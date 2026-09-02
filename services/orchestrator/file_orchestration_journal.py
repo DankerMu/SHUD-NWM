@@ -5755,10 +5755,16 @@ class FileOrchestrationJournalRepository:
         # fingerprint check.  Reads after the wipe may store their own
         # `fingerprint=None` entries for the rest of the window.  The owner
         # still computes no source-file fingerprint (#1567 D1b), but it runs
-        # the cheap containment probe of the directories that feed its cycle,
-        # so a parent component swapped for a symlink during the window turns
-        # the hit into a recompute that fails loud — cold, warm and owner
-        # reads now share one judgement about one tree.
+        # the containment probe over the DIRECTORIES that feed its cycle — and
+        # nothing below them — so one of those directories swapped for a
+        # symlink during the window turns the hit into a recompute that fails
+        # loud with whatever token the cold reader reports for that directory
+        # (design D1's table; it is a property of the (leg, lane) pair, not of
+        # the leg alone).  Stated limit, design D1b: a LEAF swapped for a
+        # symlink during the window is NOT seen — a leaf probe is exactly the
+        # source-file fingerprint this fast path exists to skip — so the owner
+        # keeps serving its pre-tamper cached rows there while a cold instance
+        # raises.
         fingerprint = (
             None
             if in_write_window
@@ -9698,15 +9704,23 @@ class FileOrchestrationJournalRepository:
         source_segments: tuple[str, ...],
         cycle_segment: str,
     ) -> bool:
-        """Cheap containment probe of the directories that feed one cycle (#1567 D1b).
+        """Containment probe of the directories that feed one cycle (#1567 D1b).
 
         The write-window owner's fast path computes no source-file fingerprint;
-        it runs this handful of ``lstat``s instead, so a parent component swapped
-        for a symlink during the window turns the owner's hit into a recompute
-        that fails loud with ``file_journal_unreadable`` exactly as a cold read
-        would.  Deliberately NOT routed through
-        ``_cycle_rows_source_fingerprint``: that method is the source-file
-        fingerprint the owner keeps skipping.
+        it runs these directory-only containment stats instead, so one of the
+        listed DIRECTORIES swapped for a symlink during the window turns the
+        owner's hit into a recompute.  The recompute then fails loud with
+        whichever token the cold reader produces for that directory — design
+        D1's table: ``file_journal_unreadable`` for the journal, pipeline-events
+        and (model-scoped) latest directories, ``file_journal_unsafe_scanned_entry``
+        for the by-cycle partition, the flat ``pipeline-jobs`` root and the
+        cross-model (``model_id=None``) latest read.
+
+        Stated limit: nothing BELOW these directories is probed, so a leaf file
+        swapped for a symlink during the window is not detected here.  That is
+        deliberate — a leaf probe is the source-file fingerprint this fast path
+        exists to skip — and it is why this is deliberately NOT routed through
+        ``_cycle_rows_source_fingerprint``.
         """
 
         directories = [self.root / "pipeline-jobs"]

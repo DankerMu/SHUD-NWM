@@ -57,15 +57,25 @@ containment fault"). A marker forces a miss; the recompute goes through
 `_probe_containment_failure`, so the exception type, code
 (`file_journal_unreadable`) and lane fate are byte-identical to a cold instance.
 
-**Per-leg fault token (implementation finding).** The journal, event-log and
-latest-directory legs reach `_probe_containment_failure` and report
-`file_journal_unreadable`. The two direct-partition legs (`pipeline-jobs/
-by-cycle/<seg>` and the flat `pipeline-jobs` root) are read by the direct
-scanners, whose containment fault is `file_journal_unsafe_scanned_entry`. Both
-tokens are fail-loud, both are what a cold instance reports on the same leg,
-and the invariant (warm == cold, one answer for one tree) holds on all five
-legs; the spec names both tokens rather than promising `file_journal_unreadable`
-on every leg.
+**Fault token = the reader that first reaches the tampered path (implementation
+finding, measured in round 1).** The fingerprint only decides *that* a recompute
+happens; the token comes from whichever hardened reader the recompute sends
+through the tampered path first, so it is a property of (leg, lane), not of the
+leg alone. Measured over five legs × `model_id ∈ {"model_a", None}` × {warm,
+cold, owner-in-window} through `list_stage_statuses`; warm == cold == owner in
+every cell where the recompute reads the tampered path:
+
+| leg (parent swapped) | model-scoped read | cross-model read (`model_id=None`) | raising frame |
+|---|---|---|---|
+| `journal/<seg>` | `file_journal_unreadable` | `file_journal_unreadable` | `_read_cycle_segments` → `_probe_containment_failure` |
+| `pipeline-events/<seg>` | `file_journal_unreadable` | `file_journal_unreadable` | same |
+| `latest/<seg>/<cycle>` | `file_journal_unreadable` | `file_journal_unsafe_scanned_entry` | `_read_optional_json` (single-path branch of `_latest_paths`) vs `_iter_discovered_files` (directory listing) |
+| `pipeline-jobs/by-cycle/<seg>` | `file_journal_unsafe_scanned_entry` | `file_journal_unsafe_scanned_entry` | direct scanner |
+| `pipeline-jobs` (flat root) | `file_journal_unsafe_scanned_entry` | `file_journal_unsafe_scanned_entry` | direct scanner |
+
+Only the latest-directory leg is lane-dependent. The spec states the rule and
+this table rather than promising one token per leg; the parametrized test pins
+every (leg, lane) cell.
 
 **Stated limit — the by-cycle leg's hard variant (deferred, not expanded).**
 When neither the decoy nor the real by-cycle directory contains `<cycle>`, the
@@ -101,20 +111,48 @@ The owner hit (`in_write_window`, `:5711-5732`) computes no fingerprint. Ruling:
 **add the cheap probe, do not pin the residual.** On an owner hit, run the same
 helper over the *directories* that feed the cycle (`journal/<seg>`,
 `pipeline-events/<seg>`, `latest/<seg>/<cycle>`,
-`pipeline-jobs/by-cycle/<seg>/<cycle>`, `pipeline-jobs`) — a handful of
-`lstat`s, no file-level fingerprint; a fault marker turns the hit into a
-recompute, which fails loud through the frame above. This keeps
+`pipeline-jobs/by-cycle/<seg>/<cycle>`, `pipeline-jobs`) — directory
+containment stats only, no file-level fingerprint; a fault marker turns the
+hit into a recompute, which fails loud through the frame above. This keeps
 `test_cycle_write_window_owner_keeps_fingerprint_free_fast_path`
 (`tests/test_file_orchestration_journal_read_cache.py:434`) true as written —
 the probe is not the source-file fingerprint — while closing the second bypass
 the issue names. Both the code comment at `:5716-5724` (it names #1567 as open
 scope) and the spec sentence "the owner's own fast path still performs no
-tamper detection" are updated by this change (spec delta), so cold, warm, and
-owner reads share one judgement.
+tamper detection" are updated by this change (spec delta), so cold, warm and
+owner reads share one judgement about the *directories* that feed a cycle.
+
+**Stated limit — the owner path is directory-only.** The probe lists the five
+directories above and nothing below them, so a leaf swapped for a symlink
+*during* the window (`journal/<seg>/<cycle>.jsonl`,
+`pipeline-events/<seg>/<cycle>.jsonl`, `latest/<seg>/<cycle>/<model>.json`, a
+direct row file under either partition) is not seen by the owner: the owner
+serves its pre-tamper cached rows while a warm non-owner (segment-signature
+marker) and a cold instance raise. Measured in round 1 on all five leaf cells.
+This is the residual the fingerprint-free design accepts on purpose — a leaf
+probe *is* the source-file fingerprint D1b exists to skip — and it narrows the
+pre-PR state (owner did no tamper detection at all) rather than widening it.
+Pinned by an owner-window leaf-swap test that asserts the stated limit, and
+routed to a follow-up issue at Phase 8.
+
+**Measured cost (round 1, Python-level `os.*` counts, empty cycle tree, root
+14 absolute components deep).** The probe is 191 syscalls for the five
+directories (≈ 4× one `_read_jsonl` of a real segment at 37-45), not "a handful
+of lstats". `_cycle_rows_source_fingerprint` went from 12 syscalls with the bare
+`_stat_signature` to 414 (34.5×), and a full warm cache-hit public read from 20
+to 422 (21×) — the amplification lands on every non-owner read, hits included.
+The cost is linear in the *absolute* depth of the journal root because
+`_open_directory_no_follow` (`packages/common/safe_fs.py`) re-walks from `/` on
+every `stat_no_follow` (depth-10 root: 326 / 151). Wall-clock: probe ≈ 490 µs
+vs a 1-record cold segment read ≈ 128 µs, vs a 100-record segment ≈ 652 µs.
+Accepted for this change: correctness over a hot path measured in hundreds of
+microseconds; the structural win (a parent-fd-reusing `stat_no_follow`) is out
+of scope and noted for a follow-up.
 
 Rejected: pinning the residual with a comment. The residual is real
 (in-window read populates → external tamper → in-window hit with no append
-between) and the probe costs less than one journal segment read.
+between) and the probe is cheap in absolute terms even if not "less than one
+segment read".
 
 ## D2 — #1658: exit clear scoped by `(source_id, cycle_segment)` prefix; entry clear untouched
 
@@ -220,6 +258,39 @@ between) and the probe costs less than one journal segment read.
     direct write, and per its docstring the anchor sync never runs and the
     stale anchor is **kept**. Regression row: divergent canonical row →
     `file_journal_job_id_scope_mismatch`, no direct file, anchor still present.
+    **Pass-level consequence (disclosed, not changed):** the repair runs inside
+    `_iter_reconcile_inventory_records` (`:7059`, non-strict branch, no try),
+    which `_iter_reconcile_pipeline_job_records` re-yields bare (`:6990`) into
+    the list-comprehension consumers of `query_inflight_jobs` /
+    `query_reserved_unbound_jobs` (`:1895` / `:1990`, no
+    `except FileOrchestrationJournalError`). One legacy divergent anchor with a
+    missing flat direct therefore aborts the whole reconcile scan: every later
+    anchor is never yielded, the divergent anchor is never pruned, and each
+    retry aborts at the same place. `scheduler_runtime.py:1557-1595` wraps both
+    reconcile calls in `except Exception`, so the scheduler pass survives but
+    records `evidence["status"]="error"` and recovers zero cohorts. This is the
+    same abort-out-of-generator shape `file_journal_reconcile_inventory_invalid`
+    (`:7069`, `:7078`), `file_journal_identity_mismatch` (`:8451`) and any
+    direct-write fault already have on that lane; skip-and-keep-anchor was
+    rejected because it would invert the fail-closed contract for one error
+    class only. Operator recovery: delete or hand-correct the divergent row and
+    its anchor; the next scan proceeds. Pinned by a scan-level test (one
+    divergent anchor + one healthy anchor sorting after it → raise, healthy
+    anchor not yielded, both anchors still present) and routed to a follow-up
+    issue at Phase 8.
+  - **Legacy divergent rows already on disk (disclosed, not changed):** every
+    public update lane validates the outgoing record before its first byte, so
+    a row whose stored `job_id` already diverges from its scope can no longer
+    be transitioned — `update_pipeline_job_status`, `permit_pipeline_job_retry`
+    and `upsert_pipeline_job` all raise `file_journal_job_id_scope_mismatch`
+    with zero bytes written where they succeeded before (measured on a
+    reserved row; a terminal row already short-circuits `update_pipeline_job_status`
+    at `terminal_guarded` and `permit_pipeline_job_retry` at its `0` return,
+    so only `upsert_pipeline_job` reaches the gate on a terminal row).
+    `FileJournalRetryService` is the same lane class. The mitigation is the
+    #1759 migration measurement (0/4309 historical rows divergent), which is
+    input-side evidence, not a live-journal census; the operator recovery is
+    the same hand-correction as above.
   - `_project_committed_pipeline_job_write` (`:8897-8930`) wraps the direct
     write in `except Exception` → bounded warning + committed result. It runs
     only *after* the append (`:9060` / `:9106`, entered at `:9066` / `:9112`),
@@ -338,8 +409,20 @@ Regression rows:
   no journal record in any segment, no direct file (flat or by-cycle), no
   `committed_projection_fault` event
 - public single-row write with `job_id` source ≠ row source -> same
-- batch lane (a public writer that appends a record batch) with one divergent row -> same, and
-  the sibling records of the batch are not appended either
+- batch lane through public `permit_pipeline_job_retry` on an on-disk divergent cohort
+  master (reserved, non-terminal, with active-member `hydro_run` siblings at the same
+  submission attempt so the siblings validate before the divergent record) -> same, and
+  the whole journal tree is byte-identical afterwards: no sibling record appended, the
+  planted flat direct untouched (the lane locates the row through it, so it must exist)
+  and nothing under `by-cycle`
+- on-disk divergent row (non-terminal) through a public update lane -> `file_journal_job_id_scope_mismatch`,
+  journal tree bytes unchanged (Legacy-compat disclosure above)
+- reconcile scan over one divergent anchor plus one healthy anchor -> the scan raises
+  `file_journal_job_id_scope_mismatch`, the healthy anchor is never yielded, both anchors
+  still present (Legacy-compat disclosure above)
+- owner-window leaf swap (`journal/<seg>/<cycle>.jsonl` replaced by a symlink between two
+  in-window reads) -> owner serves its cached rows, cold instance raises (D1b stated limit,
+  pinned as such)
 - repair lane with a divergent canonical row -> `file_journal_job_id_scope_mismatch`, no direct
   file restored, reconcile-inventory anchor still present
 - `import_historical_scheduler_state` with one divergent job row -> raises

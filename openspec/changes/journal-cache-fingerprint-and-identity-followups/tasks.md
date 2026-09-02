@@ -48,8 +48,22 @@ instance; owner path through `_locked_cycle_write`.
         sibling stat, not only the segment slots
       - owner window: read inside the window (hit), swap the parent for a
         symlink, read again inside the window → `file_journal_unreadable`
-      - write face: frame-2 transition under a warm cache still raises (existing
-        PR #1566 pin re-run, unchanged)
+      - write face: a symlinked journal parent still fails a sequence write
+        loud (existing PR #1566 pin
+        `test_symlinked_journal_source_parent_fails_a_sequence_write_loud`
+        re-run, unchanged — a cold-instance pin; the warm-cache write face is
+        carried structurally by the global entry clear, not by a separate test)
+      - per-(leg, lane) token: each of the five parent legs × `model_id ∈
+        {"model_a", None}` → the token in design D1's table, warm == cold
+      - white-box marker: each of the five legs (by-cycle in its hard variant,
+        no `<cycle>` under decoy or real dir) → `_cycle_rows_source_fingerprint`
+        returns the containment marker and stores no entry. For both direct
+        legs this marker assertion is the only red-capable guard: reverting
+        their two call sites to the bare `_stat_signature` keeps the public
+        read's outcome unchanged (the swap changes the stat tuple anyway)
+      - owner window, leaf swap: `journal/<src>/<cycle>.jsonl` replaced by a
+        symlink between two in-window reads → owner serves the cached rows,
+        cold instance raises (D1b stated limit, pinned as a limit)
 
 ## 2. #1658 — scoped window-exit clear (D2)
 
@@ -136,9 +150,10 @@ must keep `cycle_id` / `run_id` / `idempotency_key` consistent with its own
 `source_id` / `cycle_time` so that only `job_id` diverges — otherwise a
 pre-existing identity error (`file_journal_run_mismatch`) fires first and the
 test asserts the wrong token.
-- a batch lane via a public writer that appends a record batch (any of the
-  lanes appending at `:3732`, `:3837`, `:4072`, `:4263`, `:5139`) — assert the
-  sibling records of the batch are not appended either
+- the batch lane via public `permit_pipeline_job_retry` (appends at `:4072`;
+  `hydro_run` siblings precede the `pipeline_job` record) on an on-disk
+  divergent cohort master — assert the token, the journal tree byte-identical
+  afterwards (no sibling appended) and no direct file
 - the repair lane `_restore_derived_master_direct_unlocked` (`:9157`) with a
   divergent canonical row — assert no direct file restored and the
   reconcile-inventory anchor still present (kept per its docstring)
@@ -158,24 +173,33 @@ test asserts the wrong token.
         `committed_projection_fault` event exists
       - single-row lane: `job_id` embeds source ≠ row `source_id` → same
         (independent test)
-      - batch lane: one divergent row in the batch → rejected; none of the
-        batch's records appended, no direct file
+      - batch lane: public `permit_pipeline_job_retry` on an on-disk divergent
+        reserved cohort master with active-member `hydro_run` siblings →
+        `file_journal_job_id_scope_mismatch`; journal tree bytes unchanged
+        (siblings validated first, none appended); the planted flat direct
+        untouched, nothing under `by-cycle`. Doubles as the update-lane pin for
+        a legacy divergent row (design D4).
+      - reconcile scan: one divergent anchor + one healthy anchor →
+        `_iter_reconcile_pipeline_job_records()` raises at the divergent one,
+        the healthy anchor is never yielded, both anchors still present
+        (design D4 disclosure)
       - repair lane: divergent canonical row → rejected; no direct file
         restored; anchor still present
       - historical-import lane: one divergent row in `jobs` → import raises at
         that row; earlier rows present; no record/direct file for the divergent
-        row; corrected re-run idempotent
+        row and for the row after it (abort-at-row, not collect-and-raise);
+        corrected re-run idempotent
       - `job_id` matching neither regex → accepted, row readable
       - full journal + chain + warm-start + scheduler suites green (no writer
         trips the gate)
 
 ## 5. Spec + docs
 
-- [ ] Spec delta under `pipeline-job-persistence`: MODIFIED probe requirement
+- [x] Spec delta under `pipeline-job-persistence`: MODIFIED probe requirement
       (drop the #1567 carve-out), MODIFIED fast-path requirement (owner probe,
       scoped exit wipe), MODIFIED cycle-scoped lookup requirement (#1760
       residual → enforced), ADDED identity-dedup requirement.
-- [ ] `openspec validate` strict green.
+- [x] `openspec validate` strict green.
 
 ## Risk packs
 
@@ -185,8 +209,8 @@ test asserts the wrong token.
 - Schema / columns / units / field names: not selected — no payload shape change.
 - Auth / permissions / secrets: not selected.
 - Concurrency / shared state / ordering: **selected** — cache entry/exit wipes, owner marker semantics, shared-instance survival test (#1658, #1567 D1b). Single lock order preserved; no cache-mutex → write-mutex nesting.
-- Resource limits / large input / discovery: **selected** — each per-source directory enumerated once per cycle read on case-insensitive volumes; dual-filesystem evidence (#1761).
-- Legacy compatibility / examples: **selected** — historical divergent rows (0/4309 measured) would now fail `_restore_derived_master_direct_unlocked` (anchor kept) and abort `import_historical_scheduler_state` at that row, the same abort-at-row shape every existing identity error already has on that lane (no new prefilter; design D4); case-sensitive production volumes read both real directories unchanged; unparseable job ids stay accepted.
+- Resource limits / large input / discovery: **selected** — each per-source directory enumerated once per cycle read on case-insensitive volumes; dual-filesystem evidence (#1761). Containment stats cost measured and recorded in design D1b (fingerprint 12 → 414 syscalls, warm hit 20 → 422, linear in absolute root depth); accepted, structural fix deferred.
+- Legacy compatibility / examples: **selected** — historical divergent rows (0/4309 measured on the #1759 migration input; live journal not censused) would now fail `_restore_derived_master_direct_unlocked` (anchor kept, and the whole reconcile scan aborts at that anchor — later anchors never yielded, scheduler pass records `status="error"`; disclosed in design D4 with operator recovery), abort `import_historical_scheduler_state` at that row, the same abort-at-row shape every existing identity error already has on that lane (no new prefilter), and can no longer be transitioned through any public update lane (`update_pipeline_job_status` / `permit_pipeline_job_retry` / `upsert_pipeline_job` on a live divergent row → `file_journal_job_id_scope_mismatch`, zero bytes; `FileJournalRetryService` is the same class); case-sensitive production volumes read both real directories unchanged; unparseable job ids stay accepted.
 - Error handling / rollback / partial outputs: **selected** — `file_journal_unreadable` parity between cold/warm/owner; `file_journal_job_id_scope_mismatch` before the first byte; `file_journal_source_mismatch` / `file_journal_missing_identity` preserved.
 - Release / packaging / dependency compatibility: not selected.
 - Documentation / migration notes: not selected — the spec delta is the documentation; no runbook changes.

@@ -2104,6 +2104,16 @@ def test_historical_import_aborts_at_a_divergent_job_row_and_stays_idempotent(tm
     assert divergent_job_id not in journal_text
     assert list(journal_root.rglob(f"{divergent_job_id}.json")) == []
     assert (journal_root / "pipeline-jobs" / f"{first_job_id}.json").exists()
+    # abort-AT-row, not collect-and-raise: the third row of `_historical_rows`
+    # sits AFTER the divergent one and must never have been imported.  Without
+    # this the test passes on a collect-every-error-then-raise implementation,
+    # which would leave the operator with a half-imported cycle.
+    trailing_job_id = _historical_rows(cycle_time)["pipeline_jobs"][2]["job_id"]
+    assert trailing_job_id == "job_download_failed"
+    assert "job_download_failed" not in journal_text, (
+        "the import must stop at the divergent row, not continue past it"
+    )
+    assert list(journal_root.rglob("job_download_failed.json")) == []
 
     # Correcting the row and re-running is idempotent for the already-imported
     # rows: `append_historical_pipeline_job` short-circuits on `existing`.
