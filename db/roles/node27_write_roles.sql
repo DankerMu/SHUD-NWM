@@ -371,12 +371,25 @@ BEGIN
 END
 $guard$;
 
+-- The drop and the create are ONE transaction, and this is the only explicit
+-- transaction in the file.  PostgreSQL has no `CREATE OR REPLACE EVENT
+-- TRIGGER`, so re-provisioning an already-cutover database has to drop the
+-- guard first, and two autocommitted statements leave a sub-statement window in
+-- which the write roles -- which by then own the application relations -- can
+-- plant a rule or trigger.  Event-trigger DDL is transactional, so wrapping the
+-- pair closes the window; under ON_ERROR_STOP=1 a failure between them aborts
+-- the transaction and leaves the OLD guard in place, which is the fail-closed
+-- direction.  It takes no relation lock, so the `--roles-only` contract ("this
+-- phase locks nothing the display API needs") is unaffected, and the ownership
+-- loop's one-statement-per-transaction rule is a different block entirely.
+BEGIN;
 DROP EVENT TRIGGER IF EXISTS nhms_guard_no_write_role_rules_triggers;
 CREATE EVENT TRIGGER nhms_guard_no_write_role_rules_triggers
   ON ddl_command_start
   WHEN TAG IN ('CREATE RULE', 'ALTER RULE', 'DROP RULE',
                'CREATE TRIGGER', 'ALTER TRIGGER', 'DROP TRIGGER')
   EXECUTE FUNCTION nhms_guard.refuse_write_role_rules_and_triggers();
+COMMIT;
 
 \endif
 
@@ -899,6 +912,27 @@ FROM pg_roles r
 WHERE r.rolname IN ('nhms', 'nhms_display_ro', 'nhms_ingest_rw', 'nhms_download_rw')
 ORDER BY 1;
 
+\echo '## audit: CREATE on any schema for the write roles (CREATE is an object-authoring surface)'
+-- The other half of the same precondition, and printed in EVERY mode so the T7
+-- receipt carries it; the verdict is strict-only (see the block below).
+-- EVERY pg_namespace row is scanned, `pg_temp_%` / `pg_toast%` /
+-- `_timescaledb_%` / `information_schema` included: the point is that the write
+-- roles can author an object NOWHERE, so filtering the scan to the schemas this
+-- file grants on would exempt exactly the schema an ops drift added.
+-- Expected after the full-mode tightening: `(none)` for both write roles.
+-- Before it (`--roles-only`, pre-cutover) the auditor session's own `pg_temp_N`
+-- is listed, because PostgreSQL grants CREATE on a session's temp namespace to
+-- anyone holding TEMP on the database and the write roles still hold TEMP
+-- through PUBLIC at that point -- measured, transcript §19, and the reason the
+-- verdict is gated on strict rather than on the presence of a finding.
+SELECT r.rolname,
+       coalesce(string_agg(n.nspname, ', ' ORDER BY n.nspname), '(none)') AS create_on_schemas
+FROM pg_roles r
+LEFT JOIN pg_namespace n ON has_schema_privilege(r.oid, n.oid, 'CREATE')
+WHERE r.rolname IN ('nhms_ingest_rw', 'nhms_download_rw')
+GROUP BY r.rolname
+ORDER BY 1;
+
 -- Severity is the phase's, not the statement's: the strict audit (full mode)
 -- refuses, `--roles-only` and the audit-only invocation warn.  psql does not
 -- interpolate `:variables` inside a dollar-quoted body, so the phase flag is
@@ -915,7 +949,10 @@ DECLARE
   v_smuggled text;
   v_disabled text;
   v_present  int;
+  v_misshaped text;
   v_temp     text;
+  v_create   text;
+  v_create_schemas text;
 BEGIN
   -- The allow-list is spelled as (schema, table, trigger) triples, not by name
   -- alone: a trigger called `canonical_grid_cell_immutable_trg` planted on a
@@ -959,7 +996,9 @@ BEGIN
   -- The ALTER TABLE form: a stored expression is evaluated with the authority
   -- of whoever writes the row, so every function it reaches must be one a
   -- superuser writer can be handed safely -- superuser-owned, outside a temp
-  -- schema, executable by the write role itself, and off the deny-list.
+  -- schema, executable by the write role itself, and on the migration
+  -- allow-list (or reached only as a non-volatile pg_catalog operator
+  -- implementation).
   SELECT string_agg(descr, '; ' ORDER BY descr) INTO v_smuggled
   FROM (
     SELECT DISTINCT relation || ' ' || kind || ' references ' || fn
@@ -998,10 +1037,66 @@ BEGIN
     END IF;
   END IF;
 
+  -- Present is not the same as INTACT.  `CREATE OR REPLACE TRIGGER` (PG 14+)
+  -- rewrites an allow-listed guard in place: the (schema, table, name) triple
+  -- survives, `tgenabled` stays 'O', and the replacement may even keep an
+  -- allow-listed `tgfoid`, so the count above, the `tgenabled` leg below and the
+  -- provenance sweep all stay clean while `WHEN (false)` has switched the guard
+  -- off (measured, transcript §19).  Superuser-lane only -- the write roles are
+  -- refused `CREATE TRIGGER` on these ordinary `met` tables by the event trigger
+  -- -- but that is exactly the actor the presence leg already models.  So pin
+  -- the SHAPE migration 000043 creates, part by part, and name the part that
+  -- drifted.
+  --
+  -- `tgtype` is the bitmask PostgreSQL stores for level, timing and events:
+  -- ROW=1, BEFORE=2, INSERT=4, DELETE=8, UPDATE=16.  000043 writes
+  -- BEFORE INSERT OR UPDATE ... FOR EACH ROW for the product trigger
+  -- (1+2+4+16 = 23), BEFORE UPDATE ... FOR EACH ROW for the two immutability
+  -- triggers (1+2+16 = 19) and BEFORE DELETE ... FOR EACH ROW for the delete
+  -- blocker (1+2+8 = 11); all four measured in the catalog (transcript §19) and
+  -- derived from the migration text by the unit test, so a 000043 edit reddens
+  -- development-time rather than the live audit.  `tgqual` is the `WHEN` clause
+  -- (000043 writes none), `tgnargs` the trigger's argument count (none), and the
+  -- function is keyed by IDENTITY through `to_regprocedure`, which yields NULL
+  -- rather than raising if the function is gone -- `IS DISTINCT FROM` then
+  -- reports, which is the fail-closed direction.  A trigger that is absent
+  -- entirely produces no row here; that is the count leg's job.
+  SELECT string_agg(ident || ': ' || parts, '; ' ORDER BY ident) INTO v_misshaped
+  FROM (
+    SELECT e.nspname || '.' || e.relname || '.' || e.tgname AS ident,
+           nullif(concat_ws('|',
+             CASE WHEN t.tgfoid IS DISTINCT FROM to_regprocedure(e.fn) THEN 'tgfoid' END,
+             CASE WHEN t.tgtype IS DISTINCT FROM e.tgtype THEN 'tgtype' END,
+             CASE WHEN t.tgqual IS NOT NULL THEN 'tgqual' END,
+             CASE WHEN t.tgnargs IS DISTINCT FROM 0 THEN 'tgargs' END,
+             CASE WHEN t.tgenabled IS DISTINCT FROM 'O' THEN 'tgenabled' END
+           ), '') AS parts
+    FROM (VALUES
+      ('met', 'canonical_met_product', 'canonical_met_product_grid_definition_uri_match_trg', 'met.canonical_met_product_grid_definition_uri_match()', 23),
+      ('met', 'canonical_grid_snapshot', 'canonical_grid_snapshot_identity_immutable_trg', 'met.canonical_grid_snapshot_identity_immutable()', 19),
+      ('met', 'canonical_grid_cell', 'canonical_grid_cell_immutable_trg', 'met.canonical_grid_cell_immutable()', 19),
+      ('met', 'canonical_grid_cell', 'canonical_grid_cell_direct_delete_blocked_trg', 'met.canonical_grid_cell_direct_delete_blocked()', 11)
+    ) AS e(nspname, relname, tgname, fn, tgtype)
+    JOIN pg_namespace n ON n.nspname = e.nspname
+    JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = e.relname
+    JOIN pg_trigger t ON t.tgrelid = c.oid AND t.tgname = e.tgname
+  ) shaped
+  WHERE parts IS NOT NULL;
+  IF v_misshaped IS NOT NULL THEN
+    IF v_strict THEN
+      RAISE EXCEPTION 'SECURITY REGRESSION: allow-listed trigger no longer has the shape migration 000043 creates: % -- CREATE OR REPLACE TRIGGER can neuter a guard in place while its name, its function and tgenabled all still look right', v_misshaped;
+    ELSE
+      RAISE WARNING 'SECURITY REGRESSION: allow-listed trigger no longer has the shape migration 000043 creates: % -- CREATE OR REPLACE TRIGGER can neuter a guard in place while its name, its function and tgenabled all still look right', v_misshaped;
+    END IF;
+  END IF;
+
   -- `ALTER TABLE ... DISABLE TRIGGER` needs no rule/trigger DDL tag, so the
   -- event trigger never sees it: an allow-listed guard can be switched off in
   -- place.  000043 creates all four with the default origin firing mode, so
-  -- anything other than 'O' is drift.
+  -- anything other than 'O' is drift.  Kept as its own verdict even though the
+  -- shape leg above also reads `tgenabled`: this one names the guard that is
+  -- switched off in the operator's own words, and the shape leg would not fire
+  -- at all if a future 000043 edit changed the expected shape.
   SELECT string_agg(descr, '; ' ORDER BY descr) INTO v_disabled
   FROM (
     SELECT n.nspname || '.' || c.relname || ' trigger ' || t.tgname || ' (tgenabled=' || t.tgenabled::text || ')' AS descr
@@ -1041,8 +1136,9 @@ BEGIN
     END IF;
   END IF;
 
-  -- TEMP is the write roles' only function-authoring surface, so a re-granted
-  -- TEMP puts the pg_temp gadget back.  Verdict gated on v_strict and NOT on
+  -- TEMP and schema CREATE are the write roles' only object-authoring surfaces
+  -- (the leg below closes the second half), so a re-granted TEMP puts the
+  -- pg_temp gadget back.  Verdict gated on v_strict and NOT on
   -- the presence of a finding: the tightening runs in the full-mode ownership
   -- phase only, so on a database where that phase has deliberately not run yet
   -- (`--roles-only`, pre-merge) a warning would be pure noise -- and
@@ -1058,6 +1154,41 @@ BEGIN
       AND has_database_privilege(r.oid, current_database(), 'TEMP');
     IF v_temp IS NOT NULL THEN
       RAISE EXCEPTION 'SECURITY REGRESSION: % still hold(s) TEMP on this database -- pg_temp is the only schema in which a write role can author a function, and such a function is evaluated with the authority of whoever writes the row; re-run the full provision', v_temp;
+    END IF;
+  END IF;
+
+  -- CREATE on a schema is the OTHER authoring surface, and until round 5 the
+  -- audit enforced only the TEMP half of its own stated precondition.  Three of
+  -- this file's residual arguments rest on "the write role can author no
+  -- function, operator or type", and one `GRANT CREATE ON SCHEMA met TO
+  -- nhms_ingest_rw` re-opens all three at once:
+  --   * the operator carve-out above is keyed on the BACKING FUNCTION's
+  --     namespace and never joins pg_operator, so an operator the write role
+  --     creates in the drifted schema over a non-volatile pg_catalog function
+  --     arrives as via_op_only + provolatile <> 'v' and is trusted (measured
+  --     end to end, transcript §19: the sweep reports 0 untrusted while a
+  --     superuser INSERT evaluates the default and hands the write role a
+  --     superuser-only GUC);
+  --   * RowCompareExpr stores operator oids and no funcid at all;
+  --   * CoerceViaIO / CoerceToDomain reach the target type's I/O functions.
+  -- The precondition IS the invariant, so this leg closes the authoring surface
+  -- rather than widening the sweep to pg_operator: a sweep that chased the
+  -- operator would still miss the type and the domain.
+  -- Gated on v_strict and NOT on the presence of a finding, for the same reason
+  -- as the TEMP leg: before the full-mode tightening the write roles still hold
+  -- TEMP through PUBLIC, which gives them CREATE on the auditing session's own
+  -- `pg_temp_N` (measured, transcript §19), so `--roles-only` would warn about a
+  -- statement that has deliberately not run yet.  The state itself is printed in
+  -- every mode above.
+  IF v_strict THEN
+    SELECT string_agg(DISTINCT r.rolname, ', ' ORDER BY r.rolname),
+           string_agg(DISTINCT n.nspname, ', ' ORDER BY n.nspname)
+      INTO v_create, v_create_schemas
+    FROM pg_roles r, pg_namespace n
+    WHERE r.rolname IN ('nhms_ingest_rw', 'nhms_download_rw')
+      AND has_schema_privilege(r.oid, n.oid, 'CREATE');
+    IF v_create IS NOT NULL THEN
+      RAISE EXCEPTION 'SECURITY REGRESSION: % hold(s) CREATE on schema(s) % -- a write role that can create objects can author an operator/type/function that the :opfuncid carve-out or a superuser write evaluates; REVOKE it and re-run the full provision', v_create, v_create_schemas;
     END IF;
   END IF;
 END

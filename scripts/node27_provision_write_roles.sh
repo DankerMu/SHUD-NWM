@@ -34,12 +34,21 @@
 #     DDL family for the write roles -- except on a hypertable, where
 #     TimescaleDB routes the command around it (measured);
 #   * full mode revokes TEMP from PUBLIC, which removes `pg_temp`, the only
-#     schema in which a write role can AUTHOR a function at all;
+#     schema in which a write role can AUTHOR a function at all -- and the
+#     strict audit asserts BOTH halves of that precondition, TEMP on the
+#     database and CREATE on every pg_namespace row, because one
+#     `GRANT CREATE ON SCHEMA` lets the role wrap a non-volatile pg_catalog
+#     function in an operator of its own and pass the sweep's carve-out
+#     (measured, transcript 19);
 #   * the audit judges every stored expression by the PROVENANCE of the
 #     functions it reaches (temp schema / non-superuser owner / not executable
 #     by the write role / not on the migration ALLOW-list) and every rule and
 #     trigger against the migration allow-list, with TimescaleDB's blocker keyed
-#     on function identity rather than on its name.
+#     on function identity rather than on its name -- and the four allow-listed
+#     000043 guard triggers are pinned by SHAPE (tgfoid, tgtype, no WHEN clause,
+#     no arguments, tgenabled) and not only by name, because
+#     `CREATE OR REPLACE TRIGGER ... WHEN (false)` neuters one in place while
+#     its name, its function and tgenabled all still read correctly.
 # The function leg is an allow-list and not a deny-list because a deny-list
 # enumerates effects, and `query_to_xml`'s effect is "evaluate this SQL string
 # as the caller" -- measured walking straight through the deny-list at exit 0.

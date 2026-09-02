@@ -341,6 +341,46 @@ def _sql_code(text: str) -> str:
     )
 
 
+# `pg_trigger.tgtype` is a bitmask, and it is the only part of a trigger's shape
+# that is not a plain catalog column. PostgreSQL's own bit assignment
+# (`src/include/catalog/pg_trigger.h`): ROW=1, BEFORE=2, INSERT=4, DELETE=8,
+# UPDATE=16, TRUNCATE=32, INSTEAD=64. Derived from the migration text here so
+# the number the audit pins is never a guess -- all four are also measured in
+# the catalog (transcript §19).
+_TGTYPE_BITS = {
+    "ROW": 1,
+    "BEFORE": 2,
+    "INSERT": 4,
+    "DELETE": 8,
+    "UPDATE": 16,
+    "TRUNCATE": 32,
+    "INSTEAD OF": 64,
+}
+
+
+def _tgtype(timing: str, events: str, tail: str) -> int:
+    """The `tgtype` PostgreSQL stores for a `CREATE TRIGGER` statement."""
+    value = 0
+    if timing.upper() == "BEFORE":
+        value |= _TGTYPE_BITS["BEFORE"]
+    elif timing.upper() == "INSTEAD OF":
+        value |= _TGTYPE_BITS["INSTEAD OF"]
+    for event in ("INSERT", "DELETE", "UPDATE", "TRUNCATE"):
+        if re.search(rf"\b{event}\b", events, re.I):
+            value |= _TGTYPE_BITS[event]
+    assert value & 0b111100, f"no trigger event parsed out of {events!r}"
+    if re.search(r"\bFOR\s+EACH\s+ROW\b", tail, re.I):
+        value |= _TGTYPE_BITS["ROW"]
+    return value
+
+
+def _trigger_function(tail: str) -> str:
+    """The schema-qualified function a `CREATE TRIGGER` statement attaches."""
+    match = re.search(r"\bEXECUTE\s+(?:FUNCTION|PROCEDURE)\s+([a-z_]+\.[a-z_]+)", tail, re.I)
+    assert match is not None, f"no EXECUTE FUNCTION in {tail!r}"
+    return match.group(1)
+
+
 def _env_templates() -> list[Path]:
     return sorted(_ENV_DIR.glob("*.example"))
 
@@ -516,6 +556,51 @@ def test_ownership_loop_is_not_one_transaction(sql_text: str) -> None:
     assert "SET lock_timeout = '5s'" in section
     # A failed relation must not abandon the rest of the pass.
     assert "\\unset ON_ERROR_STOP" in section
+
+
+def test_the_event_trigger_is_dropped_and_recreated_in_one_transaction(
+    sql_text: str,
+) -> None:
+    r"""There is no `CREATE OR REPLACE EVENT TRIGGER`, so the pair must be atomic.
+
+    Re-provisioning an already-cutover database drops the guard and recreates
+    it. As two autocommitted statements that leaves a sub-statement window in
+    which the write roles -- which own the application relations by then -- can
+    plant a rule or trigger, and the same run's trailing audit is non-strict
+    under ``--roles-only``, so the run still exits 0. Event-trigger DDL is
+    transactional; wrapping the pair closes the window, and under
+    ``ON_ERROR_STOP=1`` an aborted wrap leaves the OLD guard in place.
+
+    Pinned as "exactly one explicit transaction in the file, and it contains
+    exactly this pair": a second ``BEGIN;`` anywhere would start batching the
+    ``\gexec`` ownership statements this change exists to keep one per
+    transaction.
+    """
+    code = _sql_code(sql_text)
+    begins = [m.start() for m in re.finditer(r"(?m)^BEGIN;$", code)]
+    commits = [m.start() for m in re.finditer(r"(?m)^COMMIT;$", code)]
+    assert len(begins) == 1 and len(commits) == 1, (
+        "the event-trigger replacement is the only explicit transaction in this "
+        f"file; found {len(begins)} BEGIN; and {len(commits)} COMMIT;"
+    )
+    assert begins[0] < commits[0]
+    txn = code[begins[0] : commits[0]]
+    assert "DROP EVENT TRIGGER IF EXISTS nhms_guard_no_write_role_rules_triggers;" in txn, (
+        "the DROP must be inside the transaction, or the window is still open"
+    )
+    assert "CREATE EVENT TRIGGER nhms_guard_no_write_role_rules_triggers" in txn, (
+        "the CREATE must be inside the same transaction as the DROP"
+    )
+    assert "\\gexec" not in txn and "\\if" not in txn and "\\endif" not in txn, (
+        r"psql meta-commands must stay outside the transaction: a \gexec or a "
+        r"\if block inside it would batch generated statements into this one "
+        "transaction"
+    )
+    roles = _sql_code(_psql_section(sql_text, "do_roles"))
+    assert roles.count("BEGIN;") == 1 and roles.count("COMMIT;") == 1, (
+        "the transaction belongs to the additive phase, next to the guard it "
+        "replaces"
+    )
 
 
 def test_owner_to_appears_only_inside_the_ownership_section(sql_text: str) -> None:
@@ -763,30 +848,52 @@ def test_audit_enumerates_rules_and_triggers_against_the_migration_allow_list(
 
 
 def test_the_trigger_allow_list_is_exactly_what_the_migrations_create() -> None:
-    """A derived allow-list, not an assumed one.
+    """A derived allow-list, not an assumed one -- and a derived SHAPE.
 
     If a later migration adds a trigger in one of the six schemas, the audit
     would refuse a *clean* catalog and the operator would learn it during the
     post-merge cutover. This test fails on the migration's PR instead, and the
     fix is one row in ``_ALLOWLISTED_TRIGGERS`` plus one in the provision SQL.
+
+    The same derivation carries the shape the audit pins, because a name-and-
+    ``tgenabled`` check is satisfied by a neutered replacement:
+    ``CREATE OR REPLACE TRIGGER … WHEN (false) EXECUTE FUNCTION <the same
+    function>`` keeps the triple, keeps ``tgenabled = 'O'`` and keeps an
+    allow-listed ``tgfoid`` while the guard is off (measured, transcript §19).
+    So the backing function and ``tgtype`` are read out of the migration text
+    too, and the SQL must pin exactly those values: an edit to 000043's timing,
+    events, level or function reddens here rather than in the live audit.
     """
-    created: set[tuple[str, str, str]] = set()
+    created: dict[tuple[str, str, str], tuple[str, int]] = {}
     for path in sorted((_ROOT / "db").rglob("*.sql")):
         if path == _SQL_PATH:
             continue  # the provision file's own prose names these triggers
         text = _sql_code(path.read_text(encoding="utf-8"))
-        for name, schema, table in re.findall(
-            r"CREATE TRIGGER\s+(\w+)[^;]*?\sON\s+([a-z_]+)\.([a-z_]+)", text, re.S
+        for name, timing, events, schema, table, tail in re.findall(
+            r"CREATE TRIGGER\s+(\w+)\s+(BEFORE|AFTER|INSTEAD OF)\s+(.*?)\s+ON\s+"
+            r"([a-z_]+)\.([a-z_]+)(.*?);",
+            text,
+            re.S,
         ):
-            if schema in _APP_SCHEMAS:
-                created.add((schema, table, name))
-    assert created == set(_ALLOWLISTED_TRIGGERS), (
+            if schema not in _APP_SCHEMAS:
+                continue
+            created[(schema, table, name)] = (
+                _trigger_function(tail),
+                _tgtype(timing, events, tail),
+            )
+    assert set(created) == set(_ALLOWLISTED_TRIGGERS), (
         "db/ creates a different set of triggers in the application schemas than "
         f"the provision audit allow-lists: {sorted(created)}"
     )
     sql = _SQL_PATH.read_text(encoding="utf-8")
-    for schema, table, name in created:
+    for (schema, table, name), (function, tgtype) in sorted(created.items()):
         assert f"('{schema}', '{table}', '{name}')" in sql
+        row = f"('{schema}', '{table}', '{name}', '{function}()', {tgtype})"
+        assert row in sql, (
+            f"the audit does not pin the shape migration 000043 gives "
+            f"{schema}.{table}.{name}; expected the row {row} in the "
+            "allow-listed-trigger shape check"
+        )
 
 
 def test_audit_sweeps_stored_expressions_by_function_provenance(sql_text: str) -> None:
@@ -858,6 +965,26 @@ def test_audit_sweeps_stored_expressions_by_function_provenance(sql_text: str) -
         "places to forget, and the deny-list is the one query_to_xml walked "
         "through (round-4 P1)"
     )
+    # ... and the WORD must not survive as a live criterion anywhere in the file
+    # either. The two guards above are expression-scoped, and `_sql_code()`
+    # strips comments, so `-- … and off the deny-list` described the retired
+    # criterion three fix passes after it was retired (round-5 review). The only
+    # admissible mentions are comment lines that mark themselves as history.
+    stale = [
+        line
+        for line in sql_text.splitlines()
+        if re.search(r"(?i)deny[\s-]?list", line)
+        and not (
+            line.lstrip().startswith("--")
+            and re.search(r"(?i)round[\s-]4|began as|history", line)
+        )
+    ]
+    assert not stale, (
+        "leg (iv) is an allow-list; a live mention of a deny-list describes a "
+        "criterion this file no longer implements. Historical rationale is fine "
+        "in a comment that says so (`round 4`, `began as`, `history`):\n"
+        + "\n".join(stale)
+    )
     for name in ("query_to_xml", "set_config", "pg_read_file"):
         assert name not in sweep, (
             f"{name} must not be named in the sweep at all: naming individual "
@@ -909,6 +1036,20 @@ def test_audit_sweeps_stored_expressions_by_function_provenance(sql_text: str) -
     # or the T7 receipt cannot show that it ran
     assert "untrusted for a superuser writer" in sweep
     assert "expression(s)/trigger(s) scanned" in sweep
+    # Two sites, and a plain `in` check would be satisfied by either one: the
+    # summary's `FILTER (WHERE untrusted_reason IS NOT NULL)` and the row
+    # listing's own WHERE. Flipping ONLY the listing leaves the verdict and the
+    # count correct and silently inverts the printed rows -- which is exactly the
+    # artifact tasks.md T7 requires the receipt to carry (round 5 measured that
+    # mutant green). Pin both, and forbid the inverted predicate outright.
+    assert sweep.count("untrusted_reason IS NOT NULL") == 2, (
+        "the every-mode inventory must both COUNT the untrusted refs (FILTER) "
+        "and LIST them (WHERE); one of the two is missing or inverted"
+    )
+    assert "untrusted_reason IS NULL" not in sweep, (
+        "the every-mode inventory must never select the TRUSTED refs: the "
+        "receipt would then print the clean rows under the untrusted heading"
+    )
 
 
 def test_the_function_allow_list_in_the_sql_is_exactly_the_pinned_set(
@@ -1033,9 +1174,11 @@ def test_every_audit_verdict_fires_on_a_finding_and_not_on_its_absence(
         "v_planted",
         "v_smuggled",
         "v_present",
+        "v_misshaped",
         "v_disabled",
         "v_event",
         "v_temp",
+        "v_create",
     }, f"the set of audit verdicts changed: {sorted(predicates)}"
     for name, predicate in predicates.items():
         if name == "v_present":
@@ -1129,6 +1272,41 @@ def test_audit_requires_the_allow_listed_triggers_to_be_present_and_enabled(
     assert (
         "RAISE WARNING 'SECURITY REGRESSION: allow-listed trigger not enabled" in planted
     )
+    # ... and a fourth way: the SHAPE. `CREATE OR REPLACE TRIGGER … WHEN (false)
+    # EXECUTE FUNCTION <the same function>` keeps the triple, keeps tgenabled
+    # 'O' and keeps an allow-listed tgfoid, so all three checks above pass while
+    # the guard is inert (measured, transcript §19). The expected values per
+    # triple are derived from 000043 by
+    # `test_the_trigger_allow_list_is_exactly_what_the_migrations_create`.
+    assert "INTO v_misshaped" in planted, (
+        "a replaced-in-place guard is invisible to a name count, a tgfoid on the "
+        "allow-list and a tgenabled read"
+    )
+    for part, predicate in (
+        ("tgfoid", "t.tgfoid IS DISTINCT FROM to_regprocedure(e.fn)"),
+        ("tgtype", "t.tgtype IS DISTINCT FROM e.tgtype"),
+        ("tgqual", "t.tgqual IS NOT NULL"),
+        ("tgargs", "t.tgnargs IS DISTINCT FROM 0"),
+        ("tgenabled", "t.tgenabled IS DISTINCT FROM 'O'"),
+    ):
+        assert f"CASE WHEN {predicate} THEN '{part}' END" in planted, (
+            f"the shape check must compare {part} and report it by name when it "
+            f"drifts: expected `CASE WHEN {predicate} THEN '{part}' END`"
+        )
+    assert "to_regprocedure(e.fn)" in planted and "e.fn::regproc" not in planted, (
+        "the backing function is keyed by IDENTITY through to_regprocedure, "
+        "which yields NULL instead of raising when the function is gone -- a "
+        "bare ::regproc cast would raise undefined_function (42883) and abort "
+        "the whole non-strict audit instead of reporting a finding"
+    )
+    assert (
+        "RAISE EXCEPTION 'SECURITY REGRESSION: allow-listed trigger no longer has the shape"
+        in planted
+    )
+    assert (
+        "RAISE WARNING 'SECURITY REGRESSION: allow-listed trigger no longer has the shape"
+        in planted
+    )
 
 
 def test_every_audit_verdict_binds_its_severity_to_the_strict_flag(sql_text: str) -> None:
@@ -1143,24 +1321,26 @@ def test_every_audit_verdict_binds_its_severity_to_the_strict_flag(sql_text: str
     planted = _psql_section(_sql_code(sql_text), "do_audit")
     planted = planted[planted.index("DO $planted$") : planted.index("$planted$;")]
     pairs = _SEVERITY_PAIR_RE.findall(planted)
-    assert len(pairs) == 5, (
-        "expected five strict/non-strict verdict pairs (planted rule/trigger, "
+    assert len(pairs) == 6, (
+        "expected six strict/non-strict verdict pairs (planted rule/trigger, "
         "untrusted function, allow-listed trigger presence, allow-listed "
-        "trigger enabled, event-trigger health); each must read exactly "
+        "trigger shape, allow-listed trigger enabled, event-trigger health); "
+        "each must read exactly "
         "`IF v_strict THEN RAISE EXCEPTION '<msg>' ... ELSE RAISE WARNING "
         f"'<same msg>'`. Found {len(pairs)}: {pairs}"
     )
     for msg in pairs:
         assert msg.startswith("SECURITY REGRESSION: "), msg
     # nothing raises outside a bound pair, except the deliberately strict-only
-    # TEMP verdict below.
-    assert planted.count("RAISE WARNING") == 5, (
+    # TEMP and schema-CREATE verdicts below.
+    assert planted.count("RAISE WARNING") == 6, (
         "a verdict with no WARNING arm is silent in --roles-only"
     )
-    assert planted.count("RAISE EXCEPTION") == 6, (
-        "six strict arms: the five pairs plus the strict-only TEMP verdict"
+    assert planted.count("RAISE EXCEPTION") == 8, (
+        "eight strict arms: the six pairs plus the two strict-only "
+        "authoring-surface verdicts (TEMP on the database, CREATE on a schema)"
     )
-    assert planted.count("IF v_strict THEN") == 6, (
+    assert planted.count("IF v_strict THEN") == 8, (
         "every RAISE EXCEPTION must sit under `IF v_strict THEN`; anything else "
         "either always raises or never does"
     )
@@ -1206,6 +1386,59 @@ def test_full_mode_removes_the_temp_function_authoring_surface(sql_text: str) ->
     verdict = audit[audit.index("still hold(s) TEMP") - 600 : audit.index("still hold(s) TEMP")]
     assert "'nhms_ingest_rw', 'nhms_download_rw'" in verdict, (
         "both write roles are checked, not only ingest"
+    )
+
+
+def test_the_audit_asserts_no_write_role_holds_create_on_any_schema(
+    sql_text: str,
+) -> None:
+    """The other half of the authoring-surface precondition, which round 5 found open.
+
+    `TEMP` was asserted; schema `CREATE` was not -- and three residual arguments
+    in this change rest on the write roles being able to author no function,
+    operator or type. The operator carve-out in leg (iv) is keyed on the BACKING
+    FUNCTION's namespace and never joins `pg_operator`, so with one
+    `GRANT CREATE ON SCHEMA met TO nhms_ingest_rw` the role can wrap a
+    non-volatile `pg_catalog` function in an operator of its own and reach the
+    sweep as `via_op_only` + non-volatile, i.e. trusted (measured end to end,
+    transcript §19). `RowCompareExpr` and `CoerceViaIO` rest on the same
+    precondition. Assert the precondition rather than chase the shapes.
+    """
+    audit = _sql_code(_psql_section(sql_text, "do_audit"))
+    # printed in every mode, so the T7 receipt carries the state
+    assert (
+        "LEFT JOIN pg_namespace n ON has_schema_privilege(r.oid, n.oid, 'CREATE')"
+        in audit
+    ), "the CREATE state must be printed in every mode, like the TEMP state"
+    # and judged in strict mode
+    marker = "hold(s) CREATE on schema(s)"
+    assert (
+        "RAISE EXCEPTION 'SECURITY REGRESSION: % hold(s) CREATE on schema(s) %" in audit
+    ), "a re-granted schema CREATE restores the authoring surface and must be caught"
+    leg = audit[audit.index(marker) - 700 : audit.index(marker)]
+    assert "FROM pg_roles r, pg_namespace n" in leg, (
+        "the verdict must cross EVERY pg_namespace row with both write roles"
+    )
+    assert "r.rolname IN ('nhms_ingest_rw', 'nhms_download_rw')" in leg, (
+        "both write roles are checked, not only ingest"
+    )
+    assert "has_schema_privilege(r.oid, n.oid, 'CREATE')" in leg, (
+        "the criterion is the effective CREATE privilege, not an nspacl literal: "
+        "a grant reaching the role through PUBLIC or through a group would not "
+        "show up in a per-schema ACL comparison"
+    )
+    for excluded in ("nspname LIKE", "nspname = ANY", "nspname <>", "nspname NOT"):
+        assert excluded not in leg, (
+            f"the CREATE scan must not filter pg_namespace ({excluded!r}): "
+            "pg_temp_%, pg_toast%, _timescaledb_% and information_schema are "
+            "exactly where an ops drift would hide"
+        )
+    # strict-only, for the same reason as the TEMP verdict: before the
+    # full-mode tightening the write roles still hold TEMP through PUBLIC, which
+    # gives them CREATE on the auditing session's own pg_temp_N.
+    strict_leg = audit[audit.index(marker) - 700 : audit.index(marker) + 400]
+    assert "IF v_strict THEN" in strict_leg and "RAISE WARNING" not in strict_leg, (
+        "the schema-CREATE verdict is deliberately strict-only"
     )
 
 
@@ -1330,26 +1563,40 @@ def test_default_privileges_cover_every_application_schema_for_ingest(sql_text: 
 
 
 def test_every_generated_schema_list_covers_all_six_schemas(sql_text: str) -> None:
-    """Every `ANY (ARRAY[...])` in `do_roles` must name all six app schemas.
+    """Every schema list in the WHOLE file must name all six app schemas.
 
-    A fixed-width window around one clause silently stops covering the list it
-    was meant to check as soon as the SQL is reformatted, and it says nothing
-    about the other four sites. Enumerate them instead: schema USAGE, DML on all
-    tables, USAGE on all sequences, and the two ALTER DEFAULT PRIVILEGES blocks.
+    Scoped to ``do_roles`` this covered 5 of the file's 21 identical lists, and
+    round 5 measured what that costs: dropping ``'flood'`` from the ``do_audit``
+    sources CTE, from the strict ``v_planted`` verdict legs or from the strict
+    owner-drift verdict left the whole suite green -- i.e. a planted rule or
+    trigger in ``flood``, or a ``flood`` relation the transfer missed, would have
+    become invisible to the cutover gate with no test to say so.
+
+    File-wide, and derived rather than enumerated: find every
+    ``ANY (ARRAY[...])``, keep the ones whose elements overlap the application
+    schemas (which excludes leg (iv)'s function allow-list without naming it),
+    and require set equality on each. The COUNT is pinned too, so deleting a
+    whole clause is caught as well as shrinking one; the literal text is not
+    pinned, because a reformat of the SQL is not a defect.
     """
-    section = _sql_code(_psql_section(sql_text, "do_roles"))
-    starts = [match.end() for match in re.finditer(r"ANY \(ARRAY\[", section)]
-    assert len(starts) == 5, (
-        "expected five generated schema lists in do_roles (schema USAGE, ALL "
-        f"TABLES, ALL SEQUENCES, default-priv TABLES, default-priv SEQUENCES); "
-        f"found {len(starts)}"
+    section = _sql_code(sql_text)
+    schema_lists: list[tuple[tuple[str, ...], str]] = []
+    for match in re.finditer(r"ANY \(ARRAY\[([^\]]*)\]", section):
+        listed = tuple(re.findall(r"'([^']*)'", match.group(1)))
+        if not set(listed) & set(_APP_SCHEMAS):
+            continue
+        context = section[max(0, match.start() - 200) : match.start()]
+        context = (context.strip().splitlines() or [""])[-1]
+        schema_lists.append((listed, context))
+    assert len(schema_lists) == 21, (
+        "expected 21 generated application-schema lists in the provision SQL "
+        "(5 in do_roles, 4 in do_ownership, 11 in the audit's inventory, sweep "
+        "sources and strict verdict legs, 1 in the strict owner-drift check); "
+        f"found {len(schema_lists)} -- a deleted clause is a scope loss too"
     )
-    for start in starts:
-        end = section.index("]", start)
-        listed = tuple(re.findall(r"'([a-z_]+)'", section[start:end]))
-        context = section[max(0, start - 400) : start].strip().splitlines()[-1:]
+    for listed, context in schema_lists:
         assert set(listed) == set(_APP_SCHEMAS), (
-            f"generated schema list {listed} after {context} must name all six "
+            f"generated schema list {listed} after {context!r} must name all six "
             f"application schemas {_APP_SCHEMAS}"
         )
 

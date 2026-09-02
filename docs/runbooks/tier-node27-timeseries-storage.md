@@ -3753,15 +3753,43 @@ the same gadget are covered by detection only, in the same audit:
   Implementation note for whoever edits it: `pg_depend` records **nothing** for
   pinned catalog functions, so the sweep reads the stored parse trees (`adbin` /
   `conbin` / `ev_action`) directly;
-- **presence and `tgenabled` check** — `ALTER TABLE … DISABLE TRIGGER` carries
-  no rule/trigger DDL tag, so the event trigger never sees it and the inventory
-  still lists the trigger; a *dropped* trigger leaves no row for an inventory to
-  look at at all. All four allow-listed triggers must be present (`count(*) =
-  4`) and `tgenabled = 'O'`.
+- **presence, shape and `tgenabled` check** — `ALTER TABLE … DISABLE TRIGGER`
+  carries no rule/trigger DDL tag, so the event trigger never sees it and the
+  inventory still lists the trigger; a *dropped* trigger leaves no row for an
+  inventory to look at at all; and `CREATE OR REPLACE TRIGGER` **reshapes one in
+  place** — `… WHEN (false) EXECUTE FUNCTION <the same function>` keeps the
+  `(schema, table, name)` triple, keeps `tgenabled = 'O'` and keeps an
+  allow-listed `tgfoid` while the guard is functionally off (measured, transcript
+  §19). So all four allow-listed triggers must be present (`count(*) = 4`),
+  `tgenabled = 'O'`, **and** carry the shape migration `000043` gives them:
+  `tgfoid` (by `to_regprocedure` identity), `tgtype` (23 / 19 / 19 / 11 for
+  `BEFORE INSERT OR UPDATE` / `BEFORE UPDATE` ×2 / `BEFORE DELETE`, all
+  `FOR EACH ROW`), `tgqual IS NULL` (no `WHEN` clause) and `tgnargs = 0`. A
+  finding names the part that drifted
+  (`met.canonical_grid_cell.canonical_grid_cell_immutable_trg: tgqual`). This is
+  a superuser-lane detection: the write roles are refused `CREATE TRIGGER` on
+  these ordinary `met` tables by the event trigger;
+- **authoring-surface check** — the write roles must be able to create an object
+  **nowhere**, because three of this change's residual arguments (the
+  `:opfuncid` carve-out, `RowCompareExpr`, `CoerceViaIO`/`CoerceToDomain`) rest
+  on "the write role can author no function, operator or type". Both halves are
+  now asserted: `has_database_privilege(<write role>, current_database(),
+  'TEMP')` must be false, and `has_schema_privilege(<write role>, n.oid,
+  'CREATE')` must be false for **every** `pg_namespace` row. The state is printed
+  in every mode (expected `(none)` for both roles after the full-mode
+  tightening); the verdicts are strict-only, for the reason in §9.6. A
+  **schema `CREATE` re-grant** is a security regression rather than a
+  convenience: with one `GRANT CREATE ON SCHEMA met TO nhms_ingest_rw` the role
+  can wrap a non-volatile `pg_catalog` function in an operator of its own and
+  reach the sweep as `via_op_only` + non-volatile, i.e. trusted — measured end to
+  end in transcript §19, where a superuser `INSERT` evaluated the resulting
+  column `DEFAULT` and handed the write role `data_directory`, a GUC it is
+  refused directly.
 
-Both legs: strict audit → error, exit 3; `--roles-only` → `WARNING`. Still open,
-recorded not fixed: removing the superuser-write half itself (migrations and
-replay off `nhms`), which is out of this change's scope.
+All legs: strict audit → error, exit 3; `--roles-only` → `WARNING` (the two
+authoring-surface verdicts are strict-only). Still open, recorded not fixed:
+removing the superuser-write half itself (migrations and replay off `nhms`),
+which is out of this change's scope.
 
 ### 9.2 Measured privilege inventory per component
 
@@ -4023,13 +4051,18 @@ row, which during a migration or a replay is the superuser. Same re-run rule as
 above — the sweep reddens the audit-only invocation, and both the additive and
 full runs re-check it as their tail.
 
-**TEMP.** Every mode prints `has_database_privilege(…, 'TEMP')` for `nhms`,
-`nhms_display_ro` and the two write roles. The **verdict** is strict-only: a
-write role holding TEMP is an error in the strict audit and is not even
+**TEMP and schema `CREATE`.** Every mode prints both authoring-surface states:
+`has_database_privilege(…, 'TEMP')` for `nhms`, `nhms_display_ro` and the two
+write roles, and `create_on_schemas` — the schemas each write role holds
+`CREATE` on across **every** `pg_namespace` row, expected `(none)` after the
+tightening. Both **verdicts** are strict-only: a write role holding TEMP, or
+`CREATE` on any schema, is an error in the strict audit and is not even
 mentioned in `--roles-only`, because that phase deliberately has not applied the
-tightening yet (and is the invocation that runs with `strict_audit` off). The
-mandatory audit-only invocation of §9.6 runs strict, so a TEMP re-granted after
-the cutover is caught there.
+tightening yet (and is the invocation that runs with `strict_audit` off) — while
+it still holds TEMP through PUBLIC it also holds `CREATE` on the auditing
+session's own `pg_temp_N`, which is a true statement about a tightening that has
+not run. The mandatory audit-only invocation of §9.6 runs strict, so either
+privilege re-granted after the cutover is caught there.
 
 Never used, and asserted absent by the guard test: `REASSIGN OWNED BY nhms`
 (moves the database, the schemas and extension-adjacent objects) and
@@ -4050,6 +4083,8 @@ Never used, and asserted absent by the guard test: `REASSIGN OWNED BY nhms`
    triggers (no `_timescaledb_internal` row: chunks and
    `_compressed_hypertable_N` are in scope and must be clean), function-provenance
    sweep summary ending `0 untrusted for a superuser writer`,
+   `create_on_schemas` = `(none)` for both write roles and `has_temp` = `f` for
+   both (the two authoring-surface states, §9.3),
    `## audit: OK -- no owner drift`.
 3. Escalation-surface sweep on the live catalog (once, in this session):
    `SELECT nspacl FROM pg_namespace WHERE nspname='public'` (no legacy `CREATE`
@@ -4134,12 +4169,42 @@ An audit is **detection**, and a planted rule, trigger or column `DEFAULT` fires
 on the *next* superuser write — which is the session you are about to open.
 Running it only afterwards means the first thing it can detect has already
 executed as `nhms`. This invocation is also the only one that can red on a
-revoked `nhms_cold` grant, a dropped event trigger or a re-granted TEMP (the
-phased runs re-issue all three before auditing, §9.3).
+revoked `nhms_cold` grant, a dropped event trigger, a re-granted TEMP or a
+re-granted schema `CREATE` (the phased runs re-issue the first three before
+auditing, §9.3).
+
+Every invocation, strict or not, **prints both authoring-surface states**:
+`has_database_privilege(<role>, current_database(), 'TEMP')` for the four roles,
+and the schemas each write role holds `CREATE` on. Expected on a cutover
+database:
+
+```
+     rolname      | create_on_schemas
+------------------+-------------------
+ nhms_download_rw | (none)
+ nhms_ingest_rw   | (none)
+```
+
+If the strict audit names a schema there, **revoking is not the whole
+remediation**: the grant is gone but anything the role authored while it held
+the grant is not, and the provenance sweep does not join `pg_operator`
+(measured, transcript §19.5 — an operator authored during the drift window
+leaves the strict audit back at exit 0). Revoke, then look for objects owned by
+the write role in that schema (`pg_proc`, `pg_operator`, `pg_type`) and for
+stored expressions that reach them, before the next superuser write. Two
+node-27-specific cases to expect on the first live run: a legacy
+`GRANT CREATE ON SCHEMA public TO PUBLIC` (the ACL a `pg_upgrade` carries
+forward — remediation is `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, which is
+the same finding T7's `nspacl` step looks for), and, before the cutover, the
+auditing session's own `pg_temp_N` (see the next paragraph).
 
 It runs **strict**, and that matters twice over: strict is what turns every
 finding into exit 3 instead of a `WARNING` nobody reads in a scrollback, and the
-TEMP verdict exists only in strict mode. It has two preconditions. Full mode
+TEMP and schema-`CREATE` verdicts exist only in strict mode — before the
+full-mode tightening the write roles still hold TEMP through PUBLIC, which gives
+them `CREATE` on the auditing session's own `pg_temp_N`, so `--roles-only` would
+otherwise warn about a statement it has deliberately not run. It has two
+preconditions. Full mode
 must already have run on this database — before the cutover, use `--roles-only`
 (non-strict) instead, whose audit deliberately does not judge a tightening that
 has not happened yet. And migration `000043` must be applied: the presence leg

@@ -1439,6 +1439,208 @@ at development time instead.
 
 Container removed (`docker rm -f nwm-probe-1774-r4`).
 
+## 19. Round-5 hardening: the authoring precondition and the trigger SHAPE
+
+One more disposable container (`nwm-fix5-r5`, same
+`timescale/timescaledb:2.10.2-pg15` image, PG 15.2), same fixture as §18. Round
+5 returned no P0/P1 and two measured P2 hardening gaps, both of which the audit
+could state but not enforce: it asserted the TEMP half of its own
+authoring-surface precondition and not the schema-`CREATE` half, and it pinned
+the four migration guard triggers by NAME and `tgenabled` but not by SHAPE.
+
+### 19.0 `--roles-only` (pre-cutover): the CREATE state before the tightening
+
+This is why the CREATE verdict is gated on `strict_audit` rather than on the
+presence of a finding. Before the full-mode tightening the write roles still
+hold TEMP through PUBLIC, and PostgreSQL grants CREATE on a session's own temp
+namespace to anyone holding TEMP on the database — so the auditing session's
+`pg_temp_N` is a true positive about a statement that has deliberately not run
+yet, and warning about it in the phase that has not run it would be noise.
+
+```
+roles-only EXIT=0
+     rolname      | create_on_schemas
+------------------+-------------------
+ nhms_download_rw | pg_temp_5
+ nhms_ingest_rw   | pg_temp_5
+
+     rolname      | has_temp
+------------------+----------
+ nhms             | t
+ nhms_display_ro  | t
+ nhms_download_rw | t
+ nhms_ingest_rw   | t
+```
+
+### 19.1 Full provision: the tightening closes both authoring surfaces
+
+```
+full-mode EXIT=0
+node27-write-roles: full provision complete; audit clean
+ 18 expression(s)/trigger(s) scanned, 16 distinct function(s) referenced, 0 untrusted for a superuser writer
+     rolname      | create_on_schemas
+------------------+-------------------
+ nhms_download_rw | (none)
+ nhms_ingest_rw   | (none)
+```
+
+### 19.2 Strict audit-only on the clean cutover catalog
+
+```
+EXIT=0
+ 18 expression(s)/trigger(s) scanned, 16 distinct function(s) referenced, 0 untrusted for a superuser writer
+ nhms_download_rw | (none)
+ nhms_ingest_rw   | (none)
+```
+
+### 19.3 The drift alone: one `GRANT CREATE ON SCHEMA`
+
+```
+$ psql -U nhms -c "GRANT CREATE ON SCHEMA met TO nhms_ingest_rw"
+GRANT
+$ # strict audit-only:
+EXIT=3
+ 18 expression(s)/trigger(s) scanned, 16 distinct function(s) referenced, 0 untrusted for a superuser writer
+ nhms_ingest_rw   | met
+ERROR:  SECURITY REGRESSION: nhms_ingest_rw hold(s) CREATE on schema(s) met -- a write role that can create objects can author an operator/type/function that the :opfuncid carve-out or a superuser write evaluates; REVOKE it and re-run the full provision
+$ psql -U nhms -c "REVOKE CREATE ON SCHEMA met FROM nhms_ingest_rw"
+REVOKE
+$ # strict audit-only:
+EXIT=0
+ nhms_ingest_rw   | (none)
+```
+
+### 19.4 What the unasserted precondition was worth, end to end
+
+The carve-out in leg (iv) is keyed on the BACKING FUNCTION's namespace and never
+joins `pg_operator`, so an operator authored in a drifted schema over a
+non-volatile `pg_catalog` function arrives as `via_op_only` + `provolatile <>
+'v'` and is trusted. The sweep alone stays at **0 untrusted**; the new leg is
+what reds.
+
+```
+$ psql -U nhms_ingest_rw -c "CREATE OPERATOR met.@#@ (RIGHTARG = text, FUNCTION = pg_catalog.current_setting)"
+CREATE OPERATOR
+$ psql -U nhms_ingest_rw -c "ALTER TABLE met.canonical_met_product ALTER COLUMN leak SET DEFAULT (OPERATOR(met.@#@) 'data_directory')"
+ALTER TABLE
+$ # the role cannot read that GUC directly:
+ERROR:  must be superuser or have privileges of pg_read_all_settings to examine "data_directory"
+$ # a superuser write evaluates the default anyway:
+INSERT 0 1
+           leak
+--------------------------
+ /var/lib/postgresql/data
+$ # strict audit-only -- the SWEEP alone is still at 0 untrusted; the new leg reds:
+EXIT=3
+ 19 expression(s)/trigger(s) scanned, 17 distinct function(s) referenced, 0 untrusted for a superuser writer
+ nhms_ingest_rw   | met
+ERROR:  SECURITY REGRESSION: nhms_ingest_rw hold(s) CREATE on schema(s) met -- a write role that can create objects can author an operator/type/function that the :opfuncid carve-out or a superuser write evaluates; REVOKE it and re-run the full provision
+```
+
+### 19.5 Recorded residual: the object outlives the grant
+
+Measured, not assumed, and it is the reason this leg is worded as a
+PRECONDITION rather than as a detector. Revoking the grant does not drop the
+operator, and `pg_operator` is still not joined by the sweep, so an operator
+authored during a drift window is invisible once the window is closed.
+
+```
+$ # grant revoked, operator + DEFAULT still in place -- strict audit-only:
+EXIT=0
+ 19 expression(s)/trigger(s) scanned, 17 distinct function(s) referenced, 0 untrusted for a superuser writer
+ nhms_ingest_rw   | (none)
+$ # after removing the operator and the DEFAULT:
+EXIT=0
+ 18 expression(s)/trigger(s) scanned, 16 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+Operationally: a `CREATE` grant that the audit reports must be investigated for
+objects the role authored while it held it, not just revoked. That is now stated
+in runbook §9.6.
+
+### 19.6 `CREATE OR REPLACE TRIGGER` neuters a guard in place
+
+Superuser-lane only — the write roles are refused `CREATE TRIGGER` on these
+ordinary `met` tables by the event trigger — which is exactly the actor the
+presence leg already models ("the superuser lanes can drop one").
+
+```
+$ psql -U nhms -c "CREATE OR REPLACE TRIGGER canonical_grid_cell_immutable_trg BEFORE UPDATE ON met.canonical_grid_cell FOR EACH ROW WHEN (false) EXECUTE FUNCTION met.canonical_grid_cell_immutable()"
+CREATE TRIGGER
+$ # name count, tgfoid and tgenabled all still look right:
+ present | all_enabled | no_when
+---------+-------------+---------
+       4 | t           | f
+$ # strict audit-only:
+EXIT=3
+ERROR:  SECURITY REGRESSION: allow-listed trigger no longer has the shape migration 000043 creates: met.canonical_grid_cell.canonical_grid_cell_immutable_trg: tgqual -- CREATE OR REPLACE TRIGGER can neuter a guard in place while its name, its function and tgenabled all still look right
+$ # restored from the 000043 statement:
+EXIT=0
+$ # the re-point variant: same triple, sibling allow-listed function
+CREATE TRIGGER
+EXIT=3
+ERROR:  SECURITY REGRESSION: allow-listed trigger no longer has the shape migration 000043 creates: met.canonical_grid_cell.canonical_grid_cell_immutable_trg: tgfoid -- CREATE OR REPLACE TRIGGER can neuter a guard in place while its name, its function and tgenabled all still look right
+$ # restored:
+EXIT=0
+```
+
+Before this leg the `WHEN (false)` variant was **EXIT 0** with `v_present = 4`,
+`tgenabled = 'O'` and an allow-listed `tgfoid` — measured by the round-5 review
+on its own container, including `UPDATE met.canonical_grid_cell SET lat=99` as
+`nhms_ingest_rw` returning `UPDATE 1` where the guard must raise. The re-point
+variant is not separately measured at HEAD^; it passes the same three checks by
+construction (the triple is unchanged, `tgenabled` is unchanged, and
+`met.canonical_grid_cell_direct_delete_blocked` is itself on the function
+allow-list), which is why it needed a `tgfoid` leg rather than a sweep entry.
+
+### 19.7 The shape the audit pins, measured
+
+The four `tgtype` integers in `db/roles/node27_write_roles.sql` are these, and
+the unit test re-derives them from 000043's text (ROW=1, BEFORE=2, INSERT=4,
+DELETE=8, UPDATE=16) rather than copying them:
+
+```
+ nspname |         relname         |                       tgname                        |                          fn                           | tgtype | no_when | tgnargs | tgenabled
+---------+-------------------------+-----------------------------------------------------+-------------------------------------------------------+--------+---------+---------+-----------
+ met     | canonical_grid_cell     | canonical_grid_cell_direct_delete_blocked_trg       | met.canonical_grid_cell_direct_delete_blocked()       |     11 | t       |       0 | O
+ met     | canonical_grid_cell     | canonical_grid_cell_immutable_trg                   | met.canonical_grid_cell_immutable()                   |     19 | t       |       0 | O
+ met     | canonical_grid_snapshot | canonical_grid_snapshot_identity_immutable_trg      | met.canonical_grid_snapshot_identity_immutable()      |     19 | t       |       0 | O
+ met     | canonical_met_product   | canonical_met_product_grid_definition_uri_match_trg | met.canonical_met_product_grid_definition_uri_match() |     23 | t       |       0 | O
+```
+
+### 19.8 The event-trigger replacement is one transaction
+
+There is no `CREATE OR REPLACE EVENT TRIGGER`, so a re-provision of an
+already-cutover database has to drop the guard first; as two autocommitted
+statements that is a sub-statement window in which the write roles — which own
+the application relations by then — can plant a rule or trigger, and the same
+run's trailing audit is non-strict under `--roles-only`, so the run still exits
+0. The pair is now wrapped, and it is the only explicit transaction in the file.
+
+```
+BEGIN; in the file: 1
+$ # re-provision an already-cutover database (--roles-only), then check the guard:
+roles-only re-run EXIT=0
+                 evtname                 | evtenabled | evtowner
+-----------------------------------------+------------+----------
+ timescaledb_ddl_command_end             | O          | postgres
+ timescaledb_ddl_sql_drop                | O          | postgres
+ nhms_guard_no_write_role_rules_triggers | O          | nhms
+$ # and the wrap is atomic -- a failure inside it leaves the OLD guard:
+$ psql -v ON_ERROR_STOP=1 -c "BEGIN; DROP EVENT TRIGGER nhms_guard_no_write_role_rules_triggers; SELECT 1/0; COMMIT;"
+BEGIN
+DROP EVENT TRIGGER
+ guard_still_present
+---------------------
+                   1
+```
+
+The `SELECT 1/0` aborted the transaction, so the completed `DROP EVENT TRIGGER`
+was rolled back and the guard is still present — which is the fail-closed
+direction the wrap buys under `ON_ERROR_STOP=1`.
+
+Container removed (`docker rm -f nwm-fix5-r5`); no `nwm-fix5-*` container left.
+
 ## Limits of this oracle (do not read more into it than it proves)
 
 - These are **privilege-shape primitives**, not real component runs. The
