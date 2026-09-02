@@ -2,6 +2,7 @@
 
 ## run 1 (default budgets) — fail-loud, exit 1
 
+```text
 pre HEAD=3acea778 porcelain=?? .nhms-work/ 
 worktree HEAD=de33bd8722914e912ae58432b4eff040ba2be29a
 Python 3.12.7
@@ -19,9 +20,11 @@ file_journal_record_limit_exceeded: pipeline_job_records
 /scratch/frd_muziyao/NWM-issue-1684                       de63a5ad (detached HEAD)
 /scratch/frd_muziyao/NWM/.codex/verify-issue-253-cff8d6e  cff8d6e8 (detached HEAD)
 post HEAD=3acea778 porcelain=?? .nhms-work/ 
+```
 
 ## run 2 (--max-records 5000000) — exit 0
 
+```text
 pre HEAD=3acea778 porcelain=?? .nhms-work/ 
 worktree HEAD=de33bd8722914e912ae58432b4eff040ba2be29a
 Python 3.12.7
@@ -38,3 +41,4 @@ exit=0 end_utc=2026-09-02T09:46:17Z service_after=activating
 /scratch/frd_muziyao/NWM-issue-1684                       de63a5ad (detached HEAD)
 /scratch/frd_muziyao/NWM/.codex/verify-issue-253-cff8d6e  cff8d6e8 (detached HEAD)
 post HEAD=3acea778 porcelain=?? .nhms-work/ 
+```
