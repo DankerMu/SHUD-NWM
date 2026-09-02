@@ -18,4 +18,4 @@
 - Code: the four modules above; no change to `timescale_write_guard.py`, no terminal-state semantics (#1781's domain), no change to `scripts/node27_river_identity_backfill.py` (neutral stage names, recorded).
 - Tests: `tests/test_forcing_producer.py`, `tests/test_output_parser.py`, `tests/test_forcing_producer_cli.py`, `tests/test_output_parser_cli.py`; `tests/test_timescale_write_guard.py` unchanged and green.
 - Docs: `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.1; active change `tier-node27-timeseries-storage/design.md` correction.
-- No node-27 receipt required (pure exception routing; unit tests are the oracle; the PR gate's `select_ci_tests` does not select these suites — #1656 — so the pytest command is run explicitly and posted).
+- No node-27 receipt required (pure exception routing; unit tests are the oracle). The PR gate's `select_ci_tests` does select these suites on this diff (measured `--changed-file` count=29, incl. the four changed suites and both wire-site guard suites; the #1656 claim in the issue body does not hold here) — the explicit pytest run is posted regardless.

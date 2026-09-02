@@ -50,7 +50,7 @@ Evidence floor:
 - [x] T1 Split the eight arms (subclass first, base second, generic last) with the new inline codes/prefixes; rewrite the routing comments at `producer.py:812-816` and `parser.py:276-278`.
 - [x] T2 16 paired cases in the four suites: producer/parser fixtures (4), forcing CLI `_click_main` + `_argparse_main` (4), output-parser CLI both subcommands (`["parse", "--run-id", …]` for the second) × `_click_main` + `_argparse_main` (8); order-mutation check recorded in the PR body.
 - [x] T3 Runbook §4.3.1 per D3's line-by-line list (count, intro, rows, HANDOFF generalisation, caveat deletion, triage paragraph); `tier-node27-timeseries-storage/design.md` dated supersede bullet covering `:1713-1715`, `:1780-1781`, `:1792-1794`.
-- [x] T4 Post the explicit pytest + grep outputs in the PR (CI does not select these suites, #1656).
+- [x] T4 Post the explicit pytest + grep outputs in the PR (posted regardless of CI selection; measured: the PR gate selects these suites on this diff, count=29 — the #1656 claim does not apply here).
 
 ## Non-goals (explicit)
 
