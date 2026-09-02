@@ -2868,7 +2868,7 @@ def test_retry_api_maps_file_journal_invalid_evidence_to_409(tmp_path: Any, monk
             actor_id="trusted-internal:test",
             roles=("sys_admin",),
         ),
-        service=service,  # type: ignore[arg-type]
+        service=service,
         gateway=_FileGateway(),  # type: ignore[arg-type]
     )
     app.dependency_overrides[pipeline_routes.get_retry_execution_context] = lambda: context
@@ -2889,3 +2889,466 @@ def test_retry_api_maps_file_journal_invalid_evidence_to_409(tmp_path: Any, monk
         assert str(journal_root) not in rendered
     finally:
         app.dependency_overrides.pop(pipeline_routes.get_retry_execution_context, None)
+
+
+# --- #1945: file-journal manual retry submission failure -> structured 503 ---
+
+_FILE_LANE_RUN_ID = "fcst_gfs_2026072000_model_a"
+_FILE_LANE_CYCLE_ISO = "2026-07-20T00:00:00+00:00"
+_FILE_JOURNAL_MODULE = "services.orchestrator.file_orchestration_journal"
+
+
+def _file_lane_retry_fixture(tmp_path: Path) -> dict[str, Any]:
+    """Mint an in-scope ``failed`` forecast row plus a file-lane retry service.
+
+    The file lane is imported INSIDE this body on purpose.  ``scripts/select_ci_tests``
+    derives its importer index from module-level statements only
+    (``_top_level_imported_module_names``), so a top-level
+    ``services.orchestrator.file_orchestration_journal`` import here would enlarge
+    that index and re-open ``tests/test_select_ci_tests.py`` governance.  Same
+    reason the #1604 409 test above imports in-body.
+
+    The gateway defines ``submit_job`` only: an object that also exposes
+    ``submit_job_array`` is preferred by ``_submit_file_manual_retry_job`` for
+    ``run_shud_forecast_array``, and the route's own execution-path probe checks
+    ``submit_job``.  Raising ``RuntimeError`` there classifies as
+    ``SBATCH_SUBMISSION_FAILED``.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileJournalRetryService
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalRepository as _Repo,
+    )
+    from services.orchestrator.retry import RetryConfig as _RetryConfig
+
+    # ``.resolve()`` because the repository refuses a root reached through a
+    # symlinked ancestor; ``tmp_path`` is already a realpath on macOS.
+    journal_root = (tmp_path / "journal").resolve()
+    repository = _Repo(journal_root)
+    repository.upsert_pipeline_job(
+        {
+            "job_id": "job_fcst_gfs_2026072000_model_a_forecast",
+            "run_id": _FILE_LANE_RUN_ID,
+            "cycle_id": "gfs_2026072000",
+            "source_id": "gfs",
+            "cycle_time": _FILE_LANE_CYCLE_ISO,
+            "job_type": "run_shud_forecast_array",
+            "model_id": "model_a",
+            "status": "failed",
+            "stage": "forecast",
+            "idempotency_key": "gfs:gfs_2026072000:model_a:forecast",
+            "error_code": "SLURM_TIMEOUT",
+            "init_state_identities": [],
+            "created_at": _FILE_LANE_CYCLE_ISO,
+            "updated_at": _FILE_LANE_CYCLE_ISO,
+            "finished_at": _FILE_LANE_CYCLE_ISO,
+        }
+    )
+
+    class _FileGateway:
+        def submit_job(self, request):
+            raise RuntimeError("no execution path")
+
+    return {
+        "journal_root": journal_root,
+        "repository": repository,
+        "service": FileJournalRetryService(repository, _RetryConfig(max_retries=3, backoff_schedule=[0])),
+        "gateway": _FileGateway(),
+    }
+
+
+def _file_lane_runtime_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+    """Two distinct-realpath local roots for ``_REQUIRED_RUNTIME_ROOT_FIELDS``.
+
+    A same-realpath pair is rejected as ``resolves_to_workspace_dir`` and the
+    evidence-present test would silently degrade into the evidence-absent one.
+    """
+
+    workspace_root = (tmp_path / "workspace").resolve()
+    object_store_root = (tmp_path / "object-store").resolve()
+    workspace_root.mkdir(parents=True, exist_ok=True)
+    object_store_root.mkdir(parents=True, exist_ok=True)
+    assert workspace_root != object_store_root
+    monkeypatch.setenv("WORKSPACE_ROOT", str(workspace_root))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
+    return workspace_root, object_store_root
+
+
+def _post_file_lane_retry(
+    fixture: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    after_retry: Any = None,
+) -> Any:
+    """Drive ``POST /runs/{run_id}/retry`` against the injected file-lane service.
+
+    ``after_retry(retry_row)`` runs on the service INSTANCE right after the real
+    ``attempt_manual_retry`` returns (failure already durable), so the route's
+    post-return evidence read is the only call a fault seam can reach.
+    """
+
+    service = fixture["service"]
+    if after_retry is not None:
+        real_attempt = service.attempt_manual_retry
+
+        def _wrapped(run_id, gateway=None, *, policy_decision=None, trusted_internal=False):
+            result = real_attempt(
+                run_id,
+                gateway,
+                policy_decision=policy_decision,
+                trusted_internal=trusted_internal,
+            )
+            after_retry(result)
+            return result
+
+        monkeypatch.setattr(service, "attempt_manual_retry", _wrapped)
+
+    context = pipeline_routes._RetryExecutionContext(
+        policy_decision=trusted_internal_policy_decision(
+            "pipeline.retry_run",
+            target_type="pipeline_run",
+            target_id=_FILE_LANE_RUN_ID,
+            actor_id="trusted-internal:test",
+            roles=("sys_admin",),
+        ),
+        service=service,
+        # The fake is not a ``SlurmGateway``; typing the gateway seam is out of
+        # scope for #1945 (only ``service`` gained a Protocol).
+        gateway=fixture["gateway"],  # type: ignore[arg-type]
+    )
+    app.dependency_overrides[pipeline_routes.get_retry_execution_context] = lambda: context
+    monkeypatch.setenv("ALLOW_DEV_ROLE_HEADER", "true")
+    try:
+        client = TestClient(app)
+        return client.post(f"/api/v1/runs/{_FILE_LANE_RUN_ID}/retry", headers={"X-User-Role": "operator"})
+    finally:
+        app.dependency_overrides.pop(pipeline_routes.get_retry_execution_context, None)
+
+
+def _persisted_submission_events(journal_root: Path, job_id: str) -> list[dict[str, Any]]:
+    """Latest-first ``submission`` event payloads read straight off the journal.
+
+    Independent of the reader under test: the append-only ``*.jsonl`` segments
+    are parsed directly rather than through ``_cycle_rows``, so the equality
+    assertion cannot be satisfied by the reader agreeing with itself.
+    """
+
+    events: list[dict[str, Any]] = []
+    for segment in sorted(journal_root.rglob("*.jsonl")):
+        for line in segment.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("record_type") != "pipeline_event":
+                continue
+            payload = record.get("payload") or {}
+            if str(payload.get("entity_id") or "") != job_id:
+                continue
+            if str(payload.get("event_type") or "") != "submission":
+                continue
+            events.append(payload)
+    events.sort(key=lambda payload: int(payload.get("event_id") or 0), reverse=True)
+    return events
+
+
+def _assert_file_lane_submission_failed_503(response: Any) -> dict[str, Any]:
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "SBATCH_SUBMISSION_FAILED"
+    details = error["details"]
+    assert details["status"] == "submission_failed"
+    assert details["run_id"] == _FILE_LANE_RUN_ID
+    assert isinstance(details["job_id"], str) and details["job_id"]
+    return details
+
+
+def test_retry_api_file_lane_submission_failure_returns_503_with_persisted_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T1 — file-lane ``submission_failed`` with resolved runtime roots.
+
+    The route must answer the structured 503 (never the unclassified 500 #1945
+    reported) and carry the persisted, already public-scrubbed
+    ``runtime_root_resolution`` mapping unchanged.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    workspace_root, object_store_root = _file_lane_runtime_roots(tmp_path, monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    persisted = _persisted_submission_events(fixture["journal_root"], details["job_id"])
+    assert len(persisted) == 1
+    expected = persisted[0]["details"]["runtime_root_resolution"]
+    assert set(expected["required"]) == {"workspace_dir", "object_store_root"}
+    assert expected["missing"] == []
+    assert details["runtime_root_resolution"] == expected
+    # The literal in the helper pins the wire contract; this pins the route to
+    # the code the journal actually durably recorded, so a lane that answered a
+    # hardcoded 503 code while persisting something else would be caught.
+    assert response.json()["error"]["code"] == persisted[0]["details"]["error_code"]
+
+    rendered = json.dumps(response.json())
+    assert "Traceback" not in rendered
+    assert "/journal/pipeline-jobs" not in rendered
+    assert str(fixture["journal_root"]) not in rendered
+    assert str(workspace_root) not in rendered
+    assert str(object_store_root) not in rendered
+
+
+def test_retry_api_file_lane_second_retry_reports_its_own_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T1 sister — the reader is scoped to the job id it was asked for.
+
+    T1 alone leaves the reader's job scoping undiscriminated: with one job in
+    the journal, ``entity_id == job_id`` and "no filter at all" agree, and
+    latest-first and oldest-first agree.  Two retries of the same run put two
+    ``submission`` events with DIFFERENT evidence into the same cycle segment
+    (``submission_failed`` is a manual-retry source status, so the second POST
+    proceeds and mints ``..._retry_2`` after ``..._retry_active``).
+
+    Mutants killed:
+
+    * filter dropped + oldest-first -> the second 503 would carry the FIRST
+      retry's evidence; killed by ``d2[...] == e2`` / ``!= e1``.
+    * filter dropped, newest-first kept -> the route reads for the newest job
+      and still agrees, but asking for the FIRST job's id now returns the
+      second's evidence; killed by the direct reader call at the end.
+
+    Sort order alone has no in-domain oracle: each job id owns exactly one
+    ``submission`` event here (asserted), and minting a second one for a single
+    job would mean faking journal writes rather than exercising the route.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _file_lane_runtime_roots(tmp_path, monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+
+    first_response = _post_file_lane_retry(fixture, monkeypatch)
+    second_response = _post_file_lane_retry(fixture, monkeypatch)
+
+    first_details = _assert_file_lane_submission_failed_503(first_response)
+    second_details = _assert_file_lane_submission_failed_503(second_response)
+    assert first_details["job_id"] != second_details["job_id"]
+
+    first_events = _persisted_submission_events(fixture["journal_root"], first_details["job_id"])
+    second_events = _persisted_submission_events(fixture["journal_root"], second_details["job_id"])
+    assert len(first_events) == 1
+    assert len(second_events) == 1
+    first_evidence = first_events[0]["details"]["runtime_root_resolution"]
+    second_evidence = second_events[0]["details"]["runtime_root_resolution"]
+    # Differ guard: without this the equalities below would hold vacuously for
+    # every mutant, because the two events would be indistinguishable.  They
+    # differ on the retry lineage keys (``retry_job_id`` / ``previous_job_id``).
+    assert first_evidence != second_evidence
+
+    assert second_details["runtime_root_resolution"] == second_evidence
+    assert second_details["runtime_root_resolution"] != first_evidence
+    assert fixture["service"].submission_runtime_root_resolution(first_details["job_id"]) == first_evidence
+
+
+def test_retry_api_file_lane_submission_failure_returns_503_without_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T2 — no runtime roots resolve, so the event carries no evidence.
+
+    ``runtime_root_resolution`` must then be ABSENT from ``details``, not ``null``.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    assert "runtime_root_resolution" not in details
+    persisted = _persisted_submission_events(fixture["journal_root"], details["job_id"])
+    assert len(persisted) == 1
+    assert "runtime_root_resolution" not in persisted[0]["details"]
+
+    rendered = json.dumps(response.json())
+    assert "Traceback" not in rendered
+    assert str(fixture["journal_root"]) not in rendered
+
+
+def test_retry_api_file_lane_evidence_read_fault_keeps_503(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """T3 — a typed journal fault on the route's second read stays fail-soft.
+
+    Built on T1's baseline (evidence IS persisted), so a missing key is
+    attributable only to the faulted read; on T2's baseline the assertion would
+    be vacuous.  This is the fixture's literal seam: only
+    ``repository._cycle_rows`` faults.  ``get_pipeline_job`` calls it internally
+    and converts the fault into a blocked row, so the reader exits through its
+    blocked-row branch (D1 step 1) rather than its ``except``; the next test
+    pins the ``except`` itself.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    _clear_runtime_root_env(monkeypatch)
+    _file_lane_runtime_roots(tmp_path, monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+    repository = fixture["repository"]
+
+    def _fault_cycle_rows(_retry_row: Any) -> None:
+        def _faulting(*_args: Any, **_kwargs: Any):
+            raise FileOrchestrationJournalError("file_journal_unreadable", field="journal")
+
+        monkeypatch.setattr(repository, "_cycle_rows", _faulting)
+
+    response = _post_file_lane_retry(fixture, monkeypatch, after_retry=_fault_cycle_rows)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    assert "runtime_root_resolution" not in details
+    rendered = json.dumps(response.json())
+    assert "Traceback" not in rendered
+    assert str(fixture["journal_root"]) not in rendered
+
+
+def test_retry_api_file_lane_evidence_read_fault_reaches_reader_fail_soft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T3 (refinement) — the reader's own ``except`` arm, with its log oracle.
+
+    Same T1 baseline and same instance seam, plus ``get_pipeline_job`` pinned to
+    the healthy row it really returns, so the ``_cycle_rows`` fault reaches the
+    reader instead of being absorbed by the blocked-row conversion.  Without
+    this the fail-soft branch has no oracle at all: on the HTTP surface "no
+    evidence" and "evidence read faulted" are byte-identical by design, and the
+    single ``logger.warning`` carrying only ``reason``/``field`` is the only
+    observable difference.
+
+    The injected ``field`` pins the root-RELATIVE segment token that the
+    read/decode raise sites produce (``field=str(_relative_evidence(path,
+    self.root))`` over the ``journal/<source>/<cycle>.jsonl`` layout).  That is
+    one real shape among several, not the only one: the identity helpers
+    (``_required_safe_identity``, ``_normalize_file_source_id``) raise with a
+    bare column name such as ``cycle_id`` / ``source_id``, which is exactly what
+    the blocked-row sister test's no-guard mutant logs.  Neither family is ever
+    an absolute root -- ``_relative_evidence`` collapses anything outside the
+    root to ``[local-path]`` -- so this is a shape pin for the path-token
+    family, not a leak guard.
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalError
+
+    _clear_runtime_root_env(monkeypatch)
+    workspace_root, object_store_root = _file_lane_runtime_roots(tmp_path, monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+    repository = fixture["repository"]
+
+    def _fault_second_read(retry_row: Any) -> None:
+        pinned = repository.get_pipeline_job(str(retry_row.job_id))
+        assert pinned is not None
+        assert pinned.get("file_journal", {}).get("status") != "blocked"
+
+        def _pinned_get(job_id: str, *_args: Any, **_kwargs: Any):
+            return pinned if job_id == str(retry_row.job_id) else None
+
+        def _faulting(*_args: Any, **_kwargs: Any):
+            raise FileOrchestrationJournalError("file_journal_unreadable", field="journal/gfs/2026072000.jsonl")
+
+        monkeypatch.setattr(repository, "get_pipeline_job", _pinned_get)
+        monkeypatch.setattr(repository, "_cycle_rows", _faulting)
+
+    with caplog.at_level(logging.WARNING, logger=_FILE_JOURNAL_MODULE):
+        response = _post_file_lane_retry(fixture, monkeypatch, after_retry=_fault_second_read)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    assert "runtime_root_resolution" not in details
+    rendered = json.dumps(response.json())
+    assert "Traceback" not in rendered
+    assert str(fixture["journal_root"]) not in rendered
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _FILE_JOURNAL_MODULE and record.levelno == logging.WARNING
+    ]
+    fail_soft = [message for message in warnings if "file_journal_unreadable" in message]
+    assert len(fail_soft) == 1
+    assert "journal" in fail_soft[0]
+    for secret in (str(fixture["journal_root"]), str(workspace_root), str(object_store_root)):
+        assert secret not in fail_soft[0]
+
+
+def test_retry_api_file_lane_blocked_job_row_keeps_503(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """T3 sister — a blocked row from the second ``get_pipeline_job`` (D1 step 1).
+
+    ``get_pipeline_job`` keeps the REAL job id on the blocked row it synthesises
+    (``query_pipeline_jobs_by_run`` is the producer that leaves the
+    ``file_journal_read_blocked`` sentinel), so the reader must key off
+    ``file_journal.status``; a job-id compare would never match and
+    ``_source_id_from_job`` would then raise on ``cycle_id=None``.
+
+    The NEGATIVE log oracle is what actually pins that branch.  Deleting the
+    blocked-row guard keeps every HTTP assertion green: ``_source_id_from_job``
+    raises ``file_journal_missing_identity`` on the blocked row's null identity,
+    the reader's fail-soft ``except`` swallows it and the route emits the same
+    evidence-less 503.  The two paths differ only in that the ``except`` arm
+    logs; asserting that NOTHING was logged separates them.  The assertion is on
+    the message TEMPLATE, not on a reason token, so it also catches a guard
+    removal that raises some other typed reason.
+    """
+
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalError,
+        _blocked_query_job,
+    )
+
+    _clear_runtime_root_env(monkeypatch)
+    _file_lane_runtime_roots(tmp_path, monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+    repository = fixture["repository"]
+
+    def _block_job_row(retry_row: Any) -> None:
+        blocked = _blocked_query_job(
+            FileOrchestrationJournalError("file_journal_unreadable", field="journal"),
+            job_id=str(retry_row.job_id),
+            run_id=_FILE_LANE_RUN_ID,
+        )
+        assert blocked["job_id"] == str(retry_row.job_id)
+        assert blocked["file_journal"]["status"] == "blocked"
+        monkeypatch.setattr(repository, "get_pipeline_job", lambda *_a, **_k: blocked)
+
+    with caplog.at_level(logging.WARNING, logger=_FILE_JOURNAL_MODULE):
+        response = _post_file_lane_retry(fixture, monkeypatch, after_retry=_block_job_row)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    assert "runtime_root_resolution" not in details
+    assert "Traceback" not in json.dumps(response.json())
+
+    fail_soft = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == _FILE_JOURNAL_MODULE and "manual retry submission evidence unreadable" in record.getMessage()
+    ]
+    assert fail_soft == []
+
+
+def test_both_retry_lanes_satisfy_manual_retry_service_protocol(tmp_path: Path) -> None:
+    """T4 — the seam the route depends on, pinned for both concrete lanes.
+
+    ``isinstance`` against a ``@runtime_checkable`` Protocol checks attribute
+    presence only — which is exactly #1945's failure mode: the file lane had no
+    ``submission_runtime_root_resolution`` and the route died with
+    ``AttributeError``.  Signature drift has no automatic oracle here (CI runs
+    no mypy).
+    """
+
+    from services.orchestrator.file_orchestration_journal import FileJournalRetryService
+    from services.orchestrator.file_orchestration_journal import (
+        FileOrchestrationJournalRepository as _Repo,
+    )
+    from services.orchestrator.retry import ManualRetryService
+
+    with _store() as store:
+        assert isinstance(RetryService(store, RetryConfig()), ManualRetryService)
+
+    repository = _Repo((tmp_path / "journal").resolve())
+    assert isinstance(FileJournalRetryService(repository, RetryConfig()), ManualRetryService)

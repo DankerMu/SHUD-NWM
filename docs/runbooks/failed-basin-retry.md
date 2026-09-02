@@ -97,6 +97,12 @@ consumed by the ordinary scheduler path, which mints a **new** retry-suffixed id
 (`<run_id>:forecast:retry_<N>` / `job_..._forecast_retry_<N>`) and reserves that successor
 alongside the released row.
 
+If any recovery door above is refused with `file_journal_job_id_scope_mismatch`, the row's
+`job_id` encodes a different `(source, cycle)` than the row itself carries: no API can
+transition it, and its `reconcile-inventory` anchor can abort the whole reconcile scan. See
+[`current-production-ops.md`](current-production-ops.md) §8.11 for the census and the recovery
+path, and §8.10 for the journal-root realpath precondition both depend on.
+
 ### `blocked_strict_warm_start_init_state_mismatch` candidates
 
 The candidate ladder now checks the stage-scoped retry budget before emitting

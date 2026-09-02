@@ -123,9 +123,19 @@ class ParsedBasinsGeometry:
     river_segments: list[RiverSegmentGeometry]
     river_network_checksum: str
     river_network_source_uri: str
+    # #1693: post-PR-2 (#561) ``segment_count`` is the ``gis/river.shp`` reach
+    # record count — NOT the finer ``seg.shp``/``.sp.rivseg`` display geometry,
+    # which the pre-PR-2 comment here used to claim. It is written to
+    # ``core.river_network_version.segment_count`` and counts reach rows only.
     segment_count: int
-    # `.sp.riv` reach count: the SHUD output/product topology, distinct from the
-    # finer `seg.shp`/`.sp.rivseg` display geometry counted by ``segment_count``.
+    # ``.sp.riv`` reach count. Equal to ``segment_count`` for a valid package:
+    # ``_validate_river_shp_single_part_invariant`` fails the import with
+    # ``BASINS_REGISTRY_RIVER_SHP_INVARIANT_VIOLATED`` unless the ``river.shp``
+    # record count matches this one. It is not a ``core.river_network_version``
+    # column: it lands in the import receipt and
+    # ``core.model_instance.resource_profile``, and is re-read from there into
+    # the scheduler file-registry / candidate / chain manifests (carrier list in
+    # ``openspec/glossary.md``, entry ``output_segment_count``).
     output_segment_count: int
     evidence_counts: dict[str, int | None]
 

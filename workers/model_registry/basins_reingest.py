@@ -346,7 +346,12 @@ def _query_post_import_metrics(
             basin_row = cursor.fetchone()
             basin_id = basin_row["basin_id"] if basin_row else None
 
-            # ``core.river_segment`` holds two row classes under one rnv:
+            # ``core.river_segment`` holds two row classes under one rnv
+            # (#1693; glossary terms ``SHUD input reach row`` /
+            # ``SHUD output river row`` / ``segment_count`` in
+            # ``openspec/glossary.md`` ``## Domain terms``, operator-facing
+            # counting invariant in ``docs/runbooks/current-production-ops.md``
+            # §9.1):
             #   * reach rows (from gis/river.shp) — id = "<model>_reach_<iRiv:06d>",
             #     geom always populated, no ``shud_output_river`` property.
             #   * output rows (from .sp.riv, seeded by _ensure_output_river_segments)

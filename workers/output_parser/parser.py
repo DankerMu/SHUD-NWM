@@ -16,6 +16,7 @@ from packages.common.object_store import LocalObjectStore
 from packages.common.storage import validate_object_path
 from packages.common.timescale_write_guard import (
     CompressedChunkGuardError,
+    CompressedChunkWriteError,
     check_batch_targets_uncompressed,
 )
 
@@ -272,13 +273,25 @@ class OutputParser:
                 _runtime_error_message(error),
             )
             raise
-        except CompressedChunkGuardError as error:
+        except CompressedChunkWriteError as error:
+            # Subclass arm FIRST: a compressed chunk was actually detected.
             # Dedicated error_code so operators route on the runbook decompress
             # procedure rather than the generic runtime error bucket. Re-raise
             # so the caller (CLI, test) sees the structured exception.
             self._mark_run_failed_preserving_error(
                 context.run_id,
                 "OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED",
+                _runtime_error_message(error),
+            )
+            raise
+        except CompressedChunkGuardError as error:
+            # Base-class arm SECOND: the guard could not certify the batch
+            # (partial window, unregistered hypertable, catalog SELECT timing
+            # out). No chunk exists to decompress, so this gets its own
+            # error_code and routes to DB-health / caller-bug triage.
+            self._mark_run_failed_preserving_error(
+                context.run_id,
+                "OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED",
                 _runtime_error_message(error),
             )
             raise

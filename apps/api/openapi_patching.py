@@ -83,10 +83,10 @@ def _finalize_openapi_schema(schema: dict) -> None:
     """Normalize hand-patched nullable schemas and publish truthful security metadata.
 
     FastAPI emits OpenAPI 3.1.0, where JSON Schema nullability is a type union
-    rather than the 3.0-only ``nullable`` keyword. All 109 ``nullable: true``
+    rather than the 3.0-only ``nullable`` keyword. All 111 ``nullable: true``
     nodes are injected by this module, so the single post-patch finalizer below
     is the only place that re-expresses them. It recurses the whole document,
-    replaces scalar ``type`` with ``[type, "null"]`` for the 108 ordinary nodes,
+    replaces scalar ``type`` with ``[type, "null"]`` for the 110 ordinary nodes,
     and re-expresses the one ``type + allOf`` composition (Layer.metadata) as a
     complete composition-or-null union so openapi-typescript keeps generating
     ``LayerMetadata | null`` instead of an erroneous intersection. Any other
@@ -620,6 +620,20 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         "the compute_control node exposes the live queue state.",
         ["CONTROL_PLANE_QUEUE_UNAVAILABLE"],
     )
+    # #1678: `GET /api/v1/queue/depth` re-raises whatever the Slurm gateway
+    # raised (`apps/api/routes/pipeline.py:838-845`). `RealSlurmGateway.list_jobs`
+    # reaches `_run_command` (`SlurmCommandError` 502 / `SlurmTimeoutError` 504)
+    # and `_parse_sacct_list` (`SlurmParseError` 502), so those two upstream
+    # statuses are reachable and are declared here. No 4XX is reachable on that
+    # operation, so none is declared.
+    responses["SlurmGatewayUpstreamError"] = _typed_error_response(
+        "The Slurm gateway command failed or returned output the gateway could not parse.",
+        ["SLURM_COMMAND_ERROR", "SLURM_PARSE_ERROR"],
+    )
+    responses["SlurmGatewayTimeout"] = _typed_error_response(
+        "The Slurm gateway command exceeded its timeout before returning.",
+        ["SLURM_TIMEOUT"],
+    )
     responses["JobLogError"] = _typed_error_response(
         "Pipeline job log retrieval failed using the canonical error envelope.",
         [
@@ -761,7 +775,11 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         schema,
         "/api/v1/queue/depth",
         "get",
-        {"503": {"$ref": "#/components/responses/ControlPlaneQueueUnavailable"}},
+        {
+            "502": {"$ref": "#/components/responses/SlurmGatewayUpstreamError"},
+            "503": {"$ref": "#/components/responses/ControlPlaneQueueUnavailable"},
+            "504": {"$ref": "#/components/responses/SlurmGatewayTimeout"},
+        },
     )
 
 

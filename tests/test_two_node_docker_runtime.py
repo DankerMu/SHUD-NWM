@@ -1317,6 +1317,18 @@ def test_two_node_e2e_evidence_rejects_display_scheduler_root_env(
 
 
 def test_static_checker_rejects_display_hard_coded_compute_roots(tmp_path: Path) -> None:
+    # Derive the hard-coded bind sources from the same template the checker
+    # parses its compute roots from, so a `compute.example` value edit cannot
+    # silently stop this fixture from tripping DISPLAY_FORBIDDEN_MOUNT.
+    compute_env = docker_runtime.parse_env_file(REPO_ROOT / "infra/env/compute.example")
+    forbidden_binds = "\n".join(
+        f"      - {source}:{target}:ro"
+        for source, target in (
+            (f"{compute_env['WORKSPACE_ROOT']}/run-a", "/workspace"),
+            (compute_env["NHMS_BASINS_ROOT"], "/basins"),
+            (f"{compute_env['NHMS_MODEL_ASSET_ROOT']}/forcing", "/model-assets"),
+        )
+    )
     display_compose = tmp_path / "compose.display.yml"
     display_compose.write_text(
         """
@@ -1341,10 +1353,8 @@ services:
         source: ${NHMS_PUBLISHED_ARTIFACT_HOST_ROOT}
         target: ${NHMS_PUBLISHED_ARTIFACT_ROOT}
         read_only: true
-      - /scratch/frd_muziyao/nhms-production/workspace/run-a:/workspace:ro
-      - /volume/data/nwm/Basins:/basins:ro
-      - /volume/data/nwm/model-assets/forcing:/model-assets:ro
-""",
+__FORBIDDEN_BINDS__
+""".replace("__FORBIDDEN_BINDS__", forbidden_binds),
         encoding="utf-8",
     )
 

@@ -1,6 +1,15 @@
 # 22-side compute/control example for infra/compose.compute.yml.
 # Use with:
 #   docker compose --env-file infra/env/compute.example -f infra/compose.compute.yml config
+#
+# SCOPE (#1694): this is the template for the COMPOSE lane only. Its instance
+# `infra/env/compute.env` is listed in NO node-22 user systemd unit's
+# EnvironmentFiles (read-only check 2026-09-02). The live node-22
+# services load `compute.scheduler-dbfree.env` (scheduler + evidence retention),
+# `compute.scheduler-provider-refresh.env` (provider refresh), and the untracked
+# `compute.host.env` (compute-api + slurm-gateway). See the
+# "node-22 unit -> EnvironmentFile authority" table in infra/env/README.md.
+# Do not quote values from this file as the production scheduler's config.
 
 NHMS_APP_IMAGE=nhms-app
 NHMS_IMAGE_TAG=m22-placeholder
@@ -55,6 +64,11 @@ NHMS_SCHEDULER_REGISTRY_MANIFEST=/scratch/frd_muziyao/nhms-production/object-sto
 NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file
 NHMS_SCHEDULER_CANONICAL_READINESS_INDEX=/scratch/frd_muziyao/nhms-production/object-store/scheduler/canonical-readiness/index-last.json
 NHMS_SCHEDULER_JOURNAL_BACKEND=file
+# Must be a realpath (`readlink -f` equals this value): every component a real
+# directory, none a symlink. An alias ANCESTOR passes the db-free preflight and
+# then fails the scheduler at start with FILE_JOURNAL_INVALID_ROOT; a symlink
+# leaf, a symlink loop or a missing root never gets that far -- the preflight's
+# own redacted blocker stops the pass first (#1943, 8.10).
 NHMS_SCHEDULER_JOURNAL_ROOT=/scratch/frd_muziyao/nhms-production/workspace/scheduler/journal
 NHMS_SCHEDULER_STATE_INDEX_BACKEND=file
 NHMS_SCHEDULER_STATE_INDEX=/scratch/frd_muziyao/nhms-production/object-store/scheduler/state-index/index-last.json
@@ -175,8 +189,21 @@ NHMS_REQUIRE_FORECAST_WARM_START=true
 # is available; cycles at/after it require exact warm-start.
 # NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-26T12:00:00Z
 
-NHMS_BASINS_ROOT=/volume/data/nwm/Basins
-NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets
+# NHMS_BASINS_ROOT is the live scheduler value: it matches
+# compute.scheduler-dbfree.env.example (the scheduler authority) and the
+# directory is present on the node-22 login host and on compute node cn01
+# (read-only check 2026-09-02; receipt
+# .workplans/pr-1956/node22-compute-env-receipt.log:84, :96, :110).
+# NHMS_MODEL_ASSET_ROOT is a compose-lane placeholder following this template's
+# /scratch/frd_muziyao/nhms-production/* scheme. It WAS checked on the node-22
+# login host on 2026-09-02 and does not exist there (same receipt, :82 and :112:
+# "MISSING /scratch/frd_muziyao/nhms-production/model-assets"). A directory
+# with the near-identical nhms-prod spelling does exist (receipt :83, EXISTS
+# /scratch/frd_muziyao/nhms-prod/model-assets); no tracked env template binds
+# NHMS_MODEL_ASSET_ROOT to it, so do not assume it is the intended value.
+# Set this key to a real path when you instantiate this file (#1694).
+NHMS_BASINS_ROOT=/volume/nwm/Basins
+NHMS_MODEL_ASSET_ROOT=/scratch/frd_muziyao/nhms-production/model-assets
 SHUD_EXECUTABLE=/opt/shud/bin/shud
 
 # Slurm gateway = the production submit path. The generic daemon (above) renders

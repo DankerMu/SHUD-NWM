@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from errno import ENOENT
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from sqlalchemy import func, inspect, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -321,6 +321,29 @@ class RetryNotFoundError(RetryError):
 class RetrySubmitter(Protocol):
     def submit_job(self, request: SubmitJobRequest) -> Any:
         raise NotImplementedError
+
+
+@runtime_checkable
+class ManualRetryService(Protocol):
+    """The manual-retry seam ``POST /runs/{run_id}/retry`` depends on.
+
+    Both concrete lanes -- :class:`RetryService` (database) and
+    ``FileJournalRetryService`` (file journal) -- satisfy this structurally, so
+    the route can stay lane-agnostic.  #1945: the file lane carried
+    ``attempt_manual_retry`` but not ``submission_runtime_root_resolution``, and
+    a real submission failure died at the route's evidence read with
+    ``AttributeError`` -- the unclassified HTTP 500 the retry spec forbids.
+
+    The declared shapes are the ROUTE's call shapes, not the full concrete
+    signatures: both lanes also accept a keyword-only ``trusted_internal`` flag
+    the route never passes.  ``runtime_checkable`` ``isinstance`` checks
+    attribute presence only, which is precisely #1945's failure mode; signature
+    drift has no automatic oracle here (CI runs no mypy).
+    """
+
+    def attempt_manual_retry(self, run_id: str, gateway: Any = None, *, policy_decision: Any = None) -> Any: ...
+
+    def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | None: ...
 
 
 @dataclass(frozen=True)

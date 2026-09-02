@@ -104,6 +104,11 @@ def test_current_production_ops_node22_active_uses_exact_venv() -> None:
     # node-27 exact-venv commands and the rollback worktree sync stay preserved.
     assert NODE27_PY in text
     assert '(cd "$ROLLBACK_CHECKOUT" && uv sync --all-extras --dev)' in text
+    # #1944 §8.11: the scanner above only inspects lines containing `uv run` /
+    # `uv sync`, so a node-22 command written with a bare interpreter would pass
+    # it by being invisible.  Positive pin, same shape as the failed-basin
+    # check: the census command must exist and must carry the exact venv.
+    assert f"{NODE22_VENV_PY} -m services.orchestrator.cli census-job-id-scope" in text
 
 
 # --- 3. failed-basin demotion and placeholder repair use exact venv ---------
