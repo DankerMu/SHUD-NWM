@@ -13,7 +13,11 @@ from services.orchestrator import file_orchestration_migration as migration_modu
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_state_manual_retry as scheduler_state_manual_retry_module
 from services.orchestrator import scheduler_state_rows as scheduler_state_rows_module
-from services.orchestrator.file_orchestration_journal import FileJournalRetryService, FileOrchestrationJournalRepository
+from services.orchestrator.file_orchestration_journal import (
+    FileJournalRetryService,
+    FileOrchestrationJournalError,
+    FileOrchestrationJournalRepository,
+)
 from services.orchestrator.file_orchestration_migration import (
     MIGRATION_RECEIPT_SCHEMA_VERSION,
     export_scheduler_state_from_postgres,
@@ -2048,3 +2052,73 @@ def test_migrate_scheduler_state_click_rejects_outside_receipt_path(
         )
 
     assert error.value.code == 2
+
+
+# --- #1760: the historical-import lane keeps its abort-at-row semantics ------
+
+
+def test_historical_import_aborts_at_a_divergent_job_row_and_stays_idempotent(tmp_path: Path) -> None:
+    """#1760 D4 (Legacy compatibility): a divergent row aborts the import at that row.
+
+    `import_historical_scheduler_state` has no per-row containment — its only
+    skip mechanism is the `_unsupported_job_reason` prefilter (a run-id shape
+    check), and every `FileOrchestrationJournalError` a row raises today
+    already aborts the import at that row, leaving earlier rows appended.  The
+    new gate adds one more such error and deliberately gets NO prefilter: a
+    prefilter would silently drop a row the operator should see.
+
+    Input: three job rows where the second carries a `job_id` naming another
+    cycle while its own `cycle_id`/`run_id` stay consistent (so only `job_id`
+    diverges).  Expected: the import raises `file_journal_job_id_scope_mismatch`
+    at that row, the row imported before it is present, the divergent row has
+    neither a journal record nor a direct file, and a re-run after correcting
+    the row is idempotent for the already-imported rows.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    divergent_job_id = "job_fcst_gfs_2026070100_model_b_forecast"
+    rows = _historical_rows(cycle_time)
+    first_job_id = rows["pipeline_jobs"][0]["job_id"]
+    rows["pipeline_jobs"][1] = _job(
+        job_id=divergent_job_id,
+        run_id="fcst_gfs_2026062800_model_b",
+        cycle_time=cycle_time,
+        model_id="model_b",
+        status="succeeded",
+    )
+    rows["pipeline_events"] = []
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        import_historical_scheduler_state(
+            journal_root=journal_root,
+            cutoff_time=_dt("2026-06-28T00:10:00Z"),
+            **rows,
+        )
+    assert caught.value.reason == "file_journal_job_id_scope_mismatch"
+
+    journal_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(journal_root.rglob("*.jsonl"))
+    )
+    assert first_job_id in journal_text, "rows imported before the divergent one must survive"
+    assert divergent_job_id not in journal_text
+    assert list(journal_root.rglob(f"{divergent_job_id}.json")) == []
+    assert (journal_root / "pipeline-jobs" / f"{first_job_id}.json").exists()
+
+    # Correcting the row and re-running is idempotent for the already-imported
+    # rows: `append_historical_pipeline_job` short-circuits on `existing`.
+    corrected = _historical_rows(cycle_time)
+    corrected["pipeline_events"] = []
+    receipt = import_historical_scheduler_state(
+        journal_root=journal_root,
+        cutoff_time=_dt("2026-06-28T00:10:00Z"),
+        **corrected,
+    )
+    assert receipt["row_counts"]["pipeline_jobs"] == 3
+    replayed = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(journal_root.rglob("*.jsonl"))
+    )
+    assert replayed.count(f'"job_id": "{first_job_id}"') == journal_text.count(
+        f'"job_id": "{first_job_id}"'
+    ), "the already-imported row must not be appended a second time"
+    assert divergent_job_id not in replayed

@@ -10,12 +10,12 @@ Line cites are against `services/orchestrator/file_orchestration_journal.py` at
 Oracle is local + CI pytest (all four issues are `db-free` / `local-only`; no
 node-27 or node-22 receipt applies).
 
-- [ ] `uv run pytest tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py -q` green on the default (case-insensitive) macOS volume
-- [ ] The same two files green with `--basetemp` on a case-sensitive APFS volume (issue #1761 `Verification:` block B — `hdiutil create ... 'Case-sensitive APFS'`); the two filesystem-branching pins must run their *other* branch here
-- [ ] `uv run pytest tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_production_scheduler.py tests/test_file_orchestration_migration.py -q` green (proves no existing writer — chain, warm-start, scheduler, historical import — trips the #1760 gate and no chain path regresses on the cache changes)
-- [ ] `uv run ruff check .` clean
-- [ ] Red proofs, batched, against pre-change source (implementer contract): the #1567 warm-tamper test, the #1658 survival test, the #1761 double-read tests, and the #1760 rejection tests each shown red before / green after; `git stash list` holds no `red-proof` entry afterwards
-- [ ] `openspec validate journal-cache-fingerprint-and-identity-followups --strict --no-interactive`
+- [x] `uv run pytest tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py -q` green on the default (case-insensitive) macOS volume
+- [x] The same two files green with `--basetemp` on a case-sensitive APFS volume (issue #1761 `Verification:` block B — `hdiutil create ... 'Case-sensitive APFS'`); the two filesystem-branching pins must run their *other* branch here
+- [x] `uv run pytest tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_production_scheduler.py tests/test_file_orchestration_migration.py -q` green (proves no existing writer — chain, warm-start, scheduler, historical import — trips the #1760 gate and no chain path regresses on the cache changes)
+- [x] `uv run ruff check .` clean
+- [x] Red proofs, batched, against pre-change source (implementer contract): the #1567 warm-tamper test, the #1658 survival test, the #1761 double-read tests, and the #1760 rejection tests each shown red before / green after; `git stash list` holds no `red-proof` entry afterwards
+- [x] `openspec validate journal-cache-fingerprint-and-identity-followups --strict --no-interactive`
 
 ## 1. #1567 — containment-aware cycle-rows fingerprint (D1, D1b)
 
@@ -23,19 +23,19 @@ Seams under test: public `list_stage_statuses` (read lane the issue names) and
 the `_cycle_rows` cache through a shared `FileOrchestrationJournalRepository`
 instance; owner path through `_locked_cycle_write`.
 
-- [ ] One containment-aware signature helper; every stat in
+- [x] One containment-aware signature helper; every stat in
       `_cycle_rows_source_fingerprint` / `_cycle_segment_signatures` (segment
       slots, event slots, latest scandir directory, by-cycle partition, flat
       root) routes through it. Absence → `None`; containment fault → a
       dedicated non-`None` marker.
-- [ ] A fingerprint carrying a marker is neither a hit nor stored (assert via
+- [x] A fingerprint carrying a marker is neither a hit nor stored (assert via
       the cache dict after the read).
-- [ ] Owner hit (`in_write_window`) runs the directory probe; a marker forces a
+- [x] Owner hit (`in_write_window`) runs the directory probe; a marker forces a
       recompute. No source-file fingerprint is computed on an untouched tree
       (`test_cycle_write_window_owner_keeps_fingerprint_free_fast_path` stays
       green as written).
-- [ ] Update the code comment at `:5716-5724` in `_cycle_rows` (it names #1567 as open scope).
-- [ ] Tests (input → expected):
+- [x] Update the code comment at `:5716-5724` in `_cycle_rows` (it names #1567 as open scope).
+- [x] Tests (input → expected):
       - warm instance reads legal `[]` for cycle C (cache populated); replace
         `journal/<src>` with a symlink to an empty decoy directory; the same
         instance's `list_stage_statuses` → blocked row `file_journal_unreadable`,
@@ -55,12 +55,12 @@ instance; owner path through `_locked_cycle_write`.
 
 Seam under test: `_locked_cycle_write` + `_cycle_rows_cache` on one shared instance.
 
-- [ ] Exit `finally` (`_locked_cycle_write` `:10089`) evicts only
+- [x] Exit `finally` (`_locked_cycle_write` `:10089`) evicts only
       `key[0] == source_id and key[1] == cycle_segment` (normalized source id),
       base key included; the entry clear (`:10072`, the first statement under
       `with self._cache_lock:` at the top of `_locked_cycle_write`) is unchanged
       (diff shows no edit to that statement).
-- [ ] Tests:
+- [x] Tests:
       - open X's window; inside it populate Y's entry (other cycle, same or other
         source); X's window body appends a journal record for X or writes a
         by-cycle candidate row (NOT a flat `pipeline-jobs/<job_id>.json`
@@ -80,17 +80,17 @@ Seam under test: `_locked_cycle_write` + `_cycle_rows_cache` on one shared insta
 Seams under test: `_cycle_read_source_segments(..., root=)` module function
 and the public `query_pipeline_jobs_by_cycle` read with touched-path instrumentation.
 
-- [ ] `_merge_cycle_source_discovery(..., root=)` dedupes by
+- [x] `_merge_cycle_source_discovery(..., root=)` dedupes by
       `_names_same_directory`; both callers pass `self.root`; `root=None` keeps
       string dedup.
-- [ ] Overrides branch dedupes by identity; source-mismatch validation and
+- [x] Overrides branch dedupes by identity; source-mismatch validation and
       `file_journal_missing_identity` on empty are preserved.
-- [ ] Re-pin the `[("IFS", ("IFS", "ifs"))]` assertion
+- [x] Re-pin the `[("IFS", ("IFS", "ifs"))]` assertion
       (`tests/test_file_orchestration_journal.py:5298`) with a
       `_filesystem_is_case_sensitive` (test file `:14914`) branch/skip, the shape
       of the pin at test file `:14966` (`:14920` is the filesystem-agnostic
       shape); do not delete the assertion.
-- [ ] Tests (each with a case-insensitive branch and a case-sensitive branch/skip):
+- [x] Tests (each with a case-insensitive branch and a case-sensitive branch/skip):
       - cross-surface discovery `latest/IFS` + `journal/ifs`, public read →
         no `(st_dev, st_ino)` opened under two spellings
       - case-sensitive: `journal/gfs` and `journal/GFS` both real → both read,
@@ -143,15 +143,15 @@ test asserts the wrong token.
   divergent canonical row — assert no direct file restored and the
   reconcile-inventory anchor still present (kept per its docstring)
 
-- [ ] One gate definition inside `_validate_outgoing_record`, no per-lane copy;
+- [x] One gate definition inside `_validate_outgoing_record`, no per-lane copy;
       new code `file_journal_job_id_scope_mismatch`, `field="job_id"`,
       evidence `{"expected": "<source>/<cycle>", "actual": "<source>/<cycle>"}`
       bounded like sibling errors. The gate sits beside — not inside —
       the `_apply_journal_record` call, so the read-side replay is untouched.
-- [ ] `_cycle_scope_from_job_id` → `None` passes (fall-open unchanged).
-- [ ] Read-side `_validate_pipeline_job_identity` (`:14028`) and
+- [x] `_cycle_scope_from_job_id` → `None` passes (fall-open unchanged).
+- [x] Read-side `_validate_pipeline_job_identity` (`:14028`) and
       `_apply_journal_record` (`:6119`) untouched.
-- [ ] Tests:
+- [x] Tests:
       - single-row lane: `job_id` embeds cycle ≠ row `cycle_time` → rejected
         with the code and evidence; afterwards no journal record for that row
         exists in any segment, no `pipeline-jobs/**/<job_id>.json` exists, no
