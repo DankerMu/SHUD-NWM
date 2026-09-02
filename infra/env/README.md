@@ -45,6 +45,59 @@ Required canonical published artifact variables:
 
 Do not use unprefixed `PUBLISHED_ARTIFACT_ROOT` as an app runtime variable.
 
+## node-22 unit → EnvironmentFile authority (#1694)
+
+Which file a node-22 user systemd unit actually loads. Paths are on node-22
+under `/scratch/frd_muziyao/`. Verified read-only on the live host 2026-09-02.
+
+| Unit (`systemctl --user`) | EnvironmentFile(s) loaded | Tracked template |
+|---|---|---|
+| `nhms-compute-scheduler.service` | `NWM/infra/env/compute.scheduler-dbfree.env` + `nhms-prod/secrets/slurm-gateway.env` | `compute.scheduler-dbfree.env.example`; the secret file has none by design (credential-bearing, mode 0600, see #1684 above) |
+| `nhms-scheduler-evidence-retention.service` | `NWM/infra/env/compute.scheduler-dbfree.env` | `compute.scheduler-dbfree.env.example` |
+| `nhms-scheduler-file-provider-refresh.service` | `NWM/infra/env/compute.scheduler-provider-refresh.env` | `compute.scheduler-provider-refresh.env.example` |
+| `nhms-compute-api.service` | `NWM/infra/env/compute.host.env` | **untracked, no template** |
+| `nhms-slurm-gateway.service` | `NWM/infra/env/compute.host.env` + `nhms-prod/secrets/slurm-gateway.env` | **untracked, no template** for `compute.host.env` |
+
+Notes:
+
+- **Two of these units reach their file set through a drop-in override, not the
+  tracked unit body.** Both drop-ins emit an empty `EnvironmentFile=` first
+  (which resets the inherited list) and then re-add the files listed above:
+  - `nhms-compute-scheduler.service` — re-adds `compute.scheduler-dbfree.env`
+    plus the untracked secret.
+  - `nhms-slurm-gateway.service` — re-adds `compute.host.env` first, then the
+    same untracked secret. The tracked template
+    `infra/systemd/nhms-slurm-gateway.service` is the *generic* unit and points
+    at a different path (`/opt/SHUD-NWM/infra/env/slurm-gateway.secret`); its
+    own header (`:3-13`) says so explicitly.
+
+  Reading only `infra/systemd/*.service` in this repo will therefore give you
+  the wrong answer for both units. `systemctl --user show <unit> -p
+  EnvironmentFiles` is the authority; the drop-in procedure is
+  `docs/runbooks/current-production-ops.md` §3.2.2.
+- **`infra/env/compute.env` is the compose-lane instance of `compute.example`,
+  and no node-22 systemd unit reads it.** Its only references are the tracked
+  `infra/systemd/nhms-compute-compose.service` (not installed on node-22) and
+  `infra/README.two-node-docker.md`. Values in it — including basin roots and
+  scheduler model/basin filters — are **not** the production scheduler's
+  configuration and must not be quoted as such.
+- `compute.host.env` is untracked with no committed template. That gap is
+  recorded, not fixed, by #1694.
+
+### Where the scheduler's basin configuration actually lives
+
+`NHMS_BASINS_ROOT`, `NHMS_SCHEDULER_BASIN_IDS`, and `NHMS_SCHEDULER_MODEL_IDS`
+for the production scheduler are whatever `compute.scheduler-dbfree.env` says
+(template `compute.scheduler-dbfree.env.example`) — never `compute.env`.
+
+- Live scheduler value as of 2026-09-02: `NHMS_BASINS_ROOT=/volume/nwm/Basins`,
+  with both `NHMS_SCHEDULER_BASIN_IDS` and `NHMS_SCHEDULER_MODEL_IDS` empty
+  (registry-driven selection, as required above).
+- `/ghdc/data/nwm/Basins` also exists on node-22 with different contents. It is
+  the **separate shared-NFS basin root that node-27 ingest reads** (as
+  `/home/ghdc/nwm/Basins`). It is not the scheduler root; do not treat either
+  path as "the" basin root without naming the lane.
+
 Compute role, node 22:
 
 - Required: `NHMS_SERVICE_ROLE=compute_control`,

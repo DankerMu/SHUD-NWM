@@ -1428,16 +1428,23 @@ def test_display_control_plane_responses_have_no_static_runtime_drift() -> None:
     )
     runtime_spec = app.openapi()
 
+    # Every entry declares the full expected code list, so multi-code responses
+    # (the #1678 502) sit in the same table as the single-code ones.
     cases = [
-        ("/api/v1/runs/{run_id}/retry", "post", "409", "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"),
-        ("/api/v1/runs/{run_id}/cancel", "post", "409", "CONTROL_PLANE_MANUAL_ACTION_REQUIRED"),
-        ("/api/v1/queue/depth", "get", "503", "CONTROL_PLANE_QUEUE_UNAVAILABLE"),
+        ("/api/v1/runs/{run_id}/retry", "post", "409", ["CONTROL_PLANE_MANUAL_ACTION_REQUIRED"]),
+        ("/api/v1/runs/{run_id}/cancel", "post", "409", ["CONTROL_PLANE_MANUAL_ACTION_REQUIRED"]),
+        ("/api/v1/queue/depth", "get", "503", ["CONTROL_PLANE_QUEUE_UNAVAILABLE"]),
+        # #1678: reachable Slurm gateway failures re-raised by `queue_depth`.
+        # 502 -> services/slurm_gateway/real_backend.py:1191/1208/1218 (command)
+        # and :1449/:1718/:1734 (sacct parse); 504 -> :1179/:1241 (timeout).
+        ("/api/v1/queue/depth", "get", "502", ["SLURM_COMMAND_ERROR", "SLURM_PARSE_ERROR"]),
+        ("/api/v1/queue/depth", "get", "504", ["SLURM_TIMEOUT"]),
     ]
-    for path, method, status_code, error_code in cases:
+    for path, method, status_code, error_codes in cases:
         static_codes = _response_error_codes(static_spec, path, method, status_code)
         runtime_codes = _response_error_codes(runtime_spec, path, method, status_code)
-        assert static_codes == [error_code], (path, status_code, static_codes)
-        assert runtime_codes == [error_code], (path, status_code, runtime_codes)
+        assert static_codes == error_codes, (path, status_code, static_codes)
+        assert runtime_codes == error_codes, (path, status_code, runtime_codes)
         assert static_codes == runtime_codes, (path, status_code)
 
 

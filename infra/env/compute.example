@@ -1,6 +1,14 @@
 # 22-side compute/control example for infra/compose.compute.yml.
 # Use with:
 #   docker compose --env-file infra/env/compute.example -f infra/compose.compute.yml config
+#
+# SCOPE (#1694): this is the template for the COMPOSE lane only. Its instance
+# `infra/env/compute.env` is read by NO node-22 systemd unit. The live node-22
+# services load `compute.scheduler-dbfree.env` (scheduler + evidence retention),
+# `compute.scheduler-provider-refresh.env` (provider refresh), and the untracked
+# `compute.host.env` (compute-api + slurm-gateway). See the
+# "node-22 unit -> EnvironmentFile authority" table in infra/env/README.md.
+# Do not quote values from this file as the production scheduler's config.
 
 NHMS_APP_IMAGE=nhms-app
 NHMS_IMAGE_TAG=m22-placeholder
@@ -175,8 +183,10 @@ NHMS_REQUIRE_FORECAST_WARM_START=true
 # is available; cycles at/after it require exact warm-start.
 # NHMS_FORECAST_WARM_START_REQUIRED_FROM=2026-06-26T12:00:00Z
 
-NHMS_BASINS_ROOT=/volume/data/nwm/Basins
-NHMS_MODEL_ASSET_ROOT=/volume/data/nwm/model-assets
+# Basin root matches compute.scheduler-dbfree.env.example (the scheduler
+# authority). Both roots below must exist on node-22 (#1694).
+NHMS_BASINS_ROOT=/volume/nwm/Basins
+NHMS_MODEL_ASSET_ROOT=/scratch/frd_muziyao/nhms-production/model-assets
 SHUD_EXECUTABLE=/opt/shud/bin/shud
 
 # Slurm gateway = the production submit path. The generic daemon (above) renders

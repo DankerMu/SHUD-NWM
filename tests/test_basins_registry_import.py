@@ -3454,6 +3454,8 @@ def test_pr2_contract_reach_rows_single_part_and_crosswalk_count(
     (b) Every reach row's geom is single-part (``ST_NumGeometries = 1``).
     (c) ``core.river_segment_crosswalk`` row count equals seg.shp record
         count (18 for qhh-sample).
+    (d) #1693: the two row classes are equal in number, so the physical
+        ``core.river_segment`` row count is ``2 * segment_count``.
     """
 
     apply_migrations_from_zero(integration_database_url)
@@ -3491,9 +3493,36 @@ def test_pr2_contract_reach_rows_single_part_and_crosswalk_count(
                 (rnv_id,),
             )
             crosswalk = cursor.fetchone()
+            # #1693: two row classes under one rnv by design — reach rows from
+            # gis/river.shp and shud_output_river='true' rows from .sp.riv.
+            # Import validates river.shp record count == .sp.riv reach count, so
+            # the classes are equal in number and the unfiltered count is
+            # 2 * segment_count. #1122/#1123 both misread this as duplicate
+            # seed rows; this assertion is the executable pin against that.
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS total_rows,
+                       COUNT(*) FILTER (
+                           WHERE COALESCE(properties_json->>'shud_output_river', 'false') = 'true'
+                       ) AS output_rows
+                FROM core.river_segment
+                WHERE river_network_version_id = %s
+                """,
+                (rnv_id,),
+            )
+            classes = cursor.fetchone()
+            cursor.execute(
+                "SELECT segment_count FROM core.river_network_version WHERE river_network_version_id = %s",
+                (rnv_id,),
+            )
+            rnv = cursor.fetchone()
     assert row["reach_count"] == 5
     assert row["singlepart_count"] == 5
     assert crosswalk["crosswalk_count"] == 18
+    # #1693: segment_count counts reach rows only, so the physical row count is
+    # exactly twice it, and the output class matches the reach class one-for-one.
+    assert classes["total_rows"] == 2 * rnv["segment_count"]
+    assert classes["output_rows"] == row["reach_count"]
     del model_id
 
 

@@ -134,6 +134,26 @@ CREATE TABLE core.basin_version (
 CREATE INDEX basin_version_geom_gix ON core.basin_version USING gist (geom);
 ```
 
+> **`active_flag` 权威归属（#1695）**：`core.basin_version.active_flag`
+> **不决定任何事**。Basins importer 对它创建的每一行硬编码写 `false`
+> （`workers/model_registry/basins_registry_import.py:542-548`），
+> 此后没有任何 `UPDATE` 路径碰这一列——importer 后续的
+> `UPDATE core.basin_version`（`basins_registry_import.py:799`）只改
+> `source_uri` / `checksum`。两个内部写 API（`POST /api/v1/basins`
+> → `::create_basin_with_version`，`POST /api/v1/basins/{basin_id}/versions`
+> → `::create_basin_version`，都落到
+> `packages/common/model_registry.py::_insert_basin_version`）
+> 确实接受 payload 里的 `active_flag`，
+> 可以在**新建行**上把它写成 `true`，但生产 ingest 不走这条路
+> （现有行全部来自 Basins importer）；
+> 唯一的非测试读者是 `packages/common/model_registry.py:874` 的
+> `ORDER BY active_flag DESC, created_at DESC, basin_version_id` 排序 tiebreak，
+> 在全表皆 `false` 时是 no-op。它对**计算面和展示面都不承载权威**。
+> node-27 实测（2026-09-02，只读）：`core.basin_version` 44 行中 `active_flag = true` 的有 **0** 行。
+> 因此「查库看到 `active_flag` 全 false」**不等于**「没有模型在跑」——
+> 计算面的权威是 node-22 file-registry manifest（见下面 §5.5 的注记）。
+> 要让某个 basin version 退出展示列表，改 `valid_to`，不要改 `active_flag`。
+
 ### 5.3 `core.river_network_version`
 
 ```sql
@@ -186,6 +206,25 @@ CREATE TABLE core.model_instance (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
+
+> **`active_flag` 权威归属（#1695）**：`core.model_instance.active_flag` 是
+> **展示面与 lifecycle 的权威**，不是计算面的。读它的地方：全国 river-network MVT
+> 成员判定（`services/tiles/mvt.py:367`，另见 `:442`、`:653`、`:691`、`:1411`）、
+> 前端 `activeModelCount`（`apps/frontend/src/lib/m11/overviewDataContracts.ts:408`、`:617`）、
+> 以及 model lifecycle API（`packages/common/model_registry.py`）。
+>
+> **计算面的权威是 node-22 的 file-registry manifest**
+> （`manifest-last.json`，由 `scripts/publish_scheduler_file_registry.py` 写出，
+> 其中每个 model 带 `active_flag` / `lifecycle_state` 字段）。生产调度器是 DB-free 的
+> （`NHMS_SCHEDULER_REGISTRY_BACKEND=file`），**两个 DB flag 它都不读**。
+>
+> 两个面**按设计不同步**。所以会出现这个看起来矛盾的实测组合
+> （node-27，2026-09-02，只读）：baseline `basins_*_shud` 行 **38 true / 6 false**，
+> 而真正在 node-22 上跑的 `dg_*` 行 **0 true / 153 false**。
+> `dg_*` 为 false 的原因只有一条可追溯事实：它们从未经由 DB lifecycle 通道被激活过；
+> 调度器不读这个列，所以它们照跑不误。展示成员只认 baseline 行上的这个 flag。
+> 不要为了「让数字好看」去翻 `dg_*` 的 flag——那会直接改变全国 MVT 的展示成员。
+> `core.basin_version.active_flag` 的（无）权威见 [§5.2 `core.basin_version` 的注记](#52-corebasin_version)。
 
 ### 5.6 `met.data_source`
 

@@ -1221,7 +1221,7 @@ segment 才回退到流量分位筛选。MVT feature 必须同时携带 `river_s
 全国总览的 basin API 请求固定带 `has_display_product=true`；因此把 HHY 的
 `core.basin_version.valid_to` 置为退役时间后，历史 run 仍保留但不再进入展示列表。
 不要用 `active_flag` 做这项退役：当前 Basins importer 创建的版本默认都是 false，
-误用它会把 18 个现行流域一起隐藏。
+误用它会把 18 个现行流域一起隐藏（三个 `active_flag` 各自的权威归属见 [`docs/spec/03_database_design.md` §5.2 / §5.5 的 `active_flag` 注记](../spec/03_database_design.md#52-corebasin_version)）。
 
 以下是 **2026-07-01 历史展示快照**，不是当前 registry 或 display inventory
 authority：当时 domain 输出 13 个 basin；river 输出 20,100 条 feature，
@@ -2851,7 +2851,8 @@ lifecycle 通道 deactivate。
   `infra/env/node27-ingest.env`（`display.env` 里的 `NHMS_AUTH_MODE=production`
   会把 CLI 证据路径判成 `release_blocked`）。deactivate 不做任何继任者提升，
   manifest / state-index post-commit publisher 生产上未挂载（默认 no-op），无调度侧副作用。
-- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，无意义），
+- 不要动 `core.basin_version`（其 `active_flag` 由 importer 恒置 false，无意义；
+  权威归属见 [`docs/spec/03_database_design.md` §5.2 / §5.5 的 `active_flag` 注记](../spec/03_database_design.md#52-corebasin_version)），
   也不要动已经 inactive 的 `dg_*` 行。一行一操作。
 
 **验收 receipt（必须前后对照，只翻旗不算修好）**：
@@ -3683,7 +3684,55 @@ group by 1
 order by 1;
 ```
 
-### 9.1 `pg_stat_activity` 归因与 cancel 纪律（#1714）
+### 9.1 `core.river_segment` 两类行与计数不变量（#1693）
+
+上面这条按 `shud_output_river` 分组的查询之所以要分组，是因为**同一个
+`river_network_version_id` 下 `core.river_segment` 按设计存两类行**（术语定义见
+`openspec/glossary.md` 的 `## Domain terms`：`SHUD input reach row` /
+`SHUD output river row`）：
+
+| 行类 | id 形状 | 来源 | `properties_json->>'shud_output_river'` | 作用 |
+|---|---|---|---|---|
+| reach 行 | `<model_id>_reach_<iRiv:06d>` | model package 的 `gis/river.shp` | 无该键或 `'false'` | 水力参数 + flow-ordered 单 part 几何；`core.river_segment_crosswalk` 只指向它 |
+| output 行 | `<model_id>_shud_riv_<N:06d>` | model package 的 `.sp.riv` | `'true'` | SHUD 输出序列身份（`hydro.river_timeseries` 按它建键）；几何从对应 reach 行回填 |
+
+`core.river_network_version.segment_count` **只数 reach 行**（post-PR-2 #561
+即 `gis/river.shp` 记录数）。导入时会校验 `river.shp` 记录数 == `.sp.riv` reach 数
+（`workers/model_registry/basins_geometry.py::_validate_river_shp_single_part_invariant`），两类行因此恒等量，所以：
+
+> 不加过滤的 `count(*)` 等于 `2 × segment_count` 是**预期值，不是重复播种**。
+
+issue #1122 与 #1123 两次都把这个翻倍读成重复 seed 行，#1123 一度已经准备好生产 delete。
+体检查询一律先过滤再比：
+
+```sql
+-- 逐类计数并与 segment_count 对照；差值应为 0/0，total 应为 2×segment_count
+select rnv.river_network_version_id,
+       rnv.segment_count,
+       count(*)                                                          as total_rows,
+       count(*) filter (where coalesce(rs.properties_json->>'shud_output_river','false') = 'false') as reach_rows,
+       count(*) filter (where coalesce(rs.properties_json->>'shud_output_river','false') = 'true')  as output_rows
+from core.river_network_version rnv
+join core.river_segment rs using (river_network_version_id)
+where rnv.river_network_version_id = :rnv_id
+group by rnv.river_network_version_id, rnv.segment_count;
+```
+
+要点：
+
+- `output_segment_count` **不是** `core.river_network_version` 的列。它只出现在
+  导入 receipt 和 `core.model_instance.resource_profile` 里，值同样等于
+  `.sp.riv` reach 数。按列名去查库只会得到 `column does not exist`。
+- 已经正确过滤的现成 oracle，可直接抄谓词：
+  `workers/model_registry/basins_registry_import.py:610-620`（reach 行幂等守卫）、
+  `tests/test_real_database_integration.py:448-453`（reach 行几何断言）、
+  `tests/test_basins_registry_import.py::test_pr2_contract_reach_rows_single_part_and_crosswalk_count`
+  （真实库里钉住 `total_rows == 2 × segment_count`）。
+- `workers/output_parser/parser.py::load_river_segments`（`:820-838`）是
+  **output-class-first**：先按 `shud_output_river='true'` 取，取不到才回落到
+  不带过滤的全量查询。不要把它当成无条件过滤的证据。
+
+### 9.2 `pg_stat_activity` 归因与 cancel 纪律（#1714）
 
 2026-08-22 事故：`pg_stat_activity` 里一条 `state=active`、`dur=00:06:59` 的
 `SELECT h.run_id, ...` 被判为「自己的 pytest 慢查询」并 `pg_cancel_backend`，

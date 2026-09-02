@@ -1539,6 +1539,48 @@ export interface components {
                 };
             };
         };
+        /** @description The Slurm gateway command failed or returned output the gateway could not parse. */
+        SlurmGatewayUpstreamError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "SLURM_COMMAND_ERROR" | "SLURM_PARSE_ERROR";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+        };
+        /** @description The Slurm gateway command exceeded its timeout before returning. */
+        SlurmGatewayTimeout: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": {
+                    request_id: string;
+                    /** @enum {string} */
+                    status: "error";
+                    error: {
+                        /** @enum {string} */
+                        code: "SLURM_TIMEOUT";
+                        message: string;
+                        details?: {
+                            [key: string]: unknown;
+                        } | null;
+                    };
+                };
+            };
+        };
         /** @description Pipeline job log retrieval failed using the canonical error envelope. */
         JobLogError: {
             headers: {
@@ -2836,7 +2878,9 @@ export interface operations {
                     };
                 };
             };
+            502: components["responses"]["SlurmGatewayUpstreamError"];
             503: components["responses"]["ControlPlaneQueueUnavailable"];
+            504: components["responses"]["SlurmGatewayTimeout"];
         };
     };
     list_layers_api_v1_layers_get: {
