@@ -25,16 +25,24 @@
 # COPY ... FROM PROGRAM probe alone reads as more than it proves: the write
 # credential's blast radius is "drop or truncate any application relation" --
 # no DIRECT program execution, no role/database creation, no direct catalog
-# escape.  Ownership does carry CREATE RULE / CREATE TRIGGER, whose bodies run
-# as the role that next writes the relation (the migration, seed and replay
-# lanes stay on the superuser `nhms`); that indirect path is closed by the event
-# trigger installed by the additive phase (prevention -- which TimescaleDB
-# bypasses for `CREATE TRIGGER` on a hypertable, measured) and, for the `ALTER
-# TABLE` forms no event trigger can refuse without breaking cold residency
-# (a planted column DEFAULT/CHECK expression, or DISABLE TRIGGER on an
-# allow-listed guard), by the audit's rule/trigger allow-list, its `tgenabled`
-# check and its function-privilege sweep over stored expressions (detection) --
-# not by removing the superuser-write half, which stays a follow-up.
+# escape.  What ownership DOES carry is the ability to attach a body to a
+# relation (CREATE RULE / CREATE TRIGGER, a column DEFAULT, a CHECK), and such a
+# body is evaluated with the authority of whoever next WRITES the row -- the
+# migration, seed and replay lanes all stay on the superuser `nhms`.  Two
+# preventions and one detection cover it, none replacing another:
+#   * the event trigger installed by the additive phase refuses the rule/trigger
+#     DDL family for the write roles -- except on a hypertable, where
+#     TimescaleDB routes the command around it (measured);
+#   * full mode revokes TEMP from PUBLIC, which removes `pg_temp`, the only
+#     schema in which a write role can AUTHOR a function at all;
+#   * the audit judges every stored expression by the PROVENANCE of the
+#     functions it reaches (temp schema / non-superuser owner / not executable
+#     by the write role / deny-listed) and every rule and trigger against the
+#     migration allow-list, with TimescaleDB's blocker keyed on function
+#     identity rather than on its name.
+# Not covered, and a follow-up rather than a fix here: removing the
+# superuser-write half itself, and the deny-list leg, which is a list and is
+# therefore incomplete by construction.
 #
 # Retry window.  The passes are the whole tolerance for a lock holder that
 # outlives one `ALTER`: the effective window is

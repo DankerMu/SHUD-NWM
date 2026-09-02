@@ -53,6 +53,55 @@ _INTERNAL_SCOPE_RE = (
     r"AND c\.relowner IN \('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole\)\)"
 )
 
+# TimescaleDB's own blocker is excluded from every rule/trigger leg by FUNCTION
+# IDENTITY, never by name: on a hypertable -- the one relation class where
+# TimescaleDB routes CREATE TRIGGER around the event trigger -- the write role
+# can `CREATE OR REPLACE TRIGGER ts_insert_blocker ... EXECUTE FUNCTION <its
+# own>` and inherit a name-keyed exclusion (round-3 P1, reproduced in §16).
+_BLOCKER_IDENTITY_RE = (
+    r"AND \(t\.tgname <> 'ts_insert_blocker'\s+"
+    r"OR t\.tgfoid IS DISTINCT FROM "
+    r"to_regprocedure\('_timescaledb_internal\.insert_blocker\(\)'\)\)"
+)
+
+# Every strict/non-strict pair in the audit must be BOUND to the phase flag:
+# `IF v_strict THEN RAISE EXCEPTION '<msg>' ELSE RAISE WARNING '<same msg>'`.
+# Asserting the two RAISEs as loose substrings let `IF false THEN` keep 49 tests
+# green (round-3 test-evidence P2).
+# The argument tail is matched with `[^\n]*` rather than `[^;]*`: verdict
+# messages and their `string_agg` separators contain semicolons, and a
+# semicolon-tolerant-but-newline-bounded tail keeps the match anchored to the
+# single RAISE line instead of silently sliding past it.  A RAISE broken across
+# lines fails this guard rather than slipping through it.
+_SEVERITY_PAIR_RE = re.compile(
+    r"IF v_strict THEN\n\s+RAISE EXCEPTION '(?P<msg>[^']+)'"
+    r"[^\n]*;\n\s+ELSE\n\s+RAISE WARNING '(?P=msg)'",
+)
+
+# PUBLIC-executable pg_catalog functions whose effect for a SUPERUSER writer is
+# not what the migration asked for. Incomplete by construction -- the structural
+# legs (temp schema, non-superuser owner) are what the design leans on.
+_DENY_LISTED_FUNCTIONS = (
+    "set_config",
+    "pg_terminate_backend",
+    "pg_cancel_backend",
+    "pg_reload_conf",
+    "pg_notify",
+    "pg_sleep",
+    "pg_sleep_for",
+    "pg_sleep_until",
+    "pg_advisory_lock",
+    "pg_advisory_lock_shared",
+    "pg_advisory_xact_lock",
+    "pg_advisory_xact_lock_shared",
+    "pg_try_advisory_lock",
+    "pg_try_advisory_lock_shared",
+    "pg_try_advisory_xact_lock",
+    "pg_try_advisory_xact_lock_shared",
+    "pg_advisory_unlock",
+    "pg_advisory_unlock_all",
+)
+
 _ALLOWLISTED_TRIGGERS = (
     ("met", "canonical_met_product", "canonical_met_product_grid_definition_uri_match_trg"),
     ("met", "canonical_grid_snapshot", "canonical_grid_snapshot_identity_immutable_trg"),
@@ -299,7 +348,14 @@ def test_ownership_loop_is_not_one_transaction(sql_text: str) -> None:
     assert not re.search(r"(?mi)^\s*(BEGIN|START TRANSACTION|COMMIT)\s*;", section), (
         "the loop must not be wrapped in an explicit transaction"
     )
-    assert section.count("\\gexec") == 4, "each statement must be autocommitted via \\gexec"
+    # four ownership generators (r/p, S, v, m) plus the TEMP re-grant that the
+    # tightening at the end of the phase emits for nhms_display_ro.
+    assert section.count("\\gexec") == 5, "each statement must be autocommitted via \\gexec"
+    ownership_loop = section[: section.index("privilege tightening")]
+    assert ownership_loop.count("\\gexec") == 4, (
+        "the four ownership generators must still be the only \\gexec sites in "
+        "the loop itself"
+    )
     assert "SET lock_timeout = '5s'" in section
     # A failed relation must not abandon the rest of the pass.
     assert "\\unset ON_ERROR_STOP" in section
@@ -449,8 +505,21 @@ def test_additive_phase_installs_the_rule_and_trigger_event_trigger(sql_text: st
         "CREATE EVENT TRIGGER has no OR REPLACE; the install must be idempotent"
     )
     assert "ON ddl_command_start" in section
-    for tag in ("'CREATE RULE'", "'CREATE TRIGGER'"):
+    # All six tags, not just the two CREATEs: ALTER/DROP are how the write role
+    # would rename or remove the four migration triggers it now owns.
+    for tag in (
+        "'CREATE RULE'",
+        "'ALTER RULE'",
+        "'DROP RULE'",
+        "'CREATE TRIGGER'",
+        "'ALTER TRIGGER'",
+        "'DROP TRIGGER'",
+    ):
         assert tag in section, f"{tag} is not refused"
+    tag_list = section[section.index("WHEN TAG IN (") : section.index("EXECUTE FUNCTION nhms_guard")]
+    assert tag_list.count("'") == 12, (
+        f"the tag list must be exactly those six tags, found: {tag_list!r}"
+    )
     guard = section[section.index("CREATE OR REPLACE FUNCTION nhms_guard.") :]
     assert "RETURNS event_trigger" in guard
     assert f"session_user IN ('{_INGEST_ROLE}', '{_DOWNLOAD_ROLE}')" in guard, (
@@ -491,8 +560,12 @@ def test_audit_enumerates_rules_and_triggers_against_the_migration_allow_list(
     assert "NOT t.tgisinternal" in section, (
         "foreign-key/constraint triggers are internal and would drown the signal"
     )
-    assert "t.tgname <> 'ts_insert_blocker'" in section, (
-        "TimescaleDB recreates ts_insert_blocker on every hypertable and chunk"
+    assert len(re.findall(_BLOCKER_IDENTITY_RE, section)) == 3, (
+        "TimescaleDB recreates ts_insert_blocker on every hypertable and chunk, "
+        "so it has to be excluded -- but by FUNCTION IDENTITY at all three "
+        "sites (inventory, sweep sources, allow-list verdict). A name-only "
+        "exclusion is inheritable: on a hypertable the write role can CREATE OR "
+        "REPLACE TRIGGER ts_insert_blocker pointing anywhere it likes"
     )
     for schema, table, trigger in _ALLOWLISTED_TRIGGERS:
         assert f"('{schema}', '{table}', '{trigger}')" in section, (
@@ -504,7 +577,7 @@ def test_audit_enumerates_rules_and_triggers_against_the_migration_allow_list(
     assert "(n.nspname, c.relname, t.tgname) NOT IN (" in section
     inventory = section[
         section.index("rules and non-internal triggers") : section.index(
-            "function-privilege sweep"
+            "function-provenance sweep"
         )
     ]
     assert len(re.findall(_INTERNAL_SCOPE_RE, inventory)) == 2, (
@@ -559,16 +632,17 @@ def test_the_trigger_allow_list_is_exactly_what_the_migrations_create() -> None:
         assert f"('{schema}', '{table}', '{name}')" in sql
 
 
-def test_audit_sweeps_stored_expressions_for_functions_the_role_cannot_execute(
-    sql_text: str,
-) -> None:
-    """The `ALTER TABLE` form of the planted-body escalation.
+def test_audit_sweeps_stored_expressions_by_function_provenance(sql_text: str) -> None:
+    """The `ALTER TABLE` form of the planted-body escalation, judged by PROVENANCE.
 
     No event trigger can refuse `ALTER TABLE` (the cold-residency lane needs it
-    for `SET TABLESPACE`), so a column `DEFAULT` or `CHECK` calling
-    ``pg_read_file`` is evaluated by whichever role writes the row -- the
-    migration superuser. The discriminator is EXECUTE on the referenced
-    function: everything the migrations use is PUBLIC-executable.
+    for `SET TABLESPACE`), so a column `DEFAULT` or `CHECK` is evaluated by
+    whichever role writes the row -- the migration superuser. "Can the write
+    role EXECUTE it" is a proxy and fails in both directions: a function the
+    write role AUTHORED in `pg_temp` passes it, and so does a PUBLIC-executable
+    `pg_catalog` function whose effect is superuser-only in context
+    (`set_config('session_replication_role', ...)`). Both were reproduced in
+    round 3 and are red-proofed in transcript §16.
     """
     section = _psql_section(_sql_code(sql_text), "do_audit")
     assert "FROM pg_attrdef d" in section, "column defaults are not swept"
@@ -585,37 +659,78 @@ def test_audit_sweeps_stored_expressions_for_functions_the_role_cannot_execute(
     assert r":(?:op)?funcid (\d+)" in section, (
         "the scan must pick up both FUNCEXPR :funcid and OpExpr :opfuncid"
     )
-    assert "has_function_privilege('nhms_ingest_rw', p.oid, 'EXECUTE')" in section, (
-        "the sweep must test EXECUTE for the write role, not the function's "
-        "schema or its owner"
+    sweep = section[
+        section.index("function-provenance sweep") : section.index("DO $planted$")
+    ]
+    # (i) the temp schemas -- the only place a write role can author a function
+    assert r"pn.nspname LIKE 'pg\_temp\_%'" in sweep, (
+        "a function the write role authored in pg_temp is the round-3 P1: it "
+        "passes has_function_privilege because the role OWNS it"
     )
-    sweep = section[section.index("function-privilege sweep") : section.index("DO $planted$")]
+    assert r"pn.nspname LIKE 'pg\_toast\_temp\_%'" in sweep
+    # (ii) provenance proper
+    assert "NOT po.rolsuper" in sweep, (
+        "a superuser writer must not evaluate a body owned by a non-superuser"
+    )
+    assert "JOIN pg_roles po ON po.oid = p.proowner" in sweep, (
+        "the owner leg needs the function's owner, not the relation's"
+    )
+    # (iii) the executability leg is kept
+    assert "has_function_privilege('nhms_ingest_rw', p.oid, 'EXECUTE')" in sweep
+    # (iv) the deny-list, named function by function
+    for name in _DENY_LISTED_FUNCTIONS:
+        assert f"'{name}'" in sweep, f"{name} is not deny-listed"
+    assert "pn.nspname = 'pg_catalog' AND p.proname = ANY (ARRAY[" in sweep, (
+        "the deny-list must be keyed on (pg_catalog, proname), not on the bare "
+        "name -- a same-named function in another schema is a different function"
+    )
+    # each finding says which leg fired
+    for label in (
+        "'temp-schema function'",
+        "' is not a superuser'",
+        "'NOT executable by nhms_ingest_rw'",
+        "'deny-listed'",
+    ):
+        assert label in sweep, f"the finding line does not name the leg: {label}"
     assert len(re.findall(_INTERNAL_SCOPE_RE, sweep)) == 4, (
         "all four sweep legs (defaults, CHECKs, rule actions, trigger "
         "functions) must also cover the _timescaledb_internal relations the "
         "transfer hands to the write roles -- owner-scoped, so TimescaleDB's "
         "own catalog tables stay out"
     )
+    assert len(re.findall(_BLOCKER_IDENTITY_RE, sweep)) == 1, (
+        "the sweep's trigger leg must exclude TimescaleDB's blocker by function "
+        "identity, not by name"
+    )
     planted = section[section.index("DO $planted$") :]
     assert (
-        "RAISE EXCEPTION 'SECURITY REGRESSION: % the write role cannot execute" in planted
-    ), "the strict audit must refuse a smuggled function"
+        "RAISE EXCEPTION 'SECURITY REGRESSION: untrusted function in a stored expression"
+        in planted
+    ), "the strict audit must refuse an untrusted function"
     assert (
-        "RAISE WARNING 'SECURITY REGRESSION: % the write role cannot execute" in planted
+        "RAISE WARNING 'SECURITY REGRESSION: untrusted function in a stored expression"
+        in planted
     ), "--roles-only and the audit-only invocation must still warn"
+    assert "WHERE untrusted_reason IS NOT NULL" in planted, (
+        "the verdict must read the provenance column, not the old executability "
+        "flag"
+    )
     # the every-mode inventory has to print a line even when the sweep is clean,
     # or the T7 receipt cannot show that it ran
-    inventory = section[section.index("function-privilege sweep") : section.index("DO $planted$")]
-    assert "not executable by nhms_ingest_rw" in inventory
-    assert "expression(s)/trigger(s) scanned" in inventory
+    assert "untrusted for a superuser writer" in sweep
+    assert "expression(s)/trigger(s) scanned" in sweep
 
 
-def test_audit_requires_the_allow_listed_triggers_to_stay_enabled(sql_text: str) -> None:
-    """`ALTER TABLE ... DISABLE TRIGGER` carries no rule/trigger DDL tag.
+def test_audit_requires_the_allow_listed_triggers_to_be_present_and_enabled(
+    sql_text: str,
+) -> None:
+    """Present is not the same as enabled, and neither is implied by an inventory.
 
-    The event trigger never sees it, so an allow-listed guard can be switched
-    off in place while the inventory still lists it. Migration 000043 creates
-    all four with the default origin firing mode.
+    `ALTER TABLE ... DISABLE TRIGGER` carries no rule/trigger DDL tag, so the
+    event trigger never sees it and the guard is switched off in place while the
+    inventory still lists it. A DROPPED guard is worse: an inventory of what
+    exists cannot see something that does not. Migration 000043 creates all four
+    with the default origin firing mode.
     """
     planted = _psql_section(_sql_code(sql_text), "do_audit")
     planted = planted[planted.index("DO $planted$") :]
@@ -623,16 +738,168 @@ def test_audit_requires_the_allow_listed_triggers_to_stay_enabled(sql_text: str)
         "an allow-listed trigger that is not enabled must be drift; 000043 uses "
         "no ENABLE ALWAYS/REPLICA, so 'O' is the only clean value"
     )
+    assert "SELECT count(*) INTO v_present" in planted, (
+        "a dropped allow-listed trigger leaves no row to inspect; only a COUNT "
+        "sees it"
+    )
+    assert "IF v_present <> 4 THEN" in planted, (
+        "the count must be pinned to the four triggers migration 000043 creates"
+    )
+    assert (
+        "RAISE EXCEPTION 'SECURITY REGRESSION: only % of the 4 allow-listed" in planted
+    )
+    assert "RAISE WARNING 'SECURITY REGRESSION: only % of the 4 allow-listed" in planted
     for schema, table, trigger in _ALLOWLISTED_TRIGGERS:
-        assert planted.count(f"('{schema}', '{table}', '{trigger}')") == 2, (
-            f"{schema}.{table}.{trigger} must be checked both against the "
-            "allow-list and for still being enabled"
+        assert planted.count(f"('{schema}', '{table}', '{trigger}')") == 3, (
+            f"{schema}.{table}.{trigger} must be checked three ways: against the "
+            "allow-list, for being present, and for being enabled"
         )
     assert (
         "RAISE EXCEPTION 'SECURITY REGRESSION: allow-listed trigger not enabled" in planted
     )
     assert (
         "RAISE WARNING 'SECURITY REGRESSION: allow-listed trigger not enabled" in planted
+    )
+
+
+def test_every_audit_verdict_binds_its_severity_to_the_strict_flag(sql_text: str) -> None:
+    """The severity arms must be BOUND to `v_strict`, not merely present.
+
+    Round 3 measured the hole: replacing `IF v_strict THEN` with `IF false THEN`
+    in all four blocks left the whole suite green, because the guards asserted
+    the two RAISE lines as loose substrings. Bind them structurally instead --
+    every `RAISE EXCEPTION` in the block is the strict arm of a pair whose
+    `ELSE` raises the SAME message as a WARNING.
+    """
+    planted = _psql_section(_sql_code(sql_text), "do_audit")
+    planted = planted[planted.index("DO $planted$") : planted.index("$planted$;")]
+    pairs = _SEVERITY_PAIR_RE.findall(planted)
+    assert len(pairs) == 5, (
+        "expected five strict/non-strict verdict pairs (planted rule/trigger, "
+        "untrusted function, allow-listed trigger presence, allow-listed "
+        "trigger enabled, event-trigger health); each must read exactly "
+        "`IF v_strict THEN RAISE EXCEPTION '<msg>' ... ELSE RAISE WARNING "
+        f"'<same msg>'`. Found {len(pairs)}: {pairs}"
+    )
+    for msg in pairs:
+        assert msg.startswith("SECURITY REGRESSION: "), msg
+    # nothing raises outside a bound pair, except the deliberately strict-only
+    # TEMP verdict below.
+    assert planted.count("RAISE WARNING") == 5, (
+        "a verdict with no WARNING arm is silent in --roles-only"
+    )
+    assert planted.count("RAISE EXCEPTION") == 6, (
+        "six strict arms: the five pairs plus the strict-only TEMP verdict"
+    )
+    assert planted.count("IF v_strict THEN") == 6, (
+        "every RAISE EXCEPTION must sit under `IF v_strict THEN`; anything else "
+        "either always raises or never does"
+    )
+    temp_leg = planted[planted.index("still hold(s) TEMP") - 400 :]
+    assert "IF v_strict THEN" in temp_leg and "RAISE WARNING" not in temp_leg, (
+        "the TEMP verdict is deliberately strict-only: the tightening runs in "
+        "the full-mode ownership phase, so warning about it during --roles-only "
+        "(which runs with strict_audit off) would be noise about a statement "
+        "that has deliberately not run yet"
+    )
+
+
+def test_full_mode_removes_the_temp_function_authoring_surface(sql_text: str) -> None:
+    """`pg_temp` is the only schema in which a write role can author a function.
+
+    The write roles hold USAGE and never CREATE on the six application schemas
+    and on nhms_guard, so removing TEMP removes the authoring surface itself --
+    prevention rather than detection. It is the one non-additive statement in
+    the file and therefore belongs to the full-mode phase, never to
+    `--roles-only`.
+    """
+    ownership = _sql_code(_psql_section(sql_text, "do_ownership"))
+    roles = _sql_code(_psql_section(sql_text, "do_roles"))
+    assert 'REVOKE TEMPORARY ON DATABASE :"provision_dbname" FROM PUBLIC;' in ownership, (
+        "TEMP reaches the write roles through PUBLIC (datacl `=Tc/nhms`), so a "
+        "per-role REVOKE is a no-op -- measured"
+    )
+    assert "GRANT TEMPORARY ON DATABASE %I TO %I" in ownership, (
+        "nhms_display_ro must keep exactly the TEMP it has today"
+    )
+    assert "'nhms_display_ro'" in ownership
+    assert "TEMPORARY" not in roles, (
+        "`--roles-only` is the pre-merge, purely additive phase: it must not "
+        "take a privilege away from anybody"
+    )
+    # the audit reports the state in every mode and refuses in strict mode
+    audit = _sql_code(_psql_section(sql_text, "do_audit"))
+    assert "has_database_privilege(r.oid, current_database(), 'TEMP')" in audit
+    assert (
+        "RAISE EXCEPTION 'SECURITY REGRESSION: % still hold(s) TEMP on this database"
+        in audit
+    ), "a re-granted TEMP puts the pg_temp gadget back and must be caught"
+    verdict = audit[audit.index("still hold(s) TEMP") - 600 : audit.index("still hold(s) TEMP")]
+    assert "'nhms_ingest_rw', 'nhms_download_rw'" in verdict, (
+        "both write roles are checked, not only ingest"
+    )
+
+
+def test_copy_probe_creates_its_scratch_table_before_switching_role(sql_text: str) -> None:
+    """The probe must survive its own prevention lever.
+
+    After the TEMP tightening the write roles cannot create a temp table at all,
+    so a probe that creates the scratch table UNDER the role would turn every
+    later additive re-run into `permission denied to create temporary tables`
+    -> runner exit 3 (measured). Create it as the superuser first, grant INSERT,
+    and the only privilege the COPY can trip over is the program one.
+    """
+    section = _sql_code(_psql_section(sql_text, "do_roles"))
+    probe = section[section.index("DO $copy_probe$") : section.index("$copy_probe$;")]
+    create_at = probe.index("CREATE TEMP TABLE node27_copy_program_probe")
+    grant_at = probe.index("GRANT INSERT ON node27_copy_program_probe")
+    set_role_at = probe.index("SET LOCAL ROLE %I")
+    copy_at = probe.index("COPY node27_copy_program_probe FROM PROGRAM")
+    assert create_at < grant_at < set_role_at < copy_at, (
+        "order must be: create as the superuser, grant INSERT, THEN switch role"
+    )
+    reset_at = probe.index("RESET ROLE")
+    drop_at = probe.index("DROP TABLE node27_copy_program_probe")
+    assert reset_at < drop_at, (
+        "the scratch table is owned by the superuser now, so the DROP has to "
+        "run after RESET ROLE"
+    )
+
+
+def test_password_is_skipped_when_the_environment_value_is_empty(sql_text: str) -> None:
+    r"""`\getenv` sets the variable whenever the env var EXISTS, empty included.
+
+    `NODE27_INGEST_RW_PASSWORD=` would otherwise set an EMPTY password and
+    silently disable password login for a role that had a working one. The
+    runner refuses to forward an empty value; this is the same gate for a direct
+    invocation.
+    """
+    section = _psql_section(sql_text, "do_roles")
+    for role, var in (
+        ("ingest_rw", "NODE27_INGEST_RW_PASSWORD"),
+        ("download_rw", "NODE27_DOWNLOAD_RW_PASSWORD"),
+    ):
+        assert f"\\getenv {role}_password {var}" in section
+        assert (
+            f"SELECT :'{role}_password' <> '' AS {role}_password_present \\gset" in section
+        ), f"{var} empty must not reach ALTER ROLE ... PASSWORD"
+        assert f"\\if :{role}_password_present" in section
+        assert f"\\set {role}_password_present f" in section, (
+            "an UNSET variable must take the same skip branch"
+        )
+        assert "unset or empty" in section
+
+
+def test_sql_file_stops_on_error_by_itself(sql_text: str) -> None:
+    """A hand-run audit must not report the later legs as if the failed one passed."""
+    head = sql_text[: sql_text.index("\\if :do_roles")]
+    assert "\\set ON_ERROR_STOP on" in head, (
+        "the runner always passes -v ON_ERROR_STOP=1, so this changes nothing "
+        "there; it is what makes a direct invocation self-sufficient"
+    )
+    ownership = _psql_section(sql_text, "do_ownership")
+    assert "\\unset ON_ERROR_STOP" in ownership and "\\set ON_ERROR_STOP 1" in ownership, (
+        "the ownership loop deliberately turns it off for the pass and back on"
     )
 
 

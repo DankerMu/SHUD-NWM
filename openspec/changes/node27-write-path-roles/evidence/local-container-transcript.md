@@ -1,17 +1,20 @@
 # Local disposable-container transcript — issue #1774 (T2)
 
-**Captured at: post-round-2 fix (§0–§13), extended after the round-3 fix (§14).** The whole file was re-run end-to-end after the
-round-2 review fixes (membership audit in both directions, the rule/trigger event
-trigger and its allow-list audit, the full-mode exit-code mapping); every block
-below is output from that single run, in the order shown, except §13 and §14
-(two later containers: one re-checks a literal changed after this capture, the
-other carries the round-3 fix that closes §12), §15 (round-4: four more
-containers), Appendix A (an earlier container,
-unchanged code path) and Appendix B (a static scan). One consequence worth
-stating rather than hiding: §0–§12 were captured before the round-3
-function-privilege sweep landed, so their audit blocks do not contain the
-`## audit: function-privilege sweep` section that every mode now prints — §14
-shows it, in a clean full-mode run and in the audit-only invocation.
+**Captured at: post-round-2 fix (§0–§13), extended after each later fix pass
+(§14, §15, §16).** The bulk of the file was re-run end-to-end after the round-2
+review fixes (membership audit in both directions, the rule/trigger event trigger
+and its allow-list audit, the full-mode exit-code mapping); every block below is
+output from that single run, in the order shown, except §13 and §14 (two later
+containers: one re-checks a literal changed after this capture, the other carries
+the fix that closes §12), §15 (six more containers), §16 (two more containers,
+carrying the round-3 redesign), Appendix A (an earlier container, unchanged code
+path) and Appendix B (a static scan). One consequence worth stating rather than
+hiding: §0–§12 were captured before the stored-expression sweep existed and §0–§15
+before it was rewritten to judge by provenance, so their audit blocks do not
+contain — or do not match the current wording of — the
+`## audit: function-provenance sweep` and `## audit: TEMP on the database`
+sections that every mode now prints. §16 shows both, in a clean full-mode run and
+in the audit-only invocation.
 
 Oracle: a **fresh** `timescale/timescaledb:2.10.2-pg15` container (PG 15.2 / TSDB 2.10.2,
 the node-27 versions), created and destroyed for this run:
@@ -733,6 +736,13 @@ so the sweep scans the stored parse trees (`pg_attrdef.adbin`,
 `pg_trigger.tgfoid`, and resolves each oid against
 `has_function_privilege('nhms_ingest_rw', …, 'EXECUTE')`.
 
+> Wording note: this section was captured before the round-3 redesign, so its
+> heading reads `## audit: function-privilege sweep` and its summary line ends
+> `not executable by nhms_ingest_rw`. The current heading is
+> `## audit: function-provenance sweep` and the summary ends `untrusted for a
+> superuser writer` — see §16. The scenario itself is unchanged and still
+> reddens the audit (the executability leg is one of the four).
+
 **Clean database, full mode (ownership transferred, strict trailing audit):**
 
 ```
@@ -813,6 +823,10 @@ Six more disposable containers (`nwm-probe-1774-tsdb`, `-htrig`, `-comp2`,
 `timescale/timescaledb:2.10.2-pg15`,
 each seeded like §0 plus the migration-shaped defaults of §14, provisioned in
 full mode, with at least one compressed and one uncompressed chunk.
+
+> Wording note: captured before the round-3 redesign — same caveat as §14, and
+> its `ts_insert_blocker` exclusion was still keyed on the NAME at that point
+> (§16.8 is the fix and its red-proof).
 
 ### (a) Every `ALTER`/`CREATE` form, attempted as `nhms_ingest_rw`
 
@@ -962,6 +976,269 @@ application-schema **hypertable** is still not *prevented* (TimescaleDB does not
 let the event trigger see it) — it is only detected. Closing that would mean
 either TimescaleDB firing event triggers for hypertable DDL, or removing the
 superuser-write half, both out of scope here.
+
+## 16. Round-3 redesign: provenance, identity, presence, and the TEMP lever
+
+One more disposable container (`nwm-probe-1774-r3`, same
+`timescale/timescaledb:2.10.2-pg15` image), seeded like §0 plus the §14 defaults
+and the four migration-trigger stand-ins, then driven end to end. Round 3
+confirmed three P1s that all had the same shape — the audit judged by a PROXY
+(can the write role execute this function; is this trigger *named* like
+TimescaleDB's) instead of by provenance — so this section proves the redesign,
+not another patched gadget.
+
+### 16.1 `--roles-only` is still purely additive
+
+```
+$ psql -tAc "SELECT datacl FROM pg_database WHERE datname=current_database()"   # before
+(null -- PG default: PUBLIC holds CONNECT+TEMP)
+$ bash scripts/node27_provision_write_roles.sh --roles-only
+roles-only EXIT=0
+$ ... # after --roles-only
+(null -- PG default: PUBLIC holds CONNECT+TEMP)
+
+## audit: TEMP on the database (pg_temp is the only schema a write role can author a function in)
+     rolname      | has_temp
+------------------+----------
+ nhms             | t
+ nhms_display_ro  | t
+ nhms_download_rw | t
+ nhms_ingest_rw   | t
+(4 rows)
+```
+
+The pre-merge phase takes nothing away: `datacl` is byte-identical before and
+after, and the audit reports the state without judging it (the verdict is
+strict-only, and `--roles-only` runs non-strict).
+
+### 16.2 Full mode applies the tightening and the audit is clean
+
+```
+$ bash scripts/node27_provision_write_roles.sh
+full-mode EXIT=0
+## privilege tightening: TEMP on the database (the one NON-additive statement in this file)
+$ ... # datacl after full mode
+{=c/nhms,nhms=CTc/nhms,nhms_display_ro=T/nhms}
+
+## audit: TEMP on the database (pg_temp is the only schema a write role can author a function in)
+     rolname      | has_temp
+------------------+----------
+ nhms             | t
+ nhms_display_ro  | t
+ nhms_download_rw | f
+ nhms_ingest_rw   | f
+(4 rows)
+
+ 15 expression(s)/trigger(s) scanned, 11 distinct function(s) referenced, 0 untrusted for a superuser writer
+## audit: OK -- no owner drift
+node27-write-roles: full provision complete; audit clean
+```
+
+`PUBLIC` keeps `CONNECT` (`=c/nhms`) and loses only `TEMPORARY`; display keeps
+exactly the privilege it had. Then two chunks were compressed and the audit-only
+invocation re-run on that part-compressed catalog:
+
+```
+ compressed | uncompressed
+------------+--------------
+          2 |            3
+$ # strict audit-only:
+EXIT=0
+ 15 expression(s)/trigger(s) scanned, 11 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+### 16.3 The write roles' only function-authoring surface is gone
+
+```
+$ psql -U nhms_ingest_rw   -c "CREATE TEMP TABLE t (x int)"
+ERROR:  permission denied to create temporary tables in database "nhms"
+$ psql -U nhms_ingest_rw   -c "CREATE FUNCTION pg_temp.evil() RETURNS text LANGUAGE sql AS 'SELECT ''x'''"
+ERROR:  permission denied to create temporary tables in database "nhms"
+$ psql -U nhms_download_rw -c "CREATE TEMP TABLE t (x int)"
+ERROR:  permission denied to create temporary tables in database "nhms"
+$ psql -U nhms_display_ro  -c "CREATE TEMP TABLE t (x int)"
+CREATE TABLE
+$ psql -U nhms             -c "CREATE TEMP TABLE t (x int)"
+CREATE TABLE
+```
+
+The function form, for all four roles, on a second full-mode container
+(`nwm-probe-1774-fn`, same image and fixture):
+
+```
+$ psql -U nhms_ingest_rw    -c "CREATE FUNCTION pg_temp.x() RETURNS text LANGUAGE sql AS ..."  -> ERROR:  permission denied to create temporary tables in database "nhms"
+$ psql -U nhms_download_rw  -c "CREATE FUNCTION pg_temp.x() RETURNS text LANGUAGE sql AS ..."  -> ERROR:  permission denied to create temporary tables in database "nhms"
+$ psql -U nhms_display_ro   -c "CREATE FUNCTION pg_temp.x() RETURNS text LANGUAGE sql AS ..."  -> CREATE FUNCTION
+$ psql -U nhms              -c "CREATE FUNCTION pg_temp.x() RETURNS text LANGUAGE sql AS ..."  -> CREATE FUNCTION
+```
+
+`CREATE FUNCTION pg_temp.x()` is refused with the *temp-table* message because
+creating anything in `pg_temp` first requires the session's temp namespace,
+which is exactly the privilege that was revoked.
+
+### 16.4 The ingest lane is unaffected, and the COPY probe survives its own lever
+
+```
+$ # all as nhms_ingest_rw, after the tightening
+INSERT INTO hydro.river_timeseries ...      -> INSERT 0 1        (routes into a NEW chunk)
+compress_chunk(...)                         -> _timescaledb_internal._hyper_1_3_chunk
+decompress_chunk(...)                       -> _timescaledb_internal._hyper_1_1_chunk
+drop_chunks('hydro.river_timeseries', ...)  -> 1
+ANALYZE hydro.river_timeseries              -> ANALYZE
+ALTER TABLE core.basin SET TABLESPACE ...   -> ALTER TABLE
+
+$ # and from the FULL-MODE run above, i.e. with TEMP already revoked, the
+$ # COPY ... FROM PROGRAM probe still reaches the program check:
+NOTICE:  copy-from-program refused for nhms_ingest_rw: must be superuser or have privileges of the pg_execute_server_program role to COPY to or from an external program
+NOTICE:  copy-from-program refused for nhms_download_rw: must be superuser or have privileges of the pg_execute_server_program role to COPY to or from an external program
+```
+
+That last pair is the reason the probe now creates its scratch table as the
+superuser and grants `INSERT` on it *before* `SET LOCAL ROLE`: under the role,
+the `CREATE TEMP TABLE` itself would now fail with
+`permission denied to create temporary tables` and every later additive re-run
+would exit 3. Measured separately: PostgreSQL performs the
+`pg_execute_server_program` check before it resolves the relation, so the probe
+still asserts the program refusal and nothing else.
+
+### 16.5 Idempotence, after the tightening
+
+```
+run2 EXIT=0
+run3 EXIT=0
+IDEMPOTENT: audit output byte-identical across runs 2 and 3
+{=c/nhms,nhms=CTc/nhms,nhms_display_ro=T/nhms}
+```
+
+### 16.6 P1 (a): a deny-listed `pg_catalog` function — `set_config`
+
+`set_config('session_replication_role','replica',false)` is PUBLIC-executable,
+so the old executability discriminator passed it; evaluated by a superuser
+writer it disables every trigger for that session.
+
+```
+$ psql -U nhms_ingest_rw -c "ALTER TABLE core.gauge_reading ALTER COLUMN label SET DEFAULT set_config('session_replication_role','replica',false)"
+ALTER TABLE
+$ # strict audit-only
+EXIT=3
+ 15 expression(s)/trigger(s) scanned, 12 distinct function(s) referenced, 1 untrusted for a superuser writer
+ core.gauge_reading column default label references pg_catalog.set_config -- deny-listed
+ERROR:  SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): core.gauge_reading column default label references pg_catalog.set_config -- deny-listed
+$ # non-strict
+EXIT=0
+WARNING:  SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): core.gauge_reading column default label references pg_catalog.set_config -- deny-listed
+```
+
+### 16.7 P1 (b): a `pg_temp` function the write role authored
+
+Run with TEMP handed back to `nhms_ingest_rw` on purpose — that is the
+pre-tightening state, and it is what the detection leg has to catch on any
+database where the full mode has not run yet. The planting session is held open,
+because a `pg_temp` function dies with its session.
+
+```
+$ psql -U nhms_ingest_rw -f plant_temp.sql    # CREATE FUNCTION pg_temp.pwn(); ALTER TABLE core.gauge_reading ALTER COLUMN label SET DEFAULT pg_temp.pwn(); session held open
+CREATE FUNCTION
+ALTER TABLE
+      relation      | attname | planted_default
+--------------------+---------+-----------------
+ core.gauge_reading | label   | pg_temp_5.pwn()
+
+$ # strict audit-only
+EXIT=3
+ 15 expression(s)/trigger(s) scanned, 12 distinct function(s) referenced, 1 untrusted for a superuser writer
+ core.gauge_reading column default label references pg_temp_5.pwn -- temp-schema function, owner nhms_ingest_rw is not a superuser
+ERROR:  SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): core.gauge_reading column default label references pg_temp_5.pwn -- temp-schema function, owner nhms_ingest_rw is not a superuser
+$ # non-strict
+EXIT=0
+WARNING:  SECURITY REGRESSION: untrusted function in a stored expression ... pg_temp_5.pwn -- temp-schema function, owner nhms_ingest_rw is not a superuser
+$ # after dropping the default and revoking TEMP again
+EXIT=0
+ 14 expression(s)/trigger(s) scanned, 11 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+Both structural legs fire and both are named. `has_function_privilege` alone
+would have said nothing: the write role OWNS `pg_temp_5.pwn()`, so of course it
+may execute it.
+
+### 16.8 P1 (c): a hijacked `ts_insert_blocker` on a hypertable
+
+The write role cannot be refused here (TimescaleDB routes `CREATE TRIGGER` on a
+hypertable around the event trigger, §15) and the trigger function it points at
+is `nhms`-owned and PUBLIC-executable, so the provenance sweep does not fire
+either. What catches it is keying TimescaleDB's exclusion on function identity.
+
+```
+$ psql -U nhms_ingest_rw -c "CREATE OR REPLACE TRIGGER ts_insert_blocker BEFORE INSERT ON hydro.river_timeseries FOR EACH ROW EXECUTE FUNCTION met.canonical_grid_cell_direct_delete_blocked()"
+CREATE TRIGGER
+$ psql -U nhms -c "SELECT tgrelid::regclass, tgfoid::regprocedure FROM pg_trigger WHERE tgname='ts_insert_blocker' AND NOT tgisinternal"
+                    relation                    |                trigger_function
+------------------------------------------------+-------------------------------------------------
+ _timescaledb_internal._compressed_hypertable_2 | _timescaledb_internal.insert_blocker()
+ _timescaledb_internal._compressed_hypertable_4 | _timescaledb_internal.insert_blocker()
+ _timescaledb_internal._hyper_1_2_chunk         | met.canonical_grid_cell_direct_delete_blocked()
+
+$ # strict audit-only
+EXIT=3
+ERROR:  SECURITY REGRESSION: rule/trigger outside the migration allow-list (its body runs as the role that next writes the relation): _timescaledb_internal._hyper_1_2_chunk trigger ts_insert_blocker; _timescaledb_internal._hyper_1_3_chunk trigger ts_insert_blocker; _timescaledb_internal._hyper_1_8_chunk trigger ts_insert_blocker; hydro.river_timeseries trigger ts_insert_blocker
+$ # non-strict
+EXIT=0
+WARNING:  SECURITY REGRESSION: rule/trigger outside the migration allow-list ... hydro.river_timeseries trigger ts_insert_blocker
+```
+
+The untouched blockers on the two `_compressed_hypertable_N` relations keep
+their real `tgfoid` and stay excluded — the exclusion is still an exclusion, it
+just cannot be inherited by wearing the name. (Run last in the driver: replacing
+the trigger back on the parent does not restore it on the chunks TimescaleDB
+already propagated it to.)
+
+### 16.9 A dropped allow-listed trigger (presence leg)
+
+```
+$ psql -U nhms -c "DROP TRIGGER canonical_grid_cell_immutable_trg ON met.canonical_grid_cell"
+DROP TRIGGER
+$ # strict audit-only
+EXIT=3
+ERROR:  SECURITY REGRESSION: only 3 of the 4 allow-listed migration triggers are present -- a dropped guard is invisible to an inventory of what exists
+$ # non-strict
+EXIT=0
+WARNING:  SECURITY REGRESSION: only 3 of the 4 allow-listed migration triggers are present -- ...
+$ # after re-creating it
+EXIT=0
+```
+
+### 16.10 A re-granted TEMP is caught by the audit-only invocation
+
+```
+$ psql -U nhms -c "GRANT TEMPORARY ON DATABASE nhms TO nhms_ingest_rw"
+$ # strict audit-only
+EXIT=3
+ERROR:  SECURITY REGRESSION: nhms_ingest_rw still hold(s) TEMP on this database -- pg_temp is the only schema in which a write role can author a function, and such a function is evaluated with the authority of whoever writes the row; re-run the full provision
+```
+
+This is why the TEMP verdict is gated on the strict flag rather than on
+`do_ownership`: the mandatory pre-write audit of runbook §9.6 runs
+`do_ownership=off -v strict_audit=on`, and it is the one invocation that can see
+a privilege handed back after the cutover.
+
+### 16.11 An EMPTY password variable must not wipe a working password
+
+`\getenv` sets the psql variable whenever the environment variable EXISTS, so
+`\if :{?var}` alone treats `NODE27_INGEST_RW_PASSWORD=` as "a password was
+supplied" and would run `ALTER ROLE … PASSWORD ''`. The runner never forwards an
+empty value; this is the same gate for a direct invocation.
+
+```
+$ docker exec -e NODE27_INGEST_RW_PASSWORD= ... psql -v do_roles=on -v do_ownership=off -v do_audit=off < db/roles/node27_write_roles.sql
+   NODE27_INGEST_RW_PASSWORD unset or empty -- nhms_ingest_rw keeps its existing password; if this run CREATED the role it has none and cannot log in over TCP until one is set
+   NODE27_DOWNLOAD_RW_PASSWORD unset or empty -- nhms_download_rw keeps its existing password; if this run CREATED the role it has none and cannot log in over TCP until one is set
+$ # and the role still authenticates over TCP with the password set earlier:
+login ok as nhms_ingest_rw
+```
+
+Both §16 containers were removed at the end (`docker rm -f nwm-probe-1774-r3`,
+`docker rm -f nwm-probe-1774-fn`); `docker ps -a | grep nwm-probe` returns
+nothing.
 
 ## Limits of this oracle (do not read more into it than it proves)
 

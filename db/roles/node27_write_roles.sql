@@ -28,7 +28,10 @@
 --                 negative COPY ... FROM PROGRAM probes and the event trigger
 --                 that refuses CREATE RULE / CREATE TRIGGER from the write
 --                 roles.  Purely additive: nothing here transfers ownership.
---   do_ownership  the per-relation ownership transfer loop.  Limit worth
+--   do_ownership  the per-relation ownership transfer loop AND the one
+--                 non-additive privilege statement in this file: the TEMP
+--                 tightening (`REVOKE TEMPORARY ... FROM PUBLIC`, re-granted to
+--                 nhms_display_ro).  Limit worth
 --                 knowing before running it: a view/matview EXECUTES as its
 --                 owner (PG 15 defaults to security_invoker = false), so a view
 --                 whose body reads a relation OUTSIDE the six schemas can become
@@ -37,24 +40,50 @@
 --                 this file nor the runner's exit-4 gate can see that.  T7
 --                 enumerates relkind v/m and their out-of-schema pg_depend
 --                 targets before the transfer for exactly this reason.
---   do_audit      the trailing audit queries.  Always asserts, in every mode:
---                 the five privilege flags are false, both roles can log in, and
---                 pg_auth_members holds NO row in either direction for the write
---                 roles -- neither a membership they hold (which hands back
---                 privileges the flags cannot show) nor a grant of a write role
---                 to somebody else (which hands that somebody SET ROLE into the
---                 write set).  Warns when the nhms_cold CREATE grant is missing,
---                 when a rule or non-internal trigger outside the migration
---                 allow-list exists in the six schemas, or when the event
---                 trigger above is missing, disabled or not superuser-owned.
---   strict_audit  when on, owner drift, a missing nhms_cold CREATE grant, a
---                 non-allow-listed rule/trigger and a broken event trigger raise
---                 (psql exits non-zero) instead of warning.
+--   do_audit      the trailing audit queries.  Scope of every relation-level
+--                 leg: the six application schemas PLUS the
+--                 `_timescaledb_internal` relations owned by a write role
+--                 (chunks and `_compressed_hypertable_N` follow their parent
+--                 through the transfer; TimescaleDB's own superuser-owned
+--                 catalog tables are never scanned).  The legs, all printed in
+--                 every mode:
+--                   1. the five privilege flags are false and both roles log in;
+--                   2. pg_auth_members holds NO row in either direction for the
+--                      write roles -- neither a membership they hold (which
+--                      hands back privileges the flags cannot show) nor a grant
+--                      of a write role to somebody else (which hands that
+--                      somebody SET ROLE into the write set);
+--                   3. relation ownership summary + owner drift;
+--                   4. nhms_display_ro's effective SELECT set;
+--                   5. the nhms_cold CREATE grant;
+--                   6. the rule/trigger inventory against the four-trigger
+--                      migration allow-list (TimescaleDB's blocker excluded by
+--                      FUNCTION IDENTITY, never by name);
+--                   7. those four allow-listed triggers are PRESENT (count = 4)
+--                      and ENABLED (tgenabled = 'O');
+--                   8. the function-provenance sweep over every stored
+--                      expression (column defaults incl. STORED generated
+--                      columns, CHECK constraints, rule actions, trigger
+--                      functions): a referenced function is untrusted when it
+--                      lives in a temp schema, is owned by a non-superuser, is
+--                      not executable by nhms_ingest_rw, or is deny-listed;
+--                   9. the event trigger is present, enabled and
+--                      superuser-owned;
+--                  10. TEMP on the database for each role (verdict is
+--                      strict-only -- see the block itself).
+--   strict_audit  when on, every leg above raises (psql exits non-zero) instead
+--                 of warning, and the TEMP verdict is checked at all.
 --
 -- Secrets: passwords are never in this file.  They are read from the
 -- environment of the psql process (NODE27_INGEST_RW_PASSWORD /
 -- NODE27_DOWNLOAD_RW_PASSWORD) via \getenv and are skipped when unset.
 
+-- Self-sufficient under a direct invocation too: the runner always passes
+-- -v ON_ERROR_STOP=1, so this changes nothing there, but a hand-run audit that
+-- hits an error must stop instead of reporting the remaining legs as if the
+-- failed one had passed.  The ownership loop below turns it OFF deliberately
+-- (one relation's lock_timeout must not abandon the pass) and back on after.
+\set ON_ERROR_STOP on
 \set VERBOSITY terse
 \set SHOW_CONTEXT never
 
@@ -131,19 +160,40 @@ $roles$;
 -- credential to rotate.
 SET log_statement = 'none';
 SET log_min_duration_statement = -1;
+--
+-- EMPTY is not the same as unset, and psql cannot tell them apart on its own:
+-- `\getenv` sets the variable whenever the environment variable EXISTS, so
+-- `NODE27_INGEST_RW_PASSWORD=` would make `\if :{?ingest_rw_password}` true and
+-- set an EMPTY password -- silently disabling password login for a role that
+-- had a working one.  The runner already refuses to forward an empty value
+-- (`${!var:+x}`, scripts/node27_provision_write_roles.sh); this second gate is
+-- what makes a DIRECT invocation safe as well.  The emptiness test is a
+-- server-side \gset because psql's own \if evaluates a literal, not an
+-- expression; that statement carries the cleartext exactly like the ALTER it
+-- guards, and both run inside the log-suppression window above.
 \getenv ingest_rw_password NODE27_INGEST_RW_PASSWORD
 \if :{?ingest_rw_password}
+SELECT :'ingest_rw_password' <> '' AS ingest_rw_password_present \gset
+\else
+\set ingest_rw_password_present f
+\endif
+\if :ingest_rw_password_present
 ALTER ROLE nhms_ingest_rw PASSWORD :'ingest_rw_password';
 \echo '   nhms_ingest_rw password set from NODE27_INGEST_RW_PASSWORD'
 \else
-\echo '   NODE27_INGEST_RW_PASSWORD unset -- nhms_ingest_rw keeps its existing password; if this run CREATED the role it has none and cannot log in over TCP until one is set'
+\echo '   NODE27_INGEST_RW_PASSWORD unset or empty -- nhms_ingest_rw keeps its existing password; if this run CREATED the role it has none and cannot log in over TCP until one is set'
 \endif
 \getenv download_rw_password NODE27_DOWNLOAD_RW_PASSWORD
 \if :{?download_rw_password}
+SELECT :'download_rw_password' <> '' AS download_rw_password_present \gset
+\else
+\set download_rw_password_present f
+\endif
+\if :download_rw_password_present
 ALTER ROLE nhms_download_rw PASSWORD :'download_rw_password';
 \echo '   nhms_download_rw password set from NODE27_DOWNLOAD_RW_PASSWORD'
 \else
-\echo '   NODE27_DOWNLOAD_RW_PASSWORD unset -- nhms_download_rw keeps its existing password; if this run CREATED the role it has none and cannot log in over TCP until one is set'
+\echo '   NODE27_DOWNLOAD_RW_PASSWORD unset or empty -- nhms_download_rw keeps its existing password; if this run CREATED the role it has none and cannot log in over TCP until one is set'
 \endif
 RESET log_statement;
 RESET log_min_duration_statement;
@@ -240,10 +290,16 @@ DECLARE
   v_msg   text;
 BEGIN
   FOREACH v_role IN ARRAY ARRAY['nhms_ingest_rw', 'nhms_download_rw'] LOOP
-    EXECUTE format('SET LOCAL ROLE %I', v_role);
-    -- Created OUTSIDE the guarded block on purpose: a refusal to create the
-    -- temp table is also SQLSTATE 42501 and would read as a passing probe.
+    -- Created as the superuser, BEFORE `SET LOCAL ROLE`, and outside the
+    -- guarded block: a refusal to create the temp table is also SQLSTATE 42501
+    -- and would read as a passing probe.  After the full-mode TEMP tightening
+    -- the write roles cannot create a temp table at all, so creating it under
+    -- the role would turn every later additive re-run into a hard failure
+    -- (measured).  INSERT is granted so the only privilege the COPY can trip
+    -- over is the program one.
     EXECUTE 'CREATE TEMP TABLE node27_copy_program_probe (x text)';
+    EXECUTE format('GRANT INSERT ON node27_copy_program_probe TO %I', v_role);
+    EXECUTE format('SET LOCAL ROLE %I', v_role);
     BEGIN
       EXECUTE 'COPY node27_copy_program_probe FROM PROGRAM ''echo probe''';
       RAISE EXCEPTION 'SECURITY REGRESSION: role % executed COPY ... FROM PROGRAM', v_role;
@@ -255,8 +311,10 @@ BEGIN
         END IF;
         RAISE NOTICE 'copy-from-program refused for %: %', v_role, v_msg;
     END;
-    EXECUTE 'DROP TABLE node27_copy_program_probe';
+    -- RESET first: after the tightening the write role holds no rights on the
+    -- session temp schema, so the DROP has to run as the superuser that owns it.
     EXECUTE 'RESET ROLE';
+    EXECUTE 'DROP TABLE node27_copy_program_probe';
   END LOOP;
 END
 $copy_probe$;
@@ -390,6 +448,35 @@ ORDER BY n.nspname, c.relname
 RESET lock_timeout;
 \set ON_ERROR_STOP 1
 
+\echo '## privilege tightening: TEMP on the database (the one NON-additive statement in this file)'
+-- Why this is here and not in do_roles.  `pg_temp` is the ONLY schema in which
+-- the write roles can create a FUNCTION: they hold USAGE, never CREATE, on the
+-- six application schemas and on nhms_guard.  A function they author is a
+-- function whose body they choose, and the audit's provenance sweep exists
+-- because such a function is evaluated with the authority of whoever writes the
+-- row.  Removing TEMP removes the authoring surface itself -- prevention, not
+-- detection -- but it TAKES a privilege away, so it belongs in the post-merge
+-- full-mode phase that already takes a lock and never in `--roles-only`, which
+-- must stay purely additive and reversible.
+--
+-- It has to go through PUBLIC: TEMP reaches the write roles as PUBLIC's default
+-- database privilege (`datacl` NULL, i.e. `=Tc/nhms`), so a per-role REVOKE is a
+-- no-op (measured).  Revoking from PUBLIC and re-granting to nhms_display_ro
+-- leaves display with exactly the privilege it has today; the superuser is
+-- unaffected (superusers bypass ACLs); CONNECT for PUBLIC is untouched.
+--
+-- Measured precondition: no write lane creates temp objects.  The only temp
+-- user in the repo is scripts/backfill_hydro_run_parsed_at.py, an operator
+-- script that runs as the migration role.
+SELECT current_database() AS provision_dbname \gset
+REVOKE TEMPORARY ON DATABASE :"provision_dbname" FROM PUBLIC;
+-- Generated per EXISTING role: nhms_display_ro is created outside this file and
+-- a missing role must not abort the cutover.
+SELECT format('GRANT TEMPORARY ON DATABASE %I TO %I', current_database(), r.rolname)
+FROM pg_roles r
+WHERE r.rolname = 'nhms_display_ro'
+\gexec
+
 \endif
 
 
@@ -522,6 +609,17 @@ $flags$;
 -- chunk).  Foreign-key and constraint triggers are `tgisinternal` and never
 -- appear.
 --
+-- The blocker is excluded by FUNCTION IDENTITY, never by name.  A name-only
+-- exclusion is a hole with the shape of the guard: on a hypertable -- the one
+-- relation class where TimescaleDB routes `CREATE TRIGGER` around the event
+-- trigger -- the write role can run `CREATE OR REPLACE TRIGGER ts_insert_blocker
+-- ... EXECUTE FUNCTION <anything>` and inherit the exclusion.  `tgfoid` must be
+-- TimescaleDB's own `_timescaledb_internal.insert_blocker()`; anything else
+-- wearing that name is a planted trigger and stays in the inventory.
+-- `to_regprocedure` returns NULL (it does not raise) on a database without the
+-- extension, and `IS DISTINCT FROM NULL` is true, so such a trigger is listed
+-- there too.
+--
 -- Scope, and why it is not just the six application schemas (all measured on a
 -- 2.10.2 container, transcript §15).  TimescaleDB's process-utility hook takes
 -- `CREATE TRIGGER` on a HYPERTABLE down its own path, which never fires a
@@ -555,19 +653,46 @@ WHERE (n.nspname = ANY (ARRAY['core', 'hydro', 'met', 'ops', 'map', 'flood'])
        OR (n.nspname = '_timescaledb_internal'
            AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
   AND NOT t.tgisinternal
-  AND t.tgname <> 'ts_insert_blocker'
+  AND (t.tgname <> 'ts_insert_blocker'
+       OR t.tgfoid IS DISTINCT FROM to_regprocedure('_timescaledb_internal.insert_blocker()'))
 ORDER BY 1, 2, 3;
 
-\echo '## audit: function-privilege sweep over stored expressions'
+\echo '## audit: function-provenance sweep over stored expressions'
 -- The ALTER TABLE form of the same escalation, which the event trigger cannot
 -- cover (the cold-residency lane needs ALTER TABLE for SET TABLESPACE): a
 -- column DEFAULT or CHECK expression planted by the relation owner is evaluated
 -- by whichever role next writes the row -- including the migration superuser --
 -- so `DEFAULT length(pg_read_file('/etc/hostname'))` reads server files the
--- owner may not read itself.  Discriminator: EXECUTE on the referenced
--- function.  Everything the migrations actually use (now(), nextval(),
--- gen_random_uuid(), length(), the four met trigger functions) is executable by
--- PUBLIC; pg_read_file / pg_ls_dir / lo_export are not.
+-- owner may not read itself.
+--
+-- The discriminator is PROVENANCE, not executability.  "Can the write role
+-- EXECUTE it" was the first cut and it is a proxy that fails in both obvious
+-- directions (both measured, transcript §16): a function the write role
+-- AUTHORED in `pg_temp` passes it (the role owns the function, so of course it
+-- may execute it) and so does a PUBLIC-executable pg_catalog function whose
+-- effect is superuser-only in context (`set_config('session_replication_role',
+-- 'replica', false)` disables every trigger for the writing session).  A
+-- referenced function is therefore untrusted when ANY of these holds:
+--
+--   (i)   it lives in a temp schema (`pg_temp_%` / `pg_toast_temp_%`) -- the
+--         only place the write roles can author a function at all, which the
+--         full-mode TEMP tightening also removes;
+--   (ii)  its owner is not a superuser -- provenance proper: a superuser writer
+--         must not evaluate a body some other role controls;
+--   (iii) nhms_ingest_rw cannot EXECUTE it (kept: pg_read_file, lo_export,
+--         pg_ls_dir -- a function the owner may not call directly but can
+--         smuggle into an expression evaluated as superuser);
+--   (iv)  it is on the deny-list below: PUBLIC-executable pg_catalog functions
+--         whose effect for a superuser writer is not what the migration asked
+--         for.  RESIDUAL, stated plainly: this leg is a LIST and is therefore
+--         incomplete by construction -- it is the only non-structural leg here.
+--         Legs (i) and (ii) are the structural ones and they are what the
+--         design leans on.
+--
+-- Everything the migrations actually use -- now(), nextval(),
+-- gen_random_uuid(), length(), the four met trigger functions -- is owned by
+-- the migration superuser and PUBLIC-executable, so a clean catalog sweeps
+-- clean.
 --
 -- Mechanism note (measured, not assumed): walking `pg_depend` does NOT work
 -- here.  Dependencies on PINNED objects -- every function created by initdb,
@@ -636,7 +761,8 @@ WITH sources AS (
          OR (n.nspname = '_timescaledb_internal'
              AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
     AND NOT t.tgisinternal
-    AND t.tgname <> 'ts_insert_blocker'
+    AND (t.tgname <> 'ts_insert_blocker'
+         OR t.tgfoid IS DISTINCT FROM to_regprocedure('_timescaledb_internal.insert_blocker()'))
 ), refs AS (
   SELECT s.relation, s.kind, (m[1])::oid AS fnoid
   FROM sources s, regexp_matches(s.tree, ':(?:op)?funcid (\d+)', 'g') m
@@ -649,29 +775,62 @@ WITH sources AS (
 SELECT r.relation,
        r.kind,
        pn.nspname || '.' || p.proname AS fn,
-       has_function_privilege('nhms_ingest_rw', p.oid, 'EXECUTE') AS ingest_can_execute,
+       -- All tripped legs are named, not just the first: a pg_temp function
+       -- owned by the write role trips (i) and (ii), and the receipt should say
+       -- so.  NULL here means "trusted for a superuser writer".
+       nullif(concat_ws(', ',
+         CASE WHEN pn.nspname LIKE 'pg\_temp\_%' OR pn.nspname LIKE 'pg\_toast\_temp\_%'
+              THEN 'temp-schema function' END,
+         CASE WHEN NOT po.rolsuper
+              THEN 'owner ' || po.rolname || ' is not a superuser' END,
+         CASE WHEN NOT has_function_privilege('nhms_ingest_rw', p.oid, 'EXECUTE')
+              THEN 'NOT executable by nhms_ingest_rw' END,
+         CASE WHEN pn.nspname = 'pg_catalog' AND p.proname = ANY (ARRAY[
+                'set_config',
+                'pg_terminate_backend', 'pg_cancel_backend', 'pg_reload_conf',
+                'pg_notify',
+                'pg_sleep', 'pg_sleep_for', 'pg_sleep_until',
+                'pg_advisory_lock', 'pg_advisory_lock_shared',
+                'pg_advisory_xact_lock', 'pg_advisory_xact_lock_shared',
+                'pg_try_advisory_lock', 'pg_try_advisory_lock_shared',
+                'pg_try_advisory_xact_lock', 'pg_try_advisory_xact_lock_shared',
+                'pg_advisory_unlock', 'pg_advisory_unlock_shared',
+                'pg_advisory_unlock_all'])
+              THEN 'deny-listed' END
+       ), '') AS untrusted_reason,
        (SELECT count(*) FROM sources) AS sources_scanned
 FROM refs r
 JOIN pg_proc p ON p.oid = r.fnoid
-JOIN pg_namespace pn ON pn.oid = p.pronamespace;
+JOIN pg_namespace pn ON pn.oid = p.pronamespace
+JOIN pg_roles po ON po.oid = p.proowner;
 
 -- Printed in every mode, and the summary line is printed even when the sweep is
 -- clean, so the T7 receipt shows that it ran rather than showing nothing.
 SELECT x.detail
 FROM (
   SELECT 0 AS ord,
-         format('%s expression(s)/trigger(s) scanned, %s distinct function(s) referenced, %s not executable by nhms_ingest_rw',
+         format('%s expression(s)/trigger(s) scanned, %s distinct function(s) referenced, %s untrusted for a superuser writer',
                 coalesce(max(sources_scanned), 0), count(DISTINCT fn),
-                count(DISTINCT fn) FILTER (WHERE NOT ingest_can_execute)) AS detail
+                count(DISTINCT fn) FILTER (WHERE untrusted_reason IS NOT NULL)) AS detail
   FROM pg_temp.nhms_audit_function_refs
   UNION ALL
   SELECT 1,
-         format('%s %s references %s -- NOT executable by nhms_ingest_rw', relation, kind, fn)
+         format('%s %s references %s -- %s', relation, kind, fn, untrusted_reason)
   FROM pg_temp.nhms_audit_function_refs
-  WHERE NOT ingest_can_execute
-  GROUP BY relation, kind, fn
+  WHERE untrusted_reason IS NOT NULL
+  GROUP BY relation, kind, fn, untrusted_reason
 ) x
 ORDER BY x.ord, x.detail;
+
+\echo '## audit: TEMP on the database (pg_temp is the only schema a write role can author a function in)'
+-- Printed in EVERY mode; the verdict is strict-only (see the block below).
+-- Expected after the full-mode tightening: false for both write roles, true for
+-- nhms (superuser, bypasses ACLs) and for nhms_display_ro (re-granted).
+SELECT r.rolname,
+       has_database_privilege(r.oid, current_database(), 'TEMP') AS has_temp
+FROM pg_roles r
+WHERE r.rolname IN ('nhms', 'nhms_display_ro', 'nhms_ingest_rw', 'nhms_download_rw')
+ORDER BY 1;
 
 -- Severity is the phase's, not the statement's: the strict audit (full mode)
 -- refuses, `--roles-only` and the audit-only invocation warn.  psql does not
@@ -688,6 +847,8 @@ DECLARE
   v_event    text;
   v_smuggled text;
   v_disabled text;
+  v_present  int;
+  v_temp     text;
 BEGIN
   -- The allow-list is spelled as (schema, table, trigger) triples, not by name
   -- alone: a trigger called `canonical_grid_cell_immutable_trg` planted on a
@@ -711,7 +872,8 @@ BEGIN
            OR (n.nspname = '_timescaledb_internal'
                AND c.relowner IN ('nhms_ingest_rw'::regrole, 'nhms_download_rw'::regrole)))
       AND NOT t.tgisinternal
-      AND t.tgname <> 'ts_insert_blocker'
+      AND (t.tgname <> 'ts_insert_blocker'
+           OR t.tgfoid IS DISTINCT FROM to_regprocedure('_timescaledb_internal.insert_blocker()'))
       AND (n.nspname, c.relname, t.tgname) NOT IN (
         ('met', 'canonical_met_product', 'canonical_met_product_grid_definition_uri_match_trg'),
         ('met', 'canonical_grid_snapshot', 'canonical_grid_snapshot_identity_immutable_trg'),
@@ -727,20 +889,45 @@ BEGIN
     END IF;
   END IF;
 
-  -- The ALTER TABLE form: a function smuggled into a stored expression that the
-  -- write role may not call itself is an escalation by construction, because
-  -- the expression is evaluated by the role that writes the row.
+  -- The ALTER TABLE form: a stored expression is evaluated with the authority
+  -- of whoever writes the row, so every function it reaches must be one a
+  -- superuser writer can be handed safely -- superuser-owned, outside a temp
+  -- schema, executable by the write role itself, and off the deny-list.
   SELECT string_agg(descr, '; ' ORDER BY descr) INTO v_smuggled
   FROM (
-    SELECT DISTINCT relation || ' ' || kind || ' references ' || fn AS descr
+    SELECT DISTINCT relation || ' ' || kind || ' references ' || fn
+                    || ' -- ' || untrusted_reason AS descr
     FROM pg_temp.nhms_audit_function_refs
-    WHERE NOT ingest_can_execute
+    WHERE untrusted_reason IS NOT NULL
   ) smuggled;
   IF v_smuggled IS NOT NULL THEN
     IF v_strict THEN
-      RAISE EXCEPTION 'SECURITY REGRESSION: % the write role cannot execute (the expression is evaluated by the role that writes the row)', v_smuggled;
+      RAISE EXCEPTION 'SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): %', v_smuggled;
     ELSE
-      RAISE WARNING 'SECURITY REGRESSION: % the write role cannot execute (the expression is evaluated by the role that writes the row)', v_smuggled;
+      RAISE WARNING 'SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): %', v_smuggled;
+    END IF;
+  END IF;
+
+  -- Enabled is not the same as present.  `DROP TRIGGER` on one of the four is
+  -- refused for the write roles by the event trigger (they are on ordinary
+  -- tables, where TimescaleDB does not intercept the DDL), but the superuser
+  -- lanes can drop one, and a missing guard leaves NO trace in an audit that
+  -- only looks at what exists.  Count them.
+  SELECT count(*) INTO v_present
+  FROM pg_trigger t
+  JOIN pg_class c ON c.oid = t.tgrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE (n.nspname, c.relname, t.tgname) IN (
+      ('met', 'canonical_met_product', 'canonical_met_product_grid_definition_uri_match_trg'),
+      ('met', 'canonical_grid_snapshot', 'canonical_grid_snapshot_identity_immutable_trg'),
+      ('met', 'canonical_grid_cell', 'canonical_grid_cell_immutable_trg'),
+      ('met', 'canonical_grid_cell', 'canonical_grid_cell_direct_delete_blocked_trg')
+    );
+  IF v_present <> 4 THEN
+    IF v_strict THEN
+      RAISE EXCEPTION 'SECURITY REGRESSION: only % of the 4 allow-listed migration triggers are present -- a dropped guard is invisible to an inventory of what exists', v_present;
+    ELSE
+      RAISE WARNING 'SECURITY REGRESSION: only % of the 4 allow-listed migration triggers are present -- a dropped guard is invisible to an inventory of what exists', v_present;
     END IF;
   END IF;
 
@@ -784,6 +971,26 @@ BEGIN
       RAISE EXCEPTION 'SECURITY REGRESSION: event trigger nhms_guard_no_write_role_rules_triggers is % -- the write roles can plant rules and triggers again; re-run the provision script', v_event;
     ELSE
       RAISE WARNING 'SECURITY REGRESSION: event trigger nhms_guard_no_write_role_rules_triggers is % -- the write roles can plant rules and triggers again; re-run the provision script', v_event;
+    END IF;
+  END IF;
+
+  -- TEMP is the write roles' only function-authoring surface, so a re-granted
+  -- TEMP puts the pg_temp gadget back.  Verdict gated on v_strict and NOT on
+  -- the presence of a finding: the tightening runs in the full-mode ownership
+  -- phase only, so on a database where that phase has deliberately not run yet
+  -- (`--roles-only`, pre-merge) a warning would be pure noise -- and
+  -- `--roles-only` is exactly the invocation that runs with strict_audit off.
+  -- Gating on `do_ownership` instead would have left the mandatory audit-only
+  -- invocation (runbook 9.6, `do_ownership=off -v strict_audit=on`, run before
+  -- every superuser write) unable to see a re-grant, which is the one place
+  -- this has to be caught.  The state itself is printed in every mode above.
+  IF v_strict THEN
+    SELECT string_agg(r.rolname, ', ' ORDER BY r.rolname) INTO v_temp
+    FROM pg_roles r
+    WHERE r.rolname IN ('nhms_ingest_rw', 'nhms_download_rw')
+      AND has_database_privilege(r.oid, current_database(), 'TEMP');
+    IF v_temp IS NOT NULL THEN
+      RAISE EXCEPTION 'SECURITY REGRESSION: % still hold(s) TEMP on this database -- pg_temp is the only schema in which a write role can author a function, and such a function is evaluated with the authority of whoever writes the row; re-run the full provision', v_temp;
     END IF;
   END IF;
 END

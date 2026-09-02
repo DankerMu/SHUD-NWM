@@ -3668,36 +3668,63 @@ ship with the provision SQL and neither replaces the other:
   the write roles on ordinary tables and on chunks but **not** on a hypertable
   (including the internal `_compressed_hypertable_N` the transfer hands them).
   That gap is detection-only, below;
+- **prevention, second lever (full mode only)** — `REVOKE TEMPORARY ON DATABASE
+  <db> FROM PUBLIC`, re-granted to `nhms_display_ro`. `pg_temp` is the **only**
+  schema in which a write role can create a FUNCTION (they hold USAGE, never
+  CREATE, on the six schemas and on `nhms_guard`), so this removes the
+  body-authoring surface itself rather than detecting its use. TEMP arrives
+  through PUBLIC (`datacl` `=Tc/nhms`), so a per-role `REVOKE` is a no-op —
+  measured. It is the one statement in the change that **takes** a privilege
+  away, so it runs in the post-merge full mode and never in `--roles-only`;
 - **detection** — the audit enumerates `pg_rewrite` (minus view `_RETURN` rules)
-  and `pg_trigger` (minus internal and TimescaleDB's `ts_insert_blocker`) in the
-  six schemas **plus every `_timescaledb_internal` relation owned by a write
-  role** (owner-scoped, so TimescaleDB's own catalog tables are never scanned)
-  against the explicit allow-list of the four `met` triggers from
-  `db/migrations/000043_canonical_grid_snapshot.sql`, and asserts the event
-  trigger is present, enabled and superuser-owned. Strict audit → error, exit 3;
-  `--roles-only` → `WARNING`.
+  and `pg_trigger` (minus internal triggers and TimescaleDB's blocker, excluded
+  by **function identity**, `tgfoid = _timescaledb_internal.insert_blocker()`,
+  never by name) in the six schemas **plus every `_timescaledb_internal`
+  relation owned by a write role** (owner-scoped, so TimescaleDB's own catalog
+  tables are never scanned) against the explicit allow-list of the four `met`
+  triggers from `db/migrations/000043_canonical_grid_snapshot.sql`, and asserts
+  the event trigger is present, enabled and superuser-owned. Strict audit →
+  error, exit 3; `--roles-only` → `WARNING`.
+
+  Why identity and not the name: on a hypertable — the one relation class where
+  the event trigger does not fire — the write role can
+  `CREATE OR REPLACE TRIGGER ts_insert_blocker … EXECUTE FUNCTION <anything>`
+  and inherit a name-keyed exclusion (measured, transcript §16).
 
 `ALTER TABLE` cannot go into the event trigger's tag list — the cold-residency
 lane needs `ALTER TABLE … SET TABLESPACE` — so the two `ALTER TABLE` forms of
 the same gadget are covered by detection only, in the same audit:
 
-- **function-privilege sweep** — every column `DEFAULT` (including `STORED`
+- **function-provenance sweep** — every column `DEFAULT` (including `STORED`
   generated columns), `CHECK` constraint, rule action and trigger function in
   the six schemas and in the write-role-owned `_timescaledb_internal` relations
-  is resolved to the functions it calls, and any function
-  `nhms_ingest_rw` cannot itself `EXECUTE` is a security regression: the
-  expression is evaluated by the role that writes the row, so
-  `DEFAULT length(pg_read_file('/etc/hostname'))` reads server files as the
-  migration superuser. Everything the migrations use (`now()`, `nextval()`,
-  `gen_random_uuid()`, `length()`, the four `met` trigger functions) is
+  is resolved to the functions it calls, and each of those is judged by
+  **provenance**, because the expression is evaluated with the authority of
+  whoever writes the row. A function is untrusted when **any** of these holds:
+  it lives in a temp schema (`pg_temp_%` / `pg_toast_temp_%`); its owner is not
+  a superuser; `nhms_ingest_rw` cannot itself `EXECUTE` it (that is how
+  `DEFAULT length(pg_read_file('/etc/hostname'))` is caught); or it is on the
+  deny-list of PUBLIC-executable `pg_catalog` functions whose effect for a
+  superuser writer is not what the migration asked for (`set_config`,
+  `pg_terminate_backend`, `pg_cancel_backend`, `pg_reload_conf`, `pg_notify`,
+  `pg_sleep*`, `pg_advisory_*`). Each finding names the leg that fired.
+  **Executability alone was the round-3 hole**: a function the write role
+  authored in `pg_temp` passes it (the role owns it), and so does
+  `set_config('session_replication_role','replica',false)`.
+  **Residual, by construction:** the deny-list is a list and cannot be complete;
+  the temp-schema and owner legs are the structural ones, and the TEMP
+  tightening above removes the authoring surface the first one guards.
+  Everything the migrations use (`now()`, `nextval()`, `gen_random_uuid()`,
+  `length()`, the four `met` trigger functions) is superuser-owned and
   PUBLIC-executable, so a clean catalog sweeps clean and prints a one-line
   summary either way. Implementation note for whoever edits it: `pg_depend`
   records **nothing** for pinned catalog functions, so the sweep reads the
   stored parse trees (`adbin` / `conbin` / `ev_action`) directly;
-- **`tgenabled` check** — `ALTER TABLE … DISABLE TRIGGER` carries no
-  rule/trigger DDL tag, so the event trigger never sees it and the inventory
-  still lists the trigger. Each of the four allow-listed triggers must be
-  `tgenabled = 'O'`.
+- **presence and `tgenabled` check** — `ALTER TABLE … DISABLE TRIGGER` carries
+  no rule/trigger DDL tag, so the event trigger never sees it and the inventory
+  still lists the trigger; a *dropped* trigger leaves no row for an inventory to
+  look at at all. All four allow-listed triggers must be present (`count(*) =
+  4`) and `tgenabled = 'O'`.
 
 Both legs: strict audit → error, exit 3; `--roles-only` → `WARNING`. Still open,
 recorded not fixed: removing the superuser-write half itself (migrations and
@@ -3716,7 +3743,7 @@ scan and fails if a lane grows a requirement this table does not cover.
 | `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | **no database connection at all** (no `execute(`, no `psycopg2`/`DATABASE_URL` under `workers/data_adapters/`); the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only — provisioned so the template's promise holds and a future adapter write does not land on the superuser) |
 | `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:595` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-compression.service` (cold-residency leg) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py:414,422` | `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` on compressed chunks → chunk ownership **plus `CREATE` on tablespace `nhms_cold`** | `nhms_ingest_rw` |
-| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:841` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:851` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-compression-replay.service` (`Type=oneshot`, no timer — operator-triggered, not a recurring lane) | `scripts/node27_timeseries_compression_supervisor.py:101-128,143,331-380` | `pg_dump`, two `migration_apply` steps (`psql --file <migration>`), `docker exec nhms-db pg_restore` — **migration-class DDL** — plus a `decompress` leg (`scripts/node27_timeseries_decompression_replay.py:194`, `decompress_chunk` → hypertable ownership) and, in the same `EXPECTED_COMMAND_SEQUENCE` (`:117-128`), `compression_dry_run` and `compression_enforce`. The exception is scoped by **"one-shot migration-class unit"**, not by which calls it makes: the compression legs are the same ones the recurring lane runs as `nhms_ingest_rw`; the `migration_apply` steps are what that role structurally cannot carry | **`nhms` (documented exception)** |
 | archive-rebuild drill (retired lane, #1370; no unit, no template in `infra/env/`) | — | `POSTGRES_ADMIN_URL` against the `postgres` database, `CREATEDB` for `nhms_archive_drill` | **`nhms` (documented exception)** |
 
@@ -3817,8 +3844,23 @@ bash scripts/node27_provision_write_roles.sh
 ```
 
 Phase 2 additionally captures `relacl` and `nhms_display_ro`'s effective
-`SELECT` set before and after, runs the transfer, diffs both, and ends with the
-**strict** audit.
+`SELECT` set before and after, runs the transfer, diffs both, applies the **TEMP
+tightening**, and ends with the **strict** audit.
+
+The tightening is `REVOKE TEMPORARY ON DATABASE nhms FROM PUBLIC` followed by
+`GRANT TEMPORARY ON DATABASE nhms TO nhms_display_ro`. It is the only statement
+in this change that takes a privilege away, which is exactly why it is here and
+not in phase 1: phase 1 must stay additive and reversible on a live primary
+before the merge. What it buys is prevention rather than detection — `pg_temp`
+is the only schema in which a write role can create a function, and a function
+it authors is a body a superuser writer would evaluate (§9.1). Measured on the
+container (transcript §16): after it, `CREATE TEMP TABLE` and
+`CREATE FUNCTION pg_temp.x()` are refused for both write roles and still work
+for `nhms` and `nhms_display_ro`; INSERT into a new chunk, `compress_chunk`,
+`decompress_chunk`, `drop_chunks`, `ANALYZE` and `SET TABLESPACE` under
+`nhms_ingest_rw` are unaffected; `--roles-only` on a fresh database leaves
+`datacl` untouched. If some other role on node-27 turns out to need TEMP, grant
+it explicitly next to the display grant — do not put it back for `PUBLIC`.
 
 How the transfer treats the display API — it is public, cannot be stopped, and
 holds `AccessShareLock` on served relations while `ALTER … OWNER TO` wants
@@ -3865,8 +3907,9 @@ non-zero means **do not cut the env files over**.
 
 Every `docker exec … psql` invocation in **both** modes is wrapped, so the
 underlying status (psql's 1 fatal / 2 connection / 3 script error under
-`ON_ERROR_STOP`, or docker's 125/126/127 for a missing container or image) is
-mapped to `3` and never leaks as a runner code — `2` would otherwise read as
+`ON_ERROR_STOP`, or docker's own: `1` for a missing container, `125` for a
+docker-level failure, `126` for a non-executable command and `127` for a missing
+one) is mapped to `3` and never leaks as a runner code — `2` would otherwise read as
 this script's "usage / environment error" and `1` is not a documented code at
 all. The refusal line names the failing step, e.g.
 `FAILED -- remaining-relation count after pass 1 (docker exec/psql exit 2)`.
@@ -3925,19 +3968,33 @@ a missing, disabled or non-superuser-owned
 in one of those schemas, add it to the allow-list in
 `db/roles/node27_write_roles.sql` **and** to `_ALLOWLISTED_TRIGGERS` in
 `tests/test_node27_write_roles.py` in the same PR — the guard test derives the
-expected set from `db/**` and fails otherwise. Each allow-listed trigger must
-also still be enabled (`tgenabled = 'O'`); `ALTER TABLE … DISABLE TRIGGER` leaves
-it in the inventory but switches its guard off.
+expected set from `db/**` and fails otherwise. All four must also be **present**
+(`count(*) = 4` — a dropped guard leaves nothing for an inventory to list) and
+still **enabled** (`tgenabled = 'O'` — `ALTER TABLE … DISABLE TRIGGER` leaves the
+trigger in the inventory but switches its guard off). TimescaleDB's
+`ts_insert_blocker` is excluded from the inventory by **function identity**, not
+by name: a `ts_insert_blocker` whose `tgfoid` is not
+`_timescaledb_internal.insert_blocker()` is a planted trigger and is reported.
 
-**Stored expressions.** Every mode also prints the function-privilege sweep — a
+**Stored expressions.** Every mode also prints the function-provenance sweep — a
 one-line summary (`N expression(s)/trigger(s) scanned, M distinct function(s)
-referenced, K not executable by nhms_ingest_rw`) plus one line per finding — and
-the strict audit refuses any column `DEFAULT`, `CHECK`, rule action or trigger
-function that calls a function `nhms_ingest_rw` cannot `EXECUTE` (§9.1). A
+referenced, K untrusted for a superuser writer`) plus one line per finding, each
+naming the leg that fired (`-- temp-schema function`,
+`-- owner <role> is not a superuser`, `-- NOT executable by nhms_ingest_rw`,
+`-- deny-listed`) — and the strict audit refuses any column `DEFAULT`, `CHECK`,
+rule action or trigger function that reaches an untrusted function (§9.1). A
 finding here is not a style problem: the expression runs as whoever writes the
 row, which during a migration or a replay is the superuser. Same re-run rule as
 above — the sweep reddens the audit-only invocation, and both the additive and
 full runs re-check it as their tail.
+
+**TEMP.** Every mode prints `has_database_privilege(…, 'TEMP')` for `nhms`,
+`nhms_display_ro` and the two write roles. The **verdict** is strict-only: a
+write role holding TEMP is an error in the strict audit and is not even
+mentioned in `--roles-only`, because that phase deliberately has not applied the
+tightening yet (and is the invocation that runs with `strict_audit` off). The
+mandatory audit-only invocation of §9.6 runs strict, so a TEMP re-granted after
+the cutover is caught there.
 
 Never used, and asserted absent by the guard test: `REASSIGN OWNED BY nhms`
 (moves the database, the schemas and extension-adjacent objects) and
@@ -4031,8 +4088,19 @@ An audit is **detection**, and a planted rule, trigger or column `DEFAULT` fires
 on the *next* superuser write — which is the session you are about to open.
 Running it only afterwards means the first thing it can detect has already
 executed as `nhms`. This invocation is also the only one that can red on a
-revoked `nhms_cold` grant or a dropped event trigger (the phased runs re-issue
-both before auditing, §9.3).
+revoked `nhms_cold` grant, a dropped event trigger or a re-granted TEMP (the
+phased runs re-issue all three before auditing, §9.3).
+
+It runs **strict**, and that matters twice over: strict is what turns every
+finding into exit 3 instead of a `WARNING` nobody reads in a scrollback, and the
+TEMP verdict exists only in strict mode. It has two preconditions. Full mode
+must already have run on this database — before the cutover, use `--roles-only`
+(non-strict) instead, whose audit deliberately does not judge a tightening that
+has not happened yet. And migration `000043` must be applied: the presence leg
+counts the four allow-listed triggers and reds at `4` ≠ found, so a strict audit
+against a database that never had them (a fresh CI fixture, a restore taken
+before `000043`) reports a security regression that is really a missing
+migration. Apply the migrations first, then audit.
 
 ## Rollback (unit-level, not data-level)
 

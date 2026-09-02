@@ -19,6 +19,7 @@
     "scripts/node27_frontier_stall_alert.py",
     "tests/test_node27_frontier_stall_alert.py",
     "tests/test_node27_timeseries_retention.py",
+    "tests/test_node27_write_roles.py",
     "docs/runbooks/tier-node27-timeseries-storage.md",
     "packages/common/compression_terminal_state.py",
     "scripts/node27_timeseries_compression.py",
