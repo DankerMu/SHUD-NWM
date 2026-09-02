@@ -137,7 +137,7 @@ def submission_runtime_root_resolution(self, job_id: str) -> dict[str, Any] | No
    contract, out of scope); the reader emits one `logger.warning` carrying
    only `error.reason` and `error.field` — the latter either a journal-relative
    token such as `journal/gfs/2026072000.jsonl` (journal read/decode raise
-   sites pass the path through `_relative_evidence`, `:14990-14994`, which
+   sites pass the path through `_relative_evidence`, `:14910-14914`, which
    falls back to `[local-path]` for out-of-root paths) or a bare column name
    such as `cycle_id` / `source_id` from the identity helpers
    (`_required_safe_identity`, `_normalize_file_source_id`) — never an
