@@ -5292,10 +5292,20 @@ def test_file_orchestration_journal_list_stage_statuses_all_sources_reads_mixed_
     )
     repository = FileOrchestrationJournalRepository(journal_root)
 
-    assert [
+    # #1761 D3 re-pin (a recorded contract change, not an oracle edit): the
+    # cross-surface merge now dedupes by `(st_dev, st_ino)` identity, so this
+    # assertion became filesystem-dependent.  On a case-insensitive volume
+    # `latest/IFS` and `journal/ifs` ARE one directory per surface and collapse
+    # to a single segment; on a case-sensitive volume no surface can prove
+    # identity and both spellings stay, exactly as before.
+    discovered = [
         (source.source_id, source.source_segments)
         for source in repository._cycle_source_discoveries(cycle_time=cycle_time)
-    ] == [("IFS", ("IFS", "ifs"))]
+    ]
+    if _filesystem_is_case_sensitive(tmp_path):
+        assert discovered == [("IFS", ("IFS", "ifs"))]
+    else:
+        assert discovered == [("IFS", ("IFS",))]
 
     rows = repository.list_stage_statuses(
         source_id=None,
@@ -17850,14 +17860,42 @@ def _lineage_cross_cycle_failed_row(tmp_path: Path) -> tuple[FileOrchestrationJo
     """
 
     cross_cycle_job_id = "job_fcst_gfs_2026060100_model_a_forecast"
-    repository = _lineage_marker_free_failed_row(
+    in_scope_job_id = "job_fcst_gfs_2026072000_model_a_forecast"
+    minting = _lineage_marker_free_failed_row(
         tmp_path,
-        job_id=cross_cycle_job_id,
+        job_id=in_scope_job_id,
         init_state_identities=[{**_cohort_init_state_identity(0), "model_id": "model_a"}],
     )
-    direct_path = repository.root / "pipeline-jobs" / f"{cross_cycle_job_id}.json"
+    # #1760: the DIVERGENT id is laid down DIRECTLY on disk and never passes
+    # through the write boundary.  ``_lineage_marker_free_failed_row`` is a
+    # test-side writer, and the write boundary now rejects a pipeline_job whose
+    # id names another cycle than the row's own -- which is precisely the state
+    # under test here.  Such a row is still a legitimate legacy/corruption
+    # state ON DISK (written before the gate existed, or by a torn rename), and
+    # the rebind guard has to defend against it, so the row is minted with an
+    # in-scope id and then the persisted bytes are edited to spell June.  Only
+    # the ``job_id`` field moves; every other identity field (``cycle_id``,
+    # ``run_id``, ``idempotency_key``, ``source_id``, ``cycle_time``,
+    # ``init_state_identities``) keeps the July values production wrote, and
+    # the file set is byte-for-byte what the pre-gate fixture produced (journal
+    # jsonl + latest view + the single flat direct file, no by-cycle mirror).
+    minted_direct = minting.root / "pipeline-jobs" / f"{in_scope_job_id}.json"
+    assert minted_direct.exists()
+    rewritten = [
+        minted_direct,
+        *sorted(minting.root.rglob("*.jsonl")),
+        *sorted((minting.root / "latest").rglob("*.json")),
+    ]
+    for path in rewritten:
+        text = path.read_text(encoding="utf-8")
+        assert in_scope_job_id in text, path
+        path.write_text(text.replace(in_scope_job_id, cross_cycle_job_id), encoding="utf-8")
+    direct_path = minting.root / "pipeline-jobs" / f"{cross_cycle_job_id}.json"
+    minted_direct.rename(direct_path)
     assert direct_path.exists()
-    return repository, direct_path
+    # A fresh instance: the divergent state appeared underneath the repository,
+    # so nothing minted may be served from the in-memory cycle-rows cache.
+    return FileOrchestrationJournalRepository(tmp_path / "journal"), direct_path
 
 
 def test_file_manual_retry_public_selection_private_row_disappearing_writes_nothing(
@@ -18620,3 +18658,679 @@ def test_file_auto_retry_contract_candidate_and_empty_lineage_and_permanent_fail
     )[-1]
     assert permanent_jsonl["init_state_identities"] == _lineage_auto_retry_identities()
     assert permanent_jsonl["status"] == "permanently_failed"
+
+
+# --- #1761: identity dedup on the two remaining string-dedup sites (D3) ------
+#
+# `_merge_cycle_source_discovery` merges the segment spellings discovered
+# across the `latest`, `journal`, `pipeline-events` and by-cycle surfaces, and
+# the `source_segment_overrides` branch of `_cycle_read_source_segments`
+# consumes that merged tuple.  Both deduped by STRING, so on a case-insensitive
+# volume the mixed pair `("IFS", "ifs")` the merge produces could not be
+# collapsed and every record was read twice.
+
+
+_ALIAS_CYCLE = _dt("2026-06-28T00:00:00Z")
+_ALIAS_SEGMENT = format_cycle_time(_ALIAS_CYCLE)
+
+
+def _mixed_spelling_alias_tree(journal_root: Path) -> None:
+    """`latest/IFS` on one surface, `journal/ifs` on another — one cycle, one source."""
+
+    latest_job = _active_job(_ALIAS_CYCLE)
+    latest_job.update(
+        {
+            "job_id": "job_ifs_latest_download",
+            "idempotency_key": f"cycle_ifs_{_ALIAS_SEGMENT}:download_source_cycle",
+            "run_id": f"fcst_ifs_{_ALIAS_SEGMENT}_model_a",
+            "cycle_id": cycle_id_for("IFS", _ALIAS_CYCLE),
+            "source_id": "IFS",
+            "stage": "download_source_cycle",
+        }
+    )
+    history_job = _active_job(_ALIAS_CYCLE)
+    history_job.update(
+        {
+            "job_id": "job_ifs_history_forecast",
+            "idempotency_key": f"cycle_ifs_{_ALIAS_SEGMENT}:forecast",
+            "run_id": f"fcst_ifs_{_ALIAS_SEGMENT}_model_a",
+            "cycle_id": cycle_id_for("IFS", _ALIAS_CYCLE),
+            "source_id": "ifs",
+            "stage": "forecast",
+            "slurm_job_id": "3002",
+            "submitted_at": "2026-06-28T00:02:00Z",
+        }
+    )
+    latest = _latest_view(source_id="IFS", cycle_time=_ALIAS_CYCLE, jobs=[latest_job])
+    latest["forcing_version"] = None
+    _write_json(journal_root / f"latest/IFS/{_ALIAS_SEGMENT}/model_a.json", latest)
+    _write_jsonl(
+        journal_root / f"journal/ifs/{_ALIAS_SEGMENT}.jsonl",
+        [
+            _journal_record(
+                record_type="pipeline_job",
+                source_id="ifs",
+                cycle_time=_ALIAS_CYCLE,
+                payload=history_job,
+            )
+        ],
+    )
+
+
+def test_cross_surface_alias_discovery_reads_each_source_directory_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1761: `latest/IFS` + `journal/ifs` must not enumerate one directory twice.
+
+    Input: the mixed-spelling tree above, read through the public
+    `list_stage_statuses(source_id=None, ...)` lane — the one that runs the
+    cross-surface merge and feeds its result into the overrides branch.
+    Expected on either filesystem: no `(st_dev, st_ino)` is opened under two
+    spellings.  Expected additionally on a case-insensitive volume: exactly one
+    segment; on a case-sensitive volume both, because neither directory exists
+    under the other spelling and no surface can prove identity.
+    """
+
+    journal_root = tmp_path / "journal"
+    _mixed_spelling_alias_tree(journal_root)
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    touched: list[Path] = []
+    real_read_json = FileOrchestrationJournalRepository._read_optional_json
+    real_read_jsonl = FileOrchestrationJournalRepository._read_jsonl
+
+    def record_json(self: Any, path: Path) -> Any:
+        touched.append(path)
+        return real_read_json(self, path)
+
+    def record_jsonl(self: Any, path: Path, **kwargs: Any) -> Any:
+        touched.append(path)
+        return real_read_jsonl(self, path, **kwargs)
+
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_optional_json", record_json)
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_jsonl", record_jsonl)
+
+    rows = repository.list_stage_statuses(
+        source_id=None, cycle_time=_ALIAS_CYCLE, model_id="model_a"
+    )
+    assert {row["job_id"] for row in rows} == {
+        "job_ifs_latest_download",
+        "job_ifs_history_forecast",
+    }
+    assert touched
+
+    spellings_by_identity: dict[tuple[int, int], set[str]] = {}
+    for path in touched:
+        try:
+            path_stat = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            # A probed-but-absent alias path opens nothing, so it cannot
+            # duplicate a read; only paths that really exist can.
+            continue
+        spellings_by_identity.setdefault((path_stat.st_dev, path_stat.st_ino), set()).add(str(path))
+    duplicated = {
+        identity: sorted(spellings)
+        for identity, spellings in spellings_by_identity.items()
+        if len(spellings) > 1
+    }
+    assert not duplicated, duplicated
+
+    segments = [
+        source.source_segments
+        for source in repository._cycle_source_discoveries(cycle_time=_ALIAS_CYCLE)
+    ]
+    if _filesystem_is_case_sensitive(tmp_path):
+        assert segments == [("IFS", "ifs")]
+    else:
+        assert segments == [("IFS",)]
+
+
+def test_merge_cycle_source_discovery_without_root_keeps_string_dedup(tmp_path: Path) -> None:
+    """#1761 D3: `root=None` is unchanged — string dedup, no stat at all."""
+
+    merged: dict[str, Any] = {}
+    journal_module._merge_cycle_source_discovery(
+        merged, journal_module._cycle_source_discovery_from_segment("IFS")
+    )
+    journal_module._merge_cycle_source_discovery(
+        merged, journal_module._cycle_source_discovery_from_segment("ifs")
+    )
+    journal_module._merge_cycle_source_discovery(
+        merged, journal_module._cycle_source_discovery_from_segment("IFS")
+    )
+    assert [source.source_segments for source in merged.values()] == [("IFS", "ifs")]
+
+
+def test_source_segment_overrides_dedupe_by_identity(tmp_path: Path) -> None:
+    """#1761 D3: the overrides branch collapses only what identity proves.
+
+    Input: overrides `("IFS", "ifs")` against a tree where the per-source
+    directories really exist.  Expected: one segment on a case-insensitive
+    volume (both spellings name one inode per surface), two on a case-sensitive
+    one (nothing can prove identity, so both real directories are read).
+    """
+
+    journal_root = tmp_path / "journal"
+    _make_source_segment_surfaces(journal_root, "IFS")
+    segments = journal_module._cycle_read_source_segments(
+        source_id="IFS",
+        source_segment_override=None,
+        source_segment_overrides=("IFS", "ifs"),
+        root=journal_root,
+    )
+    if _filesystem_is_case_sensitive(tmp_path):
+        assert segments == ("IFS", "ifs")
+    else:
+        assert segments == ("IFS",)
+
+
+def test_source_segment_overrides_keep_the_source_mismatch_check(tmp_path: Path) -> None:
+    """#1761 D3: collapsing must not weaken the per-item validation."""
+
+    journal_root = tmp_path / "journal"
+    _make_source_segment_surfaces(journal_root, "IFS")
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        journal_module._cycle_read_source_segments(
+            source_id="IFS",
+            source_segment_override=None,
+            source_segment_overrides=("IFS", "gfs"),
+            root=journal_root,
+        )
+    assert caught.value.reason == "file_journal_source_mismatch"
+
+
+def test_source_segment_overrides_empty_after_dedup_fail_closed(tmp_path: Path) -> None:
+    """#1761 D3: an override list that holds nothing still fails closed."""
+
+    journal_root = tmp_path / "journal"
+    journal_root.mkdir()
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        journal_module._cycle_read_source_segments(
+            source_id="IFS",
+            source_segment_override=None,
+            source_segment_overrides=(),
+            root=journal_root,
+        )
+    assert caught.value.reason == "file_journal_missing_identity"
+
+
+def test_symlinked_source_segment_alias_is_kept_and_fails_closed(tmp_path: Path) -> None:
+    """#1761 D3: a symlinked alias keeps its own inode, so it is NOT collapsed.
+
+    Input: a real `journal/IFS` holding this cycle's records and a symlink
+    `journal/ifs -> elsewhere`.  Expected: both spellings survive the identity
+    dedup (the no-follow stat gives the symlink its own inode) and the read
+    through the alias fails closed under the containment discipline rather than
+    being silently dropped.
+    """
+
+    journal_root = tmp_path / "journal"
+    _make_source_segment_surfaces(journal_root, "IFS")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    alias = journal_root / "journal" / "ifs"
+    if alias.exists() and not alias.is_symlink():
+        if _filesystem_is_case_sensitive(tmp_path):
+            alias.rmdir()
+        else:
+            pytest.skip("case-insensitive volume cannot hold journal/IFS and journal/ifs apart")
+    alias.symlink_to(elsewhere)
+
+    identities = journal_module._source_segment_directory_identities(journal_root, "ifs")
+    kept = journal_module._source_segment_directory_identities(journal_root, "IFS")
+    assert identities.get("journal") != kept.get("journal"), (
+        "the symlink must keep its own inode under a no-follow stat"
+    )
+    assert not journal_module._names_same_directory(journal_root, "ifs", kept)
+
+    segments = journal_module._cycle_read_source_segments(
+        source_id="IFS",
+        source_segment_override=None,
+        source_segment_overrides=("IFS", "ifs"),
+        root=journal_root,
+    )
+    assert segments == ("IFS", "ifs")
+
+    repository = FileOrchestrationJournalRepository(journal_root)
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository._cycle_rows(
+            source_id="IFS",
+            cycle_time=_ALIAS_CYCLE,
+            model_id="model_a",
+            source_segment_overrides=segments,
+        )
+    assert caught.value.reason == "file_journal_unreadable"
+
+
+# --- #1760: the job_id cycle-scope gate at the write boundary (D4) -----------
+#
+# PR #1759's D2a made the flat direct file NAME authoritative for cycle
+# scoping: a cycle-scoped reader of `pipeline-jobs/` skips a file whose name
+# resolves to another `(source_id, cycle)`.  Nothing enforced that the name
+# agreed with the row's content, so a row whose `job_id` spelled another cycle
+# became invisible to every cycle-scoped reader.  The gate lives in
+# `_validate_outgoing_record`, the one validator all eight pipeline-job write
+# call sites run BEFORE their first byte.
+#
+# Test-input precision for every rejection case below: `cycle_id`, `run_id` and
+# `idempotency_key` stay consistent with the row's OWN `source_id`/`cycle_time`,
+# so ONLY `job_id` diverges and the pre-existing `file_journal_run_mismatch`
+# cannot fire first and make the test assert the wrong token.
+
+_SCOPE_GATE_CYCLE = _dt("2026-06-28T00:00:00Z")
+_SCOPE_GATE_OTHER_CYCLE = _dt("2026-07-01T00:00:00Z")
+
+
+def _journal_text(root: Path) -> str:
+    return "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted(root.rglob("*.jsonl"))
+    )
+
+
+def _assert_no_trace_of_job(root: Path, job_id: str) -> None:
+    """No journal record in ANY segment and no direct file, flat or by-cycle."""
+
+    assert job_id not in _journal_text(root), "a rejected write left a journal record behind"
+    direct_files = [path for path in root.rglob(f"{job_id}.json")]
+    assert direct_files == [], f"a rejected write left a direct file behind: {direct_files}"
+
+
+def _assert_no_committed_projection_fault(root: Path) -> None:
+    assert "committed_projection_fault" not in _journal_text(root), (
+        "the gate must fire ahead of _project_committed_pipeline_job_write, not inside "
+        "its `except Exception` swallow"
+    )
+
+
+def test_reserve_pipeline_job_rejects_a_job_id_naming_another_cycle(tmp_path: Path) -> None:
+    """#1760: single-row lane, `job_id` cycle != the row's own cycle.
+
+    `reserve_pipeline_job` is used deliberately: it is a containment-ENABLED
+    writer (`_committed_projection_containment=True`), so the additional
+    "no `committed_projection_fault` event" assertion actually proves the gate
+    fired before the authority append rather than being a tautology.
+    """
+
+    root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(root)
+    divergent_job_id = f"job_fcst_gfs_{format_cycle_time(_SCOPE_GATE_OTHER_CYCLE)}_model_a_forecast"
+    record = _pipeline_reservation_record(_SCOPE_GATE_CYCLE, job_id=divergent_job_id)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository.reserve_pipeline_job(record)
+
+    assert caught.value.reason == "file_journal_job_id_scope_mismatch"
+    assert caught.value.field == "job_id"
+    # The pair is normalised on BOTH sides; the normalised casing differs per
+    # source ("gfs" stays lower case, "ifs" normalises to "IFS").
+    assert caught.value.evidence == {
+        "expected": f"gfs/{format_cycle_time(_SCOPE_GATE_CYCLE)}",
+        "actual": f"gfs/{format_cycle_time(_SCOPE_GATE_OTHER_CYCLE)}",
+    }
+    _assert_no_trace_of_job(root, divergent_job_id)
+    _assert_no_committed_projection_fault(root)
+
+
+def test_reserve_pipeline_job_rejects_a_job_id_naming_another_source(tmp_path: Path) -> None:
+    """#1760: single-row lane, `job_id` source != the row's own source."""
+
+    root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(root)
+    divergent_job_id = f"job_fcst_ifs_{format_cycle_time(_SCOPE_GATE_CYCLE)}_model_a_forecast"
+    record = _pipeline_reservation_record(_SCOPE_GATE_CYCLE, job_id=divergent_job_id)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository.reserve_pipeline_job(record)
+
+    assert caught.value.reason == "file_journal_job_id_scope_mismatch"
+    assert caught.value.evidence == {
+        "expected": f"gfs/{format_cycle_time(_SCOPE_GATE_CYCLE)}",
+        "actual": f"IFS/{format_cycle_time(_SCOPE_GATE_CYCLE)}",
+    }
+    _assert_no_trace_of_job(root, divergent_job_id)
+    _assert_no_committed_projection_fault(root)
+
+
+def test_pipeline_job_write_still_accepts_an_unparseable_job_id(tmp_path: Path) -> None:
+    """#1760: fall-open unchanged — an id matching neither shape is accepted.
+
+    Negative pin: it cannot go red by reverting the gate, because the
+    pre-change behaviour is the same acceptance.  It exists to keep a future
+    "tighten the parser" change from turning production's unparseable historical
+    ids into write faults.
+    """
+
+    root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(root)
+    job_id = "job_lineage_unparseable"
+    assert journal_module._cycle_scope_from_job_id(job_id) is None
+
+    written = repository.reserve_pipeline_job(
+        _pipeline_reservation_record(_SCOPE_GATE_CYCLE, job_id=job_id)
+    )
+    assert written is not None
+    assert written["job_id"] == job_id
+    assert repository.get_pipeline_job(job_id) is not None
+
+
+def test_restore_derived_master_direct_rejects_a_divergent_canonical_row(tmp_path: Path) -> None:
+    """#1760: the repair lane fails closed and KEEPS the stale anchor.
+
+    `_restore_derived_master_direct_unlocked` takes `(source_id, cycle_time)`
+    as kwargs and appends no journal record; per its docstring, if the direct
+    write does not happen the anchor sync never runs and the stale
+    reconcile-inventory anchor is preserved (fail closed, never prune first).
+    """
+
+    root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(root)
+    divergent_job_id = f"job_cycle_gfs_{format_cycle_time(_SCOPE_GATE_OTHER_CYCLE)}_forecast"
+    canonical = _active_job(_SCOPE_GATE_CYCLE)
+    canonical.update(
+        {
+            "job_id": divergent_job_id,
+            "run_id": f"cycle_gfs_{format_cycle_time(_SCOPE_GATE_CYCLE)}",
+            "cycle_id": cycle_id_for("gfs", _SCOPE_GATE_CYCLE),
+            "idempotency_key": f"cycle_gfs_{format_cycle_time(_SCOPE_GATE_CYCLE)}:forecast",
+        }
+    )
+    anchor_path = (
+        root / journal_module._RECONCILE_INVENTORY_DIRECTORY / f"{divergent_job_id}.json"
+    )
+    _write_json(anchor_path, {"job_id": divergent_job_id})
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        with repository._locked_cycle_write(source_id="gfs", cycle_time=_SCOPE_GATE_CYCLE):
+            repository._restore_derived_master_direct_unlocked(
+                canonical,
+                source_id="gfs",
+                cycle_time=_SCOPE_GATE_CYCLE,
+            )
+
+    assert caught.value.reason == "file_journal_job_id_scope_mismatch"
+    assert not (root / "pipeline-jobs" / f"{divergent_job_id}.json").exists()
+    assert anchor_path.exists(), "the stale anchor must be kept when the repair fails closed"
+    assert divergent_job_id not in _journal_text(root)
+
+
+
+# --- #1760: the batch lane, reached through a PUBLIC writer -----------------
+#
+# The divergent row is laid down ON DISK (minted legally through
+# `reserve_pipeline_job`, then its persisted `job_id` bytes rewritten to name
+# another cycle) — the legacy/torn-rename state the gate has to defend against
+# — and then driven through the public `permit_pipeline_job_retry` batch lane.
+# July is the row's real cycle; June is what its id spells.
+
+_BATCH_LANE_CYCLE = _dt("2026-07-20T00:00:00Z")
+_BATCH_LANE_JOB_ID = "job_fcst_gfs_2026072000_model_a_forecast"
+_BATCH_LANE_DIVERGENT_JOB_ID = "job_fcst_gfs_2026060100_model_a_forecast"
+_BATCH_LANE_RUN_ID = "fcst_gfs_2026072000_model_a"
+
+
+def _batch_lane_cohort_master() -> dict[str, Any]:
+    """A reserved cohort master with ONE member, so the lane has a sibling."""
+
+    record = _pipeline_reservation_record(_BATCH_LANE_CYCLE, job_id=_BATCH_LANE_JOB_ID)
+    record["cohort_members"] = [
+        {
+            "array_task_id": 0,
+            "candidate_id": "candidate_a",
+            "run_id": _BATCH_LANE_RUN_ID,
+            "model_id": "model_a",
+            "basin_id": "basin_a",
+            "scenario_id": "scenario_a",
+            "restart_stage": None,
+        }
+    ]
+    return record
+
+
+def _batch_lane_member_hydro_run() -> dict[str, Any]:
+    return {
+        "run_id": _BATCH_LANE_RUN_ID,
+        "candidate_id": "candidate_a",
+        "run_type": "forecast",
+        "scenario_id": "scenario_a",
+        "model_id": "model_a",
+        "basin_id": "basin_a",
+        "array_task_id": 0,
+        "basin_version_id": "basin_v0",
+        "forcing_version_id": "forc_gfs_2026072000_model_a",
+        "init_state_id": "state_0",
+        "source_id": "gfs",
+        "cycle_time": "2026-07-20T00:00:00Z",
+        "start_time": "2026-07-20T00:00:00Z",
+        "end_time": "2026-07-20T18:00:00Z",
+        "status": "failed",
+        "submission_attempt": 1,
+        "run_manifest_uri": "s3://nhms/runs/model_a/run-manifest.json",
+        "output_uri": "s3://nhms/runs/model_a/output",
+        "log_uri": "s3://nhms/runs/model_a/logs",
+        "error_code": "SLURM_GATEWAY_UNAVAILABLE",
+        "error_message": "transport timeout",
+    }
+
+
+def _mint_batch_lane_cohort(root: Path) -> FileOrchestrationJournalRepository:
+    """Mint a legal July cohort master whose one member is an ACTIVE hydro row.
+
+    Everything here goes through public writers, so the tree is exactly what
+    production would have written before the gate existed.
+    """
+
+    repository = FileOrchestrationJournalRepository(root)
+    repository.reserve_pipeline_job(_batch_lane_cohort_master())
+    repository.append_historical_hydro_run(_batch_lane_member_hydro_run())
+    repository.update_hydro_run_status(_BATCH_LANE_RUN_ID, "running")
+    return repository
+
+
+def _rewrite_persisted_job_id(root: Path, *, minted: str, divergent: str) -> Path:
+    """Edit the PERSISTED `job_id` bytes only; every other identity field stays.
+
+    Same technique as `_lineage_cross_cycle_failed_row`: the divergent id never
+    passes through the write boundary (the gate would reject it), it appears on
+    disk the way a pre-gate deployment or a torn rename would leave it.
+    """
+
+    minted_direct = root / "pipeline-jobs" / f"{minted}.json"
+    assert minted_direct.exists()
+    for path in [
+        minted_direct,
+        *sorted(root.rglob("*.jsonl")),
+        *sorted((root / "latest").rglob("*.json")),
+    ]:
+        text = path.read_text(encoding="utf-8")
+        if minted in text:
+            path.write_text(text.replace(minted, divergent), encoding="utf-8")
+    divergent_direct = root / "pipeline-jobs" / f"{divergent}.json"
+    minted_direct.rename(divergent_direct)
+    return divergent_direct
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_public_permit_retry_batch_lane_rejects_a_divergent_master_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """#1760 D4: the batch lane rejects before the batch's FIRST byte, through
+    a PUBLIC writer, and the whole journal tree stays byte-identical.
+
+    Supersedes the private-seam batch test this replaces, whose docstring
+    claimed no public writer could carry a divergent row into a batch lane.
+    That claim is false: `permit_pipeline_job_retry` on a NON-TERMINAL
+    (`reserved`) row derives `(source_id, cycle_time)` from the persisted row —
+    not from the job id — so an on-disk divergent master reaches the batch
+    payload loop.  (On a terminal row the lane returns 0 before the gate, which
+    is why the row here is reserved.)
+
+    The cohort has one member whose `hydro_run` row is ACTIVE at the same
+    `submission_attempt`, so the lane builds `[hydro_run, pipeline_job]` and
+    validates the sibling BEFORE the divergent master — the ordering that makes
+    "no sibling record was appended" a real assertion instead of a vacuous one.
+    The control arm proves the sibling is genuinely produced for this cohort
+    shape on the untampered tree.
+
+    This test doubles as the update-lane pin for design D4's "Legacy divergent
+    rows already on disk" disclosure: a legacy row can no longer be transitioned
+    through this public lane, and the operator sees zero bytes written.
+
+    Input: a reserved July cohort master with an active member, its persisted
+    `job_id` bytes rewritten to spell June, driven through public
+    `permit_pipeline_job_retry`.  Expected: `file_journal_job_id_scope_mismatch`
+    on `job_id` with the July/June pair as evidence, the journal tree
+    byte-identical afterwards, no `hydro_run` sibling appended, and no by-cycle
+    direct file for the June id.
+    """
+
+    control_root = tmp_path / "control" / "journal"
+    control = _mint_batch_lane_cohort(control_root)
+    # Non-vacuity control: on the untampered tree the SAME public call really
+    # does append a hydro_run sibling alongside the master.
+    assert control.permit_pipeline_job_retry(_BATCH_LANE_JOB_ID) == 2
+    assert "SLURM_RESERVATION_LOST" in _journal_text(control_root), (
+        "the lane must append a hydro_run sibling for this cohort shape, "
+        "otherwise the rejection assertions below are vacuous"
+    )
+
+    root = tmp_path / "journal"
+    _mint_batch_lane_cohort(root)
+    divergent_direct = _rewrite_persisted_job_id(
+        root, minted=_BATCH_LANE_JOB_ID, divergent=_BATCH_LANE_DIVERGENT_JOB_ID
+    )
+    # A fresh instance: the divergent state appeared underneath the repository,
+    # so nothing may be served from the in-memory cycle-rows cache.
+    repository = FileOrchestrationJournalRepository(root)
+    before = _tree_bytes(root)
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        repository.permit_pipeline_job_retry(_BATCH_LANE_DIVERGENT_JOB_ID)
+
+    assert caught.value.reason == "file_journal_job_id_scope_mismatch"
+    assert caught.value.field == "job_id"
+    assert caught.value.evidence == {
+        "expected": "gfs/2026072000",
+        "actual": "gfs/2026060100",
+    }
+    assert _tree_bytes(root) == before, (
+        "the batch lane must reject before its first byte: no record, no direct "
+        "file, no lock or inventory side effect"
+    )
+    assert "SLURM_RESERVATION_LOST" not in _journal_text(root), (
+        "the hydro_run sibling validated ahead of the divergent master must not "
+        "have been appended"
+    )
+    # The only direct file for the divergent id is the one the fixture planted
+    # on disk (the legacy row itself, byte-identical above); the lane created
+    # nothing under the by-cycle partition.
+    assert list(root.rglob(f"{_BATCH_LANE_DIVERGENT_JOB_ID}.json")) == [divergent_direct]
+    assert not list(
+        (root / "pipeline-jobs" / "by-cycle").rglob(f"{_BATCH_LANE_DIVERGENT_JOB_ID}.json")
+    )
+
+
+def test_reconcile_scan_aborts_at_a_legacy_divergent_anchor_and_never_yields_past_it(
+    tmp_path: Path,
+) -> None:
+    """#1760 D4 (disclosed, not changed): the abort is PASS-level, not row-level.
+
+    The repair lane `_restore_derived_master_direct_unlocked` runs inside
+    `_iter_reconcile_inventory_records`' non-strict branch with no `try`, and
+    `_iter_reconcile_pipeline_job_records` re-yields it bare into the
+    list-comprehension consumers of `query_inflight_jobs` /
+    `query_reserved_unbound_jobs`.  So ONE legacy divergent anchor whose flat
+    direct is missing aborts the whole scan: every anchor sorting after it is
+    never yielded, the divergent anchor is never pruned, and each retry aborts
+    at the same place.  `scheduler_runtime.py` wraps both reconcile calls in
+    `except Exception`, so the pass survives but recovers zero cohorts.
+
+    This shape is PRE-EXISTING, not introduced here: the same lane already
+    aborts out of the generator on `file_journal_reconcile_inventory_invalid`
+    and `file_journal_identity_mismatch`.  Skip-and-keep-anchor was rejected
+    because it would invert the fail-closed contract for one error class only.
+    Operator recovery is to delete or hand-correct the divergent row and its
+    anchor.  This test pins the blast radius so the disclosure cannot rot.
+
+    Input: one divergent anchor (July row whose persisted id spells June, flat
+    direct deleted so the repair lane tries to restore it) plus one healthy
+    reserved anchor that sorts AFTER it.  Expected: the scan raises
+    `file_journal_job_id_scope_mismatch`, yields nothing before the raise, a
+    second scan raises identically (nothing self-healed), both anchors are
+    still on disk, and the June direct file was not restored.
+    """
+
+    root = tmp_path / "journal"
+    repository = _mint_batch_lane_cohort(root)
+    # A terminal row is the realistic legacy shape for a stale anchor.
+    repository.update_pipeline_job_status(
+        _BATCH_LANE_JOB_ID,
+        "failed",
+        error_code="SLURM_TIMEOUT",
+        error_message="timed out",
+        finished_at=_BATCH_LANE_CYCLE,
+    )
+    healthy_job_id = "job_healthy_reserved"
+    assert _BATCH_LANE_DIVERGENT_JOB_ID < healthy_job_id, (
+        "the healthy anchor must sort AFTER the divergent one, or 'never yielded' is vacuous"
+    )
+    healthy = _pipeline_reservation_record(_BATCH_LANE_CYCLE, job_id=healthy_job_id)
+    healthy["idempotency_key"] = "gfs:healthy:forecast"
+    repository.reserve_pipeline_job(healthy)
+    # Make the one-time inventory migration marker durable BEFORE the divergent
+    # anchor is planted, so a later scan does not re-run the backfill.
+    repository._ensure_reconcile_inventory_migrated()
+
+    divergent_direct = _rewrite_persisted_job_id(
+        root, minted=_BATCH_LANE_JOB_ID, divergent=_BATCH_LANE_DIVERGENT_JOB_ID
+    )
+    # The missing flat direct is what sends the anchor into the repair lane.
+    divergent_direct.unlink()
+    inventory = root / journal_module._RECONCILE_INVENTORY_DIRECTORY
+    (inventory / f"{_BATCH_LANE_DIVERGENT_JOB_ID}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": journal_module._RECONCILE_INVENTORY_SCHEMA_VERSION,
+                "job_id": _BATCH_LANE_DIVERGENT_JOB_ID,
+                "source_id": "gfs",
+                "cycle_time": journal_module._format_utc(_BATCH_LANE_CYCLE),
+                "row_kind": "legacy",
+            }
+        ),
+        encoding="utf-8",
+    )
+    anchors_before = sorted(path.name for path in inventory.glob("*.json"))
+    assert f"{_BATCH_LANE_DIVERGENT_JOB_ID}.json" in anchors_before
+    assert f"{healthy_job_id}.json" in anchors_before
+
+    def _gated_scan() -> tuple[FileOrchestrationJournalError, list[str]]:
+        yielded: list[str] = []
+        scanner = FileOrchestrationJournalRepository(root)
+        with pytest.raises(FileOrchestrationJournalError) as raised:
+            for record in scanner._iter_reconcile_pipeline_job_records():
+                yielded.append(str(record.get("job_id") or ""))
+        return raised.value, yielded
+
+    first_error, first_yielded = _gated_scan()
+    assert first_error.reason == "file_journal_job_id_scope_mismatch"
+    assert first_error.evidence == {"expected": "gfs/2026072000", "actual": "gfs/2026060100"}
+    assert first_yielded == [], "nothing may be yielded before the abort"
+    assert healthy_job_id not in first_yielded
+
+    second_error, second_yielded = _gated_scan()
+    assert second_error.reason == first_error.reason
+    assert second_error.evidence == first_error.evidence
+    assert second_yielded == [], "the pass did not self-heal; it aborts at the same anchor"
+
+    assert sorted(path.name for path in inventory.glob("*.json")) == anchors_before, (
+        "the divergent anchor is not pruned and the healthy one is not consumed"
+    )
+    assert not divergent_direct.exists(), "the repair must fail closed before restoring the direct file"

@@ -1023,3 +1023,504 @@ def test_cold_instance_walks_fingerprint_path(tmp_path: Path) -> None:
     finally:
         monkeypatch.undo()
     assert fingerprint_calls >= 1
+
+
+# --- #1567: containment-aware cycle-rows fingerprint (design D1 / D1b) -------
+#
+# The hole: `_cycle_rows_source_fingerprint` stat'ed its source files with a
+# bare `os.stat(follow_symlinks=False)`, which does not follow the FINAL
+# component but does follow symlinked PARENTS.  A real empty directory and a
+# `symlink -> empty decoy` therefore fingerprinted identically, so a long-lived
+# instance that cached a legal `[]` before a tamper kept serving `[]` after it
+# while a cold instance on the same tree reported `file_journal_unreadable`.
+
+
+_TAMPER_CYCLE = _dt("2026-06-28T00:00:00Z")
+_TAMPER_SEGMENT = format_cycle_time(_TAMPER_CYCLE)
+
+#: Every parent that feeds the cycle-rows fingerprint, relative to the journal
+#: root.  Values are (path to replace with a symlink, extra directory the decoy
+#: must hold so the tampered tree stays a plausible "same shape" decoy).
+_FINGERPRINT_PARENTS: dict[str, tuple[str, str | None]] = {
+    "journal_segment_slot": ("journal/gfs", None),
+    "pipeline_events_segment_slot": ("pipeline-events/gfs", None),
+    "latest_scandir_parent": ("latest/gfs", None),
+    "by_cycle_direct_partition": ("pipeline-jobs/by-cycle/gfs", _TAMPER_SEGMENT),
+    "flat_direct_root": ("pipeline-jobs", None),
+}
+
+#: Design D1's fault-token table: the token is decided by whichever hardened
+#: reader the forced recompute sends through the tampered path FIRST, so it is
+#: a property of (leg, lane), not of the leg alone.  Keyed by leg, then by the
+#: `model_id` the public read carries (`"model_a"` = the model-scoped read,
+#: `None` = the cross-model read `list_stage_statuses` takes by default and the
+#: chain forecast trigger uses).  Only the latest-directory leg is
+#: lane-dependent: its model-scoped read resolves ONE path through
+#: `_read_optional_json`, while the cross-model read lists the directory
+#: through `_iter_discovered_files`.
+_FINGERPRINT_PARENT_TOKENS: dict[str, dict[str | None, str]] = {
+    "journal_segment_slot": {
+        "model_a": "file_journal_unreadable",
+        None: "file_journal_unreadable",
+    },
+    "pipeline_events_segment_slot": {
+        "model_a": "file_journal_unreadable",
+        None: "file_journal_unreadable",
+    },
+    "latest_scandir_parent": {
+        "model_a": "file_journal_unreadable",
+        None: "file_journal_unsafe_scanned_entry",
+    },
+    "by_cycle_direct_partition": {
+        "model_a": "file_journal_unsafe_scanned_entry",
+        None: "file_journal_unsafe_scanned_entry",
+    },
+    "flat_direct_root": {
+        "model_a": "file_journal_unsafe_scanned_entry",
+        None: "file_journal_unsafe_scanned_entry",
+    },
+}
+
+
+def _empty_cycle_tree(root: Path) -> None:
+    """A real, fully initialized journal tree that holds no records at all."""
+
+    for relative in (
+        "journal/gfs",
+        "pipeline-events/gfs",
+        f"latest/gfs/{_TAMPER_SEGMENT}",
+        f"pipeline-jobs/by-cycle/gfs/{_TAMPER_SEGMENT}",
+        "pipeline-jobs",
+    ):
+        (root / relative).mkdir(parents=True, exist_ok=True)
+
+
+def _swap_for_symlinked_decoy(root: Path, relative: str, decoy: Path, *, child: str | None) -> None:
+    """Replace one real parent directory with a symlink to an empty decoy."""
+
+    decoy.mkdir(parents=True, exist_ok=True)
+    if child is not None:
+        (decoy / child).mkdir(exist_ok=True)
+    target = root / relative
+    import shutil
+
+    shutil.rmtree(target)
+    target.symlink_to(decoy)
+
+
+def _stage_status_code(rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return "EMPTY"
+    return str(rows[0].get("error_code") or "ROWS")
+
+
+def _read_cycle(
+    repository: FileOrchestrationJournalRepository, *, model_id: str | None = "model_a"
+) -> list[dict[str, Any]]:
+    return repository.list_stage_statuses(
+        source_id="gfs", cycle_time=_TAMPER_CYCLE, model_id=model_id
+    )
+
+
+def test_warm_cache_entry_does_not_survive_journal_parent_symlink_tamper(tmp_path: Path) -> None:
+    """#1567 red proof: a cached legal `[]` must not outlive an ancestor swap.
+
+    Input: a real, empty journal tree; one warm read populates the cycle-rows
+    cache with a legal `[]`; then `journal/gfs` is replaced by a symlink to an
+    empty decoy directory.  Expected: the SAME instance's next public read
+    reports the `file_journal_unreadable` blocked row, not the cached `[]`.
+    """
+
+    root = tmp_path / "journal"
+    _empty_cycle_tree(root)
+    repository = FileOrchestrationJournalRepository(root)
+
+    warm = _read_cycle(repository)
+    assert warm == []
+    assert repository._cycle_rows_cache, "the warm read must have populated the cache"
+
+    _swap_for_symlinked_decoy(root, "journal/gfs", tmp_path / "decoy", child=None)
+
+    blocked = _read_cycle(repository)
+    assert _stage_status_code(blocked) == "file_journal_unreadable"
+    assert blocked[0]["file_journal"]["status"] == "blocked"
+
+
+def test_cold_and_warm_instance_agree_on_a_tampered_tree(tmp_path: Path) -> None:
+    """#1567: one tree, one answer — the warm instance matches a cold one."""
+
+    root = tmp_path / "journal"
+    _empty_cycle_tree(root)
+    warm_repository = FileOrchestrationJournalRepository(root)
+    assert _read_cycle(warm_repository) == []
+
+    _swap_for_symlinked_decoy(root, "journal/gfs", tmp_path / "decoy", child=None)
+
+    cold_repository = FileOrchestrationJournalRepository(root)
+    warm_rows = _read_cycle(warm_repository)
+    cold_rows = _read_cycle(cold_repository)
+    assert _stage_status_code(warm_rows) == "file_journal_unreadable"
+    assert _stage_status_code(warm_rows) == _stage_status_code(cold_rows)
+    assert warm_rows[0]["file_journal"]["reason"] == cold_rows[0]["file_journal"]["reason"]
+
+
+@pytest.mark.parametrize("model_id", ["model_a", None], ids=["model_scoped", "cross_model"])
+@pytest.mark.parametrize("leg", sorted(_FINGERPRINT_PARENTS))
+def test_every_fingerprint_parent_leg_fails_loud_after_a_symlink_swap(
+    tmp_path: Path, leg: str, model_id: str | None
+) -> None:
+    """#1567 D1: all five stat legs of the fingerprint family, in both lanes.
+
+    The issue names only the segment slots, but the same fingerprint also stats
+    the event-log slots, the `latest/<source>/<cycle>` scandir directory, the
+    by-cycle direct partition and the flat `pipeline-jobs` root.  Every one of
+    them is tampered here in turn, through both public read lanes
+    (`model_id="model_a"` and the default cross-model `model_id=None`).
+
+    Expected: a fail-loud blocked row on the warm instance carrying exactly the
+    token design D1's table names for that (leg, lane) cell, and the cold
+    instance on the same tree carrying the same one.  The token is NOT a
+    property of the leg: it is whichever hardened reader the forced recompute
+    sends through the tampered path first, which is why the `latest` leg
+    reports `file_journal_unreadable` model-scoped and
+    `file_journal_unsafe_scanned_entry` cross-model.
+    """
+
+    relative, child = _FINGERPRINT_PARENTS[leg]
+    expected_token = _FINGERPRINT_PARENT_TOKENS[leg][model_id]
+    root = tmp_path / "journal"
+    _empty_cycle_tree(root)
+    repository = FileOrchestrationJournalRepository(root)
+    assert _read_cycle(repository, model_id=model_id) == []
+
+    _swap_for_symlinked_decoy(root, relative, tmp_path / f"decoy_{leg}", child=child)
+
+    warm_rows = _read_cycle(repository, model_id=model_id)
+    cold_rows = _read_cycle(FileOrchestrationJournalRepository(root), model_id=model_id)
+    assert _stage_status_code(warm_rows) != "EMPTY", f"leg {leg} still fails open"
+    assert warm_rows[0]["file_journal"]["status"] == "blocked"
+    assert _stage_status_code(warm_rows) == expected_token, (
+        f"leg {leg} / model_id={model_id!r}: warm token drifted from design D1's table"
+    )
+    assert _stage_status_code(cold_rows) == expected_token, (
+        f"leg {leg} / model_id={model_id!r}: cold token drifted from design D1's table"
+    )
+    assert _stage_status_code(warm_rows) == _stage_status_code(cold_rows)
+
+
+def test_untouched_empty_directory_stays_a_cacheable_legal_empty_read(tmp_path: Path) -> None:
+    """#1567 D1: genuine absence still fingerprints as absence.
+
+    Input: the same real, empty tree, read twice with nothing tampered.
+    Expected: `[]` both times, and the second read opens no file at all — the
+    containment probe must not turn an empty directory into a cache miss.
+    """
+
+    root = tmp_path / "journal"
+    _empty_cycle_tree(root)
+    repository = FileOrchestrationJournalRepository(root)
+    assert _read_cycle(repository) == []
+
+    reads: list[Path] = []
+    real_read_json = FileOrchestrationJournalRepository._read_optional_json
+    real_read_jsonl = FileOrchestrationJournalRepository._read_jsonl
+
+    def record_json(self: Any, path: Path) -> Any:
+        reads.append(path)
+        return real_read_json(self, path)
+
+    def record_jsonl(self: Any, path: Path, **kwargs: Any) -> Any:
+        reads.append(path)
+        return real_read_jsonl(self, path, **kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_optional_json", record_json)
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_jsonl", record_jsonl)
+    try:
+        assert _read_cycle(repository) == []
+    finally:
+        monkeypatch.undo()
+    assert reads == [], f"second read was not served from the cache: {reads}"
+
+
+@pytest.mark.parametrize("leg", sorted(_FINGERPRINT_PARENTS))
+def test_fingerprint_that_observed_a_containment_fault_is_never_stored(
+    tmp_path: Path, leg: str
+) -> None:
+    """#1567 D1: a marker-carrying fingerprint neither hits nor is stored.
+
+    If a marker-carrying fingerprint WERE stored, the next read would compute
+    the same marker, compare equal, and serve the rows computed under the
+    tamper — the same hole in a new shape.  The oracle is the cache dict, and
+    every one of the five stat legs must reach it, not just the segment slot.
+
+    Why white-box at all: reverting `_containment_stat_signature` to the bare
+    `_stat_signature` on the two direct-partition call sites leaves the PUBLIC
+    read of both direct legs unchanged (measured: the decoy swap moves the
+    bare stat tuple anyway, so the recompute happens for the wrong reason and
+    lands on the same token) — only this marker assertion goes red for them.
+
+    `by_cycle_direct_partition` runs its HARD variant on purpose: neither the
+    real `pipeline-jobs/by-cycle/gfs` nor the decoy holds a `<cycle>` child, so
+    the bare stat returns `None` before AND after the swap.  There the public
+    read is `[]` even WITH the fix — the forced recompute is served from
+    `_direct_jobs_cycle_cache`, a separate cache this change deliberately does
+    not widen to (design D1's stated residual, routed to a follow-up) — so the
+    public token is not asserted for it here.
+    `test_every_fingerprint_parent_leg_fails_loud_after_a_symlink_swap` pins
+    the public tokens for the ordinary variants.
+    """
+
+    relative, child = _FINGERPRINT_PARENTS[leg]
+    hard_variant = leg == "by_cycle_direct_partition"
+    root = tmp_path / "journal"
+    _empty_cycle_tree(root)
+    if hard_variant:
+        (root / "pipeline-jobs" / "by-cycle" / "gfs" / _TAMPER_SEGMENT).rmdir()
+        child = None
+    repository = FileOrchestrationJournalRepository(root)
+    assert _read_cycle(repository) == []
+    before = {key: entry[0] for key, entry in repository._cycle_rows_cache.items()}
+    assert before, "the warm read must have stored a legal entry"
+
+    _swap_for_symlinked_decoy(root, relative, tmp_path / f"decoy_{leg}", child=child)
+
+    faulted = repository._cycle_rows_source_fingerprint(
+        source_segments=("gfs",), cycle_segment=_TAMPER_SEGMENT
+    )
+    assert faulted is journal_module._FINGERPRINT_CONTAINMENT_FAULT, (
+        f"leg {leg} did not carry the containment marker into the fingerprint"
+    )
+
+    rows = _read_cycle(repository)
+    if not hard_variant:
+        assert _stage_status_code(rows) == _FINGERPRINT_PARENT_TOKENS[leg]["model_a"]
+    after = {key: entry[0] for key, entry in repository._cycle_rows_cache.items()}
+    # The pre-tamper entry is a legally stored one and simply stops being
+    # reachable (the fault forces a miss).  What must never happen is a NEW
+    # entry whose stored fingerprint carries the marker: the next read would
+    # recompute the same marker, compare equal, and serve the tampered rows.
+    assert after == before, "the faulted read must store nothing"
+    assert all(
+        fingerprint is not journal_module._FINGERPRINT_CONTAINMENT_FAULT
+        for fingerprint in after.values()
+    )
+    # Repeating the read proves the point directly: never a hit on the marker.
+    assert repository._cycle_rows_source_fingerprint(
+        source_segments=("gfs",), cycle_segment=_TAMPER_SEGMENT
+    ) is journal_module._FINGERPRINT_CONTAINMENT_FAULT
+    if not hard_variant:
+        assert (
+            _stage_status_code(_read_cycle(repository))
+            == _FINGERPRINT_PARENT_TOKENS[leg]["model_a"]
+        )
+
+
+def test_cycle_write_window_owner_hit_under_a_tampered_parent_fails_loud(tmp_path: Path) -> None:
+    """#1567 D1b: the owner's fingerprint-free fast path is not a tamper hole.
+
+    Input: the owner reads its own cycle twice inside its window (the first is
+    a miss, the second would be an unvalidated hit), with `journal/gfs` swapped
+    for a symlink to an empty decoy between them.  Expected: the second read
+    recomputes and raises `file_journal_unreadable` — the cold read's outcome.
+    """
+
+    root = tmp_path / "journal"
+    _empty_cycle_tree(root)
+    repository = FileOrchestrationJournalRepository(root)
+
+    with repository._locked_cycle_write(source_id="gfs", cycle_time=_TAMPER_CYCLE):
+        first = repository._cycle_rows(
+            source_id="gfs", cycle_time=_TAMPER_CYCLE, model_id="model_a"
+        )
+        assert not first.pipeline_jobs
+        _swap_for_symlinked_decoy(root, "journal/gfs", tmp_path / "decoy", child=None)
+        with pytest.raises(FileOrchestrationJournalError) as caught:
+            repository._cycle_rows(source_id="gfs", cycle_time=_TAMPER_CYCLE, model_id="model_a")
+    assert caught.value.reason == "file_journal_unreadable"
+    assert repository._cycle_write_owner is None
+
+
+def test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit(
+    tmp_path: Path,
+) -> None:
+    """#1567 D1b STATED LIMIT: the owner probe is directory-only, by design.
+
+    This test pins a limit, not a fix.  The owner's fast path computes no
+    source-file fingerprint (that is what D1b exists to skip); it only
+    containment-stats the five DIRECTORIES that feed the cycle.  So a LEAF
+    swapped for a symlink during the window — here
+    `journal/gfs/<cycle>.jsonl`, one of five measured leaf cells — is invisible
+    to the owner: it keeps serving its pre-tamper cached rows while a cold
+    instance on the same tree raises.  That narrows the pre-PR state (the owner
+    did no tamper detection at all) instead of widening it.
+
+    When the residual is closed (a leaf-level owner probe, routed to a
+    follow-up issue), this test must be FLIPPED — the owner read starts raising
+    `file_journal_unreadable` like the cold one — not deleted.
+
+    Input: an empty tree; two in-window `_cycle_rows` reads with
+    `journal/gfs/<cycle>.jsonl` replaced by a symlink to a decoy regular file
+    between them.  Expected: the second read returns the cached pre-tamper rows
+    with no raise, the directory probe reports no fault, and a fresh cold
+    repository on the same tree raises `file_journal_unreadable`.
+    """
+
+    root = tmp_path / "journal"
+    _empty_cycle_tree(root)
+    decoy_leaf = tmp_path / "decoy_leaf.jsonl"
+    decoy_leaf.write_text("", encoding="utf-8")
+    repository = FileOrchestrationJournalRepository(root)
+
+    with repository._locked_cycle_write(source_id="gfs", cycle_time=_TAMPER_CYCLE):
+        first = repository._cycle_rows(
+            source_id="gfs", cycle_time=_TAMPER_CYCLE, model_id="model_a"
+        )
+        assert not first.pipeline_jobs
+        assert repository._cycle_rows_cache, "the in-window read must have cached an entry"
+
+        leaf = root / "journal" / "gfs" / f"{_TAMPER_SEGMENT}.jsonl"
+        assert not leaf.exists()
+        leaf.symlink_to(decoy_leaf)
+
+        # The stated limit: no raise, and the same rows the owner cached before
+        # the swap.
+        second = repository._cycle_rows(
+            source_id="gfs", cycle_time=_TAMPER_CYCLE, model_id="model_a"
+        )
+        assert second == first
+        assert not repository._cycle_directories_probe_faulted(
+            source_segments=("gfs",), cycle_segment=_TAMPER_SEGMENT
+        ), "the probe is directory-only; a leaf swap must not register as a fault"
+
+        # The contrast that makes the limit a limit: a cold reader on the very
+        # same tree fails loud on that leaf.
+        with pytest.raises(FileOrchestrationJournalError) as caught:
+            FileOrchestrationJournalRepository(root)._cycle_rows(
+                source_id="gfs", cycle_time=_TAMPER_CYCLE, model_id="model_a"
+            )
+    assert caught.value.reason == "file_journal_unreadable"
+    assert repository._cycle_write_owner is None
+
+
+# --- #1658: the window-EXIT clear is scoped to the window's own keys ---------
+
+
+def test_cycle_write_window_exit_clear_keeps_other_cycles_entries(tmp_path: Path) -> None:
+    """#1658 red proof — design D2.
+
+    Cohort X opens a write window; INSIDE it (the entry wipe is global, so a
+    pre-window warmup would go red for the wrong reason) an entry for a
+    different cycle Y is populated on the same instance, and a synthetic base
+    key for X is injected so "base key included" is not vacuous.  X's window
+    body appends a JOURNAL record for X — deliberately not a flat
+    `pipeline-jobs/<job_id>.json` direct, whose write would change the shared
+    flat-root stat that every cycle's fingerprint carries (design D2's stated
+    limit) and make Y miss for the wrong reason.
+
+    Expected after the window exits: Y's entry is still cached and Y's next
+    read opens no file at all, while every key for X's own
+    `(source_id, cycle_segment)` — the base key included — is gone.
+    """
+
+    root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(root)
+    writer_cycle = _dt("2026-06-29T00:00:00Z")
+    reader_cycle = _dt("2026-06-29T06:00:00Z")
+    writer_segment = format_cycle_time(writer_cycle)
+    reader_segment = format_cycle_time(reader_cycle)
+    _write_latest_view(root, cycle_time=reader_cycle, status="running")
+    _write_latest_view(root, cycle_time=writer_cycle, status="running")
+
+    base_key = ("gfs", writer_segment, None, None)
+    with repository._locked_cycle_write(source_id="gfs", cycle_time=writer_cycle):
+        # X's own derived entry, populated inside the window.
+        repository._cycle_rows(source_id="gfs", cycle_time=writer_cycle, model_id="model_a")
+        # Y's entry, populated inside the window by the same thread: a
+        # non-owner read for that cycle, so it revalidates and stores a real
+        # fingerprint.
+        repository._cycle_rows(source_id="gfs", cycle_time=reader_cycle, model_id="model_a")
+        # No current reader produces the legacy base key, so "the exit sweep
+        # includes the base key" would be untestable without injecting one.
+        with repository._cache_lock:
+            repository._cycle_rows_cache[base_key] = (None, journal_module._CycleRows())
+        record = journal_module._journal_record_for_write(
+            "pipeline_event",
+            {
+                "event_id": 1,
+                "entity_type": "pipeline_job",
+                "entity_id": f"job_cycle_gfs_{writer_segment}_forecast",
+                "event_type": "status_change",
+                "status_from": "reserved",
+                "status_to": "queued",
+                "message": None,
+                "details": {},
+                "created_at": "2026-06-29T00:00:00Z",
+            },
+            source_id="gfs",
+            cycle_time=writer_cycle,
+            model_id=None,
+            sequence=1,
+        )
+        repository._append_journal_record_unlocked(
+            source_id="gfs", cycle_time=writer_cycle, record=record
+        )
+        with repository._cache_lock:
+            repository._cycle_rows_cache[base_key] = (None, journal_module._CycleRows())
+        surviving_key = next(
+            key for key in repository._cycle_rows_cache if key[1] == reader_segment
+        )
+
+    remaining = set(repository._cycle_rows_cache)
+    assert surviving_key in remaining, "the exit clear evicted another cycle's entry"
+    assert base_key not in remaining, "the exit sweep must include the base key"
+    assert not [key for key in remaining if key[0] == "gfs" and key[1] == writer_segment], (
+        "the window's own prefix must be gone"
+    )
+
+    reads: list[Path] = []
+    real_read_json = FileOrchestrationJournalRepository._read_optional_json
+    real_read_jsonl = FileOrchestrationJournalRepository._read_jsonl
+
+    def record_json(self: Any, path: Path) -> Any:
+        reads.append(path)
+        return real_read_json(self, path)
+
+    def record_jsonl(self: Any, path: Path, **kwargs: Any) -> Any:
+        reads.append(path)
+        return real_read_jsonl(self, path, **kwargs)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_optional_json", record_json)
+    monkeypatch.setattr(FileOrchestrationJournalRepository, "_read_jsonl", record_jsonl)
+    try:
+        rows = repository._cycle_rows(
+            source_id="gfs", cycle_time=reader_cycle, model_id="model_a"
+        )
+    finally:
+        monkeypatch.undo()
+    assert rows.hydro_run["status"] == "running"
+    assert reads == [], f"Y's entry did not survive the window exit: {reads}"
+
+
+def test_cycle_write_window_entry_clear_is_still_global(tmp_path: Path) -> None:
+    """#1658 D2: only the EXIT clear is narrowed; the ENTRY clear is not.
+
+    The owner bypasses fingerprint validation for every hit, so a pre-window
+    entry another process had already invalidated would be trusted.  That makes
+    the entry wipe a correctness precondition, not a tunable.
+    """
+
+    root = tmp_path / "journal"
+    repository = FileOrchestrationJournalRepository(root)
+    writer_cycle = _dt("2026-06-29T00:00:00Z")
+    other_cycle = _dt("2026-06-29T06:00:00Z")
+    _write_latest_view(root, cycle_time=other_cycle, status="running")
+
+    repository._cycle_rows(source_id="gfs", cycle_time=other_cycle, model_id="model_a")
+    assert repository._cycle_rows_cache
+
+    with repository._locked_cycle_write(source_id="gfs", cycle_time=writer_cycle):
+        assert repository._cycle_rows_cache == {}, (
+            "the window-entry clear must stay global (design D2)"
+        )

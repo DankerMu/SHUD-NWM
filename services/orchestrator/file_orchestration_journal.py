@@ -686,6 +686,41 @@ class _PendingManualRetryResult:
     private_snapshot: dict[str, Any]
 
 
+class _FingerprintContainmentFault:
+    """The cycle-rows fingerprint's containment-fault marker (#1567 D1).
+
+    Returned by :meth:`FileOrchestrationJournalRepository._containment_stat_signature`
+    when a path it stats is unreachable under the hardened readers' containment
+    rules (a symlinked parent component, a symlink in the slot itself, or any
+    other stat fault).  It is deliberately NOT ``None`` — ``None`` is genuine
+    absence for one leg and, at ``_cycle_rows``, the write-window owner's
+    "no fingerprint computed" signal — and it never compares equal to a real
+    ``(mtime_ns, size, inode)`` signature, so a fingerprint carrying it can
+    neither match a stored entry nor be stored itself.  The recompute it forces
+    reaches the existing probe fault in ``_read_cycle_segments`` and raises
+    ``file_journal_unreadable`` exactly as a cold instance does; the fingerprint
+    itself never raises, so the public contract frame stays where it is.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid only
+        return "<cycle-rows fingerprint containment fault>"
+
+
+_FINGERPRINT_CONTAINMENT_FAULT = _FingerprintContainmentFault()
+
+
+def _signature_has_containment_fault(value: Any) -> bool:
+    """True when any leg of a (possibly nested) fingerprint carries the marker."""
+
+    if value is _FINGERPRINT_CONTAINMENT_FAULT:
+        return True
+    if isinstance(value, tuple):
+        return any(_signature_has_containment_fault(item) for item in value)
+    return False
+
+
 class _JournalProbeContainmentError(Exception):
     """A containment fault raised by an existence probe, carried to a choke frame.
 
@@ -5641,7 +5676,7 @@ class FileOrchestrationJournalRepository:
             parts = path.relative_to(self.root).parts
             if len(parts) == 4 and parts[0] == "latest" and parts[2] == cycle_segment:
                 source = _cycle_source_discovery_from_segment(parts[1])
-                _merge_cycle_source_discovery(sources, source)
+                _merge_cycle_source_discovery(sources, source, root=self.root)
         for surface in ("journal", "pipeline-events"):
             for path in sorted(
                 _iter_jsonl_files(
@@ -5666,7 +5701,7 @@ class FileOrchestrationJournalRepository:
                     segment_index=segment_index,
                 )
                 source = _cycle_source_discovery_from_segment(parts[1])
-                _merge_cycle_source_discovery(sources, source)
+                _merge_cycle_source_discovery(sources, source, root=self.root)
         file_source_ids = set(sources)
         for job in self._iter_direct_pipeline_job_records():
             if _format_utc(_cycle_time_from_job(job)) == _format_utc(cycle_time):
@@ -5718,18 +5753,38 @@ class FileOrchestrationJournalRepository:
         # when the window opens is the fast path's correctness precondition —
         # not a performance measure — because the owner's hits bypass the
         # fingerprint check.  Reads after the wipe may store their own
-        # `fingerprint=None` entries for the rest of the window; the owner's
-        # own fast path still performs no tamper detection (that is #1567's
-        # scope; ownership only narrows the exposure from any thread to the
-        # window owner).
+        # `fingerprint=None` entries for the rest of the window.  The owner
+        # still computes no source-file fingerprint (#1567 D1b), but it runs
+        # the containment probe over the DIRECTORIES that feed its cycle — and
+        # nothing below them — so one of those directories swapped for a
+        # symlink during the window turns the hit into a recompute that fails
+        # loud with whatever token the cold reader reports for that directory
+        # (design D1's table; it is a property of the (leg, lane) pair, not of
+        # the leg alone).  Stated limit, design D1b: a LEAF swapped for a
+        # symlink during the window is NOT seen — a leaf probe is exactly the
+        # source-file fingerprint this fast path exists to skip — so the owner
+        # keeps serving its pre-tamper cached rows there while a cold instance
+        # raises.
         fingerprint = (
             None
             if in_write_window
             else self._cycle_rows_source_fingerprint(source_segments=source_segments, cycle_segment=cycle_segment)
         )
+        # A fingerprint that observed a containment fault (#1567 D1) can
+        # neither hit nor be stored.  Identity (`is`) on the marker, never
+        # equality, so no exotic `__eq__` can resurrect the fast path.
+        probe_faulted = (
+            self._cycle_directories_probe_faulted(source_segments=source_segments, cycle_segment=cycle_segment)
+            if in_write_window
+            else fingerprint is _FINGERPRINT_CONTAINMENT_FAULT
+        )
         with self._cache_lock:
             cached = self._cycle_rows_cache.get(cache_key)
-        if cached is not None and (in_write_window or (fingerprint is not None and cached[0] == fingerprint)):
+        if (
+            cached is not None
+            and not probe_faulted
+            and (in_write_window or (fingerprint is not None and cached[0] == fingerprint))
+        ):
             # Cached rows are never mutated in place after being stored, so
             # cloning a hit outside the mutex cannot observe a torn value.
             return _clone_cycle_rows(cached[1])
@@ -5785,7 +5840,12 @@ class FileOrchestrationJournalRepository:
         if model_id is not None:
             _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
         rows.pipeline_events = _dedupe_events(rows.pipeline_events)
-        self._cache_cycle_rows(cache_key, rows, fingerprint=fingerprint)
+        # #1567 D1: a read whose fingerprint (or, for the window owner, whose
+        # directory probe) observed a containment fault stores nothing, so a
+        # later read cannot recompute the same marker, compare equal and serve
+        # rows that were computed under the tamper.
+        if not probe_faulted:
+            self._cache_cycle_rows(cache_key, rows, fingerprint=fingerprint)
         return _clone_cycle_rows(rows)
 
     def _cycle_rows_by_model_unlocked(
@@ -5964,7 +6024,7 @@ class FileOrchestrationJournalRepository:
         *,
         source_segments: tuple[str, ...],
         cycle_segment: str,
-    ) -> tuple[Any, ...]:
+    ) -> tuple[Any, ...] | _FingerprintContainmentFault:
         """Stat-level identity of every file that feeds `_cycle_rows`.
 
         Appends, atomic replaces, additions and removals all change the
@@ -5972,29 +6032,51 @@ class FileOrchestrationJournalRepository:
         listing, or the pipeline-jobs directory whose entries only change
         via rename — so a matching fingerprint proves a cached entry still
         reflects the on-disk state.
+
+        #1567 D1: every stat in this family — the segment slots, the event-log
+        slots, the ``latest/<source>/<cycle>`` listing's own directory, the
+        by-cycle direct partition and the flat ``pipeline-jobs`` root — routes
+        through ``_containment_stat_signature``.  If any of them observes a
+        containment fault the whole fingerprint collapses to
+        :data:`_FINGERPRINT_CONTAINMENT_FAULT`, which ``_cycle_rows`` neither
+        hits nor stores; storing it would let the NEXT read compute the same
+        marker, compare equal and serve the tampered rows — the same hole in a
+        new shape.
         """
         latest_entries: list[tuple[str, str, tuple[int, int, int] | None]] = []
         journal_signatures: list[tuple[str, Any]] = []
         event_signatures: list[tuple[str, Any]] = []
-        direct_partition_signatures: list[tuple[str, tuple[int, int, int] | None]] = []
+        direct_partition_signatures: list[tuple[str, Any]] = []
+        latest_directory_signatures: list[tuple[str, Any]] = []
         for source_segment in source_segments:
-            try:
-                with os.scandir(self.root / "latest" / source_segment / cycle_segment) as it:
-                    for entry in it:
-                        if entry.name.endswith(".json"):
-                            try:
-                                entry_stat = entry.stat(follow_symlinks=False)
-                                latest_entries.append(
-                                    (
-                                        source_segment,
-                                        entry.name,
-                                        (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino),
+            latest_directory = self.root / "latest" / source_segment / cycle_segment
+            # The scandir is the one leg the helper cannot be a drop-in for:
+            # ``os.scandir`` FOLLOWS a symlinked parent and lists the decoy
+            # without raising, so the directory itself is probed first and a
+            # fault short-circuits the listing.  Entries inside a probed-real
+            # directory keep their own ``entry.stat(follow_symlinks=False)``.
+            latest_directory_signature = self._containment_stat_signature(latest_directory)
+            latest_directory_signatures.append((source_segment, latest_directory_signature))
+            if latest_directory_signature is not None and not _signature_has_containment_fault(
+                latest_directory_signature
+            ):
+                try:
+                    with os.scandir(latest_directory) as it:
+                        for entry in it:
+                            if entry.name.endswith(".json"):
+                                try:
+                                    entry_stat = entry.stat(follow_symlinks=False)
+                                    latest_entries.append(
+                                        (
+                                            source_segment,
+                                            entry.name,
+                                            (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino),
+                                        )
                                     )
-                                )
-                            except OSError:
-                                latest_entries.append((source_segment, entry.name, None))
-            except OSError:
-                pass
+                                except OSError:
+                                    latest_entries.append((source_segment, entry.name, None))
+                except OSError:
+                    pass
             journal_signatures.append(
                 (
                     source_segment,
@@ -6012,18 +6094,22 @@ class FileOrchestrationJournalRepository:
             direct_partition_signatures.append(
                 (
                     source_segment,
-                    _stat_signature(
+                    self._containment_stat_signature(
                         self.root / "pipeline-jobs" / "by-cycle" / source_segment / cycle_segment
                     ),
                 )
             )
-        return (
+        fingerprint = (
             tuple(journal_signatures),
             tuple(event_signatures),
             tuple(direct_partition_signatures),
             tuple(sorted(latest_entries)),
-            _stat_signature(self.root / "pipeline-jobs"),
+            tuple(latest_directory_signatures),
+            self._containment_stat_signature(self.root / "pipeline-jobs"),
         )
+        if _signature_has_containment_fault(fingerprint):
+            return _FINGERPRINT_CONTAINMENT_FAULT
+        return fingerprint
 
     def _cache_cycle_rows(
         self,
@@ -9425,6 +9511,18 @@ class FileOrchestrationJournalRepository:
         record_type: str,
         model_id: str | None,
     ) -> None:
+        """The one write-side validator every journal lane runs before its first byte.
+
+        #1760 D4: for a ``pipeline_job`` record this is also the single
+        definition of the job-id scope gate.  It sits BESIDE the
+        ``_apply_journal_record`` call below — not inside it — so the read-side
+        replay (``_validate_pipeline_job_identity``) keeps its current
+        semantics and a historical row that pre-dates the gate is never turned
+        into a replay fault.  It runs BEFORE that call so the reason token is
+        deterministic when a row diverges in more than one field.
+        """
+
+        self._require_job_id_cycle_scope(record, record_type=record_type)
         rows = _CycleRows()
         self._apply_journal_record(
             rows,
@@ -9434,6 +9532,54 @@ class FileOrchestrationJournalRepository:
             expected_record_type=record_type,
             expected_model_id=model_id,
         )
+
+    def _require_job_id_cycle_scope(self, record: Mapping[str, Any], *, record_type: str) -> None:
+        """Reject a pipeline-job row whose ``job_id`` contradicts its own scope.
+
+        The flat direct file NAME is authoritative for cycle scoping (#1759
+        D2a): a cycle-scoped reader of ``pipeline-jobs/`` skips a file whose
+        name resolves to another ``(source_id, cycle)``.  This gate makes the
+        agreement between that name and the row's content an enforced
+        invariant rather than an emergent property, at the one place every
+        pipeline-job write lane passes before any byte — journal record or
+        direct file — reaches disk.
+
+        The comparison is normalized-to-normalized on both sides and against
+        the row's OWN ``source_id`` / ``cycle_time`` (the payload), never the
+        lane's kwargs, so a lane that takes the pair as arguments is judged the
+        same way as one that derives it from the row.  ``None`` from
+        ``_cycle_scope_from_job_id`` — an id matching neither recognised shape
+        — passes: the fall-open rule of #1734 D1a is unchanged at the write
+        boundary.  A payload whose own pair cannot be derived at all also
+        passes here, so the pre-existing identity error keeps its token and is
+        raised by ``_apply_journal_record`` where it always was.
+        """
+
+        if record_type != "pipeline_job":
+            return
+        payload = record.get("payload")
+        if not isinstance(payload, Mapping):
+            return
+        scope = _cycle_scope_from_job_id(payload.get("job_id"))
+        if scope is None:
+            return
+        try:
+            own_pair = (
+                _source_id_from_job(payload),
+                format_cycle_time(_cycle_time_from_job(payload)),
+            )
+        except FileOrchestrationJournalError:
+            return
+        claimed_pair = (scope[0], format_cycle_time(scope[1]))
+        if claimed_pair != own_pair:
+            raise FileOrchestrationJournalError(
+                "file_journal_job_id_scope_mismatch",
+                field="job_id",
+                evidence={
+                    "expected": f"{own_pair[0]}/{own_pair[1]}"[:80],
+                    "actual": f"{claimed_pair[0]}/{claimed_pair[1]}"[:80],
+                },
+            )
 
     def _next_sequence(self, *, source_id: str, cycle_time: datetime) -> int:
         with self._write_lock:
@@ -9521,6 +9667,74 @@ class FileOrchestrationJournalRepository:
                 field=str(_relative_evidence(path, self.root)),
                 error_type=type(error).__name__,
             ) from error
+
+    def _containment_stat_signature(
+        self, path: Path
+    ) -> tuple[int, int, int] | _FingerprintContainmentFault | None:
+        """Stat identity for the cycle-rows fingerprint family, under containment.
+
+        The single helper every stat that feeds ``_cycle_rows_source_fingerprint``
+        and ``_cycle_segment_signatures`` routes through (#1567 D1), so the cache
+        judges its source files under the same discipline as the hardened
+        readers:
+
+        * a real entry -> ``(mtime_ns, size, inode)``;
+        * genuine absence under a chain of real directories -> ``None``, so an
+          untouched empty directory stays a cacheable legal empty read;
+        * a containment fault -> :data:`_FINGERPRINT_CONTAINMENT_FAULT`, which
+          makes the whole fingerprint non-cacheable.
+
+        Bare ``os.stat(follow_symlinks=False)`` (``_stat_signature``) does not
+        follow the final component but DOES follow symlinked parents, which is
+        what let a real empty directory and a ``symlink -> empty decoy``
+        fingerprint alike.
+        """
+
+        try:
+            entry_stat = stat_no_follow(path, containment_root=self.root)
+        except FileNotFoundError:
+            return None
+        except (SafeFilesystemError, OSError):
+            return _FINGERPRINT_CONTAINMENT_FAULT
+        return (entry_stat.st_mtime_ns, entry_stat.st_size, entry_stat.st_ino)
+
+    def _cycle_directories_probe_faulted(
+        self,
+        *,
+        source_segments: tuple[str, ...],
+        cycle_segment: str,
+    ) -> bool:
+        """Containment probe of the directories that feed one cycle (#1567 D1b).
+
+        The write-window owner's fast path computes no source-file fingerprint;
+        it runs these directory-only containment stats instead, so one of the
+        listed DIRECTORIES swapped for a symlink during the window turns the
+        owner's hit into a recompute.  The recompute then fails loud with
+        whichever token the cold reader produces for that directory — design
+        D1's table: ``file_journal_unreadable`` for the journal, pipeline-events
+        and (model-scoped) latest directories, ``file_journal_unsafe_scanned_entry``
+        for the by-cycle partition, the flat ``pipeline-jobs`` root and the
+        cross-model (``model_id=None``) latest read.
+
+        Stated limit: nothing BELOW these directories is probed, so a leaf file
+        swapped for a symlink during the window is not detected here.  That is
+        deliberate — a leaf probe is the source-file fingerprint this fast path
+        exists to skip — and it is why this is deliberately NOT routed through
+        ``_cycle_rows_source_fingerprint``.
+        """
+
+        directories = [self.root / "pipeline-jobs"]
+        for source_segment in source_segments:
+            directories.append(self.root / "journal" / source_segment)
+            directories.append(self.root / "pipeline-events" / source_segment)
+            directories.append(self.root / "latest" / source_segment / cycle_segment)
+            directories.append(
+                self.root / "pipeline-jobs" / "by-cycle" / source_segment / cycle_segment
+            )
+        return any(
+            self._containment_stat_signature(directory) is _FINGERPRINT_CONTAINMENT_FAULT
+            for directory in directories
+        )
 
     def _sequence_regular_file_exists(self, path: Path) -> bool:
         mode = self._probe_stat_mode(path)
@@ -10085,8 +10299,31 @@ class FileOrchestrationJournalRepository:
                 with self._cycle_file_lock_unlocked(source_id=source_id, cycle_time=cycle_time):
                     yield
             finally:
+                # #1658 D2: the EXIT clear is a performance measure, so it is
+                # scoped to the window's own (normalized source_id,
+                # cycle_segment) prefix — every derived 4-tuple key for that
+                # pair AND the legacy base key `(source, cycle, None, None)`.
+                # The stale-key sweep in `_apply_record_to_cycle_rows_cache`
+                # deliberately EXCLUDES the base key because it updates it in
+                # place; this sweep must include it, because the window is over
+                # and nothing will refresh it.  Entries other cycles populated
+                # during the window survive.  The ENTRY clear above stays
+                # global and untouched: it is the owner fast path's correctness
+                # precondition, not a tunable.  A marker that was never set
+                # (a failure while the window was opening) leaves no prefix to
+                # scope by, so that degenerate path keeps the global wipe.
+                owner = self._cycle_write_owner
                 with self._cache_lock:
-                    self._cycle_rows_cache.clear()
+                    if owner is None:
+                        self._cycle_rows_cache.clear()
+                    else:
+                        owner_source_id, owner_cycle_segment = owner[1], owner[2]
+                        for key in [
+                            key
+                            for key in self._cycle_rows_cache
+                            if key[0] == owner_source_id and key[1] == owner_cycle_segment
+                        ]:
+                            self._cycle_rows_cache.pop(key, None)
                 self._cycle_write_owner = None
 
     @contextmanager
@@ -10223,9 +10460,15 @@ class FileOrchestrationJournalRepository:
         Absent slots are included as ``None``: rollover freezes the previous
         segment forever, so a fingerprint that only watched the base file
         would serve stale rows for the rest of the cycle's life.
+
+        #1567 D1: every slot resolves through ``_containment_stat_signature``,
+        so a symlinked ``<surface>/<source>`` parent yields the fingerprint's
+        containment-fault marker instead of an "absent" that is
+        indistinguishable from a real empty directory.
         """
         return tuple(
-            (name, _stat_signature(directory / name)) for name in _journal_segment_names(cycle_segment)
+            (name, self._containment_stat_signature(directory / name))
+            for name in _journal_segment_names(cycle_segment)
         )
 
     def _read_cycle_segments(self, directory: Path, cycle_segment: str) -> list[dict[str, Any]]:
@@ -13504,15 +13747,47 @@ def _cycle_source_discovery_from_segment(source_segment: str) -> _CycleSourceDis
 def _merge_cycle_source_discovery(
     sources: dict[str, _CycleSourceDiscovery],
     source: _CycleSourceDiscovery,
+    *,
+    root: Path | None = None,
 ) -> None:
+    """Merge one surface's discovery into the per-source segment list.
+
+    #1761 D3: when ``root`` is given, a candidate segment is dropped only when
+    ``_names_same_directory`` proves by ``(st_dev, st_ino)`` that it names a
+    directory already kept — the same identity discipline the primary alias
+    branch of ``_cycle_read_source_segments`` uses.  On a case-insensitive
+    volume the mixed pair this merge used to produce (``latest/IFS`` +
+    ``journal/ifs``) collapses to one segment, so every record is read once; on
+    a case-sensitive volume no surface can prove identity and both real
+    directories stay.  A symlinked alias keeps its own inode under the no-follow
+    stat and therefore stays too, where the read path fails it closed.  With
+    ``root is None`` the historical string dedup is kept unchanged.
+    """
+
     existing = sources.get(source.source_id)
     if existing is None:
         sources[source.source_id] = source
         return
     source_segments = list(existing.source_segments)
+    # The identity probe costs one no-follow stat per surface per kept segment,
+    # and this merge runs once per matching file under ``latest/`` and once per
+    # matching segment under ``journal/``/``pipeline-events/``.  So it is
+    # deferred until a candidate actually survives the cheap string check: the
+    # common case, where every surface spells the source the same way, pays
+    # nothing beyond the string compare it already paid.
+    kept_identities: list[dict[str, tuple[int, int]]] | None = None
     for source_segment in source.source_segments:
-        if source_segment not in source_segments:
-            source_segments.append(source_segment)
+        if source_segment in source_segments:
+            continue
+        if root is not None:
+            if kept_identities is None:
+                kept_identities = [
+                    _source_segment_directory_identities(root, segment) for segment in source_segments
+                ]
+            if any(_names_same_directory(root, source_segment, identities) for identities in kept_identities):
+                continue
+            kept_identities.append(_source_segment_directory_identities(root, source_segment))
+        source_segments.append(source_segment)
     sources[source.source_id] = _CycleSourceDiscovery(
         source_id=existing.source_id,
         source_segments=tuple(source_segments),
@@ -13587,13 +13862,24 @@ def _cycle_read_source_segments(
 ) -> tuple[str, ...]:
     if source_segment_overrides is not None:
         segments: list[str] = []
+        # #1761 D3: mirror the primary branch's identity dedup.  Every override
+        # still goes through `_cycle_read_source_segment` first, so the
+        # per-item source-mismatch validation (`file_journal_source_mismatch`)
+        # is unchanged, and an override list that is empty after collapsing
+        # still fails closed with `file_journal_missing_identity`.
+        override_identities: list[dict[str, tuple[int, int]]] = []
         for source_segment_override_item in source_segment_overrides:
             segment = _cycle_read_source_segment(
                 source_id=source_id,
                 source_segment_override=source_segment_override_item,
             )
-            if segment not in segments:
-                segments.append(segment)
+            if segment in segments:
+                continue
+            if root is not None:
+                if any(_names_same_directory(root, segment, identities) for identities in override_identities):
+                    continue
+                override_identities.append(_source_segment_directory_identities(root, segment))
+            segments.append(segment)
         if not segments:
             raise FileOrchestrationJournalError("file_journal_missing_identity", field="source_id")
         return tuple(segments)
