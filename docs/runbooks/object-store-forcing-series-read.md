@@ -110,6 +110,33 @@ HTTP 500 `STATION_FORCING_FILE_MALFORMED`（状态码与错误码都不变），
 - 该前缀是**单向**判据：有前缀说明命中的是替换窗口；**不能**反过来把「没有该前缀」读成「文件已损坏」——
   没有前缀只表示这次失败不是耗尽的 inode 竞态，其余成因（权限、I/O、CSV 契约违例、bounded-read 越界）仍需按上表逐项排查。
 
+### 事后定位：用 `X-Request-ID` grep display 日志
+
+`concurrent-replace` 这类 500 往往在用户报障时早已过去，重放请求也复现不出来。自 #1704 起
+`error_response()` 会为**每一个**错误响应在 display unit 的 stderr（systemd
+`StandardError=append:/tmp/display-api.log`）写一行，用响应头 `X-Request-ID` 就能捞回来：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27 \
+  'grep -F "<X-Request-ID>" /tmp/display-api.log'
+```
+
+一行的形状（5xx 记 ERROR，4xx 记 WARNING）：
+
+```text
+2026-09-02 08:30:09,835 ERROR apps.api.errors api_error request_id=<id> code=STATION_FORCING_FILE_MALFORMED status=500 path=/api/v1/met/stations/<id>/series details={'station_id': '…', 'expected_path': '[redacted]', 'parse_reason': 'concurrent-replace: …'}
+```
+
+**脱敏取舍（有意为之）**：`details` 先过审计用的 `redact_audit_payload`，再按 key 抹掉
+`rejected_value`。代价是 `expected_path` 这类绝对路径整串变成 `[redacted]`——日志里拿不到
+具体文件名，要定位文件请按 `station_id` + cycle 目录自己推。收益是客户端可控输入
+（API key、邮箱、SQL 片段）不会以任何形状落进生产日志。`parse_reason` 明文保留，因为它是这
+行存在的理由；不要往 `parse_reason` 里塞路径或用户输入。
+
+**已知盲区**：`/api/v1/slurm*` 前缀的请求校验错误由
+`services/slurm_gateway/validation_errors.py` 的独立 handler 应答，**不**经过
+`error_response()`，因此不产生这行日志。排查 slurm 网关请按该网关自己的口径。
+
 `PsycopgForecastStore.station_series()` 仍保留在 `packages/common/forecast_store.py`，
 但它现在是 legacy/internal DB helper：只用于保留历史 DB 合同测试和 ADR 0001 所述的
 长期历史 API 设计，不是当前 display station-series route 的实现。生产 route/service

@@ -33,6 +33,10 @@ from services.slurm_gateway.gateway import SlurmGateway, SlurmGatewayError
 from workers.data_adapters.base import format_cycle_time, parse_cycle_time
 
 router = APIRouter(prefix="/api/v1", tags=["pipeline"])
+# #1728: this router's connection surface in pg_stat_activity. Distinct from
+# hydro_display's read-only display pool: these are the control-plane
+# retry/cancel writes an operator most needs to tell apart before cancelling.
+_APPLICATION_NAME = "nhms-api-pipeline"
 _SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 PIPELINE_JOB_STATUS_VALUES = (
     "pending",
@@ -114,7 +118,11 @@ class _StrictPipelineIdentity:
 
 @lru_cache
 def _engine(database_url: str) -> Engine:
-    return create_engine(database_url, future=True)
+    return create_engine(
+        database_url,
+        future=True,
+        connect_args={"fallback_application_name": _APPLICATION_NAME},
+    )
 
 
 def get_pipeline_store() -> Generator[PipelineStore, None, None]:

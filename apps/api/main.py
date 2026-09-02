@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import sys
 from collections.abc import Mapping
 from typing import Any
 from uuid import uuid4
@@ -28,6 +30,37 @@ _PRE_BODY_PROTECTED_MUTATIONS: dict[tuple[str, str], tuple[str, str, str]] = {
     ): ("models.switch_version", "model_registry", "river-segment-crosswalks"),
 }
 _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES = 4096
+
+API_LOGGER_NAME = "apps.api"
+API_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def _install_api_log_handler() -> logging.Logger:
+    """Give the `apps.api` logger tree a stderr handler (#1704).
+
+    The production unit runs `python -m uvicorn apps.api.main:app` with no
+    `--log-config`, so the root logger is unconfigured: without this, an
+    `error_response()` line would only reach `logging.lastResort`, which emits
+    the bare message with no timestamp and drops anything below WARNING.
+    systemd's `StandardError=append:/tmp/display-api.log` then captures stderr.
+
+    Propagation is deliberately left ON: under uvicorn the root has no handler
+    (so no duplicate line), and under pytest `caplog` attaches at the root,
+    which is where these records must still be observable.
+
+    Idempotent: each uvicorn worker imports this module in its own process, but
+    a re-import or a second `create_app()` in one process must not stack
+    handlers.
+    """
+    api_logger = logging.getLogger(API_LOGGER_NAME)
+    if not api_logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter(API_LOG_FORMAT))
+        api_logger.addHandler(handler)
+    return api_logger
+
+
+_install_api_log_handler()
 runtime_router = startup_wiring.create_runtime_router()
 runtime_config = startup_wiring.runtime_config
 

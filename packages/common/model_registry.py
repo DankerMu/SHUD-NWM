@@ -110,6 +110,17 @@ def default_database_url() -> str:
     return database_url
 
 
+def _attribution_connect_kwargs(application_name: str | None) -> dict[str, str]:
+    """libpq attribution kwargs for a connection this module opens (#1728).
+
+    Empty when the caller injected no ``application_name``, so a store built
+    without one reaches ``psycopg2.connect`` exactly as it did before.
+    """
+    if application_name is None:
+        return {}
+    return {"fallback_application_name": application_name}
+
+
 def _escape_like(value: str) -> str:
     """Escape LIKE/ILIKE wildcards so user search input matches literally.
 
@@ -581,6 +592,9 @@ class PsycopgModelRegistryStore:
     database_url: str
     audit_actor: str = "nhms-api"
     audit_actor_role: str = "model-registry"
+    # #1728: the calling surface (route module) names the connection; the store
+    # itself hard-codes nothing and defaults to the pre-#1728 unnamed behaviour.
+    application_name: str | None = None
 
     def __post_init__(self) -> None:
         # Seed the ordered pre-activation hook chain (§2.1). Each reserved
@@ -733,8 +747,8 @@ class PsycopgModelRegistryStore:
         publisher(publish_context)
 
     @classmethod
-    def from_env(cls) -> PsycopgModelRegistryStore:
-        return cls(default_database_url())
+    def from_env(cls, *, application_name: str | None = None) -> PsycopgModelRegistryStore:
+        return cls(default_database_url(), application_name=application_name)
 
     def create_basin_with_version(
         self,
@@ -3407,7 +3421,7 @@ class PsycopgModelRegistryStore:
         }
 
     def _transaction(self) -> Any:
-        return _PsycopgTransaction(self.database_url)
+        return _PsycopgTransaction(self.database_url, application_name=self.application_name)
 
 
 def sanitize_model_list_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -3990,8 +4004,9 @@ def _rollback_history_preflight_reference(history: Mapping[str, Any] | None) -> 
 
 
 class _PsycopgTransaction:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, application_name: str | None = None) -> None:
         self.database_url = database_url
+        self.application_name = application_name
         self.connection: Any | None = None
 
     def __enter__(self) -> Any:
@@ -4002,7 +4017,9 @@ class _PsycopgTransaction:
             raise ModelRegistryError("psycopg2 is required for model registry operations.") from error
 
         self.psycopg2 = psycopg2
-        self.connection = psycopg2.connect(self.database_url)
+        self.connection = psycopg2.connect(
+            self.database_url, **_attribution_connect_kwargs(self.application_name)
+        )
         self.connection.autocommit = False
         register_default_json(loads=json.loads, conn_or_curs=self.connection)
         register_default_jsonb(loads=json.loads, conn_or_curs=self.connection)

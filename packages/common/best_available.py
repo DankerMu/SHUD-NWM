@@ -33,6 +33,17 @@ def default_database_url() -> str:
     return database_url
 
 
+def _attribution_connect_kwargs(application_name: str | None) -> dict[str, str]:
+    """libpq attribution kwargs for a connection this module opens (#1728).
+
+    Empty when the caller injected no ``application_name``, so a store built
+    without one reaches ``psycopg2.connect`` exactly as it did before.
+    """
+    if application_name is None:
+        return {}
+    return {"fallback_application_name": application_name}
+
+
 @dataclass(frozen=True)
 class ForcingInputSelection:
     valid_time: datetime
@@ -73,8 +84,9 @@ class BestAvailableManager:
     repository: BestAvailableRepository
 
     @classmethod
-    def from_env(cls) -> BestAvailableManager:
-        return cls(repository=PsycopgBestAvailableRepository.from_env())
+    def from_env(cls, *, application_name: str | None = None) -> BestAvailableManager:
+        # #1728: pass-through only -- the facade names nothing itself.
+        return cls(repository=PsycopgBestAvailableRepository.from_env(application_name=application_name))
 
     def write_forcing_version(
         self,
@@ -114,10 +126,13 @@ class BestAvailableManager:
 @dataclass(frozen=True)
 class PsycopgBestAvailableRepository:
     database_url: str
+    # #1728: the calling surface (route module) names the connection; the
+    # repository itself hard-codes nothing and defaults to unnamed.
+    application_name: str | None = None
 
     @classmethod
-    def from_env(cls) -> PsycopgBestAvailableRepository:
-        return cls(default_database_url())
+    def from_env(cls, *, application_name: str | None = None) -> PsycopgBestAvailableRepository:
+        return cls(default_database_url(), application_name=application_name)
 
     def list_enabled_sources(self) -> tuple[str, ...]:
         rows = self._fetch_all(
@@ -272,7 +287,9 @@ class PsycopgBestAvailableRepository:
 
         connection = None
         try:
-            connection = psycopg2.connect(self.database_url)
+            connection = psycopg2.connect(
+                self.database_url, **_attribution_connect_kwargs(self.application_name)
+            )
             connection.autocommit = False
             with connection.cursor() as cursor:
                 cursor.execute(statement, parameters)
