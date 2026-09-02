@@ -37,7 +37,13 @@ SHALL exit zero when no divergent row exists, with a distinct non-zero code
 when one or more exist, and with a third, distinct code on a typed failure
 (printing the error's code or reason without a traceback), and SHALL emit one JSON
 receipt carrying the configured and verified root, the time, the per-surface
-counts, the divergent rows and the trigger count. The gate itself, the
+counts, the divergent rows, the trigger count and its own `exit_code`. The
+receipt SHALL be emitted before any optional receipt file is written, and a
+typed failure raised after the receipt has been emitted (an unwritable receipt
+path) SHALL take exit-code precedence over the divergence verdict — the
+process exits with the typed-failure code while the emitted receipt's
+`exit_code` still carries the verdict, which is why the receipt, not the shell
+status alone, is the operator's authority. The gate itself, the
 reconcile scan's exception propagation and every write lane SHALL be
 unchanged by this requirement.
 

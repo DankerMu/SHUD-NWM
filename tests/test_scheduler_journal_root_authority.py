@@ -39,6 +39,24 @@ from tests.test_production_scheduler import _set_db_free_scheduler_env
 
 _EXPECTED_STDERR = f"FILE_JOURNAL_INVALID_ROOT: {JOURNAL_ROOT_INVALID_MESSAGE}"
 
+# ``~<user>`` for a user that cannot have a passwd entry: ``Path.expanduser``
+# has nothing to look up and raises a bare ``RuntimeError``.  Unlike ``~/...``
+# this shape ignores ``HOME`` entirely, so the row is deterministic under any
+# environment the suite runs in.
+UNEXPANDABLE_TILDE_ROOT = "~nhms-no-such-user-7f3a/journal"
+
+
+def _assert_tilde_root_is_unexpandable() -> None:
+    """Hard precondition: the fixture only bites while expansion really fails.
+
+    Should a platform ever resolve an unknown user instead of raising, this
+    fails loudly here rather than letting the refusal test pass for the wrong
+    reason (or pass vacuously on some other error type).
+    """
+
+    with pytest.raises(RuntimeError):
+        Path(UNEXPANDABLE_TILDE_ROOT).expanduser()
+
 
 def _tree_snapshot(root: Path) -> dict[str, bytes | None]:
     """Every directory and file under ``root``, without following symlinks."""
@@ -306,13 +324,27 @@ def test_plan_production_surfaces_the_refusal_as_code_message_exit_1(
 
 
 # ---------------------------------------------------------------------------
-# A non-absolute root is not a root: it would silently mean the cwd
+# A root that is not absolute -- or cannot become absolute -- is not a root:
+# it would silently mean the cwd
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("configured", ["", ".", "relative/journal"])
-def test_blank_and_relative_roots_are_refused_without_reading_the_cwd(
+@pytest.mark.parametrize(
+    ("configured", "expected_error_type"),
+    [
+        pytest.param("", "RelativeJournalRoot", id="blank"),
+        pytest.param(".", "RelativeJournalRoot", id="dot"),
+        pytest.param("relative/journal", "RelativeJournalRoot", id="relative"),
+        pytest.param(
+            UNEXPANDABLE_TILDE_ROOT,
+            "UnexpandableJournalRoot",
+            id="unexpandable-tilde",
+        ),
+    ],
+)
+def test_blank_relative_and_unexpandable_roots_are_refused_without_reading_the_cwd(
     monkeypatch: Any,
     tmp_path: Path,
     configured: str,
+    expected_error_type: str,
 ) -> None:
     """``safe_fs`` anchors a non-absolute path on the cwd; the seam refuses first.
 
@@ -321,11 +353,20 @@ def test_blank_and_relative_roots_are_refused_without_reading_the_cwd(
     refusal a blank or relative setting silently retargets every journal read at
     whatever directory the process happens to sit in -- for the census that is a
     clean exit 0 over the wrong tree, which is worse than any loud failure.
+
+    A ``~<unknown user>`` root reaches the same place by the other door: it is
+    not absolute either, and ``Path.expanduser`` cannot make it absolute -- it
+    raises a bare ``RuntimeError``.  Refused as ``UnexpandableJournalRoot``,
+    with the same code and the same constant message, so the operator meets
+    neither that untyped ``RuntimeError`` nor the safe-fs error that would
+    otherwise name the rejected value back at them.
     """
 
     empty_cwd = tmp_path / "cwd"
     empty_cwd.mkdir()
     monkeypatch.chdir(empty_cwd)
+    if expected_error_type == "UnexpandableJournalRoot":
+        _assert_tilde_root_is_unexpandable()
 
     with pytest.raises(OrchestratorError) as caught:
         verify_journal_root_authority(configured, setting="--journal-root")
@@ -334,7 +375,7 @@ def test_blank_and_relative_roots_are_refused_without_reading_the_cwd(
     assert error.error_code == "FILE_JOURNAL_INVALID_ROOT"
     assert error.message == JOURNAL_ROOT_INVALID_MESSAGE
     # Stable name: the caller may branch on it, so it is not a Python class name.
-    assert error.details["error_type"] == "RelativeJournalRoot"
+    assert error.details["error_type"] == expected_error_type
     assert error.details["journal_root"] == configured
     assert error.details["setting"] == "--journal-root"
     # The cwd was never walked, listed or written.

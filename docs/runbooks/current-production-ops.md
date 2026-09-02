@@ -3677,8 +3677,8 @@ preflight 自己的 redacted blocker 结束，根本走不到 root 验证。mess
 `census-job-id-scope` 走的是同一个 seam，同码同文案；这两条 CLI 前面没有
 preflight，所以上面"只覆盖能通过 preflight 的 root"这句只说调度器车道——CLI 上
 **所有**不合规形状都由这个 seam 拒绝，包括自 #1944 起补上的空值与相对路径
-（`details["error_type"]` 为 `RelativeJournalRoot`；否则它们会被 `safe_fs`
-锚到当前工作目录上）。
+（`details["error_type"]` 为 `RelativeJournalRoot`；`~` 无法展开时为
+`UnexpandableJournalRoot`；否则它们会被 `safe_fs` 锚到当前工作目录上）。
 
 ### 8.11 #1760 scope gate 与既存分叉 job_id 行
 

@@ -929,3 +929,62 @@ def test_cli_demote_relative_root_fails_typed_exit_1_without_touching_the_cwd(
     assert "Traceback" not in captured.err
     # Zero bytes: the cwd never became an authority root.
     assert os.listdir("relative/journal") == []
+
+
+# ``~<user>`` for a user that cannot have a passwd entry: ``Path.expanduser``
+# has nothing to look up and raises a bare ``RuntimeError``.  Unlike ``~/...``
+# this shape ignores ``HOME``, so the case is deterministic under any
+# environment the suite runs in.
+UNEXPANDABLE_TILDE_ROOT = "~nhms-no-such-user-7f3a/journal"
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_cli_demote_unexpandable_tilde_root_fails_typed_exit_1_without_writing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    """A ``--journal-root`` whose ``~`` cannot expand is refused typed, not raw.
+
+    ``Path.expanduser`` raises a bare ``RuntimeError`` for a user with no
+    passwd entry.  Without the #1943 seam catching it that would reach the
+    operator as an untyped traceback on stderr; here it is the same shared
+    constant, the same exit 1 and the same zero durable bytes as every other
+    invalid root.  Separate from the relative-root case because that one has to
+    materialise ``relative/journal`` under the cwd and this one must not create
+    anything at all.
+    """
+    # Hard precondition: the fixture only bites while expansion really fails.
+    with pytest.raises(RuntimeError):
+        Path(UNEXPANDABLE_TILDE_ROOT).expanduser()
+
+    held_repository = _held_cohort_repository(tmp_path / "held")
+    held = _held_row(held_repository)
+    before = _journal_bytes(held_repository.root)
+    args = [*_cli_base_args(held_repository, held), "--confirm"]
+    args[args.index("--journal-root") + 1] = UNEXPANDABLE_TILDE_ROOT
+    empty_cwd = tmp_path / "cwd"
+    empty_cwd.mkdir()
+    empty_home = tmp_path / "home"
+    empty_home.mkdir()
+    monkeypatch.chdir(empty_cwd)
+    monkeypatch.setenv("HOME", str(empty_home))
+
+    if entrypoint == "click":
+        with pytest.raises(SystemExit) as excinfo:
+            cli._click_main(args)
+        assert excinfo.value.code == 1
+    else:
+        assert cli._argparse_main(args) == 1
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""
+    assert captured.err.strip() == f"FILE_JOURNAL_INVALID_ROOT: {JOURNAL_ROOT_INVALID_MESSAGE}"
+    assert "Traceback" not in captured.err
+    # The message names the remedy, never the rejected value.
+    assert "nhms-no-such-user" not in captured.err
+    # Zero bytes: no cwd, no home and no source-journal byte was touched.
+    assert os.listdir(empty_cwd) == []
+    assert os.listdir(empty_home) == []
+    assert _journal_bytes(held_repository.root) == before
+    assert _held_row(held_repository) == held

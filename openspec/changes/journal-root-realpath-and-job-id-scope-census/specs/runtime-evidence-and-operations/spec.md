@@ -17,8 +17,9 @@ a real directory and names the remedy (configure the realpath, as
 `readlink -f` reports it); the message SHALL carry no filesystem path, no
 traceback and no module name, and the configured value, the name of the
 setting the caller read it from (`NHMS_SCHEDULER_JOURNAL_ROOT` for the
-scheduler) and the underlying error type SHALL ride in the error's
-structured details. The
+scheduler) and either the underlying error type or a stable token naming
+the invalid shape (for a blank/relative or an unexpandable root) SHALL ride in
+the error's structured details. The
 verified root SHALL be the tilde-expanded, un-resolved configured path, so a
 root that already is a realpath verifies to itself and the repository reads
 the exact configured location. The scheduler command SHALL surface the

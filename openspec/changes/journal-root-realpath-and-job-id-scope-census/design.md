@@ -227,7 +227,10 @@ row-bearing surfaces only, anchors never among them — `own_scope`,
 flat_direct_present`; an anchor-only id has `surfaces == []`),
 `divergent_total` (unique ids, anchor-only ids included),
 `reconcile_abort_triggers`, `exit_code`. Exit 0 / 2 / 1 (none / found /
-typed error; `OrchestratorError` prints `error_code: message`,
+typed error; a typed failure raised after the receipt was emitted — an
+unwritable `--output` — takes precedence, so the process exits 1 while the
+emitted receipt's `exit_code` keeps the verdict (round-2 r2-cand-02, round-3
+r3-cand-01); `OrchestratorError` prints `error_code: message`,
 `FileOrchestrationJournalError` prints `reason: field` — a deliberate
 departure from `cli.py:657`/`:948`'s `str(error)` + exit 2, because 2 is
 "found" here). `--output` refuses a path whose realpath lies under the
@@ -311,7 +314,7 @@ Governing invariant: The db-free scheduler's journal root is verified as a chain
 | 1 | Alias-ancestor root passes `_db_free_path_check` but `from_env` raises `FILE_JOURNAL_INVALID_ROOT` | `verify_journal_root_authority` in the factory | root-authority test: alias root (both the preflight pin and the raise) | new |
 | 2 | Realpath root at node-22 depth constructs; `active_repository.root` is the verified path | same | six-real-components case; node-22 receipt (the census constructs through the same seam on the live root) | new + live |
 | 3 | The message names the remedy (`readlink -f`, real directories), carries no path/traceback/module; `details` carries the setting name per caller | `JOURNAL_ROOT_INVALID_MESSAGE` constant + `setting` kwarg | CLI test stderr exact line; `details["setting"]` per lane; demotion leak assertions | new |
-| 3b | A blank or relative root is refused by the seam on every lane (scheduler, demotion, census) instead of being anchored on the cwd | `verify_journal_root_authority` absoluteness check on the expanded value | seam tests (`""`, `.`, relative), census CLI tests from an empty cwd (exit 1, stdout empty, cwd untouched), demotion CLI relative-root test | new (round 2) |
+| 3b | A blank or relative root is refused by the seam on every lane (scheduler, demotion, census) instead of being anchored on the cwd | `verify_journal_root_authority` absoluteness check on the expanded value | seam tests (`""`, `.`, relative) with the tilde test (`test_tilde_root_still_verifies_after_expansion` and the demotion tilde receipt test) as the expand-before-check ordering guard, census CLI tests from an empty cwd (exit 1, stdout empty, cwd untouched), demotion CLI relative-root test; `UnexpandableJournalRoot` (`~nosuchuser`) pinned on the seam and the demotion CLI (round-3 test-only addition); the census `--output` side has the mirror-image gap — `_require_output_outside_root` expands `~` unguarded, so `--output '~nosuchuser/x'` leaks a bare `RuntimeError` traceback (exit is still 1, nothing run or written) — deferred as r3-cand-02 to the seam-adoption follow-up issue #1955, so the no-traceback property is over-claimed for that one input until it lands | new (round 2) |
 | 4 | Demotion and scheduler use one seam | import identity | `is` assertion across modules; grep: no second `verify_directory_no_follow` + `FILE_JOURNAL_INVALID_ROOT` pair | new |
 | 4b | A preflight-blocked db-free pass builds no repository and never verifies the rejected root (missing / symlink-leaf / symlink-loop shapes) | `_DB_FREE_REPOSITORY_BLOCKED` sentinel in `from_env` + `__init__` | `test_preflight_blocked_db_free_pass_builds_no_repository`; the two `from_env` blocked branches are the only producers of the sentinel | new (deviation 1) |
 | 4c | Symlink-leaf and symlink-loop roots are refused by the factory seam itself, independent of the preflight that also catches them | `verify_journal_root_authority` | factory-level test with the preflight verdict asserted `blocked` alongside | new (deviation 2) |
