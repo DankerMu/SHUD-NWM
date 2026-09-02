@@ -104,6 +104,14 @@ scheduler main lane does neither.
   ```python
   ```
 
+  Round-2 repair (r2-cand-01, P1): the seam first expands `~` (guarding the
+  bare `RuntimeError` `expanduser` can raise) and refuses a blank or
+  non-absolute value with the same code and message — `safe_fs` anchors a
+  relative path on the process cwd, so `--journal-root ""` (an unset shell
+  variable) verified the cwd and the census reported it clean with exit 0.
+  The scheduler lane was already protected by the preflight's blank/relative
+  blockers; the demotion and census lanes were not.
+
   The returned path is what `verify_directory_no_follow` returns: tilde-expanded,
   **not** resolved — the same authority location the demotion lane already
   uses for its repository, so a root that is a realpath verifies to itself and
@@ -193,11 +201,18 @@ zero of these.
 
 The repository is constructed through `verify_journal_root_authority` (D1),
 so an alias root refuses typed before any read. `max_files` / `max_records`
-overrides are exposed because the replay charges every latest, segment and
-direct record against one `_RecordBudget` (`:6682`, default
-`MAX_FILE_JOURNAL_RECORDS = 100_000`) and `latest/` alone holds 5,998 files on
-node-22; a trip fails loud (`code: message`, exit 1), and the override is the
-documented way past it.
+overrides are exposed because the replay charges one `_RecordBudget`
+(`:6682`, default `MAX_FILE_JOURNAL_RECORDS = 100_000`) with one unit per
+pipeline-job row materialised from EACH latest-view file (`:6704-6705`) and
+one unit per JSONL line of every segment regardless of record type
+(`:6717-6718`); direct records are charged only under `include_direct=True`
+(`:6723-6725`), which the census does not pass. The unit is therefore neither
+files nor unique rows: node-22's 5,998 latest views and 275 segments tripped
+the default on 2026-09-02 although the deduplicated replay holds 14,922 rows,
+and the receipt does not record the consumed count, so the documented
+`--max-records 5000000` is empirical headroom, not a derived bound (round-2
+repair, r2-cand-03). A trip fails loud (`code: message`, exit 1), and the
+override is the documented way past it.
 
 ### Receipt
 
@@ -296,6 +311,7 @@ Governing invariant: The db-free scheduler's journal root is verified as a chain
 | 1 | Alias-ancestor root passes `_db_free_path_check` but `from_env` raises `FILE_JOURNAL_INVALID_ROOT` | `verify_journal_root_authority` in the factory | root-authority test: alias root (both the preflight pin and the raise) | new |
 | 2 | Realpath root at node-22 depth constructs; `active_repository.root` is the verified path | same | six-real-components case; node-22 receipt (the census constructs through the same seam on the live root) | new + live |
 | 3 | The message names the remedy (`readlink -f`, real directories), carries no path/traceback/module; `details` carries the setting name per caller | `JOURNAL_ROOT_INVALID_MESSAGE` constant + `setting` kwarg | CLI test stderr exact line; `details["setting"]` per lane; demotion leak assertions | new |
+| 3b | A blank or relative root is refused by the seam on every lane (scheduler, demotion, census) instead of being anchored on the cwd | `verify_journal_root_authority` absoluteness check on the expanded value | seam tests (`""`, `.`, relative), census CLI tests from an empty cwd (exit 1, stdout empty, cwd untouched), demotion CLI relative-root test | new (round 2) |
 | 4 | Demotion and scheduler use one seam | import identity | `is` assertion across modules; grep: no second `verify_directory_no_follow` + `FILE_JOURNAL_INVALID_ROOT` pair | new |
 | 4b | A preflight-blocked db-free pass builds no repository and never verifies the rejected root (missing / symlink-leaf / symlink-loop shapes) | `_DB_FREE_REPOSITORY_BLOCKED` sentinel in `from_env` + `__init__` | `test_preflight_blocked_db_free_pass_builds_no_repository`; the two `from_env` blocked branches are the only producers of the sentinel | new (deviation 1) |
 | 4c | Symlink-leaf and symlink-loop roots are refused by the factory seam itself, independent of the preflight that also catches them | `verify_journal_root_authority` | factory-level test with the preflight verdict asserted `blocked` alongside | new (deviation 2) |

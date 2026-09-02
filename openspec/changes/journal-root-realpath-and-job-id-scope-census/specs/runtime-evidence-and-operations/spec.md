@@ -8,8 +8,10 @@ The db-free scheduler SHALL verify the configured journal root
 (`NHMS_SCHEDULER_JOURNAL_ROOT`) through the same per-component no-follow walk
 the journal's hardened readers use, at the moment the file journal repository
 is constructed for the scheduler, before any journal byte is read. A root any
-of whose path components is a symlink, is not a directory, or does not exist
-SHALL be refused with the typed error `FILE_JOURNAL_INVALID_ROOT` whose
+of whose path components is a symlink, is not a directory, or does not exist,
+or that is blank or not absolute after tilde expansion (a relative value
+would otherwise be anchored on the process working directory and verify a
+directory the operator never named), SHALL be refused with the typed error `FILE_JOURNAL_INVALID_ROOT` whose
 message states that every component of the configured journal root must be
 a real directory and names the remedy (configure the realpath, as
 `readlink -f` reports it); the message SHALL carry no filesystem path, no
@@ -59,6 +61,15 @@ with a diagnostic that does not mention a symlink).
   root is part of a symlink loop
 - **THEN** construction fails with `FILE_JOURNAL_INVALID_ROOT` and the
   structured details carry the underlying error type
+
+#### Scenario: A blank or relative root is refused rather than anchored on the working directory
+
+- **WHEN** the configured root is the empty string, `.`, or any other
+  non-absolute value after tilde expansion
+- **THEN** the seam refuses it with `FILE_JOURNAL_INVALID_ROOT` before any
+  directory is opened, on the scheduler lane, the operator demotion lane and
+  the read-only census alike, so no lane reports on the process working
+  directory in place of the configured root
 
 #### Scenario: The operator demotion lane shares the seam
 

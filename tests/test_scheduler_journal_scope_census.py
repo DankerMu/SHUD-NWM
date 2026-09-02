@@ -179,7 +179,7 @@ def _invoke(entrypoint: str, args: list[str], capsys: pytest.CaptureFixture[str]
     return code, captured.out, captured.err
 
 
-def _census_args(root: Path, *extra: str) -> list[str]:
+def _census_args(root: Path | str, *extra: str) -> list[str]:
     return [CENSUS_JOB_ID_SCOPE_COMMAND, "--journal-root", str(root), *extra]
 
 
@@ -510,6 +510,38 @@ def test_alias_ancestor_root_refuses_the_census_typed(
 
 
 @pytest.mark.parametrize("entrypoint", _ENTRYPOINTS)
+@pytest.mark.parametrize("configured", ["", "."])
+def test_blank_or_relative_root_is_refused_instead_of_censusing_the_cwd(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+    configured: str,
+) -> None:
+    """``--journal-root ""`` must not census the working directory and exit 0.
+
+    ``required=True`` only demands the option be present; an empty or relative
+    value used to reach ``safe_fs``, which anchors a non-absolute path on the
+    cwd.  An operator whose env var was unset would then read a clean receipt
+    with ``divergent_total: 0`` over a directory that is not the journal at all
+    -- the one failure mode a census exists to rule out.
+    """
+
+    empty_cwd = tmp_path / "cwd"
+    empty_cwd.mkdir()
+    monkeypatch.chdir(empty_cwd)
+
+    code, out, err = _invoke(entrypoint, _census_args(configured), capsys)
+
+    assert code == 1
+    assert out.strip() == ""
+    assert err.strip() == f"FILE_JOURNAL_INVALID_ROOT: {JOURNAL_ROOT_INVALID_MESSAGE}"
+    assert "Traceback" not in err
+    # No receipt, no scan and no byte: the cwd is untouched.
+    assert os.listdir(".") == []
+
+
+@pytest.mark.parametrize("entrypoint", _ENTRYPOINTS)
 def test_output_inside_the_journal_root_is_refused_with_nothing_written(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -591,6 +623,40 @@ def test_unwritable_output_still_publishes_the_receipt_on_stdout(
     assert _snapshot(root) == before
 
 
+@pytest.mark.parametrize("entrypoint", _ENTRYPOINTS)
+def test_unwritable_output_after_a_divergent_census_exits_1_not_2(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    entrypoint: str,
+) -> None:
+    """Process exit is 1, and the divergence verdict lives inside the receipt.
+
+    The receipt is emitted before ``--output`` is written (deliberately: on
+    node-22 the run costs minutes), so a typed failure raised AFTER the emit
+    replaces the ``2`` the census computed with the typed-failure ``1``.  Both
+    facts are true at once and an operator scripting on ``$?`` alone would read
+    "no divergent rows" from a run that found some; the receipt's own
+    ``exit_code`` is the field to read.
+    """
+
+    root = tmp_path / "journal"
+    _segment_only_divergent_tree(root)
+    output = tmp_path / "receipts"
+    output.mkdir()
+    before = _snapshot(root)
+
+    code, out, err = _invoke(entrypoint, _census_args(root, "--output", str(output)), capsys)
+
+    assert code == 1
+    assert err.strip() == f"CENSUS_OUTPUT_UNWRITABLE: {OUTPUT_UNWRITABLE_MESSAGE}"
+    assert "Traceback" not in err
+    receipt = json.loads(out)
+    assert receipt["exit_code"] == 2
+    assert receipt["divergent_total"] >= 1
+    assert receipt["reconcile_abort_triggers"] >= 1
+    assert _snapshot(root) == before
+
+
 # ---------------------------------------------------------------------------
 # 6. Record budget: the live node-22 tree needs the override
 # ---------------------------------------------------------------------------
@@ -602,10 +668,13 @@ def test_record_budget_trip_fails_loud_with_the_documented_token(
 ) -> None:
     """The exact failure node-22 hit on 2026-09-02 with the default budget.
 
-    The whole-tree replay charges every latest view, segment record and direct
-    record against ONE budget, so a production tree trips
-    ``MAX_FILE_JOURNAL_RECORDS`` long before any file budget.  ``--max-files``
-    is not the knob: this is a record count, not a file count.
+    The whole-tree replay charges ONE budget: one unit per pipeline-job row
+    materialised from each latest view (a view can carry many rows) plus one per
+    JSONL line in every segment, whatever the record type.  Direct records are
+    charged only on the ``include_direct=True`` replay, which the census never
+    asks for.  A production tree therefore trips ``MAX_FILE_JOURNAL_RECORDS``
+    long before any file budget.  ``--max-files`` is not the knob: this is a
+    record count, not a file count.
     """
 
     root = tmp_path / "journal"

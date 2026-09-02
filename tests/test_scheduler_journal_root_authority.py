@@ -306,6 +306,61 @@ def test_plan_production_surfaces_the_refusal_as_code_message_exit_1(
 
 
 # ---------------------------------------------------------------------------
+# A non-absolute root is not a root: it would silently mean the cwd
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("configured", ["", ".", "relative/journal"])
+def test_blank_and_relative_roots_are_refused_without_reading_the_cwd(
+    monkeypatch: Any,
+    tmp_path: Path,
+    configured: str,
+) -> None:
+    """``safe_fs`` anchors a non-absolute path on the cwd; the seam refuses first.
+
+    ``_expand_path`` (``packages/common/safe_fs.py``) resolves a relative path
+    against ``Path.cwd()``, and ``Path("")`` is ``Path(".")``.  Without this
+    refusal a blank or relative setting silently retargets every journal read at
+    whatever directory the process happens to sit in -- for the census that is a
+    clean exit 0 over the wrong tree, which is worse than any loud failure.
+    """
+
+    empty_cwd = tmp_path / "cwd"
+    empty_cwd.mkdir()
+    monkeypatch.chdir(empty_cwd)
+
+    with pytest.raises(OrchestratorError) as caught:
+        verify_journal_root_authority(configured, setting="--journal-root")
+
+    error = caught.value
+    assert error.error_code == "FILE_JOURNAL_INVALID_ROOT"
+    assert error.message == JOURNAL_ROOT_INVALID_MESSAGE
+    # Stable name: the caller may branch on it, so it is not a Python class name.
+    assert error.details["error_type"] == "RelativeJournalRoot"
+    assert error.details["journal_root"] == configured
+    assert error.details["setting"] == "--journal-root"
+    # The cwd was never walked, listed or written.
+    assert os.listdir(".") == []
+
+
+def test_tilde_root_still_verifies_after_expansion(monkeypatch: Any, tmp_path: Path) -> None:
+    """The absoluteness check runs on the EXPANDED value, not the literal.
+
+    ``tests/test_orchestrator_demote_cli_security.py`` passes a literal
+    ``~/probe-journal/journal`` through this seam, and ``Path("~/x")`` is not
+    absolute: checking before expansion would refuse a legitimate root.
+    """
+
+    home = tmp_path / "home"
+    expanded_root = home / "probe-journal" / "journal"
+    expanded_root.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    verified = verify_journal_root_authority("~/probe-journal/journal", setting="--journal-root")
+
+    assert verified == expanded_root
+    assert verified.is_absolute()
+
+
+# ---------------------------------------------------------------------------
 # One seam, two callers
 # ---------------------------------------------------------------------------
 def test_demotion_and_scheduler_share_one_root_authority_seam() -> None:

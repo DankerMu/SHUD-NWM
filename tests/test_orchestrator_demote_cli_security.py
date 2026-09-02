@@ -10,6 +10,7 @@ byte.
 from __future__ import annotations
 
 import json
+import os
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -547,6 +548,7 @@ def test_cli_both_entrypoints_emit_same_normalized_redacted_values(
     assert "[redacted]" in click_payload["checked_by"]
     assert "[redacted]" in argparse_payload["verification_note"]
 
+
 def test_cli_demote_secret_shaped_projection_fault_warns_with_bounded_non_secret_tokens(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -640,9 +642,7 @@ def test_cli_demote_secret_shaped_projection_fault_warns_with_bounded_non_secret
     seen_error_types: list[str] = []
     seen_reasons: list[str] = []
     for index, (make_error, literals) in enumerate(scenarios):
-        held_repository = _held_cohort_repository(
-            tmp_path / f"held-{index}", member_count=2, active_hydro=True
-        )
+        held_repository = _held_cohort_repository(tmp_path / f"held-{index}", member_count=2, active_hydro=True)
         root = held_repository.root
         held = _held_row(held_repository)
         args = [*_cli_base_args(held_repository, held), "--confirm"]
@@ -887,8 +887,45 @@ def test_cli_demote_tilde_root_receipt_equals_expanded_authority(
     assert payload["journal_root"] == str(expanded_root.resolve())
     assert root.resolve() == expanded_root.resolve()
     assert Path(payload["journal_root"]).exists()
-    current = FileOrchestrationJournalRepository(Path(payload["journal_root"])).get_accepted_submit_pipeline_job(
-        JOB_ID
-    )
+    current = FileOrchestrationJournalRepository(Path(payload["journal_root"])).get_accepted_submit_pipeline_job(JOB_ID)
     assert current["status"] == "reservation_lost"
     assert current["reconciliation_decision"] == OPERATOR_VERIFIED_ABSENCE_DECISION
+
+
+@pytest.mark.parametrize("entrypoint", ["click", "argparse"])
+def test_cli_demote_relative_root_fails_typed_exit_1_without_touching_the_cwd(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    entrypoint: str,
+) -> None:
+    """A relative ``--journal-root`` is refused, not silently anchored on the cwd.
+
+    ``safe_fs._expand_path`` resolves a non-absolute path against ``Path.cwd()``,
+    so before the #1943 seam gained its absoluteness check this invocation would
+    have created an authority journal under whatever directory the operator
+    happened to be standing in.  Same shared constant, same exit code, zero
+    bytes.
+    """
+    held_repository = _held_cohort_repository(tmp_path / "held")
+    held = _held_row(held_repository)
+    args = [*_cli_base_args(held_repository, held), "--confirm"]
+    args[args.index("--journal-root") + 1] = "relative/journal"
+    empty_cwd = tmp_path / "cwd"
+    # The relative target EXISTS under the cwd, so the refusal cannot pass for
+    # the uninteresting reason that ``relative/journal`` is simply missing.
+    (empty_cwd / "relative" / "journal").mkdir(parents=True)
+    monkeypatch.chdir(empty_cwd)
+
+    if entrypoint == "click":
+        with pytest.raises(SystemExit) as excinfo:
+            cli._click_main(args)
+        assert excinfo.value.code == 1
+    else:
+        assert cli._argparse_main(args) == 1
+    captured = capsys.readouterr()
+    assert captured.out.strip() == ""
+    assert captured.err.strip() == f"FILE_JOURNAL_INVALID_ROOT: {JOURNAL_ROOT_INVALID_MESSAGE}"
+    assert "Traceback" not in captured.err
+    # Zero bytes: the cwd never became an authority root.
+    assert os.listdir("relative/journal") == []

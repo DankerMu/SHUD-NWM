@@ -3673,8 +3673,12 @@ readlink -f "$NHMS_SCHEDULER_JOURNAL_ROOT"
 preflight 自己的 redacted blocker 结束，根本走不到 root 验证。message 里带 `readlink -f` 与
 "real directory" 的处置指引，不含路径、traceback 或模块名；配置值与它来自哪个
 设置项（调度器是 `NHMS_SCHEDULER_JOURNAL_ROOT`，demote CLI 是 `--journal-root`）
-放在错误的结构化 details 里。operator 的 `demote-reserved-job` 走的是同一个
-seam，同码同文案。
+放在错误的结构化 details 里。operator 的 `demote-reserved-job` 与 8.11 的
+`census-job-id-scope` 走的是同一个 seam，同码同文案；这两条 CLI 前面没有
+preflight，所以上面"只覆盖能通过 preflight 的 root"这句只说调度器车道——CLI 上
+**所有**不合规形状都由这个 seam 拒绝，包括自 #1944 起补上的空值与相对路径
+（`details["error_type"]` 为 `RelativeJournalRoot`；否则它们会被 `safe_fs`
+锚到当前工作目录上）。
 
 ### 8.11 #1760 scope gate 与既存分叉 job_id 行
 
@@ -3682,6 +3686,27 @@ seam，同码同文案。
 这一行自己的 `(source_id, cycle_time)` 不一致。判定口径就是写入侧 gate
 `_require_job_id_cycle_scope` 本身（token `file_journal_job_id_scope_mismatch`，
 field `job_id`）；census 只调用这一个谓词，不做第二套比较。
+
+**先把 `$NHMS_SCHEDULER_JOURNAL_ROOT` 放进当前 shell**。下面的命令块是照抄粘贴
+的，变量为空就等于没给 root。活值只有一处权威：调度器进程自己的环境（口径同
+本文件第 3 节的 `/proc/$pid/environ` 自检）；oneshot 在 tick 之间是 inactive，
+进程不在时退回 EnvironmentFile
+`/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env`（模板见
+`infra/env/compute.scheduler-dbfree.env.example:47`）。
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22 '
+pid=$(systemctl --user show -p MainPID --value nhms-compute-scheduler.service)
+if [ "${pid:-0}" != "0" ]; then
+  tr "\0" "\n" < /proc/$pid/environ | grep "^NHMS_SCHEDULER_JOURNAL_ROOT="
+else
+  grep "^NHMS_SCHEDULER_JOURNAL_ROOT=" /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+fi'
+```
+
+把取到的值 `export NHMS_SCHEDULER_JOURNAL_ROOT=...` 之后再跑普查。自 #1944 起，
+空值或相对路径**不再**退化成"普查当前工作目录然后 exit 0"——journal-root seam
+在任何读取之前就以 `FILE_JOURNAL_INVALID_ROOT`（exit 1）拒绝，见 8.10。
 
 **普查命令**（node-22，只读，写作详见 8.10 的 root 前提）：
 
@@ -3692,17 +3717,26 @@ field `job_id`）；census 只调用这一个谓词，不做第二套比较。
 退出码：`0` = 没有分叉行；`2` = 发现分叉行（stdout 是 JSON receipt，
 `divergent_rows` 逐条列出 `job_id`、`own_scope`、`job_id_scope`、
 `anchor_present`、`flat_direct_present`、`reconcile_abort_trigger`）；`1` = typed
-失败（stderr 是 `error_code: message` 或 `reason: field`，无 traceback）。
+失败（stderr 是 `error_code: message` 或 `reason: field`，无 traceback）。receipt
+是在写 `--output` **之前**就打到 stdout 的，所以 receipt 发出之后才发生的 typed
+失败（例如 `--output` 不可写）会以 `1` 收场，**即使这一趟真的查出了分叉行**；
+判分叉一律读 stdout receipt 里的 `exit_code`，不要只看 `$?`。
 
-**为什么带 `--max-records 5000000`**：整树 replay 把每一个 latest view、每一条
-segment 记录和每一条 direct 记录都记在**同一个 record 预算**上，默认值是
-`MAX_FILE_JOURNAL_RECORDS = 100_000`。生产树会正常地超过它：node-22 在
-2026-09-02 用默认预算跑就以 exit 1 + `file_journal_record_limit_exceeded:
-pipeline_job_records` 停住（5,998 个 latest view + 275 个 segment）。补救就是
-`--max-records N`，上面写的 5000000 是实测跑通的值。**`--max-files` 不是这个
-旋钮**——它管的是单次目录遍历发现的文件数（默认同为 100000，超限报的是
-`file_journal_file_limit_exceeded`），而实际文件数离 100,000 还很远；调它不会
-让 record 预算变宽。预算跳闸是 fail-loud，不写任何字节，抬预算是唯一支持的处置，
+**为什么带 `--max-records 5000000`**：整树 replay 只有**一个** record 预算，默认
+`MAX_FILE_JOURNAL_RECORDS = 100_000`，计费单位是：每一个 latest view 里
+**物化出来的每一行 pipeline_job 各记一次**（一个 view 可以带很多行，这才是
+预算的大头）＋每个 journal segment 的**每一行 JSONL 各记一次**（不分记录类型）。
+direct 记录只在 `include_direct=True` 的 replay 上计费，而 census 传的是
+`include_direct=False`，所以 direct 文件**一次都不计**。node-22 在 2026-09-02
+用默认预算跑就以 exit 1 + `file_journal_record_limit_exceeded:
+pipeline_job_records` 停住。补救就是 `--max-records N`；5000000 是实测跑通的
+经验余量（headroom），不是算出来的数——receipt 不记录实际消耗量，所以只知道它
+够用，不知道离预算还剩多少。
+
+**`--max-files` 不是这个旋钮**——它管的是单次目录遍历发现的文件数（默认同为
+100000，超限报的是 `file_journal_file_limit_exceeded`，anchor 列举那一处报的是
+`file_journal_record_limit_exceeded: reconcile_inventory`），而实际文件数离
+100,000 还很远；调它不会让 record 预算变宽。预算跳闸是 fail-loud，不写任何字节，抬预算是唯一支持的处置，
 不存在"跳过"这个选项。
 
 **实测记录**（PR #1951，worktree SHA `de33bd87`，2026-09-02 09:46 UTC，
@@ -3714,6 +3748,11 @@ node-22 detached worktree + `/scratch/frd_muziyao/NWM/.venv/bin/python -m`）：
   `reconcile_abort_triggers` 0；per-surface：flat direct 5,125 行 / by-cycle
   direct 9,362 行 / journal replay 14,922 行（5,998 latest view + 275 segment）/
   reconcile-inventory 3 个 anchor、residue 0 / `active_reconcile` 不存在。
+- `rows` 的口径按 surface 不同：`journal_replay.rows` 数的是 replay 去重之后的
+  **唯一 `job_id` 个数**（所以 14,922 可以大于它读的 6,273 个文件——一个 latest
+  view 里可以有很多行），其余 surface 的 `rows` 数的是**读进来的文件个数**
+  （一个文件一行；`reconcile_inventory.rows` 是 anchor 个数，不含 residue）。
+  receipt schema 不变。
 - receipt 与 transcript：`docs/runbooks/receipts/journal-scope-census/node22-2026-09-02-de33bd87.json`
   与同目录 `-transcript.md`。
 - 结论：node-22 当前**没有**分叉行，规划中的 guarded repair 命令

@@ -71,6 +71,12 @@ never `uv run`, `uv sync`, or a pull of the live checkout).
 - [x] 3.2 §8.11 records the node-22 receipt outcome (0 divergent, 2026-09-02, de33bd87, receipt path) plus the `--max-records` remedy and the concurrent-run mode (round-1 fix F1).
 - [x] 3.3 `tests/test_node22_entrypoint_invariant.py`: add a positive assertion in the pattern of its existing `:122` check that `docs/runbooks/current-production-ops.md` contains `/scratch/frd_muziyao/NWM/.venv/bin/python -m services.orchestrator.cli census-job-id-scope` (the scanner only inspects `uv run` / `uv sync` lines, so without this the new runbook lines are never checked).
 
+## 3b. Round-2 review repairs (verified)
+
+- [x] 3b.1 (r2-cand-01, P1) `verify_journal_root_authority` refuses a blank or non-absolute root after tilde expansion (`expanduser` `RuntimeError` guarded) with the unchanged code/message; seam tests + census CLI tests from an empty cwd (both entrypoints × `""`/`.` → exit 1, stdout empty, typed stderr, cwd untouched) + demotion relative-root test; §8.11 gains a line naming the source of `$NHMS_SCHEDULER_JOURNAL_ROOT` (scheduler process env via `/proc/$pid/environ`, env-file fallback); spec delta enumeration widened (runtime-evidence ADDED requirement + scenario); matrix row 3b.
+- [x] 3b.2 (r2-cand-02, P2) divergent tree + unwritable `--output` test (exit 1, receipt `exit_code` 2); one masking sentence in §8.11 and `CENSUS_JOB_ID_SCOPE_HELP`; precedence unchanged.
+- [x] 3b.3 (r2-cand-03, P2 + Phase 6.2 audit) the record budget's charging unit stated correctly on §8.11, `MAX_RECORDS_HELP`, the census docstring, the test docstring and design D2 (one unit per pipeline-job row per latest view, one per JSONL line per segment, directs not charged on the census path); 5,000,000 labelled empirical headroom; `journal_replay.rows` = unique `job_id`s noted; every behavioural/numeric claim in §8.10/§8.11/help strings/docstrings audited against code (table in the implementer report).
+
 ## 4. node-22 live census receipt (D4)
 
 - [x] 4.1 Pre-checks over ssh (read-only): `git -C /scratch/frd_muziyao/NWM status --porcelain` (expect only the known untracked `.nhms-work/`), HEAD still `3acea778`, `systemctl --user is-active nhms-compute-scheduler.timer nhms-compute-scheduler.service`, `readlink -f` of the configured root equals the value.

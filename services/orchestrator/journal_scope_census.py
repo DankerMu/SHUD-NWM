@@ -40,8 +40,8 @@ Design commitments this module keeps, all of them load-bearing:
   is never added.
 
 Exit codes and stderr formats deliberately depart from this CLI's existing
-journal-error convention (``services/orchestrator/cli.py``'s
-``print(str(error))`` + exit 2 on ``FileOrchestrationJournalError``): for this
+journal-error convention (``services/orchestrator/cli.py`` echoes
+``str(error)`` and exits 2 on ``FileOrchestrationJournalError``): for this
 command exit **2 means "divergent rows found"**, so a typed failure must be
 distinguishable and uses exit **1**.  On stderr an ``OrchestratorError`` prints
 ``error_code: message`` (the ``plan-production`` convention) and a
@@ -95,9 +95,12 @@ CENSUS_JOB_ID_SCOPE_HELP = (
     "reconcile-inventory anchors and the legacy active-reconcile directory). "
     "Writes nothing under the journal root: --output refuses any path inside "
     "it, and inventory .tmp residue is reported, never removed. Exit 0 when no "
-    "divergent row exists, 2 when one or more do, 1 on a typed failure. A "
-    "production-sized tree can legitimately exceed the default replay record "
-    "budget (file_journal_record_limit_exceeded: pipeline_job_records, exit 1); "
+    "divergent row exists, 2 when one or more do, 1 on a typed failure -- and a "
+    "typed failure raised AFTER the receipt was emitted (an unwritable --output) "
+    "exits 1 even when divergent rows were found, so read exit_code inside the "
+    "stdout receipt, not only $?. A production-sized tree can legitimately "
+    "exceed the default replay record budget "
+    "(file_journal_record_limit_exceeded: pipeline_job_records, exit 1); "
     "--max-records raises it -- node-22 needed 5000000 on 2026-09-02."
 )
 
@@ -125,13 +128,22 @@ MAX_FILES_HELP = (
 
 MAX_RECORDS_HELP = (
     "Override the journal replay record budget (default MAX_FILE_JOURNAL_RECORDS "
-    "= 100000, charged across latest views, segment records and direct records "
-    "together). A trip fails loud with 'file_journal_record_limit_exceeded: "
-    "pipeline_job_records' and exit 1; node-22's live tree needed 5000000 on "
-    "2026-09-02. Raising the budget is the documented remedy, never a skip."
+    "= 100000). One unit is charged per pipeline-job ROW materialised from each "
+    "latest view -- one view can carry many rows -- plus one per JSONL LINE in "
+    "every journal segment, whatever the record type. The census replays with "
+    "include_direct=False, so direct files charge nothing. A trip fails loud "
+    "with 'file_journal_record_limit_exceeded: pipeline_job_records' and exit 1; "
+    "node-22's live tree needed 5000000 on 2026-09-02. Raising the budget is the "
+    "documented remedy, never a skip."
 )
 
-_OUTPUT_HELP = "Write the receipt to this path (must be outside the root); stdout carries it either way."
+_OUTPUT_HELP = (
+    "Write the receipt to this path. It must be outside the journal root: an "
+    "in-root path is refused (CENSUS_OUTPUT_INSIDE_JOURNAL_ROOT, exit 1) before "
+    "the census runs, so nothing is echoed for it either. Once the census has "
+    "run, stdout carries the complete receipt whether or not this file write "
+    "succeeds."
+)
 
 
 class _Divergence:
@@ -449,11 +461,13 @@ def census_job_id_scope(
 ) -> dict[str, Any]:
     """Census one journal root and return the receipt mapping.
 
-    ``max_files`` / ``max_records`` override the repository budgets: the replay
-    charges every latest view, segment record and direct record against one
-    record budget, and a large production journal can legitimately need more
-    than the default.  A trip fails loud; the override is the documented way
-    past it, never a skip.
+    ``max_files`` / ``max_records`` override the repository budgets.  The replay
+    charges one unit per pipeline-job row materialised from EACH latest view
+    (a single view can carry many rows) plus one per JSONL line in every
+    journal segment regardless of record type; direct records are charged only
+    on the ``include_direct=True`` replay, which this census never asks for.  A
+    large production journal can legitimately need more than the default.  A
+    trip fails loud; the override is the documented way past it, never a skip.
     """
 
     verified_root = verify_journal_root_authority(journal_root, setting="--journal-root")
