@@ -50,6 +50,7 @@ from tests.integration_helpers import (
     CYCLE_TIME,
     FORCING_VERSION_ID,
     FORECAST_RUN_ID,
+    HINDCAST_RUN_ID,
     ISSUE_126_PREFIX,
     MODEL_ID,
     RIVER_NETWORK_VERSION_ID,
@@ -110,6 +111,12 @@ _PARITY_GRID_CELL_ID = f"{ISSUE_126_PREFIX}_grid_cell_1"
 _NULL_FORCING_RUN_ID = f"{ISSUE_126_PREFIX}_forecast_run_nullfv"
 _NULL_FORCING_RUN_SHIFT = timedelta(hours=6)
 
+# The #1674 D2 legacy cohort, one row: `published` before the dual-write cutover
+# and therefore never stamped with `parsed_at`. Local to this module (see
+# `_seed_legacy_published_run`).
+_LEGACY_PUBLISHED_RUN_ID = f"{ISSUE_126_PREFIX}_legacy_published_run"
+_LEGACY_PUBLISHED_RUN_SHIFT = timedelta(days=30)
+
 # One unit and one deterministic value per MVP station variable. Units only have
 # to be non-empty and stable: the coverage CTEs count DISTINCT units per
 # variable, they do not interpret them.
@@ -149,6 +156,53 @@ def _scalar(connection: Any, sql: str, params: Any = None) -> Any:
         cursor.execute(sql, params)
         row = cursor.fetchone()
     return None if row is None else next(iter(row.values()))
+
+
+def _status(connection: Any, run_id: str) -> Any:
+    return _scalar(connection, "SELECT status FROM hydro.hydro_run WHERE run_id = %s", (run_id,))
+
+
+def _updated_at(connection: Any, run_id: str) -> Any:
+    return _scalar(connection, "SELECT updated_at FROM hydro.hydro_run WHERE run_id = %s", (run_id,))
+
+
+def _parsed_at(connection: Any, run_id: str) -> Any:
+    return _scalar(connection, "SELECT parsed_at FROM hydro.hydro_run WHERE run_id = %s", (run_id,))
+
+
+def _seed_legacy_published_run(connection: Any) -> None:
+    """One #1674 D2 legacy row: already ``published``, never stamped.
+
+    Seeded here and not in ``seed_issue_126_data`` on purpose — that helper is
+    shared with ``tests/test_real_database_integration.py`` and
+    ``tests/test_integration_helpers_bounded_teardown.py``, and a third run in
+    the shared seed would move their counts for a row only this module asserts
+    on. The throwaway database is created and dropped per test, so the extra row
+    needs no teardown of its own.
+    """
+    _execute(
+        connection,
+        """
+        INSERT INTO hydro.hydro_run (
+            run_id, run_type, scenario_id, model_id, basin_version_id,
+            forcing_version_id, source_id, cycle_time, start_time, end_time,
+            status, parsed_at, run_manifest_uri, output_uri, log_uri
+        )
+        VALUES (%s, 'hindcast', 'hindcast_era5', %s, %s, NULL, 'gfs', %s, %s, %s,
+                'published', NULL, %s, %s, %s)
+        """,
+        (
+            _LEGACY_PUBLISHED_RUN_ID,
+            MODEL_ID,
+            BASIN_VERSION_ID,
+            CYCLE_TIME - _LEGACY_PUBLISHED_RUN_SHIFT,
+            CYCLE_TIME - _LEGACY_PUBLISHED_RUN_SHIFT,
+            CYCLE_TIME,
+            "s3://nhms/runs/it126-legacy/input/manifest.json",
+            "s3://nhms/runs/it126-legacy/output/",
+            "s3://nhms/runs/it126-legacy/logs/",
+        ),
+    )
 
 
 def _candidates(store: PsycopgForecastStore) -> list[dict[str, Any]]:
@@ -196,6 +250,10 @@ def test_status_only_publish_keeps_ingest_refreshed_coverage_fresh(throwaway_dat
         )
         assert published_status == "published"
         assert _stale_run_ids(connection, [FORECAST_RUN_ID]) == set()
+        # Exactly one run moved: the hindcast seed is also `parsed`, and it is
+        # the seeded run with no completed parse behind it (NULL `parsed_at`,
+        # no fact rows), so `== 1` above is a two-sided count, not a lucky one.
+        assert _status(connection, HINDCAST_RUN_ID) == "parsed"
 
         # Mutation contrast: the pre-#1120 publish shape re-stales the very run
         # whose coverage the same tick refreshed.
@@ -206,6 +264,47 @@ def test_status_only_publish_keeps_ingest_refreshed_coverage_fresh(throwaway_dat
         )
         _execute(connection, _LEGACY_PUBLISH_SQL)
         assert _stale_run_ids(connection, [FORECAST_RUN_ID]) == {FORECAST_RUN_ID}
+    finally:
+        connection.close()
+
+
+def test_publish_predicate_publishes_completed_parses_and_nothing_else(
+    throwaway_database_url: str,
+) -> None:
+    """#1779: the three regression rows of the authority-state predicate.
+
+    A source-text pin (``tests/test_display_publish_status_only.py``) can say the
+    statement reads ``parsed_at``; only a database can say which rows that moves.
+    Three rows, one execution:
+
+    * positive — ``parsed`` with a parse timestamp becomes ``published``;
+    * negative — ``parsed`` with NULL ``parsed_at`` (a status nothing parsed
+      produced) is left alone. Without this the predicate could have degenerated
+      to ``status = 'parsed'`` and every assertion above would still pass;
+    * legacy — a run already ``published`` with NULL ``parsed_at`` (the #1674 D2
+      pre-cutover cohort, 1360 rows in production) is outside the predicate and
+      keeps its ``updated_at``. It is the row a predicate that keyed on
+      ``parsed_at IS NULL``, or that bumped ``updated_at``, would disturb.
+    """
+    _prepared_database(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_legacy_published_run(connection)
+        legacy_updated_at = _updated_at(connection, _LEGACY_PUBLISHED_RUN_ID)
+        forecast_updated_at = _updated_at(connection, FORECAST_RUN_ID)
+        assert _parsed_at(connection, FORECAST_RUN_ID) is not None
+        assert _parsed_at(connection, HINDCAST_RUN_ID) is None
+
+        assert autopipe._publish_display_runs(throwaway_database_url) == 1
+
+        assert _status(connection, FORECAST_RUN_ID) == "published"
+        assert _status(connection, HINDCAST_RUN_ID) == "parsed"
+        assert _status(connection, _LEGACY_PUBLISHED_RUN_ID) == "published"
+        assert _updated_at(connection, FORECAST_RUN_ID) == forecast_updated_at
+        assert _updated_at(connection, _LEGACY_PUBLISHED_RUN_ID) == legacy_updated_at
+
+        # Idempotent: a second tick finds nothing left to do.
+        assert autopipe._publish_display_runs(throwaway_database_url) == 0
     finally:
         connection.close()
 

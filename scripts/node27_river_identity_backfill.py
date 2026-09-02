@@ -96,6 +96,12 @@ _CONNECT_TIMEOUT_SECONDS = 10
 _CATALOG_TIMEOUT_MS = 60_000
 _DEFAULT_BATCH_PAGES = 1_250  # ~100k rows at ~80 rows/page on this row width
 _DEFAULT_DURATION_WALL_MS = 30_000
+# Strictly below the duration wall on purpose (#1476): a batch that is merely
+# QUEUED for a row lock must run out the lock budget first, so the failure is
+# reported as `lock_contention` (an overlap problem) instead of surfacing as
+# 57014 and being classified `duration_wall` (a batch-size problem). The two
+# remedies are opposites, so the misclassification is not cosmetic.
+_DEFAULT_LOCK_TIMEOUT_MS = 5_000
 _DEFAULT_BATCH_SLEEP_MS = 250
 _DEFAULT_MAX_BATCHES = 500
 _DEFAULT_QUIESCENCE_SECONDS = 60
@@ -309,6 +315,7 @@ class BackfillConfig:
     final_sweep: bool
     batch_pages: int
     duration_wall_ms: int
+    lock_timeout_ms: int
     batch_sleep_ms: int
     max_batches: int
     lag_seconds: int
@@ -584,6 +591,35 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
     if args.enforce and args.probe:
         raise BackfillConfigError("--enforce and --probe are mutually exclusive")
 
+    duration_wall_ms = _parse_int(
+        env.get("NODE27_RIVER_IDENTITY_BACKFILL_DURATION_WALL_MS"),
+        name="NODE27_RIVER_IDENTITY_BACKFILL_DURATION_WALL_MS",
+        default=_DEFAULT_DURATION_WALL_MS,
+        minimum=_MIN_DURATION_WALL_MS,
+    )
+    # `minimum=1`, not 0: PostgreSQL reads `lock_timeout = 0` as "wait forever",
+    # so accepting zero would silently reinstate the unbounded wait this knob
+    # exists to end.
+    lock_timeout_ms = _parse_int(
+        env.get("NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS"),
+        name="NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS",
+        default=_DEFAULT_LOCK_TIMEOUT_MS,
+        minimum=1,
+    )
+    # Refused here, before any database call: an inverted pair is not a slow
+    # run, it is a runner that cannot classify its own failures. At or above the
+    # wall the statement timeout fires first on a pure lock wait, and every
+    # contention event comes back labelled `duration_wall` -- the exact
+    # misdiagnosis #1476 exists to remove.
+    if lock_timeout_ms >= duration_wall_ms:
+        raise BackfillConfigError(
+            "NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS must be strictly less than "
+            "NODE27_RIVER_IDENTITY_BACKFILL_DURATION_WALL_MS "
+            f"(got lock_timeout_ms={lock_timeout_ms}, duration_wall_ms={duration_wall_ms}); "
+            "otherwise a pure lock wait is cancelled by the statement timeout and reported "
+            "as duration_wall instead of lock_contention"
+        )
+
     return BackfillConfig(
         database_url=database_url,
         receipt_path=receipt_path,
@@ -597,12 +633,8 @@ def config_from_args(args: argparse.Namespace, env: Mapping[str, str] | None = N
             default=_DEFAULT_BATCH_PAGES,
             minimum=1,
         ),
-        duration_wall_ms=_parse_int(
-            env.get("NODE27_RIVER_IDENTITY_BACKFILL_DURATION_WALL_MS"),
-            name="NODE27_RIVER_IDENTITY_BACKFILL_DURATION_WALL_MS",
-            default=_DEFAULT_DURATION_WALL_MS,
-            minimum=_MIN_DURATION_WALL_MS,
-        ),
+        duration_wall_ms=duration_wall_ms,
+        lock_timeout_ms=lock_timeout_ms,
         batch_sleep_ms=_parse_int(
             env.get("NODE27_RIVER_IDENTITY_BACKFILL_BATCH_SLEEP_MS"),
             name="NODE27_RIVER_IDENTITY_BACKFILL_BATCH_SLEEP_MS",
@@ -761,6 +793,7 @@ def execute_batch(
     first_page: int,
     last_page: int,
     duration_wall_ms: int,
+    lock_timeout_ms: int,
     collect_locks: bool = False,
 ) -> BatchOutcome:
     """Run one ctid-block batch inside the caller's transaction.
@@ -770,6 +803,14 @@ def execute_batch(
     actually stop a statement that is already holding row locks, so a
     self-reported "wall" would be a comment rather than a bound. A cancellation
     surfaces as :class:`BatchDurationExceeded` for the caller's halving retry.
+
+    ``SET LOCAL lock_timeout`` sits immediately beside it and strictly below it
+    (asserted at configuration time), which is what makes the two failures
+    distinguishable (#1476). Without it a batch merely QUEUED behind ingest's
+    row locks waits until the statement timeout cancels it, arrives as 57014,
+    and is classified ``duration_wall`` -- sending the operator to tune
+    ``batch_pages`` against a problem that has nothing to do with batch size.
+    With it, the wait ends at 55P03 and lands in ``lock_contention``.
 
     Fail-closed on shortfall: if fewer rows were updated than the sentinel
     predicate matched, the difference is rows the four-way join could not
@@ -784,6 +825,7 @@ def execute_batch(
     started = time.monotonic()
     try:
         cursor.execute(f"SET LOCAL statement_timeout = {int(duration_wall_ms)}")
+        cursor.execute(f"SET LOCAL lock_timeout = {int(lock_timeout_ms)}")
         candidate_rows = _scalar(cursor, _CANDIDATE_COUNT_SQL.format(chunk=chunk.qualified), params)
         cursor.execute(_BATCH_UPDATE_SQL.format(chunk=chunk.qualified), params)
         updated_rows = int(cursor.rowcount if cursor.rowcount is not None and cursor.rowcount >= 0 else 0)
@@ -1118,6 +1160,7 @@ def _run_probe(
                 first_page=first_page,
                 last_page=last_page,
                 duration_wall_ms=config.duration_wall_ms,
+                lock_timeout_ms=config.lock_timeout_ms,
                 collect_locks=True,
             )
         return {
@@ -1324,6 +1367,7 @@ def _guarded_batch(
             first_page=first_page,
             last_page=last_page,
             duration_wall_ms=config.duration_wall_ms,
+            lock_timeout_ms=config.lock_timeout_ms,
         )
 
 
@@ -1446,6 +1490,7 @@ def build_receipt(
         "bounds": {
             "batch_pages": config.batch_pages,
             "duration_wall_ms": config.duration_wall_ms,
+            "lock_timeout_ms": config.lock_timeout_ms,
             "batch_sleep_ms": config.batch_sleep_ms,
             "max_batches": config.max_batches,
             "lag_seconds": config.lag_seconds,
@@ -1636,6 +1681,7 @@ def build_refused_lock_receipt(
         "bounds": {
             "batch_pages": config.batch_pages,
             "duration_wall_ms": config.duration_wall_ms,
+            "lock_timeout_ms": config.lock_timeout_ms,
             "batch_sleep_ms": config.batch_sleep_ms,
             "max_batches": config.max_batches,
             "lag_seconds": config.lag_seconds,

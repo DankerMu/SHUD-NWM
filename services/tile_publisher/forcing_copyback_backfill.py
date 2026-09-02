@@ -74,6 +74,17 @@ _DISCOVER_BACKFILL_RUNS_SQL = """
           SELECT 1
           FROM hydro.river_timeseries rt
           WHERE rt.run_key = h.run_key
+            -- What this aid is, precisely (#1778): an ORDERBY-level batch
+            -- filter, not a segmentby index pushdown. Migration 000047 compresses
+            -- this hypertable with segmentby `run_id, river_network_version_id,
+            -- river_segment_id` and orderby `variable, valid_time`, so
+            -- `variable` reaches the planner only as per-batch min/max metadata:
+            -- it lets whole compressed batches be skipped before decompression,
+            -- and it can do nothing about which segments are opened. Do not read
+            -- it as an index-level pushdown or cite it as one elsewhere. Note
+            -- for #1342: the aid goes away with the column, and what would give
+            -- this probe a real segment-level access path is that issue's
+            -- successor index plus a compression-layout re-cut, not this line.
             -- transitional compressed-chunk pushdown aid, remove with #1342
             AND rt.variable = 'q_down'
             -- Deliberately no explicit enum cast on the literal: this statement

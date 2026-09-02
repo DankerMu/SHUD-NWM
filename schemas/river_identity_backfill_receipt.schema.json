@@ -86,6 +86,7 @@
       "required": [
         "batch_pages",
         "duration_wall_ms",
+        "lock_timeout_ms",
         "batch_sleep_ms",
         "max_batches",
         "lag_seconds"
@@ -93,6 +94,11 @@
       "properties": {
         "batch_pages": {"type": "integer", "minimum": 1},
         "duration_wall_ms": {"type": "integer", "minimum": 1000},
+        "lock_timeout_ms": {
+          "description": "Per-batch SET LOCAL lock_timeout in MILLISECONDS. Strictly below duration_wall_ms (refused at configuration time otherwise) so a pure lock wait ends as SQLSTATE 55P03 -> stop.stage lock_contention rather than as 57014 -> duration_wall. Never 0: PostgreSQL reads 0 as 'wait forever'.",
+          "type": "integer",
+          "minimum": 1
+        },
         "batch_sleep_ms": {"type": "integer", "minimum": 0},
         "max_batches": {"type": "integer", "minimum": 1},
         "lag_seconds": {
