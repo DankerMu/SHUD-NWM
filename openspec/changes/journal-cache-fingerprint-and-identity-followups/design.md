@@ -391,8 +391,9 @@ Regression rows:
   stated limit (D1), out of scope via `_direct_jobs_cycle_cache`, routed as a follow-up issue
 - untouched empty directory, warm instance -> legal `[]`, still a cache hit on the second read
 - fingerprint that observed a fault -> no entry stored (cache dict inspected)
-- owner inside its window, parent swapped for symlink between two owner reads -> second read
-  fails loud with `file_journal_unreadable`
+- owner inside its window, parent directory swapped for symlink between two owner reads ->
+  second read fails loud with the token the cold reader reports for that directory
+  (`file_journal_unreadable` on the pinned journal leg; D1 table for the others)
 - owner inside its window, untouched tree -> hit served without a source-file fingerprint
 - cohort X window exits after cohort Y populated its entry inside the window -> Y's entry
   still hits (no disk re-read); X's own prefix (incl. base key) is gone
