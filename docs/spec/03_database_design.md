@@ -230,10 +230,13 @@ CREATE TABLE core.model_instance (
 ```
 
 > **`active_flag` 权威归属（#1695）**：`core.model_instance.active_flag` 是
-> **展示面与 lifecycle 的权威**，不是计算面的。以下非 test 读者按面分组列出
+> **展示面与 lifecycle 的权威**；对生产计算面（file lane，
+> `NHMS_SCHEDULER_REGISTRY_BACKEND=file`）它没有权威，权威是 manifest；只有在
+> postgres lane（代码默认值 `postgres`，生产未用）它才是调度 run/no-run 的闸门。
+> 以下非 test 读者按面分组列出
 > （grep 口径：`grep -rn active_flag packages services workers scripts apps db`，
 > 剔除同名但不同表的列——`core.basin_version` / `met.met_station` /
-> `met.interp_weight`，以及 `met.grid_snapshot`、`core.basin` 等——和纯写入点
+> `met.interp_weight`——和纯写入点
 > （INSERT 字面量、schema DDL、API payload 直通），2026-09-02）。列出它们是为了
 > 能看清翻这个 flag 的爆炸半径；写这一列的路径除下文的激活闸门外还有
 > `workers/model_registry/qhh_production_bootstrap.py::_activate_qhh_model`（`:1622`）
@@ -295,7 +298,7 @@ CREATE TABLE core.model_instance (
 > （mock cursor 上断言 SQL 含 `NOT EXISTS` 与
 > `active_sibling.basin_version_id = core.model_instance.basin_version_id`；
 > `:864` 的 `== 0` 来自 mock 的固定 `rowcount`，不是真库行为，真库下的
-> rowcount 无测试覆盖）。调度器不读这个列，
+> rowcount 无测试覆盖）。生产（file lane）调度器不读这个列，
 > 所以它们照跑不误。
 >
 > 不要为了「让数字好看」去翻 `dg_*` 的 flag。两道 DB 闸门会先拦住你：

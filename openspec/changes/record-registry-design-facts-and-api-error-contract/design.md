@@ -158,9 +158,11 @@ Facts to state (no causal story beyond what is traced):
   MVT membership `services/tiles/mvt.py:367` (also `:442, :653, :691,
   :1411`), frontend `activeModelCount`
   (`apps/frontend/src/lib/m11/overviewDataContracts.ts:408, :617`) — and by
-  the lifecycle API (`model_registry.py`). Baseline rows are the display
-  members; `dg_*` rows are false in the DB (never activated through the
-  lifecycle channel) and are not read by the scheduler.
+  the lifecycle API (`model_registry.py`). As of the 2026-09-02 counts only
+  baseline rows are `true` (the MVT predicate has no baseline/variant test);
+  `dg_*` rows stay `false` because `node27_autopipeline::_activate_model`'s
+  one-active-sibling guard never flips them, and the production file-lane
+  scheduler does not read the column (the postgres lane would).
 - Compute-plane authority is the file-registry manifest
   (`NHMS_SCHEDULER_REGISTRY_BACKEND=file`, `manifest-last.json`, written by
   `scripts/publish_scheduler_file_registry.py`); the DB-free scheduler cannot
