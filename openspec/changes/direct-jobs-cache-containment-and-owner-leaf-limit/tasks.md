@@ -15,7 +15,7 @@ so both files run there). Sync discipline: `git status --porcelain` first,
 
 - [x] `uv run pytest tests/test_file_orchestration_journal.py tests/test_file_orchestration_journal_read_cache.py -q` green on the default (case-insensitive) macOS volume
 - [x] The same two files green with `--basetemp` on a case-sensitive APFS volume (`hdiutil` dmg; the two filesystem-branching pins from PR #1939 run their other branch here)
-- [ ] The same two files green on node-27 (`/home/nwm/NWM`, ff-only sync, `uv run pytest … -q`), receipt (host, HEAD SHA, pass line) in the PR evidence
+- [x] The same two files green on node-27 (`/home/nwm/NWM`, ff-only sync, `uv run pytest … -q`), receipt (host, HEAD SHA, pass line) in the PR evidence
 - [x] `uv run pytest tests/test_orchestration_chain.py tests/test_warm_start_chaining.py tests/test_production_scheduler.py tests/test_retry.py tests/test_retry_cancel_consistency.py tests/test_scheduler_journal_retention_archive.py tests/test_scheduler_journal_retention_planning.py -q` green (no chain / scheduler / retry / retention consumer regresses on the direct-cache change; the two retention files drive `open_retention_cycle`, matrix row 6)
 - [x] `uv run ruff check .` clean
 - [x] Red proof against pre-change source: the flipped hard-variant marker test (1.3), the owner test (1.5) and the retention-inspection test (1.7) shown red on master `9785e52d` and green after; 1.4 and 1.6 are pins expected green on master and are stated as such; `git stash list` holds no `red-proof` entry afterwards
@@ -42,10 +42,17 @@ so both files run there). Sync discipline: `git status --porcelain` first,
 - [x] 3.1 Reword the docstring of `test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit` (`:1344`): drop "must be FLIPPED when the residual is closed"; state the limit is ruled permanent by #1942 with the cost reason (probe 191 / fingerprint 414 / hit 422 vs 20 syscalls; a leaf probe is the fingerprint). Assertions unchanged.
 - [x] 3.2 No change to `_cycle_directories_probe_faulted` (`:9701`) or the probe list.
 
+## 3b. Round-1 review repairs (test-oracle, verified)
+
+- [x] 3b.1 Signature-only fault test (matrix row 2b): on a clean `_empty_cycle_tree`, monkeypatch `repository._containment_stat_signature` to return `_FINGERPRINT_CONTAINMENT_FAULT` for the `pipeline-jobs` path only; two reads (`model_a`, then `None`) both recompute (counter == 2), `_direct_jobs_cycle_cache` stays empty; remove the patch, next read recomputes then hits. Mutation "drop `if not faulted`" must go red.
+- [x] 3b.2 Parametrize 1.6 over `_empty_cycle_tree` and `_hard_variant_tree` (spec scenario "including a real by-cycle partition with no `<cycle>` child").
+- [x] 3b.3 Replace the vacuous no-marker assertion after `direct_after == direct_before` with a comment, or drop it.
+- [x] 3b.4 `:1344` docstring: "any leaf-level change (symlink swap, plain-file add/replace/remove)" and the depth caveat on the 191/414/422 figures (14-component root; this PR's 334 warm hit is at 9).
+
 ## 4. Spec + docs
 
 - [x] 4.1 `specs/pipeline-job-persistence/spec.md` delta: MODIFIED "Journal existence probes SHALL enforce filesystem containment before declaring absence" — name the direct-jobs cycle cache, drop the recompute-reads-tampered-path bound from the warm/cold scenario, add the by-cycle hard-variant scenario, widen the never-stored scenario to both caches.
-- [x] 4.2 No delta for the owner fast-path requirement (`:796`); its stated-limit sentence is the ruling's normative home (D3). The MODIFIED containment requirement names the owner only for the parent-component swap and cross-references that limit.
+- [x] 4.2 Second MODIFIED block for the owner fast-path requirement (`:796`): the stated-limit sentence widened from "a leaf file swapped for a symlink" to any leaf-level change beneath the probed directories, with the window-bounded exposure (review round 1, cand-02). The MODIFIED containment requirement names the owner only for the parent-component swap and cross-references that limit.
 - [x] 4.3 #1941 acceptance item 4 (rewrite the archived change's `design.md:390-391` / `:80-93`): not done — archived changes are immutable; the closure is carried by design D1 / matrix rows 2-4 and the spec delta. Recorded in `proposal.md` "Deviations recorded up front" and repeated in the PR 偏离记录.
 
 ## Risk packs
@@ -60,7 +67,7 @@ so both files run there). Sync discipline: `git status --porcelain` first,
 
 ## Non-goals
 
-- #1942 option A (leaf probing on the owner path).
+- #1942 option A (leaf probing on the owner path) and option C (comparing the owner probe's directory tuples) — C priced and not adopted in design D3.
 - Any other `_stat_signature` caller; `_cycle_job_records_cache` (D2).
 - Reducing `_open_directory_no_follow`'s from-root re-walk cost (fd-reusing
   `stat_no_follow`) — separate perf item, out of scope here as in PR #1939.

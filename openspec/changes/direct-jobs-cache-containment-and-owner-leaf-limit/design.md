@@ -68,9 +68,18 @@ store only if not faulted
 ```
 
 - **No cache-type widening.** `_direct_jobs_cycle_cache` (`:1101`) keeps its
-  `tuple[tuple[Any, ...], list[dict]]` shape; the marker never enters it. A
-  stored signature therefore can never compare equal to a faulted one, and the
-  explicit `not faulted` on the lookup is belt-and-braces, not load-bearing.
+  `tuple[tuple[Any, ...], list[dict]]` shape; the marker never enters it.
+  Two guards, either of which alone closes the hole (verified by mutation
+  in review round 1): the marker is a singleton without `__eq__`, so
+  `(x, FAULT) == (x, FAULT)` is `True` by identity — dropping *both* guards
+  lets a transient stat fault prime an entry that a later persistent tamper
+  then hits. With the store guard, no marker is ever in the cache and the
+  lookup guard is redundant; with only the lookup guard, a marker entry is
+  stored but never served (cache pollution, a wasted slot). Both are kept;
+  the store guard is the one the spec names ("never stored") and is pinned
+  on its own by a signature-only fault test (matrix row 2b): the containment
+  stat is made to fault while the recompute succeeds, and the cache must
+  stay empty across two reads.
 - **Fail-closed direction, unchanged token.** The recompute reads the tampered
   path, so the observable fate of a faulted read is the raise the recompute
   already produces for a cold instance (`file_journal_unsafe_scanned_entry`
@@ -159,9 +168,9 @@ non-difference, not a hole. **No code change.** The conclusion is recorded
 here and in the PR's 偏离记录; it rests on the mechanism plus the empty-tree
 probe.
 
-## D3 — #1942: the owner leaf-swap is a permanent stated limit (option B)
+## D3 — #1942: the owner leaf-level tamper is a stated limit (option B)
 
-### The two options as priced by PR #1939's verifier (cand-03, cand-04)
+### The options, priced (A and B from PR #1939's verifier, cand-03/cand-04; C surfaced by this PR's review)
 
 - **A — probe leaves too.** The owner fast path exists to skip the source-file
   fingerprint. The five leaf cells that can be swapped during a window
@@ -182,11 +191,32 @@ probe.
   revalidates under the full containment-aware fingerprint (D1 of PR #1939),
   which sees the swapped leaf and fails loud. The non-owner and cold lanes
   never had the hole.
+- **C — compare the directory tuples the owner probe already computes.**
+  `_cycle_directories_probe_faulted` (`:9701`) builds `(mtime_ns, size, ino)`
+  for its five directories and keeps only the `is _FINGERPRINT_CONTAINMENT_FAULT`
+  test; storing those tuples on the owner's entry and comparing on the next
+  hit costs zero additional `os.*` calls, and a leaf unlink/symlink/rename
+  moves the parent directory's mtime on APFS and ext4 (measured for all five
+  cells in review). C is not adopted here, for costs that are not syscalls:
+  (a) `pipeline-jobs` is a globally shared flat root — every non-candidate
+  job of *any* cycle is written there through `_atomic_write_json_unlocked`
+  (`_write_pipeline_job_direct_unlocked` `:9241-9259`), so other cycles' writes
+  during the window would turn owner hits into recomputes, the same
+  shared-root thrash `:6740-6744` documents for the sibling cache; (b) it is
+  strictly weaker than the file fingerprint — an in-place append to an
+  existing `.jsonl` leaf moves no parent tuple, and a swap changes only the
+  parent's mtime (size and inode unchanged), so coarse-timestamp filesystems
+  see nothing; (c) owner entries would carry tuples instead of `None`, which
+  touches the spec's "fingerprint-free entries" wording. Adopting C would
+  therefore close the swap/add/remove cells but not the append cell, at an
+  unmeasured hit-rate cost.
 
 ### Ruling
 
-**B.** The limit is permanent, not "until the residual is closed". What
-changes on disk:
+**B**, as the user ruled between A and B. The limit is recorded as a stated
+limit of the owner path, not as a residual awaiting closure; it is reopened
+only by a measured owner hit-rate figure under other cycles' flat writes
+(option C's cost) — no such measurement is planned. What changes on disk:
 
 - `test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit`
   (`tests/test_file_orchestration_journal_read_cache.py:1344`) keeps pinning
@@ -196,10 +226,13 @@ changes on disk:
 - The `_cycle_directories_probe_faulted` docstring / the D1b comment near
   `:5757` keep saying "directories only"; no wording promises a future flip
   there, so they are unchanged.
-- Spec `pipeline-job-persistence` `:798` already states "a leaf file swapped
-  for a symlink during the window is a stated limit of the fingerprint-free
-  owner path, not a promise of this requirement". That sentence is the
-  normative record; no delta is needed for the ruling.
+- Spec `pipeline-job-persistence` `:798` states the limit as "a leaf file
+  swapped for a symlink". Review measured that the owner probe is fault-only
+  and therefore blind to *any* leaf-level change (a plain file added,
+  replaced or removed serves pre-tamper rows just the same), so this change
+  adds a second MODIFIED block widening that sentence to "any other change
+  beneath the probed directories" and stating the window-bounded exposure.
+  That widened sentence is the ruling's normative record.
 
 ### Owner lane and the by-cycle hard variant
 
@@ -207,8 +240,8 @@ Not to be confused with #1942: the owner's *directory* probe does see a
 swapped `pipeline-jobs/by-cycle/<src>` (it is in the probe list) and forces a
 recompute — which, before D1, hit the warm direct cache and served `[]`. D1
 closes that cell for the owner lane too; tasks.md §1 carries a test row for
-it. After this PR the owner path's only stated limit is the leaf swap D3
-rules on.
+it. After this PR the owner path's only stated limit is the leaf-level
+tamper D3 rules on.
 
 ## Invariant Matrix
 
@@ -217,19 +250,20 @@ Governing invariant: Every cache the cycle-rows recompute consults — the cycle
   the direct-jobs cycle cache alike — judges the identity of its sources under the containment
   discipline, so a cold instance, a warm instance and the write-window owner give one answer
   for one tree for a parent component swapped for a symlink; the sole remaining exception is the
-  ruled, spec-stated owner leaf-swap limit, bounded to the window that grants the fast path.
+  ruled, spec-stated owner leaf-level limit, bounded to the window that grants the fast path.
 
 | # | Invariant | Where enforced | Test / evidence | Status |
 |---|---|---|---|---|
 | 1 | Both direct-cache signature legs resolve through `_containment_stat_signature` | `_direct_pipeline_job_records_for_cycle_cached` | grep: no `_stat_signature(` remains in that function; flipped marker test | new |
-| 2 | A faulted direct-cache signature is never stored and never a hit | same, store + lookup short-circuit | `test_fingerprint_that_observed_a_containment_fault_is_never_stored` hard variant asserts the public token for `model_a` and `None` and `after == before` for `_direct_jobs_cycle_cache` | flipped |
+| 2 | A faulted direct-cache signature is never stored and never a hit | same, store + lookup short-circuit | `test_fingerprint_that_observed_a_containment_fault_is_never_stored` hard variant asserts the public token for `model_a` and `None` and `after == before` for `_direct_jobs_cycle_cache` (raise path) | flipped |
+| 2b | The store guard is discriminated on its own (recompute succeeds, stat faults) | store guard | signature-only fault test: monkeypatch `_containment_stat_signature` to return the marker for one leg on a clean tree; two reads → two recomputes, `_direct_jobs_cycle_cache` empty; mutation "drop `if not faulted`" goes red | new (round 1) |
 | 3 | Warm == cold on the by-cycle hard variant, both model lanes | recompute raises inside `_iter_direct_pipeline_job_records_for_cycle` | same test + a fresh-instance cold-side pin (tamper before the first read, cache stays empty; green on master by construction, it pins the cold answer the warm cell is compared to) | new |
 | 4 | Owner in-window by-cycle hard variant raises, not `[]` | owner probe → recompute → D1 | new owner test row | new |
-| 5 | An untouched empty by-cycle partition still hits the cache on the second read | `None` for genuine absence | two reads that both miss `_cycle_rows_cache` but share the direct key (`model_a` then `None`), `_iter_direct_pipeline_job_records_for_cycle` called exactly once | new |
+| 5 | An untouched empty by-cycle partition still hits the cache on the second read — both with and without the `<cycle>` child | `None` for genuine absence | two reads that both miss `_cycle_rows_cache` but share the direct key (`model_a` then `None`), `_iter_direct_pipeline_job_records_for_cycle` called exactly once; parametrized over `_empty_cycle_tree` / `_hard_variant_tree` | new |
 | 6 | Retention inspection reports the tamper as a blocked row, never `eligible` | `_inspect_retention_cycle_unlocked` unchanged; behaviour moves at `:5835` via `:10099` | one `open_retention_cycle` window: `inspect()` → hard-variant tamper → `inspect()` == `blocked`/`file_journal_unsafe_scanned_entry`, equal to a fresh instance's inspection; master gives `eligible` | new |
 | 7 | No new exception type at any public boundary | tokens unchanged | tests assert `file_journal_unsafe_scanned_entry` only | pinned |
 | 8 | Sibling `_cycle_job_records_cache` unchanged | no diff | D2 table + `git diff` empty at `:6707-6870` | recorded |
-| 9 | Owner leaf swap remains observable as the stated limit | no code change | `:1344` pin still green; docstring cites #1942 | reworded |
+| 9 | Owner leaf-level tamper remains observable as the stated limit | no code change | `:1344` pin still green; docstring cites #1942 and says "any leaf-level change", with the depth caveat on the cost figures | reworded |
 | 10 | `test_cycle_write_window_owner_keeps_fingerprint_free_fast_path` (`:434`) stays green | owner path untouched | existing test | pinned |
 | 11 | Direct cache cost delta measured, not estimated | — | syscall delta recorded in D1 "Measured" | evidence |
 ```

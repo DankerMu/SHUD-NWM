@@ -28,7 +28,7 @@ and routed as follow-ups. Both live in
   (`:9701`) probes directories only; the owner skips the source-file
   fingerprint by design (spec `pipeline-job-persistence` `:796-798`). PR #1939
   named this a stated limit and asked for a ruling: extend the probe to
-  leaves (option A) or accept the limit permanently (option B).
+  leaves (option A) or accept the limit (option B).
 
 The user ruled **B** for #1942. The PR therefore changes code for #1941 only.
 
@@ -50,7 +50,7 @@ The user ruled **B** for #1942. The PR therefore changes code for #1941 only.
    signature `_cycle_job_records_signature` `:6707`) was probed on every leg;
    its enumerators run under containment and raise inside the signature
    computation, so there is no warm/cold split to close.
-3. **#1942 — ruled a permanent stated limit** (design D3). No probe
+3. **#1942 — ruled a stated limit** (design D3; option C, reusing the owner probe's directory tuples, priced and not adopted). No probe
    extension. The existing pin
    `test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit`
    stays; its docstring stops promising a flip and cites the ruling.
@@ -59,7 +59,7 @@ The user ruled **B** for #1942. The PR therefore changes code for #1941 only.
    discipline governs and the warm/cold-agreement scenario loses the "only
    where the recompute reads the tampered path" bound that existed solely to
    exclude the hard variant. The owner fast-path requirement already carries
-   the stated-limit sentence; ruling B changes no spec text there.
+   the stated-limit sentence; a second MODIFIED block widens it from "a leaf swapped for a symlink" to any leaf-level change beneath the probed directories (the probe is fault-only), which is what ruling B accepts.
 
 ## Deviations recorded up front
 
@@ -81,7 +81,7 @@ The user ruled **B** for #1942. The PR therefore changes code for #1941 only.
 
 ## Non-goals
 
-- Leaf-level probing on the owner fast path (#1942 option A) — rejected on
+- Leaf-level probing on the owner fast path (#1942 option A, and option C) — rejected on
   cost, see design D3.
 - Any other `_stat_signature` caller outside the two fingerprint families
   (authority-root walks, latest-view watchers, sequence floor, strict authority

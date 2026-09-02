@@ -12,7 +12,7 @@ import contextlib
 import json
 import os
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1327,10 +1327,8 @@ def test_fingerprint_that_observed_a_containment_fault_is_never_stored(
     # #1941 D1: the same never-stored rule on the direct-jobs cycle cache.
     direct_after = {key: entry[0] for key, entry in repository._direct_jobs_cycle_cache.items()}
     assert direct_after == direct_before, "the faulted direct read must store nothing"
-    assert not any(
-        journal_module._signature_has_containment_fault(signature)
-        for signature in direct_after.values()
-    )
+    # The store guard is pinned on its own by
+    # `test_direct_cache_signature_only_fault_is_never_stored_and_never_hits`.
 
 
 # --- #1941: the direct-jobs cycle cache under containment (design D1) --------
@@ -1435,8 +1433,15 @@ def test_cycle_write_window_owner_hit_under_the_by_cycle_hard_variant_fails_loud
     assert repository._cycle_write_owner is None
 
 
+@pytest.mark.parametrize(
+    ("build_tree", "by_cycle_child_absent"),
+    [(_empty_cycle_tree, False), (_hard_variant_tree, True)],
+    ids=["with_cycle_child", "without_cycle_child"],
+)
 def test_untouched_empty_by_cycle_partition_still_hits_the_direct_cache(
     tmp_path: Path,
+    build_tree: Callable[[Path], None],
+    by_cycle_child_absent: bool,
 ) -> None:
     """#1941 D1 — genuine absence still caches, which is why the cache exists.
 
@@ -1447,14 +1452,24 @@ def test_untouched_empty_by_cycle_partition_still_hits_the_direct_cache(
     the direct cache is consulted at all, and would count one recompute even if
     the direct cache never hit.
 
-    Input: an untouched tree whose real `by-cycle/gfs/<cycle>` directory holds
-    no records; one read with `model_id="model_a"`, one with `model_id=None`.
+    Both untouched shapes the spec scenario names are covered: the tree WITH a
+    real `by-cycle/gfs/<cycle>` child, and the hard-variant tree WITHOUT it —
+    the common production shape for a cycle that has no direct jobs, whose
+    by-cycle leg must sign `None` (genuine absence under real directories) and
+    not the containment marker.  What is unpinned without the second parameter
+    is the HIT, not the store: a marker-for-absence regression already fails
+    the stored-signature assertions of the never-stored tests, but a lookup
+    that refused to serve a `None` leg would leave every such cycle
+    recomputing its full direct scan for ever, with no test noticing.
+
+    Input: an untouched tree whose real `by-cycle/gfs` partition holds no
+    records; one read with `model_id="model_a"`, one with `model_id=None`.
     Expected: `_iter_direct_pipeline_job_records_for_cycle` runs exactly once
     and both reads are `[]`.
     """
 
     root = tmp_path / "journal"
-    _empty_cycle_tree(root)
+    build_tree(root)
     repository = FileOrchestrationJournalRepository(root)
 
     calls: list[str | None] = []
@@ -1477,6 +1492,105 @@ def test_untouched_empty_by_cycle_partition_still_hits_the_direct_cache(
     )
     keys = set(repository._direct_jobs_cycle_cache)
     assert keys == {("gfs", _TAMPER_SEGMENT)}, keys
+    stored_signature = repository._direct_jobs_cycle_cache[("gfs", _TAMPER_SEGMENT)][0]
+    if by_cycle_child_absent:
+        assert stored_signature[1] is None, (
+            "a missing `<cycle>` child under a real partition is genuine absence and "
+            f"must sign None, got {stored_signature[1]!r}"
+        )
+    else:
+        assert isinstance(stored_signature[1], tuple), stored_signature[1]
+
+
+def test_direct_cache_signature_only_fault_is_never_stored_and_never_hits(
+    tmp_path: Path,
+) -> None:
+    """#1941 D1 matrix row 2b — the STORE guard, discriminated on its own.
+
+    The never-stored tests above tamper the tree, so their recompute raises
+    before the store line is reached: `after == before` holds there whether or
+    not `if not faulted:` guards the store.  This test separates the two by
+    faulting the SIGNATURE only — `_containment_stat_signature` is patched to
+    report the containment marker for the `pipeline-jobs` flat root while the
+    tree underneath stays real, so the recompute succeeds and returns `[]` and
+    the store line IS reached.  (That leg also feeds
+    `_cycle_rows_source_fingerprint`, so the outer `_cycle_rows_cache` stores
+    nothing either while the patch is in place — which is what keeps both of
+    the last two reads reaching the direct cache.)
+
+    Design D1's two guards: the store guard and the `not faulted` clause on the
+    lookup.  Either one alone closes the hole, because
+    `_FINGERPRINT_CONTAINMENT_FAULT` is a singleton that defines no `__eq__`,
+    so `(x, FAULT) == (x, FAULT)` is True BY IDENTITY — a stored marker entry
+    would compare equal on the next read and serve rows computed while the
+    stat was faulting.  This test discriminates the mutation "drop `if not
+    faulted:` around the store" (the marker reaches the cache — the emptiness
+    assertion goes red) and the mutation "drop BOTH guards" (the second read
+    hits the stored marker entry — the recompute count goes red at 1).  It does
+    NOT discriminate "drop the lookup clause alone": given the store guard no
+    marker is ever in the cache, so that clause is belt-and-braces and its
+    mutant stays green here, by design.
+
+    Input: a clean `_empty_cycle_tree`; two reads (`model_a`, then `None`)
+    under the patched signature, then the patch is removed and two more.
+    Expected: the faulted pair recomputes twice and stores nothing; the read
+    after the patch is removed recomputes once more and stores; the read after
+    that is a hit.
+    """
+
+    root = tmp_path / "journal"
+    _empty_cycle_tree(root)
+    repository = FileOrchestrationJournalRepository(root)
+
+    faulting_path = root / "pipeline-jobs"
+    real_signature = repository._containment_stat_signature
+
+    def faulting_signature(path: Path) -> Any:
+        if path == faulting_path:
+            return journal_module._FINGERPRINT_CONTAINMENT_FAULT
+        return real_signature(path)
+
+    calls: list[str | None] = []
+    real_iter = repository._iter_direct_pipeline_job_records_for_cycle
+
+    def counting_iter(*, source_id: str, cycle_time: datetime, model_id: str | None) -> Any:
+        calls.append(model_id)
+        return real_iter(source_id=source_id, cycle_time=cycle_time, model_id=model_id)
+
+    counting_patch = pytest.MonkeyPatch()
+    counting_patch.setattr(repository, "_iter_direct_pipeline_job_records_for_cycle", counting_iter)
+    signature_patch = pytest.MonkeyPatch()
+    signature_patch.setattr(repository, "_containment_stat_signature", faulting_signature)
+    try:
+        assert _read_cycle(repository, model_id="model_a") == []
+        assert _read_cycle(repository, model_id=None) == []
+        assert len(calls) == 2, (
+            f"a faulted signature must never be a hit, saw {calls}"
+        )
+        assert not repository._direct_jobs_cycle_cache, (
+            "a faulted signature must never be stored, saw "
+            f"{repository._direct_jobs_cycle_cache}"
+        )
+        assert not repository._cycle_rows_cache, (
+            "the same faulted leg feeds the cycle-rows fingerprint, so the outer cache "
+            "must be empty too — otherwise the reads below would never reach the direct cache"
+        )
+
+        signature_patch.undo()
+
+        assert _read_cycle(repository, model_id="model_a") == []
+        assert len(calls) == 3, f"the unfaulted read must recompute, saw {calls}"
+        assert set(repository._direct_jobs_cycle_cache) == {("gfs", _TAMPER_SEGMENT)}, (
+            "an unfaulted signature must be stored"
+        )
+
+        assert _read_cycle(repository, model_id=None) == []
+        assert len(calls) == 3, (
+            f"the stored unfaulted signature must be a hit, saw {calls}"
+        )
+    finally:
+        signature_patch.undo()
+        counting_patch.undo()
 
 
 def test_retention_inspection_reports_the_hard_variant_as_blocked(tmp_path: Path) -> None:
@@ -1560,12 +1674,16 @@ def test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit(
 
     This test pins a limit, not a fix.  The owner's fast path computes no
     source-file fingerprint (that is what D1b exists to skip); it only
-    containment-stats the five DIRECTORIES that feed the cycle.  So a LEAF
-    swapped for a symlink during the window — here
-    `journal/gfs/<cycle>.jsonl`, one of five measured leaf cells — is invisible
-    to the owner: it keeps serving its pre-tamper cached rows while a cold
-    instance on the same tree raises.  That narrows the pre-PR state (the owner
-    did no tamper detection at all) instead of widening it.
+    containment-stats the five DIRECTORIES that feed the cycle, and that probe
+    is FAULT-ONLY — it asks whether a directory is still reachable under
+    containment, never whether its contents changed.  The limit is therefore
+    ANY leaf-level change beneath the probed directories: a symlink swap, or a
+    plain file added, replaced or removed.  The symlink swap exercised below
+    (`journal/gfs/<cycle>.jsonl`, one of five measured leaf cells) is one
+    instance of that class, not the whole of it.  Whichever shape it takes, the
+    owner keeps serving its pre-tamper cached rows while a cold instance on the
+    same tree raises.  That narrows the pre-PR state (the owner did no tamper
+    detection at all) instead of widening it.
 
     #1942 ruled this limit PERMANENT (design D3, option B): the fast path is
     not going to grow a leaf probe, so this test pins a settled behaviour, not
@@ -1573,13 +1691,24 @@ def test_cycle_write_window_owner_hit_does_not_see_a_leaf_swap_stated_limit(
     exactly the files the source-file fingerprint stats, so a leaf probe IS the
     fingerprint under another name.  Measured: the five-directory probe already
     costs 191 Python-level `os.*` calls, the full fingerprint 414, and a warm
-    cache-hit public read 422 against 20 before the containment work.  Option A
-    would put probe + fingerprint on every in-window hit, i.e. collapse the
-    fast path into the non-owner path and keep the probe's cost on top.  The
-    exposure stays bounded to the window: the owner's next append invalidates
-    every reachable key for the pair, and the first read after the window
-    revalidates under the full containment-aware fingerprint, which sees the
-    swapped leaf and fails loud.  The cold and non-owner lanes never had it.
+    cache-hit public read 422 against 20 before the containment work.  DEPTH
+    CAVEAT: those three figures were taken at a 14-component realpath root, and
+    `_open_directory_no_follow` re-walks from `/`, so they are linear in root
+    depth; this PR measured a 334-call warm hit at a 9-component root.  The two
+    sets of absolute call counts are comparable only among themselves, at their
+    own depth, and NOT across depths.  Option A would put probe + fingerprint on every in-window
+    hit, i.e. collapse the fast path into the non-owner path and keep the
+    probe's cost on top.  Option C — comparing the `(mtime_ns, size, ino)`
+    tuples the probe has ALREADY computed for those five directories, at zero
+    extra `os.*` calls — was priced in design D3 and not adopted: the shared
+    flat `pipeline-jobs` root turns other cycles' writes into owner recomputes,
+    and a parent tuple does not move for an in-place append to an existing
+    `.jsonl` leaf, so C would close the swap/add/remove cells but not the
+    append cell at an unmeasured hit-rate cost.  The exposure stays bounded to
+    the window: the owner's next append invalidates every reachable key for the
+    pair, and the first read after the window revalidates under the full
+    containment-aware fingerprint, which sees the swapped leaf and fails loud.
+    The cold and non-owner lanes never had it.
 
     Input: an empty tree; two in-window `_cycle_rows` reads with
     `journal/gfs/<cycle>.jsonl` replaced by a symlink to a decoy regular file
