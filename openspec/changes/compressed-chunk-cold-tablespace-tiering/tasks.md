@@ -157,7 +157,7 @@ Seams under test:
   redaction, 1.0-omit/1.1-observed-required/1.1-unobserved-null schema
   compatibility, shipping examples, fixed inspect ceilings, and selector
   producer-consumer closure.
-- [ ] 2A.5 Run focused target/runtime/CLI/schema/selector tests, full pytest, Ruff,
+- [x] 2A.5 Run focused target/runtime/CLI/schema/selector tests, full pytest, Ruff,
   strict OpenSpec, and a node-27 live read-only/disposable receipt proving current
   `Config.User`, numeric writable success, named `postgres` failure, unchanged
   live container identity, and zero DDL/chunk movement.
