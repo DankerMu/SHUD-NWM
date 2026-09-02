@@ -30,6 +30,7 @@ def custom_openapi_factory(api: FastAPI, *, patch_schema: OpenApiPatchSchema | N
             title=api.title,
             version=api.version,
             description=api.description,
+            license_info=api.license_info,
             routes=api.routes,
         )
         if patch_schema is None:

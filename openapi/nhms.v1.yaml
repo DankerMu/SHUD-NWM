@@ -2,6 +2,9 @@ openapi: 3.1.0
 info:
   title: NHMS API
   description: National Hydrological Modeling System API
+  license:
+    name: MIT
+    identifier: MIT
   version: 0.1.0
 paths:
   /api/v1/basins:

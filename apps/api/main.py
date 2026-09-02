@@ -261,6 +261,7 @@ def create_app(env: Mapping[str, str] | None = None) -> FastAPI:
         title="NHMS API",
         description="National Hydrological Modeling System API",
         version="0.1.0",
+        license_info={"name": "MIT", "identifier": "MIT"},
     )
     startup_wiring.configure_app_state(api, runtime_config)
 
