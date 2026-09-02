@@ -78,28 +78,185 @@ _SEVERITY_PAIR_RE = re.compile(
     r"[^\n]*;\n\s+ELSE\n\s+RAISE WARNING '(?P=msg)'",
 )
 
-# PUBLIC-executable pg_catalog functions whose effect for a SUPERUSER writer is
-# not what the migration asked for. Incomplete by construction -- the structural
-# legs (temp schema, non-superuser owner) are what the design leans on.
-_DENY_LISTED_FUNCTIONS = (
-    "set_config",
-    "pg_terminate_backend",
-    "pg_cancel_backend",
-    "pg_reload_conf",
-    "pg_notify",
-    "pg_sleep",
-    "pg_sleep_for",
-    "pg_sleep_until",
-    "pg_advisory_lock",
-    "pg_advisory_lock_shared",
-    "pg_advisory_xact_lock",
-    "pg_advisory_xact_lock_shared",
-    "pg_try_advisory_lock",
-    "pg_try_advisory_lock_shared",
-    "pg_try_advisory_xact_lock",
-    "pg_try_advisory_xact_lock_shared",
-    "pg_advisory_unlock",
-    "pg_advisory_unlock_all",
+# "N expression(s)/trigger(s) scanned" is a property of the SOURCES, and it must
+# be counted on the sources side. Carrying it on the ref rows and taking
+# `max(...)` collapses it to 0 for a catalog whose scanned expressions reference
+# no function at all (`CHECK (x IS NOT NULL)`, `DEFAULT 'lit'`) -- the receipt
+# would then read "0 scanned" and be indistinguishable from a sweep whose FROM
+# list was wrong (round-4 correctness N1, measured by the reviewer).
+_SWEEP_SCAN_COUNT_RE = re.compile(
+    r"format\('%s expression\(s\)/trigger\(s\) scanned, [^']*',\n\s+"
+    r"\(SELECT count\(\*\) FROM pg_temp\.nhms_audit_function_sources\),"
+)
+
+# Leg (iv) is an ALLOW-list, and this tuple is its pinned expected value.
+#
+# Round 4 measured why a deny-list cannot work here: `pg_catalog.query_to_xml`
+# is PUBLIC-executable, owned by the bootstrap superuser, and its effect is
+# "evaluate this SQL string as the caller", so a single column DEFAULT restored
+# both round-3 gadgets (the pg_read_file leak and
+# `set_config('session_replication_role','replica')`) with the strict audit at
+# exit 0. Thirteen more `*_to_xml*` siblings share the shape. Enumerating
+# effects cannot close a function whose effect is "run this string".
+#
+# The tuple is DERIVED from db/migrations/** (see the derivation test below),
+# not chosen: `DEFAULT now()` x31, `DEFAULT gen_random_uuid()` x1, `BIGSERIAL`
+# x7 -> `nextval`, the `BTRIM` in 000038's CHECK, the four trigger functions
+# 000043 attaches with `EXECUTE FUNCTION`, and `float8` -- the cast function
+# `::double precision` resolves to inside 000048's STORED generated column,
+# which is a reference the catalog carries even though nobody wrote a call.
+_MIGRATION_ALLOW_LIST = (
+    "met.canonical_grid_cell_direct_delete_blocked",
+    "met.canonical_grid_cell_immutable",
+    "met.canonical_grid_snapshot_identity_immutable",
+    "met.canonical_met_product_grid_definition_uri_match",
+    "pg_catalog.btrim",
+    "pg_catalog.float8",
+    "pg_catalog.gen_random_uuid",
+    "pg_catalog.nextval",
+    "pg_catalog.now",
+)
+
+_MIGRATIONS_DIR = _ROOT / "db" / "migrations"
+
+# Parse tree node types, not functions: none of these puts a `:funcid` into a
+# stored expression, so none of them belongs in the allow-list.
+#   NULLIF     -> NullIfExpr  (its equality function arrives as `:opfuncid`)
+#   LEAST/GREATEST -> MinMaxExpr
+#   COALESCE   -> CoalesceExpr
+#   CAST/CASE/IN/ANY/ALL/ARRAY/EXISTS/ROW/VALUES/NOT -> their own node types
+# The type names are typmod syntax (`geometry(MultiPolygon, 4490)`,
+# `numeric(10, 2)`), not calls.
+_NOT_A_FUNCTION_CALL = frozenset(
+    """
+    nullif least greatest coalesce cast case in any all array exists row values
+    not and or is null true false select from where on using when then else end
+    geometry geography numeric decimal varchar char character timestamp
+    timestamptz time interval bit double precision
+    """.split()
+)
+
+_CALL_RE = re.compile(r"([a-z_][a-z0-9_$]*(?:\.[a-z_][a-z0-9_$]*)?)\s*\(")
+
+# A cast is not a written call, but the ones with a pg_cast FUNCTION land in the
+# stored tree as an ordinary `:funcid` -- 000048's `::double precision` is why
+# `pg_catalog.float8` is on the allow-list (measured in the catalog, transcript
+# 18.1). Only the numeric-family targets are listed: casts to text, jsonb, uuid
+# and the date/time types from a literal are I/O conversions (CoerceViaIO) or
+# binary-coercible, and emit no function reference at all.
+_CAST_FUNCTION = {
+    "double precision": "float8",
+    "float8": "float8",
+    "real": "float4",
+    "float4": "float4",
+    "numeric": "numeric",
+    "decimal": "numeric",
+    "integer": "int4",
+    "int": "int4",
+    "int4": "int4",
+    "bigint": "int8",
+    "int8": "int8",
+    "smallint": "int2",
+    "int2": "int2",
+}
+_CAST_RE = re.compile(
+    r"::\s*(double precision|float8|float4|real|numeric|decimal|integer|int4|int8"
+    r"|bigint|smallint|int2|int)\b"
+)
+
+
+def _casts_in(expr: str) -> set[str]:
+    return {f"pg_catalog.{_CAST_FUNCTION[t]}" for t in _CAST_RE.findall(expr)}
+
+
+def _balanced(text: str, open_at: int) -> str:
+    """Return the substring inside the parentheses opening at `open_at`."""
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1 : i]
+    raise AssertionError(f"unbalanced parentheses at offset {open_at}")
+
+
+def _calls_in(expr: str, local_functions: dict[str, str]) -> set[str]:
+    """Every `name(` in `expr`, schema-resolved, minus the pseudo-functions."""
+    found = set()
+    for match in _CALL_RE.finditer(expr):
+        name = match.group(1)
+        if "." in name:
+            found.add(name)
+            continue
+        if name in _NOT_A_FUNCTION_CALL:
+            continue
+        found.add(f"{local_functions.get(name, 'pg_catalog')}.{name}")
+    return found
+
+
+def _functions_referenced_by_migrations() -> set[str]:
+    """The functions db/migrations/** puts into STORED expressions.
+
+    Scoped to exactly the four clause kinds the audit sweeps -- `DEFAULT`,
+    `CHECK (...)`, `GENERATED ALWAYS AS (...)` and `EXECUTE FUNCTION` -- plus
+    the `SERIAL`/`BIGSERIAL` shorthand, which PostgreSQL expands into a
+    `DEFAULT nextval(...)`. Expression indexes, view bodies and RLS policies are
+    deliberately outside the sweep (see the SQL comment), so they are outside
+    this derivation too.
+    """
+    local_functions: dict[str, str] = {}
+    texts = []
+    for path in sorted(_MIGRATIONS_DIR.rglob("*.sql")):
+        # Comments first: 000050's prose contains "DEFAULT choice (it is ...",
+        # which a naive scan derives as a required `pg_catalog.choice`.
+        body = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8").lower())
+        body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+        texts.append(body)
+        for schema, name in re.findall(
+            r"create\s+(?:or\s+replace\s+)?function\s+([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)",
+            body,
+        ):
+            local_functions[name] = schema
+
+    found: set[str] = set()
+    for body in texts:
+        for match in re.finditer(r"\bexecute\s+(?:function|procedure)\s+([a-z_][a-z0-9_.]*)", body):
+            name = match.group(1)
+            found.add(name if "." in name else f"{local_functions.get(name, 'pg_catalog')}.{name}")
+        if re.search(r"\b(?:big)?serial\b", body):
+            found.add("pg_catalog.nextval")
+        for keyword in ("check", "generated always as"):
+            for match in re.finditer(rf"\b{keyword}\s*\(", body):
+                open_at = body.index("(", match.end() - 1)
+                expr = _balanced(body, open_at)
+                found |= _calls_in(expr, local_functions)
+                found |= _casts_in(expr)
+        for match in re.finditer(r"\bdefault\s+([a-z_][a-z0-9_.]*)\s*\(", body):
+            name = match.group(1)
+            if name in _NOT_A_FUNCTION_CALL:
+                continue
+            found.add(name if "." in name else f"{local_functions.get(name, 'pg_catalog')}.{name}")
+            found |= _calls_in(_balanced(body, match.end() - 1), local_functions)
+        # `DEFAULT (now())` is the same thing to the parser and lands in the
+        # catalog identically, but matches neither branch above, so scan the
+        # parenthesised form as an expression body of its own.
+        for match in re.finditer(r"\bdefault\s*\(", body):
+            expr = _balanced(body, match.end() - 1)
+            found |= _calls_in(expr, local_functions)
+            found |= _casts_in(expr)
+        for match in re.finditer(r"\bdefault\s+[^,;\n]*", body):
+            found |= _casts_in(match.group(0))
+    return found
+
+
+# The SQL-side array literal, parsed. Pinned as EQUALITY against
+# `_MIGRATION_ALLOW_LIST`: the retired deny-list carried 19 names in the SQL and
+# 18 in the test, so one could have vanished from either side unnoticed
+# (round-4 test-evidence P2a).
+_ALLOW_LIST_ARRAY_RE = re.compile(
+    r"\(pn\.nspname \|\| '\.' \|\| p\.proname\) = ANY \(ARRAY\[(?P<body>[^\]]*)\]\)",
 )
 
 _ALLOWLISTED_TRIGGERS = (
@@ -656,8 +813,19 @@ def test_audit_sweeps_stored_expressions_by_function_provenance(sql_text: str) -
         "pg_attrdef has rows to pg_class only), so the stored parse trees "
         "themselves have to be scanned"
     )
-    assert r":(?:op)?funcid (\d+)" in section, (
-        "the scan must pick up both FUNCEXPR :funcid and OpExpr :opfuncid"
+    assert r":(op)?funcid (\d+)" in section, (
+        "the scan must pick up both FUNCEXPR :funcid and OpExpr :opfuncid, and "
+        "the `op` prefix must be CAPTURED -- the operator carve-out needs to "
+        "know how each reference was reached"
+    )
+    assert "coalesce(m[1], '') = 'op' AS via_op" in section, (
+        "for a plain `:funcid` the captured group is NULL, so a bare "
+        "`m[1] = 'op'` makes bool_and(...) NULL over a mixed set; the coalesce "
+        "is what makes the carve-out fail CLOSED (verifier trap 1)"
+    )
+    assert "bool_and(via_op) AS via_op_only" in section, (
+        "the carve-out applies to a function reached ONLY as an operator "
+        "implementation, so it has to be decided per (relation, kind, function)"
     )
     sweep = section[
         section.index("function-provenance sweep") : section.index("DO $planted$")
@@ -677,19 +845,41 @@ def test_audit_sweeps_stored_expressions_by_function_provenance(sql_text: str) -
     )
     # (iii) the executability leg is kept
     assert "has_function_privilege('nhms_ingest_rw', p.oid, 'EXECUTE')" in sweep
-    # (iv) the deny-list, named function by function
-    for name in _DENY_LISTED_FUNCTIONS:
-        assert f"'{name}'" in sweep, f"{name} is not deny-listed"
-    assert "pn.nspname = 'pg_catalog' AND p.proname = ANY (ARRAY[" in sweep, (
-        "the deny-list must be keyed on (pg_catalog, proname), not on the bare "
-        "name -- a same-named function in another schema is a different function"
+    # (iv) an ALLOW-list, keyed on the schema-qualified name
+    assert "(pn.nspname || '.' || p.proname) = ANY (ARRAY[" in sweep, (
+        "leg (iv) must be an allow-list keyed on schema.name -- a same-named "
+        "function in another schema is a different function"
+    )
+    assert "THEN 'not on the migration allow-list' END" in sweep, (
+        "the leg must name itself in the finding"
+    )
+    assert "'deny-listed'" not in sweep and "_denylist" not in sweep, (
+        "the deny-list must be DELETED, not kept alongside: two lists means two "
+        "places to forget, and the deny-list is the one query_to_xml walked "
+        "through (round-4 P1)"
+    )
+    for name in ("query_to_xml", "set_config", "pg_read_file"):
+        assert name not in sweep, (
+            f"{name} must not be named in the sweep at all: naming individual "
+            "bad functions is the enumerate-the-bad shape this leg replaced"
+        )
+    # the operator carve-out, and the volatility condition that makes it safe
+    assert "AND r.via_op_only" in sweep and "AND p.provolatile <> 'v'" in sweep, (
+        "a pg_catalog function reached only as an operator implementation is "
+        "carved out, but ONLY when it is not VOLATILE: a write role that can "
+        "still author in pg_temp could otherwise back a prefix operator with "
+        "pg_read_file(text) and arrive as a pure :opfuncid"
+    )
+    assert "pn.nspname = 'pg_catalog'\n                    AND r.via_op_only" in sweep, (
+        "the carve-out must stay pg_catalog-only, or a PostGIS operator (schema "
+        "public) would be readmitted without review"
     )
     # each finding says which leg fired
     for label in (
         "'temp-schema function'",
         "' is not a superuser'",
         "'NOT executable by nhms_ingest_rw'",
-        "'deny-listed'",
+        "'not on the migration allow-list'",
     ):
         assert label in sweep, f"the finding line does not name the leg: {label}"
     assert len(re.findall(_INTERNAL_SCOPE_RE, sweep)) == 4, (
@@ -719,6 +909,185 @@ def test_audit_sweeps_stored_expressions_by_function_provenance(sql_text: str) -
     # or the T7 receipt cannot show that it ran
     assert "untrusted for a superuser writer" in sweep
     assert "expression(s)/trigger(s) scanned" in sweep
+
+
+def test_the_function_allow_list_in_the_sql_is_exactly_the_pinned_set(
+    sql_text: str,
+) -> None:
+    """EQUALITY, not membership -- a name must not be able to vanish silently.
+
+    The retired deny-list carried 19 names in the SQL and 18 in this file, and
+    the guard was `for name in <test tuple>: assert name in sql`. One SQL-side
+    name could therefore be deleted with the suite green (round-4
+    test-evidence P2a). Parse the array and compare sets.
+    """
+    section = _psql_section(_sql_code(sql_text), "do_audit")
+    match = _ALLOW_LIST_ARRAY_RE.search(section)
+    assert match is not None, (
+        "leg (iv)'s allow-list array literal is not where the audit expects it: "
+        "`(pn.nspname || '.' || p.proname) = ANY (ARRAY[...])`"
+    )
+    in_sql = re.findall(r"'([^']+)'", match.group("body"))
+    assert len(in_sql) == len(set(in_sql)), f"duplicate allow-list entries: {in_sql}"
+    assert set(in_sql) == set(_MIGRATION_ALLOW_LIST), (
+        "the SQL allow-list and this file's pinned set have drifted; "
+        f"only in SQL: {sorted(set(in_sql) - set(_MIGRATION_ALLOW_LIST))}, "
+        f"only in the test: {sorted(set(_MIGRATION_ALLOW_LIST) - set(in_sql))}"
+    )
+    assert in_sql == sorted(in_sql), (
+        "keep the array sorted so a diff over it is readable"
+    )
+
+
+def test_every_function_the_migrations_reference_is_on_the_allow_list() -> None:
+    """A new migration reference must redden THIS test, never the live audit.
+
+    The audit trusts a referenced function only when it is on leg (iv)'s
+    allow-list, so a migration that starts calling something new would make the
+    strict audit -- the gate runbook 9.6 runs before every superuser write --
+    exit 3 on a perfectly legitimate catalog. This derivation is what moves
+    that failure to development time: it re-reads `db/migrations/**` and
+    requires every function those migrations put into a swept expression to be
+    allow-listed already. `scripts/select_ci_tests.py` carries the
+    `db/migrations/*.sql` -> this suite row that makes the PR-scoped selector
+    run it (`db/**` alone only buys tests/test_migrations.py).
+
+    Scope matches the sweep exactly: `DEFAULT`, `CHECK (...)`,
+    `GENERATED ALWAYS AS (...)`, `EXECUTE FUNCTION`, plus `SERIAL`/`BIGSERIAL`
+    (which PostgreSQL expands to `DEFAULT nextval(...)`). Expression indexes,
+    view bodies and RLS policies are outside the sweep, so they are outside
+    this derivation.
+
+    Excluded as parse-tree node types rather than functions -- none of them
+    emits a `:funcid`: `NULLIF` (NullIfExpr; its equality function arrives as
+    `:opfuncid`), `LEAST`/`GREATEST` (MinMaxExpr), `COALESCE` (CoalesceExpr),
+    `CAST`/`CASE`/`IN`/`ANY`/`ARRAY`, and type names used as typmod syntax
+    (`geometry(MultiPolygon, 4490)`). Operators (`>=`, `<>`, `~`, `->>`) reach
+    their implementation as `:opfuncid` and are handled by the carve-out, so
+    they are not required entries either.
+
+    Included even though nobody writes them as calls: `::` casts to the numeric
+    family, which have a `pg_cast` function and therefore DO put a `:funcid` in
+    the tree. 000048's `::double precision` is the only one in this repo and it
+    is why `pg_catalog.float8` is allow-listed -- measured in a container
+    (transcript 18.1) after a first run of that receipt reported it as a finding
+    on an otherwise clean catalog. Casts to text/jsonb/uuid/date-time are I/O
+    conversions or binary-coercible and emit nothing.
+
+    Known limit, stated rather than hidden: this is a TEXT derivation, so a
+    future migration using a cast shape outside `_CAST_FUNCTION`, or building a
+    stored expression through dynamic SQL, would not be caught here. It would
+    then be caught by the live audit -- loudly, fail-closed, exit 3 -- which is
+    the safe direction but is development-time friction the T7 receipt should
+    surface first.
+    """
+    derived = _functions_referenced_by_migrations()
+    assert derived, "the derivation found nothing -- it has stopped working"
+    missing = derived - set(_MIGRATION_ALLOW_LIST)
+    assert not missing, (
+        "db/migrations/** reference functions that leg (iv) does not allow; add "
+        f"them to the allow-list in db/roles/node27_write_roles.sql: {sorted(missing)}"
+    )
+
+
+def test_the_migration_derivation_reads_nested_files_and_parenthesised_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two shapes the derivation must not miss, proved on a synthetic tree.
+
+    `DEFAULT (now())` is what the catalog stores for `DEFAULT now()` and is
+    legal input as well, and migrations may one day live in a subdirectory.
+    Either gap would silently shrink the derived set, which is exactly the
+    direction that lets a new function reach the node-27 audit unannounced.
+    """
+    nested = tmp_path / "2027q1"
+    nested.mkdir()
+    (nested / "000099_probe.sql").write_text(
+        "-- DEFAULT upper('x') in a comment must stay invisible\n"
+        "ALTER TABLE met.probe ALTER COLUMN seen_at SET DEFAULT (now());\n"
+        "ALTER TABLE met.probe ADD COLUMN ratio double precision\n"
+        "  GENERATED ALWAYS AS ((area_m2 / 1000)::double precision) STORED;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "_MIGRATIONS_DIR", tmp_path)
+
+    assert _functions_referenced_by_migrations() == {"pg_catalog.now", "pg_catalog.float8"}
+
+
+def test_every_audit_verdict_fires_on_a_finding_and_not_on_its_absence(
+    sql_text: str,
+) -> None:
+    """The FIRING predicate of each verdict, not just its severity arms.
+
+    `_SEVERITY_PAIR_RE` pins EXCEPTION-vs-WARNING to `v_strict`, but the outer
+    `IF v_planted IS NOT NULL THEN` was unpinned: inverting it to `IS NULL`
+    left 54 tests green while the verdict fired only when there was nothing to
+    report (round-4 test-evidence P2b). Every verdict in the block must test
+    for the PRESENCE of a finding.
+    """
+    planted = _psql_section(_sql_code(sql_text), "do_audit")
+    planted = planted[planted.index("DO $planted$") : planted.index("$planted$;")]
+    predicates = dict(re.findall(r"IF (v_[a-z_]+)([^\n]*) THEN", planted))
+    predicates.pop("v_strict", None)
+    assert set(predicates) == {
+        "v_planted",
+        "v_smuggled",
+        "v_present",
+        "v_disabled",
+        "v_event",
+        "v_temp",
+    }, f"the set of audit verdicts changed: {sorted(predicates)}"
+    for name, predicate in predicates.items():
+        if name == "v_present":
+            assert predicate.strip() == "<> 4", (
+                "the presence verdict counts the four allow-listed triggers, so "
+                f"it fires on anything other than 4, not on {predicate!r}"
+            )
+        else:
+            assert predicate.strip() == "IS NOT NULL", (
+                f"{name}'s verdict must fire when there IS a finding; "
+                f"{predicate!r} fires on its absence"
+            )
+
+def test_the_scan_count_is_taken_from_the_sources_not_from_the_ref_rows(
+    sql_text: str,
+) -> None:
+    """"N scanned" must survive a catalog that references no function.
+
+    The sweep materialises the sources and the refs as two temp tables so the
+    receipt's first number is `count(*)` over the SOURCES. Derived from the ref
+    rows instead (`max(sources_scanned)`), it reads 0 whenever every scanned
+    expression happens to be function-free -- which is the one case where the
+    reader most needs to tell "nothing referenced" apart from "the FROM list is
+    wrong and nothing was scanned at all".
+    """
+    section = _psql_section(_sql_code(sql_text), "do_audit")
+    assert "CREATE TEMP TABLE pg_temp.nhms_audit_function_sources AS" in section, (
+        "the sources must be materialised in their own temp table so the scan "
+        "count can be a scalar over them"
+    )
+    assert len(_SWEEP_SCAN_COUNT_RE.findall(section)) == 1, (
+        "the summary's first argument must be "
+        "`(SELECT count(*) FROM pg_temp.nhms_audit_function_sources)`, bound to "
+        "the `%s expression(s)/trigger(s) scanned` format string"
+    )
+    assert "sources_scanned" not in section, (
+        "no per-ref-row carrier for the scan count: an aggregate over the ref "
+        "rows is exactly the bug"
+    )
+    assert "max(" not in section, (
+        "the scan count must not come from an aggregate over the ref rows"
+    )
+    # both scratch tables are cleaned up
+    for table in ("nhms_audit_function_refs", "nhms_audit_function_sources"):
+        assert f"DROP TABLE pg_temp.{table};" in section, (
+            f"pg_temp.{table} is left behind in the audit session"
+        )
+    # the refs table reads the materialised sources, not a re-declared CTE
+    assert "FROM pg_temp.nhms_audit_function_sources s,\n" in section, (
+        "the refs table must scan the SAME materialised sources the count "
+        "reports, or the two numbers describe different sets"
+    )
 
 
 def test_audit_requires_the_allow_listed_triggers_to_be_present_and_enabled(

@@ -37,17 +37,22 @@
 #     schema in which a write role can AUTHOR a function at all;
 #   * the audit judges every stored expression by the PROVENANCE of the
 #     functions it reaches (temp schema / non-superuser owner / not executable
-#     by the write role / deny-listed) and every rule and trigger against the
-#     migration allow-list, with TimescaleDB's blocker keyed on function
-#     identity rather than on its name.
+#     by the write role / not on the migration ALLOW-list) and every rule and
+#     trigger against the migration allow-list, with TimescaleDB's blocker keyed
+#     on function identity rather than on its name.
+# The function leg is an allow-list and not a deny-list because a deny-list
+# enumerates effects, and `query_to_xml`'s effect is "evaluate this SQL string
+# as the caller" -- measured walking straight through the deny-list at exit 0.
+# The allow-list has to be EXTENDED when a migration references a new function;
+# a unit test derives that set from db/migrations/** so the failure lands there
+# and not on the live audit.
 # Not covered, and a follow-up rather than a fix here: removing the
-# superuser-write half itself, and the deny-list leg, which is a list and is
-# therefore incomplete by construction.
+# superuser-write half itself.
 #
 # Retry window.  The passes are the whole tolerance for a lock holder that
 # outlives one `ALTER`: the effective window is
 # `--max-passes x lock_timeout + (--max-passes - 1) x --pass-interval`
-# (default 5 x 5 s + 0 ~= 26 s of wall clock, back-to-back -- the interval is
+# (default 5 x 5 s + 0 = 25 s of wall clock, back-to-back -- the interval is
 # only slept BETWEEN passes, never after the last one).  Widen it with
 # --max-passes / NODE27_WRITE_ROLES_MAX_PASSES, or space the passes with
 # --pass-interval / NODE27_WRITE_ROLES_PASS_INTERVAL when the holder is a long

@@ -7,7 +7,8 @@ and its allow-list audit, the full-mode exit-code mapping); every block below is
 output from that single run, in the order shown, except §13 and §14 (two later
 containers: one re-checks a literal changed after this capture, the other carries
 the fix that closes §12), §15 (six more containers), §16 (two more containers,
-carrying the round-3 redesign), Appendix A (an earlier container, unchanged code
+carrying the round-3 redesign), §17 (one more container, the round-4
+scan-count fix), §18 (one more container, the round-4 allow-list inversion), Appendix A (an earlier container, unchanged code
 path) and Appendix B (a static scan). One consequence worth stating rather than
 hiding: §0–§12 were captured before the stored-expression sweep existed and §0–§15
 before it was rewritten to judge by provenance, so their audit blocks do not
@@ -987,6 +988,14 @@ confirmed three P1s that all had the same shape — the audit judged by a PROXY
 TimescaleDB's) instead of by provenance — so this section proves the redesign,
 not another patched gadget.
 
+> **Wording note (round 4).** This section predates the round-4 inversion of
+> leg (iv) from a deny-list into an allow-list (§18). The reason text it shows
+> as `-- deny-listed` (§16.6) now reads `-- not on the migration allow-list`,
+> and the pg_temp finding of §16.7 now names that leg as well as the two
+> structural ones. Both cases are still caught — `set_config` and a pg_temp
+> function are not on the allow-list — and the reason strings are the only
+> thing that changed. Blocks are left as captured rather than rewritten.
+
 ### 16.1 `--roles-only` is still purely additive
 
 ```
@@ -1239,6 +1248,196 @@ login ok as nhms_ingest_rw
 Both §16 containers were removed at the end (`docker rm -f nwm-probe-1774-r3`,
 `docker rm -f nwm-probe-1774-fn`); `docker ps -a | grep nwm-probe` returns
 nothing.
+
+## 17. Round-4 N1: "N scanned" must not be derived from the ref rows
+
+One more disposable container (`nwm-probe-1774-n1`, same image), two databases:
+the §0 fixture, and a second `n1probe` database whose six application schemas
+contain ONLY stored expressions that reference no function at all —
+`DEFAULT 'lit'`, `DEFAULT 7`, `CHECK (note IS NOT NULL)`, `CHECK (x IS NOT NULL)`
+across two tables (4 scanned sources, 0 function references). That is the case
+the reviewer identified: the summary used to carry the source count on each REF
+row and take `coalesce(max(sources_scanned), 0)`, which has no rows to
+aggregate when nothing is referenced.
+
+```
+$ # A. FIXED code -- the count is a scalar over the materialised sources
+$ #    on the full fixture db (refs non-empty):
+EXIT=0
+ 10 expression(s)/trigger(s) scanned, 9 distinct function(s) referenced, 0 untrusted for a superuser writer
+$ #    on n1probe (sources exist, refs EMPTY):
+EXIT=0
+ 4 expression(s)/trigger(s) scanned, 0 distinct function(s) referenced, 0 untrusted for a superuser writer
+
+$ # B. MUTANT -- coalesce(max(sources_scanned), 0) over the ref rows
+$ #    on the full fixture db:
+EXIT=0
+ 10 expression(s)/trigger(s) scanned, 9 distinct function(s) referenced, 0 untrusted for a superuser writer
+$ #    on n1probe (sources exist, refs EMPTY):
+EXIT=0
+ 0 expression(s)/trigger(s) scanned, 0 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+The two forms are indistinguishable on a catalog that references functions —
+which is why the bug survived every earlier receipt — and differ exactly where
+it matters: the old form reports `0 scanned`, i.e. a receipt that cannot be told
+apart from a sweep whose `FROM` list was silently wrong. The fixed form reports
+the 4 sources it actually read.
+
+(The fixture-db counts are 10/9 here rather than §16.2's 15/11 because this run
+audits before any ownership transfer, so the write-role-owned
+`_timescaledb_internal` relations are not yet in scope. Container removed
+(`docker rm -f nwm-probe-1774-n1`).)
+
+## 18. Round-4 P1: leg (iv) inverted into an allow-list
+
+One more disposable container (`nwm-probe-1774-r4`, same
+`timescale/timescaledb:2.10.2-pg15` image). The round-4 review measured
+`pg_catalog.query_to_xml` walking straight through the deny-list: it is
+PUBLIC-executable, owned by the bootstrap superuser, and its effect is
+"evaluate this SQL STRING as the caller", so one column DEFAULT restored both
+round-3 gadgets — the `pg_read_file` leak and
+`set_config('session_replication_role','replica')` — with the strict audit and
+the runner at exit 0. Thirteen more `*_to_xml*` siblings share the shape. No
+enumeration of effects closes a function whose effect is "run this string", so
+leg (iv) was inverted: everything the migrations reference is enumerated, and
+everything else is untrusted.
+
+The fixture's stored expressions were reshaped to mirror `db/migrations/**`
+rather than to be convenient: `BIGSERIAL` (→ `nextval`), `DEFAULT
+gen_random_uuid()`, `DEFAULT now()`, 000038's
+`CHECK (method <> 'direct_grid' OR NULLIF(BTRIM(...), '') IS NOT NULL)`, a bare
+`CHECK (ordinal >= 1)`, and a 000048-shaped `STORED` generated column
+(`(properties_json ->> 'Type') ~ '^[0-9]+...'`, `LEAST`/`GREATEST`,
+`::double precision`).
+
+### 18.0 Full mode on a clean node-27-shaped catalog
+
+```
+full-mode EXIT=0
+node27-write-roles: full provision complete; audit clean
+ 18 expression(s)/trigger(s) scanned, 16 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+### 18.1 The observed inventory, so the allow-list can be read against it
+
+Two chunks compressed first, so the TimescaleDB chunk-range `CHECK`s are in
+scope:
+
+```
+ compressed | uncompressed
+------------+--------------
+          2 |            1
+
+                         fn                          |  reached_via   | vol | occurrences
+-----------------------------------------------------+----------------+-----+-------------
+ met.canonical_grid_cell_direct_delete_blocked       | :funcid        | v   |           1
+ met.canonical_grid_cell_immutable                   | :funcid        | v   |           1
+ met.canonical_grid_snapshot_identity_immutable      | :funcid        | v   |           1
+ met.canonical_met_product_grid_definition_uri_match | :funcid        | v   |           1
+ pg_catalog.btrim                                    | :funcid        | i   |           1
+ pg_catalog.float8                                   | :funcid        | i   |           2
+ pg_catalog.gen_random_uuid                          | :funcid        | v   |           1
+ pg_catalog.int4ge                                   | :opfuncid only | i   |           1
+ pg_catalog.jsonb_object_field_text                  | :opfuncid only | i   |           2
+ pg_catalog.nextval                                  | :funcid        | v   |           1
+ pg_catalog.now                                      | :funcid        | s   |           1
+ pg_catalog.texteq                                   | :opfuncid only | i   |           1
+ pg_catalog.textne                                   | :opfuncid only | i   |           1
+ pg_catalog.textregexeq                              | :opfuncid only | i   |           1
+ pg_catalog.timestamptz_ge                           | :opfuncid only | i   |           5
+ pg_catalog.timestamptz_lt                           | :opfuncid only | i   |           5
+(16 rows)
+```
+
+Nine of the sixteen are on the allow-list; the other seven are the
+`:opfuncid only` rows, all `provolatile = 'i'`, carried by the structural
+operator carve-out. **`pg_catalog.float8` was found by this receipt, not
+predicted by it:** the first run of §18 reported
+`core.gauge_reading column default stream_type references pg_catalog.float8 --
+not on the migration allow-list` on an otherwise clean catalog, because
+`::double precision` in a `STORED` generated column resolves to a real cast
+FUNCTION and lands in the tree as an ordinary `:funcid`. 000048 has exactly that
+expression, so the allow-list and the test's derivation both gained it. That is
+the intended failure direction — loud, on a receipt, before node-27.
+
+### 18.2 Strict audit-only on the clean catalog
+
+```
+EXIT=0
+ 18 expression(s)/trigger(s) scanned, 16 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+### 18.3 Idempotence
+
+```
+IDEMPOTENT: audit output byte-identical across two clean strict runs
+```
+
+### 18.4 The P1 itself: `query_to_xml` in a column DEFAULT
+
+```
+$ psql -U nhms_ingest_rw -c "ALTER TABLE met.canonical_met_product ADD COLUMN note text"
+ALTER TABLE
+$ psql -U nhms_ingest_rw -c "ALTER TABLE met.canonical_met_product ALTER COLUMN note SET DEFAULT (query_to_xml('select pg_read_file(''/etc/hostname'',0,60) as leak, set_config(''session_replication_role'',''replica'',false) as g', false, false, '')::text)"
+ALTER TABLE
+$ # strict audit-only:
+EXIT=3
+ 19 expression(s)/trigger(s) scanned, 17 distinct function(s) referenced, 1 untrusted for a superuser writer
+ERROR:  SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): met.canonical_met_product column default note references pg_catalog.query_to_xml -- not on the migration allow-list
+$ # non-strict:
+EXIT=0
+ 19 expression(s)/trigger(s) scanned, 17 distinct function(s) referenced, 1 untrusted for a superuser writer
+WARNING:  SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): met.canonical_met_product column default note references pg_catalog.query_to_xml -- not on the migration allow-list
+```
+
+The same statement was accepted by the write role and reported `0 untrusted`
+against the deny-list build at `360dacbb` — measured by the round-4 verifier,
+not re-measured here; this section measures the fix only.
+
+### 18.5 The same wrapper as `ADD CONSTRAINT … CHECK … NOT VALID`
+
+```
+$ psql -U nhms_ingest_rw -c "ALTER TABLE core.basin ADD CONSTRAINT chk_x CHECK (query_to_xml('select 1', false, false, '') IS NOT NULL) NOT VALID"
+ALTER TABLE
+$ # strict audit-only:
+EXIT=3
+ 19 expression(s)/trigger(s) scanned, 17 distinct function(s) referenced, 1 untrusted for a superuser writer
+ERROR:  SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): core.basin CHECK constraint chk_x references pg_catalog.query_to_xml -- not on the migration allow-list
+```
+
+### 18.6 An allow-listed function on an owned column stays clean
+
+```
+$ psql -U nhms_ingest_rw -c "ALTER TABLE ops.run_journal ADD COLUMN seen_at timestamptz DEFAULT now()"
+ALTER TABLE
+$ # strict audit-only:
+EXIT=0
+ 19 expression(s)/trigger(s) scanned, 16 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+### 18.7 The documented false-positive shape: harmless, but not allow-listed
+
+```
+$ psql -U nhms_ingest_rw -c "ALTER TABLE ops.run_journal ALTER COLUMN note SET DEFAULT upper('x')"
+ALTER TABLE
+$ # strict audit-only:
+EXIT=3
+ 20 expression(s)/trigger(s) scanned, 17 distinct function(s) referenced, 1 untrusted for a superuser writer
+ERROR:  SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): ops.run_journal column default note references pg_catalog.upper -- not on the migration allow-list
+$ # after reverting both:
+EXIT=0
+ 18 expression(s)/trigger(s) scanned, 16 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+`upper()` is harmless. It is reported anyway, and that is the point of the
+inversion: the criterion is the LIST, not a judgement about the effect. The
+operational cost is real and belongs in the runbook — a legitimate new
+reference makes the strict audit exit 3 until the allow-list is extended, which
+is why a unit test derives the expected set from `db/migrations/**` and reddens
+at development time instead.
+
+Container removed (`docker rm -f nwm-probe-1774-r4`).
 
 ## Limits of this oracle (do not read more into it than it proves)
 

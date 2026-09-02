@@ -1806,6 +1806,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/node27-*.example",
         ("tests/test_node27_write_roles.py",),
     ),
+    # #1774 round 4. Leg (iv) of the stored-expression sweep is an ALLOW-list of
+    # (schema, name) pairs, and the promise made in the SQL comment, the test
+    # docstring and runbook 9.6 is that a migration referencing a NEW function
+    # reddens tests/test_node27_write_roles.py at PR time instead of the live
+    # node-27 audit. That promise needs this row: `db/**` above only buys
+    # tests/test_migrations.py, which never reads the allow-list, so a
+    # migration-only PR that added e.g. `DEFAULT upper('x')` would have gone
+    # green here and failed the strict audit on the node instead. The matcher is
+    # fnmatch, whose `*` crosses `/`, so this pattern also covers a migration
+    # parked in a subdirectory -- which is what the test-side rglob reads.
+    PathTestRule(
+        "db/migrations/*.sql",
+        ("tests/test_node27_write_roles.py",),
+    ),
     # the converted lanes with no pre-existing rule to merge into. The
     # superuser-gated-READ guard scans these sources, and such a read fails
     # SILENTLY under the new non-superuser role.

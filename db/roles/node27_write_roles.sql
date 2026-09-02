@@ -66,7 +66,9 @@
 --                      columns, CHECK constraints, rule actions, trigger
 --                      functions): a referenced function is untrusted when it
 --                      lives in a temp schema, is owned by a non-superuser, is
---                      not executable by nhms_ingest_rw, or is deny-listed;
+--                      not executable by nhms_ingest_rw, or is not on the
+--                      migration ALLOW-list (round 4: a deny-list cannot close
+--                      query_to_xml, whose effect is "run this string");
 --                   9. the event trigger is present, enabled and
 --                      superuser-owned;
 --                  10. TEMP on the database for each role (verdict is
@@ -76,7 +78,7 @@
 --
 -- Secrets: passwords are never in this file.  They are read from the
 -- environment of the psql process (NODE27_INGEST_RW_PASSWORD /
--- NODE27_DOWNLOAD_RW_PASSWORD) via \getenv and are skipped when unset.
+-- NODE27_DOWNLOAD_RW_PASSWORD) via \getenv and are skipped when unset or empty.
 
 -- Self-sufficient under a direct invocation too: the runner always passes
 -- -v ON_ERROR_STOP=1, so this changes nothing there, but a hand-run audit that
@@ -352,7 +354,7 @@ $copy_probe$;
 -- TABLESPACE`.  The two `ALTER TABLE` forms of the same gadget -- a planted
 -- column DEFAULT / CHECK expression, and `... DISABLE TRIGGER` on an
 -- allow-listed guard -- are therefore closed by detection instead: the audit's
--- function-privilege sweep and its `tgenabled` check.
+-- function-provenance sweep and its presence/`tgenabled` check.
 CREATE SCHEMA IF NOT EXISTS nhms_guard;
 
 CREATE OR REPLACE FUNCTION nhms_guard.refuse_write_role_rules_and_triggers()
@@ -618,7 +620,12 @@ $flags$;
 -- wearing that name is a planted trigger and stays in the inventory.
 -- `to_regprocedure` returns NULL (it does not raise) on a database without the
 -- extension, and `IS DISTINCT FROM NULL` is true, so such a trigger is listed
--- there too.
+-- there too.  Same mechanism, stated as the TimescaleDB coupling it is: this
+-- literal is correct as of TSDB 2.10.x, and if an upgrade renames or relocates
+-- the function the exclusion matches nothing and EVERY genuine blocker on a
+-- write-role-owned hypertable or chunk becomes an inventory hit, i.e. every
+-- strict audit exits 3 until this literal is re-checked (fail-closed and loud,
+-- not silent -- runbook 9.1).
 --
 -- Scope, and why it is not just the six application schemas (all measured on a
 -- 2.10.2 container, transcript §15).  TimescaleDB's process-utility hook takes
@@ -682,17 +689,40 @@ ORDER BY 1, 2, 3;
 --   (iii) nhms_ingest_rw cannot EXECUTE it (kept: pg_read_file, lo_export,
 --         pg_ls_dir -- a function the owner may not call directly but can
 --         smuggle into an expression evaluated as superuser);
---   (iv)  it is on the deny-list below: PUBLIC-executable pg_catalog functions
---         whose effect for a superuser writer is not what the migration asked
---         for.  RESIDUAL, stated plainly: this leg is a LIST and is therefore
---         incomplete by construction -- it is the only non-structural leg here.
---         Legs (i) and (ii) are the structural ones and they are what the
---         design leans on.
+--   (iv)  it is NOT on the migration allow-list below.
 --
--- Everything the migrations actually use -- now(), nextval(),
--- gen_random_uuid(), length(), the four met trigger functions -- is owned by
--- the migration superuser and PUBLIC-executable, so a clean catalog sweeps
--- clean.
+-- Leg (iv) is an ALLOW-list, and round 4 is why.  It began as a deny-list of
+-- pg_catalog functions whose effect for a superuser writer is not what the
+-- migration asked for, and `pg_catalog.query_to_xml` walked through it
+-- (measured by the round-4 verifier against the deny-list build; transcript
+-- 18 measures this fix, not the hole): it is PUBLIC-executable, owned by the
+-- bootstrap superuser, and its effect is "evaluate this SQL STRING as the
+-- caller", so a single column DEFAULT restored BOTH earlier gadgets -- the
+-- pg_read_file leak and `set_config('session_replication_role','replica')` --
+-- with the strict audit at exit 0.  Thirteen more `*_to_xml*` /
+-- `cursor_to_xml*` siblings have the same shape.  No list of effects can
+-- close a function whose effect is "run this string", so the list was
+-- inverted: everything the migrations actually reference is enumerated, and
+-- everything else -- any schema, including every other pg_catalog function --
+-- is untrusted.  The list must be EXTENDED when a migration starts
+-- referencing a new function, and that is test-enforced:
+-- tests/test_node27_write_roles.py re-derives the migration-side set from
+-- db/migrations/**, and scripts/select_ci_tests.py maps db/migrations/*.sql (at
+-- any depth) to that suite, so a new reference reddens a unit test on the
+-- migration's own PR rather than the live audit on node-27.
+--
+-- One carve-out, and it is structural rather than enumerated: a pg_catalog
+-- function reached ONLY as `:opfuncid` -- i.e. as the implementation of an
+-- OPERATOR, never as a written call -- is trusted, provided it is not VOLATILE.
+-- Without it every `>=`, `<>`, `~` and `->>` in a CHECK constraint or a STORED
+-- generated column would have to be enumerated, including the ten chunk-range
+-- CHECKs TimescaleDB writes per hypertable.  The volatility condition is what
+-- makes it safe: on PG 15.2 all 799 pg_catalog operator-backing functions are
+-- non-volatile and none of the *_to_xml* / pg_read_file / set_config family
+-- backs any operator (measured), while a write role that could still author in
+-- pg_temp could otherwise define `CREATE OPERATOR pg_temp.@@ (RIGHTARG = text,
+-- FUNCTION = pg_read_file)` and arrive as a pure `:opfuncid`.  The carve-out is
+-- also pg_catalog-only, so a PostGIS operator (schema `public`) is reported.
 --
 -- Mechanism note (measured, not assumed): walking `pg_depend` does NOT work
 -- here.  Dependencies on PINNED objects -- every function created by initdb,
@@ -706,10 +736,19 @@ ORDER BY 1, 2, 3;
 -- policies (owner and superuser bypass RLS), and view `_RETURN` rules (a view
 -- body is evaluated for the reader, not for the role writing the row) -- the
 -- latter are excluded by the same predicate as the inventory above.
--- A temp table, not a CTE repeated three times: the inventory below, the
--- severity block and the T7 receipt must all read the same scan.  It is dropped
--- at the end of the block; an ON_ERROR_STOP abort ends the session anyway.
-CREATE TEMP TABLE pg_temp.nhms_audit_function_refs AS
+-- Temp tables, not a CTE repeated three times: the inventory below, the
+-- severity block and the T7 receipt must all read the same scan.  They are
+-- dropped at the end of the block; an ON_ERROR_STOP abort ends the session
+-- anyway.
+--
+-- The SOURCES are materialised separately from the REFS on purpose.  "How many
+-- expressions were scanned" is a property of the sources, and deriving it from
+-- the refs rows makes it collapse to 0 exactly when the sweep is most reassuring
+-- and least trustworthy: a catalog whose scanned expressions reference no
+-- function at all (`CHECK (x IS NOT NULL)`, `DEFAULT 'lit'`) produces zero ref
+-- rows, so the receipt would read "0 scanned" and be indistinguishable from a
+-- sweep whose FROM list was silently wrong.  Count the sources directly.
+CREATE TEMP TABLE pg_temp.nhms_audit_function_sources AS
 WITH sources AS (
   SELECT n.nspname || '.' || c.relname AS relation,
          'column default ' || a.attname AS kind,
@@ -763,14 +802,30 @@ WITH sources AS (
     AND NOT t.tgisinternal
     AND (t.tgname <> 'ts_insert_blocker'
          OR t.tgfoid IS DISTINCT FROM to_regprocedure('_timescaledb_internal.insert_blocker()'))
-), refs AS (
-  SELECT s.relation, s.kind, (m[1])::oid AS fnoid
-  FROM sources s, regexp_matches(s.tree, ':(?:op)?funcid (\d+)', 'g') m
+)
+SELECT * FROM sources;
+
+CREATE TEMP TABLE pg_temp.nhms_audit_function_refs AS
+WITH refs AS (
+  -- The `op` prefix is CAPTURED, because the operator carve-out below needs to
+  -- know how each reference was reached.  `coalesce(m[1], '')` is not cosmetic:
+  -- for a plain `:funcid` the group is NULL, and a bare `m[1] = 'op'` would make
+  -- `bool_and(...)` NULL over a mixed set -- which reads as "not false" in the
+  -- wrong hands.  Written this way the carve-out can only ever fail CLOSED.
+  SELECT s.relation, s.kind, (m[2])::oid AS fnoid,
+         coalesce(m[1], '') = 'op' AS via_op
+  FROM pg_temp.nhms_audit_function_sources s,
+       regexp_matches(s.tree, ':(op)?funcid (\d+)', 'g') m
   WHERE s.tree IS NOT NULL
   UNION ALL
-  SELECT s.relation, s.kind, s.fnoid
-  FROM sources s
+  -- A trigger function is a written reference, never an operator.
+  SELECT s.relation, s.kind, s.fnoid, false
+  FROM pg_temp.nhms_audit_function_sources s
   WHERE s.fnoid IS NOT NULL
+), grouped AS (
+  SELECT relation, kind, fnoid, bool_and(via_op) AS via_op_only
+  FROM refs
+  GROUP BY relation, kind, fnoid
 )
 SELECT r.relation,
        r.kind,
@@ -785,21 +840,32 @@ SELECT r.relation,
               THEN 'owner ' || po.rolname || ' is not a superuser' END,
          CASE WHEN NOT has_function_privilege('nhms_ingest_rw', p.oid, 'EXECUTE')
               THEN 'NOT executable by nhms_ingest_rw' END,
-         CASE WHEN pn.nspname = 'pg_catalog' AND p.proname = ANY (ARRAY[
-                'set_config',
-                'pg_terminate_backend', 'pg_cancel_backend', 'pg_reload_conf',
-                'pg_notify',
-                'pg_sleep', 'pg_sleep_for', 'pg_sleep_until',
-                'pg_advisory_lock', 'pg_advisory_lock_shared',
-                'pg_advisory_xact_lock', 'pg_advisory_xact_lock_shared',
-                'pg_try_advisory_lock', 'pg_try_advisory_lock_shared',
-                'pg_try_advisory_xact_lock', 'pg_try_advisory_xact_lock_shared',
-                'pg_advisory_unlock', 'pg_advisory_unlock_shared',
-                'pg_advisory_unlock_all'])
-              THEN 'deny-listed' END
-       ), '') AS untrusted_reason,
-       (SELECT count(*) FROM sources) AS sources_scanned
-FROM refs r
+         CASE WHEN NOT (
+                (pn.nspname || '.' || p.proname) = ANY (ARRAY[
+                  -- Derived from db/migrations/**, not chosen: DEFAULT now()
+                  -- (31x), DEFAULT gen_random_uuid() (1x), BIGSERIAL ->
+                  -- nextval (7x), the btrim() in 000038's CHECK, the four
+                  -- trigger functions 000043 attaches with EXECUTE FUNCTION,
+                  -- and float8 -- which is not a WRITTEN call but the cast
+                  -- function the parser resolves `::double precision` to
+                  -- inside 000048's STORED generated column (measured in the
+                  -- catalog, transcript 18.1).
+                  'met.canonical_grid_cell_direct_delete_blocked',
+                  'met.canonical_grid_cell_immutable',
+                  'met.canonical_grid_snapshot_identity_immutable',
+                  'met.canonical_met_product_grid_definition_uri_match',
+                  'pg_catalog.btrim',
+                  'pg_catalog.float8',
+                  'pg_catalog.gen_random_uuid',
+                  'pg_catalog.nextval',
+                  'pg_catalog.now'])
+                OR (pn.nspname = 'pg_catalog'
+                    AND r.via_op_only
+                    AND p.provolatile <> 'v')
+              )
+              THEN 'not on the migration allow-list' END
+       ), '') AS untrusted_reason
+FROM grouped r
 JOIN pg_proc p ON p.oid = r.fnoid
 JOIN pg_namespace pn ON pn.oid = p.pronamespace
 JOIN pg_roles po ON po.oid = p.proowner;
@@ -810,7 +876,8 @@ SELECT x.detail
 FROM (
   SELECT 0 AS ord,
          format('%s expression(s)/trigger(s) scanned, %s distinct function(s) referenced, %s untrusted for a superuser writer',
-                coalesce(max(sources_scanned), 0), count(DISTINCT fn),
+                (SELECT count(*) FROM pg_temp.nhms_audit_function_sources),
+                count(DISTINCT fn),
                 count(DISTINCT fn) FILTER (WHERE untrusted_reason IS NOT NULL)) AS detail
   FROM pg_temp.nhms_audit_function_refs
   UNION ALL
@@ -996,6 +1063,7 @@ BEGIN
 END
 $planted$;
 DROP TABLE pg_temp.nhms_audit_function_refs;
+DROP TABLE pg_temp.nhms_audit_function_sources;
 
 \echo '## audit: CREATE on tablespace nhms_cold for nhms_ingest_rw'
 -- The grant itself is a \gexec over pg_tablespace and emits NOTHING when the
