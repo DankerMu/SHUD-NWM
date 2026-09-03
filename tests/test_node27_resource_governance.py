@@ -1725,6 +1725,101 @@ def test_the_runbook_home_free_line_pins_point_at_the_real_code() -> None:
     assert "thresholds.home_free_warn_bytes" in lines[comparison_line - 1], lines[comparison_line - 1]
     assert '"code": "HOME_FREE_BELOW_WARNING"' in lines[literal_line - 1], lines[literal_line - 1]
 
+    # Round-5: guarding three of the block's pins left the other nineteen
+    # unwatched, and eleven of THOSE went one line stale in this PR alone (a
+    # comment grew above them). So every pin in the block is parsed out and
+    # checked, and the coverage assertion below fails on a pin nobody added an
+    # anchor for — a new unguarded pin is the failure mode this exists for.
+    block = _home_free_block(flat)
+    for pattern, anchor in _HOME_BLOCK_PIN_ANCHORS:
+        found = list(re.finditer(pattern, block))
+        assert len(found) == 1, f"{pattern!r} matched {len(found)} times in the §8 /home block"
+        _assert_anchor_on_pinned_lines(found[0].group(1), anchor, lines)
+    assert _covered_pin_offsets(block) == _all_pin_offsets(block), (
+        "every `:NNN` / `:NNN-MMM` pin in the §8 /home block needs an anchor in "
+        "_HOME_BLOCK_PIN_ANCHORS; uncovered offsets: "
+        f"{sorted(_all_pin_offsets(block) - _covered_pin_offsets(block))}"
+    )
+
+
+# §8's "`/home` has no critical tier" block, flattened, is the only place these
+# pins live. Anchors are matched against the pinned line of
+# `scripts/node27_resource_governance.py`; a range passes when at least one line
+# of the range carries its anchor. The table is deliberately explicit rather
+# than "the backticked token next to the pin": for `:77`/`:240`/`:245` and the
+# config-parse range the neighbouring token is the CODE NAME, which by design
+# does not appear on the threshold / comparison / parser lines they pin.
+_HOME_BLOCK_PIN_ANCHORS: tuple[tuple[str, str], ...] = (
+    (
+        r"`HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance\.py:(\d+)` \(threshold\)",
+        "home_free_warn_bytes: int",
+    ),
+    (r"\(threshold\), `:(\d+)` \(comparison\)", "thresholds.home_free_warn_bytes"),
+    (r"`:(\d+)` \(the code literal\)", '"code": "HOME_FREE_BELOW_WARNING"'),
+    (r"`status` is not `completed` \(`:(\d+-\d+)`\)", 'receipt.get("status") != "completed"'),
+    (r"`severity: critical` recommendation \(`:(\d+-\d+)`,", "critical_codes"),
+    (r"recommendation \(`:\d+-\d+`, `:(\d+)` `_critical_codes`\)", "def _critical_codes("),
+    (r"hard-codes `\"status\": \"completed\"` \(`:(\d+)`\)", '"status": "completed",'),
+    (r"the config parse is `:(\d+-\d+)`", "config_from_args(args)"),
+    (r"the `return 2` is `:(\d+)`", "return 2"),
+    (r"`ROOT_FREE_BELOW_CRITICAL` \(`:(\d+)`\)", '"code": "ROOT_FREE_BELOW_CRITICAL"'),
+    (
+        r"`HYPERTABLE_INDEX_RATIO_HIGH` \(`:(\d+)`, severity assigned at",
+        '"code": "HYPERTABLE_INDEX_RATIO_HIGH"',
+    ),
+    (r"severity assigned at `:(\d+)`\)", 'severity = "critical"'),
+    (r"`POSTGRES_UNAVAILABLE` \(`:(\d+)`\)", '"code": "POSTGRES_UNAVAILABLE"'),
+    (r"`WORKING_SET_UNAVAILABLE` \(`:(\d+)`\)", '"code": "WORKING_SET_UNAVAILABLE"'),
+    (r"`WATERMARK_UNAVAILABLE` \(`:(\d+)`\)", '"code": "WATERMARK_UNAVAILABLE"'),
+    (r"`HOME_FREE_UNAVAILABLE` \(`:(\d+)`\)", '"code": "HOME_FREE_UNAVAILABLE"'),
+    (
+        r"`PROJECTED_PEAK_EXCEEDS_HOME_FREE` \(`:(\d+)`\)",
+        '"code": "PROJECTED_PEAK_EXCEEDS_HOME_FREE"',
+    ),
+    (r"`WORKING_SET_ABOVE_WARNING` \(`:(\d+)` —", '"code": "WORKING_SET_ABOVE_WARNING"'),
+    # Positional pairing: the codes are listed in line order, CRITICAL first.
+    (r"\(`:(\d+)`, `:\d+`\): the `nhms` database", 'code = "DATABASE_SIZE_ABOVE_CRITICAL"'),
+    (r"\(`:\d+`, `:(\d+)`\): the `nhms` database", 'code = "DATABASE_SIZE_ABOVE_WARNING"'),
+    (r"\(`:(\d+)`, byte shape unchanged", "CRITICAL_DIAGNOSTIC_PREFIX"),
+    (r"`RESOURCE_GOVERNANCE_WORKING_SET:\{\.\.\.\}` line \(`:(\d+-\d+)`\)", "_working_set_diagnostic"),
+)
+
+_HOME_BLOCK_START = "**`/home` free space has no critical tier of its own**"
+_HOME_BLOCK_END = "**A red audit here is a documented state"
+_PIN_RE = re.compile(r":(\d+(?:-\d+)?)`")
+
+
+def _home_free_block(flat_runbook: str) -> str:
+    """The flattened §8 `/home` block, sliced by prose markers.
+
+    Deliberately not by line number: the runbook moves under its own edits, and
+    a guard that has to be re-pinned to keep guarding pins is no guard.
+    """
+    start = flat_runbook.index(_HOME_BLOCK_START)
+    end = flat_runbook.index(_HOME_BLOCK_END, start)
+    return flat_runbook[start:end]
+
+
+def _all_pin_offsets(block: str) -> set[int]:
+    return {match.start(1) for match in _PIN_RE.finditer(block)}
+
+
+def _covered_pin_offsets(block: str) -> set[int]:
+    covered: set[int] = set()
+    for pattern, _anchor in _HOME_BLOCK_PIN_ANCHORS:
+        for match in re.finditer(pattern, block):
+            covered.add(match.start(1))
+    return covered
+
+
+def _assert_anchor_on_pinned_lines(pin: str, anchor: str, lines: list[str]) -> None:
+    first, _, last = pin.partition("-")
+    span = range(int(first), int(last or first) + 1)
+    assert any(anchor in lines[number - 1] for number in span), (
+        f"`:{pin}` should carry {anchor!r}; found "
+        + " | ".join(lines[number - 1].strip() for number in span)
+    )
+
 
 def test_the_collection_connect_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
     """#1985 round-4 (decision 21's rationale, decision 23's lane).

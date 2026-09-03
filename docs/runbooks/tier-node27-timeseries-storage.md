@@ -397,7 +397,7 @@ a matter of waiting for as many ticks as there are chunks.
 7-day chunk eligible per tick.** It is the steady state, not a guarantee. The
 runner does not pace itself — selection is a prefix slice
 (`selected = eligible[:per_tick_bound]`,
-`scripts/node27_timeseries_compression.py:745`), so if the last compression
+`scripts/node27_timeseries_compression.py:749`), so if the last compression
 receipt or a read-only `timescaledb_information.chunks` query shows **≥2
 eligible terminal chunks** on the table, the next tick at bound 4 takes them
 **together**: two 508 GB chunks are `2 × 508 × 6.0 s/GB + 380 s ≈ 6476 s`
@@ -1838,7 +1838,7 @@ uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$
 
 `systemctl --user` locates the user manager through `$XDG_RUNTIME_DIR`; with it
 unset the probe exits non-zero with "Failed to connect to bus"
-(`scripts/node27_timeseries_compression_supervisor.py:187-194`) and the check
+(`scripts/node27_timeseries_compression_supervisor.py:192-199`) and the check
 reports a probe-execution failure — that is a broken probe, not a verdict about
 the host. Fix the environment and rerun.
 
@@ -1980,7 +1980,7 @@ Read each field for what it is worth:
   pinned `timeout` process from the same inert env-file read; the receipt shows
   what the runner received through that assembled child environment.
 - `budget.systemd_wall_seconds` is a **declaration echo** — the process cannot
-  read the unit file (`scripts/node27_timeseries_compression.py:111-116`), so
+  read the unit file (`scripts/node27_timeseries_compression.py:140-144`), so
   the receipt only proves what the env file declared. Check 2 below
   (`systemctl --user show -p TimeoutStartUSec`) is the only step that queries
   the user unit manager for the installed wall (scope fixed per issue `#1387`).
@@ -2775,9 +2775,9 @@ E4 receipt，autovacuum 刷新统计后、无 schema 变更）翻为 Bitmap Inde
 
 The retention runner
 (`scripts/node27_timeseries_retention.py`, issue #855) drops chunks
-strictly older than the drop window from the two D3
-detail hypertables `hydro.river_timeseries` and
-`met.forcing_station_timeseries` via TimescaleDB `drop_chunks`. The window
+strictly older than the drop window from the D3 detail candidate set —
+`hydro.river_timeseries`, `met.forcing_station_timeseries` and their
+`_legacy` siblings while those exist — via TimescaleDB `drop_chunks`. The window
 width is `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` (spec default 14 d;
 21 d on node-27 as of 2026-08-01) — always read the live value off the box
 rather than assuming the default.
@@ -3321,7 +3321,7 @@ Two guardrails enforce this:
 1. **Structural**: `drop_chunks` only accepts hypertables; metadata
    tables are regular Postgres tables and cannot be dropped by
    `drop_chunks`. The runner's SQL literal restricts the tuple filter to
-   the two D3 hypertables.
+   the D3 candidate set — the canonical pair plus their `_legacy` siblings.
 2. **Row-count invariant** (§6.1 test row 4): after every enforce tick,
    the row counts of the metadata / coverage tables MUST be unchanged.
    §6.3 embeds a pre/post row-count check in the live receipt review.
@@ -3862,13 +3862,13 @@ before a receipt exists.
      (threshold), `:240` (comparison), `:245` (the code literal)
      — and there is no `home_free_critical_bytes` at all. The exit-1 /
      `OnFailure=` mail lane has two triggers, in this order: the receipt's
-     `status` is not `completed` (`:903-904`), or the receipt carries at least
-     one `severity: critical` recommendation (`:909-911`, `:865`
+     `status` is not `completed` (`:904-905`), or the receipt carries at least
+     one `severity: critical` recommendation (`:910-912`, `:866`
      `_critical_codes`). The first is a defensive guard today — `build_receipt`
-     hard-codes `"status": "completed"` (`:552`) and nothing downgrades it — so
+     hard-codes `"status": "completed"` (`:553`) and nothing downgrades it — so
      in practice a critical recommendation is the only thing that reddens a
      completed audit. (A rejected config never gets that far: the config parse
-     is `:888-891` and the `return 2` is `:896`, which also trips
+     is `:889-892` and the `return 2` is `:897`, which also trips
      `OnFailure=`.) A `warning` changes neither `status` nor the critical
      list, so it trips nothing.
 
@@ -3898,7 +3898,7 @@ before a receipt exists.
      - `WATERMARK_UNAVAILABLE` (`:479`) — the display watermark could not be
        proven, so no projection is possible; the lane's own fault, and it must
        reach a person.
-     - `HOME_FREE_UNAVAILABLE` (`:500`) — the catalog side is fine but `/home`
+     - `HOME_FREE_UNAVAILABLE` (`:501`) — the catalog side is fine but `/home`
        did not resolve or its `statvfs` failed, so `home_free_bytes` is null
        and the comparison below cannot be made. Fires under BOTH measured
        statuses — `ok` and `no_uncompressed_chunk` — because the guard is
@@ -3907,7 +3907,7 @@ before a receipt exists.
        `HOME_FREE_BELOW_WARNING` when it HAS a number, so without this code an
        unobservable `/home` produced a green receipt about the one volume the
        audit exists to watch.
-     - `PROJECTED_PEAK_EXCEEDS_HOME_FREE` (`:522`) —
+     - `PROJECTED_PEAK_EXCEEDS_HOME_FREE` (`:523`) —
        `projected_peak_bytes > home_free_bytes - safety_margin_bytes`, margin
        default 100 GiB (`--safety-margin-bytes`). Gated on
        `projection_status == "ok"` ALONE (not on `no_uncompressed_chunk`) AND
@@ -3916,17 +3916,17 @@ before a receipt exists.
        comparison would fire on any `/home` under the margin; without a
        free-space number the code above fires instead.
 
-     The same block adds one warning, `WORKING_SET_ABOVE_WARNING` (`:535` —
+     The same block adds one warning, `WORKING_SET_ABOVE_WARNING` (`:536` —
      `uncompressed_bytes` above `working_set_warn_bytes`, default 400 GiB).
-     `DATABASE_SIZE_ABOVE_WARNING` and `DATABASE_SIZE_ABOVE_CRITICAL` are
+     `DATABASE_SIZE_ABOVE_CRITICAL` and `DATABASE_SIZE_ABOVE_WARNING` are
      **`info` since `#1985`** (`:263`, `:266`): the `nhms` database growing past
      500 GiB is what the retention window is supposed to allow, and a daily
      false critical is exactly how the true one gets ignored.
 
      Every critical prints `RESOURCE_GOVERNANCE_CRITICAL:<code>` on stderr
-     (`:911`, byte shape unchanged — other tooling greps it) and, only when at
+     (`:912`, byte shape unchanged — other tooling greps it) and, only when at
      least one critical fired, one additional
-     `RESOURCE_GOVERNANCE_WORKING_SET:{...}` line (`:912-915`) carrying
+     `RESOURCE_GOVERNANCE_WORKING_SET:{...}` line (`:913-916`) carrying
      `uncompressed_bytes`, `daily_ingest_bytes`, `next_compressible_at`,
      `home_free_bytes`, `projected_peak_bytes`, `projection_status` and
      `compression_lag_seconds`. The shared `OnFailure=` handler mails journal
@@ -4226,9 +4226,9 @@ scan and fails if a lane grows a requirement this table does not cover.
 |---|---|---|---|
 | `nhms-node27-autopipe.service` | `scripts/node27_autopipeline.py` | DML across `core`/`met`/`hydro`/`ops`/`map`; **`ANALYZE` on frontier chunks and on authority tables** → ownership. No `compress_chunk`/`drop_chunks`/policy calls, no runtime `CREATE TABLE`/`CREATE INDEX`/`TRUNCATE`/`REFRESH MATERIALIZED VIEW` | `nhms_ingest_rw` |
 | `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | **no database connection at all** (no `execute(`, no `psycopg2`/`DATABASE_URL` under `workers/data_adapters/`); the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only — provisioned so the template's promise holds and a future adapter write does not land on the superuser) |
-| `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:595` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:678` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-compression.service` (cold-residency leg) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py:421,422` | `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` on compressed chunks → chunk ownership **plus `CREATE` on tablespace `nhms_cold`** | `nhms_ingest_rw` |
-| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:851` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:925` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-compression-replay.service` (`Type=oneshot`, no timer — operator-triggered, not a recurring lane) | `scripts/node27_timeseries_compression_supervisor.py:101-128,143,331-380` | `pg_dump`, two `migration_apply` steps (`psql --file <migration>`), `docker exec nhms-db pg_restore` — **migration-class DDL** — plus a `decompress` leg (`scripts/node27_timeseries_decompression_replay.py:194`, `decompress_chunk` → hypertable ownership) and, in the same `EXPECTED_COMMAND_SEQUENCE` (`:117-128`), `compression_dry_run` and `compression_enforce`. The exception is scoped by **"one-shot migration-class unit"**, not by which calls it makes: the compression legs are the same ones the recurring lane runs as `nhms_ingest_rw`; the `migration_apply` steps are what that role structurally cannot carry | **`nhms` (documented exception)** |
 | archive-rebuild drill (retired lane, #1370; no unit, no template in `infra/env/`) | — | `POSTGRES_ADMIN_URL` against the `postgres` database, `CREATEDB` for `nhms_archive_drill` | **`nhms` (documented exception)** |
 
@@ -4256,9 +4256,9 @@ Scanned the converted lanes for `pg_stat_activity`, `pg_locks`, `pg_toast.`,
 hit** — every match is a `#` comment (the #1714 `fallback_application_name`
 attribution notes). The live callers all sit outside the conversion: the replay
 lane's quiescence checks
-(`node27_timeseries_compression_supervisor.py:1281,1311`,
-`node27_timeseries_compression_capture.py:338-340`) keep the superuser;
-`node27_cold_governance_collection.py:246`, `node27_external_contract_snapshot.py:115`
+(`node27_timeseries_compression_supervisor.py:1286,1342`,
+`node27_timeseries_compression_capture.py:350-353`) keep the superuser;
+`node27_cold_governance_collection.py:542`, `node27_external_contract_snapshot.py:115`
 and `node27_river_identity_backfill.py:289` belong to lanes with no converted
 template. On `pg_toast` specifically, `compressed_chunk_cold_residency.py` models
 TOAST members for classification but never names them in SQL — `_lock_sql` is fed
@@ -4582,8 +4582,9 @@ provision script is re-run:
 - and if the migration created a **hypertable**, the drift is not a warning at
   all: `compress_chunk` and `drop_chunks` refuse outright with `must be owner of
   hypertable`, so the compression and retention lanes **fail** on it rather than
-  degrading. Nil today only because both lanes hard-filter to the two existing
-  hypertables (`scripts/node27_timeseries_retention.py:166`) — that is a property
+  degrading. Nil today only because both lanes hard-filter to the D3 candidate
+  set — the canonical pair plus any existing `_legacy` sibling
+  (`scripts/node27_timeseries_retention.py:200`) — that is a property
   of those filters, not of the grants;
 - and the audit reports the owner drift.
 

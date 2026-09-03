@@ -25,14 +25,26 @@ consume this module:
 * ``packages/common/node27_cold_governance_collection.py`` — working-set collection
 * ``scripts/node27_resource_governance.py`` — the audit's policy-missing checks
 
-Three sites deliberately do NOT consume the discovery set and read
-:data:`CANONICAL_HYPERTABLES` instead; each is documented where it stands.  The
-third is capture's ownership probe
-(``scripts/node27_timeseries_compression_capture.py:332-335``), which does not
-even import the constant: it casts bare ``schema.table`` literals to
-``regclass``, which ERRORS on a relation that does not exist, and ownership of a
-renamed sibling is the same role fact as ownership of the table it was renamed
-from.
+Four sites deliberately do NOT consume the discovery set; each is documented
+where it stands.  Three of them read :data:`CANONICAL_HYPERTABLES` instead:
+
+- ``scripts/node27_timeseries_compression.py`` — its ``HYPERTABLES`` constant,
+  the fallback for receipt paths that never reached the catalog
+- ``scripts/node27_timeseries_retention.py`` — its ``TARGET_HYPERTABLES``
+  constant, the documentary canonical-pair allowlist
+- ``scripts/node27_timeseries_compression_capture.py`` — the write-guard
+  preflight's ``guards_both_targets`` check, over a tuple set frozen for I7
+
+The fourth site does not even use the constant:
+
+- ``scripts/node27_timeseries_compression_capture.py`` — the ownership probe
+  labelled ``/* capture:role */`` and marked "Canonical-only on purpose", which
+  casts bare ``schema.table`` literals to ``regclass``.  That ERRORS on a
+  relation that does not exist, and ownership of a renamed sibling is the same
+  role fact as ownership of the table it was renamed from.
+
+Pins here are by NAME, not by line: the line pin this roster used to carry went
+stale inside a single PR.
 
 The candidate list is a LITERAL, never an identifier discovered at runtime and
 formatted back into SQL: chunk/settings queries simply carry all four

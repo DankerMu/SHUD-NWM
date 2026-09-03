@@ -310,8 +310,9 @@ def test_discovery_helper_fans_out_to_the_cold_governance_suite() -> None:
     """#1985 round-4: the helper's eighth consumer had a suite nobody selected.
 
     `packages/common/node27_cold_governance_collection.py` reads the shared
-    hypertable-discovery helper, and its own behaviour (bounded connect,
-    working-set inventory) is pinned in `tests/test_node27_cold_governance.py`
+    hypertable-discovery helper, and its working-set inventory is pinned in
+    `tests/test_node27_cold_governance.py` (the bounded connect is pinned in
+    `tests/test_node27_resource_governance.py`)
     — a suite the fan-out rule did not name, so a helper-only diff could not
     have caught a break there. Written as a literal, not derived from
     `_CONSUMERS`: deriving it would let the roster and the fan-out rule drift

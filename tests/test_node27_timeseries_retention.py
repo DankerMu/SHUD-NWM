@@ -2019,6 +2019,41 @@ def test_measure_warning_byte_identical_with_runbook() -> None:
     )
 
 
+def test_no_surface_still_claims_the_runner_enumerates_two_hypertables() -> None:
+    """#1985 round-5: the delete authority is the candidate set, not a pair.
+
+    `_CHUNK_QUERY` selects over `CANDIDATE_HYPERTABLES` — the canonical pair
+    PLUS their `_legacy` siblings — so a chunk of `hydro.river_timeseries_legacy`
+    is dropped by this runner under the same window. The module docstring, the
+    H3 bullet, the `TARGET_HYPERTABLES` comment and both runbook guardrails
+    still described a two-table enumeration, which is the dangerous direction of
+    stale: an operator reading it would conclude the legacy table is NOT being
+    drained and go looking for a second lane that does not exist.
+
+    Pinned-absent as well as pinned-present, because prose only goes wrong by
+    being written again.
+    """
+    source = Path(retention.__file__).read_text(encoding="utf-8")
+    assert "enumeration of the two D3 hypertables" not in source
+    assert "catalog-only enumeration of the D3 candidate set" in source
+    assert "D3 detail candidate set" in (retention.__doc__ or "")
+    assert "the two D3 detail hypertables ``hydro.river_timeseries``" not in (retention.__doc__ or "")
+    # `TARGET_HYPERTABLES` itself stays the canonical pair — it is the
+    # documentary allowlist — so its own comment head is left alone; only the
+    # "ONLY targets" claim it made about the whole runner is unwound.
+    assert "the two hypertables\n# below are the ONLY targets" not in source
+    assert "the candidate set\n# below is the ONLY source of targets" in source
+
+    flat_runbook = " ".join(_RUNBOOK_PATH.read_text(encoding="utf-8").split())
+    assert "strictly older than the drop window from the D3 detail candidate set" in flat_runbook
+    assert "`_legacy` siblings while those exist — via TimescaleDB `drop_chunks`" in flat_runbook
+    assert (
+        "restricts the tuple filter to the D3 candidate set — the canonical pair "
+        "plus their `_legacy` siblings"
+    ) in flat_runbook
+    assert "restricts the tuple filter to the two D3 hypertables" not in flat_runbook
+
+
 # ---------------------------------------------------------------------------
 # RF-F1 R2 — loader-side FormatChecker symmetry with emit side
 # ---------------------------------------------------------------------------

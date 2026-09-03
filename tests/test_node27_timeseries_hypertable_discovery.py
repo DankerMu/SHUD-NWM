@@ -380,9 +380,9 @@ def test_every_lifecycle_consumer_imports_the_shared_helper(relative: str) -> No
 def _documented_consumers() -> list[str]:
     """Consumer paths the helper's own docstring lists, in bullet form.
 
-    Bullets only: the module docstring also names
-    ``node27_timeseries_compression_capture.py`` in prose, as the canonical-only
-    ownership probe, and that mention is not a consumer entry.
+    ``*`` bullets only: the docstring's second roster (``-`` bullets, read by
+    `_documented_non_consumers`) names sites that deliberately do NOT consume
+    the discovery set, and those are not consumer entries.
     """
     doc = discovery.__doc__ or ""
     return re.findall(r"^\* ``([^`]+)`` —", doc, flags=re.MULTILINE)
@@ -422,3 +422,87 @@ def test_the_ci_selector_comment_carries_the_current_consumer_count() -> None:
     # module docstring, which round-1 left at seven while adding the eighth.
     assert "Eight tools consume it" in (__doc__ or "")
     assert "Seven" not in (__doc__ or "")
+
+
+# ---------------------------------------------------------------------------
+# The other roster: sites that deliberately do NOT consume the discovery set
+# ---------------------------------------------------------------------------
+
+# Four entries, capture twice: it holds two distinct non-consumer sites (the
+# write-guard preflight, which reads the constant, and the ownership probe,
+# which does not even import it). Compared as a sorted LIST, not a set, so the
+# duplicate is part of the contract.
+_NON_CONSUMERS = (
+    "scripts/node27_timeseries_compression.py",
+    "scripts/node27_timeseries_compression_capture.py",
+    "scripts/node27_timeseries_compression_capture.py",
+    "scripts/node27_timeseries_retention.py",
+)
+
+# (file, token the docstring uses to name the site, literal that token must
+# resolve to in that file). Names, not line numbers: the pin this roster used
+# to carry (`..._capture.py:332-335`) was already stale by the round that
+# reviewed it.
+_NON_CONSUMER_ANCHORS: tuple[tuple[str, str, str], ...] = (
+    (
+        "scripts/node27_timeseries_compression.py",
+        "``HYPERTABLES``",
+        "HYPERTABLES: tuple[tuple[str, str], ...] = CANONICAL_HYPERTABLES",
+    ),
+    (
+        "scripts/node27_timeseries_retention.py",
+        "``TARGET_HYPERTABLES``",
+        "TARGET_HYPERTABLES: frozenset[tuple[str, str]] = frozenset(CANONICAL_HYPERTABLES)",
+    ),
+    (
+        "scripts/node27_timeseries_compression_capture.py",
+        "``guards_both_targets``",
+        "guards_both_targets = all(",
+    ),
+    (
+        "scripts/node27_timeseries_compression_capture.py",
+        "``/* capture:role */``",
+        "/* capture:role */",
+    ),
+)
+
+
+def _documented_non_consumers() -> list[str]:
+    """Non-consumer paths the helper's docstring lists, in ``-`` bullet form."""
+    doc = discovery.__doc__ or ""
+    return re.findall(r"^- ``([^`]+)`` —", doc, flags=re.MULTILINE)
+
+
+def test_the_helper_docstring_names_every_non_consumer() -> None:
+    """Round-5: the roster said "Three sites" and listed one of them.
+
+    The three constant-readers were folded into a sentence that only spelled
+    out the third site, so a maintainer converting the lane had no list of what
+    is deliberately left canonical — and the one site that WAS named carried a
+    line pin that had already drifted. Count and membership both, in the same
+    shape as the consumer roster above.
+    """
+    doc = discovery.__doc__ or ""
+    assert "Three sites" not in doc
+    assert "Four sites deliberately do NOT consume the discovery set" in doc
+    documented = _documented_non_consumers()
+    assert len(documented) == 4
+    assert sorted(documented) == sorted(_NON_CONSUMERS)
+
+
+def test_every_documented_non_consumer_anchor_is_real_and_line_free() -> None:
+    """The roster is only worth reading if its anchors resolve.
+
+    Each ``-`` bullet names its site by a symbol (or SQL label) rather than a
+    line number, so this checks BOTH halves: the docstring really uses that
+    token, and the token really exists in the file it points at. Renaming
+    `guards_both_targets` or dropping the `/* capture:role */` label without
+    touching the roster fails here.
+    """
+    doc = discovery.__doc__ or ""
+    for relative, token, literal in _NON_CONSUMER_ANCHORS:
+        assert token in doc, token
+        source = (_ROOT / relative).read_text(encoding="utf-8")
+        assert literal in source, (relative, literal)
+    # No line pins in this roster — that is the whole point of the rewrite.
+    assert not re.findall(r"^- ``[^`]+:\d+", doc, flags=re.MULTILINE)

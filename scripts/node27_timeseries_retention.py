@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """TimescaleDB retention runner for node-27 (issue #855 §6.1 + §6.2).
 
-Drops chunks strictly older than a configurable window (default 14 d) from
-the two D3 detail hypertables ``hydro.river_timeseries`` and
-``met.forcing_station_timeseries``.
+Drops chunks strictly older than a configurable window (default 14 d) from the
+D3 detail candidate set: ``hydro.river_timeseries``,
+``met.forcing_station_timeseries`` and their ``_legacy`` siblings while present.
 
 ADR 0002 (as revised 2026-08-11): the archive lane was permanently retired
 after the ``/dev/md0`` double-disk failure, and the ADR's "no deletion
@@ -25,7 +25,7 @@ the archive-lane retirement:
 
 - H3 catalog enumeration honours per-tick bound (``drop_chunks`` cannot
   bound cardinality server-side; runner enumerates
-  ``timescaledb_information.chunks`` for the two D3 hypertables, orders by
+  ``timescaledb_information.chunks`` for the candidate hypertables, orders by
   ``range_end ASC``, takes ``per_tick_bound``, then invokes ``drop_chunks``
   per selected chunk with exact ``newer_than`` and ``older_than`` bounds).
 - H4 ``freed_bytes`` measured BEFORE drop (post-drop the chunk is gone;
@@ -141,7 +141,7 @@ _DROP_TIMEOUT_MS = 300_000
 # lock. An untimed connect that stalls there leaves dropped chunks with no
 # receipt at all and parks the compression lane on `refused_lock` until the
 # stall clears. Mirrors the compression sibling's `_CONNECT_TIMEOUT_SECONDS`
-# (`scripts/node27_timeseries_compression.py:150`).
+# (`scripts/node27_timeseries_compression.py`).
 _CONNECT_TIMEOUT_SECONDS = 10
 
 
@@ -197,8 +197,8 @@ _DEFAULT_LOCK_TIMEOUT_MS = 240_000
 # TARGET_HYPERTABLES — the two D3 detail hypertables. Metadata/coverage
 # tables (`hydro_run`, `run_display_coverage`, `forcing_version`,
 # `state_snapshot`, QC/lineage) MUST NEVER appear here. Structural
-# guarantee: `drop_chunks` only accepts hypertables, and the two hypertables
-# below are the ONLY targets.
+# guarantee: `drop_chunks` only accepts hypertables, and the candidate set
+# below is the ONLY source of targets.
 #
 # #1985: this constant stays the CANONICAL pair — it is the documentary
 # allowlist, not the code path that selects chunks. The effective delete
@@ -621,7 +621,7 @@ MeasureChunkBytes = Callable[["RetentionConfig", Sequence[ChunkRow]], dict[str, 
 DropChunk = Callable[["RetentionConfig", ChunkRow], None]
 
 
-# SQL: catalog-only enumeration of the two D3 hypertables.
+# SQL: catalog-only enumeration of the D3 candidate set (canonical + `_legacy`).
 # H3 divergence from #851 compression sibling: retention MUST NOT filter
 # `is_compressed = false` — compressed chunks older than 14 d are exactly
 # the retention target, so both compressed and uncompressed chunks are
