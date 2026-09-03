@@ -45,6 +45,7 @@ from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalRepository,
 )
 from services.orchestrator.retry import RetryConfig, RetryError, RetryNotFoundError
+from services.orchestrator.run_identity import parse_run_cycle
 from services.orchestrator.scheduler import ProductionScheduler, ProductionSchedulerConfig
 from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from tests.test_production_scheduler import (
@@ -12698,7 +12699,7 @@ def test_symlink_occupying_a_segment_slot_fails_loud_on_read_and_on_the_floor(
     assert read_caught.value.reason == "file_journal_unreadable"
 
     with pytest.raises(FileOrchestrationJournalError) as floor_caught:
-        FileOrchestrationJournalRepository(root)._next_sequence(
+        FileOrchestrationJournalRepository(root)._next_sequence_unlocked(
             source_id="gfs",
             cycle_time=_PROBE_CYCLE,
         )
@@ -12723,7 +12724,7 @@ def test_symlinked_latest_source_parent_fails_the_sequence_write_loud(tmp_path: 
     latest_view["replay"]["latest_sequence"] = 9
     _write_json(root / "latest" / "gfs" / _PROBE_CYCLE_SEGMENT / "model_a.json", latest_view)
     assert (
-        FileOrchestrationJournalRepository(root)._next_sequence(
+        FileOrchestrationJournalRepository(root)._next_sequence_unlocked(
             source_id="gfs",
             cycle_time=_PROBE_CYCLE,
         )
@@ -12735,7 +12736,7 @@ def test_symlinked_latest_source_parent_fails_the_sequence_write_loud(tmp_path: 
     before = _journal_tree_bytes(root)
 
     with pytest.raises(FileOrchestrationJournalError) as floor_caught:
-        repository._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE)
+        repository._next_sequence_unlocked(source_id="gfs", cycle_time=_PROBE_CYCLE)
     assert floor_caught.value.reason == "file_journal_unreadable"
 
     with pytest.raises(FileOrchestrationJournalError) as caught:
@@ -12763,12 +12764,12 @@ def test_genuine_absence_under_real_directories_stays_a_legal_empty_read(tmp_pat
     (root / "journal" / "gfs").mkdir(parents=True)
     repository = FileOrchestrationJournalRepository(root)
     assert repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
-    assert repository._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
+    assert repository._next_sequence_unlocked(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
     assert repository.list_stage_statuses(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
 
     cold = FileOrchestrationJournalRepository(tmp_path / "never-initialized")
     assert cold._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
-    assert cold._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
+    assert cold._next_sequence_unlocked(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
 
 
 def test_directory_occupying_a_segment_slot_still_reaches_the_hardened_reader(
@@ -15154,6 +15155,80 @@ def test_underivable_idempotency_key_falls_open_to_the_whole_tree_scan(
     if underivable_key.startswith("gfs:"):
         assert observed is not None
         assert observed["job_id"] == "job_fcst_gfs_2026062800_model_a"
+
+
+_ANALYSIS_RUN_ID = "analysis_era5_2026010100_2026010200_model_qhh.v1"
+_ANALYSIS_CYCLE = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _analysis_pipeline_job_row(*, model_id: str | None) -> dict[str, Any]:
+    """A `pipeline_job` row that is identity-clean apart from its analysis run id.
+
+    Every other field the validator reads round-trips, so the only reason the
+    call can raise is the run-id shape itself.
+    """
+
+    row: dict[str, Any] = {
+        "job_id": "job_analysis_era5_2026010100_forecast",
+        "source_id": "ERA5",
+        "cycle_time": journal_module._format_utc(_ANALYSIS_CYCLE),
+        "cycle_id": cycle_id_for("ERA5", _ANALYSIS_CYCLE),
+        "run_id": _ANALYSIS_RUN_ID,
+        "status": "running",
+        "stage": "forecast",
+    }
+    if model_id is not None:
+        row["model_id"] = model_id
+    return row
+
+
+@pytest.mark.parametrize("model_id", ["model_qhh.v1", None], ids=["with-model-id", "without-model-id"])
+def test_analysis_run_id_is_rejected_by_pipeline_job_identity_on_both_branches(model_id: str | None) -> None:
+    """#1762 ruling: no `pipeline_job` row can carry an analysis run id.
+
+    ``_validate_pipeline_job_identity`` guards every `pipeline_job` write and
+    read, and BOTH of its branches -- the one taken with a model id and the one
+    taken without -- admit only the forecast and cohort shapes. This is why the
+    analysis derivation in ``_cycle_scope_from_file_run_id`` was unreachable: the
+    two lookups it feeds can never need it.
+    """
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        journal_module._validate_pipeline_job_identity(
+            _analysis_pipeline_job_row(model_id=model_id),
+            source_id="ERA5",
+            cycle_time=_ANALYSIS_CYCLE,
+            model_id=model_id,
+        )
+
+    assert caught.value.reason == "file_journal_run_mismatch"
+
+
+def test_analysis_run_id_derives_to_nothing_and_falls_open() -> None:
+    """#1762: the analysis shape is "not derivable", never "not found".
+
+    ``parse_run_cycle`` still resolves the same run id -- retention consumes it
+    for analysis workspaces -- so the removed branch is a journal-lookup
+    concern only, not a change to the canonical run-id vocabulary.
+    """
+
+    analysis_run_id = "analysis_era5_2026010100_2026010200_model_x"
+
+    assert journal_module._cycle_scope_from_file_run_id(analysis_run_id) is None
+    assert journal_module._cycle_scope_from_idempotency_key(f"{analysis_run_id}:forecast") is None
+    assert parse_run_cycle(analysis_run_id) == _ANALYSIS_CYCLE
+
+
+def test_sequence_floor_is_exposed_only_as_the_unlocked_variant() -> None:
+    """#1659: `_write_lock` is not re-entrant, so a locking wrapper is a deadlock trap.
+
+    Every write lane computes the floor while already holding the lock; the
+    wrapper had no production caller, and its absence is what keeps a future
+    in-lane caller from deadlocking.
+    """
+
+    assert not hasattr(FileOrchestrationJournalRepository, "_next_sequence")
+    assert callable(FileOrchestrationJournalRepository._next_sequence_unlocked)
 
 
 @pytest.mark.parametrize(

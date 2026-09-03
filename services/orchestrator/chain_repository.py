@@ -13,10 +13,15 @@ from services.orchestrator.chain_types import (
     ModelContext,
     OrchestratorError,
 )
+from services.orchestrator.scheduler_state_types import DURABLE_HYDRO_SUCCESS_STATUSES
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
+# Lacks "pending", which scheduler_state_types.ACTIVE_HYDRO_STATUSES holds; that divergence is
+# UNADJUDICATED (#1581) — locked by tests/test_hydro_status_set_parity.py, not decided.
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running"}
-COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "published", "complete"}
+# The SAME object as scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES (#1581), not a copy; the
+# name stays because file_orchestration_journal imports COMPLETED_HYDRO_STATUSES from here.
+COMPLETED_HYDRO_STATUSES = DURABLE_HYDRO_SUCCESS_STATUSES
 DEFAULT_CANDIDATE_STATE_EVENT_LIMIT = 100
 DEFAULT_CANDIDATE_STATE_JOB_LIMIT = 100
 _first_optional_int = chain_runtime_utils._first_optional_int

@@ -558,6 +558,12 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_e2e_ifs.py",
     "tests/test_e2e_m3.py",
     "tests/test_file_orchestration_journal.py",
+    # #1581: chain.py aliases DURABLE_HYDRO_SUCCESS_STATUSES as
+    # COMPLETED_HYDRO_STATUSES and the parity lock asserts that alias IS the
+    # shared object; a chain-only edit that rebinds it must run this suite.
+    # Stop-rule owned module, so the addition rides this at-site tuple rather
+    # than the `services/orchestrator/**` list. 5 tests in 0.23s.
+    "tests/test_hydro_status_set_parity.py",
     "tests/test_ifs_forecast_integration.py",
     "tests/test_orchestrator.py",
     "tests/test_partial_success.py",
@@ -622,6 +628,12 @@ RELEASED_RESERVATION_RECOVERY_TESTS: tuple[str, ...] = (
 
 FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal_read_cache.py",
+    # #1581: the journal's completed-pipeline probes decide on its own
+    # `COMPLETED_HYDRO_STATUSES` from-import binding, which the parity lock
+    # pins as the one shared object. Stop-rule owned module, so the addition
+    # rides this at-site tuple rather than the `services/orchestrator/**` list.
+    # 5 tests in 0.23s.
+    "tests/test_hydro_status_set_parity.py",
     # #1825: the node-22 manual-retry marker suite top-level-imports the journal
     # repository and pins the marker contract (per-run row vs cohort master) the
     # operator channel depends on. It runs in well under a second, so a rule is
@@ -1431,6 +1443,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # orchestrator-journal suites; measured together, 50 tests in 1.50s.
             "tests/test_scheduler_journal_root_authority.py",
             "tests/test_scheduler_journal_scope_census.py",
+            # #1581: the hydro-status parity lock top-level-imports seven
+            # modules of this package plus `services.orchestrator` itself, so
+            # eight importer pairs land here. Six close on this list
+            # (__init__.py, chain_forecast_trigger.py, chain_repository.py,
+            # scheduler_state_decision.py, scheduler_state_failure.py,
+            # scheduler_state_types.py); chain.py and
+            # file_orchestration_journal.py are stop-rule owned and are extended
+            # at THEIR sites, per this rule's #1455 note above. 5 tests in
+            # 0.23s, DB-free, so a rule rather than a rule-gap exclusion.
+            "tests/test_hydro_status_set_parity.py",
             "tests/test_live_monitoring.py",
             "tests/test_monitoring_api.py",
             "tests/test_pipeline_persistence.py",
@@ -1942,7 +1964,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # parked in a subdirectory -- which is what the test-side rglob reads.
     PathTestRule(
         "db/migrations/*.sql",
-        ("tests/test_node27_write_roles.py",),
+        (
+            "tests/test_node27_write_roles.py",
+            # #1581: the parity lock derives the `hydro.run_status` member table
+            # by sweeping this very glob as text, so a migration that adds an
+            # enum member changes what that suite asserts -- and the "no member
+            # outside the enum but `complete`" claim can only red on the
+            # migration's own PR if the suite runs there. `db/**` above buys only
+            # tests/test_migrations.py, which never parses the enum. 5 tests in
+            # 0.23s, DB-free.
+            "tests/test_hydro_status_set_parity.py",
+        ),
     ),
     # the converted lanes with no pre-existing rule to merge into. The
     # superuser-gated-READ guard scans these sources, and such a read fails
