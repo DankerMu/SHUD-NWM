@@ -580,7 +580,7 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     # COMPLETED_HYDRO_STATUSES and the parity lock asserts that alias IS the
     # shared object; a chain-only edit that rebinds it must run this suite.
     # Stop-rule owned module, so the addition rides this at-site tuple rather
-    # than the `services/orchestrator/**` list. 5 tests in 0.23s.
+    # than the `services/orchestrator/**` list. 9 tests in 0.29s.
     "tests/test_hydro_status_set_parity.py",
     "tests/test_ifs_forecast_integration.py",
     "tests/test_orchestrator.py",
@@ -650,7 +650,7 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # `COMPLETED_HYDRO_STATUSES` from-import binding, which the parity lock
     # pins as the one shared object. Stop-rule owned module, so the addition
     # rides this at-site tuple rather than the `services/orchestrator/**` list.
-    # 5 tests in 0.23s.
+    # 9 tests in 0.29s.
     "tests/test_hydro_status_set_parity.py",
     # #1825: the node-22 manual-retry marker suite top-level-imports the journal
     # repository and pins the marker contract (per-run row vs cohort master) the
@@ -662,6 +662,15 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_orchestrator_demote_projection_faults.py",
     "tests/test_orchestrator_demote_reclaim_lifecycle.py",
     "tests/test_scheduler_backfill.py",
+    # #1999: the predecessor-emission suite top-level-imports
+    # `FileOrchestrationJournalRepository` and pins that a predecessor hydro row
+    # sitting at `pending` on the REAL file journal makes the emitter skip with
+    # `predecessor_backfill_active_pipeline` and emit zero candidates — so the
+    # repository's active-pipeline probe decides that lane. Stop-rule owned
+    # module, so the addition rides this at-site tuple rather than the
+    # `services/orchestrator/**` list. 20 tests in 1.57s, hence a rule rather
+    # than a rule-gap exclusion.
+    "tests/test_scheduler_backfill_predecessor.py",
     # #1944: the job-id scope census reads the journal tree directly and mints
     # its divergent rows through the PUBLIC `reserve_pipeline_job` writer, so a
     # change to the repository's on-disk layout or writer path silently changes
@@ -1475,15 +1484,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # orchestrator-journal suites; measured together, 50 tests in 1.50s.
             "tests/test_scheduler_journal_root_authority.py",
             "tests/test_scheduler_journal_scope_census.py",
-            # #1581: the hydro-status parity lock top-level-imports seven
-            # modules of this package plus `services.orchestrator` itself, so
-            # eight importer pairs land here. Six close on this list
+            # #1581 (+#1999): the hydro-status parity lock top-level-imports
+            # eight modules of this package plus `services.orchestrator` itself,
+            # so nine importer pairs land here. Seven close on this list
             # (__init__.py, chain_forecast_trigger.py, chain_repository.py,
             # scheduler_state_decision.py, scheduler_state_failure.py,
-            # scheduler_state_types.py); chain.py and
-            # file_orchestration_journal.py are stop-rule owned and are extended
-            # at THEIR sites, per this rule's #1455 note above. 5 tests in
-            # 0.23s, DB-free, so a rule rather than a rule-gap exclusion.
+            # scheduler_state_manual_retry.py, scheduler_state_types.py);
+            # chain.py and file_orchestration_journal.py are stop-rule owned
+            # and are extended at THEIR sites, per this rule's #1455 note
+            # above. 9 tests in 0.29s, DB-free, so a rule rather than a
+            # rule-gap exclusion.
             "tests/test_hydro_status_set_parity.py",
             "tests/test_live_monitoring.py",
             "tests/test_monitoring_api.py",
@@ -2003,8 +2013,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # enum member changes what that suite asserts -- and the "no member
             # outside the enum but `complete`" claim can only red on the
             # migration's own PR if the suite runs there. `db/**` above buys only
-            # tests/test_migrations.py, which never parses the enum. 5 tests in
-            # 0.23s, DB-free.
+            # tests/test_migrations.py, which never parses the enum. 9 tests in
+            # 0.29s, DB-free.
             "tests/test_hydro_status_set_parity.py",
         ),
     ),

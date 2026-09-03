@@ -26,9 +26,9 @@ STATE_CANDIDATE_SCOPED_PROOF_FIELDS = (
 )
 STATE_STRONG_CANDIDATE_SCOPED_PROOF_FIELDS = STATE_CANDIDATE_SCOPED_PROOF_FIELDS
 ACTIVE_PIPELINE_STATUSES = {"pending", "queued", "submitted", "running"}
-# Holds "pending" while chain.ACTIVE_HYDRO_STATUSES and chain_repository.ACTIVE_HYDRO_STATUSES do
-# not; that divergence is UNADJUDICATED (#1581) — locked and labelled by
-# tests/test_hydro_status_set_parity.py, not decided.
+# THE single definition of "is this hydro run in flight?" — chain, chain_repository and
+# file_orchestration_journal all bind this very object. #1581's "pending"-less copies are
+# adjudicated away: "pending" is what manual retry writes once the retry job is submitted.
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
 # Scheduler durable-success predicate: "is the pipeline durably done?". THE single definition —
 # chain.COMPLETED_HYDRO_STATUSES, chain_repository.COMPLETED_HYDRO_STATUSES and

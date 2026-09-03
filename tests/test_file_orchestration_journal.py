@@ -2005,19 +2005,24 @@ def test_foreign_model_completion_row_no_longer_suppresses_the_hydro_active_arm(
     assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
 
 
-@pytest.mark.parametrize("hydro_status", ["created", "staged", "submitted", "running"])
+@pytest.mark.parametrize("hydro_status", ["created", "staged", "pending", "submitted", "running"])
 @pytest.mark.parametrize("stage", ["state_save_qc", "publish", "parse"])
 def test_foreign_model_completion_row_cannot_suppress_any_active_hydro_status(
     tmp_path: Path, hydro_status: str, stage: str
 ) -> None:
     """#1472 main discriminator matrix: foreign completion never suppresses ACTIVE hydro.
 
-    Every ACTIVE hydro status of the default terminal contract (``created``,
-    ``staged``, ``submitted``, ``running``) crossed with every completion stage
-    (``state_save_qc``, ``publish``, ``parse``): the candidate has no active
-    pipeline-job row, so the answer must come from the hydro-active arm alone —
-    the foreign row is excluded from the suppression conjunction by identity,
-    not by stage or status.
+    EVERY member of ``scheduler_state_types.ACTIVE_HYDRO_STATUSES`` — all five
+    of ``created``, ``staged``, ``pending``, ``submitted``, ``running`` — crossed
+    with every completion stage (``state_save_qc``, ``publish``, ``parse``): the
+    candidate has no active pipeline-job row, so the answer must come from the
+    hydro-active arm alone — the foreign row is excluded from the suppression
+    conjunction by identity, not by stage or status.
+
+    ``"pending"`` joined the set with this change and is listed explicitly: the
+    exclusion is one conjunction over the whole set (``:1241``), so leaving the
+    newest member out would let the test name's "any active" outrun what it
+    measures.
     """
 
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -2042,7 +2047,33 @@ def test_foreign_model_completion_row_cannot_suppress_any_active_hydro_status(
     assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
 
 
-@pytest.mark.parametrize("hydro_status", ["created", "staged", "submitted", "running"])
+def test_pending_hydro_run_with_no_job_rows_is_active_on_the_journal_lane(tmp_path: Path) -> None:
+    """`"pending"` is an ACTIVE hydro status here too, as it already is on the decision lane.
+
+    ``"pending"`` is what manual retry writes to ``hydro_run`` once the retry
+    job is submitted, so a candidate sitting at it is in flight.  Until this
+    change the journal imported the ``"pending"``-less ``ACTIVE_HYDRO_STATUSES``
+    copy from ``chain_repository`` and answered ``False`` on this row, while
+    ``scheduler_state_decision`` -- reading the ``scheduler_state_types`` set --
+    already answered "active" on the very same shape.
+
+    No pipeline-job row exists, so the verdict comes from the hydro-active arm
+    alone.  The #1472 candidate-scoped terminal-completion suppression is
+    untouched: it needs a completion row, and there is none.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="pending", jobs=[]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+
+
+@pytest.mark.parametrize("hydro_status", ["created", "staged", "pending", "submitted", "running"])
 def test_foreign_model_completion_row_cannot_suppress_under_production_terminal_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2052,7 +2083,8 @@ def test_foreign_model_completion_row_cannot_suppress_under_production_terminal_
 
     Under that contract ``has_terminal_completion`` accepts only
     ``state_save_qc`` completion rows; the foreign ``state_save_qc`` row must
-    still not suppress the ACTIVE hydro arm.
+    still not suppress the ACTIVE hydro arm — for every member of
+    ``ACTIVE_HYDRO_STATUSES``, ``"pending"`` included.
     """
 
     monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
@@ -12113,6 +12145,59 @@ def test_permanent_failure_transition_declines_an_abandoned_reservation(tmp_path
     assert reclaimed["status"] == "reserved"
 
 
+def _write_pending_cohort_member_hydro_row(repository: Any, model_id: str) -> None:
+    """Park one cohort member's ``hydro_run`` at ``"pending"`` on the attempt-1 latest view.
+
+    ``_latest_view`` omits the ``error_code`` key, which reads as ``None``
+    under ``.get`` exactly as the production row does -- the status write nulls
+    the code when it moves a row to ``"pending"``
+    (``HYDRO_RUN_CODE_CLEARING_STATUSES``).
+    """
+
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    _write_json(
+        repository.root / f"latest/gfs/{format_cycle_time(cycle_time)}/{model_id}.json",
+        _latest_view(cycle_time=cycle_time, model_id=model_id, hydro_status="pending", jobs=[]),
+    )
+
+
+def test_permit_retry_marks_a_pending_member_row_failed_like_its_active_siblings(tmp_path: Path) -> None:
+    """A ``"pending"`` member row of the LOST attempt is superseded, not left behind.
+
+    ``permit_pipeline_job_retry`` rewrites every cohort member whose
+    ``submission_attempt`` equals the lost attempt AND whose hydro status is
+    ACTIVE to ``failed`` / ``SLURM_RESERVATION_LOST``.  With the
+    ``"pending"``-less copy that guard skipped a ``"pending"`` row, so a run
+    that manual retry had just moved to ``"pending"`` survived the attempt that
+    lost it -- the journal-lane analogue of the stale ``"pending"`` row on the
+    SQL lane.  It is now marked like its ``created`` / ``staged`` /
+    ``submitted`` / ``running`` siblings.
+
+    The call therefore appends TWO records -- the master row plus this hydro
+    row -- where the neighbouring permit tests assert ``1`` because none of
+    their member rows is ``"pending"``.  ``reject_pipeline_job_submit_attempt``
+    and ``demote_operator_verified_reserved_job`` share this guard shape; this
+    test is the representative for the three sites.
+    """
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    _write_pending_cohort_member_hydro_row(repository, "model_0")
+    reserved = repository.get_pipeline_job(str(record["job_id"]))
+
+    assert repository.permit_pipeline_job_retry(
+        str(record["job_id"]),
+        accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+        expected_submission_attempt=int(reserved["submission_attempt"]),
+        expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+    ) == 2
+
+    hydro = repository._hydro_run_for("fcst_gfs_2026072000_model_0")
+    assert hydro is not None
+    assert hydro["status"] == "failed"
+    assert hydro["error_code"] == "SLURM_RESERVATION_LOST"
+
+
 def test_generic_status_update_still_refuses_master_rows_after_the_typed_transition(
     tmp_path: Path,
 ) -> None:
@@ -12277,6 +12362,44 @@ def test_cohort_projection_still_writes_terminal_status_for_unmarked_masters(tmp
     _project_cohort_failure(repository, record, error_code="OUT_OF_MEMORY")
 
     assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "failed"
+
+
+def test_cohort_projection_rewrites_a_pending_hydro_row_on_a_reconciled_succeeded_task(
+    tmp_path: Path,
+) -> None:
+    """``hydro_is_retryable`` holds for ``"pending"``, so the reconciled truth lands.
+
+    The projection only rewrites a member's ``hydro_run`` when the row is
+    retryable (ACTIVE, or ``failed`` with a reservation-class code) and carries
+    no non-reservation error code.  A ``"pending"`` row failed that test under
+    the ``"pending"``-less copy, so a task that Slurm reported ``succeeded``
+    left the run parked at ``"pending"`` for good.
+
+    ``hydro_is_retryable`` gates BOTH projection branches: the succeeded rewrite
+    pinned here and the failed rewrite alongside it, which now writes a
+    ``"pending"`` row to ``failed`` with the task's ``error_code`` (or
+    ``SLURM_JOB_FAILED``).  This test pins the succeeded branch as the
+    representative of the pair.
+    """
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+    _write_pending_cohort_member_hydro_row(repository, "model_0")
+
+    repository.project_forecast_cohort_tasks(
+        str(record["job_id"]),
+        master_slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        projections=_cohort_task_projections(record, outcome="succeeded"),
+        complete=True,
+        master_status="succeeded",
+        master_error_code=None,
+        reconciliation_decision="matched_bound",
+    )
+
+    hydro = repository._hydro_run_for("fcst_gfs_2026072000_model_0")
+    assert hydro is not None
+    assert hydro["status"] == "succeeded"
+    assert hydro["error_code"] is None
 
 
 def _non_master_permanently_failed_details(
@@ -15229,6 +15352,27 @@ def test_sequence_floor_is_exposed_only_as_the_unlocked_variant() -> None:
 
     assert not hasattr(FileOrchestrationJournalRepository, "_next_sequence")
     assert callable(FileOrchestrationJournalRepository._next_sequence_unlocked)
+
+
+def test_cycle_rows_reducer_signature_carries_no_direct_record_flag() -> None:
+    """#1661: the "reducer has no direct-record flag" SHALL, made executable.
+
+    ``_next_sequence``'s absence is pinned by ``hasattr`` above.  The reducer
+    has no such lever: a re-added ``include_direct_jobs: bool = True`` kwarg
+    passes every existing scenario verbatim, because no caller would pass it
+    and the default reproduces today's behaviour.  Only the parameter list
+    itself separates "the flag is gone" from "the flag is unused", so that is
+    what this pins.
+    """
+
+    import inspect
+
+    signature = inspect.signature(FileOrchestrationJournalRepository._cycle_rows_by_model_unlocked)
+
+    assert list(signature.parameters) == ["self", "source_id", "cycle_time", "model_ids"]
+    assert [parameter.kind for name, parameter in signature.parameters.items() if name != "self"] == [
+        inspect.Parameter.KEYWORD_ONLY
+    ] * 3
 
 
 @pytest.mark.parametrize(
