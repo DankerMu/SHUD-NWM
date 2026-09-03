@@ -3025,3 +3025,30 @@ The accumulated later-round catches still concentrate in rotated-in lenses
 requires the attribution-schema (including the still-open empty-`core_lenses`
 path), round-intent and round-role repairs plus maintainer review. Next
 revisit on the audit's next flag.
+
+## Revisit 2026-09-03 (post #1581 / #1659 / #1661 / #1762 / #1763, PR #1995) — keep; +3 core / +1 rotated across three rounds
+
+After the PR #1995 accountability line, `loop_log_audit.py` reports **164**
+multi-round merged PRs and later-round catches **core=148 / rotated=302 /
+skipped=15**: `core` moved by three, `rotated` by one.
+
+Round 1 ran five lenses (correctness, integration, security-perf,
+test-evidence, spec-compliance) and produced four confirmed findings, all in
+core lenses and all round-1 (not counted as later-round catches). Round 2
+rotated `invariant-state` in beside spec-compliance, test-evidence and
+correctness: the two spec-compliance catches (the reservation docstring still
+spelling the deleted key shape, the tasks.md mechanism clause) are core, and
+the enum-oracle blind spot to future migrations came from the rotated lens
+(**+1 rotated**). Round 3 rotated `integration` in; its only candidate was
+the same fixture-text defect that pinned spec-compliance raised at P2, so the
+dedup attributes it to core (**+1 core**, the third of this PR's three).
+Phase 7 on the final head was clean.
+
+The rotated catch is the one that changed a test oracle (whole-tree
+migration sweep plus a selector rule); the three core catches were all
+documentation accuracy on the spec/fixture surface. That is consistent with
+the accumulated picture — later-round catches still concentrate in
+rotated-in lenses (**302 versus 148**) — so **keep rotation** stands under
+the recorded autonomous default. Reversal still requires the
+attribution-schema, round-intent and round-role repairs plus maintainer
+review. Next revisit on the audit's next flag.
