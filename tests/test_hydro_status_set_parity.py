@@ -18,6 +18,7 @@ from services.orchestrator import chain as chain_module
 from services.orchestrator import chain_forecast_trigger as chain_forecast_trigger_module
 from services.orchestrator import chain_repository as chain_repository_module
 from services.orchestrator import file_orchestration_journal as journal_module
+from services.orchestrator import scheduler_state_decision as scheduler_state_decision_module
 from services.orchestrator import scheduler_state_failure as scheduler_state_failure_module
 from services.orchestrator import scheduler_state_types as scheduler_state_types_module
 
@@ -59,11 +60,19 @@ def _hydro_run_status_enum_members() -> frozenset[str]:
 
 
 def test_durable_success_aliases_are_the_same_object() -> None:
-    """`chain` / `chain_repository` / the trigger seam bind the one shared set."""
+    """`chain` / `chain_repository` / journal / scheduler decision / trigger seam bind the one shared set."""
 
     durable = scheduler_state_types_module.DURABLE_HYDRO_SUCCESS_STATUSES
     assert chain_module.COMPLETED_HYDRO_STATUSES is durable
     assert chain_repository_module.COMPLETED_HYDRO_STATUSES is durable
+    # The journal's completed-pipeline probes (`:1280` / `:1361`) decide on the
+    # name its own `from services.orchestrator.chain_repository import ...` at
+    # `:72` bound, so the module attribute is the surface to pin, not the alias
+    # it was copied from.
+    assert journal_module.COMPLETED_HYDRO_STATUSES is durable
+    # Same shape for the scheduler candidate decision at
+    # `scheduler_state_decision:228`: a from-import binding of its own.
+    assert scheduler_state_decision_module.DURABLE_HYDRO_SUCCESS_STATUSES is durable
     # `_completed_hydro_statuses` reads `chain` by `getattr` (a monkeypatch seam),
     # so it is the surface the forecast trigger actually decides on.
     assert chain_forecast_trigger_module._completed_hydro_statuses() is durable

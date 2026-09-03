@@ -51,10 +51,11 @@ Five independent read-only findings, all `p3` tech-debt, all in
    together with the direct-job ternary and the in-guard store; the six
    in-module callers and the two tests stop passing it.
    `_materialize_latest_unlocked` keeps its own `include_direct_jobs`
-   parameter (its `True` arm routes to live `_cycle_rows`), and its three
-   callers (`:3771 :4111 :4323`) keep passing `include_direct_jobs=False`
-   verbatim — dropping it there would flip them to the fingerprinted
-   `_cycle_rows` arm.
+   parameter (its `True` arm routes to live `_cycle_rows`); of its nine
+   callers, the three that pass `include_direct_jobs=False` (`:3771 :4111 :4323`)
+   keep doing so verbatim and the six that take the default `True`
+   (`:5202 :9041 :9181 :9227 :9427 :9998`) are untouched — flipping either
+   group would change which arm the latest view is built from.
 2. **#1659** `_next_sequence` is deleted; the five tests call
    `_next_sequence_unlocked` with unchanged assertions.
 3. **#1762** ruling: unreachable. The analysis branch and the

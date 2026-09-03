@@ -643,7 +643,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # partitions — the independent frontier suite already rode here),
     # and to 44 in #1943/#1944 (the journal-root authority and job-id scope
     # census suites: 50 tests in 1.50s together, measured with
-    # `uv run pytest -q` in PR-lane conditions), and stays FROZEN here as a
+    # `uv run pytest -q` in PR-lane conditions), and to 45 in #1581 (the
+    # hydro-status parity lock: 5 tests in 0.23s, DB-free — it reads the
+    # migrations as text and the status sets as objects), and stays FROZEN here as a
     # literal: reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
     # PR class in the tree. Growing the rule means consciously editing this list
@@ -661,6 +663,13 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_file_orchestration_migration.py",
         "tests/test_gateway_reconcile_binding_provenance.py",
         "tests/test_gateway_reconcile_claimant_exclusivity.py",
+        # #1581: the parity lock rides the broad orchestrator directory rule —
+        # that route is what closes the importer gaps of
+        # `services/orchestrator/__init__.py`, chain_forecast_trigger.py,
+        # chain_repository.py, scheduler_state_decision.py,
+        # scheduler_state_failure.py and scheduler_state_types.py, which no
+        # narrow or stop rule owns.
+        "tests/test_hydro_status_set_parity.py",
         "tests/test_live_monitoring.py",
         "tests/test_monitoring_api.py",
         "tests/test_orchestration_chain.py",

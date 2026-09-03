@@ -27,11 +27,15 @@ Line cites against `origin/master` `4f3fd89a`; symbol names are authoritative.
   function today never includes direct jobs and never stores (every caller
   passes `False`), so dropping the flag preserves the only executed path.
   `_materialize_latest_unlocked(include_direct_jobs=True)` still routes to
-  `_cycle_rows`; `False` still routes to the batch reducer. Its three callers
-  at `:3771 :4111 :4323` keep `include_direct_jobs=False` verbatim — those
-  kwargs belong to the materialiser, not the reducer, and dropping them would
-  route the cohort/accepted-submit write paths through the fingerprinted
-  `_cycle_rows` arm (direct jobs entering the latest view, store running).
+  `_cycle_rows`; `False` still routes to the batch reducer. The materialiser
+  has nine callers: the three that pass `include_direct_jobs=False`
+  (`:3771 :4111 :4323`) keep it verbatim — those kwargs belong to the
+  materialiser, not the reducer, and dropping them would route the
+  cohort/accepted-submit write paths through the fingerprinted `_cycle_rows`
+  arm — and the six that take the default `True`
+  (`:5202 :9041 :9181 :9227 :9427 :9998`) stay as they are; adding `False`
+  to them would drop direct `pipeline_job` rows from the latest views they
+  build (round-1 cand-03).
 - `_next_sequence_unlocked`'s sequence floor, its `journal_read_lane`
   framing, and its fail-loud containment behavior (E2/E4/E5 tests keep their
   assertions verbatim).
@@ -166,7 +170,12 @@ Parity test (`tests/test_hydro_status_set_parity.py`), seams: module
 attributes and two behavior probes.
 
 - identity: `chain.COMPLETED_HYDRO_STATUSES is scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES`,
-  same for `chain_repository`, and `chain_forecast_trigger._completed_hydro_statuses() is ...`.
+  same for `chain_repository`, `chain_forecast_trigger._completed_hydro_statuses() is ...`,
+  and — because the spec names them as consumers and a from-import rebinding
+  is invisible to the alias checks (round-1 cand-02) —
+  `file_orchestration_journal.COMPLETED_HYDRO_STATUSES is ...` (journal `:72`,
+  consumers `:1280`/`:1361`) and
+  `scheduler_state_decision.DURABLE_HYDRO_SUCCESS_STATUSES is ...` (`:228`).
 - inline site consults the shared object (durable set only — it is a mutable
   `set`): add a sentinel member to `DURABLE_HYDRO_SUCCESS_STATUSES` inside a
   `try/finally` that discards it; while present,
