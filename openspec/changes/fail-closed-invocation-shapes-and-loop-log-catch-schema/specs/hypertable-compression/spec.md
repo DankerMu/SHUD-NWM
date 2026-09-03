@@ -21,8 +21,8 @@ slot; when the verifier CLI resolves the artifact closure ahead of
 `verify_bundle`, a wrapper around an unavailable reference MAY fail
 first at the closure node instead, which is fail-closed all the same.
 Its invocation semantics — argv, exit code, timings — are never interpreted;
-the terminal slot re-derived from `execution.ledger` rather than copied
-from what was authored; and the authored value itself a
+the terminal slot is re-derived from `execution.ledger` rather than copied
+from what was authored; and the authored value itself is a
 closure node, retained in the terminal `source_manifest`. The five
 slots and the raw-bytes dereferencer (`_artifact_ref_from_raw`) SHALL
 share one definition of "well-formed reference" (one helper, one message
@@ -40,8 +40,11 @@ claim must hold for both: the legacy hand-assembled shape, whose five
 slots name five distinct files, and the committed bundle author's shape
 (`scripts/node27_timeseries_compression_bundle_author.py`), whose five
 slots are all the ledger reference itself. The input-shape gate SHALL
-NOT change the terminal document produced for either shape beyond
-`generated_at`.
+read only the authored slot values and SHALL write nothing into the
+terminal document: for a qualifying bundle of either shape the five
+terminal slots come from `execution.ledger` and `source_manifest` from
+the artifact closure alone, so the gate decides only whether the run
+qualifies.
 
 Keeping the slots is the recorded decision; this requirement governs
 what the contract says about them and the shape the verifier accepts,
@@ -102,8 +105,8 @@ identity gate is introduced. The three-key criterion of
   document's `source_manifest` is read
 - **THEN** the five authored paths appear there with their authored
   `sha256`/`bytes`, distinct from the ledger reference that occupies
-  the five slots themselves, and the terminal document is identical to
-  the pre-gate output except `generated_at`
+  the five slots themselves, which carry the reference re-derived from
+  `execution.ledger`
 
 - **WHEN** the bundle is instead one the committed bundle author
   produced, whose five slots are all the ledger reference

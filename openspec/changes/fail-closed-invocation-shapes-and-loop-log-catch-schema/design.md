@@ -114,8 +114,8 @@ fixture-review round: 454 catches in the log carry `round: 0`, 437 of them with
 
 | Where | What |
 | --- | --- |
-| `/Users/danker/Desktop/AI-vault/my-agents` (git, `DankerMu/my-agents`) — `skills/subagent-workflow/` | `scripts/evidence_check.py::check_loop_log_entry`: for a merged line, every element of `catches` must be a compliant catch per the definition above; each violation is one finding naming `catches[i]` and the missing/invalid key. `scripts/loop_log_audit.py::rotation_attribution`: skip only non-compliant catches and return the skipped count alongside `(core, rotated)` — today a missing `round` defaults to 1 and is skipped, while a missing `lens` with `round >= 2` is silently counted as **rotated** (`:71-74`); both become "non-compliant, skipped, counted". `main` scans the catches of **every** entry (not only the `multiround` subset — PR #1802's line has no `round_lenses` key and would otherwise never be scanned), prints `NOTE non-compliant catches skipped: <n> in <k> entry(ies) (pr …)` whenever `n > 0`, and the rotation line carries `skipped=<n>`. Tests in `tests/test_evidence_check.py` (compliant → 0; missing `round`, missing `lens`, string `round`, negative `round`, bool `round`, empty `lens`, non-mapping catch → 2; `round: 0` → 0) and `tests/test_loop_log_audit.py` (skipped count and PR surfaced; zero when compliant; an entry without `round_lenses` but with non-compliant catches is reported; existing `core=8 rotated=8` stays green). Bump `skill.json` + `SKILL.md` frontmatter version (PATCH → 0.31.1), CHANGELOG entry, `npm run test:subagent-workflow` green. `skills/orche-omp-workflow/scripts/loop_log_audit.py` is a diverging sibling copy: apply the same `rotation_attribution` fix there if it carries the same function, else record why not in the CHANGELOG. |
-| this repo | `docs/review-loop-log.jsonl` lines 440/442/443/445/461: rewrite each non-compliant catch to `{"round","lens","class","severity"}` (keep `what`) using the PR's evidence comments (`gh pr view <n> --comments`, review-round bundles name reviewer/lens and round; fixture-review findings are `round: 0`, `lens: "fixture-review"`); line 461 (no `round_lenses` key) gains `round_lenses` from its evidence. Any catch whose round or lens cannot be recovered from the PR record is left as-is and declared unattributable in the ADR with its line number and catch index — never invented. `docs/adr/0003-review-lens-rotation-keep.md`: a dated correction section that (a) restates the measured figures (1600 catches / 1576 with a string `lens` / 24 without, across 5 entries: 17 `phase`-only in PR #1730/#1738/#1746/#1751 and 7 `lens`-less with `round` present in PR #1802), (b) distinguishes the two failure modes and their opposite biases (missing `round` → skipped, undercounts; missing `lens` at `round >= 2` → counted rotated, overcounts), (c) supersedes the PR #1759 revisit's "17/1331, four entries" figure, (d) records the post-backfill audit line (`core=? rotated=? skipped=0`) and whether the keep direction changed. |
+| `/Users/danker/Desktop/AI-vault/my-agents` (git, `DankerMu/my-agents`) — `skills/subagent-workflow/` | `scripts/evidence_check.py::check_loop_log_entry`: for a merged line, every element of `catches` must be a compliant catch per the definition above; each violation is one finding naming `catches[i]` and the missing/invalid key. `scripts/loop_log_audit.py::rotation_attribution`: skip only non-compliant catches and return the skipped count alongside `(core, rotated)` — today a missing `round` defaults to 1 and is skipped, while a missing `lens` with `round >= 2` is silently counted as **rotated** (`:71-74`); both become "non-compliant, skipped, counted". `main` scans the catches of **every** entry (not only the `multiround` subset — PR #1802's line has no `round_lenses` key and would otherwise never be scanned), prints `NOTE non-compliant catches skipped: <n> in <k> entry(ies) (pr …)` whenever `n > 0`, and the rotation line carries the same whole-log `skipped=<n>` (population: every entry, as on the NOTE; `core`/`rotated` remain the multi-round subset). Tests in `tests/test_evidence_check.py` (compliant → 0; missing `round`, missing `lens`, string `round`, negative `round`, bool `round`, empty `lens`, non-mapping catch → 2; `round: 0` → 0) and `tests/test_loop_log_audit.py` (skipped count and PR surfaced; zero when compliant; an entry without `round_lenses` but with non-compliant catches is reported; existing `core=8 rotated=8` stays green). Bump `skill.json` + `SKILL.md` frontmatter version (PATCH → 0.31.1), CHANGELOG entry, `npm run test:subagent-workflow` green. `skills/orche-omp-workflow/scripts/loop_log_audit.py` is a diverging sibling copy: apply the same `rotation_attribution` fix there if it carries the same function, else record why not in the CHANGELOG. |
+| this repo | `docs/review-loop-log.jsonl` lines 440/442/443/445/461: rewrite each non-compliant catch to `{"round","lens","class","severity"}` (keep `what`) using the PR's evidence comments (`gh pr view <n> --comments`, review-round bundles name reviewer/lens and round; fixture-review findings are `round: 0`, `lens: "fixture-review"`); line 461 (no `round_lenses` key) gains `round_lenses` from its evidence (outcome: PR #1802's record carries no lens token, so the line stays unchanged and its 7 catches are declared unattributable). Any catch whose round or lens cannot be recovered from the PR record is left as-is and declared unattributable in the ADR with its line number and catch index — never invented. `docs/adr/0003-review-lens-rotation-keep.md`: a dated correction section that (a) restates the measured figures (1600 catches / 1576 with a string `lens` / 24 without, across 5 entries: 17 `phase`-only in PR #1730/#1738/#1746/#1751 and 7 `lens`-less with `round` present in PR #1802), (b) distinguishes the two failure modes and their opposite biases (missing `round` → skipped, undercounts; missing `lens` at `round >= 2` → counted rotated, overcounts), (c) supersedes the PR #1759 revisit's "17/1331, four entries" figure, (d) records the post-backfill audit line (`core=? rotated=? skipped=<n>`, `n = 0` only when every catch proved recoverable) and whether the keep direction changed. |
 
 Local copies (`.claude/skills/subagent-workflow/scripts/`, `.agents/skills/subagent-workflow/scripts/`)
 are gitignored; the orchestrator re-syncs them from the vault after integration
@@ -139,12 +139,25 @@ only and stays unchanged. Line `:352` (generic upsert writing
 absence member so the illustration stays symmetric with the generalized
 retry-permission clause (fixture-review recommendation; one clause). The other
 four deltas of that change were grepped
-(`matched_bound|absence_retry_permitted|identity_mismatch|reconciliation_decision`):
-zero hits, so no sibling copy. Verification: `openspec validate
+(`matched_bound|absence_retry_permitted|identity_mismatch|reconciliation_decision|reconciliation_source|six-value`):
+zero hits, so no sibling copy there; the change's own `design.md` (`:1323-1327`,
+`:1537`) carried the six-value enum and the single-source wording and was
+updated in step. Round-1 review caught two more stale faces in the same
+requirement block, fixed together: `reconciliation_source` was pinned to the
+single value `slurm_exact_comment` although live `pipeline-job-persistence`
+and the journal code persist `slurm_name_window_unique` on the fallback bind,
+and the generic-API clause's "mismatch" shorthand admitted
+`identity_mismatch_released` once the enum carried two mismatch members
+(`_GENERIC_VERSIONED_RECONCILIATION_DECISIONS` excludes it); the clause now
+names the four generic decisions and pins the release exit to its typed
+transition. Verification: `openspec validate
 node22-db-free-scheduler-state --strict --no-interactive`; archive simulation in
 a scratchpad copy of the repo (`openspec archive ... -y`), grep the produced
-`openspec/specs/file-orchestration-journal/spec.md` for the six-value enum and
-the single-producer clause (both must be absent). The real change is **not**
+`openspec/specs/file-orchestration-journal/spec.md` for the six-value enum,
+the single-producer clause, the single-value `reconciliation_source=` form and
+the generic-API "mismatch" shorthand (all four must be absent), and for the
+four named generic decisions plus the typed release-transition sentence (both
+present). The real change is **not**
 archived.
 
 ## D4 (#1662) — verified resolved, no edit
@@ -159,9 +172,11 @@ issue).
 
 ## Invariant Matrix (#1691)
 
-Governing invariant: every value the verifier requires by key is either
+Governing invariant: at every `_require_exact_keys` site owned by
+`verify_bundle` (the input-shape gate's domain), each required key is either
 dereferenced by a validating helper or shape-checked by the same helper before
-the run can qualify — no required key is presence-only.
+the run can qualify — no such key is presence-only. Evidence-only keys read by
+`_validate_checkpoint_artifacts` / `_validate_phase` are outside this invariant.
 Source-of-truth identity/contract: the artifact reference shape
 `{path, sha256, bytes}` (`schemas/…schema.json` `$defs/artifact_ref`;
 `packages/common/evidence_io.artifact_references`).

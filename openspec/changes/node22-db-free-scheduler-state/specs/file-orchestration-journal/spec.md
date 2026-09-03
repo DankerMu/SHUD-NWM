@@ -197,7 +197,9 @@ closed rather than report a usable reservation.
 
 Persisted and emitted reconciliation evidence MUST use `submit_outcome` in
 `accepted|submit_result_ambiguous|rejected`,
-`reconciliation_source=slurm_exact_comment`, and `reconciliation_decision` in
+`reconciliation_source` in `slurm_exact_comment|slurm_name_window_unique`
+(`slurm_name_window_unique` only together with `matched_bound`, the unique
+name-window fallback bind), and `reconciliation_decision` in
 `matched_bound|absence_deferred|absence_retry_permitted|operator_verified_absence|multiple_matches_blocked|identity_mismatch_blocked|identity_mismatch_released|accounting_unavailable`
 (the eight members of the orchestrator's `ACCEPTED_RECONCILIATION_DECISIONS`;
 `identity_mismatch_released` is the identity-blocked release exit recorded on
@@ -246,9 +248,12 @@ The same restriction applies to generic reserve, bind, and unmarked submit
 transition APIs: a current-version reservation MUST start clean and unbound,
 including zero/false/null retry count, manual-retry marker, and previous-job
 provenance fields. Passing the current contract version to a generic API MUST
-NOT grant typed authority. The generic submit-evidence API MAY record only
-non-binding deferred/unavailable/mismatch/multiple-match decisions under an
-exact current-attempt state compare; begin-attempt, accepted or adopted
+NOT grant typed authority. The generic submit-evidence API MAY record only the
+non-binding decisions `absence_deferred`, `accounting_unavailable`,
+`identity_mismatch_blocked`, and `multiple_matches_blocked` under an
+exact current-attempt state compare; `identity_mismatch_released` is
+produced only by the dedicated typed identity-blocked release transition
+and never through the generic API; begin-attempt, accepted or adopted
 binding, rejection, and absence retry permission MUST use their dedicated
 typed boundaries. In particular,
 accepted binding MUST use the attempt-aware commit boundary, and each

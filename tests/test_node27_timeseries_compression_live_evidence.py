@@ -7466,10 +7466,13 @@ def test_invocation_wrapper_around_an_existing_reference_fails_closed_at_the_inp
     assert f"{owner}.{key}" in str(raised.value), raised.value
 
 
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
 def test_main_rejects_an_invocation_wrapper_around_an_existing_reference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    owner: str,
+    key: str,
 ) -> None:
     """The CLI boundary: closure resolution passes, the input-shape gate fails the run.
 
@@ -7479,11 +7482,12 @@ def test_main_rejects_an_invocation_wrapper_around_an_existing_reference(
     operator entrypoint.  `failure.stage` is the discriminator: it only advances to
     `verify_or_publish` at `:4215`, after closure resolution and the output-disjointness
     check have succeeded, so asserting it proves the rejection came from the gate rather
-    than from an earlier stage.
+    than from an earlier stage.  Parametrized over all five slots so the CLI pin covers
+    every gate site, not only `recovery.invocation`.
     """
 
     bundle = _bundle(tmp_path)
-    bundle["recovery"]["invocation"] = {"note": dict(bundle["recovery"]["invocation"])}
+    bundle[owner][key] = {"note": dict(bundle[owner][key])}
     bundle_path = tmp_path / "wrapper-bundle.json"
     bundle_path.write_bytes(_canonical(bundle))
     output = tmp_path / "terminal.json"
@@ -7498,7 +7502,7 @@ def test_main_rejects_an_invocation_wrapper_around_an_existing_reference(
     jsonschema.validate(marker, EVIDENCE_SCHEMA)
     reported = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
     assert reported["status"] == "failed"
-    assert "recovery.invocation" in reported["reason"], reported["reason"]
+    assert f"{owner}.{key}" in reported["reason"], reported["reason"]
 
 
 def test_wellformed_authored_invocations_are_retained_in_the_terminal_manifest(tmp_path: Path) -> None:

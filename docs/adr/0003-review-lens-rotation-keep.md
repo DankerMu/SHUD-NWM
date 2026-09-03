@@ -2833,7 +2833,7 @@ the audit's next flag.
 
 ## Correction 2026-09-02 (#1764, batch PR) — catch-schema enforcement and attribution re-measurement
 
-#1764 is now fixed upstream (`subagent-workflow` 0.31.1, sibling
+Issue #1764 is now fixed upstream (`subagent-workflow` 0.31.1, sibling
 `orche-omp-workflow` 0.2.2) and the log has been repaired as far as the PR
 record allows. This section records the re-measurement and supersedes the
 figures two earlier revisits carry.
