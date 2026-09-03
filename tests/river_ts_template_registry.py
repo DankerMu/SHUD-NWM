@@ -104,8 +104,9 @@ NON_TEMPLATE_MENTIONS: dict[str, int] = {
     # The replace chain's two WRITE statements (DELETE + INSERT). #1980 registers
     # read templates only; the write side is #1985's (I7) narrow-write oracle.
     "workers/output_parser/parser.py": 2,
-    # The renderer's own two table-name constants. `_river_table_mentions` counts
-    # substrings, so the `_legacy` literal contains the canonical name too.
+    # The renderer's own two table-name constants. Two, not one, because
+    # `_river_table_mentions` matches a PREFIX of the name (the `_legacy` literal
+    # opens with the canonical one), not a whole identifier.
     "packages/common/river_ts_render.py": 2,
     "apps/api/routes/hydro_display.py": 0,
     "services/tile_publisher/forcing_copyback_backfill.py": 0,

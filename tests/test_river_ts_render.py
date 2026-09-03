@@ -45,6 +45,7 @@ from packages.common.river_ts_render import (
     non_code_spans,
     render_river_ts_sql,
     sql_chains,
+    text_fact_columns,
 )
 
 MARKER = PUSHDOWN_AID_MARKER
@@ -653,6 +654,24 @@ def test_an_unquoted_alias_still_renders_for_both_stores() -> None:
             'SELECT r.value FROM hydro."River_Timeseries" r WHERE r.run_id = :run_id',
             1,
         ),
+        # Round 3 (#2018 H2b). The counter counts the NAME, so any identifier
+        # EQUAL to it is a mention — a CTE and a column alias named like the
+        # fact table are both counted twice (their definition and, for the CTE,
+        # its use) against a walk that models nothing or one read. Refused, which
+        # is the fail-closed direction and the answer a template author gets:
+        # name the correlation or the output column something else. Recorded
+        # here as accepted over-matches rather than left for the next round to
+        # rediscover from a message about "2 time(s)".
+        (
+            "cte_named_fact",
+            "WITH river_timeseries AS (SELECT 1 AS x) SELECT x FROM river_timeseries",
+            2,
+        ),
+        (
+            "column_alias_named_fact",
+            'SELECT rt.value AS "river_timeseries" FROM hydro.river_timeseries rt WHERE rt.run_id = :run_id',
+            2,
+        ),
     ],
 )
 def test_a_reference_the_from_join_walk_cannot_count_is_refused(label: str, sql: str, occurrences: int) -> None:
@@ -690,35 +709,113 @@ def test_a_reference_the_from_join_walk_cannot_count_is_refused(label: str, sql:
         fact_table_text_identity_columns(sql, entry=label)
 
 
-def test_a_legacy_read_qualifying_a_column_by_the_table_name_still_renders() -> None:
-    """Non-vacuity for the bare-name counter: a column qualifier is not a read.
+@pytest.mark.parametrize(
+    ("label", "table", "qualifier", "occurrences"),
+    [
+        ("schema_qualified", "hydro.river_timeseries", "hydro.river_timeseries.", 3),
+        ("bare", "hydro.river_timeseries", "river_timeseries.", 3),
+        ("schema_qualified_legacy", "hydro.river_timeseries_legacy", "hydro.river_timeseries_legacy.", 3),
+        ("bare_legacy", "hydro.river_timeseries_legacy", "river_timeseries_legacy.", 3),
+        ("quoted", "hydro.river_timeseries", 'hydro."river_timeseries".', 3),
+    ],
+)
+def test_a_column_qualified_by_the_table_name_is_refused_so_the_qualifier_is_never_unseen(
+    label: str, table: str, qualifier: str, occurrences: int
+) -> None:
+    r"""#2018 round-3 G2, closed by DELETION of the counter's column-qualifier lookahead.
 
-    The permissive counter is one lookahead away from counting
-    ``hydro.river_timeseries_legacy.run_key`` as a SECOND reference, which would
-    make the walk's single reference disagree with it and refuse a statement
-    that is perfectly modelled. The unaliased legacy read with a table-qualified
-    column is that shape, and it must render for both stores.
+    PostgreSQL lets an UNALIASED table be named in its own predicates, so
+    ``WHERE hydro.river_timeseries.variable = %s`` is a legal read whose text
+    identity column neither arm of the scan can see: the alias set is empty, and
+    the unqualified fallback's ``(?<![.\w])`` lookbehind is defeated by the dot.
+    The narrow render shipped ``variable``; the BARE spelling additionally
+    rendered a legacy statement whose qualifier ``_rename_table`` cannot follow —
+    a reference to a ``FROM`` entry that no longer exists (verifier G).
+
+    Closed by deleting the counter's ``(?!"?\s*\.)`` lookahead rather than by
+    widening the scan: with it gone the qualifier is a counted MENTION the
+    ``FROM`` / ``JOIN`` walk does not model, and the equality guard that already
+    exists refuses the statement for both stores. No new pattern and no new
+    over-match record — the detection arm verifier G proposed would have needed
+    its own, over the un-blanked ``outer`` text. The accepted price is that a
+    table-name qualifier is REFUSED rather than attributed; the answer for a
+    template author is the bare alias pinned in
+    ``test_qualifying_the_same_columns_through_a_bare_alias_still_renders``.
     """
-    sql = (
-        "SELECT value FROM hydro.river_timeseries_legacy "
-        "WHERE hydro.river_timeseries_legacy.run_key = :run_key"
-    )
+    sql = f"SELECT value FROM {table} WHERE {qualifier}variable = %s AND {qualifier}run_key = %s"
+
+    assert fact_table_name_occurrences(sql) == occurrences
+    assert fact_table_attribution(sql).reference_count == 1
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError, match=f"{label}: unmodelled fact-table reference form"):
+            render_river_ts_sql(sql, store, entry=label)
+    with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
+        fact_table_text_identity_columns(sql, entry=label)
+
+
+def test_qualifying_the_same_columns_through_a_bare_alias_still_renders() -> None:
+    """Non-vacuity for the deletion: the ALIASED spelling is what the walk models.
+
+    The deletion is only allowed to move the table-name qualifier; an ordinary
+    aliased read of either physical table must render for both stores, and the
+    legacy rename must stay idempotent on the ``_legacy`` name.
+    """
+    sql = "SELECT rt.value FROM hydro.river_timeseries_legacy rt WHERE rt.run_key = :run_key"
 
     assert fact_table_name_occurrences(sql) == fact_table_attribution(sql).reference_count == 1
-    assert fact_table_text_identity_columns(sql, entry="legacy-qualifier") == set()
-    assert render_river_ts_sql(sql, "legacy", entry="legacy-qualifier").sql == sql
-    assert render_river_ts_sql(sql, "narrow", entry="legacy-qualifier").sql == sql
+    assert fact_table_text_identity_columns(sql, entry="aliased-qualifier") == set()
+    assert render_river_ts_sql(sql, "legacy", entry="aliased-qualifier").sql == sql
+    assert render_river_ts_sql(sql, "narrow", entry="aliased-qualifier").sql == sql
 
 
+def test_an_unaliased_read_with_bare_columns_is_still_attributed_and_refused() -> None:
+    """The discriminating control for G2: bare columns ARE seen, qualified ones are refused.
+
+    Same statement as the refusal pins above with the qualifier dropped. It is
+    what says the qualified spellings were a hole in the SCAN and not merely
+    statements the module dislikes: this one is attributed, and the narrow
+    variant is refused for carrying ``variable`` — not for being unmodelled.
+    """
+    sql = "SELECT value FROM hydro.river_timeseries WHERE variable = %s AND run_key = %s"
+
+    assert fact_table_text_identity_columns(sql, entry="bare-columns") == {"variable"}
+    with pytest.raises(RiverTemplateError) as excinfo:
+        render_river_ts_sql(sql, "narrow", entry="bare-columns")
+    assert "text identity column(s) ['variable']" in str(excinfo.value)
+    assert "unmodelled" not in str(excinfo.value)
+
+
+def test_text_fact_columns_answers_about_the_alias_it_is_given_without_the_form_guard() -> None:
+    """The single-alias helper is NOT the guarded entry point — recorded and pinned.
+
+    :func:`text_fact_columns` answers "does THIS alias predicate on a text
+    identity column" for a caller that already knows the alias (the shape
+    oracles pass one per surface), so it makes no claim about how many times the
+    statement reads the fact table and has nothing to be blind about. The
+    whole-statement question — "does this statement predicate on the FACT
+    table's text identity" — is :func:`fact_table_text_identity_columns`, and
+    that one refuses an unmodelled reference form instead of answering it.
+    Pinned rather than closed by adding the guard: the guard would need an
+    ``entry`` this helper's four oracle call sites do not have, and would refuse
+    the bare WHERE-chain fragments they legitimately pass it.
+    """
+    sql = 'SELECT "r".value FROM "hydro"."river_timeseries" r WHERE r.run_id = :run_id'
+
+    assert text_fact_columns(sql, "r") == {"run_id"}
+    with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
+        fact_table_text_identity_columns(sql, entry="single-alias")
+
+
+@pytest.mark.parametrize("prefix", ["U&", "u&"])
 @pytest.mark.parametrize(
-    ("label", "identifier"),
+    ("label", "quoted"),
     [
-        ("unicode_escape_plain", r'U&"river_timeseries"'),
-        ("unicode_escape_hidden", r'U&"riv\0065r_timeseries"'),
+        ("unicode_escape_plain", r'"river_timeseries"'),
+        ("unicode_escape_hidden", r'"riv\0065r_timeseries"'),
     ],
 )
 def test_a_unicode_escaped_identifier_is_refused_because_the_counter_cannot_see_it(
-    label: str, identifier: str
+    label: str, quoted: str, prefix: str
 ) -> None:
     r"""The one spelling that hides the NAME from a name counter.
 
@@ -730,8 +827,14 @@ def test_a_unicode_escaped_identifier_is_refused_because_the_counter_cannot_see_
     over-refusal of a ``U&'…'`` literal is a template nobody has, while a
     silently rendered narrow read of the fact table is the migration-window
     failure this whole module exists to stop.
+
+    Parametrised over both spellings of the prefix, because PostgreSQL accepts
+    ``u&"…"`` exactly as it accepts ``U&"…"``: dropping the guard's
+    ``re.IGNORECASE`` survived every suite and let the lowercase spelling render
+    with its text identity column (#2018 round-3 H1) — the same scoping gap the
+    ``E`` / ``e`` parametrisation closed one guard earlier.
     """
-    sql = f'SELECT r.value FROM hydro.{identifier} r WHERE r.run_id = :run_id'
+    sql = f'SELECT r.value FROM hydro.{prefix}{quoted} r WHERE r.run_id = :run_id'
 
     for store in ("legacy", "narrow"):
         with pytest.raises(RiverTemplateError, match=f"{label}: unmodelled .*Unicode-escaped"):
@@ -943,6 +1046,303 @@ def test_an_escape_string_with_no_backslash_and_a_doubled_quote_still_render() -
         assert fact_table_attribution(sql).aliases == frozenset({"rt"})
         assert literal in render_river_ts_sql(sql, "narrow", entry="e-control").sql
         assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="e-control").sql
+
+
+# ---------------------------------------------------------------------------
+# Round-3 review (#2018 G1, fixture decision 17): the scanner against
+# PostgreSQL's lexical structure (§4.1)
+#
+# `non_code_spans` is COMMON-MODE — the occurrence counter, the FROM/JOIN walk,
+# the rename and the structural check all read the text it blanks — so an error
+# in it is NOT caught by the counter-vs-walk equality guard: both sides read the
+# same phantom literal, both answer 0, and 0 == 0 is satisfied by mutual
+# blindness (retro-2018.md). The remaining hole space is therefore PostgreSQL's
+# LEXER, which is finite and externally specified, so every row of fixture
+# decision 17's table is pinned here rather than reasoned about in a docstring:
+# a direction claim with no red/green probe next to it is the process defect the
+# retro converted into a rule.
+# ---------------------------------------------------------------------------
+
+
+def _is_code(sql: str, needle: str) -> bool:
+    """Whether the first occurrence of ``needle`` sits outside every non-code span."""
+    position = sql.index(needle)
+    return not any(start <= position < stop for start, stop, _kind in non_code_spans(sql))
+
+
+def test_a_nested_block_comment_does_not_blank_the_statements_own_from_clause() -> None:
+    """T1 — PostgreSQL NESTS block comments, so ending at the first ``*/`` re-tokenises the tail.
+
+    ``/* outer /* inner */ don't stop here */`` is ONE comment. A scanner that
+    stops at the inner ``*/`` reads `` don't stop here */`` as code, the
+    apostrophe of ``don't`` opens a phantom literal, and that literal runs over
+    the statement's own ``FROM`` clause: the counter read 0, the walk read 0, the
+    equality guard was satisfied by mutual blindness, the narrow render shipped
+    ``rt.variable`` and the legacy render skipped the rename (#2018 round-3 G1,
+    reproduced independently by all three review lanes).
+    """
+    sql = (
+        "SELECT value /* outer /* inner */ don't stop here */ "
+        "FROM hydro.river_timeseries rt WHERE rt.variable = %(variable)s AND rt.run_key = %(run_key)s"
+    )
+
+    assert _is_code(sql, "FROM hydro.river_timeseries")
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
+        render_river_ts_sql(sql, "narrow", entry="nested-comment")
+    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="nested-comment").sql
+
+
+def test_a_nested_block_comment_is_exactly_one_span() -> None:
+    """The depth claim itself, pinned as a span rather than stated in prose.
+
+    ``/* a /* b */ c */`` is one comment: the inner ``*/`` closes the inner
+    comment only. Asserted at span level because the span is where the scanner
+    and PostgreSQL's lexer first disagree — every downstream answer is derived
+    from it (fixture decision 17, block-comment row).
+    """
+    sql = "/* a /* b */ c */ SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_key = :k"
+
+    assert non_code_spans(sql) == ((0, 17, "comment"),)
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+
+
+def test_a_non_nested_block_comment_with_an_apostrophe_keeps_todays_answer() -> None:
+    """Non-vacuity for the depth counter: the ORDINARY comment is unchanged.
+
+    Same apostrophe, no nesting — one comment span, one counted read, and the
+    two renders the module gave before the depth counter existed. The depth
+    counter is only allowed to change the nested case.
+    """
+    sql = (
+        "SELECT value /* don't stop here */ "
+        "FROM hydro.river_timeseries rt WHERE rt.variable = %(variable)s AND rt.run_key = %(run_key)s"
+    )
+
+    assert non_code_spans(sql) == ((13, 34, "comment"),)
+    assert fact_table_name_occurrences(sql) == 1
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
+        render_river_ts_sql(sql, "narrow", entry="plain-comment")
+    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="plain-comment").sql
+
+
+@pytest.mark.parametrize(("label", "identifier"), [("ascii", "a$b$c"), ("non_ascii", "é$b$c")])
+def test_a_dollar_inside_an_identifier_does_not_open_a_dollar_quote(label: str, identifier: str) -> None:
+    """T2 — ``$`` is an identifier character in PostgreSQL after the first one.
+
+    ``a$b$c`` is ONE identifier (a documented PostgreSQL extension), so a
+    dollar-quote delimiter cannot begin in the middle of it. Reading ``$b$`` as
+    an opener blanked everything to the end of the text — the read included —
+    and both counters answered 0 (#2018 round-3 G1).
+
+    The ``non_ascii`` id is the scope of the guard's ``\\w``: PostgreSQL's
+    ``ident_cont`` includes non-ASCII letters, so an identifier may perfectly
+    well be ``é$b$c``. Spelling the lookbehind ``[A-Za-z0-9_$]`` instead puts
+    that one straight back into the phantom-dollar-quote class.
+    """
+    sql = f"SELECT {identifier} FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s AND rt.run_key = %(k)s"
+
+    assert non_code_spans(sql) == ()
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
+        render_river_ts_sql(sql, "narrow", entry=label)
+    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
+
+
+def test_a_phantom_literal_that_closes_on_a_later_escape_string_still_loses_the_read() -> None:
+    r"""T3 — the CLASS pin: the desynchronisation re-synchronises BEFORE the end of the text.
+
+    The nested comment's tail opens a phantom literal at ``don't``, and that
+    literal CLOSES on the opening quote of the real ``E'q\'x'``: an escape string
+    contributes an ODD number of quote characters, which re-pairs the scan. So
+    the last span ends well before ``len(sql)`` and the unterminated-span belt in
+    ``_assert_modelled_reference_forms`` never sees it — this case is answered
+    only by the scanner agreeing with PostgreSQL's lexer, which is why the belt
+    is recorded as a belt for the unterminated sub-case and never as the closure
+    (verifier #2018 round-3 G measured this shape as the discriminator).
+    """
+    sql = (
+        "SELECT 1 /* a /* b */ don't */ FROM hydro.river_timeseries rt "
+        "WHERE rt.variable = E'q\\'x' AND rt.run_key = %(k)s"
+    )
+
+    assert _is_code(sql, "FROM hydro.river_timeseries")
+    assert non_code_spans(sql)[-1][1] < len(sql)
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
+        render_river_ts_sql(sql, "narrow", entry="resync")
+    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="resync").sql
+
+
+@pytest.mark.parametrize(("label", "newline"), [("carriage_return", "\r"), ("line_feed", "\n")])
+def test_a_line_comment_ends_at_a_carriage_return_as_well_as_a_line_feed(label: str, newline: str) -> None:
+    r"""T4 — ``--`` runs to the end of the LINE, and PostgreSQL's non_newline is ``[^\n\r]``.
+
+    With ``find("\n")`` alone a ``\r``-terminated comment swallows the rest of the
+    statement — the ``FROM`` clause and the ``run_id`` predicate with it — so both
+    counters read 0 and the narrow render shipped a text identity column. The
+    ``line_feed`` id is the control that says the fix changed nothing for the
+    ordinary spelling.
+    """
+    sql = (
+        f"SELECT rt.value -- note 'x{newline}"
+        "FROM hydro.river_timeseries rt WHERE rt.run_key = :k AND rt.run_id = :r"
+    )
+
+    assert _is_code(sql, "FROM hydro.river_timeseries")
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
+        render_river_ts_sql(sql, "narrow", entry=label)
+    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
+
+
+def test_a_carriage_return_ends_a_line_comment_for_the_sub_select_stripper_too() -> None:
+    r"""The same ``--`` rule at its SECOND site: ``_LINE_COMMENT``, inside ``outer_predicates``.
+
+    ``_in_comparison_value_position`` strips the line comment out of the text it
+    has kept so far before asking "was the last token a comparison operator".
+    Spelled ``--[^\n]*`` that strip eats the ``\r`` and the ``=`` behind it, the
+    authority sub-select is then not recognised as comparison-position, it
+    survives into ``outer_predicates``, and its ``WHERE run_id = :run_id`` — the
+    AUTHORITY table's own column — is attributed to the unaliased fact table and
+    refused. Two scanners with two ideas of where a line comment ends is the
+    disagreement :func:`non_code_spans` exists to prevent, so the rule is applied
+    at both sites and pinned once.
+    """
+    sql = (
+        "SELECT value -- first note\r"
+        "FROM hydro.river_timeseries WHERE run_key -- pick the authority run\r"
+        "= (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id)"
+    )
+
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_attribution(sql).has_unaliased_reference is True
+    assert fact_table_text_identity_columns(sql, entry="cr-authority") == set()
+    assert render_river_ts_sql(sql, "narrow", entry="cr-authority").sql == sql
+
+
+def test_an_identifier_containing_a_dollar_is_not_an_escape_string_prefix() -> None:
+    r"""``x$e'C:\'`` — ``$`` is an identifier character, so that ``e`` is a tail, not a prefix.
+
+    Decision 17's first row (``$`` belongs to the identifier after its first
+    character) decides where an ``E'…'`` prefix can START as well as where a
+    dollar quote can open: ``_opens_escape_string`` reads the character before
+    the ``e``. Counting ``$`` as a separator makes the literal backslash-aware,
+    its closing quote escaped, and the phantom literal runs over the rest of the
+    statement — the round-1 B/P2-2 failure, one lexical rule over.
+    """
+    sql = r"SELECT rt.value FROM hydro.river_timeseries rt WHERE x$e'C:\' AND rt.run_id = :run_id"
+    start = sql.index("'C:")
+
+    assert non_code_spans(sql) == ((start, start + 5, "literal"),)
+    assert fact_table_name_occurrences(sql) == 1
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
+        render_river_ts_sql(sql, "narrow", entry="dollar-e")
+
+
+@pytest.mark.parametrize(
+    ("label", "tail"),
+    [
+        ("unterminated_literal", "AND rt.note = 'oops"),
+        ("unterminated_block_comment", "AND rt.note = 'ok' /* oops"),
+        ("unterminated_dollar_quote", "AND rt.note = $tag$oops"),
+    ],
+)
+def test_a_statement_that_ends_inside_an_unterminated_span_is_refused(label: str, tail: str) -> None:
+    """The belt: if the scan never closed a span, the blanked text is not the statement's code.
+
+    Recorded as a BELT and nothing more (fixture decision 17, verifier #2018
+    round-3 G): it catches ONLY the unterminated sub-case. A phantom literal can
+    close on a later odd-quote literal and re-synchronise long before the end of
+    the text, which is what
+    ``test_a_phantom_literal_that_closes_on_a_later_escape_string_still_loses_the_read``
+    pins — that case is answered by the scanner agreeing with PostgreSQL's lexer
+    and never by this check.
+    """
+    sql = f"SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = :k {tail}"
+
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError, match=f"{label}: .*unterminated literal or comment"):
+            render_river_ts_sql(sql, store, entry=label)
+    with pytest.raises(RiverTemplateError, match="unterminated literal or comment"):
+        fact_table_text_identity_columns(sql, entry=label)
+
+
+def test_a_span_that_ends_at_the_end_of_the_text_is_not_the_same_as_an_unterminated_one() -> None:
+    """The belt's scope: reaching the end of the text is not "never closed".
+
+    A literal whose closing quote is the template's last character is complete,
+    and PostgreSQL ends a ``--`` comment at the end of the input as readily as at
+    a newline. Spelling the belt as "the last span stops at ``len(sql)``" would
+    refuse both — ``WHERE rt.variable = 'q_down'`` is an ordinary template ending
+    — so the check asks the scanner whether it FOUND the close instead.
+    """
+    for label, sql in (
+        ("trailing_literal", "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.tag = 'q_down'"),
+        ("trailing_line_comment", "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = :k -- note"),
+    ):
+        assert non_code_spans(sql)[-1][1] == len(sql)
+        assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
+        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
+
+
+@pytest.mark.parametrize(("label", "tag"), [("named_tag", "$body$"), ("anonymous", "$$")])
+def test_a_real_dollar_quoted_body_is_data_and_not_a_second_read(label: str, tag: str) -> None:
+    """Non-vacuity for the ``$`` guard: a REAL dollar quote still hides what it holds.
+
+    The guard only refuses an opener that follows an identifier character, so
+    ``$tag$ … $tag$`` and ``$$ … $$`` keep blanking their bodies — a fact read
+    spelled inside one is data, exactly like one spelled inside ``'…'``.
+    """
+    sql = (
+        f"SELECT {tag}FROM hydro.river_timeseries{tag} AS note, rt.value "
+        "FROM hydro.river_timeseries rt WHERE rt.run_id = :run_id"
+    )
+
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_attribution(sql).reference_count == 1
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
+        render_river_ts_sql(sql, "narrow", entry=label)
+    rendered = render_river_ts_sql(sql, "legacy", entry=label)
+    assert f"{tag}FROM hydro.river_timeseries{tag} AS note" in rendered.sql
+    assert rendered.sql.count(RIVER_TABLE_LEGACY) == 1
+
+
+def test_a_positional_parameter_is_code_not_a_dollar_quote() -> None:
+    """``$1`` — a dollar-quote TAG cannot start with a digit (fixture decision 17).
+
+    The fourth placeholder dialect a wave-2 template could arrive in. If ``$1``
+    opened a quote, everything up to the next ``$`` would be blanked, which is
+    exactly the ``a$b$c`` failure with a different opener.
+    """
+    sql = "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = $1 AND rt.run_id = $2"
+
+    assert non_code_spans(sql) == ()
+    assert fact_table_name_occurrences(sql) == 1
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
+        render_river_ts_sql(sql, "narrow", entry="positional-parameter")
+
+
+@pytest.mark.parametrize(("label", "literal"), [("bit", "B'1010'"), ("hex", "X'FF'")])
+def test_a_bit_or_hex_constant_is_a_plain_literal(label: str, literal: str) -> None:
+    """decision 17: ``B'…'`` / ``X'…'`` are ordinary literals — those prefixes escape nothing.
+
+    Pinned as the span: the prefix stays OUTSIDE it (like ``E``), the quotes are
+    the span's own first and last characters, and the statement around it is
+    code.
+    """
+    sql = f"SELECT rt.value, {literal} AS flags FROM hydro.river_timeseries rt WHERE rt.run_id = :run_id"
+    start = sql.index("'")
+
+    assert non_code_spans(sql) == ((start, start + len(literal) - 1, "literal"),)
+    assert fact_table_name_occurrences(sql) == 1
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
+        render_river_ts_sql(sql, "narrow", entry=label)
 
 
 def test_the_text_identity_vocabulary_is_total_and_disjoint() -> None:
@@ -1251,14 +1651,23 @@ def test_the_independent_counter_ignores_comments_and_string_literals() -> None:
     assert fact_table_name_occurrences(sql) == 1
 
 
-def test_the_independent_counter_sees_a_quoted_identifier_and_not_a_column_qualifier() -> None:
+def test_the_independent_counter_counts_a_quoted_identifier_and_a_table_name_qualifier() -> None:
+    """A column qualifier spelled with the TABLE NAME is a counted mention (#2018 round-3 G2).
+
+    It is not a second READ — but the counter's job is not to know that. The
+    ``FROM`` / ``JOIN`` walk does not model a qualifier either, so counting it is
+    what makes the two disagree, and the disagreement refuses a statement whose
+    text identity columns the scan cannot attribute (and whose bare spelling the
+    rename cannot follow). This is the counter half of that decision; the
+    behavioural half is
+    ``test_a_column_qualified_by_the_table_name_is_refused_so_the_qualifier_is_never_unseen``.
+    """
     assert fact_table_name_occurrences('SELECT 1 FROM "hydro"."river_timeseries"') == 1
-    # A column qualified by the physical table name is a column reference, not a read.
-    assert fact_table_name_occurrences("... x.run_key = hydro.river_timeseries.run_key ...") == 0
-    assert fact_table_name_occurrences("... x.run_key = hydro.river_timeseries_legacy.run_key ...") == 0
-    # The qualifier exclusion survives the quoting too: the closing quote sits
-    # between the name and the dot, so the lookahead has to step over it.
-    assert fact_table_name_occurrences('... x.run_key = hydro."river_timeseries"."run_key" ...') == 0
+    assert fact_table_name_occurrences("... x.run_key = hydro.river_timeseries.run_key ...") == 1
+    assert fact_table_name_occurrences("... x.run_key = hydro.river_timeseries_legacy.run_key ...") == 1
+    # Quoted the same way: a double-quoted span is an IDENTIFIER, so the counter
+    # reads the name inside it (:func:`non_code_spans` does not blank it).
+    assert fact_table_name_occurrences('... x.run_key = hydro."river_timeseries"."run_key" ...') == 1
 
 
 # ---------------------------------------------------------------------------

@@ -210,9 +210,28 @@ _SUBQUERY_START = re.compile(r"\(\s*SELECT\b", re.IGNORECASE)
 # comparisons, and treating them as such would widen the stripper again.
 _COMPARISON_TAIL = re.compile(r"(?<![-=<>!])(<>|!=|<=|>=|=|<|>)\s*$")
 
-_LINE_COMMENT = re.compile(r"--[^\n]*")
+#: The ``--`` comment as a REGEX, for the one place that has to strip a comment
+#: out of already-collected text instead of scanning forward
+#: (:func:`_in_comparison_value_position`). Same rule as
+#: :func:`_scan_line_comment`, spelled the same way on purpose: PostgreSQL's
+#: ``non_newline`` is ``[^\n\r]`` (§4.1.5, fixture decision 17), and with
+#: ``[^\n]*`` this sub ate the ``\r`` AND the comparison operator behind it, so
+#: an authority sub-select stopped reading as comparison-position and its
+#: ``WHERE run_id = …`` was attributed to the fact table (#2018 round-3 G1's
+#: line-comment row, second site).
+_LINE_COMMENT = re.compile(r"--[^\n\r]*")
+
+#: Where a ``--`` comment ends, as PostgreSQL's ``non_newline`` defines it.
+_NEWLINE = re.compile(r"[\n\r]")
 
 _WHITESPACE = re.compile(r"\s+")
+
+#: An identifier character in PostgreSQL: ``ident_cont`` is letters (including
+#: non-ASCII ones, hence ``\w`` where a regex is used), digits, ``_`` and ``$``
+#: (§4.1.1; the ``$`` is a documented non-standard extension). ONE notion,
+#: because two lexical rules depend on it — where a dollar quote may open and
+#: where an ``E'…'`` prefix may start — and they must not drift apart.
+_IDENTIFIER_TAIL = "_$"
 
 
 def _opens_escape_string(sql: str, start: int) -> bool:
@@ -222,10 +241,16 @@ def _opens_escape_string(sql: str, start: int) -> bool:
     an identifier that merely ends in ``e`` (a pasted ``value'x'``, or ``tablE'x'``)
     it is not, and reading the plain literal as an escape string would swallow a
     doubled quote the standard form uses as its escape.
+
+    ``$`` counts as an identifier character here for the same reason it does in
+    :data:`_DOLLAR_QUOTE_OPEN`: in ``x$e'C:\\'`` the ``e`` is the tail of the
+    identifier ``x$e``, and reading it as a prefix makes the literal
+    backslash-aware, its closing quote escaped, and the phantom literal runs over
+    the rest of the statement (#2018 round-3, decision 17's identifier row).
     """
     if start == 0 or sql[start - 1] not in "Ee":
         return False
-    return start < 2 or not (sql[start - 2].isalnum() or sql[start - 2] == "_")
+    return start < 2 or not (sql[start - 2].isalnum() or sql[start - 2] in _IDENTIFIER_TAIL)
 
 
 def _scan_quoted(sql: str, start: int, quote: str) -> int:
@@ -245,6 +270,26 @@ def _scan_quoted(sql: str, start: int, quote: str) -> int:
     scanners with two ideas of where a literal ends is exactly the disagreement
     :func:`non_code_spans` exists to prevent.
     """
+    return _scan_quoted_span(sql, start, quote)[0]
+
+
+def _scan_quoted_span(sql: str, start: int, quote: str) -> tuple[int, bool]:
+    """:func:`_scan_quoted`'s answer plus whether the closing quote was FOUND.
+
+    The flag is what separates ``'q_down'`` at the very end of a template — a
+    complete literal whose span happens to stop at ``len(sql)`` — from ``'oops``,
+    which the scanner never closed. Only the second one means the blanked text
+    every counter reads is not the statement's own code (decision 17's
+    unterminated row), and refusing on the offset alone would refuse ordinary
+    templates.
+
+    The recorded assumption underneath the backslash arm (decision 17's
+    string-constant row): ``standard_conforming_strings = on``, PostgreSQL's
+    default since 9.1, which is what makes a backslash DATA in a plain ``'…'``
+    and an escape only in an ``E'…'`` one. With it off, every literal would be
+    escape-aware; this module cannot see a session setting, so it models the
+    default and pins both halves (``'C:\\'`` plain, ``E'a\\'b'`` escaped).
+    """
     escaped = quote == "'" and _opens_escape_string(sql, start)
     index = start + 1
     length = len(sql)
@@ -256,19 +301,59 @@ def _scan_quoted(sql: str, start: int, quote: str) -> int:
             if index + 1 < length and sql[index + 1] == quote:
                 index += 2
                 continue
-            return index + 1
+            return index + 1, True
         index += 1
-    return length
+    return length, False
 
 
 def _scan_block_comment(sql: str, start: int) -> int:
-    end = sql.find("*/", start + 2)
-    return len(sql) if end == -1 else end + 2
+    return _scan_block_comment_span(sql, start)[0]
+
+
+def _scan_block_comment_span(sql: str, start: int) -> tuple[int, bool]:
+    """Index just past the block comment at ``start``, DEPTH-COUNTED, plus termination.
+
+    PostgreSQL NESTS block comments (§4.1.5): a ``/*`` inside one begins a nested
+    comment that must be closed before the outer one ends, so ``/* a /* b */ c */``
+    is ONE comment. Ending at the first ``*/`` instead re-tokenises the tail as
+    code, and an apostrophe in that tail (``don't``) opens a phantom literal that
+    ran over the statement's own ``FROM`` clause — invisible to the counter-vs-walk
+    equality guard, because the guard's two sides read this same blanked text and
+    both answered 0 (#2018 round-3 G1, all three lanes; retro-2018.md).
+
+    Unterminated still means "to the end of the text", as before; the flag says so
+    rather than the caller inferring it from the offset.
+    """
+    depth = 0
+    index = start
+    length = len(sql)
+    while index < length:
+        if sql.startswith("/*", index):
+            depth += 1
+            index += 2
+            continue
+        if sql.startswith("*/", index):
+            depth -= 1
+            index += 2
+            if depth == 0:
+                return index, True
+            continue
+        index += 1
+    return length, False
 
 
 def _scan_line_comment(sql: str, start: int) -> int:
-    end = sql.find("\n", start)
-    return len(sql) if end == -1 else end
+    """Index of the end of the ``--`` comment at ``start``.
+
+    A ``--`` comment runs to the end of the LINE, and PostgreSQL's ``non_newline``
+    is ``[^\\n\\r]`` (§4.1.5), so a ``\\r`` ends one just as a ``\\n`` does. Ending
+    it only at ``\\n`` let a ``\\r``-terminated comment swallow the rest of a
+    statement — its ``FROM`` clause and its text predicates with it (#2018 round-3
+    G1, decision 17's line-comment row). The end of the INPUT terminates a line
+    comment too, which is why this scanner has no "unterminated" answer.
+    """
+    match = _NEWLINE.search(sql, start)
+    return len(sql) if match is None else match.start()
 
 
 def _skip_balanced(sql: str, start: int) -> int:
@@ -431,6 +516,20 @@ def text_fact_columns(sql: str, alias: str) -> set[str]:
     ``\\b`` after the column name is load-bearing: it keeps ``ts.variable`` from
     matching ``ts.variable_e`` (and ``ts.unit`` from ``ts.unit_e``), which would
     make every pin unsatisfiable rather than discriminating.
+
+    Deliberately NOT guarded by :func:`_assert_modelled_reference_forms`, and
+    therefore NOT the answer to "does this statement predicate on the fact
+    table's text identity" — that question is
+    :func:`fact_table_text_identity_columns`, which refuses an unmodelled
+    reference form instead of answering it. This helper answers about the ONE
+    alias its caller names, so it claims nothing about how many reads the
+    statement performs and has nothing to be blind about; its callers are the
+    shape oracles, which pass a known alias per surface and bare WHERE-chain
+    fragments that name no table at all (a guard here would refuse those and
+    would need an ``entry`` they do not have). Recorded WITH a pin rather than
+    left as a reading of the code: ``tests/test_river_ts_render.py`` asserts
+    that this helper answers for an unmodelled reference form while
+    :func:`fact_table_text_identity_columns` refuses the same statement.
     """
     outer = outer_predicates(sql)
     return {
@@ -502,8 +601,17 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     render or a text-identity answer unless the independent occurrence counter
     and the ``FROM`` / ``JOIN`` walk AGREE about how many times it reads the fact
     table, the counter is blind to no spelling of the table's name, and no read
-    hides where the text-identity scan cannot look. Three checks, in that order:
+    hides where the text-identity scan cannot look. Four checks, in that order:
 
+    #. an UNTERMINATED literal, comment or dollar-quoted body — the statement
+       ends inside a span the scanner never closed, so the blanked text every
+       later check reads is not this statement's code. A BELT and nothing more
+       (fixture decision 17): verifier #2018 round-3 G measured that it catches
+       ONLY the unterminated sub-case, because a phantom literal can CLOSE on a
+       later literal that contributes an odd number of quote characters —
+       ``E'q\\'x'``, pinned as the re-synchronisation case — and so ends well
+       before ``len(sql)`` with the read still blanked. That case is answered by
+       :func:`non_code_spans` agreeing with PostgreSQL's lexer, never here;
     #. a Unicode-escaped identifier or literal (``U&"…"``) anywhere in the code —
        the one syntax that can name the table with no occurrence of its NAME, so
        the counter reads 0, the walk reads 0 and the equality below is satisfied
@@ -531,6 +639,13 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     this module's string constants, and a refusal message that spelled it would
     add a phantom "read site" to that count.
     """
+    unterminated = _unterminated_span(sql)
+    if unterminated is not None:
+        raise RiverTemplateError(
+            f"{entry}: unmodelled fact-table reference form — the statement ends inside an unterminated "
+            f"literal or comment opened at offset {unterminated[0]}, so the blanked text every counter and "
+            "guard reads is not this statement's code; terminate it"
+        )
     blanked = _blank_comments_and_literals(sql)
     if _UNICODE_ESCAPED.search(blanked) is not None:
         raise RiverTemplateError(
@@ -609,25 +724,52 @@ def fact_table_attribution(sql: str) -> FactTableAttribution:
 #: token, so the counter needs no model of the ways a name can be qualified
 #: (review #2018 round-2, E/P2-2 and lane-1 F1; fixture decision 16).
 #:
-#: The trailing ``(?!"?\s*\.)`` excludes a name used as a COLUMN qualifier
-#: (``hydro.river_timeseries_legacy.run_key``, ``hydro."river_timeseries"."run_key"``
-#: — hence the optional closing quote INSIDE the lookahead): that is a reference
-#: to a column, not a second read of the table, so counting it would make an
-#: unaliased statement look like it read the fact table twice.
+#: A name used as a COLUMN QUALIFIER (``hydro.river_timeseries.variable``, the
+#: bare ``river_timeseries.variable``, ``hydro."river_timeseries"."run_key"``) is
+#: counted like any other mention. It is not a second READ — but the walk does
+#: not model it either, so counting it makes the two disagree and the statement
+#: is refused: qualify columns through a bare alias. The ``(?!"?\s*\.)``
+#: lookahead that used to exclude the form was deleted in #2018 round 3 (G2),
+#: because excluding it left a "no opinion" zone the module answered WRONGLY —
+#: on an unaliased read neither arm of :func:`fact_table_text_identity_columns`
+#: can see a table-name qualifier (the alias set is empty, and the unqualified
+#: arm's ``(?<![.\w])`` lookbehind is defeated by the dot), so the narrow render
+#: shipped ``variable``; and the bare spelling additionally rendered a legacy
+#: statement whose qualifier :func:`_rename_table` cannot follow, i.e. a
+#: reference to a ``FROM`` entry that no longer exists. Deletion rather than a
+#: detection arm: it adds no pattern and no new over-match record (decision 17,
+#: verifier round-3 G, 0/20 registry entries affected).
 #:
 #: Not a token, and deliberately so: ``river_timeseries_valid_time_idx`` and
 #: every other identifier that merely starts with the name, because ``\b`` does
 #: not fire in the middle of a word.
-_FACT_NAME_TOKEN = re.compile(r'\briver_timeseries(?:_legacy)?\b(?!"?\s*\.)', re.IGNORECASE)
+_FACT_NAME_TOKEN = re.compile(r"\briver_timeseries(?:_legacy)?\b", re.IGNORECASE)
 
 
-_DOLLAR_QUOTE_OPEN = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+#: Where a dollar-quoted literal may OPEN (§4.1.2.4, fixture decision 17).
+#:
+#: The leading ``(?<![\w$])`` is load-bearing: in PostgreSQL a ``$`` after the
+#: first character of an identifier belongs to the identifier (a documented
+#: non-standard extension), so ``a$b$c`` is ONE identifier and a delimiter cannot
+#: begin in the middle of it. Without the guard ``$b$`` opened a quote whose tag
+#: never recurred, everything to the end of the text was blanked, and the read it
+#: covered was invisible to BOTH counters (#2018 round-3 G1). ``\w`` rather than
+#: ``[A-Za-z0-9_]`` because PostgreSQL's ``ident_cont`` includes non-ASCII
+#: letters.
+#:
+#: The tag must start with a letter or ``_``, which is what keeps a positional
+#: parameter (``$1``) code.
+_DOLLAR_QUOTE_OPEN = re.compile(r"(?<![\w$])\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
 
 
 def _scan_dollar_quoted(sql: str, start: int, tag: str) -> int:
+    return _scan_dollar_quoted_span(sql, start, tag)[0]
+
+
+def _scan_dollar_quoted_span(sql: str, start: int, tag: str) -> tuple[int, bool]:
     """Index just past the dollar-quoted body opening with ``tag`` at ``start``."""
     end = sql.find(tag, start + len(tag))
-    return len(sql) if end == -1 else end + len(tag)
+    return (len(sql), False) if end == -1 else (end + len(tag), True)
 
 
 _NON_CODE_COMMENT = "comment"
@@ -656,8 +798,29 @@ def non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     quoted IDENTIFIER, so ``"hydro"."river_timeseries"`` is a read of the fact
     table and must be counted, while ``'hydro.river_timeseries'`` is data and
     must not.
+
+    Audited rule by rule against PostgreSQL §4.1 (fixture decision 17) after
+    #2018 round 3: this scanner is COMMON-MODE — the occurrence counter and the
+    ``FROM`` / ``JOIN`` walk read the text it blanks, so a divergence from
+    PostgreSQL's lexer blanks real code for both of them and the equality guard
+    is satisfied by mutual blindness. Every divergence is therefore either fixed
+    here (nested comments, ``$`` inside an identifier, ``\\r`` ending a line
+    comment) or REFUSED (``U&``, an unterminated span), and each carries a pin —
+    never a "cannot happen" argument.
     """
-    spans: list[tuple[int, int, str]] = []
+    return tuple((start, stop, kind) for start, stop, kind, _closed in _scan_non_code(sql))
+
+
+def _scan_non_code(sql: str) -> tuple[tuple[int, int, str, bool], ...]:
+    """:func:`non_code_spans` with a fourth field: did the scanner FIND the close?
+
+    Kept private and separate so the public span tuple stays three-wide (every
+    span pin in the suite compares it literally) while the ONE traversal still
+    answers both questions. A second traversal that re-derived "was this
+    terminated" is precisely the two-scanners-disagree failure this function
+    exists to prevent.
+    """
+    spans: list[tuple[int, int, str, bool]] = []
     length = len(sql)
     index = 0
     while index < length:
@@ -666,19 +829,36 @@ def non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
             index = _scan_quoted(sql, index, character)
             continue
         if character == "'":
-            end, kind = _scan_quoted(sql, index, character), _NON_CODE_LITERAL
+            (end, closed), kind = _scan_quoted_span(sql, index, character), _NON_CODE_LITERAL
         elif sql.startswith("--", index):
-            end, kind = _scan_line_comment(sql, index), _NON_CODE_COMMENT
+            # A line comment is ended by the end of the input as legitimately as
+            # by a newline, so it is never "unterminated".
+            (end, closed), kind = (_scan_line_comment(sql, index), True), _NON_CODE_COMMENT
         elif sql.startswith("/*", index):
-            end, kind = _scan_block_comment(sql, index), _NON_CODE_COMMENT
+            (end, closed), kind = _scan_block_comment_span(sql, index), _NON_CODE_COMMENT
         elif character == "$" and (opener := _DOLLAR_QUOTE_OPEN.match(sql, index)) is not None:
-            end, kind = _scan_dollar_quoted(sql, index, opener.group(0)), _NON_CODE_LITERAL
+            (end, closed), kind = _scan_dollar_quoted_span(sql, index, opener.group(0)), _NON_CODE_LITERAL
         else:
             index += 1
             continue
-        spans.append((index, end, kind))
+        spans.append((index, end, kind, closed))
         index = end
     return tuple(spans)
+
+
+def _unterminated_span(sql: str) -> tuple[int, int, str] | None:
+    """The span the statement ENDS inside because the scanner never found its close.
+
+    Not "the last span stops at ``len(sql)``": a literal whose closing quote is
+    the template's last character (``WHERE rt.variable = 'q_down'``) and a
+    trailing ``--`` comment both satisfy that and are perfectly terminated, so
+    the offset spelling of this check would refuse ordinary templates.
+    """
+    spans = _scan_non_code(sql)
+    if not spans:
+        return None
+    start, stop, kind, closed = spans[-1]
+    return None if closed else (start, stop, kind)
 
 
 def _in_non_code(spans: tuple[tuple[int, int, str], ...], position: int) -> bool:
@@ -695,6 +875,11 @@ def _blank_non_code(sql: str, *, keep_literal_quotes: bool = False) -> str:
     ``AND tag = ' '`` cannot. Comments are always blanked whole — a comment is
     not a token, so leaving its delimiters behind would leave a stray ``-`` in
     the code stream.
+
+    ``\\r`` is preserved beside ``\\n``: PostgreSQL ends a line at either
+    (decision 17), so the blanked text keeps the template's line structure
+    whichever spelling it uses. Symmetry with the ``\\n`` arm — not a claim about
+    a failure that was observed, which is why it carries no pin of its own.
     """
     blanked = list(sql)
     for start, stop, kind in non_code_spans(sql):
@@ -702,7 +887,7 @@ def _blank_non_code(sql: str, *, keep_literal_quotes: bool = False) -> str:
         inner_start = start + 1 if keep else start
         inner_stop = stop - 1 if keep else stop
         for position in range(inner_start, max(inner_start, inner_stop)):
-            if sql[position] != "\n":
+            if sql[position] not in "\n\r":
                 blanked[position] = " "
     return "".join(blanked)
 
@@ -735,22 +920,31 @@ def fact_table_name_occurrences(sql: str) -> int:
 
     **Counter permissive, walk strict, disagreement refuses.** The counter needs
     no model of schemas, quoting, case or whitespace because it counts the
-    table's bare NAME as a whole token: a spelling BOTH sides miss — the 0 == 0
-    hole two review rounds found through this pair — therefore has to hide the
-    name itself, which in PostgreSQL leaves exactly one syntax, the
-    Unicode-escaped identifier refused wholesale in
-    :func:`_assert_modelled_reference_forms`. Widening is counter-side only:
-    teaching the WALK a spelling makes it "modelled" while the rename and the
-    alias attribution still need the canonical literal, which is a new fail-open
-    (fixture decision 16).
+    table's bare NAME as a whole token, so no SPELLING of the name escapes it
+    except PostgreSQL's Unicode-escape syntax, which is refused wholesale in
+    :func:`_assert_modelled_reference_forms`. That is a closure over spellings
+    and over nothing else. It holds GIVEN a scanner that agrees with
+    PostgreSQL's lexer (§4.1, fixture decision 17): the counter and the walk
+    both read the text :func:`non_code_spans` blanks, so a divergence there is
+    COMMON-MODE — it blanks real code for both sides, both answer 0, and the
+    equality guard is satisfied by mutual blindness (three rounds of #2018 hit
+    this one class). The scanner's divergences are therefore ENUMERATED in
+    decision 17 and each one is pinned; none of them is reasoned about here.
+    Widening is counter-side only: teaching the WALK a spelling makes it
+    "modelled" while the rename and the alias attribution still need the
+    canonical literal, which is a new fail-open (fixture decision 16).
 
     The permissiveness is paid for in refusals, all fail-closed and all of forms
     the registry does not use: ``otherhydro.river_timeseries x`` (a different
     schema), ``FROM river_timeseries rt`` (the search_path spelling, whose
-    identity depends on a session setting this module cannot see) and
+    identity depends on a session setting this module cannot see),
     ``hydro."River_Timeseries"`` (a quoted upper-case identifier, which in
-    PostgreSQL is a DIFFERENT table) are counted, disagree with the walk's zero,
-    and are refused as unmodelled rather than rendered.
+    PostgreSQL is a DIFFERENT table), a column qualified by the table name
+    (``hydro.river_timeseries.variable`` — alias the table instead), a CTE named
+    ``river_timeseries`` and a column alias ``AS river_timeseries`` /
+    ``AS "river_timeseries"`` (both counted twice against a walk that models one
+    read or none). All are counted, disagree with the walk, and are refused as
+    unmodelled rather than rendered.
     """
     return len(_FACT_NAME_TOKEN.findall(_blank_comments_and_literals(sql)))
 
