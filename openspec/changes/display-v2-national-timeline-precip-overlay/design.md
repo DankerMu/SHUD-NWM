@@ -98,8 +98,8 @@
 
 ## Migration Plan
 
-1. 后端合并部署 node-27（新路由、cycles、precip、目录条目）；旧路由无感。
-2. node-22 合并后执行一次回填脚本（钉住解释器），下一次 scheduler pass 起自动镜像。
+1. node-22 合并 publisher/回填脚本后先执行一次回填（钉住解释器），NFS 上出现 canonical 镜像，下一次 scheduler pass 起自动镜像（对应 issue DAG：#2016 先于 #2010 的 node-27 live 验收）。
+2. 后端合并部署 node-27（新路由、cycles、precip、目录条目）；旧路由无感；降水 index/PNG 的 live 验收此时已有镜像可读。
 3. node-27 跑 prewarm，产出 receipt（河网 z3/z4/z6/z7 的 `feature_coordinate_count`/`feature_coordinate_overflow_count`、瓦片冷热、PNG 耗时、预热请求总数、`df -h / /home` 与 `NHMS_MVT_FILE_CACHE_DIR` 所在卷、keep 水位不等式）。
 4. 前端部署；回滚 = 回退前端 + 目录条目（旧路由仍在）。
 
