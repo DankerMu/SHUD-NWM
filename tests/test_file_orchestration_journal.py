@@ -23,6 +23,7 @@ import pytest
 from packages.common import safe_fs
 from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import file_orchestration_journal as journal_module
+from services.orchestrator import public_evidence as public_evidence_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
@@ -4466,6 +4467,18 @@ def test_file_journal_download_source_manual_retry_manifest_and_hydro_reset(
         if event["entity_id"] == retried.job_id and event["status_to"] == "submitted"
     )
     assert submission_event["details"]["runtime_root_resolution"]["resolved"]["workspace_dir"]["present"] is True
+    # #1965: the sibling root must keep the SAME mapping shape as
+    # ``workspace_dir`` above -- before the fix ``_sanitize_public_field``
+    # replaced the whole mapping under the ``_root`` key with the bare string
+    # ``"[local-path]"``, so ``present``/``source`` were lost while the
+    # no-key-match sibling kept them.
+    object_store_root_evidence = submission_event["details"]["runtime_root_resolution"]["resolved"][
+        "object_store_root"
+    ]
+    assert object_store_root_evidence["present"] is True
+    assert isinstance(object_store_root_evidence["source"], str)
+    assert object_store_root_evidence["source"]
+    assert object_store_root_evidence["value"] == "[local-path]"
     assert submission_event["details"]["runtime_root_contract"]["object_store_root"] == "[local-path]"
     journal_records = [
         json.loads(line)
@@ -19339,3 +19352,274 @@ def test_reconcile_scan_aborts_at_a_legacy_divergent_anchor_and_never_yields_pas
         "the divergent anchor is not pruned and the healthy one is not consumed"
     )
     assert not divergent_direct.exists(), "the repair must fail closed before restoring the direct file"
+
+
+# --- #1961/#1965: the shared public renderer (services/orchestrator/public_evidence.py) ---
+
+
+def _db_shaped_runtime_root_evidence() -> dict[str, Any]:
+    """A literal of what ``retry._runtime_root_resolution_evidence`` constructs.
+
+    A literal rather than a call into the constructor: the pins below are about
+    the RENDERER, so the input must stay fixed even if the constructor grows a
+    field.  The ``source`` values carry ``:`` separators on purpose -- that is
+    the branch of ``_sanitize_public_text_token`` a second rendering pass would
+    re-enter, which is what makes the idempotency pin non-trivial.
+    """
+
+    return {
+        "job_type": "download_source_cycle",
+        "retry_job_id": "cycle_ifs_2026053106_retry_active",
+        "previous_job_id": "job_cycle_ifs_2026053106_download",
+        "cycle_id": "ifs_2026053106",
+        "required": ["workspace_dir", "object_store_root"],
+        "resolved": {
+            "workspace_dir": {
+                "present": True,
+                "source": "pipeline_event:submission:3:runtime_root_contract",
+                "value": "/srv/nhms/workspace",
+            },
+            "object_store_root": {
+                "present": True,
+                "source": "pipeline_event:submission:3:runtime_root_contract",
+                "value": "/srv/nhms/object-store",
+                "same_as_workspace": False,
+            },
+            "published_artifact_root": {
+                "present": True,
+                "source": "env:NHMS_PUBLISHED_ARTIFACT_ROOT",
+                "value": "/srv/nhms/published",
+            },
+            "object_store_prefix": {
+                "present": True,
+                "source": "pipeline_event:submission:3:runtime_root_contract",
+                "value": "s3://nhms-prod",
+            },
+        },
+        "missing": [],
+        "db_free_runtime": {
+            "required": True,
+            "resolved": {
+                "scheduler_registry_manifest": {
+                    "present": True,
+                    "source": "env:NHMS_SCHEDULER_REGISTRY_MANIFEST",
+                    "value": "/srv/nhms/registry/manifest.json",
+                },
+                # A DSN under ``db_free_runtime`` -- the one runtime-root family
+                # whose rendering nothing asserted before round-1 F3.
+                "scheduler_registry_backend": {
+                    "present": True,
+                    "source": "env:NHMS_SCHEDULER_REGISTRY_BACKEND",
+                    "value": "postgresql://nwm:pw@db:5432/nhms",
+                },
+            },
+            "missing": [],
+            "slurm_env": {"NHMS_SHUD_DB_FREE": "true"},
+        },
+        "rejected": [
+            {
+                "field": "object_store_root",
+                "source": "env:OBJECT_STORE_ROOT",
+                "reason": "url_userinfo",
+                "value": "https://example.com/object-store",
+            }
+        ],
+        "rejected_total_count": 1,
+        "rejected_omitted_count": 0,
+        "rejected_limit": 16,
+        "published_fields_available": ["published_artifact_root"],
+    }
+
+
+def test_public_evidence_recurses_into_mapping_values_under_path_shaped_keys() -> None:
+    """T6a (#1965) — a path-shaped KEY no longer flattens a mapping VALUE.
+
+    Before the fix ``resolved.object_store_root`` and
+    ``resolved.published_artifact_root`` collapsed to the bare string
+    ``"[local-path]"`` (key match, whole value replaced) while
+    ``resolved.workspace_dir`` -- whose key matches nothing -- kept
+    ``present``/``source`` and rendered only its inner ``value``.  One mapping,
+    two JSON types for sibling keys.  Scalars under those keys must still
+    flatten (``runtime_root_contract`` depends on it) and ``is_sensitive_key``
+    must keep precedence over the path rule.
+    """
+
+    rendered = public_evidence_module._public_evidence(
+        {
+            "resolved": {
+                "workspace_dir": {
+                    "present": True,
+                    "source": "env:WORKSPACE_ROOT",
+                    "value": "/srv/nhms/workspace",
+                },
+                "object_store_root": {
+                    "present": True,
+                    "source": "env:OBJECT_STORE_ROOT",
+                    "value": "/srv/nhms/object-store",
+                    "same_as_workspace": False,
+                    "api_token": "super-secret",
+                },
+                "published_artifact_root": {
+                    "present": True,
+                    "source": "env:NHMS_PUBLISHED_ARTIFACT_ROOT",
+                    "value": "/srv/nhms/published",
+                },
+            },
+            "runtime_root_contract": {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": "/srv/nhms/object-store",
+            },
+            # Both sensitive AND path-shaped: pins the ORDER of the two branches.
+            "credential_path": {"present": True, "source": "env:X", "value": "hunter2"},
+            "secret_path": "/srv/x",
+        }
+    )
+
+    resolved = rendered["resolved"]
+    for field_name in ("workspace_dir", "object_store_root", "published_artifact_root"):
+        entry = resolved[field_name]
+        assert isinstance(entry, dict), f"{field_name} collapsed to {entry!r}"
+        assert entry["present"] is True
+        assert entry["source"]
+        assert entry["value"] == "[local-path]"
+    assert resolved["object_store_root"]["same_as_workspace"] is False
+    # Secret precedence: the sensitive key is inside a mapping the path rule now
+    # recurses into, so it has to be caught by the FIRST branch, not the path one.
+    assert resolved["object_store_root"]["api_token"] == "[redacted]"
+    # Scalars under the same key family stay flattened (``runtime_root_contract``).
+    assert rendered["runtime_root_contract"] == {
+        "workspace_dir": "[local-path]",
+        "object_store_root": "[local-path]",
+    }
+    # Branch ORDER (round-1 F2): a key that is both sensitive and path-shaped
+    # must take the sensitive branch, mapping value and scalar value alike.  If
+    # the path branch ran first the mapping would be RECURSED into and its inner
+    # ``value`` -- which no inner key marks sensitive -- would survive verbatim.
+    # In-body import: ``scripts/select_ci_tests`` derives its importer index from
+    # module-level statements only.
+    from packages.common.redaction import is_sensitive_key
+
+    assert is_sensitive_key("credential_path") and is_sensitive_key("secret_path")
+    assert rendered["credential_path"] == "[redacted]"
+    assert rendered["secret_path"] == "[redacted]"
+    assert "hunter2" not in json.dumps(rendered)
+    assert "/srv/" not in json.dumps(rendered)
+    assert "super-secret" not in json.dumps(rendered)
+
+
+def test_public_evidence_renders_whitespace_bearing_local_roots_whole() -> None:
+    """T6 (#1965 round-1 F1) — a deployment root with a SPACE is not half-disclosed.
+
+    ``_sanitize_public_path_or_uri_scalar`` bails out of classification on any
+    whitespace, which is right for prose but wrong for the scalar the #1965
+    recursion now feeds it: ``resolved.object_store_root.value`` reaches the
+    classifier whole, so ``/home/nwm/nhms data/objects`` rendered as
+    ``"[local-path] data/objects"`` -- tail on the wire.  An absolute (or
+    ``~``-anchored) path must be classified whole, before the bail-out.
+    """
+
+    root = "/home/nwm/nhms data/objects"
+    rendered = public_evidence_module._public_evidence(
+        {
+            "resolved": {
+                "workspace_dir": {"present": True, "source": "env:WORKSPACE_ROOT", "value": root},
+                "object_store_root": {
+                    "present": True,
+                    "source": "env:OBJECT_STORE_ROOT",
+                    "value": root,
+                    "same_as_workspace": False,
+                },
+                "published_artifact_root": {
+                    "present": True,
+                    "source": "env:NHMS_PUBLISHED_ARTIFACT_ROOT",
+                    "value": root,
+                },
+            },
+            "rejected": [
+                {
+                    "field": "object_store_root",
+                    "source": "env:OBJECT_STORE_ROOT",
+                    "reason": "resolves_to_workspace_dir",
+                    "value": root,
+                }
+            ],
+        }
+    )
+
+    for field_name in ("workspace_dir", "object_store_root", "published_artifact_root"):
+        assert rendered["resolved"][field_name]["value"] == "[local-path]", field_name
+    assert rendered["rejected"][0]["value"] == "[local-path]"
+    assert "data/objects" not in json.dumps(rendered)
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("/srv/my dir") == "[local-path]"
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("~/my dir") == "[local-path]"
+    # The URI branches stay BEHIND the whitespace bail-out: a whitespace-bearing
+    # string is not one URI, so it keeps falling through to the token path.  This
+    # states today's behaviour; it is not a widening.
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("s3://bucket/my key") == "s3://bucket/my key"
+    assert public_evidence_module._public_evidence({"note": "s3://bucket/my key"}) == {"note": "[object-uri] key"}
+
+
+def test_public_evidence_is_idempotent_on_both_lane_shapes() -> None:
+    """T6b — ``f(f(x)) == f(x)``.
+
+    The database lane renders on READ and the file lane renders on WRITE, so the
+    same mapping can meet the renderer twice (a re-render of an already-public
+    file-lane event, a replayed DB read).  A second pass must be a no-op: the
+    placeholders must not themselves be re-classified and the ``:``-separated
+    ``source`` tokens must not be progressively rewritten.
+    """
+
+    db_shaped = _db_shaped_runtime_root_evidence()
+    once = public_evidence_module._public_evidence(db_shaped)
+    assert public_evidence_module._public_evidence(once) == once
+    # Non-vacuous: the first pass really did change something.
+    assert once != db_shaped
+    assert once["resolved"]["object_store_root"]["value"] == "[local-path]"
+    assert once["resolved"]["object_store_prefix"]["value"] == "[object-uri]"
+    assert once["rejected"][0]["value"] == "[uri]"
+    assert once["resolved"]["workspace_dir"]["source"] == "pipeline_event:submission:3:runtime_root_contract"
+    # Round-1 F3: ``db_free_runtime.resolved.*.value`` gets rendered too -- both
+    # T1s carry an empty ``db_free_runtime``, so the shape helper's loop over it
+    # runs zero times and this branch was otherwise unasserted.
+    db_free_resolved = once["db_free_runtime"]["resolved"]
+    assert db_free_resolved["scheduler_registry_backend"]["value"] == "[uri]"
+    assert db_free_resolved["scheduler_registry_manifest"]["value"] == "[local-path]"
+    rendered_once = json.dumps(once, sort_keys=True)
+    assert "pw@" not in rendered_once
+    assert "/srv/nhms/registry" not in rendered_once
+
+    # The post-#1965 file-lane shape fed back in as input: this is what the
+    # journal now persists and what a re-render would see.
+    file_lane_shape = once["resolved"]
+    assert public_evidence_module._public_evidence(file_lane_shape) == file_lane_shape
+
+
+def test_public_evidence_scalar_classifier_matches_file_provider_classifier() -> None:
+    """T6c — the leaf's local copy agrees with the providers original.
+
+    ``scheduler_file_providers._sanitize_file_provider_scalar`` stays where it is
+    (``retry.py`` cannot import that module: providers -> scheduler_state ->
+    retry), so the leaf carries a copy.  This is the pin that keeps the residual
+    duplicate honest.  Imported in-body: ``scripts/select_ci_tests`` builds its
+    importer index from module-level statements only.
+    """
+
+    from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
+
+    corpus: list[Any] = [
+        "/srv/x",
+        "~/x",
+        "s3://b/k",
+        "published://p",
+        "https://u:p@h/x",
+        "/srv/my dir",
+        "",
+        "  ",
+        "plain",
+        7,
+        None,
+    ]
+    for value in corpus:
+        assert public_evidence_module._public_path_or_uri_placeholder(
+            value
+        ) == scheduler_file_providers_module._sanitize_file_provider_scalar(value), value

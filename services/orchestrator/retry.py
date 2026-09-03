@@ -18,6 +18,7 @@ from packages.common.redaction import redact_payload
 from packages.common.slurm_env import secret_manifest_value_reason
 from packages.common.source_identity import normalize_source_id
 from services.orchestrator.persistence import PipelineEvent, PipelineJob, PipelineStore
+from services.orchestrator.public_evidence import _public_evidence
 from services.orchestrator.scheduler_state_types import DOWNSTREAM_RESTART_STAGES
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.slurm_gateway.gateway import SlurmGatewayError
@@ -339,6 +340,12 @@ class ManualRetryService(Protocol):
     the route never passes.  ``runtime_checkable`` ``isinstance`` checks
     attribute presence only, which is precisely #1945's failure mode; signature
     drift has no automatic oracle here (CI runs no mypy).
+
+    ``submission_runtime_root_resolution`` returns the PUBLIC-rendered evidence
+    mapping on every lane -- no absolute local root text, URIs and secrets as
+    placeholders -- because the route attaches it verbatim to a 503 body
+    (openspec change ``retry-runtime-root-evidence-public-shape``, #1961/#1965);
+    the persisted event details each lane reads from keep the real values.
     """
 
     def attempt_manual_retry(self, run_id: str, gateway: Any = None, *, policy_decision: Any = None) -> Any: ...
@@ -745,7 +752,7 @@ class RetryService:
             details = event.details if isinstance(event.details, Mapping) else {}
             evidence = details.get("runtime_root_resolution")
             if isinstance(evidence, Mapping):
-                return _redacted_mapping(evidence)
+                return _public_evidence(_redacted_mapping(evidence))
         return None
 
     def _submit_retry_job(self, retry_job: _RetrySubmissionJob, gateway: RetrySubmitter) -> _RetrySubmissionResult:

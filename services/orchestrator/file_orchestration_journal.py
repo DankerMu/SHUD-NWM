@@ -19,7 +19,6 @@ from types import SimpleNamespace
 from typing import Any, TypeVar
 
 from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
-from packages.common.redaction import is_sensitive_key
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -76,6 +75,7 @@ from services.orchestrator.chain_repository import (
 )
 from services.orchestrator.chain_source_cycle import _datetime_sort_key, _pipeline_job_truth_sort_key
 from services.orchestrator.chain_types import ForcingContext, ModelContext, OrchestratorError
+from services.orchestrator.public_evidence import _public_evidence, _public_message
 from services.orchestrator.retry import (
     _DB_FREE_REQUIRED_SELECTOR_FIELDS,
     _DB_FREE_RUNTIME_FIELDS,
@@ -135,10 +135,7 @@ from services.orchestrator.run_identity import (
 from services.orchestrator.run_identity import (
     FORECAST_RUN_ID_RE as _FORECAST_RUN_ID_RE,
 )
-from services.orchestrator.scheduler_file_providers import (
-    _public_raw_manifest_evidence,
-    _sanitize_file_provider_evidence_scalar,
-)
+from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_init_state_match import (
     INIT_STATE_IDENTITY_FIELDS,
     init_state_field,
@@ -11540,6 +11537,20 @@ class FileJournalRetryService:
         passed that public scrub.  Returning the persisted mapping unchanged is
         what makes "response equals persisted event details" provable.
 
+        TWO persisted shapes reach the route through here and both are returned
+        as recorded: events written before openspec change
+        ``retry-runtime-root-evidence-public-shape`` (#1965) carry
+        ``resolved.object_store_root`` / ``resolved.published_artifact_root`` as
+        the bare string ``"[local-path]"`` -- the public renderer used to replace
+        the whole mapping under a ``*_root`` key -- while events written after it
+        carry the mapping with ``present`` / ``source`` / ``value`` /
+        ``same_as_workspace``.  Events written before this change under a
+        whitespace-bearing root may also carry the partial rendering
+        ``"[local-path] <tail>"`` left by the old whitespace bail-out; those are
+        fixed points on re-render and are returned as recorded like the bare
+        string.  History is not rewritten and this reader does not normalise;
+        the 503 stays intact either way.
+
         Fail-soft: a typed journal fault on this SECOND read returns ``None``,
         so the caller still emits its 503 with the evidence key absent instead
         of collapsing into an unclassified 500 (the read runs outside the
@@ -13054,115 +13065,6 @@ def _public_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(raw_manifest, Mapping):
         payload["nfs_raw_manifest"] = _public_raw_manifest_evidence(raw_manifest)
     return _public_evidence(payload)
-
-
-def _public_evidence(value: Any) -> Any:
-    return _sanitize_public_evidence(value)
-
-
-def _sanitize_public_evidence(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return _format_utc(value)
-    if isinstance(value, Mapping):
-        return {
-            str(key): _sanitize_public_field(str(key), nested)
-            for key, nested in value.items()
-            if not str(key).startswith("_file_journal_")
-        }
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [_sanitize_public_evidence(item) for item in value]
-    return _sanitize_public_scalar(value)
-
-
-def _sanitize_public_field(key: str, value: Any) -> Any:
-    lowered = key.lower()
-    if is_sensitive_key(key):
-        return "[redacted]" if value not in (None, "") else value
-    if lowered == "message" or lowered.endswith("_message"):
-        return _public_message(value)
-    if lowered.endswith("_path") or lowered.endswith("_root") or lowered in {"path", "root"}:
-        return "[local-path]" if value not in (None, "") else value
-    if lowered.endswith("_uri") or lowered in {"uri", "object_uri", "manifest_uri"}:
-        return _sanitize_file_provider_evidence_scalar(key, value)
-    return _sanitize_public_evidence(value)
-
-
-def _sanitize_public_scalar(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    sanitized = _sanitize_public_path_or_uri_scalar(value)
-    if sanitized != value:
-        return sanitized
-    return _sanitize_public_text(value)
-
-
-def _sanitize_public_path_or_uri_scalar(value: str) -> str:
-    text = value.strip()
-    if not text or any(char.isspace() for char in text):
-        return value
-    if (
-        text.startswith("/")
-        or text.startswith("~")
-        or "://" in text
-        or text.startswith("s3:")
-        or text.startswith("published:")
-    ):
-        return _sanitize_file_provider_evidence_scalar("uri", value)
-    return value
-
-
-def _public_message(value: Any) -> Any:
-    if value in (None, ""):
-        return value
-    if not isinstance(value, str):
-        return _sanitize_public_evidence(value)
-    return _sanitize_public_text(value)
-
-
-def _sanitize_public_text(value: str) -> str:
-    redacted = _safe_error_message(value)
-    return _sanitize_public_text_tokens(redacted)
-
-
-def _sanitize_public_text_tokens(value: str) -> str:
-    rendered: list[str] = []
-    token = ""
-    for char in value:
-        if char.isspace():
-            if token:
-                rendered.append(_sanitize_public_text_token(token))
-                token = ""
-            rendered.append(char)
-        else:
-            token += char
-    if token:
-        rendered.append(_sanitize_public_text_token(token))
-    return "".join(rendered)
-
-
-def _sanitize_public_text_token(value: str) -> str:
-    prefix_length = 0
-    suffix_length = 0
-    while prefix_length < len(value) and value[prefix_length] in "'\"([{<":
-        prefix_length += 1
-    while suffix_length < len(value) - prefix_length and value[len(value) - suffix_length - 1] in "'\".,;:!?)]}>":
-        suffix_length += 1
-    prefix = value[:prefix_length]
-    suffix = value[len(value) - suffix_length :] if suffix_length else ""
-    core = value[prefix_length : len(value) - suffix_length if suffix_length else len(value)]
-    if not core:
-        return value
-    sanitized = _sanitize_public_path_or_uri_scalar(core)
-    if sanitized == core:
-        for separator in ("=", ":"):
-            key, found, nested = core.partition(separator)
-            if not found or not key or not nested:
-                continue
-            sanitized_nested = _sanitize_public_path_or_uri_scalar(nested)
-            if sanitized_nested != nested:
-                sanitized = f"{key}{found}{sanitized_nested}"
-                break
-    return f"{prefix}{sanitized}{suffix}" if sanitized != core else value
 
 
 def _blocked_query_job(

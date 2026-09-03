@@ -646,7 +646,7 @@ def _missing_upstream_forecast_artifact_evidence(
             # A redaction placeholder is a WITHHELD reference, not a package
             # reference: the public-read boundary rewrites every s3/published-shaped
             # ``*_uri`` the journal read materializes into ``[object-uri]``
-            # (``file_orchestration_journal._sanitize_public_field``).  Probing it
+            # (``public_evidence._sanitize_public_field``).  Probing it
             # would report "missing" for a package nobody looked for, and would
             # also shadow the sidecar tier, so it takes the recovery path exactly
             # like an absent reference.  The probe itself is never taught about
