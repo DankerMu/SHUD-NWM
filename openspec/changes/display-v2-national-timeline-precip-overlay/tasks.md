@@ -3,16 +3,16 @@
 - [ ] 1.1 `apps/frontend/src/components/layout/SiteHeader.tsx`：标题改为 `全国水文模拟系统（V2.0）`，`text-[28px] font-extrabold tracking-wide`，header `h-[84px]`，赞助商 `h-14`；检查 `AppShell.tsx` 对 header 高度的布局假设（地图区高度/偏移）。
 - [ ] 1.2 vitest：断言标题文案（全角括号）、bold 类与赞助商尺寸类。
 
-Evidence Floor：本地 `pnpm test`（SiteHeader 用例）+ `pnpm build`。
+Evidence Floor：本地 `cd apps/frontend && pnpm exec tsc --noEmit -p tsconfig.app.json && pnpm test`（SiteHeader 用例）+ `pnpm build`（`pnpm build` 是裸 `vite build`，不做类型检查，tsc 不可省）。
 
 ## 2. National river density (national-river-density)
 
 - [ ] 2.1 `services/tiles/mvt.py` river-network-national：阈值表改为 z≤4→4 / z5→3 / z6→2 / z7→1 / z≥8→1；`NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v3"`。该 CASE 位于 `river-network` 与 `river-network-national` **共用**的 `source_cte`（`if layer in {"river-network", "river-network-national"}` 分支），必须按 `layer` 分支生成阈值字面量：只有 `river-network-national` 用 v3，单流域 `river-network` 保持 v2（不得就地改字面量）。
 - [ ] 2.2 `tests/test_hydro_display_mvt_scaling.py`：更新 SQL 形状断言为新阈值与 v3 版本；新增断言 `postgis_tile_sql("river-network")` 仍含 v2 字面量（`WHEN :z <= 4 THEN 5.0` … `WHEN :z = 7 THEN 2.0`）且不含 v3 字面量。
-- [ ] 2.3 `apps/frontend/src/components/map/m11MapPrimitives.tsx` `m11NationalRiverPaint`：`dimmed` 折扣改为 zoom 插值（z<6 不折扣）；线宽 stops 上调到 Type 4 在 z3 ≥1.4px、Type 5 在 z3 >1.5px 且 z5 >2.3px（现值 1.2375 / 1.5 / ≈2.23，必须严格上调）；line-opacity 补 z6 stop 并给 Type 2 在 z6 ≥0.4、Type 1 在 z6 >0、z7 ≥0.3（现表 z7 只列 Type 5..2、无 z6 stop，v3 新露出的 Type 1/2 会被画成透明）；vitest 断言 line-opacity/line-width 表达式在 z3/z5/z6/z7 的取值。
+- [ ] 2.3 `apps/frontend/src/components/map/m11MapPrimitives.tsx` `m11NationalRiverPaint`：`dimmed` 折扣改为 zoom 插值（z<6 不折扣）；线宽 stops 上调到 Type 4 在 z3 ≥1.4px 且 z5 ≥2.2px、Type 5 在 z3 >1.5px 且 z5 >2.3px（现值 1.2375 / ≈1.86 / 1.5 / ≈2.23，必须严格上调）；line-opacity 补 z6 stop 并给 Type 2 在 z6 ≥0.4、Type 1 在 z6 >0、z7 ≥0.3（现表 z7 只列 Type 5..2、无 z6 stop，v3 新露出的 Type 1/2 会被画成透明）；vitest 断言 line-opacity/line-width 表达式在 z3/z5/z6/z7 的取值。
 - [ ] 2.4 node-27 go/no-go：用 psql 直接跑新 SQL（这些是 tile SQL 的输出列，瓦片 HTTP 路由不暴露），对覆盖中国的 z3/z4/z6/z7 瓦片实测 `prefilter_stats.feature_coordinate_count`（单要素最大坐标数）与 `feature_coordinate_overflow_count`，附带记录 `budget_stats.coordinate_count`（改前/改后）；全部满足 `feature_coordinate_count < 50 000` 且 `feature_coordinate_overflow_count == 0` 才保留 v3 表；否则该级回退一档并把三个数值写入 receipt（`coordinate_count` 在单要素超限被过滤时读数偏低，不能单独当判据）。
 
-Evidence Floor：本地 `uv run pytest tests/test_hydro_display_mvt_scaling.py -q` + `cd apps/frontend && pnpm test`（`m11NationalRiverPaint` 用例覆盖 z3/z5/z6/z7）；node-27 receipt `docs/runbooks/receipts/<date>-national-river-density.md` 含 z3/z4/z6/z7 逐瓦片的 `feature_coordinate_count`、`feature_coordinate_overflow_count` 与 `coordinate_count`（改前/改后）。
+Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_hydro_display_mvt_scaling.py -q` + `cd apps/frontend && pnpm exec tsc --noEmit -p tsconfig.app.json && pnpm test`（`m11NationalRiverPaint` 用例覆盖 z3/z5/z6/z7）；node-27 receipt `docs/runbooks/receipts/<date>-national-river-density.md` 含 z3/z4/z6/z7 逐瓦片的 `feature_coordinate_count`、`feature_coordinate_overflow_count` 与 `coordinate_count`（改前/改后）。
 
 ## 3. National discharge tiles with source/cycle (mvt-tile-contract)
 
@@ -24,7 +24,7 @@ Evidence Floor：本地 `uv run pytest tests/test_hydro_display_mvt_scaling.py -
 - [ ] 3.6 测试：fake-session 覆盖交集排除部分周期、某河网无 run 则空、57 项 3h 步长、非矩形覆盖；`tests/test_api_contract.py:1409` 与 `test_hydro_display_mvt_scaling.py:175` 模板/占位符断言更新（含新 `required_placeholders` 六元组）；**新建** 一条 pytest 调用 `_layer_source_refs(layer_id="discharge", ...)` 断言抛 `AssertionError`（`services/tiles/mvt.py:1340` 的入口断言现在没有任何测试覆盖，不是「保留」而是「补写」）；新增用例：某 `(source, cycle)` 无 display-ready run 而另一源同周期有时，瓦片路由返回 424 `MVT_LIVE_POSTGIS_UNAVAILABLE` 而不是空 200（锁住身份探针的绑定）；时间实例拼写用例（`...T12:00:00.000Z` 与 `...T12:00:00Z` 命中同一 bind/缓存）。
 - [ ] 3.7 先把 `/api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf` 追加到 `apps/api/openapi_patching.py::_patch_mvt_tile_openapi` 的 `mvt_paths` 元组（否则运行时 schema 缺 424 响应、`q_down` 枚举与 z/x/y `maximum`，且 drift 测试不会报错——静默缺文档）；再手工更新 `openapi/nhms.v1.yaml`：新增该路由（含 `424` 响应、`maximum: 14` / `16383` 与运行时 patch 一致）与 `GET /api/v1/layers/discharge/cycles`；更新 `GET /api/v1/layers/{layer_id}/valid-times` 的 `source`/`cycle` query 参数与 `/api/v1/layers` 的 metadata 形状。**没有生成器**，`tests/test_openapi_drift.py::test_static_openapi_matches_runtime_schema` 按 `app.openapi()` 等值比对；决定：不新增 `INTERNAL_ROUTE_REASONS` 条目（该 allowlist 只放宽公共路由对齐那条测试，不是等值比对的豁免；旧无源全国路由已有的 allowlist 条目保持不动）。随后 `cd apps/frontend && pnpm generate:api` 刷 `src/api/types.ts`，`pnpm check:api-types` 验证。
 
-Evidence Floor：本地 `uv run pytest tests/test_hydro_display_mvt_scaling.py tests/test_api_contract.py tests/test_openapi_drift.py tests/test_openapi_31_contract.py -q` + `cd apps/frontend && pnpm check:api-types`；node-27 真实 DB：`curl` 新路由 gfs/ifs 同一 cycle/valid_time 各一张 z4 瓦片（ETag 不同、字节非空）、某源该周期无 run 时返回 424、旧路由仍 200、cycles 端点返回交集列表、valid-times 返回 57 项；receipt 记录冷/热耗时。
+Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_hydro_display_mvt_scaling.py tests/test_api_contract.py tests/test_openapi_drift.py tests/test_openapi_31_contract.py -q` + `cd apps/frontend && pnpm check:api-types`；node-27 真实 DB：`curl` 新路由 gfs/ifs 同一 cycle/valid_time 各一张 z4 瓦片（ETag 不同、字节非空）、某源该周期无 run 时返回 424、旧路由仍 200、cycles 端点返回交集列表、valid-times 返回 57 项；receipt 记录冷/热耗时。
 
 ## 4. Canonical precipitation copyback (canonical-precip-copyback)
 
@@ -35,7 +35,7 @@ Evidence Floor：本地 `uv run pytest tests/test_hydro_display_mvt_scaling.py t
 - [ ] 4.5 node-22 执行回填：`/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill --source-root /scratch/frd_muziyao/nhms-prod/object-store --copyback-root $NHMS_OBJECT_STORE_COPYBACK_ROOT`（禁止 `uv sync` / 裸 `uv run`）；node-27 `ls /home/ghdc/nwm/object-store/canonical/{gfs,IFS}` + `df -h /home` 写 receipt。
 - [ ] 4.6 keep 水位核查：逐源比对 `GET /api/v1/layers/discharge/cycles?source=` 的最老周期与 retention cutoff（`display_watermark − retention_days`），断言 `oldest_listed_cycle − 24h ≥ cutoff`；不成立则加大 `retention_days` 并在 receipt 记偏离。
 
-Evidence Floor：本地 `uv run pytest tests/test_tile_publisher.py tests/test_node27_raw_retention.py -q`（后者按实际测试文件名）；node-22 回填 JSON 汇总 + node-27 目录清单与 `df -h /home` receipt。
+Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_tile_publisher.py tests/test_node27_raw_retention.py -q`；node-22 回填 JSON 汇总 + node-27 目录清单与 `df -h /home` receipt。
 
 ## 5. Precipitation raster service (precipitation-raster-overlay, backend)
 
@@ -43,10 +43,10 @@ Evidence Floor：本地 `uv run pytest tests/test_tile_publisher.py tests/test_n
 - [ ] 5.2 文件缓存 `NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>/<valid_time>.<palette_version>.png`（目录段与镜像 `canonical/<S>/<K>` 逐字节同名，例 `IFS/2026090212`；`<valid_time>` 用秒精度 RFC3339），tmp+rename；HTTP 缓存头同 MVT。
 - [ ] 5.3 路由 `apps/api/routes/precip.py`：`GET /api/v1/precip/{source}/{cycle}/index`、`GET /api/v1/precip/{source}/{cycle}/{valid_time}.png`；`source` 先过 `{gfs, ifs}` 枚举（422 早于任何 `normalize_source_id`/文件系统调用），再用 `packages/common/source_identity.py::normalize_source_id` 得存储 source（`ifs`→`IFS`、`gfs`→`gfs`），cycle 的 RFC3339 归一后按 `%Y%m%d%H` 渲染目录 token（同 `workers/canonical_converter/converter.py::format_cycle_time`），切片路径 `canonical/<S>/<K>/prcp_rate_or_amount/<S>_<K>_prcp_rate_or_amount_f<lead:03d>.nc`、grid `canonical/<S>/grid/{gfs_0p25|ifs_0p25}/grid.json`；404 `PRECIP_CYCLE_NOT_MIRRORED` / `PRECIP_WINDOW_INCOMPLETE`；镜像根来自 `NHMS_OBJECT_STORE_COPYBACK_ROOT`（node-27 视角路径）。
 - [ ] 5.4 `/api/v1/layers` 新增 `precip` 条目（`layer_type: meteorology`, `tile_format: png`, metadata `image_url_template`/`index_url_template`/`bounds`/`legend`/`window_hours`/`unit`）；`SUPPORTED_PUBLIC_LAYER_IDS` 与 valid-times 路由对 `precip` 返回空列表（时次由 index 提供）。
-- [ ] 5.5 测试 `tests/test_precip_overlay.py`：tmp 镜像目录合成小 `.nc`，覆盖 lead-0 跨周期 8 片解析（GFS 无 f000）、horizon 内本周期解析、**fixture 里含比请求周期更新的已镜像周期**（请求 cycle `2026-09-01T12:00:00Z`、valid_time `2026-09-02T12:00:00Z`，镜像含 `2026-09-02T00:00:00Z`/`2026-09-02T12:00:00Z`）时 8 片仍全部来自请求周期 f003–f024、无上界规则会取到 `2026-09-02T00:00:00Z` 故该用例能红、**ifs 大小写与目录 token 用例**（route `ifs` + `2026-09-02T12:00:00Z` → `canonical/IFS/2026090212/prcp_rate_or_amount/IFS_2026090212_prcp_rate_or_amount_f003.nc`）、`source=ERA5` 422 且不碰文件系统、时间拼写归一（`.000Z`/`+00:00` 与 `Z` 同一缓存文件）、缺片 404、PNG 结构（签名/IHDR/PLTE 7 项/tRNS/IDAT）、阈值下闭区间、36°N 行位置公式、缓存命中不读 NetCDF、index 只列完整窗口。
+- [ ] 5.5 测试 `tests/test_precip_overlay.py`：tmp 镜像目录合成小 `.nc`，覆盖 lead-0 跨周期 8 片解析（GFS 无 f000）、horizon 内本周期解析、**fixture 里含比请求周期更新的已镜像周期**（请求 cycle `2026-09-01T12:00:00Z`、valid_time `2026-09-02T12:00:00Z`，镜像含 `2026-09-02T00:00:00Z`/`2026-09-02T12:00:00Z`）时 8 片仍全部来自请求周期 f003–f024、无上界规则会取到 `2026-09-02T00:00:00Z` 故该用例能红、**ifs 大小写与目录 token 用例**（route `ifs` + `2026-09-02T12:00:00Z` → `canonical/IFS/2026090212/prcp_rate_or_amount/IFS_2026090212_prcp_rate_or_amount_f003.nc`）、`source=ERA5` 422 且不碰文件系统、时间拼写归一（`.000Z`/`+00:00` 与 `Z` 同一缓存文件）、缺片 404、PNG 结构（签名/IHDR/PLTE 7 项且索引 1–6 逐字节等于 `A6F28F,3DBA3D,61B8FF,0000FF,FA00FA,800040`/tRNS/IDAT）、index `legend[].color` 与 `/api/v1/layers` precip 条目同一组 hex、阈值下闭区间、36°N 行位置公式、缓存命中不读 NetCDF、index 只列完整窗口。
 - [ ] 5.6 手工更新 `openapi/nhms.v1.yaml`：新增 `GET /api/v1/precip/{source}/{cycle}/index` 与 `GET /api/v1/precip/{source}/{cycle}/{valid_time}.png`（含 404 `PRECIP_CYCLE_NOT_MIRRORED`/`PRECIP_WINDOW_INCOMPLETE` 与 422 响应）、`/api/v1/layers` 的 `precip` 条目形状（`tile_format: png` 与新 metadata 字段）；不新增 `INTERNAL_ROUTE_REASONS` 条目；随后 `pnpm generate:api` + `pnpm check:api-types`。
 
-Evidence Floor：本地 `uv run pytest tests/test_precip_overlay.py tests/test_openapi_drift.py tests/test_openapi_31_contract.py -q` + `cd apps/frontend && pnpm check:api-types`；node-27：`curl` index，并**分别 curl 一张 gfs PNG 与一张 ifs PNG**（`file` 判定 PNG、尺寸 1316×H，证明大小写映射 `IFS` 目录可读），冷生成耗时写 receipt。
+Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_precip_overlay.py tests/test_openapi_drift.py tests/test_openapi_31_contract.py -q` + `cd apps/frontend && pnpm check:api-types`；node-27：`curl` index，并**分别 curl 一张 gfs PNG 与一张 ifs PNG**（`file` 判定 PNG、尺寸 1316×H，证明大小写映射 `IFS` 目录可读），冷生成耗时写 receipt。
 
 ## 6. Frontend query state, overlay builder, timeline bar (frontend-mvt-layer-consumption + map-layer-timeline-controls + precipitation-raster-overlay 前端)
 
@@ -58,7 +58,7 @@ Evidence Floor：本地 `uv run pytest tests/test_precip_overlay.py tests/test_o
 - [ ] 6.6 `M11FloatingControls.tsx`：降水开关进图层面板气象组（默认开）；图例叠加六级降水；图例/返回按钮 `bottom-24`，notices `bottom-40`；两条互相可区分的隐藏提示——窗口不完整（时次不在 index）与该周期无降水镜像（index 404 `PRECIP_CYCLE_NOT_MIRRORED`）。
 - [ ] 6.7 vitest：`serializeM11QueryState(parseM11QueryState('precip=0'))` 仍含 `precip=0` 且 `needsM11QueryReplacement('precip=0') === false`；`buildM11RegisteredOverlay` per-cycle 列表与 URL 替换（state 里的 `.000Z` 要按秒精度拼进 `{cycle}`/`{valid_time}` 并按秒精度与 `valid_times[]` 比对）；timeline view model 默认 lead 0；`apps/frontend/src/pages/__tests__/M11Shell.test.tsx` 的 `dischargeMetadata` 常量（文件里唯一的 discharge fixture，字段名是 `url_template`，无 `m11MvtMetadataByLayer`/`dischargeNationalMvtMetadata`）改为 `url_template = "/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf"`、`required_placeholders = ['source','cycle','valid_time','z','x','y']`、`min_zoom: 0 → 3`、`source_refs` 不含 `run_id`、补 `default_source: "gfs"` 与 `default_cycle`，并同步改同文件里断言 `/api/v1/tiles/hydro/` 的用例与 `m11VectorSourceKey` 的 `run_id` 断言；降水两类隐藏文案（窗口不完整 vs `PRECIP_CYCLE_NOT_MIRRORED`）可区分；`best`/`compare` 不发 `/api/v1/precip/best|compare/...`；控制条禁用态与流域详情周期来自 run 列表。
 
-Evidence Floor：本地 `pnpm test && pnpm build && pnpm check:api-types`；node-27 浏览器 e2e receipt（`/` 首屏：标题、河网、降水层、控制条默认 lead 0；切换 IFS/周期/时次后瓦片与 PNG URL 变化；`precip=0` 隐藏）。
+Evidence Floor：本地 `cd apps/frontend && pnpm exec tsc --noEmit -p tsconfig.app.json && pnpm test && pnpm build && pnpm check:api-types`（tsc 不可用 `pnpm build` 顶替）；node-27 浏览器 e2e receipt（`/` 首屏：标题、河网、降水层、控制条默认 lead 0；切换 IFS/周期/时次后瓦片与 PNG URL 变化；`precip=0` 隐藏）。
 
 ## 7. Prewarm and deployment receipt
 
@@ -67,4 +67,4 @@ Evidence Floor：本地 `pnpm test && pnpm build && pnpm check:api-types`；node
 - [ ] 7.2 node-27 部署：`git pull --ff-only`、重启 display API、跑 prewarm、产出 receipt（z3/z4/z6/z7 的 `feature_coordinate_count` 与 `feature_coordinate_overflow_count`、瓦片冷热耗时、PNG 耗时、预热请求总数与耗时、`df -h / /home` **加上 `NHMS_MVT_FILE_CACHE_DIR` 所在卷与 `precip/` 缓存文件数**、keep 水位不等式 `oldest_listed_cycle − 24h ≥ display_watermark − retention_days`（逐源）、浏览器截图）。
 - [ ] 7.3 文档：`docs/runbooks/` 补降水镜像与回填步骤；`openspec/project-profile.md` 若入口/契约变化则更新。
 
-Evidence Floor：本地 `uv run pytest tests/test_node27_mvt_prewarm.py -q`；node-27 receipt `docs/runbooks/receipts/<date>-display-v2.md`。
+Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_node27_mvt_prewarm.py -q` + `openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive`；node-27 receipt `docs/runbooks/receipts/<date>-display-v2.md`。

@@ -40,7 +40,7 @@
 - 累积：Σ(rate_i × 3/24) → mm/24h；实现用 `netCDF4` + `numpy`，不引入 xarray 路径（display API 进程内不依赖 cfgrib）。
 
 ### D4. PNG 由 numpy + zlib 直接写调色板 PNG，Web-Mercator 重采样
-- 输出宽 1316 px（4×329），高按 Mercator 纵横比取整；对每个输出像素中心反算 lon/lat，对 0.25° 场做 bilinear；再按六级阈值映射到 8-bit 调色板索引（索引 0 = 透明）。PNG 写入为手写 IHDR/PLTE/tRNS/IDAT（zlib）+ CRC，约 60 行，无 Pillow。
+- 输出宽 1316 px（4×329），高按 Mercator 纵横比取整；对每个输出像素中心反算 lon/lat，对 0.25° 场做 bilinear；再按六级阈值映射到 8-bit 调色板索引（索引 0 = 透明；1–6 依次 `#A6F28F`/`#3DBA3D`/`#61B8FF`/`#0000FF`/`#FA00FA`/`#800040`，与 index/目录 `legend[].color` 同源）。PNG 写入为手写 IHDR/PLTE/tRNS/IDAT（zlib）+ CRC，约 60 行，无 Pillow。
 - 替代 A：SVG/矢量等值线。否决：需 contour 算法与新依赖，且渲染代价在客户端。替代 B：MVT 格点多边形。否决：74025 格点 × 57 步瓦片体量远大于单张 PNG。替代 C：EPSG:4326 直出交给 MapLibre 拉伸。否决：`image` source 在 Mercator 中线性映射，56° 纬度跨度会把雨带错位数十公里。
 - 缓存：`NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>/<valid_time>.<palette_version>.png`，其中 `<storage_source>/<cycle_token>` 与镜像的 `canonical/<S>/<K>` **逐字节同名**（`IFS/2026090212`），`<valid_time>` 用秒精度 RFC3339；tmp+rename；生成耗时 100 ms 量级，不加跨 worker 互斥。同名是为了让 retention 按名字一一对应地同步剪 PNG 缓存（D6）。
 
@@ -57,7 +57,7 @@
 ### D7. 河网密度两段式，坐标数为硬门
 - 阈值表：z≤4→4，z5→3，z6→2，z7→1，z≥8→1，写在 `postgis_tile_sql("river-network-national")` 返回的**单条 SQL 字符串**里的一个 `CASE`（zoom 是 bind `:z`，不是 Python 参数）；`NATIONAL_RIVER_NETWORK_QUERY_VERSION` → `stream-type-aggregate-v3`（版本在 `national_river_network_source_version` 的字符串里，不在 SQL 文本里）。`hydro-national` 里形状相同的那份 CASE 不动。**注意该 CASE 现在写在 `river-network` 与 `river-network-national` 共用的 `source_cte` 里**（`if layer in {"river-network", "river-network-national"}` 分支）——就地改字面量会顺带把单流域 `river-network` 层 z7 从 Type≥2 放宽到 Type≥1（密集流域单 z7 瓦片本就 >50k 坐标），所以 v3 表只在 `layer == "river-network-national"` 时生成，单流域层保持 v2，并有断言锁住。
 - go/no-go 用 `prefilter_stats.feature_coordinate_count`（单要素最大坐标数）+ `feature_coordinate_overflow_count == 0`，`budget_stats.coordinate_count` 只作附加项——后者只累加通过单要素上限的要素，恰好在合并干流超限被过滤成空瓦片时读数偏低。实测 zoom 集合扩到 z3/z4/z6/z7（v3 让 z6 多出 Type 2、z7 多出 Type 1）。这些列是 tile SQL 的输出列，用 psql 直接跑 SQL 读，不走瓦片 HTTP 路由。
-- 前端 `m11NationalRiverPaint`：`dimmed` 折扣改为 zoom 插值（z<6 不折扣），z3–5 线宽 stops 上调（Type 4 在 z3 ≥1.4px；Type 5 在 z3 >1.5px、z5 >2.3px，严格高于现值），并给 z6 的 Type 2、z6/z7 的 Type 1 补非零 opacity——现表 z7 的 match 只列 Type 5..2、无 z6 stop，新增的这两类会被取到却画成透明。
+- 前端 `m11NationalRiverPaint`：`dimmed` 折扣改为 zoom 插值（z<6 不折扣），z3–5 线宽 stops 上调（Type 4 在 z3 ≥1.4px、z5 ≥2.2px；Type 5 在 z3 >1.5px、z5 >2.3px，严格高于现值），并给 z6 的 Type 2、z6/z7 的 Type 1 补非零 opacity——现表 z7 的 match 只列 Type 5..2、无 z6 stop，新增的这两类会被取到却画成透明。
 
 ### D8. 时间轴控制条复用 `M11Timeline`
 - 底部居中玻璃条：起报时次 `<select>` + GFS/IFS 分段 + `M11Timeline`。`pickCurrentValidTime` 默认改为首项（lead=0）。全国尺度 URL `source=best` 解析为 `gfs`。流域详情模式共用控制条，周期来自该流域 run 列表、时次来自 run metadata（现有逻辑）。

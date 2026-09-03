@@ -52,4 +52,5 @@ Before the threshold change is enabled in production, node-27 SHALL measure the 
 #### Scenario: Trunk width stops
 - **WHEN** the `line-width` expression is evaluated at zoom 3 and zoom 5
 - **THEN** `Type = 4` at zoom 3 is ≥ 1.4 px (it is ≈1.24 px today, so an unchanged paint fails this assertion)
+- **AND** `Type = 4` at zoom 5 is ≥ 2.2 px (it is ≈1.86 px today, so an unchanged paint fails this assertion)
 - **AND** `Type = 5` is > 1.5 px at zoom 3 and > 2.3 px at zoom 5 (it is exactly 1.5 px and ≈2.23 px today), so the stops must strictly increase rather than merely satisfy the old values
