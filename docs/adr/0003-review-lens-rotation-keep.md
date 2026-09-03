@@ -3073,3 +3073,31 @@ The accumulated ratio still strongly favors retaining additive rotation
 (**302 versus 148**), so **keep rotation** remains the recorded decision.
 The existing attribution-schema, round-intent and round-role caveats remain
 unchanged; any reversal still requires those repairs plus maintainer review.
+
+## Revisit 2026-09-03 (post #1581 residuals / PR #1999) — keep; +7 core / +0 rotated across three rounds
+
+After the PR #1999 accountability line, `loop_log_audit.py` reports **166**
+multi-round merged PRs and later-round catches **core=155 / rotated=302 /
+skipped=15**: `core` moved by seven, `rotated` by none.
+
+Round 1 ran five lenses (correctness, integration, invariant-state,
+test-evidence, spec-compliance) and verified six minor findings, all
+round-1. Round 2 re-ran the same five lenses (no rotation: round 1 had no
+major and no class repeat) and verified five findings — the one P1 (the CI
+selector at-site gap, spec-compliance) plus four spec-doc-accuracy /
+test-oracle-gap items — all attributed to core (**+5 core**). Round 3 rotated
+`security-performance` in beside the pinned core; the rotated lens returned
+no candidates, and the two actionable catches (task 4.2 criteria, head-
+relative test cites) both came from pinned spec-compliance (**+2 core**).
+Phase 7 on the final head was clean.
+
+This PR is a counter-datum: every later-round catch came from the pinned
+core, and the single rotated slot bought nothing on a diff whose production
+delta was alias/import only. Notably the P1 was caught by re-running the
+same lens, not by rotating. The accumulated ratio still favours rotation
+(**302 versus 155**), so **keep rotation** remains the recorded decision,
+but two of the last three revisits added zero rotated catches; if the next
+flag shows the same pattern the round-intent caveat (rotation should be
+bought by breadth of the diff, not by a class repeat alone) is worth
+promoting from caveat to rule. Reversal still requires the attribution-
+schema, round-intent and round-role repairs plus maintainer review.
