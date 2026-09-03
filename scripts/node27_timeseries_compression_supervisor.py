@@ -55,6 +55,11 @@ from packages.common.node27_container_contract import (
     recurring_unit_idle_failure,
     validated_probe_target,
 )
+from packages.common.node27_timeseries_hypertable_discovery import (
+    candidate_tuple_list_sql,
+    compression_settings_expectation,
+    expected_hypertable_flags,
+)
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
 SCHEMA_VERSION = "3.0"
@@ -1284,6 +1289,32 @@ def _build_activity_sql(target: str = RECOVERY_TARGET) -> str:
     )
 
 
+# The D3 catalog probe (#1985). Module-level, not a local inside
+# ``capture_checkpoint``, so the same text can be run read-only on node-27 for
+# the pre-merge receipt without re-typing it — a re-typed probe proves nothing
+# about the probe the supervisor actually runs.
+#
+# The IN-list carries the canonical tables AND their transitional ``_legacy``
+# siblings; ``json_object_agg`` emits a key only for the rows the catalog
+# returns, so an absent sibling produces NO key at all. That distinction
+# matters: a key emitted as ``false`` would be indistinguishable from "present,
+# compression disabled", which is drift the lane must refuse.
+D3_CATALOG_SQL = (
+    "SELECT json_build_object("
+    "'hypertables',(SELECT json_object_agg(format('%s.%s',hypertable_schema,hypertable_name),compression_enabled) "
+    "FROM timescaledb_information.hypertables WHERE (hypertable_schema,hypertable_name) IN "
+    f"{candidate_tuple_list_sql()}),"
+    "'compression_settings',(SELECT COALESCE(json_agg(row_to_json(s) ORDER BY hypertable_schema,hypertable_name,"
+    "segmentby_column_index NULLS LAST,orderby_column_index NULLS LAST),'[]'::json) FROM "
+    "timescaledb_information.compression_settings s WHERE (hypertable_schema,hypertable_name) IN "
+    f"{candidate_tuple_list_sql()}),"
+    "'policy_jobs',(SELECT COALESCE(json_agg(row_to_json(j)),'[]'::json) FROM "
+    "timescaledb_information.jobs j WHERE proc_name='policy_compression' AND "
+    "(hypertable_schema,hypertable_name) IN "
+    f"{candidate_tuple_list_sql()}))"
+)
+
+
 def capture_checkpoint(
     checkpoint: Mapping[str, Any],
     *,
@@ -1310,20 +1341,7 @@ def capture_checkpoint(
         "SELECT json_build_object('conflicts',COALESCE(json_agg(l ORDER BY pid),'[]'::json)) "
         "FROM (SELECT pid,locktype,mode,granted FROM pg_locks WHERE NOT granted) l"
     )
-    catalog_sql = (
-        "SELECT json_build_object("
-        "'hypertables',(SELECT json_object_agg(format('%s.%s',hypertable_schema,hypertable_name),compression_enabled) "
-        "FROM timescaledb_information.hypertables WHERE (hypertable_schema,hypertable_name) IN "
-        "(('hydro','river_timeseries'),('met','forcing_station_timeseries'))),"
-        "'compression_settings',(SELECT COALESCE(json_agg(row_to_json(s) ORDER BY hypertable_schema,hypertable_name,"
-        "segmentby_column_index NULLS LAST,orderby_column_index NULLS LAST),'[]'::json) FROM "
-        "timescaledb_information.compression_settings s WHERE (hypertable_schema,hypertable_name) IN "
-        "(('hydro','river_timeseries'),('met','forcing_station_timeseries'))),"
-        "'policy_jobs',(SELECT COALESCE(json_agg(row_to_json(j)),'[]'::json) FROM "
-        "timescaledb_information.jobs j WHERE proc_name='policy_compression' AND "
-        "(hypertable_schema,hypertable_name) IN "
-        "(('hydro','river_timeseries'),('met','forcing_station_timeseries'))))"
-    )
+    catalog_sql = D3_CATALOG_SQL
     psql_prefix = [
         _host_bin("psql"),
         "--dbname",
@@ -1713,26 +1731,29 @@ def disarm_finalizer_state(state_path: Path, *, run_id: str) -> None:
 
 
 def validate_current_d3(catalog: Mapping[str, Any]) -> None:
-    """Accept exact current D3 state; reject disabled, missing or drifted state."""
+    """Accept exact current D3 state; reject disabled, missing or drifted state.
 
-    expected_hypertables = {
-        "hydro.river_timeseries": True,
-        "met.forcing_station_timeseries": True,
-    }
-    if catalog.get("hypertables") != expected_hypertables or catalog.get("policy_jobs") != []:
+    #1985: the expectation is asserted PER TABLE by catalog state, not by name.
+    A canonical hypertable without a ``_legacy`` sibling keeps today's
+    text-shaped settings; one WITH a sibling is asserted key-shaped and its
+    sibling text-shaped. Nothing flips ahead of its own migration, so this
+    assertion — which runs on every replay checkpoint — stays green across the
+    expand window instead of turning every tick red the day the code deploys.
+    Both canonical key shapes are already encoded in the shared helper, so I12
+    needs no change here.
+    """
+
+    hypertables = catalog.get("hypertables")
+    if not isinstance(hypertables, Mapping) or catalog.get("policy_jobs") != []:
+        raise SupervisorError("catalog is not exact current D3 state")
+    try:
+        expected_hypertables = expected_hypertable_flags(hypertables)
+        expected = [tuple(row) for row in compression_settings_expectation(hypertables)]
+    except ValueError as error:
+        raise SupervisorError(f"catalog is not exact current D3 state: {error}") from error
+    if dict(hypertables) != expected_hypertables:
         raise SupervisorError("catalog is not exact current D3 state")
     rows = catalog.get("compression_settings")
-    expected = [
-        ("hydro", "river_timeseries", "run_id", 1, None, None, None),
-        ("hydro", "river_timeseries", "river_network_version_id", 2, None, None, None),
-        ("hydro", "river_timeseries", "river_segment_id", 3, None, None, None),
-        ("hydro", "river_timeseries", "variable", None, 1, True, False),
-        ("hydro", "river_timeseries", "valid_time", None, 2, True, False),
-        ("met", "forcing_station_timeseries", "forcing_version_id", 1, None, None, None),
-        ("met", "forcing_station_timeseries", "station_id", 2, None, None, None),
-        ("met", "forcing_station_timeseries", "variable", None, 1, True, False),
-        ("met", "forcing_station_timeseries", "valid_time", None, 2, True, False),
-    ]
     fields = (
         "hypertable_schema",
         "hypertable_name",

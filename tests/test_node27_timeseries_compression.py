@@ -39,6 +39,23 @@ def _load_schema() -> dict:
     return json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
+def _stub_discovery(_dsn: str) -> list[dict]:
+    """Today's node-27 catalog: the two canonical hypertables, no `_legacy`
+    sibling (#1985). ``main`` wires a real catalog probe, so the ``main``-driven
+    rows below inject this seam; the receipt it produces is byte-for-byte the
+    pre-#1985 one."""
+
+    return [
+        {
+            "hypertable_schema": schema,
+            "hypertable_name": name,
+            "num_chunks": 14,
+            "compression_enabled": True,
+        }
+        for schema, name in compression.HYPERTABLES
+    ]
+
+
 def _args(**overrides: object) -> argparse.Namespace:
     defaults = {"enforce": False, "receipt_path": None, "lock_path": None}
     defaults.update(overrides)
@@ -297,6 +314,7 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
         fetch_chunks=lambda _dsn: [chunk],
         measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
         reconcile_chunk_state=lambda _dsn, _chunk: False,
+        discover_hypertables=_stub_discovery,
     )
 
     assert code == 0
@@ -384,6 +402,7 @@ def test_main_accepts_the_exact_budget_chain_equality(tmp_path: Path, monkeypatc
         fetch_chunks=lambda _dsn: [chunk],
         measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
         compress_chunk=lambda _dsn, _chunk: None,
+        discover_hypertables=_stub_discovery,
     )
 
     assert code == 0
@@ -592,6 +611,7 @@ def test_main_uses_display_watermark_as_compression_reference(
         fetch_chunks=lambda _dsn: [chunk],
         measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
         compress_chunk=lambda _dsn, _chunk: None,
+        discover_hypertables=_stub_discovery,
     )
 
     assert code == 0
@@ -2176,3 +2196,315 @@ def test_qualified_chunk_accepts_a_real_catalog_name_unchanged() -> None:
     chunk = _chunk_named("_timescaledb_internal", "_hyper_3_8_chunk")
 
     assert chunk.qualified_chunk == '"_timescaledb_internal"."_hyper_3_8_chunk"'
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — lifecycle discovery set, receipt schema, per-tick re-derivation
+# ---------------------------------------------------------------------------
+
+_RIVER_LEGACY_KEY = "hydro.river_timeseries_legacy"
+
+
+def _discovery_row(schema: str, name: str, *, num_chunks: int = 1) -> dict:
+    return {
+        "hypertable_schema": schema,
+        "hypertable_name": name,
+        "num_chunks": num_chunks,
+        "compression_enabled": True,
+    }
+
+
+_CANONICAL_CATALOG = [
+    _discovery_row("hydro", "river_timeseries"),
+    _discovery_row("met", "forcing_station_timeseries"),
+]
+_MIXED_CATALOG = [
+    _discovery_row("hydro", "river_timeseries"),
+    _discovery_row("hydro", "river_timeseries_legacy", num_chunks=2),
+    _discovery_row("met", "forcing_station_timeseries"),
+]
+
+
+def test_chunk_query_selects_the_candidate_set_including_the_legacy_siblings() -> None:
+    """The chunk catalog does the discovery filtering itself: a `_legacy` name
+    that does not exist simply returns no rows, so the IN-list is static and no
+    discovered identifier is ever string-formatted into SQL."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    for schema, name in discovery.CANDIDATE_HYPERTABLES:
+        assert f"('{schema}', '{name}')" in compression._CHUNK_QUERY
+    assert "timescaledb_information.chunks" in compression._CHUNK_QUERY
+
+
+def test_per_table_totals_without_a_sibling_equal_todays_key_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Must-preserve (fixture decision 9): on today's node-27 catalog the
+    receipt's ``per_table_totals`` key set is the committed receipts' key set,
+    and nothing named ``legacy`` appears anywhere in the tick output."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=False), env)
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
+        monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "old-1", delta_days=10)]
+    )
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=lambda _dsn: list(_CANONICAL_CATALOG),
+    )
+    committed = json.loads(
+        (_COMMITTED_RECEIPT_DIR / "enforce-live-20260715T091543Z.json").read_text(encoding="utf-8")
+    )
+    assert set(receipt["per_table_totals"]) == set(committed["per_table_totals"])
+    # Top-level shape is pinned as a literal rather than against the committed
+    # 1.0 receipts: those predate the 2.0/2.1 provenance and budget fields, so
+    # only ``per_table_totals`` is comparable across the two schema families.
+    assert set(receipt) == {
+        "schema_version",
+        "head_sha",
+        "generated_at",
+        "now_utc",
+        "lag_seconds",
+        "per_tick_bound",
+        "budget",
+        "mode",
+        "outcome",
+        "selected",
+        "deferred",
+        "skipped",
+        "per_table_totals",
+    }
+    assert "legacy" not in json.dumps(receipt)
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_per_table_totals_gain_the_legacy_sibling_when_the_catalog_shows_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    chunks = [
+        _chunk("hydro", "river_timeseries", "narrow-1", delta_days=10),
+        _chunk("hydro", "river_timeseries_legacy", "legacy-1", delta_days=20),
+    ]
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=chunks)
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=lambda _dsn: list(_MIXED_CATALOG),
+    )
+    assert set(receipt["per_table_totals"]) == {
+        "hydro.river_timeseries",
+        _RIVER_LEGACY_KEY,
+        "met.forcing_station_timeseries",
+    }
+    # Both tables compress in ONE tick under the same bound and lag.
+    assert receipt["per_table_totals"][_RIVER_LEGACY_KEY]["chunks_compressed"] == 1
+    assert receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] == 1
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_a_legacy_sibling_with_no_eligible_chunk_still_gets_a_zero_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The steady state after the pre-expand backlog recipe: the sibling exists
+    but has nothing left to compress. It must still be accounted, or the
+    receipt cannot answer "was the legacy table governed this tick"."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
+        monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "narrow-1", delta_days=10)]
+    )
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=lambda _dsn: list(_MIXED_CATALOG),
+    )
+    assert receipt["per_table_totals"][_RIVER_LEGACY_KEY] == {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
+
+
+def test_discovery_is_re_evaluated_every_tick_not_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Legacy gone" must converge without a second code change: the same
+    process building two receipts sees the drop on the second one."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=False), env)
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=[])
+    catalogs = [list(_MIXED_CATALOG), list(_CANONICAL_CATALOG)]
+
+    def fake_discover(_dsn: str) -> list[dict]:
+        return catalogs.pop(0)
+
+    first = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=fake_discover,
+    )
+    second = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=fake_discover,
+    )
+    assert _RIVER_LEGACY_KEY in first["per_table_totals"]
+    assert _RIVER_LEGACY_KEY not in second["per_table_totals"]
+
+
+def test_main_wires_the_catalog_discovery_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam is only worth having if production actually passes it."""
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+    code = compression.main(
+        [],
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: [],
+        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 0,
+        compress_chunk=lambda _dsn, _chunk: None,
+        discover_hypertables=lambda _dsn: list(_MIXED_CATALOG),
+    )
+    assert code == 0
+    receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text())
+    assert _RIVER_LEGACY_KEY in receipt["per_table_totals"]
+    assert "_default_discover_hypertables" in inspect.getsource(compression.main)
+
+
+def test_refused_lock_receipt_stays_canonical_only(tmp_path: Path) -> None:
+    """A lock-contended tick never reached the catalog, so it may not claim to
+    know whether a sibling exists; the refused shape is today's, unchanged."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    receipt = compression.build_refused_lock_receipt(config, now_utc=_NOW, head_sha="b" * 40)
+    assert set(receipt["per_table_totals"]) == {
+        "hydro.river_timeseries",
+        "met.forcing_station_timeseries",
+    }
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_schema_accepts_an_optional_legacy_per_table_total() -> None:
+    schema = _load_schema()
+    committed = json.loads(
+        (_COMMITTED_RECEIPT_DIR / "enforce-live-20260715T091543Z.json").read_text(encoding="utf-8")
+    )
+    with_legacy = json.loads(json.dumps(committed))
+    with_legacy["per_table_totals"][_RIVER_LEGACY_KEY] = {
+        "before_bytes": 10,
+        "after_bytes": 4,
+        "chunks_compressed": 1,
+    }
+    jsonschema.validate(with_legacy, schema)
+
+
+def test_schema_still_rejects_a_non_legacy_extra_per_table_total() -> None:
+    schema = _load_schema()
+    committed = json.loads(
+        (_COMMITTED_RECEIPT_DIR / "enforce-live-20260715T091543Z.json").read_text(encoding="utf-8")
+    )
+    stray = json.loads(json.dumps(committed))
+    stray["per_table_totals"]["hydro.river_timeseries_shadow"] = {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(stray, schema)
+
+
+def test_schema_still_requires_both_canonical_per_table_totals() -> None:
+    schema = _load_schema()
+    committed = json.loads(
+        (_COMMITTED_RECEIPT_DIR / "enforce-live-20260715T091543Z.json").read_text(encoding="utf-8")
+    )
+    missing = json.loads(json.dumps(committed))
+    missing["per_table_totals"].pop("met.forcing_station_timeseries")
+    missing["per_table_totals"][_RIVER_LEGACY_KEY] = {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(missing, schema)
+
+
+def test_refused_branch_constrains_a_legacy_total_the_same_way(tmp_path: Path) -> None:
+    """Fixture must-preserve: a refused-mode receipt carrying a ``_legacy`` key
+    stays bound by ``refused_table_total`` — zero before, null after, zero
+    chunks — so a refusal can never report work it did not do."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    receipt = compression.build_refused_lock_receipt(config, now_utc=_NOW, head_sha="b" * 40)
+    receipt["per_table_totals"][_RIVER_LEGACY_KEY] = {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
+    jsonschema.validate(receipt, _load_schema())
+    receipt["per_table_totals"][_RIVER_LEGACY_KEY] = {
+        "before_bytes": 5,
+        "after_bytes": 1,
+        "chunks_compressed": 1,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+# --- 3.3 per-tick derivation re-pin -----------------------------------------
+
+
+def test_compression_env_example_pins_the_two_day_lag() -> None:
+    """#1985 / D7: the template's lag assignment is the live two-day value and
+    the stale "one chunk width" gloss (a 7-day chunk assumption the one-day
+    narrow chunks retire) is gone."""
+    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=(\d+)$", text) == ["172800"]
+    assert "one chunk width" not in text
+
+
+def test_per_tick_bound_comment_is_re_derived_for_one_day_chunks() -> None:
+    """The bound survives the chunk-interval change only because it was
+    re-derived: the comment must cite the new arrival rate, not the retired
+    "2 terminal chunks/week"."""
+    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=(\d+)$", text) == ["4"]
+    assert "2 terminal chunks/day" in text
+    # The weekly figure may only survive as an explicitly retired one: a comment
+    # still asserting it as the current arrival rate is the stale derivation the
+    # spec's "chunk interval change without re-derivation is caught" scenario is
+    # about.
+    assert text.count("2 terminal chunks/week") == 1
+    assert "retired figure was 2 terminal chunks/week" in text
+    assert "#1985" in text
+
+
+def test_runbook_per_tick_section_records_the_one_day_derivation() -> None:
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    for phrase in (
+        "2 terminal chunks/day",
+        "finite backlog",
+        "PER_TICK_BOUND=1",
+        "51 min",
+    ):
+        assert phrase in runbook, phrase

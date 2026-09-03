@@ -214,6 +214,23 @@ class _StubRunner:
             return {c.qualified_name: self._measured.get(c.qualified_name, 0) for c in chunks}
         return {c.qualified_name: 10_000 for c in chunks}
 
+    def discover(self, config: retention.RetentionConfig) -> list[dict[str, Any]]:
+        """#1985: today's node-27 catalog — the two canonical hypertables, no
+        `_legacy` sibling. ``main`` wires a real catalog probe, so every
+        ``main``-driven row needs this seam; the receipt shape it produces is
+        byte-for-byte the pre-#1985 one."""
+
+        self.calls.append(("discover", None))
+        return [
+            {
+                "hypertable_schema": schema,
+                "hypertable_name": name,
+                "num_chunks": 14,
+                "compression_enabled": True,
+            }
+            for schema, name in (("hydro", "river_timeseries"), ("met", "forcing_station_timeseries"))
+        ]
+
     def drop(self, config: retention.RetentionConfig, chunk: retention.ChunkRow) -> None:
         self.calls.append(("drop", chunk.qualified_name))
         if chunk.chunk_name in self._drop_error:
@@ -2627,6 +2644,7 @@ def test_disabled_main_enforce_end_to_end_publishes_enforced_receipt(
         fetch_chunks=stub.fetch,
         measure_chunk_bytes=stub.measure,
         drop_chunk=stub.drop,
+        discover_hypertables=stub.discover,
     )
 
     assert code == 0
@@ -3636,6 +3654,7 @@ def _refused_tick_stderr(
         fetch_chunks=stub.fetch,
         measure_chunk_bytes=stub.measure,
         drop_chunk=stub.drop,
+        discover_hypertables=stub.discover,
     )
     return code, capsys.readouterr().err
 
@@ -3702,6 +3721,7 @@ def test_a_clean_tick_emits_no_counted_anchor(
         fetch_chunks=stub.fetch,
         measure_chunk_bytes=stub.measure,
         drop_chunk=stub.drop,
+        discover_hypertables=stub.discover,
     )
     err = capsys.readouterr().err
 
@@ -3753,6 +3773,7 @@ def test_the_counted_anchor_never_carries_credentials(
         fetch_chunks=stub.fetch,
         measure_chunk_bytes=stub.measure,
         drop_chunk=stub.drop,
+        discover_hypertables=stub.discover,
     )
     err = capsys.readouterr().err
 
@@ -3971,3 +3992,265 @@ def test_runbook_hands_the_operator_the_journal_command() -> None:
     runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
 
     assert _JOURNALCTL_FENCE in runbook_text
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — lifecycle discovery set and the legacy_chunks contract gate
+# ---------------------------------------------------------------------------
+
+_RIVER_LEGACY_KEY = "hydro.river_timeseries_legacy"
+
+
+def _discovery_row(schema: str, name: str, *, num_chunks: int = 1) -> dict[str, Any]:
+    return {
+        "hypertable_schema": schema,
+        "hypertable_name": name,
+        "num_chunks": num_chunks,
+        "compression_enabled": True,
+    }
+
+
+_CANONICAL_CATALOG = [
+    _discovery_row("hydro", "river_timeseries", num_chunks=14),
+    _discovery_row("met", "forcing_station_timeseries", num_chunks=14),
+]
+
+
+def _mixed_catalog(legacy_chunks: int) -> list[dict[str, Any]]:
+    return [
+        _discovery_row("hydro", "river_timeseries", num_chunks=14),
+        _discovery_row("hydro", "river_timeseries_legacy", num_chunks=legacy_chunks),
+        _discovery_row("met", "forcing_station_timeseries", num_chunks=14),
+    ]
+
+
+def test_retention_chunk_query_covers_the_candidate_set() -> None:
+    """Both tables are dropped under the SAME retention window; the legacy
+    sibling joins the query by existing, not by a second code change."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    for schema, name in discovery.CANDIDATE_HYPERTABLES:
+        assert f"('{schema}', '{name}')" in retention._CHUNK_QUERY
+
+
+def test_target_hypertables_stays_the_canonical_pair() -> None:
+    """The delete-authority allowlist is still exactly the two detail
+    hypertables plus, structurally, their renamed selves — metadata tables can
+    never enter it through discovery because the candidate list is a literal."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    assert retention.TARGET_HYPERTABLES == frozenset(discovery.CANONICAL_HYPERTABLES)
+    assert frozenset(discovery.CANDIDATE_HYPERTABLES) >= retention.TARGET_HYPERTABLES
+
+
+def test_dry_run_receipt_omits_legacy_chunks_without_a_sibling(tmp_path: Path) -> None:
+    """Must-preserve: today's catalog produces today's receipt, key for key."""
+    config = _build_config(tmp_path)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: list(_CANONICAL_CATALOG),
+    )
+    assert "legacy_chunks" not in receipt
+    assert "legacy" not in json.dumps(receipt)
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_enforced_receipt_carries_legacy_chunks_per_legacy_table(tmp_path: Path) -> None:
+    """The I9 entry gate reads ``legacy_chunks["hydro.river_timeseries_legacy"]``,
+    so the shape is a mapping keyed by legacy table name — not a scalar and not
+    a list."""
+    config = _build_config(tmp_path, enforce=True)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries_legacy", "legacy-a", delta_days=60)])
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: _mixed_catalog(2),
+    )
+    assert receipt["outcome"] == "enforced"
+    assert receipt["legacy_chunks"] == {_RIVER_LEGACY_KEY: 2}
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_legacy_chunks_is_the_total_remaining_count_after_the_drop_phase(tmp_path: Path) -> None:
+    """The gate opens on "the legacy table is empty", so the number is the
+    table's total remaining chunks AFTER this tick's drops — not the count this
+    tick dropped, and not the retention-eligible subset (a young legacy chunk
+    still blocks the contract)."""
+    config = _build_config(tmp_path, enforce=True)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries_legacy", "legacy-a", delta_days=60)])
+    order: list[str] = []
+    original_drop = stub.drop
+
+    def recording_drop(cfg: Any, chunk: retention.ChunkRow) -> None:
+        order.append("drop")
+        original_drop(cfg, chunk)
+
+    def discover(_config: Any) -> list[dict[str, Any]]:
+        order.append("discover")
+        # Three chunks before the tick, the drained table afterwards: a
+        # pre-drop read would report 3 and hold the contract gate shut for a
+        # further fourteen days.
+        return _mixed_catalog(0 if "drop" in order else 3)
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=recording_drop,
+        discover_hypertables=discover,
+    )
+    assert order == ["drop", "discover"]
+    assert receipt["legacy_chunks"] == {_RIVER_LEGACY_KEY: 0}
+
+
+def test_dry_run_receipt_also_carries_legacy_chunks_when_a_sibling_exists(tmp_path: Path) -> None:
+    config = _build_config(tmp_path)
+    stub = _StubRunner([])
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: _mixed_catalog(1),
+    )
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["legacy_chunks"] == {_RIVER_LEGACY_KEY: 1}
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_main_wires_the_catalog_discovery_probe() -> None:
+    assert "_default_discover_hypertables" in inspect.getsource(retention.main)
+
+
+# --- schema -----------------------------------------------------------------
+
+
+def test_schema_accepts_the_legacy_chunks_mapping(tmp_path: Path) -> None:
+    document = {
+        "schema_version": "1.1",
+        "generated_at": "2026-07-11T12:30:00Z",
+        "mode": "enforce",
+        "outcome": "enforced",
+        "archive_gate": {
+            "mode": "disabled",
+            "adr_reference": "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11",
+        },
+        "dropped_chunks": [],
+        "deferred_remainder": [],
+        "salvage_backed_windows": [],
+        "legacy_chunks": {_RIVER_LEGACY_KEY: 0},
+    }
+    jsonschema.validate(document, _load_schema())
+    document["legacy_chunks"] = {"met.forcing_station_timeseries_legacy": 4}
+    jsonschema.validate(document, _load_schema())
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"hydro.river_timeseries": 0},
+        {_RIVER_LEGACY_KEY: -1},
+        {_RIVER_LEGACY_KEY: "0"},
+        0,
+        [_RIVER_LEGACY_KEY],
+    ],
+    ids=["canonical-key", "negative", "string", "scalar", "list"],
+)
+def test_schema_rejects_a_mis_shaped_legacy_chunks(value: Any) -> None:
+    document = {
+        "schema_version": "1.1",
+        "generated_at": "2026-07-11T12:30:00Z",
+        "mode": "enforce",
+        "outcome": "enforced",
+        "archive_gate": {
+            "mode": "disabled",
+            "adr_reference": "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11",
+        },
+        "dropped_chunks": [],
+        "deferred_remainder": [],
+        "salvage_backed_windows": [],
+        "legacy_chunks": value,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(document, _load_schema())
+
+
+# --- committed receipt sweep (new in #1985) ---------------------------------
+
+# Mirrors the compression sweep in tests/test_node27_timeseries_compression.py:
+# the archived retention receipts are the pre-change comparator, so a schema
+# change that rejects them must go red HERE rather than silently invalidating
+# the evidence chain. Selection is by filename prefix, not by schema_version:
+# the four `1.0` archive-era receipts below predate the #1369 `archive_gate`
+# bump and already fail today's schema, so they are pinned as an explicit,
+# closed exclusion list instead of being filtered by a dispatch rule that would
+# quietly absorb a future stale receipt too.
+_COMMITTED_RETENTION_DIR = (
+    _ROOT / "docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-retention"
+)
+_COMMITTED_RETENTION_RECEIPTS = sorted(
+    path for path in _COMMITTED_RETENTION_DIR.glob("*.json") if path.name.startswith("retention-")
+)
+_PRE_1_1_RETENTION_RECEIPTS = (
+    "dry-run-first-live-20260725T054745Z.json",
+    "first-enforce-20260725T061740Z.json",
+    "refusal-completeness-missing-20260713T030936Z.json",
+    "refusal-drop-contention-20260725T055600Z.json",
+)
+
+
+def test_committed_retention_receipt_glob_is_not_silently_empty() -> None:
+    assert len(_COMMITTED_RETENTION_RECEIPTS) >= 4, _COMMITTED_RETENTION_RECEIPTS
+
+
+def test_the_excluded_retention_receipts_are_exactly_the_pre_1_1_archive() -> None:
+    excluded = sorted(
+        path.name
+        for path in _COMMITTED_RETENTION_DIR.glob("*.json")
+        if not path.name.startswith("retention-")
+    )
+    assert excluded == sorted(_PRE_1_1_RETENTION_RECEIPTS)
+    for name in _PRE_1_1_RETENTION_RECEIPTS:
+        document = json.loads((_COMMITTED_RETENTION_DIR / name).read_text(encoding="utf-8"))
+        assert document["schema_version"] == "1.0"
+
+
+@pytest.mark.parametrize(
+    "receipt_path",
+    _COMMITTED_RETENTION_RECEIPTS,
+    ids=lambda path: path.name,
+)
+def test_committed_retention_receipts_stay_valid_against_schema(receipt_path: Path) -> None:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_no_sibling_receipt_key_set_equals_the_committed_receipts(tmp_path: Path) -> None:
+    """Fixture decision 9's comparator: drive the writer on a no-sibling fake
+    catalog and require the archived receipts' exact key set."""
+    config = _build_config(tmp_path, enforce=True)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: list(_CANONICAL_CATALOG),
+    )
+    committed = json.loads(
+        (_COMMITTED_RETENTION_DIR / "retention-enforce-20260814T095746Z.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(receipt) == set(committed)

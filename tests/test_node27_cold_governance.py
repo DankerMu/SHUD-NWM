@@ -316,3 +316,88 @@ def test_healthy_reserved_receipt_and_examples_carry_reserved_bytes(tmp_path: Pa
     assert receipt["filesystems"]["home"]["reserved_bytes"] == 50
     jsonschema.validate(receipt, schema)
     write_cold_governance_receipt(config.receipt_path, receipt, schema)
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — the working-set block travels with the strict receipt too
+# ---------------------------------------------------------------------------
+
+_ROOT_DIR = Path(__file__).resolve().parents[1]
+_COLD_SCHEMA = json.loads(
+    (_ROOT_DIR / "schemas" / "node27_cold_governance_receipt.schema.json").read_text(encoding="utf-8")
+)
+
+_WORKING_SET = {
+    "uncompressed_bytes": 644245094400,
+    "daily_ingest_bytes": 80530636800,
+    "next_compressible_at": "2026-09-02T00:00:00Z",
+    "home_free_bytes": 966367641600,
+    "projected_peak_bytes": 805306368000,
+    "projection_status": "ok",
+    "compression_lag_seconds": 172800,
+    "watermark": "2026-08-31T00:00:00Z",
+}
+
+
+def test_cold_receipt_carries_the_working_set_when_it_is_supplied(tmp_path: Path) -> None:
+    config = GovernanceConfig(receipt_path=tmp_path / "governance.json", head_sha=SHA)
+    receipt, schema = build_cold_governance_receipt(
+        config=config,
+        started_at="2026-08-31T12:00:00Z",
+        finished_at="2026-08-31T12:00:05Z",
+        home=_sample(path="/home", used=800, pgdata=300, cold=0, object_store=200),
+        cold=_sample(path="/data/GHDC", used=700, pgdata=0, cold=400, object_store=0),
+        evidence=_evidence(),
+        working_set=_WORKING_SET,
+    )
+    assert receipt["working_set"] == _WORKING_SET
+    jsonschema.validate(receipt, schema)
+
+
+def test_cold_receipt_omits_the_working_set_when_it_is_not_supplied(tmp_path: Path) -> None:
+    """Optional by construction: the strict receipt predates the projection and
+    a caller that cannot measure it must not be forced to invent zeroes."""
+    config = GovernanceConfig(receipt_path=tmp_path / "governance.json", head_sha=SHA)
+    receipt, schema = build_cold_governance_receipt(
+        config=config,
+        started_at="2026-08-31T12:00:00Z",
+        finished_at="2026-08-31T12:00:05Z",
+        home=_sample(path="/home", used=800, pgdata=300, cold=0, object_store=200),
+        cold=_sample(path="/data/GHDC", used=700, pgdata=0, cold=400, object_store=0),
+        evidence=_evidence(),
+    )
+    assert "working_set" not in receipt
+    jsonschema.validate(receipt, schema)
+
+
+def test_both_cold_governance_examples_carry_the_working_set() -> None:
+    """The CI schema-example check validates every example against its schema;
+    both examples carry the block so the new fields are exercised there too."""
+    root = _ROOT_DIR / "schemas" / "examples"
+    for name in (
+        "node27_cold_governance_receipt.example.json",
+        "node27_cold_governance_receipt.drift.example.json",
+    ):
+        document = json.loads((root / name).read_text(encoding="utf-8"))
+        assert set(document["working_set"]) == set(_WORKING_SET)
+        jsonschema.validate(document, _COLD_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"projection_status": "made_up"},
+        {"uncompressed_bytes": -1},
+        {"projected_peak_bytes": "750 GiB"},
+    ],
+    ids=["status", "negative", "string"],
+)
+def test_cold_schema_rejects_a_mis_shaped_working_set(mutation: dict) -> None:
+    document = json.loads(
+        (_ROOT_DIR / "schemas" / "examples" / "node27_cold_governance_receipt.example.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    document["working_set"].update(mutation)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(document, _COLD_SCHEMA)

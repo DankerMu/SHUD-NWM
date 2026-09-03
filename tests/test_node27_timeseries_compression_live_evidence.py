@@ -7552,3 +7552,108 @@ def test_bundle_author_shape_carries_the_ledger_reference_once_in_the_manifest(t
         assert terminal[owner][key] == ledger_ref
     ledger_nodes = [node for node in terminal["source_manifest"] if node["path"] == ledger_ref["path"]]
     assert ledger_nodes == [ledger_ref]
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — the replay validator accepts the discovery set
+# ---------------------------------------------------------------------------
+
+_I6_D3_FIELDS = (
+    "hypertable_schema",
+    "hypertable_name",
+    "attname",
+    "segmentby_column_index",
+    "orderby_column_index",
+    "orderby_asc",
+    "orderby_nullsfirst",
+)
+
+
+def _i6_catalog(*present: str) -> dict[str, Any]:
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    return {
+        "hypertables": {key: True for key in present},
+        "compression_settings": [
+            dict(zip(_I6_D3_FIELDS, row, strict=True))
+            for row in discovery.compression_settings_expectation(present)
+        ],
+        "policy_jobs": [],
+    }
+
+
+def test_i6_d3_catalog_still_accepts_todays_no_sibling_bundle() -> None:
+    """Must-preserve: archived #1069 bundles captured before the expand carry
+    exactly this catalog and must keep validating."""
+    evidence._validate_d3_catalog(
+        _i6_catalog("hydro.river_timeseries", "met.forcing_station_timeseries"),
+        "catalog_before",
+    )
+
+
+def test_i6_d3_catalog_accepts_a_canonical_plus_legacy_bundle() -> None:
+    evidence._validate_d3_catalog(
+        _i6_catalog(
+            "hydro.river_timeseries",
+            "hydro.river_timeseries_legacy",
+            "met.forcing_station_timeseries",
+        ),
+        "catalog_before",
+    )
+
+
+def test_i6_d3_catalog_rejects_a_missing_canonical_table() -> None:
+    catalog = _i6_catalog("hydro.river_timeseries", "met.forcing_station_timeseries")
+    catalog["hypertables"].pop("met.forcing_station_timeseries")
+    catalog["compression_settings"] = [
+        row for row in catalog["compression_settings"] if row["hypertable_schema"] != "met"
+    ]
+    with pytest.raises(evidence.EvidenceError):
+        evidence._validate_d3_catalog(catalog, "catalog_before")
+
+
+def test_i6_d3_catalog_rejects_a_legacy_only_catalog() -> None:
+    """A bundle showing only the renamed table is the half-applied expand, and
+    the replay validator must refuse to bless it. Built by hand because the
+    shared helper refuses to produce an expectation for a canonical-incomplete
+    catalog at all."""
+    catalog = _i6_catalog("hydro.river_timeseries", "met.forcing_station_timeseries")
+    catalog["hypertables"] = {
+        "hydro.river_timeseries_legacy": True,
+        "met.forcing_station_timeseries": True,
+    }
+    with pytest.raises(evidence.EvidenceError):
+        evidence._validate_d3_catalog(catalog, "catalog_before")
+
+
+def test_i6_d3_catalog_rejects_compression_disabled_on_the_sibling() -> None:
+    catalog = _i6_catalog(
+        "hydro.river_timeseries",
+        "hydro.river_timeseries_legacy",
+        "met.forcing_station_timeseries",
+    )
+    catalog["hypertables"]["hydro.river_timeseries_legacy"] = False
+    with pytest.raises(evidence.EvidenceError):
+        evidence._validate_d3_catalog(catalog, "catalog_before")
+
+
+def test_i6_pre_migration_catalog_accepts_the_mixed_shape() -> None:
+    evidence._validate_pre_migration_catalog(
+        _i6_catalog(
+            "hydro.river_timeseries",
+            "hydro.river_timeseries_legacy",
+            "met.forcing_station_timeseries",
+        ),
+        "catalog_before",
+    )
+
+
+def test_i6_frozen_1069_constants_are_untouched() -> None:
+    """Fixture decision 1 / 10: the archival lag and bound are NOT re-pinned to
+    the live two-day lag."""
+    assert evidence.EXPECTED_LAG_SECONDS == 604_800
+    assert evidence.EXPECTED_BOUND == 1
+    assert evidence.HYPERTABLE_KEYS == (
+        "hydro.river_timeseries",
+        "met.forcing_station_timeseries",
+    )

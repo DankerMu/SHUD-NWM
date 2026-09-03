@@ -28,14 +28,18 @@ from packages.common.node27_cold_governance_cli import (
     validate_cold_governance_arguments,
 )
 from packages.common.node27_cold_governance_collection import (
+    DEFAULT_COMPRESSION_LAG_SECONDS,
+    PROJECTION_OK,
+    PROJECTION_WATERMARK_UNAVAILABLE,
+    collect_filesystem,
+    collect_postgres,
+    finalize_working_set,
+)
+from packages.common.node27_cold_governance_collection import (
     bytes_pretty as _bytes_pretty,
 )
 from packages.common.node27_cold_governance_collection import (
     cold_governance_sample as _cold_governance_sample,
-)
-from packages.common.node27_cold_governance_collection import (
-    collect_filesystem,
-    collect_postgres,
 )
 from packages.common.node27_cold_governance_collection import (
     run_command as _run_command,
@@ -75,6 +79,11 @@ class AuditThresholds:
     temp_bytes_warn: int = 50 * GIB
     wal_warn_bytes: int = 10 * GIB
     dead_tuple_warn_pct: float = 10.0
+    # #1985 working-set governance. The margin is the headroom the projected
+    # compression peak must clear on `/home`; the warning threshold is the
+    # uncompressed stock an operator should already be looking at.
+    safety_margin_bytes: int = 100 * GIB
+    working_set_warn_bytes: int = 400 * GIB
 
 
 @dataclass(frozen=True)
@@ -103,6 +112,7 @@ class AuditConfig:
     cold_governance_backup_inventory_bin: str = "/usr/local/sbin/nhms-backup-inventory"
     cold_governance_prior_receipt_path: Path | None = None
     cold_governance_prior_receipt_max_age_seconds: int | None = None
+    compression_lag_seconds: int = DEFAULT_COMPRESSION_LAG_SECONDS
 
 
 def _utc_now() -> str:
@@ -239,11 +249,17 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
     if postgres.get("status") == "ok":
         db_bytes = _first_database_size(postgres)
         if db_bytes is not None:
+            # #1985: both database-size codes are INFORMATIONAL. The absolute
+            # size stopped meaning "out of room" the day compression landed —
+            # what decides whether the volume survives the next compression
+            # cycle is `PROJECTED_PEAK_EXCEEDS_HOME_FREE` below. A daily false
+            # critical here is exactly how the true one gets ignored, and it
+            # must never contribute to the non-zero exit or the OnFailure mail.
             if db_bytes >= thresholds.database_critical_bytes:
-                severity = "critical"
+                severity = "info"
                 code = "DATABASE_SIZE_ABOVE_CRITICAL"
             elif db_bytes >= thresholds.database_warn_bytes:
-                severity = "warning"
+                severity = "info"
                 code = "DATABASE_SIZE_ABOVE_WARNING"
             else:
                 severity = None
@@ -342,13 +358,92 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
                         "action": "Let autovacuum finish or schedule manual VACUUM during a quiet window.",
                     }
                 )
+    recommendations.extend(_working_set_recommendations(receipt, thresholds))
+    return recommendations
+
+
+def _working_set_recommendations(
+    receipt: Mapping[str, Any], thresholds: AuditThresholds
+) -> list[dict[str, Any]]:
+    """#1985 / design D8: does the next compression peak still fit on `/home`?
+
+    Absent block = the timescale queries were blocked or the database was not
+    configured. The audit then reports what it has; it does not invent a
+    projection status or a phantom critical for "could not look".
+    """
+
+    working_set = receipt.get("working_set")
+    if not isinstance(working_set, Mapping):
+        return []
+    recommendations: list[dict[str, Any]] = []
+    uncompressed = working_set.get("uncompressed_bytes")
+    projected = working_set.get("projected_peak_bytes")
+    home_free = working_set.get("home_free_bytes")
+    evidence = {
+        "uncompressed_bytes": uncompressed,
+        "uncompressed_pretty": _bytes_pretty(uncompressed),
+        "daily_ingest_bytes": working_set.get("daily_ingest_bytes"),
+        "next_compressible_at": working_set.get("next_compressible_at"),
+        "projected_peak_bytes": projected,
+        "projected_peak_pretty": _bytes_pretty(projected),
+        "home_free_bytes": home_free,
+        "safety_margin_bytes": thresholds.safety_margin_bytes,
+        "projection_status": working_set.get("projection_status"),
+        "compression_lag_seconds": working_set.get("compression_lag_seconds"),
+    }
+    if working_set.get("projection_status") == PROJECTION_WATERMARK_UNAVAILABLE:
+        # The compression runner refuses to age data off a wall clock when the
+        # display watermark cannot be proven; governance takes the same line —
+        # this is the lane's own fault and must reach a person.
+        recommendations.append(
+            {
+                "severity": "critical",
+                "area": "postgres",
+                "code": "WATERMARK_UNAVAILABLE",
+                "evidence": evidence,
+                "action": "Restore the display watermark query before the next compression tick.",
+            }
+        )
+    elif (
+        working_set.get("projection_status") == PROJECTION_OK
+        and isinstance(projected, int)
+        and isinstance(home_free, int)
+    ):
+        # Gated on `ok`: with no uncompressed chunk there is no next compression
+        # to project, so the spec's empty state emits no critical at all — free
+        # space itself is already covered by the filesystem recommendations.
+        if projected > home_free - thresholds.safety_margin_bytes:
+            recommendations.append(
+                {
+                    "severity": "critical",
+                    "area": "postgres",
+                    "code": "PROJECTED_PEAK_EXCEEDS_HOME_FREE",
+                    "evidence": evidence,
+                    "action": (
+                        "Compress the eligible backlog now (runbook section 4.5) or free /home "
+                        "before next_compressible_at."
+                    ),
+                }
+            )
+    if isinstance(uncompressed, int) and uncompressed > thresholds.working_set_warn_bytes:
+        recommendations.append(
+            {
+                "severity": "warning",
+                "area": "postgres",
+                "code": "WORKING_SET_ABOVE_WARNING",
+                "evidence": evidence,
+                "action": "Review the compression lag and per-tick bound against the arrival rate.",
+            }
+        )
     return recommendations
 
 
 def build_receipt(config: AuditConfig) -> dict[str, Any]:
     started_at = _utc_now()
     filesystem = collect_filesystem(config)
-    postgres = collect_postgres(config.database_url)
+    postgres = collect_postgres(
+        config.database_url, compression_lag_seconds=config.compression_lag_seconds
+    )
     systemd = collect_systemd(config.services)
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -373,6 +468,9 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
             ],
         },
     }
+    working_set = _working_set_block(filesystem, postgres)
+    if working_set is not None:
+        receipt["working_set"] = working_set
     receipt["recommendations"] = _recommendations(receipt, config.thresholds)
     if config.cold_governance_receipt_path is not None:
         audit_reference = datetime.now(UTC)
@@ -393,6 +491,7 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
             home=_cold_governance_sample(filesystem, postgres, path="/home", observed_at=receipt["finished_at"]),
             cold=_cold_governance_sample(filesystem, postgres, path="/data/GHDC", observed_at=receipt["finished_at"]),
             evidence=evidence,
+            working_set=working_set,
         )
         write_cold_governance_receipt(config.cold_governance_receipt_path, cold_receipt, cold_schema)
         receipt["cold_tablespace_governance"] = {
@@ -400,6 +499,27 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
             "receipt_path": str(config.cold_governance_receipt_path),
         }
     return receipt
+
+
+def _working_set_block(
+    filesystem: Mapping[str, Any], postgres: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Join the catalog sample with `/home` free space and project the peak.
+
+    ``home_free_bytes`` comes from the SAME statvfs observation the filesystem
+    recommendations use, so the projection and the free-space warning can never
+    disagree about how much room there is.
+    """
+
+    sample = postgres.get("working_set") if isinstance(postgres, Mapping) else None
+    if not isinstance(sample, Mapping):
+        return None
+    filesystems = filesystem.get("filesystems")
+    home = filesystems.get("home") if isinstance(filesystems, Mapping) else None
+    home_free = home.get("free_bytes") if isinstance(home, Mapping) else None
+    if not isinstance(home_free, int) or isinstance(home_free, bool):
+        home_free = None
+    return finalize_working_set(sample, home_free_bytes=home_free)
 
 
 def _write_summary(path: Path, payload: Mapping[str, Any]) -> None:
@@ -429,6 +549,19 @@ def _nonnegative_bytes(raw: str, *, label: str) -> int:
     if value < 0:
         raise argparse.ArgumentTypeError(f"{label} must be non-negative")
     return value
+
+
+def _env_or_default(name: str, default: int) -> str:
+    """The env value verbatim when the variable is SET, else the code default.
+
+    Deliberately not ``os.getenv(name) or str(default)``: an empty assignment is
+    a misconfiguration an operator must be told about, not a silent fall back to
+    a number they never chose. It reaches the byte-count parser below, which
+    refuses it.
+    """
+
+    raw = os.getenv(name)
+    return str(default) if raw is None else raw
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -495,6 +628,41 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda raw: _positive_bytes(raw, label="database-critical-bytes"),
         default=AuditThresholds.database_critical_bytes,
     )
+    parser.add_argument(
+        "--safety-margin-bytes",
+        type=lambda raw: _positive_bytes(raw, label="safety-margin-bytes"),
+        default=_positive_bytes(
+            _env_or_default("NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES", AuditThresholds.safety_margin_bytes),
+            label="NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES",
+        ),
+        help="Headroom the projected compression peak must clear on /home.",
+    )
+    parser.add_argument(
+        "--working-set-warn-bytes",
+        type=lambda raw: _positive_bytes(raw, label="working-set-warn-bytes"),
+        default=_positive_bytes(
+            _env_or_default(
+                "NODE27_GOVERNANCE_WORKING_SET_WARN_BYTES", AuditThresholds.working_set_warn_bytes
+            ),
+            label="NODE27_GOVERNANCE_WORKING_SET_WARN_BYTES",
+        ),
+        help="Uncompressed working set above which a warning is emitted.",
+    )
+    parser.add_argument(
+        "--compression-lag-seconds",
+        type=lambda raw: _positive_bytes(raw, label="compression-lag-seconds"),
+        default=_positive_bytes(
+            _env_or_default(
+                "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", DEFAULT_COMPRESSION_LAG_SECONDS
+            ),
+            label="NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS",
+        ),
+        help=(
+            "Compression lag used to project next_compressible_at. Read from this lane's own "
+            "env (the compression template carries a write-role DSN and is not synced); the "
+            "receipt echoes it as compression_lag_seconds."
+        ),
+    )
     parser.add_argument("--quiet", action="store_true", help="Do not print the full receipt to stdout.")
     parser.add_argument("--pretty", action="store_true")
     return parser
@@ -508,6 +676,8 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         home_free_warn_bytes=args.home_free_warn_bytes,
         database_warn_bytes=args.database_warn_bytes,
         database_critical_bytes=args.database_critical_bytes,
+        safety_margin_bytes=args.safety_margin_bytes,
+        working_set_warn_bytes=args.working_set_warn_bytes,
     )
     pgdata_root = Path(args.pgdata_root).expanduser() if args.pgdata_root else None
     summary_path = Path(args.summary_path).expanduser() if args.summary_path else None
@@ -541,6 +711,7 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         cold_governance_backup_inventory_bin=args.cold_governance_backup_inventory_bin,
         cold_governance_prior_receipt_path=args.cold_governance_prior_receipt_path,
         cold_governance_prior_receipt_max_age_seconds=args.cold_governance_prior_receipt_max_age_seconds,
+        compression_lag_seconds=args.compression_lag_seconds,
     )
 
 
@@ -551,6 +722,25 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
 # quotes; the receipt is NOT changed (`status` stays `completed`: the audit
 # did complete, it is the finding that is critical).
 CRITICAL_DIAGNOSTIC_PREFIX = "RESOURCE_GOVERNANCE_CRITICAL:"
+
+# #1985: the shared `OnFailure=` handler mails the last
+# NHMS_UNIT_FAILURE_JOURNAL_LINES journal lines for EVERY lane — there is no
+# governance-specific mail template to put numbers into. So the numbers ride on
+# stderr, on their own anchored line, next to the per-code lines above. The
+# per-code line keeps its exact byte shape (other tooling greps it); a suffixed
+# payload would have broken that contract to solve the same problem worse.
+# Emitted only when at least one critical exists: an info-level finding must
+# stay silent, or the daily audit trains its operator to ignore the lane.
+WORKING_SET_DIAGNOSTIC_PREFIX = "RESOURCE_GOVERNANCE_WORKING_SET:"
+WORKING_SET_DIAGNOSTIC_FIELDS = (
+    "uncompressed_bytes",
+    "daily_ingest_bytes",
+    "next_compressible_at",
+    "home_free_bytes",
+    "projected_peak_bytes",
+    "projection_status",
+    "compression_lag_seconds",
+)
 
 
 def _critical_codes(receipt: Mapping[str, Any]) -> list[str]:
@@ -565,11 +755,21 @@ def _critical_codes(receipt: Mapping[str, Any]) -> list[str]:
     ]
 
 
+def _working_set_diagnostic(receipt: Mapping[str, Any]) -> str | None:
+    """The one stderr line that carries the working-set numbers to the mail."""
+
+    working_set = receipt.get("working_set")
+    if not isinstance(working_set, Mapping):
+        return None
+    payload = {field: working_set.get(field) for field in WORKING_SET_DIAGNOSTIC_FIELDS}
+    return WORKING_SET_DIAGNOSTIC_PREFIX + json.dumps(payload, sort_keys=True, default=_json_default)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
     try:
+        args = build_parser().parse_args(argv)
         config = config_from_args(args)
-    except ValueError as error:
+    except (ValueError, argparse.ArgumentTypeError) as error:
         print(
             json.dumps({"status": "failed", "reason": str(error)}, sort_keys=True),
             file=sys.stderr,
@@ -590,6 +790,10 @@ def main(argv: list[str] | None = None) -> int:
     critical_codes = _critical_codes(receipt)
     for code in critical_codes:
         print(f"{CRITICAL_DIAGNOSTIC_PREFIX}{code}", file=sys.stderr)
+    if critical_codes:
+        diagnostic = _working_set_diagnostic(receipt)
+        if diagnostic is not None:
+            print(diagnostic, file=sys.stderr)
     return 1 if critical_codes else 0
 
 

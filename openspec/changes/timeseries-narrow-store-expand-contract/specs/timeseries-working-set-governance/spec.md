@@ -2,7 +2,7 @@
 
 ### Requirement: Resource governance SHALL measure the uncompressed working set and project the next compression peak
 
-The node-27 resource-governance audit SHALL collect, from the catalog only: `uncompressed_bytes` (sum of `pg_total_relation_size` over uncompressed chunks of the canonical and `_legacy` river and forcing hypertables), `daily_ingest_bytes` (mean daily growth of uncompressed chunk bytes over the trailing seven days, derived from chunk `range_start` and size, never from row scans), `next_compressible_at` (the oldest uncompressed chunk's `range_end` plus the compression lag read from the same variable the compression runner uses), `home_free_bytes`, `projection_status`, and `projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes × max(0, days(next_compressible_at − display watermark))` where the interval is expressed in days and may be fractional.
+The node-27 resource-governance audit SHALL collect, from the catalog only: `uncompressed_bytes` (sum of `pg_total_relation_size` over uncompressed chunks of the canonical and `_legacy` river and forcing hypertables), `daily_ingest_bytes` (mean daily growth of uncompressed chunk bytes over the trailing seven days, derived from chunk `range_start` and size, never from row scans), `next_compressible_at` (the oldest uncompressed chunk's `range_end` plus the compression lag read from `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` in the governance lane's own env — the same variable name the compression runner uses, default 172800, template-to-template cross-pinned — and echoed in the receipt as `compression_lag_seconds` so the node-27 rollout receipt compares it with the deployed compression env value), `home_free_bytes`, `projection_status`, and `projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes × max(0, days(next_compressible_at − display watermark))` where the interval is expressed in days and may be fractional.
 
 #### Scenario: Fields present in the receipt
 - **WHEN** the audit runs in any mode
@@ -17,7 +17,7 @@ The node-27 resource-governance audit SHALL collect, from the catalog only: `unc
 - **THEN** the audit records `projection_status = "watermark_unavailable"`, emits the critical recommendation `WATERMARK_UNAVAILABLE` (a lane fault must reach an operator), and exits 1
 
 #### Scenario: No row scan
-- **WHEN** the collection SQL is inspected by the existing catalog-only guard test
+- **WHEN** the collection SQL is inspected by the catalog-only guard test (new in I6)
 - **THEN** none of the new queries reference a chunk or hypertable in a FROM clause other than `timescaledb_information.*` and `pg_*` size functions
 
 ### Requirement: Critical SHALL mean the projected peak does not fit; database size SHALL be informational

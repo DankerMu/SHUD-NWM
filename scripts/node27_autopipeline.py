@@ -67,6 +67,9 @@ from packages.common.forcing_domain_handoff_apply import (
     REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
     apply_forcing_domain_handoff_path,
 )
+from packages.common.node27_timeseries_hypertable_discovery import (
+    candidate_in_list_sql as _lifecycle_candidate_in_list_sql,
+)
 from packages.common.redaction import redact_payload, redact_text
 from workers.model_registry.basins_discovery import discover_basins_inventory
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin
@@ -1440,15 +1443,20 @@ def _publish_display_runs(database_url: str) -> int:
         conn.close()
 
 
-_STATS_GUARD_CANDIDATES_SQL = """
+# #1985: the candidate list is the shared lifecycle discovery set — the two
+# canonical hypertables plus their transitional `_legacy` siblings. The renamed
+# table keeps receiving chunk-level churn (decompress/drop) until retention
+# drains it, so leaving it out is how the #1468 zeroed-statistics trap comes
+# back on the one table the transition creates. A `_legacy` name that does not
+# exist simply matches no catalog rows.
+_STATS_GUARD_CANDIDATES_SQL = f"""
 SELECT c.chunk_schema, c.chunk_name, s.n_mod_since_analyze, s.last_analyze
 FROM timescaledb_information.chunks c
 JOIN pg_stat_user_tables s
   ON s.schemaname = c.chunk_schema
  AND s.relname = c.chunk_name
 WHERE (c.hypertable_schema, c.hypertable_name) IN (
-    ('hydro', 'river_timeseries'),
-    ('met', 'forcing_station_timeseries')
+{_lifecycle_candidate_in_list_sql()}
 )
   AND c.is_compressed = false
   AND s.n_mod_since_analyze >= %s

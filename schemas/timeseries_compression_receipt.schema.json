@@ -43,6 +43,9 @@
       "properties": {
         "hydro.river_timeseries": {"$ref": "#/$defs/table_total"},
         "met.forcing_station_timeseries": {"$ref": "#/$defs/table_total"}
+      },
+      "patternProperties": {
+        "^[a-z_]+\\.[a-z_]+_legacy$": {"$ref": "#/$defs/table_total"}
       }
     },
     "failure": {
@@ -67,6 +70,9 @@
             "properties": {
               "hydro.river_timeseries": {"$ref": "#/$defs/refused_table_total"},
               "met.forcing_station_timeseries": {"$ref": "#/$defs/refused_table_total"}
+            },
+            "patternProperties": {
+              "^[a-z_]+\\.[a-z_]+_legacy$": {"$ref": "#/$defs/refused_table_total"}
             }
           }
         }

@@ -42,7 +42,15 @@
       }
     },
     "deferred_remainder": {"type": "array", "items": {"type": "string", "minLength": 1}},
-    "salvage_backed_windows": {"type": "array", "items": {"$ref": "#/definitions/window"}}
+    "salvage_backed_windows": {"type": "array", "items": {"$ref": "#/definitions/window"}},
+    "legacy_chunks": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "patternProperties": {
+        "^[a-z_]+\\.[a-z_]+_legacy$": {"type": "integer", "minimum": 0}
+      }
+    }
   },
   "definitions": {
     "window": {

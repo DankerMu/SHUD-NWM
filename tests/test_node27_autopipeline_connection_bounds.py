@@ -392,3 +392,17 @@ def test_compression_chunk_pattern_is_byte_identical_to_the_autopipe_anchor() ->
     """
     assert compression._CHUNK_IDENT_RE.pattern == autopipe._STATS_GUARD_IDENT_RE.pattern
     assert compression._CHUNK_IDENT_RE.pattern == r"^[A-Za-z0-9_]+$"
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — stats-guard discovery set (second oracle on the same SQL)
+# ---------------------------------------------------------------------------
+
+
+def test_stats_guard_sql_reads_the_shared_discovery_candidate_list() -> None:
+    """Both guard oracles pin this SQL; the candidate list is owned once, by
+    the shared discovery helper, so the two can never disagree."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    sql = autopipe._STATS_GUARD_CANDIDATES_SQL
+    assert discovery.candidate_in_list_sql(indent="    ") in sql

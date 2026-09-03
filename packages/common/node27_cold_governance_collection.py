@@ -9,8 +9,17 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
+from packages.common.node27_timeseries_hypertable_discovery import (
+    DISCOVERY_SQL,
+    candidate_in_list_sql,
+    discovery_set,
+    qualified,
+)
 
 DEFAULT_REPO_RELATIVE_SIZE_TARGETS = (
     "data",
@@ -191,12 +200,167 @@ def collect_filesystem(config: Any) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Uncompressed working set and next-compression peak (#1985, design D8)
+# ---------------------------------------------------------------------------
+
+#: Governance's own copy of the compression lag. It is read from
+#: ``NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS`` in the GOVERNANCE lane's env
+#: file — the compression template carries a write-role DSN and is explicitly
+#: not synced — and this default is cross-pinned to that template's assignment
+#: by a unit test so the two cannot drift apart in the repository. Drift of the
+#: DEPLOYED node-27 values is outside any unit test's reach; the receipt echoes
+#: ``compression_lag_seconds`` precisely so the rollout receipt can compare it
+#: with the live compression env.
+DEFAULT_COMPRESSION_LAG_SECONDS = 172_800
+
+#: The trailing window the ingest rate is averaged over, in days. Fixed, not
+#: derived from the observed chunks: a partially filled window must under-report
+#: the rate rather than turn one busy day into a projected spike.
+DAILY_INGEST_WINDOW_DAYS = 7
+
+WORKING_SET_DISCOVERY_SQL = DISCOVERY_SQL
+
+# Catalog-only by construction: chunk identities and sizes come from
+# ``timescaledb_information.chunks`` and ``pg_total_relation_size``, never from
+# a row scan of the fact tables. A 600 GB scan of the very volume this audit
+# exists to protect would BE the incident it is meant to predict.
+WORKING_SET_CHUNKS_SQL = f"""
+SELECT c.hypertable_schema, c.hypertable_name, c.chunk_schema, c.chunk_name,
+       c.range_start, c.range_end,
+       pg_total_relation_size(
+           format('%I.%I', c.chunk_schema, c.chunk_name)::regclass
+       ) AS total_bytes
+FROM timescaledb_information.chunks c
+WHERE (c.hypertable_schema, c.hypertable_name) IN (
+{candidate_in_list_sql()}
+)
+  AND c.is_compressed = false
+ORDER BY c.range_end ASC, c.chunk_schema, c.chunk_name
+"""
+
+PROJECTION_OK = "ok"
+PROJECTION_NO_UNCOMPRESSED_CHUNK = "no_uncompressed_chunk"
+PROJECTION_WATERMARK_UNAVAILABLE = "watermark_unavailable"
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _as_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
+
+
+def collect_working_set(
+    cursor: Any,
+    *,
+    watermark: datetime | None,
+    lag_seconds: int = DEFAULT_COMPRESSION_LAG_SECONDS,
+) -> dict[str, Any]:
+    """Measure the uncompressed working set of the governed hypertables.
+
+    The governed set is discovered per invocation through the shared lifecycle
+    helper, so a transitional ``_legacy`` sibling is accounted from the moment
+    the expand migration creates it. ``watermark`` is the display business-time
+    watermark, fetched with the compression runner's own fetcher and its
+    fail-closed semantics: ``None`` means the lane could not prove it, which is
+    a lane fault, never a zero.
+    """
+
+    hypertables = discovery_set(_psycopg_rows(cursor, WORKING_SET_DISCOVERY_SQL))
+    rows = _psycopg_rows(cursor, WORKING_SET_CHUNKS_SQL)
+    governed = {qualified(*item) for item in hypertables}
+    chunks = [
+        row
+        for row in rows
+        if qualified(str(row["hypertable_schema"]), str(row["hypertable_name"])) in governed
+    ]
+    uncompressed_bytes = sum(int(row["total_bytes"] or 0) for row in chunks)
+
+    if watermark is None:
+        projection_status = PROJECTION_WATERMARK_UNAVAILABLE
+        daily_ingest_bytes: int | None = None
+    elif not chunks:
+        projection_status = PROJECTION_NO_UNCOMPRESSED_CHUNK
+        daily_ingest_bytes = 0
+    else:
+        projection_status = PROJECTION_OK
+        floor = watermark - timedelta(days=DAILY_INGEST_WINDOW_DAYS)
+        recent = sum(
+            int(row["total_bytes"] or 0)
+            for row in chunks
+            if _as_datetime(row["range_start"]) >= floor
+        )
+        daily_ingest_bytes = recent // DAILY_INGEST_WINDOW_DAYS
+
+    next_compressible_at: str | None = None
+    if chunks:
+        oldest_end = min(_as_datetime(row["range_end"]) for row in chunks)
+        next_compressible_at = _iso(oldest_end + timedelta(seconds=int(lag_seconds)))
+
+    return {
+        "hypertables": sorted(governed),
+        "uncompressed_bytes": uncompressed_bytes,
+        "uncompressed_chunks": len(chunks),
+        "daily_ingest_bytes": daily_ingest_bytes,
+        "next_compressible_at": next_compressible_at,
+        "compression_lag_seconds": int(lag_seconds),
+        "watermark": None if watermark is None else _iso(watermark),
+        "projection_status": projection_status,
+    }
+
+
+def finalize_working_set(
+    sample: Mapping[str, Any], *, home_free_bytes: int | None
+) -> dict[str, Any]:
+    """Add ``home_free_bytes`` and the projected next-compression peak.
+
+    ``projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes x
+    max(0, days(next_compressible_at - watermark))``, the interval expressed in
+    days and allowed to be fractional. Only the ``ok`` projection multiplies:
+    with no uncompressed chunk there is nothing to wait for, and with no
+    watermark there is no honest interval to measure, so both project the
+    working set exactly as it stands rather than inventing growth.
+    """
+
+    working_set = dict(sample)
+    working_set["home_free_bytes"] = home_free_bytes
+    uncompressed = int(working_set.get("uncompressed_bytes") or 0)
+    projected = uncompressed
+    if (
+        working_set.get("projection_status") == PROJECTION_OK
+        and working_set.get("next_compressible_at")
+        and working_set.get("watermark")
+        and working_set.get("daily_ingest_bytes") is not None
+    ):
+        span_days = (
+            _as_datetime(working_set["next_compressible_at"])
+            - _as_datetime(working_set["watermark"])
+        ).total_seconds() / 86_400.0
+        projected = uncompressed + int(
+            int(working_set["daily_ingest_bytes"]) * max(0.0, span_days)
+        )
+    working_set["projected_peak_bytes"] = projected
+    return working_set
+
+
 def _psycopg_rows(cursor: Any, sql: str) -> list[dict[str, Any]]:
     cursor.execute(sql)
     return [dict(row) for row in cursor.fetchall()]
 
 
-def collect_postgres(database_url: str | None) -> dict[str, Any]:
+def collect_postgres(
+    database_url: str | None,
+    *,
+    compression_lag_seconds: int = DEFAULT_COMPRESSION_LAG_SECONDS,
+) -> dict[str, Any]:
     if not database_url:
         return {"status": "skipped", "reason": "database_url_missing"}
     try:
@@ -394,6 +558,19 @@ def collect_postgres(database_url: str | None) -> dict[str, Any]:
                     ORDER BY pg_total_relation_size({rel_expr}) DESC
                     LIMIT 20
                     """,
+                )
+                # #1985 working set. Inside the timescale try-block on purpose:
+                # a cluster without the extension has no hypertables to govern,
+                # and the audit reports what it has rather than inventing a
+                # projection status for "could not look".
+                try:
+                    watermark: datetime | None = fetch_display_watermark(database_url)
+                except DisplayWatermarkError:
+                    watermark = None
+                result["working_set"] = collect_working_set(
+                    cursor,
+                    watermark=watermark,
+                    lag_seconds=compression_lag_seconds,
                 )
             except Exception as error:
                 result["timescale_status"] = {"status": "blocked", "error": str(error)}

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import jsonschema
 import pytest
 
+from packages.common import node27_cold_governance_collection as collection
 from scripts import node27_resource_governance as governance
 
 
@@ -323,7 +326,7 @@ def test_optional_cold_governance_receipt_is_refusal_until_descriptor_evidence_i
             "path_sizes": {},
         },
     )
-    monkeypatch.setattr(governance, "collect_postgres", lambda _url: {"status": "skipped"})
+    monkeypatch.setattr(governance, "collect_postgres", lambda _url, **_kwargs: {"status": "skipped"})
     monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
 
     governance.build_receipt(config)
@@ -398,7 +401,7 @@ def test_governance_config_and_receipt_carry_no_archive_root(
     assert not hasattr(config, "archive_root")
 
     monkeypatch.setattr(governance, "collect_filesystem", lambda _config: {"filesystems": {}})
-    monkeypatch.setattr(governance, "collect_postgres", lambda _url: {"status": "skipped"})
+    monkeypatch.setattr(governance, "collect_postgres", lambda _url, **_kwargs: {"status": "skipped"})
     monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
     receipt = governance.build_receipt(config)
     assert "archive_root" not in receipt
@@ -697,3 +700,442 @@ def test_governance_lock_does_not_live_on_the_root_volume() -> None:
         in text
     )
     assert "/tmp/node27-resource-governance.lock" not in text
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — uncompressed working set and the next-compression peak
+# ---------------------------------------------------------------------------
+
+_GIB = 1024**3
+_COMPRESSION_ENV_EXAMPLE = _ROOT / "infra/env/node27-timeseries-compression.example"
+_GOVERNANCE_ENV_EXAMPLE = _ROOT / "infra/env/node27-resource-governance.example"
+_WATERMARK = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
+
+
+class _FakeCursor:
+    """Dispatches on SQL text, like every other catalog seam in this lane."""
+
+    def __init__(self, *, hypertables: list[dict], chunks: list[dict]) -> None:
+        self.hypertables = hypertables
+        self.chunks = chunks
+        self.executed: list[str] = []
+        self._rows: list[dict] = []
+
+    def execute(self, sql: str, params: object = None) -> None:
+        self.executed.append(sql)
+        self._rows = self.hypertables if "timescaledb_information.hypertables" in sql else self.chunks
+
+    def fetchall(self) -> list[dict]:
+        return list(self._rows)
+
+
+def _hypertable_row(schema: str, name: str, *, num_chunks: int = 1) -> dict:
+    return {
+        "hypertable_schema": schema,
+        "hypertable_name": name,
+        "num_chunks": num_chunks,
+        "compression_enabled": True,
+    }
+
+
+def _chunk_row(schema: str, name: str, *, day: int, total_bytes: int) -> dict:
+    start = _WATERMARK - timedelta(days=day)
+    return {
+        "hypertable_schema": schema,
+        "hypertable_name": name,
+        "chunk_schema": "_timescaledb_internal",
+        "chunk_name": f"_hyper_{name}_{day}_chunk",
+        "range_start": start,
+        "range_end": start + timedelta(days=1),
+        "total_bytes": total_bytes,
+    }
+
+
+def _working_set(
+    *,
+    uncompressed_bytes: int,
+    daily_ingest_bytes: int | None,
+    next_compressible_at: str | None,
+    home_free_bytes: int | None,
+    projected_peak_bytes: int,
+    projection_status: str = "ok",
+) -> dict:
+    return {
+        "uncompressed_bytes": uncompressed_bytes,
+        "daily_ingest_bytes": daily_ingest_bytes,
+        "next_compressible_at": next_compressible_at,
+        "home_free_bytes": home_free_bytes,
+        "projected_peak_bytes": projected_peak_bytes,
+        "projection_status": projection_status,
+        "compression_lag_seconds": collection.DEFAULT_COMPRESSION_LAG_SECONDS,
+        "watermark": "2026-09-01T00:00:00Z",
+    }
+
+
+def _codes(receipt: dict) -> dict[str, str]:
+    return {
+        item["code"]: item["severity"]
+        for item in governance._recommendations(receipt, governance.AuditThresholds())
+    }
+
+
+# --- collection -------------------------------------------------------------
+
+
+def test_working_set_collection_is_catalog_only() -> None:
+    """Fixture decision 5 (new seam). The projection may never read a fact
+    table: a 600 GB row scan on the volume the audit exists to protect is the
+    incident, not the measurement. ``fetch_display_watermark``'s read of the
+    metadata table ``hydro.hydro_run`` is a different query and out of scope
+    here — this guard covers the working-set SQL this issue adds."""
+    for sql in (collection.WORKING_SET_CHUNKS_SQL, collection.WORKING_SET_DISCOVERY_SQL):
+        stripped = re.sub(r"'[^']*'", "''", sql)
+        assert "hydro." not in stripped, sql
+        assert "met." not in stripped, sql
+        for relation in re.findall(r"(?is)\bFROM\s+([a-z_][a-z_0-9.]*)", stripped):
+            assert relation.startswith(("timescaledb_information.", "pg_")), relation
+
+
+def test_working_set_sums_uncompressed_chunk_bytes_over_the_discovery_set() -> None:
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("hydro", "river_timeseries_legacy"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[
+            _chunk_row("hydro", "river_timeseries", day=1, total_bytes=100),
+            _chunk_row("hydro", "river_timeseries_legacy", day=9, total_bytes=400),
+            _chunk_row("met", "forcing_station_timeseries", day=2, total_bytes=25),
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["uncompressed_bytes"] == 525
+    assert sample["hypertables"] == [
+        "hydro.river_timeseries",
+        "hydro.river_timeseries_legacy",
+        "met.forcing_station_timeseries",
+    ]
+    assert sample["projection_status"] == "ok"
+    # Oldest uncompressed chunk's range_end plus the lag.
+    oldest_end = _WATERMARK - timedelta(days=9) + timedelta(days=1)
+    assert sample["next_compressible_at"] == (oldest_end + timedelta(seconds=172_800)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert sample["compression_lag_seconds"] == 172_800
+
+
+def test_daily_ingest_is_the_seven_day_mean_anchored_on_the_watermark() -> None:
+    """Chunks are attributed to a day by ``range_start``; the divisor is the
+    fixed seven-day window, so a partially filled window under-reports rather
+    than inventing a spike out of one busy day."""
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[
+            _chunk_row("hydro", "river_timeseries", day=1, total_bytes=700),
+            _chunk_row("hydro", "river_timeseries", day=6, total_bytes=700),
+            # Older than the trailing seven days: excluded from the rate.
+            _chunk_row("hydro", "river_timeseries", day=30, total_bytes=7000),
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["uncompressed_bytes"] == 8400
+    assert sample["daily_ingest_bytes"] == 200
+
+
+def test_empty_state_reports_no_uncompressed_chunk_and_projects_nothing() -> None:
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    final = collection.finalize_working_set(sample, home_free_bytes=10 * _GIB)
+    assert final["next_compressible_at"] is None
+    assert final["projection_status"] == "no_uncompressed_chunk"
+    assert final["projected_peak_bytes"] == final["uncompressed_bytes"] == 0
+
+
+def test_watermark_unavailable_is_a_lane_fault_not_a_zero() -> None:
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=3, total_bytes=64)],
+    )
+    sample = collection.collect_working_set(cursor, watermark=None, lag_seconds=172_800)
+    final = collection.finalize_working_set(sample, home_free_bytes=10 * _GIB)
+    assert final["projection_status"] == "watermark_unavailable"
+    assert final["watermark"] is None
+    assert final["daily_ingest_bytes"] is None
+    assert final["projected_peak_bytes"] == final["uncompressed_bytes"] == 64
+
+
+def test_projection_multiplies_the_rate_by_fractional_days() -> None:
+    sample = {
+        "uncompressed_bytes": 600 * _GIB,
+        "daily_ingest_bytes": 100 * _GIB,
+        "next_compressible_at": (_WATERMARK + timedelta(hours=36)).isoformat().replace("+00:00", "Z"),
+        "watermark": _WATERMARK.isoformat().replace("+00:00", "Z"),
+        "projection_status": "ok",
+        "compression_lag_seconds": 172_800,
+        "hypertables": [],
+        "uncompressed_chunks": 1,
+    }
+    final = collection.finalize_working_set(sample, home_free_bytes=900 * _GIB)
+    assert final["projected_peak_bytes"] == 600 * _GIB + int(1.5 * 100 * _GIB)
+
+
+def test_projection_never_goes_backwards_for_an_overdue_chunk() -> None:
+    """``max(0, ...)``: a chunk already past its compressible time projects the
+    working set as it stands, never a negative subtraction."""
+    sample = {
+        "uncompressed_bytes": 600 * _GIB,
+        "daily_ingest_bytes": 100 * _GIB,
+        "next_compressible_at": (_WATERMARK - timedelta(days=4)).isoformat().replace("+00:00", "Z"),
+        "watermark": _WATERMARK.isoformat().replace("+00:00", "Z"),
+        "projection_status": "ok",
+        "compression_lag_seconds": 172_800,
+        "hypertables": [],
+        "uncompressed_chunks": 1,
+    }
+    final = collection.finalize_working_set(sample, home_free_bytes=900 * _GIB)
+    assert final["projected_peak_bytes"] == 600 * _GIB
+
+
+# --- recommendations: the five scenarios ------------------------------------
+
+
+def test_scenario_peak_fits() -> None:
+    """Spec: 600 GiB working set, 75 GiB/day, two days, 900 GiB free → 750 GiB
+    peak, no critical, exit 0 even though database size exceeds 500 GiB."""
+    receipt = _base_receipt()
+    receipt["postgres"]["database_sizes"] = [{"datname": "nhms", "bytes": 600 * _GIB}]
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=600 * _GIB,
+        daily_ingest_bytes=75 * _GIB,
+        next_compressible_at="2026-09-03T00:00:00Z",
+        home_free_bytes=900 * _GIB,
+        projected_peak_bytes=750 * _GIB,
+    )
+    codes = _codes(receipt)
+    assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in codes
+    assert codes["WORKING_SET_ABOVE_WARNING"] == "warning"
+    assert codes["DATABASE_SIZE_ABOVE_CRITICAL"] == "info"
+    working_set_codes = {
+        "PROJECTED_PEAK_EXCEEDS_HOME_FREE",
+        "WORKING_SET_ABOVE_WARNING",
+        "WATERMARK_UNAVAILABLE",
+    }
+    assert "critical" not in {
+        item["severity"]
+        for item in governance._recommendations(receipt, governance.AuditThresholds())
+        if item["code"] in working_set_codes
+    }
+
+
+def test_scenario_peak_does_not_fit() -> None:
+    receipt = _base_receipt()
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=600 * _GIB,
+        daily_ingest_bytes=75 * _GIB,
+        next_compressible_at="2026-09-03T00:00:00Z",
+        home_free_bytes=800 * _GIB,
+        projected_peak_bytes=750 * _GIB,
+    )
+    codes = _codes(receipt)
+    assert codes["PROJECTED_PEAK_EXCEEDS_HOME_FREE"] == "critical"
+
+
+def test_scenario_no_uncompressed_chunk_emits_no_critical() -> None:
+    receipt = _base_receipt()
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=0,
+        daily_ingest_bytes=0,
+        next_compressible_at=None,
+        home_free_bytes=1 * _GIB,
+        projected_peak_bytes=0,
+        projection_status="no_uncompressed_chunk",
+    )
+    codes = _codes(receipt)
+    assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in codes
+    assert "WATERMARK_UNAVAILABLE" not in codes
+    assert "WORKING_SET_ABOVE_WARNING" not in codes
+
+
+def test_scenario_watermark_unavailable_is_critical() -> None:
+    receipt = _base_receipt()
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=10,
+        daily_ingest_bytes=None,
+        next_compressible_at=None,
+        home_free_bytes=900 * _GIB,
+        projected_peak_bytes=10,
+        projection_status="watermark_unavailable",
+    )
+    codes = _codes(receipt)
+    assert codes["WATERMARK_UNAVAILABLE"] == "critical"
+    assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in codes
+
+
+def test_scenario_info_only_database_size_never_exits_non_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`DATABASE_SIZE_ABOVE_CRITICAL` is demoted to info: the crossing it names
+    stopped meaning "out of room" the day compression landed, and a daily false
+    critical is how the real one gets ignored."""
+    receipt = _base_receipt()
+    receipt["postgres"]["database_sizes"] = [{"datname": "nhms", "bytes": 900 * _GIB}]
+    receipt["filesystem"]["filesystems"]["root"] = {"free_bytes": 500 * _GIB}
+    # Drop the unrelated index-ratio hotspot: this row exists to prove that the
+    # DATABASE_SIZE_* demotion alone decides the exit code.
+    receipt["postgres"]["hypertable_size_breakdown"] = []
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=1,
+        daily_ingest_bytes=0,
+        next_compressible_at="2026-09-03T00:00:00Z",
+        home_free_bytes=900 * _GIB,
+        projected_peak_bytes=1,
+    )
+    recommendations = governance._recommendations(receipt, governance.AuditThresholds())
+    assert {item["code"]: item["severity"] for item in recommendations}[
+        "DATABASE_SIZE_ABOVE_CRITICAL"
+    ] == "info"
+    full = {
+        "schema_version": governance.SCHEMA_VERSION,
+        "status": "completed",
+        "execution_mode": "read_only_audit",
+        "working_set": receipt["working_set"],
+        "recommendations": recommendations,
+    }
+    summary_path = tmp_path / "resource-governance.json"
+    rc, out, err = _run_main(monkeypatch, capsys, full, summary_path)
+    assert rc == 0
+    assert err == ""
+    assert out == ""
+
+
+def test_missing_working_set_block_changes_nothing() -> None:
+    """When the timescale queries are blocked the audit reports what it has;
+    it does not invent a fourth projection status or a phantom critical."""
+    codes = _codes(_base_receipt())
+    assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in codes
+    assert "WATERMARK_UNAVAILABLE" not in codes
+    assert "WORKING_SET_ABOVE_WARNING" not in codes
+
+
+# --- stderr line ------------------------------------------------------------
+
+
+def test_critical_run_prints_the_working_set_numbers_on_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The shared unit-failure alert mails the journal tail, so the numbers an
+    operator needs must be ON stderr. The per-code anchor line keeps its exact
+    byte shape (other tooling greps it); the numbers ride on their own line."""
+    summary_path = tmp_path / "resource-governance.json"
+    receipt = _receipt_with(_recommendation("critical", "PROJECTED_PEAK_EXCEEDS_HOME_FREE"))
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=600 * _GIB,
+        daily_ingest_bytes=75 * _GIB,
+        next_compressible_at="2026-09-03T00:00:00Z",
+        home_free_bytes=800 * _GIB,
+        projected_peak_bytes=750 * _GIB,
+    )
+    rc, _out, err = _run_main(monkeypatch, capsys, receipt, summary_path)
+    assert rc == 1
+    lines = err.splitlines()
+    assert lines[0] == f"{_CRITICAL_ANCHOR}PROJECTED_PEAK_EXCEEDS_HOME_FREE"
+    assert len(lines) == 2
+    assert lines[1].startswith(governance.WORKING_SET_DIAGNOSTIC_PREFIX)
+    payload = json.loads(lines[1][len(governance.WORKING_SET_DIAGNOSTIC_PREFIX) :])
+    assert payload["projected_peak_bytes"] == 750 * _GIB
+    assert payload["home_free_bytes"] == 800 * _GIB
+    assert payload["next_compressible_at"] == "2026-09-03T00:00:00Z"
+    assert payload["uncompressed_bytes"] == 600 * _GIB
+    assert payload["compression_lag_seconds"] == 172_800
+
+
+def test_a_run_without_criticals_stays_silent_even_with_a_working_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    summary_path = tmp_path / "resource-governance.json"
+    receipt = _receipt_with(_recommendation("warning", "WORKING_SET_ABOVE_WARNING"))
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=600 * _GIB,
+        daily_ingest_bytes=75 * _GIB,
+        next_compressible_at="2026-09-03T00:00:00Z",
+        home_free_bytes=900 * _GIB,
+        projected_peak_bytes=750 * _GIB,
+    )
+    rc, out, err = _run_main(monkeypatch, capsys, receipt, summary_path)
+    assert rc == 0
+    assert err == ""
+    assert out == ""
+
+
+# --- lag configuration and the template cross-pin ---------------------------
+
+
+def test_governance_lag_default_equals_the_compression_template_lag() -> None:
+    """Two templates, one number. Nothing in a unit test can see the DEPLOYED
+    node-27 values, so this pin covers template↔template only; the deployed
+    drift is caught by the rollout receipt comparing the echoed
+    ``compression_lag_seconds`` with the live compression env."""
+    text = _COMPRESSION_ENV_EXAMPLE.read_text(encoding="utf-8")
+    template = re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=(\d+)$", text)
+    assert template == ["172800"]
+    assert collection.DEFAULT_COMPRESSION_LAG_SECONDS == int(template[0])
+
+
+def test_governance_env_example_carries_the_lag_and_threshold_variables() -> None:
+    text = _GOVERNANCE_ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert re.search(r"(?m)^NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800$", text)
+    assert re.search(r"(?m)^NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES=\d+$", text)
+    assert re.search(r"(?m)^NODE27_GOVERNANCE_WORKING_SET_WARN_BYTES=\d+$", text)
+
+
+def test_default_thresholds_are_the_decided_values() -> None:
+    thresholds = governance.AuditThresholds()
+    assert thresholds.safety_margin_bytes == 100 * _GIB
+    assert thresholds.working_set_warn_bytes == 400 * _GIB
+
+
+def test_operator_can_override_margin_warning_and_lag() -> None:
+    args = governance.build_parser().parse_args(
+        [
+            "--safety-margin-bytes",
+            str(50 * _GIB),
+            "--working-set-warn-bytes",
+            str(200 * _GIB),
+            "--compression-lag-seconds",
+            "604800",
+        ]
+    )
+    config = governance.config_from_args(args)
+    assert config.thresholds.safety_margin_bytes == 50 * _GIB
+    assert config.thresholds.working_set_warn_bytes == 200 * _GIB
+    assert config.compression_lag_seconds == 604_800
+
+
+@pytest.mark.parametrize("value", ["", "0", "-1", "not-a-number"])
+def test_an_unparseable_lag_is_a_config_error_with_a_non_zero_exit(
+    value: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", value)
+    rc = governance.main(["--quiet"])
+    captured = capsys.readouterr()
+    assert rc != 0
+    assert json.loads(captured.err.splitlines()[0])["status"] == "failed"
+
+
+def test_receipt_echoes_the_configured_lag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", "259200")
+    args = governance.build_parser().parse_args([])
+    assert governance.config_from_args(args).compression_lag_seconds == 259_200

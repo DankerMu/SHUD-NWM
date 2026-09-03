@@ -16,23 +16,42 @@ NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM
 # it cannot `COPY ... FROM PROGRAM`. Never put the superuser `nhms` here.
 DATABASE_URL=postgresql://nhms_ingest_rw:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # The runner uses this connection read-only first to resolve the display
-# business-time watermark, then applies the 7-day lag to that watermark.
+# business-time watermark, then applies the lag below to that watermark.
 
-# Chunk-selection lag in seconds. Default 604800 = 7 days (one chunk width).
+# Chunk-selection lag in seconds. 172800 = 2 days — the value node-27 has run
+# since #1237, now also the committed template value (#1985). It is NOT "one
+# chunk width": the narrow tables use a 1-day chunk_time_interval and the
+# transitional `_legacy` siblings a 7-day one, so no single chunk width could
+# describe the lag any more. The lag is a business-time delay measured from the
+# display watermark, independent of chunk geometry.
 # Chunks whose range_end is younger than the display-watermark cutoff are skipped.
-NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=604800
+# Governance reads the SAME variable name from its own env file
+# (infra/env/node27-resource-governance.example) with the same default, and a
+# unit test cross-pins the two templates.
+NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 
 # Maximum number of chunks compressed per timer tick. Not an arbitrary
-# default: 4 is the capacity target decided in issue #1237 and derived from
-# measured node-27 inputs under a DUAL constraint — throughput (bound x 1
-# tick/day vs the steady 2 terminal chunks/week) AND the whole-tick wrapper
-# wall below. It is a throughput ceiling, NOT the number of river-size chunks
-# one tick can actually redeem: 4 is the throughput target for the NORMAL
-# one-pair week only. The per-tick hint further below (=1) governs whenever
-# more than one river-size chunk could be eligible in a single tick — in that
-# state the hint OVERRIDES this value. Derivation, measured inputs and the
-# conditions that invalidate it (the backlog condition included): runbook
-# section 4 "Per-tick capacity" invalidation list and section 4.5,
+# default: 4 is the capacity target decided in issue #1237 and RE-DERIVED in
+# #1985 for the one-day narrow chunks, under the same DUAL constraint —
+# throughput AND the whole-tick wrapper wall below.
+#   throughput: one-day chunks make every canonical hypertable produce one
+#     terminal chunk per day, i.e. 2 terminal chunks/day for the pair (the
+#     retired figure was 2 terminal chunks/week under 7-day chunks). At one
+#     tick/day, bound 4 buys 4 slots against an arrival of 2 — 2x headroom, and
+#     the daily timer cadence still covers it, so no frequency change.
+#   wall: 4 narrow one-day chunks at roughly 7.5 min each is about 30 min,
+#     inside the 3900 s (65 min) wrapper wall.
+# A transitional `_legacy` sibling is a write-frozen FINITE backlog of 7-day
+# chunks with zero steady-state arrival, not an added arrival rate; its worst
+# single chunk (about 508 GB, roughly 51 min at the measured 6.0 s/GB) already
+# approaches the 60-minute per-chunk timeout, so the backlog is compressed
+# BEFORE the expand under PER_TICK_BOUND=1, never mixed into a bound-4 tick.
+# It is a throughput ceiling, NOT the number of river-size chunks one tick can
+# actually redeem. The per-tick hint further below (=1) governs whenever more
+# than one river-size chunk could be eligible in a single tick — in that state
+# the hint OVERRIDES this value. Derivation, measured inputs and the conditions
+# that invalidate it (the chunk-interval and backlog conditions included):
+# runbook section 4 "Per-tick capacity" invalidation list and section 4.5,
 # docs/runbooks/tier-node27-timeseries-storage.md.
 NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4
 

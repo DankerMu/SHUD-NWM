@@ -3753,3 +3753,130 @@ def test_run_capture_step_refuses_an_escaping_capture_dump_binding_before_any_sp
     assert not marker.exists()
     assert not output.exists()
     assert ledger_path.read_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — the D3 expectation follows catalog state, not table names
+# ---------------------------------------------------------------------------
+
+_D3_FIELDS = (
+    "hypertable_schema",
+    "hypertable_name",
+    "attname",
+    "segmentby_column_index",
+    "orderby_column_index",
+    "orderby_asc",
+    "orderby_nullsfirst",
+)
+
+
+def _catalog(*present: str) -> dict[str, Any]:
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    return {
+        "hypertables": {key: True for key in present},
+        "compression_settings": [
+            dict(zip(_D3_FIELDS, row, strict=True))
+            for row in discovery.compression_settings_expectation(present)
+        ],
+        "policy_jobs": [],
+    }
+
+
+def test_current_d3_still_accepts_todays_no_sibling_catalog() -> None:
+    """Must-preserve: on the catalog node-27 has right now, the supervisor's
+    expectation is byte-for-byte the one it asserted before #1985 — the text
+    shape, with no key column and no legacy table anywhere."""
+    catalog = _catalog("hydro.river_timeseries", "met.forcing_station_timeseries")
+    assert [row["attname"] for row in catalog["compression_settings"]] == [
+        "run_id",
+        "river_network_version_id",
+        "river_segment_id",
+        "variable",
+        "valid_time",
+        "forcing_version_id",
+        "station_id",
+        "variable",
+        "valid_time",
+    ]
+    supervisor.validate_current_d3(catalog)
+
+
+def test_current_d3_accepts_the_mixed_river_catalog_after_the_expand() -> None:
+    """Sibling present → canonical key-shaped, sibling text-shaped. This is the
+    tick-by-tick assertion on node-27, so it must flip WITH the migration and
+    not one deploy earlier or later."""
+    supervisor.validate_current_d3(
+        _catalog(
+            "hydro.river_timeseries",
+            "hydro.river_timeseries_legacy",
+            "met.forcing_station_timeseries",
+        )
+    )
+
+
+def test_current_d3_accepts_the_mixed_forcing_catalog_with_no_code_change() -> None:
+    """tasks 7.3: I12 must not need to touch this file."""
+    supervisor.validate_current_d3(
+        _catalog(
+            "hydro.river_timeseries",
+            "met.forcing_station_timeseries",
+            "met.forcing_station_timeseries_legacy",
+        )
+    )
+
+
+def test_current_d3_rejects_a_canonical_table_that_flipped_early() -> None:
+    """Without its own sibling the river table must still be text-shaped: a
+    key-shaped river with no `_legacy` sibling means the rename half of the
+    expand ran and the create half did not."""
+    catalog = _catalog("hydro.river_timeseries", "met.forcing_station_timeseries")
+    catalog["compression_settings"][0]["attname"] = "run_key"
+    with pytest.raises(supervisor.SupervisorError):
+        supervisor.validate_current_d3(catalog)
+
+
+def test_current_d3_rejects_a_missing_canonical_hypertable() -> None:
+    """Built by hand, not through ``_catalog``: the helper refuses to produce an
+    expectation for a canonical-incomplete catalog at all, which is the point —
+    "the forcing hypertable vanished" must never be readable as "the governed
+    set is smaller today"."""
+    catalog = _catalog("hydro.river_timeseries", "met.forcing_station_timeseries")
+    catalog["hypertables"].pop("met.forcing_station_timeseries")
+    catalog["compression_settings"] = [
+        row for row in catalog["compression_settings"] if row["hypertable_schema"] != "met"
+    ]
+    with pytest.raises(supervisor.SupervisorError, match="canonical"):
+        supervisor.validate_current_d3(catalog)
+
+
+def test_current_d3_rejects_an_unknown_hypertable() -> None:
+    catalog = _catalog("hydro.river_timeseries", "met.forcing_station_timeseries")
+    catalog["hypertables"]["hydro.river_timeseries_shadow"] = True
+    with pytest.raises(supervisor.SupervisorError):
+        supervisor.validate_current_d3(catalog)
+
+
+def test_current_d3_rejects_compression_disabled_on_a_legacy_sibling() -> None:
+    catalog = _catalog(
+        "hydro.river_timeseries",
+        "hydro.river_timeseries_legacy",
+        "met.forcing_station_timeseries",
+    )
+    catalog["hypertables"]["hydro.river_timeseries_legacy"] = False
+    with pytest.raises(supervisor.SupervisorError):
+        supervisor.validate_current_d3(catalog)
+
+
+def test_d3_catalog_sql_is_module_level_and_covers_the_candidate_set() -> None:
+    """Extracted from ``capture_checkpoint`` so the node-27 pre-merge receipt
+    can run the SAME text read-only; the IN-list carries the `_legacy` names so
+    the catalog itself performs the discovery."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    sql = supervisor.D3_CATALOG_SQL
+    assert discovery.candidate_tuple_list_sql() in sql
+    assert sql.count(discovery.candidate_tuple_list_sql()) == 3
+    assert "timescaledb_information.hypertables" in sql
+    assert "timescaledb_information.compression_settings" in sql
+    assert "policy_compression" in sql

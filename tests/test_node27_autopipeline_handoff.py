@@ -2657,3 +2657,28 @@ def test_cancelled_decline_record_keeps_the_run_failing_with_its_forcing_stage(
     assert store.rows == []
     assert summary["declines_active"] == 0
     assert published_calls == []
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — the statistics guard follows the lifecycle discovery set
+# ---------------------------------------------------------------------------
+
+
+def test_stats_guard_candidate_query_covers_the_legacy_siblings() -> None:
+    """Post-expand the renamed table still receives ingest-free chunk churn
+    until retention drains it; leaving it out of the guard is how the #1468
+    zeroed-statistics trap reappears on the very table the transition creates.
+    The catalog does the discovery: a `_legacy` name that does not exist simply
+    matches no rows."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    sql = autopipe._STATS_GUARD_CANDIDATES_SQL
+    for schema, name in discovery.CANDIDATE_HYPERTABLES:
+        assert f"('{schema}', '{name}')" in sql, name
+
+
+def test_stats_guard_candidate_query_keeps_the_canonical_pair() -> None:
+    """"Legacy gone" must converge with no code change: the canonical rows stay
+    in the IN-list unconditionally."""
+    assert "('hydro', 'river_timeseries')" in autopipe._STATS_GUARD_CANDIDATES_SQL
+    assert "('met', 'forcing_station_timeseries')" in autopipe._STATS_GUARD_CANDIDATES_SQL

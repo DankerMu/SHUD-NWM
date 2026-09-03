@@ -38,6 +38,26 @@ NODE27_RESOURCE_GOVERNANCE_LOG_ROOT=/home/nwm/node27-resource-governance-logs
 # NODE27_COLD_GOVERNANCE_PRIOR_RECEIPT_PATH=/absolute/prior.json
 # NODE27_COLD_GOVERNANCE_PRIOR_RECEIPT_MAX_AGE_SECONDS=900
 
+# --- #1985 working-set governance ------------------------------------------
+# The audit projects the next compression peak
+# (projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes x days until
+# next_compressible_at) and reports critical when it does not fit in
+# home_free_bytes minus the safety margin.
+#
+# The compression lag is read from THIS file, under the same variable name the
+# compression runner uses. The two lane env files are deliberately not synced
+# (the compression env carries a write-role DSN), so the default in code and
+# the compression TEMPLATE's assignment are cross-pinned by a unit test, and
+# the receipt echoes the value it used as `compression_lag_seconds` so the
+# node-27 rollout receipt can compare it against the deployed compression env.
+# A missing or unparseable value is a configuration error with a non-zero exit,
+# never a silent fallback.
+NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
+# Headroom the projected peak must clear on /home. 100 GiB.
+NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES=107374182400
+# Uncompressed working set above which a warning is emitted. 400 GiB.
+NODE27_GOVERNANCE_WORKING_SET_WARN_BYTES=429496729600
+
 # Use a node-27-local DB account. Read-only display credentials are enough for
 # the audit path; do not use this env for ingest or cleanup writes.
 DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:5432/nhms
