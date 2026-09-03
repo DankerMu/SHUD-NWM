@@ -13,7 +13,7 @@ The rule is therefore a discovery, not a list::
     governed = {canonical} ∪ {canonical_legacy | it exists in
                               timescaledb_information.hypertables}
 
-re-evaluated on every invocation (no cached table list).  Seven call sites
+re-evaluated on every invocation (no cached table list).  Eight call sites
 consume this module:
 
 * ``scripts/node27_timeseries_compression.py`` — chunk selection, per-table totals
@@ -23,9 +23,16 @@ consume this module:
 * ``scripts/node27_timeseries_compression_live_evidence.py`` — replay validation
 * ``scripts/node27_autopipeline.py`` — the statistics guard's candidate query
 * ``packages/common/node27_cold_governance_collection.py`` — working-set collection
+* ``scripts/node27_resource_governance.py`` — the audit's policy-missing checks
 
-Two capture sites deliberately do NOT consume the discovery set and read
-:data:`CANONICAL_HYPERTABLES` instead; both are documented at their call site.
+Three sites deliberately do NOT consume the discovery set and read
+:data:`CANONICAL_HYPERTABLES` instead; each is documented where it stands.  The
+third is capture's ownership probe
+(``scripts/node27_timeseries_compression_capture.py:332-335``), which does not
+even import the constant: it casts bare ``schema.table`` literals to
+``regclass``, which ERRORS on a relation that does not exist, and ownership of a
+renamed sibling is the same role fact as ownership of the table it was renamed
+from.
 
 The candidate list is a LITERAL, never an identifier discovered at runtime and
 formatted back into SQL: chunk/settings queries simply carry all four

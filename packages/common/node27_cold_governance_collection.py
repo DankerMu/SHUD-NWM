@@ -346,7 +346,20 @@ def collect_working_set(
     else:
         projection_status = PROJECTION_OK
         floor = watermark - timedelta(days=DAILY_INGEST_WINDOW_DAYS)
-        in_window = [row for row in chunks if _as_datetime(row["range_start"]) >= floor]
+        # Two-sided (round-2 review, decision 18). The upper bound is the
+        # watermark itself: a chunk whose `range_start` is in the FUTURE is a
+        # forecast-horizon chunk, real stock that must count toward
+        # `uncompressed_bytes`, but it carries no ingest that has happened yet.
+        # Letting it into the numerator while the divisor spans only observed
+        # time inflates the rate; post-expand, with one-day chunks and a
+        # forecast horizon several days wide, the one-sided window
+        # over-reported by roughly 4x. Numerator and divisor now span the same
+        # chunk set.
+        in_window = [
+            row
+            for row in chunks
+            if floor <= _as_datetime(row["range_start"]) <= watermark
+        ]
         recent = sum(int(row["total_bytes"] or 0) for row in in_window)
         daily_ingest_bytes = int(recent / _covered_days(in_window, watermark=watermark))
 
@@ -367,21 +380,32 @@ def collect_working_set(
     }
 
 
+#: Divisor floor for :func:`_covered_days`, in days: one hour.
+_COVERED_DAYS_FLOOR = 1.0 / 24.0
+
+
 def _covered_days(rows: Sequence[Mapping[str, Any]], *, watermark: datetime) -> float:
     """Days the in-window uncompressed chunks actually cover.
 
-    ``min(DAILY_INGEST_WINDOW_DAYS, max(1.0, days(watermark - earliest
-    range_start)))`` -- fractional days, floored at one so a single fresh chunk
-    can never divide by a fraction and manufacture a spike, and capped at the
-    window so a long-uncompressed backlog cannot dilute the rate below the
-    seven-day mean.
+    ``max(1/24, days(watermark - earliest in-window range_start))`` -- fractional
+    days, floored at ONE HOUR rather than one day (round-2 review, decision 11).
+    A whole-day floor is not conservative here: in the drained steady state the
+    only in-window chunk is the open one, so a chunk six hours old would have
+    its bytes divided by 1.0 instead of 0.25 and the reported rate would be a
+    quarter of the truth -- a green flip on exactly the state the guard exists
+    to watch. Dividing by the real age over-reports early in a chunk's life,
+    which is the fail-safe direction for a capacity guard.
+
+    No upper cap is needed: the caller's window already bounds ``range_start``
+    below by ``watermark - DAILY_INGEST_WINDOW_DAYS``, so the span can never
+    exceed the window.
     """
 
     if not rows:
-        return 1.0
+        return _COVERED_DAYS_FLOOR
     earliest = min(_as_datetime(row["range_start"]) for row in rows)
     span = (watermark - earliest).total_seconds() / 86_400.0
-    return min(float(DAILY_INGEST_WINDOW_DAYS), max(1.0, span))
+    return max(_COVERED_DAYS_FLOOR, span)
 
 
 def finalize_working_set(
@@ -654,7 +678,18 @@ def collect_postgres(
                 )
                 result["working_set_error"] = str(error)
     except Exception as error:
-        result = {"status": "blocked", "reason": "query_failed", "error": str(error)}
+        # Same principle as the timescale block above (round-2 review, decision
+        # 20): a query that raised anywhere in this function must not take the
+        # capacity projection down with it. `query_failed` means the audit DID
+        # reach the database, so a missing `working_set` here would be read as
+        # "nothing to project" and exit 0. It carries the unavailable sample
+        # instead, which pages.
+        result = {
+            "status": "blocked",
+            "reason": "query_failed",
+            "error": str(error),
+            "working_set": unavailable_working_set(lag_seconds=compression_lag_seconds),
+        }
     finally:
         connection.close()
     return result

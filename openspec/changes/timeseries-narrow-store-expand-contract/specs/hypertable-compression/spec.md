@@ -53,7 +53,8 @@ runbook and live env to be re-pinned in the same change.
   AND the wrapper-wall relation (the summed duration of selected chunks
   must fit the whole-tick wall, including the measured worst mixed
   legacy-plus-narrow tick, cross-referencing the catch-up recipe and the
-  pre-expand "compress the legacy backlog first under bound 1" recipe)
+  pre-expand precondition and the attended gated `compress_chunk` of the
+  surviving legacy chunk in the expand window, with its loud backstop)
   — plus the measured inputs behind the current target, the
   derivation's invalidation conditions (chunk-interval change listed
   among them), and an explicit conclusion on timer cadence (one-day

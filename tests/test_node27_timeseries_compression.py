@@ -2312,15 +2312,21 @@ def test_a_chunk_whose_table_left_the_discovery_set_does_not_kill_the_receipt(
     jsonschema.validate(receipt, _load_schema())
 
 
+@pytest.mark.parametrize("enforce", [True, False])
 def test_a_canonical_table_missing_from_the_catalog_refuses_before_any_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce: bool
 ) -> None:
     """D3: a probe that RAN and did not report a canonical hypertable must
     refuse. The alternative is a clean receipt carrying a phantom zero total for
     a table nobody looked at — "nothing to compress" for exactly the table whose
-    disappearance is the emergency."""
+    disappearance is the emergency.
+
+    Both modes: a dry-run receipt is the evidence an operator reads BEFORE the
+    enforce tick, so a dry run that quietly reports "nothing to compress" for a
+    vanished table is the more dangerous of the two.
+    """
     env = _base_env(tmp_path)
-    config = compression.config_from_args(_args(enforce=True), env)
+    config = compression.config_from_args(_args(enforce=enforce), env)
     calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
         monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "old-1", delta_days=10)]
     )
@@ -2562,6 +2568,18 @@ def test_compression_env_example_pins_the_two_day_lag() -> None:
     text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
     assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=(\d+)$", text) == ["172800"]
     assert "one chunk width" not in text
+    # Round-2: the two provenances are DIFFERENT and neither is #1237. The box
+    # has run 172800 since the 2026-08-07 short-lag regime; only the template
+    # moved in #1985. "both since #1985" and "since #1237" are each a false
+    # audit trail for a value whose history is a recorded outage decision.
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    for source in (text, runbook):
+        # Comment wrapping is not part of the claim: flatten before matching.
+        flat = " ".join(source.replace("\n#", "\n").split())
+        assert "2026-08-07 short-lag regime" in flat
+        assert "#1237 neither judged nor changed" in flat
+    assert "2 days both on the box" not in runbook
+    assert "the value node-27 has run\n# since #1237" not in text
 
 
 def test_per_tick_bound_comment_is_re_derived_for_one_day_chunks() -> None:
@@ -2589,3 +2607,100 @@ def test_runbook_per_tick_section_records_the_one_day_derivation() -> None:
         "51 min",
     ):
         assert phrase in runbook, phrase
+
+
+# --- round-2: the bound-1 transitional rule is retired (fixture 16) ----------
+
+
+def test_the_transitional_rule_no_longer_tells_operators_to_drop_the_bound() -> None:
+    """#1985 round-2: the retired rule was not merely suboptimal, it could not
+    work — and a runbook that still carries it sends an operator to a state with
+    no exit.
+
+    Bound 4 stays the single steady-state statement; the surviving `_legacy`
+    chunk is handled by the attended `compress_chunk` instead.
+    """
+    template = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+
+    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=(\d+)$", template) == ["4"]
+    # The retired instruction, verbatim shapes it took in both files.
+    assert "keep it at 1 until a" not in template
+    assert "set this to 1 for the expand window" not in template
+    assert "stays in force from the" not in runbook
+    assert "Pre-expand recipe: compress the legacy backlog first, under bound 1" not in runbook
+    # And the template says so out loud, because an operator reading only the
+    # env file is exactly who would otherwise reach for the bound.
+    assert "Do NOT set this to 1 for the transition" in template
+
+
+def test_the_bound_one_starvation_claim_matches_the_runner() -> None:
+    """The documented reason bound 1 cannot work is a property of the SELECTION
+    CODE, so it is pinned against the code, not quoted from memory.
+
+    Table-major order plus a prefix slice means the single slot at bound 1 goes
+    to the canonical river chunk that arrives daily; the `_legacy` sibling sorts
+    after it and `met.*` after that, so neither is ever reached.
+    """
+    source = (_ROOT / "scripts" / "node27_timeseries_compression.py").read_text(encoding="utf-8")
+    assert "ORDER BY hypertable_schema, hypertable_name, range_end ASC" in source
+    assert "selected = eligible[:per_tick_bound]" in source
+    assert "river_timeseries" < "river_timeseries_legacy"  # prefix sort, hydro before met
+    assert "hydro" < "met"
+    for text in (
+        _ENV_EXAMPLE_PATH.read_text(encoding="utf-8"),
+        (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8"),
+    ):
+        assert "prefix" in text.lower()
+
+
+def test_the_attended_compress_and_its_gate_are_documented() -> None:
+    """The replacement procedure has to be executable from the runbook alone:
+    the gate that proves the legacy store is quiet, the serialisation against a
+    timer that does not share the lifecycle lock with a bare psql, and the
+    verification."""
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    for phrase in (
+        "timeseries_store = 'legacy'",
+        "status not in ('parsed','published','failed')",
+        "setsid nohup",
+        "statement_timeout",
+        "is_compressed = true",
+        "04:25 UTC",
+    ):
+        assert phrase in runbook, phrase
+
+
+def test_the_missed_attended_step_backstop_arithmetic_is_the_mixed_tick() -> None:
+    """(508 + 3 x 75) GB x 6.0 s/GB + 380 s = 4778 s ~ 80 min against a 3900 s
+    wall. The retired text said 73 min, which dropped the measured 380 s
+    non-compress residual its own formula includes."""
+    assert (508 + 3 * 75) * 6.0 + 380 == 4778.0
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    template = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert "4778" in runbook
+    assert "80 min" in runbook
+    assert "4778" in template
+    assert "73 min" not in runbook
+    for text in (runbook, template):
+        # The backstop is loud: TERM, no receipt, OnFailure — daily.
+        assert "no receipt" in text.lower()
+        assert "OnFailure" in text
+
+
+def test_the_expected_red_state_is_documented_as_a_condition_not_a_date() -> None:
+    """#1985 round-2, fixture 13: "the first deployment is red" is a claim about
+    a moment, and it goes stale the moment the backlog drains — after which the
+    runbook would be telling an operator to expect an alarm that no longer
+    fires. The durable form is the inequality plus a dated worked example.
+    """
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    assert "Expect the first deployment to be red" not in runbook
+    assert "the very\n     first daily audit" not in runbook
+    flat = " ".join(runbook.split())
+    assert "projected_peak_bytes > home_free_bytes − safety_margin_bytes" in flat
+    # The measurement survives as a dated example, not as the rule.
+    assert "2026-09-03 pre-compression measurement" in flat
+    # The acknowledgement and the prohibition are unchanged.
+    assert "Never raise" in flat
+    assert "NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES" in flat

@@ -19,7 +19,9 @@ DATABASE_URL=postgresql://nhms_ingest_rw:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # business-time watermark, then applies the lag below to that watermark.
 
 # Chunk-selection lag in seconds. 172800 = 2 days — the value node-27 has run
-# since #1237, now also the committed template value (#1985). It is NOT "one
+# since the 2026-08-07 short-lag regime (runbook section 4.3.2.1; #1237 neither
+# judged nor changed the lag), now also the committed template value (#1985,
+# which moved the template onto the live value). It is NOT "one
 # chunk width": the narrow tables use a 1-day chunk_time_interval and the
 # transitional `_legacy` siblings a 7-day one, so no single chunk width could
 # describe the lag any more. The lag is a business-time delay measured from the
@@ -44,14 +46,28 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 # A transitional `_legacy` sibling is a write-frozen FINITE backlog of 7-day
 # chunks with zero steady-state arrival, not an added arrival rate; its worst
 # single chunk (about 508 GB, roughly 51 min at the measured 6.0 s/GB) already
-# approaches the 60-minute per-chunk timeout, so the backlog is compressed
-# BEFORE the expand under PER_TICK_BOUND=1, never mixed into a bound-4 tick.
-# The pre-expand drain cannot reach the LAST legacy chunk: its range_end is
-# still in the future at rename time, so it becomes eligible at range_end + lag,
-# by which point narrow chunks are arriving and a bound-4 tick would mix them
-# (51 min + 3 x 7.5 min is past the 3900 s wall). Operational rule during the
-# transition: set this to 1 for the expand window and keep it at 1 until a
-# receipt shows that last `_legacy` chunk compressed, then restore 4.
+# approaches the 60-minute per-chunk timeout. The expand migration's
+# precondition is a compression receipt showing that backlog already drained --
+# no uncompressed terminal chunk left on the table about to be renamed, which
+# the daily timer reaches on its own under the 2-day lag, one single-table tick
+# at a time.
+# The drain cannot reach the LAST legacy chunk: its range_end is still in the
+# future at rename time, so it becomes eligible at range_end + lag, days later,
+# when narrow chunks are already arriving. That one chunk is compressed by an
+# ATTENDED, gated compress_chunk inside the expand window (runbook section 4,
+# "The surviving chunk is compressed ATTENDED"), NOT by changing this value.
+# Do NOT set this to 1 for the transition: selection is a table-major PREFIX
+# (ORDER BY hypertable_schema, hypertable_name, range_end; eligible[:bound]), so
+# the single slot always goes to the daily hydro.river_timeseries chunk -- the
+# legacy chunk and met.forcing_station_timeseries are never selected, and the
+# exit condition is unreachable. Bound 1 additionally requires the section 4.5
+# raised timeout/wall triple or leg 3 refuses the configuration.
+# If the attended step is missed the backstop is LOUD, not silent: the tick at
+# range_end + lag selects the legacy chunk plus up to three narrow ones
+# ((508 + 3 x 75) GB x 6.0 s/GB + 380 s is about 4778 s, past the 3900 s wall),
+# the wrapper TERMs it, no receipt is written and OnFailure mails -- daily,
+# until the attended compress is done. The fix is that compress, never a bound
+# change. Bound stays 4.
 # It is a throughput ceiling, NOT the number of river-size chunks one tick can
 # actually redeem. The per-tick hint further below (=1) governs whenever more
 # than one river-size chunk could be eligible in a single tick — in that state

@@ -44,7 +44,7 @@
     "deferred_remainder": {"type": "array", "items": {"type": "string", "minLength": 1}},
     "salvage_backed_windows": {"type": "array", "items": {"$ref": "#/definitions/window"}},
     "legacy_chunks": {
-      "type": "object",
+      "type": ["object", "null"],
       "additionalProperties": false,
       "minProperties": 1,
       "patternProperties": {

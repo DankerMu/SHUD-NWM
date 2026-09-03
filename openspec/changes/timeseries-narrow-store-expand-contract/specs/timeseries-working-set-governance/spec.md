@@ -2,7 +2,7 @@
 
 ### Requirement: Resource governance SHALL measure the uncompressed working set and project the next compression peak
 
-The node-27 resource-governance audit SHALL collect, from the catalog only: `uncompressed_bytes` (sum of `pg_total_relation_size` over uncompressed chunks of the canonical and `_legacy` river and forcing hypertables), `daily_ingest_bytes` (uncompressed chunk bytes whose `range_start` falls within the trailing seven days, divided by the number of days those chunks actually cover — `min(7, max(1, days(watermark − earliest in-window range_start)))`, never a fixed seven, because in steady state the uncompressed window holds only lag+1 days and a fixed divisor under-reports the rate; derived from chunk `range_start` and size, never from row scans), `next_compressible_at` (the oldest uncompressed chunk's `range_end` plus the compression lag read from `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` in the governance lane's own env — the same variable name the compression runner uses, default 172800, template-to-template cross-pinned — and echoed in the receipt as `compression_lag_seconds` so the node-27 rollout receipt compares it with the deployed compression env value), `home_free_bytes`, `projection_status`, and `projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes × max(0, days(next_compressible_at − display watermark))` where the interval is expressed in days and may be fractional.
+The node-27 resource-governance audit SHALL collect, from the catalog only: `uncompressed_bytes` (sum of `pg_total_relation_size` over uncompressed chunks of the canonical and `_legacy` river and forcing hypertables), `daily_ingest_bytes` (uncompressed chunk bytes whose `range_start` falls within the trailing seven days, divided by the number of days those chunks actually cover — `max(1/24, days(watermark − earliest in-window range_start)) (an hours-level floor: a whole-day floor divides the open chunk's first-day bytes by one day and under-reports the rate by 1/age; the seven-day cap is implied by the window bound)`, never a fixed seven, because in steady state the uncompressed window holds only lag+1 days and a fixed divisor under-reports the rate; derived from chunk `range_start` and size, never from row scans), `next_compressible_at` (the oldest uncompressed chunk's `range_end` plus the compression lag read from `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` in the governance lane's own env — the same variable name the compression runner uses, default 172800, template-to-template cross-pinned — and echoed in the receipt as `compression_lag_seconds` so the node-27 rollout receipt compares it with the deployed compression env value), `home_free_bytes`, `projection_status`, and `projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes × max(0, days(next_compressible_at − display watermark))` where the interval is expressed in days and may be fractional.
 
 #### Scenario: Fields present in the receipt
 - **WHEN** the audit runs in any mode
@@ -15,6 +15,14 @@ The node-27 resource-governance audit SHALL collect, from the catalog only: `unc
 #### Scenario: Watermark unavailable
 - **WHEN** the display watermark cannot be fetched
 - **THEN** the audit records `projection_status = "watermark_unavailable"`, emits the critical recommendation `WATERMARK_UNAVAILABLE` (a lane fault must reach an operator), and exits 1
+
+#### Scenario: Future chunks stay out of the rate
+- **WHEN** the catalog holds an uncompressed chunk whose `range_start` is after the watermark (the forecast horizon writes ahead of it)
+- **THEN** that chunk's bytes are excluded from `daily_ingest_bytes` (the in-window set is `watermark − 7 d <= range_start <= watermark`, the same set the divisor spans) while it still counts toward `uncompressed_bytes`, so the numerator and the divisor range over the same chunks
+
+#### Scenario: Home free space unavailable
+- **WHEN** the working set was measured but the `/home` filesystem observation is `unavailable`
+- **THEN** `home_free_bytes` is null, `projection_status` stays `"ok"`, the audit emits the critical recommendation `HOME_FREE_UNAVAILABLE` (the projection cannot be compared to anything — a lane fault must reach an operator) and exits 1
 
 #### Scenario: Working set unavailable
 - **WHEN** the working-set collection fails (the timescale block is `blocked`) or the catalog returns no row for either canonical hypertable

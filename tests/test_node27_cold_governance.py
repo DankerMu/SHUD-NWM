@@ -392,12 +392,15 @@ def test_both_cold_governance_examples_carry_the_working_set() -> None:
         jsonschema.validate(document, _COLD_SCHEMA)
 
 
-def test_ci_schema_example_check_resolves_the_drift_family() -> None:
-    """The `.drift` example has no schema of its own; CI must strip the suffix
-    to reach `node27_cold_governance_receipt.schema.json`. Without `drift` in
-    the alternation the job printed a WARNING and validated nothing."""
-    workflow = (_ROOT_DIR / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    assert "s/\\.(noop|intent|partial|error|drift)$//" in workflow
+# The exact-string pin on CI's family-strip alternation was RETIRED in the
+# #1985 round-2 pass. Two reasons: the alternation itself is gone (the strip is
+# now `s/\.[a-z0-9-]+$//`, so there is no closed list left to enumerate), and a
+# ci.yml-only PR routes to `tests/test_select_ci_tests.py` alone (#1650 exact
+# single-target selection) — this file would never have run on the PR that
+# broke it. The replacement lives there: it parses the sed out of the workflow
+# and asserts that EVERY example under `schemas/examples/` resolves to a real
+# schema, which covers the `.drift` case this pin covered plus the twenty-three
+# it did not.
 
 
 _PRODUCTION_WORKING_SET_KEYS = {

@@ -63,6 +63,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -134,6 +135,28 @@ _APPLICATION_NAME = "nhms-ts-retention"
 # H12 statement timeouts.
 _QUERY_TIMEOUT_MS = 60_000
 _DROP_TIMEOUT_MS = 300_000
+
+# #1985 round-2 (decision 21): the post-drop discovery probe opens its own
+# connection AFTER the drop loop, while this tick still holds the lifecycle
+# lock. An untimed connect that stalls there leaves dropped chunks with no
+# receipt at all and parks the compression lane on `refused_lock` until the
+# stall clears. Mirrors the compression sibling's `_CONNECT_TIMEOUT_SECONDS`
+# (`scripts/node27_timeseries_compression.py:150`).
+_CONNECT_TIMEOUT_SECONDS = 10
+
+
+class LegacyChunks(Enum):
+    """Sentinel for a ``legacy_chunks`` probe that could not answer.
+
+    Three receipt states, not two (#1985 round-2, decision 17): a mapping means
+    the siblings were counted, ABSENT means the catalog has no sibling, and
+    ``UNKNOWN`` means the probe failed and the count is inconclusive. The I9 /
+    I14 entry gate reads ``legacy_chunks[<table>] == 0``; absent and null both
+    keep it shut, but only an explicit ``null`` tells the archived-receipt
+    reader that the tick could not vouch for the count.
+    """
+
+    UNKNOWN = "unknown"
 
 # #1664 drop-phase lock budget. Bounds ONE lock acquisition inside the
 # drop session so a blocked drop refuses as ``55P03`` (lock not available)
@@ -755,6 +778,7 @@ def _default_discover_hypertables(config: RetentionConfig) -> list[Mapping[str, 
         config.database_url,
         cursor_factory=psycopg2.extras.RealDictCursor,
         fallback_application_name=_APPLICATION_NAME,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
     )
     try:
         with connection:
@@ -975,7 +999,7 @@ def build_receipt(
     reference_time: datetime | None = None,
     window_days: int | None = None,
     archive_gate: str = ARCHIVE_GATE_DISABLED,
-    legacy_chunks: Mapping[str, int] | None = None,
+    legacy_chunks: Mapping[str, int] | LegacyChunks | None = None,
 ) -> dict[str, Any]:
     """Assemble a schema-``oneOf``-conformant receipt.
 
@@ -993,12 +1017,17 @@ def build_receipt(
     gate_block = _archive_gate_block(archive_gate)
     # #1985: present ONLY when a `_legacy` sibling exists, so a receipt written
     # on today's (and the post-contract) catalog carries no such key at all and
-    # stays key-for-key comparable with the archived receipts.
-    legacy_block = (
-        {"legacy_chunks": {name: int(count) for name, count in legacy_chunks.items()}}
-        if legacy_chunks
-        else {}
-    )
+    # stays key-for-key comparable with the archived receipts. An explicit
+    # `null` is the third state (decision 17): the probe ran and failed, so the
+    # count is inconclusive rather than absent.
+    if legacy_chunks is LegacyChunks.UNKNOWN:
+        legacy_block: dict[str, Any] = {"legacy_chunks": None}
+    elif isinstance(legacy_chunks, Mapping) and legacy_chunks:
+        legacy_block = {
+            "legacy_chunks": {name: int(count) for name, count in legacy_chunks.items()}
+        }
+    else:
+        legacy_block = {}
     if outcome == "dry-run":
         if refusal_reason is not None:
             raise ValueError("dry-run outcome cannot carry refusal_reason")
@@ -1182,7 +1211,7 @@ def run_retention(
             **kwargs,
         )
 
-    def _legacy_chunks() -> dict[str, int] | None:
+    def _legacy_chunks() -> dict[str, int] | LegacyChunks | None:
         """#1985: the transitional siblings and their TOTAL remaining chunks.
 
         Re-evaluated per tick (never cached) so the mapping appears with the
@@ -1200,10 +1229,16 @@ def run_retention(
         raise would carry an already-executed deletion out through
         :func:`main`'s uncaught-error arm and publish a ``refused`` receipt
         whose schema branch forbids ``dropped_chunks`` — the chunks would be
-        gone and recorded nowhere. A probe failure therefore drops only the
-        ``legacy_chunks`` key: the I9 / I14 contract gate reads that key and
-        stays shut on its absence, which is the safe direction, and the cause
-        goes to stderr as a diagnostic.
+        gone and recorded nowhere.
+
+        A probe failure therefore yields :data:`LegacyChunks.UNKNOWN`, which the
+        receipt records as an explicit ``"legacy_chunks": null`` (round-2
+        review, decision 17). Absent and null both keep the I9 / I14 gate shut —
+        the safe direction — but they are different facts, and an archived
+        receipt has to be self-describing about which one it is: absent means
+        the catalog holds no sibling, null means this tick could not tell. The
+        cause goes to stderr as a diagnostic. Isolation covers the dry-run
+        branch too, which calls this same helper.
         """
 
         if discover_hypertables is None:
@@ -1215,14 +1250,14 @@ def run_retention(
                 print(
                     json.dumps(
                         {
-                            "warning": "legacy_chunks probe failed; omitting the key",
+                            "warning": "legacy_chunks probe failed; recording a null count",
                             "error": _redact_error_text(error, config.database_url),
                         },
                         sort_keys=True,
                     ),
                     file=sys.stderr,
                 )
-            return None
+            return LegacyChunks.UNKNOWN
 
     # Phase 1: enumerate eligible chunks.
     # There is no archive coverage object any more and therefore no

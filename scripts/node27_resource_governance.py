@@ -375,11 +375,16 @@ def _working_set_recommendations(
 ) -> list[dict[str, Any]]:
     """#1985 / design D8: does the next compression peak still fit on `/home`?
 
-    A block that is absent ENTIRELY is only silent when postgres itself was
-    never sampled (``status`` other than ``ok`` — no DSN configured, connection
-    refused): there is nothing to project and the postgres status already says
-    so. With a healthy postgres sample the block must exist, so its absence is
-    the same lane fault as an unmeasurable working set and reports
+    A block that is absent ENTIRELY is silent for exactly three postgres
+    outcomes, all of which mean no database was reached at all and all of which
+    the postgres status already reports: ``database_url_missing`` (no DSN
+    configured), ``psycopg2_unavailable`` (driver missing) and
+    ``connection_failed``. ``query_failed`` is deliberately NOT in that set —
+    the audit did reach the database, so its outer handler carries an
+    unavailable working set rather than dropping the block (decision 20).
+
+    With a healthy postgres sample the block must exist, so its absence is the
+    same lane fault as an unmeasurable working set and reports
     ``WORKING_SET_UNAVAILABLE`` (round-1 review: dropping the block was
     reproducibly worth exit 0 while the same failure at base exited 1).
     """
@@ -438,15 +443,34 @@ def _working_set_recommendations(
                 "action": "Restore the display watermark query before the next compression tick.",
             }
         )
-    elif (
-        working_set.get("projection_status") == PROJECTION_OK
-        and isinstance(projected, int)
-        and isinstance(home_free, int)
-    ):
+    elif working_set.get("projection_status") == PROJECTION_OK:
         # Gated on `ok`: with no uncompressed chunk there is no next compression
         # to project, so the spec's empty state emits no critical at all — free
         # space itself is already covered by the filesystem recommendations.
-        if projected > home_free - thresholds.safety_margin_bytes:
+        if not isinstance(home_free, int) or isinstance(home_free, bool):
+            # `/home` did not resolve or `statvfs` failed, so the comparison
+            # below cannot be made (round-2 review, decision 19). Skipping it
+            # silently is the fail-open this guard exists to prevent: the
+            # working set IS measured, it is the free space that is unknown, and
+            # the filesystem block only emits `HOME_FREE_BELOW_WARNING` when it
+            # has a number to compare. `projection_status` stays `ok` — the
+            # catalog was fine — and `home_free_bytes` stays null.
+            recommendations.append(
+                {
+                    "severity": "critical",
+                    "area": "filesystem",
+                    "code": "HOME_FREE_UNAVAILABLE",
+                    "evidence": evidence,
+                    "action": (
+                        "Restore /home free-space observation (statvfs) before the next "
+                        "compression tick; the peak projection cannot be checked without it."
+                    ),
+                }
+            )
+        elif (
+            isinstance(projected, int)
+            and projected > home_free - thresholds.safety_margin_bytes
+        ):
             recommendations.append(
                 {
                     "severity": "critical",

@@ -194,7 +194,13 @@ jobs:
               echo "Validating $example against $schema ..."
               check-jsonschema --schemafile "$schema" "$example"
             else
-              family=$(echo "$base" | sed -E 's/\.(noop|intent|partial|error|drift)$//')
+              # Reached only after the exact `schemas/<base>.schema.json` miss:
+              # strip one dotted variant suffix so `<schema>.<variant>.example.json`
+              # falls back to its family schema. No schema base name contains a
+              # dot (pinned in tests/test_select_ci_tests.py), so this can never
+              # eat part of a real name; a closed alternation silently skipped
+              # every variant nobody remembered to add (#1985).
+              family=$(echo "$base" | sed -E 's/\.[a-z0-9-]+$//')
               family_schema="schemas/${family}.schema.json"
               if [ "$family" != "$base" ] && [ -f "$family_schema" ]; then
                 echo "Validating $example against $family_schema ..."

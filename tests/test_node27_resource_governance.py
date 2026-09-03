@@ -75,6 +75,76 @@ def test_recommendations_capture_node27_resource_risks() -> None:
     assert "DEAD_TUPLE_HOTSPOT" in codes
 
 
+def _policy_rows(*identities: tuple[str, str]) -> dict:
+    """A postgres block whose only content is bare `hypertables` rows."""
+    return {
+        "status": "ok",
+        "hypertables": [
+            {
+                "hypertable_schema": schema,
+                "hypertable_name": name,
+                "num_chunks": 3,
+                "compression_enabled": False,
+                "retention_job_id": None,
+                "compression_job_id": None,
+            }
+            for schema, name in identities
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        ("hydro", "river_timeseries"),
+        ("hydro", "river_timeseries_legacy"),
+        ("met", "forcing_station_timeseries"),
+        ("met", "forcing_station_timeseries_legacy"),
+    ],
+)
+def test_every_candidate_hypertable_raises_the_policy_missing_pair(
+    identity: tuple[str, str],
+) -> None:
+    """#1985: the audit's policy checks are keyed on the lifecycle CANDIDATE
+    set, all four identities.
+
+    A transitional `_legacy` sibling is governed by the same retention and
+    compression policies as the table it was renamed from, so it must raise the
+    same two warnings — and it must raise them under its OWN name, or an
+    operator reading the receipt cannot tell which table lost its policy.
+    Parametrised over all four so a narrowing back to the canonical pair (a
+    `CANDIDATE_HYPERTABLES[:2]` slice, the shape the bug took) fails here.
+    """
+    receipt = {"filesystem": {"filesystems": {}}, "postgres": _policy_rows(identity)}
+    qualified = f"{identity[0]}.{identity[1]}"
+    evidence = {
+        item["code"]: item["evidence"]
+        for item in governance._recommendations(receipt, governance.AuditThresholds())
+    }
+    assert evidence["TIMESCALE_RETENTION_POLICY_MISSING"]["hypertable"] == qualified
+    assert evidence["TIMESCALE_COMPRESSION_POLICY_MISSING"]["hypertable"] == qualified
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        # Right table name, wrong schema: a `public` copy must not borrow the
+        # lifecycle lane's policy checks. This is what matching on (schema,
+        # name) instead of the bare name buys.
+        ("public", "river_timeseries"),
+        ("hydro", "river_timeseries_old"),
+        ("ops", "run_display_coverage"),
+    ],
+)
+def test_a_hypertable_outside_the_candidate_set_raises_neither_policy_code(
+    identity: tuple[str, str],
+) -> None:
+    receipt = {"filesystem": {"filesystems": {}}, "postgres": _policy_rows(identity)}
+    codes = _codes(receipt)
+    assert "TIMESCALE_RETENTION_POLICY_MISSING" not in codes
+    assert "TIMESCALE_COMPRESSION_POLICY_MISSING" not in codes
+
+
 def test_write_summary_rejects_relative_path(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="summary path must be absolute"):
         governance._write_summary(Path("relative.json"), {"status": "completed"})
@@ -741,7 +811,7 @@ def _hypertable_row(schema: str, name: str, *, num_chunks: int = 1) -> dict:
     }
 
 
-def _chunk_row(schema: str, name: str, *, day: int, total_bytes: int) -> dict:
+def _chunk_row(schema: str, name: str, *, day: float, total_bytes: int) -> dict:
     start = _WATERMARK - timedelta(days=day)
     return {
         "hypertable_schema": schema,
@@ -836,6 +906,9 @@ def test_daily_ingest_divides_by_the_days_the_window_actually_covers() -> None:
     Round-1 review: the fixed seven under-reported the rate systematically —
     the first node-27 receipt showed ``daily_ingest_bytes == uncompressed_bytes
     // 7`` byte for byte — and a capacity guard must err high, not low.
+
+    Round-2 review: the window is two-sided (``floor <= range_start <=
+    watermark``) and the divisor is floored at an hour, not a day.
     """
     cursor = _FakeCursor(
         hypertables=[
@@ -878,17 +951,83 @@ def test_daily_ingest_in_steady_state_divides_by_the_uncompressed_span() -> None
 
 
 def test_a_single_fresh_chunk_never_divides_by_a_fraction() -> None:
-    """Floor of one day: a chunk that started six hours ago would otherwise be
-    multiplied by four and project a spike nobody measured."""
+    """Round-2 review: the floor is ONE HOUR, not one day.
+
+    In the drained steady state the only in-window chunk is the open one, so a
+    whole-day floor divides a six-hour-old chunk's bytes by 1.0 instead of 0.25
+    and reports a quarter of the real rate — a green flip on exactly the state
+    this guard watches. Ten GiB in six hours is 40 GiB/day, and over-reporting
+    early in a chunk's life is the fail-safe direction for a capacity guard.
+    """
     cursor = _FakeCursor(
         hypertables=[
             _hypertable_row("hydro", "river_timeseries"),
             _hypertable_row("met", "forcing_station_timeseries"),
         ],
-        chunks=[_chunk_row("hydro", "river_timeseries", day=0, total_bytes=800)],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=0.25, total_bytes=10 * _GIB)],
     )
     sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
-    assert sample["daily_ingest_bytes"] == 800
+    assert sample["daily_ingest_bytes"] == 40 * _GIB
+
+
+def test_the_divisor_floor_is_an_hour_not_a_day() -> None:
+    """The floor still exists — a chunk seconds old must not divide by ~0 and
+    manufacture an astronomical rate. One hour is the smallest denominator."""
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=0, total_bytes=100)],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["daily_ingest_bytes"] == 100 * 24
+
+
+def test_a_future_chunk_counts_as_stock_but_not_as_ingest() -> None:
+    """Round-2 review, decision 18: the rate window is two-sided.
+
+    A chunk whose ``range_start`` is in the FUTURE is a forecast-horizon chunk:
+    real bytes on the volume, so it belongs in ``uncompressed_bytes``, but it
+    carries no ingest that has happened yet. Counting it in the numerator while
+    the divisor spans only observed time inflates the rate — post-expand, with
+    one-day chunks and a multi-day forecast horizon, by roughly 4x — and an
+    inflated rate is a projection nobody can act on.
+    """
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[
+            _chunk_row("hydro", "river_timeseries", day=2, total_bytes=200),
+            # range_start two days AFTER the watermark.
+            _chunk_row("met", "forcing_station_timeseries", day=-2, total_bytes=9000),
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    # Stock: both chunks.
+    assert sample["uncompressed_bytes"] == 9200
+    assert sample["uncompressed_chunks"] == 2
+    # Rate: only the observed one, over the two days it covers.
+    assert sample["daily_ingest_bytes"] == 100
+
+
+def test_an_all_future_working_set_reports_a_zero_rate_not_a_crash() -> None:
+    """Degenerate edge of the two-sided window: nothing observed yet. The stock
+    is real and the status stays ``ok``; the rate is honestly zero rather than
+    a division by an empty span."""
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=-1, total_bytes=500)],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["projection_status"] == "ok"
+    assert sample["uncompressed_bytes"] == 500
+    assert sample["daily_ingest_bytes"] == 0
 
 
 def test_empty_state_reports_no_uncompressed_chunk_and_projects_nothing() -> None:
@@ -977,9 +1116,10 @@ def test_scenario_peak_fits() -> None:
         "PROJECTED_PEAK_EXCEEDS_HOME_FREE",
         "WORKING_SET_ABOVE_WARNING",
         "WATERMARK_UNAVAILABLE",
-        # #1985 round-1: the new critical must stay silent on a healthy
-        # measured sample — no phantom code on the fits path.
+        # #1985 round-1/round-2: the new criticals must stay silent on a
+        # healthy measured sample — no phantom code on the fits path.
         "WORKING_SET_UNAVAILABLE",
+        "HOME_FREE_UNAVAILABLE",
     }
     assert "critical" not in {
         item["severity"]
@@ -1103,14 +1243,172 @@ def test_a_missing_working_set_block_on_a_healthy_postgres_is_critical() -> None
     assert codes["WORKING_SET_UNAVAILABLE"] == "critical"
 
 
-def test_a_missing_working_set_block_is_silent_when_postgres_was_never_sampled() -> None:
-    """No DSN configured / connection refused: postgres already says so and
-    there is nothing to project. This is the ONLY silent absence."""
-    for status in ("skipped", "blocked"):
-        receipt = _base_receipt()
-        receipt.pop("working_set", None)
-        receipt["postgres"] = {"status": status, "reason": "database_url_missing"}
-        assert "WORKING_SET_UNAVAILABLE" not in _codes(receipt)
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [
+        ("skipped", "database_url_missing"),
+        ("blocked", "psycopg2_unavailable"),
+        ("blocked", "connection_failed"),
+    ],
+)
+def test_a_missing_working_set_block_is_silent_when_postgres_was_never_sampled(
+    status: str, reason: str
+) -> None:
+    """The silent set is exactly these three, and every one of them means no
+    database was reached at all: there is nothing to project and the postgres
+    status already says so.
+
+    ``query_failed`` is deliberately NOT here — see the test below. It is the
+    one blocked reason where the audit DID reach the database, and dropping the
+    projection on it was worth exit 0 for a lane that could not see its own
+    volume.
+    """
+    receipt = _base_receipt()
+    receipt.pop("working_set", None)
+    receipt["postgres"] = {"status": status, "reason": reason}
+    assert "WORKING_SET_UNAVAILABLE" not in _codes(receipt)
+
+
+def test_query_failed_is_not_in_the_silent_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 review, decision 20: `collect_postgres`'s OUTER handler keeps the
+    working set.
+
+    A `pg_settings` read that raises has nothing to do with the hypertable
+    catalog, but the outer `except` used to replace the whole result dict and
+    take the projection with it — leaving a receipt that exits 0 while the lane
+    has stopped watching /home entirely.
+    """
+
+    class _SettingsRaisingCursor(_FakeCursor):
+        def execute(self, sql: str, params: object = None) -> None:
+            if "pg_settings" in sql:
+                raise RuntimeError("permission denied for relation pg_settings")
+            super().execute(sql, params)
+
+        def __enter__(self) -> "_SettingsRaisingCursor":
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    cursor = _SettingsRaisingCursor(hypertables=[], chunks=[])
+
+    class _Connection:
+        autocommit = False
+
+        def cursor(self) -> _SettingsRaisingCursor:
+            return cursor
+
+        def close(self) -> None:
+            return None
+
+    fake_psycopg2 = types.SimpleNamespace(
+        connect=lambda *_a, **_k: _Connection(),
+        extras=types.SimpleNamespace(RealDictCursor=object),
+    )
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+    monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_psycopg2.extras)
+    monkeypatch.setattr(
+        collection, "fetch_display_watermark", lambda _url: datetime(2026, 9, 1, tzinfo=UTC)
+    )
+    postgres = collection.collect_postgres("postgresql://ro@127.0.0.1/nhms")
+    assert postgres["status"] == "blocked"
+    assert postgres["reason"] == "query_failed"
+    assert postgres["working_set"]["projection_status"] == "working_set_unavailable"
+
+    # ... and the whole audit pages on it.
+    summary_path = tmp_path / "resource-governance.json"
+    monkeypatch.setattr(
+        governance,
+        "collect_filesystem",
+        lambda _config: {"filesystems": {"home": {"path": "/home", "free_bytes": 10 * _GIB}}, "path_sizes": {}},
+    )
+    monkeypatch.setattr(governance, "collect_postgres", lambda _url, **_kwargs: postgres)
+    monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
+    rc = governance.main(["--summary-path", str(summary_path), "--quiet"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert f"{_CRITICAL_ANCHOR}WORKING_SET_UNAVAILABLE" in captured.err.splitlines()
+
+
+def test_home_unavailable_with_a_measured_working_set_is_critical(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-2 review, decision 19: an unobservable `/home` must page.
+
+    The catalog side is fine — `projection_status` stays `ok` — but statvfs on
+    `/home` failed, so `home_free_bytes` is null and the
+    `projected_peak_bytes > home_free - margin` comparison cannot be made. The
+    filesystem block cannot help: `HOME_FREE_BELOW_WARNING` needs a number to
+    compare, so without this code the audit says nothing at all about the one
+    volume it exists to watch.
+    """
+    summary_path = tmp_path / "resource-governance.json"
+    monkeypatch.setattr(
+        governance,
+        "collect_filesystem",
+        lambda _config: {
+            "filesystems": {
+                "root": {"path": "/", "free_bytes": 500 * _GIB},
+                # Exactly what `disk_usage` returns when statvfs fails.
+                "home": {"path": "/home", "status": "unavailable", "error": "[Errno 5] I/O error"},
+            },
+            "path_sizes": {},
+        },
+    )
+    monkeypatch.setattr(
+        governance,
+        "collect_postgres",
+        lambda _url, **_kwargs: {
+            "status": "ok",
+            "working_set": {
+                "hypertables": ["hydro.river_timeseries", "met.forcing_station_timeseries"],
+                "uncompressed_bytes": 10 * _GIB,
+                "uncompressed_chunks": 2,
+                "daily_ingest_bytes": _GIB,
+                "next_compressible_at": "2026-09-03T00:00:00Z",
+                "compression_lag_seconds": 172_800,
+                "watermark": "2026-09-01T00:00:00Z",
+                "projection_status": "ok",
+            },
+        },
+    )
+    monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
+
+    rc = governance.main(["--summary-path", str(summary_path), "--quiet"])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    lines = captured.err.splitlines()
+    assert f"{_CRITICAL_ANCHOR}HOME_FREE_UNAVAILABLE" in lines
+    # The alert body still carries the numbers the operator needs.
+    assert any(line.startswith(governance.WORKING_SET_DIAGNOSTIC_PREFIX) for line in lines)
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    # The catalog was fine; only the volume observation was not.
+    assert written["working_set"]["projection_status"] == "ok"
+    assert written["working_set"]["home_free_bytes"] is None
+    # And the peak comparison is NOT silently reported as fitting.
+    assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in _codes(written)
+
+
+def test_a_measured_home_still_reaches_the_peak_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Guard on the guard: `HOME_FREE_UNAVAILABLE` must not shadow the code it
+    was inserted in front of."""
+    receipt = _base_receipt()
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=600 * _GIB,
+        daily_ingest_bytes=75 * _GIB,
+        next_compressible_at="2026-09-03T00:00:00Z",
+        home_free_bytes=400 * _GIB,
+        projected_peak_bytes=750 * _GIB,
+    )
+    codes = _codes(receipt)
+    assert codes["PROJECTED_PEAK_EXCEEDS_HOME_FREE"] == "critical"
+    assert "HOME_FREE_UNAVAILABLE" not in codes
 
 
 def test_empty_catalog_is_unavailable_not_no_uncompressed_chunk() -> None:
@@ -1185,6 +1483,16 @@ def test_a_blocked_timescale_block_still_leaves_an_unavailable_working_set(
     result = collection.collect_postgres("postgresql://ro@127.0.0.1/nhms")
     assert result["timescale_status"]["status"] == "blocked"
     assert result["working_set"]["projection_status"] == "working_set_unavailable"
+    # The CAUSE rides in the receipt, not only in the status: an operator
+    # reading the archived summary must be able to tell a permissions loss from
+    # a dropped catalog without re-running the audit. Same precedent as
+    # `timescale_status.error`, and deliberately unredacted — the summary is
+    # written by `_write_summary` without `redact_payload`, and only catalog
+    # `cursor.execute` errors can reach this field (the watermark fetcher
+    # collapses every failure to its type name), so it cannot carry a DSN.
+    assert result["working_set_error"] == (
+        "permission denied for schema timescaledb_information"
+    )
     assert _codes({"postgres": {"status": "ok"}, "working_set": result["working_set"]})[
         "WORKING_SET_UNAVAILABLE"
     ] == "critical"
@@ -1227,7 +1535,24 @@ def test_an_unavailable_working_set_pages_through_main_with_a_non_zero_exit(
     captured = capsys.readouterr()
 
     assert rc == 1
-    assert f"{_CRITICAL_ANCHOR}WORKING_SET_UNAVAILABLE" in captured.err.splitlines()
+    lines = captured.err.splitlines()
+    # Exactly the anchor and the payload: one critical, one diagnostic. A third
+    # line would mean this state also tripped something else.
+    assert lines[0] == f"{_CRITICAL_ANCHOR}WORKING_SET_UNAVAILABLE"
+    assert len(lines) == 2
+    assert lines[1].startswith(governance.WORKING_SET_DIAGNOSTIC_PREFIX)
+    payload = json.loads(lines[1][len(governance.WORKING_SET_DIAGNOSTIC_PREFIX) :])
+    # Every number the mail body would quote is null, not zero: the alert says
+    # "unknown", never "it fits".
+    for field in (
+        "uncompressed_bytes",
+        "daily_ingest_bytes",
+        "next_compressible_at",
+        "projected_peak_bytes",
+    ):
+        assert payload[field] is None, field
+    assert payload["projection_status"] == "working_set_unavailable"
+    assert payload["compression_lag_seconds"] == governance.DEFAULT_COMPRESSION_LAG_SECONDS
     written = json.loads(summary_path.read_text(encoding="utf-8"))
     assert written["working_set"]["projection_status"] == "working_set_unavailable"
     # Not 0: an unobserved working set must never read as "it fits".

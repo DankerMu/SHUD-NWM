@@ -18,7 +18,7 @@ The river expand migration SHALL, in one transaction: rename `hydro.river_timese
 
 ### Requirement: Lifecycle lanes and catalog-pinning tools SHALL cover the legacy table until it is dropped, without a second code change
 
-The compression runner, the retention runner, the compression supervisor's current-state validation, the capture tool's hypertable keys, the live-evidence replay validator's catalog check, the autopipeline statistics guard and the resource-governance collection SHALL derive their hypertable set as each canonical table plus its `_legacy` sibling when that sibling exists in `timescaledb_information.hypertables`; per-table expectations SHALL be asserted per table (key-shaped settings on the canonical table, text-shaped settings on the legacy table). Both tables SHALL be compressed under the same lag and dropped under the same retention window. The compression receipt schema SHALL accept `_legacy` keys in `per_table_totals` as optional, and the retention receipt SHALL carry `legacy_chunks` per legacy table. When the legacy table no longer exists the tools MUST proceed with the canonical table only. A canonical table without a `_legacy` sibling SHALL take its expected compression shape from a per-table no-sibling default owned by the shared discovery helper (text-shaped for both tables until each contract); the river contract migration (I9) and the forcing contract migration (I14) SHALL flip that table's default to key-shaped in the same PR as the DROP and deploy it before the DROP runs, so the expectation never reverts to text-shaped once the sibling is gone.
+The compression runner, the retention runner, the compression supervisor's current-state validation, the capture tool's hypertable keys, the live-evidence replay validator's catalog check, the autopipeline statistics guard, the resource-governance collection and the resource-governance audit's policy-missing checks SHALL derive their hypertable set as each canonical table plus its `_legacy` sibling when that sibling exists in `timescaledb_information.hypertables`; per-table expectations SHALL be asserted per table (key-shaped settings on the canonical table, text-shaped settings on the legacy table). Both tables SHALL be compressed under the same lag and dropped under the same retention window. The compression receipt schema SHALL accept `_legacy` keys in `per_table_totals` as optional, and the retention receipt SHALL carry `legacy_chunks` per legacy table. When the legacy table no longer exists the tools MUST proceed with the canonical table only. A canonical table without a `_legacy` sibling SHALL take its expected compression shape from a per-table no-sibling default owned by the shared discovery helper (text-shaped for both tables until each contract); the river contract migration (I9) and the forcing contract migration (I14) SHALL flip that table's default to key-shaped in the same PR as the DROP and deploy it before the DROP runs, so the expectation never reverts to text-shaped once the sibling is gone.
 
 #### Scenario: Both tables in one tick
 - **WHEN** a compression tick runs while `hydro.river_timeseries_legacy` exists with an eligible chunk and `hydro.river_timeseries` has an eligible one-day chunk
@@ -27,6 +27,10 @@ The compression runner, the retention runner, the compression supervisor's curre
 #### Scenario: Legacy gone
 - **WHEN** the legacy table has been dropped
 - **THEN** a tick, the supervisor validation and the statistics guard run cleanly with no reference to the legacy name, and the retention receipt omits `legacy_chunks`
+
+#### Scenario: Post-drop probe failure is inconclusive, not absent
+- **WHEN** retention's discovery probe after the drop loop fails while a legacy sibling may still exist
+- **THEN** the `enforced` receipt carries `legacy_chunks: null` (never omitted, never `0`), validates against the schema, and the stderr anchor names the probe failure; absence of the key means only that no sibling exists
 
 ### Requirement: Rollback before the contract SHALL be an executable reverse sequence with a recorded intermediate state
 
@@ -66,7 +70,7 @@ The river rollout SHALL not be declared complete without a node-27 receipt recor
 
 #### Scenario: Contract precondition
 - **WHEN** an operator prepares the contract window
-- **THEN** the runbook checklist requires the archived fourteen daily receipts and the retention receipt with `legacy_chunks["hydro.river_timeseries_legacy"] = 0` (the per-table mapping added by I6) before the migration may be applied
+- **THEN** the runbook checklist requires the archived fourteen daily receipts and the retention receipt with `legacy_chunks["hydro.river_timeseries_legacy"] = 0` (the per-table mapping added by I6; a `null` mapping or an absent key never satisfies the gate) before the migration may be applied
 
 #### Scenario: Maintenance window order
 - **WHEN** the expand window runs

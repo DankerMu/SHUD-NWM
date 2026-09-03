@@ -20,6 +20,7 @@ it.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -364,7 +365,7 @@ _CONSUMERS = (
 
 @pytest.mark.parametrize("relative", _CONSUMERS)
 def test_every_lifecycle_consumer_imports_the_shared_helper(relative: str) -> None:
-    """One helper, seven call sites. A tool that re-derives the set from its own
+    """One helper, eight call sites. A tool that re-derives the set from its own
     literals is exactly the second code change D7 promises not to need."""
     source = (_ROOT / relative).read_text(encoding="utf-8")
     # The IMPORT STATEMENT, not the bare module name: a comment naming the
@@ -373,3 +374,31 @@ def test_every_lifecycle_consumer_imports_the_shared_helper(relative: str) -> No
     assert (
         "from packages.common.node27_timeseries_hypertable_discovery import" in source
     ), relative
+
+
+def _documented_consumers() -> list[str]:
+    """Consumer paths the helper's own docstring lists, in bullet form.
+
+    Bullets only: the module docstring also names
+    ``node27_timeseries_compression_capture.py`` in prose, as the canonical-only
+    ownership probe, and that mention is not a consumer entry.
+    """
+    doc = discovery.__doc__ or ""
+    return re.findall(r"^\* ``([^`]+)`` —", doc, flags=re.MULTILINE)
+
+
+@pytest.mark.parametrize("relative", _CONSUMERS)
+def test_the_helper_docstring_names_every_consumer(relative: str) -> None:
+    """The docstring is the map a maintainer reads before adding the ninth
+    consumer; a stale one sends them looking for seven call sites when there
+    are eight."""
+    assert relative in _documented_consumers(), relative
+
+
+def test_the_helper_docstring_names_exactly_the_consumers_it_has() -> None:
+    """Count as well as membership: a path left behind after a consumer is
+    removed is the same stale map in the other direction."""
+    documented = _documented_consumers()
+    assert len(documented) == len(_CONSUMERS)
+    assert set(documented) == set(_CONSUMERS)
+    assert "Eight call sites" in (discovery.__doc__ or "")

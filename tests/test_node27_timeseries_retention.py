@@ -4152,9 +4152,11 @@ def test_probe_failure_after_the_drop_keeps_the_enforced_receipt(
     nowhere.
 
     The probe is isolated like ``_default_measure_chunk_bytes``: the tick still
-    publishes ``enforced`` with its ``dropped_chunks``, simply without
-    ``legacy_chunks`` (the I9 gate stays shut on the missing key), and the
-    cause goes to stderr.
+    publishes ``enforced`` with its ``dropped_chunks``, and records an explicit
+    ``legacy_chunks: null`` (round-2: absent means the catalog has no sibling,
+    null means this tick could not tell — the I9 gate stays shut on both, but
+    only null says so out loud to the archived-receipt reader). The cause goes
+    to stderr.
     """
     env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
     for key, value in env.items():
@@ -4182,20 +4184,22 @@ def test_probe_failure_after_the_drop_keeps_the_enforced_receipt(
         "_timescaledb_internal.chk-a",
         "_timescaledb_internal.legacy-a",
     ]
-    assert "legacy_chunks" not in receipt
+    assert "legacy_chunks" in receipt
+    assert receipt["legacy_chunks"] is None
     jsonschema.validate(receipt, _load_schema())
     # Exit code is the clean-enforce one, not the refusal's.
     assert code == 0
     warning = json.loads(
         [line for line in capsys.readouterr().err.splitlines() if "legacy_chunks probe" in line][0]
     )
-    assert warning["warning"] == "legacy_chunks probe failed; omitting the key"
+    assert warning["warning"] == "legacy_chunks probe failed; recording a null count"
     assert "secretpw" not in warning["error"]
 
 
 def test_probe_failure_in_dry_run_is_equally_isolated(tmp_path: Path) -> None:
     """Same guard on the dry-run branch: a diagnostic probe must never be able
-    to turn a completed tick into a refusal."""
+    to turn a completed tick into a refusal, and the dry-run receipt is just as
+    explicit that the count is inconclusive."""
     config = _build_config(tmp_path)
     stub = _StubRunner([])
 
@@ -4211,7 +4215,27 @@ def test_probe_failure_in_dry_run_is_equally_isolated(tmp_path: Path) -> None:
         discover_hypertables=_raising_discover,
     )
     assert receipt["outcome"] == "dry-run"
-    assert "legacy_chunks" not in receipt
+    assert receipt["legacy_chunks"] is None
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_the_contract_gate_stays_shut_on_absent_and_on_null(tmp_path: Path) -> None:
+    """The I9 / I14 entry gate reads ``legacy_chunks[<table>] == 0``.
+
+    Three receipt states, one reading: a counted zero opens the gate, an absent
+    key (no sibling in the catalog) does not, and an explicit null (the probe
+    could not answer) does not either. Pinned in one place because the whole
+    point of the round-2 change is that the two closed states are DIFFERENT
+    facts that must not diverge in the gate's answer.
+    """
+
+    def gate(receipt: Mapping[str, Any]) -> bool:
+        return (receipt.get("legacy_chunks") or {}).get(_RIVER_LEGACY_KEY) == 0
+
+    assert gate({"legacy_chunks": {_RIVER_LEGACY_KEY: 0}}) is True
+    assert gate({"legacy_chunks": {_RIVER_LEGACY_KEY: 3}}) is False
+    assert gate({}) is False
+    assert gate({"legacy_chunks": None}) is False
 
 
 def test_dry_run_receipt_also_carries_legacy_chunks_when_a_sibling_exists(tmp_path: Path) -> None:
@@ -4234,6 +4258,41 @@ def test_main_wires_the_catalog_discovery_probe() -> None:
     assert "_default_discover_hypertables" in inspect.getsource(retention.main)
 
 
+def test_the_post_drop_discovery_probe_bounds_its_connect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1985 round-2, decision 21: this connect happens AFTER the drop loop and
+    while the tick still holds the lifecycle lock.
+
+    An untimed connect that hangs there is the worst shape this lane has: the
+    chunks are already gone, no receipt has been written yet, and the
+    compression lane sits on ``refused_lock`` for as long as the TCP stack
+    takes to give up. The sibling runner has bounded every connect since
+    #1156; retention's diagnostic probe was the one that did not.
+    """
+    config = _build_config(tmp_path)
+    seen: list[dict[str, Any]] = []
+
+    def _recording_connect(_dsn: str, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        raise psycopg2.OperationalError("connection refused")
+
+    monkeypatch.setattr(psycopg2, "connect", _recording_connect)
+    with pytest.raises(psycopg2.OperationalError):
+        retention._default_discover_hypertables(config)
+
+    assert seen and seen[0]["connect_timeout"] == retention._CONNECT_TIMEOUT_SECONDS
+    assert retention._CONNECT_TIMEOUT_SECONDS == 10
+
+
+def test_the_probe_connect_timeout_mirrors_the_compression_sibling() -> None:
+    """One number, two lanes: a divergence here is a silent policy fork."""
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "node27_timeseries_compression.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_CONNECT_TIMEOUT_SECONDS = 10" in source
+
+
 # --- schema -----------------------------------------------------------------
 
 
@@ -4254,6 +4313,11 @@ def test_schema_accepts_the_legacy_chunks_mapping(tmp_path: Path) -> None:
     }
     jsonschema.validate(document, _load_schema())
     document["legacy_chunks"] = {"met.forcing_station_timeseries_legacy": 4}
+    jsonschema.validate(document, _load_schema())
+    # Round-2: an explicit null is a legal third state — the probe ran and
+    # could not answer. `minProperties`/`patternProperties` constrain objects
+    # only, so widening the type is all it takes.
+    document["legacy_chunks"] = None
     jsonschema.validate(document, _load_schema())
 
 
