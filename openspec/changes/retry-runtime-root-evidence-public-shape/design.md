@@ -191,7 +191,17 @@ classifies a stripped text starting with `/` or `~` as `[local-path]` before
 the whitespace bail-out (URI branches stay behind it); message keys are
 unaffected because `_public_message` tokenises first. The resolver and
 `_local_runtime_root_safety` admit such roots on both lanes (verifier
-evidence), so this is reachable, not hypothetical.
+evidence), so this is reachable, not hypothetical. Known residual (round-2
+D-1, P3, deferred with routing — see Boundary surface): URI-shaped values
+(`scheme://`, `s3:`, `published:`) stay behind the whitespace bail-out, so a
+URI-shaped root or prefix containing a space still renders token-wise
+(`s3://nhms prod/objects` → `[object-uri] prod/objects`); no realistic
+configuration produces one (bucket names cannot contain spaces; nobody uses
+a `file://` workspace root). Over-redaction side effect of the fix: under a
+generic non-message key a `/`-leading prose value collapses to
+`[local-path]` whole; `message`/`*_message` keys stay tokenised via
+`_public_message`; no repo producer writes leading-slash prose under a
+generic key.
 
 The `ManualRetryService` Protocol docstring (`retry.py:327-345`) gains one
 sentence: `submission_runtime_root_resolution` returns the public-rendered
@@ -266,7 +276,10 @@ orchestrator lane including both edited suites (fixture review ran the selector)
   neither the root nor its post-space tail in the 503 body, shape helper
   passes. DB lane pinned at `RetryService.submission_runtime_root_resolution`
   (the exact call the route makes) with `/srv/nhms data/...` roots, durable
-  event keeps the real values.
+  event keeps the real values. The fix's boundary (a `/` anywhere must NOT
+  classify) is pinned by pre-existing relative-token expectations in the
+  journal suite (`journal/gfs/2026062800.jsonl` at `tests/test_file_orchestration_journal.py:928`
+  and four siblings): an over-broad mutant fails ten of them (round-2 review).
 - **Existing DB 503 tests** (`:1746`, `:1817`, `:2290`): unchanged lines; the
   `:1746` test's `missing` assertion is a list and unaffected.
 
@@ -300,3 +313,10 @@ orchestrator lane including both edited suites (fixture review ran the selector)
   and the whole-value `_root` rule in `_sanitize_file_provider_evidence_scalar`
   (`:2249-2252`) remain; pinned by T6c; reported, not consolidated (module is
   outside the guard exclusions; no runtime-root evidence flows through it).
+- Routed follow-ups: #1975 (round-1 side finding: the 503's `error_message`
+  and the `GET /api/v1/jobs` read surfaces pass `job.error_message` through
+  `redact_payload` only — same body, unrendered path channel; pre-existing);
+  #1976 (round-2 D-1, P3: URI-shaped values with whitespace still render
+  token-wise behind the bail-out; `tests/test_file_orchestration_journal.py`
+  T7 pins today's behaviour for `s3://bucket/my key` explicitly, so the fix
+  must rewrite that pin deliberately).

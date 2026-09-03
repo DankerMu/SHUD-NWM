@@ -91,12 +91,21 @@ def _sanitize_public_path_or_uri_scalar(value: str) -> str:
     if text.startswith("/") or text.startswith("~"):
         # Absolute (and ``~``-anchored) paths are classified WHOLE, ahead of the
         # whitespace bail-out below: a deployment root may legitimately contain a
-        # space (``/home/nwm/nhms data/objects``), and since #1965's recursion
-        # such a root arrives here as an entire scalar ``value``, where bailing
-        # out disclosed the post-space tail (``"[local-path] data/objects"``).
-        # Message-shaped strings are unaffected -- ``_public_message`` runs
-        # ``_sanitize_public_text_tokens`` first, so this function's other caller
-        # only ever hands it whitespace-free tokens.
+        # space (``/home/nwm/nhms data/objects``), and bailing out disclosed the
+        # post-space tail (``"[local-path] data/objects"``).  ``workspace_dir``
+        # always arrived whole (the ``*_root``/``*_path`` key rule never matched
+        # ``_dir``, so its inner ``value`` was recursed into from the start);
+        # ``object_store_root``/``published_artifact_root`` only arrive whole
+        # since #1965 stopped replacing their mapping.  Of the three callers,
+        # ``_sanitize_public_scalar`` hands WHOLE untokenised scalars and the two
+        # ``_sanitize_public_text_token`` paths hand whitespace-free tokens, so
+        # the cost is over-redaction, never disclosure: under a generic key a
+        # ``/``-leading prose value like ``/srv/x is not a directory`` collapses
+        # to ``[local-path]`` whole.  ``message``/``*_message`` go through
+        # ``_public_message`` and stay tokenised; no producer in the repo writes
+        # leading-slash prose under a generic key.  Deliberate residual: a spaced
+        # URI stays BEHIND the bail-out and still renders token-wise -- tracked
+        # as follow-up issue #1976.
         return _public_path_or_uri_placeholder(value)
     if any(char.isspace() for char in text):
         # The URI branches stay BEHIND the bail-out: a whitespace-bearing string

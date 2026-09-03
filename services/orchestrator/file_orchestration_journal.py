@@ -11544,8 +11544,12 @@ class FileJournalRetryService:
         the bare string ``"[local-path]"`` -- the public renderer used to replace
         the whole mapping under a ``*_root`` key -- while events written after it
         carry the mapping with ``present`` / ``source`` / ``value`` /
-        ``same_as_workspace``.  History is not rewritten and this reader does not
-        normalise; the 503 stays intact either way.
+        ``same_as_workspace``.  Events written before this change under a
+        whitespace-bearing root may also carry the partial rendering
+        ``"[local-path] <tail>"`` left by the old whitespace bail-out; those are
+        fixed points on re-render and are returned as recorded like the bare
+        string.  History is not rewritten and this reader does not normalise;
+        the 503 stays intact either way.
 
         Fail-soft: a typed journal fault on this SECOND read returns ``None``,
         so the caller still emits its 503 with the evidence key absent instead
