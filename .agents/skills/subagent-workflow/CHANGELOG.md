@@ -5,6 +5,16 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+## [0.31.1] - 2026-09-02
+
+### Fixed
+
+- **loop-log `catches` 的 schema 现在被机械强制，不合规的 catch 被计数上报而非静默吞掉**（动机：NWM #1764。实测该仓库 512 行 log 里 1600 条 catch，24 条（5 个 entry）没有可用的 `lens`——17 条只带 `phase` 不带 `round`/`lens`，7 条有 `round` 无 `lens`。两种失效方向相反、都进了 ADR 0003 的轮转 keep/cut 依据）：
+  - `evidence_check.py --loop-log-entry`：merged 行的每个 `catches[i]` 必须是对象、`round` 为非负整数（`0` = fixture 评审轮，bool 不算整数）、`lens` 为非空字符串；每条违规出一条指名 `catches[i]` 的 finding。终态行（ceiling-split/abandoned/descoped）照旧豁免。
+  - `loop_log_audit.py::rotation_attribution`：不合规的 catch 一律计入新返回的 `skipped`，**绝不**再计 core 或 rotated。修前 `catch.get("lens")` 缺失得到 `None`，`None not in core_lenses` 恒真，于是一条无 lens 的 `round >= 2` catch 被**算成 rotated**（高估轮转收益）；而缺 `round` 的 catch 被 `catch.get("round", 1)` 默认成 1 直接跳过（低估）。两个方向的偏差同时存在。
+  - `loop_log_audit.py::main`：合规扫描覆盖**每一个** entry，不再只扫 `multiround` 子集——没有 `round_lenses` 键的行根本进不了归因块，其不合规 catch 此前永不可见。`n > 0` 时打印 `NOTE non-compliant catches skipped: <n> in <k> entry(ies) (pr …)`，归因行恒带 `skipped=<n>`。退出码语义不变：NOTE 本身不改变 exit code。
+- `orche-omp-workflow` 的姊妹脚本 `scripts/loop_log_audit.py` 携带同一份 `rotation_attribution`/`main` 逻辑（唯一差异是一段容忍字符串 catch 的分支，新定义已覆盖该形状），已同步同一修复与测试，版本 0.2.1 → 0.2.2。两个 skill 的 `evidence_check.py` 目前仍逐字节相同，但本次只按 NWM #1764 的授权范围改了 subagent-workflow 一侧的 catch schema 校验；orche-omp 侧的 `evidence_check.py` 未动，属已知不一致。
+
 ## [0.31.0] - 2026-07-25
 
 ### Added

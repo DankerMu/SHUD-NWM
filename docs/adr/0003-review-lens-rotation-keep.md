@@ -2968,8 +2968,9 @@ what makes the ruling below a measured claim rather than an assertion.
   as it did to 297. The corrected number is not new evidence for rotation.
 
 **Ruling: keep, direction unchanged.** Later-round catches still concentrate
-in rotated-in lenses (**301 versus 109**, and 306 versus 109 at the residue's
-upper bound), so keep continues to follow from the cumulative ratio plus the
+in rotated-in lenses (**301 versus 109** on the base log; 301 versus 144 on the
+log rebased onto `3b5316f9`, the fourth row above; 306 at the residue's upper
+bound either way), so keep continues to follow from the cumulative ratio plus the
 absence of a recorded cut rationale. What changed is the trustworthiness of
 the number, not the number's sign: from 0.31.1 onward a non-compliant catch
 is rejected at append time by `evidence_check --loop-log-entry` and, for the
