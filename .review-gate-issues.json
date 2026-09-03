@@ -2446,7 +2446,57 @@
     "1765": {
       "ceilingPrs": [],
       "gateEntries": 1,
-      "closed": []
+      "closed": [
+        {
+          "pr": 1968,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
+    },
+    "1774": {
+      "ceilingPrs": [],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 1964,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
+    },
+    "1779": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1960,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1446": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1959,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1728": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1962,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
     },
     "1785": {
       "ceilingPrs": [],
@@ -2458,11 +2508,6 @@
           "rounds": 1
         }
       ]
-    },
-    "1774": {
-      "ceilingPrs": [],
-      "gateEntries": 2,
-      "closed": []
     }
   },
   "1736": {

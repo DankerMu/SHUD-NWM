@@ -2787,3 +2787,46 @@ The accumulated later-round catches still concentrate in rotated-in lenses
 autonomous default. Reversal still requires the attribution-schema,
 round-intent and round-role repairs plus maintainer review. Next revisit on
 the audit's next flag.
+
+## Revisit 2026-09-03 (post batch 23–28: PRs #1958, #1968, #1962, #1959, #1960, #1964) — keep; six more no-rotation data
+
+After the PR #1964 accountability line, `loop_log_audit.py` reports **161**
+multi-round merged PRs and later-round catches **core=144 / rotated=297**.
+The six batch-23–28 lines move the sample by five PRs and the core bucket by
+thirty-five; the rotated bucket is unchanged from the #1963 revisit
+(**156** / core=109 / rotated=297).
+
+Per PR:
+
+- **#1958** (issue #1785, 1 round) never reached a follow-up round, so it is
+  outside the multi-round sample entirely and contributes to neither bucket.
+- **#1968** (4 rounds) ran all six lenses in round 1 (correctness,
+  integration, security/perf, test/evidence, spec-compliance,
+  invariant-state) and reduced sets afterwards — test/evidence +
+  spec-compliance + correctness, then spec-compliance + test/evidence twice.
+  Its eight later-round catches all sit in lenses round 1 already carried:
+  core +8, rotated +0.
+- **#1962** (3 rounds): the same six in round 1, subsets after; its one
+  later-round catch (round-2 `log-line-forgery` P1, test/evidence) is core.
+- **#1959** (2 rounds): six in round 1, a three-lens subset in round 2; both
+  later-round catches are core.
+- **#1960** (2 rounds): six in round 1, a two-lens subset in round 2; both
+  later-round catches are core.
+- **#1964** (5 rounds, two gate entries): six in round 1, then the same
+  four-lens set (security/perf, correctness, test/evidence, spec-compliance)
+  in rounds 2–5. All twenty-two later-round catches are core. The two P1
+  classes that drove the extra rounds — the audit discriminator measuring
+  executability instead of provenance, then the deny-list bypassed by
+  `query_to_xml` — were both raised by security/perf, a round-1 lens.
+
+No lens rotated in at a later round anywhere in the batch: every PR opened at
+full or near-full lens width and narrowed afterwards, which by construction
+files every later catch in the core bucket. The batch is six no-rotation data
+points, like #1947, #1949, #1956 and #1963: it moves the core count and says
+nothing about rotation's causal value.
+
+The accumulated later-round catches still concentrate in rotated-in lenses
+(**297 versus 144**), so **keep rotation** stands under the recorded
+autonomous default. Reversal still requires the attribution-schema,
+round-intent and round-role repairs plus maintainer review. Next revisit on
+the audit's next flag.
