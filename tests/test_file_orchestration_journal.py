@@ -2005,19 +2005,24 @@ def test_foreign_model_completion_row_no_longer_suppresses_the_hydro_active_arm(
     assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
 
 
-@pytest.mark.parametrize("hydro_status", ["created", "staged", "submitted", "running"])
+@pytest.mark.parametrize("hydro_status", ["created", "staged", "pending", "submitted", "running"])
 @pytest.mark.parametrize("stage", ["state_save_qc", "publish", "parse"])
 def test_foreign_model_completion_row_cannot_suppress_any_active_hydro_status(
     tmp_path: Path, hydro_status: str, stage: str
 ) -> None:
     """#1472 main discriminator matrix: foreign completion never suppresses ACTIVE hydro.
 
-    Every ACTIVE hydro status of the default terminal contract (``created``,
-    ``staged``, ``submitted``, ``running``) crossed with every completion stage
-    (``state_save_qc``, ``publish``, ``parse``): the candidate has no active
-    pipeline-job row, so the answer must come from the hydro-active arm alone —
-    the foreign row is excluded from the suppression conjunction by identity,
-    not by stage or status.
+    EVERY member of ``scheduler_state_types.ACTIVE_HYDRO_STATUSES`` — all five
+    of ``created``, ``staged``, ``pending``, ``submitted``, ``running`` — crossed
+    with every completion stage (``state_save_qc``, ``publish``, ``parse``): the
+    candidate has no active pipeline-job row, so the answer must come from the
+    hydro-active arm alone — the foreign row is excluded from the suppression
+    conjunction by identity, not by stage or status.
+
+    ``"pending"`` joined the set with this change and is listed explicitly: the
+    exclusion is one conjunction over the whole set (``:1241``), so leaving the
+    newest member out would let the test name's "any active" outrun what it
+    measures.
     """
 
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -2068,7 +2073,7 @@ def test_pending_hydro_run_with_no_job_rows_is_active_on_the_journal_lane(tmp_pa
     assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
 
 
-@pytest.mark.parametrize("hydro_status", ["created", "staged", "submitted", "running"])
+@pytest.mark.parametrize("hydro_status", ["created", "staged", "pending", "submitted", "running"])
 def test_foreign_model_completion_row_cannot_suppress_under_production_terminal_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2078,7 +2083,8 @@ def test_foreign_model_completion_row_cannot_suppress_under_production_terminal_
 
     Under that contract ``has_terminal_completion`` accepts only
     ``state_save_qc`` completion rows; the foreign ``state_save_qc`` row must
-    still not suppress the ACTIVE hydro arm.
+    still not suppress the ACTIVE hydro arm — for every member of
+    ``ACTIVE_HYDRO_STATUSES``, ``"pending"`` included.
     """
 
     monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")

@@ -44,7 +44,11 @@ therefore gain `pending`.
 ### DB lane — callers of `has_active_pipeline`
 
 - `scheduler_candidates.py:1188` — after the state decision, guarded by
-  `candidate_state_scoped_retry_detector`; a manual retry still passes.
+  `candidate_state_scoped_retry_detector`. Not reached for the `pending`
+  class: the decision lane already returns `skip` / `active_duplicate_pipeline`
+  for a `pending` row (`scheduler_state_decision.py:194`, no supersede rule
+  covers `pending`) and the `:1173` skip precedes this probe, so this diff
+  changes nothing at this call site.
 - `scheduler_candidates.py:406` — only when the active repository has no
   callable `candidate_state`; both production repositories
   (`chain_repository.py:118`, `file_orchestration_journal.py:1517`) and the
@@ -52,7 +56,16 @@ therefore gain `pending`.
   arm is reached by test fakes only.
 - `chain_forecast_trigger.py:136` — the trigger endpoint raises already-active
   for a `pending` run.
-- `scheduler_backfill_predecessor.py:392-397` — predecessor-cycle skip.
+- `scheduler_backfill_predecessor.py:392-397` — predecessor-cycle skip. This
+  emitter runs after the main loop and bypasses the candidate-state decision,
+  so it is the one scheduler site whose verdict comes straight from the
+  probe: a §8.6 predecessor whose run sits at stale `pending` (no live job)
+  is now recorded `skipped / predecessor_backfill_active_pipeline` on every
+  pass and the successor's `block_predecessor_pending` never clears, where
+  before the change the predecessor was emitted and could be re-orchestrated
+  (measured on a real journal repository: HEAD → skipped, base → emitted;
+  `failed` control → emitted on both). Pinned by a journal-repository test in
+  `tests/test_scheduler_backfill_predecessor.py` (task 1.9).
 - `chain_runtime_utils.py:90-123` `_active_orchestration_conflicts`, reached
   from `chain_forecast_control.py:118` `orchestrate_cycle`: a `pending` run
   with no live job now makes `orchestrate_cycle` raise
@@ -65,7 +78,9 @@ therefore gain `pending`.
   (`:156-194`).
 
 Changed input on this lane: exactly `hydro_run.status = 'pending'` with no
-non-terminal `pipeline_job` for the cycle. While the retry job is live the
+non-terminal `pipeline_job` in the cycle matching this candidate's run id, the
+cycle run id, or this model (`chain_repository.py:78-91`); a live per-model job
+for a sibling model does not mask it, a cycle-scoped job does. While the retry job is live the
 UNION arm already returns `True`. The chain-side writers that move a run off
 `pending` (`chain_forecast_execution.py:911-925`,
 `chain_forecast_orchestrator_cycle.py:833-841`, the unconditional
@@ -79,16 +94,26 @@ the same run id; `reconcile.py` and
 Slurm level before any of them runs leaves the row at `pending`: on that
 input the decision lane already answers "active", and after this change the
 SQL probe does too. Repairing such a row on the SQL lane is a separate
-behaviour and stays out of scope. Operator remedies after this change: the
-manual-retry path (`:1188` escape, `_manual_retry_blocking_hydro_status`)
-still works; **re-triggering the cycle, which repairs such a row today**
+behaviour and stays out of scope. Operator remedies after this change: no
+manual-retry *marker* unblocks a `pending` row on the decision lane (the
+`:1173` skip precedes the `:1188` escape and the escape needs
+`action == "retry"`; `_manual_retry_marker_bound_to_blocker` returns `False`
+for an active blocker) — pre-existing and unchanged here. DB-lane repair goes
+through `RetryService.attempt_manual_retry` (`POST /runs/{run_id}/retry`,
+`retry.py:546`), which needs at least one `pipeline_job` for the run with a
+failed/cancelled latest job (`retry.py:596 :604-611`) and repairs the row via
+the SHUD runtime's `ON CONFLICT … 'pending' → 'created'`
+(`workers/shud_runtime/runtime.py:264-271`); a run with no `pipeline_job` at
+all has no in-product remedy (out of scope). **Re-triggering the cycle, which
+repairs such a row today**
 (the trigger derives the same `fcst_{source}_{cycle}_{model}` run id,
 `chain_forecast_state.py:85`, and `chain_forecast_trigger.py:170` overwrites
 the status — it gets through only because the SQL probe at `:136` answers
 `False`) **is refused after this change** (`:136` and
 `_active_orchestration_conflicts` for `orchestrate_cycle` raise
-already-active). That is the one operator-visible regression of this change
-and the PR body states it (task 4.2).
+already-active). That, together with the predecessor-backfill skip above, is the
+operator-visible regression class of this change and the PR body states
+both (task 4.2).
 
 ### File-journal lane — the five sites
 
@@ -131,10 +156,14 @@ the three-site guard.
   changed".
 - `tests/test_hydro_status_set_parity.py:146-152`
   `test_active_hydro_status_divergence_is_locked_not_adjudicated` is replaced
-  by `test_active_hydro_statuses_are_the_same_object` asserting
-  `chain.ACTIVE_HYDRO_STATUSES is chain_repository.ACTIVE_HYDRO_STATUSES is
-  journal_module.ACTIVE_HYDRO_STATUSES is
-  scheduler_state_types.ACTIVE_HYDRO_STATUSES` and the five-member value; the
+  by `test_active_hydro_statuses_are_the_same_object` asserting that
+  `chain`, `chain_repository`, `file_orchestration_journal`,
+  `scheduler_state_decision` and `scheduler_state_manual_retry` each bind
+  `scheduler_state_types.ACTIVE_HYDRO_STATUSES` by identity (the last two are
+  the deciding lanes whose "already counts `pending`" is this change's
+  premise; re-export surfaces `scheduler.py:74` / `scheduler_state.py:157` /
+  `scheduler_state_compat.py:12` are deliberately not pinned) and the
+  five-member value; the
   old test going red is the second red proof.
 - No other existing assertion changes (the journal suite is green under the
   new membership because nothing pinned `pending` there — D1 last row).
@@ -178,7 +207,10 @@ Regexes accept `hydro.run_status`, `"hydro".run_status`, `hydro."run_status"`,
 `"hydro"."run_status"` (optional `"` around each segment). A third regex
 `ALTER\s+TYPE\s+<ident>\s+RENAME\s+(VALUE|TO)` collects hits; the helper
 asserts the list is empty with a message naming the files and saying the
-oracle does not model renames. Red proofs in a scratch migrations dir that is a COPY of `db/migrations`
+oracle does not model renames. Pinned by a committed test (task 3.4) that repoints `_MIGRATIONS_DIR` at a
+`tmp_path` COPY of `db/migrations` plus probe files — the scratch red proofs
+below are the same construction run by hand against the old helper. Red proofs
+in a scratch migrations dir that is a COPY of `db/migrations`
 plus the probe file (the helper's own self-checks — exactly one `CREATE
 TYPE`, `succeeded` declared, `pending` added — must keep passing, otherwise
 the proof dies at `:68` instead of at the assertion it targets): a
