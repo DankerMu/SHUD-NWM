@@ -19403,8 +19403,15 @@ def _db_shaped_runtime_root_evidence() -> dict[str, Any]:
                 "scheduler_registry_manifest": {
                     "present": True,
                     "source": "env:NHMS_SCHEDULER_REGISTRY_MANIFEST",
-                    "value": "/srv/nhms/object-store/scheduler/registry/manifest-last.json",
-                }
+                    "value": "/srv/nhms/registry/manifest.json",
+                },
+                # A DSN under ``db_free_runtime`` -- the one runtime-root family
+                # whose rendering nothing asserted before round-1 F3.
+                "scheduler_registry_backend": {
+                    "present": True,
+                    "source": "env:NHMS_SCHEDULER_REGISTRY_BACKEND",
+                    "value": "postgresql://nwm:pw@db:5432/nhms",
+                },
             },
             "missing": [],
             "slurm_env": {"NHMS_SHUD_DB_FREE": "true"},
@@ -19462,6 +19469,9 @@ def test_public_evidence_recurses_into_mapping_values_under_path_shaped_keys() -
                 "workspace_dir": "/srv/nhms/workspace",
                 "object_store_root": "/srv/nhms/object-store",
             },
+            # Both sensitive AND path-shaped: pins the ORDER of the two branches.
+            "credential_path": {"present": True, "source": "env:X", "value": "hunter2"},
+            "secret_path": "/srv/x",
         }
     )
 
@@ -19481,8 +19491,72 @@ def test_public_evidence_recurses_into_mapping_values_under_path_shaped_keys() -
         "workspace_dir": "[local-path]",
         "object_store_root": "[local-path]",
     }
+    # Branch ORDER (round-1 F2): a key that is both sensitive and path-shaped
+    # must take the sensitive branch, mapping value and scalar value alike.  If
+    # the path branch ran first the mapping would be RECURSED into and its inner
+    # ``value`` -- which no inner key marks sensitive -- would survive verbatim.
+    # In-body import: ``scripts/select_ci_tests`` derives its importer index from
+    # module-level statements only.
+    from packages.common.redaction import is_sensitive_key
+
+    assert is_sensitive_key("credential_path") and is_sensitive_key("secret_path")
+    assert rendered["credential_path"] == "[redacted]"
+    assert rendered["secret_path"] == "[redacted]"
+    assert "hunter2" not in json.dumps(rendered)
     assert "/srv/" not in json.dumps(rendered)
     assert "super-secret" not in json.dumps(rendered)
+
+
+def test_public_evidence_renders_whitespace_bearing_local_roots_whole() -> None:
+    """T6 (#1965 round-1 F1) — a deployment root with a SPACE is not half-disclosed.
+
+    ``_sanitize_public_path_or_uri_scalar`` bails out of classification on any
+    whitespace, which is right for prose but wrong for the scalar the #1965
+    recursion now feeds it: ``resolved.object_store_root.value`` reaches the
+    classifier whole, so ``/home/nwm/nhms data/objects`` rendered as
+    ``"[local-path] data/objects"`` -- tail on the wire.  An absolute (or
+    ``~``-anchored) path must be classified whole, before the bail-out.
+    """
+
+    root = "/home/nwm/nhms data/objects"
+    rendered = public_evidence_module._public_evidence(
+        {
+            "resolved": {
+                "workspace_dir": {"present": True, "source": "env:WORKSPACE_ROOT", "value": root},
+                "object_store_root": {
+                    "present": True,
+                    "source": "env:OBJECT_STORE_ROOT",
+                    "value": root,
+                    "same_as_workspace": False,
+                },
+                "published_artifact_root": {
+                    "present": True,
+                    "source": "env:NHMS_PUBLISHED_ARTIFACT_ROOT",
+                    "value": root,
+                },
+            },
+            "rejected": [
+                {
+                    "field": "object_store_root",
+                    "source": "env:OBJECT_STORE_ROOT",
+                    "reason": "resolves_to_workspace_dir",
+                    "value": root,
+                }
+            ],
+        }
+    )
+
+    for field_name in ("workspace_dir", "object_store_root", "published_artifact_root"):
+        assert rendered["resolved"][field_name]["value"] == "[local-path]", field_name
+    assert rendered["rejected"][0]["value"] == "[local-path]"
+    assert "data/objects" not in json.dumps(rendered)
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("/srv/my dir") == "[local-path]"
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("~/my dir") == "[local-path]"
+    # The URI branches stay BEHIND the whitespace bail-out: a whitespace-bearing
+    # string is not one URI, so it keeps falling through to the token path.  This
+    # states today's behaviour; it is not a widening.
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("s3://bucket/my key") == "s3://bucket/my key"
+    assert public_evidence_module._public_evidence({"note": "s3://bucket/my key"}) == {"note": "[object-uri] key"}
 
 
 def test_public_evidence_is_idempotent_on_both_lane_shapes() -> None:
@@ -19504,6 +19578,15 @@ def test_public_evidence_is_idempotent_on_both_lane_shapes() -> None:
     assert once["resolved"]["object_store_prefix"]["value"] == "[object-uri]"
     assert once["rejected"][0]["value"] == "[uri]"
     assert once["resolved"]["workspace_dir"]["source"] == "pipeline_event:submission:3:runtime_root_contract"
+    # Round-1 F3: ``db_free_runtime.resolved.*.value`` gets rendered too -- both
+    # T1s carry an empty ``db_free_runtime``, so the shape helper's loop over it
+    # runs zero times and this branch was otherwise unasserted.
+    db_free_resolved = once["db_free_runtime"]["resolved"]
+    assert db_free_resolved["scheduler_registry_backend"]["value"] == "[uri]"
+    assert db_free_resolved["scheduler_registry_manifest"]["value"] == "[local-path]"
+    rendered_once = json.dumps(once, sort_keys=True)
+    assert "pw@" not in rendered_once
+    assert "/srv/nhms/registry" not in rendered_once
 
     # The post-#1965 file-lane shape fed back in as input: this is what the
     # journal now persists and what a re-render would see.

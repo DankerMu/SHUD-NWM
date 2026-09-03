@@ -86,15 +86,24 @@ def _sanitize_public_scalar(value: Any) -> Any:
 
 def _sanitize_public_path_or_uri_scalar(value: str) -> str:
     text = value.strip()
-    if not text or any(char.isspace() for char in text):
+    if not text:
         return value
-    if (
-        text.startswith("/")
-        or text.startswith("~")
-        or "://" in text
-        or text.startswith("s3:")
-        or text.startswith("published:")
-    ):
+    if text.startswith("/") or text.startswith("~"):
+        # Absolute (and ``~``-anchored) paths are classified WHOLE, ahead of the
+        # whitespace bail-out below: a deployment root may legitimately contain a
+        # space (``/home/nwm/nhms data/objects``), and since #1965's recursion
+        # such a root arrives here as an entire scalar ``value``, where bailing
+        # out disclosed the post-space tail (``"[local-path] data/objects"``).
+        # Message-shaped strings are unaffected -- ``_public_message`` runs
+        # ``_sanitize_public_text_tokens`` first, so this function's other caller
+        # only ever hands it whitespace-free tokens.
+        return _public_path_or_uri_placeholder(value)
+    if any(char.isspace() for char in text):
+        # The URI branches stay BEHIND the bail-out: a whitespace-bearing string
+        # is not a single URI, and classifying it whole would rewrite prose that
+        # merely mentions a scheme.
+        return value
+    if "://" in text or text.startswith("s3:") or text.startswith("published:"):
         return _public_path_or_uri_placeholder(value)
     return value
 

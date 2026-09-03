@@ -1854,7 +1854,7 @@ def _assert_public_runtime_root_resolution(mapping: Any, *, forbidden_roots: tup
             # ``_resolve_runtime_root_candidate`` always injects
             # ``object_store_prefix`` with an empty value and a
             # ``...OBJECT_STORE_PREFIX.default_empty`` source when no prefix is
-            # configured (``retry.py:1531``), on BOTH lanes.  The renderer never
+            # configured (``_resolve_runtime_root_candidate``), on BOTH lanes.  The renderer never
             # turns a non-empty scalar into ``""``, so admitting it here cannot
             # hide a leak; a configured prefix must still be a placeholder.
             assert entry["value"] in {"[object-uri]", "[uri]", ""}, f"{field_name} value={entry['value']!r}"
@@ -1951,6 +1951,63 @@ def test_retry_api_db_lane_submission_failure_renders_public_runtime_root_eviden
                 os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
             app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
             app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
+
+
+def test_db_lane_public_evidence_read_hides_whitespace_bearing_runtime_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1965 round-1 F1, database lane — same space-bearing root, same boundary.
+
+    ``RetryService.submission_runtime_root_resolution`` is the exact call the
+    route makes for its ``submission_failed`` 503 body, so pinning it directly
+    costs one store instead of a second TestClient round trip.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    workspace_root = "/srv/nhms data/workspace"
+    object_store_root = "/srv/nhms data/object-store"
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": workspace_root,
+                "object_store_root": object_store_root,
+                "object_store_prefix": "s3://nhms-prod",
+            },
+        )
+        service = RetryService(store, RetryConfig(max_retries=3))
+        gateway = _RecordingGateway(error=RuntimeError("sbatch unavailable"))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert retry.status == "submission_failed"
+        evidence = service.submission_runtime_root_resolution(retry.job_id)
+        assert evidence is not None
+        assert set(evidence["resolved"]) >= {"workspace_dir", "object_store_root"}
+        assert evidence["missing"] == []
+        rendered = json.dumps(evidence, sort_keys=True)
+        for forbidden in (workspace_root, object_store_root, "data/workspace", "data/object-store"):
+            assert forbidden not in rendered, forbidden
+        _assert_public_runtime_root_resolution(
+            evidence,
+            forbidden_roots=(workspace_root, object_store_root, "data/workspace", "data/object-store"),
+        )
+        # The durable event still carries the real roots (operators diagnose from
+        # them); only the public read is placeheld.
+        persisted = _events(store)[-1].details["runtime_root_resolution"]["resolved"]
+        assert persisted["workspace_dir"]["value"] == workspace_root
+        assert persisted["object_store_root"]["value"] == object_store_root
 
 
 def test_manual_retry_submission_failure_marks_submission_failed() -> None:
@@ -3100,15 +3157,22 @@ def _file_lane_retry_fixture(tmp_path: Path) -> dict[str, Any]:
     }
 
 
-def _file_lane_runtime_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+def _file_lane_runtime_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, parent: str | None = None
+) -> tuple[Path, Path]:
     """Two distinct-realpath local roots for ``_REQUIRED_RUNTIME_ROOT_FIELDS``.
 
     A same-realpath pair is rejected as ``resolves_to_workspace_dir`` and the
     evidence-present test would silently degrade into the evidence-absent one.
+
+    ``parent`` nests both roots under an extra directory; the round-1 F1 pin
+    passes one containing a SPACE so the roots exercise the classifier's
+    whitespace arm.
     """
 
-    workspace_root = (tmp_path / "workspace").resolve()
-    object_store_root = (tmp_path / "object-store").resolve()
+    base = tmp_path / parent if parent else tmp_path
+    workspace_root = (base / "workspace").resolve()
+    object_store_root = (base / "object-store").resolve()
     workspace_root.mkdir(parents=True, exist_ok=True)
     object_store_root.mkdir(parents=True, exist_ok=True)
     assert workspace_root != object_store_root
@@ -3247,6 +3311,40 @@ def test_retry_api_file_lane_submission_failure_returns_503_with_persisted_evide
     _assert_public_runtime_root_resolution(
         details["runtime_root_resolution"],
         forbidden_roots=(str(workspace_root), str(object_store_root), str(fixture["journal_root"])),
+    )
+
+
+def test_retry_api_file_lane_503_hides_whitespace_bearing_runtime_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1965 round-1 F1 — a deployment root with a SPACE leaks no tail.
+
+    ``/home/nwm/nhms data/objects`` is a legal root.  The public classifier bails
+    out on whitespace, so after the #1965 recursion the inner ``value`` rendered
+    as ``"[local-path] data/objects"`` and the 503 carried the tail.  Route-level
+    because the unit pin cannot show the leak reaching the wire.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    workspace_root, object_store_root = _file_lane_runtime_roots(tmp_path, monkeypatch, parent="nhms data")
+    assert " " in str(workspace_root) and " " in str(object_store_root)
+    fixture = _file_lane_retry_fixture(tmp_path)
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    evidence = details["runtime_root_resolution"]
+    # Non-degenerate: a whitespace-bearing root must still RESOLVE, otherwise the
+    # pin would be exercising the rejected-branch instead of the resolved one.
+    assert set(evidence["resolved"]) >= {"workspace_dir", "object_store_root"}
+    assert evidence["missing"] == []
+    rendered = json.dumps(response.json())
+    tails = tuple(str(root).split(" ", 1)[1] for root in (workspace_root, object_store_root))
+    for forbidden in (str(workspace_root), str(object_store_root), *tails):
+        assert forbidden not in rendered, forbidden
+    _assert_public_runtime_root_resolution(
+        evidence,
+        forbidden_roots=(str(workspace_root), str(object_store_root), *tails),
     )
 
 

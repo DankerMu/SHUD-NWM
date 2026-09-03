@@ -179,9 +179,19 @@ Rendering per key on the DB evidence (`:1828-1911`):
 | `db_free_runtime.slurm_env`, `candidate_counts`, `required`, `missing`, ids | kept | kept (`is_sensitive_key` false for every key — probed) |
 
 Truncated values (`…` suffix at 256) still start with `/` → `[local-path]`.
-A path containing whitespace is not matched by `_sanitize_public_path_or_uri_scalar`
-(`:13101`) and falls to token-wise rendering (`[local-path]` followed by the basename tail); that is
-the file lane's existing behaviour, inherited, not introduced.
+Whitespace-bearing roots (round-1 cand-01, CONFIRMED P3): the moved
+`_sanitize_public_path_or_uri_scalar` bailed out on any whitespace before
+classifying, so a root such as `/home/nwm/nhms data/objects` fell to
+token-wise rendering (`[local-path] data/objects`). Pre-change that was
+already the file lane's rendering for `workspace_dir.value` and
+`rejected[].value`, but for `object_store_root` / `published_artifact_root`
+the whole-value key rule had masked it, so D2's recursion would have turned
+those two from whole `[local-path]` into partial disclosure. The fix pass
+classifies a stripped text starting with `/` or `~` as `[local-path]` before
+the whitespace bail-out (URI branches stay behind it); message keys are
+unaffected because `_public_message` tokenises first. The resolver and
+`_local_runtime_root_safety` admit such roots on both lanes (verifier
+evidence), so this is reachable, not hypothetical.
 
 The `ManualRetryService` Protocol docstring (`retry.py:327-345`) gains one
 sentence: `submission_runtime_root_resolution` returns the public-rendered
@@ -234,11 +244,29 @@ orchestrator lane including both edited suites (fixture review ran the selector)
   `same_as_workspace`) and `published_artifact_root` mappings plus a scalar
   `runtime_root_contract`: all three mappings recurse with `value == "[local-path]"`
   and `present`/`source` kept, the scalar `_root` → `[local-path]`, a
-  sensitive key inside the same mapping → `[redacted]` first; (b) idempotency
+  sensitive key inside the same mapping → `[redacted]` first — pinned with
+  keys that are BOTH sensitive and path-shaped (`credential_path` mapping
+  value, `secret_path` scalar; round-1 cand-02: the ordering was unpinned by
+  `api_token` alone, and the mutant leaked the mapping in clear); (b) idempotency
   `f(f(x)) == f(x)` on a DB-shaped evidence mapping AND on the post-D2
-  file-lane output (the recursed form as input); (c) classifier parity:
+  file-lane output (the recursed form as input), the DB-shaped literal
+  carrying a DSN-valued `db_free_runtime.resolved.scheduler_registry_backend`
+  (`[uri]`) and a local-path manifest (`[local-path]`) asserted explicitly
+  (round-1 cand-06: the shape helper's `db_free_runtime` loop iterates zero
+  times on both T1s); (c) classifier parity:
   `_public_path_or_uri_placeholder(v) == scheduler_file_providers._sanitize_file_provider_scalar(v)`
   over `["/srv/x", "~/x", "s3://b/k", "published://p", "https://u:p@h/x", "/srv/my dir", "", "  ", "plain", 7, None]`.
+- **T7 whitespace-bearing roots** (round-1 cand-01): unit — `_public_evidence`
+  over an evidence mapping whose three resolved roots and one `rejected[].value`
+  contain a space → every value exactly `[local-path]`, the tail absent;
+  `_sanitize_public_path_or_uri_scalar("/srv/my dir") == "[local-path]"`, same
+  for `~/my dir`; a whitespace-bearing URI keeps today's token path (stated,
+  not widened). Route — file lane with roots under a tmp directory containing
+  a space: `resolved ⊇ {workspace_dir, object_store_root}`, `missing == []`,
+  neither the root nor its post-space tail in the 503 body, shape helper
+  passes. DB lane pinned at `RetryService.submission_runtime_root_resolution`
+  (the exact call the route makes) with `/srv/nhms data/...` roots, durable
+  event keeps the real values.
 - **Existing DB 503 tests** (`:1746`, `:1817`, `:2290`): unchanged lines; the
   `:1746` test's `missing` assertion is a list and unaffected.
 
@@ -246,9 +274,9 @@ orchestrator lane including both edited suites (fixture review ran the selector)
 
 | # | invariant | pinned by |
 |---|---|---|
-| 1 | DB 503 body has no absolute local root | T1 |
+| 1 | DB 503 body has no absolute local root | T1, T7 |
 | 2 | DB persisted details keep real roots | T1 + `:1209/:1242/:1245` |
-| 3 | secrets precedence over path rendering | T2 + `:1783-1800`, T6a |
+| 3 | secrets precedence over path rendering | T2 + `:1783-1800`, T6a (sensitive+path-shaped keys) |
 | 4 | `resolved.*` is a Mapping with `present/source/value` on both lanes | T3 on both |
 | 5 | `runtime_root_contract` stays flat scalar | `:4469` |
 | 6 | file-lane response == persisted (no second scrub) | `:3087` |
