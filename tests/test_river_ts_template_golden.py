@@ -64,6 +64,7 @@ from tests.river_ts_template_registry import (
     NON_TEMPLATE_MENTIONS,
     REGISTERED_TEMPLATE_PATHS,
     REGISTRY,
+    entry_by_key,
     golden_sha256,
 )
 
@@ -283,4 +284,75 @@ def test_a_fragment_with_no_keyword_of_its_own_is_one_chain() -> None:
 
     assert sql_chains(fragment) == (
         ("rt.river_segment_id = %s", "rt.river_segment_key = %s", "rt.variable = 'q_down'"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# The chain boundary re-pin (#1980 fixture decision 12, round-3 L4)
+#
+# `_REGION_START` gained `HAVING` and lost the `ON` of `DISTINCT ON`, so the
+# golden was re-captured from a pristine `git archive 51f9d273` tree with the new
+# normaliser and `GOLDEN_SHA256` re-pinned. The measured difference is exactly
+# four entries: two HAVING chains appear (`display_coverage:refresh`,
+# `forecast_store:latest_product_fallback`) and three `DISTINCT ON (…)`
+# select-list pseudo-chains disappear (`forecast_store:analysis_segment_rows`
+# once, `mvt:postgis_tile_sql_hydro_national` twice) — 216 chains before, 215
+# after.
+#
+# Both directions are counter-exampled below, because a boundary re-pin that
+# nobody can demonstrate is a boundary nobody can review: the point of adding
+# HAVING is that deleting one goes RED, and the point of dropping DISTINCT ON is
+# that editing one stays GREEN.
+# ---------------------------------------------------------------------------
+
+_HAVING_LINE = "            HAVING COUNT(DISTINCT variable) = %(variable_count)s\n"
+
+
+def test_deleting_a_whole_having_line_reddens_the_golden() -> None:
+    """Decision 12's first counter-example: HAVING chains are now collected.
+
+    Before the re-pin this deletion was INVISIBLE — the golden never looked at a
+    HAVING body, so dropping the ``COUNT(DISTINCT variable) = %(variable_count)s``
+    guard (which is what makes a coverage row mean "every variable arrived")
+    passed the equivalence oracle.
+    """
+    entry = entry_by_key("display_coverage:refresh")
+    template = entry.source()
+    assert template.count(_HAVING_LINE) == 1
+
+    mutated = template.replace(_HAVING_LINE, "")
+
+    golden = tuple(tuple(chain) for chain in GOLDEN["entries"][entry.key]["chains"])
+    assert _legacy_chains(template, entry.key) == golden
+    assert _legacy_chains(mutated, entry.key) != golden
+
+
+def test_editing_a_distinct_on_select_list_leaves_the_golden_green() -> None:
+    """Decision 12's second counter-example: a select list is not a predicate chain.
+
+    ``SELECT DISTINCT ON (rt.valid_time)`` is a de-duplication key, and the
+    golden is a PREDICATE-CHAIN oracle (decision 6) — it is deliberately blind
+    outside WHERE / ON / HAVING / sub-query / OR-disjunct chains, and the sibling
+    substring pins cover select lists. Reading the ``ON`` of ``DISTINCT ON`` as a
+    chain opener made the golden police a select list as if it were a predicate,
+    which is a claim it cannot honestly make about the other entries.
+    """
+    entry = entry_by_key("forecast_store:analysis_segment_rows")
+    template = entry.source()
+    assert "SELECT DISTINCT ON (rt.valid_time)" in template
+
+    mutated = template.replace("SELECT DISTINCT ON (rt.valid_time)", "SELECT DISTINCT ON (rt.valid_time, rt.value)")
+
+    golden = tuple(tuple(chain) for chain in GOLDEN["entries"][entry.key]["chains"])
+    assert mutated != template
+    assert _legacy_chains(template, entry.key) == golden
+    assert _legacy_chains(mutated, entry.key) == golden
+
+
+def test_the_golden_holds_the_measured_chain_total() -> None:
+    """20 entries / 215 chains, stated so a re-capture cannot quietly change the shape."""
+    assert len(GOLDEN["entries"]) == 20
+    assert sum(len(entry["chains"]) for entry in GOLDEN["entries"].values()) == 215
+    assert len(GOLDEN["entries"]["display_coverage:refresh"]["chains"]) == len(
+        _legacy_chains(entry_by_key("display_coverage:refresh").source(), "display_coverage:refresh")
     )

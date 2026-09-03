@@ -84,6 +84,9 @@
           "station_count = expected_station_count"
         ],
         [
+          "COUNT(DISTINCT variable) = %(variable_count)s"
+        ],
+        [
           "common_window.basin_version_id = rollup.basin_version_id",
           "common_window.display_end_time = rollup.display_end_time",
           "common_window.display_start_time = rollup.display_start_time",
@@ -323,9 +326,6 @@
       "mentions": 1,
       "chains": [
         [
-          "(rt.valid_time) h.scenario_id, h.source_id, h.forcing_version_id, rt.valid_time, rt.value, rt.unit_e::text AS unit"
-        ],
-        [
           "h.run_key = rt.run_key"
         ],
         [
@@ -547,6 +547,9 @@
         [
           "expected_station_count IS NOT NULL",
           "station_count = expected_station_count"
+        ],
+        [
+          "COUNT(DISTINCT variable) = %(variable_count)s"
         ],
         [
           "common_window.basin_version_id = rollup.basin_version_id",
@@ -829,9 +832,6 @@
       "mentions": 3,
       "chains": [
         [
-          "(mi.river_network_version_id) h.run_id, mi.river_network_version_id, h.run_key, rnv.river_network_version_key"
-        ],
-        [
           "mi.basin_version_id = h.basin_version_id"
         ],
         [
@@ -909,9 +909,6 @@
         ],
         [
           "bv.basin_version_key = sv.basin_version_key"
-        ],
-        [
-          "(mi.river_network_version_id) h.run_key, rnv.river_network_version_key, h.run_id, mi.river_network_version_id"
         ],
         [
           "mi.basin_version_id = h.basin_version_id"
