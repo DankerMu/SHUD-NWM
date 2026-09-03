@@ -10,7 +10,7 @@ Five independent read-only findings, all `p3` tech-debt, all in
   takes `include_direct_jobs: bool = True` (`:5854`); every caller — five
   direct production sites (`:2397 :3690 :4052 :4215 :4903`), the
   `_materialize_latest_unlocked` routing arm (`:9951`) and both tests — passes
-  `False`. The `True` arm (`:5901-5908` direct-job collection, `:5916-5921`
+  `False`. The `True` arm (`:5903-5910` direct-job collection, `:5916-5921`
   the in-guard `_cache_cycle_rows` store with `fingerprint=None`) never runs.
   A future default-value caller would bypass the `_cycle_rows` fingerprint
   discipline (#1595/#1600 family).
@@ -63,8 +63,11 @@ Five independent read-only findings, all `p3` tech-debt, all in
    ruling is pinned by tests on the validator (both branches reject) and on
    the derivation (`analysis_*` → `None`, i.e. fall-open). `run_identity.py`'s
    regex and `parse_run_cycle` are untouched (retention consumes them).
-4. **#1763** `candidate_idempotency_key` is deleted; the module comment
-   describes `run_id:stage[:suffix]` with its producer.
+4. **#1763** `candidate_idempotency_key` is deleted; the module docstring
+   (`:21-24`, which spelled the deleted shape) and the charset comment
+   (`:45-46`) both describe `run_id:stage[:suffix]` with its producer, and
+   the `chain_runtime_utils.py:472` mention of the phantom shape is dropped
+   (round-2 cand-07).
 5. **#1581** `scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES` becomes the
    single definition; `chain.COMPLETED_HYDRO_STATUSES` and
    `chain_repository.COMPLETED_HYDRO_STATUSES` are same-object aliases (names

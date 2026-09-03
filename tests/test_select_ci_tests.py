@@ -643,10 +643,16 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # partitions — the independent frontier suite already rode here),
     # and to 44 in #1943/#1944 (the journal-root authority and job-id scope
     # census suites: 50 tests in 1.50s together, measured with
-    # `uv run pytest -q` in PR-lane conditions), and to 45 in #1581 (the
+    # `uv run pytest -q` in PR-lane conditions), and to 46 in #1581 (the
     # hydro-status parity lock: 5 tests in 0.23s, DB-free — it reads the
-    # migrations as text and the status sets as objects), and stays FROZEN here as a
-    # literal: reading it back from the rule under test would make the size
+    # migrations as text and the status sets as objects). Those running counts
+    # track the RULE's target count and had already drifted one low before #1581
+    # (the rule held 45 targets while this comment said 44), so the literal
+    # below — not the arithmetic above — is the authority: it holds 47 entries,
+    # the rule's 46 targets plus the meta-guard rider
+    # `tests/test_select_ci_tests.py`, which arrives by the same-name route
+    # rather than from the rule. The literal stays FROZEN here:
+    # reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
     # PR class in the tree. Growing the rule means consciously editing this list
     # and recording the new lane wall-clock (design risk 1: the 35-min Unit
@@ -959,15 +965,26 @@ def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None
     # on node-27. `db/**` only buys tests/test_migrations.py, which never reads
     # the allow-list, so without the explicit db/migrations rule the guard never
     # ran on the PR that could break it.
+    #
+    # #1581 adds a second target to that same rule: the parity lock derives the
+    # hydro.run_status member table by sweeping db/migrations/**/*.sql as text,
+    # so a migration that adds an enum member changes what that suite asserts —
+    # and only running it here makes the "closed enum" claim red on the
+    # migration's own PR instead of silently stale.
     migration = "db/migrations/000043_canonical_grid_snapshot.sql"
     assert Path(migration).exists()
-    expected = ["tests/test_migrations.py", "tests/test_node27_write_roles.py"]
+    expected = [
+        "tests/test_hydro_status_set_parity.py",
+        "tests/test_migrations.py",
+        "tests/test_node27_write_roles.py",
+    ]
 
     assert select_tests([migration], repo_root=Path(".")) == expected
     # The rule matcher is fnmatch, whose `*` crosses `/`, so `db/migrations/*.sql`
     # also selects a migration parked in a subdirectory -- which is what the
-    # test-side rglob reads. Pinned so a future switch to a path-aware matcher
-    # cannot silently drop that half.
+    # test-side rglobs read (both targets sweep `_MIGRATIONS_DIR.rglob("*.sql")`).
+    # Pinned so a future switch to a path-aware matcher cannot silently drop that
+    # half.
     assert select_tests(["db/migrations/2027q1/000099_x.sql"], repo_root=Path(".")) == expected
 
 

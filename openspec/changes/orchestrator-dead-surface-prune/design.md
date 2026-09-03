@@ -123,7 +123,10 @@ returns `("ERA5", 2026-01-01T00Z)` before the change); (c) the existing
 
 `reservation.py:45-46` becomes: keys are `run_id:stage[:suffix]`, minted by
 `chain_runtime_utils._cycle_stage_idempotency_key`; the safe charset guard is
-unchanged.
+unchanged. The module docstring (`:21-24`) spelled the deleted shape too and
+is rewritten to the same production shape (round-2 cand-07 — the first cut
+scoped the comment fix to `:45-46` only); the phantom-shape mention at
+`chain_runtime_utils.py:472` is dropped in the same pass.
 
 ### D5 (#1581) — one definition, `"complete"` kept, parity locked
 
@@ -185,8 +188,12 @@ attributes and two behavior probes.
   `journal_module.HYDRO_RUN_CODE_CLEARING_STATUSES is scheduler_state_types.HYDRO_RUN_CODE_CLEARING_STATUSES`
   and `scheduler_state_failure._HYDRO_RUN_CODE_CLEARING_STATUSES is ...`,
   plus `isinstance(..., frozenset)` and the six-member value.
-- enum membership: parse `hydro.run_status` members from
-  `db/migrations/000003_enums.sql` plus the `ADD VALUE` in `000013`;
+- enum membership: parse `hydro.run_status` members by sweeping every
+  `db/migrations/**/*.sql` for the single `CREATE TYPE hydro.run_status`
+  block and every `ALTER TYPE hydro.run_status ADD VALUE` (today `000003`
+  plus `000013`; round-2 cand-11 — hardcoding the two files left a future
+  `ADD VALUE 'complete'` migration invisible, and the selector now routes
+  `db/migrations/*.sql` to the parity suite);
   assert `ACTIVE_HYDRO_STATUSES` (all three) `<= enum`,
   `DURABLE - {"complete"} <= enum`, `"complete" not in enum`,
   `HYDRO_RUN_CODE_CLEARING_STATUSES - {"complete"} <= enum`.

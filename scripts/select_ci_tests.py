@@ -1964,7 +1964,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # parked in a subdirectory -- which is what the test-side rglob reads.
     PathTestRule(
         "db/migrations/*.sql",
-        ("tests/test_node27_write_roles.py",),
+        (
+            "tests/test_node27_write_roles.py",
+            # #1581: the parity lock derives the `hydro.run_status` member table
+            # by sweeping this very glob as text, so a migration that adds an
+            # enum member changes what that suite asserts -- and the "no member
+            # outside the enum but `complete`" claim can only red on the
+            # migration's own PR if the suite runs there. `db/**` above buys only
+            # tests/test_migrations.py, which never parses the enum. 5 tests in
+            # 0.23s, DB-free.
+            "tests/test_hydro_status_set_parity.py",
+        ),
     ),
     # the converted lanes with no pre-existing rule to merge into. The
     # superuser-gated-READ guard scans these sources, and such a read fails

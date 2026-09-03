@@ -468,8 +468,9 @@ def _cycle_stage_idempotency_key(
     """Stable idempotency key for a cohort's cycle-level stage submission.
 
     ``run_id`` deterministically encodes source/cycle/basin-cohort, so
-    ``run_id:stage`` is the equivalent of the per-candidate
-    ``source:cycle:basin:stage`` key and is constant across passes.
+    ``run_id:stage`` identifies the candidate submission and is constant across
+    passes; the job-id suffix is appended only when the caller passes a pipeline
+    job id that departs from the base one.
     """
 
     base_job_id = _pipeline_job_id(context.run_id, stage.stage)

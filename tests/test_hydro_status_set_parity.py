@@ -23,8 +23,9 @@ from services.orchestrator import scheduler_state_failure as scheduler_state_fai
 from services.orchestrator import scheduler_state_types as scheduler_state_types_module
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_ENUM_DECLARATION_MIGRATION = _REPO_ROOT / "db" / "migrations" / "000003_enums.sql"
-_ENUM_REMEDIATION_MIGRATION = _REPO_ROOT / "db" / "migrations" / "000013_enum_remediation.sql"
+# Swept whole, not two named files: the enum's membership is whatever the WHOLE
+# migration tree declares, so a migration added tomorrow is inside the oracle.
+_MIGRATIONS_DIR = _REPO_ROOT / "db" / "migrations"
 
 _CREATE_RUN_STATUS_RE = re.compile(
     r"CREATE\s+TYPE\s+hydro\.run_status\s+AS\s+ENUM\s*\(([^)]*)\)",
@@ -37,26 +38,42 @@ _ADD_RUN_STATUS_VALUE_RE = re.compile(
 
 
 def _hydro_run_status_enum_members() -> frozenset[str]:
-    """The declared ``hydro.run_status`` members, read from the migrations as text.
+    """The declared ``hydro.run_status`` members, swept from the migration tree as text.
 
     The migrations are the oracle here rather than a live database: this suite is
-    the local (DB-free) lane, and the enum is closed -- no ``ADD VALUE`` on
-    ``hydro.run_status`` exists after ``000013``.
+    the local (DB-free) lane. The sweep reads EVERY ``db/migrations/**/*.sql``
+    file rather than the two files that happen to mention the type today, which
+    is what makes "the enum is closed after ``000013``" an executable claim
+    instead of a comment: a future ``ALTER TYPE hydro.run_status ADD VALUE
+    'complete'`` migration enters ``added`` here and turns
+    ``test_every_member_is_a_declared_enum_member_except_complete`` red, where a
+    two-path parser would never have looked at it.
     """
 
-    declaration = _CREATE_RUN_STATUS_RE.search(_ENUM_DECLARATION_MIGRATION.read_text(encoding="utf-8"))
-    assert declaration is not None, f"no CREATE TYPE hydro.run_status in {_ENUM_DECLARATION_MIGRATION}"
-    members = set(re.findall(r"'([^']+)'", declaration.group(1)))
-    members.update(_ADD_RUN_STATUS_VALUE_RE.findall(_ENUM_REMEDIATION_MIGRATION.read_text(encoding="utf-8")))
+    migrations = sorted(_MIGRATIONS_DIR.rglob("*.sql"))
+    assert migrations, f"no migration SQL found under {_MIGRATIONS_DIR}"
+
+    declaring: list[Path] = []
+    declared: set[str] = set()
+    added: set[str] = set()
+    for migration in migrations:
+        text = migration.read_text(encoding="utf-8")
+        for declaration in _CREATE_RUN_STATUS_RE.finditer(text):
+            declaring.append(migration)
+            declared.update(re.findall(r"'([^']+)'", declaration.group(1)))
+        added.update(_ADD_RUN_STATUS_VALUE_RE.findall(text))
+
+    # One declaration across the tree: a second CREATE would mean the sweep is
+    # reading a type this suite does not reason about (a rename, a shadow schema).
+    assert len(declaring) == 1, f"expected one CREATE TYPE hydro.run_status, found {declaring}"
     # Self-check on the parse itself. A regex that drifted onto the neighbouring
     # `hydro.run_type` / `met.cycle_status` declarations would still return a
-    # non-empty set, so the two named members pin that BOTH files were read as
-    # intended: `succeeded` comes from the CREATE block, `pending` only from the
-    # `000013` ADD VALUE.
-    assert members, "hydro.run_status enum parse produced no members"
-    assert "succeeded" in members
-    assert "pending" in members
-    return frozenset(members)
+    # non-empty set, so the two named members pin that BOTH kinds of statement
+    # were reached: `succeeded` comes from the CREATE block, `pending` only from
+    # an ADD VALUE (`000013`).
+    assert "succeeded" in declared, f"CREATE block parsed as {sorted(declared)}"
+    assert "pending" in added, f"ADD VALUE sweep parsed as {sorted(added)}"
+    return frozenset(declared | added)
 
 
 def test_durable_success_aliases_are_the_same_object() -> None:

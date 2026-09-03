@@ -18,10 +18,12 @@ An overlapping pass queries ``candidate_state(idempotency_key)`` and skips any
 candidate already ``reserved``/``submitted``/``running`` — even before the job
 appears in ``squeue``/``sacct``.
 
-The idempotency_key is derived from stable candidate identity so it is constant
-for the same candidate+stage across passes:
-
-    f"{source_id}:{cycle_id}:{basin_id}:{stage}"
+The idempotency_key is minted from stable candidate identity: production builds
+``f"{run_id}:{stage}"`` in ``chain_runtime_utils._cycle_stage_idempotency_key``,
+and ``run_id`` deterministically encodes source, cycle and basin cohort, so that
+base key is constant for the same candidate+stage across passes. A job-id suffix
+(``f"{run_id}:{stage}:{suffix}"``) is appended only when the submission carries a
+pipeline job id that departs from the base one.
 """
 
 from __future__ import annotations
