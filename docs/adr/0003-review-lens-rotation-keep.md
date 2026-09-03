@@ -2830,3 +2830,151 @@ The accumulated later-round catches still concentrate in rotated-in lenses
 autonomous default. Reversal still requires the attribution-schema,
 round-intent and round-role repairs plus maintainer review. Next revisit on
 the audit's next flag.
+
+## Correction 2026-09-02 (#1764, batch PR) — catch-schema enforcement and attribution re-measurement
+
+Issue #1764 is now fixed upstream (`subagent-workflow` 0.31.1, sibling
+`orche-omp-workflow` 0.2.2) and the log has been repaired as far as the PR
+record allows. This section records the re-measurement and supersedes the
+figures two earlier revisits carry.
+
+**Measured at `f9a1345f`, before any repair.** 512 lines, 504 merged, **1600
+catch objects**. **1576** carry a string `lens`; **24** do not, in **five**
+entries:
+
+| line | PR | non-compliant catches | shape |
+|---|---|---|---|
+| 440 | #1730 | 3 | `phase` instead of `round`/`lens` |
+| 442 | #1738 | 6 | `phase` instead of `round`/`lens` |
+| 443 | #1746 | 6 | `phase` instead of `round`/`lens` |
+| 445 | #1751 | 2 | `phase` instead of `round`/`lens` |
+| 461 | #1802 | 7 | `round` present, `lens` absent; the line has **no `round_lenses` key** |
+
+**Two failure modes, opposite biases.** A catch with no `round` hit
+`catch.get("round", 1)`, was read as round 1 and `continue`d — an
+**undercount** of later-round catches. A catch with a `round >= 2` but no
+`lens` evaluated `None not in core_lenses` as true and was counted as
+**rotated** — an **overcount** of the rotation case. Both were silent.
+
+**The overcount mode had zero instances in this log**, and that must not be
+blurred. The only `lens`-less catches with a real `round` are the seven in
+line 461, whose entry has no `round_lenses` key and therefore never entered
+the `multiround` subset the attribution block reads. So `core=109
+rotated=297` was pure undercount plus invisibility; the rotated figure was
+never inflated. The fixed script confirms this directly — run on the
+*unrepaired* log it reports `core=109 rotated=297 skipped=24`, identical
+core/rotated to the old script, with the 24 now named instead of vanishing.
+
+**Backfill (task 2.5).** Nine of the 24 were recoverable from the PR record;
+fifteen were not, and were left byte-identical rather than guessed. A lens
+was written only where the record names it: the reviewer report or ledger
+names the lens for that specific finding; or the round has exactly one lens
+in `round_lenses`; or the catch's `class` equals a `round_lenses` token for
+its round verbatim. Topical fit between a finding and a lens name was **not**
+accepted as evidence.
+
+| line / index | round | lens | source |
+|---|---|---|---|
+| 440[0] | 0 | `fixture-review` | PR #1730 body, deviation record 2, and its merge comment: the write-before-`utime` ordering was a fixture-review P2 pinned into T1 before implementation (the round ledger covers round 1 and Phase 7 only, and does not mention it) |
+| 442[0] | 1 | `lineage-evidence-admission` | PR #1738 body round-1 table (four verified findings); `class` equals `round_lenses[0][0]` verbatim |
+| 442[1] | 1 | `db-plane-provider-coverage` | same table; `class` equals `round_lenses[0][1]` verbatim |
+| 442[2] | 1 | `completion-scope-coverage` | same table; `class` equals `round_lenses[0][2]` verbatim |
+| 442[5] | 3 | `test-oracle-mutation` | PR #1738 merge comment round-3 row (21 mutations / 19 caught); `class` equals `round_lenses[2][2]` verbatim |
+| 443[1] | 2 | `detector-recall-invariant` | `.workplans/pr-1746/review/verdicts-detector-recall-2.md`: "Round 2 … two candidates from the recall-invariant reviewer" |
+| 443[2] | 2 | `detector-recall-invariant` | same file, candidate 2 of that round |
+| 445[0] | 1 | `spec-conformance` | `.workplans/pr-1751/review/round1/r2-spec.md` ("R2 spec conformance — round 1") carries this exact P1; `round_lenses[0][1]` |
+| 445[1] | 2 | `spec-conformance-targeted` | the catch's own `phase` was `cross-review-round-2`, and round 2 has exactly one lens |
+
+**Unattributable, left exactly as-is (15).** In each case the round is
+knowable from the ledger but no lens is: the record names the round's lens
+set without mapping any finding to a member of it. A partial rewrite
+(`round` without `lens`) would still be non-compliant and would have changed
+bytes for nothing, so these catches were not touched at all.
+
+- **440[1], 440[2]** (round 1) — the ledger records the two P3 notes but
+  attributes neither; note 2 is explicitly "both reviewers … independently".
+- **442[3], 442[4]** (round 2) — the PR body names both round-2 findings and
+  the round-2 lens set, and maps neither.
+- **443[0]** (round 1) — `verdicts-detector-recall-1.md` records the round
+  and the verdict, never the reviewer.
+- **443[3], 443[4], 443[5]** (round 3) — `round-3-findings.md` names the two
+  round-3 lenses by remit and lists the findings under neither.
+- **461[0]–461[6]** (rounds 1,1,1,1,2,2,3 — the rounds are already correct
+  and were confirmed against `.workplans/pr-1802/review/round-ledger.log` and
+  `retro-round-3.md`) — **no lens token exists anywhere in that PR's record**.
+  The body says "3 面并行", the ledger correction says round 2's two findings
+  "came from the documentation lens", round 3 was the Phase 7 pass. Those are
+  role descriptions, not lens names, and inventing tokens for them would put
+  values in the log that no reviewer ever ran under. `round_lenses` therefore
+  could **not** be derived and the key stays absent, which is itself the
+  finding: this line is invisible to the attribution block and always was.
+
+**Before / after.**
+
+| run | line |
+|---|---|
+| original script, original log | `156 multi-round merged PR(s), later-round catches core=109 rotated=297` |
+| fixed script, original log | `… core=109 rotated=297 skipped=24` + `NOTE non-compliant catches skipped: 24 in 5 entry(ies) (pr 1730, 1738, 1746, 1751, 1802)` |
+| fixed script, backfilled log | `… core=109 rotated=301 skipped=15` + `NOTE non-compliant catches skipped: 15 in 4 entry(ies) (pr 1730, 1738, 1746, 1802)` |
+| fixed script, backfilled log rebased onto `3b5316f9` (the six batch-23–28 lines of the 2026-09-03 revisit above, 518 lines) | `161 multi-round merged PR(s), later-round catches core=144 rotated=301 skipped=15` — the core delta (+35) is those six lines, as that revisit records; the rotated and skipped figures are unchanged |
+
+The multi-round sample is unchanged at 156 (440 is `rounds=1`; 461 still has
+no `round_lenses`). The four newly counted catches — 442[5], 443[1], 443[2],
+445[1] — all land in **rotated**, because each round's lens set is disjoint
+from its own round-1 set. Core is unmoved at 109.
+
+**Residue bound.** Five of the fifteen unattributable catches are
+metric-affecting (442[3], 442[4] at round 2; 443[3]–443[5] at round 3); the
+other ten are round-1 catches or sit in the entry the block cannot read. For
+all five, the recorded lens set of their round is disjoint from their
+entry's round-1 set, so **whichever** member produced them the catch scores
+rotated. True later-round attribution is therefore `core=109`,
+`rotated ∈ [301, 306]`. The direction is unaffected by the residue, which is
+what makes the ruling below a measured claim rather than an assertion.
+
+**Supersessions.**
+
+- The **2026-08-22 PR #1759 revisit**'s table (1331 catches / 1314 counted /
+  **17** `phase`-only in **four** entries) was correct at `97f8116a` and is
+  superseded here by the larger sample and by a second failure mode it did
+  not know about: line 461 (PR #1802) was appended after that measurement and
+  carries `round` without `lens`, a shape the "carrying `round`+`lens`" /
+  "carrying `phase` only" dichotomy has no column for. Its derived bound
+  ("≤4.2% of later-round catches lost, across three multi-round PRs") is
+  likewise superseded: the true loss was 4 counted catches recovered here
+  plus up to 5 still unrecoverable, in four multi-round PRs.
+- That revisit's surviving contradiction is now **resolved in the direction
+  it feared**: line 445's round-2 catch, the instance it called "the cleanest
+  instance so far of the mechanism the ADR claims", is backfilled to
+  `spec-conformance-targeted` and does count as rotated. Narrative and
+  counter now agree on it.
+- The **2026-08-23 (#1749 / PR #1793) revisit** attributes to #1764 a
+  *different* defect — "an entry whose round-1 `core_lenses` is empty makes
+  all its later-round catches count as `rotated`", measured there as 29 of
+  128 entries contributing 3 catches, ~1% inflation. That measurement stands
+  for its sample, but its attribution is superseded: **#1764 as delivered does
+  not touch that path.** `rotation_attribution` still treats an empty round-1
+  lens list as an empty core set, so every later-round catch in such an entry
+  scores rotated. Re-measured here at `f9a1345f`: **43 of 198** merged
+  entries with `rounds >= 2` have no round-1 lens list (22%, the same
+  proportion), and they carry **6** later-round catches. Only **one** of the
+  43 actually reaches the attribution block — it has a `round_lenses` key
+  holding an empty first list, and contributes 3 of those 6; the other 42
+  have no `round_lenses` key at all and are excluded from the `multiround`
+  subset entirely, exactly like line 461. So the inflation is ≤3 catches
+  against 301. It remains open and is not covered by 0.31.1.
+- Every revisit's standing caveat — the schema counts *when* a lens ran, not
+  *whether rotating it in* is what found the defect — applies to 301 exactly
+  as it did to 297. The corrected number is not new evidence for rotation.
+
+**Ruling: keep, direction unchanged.** Later-round catches still concentrate
+in rotated-in lenses (**301 versus 109** on the base log; 301 versus 144 on the
+log rebased onto `3b5316f9`, the fourth row above; 306 at the residue's upper
+bound either way), so keep continues to follow from the cumulative ratio plus the
+absence of a recorded cut rationale. What changed is the trustworthiness of
+the number, not the number's sign: from 0.31.1 onward a non-compliant catch
+is rejected at append time by `evidence_check --loop-log-entry` and, for the
+lines already written, counted and named as `skipped=` by the audit instead
+of silently distorting either bucket. Reversal still requires the
+attribution-schema (including the still-open empty-`core_lenses` path),
+round-intent and round-role repairs plus maintainer review.

@@ -7266,14 +7266,18 @@ def test_evidence_schema_annotates_every_invocation_slot_with_its_truth_source()
         assert isinstance(description, str) and description.strip(), f"{name} has no description"
         assert "execution.ledger" in description, f"{name} does not name execution.ledger"
         assert "re-derive" in description.lower(), f"{name} does not say the verifier re-derives it"
+        # #1691: the description must also carry the input-shape contract, not just the
+        # truth source -- a slot value that is anything other than a `{path, sha256,
+        # bytes}` reference fails the run closed.
+        assert "fails closed" in description.lower(), f"{name} does not state the fail-closed rule"
 
 
-# --- #1398 G2/G3: what the five `*_invocation` slots are actually enforced as ----------
+# --- #1398 G2/G3 + #1691: what the five `*_invocation` slots are actually enforced as ---
 # The schema `description` these tests back is a contract claim in three parts, and each
 # part gets its own oracle here.  G1 above pins that the claim is *present*; G2 pins the
-# enforcement boundary (a well-formed `{path, sha256, bytes}` slot is a closure node; a
-# value of any other shape is not itself one, though a well-formed reference nested inside
-# it still is), and G3 pins that a well-formed authored reference
+# enforcement boundary (a well-formed `{path, sha256, bytes}` slot is a closure node, and
+# every other shape is rejected by the input-shape gate inside `verify_bundle`, so the run
+# fails closed and never qualifies), and G3 pins that a well-formed authored reference
 # survives into the terminal `source_manifest`, deduplicated by path.  None of the three
 # borrows credit from `test_legacy_authored_invocations_do_not_contribute_to_v3_truth`,
 # which covers only the "semantics are never interpreted" half.
@@ -7290,13 +7294,15 @@ _INVOCATION_SLOTS = (
 # `resolve_artifact_closure`'s pre-read validity gate and reaches the file open.
 _MISSING_INVOCATION_REF = {"path": "/nonexistent/issue-1398-nope.json", "sha256": "0" * 64, "bytes": 1}
 
-# The shapes that genuinely escape are exactly those carrying NO nested reference.  A
-# fourth key takes the value out of `artifact_references`' exact-key set so the mapping is
-# not itself collected (`packages/common/evidence_io.py:192`), but the same branch then
-# descends into its values (`:195`), so the extra key MUST hold a scalar -- a wrapper whose
-# extra key holds a well-formed reference does not escape, and is pinned separately by
-# `test_invocation_shape_wrapping_a_reference_is_still_closure_checked`.
-_UNCHECKED_INVOCATION_SHAPES = {
+# The three non-reference shapes the input-shape gate must reject (#1691).  Before that
+# gate existed these were the shapes nothing checked at all: a fourth key takes the value
+# out of `artifact_references`' exact-key set so the mapping is not itself collected
+# (`packages/common/evidence_io.py:192`), and the same branch's descent into its values
+# (`:195`) finds only a scalar; a bare string and `null` carry nothing to collect either.
+# The artifact closure therefore never saw them -- `_require_artifact_reference_shape`
+# does, before the run can qualify.  Wrapper mappings, whose nested reference the closure
+# *does* collect, are a separate axis pinned by the two wrapper tests below.
+_NON_REFERENCE_INVOCATION_SHAPES = {
     "extra-key": lambda ref: {**ref, "authored_by": "supervisor"},
     "string": lambda ref: ref["path"],
     "null": lambda ref: None,
@@ -7379,59 +7385,124 @@ def test_wellformed_invocation_reference_whose_identity_disagrees_fails_closed(
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 
-@pytest.mark.parametrize("shape", sorted(_UNCHECKED_INVOCATION_SHAPES))
-def test_non_reference_invocation_shapes_escape_closure_and_still_qualify(
-    tmp_path: Path, shape: str
+@pytest.mark.parametrize("shape", sorted(_NON_REFERENCE_INVOCATION_SHAPES))
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
+def test_non_reference_invocation_shapes_fail_closed_at_the_input_shape_gate(
+    tmp_path: Path, owner: str, key: str, shape: str
 ) -> None:
-    """A shape carrying no nested reference is NOT enforced, not even for existence.
+    """#1691: a slot that is not a `{path, sha256, bytes}` reference stops the run.
 
-    The mirror image of the test above, and the clause two earlier drafts of this
-    description got wrong by claiming existence/hash enforcement applies unconditionally.
-    Closure collection is gated on the value being *exactly* a three-key mapping, and the
-    evidence schema is applied to the terminal document rather than to the input bundle
-    (`scripts/node27_timeseries_compression_live_evidence.py:4208`), so all five slots can
-    name the very same absent path in a non-reference shape and the bundle still qualifies.
+    The mirror image of the closure tests above, and the gap this issue closed.  Closure
+    collection is gated on the value being *exactly* a three-key mapping, and the evidence
+    schema is applied to the terminal document rather than to the input bundle
+    (`scripts/node27_timeseries_compression_live_evidence.py:4235`), so before the
+    input-shape gate existed every shape parametrized here sailed through and the bundle
+    still qualified.  `verify_bundle` now validates the authored value itself, and the
+    rejection names the offending slot rather than some downstream artifact.
 
-    The escape is narrower than "any other shape", which is what a fourth draft of the
-    description claimed: it holds only for the shapes parametrized here, none of which
-    contains a nested reference -- a mapping whose extra key is a scalar, a bare string,
-    `null`.  A mapping that *wraps* a well-formed reference is still closure-checked; that
-    is `test_invocation_shape_wrapping_a_reference_is_still_closure_checked` below.
+    Each case corrupts exactly one slot and derives the corruption from that slot's own
+    *existing* authored reference, so nothing here can be credited to a missing file: the
+    only thing wrong with the bundle is the shape of one value.
     """
 
     bundle = _bundle(tmp_path)
-    for owner, key in _INVOCATION_SLOTS:
-        bundle[owner][key] = _UNCHECKED_INVOCATION_SHAPES[shape](dict(_MISSING_INVOCATION_REF))
-    terminal = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
-    assert terminal["qualifies_task_4_5"] is True
-    # The terminal slots are re-derived, so the unreadable authored shapes never surface.
-    ledger_ref = bundle["execution"]["ledger"]
-    for owner, key in _INVOCATION_SLOTS:
-        assert terminal[owner][key] == ledger_ref
-    assert not any(
-        node["path"] == _MISSING_INVOCATION_REF["path"] for node in terminal["source_manifest"]
-    )
+    bundle[owner][key] = _NON_REFERENCE_INVOCATION_SHAPES[shape](dict(bundle[owner][key]))
+
+    with pytest.raises(evidence.EvidenceError) as raised:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert f"{owner}.{key}" in str(raised.value), raised.value
 
 
 @pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
-def test_invocation_shape_wrapping_a_reference_is_still_closure_checked(
+def test_invocation_wrapper_around_a_missing_reference_fails_closed(
     tmp_path: Path, owner: str, key: str
 ) -> None:
-    """A wrapper mapping does NOT escape: the reference nested inside it is a closure node.
+    """A wrapper is rejected for its own shape, not for what it happens to wrap.
 
-    The caveat that refuted a fourth draft's "a value of any other shape is not
-    closure-checked at all".  `artifact_references` does not collect a non-three-key
-    mapping itself, but the same branch descends into that mapping's values
-    (`packages/common/evidence_io.py:189-197`, `stack.extend(current.values())`), so a
-    nested `{path, sha256, bytes}` is collected as a root-level closure node in its own
-    right and an unavailable path inside it still fails the run closed.  This is why the
-    escape shapes above are exactly the ones carrying no nested reference.
+    `artifact_references` does not collect a non-three-key mapping itself, but the same
+    branch descends into its values (`packages/common/evidence_io.py:189-197`), so the
+    nested reference is collected as a closure node in its own right and its unavailable
+    path used to be what failed the run.  Through `verify_bundle` the input-shape gate
+    runs first, so the verdict no longer depends on whether the wrapped file exists --
+    the negative assertion is the load-bearing half here.
+
+    (Through `main()` the ordering is the other way round: `resolve_artifact_closure` runs
+    at `scripts/node27_timeseries_compression_live_evidence.py:4201`, before
+    `verify_bundle`, so this same bundle fails at the closure node instead.  Fail-closed
+    either way, which is why the `main()` pin below uses the wrapper around an *existing*
+    reference -- the one case only this gate catches.)
     """
 
     bundle = _bundle(tmp_path)
     bundle[owner][key] = {"note": dict(_MISSING_INVOCATION_REF)}
-    with pytest.raises(BoundedEvidenceError, match="artifact closure node is unavailable or unsafe"):
+
+    with pytest.raises(evidence.EvidenceError) as raised:
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    message = str(raised.value)
+    assert f"{owner}.{key}" in message, message
+    assert "artifact closure node is unavailable" not in message, message
+
+
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
+def test_invocation_wrapper_around_an_existing_reference_fails_closed_at_the_input_shape_gate(
+    tmp_path: Path, owner: str, key: str
+) -> None:
+    """The escape the artifact closure structurally cannot see.
+
+    The wrapper holds the slot's own authored reference, so every file the bundle names
+    exists with the identity it declares and the closure resolves cleanly: it collects the
+    nested reference and finds nothing wrong with it.  What is wrong is that the slot is a
+    wrapper rather than a reference, which only the input-shape gate can say.  This is the
+    case `main()` exercises end to end below.
+    """
+
+    bundle = _bundle(tmp_path)
+    authored = dict(bundle[owner][key])
+    assert Path(authored["path"]).is_file(), "the wrapped reference must name a real file"
+    bundle[owner][key] = {"note": authored}
+
+    with pytest.raises(evidence.EvidenceError) as raised:
+        evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert f"{owner}.{key}" in str(raised.value), raised.value
+
+
+@pytest.mark.parametrize("owner, key", _INVOCATION_SLOTS)
+def test_main_rejects_an_invocation_wrapper_around_an_existing_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    owner: str,
+    key: str,
+) -> None:
+    """The CLI boundary: closure resolution passes, the input-shape gate fails the run.
+
+    `main()` resolves the artifact closure *before* `verify_bundle`
+    (`scripts/node27_timeseries_compression_live_evidence.py:4201`), so a wrapper around
+    an existing reference is the one malformed shape that reaches the gate through the
+    operator entrypoint.  `failure.stage` is the discriminator: it only advances to
+    `verify_or_publish` at `:4215`, after closure resolution and the output-disjointness
+    check have succeeded, so asserting it proves the rejection came from the gate rather
+    than from an earlier stage.  Parametrized over all five slots so the CLI pin covers
+    every gate site, not only `recovery.invocation`.
+    """
+
+    bundle = _bundle(tmp_path)
+    bundle[owner][key] = {"note": dict(bundle[owner][key])}
+    bundle_path = tmp_path / "wrapper-bundle.json"
+    bundle_path.write_bytes(_canonical(bundle))
+    output = tmp_path / "terminal.json"
+    monkeypatch.setattr(evidence, "_current_verifier_head", lambda: VERIFIER_HEAD)
+
+    assert evidence.main(["--bundle-path", str(bundle_path), "--output-path", str(output)]) == 1
+
+    marker = json.loads(output.read_text(encoding="utf-8"))
+    assert marker["outcome"] == "failed"
+    assert marker["qualifies_task_4_5"] is False
+    assert marker["failure"]["stage"] == "verify_or_publish"
+    jsonschema.validate(marker, EVIDENCE_SCHEMA)
+    reported = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert reported["status"] == "failed"
+    assert f"{owner}.{key}" in reported["reason"], reported["reason"]
 
 
 def test_wellformed_authored_invocations_are_retained_in_the_terminal_manifest(tmp_path: Path) -> None:

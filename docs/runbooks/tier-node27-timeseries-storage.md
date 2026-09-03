@@ -800,9 +800,13 @@ Referenced JSON contracts are:
   regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON
   it is complexity-bounded and its own nested artifact references are
   resolved transitively — and it is retained, deduplicated by normalized
-  path, in the terminal `source_manifest`. A value of any other shape is not
-  itself a closure node, though any well-formed reference nested inside it
-  still is, collected in its own right.
+  path, in the terminal `source_manifest`. A value of any other shape — a
+  mapping with extra or missing keys, a mapping that wraps a reference, a bare
+  string, `null` — is rejected by the verifier's input-shape check inside
+  `verify_bundle`, which names this slot: the run fails closed and never
+  qualifies. When the verifier CLI resolves the artifact closure ahead of
+  `verify_bundle`, a wrapper around an unavailable reference may fail first at
+  that closure node instead, which is fail-closed all the same.
 - `recovery.preflight`: separately authorized replay preflight with capture
   time, node-27/mutation-SHA/database identity, at least 300 GiB free space,
   `before_compressed=true`, positive row count, and the exact six-field target
