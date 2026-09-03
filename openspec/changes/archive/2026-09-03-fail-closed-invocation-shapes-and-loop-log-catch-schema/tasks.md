@@ -16,7 +16,7 @@ DB, display, or scheduler behaviour changes (verifier output bytes unchanged).
 - [x] `openspec validate node22-db-free-scheduler-state --strict --no-interactive` passes (#1812).
 - [x] Vault: `npm run test:subagent-workflow` green (#1764).
 - [x] `uv run .claude/skills/subagent-workflow/scripts/loop_log_audit.py --log docs/review-loop-log.jsonl` (post-sync, post-backfill) reports the skipped count under the fixture's compliant-catch definition (`round` non-negative integer, `0` = fixture-review round; `lens` non-empty string) with every remaining skipped catch declared unattributable in ADR 0003 by line + index (task 2.5's sanctioned alternative: 9 of 24 recoverable, `skipped=15`, all 15 listed); the resulting `core=109 rotated=301 skipped=15` (base log at `f9a1345f`; `core=144 rotated=301 skipped=15` on the log rebased onto `3b5316f9`, both rows in the ADR table) recorded in ADR 0003. (Deviation from the original `skipped=0` wording recorded in the PR 偏离记录.)
-- [ ] CI green on the final head.
+- [x] CI green on the final head. (observed on frozen head `1e52418a`, run 33707726831: Markdown Lint / JSON Schema Validate / Unit Tests / Entropy Audit pass; merged as `3b4c748b`)
 
 ## 1. #1691 — fail-closed `*_invocation` input shapes (D1)
 

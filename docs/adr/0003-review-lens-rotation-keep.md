@@ -2978,3 +2978,26 @@ lines already written, counted and named as `skipped=` by the audit instead
 of silently distorting either bucket. Reversal still requires the
 attribution-schema (including the still-open empty-`core_lenses` path),
 round-intent and round-role repairs plus maintainer review.
+
+## Revisit 2026-09-02 (post #1691 / #1764 / #1812 / #1662, PR #1974) — keep; the enforcing PR's own line is a no-rotation datum
+
+After the PR #1974 accountability line — the first line appended under the
+0.31.1 catch schema and validated by `evidence_check --loop-log-entry` before
+the append — `loop_log_audit.py` reports **162** multi-round merged PRs and
+later-round catches **core=144 / rotated=301 / skipped=15**, all three
+unchanged from the fourth row of the Correction table above.
+
+Round 1 ran the six-lens comprehensive mix and produced seven confirmed
+findings (two P1, five P2; six fixed, one discarded with a recorded reason).
+Round 2 re-ran a pinned core of four lenses on the fix delta and returned
+zero findings, and the Phase 7 Gap Sweep was clean. Every catch on the line is
+round 0 (fixture review) or round 1, so no later-round catch was recorded and
+no lens rotated in: the PR adds +0 to both buckets and +0 to `skipped`. It is
+a no-rotation datum, like #1956, #1963 and the batch-23–28 lines.
+
+The accumulated later-round catches still concentrate in rotated-in lenses
+(**301 versus 144**, `skipped=15` named rather than silently bucketed), so
+**keep rotation** stands under the recorded autonomous default. Reversal still
+requires the attribution-schema (including the still-open empty-`core_lenses`
+path), round-intent and round-role repairs plus maintainer review. Next
+revisit on the audit's next flag.
