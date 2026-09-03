@@ -34,6 +34,10 @@ FORCING_VERSION_ID = f"{ISSUE_126_PREFIX}_forcing_v1"
 STATE_ID = f"{ISSUE_126_PREFIX}_state_2026050300"
 VALID_TIME_1 = datetime(2026, 5, 3, 1, tzinfo=UTC)
 VALID_TIME_2 = datetime(2026, 5, 3, 2, tzinfo=UTC)
+# When the seeded forecast run's parse "finished". A fixed instant rather than
+# now(): the seed must be reproducible, and nothing here compares it to wall
+# clock — publish only asks whether it is NULL (#1779).
+PARSED_AT = datetime(2026, 5, 3, 3, tzinfo=UTC)
 
 
 def apply_migrations_from_zero(database_url: str) -> None:
@@ -302,6 +306,7 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                     start_time,
                     end_time,
                     status,
+                    parsed_at,
                     run_manifest_uri,
                     output_uri,
                     log_uri
@@ -321,6 +326,12 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                         VALID_TIME_1,
                         VALID_TIME_2,
                         "parsed",
+                        # #1779: the forecast run is a COMPLETED parse — it is the
+                        # only seeded run that also gets river_timeseries rows below
+                        # — so it carries the parse timestamp production's parser
+                        # stamps in the same transaction as the status flip, and the
+                        # publish step (which now keys on it) advances it.
+                        PARSED_AT,
                         "s3://nhms/runs/it126/input/manifest.json",
                         "s3://nhms/runs/it126/output/",
                         "s3://nhms/runs/it126/logs/",
@@ -337,6 +348,11 @@ def seed_issue_126_data(database_url: str, *, object_root: Path | None = None) -
                         datetime(2025, 1, 1, tzinfo=UTC),
                         datetime(2025, 1, 1, 1, tzinfo=UTC),
                         "parsed",
+                        # Deliberately NULL: this run gets no fact rows, so it stands
+                        # for a status that no parse produced. Publish must leave it
+                        # alone, which is the negative row the residual-debt suite
+                        # asserts. Do not "fix" this to match the forecast run.
+                        None,
                         "s3://nhms/runs/it126-hindcast/input/manifest.json",
                         "s3://nhms/runs/it126-hindcast/output/",
                         "s3://nhms/runs/it126-hindcast/logs/",

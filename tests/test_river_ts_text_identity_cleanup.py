@@ -44,7 +44,8 @@ A, eight segment blocks      river_segment_id, river_network_version_id,
 A9, latest-product fallback  run_id, river_network_version_id, variable
 B, publisher discovery       variable
 C, copyback EXISTS           variable
-D, autopipeline (2)          none
+D, autopipeline (0)          none — neither per-tick criterion reads the
+                             fact table at all (#1789, #1779)
 E, seed/smoke/helpers        none
 F, parser replace chain (3)  none
 ===========================  ==========================================
@@ -152,10 +153,13 @@ RIVER_TABLE = "hydro.river_timeseries"
 # * publisher.py 2 = the discovery aggregate + the PublishError message naming
 #   the required table.
 # * forcing_copyback_backfill.py 1 = the correlated EXISTS probe.
-# * node27_autopipeline.py 1 = the publish per-tick criterion. The ingest
-#   criterion used to be the second; #1789 deleted its fact-table join (the
-#   parse timestamp it derived now lives on hydro_run.parsed_at), so a return
-#   to 2 means the join came back.
+# * node27_autopipeline.py 0 = neither per-tick criterion reads the fact table
+#   any more. #1789 deleted the ingest criterion's join (the parse timestamp it
+#   derived now lives on hydro_run.parsed_at) and #1779 deleted the publish
+#   criterion's EXISTS probe for the same reason — hydro_run.parsed_at already
+#   records that a parse finished, and run_key is not a segmentby column, so the
+#   probe cost a Seq Scan of every compressed chunk per tick. Any return to a
+#   non-zero count means a fact-table read came back to the tick.
 # * summarize_qhh_smoke_results.py 1 / reset_qhh_smoke_db.py 1 = one statement
 #   each; the reset one is the table NAME passed to its ``_delete`` helper,
 #   which is why the census counts bare mentions and not just SQL-shaped ones.
@@ -168,7 +172,7 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "packages/common/forecast_store.py": 10,
     "services/tile_publisher/publisher.py": 2,
     "services/tile_publisher/forcing_copyback_backfill.py": 1,
-    "scripts/node27_autopipeline.py": 1,
+    "scripts/node27_autopipeline.py": 0,
     "scripts/summarize_qhh_smoke_results.py": 1,
     "scripts/reset_qhh_smoke_db.py": 1,
     "db/seeds/seed_demo.py": 5,
@@ -850,8 +854,41 @@ def test_copyback_discovery_probe_correlates_on_the_run_key() -> None:
     assert "AND rt.variable_e = 'q_down'" in sql
 
 
+def test_copyback_aid_is_labelled_as_an_orderby_batch_filter_not_a_pushdown() -> None:
+    """#1778: the surviving aid must say what it actually does to the planner.
+
+    ``variable`` is an ORDERBY column of 000047's compression layout, not a
+    segmentby column, so it prunes decompressed BATCHES by their min/max
+    metadata and cannot prune segments. The generic removal marker reads
+    "pushdown aid" and is byte-frozen (#1342 deletes by that line), so the
+    correction has to live in the prose beside it — and it has to be asserted,
+    or the next reader re-derives the same wrong conclusion from the marker.
+
+    Pinned on the block ABOVE the marker rather than anywhere in the module:
+    prose parked in the module docstring would satisfy a containment check while
+    leaving the aid itself unlabelled.
+    """
+    sql = backfill_module._DISCOVER_BACKFILL_RUNS_SQL
+    lines = sql.splitlines()
+    marker_line = next(index for index, line in enumerate(lines) if PUSHDOWN_AID_MARKER in line)
+    # The marker keeps its adjacency to the aid (_assert_aids_are_marked above
+    # enforces that); the explanation is the contiguous comment block above it.
+    block: list[str] = []
+    index = marker_line - 1
+    while index >= 0 and lines[index].strip().startswith("--"):
+        block.append(lines[index].strip())
+        index -= 1
+    explanation = " ".join(reversed(block)).lower()
+
+    assert "orderby" in explanation, "the aid must be named an orderby-level filter"
+    assert "segmentby" in explanation, "and contrasted with the segmentby columns it is not"
+    assert "000047" in explanation, "cite the layout migration, so the claim is checkable"
+    assert "not a segmentby index pushdown" in explanation
+
+
 # ---------------------------------------------------------------------------
-# D — scripts/node27_autopipeline.py (the two per-tick criteria)
+# D — scripts/node27_autopipeline.py (the two per-tick criteria, both now
+#     fact-table-free: ingest by #1789, publish by #1779)
 # ---------------------------------------------------------------------------
 
 
@@ -859,11 +896,13 @@ def _autopipeline_statements(function: str, *, needle: str = RIVER_TABLE, expect
     """The ``needle``-bearing string constants of one autopipeline function.
 
     ``expected`` is a parameter and not a hard-coded ``1`` because #1789 drove
-    one of the two call sites to ZERO such statements: ``_already_ingested_runs``
-    no longer touches the fact table at all. With the count baked in, the helper
-    itself raised before the negative pin below could run — a guard that fails
-    for the very shape it is supposed to certify is not a guard. The publish
-    criterion still carries exactly one, and asserts it through the same helper.
+    one of the two call sites to ZERO such statements (``_already_ingested_runs``)
+    and #1779 drove the other (``_publish_display_runs``) there too. With the
+    count baked in, the helper itself raised before the negative pins below could
+    run — a guard that fails for the very shape it is supposed to certify is not
+    a guard. It stays a parameter, rather than being fixed at zero, because the
+    same helper is used with ``needle="FROM hydro.hydro_run h"`` to reach the
+    authority statement each criterion DOES carry.
     """
     statements = _sql_constants(
         module=("scripts", "node27_autopipeline.py"),
@@ -926,11 +965,40 @@ def test_autopipeline_ingest_criterion_is_authority_state_first() -> None:
     assert "updated_at" not in sql
 
 
-def test_autopipeline_publish_criterion_correlates_by_key_with_no_aid() -> None:
-    sql = _autopipeline_statement("_publish_display_runs")
+def test_autopipeline_publish_criterion_touches_no_fact_table() -> None:
+    """#1779: publish keys on authority state, so it must not name the fact table.
 
-    _assert_switched_surface(sql, "rt", NO_AIDS, "autopipeline _publish_display_runs")
-    assert "WHERE rt.run_key = h.run_key" in sql
+    Was a key-only-join shape pin with ``NO_AIDS``. The ``EXISTS (SELECT 1 FROM
+    <fact table> rt WHERE rt.run_key = h.run_key)`` probe existed to learn that a
+    parse had produced rows — something ``hydro_run.parsed_at`` already records,
+    stamped by the parser in the transaction that sets ``status = 'parsed'``. And
+    ``run_key`` is not a compression segmentby column, so on the compressed side
+    the planner had no access path: every tick sequentially scanned every
+    compressed chunk to answer a question the authority table had already
+    answered.
+
+    Zero occurrences, not "no forbidden aid": an aid-free probe would still be
+    the whole regression. The statement's own SET/WHERE shape is pinned by
+    ``tests/test_display_publish_status_only.py`` (the ``updated_at`` and
+    ``parsed_at`` write negatives live there with their sibling assertions).
+    """
+    _autopipeline_statements("_publish_display_runs", expected=0)
+
+
+def test_autopipeline_publish_criterion_reads_only_the_authority_table() -> None:
+    """The positive half: the one statement publish keeps is an authority UPDATE.
+
+    Without this, the zero-count pin above goes green on a publish step that
+    stopped publishing — or that grew a second authority statement — because a
+    count of zero fact-table mentions says nothing about what IS there.
+    """
+    sql = _autopipeline_statement("_publish_display_runs", needle="UPDATE hydro.hydro_run h")
+
+    assert "SET status = 'published'" in sql
+    assert "WHERE h.status = 'parsed'" in sql
+    assert "AND h.parsed_at IS NOT NULL" in sql
+    assert RIVER_TABLE not in sql
+    assert PUSHDOWN_AID_MARKER not in sql, "publish is aid-free: it reads no fact table at all"
 
 
 # ---------------------------------------------------------------------------

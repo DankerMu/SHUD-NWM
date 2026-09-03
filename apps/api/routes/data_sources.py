@@ -19,19 +19,22 @@ from packages.common.object_store_forcing import (
     read_station_forcing_csv,
 )
 
+# #1728: this router's connection surface in pg_stat_activity.
+_APPLICATION_NAME = "nhms-api-data-sources"
+
 router = APIRouter(prefix="/api/v1", tags=["data-sources"])
 
 
 def get_data_source_store() -> PsycopgForecastStore:
     try:
-        return PsycopgForecastStore.from_env()
+        return PsycopgForecastStore.from_env(application_name=_APPLICATION_NAME)
     except ForecastStoreError as error:
         raise _api_error(error) from error
 
 
 def get_station_lookup() -> StationLookup:
     try:
-        return PsycopgStationLookup.from_env()
+        return PsycopgStationLookup.from_env(application_name=_APPLICATION_NAME)
     except ForecastStoreError as error:
         raise _api_error(error) from error
 

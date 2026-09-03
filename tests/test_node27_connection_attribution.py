@@ -15,8 +15,17 @@ Three layers are asserted here:
 * T5 -- a static guard over the registered files, so a new unmarked connect
   site or a renamed identity fails instead of silently losing attribution.
 
-T5b (delegated connect surfaces / ``DELEGATED_CONNECT_CLOSURE``) lives in
-``tests/test_node27_connection_attribution_delegated.py``.
+Two further layers were added for the display unit:
+
+* T3/T5c (#1728) -- a DEPLOYED-UNIT closure rooted at
+  ``apps/api/route_registry.py``: every connect site import-reachable from a
+  registered router must name a surface or be pinned ``UNREACHABLE``, plus
+  behavioural rows that run each router's real dependency provider.
+
+T5b (delegated connect surfaces / ``DELEGATED_CONNECT_CLOSURE``) and T5c's
+function-level closure (#1726) live in
+``tests/test_node27_connection_attribution_delegated.py``, which aliases this
+module's import-graph walk and verdict vocabulary.
 """
 
 from __future__ import annotations
@@ -33,8 +42,21 @@ import psycopg2.extras
 import pytest
 from psycopg2.extras import RealDictCursor
 
-from apps.api.routes import hydro_display
+from apps.api.routes import (
+    best_available,
+    data_sources,
+    forecast,
+    hydro_display,
+    models,
+    pipeline,
+    state_snapshots,
+)
 from packages.common import display_coverage
+from packages.common.best_available import BestAvailableManager
+from packages.common.forecast_store import PsycopgForecastStore
+from packages.common.model_registry import PsycopgModelRegistryStore
+from packages.common.object_store_forcing import PsycopgStationLookup
+from packages.common.state_manager import StateManager
 from scripts import (
     node27_autopipeline,
     node27_cold_residency,
@@ -142,7 +164,16 @@ def _invoke_cold_residency_connect(dsn: str, tmp_path: Path) -> None:
 # The fourth element is the invariant lock: introducing the attribution kwarg
 # must not have moved cursor_factory / connect_timeout / options on any site.
 PSYCOPG2_CASES: tuple[tuple[str, Any, str, dict[str, Any]], ...] = (
-    ("autopipeline", _invoke_autopipeline, "nhms-autopipe", {}),
+    # #1647: the autopipe `_connect` helper now bounds every connection it
+    # opens -- 10 s to connect, 600 s per statement through the libpq `options`
+    # kwarg (NOT a post-connect `SET`, which the implicit first transaction's
+    # rollback would undo).
+    (
+        "autopipeline",
+        _invoke_autopipeline,
+        "nhms-autopipe",
+        {"connect_timeout": 10, "options": "-c statement_timeout=600000"},
+    ),
     ("ingest_run", _invoke_ingest_run, "nhms-ingest-run", {"cursor_factory": RealDictCursor}),
     (
         "output_parser",
@@ -577,7 +608,11 @@ def test_refresh_coverage_all_attributes_every_worker_connection(
     monkeypatch.setattr(psycopg2, "connect", _connect)
     monkeypatch.setattr(node27_refresh_coverage, "run_display_coverage_available", lambda _cursor: True)
     monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: run_ids)
-    monkeypatch.setattr(display_coverage, "_refresh", lambda _connection, run_id: [run_id])
+    monkeypatch.setattr(
+        display_coverage,
+        "_refresh",
+        lambda _connection, run_id, *, force=False: display_coverage.RefreshOutcome([run_id], []),
+    )
 
     assert node27_refresh_coverage.main(["--all", "--workers", "4", "--database-url", DSN]) == 0
     report = json.loads(capsys.readouterr().out)
@@ -610,7 +645,11 @@ def test_refresh_coverage_worker_connections_keep_the_operator_override(
     monkeypatch.setattr(psycopg2, "connect", _connect)
     monkeypatch.setattr(node27_refresh_coverage, "run_display_coverage_available", lambda _cursor: True)
     monkeypatch.setattr(display_coverage, "_eligible_run_ids", lambda _connection: run_ids)
-    monkeypatch.setattr(display_coverage, "_refresh", lambda _connection, run_id: [run_id])
+    monkeypatch.setattr(
+        display_coverage,
+        "_refresh",
+        lambda _connection, run_id, *, force=False: display_coverage.RefreshOutcome([run_id], []),
+    )
 
     assert node27_refresh_coverage.main(["--all", "--workers", "4", "--database-url", DSN_WITH_OVERRIDE]) == 0
     report = json.loads(capsys.readouterr().out)
@@ -766,3 +805,724 @@ def test_guard_rejects_an_unmarked_connect_site(tmp_path: Path) -> None:
     literal = ast.parse('import psycopg2\npsycopg2.connect(u, fallback_application_name="nhms-autopipe")\n')
     literal_call = next(node for node in ast.walk(literal) if isinstance(node, ast.Call))
     assert _connect_site_marked(literal_call) is False
+
+
+# --------------------------------------------------------------------------- #
+# T3/T5c (#1728) -- deployed-unit closure for nhms-display-api.service
+#
+# The per-file guard above only walks REGISTERED_COMPONENTS, so before #1728 a
+# whole process of unattributed modules stayed green: only hydro_display.py was
+# registered, while the five other routers of the same uvicorn unit opened
+# unnamed backends through the packages/common stores -- including the
+# retry/cancel writes an operator most needs to tell apart before cancelling.
+#
+# This guard is rooted at the unit's ENTRYPOINT REGISTRY instead of at a file
+# list: it reads apps/api/route_registry.py, so a router added to
+# _BUSINESS_ROUTERS is walked whether or not anyone remembered this test.
+#
+# Honest limits (same class as the delegated guard's): static import graph
+# only, ``unreachable`` verdicts are pinned human judgements rather than
+# proofs, and only ``psycopg2.connect`` / ``create_engine`` count as connect
+# surfaces. Two more, named by review and NOT covered by either half:
+#   * both halves are keyed on the seam the routes use today -- a route that
+#     constructs a store directly (``PsycopgForecastStore(dsn)`` instead of
+#     ``X.from_env(application_name=...)``) is neither a ``from_env`` call site
+#     for the factory half nor a new connect-owning module for the discovery
+#     half, so it would open an unnamed backend with this file green;
+#   * ``_forwards_injected_application_name`` matches the EXPRESSION at the
+#     connect site (``**_attribution_connect_kwargs(<...>.application_name)``).
+#     It proves the kwarg is spelled, not that a non-None name reached it: a
+#     store whose ``application_name`` attribute is never populated from the
+#     injected value still passes. That is what the executed T1/T2 cases at the
+#     bottom of this file exist to cover, and they cover only the six stores
+#     listed in DISPLAY_UNIT_STORE_CASES.
+# --------------------------------------------------------------------------- #
+ROUTE_REGISTRY = "apps/api/route_registry.py"
+# route_registry.py takes the runtime router as a parameter, so it cannot be
+# resolved from that file's imports; apps/api/main.py builds it here.
+RUNTIME_ROUTER_SOURCE = "apps/api/startup_wiring.py"
+# The helper each shared store uses to forward an injected name to libpq
+# (empty kwargs when no name was injected, so nameless callers are unchanged).
+ATTRIBUTION_KWARGS_HELPER = "_attribution_connect_kwargs"
+
+# Import-graph vocabulary and walk shared with the delegated guard in
+# tests/test_node27_connection_attribution_delegated.py (which imports this
+# module, so the shared halves live here).
+FIRST_PARTY_ROOTS = ("scripts", "workers", "packages", "apps", "services")
+
+ATTRIBUTED = "attributed"
+UNREACHABLE = "unreachable"
+
+
+# Connection surfaces inside the display unit: one name per router, so
+# pg_stat_activity separates the read-only display pool from the control-plane
+# writes and from each shared store.
+DISPLAY_UNIT_SURFACES: tuple[tuple[str, str], ...] = (
+    ("apps/api/routes/forecast.py", "nhms-api-forecast"),
+    ("apps/api/routes/data_sources.py", "nhms-api-data-sources"),
+    ("apps/api/routes/best_available.py", "nhms-api-best-available"),
+    ("apps/api/routes/models.py", "nhms-api-models"),
+    ("apps/api/routes/state_snapshots.py", "nhms-api-state-snapshots"),
+    ("apps/api/routes/pipeline.py", "nhms-api-pipeline"),
+    ("apps/api/routes/hydro_display.py", "nhms-display-api"),
+)
+
+# Every module with a connect surface import-reachable from the unit's roots,
+# with the same verdict shape the delegated guard uses.
+DISPLAY_UNIT_CONNECT_CLOSURE: tuple[tuple[str, str, str], ...] = (
+    ("apps/api/routes/hydro_display.py", ATTRIBUTED, "display read-only engine (#1714)"),
+    ("apps/api/routes/pipeline.py", ATTRIBUTED, "control-plane retry/cancel engine"),
+    ("packages/common/forecast_store.py", ATTRIBUTED, "forecast + data-sources stores and the station lookup"),
+    ("packages/common/best_available.py", ATTRIBUTED, "best-available repository"),
+    ("packages/common/model_registry.py", ATTRIBUTED, "model registry store"),
+    ("packages/common/state_manager.py", ATTRIBUTED, "state-snapshot repository"),
+    (
+        "packages/common/grid_registry_store.py",
+        UNREACHABLE,
+        "import-only: models.py -> model_registry -> state_clone -> workers/mapping_builder/rewrite.py -> "
+        "algorithm.py imports dataclasses from this module; PsycopgGridRegistryStore is constructed only in "
+        "workers/grid_registry/__main__.py, which is not part of the display unit",
+    ),
+    (
+        "packages/common/met_store.py",
+        UNREACHABLE,
+        "import-only: packages/common/model_registry.py:21 imports workers.forcing_producer.direct_grid_contract, "
+        "so workers/forcing_producer/__init__.py:10 executes producer.py, which imports this module at line 31 "
+        "(it IS in the unit's runtime sys.modules). PsycopgMetStore.from_env() is called only from worker/CLI "
+        "factories -- workers/canonical_converter/converter.py:55, workers/data_adapters/{era5,gfs,ifs}_adapter.py "
+        "from_env, workers/forcing_producer/producer.py:487 (ForcingProducer.from_env) and "
+        "services/orchestrator/scheduler_adapters.py:413 -- none of which any display-unit route reaches",
+    ),
+    (
+        "services/orchestrator/chain_compat_runtime.py",
+        UNREACHABLE,
+        "static-only: the single bridge is services/orchestrator/chain.py, imported ONLY inside "
+        "services/orchestrator/__init__.py:53 (the module __getattr__ body), so `import apps.api.main` leaves "
+        "services.orchestrator.chain out of sys.modules and this module is never executed by the unit",
+    ),
+    (
+        "services/orchestrator/chain_repository.py",
+        UNREACHABLE,
+        "static-only: reached only through services/orchestrator/chain_compat_runtime.py, itself behind the "
+        "deferred chain import in services/orchestrator/__init__.py:53; absent from the unit's runtime sys.modules",
+    ),
+    (
+        "services/tile_publisher/publisher.py",
+        UNREACHABLE,
+        "static-only: imported by services/orchestrator/chain.py, which is behind the deferred import in "
+        "services/orchestrator/__init__.py:53; absent from the unit's runtime sys.modules",
+    ),
+    (
+        "workers/forcing_producer/store.py",
+        UNREACHABLE,
+        "static-only: imported function-locally at workers/forcing_producer/producer.py:485, inside "
+        "ForcingProducer.from_env(), which no display-unit route calls; absent from the unit's runtime sys.modules",
+    ),
+)
+
+# Store factories called from the unit's route layer. ``attributed`` rows must
+# pass application_name=_APPLICATION_NAME; ``unreachable`` rows record why the
+# factory opens no DB connection. A new factory call turns the discovery half
+# red instead of silently shipping an unnamed backend.
+DISPLAY_UNIT_STORE_FACTORIES: tuple[tuple[str, str, str, str], ...] = (
+    ("apps/api/routes/forecast.py", "PsycopgForecastStore", ATTRIBUTED, "forecast series/catalog reads"),
+    ("apps/api/routes/data_sources.py", "PsycopgForecastStore", ATTRIBUTED, "data-source catalog reads"),
+    ("apps/api/routes/data_sources.py", "PsycopgStationLookup", ATTRIBUTED, "met station metadata reads"),
+    ("apps/api/routes/best_available.py", "BestAvailableManager", ATTRIBUTED, "facade over the repository"),
+    ("apps/api/routes/models.py", "PsycopgModelRegistryStore", ATTRIBUTED, "model registry reads/writes"),
+    ("apps/api/routes/state_snapshots.py", "StateManager", ATTRIBUTED, "facade over the repository"),
+    (
+        "apps/api/routes/pipeline.py",
+        "ArtifactReaderConfig",
+        UNREACHABLE,
+        "artifact log/reader configuration read from the environment; opens no database connection",
+    ),
+)
+
+
+def _first_party_imports(path: Path) -> set[str]:
+    """Dotted first-party module names imported by ``path`` (any nesting)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                package = path.parent.relative_to(REPO_ROOT).as_posix().replace("/", ".")
+                for _ in range(node.level - 1):
+                    package = package.rsplit(".", 1)[0]
+                module = f"{package}.{node.module}" if node.module else package
+            else:
+                module = node.module or ""
+            if not module:
+                continue
+            names.add(module)
+            # ``from pkg.mod import name`` may name a submodule, not an object.
+            names.update(f"{module}.{alias.name}" for alias in node.names)
+    return {name for name in names if name.split(".")[0] in FIRST_PARTY_ROOTS}
+
+
+def _module_path(dotted: str) -> Path | None:
+    module = REPO_ROOT / (dotted.replace(".", "/") + ".py")
+    if module.is_file():
+        return module
+    package = REPO_ROOT / dotted.replace(".", "/") / "__init__.py"
+    return package if package.is_file() else None
+
+
+def _imported_first_party_modules(path: Path) -> set[str]:
+    """What importing ``path`` actually pulls in: leaf names AND every ancestor package.
+
+    ``import a.b.c`` executes ``a/__init__.py`` and ``a/b/__init__.py`` before
+    ``a/b/c``, so a package ``__init__`` is part of the import graph even when
+    nobody names it. Walking only the leaf dotted names hid whole subtrees: the
+    unit closure never enqueued ``workers/forcing_producer/__init__.py``, so
+    ``packages/common/met_store.py`` -- which that package's ``producer.py``
+    imports at module level, and which owns two bare ``psycopg2.connect``
+    surfaces -- was invisible while the discovery half stayed green.
+    """
+    names: set[str] = set()
+    for dotted in _first_party_imports(path):
+        parts = dotted.split(".")
+        names.update(".".join(parts[: index + 1]) for index in range(len(parts)))
+    return names
+
+
+def _owns_connect_surface(path: Path) -> bool:
+    """True if the module names ``psycopg2.connect`` / ``create_engine`` at all.
+
+    Deliberately matches bare attribute REFERENCES, not just calls:
+    ``display_watermark.py`` assigns ``connect = psycopg2.connect`` and calls it
+    later, which a call-only scan misses entirely -- precisely the shape this
+    guard exists to catch.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and (_is_psycopg2_connect(node.func) or _is_create_engine(node.func)):
+            return True
+        if isinstance(node, ast.Attribute) and _is_psycopg2_connect(node):
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == "create_engine":
+            return True
+    return False
+
+
+def _import_alias_modules(tree: ast.Module) -> dict[str, str]:
+    """``from apps.api.routes.x import router as y`` -> {"y": "apps/api/routes/x.py"}."""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        source = _module_path(node.module)
+        if source is None:
+            continue
+        relative = source.relative_to(REPO_ROOT).as_posix()
+        for alias in node.names:
+            aliases[alias.asname or alias.name] = relative
+    return aliases
+
+
+def display_unit_root_modules() -> tuple[str, ...]:
+    """Root modules of nhms-display-api.service, read from the route registry.
+
+    Never a hard-coded router count: the tuple in ``route_registry.py`` and the
+    ``include_router`` calls beside it are the source of truth, so a newly
+    registered router is walked automatically.
+    """
+    tree = ast.parse((REPO_ROOT / ROUTE_REGISTRY).read_text(encoding="utf-8"))
+    aliases = _import_alias_modules(tree)
+    router_names: list[str] = []
+    # ``for router in _BUSINESS_ROUTERS: api.include_router(router)`` -- the loop
+    # variable is already covered by expanding the tuple itself. Only names bound
+    # from that exact tuple are skipped, so a loop over anything else stays
+    # unresolved and turns this red.
+    loop_aliases = {
+        node.target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.For)
+        and isinstance(node.target, ast.Name)
+        and isinstance(node.iter, ast.Name)
+        and node.iter.id == "_BUSINESS_ROUTERS"
+    }
+    business_routers_found = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            targets = []
+        if any(isinstance(target, ast.Name) and target.id == "_BUSINESS_ROUTERS" for target in targets):
+            business_routers_found = True
+            value = node.value
+            if isinstance(value, ast.Tuple):
+                router_names.extend(element.id for element in value.elts if isinstance(element, ast.Name))
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "include_router"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+        ):
+            if node.args[0].id not in loop_aliases:
+                router_names.append(node.args[0].id)
+
+    roots: list[str] = []
+    unresolved: list[str] = []
+    for name in router_names:
+        if name == "runtime_router":
+            resolved = RUNTIME_ROUTER_SOURCE
+        else:
+            resolved = aliases.get(name, "")
+        if not resolved:
+            unresolved.append(name)
+        elif resolved not in roots:
+            roots.append(resolved)
+    assert business_routers_found, f"{ROUTE_REGISTRY} no longer declares _BUSINESS_ROUTERS; the guard is blind"
+    assert unresolved == [], f"{ROUTE_REGISTRY} registers routers this guard cannot resolve: {unresolved}"
+    return tuple(roots)
+
+
+def _unit_connect_owning_closure() -> set[str]:
+    """Modules with a connect surface import-reachable from any unit root."""
+    owners: set[str] = set()
+    visited: set[Path] = set()
+    pending = [REPO_ROOT / root for root in display_unit_root_modules()]
+    seen_modules: set[str] = set()
+    while pending:
+        current = pending.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        if _owns_connect_surface(current):
+            owners.add(current.relative_to(REPO_ROOT).as_posix())
+        for dotted in _imported_first_party_modules(current):
+            if dotted in seen_modules:
+                continue
+            seen_modules.add(dotted)
+            resolved = _module_path(dotted)
+            if resolved is not None:
+                pending.append(resolved)
+    return owners
+
+
+def _forwards_injected_application_name(call: ast.Call) -> bool:
+    """``**_attribution_connect_kwargs(<...>.application_name)`` at a connect site.
+
+    A shared store may not hard-code a name, so its attribution is the injected
+    value forwarded through the module's helper. ``_attribution_connect_kwargs(None)``
+    is deliberately NOT accepted.
+    """
+    for keyword in call.keywords:
+        if keyword.arg is not None:
+            continue
+        value = keyword.value
+        if not (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == ATTRIBUTION_KWARGS_HELPER
+            and len(value.args) == 1
+        ):
+            continue
+        argument = value.args[0]
+        if isinstance(argument, ast.Attribute) and argument.attr == "application_name":
+            return True
+        if isinstance(argument, ast.Name) and argument.id == "application_name":
+            return True
+    return False
+
+
+def _display_unit_connect_sites(relative_path: str) -> tuple[int, list[int]]:
+    """(recognised connect sites, line numbers of the unattributed ones)."""
+    tree = ast.parse((REPO_ROOT / relative_path).read_text(encoding="utf-8"))
+    sites = 0
+    unattributed: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _is_psycopg2_connect(node.func):
+            sites += 1
+            if not (_connect_site_marked(node) or _forwards_injected_application_name(node)):
+                unattributed.append(node.lineno)
+        elif _is_create_engine(node.func):
+            sites += 1
+            if not _create_engine_site_marked(node):
+                unattributed.append(node.lineno)
+    return sites, unattributed
+
+
+def _from_env_call_sites(relative_path: str) -> set[tuple[str, str]]:
+    """(module, factory class) for every ``X.from_env(...)`` call in a module."""
+    tree = ast.parse((REPO_ROOT / relative_path).read_text(encoding="utf-8"))
+    sites: set[tuple[str, str]] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "from_env"
+            and isinstance(node.func.value, ast.Name)
+        ):
+            sites.add((relative_path, node.func.value.id))
+    return sites
+
+
+def test_display_unit_roots_resolve_from_the_route_registry() -> None:
+    """Vacuity guard: every registered router resolves to a real module."""
+    roots = display_unit_root_modules()
+    assert roots, "the display unit has no resolvable route roots; the closure would be empty"
+    for root in roots:
+        assert (REPO_ROOT / root).is_file(), f"{root} is registered in {ROUTE_REGISTRY} but does not exist"
+    # The two surfaces #1714/#1728 exist to separate must both be in scope.
+    assert "apps/api/routes/hydro_display.py" in roots
+    assert "apps/api/routes/pipeline.py" in roots
+    assert RUNTIME_ROUTER_SOURCE in roots
+    # Every router module named in DISPLAY_UNIT_SURFACES is actually registered.
+    assert {path for path, _name in DISPLAY_UNIT_SURFACES} <= set(roots)
+
+
+def test_every_connect_owning_module_in_the_display_unit_is_classified() -> None:
+    """Discovery half: nothing may connect inside the unit unclassified."""
+    discovered = _unit_connect_owning_closure()
+    classified = {module for module, _verdict, _detail in DISPLAY_UNIT_CONNECT_CLOSURE}
+    assert discovered == classified, (
+        "the set of connect-owning modules import-reachable from "
+        f"{ROUTE_REGISTRY} moved. Unclassified: {sorted(discovered - classified)}; "
+        f"stale registry rows: {sorted(classified - discovered)}. Add each new module to "
+        "DISPLAY_UNIT_CONNECT_CLOSURE as 'attributed' (every connect site names a surface) or "
+        "'unreachable' (with the reason no call path in this unit reaches it)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "detail"),
+    [(module, detail) for module, verdict, detail in DISPLAY_UNIT_CONNECT_CLOSURE if verdict == ATTRIBUTED],
+    ids=[module for module, verdict, _d in DISPLAY_UNIT_CONNECT_CLOSURE if verdict == ATTRIBUTED],
+)
+def test_attributed_display_unit_module_attributes_every_connect_site(relative_path: str, detail: str) -> None:
+    """Classification half: no unnamed backend from an attributed module."""
+    sites, unattributed = _display_unit_connect_sites(relative_path)
+    assert sites >= 1, f"{relative_path} ({detail}) has no connect surface left; the registry row is stale"
+    assert unattributed == [], (
+        f"{relative_path} lines {unattributed} open a DB connection without naming a surface: a route "
+        "module must pass fallback_application_name=_APPLICATION_NAME, a shared store must forward "
+        f"**{ATTRIBUTION_KWARGS_HELPER}(<self>.application_name)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "detail"),
+    [(module, detail) for module, verdict, detail in DISPLAY_UNIT_CONNECT_CLOSURE if verdict == UNREACHABLE],
+    ids=[module for module, verdict, _d in DISPLAY_UNIT_CONNECT_CLOSURE if verdict == UNREACHABLE],
+)
+def test_unreachable_display_unit_module_is_pinned_with_a_reason(relative_path: str, detail: str) -> None:
+    """An ``unreachable`` row is a human judgement; it must stay explicit."""
+    sites, _unattributed = _display_unit_connect_sites(relative_path)
+    assert sites >= 1, f"{relative_path} no longer has a connect surface; drop the stale registry row"
+    assert len(detail.split()) >= 5, f"{relative_path} needs a recorded reason, not a placeholder"
+
+
+def test_every_store_factory_call_in_the_display_unit_route_layer_is_classified() -> None:
+    """A store built without a name is unnamed at runtime while the AST is green."""
+    discovered: set[tuple[str, str]] = set()
+    for root in display_unit_root_modules():
+        discovered |= _from_env_call_sites(root)
+    classified = {(module, factory) for module, factory, _v, _d in DISPLAY_UNIT_STORE_FACTORIES}
+    assert discovered == classified, (
+        f"the set of X.from_env(...) calls in the display unit's route layer moved. "
+        f"Unclassified: {sorted(discovered - classified)}; stale rows: {sorted(classified - discovered)}. "
+        "Classify each as 'attributed' (pass application_name=_APPLICATION_NAME) or 'unreachable' "
+        "(with the reason it opens no database connection)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "factory"),
+    [(module, factory) for module, factory, verdict, _d in DISPLAY_UNIT_STORE_FACTORIES if verdict == ATTRIBUTED],
+    ids=[
+        f"{module}::{factory}"
+        for module, factory, verdict, _d in DISPLAY_UNIT_STORE_FACTORIES
+        if verdict == ATTRIBUTED
+    ],
+)
+def test_route_layer_store_factory_injects_the_module_identity(relative_path: str, factory: str) -> None:
+    tree = ast.parse((REPO_ROOT / relative_path).read_text(encoding="utf-8"))
+    sites = 0
+    unattributed: list[int] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "from_env"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == factory
+        ):
+            continue
+        sites += 1
+        injected = next((kw.value for kw in node.keywords if kw.arg == "application_name"), None)
+        if not _references_identity_constant(injected):
+            unattributed.append(node.lineno)
+    assert sites >= 1, f"{relative_path} no longer builds {factory}; the registry row is stale"
+    assert unattributed == [], (
+        f"{relative_path} lines {unattributed} build {factory} without "
+        "application_name=_APPLICATION_NAME, so its backend lands in pg_stat_activity unattributed"
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "expected_name"),
+    DISPLAY_UNIT_SURFACES,
+    ids=[path for path, _ in DISPLAY_UNIT_SURFACES],
+)
+def test_display_unit_route_module_declares_its_surface_name(relative_path: str, expected_name: str) -> None:
+    tree = ast.parse((REPO_ROOT / relative_path).read_text(encoding="utf-8"))
+    assert _module_application_name(tree) == expected_name, (
+        f"{relative_path} must define a module-level _APPLICATION_NAME == {expected_name!r}"
+    )
+
+
+def test_display_unit_surface_names_are_unique_and_fit_the_libpq_bound() -> None:
+    names = [name for _path, name in DISPLAY_UNIT_SURFACES]
+    assert len(set(names)) == len(names)
+    for name in names:
+        assert name == name.lower()
+        assert len(name.encode()) <= 63
+    # No display-unit surface may collide with a registered node-27 component
+    # other than hydro_display.py, which is the same connection surface.
+    component_names = {name for path, name in REGISTERED_COMPONENTS if path != "apps/api/routes/hydro_display.py"}
+    assert component_names.isdisjoint(set(names))
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "packages/common/forecast_store.py",
+        "packages/common/best_available.py",
+        "packages/common/model_registry.py",
+        "packages/common/state_manager.py",
+        "packages/common/object_store_forcing.py",
+    ],
+)
+def test_shared_store_module_hard_codes_no_surface_name(relative_path: str) -> None:
+    """packages/common owns the seam, never the identity (#1728 D1)."""
+    source = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+    surface_names = {name for _path, name in DISPLAY_UNIT_SURFACES}
+    hard_coded = sorted(
+        {
+            node.value
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in surface_names
+        }
+    )
+    assert hard_coded == [], f"{relative_path} hard-codes a route-layer identity: {hard_coded}"
+
+
+# --------------------------------------------------------------------------- #
+# T1/T2 (#1728) -- the route-layer name reaches the driver
+#
+# The static halves above prove the wiring is written; these prove it is
+# EXECUTED: each case runs the router's real dependency provider, so a store
+# that silently drops the kwarg somewhere between from_env() and
+# psycopg2.connect fails here even while every AST check stays green.
+# --------------------------------------------------------------------------- #
+def _open_forecast_route_connection() -> None:
+    forecast.get_forecast_store()._transaction().__enter__()
+
+
+def _open_forecast_nameless_connection() -> None:
+    PsycopgForecastStore.from_env()._transaction().__enter__()
+
+
+def _open_data_sources_route_connection() -> None:
+    data_sources.get_data_source_store()._transaction().__enter__()
+
+
+def _open_station_lookup_route_connection() -> None:
+    data_sources.get_station_lookup().lookup("STA-1")
+
+
+def _open_station_lookup_nameless_connection() -> None:
+    PsycopgStationLookup.from_env().lookup("STA-1")
+
+
+def _open_best_available_route_connection() -> None:
+    best_available.get_best_available_manager().repository._fetch_all("SELECT 1", ())
+
+
+def _open_best_available_nameless_connection() -> None:
+    BestAvailableManager.from_env().repository._fetch_all("SELECT 1", ())
+
+
+def _open_models_route_connection() -> None:
+    models.get_model_registry_store()._transaction().__enter__()
+
+
+def _open_models_nameless_connection() -> None:
+    PsycopgModelRegistryStore.from_env()._transaction().__enter__()
+
+
+def _open_state_snapshots_route_connection() -> None:
+    state_snapshots.get_state_manager().repository._fetch_all("SELECT 1", ())
+
+
+def _open_state_snapshots_nameless_connection() -> None:
+    StateManager.from_env().repository._fetch_all("SELECT 1", ())
+
+
+# (case id, route-layer invoker, nameless-store invoker, expected identity).
+DISPLAY_UNIT_STORE_CASES: tuple[tuple[str, Any, Any, str], ...] = (
+    ("forecast", _open_forecast_route_connection, _open_forecast_nameless_connection, "nhms-api-forecast"),
+    (
+        "data_sources_store",
+        _open_data_sources_route_connection,
+        _open_forecast_nameless_connection,
+        "nhms-api-data-sources",
+    ),
+    (
+        "data_sources_station_lookup",
+        _open_station_lookup_route_connection,
+        _open_station_lookup_nameless_connection,
+        "nhms-api-data-sources",
+    ),
+    (
+        "best_available",
+        _open_best_available_route_connection,
+        _open_best_available_nameless_connection,
+        "nhms-api-best-available",
+    ),
+    ("models", _open_models_route_connection, _open_models_nameless_connection, "nhms-api-models"),
+    (
+        "state_snapshots",
+        _open_state_snapshots_route_connection,
+        _open_state_snapshots_nameless_connection,
+        "nhms-api-state-snapshots",
+    ),
+)
+
+
+def _display_unit_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dsn: str) -> None:
+    """The env the uvicorn unit reads when a route builds its store."""
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    monkeypatch.setenv("OBJECT_STORE_ROOT", str(tmp_path / "object-store"))
+
+
+@pytest.mark.parametrize(
+    ("case_id", "open_route_connection", "_open_nameless_connection", "expected_name"),
+    DISPLAY_UNIT_STORE_CASES,
+    ids=[case[0] for case in DISPLAY_UNIT_STORE_CASES],
+)
+def test_display_unit_route_store_connect_carries_its_surface_name(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case_id: str,
+    open_route_connection: Any,
+    _open_nameless_connection: Any,
+    expected_name: str,
+) -> None:
+    _display_unit_env(monkeypatch, tmp_path, DSN)
+    probe = _probe_psycopg2_connect(monkeypatch)
+
+    with pytest.raises(_ConnectIntercepted):
+        open_route_connection()
+
+    assert probe.called, f"{case_id} never reached psycopg2.connect"
+    assert probe.args == (DSN,)
+    assert probe.kwargs.pop("fallback_application_name") == expected_name
+    # The shared stores connect with no other kwargs; the injection may not add any.
+    assert probe.kwargs == {}
+
+
+@pytest.mark.parametrize(
+    ("case_id", "_open_route_connection", "open_nameless_connection", "_expected_name"),
+    DISPLAY_UNIT_STORE_CASES,
+    ids=[case[0] for case in DISPLAY_UNIT_STORE_CASES],
+)
+def test_shared_store_without_a_name_connects_exactly_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case_id: str,
+    _open_route_connection: Any,
+    open_nameless_connection: Any,
+    _expected_name: str,
+) -> None:
+    """Legacy compatibility: no name injected -> the kwarg is absent, not None.
+
+    Every non-display caller of these stores (workers, scripts, tests) builds
+    them without a name; passing ``fallback_application_name=None`` would change
+    what libpq receives on all of them.
+    """
+    _display_unit_env(monkeypatch, tmp_path, DSN)
+    probe = _probe_psycopg2_connect(monkeypatch)
+
+    with pytest.raises(_ConnectIntercepted):
+        open_nameless_connection()
+
+    assert probe.called, f"{case_id} never reached psycopg2.connect"
+    assert probe.args == (DSN,)
+    assert "fallback_application_name" not in probe.kwargs
+    assert probe.kwargs == {}
+
+
+@pytest.mark.parametrize(
+    ("case_id", "open_route_connection", "_open_nameless_connection", "expected_name"),
+    DISPLAY_UNIT_STORE_CASES,
+    ids=[case[0] for case in DISPLAY_UNIT_STORE_CASES],
+)
+def test_display_unit_route_store_keeps_the_operator_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    case_id: str,
+    open_route_connection: Any,
+    _open_nameless_connection: Any,
+    expected_name: str,
+) -> None:
+    """T4 over the display unit: `?application_name=` in the DSN still wins."""
+    _display_unit_env(monkeypatch, tmp_path, DSN_WITH_OVERRIDE)
+    probe = _probe_psycopg2_connect(monkeypatch)
+
+    with pytest.raises(_ConnectIntercepted):
+        open_route_connection()
+
+    # The store may not rewrite the operator's DSN to inject its identity.
+    assert probe.args == (DSN_WITH_OVERRIDE,)
+    conninfo = psycopg2.extensions.make_dsn(probe.args[0], **probe.kwargs)
+    parsed = psycopg2.extensions.parse_dsn(conninfo)
+    assert parsed["application_name"] == "operator-override"
+    assert parsed["fallback_application_name"] == expected_name
+
+
+def test_pipeline_engine_adds_its_identity_and_leaves_other_parameters_intact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_create_engine(url: str, **kwargs: Any) -> str:
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return "engine"
+
+    monkeypatch.setattr(pipeline, "create_engine", _fake_create_engine)
+
+    # __wrapped__ bypasses the lru_cache so the probe never pollutes it.
+    assert pipeline._engine.__wrapped__(DSN) == "engine"
+
+    assert captured["url"] == DSN
+    assert captured["kwargs"] == {
+        "future": True,
+        "connect_args": {"fallback_application_name": "nhms-api-pipeline"},
+    }
+
+
+def test_pipeline_and_display_engines_are_separate_surfaces() -> None:
+    """The retry/cancel writes must be distinguishable from the display pool.
+
+    #1728's operator scenario: both engines live in the same uvicorn process, so
+    a shared name would put the control-plane writes and the read-only display
+    queries under one label in pg_stat_activity.
+    """
+    assert pipeline._APPLICATION_NAME != hydro_display._APPLICATION_NAME
+    assert (pipeline._APPLICATION_NAME, hydro_display._APPLICATION_NAME) == (
+        "nhms-api-pipeline",
+        "nhms-display-api",
+    )

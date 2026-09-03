@@ -110,6 +110,89 @@ HTTP 500 `STATION_FORCING_FILE_MALFORMED`（状态码与错误码都不变），
 - 该前缀是**单向**判据：有前缀说明命中的是替换窗口；**不能**反过来把「没有该前缀」读成「文件已损坏」——
   没有前缀只表示这次失败不是耗尽的 inode 竞态，其余成因（权限、I/O、CSV 契约违例、bounded-read 越界）仍需按上表逐项排查。
 
+### 事后定位：用 `X-Request-ID` grep display 日志
+
+`concurrent-replace` 这类 500 往往在用户报障时早已过去，重放请求也复现不出来。自 #1704 起
+`error_response()` 会为**每一个经过它的**错误响应（`ApiError` 与 slurm 前缀以外的请求校验错误；
+不经过它的三类见下文「已知盲区」）在 display unit 的 stderr（systemd
+`StandardError=append:/tmp/display-api.log`）写一行，用响应头 `X-Request-ID` 就能捞回来：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27 \
+  'grep -F "<X-Request-ID>" /tmp/display-api.log'
+```
+
+**这个 grep 证明的是「同一行日志里出现了这个 id」，不是「这条日志来自报障的那个客户端」**：
+合规形状的入站 `X-Request-ID` 会被原样沿用（见下文），客户端可以自选、也可以复用别人用过的 id，
+甚至多个请求共用一个。把 grep 命中当作定位线索用，不要当作来源归属的证据。
+
+这行落地到 stderr 的方式是 `apps/api/main.py::_install_api_log_handler()` 给 `apps.api` logger
+树显式装的 handler，而**不是**复用 uvicorn 的 `uvicorn.error`：生产 unit 跑
+`python -m uvicorn apps.api.main:app` 且**不传 `--log-config`**，所以 root logger 未被配置，
+不自带 handler 的话这行会被直接丢掉。改动 unit 的启动参数或日志配置时，先确认这条前提还成立。
+
+一行的形状（5xx 记 ERROR，4xx 记 WARNING）：
+
+```text
+2026-09-02 08:30:09,835 ERROR apps.api.errors api_error request_id=<id> code=STATION_FORCING_FILE_MALFORMED status=500 path=/api/v1/met/stations/<id>/series details={'station_id': '…', 'expected_path': '[redacted]', 'parse_reason': 'concurrent-replace: …'}
+```
+
+**脱敏取舍（有意为之）**：`details` 先按 key 抹掉 `rejected_value` / `rejected_values`，
+再过审计用的 `redact_audit_payload`。代价是 `expected_path` 这类绝对路径整串变成
+`[redacted]`——日志里拿不到具体文件名，要定位文件请按 `station_id` + cycle 目录自己推。
+`parse_reason` 明文保留，因为它是这行存在的理由；不要往 `parse_reason` 里塞路径或用户输入。
+
+**脱敏边界（不是「全量脱敏」，别按全量脱敏对外导出）**：无条件按 key 抹掉的**只有**
+`rejected_value` 与 `rejected_values` 这两个「原样回显客户端输入」的键。挂在**其它** key 下的
+客户端可控值（`station_id`、`layer_id`、`run_id`、`cycle_time` 等）**保持明文**，除非它本身是
+路径/URI/校验和形状，或落在 `redact_audit_payload` 的敏感 key 名单里。上面那行样例里的
+`details={'station_id': '…', …}` 就是明文的客户端输入——那是**有意**的（这行要能回答「哪个站
+挂了」），但也意味着：把 `/tmp/display-api.log` 交给第三方或搬出生产环境前，必须按「含客户端标识
+明文」处理，不能当成已完全脱敏的日志。
+
+**行长上限**：单行的 `details=` 段有固定字节预算（`apps/api/errors.py::_DETAILS_RENDER_BUDGET_BYTES`，
+当前 8192 B），超出部分截断并以 `…[truncated N bytes]` 结尾。这是为了防止一次校验失败的大 body
+（每个非法元素一条 `rejected_value` 记录）把几 MB 写进未做 rotate 的 unit 日志。**响应体不受影响**，
+客户端拿到的仍是完整 `details`；也就是说日志里看到截断标记时，完整清单要去复现请求或看响应体。
+`path=` 段共用同一个字节预算：路径长度只受服务器请求行上限约束，而 percent-encoding 还会放大它
+（一条 40 KiB 全 `%FF` 的路径解码成 U+FFFD 后编码成 `%EF%BF%BD`，实测单行 123 KB），所以超预算时
+`path=` 也会截断，标记是同一个 marker 的 percent 形式 `%E2%80%A6%5Btruncated%20N%20bytes%5D`
+（不含空格，`path=` 仍是单个 token）。因此单行长度上限约为 2 × 8192 B 加上两个 marker 与前缀。
+
+**请求 ID 只在合规形状下回显**：入站 `X-Request-ID` 仅当整体匹配 `[A-Za-z0-9._-]{1,64}` 时才被沿用，
+否则服务端另发 UUID（响应头、审计记录、这行日志三者始终一致）。所以行里 `request_id=` 后面不可能被
+客户端塞进空格分隔的假 `code=` / `path=` 字段。
+
+**`path=` 段做 percent-encoding**：`request.url.path` 是**解码后**的路径，带路径参数的路由上
+那一段是客户端可控的，所以 `path=` 统一按 `quote(path, safe="/")` 渲染后再写行。效果是：
+`path=` 永远是一个不含空格、不含 `=`、不含控制字节的 token（空格 → `%20`，`=` → `%3D`，
+`NUL` → `%00`，`ESC` → `%1B`），不会把这行拆成两行。只由 unreserved 字符（`A-Za-z0-9._~-`）
+和 `/` 组成的路径逐字节不变，上面的样例行形状不受影响；路径里若出现 `:` `@` `+` `,` `;` `!` `$`
+`(` `)` 等 sub-delims，也会被编成 `%XX`，grep 时按编码后的形式写。
+因此 `grep -F request_id=<id>` 不会被伪造字段带偏，也不会因为路径里塞了 `%00`
+而让 `grep` 把整个未 rotate 的日志报成 “Binary file matches”。
+注意 TAB/CR/LF（`%09`/`%0D`/`%0A`）在 `urlsplit` 阶段就被剥掉了，日志里既看不到原字符也看不到
+它们的 percent 形式。
+
+**`details=` 一定不断行，但不做 token 净化**：渲染 `details=` 时会把所有换行类字符
+（`\n` `\r` `\x0b` `\x0c` `\x85` U+2028 U+2029）转义成 `\\n` 这类可见形式**再**做字节预算截断，
+所以无论 `details` 是 mapping、list 还是裸字符串，一次错误响应永远只写一行。但**内容是逐字原样**的：
+mapping 的值另有 `repr` 的引号，裸字符串则连引号都没有。也就是说
+`details={'station_id': 'STA code=OK status=200'}` 这种「看起来像字段」的串会出现在行里——它属于
+`details=` 段，不构成第二组真字段。按位置解析（取 `details=` 之前的部分）是可靠的，
+按 `code=` 之类 token 全行扫描则会被 `details=` 里的仿冒串误导。
+
+**已知盲区**（这三类错误响应**不**产生 `api_error` 行，别把「grep 不到」读成「没发生」）：
+
+1. `/api/v1/slurm*` 前缀的**全部**错误响应。请求校验错误由
+   `services/slurm_gateway/validation_errors.py` 的独立 handler 应答；网关自身的错误由
+   `services/slurm_gateway/routes.py:149` 与 `_gateway_error_response`（:212-217）直接构造
+   `JSONResponse`。两条路都不经过 `error_response()`。排查 slurm 网关请按该网关自己的口径。
+2. Starlette 自己应答的 `HTTPException`：未匹配路由的 404（含 `apps/api/startup_wiring.py:87`
+   SPA catch-all 对 `api/` 前缀抛的 404）与 405 method-not-allowed。
+3. 未被捕获的异常：由 `ServerErrorMiddleware` 接住，写出的是 uvicorn 的 traceback 而不是
+   `api_error` 行——按 traceback 的时间戳对齐，不要指望 `X-Request-ID`。
+
 `PsycopgForecastStore.station_series()` 仍保留在 `packages/common/forecast_store.py`，
 但它现在是 legacy/internal DB helper：只用于保留历史 DB 合同测试和 ADR 0001 所述的
 长期历史 API 设计，不是当前 display station-series route 的实现。生产 route/service

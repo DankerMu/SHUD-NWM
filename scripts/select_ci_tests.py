@@ -1027,6 +1027,51 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
 )
 
 
+# #1728: the connection-attribution guards. Before this issue only
+# apps/api/routes/hydro_display.py and the delegated-helper modules routed them,
+# because those were the only registered surfaces. The unit-level guard added
+# for #1728 is rooted at apps/api/route_registry.py and walks the six other
+# business routers plus the packages/common stores they build, so a diff that
+# drops a `fallback_application_name`, renames a surface, registers a new router
+# or adds a connect-owning module to the unit's import closure now reddens these
+# two suites — and NO other suite asserts any of that. Both are pure-AST plus a
+# handful of monkeypatched connect probes (~4s together), so they are cheap
+# enough to ride every rule that owns an attribution seam.
+CONNECTION_ATTRIBUTION_TESTS: tuple[str, ...] = (
+    "tests/test_node27_connection_attribution.py",
+    "tests/test_node27_connection_attribution_delegated.py",
+)
+# The route modules the unit-level guard walks from the registry, plus the
+# registry itself: each declares a module-level `_APPLICATION_NAME` and injects
+# it into its store factories.
+CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
+    "apps/api/route_registry.py",
+    "apps/api/routes/best_available.py",
+    "apps/api/routes/data_sources.py",
+    "apps/api/routes/forecast.py",
+    "apps/api/routes/models.py",
+    "apps/api/routes/pipeline.py",
+    "apps/api/routes/state_snapshots.py",
+)
+# The packages/common stores that carry the #1728 injection seam
+# (`application_name=` through `from_env` down to the connect call). Two more —
+# forecast_store.py and state_manager.py — already have exact rules, so the
+# suites are MERGED into those instead of listed here: a duplicate pattern
+# splits a module's ownership across two rules
+# (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
+CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
+    "packages/common/best_available.py",
+    "packages/common/model_registry.py",
+    "packages/common/object_store_forcing.py",
+)
+# #1704: the only suite that asserts the error-response log line exists, is
+# redacted, is bounded, and that the request-id is not client-forgeable. Both
+# halves of that contract live in apps/api/errors.py (the chokepoint) and
+# apps/api/main.py (the handler install + the request-id middleware); the
+# `apps/api/**` rule's three broad API suites assert none of it.
+API_ERROR_LOGGING_TEST = "tests/test_api_errors_logging.py"
+
+
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[0],
@@ -1589,6 +1634,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # "eight below" census stays true.
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
+            # #1704: same guard-derived provenance — the API error-logging
+            # suite imports apps/api/routes/hydro_display.py at file level,
+            # which imports services.tiles.mvt, so it is a one-hop importer
+            # here (and a DIRECT importer on the hydro_display rule below).
+            "tests/test_api_errors_logging.py",
         ),
     ),
     # The other two #1341 switched surfaces. Both are covered by broad rules
@@ -1612,6 +1662,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "apps/api/routes/hydro_display.py",
         (
             "tests/test_api_contract.py",
+            # #1704: guard-derived, not hand-curated — the API error-logging
+            # suite imports get_hydro_display_session from this module at file
+            # level, so it is a direct non-gated importer.
+            "tests/test_api_errors_logging.py",
             "tests/test_direct_grid_display_cutover_flip.py",
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
@@ -1686,6 +1740,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # CI green unchallenged (same at-site reasoning as #1341's
             # mvt.py / display_coverage.py entries).
             "tests/test_river_ts_text_identity_cleanup.py",
+            # #1728: this module carries the connection-attribution injection
+            # seam (`application_name=` through `from_env` to the connect call)
+            # for BOTH nhms-api-forecast and nhms-api-data-sources. MERGED into
+            # this rule rather than added as a second exact entry — a duplicate
+            # pattern splits the module's ownership across two rules
+            # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
+            *CONNECTION_ATTRIBUTION_TESTS,
         ),
     ),
     PathTestRule(
@@ -1721,6 +1782,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # fallback_application_name identity.
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
+            # #1446: the CLI suite is a one-hop importer via
+            # scripts/node27_refresh_coverage.py. It owns the operator-facing
+            # half of the overwrite guard (exit 3 + the structured refusal
+            # line, `refused` in the --all report) — behaviour none of the
+            # suites above assert.
+            "tests/test_node27_refresh_coverage_cli.py",
+        ),
+    ),
+    PathTestRule(
+        # #1446: the refusal exit code and stderr line are this script's own
+        # contract (the autopipeline branches on the rc), and no other rule
+        # covers this file — a CLI-only diff fell through to the core-smoke
+        # fallback, which imports none of it.
+        "scripts/node27_refresh_coverage.py",
+        (
+            "tests/test_node27_refresh_coverage_cli.py",
+            "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
         ),
     ),
     PathTestRule(
@@ -1753,6 +1832,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scheduler.py::test_build_candidates_suppresses_a_model_before_its_lineage_cutover",
             "tests/test_production_scheduler.py::test_build_candidates_admits_a_model_at_its_lineage_cutover",
             "tests/test_production_scheduler.py::test_build_candidates_without_lineage_is_unchanged",
+            # #1728: this module carries the connection-attribution injection
+            # seam for nhms-api-state-snapshots (StateManager.from_env ->
+            # PsycopgStateSnapshotRepository -> connect). MERGED here for the
+            # same duplicate-pattern reason as forecast_store.py above.
+            *CONNECTION_ATTRIBUTION_TESTS,
         ),
     ),
     PathTestRule(
@@ -1957,6 +2041,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_autopipeline_preflight.py",
             "tests/test_node27_autopipeline_handoff.py",
+            # #1647: the `_connect` bounds and the stats-guard flag parser live
+            # in their own suite, which the same-name fallback cannot find.
+            "tests/test_node27_autopipeline_connection_bounds.py",
             "tests/test_display_publish_status_only.py",
             # #1442/#1789: the publish criterion is a registered statement of
             # the zero-text-identity oracle (group D, no sanctioned aid at all),
@@ -2011,6 +2098,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
+            # #1647: `_CHUNK_IDENT_RE` is pinned byte-equal to the autopipeline
+            # `_STATS_GUARD_IDENT_RE` from that suite, so loosening the pattern
+            # here reds there — mirror of the autopipeline row above.
+            "tests/test_node27_autopipeline_connection_bounds.py",
             # #1774: this lane runs as a non-superuser; a superuser-gated
             # READ added here would fail SILENTLY.
             "tests/test_node27_write_roles.py",
@@ -2062,6 +2153,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_retention.py",
         ),
+    ),
+    PathTestRule(
+        # #1712: the unit file carries the `StandardError=journal` lane and the
+        # `OnFailure=` alert wiring, both pinned by unit-file tests. Without an
+        # explicit row it is infra/** non-python, matches nothing, and a
+        # unit-only PR selected zero tests. Narrow on purpose — the `.timer`
+        # sibling's cold_residency target is timer-schedule coverage, not
+        # something the unit body can break.
+        "infra/systemd/nhms-node27-timeseries-retention.service",
+        ("tests/test_node27_timeseries_retention.py",),
     ),
     PathTestRule(
         "schemas/timeseries_compression_receipt.schema.json",
@@ -2459,6 +2560,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *CORE_SMOKE_TESTS,
             *THREAD_EXCEPTION_POLICY_TESTS,
             "tests/test_node27_cold_tablespace_marker_contract.py",
+            # #1765: `tmp_path_retention_policy` lives in the same table and is
+            # asserted here (parsed key + the running session's resolved ini).
+            PYTHON_ENVIRONMENT_TRUTH_TEST,
             SELECTOR_META_GUARD_TEST,
         ),
     ),
@@ -2769,6 +2873,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/scheduler_gateway.py",
         (SLURM_AUTH_DEPLOYMENT_TEST,),
+    ),
+    *(
+        PathTestRule(path, CONNECTION_ATTRIBUTION_TESTS)
+        for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS + CONNECTION_ATTRIBUTION_STORE_PATHS
+    ),
+    PathTestRule(
+        "apps/api/errors.py",
+        (API_ERROR_LOGGING_TEST,),
+    ),
+    PathTestRule(
+        "apps/api/main.py",
+        (API_ERROR_LOGGING_TEST,),
     ),
 )
 

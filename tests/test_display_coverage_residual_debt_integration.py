@@ -50,6 +50,7 @@ from tests.integration_helpers import (
     CYCLE_TIME,
     FORCING_VERSION_ID,
     FORECAST_RUN_ID,
+    HINDCAST_RUN_ID,
     ISSUE_126_PREFIX,
     MODEL_ID,
     RIVER_NETWORK_VERSION_ID,
@@ -110,6 +111,21 @@ _PARITY_GRID_CELL_ID = f"{ISSUE_126_PREFIX}_grid_cell_1"
 _NULL_FORCING_RUN_ID = f"{ISSUE_126_PREFIX}_forecast_run_nullfv"
 _NULL_FORCING_RUN_SHIFT = timedelta(hours=6)
 
+# The #1674 D2 legacy cohort, one row: `published` before the dual-write cutover
+# and therefore never stamped with `parsed_at`. Local to this module (see
+# `_seed_legacy_published_run`).
+_LEGACY_PUBLISHED_RUN_ID = f"{ISSUE_126_PREFIX}_legacy_published_run"
+_LEGACY_PUBLISHED_RUN_SHIFT = timedelta(days=30)
+
+# The #1779 discriminator, one row: `parsed`, WITH key-visible fact rows, and no
+# `parsed_at`. It is the only row SEEDED HERE on which the retired EXISTS probe
+# and the authority-state predicate disagree; the other disagreeing shape is
+# named, and deliberately not seeded, in
+# `_seed_parsed_run_with_rows_but_no_parse_timestamp`. Local to this module for
+# the same reason as the legacy row above.
+_ROWS_WITHOUT_PARSED_AT_RUN_ID = f"{ISSUE_126_PREFIX}_rows_without_parsed_at_run"
+_ROWS_WITHOUT_PARSED_AT_RUN_SHIFT = timedelta(days=15)
+
 # One unit and one deterministic value per MVP station variable. Units only have
 # to be non-empty and stable: the coverage CTEs count DISTINCT units per
 # variable, they do not interpret them.
@@ -149,6 +165,169 @@ def _scalar(connection: Any, sql: str, params: Any = None) -> Any:
         cursor.execute(sql, params)
         row = cursor.fetchone()
     return None if row is None else next(iter(row.values()))
+
+
+def _status(connection: Any, run_id: str) -> Any:
+    return _scalar(connection, "SELECT status FROM hydro.hydro_run WHERE run_id = %s", (run_id,))
+
+
+def _updated_at(connection: Any, run_id: str) -> Any:
+    return _scalar(connection, "SELECT updated_at FROM hydro.hydro_run WHERE run_id = %s", (run_id,))
+
+
+def _parsed_at(connection: Any, run_id: str) -> Any:
+    return _scalar(connection, "SELECT parsed_at FROM hydro.hydro_run WHERE run_id = %s", (run_id,))
+
+
+def _seed_legacy_published_run(connection: Any) -> None:
+    """One #1674 D2 legacy row: already ``published``, never stamped.
+
+    Seeded here and not in ``seed_issue_126_data`` on purpose — that helper is
+    shared with ``tests/test_real_database_integration.py`` and
+    ``tests/test_integration_helpers_bounded_teardown.py``, and a third run in
+    the shared seed would move their counts for a row only this module asserts
+    on. The throwaway database is created and dropped per test, so the extra row
+    needs no teardown of its own.
+    """
+    _execute(
+        connection,
+        """
+        INSERT INTO hydro.hydro_run (
+            run_id, run_type, scenario_id, model_id, basin_version_id,
+            forcing_version_id, source_id, cycle_time, start_time, end_time,
+            status, parsed_at, run_manifest_uri, output_uri, log_uri
+        )
+        VALUES (%s, 'hindcast', 'hindcast_era5', %s, %s, NULL, 'gfs', %s, %s, %s,
+                'published', NULL, %s, %s, %s)
+        """,
+        (
+            _LEGACY_PUBLISHED_RUN_ID,
+            MODEL_ID,
+            BASIN_VERSION_ID,
+            CYCLE_TIME - _LEGACY_PUBLISHED_RUN_SHIFT,
+            CYCLE_TIME - _LEGACY_PUBLISHED_RUN_SHIFT,
+            CYCLE_TIME,
+            "s3://nhms/runs/it126-legacy/input/manifest.json",
+            "s3://nhms/runs/it126-legacy/output/",
+            "s3://nhms/runs/it126-legacy/logs/",
+        ),
+    )
+
+
+def _key_visible_river_row_count(connection: Any, run_id: str) -> int:
+    """Fact rows reachable exactly the way the RETIRED publish probe reached them.
+
+    Correlated on ``run_key``, not ``run_id``, on purpose: that is the access the
+    pre-#1779 ``EXISTS`` predicate had. Asserting it non-zero is what keeps the
+    discriminating row discriminating — if the dual-write helper ever stopped
+    populating ``run_key``, the row would quietly degrade into a second
+    do-nothing negative and the test would go on passing under both predicates.
+    """
+    return _scalar(
+        connection,
+        """
+        SELECT count(*)
+        FROM hydro.river_timeseries rt
+        JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+        WHERE h.run_id = %s
+        """,
+        (run_id,),
+    )
+
+
+def _seed_parsed_run_with_rows_but_no_parse_timestamp(connection: Any) -> None:
+    """One ``parsed`` run WITH key-visible fact rows and NULL ``parsed_at``.
+
+    The only row seeded here on which the two publish predicates disagree. The
+    retired probe asked the fact table whether any row correlated with the run
+    and would publish this one; the #1779 predicate asks ``parsed_at IS NOT
+    NULL`` and must leave it ``parsed``. Both renditions of the old probe fire on
+    it — this module's ``_LEGACY_PUBLISH_SQL`` correlates on ``rt.run_id`` while
+    pre-#1779 production correlated on ``rt.run_key``, and the dual-write helper
+    populates both — so the row reddens either way.
+
+    It is not the only shape the two predicates disagree about, merely the only
+    one seeded here. A ``parsed`` run stamped with ``parsed_at`` whose parser wrote
+    ZERO fact rows disagrees in the opposite direction: published under the #1779
+    predicate, NOT published under either rendition of the old probe, whose
+    ``EXISTS`` is false when no fact row correlates. That direction is the
+    declared behaviour change rather than a regression — the #1789 owner decision
+    recorded in ``scripts/node27_autopipeline.py``'s publish criterion — and it is
+    production-reachable, because ``mark_run_parsed`` stamps ``parsed_at``
+    unconditionally, zero rows written included. No row here seeds it;
+    ``tests/test_display_publish_status_only.py``'s
+    ``test_publish_predicate_reads_authority_state_and_no_fact_table`` pins it at
+    the statement instead — asserting the publish statement reads neither the fact
+    table nor ``EXISTS`` is exactly what makes a stamped zero-row parse publish.
+
+    It carries no timestamp because it is NOT a completed parse, which is the
+    qualifier the "integration seeds carry the timestamp only for completed
+    parses" contract turns on: ``mark_run_parsed`` stamps ``parsed_at`` in the
+    same transaction that commits the rows, so no parser can produce this state.
+    It is the counterfactual the old probe misread as a finished parse, held
+    here to pin which column the predicate reads. Do not "fix" it by stamping
+    ``parsed_at`` — that deletes the only assertion in this test that the old
+    predicate fails.
+
+    Its cycle_time sits BEFORE the seed's so it can never outrank the seeded
+    forecast run in an ``ORDER BY cycle_time DESC`` path. Seeded in this module
+    rather than in ``seed_issue_126_data`` for the reason spelled out in
+    ``_seed_legacy_published_run``.
+    """
+    cycle_time = CYCLE_TIME - _ROWS_WITHOUT_PARSED_AT_RUN_SHIFT
+    start_time = VALID_TIME_1 - _ROWS_WITHOUT_PARSED_AT_RUN_SHIFT
+    end_time = VALID_TIME_2 - _ROWS_WITHOUT_PARSED_AT_RUN_SHIFT
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            INSERT INTO hydro.hydro_run (
+                run_id, run_type, scenario_id, model_id, basin_version_id,
+                forcing_version_id, source_id, cycle_time, start_time, end_time,
+                status, parsed_at, run_manifest_uri, output_uri, log_uri
+            )
+            VALUES (
+                %s, 'forecast', 'forecast_gfs_deterministic', %s, %s,
+                %s, %s, %s, %s, %s,
+                'parsed', NULL, %s, %s, %s
+            )
+            """,
+            (
+                _ROWS_WITHOUT_PARSED_AT_RUN_ID,
+                MODEL_ID,
+                BASIN_VERSION_ID,
+                FORCING_VERSION_ID,
+                SOURCE_ID,
+                cycle_time,
+                start_time,
+                end_time,
+                "s3://nhms/runs/it126-rows-no-stamp/input/manifest.json",
+                "s3://nhms/runs/it126-rows-no-stamp/output/",
+                "s3://nhms/runs/it126-rows-no-stamp/logs/",
+            ),
+        )
+        # After the run row: the dual-write helper inner-joins hydro_run to
+        # resolve run_key and raises on a row-count shortfall.
+        insert_river_timeseries_dual_written(
+            cursor,
+            [
+                (
+                    _ROWS_WITHOUT_PARSED_AT_RUN_ID,
+                    BASIN_VERSION_ID,
+                    RIVER_NETWORK_VERSION_ID,
+                    segment_id,
+                    valid_time,
+                    lead_time_hours,
+                    "q_down",
+                    float(200 + 10 * segment_index + lead_time_hours),
+                    "m3/s",
+                    "ok",
+                )
+                for segment_index, segment_id in enumerate(
+                    (f"{ISSUE_126_PREFIX}_seg_inside", f"{ISSUE_126_PREFIX}_seg_outside")
+                )
+                for lead_time_hours, valid_time in ((1, start_time), (2, end_time))
+            ],
+        )
 
 
 def _candidates(store: PsycopgForecastStore) -> list[dict[str, Any]]:
@@ -196,6 +375,10 @@ def test_status_only_publish_keeps_ingest_refreshed_coverage_fresh(throwaway_dat
         )
         assert published_status == "published"
         assert _stale_run_ids(connection, [FORECAST_RUN_ID]) == set()
+        # Exactly one run moved: the hindcast seed is also `parsed`, and it is
+        # the seeded run with no completed parse behind it (NULL `parsed_at`,
+        # no fact rows), so `== 1` above is a two-sided count, not a lucky one.
+        assert _status(connection, HINDCAST_RUN_ID) == "parsed"
 
         # Mutation contrast: the pre-#1120 publish shape re-stales the very run
         # whose coverage the same tick refreshed.
@@ -206,6 +389,69 @@ def test_status_only_publish_keeps_ingest_refreshed_coverage_fresh(throwaway_dat
         )
         _execute(connection, _LEGACY_PUBLISH_SQL)
         assert _stale_run_ids(connection, [FORECAST_RUN_ID]) == {FORECAST_RUN_ID}
+    finally:
+        connection.close()
+
+
+def test_publish_predicate_publishes_completed_parses_and_nothing_else(
+    throwaway_database_url: str,
+) -> None:
+    """#1779: the four regression rows of the authority-state predicate.
+
+    A source-text pin (``tests/test_display_publish_status_only.py``) can say the
+    statement reads ``parsed_at``; only a database can say which rows that moves.
+    Four rows, one execution:
+
+    * positive — ``parsed`` with a parse timestamp becomes ``published``;
+    * negative — ``parsed`` with NULL ``parsed_at`` and no fact rows (a status
+      nothing parsed produced) is left alone. Without this the predicate could
+      have degenerated to ``status = 'parsed'`` and every assertion above would
+      still pass;
+    * discriminator — ``parsed`` with key-visible fact rows and NULL
+      ``parsed_at``. Of these four rows it is the ONLY one the retired ``EXISTS``
+      probe and the authority-state predicate disagree about, and therefore the
+      only reason this test is red on pre-#1779 code: the probe publishes it
+      (rowcount 2), the predicate leaves it ``parsed`` (rowcount 1). Every other
+      assertion here holds under both statements. The predicates also disagree
+      on a shape no row here seeds — a ``parsed`` run stamped with ``parsed_at``
+      whose parser wrote zero fact rows, which the new predicate publishes and
+      the old probe did not — but that direction is #1789's owner decision, not
+      a regression, and ``tests/test_display_publish_status_only.py``'s
+      ``test_publish_predicate_reads_authority_state_and_no_fact_table`` pins it
+      on the statement (see
+      ``_seed_parsed_run_with_rows_but_no_parse_timestamp``);
+    * legacy — a run already ``published`` with NULL ``parsed_at`` (the #1674 D2
+      pre-cutover cohort, 1360 rows in production) is outside the predicate and
+      keeps its ``updated_at``. It is the row a predicate that keyed on
+      ``parsed_at IS NULL``, or that bumped ``updated_at``, would disturb.
+    """
+    _prepared_database(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_legacy_published_run(connection)
+        _seed_parsed_run_with_rows_but_no_parse_timestamp(connection)
+        legacy_updated_at = _updated_at(connection, _LEGACY_PUBLISHED_RUN_ID)
+        forecast_updated_at = _updated_at(connection, FORECAST_RUN_ID)
+        rows_only_updated_at = _updated_at(connection, _ROWS_WITHOUT_PARSED_AT_RUN_ID)
+        assert _parsed_at(connection, FORECAST_RUN_ID) is not None
+        assert _parsed_at(connection, HINDCAST_RUN_ID) is None
+        # The discriminator's two preconditions, asserted and not assumed: no
+        # timestamp, and fact rows the old probe would have found.
+        assert _parsed_at(connection, _ROWS_WITHOUT_PARSED_AT_RUN_ID) is None
+        assert _key_visible_river_row_count(connection, _ROWS_WITHOUT_PARSED_AT_RUN_ID) > 0
+
+        assert autopipe._publish_display_runs(throwaway_database_url) == 1
+
+        assert _status(connection, FORECAST_RUN_ID) == "published"
+        assert _status(connection, HINDCAST_RUN_ID) == "parsed"
+        assert _status(connection, _ROWS_WITHOUT_PARSED_AT_RUN_ID) == "parsed"
+        assert _status(connection, _LEGACY_PUBLISHED_RUN_ID) == "published"
+        assert _updated_at(connection, FORECAST_RUN_ID) == forecast_updated_at
+        assert _updated_at(connection, _ROWS_WITHOUT_PARSED_AT_RUN_ID) == rows_only_updated_at
+        assert _updated_at(connection, _LEGACY_PUBLISHED_RUN_ID) == legacy_updated_at
+
+        # Idempotent: a second tick finds nothing left to do.
+        assert autopipe._publish_display_runs(throwaway_database_url) == 0
     finally:
         connection.close()
 

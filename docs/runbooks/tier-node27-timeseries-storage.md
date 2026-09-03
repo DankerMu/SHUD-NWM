@@ -2205,12 +2205,17 @@ distinguished in `stop.stage`:
   `--probe` does not classify at all: a lock failure under `--probe` surfaces as
   `failure.stage: "runner"` (with the exception class name on stderr), not as a
   `stop.stage` receipt.
-  Caveat on coverage: until `SET LOCAL lock_timeout` is adopted (a live-batch
-  behaviour change that needs its own node-27 dry-run), a pure lock *wait* still
-  runs out the statement timeout and is reported as `duration_wall`; only
-  deadlocks (`40P01`) reach this stage today. So a `duration_wall` stop on a
-  chunk that ingest may still be touching deserves one look at lock waits before
-  it is treated as slowness.
+  Coverage (#1476, adopted): each batch sets `SET LOCAL lock_timeout` beside its
+  `SET LOCAL statement_timeout`, from
+  `NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS` (default 5000 ms, echoed in
+  the receipt as `bounds.lock_timeout_ms`). A pure lock *wait* therefore ends at
+  `55P03` and reaches this stage, instead of running out the statement timeout
+  and being reported as `duration_wall`; deadlocks (`40P01`) reach it as before.
+  The bound must stay strictly below `..._DURATION_WALL_MS` — the runner refuses
+  the configuration before any batch otherwise, because at or above the wall the
+  statement timeout fires first and every contention event is mislabelled again.
+  Setting it to `0` is refused too: PostgreSQL reads `lock_timeout = 0` as "wait
+  forever".
 - `ingest_not_quiescent` — `--final-sweep` was asked to touch the active chunk
   while its write counters were still moving. Nothing was written. Complete the
   ingest pause (step 1 of the cutover sequence in 4.6.3), confirm it, and rerun;
@@ -2363,7 +2368,11 @@ autoanalyze，而 2026-08-20 复采时 chunk 58/62 各挂 ~6.8M `n_mod_since_ana
 `error`，剩余 chunk 照常尝试），guard 级失败（连接/候选查询）才写
 `stats_guard.status = "failed"` + `error`；两级都不改 tick 返回码——统计漂移是渐进病，
 下个 tick 重试即可，没资格把 unit 染红。停用开关：
-`NODE27_AUTOPIPE_STATS_GUARD=off`（summary 记 `skipped`）。
+`NODE27_AUTOPIPE_STATS_GUARD`，取值 `0` / `false` / `no` / `off`（去空白 +
+不分大小写）之一即停用，其余值（含 `1`、`on`、未设）继续跑（#1647；此前只认
+字面量 `off`，写 `0` 会静默继续跑）。停用时 summary 记 `skipped`，`reason`
+仍是 `NODE27_AUTOPIPE_STATS_GUARD=off` 这个字面量——它指的是开关本身，不是
+你写的那个值。
 
 #### 复核（`pg_stat_user_tables`）
 
@@ -3480,12 +3489,46 @@ before a receipt exists.
    an `elapsed_ms` close to 300000 on a `57014` means the statement wall
    fired. Before #1664 no such line existed at all, although this section
    already told you to read them.
-7. **Lock-blocked refusal (`lock-contention(55P03)` / `(40P01)`) — when to do
-   nothing, and when to escalate (#1664).**
+
+   This line is **not** the progress criterion of item 7. It carries no wire
+   code by design, and it is emitted on the success path too — a healthy tick
+   writes one per dropped chunk. Count item 7's anchor, not these.
+7. **Refused tick — when to do nothing, and when to escalate (#1664/#1766).**
+
+   The escalation criterion is **progress**, and any drop failure is zero
+   progress, so it counts drop-phase refusals regardless of SQLSTATE:
+
+   ```
+   grep -c 'RETENTION_DROP_FAILED:' ~/node27-timeseries-retention-logs/retention.log
+   ```
+
+   The runner emits exactly **one** such line per refused tick (the per-tick
+   stderr diagnostic, carrying the redacted `refusal_reason`), so the count is
+   a tick tally. Scope it the same way item 5 does — `retention.log` is
+   cumulative, so bracket the window you care about by `start summary=` /
+   `done rc=` timestamps before counting, e.g. with `sed -n '/<start>/,$p'`.
+
+   Before #1766 this criterion counted `lock-contention(` instead. That marker
+   attaches **only** to SQLSTATE 55P03/40P01. The refused ticks this repo has
+   forensics for — **2026-08-18 = `40P01`** and **2026-08-21 = `57014`**, the
+   #1664 pair recorded in
+   `openspec/changes/archive/2026-08-22-harden-node27-retention-lock-contention/`
+   — both predate the marker, and the `57014` class (what the 08-21 refusal
+   was, and what `lock_timeout` explicitly **cannot** eliminate — hard edge 2
+   at `:3097-3100` above) never carries the marker at all. So the criterion
+   read 0 while progress was 0. Do not go back to counting the classification.
+
+   To see *which kind* of drop failure a counted tick was — a diagnostic aid,
+   never the criterion:
 
    ```
    grep 'lock-contention(' ~/node27-timeseries-retention-logs/retention.log
    ```
+
+   `RETENTION_CONCURRENT_INVOCATION` and `RETENTION_UNCAUGHT_ERROR` are
+   deliberately **not** counted: the first means a previous tick is still
+   working (progress, not the absence of it), and the second is a bug the
+   `OnFailure=` alert already surfaces on its own.
 
    **A single lock-blocked refused tick is ACCEPTABLE and needs no human
    intervention.** Nothing was half-done: the drop either happened or did not,
@@ -3495,8 +3538,9 @@ before a receipt exists.
    warnings apply — a wrapper invocation is a live enforcing tick).
 
    **Escalate when the pattern, not the event, is wrong:** three or more
-   CONSECUTIVE days of lock-blocked refusals, or four or more lock-blocked
-   ticks within one week. That means the retention lane is no longer making
+   CONSECUTIVE days of counted refusals, or four or more counted refused ticks
+   within one week — counted by the command above, whatever their SQLSTATE.
+   That means the retention lane is no longer making
    progress and the drop backlog is growing — check the candidate backlog and
    `pg_database_size` before deciding.
 
@@ -3546,22 +3590,46 @@ before a receipt exists.
    asynchronously bounces, so either default would manufacture a second failed
    unit or a "SENT" that never arrived.
 
-   **KNOWN LIMITATION — the mail body does NOT carry `refusal_reason`.** The
-   journal context the handler quotes is systemd **lifecycle lines only**
-   (`Starting…`, `Main process exited, code=exited, status=1/FAILURE`,
-   `Failed with result 'exit-code'`). The runner's own stderr never reaches
-   the journal, for two independent reasons, both pre-existing:
-   `scripts/node27_timeseries_retention_once.sh` redirects the runner's stdout
-   **and** stderr into `retention.log`, and the retention unit writes
-   `StandardOutput=`/`StandardError=append:` files that systemd does not
-   duplicate into the journal. So the alert tells you **that** the tick failed,
-   never **why**. Read the reason out of `retention.log`:
+   **The mail body carries `refusal_reason` (#1712).** The wrapper pipes the
+   runner's combined output through `tee -a "$LOG_FILE" >&2`, so the same bytes
+   land in `retention.log` **and** on the wrapper's stderr, and the unit's
+   `StandardError=journal` publishes that stderr to the journal — which is
+   exactly the 30 lines the handler quotes. A refused tick's mail therefore
+   names the wire code and the redacted cause, not just "it failed".
+
+   `RC` comes from `PIPESTATUS[0]`, i.e. the runner's status: a `tee` that
+   fails (ENOSPC on the log volume) cannot turn a refused tick green.
+
+   Read the same thing on the host, first stop:
+
+   ```
+   journalctl --user -u nhms-node27-timeseries-retention.service -n 30 --no-pager
+   ```
+
+   `retention.log` remains the complete transcript and is still the right
+   place for anything older than the journal retains, or for the item 5/6/7
+   bracket procedures:
 
    ```
    grep 'RETENTION_' ~/node27-timeseries-retention-logs/retention.log | tail -20
    ```
 
    Then follow items 1-7 above from whichever wire code that prints.
+
+   **KNOWN LIMITATION — scope.** The `systemd.err` file lane is retired for
+   this unit and, under #1765, for `nhms-node27-resource-governance.service`.
+   The other six node-27 units (`autopipe`, `download`, `frontier-alert`,
+   `raw-retention`, `timeseries-compression`, `timeseries-compression-replay`)
+   still write `StandardError=append:…/systemd.err`, and their alerts (where
+   they have one) still quote lifecycle lines only. `StandardOutput=append:`
+   is unchanged here, but do not read it as the bracket destination: the
+   wrapper writes nothing at all to stdout. Its `start` / `done rc=` bracket
+   lines are appended straight to `retention.log`
+   (`scripts/node27_timeseries_retention_once.sh:143,:158`) and the runner's
+   combined output now goes to stderr, so `systemd.log` is a stdout catch-all
+   for anything the wrapper or runner might print in future — normally empty.
+   Look for the bracket lines in `retention.log`; they are NOT duplicated into
+   the journal.
 
    **Deployment is MANUAL** — node-27's units are user-scope
    (`~/.config/systemd/user/`), so `git pull --ff-only` updates only the
@@ -3582,6 +3650,79 @@ before a receipt exists.
    the ALERT unit is safe; **never** `systemctl --user start` the retention
    unit to test this wiring — that is a live enforcing tick and irreversibly
    drops production chunks.
+
+   The `install` + `daemon-reload` above is ALSO what the `#1712`
+   `StandardError=journal` change needs, and the same two commands with
+   `nhms-node27-resource-governance.service` are what the `#1765`
+   `OnFailure=` change needs. Until they are run, the deployed units keep
+   their old lanes no matter what the repo says.
+9. **Root-volume discipline for this host (#1765).** A two-day pytest run on
+   node-27 filled `/` (98 GB) with 27 GB of `/tmp/pytest-of-nwm`. Two halves,
+   both required:
+
+   - **Repo side (already in `pyproject.toml`):**
+     `tmp_path_retention_policy = "failed"` — only failing tests keep their
+     `tmp_path` directory, so a green session leaves nothing behind. This is
+     the growth bound; it is not a volume-size argument.
+   - **Host side (nwm login profile on node-27):**
+
+     ```
+     mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp
+     ```
+
+     so pytest's `pytest-of-nwm` root lands on `/home` instead of `/`. The
+     `mkdir -p` is not optional: `TMPDIR` **fails open** — Python's
+     `tempfile.gettempdir()` silently falls back to `/tmp` when the directory
+     is missing, and the run would go back on the root volume without saying
+     so. Verify by looking for the directory, not only at `df`:
+
+     ```
+     ls -d /home/nwm/tmp/pytest-of-nwm && ls -d /tmp/pytest-of-nwm 2>&1
+     df -h / /home
+     ```
+
+     `/home` is the pgdata + object-store volume, so this moves the residue
+     onto the volume the retention runner's own ENOSPC reasoning is about; the
+     bound that makes it safe is the retention policy above, not the volume's
+     size.
+
+     **`/home` free space has no critical tier.** The resource-governance
+     audit gives that mount a warning threshold only —
+     `home_free_warn_bytes` (default 300 GiB) ->
+     `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:70`
+     (threshold), `:227` (comparison), `:232` (the code literal)
+     — and there is no `home_free_critical_bytes` at all. The exit-1 /
+     `OnFailure=` mail lane has two triggers, in this order: the receipt's
+     `status` is not `completed` (`:584-585`), or the receipt carries at least
+     one `severity: critical` recommendation (`:590-593`, `:556`
+     `_critical_codes`). The first is a defensive guard today — `build_receipt`
+     hard-codes `"status": "completed"` (`:355`) and nothing downgrades it — so
+     in practice a critical recommendation is the only thing that reddens a
+     completed audit. (A rejected config never gets that far: the config parse
+     is `:571-576` and the `return 2` is `:577`, which also trips
+     `OnFailure=`.) A `warning` changes neither `status` nor the critical
+     list, so it trips nothing. The three codes that can be critical today are
+     `ROOT_FREE_BELOW_CRITICAL` (`:210`), `DATABASE_SIZE_ABOVE_CRITICAL`
+     (`:244`, 500 GiB of `nhms`) and `HYPERTABLE_INDEX_RATIO_HIGH` (`:318`,
+     severity assigned at `:309`).
+     So a free-space shortfall on the volume that actually holds pgdata and
+     the object store can never page anyone: it only appears as a `warning`
+     line in a receipt someone reads. The database-size proxy is the closest
+     thing to a critical for this volume, and it says nothing about the object
+     store sharing it. Reading the newest `resource-governance-*.json` by hand
+     therefore stays a step of the bringup checklist, not an optional one.
+
+   **Never** put `--basetemp` in shared config (`pyproject.toml`, CI): it
+   clears its target on every run and would apply to the Mac and to CI too.
+
+   Two wrapper locks still live on `/`, and that is **accepted, not
+   overlooked**: `scripts/node27_raw_retention_once.sh` defaults its primary
+   `LOCK_PATH` (`:113`) and `scripts/node27_timeseries_retention_once.sh` its
+   bootstrap lock (`:131`, the runner holds a separate DB-scoped one) to
+   `/tmp/...`. They are `flock` targets, effectively zero bytes, and moving
+   them changes single-instance semantics on a live lane for no capacity gain.
+   The resource-governance lock DID move (`$LOG_ROOT`) because that audit's
+   whole job is to report `/` filling up.
 
 ### 8.7 Salvage-backed windows
 

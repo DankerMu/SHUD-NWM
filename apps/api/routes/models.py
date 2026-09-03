@@ -29,6 +29,9 @@ from packages.common.model_registry import (
 )
 from workers.model_registry.validator import ModelPackageValidationError, validate_model_package_uri
 
+# #1728: this router's connection surface in pg_stat_activity.
+_APPLICATION_NAME = "nhms-api-models"
+
 router = APIRouter(prefix="/api/v1", tags=["models"])
 logger = logging.getLogger(__name__)
 SAFE_MODEL_REGISTRY_ERROR_MESSAGE = "Model registry operation failed."
@@ -164,7 +167,7 @@ class CrosswalkCreatePayload(BaseModel):
 
 def get_model_registry_store() -> PsycopgModelRegistryStore:
     try:
-        return PsycopgModelRegistryStore.from_env()
+        return PsycopgModelRegistryStore.from_env(application_name=_APPLICATION_NAME)
     except ModelRegistryError as error:
         raise _handle_registry_error(error) from error
     except Exception as error:

@@ -8,12 +8,15 @@ from fastapi import APIRouter, Depends, Query
 from apps.api.errors import ApiError
 from packages.common.best_available import BestAvailableError, BestAvailableManager
 
+# #1728: this router's connection surface in pg_stat_activity.
+_APPLICATION_NAME = "nhms-api-best-available"
+
 router = APIRouter(prefix="/api/v1", tags=["best-available"])
 
 
 def get_best_available_manager() -> BestAvailableManager:
     try:
-        return BestAvailableManager.from_env()
+        return BestAvailableManager.from_env(application_name=_APPLICATION_NAME)
     except BestAvailableError as error:
         raise _api_error(error) from error
 

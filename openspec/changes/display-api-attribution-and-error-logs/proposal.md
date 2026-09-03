@@ -1,0 +1,26 @@
+## Why
+
+- #1728: `nhms-display-api.service` (uvicorn `apps.api.main:app`) hosts six routers, but only `apps/api/routes/hydro_display.py` attributes its connections (`nhms-display-api`, #1714). `pipeline.py`'s SQLAlchemy engine and the `packages/common` stores behind the other routers (`forecast_store` for `forecast.py` and `data_sources.py`, `object_store_forcing.PsycopgStationLookup` for `data_sources.py`, `best_available`, `state_manager`, `model_registry`) open unnamed backends from the same process, including the retry/cancel write endpoints — exactly the connections an operator most needs to tell apart before `pg_cancel_backend`. The static guard from PR #1719 registers at module granularity, so a whole process of unattributed modules stays green.
+- #1726: the same guard classifies delegated helpers at module granularity too: a second, unattributed connect-opening function added to an `ATTRIBUTED` module (e.g. `packages/common/display_watermark.py`) escapes detection.
+- #1704: `apps/api/errors.py::error_response()` serialises `ApiError`/validation errors with `details` for the client but leaves no server-side trace, so a `STATION_FORCING_FILE_MALFORMED` 500 with `parse_reason: concurrent-replace: …` cannot be found afterwards in `/tmp/display-api.log`; `details` may carry absolute paths and raw client input, so logging needs redaction; the repo has no logging configuration at all (uvicorn's default config leaves root unconfigured; probed on node-27: the unit passes no `--log-config`).
+
+## What Changes
+
+- #1728 option (a): distinct identities per connection surface inside the display unit — `nhms-display-api` (unchanged), `nhms-api-pipeline` (`pipeline.py` engine via `connect_args`), and `nhms-api-forecast` / `nhms-api-data-sources` (forecast store + station lookup) / `nhms-api-best-available` / `nhms-api-models` / `nhms-api-state-snapshots`. The name is injected from the route layer through a new optional `application_name` keyword carried hop by hop from the route layer to the four connect seams (`forecast_store._PsycopgTransaction`, `model_registry._PsycopgTransaction`, `PsycopgBestAvailableRepository`, `PsycopgStateSnapshotRepository`) via `PsycopgForecastStore`, `PsycopgStationLookup`, `PsycopgModelRegistryStore`, `BestAvailableManager` and `StateManager`, forwarded as `fallback_application_name` to `psycopg2.connect`; `packages/common` gains no hard-coded names and no new module.
+- #1728 guard: a unit-level guard rooted at `apps/api/route_registry.py` (`_BUSINESS_ROUTERS` + runtime + conditional slurm) enumerates every connect site import-reachable from the registered routers and requires each to be attributed or pinned `UNREACHABLE` with a reason (six such rows today — `grid_registry_store`, `met_store`, `chain_compat_runtime`, `chain_repository`, `tile_publisher/publisher`, `forcing_producer/store` — plus one factory row; enumerated with call-reachability reasons in the guard); an unregistered router or store connect site turns it red.
+- #1726 option (b): function-level closure — every function in an `ATTRIBUTED` delegated module that opens a connection must expose a keyword-only `connect=` seam; the escape scenario from the issue is a red-proof.
+- #1704: `error_response()` logs one line per error response (logger `apps.api.errors`) with `request_id`, `code`, `status_code`, path and the redacted `details` (a local wrapper: `redact_audit_payload` plus key-level redaction of `rejected_value`) rendered into the message text; `apps/api/main.py` installs an idempotent stderr handler with a timestamped formatter on the `apps.api` logger so the line reaches `/tmp/display-api.log` under the production unit. `/api/v1/slurm` (separate handler) is recorded as a known blind spot.
+- Runbooks: `current-production-ops.md` application_name table + "attribute before cancel" clause; `object-store-forcing-series-read.md` post-hoc grep command and the whole-string redaction trade-off.
+
+## Capabilities
+
+**Modified Capabilities**
+- `node27-connection-attribution` — deployed-unit closure and function-level delegated closure.
+- `forecast-api` — server-side error logging with redacted details.
+
+## Impact
+
+- Code: `apps/api/routes/{pipeline,forecast,data_sources,best_available,models,state_snapshots}.py`, `packages/common/{forecast_store,object_store_forcing,best_available,state_manager,model_registry}.py` (optional `application_name` plumbing only), `apps/api/errors.py`, `apps/api/main.py`, `packages/common/display_watermark.py` / `display_coverage.py` only if the function-level guard finds a gap.
+- Tests: `tests/test_node27_connection_attribution.py` (unit-level guard), `tests/test_node27_connection_attribution_delegated.py` (function-level guard, home of `DELEGATED_CONNECT_CLOSURE`), `tests/test_api_errors_logging.py` (new: log line, redaction, rendered text), store suites for the new kwarg.
+- Docs: the two runbooks above.
+- Deploy: display API restart on node-27 (post-merge) + `pg_stat_activity` receipt + grep of a synthetic `ApiError`'s `X-Request-ID` in `/tmp/display-api.log` (a synthetic error substitutes for reproducing a concurrent-replace 500); pre-merge: local guard suites are the oracle, plus a node-27 worktree uvicorn smoke on a scratch port for the log line.

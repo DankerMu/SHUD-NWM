@@ -176,20 +176,28 @@ class StationForcingFileMalformedError(ObjectStoreForcingError):
 
 
 class PsycopgStationLookup:
-    def __init__(self, database_url: str | None = None, *, connection: Any | None = None) -> None:
+    def __init__(
+        self,
+        database_url: str | None = None,
+        *,
+        connection: Any | None = None,
+        application_name: str | None = None,
+    ) -> None:
         self.database_url = database_url
         self.connection = connection
+        # #1728: forwarded to the forecast-store transaction this lookup opens.
+        self.application_name = application_name
 
     @classmethod
-    def from_env(cls) -> "PsycopgStationLookup":
-        return cls(default_database_url())
+    def from_env(cls, *, application_name: str | None = None) -> "PsycopgStationLookup":
+        return cls(default_database_url(), application_name=application_name)
 
     def lookup(self, station_id: str) -> StationMetadata:
         station_id = _required_text(station_id, "station_id")
         if self.connection is not None:
             return self._lookup_with_connection(self.connection, station_id)
         database_url = self.database_url or default_database_url()
-        with _PsycopgTransaction(database_url) as cursor:
+        with _PsycopgTransaction(database_url, application_name=self.application_name) as cursor:
             return self._lookup_with_cursor(cursor, station_id)
 
     def _lookup_with_connection(self, connection: Any, station_id: str) -> StationMetadata:

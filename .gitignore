@@ -91,3 +91,6 @@ AutoSHUD/
 # Design artifacts (tracked separately)
 设计图/
 .review-gate.json
+
+# Local subagent worktrees (git-worktree checkouts under the repo root)
+.worktrees/

@@ -8,12 +8,15 @@ from apps.api.errors import ApiError
 from apps.api.routes.forecast import DEFAULT_LIMIT, MAX_LIMIT
 from packages.common.state_manager import StateManager, StateManagerError, state_snapshot_to_dict
 
+# #1728: this router's connection surface in pg_stat_activity.
+_APPLICATION_NAME = "nhms-api-state-snapshots"
+
 router = APIRouter(prefix="/api/v1", tags=["state-snapshots"])
 
 
 def get_state_manager() -> StateManager:
     try:
-        return StateManager.from_env()
+        return StateManager.from_env(application_name=_APPLICATION_NAME)
     except StateManagerError as error:
         raise _api_error(500, "STATE_MANAGER_UNAVAILABLE", str(error)) from error
 

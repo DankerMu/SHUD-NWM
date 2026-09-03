@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import logging
+import re
+from collections.abc import Mapping
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
@@ -8,7 +12,90 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from packages.common.auth_policy import redact_audit_payload
+from packages.common.redaction import REDACTION_MARKER
 from services.slurm_gateway.validation_errors import slurm_request_validation_error_response
+
+logger = logging.getLogger(__name__)
+
+# `details` keys whose VALUE is raw client input of any shape. `redact_audit_payload`
+# only redacts value-shaped secrets (paths, URIs, checksums) and sensitive key
+# names, so `rejected_value: "sk-live-ABC"` would otherwise reach the log verbatim.
+# The plural is the sibling shape the stores raise (`packages/common/forecast_store.py`
+# for an unknown `variables` token; `apps/api/routes/forecast.py` and
+# `apps/api/routes/pipeline.py` build it as a mapping of field -> reflected value),
+# and it reaches this chokepoint through `ApiError.details`.
+# RESIDUAL, by design: only these keys are redacted unconditionally. Client-supplied
+# identifiers under any other key (`station_id`, `layer_id`, `run_id`, `cycle_time`)
+# stay verbatim unless value-shaped or under a sensitive key.
+_CLIENT_INPUT_KEYS = frozenset({"rejected_value", "rejected_values"})
+
+# Budget for the rendered `details=` segment of one line. The validation arm
+# renders one `{field, rejected_value, reason}` entry PER invalid item, so a
+# single authorised POST of a few thousand items wrote a multi-megabyte line
+# into an unrotated unit log (measured 8.5 MB from a 20 000-item body). The
+# response body is unaffected; only what is written server-side is bounded.
+# RESIDUAL, not fixed here: the budget bounds what is WRITTEN, not the work.
+# `_redact_error_details` still walks the whole payload before `_render_details`
+# cuts it (measured ~554 ms of event loop for a 20 000-item validation list),
+# so a large list body is still a synchronous cost on an authorised, list-bodied
+# route. A pre-walk item cap was rejected for now because the truncation marker
+# states DROPPED BYTES: capping by item count would either change that contract
+# or make the reported byte count a lie.
+_DETAILS_RENDER_BUDGET_BYTES = 8192
+_DETAILS_TRUNCATION_MARKER = "…[truncated {dropped} bytes]"
+
+# Every character `str.splitlines()` treats as a line break. A MAPPING `details`
+# is already safe -- `str(dict)` renders its values through `repr`, which escapes
+# them -- but a non-mapping one (a bare string, most of all) is rendered with
+# `str()` and nothing quotes it. A raw `\n` in such a value wrote a SECOND
+# physical line carrying attacker-chosen `code=`/`status=` tokens and no
+# `request_id=` at all, which the runbook's grep can never tie back to its
+# request. Escaped, not stripped: the operator still reads the whole value.
+_LINE_BREAK_ESCAPES = {
+    "\n": "\\n",
+    "\r": "\\r",
+    "\x0b": "\\x0b",
+    "\x0c": "\\x0c",
+    "\x85": "\\x85",
+    "\u2028": "\\u2028",
+    "\u2029": "\\u2029",
+}
+_LINE_BREAK_TRANSLATION = str.maketrans(_LINE_BREAK_ESCAPES)
+
+# An inbound `X-Request-ID` is echoed into the response header, the audit record
+# and this log line. Accepting it verbatim let a client inject `code=`/`path=`
+# tokens into the line it would later be grepped from, so anything outside this
+# shape is replaced by a server-minted UUID.
+_REQUEST_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
+def sanitize_request_id(header_value: Any) -> str:
+    """The inbound `X-Request-ID` if it is safe to echo, else a fresh UUID.
+
+    Shared by `add_request_id` (the response header + `request.state`) and
+    `apps/api/main.py::_ensure_request_id` (the pre-body auth path), so the
+    header, the audit record and the log line can never disagree.
+    """
+    if isinstance(header_value, str) and _REQUEST_ID_RE.fullmatch(header_value):
+        return header_value
+    return str(uuid4())
+
+
+def resolve_request_id(request: Any) -> str:
+    """The id for this request: an id already on `request.state`, else the header rule.
+
+    `protected_mutation_auth_guard` wraps `add_request_id`, and on its allow
+    branch it has already run `apps/api/main.py::_ensure_request_id`. Minting
+    unconditionally here replaced that id mid-request, so the decision the guard
+    evaluated and the response the client got carried different ids for no
+    reason. The state value is re-checked against the same acceptance rule
+    rather than trusted: any middleware may have set it.
+    """
+    existing = getattr(getattr(request, "state", None), "request_id", None)
+    if isinstance(existing, str) and _REQUEST_ID_RE.fullmatch(existing):
+        return existing
+    return sanitize_request_id(request.headers.get("X-Request-ID"))
 
 
 class ApiError(RuntimeError):
@@ -30,7 +117,7 @@ class ApiError(RuntimeError):
 def register_error_handlers(app: FastAPI) -> None:
     @app.middleware("http")
     async def add_request_id(request: Request, call_next: Any) -> Any:
-        request_id = request.headers.get("X-Request-ID") or str(uuid4())
+        request_id = resolve_request_id(request)
         request.state.request_id = request_id
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
@@ -67,6 +154,153 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
 
+def _redact_client_input_keys(value: Any) -> Any:
+    """Redact `_CLIENT_INPUT_KEYS` by KEY, recursing into the validation arm's list."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): (REDACTION_MARKER if str(key) in _CLIENT_INPUT_KEYS else _redact_client_input_keys(nested))
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_client_input_keys(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_client_input_keys(item) for item in value)
+    return value
+
+
+def _redact_error_details(details: Any) -> Any:
+    """What may be written to the server log for one error response.
+
+    The key-level pass above runs FIRST, then `redact_audit_payload` (shared
+    with the audit trail: paths, URIs, checksums, sensitive key names). The
+    order is behaviour-identical -- `redact_audit_payload` maps the
+    `[redacted]` marker to itself -- but it means a body-sized `rejected_value`
+    subtree is collapsed to one string before the deep audit walk instead of
+    being traversed node by node first.
+    """
+    return redact_audit_payload(_redact_client_input_keys(details))
+
+
+def _render_details(safe_details: Any) -> str:
+    """The `details=` segment: one physical line, bounded to `_DETAILS_RENDER_BUDGET_BYTES`.
+
+    Line-breaking characters are escaped FIRST, so the budget is measured on
+    what actually lands in the file (each escape is wider than the character it
+    replaces) and the truncation marker's dropped-byte count stays honest.
+
+    Length is measured on the UTF-8 encoding (what actually lands in the file);
+    the cut is decoded with `errors="ignore"` so it always falls on a character
+    boundary, and the dropped byte count is stated rather than implied.
+
+    The encode is lenient and its result is decoded back even when nothing is
+    cut: a LONE SURROGATE (what `surrogateescape` leaves behind for an
+    undecodable byte, e.g. `os.fsdecode` of such a filename) has no UTF-8
+    encoding, so a strict encode raised here and collapsed the whole line to
+    `<redaction-failed:UnicodeEncodeError>`: request id, code, status and path
+    survived, every readable detail did not. `redact_audit_payload` normalises
+    str LEAVES on the way in, so the door is a non-str value it returns
+    unchanged (`packages/common/auth_policy.py:417`), rendered here through
+    `str()`/`repr()`. Returning the re-decoded text also keeps what the handler
+    must write encodable: on a STRICT stream (a `FileHandler`, or any handler
+    not riding `sys.stderr`'s `backslashreplace`) returning the original moves
+    the same failure into `StreamHandler.emit`, where `logging` swallows it and
+    the line is lost silently. The round trip is the identity for every
+    encodable value.
+    """
+    text = str(safe_details).translate(_LINE_BREAK_TRANSLATION)
+    encoded = text.encode("utf-8", "replace")
+    if len(encoded) <= _DETAILS_RENDER_BUDGET_BYTES:
+        return encoded.decode("utf-8")
+    kept = encoded[:_DETAILS_RENDER_BUDGET_BYTES].decode("utf-8", "ignore")
+    dropped = len(encoded) - len(kept.encode("utf-8"))
+    return kept + _DETAILS_TRUNCATION_MARKER.format(dropped=dropped)
+
+
+def _render_path(raw_path: Any) -> str:
+    """The `path=` segment: one whitespace-free, control-byte-free, bounded token.
+
+    `request.url.path` is the DECODED path, so on any matched path-parameter
+    route the client owns a segment of it: `/api/v1/met/stations/STA%20code=OK
+    %20status=200%20request_id=deadbeef%20/series` used to render a second
+    `code=`/`status=`/`request_id=` triple into the very line the runbook tells
+    the operator to `grep -F request_id=<id>`. Control bytes came through the
+    same way -- a `%00` makes `grep -F` answer "Binary file matches" for the
+    whole unrotated log, and `%1B[2K` erases the terminal line it is printed on.
+
+    `quote(..., safe="/")` re-encodes every byte outside the unreserved set, so
+    a path built from `[A-Za-z0-9._~-]` and `/` is byte-identical to its request
+    form and the documented line shape does not move. That covers every
+    IDENTIFIER-shaped path parameter this app declares (`station_id`,
+    `model_id`, `run_id`, `layer_id`, ...), but NOT every declared parameter:
+    the DATETIME-shaped `valid_time` on the tile routes
+    (`apps/api/routes/hydro_display.py:289,296,347,353`) carries a `:`, which is
+    a sub-delim and is rendered `%3A` -- the runbook says to grep the encoded
+    form. Encoding sub-delims such as `:` and `@` is accepted, because keeping
+    them safe means keeping `=` safe is the next argument, and `=` is exactly
+    what must not survive. `%r` was rejected for the same "don't move the line
+    shape" reason: it would quote every line. TAB/CR/LF never reach here at all
+    -- `urlsplit` strips them from the URL before the app sees it -- so they are
+    covered by absence, not encoding.
+
+    The encoded form is then held to `_DETAILS_RENDER_BUDGET_BYTES`, the same
+    budget as `details=`. `request.url.path` is bounded only by the server's
+    request-line limit, and encoding EXPANDS it: every byte of a 40 KiB `%FF`
+    path decodes to U+FFFD and re-encodes to the nine characters `%EF%BF%BD`,
+    which wrote a measured 123 KB single line. The marker is `_DETAILS_TRUNCATION_MARKER`
+    rendered through the same `quote`, so it states the same dropped-byte
+    contract and cannot carry the space that would split this field into two
+    tokens. `quote` emits ASCII only, so character count IS byte count here;
+    the cut is walked back so it never lands inside a `%XX` triple.
+    """
+    if not raw_path:
+        return "<unknown>"
+    encoded = quote(str(raw_path), safe="/", errors="replace")
+    if len(encoded) <= _DETAILS_RENDER_BUDGET_BYTES:
+        return encoded
+    kept = encoded[:_DETAILS_RENDER_BUDGET_BYTES]
+    if kept.endswith("%"):
+        kept = kept[:-1]
+    elif kept[-2:-1] == "%":
+        kept = kept[:-2]
+    dropped = len(encoded) - len(kept)
+    return kept + quote(_DETAILS_TRUNCATION_MARKER.format(dropped=dropped), safe="")
+
+
+def _log_error_response(
+    request: Any,
+    *,
+    request_id: str,
+    status_code: int,
+    code: str,
+    details: Any | None,
+) -> None:
+    """One grep-able server-side line per error response (#1704).
+
+    The response is the contract; this line is best effort and must never
+    change it, so every failure mode below degrades to silence rather than
+    propagating. A redaction failure logs the exception TYPE only -- never the
+    object, which is the raw payload this function exists to keep out of the log.
+    """
+    try:
+        try:
+            rendered_details = _render_details(_redact_error_details(details))
+        except Exception as error:  # noqa: BLE001 - never log the value we failed to redact
+            rendered_details = f"<redaction-failed:{type(error).__name__}>"
+        path = _render_path(getattr(getattr(request, "url", None), "path", None))
+        level = logging.ERROR if status_code >= 500 else logging.WARNING
+        logger.log(
+            level,
+            "api_error request_id=%s code=%s status=%s path=%s details=%s",
+            request_id,
+            code,
+            status_code,
+            path,
+            rendered_details,
+        )
+    except Exception:  # noqa: BLE001 - logging must never break the error response
+        pass
+
+
 def error_response(
     request: Request,
     *,
@@ -75,7 +309,19 @@ def error_response(
     message: str,
     details: Any | None = None,
 ) -> JSONResponse:
-    request_id = getattr(request.state, "request_id", None) or str(uuid4())
+    # Through the shared rule, not straight off `request.state`: this is the
+    # fourth writer of the id (after the middleware, the pre-body auth path and
+    # any app-outer middleware), and reading the state value unchecked here
+    # meant the "id is always sanitised" property held only as long as an
+    # inventory of the other three stayed complete.
+    request_id = resolve_request_id(request)
+    _log_error_response(
+        request,
+        request_id=request_id,
+        status_code=status_code,
+        code=code,
+        details=details,
+    )
     body: dict[str, Any] = {
         "request_id": request_id,
         "status": "error",

@@ -178,6 +178,17 @@ def default_database_url() -> str:
     return database_url
 
 
+def _attribution_connect_kwargs(application_name: str | None) -> dict[str, str]:
+    """libpq attribution kwargs for a connection this module opens (#1728).
+
+    Empty when the caller injected no ``application_name``, so a store built
+    without one reaches ``psycopg2.connect`` exactly as it did before.
+    """
+    if application_name is None:
+        return {}
+    return {"fallback_application_name": application_name}
+
+
 def _timeseries_segment_id(segment_id: str) -> str:
     """Translate a ``core.river_segment`` reach-row id to the matching
     ``hydro.river_timeseries`` output-row id.
@@ -331,10 +342,13 @@ def _qhh_latest_candidate_runs_sql(*, identity_sql: str, pin_scan_run_id: bool) 
 @dataclass(frozen=True)
 class PsycopgForecastStore:
     database_url: str
+    # #1728: the calling surface (route module) names the connection; the store
+    # itself hard-codes nothing and defaults to the pre-#1728 unnamed behaviour.
+    application_name: str | None = None
 
     @classmethod
-    def from_env(cls) -> PsycopgForecastStore:
-        return cls(default_database_url())
+    def from_env(cls, *, application_name: str | None = None) -> PsycopgForecastStore:
+        return cls(default_database_url(), application_name=application_name)
 
     def forecast_series(
         self,
@@ -2623,7 +2637,7 @@ class PsycopgForecastStore:
         return rows
 
     def _transaction(self) -> Any:
-        return _PsycopgTransaction(self.database_url)
+        return _PsycopgTransaction(self.database_url, application_name=self.application_name)
 
 
 @dataclass(frozen=True)
@@ -2633,8 +2647,9 @@ class _ScenarioFilter:
 
 
 class _PsycopgTransaction:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, application_name: str | None = None) -> None:
         self.database_url = database_url
+        self.application_name = application_name
         self.connection: Any | None = None
         self.psycopg2: Any | None = None
 
@@ -2650,7 +2665,9 @@ class _PsycopgTransaction:
             ) from error
 
         self.psycopg2 = psycopg2
-        self.connection = psycopg2.connect(self.database_url)
+        self.connection = psycopg2.connect(
+            self.database_url, **_attribution_connect_kwargs(self.application_name)
+        )
         self.connection.set_session(isolation_level="REPEATABLE READ", readonly=True, autocommit=False)
         register_default_json(conn_or_curs=self.connection)
         register_default_jsonb(conn_or_curs=self.connection)
