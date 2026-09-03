@@ -77,7 +77,8 @@
 - 新路由 `GET /api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf`，`source` 枚举 `gfs|ifs`（路由层小写），SQL 用 `lower(h.source_id) = :source AND h.cycle_time = :cycle` 过滤 `latest_runs`；`cycle` RFC3339。
 - 旧路由 `/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf` 保留、行为不变（别名，仅供外部旧链接）。
 - 缓存 key / ETag：`source_version` 与 file-cache key 加入 `source:cycle`；`NATIONAL_DISCHARGE_QUERY_VERSION` `fair-network-budget-v4` → `-v5`。
-- `/api/v1/layers` 的 `discharge` 目录条目 `tile_url_template` 改为 `/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf`，`required_placeholders = [source, cycle, valid_time]`；`metadata.default_source="gfs"`、`metadata.default_cycle=<最新交集周期>`、`metadata.valid_times` = 默认源默认周期的列表。`_layer_source_refs` 的 discharge 断言保持。
+- `/api/v1/layers` 的 `discharge` 目录条目 `tile_url_template` 改为 `/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf`，`required_placeholders = [source, cycle, valid_time]`：
+  - `metadata.default_source="gfs"`、`metadata.default_cycle=<最新交集周期>`、`metadata.valid_times` = 默认源默认周期的列表。`_layer_source_refs` 的 discharge 断言保持。
 - 受影响断言：`tests/test_api_contract.py:1409`、`tests/test_hydro_display_mvt_scaling.py:175`、`apps/frontend/src/pages/__tests__/M11Shell.test.tsx` 的 `dischargeNationalMvtMetadata` fixture——随 spec MODIFIED 一起改。
 
 ### D. 起报时次与有效时次
@@ -90,7 +91,10 @@
 
 **数据路径（node-22 → NFS）**
 
-- `services/tile_publisher/publisher.py` 在 q_down publish 成功后新增 canonical 降水镜像：`canonical/<source>/<cycle>/prcp_rate_or_amount/*.nc` + `canonical/<source>/grid/<grid_id>/grid.json` → `NHMS_OBJECT_STORE_COPYBACK_ROOT` 同 keyspace；复用 `_copyback_object_tree_with_rollback` 的 temp-tree + rollback；幂等（目标已存在且大小一致则跳过）；缺源文件 fail loudly 但**不阻塞** q_down 发布（降水是展示附属，写 lineage 记录失败）。
+- `services/tile_publisher/publisher.py` 在 q_down publish 成功后新增 canonical 降水镜像：`canonical/<source>/<cycle>/prcp_rate_or_amount/*.nc` + `canonical/<source>/grid/<grid_id>/grid.json` → `NHMS_OBJECT_STORE_COPYBACK_ROOT` 同 keyspace：
+  - 复用 `_copyback_object_tree_with_rollback` 的 temp-tree + rollback
+  - 幂等（目标已存在且大小一致则跳过）
+  - 缺源文件 fail loudly 但**不阻塞** q_down 发布（降水是展示附属，写 lineage 记录失败）。
 - 回填脚本 `scripts/canonical_precip_copyback_backfill.py`：一次性镜像现存保留周期，node-22 用 `/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill`，只用 `shutil`，无新依赖，不触发 `uv sync`。
 - 保留：`scripts/node27_raw_retention.py` 扩展目标到 `canonical/<source>/<cycle>`，同一 keep 水位；`grid/` 不剪。
 
