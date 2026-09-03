@@ -353,6 +353,24 @@ TWO_NODE_DOCKER_RUNBOOK_ENV_TEST = "tests/test_two_node_docker_runbook_environme
 # same owner via the same additive (non-stop) rule shape.
 QHH_DIAGNOSTIC_README = "scripts/diagnostic/qhh/README.md"
 QHH_CYCLE_SBATCH = "scripts/run_qhh_cycle.sbatch"
+# #1948: the QHH production-bootstrap corpus is three collectible partitions plus one
+# non-collectible helper, so every boundary that used to name the single historical
+# monolith path must name all three. Explicit sorted tuple, never derived at import time
+# (same reason as MAPPING_BUILDER_TESTS / BASINS_PACKAGE_PUBLICATION_TESTS). The
+# partition roles are frozen by openspec/changes/partition-qhh-production-bootstrap-tests
+# and pinned by tests/fixtures/qhh_bootstrap_partition_oracle.json: only
+# `tests/test_qhh_production_bootstrap_scheduler.py` carries `@pytest.mark.integration`,
+# which is why it — not A or B — is the path the ci.yml `database:` filter carries.
+QHH_PRODUCTION_BOOTSTRAP_TESTS: tuple[str, ...] = (
+    "tests/test_qhh_production_bootstrap.py",
+    "tests/test_qhh_production_bootstrap_scheduler.py",
+    "tests/test_qhh_production_bootstrap_state.py",
+)
+# The helper owns the shared builders, the seeded scheduler-readiness rows and the
+# `qhh_scheduler_canonical_readiness` fixture the scheduler owner imports, so a helper-only
+# diff must run all three consumers. Not collectible: the filename is deliberately not
+# `test_*`, so `is_test_suite_path` rejects it and it reaches SUPPORT_MODULE_TEST_RULES.
+QHH_PRODUCTION_BOOTSTRAP_HELPERS_PATH = "tests/qhh_production_bootstrap_helpers.py"
 # #1571 local-repair 1 (phase7-cand-01): the 997-line node-22 entrypoint owner
 # uniquely asserts the exact-interpreter contracts of the two systemd units, the
 # repair script's usage string, the QHH diagnostic README's Production
@@ -1036,6 +1054,17 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         BASINS_PACKAGE_HELPERS_PATH,
         BASINS_PACKAGE_HELPERS_CONSUMER_TESTS,
     ),
+    PathTestRule(
+        # #1948: the QHH bootstrap helper owns the registry-fixture builder, the
+        # scheduler-readiness seeds/teardown, the four readiness constants and the
+        # `qhh_scheduler_canonical_readiness` fixture. All three partitions import it at
+        # module scope, so a helper-only diff must run the whole consumer set — and it
+        # must ALSO open the real-database lane, which SUPPORT_MODULE_TEST_RULES cannot do
+        # on its own: that is why the same path is an exact `database:` trigger in ci.yml.
+        # The meta-guard rider is added by the support-module branch, deliberately not here.
+        QHH_PRODUCTION_BOOTSTRAP_HELPERS_PATH,
+        QHH_PRODUCTION_BOOTSTRAP_TESTS,
+    ),
 )
 
 
@@ -1319,7 +1348,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # to one implementation must run the test that pins both.
             "tests/test_production_object_store_validation.py",
             "tests/test_publish_scheduler_file_registry.py",
-            "tests/test_qhh_production_bootstrap.py",
+            # #1948: the single QHH bootstrap monolith literal expands to the three
+            # partitions; no prior target of this rule is dropped (the retained
+            # historical path is QHH_PRODUCTION_BOOTSTRAP_TESTS[0]).
+            *QHH_PRODUCTION_BOOTSTRAP_TESTS,
             "tests/test_qhh_scripts_static.py",
         ),
     ),

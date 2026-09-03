@@ -112,7 +112,15 @@ jobs:
               - 'tests/test_basins_reingest.py'
               - 'tests/test_migrations.py'
               - 'tests/test_node27_timeseries_decompression_replay.py'
-              - 'tests/test_qhh_production_bootstrap.py'
+              # #1948: the QHH bootstrap corpus is three partitions + one helper, and only
+              # the scheduler partition carries `@pytest.mark.integration` (11 nodes) while
+              # the helper owns the imported readiness fixture and its DB seeding/cleanup.
+              # Both are exact triggers; the retained/state partitions own no integration
+              # node and therefore deliberately do NOT open this lane. The scheduler name
+              # deliberately omits `integration`: `tests/*integration*.py` below would
+              # otherwise rescue deletion of its exact edge.
+              - 'tests/qhh_production_bootstrap_helpers.py'
+              - 'tests/test_qhh_production_bootstrap_scheduler.py'
               - 'tests/test_real_*.py'
             frontend:
               - 'apps/frontend/**'
