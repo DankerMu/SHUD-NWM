@@ -93,6 +93,17 @@ def default_database_url() -> str:
     return database_url
 
 
+def _attribution_connect_kwargs(application_name: str | None) -> dict[str, str]:
+    """libpq attribution kwargs for a connection this module opens (#1728).
+
+    Empty when the caller injected no ``application_name``, so a store built
+    without one reaches ``psycopg2.connect`` exactly as it did before.
+    """
+    if application_name is None:
+        return {}
+    return {"fallback_application_name": application_name}
+
+
 @dataclass(frozen=True)
 class StateSnapshot:
     state_id: str
@@ -252,12 +263,13 @@ class StateManager:
     object_store: LocalObjectStore
 
     @classmethod
-    def from_env(cls) -> StateManager:
+    def from_env(cls, *, application_name: str | None = None) -> StateManager:
         workspace_root = Path(os.getenv("WORKSPACE_ROOT", ".nhms-workspace"))
         object_store_root = Path(os.getenv("OBJECT_STORE_ROOT", str(workspace_root)))
         object_store_prefix = os.getenv("OBJECT_STORE_PREFIX", "")
         return cls(
-            repository=PsycopgStateSnapshotRepository.from_env(),
+            # #1728: pass-through only -- the facade names nothing itself.
+            repository=PsycopgStateSnapshotRepository.from_env(application_name=application_name),
             object_store=LocalObjectStore(object_store_root, object_store_prefix=object_store_prefix),
         )
 
@@ -667,10 +679,13 @@ class StateManager:
 @dataclass(frozen=True)
 class PsycopgStateSnapshotRepository:
     database_url: str
+    # #1728: the calling surface (route module) names the connection; the
+    # repository itself hard-codes nothing and defaults to unnamed.
+    application_name: str | None = None
 
     @classmethod
-    def from_env(cls) -> PsycopgStateSnapshotRepository:
-        return cls(default_database_url())
+    def from_env(cls, *, application_name: str | None = None) -> PsycopgStateSnapshotRepository:
+        return cls(default_database_url(), application_name=application_name)
 
     def get_state_snapshot(self, state_id: str) -> StateSnapshot | None:
         row = self._fetch_optional(
@@ -1018,7 +1033,9 @@ class PsycopgStateSnapshotRepository:
 
         connection = None
         try:
-            connection = psycopg2.connect(self.database_url)
+            connection = psycopg2.connect(
+                self.database_url, **_attribution_connect_kwargs(self.application_name)
+            )
             connection.autocommit = False
             register_default_json(conn_or_curs=connection)
             register_default_jsonb(conn_or_curs=connection)

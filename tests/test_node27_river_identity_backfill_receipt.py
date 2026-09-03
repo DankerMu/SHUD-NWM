@@ -114,6 +114,33 @@ def test_skipped_chunks_report_pending_rows_as_null_rather_than_a_fabricated_zer
     )
 
 
+def test_clean_receipt_records_the_lock_bound_it_ran_under(tmp_path: Path) -> None:
+    """#1476: the receipt is the only place a reader learns which bound applied.
+
+    Asserted on the CLEAN path as well as the stopped one because that is where
+    the node-27 dry-run evidence comes from: "no lock_contention stop" only
+    means the bound did not fire if the receipt also shows the bound existed.
+    """
+    receipt = _build_receipt(tmp_path, [chunk("terminal", days_old=30)])
+
+    jsonschema.validate(receipt, load_schema())
+    assert receipt["outcome"] == "clean"
+    assert receipt["bounds"]["lock_timeout_ms"] == 5_000
+    assert receipt["bounds"]["lock_timeout_ms"] < receipt["bounds"]["duration_wall_ms"]
+
+
+def test_schema_requires_the_lock_bound_so_a_pre_1476_receipt_cannot_pass(
+    tmp_path: Path,
+) -> None:
+    """A receipt without it came from a runner that did not set lock_timeout, and
+    reading its duration_wall stops as "slow" would repeat the misdiagnosis."""
+    receipt = _build_receipt(tmp_path, [chunk("terminal", days_old=30)])
+    del receipt["bounds"]["lock_timeout_ms"]
+
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, load_schema())
+
+
 def test_stop_stage_enum_contains_only_stages_the_runner_can_emit() -> None:
     """A dead enum value is a documented behaviour that does not exist. Budget
     exhaustion is chunk state 'deferred'; the compression timer is observed,
@@ -213,6 +240,10 @@ def test_schema_rejects_a_dry_run_that_claims_to_have_updated_rows() -> None:
         "bounds": {
             "batch_pages": 1,
             "duration_wall_ms": 1000,
+            # Present so this fixture stays REJECTED for the reason it is about
+            # (a dry-run claiming updated rows) rather than for a missing
+            # required bound, which would make the assertion below vacuous.
+            "lock_timeout_ms": 500,
             "batch_sleep_ms": 0,
             "max_batches": 1,
             "lag_seconds": 1,
@@ -383,6 +414,10 @@ def test_a_lock_contended_batch_publishes_a_schema_valid_lock_contention_receipt
     assert receipt["totals"]["updated_rows"] == 0
     assert receipt["chunks"][0]["state"] == "stopped"
     assert connection.commits == 0
+    # #1476: the bound that made this classification reachable is in the receipt
+    # on the STOPPED path too. A bound recorded only when nothing went wrong is
+    # missing from every receipt an operator actually reads.
+    assert receipt["bounds"]["lock_timeout_ms"] == backfill._DEFAULT_LOCK_TIMEOUT_MS
 
 
 def test_a_guard_error_produces_a_stopped_receipt_not_a_bare_failure_shell(
@@ -574,6 +609,20 @@ def test_contended_lock_publishes_a_refusal_receipt_and_touches_no_database(
         ({"DATABASE_URL": None}, "DATABASE_URL must be set"),
         ({"NODE27_RIVER_IDENTITY_BACKFILL_BATCH_PAGES": "0"}, "must be >= 1"),
         ({"NODE27_RIVER_IDENTITY_BACKFILL_DURATION_WALL_MS": "10"}, "must be >= 1000"),
+        # PostgreSQL reads lock_timeout = 0 as "wait forever", which is the
+        # unbounded wait #1476 removes, so zero is a bad shape and not a value.
+        ({"NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS": "0"}, "must be >= 1"),
+        (
+            {"NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS": "30000"},
+            "must be strictly less than",
+        ),
+        (
+            {
+                "NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS": "40000",
+                "NODE27_RIVER_IDENTITY_BACKFILL_DURATION_WALL_MS": "30000",
+            },
+            "must be strictly less than",
+        ),
     ],
 )
 def test_config_fails_closed_on_bad_shape(
@@ -581,6 +630,43 @@ def test_config_fails_closed_on_bad_shape(
 ) -> None:
     with pytest.raises(backfill.BackfillConfigError, match=expected):
         backfill.config_from_args(_args(), env(tmp_path, **override))
+
+
+def test_an_inverted_lock_bound_is_refused_before_any_database_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1476: refusal at CONFIG time, not "the first batch will notice".
+
+    At or above the wall, ``statement_timeout`` fires first on a pure lock wait
+    and every contention event comes back labelled ``duration_wall`` — the run
+    would look successful-ish and be systematically misdiagnosed. Refusing costs
+    one restart; running costs the operator the reason they were given the
+    classification for. The database must not be touched at all: a refusal that
+    already opened a connection is a refusal with a side effect.
+    """
+    values = env(
+        tmp_path,
+        NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS="30000",
+        NODE27_RIVER_IDENTITY_BACKFILL_DURATION_WALL_MS="30000",
+    )
+    for key, value in values.items():
+        os.environ[key] = value
+
+    def _explode(_url: str) -> Any:  # pragma: no cover - must never run
+        raise AssertionError("an inverted bound must be refused before any DB call")
+
+    try:
+        exit_code = backfill.main([], now_utc=NOW, connect=_explode)
+    finally:
+        for key in values:
+            os.environ.pop(key, None)
+
+    assert exit_code == 1
+    emitted = json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert emitted["status"] == "failed"
+    assert "must be strictly less than" in emitted["reason"]
+    # No receipt either: this run has nothing to report about the table.
+    assert not (tmp_path / "receipt.json").exists()
 
 
 def test_receipt_and_lock_paths_must_be_disjoint(tmp_path: Path) -> None:

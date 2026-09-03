@@ -22,6 +22,7 @@ from services.orchestrator import retry as retry_module
 from services.orchestrator import scheduler_state_types
 from services.orchestrator.persistence import Base, PipelineEvent, PipelineJob, PipelineStore
 from services.orchestrator.retry import (
+    _LOCAL_RUNTIME_ROOT_FIELDS,
     MANUAL_RETRY_DURABLE_SUCCESS_STATUSES,
     NON_TRANSIENT_ERROR_CODES,
     TRANSIENT_ERROR_CODES,
@@ -166,12 +167,18 @@ def test_durable_success_sets_stay_split_by_exactly_complete() -> None:
     `scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES` rules the pipeline durably
     done and additionally holds `"complete"`.  They carried the same name until
     openspec change durable-status-name-split.  The judging power sits in the first two
-    assertions, which pin each side against drift — pinning the scheduler side separately
-    reds the one merge direction that would actually change behavior (collapsing it to
-    three members).  The third is logically implied by them and is kept as executable
-    documentation of the relationship: the gap is exactly `"complete"`.  The last one
-    guards the other escape hatch, a re-added alias under the old name on `retry`; a plain
-    rename-back needs no guard, the module-level from-import fails on its own.
+    assertions, which pin each side against drift.  The scheduler side is pinned
+    separately because collapsing it to three members changes what the FILE-JOURNAL lane
+    decides: `hydro.run_status` is a closed enum, so `"complete"` is dead on the database
+    lane, but the journal never validates `hydro_run.status` and its construction face
+    writes `hydro_status="complete"` (#1581 design D5).  Which of those two lanes a given
+    caller is on is not something this test knows, so it pins membership rather than
+    claiming an absolute about "scheduler behavior".  The third assertion is logically
+    implied by the first two and is kept as executable documentation of the relationship:
+    the gap is exactly `"complete"`.  The last one guards the other escape hatch, a
+    re-added alias under the old name on `retry`; a plain rename-back needs no guard, the
+    module-level from-import fails on its own.  The parity of every hydro status set
+    across its consumer modules lives in tests/test_hydro_status_set_parity.py.
     """
 
     assert MANUAL_RETRY_DURABLE_SUCCESS_STATUSES == {"succeeded", "parsed", "published"}
@@ -1801,6 +1808,19 @@ def test_manual_retry_download_source_cycle_redacts_secret_runtime_root_evidence
             assert "https://example.com/object-store" in persisted
             assert "s3://bucket/prod" in persisted
             assert "[redacted]" not in persisted
+            # T2 (#1961): the rejected candidates' values are placeholders on the
+            # wire while the durable event keeps the credential-stripped URL that
+            # the two assertions above pin.  ``rejected`` carries one entry per
+            # secret-bearing candidate, so select by field: the root is a plain
+            # ``https`` URL (``[uri]``) and the prefix is an ``s3`` URI
+            # (``[object-uri]``) -- different placeholders, same guarantee.
+            rejected = response.json()["error"]["details"]["runtime_root_resolution"]["rejected"]
+            by_field = {entry["field"]: entry for entry in rejected}
+            assert by_field["object_store_root"]["value"] == "[uri]"
+            assert by_field["object_store_root"]["reason"] == "url_userinfo"
+            assert by_field["object_store_prefix"]["value"] == "[object-uri]"
+            assert "https://example.com/object-store" not in response_body
+            assert "s3://bucket/prod" not in response_body
         finally:
             if previous_allow_dev_role_header is None:
                 os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
@@ -1808,6 +1828,192 @@ def test_manual_retry_download_source_cycle_redacts_secret_runtime_root_evidence
                 os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
             app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
             app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
+
+
+_PUBLIC_ROOT_PLACEHOLDERS = frozenset({"[local-path]", "[uri]", "[object-uri]"})
+
+
+def _assert_public_runtime_root_resolution(mapping: Any, *, forbidden_roots: tuple[str, ...]) -> None:
+    """The one wire shape both retry lanes must render for ``runtime_root_resolution``.
+
+    #1961 (database lane over-exposed absolute roots) and #1965 (file lane
+    collapsed ``resolved.object_store_root`` to a bare ``"[local-path]"``
+    string) are opposite halves of the same divergence, so the oracle is a
+    single set of assertions applied to BOTH lanes' 503 bodies.  The expected
+    placeholders come from the renderer's documented classification, not from
+    the renderer itself: ``_LOCAL_RUNTIME_ROOT_FIELDS`` (``retry.py``) are the
+    filesystem roots, and the remaining ``resolved`` entries
+    (``object_store_prefix``, ``published_artifact_uri_prefix``) are URI-valued.
+    """
+
+    assert isinstance(mapping, dict)
+    resolved = mapping["resolved"]
+    assert isinstance(resolved, dict)
+    for field_name, entry in resolved.items():
+        assert isinstance(entry, dict), f"{field_name} must stay a mapping, got {entry!r}"
+        assert entry["present"] is True
+        assert isinstance(entry["source"], str) and entry["source"]
+        if field_name in _LOCAL_RUNTIME_ROOT_FIELDS:
+            assert entry["value"] == "[local-path]", f"{field_name} value={entry['value']!r}"
+        else:
+            # ``""`` is the constructor's unset sentinel, not a rendering:
+            # ``_resolve_runtime_root_candidate`` always injects
+            # ``object_store_prefix`` with an empty value and a
+            # ``...OBJECT_STORE_PREFIX.default_empty`` source when no prefix is
+            # configured (``_resolve_runtime_root_candidate``), on BOTH lanes.  The renderer never
+            # turns a non-empty scalar into ``""``, so admitting it here cannot
+            # hide a leak; a configured prefix must still be a placeholder.
+            assert entry["value"] in {"[object-uri]", "[uri]", ""}, f"{field_name} value={entry['value']!r}"
+    if "object_store_root" in resolved and "workspace_dir" in resolved:
+        assert isinstance(resolved["object_store_root"]["same_as_workspace"], bool)
+    for rejection in mapping.get("rejected", []):
+        assert rejection["value"] in _PUBLIC_ROOT_PLACEHOLDERS | {"[redacted]"}, rejection
+    db_free_resolved = mapping.get("db_free_runtime", {}).get("resolved", {})
+    for field_name, entry in db_free_resolved.items():
+        assert entry["value"] in _PUBLIC_ROOT_PLACEHOLDERS | {"[redacted]"}, f"{field_name}: {entry!r}"
+    rendered = json.dumps(mapping, sort_keys=True)
+    assert "/srv/" not in rendered
+    for forbidden in forbidden_roots:
+        assert forbidden not in rendered
+
+
+def test_retry_api_db_lane_submission_failure_renders_public_runtime_root_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T1 (#1961) — the database lane's 503 body carries no absolute local root.
+
+    Both required roots resolve from the previous submission's
+    ``runtime_root_contract`` and the gateway then raises, so the route takes
+    its ``submission_failed`` arm and reads the evidence back through
+    ``RetryService.submission_runtime_root_resolution``.  Before the fix that
+    read applied ``redact_payload`` only -- which owns secrets and URL
+    credentials, not filesystem paths -- so ``/srv/nhms/workspace`` travelled
+    verbatim on the wire.  The persisted assertions are the other half: the
+    durable event must KEEP the real roots (operators diagnose from them).
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    workspace_root = "/srv/nhms/workspace"
+    object_store_root = "/srv/nhms/object-store"
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": workspace_root,
+                "object_store_root": object_store_root,
+                # Keeps the helper's URI branch non-vacuous: this field is not in
+                # ``_LOCAL_RUNTIME_ROOT_FIELDS`` and must render ``[object-uri]``.
+                "object_store_prefix": "s3://nhms-prod",
+            },
+        )
+        service = RetryService(store, RetryConfig(max_retries=3))
+        gateway = _RecordingGateway(error=RuntimeError("sbatch unavailable"))
+        app.dependency_overrides[pipeline_routes.get_retry_service] = lambda: service
+        app.dependency_overrides[pipeline_routes.get_slurm_gateway] = lambda: gateway
+        previous_allow_dev_role_header = os.environ.get("ALLOW_DEV_ROLE_HEADER")
+        os.environ["ALLOW_DEV_ROLE_HEADER"] = "true"
+        try:
+            client = TestClient(app)
+
+            response = client.post("/api/v1/runs/cycle_ifs_2026053106/retry", headers={"X-User-Role": "operator"})
+
+            assert response.status_code == 503
+            error = response.json()["error"]
+            assert error["code"] == "SBATCH_SUBMISSION_FAILED"
+            assert error["details"]["status"] == "submission_failed"
+            response_body = json.dumps(response.json(), sort_keys=True)
+            assert workspace_root not in response_body
+            assert object_store_root not in response_body
+
+            evidence = error["details"]["runtime_root_resolution"]
+            _assert_public_runtime_root_resolution(
+                evidence,
+                forbidden_roots=(workspace_root, object_store_root),
+            )
+            assert evidence["resolved"]["object_store_root"]["same_as_workspace"] is False
+            assert evidence["resolved"]["object_store_prefix"]["value"] == "[object-uri]"
+
+            event = _events(store)[-1]
+            assert event.status_to == "submission_failed"
+            persisted_resolved = event.details["runtime_root_resolution"]["resolved"]
+            assert persisted_resolved["workspace_dir"]["value"] == workspace_root
+            assert persisted_resolved["object_store_root"]["value"] == object_store_root
+            assert persisted_resolved["object_store_prefix"]["value"] == "s3://nhms-prod"
+        finally:
+            if previous_allow_dev_role_header is None:
+                os.environ.pop("ALLOW_DEV_ROLE_HEADER", None)
+            else:
+                os.environ["ALLOW_DEV_ROLE_HEADER"] = previous_allow_dev_role_header
+            app.dependency_overrides.pop(pipeline_routes.get_retry_service, None)
+            app.dependency_overrides.pop(pipeline_routes.get_slurm_gateway, None)
+
+
+def test_db_lane_public_evidence_read_hides_whitespace_bearing_runtime_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1965 round-1 F1, database lane — same space-bearing root, same boundary.
+
+    ``RetryService.submission_runtime_root_resolution`` is the exact call the
+    route makes for its ``submission_failed`` 503 body, so pinning it directly
+    costs one store instead of a second TestClient round trip.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    workspace_root = "/srv/nhms data/workspace"
+    object_store_root = "/srv/nhms data/object-store"
+    with _store() as store:
+        job = _create_job(
+            store,
+            job_id="job_cycle_ifs_2026053106_download",
+            run_id="cycle_ifs_2026053106",
+            error_code="NODE_FAILURE",
+            retry_count=1,
+            cycle_id="ifs_2026053106",
+            job_type="download_source_cycle",
+            stage="download",
+        )
+        _insert_submission_event(
+            store,
+            job,
+            {
+                "workspace_dir": workspace_root,
+                "object_store_root": object_store_root,
+                "object_store_prefix": "s3://nhms-prod",
+            },
+        )
+        service = RetryService(store, RetryConfig(max_retries=3))
+        gateway = _RecordingGateway(error=RuntimeError("sbatch unavailable"))
+
+        retry = service.attempt_manual_retry("cycle_ifs_2026053106", gateway=gateway, trusted_internal=True)
+
+        assert retry.status == "submission_failed"
+        evidence = service.submission_runtime_root_resolution(retry.job_id)
+        assert evidence is not None
+        assert set(evidence["resolved"]) >= {"workspace_dir", "object_store_root"}
+        assert evidence["missing"] == []
+        rendered = json.dumps(evidence, sort_keys=True)
+        for forbidden in (workspace_root, object_store_root, "data/workspace", "data/object-store"):
+            assert forbidden not in rendered, forbidden
+        _assert_public_runtime_root_resolution(
+            evidence,
+            forbidden_roots=(workspace_root, object_store_root, "data/workspace", "data/object-store"),
+        )
+        # The durable event still carries the real roots (operators diagnose from
+        # them); only the public read is placeheld.
+        persisted = _events(store)[-1].details["runtime_root_resolution"]["resolved"]
+        assert persisted["workspace_dir"]["value"] == workspace_root
+        assert persisted["object_store_root"]["value"] == object_store_root
 
 
 def test_manual_retry_submission_failure_marks_submission_failed() -> None:
@@ -2957,15 +3163,22 @@ def _file_lane_retry_fixture(tmp_path: Path) -> dict[str, Any]:
     }
 
 
-def _file_lane_runtime_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
+def _file_lane_runtime_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, parent: str | None = None
+) -> tuple[Path, Path]:
     """Two distinct-realpath local roots for ``_REQUIRED_RUNTIME_ROOT_FIELDS``.
 
     A same-realpath pair is rejected as ``resolves_to_workspace_dir`` and the
     evidence-present test would silently degrade into the evidence-absent one.
+
+    ``parent`` nests both roots under an extra directory; the round-1 F1 pin
+    passes one containing a SPACE so the roots exercise the classifier's
+    whitespace arm.
     """
 
-    workspace_root = (tmp_path / "workspace").resolve()
-    object_store_root = (tmp_path / "object-store").resolve()
+    base = tmp_path / parent if parent else tmp_path
+    workspace_root = (base / "workspace").resolve()
+    object_store_root = (base / "object-store").resolve()
     workspace_root.mkdir(parents=True, exist_ok=True)
     object_store_root.mkdir(parents=True, exist_ok=True)
     assert workspace_root != object_store_root
@@ -3096,6 +3309,126 @@ def test_retry_api_file_lane_submission_failure_returns_503_with_persisted_evide
     assert str(fixture["journal_root"]) not in rendered
     assert str(workspace_root) not in rendered
     assert str(object_store_root) not in rendered
+
+    # #1965: the same shape oracle the database lane's T1 applies.  Before the
+    # fix ``resolved.object_store_root`` was the bare string ``"[local-path]"``
+    # here while ``resolved.workspace_dir`` was a mapping -- two JSON types for
+    # sibling keys of one mapping, which is exactly what this asserts away.
+    _assert_public_runtime_root_resolution(
+        details["runtime_root_resolution"],
+        forbidden_roots=(str(workspace_root), str(object_store_root), str(fixture["journal_root"])),
+    )
+
+
+def test_retry_api_file_lane_503_hides_whitespace_bearing_runtime_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1965 round-1 F1 — a deployment root with a SPACE leaks no tail.
+
+    ``/home/nwm/nhms data/objects`` is a legal root.  The public classifier bails
+    out on whitespace, so after the #1965 recursion the inner ``value`` rendered
+    as ``"[local-path] data/objects"`` and the 503 carried the tail.  Route-level
+    because the unit pin cannot show the leak reaching the wire.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    workspace_root, object_store_root = _file_lane_runtime_roots(tmp_path, monkeypatch, parent="nhms data")
+    assert " " in str(workspace_root) and " " in str(object_store_root)
+    fixture = _file_lane_retry_fixture(tmp_path)
+
+    response = _post_file_lane_retry(fixture, monkeypatch)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    evidence = details["runtime_root_resolution"]
+    # Non-degenerate: a whitespace-bearing root must still RESOLVE, otherwise the
+    # pin would be exercising the rejected-branch instead of the resolved one.
+    assert set(evidence["resolved"]) >= {"workspace_dir", "object_store_root"}
+    assert evidence["missing"] == []
+    rendered = json.dumps(response.json())
+    tails = tuple(str(root).split(" ", 1)[1] for root in (workspace_root, object_store_root))
+    for forbidden in (str(workspace_root), str(object_store_root), *tails):
+        assert forbidden not in rendered, forbidden
+    _assert_public_runtime_root_resolution(
+        evidence,
+        forbidden_roots=(str(workspace_root), str(object_store_root), *tails),
+    )
+
+
+def test_retry_api_file_lane_legacy_bare_string_root_entry_passes_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T5 (#1965) — an event recorded BEFORE the recursion fix is returned as-is.
+
+    Journal history is not rewritten: events written while
+    ``_sanitize_public_field`` replaced the WHOLE value under a ``*_root`` key
+    carry ``resolved.object_store_root`` as the bare string ``"[local-path]"``.
+    The reader must return them as recorded and the 503 must stay intact -- the
+    tolerated-shape half of the contract, documented on the reader's docstring.
+
+    The injection point is the ``after_retry`` seam rather than a hand-edited
+    segment file, so the record goes through the journal's own append path
+    (schema validation, ``event_id`` minting, locking).  It must land AFTER
+    ``attempt_manual_retry``'s own failure event on the SAME retry job id:
+    ``insert_pipeline_event`` mints a monotonically increasing ``event_id`` and
+    the reader is latest-first, so an earlier or differently-scoped record would
+    be shadowed and the assertions would read the modern shape instead.
+    """
+
+    _clear_runtime_root_env(monkeypatch)
+    _file_lane_runtime_roots(tmp_path, monkeypatch)
+    fixture = _file_lane_retry_fixture(tmp_path)
+    repository = fixture["repository"]
+    legacy_workspace_entry = {
+        "present": True,
+        "source": "env:WORKSPACE_ROOT",
+        "value": "[local-path]",
+    }
+    appended: dict[str, Any] = {}
+
+    def _append_legacy_event(retry_row: Any) -> None:
+        appended["event"] = repository.insert_pipeline_event(
+            entity_type="pipeline_job",
+            entity_id=str(retry_row.job_id),
+            event_type="submission",
+            status_from="pending",
+            status_to="submission_failed",
+            message="Manual retry submission failed: legacy record",
+            details={
+                "trigger": "manual",
+                "error_code": "SBATCH_SUBMISSION_FAILED",
+                "error_message": "legacy record",
+                "runtime_root_resolution": {
+                    "required": ["workspace_dir", "object_store_root"],
+                    "resolved": {
+                        "workspace_dir": dict(legacy_workspace_entry),
+                        # The pre-#1965 rendering: the key matched ``_root`` and
+                        # the mapping was replaced wholesale.
+                        "object_store_root": "[local-path]",
+                    },
+                    "missing": [],
+                },
+            },
+        )
+
+    response = _post_file_lane_retry(fixture, monkeypatch, after_retry=_append_legacy_event)
+
+    details = _assert_file_lane_submission_failed_503(response)
+    persisted = _persisted_submission_events(fixture["journal_root"], details["job_id"])
+    # Two events on this job: the lane's own failure event and the legacy one,
+    # the latter newest.  Without this the passthrough could be read off the
+    # lane's own (modern) event and pass vacuously.
+    assert len(persisted) == 2
+    assert persisted[0]["event_id"] == appended["event"]["event_id"]
+    assert persisted[0]["event_id"] > persisted[1]["event_id"]
+
+    resolved = details["runtime_root_resolution"]["resolved"]
+    assert isinstance(resolved["object_store_root"], str)
+    assert resolved["object_store_root"] == "[local-path]"
+    assert resolved["workspace_dir"] == legacy_workspace_entry
+
+    rendered = json.dumps(response.json())
+    assert "Traceback" not in rendered
+    assert str(fixture["journal_root"]) not in rendered
 
 
 def test_retry_api_file_lane_second_retry_reports_its_own_evidence(

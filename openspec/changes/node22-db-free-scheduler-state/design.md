@@ -1321,10 +1321,13 @@ Persisted reconciliation/evidence contract for #1112:
 - `submit_outcome` is one of `accepted`, `submit_result_ambiguous`, or
   `rejected`.
 - `reconciliation_source` is `slurm_exact_comment` when Slurm accounting is the
-  authority.
-- `reconciliation_decision` is one of `matched_bound`, `absence_deferred`,
-  `absence_retry_permitted`, `multiple_matches_blocked`,
-  `identity_mismatch_blocked`, or `accounting_unavailable`.
+  authority, or `slurm_name_window_unique` for the unique name-window fallback
+  bind (`matched_bound` only).
+- `reconciliation_decision` is one of the eight members of the orchestrator's
+  `ACCEPTED_RECONCILIATION_DECISIONS`: `matched_bound`, `absence_deferred`,
+  `absence_retry_permitted`, `operator_verified_absence`,
+  `multiple_matches_blocked`, `identity_mismatch_blocked`,
+  `identity_mismatch_released`, or `accounting_unavailable`.
 - `matched_slurm_job_id` is present only after one exact identity is proven;
   absence and blocked decisions persist `null`.
 - Candidate projections persist `array_task_id`, `array_task_outcome` in
@@ -1534,7 +1537,7 @@ Invariant Matrix:
   cancel use typed current-version transitions rather than marker-free clones or
   generic status writes.
 - Closed-enum invariant: task-accounting completeness is represented by
-  pipeline status/error/projection fields and never adds values to the six-value
+  pipeline status/error/projection fields and never adds values to the closed eight-value
   `reconciliation_decision` contract. Reconciliation API inputs are normalized
   to the same bounded projection allowlist before persistence.
 - Resource invariant: both exact-comment discovery and ordinary inflight

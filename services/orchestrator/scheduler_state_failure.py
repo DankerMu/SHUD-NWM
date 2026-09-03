@@ -55,7 +55,9 @@ from services.orchestrator.scheduler_state_rows import (
 )
 from services.orchestrator.scheduler_state_types import (
     ACTIVE_PIPELINE_STATUSES,
+    DURABLE_HYDRO_SUCCESS_STATUSES,
     FAILED_PIPELINE_STATUSES,
+    HYDRO_RUN_CODE_CLEARING_STATUSES,
     NATIVE_SHUD_STAGE_ALIASES,
     TERMINAL_PIPELINE_SUCCESS_STATUSES,
     TRANSIENT_RETRY_REASON_CODES,
@@ -146,7 +148,7 @@ def _durable_shud_output_exists(state: Mapping[str, Any]) -> bool:
     if state.get("durable_shud_output_exists") is not None:
         return bool(state.get("durable_shud_output_exists"))
     hydro_status = _state_status(state, "hydro_status", "hydro_run_status")
-    if hydro_status in {"succeeded", "parsed", "published", "complete"}:
+    if hydro_status in DURABLE_HYDRO_SUCCESS_STATUSES:
         return True
     if _state_output_uri(state):
         for job in _state_jobs(state):
@@ -311,14 +313,11 @@ def _state_error_code(state: Mapping[str, Any]) -> str | None:
 #: file_orchestration_journal.py:6917/:6963/:6995/:7061/:7190), and
 #: ``previous_error`` means, by definition, the error of the PREVIOUS attempt.
 _RECORDED_FAILURE_CODE_KEYS = ("error_code", "reason_code", "failure_reason")
-#: The ``hydro_run`` statuses whose journal write CLEARS the row's error code
-#: (file_orchestration_journal.py:1507-1513 is the source of this set -- it is
-#: NOT the durable-output success set, which answers a different question).  The
-#: SQL backend's ``update_hydro_run_status`` only assigns when the incoming value
-#: is not None, so a successful transition there leaves an older code in place:
-#: a code sitting on a run row in one of these statuses is stale residue rather
-#: than the current failure's own record.
-_HYDRO_RUN_CODE_CLEARING_STATUSES = frozenset({"pending", "created", "succeeded", "complete", "parsed", "published"})
+#: The ``hydro_run`` statuses whose journal write CLEARS the row's error code.
+#: Alias of the single definition in ``scheduler_state_types`` (#1581), where the
+#: full argument now lives; the private name is kept because it is this module's
+#: inventoried constant, consumed by ``_downstream_recorded_error_code``.
+_HYDRO_RUN_CODE_CLEARING_STATUSES = HYDRO_RUN_CODE_CLEARING_STATUSES
 
 
 def _downstream_recorded_error_code(state: Mapping[str, Any]) -> str | None:
@@ -646,7 +645,7 @@ def _missing_upstream_forecast_artifact_evidence(
             # A redaction placeholder is a WITHHELD reference, not a package
             # reference: the public-read boundary rewrites every s3/published-shaped
             # ``*_uri`` the journal read materializes into ``[object-uri]``
-            # (``file_orchestration_journal._sanitize_public_field``).  Probing it
+            # (``public_evidence._sanitize_public_field``).  Probing it
             # would report "missing" for a package nobody looked for, and would
             # also shadow the sidecar tier, so it takes the recovery path exactly
             # like an absent reference.  The probe itself is never taught about

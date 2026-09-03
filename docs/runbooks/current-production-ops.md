@@ -123,11 +123,26 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   10,000 行，减少数据库往返；这不改变事务边界或最终 publish 语义。
 - `coverage backstop (--all --skip-fresh)` 可刷新或跳过 display coverage；
   当前使用两个独立连接并行刷新。该步骤非 fatal，不应掩盖 autopipe 主返回码。
-- **`--skip-fresh` 不可省**：#1341 后 river coverage 扫描按代理键选行，legacy
-  （pre-#1340、NULL 键）run 扫不到任何行，裸 `--all` 或 `--run-id <legacy run>`
-  会把已物化的 `run_display_coverage` 覆写成 0 / NULL 边界，**无法撤销**，该 run
-  随即掉出 latest-product readiness 与 national tile。详见
-  `scripts/node27_refresh_coverage.py` 模块 docstring 的 warning 块。
+- **legacy run 覆写已由 guard 兜底（#1446）**：#1341 后 river coverage 扫描按代理
+  键选行，legacy（pre-#1340、NULL 键）run 扫不到任何行。曾经裸 `--all` 或
+  `--run-id <legacy run>` 会把已物化的 `run_display_coverage` 覆写成 0 / NULL
+  边界，且**旧值无法就地恢复**（归零后的行本身不是永久损失，但**不会自愈**：归零的
+  upsert 会把 `refreshed_at` 刷成 `now()`，该行随即是 fresh 的，cron 的
+  `--all --skip-fresh` 永远不会再回头扫它。#1408 身份 backfill 落地后，恢复需要显式
+  `--run-id <run>` 刷新——或一次省掉 `--skip-fresh` 的 `--all`——才会重新算出真实
+  计数）；现在 upsert 的条件
+  `DO UPDATE ... WHERE` 直接拒绝该写入——`--run-id` 退出码 **3** 并在 stderr 打一行
+  `DISPLAY_COVERAGE_REFRESH_REFUSED run_id=… existing_segment_count=… advice=…`，
+  `--all` 把它计入 JSON 报告的 `refused` 且仍退出 0（不打断批次）。
+  代价：被拒的 run 保留旧 `refreshed_at`——**只在它本来就 stale
+  （`refreshed_at < hydro_run.updated_at`）时**，cron 的 `--all --skip-fresh` 每个
+  tick 才会重扫它一次（空扫描走代理键索引，很快）；被拒但 `refreshed_at` 仍 fresh
+  的 run 不会被重扫。两条了结途径：等 #1408 身份 backfill 补上键后下一次刷新自然
+  成功并自愈；或运维确认后显式 `--run-id <run> --force` 把该 run 归零（单个 run，
+  推荐的人工方式）。`--force` 也可与 `--all` 组合，一条命令把批次里**每个**被拒的
+  run 都归零——属运维显式 opt-in，cron 永不使用。`--skip-fresh` 不再是防覆写的必
+  需项，但仍应保留——省掉它会让每个 tick 重扫所有已 fresh 的 run。详见
+  `scripts/node27_refresh_coverage.py` 模块 docstring 的 "Overwrite guard" 段。
 
 确认 node-27 ingest 按 bounded systemd 模式运行，并且 node-22 的 production
 scheduler 是 DB-free systemd timer：
@@ -2057,9 +2072,23 @@ run discovery.
 
 ### 5.1 数据库
 
-当前 active NHMS DB 在 node-27 本机 `127.0.0.1:55432/nhms`。display API uses a
-readonly role from `infra/env/display.env`; cron ingest uses writer credentials
-from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
+当前 active NHMS DB 在 node-27 本机 `127.0.0.1:55432/nhms`。
+
+数据库角色（#1774 起，写侧不再是 superuser）：
+
+| 角色 | rolsuper | 用途 | 谁用它 |
+|---|---|---|---|
+| `nhms` | **t** | 库/扩展 owner + 迁移；两个 migration-class 例外 lane | `packages/common/migrate.py`；`node27-timeseries-compression-replay.env`（`pg_dump`/`psql --file`/`pg_restore`）；已退役的 archive-rebuild drill（需 `CREATEDB`） |
+| `nhms_ingest_rw` | f | `core`/`hydro`/`met`/`ops`/`map`/`flood` 全部 relation 的 **owner** + DML + default privileges + `CREATE ON TABLESPACE nhms_cold`；ownership 是 `compress_chunk`/`drop_chunks`/chunk `ANALYZE`/`SET TABLESPACE` 与 #1643/#1468 统计守卫两条腿的硬要求 | `node27-ingest.env`、`node27-timeseries-compression.env`、`node27-cold-residency.env`、`node27-timeseries-retention.env` |
+| `nhms_download_rw` | f | 仅 `met.*` 的 DML + default privileges（下载链路实测**不连库**，角色存在是为了让模板承诺成立） | `node27-download.env` |
+| `nhms_display_ro` | f | 只读；无 INSERT/UPDATE/DELETE | display API (`infra/env/display.env`)、frontier-alert、raw-retention、resource-governance |
+
+两个写角色的 `rolsuper`/`rolcreaterole`/`rolcreatedb`/`rolreplication`/`rolbypassrls`
+全为 `f`，因此 `COPY … FROM PROGRAM`（= 容器内命令执行）对它们是关闭的。角色、授权与
+ownership 由幂等脚本 `scripts/node27_provision_write_roles.sh`
+（SQL: `db/roles/node27_write_roles.sql`）提供，**每次迁移后必须重跑**，否则新表仍归
+`nhms` 所有、其 ANALYZE 会被静默跳过；完整口径与切换/回滚流程见
+`docs/runbooks/tier-node27-timeseries-storage.md` §9。
 
 数据库文件自 2026-08-06 起分布在**两块设备**上。容器 `nhms-db` 由裸
 `docker run` 创建（无 compose、无 systemd unit），三个 bind mount 缺一不可：
@@ -2076,7 +2105,7 @@ from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
 运维含义：mover ↔ retention 死锁已随归档车道退役消失（#1370），但它的余量
 告警也一并消失——DB 在 `ghdc` 上的增长现在**无人观测**，只能靠下面的手工核查。
 
-容量核查必须**两块盘都看**：`df -h /home /data/GHDC`，而且必须**手工**看：
+容量核查必须**三个挂载点都看**：`df -h / /home /data/GHDC`，而且必须**手工**看：
 归档车道已随 #1370 永久退役（ADR 0002 Revision 2026-08-11），治理 receipt
 不再有 `archive_root` 块，也不再读 `NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES`
 ——`/dev/md0` 现在**完全没有**自动余量观测。receipt 仍在的 `pgdata_root` 只 `du`
@@ -2087,6 +2116,23 @@ from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
 重建 `nhms-db` 容器的流程见
 `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3；**不要**拿
 `infra/docker-compose.dev.yml` 当模板，那是本地 dev 栈。
+
+`/` 是新加进这条核查的第三个挂载点（#1765）：一次跨两天的 pytest 把
+`/tmp/pytest-of-nwm` 堆到把根卷塞满，而 `nhms-node27-resource-governance.service`
+每天都量到了 `ROOT_FREE_BELOW_CRITICAL`、却仍然 exit 0 且没有 `OnFailure=`——
+信号一直存在，结构上到不了人。现在该审计遇到任何 `critical` 建议会 exit 1 并向
+stderr 打 `RESOURCE_GOVERNANCE_CRITICAL:<code>`，unit 带 `OnFailure=` +
+`StandardError=journal`，锁也从 `/tmp` 挪到了 `$LOG_ROOT`；但**这些只在
+`install ~/NWM/infra/systemd/nhms-node27-resource-governance.service
+~/.config/systemd/user/` + `systemctl --user daemon-reload` 之后才生效**
+（node-27 的 unit 是 user-scope，`git pull` 只换 `ExecStart` 背后的脚本）。
+
+在 node-27 上跑 pytest 前先 `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`，
+否则临时目录仍然落在 `/`。`mkdir -p` 不能省：`TMPDIR` 指向不存在的目录时
+Python 会**静默回落**到 `/tmp`，跑完看着一切正常、根卷却又少了一块。核查看
+`ls -d /home/nwm/tmp/pytest-of-nwm`，不要只看 `df`。仓库侧的另一半是
+`pyproject.toml` 的 `tmp_path_retention_policy = "failed"`（只有失败的测试留下
+`tmp_path`）；**不要**在共享配置里加 `--basetemp`，那会连本地 Mac 和 CI 一起清。
 
 Secret-safe DB checks:
 
@@ -3929,12 +3975,18 @@ autopipe/parser/retention 共用的 `nhms` 角色抹平。现在每个组件自�
 | `nhms-output-parser` | `workers/output_parser`（autopipe 子进程）|
 | `nhms-refresh-coverage` | `scripts/node27_refresh_coverage.py`（autopipe 子进程）|
 | `nhms-display-api` | `apps/api/routes/hydro_display.py`（display API 只读连接池）|
+| `nhms-api-pipeline` | `apps/api/routes/pipeline.py`（同一 uvicorn 进程里的控制面 retry/cancel 引擎，**会写**）|
+| `nhms-api-forecast` | `apps/api/routes/forecast.py` 的 forecast store 连接 |
+| `nhms-api-data-sources` | `apps/api/routes/data_sources.py` 的 forecast store + 气象站元数据查询 |
+| `nhms-api-best-available` | `apps/api/routes/best_available.py` 的 best-available 仓库 |
+| `nhms-api-models` | `apps/api/routes/models.py` 的 model registry store（**会写**）|
+| `nhms-api-state-snapshots` | `apps/api/routes/state_snapshots.py` 的 state snapshot 仓库 |
 | `nhms-ts-retention` | `scripts/node27_timeseries_retention.py`（retention timer）|
 | `nhms-ts-compression` | `scripts/node27_timeseries_compression.py`（compression timer）|
 | `nhms-raw-retention` | `scripts/node27_raw_retention.py`（raw-retention timer；只做 watermark 只读查询）|
 | `psql` | 人工会话 |
 | `TimescaleDB Background Worker Scheduler` | TimescaleDB 后台 worker，不要动 |
-| 空串 | 未在册的连接面（`packages/common/*` 中在册组件够不到的模块、`services/*`、qhh 系脚本等）；先查清来源再处置 |
+| 空串 | 未在册的连接面（`services/*`、qhh 系脚本、`workers/grid_registry` 等）；先查清来源再处置。**`nhms-display-api.service` 自 #1728 起七个连接面全部具名**，所以空串一定不是 display API |
 
 在册组件**委托给共享 helper 打开的连接**同样带自己的名字：
 `packages/common/display_watermark.py` 的 watermark 只读查询（retention /
@@ -3942,6 +3994,13 @@ compression / raw-retention 每个 tick 的第一条连接）与
 `packages/common/display_coverage.py` 的 per-run coverage worker 连接
 （`--all` 下最多 8 条并发，正是最容易被误 cancel 的长连接）。也就是说
 **看到空串就一定不是在册生产 tick**，可以按上表照直处置。
+
+`nhms-display-api.service`（uvicorn `apps.api.main:app`，两个 worker）在同一进程里托管七个
+连接面，上表把它们拆成七个名字：`nhms-display-api` 是只读展示池，`nhms-api-pipeline` 与
+`nhms-api-models` 是**控制面写入**。名字由 route 层注入（`packages/common/*` 的 store 不
+硬编码任何名字），DSN 上的 `?application_name=` 依旧优先。静态闭包由
+`tests/test_node27_connection_attribution.py` 守着：从 `apps/api/route_registry.py` 出发
+遍历 import 图，新增的 router 或 store 连接面必须具名或写明 `unreachable` 理由。
 
 处置纪律：
 
@@ -3966,6 +4025,34 @@ compression / raw-retention 每个 tick 的第一条连接）与
   无该 opt-in 时无条件 skip 全部 integration，并且每次建 `nhms_it_<uuid>` throwaway 库
   再 drop）。不要用裸生产 `DATABASE_URL` 跑 pytest —— 那正是把测试会话和生产 tick
   混在一张 `pg_stat_activity` 里的起点。
+- **display API 的写入面（`nhms-api-pipeline` / `nhms-api-models`）取消前先看日志。**
+  自 #1704 起每个**经过 `error_response()` 的**错误响应都会在 `/tmp/display-api.log` 留一行
+  `api_error request_id=… code=… status=… path=… details=…`（5xx 记 ERROR，4xx 记
+  WARNING），用客户端拿到的 `X-Request-ID` 直接 grep 即可把一条 backend 对上一次请求：
+
+  ```bash
+  grep -F "<X-Request-ID>" /tmp/display-api.log
+  ```
+
+  该行里的 `details` 已按审计口径脱敏（绝对路径/URI/校验和/敏感 key 以及 `rejected_value` /
+  `rejected_values` 一律 `[redacted]`），所以它能定位问题但不能替代复现客户端请求；
+  **但它不是全量脱敏**——其它 key 下的客户端标识（`station_id`、`run_id` 等）保持明文，
+  详见 `docs/runbooks/object-store-forcing-series-read.md` 的「脱敏边界」。`details=` 段有固定
+  字节预算，超出以 `…[truncated N bytes]` 截断（响应体不截断）；入站 `X-Request-ID` 仅在匹配
+  `[A-Za-z0-9._-]{1,64}` 时沿用，否则服务端另发 UUID；`path=` 段按 `quote(path, safe="/")`
+  percent-encoding 后再写，客户端可控的路径参数里塞不进空格、`=` 或控制字节（只含 unreserved
+  字符与 `/` 的路径逐字节不变；`:` `@` `+` 等 sub-delims 会被编成 `%XX`）。
+  `details=` 段在截断前先把换行类字符转义（`\n` → `\\n` 等），所以一次错误响应永远只有一行；
+  但段内的值是逐字原样的，出现 `code=…` 这种 token 仿冒串属正常——按 `details=` 之前的位置解析
+  字段，别全行扫 token。
+  另外，合规形状的 `X-Request-ID` 由客户端自选，grep 命中只证明同一行日志里有这个 id，不证明来源。
+
+  已知盲区（grep 不到 ≠ 没发生）：`/api/v1/slurm*` 的**全部**错误响应（校验错误走
+  `services/slurm_gateway/validation_errors.py` 的独立 handler；网关错误由
+  `services/slurm_gateway/routes.py:149` 与 `_gateway_error_response`（:212-217）直接构造
+  `JSONResponse`）；Starlette 自己应答的 `HTTPException`——未匹配路由的 404（含
+  `apps/api/startup_wiring.py:87` 的 SPA catch-all）与 405；以及被
+  `ServerErrorMiddleware` 接住的未捕获异常（写出的是 uvicorn traceback，不是 `api_error` 行）。
 - 运维需要临时覆写标识时，在 DSN 上写 `?application_name=<name>`：代码给的是
   libpq `fallback_application_name`，显式值永远优先。
 

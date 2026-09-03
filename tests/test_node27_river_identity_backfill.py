@@ -274,9 +274,77 @@ def test_duration_wall_is_enforced_by_the_server_not_a_client_stopwatch() -> Non
         ]
     )
     with connection.cursor() as cursor:
-        backfill.execute_batch(cursor, target, first_page=0, last_page=4, duration_wall_ms=7777)
+        backfill.execute_batch(
+            cursor,
+            target,
+            first_page=0,
+            last_page=4,
+            duration_wall_ms=7777,
+            lock_timeout_ms=321,
+        )
 
     assert ("SET LOCAL statement_timeout = 7777", None) in connection.executions
+
+
+def test_each_batch_bounds_its_lock_wait_immediately_below_the_duration_wall() -> None:
+    """#1476: without this line a pure lock WAIT is indistinguishable from slowness.
+
+    A batch queued behind ingest's row locks holds no CPU and produces no rows;
+    it simply waits. With only ``statement_timeout`` set, that wait ends at the
+    duration wall as SQLSTATE 57014 and the runner classifies it
+    ``duration_wall`` — whose remedy (lower ``batch_pages``, raise the wall) is
+    exactly wrong for contention, and whose halving retry just re-queues for the
+    same lock. With ``lock_timeout`` set strictly below the wall, the wait ends
+    first, as 55P03, and reaches ``lock_contention``.
+
+    The ORDER is pinned, not just the presence: both are ``SET LOCAL``, so a
+    ``lock_timeout`` issued after the first real statement of the transaction
+    would not cover it, and one issued outside this try block would not be
+    covered by the batch's own error classification.
+    """
+    target = chunk("c1", days_old=30)
+    connection = FakeConnection(
+        [
+            ("SELECT count(*)", lambda s, p: {"fetchone": (5,)}),
+            ("UPDATE ONLY", lambda s, p: {"rowcount": 5}),
+        ]
+    )
+    with connection.cursor() as cursor:
+        backfill.execute_batch(
+            cursor,
+            target,
+            first_page=0,
+            last_page=4,
+            duration_wall_ms=7777,
+            lock_timeout_ms=321,
+        )
+
+    issued = [sql for sql, _ in connection.executions]
+    assert issued.index("SET LOCAL lock_timeout = 321") == issued.index(
+        "SET LOCAL statement_timeout = 7777"
+    ) + 1
+    # Before any statement that can take a lock.
+    assert issued.index("SET LOCAL lock_timeout = 321") < next(
+        index for index, sql in enumerate(issued) if "UPDATE ONLY" in sql
+    )
+
+
+def test_the_lock_bound_carried_into_each_batch_is_the_configured_one() -> None:
+    """The wiring, not just the SQL: a hard-coded constant in ``execute_batch``
+    would satisfy the pin above and silently ignore the operator's env knob."""
+    target = chunk("c1", days_old=30)
+    connection = FakeConnection(
+        [
+            UNCOMPRESSED_GUARD,
+            ("SELECT count(*)", lambda s, p: {"fetchone": (1,)}),
+            ("UPDATE ONLY", lambda s, p: {"rowcount": 1}),
+        ]
+    )
+    settings = config(Path("/tmp"), enforce=True, lock_timeout_ms=1234)
+
+    backfill._run_one_batch_with_retry(connection, target, settings, 0, 4)
+
+    assert ("SET LOCAL lock_timeout = 1234", None) in connection.executions
 
 
 def test_cancelled_batch_is_retried_once_at_half_the_range_and_returns_the_remainder() -> None:
@@ -792,7 +860,12 @@ def test_no_shortfall_skips_the_diagnostic_queries_entirely() -> None:
 
     with connection.cursor() as cursor:
         outcome = backfill.execute_batch(
-            cursor, target, first_page=0, last_page=4, duration_wall_ms=30_000
+            cursor,
+            target,
+            first_page=0,
+            last_page=4,
+            duration_wall_ms=30_000,
+            lock_timeout_ms=5_000,
         )
 
     assert outcome.shortfall == 0

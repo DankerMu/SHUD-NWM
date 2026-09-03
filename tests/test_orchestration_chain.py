@@ -6676,7 +6676,12 @@ def test_psycopg_has_active_pipeline_includes_queued_pipeline_rows() -> None:
         _dt("2026-05-01T00:00:00Z"),
         "model_a",
     )
-    assert set(parameters[3]) == {"created", "staged", "submitted", "running"}
+    # Requirement change, not a weakened assertion: the hydro active set has ONE definition
+    # (scheduler_state_types.ACTIVE_HYDRO_STATUSES) and "pending" is a member of it, because it is
+    # the status manual retry writes to hydro_run once the retry job is submitted. The hydro arm of
+    # this probe therefore binds five members, so a run at "pending" whose cycle has no non-terminal
+    # pipeline_job answers "active" here as it already does on the scheduler decision lane.
+    assert set(parameters[3]) == {"created", "staged", "pending", "submitted", "running"}
     assert parameters[4:] == (
         "gfs_2026050100",
         "fcst_gfs_2026050100_model_a",

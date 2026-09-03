@@ -11,21 +11,40 @@ byte-for-byte stand-in.
 Standalone and independent of the ingest scripts — call it after ingest, either
 per-run (``--run-id``) or for every parsed/finished QHH run (``--all``).
 
-.. warning::
+Overwrite guard (#1446)
+-----------------------
 
-   **Never re-scan a legacy (pre-#1340) run.** Since issue #1341 the river
-   coverage scan selects rows by surrogate key, so a run whose
-   ``hydro.river_timeseries`` rows still carry NULL keys computes as
-   ``segment_count = 0``, ``river_sample_count = 0`` and NULL river valid-time
-   bounds — and the upsert OVERWRITES the correct text-era values it already
-   has, which drops the run out of latest-product readiness and off the
-   national tile. The exclusion itself is the recorded #1341 contract; losing
-   coverage that was already materialized is not.
+Since issue #1341 the river coverage scan selects rows by surrogate key, so a
+legacy (pre-#1340) run whose ``hydro.river_timeseries`` rows still carry NULL
+keys computes as ``segment_count = 0``, ``river_sample_count = 0`` and NULL
+river valid-time bounds. Overwriting the correct text-era values with that
+result drops the run out of latest-product readiness and off the national tile,
+and nothing restores the old values in place — so the upsert now **refuses**
+it: an existing populated row is never replaced by an empty scan unless
+``--force`` is passed. (A row already zeroed this way is not lost forever, but
+it does not heal by itself: the zeroing upsert stamps ``refreshed_at = now()``,
+so the row is *fresh* and the cron's ``--all --skip-fresh`` loop never revisits
+it. Once the #1408 identity back-fill lands, recovery takes an explicit
+``--run-id <run>`` refresh -- or an ``--all`` run without ``--skip-fresh`` --
+which then recomputes the real counts.)
 
-   Consequences: run ``--all`` **with** ``--skip-fresh`` (it leaves runs whose
-   coverage is already fresh untouched), and never point ``--run-id`` at a run
-   from before the #1340 dual write unless the #1341 backfill has since given
-   its rows keys. Recovery is a re-run after backfill; there is no undo.
+* ``--run-id <legacy run>`` exits **3** and prints one
+  ``DISPLAY_COVERAGE_REFRESH_REFUSED run_id=… existing_segment_count=… advice=…``
+  line on stderr. Nothing is written.
+* ``--all`` counts refusals under ``refused`` in the JSON report and still
+  exits 0; the batch is never aborted.
+* ``--force`` performs the zeroing deliberately. The intended manual use is
+  ``--run-id <run> --force`` — one operator-reviewed run. It also composes with
+  ``--all``, which zeroes *every* refused run in the batch in one command; that
+  is an explicit operator opt-in and the cron loop never passes it.
+
+A refused run keeps its old ``refreshed_at``, so the cron's
+``--all --skip-fresh`` loop rescans it on every tick only while it is already
+stale (``refreshed_at < hydro_run.updated_at``); a refused run whose row is
+fresh is not rescanned. The rescans end when its keys are backfilled (#1408) or
+an operator forces it. ``--skip-fresh`` remains the right default for the cron
+loop — omitting it rescans every already-fresh run — even though omitting it is
+no longer destructive.
 
 Examples::
 
@@ -48,6 +67,7 @@ from typing import Any
 import psycopg2
 
 from packages.common.display_coverage import (
+    DisplayCoverageRefreshRefused,
     refresh_all_run_display_coverage,
     refresh_run_display_coverage,
     run_display_coverage_available,
@@ -81,8 +101,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=(
             "With --all, only refresh runs whose coverage is missing or stale (resumable). "
-            "Required in practice since #1341: without it, legacy NULL-key runs are re-scanned "
-            "and their already-materialized coverage is overwritten with zeros."
+            "Recommended since #1341: the #1446 guard keeps legacy NULL-key runs from being "
+            "zeroed either way, but without --skip-fresh every already-fresh run is rescanned."
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Overwrite a populated coverage row even when the fresh scan finds no segments "
+            "(#1446). Without it such a refresh is refused: --run-id exits 3 and --all counts "
+            "the run under 'refused'. Intended manual use is '--run-id <run> --force' (one "
+            "reviewed run); it also composes with --all, which zeroes every refused run in "
+            "the batch at once. The cron loop never passes this."
         ),
     )
     parser.add_argument("--progress", action="store_true", help="With --all, emit per-run progress to stderr.")
@@ -118,10 +149,29 @@ def main(argv: list[str] | None = None) -> int:
                 on_progress=progress,
                 workers=args.workers,
                 connect=_attributed_connect,
+                force=args.force,
             )
+            # ``counts`` carries the #1446 ``refused`` key alongside
+            # refreshed/skipped/failed; a batch refusal is reported, never fatal.
             report = {"mode": "all", "skip_fresh": args.skip_fresh, "workers": args.workers, **counts}
         else:
-            present = refresh_run_display_coverage(connection, args.run_id)
+            try:
+                present = refresh_run_display_coverage(connection, args.run_id, force=args.force)
+            except DisplayCoverageRefreshRefused as refusal:
+                # #1446: a refusal is an expected operator-facing outcome, not a
+                # crash. One structured line an operator (or a log scraper) can
+                # read, and a distinct exit code the caller can branch on --
+                # never a traceback. The finally below still closes the
+                # connection.
+                print(
+                    "DISPLAY_COVERAGE_REFRESH_REFUSED "
+                    f"run_id={refusal.run_id} "
+                    f"existing_segment_count={refusal.existing_segment_count} "
+                    f"advice={refusal.advice}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 3
             report = {"mode": "run", "run_id": args.run_id, "refreshed": present}
         report["elapsed_s"] = round(time.perf_counter() - t0, 3)
     finally:

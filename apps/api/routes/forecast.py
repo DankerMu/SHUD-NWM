@@ -17,6 +17,9 @@ from packages.common.forecast_store import (
 
 router = APIRouter(prefix="/api/v1", tags=["forecast"])
 
+# #1728: this router's connection surface in pg_stat_activity.
+_APPLICATION_NAME = "nhms-api-forecast"
+
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 _HINDCAST_ACCESS_ROLES = {"analyst", "operator", "model_admin", "sys_admin"}
@@ -24,7 +27,7 @@ _HINDCAST_ACCESS_ROLES = {"analyst", "operator", "model_admin", "sys_admin"}
 
 def get_forecast_store() -> PsycopgForecastStore:
     try:
-        return PsycopgForecastStore.from_env()
+        return PsycopgForecastStore.from_env(application_name=_APPLICATION_NAME)
     except ForecastStoreError as error:
         raise _api_error(error) from error
 

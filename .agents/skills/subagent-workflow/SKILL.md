@@ -2,7 +2,7 @@
 name: subagent-workflow
 description: >
   GitHub issue → verified PR workflow: the orchestrator delegates implementation, cross-review, and finding verification to the implementer/reviewer/verifier subagents, with mandatory OpenSpec fixtures, risk-adaptive review, CI, and human-gated merge. Use to implement a GitHub issue or process the next DAG issue ("implement #XX", "处理下一个issue"). Not for docs/spec-only work, hotfixes that skip review, or Codex-implements-under-Claude-orchestration (use cc-cx-workflow).
-version: 0.31.0
+version: 0.31.1
 ---
 
 # Subagent Issue Workflow

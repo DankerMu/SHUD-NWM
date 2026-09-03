@@ -2,7 +2,9 @@
 
 Operation, rollback, and cadence rationale for the node-27 timeseries storage
 tier — **hypertable compression (§4)** and **gated DB retention (§8)** —
-delivered under `openspec/changes/tier-node27-timeseries-storage`.
+delivered under `openspec/changes/tier-node27-timeseries-storage`, plus the
+**write-path least-privilege roles (§9)** these lanes run as
+(`openspec/changes/node27-write-path-roles`, #1774).
 
 ## Retirement record: the cold archive lane is gone (2026-08-11)
 
@@ -798,9 +800,13 @@ Referenced JSON contracts are:
   regular non-symlink whose `sha256`/`bytes` match, and if it parses as JSON
   it is complexity-bounded and its own nested artifact references are
   resolved transitively — and it is retained, deduplicated by normalized
-  path, in the terminal `source_manifest`. A value of any other shape is not
-  itself a closure node, though any well-formed reference nested inside it
-  still is, collected in its own right.
+  path, in the terminal `source_manifest`. A value of any other shape — a
+  mapping with extra or missing keys, a mapping that wraps a reference, a bare
+  string, `null` — is rejected by the verifier's input-shape check inside
+  `verify_bundle`, which names this slot: the run fails closed and never
+  qualifies. When the verifier CLI resolves the artifact closure ahead of
+  `verify_bundle`, a wrapper around an unavailable reference may fail first at
+  that closure node instead, which is fail-closed all the same.
 - `recovery.preflight`: separately authorized replay preflight with capture
   time, node-27/mutation-SHA/database identity, at least 300 GiB free space,
   `before_compressed=true`, positive row count, and the exact six-field target
@@ -2203,12 +2209,17 @@ distinguished in `stop.stage`:
   `--probe` does not classify at all: a lock failure under `--probe` surfaces as
   `failure.stage: "runner"` (with the exception class name on stderr), not as a
   `stop.stage` receipt.
-  Caveat on coverage: until `SET LOCAL lock_timeout` is adopted (a live-batch
-  behaviour change that needs its own node-27 dry-run), a pure lock *wait* still
-  runs out the statement timeout and is reported as `duration_wall`; only
-  deadlocks (`40P01`) reach this stage today. So a `duration_wall` stop on a
-  chunk that ingest may still be touching deserves one look at lock waits before
-  it is treated as slowness.
+  Coverage (#1476, adopted): each batch sets `SET LOCAL lock_timeout` beside its
+  `SET LOCAL statement_timeout`, from
+  `NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS` (default 5000 ms, echoed in
+  the receipt as `bounds.lock_timeout_ms`). A pure lock *wait* therefore ends at
+  `55P03` and reaches this stage, instead of running out the statement timeout
+  and being reported as `duration_wall`; deadlocks (`40P01`) reach it as before.
+  The bound must stay strictly below `..._DURATION_WALL_MS` — the runner refuses
+  the configuration before any batch otherwise, because at or above the wall the
+  statement timeout fires first and every contention event is mislabelled again.
+  Setting it to `0` is refused too: PostgreSQL reads `lock_timeout = 0` as "wait
+  forever".
 - `ingest_not_quiescent` — `--final-sweep` was asked to touch the active chunk
   while its write counters were still moving. Nothing was written. Complete the
   ingest pause (step 1 of the cutover sequence in 4.6.3), confirm it, and rerun;
@@ -2361,7 +2372,11 @@ autoanalyze，而 2026-08-20 复采时 chunk 58/62 各挂 ~6.8M `n_mod_since_ana
 `error`，剩余 chunk 照常尝试），guard 级失败（连接/候选查询）才写
 `stats_guard.status = "failed"` + `error`；两级都不改 tick 返回码——统计漂移是渐进病，
 下个 tick 重试即可，没资格把 unit 染红。停用开关：
-`NODE27_AUTOPIPE_STATS_GUARD=off`（summary 记 `skipped`）。
+`NODE27_AUTOPIPE_STATS_GUARD`，取值 `0` / `false` / `no` / `off`（去空白 +
+不分大小写）之一即停用，其余值（含 `1`、`on`、未设）继续跑（#1647；此前只认
+字面量 `off`，写 `0` 会静默继续跑）。停用时 summary 记 `skipped`，`reason`
+仍是 `NODE27_AUTOPIPE_STATS_GUARD=off` 这个字面量——它指的是开关本身，不是
+你写的那个值。
 
 #### 复核（`pg_stat_user_tables`）
 
@@ -2565,6 +2580,12 @@ ANALYZE **之后**实测 2,000 次等值查找：
 `DROP INDEX`（要手工清也必须带 `CONCURRENTLY`）。看恢复是否干净：
 `\di core.river_segment_id_trgm_idx*` 应只剩一个名字，且
 `pg_index.indisvalid = true`。
+
+> **迁移后必跑（#1774，§9.6）**：node-27 上任何 `packages.common.migrate` /
+> `migration_apply` 之后，接着跑 `bash scripts/node27_provision_write_roles.sh`
+> 并确认审计干净。迁移以 `nhms` 建表，新表在重跑之前归 `nhms` 所有：ingest 仍可
+> 读写（default privileges），但其 `ANALYZE` 被静默跳过；若新建的是 hypertable，
+> 压缩/保留两条 lane 会直接 `must be owner of hypertable` 报错。
 
 `met.met_station` 的 `met_station_id_trgm_idx` 是 partial（`WHERE active_flag =
 true`）：不带该谓词的等值查找结构上不可选它（实测走 `met_station_pkey`，
@@ -3578,12 +3599,46 @@ before a receipt exists.
    an `elapsed_ms` close to 300000 on a `57014` means the statement wall
    fired. Before #1664 no such line existed at all, although this section
    already told you to read them.
-7. **Lock-blocked refusal (`lock-contention(55P03)` / `(40P01)`) — when to do
-   nothing, and when to escalate (#1664).**
+
+   This line is **not** the progress criterion of item 7. It carries no wire
+   code by design, and it is emitted on the success path too — a healthy tick
+   writes one per dropped chunk. Count item 7's anchor, not these.
+7. **Refused tick — when to do nothing, and when to escalate (#1664/#1766).**
+
+   The escalation criterion is **progress**, and any drop failure is zero
+   progress, so it counts drop-phase refusals regardless of SQLSTATE:
+
+   ```
+   grep -c 'RETENTION_DROP_FAILED:' ~/node27-timeseries-retention-logs/retention.log
+   ```
+
+   The runner emits exactly **one** such line per refused tick (the per-tick
+   stderr diagnostic, carrying the redacted `refusal_reason`), so the count is
+   a tick tally. Scope it the same way item 5 does — `retention.log` is
+   cumulative, so bracket the window you care about by `start summary=` /
+   `done rc=` timestamps before counting, e.g. with `sed -n '/<start>/,$p'`.
+
+   Before #1766 this criterion counted `lock-contention(` instead. That marker
+   attaches **only** to SQLSTATE 55P03/40P01. The refused ticks this repo has
+   forensics for — **2026-08-18 = `40P01`** and **2026-08-21 = `57014`**, the
+   #1664 pair recorded in
+   `openspec/changes/archive/2026-08-22-harden-node27-retention-lock-contention/`
+   — both predate the marker, and the `57014` class (what the 08-21 refusal
+   was, and what `lock_timeout` explicitly **cannot** eliminate — hard edge 2
+   at `:3097-3100` above) never carries the marker at all. So the criterion
+   read 0 while progress was 0. Do not go back to counting the classification.
+
+   To see *which kind* of drop failure a counted tick was — a diagnostic aid,
+   never the criterion:
 
    ```
    grep 'lock-contention(' ~/node27-timeseries-retention-logs/retention.log
    ```
+
+   `RETENTION_CONCURRENT_INVOCATION` and `RETENTION_UNCAUGHT_ERROR` are
+   deliberately **not** counted: the first means a previous tick is still
+   working (progress, not the absence of it), and the second is a bug the
+   `OnFailure=` alert already surfaces on its own.
 
    **A single lock-blocked refused tick is ACCEPTABLE and needs no human
    intervention.** Nothing was half-done: the drop either happened or did not,
@@ -3593,8 +3648,9 @@ before a receipt exists.
    warnings apply — a wrapper invocation is a live enforcing tick).
 
    **Escalate when the pattern, not the event, is wrong:** three or more
-   CONSECUTIVE days of lock-blocked refusals, or four or more lock-blocked
-   ticks within one week. That means the retention lane is no longer making
+   CONSECUTIVE days of counted refusals, or four or more counted refused ticks
+   within one week — counted by the command above, whatever their SQLSTATE.
+   That means the retention lane is no longer making
    progress and the drop backlog is growing — check the candidate backlog and
    `pg_database_size` before deciding.
 
@@ -3644,22 +3700,46 @@ before a receipt exists.
    asynchronously bounces, so either default would manufacture a second failed
    unit or a "SENT" that never arrived.
 
-   **KNOWN LIMITATION — the mail body does NOT carry `refusal_reason`.** The
-   journal context the handler quotes is systemd **lifecycle lines only**
-   (`Starting…`, `Main process exited, code=exited, status=1/FAILURE`,
-   `Failed with result 'exit-code'`). The runner's own stderr never reaches
-   the journal, for two independent reasons, both pre-existing:
-   `scripts/node27_timeseries_retention_once.sh` redirects the runner's stdout
-   **and** stderr into `retention.log`, and the retention unit writes
-   `StandardOutput=`/`StandardError=append:` files that systemd does not
-   duplicate into the journal. So the alert tells you **that** the tick failed,
-   never **why**. Read the reason out of `retention.log`:
+   **The mail body carries `refusal_reason` (#1712).** The wrapper pipes the
+   runner's combined output through `tee -a "$LOG_FILE" >&2`, so the same bytes
+   land in `retention.log` **and** on the wrapper's stderr, and the unit's
+   `StandardError=journal` publishes that stderr to the journal — which is
+   exactly the 30 lines the handler quotes. A refused tick's mail therefore
+   names the wire code and the redacted cause, not just "it failed".
+
+   `RC` comes from `PIPESTATUS[0]`, i.e. the runner's status: a `tee` that
+   fails (ENOSPC on the log volume) cannot turn a refused tick green.
+
+   Read the same thing on the host, first stop:
+
+   ```
+   journalctl --user -u nhms-node27-timeseries-retention.service -n 30 --no-pager
+   ```
+
+   `retention.log` remains the complete transcript and is still the right
+   place for anything older than the journal retains, or for the item 5/6/7
+   bracket procedures:
 
    ```
    grep 'RETENTION_' ~/node27-timeseries-retention-logs/retention.log | tail -20
    ```
 
    Then follow items 1-7 above from whichever wire code that prints.
+
+   **KNOWN LIMITATION — scope.** The `systemd.err` file lane is retired for
+   this unit and, under #1765, for `nhms-node27-resource-governance.service`.
+   The other six node-27 units (`autopipe`, `download`, `frontier-alert`,
+   `raw-retention`, `timeseries-compression`, `timeseries-compression-replay`)
+   still write `StandardError=append:…/systemd.err`, and their alerts (where
+   they have one) still quote lifecycle lines only. `StandardOutput=append:`
+   is unchanged here, but do not read it as the bracket destination: the
+   wrapper writes nothing at all to stdout. Its `start` / `done rc=` bracket
+   lines are appended straight to `retention.log`
+   (`scripts/node27_timeseries_retention_once.sh:143,:158`) and the runner's
+   combined output now goes to stderr, so `systemd.log` is a stdout catch-all
+   for anything the wrapper or runner might print in future — normally empty.
+   Look for the bracket lines in `retention.log`; they are NOT duplicated into
+   the journal.
 
    **Deployment is MANUAL** — node-27's units are user-scope
    (`~/.config/systemd/user/`), so `git pull --ff-only` updates only the
@@ -3681,6 +3761,79 @@ before a receipt exists.
    unit to test this wiring — that is a live enforcing tick and irreversibly
    drops production chunks.
 
+   The `install` + `daemon-reload` above is ALSO what the `#1712`
+   `StandardError=journal` change needs, and the same two commands with
+   `nhms-node27-resource-governance.service` are what the `#1765`
+   `OnFailure=` change needs. Until they are run, the deployed units keep
+   their old lanes no matter what the repo says.
+9. **Root-volume discipline for this host (#1765).** A two-day pytest run on
+   node-27 filled `/` (98 GB) with 27 GB of `/tmp/pytest-of-nwm`. Two halves,
+   both required:
+
+   - **Repo side (already in `pyproject.toml`):**
+     `tmp_path_retention_policy = "failed"` — only failing tests keep their
+     `tmp_path` directory, so a green session leaves nothing behind. This is
+     the growth bound; it is not a volume-size argument.
+   - **Host side (nwm login profile on node-27):**
+
+     ```
+     mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp
+     ```
+
+     so pytest's `pytest-of-nwm` root lands on `/home` instead of `/`. The
+     `mkdir -p` is not optional: `TMPDIR` **fails open** — Python's
+     `tempfile.gettempdir()` silently falls back to `/tmp` when the directory
+     is missing, and the run would go back on the root volume without saying
+     so. Verify by looking for the directory, not only at `df`:
+
+     ```
+     ls -d /home/nwm/tmp/pytest-of-nwm && ls -d /tmp/pytest-of-nwm 2>&1
+     df -h / /home
+     ```
+
+     `/home` is the pgdata + object-store volume, so this moves the residue
+     onto the volume the retention runner's own ENOSPC reasoning is about; the
+     bound that makes it safe is the retention policy above, not the volume's
+     size.
+
+     **`/home` free space has no critical tier.** The resource-governance
+     audit gives that mount a warning threshold only —
+     `home_free_warn_bytes` (default 300 GiB) ->
+     `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:70`
+     (threshold), `:227` (comparison), `:232` (the code literal)
+     — and there is no `home_free_critical_bytes` at all. The exit-1 /
+     `OnFailure=` mail lane has two triggers, in this order: the receipt's
+     `status` is not `completed` (`:584-585`), or the receipt carries at least
+     one `severity: critical` recommendation (`:590-593`, `:556`
+     `_critical_codes`). The first is a defensive guard today — `build_receipt`
+     hard-codes `"status": "completed"` (`:355`) and nothing downgrades it — so
+     in practice a critical recommendation is the only thing that reddens a
+     completed audit. (A rejected config never gets that far: the config parse
+     is `:571-576` and the `return 2` is `:577`, which also trips
+     `OnFailure=`.) A `warning` changes neither `status` nor the critical
+     list, so it trips nothing. The three codes that can be critical today are
+     `ROOT_FREE_BELOW_CRITICAL` (`:210`), `DATABASE_SIZE_ABOVE_CRITICAL`
+     (`:244`, 500 GiB of `nhms`) and `HYPERTABLE_INDEX_RATIO_HIGH` (`:318`,
+     severity assigned at `:309`).
+     So a free-space shortfall on the volume that actually holds pgdata and
+     the object store can never page anyone: it only appears as a `warning`
+     line in a receipt someone reads. The database-size proxy is the closest
+     thing to a critical for this volume, and it says nothing about the object
+     store sharing it. Reading the newest `resource-governance-*.json` by hand
+     therefore stays a step of the bringup checklist, not an optional one.
+
+   **Never** put `--basetemp` in shared config (`pyproject.toml`, CI): it
+   clears its target on every run and would apply to the Mac and to CI too.
+
+   Two wrapper locks still live on `/`, and that is **accepted, not
+   overlooked**: `scripts/node27_raw_retention_once.sh` defaults its primary
+   `LOCK_PATH` (`:113`) and `scripts/node27_timeseries_retention_once.sh` its
+   bootstrap lock (`:131`, the runner holds a separate DB-scoped one) to
+   `/tmp/...`. They are `flock` targets, effectively zero bytes, and moving
+   them changes single-instance semantics on a live lane for no capacity gain.
+   The resource-governance lock DID move (`$LOG_ROOT`) because that audit's
+   whole job is to report `/` filling up.
+
 ### 8.7 Salvage-backed windows
 
 `salvage_backed_windows[]` in an `enforced` receipt is **always `[]`**, and
@@ -3699,6 +3852,696 @@ and the schema itself all keep the same shape.
 Do not read `[]` as "everything dropped was archive-covered". In a historical
 `enabled`-mode receipt an empty list meant "no db-export subject overlapped
 this drop window"; in every current receipt it means nothing was covered.
+
+## 9. Write-path least-privilege roles (`#1774`)
+
+Until this section existed, **every** recurring write unit on node-27 connected
+as the PostgreSQL superuser `nhms` (live `pg_roles`, 2026-09-02: only `nhms`
+(super) and `nhms_display_ro`). A superuser can `COPY … FROM PROGRAM`, i.e.
+execute shell commands as the database OS user, on the host that also serves
+`https://test.nwm.ac.cn`. The read side had a role boundary; the write side had
+none. The templates already named `nhms_ingest_rw` / `nhms_download_rw` — the
+roles had simply never been provisioned, so the deployment fell back to the
+superuser.
+
+Executable form: `db/roles/node27_write_roles.sql`, run through
+`scripts/node27_provision_write_roles.sh`. OpenSpec change
+`node27-write-path-roles`.
+
+### 9.1 The measured ownership finding (the issue's core unknown)
+
+Measured in a disposable `timescale/timescaledb:2.10.2-pg15` container (the
+node-27 versions); full transcript in
+`openspec/changes/node27-write-path-roles/evidence/local-container-transcript.md`.
+
+- `compress_chunk`, `decompress_chunk`, `drop_chunks`, `chunks_detailed_size`,
+  chunk `ANALYZE` and `ALTER … SET TABLESPACE` require the **hypertable owner**.
+  A plain non-superuser role is enough — superuser is not.
+- `ALTER TABLE <hypertable> OWNER TO <role>` **cascades** to the existing chunks
+  and to the compressed hypertable, and chunks created later (including chunks
+  created by the role's own INSERT) inherit the owner. There is no per-chunk
+  work.
+- A **DML-only** grantee can read `timescaledb_information.chunks`, INSERT into
+  new and compressed ranges and DELETE in uncompressed chunks, but is refused
+  `compress_chunk` (`must be owner of hypertable`), `COPY … FROM PROGRAM`,
+  `CREATE ROLE` and `CREATE DATABASE`, and its `ANALYZE` is **skipped with a
+  warning** rather than refused.
+- That last one is why ownership is not optional. PG 15 has no `MAINTAIN`
+  privilege, and the autopipe stats guard grades a skipped ANALYZE as
+  `status="warning"` (`scripts/node27_autopipeline.py:1490`) — the tick stays
+  green while the leg is dead. Both legs are affected: the #1643 frontier-chunk
+  leg (`:1482`) and the #1468 authority-table repair leg
+  (`_STATS_GUARD_AUTHORITY_CANDIDATES_SQL`, `:1419-1435`, run every tick at
+  `:1663`).
+- `ALTER DEFAULT PRIVILEGES FOR ROLE nhms IN SCHEMA …` does cover tables a later
+  migration creates as `nhms`, so the drift window between a migration and the
+  next provision run is writable — only ANALYZE degrades.
+
+Consequence, and the accepted residual: `nhms_ingest_rw` owns every relation in
+`core`, `hydro`, `met`, `ops`, `map`, `flood`, so its blast radius is "drop or
+truncate any application relation". That is smaller than superuser — no *direct*
+program execution, no role/database creation, no direct catalog escape — and it
+is what keeps both stats-guard legs and all tiering functions alive.
+
+Ownership also carries `CREATE RULE` / `CREATE TRIGGER`, and a rule action or a
+trigger body executes as the role that **writes** the relation, not as the role
+that created it. Migrations, seeds and the replay supervisor still write as the
+superuser `nhms` (§9.2), so an owner-planted object is an indirect path to
+`pg_read_file`, `lo_export` into PGDATA and `COPY … TO PROGRAM`. Two mitigations
+ship with the provision SQL and neither replaces the other:
+
+- **prevention** — a superuser-owned `ddl_command_start` event trigger
+  (`nhms_guard_no_write_role_rules_triggers`, installed in the additive phase so
+  it exists before the transfer grants the ability) refuses `CREATE/ALTER/DROP
+  RULE` and `CREATE/ALTER/DROP TRIGGER` whenever `session_user` is either write
+  role. The write roles hold no membership, so `SET ROLE` cannot dodge it, and a
+  non-superuser can neither drop nor disable an event trigger. **Measured gap:**
+  TimescaleDB's process-utility hook takes `CREATE TRIGGER` on a *hypertable*
+  down its own path and never fires `ddl_command_start`, so the guard refuses
+  the write roles on ordinary tables and on chunks but **not** on a hypertable
+  (including the internal `_compressed_hypertable_N` the transfer hands them).
+  That gap is detection-only, below;
+- **prevention, second lever (full mode only)** — `REVOKE TEMPORARY ON DATABASE
+  <db> FROM PUBLIC`, re-granted to `nhms_display_ro`. `pg_temp` is the **only**
+  schema in which a write role can create a FUNCTION (they hold USAGE, never
+  CREATE, on the six schemas and on `nhms_guard`), so this removes the
+  body-authoring surface itself rather than detecting its use. TEMP arrives
+  through PUBLIC (`datacl` `=Tc/nhms`), so a per-role `REVOKE` is a no-op —
+  measured. It is the one statement in the change that **takes** a privilege
+  away, so it runs in the post-merge full mode and never in `--roles-only`;
+- **detection** — the audit enumerates `pg_rewrite` (minus view `_RETURN` rules)
+  and `pg_trigger` (minus internal triggers and TimescaleDB's blocker, excluded
+  by **function identity**, `tgfoid = _timescaledb_internal.insert_blocker()`,
+  never by name) in the six schemas **plus every `_timescaledb_internal`
+  relation owned by a write role** (owner-scoped, so TimescaleDB's own catalog
+  tables are never scanned) against the explicit allow-list of the four `met`
+  triggers from `db/migrations/000043_canonical_grid_snapshot.sql`, and asserts
+  the event trigger is present, enabled and superuser-owned. Strict audit →
+  error, exit 3; `--roles-only` → `WARNING`.
+
+  Why identity and not the name: on a hypertable — the one relation class where
+  the event trigger does not fire — the write role can
+  `CREATE OR REPLACE TRIGGER ts_insert_blocker … EXECUTE FUNCTION <anything>`
+  and inherit a name-keyed exclusion (measured, transcript §16).
+
+  **TimescaleDB coupling, stated so it is not discovered during an upgrade:**
+  the identity key is the literal
+  `to_regprocedure('_timescaledb_internal.insert_blocker()')`, correct as of
+  TSDB 2.10.x (node-27's version). If an extension upgrade renames or relocates
+  that function, `to_regprocedure` returns NULL rather than raising, the
+  exclusion matches nothing, and **every genuine blocker on a write-role-owned
+  hypertable or chunk becomes an inventory hit** — so every strict audit,
+  including the mandatory §9.6 one before each superuser write, exits 3 until
+  the key is re-checked against the new extension. The failure is loud and
+  fail-closed, not silent; re-point the literal in
+  `db/roles/node27_write_roles.sql` as part of any TimescaleDB upgrade.
+
+`ALTER TABLE` cannot go into the event trigger's tag list — the cold-residency
+lane needs `ALTER TABLE … SET TABLESPACE` — so the two `ALTER TABLE` forms of
+the same gadget are covered by detection only, in the same audit:
+
+- **function-provenance sweep** — every column `DEFAULT` (including `STORED`
+  generated columns), `CHECK` constraint, rule action and trigger function in
+  the six schemas and in the write-role-owned `_timescaledb_internal` relations
+  is resolved to the functions it calls, and each of those is judged by
+  **provenance**, because the expression is evaluated with the authority of
+  whoever writes the row. A function is untrusted when **any** of these holds:
+  it lives in a temp schema (`pg_temp_%` / `pg_toast_temp_%`); its owner is not
+  a superuser; `nhms_ingest_rw` cannot itself `EXECUTE` it (that is how
+  `DEFAULT length(pg_read_file('/etc/hostname'))` is caught); or it is **not on
+  the migration allow-list**. Each finding names the leg that fired.
+  **Executability alone was the round-3 hole**: a function the write role
+  authored in `pg_temp` passes it (the role owns it), and so does
+  `set_config('session_replication_role','replica',false)`.
+  **Why the last leg is an allow-list and not a deny-list — round 4.** It began
+  as a deny-list of `pg_catalog` functions with a superuser-only effect, and
+  `pg_catalog.query_to_xml` walked through it: PUBLIC-executable,
+  superuser-owned, and its effect is *"evaluate this SQL string as the caller"*,
+  so one column `DEFAULT` restored both round-3 gadgets with the strict audit at
+  exit 0 (measured; thirteen more `*_to_xml*` siblings share the shape).
+  Enumerating effects cannot close a function whose effect is "run this string",
+  so the list was inverted. Trusted is exactly eleven names, in **two
+  provenance classes**:
+  - **derived from `db/migrations/**`** (ten): the four `met` trigger functions
+    from `000043`, and `pg_catalog.{now, nextval, gen_random_uuid, btrim,
+    float8, int8}`. The last two are catalog references nobody writes as a
+    call — `float8` is the cast function `::double precision` resolves to
+    inside `000048`'s `STORED` generated column, and `int8` is the **implicit**
+    `int4`→`int8` coercion the parser wraps around an integer-literal `DEFAULT`
+    on a `BIGINT` column (`000035`'s two `run_display_coverage` counters:
+    `pg_get_expr` prints just `0`, while the stored tree holds
+    `int8(<int4 const>)`). A unit test re-derives this set from the tree and
+    asserts **equality**, so a derivation that stops deriving is red;
+  - **ledger-backed, not derivable here** (one): `pg_catalog.jsonb_typeof`,
+    reached by `flood.run_product_quality`'s `residual_blockers` /
+    `unavailable_products` `CHECK`s. Their migrations
+    (`000034_return_period_run_quality_materialization.sql`,
+    `000036_run_product_quality_explicit_source.sql`) are recorded as applied by
+    the migration superuser in node-27's `public.schema_migrations`, but neither
+    file is under `db/migrations` any more (the listing jumps
+    `000033 → 000035 → 000037`). It is pinned in the test's
+    `_LEDGER_ALLOW_LIST` with that reason, asserted disjoint from the derived
+    set. The repo/production migration drift itself is reported out of this
+    change's scope.
+
+  Everything else, in any schema, is reported. Both added entries are
+  `IMMUTABLE`, `STRICT` and pure (measured): a width widening and a jsonb type
+  tag — no filesystem, no string evaluation, no session state.
+  **T7 first contact, and how it was resolved.** The first `--roles-only` run
+  against the production catalog measured **2 untrusted** out of 19 distinct
+  functions over 138 scanned expressions/triggers — `pg_catalog.int8` and
+  `pg_catalog.jsonb_typeof`, both **migration-authored**, neither an
+  escalation. They were resolved by **extending the list, not by absorbing
+  them**: the derivation gained an implicit-coercion branch that reproduces
+  `int8` from `000035` (measured mapping, transcript §20.1), and `jsonb_typeof`
+  got a ledger-only provenance record naming the two retired `flood`
+  migrations. Widening a predicate — "trust `pg_catalog` casts", "trust
+  `IMMUTABLE` functions" — would have re-opened exactly the round-4 hole, since
+  `query_to_xml` is `pg_catalog`-resident and `PUBLIC`-executable too.
+  **One structural carve-out:** a `pg_catalog` function reached *only* as an
+  operator implementation (`:opfuncid` — `>=`, `<>`, `~`, `->>`, and the ten
+  chunk-range `CHECK`s TimescaleDB writes per hypertable) is trusted **provided
+  it is not `VOLATILE`**. On PG 15.2 all 799 `pg_catalog` operator-backing
+  functions are non-volatile and none of the `*_to_xml*` / `pg_read_file` /
+  `set_config` family backs an operator (measured), so the volatility condition
+  costs nothing today and keeps the carve-out structural rather than empirical.
+  The carve-out is `pg_catalog`-only, so a PostGIS operator (schema `public`)
+  would still be reported.
+  **Operational cost, stated plainly:** the criterion is the LIST, not a
+  judgement about the effect, so a harmless-but-unlisted function is reported
+  too (`DEFAULT upper('x')` → exit 3, measured). A migration that starts
+  referencing a new function therefore has to extend the allow-list in
+  `db/roles/node27_write_roles.sql`; a unit test derives the expected set from
+  `db/migrations/**`, and `scripts/select_ci_tests.py` maps `db/migrations/*.sql`
+  (at any depth) to that suite, so the failure lands on the migration's own PR and not on the
+  live audit.
+  Implementation note for whoever edits it: `pg_depend` records **nothing** for
+  pinned catalog functions, so the sweep reads the stored parse trees (`adbin` /
+  `conbin` / `ev_action`) directly;
+- **presence, shape and `tgenabled` check** — `ALTER TABLE … DISABLE TRIGGER`
+  carries no rule/trigger DDL tag, so the event trigger never sees it and the
+  inventory still lists the trigger; a *dropped* trigger leaves no row for an
+  inventory to look at at all; and `CREATE OR REPLACE TRIGGER` **reshapes one in
+  place** — `… WHEN (false) EXECUTE FUNCTION <the same function>` keeps the
+  `(schema, table, name)` triple, keeps `tgenabled = 'O'` and keeps an
+  allow-listed `tgfoid` while the guard is functionally off (measured, transcript
+  §19). So all four allow-listed triggers must be present (`count(*) = 4`),
+  `tgenabled = 'O'`, **and** carry the shape migration `000043` gives them:
+  `tgfoid` (by `to_regprocedure` identity), `tgtype` (23 / 19 / 19 / 11 for
+  `BEFORE INSERT OR UPDATE` / `BEFORE UPDATE` ×2 / `BEFORE DELETE`, all
+  `FOR EACH ROW`), `tgqual IS NULL` (no `WHEN` clause) and `tgnargs = 0`. A
+  finding names the part that drifted
+  (`met.canonical_grid_cell.canonical_grid_cell_immutable_trg: tgqual`). This is
+  a superuser-lane detection: the write roles are refused `CREATE TRIGGER` on
+  these ordinary `met` tables by the event trigger;
+- **authoring-surface check** — the write roles must be able to create an object
+  **nowhere**, because three of this change's residual arguments (the
+  `:opfuncid` carve-out, `RowCompareExpr`, `CoerceViaIO`/`CoerceToDomain`) rest
+  on "the write role can author no function, operator or type". Both halves are
+  now asserted: `has_database_privilege(<write role>, current_database(),
+  'TEMP')` must be false, and `has_schema_privilege(<write role>, n.oid,
+  'CREATE')` must be false for **every** `pg_namespace` row. The state is printed
+  in every mode (expected `(none)` for both roles after the full-mode
+  tightening); the verdicts are strict-only, for the reason in §9.6. A
+  **schema `CREATE` re-grant** is a security regression rather than a
+  convenience: with one `GRANT CREATE ON SCHEMA met TO nhms_ingest_rw` the role
+  can wrap a non-volatile `pg_catalog` function in an operator of its own and
+  reach the sweep as `via_op_only` + non-volatile, i.e. trusted — measured end to
+  end in transcript §19, where a superuser `INSERT` evaluated the resulting
+  column `DEFAULT` and handed the write role `data_directory`, a GUC it is
+  refused directly.
+
+All legs: strict audit → error, exit 3; `--roles-only` → `WARNING` (the two
+authoring-surface verdicts are strict-only). Still open, recorded not fixed:
+removing the superuser-write half itself (migrations and replay off `nhms`),
+which is out of this change's scope.
+
+### 9.2 Measured privilege inventory per component
+
+Derived by static scan from each unit's entrypoint (DML, `ANALYZE`,
+`CREATE/ALTER/DROP`, `SET TABLESPACE`, `psql --file`, `pg_dump`, `pg_restore`)
+plus the container probes above. `tests/test_node27_write_roles.py` re-runs the
+scan and fails if a lane grows a requirement this table does not cover.
+
+| Unit (systemd) | Entrypoint | Measured DB requirement | Role |
+|---|---|---|---|
+| `nhms-node27-autopipe.service` | `scripts/node27_autopipeline.py` | DML across `core`/`met`/`hydro`/`ops`/`map`; **`ANALYZE` on frontier chunks and on authority tables** → ownership. No `compress_chunk`/`drop_chunks`/policy calls, no runtime `CREATE TABLE`/`CREATE INDEX`/`TRUNCATE`/`REFRESH MATERIALIZED VIEW` | `nhms_ingest_rw` |
+| `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | **no database connection at all** (no `execute(`, no `psycopg2`/`DATABASE_URL` under `workers/data_adapters/`); the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only — provisioned so the template's promise holds and a future adapter write does not land on the superuser) |
+| `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:595` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-compression.service` (cold-residency leg) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py:421,422` | `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` on compressed chunks → chunk ownership **plus `CREATE` on tablespace `nhms_cold`** | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:851` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-compression-replay.service` (`Type=oneshot`, no timer — operator-triggered, not a recurring lane) | `scripts/node27_timeseries_compression_supervisor.py:101-128,143,331-380` | `pg_dump`, two `migration_apply` steps (`psql --file <migration>`), `docker exec nhms-db pg_restore` — **migration-class DDL** — plus a `decompress` leg (`scripts/node27_timeseries_decompression_replay.py:194`, `decompress_chunk` → hypertable ownership) and, in the same `EXPECTED_COMMAND_SEQUENCE` (`:117-128`), `compression_dry_run` and `compression_enforce`. The exception is scoped by **"one-shot migration-class unit"**, not by which calls it makes: the compression legs are the same ones the recurring lane runs as `nhms_ingest_rw`; the `migration_apply` steps are what that role structurally cannot carry | **`nhms` (documented exception)** |
+| archive-rebuild drill (retired lane, #1370; no unit, no template in `infra/env/`) | — | `POSTGRES_ADMIN_URL` against the `postgres` database, `CREATEDB` for `nhms_archive_drill` | **`nhms` (documented exception)** |
+
+Not required by any recurring lane, therefore not granted: schema `CREATE`,
+`TRUNCATE`, TimescaleDB policy management (`add_compression_policy` /
+`add_retention_policy` — compression and retention are explicit script calls,
+not background policies), `pg_execute_server_program`, `CREATEDB`, `CREATEROLE`,
+`REPLICATION`, `BYPASSRLS`.
+
+**Superuser-gated *reads* (audited separately — they fail SILENTLY).** A write a
+non-owner is not entitled to raises an error; a read does not. `pg_locks` is
+**not** row-filtered — every role sees every lock row. What degrades is
+`pg_stat_activity`: it keeps one row per backend for every role, but **masks the
+`query` / `state` / `wait_event*` columns of other users' sessions** unless the
+role holds `pg_read_all_stats`. A "no concurrent writer" or "no in-flight
+`compress_chunk`" guard running as `nhms_ingest_rw` therefore reads `NULL` where
+it expected the other lane's statement text and goes permanently green instead of
+failing. `pg_locks` stays inside the guard's scan pattern because it is only ever
+useful joined back to that masked view (pid → who/what). Schema `pg_toast`
+likewise has no `USAGE` granted to `PUBLIC`.
+
+Scanned the converted lanes for `pg_stat_activity`, `pg_locks`, `pg_toast.`,
+`pg_stat_file`, `pg_ls_dir`, `pg_read_file`, `pg_read_binary_file`,
+`pg_terminate_backend`, `pg_cancel_backend`, `pg_reload_conf`: **no executed
+hit** — every match is a `#` comment (the #1714 `fallback_application_name`
+attribution notes). The live callers all sit outside the conversion: the replay
+lane's quiescence checks
+(`node27_timeseries_compression_supervisor.py:1281,1311`,
+`node27_timeseries_compression_capture.py:338-340`) keep the superuser;
+`node27_cold_governance_collection.py:246`, `node27_external_contract_snapshot.py:115`
+and `node27_river_identity_backfill.py:289` belong to lanes with no converted
+template. On `pg_toast` specifically, `compressed_chunk_cold_residency.py` models
+TOAST members for classification but never names them in SQL — `_lock_sql` is fed
+by `lockable_heaps()` (`relkind == "r"`, TOAST heaps are `'t'`) and `_move_sql` by
+`origin_shell_members()`; the TOAST relocation rides the
+`decompress_chunk`/`compress_chunk` rewrite. The one direct
+`ALTER TABLE pg_toast.… SET TABLESPACE`
+(`compressed_chunk_cold_probe/scenarios.py:80-83`) runs against the probe's own
+disposable cluster as that cluster's superuser. Therefore **no
+`GRANT USAGE ON SCHEMA pg_toast` and no `GRANT pg_read_all_stats` is granted.**
+`test_converted_lanes_do_not_read_superuser_gated_catalogs` fails the suite if a
+converted lane later grows one of these reads.
+
+The one-time `CREATE TABLESPACE nhms_cold` (#1894) stays superuser by nature and
+lives in the install/probe paths (`node27_cold_tablespace_engine.py:201`,
+`compressed_chunk_cold_probe/shell.py:319`), not in the recurring unit.
+
+### 9.3 Provision (staged: additive first, ownership second)
+
+Both phases run from the deployed checkout on node-27,
+`docker exec -i nhms-db psql -U nhms -d nhms` under the hood. The script is
+**idempotent** and must be re-run after every migration (§9.6).
+
+```bash
+# Phase 1 — ADDITIVE. Safe on the live primary with every unit still running as
+# `nhms`: creates the roles, DML grants, sequence USAGE, default privileges and
+# the conditional cold-tablespace grant, then runs the negative
+# COPY ... FROM PROGRAM probes and a NON-strict audit. Executes no
+# `ALTER ... OWNER TO`, takes no relation lock.
+# Read them, never type them into the command line: an `export VAR='…'` lands
+# verbatim in ~/.bash_history (and in the scrollback of a shared ssh session).
+# `read -rs` echoes nothing and stores nothing. Unset = leave an EXISTING role's
+# password unchanged; a role this run CREATES then has no password and cannot log
+# in over TCP until a later run sets one.
+read -rs NODE27_INGEST_RW_PASSWORD   && export NODE27_INGEST_RW_PASSWORD
+read -rs NODE27_DOWNLOAD_RW_PASSWORD && export NODE27_DOWNLOAD_RW_PASSWORD
+bash scripts/node27_provision_write_roles.sh --roles-only
+unset NODE27_INGEST_RW_PASSWORD NODE27_DOWNLOAD_RW_PASSWORD
+```
+
+Expected: `NOTICE: copy-from-program refused for …` twice, all five privilege
+flags `f` for both roles, the rule/trigger inventory showing exactly the four
+allow-listed `met` triggers, and an owner-drift list that still shows `nhms`
+everywhere — that list is *expected* in this phase, and the run exits 0. This
+phase also installs the `nhms_guard_no_write_role_rules_triggers` event trigger,
+which is why it is run **before** the merge and before any ownership transfer.
+
+Password handling: the two values live only in the operator's shell environment
+and are forwarded to `psql` **by name** (`docker exec -e VAR`), so they never
+appear in the repo, in an argv, in `docker inspect`, or in the runner's
+`bash -x` execution trace (the presence check uses `${!var:+x}`, which traces as
+`[[ -n x ]]`). What `-e VAR` does **not** hide: the value is in the environment
+of the operator's shell, of the `docker` client process and of `psql` inside the
+container, all readable by any process running as the same uid (`/proc/<pid>/environ`,
+`docker inspect` on the exec, `ps eww` on some systems) — it is kept out of
+argv, the repo and the server log, not out of the machine. `ALTER ROLE … PASSWORD`
+is logged verbatim by the server whenever `log_statement` is `ddl`/`mod`/`all`,
+so the SQL wraps both ALTERs in `SET log_statement = 'none'` /
+`SET log_min_duration_statement = -1` and restores them immediately after
+(proved against a container started with `-c log_statement=ddl`; see the
+transcript appendix). Residual: if the `ALTER ROLE` itself **fails**,
+`log_min_error_statement` still writes the statement to the log — treat a failed
+password set as a credential to rotate.
+
+```bash
+# Phase 2 — OWNERSHIP TRANSFER. Timer-stopped window (§9.4).
+bash scripts/node27_provision_write_roles.sh
+```
+
+Phase 2 additionally captures `relacl` and `nhms_display_ro`'s effective
+`SELECT` set before and after, runs the transfer, diffs both, applies the **TEMP
+tightening**, and ends with the **strict** audit.
+
+The tightening is `REVOKE TEMPORARY ON DATABASE nhms FROM PUBLIC` followed by
+`GRANT TEMPORARY ON DATABASE nhms TO nhms_display_ro`. It is the only statement
+in this change that takes a privilege away, which is exactly why it is here and
+not in phase 1: phase 1 must stay additive and reversible on a live primary
+before the merge. What it buys is prevention rather than detection — `pg_temp`
+is the only schema in which a write role can create a function, and a function
+it authors is a body a superuser writer would evaluate (§9.1). Measured on the
+container (transcript §16): after it, `CREATE TEMP TABLE` and
+`CREATE FUNCTION pg_temp.x()` are refused for both write roles and still work
+for `nhms` and `nhms_display_ro`; INSERT into a new chunk, `compress_chunk`,
+`decompress_chunk`, `drop_chunks`, `ANALYZE` and `SET TABLESPACE` under
+`nhms_ingest_rw` are unaffected; `--roles-only` on a fresh database leaves
+`datacl` untouched. If some other role on node-27 turns out to need TEMP, grant
+it explicitly next to the display grant — do not put it back for `PUBLIC`.
+
+How the transfer treats the display API — it is public, cannot be stopped, and
+holds `AccessShareLock` on served relations while `ALTER … OWNER TO` wants
+`AccessExclusiveLock` down the chunk tree:
+
+- one autocommitted `ALTER … OWNER TO` statement **per relation** (psql
+  `\gexec`), never one `DO` block and never one transaction. The
+  `AccessExclusiveLock` is held for **one statement** — for a hypertable, the
+  whole chunk tree within that one statement — bounded by that `ALTER`'s own
+  `lock_timeout`, and released at its end rather than at the end of the loop. A
+  display query arriving mid-`ALTER` waits for **that statement**, not for the
+  rest of the pass;
+- `SET lock_timeout = '5s'`, and a relation that times out is skipped, not
+  waited on;
+- up to 5 passes, each re-selecting only what is still owned by somebody else.
+  **The effective retry window is
+  `max-passes × lock_timeout + (max-passes − 1) × pass-interval`** — by default
+  5 × 5 s + 0 = 25 s of wall clock, because the passes run back-to-back; with
+  `--pass-interval 30` the same 5 passes span 25 s + 4 × 30 s = 145 s, since
+  the interval is slept *between* passes and never after the last one. Against a
+  holder that never releases inside that window the run ends as a partial
+  transfer (exit 3), not as an unbounded wait. Widen it with `--max-passes` /
+  `NODE27_WRITE_ROLES_MAX_PASSES` (at most 100), or space the passes with
+  `--pass-interval <seconds>` / `NODE27_WRITE_ROLES_PASS_INTERVAL` (default `0`,
+  at most 3600; the interval is only slept when another pass will actually run)
+  when the holder is a long display scan rather than a transient one. Both upper
+  bounds are typo guards and refuse with exit 2 — the cutover runs in a
+  timer-stopped window;
+- tables/partitioned tables before sequences (an `OWNED BY` sequence follows its
+  table; a standalone `ALTER SEQUENCE … OWNER TO` on one is refused), then views
+  and materialized views;
+- an absent schema (`flood` is provisioned outside `db/`) and an absent
+  `nhms_cold` tablespace are tolerated, not fatal.
+
+**Exhaustion is a partial, audit-visible transfer, never a rollback.** The audit
+lists the relations still owned by `nhms`, the runner exits 3, and the env
+cutover does not proceed. That state is safe: every unit still connects as the
+superuser `nhms`, for which the owner check short-circuits, so tiering and
+ANALYZE keep working on relations `nhms` no longer owns. Re-run the script.
+
+Exit codes: `0` clean · `2` usage/environment · `3` refused or incomplete
+transfer · `4` `nhms_display_ro`'s SELECT **privilege set** changed. Anything
+non-zero means **do not cut the env files over**.
+
+Every `docker exec … psql` invocation in **both** modes has its status
+mapped to `3` — the phased runs through `run_or_fail`, the trailing strict audit
+through its own captured status (a display-SELECT-set regression, exit 4,
+preempts it) — so the underlying status (psql's 1 fatal / 2 connection / 3
+script error under `ON_ERROR_STOP`, or docker's own: `1` for a missing
+container, `125` for a docker-level failure, `126` for a non-executable command
+and `127` for a missing one) never leaks as a runner code — `2` would otherwise read as
+this script's "usage / environment error" and `1` is not a documented code at
+all. The refusal line names the failing step, e.g.
+`FAILED -- remaining-relation count after pass 1 (docker exec/psql exit 2)`.
+
+What exit 4 measures, and only this: `has_table_privilege(nhms_display_ro, rel,
+'SELECT')` per relation in the six schemas, identical before and after.
+**Limit:** a view or matview *executes* as its **owner** (PG 15 defaults to
+`security_invoker = false`), so transferring a view whose body reads a relation
+**outside** the six application schemas can make it unreadable for display while
+that privilege set stays byte-identical — the gate cannot see it. T7 therefore
+enumerates relkind `v`/`m` in the six schemas together with their `pg_depend`
+targets outside them **before** the transfer (expected empty on node-27); if the
+enumeration is non-empty, add a `SET ROLE nhms_display_ro; EXPLAIN SELECT`
+execution probe before proceeding.
+
+**The audit refuses on ANY role membership, in BOTH directions, in every mode.**
+Both phases read `pg_auth_members` for `nhms_ingest_rw` and `nhms_download_rw`
+and raise (psql exit 3, runner exit 3) on either shape: a membership the write
+role *holds* (`SECURITY REGRESSION: role X is a member of Y`) and a grant of the
+write role *to somebody else* (`SECURITY REGRESSION: role X has been granted to
+Y`). The second one matters as much as the first: `GRANT nhms_ingest_rw TO
+nhms_display_ro` leaves every flag false and the writer holding no membership at
+all, while letting the read-only display credential `SET ROLE nhms_ingest_rw`
+into the whole write and ownership set (measured in the container transcript). The five `pg_roles` flag columns
+cannot see one: a single `GRANT pg_write_server_files TO nhms_ingest_rw` leaves
+all five `f` while restoring server-side file access through `COPY`, and a
+membership in the migration role restores everything it can do. The two write
+roles need no membership — their whole privilege set is relation ownership plus
+the explicit grants above — so any row is a regression, not a policy judgement.
+Revoke it before re-running; do not widen the predicate.
+
+The audit likewise checks the cold-tablespace grant: when `nhms_cold` exists,
+`has_tablespace_privilege('nhms_ingest_rw','nhms_cold','CREATE')` must be true
+(hard failure under the strict audit, `WARNING` under `--roles-only`); when it is
+absent the run says so loudly instead of skipping in silence — the `GRANT` is a
+`\gexec` over `pg_tablespace` and emits nothing when the tablespace is missing.
+
+**A revoked `nhms_cold` CREATE grant does not redden `--roles-only` or full
+mode**, because both run `do_roles=on` and re-issue the `GRANT` before the audit
+looks; it reddens only the audit-only invocation
+(`-v do_roles=off -v do_ownership=off -v do_audit=on -v strict_audit=on`, exit
+3 — non-strict warns). The same holds for the rule/trigger event trigger, which
+the additive phase re-creates. A planted expression or a disabled trigger, by
+contrast, is state the provision phases never touch, so it reddens every strict
+invocation. That is the point of running the audit-only
+invocation as its own check (§9.6), not only as the tail of a provision run.
+
+**Rules and triggers.** Every mode prints the inventory of rules and
+non-internal triggers in the six schemas **and in the `_timescaledb_internal`
+relations the write roles own** (chunks and `_compressed_hypertable_N` follow
+their parent hypertable through the transfer; TimescaleDB's own catalog tables
+stay superuser-owned and out of scope); the strict audit refuses anything
+outside the four allow-listed `met` triggers from migration 000043, and refuses
+a missing, disabled or non-superuser-owned
+`nhms_guard_no_write_role_rules_triggers`. When a later migration adds a trigger
+in one of those schemas, add it to the allow-list in
+`db/roles/node27_write_roles.sql` **and** to `_ALLOWLISTED_TRIGGERS` in
+`tests/test_node27_write_roles.py` in the same PR — the guard test derives the
+expected set from `db/**` and fails otherwise. All four must also be **present**
+(`count(*) = 4` — a dropped guard leaves nothing for an inventory to list) and
+still **enabled** (`tgenabled = 'O'` — `ALTER TABLE … DISABLE TRIGGER` leaves the
+trigger in the inventory but switches its guard off). TimescaleDB's
+`ts_insert_blocker` is excluded from the inventory by **function identity**, not
+by name: a `ts_insert_blocker` whose `tgfoid` is not
+`_timescaledb_internal.insert_blocker()` is a planted trigger and is reported.
+
+**Stored expressions.** Every mode also prints the function-provenance sweep — a
+one-line summary (`N expression(s)/trigger(s) scanned, M distinct function(s)
+referenced, K untrusted for a superuser writer`) plus one line per finding, each
+naming the leg that fired (`-- temp-schema function`,
+`-- owner <role> is not a superuser`, `-- NOT executable by nhms_ingest_rw`,
+`-- not on the migration allow-list`) — and the strict audit refuses any column `DEFAULT`, `CHECK`,
+rule action or trigger function that reaches an untrusted function (§9.1). A
+finding here is not a style problem: the expression runs as whoever writes the
+row, which during a migration or a replay is the superuser. Same re-run rule as
+above — the sweep reddens the audit-only invocation, and both the additive and
+full runs re-check it as their tail.
+
+**T7 expectation on node-27, stated as a number.** The first `--roles-only`
+sweep of the production catalog read `138 expression(s)/trigger(s) scanned, 19
+distinct function(s) referenced, 2 untrusted for a superuser writer` — the two
+being `pg_catalog.int8` (`000035`'s `BIGINT DEFAULT 0` counters and the `flood`
+counters) and `pg_catalog.jsonb_typeof` (the `flood.run_product_quality`
+`CHECK`s). Both are now on the allow-list with their provenance recorded
+(§9.1), so the T7 re-run must read **`0 untrusted`**; the scanned and distinct
+counts are catalog-shaped and will move with the catalog. A **non-zero** count
+on the re-run is a new finding and is read the same way the first two were:
+identify the authoring migration before touching the list, and extend the list
+rather than the predicate.
+
+**TEMP and schema `CREATE`.** Every mode prints both authoring-surface states:
+`has_database_privilege(…, 'TEMP')` for `nhms`, `nhms_display_ro` and the two
+write roles, and `create_on_schemas` — the schemas each write role holds
+`CREATE` on across **every** `pg_namespace` row, expected `(none)` after the
+tightening. Both **verdicts** are strict-only: a write role holding TEMP, or
+`CREATE` on any schema, is an error in the strict audit and is not even
+mentioned in `--roles-only`, because that phase deliberately has not applied the
+tightening yet (and is the invocation that runs with `strict_audit` off) — while
+it still holds TEMP through PUBLIC it also holds `CREATE` on the auditing
+session's own `pg_temp_N`, which is a true statement about a tightening that has
+not run. The mandatory audit-only invocation of §9.6 runs strict, so either
+privilege re-granted after the cutover is caught there.
+
+Never used, and asserted absent by the guard test: `REASSIGN OWNED BY nhms`
+(moves the database, the schemas and extension-adjacent objects) and
+`GRANT nhms TO <writer>` (hands the superuser straight back through membership).
+
+### 9.4 Cutover (post-merge, one session)
+
+1. Stop `nhms-node27-timeseries-compression.timer`,
+   `nhms-node27-timeseries-retention.timer` and the autopipe timer; confirm no
+   in-flight tick, `compress_chunk` or `drop_chunks` in `pg_stat_activity`
+   (`drop_chunks` takes `AccessExclusiveLock` on the same chunk tree the transfer
+   wants). Run that check **as the superuser `nhms`** — see §9.2: the
+   `query`/`state` columns of other users' sessions are masked for a
+   non-`pg_read_all_stats` role, so the same query as `nhms_ingest_rw` would look
+   quiescent no matter what is running. The display API keeps running.
+2. Run phase 2 above. Check: owner-drift list empty, display SELECT-set diff
+   empty, rule/trigger inventory limited to the four allow-listed `met`
+   triggers (no `_timescaledb_internal` row: chunks and
+   `_compressed_hypertable_N` are in scope and must be clean), function-provenance
+   sweep summary ending `0 untrusted for a superuser writer`,
+   `create_on_schemas` = `(none)` for both write roles and `has_temp` = `f` for
+   both (the two authoring-surface states, §9.3),
+   `## audit: OK -- no owner drift`.
+3. Escalation-surface sweep on the live catalog (once, in this session):
+   `SELECT nspacl FROM pg_namespace WHERE nspname='public'` (no legacy `CREATE`
+   to `PUBLIC`), `SECURITY DEFINER` functions executable by either write role
+   (expect none), and `pg_event_trigger` showing
+   `nhms_guard_no_write_role_rules_triggers` enabled and owned by `nhms`.
+   Do not read that event trigger as covering hypertables: TimescaleDB handles
+   `CREATE TRIGGER` on a hypertable without firing it (measured, transcript
+   §15), which is why the inventory follows ownership into
+   `_timescaledb_internal`. The
+   disposable container has no PostGIS and cannot stand in for this — in
+   particular, the function-provenance sweep meets PostGIS functions for the
+   first time here, and since round 4 the last leg is an **allow-list**: a
+   PostGIS function appearing in a stored expression would be reported as
+   `-- not on the migration allow-list`, and the `:opfuncid` carve-out does not
+   readmit it because that carve-out is `pg_catalog`-only. Expected on node-27:
+   **0** — `db/migrations/**` reference none in a swept clause (`geometry(...)`
+   in the table definitions is typmod syntax, and `000037`'s `ST_Multi` sits in
+   a one-time `ALTER COLUMN … USING`, neither of which is stored). Any hit is
+   investigated before the transfer, not waved through. Two entries that WILL
+   appear and are carve-out-covered, so they are not findings:
+   `pg_catalog.jsonb_object_field_text` and `pg_catalog.textregexeq`, the `->>`
+   and `~` operators inside `000048`'s `STORED` generated column. Print the full
+   distinct-function inventory into the receipt (transcript §18.1 shows the
+   shape) so the allow-list can be read against what the live catalog actually
+   references.
+4. Restart the timers.
+5. Per-component run under the new roles from a detached worktree with scratch
+   env files, **before** touching the live env files: autopipe dry tick (both
+   stats-guard legs must report `ok`, not `warning`), compression `--enforce` on
+   one eligible chunk (or dry-run if none is eligible), retention dry-run,
+   cold-residency dry-run, download dry-run as the no-DB control.
+6. Cut the env files over in this order, backing each up as `*.env.pre-1774`
+   first, restarting the unit and receipting it (`journalctl` + the unit's own
+   receipt + `pg_stat_activity.usename`):
+   `node27-download.env` → `node27-ingest.env` →
+   `node27-timeseries-compression.env` + `node27-cold-residency.env` →
+   `node27-timeseries-retention.env`.
+7. Redacted `grep` of `/home/nwm/NWM/infra/env/*.env`: no `nhms:` DSN user and
+   no `PGUSER=nhms` outside `node27-timeseries-compression-replay.env` and
+   `node27-archive-rebuild-drill.env`.
+
+### 9.5 Rollback
+
+Restore the unit's `*.env.pre-1774` file and restart it. Ownership stays with
+`nhms_ingest_rw` and that is fine: `nhms` is a superuser and is unaffected by
+not owning the relations. There is no ownership rollback step, and none is
+needed.
+
+### 9.6 Re-run after every migration — mandatory
+
+A migration runs as `nhms` and creates its tables owned by `nhms`. Until the
+provision script is re-run:
+
+- ingest can still read and write them (default privileges), so nothing breaks
+  visibly;
+- but their `ANALYZE` is skipped with a warning, i.e. the #1643/#1468 guard
+  silently stops covering those tables;
+- and if the migration created a **hypertable**, the drift is not a warning at
+  all: `compress_chunk` and `drop_chunks` refuse outright with `must be owner of
+  hypertable`, so the compression and retention lanes **fail** on it rather than
+  degrading. Nil today only because both lanes hard-filter to the two existing
+  hypertables (`scripts/node27_timeseries_retention.py:166`) — that is a property
+  of those filters, not of the grants;
+- and the audit reports the owner drift.
+
+So: **after every `migration_apply` on node-27, run
+`bash scripts/node27_provision_write_roles.sh` and confirm the audit is clean.**
+The full-mode audit exits 3 on drift precisely so this cannot be forgotten
+quietly.
+
+**And run the audit-only invocation BEFORE every superuser-write session too**
+— a migration apply, a seed, a replay `pg_restore`:
+
+```bash
+docker exec -i nhms-db psql -U nhms -d nhms -X -v ON_ERROR_STOP=1 \
+  -v do_roles=off -v do_ownership=off -v do_audit=on -v strict_audit=on \
+  < db/roles/node27_write_roles.sql
+```
+
+An audit is **detection**, and a planted rule, trigger or column `DEFAULT` fires
+on the *next* superuser write — which is the session you are about to open.
+Running it only afterwards means the first thing it can detect has already
+executed as `nhms`. This invocation is also the only one that can red on a
+revoked `nhms_cold` grant, a dropped event trigger, a re-granted TEMP or a
+re-granted schema `CREATE` (the phased runs re-issue the first three before
+auditing, §9.3).
+
+Every invocation, strict or not, **prints both authoring-surface states**:
+`has_database_privilege(<role>, current_database(), 'TEMP')` for the four roles,
+and the schemas each write role holds `CREATE` on. Expected on a cutover
+database:
+
+```
+     rolname      | create_on_schemas
+------------------+-------------------
+ nhms_download_rw | (none)
+ nhms_ingest_rw   | (none)
+```
+
+If the strict audit names a schema there, **revoking is not the whole
+remediation**: the grant is gone but anything the role authored while it held
+the grant is not, and the provenance sweep does not join `pg_operator`
+(measured, transcript §19.5 — an operator authored during the drift window
+leaves the strict audit back at exit 0). Revoke, then look for objects owned by
+the write role in that schema (`pg_proc`, `pg_operator`, `pg_type`) and for
+stored expressions that reach them, before the next superuser write. Two
+node-27-specific cases to expect on the first live run: a legacy
+`GRANT CREATE ON SCHEMA public TO PUBLIC` (the ACL a `pg_upgrade` carries
+forward — remediation is `REVOKE CREATE ON SCHEMA public FROM PUBLIC`, which is
+the same finding T7's `nspacl` step looks for), and, before the cutover, the
+auditing session's own `pg_temp_N` (see the next paragraph).
+
+It runs **strict**, and that matters twice over: strict is what turns every
+finding into exit 3 instead of a `WARNING` nobody reads in a scrollback, and the
+TEMP and schema-`CREATE` verdicts exist only in strict mode — before the
+full-mode tightening the write roles still hold TEMP through PUBLIC, which gives
+them `CREATE` on the auditing session's own `pg_temp_N`, so `--roles-only` would
+otherwise warn about a statement it has deliberately not run. It has two
+preconditions. Full mode
+must already have run on this database — before the cutover, use `--roles-only`
+(non-strict) instead, whose audit deliberately does not judge a tightening that
+has not happened yet. And migration `000043` must be applied: the presence leg
+counts the four allow-listed triggers and reds at `4` ≠ found, so a strict audit
+against a database that never had them (a fresh CI fixture, a restore taken
+before `000043`) reports a security regression that is really a missing
+migration. Apply the migrations first, then audit.
+
+One consequence of the round-4 allow-list belongs here too: a migration that
+starts referencing a function the allow-list does not carry makes **this**
+invocation exit 3 on a perfectly legitimate catalog. That is deliberate and
+fail-closed, but it must not be discovered in the maintenance window — the unit
+test that derives the expected set from `db/migrations/**` is what moves the
+failure to CI, and `scripts/select_ci_tests.py` carries the
+`db/migrations/*.sql` → `tests/test_node27_write_roles.py` row that makes the
+PR-scoped selector actually run it, so a migration PR that adds a `DEFAULT`,
+`CHECK`, generated column or trigger function reddens there first. If this audit ever reports
+`-- not on the migration allow-list` for something a migration legitimately
+introduced, extend the array in `db/roles/node27_write_roles.sql`, re-run the
+unit test, and re-run this audit; do not switch to non-strict to get past it.
+
+That is not hypothetical: T7's first `--roles-only` run reported exactly two
+such names, `pg_catalog.int8` and `pg_catalog.jsonb_typeof` (§9.1, §9.3). The
+procedure that closed them is the procedure to repeat. **Find the authoring
+migration first**, and the finding falls into one of two cases:
+
+1. the migration is in `db/migrations` — extend `_MIGRATION_ALLOW_LIST` **and**
+   the derivation in `tests/test_node27_write_roles.py` so the tree re-derives
+   the name (the equality assertion means a name added to the tuple alone is
+   still red), then the SQL array;
+2. the migration is in `public.schema_migrations` but **not** in the repository
+   — check with
+   `psql -U nhms -d nhms -Atc "SELECT version FROM public.schema_migrations ORDER BY 1"`
+   against `ls db/migrations`. Then add the name to `_LEDGER_ALLOW_LIST` with a
+   reason that names the migration file, and file the repo/production drift
+   separately; it is a real finding of its own.
+
+There is no third case. A name whose authoring migration cannot be identified in
+either place is **not** a list-extension candidate — it is the finding the sweep
+exists to make, and it is investigated as a planted expression.
 
 ## Rollback (unit-level, not data-level)
 

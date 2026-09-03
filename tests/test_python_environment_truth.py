@@ -218,3 +218,94 @@ def test_instruction_mutations_are_red(surface: str) -> None:
         assert mutated != text, f"{surface}: mutation must differ for {clause!r}"
         with pytest.raises(AssertionError, match="missing"):
             _assert_instruction_clauses(mutated, name=surface)
+
+
+# ---------------------------------------------------------------------------
+# #1765 — pytest temporary directories are bounded
+# ---------------------------------------------------------------------------
+
+PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
+TIER_RUNBOOK_PATH = REPO_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md"
+BRINGUP_CHECKLIST_PATH = REPO_ROOT / "docs/runbooks/node-27-bringup-checklist.md"
+
+# The host discipline, byte-for-byte as an operator copy-pastes it. The
+# `mkdir -p` is part of the contract, not decoration: `TMPDIR` fails open.
+TMPDIR_DISCIPLINE = "mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp"
+
+
+def test_pytest_config_bounds_tmp_path_growth() -> None:
+    """Scenario "Passing tests leave no tmp_path residue".
+
+    Parsed, not grepped: a commented-out or wrongly-sectioned key would satisfy
+    a substring check while pytest ignored it. `failed` (not `none`) because a
+    failing test's directory is evidence.
+    """
+    import tomllib
+
+    config = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    ini_options = config["tool"]["pytest"]["ini_options"]
+
+    assert ini_options["tmp_path_retention_policy"] == "failed"
+
+
+def test_this_sessions_own_tmp_path_policy_is_the_configured_one(
+    request: pytest.FixtureRequest,
+) -> None:
+    """The parsed value above is only a promise; this is the running session's
+    resolved setting, which is what actually removes the directories.
+    """
+    assert request.config.getini("tmp_path_retention_policy") == "failed"
+
+
+@pytest.mark.parametrize(
+    "surface",
+    [
+        "docs/runbooks/tier-node27-timeseries-storage.md",
+        "docs/runbooks/node-27-bringup-checklist.md",
+        "instructions/agents/shared.md",
+        "CLAUDE.md",
+        "AGENTS.md",
+    ],
+)
+def test_node27_tmpdir_discipline_is_documented_where_operators_look(surface: str) -> None:
+    """Scenario "node-27 temporary root is off the root volume".
+
+    The code half of this bound is a repo setting; the host half is a profile
+    export that no test can enforce, so the only durable thing is that every
+    surface an operator reaches for carries the same command verbatim.
+    """
+    text = (REPO_ROOT / surface).read_text(encoding="utf-8")
+
+    assert TMPDIR_DISCIPLINE in text
+
+
+def test_shared_basetemp_is_never_introduced() -> None:
+    """`--basetemp` clears its target on every run and is shared config, so it
+    would hit the Mac and CI as well. The retention policy is the bound; this
+    pins that the rejected alternative did not sneak back in.
+    """
+    # Comment lines are excluded: the `[tool.pytest.ini_options]` comment names
+    # the rejected alternative on purpose, and a raw substring check would
+    # forbid documenting why it was rejected.
+    directives = [
+        line
+        for line in PYPROJECT_PATH.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+
+    assert not [line for line in directives if "basetemp" in line]
+
+
+def test_capacity_check_covers_the_root_volume() -> None:
+    """`/` was absent from every human capacity check while it was the volume
+    that filled. All three instruction surfaces name it now.
+    """
+    for surface in INSTRUCTION_SURFACES:
+        text = (REPO_ROOT / surface).read_text(encoding="utf-8")
+        assert "df -h / /home /data/GHDC" in text, surface
+
+    ops_text = (REPO_ROOT / "docs/runbooks/current-production-ops.md").read_text(
+        encoding="utf-8"
+    )
+    assert "df -h / /home /data/GHDC" in ops_text
+    assert "df -h /home /data/GHDC" not in ops_text

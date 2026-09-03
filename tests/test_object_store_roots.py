@@ -224,7 +224,9 @@ def test_state_manager_uses_object_store_root(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setenv("OBJECT_STORE_ROOT", str(object_store_root))
     monkeypatch.setattr(
         "packages.common.state_manager.PsycopgStateSnapshotRepository.from_env",
-        lambda: FakeStateSnapshotRepository(),
+        # #1728: the facade now forwards a keyword-only application_name through
+        # to the repository; the stub must accept the same seam.
+        lambda *, application_name=None: FakeStateSnapshotRepository(),
     )
 
     manager = StateManager.from_env()

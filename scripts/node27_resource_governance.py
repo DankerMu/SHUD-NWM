@@ -544,6 +544,27 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
     )
 
 
+# #1765: the audit measured `/` below its own critical threshold every day
+# while the root volume filled, and still exited 0 with no `OnFailure=` on its
+# unit — the signal existed and was structurally unable to reach anyone. This
+# is the stderr anchor the unit routes to the journal and the alert handler
+# quotes; the receipt is NOT changed (`status` stays `completed`: the audit
+# did complete, it is the finding that is critical).
+CRITICAL_DIAGNOSTIC_PREFIX = "RESOURCE_GOVERNANCE_CRITICAL:"
+
+
+def _critical_codes(receipt: Mapping[str, Any]) -> list[str]:
+    """Codes of every `critical` recommendation, in receipt order."""
+    recommendations = receipt.get("recommendations")
+    if not isinstance(recommendations, list):
+        return []
+    return [
+        str(item.get("code"))
+        for item in recommendations
+        if isinstance(item, Mapping) and item.get("severity") == "critical"
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
@@ -560,7 +581,16 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         indent = 2 if args.pretty else None
         print(json.dumps(receipt, indent=indent, sort_keys=True, default=_json_default))
-    return 0 if receipt.get("status") == "completed" else 1
+    if receipt.get("status") != "completed":
+        return 1
+    # Receipt first, exit code second: a critical finding must never cost the
+    # evidence. `--quiet` suppresses stdout only — the wrapper runs with it, so
+    # this stderr line is the only thing the journal (and therefore the
+    # `OnFailure=` mail body) can quote.
+    critical_codes = _critical_codes(receipt)
+    for code in critical_codes:
+        print(f"{CRITICAL_DIAGNOSTIC_PREFIX}{code}", file=sys.stderr)
+    return 1 if critical_codes else 0
 
 
 if __name__ == "__main__":

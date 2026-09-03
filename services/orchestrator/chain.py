@@ -94,6 +94,7 @@ from services.orchestrator.reservation import (
     slurm_comment_for,
 )
 from services.orchestrator.retry import RetryConfig, RetryService, compute_backoff_seconds
+from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, DURABLE_HYDRO_SUCCESS_STATUSES
 from services.orchestrator.time_consistency import check_three_way_time_consistency
 from services.slurm_gateway.config import SlurmGatewaySettings
 from services.tile_publisher import PublishError, TilePublisher
@@ -204,8 +205,13 @@ _CHAIN_MANIFEST_COMPAT_TOP_LEVEL_FORWARDERS = MappingProxyType(
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$")
 _SAFE_AREA_RE = re.compile(r"^[\d,.\-\s]+$")
 
-ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running"}
-COMPLETED_HYDRO_STATUSES = {"succeeded", "parsed", "published", "complete"}
+# The SAME object as scheduler_state_types.ACTIVE_HYDRO_STATUSES, not a copy. No in-module
+# consumer; the name is kept because it is a long-standing importable surface of `chain`.
+ACTIVE_HYDRO_STATUSES = ACTIVE_HYDRO_STATUSES
+# The SAME object as scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES (#1581), not a copy: the
+# name stays because chain_forecast_trigger._completed_hydro_statuses() reads it off this module by
+# getattr, and that seam must keep resolving to the single definition.
+COMPLETED_HYDRO_STATUSES = DURABLE_HYDRO_SUCCESS_STATUSES
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
 RAW_MANIFEST_READY_CYCLE_STATUSES = {"raw_complete", "canonical_ready", "forcing_ready", "complete", "published"}

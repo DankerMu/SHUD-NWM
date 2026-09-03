@@ -2442,6 +2442,132 @@
           "rounds": 2
         }
       ]
+    },
+    "1765": {
+      "ceilingPrs": [],
+      "gateEntries": 1,
+      "closed": [
+        {
+          "pr": 1968,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
+    },
+    "1774": {
+      "ceilingPrs": [],
+      "gateEntries": 2,
+      "closed": [
+        {
+          "pr": 1964,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
+    },
+    "1779": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1960,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1446": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1959,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1728": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1962,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
+    },
+    "1785": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1958,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "1691": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1974,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1961": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1972,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1965": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1972,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1581": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1995,
+          "outcome": "merged",
+          "rounds": 3
+        },
+        {
+          "pr": 1999,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
+    },
+    "1948": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1969,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
     }
   },
   "1736": {

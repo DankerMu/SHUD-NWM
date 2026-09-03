@@ -6,7 +6,11 @@ coverage the same tick had just refreshed (staleness is
 ``coverage.refreshed_at < run.updated_at``) and made the cron backstop recompute
 each freshly published run for nothing. Requirements covered here:
 
-* the publish UPDATE touches ``status`` only;
+* the publish UPDATE touches ``status`` only — asserted on the SET CLAUSE since
+  #1779, because the predicate now legitimately READS ``parsed_at`` as its
+  authority: a statement-wide "``parsed_at`` is absent" pin would forbid the very
+  shape the change adopts, while a SET-clause pin still forbids the write;
+* the publish predicate reads authority state and no fact table;
 * display caches still rotate on publish: the run-scoped MVT revision digest
   includes ``status``, so parsed -> published changes the tile version even with
   ``updated_at`` frozen;
@@ -48,22 +52,49 @@ def _run_row(status: str) -> dict[str, object]:
     }
 
 
-def test_publish_update_sets_status_only() -> None:
+def _publish_statement() -> str:
     publish_source = _publish_display_runs_source()
-    statement = publish_source[
+    return publish_source[
         publish_source.index("cur.execute(") : publish_source.index("return cur.rowcount")
     ]
 
-    assert "SET status = 'published'" in statement
-    assert "updated_at" not in statement, (
+
+def _publish_clauses() -> tuple[str, str]:
+    """The publish UPDATE's SET clause and WHERE clause, split at the boundary.
+
+    Split rather than searched whole because the two halves now carry OPPOSITE
+    contracts for the same column: ``parsed_at`` must never be written and must
+    be read. Asserting on the statement as one blob can only express one of
+    those, so it would have to express the weaker one.
+
+    The split is asserted, not assumed: an UPDATE that lost its WHERE clause
+    would otherwise silently hand every WHERE assertion an empty string and go
+    green while publishing every row in the table.
+    """
+    statement = _publish_statement()
+    set_at = statement.index("SET ")
+    where_at = statement.index("WHERE ")
+    assert set_at < where_at, "publish UPDATE must have a SET clause before its WHERE clause"
+    return statement[set_at:where_at], statement[where_at:]
+
+
+def test_publish_update_sets_status_only() -> None:
+    set_clause, _ = _publish_clauses()
+
+    assert "SET status = 'published'" in set_clause
+    assert "updated_at" not in set_clause, (
         "publish must not advance hydro_run.updated_at: it would re-stale the coverage "
         "refreshed during the same tick's ingest phase"
     )
-    assert "WHERE h.status = 'parsed'" in statement
+    # `updated_at` has no business in the predicate either: publish is decided by
+    # the parse, not by when the row was last touched.
+    assert "updated_at" not in _publish_statement()
+    # One assignment, not a list that grew a second column past the pin above.
+    assert set_clause.count("=") == 1, f"publish SET clause assigns more than status: {set_clause!r}"
 
 
 def test_publish_update_does_not_stamp_parsed_at() -> None:
-    """#1789: ``parsed_at`` belongs to the parser, and to nothing else.
+    """#1789/#1779: ``parsed_at`` belongs to the parser, and to nothing else.
 
     Same failure class as the ``updated_at`` pin above, one layer down: publish
     runs every tick, so a ``parsed_at`` bump here would make the column track
@@ -72,13 +103,36 @@ def test_publish_update_does_not_stamp_parsed_at() -> None:
     object-store product is newer than the ingested data, so a publish-bumped
     value would claim a currency the data does not have and silently stop
     re-ingesting genuinely recomputed runs.
-    """
-    publish_source = _publish_display_runs_source()
-    statement = publish_source[
-        publish_source.index("cur.execute(") : publish_source.index("return cur.rowcount")
-    ]
 
-    assert "parsed_at" not in statement
+    Scoped to the SET clause since #1779 made the column publish's authority
+    predicate. Reading it is sanctioned; writing it is not.
+    """
+    set_clause, _ = _publish_clauses()
+
+    assert "parsed_at" not in set_clause
+
+
+def test_publish_predicate_reads_authority_state_and_no_fact_table() -> None:
+    """#1779: the predicate is ``status = 'parsed' AND parsed_at IS NOT NULL``.
+
+    The fact-table ``EXISTS`` probe it replaces asked ``hydro.river_timeseries``
+    whether a parse had produced rows. ``hydro_run.parsed_at`` already records
+    that — stamped by the parser in the same transaction as the status flip —
+    and ``run_key`` is not a compression segmentby column, so the probe cost a
+    sequential scan of every compressed chunk on every tick.
+
+    Both halves are pinned. Dropping ``parsed_at IS NOT NULL`` would publish a
+    run whose status was edited by hand with no parse behind it; re-adding any
+    fact-table read is the regression itself.
+    """
+    _, where_clause = _publish_clauses()
+
+    assert "h.status = 'parsed'" in where_clause
+    assert "h.parsed_at IS NOT NULL" in where_clause
+    assert "river_timeseries" not in _publish_statement(), (
+        "publish must learn from hydro_run alone: the fact-table probe is what #1779 removed"
+    )
+    assert "EXISTS" not in _publish_statement()
 
 
 def test_run_scoped_mvt_revision_rotates_on_publish_without_an_updated_at_bump() -> None:

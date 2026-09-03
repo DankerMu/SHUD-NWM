@@ -1103,33 +1103,51 @@ with its real truth source. The five slots of
 each carry a schema `description` stating what the slot actually is:
 required by the verifier's exact-key check on the input bundle and by
 the schema in a v3 qualifying (non-failure) terminal document; its
-invocation semantics — argv, exit code, timings — never interpreted;
-the terminal slot re-derived from `execution.ledger` rather than copied
-from what was authored; and the authored value itself a
-closure node, retained in the terminal `source_manifest`, only when it
-is exactly a `{path, sha256, bytes}` mapping — with any well-formed
-reference nested inside a value of another shape still closure-checked
-in its own right. The runbook narrative describing these
-referenced contracts SHALL name the five keys and SHALL NOT describe
-them as optional.
+authored value SHALL be exactly a `{path, sha256, bytes}` artifact
+reference (absolute path, lowercase 64-hex `sha256`, non-negative integer
+`bytes`), checked by the verifier's input-shape gate inside
+`verify_bundle` before that function resolves or uses any artifact
+closure, so that a value of any other shape — a mapping with extra or
+missing keys, a mapping that wraps a reference, a string, `null` — fails
+the run closed and never qualifies. The gate's own rejection names the
+slot; when the verifier CLI resolves the artifact closure ahead of
+`verify_bundle`, a wrapper around an unavailable reference MAY fail
+first at the closure node instead, which is fail-closed all the same.
+Its invocation semantics — argv, exit code, timings — are never interpreted;
+the terminal slot is re-derived from `execution.ledger` rather than copied
+from what was authored; and the authored value itself is a
+closure node, retained in the terminal `source_manifest`. The five
+slots and the raw-bytes dereferencer (`_artifact_ref_from_raw`) SHALL
+share one definition of "well-formed reference" (one helper, one message
+set); the byte-loading and streaming dereferencers keep their own
+existing checks and messages unchanged. The runbook narrative
+describing these referenced contracts SHALL name the five keys and SHALL
+NOT describe them as optional.
 
 The description SHALL NOT claim that the authored value is ignored,
 unread, or absent from the terminal document; SHALL NOT claim that the
 terminal slot always differs from the authored value; and SHALL NOT
-claim that existence and hash enforcement applies unconditionally. All
-three are false. Two live bundle shapes exist and an unqualified claim
-must hold for both: the legacy hand-assembled shape, whose five slots
-name five distinct files, and the committed bundle author's shape
+claim that any non-reference shape is tolerated or merely un-checked.
+All three are false. Two live bundle shapes exist and an unqualified
+claim must hold for both: the legacy hand-assembled shape, whose five
+slots name five distinct files, and the committed bundle author's shape
 (`scripts/node27_timeseries_compression_bundle_author.py`), whose five
-slots are all the ledger reference itself.
+slots are all the ledger reference itself. The input-shape gate SHALL
+read only the authored slot values and SHALL write nothing into the
+terminal document: for a qualifying bundle of either shape the five
+terminal slots come from `execution.ledger` and `source_manifest` from
+the artifact closure alone, so the gate decides only whether the run
+qualifies.
 
 Keeping the slots is the recorded decision; this requirement governs
-what the contract says about them, not whether they exist. The live
-argv contract (`_validate_exact_command_argv` / `_concrete_argv`), the
+what the contract says about them and the shape the verifier accepts,
+not whether they exist. The live argv contract
+(`_validate_exact_command_argv` / `_concrete_argv`), the
 `database_audit_proof` `{"const": false}` pins, and the #1261 ruling
 that launcher/interpreter identity is producer-side attestation rather
 than a verifier gate all stay untouched, and no launcher/interpreter
-identity gate is introduced.
+identity gate is introduced. The three-key criterion of
+`packages/common/evidence_io.artifact_references` is unchanged.
 
 #### Scenario: Every surviving slot is annotated with its truth source
 
@@ -1138,7 +1156,8 @@ identity gate is introduced.
   name ends in `invocation` is collected
 - **THEN** the collected set is exactly the five known slots, and each
   carries a non-empty `description` naming `execution.ledger` as the
-  source the verifier re-derives the slot from
+  source the verifier re-derives the slot from and stating that any
+  shape other than a `{path, sha256, bytes}` reference fails closed
 
 #### Scenario: Authored invocation content is not v3 truth
 
@@ -1149,25 +1168,28 @@ identity gate is introduced.
 - **THEN** verification still qualifies the bundle, because no code
   reads argv, exit codes or timings out of those files
 
-#### Scenario: Enforcement applies only to a well-formed artifact reference
+#### Scenario: A well-formed reference is enforced at the artifact closure
 
 - **WHEN** a slot's authored value is exactly a
   `{path, sha256, bytes}` mapping naming a path that is absent, a
   symlink, or whose hash or size disagrees with the file
 - **THEN** the run fails closed at the artifact-closure check
 
-- **WHEN** a slot's authored value is any other shape that contains no
-  nested reference — a mapping with an extra scalar key, a string, or
-  `null`
-- **THEN** no closure check reaches it and verification can still
-  qualify, because the evidence schema is applied to the terminal
-  document rather than to the input bundle
+#### Scenario: Any non-reference shape fails closed at the input-shape gate
+
+- **WHEN** a slot's authored value is a mapping with an extra scalar
+  key, a bare string, or `null` — for any of the five slots
+- **THEN** no closure check ever reaches the value: the input-shape gate
+  rejects it with an error naming that slot, and the bundle never
+  qualifies
 
 - **WHEN** a slot's authored value is a mapping of another shape that
-  *wraps* a well-formed `{path, sha256, bytes}` reference
-- **THEN** the nested reference is still collected as a closure node in
-  its own right, and an unavailable or unsafe path inside it still
-  fails the run closed
+  *wraps* a well-formed `{path, sha256, bytes}` reference, whether the
+  wrapped path exists or not
+- **THEN** verification fails closed; when the wrapped path exists the
+  rejection comes from the input-shape gate naming the slot, and when it
+  is absent the run fails closed no later than the artifact-closure
+  check
 
 #### Scenario: A well-formed authored reference is retained in the terminal manifest
 
@@ -1176,13 +1198,14 @@ identity gate is introduced.
   document's `source_manifest` is read
 - **THEN** the five authored paths appear there with their authored
   `sha256`/`bytes`, distinct from the ledger reference that occupies
-  the five slots themselves
+  the five slots themselves, which carry the reference re-derived from
+  `execution.ledger`
 
 - **WHEN** the bundle is instead one the committed bundle author
   produced, whose five slots are all the ledger reference
 - **THEN** `source_manifest` carries that reference once rather than
   five times, because the closure deduplicates identical normalized
-  paths
+  paths, and the bundle qualifies unchanged
 
 ### Requirement: A recompute blocked by the compressed-chunk guard MUST reach a recorded terminal state instead of retrying forever
 
@@ -1326,4 +1349,56 @@ identity gate is introduced.
 - **THEN** 该小节含一份压缩前置检查清单，其中至少一项是对
   `ops.ingest_recompute_decline` 按目标窗口的可直接执行 SQL 查询，
   并说明命中时的处置（先排干或显式接受终态）
+
+### Requirement: The forcing producer, the output parser and their CLIs MUST report guard-internal failures with codes distinct from compressed-chunk-blocked
+
+`workers/forcing_producer/producer.py`, `workers/forcing_producer/cli.py`, `workers/output_parser/parser.py` and `workers/output_parser/cli.py` SHALL catch `CompressedChunkWriteError` before `CompressedChunkGuardError`, keep the existing `FORCING_COMPRESSED_CHUNK_BLOCKED` / `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` codes and `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED:` / `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED:` prefixes for the subclass only, and report `FORCING_COMPRESSED_CHUNK_GUARD_FAILED`, `OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED`, or the CLI prefixes `FORCING_PRODUCE_COMPRESSED_CHUNK_GUARD_FAILED:` / `OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED:` for the base class; a generic exception arm SHALL remain after both. The apply layer's `HANDOFF_APPLY_*` codes (already split) and the identity backfill's neutral tuple catches are outside this requirement and unchanged.
+
+#### Scenario: Real compressed-chunk hit keeps its code
+
+- **WHEN** the guard raises `CompressedChunkWriteError` inside the forcing producer or the output parser
+- **THEN** the recorded `error_code` is `FORCING_COMPRESSED_CHUNK_BLOCKED` / `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` and the CLIs print the existing `_BLOCKED:` prefix with exit 1
+
+#### Scenario: Guard failure is reported as such
+
+- **WHEN** the guard raises the base `CompressedChunkGuardError` (catalog timeout, partial window, unregistered hypertable)
+- **THEN** the recorded `error_code` is `FORCING_COMPRESSED_CHUNK_GUARD_FAILED` / `OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED` and the CLIs print the `_GUARD_FAILED:` prefix with exit 1
+
+#### Scenario: Runbook routes only blocked codes to decompress
+
+- **WHEN** an operator reads runbook §4.3.1 for a `_GUARD_FAILED` code
+- **THEN** the procedure directs DB-health / caller-bug triage, not the manual decompress procedure
+
+### Requirement: The compression runner's chunk identifier helper MUST fail closed
+
+`scripts/node27_timeseries_compression.py` SHALL expose the qualified chunk name only through a helper that validates both parts against `^[A-Za-z0-9_]+$` (byte-identical to the autopipeline `_STATS_GUARD_IDENT_RE`, pinned by a test) and raises `ValueError` on mismatch. The runner itself issues no statement that interpolates a chunk name — every chunk reference is a bound `%s::regclass` parameter — so the helper has no production consumer today; it exists so that any future interpolation site (an `ANALYZE`, for example) inherits a fail-closed identifier by construction rather than by review.
+
+#### Scenario: Malformed chunk name
+
+- **WHEN** a catalog row yields a chunk name or schema containing `"`, `;`, whitespace, or an empty string
+- **THEN** `qualified_chunk` raises `ValueError` before returning any text
+
+#### Scenario: Well-formed chunk name
+
+- **WHEN** the chunk name is `_hyper_3_8_chunk` in schema `_timescaledb_internal`
+- **THEN** the qualified name is produced unchanged, and no statement in the module interpolates it directly (a repo test asserts the module carries no f-string SQL naming a chunk or the property; the scan does not follow a local rebinding, which the property's own `ValueError` still covers)
+
+### Requirement: Recurring tiering functions SHALL run as the hypertable owner role, never as superuser
+
+`compress_chunk`, `decompress_chunk`, `drop_chunks`, chunk `ANALYZE` and `ALTER … SET TABLESPACE` on `hydro.river_timeseries` and `met.forcing_station_timeseries` SHALL be executed by a non-superuser role that owns those hypertables when invoked by a recurring runtime unit (compression, retention, cold-residency); the documented migration-class exceptions (the one-shot compression-replay supervisor, whose run plan includes one `decompress_chunk` leg alongside `pg_dump` / `migration_apply` / `pg_restore`, and the archive-rebuild drill) keep the migration role `nhms` and are recorded as such in the runtime env template and the tier runbook; ownership SHALL be transferred with explicit schema-scoped `ALTER … OWNER TO` statements (never `REASSIGN OWNED`), the role SHALL hold `CREATE` on the cold tablespace, and the provision audit SHALL assert the owner of every compression-capable hypertable.
+
+#### Scenario: Owner role compresses and drops
+
+- **WHEN** `nhms_ingest_rw` runs the compression and retention runners
+- **THEN** `compress_chunk`, `drop_chunks` and the cold-residency `SET TABLESPACE` succeed and the stats guard's chunk `ANALYZE` refreshes `last_analyze`
+
+#### Scenario: Non-owner writer is refused tiering
+
+- **WHEN** `nhms_download_rw` calls `compress_chunk` on a chunk
+- **THEN** the server refuses with an owner-required error while a privilege-shape INSERT into the hypertable still succeeds
+
+#### Scenario: A new hypertable owned by the migration role is caught
+
+- **WHEN** a migration creates a compression-capable hypertable owned by `nhms`
+- **THEN** the provision audit reports the owner drift until the script is re-run
 

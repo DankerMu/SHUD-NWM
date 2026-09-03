@@ -16,6 +16,7 @@ from packages.common.forcing_domain_handoff_apply import (
 
 RUN_A = "fcst_gfs_2026062012_basins_qhh_shud"
 RUN_B = "fcst_gfs_2026062112_basins_qhh_shud"
+RUN_HEIHE = "fcst_gfs_2026062112_basins_heihe_shud"
 DIRECT_GRID_RUN = "fcst_gfs_2026070600_dg_0123456789abcdef"
 LEGACY_SAME_CYCLE_RUN = "fcst_gfs_2026070600_basins_qhh_shud"
 NODE27_DATABASE_URL = "postgresql://node27_writer:secret@127.0.0.1:55432/nhms"
@@ -44,16 +45,22 @@ def _authority_result(**overrides: Any) -> dict[str, Any]:
 
 
 def _write_run(object_store_root: Path, run_id: str, *, handoff: bool = True) -> None:
+    # The basin comes from the run_id itself, exactly as `_discover_runs` reads
+    # it (`RUN_RE`'s `basin` group), so a manifest can never disagree with the
+    # directory name the tick discovers. Direct-grid ids carry no basin segment
+    # and keep the historical `qhh` identity.
+    legacy = autopipe.RUN_RE.match(run_id)
+    basin = legacy.group("basin") if legacy is not None else "qhh"
     input_dir = object_store_root / "runs" / run_id / "input"
     input_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "identity": {
             "run_id": run_id,
             "source_id": "gfs",
-            "model_id": "basins_qhh_shud",
-            "basin_id": "basins_qhh",
-            "basin_version_id": "basins_qhh_v2026_06",
-            "model_package_uri": "s3://nhms/models/basins_qhh_shud/v2026_06/package/",
+            "model_id": f"basins_{basin}_shud",
+            "basin_id": f"basins_{basin}",
+            "basin_version_id": f"basins_{basin}_v2026_06",
+            "model_package_uri": f"s3://nhms/models/basins_{basin}_shud/v2026_06/package/",
             "forcing_version_id": f"forc_{run_id}",
         },
         "cycle_time": "2026-06-20T12:00:00Z",
@@ -2289,3 +2296,364 @@ def test_decline_on_the_empty_init_sentinel_reopens_once_a_manifest_appears(
         )
         == set()
     )
+
+
+# --------------------------------------------------------------------------- #
+# #1647 — a statement cancelled by the 600 s budget fails its run, not the lane
+# --------------------------------------------------------------------------- #
+def test_cancelled_ingest_statement_fails_its_run_and_the_next_tick_is_normal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Accepted consequence of the 600 s statement budget, stated as behaviour.
+
+    Bounding the statement means a genuinely long ingest statement is now
+    cancelled instead of hanging. What must NOT happen is a silent loss: the
+    driver's `QueryCanceled` travels the ordinary handoff-failure path, so the
+    run is marked `failed`, the tick's return code is non-zero (visible to the
+    unit and its `OnFailure=`), and the next tick — the whole point of bounding
+    it — runs normally instead of finding the flock still held.
+    """
+    cancelled = psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True}, apply_reports={RUN_A: cancelled}
+    )
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert summary["status"] == "completed_with_failures"
+    assert summary["return_code"] == 1
+    assert summary["runs"]["failed"] == 1
+    assert [entry["run_id"] for entry in summary["runs"]["failed_runs"]] == [RUN_A]
+    assert summary["runs"]["failed_runs"][0]["stage"] == autopipe.FORCING_STAGE
+    assert autopipe.FORCING_HANDOFF_FAILED_REASON in summary["runs"]["failed_runs"][0]["error"]
+
+    # The next tick is unaffected: a fresh subject, nothing sticky left behind.
+    next_tick_root = tmp_path / "next"
+    next_tick_root.mkdir()
+    next_root, _next_calls, _next_published = _prepare_autopipe(
+        monkeypatch, next_tick_root, runs={RUN_B: True}
+    )
+    next_rc, next_summary = _run_main(capsys, next_root)
+
+    assert next_rc == 0
+    assert next_summary["runs"]["ingested"] == 1
+
+
+@pytest.mark.parametrize(
+    "site",
+    ["_basin_seeded", "_already_ingested_runs", "_publish_display_runs"],
+    ids=["pre-loop-seeded-probe", "pre-loop-already-ingested", "publish"],
+)
+def test_cancelled_statement_on_a_pre_loop_or_publish_site_propagates_out_of_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    site: str,
+) -> None:
+    """The other half of the 600 s budget's blast radius: no summary at all.
+
+    The per-run half above is contained — one run goes `failed`, the tick still
+    reports. These three sites are not: `main()` calls each of them outside any
+    `try`, so a `QueryCanceled` unwinds the whole tick. That is the accepted
+    design (a tick that cannot read what is already ingested must not invent a
+    green summary), and the consequence worth pinning is the pair: the
+    exception leaves `main()` uncaught, and NOTHING reaches stdout — no partial
+    JSON, no `completed_with_failures` object an operator or a log scraper
+    could mistake for a tick that ran. Under the module's own entrypoint
+    (`raise SystemExit(main())`) an uncaught exception is exit 1 plus a
+    traceback on stderr, which is what the unit's `OnFailure=` sees; `main()`
+    itself raises no `SystemExit`, so this asserts the exception, not an rc.
+    """
+    cancelled = psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True}
+    )
+
+    def raise_cancelled(*_args: Any, **_kwargs: Any) -> Any:
+        raise cancelled
+
+    monkeypatch.setattr(autopipe, site, raise_cancelled)
+
+    with pytest.raises(psycopg2.errors.QueryCanceled):
+        autopipe.main(
+            [
+                "--object-store-root",
+                str(object_store_root),
+                "--basins-root",
+                str(object_store_root.parent / "Basins"),
+            ]
+        )
+
+    assert capsys.readouterr().out == ""
+
+    # The next tick is unaffected — the point of bounding the statement.
+    next_tick_root = tmp_path / "next"
+    next_tick_root.mkdir()
+    next_root, _next_calls, _next_published = _prepare_autopipe(
+        monkeypatch, next_tick_root, runs={RUN_B: True}
+    )
+    next_rc, next_summary = _run_main(capsys, next_root)
+
+    assert next_rc == 0
+    assert next_summary["runs"]["ingested"] == 1
+
+
+def test_cancelled_decline_count_nulls_the_field_and_leaves_the_tick_rc_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The fourth shape: an observability read is allowed to fail, quietly.
+
+    `_active_decline_count` catches `psycopg2.Error` by design (#1781), and
+    `QueryCanceled` is one, so a cancelled count degrades to `null` in the
+    summary instead of unwinding the tick — an ingest that succeeded stays
+    green. The real function is restored over the harness double so the
+    `except` clause under test is the production one, and the raiser is
+    installed on `_connect` itself: every other database surface in this tick
+    is stubbed, so `connects == [NODE27_DATABASE_URL]` proves the count is the
+    only live connect site here, which is what makes `rc == 0` mean "the count
+    failed and nothing else did".
+    """
+    real_active_decline_count = autopipe._active_decline_count
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True}
+    )
+    monkeypatch.setattr(autopipe, "_active_decline_count", real_active_decline_count)
+
+    connects: list[str] = []
+
+    def cancelled_connect(database_url: str, **_kwargs: Any) -> Any:
+        connects.append(database_url)
+        raise psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(autopipe, "_connect", cancelled_connect)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert connects == [NODE27_DATABASE_URL]
+    assert rc == 0
+    assert summary["status"] == "completed"
+    assert summary["return_code"] == 0
+    assert summary["declines_active"] is None
+    assert summary["runs"]["ingested"] == 1
+
+
+def _seed_basin_must_not_run(**kwargs: Any) -> dict[str, Any]:
+    raise AssertionError(f"_seed_basin must not run for an already-seeded basin: {kwargs.get('basin')!r}")
+
+
+def test_cancelled_display_ready_seed_fails_that_basin_and_the_tick_still_reports(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The seed-phase shape: contained per basin, not per tick.
+
+    An already-seeded basin still gets a display-ready refresh on every tick,
+    and that helper opens three bounded connections
+    (`_model_river_network_version_id`, `_backfill_output_geometry`,
+    `_activate_model`), so the 600 s budget can now cancel it. `main()` wraps
+    exactly that call in a `try` that records `seed_failed` and `continue`s, so
+    the blast radius is one basin: the OTHER basin still seeds, its run still
+    ingests, the JSON summary is still emitted, and the tick still exits
+    non-zero so the unit's `OnFailure=` sees it. Two basins is the whole point
+    — with one, "the tick continues" and "the tick died" are indistinguishable.
+
+    Deleting that `try`, or narrowing it to an exception class that excludes
+    `QueryCanceled`, would swap "rc≠0 WITH a summary" for "rc≠0, traceback, NO
+    summary" — a substitution no OTHER test here notices, because every other
+    `main()` case stubs the display-ready call to succeed (verified: with the
+    `except` narrowed to `ValueError`, this is the only case in the file that
+    goes red).
+    """
+    cancelled = psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+    object_store_root, calls, published_calls = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True, RUN_HEIHE: True}
+    )
+
+    def cancelled_for_qhh(_database_url: str, model_id: str) -> dict[str, Any]:
+        if model_id == "basins_qhh_shud":
+            raise cancelled
+        return {
+            "model_id": model_id,
+            "river_network_version_id": f"{model_id}_rivnet",
+            "output_geometry_backfilled": 0,
+            "model_activated_rows": 1,
+        }
+
+    monkeypatch.setattr(autopipe, "_ensure_seeded_basin_display_ready", cancelled_for_qhh)
+    # Both basins report as already seeded, so a `_seed_basin` call would mean
+    # the cancelled basin fell through to a full re-seed instead of `continue`.
+    monkeypatch.setattr(autopipe, "_seed_basin", _seed_basin_must_not_run)
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert summary["status"] == "completed_with_failures"
+    assert summary["return_code"] == 1
+    assert summary["seed"]["failed"] == [
+        {
+            "basin": "qhh",
+            "stage": "display_ready",
+            "error": "canceling statement due to statement timeout",
+        }
+    ]
+    # The summary's `failed` list is a three-key projection; the detail row is
+    # the record an operator actually diagnoses from, so pin it whole.
+    assert [detail for detail in summary["seed"]["details"] if detail["outcome"] == "seed_failed"] == [
+        {
+            "basin": "qhh",
+            "basin_slug": "qhh",
+            "outcome": "seed_failed",
+            "stage": "display_ready",
+            "basin_id": "basins_qhh",
+            "model_id": "basins_qhh_shud",
+            "identity_source": "run_manifest",
+            "error": "canceling statement due to statement timeout",
+        }
+    ]
+    # The tick CONTINUED: the sibling basin seeded and its run went all the way
+    # through the pipeline. Without this the assertions above are also
+    # satisfied by a tick that stopped after the summary.
+    assert summary["seed"]["already_seeded"] == ["heihe"]
+    assert [detail["run_id"] for detail in summary["runs"]["details"]] == [RUN_HEIHE]
+    assert summary["runs"]["ingested"] == 1
+    assert _command_kinds(calls) == ["register", "parse", "coverage"]
+    assert published_calls == [NODE27_DATABASE_URL]
+
+    # The next tick is unaffected: the cancelled basin is not sticky.
+    next_tick_root = tmp_path / "next"
+    next_tick_root.mkdir()
+    next_root, _next_calls, _next_published = _prepare_autopipe(
+        monkeypatch, next_tick_root, runs={RUN_B: True}
+    )
+    next_rc, next_summary = _run_main(capsys, next_root)
+
+    assert next_rc == 0
+    assert next_summary["seed"]["failed"] == []
+    assert next_summary["runs"]["ingested"] == 1
+
+
+@pytest.mark.parametrize(
+    "site",
+    ["_backfill_output_geometry", "_activate_model"],
+    ids=["seed-backfill-output-geometry", "seed-activate-model"],
+)
+def test_cancelled_statement_inside_seed_basin_propagates_out_of_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    site: str,
+) -> None:
+    """`_seed_basin`'s own two database calls are NOT contained.
+
+    The unseeded path reaches `_backfill_output_geometry` and `_activate_model`
+    directly, after the registry import has already committed. `_seed_basin`
+    guards the CLI legs by return code but wraps those two in a `try` whose only
+    handler is a scratch-cleanup `finally`, and `main()` calls `_seed_basin`
+    outside any `try` — so a cancellation there unwinds the whole tick with no
+    JSON summary, exactly like the pre-loop/publish shape above. That is the
+    accepted design (a half-imported basin must not be summarised as merely
+    `seed_failed`), and the pair worth pinning is the same one: the exception
+    leaves `main()`, and NOTHING reaches stdout for a scraper to mistake for a
+    tick that ran.
+    """
+    cancelled = psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+
+    def seed_commands(argv: list[str], _env: dict[str, str]) -> tuple[int, str, str]:
+        if "import-basins-registry" in argv:
+            return 0, json.dumps({"status": "ok", "river_network_version_id": "rnv-qhh"}) + "\n", ""
+        if "discover-basins" in argv or "publish-basins" in argv:
+            return 0, "{}\n", ""
+        raise AssertionError(f"unexpected command after the cancelled seed: {argv}")
+
+    object_store_root, _calls, _published = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True}, command_handler=seed_commands
+    )
+    (object_store_root.parent / "Basins" / "qhh").mkdir()
+    # The real `_seed_basin` is what is under test here, so the basin must look
+    # unseeded and the sibling database call must succeed.
+    monkeypatch.setattr(autopipe, "_basin_seeded", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(autopipe, "_backfill_output_geometry", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(autopipe, "_activate_model", lambda *_args, **_kwargs: 1)
+
+    def raise_cancelled(*_args: Any, **_kwargs: Any) -> Any:
+        raise cancelled
+
+    monkeypatch.setattr(autopipe, site, raise_cancelled)
+
+    with pytest.raises(psycopg2.errors.QueryCanceled):
+        autopipe.main(
+            [
+                "--object-store-root",
+                str(object_store_root),
+                "--basins-root",
+                str(object_store_root.parent / "Basins"),
+            ]
+        )
+
+    assert capsys.readouterr().out == ""
+
+    # The next tick is unaffected — the point of bounding the statement.
+    next_tick_root = tmp_path / "next"
+    next_tick_root.mkdir()
+    next_root, _next_calls, _next_published = _prepare_autopipe(
+        monkeypatch, next_tick_root, runs={RUN_B: True}
+    )
+    next_rc, next_summary = _run_main(capsys, next_root)
+
+    assert next_rc == 0
+    assert next_summary["runs"]["ingested"] == 1
+
+
+def test_cancelled_decline_record_keeps_the_run_failing_with_its_forcing_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A cancelled decline write lands in shape one, and lands there by design.
+
+    `_decline_blocked_recompute` catches the write failure and returns
+    `"failed"` — the fail-closed rule from #1781: a run may never be reported
+    as accounted for on a record that did not commit. `QueryCanceled` is an
+    ordinary `Exception`, so the 600 s budget cannot smuggle a blocked
+    recompute past that rule.
+
+    What this pins beyond the RuntimeError case above is WHERE it is caught:
+    `stage` stays `forcing_handoff` with the guard's reason codes intact. The
+    per-run worker has its own catch-all that also yields `outcome: "failed"`
+    but stamps `stage: "worker"` and drops `forcing_stage`, so the stage is the
+    only observable that tells the two handlers apart.
+    """
+    store = _DeclineStore()
+    store.write_error = psycopg2.errors.QueryCanceled("canceling statement due to statement timeout")
+    object_store_root, _calls, published_calls = _prepare_autopipe(
+        monkeypatch,
+        tmp_path,
+        runs={RUN_A: True},
+        apply_reports={RUN_A: _handoff_unavailable(BLOCKED, detail=BLOCKED_DETAIL)},
+        decline_store=store,
+    )
+    _set_initial_state(object_store_root, RUN_A, "state-a")
+
+    rc, summary = _run_main(capsys, object_store_root)
+
+    assert rc == 1
+    assert summary["status"] == "completed_with_failures"
+    assert summary["return_code"] == 1
+    detail = summary["runs"]["details"][0]
+    assert detail["outcome"] == "failed"
+    assert detail["stage"] == autopipe.FORCING_STAGE
+    assert detail["forcing_stage"]["reason_codes"] == [BLOCKED]
+    assert summary["runs"]["failed"] == 1
+    assert summary["runs"]["declined"] == 0
+    assert [entry["run_id"] for entry in summary["runs"]["failed_runs"]] == [RUN_A]
+    # Nothing was recorded, so the run is retried next tick rather than being
+    # silently terminated on a write that never committed.
+    assert store.rows == []
+    assert summary["declines_active"] == 0
+    assert published_calls == []

@@ -118,6 +118,30 @@ display/frontend oracle 都在 node-27。
   - permission-denied 矩阵：`hydro/met/ops` 关键表的 INSERT/UPDATE/DELETE/DDL/TRUNCATE/sequence/schema CREATE 全被拒，记录 `current_user` + DB role 类型。
   - 缺真实 DB 时入口必须报 `BLOCKED`，不得 mock 冒充 PASS。
 
+### C2b. 写侧最小权限 receipt（#1774）
+
+C2 证的是**读**边界（`nhms_display_ro` 无写权）。写边界是另一半，2026-09 之前完全缺失：
+ingest / download / compression / cold-residency / retention 五条 lane 全部以 superuser
+`nhms` 连库，也就是一份凭据 == 数据库容器内命令执行，而这台机器同时对外提供
+`https://test.nwm.ac.cn`。
+
+- [ ] **pre-merge（additive，可在 unit 全部照常运行时做）**：从 detached worktree 跑
+      `bash scripts/node27_provision_write_roles.sh --roles-only`，入证：
+      `pg_roles` 中 `nhms_ingest_rw` / `nhms_download_rw` 的
+      `rolsuper/rolcreaterole/rolcreatedb/rolreplication/rolbypassrls` 全为 `f`；两条
+      `copy-from-program refused for …` NOTICE。此阶段**不做** ownership 转移、不取关系锁、
+      不动任何 env 文件。
+- [ ] **post-merge（timer 停机窗口）**：跑完整 `scripts/node27_provision_write_roles.sh`，
+      入证 owner-drift 清单为空、`nhms_display_ro` 有效 SELECT 集合 before/after 一致、
+      `relacl` diff（预期只有 grantor 从 `…/nhms` 改写为 `…/nhms_ingest_rw`）。
+- [ ] 五条 lane 各在新角色下跑一轮真实 run 并留 receipt；autopipe dry tick 的统计守卫
+      **两条 ANALYZE 腿都必须是 `ok`**（`warning` = 非 owner 被静默跳过，tick 绿而腿死）。
+- [ ] env 切换后脱敏 `grep`：`/home/nwm/NWM/infra/env/*.env` 中不再出现 `nhms:` DSN 用户名或
+      `PGUSER=nhms`，例外只有 `node27-timeseries-compression-replay.env` 与
+      `node27-archive-rebuild-drill.env`（migration-class，理由已记档）。
+
+完整口径、退出码与回滚见 `docs/runbooks/tier-node27-timeseries-storage.md` §9。
+
 ### C3. cross-plane identity live（tasks 4.3 + §10.2/10.3）
 
 - [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：22 生产 → DB 状态 → published logs → `/api/v1/mvp/qhh/latest-product` → 27 `/` 单页地图 + `/ops`，**拒 historical latest 冒充**。
@@ -250,6 +274,53 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
   ```
 
 - **边界**：本 lane 只访问 `/`；`/monitoring` 原文案不变，`/ops` 不在本 metric 内。
+
+---
+
+## 主机容量纪律（每次上 27 干活之前，#1765）
+
+- [ ] 容量核查三个挂载点一起看，**`/` 不能漏**：
+
+  ```bash
+  df -h / /home /data/GHDC
+  ```
+
+  `/` 只有几十 GB 且以前无人自动看守：一次跨两天的 pytest 用
+  `/tmp/pytest-of-nwm` 把它塞满，直接阻塞了当时 PR 的 live receipt。
+  `/home` 是 pgdata + object store 共用卷，`/data/GHDC` 是 `ghdc` 表空间 +
+  归档根（口径与已知偏差见 `docs/runbooks/current-production-ops.md`）。
+- [ ] 在 27 上跑 pytest 之前先把临时根挪出 `/`：
+
+  ```bash
+  mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp   # 建议写进 nwm 的登录 profile
+  ```
+
+  `mkdir -p` 不能省——`TMPDIR` 指向不存在的目录时 Python 会**静默回落**到
+  `/tmp`，于是「设了但没生效」和「设了且生效」看起来一模一样。跑完用
+  `ls -d /home/nwm/tmp/pytest-of-nwm` 确认落点，别只看 `df`。
+  仓库侧的另一半（`pyproject.toml` 的 `tmp_path_retention_policy = "failed"`）
+  已经在代码里，绿的会话不留残留；**不要**在共享配置里加 `--basetemp`。
+- [ ] 资源治理审计的告警链已部署（`install` + `systemctl --user daemon-reload`）：
+  `nhms-node27-resource-governance.service` 必须带
+  `OnFailure=nhms-node27-unit-failure-alert@%n.service`，审计遇到 `critical`
+  建议时 exit 1 并向 journal 打 `RESOURCE_GOVERNANCE_CRITICAL:<code>`。
+
+  ```bash
+  systemctl --user show nhms-node27-resource-governance.service -p OnFailure
+  ```
+
+  **装 `OnFailure=` 之前先看有没有长期 `critical`**：只要还有一条 `critical`
+  建议没消，这个 unit 就会**每个每日 tick 都 exit 1**——按设计一直挂在
+  `systemctl --user --failed` 里并且每次都发一封信（告警处理器是刻意做傻的，
+  没有去重、没有状态）。让它安静的办法是把条件清掉，不是压制告警。所以先读
+  最新的一份 receipt 确认当前没有 `severity: critical`：
+
+  ```bash
+  ls -t /home/nwm/node27-resource-governance-logs/resource-governance-*.json | head -1 \
+    | xargs -r grep -c '"severity": *"critical"'
+  ```
+
+  timer 是 `OnCalendar=*-*-* 04:10:00 UTC`，所以「每个 tick」就是每天一封。
 
 ---
 

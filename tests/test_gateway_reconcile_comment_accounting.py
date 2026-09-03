@@ -144,7 +144,6 @@ def test_versioned_accepted_submit_mutations_never_enumerate_unrelated_history(
             source_id=source_id,
             cycle_time=datetime(2026, 7, 12, tzinfo=UTC),
             model_ids=("model_0",),
-            include_direct_jobs=False,
         )
     assert rows["model_0"].hydro_run["status"] == "failed"
 

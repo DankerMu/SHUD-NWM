@@ -23,6 +23,7 @@ import pytest
 from packages.common import safe_fs
 from services.orchestrator import chain_repository_state as chain_repository_state_module
 from services.orchestrator import file_orchestration_journal as journal_module
+from services.orchestrator import public_evidence as public_evidence_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_candidates as scheduler_candidates_module
 from services.orchestrator import scheduler_discovery as scheduler_discovery_module
@@ -44,6 +45,7 @@ from services.orchestrator.file_orchestration_journal import (
     FileOrchestrationJournalRepository,
 )
 from services.orchestrator.retry import RetryConfig, RetryError, RetryNotFoundError
+from services.orchestrator.run_identity import parse_run_cycle
 from services.orchestrator.scheduler import ProductionScheduler, ProductionSchedulerConfig
 from services.orchestrator.scheduler_state_types import CandidateStateDecision
 from tests.test_production_scheduler import (
@@ -2003,19 +2005,24 @@ def test_foreign_model_completion_row_no_longer_suppresses_the_hydro_active_arm(
     assert repository.has_completed_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is False
 
 
-@pytest.mark.parametrize("hydro_status", ["created", "staged", "submitted", "running"])
+@pytest.mark.parametrize("hydro_status", ["created", "staged", "pending", "submitted", "running"])
 @pytest.mark.parametrize("stage", ["state_save_qc", "publish", "parse"])
 def test_foreign_model_completion_row_cannot_suppress_any_active_hydro_status(
     tmp_path: Path, hydro_status: str, stage: str
 ) -> None:
     """#1472 main discriminator matrix: foreign completion never suppresses ACTIVE hydro.
 
-    Every ACTIVE hydro status of the default terminal contract (``created``,
-    ``staged``, ``submitted``, ``running``) crossed with every completion stage
-    (``state_save_qc``, ``publish``, ``parse``): the candidate has no active
-    pipeline-job row, so the answer must come from the hydro-active arm alone —
-    the foreign row is excluded from the suppression conjunction by identity,
-    not by stage or status.
+    EVERY member of ``scheduler_state_types.ACTIVE_HYDRO_STATUSES`` — all five
+    of ``created``, ``staged``, ``pending``, ``submitted``, ``running`` — crossed
+    with every completion stage (``state_save_qc``, ``publish``, ``parse``): the
+    candidate has no active pipeline-job row, so the answer must come from the
+    hydro-active arm alone — the foreign row is excluded from the suppression
+    conjunction by identity, not by stage or status.
+
+    ``"pending"`` joined the set with this change and is listed explicitly: the
+    exclusion is one conjunction over the whole set (``:1241``), so leaving the
+    newest member out would let the test name's "any active" outrun what it
+    measures.
     """
 
     cycle_time = _dt("2026-06-28T00:00:00Z")
@@ -2040,7 +2047,33 @@ def test_foreign_model_completion_row_cannot_suppress_any_active_hydro_status(
     assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
 
 
-@pytest.mark.parametrize("hydro_status", ["created", "staged", "submitted", "running"])
+def test_pending_hydro_run_with_no_job_rows_is_active_on_the_journal_lane(tmp_path: Path) -> None:
+    """`"pending"` is an ACTIVE hydro status here too, as it already is on the decision lane.
+
+    ``"pending"`` is what manual retry writes to ``hydro_run`` once the retry
+    job is submitted, so a candidate sitting at it is in flight.  Until this
+    change the journal imported the ``"pending"``-less ``ACTIVE_HYDRO_STATUSES``
+    copy from ``chain_repository`` and answered ``False`` on this row, while
+    ``scheduler_state_decision`` -- reading the ``scheduler_state_types`` set --
+    already answered "active" on the very same shape.
+
+    No pipeline-job row exists, so the verdict comes from the hydro-active arm
+    alone.  The #1472 candidate-scoped terminal-completion suppression is
+    untouched: it needs a completion row, and there is none.
+    """
+
+    cycle_time = _dt("2026-06-28T00:00:00Z")
+    journal_root = tmp_path / "journal"
+    _write_json(
+        journal_root / f"latest/gfs/{format_cycle_time(cycle_time)}/model_a.json",
+        _latest_view(cycle_time=cycle_time, hydro_status="pending", jobs=[]),
+    )
+    repository = FileOrchestrationJournalRepository(journal_root)
+
+    assert repository.has_active_pipeline(source_id="gfs", cycle_time=cycle_time, model_id="model_a") is True
+
+
+@pytest.mark.parametrize("hydro_status", ["created", "staged", "pending", "submitted", "running"])
 def test_foreign_model_completion_row_cannot_suppress_under_production_terminal_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2050,7 +2083,8 @@ def test_foreign_model_completion_row_cannot_suppress_under_production_terminal_
 
     Under that contract ``has_terminal_completion`` accepts only
     ``state_save_qc`` completion rows; the foreign ``state_save_qc`` row must
-    still not suppress the ACTIVE hydro arm.
+    still not suppress the ACTIVE hydro arm — for every member of
+    ``ACTIVE_HYDRO_STATUSES``, ``"pending"`` included.
     """
 
     monkeypatch.setenv("NHMS_ORCHESTRATOR_TERMINAL_STAGE", "forecast_state_save_qc")
@@ -4466,6 +4500,18 @@ def test_file_journal_download_source_manual_retry_manifest_and_hydro_reset(
         if event["entity_id"] == retried.job_id and event["status_to"] == "submitted"
     )
     assert submission_event["details"]["runtime_root_resolution"]["resolved"]["workspace_dir"]["present"] is True
+    # #1965: the sibling root must keep the SAME mapping shape as
+    # ``workspace_dir`` above -- before the fix ``_sanitize_public_field``
+    # replaced the whole mapping under the ``_root`` key with the bare string
+    # ``"[local-path]"``, so ``present``/``source`` were lost while the
+    # no-key-match sibling kept them.
+    object_store_root_evidence = submission_event["details"]["runtime_root_resolution"]["resolved"][
+        "object_store_root"
+    ]
+    assert object_store_root_evidence["present"] is True
+    assert isinstance(object_store_root_evidence["source"], str)
+    assert object_store_root_evidence["source"]
+    assert object_store_root_evidence["value"] == "[local-path]"
     assert submission_event["details"]["runtime_root_contract"]["object_store_root"] == "[local-path]"
     journal_records = [
         json.loads(line)
@@ -6896,11 +6942,16 @@ def test_file_orchestration_journal_oversized_non_matching_directory_listing_is_
     def fake_scandir(_fd: int) -> LazyScandir:
         return LazyScandir()
 
-    monkeypatch.setattr(safe_fs.os, "scandir", fake_scandir)
+    # #1765: `safe_fs.os` is the real `os` module, so this patch is global.
+    # `tmp_path_retention_policy = "failed"` rmtree()s tmp_path in the fixture
+    # finalizer, which calls os.scandir(fd) -- scope the patch to the call under
+    # test so it can never outlive the assertion and break teardown.
+    with monkeypatch.context() as patch:
+        patch.setattr(safe_fs.os, "scandir", fake_scandir)
 
-    query = FileOrchestrationJournalRepository(journal_root, max_files=max_files).query_pipeline_jobs_by_cycle(
-        cycle_id_for("gfs", cycle_time)
-    )
+        query = FileOrchestrationJournalRepository(journal_root, max_files=max_files).query_pipeline_jobs_by_cycle(
+            cycle_id_for("gfs", cycle_time)
+        )
 
     assert consumed_entries == max_files + 1
     assert query[0]["error_code"] == "file_journal_file_limit_exceeded"
@@ -12094,6 +12145,59 @@ def test_permanent_failure_transition_declines_an_abandoned_reservation(tmp_path
     assert reclaimed["status"] == "reserved"
 
 
+def _write_pending_cohort_member_hydro_row(repository: Any, model_id: str) -> None:
+    """Park one cohort member's ``hydro_run`` at ``"pending"`` on the attempt-1 latest view.
+
+    ``_latest_view`` omits the ``error_code`` key, which reads as ``None``
+    under ``.get`` exactly as the production row does -- the status write nulls
+    the code when it moves a row to ``"pending"``
+    (``HYDRO_RUN_CODE_CLEARING_STATUSES``).
+    """
+
+    cycle_time = _dt("2026-07-20T00:00:00Z")
+    _write_json(
+        repository.root / f"latest/gfs/{format_cycle_time(cycle_time)}/{model_id}.json",
+        _latest_view(cycle_time=cycle_time, model_id=model_id, hydro_status="pending", jobs=[]),
+    )
+
+
+def test_permit_retry_marks_a_pending_member_row_failed_like_its_active_siblings(tmp_path: Path) -> None:
+    """A ``"pending"`` member row of the LOST attempt is superseded, not left behind.
+
+    ``permit_pipeline_job_retry`` rewrites every cohort member whose
+    ``submission_attempt`` equals the lost attempt AND whose hydro status is
+    ACTIVE to ``failed`` / ``SLURM_RESERVATION_LOST``.  With the
+    ``"pending"``-less copy that guard skipped a ``"pending"`` row, so a run
+    that manual retry had just moved to ``"pending"`` survived the attempt that
+    lost it -- the journal-lane analogue of the stale ``"pending"`` row on the
+    SQL lane.  It is now marked like its ``created`` / ``staged`` /
+    ``submitted`` / ``running`` siblings.
+
+    The call therefore appends TWO records -- the master row plus this hydro
+    row -- where the neighbouring permit tests assert ``1`` because none of
+    their member rows is ``"pending"``.  ``reject_pipeline_job_submit_attempt``
+    and ``demote_operator_verified_reserved_job`` share this guard shape; this
+    test is the representative for the three sites.
+    """
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    assert repository.reserve_pipeline_job(dict(record)) is not None
+    _write_pending_cohort_member_hydro_row(repository, "model_0")
+    reserved = repository.get_pipeline_job(str(record["job_id"]))
+
+    assert repository.permit_pipeline_job_retry(
+        str(record["job_id"]),
+        accepted_submit_contract_version=reserved["accepted_submit_contract_version"],
+        expected_submission_attempt=int(reserved["submission_attempt"]),
+        expected_submission_attempt_started_at=reserved["submission_attempt_started_at"],
+    ) == 2
+
+    hydro = repository._hydro_run_for("fcst_gfs_2026072000_model_0")
+    assert hydro is not None
+    assert hydro["status"] == "failed"
+    assert hydro["error_code"] == "SLURM_RESERVATION_LOST"
+
+
 def test_generic_status_update_still_refuses_master_rows_after_the_typed_transition(
     tmp_path: Path,
 ) -> None:
@@ -12258,6 +12362,44 @@ def test_cohort_projection_still_writes_terminal_status_for_unmarked_masters(tmp
     _project_cohort_failure(repository, record, error_code="OUT_OF_MEMORY")
 
     assert repository.get_pipeline_job(str(record["job_id"]))["status"] == "failed"
+
+
+def test_cohort_projection_rewrites_a_pending_hydro_row_on_a_reconciled_succeeded_task(
+    tmp_path: Path,
+) -> None:
+    """``hydro_is_retryable`` holds for ``"pending"``, so the reconciled truth lands.
+
+    The projection only rewrites a member's ``hydro_run`` when the row is
+    retryable (ACTIVE, or ``failed`` with a reservation-class code) and carries
+    no non-reservation error code.  A ``"pending"`` row failed that test under
+    the ``"pending"``-less copy, so a task that Slurm reported ``succeeded``
+    left the run parked at ``"pending"`` for good.
+
+    ``hydro_is_retryable`` gates BOTH projection branches: the succeeded rewrite
+    pinned here and the failed rewrite alongside it, which now writes a
+    ``"pending"`` row to ``failed`` with the task's ``error_code`` (or
+    ``SLURM_JOB_FAILED``).  This test pins the succeeded branch as the
+    representative of the pair.
+    """
+
+    repository, record = _reserved_cohort_master(tmp_path, member_count=2)
+    _bind_cohort_master(repository, record)
+    _write_pending_cohort_member_hydro_row(repository, "model_0")
+
+    repository.project_forecast_cohort_tasks(
+        str(record["job_id"]),
+        master_slurm_job_id=_PERMANENT_FAILURE_MASTER_SLURM_JOB_ID,
+        projections=_cohort_task_projections(record, outcome="succeeded"),
+        complete=True,
+        master_status="succeeded",
+        master_error_code=None,
+        reconciliation_decision="matched_bound",
+    )
+
+    hydro = repository._hydro_run_for("fcst_gfs_2026072000_model_0")
+    assert hydro is not None
+    assert hydro["status"] == "succeeded"
+    assert hydro["error_code"] is None
 
 
 def _non_master_permanently_failed_details(
@@ -12680,7 +12822,7 @@ def test_symlink_occupying_a_segment_slot_fails_loud_on_read_and_on_the_floor(
     assert read_caught.value.reason == "file_journal_unreadable"
 
     with pytest.raises(FileOrchestrationJournalError) as floor_caught:
-        FileOrchestrationJournalRepository(root)._next_sequence(
+        FileOrchestrationJournalRepository(root)._next_sequence_unlocked(
             source_id="gfs",
             cycle_time=_PROBE_CYCLE,
         )
@@ -12705,7 +12847,7 @@ def test_symlinked_latest_source_parent_fails_the_sequence_write_loud(tmp_path: 
     latest_view["replay"]["latest_sequence"] = 9
     _write_json(root / "latest" / "gfs" / _PROBE_CYCLE_SEGMENT / "model_a.json", latest_view)
     assert (
-        FileOrchestrationJournalRepository(root)._next_sequence(
+        FileOrchestrationJournalRepository(root)._next_sequence_unlocked(
             source_id="gfs",
             cycle_time=_PROBE_CYCLE,
         )
@@ -12717,7 +12859,7 @@ def test_symlinked_latest_source_parent_fails_the_sequence_write_loud(tmp_path: 
     before = _journal_tree_bytes(root)
 
     with pytest.raises(FileOrchestrationJournalError) as floor_caught:
-        repository._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE)
+        repository._next_sequence_unlocked(source_id="gfs", cycle_time=_PROBE_CYCLE)
     assert floor_caught.value.reason == "file_journal_unreadable"
 
     with pytest.raises(FileOrchestrationJournalError) as caught:
@@ -12745,12 +12887,12 @@ def test_genuine_absence_under_real_directories_stays_a_legal_empty_read(tmp_pat
     (root / "journal" / "gfs").mkdir(parents=True)
     repository = FileOrchestrationJournalRepository(root)
     assert repository._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
-    assert repository._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
+    assert repository._next_sequence_unlocked(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
     assert repository.list_stage_statuses(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
 
     cold = FileOrchestrationJournalRepository(tmp_path / "never-initialized")
     assert cold._cycle_journal_records(source_id="gfs", cycle_time=_PROBE_CYCLE) == []
-    assert cold._next_sequence(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
+    assert cold._next_sequence_unlocked(source_id="gfs", cycle_time=_PROBE_CYCLE) == 1
 
 
 def test_directory_occupying_a_segment_slot_still_reaches_the_hardened_reader(
@@ -15136,6 +15278,101 @@ def test_underivable_idempotency_key_falls_open_to_the_whole_tree_scan(
     if underivable_key.startswith("gfs:"):
         assert observed is not None
         assert observed["job_id"] == "job_fcst_gfs_2026062800_model_a"
+
+
+_ANALYSIS_RUN_ID = "analysis_era5_2026010100_2026010200_model_qhh.v1"
+_ANALYSIS_CYCLE = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _analysis_pipeline_job_row(*, model_id: str | None) -> dict[str, Any]:
+    """A `pipeline_job` row that is identity-clean apart from its analysis run id.
+
+    Every other field the validator reads round-trips, so the only reason the
+    call can raise is the run-id shape itself.
+    """
+
+    row: dict[str, Any] = {
+        "job_id": "job_analysis_era5_2026010100_forecast",
+        "source_id": "ERA5",
+        "cycle_time": journal_module._format_utc(_ANALYSIS_CYCLE),
+        "cycle_id": cycle_id_for("ERA5", _ANALYSIS_CYCLE),
+        "run_id": _ANALYSIS_RUN_ID,
+        "status": "running",
+        "stage": "forecast",
+    }
+    if model_id is not None:
+        row["model_id"] = model_id
+    return row
+
+
+@pytest.mark.parametrize("model_id", ["model_qhh.v1", None], ids=["with-model-id", "without-model-id"])
+def test_analysis_run_id_is_rejected_by_pipeline_job_identity_on_both_branches(model_id: str | None) -> None:
+    """#1762 ruling: no `pipeline_job` row can carry an analysis run id.
+
+    ``_validate_pipeline_job_identity`` guards every `pipeline_job` write and
+    read, and BOTH of its branches -- the one taken with a model id and the one
+    taken without -- admit only the forecast and cohort shapes. This is why the
+    analysis derivation in ``_cycle_scope_from_file_run_id`` was unreachable: the
+    two lookups it feeds can never need it.
+    """
+
+    with pytest.raises(FileOrchestrationJournalError) as caught:
+        journal_module._validate_pipeline_job_identity(
+            _analysis_pipeline_job_row(model_id=model_id),
+            source_id="ERA5",
+            cycle_time=_ANALYSIS_CYCLE,
+            model_id=model_id,
+        )
+
+    assert caught.value.reason == "file_journal_run_mismatch"
+
+
+def test_analysis_run_id_derives_to_nothing_and_falls_open() -> None:
+    """#1762: the analysis shape is "not derivable", never "not found".
+
+    ``parse_run_cycle`` still resolves the same run id -- retention consumes it
+    for analysis workspaces -- so the removed branch is a journal-lookup
+    concern only, not a change to the canonical run-id vocabulary.
+    """
+
+    analysis_run_id = "analysis_era5_2026010100_2026010200_model_x"
+
+    assert journal_module._cycle_scope_from_file_run_id(analysis_run_id) is None
+    assert journal_module._cycle_scope_from_idempotency_key(f"{analysis_run_id}:forecast") is None
+    assert parse_run_cycle(analysis_run_id) == _ANALYSIS_CYCLE
+
+
+def test_sequence_floor_is_exposed_only_as_the_unlocked_variant() -> None:
+    """#1659: `_write_lock` is not re-entrant, so a locking wrapper is a deadlock trap.
+
+    Every write lane computes the floor while already holding the lock; the
+    wrapper had no production caller, and its absence is what keeps a future
+    in-lane caller from deadlocking.
+    """
+
+    assert not hasattr(FileOrchestrationJournalRepository, "_next_sequence")
+    assert callable(FileOrchestrationJournalRepository._next_sequence_unlocked)
+
+
+def test_cycle_rows_reducer_signature_carries_no_direct_record_flag() -> None:
+    """#1661: the "reducer has no direct-record flag" SHALL, made executable.
+
+    ``_next_sequence``'s absence is pinned by ``hasattr`` above.  The reducer
+    has no such lever: a re-added ``include_direct_jobs: bool = True`` kwarg
+    passes every existing scenario verbatim, because no caller would pass it
+    and the default reproduces today's behaviour.  Only the parameter list
+    itself separates "the flag is gone" from "the flag is unused", so that is
+    what this pins.
+    """
+
+    import inspect
+
+    signature = inspect.signature(FileOrchestrationJournalRepository._cycle_rows_by_model_unlocked)
+
+    assert list(signature.parameters) == ["self", "source_id", "cycle_time", "model_ids"]
+    assert [parameter.kind for name, parameter in signature.parameters.items() if name != "self"] == [
+        inspect.Parameter.KEYWORD_ONLY
+    ] * 3
 
 
 @pytest.mark.parametrize(
@@ -19334,3 +19571,274 @@ def test_reconcile_scan_aborts_at_a_legacy_divergent_anchor_and_never_yields_pas
         "the divergent anchor is not pruned and the healthy one is not consumed"
     )
     assert not divergent_direct.exists(), "the repair must fail closed before restoring the direct file"
+
+
+# --- #1961/#1965: the shared public renderer (services/orchestrator/public_evidence.py) ---
+
+
+def _db_shaped_runtime_root_evidence() -> dict[str, Any]:
+    """A literal of what ``retry._runtime_root_resolution_evidence`` constructs.
+
+    A literal rather than a call into the constructor: the pins below are about
+    the RENDERER, so the input must stay fixed even if the constructor grows a
+    field.  The ``source`` values carry ``:`` separators on purpose -- that is
+    the branch of ``_sanitize_public_text_token`` a second rendering pass would
+    re-enter, which is what makes the idempotency pin non-trivial.
+    """
+
+    return {
+        "job_type": "download_source_cycle",
+        "retry_job_id": "cycle_ifs_2026053106_retry_active",
+        "previous_job_id": "job_cycle_ifs_2026053106_download",
+        "cycle_id": "ifs_2026053106",
+        "required": ["workspace_dir", "object_store_root"],
+        "resolved": {
+            "workspace_dir": {
+                "present": True,
+                "source": "pipeline_event:submission:3:runtime_root_contract",
+                "value": "/srv/nhms/workspace",
+            },
+            "object_store_root": {
+                "present": True,
+                "source": "pipeline_event:submission:3:runtime_root_contract",
+                "value": "/srv/nhms/object-store",
+                "same_as_workspace": False,
+            },
+            "published_artifact_root": {
+                "present": True,
+                "source": "env:NHMS_PUBLISHED_ARTIFACT_ROOT",
+                "value": "/srv/nhms/published",
+            },
+            "object_store_prefix": {
+                "present": True,
+                "source": "pipeline_event:submission:3:runtime_root_contract",
+                "value": "s3://nhms-prod",
+            },
+        },
+        "missing": [],
+        "db_free_runtime": {
+            "required": True,
+            "resolved": {
+                "scheduler_registry_manifest": {
+                    "present": True,
+                    "source": "env:NHMS_SCHEDULER_REGISTRY_MANIFEST",
+                    "value": "/srv/nhms/registry/manifest.json",
+                },
+                # A DSN under ``db_free_runtime`` -- the one runtime-root family
+                # whose rendering nothing asserted before round-1 F3.
+                "scheduler_registry_backend": {
+                    "present": True,
+                    "source": "env:NHMS_SCHEDULER_REGISTRY_BACKEND",
+                    "value": "postgresql://nwm:pw@db:5432/nhms",
+                },
+            },
+            "missing": [],
+            "slurm_env": {"NHMS_SHUD_DB_FREE": "true"},
+        },
+        "rejected": [
+            {
+                "field": "object_store_root",
+                "source": "env:OBJECT_STORE_ROOT",
+                "reason": "url_userinfo",
+                "value": "https://example.com/object-store",
+            }
+        ],
+        "rejected_total_count": 1,
+        "rejected_omitted_count": 0,
+        "rejected_limit": 16,
+        "published_fields_available": ["published_artifact_root"],
+    }
+
+
+def test_public_evidence_recurses_into_mapping_values_under_path_shaped_keys() -> None:
+    """T6a (#1965) — a path-shaped KEY no longer flattens a mapping VALUE.
+
+    Before the fix ``resolved.object_store_root`` and
+    ``resolved.published_artifact_root`` collapsed to the bare string
+    ``"[local-path]"`` (key match, whole value replaced) while
+    ``resolved.workspace_dir`` -- whose key matches nothing -- kept
+    ``present``/``source`` and rendered only its inner ``value``.  One mapping,
+    two JSON types for sibling keys.  Scalars under those keys must still
+    flatten (``runtime_root_contract`` depends on it) and ``is_sensitive_key``
+    must keep precedence over the path rule.
+    """
+
+    rendered = public_evidence_module._public_evidence(
+        {
+            "resolved": {
+                "workspace_dir": {
+                    "present": True,
+                    "source": "env:WORKSPACE_ROOT",
+                    "value": "/srv/nhms/workspace",
+                },
+                "object_store_root": {
+                    "present": True,
+                    "source": "env:OBJECT_STORE_ROOT",
+                    "value": "/srv/nhms/object-store",
+                    "same_as_workspace": False,
+                    "api_token": "super-secret",
+                },
+                "published_artifact_root": {
+                    "present": True,
+                    "source": "env:NHMS_PUBLISHED_ARTIFACT_ROOT",
+                    "value": "/srv/nhms/published",
+                },
+            },
+            "runtime_root_contract": {
+                "workspace_dir": "/srv/nhms/workspace",
+                "object_store_root": "/srv/nhms/object-store",
+            },
+            # Both sensitive AND path-shaped: pins the ORDER of the two branches.
+            "credential_path": {"present": True, "source": "env:X", "value": "hunter2"},
+            "secret_path": "/srv/x",
+        }
+    )
+
+    resolved = rendered["resolved"]
+    for field_name in ("workspace_dir", "object_store_root", "published_artifact_root"):
+        entry = resolved[field_name]
+        assert isinstance(entry, dict), f"{field_name} collapsed to {entry!r}"
+        assert entry["present"] is True
+        assert entry["source"]
+        assert entry["value"] == "[local-path]"
+    assert resolved["object_store_root"]["same_as_workspace"] is False
+    # Secret precedence: the sensitive key is inside a mapping the path rule now
+    # recurses into, so it has to be caught by the FIRST branch, not the path one.
+    assert resolved["object_store_root"]["api_token"] == "[redacted]"
+    # Scalars under the same key family stay flattened (``runtime_root_contract``).
+    assert rendered["runtime_root_contract"] == {
+        "workspace_dir": "[local-path]",
+        "object_store_root": "[local-path]",
+    }
+    # Branch ORDER (round-1 F2): a key that is both sensitive and path-shaped
+    # must take the sensitive branch, mapping value and scalar value alike.  If
+    # the path branch ran first the mapping would be RECURSED into and its inner
+    # ``value`` -- which no inner key marks sensitive -- would survive verbatim.
+    # In-body import: ``scripts/select_ci_tests`` derives its importer index from
+    # module-level statements only.
+    from packages.common.redaction import is_sensitive_key
+
+    assert is_sensitive_key("credential_path") and is_sensitive_key("secret_path")
+    assert rendered["credential_path"] == "[redacted]"
+    assert rendered["secret_path"] == "[redacted]"
+    assert "hunter2" not in json.dumps(rendered)
+    assert "/srv/" not in json.dumps(rendered)
+    assert "super-secret" not in json.dumps(rendered)
+
+
+def test_public_evidence_renders_whitespace_bearing_local_roots_whole() -> None:
+    """T6 (#1965 round-1 F1) — a deployment root with a SPACE is not half-disclosed.
+
+    ``_sanitize_public_path_or_uri_scalar`` bails out of classification on any
+    whitespace, which is right for prose but wrong for the scalar the #1965
+    recursion now feeds it: ``resolved.object_store_root.value`` reaches the
+    classifier whole, so ``/home/nwm/nhms data/objects`` rendered as
+    ``"[local-path] data/objects"`` -- tail on the wire.  An absolute (or
+    ``~``-anchored) path must be classified whole, before the bail-out.
+    """
+
+    root = "/home/nwm/nhms data/objects"
+    rendered = public_evidence_module._public_evidence(
+        {
+            "resolved": {
+                "workspace_dir": {"present": True, "source": "env:WORKSPACE_ROOT", "value": root},
+                "object_store_root": {
+                    "present": True,
+                    "source": "env:OBJECT_STORE_ROOT",
+                    "value": root,
+                    "same_as_workspace": False,
+                },
+                "published_artifact_root": {
+                    "present": True,
+                    "source": "env:NHMS_PUBLISHED_ARTIFACT_ROOT",
+                    "value": root,
+                },
+            },
+            "rejected": [
+                {
+                    "field": "object_store_root",
+                    "source": "env:OBJECT_STORE_ROOT",
+                    "reason": "resolves_to_workspace_dir",
+                    "value": root,
+                }
+            ],
+        }
+    )
+
+    for field_name in ("workspace_dir", "object_store_root", "published_artifact_root"):
+        assert rendered["resolved"][field_name]["value"] == "[local-path]", field_name
+    assert rendered["rejected"][0]["value"] == "[local-path]"
+    assert "data/objects" not in json.dumps(rendered)
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("/srv/my dir") == "[local-path]"
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("~/my dir") == "[local-path]"
+    # The URI branches stay BEHIND the whitespace bail-out: a whitespace-bearing
+    # string is not one URI, so it keeps falling through to the token path.  This
+    # states today's behaviour; it is not a widening.
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("s3://bucket/my key") == "s3://bucket/my key"
+    assert public_evidence_module._public_evidence({"note": "s3://bucket/my key"}) == {"note": "[object-uri] key"}
+
+
+def test_public_evidence_is_idempotent_on_both_lane_shapes() -> None:
+    """T6b — ``f(f(x)) == f(x)``.
+
+    The database lane renders on READ and the file lane renders on WRITE, so the
+    same mapping can meet the renderer twice (a re-render of an already-public
+    file-lane event, a replayed DB read).  A second pass must be a no-op: the
+    placeholders must not themselves be re-classified and the ``:``-separated
+    ``source`` tokens must not be progressively rewritten.
+    """
+
+    db_shaped = _db_shaped_runtime_root_evidence()
+    once = public_evidence_module._public_evidence(db_shaped)
+    assert public_evidence_module._public_evidence(once) == once
+    # Non-vacuous: the first pass really did change something.
+    assert once != db_shaped
+    assert once["resolved"]["object_store_root"]["value"] == "[local-path]"
+    assert once["resolved"]["object_store_prefix"]["value"] == "[object-uri]"
+    assert once["rejected"][0]["value"] == "[uri]"
+    assert once["resolved"]["workspace_dir"]["source"] == "pipeline_event:submission:3:runtime_root_contract"
+    # Round-1 F3: ``db_free_runtime.resolved.*.value`` gets rendered too -- both
+    # T1s carry an empty ``db_free_runtime``, so the shape helper's loop over it
+    # runs zero times and this branch was otherwise unasserted.
+    db_free_resolved = once["db_free_runtime"]["resolved"]
+    assert db_free_resolved["scheduler_registry_backend"]["value"] == "[uri]"
+    assert db_free_resolved["scheduler_registry_manifest"]["value"] == "[local-path]"
+    rendered_once = json.dumps(once, sort_keys=True)
+    assert "pw@" not in rendered_once
+    assert "/srv/nhms/registry" not in rendered_once
+
+    # The post-#1965 file-lane shape fed back in as input: this is what the
+    # journal now persists and what a re-render would see.
+    file_lane_shape = once["resolved"]
+    assert public_evidence_module._public_evidence(file_lane_shape) == file_lane_shape
+
+
+def test_public_evidence_scalar_classifier_matches_file_provider_classifier() -> None:
+    """T6c — the leaf's local copy agrees with the providers original.
+
+    ``scheduler_file_providers._sanitize_file_provider_scalar`` stays where it is
+    (``retry.py`` cannot import that module: providers -> scheduler_state ->
+    retry), so the leaf carries a copy.  This is the pin that keeps the residual
+    duplicate honest.  Imported in-body: ``scripts/select_ci_tests`` builds its
+    importer index from module-level statements only.
+    """
+
+    from services.orchestrator import scheduler_file_providers as scheduler_file_providers_module
+
+    corpus: list[Any] = [
+        "/srv/x",
+        "~/x",
+        "s3://b/k",
+        "published://p",
+        "https://u:p@h/x",
+        "/srv/my dir",
+        "",
+        "  ",
+        "plain",
+        7,
+        None,
+    ]
+    for value in corpus:
+        assert public_evidence_module._public_path_or_uri_placeholder(
+            value
+        ) == scheduler_file_providers_module._sanitize_file_provider_scalar(value), value

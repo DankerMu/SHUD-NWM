@@ -353,6 +353,24 @@ TWO_NODE_DOCKER_RUNBOOK_ENV_TEST = "tests/test_two_node_docker_runbook_environme
 # same owner via the same additive (non-stop) rule shape.
 QHH_DIAGNOSTIC_README = "scripts/diagnostic/qhh/README.md"
 QHH_CYCLE_SBATCH = "scripts/run_qhh_cycle.sbatch"
+# #1948: the QHH production-bootstrap corpus is three collectible partitions plus one
+# non-collectible helper, so every boundary that used to name the single historical
+# monolith path must name all three. Explicit sorted tuple, never derived at import time
+# (same reason as MAPPING_BUILDER_TESTS / BASINS_PACKAGE_PUBLICATION_TESTS). The
+# partition roles are frozen by openspec/changes/partition-qhh-production-bootstrap-tests
+# and pinned by tests/fixtures/qhh_bootstrap_partition_oracle.json: only
+# `tests/test_qhh_production_bootstrap_scheduler.py` carries `@pytest.mark.integration`,
+# which is why it — not A or B — is the path the ci.yml `database:` filter carries.
+QHH_PRODUCTION_BOOTSTRAP_TESTS: tuple[str, ...] = (
+    "tests/test_qhh_production_bootstrap.py",
+    "tests/test_qhh_production_bootstrap_scheduler.py",
+    "tests/test_qhh_production_bootstrap_state.py",
+)
+# The helper owns the shared builders, the seeded scheduler-readiness rows and the
+# `qhh_scheduler_canonical_readiness` fixture the scheduler owner imports, so a helper-only
+# diff must run all three consumers. Not collectible: the filename is deliberately not
+# `test_*`, so `is_test_suite_path` rejects it and it reaches SUPPORT_MODULE_TEST_RULES.
+QHH_PRODUCTION_BOOTSTRAP_HELPERS_PATH = "tests/qhh_production_bootstrap_helpers.py"
 # #1571 local-repair 1 (phase7-cand-01): the 997-line node-22 entrypoint owner
 # uniquely asserts the exact-interpreter contracts of the two systemd units, the
 # repair script's usage string, the QHH diagnostic README's Production
@@ -558,6 +576,12 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_e2e_ifs.py",
     "tests/test_e2e_m3.py",
     "tests/test_file_orchestration_journal.py",
+    # #1581: chain.py aliases DURABLE_HYDRO_SUCCESS_STATUSES as
+    # COMPLETED_HYDRO_STATUSES and the parity lock asserts that alias IS the
+    # shared object; a chain-only edit that rebinds it must run this suite.
+    # Stop-rule owned module, so the addition rides this at-site tuple rather
+    # than the `services/orchestrator/**` list. 9 tests in 0.29s.
+    "tests/test_hydro_status_set_parity.py",
     "tests/test_ifs_forecast_integration.py",
     "tests/test_orchestrator.py",
     "tests/test_partial_success.py",
@@ -622,6 +646,12 @@ RELEASED_RESERVATION_RECOVERY_TESTS: tuple[str, ...] = (
 
 FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_file_orchestration_journal_read_cache.py",
+    # #1581: the journal's completed-pipeline probes decide on its own
+    # `COMPLETED_HYDRO_STATUSES` from-import binding, which the parity lock
+    # pins as the one shared object. Stop-rule owned module, so the addition
+    # rides this at-site tuple rather than the `services/orchestrator/**` list.
+    # 9 tests in 0.29s.
+    "tests/test_hydro_status_set_parity.py",
     # #1825: the node-22 manual-retry marker suite top-level-imports the journal
     # repository and pins the marker contract (per-run row vs cohort master) the
     # operator channel depends on. It runs in well under a second, so a rule is
@@ -632,6 +662,15 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_orchestrator_demote_projection_faults.py",
     "tests/test_orchestrator_demote_reclaim_lifecycle.py",
     "tests/test_scheduler_backfill.py",
+    # #1999: the predecessor-emission suite top-level-imports
+    # `FileOrchestrationJournalRepository` and pins that a predecessor hydro row
+    # sitting at `pending` on the REAL file journal makes the emitter skip with
+    # `predecessor_backfill_active_pipeline` and emit zero candidates — so the
+    # repository's active-pipeline probe decides that lane. Stop-rule owned
+    # module, so the addition rides this at-site tuple rather than the
+    # `services/orchestrator/**` list. 20 tests in 1.57s, hence a rule rather
+    # than a rule-gap exclusion.
+    "tests/test_scheduler_backfill_predecessor.py",
     # #1944: the job-id scope census reads the journal tree directly and mints
     # its divergent rows through the PUBLIC `reserve_pipeline_job` writer, so a
     # change to the repository's on-disk layout or writer path silently changes
@@ -1024,7 +1063,63 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         BASINS_PACKAGE_HELPERS_PATH,
         BASINS_PACKAGE_HELPERS_CONSUMER_TESTS,
     ),
+    PathTestRule(
+        # #1948: the QHH bootstrap helper owns the registry-fixture builder, the
+        # scheduler-readiness seeds/teardown, the four readiness constants and the
+        # `qhh_scheduler_canonical_readiness` fixture. All three partitions import it at
+        # module scope, so a helper-only diff must run the whole consumer set — and it
+        # must ALSO open the real-database lane, which SUPPORT_MODULE_TEST_RULES cannot do
+        # on its own: that is why the same path is an exact `database:` trigger in ci.yml.
+        # The meta-guard rider is added by the support-module branch, deliberately not here.
+        QHH_PRODUCTION_BOOTSTRAP_HELPERS_PATH,
+        QHH_PRODUCTION_BOOTSTRAP_TESTS,
+    ),
 )
+
+
+# #1728: the connection-attribution guards. Before this issue only
+# apps/api/routes/hydro_display.py and the delegated-helper modules routed them,
+# because those were the only registered surfaces. The unit-level guard added
+# for #1728 is rooted at apps/api/route_registry.py and walks the six other
+# business routers plus the packages/common stores they build, so a diff that
+# drops a `fallback_application_name`, renames a surface, registers a new router
+# or adds a connect-owning module to the unit's import closure now reddens these
+# two suites — and NO other suite asserts any of that. Both are pure-AST plus a
+# handful of monkeypatched connect probes (~4s together), so they are cheap
+# enough to ride every rule that owns an attribution seam.
+CONNECTION_ATTRIBUTION_TESTS: tuple[str, ...] = (
+    "tests/test_node27_connection_attribution.py",
+    "tests/test_node27_connection_attribution_delegated.py",
+)
+# The route modules the unit-level guard walks from the registry, plus the
+# registry itself: each declares a module-level `_APPLICATION_NAME` and injects
+# it into its store factories.
+CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
+    "apps/api/route_registry.py",
+    "apps/api/routes/best_available.py",
+    "apps/api/routes/data_sources.py",
+    "apps/api/routes/forecast.py",
+    "apps/api/routes/models.py",
+    "apps/api/routes/pipeline.py",
+    "apps/api/routes/state_snapshots.py",
+)
+# The packages/common stores that carry the #1728 injection seam
+# (`application_name=` through `from_env` down to the connect call). Two more —
+# forecast_store.py and state_manager.py — already have exact rules, so the
+# suites are MERGED into those instead of listed here: a duplicate pattern
+# splits a module's ownership across two rules
+# (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
+CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
+    "packages/common/best_available.py",
+    "packages/common/model_registry.py",
+    "packages/common/object_store_forcing.py",
+)
+# #1704: the only suite that asserts the error-response log line exists, is
+# redacted, is bounded, and that the request-id is not client-forgeable. Both
+# halves of that contract live in apps/api/errors.py (the chokepoint) and
+# apps/api/main.py (the handler install + the request-id middleware); the
+# `apps/api/**` rule's three broad API suites assert none of it.
+API_ERROR_LOGGING_TEST = "tests/test_api_errors_logging.py"
 
 
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
@@ -1262,7 +1357,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # to one implementation must run the test that pins both.
             "tests/test_production_object_store_validation.py",
             "tests/test_publish_scheduler_file_registry.py",
-            "tests/test_qhh_production_bootstrap.py",
+            # #1948: the single QHH bootstrap monolith literal expands to the three
+            # partitions; no prior target of this rule is dropped (the retained
+            # historical path is QHH_PRODUCTION_BOOTSTRAP_TESTS[0]).
+            *QHH_PRODUCTION_BOOTSTRAP_TESTS,
             "tests/test_qhh_scripts_static.py",
         ),
     ),
@@ -1386,6 +1484,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # orchestrator-journal suites; measured together, 50 tests in 1.50s.
             "tests/test_scheduler_journal_root_authority.py",
             "tests/test_scheduler_journal_scope_census.py",
+            # #1581 (+#1999): the hydro-status parity lock top-level-imports
+            # eight modules of this package plus `services.orchestrator` itself,
+            # so nine importer pairs land here. Seven close on this list
+            # (__init__.py, chain_forecast_trigger.py, chain_repository.py,
+            # scheduler_state_decision.py, scheduler_state_failure.py,
+            # scheduler_state_manual_retry.py, scheduler_state_types.py);
+            # chain.py and file_orchestration_journal.py are stop-rule owned
+            # and are extended at THEIR sites, per this rule's #1455 note
+            # above. 9 tests in 0.29s, DB-free, so a rule rather than a
+            # rule-gap exclusion.
+            "tests/test_hydro_status_set_parity.py",
             "tests/test_live_monitoring.py",
             "tests/test_monitoring_api.py",
             "tests/test_pipeline_persistence.py",
@@ -1589,6 +1698,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # "eight below" census stays true.
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
+            # #1704: same guard-derived provenance — the API error-logging
+            # suite imports apps/api/routes/hydro_display.py at file level,
+            # which imports services.tiles.mvt, so it is a one-hop importer
+            # here (and a DIRECT importer on the hydro_display rule below).
+            "tests/test_api_errors_logging.py",
         ),
     ),
     # The other two #1341 switched surfaces. Both are covered by broad rules
@@ -1612,6 +1726,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "apps/api/routes/hydro_display.py",
         (
             "tests/test_api_contract.py",
+            # #1704: guard-derived, not hand-curated — the API error-logging
+            # suite imports get_hydro_display_session from this module at file
+            # level, so it is a direct non-gated importer.
+            "tests/test_api_errors_logging.py",
             "tests/test_direct_grid_display_cutover_flip.py",
             "tests/test_direct_grid_display_cutover_history.py",
             "tests/test_direct_grid_display_cutover_model_resolution.py",
@@ -1686,6 +1804,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # CI green unchallenged (same at-site reasoning as #1341's
             # mvt.py / display_coverage.py entries).
             "tests/test_river_ts_text_identity_cleanup.py",
+            # #1728: this module carries the connection-attribution injection
+            # seam (`application_name=` through `from_env` to the connect call)
+            # for BOTH nhms-api-forecast and nhms-api-data-sources. MERGED into
+            # this rule rather than added as a second exact entry — a duplicate
+            # pattern splits the module's ownership across two rules
+            # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
+            *CONNECTION_ATTRIBUTION_TESTS,
         ),
     ),
     PathTestRule(
@@ -1721,6 +1846,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # fallback_application_name identity.
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
+            # #1446: the CLI suite is a one-hop importer via
+            # scripts/node27_refresh_coverage.py. It owns the operator-facing
+            # half of the overwrite guard (exit 3 + the structured refusal
+            # line, `refused` in the --all report) — behaviour none of the
+            # suites above assert.
+            "tests/test_node27_refresh_coverage_cli.py",
+        ),
+    ),
+    PathTestRule(
+        # #1446: the refusal exit code and stderr line are this script's own
+        # contract (the autopipeline branches on the rc), and no other rule
+        # covers this file — a CLI-only diff fell through to the core-smoke
+        # fallback, which imports none of it.
+        "scripts/node27_refresh_coverage.py",
+        (
+            "tests/test_node27_refresh_coverage_cli.py",
+            "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
         ),
     ),
     PathTestRule(
@@ -1753,6 +1896,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scheduler.py::test_build_candidates_suppresses_a_model_before_its_lineage_cutover",
             "tests/test_production_scheduler.py::test_build_candidates_admits_a_model_at_its_lineage_cutover",
             "tests/test_production_scheduler.py::test_build_candidates_without_lineage_is_unchanged",
+            # #1728: this module carries the connection-attribution injection
+            # seam for nhms-api-state-snapshots (StateManager.from_env ->
+            # PsycopgStateSnapshotRepository -> connect). MERGED here for the
+            # same duplicate-pattern reason as forecast_store.py above.
+            *CONNECTION_ATTRIBUTION_TESTS,
         ),
     ),
     PathTestRule(
@@ -1825,6 +1973,69 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # in the register.
         "db/seeds/seed_demo.py",
         ("tests/test_river_ts_text_identity_cleanup.py",),
+    ),
+    # #1774 node-27 write-path least-privilege roles. `db/**` above only buys
+    # tests/test_migrations.py, which never reads the role SQL; the runner is a
+    # shell script with no same-name suite; and `infra/env/**` only buys the
+    # two-node docker runtime suite. Without these three rows a change to the
+    # provision SQL, the runner or a node-27 env template would ship with the
+    # write-role guards unexecuted. The fourth producer, the autopipe stats
+    # guard, is covered by an extra target MERGED into the existing
+    # `scripts/node27_autopipeline.py` rule below, not by a row here.
+    PathTestRule(
+        "db/roles/node27_write_roles.sql",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_provision_write_roles.sh",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "infra/env/node27-*.example",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    # #1774 round 4. Leg (iv) of the stored-expression sweep is an ALLOW-list of
+    # (schema, name) pairs, and the promise made in the SQL comment, the test
+    # docstring and runbook 9.6 is that a migration referencing a NEW function
+    # reddens tests/test_node27_write_roles.py at PR time instead of the live
+    # node-27 audit. That promise needs this row: `db/**` above only buys
+    # tests/test_migrations.py, which never reads the allow-list, so a
+    # migration-only PR that added e.g. `DEFAULT upper('x')` would have gone
+    # green here and failed the strict audit on the node instead. The matcher is
+    # fnmatch, whose `*` crosses `/`, so this pattern also covers a migration
+    # parked in a subdirectory -- which is what the test-side rglob reads.
+    PathTestRule(
+        "db/migrations/*.sql",
+        (
+            "tests/test_node27_write_roles.py",
+            # #1581: the parity lock derives the `hydro.run_status` member table
+            # by sweeping this very glob as text, so a migration that adds an
+            # enum member changes what that suite asserts -- and the "no member
+            # outside the enum but `complete`" claim can only red on the
+            # migration's own PR if the suite runs there. `db/**` above buys only
+            # tests/test_migrations.py, which never parses the enum. 9 tests in
+            # 0.29s, DB-free.
+            "tests/test_hydro_status_set_parity.py",
+        ),
+    ),
+    # the converted lanes with no pre-existing rule to merge into. The
+    # superuser-gated-READ guard scans these sources, and such a read fails
+    # SILENTLY under the new non-superuser role.
+    PathTestRule(
+        "scripts/node27_timeseries_retention.py",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_download_cycles.py",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_ingest_run.py",
+        ("tests/test_node27_write_roles.py",),
+    ),
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_residency.py",
+        ("tests/test_node27_write_roles.py",),
     ),
     PathTestRule(
         "infra/compose.compute.yml",
@@ -1904,6 +2115,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_autopipeline_preflight.py",
             "tests/test_node27_autopipeline_handoff.py",
+            # #1647: the `_connect` bounds and the stats-guard flag parser live
+            # in their own suite, which the same-name fallback cannot find.
+            "tests/test_node27_autopipeline_connection_bounds.py",
             "tests/test_display_publish_status_only.py",
             # #1442/#1789: the publish criterion is a registered statement of
             # the zero-text-identity oracle (group D, no sanctioned aid at all),
@@ -1912,6 +2126,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # It additionally pins the ingest criterion's authority-state gate.
             # Nothing above would notice any of it.
             "tests/test_river_ts_text_identity_cleanup.py",
+            # #1774: the stats-guard ANALYZE legs are what force the writer
+            # role to OWN the relations, so the write-role guards must run.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -1955,6 +2172,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
+            # #1647: `_CHUNK_IDENT_RE` is pinned byte-equal to the autopipeline
+            # `_STATS_GUARD_IDENT_RE` from that suite, so loosening the pattern
+            # here reds there — mirror of the autopipeline row above.
+            "tests/test_node27_autopipeline_connection_bounds.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -1973,6 +2197,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -2000,6 +2227,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_retention.py",
         ),
+    ),
+    PathTestRule(
+        # #1712: the unit file carries the `StandardError=journal` lane and the
+        # `OnFailure=` alert wiring, both pinned by unit-file tests. Without an
+        # explicit row it is infra/** non-python, matches nothing, and a
+        # unit-only PR selected zero tests. Narrow on purpose — the `.timer`
+        # sibling's cold_residency target is timer-schedule coverage, not
+        # something the unit body can break.
+        "infra/systemd/nhms-node27-timeseries-retention.service",
+        ("tests/test_node27_timeseries_retention.py",),
     ),
     PathTestRule(
         "schemas/timeseries_compression_receipt.schema.json",
@@ -2140,6 +2377,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_phase2.py",
             "tests/test_node27_cold_residency_runtime_identity.py",
             "tests/test_node27_cold_residency_publication.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -2207,6 +2447,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_schema_compat.py",
             "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_compressed_chunk_cold_target.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -2391,6 +2634,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *CORE_SMOKE_TESTS,
             *THREAD_EXCEPTION_POLICY_TESTS,
             "tests/test_node27_cold_tablespace_marker_contract.py",
+            # #1765: `tmp_path_retention_policy` lives in the same table and is
+            # asserted here (parsed key + the running session's resolved ini).
+            PYTHON_ENVIRONMENT_TRUTH_TEST,
             SELECTOR_META_GUARD_TEST,
         ),
     ),
@@ -2582,6 +2828,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_tablespace_integration.py",
             "tests/test_node27_cold_tablespace_marker_contract.py",
             "tests/test_node27_cold_tablespace_root_evidence.py",
+            # #1774: this lane runs as a non-superuser; a superuser-gated
+            # READ added here would fail SILENTLY.
+            "tests/test_node27_write_roles.py",
         ),
     ),
     PathTestRule(
@@ -2698,6 +2947,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "services/orchestrator/scheduler_gateway.py",
         (SLURM_AUTH_DEPLOYMENT_TEST,),
+    ),
+    *(
+        PathTestRule(path, CONNECTION_ATTRIBUTION_TESTS)
+        for path in CONNECTION_ATTRIBUTION_ROUTE_PATHS + CONNECTION_ATTRIBUTION_STORE_PATHS
+    ),
+    PathTestRule(
+        "apps/api/errors.py",
+        (API_ERROR_LOGGING_TEST,),
+    ),
+    PathTestRule(
+        "apps/api/main.py",
+        (API_ERROR_LOGGING_TEST,),
     ),
 )
 

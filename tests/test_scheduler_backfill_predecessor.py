@@ -21,14 +21,18 @@ entries and asserting the observable AC5 behavior:
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_backfill_predecessor as _bf
-from workers.data_adapters.base import CycleDiscovery
+from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
+from tests.test_file_orchestration_journal import _latest_view
+from workers.data_adapters.base import CycleDiscovery, format_cycle_time
 
 SchedulerCandidate = scheduler_module.SchedulerCandidate
 
@@ -509,6 +513,104 @@ def test_emit_predecessor_skips_active_pipeline(monkeypatch: Any) -> None:
     assert marker.get("predecessor_backfill_active_pipeline") is True
     reasons = [record.get("reason") for record in evidence]
     assert "predecessor_backfill_active_pipeline" in reasons
+
+
+# The §8.6 predecessor cycle the default `_predecessor_pending_evidence` points
+# at; the journal fixture below has to be written at exactly this cycle for the
+# emitter's probe to find it.
+_JOURNAL_PREDECESSOR_CYCLE_TIME = _dt("2026-07-06T00:00:00Z")
+
+
+def _predecessor_journal_repository(root: Path, hydro_status: str) -> FileOrchestrationJournalRepository:
+    """A REAL file journal whose predecessor run sits at ``hydro_status`` with NO job rows.
+
+    No pipeline-job row exists, so ``has_active_pipeline`` can only answer from
+    the hydro-active arm — which is the arm this change moved.
+    """
+
+    latest = root / f"latest/gfs/{format_cycle_time(_JOURNAL_PREDECESSOR_CYCLE_TIME)}/model_a.json"
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_text(
+        json.dumps(
+            _latest_view(cycle_time=_JOURNAL_PREDECESSOR_CYCLE_TIME, hydro_status=hydro_status, jobs=[])
+        ),
+        encoding="utf-8",
+    )
+    return FileOrchestrationJournalRepository(root)
+
+
+def _emit_with_active_repository(
+    monkeypatch: Any, repository: FileOrchestrationJournalRepository
+) -> tuple[list[dict[str, Any]], list[SchedulerCandidate], list[SchedulerCandidate]]:
+    """Drive one emission pass for a §8.6 predecessor-pending successor."""
+
+    _wire_manifest_ready(monkeypatch)
+    successor = _candidate(
+        candidate_id="cand_gfs_2026070612_model_a",
+        cycle_id="gfs_2026070612",
+        cycle_time=_dt("2026-07-06T12:00:00Z"),
+        state_evidence=_predecessor_pending_evidence(),
+    )
+    candidates: list[SchedulerCandidate] = []
+    blocked: list[SchedulerCandidate] = [successor]
+    evidence = _bf.emit_predecessor_candidates(
+        models=[_FakeModel()],
+        cycles=[],
+        candidates=candidates,
+        blocked=blocked,
+        candidate_factory=_candidate_factory,
+        strict_warm_start_for_candidate=_gate_ready,
+        blocked_candidate_factory=_blocked_candidate_factory,
+        active_repository=repository,
+    )
+    return evidence, candidates, blocked
+
+
+def test_emit_predecessor_skips_pending_predecessor_on_the_real_file_journal(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A predecessor run at ``"pending"`` now holds §8.6 off — measured, not faked.
+
+    ``test_emit_predecessor_skips_active_pipeline`` above pins the emitter's own
+    R2-C3 wiring with a stub that always answers ``True``.  This one pins the
+    integration the ``"pending"`` adjudication actually changes: the emitter
+    reads a real ``FileOrchestrationJournalRepository``, whose
+    ``has_active_pipeline`` decides on the shared
+    ``scheduler_state_types.ACTIVE_HYDRO_STATUSES``.  Before ``"pending"``
+    joined that set the journal answered ``False`` on this shape and §8.6
+    prepended a duplicate predecessor for a cycle whose retry was already in
+    flight.
+
+    The ``"failed"`` control is not decoration: ``has_active_pipeline`` fails
+    CLOSED (any ``FileOrchestrationJournalError`` becomes ``True``), so a
+    malformed journal fixture would fake the skip verdict.  Only a control that
+    the SAME fixture builder drives to ``emitted`` proves the view was really
+    read.
+    """
+
+    pending_repository = _predecessor_journal_repository(tmp_path / "pending", "pending")
+    failed_repository = _predecessor_journal_repository(tmp_path / "failed", "failed")
+
+    evidence, candidates, blocked = _emit_with_active_repository(monkeypatch, pending_repository)
+
+    assert [(record.get("status"), record.get("reason")) for record in evidence] == [
+        ("skipped", "predecessor_backfill_active_pipeline")
+    ]
+    assert candidates == []
+    # The successor stays blocked and carries the operator-facing marker.
+    assert len(blocked) == 1
+    marker = blocked[0].state_evidence.get("predecessor_backfill_marker") or {}
+    assert marker.get("predecessor_backfill_active_pipeline") is True
+
+    control_evidence, control_candidates, control_blocked = _emit_with_active_repository(
+        monkeypatch, failed_repository
+    )
+
+    assert [record.get("status") for record in control_evidence] == ["emitted"]
+    assert len(control_candidates) == 1
+    assert control_candidates[0].cycle_time_utc == _JOURNAL_PREDECESSOR_CYCLE_TIME
+    assert control_candidates[0].model_id == "model_a"
+    assert len(control_blocked) == 1
 
 
 def test_emit_predecessor_prepend_cap_counts_skipped_items(monkeypatch: Any) -> None:

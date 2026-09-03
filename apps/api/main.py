@@ -1,15 +1,16 @@
 import json
+import logging
 import os
+import sys
 from collections.abc import Mapping
 from typing import Any
-from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from starlette.middleware.gzip import GZipMiddleware
 
 from apps.api import openapi_patching, route_registry, startup_wiring
 from apps.api.auth import audit_record, evaluate_request_action
-from apps.api.errors import error_response, register_error_handlers
+from apps.api.errors import error_response, register_error_handlers, resolve_request_id
 from apps.api.runtime_mode import load_runtime_config
 
 REPO_ROOT = startup_wiring.REPO_ROOT
@@ -28,6 +29,37 @@ _PRE_BODY_PROTECTED_MUTATIONS: dict[tuple[str, str], tuple[str, str, str]] = {
     ): ("models.switch_version", "model_registry", "river-segment-crosswalks"),
 }
 _ACTIVE_TOGGLE_PRE_BODY_MAX_BYTES = 4096
+
+API_LOGGER_NAME = "apps.api"
+API_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def _install_api_log_handler() -> logging.Logger:
+    """Give the `apps.api` logger tree a stderr handler (#1704).
+
+    The production unit runs `python -m uvicorn apps.api.main:app` with no
+    `--log-config`, so the root logger is unconfigured: without this, an
+    `error_response()` line would only reach `logging.lastResort`, which emits
+    the bare message with no timestamp and drops anything below WARNING.
+    systemd's `StandardError=append:/tmp/display-api.log` then captures stderr.
+
+    Propagation is deliberately left ON: under uvicorn the root has no handler
+    (so no duplicate line), and under pytest `caplog` attaches at the root,
+    which is where these records must still be observable.
+
+    Idempotent: each uvicorn worker imports this module in its own process, but
+    a re-import or a second `create_app()` in one process must not stack
+    handlers.
+    """
+    api_logger = logging.getLogger(API_LOGGER_NAME)
+    if not api_logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter(API_LOG_FORMAT))
+        api_logger.addHandler(handler)
+    return api_logger
+
+
+_install_api_log_handler()
 runtime_router = startup_wiring.create_runtime_router()
 runtime_config = startup_wiring.runtime_config
 
@@ -247,10 +279,16 @@ def _model_lifecycle_validation_error(request_id: str) -> _PreBodyPolicyError:
 
 
 def _ensure_request_id(request: Any) -> str:
-    request_id = getattr(request.state, "request_id", None)
-    if request_id:
-        return request_id
-    request_id = request.headers.get("X-Request-ID") or str(uuid4())
+    """The id for this request, resolved by the one rule the whole app shares.
+
+    Delegates to `errors.resolve_request_id`, so the pre-body auth path
+    (401/403 before `add_request_id` has run for this handler) cannot echo a
+    client-forged id into the response header, the audit record and the
+    `api_error` line. `request.state` is RE-CHECKED against the same acceptance
+    rule rather than returned as-is: this guard is not the outermost
+    middleware, so any middleware above it can have set that attribute.
+    """
+    request_id = resolve_request_id(request)
     request.state.request_id = request_id
     return request_id
 
@@ -261,6 +299,7 @@ def create_app(env: Mapping[str, str] | None = None) -> FastAPI:
         title="NHMS API",
         description="National Hydrological Modeling System API",
         version="0.1.0",
+        license_info={"name": "MIT", "identifier": "MIT"},
     )
     startup_wiring.configure_app_state(api, runtime_config)
 

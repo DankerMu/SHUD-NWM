@@ -409,6 +409,31 @@ def _require_exact_keys(value: Mapping[str, Any], keys: set[str], label: str) ->
         raise EvidenceError(f"{label} keys differ: missing={sorted(keys - actual)} extra={sorted(actual - keys)}")
 
 
+def _require_artifact_reference_shape(value: Any, label: str) -> dict[str, Any]:
+    """Validate that an authored value is syntactically a `{path, sha256, bytes}` reference.
+
+    One definition, shared by the five `*_invocation` slots and by `_artifact_ref_from_raw`
+    (#1691), so a required key can never be merely present.  The mapping check must come
+    first: `_require_exact_keys` on a string would take `set("...")` of its characters and
+    report a misleading key diff.  Nothing here touches the filesystem -- checking the
+    declared identity against real bytes is the caller's job.  `_artifact_bytes` and
+    `_streaming_artifact_ref` deliberately keep their own differently worded checks.
+    """
+
+    ref = _require_mapping(value, label)
+    _require_exact_keys(ref, {"path", "sha256", "bytes"}, label)
+    path = Path(str(ref["path"]))
+    if not path.is_absolute():
+        raise EvidenceError(f"{label}.path must be absolute")
+    digest = str(ref["sha256"])
+    size = ref["bytes"]
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise EvidenceError(f"{label}.sha256 must be lowercase sha256")
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        raise EvidenceError(f"{label}.bytes must be a non-negative integer")
+    return {"path": str(path), "sha256": digest, "bytes": size}
+
+
 def _artifact_ref(
     value: Any,
     label: str,
@@ -498,20 +523,10 @@ def _text_artifact(value: Any, label: str, *, max_bytes: int = 4 * 1024**2) -> t
 def _artifact_ref_from_raw(value: Any, label: str, raw: bytes) -> dict[str, Any]:
     """Validate a ref against bytes already read from its pinned descriptor."""
 
-    ref = _require_mapping(value, label)
-    _require_exact_keys(ref, {"path", "sha256", "bytes"}, label)
-    path = Path(str(ref["path"]))
-    if not path.is_absolute():
-        raise EvidenceError(f"{label}.path must be absolute")
-    digest = str(ref["sha256"])
-    size = ref["bytes"]
-    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
-        raise EvidenceError(f"{label}.sha256 must be lowercase sha256")
-    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-        raise EvidenceError(f"{label}.bytes must be a non-negative integer")
-    if len(raw) != size or _sha256(raw) != digest:
+    ref = _require_artifact_reference_shape(value, label)
+    if len(raw) != ref["bytes"] or _sha256(raw) != ref["sha256"]:
         raise EvidenceError(f"{label} byte count or sha256 mismatch")
-    return {"path": str(path), "sha256": digest, "bytes": size}
+    return ref
 
 
 def _streaming_artifact_ref(
@@ -3473,6 +3488,12 @@ def verify_bundle(
     preflight_summary = _validate_preflight(preflight, str(bundle["mutation_head_sha"]))
     recovery_bundle = _require_mapping(bundle["recovery"], "recovery")
     _require_exact_keys(recovery_bundle, {"preflight", "receipt", "invocation"}, "recovery")
+    # Input-shape gate (#1691): the authored slot must be a well-formed artifact reference.
+    # Checked here rather than left to the artifact closure, which by construction judges
+    # only values that are exactly a three-key mapping and so cannot see a wrapper, a bare
+    # string or `null` at all.  The gate reads the authored value and nothing else -- the
+    # terminal slot is still re-derived from `execution.ledger` further down.
+    _require_artifact_reference_shape(recovery_bundle["invocation"], "recovery.invocation")
     recovery_preflight_ref, recovery_preflight_raw = _json_artifact(recovery_bundle["preflight"], "recovery.preflight")
     recovery_receipt_ref, recovery_receipt_raw = _json_artifact(recovery_bundle["receipt"], "recovery.receipt")
     if (
@@ -3556,6 +3577,9 @@ def verify_bundle(
         },
         "migration",
     )
+    # Input-shape gate (#1691); see the note at the recovery slot.
+    _require_artifact_reference_shape(migration["first_invocation"], "migration.first_invocation")
+    _require_artifact_reference_shape(migration["second_invocation"], "migration.second_invocation")
     migration_ref = _validate_reviewed_file_ref(
         migration.get("migration_file"),
         label="migration.migration_file",
@@ -3616,6 +3640,9 @@ def verify_bundle(
         {"dry_run", "dry_run_invocation", "enforce", "enforce_invocation"},
         "receipts",
     )
+    # Input-shape gate (#1691); see the note at the recovery slot.
+    _require_artifact_reference_shape(receipts_bundle["dry_run_invocation"], "receipts.dry_run_invocation")
+    _require_artifact_reference_shape(receipts_bundle["enforce_invocation"], "receipts.enforce_invocation")
     dry_ref, dry = _load_receipt(receipts_bundle.get("dry_run"), "receipts.dry_run", receipt_schema)
     enforce_ref, enforce = _load_receipt(receipts_bundle.get("enforce"), "receipts.enforce", receipt_schema)
     # Slot re-derived from execution.ledger; see scripts/node27_timeseries_compression_bundle_author.py:21-25

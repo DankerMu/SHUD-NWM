@@ -19,7 +19,6 @@ from types import SimpleNamespace
 from typing import Any, TypeVar
 
 from packages.common.auth_policy import PolicyDecision, require_policy_evidence, trusted_internal_policy_decision
-from packages.common.redaction import is_sensitive_key
 from packages.common.safe_fs import (
     SafeFilesystemError,
     atomic_write_bytes_no_follow,
@@ -69,13 +68,13 @@ from services.orchestrator.accepted_submit_identity import (
     ordered_cohort_members,
 )
 from services.orchestrator.chain_repository import (
-    ACTIVE_HYDRO_STATUSES,
     COMPLETED_HYDRO_STATUSES,
     DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
     DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
 )
 from services.orchestrator.chain_source_cycle import _datetime_sort_key, _pipeline_job_truth_sort_key
 from services.orchestrator.chain_types import ForcingContext, ModelContext, OrchestratorError
+from services.orchestrator.public_evidence import _public_evidence, _public_message
 from services.orchestrator.retry import (
     _DB_FREE_REQUIRED_SELECTOR_FIELDS,
     _DB_FREE_RUNTIME_FIELDS,
@@ -127,24 +126,19 @@ from services.orchestrator.retry_identity import (
     split_retry_job_identity,
 )
 from services.orchestrator.run_identity import (
-    ANALYSIS_RUN_ID_RE as _ANALYSIS_RUN_ID_RE,
-)
-from services.orchestrator.run_identity import (
     CYCLE_COHORT_RUN_ID_RE as _CYCLE_COHORT_RUN_ID_RE,
 )
 from services.orchestrator.run_identity import (
     FORECAST_RUN_ID_RE as _FORECAST_RUN_ID_RE,
 )
-from services.orchestrator.scheduler_file_providers import (
-    _public_raw_manifest_evidence,
-    _sanitize_file_provider_evidence_scalar,
-)
+from services.orchestrator.scheduler_file_providers import _public_raw_manifest_evidence
 from services.orchestrator.scheduler_init_state_match import (
     INIT_STATE_IDENTITY_FIELDS,
     init_state_field,
 )
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
 from services.orchestrator.scheduler_state_manual_retry import MARKER_TARGET_ROW_DETAIL_FIELDS
+from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, HYDRO_RUN_CODE_CLEARING_STATUSES
 from services.slurm_gateway.models import SubmitJobRequest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
@@ -2401,7 +2395,6 @@ class FileOrchestrationJournalRepository:
                     source_id=source_id,
                     cycle_time=cycle_time,
                     model_ids=model_ids,
-                    include_direct_jobs=False,
                 )
             for member in members:
                 model_rows = rows_by_model.get(str(member.get("model_id") or ""))
@@ -2485,7 +2478,7 @@ class FileOrchestrationJournalRepository:
                 if value is not None:
                     row[key] = value
             resolved_error_code = _resolved_caller_evidence(error_code, durable=existing.get("error_code"))
-            if status in {"pending", "created", "succeeded", "complete", "parsed", "published"}:
+            if status in HYDRO_RUN_CODE_CLEARING_STATUSES:
                 row["error_code"] = resolved_error_code
                 row["error_message"] = safe_error_message
             else:
@@ -3694,7 +3687,6 @@ class FileOrchestrationJournalRepository:
                 source_id=source_id,
                 cycle_time=cycle_time,
                 model_ids=(str(member.get("model_id") or "") for member in members),
-                include_direct_jobs=False,
             )
             for member in members:
                 run_id = str(member.get("run_id") or "")
@@ -4056,7 +4048,6 @@ class FileOrchestrationJournalRepository:
                 source_id=source_id,
                 cycle_time=cycle_time,
                 model_ids=(str(member.get("model_id") or "") for member in members),
-                include_direct_jobs=False,
             )
             for member in members:
                 run_id = str(member.get("run_id") or "")
@@ -4219,7 +4210,6 @@ class FileOrchestrationJournalRepository:
                 source_id=source_id,
                 cycle_time=cycle_time,
                 model_ids=(str(member.get("model_id") or "") for member in members),
-                include_direct_jobs=False,
             )
             for member in members:
                 run_id = str(member.get("run_id") or "")
@@ -4911,7 +4901,6 @@ class FileOrchestrationJournalRepository:
                     for projection in verified
                     if projection.get("model_id") not in (None, "")
                 ),
-                include_direct_jobs=False,
             )
             for projection in verified:
                 run_id = str(projection.get("run_id") or "")
@@ -5854,15 +5843,22 @@ class FileOrchestrationJournalRepository:
         source_id: str,
         cycle_time: datetime,
         model_ids: Iterable[str],
-        include_direct_jobs: bool = True,
     ) -> dict[str, _CycleRows]:
         """Build exact model rows with one cycle-wide source scan.
 
         ``_CycleRows`` has single hydro/forcing/context slots, so this must
         reduce records into separate model containers rather than filtering
         the lossy ``model_id=None`` merge.  The caller holds the cycle write
-        lock; the populated model caches therefore remain authoritative until
-        an append sweeps them.
+        lock, so the rows it returns stay authoritative until an append sweeps
+        them.
+
+        This batch reducer NEVER includes the flat direct ``pipeline_job``
+        records and NEVER stores into ``_cycle_rows_cache`` (#1661).  Both were
+        once behind a flag every caller passed ``False``; the store they guarded
+        wrote ``fingerprint=None`` entries that bypass the containment discipline
+        ``_cycle_rows`` applies to its own store.  Direct records and the
+        fingerprinted store belong to ``_cycle_rows``, which is the arm
+        ``_materialize_latest_unlocked`` routes to when it does want them.
         """
         source_id = _normalize_file_source_id(source_id, field="source_id")
         normalized_model_ids = sorted({_safe_segment(model_id) for model_id in model_ids})
@@ -5903,25 +5899,9 @@ class FileOrchestrationJournalRepository:
                 cycle_time=cycle_time,
                 expected_record_type="pipeline_event",
             )
-        direct_jobs = (
-            self._direct_pipeline_job_records_for_cycle_cached(
-                source_id=source_id,
-                cycle_time=cycle_time,
-            )
-            if include_direct_jobs
-            else ()
-        )
         for model_id, rows in rows_by_model.items():
-            for job in direct_jobs:
-                _insert_missing_by_key(rows.pipeline_jobs, job, key="job_id")
             _filter_cycle_rows_for_model(rows, source_id=source_id, cycle_time=cycle_time, model_id=model_id)
             rows.pipeline_events = _dedupe_events(rows.pipeline_events)
-            if include_direct_jobs:
-                self._cache_cycle_rows(
-                    (source_id, cycle_segment, model_id, source_segments),
-                    rows,
-                    fingerprint=None,
-                )
         return {model_id: _clone_cycle_rows(rows) for model_id, rows in rows_by_model.items()}
 
     def _apply_records_to_model_rows(
@@ -9603,10 +9583,6 @@ class FileOrchestrationJournalRepository:
                 },
             )
 
-    def _next_sequence(self, *, source_id: str, cycle_time: datetime) -> int:
-        with self._write_lock:
-            return self._next_sequence_unlocked(source_id=source_id, cycle_time=cycle_time)
-
     def _next_sequence_unlocked(self, *, source_id: str, cycle_time: datetime) -> int:
         source_id = _normalize_file_source_id(source_id, field="source_id")
         cycle_segment = format_cycle_time(cycle_time)
@@ -9955,7 +9931,6 @@ class FileOrchestrationJournalRepository:
                 source_id=source_id,
                 cycle_time=cycle_time,
                 model_ids=(model_id,),
-                include_direct_jobs=False,
             )[model_id]
         )
         if next_sequence is None:
@@ -11540,6 +11515,22 @@ class FileJournalRetryService:
         passed that public scrub.  Returning the persisted mapping unchanged is
         what makes "response equals persisted event details" provable.
 
+        TWO persisted shapes reach the route through here and both are returned
+        as recorded: events written before openspec change
+        ``retry-runtime-root-evidence-public-shape`` (#1965) carry
+        ``resolved.object_store_root`` / ``resolved.published_artifact_root`` as
+        the bare string ``"[local-path]"`` -- the public renderer used to replace
+        the whole mapping under a ``*_root`` key -- while events written after it
+        carry the mapping with ``present`` / ``source`` / ``value`` /
+        ``same_as_workspace``.  Events written before this change under a
+        whitespace-bearing root may also carry the partial rendering
+        ``"[local-path] <tail>"`` left by the old whitespace bail-out; those are
+        returned as recorded like the bare string (re-rendering them under a
+        ``*_root`` key would collapse them to the bare ``"[local-path]"``, also
+        non-disclosing, but this reader never re-renders).  History is not
+        rewritten and this reader does not normalise; the 503 stays intact
+        either way.
+
         Fail-soft: a typed journal fault on this SECOND read returns ``None``,
         so the caller still emits its 503 with the evidence key absent instead
         of collapsing into an unclassified 500 (the read runs outside the
@@ -12640,29 +12631,25 @@ def _cycle_scope_from_file_run_id(run_id: Any) -> tuple[str, datetime] | None:
     a cohort or mints a wrong retry, whereas the fallback is merely as slow as
     the prior behaviour.
 
-    The forecast and cohort shapes are adjudicated by the existing
-    ``_source_cycle_from_file_run_id``; the analysis shape (whose cycle is its
-    start timestamp) is added here from the same canonical regex module. No
-    fresh parser, and the source segment always goes through
-    ``_normalize_file_source_id`` because run ids spell the source lower case
-    while the on-disk directory carries the normalised casing.
+    Only the forecast shape ``fcst_{source}_{cycle}_{model}`` and the cohort
+    shape ``cycle_{source}_{cycle}[_suffix]`` derive, both through
+    ``_source_cycle_from_file_run_id`` (which normalises the source segment,
+    because run ids spell the source lower case while the on-disk directory
+    carries the normalised casing). The analysis shape
+    ``analysis_{source}_{start}_{end}_{model}`` deliberately does NOT derive
+    (#1762): the only consumers of this helper are the ``pipeline_job``
+    lookups, and ``_validate_pipeline_job_identity`` rejects an analysis run id
+    with ``file_journal_run_mismatch`` on BOTH of its branches -- with a model
+    id and without -- on every write and read path, so no ``pipeline_job`` row
+    carrying one can exist to be found. ``run_identity.ANALYSIS_RUN_ID_RE`` and
+    ``parse_run_cycle`` are untouched; retention still consumes them.
     """
 
     try:
         return _source_cycle_from_file_run_id(str(run_id))
     except FileOrchestrationJournalError:
         pass
-    try:
-        safe_run_id = _safe_identity_text(str(run_id), field="run_id")
-    except FileOrchestrationJournalError:
-        return None
-    match = _ANALYSIS_RUN_ID_RE.fullmatch(safe_run_id)
-    if match is None:
-        return None
-    try:
-        return _normalize_file_source_id(match.group(1), field="run_id"), parse_cycle_time(match.group(2))
-    except (TypeError, ValueError, FileOrchestrationJournalError):
-        return None
+    return None
 
 
 def _cycle_scope_from_job_id(job_id: Any) -> tuple[str, datetime] | None:
@@ -13054,115 +13041,6 @@ def _public_candidate_state(state: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(raw_manifest, Mapping):
         payload["nfs_raw_manifest"] = _public_raw_manifest_evidence(raw_manifest)
     return _public_evidence(payload)
-
-
-def _public_evidence(value: Any) -> Any:
-    return _sanitize_public_evidence(value)
-
-
-def _sanitize_public_evidence(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return _format_utc(value)
-    if isinstance(value, Mapping):
-        return {
-            str(key): _sanitize_public_field(str(key), nested)
-            for key, nested in value.items()
-            if not str(key).startswith("_file_journal_")
-        }
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return [_sanitize_public_evidence(item) for item in value]
-    return _sanitize_public_scalar(value)
-
-
-def _sanitize_public_field(key: str, value: Any) -> Any:
-    lowered = key.lower()
-    if is_sensitive_key(key):
-        return "[redacted]" if value not in (None, "") else value
-    if lowered == "message" or lowered.endswith("_message"):
-        return _public_message(value)
-    if lowered.endswith("_path") or lowered.endswith("_root") or lowered in {"path", "root"}:
-        return "[local-path]" if value not in (None, "") else value
-    if lowered.endswith("_uri") or lowered in {"uri", "object_uri", "manifest_uri"}:
-        return _sanitize_file_provider_evidence_scalar(key, value)
-    return _sanitize_public_evidence(value)
-
-
-def _sanitize_public_scalar(value: Any) -> Any:
-    if not isinstance(value, str):
-        return value
-    sanitized = _sanitize_public_path_or_uri_scalar(value)
-    if sanitized != value:
-        return sanitized
-    return _sanitize_public_text(value)
-
-
-def _sanitize_public_path_or_uri_scalar(value: str) -> str:
-    text = value.strip()
-    if not text or any(char.isspace() for char in text):
-        return value
-    if (
-        text.startswith("/")
-        or text.startswith("~")
-        or "://" in text
-        or text.startswith("s3:")
-        or text.startswith("published:")
-    ):
-        return _sanitize_file_provider_evidence_scalar("uri", value)
-    return value
-
-
-def _public_message(value: Any) -> Any:
-    if value in (None, ""):
-        return value
-    if not isinstance(value, str):
-        return _sanitize_public_evidence(value)
-    return _sanitize_public_text(value)
-
-
-def _sanitize_public_text(value: str) -> str:
-    redacted = _safe_error_message(value)
-    return _sanitize_public_text_tokens(redacted)
-
-
-def _sanitize_public_text_tokens(value: str) -> str:
-    rendered: list[str] = []
-    token = ""
-    for char in value:
-        if char.isspace():
-            if token:
-                rendered.append(_sanitize_public_text_token(token))
-                token = ""
-            rendered.append(char)
-        else:
-            token += char
-    if token:
-        rendered.append(_sanitize_public_text_token(token))
-    return "".join(rendered)
-
-
-def _sanitize_public_text_token(value: str) -> str:
-    prefix_length = 0
-    suffix_length = 0
-    while prefix_length < len(value) and value[prefix_length] in "'\"([{<":
-        prefix_length += 1
-    while suffix_length < len(value) - prefix_length and value[len(value) - suffix_length - 1] in "'\".,;:!?)]}>":
-        suffix_length += 1
-    prefix = value[:prefix_length]
-    suffix = value[len(value) - suffix_length :] if suffix_length else ""
-    core = value[prefix_length : len(value) - suffix_length if suffix_length else len(value)]
-    if not core:
-        return value
-    sanitized = _sanitize_public_path_or_uri_scalar(core)
-    if sanitized == core:
-        for separator in ("=", ":"):
-            key, found, nested = core.partition(separator)
-            if not found or not key or not nested:
-                continue
-            sanitized_nested = _sanitize_public_path_or_uri_scalar(nested)
-            if sanitized_nested != nested:
-                sanitized = f"{key}{found}{sanitized_nested}"
-                break
-    return f"{prefix}{sanitized}{suffix}" if sanitized != core else value
 
 
 def _blocked_query_job(

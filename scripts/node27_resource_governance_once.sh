@@ -50,7 +50,10 @@ if [ "$LOG_ROOT" = "/" ]; then
 fi
 mkdir -p "$LOG_ROOT" 2>/dev/null || blocked "LOG_ROOT_UNWRITABLE"
 
-LOCK_PATH="${NODE27_RESOURCE_GOVERNANCE_LOCK_PATH:-/tmp/node27-resource-governance.lock}"
+# #1765: the lock lives with the logs, not on `/`. The audit's whole job is to
+# notice the root volume filling; a lock file it cannot create because `/` is
+# full would take the audit down with the condition it exists to report.
+LOCK_PATH="${NODE27_RESOURCE_GOVERNANCE_LOCK_PATH:-$LOG_ROOT/node27-resource-governance.lock}"
 SUMMARY_PATH="${NODE27_RESOURCE_GOVERNANCE_SUMMARY_PATH:-$LOG_ROOT/resource-governance-$(date -u +%Y%m%dT%H%M%SZ).json}"
 LOG_FILE="${NODE27_RESOURCE_GOVERNANCE_LOG_FILE:-$LOG_ROOT/resource-governance.log}"
 
@@ -64,9 +67,14 @@ echo "[$(ts)] node27-resource-governance: start summary=$SUMMARY_PATH" >> "$LOG_
 START=$(date +%s)
 cd "$REPO" || blocked "REPO_UNAVAILABLE"
 
+# #1765: same geometry as the retention wrapper — combined output BOTH into
+# resource-governance.log and onto this wrapper's stderr, which the unit routes
+# with `StandardError=journal` so `RESOURCE_GOVERNANCE_CRITICAL:<code>` reaches
+# the alert handler's journal context. `RC` comes from PIPESTATUS[0] (the
+# audit's status), never from `tee`.
 "$REPO/.venv/bin/python" "$REPO/scripts/node27_resource_governance.py" \
-  --summary-path "$SUMMARY_PATH" --quiet >> "$LOG_FILE" 2>&1
-RC=$?
+  --summary-path "$SUMMARY_PATH" --quiet 2>&1 | tee -a "$LOG_FILE" >&2
+RC=${PIPESTATUS[0]}
 
 END=$(date +%s)
 echo "[$(ts)] node27-resource-governance: done rc=$RC elapsed_sec=$((END - START)) summary=$SUMMARY_PATH" >> "$LOG_FILE"
