@@ -1,11 +1,29 @@
 # Copy to node27-timeseries-compression-replay.env on node-27 and chmod 0600.
 # This file is an example only; never commit the real database URL or digest.
-DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:55432/nhms
+#
+# DOCUMENTED SUPERUSER EXCEPTION (#1774). This lane is the one-shot,
+# migration-class unit that keeps the superuser `nhms` -- deliberate, not an
+# oversight. It is NOT a recurring lane: nhms-node27-timeseries-compression-
+# replay.service is `Type=oneshot` and has no `.timer`; an operator triggers it.
+# The supervisor (scripts/node27_timeseries_compression_supervisor.py) runs
+# `pg_dump`, two `migration_apply` steps (`psql --file <migration>`),
+# `docker exec nhms-db pg_restore`, one `decompress_chunk` leg
+# (scripts/node27_timeseries_decompression_replay.py) and -- the rest of
+# EXPECTED_COMMAND_SEQUENCE (:117-128) -- `compression_dry_run`,
+# `compression_enforce` and the two benchmarks. The `migration_apply` steps are
+# migration-class DDL, which OpenSpec change node27-write-path-roles explicitly
+# leaves on the migration role; `nhms_ingest_rw` cannot carry them. The
+# exception is scoped by "this is the one-shot, migration-class unit", NOT by
+# "it only decompresses": the compression legs it also runs are exactly what the
+# recurring compression lane does as `nhms_ingest_rw`.
+# tests/test_node27_write_roles.py allow-lists exactly this file and the
+# archive-rebuild drill. Do NOT copy this line into any other env file.
+DATABASE_URL=postgresql://nhms:REPLACE_ME_PW@127.0.0.1:55432/nhms
 PGHOST=127.0.0.1
 PGPORT=55432
 PGDATABASE=nhms
-PGUSER=USER
-PGPASSWORD=PASSWORD
+PGUSER=nhms
+PGPASSWORD=REPLACE_ME_PW
 PGSSLMODE=disable
 NODE27_COMPRESSION_EXPECTED_STALE_SHA256=REPLACE_WITH_64_HEX_DIGEST
 NODE27_COMPRESSION_RUN_PLAN_SHA256=REPLACE_WITH_64_HEX_DIGEST

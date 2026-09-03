@@ -117,6 +117,30 @@ display/frontend oracle 都在 node-27。
   - permission-denied 矩阵：`hydro/met/ops` 关键表的 INSERT/UPDATE/DELETE/DDL/TRUNCATE/sequence/schema CREATE 全被拒，记录 `current_user` + DB role 类型。
   - 缺真实 DB 时入口必须报 `BLOCKED`，不得 mock 冒充 PASS。
 
+### C2b. 写侧最小权限 receipt（#1774）
+
+C2 证的是**读**边界（`nhms_display_ro` 无写权）。写边界是另一半，2026-09 之前完全缺失：
+ingest / download / compression / cold-residency / retention 五条 lane 全部以 superuser
+`nhms` 连库，也就是一份凭据 == 数据库容器内命令执行，而这台机器同时对外提供
+`https://test.nwm.ac.cn`。
+
+- [ ] **pre-merge（additive，可在 unit 全部照常运行时做）**：从 detached worktree 跑
+      `bash scripts/node27_provision_write_roles.sh --roles-only`，入证：
+      `pg_roles` 中 `nhms_ingest_rw` / `nhms_download_rw` 的
+      `rolsuper/rolcreaterole/rolcreatedb/rolreplication/rolbypassrls` 全为 `f`；两条
+      `copy-from-program refused for …` NOTICE。此阶段**不做** ownership 转移、不取关系锁、
+      不动任何 env 文件。
+- [ ] **post-merge（timer 停机窗口）**：跑完整 `scripts/node27_provision_write_roles.sh`，
+      入证 owner-drift 清单为空、`nhms_display_ro` 有效 SELECT 集合 before/after 一致、
+      `relacl` diff（预期只有 grantor 从 `…/nhms` 改写为 `…/nhms_ingest_rw`）。
+- [ ] 五条 lane 各在新角色下跑一轮真实 run 并留 receipt；autopipe dry tick 的统计守卫
+      **两条 ANALYZE 腿都必须是 `ok`**（`warning` = 非 owner 被静默跳过，tick 绿而腿死）。
+- [ ] env 切换后脱敏 `grep`：`/home/nwm/NWM/infra/env/*.env` 中不再出现 `nhms:` DSN 用户名或
+      `PGUSER=nhms`，例外只有 `node27-timeseries-compression-replay.env` 与
+      `node27-archive-rebuild-drill.env`（migration-class，理由已记档）。
+
+完整口径、退出码与回滚见 `docs/runbooks/tier-node27-timeseries-storage.md` §9。
+
 ### C3. cross-plane identity live（tasks 4.3 + §10.2/10.3）
 
 - [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：22 生产 → DB 状态 → published logs → `/api/v1/mvp/qhh/latest-product` → 27 `/` 单页地图 + `/ops`，**拒 historical latest 冒充**。

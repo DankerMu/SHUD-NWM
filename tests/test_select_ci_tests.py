@@ -927,6 +927,10 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         "tests/test_node27_autopipeline_connection_bounds.py",
         "tests/test_node27_autopipeline_handoff.py",
         "tests/test_node27_autopipeline_preflight.py",
+        # #1774: the autopipe stats guard's two ANALYZE legs are what force the
+        # writer role to OWN the relations, so the write-role guards must run
+        # when this script changes.
+        "tests/test_node27_write_roles.py",
         # #1442/#1789: the publish criterion is a registered oracle
         # statement; the ingest criterion's fact-table-free shape is pinned
         # by the same file.
@@ -935,6 +939,27 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         INVARIANT_SUITE_PATH,
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+def test_select_tests_maps_a_migration_to_the_node27_write_roles_guard() -> None:
+    # #1774 round 4. The stored-expression sweep's last leg is an ALLOW-list of
+    # (schema, name) pairs, and tests/test_node27_write_roles.py derives the
+    # migration side of that list from db/migrations/*.sql. The whole point of
+    # that derivation is that a migration referencing a function nobody added to
+    # the list reddens CI on the migration's own PR rather than the strict audit
+    # on node-27. `db/**` only buys tests/test_migrations.py, which never reads
+    # the allow-list, so without the explicit db/migrations rule the guard never
+    # ran on the PR that could break it.
+    migration = "db/migrations/000043_canonical_grid_snapshot.sql"
+    assert Path(migration).exists()
+    expected = ["tests/test_migrations.py", "tests/test_node27_write_roles.py"]
+
+    assert select_tests([migration], repo_root=Path(".")) == expected
+    # The rule matcher is fnmatch, whose `*` crosses `/`, so `db/migrations/*.sql`
+    # also selects a migration parked in a subdirectory -- which is what the
+    # test-side rglob reads. Pinned so a future switch to a path-aware matcher
+    # cannot silently drop that half.
+    assert select_tests(["db/migrations/2027q1/000099_x.sql"], repo_root=Path(".")) == expected
 
 
 def test_select_tests_maps_autopipe_cron_wrapper_without_core_smoke_fallback() -> None:
