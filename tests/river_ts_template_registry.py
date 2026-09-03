@@ -37,6 +37,7 @@ top-level import of a ``test_*`` module here would close that loop into a cycle.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 #: the #1980 worktree before the first template edit).
 GOLDEN_BASE_SHA = "51f9d273"
 GOLDEN_FIXTURE = REPO_ROOT / "tests" / "fixtures" / f"river_ts_templates_{GOLDEN_BASE_SHA}.json"
+#: sha256 of the golden's BYTES. `base_sha` is a field inside the file, so a
+#: regeneration carries it along unchanged and the provenance check cannot see
+#: the re-capture; this pin can, and it makes any re-capture a one-line diff a
+#: reviewer must approve on purpose (review #1996, C10).
+GOLDEN_SHA256 = "e24893a98c65d9f99dcc0ededd8808592c332a36c0df81e498ea310b71032ffd"
+
+
+def golden_sha256() -> str:
+    """The captured golden's actual content hash."""
+    return hashlib.sha256(GOLDEN_FIXTURE.read_bytes()).hexdigest()
 
 
 @dataclass(frozen=True)

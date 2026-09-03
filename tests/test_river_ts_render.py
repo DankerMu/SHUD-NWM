@@ -32,6 +32,10 @@ from packages.common.river_ts_render import (
     TEXT_AID_COUNTERPARTS,
     TEXT_IDENTITY_COLUMNS,
     RiverTemplateError,
+    _assert_key_predicates_retained,
+    _assert_no_fact_text_identity,
+    _bind_store,
+    _strip_aids,
     aid_conjunct,
     assert_structurally_intact,
     fact_table_attribution,
@@ -39,6 +43,7 @@ from packages.common.river_ts_render import (
     render_river_ts_sql,
     render_union_all,
     store_binding_form,
+    store_binding_forms,
 )
 
 MARKER = PUSHDOWN_AID_MARKER
@@ -622,7 +627,7 @@ def test_the_union_combinator_binds_through_a_hydro_run_alias_when_the_scope_has
 
     assert store_binding_form(template) == "join"
     rendered = render_union_all(template, ("narrow",), {"status": "published", "variable": "q_down"}, entry="join")
-    assert rendered.branches == ("join",)
+    assert rendered.branches == (("join",),)
     assert "AND h.timeseries_store = 'narrow'" in rendered.sql
 
 
@@ -637,7 +642,7 @@ def test_the_union_combinator_falls_back_to_an_exists_when_the_scope_has_no_alia
 
     rendered = render_union_all(NAMED_TEMPLATE, ("narrow",), {"run_id": "a", "valid_time": "b"}, entry="exists")
 
-    assert rendered.branches == ("exists",)
+    assert rendered.branches == (("exists",),)
     assert (
         "EXISTS (SELECT 1 FROM hydro.hydro_run store_route "
         "WHERE store_route.run_key = ts.run_key AND store_route.timeseries_store = 'narrow')"
@@ -683,3 +688,327 @@ def test_the_union_combinator_refuses_an_unknown_store() -> None:
 def test_the_union_combinator_refuses_an_empty_store_list() -> None:
     with pytest.raises(RiverTemplateError, match="at least one store"):
         render_union_all(NAMED_TEMPLATE, (), {"run_id": "a", "valid_time": "b"}, entry="named")
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review (#1996): every scope that reads the fact table gets bound
+# ---------------------------------------------------------------------------
+
+
+def _bind(template: str, store: str) -> tuple[tuple[str, ...], str]:
+    """The store binding on its own — the scope walk, without the aid deletion.
+
+    Exercised directly because the walk is what the round-1 findings were about:
+    going through :func:`render_union_all` would make every one of these tests
+    also depend on the template being renderable, which is a different contract.
+    """
+    return _bind_store(template, store, "<test>")
+
+
+C1_SELF_JOIN = f"""
+    SELECT a.value
+    FROM hydro.river_timeseries a
+    JOIN hydro.river_timeseries b
+      ON b.run_key = a.run_key
+    WHERE a.valid_time = :valid_time
+      {MARKER}
+      AND a.variable = :variable
+"""
+
+C1_SCALAR_SUBQUERY = f"""
+    SELECT rt.value
+    FROM hydro.river_timeseries rt
+    WHERE rt.value = (
+              SELECT MAX(inner_ts.value)
+              FROM hydro.river_timeseries inner_ts
+              WHERE inner_ts.run_key = rt.run_key
+                {MARKER}
+                AND inner_ts.variable = :variable
+          )
+      AND rt.valid_time = :valid_time
+"""
+
+
+def test_a_self_join_binds_the_store_on_both_references() -> None:
+    """One predicate for one of two reads is the fail-open, not a partial success.
+
+    Before the round-1 fix the walk stopped at the first fact scope, so ``b`` was
+    left free to resolve against the OTHER store while the return value reported
+    the branch bound (review #1996, C1).
+    """
+    forms, bound = _bind(C1_SELF_JOIN, "narrow")
+
+    assert fact_table_attribution(C1_SELF_JOIN).reference_count == 2
+    assert len(forms) == 2
+    assert bound.count("timeseries_store = 'narrow'") == 2
+    assert "store_route.run_key = a.run_key" in bound
+    assert "store_route.run_key = b.run_key" in bound
+
+
+def test_a_scalar_subquery_reference_binds_inside_its_own_subquery() -> None:
+    """The inner read is a scope of its own; its predicate has to land there, not outside."""
+    forms, bound = _bind(C1_SCALAR_SUBQUERY, "narrow")
+
+    assert len(forms) == 2
+    assert bound.count("timeseries_store = 'narrow'") == 2
+    # The inner binding is inside the sub-select's brackets, correlated on the
+    # INNER alias; the outer one is outside them, correlated on the outer alias.
+    closes_subquery = bound.index("AND rt.valid_time = :valid_time")
+    assert bound.index("store_route.run_key = inner_ts.run_key") < closes_subquery
+    assert bound.index("store_route.run_key = rt.run_key") > closes_subquery
+
+
+def test_the_union_combinator_binds_every_reference_of_a_multi_scope_template() -> None:
+    """Three reads, three predicates per branch — the mvt national shape, in miniature."""
+    template = f"""
+        WITH probe AS (
+            SELECT ts.run_key
+            FROM hydro.river_timeseries ts
+            WHERE ts.valid_time = :valid_time
+              {MARKER}
+              AND ts.variable = :variable
+        ),
+        second AS (
+            SELECT other.value
+            FROM hydro.river_timeseries other
+            WHERE other.valid_time = :valid_time
+        )
+        SELECT third.value
+        FROM hydro.river_timeseries third
+        WHERE third.valid_time = :valid_time
+    """
+
+    rendered = render_union_all(
+        template, ("legacy", "narrow"), {"valid_time": "t", "variable": "q_down"}, entry="three"
+    )
+
+    assert fact_table_attribution(template).reference_count == 3
+    assert rendered.branches == (("exists",) * 3, ("exists",) * 3)
+    for store, branch in zip(("legacy", "narrow"), rendered.branch_sql):
+        assert branch.count(f"timeseries_store = '{store}'") == 3
+
+
+def test_a_fact_scope_with_no_chain_to_bind_on_is_refused() -> None:
+    with pytest.raises(RiverTemplateError, match="no WHERE/ON chain to bind the store on"):
+        _bind("SELECT value FROM hydro.river_timeseries", "narrow")
+
+
+def test_a_hydro_run_alias_inside_a_scalar_subquery_is_not_in_scope() -> None:
+    """``hr`` is declared in the sub-select; naming it outside is PostgreSQL 42P01.
+
+    The alias search used to read the whole bracket level, sub-selects included,
+    and emitted ``AND hr.timeseries_store = …`` in the outer WHERE (review #1996,
+    C2). Masking nested groups is what makes "this scope" mean this scope.
+    """
+    template = f"""
+        SELECT ts.value
+        FROM hydro.river_timeseries ts
+        WHERE ts.run_key = (
+                  SELECT hr.run_key FROM hydro.hydro_run hr WHERE hr.run_id = :run_id
+              )
+          {MARKER}
+          AND ts.run_id = :run_id
+    """
+
+    assert store_binding_form(template) == "exists"
+    assert store_binding_forms(template) == ("exists",)
+    _forms, bound = _bind(template, "narrow")
+    assert "hr.timeseries_store" not in bound
+
+
+def test_a_hydro_run_alias_in_another_union_branch_is_not_in_scope() -> None:
+    """UNION branches share a bracket level but not their aliases."""
+    template = """
+        SELECT h.run_id FROM hydro.hydro_run h WHERE h.status = :status
+        UNION ALL
+        SELECT rt.run_id FROM hydro.river_timeseries rt WHERE rt.valid_time = :valid_time
+    """
+
+    assert store_binding_forms(template) == ("exists",)
+    _forms, bound = _bind(template, "narrow")
+    assert "h.timeseries_store" not in bound
+
+
+def test_a_leading_comment_does_not_slide_the_binding_into_another_branch() -> None:
+    """Offsets must come from ONE coordinate system (review #1996, C3).
+
+    The fact reference used to be located in comment-STRIPPED text and the chain
+    in the original; each comment collapses to a single character, so a long
+    comment ahead of the table slid the two apart far enough to bind the store
+    predicate into the first UNION branch — referencing an alias that does not
+    exist there and leaving the fact-table branch scanning both stores.
+    """
+    template = "\n    -- " + "x" * 300 + """
+    SELECT o.value FROM other o WHERE o.flag = :flag
+    UNION ALL
+    SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key
+"""
+
+    _forms, bound = _bind(template, "narrow")
+
+    head, _, tail = bound.partition("UNION ALL")
+    assert "timeseries_store" not in head
+    assert tail.count("timeseries_store = 'narrow'") == 1
+    assert "store_route.run_key = rt.run_key" in tail
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review (#1996): structural faults a clause keyword used to hide
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "template"),
+    [
+        (
+            "clause keyword after the connective",
+            f"""
+                SELECT rt.value
+                FROM hydro.river_timeseries rt
+                WHERE rt.run_key = %s AND
+                {MARKER}
+                rt.run_id = %s
+                LIMIT 1
+            """,
+        ),
+        (
+            "another connective after the connective",
+            f"""
+                SELECT rt.value
+                FROM hydro.river_timeseries rt
+                WHERE rt.run_key = %s AND
+                {MARKER}
+                rt.run_id = %s
+                AND rt.valid_time = %s
+            """,
+        ),
+    ],
+)
+def test_an_aid_whose_connective_sits_on_the_line_above_is_refused(label: str, template: str) -> None:
+    """``AND`` left stranded by the deletion, with neither ``)`` nor end of text after it.
+
+    ``aid_conjunct`` accepts a bare aid line whose ``AND`` sits on the PREVIOUS
+    line, so the deletion can leave ``WHERE x = %s AND LIMIT 1`` or ``… AND AND
+    …``. Both are syntax errors, and the original fault list — dangling ``AND``
+    before a bracket or at the end of the text — matched neither (review #1996,
+    C4).
+    """
+    with pytest.raises(RiverTemplateError):
+        render_river_ts_sql(template, "narrow", entry=label)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT a FROM t WHERE x = 1 AND LIMIT 1",
+        "SELECT a FROM t WHERE x = 1 OR ORDER BY a",
+        "SELECT a FROM t WHERE x = 1 AND AND y = 2",
+        "SELECT a FROM t WHERE x = 1 OR AND y = 2",
+        "SELECT a FROM t WHERE LIMIT 1",
+        "SELECT a FROM t WHERE x = 1 AND GROUP BY a",
+    ],
+)
+def test_the_structural_check_rejects_a_chain_that_lost_its_last_conjunct(sql: str) -> None:
+    with pytest.raises(RiverTemplateError):
+        assert_structurally_intact(sql, "fault")
+
+
+def test_the_structural_check_still_accepts_the_shapes_that_are_legal() -> None:
+    """Guard against the new patterns firing on ordinary SQL."""
+    for sql in (
+        "SELECT a FROM t WHERE x = 1 AND y = 2 LIMIT 1",
+        "SELECT a FROM t WHERE ordering = 1 AND grouping_key = 2 ORDER BY a",
+        "SELECT a FROM t WHERE (x = 1 OR (y = 2 AND z = 3)) GROUP BY a",
+        "SELECT a FROM t WHERE x = 1 UNION ALL SELECT a FROM u WHERE y = 2",
+    ):
+        assert_structurally_intact(sql, "legal")
+
+
+# ---------------------------------------------------------------------------
+# Round-1 review (#1996): the retention check no longer exempts by containment
+# ---------------------------------------------------------------------------
+
+
+def test_losing_the_authority_key_predicate_is_reported() -> None:
+    """The aid ``run_id = :run_id`` is a SUBSTRING of the predicate it must not exempt.
+
+    An unaliased statement spells its aid exactly as the authority sub-select's
+    own required predicate, so the containment exemption let ``run_key = (SELECT
+    run_key FROM hydro.hydro_run WHERE run_id = :run_id)`` exempt itself: the
+    whole predicate could be deleted and every assert still passed (review #1996,
+    C8). The other two checks are asserted to pass FIRST, so this test cannot be
+    green for the wrong reason — the mutation is structurally clean and carries no
+    text identity column, and only the retention check can see it.
+    """
+    template = f"""
+        SELECT 1
+        FROM hydro.river_timeseries
+        WHERE run_key = (
+                  SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
+              )
+          {MARKER}
+          AND run_id = :run_id
+          AND valid_time = :valid_time
+        LIMIT 1
+    """
+    narrow = render_river_ts_sql(template, "narrow", entry="probe").sql
+    mutated = narrow.replace(
+        """WHERE run_key = (
+                  SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
+              )
+          AND valid_time""",
+        "WHERE valid_time",
+        1,
+    )
+    assert mutated != narrow
+    _sql, _placeholders, removed_aids = _strip_aids(template, "probe")
+
+    assert_structurally_intact(mutated, "probe")
+    _assert_no_fact_text_identity(mutated, "probe")
+
+    with pytest.raises(RiverTemplateError, match="lost the predicate"):
+        _assert_key_predicates_retained(template, mutated, removed_aids, "probe")
+
+
+def test_a_conjunct_that_merely_holds_an_aid_is_still_accounted_for() -> None:
+    """``EXISTS (… AND aid AND …)`` changes text when its aid goes — and must still balance.
+
+    Exempting it wholesale is what the containment rule did; the check instead
+    computes what it should look like WITHOUT the aid and requires that form to
+    be present, so the guard's other conjuncts stay protected.
+    """
+    template = f"""
+        SELECT h.run_id
+        FROM hydro.hydro_run h
+        WHERE EXISTS (
+                  SELECT 1
+                  FROM hydro.river_timeseries rt
+                  WHERE rt.run_key = h.run_key
+                    {MARKER}
+                    AND rt.variable = 'q_down'
+                    AND rt.variable_e = 'q_down'
+                    AND rt.value IS NOT NULL
+              )
+    """
+    rendered = render_river_ts_sql(template, "narrow", entry="exists-holder")
+
+    assert "rt.variable = 'q_down'" not in rendered.sql
+    assert "rt.variable_e = 'q_down'" in rendered.sql
+    assert "rt.value IS NOT NULL" in rendered.sql
+
+    stripped = rendered.sql.replace("AND rt.value IS NOT NULL", "")
+    _sql, _placeholders, removed_aids = _strip_aids(template, "exists-holder")
+    with pytest.raises(RiverTemplateError, match="lost the predicate"):
+        _assert_key_predicates_retained(template, stripped, removed_aids, "exists-holder")
+
+
+def test_the_union_combinator_refuses_a_mixed_dialect_template() -> None:
+    template = f"""
+        SELECT ts.value
+        FROM hydro.river_timeseries ts
+        WHERE ts.run_key = %(run_key)s
+          {MARKER}
+          AND ts.run_id = :run_id
+    """
+    with pytest.raises(RiverTemplateError, match="mixes"):
+        render_union_all(template, ("legacy", "narrow"), {"run_key": "k", "run_id": "r"}, entry="mixed")

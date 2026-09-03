@@ -885,6 +885,36 @@ def test_select_tests_maps_sql_shape_oracle_helper_to_its_consumer_pins() -> Non
     ]
 
 
+def test_select_tests_routes_the_template_golden_fixture_to_the_shape_oracles() -> None:
+    """The golden is DATA, and data reached no rule at all.
+
+    The `tests/**` branch of the selector is gated on `.py`, so a `.json` fixture
+    fell through every rule and selected nothing: on a PR whose only change was a
+    regenerated golden, the backend job ran a collect-only smoke and merged with
+    zero assertions — the one diff class that can void #1980's whole equivalence
+    argument, certified by nothing (review #1996, C10).
+    """
+    selected = select_tests(["tests/fixtures/river_ts_templates_51f9d273.json"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_display_coverage_refresh.py",
+        "tests/test_migrations.py",
+        "tests/test_qhh_latest_fallback_pushdown.py",
+        "tests/test_river_ts_read_path_surrogate_keys.py",
+        "tests/test_river_ts_render.py",
+        "tests/test_river_ts_template_golden.py",
+        "tests/test_river_ts_text_identity_cleanup.py",
+        "tests/test_sql_shape_helpers.py",
+    ]
+
+
+def test_the_template_golden_rule_is_globbed_on_the_capture_sha() -> None:
+    """A re-capture at a new base renames the file; the route must survive it."""
+    assert select_tests(["tests/fixtures/river_ts_templates_deadbee1.json"], repo_root=Path(".")) == select_tests(
+        ["tests/fixtures/river_ts_templates_51f9d273.json"], repo_root=Path(".")
+    )
+
+
 def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins() -> None:
     """The #1341 switch touches three production files; all three must select the pins.
 

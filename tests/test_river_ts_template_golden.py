@@ -25,13 +25,24 @@ permitted to change and nothing else:
 * the ORDER of conjuncts within one AND-chain — each chain is a sorted multiset,
   which is what licenses "the ``WHERE`` line takes the next key conjunct".
 
-Everything else is red: a dropped or added conjunct, a changed parameter name, a
-predicate that moved between chains (a lateral body's conjunct hoisted to the
-outer ``WHERE`` changes two chains), a re-bracketed disjunction that actually
-changes the truth table (the ``OR (…)`` body is its own chain), a join that lost
-an ``ON`` conjunct. The counter-examples at the bottom prove each of those bites,
-because a golden that cannot be made red would certify the edit rather than check
-it.
+What it covers is the CONJUNCT MULTISET OF EVERY PREDICATE CHAIN, and inside
+that scope everything is red: a dropped or added conjunct, a changed parameter
+name, a changed comparison operator, a predicate that moved between chains (a
+lateral body's conjunct hoisted to the outer ``WHERE`` changes two chains), a
+re-bracketed disjunction that actually changes the truth table (the ``OR (…)``
+body is its own chain), a join that lost an ``ON`` conjunct. The counter-examples
+at the bottom prove each of those bites, because a golden that cannot be made red
+would certify the edit rather than check it.
+
+What it does NOT cover — stated because an over-claimed oracle is worse than a
+narrow one (review #1996, C11): the SELECT list, ``FROM``/``JOIN`` targets and
+aliases, ``LIMIT`` / ``ORDER BY`` / ``GROUP BY``, CTE names. Those are outside a
+predicate chain, so mutating them is GREEN here. #1980 changes none of them —
+every changed line in the production diff is a ``WHERE`` / ``AND`` / ``OR (``
+conjunct line — and the sibling pins that do cover them are elsewhere
+(``tests/test_river_ts_read_path_surrogate_keys.py`` embeds ``LIMIT 1`` in its
+pinned substrings, ``tests/test_hydro_display_mvt_scaling.py`` pins ``JOIN
+core.river_segment rs``).
 """
 
 from __future__ import annotations
@@ -49,9 +60,11 @@ from packages.common.river_ts_render import (
 from tests.river_ts_template_registry import (
     GOLDEN_BASE_SHA,
     GOLDEN_FIXTURE,
+    GOLDEN_SHA256,
     NON_TEMPLATE_MENTIONS,
     REGISTERED_TEMPLATE_PATHS,
     REGISTRY,
+    golden_sha256,
 )
 
 GOLDEN = json.loads(GOLDEN_FIXTURE.read_text(encoding="utf-8"))
@@ -74,11 +87,19 @@ def test_the_golden_was_captured_at_the_change_base() -> None:
     """Provenance, so a regenerated-against-itself fixture is visible.
 
     A golden re-captured from the POST-edit tree would pass every assertion below
-    while proving nothing. The recorded SHA is the only thing that says which
-    tree it came from.
+    while proving nothing. The recorded SHA says which tree it came from — but it
+    is a field INSIDE the file, so a regeneration copies it forward unchanged and
+    nothing notices. The byte hash is the half that notices: re-capturing the
+    fixture turns this red until someone edits the pin, which is a one-line diff
+    on a reviewed line rather than a silent 1000-line data change (review #1996,
+    C10).
     """
     assert GOLDEN["base_sha"].startswith(GOLDEN_BASE_SHA)
     assert len(GOLDEN["base_sha"]) == 40
+    assert golden_sha256() == GOLDEN_SHA256, (
+        "the golden fixture's bytes changed; if that was a deliberate re-capture, "
+        "update GOLDEN_SHA256 in tests/river_ts_template_registry.py and say why"
+    )
 
 
 def test_the_golden_covers_exactly_the_registered_entries() -> None:

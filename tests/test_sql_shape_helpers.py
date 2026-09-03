@@ -100,9 +100,12 @@ from packages.common.river_ts_render import (
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     TEXT_AID_COUNTERPARTS,
     TEXT_IDENTITY_COLUMNS,
+    assert_structurally_intact,
+    fact_table_attribution,
     fact_table_text_identity_columns,
     outer_predicates,
     render_river_ts_sql,
+    render_union_all,
     strip_all_subqueries,
     strip_comments,
     strip_scalar_subqueries,
@@ -760,6 +763,44 @@ def test_every_registered_template_renders_for_the_narrow_store(entry) -> None:
     assert fact_table_text_identity_columns(rendered.sql) == set()
     # Non-vacuity: the narrow variant really is shorter by exactly the aid blocks.
     assert len(rendered.sql.split("\n")) == len(template.split("\n")) - 2 * entry.expected_aids
+    if entry.params == "positional":
+        # A deleted aid line takes its `%s` with it, and the caller's tuple has
+        # to shrink by exactly that many. `removed_placeholders` is the renderer's
+        # answer; this is the arithmetic checked against the text (review #1996,
+        # r6 P3-2). Guarded on the dialect, not on the tuple being non-empty, so
+        # an entry that stopped reporting removals is caught rather than skipped.
+        assert template.count("%s") - rendered.sql.count("%s") == len(rendered.removed_placeholders)
+    else:
+        assert rendered.removed_placeholders == ()
+
+
+UNION_ENTRIES = [entry for entry in REGISTRY if entry.kind == "statement" and entry.params == "named"]
+
+
+@pytest.mark.parametrize("entry", UNION_ENTRIES, ids=lambda entry: entry.key)
+def test_every_named_registered_statement_binds_its_store_in_every_scope(entry) -> None:
+    """The combinator, over the real register — the coverage round 1 found missing.
+
+    Every call site of ``render_union_all`` was synthetic, single-scope, and
+    hand-written, so nothing noticed that ``mvt``'s national tile SQL reads the
+    fact table three times and got ONE store predicate: the other two reads
+    scanned both stores while the return value reported the branch bound
+    (review #1996, C6/C1). One predicate per read, per branch, is the assertion
+    that could only have been written against the register.
+    """
+    template = entry.source()
+    references = fact_table_attribution(template).reference_count
+    names = sorted(set(re.findall(r"%\((\w+)\)s", template)) | set(re.findall(r"(?<![:\w]):(\w+)\b", template)))
+    params = {name: "value" for name in names}
+
+    rendered = render_union_all(template, ("legacy", "narrow"), params, entry=entry.key)
+
+    assert rendered.params == params
+    assert len(rendered.branch_sql) == len(rendered.branches) == 2
+    for store, branch, forms in zip(("legacy", "narrow"), rendered.branch_sql, rendered.branches):
+        assert branch.count(f"timeseries_store = '{store}'") == references, entry.key
+        assert len(forms) == references
+        assert_structurally_intact(branch, f"{entry.key} [{store}]", allow_markers=store == "legacy")
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)

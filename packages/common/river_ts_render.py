@@ -183,13 +183,21 @@ class RenderedUnion:
         to ``execute`` without having to know whether the combinator rewrote
         anything.
     ``branches``
-        the store-binding form each branch got, in ``stores`` order — see
-        :func:`store_binding_form`.
+        per branch, in ``stores`` order, the store-binding form of EVERY
+        fact-table reference in that branch, in document order — see
+        :func:`store_binding_forms`. Nested because a statement can read the
+        fact table more than once and the forms can differ between the reads; a
+        single word per branch could only be a summary, and a summary is what
+        let three unbound reads report themselves bound (review #1996, C1).
+    ``branch_sql``
+        each branch on its own, in ``stores`` order, before they were joined —
+        what a caller debugging a plan or a test asserting per branch needs.
     """
 
     sql: str
     params: dict[str, object]
-    branches: tuple[str, ...]
+    branches: tuple[tuple[str, ...], ...]
+    branch_sql: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -668,9 +676,17 @@ def sql_chains(sql: str) -> tuple[tuple[str, ...], ...]:
     Comments are removed and whitespace is collapsed, and the conjuncts of one
     chain are sorted, so the form is invariant under exactly the three things
     #1980's normalisation is allowed to change — whitespace, marker placement and
-    conjunct order WITHIN one chain — and sensitive to everything else. Chains
-    are ordered positionally, so a conjunct migrating from a lateral body to the
-    outer ``WHERE`` changes two chains and is red.
+    conjunct order WITHIN one chain. Chains are ordered positionally, so a
+    conjunct migrating from a lateral body to the outer ``WHERE`` changes two
+    chains and is red.
+
+    The subject is the conjunct multiset PER PREDICATE CHAIN, and nothing else:
+    the SELECT list, ``FROM``/``JOIN`` targets and aliases, ``LIMIT`` /
+    ``ORDER BY`` / ``GROUP BY`` and CTE names sit outside every chain, so this
+    form is blind to them by construction. Said explicitly because the first
+    wording claimed sensitivity "to everything else", which is the kind of
+    over-claim that gets an oracle trusted for a job it cannot do (review #1996,
+    C11).
     """
     stripped = strip_comments(sql)
     found = _collect_chains(stripped, top=True)
@@ -724,8 +740,19 @@ def aid_conjunct(line: str) -> str | None:
 # Structural check
 # ---------------------------------------------------------------------------
 
+# The keywords that end a predicate chain. A connective immediately before one
+# of them, or a WHERE immediately followed by one, means a line deletion ate the
+# chain's last (or only) conjunct: `WHERE a = %s AND` / marker / aid / `LIMIT 1`
+# folds to `WHERE a = %s AND LIMIT 1`, which the "dangling AND at the end" and
+# "before a closing bracket" patterns both miss because neither the end of the
+# text nor a bracket follows (review #1996, C4).
+_CLAUSE_KEYWORD = r"(?:LIMIT|ORDER|GROUP|HAVING|WINDOW|OFFSET|FETCH|RETURNING|UNION|EXCEPT|INTERSECT)"
+
 _STRUCTURAL_FAULTS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("WHERE with no predicate", re.compile(r"\bWHERE\s+AND\b", re.IGNORECASE)),
+    ("dangling connective before a clause keyword", re.compile(rf"\b(?:AND|OR)\s+{_CLAUSE_KEYWORD}\b", re.IGNORECASE)),
+    ("doubled connective", re.compile(r"\b(?:AND|OR)\s+(?:AND|OR)\b", re.IGNORECASE)),
+    ("WHERE with no predicate before a clause keyword", re.compile(rf"\bWHERE\s+{_CLAUSE_KEYWORD}\b", re.IGNORECASE)),
     ("FROM followed by AND", re.compile(r"\bFROM\s+AND\b", re.IGNORECASE)),
     ("ON with no predicate", re.compile(r"\bON\s+AND\b", re.IGNORECASE)),
     ("dangling AND before a closing bracket", re.compile(r"\bAND\s*\)", re.IGNORECASE)),
@@ -860,6 +887,50 @@ def _assert_no_fact_text_identity(sql: str, entry: str) -> None:
         )
 
 
+def _raw_conjuncts(text: str) -> list[str]:
+    """``text`` split on its own top-level ``AND``, pieces UNcanonicalised.
+
+    The canonicalising :func:`_conjuncts` is for comparison; this one is for
+    rebuilding, so the nested structure of each piece survives the round trip.
+    """
+    pieces: list[str] = []
+    previous = 0
+    for match in _top_level_spans(text, _AND_SEPARATOR):
+        pieces.append(text[previous : match.start()])
+        previous = match.end()
+    pieces.append(text[previous:])
+    return [piece for piece in pieces if piece.strip()]
+
+
+def _without_aids(text: str, exempt: set[str]) -> str:
+    """``text`` with every aid deleted from inside its bracketed sub-expressions.
+
+    What a conjunct that CONTAINS an aid must look like after the aid is gone —
+    ``EXISTS (… AND rt.variable = 'q_down' AND …)`` and the ``(%(scan_run_id)s IS
+    NULL OR (aid AND key))`` guard both change text when their aid goes, and
+    both must still be accounted for.
+
+    Computed rather than exempted, because "it holds the aid somewhere" is the
+    hole this replaced: the aid of an unaliased statement is ``run_id =
+    :run_id``, a substring of the authority predicate ``run_key = (SELECT
+    run_key FROM hydro.hydro_run WHERE run_id = :run_id)``, so containment let
+    that predicate exempt ITSELF and deleting it outright passed every assert
+    (review #1996, C8). Here it does not: the aid is not a top-level conjunct of
+    the sub-select — the piece is the whole ``SELECT … WHERE run_id = :run_id``
+    — so nothing is dropped, the expected form equals the original, and its
+    absence is reported.
+    """
+    rebuilt: list[str] = []
+    last = 0
+    for content_start, content in _top_level_groups(text):
+        kept = [piece for piece in _raw_conjuncts(content) if _canonical(piece) not in exempt]
+        rebuilt.append(text[last:content_start])
+        rebuilt.append(" AND ".join(_without_aids(piece, exempt).strip() for piece in kept))
+        last = content_start + len(content)
+    rebuilt.append(text[last:])
+    return "".join(rebuilt)
+
+
 def _assert_key_predicates_retained(
     legacy_sql: str,
     narrow_sql: str,
@@ -878,21 +949,33 @@ def _assert_key_predicates_retained(
     AND rt.run_key = …))``) necessarily changes text when the aid goes, so it is
     exempted here — its inner chain is compared conjunct by conjunct like any
     other, and the golden oracle pins its legacy form.
+
+    The two exemptions are EXACT, not substring containment. An unaliased
+    statement spells its aid ``run_id = :run_id``, and that is a substring of the
+    authority predicate ``run_key = (SELECT run_key FROM hydro.hydro_run WHERE
+    run_id = :run_id)`` the whole check exists to protect: under containment the
+    key predicate exempted itself, and deleting it outright passed every assert
+    (review #1996, C8).
     """
+    exempt = {_canonical(aid) for aid in removed_aids}
     narrow_conjuncts = sql_conjunct_census(narrow_sql)
     for conjunct, count in sql_conjunct_census(legacy_sql).items():
-        if any(aid in conjunct for aid in removed_aids):
+        if conjunct in exempt or narrow_conjuncts[conjunct] >= count:
             continue
-        if narrow_conjuncts[conjunct] < count:
-            raise RiverTemplateError(
-                f"{entry}: the narrow variant lost the predicate {conjunct!r} that is not a transitional aid"
-            )
+        expected = _canonical(_without_aids(conjunct, exempt))
+        if expected != conjunct and narrow_conjuncts[expected] >= count:
+            continue
+        raise RiverTemplateError(
+            f"{entry}: the narrow variant lost the predicate {conjunct!r} that is not a transitional aid"
+        )
     # No "the aid text is gone" substring check here on purpose: the unaliased
     # statements spell their aid `run_id = :run_id`, which is ALSO the authority
     # sub-select's own required predicate (`SELECT run_key FROM hydro.hydro_run
-    # WHERE run_id = :run_id`). Survival is asserted table-scoped instead, by
-    # :func:`_assert_no_fact_text_identity`, which is the same distinction this
-    # whole module exists to keep straight.
+    # WHERE run_id = :run_id`). Removal is asserted table-scoped instead, by
+    # :func:`_assert_no_fact_text_identity`, which answers a DIFFERENT question
+    # from this one — it detects the PRESENCE of a text identity column on the
+    # fact table, never the LOSS of a key predicate, so it is a complement to
+    # this check and not a substitute for it.
 
 
 def render_river_ts_sql(template: str, store: str, *, entry: str = "<template>") -> RenderedSql:
@@ -938,14 +1021,26 @@ _HYDRO_RUN_REFERENCE = re.compile(
 )
 
 
-def store_binding_form(template: str) -> str:
-    """``"join"`` if the fact table's OWN bracket scope has a ``hydro_run`` alias, else ``"exists"``.
+def store_binding_forms(template: str) -> tuple[str, ...]:
+    """One form per place the statement reads the fact table, in document order.
 
-    Reported per registry entry rather than chosen silently: only a template that
-    already joins ``hydro_run`` beside the fact table can bind
-    ``hydro_run.timeseries_store`` by a column reference; every other one has to
-    reach the authority table through a correlated ``EXISTS`` on ``run_key``,
-    which is a different plan and a different cost.
+    ``"join"`` where that reference's own SELECT segment already has a
+    ``hydro_run`` alias in scope, ``"exists"`` where the authority table has to
+    be reached through a correlated sub-select on ``run_key`` — a different plan
+    and a different cost, so which one a template gets is reported rather than
+    decided invisibly.
+
+    Plural because a statement can read the fact table more than once and the
+    answer is per reference: ``mvt``'s national tile SQL reads it in two
+    laterals and once more in an identity probe. The singular
+    :func:`store_binding_form` collapses this to one word and says ``"mixed"``
+    when the references disagree.
+    """
+    return tuple(_store_predicate(scope, "legacy")[0] for scope in _fact_table_scopes(template, "<template>"))
+
+
+def store_binding_form(template: str) -> str:
+    """``"join"``, ``"exists"``, or ``"mixed"`` when the references disagree.
 
     Same scope, not "anywhere in the statement", deliberately. A correlated body
     can see an OUTER alias — ``forcing_copyback_backfill``'s probe sits inside
@@ -956,23 +1051,80 @@ def store_binding_form(template: str) -> str:
     cheaper form declares it by joining ``hydro_run`` in the same scope. So this
     reports ``exists`` for the copyback probe, which is a cost note, not a bug.
     """
-    scope = _fact_table_scope(template, "<template>")
-    return "join" if _hydro_run_alias_in(scope.text) is not None else "exists"
+    forms = set(store_binding_forms(template))
+    return forms.pop() if len(forms) == 1 else "mixed"
+
+
+def _mask_nested(text: str) -> str:
+    """``text`` with comments, string bodies and nested bracket groups blanked out.
+
+    OFFSETS ARE PRESERVED — every masked character becomes a space, newlines
+    kept — and that is the point. The scope walk below must locate a fact
+    reference, the chain keyword governing it and that chain's end in ONE
+    coordinate system. The first implementation searched ``strip_comments(text)``
+    for the fact table and compared the offset it got back against spans of the
+    UNSTRIPPED text; each comment ahead of the table collapses to one character
+    and slides the two apart, which bound the store predicate into a different
+    UNION branch (review #1996, C3). Masking removes the class rather than the
+    instance: there is no second coordinate system left to disagree with.
+
+    Masking nested groups is also what makes "this scope's own text" mean what it
+    says — a ``hydro_run`` alias declared inside a scalar sub-select is not in
+    scope for the enclosing WHERE, and searching the unmasked level text read it
+    as if it were (C2).
+    """
+    masked = list(text)
+    length = len(text)
+    index = 0
+
+    def blank(start: int, stop: int) -> None:
+        for position in range(start, stop):
+            if text[position] != "\n":
+                masked[position] = " "
+
+    while index < length:
+        character = text[index]
+        if character in "'\"":
+            end = _scan_quoted(text, index, character)
+        elif text.startswith("--", index):
+            end = _scan_line_comment(text, index)
+        elif text.startswith("/*", index):
+            end = _scan_block_comment(text, index)
+        elif character == "(":
+            end = _skip_balanced(text, index)
+        else:
+            index += 1
+            continue
+        blank(index, end)
+        index = end
+    return "".join(masked)
 
 
 @dataclass(frozen=True)
 class _FactScope:
-    """The bracket level that holds the fact table's own ``FROM`` and ``WHERE``."""
+    """One place the statement reads the fact table, and where to bind its store."""
 
-    text: str
+    #: the level's own text with nested groups masked, in the template's own
+    #: coordinates offset by :attr:`offset`
+    masked: str
+    #: absolute offset of this bracket level's text within the template
     offset: int
-    where_end: int
+    #: absolute offset of the fact reference itself, the document order key
+    reference_at: int
+    #: absolute offset to splice ``AND <store predicate>`` at: the end of the
+    #: WHERE/ON chain that governs THIS reference
+    chain_end: int
+    #: the region the ``hydro_run`` alias must be declared in to be usable here:
+    #: this reference's own SELECT segment, not the whole bracket level. UNION
+    #: branches share a level, and an alias declared in one branch is not in
+    #: scope in the next.
+    alias_scope: str
     fact_alias: str | None
-    #: the PHYSICAL table name as written in this scope, used to qualify
-    #: ``run_key`` when the fact table has no alias — an unqualified ``run_key``
-    #: inside the correlated sub-select would resolve to the sub-select's OWN
-    #: ``hydro_run.run_key``, making the correlation ``x = x`` and the branch
-    #: predicate a no-op that selects every run.
+    #: the PHYSICAL table name as written, used to qualify ``run_key`` when the
+    #: fact table has no alias — an unqualified ``run_key`` inside the correlated
+    #: sub-select would resolve to the sub-select's OWN ``hydro_run.run_key``,
+    #: making the correlation ``x = x`` and the branch predicate a no-op that
+    #: selects every run.
     fact_table: str
 
 
@@ -982,44 +1134,97 @@ def _fact_table_name(reference: str) -> str:
 
 
 def _hydro_run_alias_in(text: str) -> str | None:
-    for match in _HYDRO_RUN_REFERENCE.finditer(strip_comments(text)):
+    for match in _HYDRO_RUN_REFERENCE.finditer(text):
         if match.group(1) is not None:
             return match.group(1)
     return None
 
 
-def _fact_table_scope(template: str, entry: str) -> _FactScope:
-    """The innermost bracket level whose own text declares the fact table."""
+def _bracket_levels(text: str, offset: int) -> list[tuple[str, int]]:
+    """Every bracket level of ``text``, outermost first, each with its absolute offset."""
+    levels = [(text, offset)]
+    for content_start, content in _top_level_groups(text):
+        levels.extend(_bracket_levels(content, offset + content_start))
+    return levels
 
-    def descend(text: str, offset: int) -> _FactScope | None:
-        for content_start, content in _top_level_groups(text):
-            deeper = descend(content, offset + content_start)
-            if deeper is not None:
-                return deeper
-        match = _FACT_REFERENCE.search(strip_comments(text))
-        if match is None:
-            return None
-        starts = [start for start in _top_level_spans(text, _REGION_START) if start.group(1).upper() == "WHERE"]
-        starts = [start for start in starts if start.start() >= match.start()]
-        if not starts:
-            raise RiverTemplateError(f"{entry}: the fact table's scope has no WHERE chain to bind the store on")
-        start = starts[0]
-        end = len(text)
-        for stop in _top_level_spans(text, _REGION_STOP):
-            if stop.start() >= start.end():
-                end = stop.start()
-                break
-        return _FactScope(text, offset, offset + end, match.group(1), _fact_table_name(match.group(0)))
 
-    scope = descend(template, 0)
-    if scope is None:
+def _chain_end(masked: str, start: re.Match[str]) -> int:
+    """Where the chain opened by ``start`` stops, relative to ``masked``."""
+    for stop in _REGION_STOP.finditer(masked):
+        if stop.start() >= start.end():
+            return stop.start()
+    return len(masked)
+
+
+def _governing_chain(masked: str, reference: re.Match[str]) -> re.Match[str] | None:
+    """The WHERE/ON chain a store predicate for ``reference`` belongs in.
+
+    A ``JOIN`` reference gets its OWN ``ON`` chain where it has one, not the
+    level's ``WHERE``: for an OUTER join the two are not interchangeable — the
+    same predicate in the WHERE drops exactly the unmatched rows the join exists
+    to keep, silently turning it into an inner join. A ``FROM`` reference gets
+    the WHERE, where it is on the preserved side either way.
+    """
+    after = [start for start in _REGION_START.finditer(masked) if start.start() >= reference.end()]
+    if not after:
+        return None
+    if reference.group(0).upper().startswith("JOIN") and after[0].group(1).upper() == "ON":
+        # ...and only if nothing else opens in between: `JOIN fact r USING (…)
+        # JOIN other o ON …` would otherwise hand this reference the NEXT join's
+        # ON chain, where neither its alias nor its rows are the subject.
+        if _REGION_STOP.search(masked, reference.end(), after[0].start()) is None:
+            return after[0]
+    where = next((start for start in after if start.group(1).upper() == "WHERE"), None)
+    return where if where is not None else after[0]
+
+
+def _fact_table_scopes(template: str, entry: str) -> tuple[_FactScope, ...]:
+    """EVERY place the statement reads the fact table, in document order.
+
+    Not "the innermost one". A statement that reads the fact table three times
+    (``mvt``'s national tile SQL: two laterals and an identity probe) needs three
+    store predicates; binding only the first returned a statement that scanned
+    BOTH stores on the other two reads while reporting itself bound — the
+    fail-open the combinator exists to prevent (review #1996, C1).
+    """
+    scopes: list[_FactScope] = []
+    for text, offset in _bracket_levels(template, 0):
+        masked = _mask_nested(text)
+        selects = list(_TOP_LEVEL_SELECT.finditer(masked))
+        for reference in _FACT_REFERENCE.finditer(masked):
+            chain = _governing_chain(masked, reference)
+            if chain is None:
+                raise RiverTemplateError(
+                    f"{entry}: the scope reading {_fact_table_name(reference.group(0))} at offset "
+                    f"{offset + reference.start()} has no WHERE/ON chain to bind the store on"
+                )
+            end = _chain_end(masked, chain)
+            segment = max((select.start() for select in selects if select.start() <= reference.start()), default=0)
+            scopes.append(
+                _FactScope(
+                    masked=masked,
+                    offset=offset,
+                    reference_at=offset + reference.start(),
+                    chain_end=offset + end,
+                    alias_scope=masked[segment:end],
+                    fact_alias=reference.group(1),
+                    fact_table=_fact_table_name(reference.group(0)),
+                )
+            )
+    if not scopes:
         raise RiverTemplateError(f"{entry}: the template does not read {RIVER_TABLE}")
-    return scope
+    counted = fact_table_attribution(template).reference_count
+    if len(scopes) != counted:
+        raise RiverTemplateError(
+            f"{entry}: the scope walk located {len(scopes)} fact-table reference(s) but the statement names "
+            f"the fact table {counted} time(s) — refusing to bind a store on a partly-understood statement"
+        )
+    scopes.sort(key=lambda scope: scope.reference_at)
+    return tuple(scopes)
 
 
-def _store_predicate(template: str, store: str, entry: str) -> tuple[str, str]:
-    scope = _fact_table_scope(template, entry)
-    alias = _hydro_run_alias_in(scope.text)
+def _store_predicate(scope: _FactScope, store: str) -> tuple[str, str]:
+    alias = _hydro_run_alias_in(scope.alias_scope)
     if alias is not None:
         return "join", f"{alias}.timeseries_store = '{store}'"
     qualifier = f"{scope.fact_alias or scope.fact_table}."
@@ -1030,11 +1235,21 @@ def _store_predicate(template: str, store: str, entry: str) -> tuple[str, str]:
     )
 
 
-def _bind_store(template: str, store: str, entry: str) -> tuple[str, str]:
-    form, predicate = _store_predicate(template, store, entry)
-    scope = _fact_table_scope(template, entry)
-    cut = scope.where_end
-    return form, f"{template[:cut]}\n  AND {predicate}\n{template[cut:]}"
+def _bind_store(template: str, store: str, entry: str) -> tuple[tuple[str, ...], str]:
+    """``template`` with one store predicate spliced into EVERY fact-table scope."""
+    scopes = _fact_table_scopes(template, entry)
+    bindings = [(scope.chain_end, *_store_predicate(scope, store)) for scope in scopes]
+    bound = template
+    # Descending, so an earlier splice cannot shift a later cut point.
+    for cut, _form, predicate in sorted(bindings, key=lambda binding: binding[0], reverse=True):
+        bound = f"{bound[:cut]}\n  AND {predicate}\n{bound[cut:]}"
+    literal = f"timeseries_store = '{store}'"
+    emitted = bound.count(literal) - template.count(literal)
+    if emitted != len(scopes):
+        raise RiverTemplateError(
+            f"{entry}: bound {emitted} store predicate(s) for {len(scopes)} fact-table reference(s)"
+        )
+    return tuple(form for _cut, form, _predicate in bindings), bound
 
 
 def _named_parameters(template: str) -> tuple[str, tuple[str, ...]]:
@@ -1065,11 +1280,18 @@ def render_union_all(
     caller's tuple twice, in an order that depends on which aids each branch
     dropped, and psycopg2 reports the arity mismatch only at execute time.
 
-    Each branch binds ``hydro_run.timeseries_store`` inside the fact table's own
-    scope — by column reference where that scope already joins ``hydro_run``,
-    otherwise by a correlated ``EXISTS`` on ``run_key``. :func:`store_binding_form`
-    reports which form a template gets, so the choice is a documented property of
-    the template rather than an invisible decision of the renderer.
+    Each branch binds ``hydro_run.timeseries_store`` inside EVERY scope that
+    reads the fact table — by column reference where that reference's own SELECT
+    segment already has a ``hydro_run`` alias, otherwise by a correlated
+    ``EXISTS`` on ``run_key``. :func:`store_binding_forms` reports which form
+    each reference gets, so the choice is a documented property of the template
+    rather than an invisible decision of the renderer.
+
+    Every branch is re-checked after binding: as many store predicates as the
+    branch has fact-table references, and still structurally intact. A branch
+    that reads the fact table somewhere the store predicate did not reach would
+    scan both stores there while the return value claimed otherwise, which is
+    the one failure this combinator exists to make impossible.
 
     Parameter names are SHARED across the branches: both placeholder dialects
     allow a name to repeat, so the caller's mapping goes through unchanged and
@@ -1095,11 +1317,19 @@ def render_union_all(
     if missing:
         raise RiverTemplateError(f"{entry}: render_union_all was not given values for {missing}")
     branches: list[str] = []
-    forms: list[str] = []
+    forms: list[tuple[str, ...]] = []
     for store in stores:
-        rendered = render_river_ts_sql(template, store, entry=f"{entry} [{store}]")
-        form, with_store = _bind_store(rendered.sql, store, f"{entry} [{store}]")
-        forms.append(form)
+        label = f"{entry} [{store}]"
+        rendered = render_river_ts_sql(template, store, entry=label)
+        branch_forms, with_store = _bind_store(rendered.sql, store, label)
+        references = fact_table_attribution(with_store).reference_count
+        if len(branch_forms) != references:
+            raise RiverTemplateError(
+                f"{label}: bound {len(branch_forms)} store predicate(s) but the branch reads the fact table "
+                f"{references} time(s) — an unbound read would scan both stores"
+            )
+        assert_structurally_intact(with_store, label, allow_markers=store == "legacy")
+        forms.append(branch_forms)
         branches.append(with_store)
     sql = "\nUNION ALL\n".join(f"(\n{branch}\n)" for branch in branches)
-    return RenderedUnion(sql, dict(params), tuple(forms))
+    return RenderedUnion(sql, dict(params), tuple(forms), tuple(branches))

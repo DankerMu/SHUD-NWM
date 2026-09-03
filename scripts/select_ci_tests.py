@@ -1791,6 +1791,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
+        # I1 #1980 river_ts_render: the captured golden of every registered read
+        # template — the ONE artefact that can void #1980's whole equivalence
+        # argument. It is data, not Python, so the `tests/**.py` branch above
+        # never sees it and it reached no rule at all: a PR that regenerated the
+        # golden after editing a template — certifying the edit against itself —
+        # selected zero backend tests and merged on a collect-only smoke
+        # (review #1996, C10). Globbed on the capture SHA so a re-capture at a
+        # new base is routed the same way.
+        "tests/fixtures/river_ts_templates_*.json",
+        SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
         "packages/common/forecast_store.py",
         (
             "tests/test_forecast_api.py",
