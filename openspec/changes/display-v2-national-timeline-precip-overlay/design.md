@@ -11,7 +11,7 @@
 ## Goals / Non-Goals
 
 **Goals:**
-- 全国流量与降水按同一 `(source, cycle, valid_time)` 三元组渲染，时间轴 3h 步长覆盖 lead 0–167h，默认 lead=0。
+- 全国流量与降水按同一 `(source, cycle, valid_time)` 三元组渲染，时间轴 3h 步长覆盖 lead +0h…+168h（含 f168，57 项；oracle 写的「167h」是 168h 视界的开区间口径，canonical 产品实际到 f168，本 change 统一按闭区间 0–168h / 57 项），默认 lead=0。
 - 降水层是「过去 24h 累积」，跨起报时次取切片，任一切片缺失即 fail-closed。
 - 不引入新 Python 依赖、不改 DB schema、不改 node-22 计算链路；旧全国瓦片路由保留别名。
 - 全国静态河网更密，且 z3/z4 瓦片坐标数受 50k 上限约束。

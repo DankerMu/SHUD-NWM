@@ -12,7 +12,7 @@ The system SHALL provide grouped layer controls matching the design while honest
 - **AND** base controls MUST include basin boundaries and river network when data is available
 
 #### Scenario: Unimplemented meteorology layers are disabled
-- **WHEN** temperature grid or other meteorology grid contracts are not implemented
+- **WHEN** temperature grid, other meteorology grid, or meteorology station data contracts are not implemented
 - **THEN** their toggles MUST be disabled or marked unavailable
 - **AND** the UI MUST not pretend those layers are rendering
 - **AND** the precipitation overlay MUST NOT be listed as unimplemented once the `precip` catalog entry is served
@@ -55,7 +55,7 @@ The same control bar is reused in basin detail, but its cycle options there SHAL
 #### Scenario: Active layer has valid times from layer API
 - **WHEN** the national overview loads
 - **THEN** the system MUST call `/api/v1/layers/discharge/cycles?source=<source>` and, for the selected cycle, `/api/v1/layers/discharge/valid-times?source=<source>&cycle=<cycle>`
-- **AND** the bottom timeline MUST use the returned `valid_times[]` (3-hour stride, lead 0–167h) for ticks, current-time selection, and next/previous actions
+- **AND** the bottom timeline MUST use the returned `valid_times[]` (3-hour stride, lead +0h … +168h inclusive, 57 entries, matching the canonical f000–f168 product range) for ticks, current-time selection, and next/previous actions
 - **AND** ticks MUST be labelled with the lead hour (`+0h`, `+3h`, …) and the valid time
 - **AND** the current valid time, source, and cycle MUST be included in map and precipitation requests
 

@@ -60,3 +60,31 @@ This guarantees that the default `discharge` overview renders **every basin's ri
 #### Scenario: Instants in the catalog use the seconds-precision spelling
 - **WHEN** the `discharge` entry is returned by either caller shape
 - **THEN** `metadata.default_cycle` and every `metadata.valid_times[]` entry match `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`, the one spelling pinned by `mvt-tile-contract`
+
+### Requirement: Overview bootstrap cold latency budget
+The system SHALL keep the default `gfs+discharge` overview cold first-paint within a defined latency budget so the receipt under `docs/runbooks/receipts/display-bootstrap-decoupling-<date>.md` (and, for this change, `docs/runbooks/receipts/<date>-display-v2.md`) is a regression contract, not a one-shot artifact. The budget is re-measured by this change because the runless catalog now evaluates the 38-network cycle intersection (`national_discharge_cycles`) and the per-cycle valid-time list inside `GET /api/v1/layers`, and because the precipitation overlay is on by default.
+
+#### Scenario: Cold `/api/v1/layers` budget
+- **WHEN** a force-refresh load issues `GET /api/v1/layers` (runless) and `GET /api/v1/layers?run_id=<latest>` on a cold cache, with the intersection and default-cycle valid-time queries included in the catalog computation
+- **THEN** each response MUST return within ≤ 200 ms p95 on node-27 production hardware
+- **AND** no other bootstrap-critical endpoint MUST exceed 500 ms p95
+- **AND** the node-27 receipt for this change MUST record the measured cold p95 of `GET /api/v1/layers` before and after the change
+
+#### Scenario: Cold first-paint interactivity budget
+- **WHEN** the default `gfs+discharge` overview is opened on a cold cache with the precipitation overlay enabled and `loadOverview` is invoked
+- **THEN** `mapBootstrapLoading` MUST settle to `false` within 1 s of `loadOverview` invocation on node-27 production hardware
+- **AND** at least one MVT hit-layer MUST be registered with MapLibre by that point so a river segment is clickable
+- **AND** the precipitation index fetch and the first PNG request MUST NOT be awaited before `mapBootstrapLoading` settles
+
+### Requirement: Cycles and precipitation index requests stay off the bootstrap critical path
+The bootstrap critical path SHALL remain `fetchBasins` + `fetchLayers(null)` + valid_time resolution from `metadata.valid_times` (the `Bootstrap minimal request set` scenario). `GET /api/v1/layers/discharge/cycles`, `GET /api/v1/layers/discharge/valid-times?source=&cycle=` and `GET /api/v1/precip/{source}/{cycle}/index` SHALL be issued only after `mapBootstrapLoading` settles, as non-blocking enrichment fetches: the bottom control bar renders immediately from `metadata.default_source` / `metadata.default_cycle` / `metadata.valid_times`, the cycle selector shows only the default cycle until the cycles list arrives, and the precipitation raster is registered when its index arrives.
+
+#### Scenario: Control bar renders from catalog metadata first
+- **WHEN** `loadOverview` settles the bootstrap critical path
+- **THEN** the timeline, source control and cycle selector are usable with the default cycle before any cycles or precip index response has arrived
+- **AND** the store issues the cycles and precip index requests after `mapBootstrapLoading === false`, never as part of the awaited bootstrap promise
+
+#### Scenario: Enrichment failure of cycles or precip index does not block the map
+- **WHEN** the cycles or precip index request rejects
+- **THEN** the map, discharge tiles and timeline for the default cycle stay interactive
+- **AND** the failure surfaces as a scoped notice (cycle selector limited to the default cycle / precipitation unavailable), not as a bootstrap error

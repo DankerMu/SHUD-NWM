@@ -28,6 +28,8 @@
 - `mvt-tile-contract`: 全国 discharge 瓦片新增 `{source}/{cycle}` 路由并成为目录 canonical URL；旧路由保留为别名；缓存 key/查询版本纳入 source+cycle；M11Shell fixture 随之更新。
 - `map-layer-timeline-controls`: 全国尺度源选择改为显式 GFS/IFS（无 Best）；新增起报时次选择（交集 fail-closed）；时间轴 3h 步长全范围、默认 lead=0；降水气象图层由「未实现禁用」改为「已实现可切换」。
 - `frontend-mvt-layer-consumption`: 有效时次按 `(source, cycle)` 从 cycles/valid-times 端点获取，`metadata.valid_times` 仅作默认周期；overlay builder 用 per-cycle 列表校验；`precip` 布尔状态序列化规则。
+- `map-first-layout-conformance`: 顶部导航高度从 56px 改为 84px（V2.0 header），底部时间轴/控制条 64px（`m11VisualTokens.timelineHeight`）重新挂载并成为布局 oracle 的一部分。
+- `overview-data-contracts`（追加）：bootstrap 冷延迟预算随目录内含交集查询重新实测；cycles / valid-times / precip index 请求明确在 bootstrap 关键路径之外。
 - `national-overview-page`: header 品牌标题文案/字号与赞助商尺寸。
 
 ## Impact

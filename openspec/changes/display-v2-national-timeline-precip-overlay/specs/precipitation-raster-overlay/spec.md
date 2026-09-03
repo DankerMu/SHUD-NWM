@@ -98,6 +98,11 @@ The display API SHALL expose `GET /api/v1/precip/{source}/{cycle}/index` and `GE
 - **WHEN** the requested `cycle` directory does not exist in the copyback root (never mirrored, or pruned by retention)
 - **THEN** the route returns HTTP 404 with code `PRECIP_CYCLE_NOT_MIRRORED`
 
+#### Scenario: PNG response carries MVT cache semantics
+- **WHEN** a PNG is served (cold or from the file cache)
+- **THEN** the response carries `Cache-Control: public, max-age=300` and an `ETag` derived from `(source, cycle, valid_time, palette_version, resolved slice set)`, the same header pair and helper convention the MVT tile routes use (`_mvt_response` in the display routes)
+- **AND** a request with a matching `If-None-Match` returns 304 without reading the cache file body
+
 #### Scenario: Invalid source
 - **WHEN** `source` is not `gfs` or `ifs`
 - **THEN** the route returns HTTP 422 without touching the filesystem
