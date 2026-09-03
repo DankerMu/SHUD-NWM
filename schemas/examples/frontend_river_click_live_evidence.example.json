@@ -1,0 +1,79 @@
+{
+  "artifact": "nhms-frontend-river-click-live-evidence",
+  "schema_version": "1.0",
+  "status": "PASS",
+  "generated_at": "2026-09-02T01:02:03Z",
+  "started_at": "2026-09-02T01:00:00Z",
+  "ended_at": "2026-09-02T01:02:03Z",
+  "threshold_ms": 2000,
+  "percentile_method": "nearest-rank",
+  "warmup_count": 1,
+  "accepted_count": 20,
+  "origins": {
+    "frontend": "https://test.nwm.ac.cn",
+    "api": "https://test.nwm.ac.cn"
+  },
+  "requested_feature": {
+    "basin_id": "basins_qhh",
+    "river_segment_id": "basins_qhh_shud_reach_000001",
+    "basin_version_id": "bv-2026-09",
+    "river_network_version_id": "rn-2026-09"
+  },
+  "rendered_feature": {
+    "basin_id": "basins_qhh",
+    "river_segment_id": "basins_qhh_shud_reach_000001",
+    "basin_version_id": "bv-2026-09",
+    "river_network_version_id": "rn-2026-09"
+  },
+  "gfs": {
+    "source_id": "GFS",
+    "basin_id": "basins_qhh",
+    "basin_version_id": "bv-2026-09",
+    "river_network_version_id": "rn-2026-09",
+    "run_id": "qhh_20260902_gfs",
+    "model_id": "shud-gfs",
+    "cycle_time": "2026-09-02T00:00:00Z",
+    "scenario": "forecast_gfs_deterministic"
+  },
+  "ifs": {
+    "source_id": "IFS",
+    "basin_id": "basins_qhh",
+    "basin_version_id": "bv-2026-09",
+    "river_network_version_id": "rn-2026-09",
+    "run_id": "qhh_20260902_ifs",
+    "model_id": "shud-ifs",
+    "cycle_time": "2026-09-02T06:00:00Z",
+    "scenario": "forecast_ifs_deterministic"
+  },
+  "warmup": {
+    "index": 0,
+    "duration_ms": 350,
+    "discarded": true,
+    "gfs_status": 200,
+    "ifs_status": 200
+  },
+  "samples": [
+    {"index": 1, "duration_ms": 1, "gfs_status": 200, "ifs_status": 200},
+    {"index": 2, "duration_ms": 2, "gfs_status": 200, "ifs_status": 200},
+    {"index": 3, "duration_ms": 3, "gfs_status": 200, "ifs_status": 200},
+    {"index": 4, "duration_ms": 4, "gfs_status": 200, "ifs_status": 200},
+    {"index": 5, "duration_ms": 5, "gfs_status": 200, "ifs_status": 200},
+    {"index": 6, "duration_ms": 6, "gfs_status": 200, "ifs_status": 200},
+    {"index": 7, "duration_ms": 7, "gfs_status": 200, "ifs_status": 200},
+    {"index": 8, "duration_ms": 8, "gfs_status": 200, "ifs_status": 200},
+    {"index": 9, "duration_ms": 9, "gfs_status": 200, "ifs_status": 200},
+    {"index": 10, "duration_ms": 10, "gfs_status": 200, "ifs_status": 200},
+    {"index": 11, "duration_ms": 11, "gfs_status": 200, "ifs_status": 200},
+    {"index": 12, "duration_ms": 12, "gfs_status": 200, "ifs_status": 200},
+    {"index": 13, "duration_ms": 13, "gfs_status": 200, "ifs_status": 200},
+    {"index": 14, "duration_ms": 14, "gfs_status": 200, "ifs_status": 200},
+    {"index": 15, "duration_ms": 15, "gfs_status": 200, "ifs_status": 200},
+    {"index": 16, "duration_ms": 16, "gfs_status": 200, "ifs_status": 200},
+    {"index": 17, "duration_ms": 17, "gfs_status": 200, "ifs_status": 200},
+    {"index": 18, "duration_ms": 18, "gfs_status": 200, "ifs_status": 200},
+    {"index": 19, "duration_ms": 19, "gfs_status": 200, "ifs_status": 200},
+    {"index": 20, "duration_ms": 20, "gfs_status": 200, "ifs_status": 200}
+  ],
+  "p95_ms": 19,
+  "failure": null
+}

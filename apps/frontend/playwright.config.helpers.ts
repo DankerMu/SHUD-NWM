@@ -155,6 +155,15 @@ export function assertLiveDisplaySpecsDoNotMockApis(testDir: string | URL) {
   return files
 }
 
+/**
+ * Static guard for the #1970 river-click lane: the live spec must not register
+ * broad page.route API mocks (the live-display guard), and the lane stays
+ * inside the existing live-display spec matcher.
+ */
+export function assertRiverClickLiveDisplayContract(testDir: string | URL) {
+  return assertLiveDisplaySpecsDoNotMockApis(testDir)
+}
+
 export function unwrapApiData(value: unknown) {
   if (value && typeof value === 'object' && 'data' in value) {
     return (value as { data: unknown }).data
