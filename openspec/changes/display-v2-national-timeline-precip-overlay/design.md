@@ -55,7 +55,7 @@
 - keep 水位必须覆盖 cycles 端点能返回的全部周期再往前 24h（`oldest_listed_cycle − 24h ≥ cutoff`），receipt 记录不等式两边；不成立就加大 `retention_days`，不靠前端 404 兜底。
 
 ### D7. 河网密度两段式，坐标数为硬门
-- 阈值表：z≤4→4，z5→3，z6→2，z7→1，z≥8→1，写在 `postgis_tile_sql("river-network-national")` 返回的**单条 SQL 字符串**里的一个 `CASE`（zoom 是 bind `:z`，不是 Python 参数）；`NATIONAL_RIVER_NETWORK_QUERY_VERSION` → `stream-type-aggregate-v3`（版本在 `national_river_network_source_version` 的字符串里，不在 SQL 文本里）。`hydro-national` 里形状相同的那份 CASE 不动。
+- 阈值表：z≤4→4，z5→3，z6→2，z7→1，z≥8→1，写在 `postgis_tile_sql("river-network-national")` 返回的**单条 SQL 字符串**里的一个 `CASE`（zoom 是 bind `:z`，不是 Python 参数）；`NATIONAL_RIVER_NETWORK_QUERY_VERSION` → `stream-type-aggregate-v3`（版本在 `national_river_network_source_version` 的字符串里，不在 SQL 文本里）。`hydro-national` 里形状相同的那份 CASE 不动。**注意该 CASE 现在写在 `river-network` 与 `river-network-national` 共用的 `source_cte` 里**（`if layer in {"river-network", "river-network-national"}` 分支）——就地改字面量会顺带把单流域 `river-network` 层 z7 从 Type≥2 放宽到 Type≥1（密集流域单 z7 瓦片本就 >50k 坐标），所以 v3 表只在 `layer == "river-network-national"` 时生成，单流域层保持 v2，并有断言锁住。
 - go/no-go 用 `prefilter_stats.feature_coordinate_count`（单要素最大坐标数）+ `feature_coordinate_overflow_count == 0`，`budget_stats.coordinate_count` 只作附加项——后者只累加通过单要素上限的要素，恰好在合并干流超限被过滤成空瓦片时读数偏低。实测 zoom 集合扩到 z3/z4/z6/z7（v3 让 z6 多出 Type 2、z7 多出 Type 1）。这些列是 tile SQL 的输出列，用 psql 直接跑 SQL 读，不走瓦片 HTTP 路由。
 - 前端 `m11NationalRiverPaint`：`dimmed` 折扣改为 zoom 插值（z<6 不折扣），z3–5 线宽 stops 上调（Type 4 在 z3 ≥1.4px；Type 5 在 z3 >1.5px、z5 >2.3px，严格高于现值），并给 z6 的 Type 2、z6/z7 的 Type 1 补非零 opacity——现表 z7 的 match 只列 Type 5..2、无 z6 stop，新增的这两类会被取到却画成透明。
 
@@ -77,7 +77,7 @@
 
 - `openapi/nhms.v1.yaml` **没有生成器**，`tests/test_openapi_drift.py::test_static_openapi_matches_runtime_schema` 按 `app.openapi()` 等值比对，所以 4 条新路由（hydro-national source/cycle、discharge cycles、precip index、precip png）与 `/api/v1/layers`、`valid-times` 的形状变化必须手写进 yaml。
 - `INTERNAL_ROUTE_REASONS` 只放宽「公共路由对齐」那条测试，**不是**等值比对的豁免（slurm 路由同时在 yaml 里就是证据），本改动不新增 allowlist 条目。
-- 新的 `.pbf` 路由条目要带上 `_patch_mvt_tile_openapi` 对 z/x/y 收窄后的 `maximum`，否则等值比对失败。
+- `apps/api/openapi_patching.py::_patch_mvt_tile_openapi` 用一个硬编码的 `mvt_paths` 元组给 `.pbf` 路由注入 424 响应、`q_down` 变量枚举与 z/x/y 收窄后的 `maximum`；新的 source/cycle 全国路由是新的 path key，**必须追加进该元组**，否则运行时 schema 与手写 yaml 都缺 424/枚举/上限——两边一致地缺，等值比对不会失败，缺陷是静默的文档缺失（mvt-tile-contract 要求该路由 424 fail-closed 有显式 OpenAPI 行为）。
 - 之后 `pnpm generate:api` 刷 `apps/frontend/src/api/types.ts`，`pnpm check:api-types` 验证。
 
 ## Sketch seams under test

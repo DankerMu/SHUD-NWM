@@ -32,7 +32,7 @@
 
 ## Impact
 
-- 后端：`services/tiles/mvt.py`（阈值表、hydro-national source/cycle SQL、cycles/valid-times、两个查询版本号）、`apps/api/routes/hydro_display.py`（新路由、cycles、precip 目录条目）、新模块 `services/precip/`、新路由 `apps/api/routes/precip.py`、`services/tile_publisher/publisher.py`（canonical 镜像）、`scripts/canonical_precip_copyback_backfill.py`（新）、`scripts/node27_raw_retention.py`、`scripts/node27_mvt_prewarm.py`。
+- 后端：`services/tiles/mvt.py`（阈值表、hydro-national source/cycle SQL、cycles/valid-times、两个查询版本号）、`apps/api/routes/hydro_display.py`（新路由、cycles、precip 目录条目）、`apps/api/openapi_patching.py`（`_patch_mvt_tile_openapi` 的 `mvt_paths` 追加新全国路由）、新模块 `services/precip/`、新路由 `apps/api/routes/precip.py`、`services/tile_publisher/publisher.py`（canonical 镜像）、`scripts/canonical_precip_copyback_backfill.py`（新）、`scripts/node27_raw_retention.py`、`scripts/node27_mvt_prewarm.py`。
 - 前端：`SiteHeader.tsx`、`m11MapPrimitives.tsx`、`m11MapBuilders.ts`、`queryState.ts`、`overviewDataContracts.ts`、`OverviewPage.tsx`、`M11FloatingControls.tsx`、`M11Controls.tsx`（复用 timeline）、新 `M11PrecipOverlayPrimitive`、stores。
 - 契约文件：`openapi/nhms.v1.yaml`（手工维护，4 条新路由 + `/api/v1/layers` 与 `valid-times` 形状）、`apps/frontend/src/api/types.ts`（`pnpm generate:api` 产物）。
 - 测试：`tests/test_hydro_display_mvt_scaling.py:175`、`tests/test_api_contract.py:1409`、`tests/test_openapi_drift.py`、`tests/test_openapi_31_contract.py`、`tests/test_node27_mvt_prewarm.py`、`M11Shell.test.tsx` fixture、新增 precip/copyback/cycles 测试与 vitest。

@@ -1,13 +1,19 @@
 ## ADDED Requirements
 
 ### Requirement: National river-network tiles use the denser stream_type threshold table
-The national river-network MVT SQL SHALL filter `core.river_segment.stream_type` with the threshold table z≤4 → ≥4, z5 → ≥3, z6 → ≥2, z7 → ≥1, z≥8 → ≥1 (one class denser than the previous z≤4 → 5 / z5 → 4 / z6 → 3 / z7 → 2 table), and `NATIONAL_RIVER_NETWORK_QUERY_VERSION` SHALL be bumped to `stream-type-aggregate-v3` so cached tiles are regenerated. The threshold lives in ONE `CASE` expression inside the single SQL string that `postgis_tile_sql(layer: str) -> str` returns for `"river-network-national"`; zoom is a SQL bind (`:z`), not a Python argument, so the assertion seam is substring matching on that one string. The identically shaped `CASE` inside the `hydro-national` SQL is NOT changed by this requirement.
+The national river-network MVT SQL SHALL filter `core.river_segment.stream_type` with the threshold table z≤4 → ≥4, z5 → ≥3, z6 → ≥2, z7 → ≥1, z≥8 → ≥1 (one class denser than the previous z≤4 → 5 / z5 → 4 / z6 → 3 / z7 → 2 table), and `NATIONAL_RIVER_NETWORK_QUERY_VERSION` SHALL be bumped to `stream-type-aggregate-v3` so cached tiles are regenerated. The threshold lives in ONE `CASE` expression inside the single SQL string that `postgis_tile_sql(layer: str) -> str` returns for `"river-network-national"`; zoom is a SQL bind (`:z`), not a Python argument, so the assertion seam is substring matching on that one string. The identically shaped `CASE` inside the `hydro-national` SQL is NOT changed by this requirement. The `CASE` is today built once in a `source_cte` shared by BOTH `"river-network"` (per-basin, per-segment, no aggregation) and `"river-network-national"` (the `if layer in {"river-network", "river-network-national"}` branch), so the v3 literals MUST be applied only when `layer == "river-network-national"`; the per-basin `river-network` layer SHALL keep the v2 table unchanged, because at z7 it would otherwise emit the full basin network per tile (a dense basin already packs >50k coordinates into one z7 tile) and nothing in the go/no-go measurement covers that layer.
 
 #### Scenario: Threshold table is encoded in the river-network SQL string
 - **WHEN** `postgis_tile_sql("river-network-national")` is generated
 - **THEN** the returned SQL contains `WHEN :z <= 4 THEN 4.0`, `WHEN :z = 5 THEN 3.0`, `WHEN :z = 6 THEN 2.0` and `WHEN :z = 7 THEN 1.0`
 - **AND** it does NOT contain the v2 bounds `WHEN :z <= 4 THEN 5.0` or `WHEN :z = 7 THEN 2.0`
 - **AND** the `hydro-national` SQL still contains its own unchanged `WHEN :z <= 4 THEN 5.0` bound
+
+#### Scenario: Per-basin river-network SQL keeps the v2 table
+- **WHEN** `postgis_tile_sql("river-network")` is generated after this change
+- **THEN** the returned SQL still contains the v2 bounds `WHEN :z <= 4 THEN 5.0`, `WHEN :z = 5 THEN 4.0`, `WHEN :z = 6 THEN 3.0` and `WHEN :z = 7 THEN 2.0`
+- **AND** it does NOT contain `WHEN :z <= 4 THEN 4.0` or `WHEN :z = 7 THEN 1.0`
+- **AND** the per-basin `/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf` cache generation is unchanged (`river-network` does not consume `NATIONAL_RIVER_NETWORK_QUERY_VERSION`)
 
 #### Scenario: Cache generation changes
 - **WHEN** the national river-network cache key is computed after this change
