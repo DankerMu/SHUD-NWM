@@ -100,8 +100,11 @@ from packages.common.river_ts_render import (
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     TEXT_AID_COUNTERPARTS,
     TEXT_IDENTITY_COLUMNS,
+    _fact_table_scopes,
+    _scope_territory,
     assert_structurally_intact,
     fact_table_attribution,
+    fact_table_name_occurrences,
     fact_table_text_identity_columns,
     outer_predicates,
     render_river_ts_sql,
@@ -764,14 +767,44 @@ def test_every_registered_template_renders_for_the_narrow_store(entry) -> None:
     # Non-vacuity: the narrow variant really is shorter by exactly the aid blocks.
     assert len(rendered.sql.split("\n")) == len(template.split("\n")) - 2 * entry.expected_aids
     if entry.params == "positional":
-        # A deleted aid line takes its `%s` with it, and the caller's tuple has
-        # to shrink by exactly that many. `removed_placeholders` is the renderer's
-        # answer; this is the arithmetic checked against the text (review #1996,
-        # r6 P3-2). Guarded on the dialect, not on the tuple being non-empty, so
-        # an entry that stopped reporting removals is caught rather than skipped.
-        assert template.count("%s") - rendered.sql.count("%s") == len(rendered.removed_placeholders)
+        # A deleted aid line takes its `%s` with it, and the caller's tuple has to
+        # shrink by exactly that many. Checked against the AIDS, not against
+        # `count('%s')` before minus after: that difference is computed by the same
+        # deletion it is supposed to audit, so it holds for any indices the renderer
+        # cares to report and cannot go red (round-2 H7-a). Guarded on the dialect,
+        # not on the tuple being non-empty, so an entry that stopped reporting
+        # removals is caught rather than skipped.
+        assert len(rendered.removed_placeholders) == sum("%s" in aid for aid in rendered.removed_aids)
+        assert rendered.removed_placeholders == POSITIONAL_INDEX_PINS[entry.key], entry.key
     else:
         assert rendered.removed_placeholders == ()
+        assert rendered.removed_aids == () or all("%s" not in aid for aid in rendered.removed_aids)
+
+
+#: The removed positional-placeholder indices of every positional entry, spelled
+#: out. Measured at 515a3947 and pinned as literals on purpose: a formula
+#: computed from the same render it checks agrees with whatever that render says
+#: (round-2 H7-a), and these indices are the caller's parameter tuple — an
+#: off-by-one here is a psycopg2 arity error in the migration window, or worse, a
+#: silently reordered tuple that binds `valid_time` where `run_id` belonged.
+POSITIONAL_INDEX_PINS: dict[str, tuple[int, ...]] = {
+    "forecast_store:segment_identity_predicates": (3, 4),
+    "forecast_store:latest_issue_time": (3, 4),
+    "forecast_store:per_source_latest_cycles": (3, 4),
+    "forecast_store:latest_analysis_issue_time": (3, 4),
+    "forecast_store:analysis_segment_rows": (3, 4),
+    "forecast_store:forecast_segment_rows_selected_cycles": (5, 6),
+    "forecast_store:forecast_segment_rows": (3, 4),
+    "forecast_store:latest_run_type_valid_time": (3, 4),
+    "forecast_store:run_type_segment_rows": (3, 4),
+    "parser:replace_chain_probe": (1,),
+    "parser:replace_chain_window": (1,),
+}
+
+
+def test_every_positional_entry_has_an_index_pin() -> None:
+    """No positional entry may join the register without its indices being written down."""
+    assert set(POSITIONAL_INDEX_PINS) == {entry.key for entry in REGISTRY if entry.params == "positional"}
 
 
 UNION_ENTRIES = [entry for entry in REGISTRY if entry.kind == "statement" and entry.params == "named"]
@@ -798,9 +831,36 @@ def test_every_named_registered_statement_binds_its_store_in_every_scope(entry) 
     assert rendered.params == params
     assert len(rendered.branch_sql) == len(rendered.branches) == 2
     for store, branch, forms in zip(("legacy", "narrow"), rendered.branch_sql, rendered.branches):
-        assert branch.count(f"timeseries_store = '{store}'") == references, entry.key
         assert len(forms) == references
         assert_structurally_intact(branch, f"{entry.key} [{store}]", allow_markers=store == "legacy")
+        # Per SCOPE, not per branch: a total of N predicates is equally consistent
+        # with "one in each of the N scopes" and with "all N crammed into the first
+        # scope and none in the others", and the second is the fail-open this test
+        # exists to catch (round-2 H5). Each scope's own chain — nested scopes cut
+        # out — must hold exactly one, in the chain kind the reference form
+        # dictates: WHERE for a FROM reference, ON for a JOIN reference.
+        scopes = _fact_table_scopes(branch, entry.key)
+        assert len(scopes) == references
+        literal = f"timeseries_store = '{store}'"
+        for scope in scopes:
+            assert scope.chain_kind == ("ON" if scope.reference_form == "JOIN" else "WHERE"), entry.key
+            territory = _scope_territory(branch, scope, scopes)
+            assert territory.count(literal) == 1, entry.key
+            # …and inside this scope's own chain, i.e. after its reference.
+            assert scope.reference_at < branch.index(literal, scope.chain_start)
+
+
+@pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
+def test_every_registered_template_is_counted_the_same_way_twice(entry) -> None:
+    """The structural walk and the name counter must agree, entry by entry.
+
+    The binder refuses when they disagree, so this sweep is what says the refusal
+    is not silently rejecting the whole register: every registered template names
+    the fact table in exactly the forms the walk models (round-2 H3).
+    """
+    template = entry.source()
+
+    assert fact_table_name_occurrences(template) == fact_table_attribution(template).reference_count, entry.key
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)

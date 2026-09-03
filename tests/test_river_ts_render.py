@@ -32,6 +32,7 @@ from packages.common.river_ts_render import (
     TEXT_AID_COUNTERPARTS,
     TEXT_IDENTITY_COLUMNS,
     RiverTemplateError,
+    _assert_bound_per_scope,
     _assert_key_predicates_retained,
     _assert_no_fact_text_identity,
     _bind_store,
@@ -39,6 +40,7 @@ from packages.common.river_ts_render import (
     aid_conjunct,
     assert_structurally_intact,
     fact_table_attribution,
+    fact_table_name_occurrences,
     fact_table_text_identity_columns,
     render_river_ts_sql,
     render_union_all,
@@ -789,7 +791,7 @@ def test_the_union_combinator_binds_every_reference_of_a_multi_scope_template() 
 
 
 def test_a_fact_scope_with_no_chain_to_bind_on_is_refused() -> None:
-    with pytest.raises(RiverTemplateError, match="no WHERE/ON chain to bind the store on"):
+    with pytest.raises(RiverTemplateError, match="has no chain of its own to bind the store on"):
         _bind("SELECT value FROM hydro.river_timeseries", "narrow")
 
 
@@ -872,6 +874,60 @@ def test_a_leading_comment_does_not_slide_the_binding_into_another_branch() -> N
             """,
         ),
         (
+            "aid last in an ON chain, JOIN next",
+            f"""
+                SELECT h.run_id
+                FROM hydro.hydro_run h
+                JOIN hydro.river_timeseries r
+                  ON r.run_key = h.run_key AND
+                  {MARKER}
+                  r.variable = 'q_down'
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_key = r.river_network_version_key
+                WHERE h.status = %s
+            """,
+        ),
+        (
+            "aid the only ON conjunct, JOIN next",
+            f"""
+                SELECT h.run_id
+                FROM hydro.hydro_run h
+                JOIN hydro.river_timeseries r
+                  ON
+                  {MARKER}
+                  r.variable = 'q_down'
+                JOIN core.river_network_version rnv
+                  ON rnv.river_network_version_key = r.river_network_version_key
+                WHERE h.status = %s
+            """,
+        ),
+        (
+            "aid last in an ON chain, LEFT JOIN next",
+            f"""
+                SELECT h.run_id
+                FROM hydro.hydro_run h
+                JOIN hydro.river_timeseries r
+                  ON r.run_key = h.run_key AND
+                  {MARKER}
+                  r.variable = 'q_down'
+                LEFT JOIN core.basin_version bv
+                  ON bv.basin_version_key = r.basin_version_key
+                WHERE h.status = %s
+            """,
+        ),
+        (
+            "aid last in an ON chain, WHERE next",
+            f"""
+                SELECT h.run_id
+                FROM hydro.hydro_run h
+                JOIN hydro.river_timeseries r
+                  ON r.run_key = h.run_key AND
+                  {MARKER}
+                  r.variable = 'q_down'
+                WHERE h.status = %s
+            """,
+        ),
+        (
             "another connective after the connective",
             f"""
                 SELECT rt.value
@@ -892,8 +948,14 @@ def test_an_aid_whose_connective_sits_on_the_line_above_is_refused(label: str, t
     …``. Both are syntax errors, and the original fault list — dangling ``AND``
     before a bracket or at the end of the text — matched neither (review #1996,
     C4).
+
+    The ON-chain shapes are the round-2 half (H6): an aid that was the last, or
+    the only, conjunct of a ``JOIN … ON`` leaves ``AND JOIN`` / ``ON JOIN`` /
+    ``AND LEFT JOIN`` / ``AND WHERE``, none of which the clause-keyword-only
+    enumeration named. One keyword family, shared with the region-stop regex,
+    covers all of them.
     """
-    with pytest.raises(RiverTemplateError):
+    with pytest.raises(RiverTemplateError, match="before a keyword|doubled connective"):
         render_river_ts_sql(template, "narrow", entry=label)
 
 
@@ -920,6 +982,12 @@ def test_the_structural_check_still_accepts_the_shapes_that_are_legal() -> None:
         "SELECT a FROM t WHERE ordering = 1 AND grouping_key = 2 ORDER BY a",
         "SELECT a FROM t WHERE (x = 1 OR (y = 2 AND z = 3)) GROUP BY a",
         "SELECT a FROM t WHERE x = 1 UNION ALL SELECT a FROM u WHERE y = 2",
+        # The reason the outer-join arm is spelled `(LEFT|RIGHT|FULL)\s+JOIN`
+        # rather than listing the bare words: they are also string functions,
+        # and a bare listing reports this line as a dangling connective
+        # (round-2 H6).
+        "SELECT a FROM t JOIN u ON u.k = t.k AND LEFT(r.tag, 3) = 'abc' WHERE x = 1",
+        "SELECT RIGHT(a, 2) AS tail FROM t WHERE x = 1 AND LEFT(b, 1) = 'q'",
     ):
         assert_structurally_intact(sql, "legal")
 
@@ -1012,3 +1080,298 @@ def test_the_union_combinator_refuses_a_mixed_dialect_template() -> None:
     """
     with pytest.raises(RiverTemplateError, match="mixes"):
         render_union_all(template, ("legacy", "narrow"), {"run_key": "k", "run_id": "r"}, entry="mixed")
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review (#1996): the chain search is bounded and its kind is fixed
+# ---------------------------------------------------------------------------
+
+
+def test_a_fact_read_in_a_segment_without_a_where_is_refused_not_bound_next_door() -> None:
+    """A sibling UNION segment's WHERE is not this segment's WHERE (round-2 H1).
+
+    Searching to the end of the bracket level found segment 2's chain and spliced
+    segment 1's predicate into it: segment 2 gets a second, redundant filter and
+    segment 1 — the one that actually needed bounding — reads BOTH stores. Two
+    wrongs that a total binding count reports as one right.
+    """
+    template = """
+        SELECT rt.run_id FROM hydro.river_timeseries rt
+        UNION ALL
+        SELECT o.run_id FROM other o WHERE o.flag = :flag
+    """
+
+    with pytest.raises(RiverTemplateError, match="has no chain of its own to bind the store on"):
+        _bind(template, "narrow")
+
+
+def test_each_union_segment_is_bound_inside_its_own_segment() -> None:
+    """Positional, not by count: the predicate has to land between ITS reference and its segment end."""
+    template = """
+        SELECT a.run_id FROM hydro.river_timeseries a WHERE a.valid_time = :valid_time
+        UNION ALL
+        SELECT b.run_id FROM hydro.river_timeseries b WHERE b.valid_time = :valid_time
+    """
+
+    forms, bound = _bind(template, "narrow")
+
+    assert len(forms) == 2
+    separator = bound.index("UNION ALL")
+    first, second = bound[:separator], bound[separator:]
+    assert first.count("timeseries_store = 'narrow'") == 1
+    assert second.count("timeseries_store = 'narrow'") == 1
+    assert "store_route.run_key = a.run_key" in first
+    assert "store_route.run_key = b.run_key" in second
+
+
+def test_a_from_reference_binds_in_the_where_even_when_a_later_join_has_an_on() -> None:
+    """The chain kind follows the reference form; a later join's ON is not a candidate."""
+    template = """
+        SELECT ts.value
+        FROM hydro.river_timeseries ts
+        LEFT JOIN core.river_segment rs
+          ON rs.river_segment_key = ts.river_segment_key
+        WHERE ts.valid_time = :valid_time
+    """
+
+    _forms, bound = _bind(template, "narrow")
+
+    on_at = bound.index("ON rs.river_segment_key")
+    where_at = bound.index("WHERE ts.valid_time")
+    predicate_at = bound.index("timeseries_store = 'narrow'")
+    assert on_at < where_at < predicate_at
+
+
+def test_a_join_reference_binds_in_its_own_on_even_when_the_query_has_a_where() -> None:
+    template = """
+        SELECT h.run_id
+        FROM hydro.hydro_run h
+        JOIN hydro.river_timeseries r
+          ON r.run_key = h.run_key
+        WHERE h.status = :status
+    """
+
+    forms, bound = _bind(template, "narrow")
+
+    assert forms == ("join",)
+    assert bound.index("timeseries_store = 'narrow'") < bound.index("WHERE h.status")
+
+
+def test_a_join_written_with_using_is_refused() -> None:
+    """No ON of its own, and the outer WHERE is not a substitute (round-2 H2)."""
+    template = """
+        SELECT o.run_id
+        FROM other o
+        JOIN hydro.river_timeseries r USING (run_key)
+        WHERE o.flag = :flag
+    """
+
+    with pytest.raises(RiverTemplateError, match="has no chain of its own to bind the store on"):
+        _bind(template, "narrow")
+
+
+def test_a_join_whose_next_chain_belongs_to_another_join_is_refused() -> None:
+    template = """
+        SELECT o.run_id
+        FROM other o
+        JOIN hydro.river_timeseries r USING (run_key)
+        JOIN more m ON m.k = o.k
+        WHERE o.flag = :flag
+    """
+
+    with pytest.raises(RiverTemplateError, match="has no chain of its own to bind the store on"):
+        _bind(template, "narrow")
+
+
+@pytest.mark.parametrize("join", ["LEFT JOIN", "LEFT OUTER JOIN", "RIGHT JOIN", "RIGHT OUTER JOIN", "FULL OUTER JOIN"])
+def test_an_outer_join_onto_the_fact_table_is_refused_outright(join: str) -> None:
+    """Neither placement is equivalent, so there is no correct answer to give (round-2 H2).
+
+    In the ``ON`` chain the store predicate does not remove rows — an unmatched
+    left row is NULL-extended and survives, so both branches emit it and the
+    UNION doubles it. In the ``WHERE`` it removes exactly those NULL-extended
+    rows, turning the outer join into an inner one. A reader that needs this
+    rewrites the read as a sub-query; the renderer refuses rather than picking.
+    """
+    template = f"""
+        SELECT h.run_id, r.value
+        FROM hydro.hydro_run h
+        {join} hydro.river_timeseries r
+          ON r.run_key = h.run_key
+        WHERE h.status = :status
+    """
+
+    with pytest.raises(RiverTemplateError, match="preserved side of an outer join"):
+        _bind(template, "narrow")
+
+
+def _lateral_template(join: str) -> str:
+    return f"""
+        SELECT seg.river_segment_key, v.value
+        FROM tile_segments seg
+        {join} (
+            SELECT ts.value
+            FROM hydro.river_timeseries ts
+            WHERE ts.river_segment_key = seg.river_segment_key
+              {MARKER}
+              AND ts.river_segment_id = seg.river_segment_id
+        ) v ON true
+        WHERE seg.stream_type IS NULL
+    """
+
+
+@pytest.mark.parametrize(
+    "join",
+    ["LEFT JOIN LATERAL", "LEFT OUTER JOIN LATERAL", "RIGHT JOIN LATERAL", "FULL OUTER JOIN LATERAL"],
+)
+def test_a_fact_read_inside_an_outer_joined_lateral_is_refused(join: str) -> None:
+    """The lateral's own WHERE is only a safe place under CROSS/INNER JOIN LATERAL.
+
+    Binding inside the lateral filters the SUB-QUERY, which is correct — but under
+    an outer join a driving row that matches in NEITHER store is still
+    NULL-extended and survives, in BOTH branches, so the UNION emits it twice.
+    The refusal that covers a direct ``LEFT JOIN hydro.river_timeseries`` cannot
+    see this: the reference sits at the lateral's own bracket level, where nothing
+    says how the parent opened it.
+    """
+    with pytest.raises(RiverTemplateError, match="LATERAL that its parent opens with an OUTER join"):
+        _bind(_lateral_template(join), "narrow")
+
+
+@pytest.mark.parametrize("join", ["CROSS JOIN LATERAL", "JOIN LATERAL", "INNER JOIN LATERAL"])
+def test_a_fact_read_inside_a_non_outer_lateral_binds_inside_that_lateral(join: str) -> None:
+    """Non-vacuity, and the registry's own shape: mvt's national probes are CROSS JOIN LATERAL.
+
+    Asserted by position — the predicate has to be inside the lateral's brackets,
+    in the lateral's own WHERE, not hoisted to the outer query where it would
+    reference an alias that is out of scope there.
+    """
+    forms, bound = _bind(_lateral_template(join), "narrow")
+
+    assert forms == ("exists",)
+    predicate_at = bound.index("timeseries_store = 'narrow'")
+    assert bound.index("WHERE ts.river_segment_key") < predicate_at < bound.index(") v ON true")
+    assert "store_route.run_key = ts.run_key" in bound
+
+
+def test_an_inner_join_onto_the_fact_table_is_not_mistaken_for_an_outer_one() -> None:
+    """Non-vacuity for the refusal above, and for the `LEFT(col, n)` spelling."""
+    template = """
+        SELECT h.run_id, LEFT(h.run_id, 4) AS prefix
+        FROM hydro.hydro_run h
+        INNER JOIN hydro.river_timeseries r
+          ON r.run_key = h.run_key
+        WHERE h.status = :status
+    """
+
+    forms, _bound = _bind(template, "narrow")
+
+    assert forms == ("join",)
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review (#1996): an independent reference counter
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("label", "template"),
+    [
+        (
+            "comma join",
+            """
+            SELECT a.value
+            FROM hydro.river_timeseries a, hydro.river_timeseries b
+            WHERE a.run_key = b.run_key
+            """,
+        ),
+        (
+            "FROM ONLY",
+            """
+            SELECT value
+            FROM ONLY hydro.river_timeseries
+            WHERE valid_time = :valid_time
+            """,
+        ),
+        (
+            "quoted identifier",
+            """
+            SELECT value
+            FROM "hydro"."river_timeseries"
+            WHERE valid_time = :valid_time
+            """,
+        ),
+        (
+            "a second read with no FROM or JOIN in front of it",
+            """
+            SELECT rt.value
+            FROM hydro.river_timeseries rt
+            WHERE rt.valid_time = :valid_time
+              AND rt.run_key IN (TABLE hydro.river_timeseries)
+            """,
+        ),
+    ],
+)
+def test_a_reference_form_the_walk_does_not_model_is_refused(label: str, template: str) -> None:
+    """Fail-closed on the unmodelled, rather than binding what it recognises and
+    leaving the rest scanning both stores (round-2 H3).
+
+    The counter is deliberately ignorant: it counts the NAME in comment- and
+    string-blanked text, with no idea what a FROM clause is, so it can disagree
+    with the structural walk. Quoted identifiers are refused rather than parsed —
+    no registered template uses them, and accepting a spelling nothing exercises
+    is how an unbound read gets shipped.
+    """
+    with pytest.raises(RiverTemplateError, match="refusing to bind a store on a partly-understood statement"):
+        _bind(template, "narrow")
+
+
+def test_the_independent_counter_ignores_comments_and_string_literals() -> None:
+    sql = """
+        SELECT value                      -- reads hydro.river_timeseries
+        FROM hydro.river_timeseries
+        WHERE note <> 'hydro.river_timeseries'
+    """
+
+    assert fact_table_name_occurrences(sql) == 1
+
+
+def test_the_independent_counter_sees_a_quoted_identifier_and_not_a_column_qualifier() -> None:
+    assert fact_table_name_occurrences('SELECT 1 FROM "hydro"."river_timeseries"') == 1
+    # What the unaliased EXISTS binding emits: a column reference, not a read.
+    assert fact_table_name_occurrences("... store_route.run_key = hydro.river_timeseries.run_key ...") == 0
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review (#1996): the post-condition is per scope
+# ---------------------------------------------------------------------------
+
+
+def test_the_post_condition_rejects_two_predicates_in_one_scope_and_none_in_another() -> None:
+    """The shape a total count cannot distinguish from a correct binding (round-2 H5)."""
+    template = """
+        SELECT a.value
+        FROM hydro.river_timeseries a
+        JOIN hydro.river_timeseries b
+          ON b.run_key = a.run_key
+        WHERE a.valid_time = :valid_time
+    """
+    forged = """
+        SELECT a.value
+        FROM hydro.river_timeseries a
+        JOIN hydro.river_timeseries b
+          ON b.run_key = a.run_key
+        WHERE a.valid_time = :valid_time
+          AND EXISTS (SELECT 1 FROM hydro.hydro_run store_route
+                      WHERE store_route.run_key = a.run_key AND store_route.timeseries_store = 'narrow')
+          AND EXISTS (SELECT 1 FROM hydro.hydro_run store_route
+                      WHERE store_route.run_key = b.run_key AND store_route.timeseries_store = 'narrow')
+    """
+
+    # The forgery binds the right NUMBER of predicates — two references, two
+    # predicates — and puts both in the WHERE, leaving the ON chain that governs
+    # `b` unbound.
+    assert forged.count("timeseries_store = 'narrow'") == 2
+
+    with pytest.raises(RiverTemplateError, match="holds 2 store predicate"):
+        _assert_bound_per_scope(template, forged, "narrow", "forged", 2)
