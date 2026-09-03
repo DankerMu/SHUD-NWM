@@ -99,12 +99,19 @@ _SWEEP_SCAN_COUNT_RE = re.compile(
 # exit 0. Thirteen more `*_to_xml*` siblings share the shape. Enumerating
 # effects cannot close a function whose effect is "run this string".
 #
-# The tuple is DERIVED from db/migrations/** (see the derivation test below),
-# not chosen: `DEFAULT now()` x31, `DEFAULT gen_random_uuid()` x1, `BIGSERIAL`
-# x7 -> `nextval`, the `BTRIM` in 000038's CHECK, the four trigger functions
-# 000043 attaches with `EXECUTE FUNCTION`, and `float8` -- the cast function
-# `::double precision` resolves to inside 000048's STORED generated column,
-# which is a reference the catalog carries even though nobody wrote a call.
+# The SQL array is the union of TWO pinned sets, kept apart because their
+# provenance -- and therefore what happens when they drift -- is different.
+#
+# `_MIGRATION_ALLOW_LIST` is DERIVED from db/migrations/** (see the derivation
+# test below), not chosen: `DEFAULT now()` x31, `DEFAULT gen_random_uuid()` x1,
+# `BIGSERIAL` x7 -> `nextval`, the `BTRIM` in 000038's CHECK, the four trigger
+# functions 000043 attaches with `EXECUTE FUNCTION`, `float8` -- the cast
+# function `::double precision` resolves to inside 000048's STORED generated
+# column -- and `int8`, the implicit int4->int8 coercion the parser wraps around
+# the integer-literal `DEFAULT 0` of 000035's two `BIGINT` counters. Neither of
+# the last two is a written call; both are references the catalog carries
+# anyway, and both were found by a receipt rather than predicted (transcript
+# 18.1 and 20).
 _MIGRATION_ALLOW_LIST = (
     "met.canonical_grid_cell_direct_delete_blocked",
     "met.canonical_grid_cell_immutable",
@@ -113,9 +120,41 @@ _MIGRATION_ALLOW_LIST = (
     "pg_catalog.btrim",
     "pg_catalog.float8",
     "pg_catalog.gen_random_uuid",
+    "pg_catalog.int8",
     "pg_catalog.nextval",
     "pg_catalog.now",
 )
+
+# `_LEDGER_ALLOW_LIST` is the other provenance class: migration-authored, but
+# NOT derivable from db/migrations/** because the authoring migration is no
+# longer in the repository. It exists so that "the derivation reproduces
+# `_MIGRATION_ALLOW_LIST` exactly" can stay an EQUALITY -- absorbing a
+# ledger-only name into the derived tuple would turn that equality into a
+# permanent inequality and force it back down to a subset check, which is the
+# direction that lets a derivation regression pass unnoticed.
+#
+# Each value is the reason, and each reason must name the migration file that
+# authored the reference (pinned by test). An entry here is a claim about
+# PRODUCTION state that this repository cannot re-derive, so it is the one place
+# in leg (iv) where a name is on the list because a human recorded why.
+_LEDGER_ALLOW_LIST: dict[str, str] = {
+    "pg_catalog.jsonb_typeof": (
+        "flood.run_product_quality carries two CHECK constraints of the shape "
+        "`jsonb_typeof(residual_blockers) = 'array'::text` "
+        "(run_product_quality_residual_blockers_array_chk and "
+        "run_product_quality_unavailable_products_array_chk), measured on "
+        "node-27 by the T7 --roles-only sweep. They were authored by "
+        "000034_return_period_run_quality_materialization.sql and "
+        "000036_run_product_quality_explicit_source.sql, both recorded as "
+        "applied by the migration superuser in node-27's "
+        "public.schema_migrations ledger (2026-06-14 / 2026-06-17) -- but "
+        "neither file is under db/migrations any more (the repository listing "
+        "jumps 000033 -> 000035 -> 000037). The reference is therefore "
+        "migration-authored and superuser-owned, yet structurally underivable "
+        "from the repository tree. The repo/production migration drift itself "
+        "is reported out of this change's scope."
+    ),
+}
 
 _MIGRATIONS_DIR = _ROOT / "db" / "migrations"
 
@@ -164,9 +203,66 @@ _CAST_RE = re.compile(
     r"|bigint|smallint|int2|int)\b"
 )
 
+# The second shape that puts a `:funcid` in the tree without anybody writing a
+# call, and the one T7's first contact with the production catalog found: an
+# INTEGER-LITERAL column DEFAULT on a column whose type is not `integer` is not
+# folded into a Const. The parser resolves the int4 literal to the column type
+# through the pg_cast FUNCTION, so `station_sample_count BIGINT NOT NULL
+# DEFAULT 0` is stored as `int8(<int4 const>)` -- a FuncExpr whose `:funcid` is
+# `pg_catalog.int8` -- while `pg_get_expr` prints only `0`, which is why reading
+# the printed default would have shown nothing.
+#
+# MEASURED, not assumed, on a throwaway `timescale/timescaledb:2.10.2-pg15`
+# container (PG 15.2), one `t(c <type> DEFAULT 0)` per row, `pg_attrdef.adbin`
+# read for `:funcid` -- transcript 20.1 carries the full table:
+#
+#   BIGINT / INT8              -> pg_catalog.int8(integer)     oid 481
+#   SMALLINT / INT2            -> pg_catalog.int2(integer)     oid 314
+#   REAL / FLOAT4              -> pg_catalog.float4(integer)   oid 318
+#   DOUBLE PRECISION / FLOAT8  -> pg_catalog.float8(integer)   oid 316
+#   NUMERIC / DECIMAL          -> pg_catalog.numeric(integer)  oid 1740
+#   INTEGER / INT4 (control)   -> (no :funcid)
+#
+# INTEGER is absent from the mapping BY MEASUREMENT: the literal already has the
+# column's type, so there is nothing to coerce and no FuncExpr is stored.
+_IMPLICIT_COERCION_FUNCTION = {
+    "bigint": "int8",
+    "int8": "int8",
+    "smallint": "int2",
+    "int2": "int2",
+    "real": "float4",
+    "float4": "float4",
+    "double precision": "float8",
+    "float8": "float8",
+    "numeric": "numeric",
+    "decimal": "numeric",
+}
+# `<type> [(typmod)] [NOT NULL] DEFAULT <integer literal>`. Also measured, and
+# all three variants are matched deliberately: `DEFAULT -1` stores the same
+# coercion around a negative Const, `DEFAULT (0)` is the same tree as
+# `DEFAULT 0`, and `numeric(10, 2) DEFAULT 0` reaches `numeric(integer)` plus
+# the typmod-application `numeric(numeric, integer)` -- two pg_proc rows, one
+# allow-list name. The trailing lookahead rejects `DEFAULT 0.0` (a numeric
+# literal, a different pg_cast entry point) and `DEFAULT 0::bigint` (an explicit
+# cast, already covered by `_CAST_RE`).
+_IMPLICIT_COERCION_RE = re.compile(
+    r"\b(bigint|int8|smallint|int2|real|float4|double precision|float8"
+    r"|numeric|decimal)"
+    r"(?:\s*\(\s*\d+\s*(?:,\s*\d+\s*)?\))?"
+    r"\s+(?:not\s+null\s+)?default\s+\(?\s*-?\d+\s*\)?(?![.\d:])"
+)
+
 
 def _casts_in(expr: str) -> set[str]:
     return {f"pg_catalog.{_CAST_FUNCTION[t]}" for t in _CAST_RE.findall(expr)}
+
+
+def _implicit_coercions_in(body: str) -> set[str]:
+    """Coercion functions the parser stores for integer-literal DEFAULTs."""
+    return {
+        f"pg_catalog.{_IMPLICIT_COERCION_FUNCTION[m.group(1)]}"
+        for m in _IMPLICIT_COERCION_RE.finditer(body)
+    }
 
 
 def _balanced(text: str, open_at: int) -> str:
@@ -248,6 +344,11 @@ def _functions_referenced_by_migrations() -> set[str]:
             found |= _casts_in(expr)
         for match in re.finditer(r"\bdefault\s+[^,;\n]*", body):
             found |= _casts_in(match.group(0))
+        # `<col> BIGINT NOT NULL DEFAULT 0` -- no call, no `::` cast, and
+        # `pg_get_expr` prints only `0`, but the stored tree holds an
+        # `int8(int4)` FuncExpr (measured; see `_IMPLICIT_COERCION_FUNCTION`).
+        # This branch is why T7's `pg_catalog.int8` finding is derivable at all.
+        found |= _implicit_coercions_in(body)
     return found
 
 
@@ -1061,6 +1162,13 @@ def test_the_function_allow_list_in_the_sql_is_exactly_the_pinned_set(
     the guard was `for name in <test tuple>: assert name in sql`. One SQL-side
     name could therefore be deleted with the suite green (round-4
     test-evidence P2a). Parse the array and compare sets.
+
+    The expected value is the UNION of the two provenance classes: the set the
+    derivation reproduces from `db/migrations/**` and the ledger-only set whose
+    authoring migrations are no longer in the repository. Union here and
+    equality against each half separately (the two tests below) is what makes
+    "a name is on the SQL list" and "a name has a recorded provenance" the same
+    statement -- an unexplained addition to the array reddens exactly this test.
     """
     section = _psql_section(_sql_code(sql_text), "do_audit")
     match = _ALLOW_LIST_ARRAY_RE.search(section)
@@ -1068,19 +1176,49 @@ def test_the_function_allow_list_in_the_sql_is_exactly_the_pinned_set(
         "leg (iv)'s allow-list array literal is not where the audit expects it: "
         "`(pn.nspname || '.' || p.proname) = ANY (ARRAY[...])`"
     )
+    expected = set(_MIGRATION_ALLOW_LIST) | set(_LEDGER_ALLOW_LIST)
     in_sql = re.findall(r"'([^']+)'", match.group("body"))
     assert len(in_sql) == len(set(in_sql)), f"duplicate allow-list entries: {in_sql}"
-    assert set(in_sql) == set(_MIGRATION_ALLOW_LIST), (
-        "the SQL allow-list and this file's pinned set have drifted; "
-        f"only in SQL: {sorted(set(in_sql) - set(_MIGRATION_ALLOW_LIST))}, "
-        f"only in the test: {sorted(set(_MIGRATION_ALLOW_LIST) - set(in_sql))}"
+    assert set(in_sql) == expected, (
+        "the SQL allow-list and this file's pinned sets have drifted; "
+        f"only in SQL (no recorded provenance): {sorted(set(in_sql) - expected)}, "
+        f"only in the test (missing from the audit): {sorted(expected - set(in_sql))}"
     )
     assert in_sql == sorted(in_sql), (
         "keep the array sorted so a diff over it is readable"
     )
 
 
-def test_every_function_the_migrations_reference_is_on_the_allow_list() -> None:
+def test_the_two_allow_list_provenance_classes_are_disjoint_and_explained() -> None:
+    """A ledger-only name must not be smuggled into the derived tuple.
+
+    `_MIGRATION_ALLOW_LIST` is checked by EQUALITY against the derivation, so
+    the only way to keep a non-derivable name on the SQL list without weakening
+    that equality is to record it in `_LEDGER_ALLOW_LIST` with a reason. Two
+    properties keep that honest: the classes may not overlap (a name in both
+    would satisfy the union test while making the derivation equality
+    unsatisfiable), and every ledger reason must name the migration file that
+    authored the reference -- `pg_catalog.jsonb_typeof` is trusted because
+    000034/000036 are in node-27's `public.schema_migrations`, not because
+    somebody found the finding inconvenient.
+    """
+    overlap = set(_MIGRATION_ALLOW_LIST) & set(_LEDGER_ALLOW_LIST)
+    assert not overlap, (
+        "these names claim both provenance classes; a derived name must not be "
+        f"in the ledger list and vice versa: {sorted(overlap)}"
+    )
+    assert _LEDGER_ALLOW_LIST, (
+        "the ledger list is empty -- if the retired flood migrations really "
+        "stopped being production truth, drop the SQL entry too"
+    )
+    for name, reason in _LEDGER_ALLOW_LIST.items():
+        assert re.search(r"0000\d\d_", reason), (
+            f"{name}'s ledger reason must name the migration FILE that authored "
+            f"the reference (e.g. `000034_...sql`), not just describe it: {reason!r}"
+        )
+
+
+def test_the_migration_side_of_the_allow_list_is_exactly_what_the_tree_derives() -> None:
     """A new migration reference must redden THIS test, never the live audit.
 
     The audit trusts a referenced function only when it is on leg (iv)'s
@@ -1107,20 +1245,42 @@ def test_every_function_the_migrations_reference_is_on_the_allow_list() -> None:
     their implementation as `:opfuncid` and are handled by the carve-out, so
     they are not required entries either.
 
-    Included even though nobody writes them as calls: `::` casts to the numeric
-    family, which have a `pg_cast` function and therefore DO put a `:funcid` in
-    the tree. 000048's `::double precision` is the only one in this repo and it
-    is why `pg_catalog.float8` is allow-listed -- measured in a container
-    (transcript 18.1) after a first run of that receipt reported it as a finding
-    on an otherwise clean catalog. Casts to text/jsonb/uuid/date-time are I/O
-    conversions or binary-coercible and emit nothing.
+    Included even though nobody writes them as calls, both found by a receipt
+    rather than predicted by one:
+
+    * `::` casts to the numeric family, which have a `pg_cast` function and
+      therefore DO put a `:funcid` in the tree. 000048's `::double precision` is
+      the only one in this repo and it is why `pg_catalog.float8` is
+      allow-listed -- measured in a container (transcript 18.1) after a first
+      run of that receipt reported it as a finding on an otherwise clean
+      catalog. Casts to text/jsonb/uuid/date-time are I/O conversions or
+      binary-coercible and emit nothing.
+    * IMPLICIT coercions of an integer-literal `DEFAULT` to a wider numeric
+      column type, which are the same FuncExpr with nothing written at all --
+      `pg_get_expr` prints `0`. T7's first `--roles-only` run against the
+      production catalog reported `pg_catalog.int8` for 000035's two `BIGINT
+      NOT NULL DEFAULT 0` counters, and this derivation gained the branch that
+      reproduces it (mapping measured, transcript 20.1).
+
+    EQUALITY, not containment. A subset check ("everything derived is allowed")
+    passes just as happily when the derivation stops deriving, which is the one
+    failure that matters: the derivation exists to move a new migration
+    reference from the node-27 audit to this suite, and a derivation that finds
+    less each release does that silently. Names the repository cannot derive --
+    references authored by migrations that are no longer in the tree -- belong
+    in `_LEDGER_ALLOW_LIST` with a written reason, not in this tuple.
 
     Known limit, stated rather than hidden: this is a TEXT derivation, so a
-    future migration using a cast shape outside `_CAST_FUNCTION`, or building a
-    stored expression through dynamic SQL, would not be caught here. It would
-    then be caught by the live audit -- loudly, fail-closed, exit 3 -- which is
-    the safe direction but is development-time friction the T7 receipt should
-    surface first.
+    future migration using a cast shape outside `_CAST_FUNCTION`, an
+    `ALTER COLUMN ... SET DEFAULT <int>` (which carries no type on the line and
+    is underivable by text -- none exists today), a non-integer literal
+    (`BIGINT DEFAULT 0.0` reaches `int8(numeric)`, also measured) or a stored
+    expression built through dynamic SQL would not be caught here. It would then
+    be caught by the live audit -- loudly, fail-closed, exit 3 -- which is the
+    safe direction but is development-time friction the T7 receipt should
+    surface first. The over-derivation direction is harmless and also measured:
+    `BIGINT DEFAULT 3000000000` stores a plain int8 Const with no `:funcid`, and
+    this derivation still asks for `pg_catalog.int8`.
     """
     derived = _functions_referenced_by_migrations()
     assert derived, "the derivation found nothing -- it has stopped working"
@@ -1129,17 +1289,116 @@ def test_every_function_the_migrations_reference_is_on_the_allow_list() -> None:
         "db/migrations/** reference functions that leg (iv) does not allow; add "
         f"them to the allow-list in db/roles/node27_write_roles.sql: {sorted(missing)}"
     )
+    stale = set(_MIGRATION_ALLOW_LIST) - derived
+    assert not stale, (
+        "these names are pinned as DERIVED but db/migrations/** no longer "
+        "yields them -- either the derivation has regressed (fix it; a "
+        "derivation that finds less is how a new reference reaches the node-27 "
+        "audit unannounced) or the reference really is gone from the tree, in "
+        "which case the name moves to _LEDGER_ALLOW_LIST with its provenance or "
+        f"leaves the SQL array: {sorted(stale)}"
+    )
+
+
+def test_the_implicit_coercion_branch_derives_int8_from_000035_and_nowhere_else() -> None:
+    """Provenance of the T7 finding, per file rather than over the whole tree.
+
+    The equality above would stay green if `pg_catalog.int8` arrived from some
+    unrelated file, which would make the runbook's and the SQL comment's
+    statement of WHY it is on the list false while the suite stayed quiet. The
+    audit reported it for `hydro.run_display_coverage.station_sample_count` and
+    `.river_sample_count`; 000035 is the file that creates them.
+    """
+    def _uncommented(path: Path) -> str:
+        # Same two comment strips as the derivation, in the same order, so this
+        # provenance check cannot go red on a block comment the derivation
+        # ignores.
+        body = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8").lower())
+        return re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+
+    per_file = {
+        path.name: _implicit_coercions_in(_uncommented(path))
+        for path in sorted(_MIGRATIONS_DIR.rglob("*.sql"))
+    }
+    contributors = {name: found for name, found in per_file.items() if found}
+    assert contributors == {
+        "000035_qhh_display_coverage_materialization.sql": {"pg_catalog.int8"}
+    }, (
+        "the implicit-coercion branch's provenance has changed; the SQL "
+        "comment, the runbook and _MIGRATION_ALLOW_LIST all say it comes from "
+        f"000035's two BIGINT counters and from nothing else: {contributors}"
+    )
+
+
+def test_an_integer_literal_default_derives_the_measured_coercion_function() -> None:
+    """The mapping is a MEASUREMENT, so pin the shapes that were measured.
+
+    Each row below was read out of `pg_attrdef.adbin` on a throwaway
+    `timescale/timescaledb:2.10.2-pg15` container (PG 15.2), one
+    `t(c <type> DEFAULT 0)` per row -- transcript 20.1. `INTEGER` is the control
+    and must derive NOTHING: the literal already has the column's type, so the
+    parser folds it to a Const and the sweep sees no function at all. Assuming
+    the control instead of measuring it is how the whole branch would have been
+    written to derive a name the catalog never carries.
+    """
+    measured = {
+        "bigint": {"pg_catalog.int8"},
+        "int8": {"pg_catalog.int8"},
+        "smallint": {"pg_catalog.int2"},
+        "int2": {"pg_catalog.int2"},
+        "real": {"pg_catalog.float4"},
+        "float4": {"pg_catalog.float4"},
+        "double precision": {"pg_catalog.float8"},
+        "float8": {"pg_catalog.float8"},
+        "numeric": {"pg_catalog.numeric"},
+        "decimal": {"pg_catalog.numeric"},
+        # Control: measured as `(no :funcid)`.
+        "integer": set(),
+        "int4": set(),
+    }
+    for coltype, expected in measured.items():
+        assert _implicit_coercions_in(f"  n {coltype} default 0,\n") == expected, (
+            f"`{coltype} DEFAULT 0` derives the wrong coercion function"
+        )
+
+    # Shape variants, all measured on the same container against `bigint`.
+    for line, expected, why in (
+        ("  n bigint not null default 0 check (n >= 0),", {"pg_catalog.int8"},
+         "000035's own shape: NOT NULL between the type and DEFAULT"),
+        ("  n bigint default -1,", {"pg_catalog.int8"},
+         "a negative literal is still an int4 Const under the coercion"),
+        ("  n bigint default (0),", {"pg_catalog.int8"},
+         "`DEFAULT (0)` is the same stored tree as `DEFAULT 0`"),
+        ("  n numeric(10, 2) default 0,", {"pg_catalog.numeric"},
+         "a typmod does not hide the coercion (it adds numeric(numeric,int4), "
+         "which carries the same schema-qualified name)"),
+        ("  n bigint default 0::bigint,", set(),
+         "an explicit cast is `_CAST_RE`'s job, not this branch's"),
+        ("  n bigint default 0.0,", set(),
+         "a numeric literal reaches int8(numeric); out of this branch's scope "
+         "and recorded as a known limit"),
+        ("  n integer default -1,", set(), "control: no coercion for int4"),
+    ):
+        assert _implicit_coercions_in(line) == expected, why
 
 
 def test_the_migration_derivation_reads_nested_files_and_parenthesised_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two shapes the derivation must not miss, proved on a synthetic tree.
+    """Shapes the derivation must not miss, proved on a synthetic tree.
 
     `DEFAULT (now())` is what the catalog stores for `DEFAULT now()` and is
-    legal input as well, and migrations may one day live in a subdirectory.
-    Either gap would silently shrink the derived set, which is exactly the
-    direction that lets a new function reach the node-27 audit unannounced.
+    legal input as well, migrations may one day live in a subdirectory, and an
+    integer-literal `DEFAULT` on a `BIGINT` column stores an `int8(int4)`
+    coercion that nothing in the text spells out. Any of those gaps would
+    silently shrink the derived set, which is exactly the direction that lets a
+    new function reach the node-27 audit unannounced.
+
+    Asserted as SET EQUALITY against a literal, so an over-derivation is red
+    too: the `INTEGER NOT NULL DEFAULT 0` line is a control that must
+    contribute nothing (`pg_catalog.int4` appearing here would mean the branch
+    is inventing catalog references), and the commented `upper('x')` must stay
+    invisible.
     """
     nested = tmp_path / "2027q1"
     nested.mkdir()
@@ -1147,12 +1406,20 @@ def test_the_migration_derivation_reads_nested_files_and_parenthesised_defaults(
         "-- DEFAULT upper('x') in a comment must stay invisible\n"
         "ALTER TABLE met.probe ALTER COLUMN seen_at SET DEFAULT (now());\n"
         "ALTER TABLE met.probe ADD COLUMN ratio double precision\n"
-        "  GENERATED ALWAYS AS ((area_m2 / 1000)::double precision) STORED;\n",
+        "  GENERATED ALWAYS AS ((area_m2 / 1000)::double precision) STORED;\n"
+        "CREATE TABLE met.probe_counter (\n"
+        "  sample_count BIGINT NOT NULL DEFAULT 0 CHECK (sample_count >= 0),\n"
+        "  ordinal INTEGER NOT NULL DEFAULT 0\n"
+        ");\n",
         encoding="utf-8",
     )
     monkeypatch.setitem(globals(), "_MIGRATIONS_DIR", tmp_path)
 
-    assert _functions_referenced_by_migrations() == {"pg_catalog.now", "pg_catalog.float8"}
+    assert _functions_referenced_by_migrations() == {
+        "pg_catalog.now",
+        "pg_catalog.float8",
+        "pg_catalog.int8",
+    }
 
 
 def test_every_audit_verdict_fires_on_a_finding_and_not_on_its_absence(

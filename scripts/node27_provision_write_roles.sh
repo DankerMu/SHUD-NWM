@@ -54,7 +54,16 @@
 # as the caller" -- measured walking straight through the deny-list at exit 0.
 # The allow-list has to be EXTENDED when a migration references a new function;
 # a unit test derives that set from db/migrations/** so the failure lands there
-# and not on the live audit.
+# and not on the live audit.  Eleven entries today, in two provenance classes:
+# ten derived from db/migrations/** (the four 000043 trigger functions plus
+# btrim / float8 / gen_random_uuid / int8 / nextval / now -- float8 and int8
+# being catalog references nobody writes as a call, an explicit `::double
+# precision` cast and the implicit int4->int8 coercion of a BIGINT column's
+# integer-literal DEFAULT), and one -- jsonb_typeof -- that is migration-
+# authored per node-27's public.schema_migrations ledger but whose authoring
+# files are no longer in db/migrations, so it is pinned with a written reason
+# instead of being derived.  Both were found by T7's first --roles-only run
+# against the production catalog, not predicted.
 # Not covered, and a follow-up rather than a fix here: removing the
 # superuser-write half itself.
 #

@@ -724,6 +724,25 @@ ORDER BY 1, 2, 3;
 -- any depth) to that suite, so a new reference reddens a unit test on the
 -- migration's own PR rather than the live audit on node-27.
 --
+-- Eleven entries today, in two provenance classes.  T7's first `--roles-only`
+-- run against the PRODUCTION catalog (the receipt read `138 expression(s)/
+-- trigger(s) scanned, 19 distinct function(s) referenced, 2 untrusted`) is what
+-- put the last two there, and both were resolved by EXTENDING the list rather
+-- than by widening a predicate to absorb them:
+--   * pg_catalog.int8 -- derivable: the implicit int4->int8 coercion of an
+--     integer-literal DEFAULT on a BIGINT column.  The derivation gained the
+--     branch that reproduces it, so the migration side stays an equality.
+--   * pg_catalog.jsonb_typeof -- NOT derivable from this repository: the
+--     migrations that authored the flood.run_product_quality CHECKs are in
+--     node-27's public.schema_migrations ledger but no longer in db/migrations.
+--     Recorded with its reason in the test's `_LEDGER_ALLOW_LIST`, which is
+--     asserted disjoint from the derived set; that keeps "the derivation
+--     reproduces the derived half exactly" true instead of degrading it to a
+--     subset check for the whole list.
+-- Both are IMMUTABLE, STRICT and pure (measured): a width widening and a jsonb
+-- type tag.  Neither reads the filesystem, evaluates a string, nor touches
+-- session state.
+--
 -- One carve-out, and it is structural rather than enumerated: a pg_catalog
 -- function reached ONLY as `:opfuncid` -- i.e. as the implementation of an
 -- OPERATOR, never as a written call -- is trusted, provided it is not VOLATILE.
@@ -855,14 +874,41 @@ SELECT r.relation,
               THEN 'NOT executable by nhms_ingest_rw' END,
          CASE WHEN NOT (
                 (pn.nspname || '.' || p.proname) = ANY (ARRAY[
-                  -- Derived from db/migrations/**, not chosen: DEFAULT now()
-                  -- (31x), DEFAULT gen_random_uuid() (1x), BIGSERIAL ->
+                  -- Two provenance classes, both migration-authored, neither
+                  -- chosen.  DERIVED from db/migrations/** (and re-derived by
+                  -- tests/test_node27_write_roles.py as an EQUALITY): DEFAULT
+                  -- now() (31x), DEFAULT gen_random_uuid() (1x), BIGSERIAL ->
                   -- nextval (7x), the btrim() in 000038's CHECK, the four
                   -- trigger functions 000043 attaches with EXECUTE FUNCTION,
-                  -- and float8 -- which is not a WRITTEN call but the cast
-                  -- function the parser resolves `::double precision` to
-                  -- inside 000048's STORED generated column (measured in the
-                  -- catalog, transcript 18.1).
+                  -- and the two entries nobody writes as a call:
+                  --   float8 -- the cast function the parser resolves
+                  --     `::double precision` to inside 000048's STORED
+                  --     generated column (measured, transcript 18.1);
+                  --   int8 -- the IMPLICIT int4->int8 coercion the parser
+                  --     wraps around an integer-literal DEFAULT on a BIGINT
+                  --     column, stored as int8(int4 const) while pg_get_expr
+                  --     prints just `0`: 000035's
+                  --     hydro.run_display_coverage.{station,river}_sample_count
+                  --     and the flood.run_product_quality counters (measured,
+                  --     transcript 20 / 20.1; found by T7's first --roles-only
+                  --     sweep of the production catalog).
+                  -- LEDGER-BACKED, not derivable from this repository:
+                  --   jsonb_typeof -- flood.run_product_quality's
+                  --     residual_blockers / unavailable_products CHECKs
+                  --     (`jsonb_typeof(x) = 'array'::text`), authored by
+                  --     000034_return_period_run_quality_materialization.sql
+                  --     and 000036_run_product_quality_explicit_source.sql,
+                  --     both applied by the migration superuser per node-27's
+                  --     public.schema_migrations -- but neither file is under
+                  --     db/migrations any more (000033 -> 000035 -> 000037).
+                  --     Kept in the test's `_LEDGER_ALLOW_LIST` with that
+                  --     reason so the derived half stays an equality; the
+                  --     repo/production drift is reported out of scope.
+                  -- Both additions are IMMUTABLE, STRICT and pure: int8 is a
+                  -- width widening and jsonb_typeof returns the type tag of a
+                  -- jsonb value.  Neither reads the filesystem, executes a
+                  -- string, or touches session state -- the properties that
+                  -- made query_to_xml the round-4 P1.
                   'met.canonical_grid_cell_direct_delete_blocked',
                   'met.canonical_grid_cell_immutable',
                   'met.canonical_grid_snapshot_identity_immutable',
@@ -870,6 +916,8 @@ SELECT r.relation,
                   'pg_catalog.btrim',
                   'pg_catalog.float8',
                   'pg_catalog.gen_random_uuid',
+                  'pg_catalog.int8',
+                  'pg_catalog.jsonb_typeof',
                   'pg_catalog.nextval',
                   'pg_catalog.now'])
                 OR (pn.nspname = 'pg_catalog'

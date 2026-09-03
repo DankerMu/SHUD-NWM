@@ -3729,12 +3729,44 @@ the same gadget are covered by detection only, in the same audit:
   so one column `DEFAULT` restored both round-3 gadgets with the strict audit at
   exit 0 (measured; thirteen more `*_to_xml*` siblings share the shape).
   Enumerating effects cannot close a function whose effect is "run this string",
-  so the list was inverted. Trusted is exactly: the four `met` trigger functions
-  from `000043`, and `pg_catalog.{now, nextval, gen_random_uuid, btrim,
-  float8}` — every function `db/migrations/**` puts into a stored expression,
-  `float8` being the cast function `::double precision` resolves to inside
-  `000048`'s `STORED` generated column. Everything else, in any schema, is
-  reported.
+  so the list was inverted. Trusted is exactly eleven names, in **two
+  provenance classes**:
+  - **derived from `db/migrations/**`** (ten): the four `met` trigger functions
+    from `000043`, and `pg_catalog.{now, nextval, gen_random_uuid, btrim,
+    float8, int8}`. The last two are catalog references nobody writes as a
+    call — `float8` is the cast function `::double precision` resolves to
+    inside `000048`'s `STORED` generated column, and `int8` is the **implicit**
+    `int4`→`int8` coercion the parser wraps around an integer-literal `DEFAULT`
+    on a `BIGINT` column (`000035`'s two `run_display_coverage` counters:
+    `pg_get_expr` prints just `0`, while the stored tree holds
+    `int8(<int4 const>)`). A unit test re-derives this set from the tree and
+    asserts **equality**, so a derivation that stops deriving is red;
+  - **ledger-backed, not derivable here** (one): `pg_catalog.jsonb_typeof`,
+    reached by `flood.run_product_quality`'s `residual_blockers` /
+    `unavailable_products` `CHECK`s. Their migrations
+    (`000034_return_period_run_quality_materialization.sql`,
+    `000036_run_product_quality_explicit_source.sql`) are recorded as applied by
+    the migration superuser in node-27's `public.schema_migrations`, but neither
+    file is under `db/migrations` any more (the listing jumps
+    `000033 → 000035 → 000037`). It is pinned in the test's
+    `_LEDGER_ALLOW_LIST` with that reason, asserted disjoint from the derived
+    set. The repo/production migration drift itself is reported out of this
+    change's scope.
+
+  Everything else, in any schema, is reported. Both added entries are
+  `IMMUTABLE`, `STRICT` and pure (measured): a width widening and a jsonb type
+  tag — no filesystem, no string evaluation, no session state.
+  **T7 first contact, and how it was resolved.** The first `--roles-only` run
+  against the production catalog measured **2 untrusted** out of 19 distinct
+  functions over 138 scanned expressions/triggers — `pg_catalog.int8` and
+  `pg_catalog.jsonb_typeof`, both **migration-authored**, neither an
+  escalation. They were resolved by **extending the list, not by absorbing
+  them**: the derivation gained an implicit-coercion branch that reproduces
+  `int8` from `000035` (measured mapping, transcript §20.1), and `jsonb_typeof`
+  got a ledger-only provenance record naming the two retired `flood`
+  migrations. Widening a predicate — "trust `pg_catalog` casts", "trust
+  `IMMUTABLE` functions" — would have re-opened exactly the round-4 hole, since
+  `query_to_xml` is `pg_catalog`-resident and `PUBLIC`-executable too.
   **One structural carve-out:** a `pg_catalog` function reached *only* as an
   operator implementation (`:opfuncid` — `>=`, `<>`, `~`, `->>`, and the ten
   chunk-range `CHECK`s TimescaleDB writes per hypertable) is trusted **provided
@@ -4053,6 +4085,18 @@ row, which during a migration or a replay is the superuser. Same re-run rule as
 above — the sweep reddens the audit-only invocation, and both the additive and
 full runs re-check it as their tail.
 
+**T7 expectation on node-27, stated as a number.** The first `--roles-only`
+sweep of the production catalog read `138 expression(s)/trigger(s) scanned, 19
+distinct function(s) referenced, 2 untrusted for a superuser writer` — the two
+being `pg_catalog.int8` (`000035`'s `BIGINT DEFAULT 0` counters and the `flood`
+counters) and `pg_catalog.jsonb_typeof` (the `flood.run_product_quality`
+`CHECK`s). Both are now on the allow-list with their provenance recorded
+(§9.1), so the T7 re-run must read **`0 untrusted`**; the scanned and distinct
+counts are catalog-shaped and will move with the catalog. A **non-zero** count
+on the re-run is a new finding and is read the same way the first two were:
+identify the authoring migration before touching the list, and extend the list
+rather than the predicate.
+
 **TEMP and schema `CREATE`.** Every mode prints both authoring-surface states:
 `has_database_privilege(…, 'TEMP')` for `nhms`, `nhms_display_ro` and the two
 write roles, and `create_on_schemas` — the schemas each write role holds
@@ -4227,6 +4271,26 @@ PR-scoped selector actually run it, so a migration PR that adds a `DEFAULT`,
 `-- not on the migration allow-list` for something a migration legitimately
 introduced, extend the array in `db/roles/node27_write_roles.sql`, re-run the
 unit test, and re-run this audit; do not switch to non-strict to get past it.
+
+That is not hypothetical: T7's first `--roles-only` run reported exactly two
+such names, `pg_catalog.int8` and `pg_catalog.jsonb_typeof` (§9.1, §9.3). The
+procedure that closed them is the procedure to repeat. **Find the authoring
+migration first**, and the finding falls into one of two cases:
+
+1. the migration is in `db/migrations` — extend `_MIGRATION_ALLOW_LIST` **and**
+   the derivation in `tests/test_node27_write_roles.py` so the tree re-derives
+   the name (the equality assertion means a name added to the tuple alone is
+   still red), then the SQL array;
+2. the migration is in `public.schema_migrations` but **not** in the repository
+   — check with
+   `psql -U nhms -d nhms -Atc "SELECT version FROM public.schema_migrations ORDER BY 1"`
+   against `ls db/migrations`. Then add the name to `_LEDGER_ALLOW_LIST` with a
+   reason that names the migration file, and file the repo/production drift
+   separately; it is a real finding of its own.
+
+There is no third case. A name whose authoring migration cannot be identified in
+either place is **not** a list-extension candidate — it is the finding the sweep
+exists to make, and it is investigated as a planted expression.
 
 ## Rollback (unit-level, not data-level)
 

@@ -1352,7 +1352,9 @@ scope:
 
 Nine of the sixteen are on the allow-list; the other seven are the
 `:opfuncid only` rows, all `provolatile = 'i'`, carried by the structural
-operator carve-out. **`pg_catalog.float8` was found by this receipt, not
+operator carve-out. (Both numbers are what this round-4 receipt measured and
+are left as measured: the list is eleven names as of §20, and the same fixture
+plus the two planted node-27 shapes reads nineteen distinct references there.) **`pg_catalog.float8` was found by this receipt, not
 predicted by it:** the first run of §18 reported
 `core.gauge_reading column default stream_type references pg_catalog.float8 --
 not on the migration allow-list` on an otherwise clean catalog, because
@@ -1775,3 +1777,212 @@ that cluster's superuser. So **no `GRANT USAGE ON SCHEMA pg_toast` and no
 This audit is pinned by
 `tests/test_node27_write_roles.py::test_converted_lanes_do_not_read_superuser_gated_catalogs`,
 so a future edit that adds such a read to a converted lane fails the suite.
+
+## 20. T7 first contact: two untrusted names, both migration-authored
+
+One more disposable container (`nwm-fix6-r6`, same
+`timescale/timescaledb:2.10.2-pg15` image, PG 15.2), same fixture as §18/§19.
+T7's first pre-merge `--roles-only` run against node-27's **production** catalog
+reported
+
+```
+138 expression(s)/trigger(s) scanned, 19 distinct function(s) referenced, 2 untrusted for a superuser writer
+```
+
+— `pg_catalog.int8` (column defaults on `hydro.run_display_coverage`'s two
+`BIGINT NOT NULL DEFAULT 0` counters and six `flood.run_product_quality`
+counters) and `pg_catalog.jsonb_typeof` (`flood.run_product_quality`'s
+`residual_blockers` / `unavailable_products` `CHECK`s). Neither is an
+escalation and neither was predicted: `int8` is an **implicit** coercion the
+parser stores while `pg_get_expr` prints just `0`, and `jsonb_typeof` comes from
+two migrations that are in node-27's `public.schema_migrations` ledger but no
+longer under `db/migrations`. This section reproduces both shapes locally and
+measures the fix.
+
+### 20.0 The §18 fixture, provisioned clean before anything is planted
+
+```
+full-mode EXIT=0
+node27-write-roles: full provision complete; audit clean
+ 18 expression(s)/trigger(s) scanned, 16 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+### 20.1 The coercion mapping, MEASURED rather than assumed
+
+The derivation's new branch maps a column type to the `pg_cast` function an
+integer-literal `DEFAULT` is stored through. That mapping is a property of
+PostgreSQL's parser, so it was read out of `pg_attrdef.adbin` — one
+`t(c <type> DEFAULT 0)` per row, plus shape variants — instead of being
+reasoned about:
+
+```
+       fixture       |     coltype      |   printed_default    |                                   funcid_resolved
+---------------------+------------------+----------------------+-------------------------------------------------------------------------------------
+ t_bigint            | bigint           | 0                    | pg_catalog.int8(integer) oid=481
+ t_int8              | bigint           | 0                    | pg_catalog.int8(integer) oid=481
+ t_smallint          | smallint         | 0                    | pg_catalog.int2(integer) oid=314
+ t_int2              | smallint         | 0                    | pg_catalog.int2(integer) oid=314
+ t_real              | real             | 0                    | pg_catalog.float4(integer) oid=318
+ t_float4            | real             | 0                    | pg_catalog.float4(integer) oid=318
+ t_double_precision  | double precision | 0                    | pg_catalog.float8(integer) oid=316
+ t_float8            | double precision | 0                    | pg_catalog.float8(integer) oid=316
+ t_numeric           | numeric          | 0                    | pg_catalog.numeric(integer) oid=1740
+ t_decimal           | numeric          | 0                    | pg_catalog.numeric(integer) oid=1740
+ t_integer           | integer          | 0                    | (no :funcid)
+ t_int4              | integer          | 0                    | (no :funcid)
+ v_bigint_notnull    | bigint           | 0                    | pg_catalog.int8(integer) oid=481
+ v_bigint_neg        | bigint           | '-1'::integer        | pg_catalog.int8(integer) oid=481
+ v_bigint_paren      | bigint           | 0                    | pg_catalog.int8(integer) oid=481
+ v_bigint_cast       | bigint           | (0)::bigint          | pg_catalog.int8(integer) oid=481
+ v_bigint_bigliteral | bigint           | '3000000000'::bigint | (no :funcid)
+ v_smallint_neg      | smallint         | '-1'::integer        | pg_catalog.int2(integer) oid=314
+ v_real_neg          | real             | '-1'::integer        | pg_catalog.float4(integer) oid=318
+ v_float8_neg        | double precision | '-1'::integer        | pg_catalog.float8(integer) oid=316
+ v_numeric_neg       | numeric          | '-1'::integer        | pg_catalog.numeric(integer) oid=1740
+ v_numeric_typmod    | numeric(10,2)    | 0                    | pg_catalog.numeric(integer) oid=1740, pg_catalog.numeric(numeric, integer) oid=1703
+ v_integer_neg       | integer          | '-1'::integer        | (no :funcid)
+ v_integer_paren     | integer          | 0                    | (no :funcid)
+ w_bigint_numlit     | bigint           | 0.0                  | pg_catalog.int8(numeric) oid=1779
+ w_float8_numlit     | double precision | 0.0                  | pg_catalog.float8(numeric) oid=1746
+ w_numeric_numlit    | numeric          | 0.0                  | (no :funcid)
+ w_text_lit          | text             | '0'::text            | (no :funcid)
+(28 rows)
+```
+
+Read out of it, and encoded in `_IMPLICIT_COERCION_FUNCTION` /
+`_IMPLICIT_COERCION_RE`:
+
+- **`INTEGER` / `INT4` derive nothing.** The literal already has the column's
+  type, so the parser folds it to a `Const` and no function reference exists.
+  This is the control, and it is why the branch is keyed on the column type
+  rather than on "a `DEFAULT` with a number in it";
+- `BIGINT`/`INT8` → `int8`, `SMALLINT`/`INT2` → `int2`, `REAL`/`FLOAT4` →
+  `float4`, `DOUBLE PRECISION`/`FLOAT8` → `float8`, `NUMERIC`/`DECIMAL` →
+  `numeric` — all `(integer)` overloads;
+- `NOT NULL` between the type and the `DEFAULT` (000035's actual shape), a
+  **negative** literal and a **parenthesised** literal all keep the coercion, so
+  all three are matched;
+- `numeric(10,2)` reaches a second `pg_proc` row, the typmod-application
+  `numeric(numeric, integer)`, which carries the same schema-qualified name —
+  one allow-list entry either way;
+- two measured limits, both stated in the test's docstring rather than hidden:
+  `BIGINT DEFAULT 3000000000` stores a plain `int8` `Const` with **no**
+  `:funcid` (the derivation over-derives there, the harmless direction), and a
+  non-integer literal reaches a different entry point (`int8(numeric)` oid 1779,
+  `float8(numeric)` oid 1746) which this branch deliberately does not match.
+
+Volatility and strictness of the two names being added, measured in the same
+catalog: `pg_catalog.int8(integer)` oid 481 and `pg_catalog.jsonb_typeof(jsonb)`
+oid 3210 are both `provolatile = 'i'`, `proisstrict = 't'`, `proparallel = 's'`,
+`prosecdef = 'f'`.
+
+### 20.2 The two node-27 shapes, planted by the SUPERUSER as a migration would
+
+```
+$ psql -U nhms -c "ALTER TABLE met.met_station ADD COLUMN station_sample_count BIGINT NOT NULL DEFAULT 0 CHECK (station_sample_count >= 0)"
+$ psql -U nhms -c "CREATE SCHEMA flood; CREATE TABLE flood.run_product_quality (run_id bigint PRIMARY KEY, expected_result_rows bigint NOT NULL DEFAULT 0, residual jsonb NOT NULL DEFAULT '[]'::jsonb, CONSTRAINT run_product_quality_residual_blockers_array_chk CHECK (jsonb_typeof(residual) = 'array'))"
+       who
+-----------------
+ planted as nhms
+
+ printed_default_for_station_sample_count
+------------------------------------------
+ 0
+```
+
+`pg_get_expr` prints `0`. **Reading the printed default would have found
+nothing** — the reference exists only in the stored tree, which is why the sweep
+scans `adbin` and not `pg_get_expr`.
+
+### 20.3 BEFORE this fix: exit 3, naming both
+
+`git show HEAD:db/roles/node27_write_roles.sql` (69e10e77, the nine-name array)
+run as a strict audit-only against the planted catalog:
+
+```
+EXIT=3
+ 23 expression(s)/trigger(s) scanned, 19 distinct function(s) referenced, 2 untrusted for a superuser writer
+ERROR:  SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): flood.run_product_quality CHECK constraint run_product_quality_residual_blockers_array_chk references pg_catalog.jsonb_typeof -- not on the migration allow-list; flood.run_product_quality column default expected_result_rows references pg_catalog.int8 -- not on the migration allow-list; met.met_station column default station_sample_count references pg_catalog.int8 -- not on the migration allow-list
+$ # non-strict, same build:
+EXIT=0
+WARNING:  SECURITY REGRESSION: ... (same three rows)
+```
+
+Two distinct untrusted **functions** across three expressions — the same pair,
+in the same words, that node-27 reported. The fixture's `19 distinct` matching
+production's `19 distinct` is a coincidence of two unrelated catalogs, not a
+reproduction of node-27's inventory.
+
+### 20.4 AFTER this fix: exit 0
+
+The planted relations are new, so the provision script is re-run first, exactly
+as runbook §9.6 requires after a migration (`flood.run_product_quality` was
+created after the ownership phase and is otherwise owner drift — which the audit
+also catches, and did):
+
+```
+full-mode EXIT=0
+node27-write-roles: full provision complete; audit clean
+$ # strict audit-only:
+EXIT=0
+ 23 expression(s)/trigger(s) scanned, 19 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+### 20.5 The inventory, with each reference's verdict
+
+```
+                         fn                          |  reached_via   | vol |         verdict         | occurrences
+-----------------------------------------------------+----------------+-----+-------------------------+-------------
+ met.canonical_grid_cell_direct_delete_blocked       | :funcid        | v   | on the list via :funcid |           1
+ met.canonical_grid_cell_immutable                   | :funcid        | v   | on the list via :funcid |           1
+ met.canonical_grid_snapshot_identity_immutable      | :funcid        | v   | on the list via :funcid |           1
+ met.canonical_met_product_grid_definition_uri_match | :funcid        | v   | on the list via :funcid |           1
+ pg_catalog.btrim                                    | :funcid        | i   | on the list via :funcid |           1
+ pg_catalog.float8                                   | :funcid        | i   | on the list via :funcid |           2
+ pg_catalog.gen_random_uuid                          | :funcid        | v   | on the list via :funcid |           1
+ pg_catalog.int4ge                                   | :opfuncid only | i   | operator carve-out      |           1
+ pg_catalog.int8                                     | :funcid        | i   | on the list via :funcid |           2
+ pg_catalog.int84ge                                  | :opfuncid only | i   | operator carve-out      |           1
+ pg_catalog.jsonb_object_field_text                  | :opfuncid only | i   | operator carve-out      |           2
+ pg_catalog.jsonb_typeof                             | :funcid        | i   | on the list via :funcid |           1
+ pg_catalog.nextval                                  | :funcid        | v   | on the list via :funcid |           1
+ pg_catalog.now                                      | :funcid        | s   | on the list via :funcid |           1
+ pg_catalog.texteq                                   | :opfuncid only | i   | operator carve-out      |           2
+ pg_catalog.textne                                   | :opfuncid only | i   | operator carve-out      |           1
+ pg_catalog.textregexeq                              | :opfuncid only | i   | operator carve-out      |           1
+ pg_catalog.timestamptz_ge                           | :opfuncid only | i   | operator carve-out      |           5
+ pg_catalog.timestamptz_lt                           | :opfuncid only | i   | operator carve-out      |           5
+(19 rows)
+```
+
+Both new names arrive as **`:funcid`**, not as `:opfuncid` — they are genuine
+written-or-coerced calls and the operator carve-out never applied to them. The
+`= 'array'::text` half of the `jsonb_typeof` `CHECK` shows up separately as
+`texteq`, `:opfuncid only`, carried by the carve-out; the `>= 0` half of the
+`BIGINT` counter's `CHECK` adds `int84ge`, which §18's inventory did not have.
+`pg_catalog.int8` at `occurrences = 2` is the two planted `BIGINT DEFAULT 0`
+columns.
+
+### 20.6 The documented false positive is unchanged
+
+Extending the list did not soften the criterion — it is still the LIST, not a
+judgement about effect:
+
+```
+$ psql -U nhms_ingest_rw -c "ALTER TABLE ops.run_journal ALTER COLUMN note SET DEFAULT upper('x')"
+ALTER TABLE
+$ # strict audit-only:
+EXIT=3
+ 24 expression(s)/trigger(s) scanned, 20 distinct function(s) referenced, 1 untrusted for a superuser writer
+ERROR:  SECURITY REGRESSION: untrusted function in a stored expression (it is evaluated with the authority of whoever writes the row): ops.run_journal column default note references pg_catalog.upper -- not on the migration allow-list
+$ # after reverting it:
+EXIT=0
+ 23 expression(s)/trigger(s) scanned, 19 distinct function(s) referenced, 0 untrusted for a superuser writer
+```
+
+`pg_catalog.upper` is as `IMMUTABLE`, `STRICT` and harmless as `int8` is. It is
+still reported, because it is not on the list and no migration authored it —
+which is the distinction that decided the two T7 findings and would have decided
+them the other way had the ledger not carried 000034/000036.
+
+Container removed (`docker rm -f nwm-fix6-r6`; `nwm-fix6-*` remaining: 0).
