@@ -3001,3 +3001,27 @@ The accumulated later-round catches still concentrate in rotated-in lenses
 requires the attribution-schema (including the still-open empty-`core_lenses`
 path), round-intent and round-role repairs plus maintainer review. Next
 revisit on the audit's next flag.
+
+## Revisit 2026-09-02 (post #1961 / #1965, PR #1972) — keep; a +1 core datum without rotation
+
+After the PR #1972 accountability line, `loop_log_audit.py` reports **163**
+multi-round merged PRs and later-round catches **core=145 / rotated=301 /
+skipped=15**: `core` moved by one, the other two are unchanged.
+
+Round 1 ran the six-lens comprehensive mix (three two-pack bundles) and
+produced three confirmed findings (one P2 redaction-narrowing, two P3
+coverage gaps). Round 2 re-ran the same six lenses on the fix delta with no
+lens rotated in and returned one P3 (a whitespace-bearing URI root leaking
+its tail past the bail-out fixed in round 1, deferred to #1976); Phase 7 on
+the final head was clean. That round-2 finding is a later-round catch in a
+core lens, so the PR adds **+1 to `core` and +0 to `rotated`**. Unlike
+the #1963 and #1974 lines it is not a null datum, but it is still not a
+rotation datum: no rotated-in lens ran, so it says nothing about what a
+rotated lens would have found.
+
+The accumulated later-round catches still concentrate in rotated-in lenses
+(**301 versus 145**, `skipped=15` named rather than silently bucketed), so
+**keep rotation** stands under the recorded autonomous default. Reversal still
+requires the attribution-schema (including the still-open empty-`core_lenses`
+path), round-intent and round-role repairs plus maintainer review. Next
+revisit on the audit's next flag.

@@ -11547,9 +11547,11 @@ class FileJournalRetryService:
         ``same_as_workspace``.  Events written before this change under a
         whitespace-bearing root may also carry the partial rendering
         ``"[local-path] <tail>"`` left by the old whitespace bail-out; those are
-        fixed points on re-render and are returned as recorded like the bare
-        string.  History is not rewritten and this reader does not normalise;
-        the 503 stays intact either way.
+        returned as recorded like the bare string (re-rendering them under a
+        ``*_root`` key would collapse them to the bare ``"[local-path]"``, also
+        non-disclosing, but this reader never re-renders).  History is not
+        rewritten and this reader does not normalise; the 503 stays intact
+        either way.
 
         Fail-soft: a typed journal fault on this SECOND read returns ``None``,
         so the caller still emits its 503 with the evidence key absent instead
