@@ -227,6 +227,17 @@ DEFAULT_COMPRESSION_LAG_SECONDS = 172_800
 #: capacity guard, over-reporting is the fail-safe direction.
 DAILY_INGEST_WINDOW_DAYS = 7
 
+#: Seconds the audit will wait for its read-only PostgreSQL connection before
+#: giving up, same value and same rationale as the lifecycle runners'
+#: ``_CONNECT_TIMEOUT_SECONDS`` (#1985 decision 21). The governance oneshot
+#: runs with ``TimeoutStartSec=0``, so nothing above this call would ever kill
+#: an unbounded ``connect``: a wedged TCP handshake would hold the unit in
+#: ``activating`` forever and every later tick would be skipped as "already
+#: running" -- a capacity guard that stops watching without ever failing. A
+#: bounded connect turns that into ``connection_failed`` -> the critical
+#: ``POSTGRES_UNAVAILABLE`` (decision 23) on the very first tick.
+_CONNECT_TIMEOUT_SECONDS = 10
+
 WORKING_SET_DISCOVERY_SQL = DISCOVERY_SQL
 
 # Catalog-only by construction: chunk identities and sizes come from
@@ -486,7 +497,11 @@ def collect_postgres(
     except Exception as error:  # pragma: no cover - environment dependent
         return {"status": "blocked", "reason": "psycopg2_unavailable", "error": str(error)}
     try:
-        connection = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
+        connection = psycopg2.connect(
+            database_url,
+            cursor_factory=psycopg2.extras.RealDictCursor,
+            connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        )
     except Exception as error:
         return {"status": "blocked", "reason": "connection_failed", "error": str(error)}
     result: dict[str, Any] = {"status": "ok"}

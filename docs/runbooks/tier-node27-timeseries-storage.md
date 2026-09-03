@@ -362,10 +362,17 @@ lifecycle lane also governs `hydro.river_timeseries_legacy` and, later,
 parser writes only the narrow table, so their steady-state arrival is **zero**
 and what remains is a bounded stock of 7-day chunks. The bound is derived, not
 measured: at most `⌈retention window ÷ 7⌉ + 1` uncompressed 7-day chunks per
-table (the `+ 1` is the still-filling chunk). River measured **2** on
-2026-09-03 at 239–508 GB — the 239 is the still-filling `_hyper_3_107` — which
-is the 14-day template window; under the live 21-day window the same formula
-gives 3–4. Forcing is the same count and much smaller. The wall argument below
+table (the `+ 1` is the still-filling chunk). Under the 21-day window node-27
+was actually running on 2026-09-03 (Current policy near the top of this
+runbook; the committed template ships 14) that bound is `⌈21 ÷ 7⌉ + 1` = **4**
+— an AT-MOST, not a forecast. The read-only measurement the same day found
+only **2** uncompressed river chunks, at 239–508 GB: the 239 is the
+still-filling `_hyper_3_107` and the 508 is the one whose `range_end` was still
+inside the 2-day compression lag. That count is what the compression cadence
+had left behind — everything older was already compressed — not a function of
+the retention window, so do not read the measured 2 as the bound, nor the
+bound 4 as a prediction of what a live box holds. Forcing is the same count and
+much smaller. The wall argument below
 is **per tick** and does not change with the count; only the drain length and
 the pre-expand lead time do. They do not enter the throughput constraint at
 all; they enter the wall constraint as a one-off.
@@ -384,9 +391,31 @@ the table about to be renamed (§5.1 of the change's rollout checklist reads tha
 receipt). Reaching that state needs no config change: under the 2-day lag the
 daily timer takes terminal chunks one single-table tick at a time (≈51 min for a
 508 GB chunk, inside the 60-minute per-chunk statement timeout), so the drain is
-a matter of waiting for as many ticks as there are chunks. An attended
-`compress_chunk` under §4.5's raised triple is the faster alternative when the
-window is short.
+a matter of waiting for as many ticks as there are chunks.
+
+**That "one tick at a time" drain has a precondition: at most one terminal
+7-day chunk eligible per tick.** It is the steady state, not a guarantee. The
+runner does not pace itself — selection is a prefix slice
+(`selected = eligible[:per_tick_bound]`,
+`scripts/node27_timeseries_compression.py:745`), so if the last compression
+receipt or a read-only `timescaledb_information.chunks` query shows **≥2
+eligible terminal chunks** on the table, the next tick at bound 4 takes them
+**together**: two 508 GB chunks are `2 × 508 × 6.0 s/GB + 380 s ≈ 6476 s`
+against the 3900 s wrapper wall — the §4 backlog case, not the steady-state
+one. So COUNT the eligible chunks before you rely on the timer; if there are
+two or more, drain them with the attended gated `compress_chunk` of §4 "The
+surviving chunk is compressed ATTENDED" (steps 1–4 below): it needs no config
+change and it is correct in both phases, before the rename and after it.
+
+**A bound change is not the pre-expand recipe** (D7 / tasks 3.3). Before the
+rename the §4.5 pair — `PER_TICK_BOUND=1` **with** the raised timeout/wall
+triple, drop-in first — would also work, because the chunks are still
+canonical and that is exactly what the backlog remedy below ("A backlog by
+itself invalidates the wall constraint") covers. It is simply not what this
+transition prescribes: ticks, or the attended step. And after the rename it
+can never help the `hydro.river_timeseries_legacy` survivor at all — prefix
+selection at bound 1 provably never reaches that chunk ("Why bound 1 is not
+the answer here" below).
 
 **The surviving chunk is compressed ATTENDED, inside the expand window.** The
 rename leaves at most one chunk whose `range_end` was still in the future when
@@ -446,8 +475,12 @@ the real `_classify` says otherwise. In steady state bound 4 keeps up with the
 the tick at `range_end + lag` selects **one** narrow river chunk, the legacy
 chunk and **one** forcing chunk —
 `(75 + 508 + 12.7) GB × 6.0 s/GB + 380 s ≈ 3954 s` against the 3900 s (65 min)
-wrapper wall. That is 54 s over at a 75 GB narrow chunk and *under* the wall at
-the measured 38–58 GB narrow sizes, so a missed step may `TERM` the tick (no
+wrapper wall. That is 54 s over at a 75 GB narrow chunk and *under* the wall
+only in the LOWER half of the derived ≈38–73 GB narrow band (one seventh of the
+measured 268–508 GB 7-day chunks; no narrow chunk exists to be measured before
+the expand) — pair the 508 GB legacy chunk with the 73 GB top of that band and
+`(73 + 508 + 12.7) × 6.0 + 380 ≈ 3942 s` is over the wall again. So a missed
+step may `TERM` the tick (no
 receipt, `rc=124`, `OnFailure=` mail) or may produce **no signal at all** — and
 even when it does `TERM`, the legacy compress has most likely already committed
 inside the wall, so the alert is at most one trailing signal, not a daily
@@ -3825,8 +3858,8 @@ before a receipt exists.
      **`/home` free space has no critical tier of its own** (line numbers
      re-pinned 2026-09-03, `#1985`). The resource-governance audit gives that
      mount a warning threshold only — `home_free_warn_bytes` (default 300 GiB)
-     -> `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:76`
-     (threshold), `:239` (comparison), `:244` (the code literal)
+     -> `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:77`
+     (threshold), `:240` (comparison), `:245` (the code literal)
      — and there is no `home_free_critical_bytes` at all. The exit-1 /
      `OnFailure=` mail lane has two triggers, in this order: the receipt's
      `status` is not `completed` (`:903-904`), or the receipt carries at least

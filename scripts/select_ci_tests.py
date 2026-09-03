@@ -2974,8 +2974,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # `scripts/node27_resource_governance.py` and this comment kept the old
     # count), so a diff that touches only the helper must still select every
     # lane it can break; the same-name rule alone would select its own test
-    # file and nothing else. The target list below is longer than eight because
-    # two consumers are covered by two suites each.
+    # file and nothing else. Ten entries for eight consumers: the helper's own
+    # suite leads the list, the autopipeline consumer needs two suites (handoff
+    # + connection bounds), and the cold-governance collection consumer needs
+    # two as well — `tests/test_node27_resource_governance.py` reaches it only
+    # through the audit, so its own suite has to be named (round-4).
     PathTestRule(
         "packages/common/node27_timeseries_hypertable_discovery.py",
         (
@@ -2988,6 +2991,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_autopipeline_handoff.py",
             "tests/test_node27_autopipeline_connection_bounds.py",
             "tests/test_node27_resource_governance.py",
+            # The cold-governance collection consumer's own suite: the
+            # `test_node27_resource_governance.py` entry above covers the
+            # audit, not `packages/common/node27_cold_governance_collection.py`.
+            "tests/test_node27_cold_governance.py",
         ),
     ),
     # The retention receipt schema and its example are validated by the shared

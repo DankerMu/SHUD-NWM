@@ -306,6 +306,25 @@ def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting(
         assert SELECTOR_META_GUARD_TEST in selected, consumer
 
 
+def test_discovery_helper_fans_out_to_the_cold_governance_suite() -> None:
+    """#1985 round-4: the helper's eighth consumer had a suite nobody selected.
+
+    `packages/common/node27_cold_governance_collection.py` reads the shared
+    hypertable-discovery helper, and its own behaviour (bounded connect,
+    working-set inventory) is pinned in `tests/test_node27_cold_governance.py`
+    — a suite the fan-out rule did not name, so a helper-only diff could not
+    have caught a break there. Written as a literal, not derived from
+    `_CONSUMERS`: deriving it would let the roster and the fan-out rule drift
+    together and still agree.
+    """
+    selected = select_tests(
+        ["packages/common/node27_timeseries_hypertable_discovery.py"], repo_root=Path(".")
+    )
+    assert "tests/test_node27_cold_governance.py" in selected
+    # The rule, not the same-name fallback, is what put it there.
+    assert "tests/test_node27_timeseries_hypertable_discovery.py" in selected
+
+
 def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:
     test_path = tmp_path / "tests" / "test_example.py"
     test_path.parent.mkdir()

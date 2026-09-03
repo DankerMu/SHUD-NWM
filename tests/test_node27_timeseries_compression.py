@@ -2677,10 +2677,15 @@ def test_the_catch_up_section_excludes_the_legacy_survivor() -> None:
 
 
 def test_the_legacy_backlog_bound_is_derived_not_a_frozen_measurement() -> None:
-    """Round-3: "river ≤ 2" was a measurement under the 14-day TEMPLATE window
-    presented as the rule. The box runs 21 days, where the same stock is 3-4,
-    so an operator sizing the expand window from that sentence would plan for
-    half the drain. State the formula; keep the measurement as a dated example.
+    """Round-3/round-4: "river ≤ 2" was a measurement presented as the rule.
+
+    The 2026-09-03 count of 2 was taken on the box under the LIVE 21-day
+    retention window (the committed template ships 14), and it reflects the
+    compression cadence — one still-filling `_hyper_3_107` plus one chunk still
+    inside the 2-day lag — not the window at all. The window-derived bound is
+    `⌈21 ÷ 7⌉ + 1` = 4, an at-most. An operator sizing the expand drain from
+    either number as if it were the other plans for the wrong length, so the
+    runbook states the formula and keeps the measurement as a dated example.
     """
     runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
     flat = " ".join(runbook.split())
@@ -2688,6 +2693,12 @@ def test_the_legacy_backlog_bound_is_derived_not_a_frozen_measurement() -> None:
     assert "2026-09-03" in flat
     assert "_hyper_3_107" in flat
     assert "river ≤ 2 at 239–508 GB" not in flat
+    # Round-4: the measurement was taken UNDER the live 21-day window, so the
+    # retired sentence had it backwards; and the formula's answer there is an
+    # at-most 4, never a range.
+    assert "⌈21 ÷ 7⌉ + 1" in flat
+    assert "gives 3–4" not in flat
+    assert "compression cadence" in flat
     # And no day count is stated as if it were the live one.
     assert "unchanged 14-day window" not in runbook
     for match in re.finditer(r"14[- ]day", runbook):
@@ -2696,6 +2707,49 @@ def test_the_legacy_backlog_bound_is_derived_not_a_frozen_measurement() -> None:
             marker in window
             for marker in ("template", "committed", "default", "Current policy")
         ), window
+
+
+def test_the_pre_expand_drain_precondition_is_stated_with_its_failure_case() -> None:
+    """Round-4: "one single-table tick at a time" is the STEADY STATE only.
+
+    The runner takes `eligible[:per_tick_bound]`; it does not pace itself. With
+    two eligible terminal 7-day chunks on the table, one bound-4 tick takes
+    both — `2 x 508 GB x 6.0 s/GB + 380 s = 6476 s` against the 3900 s wall —
+    so an operator who reads the drain as self-limiting plans a pre-expand
+    window around a tick that cannot finish. Runbook and template must both
+    carry the count-first precondition and its arithmetic.
+    """
+    assert 2 * 508 * 6.0 + 380 == 6476.0
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    template = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    for text in (runbook, template):
+        flat = " ".join(text.replace("\n#", "\n").split())
+        assert "6476" in flat
+        assert "at most one terminal" in flat.lower()
+        # The selection fact the precondition rests on, not a paraphrase.
+        assert "eligible[:" in flat
+
+
+def test_the_runner_docstring_promises_no_lag_default_and_no_fixed_pair() -> None:
+    """Round-4: the module docstring was stale twice over.
+
+    There is no code default for the lag — `_parse_positive_int` raises when
+    `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` is missing — and the governed
+    set is discovered (canonical + any existing `_legacy` sibling), not a
+    frozen pair of detail hypertables. Both claims sit in the first paragraph a
+    maintainer reads.
+    """
+    doc = compression.__doc__ or ""
+    assert "default 7 days" not in doc
+    assert "one chunk width" not in doc
+    assert "on the two\ndetail hypertables" not in doc
+    assert "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS" in doc
+    assert "_legacy" in doc
+    # The claim about the default is a property of the parser, not of prose.
+    with pytest.raises(compression.CompressionConfigError):
+        compression._parse_positive_int(
+            None, name="NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", minimum=1
+        )
 
 
 def test_the_bound_one_starvation_claim_matches_the_runner() -> None:
@@ -2840,8 +2894,11 @@ def test_the_missed_attended_step_backstop_arithmetic_is_the_mixed_tick() -> Non
     at `range_end + lag` therefore selects one narrow river chunk, the legacy
     chunk and one forcing chunk:
     `(75 + 508 + 12.7) GB x 6.0 s/GB + 380 s = 3954.2 s` against the 3900 s
-    wall — 54 s over at a 75 GB narrow chunk and UNDER it at the measured
-    38-58 GB sizes. The old text promised a daily TERM + OnFailure mail as a
+    wall — 54 s over at a 75 GB narrow chunk and UNDER it only in the lower
+    half of the DERIVED 38-73 GB narrow band (a seventh of the measured
+    268-508 GB 7-day chunks; nothing narrow exists to measure before the
+    expand): at its 73 GB top the same tick is 3942 s, over the wall again.
+    The old text promised a daily TERM + OnFailure mail as a
     backstop; a missed attended step may produce no signal at all, so
     "no alert" is not evidence and the runbook has to name a positive check.
     """
@@ -2863,6 +2920,31 @@ def test_the_missed_attended_step_backstop_arithmetic_is_the_mixed_tick() -> Non
         flat = " ".join(text.replace("\n#", "\n").split())
         index = flat.index("4778")
         assert "backlog" in flat[index : index + 220].lower(), flat[index : index + 220]
+
+
+def test_the_narrow_chunk_band_is_derived_and_only_its_lower_half_fits() -> None:
+    """Round-4: "the measured 38-58 GB narrow sizes" was never measured.
+
+    One-day narrow chunks do not exist until the expand runs, so the band is a
+    seventh of the measured 268-508 GB 7-day chunks: ~38-73 GB. The distinction
+    is load-bearing because the 3954 s steady-state tick only fits under the
+    3900 s wall in the LOWER half of that band -- pair the 508 GB legacy chunk
+    with the 73 GB top and the tick is over the wall, which is exactly the case
+    an operator would dismiss on the retired "measured 38-58" sentence.
+    """
+    assert round((73 + 508 + 12.7) * 6.0 + 380, 1) == 3942.2
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    template = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    for text, dash in ((runbook, "\u2013"), (template, "-")):
+        flat = " ".join(text.replace("\n#", "\n").split())
+        # The retired "measured" claim, in this file's own dash convention.
+        assert f"measured 38{dash}58" not in flat
+        assert f"38{dash}73" in flat
+        assert "3942" in flat
+        index = flat.index(f"38{dash}73")
+        window = flat[max(0, index - 200) : index + 200].lower()
+        assert "derived" in window, window
+        assert "lower" in window, window
 
 
 def test_the_expected_red_state_is_documented_as_a_condition_not_a_date() -> None:

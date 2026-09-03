@@ -2,11 +2,12 @@
 
 The helper is the single owner of "which hypertables does the lifecycle lane
 govern": each canonical detail hypertable plus its ``_legacy`` sibling when
-that sibling exists in ``timescaledb_information.hypertables``.  Seven tools
-consume it (compression runner, retention runner, compression supervisor,
-capture, live-evidence replay validator, autopipeline statistics guard,
-resource-governance collection), so the rules live here once and every
-consumer test pins that it really reads them.
+that sibling exists in ``timescaledb_information.hypertables``.
+Eight tools consume it (compression runner, retention runner, compression
+supervisor, capture, live-evidence replay validator, autopipeline statistics
+guard, resource-governance collection, resource-governance audit's
+policy-missing checks), so the rules live here once and every consumer test
+pins that it really reads them.
 
 The three-state expectation rule (OpenSpec change
 ``timeseries-narrow-store-expand-contract`` task 3.1) is the delicate part: a
@@ -417,3 +418,7 @@ def test_the_ci_selector_comment_carries_the_current_consumer_count() -> None:
     assert "SEVEN consumers" not in source
     assert "EIGHT consumers" in source
     assert len(_CONSUMERS) == 8
+    # Round-4: the fourth place the count is written down — THIS file's own
+    # module docstring, which round-1 left at seven while adding the eighth.
+    assert "Eight tools consume it" in (__doc__ or "")
+    assert "Seven" not in (__doc__ or "")

@@ -4416,11 +4416,18 @@ def test_the_attributed_connect_helper_stays_untouched() -> None:
 
 
 def test_the_probe_connect_timeout_mirrors_the_compression_sibling() -> None:
-    """One number, two lanes: a divergence here is a silent policy fork."""
-    source = (Path(__file__).resolve().parents[1] / "scripts" / "node27_timeseries_compression.py").read_text(
-        encoding="utf-8"
-    )
-    assert "_CONNECT_TIMEOUT_SECONDS = 10" in source
+    """One number, three lanes: a divergence here is a silent policy fork.
+
+    Round-4 added the governance collection to the mirror: its oneshot runs
+    with `TimeoutStartSec=0`, so it needs the same bound for the same reason.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for relative in (
+        "scripts/node27_timeseries_compression.py",
+        "packages/common/node27_cold_governance_collection.py",
+    ):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "_CONNECT_TIMEOUT_SECONDS = 10" in source, relative
 
 
 # --- schema -----------------------------------------------------------------

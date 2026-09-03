@@ -491,8 +491,9 @@ def _working_set_recommendations(
             # silently is the fail-open this guard exists to prevent: the
             # working set IS measured, it is the free space that is unknown, and
             # the filesystem block only emits `HOME_FREE_BELOW_WARNING` when it
-            # has a number to compare. `projection_status` stays `ok` — the
-            # catalog was fine — and `home_free_bytes` stays null.
+            # has a number to compare. `projection_status` is left unchanged
+            # (`ok` or `no_uncompressed_chunk`) — the catalog was fine either
+            # way — and `home_free_bytes` stays null.
             recommendations.append(
                 {
                     "severity": "critical",

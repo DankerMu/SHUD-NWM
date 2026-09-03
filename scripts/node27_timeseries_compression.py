@@ -3,10 +3,14 @@
 
 Task 4.2 of the ``tier-node27-timeseries-storage`` OpenSpec change
 (issue #851). Selects terminal chunks — those whose ``range_end`` is older
-than a configurable lag (default 7 days, one chunk width) — on the two
-detail hypertables ``hydro.river_timeseries`` and
-``met.forcing_station_timeseries`` and calls ``compress_chunk`` on at most
-``per_tick_bound`` of them per invocation. Never writes to the active
+than the lag this runner has no default for: it is REQUIRED in the
+environment (``NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS``, parsed in
+``config_from_args``; the committed template ships ``172800``) — on the
+hypertables the shared discovery helper reports for this tick, i.e. each
+canonical detail hypertable (``hydro.river_timeseries``,
+``met.forcing_station_timeseries``) plus any ``_legacy`` sibling that exists
+in ``timescaledb_information.hypertables``, and calls ``compress_chunk`` on at
+most ``per_tick_bound`` of them per invocation. Never writes to the active
 chunk. Dry-run by default; ``--enforce`` performs mutation. Emits a
 ``schemas/timeseries_compression_receipt.schema.json``-conformant JSON
 receipt via the shared no-follow atomic write helper.

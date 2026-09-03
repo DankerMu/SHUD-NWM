@@ -50,7 +50,17 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 # precondition is a compression receipt showing that backlog already drained --
 # no uncompressed terminal chunk left on the table about to be renamed, which
 # the daily timer reaches on its own under the 2-day lag, one single-table tick
-# at a time.
+# at a time. That drain holds only while AT MOST ONE terminal 7-day chunk is
+# eligible per tick (the steady state). The runner does not pace itself: it
+# takes eligible[:bound], so if a receipt or timescaledb_information.chunks
+# shows 2 or more eligible terminal chunks, the next bound-4 tick takes them
+# together (2 x 508 GB x 6.0 s/GB + 380 s is about 6476 s, over the 3900 s
+# wall). Count them first; two or more means drain them with the attended
+# gated compress_chunk (runbook section 4), which needs no config change. A
+# bound change is not what the transition prescribes: the bound-1 catch-up
+# below (paired with the raised timeout triple) would work on these still
+# CANONICAL chunks, but it is not the recipe here, and after the rename it
+# never reaches the _legacy survivor at all.
 # The drain cannot reach the LAST legacy chunk: its range_end is still in the
 # future at rename time, so it becomes eligible at range_end + lag, days later,
 # when narrow chunks are already arriving. That one chunk is compressed by an
@@ -69,8 +79,12 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 # and one forcing chunk -- bound 4 keeps up with 2 arrivals/day, so three narrow
 # chunks never queue: (75 + 508 + 12.7) GB x 6.0 s/GB + 380 s is about 3954 s
 # against the 3900 s wall. That is 54 s over at a 75 GB narrow chunk and UNDER
-# the wall at the measured 38-58 GB narrow sizes, so a missed attended step may
-# TERM the tick (no receipt, OnFailure mail) or may emit nothing at all -- and
+# the wall only in the LOWER half of the derived 38-73 GB narrow band (one
+# seventh of the measured 268-508 GB 7-day chunks; no narrow chunk exists to be
+# measured before the expand) -- at the 73 GB top of that band
+# (73 + 508 + 12.7) x 6.0 + 380 is about 3942 s, over the wall again. So a
+# missed attended step may TERM the tick (no receipt, OnFailure mail) or may
+# emit nothing at all -- and
 # even on a TERM the legacy compress has most likely already committed, making
 # the alert one trailing signal rather than a daily reminder. Never read "no
 # alert" as "it was done": verify is_compressed = true in

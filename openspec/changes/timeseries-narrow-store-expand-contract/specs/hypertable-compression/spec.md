@@ -54,7 +54,9 @@ runbook and live env to be re-pinned in the same change.
   must fit the whole-tick wall, including the measured worst mixed
   legacy-plus-narrow tick, cross-referencing the catch-up recipe and the
   pre-expand precondition and the attended gated `compress_chunk` of the
-  surviving legacy chunk in the expand window, with its loud backstop)
+  surviving legacy chunk in the expand window — stated as mandatory,
+  with its positive completion criteria `is_compressed` and the receipt's
+  `chunks_compressed`, never the absence of an alert)
   — plus the measured inputs behind the current target, the
   derivation's invalidation conditions (chunk-interval change listed
   among them), and an explicit conclusion on timer cadence (one-day

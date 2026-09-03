@@ -1291,6 +1291,14 @@ def test_an_unobservable_home_pages_under_the_empty_state_too(
     # The catalog was fine, so the status is NOT downgraded to unavailable.
     assert summary["working_set"]["projection_status"] == "no_uncompressed_chunk"
     assert summary["working_set"]["home_free_bytes"] is None
+    # Round-4: the guard's own comment said the status "stays `ok`", which is
+    # the single-status claim this test exists to refute — a maintainer reading
+    # it would narrow the branch back to `ok` and restore the fail-open.
+    source = (Path(__file__).resolve().parents[1] / "scripts" / "node27_resource_governance.py").read_text(
+        encoding="utf-8"
+    )
+    assert "`projection_status` stays `ok`" not in source
+    assert "(`ok` or `no_uncompressed_chunk`)" in source
 
 
 def test_scenario_watermark_unavailable_is_critical() -> None:
@@ -1691,6 +1699,95 @@ def test_a_blocked_timescale_block_still_leaves_an_unavailable_working_set(
     assert _codes({"postgres": {"status": "ok"}, "working_set": result["working_set"]})[
         "WORKING_SET_UNAVAILABLE"
     ] == "critical"
+
+
+def test_the_runbook_home_free_line_pins_point_at_the_real_code() -> None:
+    """Round-4: three of these numbers were one line stale.
+
+    §8's "`/home` has no critical tier" block cites exact line numbers so an
+    operator can check the claim without trusting the prose. A line pin that
+    drifts is worse than no pin, and it drifts on any insert above it — so the
+    numbers are read OUT of the runbook and checked against the file here,
+    which is the only way this stays true without anybody remembering to look.
+    """
+    root = Path(__file__).resolve().parents[1]
+    runbook = (root / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    flat = " ".join(runbook.split())
+    match = re.search(
+        r"`HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance\.py:(\d+)` "
+        r"\(threshold\), `:(\d+)` \(comparison\), `:(\d+)` \(the code literal\)",
+        flat,
+    )
+    assert match is not None, "the §8 /home line-pin sentence changed shape"
+    threshold_line, comparison_line, literal_line = (int(group) for group in match.groups())
+    lines = (root / "scripts" / "node27_resource_governance.py").read_text(encoding="utf-8").splitlines()
+    assert "home_free_warn_bytes: int" in lines[threshold_line - 1], lines[threshold_line - 1]
+    assert "thresholds.home_free_warn_bytes" in lines[comparison_line - 1], lines[comparison_line - 1]
+    assert '"code": "HOME_FREE_BELOW_WARNING"' in lines[literal_line - 1], lines[literal_line - 1]
+
+
+def test_the_collection_connect_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#1985 round-4 (decision 21's rationale, decision 23's lane).
+
+    `nhms-node27-resource-governance.service` is a oneshot with
+    `TimeoutStartSec=0`, so nothing outside this call bounds it: an unbounded
+    `psycopg2.connect` against a wedged host would hold the unit in
+    `activating` and every later timer tick would be skipped, leaving the
+    capacity guard off without a single failure to show for it. The kwarg is
+    asserted by VALUE against the module constant so a stray `connect_timeout`
+    of, say, 300 cannot pass this test.
+    """
+    recorded: dict[str, object] = {}
+
+    class _Connection:
+        autocommit = False
+
+        def cursor(self) -> _FakeCursor:
+            raise AssertionError("this test stops at the connect")
+
+        def close(self) -> None:
+            return None
+
+    def _connect(*args: object, **kwargs: object) -> _Connection:
+        recorded.update(kwargs)
+        recorded["args"] = args
+        return _Connection()
+
+    fake_psycopg2 = types.SimpleNamespace(
+        connect=_connect,
+        extras=types.SimpleNamespace(RealDictCursor=object),
+    )
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+    monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_psycopg2.extras)
+    monkeypatch.setattr(
+        collection, "fetch_display_watermark", lambda _url: datetime(2026, 9, 1, tzinfo=UTC)
+    )
+
+    result = collection.collect_postgres("postgresql://ro@127.0.0.1/nhms")
+
+    # The cursor stub refuses to work, so the tick reports itself blocked --
+    # what matters here is the kwargs the connect was given.
+    assert result["status"] == "blocked"
+    assert recorded["connect_timeout"] == collection._CONNECT_TIMEOUT_SECONDS == 10
+    # The DSN still travels positionally; this pass did not rewrite the call.
+    assert recorded["args"] == ("postgresql://ro@127.0.0.1/nhms",)
+
+
+def test_the_collection_connect_timeout_mirrors_both_lifecycle_runners() -> None:
+    """One number, three lanes: a divergence here is a silent policy fork.
+
+    The retention suite owns the runner-to-runner half of this mirror; this
+    assertion is the collection module's own end of it, so the constant cannot
+    be re-tuned in one lane alone.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for relative in (
+        "scripts/node27_timeseries_compression.py",
+        "scripts/node27_timeseries_retention.py",
+    ):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "_CONNECT_TIMEOUT_SECONDS = 10" in source, relative
+    assert collection._CONNECT_TIMEOUT_SECONDS == 10
 
 
 def test_an_unavailable_working_set_pages_through_main_with_a_non_zero_exit(
