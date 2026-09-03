@@ -11587,11 +11587,24 @@ def test_cold_residency_target_owner_rule_is_load_not_decoration(
 #
 # Every EXPECTED value below comes from the TRACKED oracle
 # `tests/fixtures/qhh_bootstrap_partition_oracle.json`, which was generated from the frozen
-# ignored baseline capture at `9785e52d` and NEVER from the partitioned tree, or from another
-# independent tracked authority (`docs/bugs.md` for the historical BUG-008 command, the
-# baseline commit for every "unchanged" proof, this change's own design for the frozen
-# digest values). The partitioned tree supplies OBSERVED values only, so no guard here can be
-# satisfied by re-reading the thing it is supposed to check.
+# ignored baseline capture at the SOURCE baseline `57ddc545` and NEVER from the partitioned
+# tree, or from another independent tracked authority (`docs/bugs.md` for the historical
+# BUG-008 command, the baseline commit for every "unchanged" proof, this change's own
+# design for the frozen digest values). The partitioned tree supplies OBSERVED values only,
+# so no guard here can be satisfied by re-reading the thing it is supposed to check.
+#
+# TWO baselines, two roles (Phase 6 semantics):
+# * SOURCE baseline / partition-input commit `57ddc545…` — the frozen source commit: the
+#   QHH monolith source, every per-definition source/AST digest, the node/marker/
+#   monkeypatch inventory, the selector owner rule and the CI database baseline all come
+#   from this single frozen Git commit (the last relevant input snapshot this partition
+#   used, already carrying #1765's scoped `with monkeypatch.context() as patch:` body).
+# * GUARD-PROVENANCE baseline `9785e52d…` (issue start) — its `.large-file-guard.json`
+#   blob digest is frozen provenance ONLY. The current guard is allowed to evolve upstream
+#   (#1945 added exclusions after the frozen provenance commit), so guard assertions must
+#   never read through the source-baseline helper; they fetch the provenance blob from the
+#   guard-provenance commit directly. The working-tree guard digest is deliberately not
+#   frozen anywhere: it moves with legitimate upstream work and nothing asserts it.
 #
 # Staging dependency: the tree-derived helpers below go through `git ls-files`, so the four
 # new QHH files must be at least intent-to-added (`git add -N`) for these guards to see them
@@ -11608,11 +11621,18 @@ QHH_PARTITION_SCHEDULER_COMPAT_DOC = "docs/governance/SCHEDULER_COMPATIBILITY_IN
 QHH_PARTITION_FIXTURE_SYMBOL = "qhh_scheduler_canonical_readiness"
 QHH_PARTITION_FIXTURE_PIN = "_QHH_SCHEDULER_REQUESTED_FIXTURES"
 QHH_PARTITION_SCHEDULER_FACADE = "_MetStoreCanonicalReadinessProvider"
-QHH_PARTITION_BASELINE_SHA = "9785e52d541aba71845316da3a9c5b9011749644"
-QHH_PARTITION_CONTRACT_SHA = "5055f21cdc2fdf4c8cd7c52769e6dbc5f4382e4b2d02744f3c6f6d8e0e503d83"
-# The baseline source blob's SHA-256, frozen independently of the tracked oracle: a
+# The SOURCE baseline / partition-input commit (frozen). Monolith source, per-definition
+# source/AST digests, node/marker/monkeypatch inventory, selector owner rule and CI
+# database baseline all come from this single frozen Git commit — the last relevant input
+# snapshot this partition used.
+QHH_PARTITION_SOURCE_BASELINE_SHA = "57ddc54501322728f518b776f48d14317a479d14"
+# The GUARD-PROVENANCE baseline (issue start). ONLY its `.large-file-guard.json` blob
+# digest is frozen provenance; the guard itself may legally evolve upstream.
+QHH_PARTITION_GUARD_PROVENANCE_BASELINE_SHA = "9785e52d541aba71845316da3a9c5b9011749644"
+QHH_PARTITION_CONTRACT_SHA = "084b1677f7a45eaf9a813f2f6f5bce1e1a8e6cc21c88f40c53675783317f2257"
+# The SOURCE baseline blob's SHA-256, frozen independently of the tracked oracle: a
 # regenerated capture must record exactly this blob, and the blob itself must hash to it.
-QHH_PARTITION_BASELINE_SOURCE_SHA256 = "e94c0ebc36055c8b80131c6d92b9511ee007712303d632bd59985b1659d08f2f"
+QHH_PARTITION_BASELINE_SOURCE_SHA256 = "015334d7a7fd2cc70deec2ec191452edbca45ecce34ef7feb45db787b90d1603"
 # The baseline digest values this change pins. Independent source of truth: the change
 # design/spec text and this frozen table, not anything derived from the tree or from the
 # oracle's own rows at runtime (the per-row re-derivation below is a consistency check, not
@@ -11622,8 +11642,8 @@ QHH_PARTITION_FROZEN_DIGESTS: dict[str, str] = {
     "suffix": "896acb7934114ed26a4b749398131526e26651b52310c88b9477e34f49cd0c86",
     "integration_suffix": "746147ebe8ab8023183d1986074d305ceb61ac8c1204e4c811db8d172cc82ef1",
     "owner_map": "baacfa8fc15194a81c8061863c279df0bbbf90686c5997d4f2f3e5eb29ebd9b6",
-    "definition": "5a47654bee9a2f17eb60eedc61497b339cbd49b4c4ac029782d5468456266331",
-    "ast": "53bc34b026195e0bf51aa03300c2c616be78bd52dbd2ce9e2c1803bf8ee6fef0",
+    "definition": "fc713a13b90a2ff05d2bdd7c8ede192682fffc52a31e775dd708c8e3b84ddee2",
+    "ast": "7c971e5ee53ea0f8b873a561768fb21637b701adf79c1767d76bd876f40c7c74",
     "helper_inventory": "4759039c74f5cad4d57347dee0eae51730f8c33fb9a5eb80195117848c1b2446",
     "helper_source": "a99db190c96c8a2d80dc2c99b2be585643fbbeef5c7967f769982bc102de6446",
 }
@@ -11636,9 +11656,11 @@ QHH_PARTITION_RESCUED_HYPOTHESIS = "tests/test_qhh_production_bootstrap_integrat
 # `tests/test_<module>.py` derivation. That is what makes the three per-edge REDs below
 # deletions of a load-bearing edge rather than deletions of a shadowed duplicate.
 QHH_PARTITION_OWNER_PROBE = "workers/model_registry/validator.py"
-# The `workers/model_registry/**` rule content at the baseline commit, transcribed from
-# `git show 9785e52d:scripts/select_ci_tests.py` — 13 targets, one of them the historical
-# monolith literal. #1948 must expand that literal to three and drop nothing.
+# The `workers/model_registry/**` rule content at the SOURCE baseline commit, transcribed
+# from `git show 57ddc545:scripts/select_ci_tests.py` (star-expansions resolved; the
+# persisted tuple is the resolved form — same 19 targets as the issue-start baseline,
+# because #1943's journal suites joined OTHER rules, not this one, in between). #1948 must
+# expand the single monolith literal to three and drop nothing.
 QHH_PARTITION_OWNER_RULE_AT_BASELINE: tuple[str, ...] = (
     "tests/test_basins_discovery.py",
     "tests/test_basins_migration_report.py",
@@ -11856,8 +11878,50 @@ def _qhh_marked_test_names(path: str, marker: str) -> set[str]:
     }
 
 
+def _qhh_declares_monkeypatch_fixture(node: ast.FunctionDef) -> bool:
+    """Whether ``node`` declares the pytest `monkeypatch` fixture as a named argument.
+
+    Only a real fixture argument (posonly/args/kwonly) makes ``monkeypatch`` a pytest
+    patcher in this function; a local object that merely happens to be named
+    ``monkeypatch`` is NOT a patcher.
+    """
+    return "monkeypatch" in {
+        arg.arg for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
+    }
+
+
+def _qhh_monkeypatch_patchers(node: ast.FunctionDef) -> set[str]:
+    """The only names in ``node`` that may act as pytest monkeypatch patchers.
+
+    Requires the `monkeypatch` fixture to be a declared argument first; only then is
+    ``monkeypatch`` a patcher, and so is any alias explicitly bound by
+    ``with monkeypatch.context() as <alias>:`` (#1765's shape). Nothing else — an
+    arbitrary object's ``.setattr`` must never count as a monkeypatch target, and a
+    same-named local object without the fixture argument is not a patcher either. The
+    pure-AST regression below proves all four cases without leaning on the corpus.
+    """
+    if not _qhh_declares_monkeypatch_fixture(node):
+        return set()
+    names = {"monkeypatch"}
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.With):
+            continue
+        for item in sub.items:
+            if (
+                isinstance(item.context_expr, ast.Call)
+                and isinstance(item.context_expr.func, ast.Attribute)
+                and item.context_expr.func.attr == "context"
+                and isinstance(item.context_expr.func.value, ast.Name)
+                and item.context_expr.func.value.id == "monkeypatch"
+                and isinstance(item.optional_vars, ast.Name)
+            ):
+                names.add(item.optional_vars.id)
+    return names
+
+
 def _qhh_monkeypatch_targets(node: ast.FunctionDef) -> list[str]:
     result: list[str] = []
+    patchers = _qhh_monkeypatch_patchers(node)
     for call in (candidate for candidate in ast.walk(node) if isinstance(candidate, ast.Call)):
         if not isinstance(call.func, ast.Attribute) or call.func.attr not in {
             "setattr",
@@ -11866,7 +11930,7 @@ def _qhh_monkeypatch_targets(node: ast.FunctionDef) -> list[str]:
             "chdir",
         }:
             continue
-        if not isinstance(call.func.value, ast.Name) or call.func.value.id != "monkeypatch":
+        if not isinstance(call.func.value, ast.Name) or call.func.value.id not in patchers:
             continue
         result.append(f"{call.func.attr}({', '.join(ast.unparse(argument) for argument in call.args[:2])})")
     return sorted(result)
@@ -12077,12 +12141,26 @@ def _qhh_git_stdout(*arguments: str) -> str:
     return completed.stdout
 
 
-def _qhh_baseline_blob(path: str) -> bytes:
-    """Raw bytes of ``path`` at the #1948 baseline commit (``git show``, no text re-decode)."""
-    completed = subprocess.run(
-        ["git", "show", f"{QHH_PARTITION_BASELINE_SHA}:{path}"], capture_output=True, check=True
-    )
+def _qhh_blob_at(sha: str, path: str) -> bytes:
+    """Raw bytes of ``path`` at ``sha`` (``git show``, no text re-decode)."""
+    completed = subprocess.run(["git", "show", f"{sha}:{path}"], capture_output=True, check=True)
     return completed.stdout
+
+
+def _qhh_baseline_blob(path: str) -> bytes:
+    """Raw bytes of ``path`` at the SOURCE baseline commit (``git show``, no text re-decode)."""
+    return _qhh_blob_at(QHH_PARTITION_SOURCE_BASELINE_SHA, path)
+
+
+def _qhh_guard_provenance_blob(path: str) -> bytes:
+    """Raw bytes of ``path`` at the GUARD-PROVENANCE baseline commit.
+
+    The guard assertion must read the frozen digest from the guard-provenance baseline
+    directly, NEVER through ``_qhh_baseline_blob``: the current guard and the source
+    baseline both differ from the issue-start blob upstream, so the source-baseline helper
+    would report a digest the guard-provenance contract does not freeze.
+    """
+    return _qhh_blob_at(QHH_PARTITION_GUARD_PROVENANCE_BASELINE_SHA, path)
 
 
 def _qhh_assert_baseline_source_anchor(captured: dict[str, Any]) -> None:
@@ -12120,13 +12198,17 @@ def test_qhh_partition_oracle_is_tracked_and_self_contained() -> None:
     assert QHH_PARTITION_ORACLE_PATH in tracked_fixtures, f"{QHH_PARTITION_ORACLE_PATH} is not version-controlled"
     captured = _qhh_partition_oracle()["captured_from"]
     assert captured["path"] == _qhh_partitions()[0]
-    assert captured["baseline_sha"] == QHH_PARTITION_BASELINE_SHA
-    assert captured["lines"] == 2278
+    # Two baselines, two roles: the oracle's capture records BOTH commits and their
+    # meanings, so the guard provenance cannot silently alias the source baseline.
+    assert captured["baseline_sha"] == QHH_PARTITION_SOURCE_BASELINE_SHA
+    assert captured["guard_provenance_baseline_sha"] == QHH_PARTITION_GUARD_PROVENANCE_BASELINE_SHA
+    assert captured["lines"] == 2285
     assert captured["contract_sha256"] == QHH_PARTITION_CONTRACT_SHA
-    # The recorded source SHA is anchored to the FROZEN literal AND to the actual baseline
-    # blob: `git show` of the pinned baseline commit must produce bytes whose SHA-256 is both
-    # the recorded value and the literal. Format-checking alone would accept a regenerated
-    # oracle whose source SHA was rewritten to match a different baseline blob.
+    # The recorded source SHA is anchored to the FROZEN literal AND to the actual source
+    # baseline blob: `git show` of the pinned source baseline commit must produce bytes
+    # whose SHA-256 is both the recorded value and the literal. Format-checking alone would
+    # accept a regenerated oracle whose source SHA was rewritten to match a different
+    # baseline blob.
     _qhh_assert_baseline_source_anchor(captured)
     # The pinned baseline must resolve in this checkout too, or the provenance is fiction.
     assert len(_qhh_git_stdout("rev-parse", f"{captured['baseline_sha']}^{{commit}}").strip()) == 40
@@ -12400,6 +12482,54 @@ def test_qhh_partition_preserves_every_frozen_decorator_marker_and_monkeypatch_t
     assert checked == 50, checked
 
 
+def test_qhh_partition_monkeypatch_extractor_proves_all_four_cases_pure_ast() -> None:
+    # Pure-AST regression for the monkeypatch-target extractor, independent of whatever
+    # the QHH corpus happens to contain. Four cases, all constructed:
+    #   1. a declared `monkeypatch` fixture's direct setattr/setenv calls ARE collected;
+    #   2. the `with monkeypatch.context() as patch:` alias's setattr calls ARE collected;
+    #   3. an arbitrary object's `.setattr` is NOT collected;
+    #   4. a function WITHOUT the `monkeypatch` fixture argument but with a same-named
+    #      local object's `.setattr` is NOT collected (name alone is not a patcher).
+    direct = ast.parse(
+        "def f(monkeypatch: pytest.MonkeyPatch) -> None:\n"
+        "    monkeypatch.setattr(qhh_bootstrap, 'a', 1)\n"
+        "    monkeypatch.setenv('X', '1')\n"
+        "    qhh_bootstrap.other.setattr('z', 2)\n"
+    ).body[0]
+    assert _qhh_monkeypatch_patchers(direct) == {"monkeypatch"}
+    assert _qhh_monkeypatch_targets(direct) == [
+        "setattr(qhh_bootstrap, 'a')",
+        "setenv('X', '1')",
+    ]
+    scoped = ast.parse(
+        "def f(monkeypatch: pytest.MonkeyPatch) -> None:\n"
+        "    with monkeypatch.context() as patch:\n"
+        "        patch.setattr(qhh_bootstrap.os, 'scandir', fake)\n"
+        "        patch.setattr(qhh_bootstrap, 'stat_no_follow', fake2)\n"
+        "    monkeypatch.delenv('DATABASE_URL')\n"
+    ).body[0]
+    assert _qhh_monkeypatch_patchers(scoped) == {"patch", "monkeypatch"}
+    assert _qhh_monkeypatch_targets(scoped) == [
+        "delenv('DATABASE_URL')",
+        "setattr(qhh_bootstrap, 'stat_no_follow')",
+        "setattr(qhh_bootstrap.os, 'scandir')",
+    ]
+    arbitrary = ast.parse(
+        "def f(monkeypatch: pytest.MonkeyPatch) -> None:\n"
+        "    obj.setattr('plain', 1)\n"
+        "    obj.setenv('no', '1')\n"
+    ).body[0]
+    assert _qhh_monkeypatch_patchers(arbitrary) == {"monkeypatch"}
+    assert _qhh_monkeypatch_targets(arbitrary) == []
+    no_fixture = ast.parse(
+        "def f() -> None:\n"
+        "    monkeypatch = FakePatcher()\n"
+        "    monkeypatch.setattr(qhh_bootstrap, 'local', 1)\n"
+    ).body[0]
+    assert _qhh_monkeypatch_patchers(no_fixture) == set()
+    assert _qhh_monkeypatch_targets(no_fixture) == []
+
+
 def test_qhh_partition_suites_import_exactly_the_helper_support_they_use() -> None:
     # Dead routes cut both ways: an import nobody uses is a fabricated consumer edge (the
     # #1913 temptation this clause blocks), and a used symbol nobody imports is a NameError.
@@ -12612,8 +12742,12 @@ def test_qhh_partition_owner_rule_permits_an_unrelated_future_target(
 
 
 def _qhh_owner_rule_tests_at_baseline() -> tuple[str, ...]:
-    """The `workers/model_registry/**` rule's targets at the baseline commit."""
-    source = _qhh_git_stdout("show", f"{QHH_PARTITION_BASELINE_SHA}:scripts/select_ci_tests.py")
+    """The `workers/model_registry/**` rule's targets at the SOURCE baseline commit.
+
+    The owner rule is source-baseline provenance; the guard-provenance baseline is NOT
+    used here (the upstream select_ci_tests.py legitimately changed between the two).
+    """
+    source = _qhh_git_stdout("show", f"{QHH_PARTITION_SOURCE_BASELINE_SHA}:scripts/select_ci_tests.py")
     tree = ast.parse(source, filename="scripts/select_ci_tests.py")
     rules = _qhh_literal_rule_rows(tree)
     matches = [tests for pattern, tests in rules if pattern == _qhh_partition_oracle()["selector"]["owner_route"]]
@@ -13278,6 +13412,27 @@ def test_qhh_partition_execution_semantics_match_the_frozen_baseline() -> None:
         assert recorded["post_partition"][name]["summary"].startswith(summary), recorded["post_partition"][name]
 
 
+def test_qhh_partition_summaries_are_duration_free_and_reproducible() -> None:
+    # Anti-regression (Phase 6 follow-up): the oracle must record the counts clause ONLY,
+    # never the wall-clock duration (`in 1.16s`). A duration would make the contract SHA
+    # and oracle byte digest change from run to run, so any summary matching the pytest
+    # duration shape reddens here. The requirement count prefixes stay asserted above.
+    oracle = _qhh_partition_oracle()
+    summaries_with_duration = []
+    for scope in ("baseline", "post_partition"):
+        for name, row in oracle["executions"][scope].items():
+            if not isinstance(row, dict) or "summary" not in row:
+                continue
+            summary = str(row["summary"])
+            assert summary, (scope, name)
+            assert re.fullmatch(r"(?:\d+ [\w-]+, )*\d+ (?:passed|failed|skipped|error|deselected)[\w, ]*", summary), (
+                f"{scope}.{name} summary is not a bare counts clause: {summary!r}"
+            )
+            if re.search(r" in [0-9.]+s$", summary):
+                summaries_with_duration.append(f"{scope}.{name}: {summary!r}")
+    assert not summaries_with_duration, f"summaries leaked pytest durations: {summaries_with_duration}"
+
+
 def test_qhh_partition_nested_pytest_ignores_parent_integration_opt_in(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -13358,9 +13513,20 @@ def test_qhh_partition_keeps_the_structural_guard_contract_and_out_of_the_change
     guard = json.loads(Path(guard_path).read_text(encoding="utf-8"))
 
     assert oracle["guard"]["sha256"] == "5c06fad8ba8f488d8bfc836e747cd7af642232a880bec25ae132e1bd17ab87ad"
-    assert hashlib.sha256(_qhh_baseline_blob(guard_path)).hexdigest() == oracle["guard"]["sha256"], (
-        "the guard blob at the #1948 baseline commit no longer matches the frozen digest"
+    # The frozen digest is GUARD-PROVENANCE provenance, read from the guard-provenance
+    # baseline DIRECTLY. The source-baseline blob of `.large-file-guard.json` differs
+    # (upstream #1945 added exclusions after the branch point), so reading through
+    # `_qhh_baseline_blob` would report a digest nothing freezes.
+    assert oracle["guard"]["provenance_baseline_sha"] == QHH_PARTITION_GUARD_PROVENANCE_BASELINE_SHA
+    assert oracle["guard"]["provenance_baseline_sha"] != QHH_PARTITION_SOURCE_BASELINE_SHA, (
+        "the guard provenance must not alias the source baseline"
     )
+    assert hashlib.sha256(_qhh_guard_provenance_blob(guard_path)).hexdigest() == oracle["guard"]["sha256"], (
+        "the guard blob at the guard-provenance baseline commit no longer matches the frozen digest"
+    )
+    assert hashlib.sha256(_qhh_blob_at(QHH_PARTITION_SOURCE_BASELINE_SHA, guard_path)).hexdigest() != (
+        oracle["guard"]["sha256"]
+    ), "the source-baseline guard blob must differ from the frozen provenance digest"
     changed = _qhh_partition_scope_change_set()
     if changed is not None:
         assert guard_path not in set(changed), "the #1948 change set moved the structural guard"

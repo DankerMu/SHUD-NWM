@@ -1,11 +1,15 @@
 ## Why
 
 Issue #1913 must retarget registry-helper imports in
-`tests/test_qhh_production_bootstrap.py`, but the file is 2,278 lines on current
-`master`, is not excluded from the 1,000-line commit guard, and the wired hook rejects
-that required edit. Issue #1948 is the pure-structure prerequisite: partition the existing
-QHH bootstrap corpus without changing a test oracle, production behavior, the guard or
-any #1913 registry-import implementation.
+`tests/test_qhh_production_bootstrap.py`, but the file is over the 1,000-line commit
+guard, is not excluded, and the wired hook rejects that required edit. At the issue start
+(`9785e52d541aba71845316da3a9c5b9011749644`) the monolith was 2,278 lines; at the frozen
+source / partition-input commit this change captures from
+(`57ddc54501322728f518b776f48d14317a479d14`, which already carries #1765's scoped
+monkeypatch-context change) it is 2,285 lines. Both exceed the guard. Issue #1948 is the
+pure-structure prerequisite: partition the existing QHH bootstrap corpus without changing
+a test oracle, production behavior, the guard or any #1913 registry-import
+implementation.
 
 ## What Changes
 

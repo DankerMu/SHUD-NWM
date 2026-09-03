@@ -4,7 +4,13 @@
   unique nodes, full-node digest
   `baa0c8e8027cff175e61abd9f0f273a41e226cc1a8d85fdfd20e35d0130333bc`, stable
   suffix digest `896acb7934114ed26a4b749398131526e26651b52310c88b9477e34f49cd0c86`,
-  50 test definitions, 12 support functions and four private constants.
+  50 test definitions, 12 support functions and four private constants. The persisted
+  source/partition-input baseline is `57ddc54501322728f518b776f48d14317a479d14`
+  (monolith 2,285 lines / 89,160 bytes, source SHA
+  `015334d7a7fd2cc70deec2ec191452edbca45ecce34ef7feb45db787b90d1603`); the frozen
+  guard digest is guard-PROVENANCE only, from issue start
+  `9785e52d541aba71845316da3a9c5b9011749644`, and may legally diverge from the source
+  baseline guard blob.
 - [x] 1.2 Record baseline default execution (55 passed, 11 skipped), non-integration
   execution (55 passed, 11 deselected), local integration collection (11 skipped) and
   BUG-008 three-file execution (eight passed); freeze decorator/parameter/marker/
@@ -59,11 +65,17 @@
   and the exact pending changeset passes the ordinary wired hook.
 - [x] 3.7 Add tracked self-contained
   `tests/fixtures/qhh_bootstrap_partition_oracle.json` with schema
-  `qhh-bootstrap-partition-oracle/v1`; pin baseline SHA `9785e52d541aba71845316da3a9c5b9011749644`,
-  source SHA `e94c0ebc36055c8b80131c6d92b9511ee007712303d632bd59985b1659d08f2f`,
-  capture SHA `5055f21cdc2fdf4c8cd7c52769e6dbc5f4382e4b2d02744f3c6f6d8e0e503d83`
-  and 2,278 lines, plus explicit empty integration sets for A/B and exact C/D database
-  authority. Prove the
+  `qhh-bootstrap-partition-oracle/v1`; pin the frozen source / partition-input commit
+  `57ddc54501322728f518b776f48d14317a479d14` (the last relevant input snapshot this
+  partition used, already carrying #1765's scoped monkeypatch context), source SHA
+  `015334d7a7fd2cc70deec2ec191452edbca45ecce34ef7feb45db787b90d1603`,
+  capture SHA `084b1677f7a45eaf9a813f2f6f5bce1e1a8e6cc21c88f40c53675783317f2257`
+  and 2,285 lines. Record the two-baseline split explicitly: source/partition-input
+  baseline = `57ddc545…`; guard-provenance baseline = issue start
+  `9785e52d541aba71845316da3a9c5b9011749644` whose `.large-file-guard.json` digest
+  remains `5c06fad8ba8f488d8bfc836e747cd7af642232a880bec25ae132e1bd17ab87ad`
+  (provenance only; the guard may evolve upstream). Plus explicit empty integration sets
+  for A/B and exact C/D database authority. Prove the
   oracle itself is tracked and does not depend on ignored `.workplans/` state in another
   checkout.
 

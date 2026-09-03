@@ -6,9 +6,14 @@ real-database trigger can silently become incomplete during a large physical mov
 profile: NHMS. Real-database evidence is routed only to node-27's local PostgreSQL
 `:55432`; node-22 is DB-free and not applicable.
 
-At baseline `9785e52d541aba71845316da3a9c5b9011749644`,
-`tests/test_qhh_production_bootstrap.py` is 2,278 lines / 88,774 bytes with source digest
-`e94c0ebc36055c8b80131c6d92b9511ee007712303d632bd59985b1659d08f2f`.
+At the frozen source / partition-input commit
+`57ddc54501322728f518b776f48d14317a479d14` (the last relevant input snapshot this
+partition used; upstream master has advanced since and this snapshot remains frozen as the
+capture authority — it already carries #1765's scoped
+`with monkeypatch.context() as patch:` body in
+`test_bounded_discovery_entry_limit_streams_without_materializing_directory`),
+`tests/test_qhh_production_bootstrap.py` is 2,285 lines / 89,160 bytes with source digest
+`015334d7a7fd2cc70deec2ec191452edbca45ecce34ef7feb45db787b90d1603`.
 It defines 50 tests and 12 support functions, carries four scheduler-readiness constants,
 and collects 66 unique nodes. The sorted full-node digest is
 `baa0c8e8027cff175e61abd9f0f273a41e226cc1a8d85fdfd20e35d0130333bc`;
@@ -19,10 +24,21 @@ Nine integration definitions collect eleven suffixes with digest
 
 The ignored deterministic baseline authority is
 `.workplans/issue-1948/contract.json`, SHA-256
-`5055f21cdc2fdf4c8cd7c52769e6dbc5f4382e4b2d02744f3c6f6d8e0e503d83`.
+`084b1677f7a45eaf9a813f2f6f5bce1e1a8e6cc21c88f40c53675783317f2257`.
 It binds every test function to one frozen owner and records exact source/AST digests,
 arguments, decorators, markers, monkeypatch targets, helper inventory and execution
 summaries.
+
+Two baselines, two roles. The SOURCE baseline / partition-input commit is
+`57ddc545…`: monolith source, every per-definition source/AST digest, the node/marker/
+monkeypatch inventory, the selector owner rule and the CI database baseline all come from
+this frozen snapshot. The GUARD-PROVENANCE baseline is the issue start `9785e52d…`: only its
+`.large-file-guard.json` blob digest (SHA-256
+`5c06fad8ba8f488d8bfc836e747cd7af642232a880bec25ae132e1bd17ab87ad`) is frozen
+provenance. The current guard is allowed to evolve upstream (#1945 added
+`retry.py`/`pipeline.py` exclusions after the branch point), so the guard assertion reads
+the provenance blob from the guard-provenance commit directly and never through the
+source-baseline helper.
 
 ## Goals / Non-Goals
 
@@ -103,12 +119,19 @@ Moved module prefixes necessarily change. Stable collection identity is every no
 after the first `::`; all 66 sorted unique suffixes remain identical. Every one of the 50
 baseline test definitions and 16 helper members is compared by exact source fragment and
 normalized AST. Arguments, decorators, markers, parameter values/IDs, fixtures, assertions,
-skips and monkeypatch targets therefore remain unchanged. Imports/header ownership are the
-only permitted differences. A tracked self-contained oracle is generated from the ignored
-capture at baseline SHA—not from the partitioned tree—and records source/capture digests,
-explicit empty A/B integration sets and the exact C/D database authority. Checkout tests
-read that tracked oracle and prove it is version-controlled; ignored capture files are an
-optional provenance cross-check, never a runtime requirement.
+skips and monkeypatch targets therefore remain unchanged. The monkeypatch-target extractor
+recognizes only the pytest `monkeypatch` fixture and any alias explicitly bound by
+`with monkeypatch.context() as <alias>:` as patchers, so #1765's scoped form (a legal
+upstream change on the source baseline) keeps its inventory
+`setattr(qhh_bootstrap, 'stat_no_follow')` / `setattr(qhh_bootstrap.os, 'scandir')` —
+never generalized to arbitrary objects' `.setattr` and never dropped. Imports/header
+ownership are the only permitted differences. A tracked self-contained oracle is generated
+from the ignored capture at the SOURCE baseline SHA—not from the partitioned tree—and
+records source/capture digests, explicit empty A/B integration sets and the exact C/D
+database authority, plus the two-baseline split with the guard-provenance digest read from
+the guard-provenance commit. Checkout tests read that tracked oracle and prove it is
+version-controlled; ignored capture files are an optional provenance cross-check, never a
+runtime requirement.
 
 Default execution remains 55 passed / 11 skipped; `-m "not integration"` remains 55 passed
 / 11 deselected. Local `-m integration` still collects eleven expected skips until the

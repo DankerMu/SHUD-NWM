@@ -1,11 +1,14 @@
 {
     "captured_from": {
-      "baseline_sha": "9785e52d541aba71845316da3a9c5b9011749644",
+      "baseline_role": "frozen source / partition-input commit: monolith source, per-definition source/AST digests, node/marker/monkeypatch inventory, selector owner rule and CI database baseline all come from this commit",
+      "baseline_sha": "57ddc54501322728f518b776f48d14317a479d14",
       "capture_authority": ".workplans/issue-1948/contract.json (ignored; provenance only)",
-      "contract_sha256": "5055f21cdc2fdf4c8cd7c52769e6dbc5f4382e4b2d02744f3c6f6d8e0e503d83",
-      "lines": 2278,
+      "contract_sha256": "084b1677f7a45eaf9a813f2f6f5bce1e1a8e6cc21c88f40c53675783317f2257",
+      "guard_provenance_baseline_sha": "9785e52d541aba71845316da3a9c5b9011749644",
+      "guard_provenance_role": "issue-start baseline; its .large-file-guard.json blob digest is frozen provenance only. The current guard may legally evolve upstream, so the guard assertions must not read through the source baseline helper.",
+      "lines": 2285,
       "path": "tests/test_qhh_production_bootstrap.py",
-      "sha256": "e94c0ebc36055c8b80131c6d92b9511ee007712303d632bd59985b1659d08f2f"
+      "sha256": "015334d7a7fd2cc70deec2ec191452edbca45ecce34ef7feb45db787b90d1603"
   },
     "ci_database_authority": {
       "absent_literals": ["tests/test_qhh_production_bootstrap.py", "tests/test_qhh_production_bootstrap_state.py"],
@@ -91,37 +94,37 @@
   },
     "counts": {"database_authority_count": 32, "helper_count": 1, "integration_defs": 9, "integration_nodes": 11, "nodes": 66, "partition_count": 3, "support_functions": 12, "test_functions": 50},
     "digests": {
-      "ast": "53bc34b026195e0bf51aa03300c2c616be78bd52dbd2ce9e2c1803bf8ee6fef0",
-      "definition": "5a47654bee9a2f17eb60eedc61497b339cbd49b4c4ac029782d5468456266331",
+      "ast": "7c971e5ee53ea0f8b873a561768fb21637b701adf79c1767d76bd876f40c7c74",
+      "definition": "fc713a13b90a2ff05d2bdd7c8ede192682fffc52a31e775dd708c8e3b84ddee2",
       "full_node": "baa0c8e8027cff175e61abd9f0f273a41e226cc1a8d85fdfd20e35d0130333bc",
       "helper_inventory": "4759039c74f5cad4d57347dee0eae51730f8c33fb9a5eb80195117848c1b2446",
       "helper_source": "a99db190c96c8a2d80dc2c99b2be585643fbbeef5c7967f769982bc102de6446",
       "integration_suffix": "746147ebe8ab8023183d1986074d305ceb61ac8c1204e4c811db8d172cc82ef1",
-      "oracle": "623e227d7ae2dcd1bd2c332cdf95c7ed7053c5198b363faa80764162a9c74cca",
+      "oracle": "9c7f29646faad11d4d3122ef7ba16710d7b8b88b6cf222480e4b8c66e580f38a",
       "owner_map": "baacfa8fc15194a81c8061863c279df0bbbf90686c5997d4f2f3e5eb29ebd9b6",
       "suffix": "896acb7934114ed26a4b749398131526e26651b52310c88b9477e34f49cd0c86"
   },
     "executions": {
       "baseline": {
-        "bug008": {"returncode": 0, "summary": "8 passed, 2163 deselected in 0.55s"},
-        "default": {"returncode": 0, "summary": "55 passed, 11 skipped in 1.05s"},
-        "integration": {"returncode": 0, "summary": "11 skipped, 55 deselected in 0.31s"},
-        "not_integration": {"returncode": 0, "summary": "55 passed, 11 deselected in 1.09s"}
+        "bug008": {"returncode": 0, "summary": "8 passed, 2164 deselected"},
+        "default": {"returncode": 0, "summary": "55 passed, 11 skipped"},
+        "integration": {"returncode": 0, "summary": "11 skipped, 55 deselected"},
+        "not_integration": {"returncode": 0, "summary": "55 passed, 11 deselected"}
     },
       "post_partition": {
-        "bug008_command": {"returncode": 0, "summary": "8 passed, 2141 deselected in 0.57s"},
+        "bug008_command": {"returncode": 0, "summary": "8 passed, 2142 deselected"},
         "bug008_ownership": {"production_scheduler_owner": 1, "qhh_bootstrap_partition_A": 5, "registry_owner": 2},
         "collection": {"integration_nodes": 11, "nodes": 66, "unique_suffixes": 66},
-        "default": {"returncode": 0, "summary": "55 passed, 11 skipped in 1.03s"},
+        "default": {"returncode": 0, "summary": "55 passed, 11 skipped"},
         "helper_collection": {"nodes": 0, "returncode": 5},
-        "integration_only": {"returncode": 0, "summary": "11 skipped in 0.32s"},
-        "not_integration": {"returncode": 0, "summary": "55 passed, 11 deselected in 1.06s"}
+        "integration_only": {"returncode": 0, "summary": "11 skipped"},
+        "not_integration": {"returncode": 0, "summary": "55 passed, 11 deselected"}
     }
   },
     "guard": {
       "denied_contrast": {
-        "message": "large-file-guard: commit blocked — file(s) exceed 1000 lines: tests/test_qhh_production_bootstrap.py (2280 lines).",
-        "note": "The pre-partition denial recorded in issue #1948; the partition is what clears it.",
+        "message": "large-file-guard: commit blocked — file(s) exceed 1000 lines: tests/test_qhh_production_bootstrap.py (2285 lines).",
+        "note": "The pre-partition denial: the source-baseline monolith (2,285 lines) exceeds the 1,000-line limit; the partition is what clears it.",
         "observed_returncode": 2
     },
       "hook_acceptance": {
@@ -130,8 +133,9 @@
         "note": "Runs the wired PreToolUse guard against a temporary GIT_INDEX_FILE holding the exact #1948 changeset; the real Git index is never touched."
     },
       "max_lines": 1000,
-      "output_lines": {"tests/qhh_production_bootstrap_helpers.py": 262, "tests/test_qhh_production_bootstrap.py": 764, "tests/test_qhh_production_bootstrap_scheduler.py": 853, "tests/test_qhh_production_bootstrap_state.py": 468},
+      "output_lines": {"tests/qhh_production_bootstrap_helpers.py": 262, "tests/test_qhh_production_bootstrap.py": 771, "tests/test_qhh_production_bootstrap_scheduler.py": 853, "tests/test_qhh_production_bootstrap_state.py": 468},
       "path": ".large-file-guard.json",
+      "provenance_baseline_sha": "9785e52d541aba71845316da3a9c5b9011749644",
       "sha256": "5c06fad8ba8f488d8bfc836e747cd7af642232a880bec25ae132e1bd17ab87ad"
   },
     "helper_rows": {
@@ -537,12 +541,12 @@
     },
       "test_bounded_discovery_entry_limit_streams_without_materializing_directory": {
         "args": "tmp_path: Path, monkeypatch: pytest.MonkeyPatch",
-        "ast_sha256": "1dc97cd3eb4a8fa11e1efdc9b1211786e4b26b73d450ac79c44ccfb4cb3b8009",
+        "ast_sha256": "d62c8ac7c038aabd399639e2e8579a25fb1f1083535f152c16d6c1128bb23f37",
         "decorators": [],
         "markers": [],
         "monkeypatch_targets": ["setattr(qhh_bootstrap, 'stat_no_follow')", "setattr(qhh_bootstrap.os, 'scandir')"],
         "owner": "tests/test_qhh_production_bootstrap.py",
-        "source_sha256": "6d88b2d662c4cdcc2005a7f475f860388cdc929631d064bf7b2c6a0fa64de768"
+        "source_sha256": "2c0aa5e615860917b92dc0c7517a437d91500ae23e0a35e862490e319d95beb2"
     },
       "test_duplicate_active_preflight_does_not_match_source_inventory_checksum_only": {
         "args": "",
