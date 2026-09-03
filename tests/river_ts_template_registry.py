@@ -70,34 +70,13 @@ class TemplateEntry:
         so it names no table — the rename is a no-op on it and the structural
         check applies to the fragment alone.
     ``params``
-        ``positional`` (``%s``) or ``named`` (``%(name)s`` / ``:name``). Only
-        named templates may be passed to ``render_union_all``: duplicating a
-        positional template into two branches doubles the caller's tuple in an
-        order that depends on which aids each branch dropped.
+        ``positional`` (``%s``) or ``named`` (``%(name)s`` / ``:name``).
     ``expected_aids``
         how many transitional aid conjuncts the template carries after #1980's
         normalisation — the per-entry half of the 34/34 marker/aid census.
     ``mentions``
         canonical-table occurrences in the entry's own text, which the closure
         check sums per file.
-    ``union_safe`` / ``union_unsafe_reason``
-        whether a statement-level ``UNION ALL`` of this statement's two store
-        branches means the same thing as the statement itself, and — when it does
-        not — the one-line reason, read off THIS ENTRY'S CONSUMER.
-
-        DECLARED, never inferred (fixture decision 13). Whether a result
-        decomposes per store is not a property of the SQL text: ``SELECT DISTINCT
-        … ORDER BY … LIMIT`` computes a per-branch top-N that concatenates into
-        something that is not the global top-N, a single global aggregate row
-        becomes two partial rows, a statement whose driving relation is NOT the
-        fact table duplicates every driving row, and a ``.first()`` consumer
-        reads one row out of two branches' worth. The renderer cannot see any of
-        that, so it refuses a ``union_safe=False`` entry and says whose reason it
-        is. The combination those entries actually need is a union INSIDE a CTE,
-        which is designed by the wave-2 PR that has a caller for it — #1980 ships
-        the statement-level combinator only.
-
-        ``union_unsafe_reason`` is present iff ``union_safe`` is False.
     """
 
     key: str
@@ -107,8 +86,6 @@ class TemplateEntry:
     expected_aids: int
     mentions: int
     source: Callable[[], str]
-    union_safe: bool = True
-    union_unsafe_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -164,14 +141,6 @@ HYDRO_DISPLAY_ENTRIES: tuple[TemplateEntry, ...] = (
         expected_aids=3,
         mentions=1,
         source=_hydro_display_identity_probe,
-        union_safe=False,
-        union_unsafe_reason=(
-            "top-level LIMIT 1 existence probe consumed by .first() "
-            "(apps/api/routes/hydro_display.py:805, `if row is not None: return`): the statement returns at "
-            "most one row and a UNION ALL of two LIMIT-1 branches returns up to two, so the union is not "
-            "the statement's own LIMIT -- the equivalent cross-store form is one predicate with two EXISTS "
-            "arms, not two operands"
-        ),
     ),
 )
 
@@ -196,14 +165,6 @@ DISPLAY_COVERAGE_ENTRIES: tuple[TemplateEntry, ...] = (
         expected_aids=3,
         mentions=1,
         source=_display_coverage_refresh,
-        union_safe=False,
-        union_unsafe_reason=(
-            "data-modifying: WITH ... INSERT INTO hydro.run_display_coverage ... ON CONFLICT ... RETURNING "
-            "run_id, executed by `_refresh` at packages/common/display_coverage.py:738 -- the worker "
-            "`refresh_run_display_coverage` (:756) calls. A UNION "
-            "ALL operand has to be a read; duplicating this into two branches would run the upsert twice. "
-            "`kind` stays `statement` because the census counts statements, not union operands (decision 13)"
-        ),
     ),
 )
 
@@ -279,16 +240,6 @@ FORECAST_STORE_ENTRIES: tuple[TemplateEntry, ...] = (
         expected_aids=3,
         mentions=1,
         source=_latest_product_fallback,
-        union_safe=False,
-        union_unsafe_reason=(
-            "the fact table is not the driving relation: the read sits in the `river_sample_rows` CTE that "
-            "feeds `hydro_coverage`, and the outer query drives off `FROM candidate_runs cr` and reaches the "
-            "river side only through `LEFT JOIN station_coverage sc ... LEFT JOIN station_variable_coverage "
-            "svc ... LEFT JOIN hydro_coverage hc`, so a statement-level UNION ALL emits EVERY candidate_runs "
-            "row twice -- once per branch -- "
-            "whichever store its river rows live in. This is the case whose correct union sits inside the "
-            "CTE (retro round 3)"
-        ),
     ),
 )
 
@@ -409,14 +360,6 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         expected_aids=3,
         mentions=1,
         source=_tile_sql("hydro"),
-        union_safe=False,
-        union_unsafe_reason=(
-            "one GLOBAL aggregate row per branch: the statement's final SELECT reads scalar sub-selects out "
-            "of `source_identity_stats, source_stats, budget_stats, prefilter_stats` (ST_AsMVT plus "
-            "COUNT/SUM/MAX over the whole tile), and the consumer takes .mappings().first() "
-            "(apps/api/routes/hydro_display.py:514). Two branches produce two PARTIAL tiles and the consumer "
-            "reads one of them"
-        ),
     ),
     TemplateEntry(
         # One statement, three fact-table reads: the identity-existence probe and
@@ -428,13 +371,6 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         expected_aids=11,
         mentions=3,
         source=_tile_sql("hydro-national"),
-        union_safe=False,
-        union_unsafe_reason=(
-            "one GLOBAL aggregate row per branch, same consumer as the single-network tile "
-            "(apps/api/routes/hydro_display.py:514), and additionally a per-branch `DISTINCT ON "
-            "(mi.river_network_version_id)` latest-run selection and a per-branch segment `LIMIT` budget: "
-            "each branch would pick its own latest run and spend the whole budget"
-        ),
     ),
     TemplateEntry(
         key="mvt:valid_times_named_identity",
@@ -444,13 +380,6 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         expected_aids=3,
         mentions=1,
         source=_valid_times_branch(0),
-        union_safe=False,
-        union_unsafe_reason=(
-            "SELECT DISTINCT ... ORDER BY valid_time DESC LIMIT :limit -- a per-branch top-N. The union of "
-            "two branch top-Ns is neither globally distinct nor the global top-N, and the consumer slices "
-            "`formatted[:limit]` off the row order it was handed "
-            "(services/tiles/mvt.py:1668-1670, _valid_time_discovery)"
-        ),
     ),
     TemplateEntry(
         key="mvt:valid_times_any_identity",
@@ -460,13 +389,6 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         expected_aids=1,
         mentions=1,
         source=_valid_times_branch(1),
-        union_safe=False,
-        union_unsafe_reason=(
-            "SELECT DISTINCT ... ORDER BY valid_time DESC LIMIT :limit with no run filter at all, so both "
-            "branches really do return rows: the union is up to 2x:limit rows, not globally distinct and not "
-            "the global top-N, and the consumer slices `formatted[:limit]` "
-            "(services/tiles/mvt.py:1668-1670)"
-        ),
     ),
 )
 
