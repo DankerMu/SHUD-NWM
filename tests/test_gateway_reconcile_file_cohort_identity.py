@@ -763,12 +763,10 @@ def test_terminal_runtime_identity_uses_one_cycle_snapshot_from_reconcile_entry(
         source_id: str,
         cycle_time: datetime,
         model_ids: Any,
-        include_direct_jobs: bool = True,
     ) -> dict[str, Any]:
         calls["batch_snapshots"] += 1
         assert source_id == "gfs"
         assert cycle_time == datetime(2026, 7, 12, tzinfo=UTC)
-        assert include_direct_jobs is False
         requested = list(model_ids)
         assert len(requested) == member_count
         members = {str(member["model_id"]): member for member in identity["cohort_members"]}

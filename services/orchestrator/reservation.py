@@ -42,11 +42,13 @@ from services.orchestrator.persistence import (
 # sbatch actually accepted, by idempotency rather than a never-recorded job id.
 SLURM_COMMENT_PREFIX = "nhms_idem:"
 
-# An idempotency_key is built from stable identity tokens
-# (``source:cycle:basin:stage``). Restrict it to a safe charset so the value
-# stamped into a shell-adjacent ``--comment`` can never carry a pipe, newline,
-# or shell metacharacter. This makes "idempotency_key is clean" an explicit
-# guard rather than an implicit assumption.
+# An idempotency_key is built from stable identity tokens: production mints
+# ``run_id:stage[:suffix]`` in ``chain_runtime_utils._cycle_stage_idempotency_key``,
+# and the run id deterministically encodes source, cycle and basin cohort.
+# Restrict the key to a safe charset so the value stamped into a shell-adjacent
+# ``--comment`` can never carry a pipe, newline, or shell metacharacter. This
+# makes "idempotency_key is clean" an explicit guard rather than an implicit
+# assumption.
 IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9:._-]+$")
 
 
@@ -62,18 +64,6 @@ def validate_idempotency_key(idempotency_key: str) -> str:
             f"idempotency_key contains disallowed characters: {idempotency_key!r}"
         )
     return idempotency_key
-
-
-def candidate_idempotency_key(
-    *,
-    source_id: str,
-    cycle_id: str,
-    basin_id: str,
-    stage: str,
-) -> str:
-    """Stable per-candidate+stage idempotency key (constant across passes)."""
-
-    return f"{source_id}:{cycle_id}:{basin_id}:{stage}"
 
 
 def slurm_comment_for(idempotency_key: str) -> str:

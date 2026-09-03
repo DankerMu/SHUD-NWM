@@ -167,12 +167,18 @@ def test_durable_success_sets_stay_split_by_exactly_complete() -> None:
     `scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES` rules the pipeline durably
     done and additionally holds `"complete"`.  They carried the same name until
     openspec change durable-status-name-split.  The judging power sits in the first two
-    assertions, which pin each side against drift — pinning the scheduler side separately
-    reds the one merge direction that would actually change behavior (collapsing it to
-    three members).  The third is logically implied by them and is kept as executable
-    documentation of the relationship: the gap is exactly `"complete"`.  The last one
-    guards the other escape hatch, a re-added alias under the old name on `retry`; a plain
-    rename-back needs no guard, the module-level from-import fails on its own.
+    assertions, which pin each side against drift.  The scheduler side is pinned
+    separately because collapsing it to three members changes what the FILE-JOURNAL lane
+    decides: `hydro.run_status` is a closed enum, so `"complete"` is dead on the database
+    lane, but the journal never validates `hydro_run.status` and its construction face
+    writes `hydro_status="complete"` (#1581 design D5).  Which of those two lanes a given
+    caller is on is not something this test knows, so it pins membership rather than
+    claiming an absolute about "scheduler behavior".  The third assertion is logically
+    implied by the first two and is kept as executable documentation of the relationship:
+    the gap is exactly `"complete"`.  The last one guards the other escape hatch, a
+    re-added alias under the old name on `retry`; a plain rename-back needs no guard, the
+    module-level from-import fails on its own.  The parity of every hydro status set
+    across its consumer modules lives in tests/test_hydro_status_set_parity.py.
     """
 
     assert MANUAL_RETRY_DURABLE_SUCCESS_STATUSES == {"succeeded", "parsed", "published"}

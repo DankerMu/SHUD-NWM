@@ -26,13 +26,35 @@ STATE_CANDIDATE_SCOPED_PROOF_FIELDS = (
 )
 STATE_STRONG_CANDIDATE_SCOPED_PROOF_FIELDS = STATE_CANDIDATE_SCOPED_PROOF_FIELDS
 ACTIVE_PIPELINE_STATUSES = {"pending", "queued", "submitted", "running"}
+# Holds "pending" while chain.ACTIVE_HYDRO_STATUSES and chain_repository.ACTIVE_HYDRO_STATUSES do
+# not; that divergence is UNADJUDICATED (#1581) — locked and labelled by
+# tests/test_hydro_status_set_parity.py, not decided.
 ACTIVE_HYDRO_STATUSES = {"created", "staged", "pending", "submitted", "running"}
-# Scheduler durable-success predicate: "is the pipeline durably done?". Holds "complete" on top of
-# the three members of the manual-retry refusal set in services/orchestrator/retry.py, which
-# answers the different question "may an operator retry this run?" and is named distinctly on
-# purpose (change durable-status-name-split — grep that name for both sides). Do not merge the
-# two: collapsing this set to three members would change scheduler behavior.
+# Scheduler durable-success predicate: "is the pipeline durably done?". THE single definition —
+# chain.COMPLETED_HYDRO_STATUSES, chain_repository.COMPLETED_HYDRO_STATUSES and
+# scheduler_state_failure._durable_shud_output_exists all read this very object (#1581).
+# Holds "complete" on top of the three members of the manual-retry refusal set in
+# services/orchestrator/retry.py, which answers the different question "may an operator retry this
+# run?" and is named distinctly on purpose (change durable-status-name-split — grep that name for
+# both sides). Do not merge the two.
+#
+# "complete" is kept as the one member outside the hydro.run_status enum (#1581 design D5). On the
+# DB lane it is dead: hydro.run_status is a closed enum (db/migrations/000003_enums.sql plus the
+# "pending" ADD VALUE in 000013) and has_completed_pipeline compares status::text, so the member
+# can never match. On the file-journal lane no production writer emits it, but
+# _validate_hydro_run_identity constrains identity fields only and never the status, and the
+# journal's test construction face writes hydro_status="complete" — so dropping it would change
+# journal decisions there. tests/test_hydro_status_set_parity.py pins it as that single exception.
 DURABLE_HYDRO_SUCCESS_STATUSES = {"succeeded", "parsed", "published", "complete"}
+# The hydro_run statuses whose journal write CLEARS the row's error code -- it is NOT the
+# durable-output success set above, which answers a different question. Consumed by
+# file_orchestration_journal.update_hydro_run_status (the write at :2485 of 4f3fd89a) and, as
+# scheduler_state_failure._HYDRO_RUN_CODE_CLEARING_STATUSES, by _downstream_recorded_error_code.
+# The SQL backend's update_hydro_run_status only assigns when the incoming value is not None, so a
+# successful transition there leaves an older code in place: a code sitting on a run row in one of
+# these statuses is stale residue rather than the current failure's own record. Frozen because
+# tests/test_production_scheduler.py pins the alias' top-level type.
+HYDRO_RUN_CODE_CLEARING_STATUSES = frozenset({"pending", "created", "succeeded", "complete", "parsed", "published"})
 TERMINAL_PIPELINE_SUCCESS_STATUSES = {"succeeded", "complete", "published"}
 TERMINAL_PIPELINE_COMPLETION_STAGES = {"parse", "state_save_qc", "publish"}
 FAILED_PIPELINE_STATUSES = {"failed", "submission_failed", "partially_failed", "permanently_failed"}
