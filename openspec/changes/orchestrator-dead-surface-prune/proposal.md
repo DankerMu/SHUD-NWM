@@ -96,7 +96,7 @@ the journal cache store and lock wrapper).
 
 - Any behavior change: no decision, query, error, or cache result differs
   for any input either lane can produce today.
-- `_cycle_rows`' live store (`:5843`), `_cycle_rows_cache` consumers,
+- `_cycle_rows`' live store (`:5845`), `_cycle_rows_cache` consumers,
   `_direct_pipeline_job_records_for_cycle_cached`, `_materialize_latest_unlocked`'s
   routing flag.
 - `_next_sequence_unlocked`, `_write_lock`, the `_write_lock.locked()` window

@@ -105,8 +105,9 @@ is a historical record of that change's test surface and is not edited.
 ### D3 (#1762) — ruling: the analysis branch is unreachable; delete it
 
 Evidence: `_validate_pipeline_job_identity` guards every `pipeline_job`
-write and read (`:4533`-class replay, per-record apply, flat direct read,
-pre-write mint per the issue), and both of its branches accept only
+write and read (replay, per-record apply, flat direct read, pre-write mint — the issue's
+`:4533` is its own older-master frame; at `4f3fd89a` the call sites are
+`:6207 :6255 :8827 :8985`), and both of its branches accept only
 `fcst_{src}_{cycle}_{model}` / `cycle_{src}_{cycle}[_suffix]`
 (`:14355-14366`, `:14367-14377`). An `analysis_*` run id raises
 `file_journal_run_mismatch` on either branch, so no `pipeline_job` row
@@ -177,7 +178,7 @@ attributes and two behavior probes.
   and — because the spec names them as consumers and a from-import rebinding
   is invisible to the alias checks (round-1 cand-02) —
   `file_orchestration_journal.COMPLETED_HYDRO_STATUSES is ...` (journal `:72`,
-  consumers `:1280`/`:1361`) and
+  consumers `:1282`/`:1363`) and
   `scheduler_state_decision.DURABLE_HYDRO_SUCCESS_STATUSES is ...` (`:228`).
 - inline site consults the shared object (durable set only — it is a mutable
   `set`): add a sentinel member to `DURABLE_HYDRO_SUCCESS_STATUSES` inside a
