@@ -421,7 +421,14 @@ def test_target_hypertables_are_exactly_d3() -> None:
 
 
 def test_target_hypertables_do_not_include_metadata_tables() -> None:
-    """§6.1 test row 4: metadata / coverage tables MUST NOT be retention targets."""
+    """§6.1 test row 4: metadata / coverage tables MUST NOT be retention targets.
+
+    #1985: asserted against the EFFECTIVE delete authority too. Chunk selection
+    runs off `_CHUNK_QUERY`'s candidate IN-list, so a metadata table that never
+    entered `TARGET_HYPERTABLES` could still be deleted if it entered the query.
+    """
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
     metadata_tables = {
         ("hydro", "hydro_run"),
         ("hydro", "run_display_coverage"),
@@ -431,6 +438,10 @@ def test_target_hypertables_do_not_include_metadata_tables() -> None:
         ("core", "run_display_coverage"),
     }
     assert retention.TARGET_HYPERTABLES.isdisjoint(metadata_tables)
+    assert frozenset(discovery.CANDIDATE_HYPERTABLES).isdisjoint(metadata_tables)
+    for schema, name in metadata_tables:
+        assert f"'{schema}', '{name}'" not in retention._CHUNK_QUERY
+        assert name not in retention._CHUNK_QUERY
 
 
 def test_chunk_query_targets_only_d3_hypertables() -> None:
@@ -1990,6 +2001,14 @@ def test_metadata_table_row_counts_unchanged_under_enforce(
         # every drop call targets a chunk from the two D3 hypertables only.
         chunk_qualified = drop_call[1]
         assert chunk_qualified.startswith("_timescaledb_internal.")
+    # #1985: the parent hypertables the runner was even allowed to enumerate are
+    # the candidate set, and no metadata table is in it or in the query text.
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    for chunk in chunks:
+        assert (chunk.hypertable_schema, chunk.hypertable_name) in discovery.CANDIDATE_HYPERTABLES
+    for forbidden in ("hydro_run", "run_display_coverage", "forcing_version", "state_snapshot"):
+        assert forbidden not in retention._CHUNK_QUERY
 
 
 # ---------------------------------------------------------------------------
@@ -4040,7 +4059,18 @@ def test_target_hypertables_stays_the_canonical_pair() -> None:
     from packages.common import node27_timeseries_hypertable_discovery as discovery
 
     assert retention.TARGET_HYPERTABLES == frozenset(discovery.CANONICAL_HYPERTABLES)
-    assert frozenset(discovery.CANDIDATE_HYPERTABLES) >= retention.TARGET_HYPERTABLES
+    # Non-trivial half: the query the runner actually selects with carries the
+    # canonical pair AND exactly their two renamed selves — nothing else.
+    in_list_entries = {
+        (schema, name)
+        for schema, name in discovery.CANDIDATE_HYPERTABLES
+        if f"('{schema}', '{name}')" in retention._CHUNK_QUERY
+    }
+    assert in_list_entries == set(discovery.CANDIDATE_HYPERTABLES)
+    assert in_list_entries - retention.TARGET_HYPERTABLES == {
+        ("hydro", "river_timeseries_legacy"),
+        ("met", "forcing_station_timeseries_legacy"),
+    }
 
 
 def test_dry_run_receipt_omits_legacy_chunks_without_a_sibling(tmp_path: Path) -> None:
@@ -4110,6 +4140,78 @@ def test_legacy_chunks_is_the_total_remaining_count_after_the_drop_phase(tmp_pat
     )
     assert order == ["drop", "discover"]
     assert receipt["legacy_chunks"] == {_RIVER_LEGACY_KEY: 0}
+
+
+def test_probe_failure_after_the_drop_keeps_the_enforced_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-1 review, reproduced through ``main``: the discovery probe runs
+    AFTER the drop loop, so a raising probe used to escape into the
+    uncaught-error arm and publish a ``refused`` receipt — whose schema branch
+    forbids ``dropped_chunks``. Two chunks would have been deleted and recorded
+    nowhere.
+
+    The probe is isolated like ``_default_measure_chunk_bytes``: the tick still
+    publishes ``enforced`` with its ``dropped_chunks``, simply without
+    ``legacy_chunks`` (the I9 gate stays shut on the missing key), and the
+    cause goes to stderr.
+    """
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    chunks = [
+        _chunk("hydro", "river_timeseries", "chk-a", delta_days=60),
+        _chunk("hydro", "river_timeseries_legacy", "legacy-a", delta_days=61),
+    ]
+    stub = _StubRunner(chunks)
+
+    def _raising_discover(_config: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("catalog probe blew up after the drop")
+
+    code = retention.main(
+        argv=[],
+        now=_NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=_raising_discover,
+    )
+    receipt = json.loads(Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "enforced"
+    assert [item["name"] for item in receipt["dropped_chunks"]] == [
+        "_timescaledb_internal.chk-a",
+        "_timescaledb_internal.legacy-a",
+    ]
+    assert "legacy_chunks" not in receipt
+    jsonschema.validate(receipt, _load_schema())
+    # Exit code is the clean-enforce one, not the refusal's.
+    assert code == 0
+    warning = json.loads(
+        [line for line in capsys.readouterr().err.splitlines() if "legacy_chunks probe" in line][0]
+    )
+    assert warning["warning"] == "legacy_chunks probe failed; omitting the key"
+    assert "secretpw" not in warning["error"]
+
+
+def test_probe_failure_in_dry_run_is_equally_isolated(tmp_path: Path) -> None:
+    """Same guard on the dry-run branch: a diagnostic probe must never be able
+    to turn a completed tick into a refusal."""
+    config = _build_config(tmp_path)
+    stub = _StubRunner([])
+
+    def _raising_discover(_config: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("catalog probe blew up")
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=_raising_discover,
+    )
+    assert receipt["outcome"] == "dry-run"
+    assert "legacy_chunks" not in receipt
 
 
 def test_dry_run_receipt_also_carries_legacy_chunks_when_a_sibling_exists(tmp_path: Path) -> None:

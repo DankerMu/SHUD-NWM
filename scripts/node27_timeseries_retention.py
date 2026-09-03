@@ -172,12 +172,13 @@ _DEFAULT_LOCK_TIMEOUT_MS = 240_000
 # guarantee: `drop_chunks` only accepts hypertables, and the two hypertables
 # below are the ONLY targets.
 #
-# #1985: during the expand-contract transition the same two tables may also
-# exist under their `_legacy` names, and BOTH are dropped under the SAME
-# retention window. The delete-authority allowlist therefore widens by exactly
-# the renamed selves of these two tables (`CANDIDATE_HYPERTABLES`) and by
-# nothing else — the candidate list is a literal, so no metadata table can ever
-# reach `drop_chunks` through discovery.
+# #1985: this constant stays the CANONICAL pair — it is the documentary
+# allowlist, not the code path that selects chunks. The effective delete
+# authority during the expand-contract transition is `_CHUNK_QUERY`'s candidate
+# IN-list, which additionally carries the `_legacy` renamed selves of these two
+# tables (`CANDIDATE_HYPERTABLES`) so both are dropped under the SAME retention
+# window. That list is a literal, so no metadata table can reach `drop_chunks`
+# through discovery; the disjointness guards assert against BOTH surfaces.
 TARGET_HYPERTABLES: frozenset[tuple[str, str]] = frozenset(CANONICAL_HYPERTABLES)
 
 # H6 wire-format codes — byte-identical across:
@@ -1193,11 +1194,35 @@ def run_retention(
         honest claim for a caller without a database — and the receipt then
         carries no ``legacy_chunks`` key at all. ``main`` always wires the real
         probe.
+
+        Isolated exactly like :func:`_default_measure_chunk_bytes` (#1985
+        round-1 review): this probe runs AFTER the drop loop, so letting it
+        raise would carry an already-executed deletion out through
+        :func:`main`'s uncaught-error arm and publish a ``refused`` receipt
+        whose schema branch forbids ``dropped_chunks`` — the chunks would be
+        gone and recorded nowhere. A probe failure therefore drops only the
+        ``legacy_chunks`` key: the I9 / I14 contract gate reads that key and
+        stays shut on its absence, which is the safe direction, and the cause
+        goes to stderr as a diagnostic.
         """
 
         if discover_hypertables is None:
             return None
-        return legacy_chunk_counts(discover_hypertables(config))
+        try:
+            return legacy_chunk_counts(discover_hypertables(config))
+        except Exception as error:
+            with contextlib.suppress(OSError):
+                print(
+                    json.dumps(
+                        {
+                            "warning": "legacy_chunks probe failed; omitting the key",
+                            "error": _redact_error_text(error, config.database_url),
+                        },
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                )
+            return None
 
     # Phase 1: enumerate eligible chunks.
     # There is no archive coverage object any more and therefore no

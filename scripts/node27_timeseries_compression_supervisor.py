@@ -1734,13 +1734,16 @@ def validate_current_d3(catalog: Mapping[str, Any]) -> None:
     """Accept exact current D3 state; reject disabled, missing or drifted state.
 
     #1985: the expectation is asserted PER TABLE by catalog state, not by name.
-    A canonical hypertable without a ``_legacy`` sibling keeps today's
-    text-shaped settings; one WITH a sibling is asserted key-shaped and its
-    sibling text-shaped. Nothing flips ahead of its own migration, so this
-    assertion — which runs on every replay checkpoint — stays green across the
-    expand window instead of turning every tick red the day the code deploys.
-    Both canonical key shapes are already encoded in the shared helper, so I12
-    needs no change here.
+    A canonical hypertable WITH a ``_legacy`` sibling is asserted key-shaped and
+    its sibling text-shaped; one WITHOUT a sibling is asserted against that
+    table's ``NO_SIBLING_SHAPE`` entry in the shared helper — text-shaped for
+    both tables today, so this assertion, which runs on every replay
+    checkpoint, stays green across the expand window instead of turning every
+    tick red the day the code deploys. The expand migrations (I7 river, I12
+    forcing) flip their table by creating the sibling; the CONTRACT migrations
+    (tasks 6.2 river, 8.2 forcing) must flip that table's ``NO_SIBLING_SHAPE``
+    entry to the key shape and deploy it BEFORE the ``DROP``, or this check
+    goes red the moment the sibling disappears.
     """
 
     hypertables = catalog.get("hypertables")

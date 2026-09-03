@@ -3836,6 +3836,70 @@ def test_current_d3_rejects_a_canonical_table_that_flipped_early() -> None:
         supervisor.validate_current_d3(catalog)
 
 
+def test_current_d3_is_red_on_a_post_contract_river_catalog_until_the_flip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The catalog AFTER task 6.2 drops ``hydro.river_timeseries_legacy``.
+
+    The sibling is gone and the canonical table is physically key-shaped, so
+    the catalog is indistinguishable from today's by SHAPE OF THE SET alone —
+    only the per-table ``NO_SIBLING_SHAPE`` constant can tell the two apart.
+    Red here today is the intended state: it is the pin the contract PR closes
+    by flipping the river entry and DEPLOYING that flip before the DROP.
+    """
+
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    post_contract = {
+        "hypertables": {"hydro.river_timeseries": True, "met.forcing_station_timeseries": True},
+        "compression_settings": [
+            dict(zip(_D3_FIELDS, ("hydro", "river_timeseries", *row), strict=True))
+            for row in discovery._KEY_SHAPE[("hydro", "river_timeseries")]
+        ]
+        + [
+            dict(zip(_D3_FIELDS, ("met", "forcing_station_timeseries", *row), strict=True))
+            for row in discovery._TEXT_SHAPE[("met", "forcing_station_timeseries")]
+        ],
+        "policy_jobs": [],
+    }
+    with pytest.raises(supervisor.SupervisorError):
+        supervisor.validate_current_d3(post_contract)
+
+    monkeypatch.setitem(
+        discovery.NO_SIBLING_SHAPE,
+        ("hydro", "river_timeseries"),
+        discovery._KEY_SHAPE[("hydro", "river_timeseries")],
+    )
+    supervisor.validate_current_d3(post_contract)
+
+
+def test_current_d3_still_accepts_todays_catalog_after_the_river_flip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The inverse guard: once river flips, TODAY's text-shaped river catalog
+    must be rejected — the flip is deployed with the contract migration, not
+    before it, and this red is how a premature deploy announces itself."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    monkeypatch.setitem(
+        discovery.NO_SIBLING_SHAPE,
+        ("hydro", "river_timeseries"),
+        discovery._KEY_SHAPE[("hydro", "river_timeseries")],
+    )
+    todays = _catalog("hydro.river_timeseries", "met.forcing_station_timeseries")
+    # `_catalog` builds its rows from the (now flipped) expectation, so rebuild
+    # the text shape by hand — this is the catalog on the box today.
+    todays["compression_settings"] = [
+        dict(zip(_D3_FIELDS, ("hydro", "river_timeseries", *row), strict=True))
+        for row in discovery._TEXT_SHAPE[("hydro", "river_timeseries")]
+    ] + [
+        dict(zip(_D3_FIELDS, ("met", "forcing_station_timeseries", *row), strict=True))
+        for row in discovery._TEXT_SHAPE[("met", "forcing_station_timeseries")]
+    ]
+    with pytest.raises(supervisor.SupervisorError):
+        supervisor.validate_current_d3(todays)
+
+
 def test_current_d3_rejects_a_missing_canonical_hypertable() -> None:
     """Built by hand, not through ``_catalog``: the helper refuses to produce an
     expectation for a canonical-incomplete catalog at all, which is the point —

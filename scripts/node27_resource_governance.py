@@ -31,6 +31,7 @@ from packages.common.node27_cold_governance_collection import (
     DEFAULT_COMPRESSION_LAG_SECONDS,
     PROJECTION_OK,
     PROJECTION_WATERMARK_UNAVAILABLE,
+    PROJECTION_WORKING_SET_UNAVAILABLE,
     collect_filesystem,
     collect_postgres,
     finalize_working_set,
@@ -45,6 +46,7 @@ from packages.common.node27_cold_governance_collection import (
     run_command as _run_command,
 )
 from packages.common.node27_cold_governance_runtime import ColdGovernanceRuntimeConfig, cold_governance_evidence
+from packages.common.node27_timeseries_hypertable_discovery import CANDIDATE_HYPERTABLES
 
 SCHEMA_VERSION = "nhms.node27_resource_governance.audit.v1"
 
@@ -290,7 +292,13 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
             )
         for row in postgres.get("hypertables", []) or []:
             name = f"{row.get('hypertable_schema')}.{row.get('hypertable_name')}"
-            if row.get("hypertable_name") in {"river_timeseries", "forcing_station_timeseries"}:
+            # #1985: the lifecycle candidate set, not two bare names — a
+            # transitional `_legacy` sibling is governed by the same policies
+            # and must raise the same "policy missing" warnings, and matching
+            # on (schema, name) stops a same-named table in another schema from
+            # borrowing these checks.
+            identity = (str(row.get("hypertable_schema")), str(row.get("hypertable_name")))
+            if identity in CANDIDATE_HYPERTABLES:
                 if not row.get("retention_job_id"):
                     recommendations.append(
                         {
@@ -367,14 +375,22 @@ def _working_set_recommendations(
 ) -> list[dict[str, Any]]:
     """#1985 / design D8: does the next compression peak still fit on `/home`?
 
-    Absent block = the timescale queries were blocked or the database was not
-    configured. The audit then reports what it has; it does not invent a
-    projection status or a phantom critical for "could not look".
+    A block that is absent ENTIRELY is only silent when postgres itself was
+    never sampled (``status`` other than ``ok`` — no DSN configured, connection
+    refused): there is nothing to project and the postgres status already says
+    so. With a healthy postgres sample the block must exist, so its absence is
+    the same lane fault as an unmeasurable working set and reports
+    ``WORKING_SET_UNAVAILABLE`` (round-1 review: dropping the block was
+    reproducibly worth exit 0 while the same failure at base exited 1).
     """
 
+    postgres = receipt.get("postgres")
+    postgres_ok = isinstance(postgres, Mapping) and postgres.get("status") == "ok"
     working_set = receipt.get("working_set")
     if not isinstance(working_set, Mapping):
-        return []
+        if not postgres_ok:
+            return []
+        working_set = {"projection_status": PROJECTION_WORKING_SET_UNAVAILABLE}
     recommendations: list[dict[str, Any]] = []
     uncompressed = working_set.get("uncompressed_bytes")
     projected = working_set.get("projected_peak_bytes")
@@ -391,7 +407,25 @@ def _working_set_recommendations(
         "projection_status": working_set.get("projection_status"),
         "compression_lag_seconds": working_set.get("compression_lag_seconds"),
     }
-    if working_set.get("projection_status") == PROJECTION_WATERMARK_UNAVAILABLE:
+    if working_set.get("projection_status") == PROJECTION_WORKING_SET_UNAVAILABLE:
+        # Same class as WATERMARK_UNAVAILABLE: the projection could not be made
+        # at all. An empty catalog reads identically to "everything is already
+        # compressed", so this status is the only thing standing between a
+        # read-only role that lost `timescaledb_information.*` visibility and a
+        # green audit that has stopped watching the volume.
+        recommendations.append(
+            {
+                "severity": "critical",
+                "area": "postgres",
+                "code": "WORKING_SET_UNAVAILABLE",
+                "evidence": evidence,
+                "action": (
+                    "Restore catalog visibility for the audit role and re-run; do not read a "
+                    "missing working set as an empty one."
+                ),
+            }
+        )
+    elif working_set.get("projection_status") == PROJECTION_WATERMARK_UNAVAILABLE:
         # The compression runner refuses to age data off a wall clock when the
         # display watermark cannot be proven; governance takes the same line —
         # this is the lane's own fault and must reach a person.
@@ -541,6 +575,23 @@ def _positive_bytes(raw: str, *, label: str) -> int:
     return value
 
 
+def _positive_seconds(raw: str, *, label: str) -> int:
+    """#1985: the lag is a duration, so its refusal must say seconds.
+
+    ``_positive_bytes`` would tell an operator who typed ``2d`` that the lag
+    "must be an integer byte count", which is the wrong unit and the wrong
+    hint about what to type instead.
+    """
+
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"{label} must be an integer number of seconds") from error
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"{label} must be positive")
+    return value
+
+
 def _nonnegative_bytes(raw: str, *, label: str) -> int:
     try:
         value = int(raw)
@@ -650,8 +701,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--compression-lag-seconds",
-        type=lambda raw: _positive_bytes(raw, label="compression-lag-seconds"),
-        default=_positive_bytes(
+        type=lambda raw: _positive_seconds(raw, label="compression-lag-seconds"),
+        default=_positive_seconds(
             _env_or_default(
                 "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", DEFAULT_COMPRESSION_LAG_SECONDS
             ),

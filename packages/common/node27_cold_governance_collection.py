@@ -15,9 +15,11 @@ from typing import Any, Mapping, Sequence
 
 from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
 from packages.common.node27_timeseries_hypertable_discovery import (
+    CANONICAL_HYPERTABLES,
     DISCOVERY_SQL,
     candidate_in_list_sql,
     discovery_set,
+    present_from_rows,
     qualified,
 )
 
@@ -214,9 +216,14 @@ def collect_filesystem(config: Any) -> dict[str, Any]:
 #: with the live compression env.
 DEFAULT_COMPRESSION_LAG_SECONDS = 172_800
 
-#: The trailing window the ingest rate is averaged over, in days. Fixed, not
-#: derived from the observed chunks: a partially filled window must under-report
-#: the rate rather than turn one busy day into a projected spike.
+#: The LONGEST trailing window the ingest rate is averaged over, in days. The
+#: divisor is the span the in-window uncompressed chunks actually cover, capped
+#: at this value and floored at one day -- not a fixed seven. In steady state
+#: the uncompressed chunks only ever cover ``lag + 1`` days (everything older is
+#: already compressed), so dividing by seven under-reported the daily rate by
+#: about 3/7; the node-27 receipt at 989c3cf7 showed
+#: ``daily_ingest_bytes == uncompressed_bytes // 7`` byte for byte. For a
+#: capacity guard, over-reporting is the fail-safe direction.
 DAILY_INGEST_WINDOW_DAYS = 7
 
 WORKING_SET_DISCOVERY_SQL = DISCOVERY_SQL
@@ -242,6 +249,12 @@ ORDER BY c.range_end ASC, c.chunk_schema, c.chunk_name
 PROJECTION_OK = "ok"
 PROJECTION_NO_UNCOMPRESSED_CHUNK = "no_uncompressed_chunk"
 PROJECTION_WATERMARK_UNAVAILABLE = "watermark_unavailable"
+#: The working set could not be measured at all: the timescale probes raised, or
+#: the catalog returned no row for a canonical hypertable (the shape a read-only
+#: role takes when it loses ``timescaledb_information.*`` visibility). An empty
+#: catalog must NEVER be read as "everything is compressed" -- that is the one
+#: failure mode which silently turns the capacity alarm off.
+PROJECTION_WORKING_SET_UNAVAILABLE = "working_set_unavailable"
 
 
 def _iso(value: datetime) -> str:
@@ -258,6 +271,32 @@ def _as_datetime(value: Any) -> datetime:
     return moment.astimezone(UTC)
 
 
+def unavailable_working_set(
+    *,
+    lag_seconds: int = DEFAULT_COMPRESSION_LAG_SECONDS,
+    watermark: datetime | None = None,
+    hypertables: Sequence[str] = (),
+) -> dict[str, Any]:
+    """The working set nobody could measure: every number ``None``, status set.
+
+    Same key set as a measured sample so the receipt shape never varies; the
+    byte counts are ``None`` rather than ``0`` because an unobserved working set
+    reported as zero is exactly the reading that would suppress
+    ``PROJECTED_PEAK_EXCEEDS_HOME_FREE``.
+    """
+
+    return {
+        "hypertables": sorted(hypertables),
+        "uncompressed_bytes": None,
+        "uncompressed_chunks": None,
+        "daily_ingest_bytes": None,
+        "next_compressible_at": None,
+        "compression_lag_seconds": int(lag_seconds),
+        "watermark": None if watermark is None else _iso(watermark),
+        "projection_status": PROJECTION_WORKING_SET_UNAVAILABLE,
+    }
+
+
 def collect_working_set(
     cursor: Any,
     *,
@@ -272,9 +311,23 @@ def collect_working_set(
     watermark, fetched with the compression runner's own fetcher and its
     fail-closed semantics: ``None`` means the lane could not prove it, which is
     a lane fault, never a zero.
+
+    A catalog that does not report BOTH canonical hypertables is a lane fault of
+    the same class: the rows are missing, not the data, so the sample comes back
+    ``working_set_unavailable`` instead of an empty -- and therefore reassuring
+    -- ``no_uncompressed_chunk``.
     """
 
-    hypertables = discovery_set(_psycopg_rows(cursor, WORKING_SET_DISCOVERY_SQL))
+    discovery_rows = _psycopg_rows(cursor, WORKING_SET_DISCOVERY_SQL)
+    present = present_from_rows(discovery_rows)
+    if not set(CANONICAL_HYPERTABLES) <= set(present):
+        return unavailable_working_set(
+            lag_seconds=lag_seconds,
+            watermark=watermark,
+            hypertables=[qualified(*item) for item in present],
+        )
+
+    hypertables = discovery_set(discovery_rows)
     rows = _psycopg_rows(cursor, WORKING_SET_CHUNKS_SQL)
     governed = {qualified(*item) for item in hypertables}
     chunks = [
@@ -293,12 +346,9 @@ def collect_working_set(
     else:
         projection_status = PROJECTION_OK
         floor = watermark - timedelta(days=DAILY_INGEST_WINDOW_DAYS)
-        recent = sum(
-            int(row["total_bytes"] or 0)
-            for row in chunks
-            if _as_datetime(row["range_start"]) >= floor
-        )
-        daily_ingest_bytes = recent // DAILY_INGEST_WINDOW_DAYS
+        in_window = [row for row in chunks if _as_datetime(row["range_start"]) >= floor]
+        recent = sum(int(row["total_bytes"] or 0) for row in in_window)
+        daily_ingest_bytes = int(recent / _covered_days(in_window, watermark=watermark))
 
     next_compressible_at: str | None = None
     if chunks:
@@ -317,6 +367,23 @@ def collect_working_set(
     }
 
 
+def _covered_days(rows: Sequence[Mapping[str, Any]], *, watermark: datetime) -> float:
+    """Days the in-window uncompressed chunks actually cover.
+
+    ``min(DAILY_INGEST_WINDOW_DAYS, max(1.0, days(watermark - earliest
+    range_start)))`` -- fractional days, floored at one so a single fresh chunk
+    can never divide by a fraction and manufacture a spike, and capped at the
+    window so a long-uncompressed backlog cannot dilute the rate below the
+    seven-day mean.
+    """
+
+    if not rows:
+        return 1.0
+    earliest = min(_as_datetime(row["range_start"]) for row in rows)
+    span = (watermark - earliest).total_seconds() / 86_400.0
+    return min(float(DAILY_INGEST_WINDOW_DAYS), max(1.0, span))
+
+
 def finalize_working_set(
     sample: Mapping[str, Any], *, home_free_bytes: int | None
 ) -> dict[str, Any]:
@@ -332,6 +399,11 @@ def finalize_working_set(
 
     working_set = dict(sample)
     working_set["home_free_bytes"] = home_free_bytes
+    if working_set.get("projection_status") == PROJECTION_WORKING_SET_UNAVAILABLE:
+        # Nothing was observed, so there is no peak to state. Reporting zero
+        # here would read as "it fits".
+        working_set["projected_peak_bytes"] = None
+        return working_set
     uncompressed = int(working_set.get("uncompressed_bytes") or 0)
     projected = uncompressed
     if (
@@ -559,10 +631,14 @@ def collect_postgres(
                     LIMIT 20
                     """,
                 )
-                # #1985 working set. Inside the timescale try-block on purpose:
-                # a cluster without the extension has no hypertables to govern,
-                # and the audit reports what it has rather than inventing a
-                # projection status for "could not look".
+            except Exception as error:
+                result["timescale_status"] = {"status": "blocked", "error": str(error)}
+            # #1985 working set, in its OWN try: a failure of the inventory
+            # queries above must not delete the capacity projection from the
+            # receipt. Losing the block entirely is indistinguishable from
+            # "nothing to project" downstream, so a failure here still leaves a
+            # working_set -- carrying the unavailable status that pages.
+            try:
                 try:
                     watermark: datetime | None = fetch_display_watermark(database_url)
                 except DisplayWatermarkError:
@@ -573,7 +649,10 @@ def collect_postgres(
                     lag_seconds=compression_lag_seconds,
                 )
             except Exception as error:
-                result["timescale_status"] = {"status": "blocked", "error": str(error)}
+                result["working_set"] = unavailable_working_set(
+                    lag_seconds=compression_lag_seconds
+                )
+                result["working_set_error"] = str(error)
     except Exception as error:
         result = {"status": "blocked", "reason": "query_failed", "error": str(error)}
     finally:

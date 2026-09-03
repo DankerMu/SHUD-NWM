@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import json
 import re
+import sys
+import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -825,10 +828,15 @@ def test_working_set_sums_uncompressed_chunk_bytes_over_the_discovery_set() -> N
     assert sample["compression_lag_seconds"] == 172_800
 
 
-def test_daily_ingest_is_the_seven_day_mean_anchored_on_the_watermark() -> None:
+def test_daily_ingest_divides_by_the_days_the_window_actually_covers() -> None:
     """Chunks are attributed to a day by ``range_start``; the divisor is the
-    fixed seven-day window, so a partially filled window under-reports rather
-    than inventing a spike out of one busy day."""
+    span those in-window chunks COVER (``watermark - earliest range_start``,
+    capped at seven, floored at one), not a fixed seven.
+
+    Round-1 review: the fixed seven under-reported the rate systematically —
+    the first node-27 receipt showed ``daily_ingest_bytes == uncompressed_bytes
+    // 7`` byte for byte — and a capacity guard must err high, not low.
+    """
     cursor = _FakeCursor(
         hypertables=[
             _hypertable_row("hydro", "river_timeseries"),
@@ -843,7 +851,44 @@ def test_daily_ingest_is_the_seven_day_mean_anchored_on_the_watermark() -> None:
     )
     sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
     assert sample["uncompressed_bytes"] == 8400
-    assert sample["daily_ingest_bytes"] == 200
+    # In-window chunks start 6 and 1 days before the watermark -> 6 covered days.
+    assert sample["daily_ingest_bytes"] == 1400 // 6
+
+
+def test_daily_ingest_in_steady_state_divides_by_the_uncompressed_span() -> None:
+    """Steady state under a 2-day lag: everything older is already compressed,
+    so only the last few one-day chunks are uncompressed. Compressed chunks
+    inside the seven-day window are not returned by the catalog query at all,
+    and must not dilute the rate."""
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        # 7-day window, 4 older chunks already compressed (absent from the
+        # is_compressed=false query), 3 uncompressed one-day chunks left.
+        chunks=[
+            _chunk_row("hydro", "river_timeseries", day=day, total_bytes=100)
+            for day in (1, 2, 3)
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["uncompressed_chunks"] == 3
+    assert sample["daily_ingest_bytes"] == 300 // 3
+
+
+def test_a_single_fresh_chunk_never_divides_by_a_fraction() -> None:
+    """Floor of one day: a chunk that started six hours ago would otherwise be
+    multiplied by four and project a spike nobody measured."""
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=0, total_bytes=800)],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["daily_ingest_bytes"] == 800
 
 
 def test_empty_state_reports_no_uncompressed_chunk_and_projects_nothing() -> None:
@@ -932,6 +977,9 @@ def test_scenario_peak_fits() -> None:
         "PROJECTED_PEAK_EXCEEDS_HOME_FREE",
         "WORKING_SET_ABOVE_WARNING",
         "WATERMARK_UNAVAILABLE",
+        # #1985 round-1: the new critical must stay silent on a healthy
+        # measured sample — no phantom code on the fits path.
+        "WORKING_SET_UNAVAILABLE",
     }
     assert "critical" not in {
         item["severity"]
@@ -1021,13 +1069,169 @@ def test_scenario_info_only_database_size_never_exits_non_zero(
     assert out == ""
 
 
-def test_missing_working_set_block_changes_nothing() -> None:
-    """When the timescale queries are blocked the audit reports what it has;
-    it does not invent a fourth projection status or a phantom critical."""
-    codes = _codes(_base_receipt())
+def test_scenario_working_set_unavailable_is_critical() -> None:
+    """Same class as WATERMARK_UNAVAILABLE (decision 12): the projection could
+    not be made, which is a lane fault and not a quiet zero."""
+    receipt = _base_receipt()
+    receipt["working_set"] = {
+        "hypertables": [],
+        "uncompressed_bytes": None,
+        "uncompressed_chunks": None,
+        "daily_ingest_bytes": None,
+        "next_compressible_at": None,
+        "home_free_bytes": 900 * _GIB,
+        "projected_peak_bytes": None,
+        "projection_status": "working_set_unavailable",
+        "compression_lag_seconds": 172_800,
+        "watermark": None,
+    }
+    codes = _codes(receipt)
+    assert codes["WORKING_SET_UNAVAILABLE"] == "critical"
     assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in codes
     assert "WATERMARK_UNAVAILABLE" not in codes
-    assert "WORKING_SET_ABOVE_WARNING" not in codes
+
+
+def test_a_missing_working_set_block_on_a_healthy_postgres_is_critical() -> None:
+    """Round-1 review reproduced the hole: dropping the block entirely (the
+    timescale queries raising) exited 0 at HEAD where the same failure exited 1
+    at base. With a healthy postgres sample the block MUST be there, so its
+    absence is the unavailable state."""
+    receipt = _base_receipt()
+    receipt.pop("working_set", None)
+    assert receipt["postgres"]["status"] == "ok"
+    codes = _codes(receipt)
+    assert codes["WORKING_SET_UNAVAILABLE"] == "critical"
+
+
+def test_a_missing_working_set_block_is_silent_when_postgres_was_never_sampled() -> None:
+    """No DSN configured / connection refused: postgres already says so and
+    there is nothing to project. This is the ONLY silent absence."""
+    for status in ("skipped", "blocked"):
+        receipt = _base_receipt()
+        receipt.pop("working_set", None)
+        receipt["postgres"] = {"status": status, "reason": "database_url_missing"}
+        assert "WORKING_SET_UNAVAILABLE" not in _codes(receipt)
+
+
+def test_empty_catalog_is_unavailable_not_no_uncompressed_chunk() -> None:
+    """A read-only role that lost `timescaledb_information.*` visibility sees
+    zero rows. Reading that as "everything is compressed" is exactly how the
+    capacity alarm switches itself off."""
+    cursor = _FakeCursor(hypertables=[], chunks=[])
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    final = collection.finalize_working_set(sample, home_free_bytes=10 * _GIB)
+    assert final["projection_status"] == "working_set_unavailable"
+    assert final["uncompressed_bytes"] is None
+    assert final["projected_peak_bytes"] is None
+    assert _codes({"postgres": {"status": "ok"}, "working_set": final})[
+        "WORKING_SET_UNAVAILABLE"
+    ] == "critical"
+
+
+def test_one_missing_canonical_table_is_already_unavailable() -> None:
+    """Both canonical tables or nothing: a catalog that reports only river has
+    stopped answering for forcing, and half a working set is not a projection."""
+    cursor = _FakeCursor(
+        hypertables=[_hypertable_row("hydro", "river_timeseries")],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=1, total_bytes=64)],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["projection_status"] == "working_set_unavailable"
+    assert sample["hypertables"] == ["hydro.river_timeseries"]
+
+
+def test_a_blocked_timescale_block_still_leaves_an_unavailable_working_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`collect_postgres` gives the working set its own try: an inventory query
+    that raises must not delete the projection from the receipt."""
+
+    class _RaisingCursor(_FakeCursor):
+        def execute(self, sql: str, params: object = None) -> None:
+            if "timescaledb_information" in sql:
+                raise RuntimeError("permission denied for schema timescaledb_information")
+            super().execute(sql, params)
+
+        def __enter__(self) -> "_RaisingCursor":
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+    cursor = _RaisingCursor(hypertables=[], chunks=[])
+
+    class _Connection:
+        autocommit = False
+
+        def cursor(self) -> _RaisingCursor:
+            return cursor
+
+        def close(self) -> None:
+            return None
+
+    fake_psycopg2 = types.SimpleNamespace(
+        connect=lambda *_a, **_k: _Connection(),
+        extras=types.SimpleNamespace(RealDictCursor=object),
+    )
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+    monkeypatch.setitem(sys.modules, "psycopg2.extras", fake_psycopg2.extras)
+    # `collect_postgres` reaches the watermark through `display_watermark`,
+    # which holds its OWN psycopg2 reference: without this stub the test would
+    # depend on a real connection to 127.0.0.1 failing, and this suite must
+    # never touch a database.
+    monkeypatch.setattr(
+        collection, "fetch_display_watermark", lambda _url: datetime(2026, 9, 1, tzinfo=UTC)
+    )
+    result = collection.collect_postgres("postgresql://ro@127.0.0.1/nhms")
+    assert result["timescale_status"]["status"] == "blocked"
+    assert result["working_set"]["projection_status"] == "working_set_unavailable"
+    assert _codes({"postgres": {"status": "ok"}, "working_set": result["working_set"]})[
+        "WORKING_SET_UNAVAILABLE"
+    ] == "critical"
+
+
+def test_an_unavailable_working_set_pages_through_main_with_a_non_zero_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The all-`None` sample has to survive the WHOLE pipeline.
+
+    The other unavailable tests stop at `_codes`; this one drives the sample
+    through `_working_set_block` -> `finalize_working_set` -> `main`, because
+    an arithmetic slip on a `None` byte count anywhere in that chain would turn
+    the page into a crash (or, worse, into silence).
+    """
+    summary_path = tmp_path / "resource-governance.json"
+    thresholds = governance.AuditThresholds()
+    monkeypatch.setattr(
+        governance,
+        "collect_filesystem",
+        lambda _config: {
+            "filesystems": {
+                "root": {"path": "/", "free_bytes": thresholds.root_free_warn_bytes + 1},
+                "home": {"path": "/home", "free_bytes": thresholds.home_free_warn_bytes + 1},
+            },
+            "path_sizes": {},
+        },
+    )
+    monkeypatch.setattr(
+        governance,
+        "collect_postgres",
+        lambda _url, **_kwargs: {
+            "status": "ok",
+            "working_set": collection.unavailable_working_set(),
+        },
+    )
+    monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
+
+    rc = governance.main(["--summary-path", str(summary_path), "--quiet"])
+    captured = capsys.readouterr()
+
+    assert rc == 1
+    assert f"{_CRITICAL_ANCHOR}WORKING_SET_UNAVAILABLE" in captured.err.splitlines()
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert written["working_set"]["projection_status"] == "working_set_unavailable"
+    # Not 0: an unobserved working set must never read as "it fits".
+    assert written["working_set"]["projected_peak_bytes"] is None
 
 
 # --- stderr line ------------------------------------------------------------
@@ -1133,6 +1337,38 @@ def test_an_unparseable_lag_is_a_config_error_with_a_non_zero_exit(
     captured = capsys.readouterr()
     assert rc != 0
     assert json.loads(captured.err.splitlines()[0])["status"] == "failed"
+
+
+def test_absent_lag_env_falls_back_to_the_pinned_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UNSET is the normal state on a box whose env file predates #1985, and it
+    must resolve to 172800 — the same number the compression template ships."""
+    monkeypatch.delenv("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", raising=False)
+    config = governance.config_from_args(governance.build_parser().parse_args([]))
+    assert config.compression_lag_seconds == 172_800
+    assert config.compression_lag_seconds == collection.DEFAULT_COMPRESSION_LAG_SECONDS
+
+
+def test_an_invalid_lag_is_refused_in_seconds_not_bytes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The lag is a duration; telling an operator it "must be an integer byte
+    count" points at the wrong unit. Both entry points are checked: the flag
+    (argparse turns the type error into a usage message) and the env default
+    (evaluated while the parser is built)."""
+    monkeypatch.delenv("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", raising=False)
+    with pytest.raises(SystemExit):
+        governance.build_parser().parse_args(["--compression-lag-seconds", "2d"])
+    message = capsys.readouterr().err
+    assert "must be an integer number of seconds" in message
+    assert "byte count" not in message
+
+    monkeypatch.setenv("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", "2d")
+    with pytest.raises(argparse.ArgumentTypeError) as excinfo:
+        governance.build_parser()
+    assert "must be an integer number of seconds" in str(excinfo.value)
+    assert "byte count" not in str(excinfo.value)
 
 
 def test_receipt_echoes_the_configured_lag(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -36,13 +36,22 @@ gone" a no-op rather than a branch.
 Per-table expectations follow catalog state, not table names (task 3.1's
 three-state rule):
 
-* canonical table WITHOUT a sibling → today's text-shaped compression settings
 * canonical table WITH a sibling → key-shaped settings, sibling text-shaped
+* canonical table WITHOUT a sibling → that table's entry in
+  :data:`NO_SIBLING_SHAPE`, a per-canonical constant (text-shaped for both
+  tables today, so today's live catalog is asserted exactly as before)
 
-so river flips exactly at I7's expand and forcing exactly at I12's, and no
-expectation is ever flipped ahead of its own migration.  Both key shapes are
-encoded here now (river per design D4, forcing per design D9) so I12 needs no
-change to the supervisor or the capture tool.
+The no-sibling case is deliberately a CONSTANT and not "always text-shaped".
+Sibling presence alone cannot answer the question, because the catalog looks
+the same before the expand migration creates the sibling and after the
+contract migration drops it — but the physical table is text-shaped in the
+first case and key-shaped in the second.  So each contract PR (tasks 6.2 for
+river, 8.2 for forcing) flips ITS OWN entry in :data:`NO_SIBLING_SHAPE` to the
+key shape and deploys that flip BEFORE the ``DROP``; skip the flip and
+``validate_current_d3`` goes red the instant the sibling disappears (round-1
+review reproduced exactly that).  One constant per contract, no change to the
+discovery logic.  Both key shapes are encoded here now (river per design D4,
+forcing per design D9), so I7 and I12 flip by migration alone.
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ __all__ = [
     "CANONICAL_KEYS",
     "DISCOVERY_SQL",
     "LEGACY_SUFFIX",
+    "NO_SIBLING_SHAPE",
     "candidate_in_list_sql",
     "candidate_tuple_list_sql",
     "compression_settings_expectation",
@@ -148,10 +158,20 @@ def present_from_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[tuple[str, str
 def discovery_set(rows: Iterable[Mapping[str, Any]]) -> tuple[tuple[str, str], ...]:
     """The governed set: canonical tables plus every sibling that exists.
 
-    A canonical table missing from the catalog stays in the set on purpose.
-    Silently dropping it would turn "the expand migration renamed the table and
-    never created the new one" into a quiet no-op tick; keeping it makes the
-    downstream expectation check raise and name it.
+    A canonical table missing from the catalog stays in the set on purpose:
+    silently dropping it would turn "the expand migration renamed the table and
+    never created the new one" into a quiet no-op tick.
+
+    Keeping it is NOT by itself a refusal, and callers must not assume one.
+    :func:`compression_settings_expectation` and :func:`expected_hypertable_flags`
+    raise on a missing canonical (so the supervisor and the live-evidence
+    validator fail closed), but the compression runner and the governance
+    collection never call those, so each performs its own
+    :func:`present_from_rows` check: the runner refuses the tick
+    (``CompressionConfigError``) and governance reports
+    ``projection_status = "working_set_unavailable"``. The retention runner
+    consumes discovery only to count ``_legacy`` chunks, where a missing
+    canonical changes nothing.
     """
 
     present = set(present_from_rows(rows))
@@ -219,6 +239,20 @@ _KEY_SHAPE: dict[tuple[str, str], tuple[tuple[str, int | None, int | None, bool 
     ),
 }
 
+# The shape a canonical table is asserted to have when NO ``_legacy`` sibling is
+# in the catalog.  Both entries are the text shape TODAY, which is why the live
+# node-27 catalog is asserted byte-identically to before #1985; each contract PR
+# flips its own entry to ``_KEY_SHAPE`` and deploys that flip before its DROP
+# (see the module docstring).  Never collapse this back to "text shape when no
+# sibling": that reverts the canonical table's expectation after the contract.
+NO_SIBLING_SHAPE: dict[
+    tuple[str, str], tuple[tuple[str, int | None, int | None, bool | None, bool | None], ...]
+] = {
+    ("hydro", "river_timeseries"): _TEXT_SHAPE[("hydro", "river_timeseries")],
+    ("met", "forcing_station_timeseries"): _TEXT_SHAPE[("met", "forcing_station_timeseries")],
+}
+
+
 ExpectationRow = tuple[str, str, str, int | None, int | None, bool | None, bool | None]
 
 
@@ -277,6 +311,8 @@ def compression_settings_expectation(
             # Its sibling exists, so this table IS the post-expand narrow one.
             shape = _KEY_SHAPE[(schema, name)]
         else:
-            shape = _TEXT_SHAPE[(schema, name)]
+            # No sibling: the per-table constant decides, because the catalog
+            # cannot distinguish "pre-expand" from "post-contract".
+            shape = NO_SIBLING_SHAPE[(schema, name)]
         rows.extend((schema, name, *entry) for entry in shape)
     return rows

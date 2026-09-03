@@ -2281,6 +2281,87 @@ def test_per_table_totals_without_a_sibling_equal_todays_key_set(
     jsonschema.validate(receipt, _load_schema())
 
 
+def test_a_chunk_whose_table_left_the_discovery_set_does_not_kill_the_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery and chunk selection are two separate reads. A contract
+    migration landing between them returns a chunk for a table that is no
+    longer governed; a bare ``totals[key]`` raised ``KeyError`` AFTER
+    ``compress_chunk`` had run, and the tick then reported ``indeterminate``
+    with every other table's totals lost. ``setdefault`` keeps the receipt
+    honest about the work that actually happened."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    chunks = [
+        _chunk("hydro", "river_timeseries", "narrow-1", delta_days=10),
+        _chunk("hydro", "river_timeseries_legacy", "legacy-1", delta_days=20),
+    ]
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=chunks)
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        # The catalog no longer reports the sibling; the chunk query still did.
+        discover_hypertables=lambda _dsn: list(_CANONICAL_CATALOG),
+    )
+    assert receipt["outcome"] == "clean"
+    assert receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] == 1
+    assert receipt["per_table_totals"][_RIVER_LEGACY_KEY]["chunks_compressed"] == 1
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_a_canonical_table_missing_from_the_catalog_refuses_before_any_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D3: a probe that RAN and did not report a canonical hypertable must
+    refuse. The alternative is a clean receipt carrying a phantom zero total for
+    a table nobody looked at — "nothing to compress" for exactly the table whose
+    disappearance is the emergency."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
+        monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "old-1", delta_days=10)]
+    )
+    with pytest.raises(compression.CompressionConfigError, match="met.forcing_station_timeseries"):
+        compression.build_receipt(
+            config,
+            now_utc=_NOW,
+            fetch_chunks=fake_fetch,
+            measure_chunk_bytes=fake_measure,
+            compress_chunk=fake_compress,
+            discover_hypertables=lambda _dsn: [_discovery_row("hydro", "river_timeseries")],
+        )
+    # Before any mutation: not one chunk measured, not one compressed.
+    assert calls["measure"] == []
+    assert calls["compress"] == []
+
+
+def test_no_probe_at_all_still_means_the_canonical_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``discover_hypertables=None`` is "no catalog was consulted", which is a
+    different claim from "the catalog says the table is gone" and must not
+    refuse."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=False), env)
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
+        monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "old-1", delta_days=10)]
+    )
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+    )
+    assert set(receipt["per_table_totals"]) == {
+        "hydro.river_timeseries",
+        "met.forcing_station_timeseries",
+    }
+
+
 def test_per_table_totals_gain_the_legacy_sibling_when_the_catalog_shows_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

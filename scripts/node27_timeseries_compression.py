@@ -46,6 +46,7 @@ from packages.common.node27_timeseries_hypertable_discovery import (
     DISCOVERY_SQL,
     candidate_in_list_sql,
     discovery_set,
+    present_from_rows,
     qualified,
 )
 from packages.common.node27_timeseries_lifecycle_lock import (
@@ -813,15 +814,30 @@ def build_receipt(
     contract migration drops it. ``main`` always wires the real probe; ``None``
     means "no catalog was consulted", and then the governed set is exactly the
     canonical pair — the honest claim for a caller without a database.
+
+    A probe that ran and did NOT report a canonical hypertable refuses the tick
+    (D3): the alternative is a clean receipt carrying a phantom zero total for a
+    table nobody looked at, which reads as "nothing to compress" for exactly the
+    table whose disappearance is the emergency.
     """
     frozen_head_sha = head_sha or _current_head_sha()
     if re.fullmatch(r"[0-9a-f]{40}", frozen_head_sha) is None:
         raise CompressionConfigError("receipt head_sha must be a lowercase 40-hex Git SHA")
-    governed = (
-        HYPERTABLES
-        if discover_hypertables is None
-        else discovery_set(discover_hypertables(config.database_url))
-    )
+    if discover_hypertables is None:
+        governed = HYPERTABLES
+    else:
+        discovery_rows = discover_hypertables(config.database_url)
+        missing = [
+            qualified(*item)
+            for item in CANONICAL_HYPERTABLES
+            if item not in present_from_rows(discovery_rows)
+        ]
+        if missing:
+            # Before any mutation: nothing has been measured or compressed yet.
+            raise CompressionConfigError(
+                f"catalog is missing a canonical hypertable: {missing}"
+            )
+        governed = discovery_set(discovery_rows)
     chunks = fetch_chunks(config.database_url)
     selected_rows, deferred_rows, skipped_rows = _classify(
         chunks,
@@ -851,7 +867,25 @@ def build_receipt(
     after_poisoned = {key: False for key in totals}
     selected_descriptors: list[dict[str, Any]] = []
     any_errors = False
+
+    def _register(key: str) -> None:
+        """#1985: ``setdefault``, never ``totals[key]`` on an unknown table.
+
+        The discovery probe and the chunk query are two separate reads. A
+        contract migration landing between them yields a chunk whose hypertable
+        is no longer in ``governed``; a bare subscript would then raise
+        ``KeyError`` AFTER ``compress_chunk`` had already run, and the receipt
+        would come back ``indeterminate`` with every other table's totals lost.
+        Registering the key keeps the tick honest about what it actually did.
+        """
+
+        if key not in totals:
+            totals[key] = {"before_bytes": 0, "after_bytes": 0, "chunks_compressed": 0}
+            saw_after[key] = False
+            after_poisoned[key] = False
+
     for chunk in selected_rows:
+        _register(chunk.hypertable_key)
         # Symmetrical per-chunk isolation. Any failure on this chunk is
         # recorded in the descriptor, poisons the table's after_bytes, and the
         # top-level outcome becomes ``partial`` — but does not abort the loop.

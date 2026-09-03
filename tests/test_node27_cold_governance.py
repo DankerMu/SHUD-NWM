@@ -371,16 +371,125 @@ def test_cold_receipt_omits_the_working_set_when_it_is_not_supplied(tmp_path: Pa
 
 
 def test_both_cold_governance_examples_carry_the_working_set() -> None:
-    """The CI schema-example check validates every example against its schema;
-    both examples carry the block so the new fields are exercised there too."""
+    """Both examples carry the block, so the new fields are exercised by CI's
+    schema-example job (`.github/workflows/ci.yml`, which strips the `.drift`
+    family suffix to find the schema) as well as by this suite.
+
+    Keys are asserted as a SUBSET of the production shape, not as equality with
+    the eight-key literal below: the collector emits ten keys (it adds
+    `hypertables` and `uncompressed_chunks`), and an example is free to show
+    them.
+    """
     root = _ROOT_DIR / "schemas" / "examples"
     for name in (
         "node27_cold_governance_receipt.example.json",
         "node27_cold_governance_receipt.drift.example.json",
     ):
         document = json.loads((root / name).read_text(encoding="utf-8"))
-        assert set(document["working_set"]) == set(_WORKING_SET)
+        keys = set(document["working_set"])
+        assert set(_WORKING_SET) <= keys
+        assert keys <= _PRODUCTION_WORKING_SET_KEYS
         jsonschema.validate(document, _COLD_SCHEMA)
+
+
+def test_ci_schema_example_check_resolves_the_drift_family() -> None:
+    """The `.drift` example has no schema of its own; CI must strip the suffix
+    to reach `node27_cold_governance_receipt.schema.json`. Without `drift` in
+    the alternation the job printed a WARNING and validated nothing."""
+    workflow = (_ROOT_DIR / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "s/\\.(noop|intent|partial|error|drift)$//" in workflow
+
+
+_PRODUCTION_WORKING_SET_KEYS = {
+    "hypertables",
+    "uncompressed_bytes",
+    "uncompressed_chunks",
+    "daily_ingest_bytes",
+    "next_compressible_at",
+    "home_free_bytes",
+    "projected_peak_bytes",
+    "projection_status",
+    "compression_lag_seconds",
+    "watermark",
+}
+
+
+def _fake_cursor(*, hypertables: list[dict], chunks: list[dict]) -> object:
+    class _Cursor:
+        def __init__(self) -> None:
+            self._rows: list[dict] = []
+
+        def execute(self, sql: str, params: object = None) -> None:
+            self._rows = (
+                hypertables if "timescaledb_information.hypertables" in sql else chunks
+            )
+
+        def fetchall(self) -> list[dict]:
+            return list(self._rows)
+
+    return _Cursor()
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["ok", "no_uncompressed_chunk", "watermark_unavailable", "working_set_unavailable"],
+)
+def test_the_production_working_set_validates_for_every_projection_status(
+    tmp_path: Path, status: str
+) -> None:
+    """The shape the COLLECTOR produces — ten keys — driven end to end through
+    `finalize_working_set` into the strict receipt and validated. The examples
+    are hand-written; this is the only test that proves the real producer's
+    output fits the schema, in every state it can be in.
+    """
+    from packages.common import node27_cold_governance_collection as collection
+
+    watermark = datetime(2026, 9, 1, tzinfo=UTC)
+    hypertables = [
+        {
+            "hypertable_schema": schema,
+            "hypertable_name": name,
+            "num_chunks": 3,
+            "compression_enabled": True,
+        }
+        for schema, name in (("hydro", "river_timeseries"), ("met", "forcing_station_timeseries"))
+    ]
+    chunks = [
+        {
+            "hypertable_schema": "hydro",
+            "hypertable_name": "river_timeseries",
+            "chunk_schema": "_timescaledb_internal",
+            "chunk_name": "_hyper_3_1_chunk",
+            "range_start": datetime(2026, 8, 30, tzinfo=UTC),
+            "range_end": datetime(2026, 8, 31, tzinfo=UTC),
+            "total_bytes": 1024,
+        }
+    ]
+    if status == "no_uncompressed_chunk":
+        chunks = []
+    if status == "working_set_unavailable":
+        hypertables = []
+    cursor = _fake_cursor(hypertables=hypertables, chunks=chunks)
+    sample = collection.collect_working_set(
+        cursor,
+        watermark=None if status == "watermark_unavailable" else watermark,
+        lag_seconds=172_800,
+    )
+    working_set = collection.finalize_working_set(sample, home_free_bytes=900 * 1024**3)
+    assert working_set["projection_status"] == status
+    assert set(working_set) == _PRODUCTION_WORKING_SET_KEYS
+
+    receipt, schema = build_cold_governance_receipt(
+        config=GovernanceConfig(receipt_path=tmp_path / "governance.json", head_sha=SHA),
+        started_at="2026-08-31T12:00:00Z",
+        finished_at="2026-08-31T12:00:05Z",
+        home=_sample(path="/home", used=800, pgdata=300, cold=0, object_store=200),
+        cold=_sample(path="/data/GHDC", used=700, pgdata=0, cold=400, object_store=0),
+        evidence=_evidence(),
+        working_set=working_set,
+    )
+    assert receipt["working_set"] == working_set
+    jsonschema.validate(receipt, schema)
 
 
 @pytest.mark.parametrize(

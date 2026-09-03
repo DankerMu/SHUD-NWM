@@ -9,10 +9,13 @@ resource-governance collection), so the rules live here once and every
 consumer test pins that it really reads them.
 
 The three-state expectation rule (OpenSpec change
-``timeseries-narrow-store-expand-contract`` task 3.1) is the delicate part:
-a canonical table WITHOUT a sibling keeps today's text-shaped compression
-settings, a canonical table WITH a sibling is key-shaped and its sibling is
-text-shaped.  Nothing flips ahead of its own migration.
+``timeseries-narrow-store-expand-contract`` task 3.1) is the delicate part: a
+canonical table WITH a sibling is key-shaped and its sibling is text-shaped; a
+canonical table WITHOUT a sibling takes its entry in ``NO_SIBLING_SHAPE``, a
+per-table constant that is text-shaped today and is flipped to the key shape by
+that table's own CONTRACT migration (tasks 6.2 / 8.2) before the sibling is
+dropped.  Nothing flips ahead of its own migration and nothing reverts after
+it.
 """
 
 from __future__ import annotations
@@ -224,6 +227,56 @@ def test_both_siblings_present_flips_both_tables() -> None:
     ]
 
 
+def test_no_sibling_shape_is_todays_text_shape_for_both_tables() -> None:
+    """The flip is a constant, and today it is set to text for both tables — so
+    #1985 changed no expectation on the live catalog."""
+    assert discovery.NO_SIBLING_SHAPE[_RIVER] == discovery._TEXT_SHAPE[_RIVER]
+    assert discovery.NO_SIBLING_SHAPE[_FORCING] == discovery._TEXT_SHAPE[_FORCING]
+    assert set(discovery.NO_SIBLING_SHAPE) == set(discovery.CANONICAL_HYPERTABLES)
+
+
+def test_post_contract_river_is_red_today_and_green_once_the_constant_flips(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The catalog AFTER the river contract migration: the sibling is gone and
+    the canonical table is physically key-shaped.
+
+    Sibling presence alone cannot answer this — the catalog looks exactly like
+    today's — so the expectation must come from the per-table constant. Red
+    here today is correct and is the pin task 6.2 satisfies by flipping the
+    river entry to the key shape and deploying that BEFORE the DROP.
+    """
+
+    post_contract = [*_RIVER_KEY, *_FORCING_TEXT]
+    assert discovery.compression_settings_expectation(discovery.CANONICAL_KEYS) != post_contract
+
+    monkeypatch.setitem(discovery.NO_SIBLING_SHAPE, _RIVER, discovery._KEY_SHAPE[_RIVER])
+    assert discovery.compression_settings_expectation(discovery.CANONICAL_KEYS) == post_contract
+
+
+def test_flipping_river_does_not_flip_forcing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One constant per contract: I9 must not drag the forcing table with it."""
+    monkeypatch.setitem(discovery.NO_SIBLING_SHAPE, _RIVER, discovery._KEY_SHAPE[_RIVER])
+    assert discovery.compression_settings_expectation(discovery.CANONICAL_KEYS) == [
+        *_RIVER_KEY,
+        *_FORCING_TEXT,
+    ]
+
+
+def test_a_sibling_still_wins_over_the_no_sibling_constant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """During the expand window the sibling decides; the constant is only the
+    answer to "no sibling in the catalog"."""
+    monkeypatch.setitem(discovery.NO_SIBLING_SHAPE, _RIVER, discovery._KEY_SHAPE[_RIVER])
+    present = (*discovery.CANONICAL_KEYS, "hydro.river_timeseries_legacy")
+    assert discovery.compression_settings_expectation(present) == [
+        *_RIVER_KEY,
+        *_RIVER_LEGACY_TEXT,
+        *_FORCING_TEXT,
+    ]
+
+
 def test_expectation_rows_are_in_catalog_order() -> None:
     """The supervisor orders by (schema, name, segmentby idx NULLS LAST,
     orderby idx NULLS LAST); the expectation must be produced in that order or
@@ -303,6 +356,9 @@ _CONSUMERS = (
     "scripts/node27_timeseries_compression_live_evidence.py",
     "scripts/node27_autopipeline.py",
     "packages/common/node27_cold_governance_collection.py",
+    # #1985 round-1: the audit's own policy-missing checks were still keyed on
+    # two bare table names after the collection side had been converted.
+    "scripts/node27_resource_governance.py",
 )
 
 
@@ -311,4 +367,9 @@ def test_every_lifecycle_consumer_imports_the_shared_helper(relative: str) -> No
     """One helper, seven call sites. A tool that re-derives the set from its own
     literals is exactly the second code change D7 promises not to need."""
     source = (_ROOT / relative).read_text(encoding="utf-8")
-    assert "node27_timeseries_hypertable_discovery" in source, relative
+    # The IMPORT STATEMENT, not the bare module name: a comment naming the
+    # helper used to satisfy the substring form of this pin, which would have
+    # let a consumer keep its own literals and still look converted.
+    assert (
+        "from packages.common.node27_timeseries_hypertable_discovery import" in source
+    ), relative

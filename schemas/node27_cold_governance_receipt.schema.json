@@ -138,13 +138,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "uncompressed_bytes": {"type": "integer", "minimum": 0},
-        "uncompressed_chunks": {"type": "integer", "minimum": 0},
+        "uncompressed_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "uncompressed_chunks": {"type": ["integer", "null"], "minimum": 0},
         "daily_ingest_bytes": {"type": ["integer", "null"], "minimum": 0},
         "next_compressible_at": {"type": ["string", "null"], "format": "date-time"},
         "home_free_bytes": {"type": ["integer", "null"], "minimum": 0},
-        "projected_peak_bytes": {"type": "integer", "minimum": 0},
-        "projection_status": {"enum": ["ok", "no_uncompressed_chunk", "watermark_unavailable"]},
+        "projected_peak_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "projection_status": {"enum": ["ok", "no_uncompressed_chunk", "watermark_unavailable", "working_set_unavailable"]},
         "compression_lag_seconds": {"type": "integer", "minimum": 1},
         "watermark": {"type": ["string", "null"], "format": "date-time"},
         "hypertables": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 8}

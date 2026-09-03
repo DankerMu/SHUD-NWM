@@ -194,7 +194,7 @@ jobs:
               echo "Validating $example against $schema ..."
               check-jsonschema --schemafile "$schema" "$example"
             else
-              family=$(echo "$base" | sed -E 's/\.(noop|intent|partial|error)$//')
+              family=$(echo "$base" | sed -E 's/\.(noop|intent|partial|error|drift)$//')
               family_schema="schemas/${family}.schema.json"
               if [ "$family" != "$base" ] && [ -f "$family_schema" ]; then
                 echo "Validating $example against $family_schema ..."

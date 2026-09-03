@@ -306,7 +306,9 @@ against the committed `.example` templates as of 2026-08-01:
 Native TimescaleDB compression is the sole mechanism this milestone applies
 to shrink the two hot hypertables (`hydro.river_timeseries` and
 `met.forcing_station_timeseries`). Compression is applied to terminal chunks
-only (age older than the configurable lag, default 7 d) by the receipted
+only (age older than the configured lag —
+`NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS`, `172800` = 2 days both on the box
+and in the template since `#1985`; the 7-day figure is retired) by the receipted
 runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
 active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
@@ -369,10 +371,24 @@ rollout checklist), drain the existing stock of 7-day chunks with manual ticks
 at `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1` and the §4.5 raised
 timeout/wall triple — the same procedure already executed for chunk 91. After
 the expand, the renamed table holds at most the one chunk whose `range_end` was
-still in the future at rename time; every later tick is a pure narrow tick at
-bound 4. Retention then drains the sibling under the unchanged 14-day window,
-and the retention receipt's `legacy_chunks["hydro.river_timeseries_legacy"]`
-counts it down to `0` — the contract migration's entry gate.
+still in the future at rename time. **That last chunk is the residual mixed
+tick, and the pre-expand drain does not remove it:** its `range_end` is in the
+future when the rename happens, so it only becomes eligible at
+`range_end + lag`, days later, when narrow chunks are already arriving. Under
+bound 4 it would share a tick with them — `51 min` for the legacy chunk plus
+three narrow chunks at ~7.5 min ≈ 73 min, past the 3900 s (65 min) wrapper wall.
+
+**So `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1` stays in force from the
+expand window until a compression receipt shows the last `_legacy` chunk
+compressed** (`per_table_totals["hydro.river_timeseries_legacy"]
+["chunks_compressed"] ≥ 1` on the tick that takes it, and the next tick
+selecting no legacy chunk at all). Only then restore `4`. Bound 1 costs
+throughput — one chunk per tick against an arrival of two per day — so it is a
+backlog, not a steady state: expect a short catch-up under §4.5 after the
+restore. Retention meanwhile drains the sibling under the unchanged 14-day
+window, and the retention receipt's
+`legacy_chunks["hydro.river_timeseries_legacy"]` counts it down to `0` — the
+contract migration's entry gate.
 
 Measured inputs (node-27, read-only, 2026-08-14 unless noted):
 
@@ -3714,44 +3730,74 @@ before a receipt exists.
      **`/home` free space has no critical tier of its own** (line numbers
      re-pinned 2026-09-03, `#1985`). The resource-governance audit gives that
      mount a warning threshold only — `home_free_warn_bytes` (default 300 GiB)
-     -> `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:74`
-     (threshold), `:237` (comparison), `:242` (the code literal)
+     -> `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:76`
+     (threshold), `:239` (comparison), `:244` (the code literal)
      — and there is no `home_free_critical_bytes` at all. The exit-1 /
      `OnFailure=` mail lane has two triggers, in this order: the receipt's
-     `status` is not `completed` (`:784-785`), or the receipt carries at least
-     one `severity: critical` recommendation (`:790-793`, `:746`
+     `status` is not `completed` (`:835-836`), or the receipt carries at least
+     one `severity: critical` recommendation (`:841-844`, `:797`
      `_critical_codes`). The first is a defensive guard today — `build_receipt`
-     hard-codes `"status": "completed"` (`:450`) and nothing downgrades it — so
+     hard-codes `"status": "completed"` (`:484`) and nothing downgrades it — so
      in practice a critical recommendation is the only thing that reddens a
      completed audit. (A rejected config never gets that far: the config parse
-     is `:770-776` and the `return 2` is `:777`, which also trips
+     is `:820-822` and the `return 2` is `:828`, which also trips
      `OnFailure=`.) A `warning` changes neither `status` nor the critical
      list, so it trips nothing.
 
      The codes that can be critical today are `ROOT_FREE_BELOW_CRITICAL`
-     (`:220`), `HYPERTABLE_INDEX_RATIO_HIGH` (`:334`, severity assigned at
-     `:324`) and the two working-set codes `#1985` added:
-     `WATERMARK_UNAVAILABLE` (`:402` — the display watermark could not be
-     proven, so no projection is possible and the lane's own fault must reach a
-     person) and `PROJECTED_PEAK_EXCEEDS_HOME_FREE` (`:420` —
-     `projected_peak_bytes > home_free_bytes - safety_margin_bytes`, margin
-     default 100 GiB, `--safety-margin-bytes`). The same block adds one
-     warning, `WORKING_SET_ABOVE_WARNING` (`:433` — `uncompressed_bytes` above
-     `working_set_warn_bytes`, default 400 GiB). `DATABASE_SIZE_ABOVE_WARNING`
-     and `DATABASE_SIZE_ABOVE_CRITICAL` are **`info` since `#1985`**
-     (`:255-266`): the `nhms` database growing past 500 GiB is what the
-     retention window is supposed to allow, and a daily false critical is
-     exactly how the true one gets ignored.
+     (`:222`), `HYPERTABLE_INDEX_RATIO_HIGH` (`:342`, severity assigned at
+     `:333`) and the three working-set codes `#1985` added:
+
+     - `WORKING_SET_UNAVAILABLE` (`:420`) — the working set could not be
+       measured at all: the catalog probes raised, or they returned no row for
+       a canonical hypertable (the shape a read-only role takes when it loses
+       `timescaledb_information.*` visibility). An empty catalog reads exactly
+       like "everything is already compressed", so this status is the only
+       thing between a blinded audit and a green receipt that has stopped
+       watching the volume.
+     - `WATERMARK_UNAVAILABLE` (`:436`) — the display watermark could not be
+       proven, so no projection is possible; the lane's own fault, and it must
+       reach a person.
+     - `PROJECTED_PEAK_EXCEEDS_HOME_FREE` (`:454`) —
+       `projected_peak_bytes > home_free_bytes - safety_margin_bytes`, margin
+       default 100 GiB (`--safety-margin-bytes`). Gated on
+       `projection_status == "ok"`: with nothing uncompressed there is no next
+       compression to project.
+
+     The same block adds one warning, `WORKING_SET_ABOVE_WARNING` (`:467` —
+     `uncompressed_bytes` above `working_set_warn_bytes`, default 400 GiB).
+     `DATABASE_SIZE_ABOVE_WARNING` and `DATABASE_SIZE_ABOVE_CRITICAL` are
+     **`info` since `#1985`** (`:262`, `:265`): the `nhms` database growing past
+     500 GiB is what the retention window is supposed to allow, and a daily
+     false critical is exactly how the true one gets ignored.
 
      Every critical prints `RESOURCE_GOVERNANCE_CRITICAL:<code>` on stderr
-     (`:792`, byte shape unchanged — other tooling greps it) and, only when at
+     (`:843`, byte shape unchanged — other tooling greps it) and, only when at
      least one critical fired, one additional
-     `RESOURCE_GOVERNANCE_WORKING_SET:{...}` line (`:793-796`) carrying
+     `RESOURCE_GOVERNANCE_WORKING_SET:{...}` line (`:844-847`) carrying
      `uncompressed_bytes`, `daily_ingest_bytes`, `next_compressible_at`,
      `home_free_bytes`, `projected_peak_bytes`, `projection_status` and
      `compression_lag_seconds`. The shared `OnFailure=` handler mails journal
      lines, not a per-lane template, so that line is how the mail body carries
      numbers; `--quiet` (what the wrapper uses) suppresses stdout only.
+
+     **Expect the first deployment to be red, and do not silence it.** With the
+     shipped defaults (100 GiB safety margin) and the 2026-09-03 measurement —
+     869 GB uncompressed working set against 295 GB free on `/home` — the very
+     first daily audit after this lane deploys exits 1 on
+     `PROJECTED_PEAK_EXCEEDS_HOME_FREE` and mails `OnFailure=`, and it will do
+     so on every tick for as long as `home_free_bytes - safety_margin_bytes`
+     stays below the uncompressed stock, i.e. until the one-day-chunk expand
+     migration lands and the stock drains. That is a TRUE capacity hazard, not
+     a false positive: the projection is describing the same condition that
+     filled `/home` on 2026-07-25/26. The acknowledgement is to **record
+     `projected_peak_bytes` and `home_free_bytes` from the receipt in the
+     maintenance log** on each red tick, so the trend is visible and the day it
+     stops being red is visible too. **Never raise
+     `NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES` to make the alarm stop** — that
+     edits the threshold instead of the hazard and leaves the lane permanently
+     unable to warn about the next one. The I8 rollout checklist carries the
+     same instruction.
 
      So a raw free-space shortfall on the volume that actually holds pgdata and
      the object store still only appears as a `warning` line in a receipt

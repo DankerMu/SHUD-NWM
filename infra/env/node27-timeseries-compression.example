@@ -46,6 +46,12 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 # single chunk (about 508 GB, roughly 51 min at the measured 6.0 s/GB) already
 # approaches the 60-minute per-chunk timeout, so the backlog is compressed
 # BEFORE the expand under PER_TICK_BOUND=1, never mixed into a bound-4 tick.
+# The pre-expand drain cannot reach the LAST legacy chunk: its range_end is
+# still in the future at rename time, so it becomes eligible at range_end + lag,
+# by which point narrow chunks are arriving and a bound-4 tick would mix them
+# (51 min + 3 x 7.5 min is past the 3900 s wall). Operational rule during the
+# transition: set this to 1 for the expand window and keep it at 1 until a
+# receipt shows that last `_legacy` chunk compressed, then restore 4.
 # It is a throughput ceiling, NOT the number of river-size chunks one tick can
 # actually redeem. The per-tick hint further below (=1) governs whenever more
 # than one river-size chunk could be eligible in a single tick — in that state
