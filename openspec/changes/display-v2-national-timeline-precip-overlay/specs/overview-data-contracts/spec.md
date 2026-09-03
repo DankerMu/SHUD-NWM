@@ -107,6 +107,8 @@ The system SHALL keep the default `gfs+discharge` overview cold first-paint with
 - **AND** at least one MVT hit-layer MUST be registered with MapLibre by that point so a river segment is clickable
 - **AND** the precipitation index fetch and the first PNG request MUST NOT be awaited before `mapBootstrapLoading` settles
 
+## ADDED Requirements
+
 ### Requirement: Cycles and precipitation index requests stay off the bootstrap critical path
 The bootstrap critical path SHALL remain `fetchBasins` + `fetchLayers(null)` + valid_time resolution from `metadata.valid_times` (the `Bootstrap minimal request set` scenario, restated above for the `gfs+discharge` national default). `GET /api/v1/layers/discharge/cycles`, `GET /api/v1/layers/discharge/valid-times?source=&cycle=` and `GET /api/v1/precip/{source}/{cycle}/index` SHALL be issued only after `mapBootstrapLoading` settles, as non-blocking enrichment fetches: the bottom control bar renders immediately from `metadata.default_source` / `metadata.default_cycle` / `metadata.valid_times`, the cycle selector shows only the default cycle until the cycles list arrives, and the precipitation raster is registered when its index arrives.
 
