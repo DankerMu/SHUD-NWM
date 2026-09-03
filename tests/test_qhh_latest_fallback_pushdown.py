@@ -188,10 +188,17 @@ def test_scan_pushdown_predicates_present_in_both_sample_ctes() -> None:
     # see a guard whose escape branch has drifted. Do not simplify these
     # substrings on the grounds that the adjacency check covers them.
     river_outer = outer_predicates(river_cte)
-    assert "AND (%(scan_run_id)s IS NULL OR (rt.run_id = %(scan_run_id)s AND rt.run_key = ))" in river_outer
+    # #1980 note on the space in ``OR ( rt.``: the removal marker now sits on
+    # its own line INSIDE the disjunct, immediately above the aid, so once
+    # ``strip_comments`` has replaced it the bracket is followed by whitespace.
+    # The pin is re-spelled rather than loosened — the shape it protects (the
+    # aid AND-ed to its key resolution inside the guard, the guard folding away
+    # on a NULL binding) is unchanged, and the fold is exactly what makes the
+    # aid line deletable by #1342.
+    assert "AND (%(scan_run_id)s IS NULL OR ( rt.run_id = %(scan_run_id)s AND rt.run_key = ))" in river_outer
     assert (
         "AND (%(scan_river_network_version_id)s IS NULL "
-        "OR (rt.river_network_version_id = %(scan_river_network_version_id)s "
+        "OR ( rt.river_network_version_id = %(scan_river_network_version_id)s "
         "AND rt.river_network_version_key = ))"
     ) in river_outer
     assert "AND (%(scan_basin_version_id)s IS NULL OR rt.basin_version_key = )" in river_outer

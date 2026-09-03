@@ -419,7 +419,9 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
     )
 
     for expected in (
-        "AND run_key = (",
+        # #1980: `run_key` is now the WHERE-line conjunct and `run_id` the marked
+        # aid under it, so the key resolution opens the chain.
+        "WHERE run_key = (",
         "SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id",
         "AND basin_version_key = (",
         "SELECT basin_version_key FROM core.basin_version",
@@ -439,9 +441,14 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
     # sanctioned text aid as ADJACENT to its counterpart (a pair split across
     # the query stops being a self-evident no-op), and is red the moment any
     # other predicate — text or key — appears.
+    # #1980 re-pin: `run_id` is now the marked aid on its own `AND` line under
+    # the `WHERE` line's key predicate, so the first two conjuncts swap. The
+    # index-order claim this equality makes is about the KEY columns, which are
+    # unmoved; conjunct order inside one AND-chain is the one thing #1980's
+    # golden oracle deliberately does not preserve.
     assert outer_predicates(named_branch_sql) == (
         "SELECT DISTINCT valid_time FROM hydro.river_timeseries "
-        "WHERE run_id = :run_id AND run_key = "
+        "WHERE run_key = AND run_id = :run_id "
         "AND basin_version_key = "
         "AND river_network_version_id = :river_network_version_id AND river_network_version_key = "
         "AND variable = :variable AND variable_e = "

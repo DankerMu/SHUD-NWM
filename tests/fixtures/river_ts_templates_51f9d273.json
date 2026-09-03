@@ -1,0 +1,1118 @@
+{
+  "base_sha": "51f9d273e41ea129e4e3feef1c71b168657587c9",
+  "note": "Golden capture of every registered river read template, taken from a working tree whose reader sources were VERIFIED CLEAN at base_sha, BEFORE #1980's layout normalisation. Each entry records the template's AND-chains as produced by packages.common.river_ts_render.sql_chains: comments removed, whitespace collapsed and bracket padding normalised, split on top-level AND per chain, conjuncts sorted within a chain, chains in document order. The equivalence oracle asserts that render(entry, 'legacy') with hydro.river_timeseries_legacy substituted back to hydro.river_timeseries reproduces this exactly, which is the machine-checkable form of 'equal modulo whitespace, marker placement and conjunct order within one AND-chain'. Regenerate ONLY from a clean base tree: a capture taken after the edit would certify the edit against itself.",
+  "entries": {
+    "hydro_display:mvt_source_identity_probe": {
+      "path": "apps/api/routes/hydro_display.py",
+      "kind": "statement",
+      "params": "named",
+      "mentions": 1,
+      "chains": [
+        [
+          "basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = :basin_version_id)",
+          "river_network_version_id = :river_network_version_id",
+          "river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = :river_network_version_id)",
+          "run_id = :run_id",
+          "run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id)",
+          "valid_time = :valid_time",
+          "variable = :variable",
+          "variable_e = (SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e WHERE e::text = :variable)"
+        ],
+        [
+          "run_id = :run_id"
+        ],
+        [
+          "basin_version_id = :basin_version_id"
+        ],
+        [
+          "river_network_version_id = :river_network_version_id"
+        ],
+        [
+          "e::text = :variable"
+        ]
+      ]
+    },
+    "display_coverage:refresh": {
+      "path": "packages/common/display_coverage.py",
+      "kind": "statement",
+      "params": "named",
+      "mentions": 1,
+      "chains": [
+        [
+          "bv.basin_version_id = h.basin_version_id"
+        ],
+        [
+          "mi.model_id = h.model_id"
+        ],
+        [
+          "rnv.river_network_version_id = mi.river_network_version_id"
+        ],
+        [
+          "fv.forcing_version_id = h.forcing_version_id"
+        ],
+        [
+          "(%(basin_id)s IS NULL OR bv.basin_id = %(basin_id)s)",
+          "(%(run_id)s IS NULL OR h.run_id = %(run_id)s)",
+          "h.cycle_time IS NOT NULL",
+          "h.run_type = 'forecast'",
+          "h.status IN ('succeeded', 'parsed', 'published')"
+        ],
+        [
+          "LOWER(fst.source_id) = LOWER(cr.source_id)",
+          "cr.forcing_version_id = fst.forcing_version_id",
+          "fst.basin_version_id = cr.basin_version_id"
+        ],
+        [
+          "(%(scan_basin_version_id)s IS NULL OR fst.basin_version_id = %(scan_basin_version_id)s)",
+          "(%(scan_display_end)s IS NULL OR fst.valid_time <= %(scan_display_end)s)",
+          "(%(scan_display_start)s IS NULL OR fst.valid_time >= %(scan_display_start)s)",
+          "(%(scan_forcing_version_id)s IS NULL OR fst.forcing_version_id = %(scan_forcing_version_id)s)",
+          "(%(scan_source_id_lower)s IS NULL OR LOWER(fst.source_id) = %(scan_source_id_lower)s)",
+          "EXISTS (SELECT 1 FROM met.interp_weight iw WHERE iw.model_id = cr.model_id AND iw.station_id = fst.station_id AND iw.variable = fst.variable AND LOWER(iw.source_id) = LOWER(cr.source_id))",
+          "fst.valid_time <= cr.display_end_time",
+          "fst.valid_time >= cr.display_start_time",
+          "fst.variable = ANY(%(variables)s)"
+        ],
+        [
+          "LOWER(iw.source_id) = LOWER(cr.source_id)",
+          "iw.model_id = cr.model_id",
+          "iw.station_id = fst.station_id",
+          "iw.variable = fst.variable"
+        ],
+        [
+          "expected_station_count IS NOT NULL",
+          "station_count = expected_station_count"
+        ],
+        [
+          "common_window.basin_version_id = rollup.basin_version_id",
+          "common_window.display_end_time = rollup.display_end_time",
+          "common_window.display_start_time = rollup.display_start_time",
+          "common_window.forcing_version_id = rollup.forcing_version_id",
+          "common_window.model_id = rollup.model_id",
+          "common_window.run_id = rollup.run_id",
+          "common_window.station_source_id = rollup.station_source_id"
+        ],
+        [
+          "sample_stats.basin_version_id = identity_stats.basin_version_id",
+          "sample_stats.display_end_time = identity_stats.display_end_time",
+          "sample_stats.display_start_time = identity_stats.display_start_time",
+          "sample_stats.forcing_version_id = identity_stats.forcing_version_id",
+          "sample_stats.model_id = identity_stats.model_id",
+          "sample_stats.run_id = identity_stats.run_id",
+          "sample_stats.station_source_id = identity_stats.station_source_id",
+          "sample_stats.variable = identity_stats.variable"
+        ],
+        [
+          "common_times.basin_version_id = identity_stats.basin_version_id",
+          "common_times.display_end_time = identity_stats.display_end_time",
+          "common_times.display_start_time = identity_stats.display_start_time",
+          "common_times.forcing_version_id = identity_stats.forcing_version_id",
+          "common_times.model_id = identity_stats.model_id",
+          "common_times.run_id = identity_stats.run_id",
+          "common_times.station_source_id = identity_stats.station_source_id",
+          "common_times.variable = identity_stats.variable"
+        ],
+        [
+          "cr.basin_version_key = rt.basin_version_key",
+          "cr.river_network_version_key = rt.river_network_version_key",
+          "cr.run_key = rt.run_key"
+        ],
+        [
+          "(%(scan_basin_version_id)s IS NULL OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %(scan_basin_version_id)s))",
+          "(%(scan_display_end)s IS NULL OR rt.valid_time <= %(scan_display_end)s)",
+          "(%(scan_display_start)s IS NULL OR rt.valid_time >= %(scan_display_start)s)",
+          "(%(scan_river_network_version_id)s IS NULL OR (rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %(scan_river_network_version_id)s)))",
+          "(%(scan_run_id)s IS NULL OR (rt.run_id = %(scan_run_id)s AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(scan_run_id)s)))",
+          "rt.valid_time <= cr.display_end_time",
+          "rt.valid_time >= cr.display_start_time",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "rt.run_id = %(scan_run_id)s",
+          "rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(scan_run_id)s)"
+        ],
+        [
+          "run_id = %(scan_run_id)s"
+        ],
+        [
+          "basin_version_id = %(scan_basin_version_id)s"
+        ],
+        [
+          "rt.river_network_version_id = %(scan_river_network_version_id)s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %(scan_river_network_version_id)s)"
+        ],
+        [
+          "river_network_version_id = %(scan_river_network_version_id)s"
+        ],
+        [
+          "expected_segment_count IS NOT NULL",
+          "segment_count = expected_segment_count"
+        ],
+        [
+          "common_window.basin_version_key = rollup.basin_version_key",
+          "common_window.river_network_version_key = rollup.river_network_version_key",
+          "common_window.run_key = rollup.run_key"
+        ],
+        [
+          "rollup_run.run_key = rollup.run_key"
+        ],
+        [
+          "rollup_basin.basin_version_key = rollup.basin_version_key"
+        ],
+        [
+          "rollup_network.river_network_version_key = rollup.river_network_version_key"
+        ],
+        [
+          "sc.basin_version_id = cr.basin_version_id",
+          "sc.display_end_time = cr.display_end_time",
+          "sc.display_start_time = cr.display_start_time",
+          "sc.forcing_version_id = cr.forcing_version_id",
+          "sc.model_id = cr.model_id",
+          "sc.run_id = cr.run_id",
+          "sc.station_source_id = LOWER(cr.source_id)"
+        ],
+        [
+          "svc.basin_version_id = cr.basin_version_id",
+          "svc.display_end_time = cr.display_end_time",
+          "svc.display_start_time = cr.display_start_time",
+          "svc.forcing_version_id = cr.forcing_version_id",
+          "svc.model_id = cr.model_id",
+          "svc.run_id = cr.run_id",
+          "svc.station_source_id = LOWER(cr.source_id)"
+        ],
+        [
+          "hc.basin_version_id = cr.basin_version_id",
+          "hc.river_network_version_id = cr.river_network_version_id",
+          "hc.run_id = cr.run_id"
+        ],
+        [
+          "CONFLICT (run_id) DO UPDATE"
+        ],
+        [
+          "%(force)s OR EXCLUDED.segment_count > 0 OR hydro.run_display_coverage.segment_count = 0"
+        ]
+      ]
+    },
+    "forecast_store:segment_identity_predicates": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "fragment",
+      "params": "positional",
+      "mentions": 0,
+      "chains": [
+        [
+          "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s)",
+          "rt.river_network_version_id = %s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %s)",
+          "rt.river_segment_id = %s",
+          "rt.river_segment_key = (SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %s AND river_network_version_id = %s)",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "basin_version_id = %s"
+        ],
+        [
+          "river_network_version_id = %s",
+          "river_segment_id = %s"
+        ],
+        [
+          "river_network_version_id = %s"
+        ]
+      ]
+    },
+    "forecast_store:latest_issue_time": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "h.run_key = rt.run_key"
+        ],
+        [
+          "h.cycle_time IS NOT NULL",
+          "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s)",
+          "rt.river_network_version_id = %s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %s)",
+          "rt.river_segment_id = %s",
+          "rt.river_segment_key = (SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %s AND river_network_version_id = %s)",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "basin_version_id = %s"
+        ],
+        [
+          "river_network_version_id = %s",
+          "river_segment_id = %s"
+        ],
+        [
+          "river_network_version_id = %s"
+        ]
+      ]
+    },
+    "forecast_store:per_source_latest_cycles": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "h.run_key = rt.run_key"
+        ],
+        [
+          "h.cycle_time IS NOT NULL",
+          "h.run_type = 'forecast'",
+          "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s)",
+          "rt.river_network_version_id = %s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %s)",
+          "rt.river_segment_id = %s",
+          "rt.river_segment_key = (SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %s AND river_network_version_id = %s)",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "basin_version_id = %s"
+        ],
+        [
+          "river_network_version_id = %s",
+          "river_segment_id = %s"
+        ],
+        [
+          "river_network_version_id = %s"
+        ]
+      ]
+    },
+    "forecast_store:latest_analysis_issue_time": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "h.run_key = rt.run_key"
+        ],
+        [
+          "h.end_time IS NOT NULL",
+          "h.scenario_id = 'analysis_true_field'",
+          "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s)",
+          "rt.river_network_version_id = %s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %s)",
+          "rt.river_segment_id = %s",
+          "rt.river_segment_key = (SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %s AND river_network_version_id = %s)",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "basin_version_id = %s"
+        ],
+        [
+          "river_network_version_id = %s",
+          "river_segment_id = %s"
+        ],
+        [
+          "river_network_version_id = %s"
+        ]
+      ]
+    },
+    "forecast_store:analysis_segment_rows": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "(rt.valid_time) h.scenario_id, h.source_id, h.forcing_version_id, rt.valid_time, rt.value, rt.unit_e::text AS unit"
+        ],
+        [
+          "h.run_key = rt.run_key"
+        ],
+        [
+          "h.scenario_id = 'analysis_true_field'",
+          "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s)",
+          "rt.river_network_version_id = %s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %s)",
+          "rt.river_segment_id = %s",
+          "rt.river_segment_key = (SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %s AND river_network_version_id = %s)",
+          "rt.valid_time < %s",
+          "rt.valid_time >= %s",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "basin_version_id = %s"
+        ],
+        [
+          "river_network_version_id = %s",
+          "river_segment_id = %s"
+        ],
+        [
+          "river_network_version_id = %s"
+        ]
+      ]
+    },
+    "forecast_store:forecast_segment_rows_selected_cycles": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "h.run_key = rt.run_key"
+        ],
+        [
+          "rnv.river_network_version_key = rt.river_network_version_key"
+        ],
+        [
+          "sc.cycle_time = h.cycle_time",
+          "sc.scenario_id = h.scenario_id"
+        ],
+        [
+          "h.run_type = 'forecast'",
+          "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s)",
+          "rt.river_network_version_id = %s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %s)",
+          "rt.river_segment_id = %s",
+          "rt.river_segment_key = (SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %s AND river_network_version_id = %s)",
+          "rt.valid_time <= h.cycle_time + INTERVAL '7 days'",
+          "rt.valid_time >= h.cycle_time",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "basin_version_id = %s"
+        ],
+        [
+          "river_network_version_id = %s",
+          "river_segment_id = %s"
+        ],
+        [
+          "river_network_version_id = %s"
+        ]
+      ]
+    },
+    "forecast_store:forecast_segment_rows": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "h.run_key = rt.run_key"
+        ],
+        [
+          "rnv.river_network_version_key = rt.river_network_version_key"
+        ],
+        [
+          "h.cycle_time = %s",
+          "h.run_type = 'forecast'",
+          "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s)",
+          "rt.river_network_version_id = %s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %s)",
+          "rt.river_segment_id = %s",
+          "rt.river_segment_key = (SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %s AND river_network_version_id = %s)",
+          "rt.valid_time <= %s",
+          "rt.valid_time >= %s",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "basin_version_id = %s"
+        ],
+        [
+          "river_network_version_id = %s",
+          "river_segment_id = %s"
+        ],
+        [
+          "river_network_version_id = %s"
+        ]
+      ]
+    },
+    "forecast_store:latest_run_type_valid_time": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "h.run_key = rt.run_key"
+        ],
+        [
+          "LOWER(h.run_type) = ANY(%s)",
+          "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s)",
+          "rt.river_network_version_id = %s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %s)",
+          "rt.river_segment_id = %s",
+          "rt.river_segment_key = (SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %s AND river_network_version_id = %s)",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "basin_version_id = %s"
+        ],
+        [
+          "river_network_version_id = %s",
+          "river_segment_id = %s"
+        ],
+        [
+          "river_network_version_id = %s"
+        ]
+      ]
+    },
+    "forecast_store:run_type_segment_rows": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "h.run_key = rt.run_key"
+        ],
+        [
+          "rnv.river_network_version_key = rt.river_network_version_key"
+        ],
+        [
+          "LOWER(h.run_type) = ANY(%s)",
+          "rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %s)",
+          "rt.river_network_version_id = %s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %s)",
+          "rt.river_segment_id = %s",
+          "rt.river_segment_key = (SELECT river_segment_key FROM core.river_segment WHERE river_segment_id = %s AND river_network_version_id = %s)",
+          "rt.valid_time <= %s",
+          "rt.valid_time >= %s",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "basin_version_id = %s"
+        ],
+        [
+          "river_network_version_id = %s",
+          "river_segment_id = %s"
+        ],
+        [
+          "river_network_version_id = %s"
+        ]
+      ]
+    },
+    "forecast_store:latest_product_fallback": {
+      "path": "packages/common/forecast_store.py",
+      "kind": "statement",
+      "params": "named",
+      "mentions": 1,
+      "chains": [
+        [
+          "bv.basin_version_id = h.basin_version_id"
+        ],
+        [
+          "mi.model_id = h.model_id"
+        ],
+        [
+          "rnv.river_network_version_id = mi.river_network_version_id"
+        ],
+        [
+          "fv.forcing_version_id = h.forcing_version_id"
+        ],
+        [
+          "LOWER(h.source_id) = LOWER(%(source_id)s)",
+          "bv.basin_id = %(basin_id)s",
+          "h.cycle_time IS NOT NULL",
+          "h.run_id = %(scan_run_id)s",
+          "h.run_type = 'forecast'",
+          "h.status IN ('succeeded', 'parsed', 'published')"
+        ],
+        [
+          "LOWER(fst.source_id) = LOWER(cr.source_id)",
+          "cr.forcing_version_id = fst.forcing_version_id",
+          "fst.basin_version_id = cr.basin_version_id"
+        ],
+        [
+          "(%(scan_basin_version_id)s IS NULL OR fst.basin_version_id = %(scan_basin_version_id)s)",
+          "(%(scan_display_end)s IS NULL OR fst.valid_time <= %(scan_display_end)s)",
+          "(%(scan_display_start)s IS NULL OR fst.valid_time >= %(scan_display_start)s)",
+          "(%(scan_forcing_version_id)s IS NULL OR fst.forcing_version_id = %(scan_forcing_version_id)s)",
+          "(%(scan_source_id_lower)s IS NULL OR LOWER(fst.source_id) = %(scan_source_id_lower)s)",
+          "EXISTS (SELECT 1 FROM met.interp_weight iw WHERE iw.model_id = cr.model_id AND iw.station_id = fst.station_id AND iw.variable = fst.variable AND LOWER(iw.source_id) = LOWER(cr.source_id))",
+          "fst.valid_time <= cr.display_end_time",
+          "fst.valid_time >= cr.display_start_time",
+          "fst.variable = ANY(%(variables)s)"
+        ],
+        [
+          "LOWER(iw.source_id) = LOWER(cr.source_id)",
+          "iw.model_id = cr.model_id",
+          "iw.station_id = fst.station_id",
+          "iw.variable = fst.variable"
+        ],
+        [
+          "expected_station_count IS NOT NULL",
+          "station_count = expected_station_count"
+        ],
+        [
+          "common_window.basin_version_id = rollup.basin_version_id",
+          "common_window.display_end_time = rollup.display_end_time",
+          "common_window.display_start_time = rollup.display_start_time",
+          "common_window.forcing_version_id = rollup.forcing_version_id",
+          "common_window.model_id = rollup.model_id",
+          "common_window.run_id = rollup.run_id",
+          "common_window.station_source_id = rollup.station_source_id"
+        ],
+        [
+          "sample_stats.basin_version_id = identity_stats.basin_version_id",
+          "sample_stats.display_end_time = identity_stats.display_end_time",
+          "sample_stats.display_start_time = identity_stats.display_start_time",
+          "sample_stats.forcing_version_id = identity_stats.forcing_version_id",
+          "sample_stats.model_id = identity_stats.model_id",
+          "sample_stats.run_id = identity_stats.run_id",
+          "sample_stats.station_source_id = identity_stats.station_source_id",
+          "sample_stats.variable = identity_stats.variable"
+        ],
+        [
+          "common_times.basin_version_id = identity_stats.basin_version_id",
+          "common_times.display_end_time = identity_stats.display_end_time",
+          "common_times.display_start_time = identity_stats.display_start_time",
+          "common_times.forcing_version_id = identity_stats.forcing_version_id",
+          "common_times.model_id = identity_stats.model_id",
+          "common_times.run_id = identity_stats.run_id",
+          "common_times.station_source_id = identity_stats.station_source_id",
+          "common_times.variable = identity_stats.variable"
+        ],
+        [
+          "cr.basin_version_key = rt.basin_version_key",
+          "cr.river_network_version_key = rt.river_network_version_key",
+          "cr.run_key = rt.run_key"
+        ],
+        [
+          "(%(scan_basin_version_id)s IS NULL OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = %(scan_basin_version_id)s))",
+          "(%(scan_display_end)s IS NULL OR rt.valid_time <= %(scan_display_end)s)",
+          "(%(scan_display_start)s IS NULL OR rt.valid_time >= %(scan_display_start)s)",
+          "(%(scan_river_network_version_id)s IS NULL OR (rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %(scan_river_network_version_id)s)))",
+          "(%(scan_run_id)s IS NULL OR (rt.run_id = %(scan_run_id)s AND rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(scan_run_id)s)))",
+          "rt.valid_time <= cr.display_end_time",
+          "rt.valid_time >= cr.display_start_time",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'::hydro.river_variable"
+        ],
+        [
+          "rt.run_id = %(scan_run_id)s",
+          "rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %(scan_run_id)s)"
+        ],
+        [
+          "run_id = %(scan_run_id)s"
+        ],
+        [
+          "basin_version_id = %(scan_basin_version_id)s"
+        ],
+        [
+          "rt.river_network_version_id = %(scan_river_network_version_id)s",
+          "rt.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = %(scan_river_network_version_id)s)"
+        ],
+        [
+          "river_network_version_id = %(scan_river_network_version_id)s"
+        ],
+        [
+          "expected_segment_count IS NOT NULL",
+          "segment_count = expected_segment_count"
+        ],
+        [
+          "common_window.basin_version_key = rollup.basin_version_key",
+          "common_window.river_network_version_key = rollup.river_network_version_key",
+          "common_window.run_key = rollup.run_key"
+        ],
+        [
+          "rollup_run.run_key = rollup.run_key"
+        ],
+        [
+          "rollup_basin.basin_version_key = rollup.basin_version_key"
+        ],
+        [
+          "rollup_network.river_network_version_key = rollup.river_network_version_key"
+        ],
+        [
+          "sc.basin_version_id = cr.basin_version_id",
+          "sc.display_end_time = cr.display_end_time",
+          "sc.display_start_time = cr.display_start_time",
+          "sc.forcing_version_id = cr.forcing_version_id",
+          "sc.model_id = cr.model_id",
+          "sc.run_id = cr.run_id",
+          "sc.station_source_id = LOWER(cr.source_id)"
+        ],
+        [
+          "svc.basin_version_id = cr.basin_version_id",
+          "svc.display_end_time = cr.display_end_time",
+          "svc.display_start_time = cr.display_start_time",
+          "svc.forcing_version_id = cr.forcing_version_id",
+          "svc.model_id = cr.model_id",
+          "svc.run_id = cr.run_id",
+          "svc.station_source_id = LOWER(cr.source_id)"
+        ],
+        [
+          "hc.basin_version_id = cr.basin_version_id",
+          "hc.river_network_version_id = cr.river_network_version_id",
+          "hc.run_id = cr.run_id"
+        ]
+      ]
+    },
+    "forcing_copyback_backfill:discover_backfill_runs": {
+      "path": "services/tile_publisher/forcing_copyback_backfill.py",
+      "kind": "statement",
+      "params": "named",
+      "mentions": 1,
+      "chains": [
+        [
+          "fv.forcing_version_id = h.forcing_version_id"
+        ],
+        [
+          "EXISTS (SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_key = h.run_key AND rt.variable = 'q_down' AND rt.variable_e = 'q_down' AND rt.value IS NOT NULL)",
+          "h.status IN ('succeeded', 'parsed', 'published')"
+        ],
+        [
+          "rt.run_key = h.run_key",
+          "rt.value IS NOT NULL",
+          "rt.variable = 'q_down'",
+          "rt.variable_e = 'q_down'"
+        ]
+      ]
+    },
+    "publisher:qdown_discovery": {
+      "path": "services/tile_publisher/publisher.py",
+      "kind": "statement",
+      "params": "named",
+      "mentions": 1,
+      "chains": [
+        [
+          "r.run_key = h.run_key",
+          "r.variable = 'q_down'",
+          "r.variable_e = 'q_down'"
+        ],
+        [
+          "rnv.river_network_version_key = r.river_network_version_key"
+        ],
+        [
+          "fv.forcing_version_id = h.forcing_version_id"
+        ],
+        [
+          "h.run_type = 'forecast'",
+          "h.status IN ('succeeded', 'parsed', 'published')",
+          "lower(h.source_id) = :source_id",
+          "r.variable_e = 'q_down'"
+        ]
+      ]
+    },
+    "mvt:postgis_tile_sql_hydro": {
+      "path": "services/tiles/mvt.py",
+      "kind": "statement",
+      "params": "named",
+      "mentions": 1,
+      "chains": [
+        [
+          "rs.river_segment_key = ts.river_segment_key"
+        ],
+        [
+          "ts.basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = :basin_version_id)",
+          "ts.river_network_version_id = :river_network_version_id",
+          "ts.river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = :river_network_version_id)",
+          "ts.run_id = :run_id",
+          "ts.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id)",
+          "ts.valid_time = :valid_time",
+          "ts.variable = :variable",
+          "ts.variable_e = (SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e WHERE e::text = :variable)"
+        ],
+        [
+          "run_id = :run_id"
+        ],
+        [
+          "basin_version_id = :basin_version_id"
+        ],
+        [
+          "river_network_version_id = :river_network_version_id"
+        ],
+        [
+          "e::text = :variable"
+        ],
+        [
+          "source_rows.geom && ST_Transform(bounds.geom_3857, 4490)",
+          "source_rows.geom IS NOT NULL"
+        ],
+        [
+          "source_coordinate_count <= :feature_coordinate_limit",
+          "source_coordinate_dimensions <= :max_coordinate_dimensions"
+        ],
+        [
+          "source_coordinate_count > :feature_coordinate_limit"
+        ],
+        [
+          "source_coordinate_dimensions > :max_coordinate_dimensions"
+        ],
+        [
+          "feature_id IS NULL OR feature_id::text = ''"
+        ],
+        [
+          "segment_id IS NULL OR segment_id::text = ''"
+        ],
+        [
+          "river_segment_id IS NULL OR river_segment_id::text = ''"
+        ],
+        [
+          "river_network_version_id IS NULL OR river_network_version_id::text = ''"
+        ],
+        [
+          "basin_version_id IS NULL OR basin_version_id::text = ''"
+        ],
+        [
+          "value IS NULL OR value::double precision IN ('NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision)"
+        ],
+        [
+          "unit IS NULL OR unit::text = ''"
+        ],
+        [
+          "quality_flag IS NULL OR quality_flag::text = ''"
+        ],
+        [
+          "run_id IS NULL OR run_id::text = ''"
+        ],
+        [
+          "variable IS NULL OR variable::text = ''"
+        ],
+        [
+          "valid_time IS NULL"
+        ],
+        [
+          "feature_id IS NULL OR feature_id::text = ''"
+        ],
+        [
+          "segment_id IS NULL OR segment_id::text = ''"
+        ],
+        [
+          "river_segment_id IS NULL OR river_segment_id::text = ''"
+        ],
+        [
+          "river_network_version_id IS NULL OR river_network_version_id::text = ''"
+        ],
+        [
+          "basin_version_id IS NULL OR basin_version_id::text = ''"
+        ],
+        [
+          "value IS NULL OR value::double precision IN ('NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision)"
+        ],
+        [
+          "unit IS NULL OR unit::text = ''"
+        ],
+        [
+          "quality_flag IS NULL OR quality_flag::text = ''"
+        ],
+        [
+          "run_id IS NULL OR run_id::text = ''"
+        ],
+        [
+          "variable IS NULL OR variable::text = ''"
+        ],
+        [
+          "valid_time IS NULL"
+        ],
+        [
+          "budget_stats.coordinate_count <= :collection_coordinate_limit",
+          "budget_stats.feature_count <= :feature_limit",
+          "prefilter_stats.coordinate_dimension_overflow_count = 0",
+          "prefilter_stats.feature_coordinate_overflow_count = 0",
+          "prefilter_stats.invalid_property_count = 0"
+        ],
+        [
+          "mvt_geom IS NOT NULL"
+        ]
+      ]
+    },
+    "mvt:postgis_tile_sql_hydro_national": {
+      "path": "services/tiles/mvt.py",
+      "kind": "statement",
+      "params": "named",
+      "mentions": 3,
+      "chains": [
+        [
+          "(mi.river_network_version_id) h.run_id, mi.river_network_version_id, h.run_key, rnv.river_network_version_key"
+        ],
+        [
+          "mi.basin_version_id = h.basin_version_id"
+        ],
+        [
+          "rnv.river_network_version_id = mi.river_network_version_id"
+        ],
+        [
+          "rdc.river_valid_time_end >= :valid_time",
+          "rdc.river_valid_time_start <= :valid_time",
+          "rdc.run_id = h.run_id",
+          "rdc.segment_count > 0"
+        ],
+        [
+          "h.status IN ('succeeded', 'parsed', 'published')",
+          "mi.active_flag",
+          "mi.river_network_version_id IS NOT NULL"
+        ],
+        [
+          "rs0.river_network_version_id = lr.river_network_version_id"
+        ],
+        [
+          "nsm.river_network_version_id = rs.river_network_version_id"
+        ],
+        [
+          "(:z >= 9 OR rs.stream_type IS NULL OR rs.stream_type >= LEAST(CASE WHEN :z <= 4 THEN 5.0 WHEN :z = 5 THEN 4.0 WHEN :z = 6 THEN 3.0 WHEN :z = 7 THEN 2.0 ELSE 1.0 END, nsm.max_stream_type))",
+          "rs.geom && ST_Transform(bounds.geom_3857, 4490)",
+          "rs.geom IS NOT NULL"
+        ],
+        [
+          "lr.river_network_version_id = seg.river_network_version_id"
+        ],
+        [
+          "ts.river_network_version_id = lr.river_network_version_id",
+          "ts.river_network_version_key = lr.river_network_version_key",
+          "ts.river_segment_id = seg.river_segment_id",
+          "ts.river_segment_key = seg.river_segment_key",
+          "ts.run_id = lr.run_id",
+          "ts.run_key = lr.run_key",
+          "ts.valid_time = :valid_time",
+          "ts.variable = :variable",
+          "ts.variable_e = (SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e WHERE e::text = :variable)"
+        ],
+        [
+          "e::text = :variable"
+        ],
+        [
+          "(:z >= 9 OR seg.stream_type IS NOT NULL)"
+        ],
+        [
+          "lr.river_network_version_id = seg.river_network_version_id"
+        ],
+        [
+          "ts.river_network_version_id = lr.river_network_version_id",
+          "ts.river_network_version_key = lr.river_network_version_key",
+          "ts.river_segment_id = seg.river_segment_id",
+          "ts.river_segment_key = seg.river_segment_key",
+          "ts.run_id = lr.run_id",
+          "ts.run_key = lr.run_key",
+          "ts.valid_time = :valid_time",
+          "ts.variable = :variable",
+          "ts.variable_e = (SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e WHERE e::text = :variable)"
+        ],
+        [
+          "e::text = :variable"
+        ],
+        [
+          ":z < 9",
+          "seg.stream_type IS NULL"
+        ],
+        [
+          "value_percent_rank >= CASE WHEN :z <= 4 THEN 0.90 WHEN :z = 5 THEN 0.70 WHEN :z = 6 THEN 0.40 WHEN :z = 7 THEN 0.15 ELSE 0.04 END",
+          "value_percent_rank IS NOT NULL"
+        ],
+        [
+          "rs.river_segment_key = sv.river_segment_key"
+        ],
+        [
+          "bv.basin_version_key = sv.basin_version_key"
+        ],
+        [
+          "(mi.river_network_version_id) h.run_key, rnv.river_network_version_key, h.run_id, mi.river_network_version_id"
+        ],
+        [
+          "mi.basin_version_id = h.basin_version_id"
+        ],
+        [
+          "rnv.river_network_version_id = mi.river_network_version_id"
+        ],
+        [
+          "rdc.river_valid_time_end >= :valid_time",
+          "rdc.river_valid_time_start <= :valid_time",
+          "rdc.run_id = h.run_id",
+          "rdc.segment_count > 0"
+        ],
+        [
+          "h.status IN ('succeeded', 'parsed', 'published')",
+          "mi.active_flag",
+          "mi.river_network_version_id IS NOT NULL"
+        ],
+        [
+          "ts.river_network_version_id = lr.river_network_version_id",
+          "ts.river_network_version_key = lr.river_network_version_key",
+          "ts.run_id = lr.run_id",
+          "ts.run_key = lr.run_key",
+          "ts.valid_time = :valid_time",
+          "ts.variable = :variable",
+          "ts.variable_e = (SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e WHERE e::text = :variable)"
+        ],
+        [
+          "e::text = :variable"
+        ],
+        [
+          "source_rows.geom && ST_Transform(bounds.geom_3857, 4490)",
+          "source_rows.geom IS NOT NULL"
+        ],
+        [
+          "source_coordinate_count <= :feature_coordinate_limit",
+          "source_coordinate_dimensions <= :max_coordinate_dimensions"
+        ],
+        [
+          "CURRENT ROW",
+          "ORDER BY network_rank, value DESC NULLS LAST, river_network_version_id, river_segment_id ROWS BETWEEN UNBOUNDED PRECEDING"
+        ],
+        [
+          "tile_coordinate_rank <= :collection_coordinate_limit",
+          "tile_feature_rank <= :feature_limit"
+        ],
+        [
+          "source_coordinate_count > :feature_coordinate_limit"
+        ],
+        [
+          "source_coordinate_dimensions > :max_coordinate_dimensions"
+        ],
+        [
+          "feature_id IS NULL OR feature_id::text = ''"
+        ],
+        [
+          "segment_id IS NULL OR segment_id::text = ''"
+        ],
+        [
+          "river_segment_id IS NULL OR river_segment_id::text = ''"
+        ],
+        [
+          "river_network_version_id IS NULL OR river_network_version_id::text = ''"
+        ],
+        [
+          "basin_version_id IS NULL OR basin_version_id::text = ''"
+        ],
+        [
+          "value IS NULL OR value::double precision IN ('NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision)"
+        ],
+        [
+          "unit IS NULL OR unit::text = ''"
+        ],
+        [
+          "quality_flag IS NULL OR quality_flag::text = ''"
+        ],
+        [
+          "run_id IS NULL OR run_id::text = ''"
+        ],
+        [
+          "variable IS NULL OR variable::text = ''"
+        ],
+        [
+          "valid_time IS NULL"
+        ],
+        [
+          "feature_id IS NULL OR feature_id::text = ''"
+        ],
+        [
+          "segment_id IS NULL OR segment_id::text = ''"
+        ],
+        [
+          "river_segment_id IS NULL OR river_segment_id::text = ''"
+        ],
+        [
+          "river_network_version_id IS NULL OR river_network_version_id::text = ''"
+        ],
+        [
+          "basin_version_id IS NULL OR basin_version_id::text = ''"
+        ],
+        [
+          "value IS NULL OR value::double precision IN ('NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision)"
+        ],
+        [
+          "unit IS NULL OR unit::text = ''"
+        ],
+        [
+          "quality_flag IS NULL OR quality_flag::text = ''"
+        ],
+        [
+          "run_id IS NULL OR run_id::text = ''"
+        ],
+        [
+          "variable IS NULL OR variable::text = ''"
+        ],
+        [
+          "valid_time IS NULL"
+        ],
+        [
+          "budget_stats.coordinate_count <= :collection_coordinate_limit",
+          "budget_stats.feature_count <= :feature_limit",
+          "prefilter_stats.coordinate_dimension_overflow_count = 0",
+          "prefilter_stats.feature_coordinate_overflow_count = 0",
+          "prefilter_stats.invalid_property_count = 0"
+        ],
+        [
+          "mvt_geom IS NOT NULL"
+        ]
+      ]
+    },
+    "mvt:valid_times_named_identity": {
+      "path": "services/tiles/mvt.py",
+      "kind": "statement",
+      "params": "named",
+      "mentions": 1,
+      "chains": [
+        [
+          "basin_version_key = (SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = :basin_version_id)",
+          "river_network_version_id = :river_network_version_id",
+          "river_network_version_key = (SELECT river_network_version_key FROM core.river_network_version WHERE river_network_version_id = :river_network_version_id)",
+          "run_id = :run_id",
+          "run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id)",
+          "variable = :variable",
+          "variable_e = (SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e WHERE e::text = :variable)"
+        ],
+        [
+          "run_id = :run_id"
+        ],
+        [
+          "basin_version_id = :basin_version_id"
+        ],
+        [
+          "river_network_version_id = :river_network_version_id"
+        ],
+        [
+          "e::text = :variable"
+        ]
+      ]
+    },
+    "mvt:valid_times_any_identity": {
+      "path": "services/tiles/mvt.py",
+      "kind": "statement",
+      "params": "named",
+      "mentions": 1,
+      "chains": [
+        [
+          "variable = :variable",
+          "variable_e = (SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e WHERE e::text = :variable)"
+        ],
+        [
+          "e::text = :variable"
+        ]
+      ]
+    },
+    "parser:replace_chain_probe": {
+      "path": "workers/output_parser/parser.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "river_network_version_key = %s",
+          "run_id = %s",
+          "run_key = %s",
+          "variable_e = %s"
+        ]
+      ]
+    },
+    "parser:replace_chain_window": {
+      "path": "workers/output_parser/parser.py",
+      "kind": "statement",
+      "params": "positional",
+      "mentions": 1,
+      "chains": [
+        [
+          "river_network_version_key = %s",
+          "run_id = %s",
+          "run_key = %s",
+          "variable_e = %s"
+        ]
+      ]
+    }
+  }
+}
