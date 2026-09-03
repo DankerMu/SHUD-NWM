@@ -359,8 +359,10 @@ Core packs considered:
   monitoring live evidence, and mocked tests remain unchanged.
 - Error handling / rollback / partial outputs: selected — FAIL/BLOCKED and
   publication failures cannot leave a false PASS.
-- Release / packaging / dependency compatibility: not selected — no new package
-  or build target; existing React/MapLibre/Playwright/Node APIs suffice.
+- Release / packaging / dependency compatibility: selected — Node filesystem
+  typing and executable Draft 2020-12 negative tests add dev-only `@types/node`
+  and `ajv`, plus a narrow Node/Playwright typecheck target; frozen-lockfile,
+  typecheck, test, build, and bundle gates must stay compatible.
 - Documentation / migration notes: selected — two runbooks become the operator
   contract consumed by #1895.
 

@@ -117,6 +117,7 @@ Seams under test:
   current pin provenance, threshold, and FAIL/BLOCKED/publication stop behavior;
   do not claim live PASS in this implementation PR.
 - [x] 4.2 Wire focused tests into existing frontend `pnpm test`/build ownership,
+  add the narrow Node/Playwright typecheck to frontend CI with a frozen lockfile,
   include the live spec in the existing static no-mock guard, and rely on the
   existing root schema/example validation loop. Do not route frontend sources or
   tests through backend `scripts/select_ci_tests.py`.
