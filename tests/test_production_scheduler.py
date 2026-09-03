@@ -32,6 +32,7 @@ from services.orchestrator import chain_repository_state as chain_repository_sta
 from services.orchestrator import chain_source_cycle as chain_source_cycle_module
 from services.orchestrator import cli
 from services.orchestrator import file_orchestration_journal as file_orchestration_journal_module
+from services.orchestrator import public_evidence as public_evidence_module
 from services.orchestrator import retry as retry_module
 from services.orchestrator import scheduler as scheduler_module
 from services.orchestrator import scheduler_backfill_predecessor as scheduler_backfill_predecessor_module
@@ -13498,7 +13499,7 @@ def test_decision_evidence_names_the_journal_forcing_provenance_tier(
     recorded_uri = sidecar["manifest_uri"]
     assert recorded_uri == sidecar["manifest_key"]
     assert (
-        file_orchestration_journal_module._sanitize_public_field("forcing_package_uri", recorded_uri)
+        public_evidence_module._sanitize_public_field("forcing_package_uri", recorded_uri)
         == recorded_uri
     )
     state = _forecast_failure_state(
