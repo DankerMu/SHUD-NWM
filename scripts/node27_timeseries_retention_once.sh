@@ -144,8 +144,15 @@ echo "[$(ts)] node27-timeseries-retention: start summary=$SUMMARY_PATH" >> "$LOG
 START=$(date +%s)
 cd "$REPO" || blocked "REPO_UNAVAILABLE"
 
-"$PYTHON_BIN" "$SCRIPT" "$@" >> "$LOG_FILE" 2>&1
-RC=$?
+# #1712: the runner's combined output goes BOTH to retention.log (complete
+# transcript, unchanged for items 5/6/7 of runbook §8.6) and to this wrapper's
+# own stderr, which the unit routes with `StandardError=journal` so the
+# redacted refusal diagnostic is inside the 30 journal lines the `OnFailure=`
+# handler quotes. `RC` is taken from PIPESTATUS[0] — the runner's status, never
+# `tee`'s: a broken log lane must not turn a refused tick into a green one, nor
+# a green tick into a failed one.
+"$PYTHON_BIN" "$SCRIPT" "$@" 2>&1 | tee -a "$LOG_FILE" >&2
+RC=${PIPESTATUS[0]}
 
 END=$(date +%s)
 echo "[$(ts)] node27-timeseries-retention: done rc=$RC elapsed_sec=$((END - START)) summary=$SUMMARY_PATH" >> "$LOG_FILE"

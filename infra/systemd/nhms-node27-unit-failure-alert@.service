@@ -10,9 +10,16 @@
 # bare template (`systemd-analyze --user verify` on the template alone cannot
 # see instantiation errors).
 #
-# As of this change the ONLY consumer is
-# nhms-node27-timeseries-retention.service. The template exists so adding the
-# next consumer is one line in that consumer's unit.
+# Consumers as of this change (two, both node-27 user-scope oneshots):
+#   - nhms-node27-timeseries-retention.service (#1664)
+#   - nhms-node27-resource-governance.service (#1765)
+# Adding the next consumer stays one `OnFailure=` line in that unit.
+#
+# Delivery volume, governance lane: that audit exits 1 while ANY `critical`
+# recommendation is live, so a standing critical (a volume that stays below
+# its threshold, say) fails the unit and mails on EVERY daily tick — there is
+# no dedup or state here by design; the handler is deliberately dumb. Silence
+# comes from clearing the condition, not from suppressing the alert.
 Description=NHMS node-27 unit failure alert for %i
 
 [Service]

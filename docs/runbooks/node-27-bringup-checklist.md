@@ -158,6 +158,53 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
 
 ---
 
+## 主机容量纪律（每次上 27 干活之前，#1765）
+
+- [ ] 容量核查三个挂载点一起看，**`/` 不能漏**：
+
+  ```bash
+  df -h / /home /data/GHDC
+  ```
+
+  `/` 只有几十 GB 且以前无人自动看守：一次跨两天的 pytest 用
+  `/tmp/pytest-of-nwm` 把它塞满，直接阻塞了当时 PR 的 live receipt。
+  `/home` 是 pgdata + object store 共用卷，`/data/GHDC` 是 `ghdc` 表空间 +
+  归档根（口径与已知偏差见 `docs/runbooks/current-production-ops.md`）。
+- [ ] 在 27 上跑 pytest 之前先把临时根挪出 `/`：
+
+  ```bash
+  mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp   # 建议写进 nwm 的登录 profile
+  ```
+
+  `mkdir -p` 不能省——`TMPDIR` 指向不存在的目录时 Python 会**静默回落**到
+  `/tmp`，于是「设了但没生效」和「设了且生效」看起来一模一样。跑完用
+  `ls -d /home/nwm/tmp/pytest-of-nwm` 确认落点，别只看 `df`。
+  仓库侧的另一半（`pyproject.toml` 的 `tmp_path_retention_policy = "failed"`）
+  已经在代码里，绿的会话不留残留；**不要**在共享配置里加 `--basetemp`。
+- [ ] 资源治理审计的告警链已部署（`install` + `systemctl --user daemon-reload`）：
+  `nhms-node27-resource-governance.service` 必须带
+  `OnFailure=nhms-node27-unit-failure-alert@%n.service`，审计遇到 `critical`
+  建议时 exit 1 并向 journal 打 `RESOURCE_GOVERNANCE_CRITICAL:<code>`。
+
+  ```bash
+  systemctl --user show nhms-node27-resource-governance.service -p OnFailure
+  ```
+
+  **装 `OnFailure=` 之前先看有没有长期 `critical`**：只要还有一条 `critical`
+  建议没消，这个 unit 就会**每个每日 tick 都 exit 1**——按设计一直挂在
+  `systemctl --user --failed` 里并且每次都发一封信（告警处理器是刻意做傻的，
+  没有去重、没有状态）。让它安静的办法是把条件清掉，不是压制告警。所以先读
+  最新的一份 receipt 确认当前没有 `severity: critical`：
+
+  ```bash
+  ls -t /home/nwm/node27-resource-governance-logs/resource-governance-*.json | head -1 \
+    | xargs -r grep -c '"severity": *"critical"'
+  ```
+
+  timer 是 `OnCalendar=*-*-* 04:10:00 UTC`，所以「每个 tick」就是每天一封。
+
+---
+
 ## 上线判定
 
 - **B 全绿** + **C1–C4 全部产出 live receipt** → 27 节点可声明上线。

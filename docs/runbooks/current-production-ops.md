@@ -2076,7 +2076,7 @@ from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
 运维含义：mover ↔ retention 死锁已随归档车道退役消失（#1370），但它的余量
 告警也一并消失——DB 在 `ghdc` 上的增长现在**无人观测**，只能靠下面的手工核查。
 
-容量核查必须**两块盘都看**：`df -h /home /data/GHDC`，而且必须**手工**看：
+容量核查必须**三个挂载点都看**：`df -h / /home /data/GHDC`，而且必须**手工**看：
 归档车道已随 #1370 永久退役（ADR 0002 Revision 2026-08-11），治理 receipt
 不再有 `archive_root` 块，也不再读 `NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES`
 ——`/dev/md0` 现在**完全没有**自动余量观测。receipt 仍在的 `pgdata_root` 只 `du`
@@ -2087,6 +2087,23 @@ from the node-27 ingest env, normally `infra/env/node27-ingest.env`.
 重建 `nhms-db` 容器的流程见
 `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3；**不要**拿
 `infra/docker-compose.dev.yml` 当模板，那是本地 dev 栈。
+
+`/` 是新加进这条核查的第三个挂载点（#1765）：一次跨两天的 pytest 把
+`/tmp/pytest-of-nwm` 堆到把根卷塞满，而 `nhms-node27-resource-governance.service`
+每天都量到了 `ROOT_FREE_BELOW_CRITICAL`、却仍然 exit 0 且没有 `OnFailure=`——
+信号一直存在，结构上到不了人。现在该审计遇到任何 `critical` 建议会 exit 1 并向
+stderr 打 `RESOURCE_GOVERNANCE_CRITICAL:<code>`，unit 带 `OnFailure=` +
+`StandardError=journal`，锁也从 `/tmp` 挪到了 `$LOG_ROOT`；但**这些只在
+`install ~/NWM/infra/systemd/nhms-node27-resource-governance.service
+~/.config/systemd/user/` + `systemctl --user daemon-reload` 之后才生效**
+（node-27 的 unit 是 user-scope，`git pull` 只换 `ExecStart` 背后的脚本）。
+
+在 node-27 上跑 pytest 前先 `mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`，
+否则临时目录仍然落在 `/`。`mkdir -p` 不能省：`TMPDIR` 指向不存在的目录时
+Python 会**静默回落**到 `/tmp`，跑完看着一切正常、根卷却又少了一块。核查看
+`ls -d /home/nwm/tmp/pytest-of-nwm`，不要只看 `df`。仓库侧的另一半是
+`pyproject.toml` 的 `tmp_path_retention_policy = "failed"`（只有失败的测试留下
+`tmp_path`）；**不要**在共享配置里加 `--basetemp`，那会连本地 Mac 和 CI 一起清。
 
 Secret-safe DB checks:
 

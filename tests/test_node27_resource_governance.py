@@ -524,3 +524,176 @@ def test_collect_systemd_receipt_includes_retention_units(
     ):
         assert services[unit]["command"]["status"] == "ok"
         assert services[unit]["properties"].get("Id") == "stub"
+
+
+# ---------------------------------------------------------------------------
+# #1765 — a critical finding must be audible
+# ---------------------------------------------------------------------------
+
+_ROOT = Path(__file__).resolve().parents[1]
+_GOVERNANCE_UNIT_PATH = _ROOT / "infra/systemd/nhms-node27-resource-governance.service"
+_GOVERNANCE_WRAPPER_PATH = _ROOT / "scripts/node27_resource_governance_once.sh"
+
+# The stderr anchor, spelled out by hand: this literal is what the journal
+# carries and what the `OnFailure=` mail body quotes, so it is a contract with
+# an operator, not an implementation detail.
+_CRITICAL_ANCHOR = "RESOURCE_GOVERNANCE_CRITICAL:"
+
+
+def _receipt_with(*recommendations: dict) -> dict:
+    """A completed receipt carrying exactly the given recommendations."""
+    return {
+        "schema_version": governance.SCHEMA_VERSION,
+        "status": "completed",
+        "execution_mode": "read_only_audit",
+        "recommendations": list(recommendations),
+    }
+
+
+def _recommendation(severity: str, code: str) -> dict:
+    return {"severity": severity, "area": "filesystem", "code": code, "evidence": {}, "action": "x"}
+
+
+def _run_main(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    receipt: dict,
+    summary_path: Path,
+) -> tuple[int, str, str]:
+    monkeypatch.setattr(governance, "build_receipt", lambda _config: receipt)
+    # `--quiet` is what the systemd wrapper actually passes, so it is the only
+    # configuration in which this signal has to work.
+    rc = governance.main(["--summary-path", str(summary_path), "--quiet"])
+    captured = capsys.readouterr()
+    return rc, captured.out, captured.err
+
+
+def test_critical_recommendation_exits_non_zero_after_writing_the_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Scenario "Root volume below the critical threshold".
+
+    The receipt is evidence and must survive the failure, so it is written
+    first and its `status` stays `completed`: the audit DID complete — it is
+    the finding that is critical, and the schema does not move.
+    """
+    summary_path = tmp_path / "resource-governance.json"
+    receipt = _receipt_with(
+        _recommendation("critical", "ROOT_FREE_BELOW_CRITICAL"),
+        _recommendation("warning", "HOME_FREE_BELOW_WARNING"),
+    )
+
+    rc, out, err = _run_main(monkeypatch, capsys, receipt, summary_path)
+
+    assert rc == 1
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert written["status"] == "completed"
+    assert written == receipt
+    assert err.splitlines() == [f"{_CRITICAL_ANCHOR}ROOT_FREE_BELOW_CRITICAL"]
+    assert out == ""
+
+
+def test_every_critical_recommendation_gets_its_own_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One line per finding: a mail body naming only the first critical code
+    would send an operator to clean `/` while the database volume is the one
+    that is actually out of room.
+    """
+    summary_path = tmp_path / "resource-governance.json"
+    receipt = _receipt_with(
+        _recommendation("critical", "ROOT_FREE_BELOW_CRITICAL"),
+        _recommendation("warning", "TEMP_BYTES_ABOVE_WARNING"),
+        _recommendation("critical", "DATABASE_SIZE_ABOVE_CRITICAL"),
+    )
+
+    rc, _out, err = _run_main(monkeypatch, capsys, receipt, summary_path)
+
+    assert rc == 1
+    assert err.splitlines() == [
+        f"{_CRITICAL_ANCHOR}ROOT_FREE_BELOW_CRITICAL",
+        f"{_CRITICAL_ANCHOR}DATABASE_SIZE_ABOVE_CRITICAL",
+    ]
+
+
+def test_no_critical_recommendation_exits_zero_and_prints_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Scenario "No critical recommendation" — warnings stay non-events.
+
+    The audit runs daily; a warning that mailed an operator would be noise the
+    lane learns to ignore, which is how the critical one gets missed.
+    """
+    summary_path = tmp_path / "resource-governance.json"
+    receipt = _receipt_with(
+        _recommendation("warning", "ROOT_FREE_BELOW_WARNING"),
+        _recommendation("warning", "TEMP_BYTES_ABOVE_WARNING"),
+    )
+
+    rc, out, err = _run_main(monkeypatch, capsys, receipt, summary_path)
+
+    assert rc == 0
+    assert err == ""
+    assert out == ""
+    assert json.loads(summary_path.read_text(encoding="utf-8"))["status"] == "completed"
+
+
+def test_the_real_recommendation_builder_produces_the_critical_severity() -> None:
+    """The exit-code rule above is only reachable if the audit really labels a
+    root-volume shortfall `critical` — this is the join between the two.
+    """
+    codes = [
+        item["code"]
+        for item in governance._recommendations(_base_receipt(), governance.AuditThresholds())
+        if item["severity"] == "critical"
+    ]
+
+    assert "ROOT_FREE_BELOW_CRITICAL" in codes
+    assert governance._critical_codes({"recommendations": []}) == []
+
+
+def test_governance_unit_routes_stderr_to_the_journal_and_alerts_on_failure() -> None:
+    """The exit code is only useful if something acts on it. `%n` expands to
+    the FULL unit name (mirror of the retention unit).
+    """
+    text = _GOVERNANCE_UNIT_PATH.read_text(encoding="utf-8")
+
+    assert "OnFailure=nhms-node27-unit-failure-alert@%n.service" in text
+    assert "StandardError=journal" in text
+    assert "StandardError=append:" not in text
+    # stdout keeps its file. Not because the bracket lines live there — the
+    # wrapper appends its own `start` / `done rc=` lines straight to
+    # resource-governance.log and writes nothing to stdout — but because
+    # `StandardOutput=` is the catch-all for anything the lane might print in
+    # future, and retargeting it would be an unrelated change.
+    assert (
+        "StandardOutput=append:/home/nwm/node27-resource-governance-logs/systemd.log" in text
+    )
+
+
+def test_governance_wrapper_tees_and_keeps_the_audits_exit_code() -> None:
+    """`tee` is the only way the transcript and the journal can both be
+    complete; `PIPESTATUS[0]` is the only way `tee`'s own status cannot
+    masquerade as the audit's.
+    """
+    text = _GOVERNANCE_WRAPPER_PATH.read_text(encoding="utf-8")
+
+    assert '--summary-path "$SUMMARY_PATH" --quiet 2>&1 | tee -a "$LOG_FILE" >&2' in text
+    assert "RC=${PIPESTATUS[0]}" in text
+    # The pre-#1765 form must be gone, not merely shadowed: `$?` after a
+    # pipeline is `tee`'s status.
+    assert "RC=$?" not in text
+
+
+def test_governance_lock_does_not_live_on_the_root_volume() -> None:
+    """The audit's job is to notice `/` filling up. A lock file it cannot
+    create because `/` is full would take the audit down with the condition it
+    exists to report.
+    """
+    text = _GOVERNANCE_WRAPPER_PATH.read_text(encoding="utf-8")
+
+    assert (
+        'LOCK_PATH="${NODE27_RESOURCE_GOVERNANCE_LOCK_PATH:-$LOG_ROOT/node27-resource-governance.lock}"'
+        in text
+    )
+    assert "/tmp/node27-resource-governance.lock" not in text

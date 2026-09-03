@@ -3579,8 +3579,9 @@ def test_alert_wrapper_exits_zero_without_a_unit_argument(tmp_path: Path) -> Non
 
 
 def test_retention_unit_declares_the_failure_alert_handler() -> None:
-    """The retention unit is the ONLY consumer wired in this change, and the
-    template it points at exists and runs the wrapper with ``%i``.
+    """The retention unit is one of the two consumers wired in this change
+    (the resource-governance unit is the other, #1765), and the template it
+    points at exists and runs the wrapper with ``%i``.
     """
     service_text = _SERVICE_PATH.read_text(encoding="utf-8")
     assert "OnFailure=nhms-node27-unit-failure-alert@%n.service" in service_text
@@ -3597,3 +3598,376 @@ def test_retention_unit_declares_the_failure_alert_handler() -> None:
         "EnvironmentFile=-%h/NWM/infra/env/node27-frontier-alert.env" in template_text
     )
     assert os.access(_ALERT_WRAPPER_PATH, os.X_OK)
+
+
+# ---------------------------------------------------------------------------
+# #1766 — the §8.6 progress criterion counts drop-phase refusals
+# ---------------------------------------------------------------------------
+
+# The token the runbook's escalation criterion counts, and the criterion
+# command as the operator copy-pastes it. Both spelled out by hand so this file
+# is an INDEPENDENT oracle for the runner's emit shape and for §8.6's fenced
+# command (same discipline as ``_MEASURE_WARNING_GREP_FENCE`` above).
+#
+# Why the trailing colon matters: `RETENTION_DROP_FAILED` also appears in §8.2
+# prose and in this module's constant name. The colon is what makes the token
+# match ONLY the rendered refusal reason.
+_DROP_FAILED_COUNT_TOKEN = "RETENTION_DROP_FAILED:"
+_DROP_FAILED_COUNT_FENCE = f"grep -c '{_DROP_FAILED_COUNT_TOKEN}'"
+
+
+def _refused_tick_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: Exception,
+) -> tuple[int, str]:
+    """One whole enforcing tick through ``main`` whose single drop raises."""
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    stub = _StubRunner(
+        [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)],
+        drop_error={"chk-a": error},
+    )
+    code = retention.main(
+        argv=[],
+        now=_NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+    return code, capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("pgcode", "driver_text"),
+    [
+        # The two REAL production refusals (08-21, 08-22). Before #1766 the
+        # criterion counted `lock-contention(`, which a 57014 never carries, so
+        # the escalation criterion read 0 while progress was 0.
+        ("57014", "canceling statement due to statement timeout"),
+        ("55P03", "canceling statement due to lock timeout"),
+        ("40P01", "deadlock detected"),
+    ],
+    ids=["statement-timeout-57014", "lock-not-available-55P03", "deadlock-40P01"],
+)
+def test_every_drop_refusal_emits_exactly_one_counted_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    pgcode: str,
+    driver_text: str,
+) -> None:
+    """Scenarios "A statement-timeout refusal is counted" + "Lock-classified
+    refusals are counted the same way".
+
+    The criterion's intent is PROGRESS, and any drop failure is zero progress,
+    so the count must not depend on the `lock-contention(` classification —
+    which by design only ever attaches to 55P03/40P01. `== 1`, not `>= 1`: the
+    count is a per-tick tally, so a tick that emitted the anchor twice would
+    inflate a three-day escalation threshold into a one-day one.
+    """
+    code, err = _refused_tick_stderr(
+        tmp_path, monkeypatch, capsys, _SyntheticDriverError(driver_text, pgcode)
+    )
+
+    assert code == 1
+    assert err.count(_DROP_FAILED_COUNT_TOKEN) == 1
+    # It is the per-tick stderr DIAGNOSTIC line that carries it — not the
+    # drop-timing line, which deliberately carries no error text at all.
+    counted = [line for line in err.splitlines() if _DROP_FAILED_COUNT_TOKEN in line]
+    payload = json.loads(counted[0])
+    assert payload["outcome"] == "refused"
+    assert payload["refusal_reason"].startswith(_DROP_FAILED_COUNT_TOKEN)
+
+
+def test_a_clean_tick_emits_no_counted_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Scenario "A clean tick is not counted" — the discriminating row.
+
+    A successful enforcing tick still writes drop-timing lines to the same
+    stderr; if the counted token matched those, every healthy day would look
+    like a stalled one and the criterion would be worse than useless.
+    """
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+
+    code = retention.main(
+        argv=[],
+        now=_NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+    err = capsys.readouterr().err
+
+    assert code == 0
+    assert err.count(_DROP_FAILED_COUNT_TOKEN) == 0
+    # ... and the tick did emit its other diagnostics, so the zero above is a
+    # measurement rather than an empty stream.
+    assert len(_drop_timing_lines(err)) == 1
+
+
+def test_counted_anchor_is_byte_identical_with_the_runbook_criterion() -> None:
+    """§8.6's escalation criterion is executable text; a rename on the code
+    side that did not touch it would leave the operator counting a literal the
+    runner no longer emits and reading 0 as "retention is progressing".
+    """
+    assert f"{retention.CODE_RETENTION_DROP_FAILED}:" == _DROP_FAILED_COUNT_TOKEN
+
+    runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
+    assert _DROP_FAILED_COUNT_FENCE in runbook_text, (
+        "runbook §8.6 item 7 must carry the progress-criterion count command verbatim"
+    )
+
+
+def test_the_counted_anchor_never_carries_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#1712 makes this line journal- and mail-visible, so its redaction is now
+    load-bearing for a surface it did not previously reach.
+
+    The driver text below is the shape a DSN-parse failure really takes: the
+    whole conninfo, password included, echoed back inside the exception.
+    """
+    env = _base_env(tmp_path, DATABASE_URL=_MEASURE_PROBE_DSN, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    stub = _StubRunner(
+        [_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)],
+        drop_error={
+            "chk-a": _SyntheticDriverError(
+                f'invalid dsn: missing "=" after "{_MEASURE_PROBE_DSN}" in connection info string',
+                "57014",
+            )
+        },
+    )
+
+    code = retention.main(
+        argv=[],
+        now=_NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+    )
+    err = capsys.readouterr().err
+
+    assert code == 1
+    counted = [line for line in err.splitlines() if _DROP_FAILED_COUNT_TOKEN in line]
+    assert len(counted) == 1
+    _assert_surfaces_credential_free(counted[0])
+
+
+# ---------------------------------------------------------------------------
+# #1712 — the runner's stderr reaches the journal, retention.log stays complete
+# ---------------------------------------------------------------------------
+
+_JOURNALCTL_FENCE = (
+    "journalctl --user -u nhms-node27-timeseries-retention.service -n 30 --no-pager"
+)
+
+_FAKE_RUNNER_DIAGNOSTIC = (
+    '{"mode": "enforce", "outcome": "refused", "refusal_reason": '
+    '"RETENTION_DROP_FAILED:hydro.chk-a: canceling statement due to statement timeout"}'
+)
+
+
+def _wrapper_harness(tmp_path: Path, *, runner_rc: int) -> dict[str, str]:
+    """A wrapper invocation that really reaches the runner call.
+
+    The wrapper's preflight is total (env-file mode, absolute paths, the
+    scripts-import-origin probe), so every earlier test in this file stops at a
+    refusal. Reaching line "run the runner" needs a stand-in interpreter that
+    answers the probe (`-c`) with 0 and then plays the runner, plus a `flock`
+    that succeeds — macOS ships none, and without a shim the wrapper would
+    take the "previous wrapper still active" branch and exit 0, making every
+    assertion below vacuously true.
+    """
+    env_file = tmp_path / "runner.env"
+    env_file.write_text("", encoding="utf-8")
+    env_file.chmod(0o600)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    flock_shim = bin_dir / "flock"
+    flock_shim.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    flock_shim.chmod(0o755)
+
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        # The import-origin probe: `-c <program> <repo> <script>`.
+        'case "$1" in -c) exit 0 ;; esac\n'
+        'echo "runner stdout line"\n'
+        f"echo '{_FAKE_RUNNER_DIAGNOSTIC}' >&2\n"
+        f"exit {runner_rc}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    fake_script = tmp_path / "fake_runner.py"
+    fake_script.write_text("", encoding="utf-8")
+
+    log_root = tmp_path / "logs"
+    return {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+        "NODE27_TIMESERIES_RETENTION_ENV_FILE": str(env_file),
+        "NODE27_TIMESERIES_RETENTION_REPO": str(_ROOT),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOG": str(tmp_path / "bootstrap.log"),
+        "NODE27_TIMESERIES_RETENTION_LOG_ROOT": str(log_root),
+        "NODE27_TIMESERIES_RETENTION_LOG_FILE": str(log_root / "retention.log"),
+        "NODE27_TIMESERIES_RETENTION_BOOTSTRAP_LOCK": str(tmp_path / "wrapper.lock"),
+        "NODE27_TIMESERIES_RETENTION_RECEIPT_PATH": str(tmp_path / "receipt.json"),
+        "NODE27_TIMESERIES_RETENTION_PYTHON": str(fake_python),
+        "NODE27_TIMESERIES_RETENTION_SCRIPT": str(fake_script),
+    }
+
+
+def test_wrapper_tees_the_runner_output_to_the_log_and_to_its_own_stderr(
+    tmp_path: Path,
+) -> None:
+    """Scenario "Exit code and log brackets survive the pipeline" + the journal
+    half of "A refused tick's reason appears in the alert context".
+
+    Three independent facts, because the change could break any one alone:
+    the exit code is the RUNNER's (not `tee`'s), `retention.log` is still the
+    complete transcript with its brackets, and the same bytes are on the
+    wrapper's stderr — which is the only thing the unit can route to the
+    journal the `OnFailure=` handler quotes.
+    """
+    env = _wrapper_harness(tmp_path, runner_rc=3)
+
+    result = subprocess.run(
+        ["/bin/bash", str(_WRAPPER_PATH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 3, result.stderr
+
+    log_text = Path(env["NODE27_TIMESERIES_RETENTION_LOG_FILE"]).read_text(encoding="utf-8")
+    assert "node27-timeseries-retention: start summary=" in log_text
+    assert "node27-timeseries-retention: done rc=3" in log_text
+    assert _FAKE_RUNNER_DIAGNOSTIC in log_text
+    assert "runner stdout line" in log_text
+
+    assert _FAKE_RUNNER_DIAGNOSTIC in result.stderr
+    assert _DROP_FAILED_COUNT_TOKEN in result.stderr
+    assert "runner stdout line" in result.stderr
+
+
+def test_wrapper_still_reports_a_green_tick_as_green(tmp_path: Path) -> None:
+    """The pipeline must not manufacture a failure either: `PIPESTATUS[0]` on a
+    successful runner is 0 even though `tee` also succeeded.
+    """
+    env = _wrapper_harness(tmp_path, runner_rc=0)
+
+    result = subprocess.run(
+        ["/bin/bash", str(_WRAPPER_PATH)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log_text = Path(env["NODE27_TIMESERIES_RETENTION_LOG_FILE"]).read_text(encoding="utf-8")
+    assert "node27-timeseries-retention: done rc=0" in log_text
+
+
+def test_wrapper_takes_its_exit_code_from_the_runner_not_from_tee() -> None:
+    """Source-level pin for the one case a test cannot stage portably: `tee`
+    failing (ENOSPC on the log volume). `$?` after a pipeline is `tee`'s
+    status, so a broken log lane would silently turn a refused tick green.
+    """
+    text = _WRAPPER_PATH.read_text(encoding="utf-8")
+
+    assert '"$PYTHON_BIN" "$SCRIPT" "$@" 2>&1 | tee -a "$LOG_FILE" >&2' in text
+    assert "RC=${PIPESTATUS[0]}" in text
+    assert "RC=$?" not in text
+
+
+def test_retention_unit_routes_stderr_to_the_journal() -> None:
+    """The wrapper's stderr is only useful if the unit publishes it.
+
+    `StandardOutput=` is deliberately unchanged (a stdout catch-all; the
+    wrapper's own bracket lines never went there — they are appended straight
+    to retention.log) and `OnFailure=` is unchanged — this is a lane change,
+    not a new alerting mechanism.
+    """
+    text = _SERVICE_PATH.read_text(encoding="utf-8")
+    # Directives only: the `#` lines explaining the retirement mention the
+    # retired path by name, and a raw substring check would match those.
+    directives = [
+        line for line in text.splitlines() if line and not line.lstrip().startswith("#")
+    ]
+
+    assert "StandardError=journal" in directives
+    assert not [line for line in directives if "systemd.err" in line]
+    assert (
+        "StandardOutput=append:/home/nwm/node27-timeseries-retention-logs/systemd.log"
+        in directives
+    )
+    assert "OnFailure=nhms-node27-unit-failure-alert@%n.service" in directives
+
+
+def test_sibling_units_keep_their_systemd_err_lane() -> None:
+    """The retirement is scoped, and the scope is pinned as a SET, not a sample.
+
+    Eight units sit beside this one. Six of them were only ever registered,
+    never diagnosed here — changing them would be an unreviewed behaviour
+    change on lanes this issue never looked at, so this asserts exactly which
+    six still carry `StandardError=append:…/systemd.err`. Equality rather than
+    membership: a subset check would let a seventh unit lose its lane, or a
+    ninth appear without one, without anybody noticing.
+
+    The remaining two are the whole of the difference:
+    `nhms-node27-resource-governance.service` is the one deliberate retirement
+    (#1765 gives it `StandardError=journal` + `OnFailure=`), re-asserted
+    negatively below because that is the fact #1712/#1765 must not silently
+    reacquire; `nhms-node27-unit-failure-alert@.service` never had a
+    `StandardError=` directive at all. 6 + 1 + 1 = 8.
+    """
+    siblings = sorted(
+        path
+        for path in (_ROOT / "infra/systemd").glob("nhms-node27-*.service")
+        if path != _SERVICE_PATH
+    )
+    assert siblings, "sibling unit files must exist for this pin to mean anything"
+
+    with_err_lane = [
+        path.name
+        for path in siblings
+        if any(
+            line.startswith("StandardError=append:") and line.endswith("systemd.err")
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    ]
+    assert set(with_err_lane) == {
+        "nhms-node27-autopipe.service",
+        "nhms-node27-download.service",
+        "nhms-node27-frontier-alert.service",
+        "nhms-node27-raw-retention.service",
+        "nhms-node27-timeseries-compression.service",
+        "nhms-node27-timeseries-compression-replay.service",
+    }
+    # Stated twice on purpose: the set above already excludes it, but this line
+    # is the one that names WHY, so a future edit widening the set has to
+    # delete an assertion that says "deliberate exception" out loud.
+    assert "nhms-node27-resource-governance.service" not in with_err_lane
+
+
+def test_runbook_hands_the_operator_the_journal_command() -> None:
+    """§8.6 item 8's first stop is now the journal, so the command has to be
+    there verbatim — including `--user`, without which the unit is not found.
+    """
+    runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
+
+    assert _JOURNALCTL_FENCE in runbook_text

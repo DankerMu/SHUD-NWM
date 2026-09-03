@@ -1,10 +1,20 @@
 [Unit]
 Description=NHMS node-27 resource governance audit
+# #1765: the audit exits non-zero on a `critical` recommendation, so the
+# failure must reach an operator instead of sitting in a log file. `%n` expands
+# to the FULL unit name (mirror of the retention unit's comment). Installing
+# the template into ~/.config/systemd/user/ + `daemon-reload` is a MANUAL step
+# on node-27 — `git pull` updates only the ExecStart payload.
+OnFailure=nhms-node27-unit-failure-alert@%n.service
 
 [Service]
 Type=oneshot
 WorkingDirectory=/home/nwm/NWM
 ExecStart=/home/nwm/NWM/scripts/node27_resource_governance_once.sh
 StandardOutput=append:/home/nwm/node27-resource-governance-logs/systemd.log
-StandardError=append:/home/nwm/node27-resource-governance-logs/systemd.err
+# #1765: stderr to the journal so `RESOURCE_GOVERNANCE_CRITICAL:<code>` is in
+# the 30 journal lines the alert handler quotes. The wrapper tees the runner's
+# combined output into resource-governance.log AND to its own stderr, so the
+# file transcript stays complete.
+StandardError=journal
 TimeoutStartSec=0

@@ -883,13 +883,56 @@ def _basin_key_set(value: str | None) -> set[str]:
 # so the code never takes that override away.
 _APPLICATION_NAME = "nhms-autopipe"
 
+# #1647: no connection this script opened was bounded, so one hung backend
+# wedged the whole tick under its flock forever and every later tick was
+# skipped by `flock -n`.
+#
+# 10 s is the connect budget: the DB is on localhost, so a connect that has not
+# completed by then is not slow, it is not coming.
+_CONNECT_TIMEOUT_SECONDS = 10
+
+# 600 000 ms = one tick interval. Deliberately NOT the compression lane's 60 s
+# catalog budget: ingest statements legitimately run for minutes under lock
+# contention, and the goal here is "the tick terminates", not "the tick is
+# fast". Applied through the libpq `options` kwarg rather than a post-connect
+# `SET`, because a `SET` issued inside psycopg2's implicit first transaction is
+# undone by the rollback that transaction ends with. The statistics guard
+# passes its own `STATS_GUARD_TIMEOUT_MS` instead (#1643 semantics unchanged).
+_QUERY_TIMEOUT_MS = 600_000
+
+
+def _dsn_sets_connect_timeout(database_url: str) -> bool:
+    """True when the operator's DSN already carries `connect_timeout`.
+
+    `connect_timeout` is an allowed DATABASE_URL query key
+    (``DATABASE_URL_ALLOWED_QUERY_KEYS``), so an operator who sets it wins —
+    the mirror of the `application_name` precedence rule (#1714). Same parse
+    idiom as the preflight's `_database_query_blockers`, deliberately not a
+    second URL-parsing dialect.
+    """
+    query = urlsplit(database_url).query
+    if not query:
+        return False
+    return any(
+        key.strip().lower() == "connect_timeout"
+        for key, _value in parse_qsl(query, keep_blank_values=True)
+    )
+
 
 def _connect(database_url: str, **kwargs: Any) -> Any:
     """Single connect surface for this script, tagged with _APPLICATION_NAME.
 
-    The only thing this adds over ``psycopg2.connect`` is the attribution
-    kwarg; every caller's other connect parameters pass through untouched.
+    Adds the attribution kwarg (#1714) and the two #1647 bounds; every caller's
+    other connect parameters pass through untouched, and an explicit
+    `connect_timeout=` / `options=` from a Python caller still wins.
     """
+    if "connect_timeout" not in kwargs and not _dsn_sets_connect_timeout(database_url):
+        kwargs["connect_timeout"] = _CONNECT_TIMEOUT_SECONDS
+    if "options" not in kwargs:
+        # `options` is not an allowed DATABASE_URL query key, so unlike
+        # `connect_timeout` it has no DSN path: only a Python caller can
+        # override the statement budget.
+        kwargs["options"] = f"-c statement_timeout={_QUERY_TIMEOUT_MS}"
     return psycopg2.connect(
         database_url, fallback_application_name=_APPLICATION_NAME, **kwargs
     )
@@ -1439,6 +1482,14 @@ ORDER BY c.relpages DESC, 1, 2
 # identifier rather than quote-escaping by hand.
 _STATS_GUARD_IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
+# #1647: the disable switch used to recognise the single literal `off`, so an
+# operator who wrote `NODE27_AUTOPIPE_STATS_GUARD=0` silently kept the guard
+# running. The conventional falsy set, compared after strip + lower; anything
+# else (including `1`, `on` and unset) keeps the guard enabled. The `skipped`
+# reason string stays byte-identical for all four values -- #1643's observation
+# semantics and the receipt shape do not move.
+_STATS_GUARD_FALSY: frozenset[str] = frozenset({"0", "false", "no", "off"})
+
 
 def _stats_guard_error(exc: Exception) -> str:
     """Always a non-empty, credential-free string -- some DB errors carry no message."""
@@ -1563,7 +1614,11 @@ def _analyze_frontier_chunks(database_url: str) -> dict[str, Any]:
     }
     conn = None
     try:
-        conn = _connect(database_url)
+        # #1647: the guard keeps its OWN statement budget on the connection
+        # instead of inheriting the tick's 600 s default -- the per-relation
+        # `SET statement_timeout` below already binds each ANALYZE, and this
+        # makes the candidate query and the read-back obey the same bound.
+        conn = _connect(database_url, options=f"-c statement_timeout={STATS_GUARD_TIMEOUT_MS}")
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(_STATS_GUARD_CANDIDATES_SQL, (STATS_GUARD_MIN_MODS,))
@@ -1609,7 +1664,8 @@ def _analyze_unanalyzed_authority_tables(database_url: str) -> dict[str, Any]:
     }
     conn = None
     try:
-        conn = _connect(database_url)
+        # #1647: same own-budget rule as the frontier leg.
+        conn = _connect(database_url, options=f"-c statement_timeout={STATS_GUARD_TIMEOUT_MS}")
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(_STATS_GUARD_AUTHORITY_CANDIDATES_SQL)
@@ -1647,7 +1703,7 @@ def _stats_guard(database_url: str, *, ingested_runs: int, env: Mapping[str, str
         "analyzed": [],
         "deferred": [],
     }
-    if (env.get("NODE27_AUTOPIPE_STATS_GUARD") or "").strip().lower() == "off":
+    if (env.get("NODE27_AUTOPIPE_STATS_GUARD") or "").strip().lower() in _STATS_GUARD_FALSY:
         return {
             "status": "skipped",
             "reason": "NODE27_AUTOPIPE_STATS_GUARD=off",

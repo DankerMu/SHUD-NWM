@@ -142,7 +142,16 @@ def _invoke_cold_residency_connect(dsn: str, tmp_path: Path) -> None:
 # The fourth element is the invariant lock: introducing the attribution kwarg
 # must not have moved cursor_factory / connect_timeout / options on any site.
 PSYCOPG2_CASES: tuple[tuple[str, Any, str, dict[str, Any]], ...] = (
-    ("autopipeline", _invoke_autopipeline, "nhms-autopipe", {}),
+    # #1647: the autopipe `_connect` helper now bounds every connection it
+    # opens -- 10 s to connect, 600 s per statement through the libpq `options`
+    # kwarg (NOT a post-connect `SET`, which the implicit first transaction's
+    # rollback would undo).
+    (
+        "autopipeline",
+        _invoke_autopipeline,
+        "nhms-autopipe",
+        {"connect_timeout": 10, "options": "-c statement_timeout=600000"},
+    ),
     ("ingest_run", _invoke_ingest_run, "nhms-ingest-run", {"cursor_factory": RealDictCursor}),
     (
         "output_parser",
