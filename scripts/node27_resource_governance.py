@@ -29,6 +29,7 @@ from packages.common.node27_cold_governance_cli import (
 )
 from packages.common.node27_cold_governance_collection import (
     DEFAULT_COMPRESSION_LAG_SECONDS,
+    PROJECTION_NO_UNCOMPRESSED_CHUNK,
     PROJECTION_OK,
     PROJECTION_WATERMARK_UNAVAILABLE,
     PROJECTION_WORKING_SET_UNAVAILABLE,
@@ -370,18 +371,31 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
     return recommendations
 
 
+#: `collect_postgres` reasons that mean NO database was reached and the audit
+#: was supposed to reach one (#1985 round-3). `database_url_missing` is
+#: deliberately absent: that is the configured-not-to-look skip, and it stays
+#: exit 0. `query_failed` is absent for the opposite reason — the connection
+#: succeeded, so the working-set block exists and reports itself.
+POSTGRES_UNREACHABLE_REASONS = frozenset({"connection_failed", "psycopg2_unavailable"})
+
+
 def _working_set_recommendations(
     receipt: Mapping[str, Any], thresholds: AuditThresholds
 ) -> list[dict[str, Any]]:
     """#1985 / design D8: does the next compression peak still fit on `/home`?
 
-    A block that is absent ENTIRELY is silent for exactly three postgres
-    outcomes, all of which mean no database was reached at all and all of which
-    the postgres status already reports: ``database_url_missing`` (no DSN
-    configured), ``psycopg2_unavailable`` (driver missing) and
-    ``connection_failed``. ``query_failed`` is deliberately NOT in that set —
-    the audit did reach the database, so its outer handler carries an
-    unavailable working set rather than dropping the block (decision 20).
+    A block that is absent ENTIRELY is silent for exactly ONE postgres outcome:
+    ``database_url_missing``, which is a deliberate skip — the audit was told
+    not to look at a database, so there is nothing to report (round-3 review).
+
+    The two other "no database was reached" outcomes are NOT skips.
+    ``connection_failed`` and ``psycopg2_unavailable`` mean the audit was
+    configured to watch the volume and could not, so the capacity guard is
+    silently off; they report ``POSTGRES_UNAVAILABLE`` and exit non-zero.
+    ``query_failed`` is different again — the audit DID reach the database, so
+    its outer handler carries an unavailable working set and the block is
+    present (decision 20); it yields exactly one critical,
+    ``WORKING_SET_UNAVAILABLE``, never both.
 
     With a healthy postgres sample the block must exist, so its absence is the
     same lane fault as an unmeasurable working set and reports
@@ -390,7 +404,31 @@ def _working_set_recommendations(
     """
 
     postgres = receipt.get("postgres")
-    postgres_ok = isinstance(postgres, Mapping) and postgres.get("status") == "ok"
+    postgres_status = postgres.get("status") if isinstance(postgres, Mapping) else None
+    postgres_reason = postgres.get("reason") if isinstance(postgres, Mapping) else None
+    postgres_ok = postgres_status == "ok"
+    if postgres_status == "blocked" and postgres_reason in POSTGRES_UNREACHABLE_REASONS:
+        # No catalog was read at all, so there is no working set to judge and
+        # every downstream check below would be vacuous. Returning [] here (the
+        # pre-round-3 behaviour) made a database the audit could not reach
+        # indistinguishable from a healthy one: exit 0, no mail, and the volume
+        # guard off for as long as the outage lasts.
+        return [
+            {
+                "severity": "critical",
+                "area": "postgres",
+                "code": "POSTGRES_UNAVAILABLE",
+                "evidence": {
+                    "postgres_status": postgres_status,
+                    "postgres_reason": postgres_reason,
+                    "error": postgres.get("error") if isinstance(postgres, Mapping) else None,
+                },
+                "action": (
+                    "Restore the audit's database connectivity; until it is back the working-set "
+                    "capacity guard is not running at all."
+                ),
+            }
+        ]
     working_set = receipt.get("working_set")
     if not isinstance(working_set, Mapping):
         if not postgres_ok:
@@ -443,10 +481,10 @@ def _working_set_recommendations(
                 "action": "Restore the display watermark query before the next compression tick.",
             }
         )
-    elif working_set.get("projection_status") == PROJECTION_OK:
-        # Gated on `ok`: with no uncompressed chunk there is no next compression
-        # to project, so the spec's empty state emits no critical at all — free
-        # space itself is already covered by the filesystem recommendations.
+    elif working_set.get("projection_status") in (PROJECTION_OK, PROJECTION_NO_UNCOMPRESSED_CHUNK):
+        # Both MEASURED statuses (round-3 review, decision 19: the spec scenario
+        # says "measured", not "ok"). The catalog answered in both cases; the
+        # difference is only whether there is anything left to compress.
         if not isinstance(home_free, int) or isinstance(home_free, bool):
             # `/home` did not resolve or `statvfs` failed, so the comparison
             # below cannot be made (round-2 review, decision 19). Skipping it
@@ -468,9 +506,15 @@ def _working_set_recommendations(
                 }
             )
         elif (
-            isinstance(projected, int)
+            working_set.get("projection_status") == PROJECTION_OK
+            and isinstance(projected, int)
             and projected > home_free - thresholds.safety_margin_bytes
         ):
+            # Peak comparison stays gated on `ok` ALONE. Under
+            # `no_uncompressed_chunk` there is no next compression to project,
+            # `projected_peak_bytes` is 0, and `0 > home_free - 100 GiB` is true
+            # for any `/home` under the margin — the empty state would emit
+            # PROJECTED_PEAK_EXCEEDS_HOME_FREE about a peak that does not exist.
             recommendations.append(
                 {
                     "severity": "critical",

@@ -60,18 +60,27 @@ NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 # (ORDER BY hypertable_schema, hypertable_name, range_end; eligible[:bound]), so
 # the single slot always goes to the daily hydro.river_timeseries chunk -- the
 # legacy chunk and met.forcing_station_timeseries are never selected, and the
-# exit condition is unreachable. Bound 1 additionally requires the section 4.5
-# raised timeout/wall triple or leg 3 refuses the configuration.
-# If the attended step is missed the backstop is LOUD, not silent: the tick at
-# range_end + lag selects the legacy chunk plus up to three narrow ones
-# ((508 + 3 x 75) GB x 6.0 s/GB + 380 s is about 4778 s, past the 3900 s wall),
-# the wrapper TERMs it, no receipt is written and OnFailure mails -- daily,
-# until the attended compress is done. The fix is that compress, never a bound
-# change. Bound stays 4.
+# exit condition is unreachable. The budget chain does NOT forbid bound 1 on its
+# own (round-3 correction): leg 3 enforces raised COMPRESS_TIMEOUT_MS => bound 1,
+# NOT the converse, and bound 1 at the default 3600000 ms timeout is accepted by
+# the preflight. Prefix-selection starvation above is the whole argument.
+# The attended compress is MANDATORY, not optional-with-a-net. In steady state
+# the tick at range_end + lag selects one narrow river chunk, the legacy chunk
+# and one forcing chunk -- bound 4 keeps up with 2 arrivals/day, so three narrow
+# chunks never queue: (75 + 508 + 12.7) GB x 6.0 s/GB + 380 s is about 3954 s
+# against the 3900 s wall. That is 54 s over at a 75 GB narrow chunk and UNDER
+# the wall at the measured 38-58 GB narrow sizes, so a missed attended step may
+# TERM the tick (no receipt, OnFailure mail) or may emit nothing at all -- and
+# even on a TERM the legacy compress has most likely already committed, making
+# the alert one trailing signal rather than a daily reminder. Never read "no
+# alert" as "it was done": verify is_compressed = true in
+# timescaledb_information.chunks and the receipt's
+# per_table_totals["hydro.river_timeseries_legacy"]["chunks_compressed"].
+# ((508 + 3 x 75) GB x 6.0 s/GB + 380 s is about 4778 s, about 80 min, is the
+# BACKLOG worst case -- three narrow chunks already queued -- not the steady
+# state.) The fix is the attended compress, never a bound change. Bound stays 4.
 # It is a throughput ceiling, NOT the number of river-size chunks one tick can
-# actually redeem. The per-tick hint further below (=1) governs whenever more
-# than one river-size chunk could be eligible in a single tick — in that state
-# the hint OVERRIDES this value. Derivation, measured inputs and the conditions
+# actually redeem. Derivation, measured inputs and the conditions
 # that invalidate it (the chunk-interval and backlog conditions included):
 # runbook section 4 "Per-tick capacity" invalidation list and section 4.5,
 # docs/runbooks/tier-node27-timeseries-storage.md.
@@ -121,10 +130,11 @@ NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=7842
 # bounds ONE chunk's budget, so a second chunk in the same tick still dies on
 # the wall — whenever you raise COMPRESS_TIMEOUT_MS above the 3600000 default,
 # NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1 is required and leg 3 refuses
-# the configuration outright if you skip it. That is also the state you are in
-# wherever chunks approach the per-chunk ceiling — which the 268-409 GB
-# steady-state chunks of hydro.river_timeseries do: bound 1, and let the daily
-# timer drain the backlog one chunk at a time.
+# the configuration outright if you skip it. It applies to a genuine backlog of
+# CANONICAL-table chunks: bound 1, one chunk per tick, until the backlog drains.
+# It does NOT apply to the transitional `_legacy` survivor -- prefix selection at
+# bound 1 never reaches that chunk (see the PER_TICK_BOUND block above), so a
+# raised-timeout catch-up is not the tool for it; the attended gated compress is.
 # Full ordered procedure (drop-in first, timer stopped+masked, no replay in the
 # window, override removed FIRST on cleanup): runbook section 4.5
 # "大 chunk 追赶", docs/runbooks/tier-node27-timeseries-storage.md.

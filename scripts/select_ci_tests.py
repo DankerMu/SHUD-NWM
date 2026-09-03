@@ -2968,9 +2968,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (API_ERROR_LOGGING_TEST,),
     ),
     # --- I6 #1985 lifecycle discovery / governance --------------------------
-    # The shared hypertable-discovery helper has SEVEN consumers, so a diff that
-    # touches only the helper must still select every lane it can break; the
-    # same-name rule alone would select its own test file and nothing else.
+    # The shared hypertable-discovery helper has EIGHT consumers (its own
+    # docstring and `tests/test_node27_timeseries_hypertable_discovery.py`'s
+    # `_CONSUMERS` are the roster; round-1 added
+    # `scripts/node27_resource_governance.py` and this comment kept the old
+    # count), so a diff that touches only the helper must still select every
+    # lane it can break; the same-name rule alone would select its own test
+    # file and nothing else. The target list below is longer than eight because
+    # two consumers are covered by two suites each.
     PathTestRule(
         "packages/common/node27_timeseries_hypertable_discovery.py",
         (

@@ -154,6 +154,11 @@ class LegacyChunks(Enum):
     I14 entry gate reads ``legacy_chunks[<table>] == 0``; absent and null both
     keep it shut, but only an explicit ``null`` tells the archived-receipt
     reader that the tick could not vouch for the count.
+
+    Round 3: ``refused`` receipts do not need this sentinel -- a refused tick
+    never reaches the probe at all, so :func:`build_receipt` defaults their
+    ``legacy_chunks`` to ``null`` on its own. The sentinel stays the only way
+    an ``enforced`` or ``dry-run`` tick can say "I looked and could not tell".
     """
 
     UNKNOWN = "unknown"
@@ -684,6 +689,7 @@ def _default_fetch_chunks(config: RetentionConfig, cutoff: datetime) -> list[Chu
         config.database_url,
         cursor_factory=psycopg2.extras.RealDictCursor,
         fallback_application_name=_APPLICATION_NAME,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
     )
     try:
         with connection:
@@ -811,9 +817,10 @@ def _default_measure_chunk_bytes(
 
     Per-chunk connection (mirrors compression sibling
     ``scripts/node27_timeseries_compression.py:387-428`` — same per-chunk
-    isolation and 60 s statement timeout; the sibling additionally passes
-    ``connect_timeout``, a pre-existing divergence this change does not
-    touch): a shared transaction would enter ``InFailedSqlTransaction`` on the
+    isolation, 60 s statement timeout and, since round 3 (decision 21), the
+    same ``connect_timeout=_CONNECT_TIMEOUT_SECONDS``; the divergence that
+    left this connect unbounded is closed): a shared transaction would enter
+    ``InFailedSqlTransaction`` on the
     first per-chunk failure, silently zeroing every subsequent chunk's
     ``freed_bytes``. Isolating each measurement in its own connection keeps
     the receipt faithful when a single chunk fails to size.
@@ -837,7 +844,9 @@ def _default_measure_chunk_bytes(
     for chunk in chunks:
         try:
             connection = psycopg2.connect(
-                config.database_url, fallback_application_name=_APPLICATION_NAME
+                config.database_url,
+                fallback_application_name=_APPLICATION_NAME,
+                connect_timeout=_CONNECT_TIMEOUT_SECONDS,
             )
             try:
                 with connection:
@@ -903,7 +912,9 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
     import psycopg2  # type: ignore[import-untyped]
 
     connection = psycopg2.connect(
-        config.database_url, fallback_application_name=_APPLICATION_NAME
+        config.database_url,
+        fallback_application_name=_APPLICATION_NAME,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
     )
     try:
         with connection:
@@ -1020,7 +1031,17 @@ def build_receipt(
     # stays key-for-key comparable with the archived receipts. An explicit
     # `null` is the third state (decision 17): the probe ran and failed, so the
     # count is inconclusive rather than absent.
-    if legacy_chunks is LegacyChunks.UNKNOWN:
+    #
+    # Round 3: a `refused` tick NEVER ran the probe -- it aborted before the
+    # post-drop discovery -- so absence there would read as "the catalog has no
+    # sibling", a claim this tick cannot make. Every refused exit (drop failure,
+    # lifecycle-lock contention, runner-lock contention, uncaught error) is
+    # therefore defaulted to an explicit `null`, which keeps "absent = no
+    # sibling" true for every archived receipt rather than only for the
+    # `enforced`/`dry-run` ones. The I9/I14 entry gate only ever opens on an
+    # explicit `0`, so this tightens nothing operationally and makes each
+    # receipt self-describing.
+    if legacy_chunks is LegacyChunks.UNKNOWN or (legacy_chunks is None and outcome == "refused"):
         legacy_block: dict[str, Any] = {"legacy_chunks": None}
     elif isinstance(legacy_chunks, Mapping) and legacy_chunks:
         legacy_block = {
@@ -1217,7 +1238,9 @@ def run_retention(
         Re-evaluated per tick (never cached) so the mapping appears with the
         expand migration and disappears with the contract one; the tick's own
         refusal paths do not call it, because a tick that failed mid-drop
-        cannot vouch for a post-drop count.
+        cannot vouch for a post-drop count -- :func:`build_receipt` writes an
+        explicit ``null`` for them (round 3), so "absent = no sibling" holds
+        for refused receipts too.
 
         ``discover_hypertables is None`` means no catalog was consulted — the
         honest claim for a caller without a database — and the receipt then

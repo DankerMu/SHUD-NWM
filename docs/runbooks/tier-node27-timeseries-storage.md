@@ -41,7 +41,9 @@ ships (`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`); the value that actually
 runs is whatever the machine's env file holds — node-27's DB retention window
 was `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=21` as of 2026-08-01. Read the
 live value on the box before quoting a day count anywhere (§8.1 step 2 shows
-the grep). Compression remains earlier at 7 days. Both ages are measured from
+the grep). Compression is earlier: lag `172800` (2 days), the value node-27 has
+run since the 2026-08-07 short-lag regime (§4.3.2.1) and, since `#1985`, the
+committed template value as well. Both ages are measured from
 the latest forecast cycle accepted by the node-27 display catalog, not from
 the server wall clock. The historical 30/45-day receipts in the committed
 evidence tree are audit evidence only, not commands for new runs.
@@ -52,7 +54,8 @@ Every lifecycle runner opens a bounded read-only query before selection and
 fails closed when that watermark is absent or unreadable; it MUST NOT fall back
 to `datetime.now()`. Wall time remains the receipt generation/freshness clock.
 For example, with display watermark `2026-07-11T12:00:00Z`, compression cutoff
-is `2026-07-04T12:00:00Z` and DB-retention cutoff is `2026-06-27T12:00:00Z`
+is `2026-07-09T12:00:00Z` (watermark minus the 172800 s lag) and DB-retention
+cutoff is `2026-06-27T12:00:00Z` (watermark minus the template's 14-day window)
 even if the host date is later.
 
 - Design record: `openspec/changes/tier-node27-timeseries-storage/design.md`
@@ -357,9 +360,15 @@ expand–contract transition (`timeseries-narrow-store-expand-contract`) the
 lifecycle lane also governs `hydro.river_timeseries_legacy` and, later,
 `met.forcing_station_timeseries_legacy`. Those tables are **write-frozen**: the
 parser writes only the narrow table, so their steady-state arrival is **zero**
-and what remains is a bounded stock of 7-day chunks (river ≤ 2 at 239–508 GB,
-forcing ≤ 2, much smaller). They do not enter the throughput constraint at all;
-they enter the wall constraint as a one-off.
+and what remains is a bounded stock of 7-day chunks. The bound is derived, not
+measured: at most `⌈retention window ÷ 7⌉ + 1` uncompressed 7-day chunks per
+table (the `+ 1` is the still-filling chunk). River measured **2** on
+2026-09-03 at 239–508 GB — the 239 is the still-filling `_hyper_3_107` — which
+is the 14-day template window; under the live 21-day window the same formula
+gives 3–4. Forcing is the same count and much smaller. The wall argument below
+is **per tick** and does not change with the count; only the drain length and
+the pre-expand lead time do. They do not enter the throughput constraint at
+all; they enter the wall constraint as a one-off.
 
 **Worst mixed tick.** One legacy 7-day river chunk at 508 GB is
 `508 × 6.0 s ≈ 3050 s ≈ 51 min`. That single chunk already approaches the
@@ -390,9 +399,17 @@ it by hand:
    terminal — D6 makes the table write-frozen, and this query must return `0`:
 
    ```sql
-   select count(*) filter (where status not in ('parsed','published','failed'))
-   from hydro.hydro_run where timeseries_store = 'legacy';
+   select count(*) from hydro.hydro_run
+   where timeseries_store = 'legacy'
+     and status in ('created','staged','pending','submitted','running');
    ```
+
+   The list is spelled as the COMPLEMENT of the terminal set on purpose
+   (`apps/api/routes/pipeline.py` `_TERMINAL_HYDRO_STATUSES`): `succeeded`,
+   `cancelled` and `superseded` are terminal too, so a `not in
+   ('parsed','published','failed')` gate would count a retried legacy run
+   parked at `succeeded` by the D6 refusal as live and wedge the gate shut
+   forever.
 
 2. **Serialise against the timer.** Stop the compression timer, or confirm you
    are outside its 04:25 UTC tick: the lifecycle lock is taken by the runner,
@@ -416,18 +433,37 @@ At `bound=1` the single slot therefore goes to the oldest eligible
 `met.forcing_station_timeseries` after that, so neither is ever selected: the
 legacy chunk is never compressed, forcing stops being compressed at all, and the
 "until a receipt shows the legacy chunk compressed" exit condition can never be
-reached. Bound 1 also demands the §4.5 raised timeout/wall triple or the
-configuration is refused outright by leg 3 of the budget chain. **Bound stays 4.**
+reached. The budget chain does not forbid bound 1 on its own: leg 3 of the
+chain enforces "raised `COMPRESS_TIMEOUT_MS` ⇒ bound 1", **not** the converse —
+bound 1 at the default `3600000` ms timeout is accepted by the preflight. The
+prefix-selection starvation above, not the budget chain, is why bound 1 is
+wrong here. **Bound stays 4.**
 
-**The backstop is loud, not silent.** If the attended step is missed, the tick
-at `range_end + lag` selects the legacy chunk plus up to three narrow ones:
-`(508 + 3 × 75) GB × 6.0 s/GB + 380 s ≈ 4778 s ≈ 80 min` against the 3900 s
-(65 min) wrapper wall. That tick is `TERM`ed by the wrapper's `timeout`, writes
-**no receipt**, marks the unit `failed` (`rc=124`) and sends the `OnFailure=`
-mail — and repeats every day until the chunk is compressed. The remedy is the
-attended step above, never a bound change: at bound 1 the tick would simply
-never select the legacy chunk at all. Retention meanwhile drains the sibling
-under the unchanged 14-day window, and the retention receipt's
+**There is no backstop — the attended step is mandatory.** The earlier text
+here promised a loud daily failure if the step were missed; simulation against
+the real `_classify` says otherwise. In steady state bound 4 keeps up with the
+2 terminal chunks/day the pair produces, so three narrow chunks never queue:
+the tick at `range_end + lag` selects **one** narrow river chunk, the legacy
+chunk and **one** forcing chunk —
+`(75 + 508 + 12.7) GB × 6.0 s/GB + 380 s ≈ 3954 s` against the 3900 s (65 min)
+wrapper wall. That is 54 s over at a 75 GB narrow chunk and *under* the wall at
+the measured 38–58 GB narrow sizes, so a missed step may `TERM` the tick (no
+receipt, `rc=124`, `OnFailure=` mail) or may produce **no signal at all** — and
+even when it does `TERM`, the legacy compress has most likely already committed
+inside the wall, so the alert is at most one trailing signal, not a daily
+reminder.
+
+Therefore **do not verify by the absence of an alert.** The completion criteria
+are `is_compressed = true` for that chunk in `timescaledb_information.chunks`
+and the compression receipt's
+`per_table_totals["hydro.river_timeseries_legacy"]["chunks_compressed"]`.
+(`(508 + 3 × 75) GB × 6.0 s/GB + 380 s ≈ 4778 s ≈ 80 min` remains the **backlog**
+worst case — three narrow chunks already queued — not the steady state.) The
+remedy for a missed step is the attended compress above, never a bound change:
+at bound 1 the tick would simply never select the legacy chunk at all.
+Retention meanwhile drains the sibling under the retention window in force
+(Current policy near the top of this runbook: the box ran 21 days as of
+2026-08-01, the committed template ships 14), and the retention receipt's
 `legacy_chunks["hydro.river_timeseries_legacy"]` counts it down to `0` — the
 contract migration's entry gate.
 
@@ -1477,8 +1513,8 @@ window trades one loop for another.
    runner is not a native TimescaleDB policy — `timescaledb_information.jobs`
    carries no compression job; it is the systemd timer, gated by
    `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` (live `172800` = 2 days since
-   the 2026-08-07 short-lag decision, §4.3.2.1; the committed template still
-   ships `604800` = 7 days — read the box, not the template) and bounded to
+   the 2026-08-07 short-lag decision, §4.3.2.1, and the committed template
+   value since `#1985` — read the box, not the template) and bounded to
    `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` chunks per tick.
    Every chunk whose `range_end` is older than the lag is a candidate, not
    just the one you decompressed. Because the write guard refuses **any**
@@ -1842,12 +1878,21 @@ check cannot flake on autovacuum or parallel-worker noise.
 ### 4.5 大 chunk 追赶（timeout 墙 override，`#1156`）
 
 A terminal chunk that outgrows the per-chunk statement timeout cannot pass the
-automated lane, and because selection is oldest-first (`ORDER BY range_end
-ASC`, then `eligible[:per_tick_bound]`) that one chunk is re-selected every
-tick and burns the whole tick, blocking everything behind it. The two mode-0600
-lane env files are one sequential assembly input: the shared preflight reads
-both as inert data before compression or cold residency starts. A catch-up is a
-bounded two-file override window, not a manual `statement_timeout = 0` DDL.
+automated lane, and because selection is **table-major** and only then
+oldest-first (`ORDER BY hypertable_schema, hypertable_name, range_end ASC`,
+then `eligible[:per_tick_bound]`) that one chunk is re-selected every tick and
+burns the whole tick, blocking everything behind it in its own table. The two
+mode-0600 lane env files are one sequential assembly input: the shared
+preflight reads both as inert data before compression or cold residency starts.
+A catch-up is a bounded two-file override window, not a manual
+`statement_timeout = 0` DDL.
+
+**This procedure does not apply to the transitional `_legacy` survivor.** The
+bound-1 requirement below is real for a genuine backlog of canonical-table
+chunks, but table-major prefix selection at bound 1 never reaches a
+`hydro.river_timeseries_legacy` chunk at all (§4, "Why bound 1 is not the
+answer here"). That chunk is compressed by the attended gated `compress_chunk`
+described there, not by a raised-timeout catch-up window.
 
 **The defaults already cover the steady state — check before you override.**
 `#1352` resized the compression statement/wrapper pair to `3600000` ms /
@@ -3784,55 +3829,71 @@ before a receipt exists.
      (threshold), `:239` (comparison), `:244` (the code literal)
      — and there is no `home_free_critical_bytes` at all. The exit-1 /
      `OnFailure=` mail lane has two triggers, in this order: the receipt's
-     `status` is not `completed` (`:859-860`), or the receipt carries at least
-     one `severity: critical` recommendation (`:865-867`, `:821`
+     `status` is not `completed` (`:903-904`), or the receipt carries at least
+     one `severity: critical` recommendation (`:909-911`, `:865`
      `_critical_codes`). The first is a defensive guard today — `build_receipt`
-     hard-codes `"status": "completed"` (`:508`) and nothing downgrades it — so
+     hard-codes `"status": "completed"` (`:552`) and nothing downgrades it — so
      in practice a critical recommendation is the only thing that reddens a
      completed audit. (A rejected config never gets that far: the config parse
-     is `:844-847` and the `return 2` is `:852`, which also trips
+     is `:888-891` and the `return 2` is `:896`, which also trips
      `OnFailure=`.) A `warning` changes neither `status` nor the critical
      list, so it trips nothing.
 
      The codes that can be critical today are `ROOT_FREE_BELOW_CRITICAL`
-     (`:222`), `HYPERTABLE_INDEX_RATIO_HIGH` (`:342`, severity assigned at
-     `:333`) and the four codes `#1985` added around the working set:
+     (`:223`), `HYPERTABLE_INDEX_RATIO_HIGH` (`:343`, severity assigned at
+     `:334`) and the five codes `#1985` added around the working set:
 
-     - `WORKING_SET_UNAVAILABLE` (`:425`) — the working set could not be
+     - `POSTGRES_UNAVAILABLE` (`:420`) — no database was reached at all:
+       `collect_postgres` reports `status: blocked` with reason
+       `connection_failed` or `psycopg2_unavailable`. There is no working set
+       to judge, so this is the whole finding. Before `#1985` round 3 both
+       shapes returned no recommendations and the tick exited 0, which made a
+       database the audit could not reach indistinguishable from a healthy
+       one — with the capacity guard off for the whole outage.
+       `database_url_missing` is deliberately NOT here: that is the
+       configured-not-to-look skip and stays exit 0. `query_failed` is not here
+       either, for the opposite reason — the connection succeeded, so the
+       working-set block exists and reports itself as
+       `WORKING_SET_UNAVAILABLE` (exactly one critical, never both).
+     - `WORKING_SET_UNAVAILABLE` (`:463`) — the working set could not be
        measured at all: the catalog probes raised, or they returned no row for
        a canonical hypertable (the shape a read-only role takes when it loses
        `timescaledb_information.*` visibility). An empty catalog reads exactly
        like "everything is already compressed", so this status is the only
        thing between a blinded audit and a green receipt that has stopped
        watching the volume.
-     - `WATERMARK_UNAVAILABLE` (`:441`) — the display watermark could not be
+     - `WATERMARK_UNAVAILABLE` (`:479`) — the display watermark could not be
        proven, so no projection is possible; the lane's own fault, and it must
        reach a person.
-     - `HOME_FREE_UNAVAILABLE` (`:462`) — the catalog side is fine
-       (`projection_status` stays `ok`) but `/home` did not resolve or its
-       `statvfs` failed, so `home_free_bytes` is null and the comparison below
-       cannot be made. Skipping it silently was the fail-open: the filesystem
-       block only emits `HOME_FREE_BELOW_WARNING` when it HAS a number, so
-       without this code an unobservable `/home` produced a green receipt about
-       the one volume the audit exists to watch.
-     - `PROJECTED_PEAK_EXCEEDS_HOME_FREE` (`:478`) —
+     - `HOME_FREE_UNAVAILABLE` (`:500`) — the catalog side is fine but `/home`
+       did not resolve or its `statvfs` failed, so `home_free_bytes` is null
+       and the comparison below cannot be made. Fires under BOTH measured
+       statuses — `ok` and `no_uncompressed_chunk` — because the guard is
+       equally blind in either: `projection_status` is left unchanged. Skipping
+       it silently was the fail-open: the filesystem block only emits
+       `HOME_FREE_BELOW_WARNING` when it HAS a number, so without this code an
+       unobservable `/home` produced a green receipt about the one volume the
+       audit exists to watch.
+     - `PROJECTED_PEAK_EXCEEDS_HOME_FREE` (`:522`) —
        `projected_peak_bytes > home_free_bytes - safety_margin_bytes`, margin
        default 100 GiB (`--safety-margin-bytes`). Gated on
-       `projection_status == "ok"` AND on a known `home_free_bytes`: with
-       nothing uncompressed there is no next compression to project, and
-       without a free-space number the code above fires instead.
+       `projection_status == "ok"` ALONE (not on `no_uncompressed_chunk`) AND
+       on a known `home_free_bytes`: with nothing uncompressed there is no next
+       compression to project and `projected_peak_bytes` is 0, so the
+       comparison would fire on any `/home` under the margin; without a
+       free-space number the code above fires instead.
 
-     The same block adds one warning, `WORKING_SET_ABOVE_WARNING` (`:491` —
+     The same block adds one warning, `WORKING_SET_ABOVE_WARNING` (`:535` —
      `uncompressed_bytes` above `working_set_warn_bytes`, default 400 GiB).
      `DATABASE_SIZE_ABOVE_WARNING` and `DATABASE_SIZE_ABOVE_CRITICAL` are
-     **`info` since `#1985`** (`:262`, `:265`): the `nhms` database growing past
+     **`info` since `#1985`** (`:263`, `:266`): the `nhms` database growing past
      500 GiB is what the retention window is supposed to allow, and a daily
      false critical is exactly how the true one gets ignored.
 
      Every critical prints `RESOURCE_GOVERNANCE_CRITICAL:<code>` on stderr
-     (`:867`, byte shape unchanged — other tooling greps it) and, only when at
+     (`:911`, byte shape unchanged — other tooling greps it) and, only when at
      least one critical fired, one additional
-     `RESOURCE_GOVERNANCE_WORKING_SET:{...}` line (`:868-871`) carrying
+     `RESOURCE_GOVERNANCE_WORKING_SET:{...}` line (`:912-915`) carrying
      `uncompressed_bytes`, `daily_ingest_bytes`, `next_compressible_at`,
      `home_free_bytes`, `projected_peak_bytes`, `projection_status` and
      `compression_lag_seconds`. The shared `OnFailure=` handler mails journal

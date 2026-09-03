@@ -216,12 +216,13 @@ def collect_filesystem(config: Any) -> dict[str, Any]:
 #: with the live compression env.
 DEFAULT_COMPRESSION_LAG_SECONDS = 172_800
 
-#: The LONGEST trailing window the ingest rate is averaged over, in days. The
-#: divisor is the span the in-window uncompressed chunks actually cover, capped
-#: at this value and floored at one day -- not a fixed seven. In steady state
-#: the uncompressed chunks only ever cover ``lag + 1`` days (everything older is
-#: already compressed), so dividing by seven under-reported the daily rate by
-#: about 3/7; the node-27 receipt at 989c3cf7 showed
+#: The LONGEST trailing window the ingest rate is averaged over, in days. It
+#: bounds which chunks enter the rate; it is NOT the divisor. The divisor is
+#: per table, the span that table's own in-window chunks cover, floored at one
+#: HOUR (:data:`_COVERED_DAYS_FLOOR`) -- not a fixed seven and not a whole day.
+#: In steady state the uncompressed chunks only ever cover ``lag + 1`` days
+#: (everything older is already compressed), so dividing by seven under-reported
+#: the daily rate by about 3/7; the node-27 receipt at 989c3cf7 showed
 #: ``daily_ingest_bytes == uncompressed_bytes // 7`` byte for byte. For a
 #: capacity guard, over-reporting is the fail-safe direction.
 DAILY_INGEST_WINDOW_DAYS = 7
@@ -360,8 +361,24 @@ def collect_working_set(
             for row in chunks
             if floor <= _as_datetime(row["range_start"]) <= watermark
         ]
-        recent = sum(int(row["total_bytes"] or 0) for row in in_window)
-        daily_ingest_bytes = int(recent / _covered_days(in_window, watermark=watermark))
+        # PER TABLE, then summed (round-3 review). A pooled divisor takes
+        # `min(range_start)` across ALL governed tables, so one long-span,
+        # byte-light table drags every other table's rate down with it: a
+        # write-frozen `_legacy` sibling holding a single week-old chunk, or a
+        # 7-day forcing chunk next to 1-day river chunks, halves the reported
+        # river rate. Each table's bytes are divided by the span that table's
+        # own chunks cover; tables with nothing in the window contribute zero.
+        per_table: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+        for row in in_window:
+            key = (str(row["hypertable_schema"]), str(row["hypertable_name"]))
+            per_table.setdefault(key, []).append(row)
+        daily_ingest_bytes = sum(
+            int(
+                sum(int(row["total_bytes"] or 0) for row in table_rows)
+                / _covered_days(table_rows, watermark=watermark)
+            )
+            for table_rows in per_table.values()
+        )
 
     next_compressible_at: str | None = None
     if chunks:
@@ -385,7 +402,11 @@ _COVERED_DAYS_FLOOR = 1.0 / 24.0
 
 
 def _covered_days(rows: Sequence[Mapping[str, Any]], *, watermark: datetime) -> float:
-    """Days the in-window uncompressed chunks actually cover.
+    """Days ONE table's in-window uncompressed chunks actually cover.
+
+    Called once per governed hypertable (round-3 review): a divisor pooled over
+    every table takes the earliest ``range_start`` in the whole catalog, which
+    lets a long-span, byte-light table dilute a busy one.
 
     ``max(1/24, days(watermark - earliest in-window range_start))`` -- fractional
     days, floored at ONE HOUR rather than one day (round-2 review, decision 11).

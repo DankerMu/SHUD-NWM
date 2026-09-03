@@ -50,8 +50,11 @@ NODE27_RESOURCE_GOVERNANCE_LOG_ROOT=/home/nwm/node27-resource-governance-logs
 # the compression TEMPLATE's assignment are cross-pinned by a unit test, and
 # the receipt echoes the value it used as `compression_lag_seconds` so the
 # node-27 rollout receipt can compare it against the deployed compression env.
-# A missing or unparseable value is a configuration error with a non-zero exit,
-# never a silent fallback.
+# An EMPTY or unparseable value is a configuration error with a non-zero exit,
+# never a silent fallback. An ABSENT variable is different: it resolves to the
+# code default 172800, which is cross-pinned to the compression template's
+# assignment, so an env file that predates this block still projects against
+# the same lag the runner uses.
 NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 # Headroom the projected peak must clear on /home. 100 GiB.
 NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES=107374182400

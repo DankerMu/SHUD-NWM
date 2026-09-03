@@ -900,8 +900,10 @@ def test_working_set_sums_uncompressed_chunk_bytes_over_the_discovery_set() -> N
 
 def test_daily_ingest_divides_by_the_days_the_window_actually_covers() -> None:
     """Chunks are attributed to a day by ``range_start``; the divisor is the
-    span those in-window chunks COVER (``watermark - earliest range_start``,
-    capped at seven, floored at one), not a fixed seven.
+    span that table's own in-window chunks COVER (``watermark - that table's
+    earliest in-window range_start``, floored at one HOUR), not a fixed seven.
+    The seven-day cap is implied by the window bound, so there is no separate
+    cap; the floor is sub-day (round-2 review, decision 11).
 
     Round-1 review: the fixed seven under-reported the rate systematically —
     the first node-27 receipt showed ``daily_ingest_bytes == uncompressed_bytes
@@ -948,6 +950,66 @@ def test_daily_ingest_in_steady_state_divides_by_the_uncompressed_span() -> None
     sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
     assert sample["uncompressed_chunks"] == 3
     assert sample["daily_ingest_bytes"] == 300 // 3
+
+
+def test_the_rate_is_computed_per_table_so_a_wide_chunk_cannot_dilute_it() -> None:
+    """Round-3 review, spec D8: ``daily_ingest_bytes`` is computed PER governed
+    hypertable and summed.
+
+    A pooled divisor takes ``min(range_start)`` across the WHOLE governed set,
+    so one long-span, byte-light table drags every other table's rate down with
+    it. Here river writes 60 GiB/day into one-day chunks while forcing holds a
+    single six-day-old 7-day chunk of 42 GiB (7 GiB/day). The truth is 67
+    GiB/day; pooled it would be ``222 GiB / 6 == 37 GiB/day``, a 45% under-report
+    on the guard whose whole job is to see the volume filling.
+    """
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[
+            _chunk_row("hydro", "river_timeseries", day=3, total_bytes=60 * _GIB),
+            _chunk_row("hydro", "river_timeseries", day=2, total_bytes=60 * _GIB),
+            _chunk_row("hydro", "river_timeseries", day=1, total_bytes=60 * _GIB),
+            _chunk_row("met", "forcing_station_timeseries", day=6, total_bytes=42 * _GIB),
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["uncompressed_bytes"] == 222 * _GIB
+    # river 180 GiB / 3 d + forcing 42 GiB / 6 d.
+    assert sample["daily_ingest_bytes"] == 67 * _GIB
+    # The pooled divisor this replaces.
+    assert sample["daily_ingest_bytes"] != 222 * _GIB // 6
+
+
+def test_a_write_frozen_legacy_sibling_does_not_dilute_the_canonical_rate() -> None:
+    """The transitional shape this rule exists for (D7 + round-3 review).
+
+    From rename onward the ``_legacy`` sibling is write-frozen: it holds one
+    stale 7-day chunk and takes on no new bytes. Pooled, its six-day-old
+    ``range_start`` becomes the divisor for the canonical table too, halving the
+    reported river rate for the entire expand window — exactly while the volume
+    is under the most pressure. Per table, the frozen sibling contributes its own
+    (near-zero) rate and nothing else.
+    """
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("hydro", "river_timeseries_legacy"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[
+            _chunk_row("hydro", "river_timeseries", day=3, total_bytes=60 * _GIB),
+            _chunk_row("hydro", "river_timeseries", day=2, total_bytes=60 * _GIB),
+            _chunk_row("hydro", "river_timeseries", day=1, total_bytes=60 * _GIB),
+            _chunk_row("hydro", "river_timeseries_legacy", day=6, total_bytes=_GIB),
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["daily_ingest_bytes"] == 60 * _GIB + int(_GIB / 6)
+    # Pooled, the frozen sibling would have cut the canonical rate in half.
+    assert sample["daily_ingest_bytes"] > (181 * _GIB) // 6
 
 
 def test_a_single_fresh_chunk_never_divides_by_a_fraction() -> None:
@@ -1116,10 +1178,11 @@ def test_scenario_peak_fits() -> None:
         "PROJECTED_PEAK_EXCEEDS_HOME_FREE",
         "WORKING_SET_ABOVE_WARNING",
         "WATERMARK_UNAVAILABLE",
-        # #1985 round-1/round-2: the new criticals must stay silent on a
-        # healthy measured sample — no phantom code on the fits path.
+        # #1985 round-1/round-2/round-3: the new criticals must stay silent on
+        # a healthy measured sample — no phantom code on the fits path.
         "WORKING_SET_UNAVAILABLE",
         "HOME_FREE_UNAVAILABLE",
+        "POSTGRES_UNAVAILABLE",
     }
     assert "critical" not in {
         item["severity"]
@@ -1155,6 +1218,79 @@ def test_scenario_no_uncompressed_chunk_emits_no_critical() -> None:
     assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in codes
     assert "WATERMARK_UNAVAILABLE" not in codes
     assert "WORKING_SET_ABOVE_WARNING" not in codes
+
+
+def test_an_empty_working_set_with_a_measured_home_still_makes_no_peak_claim() -> None:
+    """The trap in widening HOME_FREE_UNAVAILABLE to `no_uncompressed_chunk`.
+
+    Here `/home` IS measured — 1 GiB free, well under the 100 GiB safety
+    margin — and `projected_peak_bytes` is 0 because there is nothing left to
+    compress. Widening the whole branch instead of just the null-home check
+    makes `0 > 1 GiB - 100 GiB` true and fires
+    PROJECTED_PEAK_EXCEEDS_HOME_FREE about a compression that will not happen.
+    The filesystem block already owns low free space.
+    """
+    receipt = _base_receipt()
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=0,
+        daily_ingest_bytes=0,
+        next_compressible_at=None,
+        home_free_bytes=1 * _GIB,
+        projected_peak_bytes=0,
+        projection_status="no_uncompressed_chunk",
+    )
+    codes = _codes(receipt)
+    assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in codes
+    assert "HOME_FREE_UNAVAILABLE" not in codes
+
+
+def test_an_unobservable_home_pages_under_the_empty_state_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-3 review, decision 19: BOTH measured statuses, not just `ok`.
+
+    `no_uncompressed_chunk` is the state right after a compression tick drains
+    the backlog — the catalog answered, the working set is measured, and the
+    lane is about to start accumulating again. If `/home` is unobservable then,
+    the guard is just as blind as it is under `ok`, and staying silent means
+    the volume can fill through the entire next accumulation cycle with a green
+    daily audit.
+    """
+    monkeypatch.setattr(
+        governance,
+        "collect_filesystem",
+        lambda _config: {
+            "filesystems": {"home": {"path": "/home", "status": "unavailable"}},
+            "path_sizes": {},
+        },
+    )
+    monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
+    monkeypatch.setattr(
+        governance,
+        "collect_postgres",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "working_set": {
+                "hypertables": ["hydro.river_timeseries", "met.forcing_station_timeseries"],
+                "uncompressed_bytes": 0,
+                "uncompressed_chunks": 0,
+                "daily_ingest_bytes": 0,
+                "next_compressible_at": None,
+                "compression_lag_seconds": collection.DEFAULT_COMPRESSION_LAG_SECONDS,
+                "watermark": "2026-09-01T00:00:00Z",
+                "projection_status": "no_uncompressed_chunk",
+            },
+        },
+    )
+    summary_path = tmp_path / "resource-governance.json"
+    rc = governance.main(["--summary-path", str(summary_path), "--quiet"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert f"{_CRITICAL_ANCHOR}HOME_FREE_UNAVAILABLE" in err.splitlines()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    # The catalog was fine, so the status is NOT downgraded to unavailable.
+    assert summary["working_set"]["projection_status"] == "no_uncompressed_chunk"
+    assert summary["working_set"]["home_free_bytes"] is None
 
 
 def test_scenario_watermark_unavailable_is_critical() -> None:
@@ -1243,30 +1379,89 @@ def test_a_missing_working_set_block_on_a_healthy_postgres_is_critical() -> None
     assert codes["WORKING_SET_UNAVAILABLE"] == "critical"
 
 
-@pytest.mark.parametrize(
-    ("status", "reason"),
-    [
-        ("skipped", "database_url_missing"),
-        ("blocked", "psycopg2_unavailable"),
-        ("blocked", "connection_failed"),
-    ],
-)
-def test_a_missing_working_set_block_is_silent_when_postgres_was_never_sampled(
-    status: str, reason: str
-) -> None:
-    """The silent set is exactly these three, and every one of them means no
-    database was reached at all: there is nothing to project and the postgres
-    status already says so.
+def test_a_missing_working_set_block_is_silent_when_postgres_was_never_sampled() -> None:
+    """Round-3 review: the silent set is exactly ONE reason.
 
-    ``query_failed`` is deliberately NOT here — see the test below. It is the
-    one blocked reason where the audit DID reach the database, and dropping the
-    projection on it was worth exit 0 for a lane that could not see its own
-    volume.
+    ``database_url_missing`` is the configured-not-to-look skip — the operator
+    told the audit there is no database, so silence is the honest answer and
+    exit 0 is correct. Every OTHER "no database" reason is an outage, not a
+    skip, and is covered by the parametrised test below.
     """
     receipt = _base_receipt()
     receipt.pop("working_set", None)
-    receipt["postgres"] = {"status": status, "reason": reason}
-    assert "WORKING_SET_UNAVAILABLE" not in _codes(receipt)
+    receipt["postgres"] = {"status": "skipped", "reason": "database_url_missing"}
+    codes = _codes(receipt)
+    assert "WORKING_SET_UNAVAILABLE" not in codes
+    assert "POSTGRES_UNAVAILABLE" not in codes
+
+
+@pytest.mark.parametrize("reason", ["connection_failed", "psycopg2_unavailable"])
+def test_an_unreachable_database_is_a_critical_not_a_skip(reason: str) -> None:
+    """Round-3 review (spec D8): a database the audit CANNOT reach is not the
+    same as one it was told to ignore.
+
+    Before this, both shapes returned no recommendations: the daily tick exited
+    0 and mailed nothing while the capacity guard was completely off. A driver
+    that failed to import or a refused connection can persist for weeks that
+    way — precisely the window in which `/home` fills.
+    """
+    receipt = _base_receipt()
+    receipt.pop("working_set", None)
+    receipt["postgres"] = {"status": "blocked", "reason": reason, "error": "boom"}
+    codes = _codes(receipt)
+    assert codes["POSTGRES_UNAVAILABLE"] == "critical"
+    # One finding, not two: there is no working set to also call unavailable.
+    assert "WORKING_SET_UNAVAILABLE" not in codes
+    assert reason in governance.POSTGRES_UNREACHABLE_REASONS
+
+
+@pytest.mark.parametrize("reason", ["connection_failed", "psycopg2_unavailable"])
+def test_an_unreachable_database_exits_non_zero_with_its_own_stderr_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], reason: str
+) -> None:
+    """The wire contract, not just the recommendation list: rc 1 plus the
+    anchored stderr line the systemd `OnFailure=` handler mails."""
+    monkeypatch.setattr(
+        governance,
+        "collect_filesystem",
+        lambda _config: {
+            "filesystems": {"home": {"path": "/home", "free_bytes": 10 * _GIB}},
+            "path_sizes": {},
+        },
+    )
+    monkeypatch.setattr(
+        governance,
+        "collect_postgres",
+        lambda *_args, **_kwargs: {"status": "blocked", "reason": reason, "error": "boom"},
+    )
+    monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
+    summary_path = tmp_path / "resource-governance.json"
+    rc = governance.main(["--summary-path", str(summary_path), "--quiet"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert f"{_CRITICAL_ANCHOR}POSTGRES_UNAVAILABLE" in err.splitlines()
+
+
+def test_query_failed_yields_exactly_one_critical() -> None:
+    """`query_failed` is `status == "blocked"` too, so keying the new critical
+    on the status alone would emit POSTGRES_UNAVAILABLE *and*
+    WORKING_SET_UNAVAILABLE for a single fault. The discriminator is the
+    reason: the connection succeeded, so the working-set block is present and
+    speaks for itself (decision 20)."""
+    receipt = _base_receipt()
+    receipt["postgres"] = {"status": "blocked", "reason": "query_failed", "error": "boom"}
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=0,
+        daily_ingest_bytes=None,
+        next_compressible_at=None,
+        home_free_bytes=None,
+        projected_peak_bytes=0,
+        projection_status="working_set_unavailable",
+    )
+    codes = _codes(receipt)
+    assert codes["WORKING_SET_UNAVAILABLE"] == "critical"
+    assert "POSTGRES_UNAVAILABLE" not in codes
+    assert "query_failed" not in governance.POSTGRES_UNREACHABLE_REASONS
 
 
 def test_query_failed_is_not_in_the_silent_set(
@@ -1628,6 +1823,17 @@ def test_governance_env_example_carries_the_lag_and_threshold_variables() -> Non
     assert re.search(r"(?m)^NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800$", text)
     assert re.search(r"(?m)^NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES=\d+$", text)
     assert re.search(r"(?m)^NODE27_GOVERNANCE_WORKING_SET_WARN_BYTES=\d+$", text)
+    # Round-3 review: the template used to say "A missing or unparseable value
+    # is a configuration error", which is false for the missing half — an
+    # absent variable resolves to the code default (pinned by
+    # `test_absent_lag_env_falls_back_to_the_pinned_default`). Only an
+    # EMPTY or unparseable value refuses. An operator who trusted the old
+    # sentence would have added the line to silence a refusal that never comes.
+    assert "A missing or unparseable value" not in text
+    lag_comment = text.split("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=")[0]
+    assert "EMPTY or unparseable" in lag_comment
+    assert "absent" in lag_comment.lower()
+    assert "172800" in lag_comment
 
 
 def test_default_thresholds_are_the_decided_values() -> None:

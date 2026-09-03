@@ -402,3 +402,18 @@ def test_the_helper_docstring_names_exactly_the_consumers_it_has() -> None:
     assert len(documented) == len(_CONSUMERS)
     assert set(documented) == set(_CONSUMERS)
     assert "Eight call sites" in (discovery.__doc__ or "")
+
+
+def test_the_ci_selector_comment_carries_the_current_consumer_count() -> None:
+    """Round-3 review: the third place the count is written down.
+
+    `scripts/select_ci_tests.py` explains WHY the helper needs an explicit
+    fan-out rule by citing the consumer count. Round-1 added the eighth
+    consumer and updated the helper docstring and `_CONSUMERS`, but not this
+    comment — so the file a maintainer reads when deciding whether the rule
+    still covers everything claimed seven.
+    """
+    source = (_ROOT / "scripts" / "select_ci_tests.py").read_text(encoding="utf-8")
+    assert "SEVEN consumers" not in source
+    assert "EIGHT consumers" in source
+    assert len(_CONSUMERS) == 8

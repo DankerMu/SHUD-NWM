@@ -671,6 +671,9 @@ def test_per_chunk_drop_failure_refuses_whole_tick(tmp_path: Path) -> None:
     assert "_timescaledb_internal.chk-c" not in drop_calls
     # a was attempted (before b), b was attempted (raised), c was not.
     assert drop_calls == ["_timescaledb_internal.chk-a", "_timescaledb_internal.chk-b"]
+    # #1985 round-3: a refused tick never reached the post-drop probe, so it
+    # cannot claim "no sibling" by omission -- it says so explicitly.
+    assert receipt["legacy_chunks"] is None
     jsonschema.validate(receipt, _load_schema())
 
 
@@ -769,6 +772,7 @@ def test_concurrent_invocation_publishes_refused_receipt(
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["outcome"] == "refused"
     assert receipt["refusal_reason"] == retention.CODE_RETENTION_CONCURRENT_INVOCATION
+    assert receipt["legacy_chunks"] is None
     jsonschema.validate(receipt, _load_schema())
     err = capsys.readouterr().err
     assert retention.CODE_RETENTION_CONCURRENT_INVOCATION in err
@@ -799,7 +803,64 @@ def test_uncaught_error_publishes_refused_receipt(
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["outcome"] == "refused"
     assert receipt["refusal_reason"].startswith("RETENTION_UNCAUGHT_ERROR:RuntimeError")
+    assert receipt["legacy_chunks"] is None
     jsonschema.validate(receipt, _load_schema())
+
+
+def test_lifecycle_lock_contention_publishes_refused_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fourth refused exit (#1893 lifecycle mutex), previously untested.
+
+    It sits BEFORE the runner lock, so the runner-lock test never reaches it:
+    when compression or a manual decompression already holds
+    ``/tmp/nhms-node27-timeseries-lifecycle.lock`` the tick refuses without
+    opening its own lock file at all. Like every other refused exit, the
+    receipt carries an explicit ``legacy_chunks: null`` (round-3, decision 17).
+    """
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(retention, "acquire_timeseries_lifecycle_lock", lambda: None)
+
+    code = retention.main(argv=[], now=_NOW)
+
+    assert code == 1
+    receipt_path = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == retention.CODE_RETENTION_CONCURRENT_INVOCATION
+    assert receipt["legacy_chunks"] is None
+    jsonschema.validate(receipt, _load_schema())
+    assert retention.CODE_RETENTION_CONCURRENT_INVOCATION in capsys.readouterr().err
+    # The runner lock was never opened: this exit precedes it.
+    assert not Path(env["NODE27_TIMESERIES_RETENTION_LOCK_PATH"]).exists()
+
+
+def test_the_no_sibling_absent_shape_survives_for_non_refused_outcomes(
+    tmp_path: Path,
+) -> None:
+    """The round-3 default is scoped to `refused` only. A dry-run or enforced
+    tick on a catalog with no `_legacy` sibling still OMITS the key, which is
+    what keeps today's and the post-contract receipts key-for-key comparable
+    with the archived ones."""
+    config = _build_config(tmp_path, enforce=True)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+    enforced = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: [
+            {"hypertable_schema": "hydro", "hypertable_name": "river_timeseries"},
+            {"hypertable_schema": "met", "hypertable_name": "forcing_station_timeseries"},
+        ],
+    )
+    assert enforced["outcome"] == "enforced"
+    assert "legacy_chunks" not in enforced
+    dry = retention.build_receipt("dry-run", _NOW)
+    assert "legacy_chunks" not in dry
 
 
 # ---------------------------------------------------------------------------
@@ -2203,6 +2264,12 @@ def test_refused_receipt_shape_validates_against_schema(wire_code: str) -> None:
     receipt = retention.build_receipt("refused", _NOW, refusal_reason=wire_code)
     jsonschema.validate(receipt, _load_schema())
     assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
+    # #1985 round-3, decision 17: every refused exit self-describes an
+    # inconclusive sibling count rather than omitting the key, which an
+    # archived-receipt reader would (correctly, for enforced receipts) read as
+    # "the catalog had no `_legacy` sibling".
+    assert "legacy_chunks" in receipt
+    assert receipt["legacy_chunks"] is None
 
 
 def test_enforced_receipt_salvage_backed_window_datetime_format_enforced() -> None:
@@ -4283,6 +4350,69 @@ def test_the_post_drop_discovery_probe_bounds_its_connect(
 
     assert seen and seen[0]["connect_timeout"] == retention._CONNECT_TIMEOUT_SECONDS
     assert retention._CONNECT_TIMEOUT_SECONDS == 10
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        pytest.param(
+            lambda config: retention._default_fetch_chunks(config, _NOW),
+            id="fetch_chunks",
+        ),
+        pytest.param(
+            lambda config: retention._default_measure_chunk_bytes(
+                config, [_chunk("hydro", "river_timeseries", "c1", delta_days=30)]
+            ),
+            id="measure_chunk_bytes",
+        ),
+        pytest.param(
+            lambda config: retention._default_drop_chunk(
+                config, _chunk("hydro", "river_timeseries", "c1", delta_days=30)
+            ),
+            id="drop_chunk",
+        ),
+    ],
+)
+def test_every_default_connect_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invoke: Any
+) -> None:
+    """#1985 round-3, decision 21: the three pre-existing untimed connects.
+
+    Round 2 bounded only the post-drop discovery probe. Enumeration,
+    measurement and drop all opened unbounded connects, so a black-holed
+    server (dropped SYN/ACK, not a refusal) parks the tick on the OS TCP
+    timeout — minutes to hours — while it holds the runner lock and, for the
+    drop path, the lifecycle lock. There is no per-connect-site reason for a
+    different policy, so all four now carry the same bound.
+    """
+    config = _build_config(tmp_path)
+    seen: list[dict[str, Any]] = []
+
+    def _recording_connect(_dsn: str, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        raise psycopg2.OperationalError("connection refused")
+
+    monkeypatch.setattr(psycopg2, "connect", _recording_connect)
+    # `_default_measure_chunk_bytes` swallows per-chunk failures by design; the
+    # other two propagate. Either way the connect kwargs were already recorded.
+    try:
+        invoke(config)
+    except psycopg2.OperationalError:
+        pass
+
+    assert seen, "no connect was attempted"
+    assert seen[0]["connect_timeout"] == retention._CONNECT_TIMEOUT_SECONDS
+
+
+def test_the_attributed_connect_helper_stays_untouched() -> None:
+    """Decision 21 exempts `_attributed_connect` explicitly: its only caller,
+    `fetch_display_watermark`, already passes `connect_timeout=5`, so adding
+    the kwarg here would raise `TypeError: got multiple values`. The bound is
+    present on that path; it just is not spelled in this module."""
+    source = inspect.getsource(retention._attributed_connect)
+    assert "connect_timeout" not in source
+    watermark_source = inspect.getsource(retention.fetch_display_watermark)
+    assert "connect_timeout=5" in watermark_source
 
 
 def test_the_probe_connect_timeout_mirrors_the_compression_sibling() -> None:
