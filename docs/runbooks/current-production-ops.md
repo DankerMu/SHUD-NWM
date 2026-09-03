@@ -123,11 +123,26 @@ tail -n 160 /home/nwm/autopipe-logs/autopipe.log
   10,000 行，减少数据库往返；这不改变事务边界或最终 publish 语义。
 - `coverage backstop (--all --skip-fresh)` 可刷新或跳过 display coverage；
   当前使用两个独立连接并行刷新。该步骤非 fatal，不应掩盖 autopipe 主返回码。
-- **`--skip-fresh` 不可省**：#1341 后 river coverage 扫描按代理键选行，legacy
-  （pre-#1340、NULL 键）run 扫不到任何行，裸 `--all` 或 `--run-id <legacy run>`
-  会把已物化的 `run_display_coverage` 覆写成 0 / NULL 边界，**无法撤销**，该 run
-  随即掉出 latest-product readiness 与 national tile。详见
-  `scripts/node27_refresh_coverage.py` 模块 docstring 的 warning 块。
+- **legacy run 覆写已由 guard 兜底（#1446）**：#1341 后 river coverage 扫描按代理
+  键选行，legacy（pre-#1340、NULL 键）run 扫不到任何行。曾经裸 `--all` 或
+  `--run-id <legacy run>` 会把已物化的 `run_display_coverage` 覆写成 0 / NULL
+  边界，且**旧值无法就地恢复**（归零后的行本身不是永久损失，但**不会自愈**：归零的
+  upsert 会把 `refreshed_at` 刷成 `now()`，该行随即是 fresh 的，cron 的
+  `--all --skip-fresh` 永远不会再回头扫它。#1408 身份 backfill 落地后，恢复需要显式
+  `--run-id <run>` 刷新——或一次省掉 `--skip-fresh` 的 `--all`——才会重新算出真实
+  计数）；现在 upsert 的条件
+  `DO UPDATE ... WHERE` 直接拒绝该写入——`--run-id` 退出码 **3** 并在 stderr 打一行
+  `DISPLAY_COVERAGE_REFRESH_REFUSED run_id=… existing_segment_count=… advice=…`，
+  `--all` 把它计入 JSON 报告的 `refused` 且仍退出 0（不打断批次）。
+  代价：被拒的 run 保留旧 `refreshed_at`——**只在它本来就 stale
+  （`refreshed_at < hydro_run.updated_at`）时**，cron 的 `--all --skip-fresh` 每个
+  tick 才会重扫它一次（空扫描走代理键索引，很快）；被拒但 `refreshed_at` 仍 fresh
+  的 run 不会被重扫。两条了结途径：等 #1408 身份 backfill 补上键后下一次刷新自然
+  成功并自愈；或运维确认后显式 `--run-id <run> --force` 把该 run 归零（单个 run，
+  推荐的人工方式）。`--force` 也可与 `--all` 组合，一条命令把批次里**每个**被拒的
+  run 都归零——属运维显式 opt-in，cron 永不使用。`--skip-fresh` 不再是防覆写的必
+  需项，但仍应保留——省掉它会让每个 tick 重扫所有已 fresh 的 run。详见
+  `scripts/node27_refresh_coverage.py` 模块 docstring 的 "Overwrite guard" 段。
 
 确认 node-27 ingest 按 bounded systemd 模式运行，并且 node-22 的 production
 scheduler 是 DB-free systemd timer：

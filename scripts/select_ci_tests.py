@@ -1782,6 +1782,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # fallback_application_name identity.
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
+            # #1446: the CLI suite is a one-hop importer via
+            # scripts/node27_refresh_coverage.py. It owns the operator-facing
+            # half of the overwrite guard (exit 3 + the structured refusal
+            # line, `refused` in the --all report) — behaviour none of the
+            # suites above assert.
+            "tests/test_node27_refresh_coverage_cli.py",
+        ),
+    ),
+    PathTestRule(
+        # #1446: the refusal exit code and stderr line are this script's own
+        # contract (the autopipeline branches on the rc), and no other rule
+        # covers this file — a CLI-only diff fell through to the core-smoke
+        # fallback, which imports none of it.
+        "scripts/node27_refresh_coverage.py",
+        (
+            "tests/test_node27_refresh_coverage_cli.py",
+            "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
         ),
     ),
     PathTestRule(

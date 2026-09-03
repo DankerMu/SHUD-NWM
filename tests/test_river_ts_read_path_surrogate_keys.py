@@ -719,6 +719,9 @@ def test_coverage_sql_binds_only_parameters_the_refresh_actually_supplies() -> N
         "run_id",
         "variables",
         "variable_count",
+        # #1446: the overwrite guard's explicit-zeroing bypass, bound by
+        # `_refresh` on every call (False unless the caller forces).
+        "force",
         *display_coverage._SCAN_PARAM_KEYS,
     }
     for name, sql in (
