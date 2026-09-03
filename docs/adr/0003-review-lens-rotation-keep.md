@@ -3014,10 +3014,10 @@ coverage gaps). Round 2 re-ran the same six lenses on the fix delta with no
 lens rotated in and returned one P3 (a whitespace-bearing URI root leaking
 its tail past the bail-out fixed in round 1, deferred to #1976); Phase 7 on
 the final head was clean. That round-2 finding is a later-round catch in a
-core lens, so the PR adds **+1 to `core` and +0 to `rotated`**. Unlike the
-#1963 and #1974 lines it is not a null datum, but it is still not a rotation
-datum: no rotated-in lens ran, so it says nothing about what a rotated lens
-would have found.
+core lens, so the PR adds **+1 to `core` and +0 to `rotated`**. Unlike
+the #1963 and #1974 lines it is not a null datum, but it is still not a
+rotation datum: no rotated-in lens ran, so it says nothing about what a
+rotated lens would have found.
 
 The accumulated later-round catches still concentrate in rotated-in lenses
 (**301 versus 145**, `skipped=15` named rather than silently bucketed), so
