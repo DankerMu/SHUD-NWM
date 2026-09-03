@@ -2519,6 +2519,28 @@
           "rounds": 2
         }
       ]
+    },
+    "1961": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1972,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "1965": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 1972,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
     }
   },
   "1736": {
