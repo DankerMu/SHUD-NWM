@@ -1605,7 +1605,12 @@ def test_every_registered_file_declares_its_river_timeseries_statement_count() -
 
 
 def test_every_registered_file_declares_its_marker_and_aid_count() -> None:
-    """34/34 across the tree, of which this register owns ten (#1980, task 1.1).
+    """34/34 across the REGISTERED files, of which this register owns ten (#1980, task 1.1).
+
+    The 34 is the total over ``REGISTERED_SOURCES`` plus the display oracle's
+    ``DISPLAY_MARKER_AID_CENSUS``, not over the tree: nothing here sweeps the
+    repository, so a NEW reader that is in neither register is invisible to this
+    assertion. Finding one is the I11 discovery-set census's job (tasks 7.2a).
 
     Two things at once, and both matter:
 
@@ -1624,7 +1629,7 @@ def test_every_registered_file_declares_its_marker_and_aid_count() -> None:
 
 
 def test_this_registers_marker_total_is_the_measured_ten() -> None:
-    """The register's share of the tree-wide 34, stated as a number.
+    """The register's share of the registered 34, stated as a number.
 
     A per-file dict can be edited one line at a time without anyone noticing the
     total moved; the issue's baseline is a total.

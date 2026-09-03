@@ -43,6 +43,7 @@ from packages.common.river_ts_render import (
     fact_table_name_occurrences,
     fact_table_text_identity_columns,
     render_river_ts_sql,
+    sql_chains,
 )
 
 MARKER = PUSHDOWN_AID_MARKER
@@ -450,6 +451,12 @@ def test_the_legacy_table_name_is_attributed_to_the_fact_table_too() -> None:
         ("as_quoted", 'hydro.river_timeseries AS "r"'),
         ("bare_quoted", 'hydro.river_timeseries "r"'),
         ("legacy_as_quoted", 'hydro.river_timeseries_legacy AS "r"'),
+        # A double quote opens an identifier with no whitespace in front of it,
+        # so these are the SAME unmodelled form and used to walk straight past
+        # the `\s+` the guard was first written with (review #2018, B/P2-1).
+        ("no_ws_bare_quoted", 'hydro.river_timeseries"r"'),
+        ("no_ws_as_quoted", 'hydro.river_timeseries AS"r"'),
+        ("legacy_no_ws_quoted", 'hydro.river_timeseries_legacy"r"'),
     ],
 )
 def test_a_double_quoted_fact_alias_is_refused_instead_of_reported_clean(label: str, reference: str) -> None:
@@ -469,6 +476,28 @@ def test_a_double_quoted_fact_alias_is_refused_instead_of_reported_clean(label: 
             render_river_ts_sql(sql, store, entry=label)
     with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
         fact_table_text_identity_columns(sql, entry=label)
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("as_alias", "hydro.river_timeseries AS r"),
+        ("bare_alias", "hydro.river_timeseries r"),
+        ("column_alias_list", "hydro.river_timeseries r(run_key, value)"),
+        ("legacy_bare_alias", "hydro.river_timeseries_legacy r"),
+    ],
+)
+def test_an_unquoted_fact_alias_survives_the_no_whitespace_widening(label: str, reference: str) -> None:
+    r"""Non-vacuity for the `\s*` widening: only the QUOTED spellings are refused.
+
+    Relaxing both gaps to `\s*` widens what the refusal can reach, so the legal
+    spellings — `AS r`, a bare `r`, a column alias list `r(a, b)`, the legacy
+    name — are asserted to still be read as ordinary aliased reads. A guard that
+    refused these would refuse the registry.
+    """
+    sql = f"SELECT r.value FROM {reference} WHERE r.run_id = :run_id"
+
+    assert fact_table_text_identity_columns(sql, entry=label) == {"run_id"}
 
 
 def test_an_unquoted_as_alias_is_the_alias_and_not_the_word_as() -> None:
@@ -498,6 +527,80 @@ def test_an_unquoted_alias_still_renders_for_both_stores() -> None:
     assert "run_id" not in narrow.sql
 
 
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "fully_quoted",
+            'SELECT "r".value FROM "hydro"."river_timeseries" r WHERE r.run_id = :run_id',
+        ),
+        (
+            "half_quoted",
+            'SELECT r.value FROM hydro."river_timeseries" r WHERE r.run_id = :run_id',
+        ),
+        (
+            "from_only",
+            "SELECT r.value FROM ONLY hydro.river_timeseries r WHERE r.run_id = :run_id",
+        ),
+        (
+            "comma_join",
+            "SELECT a.value FROM hydro.river_timeseries a, hydro.river_timeseries b "
+            "WHERE a.run_id = :run_id AND b.run_key = a.run_key",
+        ),
+        (
+            "in_table",
+            "SELECT 1 FROM hydro.river_timeseries r "
+            "WHERE r.run_key IN (TABLE hydro.river_timeseries) AND r.run_id = :run_id",
+        ),
+    ],
+)
+def test_a_reference_the_from_join_walk_cannot_count_is_refused(label: str, sql: str) -> None:
+    """The independent counter's disagreement is now ENFORCED, not merely available.
+
+    ``fact_table_name_occurrences`` exists to be able to disagree with the
+    ``FROM`` / ``JOIN`` walk (round-2 H3), but nothing on the render path read
+    the disagreement, so every one of these shipped: the three quoted / ``ONLY``
+    spellings rendered "legacy" WITHOUT the rename (the walk saw no reference at
+    all, so ``_rename_table`` had nothing to rename) and narrow with their text
+    predicates intact, and the two double-read spellings rendered legacy with
+    only one of their two reads renamed. Refusing on ``occurrences !=
+    reference_count`` closes all of them at once, naming both counts.
+
+    The half-quoted spelling ``hydro."river_timeseries"`` is in the list because
+    it is the case the equality alone does NOT catch: the counter could not see
+    it either, so the guard compared 0 == 0 and waved it through until
+    ``_FACT_NAME_QUOTED`` learned the spelling (review #2018, C/P2-1).
+
+    Matched on the message, not on the exception type: ``comma_join`` and
+    ``in_table`` already raised for narrow through the text-identity check, so a
+    bare ``pytest.raises(RiverTemplateError)`` would have been green before the
+    guard existed.
+    """
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError, match=f"{label}: unmodelled fact-table reference form"):
+            render_river_ts_sql(sql, store, entry=label)
+    with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
+        fact_table_text_identity_columns(sql, entry=label)
+
+
+def test_the_reference_count_guard_does_not_fire_on_a_plainly_aliased_read() -> None:
+    """Non-vacuity: the two counters agree on the ordinary form, so nothing is refused.
+
+    Asserted with the refusal message, because the narrow variant of this
+    statement is refused either way — the point is that it is refused for
+    carrying ``run_id``, not for being unreadable.
+    """
+    sql = "SELECT r.value FROM hydro.river_timeseries r WHERE r.run_id = :run_id"
+
+    assert fact_table_name_occurrences(sql) == fact_table_attribution(sql).reference_count == 1
+    assert fact_table_text_identity_columns(sql, entry="counted") == {"run_id"}
+    assert "FROM hydro.river_timeseries_legacy r" in render_river_ts_sql(sql, "legacy", entry="counted").sql
+    with pytest.raises(RiverTemplateError) as excinfo:
+        render_river_ts_sql(sql, "narrow", entry="counted")
+    assert "text identity column(s) ['run_id']" in str(excinfo.value)
+    assert "unmodelled" not in str(excinfo.value)
+
+
 def test_a_literal_that_spells_a_fact_read_is_not_a_second_reference() -> None:
     """Probe F for the third counter: attribution reads CODE, like its siblings.
 
@@ -524,6 +627,47 @@ def test_a_literal_that_spells_a_fact_read_is_not_a_second_reference() -> None:
     rendered = render_river_ts_sql(template, "narrow", entry="literal-reference")
 
     assert "'FROM hydro.river_timeseries' AS note" in rendered.sql
+
+
+def test_an_escape_string_literal_does_not_swallow_the_statement_after_it() -> None:
+    """``E'a\\'b'`` ends at its own closing quote, not at the escaped one.
+
+    The scanners read `\\'` as the end of the literal and the following text as a
+    SECOND literal running to the end of the statement, so the blanked text this
+    module makes every structural decision in lost the statement's own ``FROM``
+    clause: attribution reported no fact-table reference at all, the narrow
+    render shipped ``rt.run_id`` and the legacy render skipped the rename
+    (review #2018, B/P2-2). The blanking is what made this reachable, so the pin
+    covers all three answers, not just the count.
+    """
+    sql = (
+        "SELECT rt.value, E'a\\'b' AS note FROM hydro.river_timeseries rt "
+        "WHERE rt.run_key = :run_key AND rt.run_id = :run_id"
+    )
+
+    attribution = fact_table_attribution(sql)
+
+    assert attribution.aliases == frozenset({"rt"})
+    assert attribution.reference_count == 1
+    assert fact_table_name_occurrences(sql) == 1
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
+        render_river_ts_sql(sql, "narrow", entry="escape-literal")
+    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="escape-literal").sql
+
+
+def test_an_escape_string_with_no_backslash_and_a_doubled_quote_still_render() -> None:
+    """Non-vacuity: the backslash arm must not have changed the ordinary literals.
+
+    ``E'abc'`` carries the prefix but no escape, and ``'a''b'`` is the standard
+    doubled-quote form whose escape the backslash arm must not consume.
+    """
+    prefixed = "SELECT rt.value, E'abc' AS note FROM hydro.river_timeseries rt WHERE rt.valid_time = :valid_time"
+    doubled = "SELECT rt.value, 'a''b' AS note FROM hydro.river_timeseries rt WHERE rt.valid_time = :valid_time"
+
+    for sql, literal in ((prefixed, "E'abc' AS note"), (doubled, "'a''b' AS note")):
+        assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+        assert literal in render_river_ts_sql(sql, "narrow", entry="e-control").sql
+        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="e-control").sql
 
 
 def test_the_text_identity_vocabulary_is_total_and_disjoint() -> None:
@@ -902,6 +1046,26 @@ def test_the_structural_check_names_the_terminator_and_row_count_faults(label: s
     """The faults a chain-end mutation produces, named rather than shipped silently."""
     with pytest.raises(RiverTemplateError, match=re.escape(label)):
         assert_structurally_intact(sql, "<test>")
+
+
+@pytest.mark.parametrize("lock_clause", ["FOR UPDATE", "FOR NO KEY UPDATE", "FOR SHARE", "FOR KEY SHARE"])
+def test_a_row_locking_clause_ends_the_chain_and_is_never_a_conjunct(lock_clause: str) -> None:
+    """The ``FOR …`` arm of ``_KEYWORD_FAMILY``, pinned on both of its consumers.
+
+    A row-locking clause is not a predicate. Without the arm, a chain read as
+    continuing into it produces ``FOR UPDATE AND …`` — a syntax error at execute
+    time that nothing textual noticed (round-3 L1-3) — and the golden form folds
+    the clause into a conjunct, so moving a predicate across it is invisible to
+    the equivalence oracle.
+
+    Both consumers are asserted because the arm is ONE constant shared by them:
+    the structural fault that catches a chain whose last conjunct was deleted,
+    and the region stop that decides where a chain ends.
+    """
+    with pytest.raises(RiverTemplateError, match="dangling connective before a keyword"):
+        assert_structurally_intact(f"SELECT a FROM t WHERE x = :v AND {lock_clause}", "<test>")
+
+    assert sql_chains(f"SELECT a FROM t WHERE x = :v {lock_clause}") == (("x = :v",),)
 
 
 def test_a_row_count_clause_with_no_conjunct_after_it_is_not_a_fault() -> None:

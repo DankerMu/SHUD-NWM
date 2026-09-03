@@ -215,11 +215,43 @@ _LINE_COMMENT = re.compile(r"--[^\n]*")
 _WHITESPACE = re.compile(r"\s+")
 
 
+def _opens_escape_string(sql: str, start: int) -> bool:
+    """Whether the single quote at ``start`` opens a PostgreSQL ``E'…'`` literal.
+
+    The ``E`` has to be a token of its own: in ``note E'x'`` it is the prefix, in
+    an identifier that merely ends in ``e`` (a pasted ``value'x'``, or ``tablE'x'``)
+    it is not, and reading the plain literal as an escape string would swallow a
+    doubled quote the standard form uses as its escape.
+    """
+    if start == 0 or sql[start - 1] not in "Ee":
+        return False
+    return start < 2 or not (sql[start - 2].isalnum() or sql[start - 2] == "_")
+
+
 def _scan_quoted(sql: str, start: int, quote: str) -> int:
-    """Index just past the quoted run beginning at ``start`` (doubled quote escapes)."""
+    r"""Index just past the quoted run beginning at ``start`` (doubled quote escapes).
+
+    A single-quoted run carrying the ``E'…'`` prefix additionally honours
+    BACKSLASH escapes, so ``\'`` and ``\\`` inside it are data and not the end of
+    the literal. Without that, ``E'a\'b' AS note FROM hydro.river_timeseries rt``
+    ends its "literal" at the middle quote and opens a second one that runs to
+    the end of the statement — which blanked the statement's own ``FROM`` clause
+    and made :func:`fact_table_attribution` report a read of the fact table as no
+    read at all, so the narrow render shipped its text predicates and the legacy
+    render skipped the rename (review #2018, B/P2-2).
+
+    Taught HERE rather than in one caller because every traversal in this module
+    locates faults, references and chain ends as offsets into the same text: two
+    scanners with two ideas of where a literal ends is exactly the disagreement
+    :func:`non_code_spans` exists to prevent.
+    """
+    escaped = quote == "'" and _opens_escape_string(sql, start)
     index = start + 1
     length = len(sql)
     while index < length:
+        if escaped and sql[index] == "\\":
+            index += 2
+            continue
         if sql[index] == quote:
             if index + 1 < length and sql[index + 1] == quote:
                 index += 2
@@ -439,8 +471,18 @@ _FACT_REFERENCE = re.compile(
 #: text identity on the fact table", for a statement that plainly does. So the
 #: form is REFUSED naming the entry instead: unmodelled and silently clean are
 #: not the same answer.
+#:
+#: Both gaps are `\s*`, not `\s+`: a double quote needs no whitespace in front of
+#: it to start an identifier, so `hydro.river_timeseries"r"` and
+#: `hydro.river_timeseries AS"r"` are the same unmodelled form as their spaced
+#: spellings and used to walk straight past a `\s+` guard (review #2018, B/P2-1).
+#: The accepted consequence is that `FROM "hydro.river_timeseries" r` — a quoted
+#: identifier for a table literally named `hydro.river_timeseries` in the default
+#: schema, which is not this fact table — is refused too. That form is equally
+#: unmodelled by the alias walk (it silently attributed nothing), so refusing it
+#: is the fail-closed answer rather than a regression.
 _FACT_QUOTED_ALIAS = re.compile(
-    r"\bhydro\.river_timeseries(?:_legacy)?\s+(?:AS\s+)?\"",
+    r"\bhydro\.river_timeseries(?:_legacy)?\s*(?:AS\s*)?\"",
     re.IGNORECASE,
 )
 
@@ -459,6 +501,15 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
             f"{entry}: unmodelled fact-table reference form {match.group(0).strip()!r} — a double-quoted "
             "alias is not modelled by the alias walk, so this statement's text-identity columns cannot be "
             "attributed to the fact table; alias the table with a bare identifier"
+        )
+    occurrences = fact_table_name_occurrences(sql)
+    modelled = fact_table_attribution(sql).reference_count
+    if occurrences != modelled:
+        raise RiverTemplateError(
+            f"{entry}: unmodelled fact-table reference form — the statement names the fact table "
+            f"{occurrences} time(s) but the FROM/JOIN walk models {modelled} reference(s), so at least one "
+            "read is spelled in a form whose alias (and therefore whose text-identity predicates) cannot be "
+            "attributed; write each read as a plain FROM/JOIN of the fact table with a bare alias"
         )
 
 
@@ -504,7 +555,11 @@ def fact_table_attribution(sql: str) -> FactTableAttribution:
 #: not a second read of the table, so counting it would make an unaliased
 #: statement look like it read the fact table twice.
 _FACT_NAME = re.compile(r"\bhydro\.river_timeseries(?:_legacy)?\b(?!\s*\.)", re.IGNORECASE)
-_FACT_NAME_QUOTED = re.compile(r'"hydro"\s*\.\s*"river_timeseries(?:_legacy)?"(?!\s*\.)', re.IGNORECASE)
+#: The half-quoted spelling counts too (``hydro."river_timeseries"``): a name the
+#: counter cannot see is a name the equality guard in
+#: :func:`_assert_modelled_reference_forms` compares as 0 == 0, i.e. an unmodelled
+#: read that slips through because BOTH sides are blind to it (review #2018, C/P2-1).
+_FACT_NAME_QUOTED = re.compile(r'(?:"hydro"|hydro)\s*\.\s*"river_timeseries(?:_legacy)?"(?!\s*\.)', re.IGNORECASE)
 
 
 _DOLLAR_QUOTE_OPEN = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
@@ -531,9 +586,12 @@ def non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     L2-3): one span helper cannot disagree with itself.
 
     Covered: ``--`` line comments and ``/* … */`` block comments (kind
-    ``"comment"``); single-quoted literals with doubled-quote escapes traversed,
-    and dollar-quoted bodies ``$$ … $$`` / ``$tag$ … $tag$`` (kind
-    ``"literal"``).
+    ``"comment"``); single-quoted literals with doubled-quote escapes traversed
+    (and backslash escapes too where the literal carries the ``E'…'`` prefix, see
+    :func:`_scan_quoted`), and dollar-quoted bodies ``$$ … $$`` / ``$tag$ … $tag$``
+    (kind ``"literal"``). An ``E`` prefix stays OUTSIDE the span: the span's own
+    first and last characters have to be the quotes, because
+    :func:`_blank_non_code` keeps them when it blanks a literal's body.
 
     NOT covered, deliberately: double-quoted text. In PostgreSQL that is a
     quoted IDENTIFIER, so ``"hydro"."river_timeseries"`` is a read of the fact
@@ -610,6 +668,11 @@ def fact_table_name_occurrences(sql: str) -> int:
     not model — a comma join (``FROM fact a, fact b``), ``FROM ONLY``, a quoted
     identifier — and a caller that trusted the walk alone would be reasoning about
     fewer reads than the statement performs (round-2 H3).
+
+    The disagreement is no longer merely available to callers: since review #2018
+    (C/P2-1) :func:`_assert_modelled_reference_forms` REFUSES any statement whose
+    two counts differ, so every render and every text-identity answer is taken
+    over a statement both counters agree about.
     """
     text = _blank_comments_and_literals(sql)
     return len(_FACT_NAME.findall(text)) + len(_FACT_NAME_QUOTED.findall(text))

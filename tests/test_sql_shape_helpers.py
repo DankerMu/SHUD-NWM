@@ -834,9 +834,12 @@ def test_the_rendered_aid_total_reconciles_with_the_per_file_census() -> None:
     The two numbers count different things and both are load-bearing, so they are
     reconciled here rather than left to look like a contradiction:
 
-    * **34** is the ``grep -rn "remove with #1342"`` total over the seven reader
-      SOURCE files (fixture "Measured baseline"), pinned per file in each file's
-      owning oracle. That is the number #1342 deletes.
+    * **34** is the ``grep -rn "remove with #1342"`` total over the seven
+      REGISTERED reader SOURCE files (fixture "Measured baseline"), pinned per
+      file in each file's owning oracle — ``REGISTERED_SOURCES`` plus
+      ``DISPLAY_MARKER_AID_CENSUS``, not a sweep of the tree, so an unregistered
+      reader is not in it (that is I11's discovery-set census, tasks 7.2a).
+      That is the number #1342 deletes from those files.
     * **58** is the total over RENDERED templates, which is larger for exactly one
       reason: ``forecast_store._SEGMENT_IDENTITY_PREDICATE_SQL`` carries three
       aids in the source once and is embedded by all eight segment blocks, so

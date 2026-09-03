@@ -859,7 +859,12 @@ def test_the_display_readers_declare_their_marker_and_aid_count() -> None:
 
 
 def test_the_display_readers_carry_the_measured_marker_total() -> None:
-    """24 of the tree-wide 34; the other ten are the cleanup oracle's."""
+    """24 of the registered 34; the other ten are the cleanup oracle's.
+
+    Registered, not tree-wide: the 34 spans this census plus the cleanup
+    oracle's ``REGISTERED_SOURCES`` and nothing sweeps for an unregistered
+    reader — that is the I11 discovery-set census (tasks 7.2a).
+    """
     assert sum(DISPLAY_MARKER_AID_CENSUS.values()) == 24
 
 
