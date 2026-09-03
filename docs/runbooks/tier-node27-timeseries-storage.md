@@ -2203,12 +2203,17 @@ distinguished in `stop.stage`:
   `--probe` does not classify at all: a lock failure under `--probe` surfaces as
   `failure.stage: "runner"` (with the exception class name on stderr), not as a
   `stop.stage` receipt.
-  Caveat on coverage: until `SET LOCAL lock_timeout` is adopted (a live-batch
-  behaviour change that needs its own node-27 dry-run), a pure lock *wait* still
-  runs out the statement timeout and is reported as `duration_wall`; only
-  deadlocks (`40P01`) reach this stage today. So a `duration_wall` stop on a
-  chunk that ingest may still be touching deserves one look at lock waits before
-  it is treated as slowness.
+  Coverage (#1476, adopted): each batch sets `SET LOCAL lock_timeout` beside its
+  `SET LOCAL statement_timeout`, from
+  `NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS` (default 5000 ms, echoed in
+  the receipt as `bounds.lock_timeout_ms`). A pure lock *wait* therefore ends at
+  `55P03` and reaches this stage, instead of running out the statement timeout
+  and being reported as `duration_wall`; deadlocks (`40P01`) reach it as before.
+  The bound must stay strictly below `..._DURATION_WALL_MS` — the runner refuses
+  the configuration before any batch otherwise, because at or above the wall the
+  statement timeout fires first and every contention event is mislabelled again.
+  Setting it to `0` is refused too: PostgreSQL reads `lock_timeout = 0` as "wait
+  forever".
 - `ingest_not_quiescent` — `--final-sweep` was asked to touch the active chunk
   while its write counters were still moving. Nothing was written. Complete the
   ingest pause (step 1 of the cutover sequence in 4.6.3), confirm it, and rerun;

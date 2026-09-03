@@ -1124,12 +1124,21 @@ def _already_ingested_runs(
 
     Completeness is decided by AUTHORITY STATE first (#1674). A run at status
     'published' is complete whether or not its fact rows are key-visible right
-    now: publish only ever happens once rows exist, so a later invisibility has
-    exactly two sources -- NULL-key legacy rows the backfill could not reach
-    inside compressed chunks (a recorded, converging exclusion contract), or a
-    retention-dropped chunk (an intentional deletion). Neither should
-    re-trigger the per-cycle handoff. A run at status 'parsed' still requires
-    evidence that a parse finished, now read as a non-NULL parsed_at.
+    now. What backs that is the PARSER, not publish: mark_run_parsed stamps
+    parsed_at in the same transaction that commits the run's fact rows
+    (workers/output_parser/parser.py), so a post-cutover run that reached
+    'parsed' has a committed parse behind it. The pre-cutover legacy cohort is
+    'published' by contract instead (#1674 design D2) and was never stamped.
+    Publish itself no longer reads the fact table at all -- since #1779 it keys
+    on status plus parsed_at -- so it neither adds to nor subtracts from that
+    guarantee. Invisibility of a published run's rows therefore has three
+    sources: NULL-key legacy rows the backfill could not reach inside compressed
+    chunks (a recorded, converging exclusion contract), a retention-dropped
+    chunk (an intentional deletion), or -- new with #1779 -- a run whose parser
+    committed zero rows and which publish advances anyway (the #1789 owner
+    decision). None of the three should re-trigger the per-cycle handoff. A run
+    at status 'parsed' still requires evidence that a parse finished, now read
+    as a non-NULL parsed_at.
 
     This statement touches NO fact table (#1789). parsed_at is a column on
     hydro_run, stamped by every successful parse; it used to be derived here as
@@ -1374,17 +1383,30 @@ def _backfill_output_geometry(database_url: str, river_network_version_id: str) 
 
 
 def _publish_display_runs(database_url: str) -> int:
-    """Advance fully-ingested display runs from 'parsed' to 'published'.
+    """Advance parsed display runs to 'published' on authority state alone.
 
-    ``/api/v1/layers`` surfaces display-ready hydro runs. A display node
-    publishes q_down products after parsed river_timeseries rows appear so the
-    overlay registers without waiting for compute-side jobs. Idempotent
-    (published runs and runs without timeseries are left untouched). The
-    parsed -> published transition keys on key-visible rows, which is right for
-    the population it acts on: only runs written after the dual-write cutover
-    can still be 'parsed'. Legacy NULL-key runs are already 'published' by
-    contract -- they finished publishing before the cutover -- so this
-    statement never has to reason about them (#1674 design D2).
+    ``/api/v1/layers`` surfaces display-ready hydro runs, and the overlay must
+    register without waiting for compute-side jobs. The transition therefore
+    reads ``hydro.hydro_run`` and nothing else. ``parsed_at`` is stamped by the
+    output parser's own UNCONDITIONAL statement, which runs first in the same
+    transaction as the status-gated ``status = 'parsed'`` UPDATE beside it
+    (``workers/output_parser/parser.py``, both inside ``mark_run_parsed``), so
+    the authority table already records that a parse finished: the old ``EXISTS``
+    probe against the river fact table asked it a question it did not need to
+    ask. It also asked it expensively -- ``run_key``
+    is not a compression segmentby column, so on the compressed side the planner
+    had no access path and every compressed chunk was sequentially scanned once
+    per tick (#1779).
+
+    ``parsed_at IS NOT NULL`` is belt-and-braces against a manual status edit;
+    it is a READ of the column, never a write (the parser owns writes, #1789),
+    and it costs nothing on the ``hydro_run_display_ready_basin_status_idx``
+    path. A parsed run whose parser wrote zero river rows is published like any
+    other parsed run -- that is the #1789 owner decision, and it is the one
+    behaviour change against the old probe. Idempotent: already-``published``
+    runs are outside the predicate, which is also what keeps the legacy NULL-key
+    cohort -- ``published`` by contract before the dual-write cutover -- out of
+    it (#1674 design D2).
 
     Status-only on purpose: ``updated_at`` means "run data changed" (register,
     mark_run_parsed), and display coverage staleness is
@@ -1402,12 +1424,7 @@ def _publish_display_runs(database_url: str) -> int:
                     UPDATE hydro.hydro_run h
                     SET status = 'published'
                     WHERE h.status = 'parsed'
-                      -- #1442: key-only correlation, same reasoning as
-                      -- _already_ingested_runs — the run arrives by join, so no
-                      -- transitional text aid applies.
-                      AND EXISTS (
-                          SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_key = h.run_key
-                      )
+                      AND h.parsed_at IS NOT NULL
                     """
                 )
                 return cur.rowcount

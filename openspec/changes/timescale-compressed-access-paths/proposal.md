@@ -1,0 +1,23 @@
+## Why
+
+- #1779: `scripts/node27_autopipeline.py::_publish_display_runs` advances `parsed -> published` with `EXISTS (SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_key = h.run_key)`. `run_key` is not the compression segmentby column, so on the compressed side the planner has no access path and each compressed leg is a bare `Seq Scan on compress_hyper_*`. #1789 has since added `hydro.hydro_run.parsed_at`, written by the parser in the same transaction that sets `status = 'parsed'` (`workers/output_parser/parser.py:1192-1200`, `parsed_at` stamped first, unconditionally). The fact-table probe is therefore redundant: the authority table already knows a parse finished.
+- #1778: `services/tile_publisher/forcing_copyback_backfill.py:73-86` carries `rt.variable = 'q_down'` labelled as a "transitional pushdown aid", but `variable` is an **orderby** column of the compression layout, not segmentby — it filters batch metadata, it is not an index-level pushdown. Readers take it for more than it is.
+- #1476: `scripts/node27_river_identity_backfill.py:786` sets only `SET LOCAL statement_timeout`; without `lock_timeout` a pure lock wait runs out the statement budget and lands in `duration_wall`, so the delivered `lock_contention` classification (#1408) is only reachable by deadlock.
+
+## What Changes
+
+- #1779: the publish UPDATE becomes `WHERE h.status = 'parsed' AND h.parsed_at IS NOT NULL` — no fact-table access, no pushdown aid, `updated_at` untouched, #1674 D2 preserved (legacy `published` runs are outside the predicate). Owner decision from #1789: no transitional aid for this site. The `NO_AIDS` oracle and the `('hydro','river_timeseries')` reference census in `tests/test_river_ts_text_identity_cleanup.py` are re-pinned to "publish touches no fact table" (1 → 0 dotted mentions in `node27_autopipeline.py`); the existing spec scenario "register and publish never write parsed_at" is narrowed from *references* to *writes* (MODIFIED delta) and `tests/test_display_publish_status_only.py` is rewritten from `"parsed_at" not in statement` to a SET-clause pin plus the predicate regression rows; `tests/integration_helpers.py` seeds `parsed_at` for the one seeded run that also gets fact rows (the hindcast seed stays NULL) so the residual-debt integration suite keeps publishing exactly 1 row and gains the negative row. Pre-switch invariant measured live (2026-09-02): zero `status = 'parsed'` rows exist, and the parser stamps `parsed_at` before the status flip, so no `parsed` row can lack `parsed_at`. #1686 AC6: publish site closed; `forcing_copyback_backfill.py` still untriaged for pushdown (this batch only fixes its wording, #1778).
+- #1778 option (b): wording only — the comment next to the aid states it is an orderby-level batch filter, not a segmentby pushdown; the `PUSHDOWN_AID_MARKER` line stays byte-identical; `required_columns` and `COPYBACK_AIDS` unchanged; note left for #1342.
+- #1476: `NODE27_RIVER_IDENTITY_BACKFILL_LOCK_TIMEOUT_MS` (default 5000) set as `SET LOCAL lock_timeout` beside the statement timeout in `execute_batch`; config-time assertion `lock_timeout_ms < duration_wall_ms` (fail-closed refusal with a wire code); value recorded in receipt `bounds` (clean and stopped paths) and required by `schemas/river_identity_backfill_receipt.schema.json`; runbook §4.6.2 caveat rewritten; node-27 dry-run receipt proves no false trigger.
+
+## Capabilities
+
+**Modified Capabilities**
+- `river-identity-normalization` — publish transition keyed on authority state; backfill lock-wait bound; copyback aid wording.
+
+## Impact
+
+- Code: `scripts/node27_autopipeline.py` (`_publish_display_runs`), `services/tile_publisher/forcing_copyback_backfill.py` (comment only), `scripts/node27_river_identity_backfill.py`, `schemas/river_identity_backfill_receipt.schema.json`.
+- Tests: `tests/test_river_ts_text_identity_cleanup.py`, `tests/test_display_publish_status_only.py`, `tests/integration_helpers.py`, `tests/test_display_coverage_residual_debt_integration.py`, `tests/test_real_database_integration.py`, `tests/test_integration_helpers_bounded_teardown.py` (node-27, shared seed helper), `tests/test_node27_river_identity_backfill.py`, `tests/test_node27_river_identity_backfill_receipt.py`, `tests/test_node27_autopipeline_handoff.py` and `tests/test_forcing_copyback_backfill.py` (must stay green).
+- Docs: `docs/runbooks/tier-node27-timeseries-storage.md` §4.6.2 (caveat at `:2204`); infra env example for the backfill lane if one exists.
+- node-27: read-only `EXPLAIN (COSTS OFF)` before/after for the publish statement; integration-marked run of the residual-debt suite; backfill dry-run receipt; count assertion `status='parsed' AND parsed_at IS NULL = 0`.
