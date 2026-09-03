@@ -54,7 +54,7 @@ The same control bar is reused in basin detail, but its cycle options there SHAL
 
 #### Scenario: Active layer has valid times from layer API
 - **WHEN** the national overview loads
-- **THEN** the system MUST call `/api/v1/layers/discharge/cycles?source=<source>` and, for the selected cycle, `/api/v1/layers/discharge/valid-times?source=<source>&cycle=<cycle>`
+- **THEN** the system MUST call `/api/v1/layers/discharge/cycles?source=<source>` (after `mapBootstrapLoading` settles, per `overview-data-contracts`) and MUST consume the default cycle's valid times from `metadata.valid_times`; `/api/v1/layers/discharge/valid-times?source=<source>&cycle=<cycle>` is called only when the selected `(source, cycle)` differs from `(default_source, default_cycle)` (per `frontend-mvt-layer-consumption`)
 - **AND** the bottom timeline MUST use the returned `valid_times[]` (3-hour stride, lead +0h … +168h inclusive, 57 entries, matching the canonical f000–f168 product range) for ticks, current-time selection, and next/previous actions
 - **AND** ticks MUST be labelled with the lead hour (`+0h`, `+3h`, …) and the valid time
 - **AND** the current valid time, source, and cycle MUST be included in map and precipitation requests

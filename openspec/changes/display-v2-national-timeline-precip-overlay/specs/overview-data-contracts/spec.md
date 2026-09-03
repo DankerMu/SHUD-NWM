@@ -61,6 +61,37 @@ This guarantees that the default `discharge` overview renders **every basin's ri
 - **WHEN** the `discharge` entry is returned by either caller shape
 - **THEN** `metadata.default_cycle` and every `metadata.valid_times[]` entry match `^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`, the one spelling pinned by `mvt-tile-contract`
 
+### Requirement: Map interactivity is decoupled from enrichment loading
+The system SHALL split the single `loading` flag in `useOverviewDataStore` into two independent flags so that map interactivity (MVT hit-layer registration) is not gated on non-essential enrichment requests. The flags are `mapBootstrapLoading` and `enrichmentLoading`.
+
+#### Scenario: Initial state before loadOverview
+- **WHEN** the store is constructed and `loadOverview` has not yet been called
+- **THEN** both `mapBootstrapLoading` and `enrichmentLoading` MUST be `false`
+- **AND** `overview` MUST be `null`
+- **AND** callers MUST treat the (false, false, null) tuple as "not yet bootstrapped", not as "ready / empty"
+
+#### Scenario: Map bootstrap completes before enrichment
+- **WHEN** `loadOverview` runs and the bootstrap critical path settles
+- **THEN** the store MUST set `mapBootstrapLoading=false` once basins, runless layers catalog, and the selected layer's valid_time are settled
+- **AND** the store MUST keep `enrichmentLoading=true` until pipeline status, queue depth, per-basin versions, and any other non-bootstrap fetch settle
+- **AND** the OverviewPage `surfaceSettling` indicator MUST react only to `mapBootstrapLoading || !overview?.bootstrap`, not to `enrichmentLoading`
+
+#### Scenario: Map bootstrap rejection
+- **WHEN** the mapBootstrap critical-path fetch (basins or runless layers) rejects
+- **THEN** `mapBootstrapLoading` MUST settle to `false` with a scoped bootstrap-error state
+- **AND** `enrichmentLoading` MUST NOT block on the failed bootstrap promise
+- **AND** OverviewPage MUST render a truthful "bootstrap failed" state rather than an indefinite spinner
+
+#### Scenario: Enrichment failure does not block map
+- **WHEN** any enrichment fetch (pipeline, queue, summary, per-basin versions) rejects or yields partialError
+- **THEN** the map MUST remain interactive
+- **AND** the failure MUST surface as a scoped enrichment error or unavailable badge in the affected panel only
+
+#### Scenario: Bootstrap minimal request set
+- **WHEN** the default `gfs+discharge` overview is opened (the national default source is `gfs`; a restored `source=best` resolves to `gfs` at national scale per `map-layer-timeline-controls`)
+- **THEN** the mapBootstrap critical path MUST consist of: `fetchBasins`, `fetchLayers(null)` (runless catalog), and resolution of the current layer's valid_time from `metadata.valid_times`
+- **AND** the bootstrap MUST NOT depend on `fetchRuns`, `fetchPipelineStatus`, `fetchQueueDepth`, `fetchBasinVersions`, `fetchLayerValidTimes`, the discharge cycles request, or the precipitation index request
+
 ### Requirement: Overview bootstrap cold latency budget
 The system SHALL keep the default `gfs+discharge` overview cold first-paint within a defined latency budget so the receipt under `docs/runbooks/receipts/display-bootstrap-decoupling-<date>.md` (and, for this change, `docs/runbooks/receipts/<date>-display-v2.md`) is a regression contract, not a one-shot artifact. The budget is re-measured by this change because the runless catalog now evaluates the 38-network cycle intersection (`national_discharge_cycles`) and the per-cycle valid-time list inside `GET /api/v1/layers`, and because the precipitation overlay is on by default.
 
@@ -77,7 +108,7 @@ The system SHALL keep the default `gfs+discharge` overview cold first-paint with
 - **AND** the precipitation index fetch and the first PNG request MUST NOT be awaited before `mapBootstrapLoading` settles
 
 ### Requirement: Cycles and precipitation index requests stay off the bootstrap critical path
-The bootstrap critical path SHALL remain `fetchBasins` + `fetchLayers(null)` + valid_time resolution from `metadata.valid_times` (the `Bootstrap minimal request set` scenario). `GET /api/v1/layers/discharge/cycles`, `GET /api/v1/layers/discharge/valid-times?source=&cycle=` and `GET /api/v1/precip/{source}/{cycle}/index` SHALL be issued only after `mapBootstrapLoading` settles, as non-blocking enrichment fetches: the bottom control bar renders immediately from `metadata.default_source` / `metadata.default_cycle` / `metadata.valid_times`, the cycle selector shows only the default cycle until the cycles list arrives, and the precipitation raster is registered when its index arrives.
+The bootstrap critical path SHALL remain `fetchBasins` + `fetchLayers(null)` + valid_time resolution from `metadata.valid_times` (the `Bootstrap minimal request set` scenario, restated above for the `gfs+discharge` national default). `GET /api/v1/layers/discharge/cycles`, `GET /api/v1/layers/discharge/valid-times?source=&cycle=` and `GET /api/v1/precip/{source}/{cycle}/index` SHALL be issued only after `mapBootstrapLoading` settles, as non-blocking enrichment fetches: the bottom control bar renders immediately from `metadata.default_source` / `metadata.default_cycle` / `metadata.valid_times`, the cycle selector shows only the default cycle until the cycles list arrives, and the precipitation raster is registered when its index arrives.
 
 #### Scenario: Control bar renders from catalog metadata first
 - **WHEN** `loadOverview` settles the bootstrap critical path
