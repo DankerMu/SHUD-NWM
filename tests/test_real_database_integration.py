@@ -13,9 +13,12 @@ from packages.common.migrate import MIGRATIONS_DIR
 from tests.integration_helpers import (
     BASIN_ID,
     BASIN_VERSION_ID,
+    CYCLE_ID,
     CYCLE_TIME,
+    FORECAST_RUN_ID,
     MODEL_ID,
     RIVER_NETWORK_VERSION_ID,
+    SOURCE_ID,
     STATE_ID,
     apply_migrations_from_zero,
     seed_issue_126_data,
@@ -394,6 +397,82 @@ def test_real_reserve_candidate_reclaims_dead_reservation(
     assert state is not None
     assert state["status"] == "reserved"
     assert state["slurm_job_id"] is None
+
+
+def test_real_active_pipeline_probe_counts_a_pending_hydro_run_with_no_pipeline_job(
+    throwaway_database_url: str,
+) -> None:
+    """The SQL active probe's hydro arm binds ``pending`` — proved on real Postgres.
+
+    ``test_psycopg_has_active_pipeline_includes_queued_pipeline_rows`` captures
+    the bound parameter list, which proves the literal, not the query. Only a
+    real database exercises ``h.status::text = ANY(%s)`` against a real
+    ``hydro.run_status`` enum column, which is what actually decides.
+
+    The input is exactly the one whose answer this change flips: a
+    ``hydro_run`` at ``pending`` whose cycle carries no ``ops.pipeline_job`` row
+    at all, so the UNION's job arm cannot answer for it and the verdict comes
+    from the hydro arm alone. ``pending`` is what manual retry writes once the
+    retry job is submitted, and the scheduler decision lane has always called
+    such a row active; at ``d7fe213b`` this probe answered ``False``.
+
+    ``throwaway_database_url``, never the session-scoped
+    ``integration_database_url``: this test rewrites and deletes seeded issue
+    #126 rows, and ``seed_issue_126_data`` clears them only on its NEXT call, so
+    on the shared database the damage would surface in a later test as what
+    looks like a product bug.
+    """
+
+    from services.orchestrator.chain_repository import PsycopgOrchestratorRepository
+
+    apply_migrations_from_zero(throwaway_database_url)
+    seed_issue_126_data(throwaway_database_url)
+
+    engine = sqlalchemy_engine(throwaway_database_url)
+    try:
+        with engine.begin() as connection:
+            # The seeded forecast run is `parsed`; park it at `pending` as a
+            # manual retry would, and take the cycle's only pipeline_job away.
+            connection.execute(
+                text("UPDATE hydro.hydro_run SET status = 'pending' WHERE run_id = :run_id"),
+                {"run_id": FORECAST_RUN_ID},
+            )
+            connection.execute(
+                text("DELETE FROM ops.pipeline_job WHERE cycle_id = :cycle_id"),
+                {"cycle_id": CYCLE_ID},
+            )
+        with engine.connect() as connection:
+            # Preconditions, so a red here can never be misread as the probe's
+            # verdict: the job arm has nothing to match, and the hydro arm has
+            # exactly the row under test.
+            assert (
+                connection.execute(
+                    text("SELECT count(*) FROM ops.pipeline_job WHERE cycle_id = :cycle_id"),
+                    {"cycle_id": CYCLE_ID},
+                ).scalar_one()
+                == 0
+            )
+            assert [
+                row["status"]
+                for row in connection.execute(
+                    text(
+                        """
+                        SELECT status::text AS status
+                        FROM hydro.hydro_run
+                        WHERE source_id = :source_id
+                          AND cycle_time = :cycle_time
+                          AND model_id = :model_id
+                        """
+                    ),
+                    {"source_id": SOURCE_ID, "cycle_time": CYCLE_TIME, "model_id": MODEL_ID},
+                ).mappings()
+            ] == ["pending"]
+    finally:
+        engine.dispose()
+
+    repository = PsycopgOrchestratorRepository(throwaway_database_url)
+
+    assert repository.has_active_pipeline(source_id=SOURCE_ID, cycle_time=CYCLE_TIME, model_id=MODEL_ID) is True
 
 
 # ---------------------------------------------------------------------------

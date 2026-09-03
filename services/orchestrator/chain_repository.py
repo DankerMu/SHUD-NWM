@@ -13,12 +13,17 @@ from services.orchestrator.chain_types import (
     ModelContext,
     OrchestratorError,
 )
-from services.orchestrator.scheduler_state_types import DURABLE_HYDRO_SUCCESS_STATUSES
+from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, DURABLE_HYDRO_SUCCESS_STATUSES
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
-# Lacks "pending", which scheduler_state_types.ACTIVE_HYDRO_STATUSES holds; that divergence is
-# UNADJUDICATED (#1581) — locked by tests/test_hydro_status_set_parity.py, not decided.
-ACTIVE_HYDRO_STATUSES = {"created", "staged", "submitted", "running"}
+# The SAME object as scheduler_state_types.ACTIVE_HYDRO_STATUSES, not a copy; the name stays
+# because it is an importable surface of this module. Consequence: the hydro arm of
+# has_active_pipeline below now binds "pending" too, so a hydro_run at "pending" whose cycle has
+# no non-terminal pipeline_job answers "active" on this lane exactly as it already does on the
+# scheduler decision lane. The file journal's probe applies its own candidate-scoped
+# terminal-completion suppression (#1472) on top; that suppression is NOT mirrored here — this arm
+# stays a plain UNION member with no completion clause.
+ACTIVE_HYDRO_STATUSES = ACTIVE_HYDRO_STATUSES
 # The SAME object as scheduler_state_types.DURABLE_HYDRO_SUCCESS_STATUSES (#1581), not a copy; the
 # name stays because file_orchestration_journal imports COMPLETED_HYDRO_STATUSES from here.
 COMPLETED_HYDRO_STATUSES = DURABLE_HYDRO_SUCCESS_STATUSES

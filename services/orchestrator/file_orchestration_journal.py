@@ -68,7 +68,6 @@ from services.orchestrator.accepted_submit_identity import (
     ordered_cohort_members,
 )
 from services.orchestrator.chain_repository import (
-    ACTIVE_HYDRO_STATUSES,
     COMPLETED_HYDRO_STATUSES,
     DEFAULT_CANDIDATE_STATE_EVENT_LIMIT,
     DEFAULT_CANDIDATE_STATE_JOB_LIMIT,
@@ -139,7 +138,7 @@ from services.orchestrator.scheduler_init_state_match import (
 )
 from services.orchestrator.scheduler_state import _ensure_utc, _evidence_safe, _format_utc
 from services.orchestrator.scheduler_state_manual_retry import MARKER_TARGET_ROW_DETAIL_FIELDS
-from services.orchestrator.scheduler_state_types import HYDRO_RUN_CODE_CLEARING_STATUSES
+from services.orchestrator.scheduler_state_types import ACTIVE_HYDRO_STATUSES, HYDRO_RUN_CODE_CLEARING_STATUSES
 from services.slurm_gateway.models import SubmitJobRequest
 from workers.data_adapters.base import cycle_id_for, format_cycle_time, parse_cycle_time
 
