@@ -47,14 +47,14 @@ therefore gain `pending`.
   `candidate_state_scoped_retry_detector`. Not reached for the `pending`
   class: the decision lane already returns `skip` / `active_duplicate_pipeline`
   for a `pending` row (`scheduler_state_decision.py:194`, no supersede rule
-  covers `pending`) and the `:1173` skip precedes this probe, so this diff
+  covers `pending`) and the `:1174` skip precedes this probe, so this diff
   changes nothing at this call site.
 - `scheduler_candidates.py:406` — only when the active repository has no
   callable `candidate_state`; both production repositories
   (`chain_repository.py:118`, `file_orchestration_journal.py:1517`) and the
   raw-handoff provider (`scheduler_file_providers.py:544`) have one, so this
   arm is reached by test fakes only.
-- `chain_forecast_trigger.py:136` — the trigger endpoint raises already-active
+- `chain_forecast_trigger.py:136` — the forecast trigger (orchestrator `trigger_forecast` / `trigger_ready_forecasts` methods; no HTTP/CLI entry and no production caller in-repo — the scheduler dispatches through `orchestrate_cycle`, `scheduler_execution.py:746`) raises already-active
   for a `pending` run.
 - `scheduler_backfill_predecessor.py:392-397` — predecessor-cycle skip. This
   emitter runs after the main loop and bypasses the candidate-state decision,
@@ -96,15 +96,41 @@ input the decision lane already answers "active", and after this change the
 SQL probe does too. Repairing such a row on the SQL lane is a separate
 behaviour and stays out of scope. Operator remedies after this change: no
 manual-retry *marker* unblocks a `pending` row on the decision lane (the
-`:1173` skip precedes the `:1188` escape and the escape needs
+`:1174` skip precedes the `:1188` escape and the escape needs
 `action == "retry"`; `_manual_retry_marker_bound_to_blocker` returns `False`
-for an active blocker) — pre-existing and unchanged here. DB-lane repair goes
-through `RetryService.attempt_manual_retry` (`POST /runs/{run_id}/retry`,
-`retry.py:546`), which needs at least one `pipeline_job` for the run with a
-failed/cancelled latest job (`retry.py:596 :604-611`) and repairs the row via
-the SHUD runtime's `ON CONFLICT … 'pending' → 'created'`
-(`workers/shud_runtime/runtime.py:264-271`); a run with no `pipeline_job` at
-all has no in-product remedy (out of scope). **Re-triggering the cycle, which
+for an active blocker) — pre-existing and unchanged here.
+The reachable stale shape is `hydro_run.status = 'pending'` with every
+matching `pipeline_job` terminal. A `pending` row with **no** `pipeline_job`
+at all is not production-reachable — both writers create the retry job first
+(`retry.py:594-595` raises `RetryNotFoundError` on an empty job list, `:622`
+inserts the retry row before the `:676-689` UPDATE; journal `:11707-11708`
+upserts the retry job before `_reset_hydro_run_after_retry_submission`) and
+nothing in `services/ workers/ scripts/ db/` deletes `ops.pipeline_job` or
+`hydro.hydro_run`; D3 constructs that shape by DELETE as a probe input only.
+`RetryService.attempt_manual_retry` (`POST /runs/{run_id}/retry`,
+`retry.py:546`) repairs the row only when the latest job is failed/cancelled
+(`:606-611`), and self-heals it only when the retried stage is the SHUD
+forecast (`workers/shud_runtime/runtime.py:264-271`). Manual retry copies
+`job_type`/`stage` verbatim with no stage gating (`retry.py:1036-1052`,
+`_submit_retry_job:758-784`) and every stage's `pipeline_job` carries the hydro
+run id (`chain_forecast_execution.py:1068-1090`), so retrying a failed
+`parse_output` job (`chain_stages.py:11`) moves the row to `pending` and its
+success leaves it there — `parser.py:38` `PARSE_READY_RUN_STATUSES` excludes
+`pending` and `reconcile.py` never writes `hydro_run`. On that row
+`_retry_source_job_for_run` (`retry.py:1103-1111`) returns `None` (`pending` ∉
+`PARTIAL_OR_FAILED_HYDRO_STATUSES`, `:83`) and retry answers `RETRY_NOT_FOUND`
+(`:608-609`). The in-product escape for both shapes is
+`POST /runs/{run_id}/cancel` (`apps/api/routes/pipeline.py:584`, same router
+as `/retry`): it requires no active job and `_cancel_hydro_run` (`:975-1002`)
+writes `cancelled` because `pending` ∉ `_TERMINAL_HYDRO_STATUSES` (`:66`) —
+verified by probe on a zero-job `pending` row. `cancelled` ∉
+`ACTIVE_HYDRO_STATUSES`, so the refusals below lift; the run then sits in the
+pre-existing `cancelled_manual_retry_required` path
+(`scheduler_state_failure.py:2166-2180`) — the scheduler does not auto-resume
+it, and a further `/retry` re-selects the same failed job and re-wedges on
+success unless the retried stage is the forecast. That handling is unchanged
+here.
+**Re-triggering the cycle (scheduler dispatch only — no operator HTTP/CLI entry), which
 repairs such a row today**
 (the trigger derives the same `fcst_{source}_{cycle}_{model}` run id,
 `chain_forecast_state.py:85`, and `chain_forecast_trigger.py:170` overwrites
@@ -165,8 +191,14 @@ the three-site guard.
   `scheduler_state_compat.py:12` are deliberately not pinned) and the
   five-member value; the
   old test going red is the second red proof.
-- No other existing assertion changes (the journal suite is green under the
-  new membership because nothing pinned `pending` there — D1 last row).
+- Two other existing tests gained additive coverage, neither relaxed: task 1.5
+  adds `assert journal_module.ACTIVE_HYDRO_STATUSES <= enum_members` to
+  `test_every_member_is_a_declared_enum_member_except_complete`
+  (`tests/test_hydro_status_set_parity.py`), and task 1.10 widens the two #1472
+  foreign-completion matrices (`tests/test_file_orchestration_journal.py:2008
+  :2070`) to parametrize over `pending` — rows added, none removed or relaxed.
+  Every pre-existing assertion in the journal suite passes unchanged because
+  nothing else there pinned `pending` (D1 last row).
 
 ## D3 — Real-Postgres proof of the SQL query
 
@@ -213,7 +245,7 @@ below are the same construction run by hand against the old helper. Red proofs
 in a scratch migrations dir that is a COPY of `db/migrations`
 plus the probe file (the helper's own self-checks — exactly one `CREATE
 TYPE`, `succeeded` declared, `pending` added — must keep passing, otherwise
-the proof dies at `:68` instead of at the assertion it targets): a
+the proof dies at the helper's own `assert len(declaring) == 1` self-check instead of at the assertion it targets): a
 quoted-identifier `ADD VALUE 'complete'` (invisible to the old regex, red
 under the new), and a `RENAME VALUE 'succeeded' TO 'done'` (silently green
 before, red with the fail-closed message after).

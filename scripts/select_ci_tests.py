@@ -644,6 +644,15 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_orchestrator_demote_projection_faults.py",
     "tests/test_orchestrator_demote_reclaim_lifecycle.py",
     "tests/test_scheduler_backfill.py",
+    # #1999: the predecessor-emission suite top-level-imports
+    # `FileOrchestrationJournalRepository` and pins that a predecessor hydro row
+    # sitting at `pending` on the REAL file journal makes the emitter skip with
+    # `predecessor_backfill_active_pipeline` and emit zero candidates — so the
+    # repository's active-pipeline probe decides that lane. Stop-rule owned
+    # module, so the addition rides this at-site tuple rather than the
+    # `services/orchestrator/**` list. 20 tests in 1.57s, hence a rule rather
+    # than a rule-gap exclusion.
+    "tests/test_scheduler_backfill_predecessor.py",
     # #1944: the job-id scope census reads the journal tree directly and mints
     # its divergent rows through the PUBLIC `reserve_pipeline_job` writer, so a
     # change to the repository's on-disk layout or writer path silently changes
@@ -1971,8 +1980,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # enum member changes what that suite asserts -- and the "no member
             # outside the enum but `complete`" claim can only red on the
             # migration's own PR if the suite runs there. `db/**` above buys only
-            # tests/test_migrations.py, which never parses the enum. 5 tests in
-            # 0.23s, DB-free.
+            # tests/test_migrations.py, which never parses the enum. 9 tests in
+            # 0.29s, DB-free.
             "tests/test_hydro_status_set_parity.py",
         ),
     ),

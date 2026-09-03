@@ -237,10 +237,12 @@ def test_active_hydro_statuses_are_the_same_object() -> None:
 # The two shapes the sweep is built to survive, as executable probes rather
 # than the manual scratch procedure design D5 describes (task 3.4): a migration
 # that spells the type with a quoted segment, and a rename the sweep cannot
-# model. Both are written into a COPY of the real migration tree, so the real
-# `db/migrations/` stays the oracle for every other assertion in this file.
+# model -- in BOTH of the spellings Postgres offers, `RENAME VALUE` and
+# `RENAME TO`. All are written into a COPY of the real migration tree, so the
+# real `db/migrations/` stays the oracle for every other assertion in this file.
 _QUOTED_ADD_VALUE_PROBE = "ALTER TYPE hydro.\"run_status\" ADD VALUE IF NOT EXISTS 'complete';\n"
 _RUN_STATUS_RENAME_PROBE = "ALTER TYPE hydro.run_status RENAME VALUE 'succeeded' TO 'done';\n"
+_TYPE_RENAME_PROBE = "ALTER TYPE hydro.run_status RENAME TO run_status_v2;\n"
 # Negative control: a rename of the NEIGHBOURING enum. The refusal must be
 # scoped to `hydro.run_status`, or every unrelated enum rename would fail-close
 # this suite and the refusal would be noise instead of a signal.
@@ -291,18 +293,31 @@ def test_sweep_reads_a_quoted_identifier_add_value_migration(
         test_every_member_is_a_declared_enum_member_except_complete()
 
 
+@pytest.mark.parametrize(
+    "probe",
+    [
+        pytest.param(_RUN_STATUS_RENAME_PROBE, id="rename-value"),
+        pytest.param(_TYPE_RENAME_PROBE, id="rename-to"),
+    ],
+)
 def test_sweep_refuses_a_run_status_rename_migration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    probe: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`ALTER TYPE ... RENAME VALUE` fails the sweep closed, naming the migration.
+    """Both `ALTER TYPE ... RENAME VALUE` and `... RENAME TO` fail the sweep closed, naming the migration.
 
-    A rename leaves every `CREATE TYPE` / `ADD VALUE` string in the tree
+    A value rename leaves every `CREATE TYPE` / `ADD VALUE` string in the tree
     untouched, so the swept table would keep asserting `'succeeded'` -- a label
-    the database no longer has. The sweep refuses instead of guessing, and the
-    message has to name the offending file or the operator cannot act on it.
+    the database no longer has. A type rename is the quieter of the two: once
+    the type is `hydro.run_status_v2`, every later `ALTER TYPE
+    hydro.run_status_v2 ADD VALUE` is invisible to this sweep, while the
+    self-checks (one CREATE, `succeeded` from the CREATE block, `pending` from
+    an ADD VALUE) all keep passing against the stale name -- green while wrong,
+    with nothing in the tree to hint at it. The sweep refuses on either
+    spelling instead of guessing, and the message has to name the offending
+    file or the operator cannot act on it.
     """
 
-    _migrations_copy_with(tmp_path, monkeypatch, {"000099_rename.sql": _RUN_STATUS_RENAME_PROBE})
+    _migrations_copy_with(tmp_path, monkeypatch, {"000099_rename.sql": probe})
 
     with pytest.raises(AssertionError, match="does not model renames") as refusal:
         _hydro_run_status_enum_members()
