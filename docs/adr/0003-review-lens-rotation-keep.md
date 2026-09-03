@@ -3052,3 +3052,24 @@ rotated-in lenses (**302 versus 148**) — so **keep rotation** stands under
 the recorded autonomous default. Reversal still requires the
 attribution-schema, round-intent and round-role repairs plus maintainer
 review. Next revisit on the audit's next flag.
+
+## Revisit 2026-09-03 (post #1948 / PR #1969) — keep; denominator +1, catches unchanged
+
+After the PR #1969 accountability line, `loop_log_audit.py` reports **165**
+multi-round merged PRs and later-round catches **core=148 / rotated=302**.
+Relative to the preceding PR #1995 revisit, only the denominator moved.
+
+PR #1969's five verified P1 catches all came from Round 1. Rounds 2 and 3
+re-ran the selected core and returned zero candidates. Round 4 was added
+because latest master touched selector and scheduler dependency surfaces;
+it again ran correctness, integration and test-evidence and returned zero
+candidates. Both Phase 7 sweeps were clean. There is therefore no later-round
+catch to attribute, and this line adds **+0 core / +0 rotated**.
+
+This is a closure datum, not a rotation experiment: the later rounds proved
+that the fixes and the rebased combined tree were clean, but zero findings
+cannot identify whether a different free-slot lens would have changed recall.
+The accumulated ratio still strongly favors retaining additive rotation
+(**302 versus 148**), so **keep rotation** remains the recorded decision.
+The existing attribution-schema, round-intent and round-role caveats remain
+unchanged; any reversal still requires those repairs plus maintainer review.
