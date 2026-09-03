@@ -486,16 +486,60 @@ _FACT_QUOTED_ALIAS = re.compile(
     re.IGNORECASE,
 )
 
+#: PostgreSQL's Unicode-escape prefix, on an identifier (``U&"riv\0065r…"``) or a
+#: string (``U&'…'``). The ONE spelling that defeats a name counter rather than
+#: merely dodging one of its alternatives: the identifier it denotes need not
+#: contain the name at all, so widening the counter cannot reach it and both
+#: sides read zero (review #2018 round-2, E/P2-2). Refused by its prefix, which
+#: is the only part of it that is always literal.
+_UNICODE_ESCAPED = re.compile(r"\bU&", re.IGNORECASE)
+
 
 def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     """Refuse a fact-table reference form the alias walk does not model.
+
+    The guarantee, in one sentence (fixture decision 16): no statement reaches a
+    render or a text-identity answer unless the independent occurrence counter
+    and the ``FROM`` / ``JOIN`` walk AGREE about how many times it reads the fact
+    table, the counter is blind to no spelling of the table's name, and no read
+    hides where the text-identity scan cannot look. Three checks, in that order:
+
+    #. a Unicode-escaped identifier or literal (``U&"…"``) anywhere in the code —
+       the one syntax that can name the table with no occurrence of its NAME, so
+       the counter reads 0, the walk reads 0 and the equality below is satisfied
+       by mutual blindness. Refused wholesale rather than decoded; the accepted
+       over-refusal is a ``U&'…'`` string literal, which no registered template
+       has;
+    #. a double-quoted ALIAS, whose predicates the walk would attribute to the
+       wrong table or to none;
+    #. the counts themselves — the permissive name counter against the strict
+       walk, and the whole statement against the statement with its
+       comparison-position sub-selects removed, because a fact read inside one of
+       those is stripped by :func:`outer_predicates` before any column is
+       attributed and is therefore invisible to the narrow check (review #2018
+       round-2, F4). The sub-select case is REFUSED rather than scanned:
+       extending the scan into comparison-position sub-selects false-refuses the
+       registered statements whose authority resolution lives there.
 
     Run over the comment/literal-blanked text so a quoted alias SPELLED inside a
     literal or a comment is data, not a refusal. Double-quoted spans survive that
     blanking on purpose (see :func:`non_code_spans`): in PostgreSQL they are
     identifiers, which is exactly what this is about.
+
+    Every message names the entry and never the table: the statement census in
+    ``tests/test_river_ts_text_identity_cleanup.py`` counts the table name in
+    this module's string constants, and a refusal message that spelled it would
+    add a phantom "read site" to that count.
     """
-    match = _FACT_QUOTED_ALIAS.search(_blank_comments_and_literals(sql))
+    blanked = _blank_comments_and_literals(sql)
+    if _UNICODE_ESCAPED.search(blanked) is not None:
+        raise RiverTemplateError(
+            f"{entry}: unmodelled fact-table reference form — a Unicode-escaped identifier or literal "
+            "(U&) is not modelled: it can name the fact table with no occurrence of the table's name in "
+            "the text, so neither the occurrence counter nor the FROM/JOIN walk can see the read; spell "
+            "identifiers literally"
+        )
+    match = _FACT_QUOTED_ALIAS.search(blanked)
     if match is not None:
         raise RiverTemplateError(
             f"{entry}: unmodelled fact-table reference form {match.group(0).strip()!r} — a double-quoted "
@@ -510,6 +554,15 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
             f"{occurrences} time(s) but the FROM/JOIN walk models {modelled} reference(s), so at least one "
             "read is spelled in a form whose alias (and therefore whose text-identity predicates) cannot be "
             "attributed; write each read as a plain FROM/JOIN of the fact table with a bare alias"
+        )
+    outer_occurrences = fact_table_name_occurrences(strip_scalar_subqueries(sql))
+    if occurrences != outer_occurrences:
+        raise RiverTemplateError(
+            f"{entry}: unmodelled fact-table reference form — the statement names the fact table "
+            f"{occurrences} time(s) but only {outer_occurrences} outside its comparison-position "
+            "sub-select(s), and a read inside one of those is stripped before any column is attributed, "
+            "so its text-identity predicates are never seen; resolve identity through the authority "
+            "table in that position instead"
         )
 
 
@@ -546,20 +599,26 @@ def fact_table_attribution(sql: str) -> FactTableAttribution:
     return FactTableAttribution(frozenset(aliases), unaliased, count)
 
 
-#: The fact table's NAME, wherever it appears — the independent counter's whole
-#: vocabulary. Deliberately ignorant of ``FROM`` / ``JOIN`` / aliases: its job is
-#: to disagree with the structural walk whenever the statement names the table in
-#: a form the walk does not model.
-#: The trailing ``(?!\s*\.)`` excludes a name used as a COLUMN qualifier
-#: (``hydro.river_timeseries_legacy.run_key``): that is a reference to a column,
-#: not a second read of the table, so counting it would make an unaliased
-#: statement look like it read the fact table twice.
-_FACT_NAME = re.compile(r"\bhydro\.river_timeseries(?:_legacy)?\b(?!\s*\.)", re.IGNORECASE)
-#: The half-quoted spelling counts too (``hydro."river_timeseries"``): a name the
-#: counter cannot see is a name the equality guard in
-#: :func:`_assert_modelled_reference_forms` compares as 0 == 0, i.e. an unmodelled
-#: read that slips through because BOTH sides are blind to it (review #2018, C/P2-1).
-_FACT_NAME_QUOTED = re.compile(r'(?:"hydro"|hydro)\s*\.\s*"river_timeseries(?:_legacy)?"(?!\s*\.)', re.IGNORECASE)
+#: The fact table's bare NAME as a whole token, in any case — the independent
+#: counter's whole vocabulary. Deliberately ignorant of ``FROM`` / ``JOIN`` /
+#: aliases AND of schemas, quoting and whitespace: its job is to disagree with
+#: the structural walk whenever the statement names the table in a form the walk
+#: does not model, and it can only do that job for spellings it can SEE. Every
+#: qualified spelling — ``hydro.x``, ``"hydro"."x"``, ``hydro . x``,
+#: ``hydro./*c*/x``, ``otherhydro.x``, or no schema at all — ends in the same
+#: token, so the counter needs no model of the ways a name can be qualified
+#: (review #2018 round-2, E/P2-2 and lane-1 F1; fixture decision 16).
+#:
+#: The trailing ``(?!"?\s*\.)`` excludes a name used as a COLUMN qualifier
+#: (``hydro.river_timeseries_legacy.run_key``, ``hydro."river_timeseries"."run_key"``
+#: — hence the optional closing quote INSIDE the lookahead): that is a reference
+#: to a column, not a second read of the table, so counting it would make an
+#: unaliased statement look like it read the fact table twice.
+#:
+#: Not a token, and deliberately so: ``river_timeseries_valid_time_idx`` and
+#: every other identifier that merely starts with the name, because ``\b`` does
+#: not fire in the middle of a word.
+_FACT_NAME_TOKEN = re.compile(r'\briver_timeseries(?:_legacy)?\b(?!"?\s*\.)', re.IGNORECASE)
 
 
 _DOLLAR_QUOTE_OPEN = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
@@ -662,20 +721,38 @@ def _blank_comments_and_literals(sql: str) -> str:
 def fact_table_name_occurrences(sql: str) -> int:
     """How many times the statement NAMES the fact table, counted independently.
 
-    Derived from the name alone, with no model of ``FROM`` / ``JOIN`` / segments,
-    precisely so that it can disagree with :func:`fact_table_attribution`. When it
-    does, the statement spells a read in a form the ``FROM`` / ``JOIN`` walk does
-    not model — a comma join (``FROM fact a, fact b``), ``FROM ONLY``, a quoted
-    identifier — and a caller that trusted the walk alone would be reasoning about
-    fewer reads than the statement performs (round-2 H3).
+    Derived from the bare name alone, with no model of ``FROM`` / ``JOIN`` /
+    segments, precisely so that it can disagree with
+    :func:`fact_table_attribution`. When it does, the statement spells a read in a
+    form the ``FROM`` / ``JOIN`` walk does not model — a comma join (``FROM fact
+    a, fact b``), ``FROM ONLY``, a quoted identifier, a schema written with a
+    space or a comment around its dot, a different schema, or no schema at all —
+    and a caller that trusted the walk alone would be reasoning about fewer reads
+    than the statement performs (round-2 H3). Since review #2018 (C/P2-1)
+    :func:`_assert_modelled_reference_forms` REFUSES on the disagreement, so every
+    render and every text-identity answer is taken over a statement both counters
+    agree about.
 
-    The disagreement is no longer merely available to callers: since review #2018
-    (C/P2-1) :func:`_assert_modelled_reference_forms` REFUSES any statement whose
-    two counts differ, so every render and every text-identity answer is taken
-    over a statement both counters agree about.
+    **Counter permissive, walk strict, disagreement refuses.** The counter needs
+    no model of schemas, quoting, case or whitespace because it counts the
+    table's bare NAME as a whole token: a spelling BOTH sides miss — the 0 == 0
+    hole two review rounds found through this pair — therefore has to hide the
+    name itself, which in PostgreSQL leaves exactly one syntax, the
+    Unicode-escaped identifier refused wholesale in
+    :func:`_assert_modelled_reference_forms`. Widening is counter-side only:
+    teaching the WALK a spelling makes it "modelled" while the rename and the
+    alias attribution still need the canonical literal, which is a new fail-open
+    (fixture decision 16).
+
+    The permissiveness is paid for in refusals, all fail-closed and all of forms
+    the registry does not use: ``otherhydro.river_timeseries x`` (a different
+    schema), ``FROM river_timeseries rt`` (the search_path spelling, whose
+    identity depends on a session setting this module cannot see) and
+    ``hydro."River_Timeseries"`` (a quoted upper-case identifier, which in
+    PostgreSQL is a DIFFERENT table) are counted, disagree with the walk's zero,
+    and are refused as unmodelled rather than rendered.
     """
-    text = _blank_comments_and_literals(sql)
-    return len(_FACT_NAME.findall(text)) + len(_FACT_NAME_QUOTED.findall(text))
+    return len(_FACT_NAME_TOKEN.findall(_blank_comments_and_literals(sql)))
 
 
 def fact_table_text_identity_columns(sql: str, *, entry: str = "<template>") -> set[str]:
@@ -1100,7 +1177,13 @@ def assert_structurally_intact(sql: str, entry: str, *, allow_markers: bool = Fa
 # Rendering
 # ---------------------------------------------------------------------------
 
-_CANONICAL_NAME = re.compile(rf"{re.escape(RIVER_TABLE)}\b")
+# `re.IGNORECASE` because an unquoted SQL identifier is case-insensitive: with
+# this the module has ONE case policy for the fact table's name, shared by the
+# counter, the FROM/JOIN walk, the quoted-alias guard and this rename. Without
+# it, `FROM HYDRO.RIVER_TIMESERIES` passed both counters and the equality guard
+# and then rendered "legacy" naming the CANONICAL table — the narrow one, which
+# holds none of the legacy rows (review #2018 round-2, F2).
+_CANONICAL_NAME = re.compile(rf"{re.escape(RIVER_TABLE)}\b", re.IGNORECASE)
 _POSITIONAL_PLACEHOLDER = re.compile(r"%s")
 
 

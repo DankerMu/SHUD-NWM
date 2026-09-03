@@ -191,9 +191,11 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "workers/output_parser/parser.py": 4,
     "tests/integration_helpers.py": 3,
     # river_ts_render.py 2 = RIVER_TABLE and RIVER_TABLE_LEGACY. Two, not one,
-    # because `_river_table_mentions` counts SUBSTRINGS and the `_legacy` literal
-    # contains the canonical name. Any third mention means a statement (or a
-    # third name) arrived in the shared helper.
+    # because `_river_table_mentions` matches a PREFIX of the name (the `_legacy`
+    # literal opens with the canonical one), not a whole identifier. Any third
+    # mention means a statement (or a third name) arrived in the shared helper —
+    # including one spelled in a refusal MESSAGE, which is why that module's
+    # messages describe the fact table rather than naming it.
     "packages/common/river_ts_render.py": 2,
 }
 
@@ -349,18 +351,40 @@ def _docstring_constants(tree: ast.AST) -> set[int]:
     return found
 
 
+#: A SCHEMA-QUALIFIED mention of the fact table, however it is quoted, spaced or
+#: cased. The census's closure is over this class and not over one spelling:
+#: ``str.count("hydro.river_timeseries")`` counted ``"hydro"."river_timeseries"``
+#: and ``HYDRO . river_timeseries`` zero times, so a new read site could arrive
+#: in a registered file without moving the census and therefore without ever
+#: being forced into the template register (#2018 round-2, lane-1 F1).
+#:
+#: Deliberately NOT the renderer's bare-name token: registered sources spell the
+#: table unqualified on purpose — as a value passed to a delete helper, as a
+#: column list, in a table name constant — and counting those would move 8 of the
+#: 10 per-file numbers for no gain. The unqualified search_path spelling of a
+#: READ is refused by ``render_river_ts_sql`` at render time (its counter counts
+#: the bare token, the FROM/JOIN walk does not model it, and the disagreement
+#: refuses); what this census cannot do is FORCE such a read into the register,
+#: and that is the recorded limit of the closure.
+_RIVER_TABLE_SPELLING = re.compile(r'(?:"hydro"|\bhydro)\s*\.\s*"?river_timeseries', re.IGNORECASE)
+
+
 def _river_table_mentions(source: str) -> int:
-    """Occurrences of ``hydro.river_timeseries`` in non-docstring string constants.
+    """Schema-qualified mentions of the fact table in non-docstring string constants.
 
     Parsed rather than grepped for the same reason ``_sql_constants`` is: raw
     source counts every ``#`` comment and docstring paragraph that names the
     table, which turns a prose edit into a census failure and teaches everyone
     to bump the number without reading it.
+
+    Matched with :data:`_RIVER_TABLE_SPELLING` rather than counted as a
+    substring, so the count is over the class of qualified spellings and not
+    over one of them.
     """
     tree = ast.parse(source)
     docstrings = _docstring_constants(tree)
     return sum(
-        node.value.count(RIVER_TABLE)
+        len(_RIVER_TABLE_SPELLING.findall(node.value))
         for node in ast.walk(tree)
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
     )
@@ -1686,6 +1710,26 @@ def test_the_census_counts_statements_and_ignores_prose() -> None:
         'MORE = """\nDELETE FROM hydro.river_timeseries;\nSELECT 1 FROM hydro.river_timeseries;\n"""\n'
     )
     assert _river_table_mentions(both) == 3
+
+
+def test_the_census_counts_the_qualified_spelling_however_it_is_quoted_spaced_or_cased() -> None:
+    """The census's closure, on the spellings a substring count is blind to.
+
+    ``str.count("hydro.river_timeseries")`` reads exactly one of the many legal
+    ways to name the table: a call site that wrote ``"hydro"."river_timeseries"``
+    or ``HYDRO . river_timeseries`` was counted zero times, so a new read site
+    could arrive in a registered file without moving the census and without ever
+    being forced into the template register (#2018 round-2 lane-1 F1, sibling of
+    the renderer's own counter). Prose stays excluded, because the reason the
+    census is parsed rather than grepped has not changed.
+    """
+    source = (
+        '"""Module docstring naming hydro.river_timeseries."""\n'
+        "QUOTED = 'SELECT 1 FROM \"hydro\".\"river_timeseries\" WHERE run_key = %s'\n"
+        "SPACED = 'SELECT 1 FROM HYDRO . river_timeseries WHERE run_key = %s'\n"
+    )
+
+    assert _river_table_mentions(source) == 2
 
 
 def test_the_sanctioned_ceiling_is_the_shared_one_not_a_private_copy() -> None:
