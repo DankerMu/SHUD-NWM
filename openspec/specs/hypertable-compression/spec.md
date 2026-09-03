@@ -1327,3 +1327,55 @@ identity gate is introduced.
   `ops.ingest_recompute_decline` 按目标窗口的可直接执行 SQL 查询，
   并说明命中时的处置（先排干或显式接受终态）
 
+### Requirement: The forcing producer, the output parser and their CLIs MUST report guard-internal failures with codes distinct from compressed-chunk-blocked
+
+`workers/forcing_producer/producer.py`, `workers/forcing_producer/cli.py`, `workers/output_parser/parser.py` and `workers/output_parser/cli.py` SHALL catch `CompressedChunkWriteError` before `CompressedChunkGuardError`, keep the existing `FORCING_COMPRESSED_CHUNK_BLOCKED` / `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` codes and `FORCING_PRODUCE_COMPRESSED_CHUNK_BLOCKED:` / `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED:` prefixes for the subclass only, and report `FORCING_COMPRESSED_CHUNK_GUARD_FAILED`, `OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED`, or the CLI prefixes `FORCING_PRODUCE_COMPRESSED_CHUNK_GUARD_FAILED:` / `OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED:` for the base class; a generic exception arm SHALL remain after both. The apply layer's `HANDOFF_APPLY_*` codes (already split) and the identity backfill's neutral tuple catches are outside this requirement and unchanged.
+
+#### Scenario: Real compressed-chunk hit keeps its code
+
+- **WHEN** the guard raises `CompressedChunkWriteError` inside the forcing producer or the output parser
+- **THEN** the recorded `error_code` is `FORCING_COMPRESSED_CHUNK_BLOCKED` / `OUTPUT_PARSE_COMPRESSED_CHUNK_BLOCKED` and the CLIs print the existing `_BLOCKED:` prefix with exit 1
+
+#### Scenario: Guard failure is reported as such
+
+- **WHEN** the guard raises the base `CompressedChunkGuardError` (catalog timeout, partial window, unregistered hypertable)
+- **THEN** the recorded `error_code` is `FORCING_COMPRESSED_CHUNK_GUARD_FAILED` / `OUTPUT_PARSE_COMPRESSED_CHUNK_GUARD_FAILED` and the CLIs print the `_GUARD_FAILED:` prefix with exit 1
+
+#### Scenario: Runbook routes only blocked codes to decompress
+
+- **WHEN** an operator reads runbook §4.3.1 for a `_GUARD_FAILED` code
+- **THEN** the procedure directs DB-health / caller-bug triage, not the manual decompress procedure
+
+### Requirement: The compression runner's chunk identifier helper MUST fail closed
+
+`scripts/node27_timeseries_compression.py` SHALL expose the qualified chunk name only through a helper that validates both parts against `^[A-Za-z0-9_]+$` (byte-identical to the autopipeline `_STATS_GUARD_IDENT_RE`, pinned by a test) and raises `ValueError` on mismatch. The runner itself issues no statement that interpolates a chunk name — every chunk reference is a bound `%s::regclass` parameter — so the helper has no production consumer today; it exists so that any future interpolation site (an `ANALYZE`, for example) inherits a fail-closed identifier by construction rather than by review.
+
+#### Scenario: Malformed chunk name
+
+- **WHEN** a catalog row yields a chunk name or schema containing `"`, `;`, whitespace, or an empty string
+- **THEN** `qualified_chunk` raises `ValueError` before returning any text
+
+#### Scenario: Well-formed chunk name
+
+- **WHEN** the chunk name is `_hyper_3_8_chunk` in schema `_timescaledb_internal`
+- **THEN** the qualified name is produced unchanged, and no statement in the module interpolates it directly (a repo test asserts the module carries no f-string SQL naming a chunk or the property; the scan does not follow a local rebinding, which the property's own `ValueError` still covers)
+
+### Requirement: Recurring tiering functions SHALL run as the hypertable owner role, never as superuser
+
+`compress_chunk`, `decompress_chunk`, `drop_chunks`, chunk `ANALYZE` and `ALTER … SET TABLESPACE` on `hydro.river_timeseries` and `met.forcing_station_timeseries` SHALL be executed by a non-superuser role that owns those hypertables when invoked by a recurring runtime unit (compression, retention, cold-residency); the documented migration-class exceptions (the one-shot compression-replay supervisor, whose run plan includes one `decompress_chunk` leg alongside `pg_dump` / `migration_apply` / `pg_restore`, and the archive-rebuild drill) keep the migration role `nhms` and are recorded as such in the runtime env template and the tier runbook; ownership SHALL be transferred with explicit schema-scoped `ALTER … OWNER TO` statements (never `REASSIGN OWNED`), the role SHALL hold `CREATE` on the cold tablespace, and the provision audit SHALL assert the owner of every compression-capable hypertable.
+
+#### Scenario: Owner role compresses and drops
+
+- **WHEN** `nhms_ingest_rw` runs the compression and retention runners
+- **THEN** `compress_chunk`, `drop_chunks` and the cold-residency `SET TABLESPACE` succeed and the stats guard's chunk `ANALYZE` refreshes `last_analyze`
+
+#### Scenario: Non-owner writer is refused tiering
+
+- **WHEN** `nhms_download_rw` calls `compress_chunk` on a chunk
+- **THEN** the server refuses with an owner-required error while a privilege-shape INSERT into the hypertable still succeeds
+
+#### Scenario: A new hypertable owned by the migration role is caught
+
+- **WHEN** a migration creates a compression-capable hypertable owned by `nhms`
+- **THEN** the provision audit reports the owner drift until the script is re-run
+
