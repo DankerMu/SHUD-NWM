@@ -198,7 +198,11 @@ closed rather than report a usable reservation.
 Persisted and emitted reconciliation evidence MUST use `submit_outcome` in
 `accepted|submit_result_ambiguous|rejected`,
 `reconciliation_source=slurm_exact_comment`, and `reconciliation_decision` in
-`matched_bound|absence_deferred|absence_retry_permitted|multiple_matches_blocked|identity_mismatch_blocked|accounting_unavailable`.
+`matched_bound|absence_deferred|absence_retry_permitted|operator_verified_absence|multiple_matches_blocked|identity_mismatch_blocked|identity_mismatch_released|accounting_unavailable`
+(the eight members of the orchestrator's `ACCEPTED_RECONCILIATION_DECISIONS`;
+`identity_mismatch_released` is the identity-blocked release exit recorded on
+a `reservation_lost` row, and `operator_verified_absence` is the
+operator-verified typed demotion of the comment-unobservable held shape).
 `matched_slurm_job_id` MUST remain null until an exact unique identity is
 proven. Candidate projection MUST use `array_task_id`, `array_task_outcome` in
 `succeeded|failed|unverified`, `restart_stage`, and
@@ -247,9 +251,11 @@ non-binding deferred/unavailable/mismatch/multiple-match decisions under an
 exact current-attempt state compare; begin-attempt, accepted or adopted
 binding, rejection, and absence retry permission MUST use their dedicated
 typed boundaries. In particular,
-accepted binding MUST use the attempt-aware commit boundary, and
-`absence_retry_permitted` MUST be produced only by the authoritative typed
-retry-permission boundary. Marker-free rows retain their legacy API behavior.
+accepted binding MUST use the attempt-aware commit boundary, and each
+absence decision MUST be produced only by its own dedicated typed boundary:
+`absence_retry_permitted` only by the authoritative typed retry-permission
+boundary, and `operator_verified_absence` only by the dedicated typed
+operator-demotion path. Marker-free rows retain their legacy API behavior.
 
 A typed runtime synchronization transition MUST use a closed, monotonic state
 graph and MUST require an accepted or exactly adopted real Slurm binding.
@@ -349,7 +355,8 @@ accepted-submit cohorts, not to generic or non-DB-free reconciliation.
 - **THEN** the mutation fails before append/direct materialization and reopen
   preserves the original master exactly
 - **AND** clearing a bound Slurm ID or writing
-  `absence_retry_permitted` cannot make typed reclaim submit a second attempt
+  `absence_retry_permitted` or `operator_verified_absence` through ordinary
+  upsert cannot make typed reclaim submit a second attempt
 - **AND** an exact same-value ordinary replay appends no journal record, while
   the corresponding valid typed transition remains available.
 
