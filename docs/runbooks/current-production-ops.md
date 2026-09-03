@@ -3946,12 +3946,18 @@ autopipe/parser/retention 共用的 `nhms` 角色抹平。现在每个组件自�
 | `nhms-output-parser` | `workers/output_parser`（autopipe 子进程）|
 | `nhms-refresh-coverage` | `scripts/node27_refresh_coverage.py`（autopipe 子进程）|
 | `nhms-display-api` | `apps/api/routes/hydro_display.py`（display API 只读连接池）|
+| `nhms-api-pipeline` | `apps/api/routes/pipeline.py`（同一 uvicorn 进程里的控制面 retry/cancel 引擎，**会写**）|
+| `nhms-api-forecast` | `apps/api/routes/forecast.py` 的 forecast store 连接 |
+| `nhms-api-data-sources` | `apps/api/routes/data_sources.py` 的 forecast store + 气象站元数据查询 |
+| `nhms-api-best-available` | `apps/api/routes/best_available.py` 的 best-available 仓库 |
+| `nhms-api-models` | `apps/api/routes/models.py` 的 model registry store（**会写**）|
+| `nhms-api-state-snapshots` | `apps/api/routes/state_snapshots.py` 的 state snapshot 仓库 |
 | `nhms-ts-retention` | `scripts/node27_timeseries_retention.py`（retention timer）|
 | `nhms-ts-compression` | `scripts/node27_timeseries_compression.py`（compression timer）|
 | `nhms-raw-retention` | `scripts/node27_raw_retention.py`（raw-retention timer；只做 watermark 只读查询）|
 | `psql` | 人工会话 |
 | `TimescaleDB Background Worker Scheduler` | TimescaleDB 后台 worker，不要动 |
-| 空串 | 未在册的连接面（`packages/common/*` 中在册组件够不到的模块、`services/*`、qhh 系脚本等）；先查清来源再处置 |
+| 空串 | 未在册的连接面（`services/*`、qhh 系脚本、`workers/grid_registry` 等）；先查清来源再处置。**`nhms-display-api.service` 自 #1728 起七个连接面全部具名**，所以空串一定不是 display API |
 
 在册组件**委托给共享 helper 打开的连接**同样带自己的名字：
 `packages/common/display_watermark.py` 的 watermark 只读查询（retention /
@@ -3959,6 +3965,13 @@ compression / raw-retention 每个 tick 的第一条连接）与
 `packages/common/display_coverage.py` 的 per-run coverage worker 连接
 （`--all` 下最多 8 条并发，正是最容易被误 cancel 的长连接）。也就是说
 **看到空串就一定不是在册生产 tick**，可以按上表照直处置。
+
+`nhms-display-api.service`（uvicorn `apps.api.main:app`，两个 worker）在同一进程里托管七个
+连接面，上表把它们拆成七个名字：`nhms-display-api` 是只读展示池，`nhms-api-pipeline` 与
+`nhms-api-models` 是**控制面写入**。名字由 route 层注入（`packages/common/*` 的 store 不
+硬编码任何名字），DSN 上的 `?application_name=` 依旧优先。静态闭包由
+`tests/test_node27_connection_attribution.py` 守着：从 `apps/api/route_registry.py` 出发
+遍历 import 图，新增的 router 或 store 连接面必须具名或写明 `unreachable` 理由。
 
 处置纪律：
 
@@ -3983,6 +3996,34 @@ compression / raw-retention 每个 tick 的第一条连接）与
   无该 opt-in 时无条件 skip 全部 integration，并且每次建 `nhms_it_<uuid>` throwaway 库
   再 drop）。不要用裸生产 `DATABASE_URL` 跑 pytest —— 那正是把测试会话和生产 tick
   混在一张 `pg_stat_activity` 里的起点。
+- **display API 的写入面（`nhms-api-pipeline` / `nhms-api-models`）取消前先看日志。**
+  自 #1704 起每个**经过 `error_response()` 的**错误响应都会在 `/tmp/display-api.log` 留一行
+  `api_error request_id=… code=… status=… path=… details=…`（5xx 记 ERROR，4xx 记
+  WARNING），用客户端拿到的 `X-Request-ID` 直接 grep 即可把一条 backend 对上一次请求：
+
+  ```bash
+  grep -F "<X-Request-ID>" /tmp/display-api.log
+  ```
+
+  该行里的 `details` 已按审计口径脱敏（绝对路径/URI/校验和/敏感 key 以及 `rejected_value` /
+  `rejected_values` 一律 `[redacted]`），所以它能定位问题但不能替代复现客户端请求；
+  **但它不是全量脱敏**——其它 key 下的客户端标识（`station_id`、`run_id` 等）保持明文，
+  详见 `docs/runbooks/object-store-forcing-series-read.md` 的「脱敏边界」。`details=` 段有固定
+  字节预算，超出以 `…[truncated N bytes]` 截断（响应体不截断）；入站 `X-Request-ID` 仅在匹配
+  `[A-Za-z0-9._-]{1,64}` 时沿用，否则服务端另发 UUID；`path=` 段按 `quote(path, safe="/")`
+  percent-encoding 后再写，客户端可控的路径参数里塞不进空格、`=` 或控制字节（只含 unreserved
+  字符与 `/` 的路径逐字节不变；`:` `@` `+` 等 sub-delims 会被编成 `%XX`）。
+  `details=` 段在截断前先把换行类字符转义（`\n` → `\\n` 等），所以一次错误响应永远只有一行；
+  但段内的值是逐字原样的，出现 `code=…` 这种 token 仿冒串属正常——按 `details=` 之前的位置解析
+  字段，别全行扫 token。
+  另外，合规形状的 `X-Request-ID` 由客户端自选，grep 命中只证明同一行日志里有这个 id，不证明来源。
+
+  已知盲区（grep 不到 ≠ 没发生）：`/api/v1/slurm*` 的**全部**错误响应（校验错误走
+  `services/slurm_gateway/validation_errors.py` 的独立 handler；网关错误由
+  `services/slurm_gateway/routes.py:149` 与 `_gateway_error_response`（:212-217）直接构造
+  `JSONResponse`）；Starlette 自己应答的 `HTTPException`——未匹配路由的 404（含
+  `apps/api/startup_wiring.py:87` 的 SPA catch-all）与 405；以及被
+  `ServerErrorMiddleware` 接住的未捕获异常（写出的是 uvicorn traceback，不是 `api_error` 行）。
 - 运维需要临时覆写标识时，在 DSN 上写 `?application_name=<name>`：代码给的是
   libpq `fallback_application_name`，显式值永远优先。
 

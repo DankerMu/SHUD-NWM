@@ -774,6 +774,11 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             # #1442 added the zero-text-identity oracle for this file's nine
             # registered statements.
             "tests/test_river_ts_text_identity_cleanup.py",
+            # #1728 merged the connection-attribution guards into this rule:
+            # the module carries the application_name injection seam for both
+            # nhms-api-forecast and nhms-api-data-sources.
+            "tests/test_node27_connection_attribution.py",
+            "tests/test_node27_connection_attribution_delegated.py",
             INVARIANT_SUITE_PATH,
         }
     )
@@ -786,6 +791,10 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
 
     assert selected == [
         "tests/test_api_contract.py",
+        # #1704: guard-derived entry, synced from the selector's own output
+        # per the procedure below — a one-hop importer through
+        # apps/api/routes/hydro_display.py.
+        "tests/test_api_errors_logging.py",
         # #1597: the closure guard (direct UNION one hop over
         # services.tiles.mvt) put these eight in the rule. This pin is the
         # complement of the guard — the guard forbids missing suites, the pin
