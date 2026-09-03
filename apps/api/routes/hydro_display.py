@@ -770,11 +770,11 @@ def _require_hydro_mvt_source_identity(
             """
             SELECT 1
             FROM hydro.river_timeseries
-            -- transitional compressed-chunk pushdown aid, remove with #1342
-            WHERE run_id = :run_id
-              AND run_key = (
+            WHERE run_key = (
                       SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
                   )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND run_id = :run_id
               AND basin_version_key = (
                       SELECT basin_version_key FROM core.basin_version
                       WHERE basin_version_id = :basin_version_id

@@ -715,6 +715,14 @@ SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
     # fold-away pins moved from split substrings to whole-guard verbatim ones,
     # which only stay readable through `outer_predicates`.
     "tests/test_qhh_latest_fallback_pushdown.py",
+    # #1980 (epic #1979) added two more members of the SAME oracle rather than a
+    # separate narrow group: `strip_*`, `outer_predicates` and the text-identity
+    # vocabulary now live in packages/common/river_ts_render.py, and these two
+    # suites are that module's contract and its equivalence proof. Joining the
+    # group means every rule that already routes a reader to the oracle routes it
+    # to them too, and a helper-only diff still runs the whole set.
+    "tests/test_river_ts_render.py",
+    "tests/test_river_ts_template_golden.py",
 )
 
 
@@ -1073,6 +1081,16 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # The meta-guard rider is added by the support-module branch, deliberately not here.
         QHH_PRODUCTION_BOOTSTRAP_HELPERS_PATH,
         QHH_PRODUCTION_BOOTSTRAP_TESTS,
+    ),
+    PathTestRule(
+        # I1 #1980 river_ts_render: the non-collectible register of river read
+        # templates. Every SQL-shape oracle in the group derives its coverage
+        # FROM it — which templates exist, how many aids each carries, how many
+        # times each file names the fact table — so an edit here silently changes
+        # what four suites assert without touching any of them. Its file-level
+        # importers are exactly the group, so the group is the consumer set.
+        "tests/river_ts_template_registry.py",
+        SQL_SHAPE_ORACLE_TESTS,
     ),
 )
 
@@ -1438,6 +1456,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # because parser.py is the only module in the package the oracle
             # reads.
             "tests/test_river_ts_text_identity_cleanup.py",
+            # I1 #1980 river_ts_render: this file's river read templates are
+            # registered in tests/river_ts_template_registry.py and rendered per
+            # timeseries store by the whole SQL-shape oracle group, so a layout
+            # or predicate edit here must run all of it — the golden equivalence
+            # oracle included, which is what proves the edit was behaviour-free.
+            # (One block per site rather than one new rule per path: the
+            # selector's own duplicate-pattern guard forbids a second
+            # PATH_TEST_RULES entry for an already-owned module.)
+            *SQL_SHAPE_ORACLE_TESTS,
         ),
     ),
     PathTestRule(
@@ -1651,6 +1678,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # the SQL identity shape, so the oracle joins the directory list
             # rather than getting two per-file entries for the same targets.
             "tests/test_river_ts_text_identity_cleanup.py",
+            # I1 #1980 river_ts_render: this file's river read templates are
+            # registered in tests/river_ts_template_registry.py and rendered per
+            # timeseries store by the whole SQL-shape oracle group, so a layout
+            # or predicate edit here must run all of it — the golden equivalence
+            # oracle included, which is what proves the edit was behaviour-free.
+            # (One block per site rather than one new rule per path: the
+            # selector's own duplicate-pattern guard forbids a second
+            # PATH_TEST_RULES entry for an already-owned module.)
+            *SQL_SHAPE_ORACLE_TESTS,
         ),
     ),
     PathTestRule(
@@ -1703,6 +1739,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # which imports services.tiles.mvt, so it is a one-hop importer
             # here (and a DIRECT importer on the hydro_display rule below).
             "tests/test_api_errors_logging.py",
+            # I1 #1980 river_ts_render: this file's river read templates are
+            # registered in tests/river_ts_template_registry.py and rendered per
+            # timeseries store by the whole SQL-shape oracle group, so a layout
+            # or predicate edit here must run all of it — the golden equivalence
+            # oracle included, which is what proves the edit was behaviour-free.
+            # (One block per site rather than one new rule per path: the
+            # selector's own duplicate-pattern guard forbids a second
+            # PATH_TEST_RULES entry for an already-owned module.)
+            *SQL_SHAPE_ORACLE_TESTS,
         ),
     ),
     # The other two #1341 switched surfaces. Both are covered by broad rules
@@ -1747,6 +1792,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_openapi_drift.py",
             "tests/test_river_ts_read_path_surrogate_keys.py",
             "tests/test_runtime_mode.py",
+            # I1 #1980 river_ts_render: this file's river read templates are
+            # registered in tests/river_ts_template_registry.py and rendered per
+            # timeseries store by the whole SQL-shape oracle group, so a layout
+            # or predicate edit here must run all of it — the golden equivalence
+            # oracle included, which is what proves the edit was behaviour-free.
+            # (One block per site rather than one new rule per path: the
+            # selector's own duplicate-pattern guard forbids a second
+            # PATH_TEST_RULES entry for an already-owned module.)
+            *SQL_SHAPE_ORACLE_TESTS,
         ),
     ),
     PathTestRule(
@@ -1790,6 +1844,29 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # I1 #1980 river_ts_render: the shared per-store renderer. It owns the
+        # text-identity vocabulary and the table-scoped attribution every oracle
+        # in the group now imports, so a diff to it can blunt all of them at once
+        # — the #1442 failure mode one level down. It is also a registered source
+        # of tests/test_river_ts_text_identity_cleanup.py (census 2, the two
+        # table-name constants), which that oracle's wiring meta-test requires to
+        # be routed here.
+        "packages/common/river_ts_render.py",
+        SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
+        # I1 #1980 river_ts_render: the captured golden of every registered read
+        # template — the ONE artefact that can void #1980's whole equivalence
+        # argument. It is data, not Python, so the `tests/**.py` branch above
+        # never sees it and it reached no rule at all: a PR that regenerated the
+        # golden after editing a template — certifying the edit against itself —
+        # selected zero backend tests and merged on a collect-only smoke
+        # (review #1996, C10). Globbed on the capture SHA so a re-capture at a
+        # new base is routed the same way.
+        "tests/fixtures/river_ts_templates_*.json",
+        SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
         "packages/common/forecast_store.py",
         (
             "tests/test_forecast_api.py",
@@ -1811,6 +1888,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # pattern splits the module's ownership across two rules
             # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
             *CONNECTION_ATTRIBUTION_TESTS,
+            # I1 #1980 river_ts_render: this file's river read templates are
+            # registered in tests/river_ts_template_registry.py and rendered per
+            # timeseries store by the whole SQL-shape oracle group, so a layout
+            # or predicate edit here must run all of it — the golden equivalence
+            # oracle included, which is what proves the edit was behaviour-free.
+            # (One block per site rather than one new rule per path: the
+            # selector's own duplicate-pattern guard forbids a second
+            # PATH_TEST_RULES entry for an already-owned module.)
+            *SQL_SHAPE_ORACLE_TESTS,
         ),
     ),
     PathTestRule(
@@ -1852,6 +1938,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # line, `refused` in the --all report) — behaviour none of the
             # suites above assert.
             "tests/test_node27_refresh_coverage_cli.py",
+            # I1 #1980 river_ts_render: this file's river read templates are
+            # registered in tests/river_ts_template_registry.py and rendered per
+            # timeseries store by the whole SQL-shape oracle group, so a layout
+            # or predicate edit here must run all of it — the golden equivalence
+            # oracle included, which is what proves the edit was behaviour-free.
+            # (One block per site rather than one new rule per path: the
+            # selector's own duplicate-pattern guard forbids a second
+            # PATH_TEST_RULES entry for an already-owned module.)
+            *SQL_SHAPE_ORACLE_TESTS,
         ),
     ),
     PathTestRule(
