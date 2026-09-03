@@ -150,3 +150,4 @@ The frontend SHALL render the precipitation PNG as a MapLibre `image` source + `
 #### Scenario: Legend shows both layers
 - **WHEN** the precipitation overlay is enabled
 - **THEN** the legend panel shows the six-class precipitation legend (mm/24h) beneath the discharge legend
+- **AND** the panel renders its swatch colours and thresholds from the precip index `legend[]` (or the `/api/v1/layers` `precip` entry), never from a hardcoded frontend palette, so the six hex values cannot drift between PNG and legend
