@@ -9,8 +9,9 @@ machine. Item A changes a production dedup decision on the DB lane and three
 attempt-scoped write decisions plus one probe on the file-journal lane; B and
 C are test-only. Packs selected: **Concurrency / shared state** (a mutable
 `set` becomes one shared object across four modules — same shape #1581
-accepted for the durable set; no production mutator exists, the parity suite's
-sentinel probe is the only writer and it restores under `finally`);
+accepted for the durable set; `ACTIVE_HYDRO_STATUSES` has no writer anywhere —
+the parity suite's sentinel probe mutates only `DURABLE_HYDRO_SUCCESS_STATUSES`
+and restores it under `finally`);
 **Legacy compatibility** (`chain.ACTIVE_HYDRO_STATUSES` and
 `chain_repository.ACTIVE_HYDRO_STATUSES` stay importable; the compat
 re-export list `scheduler_state_compat.py:12` already exports the
@@ -103,7 +104,7 @@ The reachable stale shape is `hydro_run.status = 'pending'` with every
 matching `pipeline_job` terminal. A `pending` row with **no** `pipeline_job`
 at all is not production-reachable — both writers create the retry job first
 (`retry.py:594-595` raises `RetryNotFoundError` on an empty job list, `:622`
-inserts the retry row before the `:676-689` UPDATE; journal `:11707-11708`
+inserts the retry row before the `:676-689` UPDATE; journal `:11708-11709`
 upserts the retry job before `_reset_hydro_run_after_retry_submission`) and
 nothing in `services/ workers/ scripts/ db/` deletes `ops.pipeline_job` or
 `hydro.hydro_run`; D3 constructs that shape by DELETE as a probe input only.
@@ -196,7 +197,7 @@ the three-site guard.
   `test_every_member_is_a_declared_enum_member_except_complete`
   (`tests/test_hydro_status_set_parity.py`), and task 1.10 widens the two #1472
   foreign-completion matrices (`tests/test_file_orchestration_journal.py:2008
-  :2070`) to parametrize over `pending` — rows added, none removed or relaxed.
+  :2045`) to parametrize over `pending` — rows added, none removed or relaxed.
   Every pre-existing assertion in the journal suite passes unchanged because
   nothing else there pinned `pending` (D1 last row).
 
@@ -247,8 +248,10 @@ plus the probe file (the helper's own self-checks — exactly one `CREATE
 TYPE`, `succeeded` declared, `pending` added — must keep passing, otherwise
 the proof dies at the helper's own `assert len(declaring) == 1` self-check instead of at the assertion it targets): a
 quoted-identifier `ADD VALUE 'complete'` (invisible to the old regex, red
-under the new), and a `RENAME VALUE 'succeeded' TO 'done'` (silently green
-before, red with the fail-closed message after).
+under the new), and both rename spellings — `RENAME VALUE 'succeeded' TO 'done'`
+and `RENAME TO run_status_v2` — (silently green before, red with the
+fail-closed message after; under a VALUE-only regex the `RENAME TO` case is
+the one that stays green).
 
 ## Must-preserve
 

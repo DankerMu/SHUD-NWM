@@ -562,7 +562,7 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
     # COMPLETED_HYDRO_STATUSES and the parity lock asserts that alias IS the
     # shared object; a chain-only edit that rebinds it must run this suite.
     # Stop-rule owned module, so the addition rides this at-site tuple rather
-    # than the `services/orchestrator/**` list. 5 tests in 0.23s.
+    # than the `services/orchestrator/**` list. 9 tests in 0.29s.
     "tests/test_hydro_status_set_parity.py",
     "tests/test_ifs_forecast_integration.py",
     "tests/test_orchestrator.py",
@@ -632,7 +632,7 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # `COMPLETED_HYDRO_STATUSES` from-import binding, which the parity lock
     # pins as the one shared object. Stop-rule owned module, so the addition
     # rides this at-site tuple rather than the `services/orchestrator/**` list.
-    # 5 tests in 0.23s.
+    # 9 tests in 0.29s.
     "tests/test_hydro_status_set_parity.py",
     # #1825: the node-22 manual-retry marker suite top-level-imports the journal
     # repository and pins the marker contract (per-run row vs cohort master) the
@@ -1452,15 +1452,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # orchestrator-journal suites; measured together, 50 tests in 1.50s.
             "tests/test_scheduler_journal_root_authority.py",
             "tests/test_scheduler_journal_scope_census.py",
-            # #1581: the hydro-status parity lock top-level-imports seven
-            # modules of this package plus `services.orchestrator` itself, so
-            # eight importer pairs land here. Six close on this list
+            # #1581 (+#1999): the hydro-status parity lock top-level-imports
+            # eight modules of this package plus `services.orchestrator` itself,
+            # so nine importer pairs land here. Seven close on this list
             # (__init__.py, chain_forecast_trigger.py, chain_repository.py,
             # scheduler_state_decision.py, scheduler_state_failure.py,
-            # scheduler_state_types.py); chain.py and
-            # file_orchestration_journal.py are stop-rule owned and are extended
-            # at THEIR sites, per this rule's #1455 note above. 5 tests in
-            # 0.23s, DB-free, so a rule rather than a rule-gap exclusion.
+            # scheduler_state_manual_retry.py, scheduler_state_types.py);
+            # chain.py and file_orchestration_journal.py are stop-rule owned
+            # and are extended at THEIR sites, per this rule's #1455 note
+            # above. 9 tests in 0.29s, DB-free, so a rule rather than a
+            # rule-gap exclusion.
             "tests/test_hydro_status_set_parity.py",
             "tests/test_live_monitoring.py",
             "tests/test_monitoring_api.py",
