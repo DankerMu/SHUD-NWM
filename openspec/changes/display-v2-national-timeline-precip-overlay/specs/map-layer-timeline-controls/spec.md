@@ -50,6 +50,8 @@ The system SHALL support explicit GFS/IFS source selection for the national over
 
 The system SHALL drive time selection from `/api/v1/layers/discharge/cycles` and `/api/v1/layers/{layer_id}/valid-times?source=&cycle=` as the primary layer-time contract for the national overview, and from payload-derived valid times only for non-layer detail payloads that do not have a layer contract. The bottom control bar SHALL contain a cycle (起报时次) selector, the GFS/IFS segmented control, and the timeline, and SHALL default to the newest cycle at lead 0.
 
+The same control bar is reused in basin detail, but its cycle options there SHALL come from that basin's `/api/v1/runs` run list (the existing basin-detail data path) and its valid times from the selected run's metadata — NOT from `/api/v1/layers/discharge/cycles`, which is national-intersection scoped. The national fail-closed empty-cycles rule therefore does not apply in basin detail: a basin with runs keeps a usable cycle selector even when no cycle covers every basin nationally.
+
 #### Scenario: Active layer has valid times from layer API
 - **WHEN** the national overview loads
 - **THEN** the system MUST call `/api/v1/layers/discharge/cycles?source=<source>` and, for the selected cycle, `/api/v1/layers/discharge/valid-times?source=<source>&cycle=<cycle>`
@@ -62,9 +64,20 @@ The system SHALL drive time selection from `/api/v1/layers/discharge/cycles` and
 - **THEN** the selected valid time MUST be the first entry (lead 0) of the active cycle's list
 
 #### Scenario: Cycle selector is fail-closed
-- **WHEN** the cycles endpoint returns an empty list
+- **WHEN** the cycles endpoint returns an empty list (equivalently, the catalog's `discharge` entry carries `default_cycle: null` and `valid_times: []`)
 - **THEN** the cycle selector, timeline, and playback MUST render disabled with a notice that no cycle covers every basin
-- **AND** no tiles MUST be requested for a partial cycle
+- **AND** no tiles MUST be requested for a partial cycle, and no request MUST be issued with a literal `{cycle}` segment or a client-invented cycle
+
+#### Scenario: Basin detail cycles come from the basin's run list
+- **WHEN** the control bar is mounted in basin detail for a basin whose `/api/v1/runs` response holds runs for two cycles
+- **THEN** the cycle selector options MUST be those runs' cycles (newest first) and the timeline valid times MUST come from the selected run's metadata
+- **AND** `/api/v1/layers/discharge/cycles` MUST NOT be the source of the basin-detail cycle options
+- **AND** changing the basin-detail cycle MUST re-request that basin's detail data for the selected run
+
+#### Scenario: National fail-closed does not disable basin detail
+- **WHEN** `/api/v1/layers/discharge/cycles` returns an empty list while the opened basin has display-ready runs
+- **THEN** the basin-detail control bar MUST stay enabled on that basin's own run-derived cycles
+- **AND** only the national overview surfaces the disabled fail-closed state
 
 #### Scenario: Non-layer detail payload derives valid times
 - **WHEN** a selected segment forecast is the active detail source and no layer valid-time contract applies
