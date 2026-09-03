@@ -9,8 +9,19 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
+from packages.common.node27_timeseries_hypertable_discovery import (
+    CANONICAL_HYPERTABLES,
+    DISCOVERY_SQL,
+    candidate_in_list_sql,
+    discovery_set,
+    present_from_rows,
+    qualified,
+)
 
 DEFAULT_REPO_RELATIVE_SIZE_TARGETS = (
     "data",
@@ -191,12 +202,293 @@ def collect_filesystem(config: Any) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Uncompressed working set and next-compression peak (#1985, design D8)
+# ---------------------------------------------------------------------------
+
+#: Governance's own copy of the compression lag. It is read from
+#: ``NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS`` in the GOVERNANCE lane's env
+#: file — the compression template carries a write-role DSN and is explicitly
+#: not synced — and this default is cross-pinned to that template's assignment
+#: by a unit test so the two cannot drift apart in the repository. Drift of the
+#: DEPLOYED node-27 values is outside any unit test's reach; the receipt echoes
+#: ``compression_lag_seconds`` precisely so the rollout receipt can compare it
+#: with the live compression env.
+DEFAULT_COMPRESSION_LAG_SECONDS = 172_800
+
+#: The LONGEST trailing window the ingest rate is averaged over, in days. It
+#: bounds which chunks enter the rate; it is NOT the divisor. The divisor is
+#: per table, the span that table's own in-window chunks cover, floored at one
+#: HOUR (:data:`_COVERED_DAYS_FLOOR`) -- not a fixed seven and not a whole day.
+#: In steady state the uncompressed chunks only ever cover ``lag + 1`` days
+#: (everything older is already compressed), so dividing by seven under-reported
+#: the daily rate by about 3/7; the node-27 receipt at 989c3cf7 showed
+#: ``daily_ingest_bytes == uncompressed_bytes // 7`` byte for byte. For a
+#: capacity guard, over-reporting is the fail-safe direction.
+DAILY_INGEST_WINDOW_DAYS = 7
+
+#: Seconds the audit will wait for its read-only PostgreSQL connection before
+#: giving up, same value and same rationale as the lifecycle runners'
+#: ``_CONNECT_TIMEOUT_SECONDS`` (#1985 decision 21). The governance oneshot
+#: runs with ``TimeoutStartSec=0``, so nothing above this call would ever kill
+#: an unbounded ``connect``: a wedged TCP handshake would hold the unit in
+#: ``activating`` forever and every later tick would be skipped as "already
+#: running" -- a capacity guard that stops watching without ever failing. A
+#: bounded connect turns that into ``connection_failed`` -> the critical
+#: ``POSTGRES_UNAVAILABLE`` (decision 23) on the very first tick.
+_CONNECT_TIMEOUT_SECONDS = 10
+
+WORKING_SET_DISCOVERY_SQL = DISCOVERY_SQL
+
+# Catalog-only by construction: chunk identities and sizes come from
+# ``timescaledb_information.chunks`` and ``pg_total_relation_size``, never from
+# a row scan of the fact tables. A 600 GB scan of the very volume this audit
+# exists to protect would BE the incident it is meant to predict.
+WORKING_SET_CHUNKS_SQL = f"""
+SELECT c.hypertable_schema, c.hypertable_name, c.chunk_schema, c.chunk_name,
+       c.range_start, c.range_end,
+       pg_total_relation_size(
+           format('%I.%I', c.chunk_schema, c.chunk_name)::regclass
+       ) AS total_bytes
+FROM timescaledb_information.chunks c
+WHERE (c.hypertable_schema, c.hypertable_name) IN (
+{candidate_in_list_sql()}
+)
+  AND c.is_compressed = false
+ORDER BY c.range_end ASC, c.chunk_schema, c.chunk_name
+"""
+
+PROJECTION_OK = "ok"
+PROJECTION_NO_UNCOMPRESSED_CHUNK = "no_uncompressed_chunk"
+PROJECTION_WATERMARK_UNAVAILABLE = "watermark_unavailable"
+#: The working set could not be measured at all: the timescale probes raised, or
+#: the catalog returned no row for a canonical hypertable (the shape a read-only
+#: role takes when it loses ``timescaledb_information.*`` visibility). An empty
+#: catalog must NEVER be read as "everything is compressed" -- that is the one
+#: failure mode which silently turns the capacity alarm off.
+PROJECTION_WORKING_SET_UNAVAILABLE = "working_set_unavailable"
+
+
+def _iso(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _as_datetime(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        moment = value
+    else:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC)
+
+
+def unavailable_working_set(
+    *,
+    lag_seconds: int = DEFAULT_COMPRESSION_LAG_SECONDS,
+    watermark: datetime | None = None,
+    hypertables: Sequence[str] = (),
+) -> dict[str, Any]:
+    """The working set nobody could measure: every number ``None``, status set.
+
+    Same key set as a measured sample so the receipt shape never varies; the
+    byte counts are ``None`` rather than ``0`` because an unobserved working set
+    reported as zero is exactly the reading that would suppress
+    ``PROJECTED_PEAK_EXCEEDS_HOME_FREE``.
+    """
+
+    return {
+        "hypertables": sorted(hypertables),
+        "uncompressed_bytes": None,
+        "uncompressed_chunks": None,
+        "daily_ingest_bytes": None,
+        "next_compressible_at": None,
+        "compression_lag_seconds": int(lag_seconds),
+        "watermark": None if watermark is None else _iso(watermark),
+        "projection_status": PROJECTION_WORKING_SET_UNAVAILABLE,
+    }
+
+
+def collect_working_set(
+    cursor: Any,
+    *,
+    watermark: datetime | None,
+    lag_seconds: int = DEFAULT_COMPRESSION_LAG_SECONDS,
+) -> dict[str, Any]:
+    """Measure the uncompressed working set of the governed hypertables.
+
+    The governed set is discovered per invocation through the shared lifecycle
+    helper, so a transitional ``_legacy`` sibling is accounted from the moment
+    the expand migration creates it. ``watermark`` is the display business-time
+    watermark, fetched with the compression runner's own fetcher and its
+    fail-closed semantics: ``None`` means the lane could not prove it, which is
+    a lane fault, never a zero.
+
+    A catalog that does not report BOTH canonical hypertables is a lane fault of
+    the same class: the rows are missing, not the data, so the sample comes back
+    ``working_set_unavailable`` instead of an empty -- and therefore reassuring
+    -- ``no_uncompressed_chunk``.
+    """
+
+    discovery_rows = _psycopg_rows(cursor, WORKING_SET_DISCOVERY_SQL)
+    present = present_from_rows(discovery_rows)
+    if not set(CANONICAL_HYPERTABLES) <= set(present):
+        return unavailable_working_set(
+            lag_seconds=lag_seconds,
+            watermark=watermark,
+            hypertables=[qualified(*item) for item in present],
+        )
+
+    hypertables = discovery_set(discovery_rows)
+    rows = _psycopg_rows(cursor, WORKING_SET_CHUNKS_SQL)
+    governed = {qualified(*item) for item in hypertables}
+    chunks = [
+        row
+        for row in rows
+        if qualified(str(row["hypertable_schema"]), str(row["hypertable_name"])) in governed
+    ]
+    uncompressed_bytes = sum(int(row["total_bytes"] or 0) for row in chunks)
+
+    if watermark is None:
+        projection_status = PROJECTION_WATERMARK_UNAVAILABLE
+        daily_ingest_bytes: int | None = None
+    elif not chunks:
+        projection_status = PROJECTION_NO_UNCOMPRESSED_CHUNK
+        daily_ingest_bytes = 0
+    else:
+        projection_status = PROJECTION_OK
+        floor = watermark - timedelta(days=DAILY_INGEST_WINDOW_DAYS)
+        # Two-sided (round-2 review, decision 18). The upper bound is the
+        # watermark itself: a chunk whose `range_start` is in the FUTURE is a
+        # forecast-horizon chunk, real stock that must count toward
+        # `uncompressed_bytes`, but it carries no ingest that has happened yet.
+        # Letting it into the numerator while the divisor spans only observed
+        # time inflates the rate; post-expand, with one-day chunks and a
+        # forecast horizon several days wide, the one-sided window
+        # over-reported by roughly 4x. Numerator and divisor now span the same
+        # chunk set.
+        in_window = [
+            row
+            for row in chunks
+            if floor <= _as_datetime(row["range_start"]) <= watermark
+        ]
+        # PER TABLE, then summed (round-3 review). A pooled divisor takes
+        # `min(range_start)` across ALL governed tables, so one long-span,
+        # byte-light table drags every other table's rate down with it: a
+        # write-frozen `_legacy` sibling holding a single week-old chunk, or a
+        # 7-day forcing chunk next to 1-day river chunks, halves the reported
+        # river rate. Each table's bytes are divided by the span that table's
+        # own chunks cover; tables with nothing in the window contribute zero.
+        per_table: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+        for row in in_window:
+            key = (str(row["hypertable_schema"]), str(row["hypertable_name"]))
+            per_table.setdefault(key, []).append(row)
+        daily_ingest_bytes = sum(
+            int(
+                sum(int(row["total_bytes"] or 0) for row in table_rows)
+                / _covered_days(table_rows, watermark=watermark)
+            )
+            for table_rows in per_table.values()
+        )
+
+    next_compressible_at: str | None = None
+    if chunks:
+        oldest_end = min(_as_datetime(row["range_end"]) for row in chunks)
+        next_compressible_at = _iso(oldest_end + timedelta(seconds=int(lag_seconds)))
+
+    return {
+        "hypertables": sorted(governed),
+        "uncompressed_bytes": uncompressed_bytes,
+        "uncompressed_chunks": len(chunks),
+        "daily_ingest_bytes": daily_ingest_bytes,
+        "next_compressible_at": next_compressible_at,
+        "compression_lag_seconds": int(lag_seconds),
+        "watermark": None if watermark is None else _iso(watermark),
+        "projection_status": projection_status,
+    }
+
+
+#: Divisor floor for :func:`_covered_days`, in days: one hour.
+_COVERED_DAYS_FLOOR = 1.0 / 24.0
+
+
+def _covered_days(rows: Sequence[Mapping[str, Any]], *, watermark: datetime) -> float:
+    """Days ONE table's in-window uncompressed chunks actually cover.
+
+    Called once per governed hypertable (round-3 review): a divisor pooled over
+    every table takes the earliest ``range_start`` in the whole catalog, which
+    lets a long-span, byte-light table dilute a busy one.
+
+    ``max(1/24, days(watermark - earliest in-window range_start))`` -- fractional
+    days, floored at ONE HOUR rather than one day (round-2 review, decision 11).
+    A whole-day floor is not conservative here: in the drained steady state the
+    only in-window chunk is the open one, so a chunk six hours old would have
+    its bytes divided by 1.0 instead of 0.25 and the reported rate would be a
+    quarter of the truth -- a green flip on exactly the state the guard exists
+    to watch. Dividing by the real age over-reports early in a chunk's life,
+    which is the fail-safe direction for a capacity guard.
+
+    No upper cap is needed: the caller's window already bounds ``range_start``
+    below by ``watermark - DAILY_INGEST_WINDOW_DAYS``, so the span can never
+    exceed the window.
+    """
+
+    if not rows:
+        return _COVERED_DAYS_FLOOR
+    earliest = min(_as_datetime(row["range_start"]) for row in rows)
+    span = (watermark - earliest).total_seconds() / 86_400.0
+    return max(_COVERED_DAYS_FLOOR, span)
+
+
+def finalize_working_set(
+    sample: Mapping[str, Any], *, home_free_bytes: int | None
+) -> dict[str, Any]:
+    """Add ``home_free_bytes`` and the projected next-compression peak.
+
+    ``projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes x
+    max(0, days(next_compressible_at - watermark))``, the interval expressed in
+    days and allowed to be fractional. Only the ``ok`` projection multiplies:
+    with no uncompressed chunk there is nothing to wait for, and with no
+    watermark there is no honest interval to measure, so both project the
+    working set exactly as it stands rather than inventing growth.
+    """
+
+    working_set = dict(sample)
+    working_set["home_free_bytes"] = home_free_bytes
+    if working_set.get("projection_status") == PROJECTION_WORKING_SET_UNAVAILABLE:
+        # Nothing was observed, so there is no peak to state. Reporting zero
+        # here would read as "it fits".
+        working_set["projected_peak_bytes"] = None
+        return working_set
+    uncompressed = int(working_set.get("uncompressed_bytes") or 0)
+    projected = uncompressed
+    if (
+        working_set.get("projection_status") == PROJECTION_OK
+        and working_set.get("next_compressible_at")
+        and working_set.get("watermark")
+        and working_set.get("daily_ingest_bytes") is not None
+    ):
+        span_days = (
+            _as_datetime(working_set["next_compressible_at"])
+            - _as_datetime(working_set["watermark"])
+        ).total_seconds() / 86_400.0
+        projected = uncompressed + int(
+            int(working_set["daily_ingest_bytes"]) * max(0.0, span_days)
+        )
+    working_set["projected_peak_bytes"] = projected
+    return working_set
+
+
 def _psycopg_rows(cursor: Any, sql: str) -> list[dict[str, Any]]:
     cursor.execute(sql)
     return [dict(row) for row in cursor.fetchall()]
 
 
-def collect_postgres(database_url: str | None) -> dict[str, Any]:
+def collect_postgres(
+    database_url: str | None,
+    *,
+    compression_lag_seconds: int = DEFAULT_COMPRESSION_LAG_SECONDS,
+) -> dict[str, Any]:
     if not database_url:
         return {"status": "skipped", "reason": "database_url_missing"}
     try:
@@ -205,7 +497,11 @@ def collect_postgres(database_url: str | None) -> dict[str, Any]:
     except Exception as error:  # pragma: no cover - environment dependent
         return {"status": "blocked", "reason": "psycopg2_unavailable", "error": str(error)}
     try:
-        connection = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
+        connection = psycopg2.connect(
+            database_url,
+            cursor_factory=psycopg2.extras.RealDictCursor,
+            connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        )
     except Exception as error:
         return {"status": "blocked", "reason": "connection_failed", "error": str(error)}
     result: dict[str, Any] = {"status": "ok"}
@@ -397,8 +693,39 @@ def collect_postgres(database_url: str | None) -> dict[str, Any]:
                 )
             except Exception as error:
                 result["timescale_status"] = {"status": "blocked", "error": str(error)}
+            # #1985 working set, in its OWN try: a failure of the inventory
+            # queries above must not delete the capacity projection from the
+            # receipt. Losing the block entirely is indistinguishable from
+            # "nothing to project" downstream, so a failure here still leaves a
+            # working_set -- carrying the unavailable status that pages.
+            try:
+                try:
+                    watermark: datetime | None = fetch_display_watermark(database_url)
+                except DisplayWatermarkError:
+                    watermark = None
+                result["working_set"] = collect_working_set(
+                    cursor,
+                    watermark=watermark,
+                    lag_seconds=compression_lag_seconds,
+                )
+            except Exception as error:
+                result["working_set"] = unavailable_working_set(
+                    lag_seconds=compression_lag_seconds
+                )
+                result["working_set_error"] = str(error)
     except Exception as error:
-        result = {"status": "blocked", "reason": "query_failed", "error": str(error)}
+        # Same principle as the timescale block above (round-2 review, decision
+        # 20): a query that raised anywhere in this function must not take the
+        # capacity projection down with it. `query_failed` means the audit DID
+        # reach the database, so a missing `working_set` here would be read as
+        # "nothing to project" and exit 0. It carries the unavailable sample
+        # instead, which pages.
+        result = {
+            "status": "blocked",
+            "reason": "query_failed",
+            "error": str(error),
+            "working_set": unavailable_working_set(lag_seconds=compression_lag_seconds),
+        }
     finally:
         connection.close()
     return result

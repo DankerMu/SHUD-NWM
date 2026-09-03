@@ -69,11 +69,14 @@ _FROZEN_CATALOG_POST_SQL = (
     "/* capture:catalog_post */ SELECT json_build_object("
     "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
     "'catalog', (SELECT json_build_object("
-    "'hypertables', json_build_object("
-    "'hydro.river_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
-    "WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries' AND compression_enabled),"
-    "'met.forcing_station_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
-    "WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' AND compression_enabled)),"
+    # #1985 re-pin: the two EXISTS probes became one catalog aggregate over the
+    # candidate set, so an absent `_legacy` sibling produces no key at all.
+    "'hypertables', COALESCE((SELECT json_object_agg("
+    "format('%s.%s', h.hypertable_schema, h.hypertable_name), h.compression_enabled) "
+    "FROM timescaledb_information.hypertables h "
+    "WHERE (h.hypertable_schema, h.hypertable_name) IN "
+    "(('hydro','river_timeseries'),('hydro','river_timeseries_legacy'),"
+    "('met','forcing_station_timeseries'),('met','forcing_station_timeseries_legacy'))), '{}'::json),"
     "'compression_settings', COALESCE((SELECT json_agg(row_to_json(s)) FROM "
     "timescaledb_information.compression_settings s), '[]'::json),"
     "'policy_jobs', COALESCE((SELECT json_agg(row_to_json(j)) FROM timescaledb_information.jobs j "
@@ -83,7 +86,7 @@ _FROZEN_CATALOG_POST_SQL = (
     "'chunk_schema','_timescaledb_internal','chunk_name','_hyper_3_7_chunk',"
     "'range_start','2026-05-28T00:00:00Z','range_end','2026-06-04T00:00:00Z')))"
 )
-_FROZEN_CATALOG_POST_SQL_SHA256 = "c68db1f99df431bf3f5baeb3d6f73eae03d63d440abae2f0c08729535f43567e"
+_FROZEN_CATALOG_POST_SQL_SHA256 = "640767650af43dd7149d7e62192e72ab0b93153c2633d0c959f171369b949b23"
 
 _DB_IDENTITY = {
     "dbname": "nhms",
@@ -808,3 +811,55 @@ def test_authored_plan_survives_the_real_state_machine_and_verifier_validators(
         assert _re.fullmatch(r"[0-9a-f]{64}", reference["sha256"]) is not None
         assert reference["sha256"] == _hashlib.sha256(raw).hexdigest()
         assert reference["bytes"] == len(raw) > 0
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — capture emits the discovery set, not a hard-coded pair
+# ---------------------------------------------------------------------------
+
+
+def test_capture_catalog_and_selection_sql_cover_the_candidate_set() -> None:
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    tuples = discovery.candidate_tuple_list_sql()
+    assert tuples in capture._CATALOG_BODY_SQL
+    assert tuples in capture._selection_sql("selection_before")
+    assert tuples in capture._sizes_sql("sizes_before")
+
+
+def test_capture_catalog_body_reports_only_tables_that_exist() -> None:
+    """A key emitted with ``false`` for an absent table would be
+    indistinguishable from "present, compression off" — the live-evidence
+    validator has to tell those two apart, so absent tables produce NO key."""
+    body = capture._CATALOG_BODY_SQL
+    assert "json_object_agg" in body
+    assert "EXISTS (SELECT 1 FROM timescaledb_information.hypertables" not in body
+
+
+def test_capture_sizes_sql_never_names_a_table_that_may_not_exist() -> None:
+    """``hypertable_size('x'::regclass)`` ERRORS on a missing relation, so the
+    size probe must be driven by the catalog rows rather than by literal
+    ``schema.table`` casts."""
+    sizes = capture._sizes_sql("sizes_before")
+    assert "'hydro.river_timeseries'::regclass" not in sizes
+    assert "'met.forcing_station_timeseries'::regclass" not in sizes
+    assert "format('%I.%I'" in sizes
+
+
+def test_capture_keeps_the_frozen_1069_lag_literal() -> None:
+    """The archival #1069 contract is NOT re-pinned to the live 172800 lag."""
+    assert "interval '604800 seconds'" in capture._selection_sql("selection_before")
+
+
+def test_capture_write_guard_and_ownership_probes_stay_canonical_only() -> None:
+    """Two of the five sites are deliberately NOT discovery consumers: the
+    write guard's pinned tuple set (``packages/common/timescale_write_guard.py``)
+    is frozen for I7 and never gains the legacy table, and the preflight
+    ownership probe casts a literal regclass that would error on a missing
+    relation. Both read the canonical constant."""
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "scripts/node27_timeseries_compression_capture.py").read_text(encoding="utf-8")
+    assert "owns_hydro_river_timeseries" in source
+    assert "river_timeseries_legacy" not in source
+    guard = (root / "packages/common/timescale_write_guard.py").read_text(encoding="utf-8")
+    assert "river_timeseries_legacy" not in guard

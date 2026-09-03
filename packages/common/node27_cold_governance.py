@@ -269,6 +269,7 @@ def build_cold_governance_receipt(
     home: Mapping[str, Any],
     cold: Mapping[str, Any],
     evidence: Mapping[str, Any],
+    working_set: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     observation_blockers = [
         *_sample_observation_blockers(home, label="home"),
@@ -325,6 +326,12 @@ def build_cold_governance_receipt(
         },
         "blockers": list(dict.fromkeys(blockers)),
     }
+    # #1985: optional by construction. The strict dual-device receipt predates
+    # the working-set projection and a caller that cannot measure it must not be
+    # forced to invent zeroes — the absent key says "not measured", which a zero
+    # would not.
+    if working_set is not None:
+        receipt["working_set"] = dict(working_set)
     return redact_payload(receipt), _schema()
 
 

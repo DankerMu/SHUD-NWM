@@ -41,6 +41,11 @@ from typing import Any
 
 from packages.common import node27_container_contract as contract
 from packages.common.evidence_io import reject_secret_material
+from packages.common.node27_timeseries_hypertable_discovery import (
+    CANONICAL_HYPERTABLES,
+    CANONICAL_KEYS,
+    candidate_tuple_list_sql,
+)
 
 # The host contract values the verifier pins by exact equality; they are node-27
 # facts, not test-varying inputs, so the producer emits them verbatim.
@@ -53,7 +58,10 @@ REMOTE_IDENTITY = "DankerMu/SHUD-NWM"
 # two coincide.
 HOST_DOCKER_CLI = "/usr/bin/docker"
 DATABASE_INSTANCE = "node27-primary-pg15"
-HYPERTABLE_KEYS = ("hydro.river_timeseries", "met.forcing_station_timeseries")
+# The CANONICAL keys. What a capture actually emits is the discovery set — the
+# canonical tables plus any ``_legacy`` sibling the catalog reports (#1985) —
+# so this constant is the "must always be there" floor, not the exact set.
+HYPERTABLE_KEYS = CANONICAL_KEYS
 EXPECTED_UNITS = (
     "nhms-node27-autopipe.timer",
     "nhms-node27-autopipe.service",
@@ -322,6 +330,10 @@ def _preflight_core(ctx: Context) -> dict[str, Any]:
         "/* capture:role */ SELECT json_build_object("
         "'current_user', current_user, 'rolsuper', r.rolsuper, 'rolcreaterole', r.rolcreaterole,"
         "'rolcreatedb', r.rolcreatedb,"
+        # Canonical-only on purpose (#1985): these cast a literal
+        # ``schema.table`` to regclass, which ERRORS on a relation that does not
+        # exist, and ownership of the renamed sibling is the same role fact as
+        # ownership of the canonical table it was renamed from.
         "'owns_hydro_river_timeseries', pg_catalog.pg_has_role(current_user,"
         " (SELECT relowner FROM pg_class WHERE oid = 'hydro.river_timeseries'::regclass), 'USAGE'),"
         "'owns_met_forcing_station_timeseries', pg_catalog.pg_has_role(current_user,"
@@ -386,9 +398,13 @@ def _write_guards_present(ctx: Context) -> bool:
     if not module.exists():
         return False
     source = module.read_text(encoding="utf-8")
+    # Deliberately NOT a discovery-set consumer (#1985): the guard's pinned
+    # tuple set in ``packages/common/timescale_write_guard.py`` is frozen for
+    # the I7 write-path work and never gains the legacy table, so asking for a
+    # `_legacy` entry here would fail preflight on a correct deployment.
     guards_both_targets = all(
         f'"{schema}", "{table}"' in source or f"'{schema}', '{table}'" in source
-        for schema, table in (("hydro", "river_timeseries"), ("met", "forcing_station_timeseries"))
+        for schema, table in CANONICAL_HYPERTABLES
     )
     callers = 0
     for relative in (
@@ -630,13 +646,18 @@ RECOVERY_PREFLIGHT_SQL = (
     f"AND c.chunk_name = '{RECOVERY_TARGET['chunk_name']}'"
 )
 
+# #1985: the hypertables block is a catalog aggregate over the candidate set
+# rather than two EXISTS probes. An absent table produces NO key, which is what
+# lets the replay validator tell "sibling not created yet" apart from "sibling
+# present with compression disabled" — the second is drift, the first is the
+# normal pre-expand state.
 _CATALOG_BODY_SQL = (
     "(SELECT json_build_object("
-    "'hypertables', json_build_object("
-    "'hydro.river_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
-    "WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries' AND compression_enabled),"
-    "'met.forcing_station_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
-    "WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' AND compression_enabled)),"
+    "'hypertables', COALESCE((SELECT json_object_agg("
+    "format('%s.%s', h.hypertable_schema, h.hypertable_name), h.compression_enabled) "
+    "FROM timescaledb_information.hypertables h "
+    "WHERE (h.hypertable_schema, h.hypertable_name) IN "
+    f"{candidate_tuple_list_sql()}), '{{}}'::json),"
     "'compression_settings', COALESCE((SELECT json_agg(row_to_json(s)) FROM "
     "timescaledb_information.compression_settings s), '[]'::json),"
     "'policy_jobs', COALESCE((SELECT json_agg(row_to_json(j)) FROM timescaledb_information.jobs j "
@@ -693,7 +714,7 @@ def _selection_sql(kind: str) -> str:
         "'before_bytes', pg_total_relation_size(format('%I.%I', ch.chunk_schema, ch.chunk_name)::regclass)) AS c "
         "FROM timescaledb_information.chunks ch, obs o2 "
         "WHERE (ch.hypertable_schema, ch.hypertable_name) IN "
-        "(('hydro','river_timeseries'),('met','forcing_station_timeseries')) "
+        f"{candidate_tuple_list_sql()} "
         "AND ch.is_compressed = false AND ch.range_end < (o2.observed_at - interval '604800 seconds')) sub), "
         "'[]'::json)) FROM obs o"
     )
@@ -705,22 +726,35 @@ def _sizes_sql(kind: str) -> str:
     return (
         f"/* capture:{kind} */ SELECT json_build_object("
         "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
-        "'tables', json_build_object("
-        "'hydro.river_timeseries', " + _table_size_sql("hydro", "river_timeseries") + ","
-        "'met.forcing_station_timeseries', " + _table_size_sql("met", "forcing_station_timeseries") + "))"
+        "'tables', COALESCE((SELECT json_object_agg("
+        "format('%s.%s', ht.hypertable_schema, ht.hypertable_name), " + _table_size_sql() + ") "
+        "FROM timescaledb_information.hypertables ht "
+        "WHERE (ht.hypertable_schema, ht.hypertable_name) IN "
+        f"{candidate_tuple_list_sql()}), '{{}}'::json))"
     )
 
 
-def _table_size_sql(schema: str, table: str) -> str:
-    fqtn = f"'{schema}.{table}'"
+def _table_size_sql() -> str:
+    """Per-table size block, driven by the catalog row ``ht`` rather than a
+    literal name (#1985).
+
+    ``hypertable_size('x'::regclass)`` RAISES on a relation that does not
+    exist, so a literal cast could not survive the transitional window in which
+    a ``_legacy`` sibling may or may not be there. Aggregating over the catalog
+    rows means the query names only tables the catalog just confirmed.
+    """
+
+    fqtn = "format('%I.%I', ht.hypertable_schema, ht.hypertable_name)::regclass"
     return (
         "json_build_object("
-        f"'hypertable_size', hypertable_size({fqtn}::regclass)::bigint,"
-        f"'parent_relation_size', pg_total_relation_size({fqtn}::regclass)::bigint,"
+        f"'hypertable_size', hypertable_size({fqtn})::bigint,"
+        f"'parent_relation_size', pg_total_relation_size({fqtn})::bigint,"
         "'compressed_chunks', (SELECT count(*)::int FROM timescaledb_information.chunks "
-        f"WHERE hypertable_schema='{schema}' AND hypertable_name='{table}' AND is_compressed),"
+        "WHERE hypertable_schema=ht.hypertable_schema AND hypertable_name=ht.hypertable_name "
+        "AND is_compressed),"
         "'uncompressed_chunks', (SELECT count(*)::int FROM timescaledb_information.chunks "
-        f"WHERE hypertable_schema='{schema}' AND hypertable_name='{table}' AND NOT is_compressed),"
+        "WHERE hypertable_schema=ht.hypertable_schema AND hypertable_name=ht.hypertable_name "
+        "AND NOT is_compressed),"
         "'compressed_relations', COALESCE((SELECT json_agg(json_build_object("
         "'origin_chunk_schema', oc.schema_name, 'origin_chunk_name', oc.table_name,"
         "'schema', cc.schema_name, 'name', cc.table_name,"
@@ -728,7 +762,7 @@ def _table_size_sql(schema: str, table: str) -> str:
         "FROM _timescaledb_catalog.chunk oc "
         "JOIN _timescaledb_catalog.chunk cc ON oc.compressed_chunk_id = cc.id "
         "JOIN _timescaledb_catalog.hypertable h ON oc.hypertable_id = h.id "
-        f"WHERE h.schema_name='{schema}' AND h.table_name='{table}'), '[]'::json))"
+        "WHERE h.schema_name=ht.hypertable_schema AND h.table_name=ht.hypertable_name), '[]'::json))"
     )
 
 

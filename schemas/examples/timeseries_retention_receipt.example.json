@@ -9,5 +9,6 @@
   },
   "dropped_chunks": [{"name": "_hyper_1_42_chunk", "freed_bytes": 1073741824}],
   "deferred_remainder": ["_hyper_1_43_chunk"],
-  "salvage_backed_windows": []
+  "salvage_backed_windows": [],
+  "legacy_chunks": {"hydro.river_timeseries_legacy": 1}
 }

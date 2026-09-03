@@ -19,6 +19,8 @@ from pathlib import Path
 import jsonschema
 import pytest
 
+from packages.common import node27_timeseries_hypertable_discovery as discovery
+from packages.common import node27_timeseries_sequential_budget as budget
 from packages.common.migrate import split_sql_statements
 from scripts import node27_timeseries_compression as compression
 
@@ -37,6 +39,23 @@ _NOW = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
 
 def _load_schema() -> dict:
     return json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+
+def _stub_discovery(_dsn: str) -> list[dict]:
+    """Today's node-27 catalog: the two canonical hypertables, no `_legacy`
+    sibling (#1985). ``main`` wires a real catalog probe, so the ``main``-driven
+    rows below inject this seam; the receipt it produces is byte-for-byte the
+    pre-#1985 one."""
+
+    return [
+        {
+            "hypertable_schema": schema,
+            "hypertable_name": name,
+            "num_chunks": 14,
+            "compression_enabled": True,
+        }
+        for schema, name in compression.HYPERTABLES
+    ]
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -297,6 +316,7 @@ def test_main_enforce_propagates_the_configured_compress_timeout_to_the_session(
         fetch_chunks=lambda _dsn: [chunk],
         measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
         reconcile_chunk_state=lambda _dsn, _chunk: False,
+        discover_hypertables=_stub_discovery,
     )
 
     assert code == 0
@@ -384,6 +404,7 @@ def test_main_accepts_the_exact_budget_chain_equality(tmp_path: Path, monkeypatc
         fetch_chunks=lambda _dsn: [chunk],
         measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
         compress_chunk=lambda _dsn, _chunk: None,
+        discover_hypertables=_stub_discovery,
     )
 
     assert code == 0
@@ -592,6 +613,7 @@ def test_main_uses_display_watermark_as_compression_reference(
         fetch_chunks=lambda _dsn: [chunk],
         measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 100,
         compress_chunk=lambda _dsn, _chunk: None,
+        discover_hypertables=_stub_discovery,
     )
 
     assert code == 0
@@ -2176,3 +2198,768 @@ def test_qualified_chunk_accepts_a_real_catalog_name_unchanged() -> None:
     chunk = _chunk_named("_timescaledb_internal", "_hyper_3_8_chunk")
 
     assert chunk.qualified_chunk == '"_timescaledb_internal"."_hyper_3_8_chunk"'
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — lifecycle discovery set, receipt schema, per-tick re-derivation
+# ---------------------------------------------------------------------------
+
+_RIVER_LEGACY_KEY = "hydro.river_timeseries_legacy"
+
+
+def _discovery_row(schema: str, name: str, *, num_chunks: int = 1) -> dict:
+    return {
+        "hypertable_schema": schema,
+        "hypertable_name": name,
+        "num_chunks": num_chunks,
+        "compression_enabled": True,
+    }
+
+
+_CANONICAL_CATALOG = [
+    _discovery_row("hydro", "river_timeseries"),
+    _discovery_row("met", "forcing_station_timeseries"),
+]
+_MIXED_CATALOG = [
+    _discovery_row("hydro", "river_timeseries"),
+    _discovery_row("hydro", "river_timeseries_legacy", num_chunks=2),
+    _discovery_row("met", "forcing_station_timeseries"),
+]
+
+
+def test_chunk_query_selects_the_candidate_set_including_the_legacy_siblings() -> None:
+    """The chunk catalog does the discovery filtering itself: a `_legacy` name
+    that does not exist simply returns no rows, so the IN-list is static and no
+    discovered identifier is ever string-formatted into SQL."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    for schema, name in discovery.CANDIDATE_HYPERTABLES:
+        assert f"('{schema}', '{name}')" in compression._CHUNK_QUERY
+    assert "timescaledb_information.chunks" in compression._CHUNK_QUERY
+
+
+def test_per_table_totals_without_a_sibling_equal_todays_key_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Must-preserve (fixture decision 9): on today's node-27 catalog the
+    receipt's ``per_table_totals`` key set is the committed receipts' key set,
+    and nothing named ``legacy`` appears anywhere in the tick output."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=False), env)
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
+        monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "old-1", delta_days=10)]
+    )
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=lambda _dsn: list(_CANONICAL_CATALOG),
+    )
+    committed = json.loads(
+        (_COMMITTED_RECEIPT_DIR / "enforce-live-20260715T091543Z.json").read_text(encoding="utf-8")
+    )
+    assert set(receipt["per_table_totals"]) == set(committed["per_table_totals"])
+    # Top-level shape is pinned as a literal rather than against the committed
+    # 1.0 receipts: those predate the 2.0/2.1 provenance and budget fields, so
+    # only ``per_table_totals`` is comparable across the two schema families.
+    assert set(receipt) == {
+        "schema_version",
+        "head_sha",
+        "generated_at",
+        "now_utc",
+        "lag_seconds",
+        "per_tick_bound",
+        "budget",
+        "mode",
+        "outcome",
+        "selected",
+        "deferred",
+        "skipped",
+        "per_table_totals",
+    }
+    assert "legacy" not in json.dumps(receipt)
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_a_chunk_whose_table_left_the_discovery_set_does_not_kill_the_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery and chunk selection are two separate reads. A contract
+    migration landing between them returns a chunk for a table that is no
+    longer governed; a bare ``totals[key]`` raised ``KeyError`` AFTER
+    ``compress_chunk`` had run, and the tick then reported ``indeterminate``
+    with every other table's totals lost. ``setdefault`` keeps the receipt
+    honest about the work that actually happened."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    chunks = [
+        _chunk("hydro", "river_timeseries", "narrow-1", delta_days=10),
+        _chunk("hydro", "river_timeseries_legacy", "legacy-1", delta_days=20),
+    ]
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=chunks)
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        # The catalog no longer reports the sibling; the chunk query still did.
+        discover_hypertables=lambda _dsn: list(_CANONICAL_CATALOG),
+    )
+    assert receipt["outcome"] == "clean"
+    assert receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] == 1
+    assert receipt["per_table_totals"][_RIVER_LEGACY_KEY]["chunks_compressed"] == 1
+    jsonschema.validate(receipt, _load_schema())
+
+
+@pytest.mark.parametrize("enforce", [True, False])
+def test_a_canonical_table_missing_from_the_catalog_refuses_before_any_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce: bool
+) -> None:
+    """D3: a probe that RAN and did not report a canonical hypertable must
+    refuse. The alternative is a clean receipt carrying a phantom zero total for
+    a table nobody looked at — "nothing to compress" for exactly the table whose
+    disappearance is the emergency.
+
+    Both modes: a dry-run receipt is the evidence an operator reads BEFORE the
+    enforce tick, so a dry run that quietly reports "nothing to compress" for a
+    vanished table is the more dangerous of the two.
+    """
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=enforce), env)
+    calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
+        monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "old-1", delta_days=10)]
+    )
+    with pytest.raises(compression.CompressionConfigError, match="met.forcing_station_timeseries"):
+        compression.build_receipt(
+            config,
+            now_utc=_NOW,
+            fetch_chunks=fake_fetch,
+            measure_chunk_bytes=fake_measure,
+            compress_chunk=fake_compress,
+            discover_hypertables=lambda _dsn: [_discovery_row("hydro", "river_timeseries")],
+        )
+    # Before any mutation: not one chunk measured, not one compressed.
+    assert calls["measure"] == []
+    assert calls["compress"] == []
+
+
+def test_no_probe_at_all_still_means_the_canonical_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``discover_hypertables=None`` is "no catalog was consulted", which is a
+    different claim from "the catalog says the table is gone" and must not
+    refuse."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=False), env)
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
+        monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "old-1", delta_days=10)]
+    )
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+    )
+    assert set(receipt["per_table_totals"]) == {
+        "hydro.river_timeseries",
+        "met.forcing_station_timeseries",
+    }
+
+
+def test_per_table_totals_gain_the_legacy_sibling_when_the_catalog_shows_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    chunks = [
+        _chunk("hydro", "river_timeseries", "narrow-1", delta_days=10),
+        _chunk("hydro", "river_timeseries_legacy", "legacy-1", delta_days=20),
+    ]
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=chunks)
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=lambda _dsn: list(_MIXED_CATALOG),
+    )
+    assert set(receipt["per_table_totals"]) == {
+        "hydro.river_timeseries",
+        _RIVER_LEGACY_KEY,
+        "met.forcing_station_timeseries",
+    }
+    # Both tables compress in ONE tick under the same bound and lag.
+    assert receipt["per_table_totals"][_RIVER_LEGACY_KEY]["chunks_compressed"] == 1
+    assert receipt["per_table_totals"]["hydro.river_timeseries"]["chunks_compressed"] == 1
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_a_legacy_sibling_with_no_eligible_chunk_still_gets_a_zero_total(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The steady state after the pre-expand backlog recipe: the sibling exists
+    but has nothing left to compress. It must still be accounted, or the
+    receipt cannot answer "was the legacy table governed this tick"."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(
+        monkeypatch, chunks=[_chunk("hydro", "river_timeseries", "narrow-1", delta_days=10)]
+    )
+    receipt = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=lambda _dsn: list(_MIXED_CATALOG),
+    )
+    assert receipt["per_table_totals"][_RIVER_LEGACY_KEY] == {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
+
+
+def test_discovery_is_re_evaluated_every_tick_not_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Legacy gone" must converge without a second code change: the same
+    process building two receipts sees the drop on the second one."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=False), env)
+    _calls, fake_fetch, fake_measure, fake_compress = _install_stubs(monkeypatch, chunks=[])
+    catalogs = [list(_MIXED_CATALOG), list(_CANONICAL_CATALOG)]
+
+    def fake_discover(_dsn: str) -> list[dict]:
+        return catalogs.pop(0)
+
+    first = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=fake_discover,
+    )
+    second = compression.build_receipt(
+        config,
+        now_utc=_NOW,
+        fetch_chunks=fake_fetch,
+        measure_chunk_bytes=fake_measure,
+        compress_chunk=fake_compress,
+        discover_hypertables=fake_discover,
+    )
+    assert _RIVER_LEGACY_KEY in first["per_table_totals"]
+    assert _RIVER_LEGACY_KEY not in second["per_table_totals"]
+
+
+def test_main_wires_the_catalog_discovery_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam is only worth having if production actually passes it."""
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(compression, "_current_head_sha", lambda **_kwargs: "a" * 40)
+    code = compression.main(
+        [],
+        now_utc=_NOW,
+        fetch_chunks=lambda _dsn: [],
+        measure_chunk_bytes=lambda _dsn, _chunk, **_kwargs: 0,
+        compress_chunk=lambda _dsn, _chunk: None,
+        discover_hypertables=lambda _dsn: list(_MIXED_CATALOG),
+    )
+    assert code == 0
+    receipt = json.loads(Path(env["NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH"]).read_text())
+    assert _RIVER_LEGACY_KEY in receipt["per_table_totals"]
+    assert "_default_discover_hypertables" in inspect.getsource(compression.main)
+
+
+def test_refused_lock_receipt_stays_canonical_only(tmp_path: Path) -> None:
+    """A lock-contended tick never reached the catalog, so it may not claim to
+    know whether a sibling exists; the refused shape is today's, unchanged."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    receipt = compression.build_refused_lock_receipt(config, now_utc=_NOW, head_sha="b" * 40)
+    assert set(receipt["per_table_totals"]) == {
+        "hydro.river_timeseries",
+        "met.forcing_station_timeseries",
+    }
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_schema_accepts_an_optional_legacy_per_table_total() -> None:
+    schema = _load_schema()
+    committed = json.loads(
+        (_COMMITTED_RECEIPT_DIR / "enforce-live-20260715T091543Z.json").read_text(encoding="utf-8")
+    )
+    with_legacy = json.loads(json.dumps(committed))
+    with_legacy["per_table_totals"][_RIVER_LEGACY_KEY] = {
+        "before_bytes": 10,
+        "after_bytes": 4,
+        "chunks_compressed": 1,
+    }
+    jsonschema.validate(with_legacy, schema)
+
+
+def test_schema_still_rejects_a_non_legacy_extra_per_table_total() -> None:
+    schema = _load_schema()
+    committed = json.loads(
+        (_COMMITTED_RECEIPT_DIR / "enforce-live-20260715T091543Z.json").read_text(encoding="utf-8")
+    )
+    stray = json.loads(json.dumps(committed))
+    stray["per_table_totals"]["hydro.river_timeseries_shadow"] = {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(stray, schema)
+
+
+def test_schema_still_requires_both_canonical_per_table_totals() -> None:
+    schema = _load_schema()
+    committed = json.loads(
+        (_COMMITTED_RECEIPT_DIR / "enforce-live-20260715T091543Z.json").read_text(encoding="utf-8")
+    )
+    missing = json.loads(json.dumps(committed))
+    missing["per_table_totals"].pop("met.forcing_station_timeseries")
+    missing["per_table_totals"][_RIVER_LEGACY_KEY] = {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(missing, schema)
+
+
+def test_refused_branch_constrains_a_legacy_total_the_same_way(tmp_path: Path) -> None:
+    """Fixture must-preserve: a refused-mode receipt carrying a ``_legacy`` key
+    stays bound by ``refused_table_total`` — zero before, null after, zero
+    chunks — so a refusal can never report work it did not do."""
+    env = _base_env(tmp_path)
+    config = compression.config_from_args(_args(enforce=True), env)
+    receipt = compression.build_refused_lock_receipt(config, now_utc=_NOW, head_sha="b" * 40)
+    receipt["per_table_totals"][_RIVER_LEGACY_KEY] = {
+        "before_bytes": 0,
+        "after_bytes": None,
+        "chunks_compressed": 0,
+    }
+    jsonschema.validate(receipt, _load_schema())
+    receipt["per_table_totals"][_RIVER_LEGACY_KEY] = {
+        "before_bytes": 5,
+        "after_bytes": 1,
+        "chunks_compressed": 1,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(receipt, _load_schema())
+
+
+# --- 3.3 per-tick derivation re-pin -----------------------------------------
+
+
+def test_compression_env_example_pins_the_two_day_lag() -> None:
+    """#1985 / D7: the template's lag assignment is the live two-day value and
+    the stale "one chunk width" gloss (a 7-day chunk assumption the one-day
+    narrow chunks retire) is gone."""
+    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=(\d+)$", text) == ["172800"]
+    assert "one chunk width" not in text
+    # Round-2: the two provenances are DIFFERENT and neither is #1237. The box
+    # has run 172800 since the 2026-08-07 short-lag regime; only the template
+    # moved in #1985. "both since #1985" and "since #1237" are each a false
+    # audit trail for a value whose history is a recorded outage decision.
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    for source in (text, runbook):
+        # Comment wrapping is not part of the claim: flatten before matching.
+        flat = " ".join(source.replace("\n#", "\n").split())
+        assert "2026-08-07 short-lag regime" in flat
+        assert "#1237 neither judged nor changed" in flat
+    assert "2 days both on the box" not in runbook
+    assert "the value node-27 has run\n# since #1237" not in text
+    # Round-3: three places still described the compression lag as 7 days,
+    # which is the value the box STOPPED using on 2026-08-07 and the template
+    # stopped shipping in #1985. An operator reading any of them would compute
+    # the wrong cutoff for the worked example two paragraphs down.
+    assert "Compression remains earlier at 7 days" not in runbook
+    assert "the committed template still" not in runbook
+    assert "2026-07-04T12:00:00Z" not in runbook
+    # ... and the worked example is now the 172800 s cutoff off the same
+    # watermark, computed here rather than quoted.
+    watermark = datetime(2026, 7, 11, 12, 0, tzinfo=UTC)
+    cutoff = watermark - timedelta(seconds=172_800)
+    assert cutoff.strftime("%Y-%m-%dT%H:%M:%SZ") == "2026-07-09T12:00:00Z"
+    assert "2026-07-09T12:00:00Z" in runbook
+    # The historical mentions of 604800 are correct and must survive: the
+    # short-lag regime section and the pre-2026-08-07 provenance both name it.
+    assert "自 2026-08-07 起生产 lag 从 604800" in runbook
+    assert "Historically the template shipped `604800`" in runbook
+
+
+def test_per_tick_bound_comment_is_re_derived_for_one_day_chunks() -> None:
+    """The bound survives the chunk-interval change only because it was
+    re-derived: the comment must cite the new arrival rate, not the retired
+    "2 terminal chunks/week"."""
+    text = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=(\d+)$", text) == ["4"]
+    assert "2 terminal chunks/day" in text
+    # The weekly figure may only survive as an explicitly retired one: a comment
+    # still asserting it as the current arrival rate is the stale derivation the
+    # spec's "chunk interval change without re-derivation is caught" scenario is
+    # about.
+    assert text.count("2 terminal chunks/week") == 1
+    assert "retired figure was 2 terminal chunks/week" in text
+    assert "#1985" in text
+
+
+def test_runbook_per_tick_section_records_the_one_day_derivation() -> None:
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    for phrase in (
+        "2 terminal chunks/day",
+        "finite backlog",
+        "PER_TICK_BOUND=1",
+        "51 min",
+    ):
+        assert phrase in runbook, phrase
+
+
+# --- round-2: the bound-1 transitional rule is retired (fixture 16) ----------
+
+
+def test_the_transitional_rule_no_longer_tells_operators_to_drop_the_bound() -> None:
+    """#1985 round-2: the retired rule was not merely suboptimal, it could not
+    work — and a runbook that still carries it sends an operator to a state with
+    no exit.
+
+    Bound 4 stays the single steady-state statement; the surviving `_legacy`
+    chunk is handled by the attended `compress_chunk` instead.
+    """
+    template = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+
+    assert re.findall(r"(?m)^NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=(\d+)$", template) == ["4"]
+    # The retired instruction, verbatim shapes it took in both files.
+    assert "keep it at 1 until a" not in template
+    assert "set this to 1 for the expand window" not in template
+    assert "stays in force from the" not in runbook
+    assert "Pre-expand recipe: compress the legacy backlog first, under bound 1" not in runbook
+    # And the template says so out loud, because an operator reading only the
+    # env file is exactly who would otherwise reach for the bound.
+    assert "Do NOT set this to 1 for the transition" in template
+    # Round-3: two survivors of the retired rule inside the same file that now
+    # says "Do NOT set this to 1". Both told an operator to use bound 1.
+    flat_template = " ".join(template.replace("\n#", "\n").split())
+    assert "the hint OVERRIDES this value" not in flat_template
+    assert "bound 1, and let the daily timer drain the backlog" not in flat_template
+
+
+def test_the_catch_up_section_excludes_the_legacy_survivor() -> None:
+    """§4.5's bound-1 recipe is right for a canonical-table backlog and wrong
+    for the `_legacy` survivor, which prefix selection at bound 1 never reaches.
+
+    The section also described selection as plain oldest-first, which is what
+    made the bound-1 recipe look applicable to any eligible chunk; the real
+    order is table-major first.
+    """
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    start = runbook.index("### 4.5 ")
+    end = runbook.index("### 4.6 ", start)
+    section = runbook[start:end]
+    assert "_legacy" in section
+    assert "hypertable_schema, hypertable_name, range_end" in section
+    # The retired oldest-first-only claim.
+    assert "selection is oldest-first (`ORDER BY range_end" not in section
+
+
+def test_the_legacy_backlog_bound_is_derived_not_a_frozen_measurement() -> None:
+    """Round-3/round-4: "river ≤ 2" was a measurement presented as the rule.
+
+    The 2026-09-03 count of 2 was taken on the box under the LIVE 21-day
+    retention window (the committed template ships 14), and it reflects the
+    compression cadence — one still-filling `_hyper_3_107` plus one chunk still
+    inside the 2-day lag — not the window at all. The window-derived bound is
+    `⌈21 ÷ 7⌉ + 1` = 4, an at-most. An operator sizing the expand drain from
+    either number as if it were the other plans for the wrong length, so the
+    runbook states the formula and keeps the measurement as a dated example.
+    """
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    flat = " ".join(runbook.split())
+    assert "⌈retention window ÷ 7⌉ + 1" in flat
+    assert "2026-09-03" in flat
+    assert "_hyper_3_107" in flat
+    assert "river ≤ 2 at 239–508 GB" not in flat
+    # Round-4: the measurement was taken UNDER the live 21-day window, so the
+    # retired sentence had it backwards; and the formula's answer there is an
+    # at-most 4, never a range.
+    assert "⌈21 ÷ 7⌉ + 1" in flat
+    assert "gives 3–4" not in flat
+    assert "compression cadence" in flat
+    # And no day count is stated as if it were the live one.
+    assert "unchanged 14-day window" not in runbook
+    for match in re.finditer(r"14[- ]day", runbook):
+        window = runbook[max(0, match.start() - 200) : match.end() + 200]
+        assert any(
+            marker in window
+            for marker in ("template", "committed", "default", "Current policy")
+        ), window
+
+
+def test_the_pre_expand_drain_precondition_is_stated_with_its_failure_case() -> None:
+    """Round-4: "one single-table tick at a time" is the STEADY STATE only.
+
+    The runner takes `eligible[:per_tick_bound]`; it does not pace itself. With
+    two eligible terminal 7-day chunks on the table, one bound-4 tick takes
+    both — `2 x 508 GB x 6.0 s/GB + 380 s = 6476 s` against the 3900 s wall —
+    so an operator who reads the drain as self-limiting plans a pre-expand
+    window around a tick that cannot finish. Runbook and template must both
+    carry the count-first precondition and its arithmetic.
+    """
+    assert 2 * 508 * 6.0 + 380 == 6476.0
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    template = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    for text in (runbook, template):
+        flat = " ".join(text.replace("\n#", "\n").split())
+        assert "6476" in flat
+        assert "at most one terminal" in flat.lower()
+        # The selection fact the precondition rests on, not a paraphrase.
+        assert "eligible[:" in flat
+
+
+def test_the_runner_docstring_promises_no_lag_default_and_no_fixed_pair() -> None:
+    """Round-4: the module docstring was stale twice over.
+
+    There is no code default for the lag — `_parse_positive_int` raises when
+    `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` is missing — and the governed
+    set is discovered (canonical + any existing `_legacy` sibling), not a
+    frozen pair of detail hypertables. Both claims sit in the first paragraph a
+    maintainer reads.
+    """
+    doc = compression.__doc__ or ""
+    assert "default 7 days" not in doc
+    assert "one chunk width" not in doc
+    assert "on the two\ndetail hypertables" not in doc
+    assert "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS" in doc
+    assert "_legacy" in doc
+    # The claim about the default is a property of the parser, not of prose.
+    with pytest.raises(compression.CompressionConfigError):
+        compression._parse_positive_int(
+            None, name="NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", minimum=1
+        )
+
+
+def test_the_bound_one_starvation_claim_matches_the_runner() -> None:
+    """The documented reason bound 1 cannot work is a property of the SELECTION
+    CODE, so it is pinned against the code, not quoted from memory.
+
+    Table-major order plus a prefix slice means the single slot at bound 1 goes
+    to the canonical river chunk that arrives daily; the `_legacy` sibling sorts
+    after it and `met.*` after that, so neither is ever reached.
+    """
+    source = (_ROOT / "scripts" / "node27_timeseries_compression.py").read_text(encoding="utf-8")
+    assert "ORDER BY hypertable_schema, hypertable_name, range_end ASC" in source
+    assert "selected = eligible[:per_tick_bound]" in source
+    # The sort claim, against the real candidate roster rather than two string
+    # literals that compare true no matter what the code holds.
+    qualified = sorted(f"{schema}.{name}" for schema, name in discovery.CANDIDATE_HYPERTABLES)
+    assert qualified.index("hydro.river_timeseries") < qualified.index(
+        "hydro.river_timeseries_legacy"
+    )
+    assert qualified.index("hydro.river_timeseries_legacy") < qualified.index(
+        "met.forcing_station_timeseries"
+    )
+    for text in (
+        _ENV_EXAMPLE_PATH.read_text(encoding="utf-8"),
+        (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8"),
+    ):
+        assert "prefix" in text.lower()
+
+
+def test_the_budget_chain_does_not_forbid_bound_one_on_its_own() -> None:
+    """Round-3 correction. Both files claimed leg 3 refuses bound 1 unless the
+    §4.5 raised triple is in place; the implication runs the OTHER way.
+
+    `_validated_resolution` refuses only `raised timeout AND bound != 1`. Bound
+    1 at the default timeout resolves cleanly, so the budget chain would have
+    accepted exactly the configuration the runbook says it rejects — and an
+    operator who trusted that sentence would have concluded the preflight was
+    protecting them from the starvation, which it is not.
+    """
+    resolved = budget._validated_resolution(
+        compression_statement_timeout_ms=budget.DEFAULT_COMPRESSION_STATEMENT_TIMEOUT_MS,
+        compression_per_tick_bound=1,
+        compression_wrapper_wall_seconds=budget.COMPRESSION_WRAPPER_WALL_SECONDS,
+        cold_statement_timeout_ms=budget.DEFAULT_COLD_STATEMENT_TIMEOUT_MS,
+        cold_wrapper_wall_seconds=budget.COLD_WRAPPER_WALL_SECONDS,
+        service_wall_seconds=budget.SERVICE_WALL_SECONDS,
+    )
+    assert resolved.compression_per_tick_bound == 1
+    # The direction that IS enforced (leg 3), with walls raised to match so the
+    # earlier legs do not fire first and mask it.
+    raised_ms = budget.DEFAULT_COMPRESSION_STATEMENT_TIMEOUT_MS * 2
+    raised_wall = raised_ms // 1000 + 300
+    with pytest.raises(budget.SequentialBudgetError, match="PER_TICK_BOUND=1"):
+        budget._validated_resolution(
+            compression_statement_timeout_ms=raised_ms,
+            compression_per_tick_bound=4,
+            compression_wrapper_wall_seconds=raised_wall,
+            cold_statement_timeout_ms=budget.DEFAULT_COLD_STATEMENT_TIMEOUT_MS,
+            cold_wrapper_wall_seconds=budget.COLD_WRAPPER_WALL_SECONDS,
+            service_wall_seconds=raised_wall + budget.COLD_WRAPPER_WALL_SECONDS + 41,
+        )
+    template = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    assert "or leg 3 refuses the configuration" not in template
+    assert "refused outright by leg 3" not in runbook
+
+
+def _hydro_run_status_enum() -> set[str]:
+    """Every `hydro.run_status` label, read from the migrations that define it.
+
+    There is no repo-level Python constant holding the enum (only the terminal
+    SUBSET, `apps.api.routes.pipeline._TERMINAL_HYDRO_STATUSES`), so the DDL is
+    the source of truth: `000003_enums.sql` creates the type and
+    `000013_enum_remediation.sql` adds `pending`.
+    """
+    create = (_ROOT / "db/migrations/000003_enums.sql").read_text(encoding="utf-8")
+    body = re.search(
+        r"CREATE TYPE hydro\.run_status AS ENUM \((.*?)\)", create, flags=re.DOTALL
+    )
+    assert body is not None, "hydro.run_status is no longer created in 000003_enums.sql"
+    labels = set(re.findall(r"'([a-z_]+)'", body.group(1)))
+    remediation = (_ROOT / "db/migrations/000013_enum_remediation.sql").read_text(encoding="utf-8")
+    labels |= set(
+        re.findall(
+            r"ALTER TYPE hydro\.run_status ADD VALUE IF NOT EXISTS '([a-z_]+)'", remediation
+        )
+    )
+    return labels
+
+
+def test_the_attended_compress_and_its_gate_are_documented() -> None:
+    """The replacement procedure has to be executable from the runbook alone:
+    the gate that proves the legacy store is quiet, the serialisation against a
+    timer that does not share the lifecycle lock with a bare psql, and the
+    verification."""
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    for phrase in (
+        "timeseries_store = 'legacy'",
+        "setsid nohup",
+        "statement_timeout",
+        "is_compressed = true",
+        "04:25 UTC",
+    ):
+        assert phrase in runbook, phrase
+
+
+def test_the_attended_gate_sql_is_the_complement_of_the_terminal_status_set() -> None:
+    """Round-3: the gate was spelled as a NEGATIVE list of three statuses.
+
+    `not in ('parsed','published','failed')` treats `succeeded`, `cancelled`
+    and `superseded` as live, so a retried legacy run that D6's write refusal
+    parked at `succeeded` would keep the gate shut permanently — the attended
+    compress could never be started, and the expand window would close with the
+    surviving chunk uncompressed. Spelled as the COMPLEMENT of the terminal
+    set, the gate closes on exactly the states that can still write.
+
+    Derived, not quoted: the runbook's own SQL is parsed and compared against
+    the enum labels minus `apps.api.routes.pipeline._TERMINAL_HYDRO_STATUSES`,
+    so adding a status to either side without revisiting the gate is red.
+    """
+    from apps.api.routes.pipeline import _TERMINAL_HYDRO_STATUSES
+
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    documented = re.findall(
+        r"and status in \(([^)]*)\);", runbook
+    )
+    assert len(documented) == 1, documented
+    gate = set(re.findall(r"'([a-z_]+)'", documented[0]))
+
+    expected = _hydro_run_status_enum() - set(_TERMINAL_HYDRO_STATUSES)
+    assert gate == expected
+    assert gate == {"created", "staged", "pending", "submitted", "running"}
+    # The retired negative spelling must not survive anywhere in the runbook.
+    assert "status not in ('parsed','published','failed')" not in runbook
+
+
+def test_the_missed_attended_step_backstop_arithmetic_is_the_mixed_tick() -> None:
+    """Round-3: the STEADY-STATE mixed tick, not the backlog one.
+
+    Bound 4 keeps up with the 2 terminal chunks/day the canonical pair
+    produces, so three narrow river chunks are never queued at once. The tick
+    at `range_end + lag` therefore selects one narrow river chunk, the legacy
+    chunk and one forcing chunk:
+    `(75 + 508 + 12.7) GB x 6.0 s/GB + 380 s = 3954.2 s` against the 3900 s
+    wall — 54 s over at a 75 GB narrow chunk and UNDER it only in the lower
+    half of the DERIVED 38-73 GB narrow band (a seventh of the measured
+    268-508 GB 7-day chunks; nothing narrow exists to measure before the
+    expand): at its 73 GB top the same tick is 3942 s, over the wall again.
+    The old text promised a daily TERM + OnFailure mail as a
+    backstop; a missed attended step may produce no signal at all, so
+    "no alert" is not evidence and the runbook has to name a positive check.
+    """
+    assert round((75 + 508 + 12.7) * 6.0 + 380, 1) == 3954.2
+    # The backlog worst case, which the text keeps but relabels.
+    assert (508 + 3 * 75) * 6.0 + 380 == 4778.0
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    template = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    assert "3954" in runbook
+    assert "3954" in template
+    assert "73 min" not in runbook
+    assert "repeats every day until the chunk is compressed" not in runbook
+    # The positive completion criteria replace "no alert".
+    assert "chunks_compressed" in runbook
+    assert "chunks_compressed" in template
+    for text in (runbook, template):
+        assert "4778" in text
+        # 4778 survives ONLY as the backlog worst case.
+        flat = " ".join(text.replace("\n#", "\n").split())
+        index = flat.index("4778")
+        assert "backlog" in flat[index : index + 220].lower(), flat[index : index + 220]
+
+
+def test_the_narrow_chunk_band_is_derived_and_only_its_lower_half_fits() -> None:
+    """Round-4: "the measured 38-58 GB narrow sizes" was never measured.
+
+    One-day narrow chunks do not exist until the expand runs, so the band is a
+    seventh of the measured 268-508 GB 7-day chunks: ~38-73 GB. The distinction
+    is load-bearing because the 3954 s steady-state tick only fits under the
+    3900 s wall in the LOWER half of that band -- pair the 508 GB legacy chunk
+    with the 73 GB top and the tick is over the wall, which is exactly the case
+    an operator would dismiss on the retired "measured 38-58" sentence.
+    """
+    assert round((73 + 508 + 12.7) * 6.0 + 380, 1) == 3942.2
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    template = _ENV_EXAMPLE_PATH.read_text(encoding="utf-8")
+    for text, dash in ((runbook, "\u2013"), (template, "-")):
+        flat = " ".join(text.replace("\n#", "\n").split())
+        # The retired "measured" claim, in this file's own dash convention.
+        assert f"measured 38{dash}58" not in flat
+        assert f"38{dash}73" in flat
+        assert "3942" in flat
+        index = flat.index(f"38{dash}73")
+        window = flat[max(0, index - 200) : index + 200].lower()
+        assert "derived" in window, window
+        assert "lower" in window, window
+
+
+def test_the_expected_red_state_is_documented_as_a_condition_not_a_date() -> None:
+    """#1985 round-2, fixture 13: "the first deployment is red" is a claim about
+    a moment, and it goes stale the moment the backlog drains — after which the
+    runbook would be telling an operator to expect an alarm that no longer
+    fires. The durable form is the inequality plus a dated worked example.
+    """
+    runbook = (_ROOT / "docs/runbooks/tier-node27-timeseries-storage.md").read_text(encoding="utf-8")
+    assert "Expect the first deployment to be red" not in runbook
+    assert "the very\n     first daily audit" not in runbook
+    flat = " ".join(runbook.split())
+    assert "projected_peak_bytes > home_free_bytes − safety_margin_bytes" in flat
+    # The measurement survives as a dated example, not as the rule.
+    assert "2026-09-03 pre-compression measurement" in flat
+    # The acknowledgement and the prohibition are unchanged.
+    assert "Never raise" in flat
+    assert "NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES" in flat

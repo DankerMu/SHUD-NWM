@@ -316,3 +316,200 @@ def test_healthy_reserved_receipt_and_examples_carry_reserved_bytes(tmp_path: Pa
     assert receipt["filesystems"]["home"]["reserved_bytes"] == 50
     jsonschema.validate(receipt, schema)
     write_cold_governance_receipt(config.receipt_path, receipt, schema)
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — the working-set block travels with the strict receipt too
+# ---------------------------------------------------------------------------
+
+_ROOT_DIR = Path(__file__).resolve().parents[1]
+_COLD_SCHEMA = json.loads(
+    (_ROOT_DIR / "schemas" / "node27_cold_governance_receipt.schema.json").read_text(encoding="utf-8")
+)
+
+_WORKING_SET = {
+    "uncompressed_bytes": 644245094400,
+    "daily_ingest_bytes": 80530636800,
+    "next_compressible_at": "2026-09-02T00:00:00Z",
+    "home_free_bytes": 966367641600,
+    "projected_peak_bytes": 805306368000,
+    "projection_status": "ok",
+    "compression_lag_seconds": 172800,
+    "watermark": "2026-08-31T00:00:00Z",
+}
+
+
+def test_cold_receipt_carries_the_working_set_when_it_is_supplied(tmp_path: Path) -> None:
+    config = GovernanceConfig(receipt_path=tmp_path / "governance.json", head_sha=SHA)
+    receipt, schema = build_cold_governance_receipt(
+        config=config,
+        started_at="2026-08-31T12:00:00Z",
+        finished_at="2026-08-31T12:00:05Z",
+        home=_sample(path="/home", used=800, pgdata=300, cold=0, object_store=200),
+        cold=_sample(path="/data/GHDC", used=700, pgdata=0, cold=400, object_store=0),
+        evidence=_evidence(),
+        working_set=_WORKING_SET,
+    )
+    assert receipt["working_set"] == _WORKING_SET
+    jsonschema.validate(receipt, schema)
+
+
+def test_cold_receipt_omits_the_working_set_when_it_is_not_supplied(tmp_path: Path) -> None:
+    """Optional by construction: the strict receipt predates the projection and
+    a caller that cannot measure it must not be forced to invent zeroes."""
+    config = GovernanceConfig(receipt_path=tmp_path / "governance.json", head_sha=SHA)
+    receipt, schema = build_cold_governance_receipt(
+        config=config,
+        started_at="2026-08-31T12:00:00Z",
+        finished_at="2026-08-31T12:00:05Z",
+        home=_sample(path="/home", used=800, pgdata=300, cold=0, object_store=200),
+        cold=_sample(path="/data/GHDC", used=700, pgdata=0, cold=400, object_store=0),
+        evidence=_evidence(),
+    )
+    assert "working_set" not in receipt
+    jsonschema.validate(receipt, schema)
+
+
+def test_both_cold_governance_examples_carry_the_working_set() -> None:
+    """Both examples carry the block, so the new fields are exercised by CI's
+    schema-example job (`.github/workflows/ci.yml`, which strips the `.drift`
+    family suffix to find the schema) as well as by this suite.
+
+    Keys are asserted as a SUBSET of the production shape, not as equality with
+    the eight-key literal below: the collector emits ten keys (it adds
+    `hypertables` and `uncompressed_chunks`), and an example is free to show
+    them.
+    """
+    root = _ROOT_DIR / "schemas" / "examples"
+    for name in (
+        "node27_cold_governance_receipt.example.json",
+        "node27_cold_governance_receipt.drift.example.json",
+    ):
+        document = json.loads((root / name).read_text(encoding="utf-8"))
+        keys = set(document["working_set"])
+        assert set(_WORKING_SET) <= keys
+        assert keys <= _PRODUCTION_WORKING_SET_KEYS
+        jsonschema.validate(document, _COLD_SCHEMA)
+
+
+# The exact-string pin on CI's family-strip alternation was RETIRED in the
+# #1985 round-2 pass. Two reasons: the alternation itself is gone (the strip is
+# now `s/\.[a-z0-9-]+$//`, so there is no closed list left to enumerate), and a
+# ci.yml-only PR routes to `tests/test_select_ci_tests.py` alone (#1650 exact
+# single-target selection) — this file would never have run on the PR that
+# broke it. The replacement lives there: it parses the sed out of the workflow
+# and asserts that EVERY example under `schemas/examples/` resolves to a real
+# schema, which covers the `.drift` case this pin covered plus the twenty-three
+# it did not.
+
+
+_PRODUCTION_WORKING_SET_KEYS = {
+    "hypertables",
+    "uncompressed_bytes",
+    "uncompressed_chunks",
+    "daily_ingest_bytes",
+    "next_compressible_at",
+    "home_free_bytes",
+    "projected_peak_bytes",
+    "projection_status",
+    "compression_lag_seconds",
+    "watermark",
+}
+
+
+def _fake_cursor(*, hypertables: list[dict], chunks: list[dict]) -> object:
+    class _Cursor:
+        def __init__(self) -> None:
+            self._rows: list[dict] = []
+
+        def execute(self, sql: str, params: object = None) -> None:
+            self._rows = (
+                hypertables if "timescaledb_information.hypertables" in sql else chunks
+            )
+
+        def fetchall(self) -> list[dict]:
+            return list(self._rows)
+
+    return _Cursor()
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["ok", "no_uncompressed_chunk", "watermark_unavailable", "working_set_unavailable"],
+)
+def test_the_production_working_set_validates_for_every_projection_status(
+    tmp_path: Path, status: str
+) -> None:
+    """The shape the COLLECTOR produces — ten keys — driven end to end through
+    `finalize_working_set` into the strict receipt and validated. The examples
+    are hand-written; this is the only test that proves the real producer's
+    output fits the schema, in every state it can be in.
+    """
+    from packages.common import node27_cold_governance_collection as collection
+
+    watermark = datetime(2026, 9, 1, tzinfo=UTC)
+    hypertables = [
+        {
+            "hypertable_schema": schema,
+            "hypertable_name": name,
+            "num_chunks": 3,
+            "compression_enabled": True,
+        }
+        for schema, name in (("hydro", "river_timeseries"), ("met", "forcing_station_timeseries"))
+    ]
+    chunks = [
+        {
+            "hypertable_schema": "hydro",
+            "hypertable_name": "river_timeseries",
+            "chunk_schema": "_timescaledb_internal",
+            "chunk_name": "_hyper_3_1_chunk",
+            "range_start": datetime(2026, 8, 30, tzinfo=UTC),
+            "range_end": datetime(2026, 8, 31, tzinfo=UTC),
+            "total_bytes": 1024,
+        }
+    ]
+    if status == "no_uncompressed_chunk":
+        chunks = []
+    if status == "working_set_unavailable":
+        hypertables = []
+    cursor = _fake_cursor(hypertables=hypertables, chunks=chunks)
+    sample = collection.collect_working_set(
+        cursor,
+        watermark=None if status == "watermark_unavailable" else watermark,
+        lag_seconds=172_800,
+    )
+    working_set = collection.finalize_working_set(sample, home_free_bytes=900 * 1024**3)
+    assert working_set["projection_status"] == status
+    assert set(working_set) == _PRODUCTION_WORKING_SET_KEYS
+
+    receipt, schema = build_cold_governance_receipt(
+        config=GovernanceConfig(receipt_path=tmp_path / "governance.json", head_sha=SHA),
+        started_at="2026-08-31T12:00:00Z",
+        finished_at="2026-08-31T12:00:05Z",
+        home=_sample(path="/home", used=800, pgdata=300, cold=0, object_store=200),
+        cold=_sample(path="/data/GHDC", used=700, pgdata=0, cold=400, object_store=0),
+        evidence=_evidence(),
+        working_set=working_set,
+    )
+    assert receipt["working_set"] == working_set
+    jsonschema.validate(receipt, schema)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"projection_status": "made_up"},
+        {"uncompressed_bytes": -1},
+        {"projected_peak_bytes": "750 GiB"},
+    ],
+    ids=["status", "negative", "string"],
+)
+def test_cold_schema_rejects_a_mis_shaped_working_set(mutation: dict) -> None:
+    document = json.loads(
+        (_ROOT_DIR / "schemas" / "examples" / "node27_cold_governance_receipt.example.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    document["working_set"].update(mutation)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(document, _COLD_SCHEMA)

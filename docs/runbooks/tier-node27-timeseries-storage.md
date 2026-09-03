@@ -41,7 +41,9 @@ ships (`NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`); the value that actually
 runs is whatever the machine's env file holds — node-27's DB retention window
 was `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS=21` as of 2026-08-01. Read the
 live value on the box before quoting a day count anywhere (§8.1 step 2 shows
-the grep). Compression remains earlier at 7 days. Both ages are measured from
+the grep). Compression is earlier: lag `172800` (2 days), the value node-27 has
+run since the 2026-08-07 short-lag regime (§4.3.2.1) and, since `#1985`, the
+committed template value as well. Both ages are measured from
 the latest forecast cycle accepted by the node-27 display catalog, not from
 the server wall clock. The historical 30/45-day receipts in the committed
 evidence tree are audit evidence only, not commands for new runs.
@@ -52,7 +54,8 @@ Every lifecycle runner opens a bounded read-only query before selection and
 fails closed when that watermark is absent or unreadable; it MUST NOT fall back
 to `datetime.now()`. Wall time remains the receipt generation/freshness clock.
 For example, with display watermark `2026-07-11T12:00:00Z`, compression cutoff
-is `2026-07-04T12:00:00Z` and DB-retention cutoff is `2026-06-27T12:00:00Z`
+is `2026-07-09T12:00:00Z` (watermark minus the 172800 s lag) and DB-retention
+cutoff is `2026-06-27T12:00:00Z` (watermark minus the template's 14-day window)
 even if the host date is later.
 
 - Design record: `openspec/changes/tier-node27-timeseries-storage/design.md`
@@ -263,17 +266,24 @@ against the committed `.example` templates as of 2026-08-01:
   and the deployed env both carry `=4` since issue #1237 decided it as a
   capacity target (the box already ran `=4`; the template's stale `=5` was
   the side that moved). Still read the live value off the box before quoting
-  it. See §4 "Per-tick capacity (live state 2026-08-14, decided in #1237)".
+  it. See §4 "Per-tick capacity (re-derived 2026-09-03 for one-day chunks,
+  `#1985`; original decision `#1237`)".
 - **Compression chunk-selection lag.**
   `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` reads `172800` (2 days) on the
-  box (re-confirmed 2026-08-14) while the committed template ships `604800`
-  (7 days). This gap is a **recorded decision, not drift**: the 2026-08-07
+  box (re-confirmed 2026-08-14). **The gap is closed as of `#1985`**: the
+  committed template now ships `172800` too, and its former "one chunk width"
+  gloss is gone — with one-day narrow chunks and seven-day `_legacy` siblings
+  no single chunk width describes the lag any more. The governance lane's env
+  carries the same variable with the same value and a cross-template pin test
+  keeps the two honest. Historically the template shipped `604800`
+  (7 days) and the gap was a **recorded decision, not drift**: the 2026-08-07
   short-lag regime taken after the md0 outage left `/home` carrying the whole
   uncompressed steady state alone (backup `*.bak-lag7d-20260807`; rollback
   condition = md0 recovery restoring a separate device for large chunks). The
   regime, its peak-space arithmetic and the mandatory decompress-first rule
   for outage recovery are §4.3.2.1 — read that section before touching the
-  value. #1237 neither judged nor changed the lag.
+  value. #1237 neither judged nor changed the lag; #1985 only moved the
+  template onto the live value it had already been running.
 - **DB retention timer.** Not enabled as of the 2026-08-01 verification;
   enabled on 2026-08-14 (issue #1369 operator decision) at the committed
   06:36 UTC daily cadence with the archive gate `disabled` — since #1370 the
@@ -299,146 +309,292 @@ against the committed `.example` templates as of 2026-08-01:
 Native TimescaleDB compression is the sole mechanism this milestone applies
 to shrink the two hot hypertables (`hydro.river_timeseries` and
 `met.forcing_station_timeseries`). Compression is applied to terminal chunks
-only (age older than the configurable lag, default 7 d) by the receipted
+only (age older than the configured lag —
+`NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS`, `172800` = 2 days: on the box since
+the 2026-08-07 short-lag regime (§4.3.2.1; `#1237` neither judged nor changed
+it), in the committed template only since `#1985`, which moved the template onto
+the value the box had already been running — the 7-day template figure is
+retired) by the receipted
 runner (`scripts/node27_timeseries_compression.py`, `#851`), never to the
 active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
 
-### Per-tick capacity (live state 2026-08-14, decided in #1237)
+### Per-tick capacity (re-derived 2026-09-03 for one-day chunks, `#1985`; original decision `#1237`)
 
 `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` caps how many chunks one timer
 tick compresses. **The decided value is 4** — a capacity target derived from
-the measured inputs below, not an arbitrary default and not an after-the-fact
-blessing of a July retune. Issue #1237 is the decision record. The committed
-template (`infra/env/node27-timeseries-compression.example`) now ships `=4`
-and a test pins that exact assignment line; the deployed
-`/home/nwm/NWM/infra/env/node27-timeseries-compression.env` already ran `=4`
-(verified on the box 2026-08-01 and 2026-08-14), so the decision moved the
-template only and changed nothing on node-27. The former `5` vs `4`
-template/live drift is resolved.
+the measured inputs below, not an arbitrary default. #1237 is the original
+decision record; #1985 re-derives it for the narrow tables' **one-day**
+`chunk_time_interval` (a chunk-interval change is on the invalidation list
+below, so the derivation had to be redone in the same change that introduces
+it). The committed template
+(`infra/env/node27-timeseries-compression.example`) ships `=4` and a test pins
+that exact assignment line.
 
 **The relation is dual — both constraints are mandatory.**
 
-1. **Throughput.** `bound × 1 tick/day ≥ steady arrival of 2 terminal
-   chunks/week`. The timer fires **once daily** (`OnCalendar=*-*-* 04:25:00
-   UTC`, `infra/systemd/nhms-node27-timeseries-compression.timer:5`), so
-   `bound=4` buys 28 chunk-slots/week against an arrival of 2 — **14×
-   headroom**.
+1. **Throughput.** `bound × 1 tick/day ≥ steady arrival`. Each canonical
+   hypertable cuts chunks on the time dimension, so a one-day interval makes
+   **one terminal chunk per canonical table per day — 2 terminal chunks/day**
+   for the pair (the retired figure, under 7-day chunks, was 2 terminal
+   chunks/week). The timer fires once daily (`OnCalendar=*-*-* 04:25:00 UTC`,
+   `infra/systemd/nhms-node27-timeseries-compression.timer:5`), so `bound=4`
+   buys 4 slots/day against an arrival of 2 — **2× headroom**.
 2. **Wall.** `Σ(selected chunk GB × 6.0 s) + ~380 s ≤
-   NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS` (`3900`, the live
-   default from `#1156`/`#1352`, no override installed). That wall bounds the
-   **whole tick**, not one chunk, and the runner has no in-loop elapsed guard:
-   overrunning it means the wrapper's `timeout` sends `TERM` mid-DDL.
+   NODE27_TIMESERIES_COMPRESSION_WRAPPER_WALL_SECONDS` (`3900`). That wall
+   bounds the **whole tick**, not one chunk, and the runner has no in-loop
+   elapsed guard: overrunning it means the wrapper's `timeout` sends `TERM`
+   mid-DDL. A narrow one-day chunk is roughly a seventh of the 7-day chunk it
+   replaces — call it ≈75 GB, ≈7.5 min at the measured 6.0 s/GB — so
+   `4 × 7.5 min ≈ 30 min + 380 s ≈ 36 min` sits well inside the 65-minute
+   wall.
 
-   The `380 s` is the **measured 2026-08-14 non-compress residual**: the
-   observed 1836 s tick minus the 1456 s the §4.5 estimator gives for that
-   tick's pair. Note that §4.5's own "roughly 300 seconds of non-compress
-   budget" is a *worst-case estimate* assembled from the per-leg timeout caps,
-   and the 2026-08-14 measurement already exceeds it — use `380 s` here, and
-   read the §4.5 number as an estimate the box has outgrown, not as a ceiling.
-   Part of the residual also scales with chunk *count* (§4.5's enumeration
-   includes per-chunk legs — a size measurement before **and** after each
-   compress), so treat `380 s` as a floor for ticks selecting more than the
-   measured pair, and the `≥281 GB` onset threshold below as correspondingly
-   optimistic.
+   The `380 s` is the **measured 2026-08-14 non-compress residual** (observed
+   1836 s tick minus the 1456 s the §4.5 estimator gives for that tick's pair).
+   Part of it scales with chunk *count* — §4.5's enumeration includes a size
+   measurement before **and** after each compress — so treat it as a floor for
+   ticks selecting more than the measured pair.
+
+**The `_legacy` sibling is a finite backlog, not an arrival rate.** During the
+expand–contract transition (`timeseries-narrow-store-expand-contract`) the
+lifecycle lane also governs `hydro.river_timeseries_legacy` and, later,
+`met.forcing_station_timeseries_legacy`. Those tables are **write-frozen**: the
+parser writes only the narrow table, so their steady-state arrival is **zero**
+and what remains is a bounded stock of 7-day chunks. The bound is derived, not
+measured: at most `⌈retention window ÷ 7⌉ + 1` uncompressed 7-day chunks per
+table (the `+ 1` is the still-filling chunk). Under the 21-day window node-27
+was actually running on 2026-09-03 (Current policy near the top of this
+runbook; the committed template ships 14) that bound is `⌈21 ÷ 7⌉ + 1` = **4**
+— an AT-MOST, not a forecast. The read-only measurement the same day found
+only **2** uncompressed river chunks, at 239–508 GB: the 239 is the
+still-filling `_hyper_3_107` and the 508 is the one whose `range_end` was still
+inside the 2-day compression lag. That count is what the compression cadence
+had left behind — everything older was already compressed — not a function of
+the retention window, so do not read the measured 2 as the bound, nor the
+bound 4 as a prediction of what a live box holds. Forcing is the same count and
+much smaller. The wall argument below
+is **per tick** and does not change with the count; only the drain length and
+the pre-expand lead time do. They do not enter the throughput constraint at
+all; they enter the wall constraint as a one-off.
+
+**Worst mixed tick.** One legacy 7-day river chunk at 508 GB is
+`508 × 6.0 s ≈ 3050 s ≈ 51 min`. That single chunk already approaches the
+60-minute per-chunk `NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS` and
+leaves ~14 min of the 65-minute tick wall for everything else — a mixed tick of
+one legacy chunk plus even one narrow chunk (51 + 7.5 min + 380 s ≈ 65 min) is
+at or over the wall. **Do not let that tick happen.**
+
+**Pre-expand precondition: no uncompressed terminal `_legacy` chunk.** The
+expand migration may run only when a compression receipt shows the existing
+stock of 7-day chunks already compressed — nothing terminal left uncompressed on
+the table about to be renamed (§5.1 of the change's rollout checklist reads that
+receipt). Reaching that state needs no config change: under the 2-day lag the
+daily timer takes terminal chunks one single-table tick at a time (≈51 min for a
+508 GB chunk, inside the 60-minute per-chunk statement timeout), so the drain is
+a matter of waiting for as many ticks as there are chunks.
+
+**That "one tick at a time" drain has a precondition: at most one terminal
+7-day chunk eligible per tick.** It is the steady state, not a guarantee. The
+runner does not pace itself — selection is a prefix slice
+(`selected = eligible[:per_tick_bound]`,
+`scripts/node27_timeseries_compression.py:749`), so if the last compression
+receipt or a read-only `timescaledb_information.chunks` query shows **≥2
+eligible terminal chunks** on the table, the next tick at bound 4 takes them
+**together**: two 508 GB chunks are `2 × 508 × 6.0 s/GB + 380 s ≈ 6476 s`
+against the 3900 s wrapper wall — the §4 backlog case, not the steady-state
+one. So COUNT the eligible chunks before you rely on the timer; if there are
+two or more, drain them with the attended gated `compress_chunk` of §4 "The
+surviving chunk is compressed ATTENDED" (steps 1–4 below): it needs no config
+change and it is correct in both phases, before the rename and after it.
+
+**A bound change is not the pre-expand recipe** (D7 / tasks 3.3). Before the
+rename the §4.5 pair — `PER_TICK_BOUND=1` **with** the raised timeout/wall
+triple, drop-in first — would also work, because the chunks are still
+canonical and that is exactly what the backlog remedy below ("A backlog by
+itself invalidates the wall constraint") covers. It is simply not what this
+transition prescribes: ticks, or the attended step. And after the rename it
+can never help the `hydro.river_timeseries_legacy` survivor at all — prefix
+selection at bound 1 provably never reaches that chunk ("Why bound 1 is not
+the answer here" below).
+
+**The surviving chunk is compressed ATTENDED, inside the expand window.** The
+rename leaves at most one chunk whose `range_end` was still in the future when
+it happened, so the pre-expand drain cannot have reached it: it becomes eligible
+only at `range_end + lag`, days later, when narrow chunks are already arriving.
+Do not wait for that tick. After services restart in the expand window, compress
+it by hand:
+
+1. **Gate.** Every run that could still be reading the legacy store must be
+   terminal — D6 makes the table write-frozen, and this query must return `0`:
+
+   ```sql
+   select count(*) from hydro.hydro_run
+   where timeseries_store = 'legacy'
+     and status in ('created','staged','pending','submitted','running');
+   ```
+
+   The list is spelled as the COMPLEMENT of the terminal set on purpose
+   (`apps/api/routes/pipeline.py` `_TERMINAL_HYDRO_STATUSES`): `succeeded`,
+   `cancelled` and `superseded` are terminal too, so a `not in
+   ('parsed','published','failed')` gate would count a retried legacy run
+   parked at `succeeded` by the D6 refusal as live and wedge the gate shut
+   forever.
+
+2. **Serialise against the timer.** Stop the compression timer, or confirm you
+   are outside its 04:25 UTC tick: the lifecycle lock is taken by the runner,
+   **not** by a bare `psql`, so nothing stops the two from colliding on their
+   own.
+3. **Run detached with a session-level timeout**, the chunk-91 watcher pattern —
+   a `setsid nohup psql` session that raises `statement_timeout` for itself
+   (`SET statement_timeout = ...` in the same session as the `compress_chunk`
+   call) and writes its output to a file, so an SSH drop cannot abort a
+   half-finished DDL.
+4. **Verify**: `is_compressed = true` for that chunk in
+   `timescaledb_information.chunks`, and `df -h /home` for the space it
+   returned. Restart the timer if you stopped it.
+
+**Why bound 1 is not the answer here.** Selection is a table-major PREFIX:
+the runner orders eligible chunks by
+`hypertable_schema, hypertable_name, range_end` and takes `eligible[:bound]`.
+At `bound=1` the single slot therefore goes to the oldest eligible
+`hydro.river_timeseries` chunk — and one of those arrives every day. The
+`hydro.river_timeseries_legacy` chunk sorts after all of them, and
+`met.forcing_station_timeseries` after that, so neither is ever selected: the
+legacy chunk is never compressed, forcing stops being compressed at all, and the
+"until a receipt shows the legacy chunk compressed" exit condition can never be
+reached. The budget chain does not forbid bound 1 on its own: leg 3 of the
+chain enforces "raised `COMPRESS_TIMEOUT_MS` ⇒ bound 1", **not** the converse —
+bound 1 at the default `3600000` ms timeout is accepted by the preflight. The
+prefix-selection starvation above, not the budget chain, is why bound 1 is
+wrong here. **Bound stays 4.**
+
+**There is no backstop — the attended step is mandatory.** The earlier text
+here promised a loud daily failure if the step were missed; simulation against
+the real `_classify` says otherwise. In steady state bound 4 keeps up with the
+2 terminal chunks/day the pair produces, so three narrow chunks never queue:
+the tick at `range_end + lag` selects **one** narrow river chunk, the legacy
+chunk and **one** forcing chunk —
+`(75 + 508 + 12.7) GB × 6.0 s/GB + 380 s ≈ 3954 s` against the 3900 s (65 min)
+wrapper wall. That is 54 s over at a 75 GB narrow chunk and *under* the wall
+only in the LOWER half of the derived ≈38–73 GB narrow band (one seventh of the
+measured 268–508 GB 7-day chunks; no narrow chunk exists to be measured before
+the expand) — pair the 508 GB legacy chunk with the 73 GB top of that band and
+`(73 + 508 + 12.7) × 6.0 + 380 ≈ 3942 s` is over the wall again. So a missed
+step may `TERM` the tick (no
+receipt, `rc=124`, `OnFailure=` mail) or may produce **no signal at all** — and
+even when it does `TERM`, the legacy compress has most likely already committed
+inside the wall, so the alert is at most one trailing signal, not a daily
+reminder.
+
+Therefore **do not verify by the absence of an alert.** The completion criteria
+are `is_compressed = true` for that chunk in `timescaledb_information.chunks`
+and the compression receipt's
+`per_table_totals["hydro.river_timeseries_legacy"]["chunks_compressed"]`.
+(`(508 + 3 × 75) GB × 6.0 s/GB + 380 s ≈ 4778 s ≈ 80 min` remains the **backlog**
+worst case — three narrow chunks already queued — not the steady state.) The
+remedy for a missed step is the attended compress above, never a bound change:
+at bound 1 the tick would simply never select the legacy chunk at all.
+Retention meanwhile drains the sibling under the retention window in force
+(Current policy near the top of this runbook: the box ran 21 days as of
+2026-08-01, the committed template ships 14), and the retention receipt's
+`legacy_chunks["hydro.river_timeseries_legacy"]` counts it down to `0` — the
+contract migration's entry gate.
 
 Measured inputs (node-27, read-only, 2026-08-14 unless noted):
 
-- **Arrival rate = 2/week.** Both hot hypertables use a 7-day
-  `chunk_time_interval` with aligned range boundaries
-  (`timescaledb_information.dimensions`; census 5 river / 6 forcing chunks),
-  so two terminal chunks become eligible on the **same day, once a week**. The
-  2026-08-14T04:25 tick receipt compressed exactly that pair
-  (230 GB + 12.7 GB) in 30m36s — **1836 s measured**. The §4.5 estimator *as
-  written* is `GB × 6.0 s` with no overhead term and predicts 1456 s for that
-  pair, so the tick ran 380 s longer than the recipe. The `~380 s` residual in
-  the wall constraint above is **back-solved from this single observation**
-  (1836 − 1456); it is not an independent measurement of the non-compress
-  legs, and a second measured pair should be used to confirm or replace it.
-- **Backlog ceiling ≤6 chunks — CONDITIONAL, not physical.** The DB retention
-  window bounds uncompressed stock at ≤3 per table, hence ≤6 for the lane. The
-  window in force is the **live 21 days**, not the committed template's 14
-  (that drift is recorded in "Current policy (effective 2026-07-21)" near the
-  top of this runbook, the `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS`
-  paragraph). The retention timer was only enabled on 2026-08-14 (`#1369`), so
-  the convergence to the steady stock is not yet observed. **If that timer is
-  disabled or the window is changed, this premise fails** and the bound must
-  be re-derived from the formula above.
-- **Per-chunk cost.** Steady-state `hydro.river_timeseries` chunks measure
-  268–409 GB → 1608–2454 s each at ~6.0 s/GB (§4.5). Therefore `3 river + 1
-  forcing ≈ 3 × (1608…2454) + 76 + 380 = 5280–7818 s`, which **exceeds the
-  3900 s wall** outright.
-- **Live value was already 4**, so no operational change accompanies this
-  decision.
+- **Per-chunk cost ≈ 6.0 s/GB.** Compressing `_hyper_3_32_chunk` (268 GB) took
+  1607 s (2026-08-10). The 2026-08-14T04:25 tick compressed a 7-day pair
+  (230 GB + 12.7 GB) in 30m36s — **1836 s measured**, 380 s above the
+  `GB × 6.0 s` estimate.
+- **Steady-state 7-day river chunks were 268–409 GB**, with 508 GB the largest
+  observed; one-day narrow chunks are the seventh of that band, ≈38–73 GB.
+- **Backlog ceiling — CONDITIONAL, not physical.** The DB retention window
+  bounds uncompressed stock per table. Under one-day chunks and the committed
+  14-day window that is ≤14 per canonical table; the live window in force is
+  recorded in "Current policy (effective 2026-07-21)" near the top of this
+  runbook. **If the retention timer is disabled or the window changes, this
+  premise fails** and the bound must be re-derived from the formula above.
 - **Chunk count is decoupled from ingest volume.** Chunks are cut on the time
-  dimension (7 d), so doubling ingest makes terminal chunks *bigger*, not more
-  numerous. Growth pressure lands entirely on the per-chunk timeout budget
+  dimension, so doubling ingest makes terminal chunks *bigger*, not more
+  numerous. Growth pressure lands on the per-chunk timeout budget
   (`#1156`/`#1352`), never on this bound.
 
 **`bound=4` is a throughput ceiling, not redeemable single-tick capacity.** At
-river chunk sizes the wall admits roughly **≤2 chunks in one tick**; the
-weekly pair (1 river + 1 forcing ≈ 1836 s) clears it comfortably. Do not read
-"4" as "four river chunks in one tick" — that selection dies on the wall.
+*legacy* chunk sizes the wall admits roughly **one** chunk per tick; at narrow
+one-day sizes it comfortably admits four. Do not read "4" as "four
+seven-day-size chunks in one tick" — that selection dies on the wall.
 
-**Catch-up does not depend on this bound.** Draining a real backlog is §4.5
-"大 chunk 追赶": set `PER_TICK_BOUND=1` and raise the timeout/wall triple
-(systemd drop-in first), one chunk per tick. Raising the bound is not a
-catch-up tool and never was.
+**Catch-up does not depend on this bound.** Draining a real backlog of
+canonical-table chunks is §4.5 "大 chunk 追赶": set `PER_TICK_BOUND=1` and raise
+the timeout/wall triple (systemd drop-in first), one chunk per tick. Raising the
+bound is not a catch-up tool and never was — and neither is lowering it for the
+transitional `_legacy` survivor, which the prefix selection never reaches at
+bound 1.
 
-**No timer frequency change is required.** The main argument is the
-decoupling above — a second daily tick would find no extra terminal chunks to
-compress, because arrival is set by the 7-day chunk width, not by ingest
-volume. The 14× throughput headroom is the secondary confirmation. No cadence
-follow-up issue is opened.
+**Cadence conclusion: the daily timer stays.** One-day chunks raise arrival
+from two per week to **two per day**; the daily tick still covers that under
+bound 4 with 2× headroom, and a second daily tick would find nothing extra to
+compress because arrival is set by the chunk width, not by ingest volume. **No
+frequency change is required** and no cadence follow-up issue is opened.
 
-Why the bound matters at all: uncompressed chunks piling up on the hot tier
-was one of the two inputs to the 2026-07-25/26 `/home`-full incident (the
-other being the archive root sharing the hot filesystem — see
+Why the bound matters at all: uncompressed chunks piling up on the hot tier was
+one of the two inputs to the 2026-07-25/26 `/home`-full incident (the other
+being the archive root sharing the hot filesystem — see
 `docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment
-(2026-07-26)").
+(2026-07-26)"). The `#1985` working-set governance metric
+(`projected_peak_bytes` vs `home_free_bytes`) is the forward-looking alarm for
+exactly that condition; §8 records its recommendation codes.
 
 **A backlog by itself invalidates the wall constraint — no config has to
 change.** Selection is table-major
-(`scripts/node27_timeseries_compression.py:396` orders by
-`hypertable_schema, hypertable_name, range_end`, so `hydro` sorts before
-`met` and **every** eligible river chunk is taken before any forcing chunk),
-so at `bound=4` any unattended tick holding **≥2 eligible river chunks** can
-overrun the 3900 s wall while every chunk is still inside the normal
-268–409 GB band: `2 river + 2 forcing` already exceeds it once river chunks
-reach ≥281 GB. Detection must not wait for the receipt: a wall-`TERM`ed tick
+(`scripts/node27_timeseries_compression.py` orders by
+`hypertable_schema, hypertable_name, range_end`, so `hydro` sorts before `met`
+and a canonical table before its own `_legacy` sibling), so at `bound=4` any
+unattended tick holding one or more eligible 7-day-size chunks can overrun the
+3900 s wall. Detection must not wait for the receipt: a wall-`TERM`ed tick
 writes **no receipt at all**, and `deferred` is empty in the receipts it does
-write, so "`deferred` is non-empty" is **not** a signal for this. The signal
-is the *state* — a tick would select ≥2 river chunks, i.e. roughly ≥1 week of
-missed ticks (a §4.5 stop+mask override window, a §4.3.2 decompress pause, or
-an outage). What an operator can actually check: the unit went `failed`
-(`systemctl --user status` / `journalctl --user -u`; `rc=124` is the wall `TERM` — this is the
-authority), **or** the receipt at
+write, so "`deferred` is non-empty" is **not** a signal for this. The signal is
+the *state* — roughly a week of missed ticks (a §4.5 stop+mask override window,
+a §4.3.2 decompress pause, or an outage). What an operator can actually check:
+the unit went `failed` (`systemctl --user status` / `journalctl --user -u`;
+`rc=124` is the wall `TERM` — this is the authority), **or** the receipt at
 `NODE27_TIMESERIES_COMPRESSION_RECEIPT_PATH` is **stale** — its `generated_at`
 predates the last timer trigger (`systemctl --user list-timers`). Receipt
-*absence* is not a checkable signal: the path is a single shared file each
-tick overwrites in place (see the §4.0 shared-receipt note below), so a
-`TERM`ed tick leaves the previous clean receipt sitting at the path.
+*absence* is not a checkable signal: the path is a single shared file each tick
+overwrites in place (see the §4.0 shared-receipt note below), so a `TERM`ed
+tick leaves the previous clean receipt sitting at the path.
 **In that state, set `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1` per
 §4.5 before restarting the timer**, and let the daily timer drain one chunk
-per tick.
+per tick. **This applies to a genuine backlog of canonical-table chunks only.**
+During the expand–contract transition the single eligible 7-day-size chunk is
+the surviving `_legacy` one, and bound 1 cannot reach it: the prefix selection
+gives the only slot to the daily canonical chunk that sorts ahead of it (see
+"Why bound 1 is not the answer here" above). That case is the attended
+`compress_chunk`, not a bound change.
 
 **Invalidation conditions.** Re-derive from the two constraints above when any
 of these change:
 
-- `chunk_time_interval` on either hot hypertable (moves the arrival rate).
-- A third hot hypertable joins the lane (moves the arrival rate).
-- The DB retention timer is disabled, or its window changes (kills the ≤6
-  backlog ceiling premise).
+- `chunk_time_interval` on any governed hypertable (moves the arrival rate).
+  This is the condition `#1985` itself triggered: 7 d → 1 d on the canonical
+  tables.
+- A hypertable joins or leaves the governed set other than by the transitional
+  `_legacy` rename (moves the arrival rate). The `_legacy` siblings themselves
+  do **not** — they are write-frozen finite backlogs, modelled above.
+- The DB retention timer is disabled, or its window changes (kills the backlog
+  ceiling premise).
 - The wrapper wall / timeout budget changes, including a temporary §4.5
   override window (moves the wall constraint).
-- **A backlog forms — ≥2 river chunks eligible in one tick** (paragraph
-  above). This one is a *state*, not a config change: it does not move the
-  derivation, it defeats the wall constraint at `bound=4` directly. Do not
-  re-derive — drop to `PER_TICK_BOUND=1` per §4.5 before the timer runs again.
-- Chunk boundaries de-align between the two hypertables. This spreads the two
-  weekly terminals over different days and therefore **reduces** per-tick
-  load — a safe direction, listed here only so it is not misread as a
-  regression.
+- **A backlog forms — a tick would select a 7-day-size chunk alongside
+  anything else** (paragraph above). This one is a *state*, not a config
+  change: it does not move the derivation, it defeats the wall constraint at
+  `bound=4` directly. Do not re-derive — drop to `PER_TICK_BOUND=1` per §4.5
+  before the timer runs again, **unless** the 7-day-size chunk is the
+  transitional `_legacy` survivor, which bound 1 provably never selects and
+  which the attended `compress_chunk` above handles instead.
+- Chunk boundaries de-align between the governed hypertables. This spreads the
+  daily terminals over different hours and therefore **reduces** per-tick load
+  — a safe direction, listed here only so it is not misread as a regression.
 
 When retuning, read the live value off the box first and record the new value
 with the receipt that justified it.
@@ -1390,8 +1546,8 @@ window trades one loop for another.
    runner is not a native TimescaleDB policy — `timescaledb_information.jobs`
    carries no compression job; it is the systemd timer, gated by
    `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` (live `172800` = 2 days since
-   the 2026-08-07 short-lag decision, §4.3.2.1; the committed template still
-   ships `604800` = 7 days — read the box, not the template) and bounded to
+   the 2026-08-07 short-lag decision, §4.3.2.1, and the committed template
+   value since `#1985` — read the box, not the template) and bounded to
    `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` chunks per tick.
    Every chunk whose `range_end` is older than the lag is a candidate, not
    just the one you decompressed. Because the write guard refuses **any**
@@ -1682,7 +1838,7 @@ uv run python scripts/node27_external_contract_snapshot.py --check; echo "exit=$
 
 `systemctl --user` locates the user manager through `$XDG_RUNTIME_DIR`; with it
 unset the probe exits non-zero with "Failed to connect to bus"
-(`scripts/node27_timeseries_compression_supervisor.py:187-194`) and the check
+(`scripts/node27_timeseries_compression_supervisor.py:192-199`) and the check
 reports a probe-execution failure — that is a broken probe, not a verdict about
 the host. Fix the environment and rerun.
 
@@ -1755,12 +1911,21 @@ check cannot flake on autovacuum or parallel-worker noise.
 ### 4.5 大 chunk 追赶（timeout 墙 override，`#1156`）
 
 A terminal chunk that outgrows the per-chunk statement timeout cannot pass the
-automated lane, and because selection is oldest-first (`ORDER BY range_end
-ASC`, then `eligible[:per_tick_bound]`) that one chunk is re-selected every
-tick and burns the whole tick, blocking everything behind it. The two mode-0600
-lane env files are one sequential assembly input: the shared preflight reads
-both as inert data before compression or cold residency starts. A catch-up is a
-bounded two-file override window, not a manual `statement_timeout = 0` DDL.
+automated lane, and because selection is **table-major** and only then
+oldest-first (`ORDER BY hypertable_schema, hypertable_name, range_end ASC`,
+then `eligible[:per_tick_bound]`) that one chunk is re-selected every tick and
+burns the whole tick, blocking everything behind it in its own table. The two
+mode-0600 lane env files are one sequential assembly input: the shared
+preflight reads both as inert data before compression or cold residency starts.
+A catch-up is a bounded two-file override window, not a manual
+`statement_timeout = 0` DDL.
+
+**This procedure does not apply to the transitional `_legacy` survivor.** The
+bound-1 requirement below is real for a genuine backlog of canonical-table
+chunks, but table-major prefix selection at bound 1 never reaches a
+`hydro.river_timeseries_legacy` chunk at all (§4, "Why bound 1 is not the
+answer here"). That chunk is compressed by the attended gated `compress_chunk`
+described there, not by a raised-timeout catch-up window.
 
 **The defaults already cover the steady state — check before you override.**
 `#1352` resized the compression statement/wrapper pair to `3600000` ms /
@@ -1815,7 +1980,7 @@ Read each field for what it is worth:
   pinned `timeout` process from the same inert env-file read; the receipt shows
   what the runner received through that assembled child environment.
 - `budget.systemd_wall_seconds` is a **declaration echo** — the process cannot
-  read the unit file (`scripts/node27_timeseries_compression.py:111-116`), so
+  read the unit file (`scripts/node27_timeseries_compression.py:140-144`), so
   the receipt only proves what the env file declared. Check 2 below
   (`systemctl --user show -p TimeoutStartUSec`) is the only step that queries
   the user unit manager for the installed wall (scope fixed per issue `#1387`).
@@ -2610,9 +2775,9 @@ E4 receipt，autovacuum 刷新统计后、无 schema 变更）翻为 Bitmap Inde
 
 The retention runner
 (`scripts/node27_timeseries_retention.py`, issue #855) drops chunks
-strictly older than the drop window from the two D3
-detail hypertables `hydro.river_timeseries` and
-`met.forcing_station_timeseries` via TimescaleDB `drop_chunks`. The window
+strictly older than the drop window from the D3 detail candidate set —
+`hydro.river_timeseries`, `met.forcing_station_timeseries` and their
+`_legacy` siblings while those exist — via TimescaleDB `drop_chunks`. The window
 width is `NODE27_TIMESERIES_RETENTION_WINDOW_DAYS` (spec default 14 d;
 21 d on node-27 as of 2026-08-01) — always read the live value off the box
 rather than assuming the default.
@@ -3156,7 +3321,7 @@ Two guardrails enforce this:
 1. **Structural**: `drop_chunks` only accepts hypertables; metadata
    tables are regular Postgres tables and cannot be dropped by
    `drop_chunks`. The runner's SQL literal restricts the tuple filter to
-   the two D3 hypertables.
+   the D3 candidate set — the canonical pair plus their `_legacy` siblings.
 2. **Row-count invariant** (§6.1 test row 4): after every enforce tick,
    the row counts of the metadata / coverage tables MUST be unchanged.
    §6.3 embeds a pre/post row-count check in the live receipt review.
@@ -3690,31 +3855,111 @@ before a receipt exists.
      bound that makes it safe is the retention policy above, not the volume's
      size.
 
-     **`/home` free space has no critical tier.** The resource-governance
-     audit gives that mount a warning threshold only —
-     `home_free_warn_bytes` (default 300 GiB) ->
-     `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:70`
-     (threshold), `:227` (comparison), `:232` (the code literal)
+     **`/home` free space has no critical tier of its own** (line numbers
+     re-pinned 2026-09-03, `#1985`). The resource-governance audit gives that
+     mount a warning threshold only — `home_free_warn_bytes` (default 300 GiB)
+     -> `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:77`
+     (threshold), `:240` (comparison), `:245` (the code literal)
      — and there is no `home_free_critical_bytes` at all. The exit-1 /
      `OnFailure=` mail lane has two triggers, in this order: the receipt's
-     `status` is not `completed` (`:584-585`), or the receipt carries at least
-     one `severity: critical` recommendation (`:590-593`, `:556`
+     `status` is not `completed` (`:904-905`), or the receipt carries at least
+     one `severity: critical` recommendation (`:910-912`, `:866`
      `_critical_codes`). The first is a defensive guard today — `build_receipt`
-     hard-codes `"status": "completed"` (`:355`) and nothing downgrades it — so
+     hard-codes `"status": "completed"` (`:553`) and nothing downgrades it — so
      in practice a critical recommendation is the only thing that reddens a
      completed audit. (A rejected config never gets that far: the config parse
-     is `:571-576` and the `return 2` is `:577`, which also trips
+     is `:889-892` and the `return 2` is `:897`, which also trips
      `OnFailure=`.) A `warning` changes neither `status` nor the critical
-     list, so it trips nothing. The three codes that can be critical today are
-     `ROOT_FREE_BELOW_CRITICAL` (`:210`), `DATABASE_SIZE_ABOVE_CRITICAL`
-     (`:244`, 500 GiB of `nhms`) and `HYPERTABLE_INDEX_RATIO_HIGH` (`:318`,
-     severity assigned at `:309`).
-     So a free-space shortfall on the volume that actually holds pgdata and
-     the object store can never page anyone: it only appears as a `warning`
-     line in a receipt someone reads. The database-size proxy is the closest
-     thing to a critical for this volume, and it says nothing about the object
-     store sharing it. Reading the newest `resource-governance-*.json` by hand
-     therefore stays a step of the bringup checklist, not an optional one.
+     list, so it trips nothing.
+
+     The codes that can be critical today are `ROOT_FREE_BELOW_CRITICAL`
+     (`:223`), `HYPERTABLE_INDEX_RATIO_HIGH` (`:343`, severity assigned at
+     `:334`) and the five codes `#1985` added around the working set:
+
+     - `POSTGRES_UNAVAILABLE` (`:420`) — no database was reached at all:
+       `collect_postgres` reports `status: blocked` with reason
+       `connection_failed` or `psycopg2_unavailable`. There is no working set
+       to judge, so this is the whole finding. Before `#1985` round 3 both
+       shapes returned no recommendations and the tick exited 0, which made a
+       database the audit could not reach indistinguishable from a healthy
+       one — with the capacity guard off for the whole outage.
+       `database_url_missing` is deliberately NOT here: that is the
+       configured-not-to-look skip and stays exit 0. `query_failed` is not here
+       either, for the opposite reason — the connection succeeded, so the
+       working-set block exists and reports itself as
+       `WORKING_SET_UNAVAILABLE` (exactly one critical, never both).
+     - `WORKING_SET_UNAVAILABLE` (`:463`) — the working set could not be
+       measured at all: the catalog probes raised, or they returned no row for
+       a canonical hypertable (the shape a read-only role takes when it loses
+       `timescaledb_information.*` visibility). An empty catalog reads exactly
+       like "everything is already compressed", so this status is the only
+       thing between a blinded audit and a green receipt that has stopped
+       watching the volume.
+     - `WATERMARK_UNAVAILABLE` (`:479`) — the display watermark could not be
+       proven, so no projection is possible; the lane's own fault, and it must
+       reach a person.
+     - `HOME_FREE_UNAVAILABLE` (`:501`) — the catalog side is fine but `/home`
+       did not resolve or its `statvfs` failed, so `home_free_bytes` is null
+       and the comparison below cannot be made. Fires under BOTH measured
+       statuses — `ok` and `no_uncompressed_chunk` — because the guard is
+       equally blind in either: `projection_status` is left unchanged. Skipping
+       it silently was the fail-open: the filesystem block only emits
+       `HOME_FREE_BELOW_WARNING` when it HAS a number, so without this code an
+       unobservable `/home` produced a green receipt about the one volume the
+       audit exists to watch.
+     - `PROJECTED_PEAK_EXCEEDS_HOME_FREE` (`:523`) —
+       `projected_peak_bytes > home_free_bytes - safety_margin_bytes`, margin
+       default 100 GiB (`--safety-margin-bytes`). Gated on
+       `projection_status == "ok"` ALONE (not on `no_uncompressed_chunk`) AND
+       on a known `home_free_bytes`: with nothing uncompressed there is no next
+       compression to project and `projected_peak_bytes` is 0, so the
+       comparison would fire on any `/home` under the margin; without a
+       free-space number the code above fires instead.
+
+     The same block adds one warning, `WORKING_SET_ABOVE_WARNING` (`:536` —
+     `uncompressed_bytes` above `working_set_warn_bytes`, default 400 GiB).
+     `DATABASE_SIZE_ABOVE_CRITICAL` and `DATABASE_SIZE_ABOVE_WARNING` are
+     **`info` since `#1985`** (`:263`, `:266`): the `nhms` database growing past
+     500 GiB is what the retention window is supposed to allow, and a daily
+     false critical is exactly how the true one gets ignored.
+
+     Every critical prints `RESOURCE_GOVERNANCE_CRITICAL:<code>` on stderr
+     (`:912`, byte shape unchanged — other tooling greps it) and, only when at
+     least one critical fired, one additional
+     `RESOURCE_GOVERNANCE_WORKING_SET:{...}` line (`:913-916`) carrying
+     `uncompressed_bytes`, `daily_ingest_bytes`, `next_compressible_at`,
+     `home_free_bytes`, `projected_peak_bytes`, `projection_status` and
+     `compression_lag_seconds`. The shared `OnFailure=` handler mails journal
+     lines, not a per-lane template, so that line is how the mail body carries
+     numbers; `--quiet` (what the wrapper uses) suppresses stdout only.
+
+     **A red audit here is a documented state, not a defect — and it is a
+     condition, not a date.** While
+     `projected_peak_bytes > home_free_bytes − safety_margin_bytes` (margin
+     default 100 GiB) the daily audit exits 1 on
+     `PROJECTED_PEAK_EXCEEDS_HOME_FREE` and mails `OnFailure=`, every tick, for
+     as long as that inequality holds. The worked example is the 2026-09-03
+     pre-compression measurement — a 869 GB uncompressed working set against
+     295 GB free on `/home` — which is comfortably red; whether the audit is
+     red at any later moment follows from the receipt's own numbers at that
+     moment, not from this paragraph. Where it is red it is describing a TRUE
+     capacity hazard: the same condition that filled `/home` on 2026-07-25/26,
+     which the one-day-chunk expand migration and the drained backlog are what
+     actually resolve. The acknowledgement is to **record
+     `projected_peak_bytes` and `home_free_bytes` from the receipt in the
+     maintenance log** on each red tick, so the trend is visible and the day it
+     stops being red is visible too. **Never raise
+     `NODE27_GOVERNANCE_SAFETY_MARGIN_BYTES` to make the alarm stop** — that
+     edits the threshold instead of the hazard and leaves the lane permanently
+     unable to warn about the next one. The I8 rollout checklist carries the
+     same instruction.
+
+     So a raw free-space shortfall on the volume that actually holds pgdata and
+     the object store still only appears as a `warning` line in a receipt
+     someone reads — what can page now is the projection that says the
+     shortfall is coming, before it arrives. Reading the newest
+     `resource-governance-*.json` by hand therefore stays a step of the
+     bringup checklist, not an optional one.
 
    **Never** put `--basetemp` in shared config (`pyproject.toml`, CI): it
    clears its target on every run and would apply to the Mac and to CI too.
@@ -3981,9 +4226,9 @@ scan and fails if a lane grows a requirement this table does not cover.
 |---|---|---|---|
 | `nhms-node27-autopipe.service` | `scripts/node27_autopipeline.py` | DML across `core`/`met`/`hydro`/`ops`/`map`; **`ANALYZE` on frontier chunks and on authority tables** → ownership. No `compress_chunk`/`drop_chunks`/policy calls, no runtime `CREATE TABLE`/`CREATE INDEX`/`TRUNCATE`/`REFRESH MATERIALIZED VIEW` | `nhms_ingest_rw` |
 | `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | **no database connection at all** (no `execute(`, no `psycopg2`/`DATABASE_URL` under `workers/data_adapters/`); the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only — provisioned so the template's promise holds and a future adapter write does not land on the superuser) |
-| `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:595` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:678` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-compression.service` (cold-residency leg) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py:421,422` | `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` on compressed chunks → chunk ownership **plus `CREATE` on tablespace `nhms_cold`** | `nhms_ingest_rw` |
-| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:851` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
+| `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:925` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-compression-replay.service` (`Type=oneshot`, no timer — operator-triggered, not a recurring lane) | `scripts/node27_timeseries_compression_supervisor.py:101-128,143,331-380` | `pg_dump`, two `migration_apply` steps (`psql --file <migration>`), `docker exec nhms-db pg_restore` — **migration-class DDL** — plus a `decompress` leg (`scripts/node27_timeseries_decompression_replay.py:194`, `decompress_chunk` → hypertable ownership) and, in the same `EXPECTED_COMMAND_SEQUENCE` (`:117-128`), `compression_dry_run` and `compression_enforce`. The exception is scoped by **"one-shot migration-class unit"**, not by which calls it makes: the compression legs are the same ones the recurring lane runs as `nhms_ingest_rw`; the `migration_apply` steps are what that role structurally cannot carry | **`nhms` (documented exception)** |
 | archive-rebuild drill (retired lane, #1370; no unit, no template in `infra/env/`) | — | `POSTGRES_ADMIN_URL` against the `postgres` database, `CREATEDB` for `nhms_archive_drill` | **`nhms` (documented exception)** |
 
@@ -4011,9 +4256,9 @@ Scanned the converted lanes for `pg_stat_activity`, `pg_locks`, `pg_toast.`,
 hit** — every match is a `#` comment (the #1714 `fallback_application_name`
 attribution notes). The live callers all sit outside the conversion: the replay
 lane's quiescence checks
-(`node27_timeseries_compression_supervisor.py:1281,1311`,
-`node27_timeseries_compression_capture.py:338-340`) keep the superuser;
-`node27_cold_governance_collection.py:246`, `node27_external_contract_snapshot.py:115`
+(`node27_timeseries_compression_supervisor.py:1286,1342`,
+`node27_timeseries_compression_capture.py:350-353`) keep the superuser;
+`node27_cold_governance_collection.py:542`, `node27_external_contract_snapshot.py:115`
 and `node27_river_identity_backfill.py:289` belong to lanes with no converted
 template. On `pg_toast` specifically, `compressed_chunk_cold_residency.py` models
 TOAST members for classification but never names them in SQL — `_lock_sql` is fed
@@ -4337,8 +4582,9 @@ provision script is re-run:
 - and if the migration created a **hypertable**, the drift is not a warning at
   all: `compress_chunk` and `drop_chunks` refuse outright with `must be owner of
   hypertable`, so the compression and retention lanes **fail** on it rather than
-  degrading. Nil today only because both lanes hard-filter to the two existing
-  hypertables (`scripts/node27_timeseries_retention.py:166`) — that is a property
+  degrading. Nil today only because both lanes hard-filter to the D3 candidate
+  set — the canonical pair plus any existing `_legacy` sibling
+  (`scripts/node27_timeseries_retention.py:200`) — that is a property
   of those filters, not of the grants;
 - and the audit reports the owner drift.
 

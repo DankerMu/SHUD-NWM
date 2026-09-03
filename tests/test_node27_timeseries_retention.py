@@ -214,6 +214,23 @@ class _StubRunner:
             return {c.qualified_name: self._measured.get(c.qualified_name, 0) for c in chunks}
         return {c.qualified_name: 10_000 for c in chunks}
 
+    def discover(self, config: retention.RetentionConfig) -> list[dict[str, Any]]:
+        """#1985: today's node-27 catalog — the two canonical hypertables, no
+        `_legacy` sibling. ``main`` wires a real catalog probe, so every
+        ``main``-driven row needs this seam; the receipt shape it produces is
+        byte-for-byte the pre-#1985 one."""
+
+        self.calls.append(("discover", None))
+        return [
+            {
+                "hypertable_schema": schema,
+                "hypertable_name": name,
+                "num_chunks": 14,
+                "compression_enabled": True,
+            }
+            for schema, name in (("hydro", "river_timeseries"), ("met", "forcing_station_timeseries"))
+        ]
+
     def drop(self, config: retention.RetentionConfig, chunk: retention.ChunkRow) -> None:
         self.calls.append(("drop", chunk.qualified_name))
         if chunk.chunk_name in self._drop_error:
@@ -404,7 +421,14 @@ def test_target_hypertables_are_exactly_d3() -> None:
 
 
 def test_target_hypertables_do_not_include_metadata_tables() -> None:
-    """§6.1 test row 4: metadata / coverage tables MUST NOT be retention targets."""
+    """§6.1 test row 4: metadata / coverage tables MUST NOT be retention targets.
+
+    #1985: asserted against the EFFECTIVE delete authority too. Chunk selection
+    runs off `_CHUNK_QUERY`'s candidate IN-list, so a metadata table that never
+    entered `TARGET_HYPERTABLES` could still be deleted if it entered the query.
+    """
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
     metadata_tables = {
         ("hydro", "hydro_run"),
         ("hydro", "run_display_coverage"),
@@ -414,6 +438,10 @@ def test_target_hypertables_do_not_include_metadata_tables() -> None:
         ("core", "run_display_coverage"),
     }
     assert retention.TARGET_HYPERTABLES.isdisjoint(metadata_tables)
+    assert frozenset(discovery.CANDIDATE_HYPERTABLES).isdisjoint(metadata_tables)
+    for schema, name in metadata_tables:
+        assert f"'{schema}', '{name}'" not in retention._CHUNK_QUERY
+        assert name not in retention._CHUNK_QUERY
 
 
 def test_chunk_query_targets_only_d3_hypertables() -> None:
@@ -643,6 +671,9 @@ def test_per_chunk_drop_failure_refuses_whole_tick(tmp_path: Path) -> None:
     assert "_timescaledb_internal.chk-c" not in drop_calls
     # a was attempted (before b), b was attempted (raised), c was not.
     assert drop_calls == ["_timescaledb_internal.chk-a", "_timescaledb_internal.chk-b"]
+    # #1985 round-3: a refused tick never reached the post-drop probe, so it
+    # cannot claim "no sibling" by omission -- it says so explicitly.
+    assert receipt["legacy_chunks"] is None
     jsonschema.validate(receipt, _load_schema())
 
 
@@ -741,6 +772,7 @@ def test_concurrent_invocation_publishes_refused_receipt(
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["outcome"] == "refused"
     assert receipt["refusal_reason"] == retention.CODE_RETENTION_CONCURRENT_INVOCATION
+    assert receipt["legacy_chunks"] is None
     jsonschema.validate(receipt, _load_schema())
     err = capsys.readouterr().err
     assert retention.CODE_RETENTION_CONCURRENT_INVOCATION in err
@@ -771,7 +803,64 @@ def test_uncaught_error_publishes_refused_receipt(
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["outcome"] == "refused"
     assert receipt["refusal_reason"].startswith("RETENTION_UNCAUGHT_ERROR:RuntimeError")
+    assert receipt["legacy_chunks"] is None
     jsonschema.validate(receipt, _load_schema())
+
+
+def test_lifecycle_lock_contention_publishes_refused_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The fourth refused exit (#1893 lifecycle mutex), previously untested.
+
+    It sits BEFORE the runner lock, so the runner-lock test never reaches it:
+    when compression or a manual decompression already holds
+    ``/tmp/nhms-node27-timeseries-lifecycle.lock`` the tick refuses without
+    opening its own lock file at all. Like every other refused exit, the
+    receipt carries an explicit ``legacy_chunks: null`` (round-3, decision 17).
+    """
+    env = _base_env(tmp_path)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(retention, "acquire_timeseries_lifecycle_lock", lambda: None)
+
+    code = retention.main(argv=[], now=_NOW)
+
+    assert code == 1
+    receipt_path = Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"])
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "refused"
+    assert receipt["refusal_reason"] == retention.CODE_RETENTION_CONCURRENT_INVOCATION
+    assert receipt["legacy_chunks"] is None
+    jsonschema.validate(receipt, _load_schema())
+    assert retention.CODE_RETENTION_CONCURRENT_INVOCATION in capsys.readouterr().err
+    # The runner lock was never opened: this exit precedes it.
+    assert not Path(env["NODE27_TIMESERIES_RETENTION_LOCK_PATH"]).exists()
+
+
+def test_the_no_sibling_absent_shape_survives_for_non_refused_outcomes(
+    tmp_path: Path,
+) -> None:
+    """The round-3 default is scoped to `refused` only. A dry-run or enforced
+    tick on a catalog with no `_legacy` sibling still OMITS the key, which is
+    what keeps today's and the post-contract receipts key-for-key comparable
+    with the archived ones."""
+    config = _build_config(tmp_path, enforce=True)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+    enforced = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: [
+            {"hypertable_schema": "hydro", "hypertable_name": "river_timeseries"},
+            {"hypertable_schema": "met", "hypertable_name": "forcing_station_timeseries"},
+        ],
+    )
+    assert enforced["outcome"] == "enforced"
+    assert "legacy_chunks" not in enforced
+    dry = retention.build_receipt("dry-run", _NOW)
+    assert "legacy_chunks" not in dry
 
 
 # ---------------------------------------------------------------------------
@@ -1930,6 +2019,41 @@ def test_measure_warning_byte_identical_with_runbook() -> None:
     )
 
 
+def test_no_surface_still_claims_the_runner_enumerates_two_hypertables() -> None:
+    """#1985 round-5: the delete authority is the candidate set, not a pair.
+
+    `_CHUNK_QUERY` selects over `CANDIDATE_HYPERTABLES` — the canonical pair
+    PLUS their `_legacy` siblings — so a chunk of `hydro.river_timeseries_legacy`
+    is dropped by this runner under the same window. The module docstring, the
+    H3 bullet, the `TARGET_HYPERTABLES` comment and both runbook guardrails
+    still described a two-table enumeration, which is the dangerous direction of
+    stale: an operator reading it would conclude the legacy table is NOT being
+    drained and go looking for a second lane that does not exist.
+
+    Pinned-absent as well as pinned-present, because prose only goes wrong by
+    being written again.
+    """
+    source = Path(retention.__file__).read_text(encoding="utf-8")
+    assert "enumeration of the two D3 hypertables" not in source
+    assert "catalog-only enumeration of the D3 candidate set" in source
+    assert "D3 detail candidate set" in (retention.__doc__ or "")
+    assert "the two D3 detail hypertables ``hydro.river_timeseries``" not in (retention.__doc__ or "")
+    # `TARGET_HYPERTABLES` itself stays the canonical pair — it is the
+    # documentary allowlist — so its own comment head is left alone; only the
+    # "ONLY targets" claim it made about the whole runner is unwound.
+    assert "the two hypertables\n# below are the ONLY targets" not in source
+    assert "the candidate set\n# below is the ONLY source of targets" in source
+
+    flat_runbook = " ".join(_RUNBOOK_PATH.read_text(encoding="utf-8").split())
+    assert "strictly older than the drop window from the D3 detail candidate set" in flat_runbook
+    assert "`_legacy` siblings while those exist — via TimescaleDB `drop_chunks`" in flat_runbook
+    assert (
+        "restricts the tuple filter to the D3 candidate set — the canonical pair "
+        "plus their `_legacy` siblings"
+    ) in flat_runbook
+    assert "restricts the tuple filter to the two D3 hypertables" not in flat_runbook
+
+
 # ---------------------------------------------------------------------------
 # RF-F1 R2 — loader-side FormatChecker symmetry with emit side
 # ---------------------------------------------------------------------------
@@ -1973,6 +2097,14 @@ def test_metadata_table_row_counts_unchanged_under_enforce(
         # every drop call targets a chunk from the two D3 hypertables only.
         chunk_qualified = drop_call[1]
         assert chunk_qualified.startswith("_timescaledb_internal.")
+    # #1985: the parent hypertables the runner was even allowed to enumerate are
+    # the candidate set, and no metadata table is in it or in the query text.
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    for chunk in chunks:
+        assert (chunk.hypertable_schema, chunk.hypertable_name) in discovery.CANDIDATE_HYPERTABLES
+    for forbidden in ("hydro_run", "run_display_coverage", "forcing_version", "state_snapshot"):
+        assert forbidden not in retention._CHUNK_QUERY
 
 
 # ---------------------------------------------------------------------------
@@ -2167,6 +2299,12 @@ def test_refused_receipt_shape_validates_against_schema(wire_code: str) -> None:
     receipt = retention.build_receipt("refused", _NOW, refusal_reason=wire_code)
     jsonschema.validate(receipt, _load_schema())
     assert receipt["archive_gate"] == {"mode": "disabled", "adr_reference": _ADR_REFERENCE}
+    # #1985 round-3, decision 17: every refused exit self-describes an
+    # inconclusive sibling count rather than omitting the key, which an
+    # archived-receipt reader would (correctly, for enforced receipts) read as
+    # "the catalog had no `_legacy` sibling".
+    assert "legacy_chunks" in receipt
+    assert receipt["legacy_chunks"] is None
 
 
 def test_enforced_receipt_salvage_backed_window_datetime_format_enforced() -> None:
@@ -2627,6 +2765,7 @@ def test_disabled_main_enforce_end_to_end_publishes_enforced_receipt(
         fetch_chunks=stub.fetch,
         measure_chunk_bytes=stub.measure,
         drop_chunk=stub.drop,
+        discover_hypertables=stub.discover,
     )
 
     assert code == 0
@@ -3636,6 +3775,7 @@ def _refused_tick_stderr(
         fetch_chunks=stub.fetch,
         measure_chunk_bytes=stub.measure,
         drop_chunk=stub.drop,
+        discover_hypertables=stub.discover,
     )
     return code, capsys.readouterr().err
 
@@ -3702,6 +3842,7 @@ def test_a_clean_tick_emits_no_counted_anchor(
         fetch_chunks=stub.fetch,
         measure_chunk_bytes=stub.measure,
         drop_chunk=stub.drop,
+        discover_hypertables=stub.discover,
     )
     err = capsys.readouterr().err
 
@@ -3753,6 +3894,7 @@ def test_the_counted_anchor_never_carries_credentials(
         fetch_chunks=stub.fetch,
         measure_chunk_bytes=stub.measure,
         drop_chunk=stub.drop,
+        discover_hypertables=stub.discover,
     )
     err = capsys.readouterr().err
 
@@ -3971,3 +4113,482 @@ def test_runbook_hands_the_operator_the_journal_command() -> None:
     runbook_text = _RUNBOOK_PATH.read_text(encoding="utf-8")
 
     assert _JOURNALCTL_FENCE in runbook_text
+
+
+# ---------------------------------------------------------------------------
+# I6 (#1985) — lifecycle discovery set and the legacy_chunks contract gate
+# ---------------------------------------------------------------------------
+
+_RIVER_LEGACY_KEY = "hydro.river_timeseries_legacy"
+
+
+def _discovery_row(schema: str, name: str, *, num_chunks: int = 1) -> dict[str, Any]:
+    return {
+        "hypertable_schema": schema,
+        "hypertable_name": name,
+        "num_chunks": num_chunks,
+        "compression_enabled": True,
+    }
+
+
+_CANONICAL_CATALOG = [
+    _discovery_row("hydro", "river_timeseries", num_chunks=14),
+    _discovery_row("met", "forcing_station_timeseries", num_chunks=14),
+]
+
+
+def _mixed_catalog(legacy_chunks: int) -> list[dict[str, Any]]:
+    return [
+        _discovery_row("hydro", "river_timeseries", num_chunks=14),
+        _discovery_row("hydro", "river_timeseries_legacy", num_chunks=legacy_chunks),
+        _discovery_row("met", "forcing_station_timeseries", num_chunks=14),
+    ]
+
+
+def test_retention_chunk_query_covers_the_candidate_set() -> None:
+    """Both tables are dropped under the SAME retention window; the legacy
+    sibling joins the query by existing, not by a second code change."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    for schema, name in discovery.CANDIDATE_HYPERTABLES:
+        assert f"('{schema}', '{name}')" in retention._CHUNK_QUERY
+
+
+def test_target_hypertables_stays_the_canonical_pair() -> None:
+    """The delete-authority allowlist is still exactly the two detail
+    hypertables plus, structurally, their renamed selves — metadata tables can
+    never enter it through discovery because the candidate list is a literal."""
+    from packages.common import node27_timeseries_hypertable_discovery as discovery
+
+    assert retention.TARGET_HYPERTABLES == frozenset(discovery.CANONICAL_HYPERTABLES)
+    # Non-trivial half: the query the runner actually selects with carries the
+    # canonical pair AND exactly their two renamed selves — nothing else.
+    in_list_entries = {
+        (schema, name)
+        for schema, name in discovery.CANDIDATE_HYPERTABLES
+        if f"('{schema}', '{name}')" in retention._CHUNK_QUERY
+    }
+    assert in_list_entries == set(discovery.CANDIDATE_HYPERTABLES)
+    assert in_list_entries - retention.TARGET_HYPERTABLES == {
+        ("hydro", "river_timeseries_legacy"),
+        ("met", "forcing_station_timeseries_legacy"),
+    }
+
+
+def test_dry_run_receipt_omits_legacy_chunks_without_a_sibling(tmp_path: Path) -> None:
+    """Must-preserve: today's catalog produces today's receipt, key for key."""
+    config = _build_config(tmp_path)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: list(_CANONICAL_CATALOG),
+    )
+    assert "legacy_chunks" not in receipt
+    assert "legacy" not in json.dumps(receipt)
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_enforced_receipt_carries_legacy_chunks_per_legacy_table(tmp_path: Path) -> None:
+    """The I9 entry gate reads ``legacy_chunks["hydro.river_timeseries_legacy"]``,
+    so the shape is a mapping keyed by legacy table name — not a scalar and not
+    a list."""
+    config = _build_config(tmp_path, enforce=True)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries_legacy", "legacy-a", delta_days=60)])
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: _mixed_catalog(2),
+    )
+    assert receipt["outcome"] == "enforced"
+    assert receipt["legacy_chunks"] == {_RIVER_LEGACY_KEY: 2}
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_legacy_chunks_is_the_total_remaining_count_after_the_drop_phase(tmp_path: Path) -> None:
+    """The gate opens on "the legacy table is empty", so the number is the
+    table's total remaining chunks AFTER this tick's drops — not the count this
+    tick dropped, and not the retention-eligible subset (a young legacy chunk
+    still blocks the contract)."""
+    config = _build_config(tmp_path, enforce=True)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries_legacy", "legacy-a", delta_days=60)])
+    order: list[str] = []
+    original_drop = stub.drop
+
+    def recording_drop(cfg: Any, chunk: retention.ChunkRow) -> None:
+        order.append("drop")
+        original_drop(cfg, chunk)
+
+    def discover(_config: Any) -> list[dict[str, Any]]:
+        order.append("discover")
+        # Three chunks before the tick, the drained table afterwards: a
+        # pre-drop read would report 3 and hold the contract gate shut for a
+        # further fourteen days.
+        return _mixed_catalog(0 if "drop" in order else 3)
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=recording_drop,
+        discover_hypertables=discover,
+    )
+    assert order == ["drop", "discover"]
+    assert receipt["legacy_chunks"] == {_RIVER_LEGACY_KEY: 0}
+
+
+def test_probe_failure_after_the_drop_keeps_the_enforced_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Round-1 review, reproduced through ``main``: the discovery probe runs
+    AFTER the drop loop, so a raising probe used to escape into the
+    uncaught-error arm and publish a ``refused`` receipt — whose schema branch
+    forbids ``dropped_chunks``. Two chunks would have been deleted and recorded
+    nowhere.
+
+    The probe is isolated like ``_default_measure_chunk_bytes``: the tick still
+    publishes ``enforced`` with its ``dropped_chunks``, and records an explicit
+    ``legacy_chunks: null`` (round-2: absent means the catalog has no sibling,
+    null means this tick could not tell — the I9 gate stays shut on both, but
+    only null says so out loud to the archived-receipt reader). The cause goes
+    to stderr.
+    """
+    env = _base_env(tmp_path, NODE27_TIMESERIES_RETENTION_ENFORCE="1")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    chunks = [
+        _chunk("hydro", "river_timeseries", "chk-a", delta_days=60),
+        _chunk("hydro", "river_timeseries_legacy", "legacy-a", delta_days=61),
+    ]
+    stub = _StubRunner(chunks)
+
+    def _raising_discover(_config: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("catalog probe blew up after the drop")
+
+    code = retention.main(
+        argv=[],
+        now=_NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=_raising_discover,
+    )
+    receipt = json.loads(Path(env["NODE27_TIMESERIES_RETENTION_RECEIPT_PATH"]).read_text(encoding="utf-8"))
+    assert receipt["outcome"] == "enforced"
+    assert [item["name"] for item in receipt["dropped_chunks"]] == [
+        "_timescaledb_internal.chk-a",
+        "_timescaledb_internal.legacy-a",
+    ]
+    assert "legacy_chunks" in receipt
+    assert receipt["legacy_chunks"] is None
+    jsonschema.validate(receipt, _load_schema())
+    # Exit code is the clean-enforce one, not the refusal's.
+    assert code == 0
+    warning = json.loads(
+        [line for line in capsys.readouterr().err.splitlines() if "legacy_chunks probe" in line][0]
+    )
+    assert warning["warning"] == "legacy_chunks probe failed; recording a null count"
+    assert "secretpw" not in warning["error"]
+
+
+def test_probe_failure_in_dry_run_is_equally_isolated(tmp_path: Path) -> None:
+    """Same guard on the dry-run branch: a diagnostic probe must never be able
+    to turn a completed tick into a refusal, and the dry-run receipt is just as
+    explicit that the count is inconclusive."""
+    config = _build_config(tmp_path)
+    stub = _StubRunner([])
+
+    def _raising_discover(_config: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("catalog probe blew up")
+
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=_raising_discover,
+    )
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["legacy_chunks"] is None
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_the_contract_gate_stays_shut_on_absent_and_on_null(tmp_path: Path) -> None:
+    """The I9 / I14 entry gate reads ``legacy_chunks[<table>] == 0``.
+
+    Three receipt states, one reading: a counted zero opens the gate, an absent
+    key (no sibling in the catalog) does not, and an explicit null (the probe
+    could not answer) does not either. Pinned in one place because the whole
+    point of the round-2 change is that the two closed states are DIFFERENT
+    facts that must not diverge in the gate's answer.
+    """
+
+    def gate(receipt: Mapping[str, Any]) -> bool:
+        return (receipt.get("legacy_chunks") or {}).get(_RIVER_LEGACY_KEY) == 0
+
+    assert gate({"legacy_chunks": {_RIVER_LEGACY_KEY: 0}}) is True
+    assert gate({"legacy_chunks": {_RIVER_LEGACY_KEY: 3}}) is False
+    assert gate({}) is False
+    assert gate({"legacy_chunks": None}) is False
+
+
+def test_dry_run_receipt_also_carries_legacy_chunks_when_a_sibling_exists(tmp_path: Path) -> None:
+    config = _build_config(tmp_path)
+    stub = _StubRunner([])
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: _mixed_catalog(1),
+    )
+    assert receipt["outcome"] == "dry-run"
+    assert receipt["legacy_chunks"] == {_RIVER_LEGACY_KEY: 1}
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_main_wires_the_catalog_discovery_probe() -> None:
+    assert "_default_discover_hypertables" in inspect.getsource(retention.main)
+
+
+def test_the_post_drop_discovery_probe_bounds_its_connect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1985 round-2, decision 21: this connect happens AFTER the drop loop and
+    while the tick still holds the lifecycle lock.
+
+    An untimed connect that hangs there is the worst shape this lane has: the
+    chunks are already gone, no receipt has been written yet, and the
+    compression lane sits on ``refused_lock`` for as long as the TCP stack
+    takes to give up. The sibling runner has bounded every connect since
+    #1156; retention's diagnostic probe was the one that did not.
+    """
+    config = _build_config(tmp_path)
+    seen: list[dict[str, Any]] = []
+
+    def _recording_connect(_dsn: str, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        raise psycopg2.OperationalError("connection refused")
+
+    monkeypatch.setattr(psycopg2, "connect", _recording_connect)
+    with pytest.raises(psycopg2.OperationalError):
+        retention._default_discover_hypertables(config)
+
+    assert seen and seen[0]["connect_timeout"] == retention._CONNECT_TIMEOUT_SECONDS
+    assert retention._CONNECT_TIMEOUT_SECONDS == 10
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        pytest.param(
+            lambda config: retention._default_fetch_chunks(config, _NOW),
+            id="fetch_chunks",
+        ),
+        pytest.param(
+            lambda config: retention._default_measure_chunk_bytes(
+                config, [_chunk("hydro", "river_timeseries", "c1", delta_days=30)]
+            ),
+            id="measure_chunk_bytes",
+        ),
+        pytest.param(
+            lambda config: retention._default_drop_chunk(
+                config, _chunk("hydro", "river_timeseries", "c1", delta_days=30)
+            ),
+            id="drop_chunk",
+        ),
+    ],
+)
+def test_every_default_connect_is_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invoke: Any
+) -> None:
+    """#1985 round-3, decision 21: the three pre-existing untimed connects.
+
+    Round 2 bounded only the post-drop discovery probe. Enumeration,
+    measurement and drop all opened unbounded connects, so a black-holed
+    server (dropped SYN/ACK, not a refusal) parks the tick on the OS TCP
+    timeout — minutes to hours — while it holds the runner lock and, for the
+    drop path, the lifecycle lock. There is no per-connect-site reason for a
+    different policy, so all four now carry the same bound.
+    """
+    config = _build_config(tmp_path)
+    seen: list[dict[str, Any]] = []
+
+    def _recording_connect(_dsn: str, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        raise psycopg2.OperationalError("connection refused")
+
+    monkeypatch.setattr(psycopg2, "connect", _recording_connect)
+    # `_default_measure_chunk_bytes` swallows per-chunk failures by design; the
+    # other two propagate. Either way the connect kwargs were already recorded.
+    try:
+        invoke(config)
+    except psycopg2.OperationalError:
+        pass
+
+    assert seen, "no connect was attempted"
+    assert seen[0]["connect_timeout"] == retention._CONNECT_TIMEOUT_SECONDS
+
+
+def test_the_attributed_connect_helper_stays_untouched() -> None:
+    """Decision 21 exempts `_attributed_connect` explicitly: its only caller,
+    `fetch_display_watermark`, already passes `connect_timeout=5`, so adding
+    the kwarg here would raise `TypeError: got multiple values`. The bound is
+    present on that path; it just is not spelled in this module."""
+    source = inspect.getsource(retention._attributed_connect)
+    assert "connect_timeout" not in source
+    watermark_source = inspect.getsource(retention.fetch_display_watermark)
+    assert "connect_timeout=5" in watermark_source
+
+
+def test_the_probe_connect_timeout_mirrors_the_compression_sibling() -> None:
+    """One number, three lanes: a divergence here is a silent policy fork.
+
+    Round-4 added the governance collection to the mirror: its oneshot runs
+    with `TimeoutStartSec=0`, so it needs the same bound for the same reason.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for relative in (
+        "scripts/node27_timeseries_compression.py",
+        "packages/common/node27_cold_governance_collection.py",
+    ):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "_CONNECT_TIMEOUT_SECONDS = 10" in source, relative
+
+
+# --- schema -----------------------------------------------------------------
+
+
+def test_schema_accepts_the_legacy_chunks_mapping(tmp_path: Path) -> None:
+    document = {
+        "schema_version": "1.1",
+        "generated_at": "2026-07-11T12:30:00Z",
+        "mode": "enforce",
+        "outcome": "enforced",
+        "archive_gate": {
+            "mode": "disabled",
+            "adr_reference": "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11",
+        },
+        "dropped_chunks": [],
+        "deferred_remainder": [],
+        "salvage_backed_windows": [],
+        "legacy_chunks": {_RIVER_LEGACY_KEY: 0},
+    }
+    jsonschema.validate(document, _load_schema())
+    document["legacy_chunks"] = {"met.forcing_station_timeseries_legacy": 4}
+    jsonschema.validate(document, _load_schema())
+    # Round-2: an explicit null is a legal third state — the probe ran and
+    # could not answer. `minProperties`/`patternProperties` constrain objects
+    # only, so widening the type is all it takes.
+    document["legacy_chunks"] = None
+    jsonschema.validate(document, _load_schema())
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        {"hydro.river_timeseries": 0},
+        {_RIVER_LEGACY_KEY: -1},
+        {_RIVER_LEGACY_KEY: "0"},
+        0,
+        [_RIVER_LEGACY_KEY],
+    ],
+    ids=["canonical-key", "negative", "string", "scalar", "list"],
+)
+def test_schema_rejects_a_mis_shaped_legacy_chunks(value: Any) -> None:
+    document = {
+        "schema_version": "1.1",
+        "generated_at": "2026-07-11T12:30:00Z",
+        "mode": "enforce",
+        "outcome": "enforced",
+        "archive_gate": {
+            "mode": "disabled",
+            "adr_reference": "docs/adr/0002-node27-timeseries-hot-cold-tiering.md Revision 2026-08-11",
+        },
+        "dropped_chunks": [],
+        "deferred_remainder": [],
+        "salvage_backed_windows": [],
+        "legacy_chunks": value,
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(document, _load_schema())
+
+
+# --- committed receipt sweep (new in #1985) ---------------------------------
+
+# Mirrors the compression sweep in tests/test_node27_timeseries_compression.py:
+# the archived retention receipts are the pre-change comparator, so a schema
+# change that rejects them must go red HERE rather than silently invalidating
+# the evidence chain. Selection is by filename prefix, not by schema_version:
+# the four `1.0` archive-era receipts below predate the #1369 `archive_gate`
+# bump and already fail today's schema, so they are pinned as an explicit,
+# closed exclusion list instead of being filtered by a dispatch rule that would
+# quietly absorb a future stale receipt too.
+_COMMITTED_RETENTION_DIR = (
+    _ROOT / "docs/runbooks/receipts/tier-node27-timeseries-storage/timeseries-retention"
+)
+_COMMITTED_RETENTION_RECEIPTS = sorted(
+    path for path in _COMMITTED_RETENTION_DIR.glob("*.json") if path.name.startswith("retention-")
+)
+_PRE_1_1_RETENTION_RECEIPTS = (
+    "dry-run-first-live-20260725T054745Z.json",
+    "first-enforce-20260725T061740Z.json",
+    "refusal-completeness-missing-20260713T030936Z.json",
+    "refusal-drop-contention-20260725T055600Z.json",
+)
+
+
+def test_committed_retention_receipt_glob_is_not_silently_empty() -> None:
+    assert len(_COMMITTED_RETENTION_RECEIPTS) >= 4, _COMMITTED_RETENTION_RECEIPTS
+
+
+def test_the_excluded_retention_receipts_are_exactly_the_pre_1_1_archive() -> None:
+    excluded = sorted(
+        path.name
+        for path in _COMMITTED_RETENTION_DIR.glob("*.json")
+        if not path.name.startswith("retention-")
+    )
+    assert excluded == sorted(_PRE_1_1_RETENTION_RECEIPTS)
+    for name in _PRE_1_1_RETENTION_RECEIPTS:
+        document = json.loads((_COMMITTED_RETENTION_DIR / name).read_text(encoding="utf-8"))
+        assert document["schema_version"] == "1.0"
+
+
+@pytest.mark.parametrize(
+    "receipt_path",
+    _COMMITTED_RETENTION_RECEIPTS,
+    ids=lambda path: path.name,
+)
+def test_committed_retention_receipts_stay_valid_against_schema(receipt_path: Path) -> None:
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    jsonschema.validate(receipt, _load_schema())
+
+
+def test_no_sibling_receipt_key_set_equals_the_committed_receipts(tmp_path: Path) -> None:
+    """Fixture decision 9's comparator: drive the writer on a no-sibling fake
+    catalog and require the archived receipts' exact key set."""
+    config = _build_config(tmp_path, enforce=True)
+    stub = _StubRunner([_chunk("hydro", "river_timeseries", "chk-a", delta_days=60)])
+    receipt = retention.run_retention(
+        config,
+        _NOW,
+        fetch_chunks=stub.fetch,
+        measure_chunk_bytes=stub.measure,
+        drop_chunk=stub.drop,
+        discover_hypertables=lambda _config: list(_CANONICAL_CATALOG),
+    )
+    committed = json.loads(
+        (_COMMITTED_RETENTION_DIR / "retention-enforce-20260814T095746Z.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(receipt) == set(committed)

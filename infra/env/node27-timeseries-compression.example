@@ -16,23 +16,87 @@ NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM
 # it cannot `COPY ... FROM PROGRAM`. Never put the superuser `nhms` here.
 DATABASE_URL=postgresql://nhms_ingest_rw:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # The runner uses this connection read-only first to resolve the display
-# business-time watermark, then applies the 7-day lag to that watermark.
+# business-time watermark, then applies the lag below to that watermark.
 
-# Chunk-selection lag in seconds. Default 604800 = 7 days (one chunk width).
+# Chunk-selection lag in seconds. 172800 = 2 days — the value node-27 has run
+# since the 2026-08-07 short-lag regime (runbook section 4.3.2.1; #1237 neither
+# judged nor changed the lag), now also the committed template value (#1985,
+# which moved the template onto the live value). It is NOT "one
+# chunk width": the narrow tables use a 1-day chunk_time_interval and the
+# transitional `_legacy` siblings a 7-day one, so no single chunk width could
+# describe the lag any more. The lag is a business-time delay measured from the
+# display watermark, independent of chunk geometry.
 # Chunks whose range_end is younger than the display-watermark cutoff are skipped.
-NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=604800
+# Governance reads the SAME variable name from its own env file
+# (infra/env/node27-resource-governance.example) with the same default, and a
+# unit test cross-pins the two templates.
+NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 
 # Maximum number of chunks compressed per timer tick. Not an arbitrary
-# default: 4 is the capacity target decided in issue #1237 and derived from
-# measured node-27 inputs under a DUAL constraint — throughput (bound x 1
-# tick/day vs the steady 2 terminal chunks/week) AND the whole-tick wrapper
-# wall below. It is a throughput ceiling, NOT the number of river-size chunks
-# one tick can actually redeem: 4 is the throughput target for the NORMAL
-# one-pair week only. The per-tick hint further below (=1) governs whenever
-# more than one river-size chunk could be eligible in a single tick — in that
-# state the hint OVERRIDES this value. Derivation, measured inputs and the
-# conditions that invalidate it (the backlog condition included): runbook
-# section 4 "Per-tick capacity" invalidation list and section 4.5,
+# default: 4 is the capacity target decided in issue #1237 and RE-DERIVED in
+# #1985 for the one-day narrow chunks, under the same DUAL constraint —
+# throughput AND the whole-tick wrapper wall below.
+#   throughput: one-day chunks make every canonical hypertable produce one
+#     terminal chunk per day, i.e. 2 terminal chunks/day for the pair (the
+#     retired figure was 2 terminal chunks/week under 7-day chunks). At one
+#     tick/day, bound 4 buys 4 slots against an arrival of 2 — 2x headroom, and
+#     the daily timer cadence still covers it, so no frequency change.
+#   wall: 4 narrow one-day chunks at roughly 7.5 min each is about 30 min,
+#     inside the 3900 s (65 min) wrapper wall.
+# A transitional `_legacy` sibling is a write-frozen FINITE backlog of 7-day
+# chunks with zero steady-state arrival, not an added arrival rate; its worst
+# single chunk (about 508 GB, roughly 51 min at the measured 6.0 s/GB) already
+# approaches the 60-minute per-chunk timeout. The expand migration's
+# precondition is a compression receipt showing that backlog already drained --
+# no uncompressed terminal chunk left on the table about to be renamed, which
+# the daily timer reaches on its own under the 2-day lag, one single-table tick
+# at a time. That drain holds only while AT MOST ONE terminal 7-day chunk is
+# eligible per tick (the steady state). The runner does not pace itself: it
+# takes eligible[:bound], so if a receipt or timescaledb_information.chunks
+# shows 2 or more eligible terminal chunks, the next bound-4 tick takes them
+# together (2 x 508 GB x 6.0 s/GB + 380 s is about 6476 s, over the 3900 s
+# wall). Count them first; two or more means drain them with the attended
+# gated compress_chunk (runbook section 4), which needs no config change. A
+# bound change is not what the transition prescribes: the bound-1 catch-up
+# below (paired with the raised timeout triple) would work on these still
+# CANONICAL chunks, but it is not the recipe here, and after the rename it
+# never reaches the _legacy survivor at all.
+# The drain cannot reach the LAST legacy chunk: its range_end is still in the
+# future at rename time, so it becomes eligible at range_end + lag, days later,
+# when narrow chunks are already arriving. That one chunk is compressed by an
+# ATTENDED, gated compress_chunk inside the expand window (runbook section 4,
+# "The surviving chunk is compressed ATTENDED"), NOT by changing this value.
+# Do NOT set this to 1 for the transition: selection is a table-major PREFIX
+# (ORDER BY hypertable_schema, hypertable_name, range_end; eligible[:bound]), so
+# the single slot always goes to the daily hydro.river_timeseries chunk -- the
+# legacy chunk and met.forcing_station_timeseries are never selected, and the
+# exit condition is unreachable. The budget chain does NOT forbid bound 1 on its
+# own (round-3 correction): leg 3 enforces raised COMPRESS_TIMEOUT_MS => bound 1,
+# NOT the converse, and bound 1 at the default 3600000 ms timeout is accepted by
+# the preflight. Prefix-selection starvation above is the whole argument.
+# The attended compress is MANDATORY, not optional-with-a-net. In steady state
+# the tick at range_end + lag selects one narrow river chunk, the legacy chunk
+# and one forcing chunk -- bound 4 keeps up with 2 arrivals/day, so three narrow
+# chunks never queue: (75 + 508 + 12.7) GB x 6.0 s/GB + 380 s is about 3954 s
+# against the 3900 s wall. That is 54 s over at a 75 GB narrow chunk and UNDER
+# the wall only in the LOWER half of the derived 38-73 GB narrow band (one
+# seventh of the measured 268-508 GB 7-day chunks; no narrow chunk exists to be
+# measured before the expand) -- at the 73 GB top of that band
+# (73 + 508 + 12.7) x 6.0 + 380 is about 3942 s, over the wall again. So a
+# missed attended step may TERM the tick (no receipt, OnFailure mail) or may
+# emit nothing at all -- and
+# even on a TERM the legacy compress has most likely already committed, making
+# the alert one trailing signal rather than a daily reminder. Never read "no
+# alert" as "it was done": verify is_compressed = true in
+# timescaledb_information.chunks and the receipt's
+# per_table_totals["hydro.river_timeseries_legacy"]["chunks_compressed"].
+# ((508 + 3 x 75) GB x 6.0 s/GB + 380 s is about 4778 s, about 80 min, is the
+# BACKLOG worst case -- three narrow chunks already queued -- not the steady
+# state.) The fix is the attended compress, never a bound change. Bound stays 4.
+# It is a throughput ceiling, NOT the number of river-size chunks one tick can
+# actually redeem. Derivation, measured inputs and the conditions
+# that invalidate it (the chunk-interval and backlog conditions included):
+# runbook section 4 "Per-tick capacity" invalidation list and section 4.5,
 # docs/runbooks/tier-node27-timeseries-storage.md.
 NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4
 
@@ -80,10 +144,11 @@ NODE27_TIMESERIES_COMPRESSION_SYSTEMD_WALL_SECONDS=7842
 # bounds ONE chunk's budget, so a second chunk in the same tick still dies on
 # the wall — whenever you raise COMPRESS_TIMEOUT_MS above the 3600000 default,
 # NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=1 is required and leg 3 refuses
-# the configuration outright if you skip it. That is also the state you are in
-# wherever chunks approach the per-chunk ceiling — which the 268-409 GB
-# steady-state chunks of hydro.river_timeseries do: bound 1, and let the daily
-# timer drain the backlog one chunk at a time.
+# the configuration outright if you skip it. It applies to a genuine backlog of
+# CANONICAL-table chunks: bound 1, one chunk per tick, until the backlog drains.
+# It does NOT apply to the transitional `_legacy` survivor -- prefix selection at
+# bound 1 never reaches that chunk (see the PER_TICK_BOUND block above), so a
+# raised-timeout catch-up is not the tool for it; the attended gated compress is.
 # Full ordered procedure (drop-in first, timer stopped+masked, no replay in the
 # window, override removed FIRST on cleanup): runbook section 4.5
 # "大 chunk 追赶", docs/runbooks/tier-node27-timeseries-storage.md.

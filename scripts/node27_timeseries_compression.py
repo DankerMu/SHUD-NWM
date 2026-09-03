@@ -3,10 +3,14 @@
 
 Task 4.2 of the ``tier-node27-timeseries-storage`` OpenSpec change
 (issue #851). Selects terminal chunks — those whose ``range_end`` is older
-than a configurable lag (default 7 days, one chunk width) — on the two
-detail hypertables ``hydro.river_timeseries`` and
-``met.forcing_station_timeseries`` and calls ``compress_chunk`` on at most
-``per_tick_bound`` of them per invocation. Never writes to the active
+than the lag this runner has no default for: it is REQUIRED in the
+environment (``NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS``, parsed in
+``config_from_args``; the committed template ships ``172800``) — on the
+hypertables the shared discovery helper reports for this tick, i.e. each
+canonical detail hypertable (``hydro.river_timeseries``,
+``met.forcing_station_timeseries``) plus any ``_legacy`` sibling that exists
+in ``timescaledb_information.hypertables``, and calls ``compress_chunk`` on at
+most ``per_tick_bound`` of them per invocation. Never writes to the active
 chunk. Dry-run by default; ``--enforce`` performs mutation. Emits a
 ``schemas/timeseries_compression_receipt.schema.json``-conformant JSON
 receipt via the shared no-follow atomic write helper.
@@ -41,6 +45,14 @@ from packages.common.evidence_io import (
     inspect_bounded_file_no_follow,
     normalized_absolute_path,
 )
+from packages.common.node27_timeseries_hypertable_discovery import (
+    CANONICAL_HYPERTABLES,
+    DISCOVERY_SQL,
+    candidate_in_list_sql,
+    discovery_set,
+    present_from_rows,
+    qualified,
+)
 from packages.common.node27_timeseries_lifecycle_lock import (
     LifecycleLockError,
     acquire_timeseries_lifecycle_lock,
@@ -68,10 +80,15 @@ PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 # The two detail hypertables gated by D3. Ordering here is the tie-break in
 # chunk selection and per-table totals — do not reorder without matching the
 # schema example.
-HYPERTABLES: tuple[tuple[str, str], ...] = (
-    ("hydro", "river_timeseries"),
-    ("met", "forcing_station_timeseries"),
-)
+#
+# #1985: this is now the CANONICAL set only. The set a tick actually governs is
+# discovered from the catalog on every invocation — canonical plus any
+# ``_legacy`` sibling that exists — through
+# ``packages/common/node27_timeseries_hypertable_discovery.py``. This constant
+# remains the fallback for receipt paths that never reached the catalog (the
+# lock-contended and config-tombstone receipts): a tick that did not query the
+# catalog may not claim to know whether a sibling exists.
+HYPERTABLES: tuple[tuple[str, str], ...] = CANONICAL_HYPERTABLES
 
 # Statement timeouts. Chunk-catalog lookups against
 # ``timescaledb_information.chunks`` are catalog-only (no hypertable row
@@ -418,18 +435,22 @@ def acquire_lock(path: Path) -> int | None:
 
 # SQL: chunk-selection lookup against timescaledb_information.chunks only.
 # Deliberately catalog-only; MUST NOT reference the detail hypertables.
-# Filter for the two D3 hypertables. Ordering keeps the receipt deterministic
-# and the (selected, deferred) partition stable across ties.
+# Filter for the D3 candidate set (#1985): the two canonical hypertables plus
+# their transitional ``_legacy`` siblings. The list is a literal, never a name
+# discovered at runtime and formatted back into SQL — a sibling that does not
+# exist simply matches no rows, so "legacy gone" needs no second code change.
+# Ordering keeps the receipt deterministic and the (selected, deferred)
+# partition stable across ties; ``hydro`` sorts before ``met`` and a canonical
+# table before its own sibling.
 # is_compressed = false is an explicit stale-state guard so re-running the
 # runner over an already-compressed chunk is a no-op (see design "Workflow
 # Fixture: Issue #851" boundary-surface checklist).
-_CHUNK_QUERY = """
+_CHUNK_QUERY = f"""
 SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name,
        range_start, range_end, is_compressed
 FROM timescaledb_information.chunks
 WHERE (hypertable_schema, hypertable_name) IN (
-    ('hydro', 'river_timeseries'),
-    ('met', 'forcing_station_timeseries')
+{candidate_in_list_sql()}
 )
   AND is_compressed = false
 ORDER BY hypertable_schema, hypertable_name, range_end ASC
@@ -489,6 +510,7 @@ def _iso(value: datetime) -> str:
 # is truncated when its rows are moved to the compressed sibling — that is
 # the semantic bug cand-A hardens against.
 FetchChunks = Callable[[str], list[ChunkRow]]
+DiscoverHypertables = Callable[[str], list[Mapping[str, Any]]]
 MeasureChunkBytes = Callable[..., int]
 CompressChunk = Callable[[str, ChunkRow], None]
 ReconcileChunkState = Callable[[str, ChunkRow], bool]
@@ -554,6 +576,34 @@ def _default_fetch_chunks(database_url: str) -> list[ChunkRow]:
                         if len(chunks) > min(_MAX_CATALOG_ROWS, _MAX_CANDIDATES):
                             raise CompressionConfigError("catalog discovery exceeds the row/candidate ceiling")
                 return chunks
+    finally:
+        connection.close()
+
+
+def _default_discover_hypertables(database_url: str) -> list[Mapping[str, Any]]:
+    """#1985: which of the candidate hypertables exist right now.
+
+    Catalog-only and bounded (four candidate rows at most), executed once per
+    tick before selection so ``per_table_totals`` accounts every governed table
+    — including a ``_legacy`` sibling with nothing left to compress, which is
+    the steady state after the pre-expand backlog recipe.
+    """
+
+    import psycopg2  # type: ignore[import-untyped]
+    import psycopg2.extras  # type: ignore[import-untyped]
+
+    connection = psycopg2.connect(
+        database_url,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        fallback_application_name=_APPLICATION_NAME,
+    )
+    try:
+        with connection:
+            with connection.cursor() as cursor:
+                cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
+                cursor.execute(DISCOVERY_SQL)
+                return [dict(row) for row in cursor.fetchall()]
     finally:
         connection.close()
 
@@ -701,10 +751,12 @@ def _classify(
     return selected, deferred, skipped
 
 
-def _blank_totals() -> dict[str, dict[str, Any]]:
+def _blank_totals(
+    hypertables: Sequence[tuple[str, str]] = HYPERTABLES,
+) -> dict[str, dict[str, Any]]:
     return {
-        f"{schema_}.{name}": {"before_bytes": 0, "after_bytes": 0, "chunks_compressed": 0}
-        for schema_, name in HYPERTABLES
+        qualified(schema_, name): {"before_bytes": 0, "after_bytes": 0, "chunks_compressed": 0}
+        for schema_, name in hypertables
     }
 
 
@@ -755,12 +807,41 @@ def build_receipt(
     measure_chunk_bytes: MeasureChunkBytes,
     compress_chunk: CompressChunk,
     reconcile_chunk_state: ReconcileChunkState = _default_reconcile_chunk_state,
+    discover_hypertables: DiscoverHypertables | None = None,
     head_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Perform the selection + (optionally) compression and return the receipt."""
+    """Perform the selection + (optionally) compression and return the receipt.
+
+    ``discover_hypertables`` is the #1985 catalog probe: it is re-evaluated on
+    every invocation, never cached, so a ``_legacy`` sibling joins the governed
+    set the moment the expand migration creates it and leaves it the moment the
+    contract migration drops it. ``main`` always wires the real probe; ``None``
+    means "no catalog was consulted", and then the governed set is exactly the
+    canonical pair — the honest claim for a caller without a database.
+
+    A probe that ran and did NOT report a canonical hypertable refuses the tick
+    (D3): the alternative is a clean receipt carrying a phantom zero total for a
+    table nobody looked at, which reads as "nothing to compress" for exactly the
+    table whose disappearance is the emergency.
+    """
     frozen_head_sha = head_sha or _current_head_sha()
     if re.fullmatch(r"[0-9a-f]{40}", frozen_head_sha) is None:
         raise CompressionConfigError("receipt head_sha must be a lowercase 40-hex Git SHA")
+    if discover_hypertables is None:
+        governed = HYPERTABLES
+    else:
+        discovery_rows = discover_hypertables(config.database_url)
+        missing = [
+            qualified(*item)
+            for item in CANONICAL_HYPERTABLES
+            if item not in present_from_rows(discovery_rows)
+        ]
+        if missing:
+            # Before any mutation: nothing has been measured or compressed yet.
+            raise CompressionConfigError(
+                f"catalog is missing a canonical hypertable: {missing}"
+            )
+        governed = discovery_set(discovery_rows)
     chunks = fetch_chunks(config.database_url)
     selected_rows, deferred_rows, skipped_rows = _classify(
         chunks,
@@ -768,7 +849,7 @@ def build_receipt(
         lag_seconds=config.lag_seconds,
         per_tick_bound=config.per_tick_bound,
     )
-    totals = _blank_totals()
+    totals = _blank_totals(governed)
     # Track whether any per-table totals became meaningfully aware of
     # ``after_bytes``. If nothing was compressed we keep the dry-run
     # convention of ``after_bytes = null`` (schema allows it).
@@ -790,7 +871,25 @@ def build_receipt(
     after_poisoned = {key: False for key in totals}
     selected_descriptors: list[dict[str, Any]] = []
     any_errors = False
+
+    def _register(key: str) -> None:
+        """#1985: ``setdefault``, never ``totals[key]`` on an unknown table.
+
+        The discovery probe and the chunk query are two separate reads. A
+        contract migration landing between them yields a chunk whose hypertable
+        is no longer in ``governed``; a bare subscript would then raise
+        ``KeyError`` AFTER ``compress_chunk`` had already run, and the receipt
+        would come back ``indeterminate`` with every other table's totals lost.
+        Registering the key keeps the tick honest about what it actually did.
+        """
+
+        if key not in totals:
+            totals[key] = {"before_bytes": 0, "after_bytes": 0, "chunks_compressed": 0}
+            saw_after[key] = False
+            after_poisoned[key] = False
+
     for chunk in selected_rows:
+        _register(chunk.hypertable_key)
         # Symmetrical per-chunk isolation. Any failure on this chunk is
         # recorded in the descriptor, poisons the table's after_bytes, and the
         # top-level outcome becomes ``partial`` — but does not abort the loop.
@@ -1166,6 +1265,7 @@ def main(
     measure_chunk_bytes: MeasureChunkBytes | None = None,
     compress_chunk: CompressChunk | None = None,
     reconcile_chunk_state: ReconcileChunkState | None = None,
+    discover_hypertables: DiscoverHypertables | None = None,
 ) -> int:
     wall_time = datetime.now(UTC)
     now = now_utc or wall_time
@@ -1288,6 +1388,7 @@ def main(
                     compress_timeout_ms=config.compress_timeout_ms,
                 ),
                 reconcile_chunk_state=reconcile_chunk_state or _default_reconcile_chunk_state,
+                discover_hypertables=discover_hypertables or _default_discover_hypertables,
                 head_sha=frozen_head_sha,
             )
         except CompressionConfigError as error:

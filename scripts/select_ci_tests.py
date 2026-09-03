@@ -2243,6 +2243,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
+            # #1985: this oracle validates the schema against the canonical
+            # example, so the `per_table_totals` patternProperties change goes
+            # red here too.
+            "tests/test_node27_timeseries_sequential_budget.py",
         ),
     ),
     PathTestRule(
@@ -2259,6 +2263,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_sequential_budget.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
             "tests/test_node27_timeseries_sequential_wrappers.py",
+            # #1985: the governance lag default is cross-pinned to this
+            # template's LAG_SECONDS assignment.
+            "tests/test_node27_resource_governance.py",
         ),
     ),
     PathTestRule(
@@ -2960,6 +2967,65 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "apps/api/main.py",
         (API_ERROR_LOGGING_TEST,),
     ),
+    # --- I6 #1985 lifecycle discovery / governance --------------------------
+    # The shared hypertable-discovery helper has EIGHT consumers (its own
+    # docstring and `tests/test_node27_timeseries_hypertable_discovery.py`'s
+    # `_CONSUMERS` are the roster; round-1 added
+    # `scripts/node27_resource_governance.py` and this comment kept the old
+    # count), so a diff that touches only the helper must still select every
+    # lane it can break; the same-name rule alone would select its own test
+    # file and nothing else. Ten entries for eight consumers: the helper's own
+    # suite leads the list, the autopipeline consumer needs two suites (handoff
+    # + connection bounds), and the cold-governance collection consumer needs
+    # two as well — `tests/test_node27_resource_governance.py` reaches it only
+    # through the audit, so its own suite has to be named (round-4).
+    PathTestRule(
+        "packages/common/node27_timeseries_hypertable_discovery.py",
+        (
+            "tests/test_node27_timeseries_hypertable_discovery.py",
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_retention.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+            "tests/test_node27_timeseries_compression_capture.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
+            "tests/test_node27_autopipeline_handoff.py",
+            "tests/test_node27_autopipeline_connection_bounds.py",
+            "tests/test_node27_resource_governance.py",
+            # The cold-governance collection consumer's own suite: the
+            # `test_node27_resource_governance.py` entry above covers the
+            # audit, not `packages/common/node27_cold_governance_collection.py`.
+            "tests/test_node27_cold_governance.py",
+        ),
+    ),
+    # The retention receipt schema and its example are validated by the shared
+    # storage-schema oracle as well as by the runner suite (the compression
+    # schema already has a row above; its sequential-budget oracle does not).
+    PathTestRule(
+        "schemas/timeseries_retention_receipt.schema.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_timeseries_retention.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/timeseries_retention_receipt.example.json",
+        (
+            "tests/test_timeseries_storage_schemas.py",
+            "tests/test_node27_timeseries_retention.py",
+        ),
+    ),
+    # The remaining I6 surfaces already have rows above and the selector forbids
+    # duplicate patterns, so the two mappings this issue adds are merged into
+    # those rows in place, each tagged `#1985`:
+    #   schemas/timeseries_compression_receipt.schema.json
+    #     -> tests/test_node27_timeseries_sequential_budget.py
+    #   infra/env/node27-timeseries-compression.example
+    #     -> tests/test_node27_resource_governance.py  (lag cross-template pin)
+    # `infra/env/node27-resource-governance.example`,
+    # `packages/common/node27_cold_governance_collection.py` and
+    # `docs/runbooks/tier-node27-timeseries-storage.md` already select every
+    # oracle this issue needs.
+    # --- end I6 #1985 -------------------------------------------------------
 )
 
 

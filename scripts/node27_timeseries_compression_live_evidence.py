@@ -53,12 +53,21 @@ from packages.common.node27_container_contract import (
     container_dump_path_within_mount,
     recurring_unit_idle_failure,
 )
+from packages.common.node27_timeseries_hypertable_discovery import (
+    CANDIDATE_KEYS,
+    CANONICAL_KEYS,
+    compression_settings_expectation,
+    expected_hypertable_flags,
+)
 
 SCHEMA_VERSION = "3.0"
 ISSUE = 1069
 PASS_VERDICT = "PASS_TASK_4_5"
 PASS_CLAIM = "controlled lane executed exactly once with no observed conflict"
-HYPERTABLE_KEYS = ("hydro.river_timeseries", "met.forcing_station_timeseries")
+# The CANONICAL keys — the floor every bundle must prove. Since #1985 a capture
+# emits the discovery set, so a bundle may ALSO carry the transitional
+# ``_legacy`` siblings; those are accepted, anything else is not.
+HYPERTABLE_KEYS = CANONICAL_KEYS
 MAX_SELECTED_BYTES = 8 * 1024**3
 MIN_FREE_BYTES = 300 * 1024**3
 EXPECTED_LAG_SECONDS = 604_800
@@ -1872,23 +1881,41 @@ def _load_receipt(
     return ref, receipt
 
 
+def _catalog_settings_expectation(hypertables: Mapping[str, Any], label: str) -> list[list[Any]]:
+    """Per-table D3 expectation for the catalog this bundle actually captured.
+
+    #1985: the canonical two are mandatory and must have compression enabled; a
+    ``_legacy`` sibling is optional and, when present, flips its canonical
+    partner to the key shape and is itself asserted text-shaped. A bundle
+    showing only the renamed table (the half-applied expand) is refused, which
+    is why the canonical floor is checked before the shapes.
+    """
+
+    try:
+        if dict(hypertables) != expected_hypertable_flags(hypertables):
+            raise ValueError("compression must be enabled on every captured hypertable")
+        return [list(row) for row in compression_settings_expectation(hypertables)]
+    except ValueError as error:
+        raise EvidenceError(f"{label} does not prove the D3 hypertable set: {error}") from error
+
+
+def _sorted_settings(rows: list[list[Any]]) -> list[list[Any]]:
+    """Order-insensitive comparison key.
+
+    ``_CATALOG_BODY_SQL`` aggregates ``compression_settings`` without an
+    ``ORDER BY``, so row order was never a contract — only content is. Sorting
+    both sides keeps archived bundles valid while letting the four-table
+    post-expand catalog compare cleanly.
+    """
+
+    return sorted(rows, key=lambda row: tuple(str(value) for value in row))
+
+
 def _validate_d3_catalog(raw: Any, label: str) -> None:
     catalog = _require_mapping(raw, label)
     _require_exact_keys(catalog, {"hypertables", "compression_settings", "policy_jobs"}, label)
     hypertables = _require_mapping(catalog["hypertables"], f"{label}.hypertables")
-    if set(hypertables) != set(HYPERTABLE_KEYS) or not all(hypertables[key] is True for key in HYPERTABLE_KEYS):
-        raise EvidenceError(f"{label} must enable compression on exactly both hypertables")
-    expected = [
-        ["hydro", "river_timeseries", "run_id", 1, None, None, None],
-        ["hydro", "river_timeseries", "river_network_version_id", 2, None, None, None],
-        ["hydro", "river_timeseries", "river_segment_id", 3, None, None, None],
-        ["hydro", "river_timeseries", "variable", None, 1, True, False],
-        ["hydro", "river_timeseries", "valid_time", None, 2, True, False],
-        ["met", "forcing_station_timeseries", "forcing_version_id", 1, None, None, None],
-        ["met", "forcing_station_timeseries", "station_id", 2, None, None, None],
-        ["met", "forcing_station_timeseries", "variable", None, 1, True, False],
-        ["met", "forcing_station_timeseries", "valid_time", None, 2, True, False],
-    ]
+    expected = _catalog_settings_expectation(hypertables, label)
     settings = _require_list(catalog["compression_settings"], f"{label}.compression_settings")
     actual = []
     for index, row_value in enumerate(settings):
@@ -1917,7 +1944,7 @@ def _validate_d3_catalog(raw: Any, label: str) -> None:
                 row["orderby_nullsfirst"],
             ]
         )
-    if actual != expected or catalog["policy_jobs"] != []:
+    if _sorted_settings(actual) != _sorted_settings(expected) or catalog["policy_jobs"] != []:
         raise EvidenceError(f"{label} does not match exact D3 settings/no-policy contract")
 
 
@@ -1925,7 +1952,7 @@ def _validate_pre_migration_catalog(raw: Any, label: str) -> None:
     catalog = _require_mapping(raw, label)
     _require_exact_keys(catalog, {"hypertables", "compression_settings", "policy_jobs"}, label)
     hypertables = _require_mapping(catalog["hypertables"], f"{label}.hypertables")
-    if set(hypertables) != set(HYPERTABLE_KEYS):
+    if not set(HYPERTABLE_KEYS) <= set(hypertables) <= set(CANDIDATE_KEYS):
         raise EvidenceError(f"{label} does not prove the exact pre-migration catalog")
     if all(value is True for value in hypertables.values()):
         _validate_d3_catalog(catalog, label)
@@ -2325,11 +2352,13 @@ def _table_snapshot(
     if snapshot["selected_origin_uncompressed_index"] != expected_uncompressed:
         raise EvidenceError(f"{label} selected origin uncompressed-state differs")
     tables = _require_mapping(snapshot["tables"], f"{label}.tables")
-    if set(tables) != set(HYPERTABLE_KEYS):
+    # #1985: the canonical two are mandatory; the transitional `_legacy`
+    # siblings are accepted when the capture's discovery found them.
+    if not set(HYPERTABLE_KEYS) <= set(tables) <= set(CANDIDATE_KEYS):
         raise EvidenceError(f"{label} must contain exactly both hypertables")
     all_origins: set[tuple[str, str]] = set()
     all_siblings: set[tuple[str, str]] = set()
-    for key in HYPERTABLE_KEYS:
+    for key in tables:
         row = _require_mapping(tables[key], f"{label}.{key}")
         _require_exact_keys(
             row,
@@ -2430,7 +2459,7 @@ def _validate_selection_snapshot(raw: Any, label: str) -> dict[str, Any]:
             f"{label}.candidates[{index}]",
         )
         key = f"{candidate['hypertable_schema']}.{candidate['hypertable_name']}"
-        if key not in HYPERTABLE_KEYS or candidate["is_compressed"] is not False:
+        if key not in CANDIDATE_KEYS or candidate["is_compressed"] is not False:
             raise EvidenceError(f"{label} candidate is outside the uncompressed D3 allowlist")
         before_bytes = candidate["before_bytes"]
         if not isinstance(before_bytes, int) or isinstance(before_bytes, bool) or before_bytes < 1:

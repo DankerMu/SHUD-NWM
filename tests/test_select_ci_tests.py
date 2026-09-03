@@ -306,6 +306,26 @@ def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting(
         assert SELECTOR_META_GUARD_TEST in selected, consumer
 
 
+def test_discovery_helper_fans_out_to_the_cold_governance_suite() -> None:
+    """#1985 round-4: the helper's eighth consumer had a suite nobody selected.
+
+    `packages/common/node27_cold_governance_collection.py` reads the shared
+    hypertable-discovery helper, and its working-set inventory is pinned in
+    `tests/test_node27_cold_governance.py` (the bounded connect is pinned in
+    `tests/test_node27_resource_governance.py`)
+    — a suite the fan-out rule did not name, so a helper-only diff could not
+    have caught a break there. Written as a literal, not derived from
+    `_CONSUMERS`: deriving it would let the roster and the fan-out rule drift
+    together and still agree.
+    """
+    selected = select_tests(
+        ["packages/common/node27_timeseries_hypertable_discovery.py"], repo_root=Path(".")
+    )
+    assert "tests/test_node27_cold_governance.py" in selected
+    # The rule, not the same-name fallback, is what put it there.
+    assert "tests/test_node27_timeseries_hypertable_discovery.py" in selected
+
+
 def test_select_tests_includes_changed_test_file(tmp_path: Path) -> None:
     test_path = tmp_path / "tests" / "test_example.py"
     test_path.parent.mkdir()
@@ -13659,4 +13679,104 @@ def _qhh_imports_module(path: str, module: str) -> bool:
     return any(
         isinstance(node, ast.ImportFrom) and node.module == module and node.level == 0
         for node in ast.parse(content, filename=path).body
+    )
+
+
+# #1985 round-2: the schema-example validation job's example -> schema mapping
+# ---------------------------------------------------------------------------
+#
+# This suite is the one file a ci.yml-only PR routes to (#1650 self-routing
+# above), so an invariant about the workflow's own shell has to live HERE or it
+# is never executed on the PR that breaks it.
+
+
+def _schema_example_family_substitution() -> tuple[str, str]:
+    """The `sed -E 's/PATTERN/REPL/'` the schema-example job actually runs.
+
+    Parsed out of the tracked workflow rather than hard-coded: a test carrying
+    its own copy of the expression passes happily while CI runs a different one.
+    """
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    lines = [
+        line for line in workflow.splitlines() if "sed -E" in line and "family=" in line
+    ]
+    assert len(lines) == 1, f"expected exactly one family-strip sed, found {len(lines)}"
+    match = re.search(r"sed -E 's/(.*?)/(.*?)/'", lines[0])
+    assert match is not None, lines[0]
+    return match.group(1), match.group(2)
+
+
+def _resolved_schema_for(example: Path, pattern: str, replacement: str) -> Path | None:
+    """Mirror of the job's exact-then-strip resolution, in Python."""
+    name = example.name
+    base = name[: -len(".example.json")] if name.endswith(".example.json") else example.stem
+    exact = Path("schemas") / f"{base}.schema.json"
+    if exact.is_file():
+        return exact
+    family = re.sub(pattern, replacement, base)
+    family_schema = Path("schemas") / f"{family}.schema.json"
+    if family != base and family_schema.is_file():
+        return family_schema
+    return None
+
+
+def test_every_schema_example_resolves_to_a_schema_through_the_ci_mapping() -> None:
+    """The job's else-branch prints a WARNING and validates NOTHING.
+
+    A closed alternation (`noop|intent|partial|error|drift`) meant every variant
+    nobody remembered to add was silently unvalidated — five
+    `node27_cold_tablespace_install_receipt.*` examples had been in that state
+    since they were committed. The generalised strip closes the hole; this test
+    is what keeps it closed, because the failure mode is a green log line.
+    """
+    pattern, replacement = _schema_example_family_substitution()
+    examples = sorted(Path("schemas/examples").glob("*.json"))
+    assert examples, "no schema examples found"
+    unresolved = [
+        example.name
+        for example in examples
+        if _resolved_schema_for(example, pattern, replacement) is None
+    ]
+    assert not unresolved, f"examples CI would skip with a WARNING: {unresolved}"
+
+
+def test_no_schema_base_name_contains_a_dot() -> None:
+    """The safety premise of the generalised strip.
+
+    `s/\\.[a-z0-9-]+$//` is only reached after the exact match fails, and it can
+    only ever eat a real name if some schema's own base name contains a dot.
+    None does; if one ever did, the strip could silently redirect its examples
+    to a different schema, so this fails loudly instead.
+    """
+    dotted = [
+        path.name
+        for path in sorted(Path("schemas").glob("*.schema.json"))
+        if "." in path.name[: -len(".schema.json")]
+    ]
+    assert not dotted, dotted
+
+
+def test_the_family_strip_is_reached_only_after_an_exact_miss() -> None:
+    """Order matters: `<name>.example.json` with its own schema must never be
+    re-pointed at a family schema by the strip."""
+    pattern, replacement = _schema_example_family_substitution()
+    exact = Path("schemas/examples/node27_cold_governance_receipt.example.json")
+    assert exact.is_file()
+    assert _resolved_schema_for(exact, pattern, replacement) == Path(
+        "schemas/node27_cold_governance_receipt.schema.json"
+    )
+    # ... while the variant reaches the same schema THROUGH the strip.
+    variant = Path("schemas/examples/node27_cold_governance_receipt.drift.example.json")
+    assert variant.is_file()
+    assert _resolved_schema_for(variant, pattern, replacement) == Path(
+        "schemas/node27_cold_governance_receipt.schema.json"
+    )
+    # A hyphenated variant is the case the closed alternation could not have
+    # covered without another edit.
+    hyphenated = Path(
+        "schemas/examples/node27_cold_tablespace_install_receipt.already-ready.example.json"
+    )
+    assert hyphenated.is_file()
+    assert _resolved_schema_for(hyphenated, pattern, replacement) == Path(
+        "schemas/node27_cold_tablespace_install_receipt.schema.json"
     )

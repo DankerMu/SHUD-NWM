@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """TimescaleDB retention runner for node-27 (issue #855 §6.1 + §6.2).
 
-Drops chunks strictly older than a configurable window (default 14 d) from
-the two D3 detail hypertables ``hydro.river_timeseries`` and
-``met.forcing_station_timeseries``.
+Drops chunks strictly older than a configurable window (default 14 d) from the
+D3 detail candidate set: ``hydro.river_timeseries``,
+``met.forcing_station_timeseries`` and their ``_legacy`` siblings while present.
 
 ADR 0002 (as revised 2026-08-11): the archive lane was permanently retired
 after the ``/dev/md0`` double-disk failure, and the ADR's "no deletion
@@ -25,7 +25,7 @@ the archive-lane retirement:
 
 - H3 catalog enumeration honours per-tick bound (``drop_chunks`` cannot
   bound cardinality server-side; runner enumerates
-  ``timescaledb_information.chunks`` for the two D3 hypertables, orders by
+  ``timescaledb_information.chunks`` for the candidate hypertables, orders by
   ``range_end ASC``, takes ``per_tick_bound``, then invokes ``drop_chunks``
   per selected chunk with exact ``newer_than`` and ``older_than`` bounds).
 - H4 ``freed_bytes`` measured BEFORE drop (post-drop the chunk is gone;
@@ -63,6 +63,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -70,6 +71,12 @@ from urllib.parse import urlsplit
 import jsonschema
 
 from packages.common.display_watermark import fetch_display_watermark
+from packages.common.node27_timeseries_hypertable_discovery import (
+    CANONICAL_HYPERTABLES,
+    DISCOVERY_SQL,
+    candidate_in_list_sql,
+    legacy_chunk_counts,
+)
 from packages.common.node27_timeseries_lifecycle_lock import (
     LifecycleLockError,
     acquire_timeseries_lifecycle_lock,
@@ -129,6 +136,33 @@ _APPLICATION_NAME = "nhms-ts-retention"
 _QUERY_TIMEOUT_MS = 60_000
 _DROP_TIMEOUT_MS = 300_000
 
+# #1985 round-2 (decision 21): the post-drop discovery probe opens its own
+# connection AFTER the drop loop, while this tick still holds the lifecycle
+# lock. An untimed connect that stalls there leaves dropped chunks with no
+# receipt at all and parks the compression lane on `refused_lock` until the
+# stall clears. Mirrors the compression sibling's `_CONNECT_TIMEOUT_SECONDS`
+# (`scripts/node27_timeseries_compression.py`).
+_CONNECT_TIMEOUT_SECONDS = 10
+
+
+class LegacyChunks(Enum):
+    """Sentinel for a ``legacy_chunks`` probe that could not answer.
+
+    Three receipt states, not two (#1985 round-2, decision 17): a mapping means
+    the siblings were counted, ABSENT means the catalog has no sibling, and
+    ``UNKNOWN`` means the probe failed and the count is inconclusive. The I9 /
+    I14 entry gate reads ``legacy_chunks[<table>] == 0``; absent and null both
+    keep it shut, but only an explicit ``null`` tells the archived-receipt
+    reader that the tick could not vouch for the count.
+
+    Round 3: ``refused`` receipts do not need this sentinel -- a refused tick
+    never reaches the probe at all, so :func:`build_receipt` defaults their
+    ``legacy_chunks`` to ``null`` on its own. The sentinel stays the only way
+    an ``enforced`` or ``dry-run`` tick can say "I looked and could not tell".
+    """
+
+    UNKNOWN = "unknown"
+
 # #1664 drop-phase lock budget. Bounds ONE lock acquisition inside the
 # drop session so a blocked drop refuses as ``55P03`` (lock not available)
 # instead of as a generic ``57014`` statement timeout that cannot be told
@@ -163,11 +197,17 @@ _DEFAULT_LOCK_TIMEOUT_MS = 240_000
 # TARGET_HYPERTABLES — the two D3 detail hypertables. Metadata/coverage
 # tables (`hydro_run`, `run_display_coverage`, `forcing_version`,
 # `state_snapshot`, QC/lineage) MUST NEVER appear here. Structural
-# guarantee: `drop_chunks` only accepts hypertables, and the two hypertables
-# below are the ONLY targets.
-TARGET_HYPERTABLES: frozenset[tuple[str, str]] = frozenset(
-    {("hydro", "river_timeseries"), ("met", "forcing_station_timeseries")}
-)
+# guarantee: `drop_chunks` only accepts hypertables, and the candidate set
+# below is the ONLY source of targets.
+#
+# #1985: this constant stays the CANONICAL pair — it is the documentary
+# allowlist, not the code path that selects chunks. The effective delete
+# authority during the expand-contract transition is `_CHUNK_QUERY`'s candidate
+# IN-list, which additionally carries the `_legacy` renamed selves of these two
+# tables (`CANDIDATE_HYPERTABLES`) so both are dropped under the SAME retention
+# window. That list is a literal, so no metadata table can reach `drop_chunks`
+# through discovery; the disjointness guards assert against BOTH surfaces.
+TARGET_HYPERTABLES: frozenset[tuple[str, str]] = frozenset(CANONICAL_HYPERTABLES)
 
 # H6 wire-format codes — byte-identical across:
 # * this module (``WIRE_CODES`` frozenset),
@@ -576,11 +616,12 @@ def _iso(value: datetime) -> str:
 
 
 FetchChunks = Callable[["RetentionConfig", datetime], list[ChunkRow]]
+DiscoverHypertables = Callable[["RetentionConfig"], list[Mapping[str, Any]]]
 MeasureChunkBytes = Callable[["RetentionConfig", Sequence[ChunkRow]], dict[str, int]]
 DropChunk = Callable[["RetentionConfig", ChunkRow], None]
 
 
-# SQL: catalog-only enumeration of the two D3 hypertables.
+# SQL: catalog-only enumeration of the D3 candidate set (canonical + `_legacy`).
 # H3 divergence from #851 compression sibling: retention MUST NOT filter
 # `is_compressed = false` — compressed chunks older than 14 d are exactly
 # the retention target, so both compressed and uncompressed chunks are
@@ -588,13 +629,12 @@ DropChunk = Callable[["RetentionConfig", ChunkRow], None]
 # from compression's strict `<`: a chunk with `range_end == cutoff` has all
 # row times strictly less than cutoff and therefore satisfies "entire range
 # older than window" per spec §Window and mechanism.
-_CHUNK_QUERY = """
+_CHUNK_QUERY = f"""
 SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name,
        range_start, range_end, is_compressed
 FROM timescaledb_information.chunks
 WHERE (hypertable_schema, hypertable_name) IN (
-    ('hydro', 'river_timeseries'),
-    ('met', 'forcing_station_timeseries')
+{candidate_in_list_sql()}
 )
   AND range_end <= %s
 ORDER BY hypertable_schema, hypertable_name, range_end ASC
@@ -649,6 +689,7 @@ def _default_fetch_chunks(config: RetentionConfig, cutoff: datetime) -> list[Chu
         config.database_url,
         cursor_factory=psycopg2.extras.RealDictCursor,
         fallback_application_name=_APPLICATION_NAME,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
     )
     try:
         with connection:
@@ -727,6 +768,34 @@ def _redact_error_text(error: BaseException, dsn: str) -> str:
         return f"<error text withheld: redaction unavailable ({type(error).__name__})>"
 
 
+def _default_discover_hypertables(config: RetentionConfig) -> list[Mapping[str, Any]]:
+    """#1985: which of the candidate hypertables exist, and how many chunks each
+    still holds.
+
+    Read AFTER the drop phase: ``legacy_chunks`` is the I9 / I14 contract entry
+    gate ("the renamed table is empty"), so a pre-drop count would keep the gate
+    shut for a further fourteen days after the last legacy chunk actually went.
+    """
+
+    import psycopg2  # type: ignore[import-untyped]
+    import psycopg2.extras  # type: ignore[import-untyped]
+
+    connection = psycopg2.connect(
+        config.database_url,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        fallback_application_name=_APPLICATION_NAME,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
+    )
+    try:
+        with connection:
+            with connection.cursor() as cursor:
+                cursor.execute(f"SET statement_timeout = {_QUERY_TIMEOUT_MS}")
+                cursor.execute(DISCOVERY_SQL)
+                return [dict(row) for row in cursor.fetchall()]
+    finally:
+        connection.close()
+
+
 def _default_measure_chunk_bytes(
     config: RetentionConfig, chunks: Sequence[ChunkRow]
 ) -> dict[str, int]:
@@ -748,9 +817,10 @@ def _default_measure_chunk_bytes(
 
     Per-chunk connection (mirrors compression sibling
     ``scripts/node27_timeseries_compression.py:387-428`` — same per-chunk
-    isolation and 60 s statement timeout; the sibling additionally passes
-    ``connect_timeout``, a pre-existing divergence this change does not
-    touch): a shared transaction would enter ``InFailedSqlTransaction`` on the
+    isolation, 60 s statement timeout and, since round 3 (decision 21), the
+    same ``connect_timeout=_CONNECT_TIMEOUT_SECONDS``; the divergence that
+    left this connect unbounded is closed): a shared transaction would enter
+    ``InFailedSqlTransaction`` on the
     first per-chunk failure, silently zeroing every subsequent chunk's
     ``freed_bytes``. Isolating each measurement in its own connection keeps
     the receipt faithful when a single chunk fails to size.
@@ -774,7 +844,9 @@ def _default_measure_chunk_bytes(
     for chunk in chunks:
         try:
             connection = psycopg2.connect(
-                config.database_url, fallback_application_name=_APPLICATION_NAME
+                config.database_url,
+                fallback_application_name=_APPLICATION_NAME,
+                connect_timeout=_CONNECT_TIMEOUT_SECONDS,
             )
             try:
                 with connection:
@@ -840,7 +912,9 @@ def _default_drop_chunk(config: RetentionConfig, chunk: ChunkRow) -> None:
     import psycopg2  # type: ignore[import-untyped]
 
     connection = psycopg2.connect(
-        config.database_url, fallback_application_name=_APPLICATION_NAME
+        config.database_url,
+        fallback_application_name=_APPLICATION_NAME,
+        connect_timeout=_CONNECT_TIMEOUT_SECONDS,
     )
     try:
         with connection:
@@ -936,6 +1010,7 @@ def build_receipt(
     reference_time: datetime | None = None,
     window_days: int | None = None,
     archive_gate: str = ARCHIVE_GATE_DISABLED,
+    legacy_chunks: Mapping[str, int] | LegacyChunks | None = None,
 ) -> dict[str, Any]:
     """Assemble a schema-``oneOf``-conformant receipt.
 
@@ -951,6 +1026,29 @@ def build_receipt(
     the audit trail has a hole exactly where that authority is questioned.
     """
     gate_block = _archive_gate_block(archive_gate)
+    # #1985: present ONLY when a `_legacy` sibling exists, so a receipt written
+    # on today's (and the post-contract) catalog carries no such key at all and
+    # stays key-for-key comparable with the archived receipts. An explicit
+    # `null` is the third state (decision 17): the probe ran and failed, so the
+    # count is inconclusive rather than absent.
+    #
+    # Round 3: a `refused` tick NEVER ran the probe -- it aborted before the
+    # post-drop discovery -- so absence there would read as "the catalog has no
+    # sibling", a claim this tick cannot make. Every refused exit (drop failure,
+    # lifecycle-lock contention, runner-lock contention, uncaught error) is
+    # therefore defaulted to an explicit `null`, which keeps "absent = no
+    # sibling" true for every archived receipt rather than only for the
+    # `enforced`/`dry-run` ones. The I9/I14 entry gate only ever opens on an
+    # explicit `0`, so this tightens nothing operationally and makes each
+    # receipt self-describing.
+    if legacy_chunks is LegacyChunks.UNKNOWN or (legacy_chunks is None and outcome == "refused"):
+        legacy_block: dict[str, Any] = {"legacy_chunks": None}
+    elif isinstance(legacy_chunks, Mapping) and legacy_chunks:
+        legacy_block = {
+            "legacy_chunks": {name: int(count) for name, count in legacy_chunks.items()}
+        }
+    else:
+        legacy_block = {}
     if outcome == "dry-run":
         if refusal_reason is not None:
             raise ValueError("dry-run outcome cannot carry refusal_reason")
@@ -962,6 +1060,7 @@ def build_receipt(
             "archive_gate": gate_block,
             "candidate_chunks": list(candidate_chunks),
             "deferred_remainder": list(deferred_remainder),
+            **legacy_block,
         }
         if reference_time is not None and window_days is not None:
             receipt.update(
@@ -980,6 +1079,7 @@ def build_receipt(
             "outcome": "refused",
             "archive_gate": gate_block,
             "refusal_reason": refusal_reason,
+            **legacy_block,
         }
         if reference_time is not None and window_days is not None:
             receipt.update(
@@ -1006,6 +1106,7 @@ def build_receipt(
             # deletion, so the schema-required list is structurally empty —
             # "nothing endorsed this", stated rather than left ambiguous.
             "salvage_backed_windows": [],
+            **legacy_block,
         }
         if reference_time is not None and window_days is not None:
             receipt.update(
@@ -1102,6 +1203,7 @@ def run_retention(
     fetch_chunks: FetchChunks | None = None,
     measure_chunk_bytes: MeasureChunkBytes | None = None,
     drop_chunk: DropChunk | None = None,
+    discover_hypertables: DiscoverHypertables | None = None,
 ) -> dict[str, Any]:
     """Three-phase retention: enumerate → measure → drop.
 
@@ -1130,6 +1232,56 @@ def run_retention(
             **kwargs,
         )
 
+    def _legacy_chunks() -> dict[str, int] | LegacyChunks | None:
+        """#1985: the transitional siblings and their TOTAL remaining chunks.
+
+        Re-evaluated per tick (never cached) so the mapping appears with the
+        expand migration and disappears with the contract one; the tick's own
+        refusal paths do not call it, because a tick that failed mid-drop
+        cannot vouch for a post-drop count -- :func:`build_receipt` writes an
+        explicit ``null`` for them (round 3), so "absent = no sibling" holds
+        for refused receipts too.
+
+        ``discover_hypertables is None`` means no catalog was consulted — the
+        honest claim for a caller without a database — and the receipt then
+        carries no ``legacy_chunks`` key at all. ``main`` always wires the real
+        probe.
+
+        Isolated exactly like :func:`_default_measure_chunk_bytes` (#1985
+        round-1 review): this probe runs AFTER the drop loop, so letting it
+        raise would carry an already-executed deletion out through
+        :func:`main`'s uncaught-error arm and publish a ``refused`` receipt
+        whose schema branch forbids ``dropped_chunks`` — the chunks would be
+        gone and recorded nowhere.
+
+        A probe failure therefore yields :data:`LegacyChunks.UNKNOWN`, which the
+        receipt records as an explicit ``"legacy_chunks": null`` (round-2
+        review, decision 17). Absent and null both keep the I9 / I14 gate shut —
+        the safe direction — but they are different facts, and an archived
+        receipt has to be self-describing about which one it is: absent means
+        the catalog holds no sibling, null means this tick could not tell. The
+        cause goes to stderr as a diagnostic. Isolation covers the dry-run
+        branch too, which calls this same helper.
+        """
+
+        if discover_hypertables is None:
+            return None
+        try:
+            return legacy_chunk_counts(discover_hypertables(config))
+        except Exception as error:
+            with contextlib.suppress(OSError):
+                print(
+                    json.dumps(
+                        {
+                            "warning": "legacy_chunks probe failed; recording a null count",
+                            "error": _redact_error_text(error, config.database_url),
+                        },
+                        sort_keys=True,
+                    ),
+                    file=sys.stderr,
+                )
+            return LegacyChunks.UNKNOWN
+
     # Phase 1: enumerate eligible chunks.
     # There is no archive coverage object any more and therefore no
     # "partially covered" notion, so a chunk straddling what used to be the
@@ -1151,6 +1303,7 @@ def run_retention(
             "dry-run",
             candidate_chunks=[chunk.qualified_name for chunk in selected],
             deferred_remainder=deferred_remainder,
+            legacy_chunks=_legacy_chunks(),
         )
 
     # Phase 3b: enforce — measure BEFORE drop (H4).
@@ -1206,6 +1359,7 @@ def run_retention(
         "enforced",
         dropped_chunks=dropped,
         deferred_remainder=deferred_remainder,
+        legacy_chunks=_legacy_chunks(),
     )
 
 
@@ -1221,6 +1375,7 @@ def main(
     fetch_chunks: FetchChunks | None = None,
     measure_chunk_bytes: MeasureChunkBytes | None = None,
     drop_chunk: DropChunk | None = None,
+    discover_hypertables: DiscoverHypertables | None = None,
 ) -> int:
     try:
         args = _parser().parse_args(argv)
@@ -1327,6 +1482,7 @@ def main(
                 fetch_chunks=fetch_chunks,
                 measure_chunk_bytes=measure_chunk_bytes,
                 drop_chunk=drop_chunk,
+                discover_hypertables=discover_hypertables or _default_discover_hypertables,
             )
         except Exception as error:
             # RETENTION_UNCAUGHT_ERROR: emit a schema-valid refused receipt
