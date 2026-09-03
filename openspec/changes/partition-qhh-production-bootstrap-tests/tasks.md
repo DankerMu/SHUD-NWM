@@ -93,7 +93,7 @@
   plus full `uv run pytest -q`; expect no production, SQL/schema/geometry/auth/oracle drift.
 - [x] 4.5 Run Ruff for every changed/new Python file, entropy report/hard gate, strict
   single/all OpenSpec, Markdown lint and `git diff --check`; expect zero new violations.
-- [ ] 4.6 On node-27, run frozen-final-SHA scheduler-owner integration suite against an
+- [x] 4.6 On node-27, run frozen-final-SHA scheduler-owner integration suite against an
   isolated temporary database on node-27's local PostgreSQL `:55432`; require all 11 nodes
   PASSED, including the three nodes requesting imported
   `qhh_scheduler_canonical_readiness`, verify cleanup and no production DB/display mutation.
