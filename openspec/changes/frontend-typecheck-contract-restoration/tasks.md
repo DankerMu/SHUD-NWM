@@ -43,7 +43,7 @@
 
 ## 5. 前端消费方与残留
 
-- [ ] 5.1 重生成 `types.ts`（`pnpm generate:api`），确认 **25 个新补写的 OpenAPI 具名 schema** 全部可解析（第 26 个归宿 `ModelLifecycleRequest` 不补写，见 5.3）。
+- [ ] 5.1 重生成 `types.ts`（`pnpm generate:api`），确认 **24 个新补写的 OpenAPI 具名 schema** 全部可解析（`ModelLifecycleRequest` 不补写、走 5.3 重指；`GeoJsonPoint` 因 `MetStation` 运行时无 `geom` 而不补写）。
   - **禁止注入孤儿组件**：每个新增 component 都必须被至少一条 operation 的响应 `$ref` 到。只塞 `components.schemas` 不改 operation 能让 tsc 变绿，但那是形状谎言（Redocly 因 `--skip-rule no-unused-components` 也拦不住）。
 - [ ] 5.2 `LineageResponse` / `ForcingVersion` / `QcResult` 三个改为前端本地 interface（在 `apps/frontend/src/lib/m11/overviewDataContracts.ts` 就地声明），替换 `components['schemas'][...]` 引用。`/api/v1/lineage/river-point` 后端从未实现，没有路由就不可能有 OpenAPI schema。
   - **不得改动 `overviewData.ts:1397-1410` 的 try/catch 与 `partialErrors` 行为** —— 删掉该调用会让 `'河段追溯暂不可用'` 这条 partialError 消失，等于改 UI。
@@ -63,7 +63,8 @@
 
 ## 7. 证据与收尾
 
-- [ ] 7.1 PR body 列出 **33 个名字的逐名归宿表**：26 个 OpenAPI 具名（载体 · 路由 · 形状来源 store 函数 · 与旧 yaml 的差异）、3 个前端本地、4 个整支删除及删除依据。
+- [ ] 7.1 PR body 列出 **33 个名字的逐名归宿表**：24 个 OpenAPI 具名（载体 · 路由 · 形状来源 store 函数 · 与旧 yaml 的差异）、1 个重指（`ModelLifecycleRequest`→`ModelLifecyclePayload`）、1 个因运行时无该字段而删（`GeoJsonPoint`）、3 个前端本地、4 个随死字段整支删除。24+1+1+3+4=33。
+- [ ] 7.6 为两条越界发现立 issue（只报不修）：① `_model_public_projection`（`model_registry.py:3601-3622`）不 pop `mesh_properties_json`，而 `_model_asset_detail:3545` 会 pop —— lifecycle 响应会外泄原始 mesh properties JSON，属潜在路径/血缘泄漏；② `docs/spec/03_database_design.md:68`、`docs/appendices/C_database_schema_draft.md:28`、`docs/runbooks/forcing-copyback-backfill.md:66` 把 `frequency_done` 当作 `hydro.run_status` 合法成员，其中一处写进 `status IN (...)` 的 SQL、对该字面量恒不命中。
 - [ ] 7.2 记录 residual：新增 schema 是纯文档，**不做运行时校验**（与 `b97c16e2^` 之前的状态一致，非能力降级）；`response_model=` 升级另立 issue。
 - [ ] 7.3 为 `/api/v1/lineage/river-point` 后端路由缺失（生产静默降级）立 issue。
 - [ ] 7.4 node-27 跑后端契约测试（`tests/test_api_contract.py` 与 3.4 的新校验测试按 CLAUDE.md 路由需真实 DB oracle 复核）。

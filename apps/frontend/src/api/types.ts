@@ -1289,6 +1289,34 @@ export interface components {
             availability: components["schemas"]["QhhLatestAvailability"];
             quality: components["schemas"]["QhhLatestQuality"];
         };
+        MetStation: {
+            station_id: string;
+            basin_version_id: string;
+            station_name?: string | null;
+            /** @description Alias of station_name. */
+            name?: string | null;
+            longitude?: number | null;
+            latitude?: number | null;
+            elevation_m?: number | null;
+            /** @description Alias of elevation_m. */
+            elevation?: number | null;
+            station_role: string;
+            properties_json?: {
+                [key: string]: unknown;
+            } | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        MetStationPage: {
+            items: components["schemas"]["MetStation"][];
+            total_count: number;
+            limit: number;
+            offset: number;
+            /** @description Applied filters plus per-filter availability so the UI can degrade advanced filters honestly (e.g. qc_status unavailable) without errors. */
+            filters?: {
+                [key: string]: unknown;
+            };
+        };
         Layer: {
             layer_id: string;
             layer_name: string;
@@ -1352,6 +1380,268 @@ export interface components {
             description?: string | null;
             /** Format: date-time */
             created_at: string;
+        };
+        GeoJsonMultiPolygon: {
+            /** @enum {string} */
+            type: "MultiPolygon";
+            coordinates: number[][][][];
+        };
+        BasinVersion: {
+            basin_version_id: string;
+            basin_id: string;
+            version_label: string;
+            geom: components["schemas"]["GeoJsonMultiPolygon"];
+            active_flag: boolean;
+            valid_from?: string | null;
+            valid_to?: string | null;
+            /** @description Public responses redact local/source lineage URIs and return null. */
+            source_uri?: string | null;
+            /** @description Public responses redact raw lineage checksums and return null. */
+            checksum?: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        GeoJsonLineString: {
+            /** @enum {string} */
+            type: "LineString";
+            coordinates: number[][];
+        };
+        /** @description GeoJSON MultiLineString. The underlying core.river_segment.geom column type is MultiLineString(4490); since the PR-2 contract, every reach row currently stored holds exactly one part (the single-part flow-ordered polyline derived from gis/river.shp). The wrapper type is retained to allow a basin's input to express a genuine multi-part reach in the future without a schema change. */
+        GeoJsonMultiLineString: {
+            /** @enum {string} */
+            type: "MultiLineString";
+            coordinates: number[][][];
+        };
+        RiverSegment: {
+            river_segment_id: string;
+            river_network_version_id: string;
+            segment_order?: number | null;
+            downstream_segment_id?: string | null;
+            length_m?: number | null;
+            geom: components["schemas"]["GeoJsonLineString"] | components["schemas"]["GeoJsonMultiLineString"];
+            properties_json: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
+        };
+        RiverSegmentFeature: {
+            /** @enum {string} */
+            type: "Feature";
+            /** @description Segment-level feature id, emitted by the segment-slice query path only. */
+            id?: string;
+            properties: {
+                segment_id: string;
+                river_segment_id: string;
+                basin_version_id: string;
+                river_network_version_id: string;
+                name: string;
+                stream_order: number;
+                segment_order?: number | null;
+                downstream_segment_id?: string | null;
+                length_m?: number | null;
+            } & {
+                [key: string]: unknown;
+            };
+            geometry: components["schemas"]["GeoJsonLineString"] | components["schemas"]["GeoJsonMultiLineString"];
+        };
+        RiverSegmentFeatureCollection: {
+            /** @enum {string} */
+            type: "FeatureCollection";
+            features: components["schemas"]["RiverSegmentFeature"][];
+            /** @description Total matching stored river segment rows, including rows omitted from features because geom is null. */
+            total: number;
+            /** @description Total matching river segment rows with non-null LineString geometry that can be emitted as GeoJSON features. */
+            feature_total: number;
+            limit: number;
+            offset: number;
+        };
+        ModelInstance: {
+            model_id: string;
+            model_name?: string | null;
+            basin_id?: string | null;
+            basin_name?: string | null;
+            basin_version_id: string;
+            river_network_version_id: string;
+            mesh_version_id: string;
+            calibration_version_id: string;
+            segment_count?: number | null;
+            mesh_uri?: string | null;
+            mesh_checksum?: string | null;
+            shud_code_version: string;
+            rshud_code_version?: string | null;
+            autoshud_code_version?: string | null;
+            active_flag: boolean;
+            /**
+             * @default inactive
+             * @enum {string}
+             */
+            lifecycle_state: "inactive" | "active" | "deprecated" | "superseded";
+            container_image?: string | null;
+            model_package_uri: string | null;
+            package_checksum?: string | null;
+            manifest_uri?: string | null;
+            source_inventory_checksum?: string | null;
+            basin_slug?: string | null;
+            shud_input_name?: string | null;
+            source_path?: string | null;
+            resolved_source_path?: string | null;
+            source_uri?: string | null;
+            source_is_symlink?: boolean | null;
+            resource_profile: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
+        };
+        ModelInstancePage: {
+            items: components["schemas"]["ModelInstance"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        ModelOperationPreflight: {
+            schema: string;
+            request_id?: string | null;
+            operation: string;
+            action_id?: string | null;
+            actor_id?: string | null;
+            roles?: string[];
+            /** @enum {string} */
+            status: "ready" | "blocked";
+            model_id: string;
+            basin_id?: string | null;
+            basin_version_id?: string | null;
+            current_active_model_id?: string | null;
+            previous_model_id?: string | null;
+            restored_model_id?: string | null;
+            prior_audit_log_id?: number | null;
+            rollback_history?: {
+                [key: string]: unknown;
+            } | null;
+            river_network_version_id?: string | null;
+            mesh_version_id?: string | null;
+            lineage?: {
+                [key: string]: unknown;
+            };
+            object_uri_prefix?: {
+                [key: string]: unknown;
+            };
+            impact: {
+                [key: string]: unknown;
+            };
+            blockers: {
+                [key: string]: unknown;
+            }[];
+            warnings: {
+                [key: string]: unknown;
+            }[];
+            override_missing_active?: boolean;
+            reason?: string | null;
+        };
+        ModelLifecycleResult: {
+            /** @enum {string} */
+            status: "allowed" | "blocked" | "already_current" | "rollback";
+            operation: string;
+            model: components["schemas"]["ModelInstance"];
+            previous_model?: components["schemas"]["ModelInstance"] | null;
+            preflight: components["schemas"]["ModelOperationPreflight"];
+            audit_reference?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** @enum {string} */
+        RunType: "analysis" | "forecast" | "hindcast";
+        /** @enum {string} */
+        RunStatus: "created" | "staged" | "pending" | "submitted" | "running" | "succeeded" | "parsed" | "published" | "failed" | "cancelled" | "superseded";
+        HydroRun: {
+            run_id: string;
+            run_key?: number;
+            run_type: components["schemas"]["RunType"];
+            scenario_id: string;
+            model_id: string;
+            basin_id?: string | null;
+            basin_version_id: string;
+            river_network_version_id: string | null;
+            forcing_version_id?: string | null;
+            init_state_id?: string | null;
+            source_id?: string | null;
+            /** @description Adapter name for source_id, falling back to source_id itself. */
+            source?: string | null;
+            cycle_time?: string | null;
+            status: components["schemas"]["RunStatus"];
+            slurm_job_id?: string | null;
+            /** Format: date-time */
+            start_time: string;
+            /** Format: date-time */
+            end_time: string;
+            run_manifest_uri?: string | null;
+            output_uri?: string | null;
+            log_uri?: string | null;
+            error_code?: string | null;
+            error_message?: string | null;
+            parsed_at?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        HydroRunPage: {
+            items: components["schemas"]["HydroRun"][];
+            total: number;
+            /** @description Backward-compatible alias of total. */
+            total_count?: number;
+            limit: number;
+            offset: number;
+        };
+        SeriesSegment: {
+            scenario_id: string;
+            /** @example GFS */
+            source_id?: string;
+            /** Format: date-time */
+            cycle_time?: string;
+            /** @example 168 */
+            available_lead_hours?: number;
+            segment_role: string;
+            /** @example q_down */
+            variable?: string;
+            /** @description [epoch milliseconds, value] pairs, ascending by time. */
+            points: number[][];
+        };
+        RiverSeriesResponse: {
+            segment_id: string;
+            issue_time: string | null;
+            unit: string;
+            series: components["schemas"]["SeriesSegment"][];
+        };
+        /** @description Returned when include_analysis=true splices analysis-period data before the forecast window into a unified segments array. */
+        SplicedForecastResponse: {
+            river_segment_id: string;
+            segments: {
+                scenario: string;
+                /** @description Canonical scenario identifier. */
+                scenario_id?: string;
+                source: string;
+                /** @description Forecast source identifier; omitted on analysis segments. */
+                source_id?: string;
+                /**
+                 * Format: date-time
+                 * @description Forecast source cycle time; omitted on analysis segments.
+                 */
+                cycle_time?: string;
+                /** @description Available forecast lead time in hours; omitted on analysis segments. */
+                available_lead_hours?: number;
+                /** @enum {string} */
+                segment_role: "past_7_days" | "future_7_days";
+                data: {
+                    /** Format: date-time */
+                    valid_time: string;
+                    value: number;
+                }[];
+            }[];
+            issue_time: string | null;
+            variable: string;
+            unit: string;
         };
         JobStatusCounts: {
             succeeded: number;
@@ -1463,6 +1753,25 @@ export interface components {
             slurm_job_id: string | null;
             /** @enum {string} */
             execution_status: "submitted";
+        };
+        QueueDepth: {
+            running: number;
+            pending: number;
+            idle: number;
+        };
+        StageDurationMetric: {
+            /** Format: date */
+            date: string;
+            stage: string;
+            average_duration_seconds: number;
+            job_count: number;
+        };
+        SuccessRateMetric: {
+            /** Format: date */
+            date: string;
+            success_rate: number;
+            succeeded_cycles: number;
+            total_cycles: number;
         };
         RuntimeConfig: {
             /** @enum {string} */
@@ -1708,8 +2017,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["BasinVersion"][];
                     };
                 };
             };
@@ -1823,8 +2132,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["RiverSegmentFeatureCollection"];
                     };
                 };
             };
@@ -1866,8 +2175,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["RiverSegment"];
                     };
                 };
             };
@@ -1945,8 +2254,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["ModelInstancePage"];
                     };
                 };
             };
@@ -2054,8 +2363,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["ModelOperationPreflight"];
                     };
                 };
             };
@@ -2091,8 +2400,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["ModelLifecycleResult"];
                     };
                 };
             };
@@ -2124,8 +2433,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["ModelInstance"];
                     };
                 };
             };
@@ -2205,9 +2514,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["RiverSeriesResponse"] | components["schemas"]["SplicedForecastResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2276,8 +2583,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["HydroRunPage"];
                     };
                 };
             };
@@ -2463,8 +2770,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["MetStationPage"];
                     };
                 };
             };
@@ -2815,8 +3122,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["StageDurationMetric"][];
                     };
                 };
             };
@@ -2850,8 +3157,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["SuccessRateMetric"][];
                     };
                 };
             };
@@ -2881,8 +3188,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["QueueDepth"];
                     };
                 };
             };

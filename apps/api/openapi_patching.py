@@ -5,6 +5,33 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
+from apps.api.openapi_restored_schemas import (
+    _basin_schema,
+    _basin_version_schema,
+    _forecast_series_response_schema,
+    _geojson_line_string_schema,
+    _geojson_multi_line_string_schema,
+    _geojson_multi_polygon_schema,
+    _hydro_run_page_schema,
+    _hydro_run_schema,
+    _met_station_page_schema,
+    _met_station_schema,
+    _model_instance_page_schema,
+    _model_instance_schema,
+    _model_lifecycle_result_schema,
+    _model_operation_preflight_schema,
+    _queue_depth_schema,
+    _river_segment_feature_collection_schema,
+    _river_segment_feature_schema,
+    _river_segment_schema,
+    _river_series_response_schema,
+    _run_status_schema,
+    _run_type_schema,
+    _series_segment_schema,
+    _spliced_forecast_response_schema,
+    _stage_duration_metric_schema,
+    _success_rate_metric_schema,
+)
 from apps.api.routes.hydro_display import TILE_X_DESCRIPTION, TILE_Y_DESCRIPTION
 from apps.api.routes.pipeline import (
     PIPELINE_JOB_STATUS_VALUES,
@@ -378,10 +405,25 @@ def _patch_met_stations_list_openapi(schema: dict) -> None:
     params correctly, but it emits ``anyOf: [array, null]``. The published
     contract advertises ``oneOf: [string, array]`` (repeat or comma-separate), so
     we restore that documented form without touching the static spec / types.ts.
+
+    The named ``MetStation``/``MetStationPage`` response schemas are injected here
+    rather than in a separate patch because this operation is already owned by
+    this function; a later patch would clobber whichever rewrite ran first.
     """
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["MetStation"] = _met_station_schema()
+    schemas["MetStationPage"] = _met_station_page_schema()
+
     operation = schema.get("paths", {}).get("/api/v1/met/stations", {}).get("get")
     if not operation:
         return
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/met/stations",
+        _success_response_schema({"$ref": "#/components/schemas/MetStationPage"}),
+    )
     for parameter in operation.get("parameters", []):
         if parameter.get("name") != "variables":
             continue
@@ -439,11 +481,122 @@ def _patch_basin_registry_openapi(schema: dict) -> None:
     schemas = components.setdefault("schemas", {})
     schemas["SuccessEnvelope"] = _success_envelope_schema()
     schemas["Basin"] = _basin_schema()
+    schemas["GeoJsonMultiPolygon"] = _geojson_multi_polygon_schema()
+    schemas["BasinVersion"] = _basin_version_schema()
 
     _set_operation_response_schema(
         schema,
         "/api/v1/basins",
         _success_response_schema({"type": "array", "items": {"$ref": "#/components/schemas/Basin"}}),
+    )
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/basins/{basin_id}/versions",
+        _success_response_schema({"type": "array", "items": {"$ref": "#/components/schemas/BasinVersion"}}),
+    )
+
+
+def _patch_river_segment_openapi(schema: dict) -> None:
+    """Restore the river-segment GeoJSON collection and detail response bodies.
+
+    Both handlers (``apps/api/routes/models.py:428`` / ``:495``) are annotated
+    ``dict[str, Any]`` around ``_ok()``, so FastAPI can only emit an opaque body.
+    """
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["GeoJsonLineString"] = _geojson_line_string_schema()
+    schemas["GeoJsonMultiLineString"] = _geojson_multi_line_string_schema()
+    schemas["RiverSegment"] = _river_segment_schema()
+    schemas["RiverSegmentFeature"] = _river_segment_feature_schema()
+    schemas["RiverSegmentFeatureCollection"] = _river_segment_feature_collection_schema()
+
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/basin-versions/{basin_version_id}/river-segments",
+        _success_response_schema({"$ref": "#/components/schemas/RiverSegmentFeatureCollection"}),
+    )
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}",
+        _success_response_schema({"$ref": "#/components/schemas/RiverSegment"}),
+    )
+
+
+def _patch_model_instance_openapi(schema: dict) -> None:
+    """Restore the model registry list/detail and lifecycle response bodies.
+
+    The two lifecycle operations are POSTs, so they pass ``method="post"``; the
+    default would no-op and orphan ``ModelOperationPreflight`` /
+    ``ModelLifecycleResult``.
+    """
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["ModelInstance"] = _model_instance_schema()
+    schemas["ModelInstancePage"] = _model_instance_page_schema()
+    schemas["ModelOperationPreflight"] = _model_operation_preflight_schema()
+    schemas["ModelLifecycleResult"] = _model_lifecycle_result_schema()
+
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/models",
+        _success_response_schema({"$ref": "#/components/schemas/ModelInstancePage"}),
+    )
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/models/{model_id}",
+        _success_response_schema({"$ref": "#/components/schemas/ModelInstance"}),
+    )
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/models/{model_id}/preflight",
+        _success_response_schema({"$ref": "#/components/schemas/ModelOperationPreflight"}),
+        method="post",
+    )
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/models/{model_id}/lifecycle",
+        _success_response_schema({"$ref": "#/components/schemas/ModelLifecycleResult"}),
+        method="post",
+    )
+
+
+def _patch_hydro_run_openapi(schema: dict) -> None:
+    """Restore the run-list response body (``apps/api/routes/forecast.py:97``)."""
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["RunType"] = _run_type_schema()
+    schemas["RunStatus"] = _run_status_schema()
+    schemas["HydroRun"] = _hydro_run_schema()
+    schemas["HydroRunPage"] = _hydro_run_page_schema()
+
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/runs",
+        _success_response_schema({"$ref": "#/components/schemas/HydroRunPage"}),
+    )
+
+
+def _patch_forecast_series_openapi(schema: dict) -> None:
+    """Restore the river forecast-series response body.
+
+    This is the one route in this family whose 200 is **not** wrapped in
+    ``SuccessEnvelope``: ``get_forecast_series`` returns ``store.forecast_series``
+    directly (``apps/api/routes/forecast.py:68``) rather than through ``_ok``, so
+    the body is the bare ``oneOf`` of the two payload shapes.
+    """
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SeriesSegment"] = _series_segment_schema()
+    schemas["RiverSeriesResponse"] = _river_series_response_schema()
+    schemas["SplicedForecastResponse"] = _spliced_forecast_response_schema()
+
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series",
+        _forecast_series_response_schema(),
     )
 
 
@@ -631,6 +784,9 @@ def _patch_pipeline_openapi(schema: dict) -> None:
     schemas["PipelineJobPage"] = _pipeline_job_page_schema()
     schemas["JobLogs"] = _job_logs_schema()
     schemas["RetryRunResult"] = _retry_run_result_schema()
+    schemas["QueueDepth"] = _queue_depth_schema()
+    schemas["StageDurationMetric"] = _stage_duration_metric_schema()
+    schemas["SuccessRateMetric"] = _success_rate_metric_schema()
 
     responses = components.setdefault("responses", {})
     responses["Error"] = {
@@ -789,14 +945,38 @@ def _patch_pipeline_openapi(schema: dict) -> None:
         description="Retry request accepted",
         extra_responses={"409": {"$ref": "#/components/responses/ControlPlaneManualActionRequired"}},
     )
-    # Cancel and queue/depth keep FastAPI's generated success schema; only the
-    # display-mode error responses are injected so the runtime spec matches the
-    # static contract for those control-plane status codes.
+    # The metrics routes are plain `_ok()` handlers (routes/pipeline.py:750/795),
+    # not `_patch_pipeline_operation` operations, so only their 200 body is
+    # rewritten; their FastAPI-generated parameters and error responses stand.
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/metrics/stage-duration",
+        _success_response_schema(
+            {"type": "array", "items": {"$ref": "#/components/schemas/StageDurationMetric"}}
+        ),
+    )
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/metrics/success-rate",
+        _success_response_schema(
+            {"type": "array", "items": {"$ref": "#/components/schemas/SuccessRateMetric"}}
+        ),
+    )
+    # Cancel keeps FastAPI's generated success schema; only the display-mode
+    # error responses are injected so the runtime spec matches the static
+    # contract for those control-plane status codes. queue/depth additionally
+    # gets its named 200 body, written before `_inject_operation_responses` so
+    # the error injection (which only adds keys) cannot clobber it.
     _inject_operation_responses(
         schema,
         "/api/v1/runs/{run_id}/cancel",
         "post",
         {"409": {"$ref": "#/components/responses/ControlPlaneManualActionRequired"}},
+    )
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/queue/depth",
+        _success_response_schema({"$ref": "#/components/schemas/QueueDepth"}),
     )
     _inject_operation_responses(
         schema,
@@ -1076,8 +1256,22 @@ def _error_example(code: str, message: str, *, details: Any | None = None) -> di
     }
 
 
-def _set_operation_response_schema(schema: dict, path: str, response_schema: dict) -> None:
-    operation = schema.get("paths", {}).get(path, {}).get("get")
+def _set_operation_response_schema(
+    schema: dict,
+    path: str,
+    response_schema: dict,
+    *,
+    method: str = "get",
+) -> None:
+    """Rewrite an operation's 200 ``application/json`` schema in place.
+
+    ``method`` is explicit because the POST lifecycle operations need the same
+    rewrite; defaulting it to ``get`` would silently no-op on them and leave the
+    injected component orphaned (a named schema in ``components`` that no
+    operation references, which type-checks green while the contract still
+    advertises ``additionalProperties: true``).
+    """
+    operation = schema.get("paths", {}).get(path, {}).get(method)
     if not operation:
         return
     response = operation.get("responses", {}).get("200", {})
@@ -1737,18 +1931,6 @@ def _nullable(schema: dict) -> dict:
     return {**schema, "nullable": True}
 
 
-def _null_union(schema: dict) -> dict:
-    """Nullability as a native OpenAPI 3.1 union instead of the 3.0 keyword.
-
-    ``_nullable`` emits the 3.0-only ``nullable: true`` keyword that
-    ``_finalize_openapi_schema`` has to rewrite, and every such node is pinned by
-    ``tests/test_openapi_31_contract.py::BASELINE_NULLABLE_COUNT``. Hand-written
-    schemas added from here on express the union directly, so they need no
-    finalizer rewrite and leave that baseline untouched.
-    """
-    return {"anyOf": [schema, {"type": "null"}]}
-
-
 def _layer_metadata_schema() -> dict:
     string_array = {"type": "array", "items": {"type": "string"}}
     number_array = {"type": "array", "items": {"type": "number"}}
@@ -1800,19 +1982,5 @@ def _layer_metadata_schema() -> dict:
             "fallback_endpoint": _nullable({"type": "string"}),
             "release_blocking": {"type": "boolean"},
             "production_mvt_readiness_claimed": _nullable({"type": "boolean"}),
-        },
-    }
-
-
-def _basin_schema() -> dict:
-    return {
-        "type": "object",
-        "required": ["basin_id", "basin_name", "created_at"],
-        "properties": {
-            "basin_id": {"type": "string"},
-            "basin_name": {"type": "string"},
-            "basin_group": _null_union({"type": "string"}),
-            "description": _null_union({"type": "string"}),
-            "created_at": {"type": "string", "format": "date-time"},
         },
     }

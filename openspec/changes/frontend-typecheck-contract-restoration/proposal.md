@@ -8,9 +8,10 @@
 
 ## What Changes
 
-- 补齐 **25 个 OpenAPI 具名 schema**。起点是 issue 列的 23 个种子名，传递闭包（`allOf`/`oneOf`/`anyOf`/`items`/`additionalProperties`/`properties` 统一遍历）得 33 个，再按实测分流掉 8 个：
+- 补齐 **24 个 OpenAPI 具名 schema**。起点是 issue 列的 23 个种子名，传递闭包（`allOf`/`oneOf`/`anyOf`/`items`/`additionalProperties`/`properties` 统一遍历）得 33 个，再按实测分流掉 9 个：
   - **3 个转前端本地**：`LineageResponse` 及其独家子节点 `ForcingVersion` / `QcResult`（后两者在旧 yaml 里的唯一父节点就是 `LineageResponse`，实测确认）。理由见下条。
   - **1 个只重指、不补写**：`ModelLifecycleRequest` 在旧 yaml 里**只被 requestBody 引用**（`/preflight` 与 `/lifecycle` 两处），今天这两个 requestBody 已由 FastAPI 从 `models.py:143` 的 `ModelLifecyclePayload` 自动生成。它不是响应体，补写它既凑不进"每个新增组件都必须被某条 operation 的响应 `$ref` 到"的规则，也只会造出 `ModelLifecyclePayload` 的重复孤儿组件。做法是把前端消费方重指过去。
+  - **1 个因运行时根本不产出而删除**：`GeoJsonPoint` 唯一入口是 `MetStation.geom`，但 `list_met_stations` 的 SELECT 只取 `ST_X(ms.geom) AS longitude` / `ST_Y(ms.geom) AS latitude`（`packages/common/forecast_store.py:1109-1119`），**从不 select `ms.geom`，也不 select `ms.active_flag`** —— 而旧 yaml 把这两个都列进了 `MetStation.required`。补写 `GeoJsonPoint` 只会造出孤儿组件。同一 row builder 的另一个一直在维护的手写 schema `_station_series_station_schema`（`openapi_patching.py:1610-1628`）声明的也正是扁平字段、没有 `geom`，互为佐证；前端的 Point 是 `lib/hydroMet/runtime.ts:90-105` 客户端合成的。
   - **4 个整支删除**：`HydroRun.product_quality` 字段今天已不存在（`product_quality` 在 `apps/ packages/ services/ workers/` 与整个前端均**零命中**，当前 yaml 的 `QhhLatestQuality` 也不再引用它），随之删掉只经它入闭包的 `QhhLatestProductQuality` / `FloodReturnPeriodProductQuality` / `FloodReturnPeriodQualityState`；`frequency_thresholds` 同样零命中（`_empty_forecast_response` 只返回 `{segment_id, issue_time, unit, series}`），它出现在 **`RiverSeriesResponse` 与 `SplicedForecastResponse` 两处**（前者还把它列进了 `required`），两处都删，随之删掉 `FloodFrequencyThresholds`。`RunStatus` 的 `frequency_done` 枚举值同理剔除。
 - **形状权威是当前 store / handler 实现，不是旧 yaml。** `b97c16e2^:openapi/nhms.v1.yaml` 只作**起草稿**：它记录了前端消费的字段名与结构，但它本身是从未被校验过的文档（见上），既可能多写今天不存在的字段（已实测到 3 处），也可能漏写今天已新增的字段（已实测：`SeriesSegment` 运行时发 `variable`，`forecast_store.py:4031`，旧 schema 未声明）。每个 schema 必须从对应 store 函数实际构造的 key 集合反推。
 
