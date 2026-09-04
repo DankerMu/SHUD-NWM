@@ -56,3 +56,4 @@
 - 不实现 `/api/v1/lineage/river-point` 路由。
 - 不把 `check:api-types` 接进 CI（issue 明确排除）。
 - 不改任何 handler 的返回值构造、不改 `BASELINE_NULLABLE_COUNT`、不放松任何既有断言。
+- 不把 `refused` 补进 `ModelLifecycleResult.status` enum（当前四值 `allowed|blocked|already_current|rollback`，`openapi/nhms.v1.yaml:4617-4622`）：`_record_state_clone_refusal_audit`（`packages/common/model_registry.py:3396-3401`）返回 `"status": "refused"`，经 `model_lifecycle_operation:2357` 正常 return（非异常）、路由 `apps/api/routes/models.py:629-640` 直送 `_ok` 得 **200**。**可达性前提**：今天不可达 —— `register_pre_activation_hook` 的调用方只有 tests 与 `openspec/changes/direct-grid-display-cutover/evidence/rehearse/rehearse.py:473-474`，API 进程内始终是默认的 `_default_no_op_hook`（`model_registry.py:606-610`）。一旦有人把真实 pre-activation hook 接进 API 进程，该 enum 连同本次刻意省略的 `cold_start_approval` 字段一起变成契约谎言。

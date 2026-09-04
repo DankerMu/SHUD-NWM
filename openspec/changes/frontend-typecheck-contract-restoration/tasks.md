@@ -57,19 +57,20 @@
 ## 6. 补门
 
 - [x] 6.1 `apps/frontend/package.json` 增加 `"typecheck": "tsc --noEmit -p tsconfig.app.json"`。
-- [ ] 6.2 `.github/workflows/ci.yml` 的 `frontend-build` job 增加**独立命名 step**（如 `- name: Typecheck frontend`）执行 `pnpm typecheck`。
+- [x] 6.2 `.github/workflows/ci.yml` 的 `frontend-build` job 增加**独立命名 step**（如 `- name: Typecheck frontend`）执行 `pnpm typecheck`。
   - **顺序陷阱**：现有 step 是融合的一行 `pnpm install --frozen-lockfile && pnpm build && pnpm test`（`ci.yml:395-396`）。照字面"置于 `pnpm build` 之前"会把新 step 排到 `pnpm install` **之前**，那时没有 `node_modules`、`tsc` 根本不存在。正确做法：**先把 `pnpm install --frozen-lockfile` 拆成独立 step**，typecheck step 置于其后、build 之前。
   - Required evidence：一次真实 PR CI run 的 `frontend-build` job 里该 step 显示 **executed + passed**（非 skip、非 warning-only），贴 run 链接。
+  - 已完成。证据：<https://github.com/DankerMu/SHUD-NWM/actions/runs/33838417298/job/100915577920> —— `Frontend Build` job 的 step 6 `Typecheck frontend` 为 `completed/success`（非 skip），排在 step 5 `Install frontend dependencies` 之后、step 7 `Build and test frontend` 之前，顺序陷阱已按拆分方案规避。
 
 ## 7. 证据与收尾
 
-- [ ] 7.1 PR body 列出 **33 个名字的逐名归宿表**：24 个 OpenAPI 具名（载体 · 路由 · 形状来源 store 函数 · 与旧 yaml 的差异）、1 个重指（`ModelLifecycleRequest`→`ModelLifecyclePayload`）、1 个因运行时无该字段而删（`GeoJsonPoint`）、3 个前端本地、4 个随死字段整支删除。24+1+1+3+4=33。
-- [ ] 7.6 为两条越界发现立 issue（只报不修）：① `_model_public_projection`（`model_registry.py:3601-3622`）不 pop `mesh_properties_json`，而 `_model_asset_detail:3545` 会 pop —— lifecycle 响应会外泄原始 mesh properties JSON，属潜在路径/血缘泄漏；② `docs/spec/03_database_design.md:68`、`docs/appendices/C_database_schema_draft.md:28`、`docs/runbooks/forcing-copyback-backfill.md:66` 把 `frequency_done` 当作 `hydro.run_status` 合法成员，其中一处写进 `status IN (...)` 的 SQL、对该字面量恒不命中。
-- [ ] 7.2 记录 residual：新增 schema 是纯文档，**不做运行时校验**（与 `b97c16e2^` 之前的状态一致，非能力降级）；`response_model=` 升级另立 issue。
-- [ ] 7.3 为 `/api/v1/lineage/river-point` 后端路由缺失（生产静默降级）立 issue。
-- [ ] 7.4 node-27 跑后端契约测试（`tests/test_api_contract.py` 与 3.4 的新校验测试按 CLAUDE.md 路由需真实 DB oracle 复核）。
+- [x] 7.1 PR body 列出 **33 个名字的逐名归宿表**：24 个 OpenAPI 具名（载体 · 路由 · 形状来源 store 函数 · 与旧 yaml 的差异）、1 个重指（`ModelLifecycleRequest`→`ModelLifecyclePayload`）、1 个因运行时无该字段而删（`GeoJsonPoint`）、3 个前端本地、4 个随死字段整支删除。24+1+1+3+4=33。
+- [ ] 7.6 为两条越界发现立 issue（只报不修）。① **已立单 #2038**——立单核查确认这是真实的脱敏绕过而非潜在风险（同一响应体内 `preflight.lineage.mesh_properties.source_path` 为 `[redacted]`、`model.mesh_properties_json.source_path` 为真实路径），并纠正了原观察两处：`/preflight` **不受影响**，但 `PUT .../active` 同样受影响。② **仍未立单**。原始观察：① `_model_public_projection`（`model_registry.py:3601-3622`）不 pop `mesh_properties_json`，而 `_model_asset_detail:3545` 会 pop —— lifecycle 响应会外泄原始 mesh properties JSON，属潜在路径/血缘泄漏；② `docs/spec/03_database_design.md:68`、`docs/appendices/C_database_schema_draft.md:28`、`docs/runbooks/forcing-copyback-backfill.md:66` 把 `frequency_done` 当作 `hydro.run_status` 合法成员，其中一处写进 `status IN (...)` 的 SQL、对该字面量恒不命中。
+- [x] 7.2 记录 residual：新增 schema 是纯文档，**不做运行时校验**（与 `b97c16e2^` 之前的状态一致，非能力降级）；`response_model=` 升级另立 issue。
+- [x] 7.3 为 `/api/v1/lineage/river-point` 后端路由缺失（生产静默降级）立 issue。已立单 **#2039**；立单时对公网实测确认 404，并查实修法是造功能而非注册路由（无血缘图存储，`docs/spec/04_api_design.md:227-251` 与前端 interface 两份契约互斥）。
+- [ ] 7.4 **（合并前唯一未闭合项）** node-27 跑后端契约测试（`tests/test_api_contract.py` 与 3.4 的新校验测试按 CLAUDE.md 路由需真实 DB oracle 复核）。
   - 附带一行闭环删 `frequency_done` 的决定：`SELECT unnest(enum_range(NULL::hydro.run_status));` —— 仓库迁移证据已足够强，但排除不了带外 `ALTER TYPE ... ADD VALUE`。
-- [ ] 7.5 PR body 记一句 `PUT /api/v1/models/{model_id}/active`：旧 yaml 里它同样 `$ref` 到 `ModelLifecycleResult`，但前端无 typed 消费方（`apps/frontend/src` 无任何 `client.PUT(`），不构成 tsc 缺口，故不在本次 14 条路由内 —— 代价是同一形状在文档里具名/匿名并存，显式取舍。
+- [x] 7.5 PR body 记一句 `PUT /api/v1/models/{model_id}/active`：旧 yaml 里它同样 `$ref` 到 `ModelLifecycleResult`，但前端无 typed 消费方（`apps/frontend/src` 无任何 `client.PUT(`），不构成 tsc 缺口，故不在本次 14 条路由内 —— 代价是同一形状在文档里具名/匿名并存，显式取舍。
 
 ## Evidence Floor
 
