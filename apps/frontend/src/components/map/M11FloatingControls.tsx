@@ -167,7 +167,12 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
       // 宽度跟着最长的图例行走：固定 w-56 会在右侧留下约三分之一死白（实测内容区
       // 200px / 最宽行 137px）。max-w-56 保住原来的上限，未来出现更长的标签也不会
       // 把卡片撑过地图。
-      className={cn('absolute bottom-4 right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
+      //
+      // bottom-12 而不是 bottom-4：地图右下角是 MapLibre 版权归属的固定位置，
+      // 实测它离底 10px、高 24px（折叠成小钮后是 36x24，一样高），bottom-4 会压掉一角。
+      // 版权标注是瓦片供应商的硬要求，让我们自己的浮层避让。48px 留 14px 余量，
+      // 几何由 e2e/m11-overlay-collision.mocked.spec.ts 守住。
+      className={cn('absolute bottom-12 right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
       aria-label="地图图例"
       data-testid="m11-floating-legend"
     >
