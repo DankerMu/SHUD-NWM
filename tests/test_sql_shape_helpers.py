@@ -86,251 +86,48 @@ from __future__ import annotations
 import ast
 import re
 import textwrap
+from pathlib import Path
 
-_SUBQUERY_START = re.compile(r"\(\s*SELECT\b", re.IGNORECASE)
+import pytest
 
-# The token immediately before a key-resolution sub-select is a comparison
-# operator. The lookbehind keeps composite operators that merely END in one of
-# these characters out: `->` / `->>` (json) and `=>` (named argument) are not
-# comparisons, and treating them as such would widen the stripper again.
-_COMPARISON_TAIL = re.compile(r"(?<![-=<>!])(<>|!=|<=|>=|=|<|>)\s*$")
-
-_LINE_COMMENT = re.compile(r"--[^\n]*")
-
-_WHITESPACE = re.compile(r"\s+")
-
-# Text identity columns of hydro.river_timeseries, as #1341 classifies them.
-#
-# Sanctioned: kept as redundant transitional pushdown predicates because
-# compression still segments/orders compressed chunks by them (000047:
-# segmentby run_id, river_network_version_id, river_segment_id; orderby
-# variable, valid_time) and TimescaleDB 2.10.2 cannot push an integer-key
-# predicate through that. `river_segment_id` is a segmentby column too but is
-# NOT sanctioned by this shared default: on the display surfaces #1341 owns it
-# would be a text fact join (they reach the fact table once per row of a
-# segment relation), which the delta forbids outright.
-#
-# Two adjudicated position-dependent exceptions extend this default WITHOUT
-# widening it, so no surface inherits them by accident:
-# LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS below (#1341's correlated probe bodies),
-# and #1442's eight constant-binding forecast_store segment blocks, which bind
-# `river_segment_id` as a literal and measurably need it for segmentby pruning
-# (design D10.7). The latter lives in
-# `tests/test_river_ts_text_identity_cleanup.py` as that oracle's own ceiling,
-# passed per call site through `assert_text_fact_columns(..., allowed=...)`.
-SANCTIONED_TEXT_PUSHDOWN_COLUMNS: tuple[str, ...] = (
-    "run_id",
-    "river_network_version_id",
-    "variable",
+from packages.common import river_ts_render
+from packages.common.river_ts_render import (
+    FORBIDDEN_TEXT_FACT_COLUMNS,
+    LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
+    PUSHDOWN_AID_MARKER,
+    RIVER_TABLE,
+    RIVER_TABLE_LEGACY,
+    SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
+    TEXT_AID_COUNTERPARTS,
+    TEXT_IDENTITY_COLUMNS,
+    fact_table_attribution,
+    fact_table_name_occurrences,
+    fact_table_text_identity_columns,
+    outer_predicates,
+    render_river_ts_sql,
+    strip_all_subqueries,
+    strip_comments,
+    strip_scalar_subqueries,
+    text_fact_columns,
 )
-FORBIDDEN_TEXT_FACT_COLUMNS: tuple[str, ...] = (
-    "basin_version_id",
-    "river_segment_id",
-    "unit",
-    "quality_flag",
-)
-# Position-dependent extension (#1341 round-3 P1 remedy). The two national
-# legs no longer join the fact table set-based: they drive from tile_segments
-# and probe it once per segment through a `CROSS JOIN LATERAL (... LIMIT 1)`.
-# Inside that probe the correlated `lr.` / `seg.` values are constants for the
-# duration of one loop, so `river_segment_id` behaves exactly like the other
-# three aids — it reaches the compressed segmentby index and the text primary
-# key — rather than being the unpushable text fact join the classification
-# above rules out. It is sanctioned in that position ONLY: it stays in
-# FORBIDDEN_TEXT_FACT_COLUMNS so every constant-bound surface keeps rejecting
-# it, and the national pins additionally assert that no `ts.` reference of
-# either leg lives outside the lateral body.
-LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + ("river_segment_id",)
-TEXT_IDENTITY_COLUMNS: tuple[str, ...] = SANCTIONED_TEXT_PUSHDOWN_COLUMNS + FORBIDDEN_TEXT_FACT_COLUMNS
+from tests.river_ts_template_registry import FORECAST_STORE_SEGMENT_BLOCKS, REGISTRY, entry_by_key
 
-# The key/enum column each text identity column is transitional FOR. A retained
-# text aid is only ever allowed to narrow, which is exactly the statement "it is
-# AND-ed with this column in the same conjunction" — see
-# :func:`assert_aid_is_conjoined_with_its_counterpart`.
-TEXT_AID_COUNTERPARTS: dict[str, str] = {
-    "run_id": "run_key",
-    "river_network_version_id": "river_network_version_key",
-    "river_segment_id": "river_segment_key",
-    "basin_version_id": "basin_version_key",
-    "variable": "variable_e",
-    # Not identity predicates on any switched surface, but 000050 gives them a
-    # twin too, and the map is asserted total against TEXT_IDENTITY_COLUMNS so a
-    # column cannot be classified without naming what makes it redundant.
-    "unit": "unit_e",
-    "quality_flag": "quality_flag_e",
-}
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
-
-def _scan_quoted(sql: str, start: int, quote: str) -> int:
-    """Index just past the quoted run beginning at ``start`` (doubled quote escapes)."""
-    index = start + 1
-    length = len(sql)
-    while index < length:
-        if sql[index] == quote:
-            if index + 1 < length and sql[index + 1] == quote:
-                index += 2
-                continue
-            return index + 1
-        index += 1
-    return length
-
-
-def _scan_block_comment(sql: str, start: int) -> int:
-    end = sql.find("*/", start + 2)
-    return len(sql) if end == -1 else end + 2
-
-
-def _scan_line_comment(sql: str, start: int) -> int:
-    end = sql.find("\n", start)
-    return len(sql) if end == -1 else end
-
-
-def _skip_balanced(sql: str, start: int) -> int:
-    """Index just past the parenthesis group opening at ``start``.
-
-    Parentheses inside strings, quoted identifiers and comments do not count,
-    so ``(SELECT ... WHERE name = ')' ...)`` is consumed whole rather than cut
-    at the literal.
-    """
-    depth = 0
-    index = start
-    length = len(sql)
-    while index < length:
-        character = sql[index]
-        if character in "'\"":
-            index = _scan_quoted(sql, index, character)
-            continue
-        if sql.startswith("--", index):
-            index = _scan_line_comment(sql, index)
-            continue
-        if sql.startswith("/*", index):
-            index = _scan_block_comment(sql, index)
-            continue
-        if character == "(":
-            depth += 1
-        elif character == ")":
-            depth -= 1
-            if depth == 0:
-                return index + 1
-        index += 1
-    return length
-
-
-def _in_comparison_value_position(kept: list[str]) -> bool:
-    tail = _LINE_COMMENT.sub("", "".join(kept[-160:]))
-    return _COMPARISON_TAIL.search(tail) is not None
-
-
-def strip_scalar_subqueries(sql: str) -> str:
-    """Return ``sql`` with every comparison-position sub-``SELECT`` removed.
-
-    CTE openers, derived tables, ``EXISTS``/``IN`` sub-selects and ordinary
-    function calls are preserved; see the module docstring for why each one
-    matters. String literals, quoted identifiers and both comment styles are
-    traversed rather than parsed, so a ``(SELECT`` written inside any of them
-    is never mistaken for a sub-select.
-    """
-    kept: list[str] = []
-    index = 0
-    length = len(sql)
-    while index < length:
-        character = sql[index]
-        if character in "'\"":
-            end = _scan_quoted(sql, index, character)
-            kept.append(sql[index:end])
-            index = end
-            continue
-        if sql.startswith("--", index):
-            end = _scan_line_comment(sql, index)
-            kept.append(sql[index:end])
-            index = end
-            continue
-        if sql.startswith("/*", index):
-            end = _scan_block_comment(sql, index)
-            kept.append(sql[index:end])
-            index = end
-            continue
-        if character == "(" and _SUBQUERY_START.match(sql, index) and _in_comparison_value_position(kept):
-            index = _skip_balanced(sql, index)
-            continue
-        kept.append(character)
-        index += 1
-    return "".join(kept)
-
-
-def strip_all_subqueries(sql: str) -> str:
-    """Return ``sql`` with EVERY parenthesized sub-``SELECT`` removed.
-
-    The blunt companion to :func:`strip_scalar_subqueries`, added for #1442's
-    bare-fragment face. Those call sites resolve identity with an ``IN``
-    sub-select — ``run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id
-    = %s)`` — which is deliberately NOT comparison position, so the precise
-    stripper keeps it and the authority table's own ``WHERE run_id = %s`` reads
-    as a regression.
-
-    Only safe where the fragment has no CTE and no derived table, because this
-    deletes those too. That is exactly the shape of a WHERE fragment or a single
-    flat statement; anything with a ``WITH`` must keep using
-    :func:`outer_predicates`, or its body vanishes and its pins go vacuous.
-    """
-    kept: list[str] = []
-    index = 0
-    length = len(sql)
-    while index < length:
-        character = sql[index]
-        if character in "'\"":
-            end = _scan_quoted(sql, index, character)
-            kept.append(sql[index:end])
-            index = end
-            continue
-        if sql.startswith("--", index):
-            end = _scan_line_comment(sql, index)
-            kept.append(sql[index:end])
-            index = end
-            continue
-        if sql.startswith("/*", index):
-            end = _scan_block_comment(sql, index)
-            kept.append(sql[index:end])
-            index = end
-            continue
-        if character == "(" and _SUBQUERY_START.match(sql, index):
-            index = _skip_balanced(sql, index)
-            continue
-        kept.append(character)
-        index += 1
-    return "".join(kept)
-
-
-def strip_comments(sql: str) -> str:
-    """Return ``sql`` with both comment styles replaced by a single space.
-
-    Uses the same traversal as :func:`strip_scalar_subqueries`, so a ``--``
-    written inside a string literal is text, not a comment. Comments must go
-    before any adjacency assertion: the production SQL puts a "transitional
-    pushdown aid" note between a text predicate and its key counterpart, and a
-    naive substring check would see the comment as separation.
-    """
-    kept: list[str] = []
-    index = 0
-    length = len(sql)
-    while index < length:
-        character = sql[index]
-        if character in "'\"":
-            end = _scan_quoted(sql, index, character)
-            kept.append(sql[index:end])
-            index = end
-            continue
-        if sql.startswith("--", index):
-            index = _scan_line_comment(sql, index)
-            kept.append(" ")
-            continue
-        if sql.startswith("/*", index):
-            index = _scan_block_comment(sql, index)
-            kept.append(" ")
-            continue
-        kept.append(character)
-        index += 1
-    return "".join(kept)
+# The text-identity vocabulary and the SQL text machinery that attributes a
+# column reference to a table MOVED to `packages/common/river_ts_render.py`
+# (#1980, fixture decision 2). They are re-imported rather than re-declared:
+# the renderer performs the very same table-scoped no-text-identity check on
+# every statement it produces, `packages/` cannot import `tests/`, and two
+# copies of a boundary are two boundaries. Everything below still names them
+# unqualified, so no call site in this file or its four consumers changed; the
+# self-tests further down keep exercising the real implementations through
+# these names, which is what stops the move from turning the oracle vacuous.
+#
+# What did NOT move: `sql_literals` / `sql_from_python` (Python-AST helpers, not
+# SQL text), and the two `assert_*` helpers below — those raise AssertionError
+# by design, whereas the renderer must raise a named exception carrying the
+# entry it refused.
 
 
 _LOOKS_LIKE_SQL = re.compile(r"\bSELECT\b", re.IGNORECASE)
@@ -369,39 +166,6 @@ def sql_literals(python_source: str) -> tuple[str, ...]:
 def sql_from_python(python_source: str) -> str:
     """:func:`sql_literals` newline-joined, for pins that span every branch."""
     return "\n".join(sql_literals(python_source))
-
-
-def outer_predicates(sql: str) -> str:
-    """The outer query's own text: sub-selects gone, comments gone, one space.
-
-    This is the canonical form the #1341 pins assert against. Key-resolution
-    sub-selects contain ``WHERE run_id = :run_id`` against the AUTHORITY table
-    by design, so a pin that inspects raw source cannot distinguish switched
-    code from unswitched code; and whitespace-collapsing is what lets the
-    "text predicate is immediately followed by its key counterpart" invariant
-    be written as one exact substring.
-    """
-    return _WHITESPACE.sub(" ", strip_comments(strip_scalar_subqueries(sql))).strip()
-
-
-def text_fact_columns(sql: str, alias: str) -> set[str]:
-    """Text identity columns of the fact table referenced by the outer query.
-
-    ``\\b`` after the column name is load-bearing: it keeps ``ts.variable``
-    from matching ``ts.variable_e`` (and ``ts.unit`` from ``ts.unit_e``), which
-    would make every pin unsatisfiable rather than discriminating.
-
-    Consumers assert this set *equals* the sanctioned columns that surface is
-    allowed to carry, not merely that it excludes the forbidden ones — an
-    equality catches both a forbidden column appearing and a sanctioned
-    pushdown aid silently disappearing.
-    """
-    outer = outer_predicates(sql)
-    return {
-        column
-        for column in TEXT_IDENTITY_COLUMNS
-        if re.search(rf"\b{re.escape(alias)}\.{column}\b", outer) is not None
-    }
 
 
 def assert_text_fact_columns(
@@ -949,3 +713,167 @@ def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> No
         assert "FROM hydro.river_timeseries" in stripped, name
         assert "SELECT run_key FROM hydro.hydro_run" not in stripped, name
         assert "enum_range" not in stripped, name
+
+
+# ---------------------------------------------------------------------------
+# Per-store rendering of every registered template (#1980, task 1.3)
+#
+# The shared half of the coverage: this module is the one both display and
+# out-of-boundary oracles depend on, so "every registered template survives both
+# renderings" is asserted here once instead of twice, per file, with two
+# definitions of what survival means. The per-file marker/aid CENSUS stays in
+# each file's owning oracle (fixture decision 7) — this is about the templates,
+# not about who owns them.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
+def test_every_registered_template_renders_for_the_legacy_store(entry) -> None:
+    """Legacy is the template plus a rename — every aid included.
+
+    The legacy table keeps 000047's text-column compression layout, so an aid
+    dropped from this branch is the measured compressed-chunk collapse applied to
+    exactly the rows that have not moved yet.
+    """
+    template = entry.source()
+
+    rendered = render_river_ts_sql(template, "legacy", entry=entry.key)
+
+    assert rendered.sql == template.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    assert rendered.sql.count(PUSHDOWN_AID_MARKER) == entry.expected_aids
+    assert rendered.removed_placeholders == ()
+
+
+@pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
+def test_every_registered_template_renders_for_the_narrow_store(entry) -> None:
+    """Narrow keeps the canonical name and carries no text identity at all.
+
+    ``render_river_ts_sql`` refuses rather than returns on a mis-shaped marker, a
+    lost key predicate or a broken structure, so calling it IS most of the
+    assertion; what is added here is the census-shaped part (the aid count) and
+    the table-scoped emptiness the whole cleanup turns on.
+    """
+    template = entry.source()
+
+    rendered = render_river_ts_sql(template, "narrow", entry=entry.key)
+
+    assert PUSHDOWN_AID_MARKER not in rendered.sql
+    assert RIVER_TABLE_LEGACY not in rendered.sql
+    assert fact_table_text_identity_columns(rendered.sql) == set()
+    # Non-vacuity: the narrow variant really is shorter by exactly the aid blocks.
+    assert len(rendered.sql.split("\n")) == len(template.split("\n")) - 2 * entry.expected_aids
+    if entry.params == "positional":
+        # A deleted aid line takes its `%s` with it, and the caller's tuple has to
+        # shrink by exactly that many. Checked against the AIDS, not against
+        # `count('%s')` before minus after: that difference is computed by the same
+        # deletion it is supposed to audit, so it holds for any indices the renderer
+        # cares to report and cannot go red (round-2 H7-a). Guarded on the dialect,
+        # not on the tuple being non-empty, so an entry that stopped reporting
+        # removals is caught rather than skipped.
+        assert len(rendered.removed_placeholders) == sum("%s" in aid for aid in rendered.removed_aids)
+        assert rendered.removed_placeholders == POSITIONAL_INDEX_PINS[entry.key], entry.key
+    else:
+        assert rendered.removed_placeholders == ()
+        assert rendered.removed_aids == () or all("%s" not in aid for aid in rendered.removed_aids)
+
+
+#: The removed positional-placeholder indices of every positional entry, spelled
+#: out. Measured at 515a3947 and pinned as literals on purpose: a formula
+#: computed from the same render it checks agrees with whatever that render says
+#: (round-2 H7-a), and these indices are the caller's parameter tuple — an
+#: off-by-one here is a psycopg2 arity error in the migration window, or worse, a
+#: silently reordered tuple that binds `valid_time` where `run_id` belonged.
+POSITIONAL_INDEX_PINS: dict[str, tuple[int, ...]] = {
+    "forecast_store:segment_identity_predicates": (3, 4),
+    "forecast_store:latest_issue_time": (3, 4),
+    "forecast_store:per_source_latest_cycles": (3, 4),
+    "forecast_store:latest_analysis_issue_time": (3, 4),
+    "forecast_store:analysis_segment_rows": (3, 4),
+    "forecast_store:forecast_segment_rows_selected_cycles": (5, 6),
+    "forecast_store:forecast_segment_rows": (3, 4),
+    "forecast_store:latest_run_type_valid_time": (3, 4),
+    "forecast_store:run_type_segment_rows": (3, 4),
+    "parser:replace_chain_probe": (1,),
+    "parser:replace_chain_window": (1,),
+}
+
+
+def test_every_positional_entry_has_an_index_pin() -> None:
+    """No positional entry may join the register without its indices being written down."""
+    assert set(POSITIONAL_INDEX_PINS) == {entry.key for entry in REGISTRY if entry.params == "positional"}
+
+
+@pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
+def test_every_registered_template_is_counted_the_same_way_twice(entry) -> None:
+    """The structural walk and the name counter must agree, entry by entry.
+
+    The name counter is deliberately ignorant of `FROM` / `JOIN` / aliases so it
+    can disagree with the structural walk; this sweep is what says the two never
+    do over the real register — every registered template names the fact table in
+    exactly the forms the walk models (round-2 H3).
+    """
+    template = entry.source()
+
+    assert fact_table_name_occurrences(template) == fact_table_attribution(template).reference_count, entry.key
+
+
+@pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
+def test_every_registered_templates_aid_count_matches_its_marker_count(entry) -> None:
+    """1:1, which is the invariant the whole line-deletion scheme rests on."""
+    template = entry.source()
+
+    assert template.count(PUSHDOWN_AID_MARKER) == entry.expected_aids, entry.key
+    assert template.count("remove with #1342") == entry.expected_aids, (
+        f"{entry.key}: a non-verbatim aid marker is present"
+    )
+
+
+def test_the_rendered_aid_total_reconciles_with_the_per_file_census() -> None:
+    """Rendered 58, in source 34 — and the difference is stated, not waved at.
+
+    The two numbers count different things and both are load-bearing, so they are
+    reconciled here rather than left to look like a contradiction:
+
+    * **34** is the ``grep -rn "remove with #1342"`` total over the seven
+      REGISTERED reader SOURCE files (fixture "Measured baseline"), pinned per
+      file in each file's owning oracle — ``REGISTERED_SOURCES`` plus
+      ``DISPLAY_MARKER_AID_CENSUS``, not a sweep of the tree, so an unregistered
+      reader is not in it (that is I11's discovery-set census, tasks 7.2a).
+      That is the number #1342 deletes from those files.
+    * **58** is the total over RENDERED templates, which is larger for exactly one
+      reason: ``forecast_store._SEGMENT_IDENTITY_PREDICATE_SQL`` carries three
+      aids in the source once and is embedded by all eight segment blocks, so
+      those three aids are rendered nine times (once as the fragment entry, once
+      inside each block) and appear 8 × 3 = 24 times more than they are written.
+
+    Pinned as an identity rather than as two independent constants: if a block
+    stopped embedding the fragment — the change that would silently drop its
+    segmentby pruning — the arithmetic breaks here even though both totals could
+    be individually re-pinned to something self-consistent.
+    """
+    rendered_total = sum(entry.expected_aids for entry in REGISTRY)
+    fragment = entry_by_key("forecast_store:segment_identity_predicates")
+    embedding_blocks = len(FORECAST_STORE_SEGMENT_BLOCKS)
+
+    assert rendered_total == 58
+    assert rendered_total - embedding_blocks * fragment.expected_aids == 34
+
+
+def test_the_sanctioned_vocabulary_is_the_shared_one_not_a_private_copy() -> None:
+    """The move must not have left a second definition behind (#1980, decision 2)."""
+    assert SANCTIONED_TEXT_PUSHDOWN_COLUMNS is river_ts_render.SANCTIONED_TEXT_PUSHDOWN_COLUMNS
+    assert FORBIDDEN_TEXT_FACT_COLUMNS is river_ts_render.FORBIDDEN_TEXT_FACT_COLUMNS
+    assert LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS is river_ts_render.LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS
+    assert TEXT_IDENTITY_COLUMNS is river_ts_render.TEXT_IDENTITY_COLUMNS
+    assert TEXT_AID_COUNTERPARTS is river_ts_render.TEXT_AID_COUNTERPARTS
+    assert text_fact_columns is river_ts_render.text_fact_columns
+    assert outer_predicates is river_ts_render.outer_predicates
+    source = (REPO_ROOT / "tests" / "test_sql_shape_helpers.py").read_text(encoding="utf-8")
+    for name in (
+        "SANCTIONED_TEXT_PUSHDOWN_COLUMNS",
+        "FORBIDDEN_TEXT_FACT_COLUMNS",
+        "LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS",
+        "TEXT_IDENTITY_COLUMNS",
+        "TEXT_AID_COUNTERPARTS",
+    ):
+        assert f"\n{name}" not in source, f"{name} was re-declared here instead of imported"

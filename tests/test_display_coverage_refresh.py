@@ -299,10 +299,14 @@ def test_pushdown_predicates_present_in_both_sample_ctes() -> None:
     # its key/enum counterpart. Asserted as one substring each, because two
     # independent `in` checks also pass when the pair is split across the query
     # and the "strict no-op" argument no longer holds.
-    assert "WHERE rt.variable = 'q_down' AND rt.variable_e = 'q_down'::hydro.river_variable" in outer
-    assert "(rt.run_id = %(scan_run_id)s AND rt.run_key = )" in outer
+    # #1980 re-pin: the `variable` aid moved off the `WHERE` line onto its own
+    # marked `AND` line, and the two guards' aids moved inside `OR (` with the
+    # marker above them (hence the space after the bracket once comments are
+    # stripped). Same conjunctions, same truth table, same fold-away on NULL.
+    assert "WHERE rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'" in outer
+    assert "( rt.run_id = %(scan_run_id)s AND rt.run_key = )" in outer
     assert (
-        "(rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = )"
+        "( rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = )"
     ) in outer
 
     # Negative half: the aids are bounded to the sanctioned three, and nothing

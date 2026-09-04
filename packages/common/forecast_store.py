@@ -1894,26 +1894,28 @@ class PsycopgForecastStore:
                   ON cr.run_key = rt.run_key
                  AND cr.basin_version_key = rt.basin_version_key
                  AND cr.river_network_version_key = rt.river_network_version_key
-                -- transitional compressed-chunk pushdown aid, remove with #1342
-                WHERE rt.variable = 'q_down'
-                  AND rt.variable_e = 'q_down'::hydro.river_variable
+                WHERE rt.variable_e = 'q_down'::hydro.river_variable
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND rt.variable = 'q_down'
                   AND rt.valid_time >= cr.display_start_time
                   AND rt.valid_time <= cr.display_end_time
                   AND (%(scan_run_id)s IS NULL
-                       -- transitional compressed-chunk pushdown aid, remove with #1342
-                       OR (rt.run_id = %(scan_run_id)s
-                           AND rt.run_key = (SELECT run_key FROM hydro.hydro_run
-                                             WHERE run_id = %(scan_run_id)s)))
+                       OR (
+                           -- transitional compressed-chunk pushdown aid, remove with #1342
+                           rt.run_id = %(scan_run_id)s AND
+                           rt.run_key = (SELECT run_key FROM hydro.hydro_run
+                                         WHERE run_id = %(scan_run_id)s)))
                   AND (%(scan_basin_version_id)s IS NULL
                        OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
                                                   WHERE basin_version_id = %(scan_basin_version_id)s))
                   AND (%(scan_river_network_version_id)s IS NULL
-                       -- transitional compressed-chunk pushdown aid, remove with #1342
-                       OR (rt.river_network_version_id = %(scan_river_network_version_id)s
-                           AND rt.river_network_version_key = (SELECT river_network_version_key
-                                                               FROM core.river_network_version
-                                                               WHERE river_network_version_id
-                                                                     = %(scan_river_network_version_id)s)))
+                       OR (
+                           -- transitional compressed-chunk pushdown aid, remove with #1342
+                           rt.river_network_version_id = %(scan_river_network_version_id)s AND
+                           rt.river_network_version_key = (SELECT river_network_version_key
+                                                           FROM core.river_network_version
+                                                           WHERE river_network_version_id
+                                                                 = %(scan_river_network_version_id)s)))
                   AND (%(scan_display_start)s IS NULL
                        OR rt.valid_time >= %(scan_display_start)s)
                   AND (%(scan_display_end)s IS NULL

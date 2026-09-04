@@ -89,8 +89,14 @@ import pytest
 
 from packages.common import forecast_store
 from packages.common.forecast_store import PsycopgForecastStore, _ScenarioFilter
+from packages.common.river_ts_render import PUSHDOWN_AID_MARKER
 from services.tile_publisher import forcing_copyback_backfill as backfill_module
 from services.tile_publisher import publisher as publisher_module
+from tests.river_ts_template_registry import (
+    NON_TEMPLATE_MENTIONS,
+    REGISTRY,
+    assert_marker_census,
+)
 from tests.test_sql_shape_helpers import (
     FORBIDDEN_TEXT_FACT_COLUMNS,
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
@@ -121,6 +127,12 @@ REGISTERED_SOURCES: tuple[str, ...] = (
     "db/seeds/seed_demo.py",
     "workers/output_parser/parser.py",
     "tests/integration_helpers.py",
+    # #1980: the shared renderer holds the two table-name constants and MUST hold
+    # no statement. Registering it is what makes a statement sneaking into the
+    # helper red — the census below pins its mention count at exactly the two
+    # constants, and the selector wiring meta-test then forces a diff to it to
+    # run this oracle.
+    "packages/common/river_ts_render.py",
 )
 
 RIVER_TABLE = "hydro.river_timeseries"
@@ -178,12 +190,60 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "db/seeds/seed_demo.py": 5,
     "workers/output_parser/parser.py": 4,
     "tests/integration_helpers.py": 3,
+    # river_ts_render.py 2 = RIVER_TABLE and RIVER_TABLE_LEGACY. Two, not one,
+    # because `_river_table_mentions` matches a PREFIX of the name (the `_legacy`
+    # literal opens with the canonical one), not a whole identifier. Any third
+    # mention means a statement (or a third name) arrived in the shared helper —
+    # including one spelled in a refusal MESSAGE, which is why that module's
+    # messages describe the fact table rather than naming it.
+    "packages/common/river_ts_render.py": 2,
+}
+
+# Per-file marker/aid census (#1980, task 1.1). The four production files this
+# oracle owns (fixture decision 7); mvt, hydro_display and display_coverage are
+# censused by tests/test_river_ts_read_path_surrogate_keys.py, and the two
+# registers stay mutually exclusive so exactly one test reddens per file.
+#
+# Counted on the SOURCE, which is the number #1342 deletes:
+#
+# * forecast_store.py 6 = the three-aid segment-identity FRAGMENT (written once,
+#   embedded by all eight blocks) + the latest-product fallback's three.
+# * publisher.py 1 / forcing_copyback_backfill.py 1 = the single `variable` aid
+#   each, in an ON chain and inside a correlated EXISTS respectively.
+# * parser.py 2 = the probe's and the window read's `run_id` aid. Unchanged by
+#   #1980: both already sat one aid per marker on the line below it, which is why
+#   a parser diff in this PR would be a deviation.
+# * the remaining registered files carry no aid at all, and 0 is asserted rather
+#   than skipped: an aid appearing in the autopipeline tick or a seed helper is
+#   exactly the regression the zero says will not happen.
+MARKER_AID_CENSUS: dict[str, int] = {
+    "packages/common/forecast_store.py": 6,
+    "services/tile_publisher/publisher.py": 1,
+    "services/tile_publisher/forcing_copyback_backfill.py": 1,
+    "scripts/node27_autopipeline.py": 0,
+    "scripts/summarize_qhh_smoke_results.py": 0,
+    "scripts/reset_qhh_smoke_db.py": 0,
+    "db/seeds/seed_demo.py": 0,
+    "workers/output_parser/parser.py": 2,
+    "tests/integration_helpers.py": 0,
+    "packages/common/river_ts_render.py": 0,
+}
+
+# Lines that carry the ``#1342`` tag WITHOUT being an aid marker, per file. Only
+# the renderer has any: the marker constant itself and the tag it matches
+# non-verbatim markers by. Declared rather than tolerated, so mvt's pre-#1980
+# 1:N wording cannot reappear anywhere in this register as "just a comment".
+NON_AID_MARKER_TAG_LINES: dict[str, int] = {
+    "packages/common/river_ts_render.py": 2,
 }
 
 # The marker every retained transitional text predicate must carry, verbatim.
 # #1341 introduced the wording; #1342 removes every line that has it, so a
 # retained aid without the marker is an aid nobody will remember to delete.
-PUSHDOWN_AID_MARKER = "-- transitional compressed-chunk pushdown aid, remove with #1342"
+# Imported, not re-declared (#1980): `packages/common/river_ts_render.py` deletes
+# by exactly this string, and a second copy here could drift from the one the
+# renderer actually matches — which would make this oracle green on a template
+# the renderer refuses.
 
 # Per-group ceilings, as adjudicated in design D1 (A segment blocks amended by
 # D10.7). The segment blocks are the one group whose ceiling exceeds the shared
@@ -291,18 +351,40 @@ def _docstring_constants(tree: ast.AST) -> set[int]:
     return found
 
 
+#: A SCHEMA-QUALIFIED mention of the fact table, however it is quoted, spaced or
+#: cased. The census's closure is over this class and not over one spelling:
+#: ``str.count("hydro.river_timeseries")`` counted ``"hydro"."river_timeseries"``
+#: and ``HYDRO . river_timeseries`` zero times, so a new read site could arrive
+#: in a registered file without moving the census and therefore without ever
+#: being forced into the template register (#2018 round-2, lane-1 F1).
+#:
+#: Deliberately NOT the renderer's bare-name token: registered sources spell the
+#: table unqualified on purpose — as a value passed to a delete helper, as a
+#: column list, in a table name constant — and counting those would move 8 of the
+#: 10 per-file numbers for no gain. The unqualified search_path spelling of a
+#: READ is refused by ``render_river_ts_sql`` at render time (its counter counts
+#: the bare token, the FROM/JOIN walk does not model it, and the disagreement
+#: refuses); what this census cannot do is FORCE such a read into the register,
+#: and that is the recorded limit of the closure.
+_RIVER_TABLE_SPELLING = re.compile(r'(?:"hydro"|\bhydro)\s*\.\s*"?river_timeseries', re.IGNORECASE)
+
+
 def _river_table_mentions(source: str) -> int:
-    """Occurrences of ``hydro.river_timeseries`` in non-docstring string constants.
+    """Schema-qualified mentions of the fact table in non-docstring string constants.
 
     Parsed rather than grepped for the same reason ``_sql_constants`` is: raw
     source counts every ``#`` comment and docstring paragraph that names the
     table, which turns a prose edit into a census failure and teaches everyone
     to bump the number without reading it.
+
+    Matched with :data:`_RIVER_TABLE_SPELLING` rather than counted as a
+    substring, so the count is over the class of qualified spellings and not
+    over one of them.
     """
     tree = ast.parse(source)
     docstrings = _docstring_constants(tree)
     return sum(
-        node.value.count(RIVER_TABLE)
+        len(_RIVER_TABLE_SPELLING.findall(node.value))
         for node in ast.walk(tree)
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings
     )
@@ -349,18 +431,21 @@ def _assert_aids_are_marked(sql: str, alias: str, expected_aids: set[str], label
     """Every sanctioned text conjunct of ``alias`` sits under the removal marker.
 
     Asserted per aid on the RAW sql (markers are comments, so they are gone from
-    ``outer_predicates``): the marker must be ADJACENT to the aid — on the aid's
-    own line or on the line immediately above it — and there must be at least
-    one marker per aid so a single marker cannot cover a predicate that quietly
-    grew a second text column.
+    ``outer_predicates``): the marker must be on EXACTLY the line above the aid,
+    it must be the whole line, and markers and aid lines must be 1:1.
 
-    Adjacency, not "anywhere above" (#1442 round-2, ride-along F6). #1342's
-    removal is a per-LINE deletion driven by this marker: a marker two lines up,
-    or at the top of a constant, tells the reader nothing about which line to
-    delete, and deleting the marker's own line leaves the aid behind — a text
-    predicate on a column that no longer exists, i.e. a migration that fails at
-    the first query rather than at the ALTER. The looser rule also went green on
-    a statement whose aid had drifted away from its marker entirely.
+    Tightened from "the aid's own line or the line above" to "the line above,
+    alone" by #1980, because a renderer now consumes this layout: it deletes a
+    marker line PLUS THE LINE UNDER IT, so an inline marker (``AND rt.variable =
+    'q_down' -- marker``) means deleting the aid's own line and whatever the aid
+    shared it with, and a marker covering two aids (mvt's pre-#1980 wording, one
+    comment over four conjuncts) means deleting one of them and leaving three
+    text predicates on a table that has no text columns. Both shapes were
+    accepted before and both are now refused, here and in
+    ``packages.common.river_ts_render``, from one definition of the marker.
+
+    1:1 rather than "at least one marker per aid" for the same reason: an extra
+    marker no longer means an extra comment, it means an extra deleted line.
 
     Alias-scoped, because these statements read more than one table: the
     latest-product fallback's station CTE carries ``fst.variable = ANY(...)`` on
@@ -371,8 +456,13 @@ def _assert_aids_are_marked(sql: str, alias: str, expected_aids: set[str], label
         assert PUSHDOWN_AID_MARKER not in sql, f"{label}: marker present but no aid is sanctioned here"
         return
     lines = sql.splitlines()
-    marker_lines = {index for index, line in enumerate(lines) if PUSHDOWN_AID_MARKER in line}
-    assert len(marker_lines) >= len(expected_aids), f"{label}: fewer markers than sanctioned aids"
+    marker_lines = {index for index, line in enumerate(lines) if line.strip() == PUSHDOWN_AID_MARKER}
+    tagged_lines = {index for index, line in enumerate(lines) if "remove with #1342" in line}
+    assert tagged_lines == marker_lines, (
+        f"{label}: lines {sorted(index + 1 for index in tagged_lines - marker_lines)} carry the #1342 tag "
+        "without being a verbatim marker on their own line"
+    )
+    all_aid_lines: set[int] = set()
     for aid in expected_aids:
         aid_lines = [
             index
@@ -381,10 +471,15 @@ def _assert_aids_are_marked(sql: str, alias: str, expected_aids: set[str], label
         ]
         assert aid_lines, f"{label}: sanctioned aid {aid} is not present at all"
         for aid_line in aid_lines:
-            assert marker_lines & {aid_line - 1, aid_line}, (
-                f"{label}: aid {aid} on line {aid_line + 1} carries no ADJACENT marker "
-                f"(markers on lines {sorted(index + 1 for index in marker_lines)})"
+            assert aid_line - 1 in marker_lines, (
+                f"{label}: aid {aid} on line {aid_line + 1} has no verbatim marker on the line IMMEDIATELY "
+                f"above it (markers on lines {sorted(index + 1 for index in marker_lines)})"
             )
+        all_aid_lines.update(aid_lines)
+    assert len(marker_lines) == len(all_aid_lines), (
+        f"{label}: {len(marker_lines)} markers for {len(all_aid_lines)} aid lines — the mapping must be 1:1, "
+        "because #1342 deletes a marker line and the line under it"
+    )
 
 
 def _assert_no_text_fact_join(sql: str, alias: str, label: str) -> None:
@@ -736,10 +831,17 @@ def test_latest_product_fallback_scan_guards_still_fold_away_on_a_null_binding()
     # run_id / river_network_version_id keep their transitional text conjunct
     # INSIDE the guard, AND-ed with the key predicate that supersedes it; the
     # `= )` tail is the key-resolution sub-select the stripper removed.
-    assert "AND (%(scan_run_id)s IS NULL OR (rt.run_id = %(scan_run_id)s AND rt.run_key = ))" in outer
+    # #1980 note on the space in ``OR ( rt.``: the removal marker now sits on
+    # its own line INSIDE the disjunct, immediately above the aid, so once
+    # ``strip_comments`` has replaced it the bracket is followed by whitespace.
+    # The pin is re-spelled rather than loosened — the shape it protects (the
+    # aid AND-ed to its key resolution inside the guard, the guard folding away
+    # on a NULL binding) is unchanged, and the fold is exactly what makes the
+    # aid line deletable by #1342.
+    assert "AND (%(scan_run_id)s IS NULL OR ( rt.run_id = %(scan_run_id)s AND rt.run_key = ))" in outer
     assert (
         "AND (%(scan_river_network_version_id)s IS NULL "
-        "OR (rt.river_network_version_id = %(scan_river_network_version_id)s "
+        "OR ( rt.river_network_version_id = %(scan_river_network_version_id)s "
         "AND rt.river_network_version_key = ))"
     ) in outer
     # basin_version_id is not a sanctioned aid, so its guard is key-only: it no
@@ -1406,14 +1508,42 @@ def test_a_marker_detached_from_its_aid_turns_the_oracle_red() -> None:
         _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "detached marker")
 
 
-def test_a_marker_on_the_aids_own_line_is_accepted() -> None:
-    """Adjacency is "same line or the line above", not "the line above" only."""
+def test_a_marker_on_the_aids_own_line_turns_the_oracle_red() -> None:
+    """Inverted by #1980: adjacency is now "the line above, alone".
+
+    This shape was ACCEPTED before, on the reasoning that a reader can see which
+    predicate the marker belongs to. A renderer cannot: it deletes the marker's
+    line and the line below it, so an inline marker makes it delete the aid's own
+    line plus the NEXT conjunct — a silently wrong statement rather than a
+    refusal. The rule and its enforcement now live in one place
+    (``packages.common.river_ts_render``), and this is the counter-example that
+    says the tightening actually took.
+    """
     mutated = _SWITCHED_SPECIMEN.replace(
         f"      {PUSHDOWN_AID_MARKER}\n      AND rt.variable = 'q_down'",
         f"      AND rt.variable = 'q_down' {PUSHDOWN_AID_MARKER}",
     )
 
-    _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "inline marker")
+    with pytest.raises(AssertionError):
+        _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "inline marker")
+
+
+def test_one_marker_covering_two_aids_turns_the_oracle_red() -> None:
+    """mvt's pre-#1980 shape: one comment over three or four conjuncts.
+
+    The 1:N form is what task 1.1 expands into eleven 1:1 markers. Without this
+    counter-example the census could be re-pinned back down and the adjacency
+    rule would still pass, because every aid would have "a" marker above it — the
+    first one.
+    """
+    mutated = _SWITCHED_SPECIMEN.replace(
+        f"      {PUSHDOWN_AID_MARKER}\n      AND rt.river_network_version_id",
+        "\n      AND rt.river_network_version_id",
+    )
+
+    assert mutated.count(PUSHDOWN_AID_MARKER) == 2
+    with pytest.raises(AssertionError):
+        _assert_aids_are_marked(mutated, "rt", A_SEGMENT_BLOCK_AIDS, "one marker, two aids")
 
 
 def test_a_dropped_pushdown_aid_turns_the_oracle_red() -> None:
@@ -1498,6 +1628,62 @@ def test_every_registered_file_declares_its_river_timeseries_statement_count() -
         )
 
 
+def test_every_registered_file_declares_its_marker_and_aid_count() -> None:
+    """34/34 across the REGISTERED files, of which this register owns ten (#1980, task 1.1).
+
+    The 34 is the total over ``REGISTERED_SOURCES`` plus the display oracle's
+    ``DISPLAY_MARKER_AID_CENSUS``, not over the tree: nothing here sweeps the
+    repository, so a NEW reader that is in neither register is invisible to this
+    assertion. Finding one is the I11 discovery-set census's job (tasks 7.2a).
+
+    Two things at once, and both matter:
+
+    * the COUNT per file, so an aid added or dropped is red where it happened;
+    * the SHAPE of every one of them — verbatim marker, alone on its line,
+      exactly one aid conjunct underneath — which is what
+      ``packages.common.river_ts_render`` deletes by and what the pre-#1980 mvt
+      wording (one comment over four conjuncts) violated.
+
+    Asserted through the shared counter in ``tests/river_ts_template_registry.py``
+    so the display oracle's half uses the same definition of "a marker".
+    """
+    assert set(MARKER_AID_CENSUS) == set(REGISTERED_SOURCES), "census and register must list the same files"
+    for path, expected in MARKER_AID_CENSUS.items():
+        assert_marker_census(path, expected, non_aid_tag_lines=NON_AID_MARKER_TAG_LINES.get(path, 0))
+
+
+def test_this_registers_marker_total_is_the_measured_ten() -> None:
+    """The register's share of the registered 34, stated as a number.
+
+    A per-file dict can be edited one line at a time without anyone noticing the
+    total moved; the issue's baseline is a total.
+    """
+    assert sum(MARKER_AID_CENSUS.values()) == 10
+
+
+def test_every_registered_read_template_is_registered_in_the_template_registry() -> None:
+    """Registry closure for this oracle's files (#1980 orchestrator requirement).
+
+    The statement census says how many times a file names the fact table; the
+    template registry says which of those are READ TEMPLATES that render per
+    store. Closure is the equality between them, with the non-template mentions
+    enumerated: a new read site is then red twice over — once because the census
+    moved, once because the sum no longer closes — and it cannot be silenced by
+    bumping only the census.
+    """
+    for path in sorted(set(entry.path for entry in REGISTRY) & set(RIVER_TABLE_CENSUS)):
+        registered = sum(entry.mentions for entry in REGISTRY if entry.path == path)
+        assert registered + NON_TEMPLATE_MENTIONS[path] == RIVER_TABLE_CENSUS[path], (
+            f"{path}: {registered} mentions in registered templates + "
+            f"{NON_TEMPLATE_MENTIONS[path]} declared non-template mentions != census {RIVER_TABLE_CENSUS[path]}"
+        )
+    # The shared helper is registered with no template at all, which is the whole
+    # point of registering it.
+    assert RIVER_TABLE_CENSUS["packages/common/river_ts_render.py"] == (
+        NON_TEMPLATE_MENTIONS["packages/common/river_ts_render.py"]
+    )
+
+
 def test_the_census_counts_statements_and_ignores_prose() -> None:
     """The census's own contract, on a synthetic module.
 
@@ -1524,6 +1710,26 @@ def test_the_census_counts_statements_and_ignores_prose() -> None:
         'MORE = """\nDELETE FROM hydro.river_timeseries;\nSELECT 1 FROM hydro.river_timeseries;\n"""\n'
     )
     assert _river_table_mentions(both) == 3
+
+
+def test_the_census_counts_the_qualified_spelling_however_it_is_quoted_spaced_or_cased() -> None:
+    """The census's closure, on the spellings a substring count is blind to.
+
+    ``str.count("hydro.river_timeseries")`` reads exactly one of the many legal
+    ways to name the table: a call site that wrote ``"hydro"."river_timeseries"``
+    or ``HYDRO . river_timeseries`` was counted zero times, so a new read site
+    could arrive in a registered file without moving the census and without ever
+    being forced into the template register (#2018 round-2 lane-1 F1, sibling of
+    the renderer's own counter). Prose stays excluded, because the reason the
+    census is parsed rather than grepped has not changed.
+    """
+    source = (
+        '"""Module docstring naming hydro.river_timeseries."""\n'
+        "QUOTED = 'SELECT 1 FROM \"hydro\".\"river_timeseries\" WHERE run_key = %s'\n"
+        "SPACED = 'SELECT 1 FROM HYDRO . river_timeseries WHERE run_key = %s'\n"
+    )
+
+    assert _river_table_mentions(source) == 2
 
 
 def test_the_sanctioned_ceiling_is_the_shared_one_not_a_private_copy() -> None:
