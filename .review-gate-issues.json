@@ -2627,6 +2627,11 @@
           "pr": 2018,
           "outcome": "superseded-by-split",
           "rounds": 5
+        },
+        {
+          "pr": 2049,
+          "outcome": "merged",
+          "rounds": 1
         }
       ],
       "gateEntries": 4
