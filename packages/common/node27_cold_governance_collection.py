@@ -3,6 +3,25 @@
 The operational script remains CLI/orchestration.  This owner observes disk
 capacity, path sizes, and PostgreSQL relation inventory, and refuses to
 account unobserved cold-relation bytes as zero.
+
+The working-set ingest rate (fixture decision 25) is read from ONE chunk per
+canonical hypertable: the latest-by-``range_end`` chunk whose
+``compression_status`` is ``Compressed``, ``before_compression_total_bytes``
+divided by that chunk's own width.  It is deliberately NOT read from the
+uncompressed set.  ``hydro.river_timeseries`` is partitioned on forecast
+``valid_time`` with a 168 h horizon, so the newest chunk is written before the
+display watermark ever reaches it: at 71bc5265 the node-27 receipt divided a
+324 GB chunk whose ``range_start`` equalled the watermark by the covered age
+and reported ``daily_ingest_bytes = 8_370_462_645_101`` (8.4 TB/day) against
+the ≈78 GB/day the catalog can actually measure, plus a false critical
+``PROJECTED_PEAK_EXCEEDS_HOME_FREE`` (peak 17.2 TB vs 721 GB free).  Any rate
+taken from uncompressed bytes over covered time is front-loaded by
+construction; a compressed chunk has received every write it will ever get.
+
+Recorded limits, not compensated: the rate is lag + chunk width old (≈9 days
+today, ≈3 days after the one-day-chunk expand), so roster growth under-reports
+until the next compression, and D8's peak formula assumes that rate is uniform
+over the projected span.
 """
 
 from __future__ import annotations
@@ -19,6 +38,7 @@ from packages.common.node27_timeseries_hypertable_discovery import (
     DISCOVERY_SQL,
     candidate_in_list_sql,
     discovery_set,
+    is_legacy,
     present_from_rows,
     qualified,
 )
@@ -216,17 +236,6 @@ def collect_filesystem(config: Any) -> dict[str, Any]:
 #: with the live compression env.
 DEFAULT_COMPRESSION_LAG_SECONDS = 172_800
 
-#: The LONGEST trailing window the ingest rate is averaged over, in days. It
-#: bounds which chunks enter the rate; it is NOT the divisor. The divisor is
-#: per table, the span that table's own in-window chunks cover, floored at one
-#: HOUR (:data:`_COVERED_DAYS_FLOOR`) -- not a fixed seven and not a whole day.
-#: In steady state the uncompressed chunks only ever cover ``lag + 1`` days
-#: (everything older is already compressed), so dividing by seven under-reported
-#: the daily rate by about 3/7; the node-27 receipt at 989c3cf7 showed
-#: ``daily_ingest_bytes == uncompressed_bytes // 7`` byte for byte. For a
-#: capacity guard, over-reporting is the fail-safe direction.
-DAILY_INGEST_WINDOW_DAYS = 7
-
 #: Seconds the audit will wait for its read-only PostgreSQL connection before
 #: giving up, same value and same rationale as the lifecycle runners'
 #: ``_CONNECT_TIMEOUT_SECONDS`` (#1985 decision 21). The governance oneshot
@@ -258,8 +267,47 @@ WHERE (c.hypertable_schema, c.hypertable_name) IN (
 ORDER BY c.range_end ASC, c.chunk_schema, c.chunk_name
 """
 
+# Catalog-only as well: ``chunk_compression_stats`` is a TimescaleDB catalog
+# FUNCTION over compression statistics, not a scan of the hypertable it names.
+# Executed once per canonical hypertable, the parameter being the
+# ``'<schema>.<table>'`` literal the function coerces to ``regclass`` (measured
+# on node-27, TSDB 2.10.2, role ``nhms_display_ro``: 16 ms, EXECUTE granted).
+#
+# Three clauses carry the whole rule and each is pinned by a behavioural test:
+#
+# * ``compression_status = 'Compressed'`` -- the function also returns
+#   ``Uncompressed`` rows, and an uncompressed chunk is exactly the front-loaded
+#   reading this query exists to avoid;
+# * ``ORDER BY c.range_end DESC`` -- LATEST, not largest: an older, bigger chunk
+#   is a stale rate;
+# * ``LIMIT 1`` -- one reference chunk per table; the width comes from the join
+#   (``range_end - range_start``), never from a constant, so the same code reads
+#   today's 7-day chunks and the post-expand 1-day chunks.
+#
+# 2.10.2 column names: ``chunk_schema``, ``chunk_name``, ``compression_status``,
+# ``before_compression_total_bytes``. The ``after_*`` columns are NOT used: the
+# rate is what was written, not what it compressed down to.
+WORKING_SET_COMPRESSED_REFERENCE_SQL = """
+SELECT c.chunk_schema, c.chunk_name, c.range_start, c.range_end,
+       s.before_compression_total_bytes
+FROM chunk_compression_stats(%s) s
+JOIN timescaledb_information.chunks c
+  ON (c.chunk_schema, c.chunk_name) = (s.chunk_schema, s.chunk_name)
+WHERE s.compression_status = 'Compressed'
+ORDER BY c.range_end DESC
+LIMIT 1
+"""
+
 PROJECTION_OK = "ok"
 PROJECTION_NO_UNCOMPRESSED_CHUNK = "no_uncompressed_chunk"
+#: A canonical hypertable holds uncompressed chunks but has no compressed chunk
+#: to read a rate from -- the narrow table during its first lag + chunk width
+#: after the expand migration, or a fresh install. There is no honest growth
+#: claim to make, so ``daily_ingest_bytes`` is ``None`` (never a partial sum
+#: over the tables that DO have a reference) and the peak is the stock as it
+#: stands. Visible as the WARNING ``NO_COMPRESSED_REFERENCE``, never a critical:
+#: the state is expected and resolves itself at the next compression tick.
+PROJECTION_NO_COMPRESSED_REFERENCE = "no_compressed_reference"
 PROJECTION_WATERMARK_UNAVAILABLE = "watermark_unavailable"
 #: The working set could not be measured at all: the timescale probes raised, or
 #: the catalog returned no row for a canonical hypertable (the shape a read-only
@@ -302,6 +350,9 @@ def unavailable_working_set(
         "uncompressed_bytes": None,
         "uncompressed_chunks": None,
         "daily_ingest_bytes": None,
+        # Same convention as every other measured field here: present and
+        # ``None``, so the receipt's key set never varies with the failure mode.
+        "ingest_reference": None,
         "next_compressible_at": None,
         "compression_lag_seconds": int(lag_seconds),
         "watermark": None if watermark is None else _iso(watermark),
@@ -349,47 +400,60 @@ def collect_working_set(
     ]
     uncompressed_bytes = sum(int(row["total_bytes"] or 0) for row in chunks)
 
+    canonical = [item for item in hypertables if not is_legacy(item[1])]
+    with_uncompressed = {
+        (str(row["hypertable_schema"]), str(row["hypertable_name"])) for row in chunks
+    }
+
+    ingest_reference: dict[str, Any] | None
     if watermark is None:
         projection_status = PROJECTION_WATERMARK_UNAVAILABLE
         daily_ingest_bytes: int | None = None
+        ingest_reference = None
     elif not chunks:
         projection_status = PROJECTION_NO_UNCOMPRESSED_CHUNK
         daily_ingest_bytes = 0
+        # Nothing to project for any table, so no table needs a reference: the
+        # empty mapping, not a mapping full of nulls.
+        ingest_reference = {}
     else:
-        projection_status = PROJECTION_OK
-        floor = watermark - timedelta(days=DAILY_INGEST_WINDOW_DAYS)
-        # Two-sided (round-2 review, decision 18). The upper bound is the
-        # watermark itself: a chunk whose `range_start` is in the FUTURE is a
-        # forecast-horizon chunk, real stock that must count toward
-        # `uncompressed_bytes`, but it carries no ingest that has happened yet.
-        # Letting it into the numerator while the divisor spans only observed
-        # time inflates the rate; post-expand, with one-day chunks and a
-        # forecast horizon several days wide, the one-sided window
-        # over-reported by roughly 4x. Numerator and divisor now span the same
-        # chunk set.
-        in_window = [
-            row
-            for row in chunks
-            if floor <= _as_datetime(row["range_start"]) <= watermark
-        ]
-        # PER TABLE, then summed (round-3 review). A pooled divisor takes
-        # `min(range_start)` across ALL governed tables, so one long-span,
-        # byte-light table drags every other table's rate down with it: a
-        # write-frozen `_legacy` sibling holding a single week-old chunk, or a
-        # 7-day forcing chunk next to 1-day river chunks, halves the reported
-        # river rate. Each table's bytes are divided by the span that table's
-        # own chunks cover; tables with nothing in the window contribute zero.
-        per_table: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
-        for row in in_window:
-            key = (str(row["hypertable_schema"]), str(row["hypertable_name"]))
-            per_table.setdefault(key, []).append(row)
-        daily_ingest_bytes = sum(
-            int(
-                sum(int(row["total_bytes"] or 0) for row in table_rows)
-                / _covered_days(table_rows, watermark=watermark)
-            )
-            for table_rows in per_table.values()
-        )
+        # PER CANONICAL TABLE, then summed (round-3 review, kept by decision
+        # 25). A `_legacy` sibling is write-frozen from the rename onward: it
+        # contributes zero and is NEVER borrowed from, because its rows are
+        # roughly six times wider than the narrow canonical table's and its
+        # pre-compression bytes would over-report right through the I8 window.
+        #
+        # KEYED BY NEED, not by roster: only a canonical table that HAS
+        # uncompressed chunks is keyed here. An empty canonical table has
+        # nothing to project, so it gets no entry at all -- which is what makes
+        # a `null` value mean exactly one thing, "this table needs a reference
+        # and has none", and lets the warning's `tables_without_reference` be
+        # that null set without ever naming an empty table.
+        ingest_reference = {}
+        without_reference: list[str] = []
+        rate_total = 0
+        for item in canonical:
+            key = qualified(*item)
+            if item not in with_uncompressed:
+                continue
+            reference = _compressed_reference(cursor, *item)
+            ingest_reference[key] = reference
+            if reference is None:
+                without_reference.append(key)
+            else:
+                rate_total += int(reference["daily_ingest_bytes"])
+        if without_reference:
+            # No partial sum: a rate covering half the governed tables reads as
+            # a whole-lane rate and under-projects the peak.
+            projection_status = PROJECTION_NO_COMPRESSED_REFERENCE
+            daily_ingest_bytes = None
+        else:
+            projection_status = PROJECTION_OK
+            # ROUNDING: `int()` per table (truncation), then summed -- so the
+            # receipt's `daily_ingest_bytes` is exactly the sum of the per-table
+            # rates echoed in `ingest_reference` and the arithmetic can be
+            # rechecked from the JSON alone.
+            daily_ingest_bytes = rate_total
 
     next_compressible_at: str | None = None
     if chunks:
@@ -401,6 +465,7 @@ def collect_working_set(
         "uncompressed_bytes": uncompressed_bytes,
         "uncompressed_chunks": len(chunks),
         "daily_ingest_bytes": daily_ingest_bytes,
+        "ingest_reference": ingest_reference,
         "next_compressible_at": next_compressible_at,
         "compression_lag_seconds": int(lag_seconds),
         "watermark": None if watermark is None else _iso(watermark),
@@ -408,36 +473,35 @@ def collect_working_set(
     }
 
 
-#: Divisor floor for :func:`_covered_days`, in days: one hour.
-_COVERED_DAYS_FLOOR = 1.0 / 24.0
+def _compressed_reference(cursor: Any, schema: str, name: str) -> dict[str, Any] | None:
+    """The one chunk ONE canonical hypertable's ingest rate is read from.
 
-
-def _covered_days(rows: Sequence[Mapping[str, Any]], *, watermark: datetime) -> float:
-    """Days ONE table's in-window uncompressed chunks actually cover.
-
-    Called once per governed hypertable (round-3 review): a divisor pooled over
-    every table takes the earliest ``range_start`` in the whole catalog, which
-    lets a long-span, byte-light table dilute a busy one.
-
-    ``max(1/24, days(watermark - earliest in-window range_start))`` -- fractional
-    days, floored at ONE HOUR rather than one day (round-2 review, decision 11).
-    A whole-day floor is not conservative here: in the drained steady state the
-    only in-window chunk is the open one, so a chunk six hours old would have
-    its bytes divided by 1.0 instead of 0.25 and the reported rate would be a
-    quarter of the truth -- a green flip on exactly the state the guard exists
-    to watch. Dividing by the real age over-reports early in a chunk's life,
-    which is the fail-safe direction for a capacity guard.
-
-    No upper cap is needed: the caller's window already bounds ``range_start``
-    below by ``watermark - DAILY_INGEST_WINDOW_DAYS``, so the span can never
-    exceed the window.
+    ``None`` when the catalog has no compressed chunk for it (nothing to read a
+    rate from) or reports a non-positive width (a degenerate row that would
+    divide by zero). Both are the same answer to the caller: this table makes no
+    growth claim.
     """
 
+    rows = _psycopg_rows(
+        cursor, WORKING_SET_COMPRESSED_REFERENCE_SQL, (qualified(schema, name),)
+    )
     if not rows:
-        return _COVERED_DAYS_FLOOR
-    earliest = min(_as_datetime(row["range_start"]) for row in rows)
-    span = (watermark - earliest).total_seconds() / 86_400.0
-    return max(_COVERED_DAYS_FLOOR, span)
+        return None
+    row = rows[0]
+    range_start = _as_datetime(row["range_start"])
+    range_end = _as_datetime(row["range_end"])
+    width_days = (range_end - range_start).total_seconds() / 86_400.0
+    if width_days <= 0:
+        return None
+    before_bytes = int(row["before_compression_total_bytes"] or 0)
+    return {
+        "chunk": qualified(str(row["chunk_schema"]), str(row["chunk_name"])),
+        "range_start": _iso(range_start),
+        "range_end": _iso(range_end),
+        "before_compression_total_bytes": before_bytes,
+        "width_days": width_days,
+        "daily_ingest_bytes": int(before_bytes / width_days),
+    }
 
 
 def finalize_working_set(
@@ -451,6 +515,8 @@ def finalize_working_set(
     with no uncompressed chunk there is nothing to wait for, and with no
     watermark there is no honest interval to measure, so both project the
     working set exactly as it stands rather than inventing growth.
+    ``no_compressed_reference`` joins them for the same reason (decision 25):
+    ``daily_ingest_bytes`` is ``None``, so the only honest peak is the stock.
     """
 
     working_set = dict(sample)
@@ -479,8 +545,13 @@ def finalize_working_set(
     return working_set
 
 
-def _psycopg_rows(cursor: Any, sql: str) -> list[dict[str, Any]]:
-    cursor.execute(sql)
+def _psycopg_rows(
+    cursor: Any, sql: str, params: Sequence[Any] | None = None
+) -> list[dict[str, Any]]:
+    if params is None:
+        cursor.execute(sql)
+    else:
+        cursor.execute(sql, params)
     return [dict(row) for row in cursor.fetchall()]
 
 

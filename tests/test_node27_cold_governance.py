@@ -328,14 +328,35 @@ _COLD_SCHEMA = json.loads(
 )
 
 _WORKING_SET = {
-    "uncompressed_bytes": 644245094400,
-    "daily_ingest_bytes": 80530636800,
-    "next_compressible_at": "2026-09-02T00:00:00Z",
+    "uncompressed_bytes": 412452331520,
+    "daily_ingest_bytes": 81411357549,
+    # Decision 25: the divisor travels with the rate. These are the live
+    # node-27 reference chunks at 71bc5265 (river chunk 91, forcing chunk 61),
+    # and 548636811264 // 7 + 21242691584 // 7 is the rate above.
+    "ingest_reference": {
+        "hydro.river_timeseries": {
+            "chunk": "_timescaledb_internal._hyper_3_91_chunk",
+            "range_start": "2026-08-27T00:00:00Z",
+            "range_end": "2026-09-03T00:00:00Z",
+            "before_compression_total_bytes": 548636811264,
+            "width_days": 7.0,
+            "daily_ingest_bytes": 78376687323,
+        },
+        "met.forcing_station_timeseries": {
+            "chunk": "_timescaledb_internal._hyper_1_61_chunk",
+            "range_start": "2026-08-20T00:00:00Z",
+            "range_end": "2026-08-27T00:00:00Z",
+            "before_compression_total_bytes": 21242691584,
+            "width_days": 7.0,
+            "daily_ingest_bytes": 3034670226,
+        },
+    },
+    "next_compressible_at": "2026-09-05T00:00:00Z",
     "home_free_bytes": 966367641600,
-    "projected_peak_bytes": 805306368000,
+    "projected_peak_bytes": 575275046618,
     "projection_status": "ok",
     "compression_lag_seconds": 172800,
-    "watermark": "2026-08-31T00:00:00Z",
+    "watermark": "2026-09-03T00:00:00Z",
 }
 
 
@@ -376,7 +397,7 @@ def test_both_cold_governance_examples_carry_the_working_set() -> None:
     family suffix to find the schema) as well as by this suite.
 
     Keys are asserted as a SUBSET of the production shape, not as equality with
-    the eight-key literal below: the collector emits ten keys (it adds
+    the nine-key literal below: the collector emits eleven keys (it adds
     `hypertables` and `uncompressed_chunks`), and an example is free to show
     them.
     """
@@ -408,6 +429,7 @@ _PRODUCTION_WORKING_SET_KEYS = {
     "uncompressed_bytes",
     "uncompressed_chunks",
     "daily_ingest_bytes",
+    "ingest_reference",
     "next_compressible_at",
     "home_free_bytes",
     "projected_peak_bytes",
@@ -417,15 +439,25 @@ _PRODUCTION_WORKING_SET_KEYS = {
 }
 
 
-def _fake_cursor(*, hypertables: list[dict], chunks: list[dict]) -> object:
+def _fake_cursor(
+    *, hypertables: list[dict], chunks: list[dict], compression_rows: list[dict] | None = None
+) -> object:
     class _Cursor:
         def __init__(self) -> None:
             self._rows: list[dict] = []
 
         def execute(self, sql: str, params: object = None) -> None:
-            self._rows = (
-                hypertables if "timescaledb_information.hypertables" in sql else chunks
-            )
+            if "chunk_compression_stats" in sql:
+                table = None if params is None else str(list(params)[0])
+                self._rows = [
+                    row
+                    for row in (compression_rows or [])
+                    if table is None or row["hypertable"] == table
+                ]
+            elif "timescaledb_information.hypertables" in sql:
+                self._rows = hypertables
+            else:
+                self._rows = chunks
 
         def fetchall(self) -> list[dict]:
             return list(self._rows)
@@ -435,12 +467,18 @@ def _fake_cursor(*, hypertables: list[dict], chunks: list[dict]) -> object:
 
 @pytest.mark.parametrize(
     "status",
-    ["ok", "no_uncompressed_chunk", "watermark_unavailable", "working_set_unavailable"],
+    [
+        "ok",
+        "no_uncompressed_chunk",
+        "no_compressed_reference",
+        "watermark_unavailable",
+        "working_set_unavailable",
+    ],
 )
 def test_the_production_working_set_validates_for_every_projection_status(
     tmp_path: Path, status: str
 ) -> None:
-    """The shape the COLLECTOR produces — ten keys — driven end to end through
+    """The shape the COLLECTOR produces — eleven keys — driven end to end through
     `finalize_working_set` into the strict receipt and validated. The examples
     are hand-written; this is the only test that proves the real producer's
     output fits the schema, in every state it can be in.
@@ -468,11 +506,27 @@ def test_the_production_working_set_validates_for_every_projection_status(
             "total_bytes": 1024,
         }
     ]
+    compression_rows = [
+        {
+            "hypertable": "hydro.river_timeseries",
+            "chunk_schema": "_timescaledb_internal",
+            "chunk_name": "_hyper_3_1_chunk",
+            "range_start": datetime(2026, 8, 23, tzinfo=UTC),
+            "range_end": datetime(2026, 8, 30, tzinfo=UTC),
+            "before_compression_total_bytes": 7168,
+        }
+    ]
     if status == "no_uncompressed_chunk":
         chunks = []
+    if status == "no_compressed_reference":
+        # The post-expand narrow table before its first chunk compresses: the
+        # uncompressed chunk above is still there, the reference is not.
+        compression_rows = []
     if status == "working_set_unavailable":
         hypertables = []
-    cursor = _fake_cursor(hypertables=hypertables, chunks=chunks)
+    cursor = _fake_cursor(
+        hypertables=hypertables, chunks=chunks, compression_rows=compression_rows
+    )
     sample = collection.collect_working_set(
         cursor,
         watermark=None if status == "watermark_unavailable" else watermark,

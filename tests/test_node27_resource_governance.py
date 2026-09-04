@@ -786,17 +786,54 @@ _WATERMARK = datetime(2026, 9, 1, 0, 0, tzinfo=UTC)
 
 
 class _FakeCursor:
-    """Dispatches on SQL text, like every other catalog seam in this lane."""
+    """Dispatches on SQL text, like every other catalog seam in this lane.
 
-    def __init__(self, *, hypertables: list[dict], chunks: list[dict]) -> None:
+    The reference query is served the way PostgreSQL would serve it: the
+    parameter, the `compression_status` filter, the `ORDER BY` direction and the
+    `LIMIT` are all read OUT of the SQL text the collector sent. A fake that
+    returned a canned row for any `chunk_compression_stats` query would make
+    those three clauses untestable — delete the filter or flip the sort in the
+    module and every test would still pass.
+    """
+
+    def __init__(
+        self,
+        *,
+        hypertables: list[dict],
+        chunks: list[dict],
+        compression_rows: list[dict] | None = None,
+    ) -> None:
         self.hypertables = hypertables
         self.chunks = chunks
+        self.compression_rows = list(compression_rows or [])
         self.executed: list[str] = []
+        self.parameters: list[object] = []
         self._rows: list[dict] = []
 
     def execute(self, sql: str, params: object = None) -> None:
         self.executed.append(sql)
-        self._rows = self.hypertables if "timescaledb_information.hypertables" in sql else self.chunks
+        self.parameters.append(params)
+        if "chunk_compression_stats" in sql:
+            self._rows = self._reference_rows(sql, params)
+        elif "timescaledb_information.hypertables" in sql:
+            self._rows = self.hypertables
+        else:
+            self._rows = self.chunks
+
+    def _reference_rows(self, sql: str, params: object) -> list[dict]:
+        assert params is not None, "the reference query is per hypertable"
+        table = str(list(params)[0])  # type: ignore[call-overload]
+        rows = [row for row in self.compression_rows if row["hypertable"] == table]
+        if "s.compression_status = 'Compressed'" in sql:
+            rows = [row for row in rows if row["compression_status"] == "Compressed"]
+        rows = sorted(
+            rows,
+            key=lambda row: row["range_end"],
+            reverse="ORDER BY c.range_end DESC" in sql,
+        )
+        if "LIMIT 1" in sql:
+            rows = rows[:1]
+        return [{key: value for key, value in row.items() if key != "hypertable"} for row in rows]
 
     def fetchall(self) -> list[dict]:
         return list(self._rows)
@@ -808,6 +845,35 @@ def _hypertable_row(schema: str, name: str, *, num_chunks: int = 1) -> dict:
         "hypertable_name": name,
         "num_chunks": num_chunks,
         "compression_enabled": True,
+    }
+
+
+def _iso(moment: datetime) -> str:
+    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _reference_row(
+    schema: str,
+    name: str,
+    *,
+    start_day: float,
+    end_day: float,
+    before_bytes: int,
+    status: str = "Compressed",
+) -> dict:
+    """One `chunk_compression_stats` row joined to `timescaledb_information.chunks`.
+
+    `start_day` / `end_day` are days BEFORE `_WATERMARK`, so `start_day=8,
+    end_day=1` is a seven-day chunk that ended a day before the watermark.
+    """
+    return {
+        "hypertable": f"{schema}.{name}",
+        "chunk_schema": "_timescaledb_internal",
+        "chunk_name": f"_hyper_{name}_{start_day:g}_chunk",
+        "compression_status": status,
+        "range_start": _WATERMARK - timedelta(days=start_day),
+        "range_end": _WATERMARK - timedelta(days=end_day),
+        "before_compression_total_bytes": before_bytes,
     }
 
 
@@ -824,6 +890,22 @@ def _chunk_row(schema: str, name: str, *, day: float, total_bytes: int) -> dict:
     }
 
 
+#: The live node-27 reference at 71bc5265: river chunk 91, 2026-08-27..09-03,
+#: 548,636,811,264 pre-compression bytes over its own seven days. Only the table
+#: that has uncompressed chunks is keyed (decision 25 as amended), so this shape
+#: is `ok`-consistent: a null here would mean a missing reference.
+_LIVE_REFERENCE = {
+    "hydro.river_timeseries": {
+        "chunk": "_timescaledb_internal._hyper_3_91_chunk",
+        "range_start": "2026-08-27T00:00:00Z",
+        "range_end": "2026-09-03T00:00:00Z",
+        "before_compression_total_bytes": 548_636_811_264,
+        "width_days": 7.0,
+        "daily_ingest_bytes": 548_636_811_264 // 7,
+    },
+}
+
+
 def _working_set(
     *,
     uncompressed_bytes: int,
@@ -832,10 +914,12 @@ def _working_set(
     home_free_bytes: int | None,
     projected_peak_bytes: int,
     projection_status: str = "ok",
+    ingest_reference: dict | None = None,
 ) -> dict:
     return {
         "uncompressed_bytes": uncompressed_bytes,
         "daily_ingest_bytes": daily_ingest_bytes,
+        "ingest_reference": _LIVE_REFERENCE if ingest_reference is None else ingest_reference,
         "next_compressible_at": next_compressible_at,
         "home_free_bytes": home_free_bytes,
         "projected_peak_bytes": projected_peak_bytes,
@@ -860,13 +944,40 @@ def test_working_set_collection_is_catalog_only() -> None:
     table: a 600 GB row scan on the volume the audit exists to protect is the
     incident, not the measurement. ``fetch_display_watermark``'s read of the
     metadata table ``hydro.hydro_run`` is a different query and out of scope
-    here — this guard covers the working-set SQL this issue adds."""
-    for sql in (collection.WORKING_SET_CHUNKS_SQL, collection.WORKING_SET_DISCOVERY_SQL):
+    here — this guard covers the working-set SQL this issue adds.
+
+    ``chunk_compression_stats(<hypertable>)`` is allowed by name (decision 25):
+    it is a TimescaleDB catalog FUNCTION over compression statistics, not a
+    scan of the hypertable it is passed. Nothing else is.
+    """
+    for sql in (
+        collection.WORKING_SET_CHUNKS_SQL,
+        collection.WORKING_SET_DISCOVERY_SQL,
+        collection.WORKING_SET_COMPRESSED_REFERENCE_SQL,
+    ):
         stripped = re.sub(r"'[^']*'", "''", sql)
         assert "hydro." not in stripped, sql
         assert "met." not in stripped, sql
         for relation in re.findall(r"(?is)\bFROM\s+([a-z_][a-z_0-9.]*)", stripped):
-            assert relation.startswith(("timescaledb_information.", "pg_")), relation
+            assert relation.startswith(
+                ("timescaledb_information.", "pg_", "chunk_compression_stats")
+            ), relation
+
+
+def test_the_reference_query_pins_the_three_clauses_that_carry_the_rule() -> None:
+    """Decision 25 lives in three clauses; each is also killed behaviourally by
+    a test below (`..._is_not_a_reference`, `..._wins_not_the_largest`,
+    `..._from_the_catalog_not_a_constant`). The literals are pinned here so the
+    rule is readable at the seam without running the mutants."""
+    sql = collection.WORKING_SET_COMPRESSED_REFERENCE_SQL
+    assert "s.compression_status = 'Compressed'" in sql
+    assert "ORDER BY c.range_end DESC" in sql
+    assert "LIMIT 1" in sql
+    # The width comes from the joined catalog row, not from the function.
+    assert "c.range_start" in sql and "c.range_end" in sql
+    assert "before_compression_total_bytes" in sql
+    # `after_*` is the compressed size; the rate is what was written.
+    assert "after_compression" not in sql
 
 
 def test_working_set_sums_uncompressed_chunk_bytes_over_the_discovery_set() -> None:
@@ -880,6 +991,12 @@ def test_working_set_sums_uncompressed_chunk_bytes_over_the_discovery_set() -> N
             _chunk_row("hydro", "river_timeseries", day=1, total_bytes=100),
             _chunk_row("hydro", "river_timeseries_legacy", day=9, total_bytes=400),
             _chunk_row("met", "forcing_station_timeseries", day=2, total_bytes=25),
+        ],
+        compression_rows=[
+            _reference_row("hydro", "river_timeseries", start_day=8, end_day=1, before_bytes=700),
+            _reference_row(
+                "met", "forcing_station_timeseries", start_day=8, end_day=1, before_bytes=70
+            ),
         ],
     )
     sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
@@ -898,100 +1015,215 @@ def test_working_set_sums_uncompressed_chunk_bytes_over_the_discovery_set() -> N
     assert sample["compression_lag_seconds"] == 172_800
 
 
-def test_daily_ingest_divides_by_the_days_the_window_actually_covers() -> None:
-    """Chunks are attributed to a day by ``range_start``; the divisor is the
-    span that table's own in-window chunks COVER (``watermark - that table's
-    earliest in-window range_start``, floored at one HOUR), not a fixed seven.
-    The seven-day cap is implied by the window bound, so there is no separate
-    cap; the floor is sub-day (round-2 review, decision 11).
+def test_daily_ingest_is_the_last_compressed_chunk_divided_by_its_width() -> None:
+    """Decision 25, the rule itself: the rate is the latest COMPRESSED chunk's
+    ``before_compression_total_bytes`` divided by that chunk's own width.
 
-    Round-1 review: the fixed seven under-reported the rate systematically —
-    the first node-27 receipt showed ``daily_ingest_bytes == uncompressed_bytes
-    // 7`` byte for byte — and a capacity guard must err high, not low.
-
-    Round-2 review: the window is two-sided (``floor <= range_start <=
-    watermark``) and the divisor is floored at an hour, not a day.
+    The uncompressed set does not enter the rate at all. `hydro.river_timeseries`
+    is partitioned on forecast `valid_time` with a 168 h horizon, so its newest
+    chunk holds bytes the watermark has not reached yet; any rate read from it
+    is front-loaded by construction. A compressed chunk has received every write
+    it will ever get. Here the same 7-day reference is read next to a tiny and
+    then a huge uncompressed chunk, and the rate does not move.
     """
+    reference = _reference_row(
+        "hydro", "river_timeseries", start_day=8, end_day=1, before_bytes=7 * 5_000_000
+    )
+    rates = []
+    for uncompressed_bytes in (1_000, 900 * _GIB):
+        cursor = _FakeCursor(
+            hypertables=[
+                _hypertable_row("hydro", "river_timeseries"),
+                _hypertable_row("met", "forcing_station_timeseries"),
+            ],
+            chunks=[
+                _chunk_row("hydro", "river_timeseries", day=1, total_bytes=uncompressed_bytes)
+            ],
+            compression_rows=[reference],
+        )
+        sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+        rates.append(sample["daily_ingest_bytes"])
+        assert sample["ingest_reference"]["hydro.river_timeseries"] == {
+            "chunk": "_timescaledb_internal._hyper_river_timeseries_8_chunk",
+            "range_start": _iso(_WATERMARK - timedelta(days=8)),
+            "range_end": _iso(_WATERMARK - timedelta(days=1)),
+            "before_compression_total_bytes": 7 * 5_000_000,
+            "width_days": 7.0,
+            "daily_ingest_bytes": 5_000_000,
+        }
+        # A canonical table with no uncompressed chunk needs no reference, so
+        # it is not keyed at all.
+        assert "met.forcing_station_timeseries" not in sample["ingest_reference"]
+    assert rates == [5_000_000, 5_000_000]
+
+
+def test_the_live_node27_shape_reports_gigabytes_per_day_not_terabytes() -> None:
+    """THE regression pin (fixture decision 25, spec scenario "The rate reads
+    the last compressed chunk, not the working set").
+
+    The live node-27 catalog at 71bc5265: watermark 2026-09-03T00:00Z, the only
+    uncompressed river chunk spans 09-03..09-10 with `range_start == watermark`
+    and 348 GB on disk, and the latest compressed river chunk spans 08-27..09-03
+    with `before_compression_total_bytes = 548,636,811,264`.
+
+    The age divisor hit its 1/24 floor on that shape and the receipt reported
+    `daily_ingest_bytes = 8,370,462,645,101` — 8.4 TB/day — and a false critical
+    `PROJECTED_PEAK_EXCEEDS_HOME_FREE` at a 17.2 TB peak against 721 GB free.
+    The reference chunk gives ≈78 GB/day and a peak under a terabyte.
+    """
+    watermark = datetime(2026, 9, 3, tzinfo=UTC)
     cursor = _FakeCursor(
         hypertables=[
             _hypertable_row("hydro", "river_timeseries"),
             _hypertable_row("met", "forcing_station_timeseries"),
         ],
         chunks=[
-            _chunk_row("hydro", "river_timeseries", day=1, total_bytes=700),
-            _chunk_row("hydro", "river_timeseries", day=6, total_bytes=700),
-            # Older than the trailing seven days: excluded from the rate.
-            _chunk_row("hydro", "river_timeseries", day=30, total_bytes=7000),
+            {
+                "hypertable_schema": "hydro",
+                "hypertable_name": "river_timeseries",
+                "chunk_schema": "_timescaledb_internal",
+                "chunk_name": "_hyper_3_107_chunk",
+                # range_start IS the watermark: the forecast-horizon chunk.
+                "range_start": watermark,
+                "range_end": watermark + timedelta(days=7),
+                "total_bytes": 348_000_000_000,
+            },
+            # The live catalog's uncompressed forcing chunks: one future, one
+            # ending AT the watermark — the latter is what actually sets
+            # `next_compressible_at` (its range_end + the 2-day lag).
+            {
+                "hypertable_schema": "met",
+                "hypertable_name": "forcing_station_timeseries",
+                "chunk_schema": "_timescaledb_internal",
+                "chunk_name": "_hyper_1_63_chunk",
+                "range_start": watermark,
+                "range_end": watermark + timedelta(days=7),
+                "total_bytes": 37_000_000_000,
+            },
+            {
+                "hypertable_schema": "met",
+                "hypertable_name": "forcing_station_timeseries",
+                "chunk_schema": "_timescaledb_internal",
+                "chunk_name": "_hyper_1_62_chunk",
+                "range_start": watermark - timedelta(days=7),
+                "range_end": watermark,
+                "total_bytes": 23_000_000_000,
+            },
+        ],
+        compression_rows=[
+            {
+                "hypertable": "hydro.river_timeseries",
+                "chunk_schema": "_timescaledb_internal",
+                "chunk_name": "_hyper_3_91_chunk",
+                "compression_status": "Compressed",
+                "range_start": watermark - timedelta(days=7),
+                "range_end": watermark,
+                "before_compression_total_bytes": 548_636_811_264,
+            },
+            {
+                "hypertable": "met.forcing_station_timeseries",
+                "chunk_schema": "_timescaledb_internal",
+                "chunk_name": "_hyper_1_61_chunk",
+                "compression_status": "Compressed",
+                "range_start": watermark - timedelta(days=14),
+                "range_end": watermark - timedelta(days=7),
+                "before_compression_total_bytes": 21_242_691_584,
+            },
         ],
     )
-    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
-    assert sample["uncompressed_bytes"] == 8400
-    # In-window chunks start 6 and 1 days before the watermark -> 6 covered days.
-    assert sample["daily_ingest_bytes"] == 1400 // 6
+    sample = collection.collect_working_set(cursor, watermark=watermark, lag_seconds=172_800)
 
-
-def test_daily_ingest_in_steady_state_divides_by_the_uncompressed_span() -> None:
-    """Steady state under a 2-day lag: everything older is already compressed,
-    so only the last few one-day chunks are uncompressed. Compressed chunks
-    inside the seven-day window are not returned by the catalog query at all,
-    and must not dilute the rate."""
-    cursor = _FakeCursor(
-        hypertables=[
-            _hypertable_row("hydro", "river_timeseries"),
-            _hypertable_row("met", "forcing_station_timeseries"),
-        ],
-        # 7-day window, 4 older chunks already compressed (absent from the
-        # is_compressed=false query), 3 uncompressed one-day chunks left.
-        chunks=[
-            _chunk_row("hydro", "river_timeseries", day=day, total_bytes=100)
-            for day in (1, 2, 3)
-        ],
+    assert sample["projection_status"] == "ok"
+    assert sample["uncompressed_bytes"] == 408_000_000_000
+    # River alone is the 8.4 TB/day the age divisor produced on this shape.
+    assert sample["ingest_reference"]["hydro.river_timeseries"]["daily_ingest_bytes"] == (
+        548_636_811_264 // 7
     )
-    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
-    assert sample["uncompressed_chunks"] == 3
-    assert sample["daily_ingest_bytes"] == 300 // 3
+    assert sample["daily_ingest_bytes"] == 548_636_811_264 // 7 + 21_242_691_584 // 7
+    assert sample["daily_ingest_bytes"] < 100_000_000_000
+    reference = sample["ingest_reference"]["hydro.river_timeseries"]
+    assert reference["chunk"] == "_timescaledb_internal._hyper_3_91_chunk"
+    assert reference["width_days"] == 7.0
+    assert reference["before_compression_total_bytes"] == 548_636_811_264
+
+    final = collection.finalize_working_set(sample, home_free_bytes=721_000_000_000)
+    # `next_compressible_at` is watermark + 2 days (the lag on the chunk that
+    # ends at the watermark), so the span is two days of the measured rate.
+    assert final["next_compressible_at"] == _iso(watermark + timedelta(days=2))
+    assert final["projected_peak_bytes"] < 1_000_000_000_000
+    receipt = {"postgres": {"status": "ok"}, "working_set": final}
+    assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in _codes(receipt)
 
 
-def test_the_rate_is_computed_per_table_so_a_wide_chunk_cannot_dilute_it() -> None:
-    """Round-3 review, spec D8: ``daily_ingest_bytes`` is computed PER governed
-    hypertable and summed.
-
-    A pooled divisor takes ``min(range_start)`` across the WHOLE governed set,
-    so one long-span, byte-light table drags every other table's rate down with
-    it. Here river writes 60 GiB/day into one-day chunks while forcing holds a
-    single six-day-old 7-day chunk of 42 GiB (7 GiB/day). The truth is 67
-    GiB/day; pooled it would be ``222 GiB / 6 == 37 GiB/day``, a 45% under-report
-    on the guard whose whole job is to see the volume filling.
-    """
+def test_the_rate_is_per_canonical_table_and_summed() -> None:
+    """Decision 25 keeps round 3's per-table principle: each canonical
+    hypertable gets its own reference chunk and its own divisor, and the receipt
+    total is exactly the sum of the per-table rates it echoes."""
     cursor = _FakeCursor(
         hypertables=[
             _hypertable_row("hydro", "river_timeseries"),
             _hypertable_row("met", "forcing_station_timeseries"),
         ],
         chunks=[
-            _chunk_row("hydro", "river_timeseries", day=3, total_bytes=60 * _GIB),
-            _chunk_row("hydro", "river_timeseries", day=2, total_bytes=60 * _GIB),
             _chunk_row("hydro", "river_timeseries", day=1, total_bytes=60 * _GIB),
-            _chunk_row("met", "forcing_station_timeseries", day=6, total_bytes=42 * _GIB),
+            _chunk_row("met", "forcing_station_timeseries", day=1, total_bytes=_GIB),
+        ],
+        compression_rows=[
+            _reference_row(
+                "hydro", "river_timeseries", start_day=8, end_day=1, before_bytes=7 * 60 * _GIB
+            ),
+            _reference_row(
+                "met", "forcing_station_timeseries", start_day=8, end_day=1, before_bytes=7 * _GIB
+            ),
         ],
     )
     sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
-    assert sample["uncompressed_bytes"] == 222 * _GIB
-    # river 180 GiB / 3 d + forcing 42 GiB / 6 d.
-    assert sample["daily_ingest_bytes"] == 67 * _GIB
-    # The pooled divisor this replaces.
-    assert sample["daily_ingest_bytes"] != 222 * _GIB // 6
+    reference = sample["ingest_reference"]
+    assert reference["hydro.river_timeseries"]["daily_ingest_bytes"] == 60 * _GIB
+    assert reference["met.forcing_station_timeseries"]["daily_ingest_bytes"] == _GIB
+    assert sample["daily_ingest_bytes"] == 61 * _GIB
+    assert sample["daily_ingest_bytes"] == sum(
+        entry["daily_ingest_bytes"] for entry in reference.values() if entry is not None
+    )
 
 
-def test_a_write_frozen_legacy_sibling_does_not_dilute_the_canonical_rate() -> None:
-    """The transitional shape this rule exists for (D7 + round-3 review).
+def test_the_per_table_rates_are_truncated_before_they_are_summed() -> None:
+    """The rounding choice, pinned because both readings are defensible: `int()`
+    PER TABLE and then summed, not one `int()` over the total. Five bytes over
+    two days twice is 2 + 2 = 4, not `int(10 / 2) == 5`; the receipt's
+    `daily_ingest_bytes` must equal the sum of the rates `ingest_reference`
+    shows, or the JSON cannot be rechecked without the catalog."""
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[
+            _chunk_row("hydro", "river_timeseries", day=1, total_bytes=10),
+            _chunk_row("met", "forcing_station_timeseries", day=1, total_bytes=10),
+        ],
+        compression_rows=[
+            _reference_row("hydro", "river_timeseries", start_day=3, end_day=1, before_bytes=5),
+            _reference_row(
+                "met", "forcing_station_timeseries", start_day=3, end_day=1, before_bytes=5
+            ),
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["daily_ingest_bytes"] == 4
+    assert sample["daily_ingest_bytes"] != int((5 + 5) / 2)
 
-    From rename onward the ``_legacy`` sibling is write-frozen: it holds one
-    stale 7-day chunk and takes on no new bytes. Pooled, its six-day-old
-    ``range_start`` becomes the divisor for the canonical table too, halving the
-    reported river rate for the entire expand window — exactly while the volume
-    is under the most pressure. Per table, the frozen sibling contributes its own
-    (near-zero) rate and nothing else.
+
+def test_a_write_frozen_legacy_sibling_contributes_no_ingest_and_is_never_a_reference() -> None:
+    """Decision 25: the `_legacy` sibling is write-frozen from the rename
+    onward. Its uncompressed chunks are real bytes on the volume and stay in
+    `uncompressed_bytes`, but it contributes zero ingest and its compressed
+    chunks are NEVER borrowed as the canonical table's reference — the legacy
+    rows are roughly six times wider, so borrowing would over-report the narrow
+    table's rate right through the I8 window.
+
+    Here only the sibling has a compressed chunk. The honest answer is
+    `no_compressed_reference`, not the sibling's rate.
     """
     cursor = _FakeCursor(
         hypertables=[
@@ -1000,61 +1232,45 @@ def test_a_write_frozen_legacy_sibling_does_not_dilute_the_canonical_rate() -> N
             _hypertable_row("met", "forcing_station_timeseries"),
         ],
         chunks=[
-            _chunk_row("hydro", "river_timeseries", day=3, total_bytes=60 * _GIB),
-            _chunk_row("hydro", "river_timeseries", day=2, total_bytes=60 * _GIB),
-            _chunk_row("hydro", "river_timeseries", day=1, total_bytes=60 * _GIB),
+            _chunk_row("hydro", "river_timeseries", day=1, total_bytes=100 * _GIB),
             _chunk_row("hydro", "river_timeseries_legacy", day=6, total_bytes=_GIB),
         ],
-    )
-    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
-    assert sample["daily_ingest_bytes"] == 60 * _GIB + int(_GIB / 6)
-    # Pooled, the frozen sibling would have cut the canonical rate in half.
-    assert sample["daily_ingest_bytes"] > (181 * _GIB) // 6
-
-
-def test_a_single_fresh_chunk_never_divides_by_a_fraction() -> None:
-    """Round-2 review: the floor is ONE HOUR, not one day.
-
-    In the drained steady state the only in-window chunk is the open one, so a
-    whole-day floor divides a six-hour-old chunk's bytes by 1.0 instead of 0.25
-    and reports a quarter of the real rate — a green flip on exactly the state
-    this guard watches. Ten GiB in six hours is 40 GiB/day, and over-reporting
-    early in a chunk's life is the fail-safe direction for a capacity guard.
-    """
-    cursor = _FakeCursor(
-        hypertables=[
-            _hypertable_row("hydro", "river_timeseries"),
-            _hypertable_row("met", "forcing_station_timeseries"),
+        compression_rows=[
+            _reference_row(
+                "hydro",
+                "river_timeseries_legacy",
+                start_day=13,
+                end_day=6,
+                before_bytes=7 * 400 * _GIB,
+            )
         ],
-        chunks=[_chunk_row("hydro", "river_timeseries", day=0.25, total_bytes=10 * _GIB)],
     )
     sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
-    assert sample["daily_ingest_bytes"] == 40 * _GIB
-
-
-def test_the_divisor_floor_is_an_hour_not_a_day() -> None:
-    """The floor still exists — a chunk seconds old must not divide by ~0 and
-    manufacture an astronomical rate. One hour is the smallest denominator."""
-    cursor = _FakeCursor(
-        hypertables=[
-            _hypertable_row("hydro", "river_timeseries"),
-            _hypertable_row("met", "forcing_station_timeseries"),
-        ],
-        chunks=[_chunk_row("hydro", "river_timeseries", day=0, total_bytes=100)],
+    assert sample["projection_status"] == "no_compressed_reference"
+    assert sample["daily_ingest_bytes"] is None
+    # River needs a reference and has none; forcing has no uncompressed chunk
+    # at all, so it is not keyed (an empty table is not a missing reference).
+    assert sample["ingest_reference"] == {"hydro.river_timeseries": None}
+    # The sibling's stock is still counted.
+    assert sample["uncompressed_bytes"] == 101 * _GIB
+    # And the sibling was never even asked for a reference.
+    assert all(
+        "_legacy" not in str(params)
+        for sql, params in zip(cursor.executed, cursor.parameters)
+        if "chunk_compression_stats" in sql
     )
-    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
-    assert sample["daily_ingest_bytes"] == 100 * 24
 
 
-def test_a_future_chunk_counts_as_stock_but_not_as_ingest() -> None:
-    """Round-2 review, decision 18: the rate window is two-sided.
+def test_a_canonical_table_without_a_compressed_chunk_makes_no_growth_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The post-expand narrow table during its first lag + chunk width, and a
+    fresh install: uncompressed chunks exist, no compressed chunk does.
 
-    A chunk whose ``range_start`` is in the FUTURE is a forecast-horizon chunk:
-    real bytes on the volume, so it belongs in ``uncompressed_bytes``, but it
-    carries no ingest that has happened yet. Counting it in the numerator while
-    the divisor spans only observed time inflates the rate — post-expand, with
-    one-day chunks and a multi-day forecast horizon, by roughly 4x — and an
-    inflated rate is a projection nobody can act on.
+    No rate can be read, so none is claimed — `daily_ingest_bytes` is null, the
+    peak is the stock as it stands, and the state is a WARNING an operator can
+    see, never a critical. It resolves itself at the next compression tick, and
+    a daily false critical is exactly how the true one gets ignored.
     """
     cursor = _FakeCursor(
         hypertables=[
@@ -1062,34 +1278,315 @@ def test_a_future_chunk_counts_as_stock_but_not_as_ingest() -> None:
             _hypertable_row("met", "forcing_station_timeseries"),
         ],
         chunks=[
-            _chunk_row("hydro", "river_timeseries", day=2, total_bytes=200),
-            # range_start two days AFTER the watermark.
-            _chunk_row("met", "forcing_station_timeseries", day=-2, total_bytes=9000),
+            _chunk_row("hydro", "river_timeseries", day=1, total_bytes=300 * _GIB),
+            _chunk_row("met", "forcing_station_timeseries", day=1, total_bytes=_GIB),
+        ],
+        # Forcing HAS a reference; the narrow river table does not.
+        compression_rows=[
+            _reference_row(
+                "met", "forcing_station_timeseries", start_day=8, end_day=1, before_bytes=7 * _GIB
+            )
         ],
     )
     sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
-    # Stock: both chunks.
-    assert sample["uncompressed_bytes"] == 9200
-    assert sample["uncompressed_chunks"] == 2
-    # Rate: only the observed one, over the two days it covers.
-    assert sample["daily_ingest_bytes"] == 100
+    final = collection.finalize_working_set(sample, home_free_bytes=900 * _GIB)
+    assert final["projection_status"] == "no_compressed_reference"
+    # No partial sum: forcing's 1 GiB/day is echoed but NOT claimed as the
+    # lane's rate — half the governed tables reads as a whole-lane rate and
+    # under-projects the peak.
+    assert final["daily_ingest_bytes"] is None
+    assert final["ingest_reference"]["hydro.river_timeseries"] is None
+    assert final["ingest_reference"]["met.forcing_station_timeseries"]["daily_ingest_bytes"] == _GIB
+    assert final["projected_peak_bytes"] == final["uncompressed_bytes"] == 301 * _GIB
+
+    codes = _codes({"postgres": {"status": "ok"}, "working_set": final})
+    assert codes["NO_COMPRESSED_REFERENCE"] == "warning"
+    assert "critical" not in codes.values()
+    warning = next(
+        item
+        for item in governance._recommendations(
+            {"postgres": {"status": "ok"}, "working_set": final}, governance.AuditThresholds()
+        )
+        if item["code"] == "NO_COMPRESSED_REFERENCE"
+    )
+    assert warning["evidence"]["tables_without_reference"] == ["hydro.river_timeseries"]
+    assert "hydro.river_timeseries" in warning["action"]
+
+    # And end to end: a warning does not redden the daily tick.
+    monkeypatch.setattr(
+        governance,
+        "collect_filesystem",
+        lambda _config: {
+            "filesystems": {
+                "root": {"path": "/", "free_bytes": 500 * _GIB},
+                "home": {"path": "/home", "free_bytes": 900 * _GIB},
+            },
+            "path_sizes": {},
+        },
+    )
+    monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
+    monkeypatch.setattr(
+        governance,
+        "collect_postgres",
+        lambda *_args, **_kwargs: {"status": "ok", "working_set": sample},
+    )
+    summary_path = tmp_path / "resource-governance.json"
+    rc = governance.main(["--summary-path", str(summary_path), "--quiet"])
+    err = capsys.readouterr().err
+    assert rc == 0
+    assert _CRITICAL_ANCHOR not in err
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert _codes(written)["NO_COMPRESSED_REFERENCE"] == "warning"
 
 
-def test_an_all_future_working_set_reports_a_zero_rate_not_a_crash() -> None:
-    """Degenerate edge of the two-sided window: nothing observed yet. The stock
-    is real and the status stays ``ok``; the rate is honestly zero rather than
-    a division by an empty span."""
+def test_an_empty_canonical_table_needs_no_reference() -> None:
+    """A canonical hypertable with no uncompressed chunk has nothing to project,
+    so a missing reference for it is not a fault: requiring one would put the
+    whole block into `no_compressed_reference` and delete the OTHER table's
+    perfectly good rate.
+
+    It is not keyed in `ingest_reference` either (decision 25 as amended). That
+    is what makes a null mean exactly one thing — "needs a reference and has
+    none" — so `tables_without_reference` in the warning can be read straight
+    off the nulls without ever naming a table that is simply empty.
+    """
     cursor = _FakeCursor(
         hypertables=[
             _hypertable_row("hydro", "river_timeseries"),
             _hypertable_row("met", "forcing_station_timeseries"),
         ],
-        chunks=[_chunk_row("hydro", "river_timeseries", day=-1, total_bytes=500)],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=1, total_bytes=10 * _GIB)],
+        compression_rows=[
+            _reference_row(
+                "hydro", "river_timeseries", start_day=8, end_day=1, before_bytes=7 * 9 * _GIB
+            )
+        ],
     )
     sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
     assert sample["projection_status"] == "ok"
-    assert sample["uncompressed_bytes"] == 500
-    assert sample["daily_ingest_bytes"] == 0
+    assert sample["daily_ingest_bytes"] == 9 * _GIB
+    assert set(sample["ingest_reference"]) == {"hydro.river_timeseries"}
+
+    # And the case the amendment closes: the empty table sits next to a table
+    # that DOES need a reference and has none. Only the latter is named.
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=1, total_bytes=10 * _GIB)],
+        compression_rows=[],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    final = collection.finalize_working_set(sample, home_free_bytes=900 * _GIB)
+    assert final["projection_status"] == "no_compressed_reference"
+    assert final["ingest_reference"] == {"hydro.river_timeseries": None}
+    warning = next(
+        item
+        for item in governance._recommendations(
+            {"postgres": {"status": "ok"}, "working_set": final}, governance.AuditThresholds()
+        )
+        if item["code"] == "NO_COMPRESSED_REFERENCE"
+    )
+    assert warning["evidence"]["tables_without_reference"] == ["hydro.river_timeseries"]
+    assert "met.forcing_station_timeseries" not in warning["action"]
+
+
+def test_the_width_comes_from_the_catalog_not_a_constant() -> None:
+    """Today's chunks are seven days wide; the post-expand narrow table's are
+    one; a partial chunk can be half a day. The divisor is always the reference
+    chunk's own `range_end - range_start`, so the same code reads all three."""
+    for start_day, end_day, expected_width in ((2.0, 1.0, 1.0), (8.0, 1.0, 7.0), (1.5, 1.0, 0.5)):
+        cursor = _FakeCursor(
+            hypertables=[
+                _hypertable_row("hydro", "river_timeseries"),
+                _hypertable_row("met", "forcing_station_timeseries"),
+            ],
+            chunks=[_chunk_row("hydro", "river_timeseries", day=1, total_bytes=_GIB)],
+            compression_rows=[
+                _reference_row(
+                    "hydro",
+                    "river_timeseries",
+                    start_day=start_day,
+                    end_day=end_day,
+                    before_bytes=84 * _GIB,
+                )
+            ],
+        )
+        sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+        reference = sample["ingest_reference"]["hydro.river_timeseries"]
+        assert reference["width_days"] == expected_width
+        assert reference["daily_ingest_bytes"] == int(84 * _GIB / expected_width)
+        assert sample["daily_ingest_bytes"] == int(84 * _GIB / expected_width)
+
+
+def test_a_zero_width_reference_chunk_is_not_a_reference() -> None:
+    """A catalog row whose range is empty cannot be divided by. It is treated as
+    no reference at all — the same no-growth-claim answer — rather than crashing
+    the daily tick with ZeroDivisionError."""
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=1, total_bytes=_GIB)],
+        compression_rows=[
+            _reference_row("hydro", "river_timeseries", start_day=1, end_day=1, before_bytes=_GIB)
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["projection_status"] == "no_compressed_reference"
+    assert sample["ingest_reference"]["hydro.river_timeseries"] is None
+
+
+def test_the_latest_compressed_chunk_wins_not_the_largest() -> None:
+    """LATEST by `range_end`, not largest: an older, bigger chunk is a stale
+    rate. A backfill week that is four times the current volume must not become
+    the projection for the week after it."""
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=1, total_bytes=_GIB)],
+        compression_rows=[
+            # Older AND four times bigger.
+            _reference_row(
+                "hydro", "river_timeseries", start_day=15, end_day=8, before_bytes=7 * 40 * _GIB
+            ),
+            _reference_row(
+                "hydro", "river_timeseries", start_day=8, end_day=1, before_bytes=7 * 10 * _GIB
+            ),
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["daily_ingest_bytes"] == 10 * _GIB
+    assert sample["ingest_reference"]["hydro.river_timeseries"]["range_end"] == _iso(
+        _WATERMARK - timedelta(days=1)
+    )
+
+
+def test_an_uncompressed_row_from_compression_stats_is_not_a_reference() -> None:
+    """`chunk_compression_stats` returns a row for every chunk, compressed or
+    not. An `Uncompressed` row is the front-loaded reading this rule exists to
+    avoid, and it is always the NEWEST row — so without the explicit
+    `compression_status = 'Compressed'` filter it would win every time."""
+    newer_uncompressed = _reference_row(
+        "hydro",
+        "river_timeseries",
+        start_day=1,
+        end_day=-6,
+        before_bytes=7 * 500 * _GIB,
+        status="Uncompressed",
+    )
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=1, total_bytes=_GIB)],
+        compression_rows=[
+            newer_uncompressed,
+            _reference_row(
+                "hydro", "river_timeseries", start_day=8, end_day=1, before_bytes=7 * 10 * _GIB
+            ),
+        ],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["daily_ingest_bytes"] == 10 * _GIB
+    assert sample["projection_status"] == "ok"
+
+    # With ONLY uncompressed rows there is no reference at all.
+    cursor = _FakeCursor(
+        hypertables=[
+            _hypertable_row("hydro", "river_timeseries"),
+            _hypertable_row("met", "forcing_station_timeseries"),
+        ],
+        chunks=[_chunk_row("hydro", "river_timeseries", day=1, total_bytes=_GIB)],
+        compression_rows=[newer_uncompressed],
+    )
+    sample = collection.collect_working_set(cursor, watermark=_WATERMARK, lag_seconds=172_800)
+    assert sample["projection_status"] == "no_compressed_reference"
+    assert sample["daily_ingest_bytes"] is None
+
+
+def test_no_compressed_reference_is_measured_so_a_missing_home_is_still_a_lane_fault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Decision 25 + decision 19: `no_compressed_reference` is a MEASURED state
+    — the catalog answered, there was simply no chunk to read a rate from — so
+    an unobservable `/home` is as blinding here as it is under `ok` and must
+    still page. The two findings are independent and both are emitted."""
+    monkeypatch.setattr(
+        governance,
+        "collect_filesystem",
+        lambda _config: {
+            "filesystems": {"home": {"path": "/home", "status": "unavailable"}},
+            "path_sizes": {},
+        },
+    )
+    monkeypatch.setattr(governance, "collect_systemd", lambda _services: {"units": []})
+    monkeypatch.setattr(
+        governance,
+        "collect_postgres",
+        lambda *_args, **_kwargs: {
+            "status": "ok",
+            "working_set": {
+                "hypertables": ["hydro.river_timeseries", "met.forcing_station_timeseries"],
+                "uncompressed_bytes": 300 * _GIB,
+                "uncompressed_chunks": 1,
+                "daily_ingest_bytes": None,
+                # One uncompressed chunk, on river: only river is keyed, and
+                # its null is what `tables_without_reference` reports.
+                "ingest_reference": {"hydro.river_timeseries": None},
+                "next_compressible_at": "2026-09-03T00:00:00Z",
+                "compression_lag_seconds": collection.DEFAULT_COMPRESSION_LAG_SECONDS,
+                "watermark": "2026-09-01T00:00:00Z",
+                "projection_status": "no_compressed_reference",
+            },
+        },
+    )
+    summary_path = tmp_path / "resource-governance.json"
+    rc = governance.main(["--summary-path", str(summary_path), "--quiet"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert f"{_CRITICAL_ANCHOR}HOME_FREE_UNAVAILABLE" in err.splitlines()
+    written = json.loads(summary_path.read_text(encoding="utf-8"))
+    # The catalog was fine, so the status is NOT downgraded to unavailable.
+    assert written["working_set"]["projection_status"] == "no_compressed_reference"
+    codes = _codes(written)
+    assert codes["HOME_FREE_UNAVAILABLE"] == "critical"
+    assert codes["NO_COMPRESSED_REFERENCE"] == "warning"
+    assert "PROJECTED_PEAK_EXCEEDS_HOME_FREE" not in codes
+    warning = next(
+        item
+        for item in governance._recommendations(written, governance.AuditThresholds())
+        if item["code"] == "NO_COMPRESSED_REFERENCE"
+    )
+    assert warning["evidence"]["tables_without_reference"] == ["hydro.river_timeseries"]
+
+
+def test_the_diagnostic_line_carries_the_ingest_reference() -> None:
+    """The `RESOURCE_GOVERNANCE_WORKING_SET:` line is what the shared
+    `OnFailure=` mail carries. The 71bc5265 receipt reported 8.4 TB/day with
+    nothing to say where the number came from; the divisor rides along now."""
+    assert "ingest_reference" in governance.WORKING_SET_DIAGNOSTIC_FIELDS
+    receipt = _base_receipt()
+    receipt["working_set"] = _working_set(
+        uncompressed_bytes=600 * _GIB,
+        daily_ingest_bytes=75 * _GIB,
+        next_compressible_at="2026-09-03T00:00:00Z",
+        home_free_bytes=800 * _GIB,
+        projected_peak_bytes=750 * _GIB,
+    )
+    line = governance._working_set_diagnostic(receipt)
+    assert line is not None
+    payload = json.loads(line[len(governance.WORKING_SET_DIAGNOSTIC_PREFIX) :])
+    assert payload["ingest_reference"] == receipt["working_set"]["ingest_reference"]
+    assert (
+        payload["ingest_reference"]["hydro.river_timeseries"]["before_compression_total_bytes"]
+        == 548_636_811_264
+    )
 
 
 def test_empty_state_reports_no_uncompressed_chunk_and_projects_nothing() -> None:
@@ -1105,6 +1602,9 @@ def test_empty_state_reports_no_uncompressed_chunk_and_projects_nothing() -> Non
     assert final["next_compressible_at"] is None
     assert final["projection_status"] == "no_uncompressed_chunk"
     assert final["projected_peak_bytes"] == final["uncompressed_bytes"] == 0
+    # No table needs a reference, so the mapping is EMPTY rather than a mapping
+    # of nulls: a null means "needs a reference and has none".
+    assert final["ingest_reference"] == {}
 
 
 def test_watermark_unavailable_is_a_lane_fault_not_a_zero() -> None:
@@ -1298,7 +1798,7 @@ def test_an_unobservable_home_pages_under_the_empty_state_too(
         encoding="utf-8"
     )
     assert "`projection_status` stays `ok`" not in source
-    assert "(`ok` or `no_uncompressed_chunk`)" in source
+    assert "(`ok`, `no_uncompressed_chunk` or `no_compressed_reference`)" in source
 
 
 def test_scenario_watermark_unavailable_is_critical() -> None:
@@ -1777,6 +2277,7 @@ _HOME_BLOCK_PIN_ANCHORS: tuple[tuple[str, str], ...] = (
         '"code": "PROJECTED_PEAK_EXCEEDS_HOME_FREE"',
     ),
     (r"`WORKING_SET_ABOVE_WARNING` \(`:(\d+)` —", '"code": "WORKING_SET_ABOVE_WARNING"'),
+    (r"`NO_COMPRESSED_REFERENCE` \(`:(\d+)` —", '"code": "NO_COMPRESSED_REFERENCE"'),
     # Positional pairing: the codes are listed in line order, CRITICAL first.
     (r"\(`:(\d+)`, `:\d+`\): the `nhms` database", 'code = "DATABASE_SIZE_ABOVE_CRITICAL"'),
     (r"\(`:\d+`, `:(\d+)`\): the `nhms` database", 'code = "DATABASE_SIZE_ABOVE_WARNING"'),

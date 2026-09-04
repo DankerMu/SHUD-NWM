@@ -141,15 +141,31 @@
         "uncompressed_bytes": {"type": ["integer", "null"], "minimum": 0},
         "uncompressed_chunks": {"type": ["integer", "null"], "minimum": 0},
         "daily_ingest_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "ingest_reference": {
+          "type": ["object", "null"],
+          "additionalProperties": {
+            "type": ["object", "null"],
+            "additionalProperties": false,
+            "properties": {
+              "chunk": {"type": "string", "minLength": 1, "maxLength": 256},
+              "range_start": {"type": "string", "format": "date-time"},
+              "range_end": {"type": "string", "format": "date-time"},
+              "before_compression_total_bytes": {"type": "integer", "minimum": 0},
+              "width_days": {"type": "number", "exclusiveMinimum": 0},
+              "daily_ingest_bytes": {"type": "integer", "minimum": 0}
+            },
+            "required": ["chunk", "range_start", "range_end", "before_compression_total_bytes", "width_days", "daily_ingest_bytes"]
+          }
+        },
         "next_compressible_at": {"type": ["string", "null"], "format": "date-time"},
         "home_free_bytes": {"type": ["integer", "null"], "minimum": 0},
         "projected_peak_bytes": {"type": ["integer", "null"], "minimum": 0},
-        "projection_status": {"enum": ["ok", "no_uncompressed_chunk", "watermark_unavailable", "working_set_unavailable"]},
+        "projection_status": {"enum": ["ok", "no_uncompressed_chunk", "no_compressed_reference", "watermark_unavailable", "working_set_unavailable"]},
         "compression_lag_seconds": {"type": "integer", "minimum": 1},
         "watermark": {"type": ["string", "null"], "format": "date-time"},
         "hypertables": {"type": "array", "items": {"type": "string", "minLength": 1}, "maxItems": 8}
       },
-      "required": ["uncompressed_bytes", "daily_ingest_bytes", "next_compressible_at", "home_free_bytes", "projected_peak_bytes", "projection_status", "compression_lag_seconds"]
+      "required": ["uncompressed_bytes", "daily_ingest_bytes", "ingest_reference", "next_compressible_at", "home_free_bytes", "projected_peak_bytes", "projection_status", "compression_lag_seconds"]
     },
     "trend": {
       "type": "object",

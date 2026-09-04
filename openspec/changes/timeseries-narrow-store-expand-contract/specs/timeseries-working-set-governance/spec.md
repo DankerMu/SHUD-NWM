@@ -2,11 +2,11 @@
 
 ### Requirement: Resource governance SHALL measure the uncompressed working set and project the next compression peak
 
-The node-27 resource-governance audit SHALL collect, from the catalog only: `uncompressed_bytes` (sum of `pg_total_relation_size` over uncompressed chunks of the canonical and `_legacy` river and forcing hypertables), `daily_ingest_bytes` (computed PER governed hypertable and summed: for each hypertable, its uncompressed chunk bytes whose `range_start` falls within the trailing seven days and not after the watermark, divided by the days that table's own in-window chunks actually cover — `max(1/24, days(watermark − that table's earliest in-window range_start))`, never a fixed seven and never a whole-day floor (a whole-day floor divides the open chunk's first-day bytes by one day and under-reports the rate by 1/age; a pooled divisor takes `min(range_start)` across tables and lets a long-span, byte-light table such as a write-frozen `_legacy` sibling or a 7-day forcing chunk dilute a 1-day table's rate; the seven-day cap is implied by the window bound), because in steady state the uncompressed window is shorter than seven days), `next_compressible_at` (the oldest uncompressed chunk's `range_end` plus the compression lag read from `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` in the governance lane's own env — the same variable name the compression runner uses, default 172800, template-to-template cross-pinned — and echoed in the receipt as `compression_lag_seconds` so the node-27 rollout receipt compares it with the deployed compression env value), `home_free_bytes`, `projection_status`, and `projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes × max(0, days(next_compressible_at − display watermark))` where the interval is expressed in days and may be fractional.
+The node-27 resource-governance audit SHALL collect, from the catalog only: `uncompressed_bytes` (sum of `pg_total_relation_size` over uncompressed chunks of the canonical and `_legacy` river and forcing hypertables), `daily_ingest_bytes` (computed PER canonical governed hypertable and summed: for each canonical hypertable, the `before_compression_total_bytes` of its latest-by-`range_end` chunk with `compression_status = 'Compressed'` in `chunk_compression_stats('<schema>.<table>')` joined to `timescaledb_information.chunks`, divided by that chunk's own width `days(range_end − range_start)`; a `_legacy` sibling contributes zero and is never borrowed from; NO uncompressed chunk is ever read for the rate, because a `valid_time`-partitioned chunk receives most of its bytes before the watermark reaches it and any uncompressed-bytes-over-age reading over-reports 24× at the chunk boundary — the 2026-09-04 node-27 receipt at 71bc5265 reported 8.4 TB/day against ≈78 GB/day; a compressed chunk has received every write it will get), `ingest_reference` (per canonical hypertable the chunk, range, pre-compression bytes, width and per-table rate the divisor came from, or `null` when that table has no compressed chunk), `next_compressible_at` (the oldest uncompressed chunk's `range_end` plus the compression lag read from `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` in the governance lane's own env — the same variable name the compression runner uses, default 172800, template-to-template cross-pinned — and echoed in the receipt as `compression_lag_seconds` so the node-27 rollout receipt compares it with the deployed compression env value), `home_free_bytes`, `projection_status`, and `projected_peak_bytes = uncompressed_bytes + daily_ingest_bytes × max(0, days(next_compressible_at − display watermark))` where the interval is expressed in days and may be fractional.
 
 #### Scenario: Fields present in the receipt
 - **WHEN** the audit runs in any mode
-- **THEN** the receipt validates against the updated schema and carries all six fields, byte units, the watermark used and `projection_status = "ok"`
+- **THEN** the receipt validates against the updated schema and carries all six fields plus `ingest_reference`, byte units, the watermark used and `projection_status = "ok"`
 
 #### Scenario: No uncompressed chunk
 - **WHEN** every chunk of every governed hypertable is compressed
@@ -16,9 +16,29 @@ The node-27 resource-governance audit SHALL collect, from the catalog only: `unc
 - **WHEN** the display watermark cannot be fetched
 - **THEN** the audit records `projection_status = "watermark_unavailable"`, emits the critical recommendation `WATERMARK_UNAVAILABLE` (a lane fault must reach an operator), and exits 1
 
-#### Scenario: Future chunks stay out of the rate
-- **WHEN** the catalog holds an uncompressed chunk whose `range_start` is after the watermark (the forecast horizon writes ahead of it)
-- **THEN** that chunk's bytes are excluded from `daily_ingest_bytes` (the in-window set is `watermark − 7 d <= range_start <= watermark`, the same set the divisor spans) while it still counts toward `uncompressed_bytes`, so the numerator and the divisor range over the same chunks
+#### Scenario: The rate reads the last compressed chunk, not the working set
+- **WHEN** the watermark is 2026-09-03T00:00Z, the only uncompressed river chunk spans 2026-09-03..09-10 with `range_start` equal to the watermark and 324 GB on disk, and the latest compressed river chunk spans 2026-08-27..09-03 with `before_compression_total_bytes = 548,636,811,264` (the live node-27 shape at 71bc5265)
+- **THEN** the river table's rate is `548,636,811,264 / 7` bytes per day (≈78 GB/day, not the 8.4 TB/day an age divisor reports), `uncompressed_bytes` is 324 GB, `ingest_reference["hydro.river_timeseries"]` names that compressed chunk, its bytes and `width_days = 7`, and the projected peak stays below one terabyte
+
+#### Scenario: Latest compressed chunk, not the largest
+- **WHEN** a table has two compressed chunks and the older one carries more `before_compression_total_bytes`
+- **THEN** the rate is derived from the one with the greater `range_end`
+
+#### Scenario: Width comes from the catalog
+- **WHEN** the reference chunk spans one day (the post-expand narrow table) or seven days (today's canonical table)
+- **THEN** the divisor is that chunk's own `range_end − range_start` in days — one and seven respectively — never a constant
+
+#### Scenario: Only a compressed row is a reference
+- **WHEN** `chunk_compression_stats` also returns rows with `compression_status = 'Uncompressed'`
+- **THEN** those rows are ignored for the rate even if newer than every compressed row
+
+#### Scenario: A write-frozen legacy sibling contributes no ingest
+- **WHEN** `hydro.river_timeseries_legacy` still holds compressed and uncompressed chunks after the expand
+- **THEN** its uncompressed chunks count toward `uncompressed_bytes`, it contributes zero to `daily_ingest_bytes`, and it is never used as the canonical table's reference
+
+#### Scenario: No compressed reference
+- **WHEN** a canonical hypertable has uncompressed chunks but no compressed chunk (the narrow table during its first lag + width days after the expand; a fresh install)
+- **THEN** the audit records `projection_status = "no_compressed_reference"`, `daily_ingest_bytes = null`, `ingest_reference[<table>] = null`, `projected_peak_bytes = uncompressed_bytes` (no growth claim), emits the WARNING `NO_COMPRESSED_REFERENCE` naming the table, never `PROJECTED_PEAK_EXCEEDS_HOME_FREE`, and exits 0 unless another critical fires
 
 #### Scenario: Home free space unavailable
 - **WHEN** the working set was measured but the `/home` filesystem observation is `unavailable`
@@ -34,7 +54,7 @@ The node-27 resource-governance audit SHALL collect, from the catalog only: `unc
 
 #### Scenario: No row scan
 - **WHEN** the collection SQL is inspected by the catalog-only guard test (new in I6)
-- **THEN** none of the new queries reference a chunk or hypertable in a FROM clause other than `timescaledb_information.*` and `pg_*` size functions
+- **THEN** none of the new queries reference a chunk or hypertable in a FROM clause other than `timescaledb_information.*`, `pg_*` size functions and `chunk_compression_stats(<hypertable literal>)` (a catalog function over compression statistics, not a scan of the hypertable it names)
 
 ### Requirement: Critical SHALL mean the projected peak does not fit; database size SHALL be informational
 

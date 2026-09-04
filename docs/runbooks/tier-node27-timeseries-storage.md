@@ -3855,28 +3855,54 @@ before a receipt exists.
      bound that makes it safe is the retention policy above, not the volume's
      size.
 
+     **How `daily_ingest_bytes` is measured** (`#1985` decision 25): per
+     canonical hypertable, the latest-by-`range_end` chunk whose
+     `compression_status` is `Compressed` in `chunk_compression_stats()`, its
+     `before_compression_total_bytes` divided by that chunk's own width, summed
+     across the tables — never from the uncompressed set, because
+     `hydro.river_timeseries` is partitioned on forecast `valid_time` with a
+     168 h horizon, so its newest chunk already holds bytes the watermark has
+     not reached: dividing those by their covered age reported **8.4 TB/day
+     against ≈78 GB/day** on 2026-09-04, and a false 17.2 TB peak against
+     721 GB free. A canonical table that has uncompressed chunks but no
+     compressed one yet (the first lag + chunk width after the expand
+     migration, or a fresh install) reports `projection_status =
+     "no_compressed_reference"`, a null `daily_ingest_bytes`, the stock as its
+     peak, and the warning
+     `NO_COMPRESSED_REFERENCE`, which names it. `working_set.ingest_reference`
+     is keyed by the canonical tables that HAVE uncompressed chunks (an empty
+     table has no entry) and echoes the chunk, range, pre-compression bytes,
+     width and per-table rate the divisor came from — or `null` for a table
+     that needs a reference and has none, which is exactly the set the warning
+     reports. `{}` when nothing is uncompressed, `null` when the working set or
+     the watermark could not be measured. So the next wrong rate is diagnosable
+     from the receipt alone.
+     Recorded limit, not compensated: the rate is lag + chunk width old
+     (≈9 days today, ≈3 after the expand), so roster growth under-reports
+     until the next compression.
+
      **`/home` free space has no critical tier of its own** (line numbers
      re-pinned 2026-09-03, `#1985`). The resource-governance audit gives that
      mount a warning threshold only — `home_free_warn_bytes` (default 300 GiB)
-     -> `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:77`
-     (threshold), `:240` (comparison), `:245` (the code literal)
+     -> `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:78`
+     (threshold), `:241` (comparison), `:246` (the code literal)
      — and there is no `home_free_critical_bytes` at all. The exit-1 /
      `OnFailure=` mail lane has two triggers, in this order: the receipt's
-     `status` is not `completed` (`:904-905`), or the receipt carries at least
-     one `severity: critical` recommendation (`:910-912`, `:866`
+     `status` is not `completed` (`:948-949`), or the receipt carries at least
+     one `severity: critical` recommendation (`:910-912`, `:910`
      `_critical_codes`). The first is a defensive guard today — `build_receipt`
-     hard-codes `"status": "completed"` (`:553`) and nothing downgrades it — so
+     hard-codes `"status": "completed"` (`:596`) and nothing downgrades it — so
      in practice a critical recommendation is the only thing that reddens a
      completed audit. (A rejected config never gets that far: the config parse
-     is `:889-892` and the `return 2` is `:897`, which also trips
+     is `:935-938` and the `return 2` is `:941`, which also trips
      `OnFailure=`.) A `warning` changes neither `status` nor the critical
      list, so it trips nothing.
 
      The codes that can be critical today are `ROOT_FREE_BELOW_CRITICAL`
-     (`:223`), `HYPERTABLE_INDEX_RATIO_HIGH` (`:343`, severity assigned at
-     `:334`) and the five codes `#1985` added around the working set:
+     (`:224`), `HYPERTABLE_INDEX_RATIO_HIGH` (`:344`, severity assigned at
+     `:335`) and the five codes `#1985` added around the working set:
 
-     - `POSTGRES_UNAVAILABLE` (`:420`) — no database was reached at all:
+     - `POSTGRES_UNAVAILABLE` (`:421`) — no database was reached at all:
        `collect_postgres` reports `status: blocked` with reason
        `connection_failed` or `psycopg2_unavailable`. There is no working set
        to judge, so this is the whole finding. Before `#1985` round 3 both
@@ -3888,50 +3914,61 @@ before a receipt exists.
        either, for the opposite reason — the connection succeeded, so the
        working-set block exists and reports itself as
        `WORKING_SET_UNAVAILABLE` (exactly one critical, never both).
-     - `WORKING_SET_UNAVAILABLE` (`:463`) — the working set could not be
+     - `WORKING_SET_UNAVAILABLE` (`:469`) — the working set could not be
        measured at all: the catalog probes raised, or they returned no row for
        a canonical hypertable (the shape a read-only role takes when it loses
        `timescaledb_information.*` visibility). An empty catalog reads exactly
        like "everything is already compressed", so this status is the only
        thing between a blinded audit and a green receipt that has stopped
        watching the volume.
-     - `WATERMARK_UNAVAILABLE` (`:479`) — the display watermark could not be
+     - `WATERMARK_UNAVAILABLE` (`:485`) — the display watermark could not be
        proven, so no projection is possible; the lane's own fault, and it must
        reach a person.
-     - `HOME_FREE_UNAVAILABLE` (`:501`) — the catalog side is fine but `/home`
+     - `HOME_FREE_UNAVAILABLE` (`:513`) — the catalog side is fine but `/home`
        did not resolve or its `statvfs` failed, so `home_free_bytes` is null
-       and the comparison below cannot be made. Fires under BOTH measured
-       statuses — `ok` and `no_uncompressed_chunk` — because the guard is
-       equally blind in either: `projection_status` is left unchanged. Skipping
-       it silently was the fail-open: the filesystem block only emits
+       and the comparison below cannot be made. Fires under ALL THREE measured
+       statuses — `ok`, `no_uncompressed_chunk` and
+       `no_compressed_reference` — because the guard is equally blind in each:
+       an unknown `/home` is a lane fault whatever the catalog said, and
+       `projection_status` is left unchanged. Skipping it silently was the
+       fail-open: the filesystem block only emits
        `HOME_FREE_BELOW_WARNING` when it HAS a number, so without this code an
        unobservable `/home` produced a green receipt about the one volume the
        audit exists to watch.
-     - `PROJECTED_PEAK_EXCEEDS_HOME_FREE` (`:523`) —
+     - `PROJECTED_PEAK_EXCEEDS_HOME_FREE` (`:535`) —
        `projected_peak_bytes > home_free_bytes - safety_margin_bytes`, margin
        default 100 GiB (`--safety-margin-bytes`). Gated on
-       `projection_status == "ok"` ALONE (not on `no_uncompressed_chunk`) AND
-       on a known `home_free_bytes`: with nothing uncompressed there is no next
-       compression to project and `projected_peak_bytes` is 0, so the
-       comparison would fire on any `/home` under the margin; without a
-       free-space number the code above fires instead.
+       `projection_status == "ok"` ALONE (not on `no_uncompressed_chunk`, not on
+       `no_compressed_reference`) AND on a known `home_free_bytes`: with nothing
+       uncompressed there is no next compression to project and
+       `projected_peak_bytes` is 0, so the comparison would fire on any `/home`
+       under the margin; with no rate to read the peak is the stock and no
+       growth is being claimed; without a free-space number the code above fires
+       instead.
 
-     The same block adds one warning, `WORKING_SET_ABOVE_WARNING` (`:536` —
-     `uncompressed_bytes` above `working_set_warn_bytes`, default 400 GiB).
+     The same block adds two warnings: `WORKING_SET_ABOVE_WARNING` (`:579` —
+     `uncompressed_bytes` above `working_set_warn_bytes`, default 400 GiB) and
+     `NO_COMPRESSED_REFERENCE` (`:563` — a canonical hypertable holds
+     uncompressed chunks but has no compressed chunk to read a rate from;
+     evidence carries `tables_without_reference`).
+     Warning, never critical: it is the expected state for the first lag + chunk
+     width after the expand migration and it clears itself at the next
+     compression tick.
      `DATABASE_SIZE_ABOVE_CRITICAL` and `DATABASE_SIZE_ABOVE_WARNING` are
-     **`info` since `#1985`** (`:263`, `:266`): the `nhms` database growing past
+     **`info` since `#1985`** (`:264`, `:267`): the `nhms` database growing past
      500 GiB is what the retention window is supposed to allow, and a daily
      false critical is exactly how the true one gets ignored.
 
      Every critical prints `RESOURCE_GOVERNANCE_CRITICAL:<code>` on stderr
-     (`:912`, byte shape unchanged — other tooling greps it) and, only when at
+     (`:887`, byte shape unchanged — other tooling greps it) and, only when at
      least one critical fired, one additional
-     `RESOURCE_GOVERNANCE_WORKING_SET:{...}` line (`:913-916`) carrying
-     `uncompressed_bytes`, `daily_ingest_bytes`, `next_compressible_at`,
-     `home_free_bytes`, `projected_peak_bytes`, `projection_status` and
-     `compression_lag_seconds`. The shared `OnFailure=` handler mails journal
-     lines, not a per-lane template, so that line is how the mail body carries
-     numbers; `--quiet` (what the wrapper uses) suppresses stdout only.
+     `RESOURCE_GOVERNANCE_WORKING_SET:{...}` line (`:922-925`) carrying
+     `uncompressed_bytes`, `daily_ingest_bytes`, `ingest_reference`,
+     `next_compressible_at`, `home_free_bytes`, `projected_peak_bytes`,
+     `projection_status` and `compression_lag_seconds`. The shared `OnFailure=`
+     handler mails journal lines, not a per-lane template, so that line is how
+     the mail body carries numbers; `--quiet` (what the wrapper uses) suppresses
+     stdout only.
 
      **A red audit here is a documented state, not a defect — and it is a
      condition, not a date.** While
@@ -4094,6 +4131,17 @@ ship with the provision SQL and neither replaces the other:
   the key is re-checked against the new extension. The failure is loud and
   fail-closed, not silent; re-point the literal in
   `db/roles/node27_write_roles.sql` as part of any TimescaleDB upgrade.
+
+  - **Second coupling, the governance lane (`#1985` decision 25):** the
+    working-set ingest rate reads `chunk_compression_stats(<hypertable>)` and
+    its `before_compression_total_bytes` / `compression_status = 'Compressed'`
+    columns, correct as of TSDB 2.10.2 (node-27's version; measured under
+    `nhms_display_ro`, EXECUTE granted, 16 ms). A rename or a column change in
+    an upgrade makes the query error and the daily audit report
+    `WORKING_SET_UNAVAILABLE` — loud, not silent — so re-check it in
+    `packages/common/node27_cold_governance_collection.py`
+    (`WORKING_SET_COMPRESSED_REFERENCE_SQL`) as part of any TimescaleDB
+    upgrade. The `after_*` columns are deliberately unused.
 
 `ALTER TABLE` cannot go into the event trigger's tag list — the cold-residency
 lane needs `ALTER TABLE … SET TABLESPACE` — so the two `ALTER TABLE` forms of

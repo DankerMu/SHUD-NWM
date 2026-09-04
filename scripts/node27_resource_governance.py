@@ -29,6 +29,7 @@ from packages.common.node27_cold_governance_cli import (
 )
 from packages.common.node27_cold_governance_collection import (
     DEFAULT_COMPRESSION_LAG_SECONDS,
+    PROJECTION_NO_COMPRESSED_REFERENCE,
     PROJECTION_NO_UNCOMPRESSED_CHUNK,
     PROJECTION_OK,
     PROJECTION_WATERMARK_UNAVAILABLE,
@@ -442,6 +443,11 @@ def _working_set_recommendations(
         "uncompressed_bytes": uncompressed,
         "uncompressed_pretty": _bytes_pretty(uncompressed),
         "daily_ingest_bytes": working_set.get("daily_ingest_bytes"),
+        # The divisor the rate came from, per canonical hypertable (decision
+        # 25). The 71bc5265 receipt reported 8.4 TB/day and carried nothing to
+        # tell an operator WHERE that number came from; only a live catalog
+        # session could find out.
+        "ingest_reference": working_set.get("ingest_reference"),
         "next_compressible_at": working_set.get("next_compressible_at"),
         "projected_peak_bytes": projected,
         "projected_peak_pretty": _bytes_pretty(projected),
@@ -481,10 +487,15 @@ def _working_set_recommendations(
                 "action": "Restore the display watermark query before the next compression tick.",
             }
         )
-    elif working_set.get("projection_status") in (PROJECTION_OK, PROJECTION_NO_UNCOMPRESSED_CHUNK):
-        # Both MEASURED statuses (round-3 review, decision 19: the spec scenario
-        # says "measured", not "ok"). The catalog answered in both cases; the
-        # difference is only whether there is anything left to compress.
+    elif working_set.get("projection_status") in (
+        PROJECTION_OK,
+        PROJECTION_NO_UNCOMPRESSED_CHUNK,
+        PROJECTION_NO_COMPRESSED_REFERENCE,
+    ):
+        # All three MEASURED statuses (round-3 review, decision 19: the spec
+        # scenario says "measured", not "ok"; decision 25 adds the third). The
+        # catalog answered in every case; the difference is only whether there
+        # is anything left to compress and whether a rate could be read.
         if not isinstance(home_free, int) or isinstance(home_free, bool):
             # `/home` did not resolve or `statvfs` failed, so the comparison
             # below cannot be made (round-2 review, decision 19). Skipping it
@@ -492,8 +503,9 @@ def _working_set_recommendations(
             # working set IS measured, it is the free space that is unknown, and
             # the filesystem block only emits `HOME_FREE_BELOW_WARNING` when it
             # has a number to compare. `projection_status` is left unchanged
-            # (`ok` or `no_uncompressed_chunk`) — the catalog was fine either
-            # way — and `home_free_bytes` stays null.
+            # (`ok`, `no_uncompressed_chunk` or `no_compressed_reference`) — the
+            # catalog was fine in all three — and `home_free_bytes` stays null.
+            # An unknown `/home` is a lane fault whatever the catalog said.
             recommendations.append(
                 {
                     "severity": "critical",
@@ -528,6 +540,37 @@ def _working_set_recommendations(
                     ),
                 }
             )
+    if working_set.get("projection_status") == PROJECTION_NO_COMPRESSED_REFERENCE:
+        # Emitted OUTSIDE the `/home` branch above: an unobservable `/home` and
+        # an unreadable rate are independent faults and the operator needs both.
+        # Warning, never critical (decision 25) — this is the expected state for
+        # the first lag + chunk width after the expand migration, and a daily
+        # false critical is exactly how the true one gets ignored.
+        # `ingest_reference` is keyed by the canonical tables that HAVE
+        # uncompressed chunks, so a null value means exactly "needs a reference
+        # and has none" and this list can never name a table that is simply
+        # empty (decision 25 as amended).
+        reference = working_set.get("ingest_reference")
+        tables = (
+            sorted(str(key) for key, value in reference.items() if value is None)
+            if isinstance(reference, Mapping)
+            else []
+        )
+        recommendations.append(
+            {
+                "severity": "warning",
+                "area": "postgres",
+                "code": "NO_COMPRESSED_REFERENCE",
+                # A fresh dict: `evidence` is shared with every other code here.
+                "evidence": {**evidence, "tables_without_reference": tables},
+                "action": (
+                    "Nothing to project until the first chunk of "
+                    f"{', '.join(tables) or 'the canonical hypertable'} compresses (lag + chunk "
+                    "width); record the stock in the maintenance log; expected during the first "
+                    "days after the expand migration."
+                ),
+            }
+        )
     if isinstance(uncompressed, int) and uncompressed > thresholds.working_set_warn_bytes:
         recommendations.append(
             {
@@ -855,6 +898,7 @@ WORKING_SET_DIAGNOSTIC_PREFIX = "RESOURCE_GOVERNANCE_WORKING_SET:"
 WORKING_SET_DIAGNOSTIC_FIELDS = (
     "uncompressed_bytes",
     "daily_ingest_bytes",
+    "ingest_reference",
     "next_compressible_at",
     "home_free_bytes",
     "projected_peak_bytes",
