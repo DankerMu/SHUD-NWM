@@ -1163,10 +1163,16 @@ class TilePublisher:
 
         Each ``trees[]`` entry separates plan intent (``action``: ``copy`` /
         ``skip``) from outcome (``status``: ``pending`` -> ``copied`` ->
-        ``rolled_back``, or ``skipped``). A payload must never claim work that
-        did not happen, so ``status`` is only advanced after the write helper
-        returns, ``byte_count`` for a copied tree is the helper's own byte count,
-        and a failed record carries no ``file_count`` at all.
+        ``rolled_back`` / ``rollback_unknown``, or ``skipped``). A payload must
+        never claim work that did not happen, so ``status`` is only advanced
+        after the write helper returns, ``file_count``/``byte_count`` for a
+        copied tree are the helper's own counts (the plan-phase numbers describe
+        a source tree that may since have changed), and a failed record carries
+        no top-level ``file_count`` at all. When this step's own rollback itself
+        raises, no promoted tree's destination state is knowable any more, so
+        every tree still at ``copied`` becomes ``rollback_unknown``: the batch
+        helper collects per-entry errors and raises once at the end, so even a
+        tree the rollback did undo cannot be told apart from one it did not.
         """
         if self.object_store_copyback_root is None:
             return None
@@ -1230,21 +1236,22 @@ class TilePublisher:
                 }
                 for key, source_tree, needs_copy in plans
             )
-            # file_count counts every file the mirror holds for this cycle, copied
-            # and already-identical trees alike, so the 56 `.nc` + `grid.json`
-            # cycle reports 57 whether or not the grid tree needed rewriting. It
-            # is attached to the `ok` / `skipped` payloads only: on a failure no
-            # such claim can be made, so the key is absent.
-            file_count = sum(int(tree["file_count"]) for tree in trees)
             summary["trees"] = trees
 
             pending = [tree for tree in trees if tree["action"] == "copy"]
             if not pending:
+                # file_count counts every file the mirror holds for this cycle,
+                # copied and already-identical trees alike, so the 56 `.nc` +
+                # `grid.json` cycle reports 57 whether or not the grid tree
+                # needed rewriting. It is attached to the `ok` / `skipped`
+                # payloads only: on a failure no such claim can be made, so the
+                # key is absent. It is summed *after* phase 2 so it adds up the
+                # copy helper's own counts, never the plan-phase ones.
                 return {
                     **summary,
                     "status": "skipped",
                     "reason": "trees_already_mirrored",
-                    "file_count": file_count,
+                    "file_count": _summed_tree_file_count(trees),
                 }
 
             # Phase 2 writes, on a rollback batch of its own: a precip failure
@@ -1257,22 +1264,34 @@ class TilePublisher:
                     rollback_log=rollback_log,
                 )
                 # Only now has this tree been promoted; before this line it is
-                # still `pending` and the destination holds nothing new.
+                # still `pending` and the destination holds nothing new. Both
+                # counts are replaced with the copy helper's own: the plan-phase
+                # pair was measured on a source tree that may have changed since,
+                # and a record whose two numbers describe different file sets is
+                # exactly the claim this payload must not make.
                 tree["status"] = "copied"
+                tree["file_count"] = counts["file_count"]
                 tree["byte_count"] = counts["byte_count"]
             _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
-            return {**summary, "status": "ok", "file_count": file_count}
+            return {**summary, "status": "ok", "file_count": _summed_tree_file_count(trees)}
         except Exception as error:
             if copyback_root is not None and rollback_log:
                 try:
                     _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
                 except (OSError, SafeFilesystemError) as rollback_error:
                     # A failed rollback is evidence, never an exception the
-                    # publish has to survive. The promoted trees keep `copied`:
-                    # the rollback did not undo them, and `rollback_error` is the
-                    # signal that the destination state is unknown.
+                    # publish has to survive. `_rollback_qdown_copyback_batch`
+                    # collects per-entry errors and raises once at the end, so a
+                    # tree it *did* undo is indistinguishable here from one it
+                    # did not: no promoted tree's destination state is knowable
+                    # any more. `copied` would be a claim about the disk that
+                    # nothing establishes, so every one of them becomes
+                    # `rollback_unknown`. Trees never promoted stay `pending`.
                     summary["rollback_error"] = str(rollback_error)
                     summary["rollback_error_type"] = type(rollback_error).__name__
+                    for tree in trees:
+                        if tree["status"] == "copied":
+                            tree["status"] = "rollback_unknown"
                 else:
                     for tree in trees:
                         if tree["status"] == "copied":
@@ -1840,6 +1859,17 @@ def _is_canonical_precip_tree_key(parts: tuple[str, ...]) -> bool:
 
 def _accept_canonical_precip_tree(_source_tree: _CopybackSourceTree) -> None:
     """The canonical mirror copies verbatim; per-tree content contracts live in the plan phase."""
+
+
+def _summed_tree_file_count(trees: list[dict[str, Any]]) -> int:
+    """Total files the mirror holds for this cycle, summed after phase 2.
+
+    Called only from the ``ok`` / ``skipped`` return sites, so every ``copied``
+    tree has already had its plan-phase ``file_count`` replaced by the copy
+    helper's own count.
+    """
+
+    return sum(int(tree["file_count"]) for tree in trees)
 
 
 def _copyback_tree_label(key: str) -> str:

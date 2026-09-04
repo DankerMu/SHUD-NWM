@@ -44,7 +44,7 @@ Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_tile_p
 
 ### Invariant Matrix（4.1–4.3，issue #2008 补充；高强度 repair 要求）
 
-Governing invariant: 降水镜像永不改变 q_down 发布的成败与其 copyback 产物；每棵被镜像的目标树要么与源树同名同字节，要么保持原样，绝不留半成品或 temp 残留；任何失败只体现为 lineage `precip_mirror`，绝不外泄异常。
+Governing invariant: 降水镜像永不改变 q_down 发布的成败与其 copyback 产物；每棵被镜像的目标树要么与源树同名同字节，要么保持原样；**在本步 rollback 未抛错（lineage 无 `rollback_error`）时**绝不留半成品或 temp 残留——rollback 自身抛错时可能留下 `.copyback-backup.<hex>`（restore 在 `rmtree` 与 `os.replace` 之间失败必然留一个），此时以 `rollback_error` + 全部 `rollback_unknown` 如实上报；任何失败只体现为 lineage `precip_mirror`，绝不外泄异常。
 
 Source-of-truth identity/contract:
 - 镜像 keyspace `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` 与 `canonical/<storage_source>/grid/<grid_id>/`（见 design.md D3）。
@@ -59,7 +59,7 @@ Surfaces:
 - Public routes/entrypoints: 无（`publish_qdown_display` 是唯一入口；回填脚本 CLI 为运维入口）
 - Frontend/downstream consumers: I8 读端按同一 keyspace 读（本 PR 只产出路径，不消费）
 - Failure paths/rollback/stale state: **独立于 q_down 的** `rollback_log` + `_commit_qdown_copyback_batch` / `_rollback_qdown_copyback_batch`；temp-tree 异常清理；rollback 自身失败也只写进 lineage
-- Evidence/audit/readiness: `lineage.precip_mirror`——`ok`／`skipped` 带 `file_count` 与 `trees[]`，`failed` 带 `missing_path` 或 `error`+`error_type` 且**不带 `file_count`**（失败时无法主张镜像了多少文件；计划阶段就失败时连 `trees` 都没有）。`trees[]` 每项把计划意图与实际结果分开：`action` ∈ {`copy`,`skip`}（计划阶段决定，恒存在），`status` ∈ {`skipped`,`pending`,`copied`,`rolled_back`}——`copied` 只在 copy helper 返回之后写入且 `byte_count` 取 helper 的返回值（不是源 stat），本步自身 rollback 成功执行后把已 `copied` 的树改成 `rolled_back`、未尝试的仍是 `pending`；rollback 自身抛错时该树保留 `copied`，由顶层 `rollback_error`/`rollback_error_type` 表示目标态未知。回填 stdout JSON 汇总 + 退出码
+- Evidence/audit/readiness: `lineage.precip_mirror`——`ok`／`skipped` 带 `file_count` 与 `trees[]`，`failed` 带 `missing_path` 或 `error`+`error_type` 且**不带 `file_count`**（失败时无法主张镜像了多少文件；计划阶段就失败时连 `trees` 都没有）。`trees[]` 每项把计划意图与实际结果分开：`action` ∈ {`copy`,`skip`}（计划阶段决定，恒存在），`status` ∈ {`skipped`,`pending`,`copied`,`rolled_back`,`rollback_unknown`}——`copied` 只在 copy helper 返回之后写入，且该树的 `file_count` 与 `byte_count` **都**取 helper 的返回值（不是计划阶段的源 stat，否则两个数字会描述不同的文件集合），顶层 `file_count` 也在 copy 阶段之后再求和；本步自身 rollback 干净返回后把已 `copied` 的树改成 `rolled_back`、未尝试的仍是 `pending`；**rollback 自身抛错时，所有仍是 `copied` 的树一律改成 `rollback_unknown`**——`_rollback_qdown_copyback_batch` 逐项收集错误、最后统一抛出，被成功撤销的树与未被撤销的树在这里无法区分（甚至自身 rollback 抛错的那棵也可能已不在盘上），任何 `copied` 都是代码无法确立的断言；顶层 `rollback_error`/`rollback_error_type` 给出原因。共享 batch helper 一律不改（与 `runs/`/`forcing/` 共用，该族缺陷由 issue #2035 承接）。回填 stdout JSON 汇总 + 退出码
 
 Regression rows:
 - 源含 56 个 `.nc` + 1 个 `grid.json`，q_down copyback 成功 -> 目标出现同名同字节文件，`precip_mirror.status == "ok"` 且 `file_count == 57`
@@ -68,7 +68,8 @@ Regression rows:
 - 源 `prcp_rate_or_amount` 缺失 -> `publish` 仍返回 `status == "published"`，`precip_mirror.status == "failed"` 且 `missing_path` 指名缺失路径，copyback 根下无 temp 残留
 - 源树含 symlink / 超 `_COPYBACK_MAX_FILE_BYTES` / 复制中途 `OSError` -> `publish` 仍 `published`，`precip_mirror.status == "failed"` 带 `error` + `error_type`，无 temp 残留（兄弟实现在同类异常上抛 `PublishError`，此处必须吞掉）；失败记录**无 `file_count`**，且未真正落盘的树只能是 `pending`，绝不报 `copied`
 - 第一棵树已 promote、后一棵树写入失败（把注入面收窄到含 `/grid/` 的 key，`pending` 顺序为 `[prcp, grid...]`）-> 本步自身 rollback 执行：目标为空时被 promote 的 prcp 树消失（断言该树 key 不存在，**不是**断言 `canonical/` 不存在——空的 `canonical/<S>/<cycle>/` 与 `canonical/<S>/grid/` 父目录合法留存），目标原有陈旧树则按 `backup_dir` 分支逐字节还原；`trees[]` 记 `rolled_back` + `pending`，`publish` 仍 `published`，q_down 产物完好
-- rollback 自身抛 `SafeFilesystemError`（把已 promote 的目标树换成 symlink，`rmtree_no_follow` 拒绝 symlink 根）-> lineage 带 `rollback_error` + `rollback_error_type`，该树保留 `copied`，`publish` 仍 `published`
+- rollback 自身抛 `SafeFilesystemError`（把已 promote 的目标树换成 symlink，`rmtree_no_follow` 拒绝 symlink 根）-> lineage 带 `rollback_error` + `rollback_error_type`，该树改记 `rollback_unknown`（**不是** `copied`），`publish` 仍 `published`
+- 混合 batch：三棵树（`[prcp, grid/gfs_0p25, grid/gfs_0p50]`），注入面收窄到 `gfs_0p50` 的写入，并在抛错前把已 promote 的 `gfs_0p25` 换成 symlink -> rollback 里 `gfs_0p25` 失败、`prcp` 成功撤销：`prcp` 树确实不在盘上，但**不得**报 `copied`，与 `gfs_0p25` 一同记 `rollback_unknown`，`gfs_0p50` 仍 `pending`；`publish` 仍 `published`，q_down 产物完好（此时不断言无 `.copyback-*` 残留）
 - `prcp_rate_or_amount` 存在但无 `grid.json` -> `status == "failed"` 且 `missing_path` 为缺失的 grid 路径
 - `ifs` 源 -> 写入 `canonical/IFS/<token>/...` 与 `canonical/IFS/grid/ifs_0p25/grid.json`，绝不出现 `canonical/ifs/...`
 - `NHMS_OBJECT_STORE_COPYBACK_ROOT` 未配置 -> 不尝试镜像，lineage 无 `precip_mirror` 键（锁住绝大多数既有 publish 用例不受影响）
@@ -76,8 +77,11 @@ Regression rows:
 - 未改动的兄弟面：`runs/<run_id>` 与 `forcing/...` copyback 的既有用例（`tests/test_tile_publisher.py` 全部 copyback 用例）保持通过；helper 白名单扩展不放宽这两类 key 的形状校验
 - 回填脚本 `--dry-run` -> 目标根下无任何新文件/新目录，汇总列出计划复制
 - 回填脚本某周期源目录不可读 -> 汇总仍打印且该周期 `failed > 0`，退出码 1；全成功退出码 0；参数/根不可用退出码 2
-- 回填脚本三个树根（`canonical/`、`canonical/<S>/grid/`、`canonical/<S>/<cycle>/prcp_rate_or_amount/`）任一是指向 `--source-root` 之外的 symlink -> 拒绝跟随并记为 failure（`canonical/` 判为不可用根退 2，另两者退 1），copyback 根下不出现任何来自外部的文件（既有 `test_backfill_refuses_to_mirror_a_symlinked_entry` 只覆盖树**内部**的 symlink）
+- 回填脚本三个树根（`canonical/`、`canonical/<S>/grid/`、`canonical/<S>/<cycle>/prcp_rate_or_amount/`）任一是指向 `--source-root` 之外的 symlink -> 拒绝跟随并记为 failure（`canonical/` 判为不可用根退 2，另两者退 1），copyback 根下不出现任何来自外部的文件（既有 `test_backfill_refuses_to_mirror_a_symlinked_entry` 只覆盖树**内部**的 symlink）。三条规则各不相同、fixture 只许照实描述：built 树根 `lstat` 拒绝；树**内部**条目按 `S_ISLNK` 记 failure；**列目录发现**的名字（`<S>`/`<cycle_token>`/`<grid_id>`）被 `entry.is_dir(follow_symlinks=False)` 静默 skip，汇总里根本不出现。`--copyback-root` 一侧的路径分量**不检查、会被跟随**（脚本只 `mkdir -p`），这是相对 publisher（`O_NOFOLLOW` fd-walk）的既有差距，与本 PR 无关且不构成权限边界（目标根由运维给定），不得在 fixture 里宣称 parity
 - 回填脚本在 `umask 0o077` 下运行 -> 它在 copyback 根下新建的每个目录（含中间目录）都 `st_mode & 0o055 == 0o055`（`mkdir(mode=)` 会被 umask 掩掉，必须显式 `chmod`；publisher 侧的中间目录 umask 依赖属既有 `safe_fs` 行为、与 `runs/`/`forcing/` 共用，不在本 issue 范围）
+- 回填脚本某个目标叶目录 `mkdir` 在 `umask 0o077` 下失败（注入 `os.mkdir` ENOSPC）-> 该次运行**当场**就已把先建好的每一级祖先 chmod 到 `st_mode & 0o055 == 0o055`（`mkdir(parents=True)` + 尾部 chmod 循环做不到：叶失败时循环根本不执行，之后干净重跑的 `exists()` 探测又不再把它们算作本次新建，于是永久停在 umask 上）；随后一次干净重跑退 0，祖先仍然可读
+- 回填脚本 `canonical/<S>/<cycle>/prcp_rate_or_amount` 是**悬空** symlink -> 该周期记 `status == "failed"` + 拒绝信息、退出码 1，**绝不是** `no_precip_products` 退 0（`.exists()` 会把悬空 symlink 读成「本周期没有降水产物」，故判据必须是 `lstat()`）
+- 回填脚本 `<cycle>` 目录不可读（`chmod 000`，root 下 skip）-> `lstat` 抛非 `FileNotFoundError` 的 `OSError`，该周期记 `failed` 而不是让异常冒出 `backfill()`
 - 回填脚本 `canonical/` 存在但不可读/不是目录/是 symlink -> 汇总仍打印且带 `root_error`，退出码 **2**（不是 1：此时根本没有 cycle/grid 条目让「任一 cycle 或 grid `failed > 0`」成立）；`canonical/` **不存在**仍退 0
 - 回填脚本 import 面 -> 静态断言只含标准库（无 `services`/`packages`/`workers`/第三方），且 subprocess `-m scripts.canonical_precip_copyback_backfill` 能跑通
 

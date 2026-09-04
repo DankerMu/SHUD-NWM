@@ -15,8 +15,11 @@ Contract (canonical-precip-copyback spec, Requirement 2):
   triggering an environment build;
 * refuses a symlinked *tree root* (``canonical/``, ``canonical/<S>/grid/``,
   ``canonical/<S>/<cycle>/prcp_rate_or_amount/``) instead of deep-copying
-  whatever lives outside ``--source-root``, the same rule it already applies to
-  entries inside a tree;
+  whatever lives outside ``--source-root``. That is one of three distinct rules:
+  entries *inside* a tree are refused per entry, while the directory names the
+  script *discovers* by listing (``<S>``, ``<cycle_token>``, ``<grid_id>``) are
+  silently skipped by ``is_dir(follow_symlinks=False)``. Path components under
+  ``--copyback-root`` are not checked at all;
 * leaves every directory it creates under ``--copyback-root`` group/world
   readable regardless of the process umask (node-22 writes as one account,
   node-27 reads the same NFS as another).
@@ -25,6 +28,7 @@ Contract (canonical-precip-copyback spec, Requirement 2):
 from __future__ import annotations
 
 import ast
+import errno
 import json
 import os
 import shutil
@@ -32,6 +36,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -325,6 +330,64 @@ def test_backfill_refuses_a_symlinked_precipitation_root(
     _assert_nothing_copied_from_outside(copyback_root)
 
 
+def test_backfill_dangling_symlinked_precipitation_root_is_a_refusal_not_absence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A dangling symlink must not read as "this cycle has no precipitation".
+
+    The presence probe is `lstat()`, not `exists()`: `exists()` follows the link,
+    finds nothing, and reports `no_precip_products` with exit 0 -- an operator
+    signal that the cycle is legitimately variable-only, when in fact a symlink
+    was planted where the products belong.
+    """
+
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+    prcp_root = source_root / "canonical" / "gfs" / "2026090212" / "prcp_rate_or_amount"
+    shutil.rmtree(prcp_root)
+    prcp_root.symlink_to(tmp_path / "outside" / "never-created")
+    assert not prcp_root.exists() and prcp_root.is_symlink()
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    entry = next(
+        cycle for cycle in summary["cycles"] if cycle["source"] == "gfs" and cycle["cycle_token"] == "2026090212"
+    )
+    assert entry["status"] == "failed"
+    assert entry["status"] != "no_precip_products"
+    assert entry["failed"] == 1
+    assert any("refusing to mirror a symlinked directory" in message for message in entry["errors"])
+    assert not (copyback_root / "canonical/gfs/2026090212/prcp_rate_or_amount").exists()
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root sails straight through a chmod-000 directory")
+def test_backfill_unreadable_cycle_directory_is_recorded_not_raised(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The `lstat` probe's non-FileNotFoundError branch: recorded, never propagated."""
+
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+    cycle_dir = source_root / "canonical" / "gfs" / "2026090300"
+    (cycle_dir / "prcp_rate_or_amount").mkdir(parents=True)
+    os.chmod(cycle_dir, 0o000)
+    try:
+        exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+        summary = json.loads(capsys.readouterr().out)
+    finally:
+        os.chmod(cycle_dir, 0o755)
+
+    assert exit_code == 1
+    entry = next(cycle for cycle in summary["cycles"] if cycle["cycle_token"] == "2026090300")
+    assert entry["status"] == "failed"
+    assert entry["failed"] == 1
+    assert any("failed to stat" in message for message in entry["errors"])
+    # The healthy cycles were still mirrored.
+    assert summary["totals"]["copied"] == 14
+
+
 def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -349,6 +412,68 @@ def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
         str(path) for path in created_dirs if stat.S_IMODE(path.stat().st_mode) & 0o055 != 0o055
     ]
     assert unreadable == []
+
+
+def test_backfill_partially_created_directory_chain_stays_readable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leaf mkdir that fails must not leave its ancestors at the process umask.
+
+    `mkdir(parents=True)` creates the ancestors first and the leaf last, so a
+    trailing chmod loop is never reached when the leaf fails -- and a later clean
+    rerun's `exists()` probe no longer counts those ancestors as newly created,
+    so they stay unreadable forever. Each level must therefore be chmod'ed as
+    soon as that level itself exists.
+    """
+
+    source_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    source_root.mkdir()
+    copyback_root.mkdir()
+    _seed_cycle(source_root, "gfs", "2026090212", leads=(3,))
+    leaf = copyback_root / "canonical" / "gfs" / "2026090212" / "prcp_rate_or_amount"
+    ancestors = [leaf.parent.parent.parent, leaf.parent.parent, leaf.parent]
+    real_mkdir = os.mkdir
+
+    def mkdir_failing_on_the_leaf(path: Any, mode: int = 0o777, *args: Any, **kwargs: Any) -> None:
+        # Only once the parents exist, so pathlib's parents=True recursion has
+        # already created the whole ancestor chain -- exactly the state the
+        # trailing-chmod implementation leaves behind.
+        if os.fspath(path) == str(leaf) and leaf.parent.is_dir():
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real_mkdir(path, mode, *args, **kwargs)
+
+    def assert_ancestors_readable(label: str) -> None:
+        unreadable = [
+            f"{label}: {path} {stat.S_IMODE(path.stat().st_mode):04o}"
+            for path in ancestors
+            if stat.S_IMODE(path.stat().st_mode) & 0o055 != 0o055
+        ]
+        assert unreadable == []
+
+    previous_umask = os.umask(0o077)
+    try:
+        monkeypatch.setattr(os, "mkdir", mkdir_failing_on_the_leaf)
+        first_exit = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+        first_summary = json.loads(capsys.readouterr().out)
+        monkeypatch.undo()
+        # The violation is complete after run 1: a rerun repairing it would not
+        # make run 1's state acceptable, and it does not repair it anyway.
+        assert first_exit == 1
+        assert first_summary["totals"]["failed"] == 1
+        assert all(path.is_dir() for path in ancestors)
+        assert_ancestors_readable("after the failed run")
+
+        second_exit = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+        second_summary = json.loads(capsys.readouterr().out)
+    finally:
+        os.umask(previous_umask)
+
+    assert second_exit == 0
+    assert second_summary["totals"] == {"copied": 1, "skipped": 0, "failed": 0}
+    assert_ancestors_readable("after the clean rerun")
 
 
 def test_backfill_canonical_root_that_is_not_a_directory_exits_two(

@@ -2486,11 +2486,14 @@ def _fail_grid_writes(
     copyback_root: Path,
     *,
     before_raise: Any = None,
+    key_marker: str = "/grid/",
 ) -> None:
     original_write = LocalObjectStore.write_bytes_atomic
 
     def fail_grid_write(self: Any, key_or_uri: str, content: bytes) -> str:
-        if self.root == copyback_root.resolve() and "/grid/" in key_or_uri:
+        # `key_marker` carries no trailing slash for a single grid id, because
+        # the write goes to the temp tree `<grid_id>.copyback.<hex>/`.
+        if self.root == copyback_root.resolve() and key_marker in key_or_uri:
             if before_raise is not None:
                 before_raise()
             raise OSError("disk gone")
@@ -2600,11 +2603,84 @@ def test_publish_qdown_canonical_precip_failed_rollback_is_recorded_not_raised(
     assert mirror["error_type"] == "OSError"
     assert mirror["rollback_error_type"] == "SafeFilesystemError"
     assert "symlink" in mirror["rollback_error"]
-    # The rollback did NOT undo the promotion, so the tree keeps `copied`;
-    # rollback_error is the signal that the destination state is unknown.
-    assert [tree["status"] for tree in mirror["trees"]] == ["copied", "pending"]
+    # The rollback raised, so nothing here can establish the promoted tree's
+    # destination state -- `copied` would be a claim about the disk that no code
+    # made true. It becomes `rollback_unknown`; the never-attempted tree stays
+    # `pending`.
+    assert [tree["status"] for tree in mirror["trees"]] == ["rollback_unknown", "pending"]
     assert "file_count" not in mirror
     assert "[redacted]" not in json.dumps(mirror)
+    _assert_qdown_copyback_intact(copyback_root)
+
+
+def _seed_extra_canonical_grid(
+    publisher: TilePublisher,
+    *,
+    storage_source: str = "gfs",
+    grid_id: str = "gfs_0p50",
+) -> None:
+    """A second grid tree, so the mirror plans three trees instead of two."""
+
+    payload = json.dumps({"grid_id": grid_id, "nx": 2, "ny": 2}).encode("utf-8")
+    publisher.object_store.write_bytes_atomic(f"{_grid_tree_key(storage_source, grid_id)}/grid.json", payload)
+
+
+def test_publish_qdown_canonical_precip_partly_failed_rollback_reports_no_tree_as_copied(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rollback that undid one tree and failed on another may claim neither.
+
+    `_rollback_qdown_copyback_batch` collects per-entry errors and raises once at
+    the end, so the caller cannot tell the undone tree from the stuck one. Here
+    the prcp tree really is removed from disk while the first grid tree's
+    rollback fails; reporting prcp as `copied` would be evidence for a state the
+    code never established.
+    """
+
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    _seed_extra_canonical_grid(publisher)
+    prcp_key = _prcp_tree_key("gfs", COMPACT_TIME)
+    first_grid_key = _grid_tree_key("gfs", "gfs_0p25")
+    moved_aside = copyback_root / "canonical" / "gfs" / "grid" / "moved_aside"
+
+    def sabotage_first_grid() -> None:
+        # Only THIS tree's rollback fails: rmtree_no_follow refuses a symlinked
+        # root. The prcp tree's rollback is left able to succeed.
+        promoted = copyback_root / first_grid_key
+        if promoted.is_dir() and not promoted.is_symlink():
+            os.rename(promoted, moved_aside)
+            promoted.symlink_to(moved_aside)
+
+    # Plan order is [prcp, grid/gfs_0p25, grid/gfs_0p50]: the first two promote,
+    # the third blows the batch up.
+    _fail_grid_writes(
+        monkeypatch,
+        copyback_root,
+        before_raise=sabotage_first_grid,
+        key_marker="/grid/gfs_0p50",
+    )
+
+    result = _publish_with_canonical_precip(publisher)
+
+    assert result.status == "published"
+    mirror = result.lineage["precip_mirror"]
+    assert mirror["status"] == "failed"
+    assert mirror["error_type"] == "OSError"
+    assert mirror["rollback_error_type"] == "SafeFilesystemError"
+    assert [(tree["object_key"], tree["status"]) for tree in mirror["trees"]] == [
+        (prcp_key, "rollback_unknown"),
+        (first_grid_key, "rollback_unknown"),
+        (_grid_tree_key("gfs", "gfs_0p50"), "pending"),
+    ]
+    # The prcp tree WAS undone -- it is gone from disk -- so `copied` would have
+    # been false for it as well as for the tree that stayed.
+    assert not (copyback_root / prcp_key).exists()
+    assert "copied" not in [tree["status"] for tree in mirror["trees"]]
+    assert "file_count" not in mirror
     _assert_qdown_copyback_intact(copyback_root)
 
 

@@ -30,12 +30,27 @@ includes a ``canonical/`` under ``--source-root`` that exists but is unreadable,
 not a directory, or a symlink. An *absent* ``canonical/`` is not an error: there
 is simply nothing to mirror, and the run exits 0.
 
-Path safety: a tree root that is itself a symlink (``canonical/``,
-``canonical/<S>/grid/`` or ``canonical/<S>/<cycle>/prcp_rate_or_amount/``) is
-refused rather than followed, the same rule this script already applies to every
-entry inside a tree. Every directory the script creates under ``--copyback-root``
-is chmod'ed 0o755 explicitly, because node-22 writes as one account and node-27
-reads the same NFS as another and the process umask must not decide that.
+Path safety, stated as exactly what is enforced and nothing more:
+
+* the three tree roots this script builds as paths -- ``canonical/``,
+  ``canonical/<S>/grid/`` and ``canonical/<S>/<cycle_token>/prcp_rate_or_amount/``
+  -- are ``lstat``ed and refused when they are symlinks, rather than followed out
+  of ``--source-root``;
+* entries *inside* a tree are a stricter rule: a symlinked file or directory
+  there is recorded as a failure by ``_mirror_directory``;
+* the directory names this script *discovers* by listing -- ``<S>``,
+  ``<cycle_token>`` and ``<grid_id>`` -- are filtered with
+  ``entry.is_dir(follow_symlinks=False)``, so a symlink there is silently
+  SKIPPED, not refused, and never appears in the summary at all;
+* path components under ``--copyback-root`` are NOT checked: this script
+  ``mkdir -p``s into the destination and a symlinked component there is followed.
+  The destination root is operator-supplied and anyone able to plant such a link
+  already has write access to it, so this is not a privilege boundary; it is a
+  gap relative to the publisher, which walks its destination with ``O_NOFOLLOW``.
+
+Every directory the script creates under ``--copyback-root`` is chmod'ed 0o755
+explicitly, because node-22 writes as one account and node-27 reads the same NFS
+as another and the process umask must not decide that.
 """
 
 from __future__ import annotations
@@ -122,6 +137,8 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 def _sorted_child_dir_names(path: Path) -> list[str]:
     """Names of the real (non-symlink) subdirectories of ``path``, sorted.
 
+    A symlinked child is silently omitted, not reported: it is skipped by the
+    ``follow_symlinks=False`` filter and therefore never reaches the summary.
     Raises ``FileNotFoundError`` when ``path`` is absent and ``OSError`` when it
     exists but cannot be listed (unreadable, not a directory at all, or a
     symlink -- ``os.scandir`` would happily follow that one).
@@ -139,11 +156,15 @@ def _sorted_child_dir_names(path: Path) -> list[str]:
 def _reject_symlinked_directory(path: Path) -> None:
     """Fail closed on a tree root that is itself a symlink.
 
-    Entries *inside* a tree are already filtered with ``follow_symlinks=False``;
-    the roots (``canonical/``, ``canonical/<S>/grid/``,
-    ``canonical/<S>/<cycle>/prcp_rate_or_amount/``) are built as paths and would
-    otherwise be followed out of ``--source-root``. Raises ``FileNotFoundError``
-    when ``path`` is absent, so callers keep distinguishing "nothing to mirror".
+    Applies to the three roots this script builds as paths (``canonical/``,
+    ``canonical/<S>/grid/``, ``canonical/<S>/<cycle>/prcp_rate_or_amount/``),
+    which would otherwise be followed out of ``--source-root``. It is a
+    different rule from the two the rest of the script applies: a symlinked
+    entry *inside* a tree is recorded as a failure by ``_mirror_directory``,
+    while a symlinked *discovered* directory name (``<S>``, ``<cycle_token>``,
+    ``<grid_id>``) is silently skipped by ``_sorted_child_dir_names``'s
+    ``is_dir(follow_symlinks=False)`` filter. Raises ``FileNotFoundError`` when
+    ``path`` is absent, so callers keep distinguishing "nothing to mirror".
     """
 
     if stat.S_ISLNK(path.lstat().st_mode):
@@ -158,18 +179,34 @@ def _ensure_target_directory(directory: Path) -> None:
     ``mkdir`` leaves 0o750 and node-27's reader account loses the tree.
     Pre-existing directories are left alone -- this script only owns what it
     creates.
+
+    The chain is created one level at a time, outermost first, and each level is
+    chmod'ed as soon as *that* level exists. A single ``mkdir(parents=True)``
+    followed by a chmod loop would leave the ancestors at the process umask
+    forever whenever the leaf fails: ``parents=True`` creates the ancestors
+    first, the loop is never reached, and a later run's ``exists()`` probe no
+    longer counts them as created.
     """
 
-    created: list[Path] = []
+    missing: list[Path] = []
     probe = directory
     while not probe.exists():
-        created.append(probe)
+        missing.append(probe)
         parent = probe.parent
         if parent == probe:
             break
         probe = parent
-    directory.mkdir(parents=True, exist_ok=True)
-    for path in created:
+    for path in reversed(missing):
+        try:
+            path.mkdir()
+        except FileExistsError:
+            # Lost the race to a concurrent creator (or the probe was stale):
+            # this run did not create it, so this run does not widen it. Matches
+            # `mkdir(exist_ok=True)`, which re-raises when the name is not a
+            # directory.
+            if not path.is_dir():
+                raise
+            continue
         os.chmod(path, DIR_MODE)
 
 
