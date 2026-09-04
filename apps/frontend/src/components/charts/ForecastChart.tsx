@@ -3,6 +3,7 @@ import ReactEChartsCore from 'echarts-for-react/lib/core'
 
 import { echarts } from '@/components/charts/echartsCore'
 import { FORECAST_CHART_POINT_BUDGET, forecastPointBudgetMessage } from '@/lib/forecastRenderingBudget'
+import { formatUnitForDisplay } from '@/lib/format'
 import type { ForecastData } from '@/stores/forecast'
 
 const IFS_SIX_DAY_LEAD_HOURS = 144
@@ -139,7 +140,7 @@ function tooltipFormatter(params: TooltipParam | TooltipParam[], unit?: string) 
   items.forEach((param) => {
     const value = tooltipValue(param)
     if (!Number.isFinite(value)) return
-    lines.push(`${param.marker ?? ''}${param.seriesName ?? 'series'}: ${value.toFixed(2)} ${unit ?? 'm3/s'}`)
+    lines.push(`${param.marker ?? ''}${param.seriesName ?? 'series'}: ${value.toFixed(2)} ${formatUnitForDisplay(unit ?? 'm3/s')}`)
   })
 
   return lines.join('\n')

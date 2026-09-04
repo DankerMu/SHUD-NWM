@@ -75,7 +75,7 @@ const basemapOptions: Array<{ value: M11Basemap; label: string; icon: typeof Map
 ]
 
 const hydrologyLayers: Array<{ value: M11Layer; label: string; description: string }> = [
-  { value: 'discharge', label: '河段径流', description: 'q_down / m3/s' },
+  { value: 'discharge', label: '河段径流', description: 'q_down / m³/s' },
 ]
 
 const sourceOptions: Array<{ value: M11Source; label: string; description: string }> = [

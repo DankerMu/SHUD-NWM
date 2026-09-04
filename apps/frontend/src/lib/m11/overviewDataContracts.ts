@@ -85,12 +85,12 @@ export const m11BasinRiverCollectionBudget = {
 } as const
 
 const m11RiverDischargeLegend: LayerLegendEntry[] = [
-  { label: '<1 m3/s', color: '#7FB8DC', max: 1 },
-  { label: '1-10 m3/s', color: '#4292C6', min: 1, max: 10 },
-  { label: '10-100 m3/s', color: '#2171B5', min: 10, max: 100 },
-  { label: '100-1000 m3/s', color: '#08519C', min: 100, max: 1000 },
-  { label: '1000-10000 m3/s', color: '#08306B', min: 1000, max: 10000 },
-  { label: '>10000 m3/s', color: '#CB181D', min: 10000 },
+  { label: '<1 m³/s', color: '#7FB8DC', max: 1 },
+  { label: '1-10 m³/s', color: '#4292C6', min: 1, max: 10 },
+  { label: '10-100 m³/s', color: '#2171B5', min: 10, max: 100 },
+  { label: '100-1000 m³/s', color: '#08519C', min: 100, max: 1000 },
+  { label: '1000-10000 m³/s', color: '#08306B', min: 1000, max: 10000 },
+  { label: '>10000 m³/s', color: '#CB181D', min: 10000 },
   { label: '无径流数据', color: m11DischargeColor(null) },
 ]
 
@@ -870,6 +870,10 @@ function isStale(value: unknown, staleAfterHours: number): boolean {
   return Date.now() - Date.parse(normalized) > staleAfterHours * 3_600_000
 }
 
+// Canonicalises a unit to the ASCII spelling the API and `hydro.river_unit`
+// use, so `qUnit` stays comparable to what the backend sent. The superscript
+// belongs to the display layer only — render it with `formatUnitForDisplay`
+// at the point it goes on screen, do not canonicalise the other way here.
 function normalizeUnit(value: unknown): string {
   const unit = normalizeString(value)
   if (!unit) return 'm3/s'
