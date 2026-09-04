@@ -48,7 +48,7 @@
 - `M11QueryState.precip: boolean`（默认 true）；约束落在导出面：`parseM11QueryState` 读 `precip=0` 为 false、其余为 true，`serializeM11QueryState` 的白名单在 false 时产出 `precip=0`。实现上要动私有 `queryParamsFromState`（现在丢掉所有 false 布尔，会让 `serializeM11QueryState` 内部那趟 parse 归一把 false 吃回 true）并把 `precip` 加进白名单；其它布尔行为不变。目录 `precip` 条目（`layer_type: meteorology`, `tile_format: png`）提供 `image_url_template` / `index_url_template` / `bounds` / `legend`，前端 `normalizeLayerStates` 的 `requiredLayers` 仍只含 `discharge`。
 - 渲染：`M11PrecipOverlayPrimitive` 用 MapLibre `image` source（四角 = bbox 四角）+ `raster` layer，`raster-opacity 0.55`，插入全国河网层之下；切换 valid_time 时更新 url。当前时次不在 `index.valid_times` 内则隐藏并提示。index 返回 404 `PRECIP_CYCLE_NOT_MIRRORED` 时用**另一条**文案（该周期无降水镜像），两种隐藏原因在 UI 与 vitest 里可区分。流域详情里 source 可能是 `best`/`compare`：只用解析出的具体 gfs/ifs 拼 URL，解析不出就隐藏并给原因，绝不请求 `/api/v1/precip/best|compare/...`。
 
-### D6. copyback 镜像不阻塞 q_down 发布
+### D6. canonical 降水镜像挂在 DB-free 终态 stage，不阻塞该 stage
 - 触发点是 node-22 DB-free 的 forecast 终态 stage（`chain_forecast_execution.py::_after_cycle_stage_terminal`，终态 `forecast_state_save_qc`），**不是** publisher 的 q_down 发布路径——后者在生产拓扑下永不执行（#2034）。镜像实现仍复用 `publisher.py::_copyback_canonical_precip`（纯文件系统、无 DB，经 #2028 五轮加固），经一个公开包装方法调用；目标存在且大小一致则跳过；源缺失记 `precip_mirror: failed` 并继续。
 - 回执走 `pipeline_event`（`event_type="canonical_precip_mirror"`），DB-free 下由 `FileOrchestrationJournalRepository` 落到 `<journal_root>/journal/<source>/<cycle>.jsonl`；payload 里周期键必须叫 `cycle` 不能叫 `cycle_token`（`redact_payload` 会把含 `token` 的键打成 `[redacted]`）。
 - 身份取 `context.source_id`（已 normalize）+ `format_cycle_time(context.cycle_time)`，**不得**从 `cycle_id` 反解（它把 source 小写化，丢掉 `IFS`/`ERA5` 拼写）。
