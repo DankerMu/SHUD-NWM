@@ -9,8 +9,8 @@
 ## 取证方式（未改动生产 bundle）
 
 生产入口 `https://test.nwm.ac.cn` 的 nginx bundle 全程未被触碰。改用独立 git worktree
-`/home/nwm/nwm-wt-2006`，在其中分别构建「本分支」与「master」两份 dist，用一次性 Node 脚本做静态服务
-+ `/api` **同源**反代到 live display API（`127.0.0.1:8080`），分别挂 `127.0.0.1:4179` / `:4180`，
+`/home/nwm/nwm-wt-2006`，在其中分别构建「本分支」与「master」两份 dist，用一次性 Node 脚本做静态
+服务并把 `/api` **同源**反代到 live display API（`127.0.0.1:8080`），分别挂 `127.0.0.1:4179` / `:4180`，
 Playwright/chromium 在 node-27 本机访问。取证后 worktree、两个服务进程、两份 dist 与 node_modules 均已清理。
 
 数据面是真实的：`/api/v1/layers` 返回 `discharge` / `river-network` / `met-stations`；
