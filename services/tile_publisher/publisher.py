@@ -1245,8 +1245,10 @@ class TilePublisher:
                 # `grid.json` cycle reports 57 whether or not the grid tree
                 # needed rewriting. It is attached to the `ok` / `skipped`
                 # payloads only: on a failure no such claim can be made, so the
-                # key is absent. It is summed *after* phase 2 so it adds up the
-                # copy helper's own counts, never the plan-phase ones.
+                # key is absent. Every tree here is `skipped`, so this sum is
+                # entirely plan-phase -- phase 2 provably never runs on this
+                # branch, and the plan-phase stat is the only number available
+                # precisely because nothing was written.
                 return {
                     **summary,
                     "status": "skipped",
@@ -1317,14 +1319,28 @@ class TilePublisher:
             raise _CanonicalPrecipSourceMissing(str(grid_dir)) from error
         grid_keys: list[str] = []
         for name in sorted(names):
+            # The directory filter runs first because it is what defines the
+            # discovery set: Requirement 1 has both producers list
+            # `canonical/<S>/grid/*/`, and the backfill resolves the same input
+            # with `entry.is_dir(follow_symlinks=False)`. A plain file alongside
+            # the grid directories is simply not a tree to mirror, so it must not
+            # fail the whole mirror -- prcp tree included -- on its name.
+            # A symlinked entry is still refused whatever its name -- the reorder
+            # changes which guard reports it, not the outcome -- and the name
+            # check below still refuses an unsafe-named *directory* before it can
+            # become a key segment.
+            if not stat.S_ISDIR(stat_no_follow(grid_dir / name, containment_root=source_root).st_mode):
+                continue
             if _SAFE_ID_RE.fullmatch(name) is None:
                 raise SafeFilesystemError(f"Unsafe canonical grid entry name: {grid_key}/{name}")
-            # stat_no_follow rejects a symlinked entry outright; a plain file
-            # alongside the grid directories is simply not a tree to mirror.
-            if stat.S_ISDIR(stat_no_follow(grid_dir / name, containment_root=source_root).st_mode):
-                grid_keys.append(f"{grid_key}/{name}")
+            grid_keys.append(f"{grid_key}/{name}")
         if not grid_keys:
-            raise _CanonicalPrecipSourceMissing(str(grid_dir))
+            # NOT _CanonicalPrecipSourceMissing: `grid_dir` was just listed, so
+            # it demonstrably exists, and `missing_path` already carries the
+            # genuinely-absent case above. Emitting it here would make the two
+            # states indistinguishable in lineage and, because `missing_path`
+            # and `error`/`error_type` are mutually exclusive, drop the cause.
+            raise SafeFilesystemError(f"No canonical grid directory under {grid_key}")
         return grid_keys
 
     def _plan_canonical_precip_tree(

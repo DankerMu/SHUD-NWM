@@ -9,11 +9,18 @@ the identical keyspace, and prints a JSON summary to stdout.
 Standard library only -- deliberately. node-22's checkout is frozen ahead of a
 maintenance window, so this must run as::
 
-    /scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill \\
+    cd /scratch/frd_muziyao/NWM && \\
+        /scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill \\
         --source-root <root> --copyback-root <root>
 
-without triggering any environment build. It therefore imports nothing from
-``services`` / ``packages`` / ``workers`` and no third-party module. The direct
+without triggering any environment build. The ``cd`` is mandatory, not decoration:
+there is no ``scripts/__init__.py`` (PEP 420), so ``-m`` resolves the module only
+because it puts the cwd on ``sys.path``. From anywhere else the interpreter exits
+1 with ``ModuleNotFoundError`` -- the same exit code this script uses for
+"completed but something failed", distinguishable only by the empty stdout.
+
+It therefore imports nothing from ``services`` / ``packages`` / ``workers`` and
+no third-party module. The direct
 consequence is that it does **not** normalize source ids: it copies the on-disk
 directory names verbatim (``gfs`` / ``IFS`` are already the storage spelling) and
 discovers ``<grid_id>`` by listing ``canonical/<S>/grid/*/``. That non-sharing of
@@ -43,14 +50,23 @@ Path safety, stated as exactly what is enforced and nothing more:
   ``entry.is_dir(follow_symlinks=False)``, so a symlink there is silently
   SKIPPED, not refused, and never appears in the summary at all;
 * path components under ``--copyback-root`` are NOT checked: this script
-  ``mkdir -p``s into the destination and a symlinked component there is followed.
-  The destination root is operator-supplied and anyone able to plant such a link
-  already has write access to it, so this is not a privilege boundary; it is a
-  gap relative to the publisher, which walks its destination with ``O_NOFOLLOW``.
+  ``mkdir -p``s into the destination and a symlinked *component* there is
+  followed. The destination root is operator-supplied and anyone able to plant
+  such a link already has write access to it, so this is not a privilege
+  boundary; it is a gap relative to the publisher, which walks its destination
+  with ``O_NOFOLLOW``. The per-file *leaf* is not in that gap: the temp name
+  ``.<name>.backfill.<pid>.tmp`` is opened
+  ``O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW``, so a symlink planted at it is refused
+  and recorded as a failure rather than followed out of the root, and a stale
+  temp from a crashed run is refused rather than written through.
 
 Every directory the script creates under ``--copyback-root`` is chmod'ed 0o755
-explicitly, because node-22 writes as one account and node-27 reads the same NFS
-as another and the process umask must not decide that.
+explicitly, and every file it promotes there is chmod'ed 0o644 on the temp name
+before the ``os.replace``, because node-22 writes as one account and node-27
+reads the same NFS as another and the process umask must not decide that
+(``O_CREAT``'s mode argument is masked by the umask exactly as ``mkdir``'s is).
+Directories the script did not create and files it did not write -- an
+identical-size destination is skipped -- keep the mode they already had.
 """
 
 from __future__ import annotations
@@ -303,8 +319,18 @@ def _mirror_file(
     temp_file = target_file.parent / f".{target_file.name}.backfill.{os.getpid()}.tmp"
     try:
         _ensure_target_directory(target_file.parent)
-        shutil.copyfile(source_file, temp_file)
-        os.chmod(temp_file, FILE_MODE)
+        # O_NOFOLLOW: the temp name is predictable, and `copyfile` + `chmod`
+        # would follow a symlink planted there straight out of --copyback-root,
+        # overwrite whatever it points at and widen its mode, while the summary
+        # still counted the file `copied`. O_EXCL refuses a stale temp rather
+        # than writing through it; the handler below unlinks it, so a rerun is
+        # clean. The mode argument is masked by the umask exactly as `mkdir`'s
+        # is, hence the explicit `fchmod`.
+        descriptor = os.open(temp_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, FILE_MODE)
+        with os.fdopen(descriptor, "wb") as temp_stream:
+            os.fchmod(descriptor, FILE_MODE)
+            with open(source_file, "rb") as source_stream:
+                shutil.copyfileobj(source_stream, temp_stream)
         os.replace(temp_file, target_file)
     except OSError as error:
         try:
