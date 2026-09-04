@@ -3129,9 +3129,10 @@ autonomous default——这一约束自 2026-08-20 起未变。
 
 PR #2021 是 `rounds: 2` 的多轮 PR，进入了 167 的分母，但两条 catch 全部落在 **Round 1**
 （`review-test-evidence`），later-round（Round 2）返回 clean、零 catch，因此对 core/rotated
-任一侧都不加数。Round 2 按 post-fix 规则只派了一名全范围 reviewer（`round_lenses` 第二项是
-第一项的子集），恰好又撞上前几条登记的第一项工具缺口——**`round_lenses` 为 round-1 子集时
-不应计入轮换分母**。这条缺口在本次再次实证：分母 +1 而分子不动，比值被稀释的方向是
+任一侧都不加数。Round 2 按 post-fix 规则只派了一名 reviewer，但其 brief 覆盖的镜组与 Round 1 **完全相同**
+（correctness / spec-compliance / test-evidence，故 `round_lenses` 两项等值；此处按本文件惯例
+记该轮实际覆盖的镜组，而非 agent 数），恰好又撞上前几条登记的第一项工具缺口——**`round_lenses`
+为 round-1 子集或与之相同时不应计入轮换分母**。这条缺口在本次再次实证：分母 +1 而分子不动，比值被稀释的方向是
 系统性的、与真实轮换效力无关。
 
 前几条登记的三项工具缺口（子集轮不计分母、Phase 7 终审轮排除或单列 `final_review` 桶、
