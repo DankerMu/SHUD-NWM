@@ -188,11 +188,13 @@ describe('m11NationalRiverPaint line-opacity', () => {
   })
 
   /**
-   * 渲染器限制，不是 bug：line-opacity 是 composite 属性（同时被 ['zoom'] 和 ['get','Type'] 驱动），
+   * 这是取舍，不是渲染器限制：line-opacity 是 composite 属性（同时被 ['zoom'] 和 ['get','Type'] 驱动），
    * MapLibre 只在**整数** zoom 上求值一次、把 zoom / zoom+1 两份结果交给 GPU，再用**小数** map zoom
    * 线性混合（maplibre-gl src/data/program_configuration.ts:307-308，`useIntegerZoom` 为 false）。
-   * 顶层 linear interpolate 因此无法表达「z6 处硬切」；本文件的 CPU `evaluate({ zoom: 5.5 })`
-   * 与 GPU 走的是同一个线性混合公式、数值一致，所以下面钉的就是用户真正看到的值。
+   * 顶层 linear interpolate 因此必然沿 z5->z6 ramp；顶层 `step` 能在 z6 硬切（其插值因子恒为 0），
+   * 但会在每个 stop（3/5/6/7/9）都跳变、丢掉本 paint 依赖的跨 zoom 平滑，所以这里选平滑、接受 ramp。
+   * 本文件的 CPU `evaluate({ zoom: 5.5 })` 与 GPU 走的是同一个线性混合公式、数值一致，
+   * 所以下面钉的就是用户真正看到的值。
    *
    * 结论：规格场景里字面写的「zoom 3-5.99 不打折」只在 z <= 5.0 成立；(5, 6) 开区间上折扣按
    * 线性 ramp 逐步进来，到 z6 才是满额 0.42。这里把 ramp 钉住，让这个取舍显式可见而不是静默存在。

@@ -163,8 +163,10 @@ export function M11OverlayPrimitive({
 }
 
 export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; satellite: boolean }): LayerProps['paint'] {
-  // `dimmed` 的折扣在 z5->z6 之间线性 ramp 进来（z5 stop 不打折，z6 起满额 0.42）：line-opacity 是
-  // composite 属性，GPU 只在整数 zoom 采样、再按小数 zoom 插值，所以「z6 硬切」无法表达。
+  // `dimmed` 的折扣在 z5->z6 之间线性 ramp 进来（z5 stop 不打折，z6 起满额 0.42）：这是取舍，不是限制。
+  // 顶层 `step` 确实能在 z6 硬切，但它在每个 stop（3/5/6/7/9）都跳变、丢掉本 paint 依赖的跨 zoom
+  // 平滑，也不符合需求「zoom 插值表达式」的措辞。选 linear interpolate 的代价就是：line-opacity 是
+  // composite 属性，GPU 只在整数 zoom 采样、再按小数 zoom 插值，折扣只能沿 z5->z6 ramp 进来。
   // MapLibre 又只接受 `['zoom']` 作为**顶层** interpolate/step 的直接输入，嵌套 zoom 表达式会被
   // createPropertyExpression 判为非法，所以折扣因子只能按 stop 烘成 JS 常量。
   const lowZoomScale = 1
