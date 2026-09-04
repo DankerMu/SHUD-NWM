@@ -25,14 +25,24 @@ from packages.common.safe_fs import (
     atomic_write_bytes_no_follow,
     directory_identity_no_follow,
     ensure_directory_no_follow,
+    list_directory_no_follow,
     read_bytes_limited_no_follow,
     rmtree_no_follow,
+    stat_no_follow,
     verify_directory_no_follow,
 )
+from packages.common.source_identity import normalize_source_id
 from workers.data_adapters.base import cycle_id_for, format_cycle_time
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _CYCLE_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*_\d{10}")
+# The canonical mirror keyspace is `canonical/<storage_source>/<cycle_token>/...`
+# with `<cycle_token>` rendered as `%Y%m%d%H` (design.md D3). The 10-digit shape
+# is also what keeps the cycle key and the literal `grid` key disjoint.
+_CANONICAL_CYCLE_DIR_RE = re.compile(r"^\d{10}$")
+_CANONICAL_PRCP_LEAF = "prcp_rate_or_amount"
+_CANONICAL_GRID_DIR = "grid"
+_CANONICAL_GRID_FILE = "grid.json"
 _COPYBACK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 _COPYBACK_MAX_FILES = 100_000
 _COPYBACK_MAX_DIRECTORIES = 20_000
@@ -96,6 +106,19 @@ class _ForcingPackageValidationError(RuntimeError):
         super().__init__(str(error))
         self.ref = ref
         self.original_error = error
+
+
+class _CanonicalPrecipSourceMissing(RuntimeError):
+    """A canonical precipitation source directory/file the mirror needs is absent.
+
+    Carried separately from every other mirror failure because the lineage
+    contract reports an absent source as ``missing_path`` and everything else as
+    ``error`` + ``error_type`` (canonical-precip-copyback spec, Requirement 1).
+    """
+
+    def __init__(self, missing_path: str) -> None:
+        super().__init__(f"Canonical precipitation source is missing: {missing_path}")
+        self.missing_path = missing_path
 
 
 class TilePublisher:
@@ -272,6 +295,16 @@ class TilePublisher:
 
         layers.sort(key=lambda layer: str(layer["layer_id"]))
         artifacts.sort(key=lambda artifact: str(artifact["artifact_id"]))
+        # I7 (#2008 / design.md D6): the canonical precipitation mirror is the
+        # last step before lineage assembly -- q_down copyback, artifact writes
+        # and DB registration have all already succeeded, so nothing this step
+        # does may change the publish outcome.
+        cycle_lineage = _cycle_filter(cycle_id)
+        precip_mirror_summary = (
+            self._copyback_canonical_precip(cycle_lineage["source_id"], cycle_lineage["compact_time"])
+            if cycle_lineage is not None
+            else None
+        )
         lineage = {
             "cycle_id": cycle_id,
             "published_basins": len(source_run_ids),
@@ -285,6 +318,8 @@ class TilePublisher:
         }
         if copyback_summary is not None:
             lineage["object_store_copyback"] = copyback_summary
+        if precip_mirror_summary is not None:
+            lineage["precip_mirror"] = precip_mirror_summary
         return PublishResult(
             cycle_id=cycle_id,
             status="published",
@@ -1102,6 +1137,172 @@ class TilePublisher:
         }
         return summary
 
+    def _copyback_canonical_precip(self, source: str, cycle: str) -> dict[str, Any] | None:
+        """Mirror the canonical precipitation products for one cycle (#2008, D6).
+
+        ``source`` is the raw source id parsed out of the cycle id and ``cycle``
+        its ``%Y%m%d%H`` token; the mirror keyspace is
+        ``canonical/<storage_source>/<cycle>/prcp_rate_or_amount/`` plus every
+        ``canonical/<storage_source>/grid/<grid_id>/`` directory discovered on the
+        source root (design.md D3). ``<grid_id>`` is *listed*, never imported from
+        ``workers.canonical_converter`` -- that import chain needs third-party
+        packages this process must not require.
+
+        This step MUST NOT fail, block or roll back the q_down publish for any
+        reason. Every failure -- absent source, unsafe entry name, symlink, tree
+        limit, mid-copy ``OSError``, ``SafeFilesystemError``, even a failed
+        rollback -- is swallowed and reported through the returned
+        ``precip_mirror`` lineage entry. The sibling ``_copyback_qdown_products``
+        converts these same exceptions into ``PublishError`` and raises; copying
+        that shape here would be a bug.
+
+        Idempotency is tree-granular: the reused copy helper always rebuilds a
+        temp tree and promotes it with a single ``os.replace``, so a tree whose
+        destination holds the same names with the same sizes is skipped whole and
+        anything else is replaced whole.
+        """
+        if self.object_store_copyback_root is None:
+            return None
+
+        copyback_root_raw = self.object_store_copyback_root
+        summary: dict[str, Any] = {"root": str(copyback_root_raw)}
+        rollback_log: list[_CopybackRollbackEntry] = []
+        copyback_root: Path | None = None
+        try:
+            storage_source = normalize_source_id(source)
+            cycle_dir = str(cycle).strip()
+            if _CANONICAL_CYCLE_DIR_RE.fullmatch(cycle_dir) is None:
+                raise ValueError(f"Unsupported canonical precipitation cycle directory: {cycle_dir!r}")
+            summary["storage_source"] = storage_source
+            # NOT `cycle_token`: redact_payload() blanks any key matching /token/.
+            summary["cycle"] = cycle_dir
+
+            object_store_root_raw = _configured_path_no_resolve(self.object_store.root)
+            object_store_root = verify_directory_no_follow(object_store_root_raw).resolve()
+            copyback_root = self._prepare_copyback_root(
+                copyback_root_raw=copyback_root_raw,
+                object_store_root_raw=object_store_root_raw,
+                object_store_root=object_store_root,
+            )
+            summary["root"] = str(copyback_root)
+            # Identity, not the resolved path string -- see _copyback_run_products.
+            if directory_identity_no_follow(copyback_root) == directory_identity_no_follow(object_store_root):
+                return {**summary, "status": "skipped", "reason": "copyback_root_matches_object_store_root"}
+            if _paths_overlap(copyback_root, object_store_root):
+                raise SafeFilesystemError(
+                    "Object-store copyback root must not overlap OBJECT_STORE_ROOT: "
+                    f"{copyback_root} / {object_store_root}"
+                )
+            copyback_store = LocalObjectStore(
+                copyback_root,
+                object_store_prefix=self.object_store.object_store_prefix,
+            )
+
+            # Phase 1 is read-only: every "missing source" verdict is reached
+            # before a single byte is written under the copyback root.
+            plans = [
+                self._plan_canonical_precip_tree(
+                    f"canonical/{storage_source}/{cycle_dir}/{_CANONICAL_PRCP_LEAF}",
+                    copyback_store,
+                )
+            ]
+            plans.extend(
+                self._plan_canonical_precip_tree(grid_key, copyback_store, required_file=_CANONICAL_GRID_FILE)
+                for grid_key in self._discover_canonical_grid_keys(storage_source)
+            )
+            trees = [
+                {
+                    "object_key": key,
+                    "status": "copied" if needs_copy else "skipped",
+                    "file_count": len(source_tree.files),
+                    "byte_count": sum(size for _name, size in source_tree.file_sizes),
+                }
+                for key, source_tree, needs_copy in plans
+            ]
+            # file_count counts every file the mirror holds for this cycle, copied
+            # and already-identical trees alike, so the 56 `.nc` + `grid.json`
+            # cycle reports 57 whether or not the grid tree needed rewriting.
+            summary["file_count"] = sum(int(tree["file_count"]) for tree in trees)
+            summary["trees"] = trees
+
+            pending = [key for key, _source_tree, needs_copy in plans if needs_copy]
+            if not pending:
+                return {**summary, "status": "skipped", "reason": "trees_already_mirrored"}
+
+            # Phase 2 writes, on a rollback batch of its own: a precip failure
+            # must never roll back the q_down products copied earlier.
+            for key in pending:
+                self._copyback_object_tree_with_rollback(
+                    key,
+                    copyback_store,
+                    validate_source_tree=_accept_canonical_precip_tree,
+                    rollback_log=rollback_log,
+                )
+            _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+            return {**summary, "status": "ok"}
+        except Exception as error:
+            if copyback_root is not None and rollback_log:
+                try:
+                    _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+                except (OSError, SafeFilesystemError) as rollback_error:
+                    # A failed rollback is evidence, never an exception the
+                    # publish has to survive.
+                    summary["rollback_error"] = str(rollback_error)
+                    summary["rollback_error_type"] = type(rollback_error).__name__
+            if isinstance(error, _CanonicalPrecipSourceMissing):
+                return {**summary, "status": "failed", "missing_path": error.missing_path}
+            return {
+                **summary,
+                "status": "failed",
+                "error": str(error),
+                "error_type": type(error).__name__,
+            }
+
+    def _discover_canonical_grid_keys(self, storage_source: str) -> list[str]:
+        """List `canonical/<S>/grid/*/` on the source root, never importing the converter."""
+
+        source_root = Path(self.object_store.root)
+        grid_key = f"canonical/{storage_source}/{_CANONICAL_GRID_DIR}"
+        grid_dir = source_root / grid_key
+        try:
+            names = list_directory_no_follow(grid_dir, containment_root=source_root)
+        except FileNotFoundError as error:
+            raise _CanonicalPrecipSourceMissing(str(grid_dir)) from error
+        grid_keys: list[str] = []
+        for name in sorted(names):
+            if _SAFE_ID_RE.fullmatch(name) is None:
+                raise SafeFilesystemError(f"Unsafe canonical grid entry name: {grid_key}/{name}")
+            # stat_no_follow rejects a symlinked entry outright; a plain file
+            # alongside the grid directories is simply not a tree to mirror.
+            if stat.S_ISDIR(stat_no_follow(grid_dir / name, containment_root=source_root).st_mode):
+                grid_keys.append(f"{grid_key}/{name}")
+        if not grid_keys:
+            raise _CanonicalPrecipSourceMissing(str(grid_dir))
+        return grid_keys
+
+    def _plan_canonical_precip_tree(
+        self,
+        key: str,
+        copyback_store: LocalObjectStore,
+        *,
+        required_file: str | None = None,
+    ) -> tuple[str, _CopybackSourceTree, bool]:
+        """Collect one source tree and decide whether the mirror must replace it."""
+
+        source_root = Path(self.object_store.root)
+        try:
+            source_tree = _collect_copyback_source_tree(self.object_store, key)
+        except FileNotFoundError as error:
+            raise _CanonicalPrecipSourceMissing(str(source_root / key)) from error
+        if required_file is not None and f"{key}/{required_file}" not in source_tree.files:
+            raise _CanonicalPrecipSourceMissing(str(source_root / key / required_file))
+        try:
+            target_tree = _collect_copyback_source_tree(copyback_store, key)
+        except (OSError, SafeFilesystemError):
+            # Absent or unreadable destination: replace the tree wholesale.
+            return (key, source_tree, True)
+        return (key, source_tree, target_tree.file_sizes != source_tree.file_sizes)
+
     def _prepare_copyback_root(
         self,
         *,
@@ -1558,7 +1759,7 @@ def _object_tree_root_path(store: LocalObjectStore, key: str) -> Path:
     parts = PurePosixPath(key).parts
     if _is_run_tree_key(parts):
         return Path(store.root) / parts[0] / parts[1]
-    if _is_forcing_tree_key(parts):
+    if _is_forcing_tree_key(parts) or _is_canonical_precip_tree_key(parts):
         return Path(store.root).joinpath(*parts)
     raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
 
@@ -1567,7 +1768,7 @@ def _copyback_temp_tree_key(key: str) -> str:
     parts = PurePosixPath(key).parts
     if _is_run_tree_key(parts):
         return f"runs/{parts[1]}.copyback.{uuid.uuid4().hex}"
-    if _is_forcing_tree_key(parts):
+    if _is_forcing_tree_key(parts) or _is_canonical_precip_tree_key(parts):
         return "/".join((*parts[:-1], f"{parts[-1]}.copyback.{uuid.uuid4().hex}"))
     raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
 
@@ -1584,21 +1785,51 @@ def _is_forcing_tree_key(parts: tuple[str, ...]) -> bool:
     )
 
 
+def _is_canonical_precip_tree_key(parts: tuple[str, ...]) -> bool:
+    """The two -- and only two -- canonical shapes the copyback helpers accept (#2008).
+
+    ``canonical/<S>/<10-digit cycle>/prcp_rate_or_amount`` and
+    ``canonical/<S>/grid/<grid_id>``. The 10-digit test on ``parts[2]`` is what
+    keeps the two disjoint: ``grid`` is not a number. Arbitrary ``canonical/**``
+    keys stay unsupported.
+
+    The precipitation leaf must also accept the copyback temp spelling:
+    ``_copyback_collected_object_tree`` feeds ``_copyback_temp_tree_key(key)``
+    straight back into ``_object_tree_root_path``, so a predicate matching only
+    the bare literal would raise ``ValueError`` on every mirror. The grid leaf is
+    a free ``_SAFE_ID_RE`` segment and is temp-compatible by construction, for
+    the same reason ``_is_run_tree_key`` / ``_is_forcing_tree_key`` are.
+    """
+
+    if len(parts) != 4 or parts[0] != "canonical":
+        return False
+    if not all(_SAFE_ID_RE.fullmatch(part) for part in parts):
+        return False
+    if _CANONICAL_CYCLE_DIR_RE.fullmatch(parts[2]) is not None:
+        return parts[3] == _CANONICAL_PRCP_LEAF or parts[3].startswith(f"{_CANONICAL_PRCP_LEAF}.copyback.")
+    return parts[2] == _CANONICAL_GRID_DIR
+
+
+def _accept_canonical_precip_tree(_source_tree: _CopybackSourceTree) -> None:
+    """The canonical mirror copies verbatim; per-tree content contracts live in the plan phase."""
+
+
 def _copyback_tree_label(key: str) -> str:
     parts = PurePosixPath(key).parts
     if parts and parts[0] == "forcing":
         return "forcing package"
+    if parts and parts[0] == "canonical":
+        return "canonical precipitation product"
     return "run product"
 
 
 def _copyback_tree_label_title(key: str) -> str:
     label = _copyback_tree_label(key)
-    return "Forcing package" if label == "forcing package" else "Run product"
+    return label[:1].upper() + label[1:]
 
 
 def _copyback_path_component_label(key: str) -> str:
-    parts = PurePosixPath(key).parts
-    return "forcing package" if parts and parts[0] == "forcing" else "run product"
+    return _copyback_tree_label(key)
 
 
 def _run_id_from_product_key(key: str) -> str:
@@ -1789,7 +2020,7 @@ def _path_is_relative_to(path: Path, parent: Path) -> bool:
 def _collect_copyback_source_tree(store: LocalObjectStore, key: str) -> _CopybackSourceTree:
     root = Path(store.root)
     parts = PurePosixPath(key).parts
-    if not (_is_run_tree_key(parts) or _is_forcing_tree_key(parts)):
+    if not (_is_run_tree_key(parts) or _is_forcing_tree_key(parts) or _is_canonical_precip_tree_key(parts)):
         raise ValueError(f"Unsupported object-store copyback tree key: {key!r}")
 
     root_path = verify_directory_no_follow(root)

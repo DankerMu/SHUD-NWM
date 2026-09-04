@@ -33,14 +33,59 @@ Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_hydro_
 
 ## 4. Canonical precipitation copyback (canonical-precip-copyback)
 
-- [ ] 4.1 `services/tile_publisher/publisher.py`：q_down copyback 后新增 `_copyback_canonical_precip(source, cycle)`——镜像 `canonical/<source>/<cycle>/prcp_rate_or_amount/*.nc` + `canonical/<source>/grid/<grid_id>/grid.json`，复用 `_copyback_object_tree_with_rollback`，同大小跳过，缺源记 lineage `precip_mirror: failed` 不抛出。
-- [ ] 4.2 `tests/test_tile_publisher.py`：tmp roots 覆盖成功镜像、幂等 skipped、缺源不阻塞发布。
-- [ ] 4.3 `scripts/canonical_precip_copyback_backfill.py`（仅标准库）：`--source-root/--copyback-root/--dry-run`，JSON 汇总；单测用 tmp 目录。
+- [x] 4.1 `services/tile_publisher/publisher.py`：q_down copyback 后新增 `_copyback_canonical_precip(source, cycle)`——镜像 `canonical/<source>/<cycle>/prcp_rate_or_amount/*.nc` + `canonical/<source>/grid/<grid_id>/grid.json`，复用 `_copyback_object_tree_with_rollback`，同大小跳过，缺源记 lineage `precip_mirror: failed` 不抛出。
+- [x] 4.2 `tests/test_tile_publisher.py`：tmp roots 覆盖成功镜像、幂等 skipped、缺源不阻塞发布。
+- [x] 4.3 `scripts/canonical_precip_copyback_backfill.py`（仅标准库）：`--source-root/--copyback-root/--dry-run`，JSON 汇总，退出码 0/1/2；单测落在**新文件** `tests/test_canonical_precip_copyback_backfill.py`（tmp 目录），含一条 subprocess `-m scripts.canonical_precip_copyback_backfill` 用例与一条 import-仅标准库 的静态断言。
 - [ ] 4.4 `scripts/node27_raw_retention.py`：目标集合扩到 `canonical/<storage_source>/<cycle_token>` 与 `NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>`，同一 cutoff（`display_watermark − retention_days`），`canonical/<source>/grid/` 永不剪；配置里的 source 是小写 `gfs,ifs`，canonical/缓存目录用 `normalize_source_id` 映射（`ifs`→`IFS`），不得直接拼小写；更新其测试，覆盖「剪掉的周期再请求 PNG 得 404 `PRECIP_CYCLE_NOT_MIRRORED` 而不是缓存命中」与 `IFS` 大小写映射。
 - [ ] 4.5 node-22 执行回填：`/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill --source-root /scratch/frd_muziyao/nhms-prod/object-store --copyback-root $NHMS_OBJECT_STORE_COPYBACK_ROOT`（禁止 `uv sync` / 裸 `uv run`）；node-27 `ls /home/ghdc/nwm/object-store/canonical/{gfs,IFS}` + `df -h /home` 写 receipt。
 - [ ] 4.6 keep 水位核查：逐源比对 `GET /api/v1/layers/discharge/cycles?source=` 的最老周期与 retention cutoff（`display_watermark − retention_days`），断言 `oldest_listed_cycle − 24h ≥ cutoff`；不成立则加大 `retention_days` 并在 receipt 记偏离。
 
-Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_tile_publisher.py tests/test_node27_raw_retention.py -q`；node-22 回填 JSON 汇总 + node-27 目录清单与 `df -h /home` receipt。
+Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_tile_publisher.py tests/test_canonical_precip_copyback_backfill.py tests/test_node27_raw_retention.py -q`；node-22 回填 JSON 汇总 + node-27 目录清单与 `df -h /home` receipt。
+
+### Invariant Matrix（4.1–4.3，issue #2008 补充；高强度 repair 要求）
+
+Governing invariant: 降水镜像永不改变 q_down 发布的成败与其 copyback 产物；每棵被镜像的目标树要么与源树同名同字节，要么保持原样，绝不留半成品或 temp 残留；任何失败只体现为 lineage `precip_mirror`，绝不外泄异常。
+
+Source-of-truth identity/contract:
+- 镜像 keyspace `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` 与 `canonical/<storage_source>/grid/<grid_id>/`（见 design.md D3）。
+- publisher 侧：`storage_source = normalize_source_id(_cycle_filter(cycle_id)["source_id"])`、`cycle_token = _cycle_filter(...)["compact_time"]`（`%Y%m%d%H`）；`<grid_id>` **列目录得到**（`canonical/<S>/grid/*/`），不得 import `workers.canonical_converter`（其 import 链需第三方包）。
+- 回填脚本侧：不做任何 source 归一，直接照抄源根上的目录名（`gfs`/`IFS` 已是存储拼写）；`<grid_id>` 同样列目录得到。两个 producer 因此不共享归一代码，也不重复归一规则。
+- lineage 键位置：`PublishResult.lineage["precip_mirror"]`（顶层，与 `object_store_copyback` 平级）。
+
+Surfaces:
+- Producers: `services/tile_publisher/publisher.py::_copyback_canonical_precip`（插入点：`publisher.py` 中 DB 注册 `session.commit()` 之后、构造 lineage dict 之前）；`scripts/canonical_precip_copyback_backfill.py`
+- Validators/preflight: `_prepare_copyback_root`、`_paths_overlap`、`directory_identity_no_follow` 同根判定、`_collect_copyback_source_tree` 的 no-follow / symlink / 限额校验；grid 目录发现用 `packages/common/safe_fs.py::list_directory_no_follow(path, containment_root=object_store.root)`——`_collect_copyback_source_tree` 会拒绝 3 段 key `canonical/<S>/grid`，不能拿来做发现，发现到的每个 grid 目录再各自走 `_collect_copyback_source_tree`
+- Storage/cache/query: `LocalObjectStore`（copyback root，独立实例）；本 issue 不触碰读端
+- Public routes/entrypoints: 无（`publish_qdown_display` 是唯一入口；回填脚本 CLI 为运维入口）
+- Frontend/downstream consumers: I8 读端按同一 keyspace 读（本 PR 只产出路径，不消费）
+- Failure paths/rollback/stale state: **独立于 q_down 的** `rollback_log` + `_commit_qdown_copyback_batch` / `_rollback_qdown_copyback_batch`；temp-tree 异常清理；rollback 自身失败也只写进 lineage
+- Evidence/audit/readiness: `lineage.precip_mirror`（`ok` 带 `file_count` 与 `trees[]`／`skipped`／`failed` 带 `missing_path` 或 `error`+`error_type`）；回填 stdout JSON 汇总 + 退出码
+
+Regression rows:
+- 源含 56 个 `.nc` + 1 个 `grid.json`，q_down copyback 成功 -> 目标出现同名同字节文件，`precip_mirror.status == "ok"` 且 `file_count == 57`
+- 同周期二次运行（每棵树文件名与大小全等）-> 不重写任何文件（mtime 不变），`status == "skipped"`
+- 目标 prcp 树缺一个文件或某文件大小不同 -> 该树整棵替换、`status == "ok"`；grid 树未变仍 skipped
+- 源 `prcp_rate_or_amount` 缺失 -> `publish` 仍返回 `status == "published"`，`precip_mirror.status == "failed"` 且 `missing_path` 指名缺失路径，copyback 根下无 temp 残留
+- 源树含 symlink / 超 `_COPYBACK_MAX_FILE_BYTES` / 复制中途 `OSError` -> `publish` 仍 `published`，`precip_mirror.status == "failed"` 带 `error` + `error_type`，无 temp 残留（兄弟实现在同类异常上抛 `PublishError`，此处必须吞掉）
+- `prcp_rate_or_amount` 存在但无 `grid.json` -> `status == "failed"` 且 `missing_path` 为缺失的 grid 路径
+- `ifs` 源 -> 写入 `canonical/IFS/<token>/...` 与 `canonical/IFS/grid/ifs_0p25/grid.json`，绝不出现 `canonical/ifs/...`
+- `NHMS_OBJECT_STORE_COPYBACK_ROOT` 未配置 -> 不尝试镜像，lineage 无 `precip_mirror` 键（锁住绝大多数既有 publish 用例不受影响）
+- copyback 根与 `OBJECT_STORE_ROOT` 同一目录 identity -> `precip_mirror == {"status": "skipped", "reason": "copyback_root_matches_object_store_root"}`
+- 未改动的兄弟面：`runs/<run_id>` 与 `forcing/...` copyback 的既有用例（`tests/test_tile_publisher.py` 全部 copyback 用例）保持通过；helper 白名单扩展不放宽这两类 key 的形状校验
+- 回填脚本 `--dry-run` -> 目标根下无任何新文件/新目录，汇总列出计划复制
+- 回填脚本某周期源目录不可读 -> 汇总仍打印且该周期 `failed > 0`，退出码 1；全成功退出码 0；参数/根不可用退出码 2
+- 回填脚本 import 面 -> 静态断言只含标准库（无 `services`/`packages`/`workers`/第三方），且 subprocess `-m scripts.canonical_precip_copyback_backfill` 能跑通
+
+Boundary-surface checklist（4.1–4.3）:
+- 共享 helper 根：`_object_tree_root_path` / `_copyback_temp_tree_key` / `_collect_copyback_source_tree` / `_copyback_tree_label(_title)` 只新增 canonical 的**两种精确形状**，不接受任意 `canonical/**`：`("canonical", S, K, prcp_leaf)` 与 `("canonical", S, "grid", grid_leaf)`。两者的 `S` 与末段都过 `_SAFE_ID_RE`，`K` 必须是 10 位数字 cycle token（这是让两种形状互斥的判据，`"grid"` 不是数字）。**末段必须同时接受 temp 名**：`_copyback_object_tree_with_rollback` 会先算 `_copyback_temp_tree_key`（末段变成 `<leaf>.copyback.<hex>`）再把它交给 `_object_tree_root_path`，所以 prcp 形状的判据是「末段等于 `prcp_rate_or_amount` 或以 `prcp_rate_or_amount.copyback.` 开头」，写成只等于 `prcp_rate_or_amount` 会让每次镜像都 `ValueError` 并被吞成永久 `failed`；grid 形状的末段本就是自由 `grid_leaf`，天然兼容（与 `_is_run_tree_key` / `_is_forcing_tree_key` 让末段过 `_SAFE_ID_RE` 的理由相同）
+- 写入/覆盖面：目标树替换仍走 temp-tree + `os.replace`，containment root 不变；precip 的 rollback batch 与 q_down 的完全分离
+- 幂等/陈旧态边界：跳过判定基于源/目标 `_CopybackSourceTree.file_sizes` 全等；不等则整树替换
+- 未改动下游消费者：`_copyback_run_products`、`_copyback_qdown_products` 的对外语义与错误码不变
+
+刻意取舍（供 review 直接采信，不必重开辩论）:
+- 幂等只能做到整树粒度：复用的 `_copyback_object_tree_with_rollback` 总是重建 temp 树再 `os.replace`，没有逐文件跳过能力。spec Req 1 已按此改写。
+- 回填脚本默认写入、`--dry-run` 才不写，与兄弟 `services/tile_publisher/forcing_copyback_backfill.py` 的「默认 dry-run、`--apply` 才写」相反：本 change 的 4.5 node-22 命令不带任何标志就必须写入。
+- 回填脚本与 publisher 各自拼 keyspace（脚本照抄目录名、publisher 走 `normalize_source_id`），是 stdlib-only 硬约束的直接后果，不是重复实现。
 
 ## 5. Precipitation raster service (precipitation-raster-overlay, backend)
 

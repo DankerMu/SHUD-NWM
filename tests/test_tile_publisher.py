@@ -48,7 +48,9 @@ from services.tile_publisher.publisher import (
     PublishError,
     PublishResult,
     TilePublisher,
+    _copyback_temp_tree_key,
     _is_private_display_path,
+    _object_tree_root_path,
     _parse_forcing_lineage,
     _replace_directory_tree_no_follow,
 )
@@ -265,6 +267,7 @@ def _insert_run(
     session: Session,
     *,
     run_id: str,
+    source_id: str = SOURCE_ID,
     status: str = "parsed",
     run_type: str = "forecast",
     model_id: str | None = "model-1",
@@ -304,7 +307,7 @@ def _insert_run(
                 "model_id": model_id,
                 "basin_version_id": basin_version_id,
                 "forcing_version_id": forcing_version_id,
-                "source_id": SOURCE_ID,
+                "source_id": source_id,
                 "cycle_time": CYCLE_TIME,
                 "status": status,
                 "run_manifest_uri": run_manifest_uri,
@@ -2182,3 +2185,387 @@ def test_is_private_display_path_rejects_private(private_path: str) -> None:
 )
 def test_is_private_display_path_allows_public(public_path: str) -> None:
     assert _is_private_display_path(public_path) is False
+
+
+# --------------------------------------------------------------------------- #
+# canonical precipitation mirror (#2008, canonical-precip-copyback)
+#
+# The mirror is the last step of a q_down publish and must never change that
+# publish's outcome: every failure is swallowed into lineage["precip_mirror"].
+# Keyspace (design.md D3): canonical/<storage_source>/<cycle_token>/
+# prcp_rate_or_amount/ plus every canonical/<storage_source>/grid/<grid_id>/.
+# --------------------------------------------------------------------------- #
+GFS_LEAD_HOURS = tuple(range(3, 169, 3))  # f003..f168 -- the 56 real GFS files
+
+
+def _prcp_tree_key(storage_source: str, cycle: str) -> str:
+    return f"canonical/{storage_source}/{cycle}/prcp_rate_or_amount"
+
+
+def _grid_tree_key(storage_source: str, grid_id: str) -> str:
+    return f"canonical/{storage_source}/grid/{grid_id}"
+
+
+def _seed_canonical_precip(
+    publisher: TilePublisher,
+    *,
+    storage_source: str = "gfs",
+    cycle: str = COMPACT_TIME,
+    grid_id: str = "gfs_0p25",
+    leads: tuple[int, ...] = GFS_LEAD_HOURS,
+    write_grid_json: bool = True,
+) -> dict[str, bytes]:
+    """Seed one canonical cycle on the production root; returns key -> bytes."""
+
+    payloads: dict[str, bytes] = {}
+    prcp_key = _prcp_tree_key(storage_source, cycle)
+    for lead in leads:
+        key = f"{prcp_key}/{storage_source}_{cycle}_prcp_rate_or_amount_f{lead:03d}.nc"
+        payload = f"prcp:{storage_source}:{cycle}:{lead:03d}".encode("utf-8")
+        publisher.object_store.write_bytes_atomic(key, payload)
+        payloads[key] = payload
+    grid_key = _grid_tree_key(storage_source, grid_id)
+    if write_grid_json:
+        grid_payload = json.dumps({"grid_id": grid_id, "nx": 4, "ny": 3}).encode("utf-8")
+        publisher.object_store.write_bytes_atomic(f"{grid_key}/grid.json", grid_payload)
+        payloads[f"{grid_key}/grid.json"] = grid_payload
+    else:
+        (Path(publisher.object_store.root) / grid_key).mkdir(parents=True, exist_ok=True)
+    return payloads
+
+
+def _assert_no_copyback_residue(root: Path) -> None:
+    residue = sorted(str(path) for path in Path(root).rglob("*") if ".copyback" in path.name)
+    assert residue == []
+
+
+def _assert_qdown_copyback_intact(
+    copyback_root: Path,
+    run_id: str = "run-a",
+    forcing_key: str = FORCING_KEY,
+) -> None:
+    """The precip mirror must never roll back or damage the q_down products."""
+
+    assert (copyback_root / f"runs/{run_id}/input/manifest.json").exists()
+    assert (copyback_root / f"runs/{run_id}/output/q.rivqdown.csv").read_bytes() == b"seg,q\n1,2\n"
+    assert (copyback_root / f"{forcing_key}/forcing_package.json").exists()
+
+
+def _publish_with_canonical_precip(
+    publisher: TilePublisher,
+    *,
+    cycle_id: str = CYCLE_ID,
+    source_id: str = SOURCE_ID,
+    forcing_key: str = FORCING_KEY,
+) -> PublishResult:
+    with _store(create_met=True) as session:
+        _insert_run(session, run_id="run-a", source_id=source_id, segments=3)
+        _seed_forcing_package(publisher, session, package_key=forcing_key)
+        return publisher._publish_qdown_from_database(session, cycle_id)
+
+
+def _file_mtimes(root: Path) -> dict[str, int]:
+    return {
+        path.relative_to(root).as_posix(): path.stat().st_mtime_ns
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_publish_qdown_mirrors_canonical_precip_products(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    payloads = _seed_canonical_precip(publisher)
+    assert len(payloads) == 57
+
+    result = _publish_with_canonical_precip(publisher)
+
+    assert result.status == "published"
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
+    mirror = result.lineage["precip_mirror"]
+    assert mirror["status"] == "ok"
+    assert mirror["file_count"] == 57
+    assert mirror["storage_source"] == "gfs"
+    assert mirror["cycle"] == COMPACT_TIME
+    assert mirror["trees"] == [
+        {
+            "object_key": _prcp_tree_key("gfs", COMPACT_TIME),
+            "status": "copied",
+            "file_count": 56,
+            "byte_count": sum(
+                len(payload) for key, payload in payloads.items() if key.endswith(".nc")
+            ),
+        },
+        {
+            "object_key": _grid_tree_key("gfs", "gfs_0p25"),
+            "status": "copied",
+            "file_count": 1,
+            "byte_count": len(payloads[f"{_grid_tree_key('gfs', 'gfs_0p25')}/grid.json"]),
+        },
+    ]
+    # redact_payload() runs over the whole lineage; nothing here may be blanked.
+    assert "[redacted]" not in json.dumps(mirror)
+    _assert_no_copyback_residue(copyback_root)
+    _assert_qdown_copyback_intact(copyback_root)
+
+
+def test_publish_qdown_canonical_precip_mirror_is_idempotent(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _seed_canonical_precip(publisher)
+
+    first = _publish_with_canonical_precip(publisher)
+    assert first.lineage["precip_mirror"]["status"] == "ok"
+    mtimes_before = _file_mtimes(copyback_root / "canonical")
+
+    second = _publish_with_canonical_precip(publisher)
+
+    mirror = second.lineage["precip_mirror"]
+    assert mirror["status"] == "skipped"
+    assert mirror["reason"] == "trees_already_mirrored"
+    assert mirror["file_count"] == 57
+    assert [tree["status"] for tree in mirror["trees"]] == ["skipped", "skipped"]
+    assert _file_mtimes(copyback_root / "canonical") == mtimes_before
+    _assert_no_copyback_residue(copyback_root)
+
+
+def test_publish_qdown_canonical_precip_mirror_replaces_partial_tree(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    payloads = _seed_canonical_precip(publisher)
+    _publish_with_canonical_precip(publisher)
+
+    prcp_key = _prcp_tree_key("gfs", COMPACT_TIME)
+    dropped = f"{prcp_key}/gfs_{COMPACT_TIME}_prcp_rate_or_amount_f003.nc"
+    resized = f"{prcp_key}/gfs_{COMPACT_TIME}_prcp_rate_or_amount_f006.nc"
+    (copyback_root / dropped).unlink()
+    (copyback_root / resized).write_bytes(b"short")
+    grid_mtimes_before = _file_mtimes(copyback_root / _grid_tree_key("gfs", "gfs_0p25"))
+
+    result = _publish_with_canonical_precip(publisher)
+
+    mirror = result.lineage["precip_mirror"]
+    assert mirror["status"] == "ok"
+    assert mirror["file_count"] == 57
+    assert [(tree["object_key"], tree["status"]) for tree in mirror["trees"]] == [
+        (prcp_key, "copied"),
+        (_grid_tree_key("gfs", "gfs_0p25"), "skipped"),
+    ]
+    assert (copyback_root / dropped).read_bytes() == payloads[dropped]
+    assert (copyback_root / resized).read_bytes() == payloads[resized]
+    assert _file_mtimes(copyback_root / _grid_tree_key("gfs", "gfs_0p25")) == grid_mtimes_before
+    _assert_no_copyback_residue(copyback_root)
+
+
+def test_publish_qdown_canonical_precip_missing_source_does_not_block_publish(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+
+    result = _publish_with_canonical_precip(publisher)
+
+    assert result.status == "published"
+    mirror = result.lineage["precip_mirror"]
+    assert mirror["status"] == "failed"
+    assert mirror["missing_path"] == str(
+        Path(publisher.object_store.root) / _prcp_tree_key("gfs", COMPACT_TIME)
+    )
+    assert "error" not in mirror
+    assert not (copyback_root / "canonical").exists()
+    _assert_no_copyback_residue(copyback_root)
+    _assert_qdown_copyback_intact(copyback_root)
+
+
+def test_publish_qdown_canonical_precip_missing_grid_json_does_not_block_publish(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _seed_canonical_precip(publisher, leads=(3, 6), write_grid_json=False)
+
+    result = _publish_with_canonical_precip(publisher)
+
+    assert result.status == "published"
+    mirror = result.lineage["precip_mirror"]
+    assert mirror["status"] == "failed"
+    assert mirror["missing_path"] == str(
+        Path(publisher.object_store.root) / _grid_tree_key("gfs", "gfs_0p25") / "grid.json"
+    )
+    # The plan phase runs before any write, so the destination stays untouched.
+    assert not (copyback_root / "canonical").exists()
+    _assert_no_copyback_residue(copyback_root)
+    _assert_qdown_copyback_intact(copyback_root)
+
+
+def test_publish_qdown_canonical_precip_symlinked_entry_does_not_block_publish(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    prcp_dir = Path(publisher.object_store.root) / _prcp_tree_key("gfs", COMPACT_TIME)
+    (prcp_dir / "linked.nc").symlink_to(prcp_dir / f"gfs_{COMPACT_TIME}_prcp_rate_or_amount_f003.nc")
+
+    result = _publish_with_canonical_precip(publisher)
+
+    assert result.status == "published"
+    mirror = result.lineage["precip_mirror"]
+    assert mirror["status"] == "failed"
+    assert mirror["error_type"] == "SafeFilesystemError"
+    assert "must not be a symlink" in mirror["error"]
+    assert "missing_path" not in mirror
+    assert not (copyback_root / "canonical").exists()
+    _assert_no_copyback_residue(copyback_root)
+    _assert_qdown_copyback_intact(copyback_root)
+
+
+def test_publish_qdown_canonical_precip_write_error_does_not_block_publish(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    original_write = type(publisher.object_store).write_bytes_atomic
+
+    def fail_canonical_write(self: Any, key_or_uri: str, content: bytes) -> str:
+        # Scoped to the mirror: a global failure would sink the q_down copyback
+        # (which runs first) and this test would prove the wrong thing.
+        if self.root == copyback_root.resolve() and "canonical/" in key_or_uri:
+            raise OSError("disk gone")
+        return original_write(self, key_or_uri, content)
+
+    monkeypatch.setattr("packages.common.object_store.LocalObjectStore.write_bytes_atomic", fail_canonical_write)
+
+    result = _publish_with_canonical_precip(publisher)
+
+    assert result.status == "published"
+    mirror = result.lineage["precip_mirror"]
+    assert mirror["status"] == "failed"
+    assert mirror["error_type"] == "OSError"
+    assert "disk gone" in mirror["error"]
+    assert not (copyback_root / _prcp_tree_key("gfs", COMPACT_TIME)).exists()
+    _assert_no_copyback_residue(copyback_root)
+    _assert_qdown_copyback_intact(copyback_root)
+
+
+def test_publish_qdown_canonical_precip_mirrors_ifs_under_upper_case_storage_source(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    payloads = _seed_canonical_precip(
+        publisher,
+        storage_source="IFS",
+        grid_id="ifs_0p25",
+        leads=(0, 3, 6),
+    )
+
+    result = _publish_with_canonical_precip(
+        publisher,
+        cycle_id=f"ifs_{COMPACT_TIME}",
+        source_id="ifs",
+        # _validate_forcing_package_identity pins the key's source segment to the
+        # run's source, so the ifs cycle needs its own forcing package key.
+        forcing_key=f"forcing/ifs/{COMPACT_TIME}/basin-1/model-1",
+    )
+
+    assert result.status == "published"
+    mirror = result.lineage["precip_mirror"]
+    assert mirror["status"] == "ok"
+    assert mirror["storage_source"] == "IFS"
+    assert mirror["file_count"] == 4
+    assert [tree["object_key"] for tree in mirror["trees"]] == [
+        _prcp_tree_key("IFS", COMPACT_TIME),
+        _grid_tree_key("IFS", "ifs_0p25"),
+    ]
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
+    assert (copyback_root / _grid_tree_key("IFS", "ifs_0p25") / "grid.json").exists()
+    # Case-exact via readdir: `.exists()` would pass on a case-insensitive
+    # filesystem (macOS) even if the mirror had written `canonical/ifs`.
+    assert sorted(entry.name for entry in (copyback_root / "canonical").iterdir()) == ["IFS"]
+    _assert_no_copyback_residue(copyback_root)
+
+
+def test_publish_qdown_without_copyback_root_records_no_precip_mirror(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    _seed_run_products(publisher, "run-a")
+    _seed_canonical_precip(publisher, leads=(3, 6))
+
+    result = _publish_with_canonical_precip(publisher)
+
+    assert result.status == "published"
+    assert "precip_mirror" not in result.lineage
+    assert "object_store_copyback" not in result.lineage
+
+
+def test_publish_qdown_canonical_precip_skips_when_copyback_root_is_the_object_store_root(
+    tmp_path: Any,
+) -> None:
+    publisher = _publisher(tmp_path, object_store_copyback_root=tmp_path / "object-store")
+    _seed_run_products(publisher, "run-a")
+    _seed_canonical_precip(publisher, leads=(3, 6))
+
+    result = _publish_with_canonical_precip(publisher)
+
+    assert result.status == "published"
+    assert result.lineage["precip_mirror"] == {
+        "root": str(Path(publisher.object_store.root)),
+        "storage_source": "gfs",
+        "cycle": COMPACT_TIME,
+        "status": "skipped",
+        "reason": "copyback_root_matches_object_store_root",
+    }
+
+
+# Boundary: the copyback helper whitelist gained exactly two canonical shapes and
+# must not have loosened the `runs/` or `forcing/` shapes it already accepted.
+@pytest.mark.parametrize(
+    "key",
+    [
+        "runs/run-a",
+        FORCING_KEY,
+        f"canonical/gfs/{COMPACT_TIME}/prcp_rate_or_amount",
+        "canonical/IFS/grid/ifs_0p25",
+    ],
+)
+def test_copyback_tree_key_whitelist_accepts_supported_shapes(tmp_path: Any, key: str) -> None:
+    publisher = _publisher(tmp_path)
+
+    assert _object_tree_root_path(publisher.object_store, key) == Path(publisher.object_store.root) / key
+    # The temp spelling must round-trip: _copyback_collected_object_tree feeds
+    # _copyback_temp_tree_key() straight back into _object_tree_root_path().
+    temp_key = _copyback_temp_tree_key(key)
+    assert temp_key != key
+    assert _object_tree_root_path(publisher.object_store, temp_key).parent == (
+        Path(publisher.object_store.root) / key
+    ).parent
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "runs/run-a/output",
+        "runs",
+        "forcing/gfs/2024060112/basin-1",
+        "forcing/gfs/2024060112/basin-1/model-1/extra",
+        # arbitrary canonical/** stays unsupported
+        f"canonical/gfs/{COMPACT_TIME}/t2m",
+        f"canonical/gfs/{COMPACT_TIME}",
+        f"canonical/gfs/{COMPACT_TIME}/prcp_rate_or_amount/nested",
+        "canonical/gfs/notacycle/prcp_rate_or_amount",
+        "canonical/gfs/grid",
+        "canonical/gfs/grid/gfs_0p25/grid.json",
+        "canonical/gfs/2024060112/prcp_rate_or_amount_other",
+    ],
+)
+def test_copyback_tree_key_whitelist_rejects_unsupported_shapes(tmp_path: Any, key: str) -> None:
+    publisher = _publisher(tmp_path)
+
+    with pytest.raises(ValueError):
+        _object_tree_root_path(publisher.object_store, key)
+    with pytest.raises(ValueError):
+        _copyback_temp_tree_key(key)

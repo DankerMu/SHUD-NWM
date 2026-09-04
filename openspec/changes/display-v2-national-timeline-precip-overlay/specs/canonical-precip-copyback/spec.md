@@ -1,24 +1,46 @@
 ## ADDED Requirements
 
 ### Requirement: q_down publish mirrors canonical precipitation products
-After a successful q_down publish for `(source, cycle)`, the publisher on node-22 SHALL mirror `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/*.nc` and the referenced `canonical/<storage_source>/grid/<grid_id>/grid.json` (storage source `gfs`/`IFS` via `normalize_source_id`, cycle token `%Y%m%d%H`) from `OBJECT_STORE_ROOT` to `NHMS_OBJECT_STORE_COPYBACK_ROOT` under the same keyspace using the existing temp-tree + rollback copy pattern. The mirror MUST be idempotent (a destination file with identical size is skipped) and MUST NOT fail the q_down publish when the source products are missing; the failure MUST be recorded in copyback lineage as `precip_mirror: failed` with the missing path.
+After a q_down publish for `(source, cycle)` has completed its q_down copyback, artifact writes, and layer registration — that is, at the last step before the publish lineage is assembled — the publisher on node-22 SHALL mirror `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` and every `canonical/<storage_source>/grid/<grid_id>/` directory that exists under the source root (storage source `gfs`/`IFS` via `normalize_source_id`, cycle token `%Y%m%d%H`) from `OBJECT_STORE_ROOT` to `NHMS_OBJECT_STORE_COPYBACK_ROOT` under the same keyspace using the existing temp-tree + rollback copy pattern with its own rollback batch, never the q_down batch.
+
+The mirror is idempotent at **tree** granularity: a mirrored tree whose destination holds exactly the same file names with identical sizes is skipped without rewriting any file; any other state (missing file, extra file, size mismatch) replaces that whole tree atomically. Per-file skipping is not available because the reused copy helper rebuilds a temp tree and promotes it with a single `os.replace`.
+
+The mirror MUST NOT fail, block, or roll back the q_down publish for **any** reason — missing source products, unsafe entry names, symlinks, tree/byte/depth limits, IO errors, or a failed rollback. Every such failure is swallowed and recorded in the publish lineage under the top-level key `precip_mirror` as `{"status": "failed", ...}`, carrying `missing_path` when the cause is an absent source directory and `error`/`error_type` otherwise. On success the key records `{"status": "ok", "file_count": <files mirrored across all trees>, "trees": [...]}`; when every tree was skipped it records `{"status": "skipped", ...}`.
+
+The mirror runs only when the q_down copyback actually copied: when `NHMS_OBJECT_STORE_COPYBACK_ROOT` is unset the `precip_mirror` key is absent from the lineage, and when the copyback root resolves to the same directory identity as `OBJECT_STORE_ROOT` the key records `{"status": "skipped", "reason": "copyback_root_matches_object_store_root"}`.
+
+The `<grid_id>` segment MUST NOT be derived by importing `workers/canonical_converter/converter.py` (its import chain needs third-party packages); both producers discover it by listing `canonical/<storage_source>/grid/*/` on the source root and mirroring each grid directory found. When `prcp_rate_or_amount` exists but no `grid.json` does, the status is `failed` with the absent grid path.
 
 #### Scenario: Successful mirror
-- **WHEN** q_down publish succeeds for `gfs` cycle `2026090212` and the source root holds 56 `.nc` files plus `grid.json`
+- **WHEN** q_down publish succeeds for `gfs` cycle `2026090212` and the source root holds 56 `.nc` files plus one `grid.json`
 - **THEN** the copyback root contains the same 56 files and `grid.json` with identical bytes
-- **AND** lineage records `precip_mirror: ok` with the file count
+- **AND** lineage records `precip_mirror.status == "ok"` with `file_count == 57` (both trees counted)
 
 #### Scenario: Idempotent re-run
-- **WHEN** the mirror runs again for a cycle already mirrored
-- **THEN** no file is rewritten and lineage records `precip_mirror: skipped`
+- **WHEN** the mirror runs again for a cycle whose every mirrored tree already holds the same file names with identical sizes
+- **THEN** no file is rewritten (mtimes unchanged) and lineage records `precip_mirror.status == "skipped"`
+
+#### Scenario: Partially mirrored tree is replaced whole
+- **WHEN** the destination `prcp_rate_or_amount` tree is missing one `.nc` file or holds one of a different size
+- **THEN** that whole tree is replaced atomically and lineage records `precip_mirror.status == "ok"`
+- **AND** the grid tree, being unchanged, is still skipped
 
 #### Scenario: Missing source does not block publish
 - **WHEN** the source `prcp_rate_or_amount` directory is absent
-- **THEN** q_down publish still completes
-- **AND** lineage records `precip_mirror: failed` naming the absent path
+- **THEN** q_down publish still completes with `status == "published"`
+- **AND** lineage records `precip_mirror.status == "failed"` naming the absent path in `missing_path`
+
+#### Scenario: Mirror failure other than a missing source does not block publish
+- **WHEN** the source tree is unsafe or unreadable — a symlinked entry, an entry over `_COPYBACK_MAX_FILE_BYTES`, or an `OSError` raised mid-copy
+- **THEN** q_down publish still completes with `status == "published"`
+- **AND** lineage records `precip_mirror.status == "failed"` with `error` and `error_type`, and no temp tree is left under the copyback root
+
+#### Scenario: Copyback root not configured
+- **WHEN** `NHMS_OBJECT_STORE_COPYBACK_ROOT` is unset
+- **THEN** no mirror is attempted and the lineage carries no `precip_mirror` key
 
 ### Requirement: One-shot backfill mirrors retained cycles without touching the environment
-A script `scripts/canonical_precip_copyback_backfill.py` SHALL mirror every retained `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` directory and each source's `grid.json` using only the standard library, runnable on node-22 as `/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill --source-root <root> --copyback-root <root>`; it MUST print a JSON summary (per cycle: copied/skipped/failed) and MUST NOT import project modules that require third-party packages.
+A script `scripts/canonical_precip_copyback_backfill.py` SHALL mirror every `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` directory present under `--source-root` and each source's `canonical/<storage_source>/grid/*/grid.json` using only the standard library (it MUST NOT import `services`, `packages`, `workers`, or any third-party module — the keyspace rule is not shared with the publisher; the script copies the on-disk directory names verbatim and never normalizes a source id), runnable on node-22 as `/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill --source-root <root> --copyback-root <root>`; it MUST print a JSON summary (per cycle: copied/skipped/failed) to stdout. It writes by default and only `--dry-run` suppresses writes — the inverse of `services/tile_publisher/forcing_copyback_backfill.py`, because the node-22 operation in this change's tasks invokes it without a flag. Exit code: `0` when the run completes with no failure, `1` when the run completes but any cycle or grid reports `failed > 0` (the summary is still printed), `2` for unusable arguments or roots. Per file it skips a destination of identical size and otherwise copies through a temp name plus `os.replace`.
 
 #### Scenario: Backfill summary
 - **WHEN** the script runs against a source root with two sources and N cycles each
@@ -26,7 +48,15 @@ A script `scripts/canonical_precip_copyback_backfill.py` SHALL mirror every reta
 
 #### Scenario: Dry run
 - **WHEN** `--dry-run` is passed
-- **THEN** no file is written and the summary reports the planned copies
+- **THEN** no file and no directory is created under the copyback root and the summary reports the planned copies
+
+#### Scenario: Failed cycle is signalled by the exit code
+- **WHEN** one cycle cannot be mirrored (its source directory is unreadable) while others succeed
+- **THEN** the summary is still printed with that cycle's `failed` count non-zero and the process exits 1
+
+#### Scenario: Standard library only
+- **WHEN** the script's imports are inspected, or it is run as `python -m scripts.canonical_precip_copyback_backfill` in a subprocess
+- **THEN** it imports no `services`, `packages`, `workers`, or third-party module and runs to completion
 
 ### Requirement: Canonical mirror is pruned with the raw retention watermark
 `scripts/node27_raw_retention.py` SHALL include `canonical/<storage_source>/<cycle_token>` directories in its retention targets using the same cutoff it applies to `raw/<source>/<cycle_token>` (`display_watermark − retention_days`, anchor unchanged), and MUST never delete `canonical/<storage_source>/grid/`. Because the script's configured sources are lower-case (`gfs`, `ifs`) while canonical directories carry the storage spelling (`gfs`, `IFS`), the canonical target path MUST be derived with `packages/common/source_identity.py::normalize_source_id`, not by reusing the raw source token verbatim.
