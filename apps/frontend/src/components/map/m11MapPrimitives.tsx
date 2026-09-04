@@ -163,7 +163,10 @@ export function M11OverlayPrimitive({
 }
 
 export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; satellite: boolean }): LayerProps['paint'] {
-  const opacityScale = dimmed ? 0.42 : 1
+  // `dimmed` 只在 z>=6 打折：MapLibre 只接受 `['zoom']` 作为**顶层** interpolate/step 的直接输入，
+  // 嵌套 zoom 表达式会被 createPropertyExpression 判为非法，所以折扣因子按 stop 烘成 JS 常量。
+  const lowZoomScale = 1
+  const dimZoomScale = dimmed ? 0.42 : 1
   return {
     'line-color': [
       'interpolate',
@@ -181,9 +184,11 @@ export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; 
       ['linear'],
       ['zoom'],
       3,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.45, 5, 1.5],
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.55, 5, 1.7],
+      5,
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.9, 5, 2.8],
       6,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.9, 5, 2.6],
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 1.0, 5, 2.9],
       9,
       ['interpolate', ['linear'], ['get', 'Type'], 1, 1.5, 5, 3.6],
       12,
@@ -194,13 +199,15 @@ export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; 
       ['linear'],
       ['zoom'],
       3,
-      ['*', opacityScale, ['match', ['get', 'Type'], 5, 0.82, 4, 0.45, 0]],
+      ['*', lowZoomScale, ['match', ['get', 'Type'], 5, 0.82, 4, 0.45, 0]],
       5,
-      ['*', opacityScale, ['match', ['get', 'Type'], 5, 0.9, 4, 0.76, 3, 0.42, 0]],
+      ['*', lowZoomScale, ['match', ['get', 'Type'], 5, 0.9, 4, 0.76, 3, 0.42, 0]],
+      6,
+      ['*', dimZoomScale, ['match', ['get', 'Type'], 5, 0.92, 4, 0.84, 3, 0.6, 2, 0.45, 1, 0.2, 0]],
       7,
-      ['*', opacityScale, ['match', ['get', 'Type'], 5, 0.94, 4, 0.9, 3, 0.72, 2, 0.5, 0]],
+      ['*', dimZoomScale, ['match', ['get', 'Type'], 5, 0.94, 4, 0.9, 3, 0.72, 2, 0.5, 1, 0.35, 0]],
       9,
-      0.88 * opacityScale,
+      0.88 * dimZoomScale,
     ],
   }
 }
