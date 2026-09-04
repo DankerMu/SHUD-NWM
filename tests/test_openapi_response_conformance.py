@@ -120,6 +120,38 @@ class _RiverSegmentStore(_ModelRegistryStore):
         }
 
 
+class _LifecycleModelRegistryStore(_ModelRegistryStore):
+    """Production-shaped `model_lifecycle_operation` rows.
+
+    The shared `tests/test_api_contract.py` stub builds its lifecycle `model`
+    from `set_model_active`, which is thinner than any real lifecycle row: all
+    three SQL projections feeding the route --
+    `_fetch_model_lifecycle_row` (`packages/common/model_registry.py:2634-2662`),
+    `_fetch_active_model_for_scope` (`:2666-2700`) and
+    `_update_model_lifecycle_state` (`:3143-3190`) -- alias
+    `bv.checksum AS basin_checksum`, `rnv.checksum AS river_network_checksum`
+    and `mv.properties_json AS mesh_properties_json`.
+    `_model_public_projection` (`:3601`) forces the two checksums to null but
+    keeps the keys, and (unlike `_model_asset_detail`, which pops it at `:3545`)
+    never removes `mesh_properties_json`; the route hands that dict straight to
+    `_ok` with no sanitizer (`apps/api/routes/models.py:629-640`). Validating
+    the thin stub row would let the schema drop these three keys unnoticed.
+    """
+
+    def model_lifecycle_operation(self, model_id: str, *, operation: str, **kwargs: Any) -> dict[str, Any]:
+        result = super().model_lifecycle_operation(model_id, operation=operation, **kwargs)
+        result["model"] = {
+            **result["model"],
+            # `core.mesh_version.properties_json` is `JSONB NOT NULL DEFAULT '{}'`
+            # (db/migrations/000004_core.sql:52), so the join always yields an object.
+            "mesh_properties_json": {"shud_input_name": "alias-a"},
+            # `_model_public_projection` nulls every lineage checksum it finds.
+            "basin_checksum": None,
+            "river_network_checksum": None,
+        }
+        return result
+
+
 class _MetStationStore:
     """Shape mirrors `PsycopgForecastStore.list_met_stations`
     (`packages/common/forecast_store.py:1026`): the SELECT at `:1107-1116`
@@ -308,7 +340,9 @@ def _fetch_model_preflight() -> Any:
 
 
 def _fetch_model_lifecycle() -> Any:
-    with _overridden_client(get_model_registry_store, _ModelRegistryStore(), allow_dev_role_header=True) as client:
+    with _overridden_client(
+        get_model_registry_store, _LifecycleModelRegistryStore(), allow_dev_role_header=True
+    ) as client:
         return _json_200(
             client.post(
                 "/api/v1/models/inactive_model/lifecycle",
@@ -388,6 +422,10 @@ class RouteCase:
     path: str
     fetch: Callable[[], Any]
     mutation: Mutation
+    # Further corruptions of the same response body. Every mutation, primary or
+    # extra, becomes its own parametrized case in
+    # `test_mutated_response_body_is_rejected_by_referenced_component`.
+    extra_mutations: tuple[Mutation, ...] = ()
     enveloped: bool = True
     # Component names expected at the `data` position (list = one per oneOf branch).
     data_components: tuple[str, ...] = ()
@@ -565,6 +603,44 @@ ROUTE_CASES: tuple[RouteCase, ...] = (
             validator="required",
             apply=lambda body: _pop(body, ("data", "preflight")),
         ),
+        # `data.model` is the widest `ModelInstance` any route emits: the three
+        # join-projected keys below reach the client only here, and
+        # `lifecycle_state` is a `NOT NULL DEFAULT 'inactive'` column
+        # (db/migrations/000022_model_asset_lifecycle.sql:2) that both
+        # projections write unconditionally. `ModelInstance` has no
+        # `additionalProperties: false`, so an undeclared key would validate
+        # silently -- these value mutations are what make the declarations
+        # load-bearing.
+        extra_mutations=(
+            Mutation(
+                component="ModelInstance",
+                field="mesh_properties_json",
+                kind="value",
+                validator="type",
+                apply=lambda body: _put(body, ("data", "model", "mesh_properties_json"), "not-an-object"),
+            ),
+            Mutation(
+                component="ModelInstance",
+                field="basin_checksum",
+                kind="value",
+                validator="anyOf",
+                apply=lambda body: _put(body, ("data", "model", "basin_checksum"), 123),
+            ),
+            Mutation(
+                component="ModelInstance",
+                field="river_network_checksum",
+                kind="value",
+                validator="anyOf",
+                apply=lambda body: _put(body, ("data", "model", "river_network_checksum"), 123),
+            ),
+            Mutation(
+                component="ModelInstance",
+                field="lifecycle_state",
+                kind="required",
+                validator="required",
+                apply=lambda body: _pop(body, ("data", "model", "lifecycle_state")),
+            ),
+        ),
     ),
     RouteCase(
         route_id="GET /api/v1/runs",
@@ -643,6 +719,12 @@ ROUTE_CASES: tuple[RouteCase, ...] = (
 )
 
 CASE_IDS = tuple(case.route_id for case in ROUTE_CASES)
+MUTATION_CASES: tuple[tuple[RouteCase, Mutation], ...] = tuple(
+    (case, mutation) for case in ROUTE_CASES for mutation in (case.mutation, *case.extra_mutations)
+)
+MUTATION_IDS = tuple(
+    f"{case.route_id} :: {mutation.component}.{mutation.field}" for case, mutation in MUTATION_CASES
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -758,13 +840,12 @@ def test_real_response_body_validates_against_declared_schema(
     assert not errors, [(list(error.absolute_path), error.message) for error in errors]
 
 
-@pytest.mark.parametrize("case", ROUTE_CASES, ids=CASE_IDS)
+@pytest.mark.parametrize(("case", "mutation"), MUTATION_CASES, ids=MUTATION_IDS)
 def test_mutated_response_body_is_rejected_by_referenced_component(
-    case: RouteCase, route_responses: dict[str, Any]
+    case: RouteCase, mutation: Mutation, route_responses: dict[str, Any]
 ) -> None:
     """Per-route proof that the declared schema bites, and bites from inside the
     referenced component -- an unresolved `$ref` cannot produce these errors."""
-    mutation = case.mutation
     body = copy.deepcopy(route_responses[case.route_id])
     mutation.apply(body)
 

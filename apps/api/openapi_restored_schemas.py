@@ -264,15 +264,33 @@ def _river_segment_feature_collection_schema() -> dict:
 
 
 def _model_instance_schema() -> dict:
-    """:source: ``_model_public_projection`` (model_registry.py:3601) over
-    ``list_models`` rows (model_registry.py:2426 ``SELECT mi.*, b.basin_id,
-    b.basin_name``) and ``_model_asset_detail`` (model_registry.py:3542) over
-    ``get_model_internal`` rows (model_registry.py:2450-2468).
+    """:source: three producers, whose union this schema documents.
 
-    The detail projection is the wider of the two: the list projection omits
-    ``segment_count``/``mesh_uri``/``mesh_checksum``/``model_name`` and the nine
-    ``MODEL_ASSET_LINEAGE_KEYS``, which is why only the ``core.model_instance``
-    columns are ``required``.
+    1. ``_model_public_projection`` (model_registry.py:3601) over ``list_models``
+       rows (model_registry.py:2426 ``SELECT mi.*, b.basin_id, b.basin_name``).
+    2. ``_model_asset_detail`` (model_registry.py:3542) over
+       ``get_model_internal`` rows (model_registry.py:2450-2468).
+    3. ``_model_public_projection`` again, over the lifecycle rows behind
+       ``POST /api/v1/models/{model_id}/lifecycle``
+       (``_fetch_model_lifecycle_row`` model_registry.py:2634-2662,
+       ``_fetch_active_model_for_scope`` :2666-2700,
+       ``_update_model_lifecycle_state`` :3143-3190), which reach the client
+       unsanitized as ``data.model``/``data.previous_model``
+       (apps/api/routes/models.py:629-640).
+
+    The detail rows and the lifecycle rows each strictly extend the list rows,
+    but neither contains the other, so only the ``core.model_instance`` columns
+    every producer writes are ``required``:
+
+    * the list projection omits ``segment_count``/``mesh_uri``/``mesh_checksum``/
+      ``model_name`` and the nine ``MODEL_ASSET_LINEAGE_KEYS``;
+    * only the detail projection derives those nine lineage keys (none is a
+      ``core.model_instance`` column) and normalizes ``model_name``;
+    * only the lifecycle rows carry ``basin_checksum``/``river_network_checksum``
+      (``bv.checksum``/``rnv.checksum`` aliases, nulled by the projection but
+      still present as keys) and ``mesh_properties_json`` -- the SQL alias for
+      ``mv.properties_json``, which ``_model_asset_detail`` pops at :3545 and
+      ``_model_public_projection`` never does.
     """
     return {
         "type": "object",
@@ -284,6 +302,7 @@ def _model_instance_schema() -> dict:
             "calibration_version_id",
             "shud_code_version",
             "active_flag",
+            "lifecycle_state",
             "model_package_uri",
             "resource_profile",
             "created_at",
@@ -294,12 +313,34 @@ def _model_instance_schema() -> dict:
             "basin_id": _null_union({"type": "string"}),
             "basin_name": _null_union({"type": "string"}),
             "basin_version_id": {"type": "string"},
+            "basin_checksum": {
+                **_null_union({"type": "string"}),
+                "description": (
+                    "bv.checksum, projected by the lifecycle queries only. Public responses "
+                    "redact raw lineage checksums, so the key is present and always null."
+                ),
+            },
             "river_network_version_id": {"type": "string"},
+            "river_network_checksum": {
+                **_null_union({"type": "string"}),
+                "description": (
+                    "rnv.checksum, projected by the lifecycle queries only. Public responses "
+                    "redact raw lineage checksums, so the key is present and always null."
+                ),
+            },
             "mesh_version_id": {"type": "string"},
             "calibration_version_id": {"type": "string"},
             "segment_count": _null_union({"type": "integer", "minimum": 0}),
             "mesh_uri": _null_union({"type": "string"}),
             "mesh_checksum": _null_union({"type": "string"}),
+            "mesh_properties_json": {
+                **_JSON_OBJECT,
+                "description": (
+                    "mv.properties_json (core.mesh_version.properties_json, JSONB NOT NULL "
+                    "DEFAULT '{}'). Emitted only by the lifecycle route, whose projection -- "
+                    "unlike _model_asset_detail -- does not pop this key."
+                ),
+            },
             "shud_code_version": {"type": "string"},
             "rshud_code_version": _null_union({"type": "string"}),
             "autoshud_code_version": _null_union({"type": "string"}),
@@ -307,7 +348,12 @@ def _model_instance_schema() -> dict:
             "lifecycle_state": {
                 "type": "string",
                 "enum": ["inactive", "active", "deprecated", "superseded"],
-                "default": "inactive",
+                "description": (
+                    "core.model_instance.lifecycle_state, NOT NULL DEFAULT 'inactive' with a "
+                    "four-member CHECK (db/migrations/000022_model_asset_lifecycle.sql:2,23-24). "
+                    "Both projections write it unconditionally, falling back to "
+                    "active if active_flag else inactive, so it is always present."
+                ),
             },
             "container_image": _null_union({"type": "string"}),
             "model_package_uri": _null_union({"type": "string"}),

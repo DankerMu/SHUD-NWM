@@ -4351,6 +4351,7 @@ components:
       - calibration_version_id
       - shud_code_version
       - active_flag
+      - lifecycle_state
       - model_package_uri
       - resource_profile
       - created_at
@@ -4371,8 +4372,22 @@ components:
           - type: 'null'
         basin_version_id:
           type: string
+        basin_checksum:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: bv.checksum, projected by the lifecycle queries only. Public
+            responses redact raw lineage checksums, so the key is present and always
+            null.
         river_network_version_id:
           type: string
+        river_network_checksum:
+          anyOf:
+          - type: string
+          - type: 'null'
+          description: rnv.checksum, projected by the lifecycle queries only. Public
+            responses redact raw lineage checksums, so the key is present and always
+            null.
         mesh_version_id:
           type: string
         calibration_version_id:
@@ -4390,6 +4405,12 @@ components:
           anyOf:
           - type: string
           - type: 'null'
+        mesh_properties_json:
+          type: object
+          additionalProperties: true
+          description: mv.properties_json (core.mesh_version.properties_json, JSONB
+            NOT NULL DEFAULT '{}'). Emitted only by the lifecycle route, whose projection
+            -- unlike _model_asset_detail -- does not pop this key.
         shud_code_version:
           type: string
         rshud_code_version:
@@ -4409,7 +4430,10 @@ components:
           - active
           - deprecated
           - superseded
-          default: inactive
+          description: core.model_instance.lifecycle_state, NOT NULL DEFAULT 'inactive'
+            with a four-member CHECK (db/migrations/000022_model_asset_lifecycle.sql:2,23-24).
+            Both projections write it unconditionally, falling back to active if active_flag
+            else inactive, so it is always present.
         container_image:
           anyOf:
           - type: string

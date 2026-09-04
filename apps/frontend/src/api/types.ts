@@ -1462,18 +1462,26 @@ export interface components {
             basin_id?: string | null;
             basin_name?: string | null;
             basin_version_id: string;
+            /** @description bv.checksum, projected by the lifecycle queries only. Public responses redact raw lineage checksums, so the key is present and always null. */
+            basin_checksum?: string | null;
             river_network_version_id: string;
+            /** @description rnv.checksum, projected by the lifecycle queries only. Public responses redact raw lineage checksums, so the key is present and always null. */
+            river_network_checksum?: string | null;
             mesh_version_id: string;
             calibration_version_id: string;
             segment_count?: number | null;
             mesh_uri?: string | null;
             mesh_checksum?: string | null;
+            /** @description mv.properties_json (core.mesh_version.properties_json, JSONB NOT NULL DEFAULT '{}'). Emitted only by the lifecycle route, whose projection -- unlike _model_asset_detail -- does not pop this key. */
+            mesh_properties_json?: {
+                [key: string]: unknown;
+            };
             shud_code_version: string;
             rshud_code_version?: string | null;
             autoshud_code_version?: string | null;
             active_flag: boolean;
             /**
-             * @default inactive
+             * @description core.model_instance.lifecycle_state, NOT NULL DEFAULT 'inactive' with a four-member CHECK (db/migrations/000022_model_asset_lifecycle.sql:2,23-24). Both projections write it unconditionally, falling back to active if active_flag else inactive, so it is always present.
              * @enum {string}
              */
             lifecycle_state: "inactive" | "active" | "deprecated" | "superseded";
