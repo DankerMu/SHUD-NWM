@@ -98,9 +98,9 @@
       "definition": "fc713a13b90a2ff05d2bdd7c8ede192682fffc52a31e775dd708c8e3b84ddee2",
       "full_node": "baa0c8e8027cff175e61abd9f0f273a41e226cc1a8d85fdfd20e35d0130333bc",
       "helper_inventory": "4759039c74f5cad4d57347dee0eae51730f8c33fb9a5eb80195117848c1b2446",
-      "helper_source": "a99db190c96c8a2d80dc2c99b2be585643fbbeef5c7967f769982bc102de6446",
+      "helper_source": "77c0a64f458b4ec3acd3de182d229018a4ddcf22e4c87d47ef339b5b053079e8",
       "integration_suffix": "746147ebe8ab8023183d1986074d305ceb61ac8c1204e4c811db8d172cc82ef1",
-      "oracle": "9c7f29646faad11d4d3122ef7ba16710d7b8b88b6cf222480e4b8c66e580f38a",
+      "oracle": "64c7abdece664e07aac18393847c34cf1353e94861a49ad3a12d2dabe652ce1b",
       "owner_map": "baacfa8fc15194a81c8061863c279df0bbbf90686c5997d4f2f3e5eb29ebd9b6",
       "suffix": "896acb7934114ed26a4b749398131526e26651b52310c88b9477e34f49cd0c86"
   },
@@ -133,7 +133,7 @@
         "note": "Runs the wired PreToolUse guard against a temporary GIT_INDEX_FILE holding the exact #1948 changeset; the real Git index is never touched."
     },
       "max_lines": 1000,
-      "output_lines": {"tests/qhh_production_bootstrap_helpers.py": 262, "tests/test_qhh_production_bootstrap.py": 771, "tests/test_qhh_production_bootstrap_scheduler.py": 853, "tests/test_qhh_production_bootstrap_state.py": 468},
+      "output_lines": {"tests/qhh_production_bootstrap_helpers.py": 263, "tests/test_qhh_production_bootstrap.py": 771, "tests/test_qhh_production_bootstrap_scheduler.py": 853, "tests/test_qhh_production_bootstrap_state.py": 468},
       "path": ".large-file-guard.json",
       "provenance_baseline_sha": "9785e52d541aba71845316da3a9c5b9011749644",
       "sha256": "5c06fad8ba8f488d8bfc836e747cd7af642232a880bec25ae132e1bd17ab87ad"
@@ -150,7 +150,7 @@
       "_qhh_scheduler_policy_identity": {"ast_sha256": "e57da9dee4f57482ca702a4fbc1a5a8029055c30d170cdb69f4b991712b79580", "kind": "function", "source_sha256": "d6194e7f18dde17cda19d738c6bf8b9f6f3ae50132d4c058e48c1eab656e1138"},
       "_qhh_scheduler_ready_gfs_adapter": {"ast_sha256": "9e28dcc2a3b640eb373f7625ae1141b90f73b43e3d35d74c732b28a55936ac48", "kind": "function", "source_sha256": "8987245ddfaf7a42f2bcb9ea6838754cea0a82099f1aa4cc24a99ac9059b3069"},
       "_qhh_scheduler_source_object_identity": {"ast_sha256": "c10f7a0cef3beb09737932684596c383f5b6f00bb33c98c7aede8113f99af102", "kind": "function", "source_sha256": "7b8c98192236b367c862bd6e681ec61bdfe1c3644fd19ede00ecfe0869adfc37"},
-      "_refresh_inventory_and_manifest": {"ast_sha256": "67ba09d4e5eafb19d7c933cd53de673a23e674188b1bbf0b9f3a016fdf7d5f58", "kind": "function", "source_sha256": "d3d6788fdf7cfa7d611a8aa5e92b7d4c18b20c6b9f8f721769d51dca7d5514ac"},
+      "_refresh_inventory_and_manifest": {"ast_sha256": "8b49e563c9c7d2b5c4adb572b77e144a80caa3fdf0192e90c445d6ca5b01319c", "kind": "function", "source_sha256": "ef6b1b6e8e8e76fe974a6aadc71ab355700035d4fb8f4cfd537a162f2482156e"},
       "_rename_fixture_input_to_qhh": {"ast_sha256": "34bf1fdce9afcf49edb7f196d3802b45a562f6839f96219bb2b1b4703ac17be1", "kind": "function", "source_sha256": "67d75f022938dfe6f828bc2c39cb810fed8546d8350217e243aff15ac6c31d11"},
       "_seed_qhh_scheduler_canonical_readiness": {"ast_sha256": "b19657f8ac1108a9138f5751a4de6005d67dd18f7a18a60d555cc2d858979ce9", "kind": "function", "source_sha256": "a7d403e98ee27d5f4f44ed85f9179a614448962f8867cabda0f122f043398351"},
       "_write_valid_qhh_tsd_forc": {"ast_sha256": "4b0de92a37f595c4e28d545a46d3422f043f6d96bac4a6931411a5ea251becbb", "kind": "function", "source_sha256": "304717b01bfcb3dfcffd9c7ec160f3a592be98ee0aed2636c98f80bf1121a910"},

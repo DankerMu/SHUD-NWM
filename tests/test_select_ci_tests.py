@@ -33,6 +33,8 @@ from scripts.select_ci_tests import (
     BASINS_PACKAGE_HELPERS_CONSUMER_TESTS,
     BASINS_PACKAGE_HELPERS_PATH,
     BASINS_PACKAGE_PUBLICATION_TESTS,
+    BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS,
+    BASINS_REGISTRY_IMPORT_TESTS,
     CALIBRATION_OVERRIDES_PATH,
     CHAIN_IMPORTER_TESTS,
     CHANGED_TEST_FILE_RULES,
@@ -8732,6 +8734,12 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # #1948: the QHH bootstrap corpus's shared helper. All three partitions import it at
     # module scope; the retained historical path is a valid anchor for the same reason.
     ("tests/qhh_production_bootstrap_helpers.py", "tests/test_qhh_production_bootstrap.py"),
+    # #1913: the registry-import helper. Its eight direct collectible importers all
+    # import it at module scope; the retained historical path is a valid derivation
+    # anchor for the same reason #1912 pinned the publication core. The three QHH
+    # A/B/C suites are explicit extra route edges (they import D, not this helper),
+    # so they are not this derivation's anchors.
+    ("tests/basins_registry_import_helpers.py", "tests/test_basins_registry_import.py"),
 )
 
 # At least this many support modules must derive a non-empty consumer set (10 of
@@ -11713,7 +11721,13 @@ QHH_PARTITION_FROZEN_DIGESTS: dict[str, str] = {
     "definition": "fc713a13b90a2ff05d2bdd7c8ede192682fffc52a31e775dd708c8e3b84ddee2",
     "ast": "7c971e5ee53ea0f8b873a561768fb21637b701adf79c1767d76bd876f40c7c74",
     "helper_inventory": "4759039c74f5cad4d57347dee0eae51730f8c33fb9a5eb80195117848c1b2446",
-    "helper_source": "a99db190c96c8a2d80dc2c99b2be585643fbbeef5c7967f769982bc102de6446",
+    # #1913 controlled D transition: D's `_refresh_inventory_and_manifest` function-local
+    # import moved from the former registry monolith to
+    # `tests.basins_registry_import_helpers`, changing exactly that one helper row's
+    # source/AST fragment digests — so the helper aggregate moves here and in the tracked
+    # oracle, with every other helper row, QHH row, node, owner, marker and execution
+    # summary byte-frozen. The before/after transition guard below pins both directions.
+    "helper_source": "77c0a64f458b4ec3acd3de182d229018a4ddcf22e4c87d47ef339b5b053079e8",
 }
 # The filename the partition deliberately did NOT choose, kept as the oracle's positive
 # control: `tests/*integration*.py` really would rescue deletion of its exact edge.
@@ -13534,22 +13548,83 @@ def test_qhh_partition_nested_pytest_ignores_parent_integration_opt_in(
     assert _qhh_counts(non_integration.stdout) == "55 passed, 11 deselected", non_integration.stdout
 
 
-def test_qhh_partition_registry_monolith_imports_stay_in_the_helper() -> None:
+def test_qhh_partition_registry_helper_imports_stay_in_the_helper() -> None:
+    # #1913 post-transition form of the #1948 "imports stay in the helper" guard: D's two
+    # registry-fixture imports now name the non-collectible registry helper, A/B/C import
+    # NEITHER registry module, and nothing anywhere still imports the retained collectible
+    # core as a support module.
     helper = _qhh_helper()
+    registry_helper = "tests.basins_registry_import_helpers"
 
     for owner in _qhh_partitions():
         text = Path(owner).read_text(encoding="utf-8")
         imported = _qhh_imported_names(owner, QHH_PARTITION_REGISTRY_MONOLITH)
-        assert not imported, f"{owner} must not import the registry monolith: {sorted(imported)}"
+        assert not imported, f"{owner} must not import the retained registry core: {sorted(imported)}"
         assert QHH_PARTITION_REGISTRY_MONOLITH not in text, owner
-        assert "basins_registry_import_helpers" not in text, f"{owner} must not reach for #1913's future helper"
+        assert registry_helper not in text, f"{owner} must not import the registry helper directly"
     helper_text = Path(helper).read_text(encoding="utf-8")
-    module_level = _qhh_imported_names(helper, QHH_PARTITION_REGISTRY_MONOLITH)
+    module_level = _qhh_imported_names(helper, registry_helper)
 
     assert module_level == {"_write_registry_fixture"}, sorted(module_level)
-    assert "from tests.test_basins_registry_import import _package_manifest_for_model" in helper_text
-    assert helper_text.count("from tests.test_basins_registry_import import") == 2, (
-        "the helper must keep exactly the two baseline registry imports #1913 retargets"
+    assert f"from {registry_helper} import _package_manifest_for_model" in helper_text
+    assert helper_text.count(f"from {registry_helper} import") == 2, (
+        "the helper must keep exactly the two registry imports #1913 retargeted"
+    )
+    assert QHH_PARTITION_REGISTRY_MONOLITH not in helper_text, (
+        "D must not import the retained collectible registry core"
+    )
+
+
+def test_qhh_partition_registry_helper_transition_is_exactly_two_import_retargets() -> None:
+    # Controlled-transition anchor (issue #1913, design D3): D's blob at the registry
+    # partition's SOURCE baseline `3c29698f…` differs from the current D by EXACTLY the two
+    # import-module references and nothing else — every other line, the 16-member helper
+    # inventory and the 66-node QHH corpus stay frozen.
+    before = _qhh_blob_at("3c29698f9eda5efdd2d48f3c2922da8df0d3aa2a", _qhh_helper()).decode()
+    after = Path(_qhh_helper()).read_text(encoding="utf-8")
+
+    assert before != after, "the transition must actually have happened in this tree"
+    assert "tests.test_basins_registry_import" not in after, (
+        "D still imports the retained collectible registry core"
+    )
+    assert "from tests.basins_registry_import_helpers import _write_registry_fixture" in after
+    assert "from tests.basins_registry_import_helpers import _package_manifest_for_model" in after
+    # Rebuild the after-text from the before-blob by string substitution alone: if any
+    # OTHER byte had moved, this reconstruction would not reproduce the current file.
+    reconstructed = before.replace(
+        "from tests.test_basins_registry_import import _write_registry_fixture",
+        "from tests.basins_registry_import_helpers import _write_registry_fixture",
+    ).replace(
+        "from tests.test_basins_registry_import import _package_manifest_for_model",
+        "from tests.basins_registry_import_helpers import _package_manifest_for_model",
+    )
+    before_docstring = (
+        "This module is also the only\n"
+        "partition that still imports the baseline registry monolith — #1913 retargets those\n"
+        "two imports.\n"
+    )
+    after_docstring = (
+        "Its two registry-fixture\n"
+        "imports come from the #1913 non-collectible registry helper\n"
+        "(`tests/basins_registry_import_helpers.py`), never from a collectible registry\n"
+        "suite, and no QHH bootstrap partition imports that helper directly.\n"
+    )
+    assert before_docstring in before, "the pinned before-blob lost its #1948 docstring"
+    assert after_docstring in after, "the current D lost its #1913 docstring"
+    reconstructed = reconstructed.replace(before_docstring, after_docstring)
+    # The retargeted module-scope import now sorts before `tests.integration_helpers`
+    # (isort / ruff I001). That is a mechanical consequence of the same two-module
+    # substitution, not a third semantic edit.
+    reconstructed = reconstructed.replace(
+        "from tests.integration_helpers import psycopg_connection\n"
+        "from tests.basins_registry_import_helpers import _write_registry_fixture\n",
+        "from tests.basins_registry_import_helpers import _write_registry_fixture\n"
+        "from tests.integration_helpers import psycopg_connection\n",
+    )
+    assert reconstructed == after, (
+        "D drifted beyond the two import-module references, the docstring, and the "
+        "isort reorder of the retargeted module-scope import; the transition is no "
+        "longer the controlled #1913 edit"
     )
 
 
@@ -13728,3 +13803,953 @@ def _qhh_imports_module(path: str, module: str) -> bool:
         isinstance(node, ast.ImportFrom) and node.module == module and node.level == 0
         for node in ast.parse(content, filename=path).body
     )
+
+
+
+# ---------------------------------------------------------------------------
+# Issue #1913 — Basins registry-import partition guards.
+#
+# Every EXPECTED value below comes from the TRACKED oracle
+# `tests/fixtures/basins_registry_partition_oracle.json`, which was generated from the
+# frozen ignored contract `.workplans/issue-1913/baseline/contract.json` (SHA-256
+# `42803dd59276621d559bf6719b4c31cccc64ad751ed0f46105c373ba7b17c60c`) captured twice
+# byte-identically from a disposable Git-archive snapshot of the SOURCE baseline
+# `3c29698f9eda5efdd2d48f3c2922da8df0d3aa2a` — NEVER from the partitioned tree — plus the
+# frozen literals declared here (source-anchor SHA, database authority, consumer graph).
+# The partitioned tree supplies OBSERVED values only, so no guard here can be satisfied by
+# re-reading the thing it is supposed to check.
+#
+# Staging dependency: the tree-derived helpers below go through `git ls-files`, so the
+# seven new suite files, the helper and the oracle must be at least intent-to-added
+# (`git add -N`) for these guards to see them — the same requirement every other
+# tracked-tree guard in this module already carries.
+# ---------------------------------------------------------------------------
+
+REGISTRY_PARTITION_ORACLE_PATH = "tests/fixtures/basins_registry_partition_oracle.json"
+REGISTRY_PARTITION_SCHEMA = "basins-registry-partition-oracle/v1"
+REGISTRY_PARTITION_STRUCTURAL_LIMIT = 1000
+REGISTRY_PARTITION_HELPER = "tests/basins_registry_import_helpers.py"
+REGISTRY_PARTITION_HELPER_MODULE = "tests.basins_registry_import_helpers"
+REGISTRY_PARTITION_RETAINED_CORE = "tests/test_basins_registry_import.py"
+REGISTRY_PARTITION_RETAINED_CORE_MODULE = "tests.test_basins_registry_import"
+# The registry partition's SOURCE baseline / partition-input commit (frozen): the monolith
+# source, every per-definition fingerprint, the node/marker/monkeypatch inventory, the
+# selector owner rule and the CI database baseline all derive here.
+REGISTRY_PARTITION_SOURCE_BASELINE_SHA = "3c29698f9eda5efdd2d48f3c2922da8df0d3aa2a"
+# Frozen independently of the tracked oracle: a regenerated capture must record exactly
+# this blob, and the blob itself must hash to it.
+REGISTRY_PARTITION_BASELINE_SOURCE_SHA256 = "c61c61f6e905ee951b9e5fb1c7566722367c8cc3e1fd07baad21bda91461f708"
+REGISTRY_PARTITION_CONTRACT_SHA256 = "42803dd59276621d559bf6719b4c31cccc64ad751ed0f46105c373ba7b17c60c"
+REGISTRY_PARTITION_FROZEN_DIGESTS: dict[str, str] = {
+    "suffix": "ba89c8cb7520a24aab19195dc0a724ecbf4034675d2bd38fba8b9e04aff6c5c8",
+    "integration_suffix": "2531bdef5d481f1024fafe0d5fe36ae7aabb47c478746ceb3286952bccefd73c",
+    "definition": "9fcffe77f64696af9189c76cc35415b88ad024bbc65b908c92586d72eb5dfe7a",
+    "ast": "d4f069c7dbb343b32253a5bea204f4cc6df7cbc35f155ee4cc1042e12959fa54",
+    "helper_inventory": "8840823ea7c0041ef3bc775601485452eeb6c04838dce454481d0c9ab43e5335",
+    "helper_source": "90973ba3e2ad0b30e5803be4a77aaffe155bb4141771eb60d452c3b6fed1b7ea",
+    "owner_map": "f4f71687d744df2551f9ff0926e10fdd0498ade214fe67f6bb78ba62ee6879a9",
+}
+# The exact eight-path `database:` authority this change freezes (design D6): the six
+# registry paths (helper, core, auth, DB, QHH, reingest) united with #1948's QHH helper +
+# scheduler owner. Parser, CLI, security and QHH A/B stay absent, and no broad registry
+# glob may substitute for an exact path.
+REGISTRY_PARTITION_DATABASE_AUTHORITY: tuple[str, ...] = (
+    "tests/basins_registry_import_helpers.py",
+    "tests/test_basins_registry_import.py",
+    "tests/test_basins_registry_import_auth.py",
+    "tests/test_basins_registry_import_db.py",
+    "tests/test_basins_registry_import_qhh.py",
+    "tests/test_basins_reingest.py",
+    "tests/qhh_production_bootstrap_helpers.py",
+    "tests/test_qhh_production_bootstrap_scheduler.py",
+)
+REGISTRY_PARTITION_DATABASE_ABSENT: tuple[str, ...] = (
+    "tests/test_basins_registry_import_parser.py",
+    "tests/test_basins_registry_import_cli.py",
+    "tests/test_basins_registry_import_security.py",
+    "tests/test_qhh_production_bootstrap.py",
+    "tests/test_qhh_production_bootstrap_state.py",
+)
+
+
+def _registry_load_partition_oracle() -> dict[str, Any]:
+    payload = json.loads(Path(REGISTRY_PARTITION_ORACLE_PATH).read_text(encoding="utf-8"))
+    assert payload["schema"] == REGISTRY_PARTITION_SCHEMA, payload["schema"]
+    return payload
+
+
+def _registry_partition_oracle() -> dict[str, Any]:
+    """Module-cached read of the tracked oracle (lazy, so import never touches the tree)."""
+    global _REGISTRY_PARTITION_ORACLE_CACHE
+    if _REGISTRY_PARTITION_ORACLE_CACHE is None:
+        _REGISTRY_PARTITION_ORACLE_CACHE = _registry_load_partition_oracle()
+    return _REGISTRY_PARTITION_ORACLE_CACHE
+
+
+_REGISTRY_PARTITION_ORACLE_CACHE: dict[str, Any] | None = None
+
+
+def _registry_partitions(oracle: dict[str, Any] | None = None) -> tuple[str, ...]:
+    return tuple((oracle or _registry_partition_oracle())["partitions"])
+
+
+def _registry_digest_lines(values: Sequence[str]) -> str:
+    return hashlib.sha256(("\n".join(values) + "\n").encode()).hexdigest()
+
+
+def _registry_members(path: str) -> dict[str, tuple[str, str]]:
+    """`name -> (source_sha256, ast_sha256)` for top-level members of ``path``.
+
+    Reuses the #1948 `_qhh_*` fragment rule verbatim: same capture segment semantics, so a
+    digest here is directly comparable with the frozen contract's `source_sha256` rows.
+    """
+    content = Path(path).read_text(encoding="utf-8")
+    lines = content.splitlines()
+    out: dict[str, tuple[str, str]] = {}
+    for node in ast.parse(content, filename=path).body:
+        # `_qhh_member_name` names functions and assignments; the registry helper also owns
+        # one CLASS (`_FakeRiverSegmentCursor`), which needs the same fragment treatment.
+        if isinstance(node, ast.ClassDef):
+            name: str | None = node.name
+        else:
+            name = _qhh_member_name(node)
+        if name is None:
+            continue
+        start = (
+            _qhh_definition_start(node, lines)
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+            else node.lineno
+        )
+        fragment = "\n".join(lines[start - 1 : node.end_lineno]) + "\n"
+        out[name] = (
+            hashlib.sha256(fragment.encode()).hexdigest(),
+            hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest(),
+        )
+    return out
+
+
+def _registry_marker_names(node: ast.FunctionDef) -> list[str]:
+    """`pytest.mark.<name>` decorators in source order (the capture's rule)."""
+    out: list[str] = []
+    for decorator in node.decorator_list:
+        callee = decorator.func if isinstance(decorator, ast.Call) else decorator
+        if (
+            isinstance(callee, ast.Attribute)
+            and isinstance(callee.value, ast.Attribute)
+            and isinstance(callee.value.value, ast.Name)
+            and callee.value.value.id == "pytest"
+            and callee.value.attr == "mark"
+        ):
+            out.append(callee.attr)
+    return out
+
+
+def _registry_pytest(*arguments: str) -> subprocess.CompletedProcess[str]:
+    """Run the registry corpus in a child pytest with local execution semantics only.
+
+    The child must see the same local-skip semantics on every machine: the integration
+    opt-in/DSN/real-Basins variables that turn conftest's skip into a real database or
+    real-fixture lifecycle on node-27 are parent state, not a property of this meta-suite.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "NHMS_RUN_INTEGRATION",
+            "NHMS_INTEGRATION_DATABASE_URL",
+            "NHMS_ALLOW_DATABASE_URL_INTEGRATION",
+            "DATABASE_URL",
+            "NHMS_RUN_REAL_BASINS_IMPORT",
+        }
+    }
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        timeout=_QHH_PYTEST_TIMEOUT_SECONDS,
+    )
+
+
+def _registry_collected_suffixes(paths: Sequence[str], *extra: str) -> list[str]:
+    completed = _registry_pytest("--collect-only", *paths, *extra)
+    assert completed.returncode in (0, 5), completed.stdout + completed.stderr
+    return [
+        line.strip().split("::", 1)[1]
+        for line in completed.stdout.splitlines()
+        if line.strip().startswith("tests/") and "::" in line
+    ]
+
+
+def _registry_assert_baseline_source_anchor(captured: dict[str, Any]) -> None:
+    """Independent baseline anchor: recorded source SHA == frozen literal == actual blob.
+
+    The frozen literal is the only non-self-referential authority on the baseline source:
+    the oracle's own ``captured_from`` row, its self-digest and its per-row re-derivations
+    are all part of the same payload, so an internally consistent regeneration would rewrite
+    all of them together. The literal (and the blob hash computed from the pinned baseline
+    commit) cannot be rewritten by a payload edit.
+    """
+    assert captured["sha256"] == REGISTRY_PARTITION_BASELINE_SOURCE_SHA256, (
+        f"the oracle records source SHA {captured['sha256']}, the frozen literal is "
+        f"{REGISTRY_PARTITION_BASELINE_SOURCE_SHA256}"
+    )
+    blob = _qhh_blob_at(REGISTRY_PARTITION_SOURCE_BASELINE_SHA, captured["path"])
+    assert hashlib.sha256(blob).hexdigest() == captured["sha256"], (
+        "the baseline blob at the pinned commit no longer hashes to the recorded source SHA"
+    )
+
+
+def test_registry_partition_oracle_is_tracked_and_anchored() -> None:
+    tracked_fixtures = [
+        line for line in _qhh_git_stdout("ls-files", "--", "tests/fixtures").splitlines() if line
+    ]
+
+    assert REGISTRY_PARTITION_ORACLE_PATH in tracked_fixtures, (
+        f"{REGISTRY_PARTITION_ORACLE_PATH} is not version-controlled"
+    )
+    captured = _registry_partition_oracle()["captured_from"]
+    assert captured["path"] == _registry_partitions()[0]
+    assert captured["baseline_sha"] == REGISTRY_PARTITION_SOURCE_BASELINE_SHA
+    assert captured["lines"] == 3931
+    assert captured["bytes"] == 156249
+    assert captured["contract_sha256"] == REGISTRY_PARTITION_CONTRACT_SHA256
+    _registry_assert_baseline_source_anchor(captured)
+    assert len(_qhh_git_stdout("rev-parse", f"{captured['baseline_sha']}^{{commit}}").strip()) == 40
+    optional_capture = Path(".workplans/issue-1913/baseline/contract.json")
+    if optional_capture.is_file():
+        assert hashlib.sha256(optional_capture.read_bytes()).hexdigest() == captured["contract_sha256"], (
+            "the ignored contract no longer matches the tracked oracle's recorded provenance"
+        )
+
+
+def test_registry_partition_oracle_self_digest_covers_its_own_payload() -> None:
+    # Anti-tamper: `digests.self` is recomputed over the canonical JSON of every other key,
+    # so editing a frozen row, an owner map, a database path or an execution summary in the
+    # tracked oracle changes the digest and reddens this guard.
+    oracle = _registry_partition_oracle()
+    payload = {key: value for key, value in oracle.items() if key != "digests"}
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+    assert oracle["digests"]["self"] == hashlib.sha256(canonical).hexdigest(), (
+        "the tracked oracle's payload no longer matches its own self-digest"
+    )
+
+
+def test_registry_partition_rejected_regenerated_oracle_rewrites_the_source_anchor() -> None:
+    # Anti-tamper RED for the INDEPENDENT anchor (same construction as the #1948 arm): a
+    # regeneration that rewrites the recorded baseline source SHA and recomputes its own
+    # self-digest is internally consistent yet must fail the frozen literal. The
+    # constructed tamper never touches the tracked oracle.
+    oracle = _registry_partition_oracle()
+    payload = json.loads(json.dumps(oracle, sort_keys=True))
+    payload["captured_from"]["sha256"] = "0" * 64
+    payload["digests"]["self"] = hashlib.sha256(
+        json.dumps(
+            {key: value for key, value in payload.items() if key != "digests"},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+
+    # Premise: the tampered payload is internally consistent — self-digest recomputed over
+    # its own payload and every digest the shape test re-derives from rows unchanged — so
+    # ONLY the independent frozen anchor can reject it.
+    canonical = json.dumps(
+        {key: value for key, value in payload.items() if key != "digests"},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    assert payload["digests"]["self"] == hashlib.sha256(canonical).hexdigest()
+    for key in ("definition", "ast", "helper_inventory", "helper_source", "owner_map"):
+        assert payload["digests"][key] == oracle["digests"][key], key
+    assert payload["captured_from"]["sha256"] != REGISTRY_PARTITION_BASELINE_SOURCE_SHA256, (
+        "the tampered payload must actually differ, or this RED premise is vacuous"
+    )
+    assert payload["digests"]["self"] != oracle["digests"]["self"], (
+        "the tampered payload must have recomputed its self-digest, or the premise is stale"
+    )
+
+    with pytest.raises(AssertionError, match=REGISTRY_PARTITION_BASELINE_SOURCE_SHA256):
+        _registry_assert_baseline_source_anchor(payload["captured_from"])
+
+
+def test_registry_partition_oracle_shape_is_the_frozen_contract_authority() -> None:
+    # The oracle must be internally the contract it claims to mirror — counts, owner maps
+    # and digest set cross-checked against each other (never against the partitioned tree),
+    # and the frozen digest values re-derived from its own rows — so a regenerated-but-wrong
+    # oracle reddens here instead of quietly weakening a downstream guard.
+    oracle = _registry_partition_oracle()
+    partitions = _registry_partitions()
+    counts = oracle["counts"]
+    rows = oracle["rows"]
+
+    assert len(partitions) == 7
+    assert counts["nodes"] == counts["unique_suffixes"] == 96
+    assert counts["test_functions"] == 94
+    assert counts["integration_nodes"] == 17
+    assert counts["helper_functions"] == 19
+    assert counts["helper_classes"] == 1
+    assert counts["helper_constants"] == 4
+    assert counts["partition_count"] == 7
+    assert counts["direct_collectible_importer_count"] == 8
+    assert counts["helper_route_test_count"] == 11
+    assert counts["database_authority_count"] == len(oracle["database_authority"]["exact_paths"]) == 8
+    assert oracle["structural"]["line_limit"] == REGISTRY_PARTITION_STRUCTURAL_LIMIT
+    assert len(rows) == 94
+    assert len(oracle["helper"]["rows"]) == 24
+    assert len(oracle["node_suffixes"]) == len(set(oracle["node_suffixes"])) == 96
+    assert len(oracle["integration_suffixes"]) == 17
+    assert oracle["owner_function_counts"] == {
+        "tests/test_basins_registry_import.py": 18,
+        "tests/test_basins_registry_import_parser.py": 13,
+        "tests/test_basins_registry_import_cli.py": 5,
+        "tests/test_basins_registry_import_security.py": 20,
+        "tests/test_basins_registry_import_auth.py": 11,
+        "tests/test_basins_registry_import_db.py": 5,
+        "tests/test_basins_registry_import_qhh.py": 22,
+    }
+    assert oracle["owner_node_counts"] == {
+        "tests/test_basins_registry_import.py": 18,
+        "tests/test_basins_registry_import_parser.py": 13,
+        "tests/test_basins_registry_import_cli.py": 5,
+        "tests/test_basins_registry_import_security.py": 20,
+        "tests/test_basins_registry_import_auth.py": 13,
+        "tests/test_basins_registry_import_db.py": 5,
+        "tests/test_basins_registry_import_qhh.py": 22,
+    }
+    assert oracle["integration_by_owner"] == {
+        owner: sorted(
+            suffix
+            for suffix in oracle["integration_suffixes"]
+            if suffix in set(oracle["owner_nodes"][owner])
+        )
+        for owner in (
+            "tests/test_basins_registry_import_auth.py",
+            "tests/test_basins_registry_import_db.py",
+            "tests/test_basins_registry_import_qhh.py",
+        )
+    }
+    assert {owner: len(v) for owner, v in oracle["integration_by_owner"].items()} == {
+        "tests/test_basins_registry_import_auth.py": 5,
+        "tests/test_basins_registry_import_db.py": 5,
+        "tests/test_basins_registry_import_qhh.py": 7,
+    }
+    assert oracle["owner_nodes"] == {
+        owner: sorted(
+            suffix for suffix in oracle["node_suffixes"] if rows[suffix.split("[", 1)[0]][0] == owner
+        )
+        for owner in partitions
+    }
+    assert all(
+        rows[suffix.split("[", 1)[0]][0] == owner
+        for owner, suffixes in oracle["owner_nodes"].items()
+        for suffix in suffixes
+    )
+    for key, frozen in REGISTRY_PARTITION_FROZEN_DIGESTS.items():
+        assert oracle["digests"][key] == frozen, key
+    assert oracle["digests"]["suffix"] == _registry_digest_lines(sorted(oracle["node_suffixes"]))
+    assert oracle["digests"]["integration_suffix"] == _registry_digest_lines(
+        sorted(oracle["integration_suffixes"])
+    )
+    assert oracle["digests"]["definition"] == _registry_digest_lines(
+        [f"{name}:{row[1]}" for name, row in sorted(rows.items())]
+    )
+    assert oracle["digests"]["ast"] == _registry_digest_lines(
+        [f"{name}:{row[2]}" for name, row in sorted(rows.items())]
+    )
+    assert oracle["digests"]["owner_map"] == _registry_digest_lines(
+        [f"{name}:{row[0]}" for name, row in sorted(rows.items())]
+    )
+    assert oracle["digests"]["helper_inventory"] == _registry_digest_lines(
+        sorted(oracle["helper"]["rows"])
+    )
+    assert oracle["digests"]["helper_source"] == _registry_digest_lines(
+        [f"{name}:{row[1]}" for name, row in sorted(oracle["helper"]["rows"].items())]
+    )
+    assert oracle["digests"]["helper_consumers"] == _registry_digest_lines(
+        sorted(oracle["helper_consumers"]["direct_collectible_importers"])
+    )
+    assert oracle["digests"]["helper_route"] == _registry_digest_lines(
+        sorted(oracle["helper_consumers"]["helper_route_tests"])
+    )
+    assert oracle["digests"]["database_authority"] == _registry_digest_lines(
+        sorted(oracle["database_authority"]["exact_paths"])
+    )
+
+
+def test_registry_partition_tracked_tree_is_exactly_seven_suites_one_helper() -> None:
+    # "Seven collectible suites is a floor, not a choice": an eighth partition, a leftover
+    # compatibility shim, or a helper renamed into a suite all redden here. The expected
+    # membership is the oracle's, never a glob result.
+    partitions = set(_registry_partitions())
+    helper = REGISTRY_PARTITION_HELPER
+    tracked = set(_tracked_python_files("tests"))
+
+    assert partitions <= tracked, sorted(partitions - tracked)
+    assert helper in tracked
+    corpus = {
+        path
+        for path in tracked
+        if PurePosixPath(path).name.startswith("test_basins_registry_import")
+    }
+    assert corpus == partitions, sorted(corpus ^ partitions)
+    assert all(is_test_suite_path(path) for path in partitions)
+    assert not is_test_suite_path(helper)
+    for owner in partitions:
+        assert "integration" not in PurePosixPath(owner).name
+
+
+def test_registry_partition_collects_its_frozen_suffixes_exactly_once() -> None:
+    oracle = _registry_partition_oracle()
+    partitions = list(_registry_partitions())
+
+    observed = _registry_collected_suffixes(partitions)
+
+    assert sorted(observed) == sorted(oracle["node_suffixes"])
+    assert len(observed) == len(set(observed)) == 96, "a suffix vanished or landed in two partitions"
+    assert _registry_digest_lines(sorted(observed)) == oracle["digests"]["suffix"]
+
+
+def test_registry_partition_integration_suffixes_and_owner_counts_are_frozen() -> None:
+    oracle = _registry_partition_oracle()
+    observed = _registry_collected_suffixes(list(_registry_partitions()), "-m", "integration")
+
+    assert sorted(observed) == sorted(oracle["integration_suffixes"])
+    assert _registry_digest_lines(sorted(observed)) == oracle["digests"]["integration_suffix"]
+    owner_of = {name: row[0] for name, row in oracle["rows"].items()}
+    owner_counts = Counter(owner_of[suffix.split("[", 1)[0]] for suffix in observed)
+    assert dict(owner_counts) == {
+        "tests/test_basins_registry_import_auth.py": 5,
+        "tests/test_basins_registry_import_db.py": 5,
+        "tests/test_basins_registry_import_qhh.py": 7,
+    }
+
+
+def test_registry_partition_definitions_are_byte_and_ast_identical_to_the_baseline() -> None:
+    # Per-definition proof against the frozen rows: same name set, same source-fragment
+    # digest, same normalized-AST digest, same markers, signature, decorators and
+    # monkeypatch targets, in exactly one partition each. Imports and module headers are the
+    # only permitted differences, and no rephrased body can satisfy this.
+    oracle = _registry_partition_oracle()
+    rows = oracle["rows"]
+    observed_by_name: dict[str, str] = {}
+    for owner in _registry_partitions():
+        content = Path(owner).read_text(encoding="utf-8")
+        lines = content.splitlines()
+        for node in ast.parse(content, filename=owner).body:
+            if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+                continue
+            frozen = rows.get(node.name)
+            assert frozen is not None, f"{owner}::{node.name} is not a frozen baseline definition"
+            fragment = _qhh_source_fragment(node, lines)
+            observed = (
+                owner,
+                hashlib.sha256(fragment.encode()).hexdigest(),
+                hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest(),
+                ",".join(_registry_marker_names(node)),
+                _registry_digest_lines([ast.unparse(node.args)]),
+                _registry_digest_lines([" ".join(ast.unparse(d) for d in node.decorator_list)]),
+                _registry_digest_lines(sorted(_qhh_monkeypatch_targets(node))),
+            )
+            assert observed == tuple(frozen), (
+                f"{owner}::{node.name} drifted: observed={observed} frozen={tuple(frozen)}"
+            )
+            assert node.name not in observed_by_name, (
+                f"{node.name} defined twice ({observed_by_name[node.name]} and {owner})"
+            )
+            observed_by_name[node.name] = owner
+
+    assert set(observed_by_name) == set(rows), (
+        f"missing={sorted(set(rows) - set(observed_by_name))} "
+        f"extra={sorted(set(observed_by_name) - set(rows))}"
+    )
+    assert len(observed_by_name) == 94
+    assert _registry_digest_lines(
+        [f"{name}:{observed_by_name[name]}" for name in sorted(observed_by_name)]
+    ) == oracle["digests"]["owner_map"]
+
+
+def test_registry_partition_helper_owns_all_twenty_four_members_identically() -> None:
+    oracle = _registry_partition_oracle()
+    frozen = oracle["helper"]["rows"]
+
+    observed = _registry_members(REGISTRY_PARTITION_HELPER)
+
+    assert set(observed) == set(frozen), (
+        f"helper inventory drifted: missing={sorted(set(frozen) - set(observed))} "
+        f"extra={sorted(set(observed) - set(frozen))}"
+    )
+    for name, row in frozen.items():
+        assert observed[name] == (row[1], row[2]), f"{name} drifted"
+    assert sum(row[0] == "function" for row in frozen.values()) == 19
+    assert sum(row[0] == "constant" for row in frozen.values()) == 4
+    assert sum(row[0] == "class" for row in frozen.values()) == 1
+    # No partition may re-home a support member: the suites define tests and nothing else.
+    for owner in _registry_partitions():
+        overlap = set(_registry_members(owner)) & set(frozen)
+        assert not overlap, f"{owner} re-homes helper members: {sorted(overlap)}"
+
+
+def test_registry_partition_helper_defines_no_test_and_collects_zero_nodes() -> None:
+    assert not [
+        name for name in _registry_members(REGISTRY_PARTITION_HELPER) if name.startswith("test_")
+    ]
+    assert not is_test_suite_path(REGISTRY_PARTITION_HELPER)
+    completed = _registry_pytest("--collect-only", REGISTRY_PARTITION_HELPER)
+    assert completed.returncode == 5, completed.stdout + completed.stderr
+    assert "no tests collected" in completed.stdout
+    assert _registry_collected_suffixes([REGISTRY_PARTITION_HELPER]) == []
+
+
+def test_registry_partition_execution_semantics_match_the_frozen_baseline() -> None:
+    oracle = _registry_partition_oracle()
+    partitions = list(_registry_partitions())
+
+    default = _registry_pytest(*partitions)
+    assert default.returncode == 0, default.stdout
+    assert _qhh_counts(default.stdout) == "78 passed, 18 skipped", default.stdout
+    non_integration = _registry_pytest("-m", "not integration", *partitions)
+    assert non_integration.returncode == 0, non_integration.stdout
+    assert _qhh_counts(non_integration.stdout) == "78 passed, 1 skipped, 17 deselected", (
+        non_integration.stdout
+    )
+    integration_only = _registry_pytest("-m", "integration", *partitions)
+    assert integration_only.returncode == 0, integration_only.stdout
+    assert _qhh_counts(integration_only.stdout) == "17 skipped, 79 deselected", integration_only.stdout
+    bug008 = _registry_pytest(REGISTRY_PARTITION_RETAINED_CORE, "-k", "output_segment_count")
+    assert bug008.returncode == 0, bug008.stdout
+    assert _qhh_counts(bug008.stdout) == "2 passed, 16 deselected", bug008.stdout
+    assert oracle["execution"]["default"] == {"passed": 78, "skipped": 18}
+    assert oracle["execution"]["not_integration"] == {"passed": 78, "skipped": 1, "deselected": 17}
+    assert oracle["execution"]["integration_only"] == {"skipped": 17, "deselected": 79}
+
+
+def test_registry_partition_bug008_command_still_passes_exactly_two_cases() -> None:
+    oracle = _registry_partition_oracle()
+    bug008 = oracle["bug008"]
+    assert bug008["suite"] == REGISTRY_PARTITION_RETAINED_CORE
+    assert bug008["keyword"] == "output_segment_count"
+    assert bug008["passed"] == 2
+
+    nodes = _registry_collected_suffixes([REGISTRY_PARTITION_RETAINED_CORE], "-k", "output_segment_count")
+    assert sorted(nodes) == sorted(bug008["suffixes"]), nodes
+    assert len(nodes) == 2
+    completed = _registry_pytest(REGISTRY_PARTITION_RETAINED_CORE, "-k", "output_segment_count")
+    assert completed.returncode == 0, completed.stdout
+    assert _qhh_counts(completed.stdout) == "2 passed, 16 deselected", completed.stdout
+
+
+def test_registry_partition_direct_importers_derive_from_tracked_asts() -> None:
+    # The helper's direct collectible importer set is DERIVED from the tracked tree, never
+    # frozen here: a partition that stops importing the helper while staying routed (dead
+    # edge) and a new importer suite that nobody routes (missing edge) both redden here.
+    oracle = _registry_partition_oracle()
+    expected = set(oracle["helper_consumers"]["direct_collectible_importers"])
+
+    derived = _non_gated_top_level_importer_tests(REGISTRY_PARTITION_HELPER_MODULE)
+
+    assert derived == expected, (
+        "registry helper direct importer set drifted: "
+        f"derived={sorted(derived)} expected={sorted(expected)}"
+    )
+    assert len(derived) == 8
+    assert expected <= set(BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS)
+
+
+def test_registry_partition_support_bridge_is_exactly_one_qhh_helper_edge() -> None:
+    # D is the sole support-to-support importer; A/B/C import D, never the registry helper.
+    oracle = _registry_partition_oracle()
+    helper_module = REGISTRY_PARTITION_HELPER_MODULE
+    support = oracle["helper_consumers"]["support_importer"]
+    qhh_partitions = oracle["helper_consumers"]["qhh_partitions_via_support"]
+
+    assert support == "tests/qhh_production_bootstrap_helpers.py"
+    support_tree = ast.parse(Path(support).read_text(encoding="utf-8"), filename=support)
+    module_level = {
+        node.module
+        for node in support_tree.body
+        if isinstance(node, ast.ImportFrom) and node.level == 0
+    }
+    assert helper_module in module_level, "D lost its module-scope registry-helper import"
+    # The second D edge is the function-local `_package_manifest_for_model` import inside
+    # `_refresh_inventory_and_manifest` — the one controlled fingerprint transition. D is a
+    # support module, so both edges are read from its full AST (module + function scope).
+    all_helper_imports = [
+        node
+        for node in ast.walk(support_tree)
+        if isinstance(node, ast.ImportFrom) and node.module == helper_module and node.level == 0
+    ]
+    assert len(all_helper_imports) == 2, "D must carry exactly its two retargeted imports"
+    imported_names = {alias.name for node in all_helper_imports for alias in node.names}
+    assert imported_names == {"_write_registry_fixture", "_package_manifest_for_model"}, (
+        sorted(imported_names)
+    )
+    # No tracked suite outside the derived direct eight may import the registry helper,
+    # and the three QHH partitions must import D rather than the registry helper.
+    d_module = "tests.qhh_production_bootstrap_helpers"
+    direct_eight = set(_registry_partitions()) | {"tests/test_publish_scheduler_file_registry.py"}
+    for suite in _tracked_test_suites():
+        if suite in direct_eight:
+            continue
+        names = _top_level_imported_module_names(suite, _parse_tracked(suite))
+        assert helper_module not in names, f"{suite} is an unexpected direct helper importer"
+    for owner in qhh_partitions:
+        names = _top_level_imported_module_names(owner, _parse_tracked(owner))
+        assert d_module in names, f"{owner} lost its QHH-helper import"
+        assert helper_module not in names, f"{owner} must not import the registry helper directly"
+        text = Path(owner).read_text(encoding="utf-8")
+        assert helper_module not in text, owner
+
+
+def test_registry_partition_no_consumer_imports_the_retained_collectible_core() -> None:
+    # The retained historical path is a COLLECTIBLE suite after the partition: no consumer
+    # may keep importing it as a support module, at module scope or function scope.
+    core_module = REGISTRY_PARTITION_RETAINED_CORE_MODULE
+    oracle = _registry_partition_oracle()
+    consumers = [
+        *_registry_partitions(),
+        "tests/test_publish_scheduler_file_registry.py",
+        oracle["helper_consumers"]["support_importer"],
+        *oracle["helper_consumers"]["qhh_partitions_via_support"],
+    ]
+    for rel in consumers:
+        text = Path(rel).read_text(encoding="utf-8")
+        assert f"from {core_module} import" not in text, f"{rel} still imports the retained core"
+        assert f"import {core_module}" not in text, f"{rel} still imports the retained core"
+    # Derived sweep over the whole tracked suite domain, not just the known consumers.
+    for suite in _tracked_test_suites():
+        if suite == REGISTRY_PARTITION_RETAINED_CORE:
+            continue
+        names = _top_level_imported_module_names(suite, _parse_tracked(suite))
+        assert core_module not in names, f"{suite} imports the retained collectible core"
+
+
+def test_registry_partition_selector_tuple_is_the_sorted_seven_owner_authority() -> None:
+    partitions = _registry_partitions()
+    assert tuple(sorted(partitions)) == BASINS_REGISTRY_IMPORT_TESTS
+    assert len(BASINS_REGISTRY_IMPORT_TESTS) == 7
+    # The tuple must equal the tracked corpus, not a hand-frozen subset: an eighth suite
+    # reddens here by derivation (same shape as `_tracked_mapping_builder_suites`).
+    tracked = {
+        path
+        for path in _tracked_test_suites()
+        if PurePosixPath(path).name.startswith("test_basins_registry_import")
+    }
+    assert tracked == set(BASINS_REGISTRY_IMPORT_TESTS), sorted(tracked ^ set(BASINS_REGISTRY_IMPORT_TESTS))
+
+
+def test_registry_partition_owner_route_selects_all_seven_with_a_non_same_name_probe() -> None:
+    # The probe must not be same-name derivable, or the seven per-edge REDs below would only
+    # prove that the derivation still works. And the expansion must be ADDITIVE: no prior
+    # target of the `workers/model_registry/**` rule may drop.
+    from scripts.select_ci_tests import _same_name_backend_python_test
+
+    oracle = _registry_partition_oracle()
+    probe = oracle["owner_probe"]
+    assert Path(probe).is_file()
+    derived = _same_name_backend_python_test(probe)
+    assert derived == oracle["owner_probe_same_name"] == "tests/test_basins_reingest.py"
+    assert derived not in set(_registry_partitions()), (
+        "the owner-route probe is same-name derivable to a partition, voiding the per-edge REDs"
+    )
+
+    selected = set(select_tests([probe], repo_root=Path(".")))
+    rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == oracle["model_registry_pattern"])
+
+    assert set(_registry_partitions()) <= selected, sorted(set(_registry_partitions()) - selected)
+    assert len([test for test in rule.tests if "test_basins_registry_import" in test]) == 7
+    # No pre-#1913 target dropped: the baseline rule content is frozen by the #1948 literal
+    # transcription plus the #1912 publication tuple — every one of them must survive.
+    pre_existing = (
+        "tests/test_model_registration.py",
+        "tests/test_model_registry_basin_versions.py",
+        "tests/test_model_registry_list_basins.py",
+        "tests/test_basins_discovery.py",
+        "tests/test_basins_package.py",
+        "tests/test_basins_reingest.py",
+        "tests/test_direct_grid_variant_registration.py",
+        "tests/test_hhe_mvt_binding.py",
+        "tests/test_production_object_store_validation.py",
+        "tests/test_publish_scheduler_file_registry.py",
+        "tests/test_qhh_scripts_static.py",
+        *BASINS_PACKAGE_PUBLICATION_TESTS,
+        "tests/test_qhh_production_bootstrap.py",
+        "tests/test_qhh_production_bootstrap_scheduler.py",
+        "tests/test_qhh_production_bootstrap_state.py",
+    )
+    assert set(pre_existing) <= set(rule.tests), sorted(set(pre_existing) - set(rule.tests))
+    assert set(BASINS_REGISTRY_IMPORT_TESTS) <= set(rule.tests)
+    # The rule's registry targets are exactly the tracked corpus: a partially-listed corpus,
+    # a stale rule entry whose file left the tree, and an eighth partition with no rule
+    # entry all redden here.
+    tracked_registry = {
+        path
+        for path in _tracked_test_suites()
+        if "test_basins_registry_import" in PurePosixPath(path).name
+    }
+    assert set(rule.tests) & tracked_registry == set(BASINS_REGISTRY_IMPORT_TESTS)
+
+
+@pytest.mark.parametrize("removed", sorted(_registry_partitions()))
+def test_registry_partition_owner_route_reds_when_an_edge_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    removed: str,
+) -> None:
+    # The fracture pin, all seven edges (retained core included): rebuilding the
+    # model-registry rule WITHOUT one partition must drop exactly that partition from the
+    # production-owner selection. Passing this row is what proves each of the seven is
+    # load-bearing rather than decorative.
+    oracle = _registry_partition_oracle()
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != removed),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == oracle["model_registry_pattern"]
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert any(rule.pattern == oracle["model_registry_pattern"] for rule in patched), "owner rule not found"
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", patched)
+
+    selected = select_tests([oracle["owner_probe"]], repo_root=Path("."))
+
+    # Only the removed edge disappears: the mutation drops exactly one partition, so the
+    # row cannot be satisfied by a mutation that empties the whole route.
+    assert removed not in selected
+    survivors = sorted(set(_registry_partitions()) - {removed})
+    assert all(suite in selected for suite in survivors), survivors
+
+
+def test_registry_partition_owner_rule_permits_an_unrelated_future_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Future-compatibility GREEN arm (constructed, never derived from current data): a
+    # legitimate future target added to the `workers/model_registry/**` rule under a
+    # DIFFERENT owner directory must not false-red the registry partition contract.
+    oracle = _registry_partition_oracle()
+    future_target = "tests/test_some_future_registry_import_consumer.py"
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            (*rule.tests, future_target),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == oracle["model_registry_pattern"]
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert any(future_target in candidate.tests for candidate in patched)
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", patched)
+
+    selected = set(select_tests([oracle["owner_probe"]], repo_root=Path(".")))
+
+    assert set(_registry_partitions()) <= selected
+    future_rule = next(rule for rule in patched if rule.pattern == oracle["model_registry_pattern"])
+    assert set(_registry_partitions()) <= set(future_rule.tests)
+
+
+def test_registry_partition_helper_route_selects_exactly_the_eleven_consumers() -> None:
+    # A helper-only diff must run the eight direct collectible importers plus QHH A/B/C —
+    # the support bridge is NOT transitively expanded, so the QHH trio must ride the exact
+    # rule — plus the selector's own meta-guard rider (added by the support-module branch,
+    # deliberately not duplicated inside the rule).
+    oracle = _registry_partition_oracle()
+    expected = set(oracle["helper_consumers"]["helper_route_tests"])
+    assert len(expected) == 11
+    assert sorted(BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS) == sorted(expected)
+
+    selected = set(select_tests([REGISTRY_PARTITION_HELPER], repo_root=Path(".")))
+
+    assert selected == expected | {SELECTOR_META_GUARD_TEST}, (
+        sorted(selected ^ (expected | {SELECTOR_META_GUARD_TEST}))
+    )
+    rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == REGISTRY_PARTITION_HELPER)
+    assert sorted(rule.tests) == sorted(expected)
+    assert SELECTOR_META_GUARD_TEST not in rule.tests
+
+
+@pytest.mark.parametrize(
+    "removed",
+    sorted(_registry_partition_oracle()["helper_consumers"]["helper_route_tests"]),
+)
+def test_registry_partition_helper_route_reds_when_a_consumer_edge_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    removed: str,
+) -> None:
+    # The eleven helper-route edges are each load-bearing: with the exact rule rebuilt
+    # WITHOUT one consumer, a helper-only diff drops that suite and keeps the rest (plus
+    # the meta-guard rider).
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != removed),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == REGISTRY_PARTITION_HELPER
+        else rule
+        for rule in SUPPORT_MODULE_TEST_RULES
+    )
+    assert any(rule.pattern == REGISTRY_PARTITION_HELPER for rule in patched), "helper rule not found"
+    monkeypatch.setattr(_prod_module, "SUPPORT_MODULE_TEST_RULES", patched)
+
+    selected = set(select_tests([REGISTRY_PARTITION_HELPER], repo_root=Path(".")))
+
+    assert removed not in selected
+    survivors = set(_registry_partition_oracle()["helper_consumers"]["helper_route_tests"]) - {removed}
+    assert survivors <= selected, sorted(survivors - selected)
+    assert SELECTOR_META_GUARD_TEST in selected
+
+
+def _registry_database_contract(observed: Sequence[str], baseline_patterns: Sequence[str]) -> None:
+    """Registry-local `database:` filter contract: exact eight, baseline subset preserved.
+
+    Deliberately NOT a whole-list equality against the baseline snapshot: a legitimate
+    unrelated future pattern added to the `database:` filter must not false-red the
+    registry partition contract, and the baseline list is provenance, not a ceiling.
+    """
+    observed_set = set(observed)
+    exact = set(REGISTRY_PARTITION_DATABASE_AUTHORITY)
+
+    assert exact <= observed_set, sorted(exact - observed_set)
+    for absent in REGISTRY_PARTITION_DATABASE_ABSENT:
+        assert absent not in observed_set, f"non-integration owner {absent} opened the database lane"
+    assert not [pattern for pattern in observed if "registry_import*" in pattern], (
+        "a broad registry glob replaced the exact paths"
+    )
+    # Baseline subset preservation: nothing pre-#1913 may drop. The baseline block already
+    # carried the retained core, reingest and #1948's C+D literals; this change only ADDS
+    # the helper, auth, DB and QHH literals.
+    missing_baseline = set(baseline_patterns) - observed_set
+    assert not missing_baseline, f"prior database patterns dropped: {sorted(missing_baseline)}"
+
+
+def test_registry_partition_database_authority_is_the_exact_eight_path_union() -> None:
+    oracle = _registry_partition_oracle()
+    observed = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+
+    assert sorted(oracle["database_authority"]["exact_paths"]) == sorted(REGISTRY_PARTITION_DATABASE_AUTHORITY)
+    assert sorted(oracle["database_authority"]["absent_paths"]) == sorted(REGISTRY_PARTITION_DATABASE_ABSENT)
+    _registry_database_contract(observed, oracle["database_authority"]["baseline_patterns"])
+    # The 17 frozen integration suffixes bind suffix -> frozen owner -> an exact literal.
+    owner_of = {name: row[0] for name, row in oracle["rows"].items()}
+    for suffix in oracle["integration_suffixes"]:
+        owner = owner_of[suffix.split("[", 1)[0]]
+        assert any(fnmatch.fnmatch(owner, pattern) for pattern in observed), (
+            f"integration owner {owner} for {suffix} matches no database pattern"
+        )
+        assert owner in set(observed), f"integration owner {owner} is not an exact database literal"
+
+
+def test_registry_partition_database_filter_permits_an_unrelated_future_pattern() -> None:
+    # Future-compatibility GREEN arm (constructed): an unrelated future `database:` pattern
+    # must not false-red the registry contract.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    future_pattern = "packages/common/some_future_registry_store.py"
+    entry = f"              - '{future_pattern}'\n"
+    assert entry not in workflow
+    block = _database_filter_block(workflow)
+    mutated = workflow.replace(block, f"{entry}{block}")
+
+    _registry_database_contract(
+        _database_filter_patterns(mutated),
+        _registry_partition_oracle()["database_authority"]["baseline_patterns"],
+    )
+
+
+@pytest.mark.parametrize("target", REGISTRY_PARTITION_DATABASE_AUTHORITY)
+def test_registry_partition_database_edge_deletion_is_independent_and_unrescued(target: str) -> None:
+    # Block-scoped per-edge RED, all eight edges: deleting one literal must leave THAT path
+    # matched by no surviving `database:` pattern (no glob rescue), while the other seven
+    # stay matched and every integration suffix of the other owners stays routed.
+    workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
+    entry = f"              - '{target}'\n"
+    assert entry in _database_filter_block(workflow), f"{target} is not a block literal"
+    mutated = workflow.replace(entry, "")
+    remaining = _database_filter_patterns(mutated)
+
+    assert target not in remaining
+    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
+        f"{target} is rescued by a surviving pattern after its exact edge was deleted"
+    )
+    survivors_exact = set(REGISTRY_PARTITION_DATABASE_AUTHORITY) - {target}
+    assert survivors_exact <= set(remaining), sorted(survivors_exact - set(remaining))
+    # A catch-all `tests/**`-shaped pattern would rescue EVERY deletion in the block; rule
+    # it out with a sentinel so the per-edge proof cannot silently go vacuous.
+    sentinel = "tests/zz_any_registry_consumer.py"
+    catch_alls = [pattern for pattern in remaining if fnmatch.fnmatch(sentinel, pattern)]
+    assert not catch_alls, f"catch-all `database:` patterns would rescue {target}: {catch_alls}"
+    oracle = _registry_partition_oracle()
+    owner_of = {name: row[0] for name, row in oracle["rows"].items()}
+    other_owners = {owner_of[suffix.split("[", 1)[0]] for suffix in oracle["integration_suffixes"]} - {target}
+    for owner in other_owners:
+        assert any(fnmatch.fnmatch(owner, pattern) for pattern in remaining), (
+            f"deleting {target} unroutes integration owner {owner}"
+        )
+
+
+def test_registry_partition_all_eight_outputs_stay_below_the_structural_limit() -> None:
+    oracle = _registry_partition_oracle()
+    paths = [*_registry_partitions(), REGISTRY_PARTITION_HELPER]
+
+    assert len(paths) == 8
+    for path in paths:
+        observed = len(Path(path).read_bytes().splitlines())
+        assert observed < REGISTRY_PARTITION_STRUCTURAL_LIMIT, f"{path} is {observed} lines"
+    # The oracle itself is a tracked artifact of this change and must stay under the cap too.
+    assert (
+        len(Path(REGISTRY_PARTITION_ORACLE_PATH).read_bytes().splitlines())
+        < REGISTRY_PARTITION_STRUCTURAL_LIMIT
+    )
+    assert oracle["structural"]["line_limit"] == REGISTRY_PARTITION_STRUCTURAL_LIMIT
+
+
+def test_registry_partition_keeps_the_structural_guard_contract_and_out_of_the_change_set() -> None:
+    # #1913 must not move the structural guard: the current guard stays enabled at 1,000
+    # lines with no registry exclusion, and the frozen provenance blob still hashes to the
+    # contract's recorded digest (issue-start provenance only).
+    oracle = _registry_partition_oracle()
+    paths = [*_registry_partitions(), REGISTRY_PARTITION_HELPER]
+    guard_path = oracle["structural"]["guard_path"]
+    guard = json.loads(Path(guard_path).read_text(encoding="utf-8"))
+
+    provenance = _qhh_blob_at(oracle["captured_from"]["guard_provenance_baseline_sha"], guard_path)
+    assert hashlib.sha256(provenance).hexdigest() == oracle["structural"]["guard_provenance_sha256"], (
+        "the guard blob at the guard-provenance baseline no longer matches the frozen digest"
+    )
+    assert guard["enabled"] is True and guard["maxLines"] == REGISTRY_PARTITION_STRUCTURAL_LIMIT
+    assert not [path for path in paths if path in guard["exclude"]], (
+        "a replacement exclusion would undo the point of the partition"
+    )
+    assert not [pattern for pattern in guard["exclude"] if "basins_registry_import" in pattern], (
+        "a registry glob exclusion would undo the point of the partition"
+    )
+
+
+def test_registry_partition_live_commands_name_all_seven_suites() -> None:
+    # Current docs must name the whole corpus: the live full-registry commands list all
+    # seven suites, the real-Basins smoke moved to the DB owner, and the historical
+    # BUG-008 ledger command stays byte-identical (validator-enforced elsewhere).
+    oracle = _registry_partition_oracle()
+    partitions = _registry_partitions()
+    for document in oracle["live_command_docs"]:
+        text = Path(document).read_text(encoding="utf-8")
+        for owner in partitions:
+            assert owner in text, f"{document} does not name {owner}"
+    validation = Path("docs/VALIDATION.md").read_text(encoding="utf-8")
+    smoke = validation.split("NHMS_RUN_REAL_BASINS_IMPORT=1", 1)[1].split("```", 1)[0]
+    assert "tests/test_basins_registry_import_db.py" in smoke, smoke
+    assert oracle["bug008_command"] == (
+        "uv run pytest -q tests/test_basins_registry_import.py -k output_segment_count"
+    )
+    # The retained-core BUG-008 command is still a live, correct recipe: it collects and
+    # passes exactly the two frozen cases (proven in the execution-semantics row above).

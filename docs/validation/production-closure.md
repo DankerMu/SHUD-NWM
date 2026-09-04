@@ -187,6 +187,12 @@ openspec validate m10-production-closure --strict --no-interactive
   tests/test_basins_package_publication_refusal.py \
   tests/test_basins_package_publication_toctou.py \
   tests/test_basins_registry_import.py \
+  tests/test_basins_registry_import_auth.py \
+  tests/test_basins_registry_import_cli.py \
+  tests/test_basins_registry_import_db.py \
+  tests/test_basins_registry_import_parser.py \
+  tests/test_basins_registry_import_qhh.py \
+  tests/test_basins_registry_import_security.py \
   tests/test_shud_runtime.py \
   tests/test_model_registration.py \
   tests/test_api_contract.py \
