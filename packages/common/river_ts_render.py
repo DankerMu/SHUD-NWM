@@ -262,6 +262,17 @@ def _opens_escape_string(sql: str, start: int) -> bool:
     (the ``$`` spelling, refused) and
     ``test_an_identifier_ending_in_underscore_e_is_not_an_escape_string_prefix``
     (the ``_`` spelling, still inside the subset and still not a prefix).
+
+    A NUMERIC constant glued to the prefix (``1E'a\\'x'``) is not answered here
+    any more either: this function says "plain literal" (the ``1`` is
+    ``isalnum``), §4.1's token rule says "escape string", and no PostgreSQL
+    version EXECUTES either reading, so decision 18 refuses the shape instead
+    (:data:`_NUMERIC_GLUED_ESCAPE_PREFIX`, #2018 round-5 L2). Pinned both ways:
+    ``test_a_numeric_literal_glued_to_an_escape_prefix_is_refused_as_outside_the_lexical_subset``
+    (refused) and
+    ``test_an_identifier_character_before_the_digit_keeps_todays_answer`` (the
+    digit inside an identifier — ``col1E'x'`` — where this function and §4.1
+    already agree, so nothing changes).
     """
     if start == 0 or sql[start - 1] not in "Ee":
         return False
@@ -608,8 +619,10 @@ _FACT_QUOTED_ALIAS = re.compile(
 #: is the only part of it that is always literal.
 _UNICODE_ESCAPED = re.compile(r"\bU&", re.IGNORECASE)
 
-#: The characters that put a statement OUTSIDE this module's declared lexical
-#: subset (fixture decision 18): a dollar sign, and any non-ASCII byte.
+#: The CHARACTER arm of the declared lexical subset (fixture decision 18): the
+#: characters that put a statement outside it wherever they appear in code — a
+#: dollar sign, and any non-ASCII byte. (The second arm is a two-token SHAPE,
+#: :data:`_NUMERIC_GLUED_ESCAPE_PREFIX`.)
 #:
 #: Both are places where the module's hand-rolled lexer and PostgreSQL's §4.1
 #: can differ, and every such difference is COMMON-MODE — it blanks real code for
@@ -623,28 +636,73 @@ _UNICODE_ESCAPED = re.compile(r"\bU&", re.IGNORECASE)
 #: removed rather than enumerated.
 #:
 #: Affordable because it is measured, not assumed: over the 20 registered
-#: templates there are 0 ``$`` and 0 non-ASCII bytes IN CODE (the two ``$`` sit
-#: inside ``'^[0-9]+$'`` literals, the four ``—`` inside comments), so the subset
-#: costs the readers nothing. Widening it back is a fixture decision with its own
-#: pins, never a silent regex change.
+#: templates there are 0 ``$`` and 0 non-ASCII bytes IN CODE (all 10 ``$``
+#: occurrences, in 2 entries, are the closing anchor of ``'^[0-9]+$'`` literals;
+#: all 6 ``—`` occurrences, in 4 entries, sit inside ``--`` comments), so the
+#: subset costs the readers nothing. Widening it back is a fixture decision with
+#: its own pins, never a silent regex change.
 _LEXICAL_SUBSET_VIOLATION = re.compile(r"[$\x80-\U0010ffff]")
+
+#: The SECOND arm of the subset (fixture decision 18, amended in #2018 round 5):
+#: a numeric constant glued directly to an ``E'`` / ``e'`` escape-string prefix —
+#: ``1E'a\'x'``, ``12E'…'``, ``1.5e'…'``.
+#:
+#: §4.1.2.2 requires the ``E`` to be a token start, so this module reads the
+#: quote as opening a PLAIN literal (backslash-blind) while an independent §4.1
+#: reference lexer reads an ESCAPE string — the two answers differ, and the
+#: difference is the usual common-mode one: verifier #2018 round-5 L2 measured
+#: ``SELECT 1E'a\'x' AS n, … WHERE rt.variable = %(v)s AND rt.run_key = 1E'b\'y'``
+#: lexed with a phantom literal over the whole ``FROM`` clause, occurrences 0 ==
+#: walk 0, and the narrow render shipping ``rt.variable``. No PostgreSQL version
+#: EXECUTES either reading — a lex error on 15+, a parse error on ≤14 (verifier
+#: #2018 round-5 L2 (iv); the analysis is from ``scan.l``, unverified against a
+#: live server, which this loop has no access to) — so there is no ground truth
+#: to implement faithfully here and the subset refuses the shape instead.
+#:
+#: ``(?<!\w)`` keeps the arm on NUMERIC constants: in ``col1E'x'`` / ``x1e'…'``
+#: the digit is inside an identifier, ``E`` is not a token, and the module already
+#: agrees with §4.1 (measured), so those keep the answer they have today.
+#: ``[0-9.]*`` makes the reported text start at the constant's own first digit,
+#: and stops where PostgreSQL's exponent does — ``1.5e3'…'`` and ``1EE'…'`` are
+#: NOT refused. Both boundaries are pinned by
+#: ``test_the_glued_escape_prefix_arm_reports_the_whole_numeric_constant``.
+#: Asked over :func:`_blank_non_code` with ``keep_literal_quotes=True`` — the
+#: quote-blanking form the other checks read would have deleted the very quote
+#: this arm looks for; pinned by
+#: ``test_a_digit_before_an_escape_prefix_inside_a_literal_or_comment_stays_inside_the_subset``.
+_NUMERIC_GLUED_ESCAPE_PREFIX = re.compile(r"(?<!\w)[0-9][0-9.]*[Ee]'")
 
 
 def _lexical_subset_violation(sql: str) -> tuple[int, str] | None:
-    """``(offset, character)`` of the first code character outside the subset, or ``None``.
+    """``(offset, text)`` of the first code text outside the subset, or ``None``.
 
-    Asked over the comment/literal-blanked text, so a ``$`` or a non-ASCII
-    character inside a string literal or a comment is DATA and stays inside the
-    subset — which is what the registry actually contains (``'^[0-9]+$'``,
-    ``-- … — …``).
+    TWO arms, both asked over blanked text so that a construct inside a string
+    literal or a comment is DATA and stays inside the subset — which is what the
+    registry actually contains (``'^[0-9]+$'``, ``-- … — …``):
+
+    #. a ``$`` or a non-ASCII character, over the text with comments and literal
+       BODIES AND QUOTES blanked;
+    #. a numeric constant glued to an ``E'`` escape prefix, over the text with
+       literal quotes KEPT (:data:`_NUMERIC_GLUED_ESCAPE_PREFIX`) — the arm is
+       about a quote's own meaning, so it cannot run on text that has blanked the
+       quotes away.
+
+    The earlier offset wins, so the message diagnoses the first thing the reader
+    can see rather than whichever arm ran first.
 
     Public enough (module-private, but imported by the tests) that the
     differential against the reference lexer can ask the module the SAME
     question the guard asks: a sample the module refuses is a sample the
     differential must not hold to a span-for-span answer.
     """
-    match = _LEXICAL_SUBSET_VIOLATION.search(_blank_comments_and_literals(sql))
-    return None if match is None else (match.start(), match.group(0))
+    violations: list[tuple[int, str]] = []
+    character = _LEXICAL_SUBSET_VIOLATION.search(_blank_comments_and_literals(sql))
+    if character is not None:
+        violations.append((character.start(), character.group(0)))
+    glued = _NUMERIC_GLUED_ESCAPE_PREFIX.search(_blank_non_code(sql, keep_literal_quotes=True))
+    if glued is not None:
+        violations.append((glued.start(), glued.group(0)))
+    return min(violations) if violations else None
 
 
 def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
@@ -665,16 +723,20 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
        the accepted over-refusal is a ``U&'…'`` string literal, which no
        registered template has;
     #. the LEXICAL SUBSET (fixture decision 18): a ``$`` or a non-ASCII byte in
-       the blanked code text. SECOND, and deliberately so — ahead of the belt,
-       the alias check, the counts and the delta — because those two characters
-       are where every lexer/PostgreSQL disagreement of rounds 3 and 4 started
+       the blanked code text, or a numeric constant glued to an ``E'`` escape
+       prefix (``1E'a\\'x'``, round-5 L2). SECOND, and deliberately so — ahead of
+       the belt, the alias check, the counts and the delta — because those are
+       where every lexer/PostgreSQL disagreement of rounds 3 to 5 started
        (a dollar-quote tag class spelled ASCII against §4.1's byte class; a
        dollar body hiding a ``--``, a ``/*`` or a ``(`` from the traversal
-       family), and a disagreement in the scanner corrupts the text every LATER
-       check reads. Refusing first removes the hole space instead of enumerating
-       it: the belt cannot see a phantom span that re-synchronises, and the
-       equality guard cannot see a read both sides are blind to, so neither is
-       able to answer for this class. Measured 0/20 over the registry, in code;
+       family; a quote after ``1E`` read as a plain literal where §4.1's token
+       rule says escape string and no PostgreSQL version executes either), and a
+       disagreement in
+       the scanner corrupts the text every LATER check reads. Refusing first
+       removes the hole space instead of enumerating it: the belt cannot see a
+       phantom span that re-synchronises, and the equality guard cannot see a
+       read both sides are blind to, so neither is able to answer for this class.
+       Measured 0/20 over the registry, in code;
     #. an UNTERMINATED literal or comment — the statement
        ends inside a span the scanner never closed, so the blanked text every
        later check reads is not this statement's code. A BELT and nothing more
@@ -718,14 +780,15 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
         )
     violation = _lexical_subset_violation(sql)
     if violation is not None:
-        offset, character = violation
+        offset, text = violation
         raise RiverTemplateError(
-            f"river template {entry!r}: outside the modelled lexical subset ({character!r} at offset "
+            f"river template {entry!r}: outside the modelled lexical subset ({text!r} at offset "
             f"{offset}) — fixture I1-1980 decision 18. This module lexes a declared subset of PostgreSQL "
             "§4.1 ('…' with '', E'…' with backslash escapes, \"…\" with \"\", -- to a newline, nested "
             "/* */, and the %s / %(name)s / :name placeholder dialects); a dollar sign or a non-ASCII "
-            "byte in CODE is where its lexer and PostgreSQL can disagree, and a disagreement there hides "
-            "a read from every counter at once, so the statement is refused instead of scanned"
+            "byte in CODE, and a numeric constant glued to an E' escape prefix, are where its lexer and "
+            "PostgreSQL can disagree, and a disagreement there hides a read from every counter at once, "
+            "so the statement is refused instead of scanned"
         )
     unterminated = _unterminated_span(sql)
     if unterminated is not None:
@@ -882,8 +945,19 @@ def non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     divergence from PostgreSQL's lexer blanks real code for both of them and the
     equality guard is satisfied by mutual blindness. Every divergence is
     therefore either fixed here (nested comments, ``\\r`` ending a line comment)
-    or REFUSED (``U&``, a ``$`` or non-ASCII byte in code, an unterminated span),
-    and each carries a pin — never a "cannot happen" argument. The agreement
+    or REFUSED (``U&``, a ``$`` or non-ASCII byte in code, a numeric constant
+    glued to an ``E'`` escape prefix — ``1E'a\\'x'``, where §4.1 reads an escape
+    string, this scanner a plain literal and no PostgreSQL version executes
+    either, #2018 round-5 L2 — an unterminated span), and each carries a pin:
+    respectively
+    ``test_a_nested_block_comment_is_exactly_one_span``,
+    ``test_a_line_comment_ends_at_a_carriage_return_as_well_as_a_line_feed``,
+    ``test_a_unicode_escaped_identifier_is_refused_because_the_counter_cannot_see_it``,
+    ``test_a_dollar_sign_in_code_is_refused_as_outside_the_lexical_subset``,
+    ``test_a_non_ascii_byte_in_code_is_refused_as_outside_the_lexical_subset``,
+    ``test_a_numeric_literal_glued_to_an_escape_prefix_is_refused_as_outside_the_lexical_subset``
+    and ``test_a_statement_that_ends_inside_an_unterminated_span_is_refused`` —
+    never a "cannot happen" argument. The agreement
     itself is pinned differentially against an independent §4.1 reference lexer
     in ``tests/test_river_ts_render_reference_lexer.py``, and the traversal
     family's agreement with THIS function is pinned by
