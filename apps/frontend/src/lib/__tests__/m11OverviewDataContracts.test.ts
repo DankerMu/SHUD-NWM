@@ -11,8 +11,9 @@ import {
   normalizeSelectedSegmentDetail,
 } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
+import type { M11QueryState } from '@/lib/m11/queryState'
 
-const query = {
+const query: M11QueryState = {
   ...defaultM11QueryState,
   source: 'gfs',
   cycle: '2026-05-18T00:00:00.000Z',
@@ -202,7 +203,7 @@ describe('M11 overview data contracts', () => {
             scenario_id: 'forecast_gfs_deterministic',
             source_id: 'GFS',
             segment_role: 'future_7_days',
-            points: [['2026-05-18T06:00:00Z', 55]],
+            points: [[1779084000000, 55]],
           },
         ],
       },

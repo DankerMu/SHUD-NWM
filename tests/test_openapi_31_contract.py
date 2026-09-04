@@ -376,6 +376,11 @@ def _pre_finalized_runtime_schema() -> dict[str, Any]:
         openapi_patching._patch_qhh_latest_product_openapi,
         openapi_patching._patch_met_stations_list_openapi,
         openapi_patching._patch_layer_metadata_openapi,
+        openapi_patching._patch_basin_registry_openapi,
+        openapi_patching._patch_river_segment_openapi,
+        openapi_patching._patch_model_instance_openapi,
+        openapi_patching._patch_hydro_run_openapi,
+        openapi_patching._patch_forecast_series_openapi,
         openapi_patching._patch_pipeline_openapi,
         openapi_patching._patch_runtime_openapi,
     ):

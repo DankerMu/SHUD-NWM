@@ -10,9 +10,10 @@ import {
 } from '@/components/map/M11MapLibreSurface'
 import type { BasinSegmentRow, LayerState, OverviewBasin } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
+import type { M11QueryState } from '@/lib/m11/queryState'
 import { m11VisualTokens } from '@/lib/m11/visualTokens'
 
-const state = {
+const state: M11QueryState = {
   ...defaultM11QueryState,
   source: 'gfs',
   cycle: '2026-05-18T00:00:00.000Z',
@@ -120,11 +121,14 @@ describe('M11 discharge shell contracts', () => {
   })
 
   it('suppresses every basin boundary and its map label source', () => {
-    const basins = [
+    const basins: OverviewBasin[] = [
       {
         basinId: 'basins_qhh',
         displayName: 'QHH',
         basinGroup: null,
+        parentBasinId: null,
+        level: 1,
+        qualityNote: null,
         areaKm2: null,
         riverCount: null,
         activeModelCount: 0,
@@ -138,7 +142,7 @@ describe('M11 discharge shell contracts', () => {
         bbox: { minLon: 98, minLat: 37, maxLon: 99, maxLat: 38 },
         unavailableReason: null,
       },
-    ] as OverviewBasin[]
+    ]
 
     expect(m11BasinBoundaryOverlayEnabled).toBe(false)
     expect(buildBasinFeatureCollection(basins, undefined).features).toEqual([])

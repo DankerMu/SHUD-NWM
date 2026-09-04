@@ -20,6 +20,7 @@ describe('model asset API types', () => {
       mesh_checksum: 'mesh-sha-1',
       shud_code_version: 'basins-shud',
       active_flag: false,
+      lifecycle_state: 'inactive',
       model_package_uri: 's3://nhms/models/basins_basin_a_shud/vbasins/package/',
       package_checksum: 'package-sha-1',
       manifest_uri: 's3://nhms/models/basins_basin_a_shud/vbasins/manifest.json',

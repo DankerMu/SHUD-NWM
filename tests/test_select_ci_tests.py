@@ -326,6 +326,7 @@ def test_select_tests_maps_openapi_artifact_to_drift_and_api_contract() -> None:
         "tests/test_api_contract.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        "tests/test_openapi_response_conformance.py",
         "tests/test_slurm_gateway_openapi_security.py",
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -7634,6 +7635,12 @@ INTENTIONAL_RULE_GAP_EXCLUSIONS: dict[tuple[str, str], str] = {
     ("workers/data_adapters/base.py", "tests/test_file_orchestration_migration.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_ifs_forecast_integration.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_monitoring_api.py"): "edge-consumer",
+    # #2022: the OpenAPI response-conformance suite validates TestClient bodies
+    # against the schemas in `openapi/nhms.v1.yaml`; it imports `cycle_id_for`
+    # to mint the cycle ids that seed the in-memory sqlite store behind the
+    # three `pipeline.py` metrics routes. Fixture material, not a subject — it
+    # is selected by `openapi/**`, the surface it actually contracts.
+    ("workers/data_adapters/base.py", "tests/test_openapi_response_conformance.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_pipeline_logs_artifacts.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_production_readiness_validation.py"): "edge-consumer",
     ("workers/data_adapters/base.py", "tests/test_scheduler_backfill.py"): "edge-consumer",

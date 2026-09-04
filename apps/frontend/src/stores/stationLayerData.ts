@@ -103,7 +103,7 @@ async function fetchAllStations(request: StationLayerRequest): Promise<StationLa
     }
 
     const product = context.source
-      ? await fetchHydroMetLatestProduct({ basinId: context.basinId, source: context.source, cycle: context.cycle })
+      ? await fetchHydroMetLatestProduct({ basinId: context.basinId, source: context.source, cycle: context.cycle ?? null })
       : null
     const stationIdentity = product
       ? { basinVersionId: product.basin_version_id, modelId: product.model_id }

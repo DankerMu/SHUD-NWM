@@ -32,7 +32,7 @@ describe('Playwright config helpers', () => {
 
   it('keeps the default mocked regression project explicitly named', async () => {
     const config = await import('../../playwright.config')
-    const projectNames = config.default.projects?.map((project: { name: string }) => project.name)
+    const projectNames = config.default.projects?.map((project) => project.name)
 
     expect(projectNames).toEqual(['mocked-regression-chromium'])
     expect(projectNames).not.toContain('chromium')

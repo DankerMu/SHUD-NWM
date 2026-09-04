@@ -392,7 +392,13 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           version: 10.11.0
-      - name: Install, build, typecheck, and test frontend
-        run: cd apps/frontend && pnpm install --frozen-lockfile && pnpm build && pnpm run check:types && pnpm test
+      - name: Install frontend dependencies
+        run: cd apps/frontend && pnpm install --frozen-lockfile
+      - name: Typecheck frontend
+        run: cd apps/frontend && pnpm typecheck
+      - name: Typecheck frontend tooling
+        run: cd apps/frontend && pnpm run check:types
+      - name: Build and test frontend
+        run: cd apps/frontend && pnpm build && pnpm test
       - name: Check frontend bundle size
         run: cd apps/frontend && pnpm check:bundle

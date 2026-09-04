@@ -34,7 +34,7 @@ vi.mock('@/api/client', () => ({
   },
 }))
 
-const failedJob = {
+const failedJob: PipelineJob = {
   job_id: 'job-failed',
   run_id: 'run-failed',
   cycle_id: 'cycle-1',
@@ -56,7 +56,7 @@ const failedJob = {
   duration_seconds: 120,
 }
 
-const runningJob = {
+const runningJob: PipelineJob = {
   job_id: 'job-running',
   run_id: 'run-running',
   cycle_id: 'cycle-1',
@@ -78,7 +78,7 @@ const runningJob = {
   duration_seconds: null,
 }
 
-const queuedJob = {
+const queuedJob: PipelineJob = {
   job_id: 'job-queued',
   run_id: 'run-queued',
   cycle_id: 'cycle-1',

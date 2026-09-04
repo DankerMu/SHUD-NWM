@@ -208,6 +208,12 @@ function stationSeriesResponse(
   }
 }
 
+// `client.GET` 是 openapi-fetch 的泛型重载函数，`vi.mocked(...).mock.calls` 因此推断成 `never[]`，
+// 无法直接解构。按调用实参的运行时形状（[path, init]）读成 `unknown[][]`。
+function apiGetCalls(): unknown[][] {
+  return vi.mocked(client.GET).mock.calls
+}
+
 describe('hydro-met query state', () => {
   it('normalizes supported source and RFC3339 cycle', () => {
     const state = parseHydroMetQueryState('source=ifs&cycle=2026-05-21T08:00:00%2B08:00')
@@ -463,7 +469,7 @@ describe('loadHydroMetBootstrap', () => {
 
     expect(result.status).toBe('strict-identity-mismatch')
     expect(result.latestReasons.join(' ')).toContain('run_id=other-run')
-    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
   it('normalizes runtime-shaped station inventory coordinates without losing river candidates', async () => {
@@ -491,7 +497,7 @@ describe('loadHydroMetBootstrap', () => {
 
     expect(result.status).toBe('cycle-unavailable')
     expect(result.latestReasons.join(' ')).toContain('避免混用产品')
-    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
   it('reports latest unavailable and incomplete products before station or river requests', async () => {
@@ -512,7 +518,7 @@ describe('loadHydroMetBootstrap', () => {
 
     expect(unavailable.status).toBe('latest-unavailable')
     expect(unavailable.latestReasons.join(' ')).toContain('NO_FORCING')
-    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
 
     vi.clearAllMocks()
     vi.mocked(client.GET).mockResolvedValueOnce({
@@ -525,7 +531,7 @@ describe('loadHydroMetBootstrap', () => {
     expect(incomplete.status).toBe('latest-incomplete')
     expect(incomplete.latestReasons.join(' ')).toContain('river_network_version_id 缺失')
     expect(incomplete.latestReasons.join(' ')).toContain('segment_count 不可展示')
-    expect(vi.mocked(client.GET).mock.calls.map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
+    expect(apiGetCalls().map(([path]) => path)).toEqual(['/api/v1/mvp/qhh/latest-product'])
   })
 
   it('keeps station and river partial failures separate without failing the whole bootstrap', async () => {

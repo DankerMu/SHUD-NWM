@@ -273,6 +273,7 @@ OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_api_contract.py",
     "tests/test_openapi_31_contract.py",
     "tests/test_openapi_drift.py",
+    "tests/test_openapi_response_conformance.py",
     "tests/test_slurm_gateway_openapi_security.py",
 )
 

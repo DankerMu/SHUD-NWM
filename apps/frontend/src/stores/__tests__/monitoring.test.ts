@@ -99,6 +99,10 @@ function makeJob(overrides: Partial<PipelineJob> = {}): PipelineJob {
     job_id: 'job-1',
     run_id: 'forecast-gfs-run-1',
     cycle_id: 'cycle-1',
+    // PipelineJob.run_type / scenario 在契约里是 required + nullable：后端不知道时写 null。
+    // 保持 null（而不是具体值）才不会遮蔽 normalizeJob 的 `?? inferRunType/inferScenario` 推断。
+    run_type: null,
+    scenario: null,
     job_type: 'forecast',
     slurm_job_id: '123',
     model_id: 'model-a',
