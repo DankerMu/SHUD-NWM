@@ -96,6 +96,18 @@ describe('M11FloatingLegend', () => {
     expect(screen.getByText('<500 m3/s')).toBeInTheDocument()
   })
 
+  it('sizes the card to its widest row instead of pinning a fixed width', () => {
+    // 布局宽度 jsdom 算不出来，能守住的是意图：卡片不许再带固定宽度类，
+    // 只保留一个上限。回填 w-56 之类的固定宽度会让这条变红。
+    render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} />)
+    const card = screen.getByTestId('m11-floating-legend')
+    const classes = card.className.split(/\s+/)
+
+    expect(classes).toContain('w-max')
+    expect(classes.filter((name) => /^w-(?!max$|fit$)/.test(name))).toHaveLength(0)
+    expect(classes.some((name) => name.startsWith('max-w-'))).toBe(true)
+  })
+
   it('keeps the legend tied to the hydrology layer while stations are an overlay', () => {
     render(<M11FloatingLegend layer="discharge" layers={[{ ...dischargeLayer, legend: [] }]} />)
     expect(screen.getByText('径流量图例')).toBeInTheDocument()
