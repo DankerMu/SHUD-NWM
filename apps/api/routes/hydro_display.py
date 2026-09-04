@@ -3,14 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Generator
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -107,6 +108,40 @@ TILE_Y_DESCRIPTION = (
     f"Web Mercator XYZ tile row. Global schema bounds are 0..{MVT_MAX_TILE_COORDINATE} "
     f"for max zoom {MVT_MAX_ZOOM}; each request also enforces 0 <= y < 2^z."
 )
+
+# RFC3339 at seconds precision, with an optional fractional part and a
+# mandatory offset: `2026-09-02T12:00:00Z`, `...T12:00:00.000Z`,
+# `...T12:00:00+00:00`, `...T20:00:00+08:00`. A fractional part is matched here
+# and rejected later by `_require_seconds_precision_instant`, so `.000` still
+# canonicalizes while `.500` gets the precision message rather than a shape one.
+_RFC3339_INSTANT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+
+
+def _reject_non_rfc3339_instant_text(value: Any) -> Any:
+    """Gate the raw path segment before pydantic's lax datetime coercion runs.
+
+    `cycle: datetime` on its own accepts spellings the tile contract does not
+    define an answer for: a bare Unix epoch (`1756814400` -> 2025-09-02T12:00Z),
+    an offset-less `2026-09-02T12:00:00`, and a space-separated
+    `2026-09-02 12:00:00` all coerce and reach the tile SQL. The contract's
+    "Invalid tile" scenario requires a 422 without expensive SQL instead, so the
+    string shape is checked first and the value handed on unchanged for pydantic
+    to parse.
+
+    Raises `ValueError`, never `ApiError`: only `ValueError`/`AssertionError`
+    become a `RequestValidationError`, which the app's handler renders as the
+    same 422 `VALIDATION_ERROR` an out-of-enum `source` produces. Any other
+    exception escapes dependency solving as a 500.
+    """
+    if isinstance(value, str) and not _RFC3339_INSTANT_RE.match(value):
+        raise ValueError("Input should be an RFC3339 instant, e.g. 2026-09-02T12:00:00Z")
+    return value
+
+
+# Only the canonical `{source}/{cycle}` national route uses this. The legacy
+# routes' `valid_time: datetime` laxness is pre-existing and deliberately left
+# alone here.
+Rfc3339Instant = Annotated[datetime, BeforeValidator(_reject_non_rfc3339_instant_text)]
 
 
 class Layer(BaseModel):
@@ -354,9 +389,9 @@ def hydro_national_source_cycle_mvt_tile(
     # `$ref` into `components/schemas`, which the hand-maintained
     # `openapi/nhms.v1.yaml` would then have to mirror in a second place.
     source: Literal["gfs", "ifs"],
-    cycle: datetime,
+    cycle: Rfc3339Instant,
     variable: str,
-    valid_time: datetime,
+    valid_time: Rfc3339Instant,
     z: int,
     x: int,
     y: int,
@@ -364,10 +399,12 @@ def hydro_national_source_cycle_mvt_tile(
 ) -> Response:
     """Canonical national discharge tile for one (source, cycle) identity; 424 when it has no display-ready run."""
     # `cycle` / `valid_time` are RFC3339 at seconds precision
-    # (`YYYY-MM-DDTHH:MM:SSZ`); `...T12:00:00.000Z` and `...T12:00:00+00:00` are
-    # accepted and canonicalize onto it. Every check below runs before the
-    # session is touched, so a bad variable/z/x/y costs no SQL; `source` and
-    # `cycle` are rejected by FastAPI itself, ahead of this body.
+    # (`YYYY-MM-DDTHH:MM:SSZ`); `...T12:00:00.000Z`, `...T12:00:00+00:00` and a
+    # non-UTC `...T20:00:00+08:00` are accepted and canonicalize onto it. Every
+    # check below runs before the session is touched, so a bad variable/z/x/y
+    # costs no SQL; `source` and the two instants' STRING SHAPE are rejected by
+    # FastAPI itself (`Rfc3339Instant`), ahead of this body, and what remains
+    # here is the seconds-precision and in-range checks pydantic cannot express.
     validate_identifier(variable, "variable")
     _validate_supported_hydro_variable(variable)
     validate_xyz(z, x, y)
@@ -1062,14 +1099,21 @@ def _format_time(value: Any) -> str:
 
 
 def _require_seconds_precision_instant(value: datetime, field_name: str) -> datetime:
-    """Reject a sub-second instant, and normalize the accepted ones to UTC.
+    """Reject a sub-second or out-of-range instant, and normalize the rest to UTC.
 
     `canonical_mvt_time` does not truncate: a non-zero microsecond round-trips
     as `...:00.500000Z`. Truncating one here would serve the `12:00:00` tile
     under a `12:00:00.500Z` request, so this is a 422 instead. The
     zero-microsecond spellings the contract is written for -- `...T12:00:00Z`,
-    `...T12:00:00.000Z`, `...T12:00:00+00:00` -- are all accepted and collapse
-    onto one instant, one SQL bind and one cache key.
+    `...T12:00:00.000Z`, `...T12:00:00+00:00`, and a non-UTC
+    `...T20:00:00+08:00` -- are all accepted and collapse onto one instant, one
+    SQL bind and one cache key.
+
+    The conversion is guarded because it can leave `datetime`'s representable
+    range: `9999-12-31T23:59:59-08:00` is well-formed RFC3339 (so the string
+    shape gate passes it) and `astimezone(UTC)` then raises `OverflowError`,
+    which would surface as an HTTP 500 on a public URL. It is a bad request, so
+    it gets the same 422 every other rejected instant gets.
     """
     if value.microsecond:
         raise ApiError(
@@ -1078,7 +1122,15 @@ def _require_seconds_precision_instant(value: datetime, field_name: str) -> date
             message="Tile time instants must be RFC3339 with seconds precision.",
             details={field_name: value.isoformat(), "expected_format": "YYYY-MM-DDTHH:MM:SSZ"},
         )
-    return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    try:
+        return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    except (OverflowError, ValueError) as exc:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Tile time instants must be representable in UTC.",
+            details={field_name: value.isoformat(), "expected_format": "YYYY-MM-DDTHH:MM:SSZ"},
+        ) from exc
 
 
 def _national_source_cycle_tile_input(

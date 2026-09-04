@@ -103,6 +103,25 @@ _IFS_CYCLE_TIME = _CYCLE_TIME + timedelta(hours=6)
 _IFS_WINDOW_START = _IFS_CYCLE_TIME
 _IFS_WINDOW_END = _IFS_CYCLE_TIME + timedelta(hours=2)
 
+# #2007's two competing-run cases. Both rival runs are display-ready and cover
+# `_WINDOW_END`, so the ONLY thing that can keep them out of the answer is the
+# bound identity.
+#
+# `run_id` is one of the layer's public tile columns
+# (`_mvt_public_tile_columns("hydro-national")`), and MVT string values are
+# plain UTF-8 in the protobuf, so it is the discriminator these cases assert on:
+# segment ids and the network id are IDENTICAL across runs, so the shared
+# `_assert_tile_carries_the_seeded_features` cannot tell two runs apart.
+#
+# The ids below deliberately neither contain nor are contained in `_RUN_ID`
+# (`it1596_forecast_run`, which IS a prefix of `_IFS_RUN_ID`), because a
+# substring would make `not in response.content` silently unfalsifiable.
+_LATE_CYCLE_TIME = _CYCLE_TIME + timedelta(hours=1)
+_LATE_GFS_RUN_ID = "it2007_gfs_late_cycle_run"
+_LATE_GFS_FORCING_VERSION_ID = "it2007_forcing_gfs_late_v1"
+_SAME_CYCLE_IFS_RUN_ID = "it2007_ifs_same_cycle_run"
+_SAME_CYCLE_IFS_FORCING_VERSION_ID = "it2007_forcing_ifs_same_cycle_v1"
+
 _ZOOM = 9
 
 
@@ -334,6 +353,105 @@ def _seed_uppercase_ifs_run(database_url: str) -> None:
         connection.close()
 
 
+def _seed_rival_display_ready_run(
+    database_url: str,
+    *,
+    run_id: str,
+    source_id: str,
+    forcing_version_id: str,
+    cycle_time: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    value_base: float,
+    new_data_source_name: str | None = None,
+) -> None:
+    """A second display-ready run on the SAME model/network, seeded per case (#2007).
+
+    Deliberately a separate helper from ``_seed_uppercase_ifs_run`` rather than
+    a generalization of it: that one backs a case the suite already runs green,
+    and these cases have to be able to fail on their own predicate rather than
+    on a shared-fixture change.
+
+    Like every display-ready run here it needs its own ``met.forcing_version``
+    row (the coverage window is a GREATEST/LEAST against the forcing window, so
+    without one the window is NULL and the case collapses onto the no-coverage
+    branch) and complete rows at BOTH window endpoints (the window's endpoints
+    are a MIN/MAX over instants whose ``segment_count`` equals the network's).
+    ``new_data_source_name`` inserts the ``met.data_source`` parent when the
+    source is not the one ``_seed`` already registered.
+    """
+    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            if new_data_source_name is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO met.data_source
+                        (source_id, source_name, source_type, status, native_format, adapter_name)
+                    VALUES (%s, %s, 'forecast', 'mock', 'netcdf', %s)
+                    """,
+                    (source_id, new_data_source_name, source_id.lower()),
+                )
+            cursor.execute(
+                """
+                INSERT INTO met.forcing_version
+                    (forcing_version_id, model_id, source_id, cycle_time, start_time, end_time,
+                     station_count, forcing_package_uri, checksum)
+                VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s)
+                """,
+                (
+                    forcing_version_id,
+                    _MODEL_ID,
+                    source_id,
+                    cycle_time,
+                    window_start,
+                    window_end,
+                    f"s3://nhms/forcing/{forcing_version_id}/",
+                    f"forcing-sha-{forcing_version_id}",
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO hydro.hydro_run
+                    (run_id, run_type, scenario_id, model_id, basin_version_id, forcing_version_id,
+                     source_id, cycle_time, start_time, end_time, status, run_manifest_uri)
+                VALUES (%s, 'forecast', 'sc', %s, %s, %s, %s, %s, %s, %s, 'parsed', 's3://nhms/manifest')
+                """,
+                (
+                    run_id,
+                    _MODEL_ID,
+                    _BASIN_VERSION_ID,
+                    forcing_version_id,
+                    source_id,
+                    cycle_time,
+                    window_start,
+                    window_end,
+                ),
+            )
+            insert_river_timeseries_dual_written(
+                cursor,
+                [
+                    (
+                        run_id,
+                        _BASIN_VERSION_ID,
+                        _NETWORK_ID,
+                        segment_id,
+                        valid_time,
+                        lead,
+                        _VARIABLE,
+                        value_base + index,
+                        "m3/s",
+                        "ok",
+                    )
+                    for lead, valid_time in enumerate((window_start, window_end))
+                    for index, segment_id in enumerate(_SEGMENT_IDS)
+                ],
+            )
+    finally:
+        connection.close()
+
+
 def _refresh_coverage(database_url: str, run_id: str = _RUN_ID) -> None:
     connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
     try:
@@ -534,3 +652,153 @@ def test_national_identity_tile_matches_an_uppercase_source_id_from_a_lowercase_
     )
     # The gfs identity has no run at the IFS cycle, so it stays fail-closed.
     _assert_probe_said_no_data(_request_identity_tile(client, "gfs", _IFS_CYCLE_TIME, _IFS_WINDOW_END))
+
+
+# --- #2007: two competing runs, one bound identity -------------------------
+#
+# Both cases below exist because the whole suite stayed GREEN when the
+# `:source` / `:cycle` predicates were deleted from the tile SQL on node-27.
+# The three pre-#2007 cases never have two rival runs covering one instant, and
+# the two #2007 cases that do assert only 200-vs-424 -- so nothing anywhere
+# proved that a bound identity actually SELECTS its own run rather than the
+# newest one. That is the "同一张图 gfs/IFS 混源" failure this issue exists to
+# fix: a 200 whose bytes come from the wrong run.
+
+
+def _assert_both_runs_are_candidates_at(database_url: str, run_ids: tuple[str, str], valid_time: datetime) -> None:
+    """Non-vacuity: neither rival run is excluded by anything except the identity.
+
+    Without this, a case that seeds a rival with (say) a NULL coverage window
+    would still "pass" -- the rival was never in the running, so the assertion
+    that its `run_id` is absent proves nothing about the bound predicate.
+    """
+    for run_id in run_ids:
+        coverage = _query(
+            database_url,
+            """
+            SELECT segment_count, river_valid_time_start, river_valid_time_end
+            FROM hydro.run_display_coverage WHERE run_id = %s
+            """,
+            (run_id,),
+        )
+        assert len(coverage) == 1, f"{run_id} has no coverage row, so it is not a candidate at all"
+        assert coverage[0]["segment_count"] > 0, run_id
+        assert coverage[0]["river_valid_time_start"] <= valid_time <= coverage[0]["river_valid_time_end"], run_id
+        rows = _query(
+            database_url,
+            "SELECT COUNT(*) AS n FROM hydro.river_timeseries WHERE run_id = %s AND valid_time = %s",
+            (run_id, valid_time),
+        )
+        assert rows[0]["n"] == len(_SEGMENT_IDS), f"{run_id} has no fact rows at {valid_time}"
+
+
+def _assert_tile_was_painted_by(response: Any, expected_run_id: str, rejected_run_id: str) -> None:
+    """The run identity in the tile bytes, which is the only thing that differs.
+
+    `_assert_tile_carries_the_seeded_features` checks segment ids and the
+    network id; both rival runs share all of those, so it passes no matter which
+    run painted the tile. `run_id` is a public tile column for this layer and
+    MVT string values are plain UTF-8 in the protobuf, so both directions are
+    readable straight off the bytes.
+    """
+    _assert_tile_carries_the_seeded_features(response)
+    assert expected_run_id not in rejected_run_id and rejected_run_id not in expected_run_id, (
+        "one run id must not be a substring of the other, or the negative assertion is unfalsifiable"
+    )
+    assert expected_run_id.encode() in response.content, expected_run_id
+    assert rejected_run_id.encode() not in response.content, rejected_run_id
+
+
+def test_national_identity_tile_serves_the_requested_cycle_not_the_newest_one(national_tile: Any) -> None:
+    """Same source, two cycles: the OLDER cycle must not be answered by the newer run.
+
+    Run selection is `DISTINCT ON (river_network_version_id) ... ORDER BY
+    h.cycle_time DESC`, so with the `:cycle` predicate deleted BOTH requests
+    below would be painted by the late run -- a request for an old cycle served
+    with the newest cycle's discharge, silently, at HTTP 200. Making an old
+    identity addressable is the entire point of the issue, so this is its
+    behavioral oracle.
+
+    The legacy source-less route is asserted alongside precisely to show that
+    newest-wins IS the unbound default: it still picks the late run, and only
+    the bound cycle overrides it.
+    """
+    database_url, client = national_tile
+    _seed_rival_display_ready_run(
+        database_url,
+        run_id=_LATE_GFS_RUN_ID,
+        source_id=_SOURCE_ID,
+        forcing_version_id=_LATE_GFS_FORCING_VERSION_ID,
+        cycle_time=_LATE_CYCLE_TIME,
+        window_start=_LATE_CYCLE_TIME,
+        window_end=_WINDOW_END,
+        value_base=300.0,
+    )
+    _refresh_coverage(database_url)
+    _refresh_coverage(database_url, _LATE_GFS_RUN_ID)
+    _assert_both_runs_are_candidates_at(database_url, (_RUN_ID, _LATE_GFS_RUN_ID), _WINDOW_END)
+    same_source_runs = _query(
+        database_url,
+        "SELECT run_id FROM hydro.hydro_run WHERE source_id = %s ORDER BY cycle_time",
+        (_SOURCE_ID,),
+    )
+    assert same_source_runs == [{"run_id": _RUN_ID}, {"run_id": _LATE_GFS_RUN_ID}], (
+        "both rivals must be the SAME source, or :cycle is not what is under test"
+    )
+
+    _assert_tile_was_painted_by(
+        _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END), _RUN_ID, _LATE_GFS_RUN_ID
+    )
+    _assert_tile_was_painted_by(
+        _request_identity_tile(client, "gfs", _LATE_CYCLE_TIME, _WINDOW_END), _LATE_GFS_RUN_ID, _RUN_ID
+    )
+    # Unbound default, unchanged: newest cycle wins.
+    _assert_tile_was_painted_by(_request_tile(client, _WINDOW_END), _LATE_GFS_RUN_ID, _RUN_ID)
+
+
+def test_national_identity_tile_serves_the_requested_source_not_the_other_one_at_that_cycle(
+    national_tile: Any,
+) -> None:
+    """Same cycle, two sources: neither request may be painted by the other source's run.
+
+    This is the mutation that survives everything else in the repo -- deleting
+    the identity pair from the `latest_runs` DATA CTE alone, leaving the probe
+    and the digest bound. The probe still answers 1, so the route still returns
+    200, and the CTE paints the other source's discharge.
+
+    Both runs share `cycle_time`, so the unbound tie-break is `ORDER BY h.run_id
+    DESC`: `it2007_ifs_same_cycle_run` sorts above `it1596_forecast_run`, which
+    makes the `gfs` request the direction the mutation actually bites. The `ifs`
+    direction is asserted for symmetry -- it is the one that would break if the
+    predicate were inverted or the case-folding dropped.
+    """
+    database_url, client = national_tile
+    _seed_rival_display_ready_run(
+        database_url,
+        run_id=_SAME_CYCLE_IFS_RUN_ID,
+        source_id=_IFS_SOURCE_ID,
+        forcing_version_id=_SAME_CYCLE_IFS_FORCING_VERSION_ID,
+        cycle_time=_CYCLE_TIME,
+        window_start=_WINDOW_START,
+        window_end=_WINDOW_END,
+        value_base=400.0,
+        new_data_source_name="IFS 2007 same cycle",
+    )
+    _refresh_coverage(database_url)
+    _refresh_coverage(database_url, _SAME_CYCLE_IFS_RUN_ID)
+    _assert_both_runs_are_candidates_at(database_url, (_RUN_ID, _SAME_CYCLE_IFS_RUN_ID), _WINDOW_END)
+    assert _query(
+        database_url,
+        "SELECT run_id, source_id FROM hydro.hydro_run WHERE cycle_time = %s ORDER BY run_id",
+        (_CYCLE_TIME,),
+    ) == [
+        {"run_id": _RUN_ID, "source_id": _SOURCE_ID},
+        {"run_id": _SAME_CYCLE_IFS_RUN_ID, "source_id": _IFS_SOURCE_ID},
+    ], "both rivals must share the cycle, or :source is not what is under test"
+
+    _assert_tile_was_painted_by(
+        _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END), _RUN_ID, _SAME_CYCLE_IFS_RUN_ID
+    )
+    _assert_tile_was_painted_by(
+        _request_identity_tile(client, "ifs", _CYCLE_TIME, _WINDOW_END), _SAME_CYCLE_IFS_RUN_ID, _RUN_ID
+    )

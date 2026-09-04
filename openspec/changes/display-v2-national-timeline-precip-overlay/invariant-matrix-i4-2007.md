@@ -32,12 +32,23 @@ bound as `:source` / `:cycle`, spelled through `canonical_mvt_time` (`YYYY-MM-DD
    bind passes every fake-session test and only fails against a real driver.
    Consequence for the shape assertion: the literal contiguous string
    `lower(h.source_id) = :source AND h.cycle_time = :cycle` appears ZERO times. This decision
-   **supersedes** issue #2007's acceptance-criterion wording ("形状测试断言 ... `lower(h.source_id) =
-   :source AND h.cycle_time = :cycle` 出现在 ... 两处"): that AC was written before the legacy
-   pass-through form was chosen, and no guard form can satisfy both it and an unchanged legacy route.
-   The AC bullet in the issue body has been amended to match. What is asserted instead: each
-   sub-predicate located separately at each of the two sites, plus the NULL guard itself, so the legacy
-   pass-through is locked too.
+   **supersedes** issue #2007's acceptance-criterion wording, and the AC bullet has been amended to match.
+
+   **Correction (post cross-review).** An earlier version of this file justified the supersession by
+   claiming no guard form could satisfy both the contiguous-string AC and an unchanged legacy route.
+   That claim was FALSE. This form satisfies both, keeps the contiguous string verbatim, declares
+   exactly the binds `['cycle','source']`, and preserves legacy pass-through when both are NULL:
+
+   ```sql
+   AND ((CAST(:source AS text) IS NULL AND CAST(:cycle AS timestamptz) IS NULL)
+        OR (lower(h.source_id) = :source AND h.cycle_time = :cycle))
+   ```
+
+   The real and sufficient justification is that the assertion chosen is **strictly stronger**: locating
+   each sub-predicate separately at each of the two sites, plus asserting the NULL guard, plus asserting
+   no `:source::text`-style phantom bind, rejects the half-bound implementation that a contiguous-string
+   match satisfies whenever both occurrences land in the data CTE — which is exactly the bug D1 warns
+   about. The supersession was a deliberate trade, not a forced move.
 2. **Sub-second instants.** `canonical_mvt_time` does not truncate: a datetime with non-zero
    microseconds round-trips as `...:00.500000Z`. The new route therefore accepts the zero-microsecond
    spellings the contract is written for (`...T12:00:00.000Z`, `...T12:00:00+00:00`, `...T12:00:00Z`)

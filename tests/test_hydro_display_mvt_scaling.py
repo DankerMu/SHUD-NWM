@@ -562,6 +562,18 @@ def test_national_tile_sql_binds_source_and_cycle_at_both_run_selection_sites() 
     assert not binds & {"sourc", "cycl"}
 
 
+def test_national_discharge_query_version_is_pinned_to_the_literal_the_spec_names() -> None:
+    """A literal, not the imported constant.
+
+    Every other assertion on this constant imports it from the module under
+    test and interpolates it, so reverting the value would keep them all green
+    while silently un-rotating the cache key that #2007's new run selection
+    requires. The spec names `fair-network-budget-v5`; this is the only place
+    the repo says so.
+    """
+    assert NATIONAL_DISCHARGE_QUERY_VERSION == "fair-network-budget-v5"
+
+
 def test_sibling_tile_layers_carry_no_source_or_cycle_bind() -> None:
     for layer in ("hydro", "river-network-national", "river-network", "met-stations"):
         layer_sql = postgis_tile_sql(layer)
@@ -717,8 +729,19 @@ def _request_national_identity_tile(
 def test_national_identity_route_collapses_time_spellings_onto_one_bind_and_one_cache_key(
     monkeypatch: Any, tmp_path: Any
 ) -> None:
-    """`.000Z`, `+00:00` and `Z` are one instant, one `:cycle` bind, one cache entry."""
-    spellings = ("2026-09-02T12:00:00.000Z", "2026-09-02T12:00:00+00:00", "2026-09-02T12:00:00Z")
+    """`.000Z`, `+00:00`, `+08:00` and `Z` are one instant, one `:cycle` bind, one cache entry.
+
+    `+08:00` is here because the RFC3339 shape gate (#2007 F4) must not narrow
+    the accepted spellings to UTC: `2026-09-02T20:00:00+08:00` is the SAME
+    instant as the other three and must collapse onto the same canonical
+    `2026-09-02T12:00:00Z` bind and cache key, not a fourth one.
+    """
+    spellings = (
+        "2026-09-02T12:00:00.000Z",
+        "2026-09-02T12:00:00+00:00",
+        "2026-09-02T20:00:00+08:00",
+        "2026-09-02T12:00:00Z",
+    )
     keys: list[str] = []
     binds: list[Any] = []
     captured: list[TileInput] = []
@@ -773,6 +796,23 @@ def test_national_identity_route_gives_two_identities_two_cache_keys(monkeypatch
         _national_identity_url("gfs", "not-an-instant"),
         _national_identity_url("gfs", quote("2026-09-02T12:00:00.500Z", safe="")),
         _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time=quote("2026-09-03T00:00:00.500Z", safe="")),
+        # Spellings `cycle: datetime` coerces on its own, all of which reached
+        # the tile SQL with a 200 before the RFC3339 shape gate: a bare Unix
+        # epoch (which silently became 2025-09-02T12:00:00Z), an offset-less
+        # local-looking instant, and a space-separated one.
+        _national_identity_url("gfs", "1756814400"),
+        _national_identity_url("gfs", "2026-09-02T12:00:00"),
+        _national_identity_url("gfs", quote("2026-09-02 12:00:00", safe="")),
+        # The same three in the `valid_time` position: the gate is on BOTH
+        # instants, and a `cycle`-only gate would leave half the route lax.
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time="1756814400"),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time="2026-09-03T00:00:00"),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time=quote("2026-09-03 00:00:00", safe="")),
+        # Well-formed RFC3339 that leaves `datetime`'s range once shifted to
+        # UTC: the shape gate passes it and `astimezone` raised `OverflowError`,
+        # i.e. an HTTP 500 from a public URL. It is a bad request, so it is 422.
+        _national_identity_url("gfs", quote("9999-12-31T23:59:59-08:00", safe="")),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time=quote("9999-12-31T23:59:59-08:00", safe="")),
     ],
 )
 def test_national_identity_route_rejects_a_bad_identity_before_running_any_sql(url: str) -> None:
@@ -785,6 +825,52 @@ def test_national_identity_route_rejects_a_bad_identity_before_running_any_sql(u
         app.dependency_overrides.clear()
 
     assert response.status_code == 422, response.text
+    # One rejection contract for the whole route, whichever layer rejects:
+    # FastAPI's own path validation (`source`, and the RFC3339 shape gate) and
+    # the route body's `ApiError` (sub-second, out-of-UTC-range) must be
+    # indistinguishable to a client.
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR", response.text
+
+
+def _legacy_national_url(valid_time: str = "2026-09-03T00:00:00Z") -> str:
+    return (
+        f"{_NATIONAL_ROUTE_PREFIX}/q_down/{valid_time}"
+        f"/{_NATIONAL_TILE_Z}/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"
+    )
+
+
+@pytest.mark.parametrize(
+    ("route_name", "url"),
+    [
+        ("identity", _national_identity_url("gfs", "2026-09-02T12:00:00Z")),
+        ("legacy", _legacy_national_url()),
+    ],
+)
+def test_every_national_tile_sql_bind_is_supplied_by_the_route_that_executes_it(
+    route_name: str, url: str, monkeypatch: Any, tmp_path: Any
+) -> None:
+    """No bind in the national tile SQL may be missing from a call site's params.
+
+    `text()` raises `StatementError: A value is required for bind parameter
+    'source'` at execution time, so a bind added to the SQL without a matching
+    param is a RUNTIME failure that no fake-session test sees: this file's fake
+    session ignores its params entirely, and the real-DB suites that would catch
+    it are opt-in. That is exactly how #2007's first pass left four cases in
+    `test_river_ts_read_path_surrogate_keys_integration.py` broken. This case
+    compares the two sets directly instead of trusting a human to remember.
+    """
+    declared = set(text(postgis_tile_sql("hydro-national"))._bindparams)
+    # Non-vacuity: an empty or truncated `declared` would make the subset check
+    # below pass for any call site at all.
+    assert {"source", "cycle", "variable", "valid_time", "z", "x", "y"} <= declared
+
+    session = _NationalRouteSession()
+    response, _captured = _request_national_identity_tile(url, session, monkeypatch, tmp_path)
+
+    assert response.status_code == 200, response.text
+    assert len(session.tile_params) == 1
+    supplied = set(session.tile_params[0])
+    assert declared - supplied == set(), f"{route_name} route omits binds the SQL declares"
 
 
 def test_runtime_openapi_documents_the_national_identity_tile_route() -> None:
