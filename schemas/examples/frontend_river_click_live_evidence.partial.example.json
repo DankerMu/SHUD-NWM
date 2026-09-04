@@ -1,0 +1,31 @@
+{
+  "artifact": "nhms-frontend-river-click-live-evidence",
+  "schema_version": "1.0",
+  "status": "BLOCKED",
+  "generated_at": "2026-09-02T01:00:01Z",
+  "started_at": "2026-09-02T01:00:00Z",
+  "ended_at": "2026-09-02T01:00:01Z",
+  "threshold_ms": 2000,
+  "percentile_method": "nearest-rank",
+  "warmup_count": 0,
+  "accepted_count": 0,
+  "origins": {
+    "frontend": null,
+    "api": null
+  },
+  "requested_feature": null,
+  "rendered_feature": null,
+  "gfs": null,
+  "ifs": null,
+  "warmup": null,
+  "samples": [],
+  "p95_ms": null,
+  "failure": {
+    "code": "REQUIRED_ENV_MISSING",
+    "stage": "runtime",
+    "sample_index": null,
+    "gfs_status": null,
+    "ifs_status": null,
+    "message": "missing required river-click live evidence env: PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH"
+  }
+}

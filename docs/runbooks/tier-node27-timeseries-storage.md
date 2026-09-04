@@ -2606,6 +2606,113 @@ E4 receipt，autovacuum 刷新统计后、无 schema 变更）翻为 Bitmap Inde
   消亡。000052 之后**不再需要**——不要把它固化进任何回填脚本，那只救一个消费者
   并掩盖根因。
 
+### 4.9 Frontend `/` river-click GFS+IFS P95 evidence (#1970 → #1895 task 4.0)
+
+The frontend river-click `P95 < 2 s` gate (also §4.0 stop-table G7) has a
+shipping browser oracle after #1970: the public `/` map route, a gated
+read-only hook, and a no-mock serial sampler that publishes a schema-1.0
+mode-0600 no-clobber receipt. **This section documents the exact merged
+command; it does not claim a live PASS — #1895 owns the node-27 execution and
+acceptance.**
+
+- **Only five env keys are read.** `PLAYWRIGHT_LIVE_BASE_URL`,
+  `PLAYWRIGHT_LIVE_API_BASE_URL` (both bare HTTP(S) origins, root pathname, no
+  userinfo/query/fragment), `PLAYWRIGHT_LIVE_RIVER_BASIN_ID`,
+  `PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID` (current live M11 pins — never copied from
+  a historical receipt), and `PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH`
+  (absolute canonical path whose basename matches
+  `nhms-frontend-river-click-live-evidence-[A-Za-z0-9._-]{1,96}.json`).
+  Supplying any `PLAYWRIGHT_LIVE_RIVER_RUN_ID` / `_MODEL_ID` /
+  `_BASIN_VERSION_ID` / `_RIVER_NETWORK_VERSION_ID` / `_CYCLE_TIME` /
+  `_SCENARIO` override is a config FAIL. A **missing/unsafe receipt path**
+  writes no file (BLOCKED diagnostic). A **supplied safe receipt path** with a
+  missing URL publishes one `REQUIRED_ENV_MISSING` BLOCKED receipt; with a
+  missing/invalid pin, malformed URL, or forbidden override it publishes one
+  `CONFIG_INVALID` FAIL receipt.
+- **Current-run binding** — create one new private run root and one unique
+  absent receipt before each command; record the command start/end bracket and
+  exit code; this is what ties the artifact to THIS run, not a shared
+  test-results directory:
+
+  ```bash
+  REPO_ROOT="/home/nwm/NWM"
+  RUN_ROOT=$(mktemp -d "$REPO_ROOT/.nhms-issue1895-riverclick-XXXXXX")
+  test -d "$RUN_ROOT"    # exclusive direct creation; never mkdir -p reuse
+  chmod 0700 "$RUN_ROOT"
+  test "$(stat -c '%u' "$RUN_ROOT")" = "$(id -u)"
+  test "$(stat -c '%a' "$RUN_ROOT")" = "700"
+  RECEIPT="$RUN_ROOT/nhms-frontend-river-click-live-evidence-$(date -u +%Y%m%dT%H%M%SZ).json"
+  CMD_START=$(date -u +%s)
+  test ! -e "$RECEIPT"   # must be absent; the publisher never overwrites
+  ```
+
+- **Exact merged command** (one worker, zero retries; the pre-start hook flag
+  is set inside the spec via `page.addInitScript`, never in the page URL; the
+  command runs from REPO_ROOT and resolves the frontend package importer with
+  `pnpm --dir` — the repo root has no package.json — so binder `schemas/...`
+  paths also resolve, pinned to the package manager version):
+
+  ```bash
+  cd "$REPO_ROOT" || { echo "BLOCKED: REPO_ROOT unreachable"; exit 1; }
+  set +e; \
+  PLAYWRIGHT_LIVE_BASE_URL="${PLAYWRIGHT_LIVE_BASE_URL-}" \
+  PLAYWRIGHT_LIVE_API_BASE_URL="${PLAYWRIGHT_LIVE_API_BASE_URL-}" \
+  PLAYWRIGHT_LIVE_RIVER_BASIN_ID="${PLAYWRIGHT_LIVE_RIVER_BASIN_ID-}" \
+  PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID="${PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID-}" \
+  PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH="$RECEIPT" \
+  corepack pnpm@10.11.0 --dir "$REPO_ROOT/apps/frontend" run test:e2e:live-river-click; \
+  CMD_EXIT=$?; set -e; \
+  CMD_END=$(date -u +%s)
+  test "$CMD_EXIT" = "0"
+  ```
+
+- **Schema/readback acceptance.** `#1895` accepts only a receipt that is
+  valid against `schemas/frontend_river_click_live_evidence.schema.json`
+  (the semantic validator in `playwright.river-click-evidence.ts` enforces the
+  same closed bounds before write), schema-`1.0` artifacts
+  `nhms-frontend-river-click-live-evidence`, parent
+  mode 0700, file mode 0600 and link count 1, `status=PASS`,
+  `warmup_count=1` (one complete discarded warmup), `accepted_count=20`,
+  exactly 20 indexed samples, `percentile_method=nearest-rank`,
+  `p95_ms < 2000` (equality fails `THRESHOLD_EXCEEDED`), `failure=null`,
+  non-null origins/requested+rendered features/GFS+IFS identities, and
+  `started_at <= ended_at == generated_at` (parsed, not lexicographic).
+
+  Executable binder (run with `set -euo pipefail`; Node-20 stdlib single file,
+  no runtime dependency; **PASS-only acceptance** — it rejects every non-PASS
+  terminal; strict UTC RFC3339 calendar-valid timestamps, never permissive
+  `Date.parse` and never lexicographic; the nearest-rank P95 is recomputed
+  from the actual durations and every violated fact is one bounded fixed-shaped
+  `BINDER:` line with exit 1 — no path/origin/identity/OS-error echo):
+
+  ```bash
+  test -f "$RECEIPT" && test ! -L "$RECEIPT"    # regular file, not a symlink
+  test "$(stat -c '%u' "$RECEIPT")" = "$(id -u)"
+  test "$(stat -c '%a' "$(dirname "$RECEIPT")")" = "700"
+  test "$(stat -c '%u' "$(dirname "$RECEIPT")")" = "$(id -u)"
+  test "$CMD_START" -le "$(stat -c '%Y' "$RECEIPT")"
+  test "$(stat -c '%Y' "$RECEIPT")" -le "$CMD_END"
+  test "$(stat -c '%s' "$RECEIPT")" -le 262144
+  test "$(stat -c '%a' "$RECEIPT")" = "600"
+  test "$(stat -c '%h' "$RECEIPT")" = "1"
+  uv run check-jsonschema --schemafile schemas/frontend_river_click_live_evidence.schema.json "$RECEIPT"
+  node "$REPO_ROOT/apps/frontend/scripts/river-click-receipt-binder.mjs" \
+    --receipt "$RECEIPT" \
+    --frontend-origin "$PLAYWRIGHT_LIVE_BASE_URL" \
+    --api-origin "$PLAYWRIGHT_LIVE_API_BASE_URL" \
+    --basin-id "$PLAYWRIGHT_LIVE_RIVER_BASIN_ID" \
+    --segment-id "$PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID" \
+    --cmd-start "$CMD_START" --cmd-end "$CMD_END"
+  ```
+
+- **Stop behavior.** Missing/unsafe path → bounded `BLOCKED:` stderr
+  diagnostic and no file. Missing/invalid pin, invalid URL/path, product/
+  geometry absence, missing hook, hook rejection, sample/request/network/
+  chart/timing error, per-sample or whole-run timeout, or `p95_ms >= 2000` →
+  `FAIL` receipt published before a nonzero exit. Publication failure (target
+  exists, parent identity drift, fsync/link/unlink/readback uncertainty) is
+  terminal failure and never overwrites an older artifact.
+
 ## 8. Gated DB retention (`timeseries-db-retention`)
 
 The retention runner

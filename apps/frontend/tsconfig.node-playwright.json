@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM"],
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "playwright.river-click-evidence.ts",
+    "playwright.river-click-evidence-owner.ts",
+    "playwright.river-click-lane.ts",
+    "playwright.river-click-lane-preflight.ts",
+    "playwright.river-click-lane-attempt.ts",
+    "playwright.river-click-terminal.ts",
+    "playwright.live-display.global-setup.ts",
+    "playwright.config.helpers.ts",
+    "playwright.live-display.config.ts",
+    "playwright.live-river-click.config.ts",
+    "e2e/live-display.spec.ts",
+    "scripts/river-click-receipt-binder-core.d.mts",
+    "src/lib/riverClickEvidence/**/*.ts"
+  ],
+  "exclude": ["**/__tests__/**", "src/test/**"]
+}

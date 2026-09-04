@@ -596,6 +596,19 @@ in mocked regression, preview, or visual evidence lanes. Do not use
 `--project=chromium` for mocked evidence; use
 `--project=mocked-regression-chromium`.
 
+The `/` river-click GFS+IFS P95 metric is a dedicated lane. It requires the
+five env keys and must not be inferred from `/monitoring` or `/ops`.
+
+```bash
+cd apps/frontend
+PLAYWRIGHT_LIVE_BASE_URL=https://display.example.internal \
+PLAYWRIGHT_LIVE_API_BASE_URL=https://api.example.internal \
+PLAYWRIGHT_LIVE_RIVER_BASIN_ID=<current-basin-id> \
+PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID=<current-segment-id> \
+PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH=/absolute/private/nhms-frontend-river-click-live-evidence-<run>.json \
+  corepack pnpm run test:e2e:live-river-click
+```
+
 ## OpenSpec
 
 ```bash

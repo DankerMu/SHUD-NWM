@@ -34,9 +34,10 @@
   `control_mutations_enabled=false`/`slurm_routes_enabled=false` live 确认。
 - **与本清单 C 关系**：M26 receipt 是 **C4 浏览器 e2e** 在新单页地图形态下的**部分闭合**（单页 shell 的重定向/全屏/诚实 overlay live 已证），
   **不替代** C1（生产 docker 部署）/ C2（只读 DB denied-write 矩阵）/ C3（cross-plane identity GFS+IFS 双源）——
-  这三项仍须独立产 live receipt。④⑤ 代站/河段 popup 的 live 点击截图因 `/api/v1/basins` 无 bbox（无法自动 framing）+
-  CLI 难命中 WebGL 要素而由 #389 单独承接，绘制不变量已由本地单测全覆盖、数据 live 就绪；这是 bbox/点击自动化/popup live click
-  证据缺口，不再归为 live MVT 开关/根因问题。
+  这三项仍须独立产 live receipt。④⑤ popup live 点击证据缺口按 2026-09 状态拆分：**river popup** 的
+  framing/命中已由 #1970 门控 hook 交付（详情 geom bbox + 真实渲染要素 + 既有 onOverlayClick 路径），
+  live receipt 由 C4-river-click 节（#1895）执行；**station popup**（station-MVT 端点/bbox 属 #342 协同）
+  仍由 #389 承接，绘制不变量已由本地单测全覆盖、数据 live 就绪。这不再是整体「#389 唯一承接」的表述。
 - **live MVT closure（#351 → #343）**：#351 已用 2026-06-08 node-27 live receipt 闭合 #343；`NHMS_ENABLE_LIVE_POSTGIS_MVT=true`
   后 `/api/v1/layers` 返回 live layers，`hydro-national/q_down` tile 200。原 river-network 424 / hydro 409 根因是
   display readonly 未启用 live PostGIS MVT 和图层未注册。
@@ -166,9 +167,12 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
   浏览器无法据此 `map.fitBounds` 自动定位到要素再点击。定义所需：列表/详情响应附带要素 bbox（或
   提供按 id 取 bbox 的轻端点），使 e2e 能确定性 framing。**此数据契约属 node-27/display API 侧**，
   与 #342 station-MVT 协同，非本前端 issue 单独可闭合。
-- [ ] **WebGL 要素命中坐标**：MapLibre WebGL canvas 内要素无 DOM 句柄，CLI/Playwright 难以稳定命中
-  点击。定义所需：暴露确定性「测试钩子」（如按 id 触发 popup 的 `window.__m11SelectFeature(id)` 调试入口，
-  或 feature→屏幕坐标的可查询映射），使点击/弹窗可被断言，而非靠像素猜测。
+- [x] **WebGL 要素命中 + 河段 framing（river-click 路径，#1970 已交付，2026-09）**：门控的只读
+  `window.__nhmsRiverClickEvidence.selectRenderedRiver` 钩子以真实渲染要素沿既有 `onOverlayClick`
+  点击路径完成 fit/命中/弹窗打开；配合 `basin-versions/{id}/river-segments/{segment_id}` 详情响应的
+  *geom bbox*（M11 段详情本就带 geom），河段 river popup 的确定性 framing/命中已可自动化（见下方
+  C4-river-click 节，由 #1895 产出 live receipt）。**station popup 仍无等价路径**（station-MVT
+  端点/bbox 属 #342/#389 协同侧，未闭合）。
 - [x] **node-27 浏览器可启动**（**#431 已解，2026-06-10**）：曾缺 `libgbm.so.1`/`libxcb-randr.so.0`
   导致 chromium `exitCode=127`。已用 `sudo apt-get install -y libgbm1 libxcb-randr0`（apt 自动带
   `libwayland-server0`）系统级安装（Ubuntu jammy 上 `sudo` 验证的是调用者 nwm 自身密码，与被禁用的
@@ -176,9 +180,101 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
   **不带** `LD_LIBRARY_PATH` 启动 chromium exit 0、master `test:e2e:mocked-regression` → 19 passed。
   临时 `~/pwdeps` userspace hack 已清除。live browser lane（含本节 popup live click、
   `e2e/live-display.spec.ts`）的浏览器前提已就绪。
-- [ ] 上述就绪后：river popup（流量/起报时间）+ station popup（forcing 序列）的 live 点击截图 + 断言
-  作为 C4 ④⑤ 的 live receipt 归入 **#389**（绘制不变量已由本地单测全覆盖、数据 live 就绪，仅缺自动化
-  framing/命中/浏览器三要素）。
+- [ ] 上述就绪后：station popup（forcing 序列）的 live 点击截图 + 断言仍在 **#389** 未闭（river popup
+  的流量/起报时间 live 点击已由 C4-river-click 节承接，#1970 交付、#1895 执行）。
+
+#### C4-river-click：`/` 河段点击 GFS+IFS P95 证据（#1970 → #1895）
+
+> #1970 交付了**门控的只读测试钩子 + 无 mock 的 live P95 采集 lane**（代码与本地单测已就绪），
+> 本 PR **没有**在 node-27 实机执行、**没有**产 live PASS。真正的 live PASS 由 **#1895** 用
+> 下面的 exact merged command 在当前运行里产出。
+>
+> C4 #389 历史文本（station popup / basin-bbox 的 live receipt）保持诚实：river 河段点击的
+> WebGL 钩子与 segment-detail 几何 framing 已由 #1970 交付；station popup 与 basin-bbox 的
+> live receipt **仍未交付**，属 #389 仍打开的工作。
+
+- **环境（五个键；口径：URL/receipt 缺失 => BLOCKED，pin 缺失/非法 => FAIL）**：
+  `PLAYWRIGHT_LIVE_BASE_URL`（27 前端 bare origin，如
+  `https://test.nwm.ac.cn`）、`PLAYWRIGHT_LIVE_API_BASE_URL`（27 API bare origin）、
+  `PLAYWRIGHT_LIVE_RIVER_BASIN_ID`、`PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID`（当前 M11 pin，来自当
+  run 的 live identity——`GET /api/v1/basins/{basin_id}/versions` 或
+  `GET /api/v1/mvp/qhh/latest-product?source=GFS&identity_only=true&basin_id=<pin>`
+  的当前 `basin_version_id`/`river_network_version_id`，**不复制历史证据**）、
+  `PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH`（本次运行的**唯一不存在**绝对路径，见下）。
+  缺失 frontend/API URL 或缺失/不安全 receipt path => `BLOCKED`（无文件或 BLOCKED receipt）；
+  缺失/非法 pin（含空值）或非法 URL/path => `FAIL`（CONFIG_INVALID receipt）。
+  禁止设置六个 override 键（出现即 FAIL，即使值为空）：`PLAYWRIGHT_LIVE_RIVER_RUN_ID`、
+  `PLAYWRIGHT_LIVE_RIVER_MODEL_ID`、`PLAYWRIGHT_LIVE_RIVER_BASIN_VERSION_ID`、
+  `PLAYWRIGHT_LIVE_RIVER_RIVER_NETWORK_VERSION_ID`、`PLAYWRIGHT_LIVE_RIVER_CYCLE_TIME`、
+  `PLAYWRIGHT_LIVE_RIVER_SCENARIO`（`PLAYWRIGHT_LIVE_RIVER_BASIN_ID` 与
+  `PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID` 是必需的 pin，不在此列）。
+- **私有运行目录 + 唯一 absent receipt**（当前运行绑定；命令 start/end 括号记录
+  本次 run 的时间窗，receipt 的 mtime 必须落在括号内才是本次产物）：
+
+  ```bash
+  REPO_ROOT="/home/nwm/NWM"
+  RUN_ROOT=$(mktemp -d "$REPO_ROOT/.nhms-issue1895-riverclick-XXXXXX")
+  test -d "$RUN_ROOT"                                   # mktemp -d 独占直接创建（无共享 base 复用）
+  chmod 0700 "$RUN_ROOT"                                # 独占直接创建（无共享 base 复用）
+  test "$(stat -c '%u' "$RUN_ROOT")" = "$(id -u)"
+  test "$(stat -c '%a' "$RUN_ROOT")" = "700"
+  RECEIPT="$RUN_ROOT/nhms-frontend-river-click-live-evidence-$(date -u +%Y%m%dT%H%M%SZ).json"
+  CMD_START=$(date -u +%s)
+  test ! -e "$RECEIPT"   # 必须不存在；no-clobber 发布拒绝覆盖任何旧文件
+  ```
+
+- **exact merged command**（单 worker / 0 retries；浏览器只在 `page.addInitScript` 里设
+  `window.__NHMS_E2E_HOOKS__ = true` 后面访问 `/`，不在 URL 放身份参数；命令从
+  REPO_ROOT 运行并通过 `pnpm --dir` 解析 frontend 包（repo root 无 package.json），
+  binder 的 `schemas/...` 因此可解析）：
+
+  ```bash
+  cd "$REPO_ROOT" || { echo "BLOCKED: REPO_ROOT unreachable"; exit 1; }
+  set +e; \
+  PLAYWRIGHT_LIVE_BASE_URL="${PLAYWRIGHT_LIVE_BASE_URL-}" \
+  PLAYWRIGHT_LIVE_API_BASE_URL="${PLAYWRIGHT_LIVE_API_BASE_URL-}" \
+  PLAYWRIGHT_LIVE_RIVER_BASIN_ID="${PLAYWRIGHT_LIVE_RIVER_BASIN_ID-}" \
+  PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID="${PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID-}" \
+  PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH="$RECEIPT" \
+  corepack pnpm@10.11.0 --dir "$REPO_ROOT/apps/frontend" run test:e2e:live-river-click; \
+  CMD_EXIT=$?; set -e; \
+  CMD_END=$(date -u +%s)
+  test "$CMD_EXIT" = "0"
+  ```
+
+- **判定**：命令 exit 0 且 receipt 是 schema-1.0 `nhms-frontend-river-click-live-evidence`、
+  父目录 mode 0700、receipt mode 0600、`status=PASS`、`warmup_count=1`、`accepted_count=20`、
+  `percentile_method=nearest-rank`、`p95_ms < 2000`、`failure=null`、`started_at <= ended_at == generated_at`。
+  任何 FAIL/BLOCKED receipt 或 exit != 0 都是 **NO-GO**（`p95_ms >= 2000` = `THRESHOLD_EXCEEDED`）。
+  发布失败（路径不安全 / 目标已存在 / 身份漂移）必失败并**不覆盖**旧证据。
+- **可执行绑定（receipt 接受性 binder，`set -euo pipefail` 下运行；Node-20
+  stdlib 单文件，无运行时依赖；仅接受 PASS 终态——任何非 PASS 都拒绝；
+  严格 UTC RFC3339 日历合法时间戳，不用宽松 `Date.parse`、不做字典序比较；
+  nearest-rank P95 独立重算自实际 durations；缺失/漂移字段的每一行都是
+  `BINDER:` 有界固定形状诊断（不回显路径/origin/identity/OS error）并 exit 1）**：
+
+  ```bash
+  test -f "$RECEIPT" && test ! -L "$RECEIPT"                       # regular file, not a symlink
+  test "$(stat -c '%u' "$RECEIPT")" = "$(id -u)"                   # euid-owned
+  test "$(stat -c '%a' "$(dirname "$RECEIPT")")" = "700"           # parent 0700
+  test "$(stat -c '%u' "$(dirname "$RECEIPT")")" = "$(id -u)"
+  test "$CMD_START" -le "$(stat -c '%Y' "$RECEIPT")"
+  test "$(stat -c '%Y' "$RECEIPT")" -le "$CMD_END"                 # mtime inside the bracket
+  test "$(stat -c '%s' "$RECEIPT")" -gt 0                          # non-empty
+  test "$(stat -c '%s' "$RECEIPT")" -le 262144                     # refuse oversized content before unbounded schema parse
+  test "$(stat -c '%a' "$RECEIPT")" = "600"                        # file 0600
+  test "$(stat -c '%h' "$RECEIPT")" = "1"                          # nlink 1
+  uv run check-jsonschema --schemafile schemas/frontend_river_click_live_evidence.schema.json "$RECEIPT"
+  node "$REPO_ROOT/apps/frontend/scripts/river-click-receipt-binder.mjs" \
+    --receipt "$RECEIPT" \
+    --frontend-origin "$PLAYWRIGHT_LIVE_BASE_URL" \
+    --api-origin "$PLAYWRIGHT_LIVE_API_BASE_URL" \
+    --basin-id "$PLAYWRIGHT_LIVE_RIVER_BASIN_ID" \
+    --segment-id "$PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID" \
+    --cmd-start "$CMD_START" --cmd-end "$CMD_END"
+  ```
+
+- **边界**：本 lane 只访问 `/`；`/monitoring` 原文案不变，`/ops` 不在本 metric 内。
 
 ---
 

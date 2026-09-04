@@ -1,0 +1,45 @@
+{
+  "artifact": "nhms-frontend-river-click-live-evidence",
+  "schema_version": "1.0",
+  "status": "FAIL",
+  "generated_at": "2026-09-02T01:01:03Z",
+  "started_at": "2026-09-02T01:00:00Z",
+  "ended_at": "2026-09-02T01:01:03Z",
+  "threshold_ms": 2000,
+  "percentile_method": "nearest-rank",
+  "warmup_count": 0,
+  "accepted_count": 0,
+  "origins": {
+    "frontend": "https://test.nwm.ac.cn",
+    "api": "https://test.nwm.ac.cn"
+  },
+  "requested_feature": {
+    "basin_id": "basins_qhh",
+    "river_segment_id": "basins_qhh_shud_reach_000001",
+    "basin_version_id": "bv-2026-09",
+    "river_network_version_id": "rn-2026-09"
+  },
+  "rendered_feature": null,
+  "gfs": {
+    "source_id": "GFS",
+    "basin_id": "basins_qhh",
+    "basin_version_id": "bv-2026-09",
+    "river_network_version_id": "rn-2026-09",
+    "run_id": "qhh_20260902_gfs",
+    "model_id": "shud-gfs",
+    "cycle_time": "2026-09-02T00:00:00Z",
+    "scenario": "forecast_gfs_deterministic"
+  },
+  "ifs": null,
+  "warmup": null,
+  "samples": [],
+  "p95_ms": null,
+  "failure": {
+    "code": "HOOK_SELECTION_FAILED",
+    "stage": "map",
+    "sample_index": null,
+    "gfs_status": null,
+    "ifs_status": null,
+    "message": "rendered discharge feature match count must be exactly 1"
+  }
+}

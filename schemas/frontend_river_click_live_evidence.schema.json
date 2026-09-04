@@ -1,0 +1,307 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NHMS Frontend River-Click Live Evidence",
+  "description": "Schema-1.0 PASS/FAIL/BLOCKED receipt for the public / river-click GFS+IFS P95 lane (#1970).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "schema_version",
+    "status",
+    "generated_at",
+    "started_at",
+    "ended_at",
+    "threshold_ms",
+    "percentile_method",
+    "warmup_count",
+    "accepted_count",
+    "origins",
+    "requested_feature",
+    "rendered_feature",
+    "gfs",
+    "ifs",
+    "warmup",
+    "samples",
+    "p95_ms",
+    "failure"
+  ],
+  "properties": {
+    "artifact": {"const": "nhms-frontend-river-click-live-evidence"},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+    "generated_at": {"$ref": "#/$defs/utc_rfc3339"},
+    "started_at": {"$ref": "#/$defs/utc_rfc3339"},
+    "ended_at": {"$ref": "#/$defs/utc_rfc3339"},
+    "threshold_ms": {"const": 2000},
+    "percentile_method": {"const": "nearest-rank"},
+    "warmup_count": {"type": "integer", "minimum": 0, "maximum": 1},
+    "accepted_count": {"type": "integer", "minimum": 0, "maximum": 20},
+    "origins": {"$ref": "#/$defs/origins"},
+    "requested_feature": {"$ref": "#/$defs/feature"},
+    "rendered_feature": {"$ref": "#/$defs/feature"},
+    "gfs": {"$ref": "#/$defs/product_gfs"},
+    "ifs": {"$ref": "#/$defs/product_ifs"},
+    "warmup": {"$ref": "#/$defs/warmup"},
+    "samples": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {"$ref": "#/$defs/sample"}
+    },
+    "p95_ms": {"anyOf": [{"type": "null"}, {"type": "number", "minimum": 0}]},
+    "failure": {"$ref": "#/$defs/failure"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "PASS"}}},
+      "then": {
+        "properties": {
+          "warmup_count": {"const": 1},
+          "accepted_count": {"const": 20},
+          "warmup": {"not": {"type": "null"}},
+          "requested_feature": {"not": {"type": "null"}},
+          "rendered_feature": {"not": {"type": "null"}},
+          "gfs": {"not": {"type": "null"}},
+          "ifs": {"not": {"type": "null"}},
+          "samples": {"minItems": 20, "maxItems": 20},
+          "p95_ms": {"type": "number", "minimum": 0, "exclusiveMaximum": 2000},
+          "failure": {"type": "null"}
+        },
+        "allOf": [
+          {
+            "if": {"required": ["requested_feature", "rendered_feature"]},
+            "then": {
+              "properties": {
+                "requested_feature": {"not": {"type": "null"}},
+                "rendered_feature": {"not": {"type": "null"}}
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "BLOCKED"}}},
+      "then": {
+        "properties": {
+          "warmup_count": {"const": 0},
+          "accepted_count": {"const": 0},
+          "origins": {"properties": {"frontend": {"type": "null"}, "api": {"type": "null"}}},
+          "warmup": {"type": "null"},
+          "requested_feature": {"type": "null"},
+          "rendered_feature": {"type": "null"},
+          "gfs": {"type": "null"},
+          "ifs": {"type": "null"},
+          "samples": {"maxItems": 0},
+          "p95_ms": {"type": "null"},
+          "failure": {"not": {"type": "null"}}
+        },
+        "allOf": [
+          {
+            "if": {"required": ["failure"]},
+            "then": {
+              "properties": {
+                "failure": {"allOf": [
+                  {"properties": {"code": {"enum": ["REQUIRED_ENV_MISSING", "RUNTIME_UNAVAILABLE", "HOOK_PREREQUISITE_MISSING"]}}},
+                  {"properties": {"sample_index": {"type": "null"}}},
+                  {"properties": {"gfs_status": {"type": "null"}}},
+                  {"properties": {"ifs_status": {"type": "null"}}}
+                ]}
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "FAIL"}}},
+      "then": {
+        "properties": {
+          "failure": {"not": {"type": "null"}}
+        },
+        "allOf": [
+          {
+            "if": {"required": ["failure"]},
+            "then": {
+              "properties": {
+                "failure": {"properties": {"code": {"not": {"enum": ["REQUIRED_ENV_MISSING", "RUNTIME_UNAVAILABLE", "HOOK_PREREQUISITE_MISSING"]}}}}
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "failure": {"properties": {"code": {"const": "THRESHOLD_EXCEEDED"}}}
+              }
+            },
+            "then": {
+              "properties": {
+                "p95_ms": {"type": "number", "minimum": 2000},
+                "warmup_count": {"const": 1},
+                "accepted_count": {"const": 20},
+                "warmup": {"not": {"type": "null"}},
+                "requested_feature": {"not": {"type": "null"}},
+                "rendered_feature": {"not": {"type": "null"}},
+                "gfs": {"not": {"type": "null"}},
+                "ifs": {"not": {"type": "null"}},
+                "samples": {"minItems": 20, "maxItems": 20},
+                "failure": {"properties": {"stage": {"const": "threshold"}, "sample_index": {"type": "null"}}}
+              }
+            }
+          },
+          {
+            "if": {
+              "not": {
+                "properties": {
+                  "failure": {"properties": {"code": {"const": "THRESHOLD_EXCEEDED"}}}
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "p95_ms": {"type": "null"}
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "utc_rfc3339": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "origins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frontend", "api"],
+      "properties": {
+        "frontend": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 256}]},
+        "api": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 256}]}
+      }
+    },
+    "feature": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["basin_id", "river_segment_id", "basin_version_id", "river_network_version_id"],
+          "properties": {
+            "basin_id": {"$ref": "#/$defs/identity"},
+            "river_segment_id": {"$ref": "#/$defs/identity"},
+            "basin_version_id": {"$ref": "#/$defs/identity"},
+            "river_network_version_id": {"$ref": "#/$defs/identity"}
+          }
+        }
+      ]
+    },
+    "product_common": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id", "basin_id", "basin_version_id", "river_network_version_id",
+        "run_id", "model_id", "cycle_time", "scenario"
+      ],
+      "properties": {
+        "source_id": {"enum": ["GFS", "IFS"]},
+        "basin_id": {"$ref": "#/$defs/identity"},
+        "basin_version_id": {"$ref": "#/$defs/identity"},
+        "river_network_version_id": {"$ref": "#/$defs/identity"},
+        "run_id": {"$ref": "#/$defs/identity"},
+        "model_id": {"$ref": "#/$defs/identity"},
+        "cycle_time": {"$ref": "#/$defs/identity"},
+        "scenario": {"enum": ["forecast_gfs_deterministic", "forecast_ifs_deterministic"]}
+      }
+    },
+    "product_gfs": {
+      "anyOf": [
+        {"type": "null"},
+        {"allOf": [
+          {"$ref": "#/$defs/product_common"},
+          {"properties": {"source_id": {"const": "GFS"}, "scenario": {"const": "forecast_gfs_deterministic"}}}
+        ]}
+      ]
+    },
+    "product_ifs": {
+      "anyOf": [
+        {"type": "null"},
+        {"allOf": [
+          {"$ref": "#/$defs/product_common"},
+          {"properties": {"source_id": {"const": "IFS"}, "scenario": {"const": "forecast_ifs_deterministic"}}}
+        ]}
+      ]
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "duration_ms", "gfs_status", "ifs_status"],
+      "properties": {
+        "index": {"type": "integer", "minimum": 1, "maximum": 20},
+        "duration_ms": {"type": "number", "minimum": 0},
+        "gfs_status": {"type": "integer", "minimum": 200, "maximum": 299},
+        "ifs_status": {"type": "integer", "minimum": 200, "maximum": 299}
+      }
+    },
+    "warmup": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["index", "duration_ms", "discarded", "gfs_status", "ifs_status"],
+          "properties": {
+            "index": {"const": 0},
+            "duration_ms": {"type": "number", "minimum": 0},
+            "discarded": {"const": true},
+            "gfs_status": {"type": "integer", "minimum": 200, "maximum": 299},
+            "ifs_status": {"type": "integer", "minimum": 200, "maximum": 299}
+          }
+        }
+      ]
+    },
+    "failure": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "stage", "sample_index", "gfs_status", "ifs_status", "message"],
+          "properties": {
+            "code": {"enum": [
+              "REQUIRED_ENV_MISSING",
+              "RUNTIME_UNAVAILABLE",
+              "HOOK_PREREQUISITE_MISSING",
+              "CONFIG_INVALID",
+              "PREFLIGHT_HTTP_ERROR",
+              "PREFLIGHT_RESPONSE_INVALID",
+              "PRODUCT_UNAVAILABLE",
+              "IDENTITY_MISMATCH",
+              "SEGMENT_GEOMETRY_INVALID",
+              "HOOK_SELECTION_FAILED",
+              "SERIES_REQUEST_INVALID",
+              "SERIES_RESPONSE_ERROR",
+              "SAMPLE_TIMEOUT",
+              "WHOLE_RUN_TIMEOUT",
+              "CHART_INCOMPLETE",
+              "TIMING_INVALID",
+              "IDENTITY_DRIFT",
+              "THRESHOLD_EXCEEDED",
+              "INTERNAL_ERROR"
+            ]},
+            "stage": {"enum": ["config", "runtime", "preflight", "map", "warmup", "sample", "threshold"]},
+            "sample_index": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 20}]},
+            "gfs_status": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 100, "maximum": 599}]},
+            "ifs_status": {"anyOf": [{"type": "null"}, {"type": "integer", "minimum": 100, "maximum": 599}]},
+            "message": {"type": "string", "minLength": 1, "maxLength": 512}
+          }
+        }
+      ]
+    }
+  }
+}
