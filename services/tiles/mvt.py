@@ -544,11 +544,11 @@ def postgis_tile_sql(layer: str) -> str:
             FROM hydro.river_timeseries ts
             JOIN core.river_segment rs
               ON rs.river_segment_key = ts.river_segment_key
-            -- transitional compressed-chunk pushdown aid, remove with #1342
-            WHERE ts.run_id = :run_id
-              AND ts.run_key = (
+            WHERE ts.run_key = (
                       SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
                   )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND ts.run_id = :run_id
               AND ts.basin_version_key = (
                       SELECT basin_version_key FROM core.basin_version
                       WHERE basin_version_id = :basin_version_id
@@ -694,9 +694,11 @@ def postgis_tile_sql(layer: str) -> str:
                     FROM hydro.river_timeseries ts
                     WHERE ts.run_key = lr.run_key
                       AND ts.river_network_version_key = lr.river_network_version_key
-                      -- transitional compressed-chunk pushdown aids, remove with #1342
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.run_id = lr.run_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.river_network_version_id = lr.river_network_version_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.variable = :variable
                       AND ts.variable_e = (
                               SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
@@ -825,11 +827,18 @@ def postgis_tile_sql(layer: str) -> str:
                     WHERE ts.run_key = lr.run_key
                       AND ts.river_network_version_key = lr.river_network_version_key
                       AND ts.river_segment_key = seg.river_segment_key
-                      -- transitional compressed-chunk / text-pkey pushdown
-                      -- aids, remove with #1342
+                      -- These four aids do double duty: 000047's segmentby
+                      -- pruning AND the text primary key's per-loop lookup.
+                      -- The nuance lives here, in prose, because the removal
+                      -- marker below is byte-frozen (#1342 deletes by that
+                      -- exact line) and carries one aid each.
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.run_id = lr.run_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.river_network_version_id = lr.river_network_version_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.river_segment_id = seg.river_segment_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.variable = :variable
                       AND ts.variable_e = (
                               SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
@@ -872,11 +881,18 @@ def postgis_tile_sql(layer: str) -> str:
                     WHERE ts.run_key = lr.run_key
                       AND ts.river_network_version_key = lr.river_network_version_key
                       AND ts.river_segment_key = seg.river_segment_key
-                      -- transitional compressed-chunk / text-pkey pushdown
-                      -- aids, remove with #1342
+                      -- These four aids do double duty: 000047's segmentby
+                      -- pruning AND the text primary key's per-loop lookup.
+                      -- The nuance lives here, in prose, because the removal
+                      -- marker below is byte-frozen (#1342 deletes by that
+                      -- exact line) and carries one aid each.
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.run_id = lr.run_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.river_network_version_id = lr.river_network_version_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.river_segment_id = seg.river_segment_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
                       AND ts.variable = :variable
                       AND ts.variable_e = (
                               SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
@@ -1584,11 +1600,11 @@ def valid_times_for_layer(
             """
                 SELECT DISTINCT valid_time
                 FROM hydro.river_timeseries
-                -- transitional compressed-chunk pushdown aid, remove with #1342
-                WHERE run_id = :run_id
-                  AND run_key = (
+                WHERE run_key = (
                           SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
                       )
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND run_id = :run_id
                   AND basin_version_key = (
                           SELECT basin_version_key FROM core.basin_version
                           WHERE basin_version_id = :basin_version_id
@@ -1612,12 +1628,12 @@ def valid_times_for_layer(
             else """
                 SELECT DISTINCT valid_time
                 FROM hydro.river_timeseries
-                -- transitional compressed-chunk pushdown aid, remove with #1342
-                WHERE variable = :variable
-                  AND variable_e = (
+                WHERE variable_e = (
                           SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
                           WHERE e::text = :variable
                       )
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND variable = :variable
                 ORDER BY valid_time DESC
                 LIMIT :limit
             """

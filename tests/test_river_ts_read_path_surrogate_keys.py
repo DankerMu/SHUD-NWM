@@ -46,9 +46,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from packages.common import display_coverage
+from packages.common.river_ts_render import fact_table_text_identity_columns, render_river_ts_sql
 from services.production_closure.scale_validation import QUERY_TARGETS
 from services.tiles.mvt import _mvt_tile_order_by, postgis_tile_sql
+from tests.river_ts_template_registry import NON_TEMPLATE_MENTIONS, REGISTRY, assert_marker_census
+from tests.test_river_ts_text_identity_cleanup import _river_table_mentions
 from tests.test_sql_shape_helpers import (
     FORBIDDEN_TEXT_FACT_COLUMNS,
     LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
@@ -81,7 +86,12 @@ ENUM_VARIABLE_RESOLUTION = "SELECT e FROM unnest(enum_range(NULL::hydro.river_va
 # Written as ONE substring per pair so the assertion is about adjacency in a
 # single conjunction, not about two literals existing somewhere in the query.
 BOUND_PARAM_PUSHDOWN_PAIRS = (
-    ("run_id", "ts.run_id = :run_id AND ts.run_key ="),
+    # #1980: `run_id` is the aid whose WHERE-line position moved, so its pair is
+    # spelled key-then-aid; the other two were already aid-then-key and are
+    # unchanged. Either order is the same conjunction (see
+    # `assert_aid_is_conjoined_with_its_counterpart`), and the pin stays ONE
+    # substring so it is still about adjacency and not about co-existence.
+    ("run_id", "ts.run_key = AND ts.run_id = :run_id"),
     (
         "river_network_version_id",
         "ts.river_network_version_id = :river_network_version_id AND ts.river_network_version_key =",
@@ -565,7 +575,15 @@ def test_valid_times_named_identity_branch_pairs_every_pushdown_aid_with_its_key
     named, _no_named = _valid_times_branch_sql()
     outer = outer_predicates(named)
 
-    assert "WHERE run_id = :run_id AND run_key =" in outer
+    # #1980 re-pin: the aid moved off the `WHERE` line onto its own `AND` line
+    # under its marker, so the `WHERE` line now carries the KEY predicate and
+    # the aid follows it. The pairing these substrings exist to pin — aid and
+    # counterpart in one conjunction, separated by exactly one `AND` — is
+    # unchanged; only which of the two comes first is. Conjunct order within one
+    # AND-chain is what the golden oracle
+    # (tests/test_river_ts_template_golden.py) explicitly does NOT preserve, and
+    # what it does preserve is asserted there for every registered template.
+    assert "WHERE run_key = AND run_id = :run_id" in outer
     assert "AND river_network_version_id = :river_network_version_id AND river_network_version_key =" in outer
     assert "AND variable = :variable AND variable_e =" in outer
     # basin_version_id has no sanctioned text partner: key only.
@@ -585,13 +603,13 @@ def test_valid_times_no_named_identity_branch_also_filters_the_enum_column() -> 
     _named, no_named = _valid_times_branch_sql()
     outer = outer_predicates(no_named)
 
-    assert "AND variable_e = (" in no_named
+    assert "WHERE variable_e = (" in no_named
     assert ENUM_VARIABLE_RESOLUTION in no_named
     # Whole-query equality: this branch is short enough to pin exactly, which
     # is the strongest form of "no predicate crept in".
     assert outer == (
         "SELECT DISTINCT valid_time FROM hydro.river_timeseries "
-        "WHERE variable = :variable AND variable_e = "
+        "WHERE variable_e = AND variable = :variable "
         "ORDER BY valid_time DESC LIMIT :limit"
     )
     # No identity predicate at all on this branch, text or key — it is the
@@ -608,7 +626,10 @@ def test_existence_probe_switches_to_keys_without_touching_its_404_contract() ->
     )
 
     assert "FROM hydro.river_timeseries" in probe
-    assert "AND run_key = (" in probe
+    # #1980: the key predicate is now the WHERE-line conjunct and the aid follows
+    # it on its own marked line, so this reads `WHERE run_key = (` rather than
+    # `AND run_key = (`.
+    assert "WHERE run_key = (" in probe
     assert RUN_KEY_RESOLUTION in probe
     assert "AND basin_version_key = (" in probe
     assert BASIN_KEY_RESOLUTION in probe
@@ -620,7 +641,8 @@ def test_existence_probe_switches_to_keys_without_touching_its_404_contract() ->
     outer = outer_predicates(sql_from_python(probe))
     assert outer == (
         "SELECT 1 FROM hydro.river_timeseries "
-        "WHERE run_id = :run_id AND run_key = "
+        # #1980: key predicate first, marked aid second (same conjunction).
+        "WHERE run_key = AND run_id = :run_id "
         "AND basin_version_key = "
         "AND river_network_version_id = :river_network_version_id AND river_network_version_key = "
         "AND variable = :variable AND variable_e = "
@@ -657,7 +679,11 @@ def test_coverage_river_scan_groups_by_keys_and_reconstructs_text_at_the_rollup(
     assert "ON cr.run_key = rt.run_key" in sql
     assert "AND cr.basin_version_key = rt.basin_version_key" in sql
     assert "AND cr.river_network_version_key = rt.river_network_version_key" in sql
-    assert "WHERE rt.variable = 'q_down'\n              AND rt.variable_e = 'q_down'::hydro.river_variable" in sql
+    assert (
+        "WHERE rt.variable_e = 'q_down'::hydro.river_variable\n"
+        "              -- transitional compressed-chunk pushdown aid, remove with #1342\n"
+        "              AND rt.variable = 'q_down'"
+    ) in sql
 
     # Segment counting moves to the key. Within a network the mapping is 1:1,
     # so the count is unchanged; the key is additionally unique table-wide.
@@ -689,10 +715,10 @@ def test_coverage_river_scan_pairs_its_pushdown_aids_and_joins_on_keys_only() ->
     """
     outer = outer_predicates(display_coverage._REFRESH_SQL)
 
-    assert "WHERE rt.variable = 'q_down' AND rt.variable_e = 'q_down'::hydro.river_variable" in outer
-    assert "(rt.run_id = %(scan_run_id)s AND rt.run_key = )" in outer
+    assert "WHERE rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'" in outer
+    assert "( rt.run_id = %(scan_run_id)s AND rt.run_key = )" in outer
     assert (
-        "(rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = )"
+        "( rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = )"
     ) in outer
     # basin_version_id is not sanctioned, so its guard is key-only.
     assert "OR rt.basin_version_key = )" in outer
@@ -795,3 +821,106 @@ def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates()
 
     for index_name in re.findall(r"Index Scan using (\w+) on", plan_text):
         assert index_name in creatable, f"{index_name} is named by the plan fixture but no migration creates it"
+
+
+# ---------------------------------------------------------------------------
+# Marker / aid census and registry closure for the display three (#1980)
+#
+# Ownership is exclusive by design (fixture decision 7): this file owns mvt,
+# hydro_display and display_coverage; tests/test_river_ts_text_identity_cleanup.py
+# owns forecast_store, publisher, forcing_copyback_backfill and parser. Exactly
+# one test reddens per file, and neither register can quietly grow into the
+# other's files.
+# ---------------------------------------------------------------------------
+
+# Counted on the SOURCE — the number `grep -rn "remove with #1342"` gives and the
+# number #1342 deletes:
+#
+# * mvt.py 18 = the hydro layer's three + the national statement's eleven (the
+#   identity-existence probe's three, and four in each of the two data legs'
+#   correlated lateral probes) + the valid_times branches' three and one. Eleven
+#   of the eighteen are new LINES, not new predicates: #1980 split three 1:N
+#   comments (one over three aids, two over four) into one verbatim marker each.
+# * hydro_display.py 3 / display_coverage.py 3 = run_id, river_network_version_id
+#   and variable on the existence probe and on the coverage river scan. The three
+#   in display_coverage are new marker lines over pre-existing aids that a prose
+#   paragraph used to identify collectively.
+DISPLAY_MARKER_AID_CENSUS: dict[str, int] = {
+    "apps/api/routes/hydro_display.py": 3,
+    "packages/common/display_coverage.py": 3,
+    "services/tiles/mvt.py": 18,
+}
+
+
+def test_the_display_readers_declare_their_marker_and_aid_count() -> None:
+    """Per file, 1:1, verbatim, marker alone on the line above its aid."""
+    for path, expected in DISPLAY_MARKER_AID_CENSUS.items():
+        assert_marker_census(path, expected)
+
+
+def test_the_display_readers_carry_the_measured_marker_total() -> None:
+    """24 of the registered 34; the other ten are the cleanup oracle's.
+
+    Registered, not tree-wide: the 34 spans this census plus the cleanup
+    oracle's ``REGISTERED_SOURCES`` and nothing sweeps for an unregistered
+    reader — that is the I11 discovery-set census (tasks 7.2a).
+    """
+    assert sum(DISPLAY_MARKER_AID_CENSUS.values()) == 24
+
+
+def test_every_display_read_site_is_registered_in_the_template_registry() -> None:
+    """Registry closure for the display three (#1980 orchestrator requirement).
+
+    These files are deliberately absent from the cleanup oracle's statement
+    census, so closure is asserted here against the same counter that oracle uses
+    (``_river_table_mentions``: mentions inside non-docstring string constants,
+    not raw source). Both mvt valid_times branches count, and the national tile
+    statement contributes three — the identity probe and the two lateral probes —
+    so an unregistered read site cannot hide inside an already-registered
+    statement's file.
+    """
+    for path, entries in _registry_entries_by_path().items():
+        source = REPO_ROOT.joinpath(*path.split("/")).read_text(encoding="utf-8")
+        registered = sum(entry.mentions for entry in entries)
+        assert registered + NON_TEMPLATE_MENTIONS[path] == _river_table_mentions(source), (
+            f"{path}: {registered} mentions in registered templates + "
+            f"{NON_TEMPLATE_MENTIONS[path]} declared non-template mentions != "
+            f"{_river_table_mentions(source)} in the source"
+        )
+
+
+def _registry_entries_by_path() -> dict[str, list]:
+    grouped: dict[str, list] = {}
+    for entry in REGISTRY:
+        if entry.path in DISPLAY_MARKER_AID_CENSUS:
+            grouped.setdefault(entry.path, []).append(entry)
+    assert set(grouped) == set(DISPLAY_MARKER_AID_CENSUS), "a display reader has no registered template"
+    return grouped
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [entry for entry in REGISTRY if entry.path in DISPLAY_MARKER_AID_CENSUS],
+    ids=lambda entry: entry.key,
+)
+def test_every_display_template_renders_free_of_text_identity_for_the_narrow_store(entry) -> None:
+    """The display half of "render both variants for every registered template".
+
+    ``tests/test_sql_shape_helpers.py`` runs this over the whole register; it is
+    restated here on the three files this oracle owns because those are the ones
+    whose 404 / tile / coverage behaviour depends on the fact-table predicates,
+    and this file is where a reviewer of an mvt change looks.
+    """
+    narrow = render_river_ts_sql(entry.source(), "narrow", entry=entry.key)
+
+    # Table-scoped, deliberately not a per-column substring sweep: these
+    # statements also read `identity_stats.basin_version_id` and project
+    # `ts.unit_e`, so an `f"ts.{column}" not in sql` loop is red on switched code
+    # and would have to be weakened until it said nothing.
+    assert fact_table_text_identity_columns(narrow.sql) == set()
+    # Non-vacuity: what is LEFT is the key/enum authority resolution, so the
+    # statement still selects the same rows through the same predicates, and the
+    # narrow variant really is the legacy one minus its aid blocks.
+    legacy = render_river_ts_sql(entry.source(), "legacy", entry=entry.key)
+    assert "_key = " in narrow.sql or "variable_e = " in narrow.sql
+    assert len(narrow.sql.split("\n")) == len(legacy.sql.split("\n")) - 2 * entry.expected_aids

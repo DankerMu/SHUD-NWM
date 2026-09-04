@@ -20,7 +20,7 @@ node-27（PG 15.2 / TimescaleDB 2.10.2）2026-09-03 只读实测：
 - hypertable 上 `CREATE INDEX CONCURRENTLY` 被拒；`ADD CONSTRAINT ... PRIMARY KEY USING INDEX` 被拒；主键构建在窗口内持 ACCESS EXCLUSIVE。
 - 压缩设置一旦有压缩 chunk 就不能再 ALTER（`000047` 的守卫因此存在）；segmentby ∪ orderby 必须覆盖主键与外键列。
 - 写守卫按并集窗口 fail-closed（`packages/common/timescale_write_guard.py`）；parser 的 replace chain 是"同 run + 同 network + 同 variable + 闭区间 `valid_time` 窗"的 DELETE + INSERT，窗界两端字面量在同一语句内（`tests/test_timescale_write_guard_wire_site_invariant.py` 结构化强制）。
-- 仓内 26 行 `remove with #1342` 标记（23 行逐字 + mvt 3 行非逐字，展开 1:N 后 31 条被标记 aid（含 parser 写路径 2 条），另有 display_coverage 3 条无标记 aid）的实际布局：标记恒在**自己一行**、aid 谓词在**下一行**（`packages/common/forecast_store.py:101-104`）；`services/tiles/mvt.py:661/793/840` 三处标记措辞非逐字且一个标记管 3 条 aid；`forecast_store.py:1903-1906` 的 aid 与键谓词同处一个括号析取式；五处标记压在 `WHERE` 关键字行上：`apps/api/routes/hydro_display.py:773`、`forecast_store.py:1897`、`services/tiles/mvt.py:511/1496/1524`；`packages/common/display_coverage.py:383-418` 的 aid 只有一段散文注释（`:383-391`）而无逐字标记，`:406` 的 `rt.variable` aid 直接压在 `WHERE` 行，`run_id` 与 `river_network_version_id` 两条 aid 分别嵌在 `:410-411`、`:417-418` 的 `OR (` 析取式里。
+- 仓内生产代码 23 行 `remove with #1342` 标记（20 行逐字 + mvt 3 处非逐字：`:661` 一行管 3 条 aid，`:793`/`:840` 各为两行注释管 4 条 aid；另有 3 处 grep 命中是 oracle 自身的常量/散文，不计）。被标记 aid 31 条（含 parser 写路径 2 条，已合规），另有 display_coverage 3 条无标记 aid；规范化目标 34 标记 / 34 aid、严格 1:1（mvt 1:N 展开即 3+4+4=11 个标记）的实际布局：标记恒在**自己一行**、aid 谓词在**下一行**（`packages/common/forecast_store.py:101-104`）；`services/tiles/mvt.py:661/793/840` 三处标记措辞非逐字且一个标记管 3 或 4 条 aid；`forecast_store.py:1903-1906` 的 aid 与键谓词同处一个括号析取式；五处标记已独占一行、但其 aid 是 `WHERE` 行的首个合取项：`apps/api/routes/hydro_display.py:773`、`forecast_store.py:1897`、`services/tiles/mvt.py:511/1496/1524`；`packages/common/display_coverage.py:383-418` 的 aid 只有一段散文注释（`:383-391`）而无逐字标记，`:406` 的 `rt.variable` aid 直接压在 `WHERE` 行，`run_id` 与 `river_network_version_id` 两条 aid 分别嵌在 `:410-411`、`:417-418` 的 `OR (` 析取式里。
 
 因此 in-place cutover（000050 的函数）线上不可执行：decompress 671 GB 装不下，13 亿行主键重建让 display 停读数小时。
 
@@ -60,9 +60,9 @@ node-27（PG 15.2 / TimescaleDB 2.10.2）2026-09-03 只读实测：
 DDL 顺序（迁移 header 记账项）：`CREATE TABLE`（PK + 两 FK 内联）→ `create_hypertable('hydro.river_timeseries','valid_time', chunk_time_interval => interval '1 day', create_default_indexes => false)` → 两个二级索引 → `ALTER TABLE ... SET (timescaledb.compress, compress_segmentby, compress_orderby)` → `ALTER TABLE ... OWNER TO nhms_ingest_rw`。
 
 ### D5 读路径：模板规范化 + 按标记块删除
-现状不允许"删标记行"：aid 在标记的下一行、mvt 一标记管三 aid、`forecast_store.py:1903` 的 aid 嵌在括号析取式里。因此分两步：
-1. **模板规范化（零行为变化，先合）**：每条 aid 改写成独立合取项一行；每条 aid 上方恰有一行逐字 `-- transitional compressed-chunk pushdown aid, remove with #1342`（mvt 三处非逐字标记归一，1:N 拆成 1:1）；标记只能压在 aid 谓词行的正上方，绝不能压在 `WHERE` 或任何其他关键字行上（`hydro_display.py:773`、`forecast_store.py:1897`、`mvt.py:511/1496/1524` 的布局必须先重排）；`display_coverage.py:383-418` 的散文注释换成逐条逐字标记，其 `:406` WHERE 行 aid 同样下移；`forecast_store.py:1903` 与 `display_coverage.py:410/417` 的 `OR (rt.run_id = %(scan_run_id)s AND rt.run_key = (...))` 改写为 `OR (` + 标记行 + `rt.run_id = %(scan_run_id)s AND` + `rt.run_key = (...))`，即 aid 行以尾随 `AND` 结尾、删除后括号内只剩键谓词。`tests/test_river_ts_text_identity_cleanup.py` 的 adjacency 不变式收紧为"一 aid 一逐字标记、标记在 aid 的上一行"；census 计数与逐块 pin 在同一 PR 重钉。
-2. **渲染器** `render_river_ts_sql(template, store)`（`packages/common/`）：`legacy` → 表名替换为 `hydro.river_timeseries_legacy`，其余逐字；`narrow` → 表名为正名，删除每个标记行**及其紧邻的下一行**（该行必须是一条 aid 谓词，否则渲染器 fail-closed），随后断言输出可解析、不含任何 text 身份列、legacy 变体中的每个键/枚举谓词仍在。跨 store 查询用 `render_union_all(template, stores, params)` 组合子：两分支各绑定 `h.timeseries_store = '<store>'`，参数按分支复制，输出形状由 oracle 钉住。contract 时渲染器只接受 `narrow`，模板里的标记行与 aid 行物理删除。
+现状不允许"删标记行"：aid 在标记的下一行、mvt 一标记管三或四条 aid、五处 aid 压在 `WHERE` 行上、`forecast_store.py:1903` 的 aid 嵌在括号析取式里。因此分两步：
+1. **模板规范化（零行为变化，先合）**：每条 aid 改写成独立合取项一行；每条 aid 上方恰有一行逐字 `-- transitional compressed-chunk pushdown aid, remove with #1342`（mvt 三处非逐字标记归一，1:N 拆成 1:1）；标记只能压在 aid 谓词行的正上方，aid 绝不能留在 `WHERE` 或任何其他关键字行上（`hydro_display.py:773`、`forecast_store.py:1897`、`mvt.py:511/1496/1524` 五处的 aid 从 `WHERE` 行下移到自己的 `AND` 行、`WHERE` 行改接下一条键谓词——合取项在同一 AND 链内的顺序因此允许变化，等价性以合取项多重集为准）；`display_coverage.py:383-418` 的散文注释换成逐条逐字标记，其 `:406` WHERE 行 aid 同样下移；`forecast_store.py:1903` 与 `display_coverage.py:410/417` 的 `OR (rt.run_id = %(scan_run_id)s AND rt.run_key = (...))` 改写为 `OR (` + 标记行 + `rt.run_id = %(scan_run_id)s AND` + `rt.run_key = (...))`，即 aid 行以尾随 `AND` 结尾、删除后括号内只剩键谓词。`tests/test_river_ts_text_identity_cleanup.py` 的 adjacency 不变式收紧为"一 aid 一逐字标记、标记在 aid 的上一行"；census 计数与逐块 pin 在同一 PR 重钉。
+2. **渲染器** `render_river_ts_sql(template, store)`（`packages/common/`）：`legacy` → 表名替换为 `hydro.river_timeseries_legacy`，其余逐字；`narrow` → 表名为正名，删除每个标记行**及其紧邻的下一行**（该行必须是一条 aid 谓词，否则渲染器 fail-closed），随后做结构性检查（仓内无 SQL parser、三种占位符方言并存：括号配平、无 `WHERE AND`/`FROM AND`/`ON AND`、无悬空 `AND`/`OR (`、连接词后不得紧跟子句/连接/join 关键字（`LIMIT|ORDER|…|UNION|EXCEPT|INTERSECT` 与 `JOIN|LEFT|…|WHERE|ON|FROM|SELECT|WITH|VALUES|SET` 同一关键字族）、无 `AND AND`/`OR OR` 之类重复连接词、`WHERE` 后不得紧跟关键字、无残留标记）、断言不含任何事实表 text 身份列（按表归属，`hydro_run` 子查询里的 `run_id` 合法）、legacy 变体中的每个键/枚举谓词仍在；返回 `RenderedSql(sql, removed_placeholders)`，后者列出被删的位置参数 `%s` 下标（具名参数模板为空）。跨 store 查询的 `UNION ALL` 组合子已于 #1996 第二次 gate 拆出（fixture I1-1980 决策 15，tasks 1.4 re-entry）：由各读方在自己的语句内按 caller 侧设计实现，不再作为无调用方的文本级 helper。
 非模板面（同批处理）：`services/tile_publisher/publisher.py` 的 `_has_table` 前置在过渡期接受两个名字；`services/tile_publisher/forcing_copyback_backfill.py:314` 的 `required_columns` 按 store 分支（legacy 保 `variable`，narrow 只留键/枚举）；（`scripts/node27_autopipeline.py:1443-1451` 统计守卫的 IN-list 属 D7/任务 3.1，不在本批非模板面内）；`scripts/reset_qhh_smoke_db.py`、`scripts/summarize_qhh_smoke_results.py` 按 store 渲染（reset 对 legacy run 同时清 legacy 表）；`services/production_closure/scale_validation.py` 与 `scripts/node27_timeseries_compression_live_evidence.py` 的计划形状钉子按 store 分支。
 
 ### D6 legacy 重解析：fail-closed，走既有 decline 账本、tick rc=0、永久
@@ -89,7 +89,7 @@ per-tick 推导按表分别陈述：正名表 1 天 chunk，每表每天到达 1
 
 ## Sketch seams under test
 
-1. **渲染 SQL 形状 oracle**（最高、已有）：`tests/test_sql_shape_helpers.py` 机制作用于 `render_river_ts_sql` / `render_union_all` 的输出——legacy 变体与规范化后的模板逐字等价（表名除外）、规范化后的模板与规范化前的 pin 语义等价（census/shape pin 重钉）、narrow 变体不含 text 身份列/标记行且键谓词完整。理由：一个 seam 覆盖 13 处读方 + 2 个 smoke 脚本。
+1. **渲染 SQL 形状 oracle**（最高、已有）：`tests/test_sql_shape_helpers.py` 机制作用于 `render_river_ts_sql` 的输出（跨 store union 组合子已在 #1996 第二次 gate 拆出，回流 Stage 5 作 caller 侧设计，见 tasks 1.4）——legacy 变体与规范化后的模板逐字等价（表名除外）、规范化后的模板与规范化前的 pin 语义等价（census/shape pin 重钉）、narrow 变体不含 text 身份列/标记行且键谓词完整。理由：一个 seam 覆盖 13 处读方 + 2 个 smoke 脚本。
 2. **parser replace chain 单测**（已有假 cursor seam）：只写窄表列、`ON CONFLICT` 键主键、DELETE 保持 run + network + variable + 闭区间窗、legacy run 拒绝且不发 DELETE、`timeseries_store` 与 `mark_run_parsed` 同事务。
 3. **真实 DB 集成（node-27 marker）**：expand 迁移幂等与改名、混合 store（一 legacy 一 narrow run）的 national-tile / coverage 查询两分支各碰自己的表、回退序列后 legacy run 可读可重解析、contract 迁移对非空 legacy 的拒绝、EXPLAIN 硬门。
 4. **治理推荐单测**（已有符号阈值风格）：投影公式、fits / does-not-fit / no-uncompressed / watermark-unavailable 四态、DB-size 降级、receipt schema 校验。
@@ -110,7 +110,7 @@ per-tick 推导按表分别陈述：正名表 1 天 chunk，每表每天到达 1
 
 按依赖倒序，先合零行为变化的读侧：
 1. **I1 渲染器 + 模板规范化 + oracle**（零行为变化，独立合绿）。
-2. **I2 forecast_store（9 条）**、**I3 mvt（6 条 + UNION ALL 组合子）**、**I4 hydro_display + display_coverage** 各自走渲染器，store 恒为 legacy 时行为不变。
+2. **I2 forecast_store（9 条）**、**I3 mvt（6 条 + 跨 run 发现查询的 UNION ALL，按 tasks 1.4 的 re-entry 设计实现）**、**I4 hydro_display + display_coverage** 各自走渲染器，store 恒为 legacy 时行为不变。
 3. **I5 非模板面**（publisher `_has_table`、copyback `required_columns`、两个 smoke 脚本、计划形状钉子；autopipeline 统计守卫 IN-list 归 I6）。
 4. **I6 车道与治理**（发现式集合、supervisor/capture、receipt schema、per-tick 重钉、governance 指标）——legacy 缺席时为 no-op，可独立合绿；部署上先于 I7 落 node-27。
 5. **I7 expand 迁移 + parser 窄写 + fixture 重钉**（一次合入；此时读方已按 store 路由，真实 DB pytest 可绿）。

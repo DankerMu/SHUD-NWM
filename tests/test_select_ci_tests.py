@@ -793,6 +793,14 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             # #1442 added the zero-text-identity oracle for this file's nine
             # registered statements.
             "tests/test_river_ts_text_identity_cleanup.py",
+            # I1 #1980: this file's ten river read templates are registered and
+            # rendered per timeseries store by the whole SQL-shape oracle group.
+            "tests/test_display_coverage_refresh.py",
+            "tests/test_river_ts_read_path_surrogate_keys.py",
+            "tests/test_river_ts_render.py",
+            "tests/test_river_ts_render_reference_lexer.py",
+            "tests/test_river_ts_template_golden.py",
+            "tests/test_sql_shape_helpers.py",
             # #1728 merged the connection-attribution guards into this rule:
             # the module carries the application_name injection seam for both
             # nhms-api-forecast and nhms-api-data-sources.
@@ -825,6 +833,10 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_direct_grid_display_cutover_flip.py",
         "tests/test_direct_grid_display_cutover_history.py",
         "tests/test_direct_grid_display_cutover_model_resolution.py",
+        # I1 #1980: mvt.py's six river read templates are registered and
+        # rendered per timeseries store by the whole SQL-shape oracle group, so
+        # the group's other five members joined this rule.
+        "tests/test_display_coverage_refresh.py",
         "tests/test_display_publish_status_only.py",
         "tests/test_hhe_mvt_binding.py",
         "tests/test_hydro_display_mvt_scaling.py",
@@ -839,13 +851,20 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_node27_timeseries_compression_live_evidence.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        # I1 #1980, same group as the coverage-refresh entry above.
+        "tests/test_qhh_latest_fallback_pushdown.py",
         # Issue #1341 added the surrogate-key / transitional-pushdown shape
         # pins for this exact file.
         "tests/test_river_ts_read_path_surrogate_keys.py",
+        "tests/test_river_ts_render.py",
+        "tests/test_river_ts_render_reference_lexer.py",
+        "tests/test_river_ts_template_golden.py",
+        "tests/test_river_ts_text_identity_cleanup.py",
         # #1684 large-file guard repair: the 3.1-contract security half joined
         # the mvt rule's derived closure as a one-hop importer via
         # tests/test_openapi_31_contract.py.
         "tests/test_slurm_gateway_openapi_security.py",
+        "tests/test_sql_shape_helpers.py",
     ]
     assert not fallback_only_tests & set(selected)
 
@@ -871,6 +890,13 @@ def test_select_tests_maps_sql_shape_oracle_helper_to_its_consumer_pins() -> Non
         # #1442's out-of-boundary cleanup oracle is the fourth consumer: it
         # imports assert_text_fact_columns / strip_all_subqueries from the
         # helper, so a helper-only diff can blunt it the same way.
+        # I1 #1980: the renderer's contract and the template golden joined
+        # SQL_SHAPE_ORACLE_TESTS. `strip_*` / `outer_predicates` / the
+        # text-identity vocabulary moved into packages/common/river_ts_render.py
+        # and this module re-imports them, so a diff here can still blunt both.
+        "tests/test_river_ts_render.py",
+        "tests/test_river_ts_render_reference_lexer.py",
+        "tests/test_river_ts_template_golden.py",
         "tests/test_river_ts_text_identity_cleanup.py",
         # Every changed test suite drags the meta-guard suite along, because a
         # test-file PR is exactly the change class that can invalidate the
@@ -879,6 +905,37 @@ def test_select_tests_maps_sql_shape_oracle_helper_to_its_consumer_pins() -> Non
         SELECTOR_META_GUARD_TEST,
         "tests/test_sql_shape_helpers.py",
     ]
+
+
+def test_select_tests_routes_the_template_golden_fixture_to_the_shape_oracles() -> None:
+    """The golden is DATA, and data reached no rule at all.
+
+    The `tests/**` branch of the selector is gated on `.py`, so a `.json` fixture
+    fell through every rule and selected nothing: on a PR whose only change was a
+    regenerated golden, the backend job ran a collect-only smoke and merged with
+    zero assertions — the one diff class that can void #1980's whole equivalence
+    argument, certified by nothing (review #1996, C10).
+    """
+    selected = select_tests(["tests/fixtures/river_ts_templates_51f9d273.json"], repo_root=Path("."))
+
+    assert selected == [
+        "tests/test_display_coverage_refresh.py",
+        "tests/test_migrations.py",
+        "tests/test_qhh_latest_fallback_pushdown.py",
+        "tests/test_river_ts_read_path_surrogate_keys.py",
+        "tests/test_river_ts_render.py",
+        "tests/test_river_ts_render_reference_lexer.py",
+        "tests/test_river_ts_template_golden.py",
+        "tests/test_river_ts_text_identity_cleanup.py",
+        "tests/test_sql_shape_helpers.py",
+    ]
+
+
+def test_the_template_golden_rule_is_globbed_on_the_capture_sha() -> None:
+    """A re-capture at a new base renames the file; the route must survive it."""
+    assert select_tests(["tests/fixtures/river_ts_templates_deadbee1.json"], repo_root=Path(".")) == select_tests(
+        ["tests/fixtures/river_ts_templates_51f9d273.json"], repo_root=Path(".")
+    )
 
 
 def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins() -> None:
@@ -8616,6 +8673,10 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/test_mapping_builder_algorithm.py",
     ),
     ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
+    # I1 #1980: the river read-template register. Four suites import it at module
+    # scope; the golden equivalence oracle is the anchor because it is the one
+    # whose whole content is derived from the register.
+    ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),
     ("tests/river_identity_backfill_fakes.py", "tests/test_node27_river_identity_backfill.py"),
     (
         "tests/state_clone_recalibration_fixtures.py",

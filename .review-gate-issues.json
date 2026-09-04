@@ -2612,6 +2612,17 @@
           "rounds": 3
         }
       ]
+    },
+    "1980": {
+      "ceilingPrs": [],
+      "closed": [
+        {
+          "outcome": "superseded-by-split",
+          "pr": 1996,
+          "rounds": 4
+        }
+      ],
+      "gateEntries": 4
     }
   },
   "1736": {
