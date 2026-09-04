@@ -296,6 +296,27 @@ def test_national_river_tile_fairly_caps_rows_before_the_shared_mvt_budget() -> 
         assert '"Type" DESC NULLS LAST' in clause
     assert re.search(r'"Type"\s+DESC(?!\s+NULLS\s+LAST)', national_sql) is None
 
+    # The leading sort key is the whole point of the window and the checks above
+    # are position-insensitive, so pin it. `network_rank` orders each network's
+    # own segments by stream class; both GLOBAL orders must then lead with
+    # `network_rank` so admission goes round-robin across networks. Leading the
+    # global orders with "Type" instead would spend the budget network by
+    # network, admitting a dense network's minor tributaries ahead of a sparse
+    # network's trunk -- the first-come order the spec forbids.
+    normalized = [" ".join(clause.split()) for clause in order_by_clauses]
+    assert normalized[0].startswith('"Type" DESC NULLS LAST,')
+    for clause in normalized[1:]:
+        assert clause.startswith('network_rank, "Type" DESC NULLS LAST,')
+
+    # The running total must sum the per-feature COORDINATE cost over a
+    # PRECEDING..CURRENT frame. Summing anything else (a row count, say) makes
+    # `tile_coordinate_rank` compare apples to a coordinate limit and restores
+    # the 413 the window exists to remove; widening the frame to UNBOUNDED
+    # FOLLOWING makes every row carry the tile's grand total, so one over-budget
+    # tile empties `eligible` entirely and the route caches a blank 200.
+    assert "SUM(source_coordinate_count) OVER (" in window_block
+    assert window_block.count("ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW") == 1
+
     assert "national_budget_window" not in per_basin_sql
     assert "network_rank" not in per_basin_sql
     assert "preeligible" not in per_basin_sql
