@@ -2590,6 +2590,17 @@
           "rounds": 2
         }
       ]
+    },
+    "2005": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2025,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
     }
   },
   "1736": {

@@ -3139,3 +3139,40 @@ PR #2021 是 `rounds: 2` 的多轮 PR，进入了 167 的分母，但两条 catc
 round-intent 未记录）**仍一条未修**，`gh issue list --search "loop_log_audit rotation_attribution"`
 仍返回空，**至今没有对应的 tracked issue**。在修好之前，基于该比值的 keep/cut **翻转**仍须
 maintainer 人的裁定，不走 autonomous default；keep 按 autonomous default 维持，无行为变更。
+
+## Revisit 2026-09-04（PR #2025 / issue #2005 合并后 audit 再次 DECIDABLE）
+
+样本 **168** 个多轮 merged PR（较上条 +1），later-round catches **core=161 vs rotated=302**。
+**维持 keep**，但本条与上两条不同：**本 PR 的证据贡献是负向的，全部落在 core 一侧。**
+
+PR #2025 是 `rounds: 2`。Round 1 派了四个镜组（spec-compliance / test-evidence / integration /
+security-perf），Round 2 **轮换进了 `review-correctness`**，另两名沿用 Round 1 的 test-evidence 与
+spec-compliance。结果是：Round 2 的 6 条 later-round catch **全部来自那两个 core 镜组**（证据完整性
+与 spec/code 一致性），**轮换进来的 correctness 返回零发现**。core 因此 +6、rotated +0。
+
+这不是说轮换无用——correctness 那一轮的零发现本身是有价值的独立复核（它逐字节复核了四个未改图层的
+生成 SQL、v2/v3 缓存键分离，把「RG-D1 类污染」这条最贵的风险钉死了）。但它恰好例证了前几条反复登记的
+第二项工具缺口：**审查的价值不等于 catch 数**，而 `loop_log_audit` 的 core/rotated 比值只数 catch。
+一个把高风险假设证伪、从而让人敢合并的镜组，在这个指标里与「没跑」无法区分。
+
+另外本 PR 的 Phase 7 终审扫出 2 条 P2（design.md 里无来源的冷生成耗时、无背书的 simplify 容差结论），
+按现有口径记在 `phase7_catches`，**不进 core/rotated 任一侧**——这正是第二项缺口的另一半。
+
+前几条登记的三项工具缺口此前**一条未修且无 tracked issue**。本次已立单：**#2036**，标题含
+`loop_log_audit` 与 `rotation_attribution` 两个 token，所以 ADR 反复运行的那条 search 从此能命中它。
+
+立单时的复核把问题**改写得比本文件历来记的更糟**，两处必须更正本文件的既有措辞：
+
+- 第一项缺口不是「稀释」，是**单向偏置**。`loop_log_audit.py` 把 `core_lenses` 钉死为 `round_lenses[0]`，
+  所以镜组与 round 1 相同的后续轮**只能给 core 加数、结构上永远给不了 rotated**，同时分母 +1。
+  当前 168 个多轮 PR 里有 **46 个（27.4%）**的后续轮全是 round-1 子集。
+- 第二项缺口比记的更严重：日志里同时存在**两套相反口径**。旧口径把终审 catch 写进 `catches`、`lens` 记作
+  `final-review` / `gap-sweep` 之类伪镜名，这类名字按定义不在 `round_lenses[0]` 里，于是被**全额记为
+  rotated**——当前 `rotated=302` 中**至少 56 条（18.5%，跨 35 个 PR）**是这么来的，记为 core 的是 0 条；
+  新口径的 `phase7_catches` 共 20 条，脚本里**零引用**，两侧都不计。也就是说同一类事件在同一份日志里
+  语义相反，而这次重解释**此前已经无声发生过一次**。
+
+把这两点合起来看：`rotated=302` 里有一成八是终审轮冒充轮换，而 core 一侧被 46 个零轮换的后续轮系统性
+垫高——**这个比值目前既不能支持 keep 也不能支持 cut**。keep 仍按 autonomous default 维持（无行为变更，
+且轮换本身在工作流里有独立理由），但本文件从此不应再把这个比值当作 keep 的**证据**引用。基于该比值的
+keep/cut **翻转**仍须 maintainer 裁定，且应等 #2036 落地后重算。
