@@ -140,7 +140,7 @@
 ### 3.1 顶部导航栏
 
 ```text
-高度：56px
+高度：84px
 背景：--color-primary-900
 Logo 区域：左侧 16px，Logo 32x32，系统名称 --text-title 白色
 Tab 栏：居中排列，Tab 间距 0，每个 Tab 内边距 16px 24px

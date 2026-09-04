@@ -43,7 +43,7 @@
   --danger: #b42318;
   /*
     M15 visual conformance maps the 06B GIS design tokens into CSS/Tailwind:
-    56px nav, 280px left panel, 320-360px right panel, 64px timeline,
+    84px nav, 280px left panel, 320-360px right panel, 64px timeline,
     4px spacing base, 4px/8px radii, shared warning/status colors,
     panel/card shadows, and one visible focus ring for all operational controls.
   */
@@ -66,7 +66,7 @@
   --z-popover: 300;
   --z-overlay: 400;
   --z-toast: 500;
-  --m11-nav-height: 56px;
+  --m11-nav-height: 84px;
   --m15-nav-height: var(--m11-nav-height);
   --m15-control-height: var(--control-height);
   --m15-control-height-lg: var(--control-height-lg);
