@@ -145,7 +145,11 @@ export async function loadHydroMetRiverForecast({
     if (error) throw new Error(formatHydroMetRiverForecastMessage(error, 'river forecast-series 不可用'))
     const response = unwrapApiData<HydroMetRiverForecastPayload>(data, 'river forecast-series 不可用')
     if (!isRecord(response)) throw new Error('river forecast-series 响应不完整')
-    if (!Array.isArray(response.series) && !Array.isArray(response.segments)) {
+    // 200 是裸 oneOf: RiverSeriesResponse 带 `series`、SplicedForecastResponse 带 `segments`，
+    // 用 `in` 在联合上按存在性判别（缺键时与旧写法一样得到 undefined）。
+    const seriesValue = 'series' in response ? response.series : undefined
+    const segmentsValue = 'segments' in response ? response.segments : undefined
+    if (!Array.isArray(seriesValue) && !Array.isArray(segmentsValue)) {
       throw new Error('river forecast-series series 缺失或格式无效')
     }
     return response
@@ -174,7 +178,7 @@ export function validateHydroMetRiverForecastForChart(
     messages.push(`river_segment_id=${formatHydroMetRiverForecastContractValue(responseSegmentId)} 与当前选择 ${formatHydroMetRiverForecastContractValue(expectedSegmentId)} 不一致`)
   }
 
-  const variableValue = response.variable
+  const variableValue = 'variable' in response ? response.variable : undefined
   if (variableValue !== undefined && variableValue !== null && variableValue !== HYDRO_MET_RIVER_FORECAST_VARIABLE) {
     messages.push(`variable=${formatHydroMetRiverForecastContractValue(variableValue)} 不是 q_down`)
   }

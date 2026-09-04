@@ -445,7 +445,7 @@ describe('forecast comparison UI', () => {
 
     const ifs = renderedChartOption().series.find((series) => series.name === 'IFS 预报')
     expect(ifs?.markLine?.data).toContainEqual(expect.objectContaining({ name: 'IFS 6d', xAxis: endpoint }))
-    expect(ifs?.data.at(-1)?.[0]).toBe(endpoint)
+    expect(ifs?.data?.at(-1)?.[0]).toBe(endpoint)
   })
 
   it('renders an over-budget state instead of passing oversized forecast arrays to ECharts', () => {

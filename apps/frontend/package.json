@@ -9,6 +9,7 @@
     "build": "vite build",
     "check:bundle": "bash ./scripts/check-bundle-size.sh",
     "test": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
     "test:e2e": "playwright test",
     "test:e2e:mocked-regression": "playwright test --config playwright.config.ts",
     "test:e2e:m15-visual": "playwright test e2e/m15-visual-conformance.spec.ts --project=mocked-regression-chromium --workers=1",

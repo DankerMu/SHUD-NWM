@@ -78,7 +78,7 @@ export function normalizeMonitoringQueryCycle(value: string | null | undefined) 
   return new Date(timestamp).toISOString()
 }
 
-function parseMonitoringSource(value: string | null) {
+function parseMonitoringSource(value: string | null): { source: MonitoringSource | null; error: string | null } {
   if (value === null) return { source: null, error: null }
   const trimmed = value.trim()
   if (!trimmed) {

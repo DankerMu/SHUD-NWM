@@ -9,7 +9,7 @@ export type ModelAsset = components['schemas']['ModelInstance'] & {
   __truncatedFields?: Record<string, true>
 }
 export type ModelAssetPage = components['schemas']['ModelInstancePage']
-export type ModelAssetLifecycleRequest = components['schemas']['ModelLifecycleRequest']
+export type ModelAssetLifecycleRequest = components['schemas']['ModelLifecyclePayload']
 export type ModelAssetOperationPreflight = components['schemas']['ModelOperationPreflight']
 export type ModelAssetLifecycleResult = components['schemas']['ModelLifecycleResult']
 export type ModelAssetActiveFilter = 'true' | 'false' | 'all'
