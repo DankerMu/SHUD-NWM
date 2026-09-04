@@ -1,7 +1,8 @@
 # node-27 receipt — issue #2007 hydro-national `{source}/{cycle}` 瓦片
 
 - 日期：2026-09-04
-- 分支 / HEAD：`feat/issue-2007-hydro-national-source-cycle-route` @ `6c30e33d`（rebase 到 master `70337533` 之后）
+- 分支：`feat/issue-2007-hydro-national-source-cycle-route`（rebase 到 master `70337533` 之后）
+- 第 1、2 节的读数取自 `6c30e33d`（交叉审查前）；第 3 节取自修复后的 `9ac6aaf3`。两段读数不要混看。
 - PR：#2027 ・ epic #2003 (m27) ・ OpenSpec change `display-v2-national-timeline-precip-overlay` group 3
 - 节点：node-27（`210.77.77.27`），active primary PG `:55432`
 - 执行方式：**未动生产**。在 `/home/nwm/wt-2007` 新建 git worktree，独立 `uv sync`，另起 uvicorn 于 `127.0.0.1:8090`；生产 `nhms-display-api.service`（:8080）与 `https://test.nwm.ac.cn` 全程未重启、未切分支。
@@ -13,7 +14,7 @@
 ```
 NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:***@127.0.0.1:55432/nhms \
 TMPDIR=/home/nwm/tmp uv run pytest tests/test_mvt_national_identity_probe_integration.py -q
-→ 5 passed in 13.98s
+→ 5 passed in 13.98s   # @6c30e33d；修复后与另一个集成文件合跑为 21 passed，见第 3 节
 ```
 
 5 项 = 旧 5 段路由的 3 条既有用例（未改语义，本次同时是旧路由行为不变的回归 oracle）+ 本 issue 新增 2 条：
@@ -69,10 +70,49 @@ TMPDIR=/home/nwm/tmp uv run pytest tests/test_mvt_national_identity_probe_integr
 
 三种拼写命中同一条缓存，未写出第二份瓦片。
 
-## 3. 覆盖到的 Evidence Floor 项
+## 3. 交叉审查后的第二轮实机验证（HEAD `9ac6aaf3`）
 
-group 3 Evidence Floor 中属于本 issue 的实机项全部满足：新路由 gfs/ifs 同 cycle 各一张 z4 瓦片（200、字节非空、ETag 不同）、无 run 时 424、旧路由仍 200、冷/热耗时已记录。`cycles` 端点与 57 项 valid-times 属 I5/#2008，不在本 receipt。
+round-1 交叉审查发现两个覆盖洞与一条实际破坏，均在 node-27 上实测确认并复验：
 
-## 4. 清理
+**（a）既有真实 DB 测试被新绑定打断（已修）**
+
+`tests/test_river_ts_read_path_surrogate_keys_integration.py` 把 `hydro-national` 的 `source_rows` CTE 切出来直接执行，新增绑定未同批供参：
+
+| 阶段 | 结果 |
+|---|---|
+| 修复前 | `2 failed, 12 passed` — `StatementError: A value is required for bind parameter 'source'` |
+| 修复后 | 与 probe 文件合跑 `21 passed in 50.44s` |
+
+**（b）突变实验：修复前两个核心谓词形同虚设，修复后咬住**
+
+在 node-27 worktree 里删掉谓词再跑真实 DB 集成测试（跑完 `git checkout --` 还原，`git status` 归零）：
+
+| 突变 | 修复前 | 修复后 |
+|---|---|---|
+| 删掉全部 `h.cycle_time = :cycle` 谓词（3 处） | **5 passed**（只有字符串形状断言变红） | **1 failed** — `test_national_identity_tile_serves_the_requested_cycle_not_the_newest_one` |
+| 只删数据 CTE 的身份谓词（保留探针与 digest） | **5 passed** | **2 failed** — 上述用例 + `..._serves_the_requested_source_not_the_other_one_at_that_cycle` |
+
+第二行的修复前状态正是本 issue 要消灭的「同一张图 gfs/IFS 混源」：探针答 200、CTE 画另一个源。判别器用 tile 的 `run_id` 属性——既有断言只看 segment/network id，两个 run 在这两项上完全相同，因此看不出差别。
+
+**（c）修复后新增的 RFC3339 形状门实机复测（HEAD `9ac6aaf3`，独立端口 :8091）**
+
+第 2 节的 422 表是在加形状门**之前**（`6c30e33d`）读的，而形状门恰好改写了那张表覆盖的面，故在修复后的 HEAD 上重测：
+
+| 用例 | HTTP | 秒 | 说明 |
+|---|---|---|---|
+| `cycle=1756814400`（Unix epoch） | 422 `VALIDATION_ERROR` | 0.014 | 加门前是 200，且绑定到 2025-09-02T12:00Z |
+| `cycle=2026-09-03T00:00:00`（无偏移） | 422 `VALIDATION_ERROR` | 0.006 | 加门前 200 |
+| `cycle=2026-09-03 00:00:00`（空格分隔） | 422 `VALIDATION_ERROR` | 0.004 | 加门前 200 |
+| `cycle=9999-12-31T23:59:59-08:00` | 422 `VALIDATION_ERROR` | 0.004 | 加门前 500（`OverflowError`） |
+
+仍必须接受的拼写，全部 200 且**命中同一条缓存**（`X-Tile-Cache-Key` 前 16 位 `57b487e5a9d5403f`，与第 2 节同值）：`...T00:00:00Z`（冷 2.053 s）、`.000Z`、`+00:00`、`2026-09-03T08:00:00+08:00`（同一时刻的非 UTC 偏移，热 0.037 s）。
+
+旧 5 段路由不受形状门影响：200，key `aba7d520afbaae84`。
+
+## 4. 覆盖到的 Evidence Floor 项
+
+group 3 Evidence Floor 中属于本 issue 的实机项全部满足：新路由 gfs/ifs 同 cycle 各一张 z4 瓦片（200、字节非空、`X-Tile-Cache-Key` 不同、ETag 因字节不同而不同）、无 run 时 424、旧路由仍 200、冷/热耗时已记录。`cycles` 端点与 57 项 valid-times 属 I5/#2009，不在本 receipt。
+
+## 5. 清理
 
 `/home/nwm/wt-2007` worktree、`/home/nwm/tmp/mvt-cache-2007` 缓存目录与 `/home/nwm/run-2007-*.{sh,log}` 在合并后移除；生产服务与 `/home/nwm/NWM` 工作树自始至终停留在 master。

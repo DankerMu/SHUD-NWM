@@ -53,7 +53,11 @@ bound as `:source` / `:cycle`, spelled through `canonical_mvt_time` (`YYYY-MM-DD
    microseconds round-trips as `...:00.500000Z`. The new route therefore accepts the zero-microsecond
    spellings the contract is written for (`...T12:00:00.000Z`, `...T12:00:00+00:00`, `...T12:00:00Z`)
    and rejects a non-zero-microsecond `cycle`/`valid_time` with 422. Silent truncation is not chosen:
-   it would serve the `12:00:00` tile under a `12:00:00.500Z` request.
+   it would serve the `12:00:00` tile under a `12:00:00.500Z` request. Precision of the claim: pydantic
+   truncates below microsecond resolution before this check sees the value, so a spelling with seven or
+   more fractional digits whose microsecond part is zero (`...:00.0000001Z`) is accepted and collapses
+   onto `12:00:00`. The aliasing window is one microsecond, no producer emits that, and both spellings
+   name the same identity — but the rule enforced is "non-zero MICROSECOND", not "no fractional part".
 3. **ETag is not part of the identity contract.** `stable_etag(data)` hashes tile bytes only
    (`services/tiles/mvt.py:271-272`); `source_version` reaches `cache_key`, not the ETag. The
    identity assertion is therefore on `cache_key` / the `X-Tile-Cache-Key` response header. Two
@@ -72,7 +76,7 @@ bound as `:source` / `:cycle`, spelled through `canonical_mvt_time` (`YYYY-MM-DD
 - Public routes/entrypoints: new 7-segment national route; legacy 5-segment national route (alias, unchanged
   behavior — its fetch helper does change, because `text()` raises on a missing named bind).
 - Frontend/downstream consumers: none in this PR — the `/api/v1/layers` discharge catalog entry stays on the
-  legacy template (I5/#2008); `apps/frontend/src/api/types.ts` is refreshed only by `pnpm generate:api`.
+  legacy template (I5/#2009); `apps/frontend/src/api/types.ts` is refreshed only by `pnpm generate:api`.
 - Failure paths/rollback/stale state: the `source_identity_count <= 0` 424 branch in `_fetch_postgis_tile_bytes`
   vs. the same-code 424 from `_require_live_postgis_mvt` (told apart by `details`).
 - Evidence/audit/readiness: `apps/api/openapi_patching.py::_patch_mvt_tile_openapi` `mvt_paths`,

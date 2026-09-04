@@ -82,10 +82,18 @@ _SEGMENT_IDS = (f"{_PREFIX}_seg_a", f"{_PREFIX}_seg_b")
 _SEGMENT_LON = 100.0
 _SEGMENT_LAT = 38.0
 
-# Three instants, one per case, so the tile cache
-# (``_cached_or_generated_mvt_response``) can never carry one case's answer
-# into another. `_WINDOW_START` and `_WINDOW_END` are written complete; the hour
-# between them is the interior gap and gets no rows at all.
+# Three instants, one per PRE-#2007 case, so the tile cache
+# (``_cached_or_generated_mvt_response``) can never carry one of those answers
+# into another. (The #2007 identity cases below deliberately share
+# `_WINDOW_END` instead and rely on `(source, cycle)` being part of the cache
+# key.) The base `_seed` writes `_WINDOW_START` and `_WINDOW_END` complete and
+# nothing at the hour between them, which is the interior gap.
+#
+# `_GAP_TIME` is empty in the BASE SEED ONLY. `_LATE_CYCLE_TIME` below is the
+# same instant, and the rival run seeded there by the cycle case writes a full
+# segment set at it. Nothing breaks today — `throwaway_database_url` gives every
+# test its own database and only that one case seeds the rival — but a new case
+# that seeds the rival and then expects the interior gap to be empty is wrong.
 _CYCLE_TIME = datetime(2026, 7, 1, tzinfo=UTC)
 _WINDOW_START = _CYCLE_TIME
 _GAP_TIME = _CYCLE_TIME + timedelta(hours=1)
@@ -121,6 +129,14 @@ _LATE_GFS_RUN_ID = "it2007_gfs_late_cycle_run"
 _LATE_GFS_FORCING_VERSION_ID = "it2007_forcing_gfs_late_v1"
 _SAME_CYCLE_IFS_RUN_ID = "it2007_ifs_same_cycle_run"
 _SAME_CYCLE_IFS_FORCING_VERSION_ID = "it2007_forcing_ifs_same_cycle_v1"
+
+# A cycle NO run is ever seeded at, in either helper. It is the production shape
+# the `:cycle` half of the identity PROBE (`source_identity_stats_sql`, the
+# sub-select that decides 424-vs-200) has to fail closed on: an older cycle
+# whose runs were pruned or failed while a newer cycle still covers the same
+# valid_time. Older rather than newer so the request is a plausible hindcast
+# rather than a cycle issued after the instant it forecasts.
+_PRUNED_CYCLE_TIME = _CYCLE_TIME - timedelta(hours=6)
 
 _ZOOM = 9
 
@@ -710,7 +726,7 @@ def _assert_tile_was_painted_by(response: Any, expected_run_id: str, rejected_ru
 
 
 def test_national_identity_tile_serves_the_requested_cycle_not_the_newest_one(national_tile: Any) -> None:
-    """Same source, two cycles: the OLDER cycle must not be answered by the newer run.
+    """Same source, two seeded cycles plus a third with no run: each answer is its own.
 
     Run selection is `DISTINCT ON (river_network_version_id) ... ORDER BY
     h.cycle_time DESC`, so with the `:cycle` predicate deleted BOTH requests
@@ -722,6 +738,16 @@ def test_national_identity_tile_serves_the_requested_cycle_not_the_newest_one(na
     The legacy source-less route is asserted alongside precisely to show that
     newest-wins IS the unbound default: it still picks the late run, and only
     the bound cycle overrides it.
+
+    The third request — `_PRUNED_CYCLE_TIME`, which has no run at all — is the
+    only behavioral oracle on the `:cycle` half of the identity PROBE. The two
+    painted-by cases above run entirely inside the 200 branch, so they cannot
+    tell a probe that filters on `:cycle` from one where the predicate is
+    present but ineffective; every other identity case in this file either
+    leaves `:source` bound to a source with no run, or asks for a cycle that
+    does have one. Delete or neuter `:cycle` in
+    `source_identity_stats_sql` only and the probe answers "present" from the
+    late gfs run, which turns this contract's 424 into an empty 200.
     """
     database_url, client = national_tile
     _seed_rival_display_ready_run(
@@ -752,6 +778,16 @@ def test_national_identity_tile_serves_the_requested_cycle_not_the_newest_one(na
     _assert_tile_was_painted_by(
         _request_identity_tile(client, "gfs", _LATE_CYCLE_TIME, _WINDOW_END), _LATE_GFS_RUN_ID, _RUN_ID
     )
+    # A gfs cycle that was never seeded, asked for at an instant BOTH seeded
+    # runs cover (`_assert_both_runs_are_candidates_at` above established that
+    # half; the mutation only bites because it holds). Fail-closed 424, not the
+    # newest run's tile and not an empty 200.
+    assert _query(
+        database_url,
+        "SELECT COUNT(*) AS n FROM hydro.hydro_run WHERE cycle_time = %s",
+        (_PRUNED_CYCLE_TIME,),
+    )[0]["n"] == 0, "the pruned cycle must have no run at all, or the case proves nothing"
+    _assert_probe_said_no_data(_request_identity_tile(client, "gfs", _PRUNED_CYCLE_TIME, _WINDOW_END))
     # Unbound default, unchanged: newest cycle wins.
     _assert_tile_was_painted_by(_request_tile(client, _WINDOW_END), _LATE_GFS_RUN_ID, _RUN_ID)
 

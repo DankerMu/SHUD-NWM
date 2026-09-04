@@ -661,11 +661,17 @@ class _NationalRouteSession:
     def __init__(self) -> None:
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
         self.tile_params: list[dict[str, Any]] = []
+        self.digest_params: list[dict[str, Any]] = []
 
     def execute(self, statement: Any, params: Any = None) -> _TileResult:
         if "ST_AsMVT" in str(statement):
             self.tile_params.append(dict(params or {}))
             return _TileResult([dict(self._TILE_ROW)])
+        # The only other statement either national route issues is
+        # `national_discharge_source_version`'s digest; recording its binds is
+        # what lets a case assert the route narrowed it to the requested
+        # identity (the tile binds alone cannot see that call at all).
+        self.digest_params.append(dict(params or {}))
         return _TileResult([dict(row) for row in self._DIGEST_ROWS])
 
     def get_bind(self) -> Any:
@@ -871,6 +877,50 @@ def test_every_national_tile_sql_bind_is_supplied_by_the_route_that_executes_it(
     assert len(session.tile_params) == 1
     supplied = set(session.tile_params[0])
     assert declared - supplied == set(), f"{route_name} route omits binds the SQL declares"
+
+
+@pytest.mark.parametrize(
+    ("route_name", "url", "expected_digest_params"),
+    [
+        (
+            "identity",
+            _national_identity_url("gfs", "2026-09-02T12:00:00Z"),
+            {"source": "gfs", "cycle": _NATIONAL_CYCLE},
+        ),
+        ("legacy", _legacy_national_url(), {"source": None, "cycle": None}),
+    ],
+)
+def test_each_national_route_hands_the_digest_helper_its_own_identity(
+    route_name: str,
+    url: str,
+    expected_digest_params: dict[str, Any],
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> None:
+    """The identity route must narrow the digest to `(source, cycle)`; the legacy route must not.
+
+    Freshness, not separation, is what this protects, and that is why nothing
+    else catches it: `source_version` embeds the literal source and cycle text,
+    so two identities keep two cache keys even when the route drops the kwargs.
+    Rebinding the helper to a wrapper that swallows them left this file plus
+    `test_api_contract`, `test_openapi_drift` and `test_display_publish_status_only`
+    entirely green. What silently breaks is the other half: a RE-RUN of a
+    non-latest `(source, cycle)` stops rotating the digest, so the cache key
+    does not move, and the tile file cache has no TTL — the stale tile is served
+    until something else evicts it.
+
+    `test_national_digest_narrows_to_the_requested_identity_and_stays_null_without_one`
+    proves the helper honours the arguments; this proves the routes pass them.
+    """
+    session = _NationalRouteSession()
+    response, _captured = _request_national_identity_tile(url, session, monkeypatch, tmp_path)
+
+    assert response.status_code == 200, response.text
+    # Non-vacuity: the digest really was computed once for this request. An
+    # empty list would make the equality below unreachable, and a longer one
+    # would mean a third statement now lands on this branch.
+    assert len(session.digest_params) == 1, f"{route_name} route: {session.digest_params}"
+    assert session.digest_params[0] == expected_digest_params, route_name
 
 
 def test_runtime_openapi_documents_the_national_identity_tile_route() -> None:
