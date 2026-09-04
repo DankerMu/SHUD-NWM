@@ -162,7 +162,10 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
 
   return (
     <section
-      className={cn('absolute bottom-4 right-4 z-[120] w-56 p-3', GLASS_PANEL)}
+      // 宽度跟着最长的图例行走：固定 w-56 会在右侧留下约三分之一死白（实测内容区
+      // 200px / 最宽行 137px）。max-w-56 保住原来的上限，未来出现更长的标签也不会
+      // 把卡片撑过地图。
+      className={cn('absolute bottom-4 right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
       aria-label="地图图例"
       data-testid="m11-floating-legend"
     >
@@ -176,7 +179,7 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
             // label 已自带数值区间（如「500-1000 m³/s」），不再重复渲染右侧数字列。
             <div key={`${entry.label}-${entry.color}`} className="flex items-center gap-2 text-xs text-neutral-700">
               <span className="h-3 w-7 shrink-0 rounded-sm" style={{ backgroundColor: entry.color }} aria-hidden="true" />
-              <span className="truncate">{entry.label}</span>
+              <span className="min-w-0 truncate">{entry.label}</span>
             </div>
           ))}
         </div>
