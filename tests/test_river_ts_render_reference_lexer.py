@@ -88,6 +88,18 @@ def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     and expressing it as a lookbehind is how the module came to disagree with
     §4.1 at ``x$e'C:\'`` in the first place.
 
+    The register carries the previous token's END OFFSET as well as its text, and
+    is inert unless ``previous_end == index``: §4.1.2.2 puts the prefix
+    "immediately before the opening single quote", so ``E 'C:\'`` is an
+    identifier followed by a PLAIN literal, not an escape string. Without the
+    offset the register survives whitespace, the reference over-blanks (verifier
+    #2018 round-5 L1 measured it swallowing a whole ``FROM`` clause), and — worse
+    for an oracle — it over-blanks in the same direction the module's own
+    lookbehind would if someone "tidied" it, so the differential would go green
+    on the very mutant it exists to catch. Pinned by the
+    ``escape_prefix_needs_adjacency`` row of
+    :func:`test_the_reference_lexer_answers_its_own_known_cases`.
+
     Unterminated runs extend to the end of the input, which is also what the
     module does; the difference between "closed" and "ran out" is the module's
     own belt and is not part of this comparison.
@@ -96,11 +108,12 @@ def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     index = 0
     length = len(sql)
     previous_token: str | None = None
+    previous_end = -1
     while index < length:
         character = sql[index]
 
         if character == "'":
-            escaped = previous_token in ("E", "e")
+            escaped = previous_token in ("E", "e") and previous_end == index
             cursor = index + 1
             while cursor < length:
                 if escaped and sql[cursor] == "\\":
@@ -178,7 +191,7 @@ def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
             cursor = index
             while cursor < length and _is_ident_cont(sql[cursor]):
                 cursor += 1
-            previous_token = sql[index:cursor]
+            previous_token, previous_end = sql[index:cursor], cursor
             index = cursor
             continue
 
@@ -243,6 +256,26 @@ ALPHABET: tuple[str, ...] = (
     # invisible to the differential (measured: it survived).
     r"'C:\' ",
     r"LIKE'C:\' ",
+    # The `E'…'` ADJACENCY fragments (#2018 round-5 L1). Every other fragment
+    # ends in whitespace, so before these the alphabet could not even GENERATE a
+    # bare `E` next to a quote: 380 of the 2000 samples contained `[Ee]\s+'` and
+    # in every one the token before the quote was a multi-char identifier
+    # (`value 'it''s'`), never the `E` token the rule is about. The first two
+    # produce `E ␠'…'`, which §4.1.2.2 makes a PLAIN literal because the prefix
+    # must sit immediately before the opening quote; the last two produce a
+    # genuine `E'…'` behind a token that is not an identifier character. Without
+    # all four the reference's own adjacency rule is unreachable and a module
+    # that walked its lookbehind back over whitespace stayed green (mutant m6).
+    "E ",
+    "e ",
+    '"x"E',
+    ")E",
+    # In-subset on its own, out of subset only in COMPOSITION: glued to a
+    # following `'…'` fragment it spells `1E'`, which decision 18's second arm
+    # refuses (round-5 L2). Addable only because that arm exists — with the
+    # corrected reference and no arm the pair is a real 18-mismatch divergence
+    # over 20 seeds, which is what L2 measured.
+    "1E",
     "AS n ",
     ", ",
     "|| ",
@@ -276,10 +309,13 @@ IN_SUBSET_ALPHABET: tuple[str, ...] = tuple(
 SEED = 20180905
 SAMPLE_COUNT = 2000
 
-#: Measured at this commit: 787/2000 samples (39.4%) are inside the declared
-#: subset and are therefore actually compared span-for-span; the other 1213 carry
-#: one of the eleven out-of-subset fragments and exercise the REFUSAL arm.
-#: Pinned a third below the measurement so ordinary drift in the alphabet does
+#: Measured at this commit: 836/2000 samples (41.8%) are inside the declared
+#: subset and are therefore actually compared span-for-span. Of the other 1164,
+#: 1159 carry one of the eleven out-of-subset fragments and 5 are refused only in
+#: COMPOSITION — the in-subset fragment ``1E`` glued to a following ``'…'``,
+#: which is decision 18's second arm (round-5 L2) — so the refusal arm is
+#: exercised by both halves of the subset rule.
+#: Pinned well below the measurement so ordinary drift in the alphabet does
 #: not redden it, while the failure this floor exists to catch — a subset rule
 #: that widens until it refuses everything and the differential asserts nothing —
 #: cannot pass.
@@ -305,6 +341,15 @@ def test_the_scanner_agrees_with_a_reference_lexer_or_refuses() -> None:
     Both anti-vacuity guards are load-bearing and were chosen because the obvious
     version of this test is trivially satisfiable: a module that refused every
     statement would pass the disjunction with no comparison ever made.
+
+    What the fragment-coverage guard does NOT prove: it is a SUBSTRING test, so
+    the adjacency fragments ``"E "`` and ``"e "`` are satisfied by any accepted
+    sample containing ``WHERE `` or ``value `` and their presence in the alphabet
+    is not evidence that a bare ``E`` ever landed next to a quote. The evidence
+    for that is the mutant: with ``_opens_escape_string`` walking its lookbehind
+    back over whitespace this test goes red (round-5 L1, and the kill is recorded
+    in the round-5 implementer report), which it could not do before these
+    fragments existed.
     """
     samples = _samples()
     accepted: list[str] = []
@@ -371,6 +416,7 @@ def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None
         ("nested_block_comment", "/* a /* b */ c */ SELECT 1", ((0, 17, "comment"),)),
         ("carriage_return_line_comment", "SELECT 1 -- note\rFROM t", ((9, 16, "comment"),)),
         ("escape_string", r"SELECT E'a\'b' FROM t", ((8, 14, "literal"),)),
+        ("escape_prefix_needs_adjacency", r"SELECT note E 'C:\' AS n", ((14, 19, "literal"),)),
         ("plain_backslash_literal", r"SELECT 'C:\' FROM t", ((7, 12, "literal"),)),
         ("quoted_identifier_is_code", "SELECT \"it's\" FROM t", ()),
         ("dollar_body", "SELECT $q$a'b$q$ FROM t", ((7, 16, "literal"),)),
@@ -379,6 +425,7 @@ def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None
         "nested_block_comment",
         "carriage_return_line_comment",
         "escape_string",
+        "escape_prefix_needs_adjacency",
         "plain_backslash_literal",
         "quoted_identifier_is_code",
         "dollar_body",
@@ -395,5 +442,13 @@ def test_the_reference_lexer_answers_its_own_known_cases(
     the module deliberately DISAGREE: §4.1 has dollar quoting, this module
     refuses it (decision 18), and the differential never compares such a sample —
     so the reference's dollar rule needs its own pin here.
+
+    ``escape_prefix_needs_adjacency`` is round-5 L1's row and the one that pins a
+    reference rule the MODULE is already right about: the reference as first
+    committed read ``E ␠'C:\\'`` as an escape string and blanked ``(14, 81)`` of
+    that statement — over its ``FROM`` clause and every predicate — while the
+    module answered ``(14, 19)``. A reference that over-blanks is an oracle that
+    agrees with the fail-open mutant, which is precisely the common-mode failure
+    this file exists to end.
     """
     assert reference_non_code_spans(sql) == expected

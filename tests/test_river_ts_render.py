@@ -1374,12 +1374,15 @@ def test_a_bit_or_hex_constant_is_a_plain_literal(label: str, literal: str) -> N
 # a whole second lexer in the traversal family with no dollar arm at all.
 #
 # Decision 18 answers by SHRINKING the module's input domain instead: the
-# renderer accepts a declared subset of §4.1 and refuses everything else. The
-# refused characters are `$` and any non-ASCII byte IN CODE, measured 0/20 over
-# the registry (its two `$` sit inside `'^[0-9]+$'` literals, its four `—` inside
-# comments), so nothing the readers use is lost. The pins below are the subset's
-# contract: what is refused, what is NOT refused, and that the refusal happens
-# before any traversal can mis-lex the statement.
+# renderer accepts a declared subset of §4.1 and refuses everything else. What is
+# refused is `$` and any non-ASCII byte IN CODE, and (round 5, L2) a numeric
+# constant glued to an `E'` escape prefix — measured 0/20 over the registry (all
+# 10 `$` occurrences, in 2 entries, are the closing anchor of a `'^[0-9]+$'`
+# literal; all 6 `—` occurrences, in 4 entries, sit inside `--` comments; no
+# entry glues a digit to a quote anywhere in its RAW source, measured), so
+# nothing the readers use is lost. The pins
+# below are the subset's contract: what is refused, what is NOT refused, and that
+# the refusal happens before any traversal can mis-lex the statement.
 # ---------------------------------------------------------------------------
 
 
@@ -1401,18 +1404,36 @@ def _assert_refused_as_outside_the_subset(sql: str, entry: str) -> None:
     calls the guard for BOTH stores before it branches, and
     ``fact_table_text_identity_columns`` calls it as its first statement.
 
+    The public message is the fixture's own shape: it names the supplied
+    ``entry`` and quotes the complete offending text at its offset — the same
+    ``(offset, text)`` :func:`_lexical_subset_violation` answers, interpolated
+    as ``{text!r} at offset {offset}``. The private-tuple pin cannot see a
+    mutation that drops those fields from :func:`_assert_modelled_reference_forms`.
+
     The message must NOT contain the fact table's name: the statement census in
     ``tests/test_river_ts_text_identity_cleanup.py`` counts that name in this
     module's string constants, so a refusal message spelling it would add a
     phantom "read site" to the census (census-2).
     """
+    violation = _lexical_subset_violation(sql)
+    assert violation is not None
+    offset, text = violation
+    locus = f"{text!r} at offset {offset}"
+
+    def _assert_public_door(raised: pytest.ExceptionInfo[RiverTemplateError]) -> None:
+        message = str(raised.value)
+        assert _SUBSET_REFUSAL in message
+        assert entry in message
+        assert locus in message
+        assert "river_timeseries" not in message
+
     for store in ("legacy", "narrow"):
         with pytest.raises(RiverTemplateError, match=_SUBSET_REFUSAL) as raised:
             render_river_ts_sql(sql, store, entry=entry)
-        assert "river_timeseries" not in str(raised.value)
+        _assert_public_door(raised)
     with pytest.raises(RiverTemplateError, match=_SUBSET_REFUSAL) as raised:
         fact_table_text_identity_columns(sql, entry=entry)
-    assert "river_timeseries" not in str(raised.value)
+    _assert_public_door(raised)
 
 
 @pytest.mark.parametrize(
@@ -1518,9 +1539,9 @@ def test_a_dollar_body_hiding_a_comment_or_paren_is_refused_before_any_traversal
 def test_a_dollar_sign_inside_a_literal_or_comment_stays_inside_the_subset() -> None:
     """Non-vacuity, and the registry's OWN shape: the subset is asked over blanked text.
 
-    Two of the twenty registered templates contain a ``$`` — both inside a
-    ``'^[0-9]+$'`` regex literal — and this is why decision 18 costs the readers
-    nothing. A subset check spelled over the RAW text instead of the
+    Two of the twenty registered templates contain a ``$`` — 10 occurrences
+    between them, every one the closing anchor of a ``'^[0-9]+$'`` regex literal
+    — and this is why decision 18 costs the readers nothing. A subset check spelled over the RAW text instead of the
     comment/literal-blanked text would refuse them and take the whole change with
     it, so the "0 ``$`` in code" measurement is pinned here as behaviour rather
     than quoted as a number.
@@ -1579,8 +1600,8 @@ def test_a_non_ascii_byte_in_code_is_refused_as_outside_the_lexical_subset(label
 def test_non_ascii_text_inside_a_comment_or_literal_stays_inside_the_subset() -> None:
     """Non-vacuity for the byte half: 4/20 registered templates do exactly this.
 
-    The four non-ASCII occurrences in the registry are ``—`` characters inside
-    ``--`` comments. Blanked text is what the rule reads, so prose comments and
+    The registry's 6 non-ASCII occurrences, spread over those 4 entries, are all
+    ``—`` characters inside ``--`` comments. Blanked text is what the rule reads, so prose comments and
     ``'备注'`` literals are data and render normally for both stores.
     """
     comment_sql = (
@@ -1595,6 +1616,181 @@ def test_non_ascii_text_inside_a_comment_or_literal_stays_inside_the_subset() ->
         assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
         assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
 
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "select_list",
+            r"SELECT 1E'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = 1E'b\'y'",
+        ),
+        (
+            "predicate",
+            r"SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s "
+            r"AND rt.note = 1E'a\'x' AND rt.tag = 1E'b\'y'",
+        ),
+        (
+            "lowercase_e",
+            r"SELECT 1e'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = 1e'b\'y'",
+        ),
+    ],
+    ids=["select_list", "predicate", "lowercase_e"],
+)
+def test_a_numeric_literal_glued_to_an_escape_prefix_is_refused_as_outside_the_lexical_subset(
+    label: str, sql: str
+) -> None:
+    r"""The subset's second arm (#2018 round-5 L2): ``1E'`` is a shape, not a character.
+
+    §4.1.2.2 requires the ``E`` of an escape string to be a TOKEN START. After a
+    numeric constant it is not one, so an independent §4.1 reference lexer reads
+    ``1E'a\'x'`` as an identifier-less escape string while this module's
+    ``_opens_escape_string`` sees ``isalnum()`` before the ``E`` and reads a
+    PLAIN literal, backslash-blind — the two disagree, and the disagreement is
+    the same common-mode one as rounds 1 to 4: the plain literal closes on the
+    escaped quote, the next quote opens a phantom literal over the statement's
+    own ``FROM`` clause, both counters read 0 and the equality guard is satisfied
+    by mutual blindness.
+
+    No PostgreSQL version EXECUTES either answer — a lex error on 15+, a parse
+    error on ≤14 (verifier #2018 round-5 L2 (iv), read out of ``scan.l`` and
+    explicitly NOT verified against a live server; this loop has none) — so there
+    is no ground truth to implement faithfully here, which is exactly the case
+    decision 18 exists for: the shape leaves the input domain instead of being
+    modelled.
+
+    What each parameter is red for at 03241693, measured rather than assumed:
+
+    * ``select_list`` (verifier L's statement) and ``lowercase_e`` are LIVE
+      holes there — ``_lexical_subset_violation`` answers ``None``, occurrences
+      0 == walk 0, ``fact_table_text_identity_columns`` answers ``set()``, the
+      narrow render SHIPS ``rt.variable`` and the legacy render leaves the fact
+      table un-renamed;
+    * ``predicate`` is red by MESSAGE: at 03241693 the spans still diverge from
+      §4.1 (module ``(89, 93), (94, 112), (114, 117)`` vs reference
+      ``(89, 95), (111, 117)``), but the phantom literal opens after the ``FROM``
+      clause, so the statement is refused for a DIFFERENT reason (text identity)
+      and the legacy render succeeds. It is here because the arm has to reach a
+      glued literal wherever it sits, not only ahead of the read.
+    """
+    _assert_refused_as_outside_the_subset(sql, label)
+
+
+def test_the_glued_escape_prefix_arm_reports_the_whole_numeric_constant() -> None:
+    r"""The arm's SHAPE, at the offsets and text the refusal message quotes.
+
+    Two claims that the three-door pins above cannot make, because they only ask
+    "was it refused":
+
+    * the arm covers the whole numeric constant, so ``12E'`` and ``1.5e'`` are
+      refused as such and the message quotes the constant from its first digit —
+      both of those DO diverge from §4.1 with a backslash inside the literal
+      (measured: module and reference disagree there);
+    * it stops where PostgreSQL's exponent does. ``1.5e3'a\'x'`` and
+      ``1EE'a\'x'`` are NOT refused, because the character before the quote is
+      not the ``E`` of a prefix at all and module and reference already agree on
+      both (measured). Without that boundary the arm would be a digit-anywhere
+      rule and would start refusing ordinary numeric SQL.
+    """
+    assert _lexical_subset_violation(r"SELECT 12E'a\'x' AS n, " + _REAL_READ) == (7, "12E'")
+    assert _lexical_subset_violation(r"SELECT 1.5e'a\'x' AS n, " + _REAL_READ) == (7, "1.5e'")
+    assert _lexical_subset_violation(r"SELECT 1.5e3'a\'x' AS n, " + _REAL_READ) is None
+    assert _lexical_subset_violation(r"SELECT 1EE'a\'x' AS n, " + _REAL_READ) is None
+
+
+def test_a_digit_before_an_escape_prefix_inside_a_literal_or_comment_stays_inside_the_subset() -> None:
+    """Non-vacuity for the second arm: it is asked over BLANKED text, like the first.
+
+    The arm needs the literal's quotes to survive blanking (it is a claim about
+    what a quote means), so it reads ``_blank_non_code(sql,
+    keep_literal_quotes=True)`` rather than the quote-blanking form the other
+    checks read. That is one step closer to the raw text than any other check in
+    the guard, so the failure mode to keep out is an arm that reads the RAW
+    statement and refuses a template for a ``1E'`` its author wrote inside a
+    string or a comment. Both statements below render for both stores.
+    """
+    literal_sql = "SELECT rt.value, '1E' AS n FROM hydro.river_timeseries rt WHERE rt.run_key = %(k)s"
+    comment_sql = (
+        "SELECT rt.value -- note 1E'x'\nFROM hydro.river_timeseries rt WHERE rt.run_key = %(k)s"
+    )
+
+    for label, sql in (("literal", literal_sql), ("comment", comment_sql)):
+        assert _lexical_subset_violation(sql) is None
+        assert fact_table_name_occurrences(sql) == 1
+        assert fact_table_text_identity_columns(sql, entry=label) == set()
+        assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
+        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
+
+
+@pytest.mark.parametrize(
+    ("label", "sql", "still_renders_legacy"),
+    [
+        ("uppercase_e", "SELECT col1E'x' AS n, " + _REAL_READ, True),
+        ("lowercase_e", "SELECT x1e'a\\'x' AS n, " + _REAL_READ, False),
+    ],
+    ids=["uppercase_e", "lowercase_e"],
+)
+def test_an_identifier_character_before_the_digit_keeps_todays_answer(
+    label: str, sql: str, still_renders_legacy: bool
+) -> None:
+    r"""The arm is scoped to NUMERIC constants, so ``col1E'x'`` is untouched.
+
+    In ``col1E'x'`` and ``x1e'a\'x'`` the digit is inside an IDENTIFIER, the
+    ``E`` is not a token of its own by anyone's rule, and the module already
+    answers "plain literal" exactly as §4.1 does (verifier L measured both as
+    AGREEING at 03241693). Refusing them would be over-refusal bought for
+    nothing, so the arm carries ``(?<!\w)`` and these two keep the answers they
+    have today:
+
+    * ``col1E'x'`` — occurrences 1 == walk 1, text identity ``{'variable'}``, the
+      narrow render refused for THAT reason and the legacy render succeeding
+      with the rename;
+    * ``x1e'a\'x'`` — the backslash-blind plain literal runs off the end, so the
+      UNTERMINATED belt refuses it, at offset 15 and with its own message.
+
+    Either way the message must not be the subset one: a subset refusal here
+    would mean the arm had stopped being about numeric constants.
+    """
+    assert _lexical_subset_violation(sql) is None
+
+    if still_renders_legacy:
+        assert fact_table_name_occurrences(sql) == 1
+        assert fact_table_attribution(sql).reference_count == 1
+        assert fact_table_text_identity_columns(sql, entry=label) == {"variable"}
+        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
+        with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]") as raised:
+            render_river_ts_sql(sql, "narrow", entry=label)
+    else:
+        with pytest.raises(
+            RiverTemplateError, match="unterminated literal or comment opened at offset 15"
+        ) as raised:
+            render_river_ts_sql(sql, "narrow", entry=label)
+    assert _SUBSET_REFUSAL not in str(raised.value)
+
+
+def test_a_digit_glued_to_a_double_quoted_identifier_stays_inside_the_subset() -> None:
+    r"""The arm's other boundary: ``1E"x"``, the quote form it does NOT cover.
+
+    Decision 18's second arm is spelled for the SINGLE quote only. Measured at
+    03241693 and here: on ``1E"x"`` the module and the §4.1 reference lexer
+    already give the same answer — no span at all, because a double-quoted run is
+    an identifier in both — so there is nothing for a refusal to close, and
+    widening the arm to ``["']`` would refuse a statement the differential
+    compares happily. Today's answer, pinned: the statement is inside the subset,
+    reads the fact table once, and is refused by the NARROW check on
+    ``rt.variable`` rather than by the subset.
+    """
+    sql = 'SELECT 1E"x" AS n, ' + _REAL_READ
+
+    assert _lexical_subset_violation(sql) is None
+    assert non_code_spans(sql) == ()
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_text_identity_columns(sql, entry="double_quoted") == {"variable"}
+    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="double_quoted").sql
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]") as raised:
+        render_river_ts_sql(sql, "narrow", entry="double_quoted")
+    assert _SUBSET_REFUSAL not in str(raised.value)
 
 
 # ---------------------------------------------------------------------------
@@ -1773,6 +1969,18 @@ _ADVERSARIAL_CORPUS: tuple[tuple[str, str], ...] = (
         "quoted_identifier_holding_a_comment_opener",
         'SELECT rt.value AS "a--b", rt.unit AS "c/*d" FROM hydro.river_timeseries rt WHERE rt.run_key = :k',
     ),
+    # The `_opaque_runs` discriminator for its QUOTED-IDENTIFIER half (round-5
+    # L3). The `)` has to sit inside a quoted identifier INSIDE the stripped
+    # sub-select: only there does the reference's own `skip_balanced` walk over
+    # it, so a reference that stopped skipping quoted identifiers would close the
+    # group one character early and strip a different span. The same identifier
+    # in the SELECT list — outside every stripped group — changes nothing and
+    # leaves the mutant alive (measured: 167/167 green with `AS "a(b"` there).
+    (
+        "quoted_identifier_holding_an_unbalanced_paren_inside_a_stripped_group",
+        'SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = (SELECT run_key AS "a)b" '
+        "FROM hydro.hydro_run WHERE run_id = :r) AND rt.valid_time = :t",
+    ),
 )
 
 #: Verifier I's I2 statements — the ones the family and the scanner lexed
@@ -1822,6 +2030,14 @@ def test_every_traversal_commutes_with_the_scanner_over_the_corpus() -> None:
     notion of "code" for the counter, the walk, the rename, the structural check
     and the strippers — and it goes red the moment a family member's private
     lexer disagrees with the shared one, in EITHER direction.
+
+    What this pin does NOT reach, recorded rather than left for the next round to
+    find: ``assert_structurally_intact``'s own paren loop losing its quoted-
+    identifier arm (round-5 L3's mutant m25). It is compared here as an OUTCOME
+    against ``_blank_non_code(sql, keep_literal_quotes=True)``, and blanking
+    leaves quoted identifiers untouched, so both sides count the same phantom
+    paren and agree — structurally, not by luck. Closing m25 needs a direct
+    structural pin, not another corpus line.
 
     ``strip_*`` are compared verbatim (no whitespace normalisation: they return
     the original text with non-comment runs untouched). ``outer_predicates`` is
