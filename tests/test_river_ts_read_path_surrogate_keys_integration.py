@@ -410,6 +410,15 @@ def seeded(throwaway_database_url: str) -> Any:
     engine.dispose()
 
 
+# The national ``source_rows`` CTE binds `(source, cycle)` since #2007. These
+# cases are written for the legacy source-less semantics -- every candidate run
+# eligible, newest cycle wins -- so they bind the NULL pass-through the legacy
+# 5-segment route binds. Omitting the names is not an option: `text()` raises
+# `StatementError: A value is required for bind parameter 'source'` before the
+# statement reaches the driver.
+_NATIONAL_TILE_PARAMS: dict[str, Any] = {"variable": _VARIABLE, "source": None, "cycle": None}
+
+
 def _identity_params(run_id: str, valid_time: datetime = _T0, variable: str = _VARIABLE) -> dict[str, Any]:
     return {
         "run_id": run_id,
@@ -616,12 +625,12 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded
     detail = _rows(
         session,
         query,
-        {"variable": _VARIABLE, "valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y},
+        _NATIONAL_TILE_PARAMS | {"valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y},
     )
     overview = _rows(
         session,
         query,
-        {"variable": _VARIABLE, "valid_time": _T0, "z": 5, "x": overview_x, "y": overview_y},
+        _NATIONAL_TILE_PARAMS | {"valid_time": _T0, "z": 5, "x": overview_x, "y": overview_y},
     )
 
     detail_segments = {row["river_segment_id"] for row in detail}
@@ -668,7 +677,7 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(seed
     detail = _rows(
         session,
         query,
-        {"variable": _VARIABLE, "valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y},
+        _NATIONAL_TILE_PARAMS | {"valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y},
     )
 
     expected_values = {segment_id: value for segment_id, _type, value in _SEGMENTS}
@@ -702,7 +711,7 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(seed
     later = _rows(
         session,
         query,
-        {"variable": _VARIABLE, "valid_time": _T1, "z": 9, "x": detail_x, "y": detail_y},
+        _NATIONAL_TILE_PARAMS | {"valid_time": _T1, "z": 9, "x": detail_x, "y": detail_y},
     )
     assert later == []
 

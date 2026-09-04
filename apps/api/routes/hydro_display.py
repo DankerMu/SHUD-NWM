@@ -3,14 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from collections.abc import Generator
-from datetime import datetime
+from datetime import UTC, datetime
 from functools import lru_cache
-from typing import Any, Callable
+from typing import Annotated, Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
@@ -107,6 +108,40 @@ TILE_Y_DESCRIPTION = (
     f"Web Mercator XYZ tile row. Global schema bounds are 0..{MVT_MAX_TILE_COORDINATE} "
     f"for max zoom {MVT_MAX_ZOOM}; each request also enforces 0 <= y < 2^z."
 )
+
+# RFC3339 at seconds precision, with an optional fractional part and a
+# mandatory offset: `2026-09-02T12:00:00Z`, `...T12:00:00.000Z`,
+# `...T12:00:00+00:00`, `...T20:00:00+08:00`. A fractional part is matched here
+# and rejected later by `_require_seconds_precision_instant`, so `.000` still
+# canonicalizes while `.500` gets the precision message rather than a shape one.
+_RFC3339_INSTANT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+
+
+def _reject_non_rfc3339_instant_text(value: Any) -> Any:
+    """Gate the raw path segment before pydantic's lax datetime coercion runs.
+
+    `cycle: datetime` on its own accepts spellings the tile contract does not
+    define an answer for: a bare Unix epoch (`1756814400` -> 2025-09-02T12:00Z),
+    an offset-less `2026-09-02T12:00:00`, and a space-separated
+    `2026-09-02 12:00:00` all coerce and reach the tile SQL. The contract's
+    "Invalid tile" scenario requires a 422 without expensive SQL instead, so the
+    string shape is checked first and the value handed on unchanged for pydantic
+    to parse.
+
+    Raises `ValueError`, never `ApiError`: only `ValueError`/`AssertionError`
+    become a `RequestValidationError`, which the app's handler renders as the
+    same 422 `VALIDATION_ERROR` an out-of-enum `source` produces. Any other
+    exception escapes dependency solving as a 500.
+    """
+    if isinstance(value, str) and not _RFC3339_INSTANT_RE.match(value):
+        raise ValueError("Input should be an RFC3339 instant, e.g. 2026-09-02T12:00:00Z")
+    return value
+
+
+# Only the canonical `{source}/{cycle}` national route uses this. The legacy
+# routes' `valid_time: datetime` laxness is pre-existing and deliberately left
+# alone here.
+Rfc3339Instant = Annotated[datetime, BeforeValidator(_reject_non_rfc3339_instant_text)]
 
 
 class Layer(BaseModel):
@@ -345,6 +380,63 @@ def hydro_mvt_tile(
 
 
 @router.get(
+    "/api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
+    responses=MVT_ROUTE_RESPONSES,
+    response_class=Response,
+)
+def hydro_national_source_cycle_mvt_tile(
+    # `Literal`, deliberately not a Python `Enum`: an Enum makes FastAPI emit a
+    # `$ref` into `components/schemas`, which the hand-maintained
+    # `openapi/nhms.v1.yaml` would then have to mirror in a second place.
+    source: Literal["gfs", "ifs"],
+    cycle: Rfc3339Instant,
+    variable: str,
+    valid_time: Rfc3339Instant,
+    z: int,
+    x: int,
+    y: int,
+    session: Session = Depends(get_hydro_display_session),
+) -> Response:
+    """Canonical national discharge tile for one (source, cycle) identity; 424 when it has no display-ready run."""
+    # `cycle` / `valid_time` are RFC3339 at seconds precision
+    # (`YYYY-MM-DDTHH:MM:SSZ`); `...T12:00:00.000Z`, `...T12:00:00+00:00` and a
+    # non-UTC `...T20:00:00+08:00` are accepted and canonicalize onto it. Every
+    # check below runs before the session is touched, so a bad variable/z/x/y
+    # costs no SQL; `source` and the two instants' STRING SHAPE are rejected by
+    # FastAPI itself (`Rfc3339Instant`), ahead of this body, and what remains
+    # here is the seconds-precision and in-range checks pydantic cannot express.
+    validate_identifier(variable, "variable")
+    _validate_supported_hydro_variable(variable)
+    validate_xyz(z, x, y)
+    cycle_instant = _require_seconds_precision_instant(cycle, "cycle")
+    valid_time_instant = _require_seconds_precision_instant(valid_time, "valid_time")
+    tile_input = _national_source_cycle_tile_input(
+        source=source,
+        cycle_text=_format_time(cycle_instant),
+        variable=variable,
+        valid_time=valid_time_instant,
+        z=z,
+        x=x,
+        y=y,
+        source_digest=national_discharge_source_version(session, source=source, cycle=cycle_instant),
+    )
+    return _cached_or_generated_mvt_response(
+        session,
+        tile_input,
+        lambda: _fetch_hydro_national_mvt_tile_bytes(
+            session,
+            variable=variable,
+            valid_time=valid_time_instant,
+            z=z,
+            x=x,
+            y=y,
+            source=source,
+            cycle=cycle_instant,
+        ),
+    )
+
+
+@router.get(
     "/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
     responses=MVT_ROUTE_RESPONSES,
     response_class=Response,
@@ -373,8 +465,11 @@ def hydro_national_mvt_tile(
     return _cached_or_generated_mvt_response(
         session,
         tile_input,
+        # Non-canonical alias: unchanged run selection, unchanged bytes,
+        # unchanged 200/424 verdict. `source`/`cycle` are bound NULL rather
+        # than omitted because `text()` raises on a missing named bind.
         lambda: _fetch_hydro_national_mvt_tile_bytes(
-            session, variable=variable, valid_time=valid_time, z=z, x=x, y=y
+            session, variable=variable, valid_time=valid_time, z=z, x=x, y=y, source=None, cycle=None
         ),
     )
 
@@ -603,11 +698,13 @@ def _fetch_hydro_national_mvt_tile_bytes(
     z: int,
     x: int,
     y: int,
+    source: str | None,
+    cycle: datetime | None,
 ) -> bytes:
     return _fetch_postgis_tile_bytes(
         session,
         "hydro-national",
-        {"variable": variable, "valid_time": valid_time},
+        {"variable": variable, "valid_time": valid_time, "source": source, "cycle": cycle},
         z=z,
         x=x,
         y=y,
@@ -999,3 +1096,72 @@ def _postgis_tile_params(
 
 def _format_time(value: Any) -> str:
     return canonical_mvt_time(value) or str(value)
+
+
+def _require_seconds_precision_instant(value: datetime, field_name: str) -> datetime:
+    """Reject a sub-second or out-of-range instant, and normalize the rest to UTC.
+
+    `canonical_mvt_time` does not truncate: a non-zero microsecond round-trips
+    as `...:00.500000Z`. Truncating one here would serve the `12:00:00` tile
+    under a `12:00:00.500Z` request, so this is a 422 instead. The
+    zero-microsecond spellings the contract is written for -- `...T12:00:00Z`,
+    `...T12:00:00.000Z`, `...T12:00:00+00:00`, and a non-UTC
+    `...T20:00:00+08:00` -- are all accepted and collapse onto one instant, one
+    SQL bind and one cache key.
+
+    The conversion is guarded because it can leave `datetime`'s representable
+    range: `9999-12-31T23:59:59-08:00` is well-formed RFC3339 (so the string
+    shape gate passes it) and `astimezone(UTC)` then raises `OverflowError`,
+    which would surface as an HTTP 500 on a public URL. It is a bad request, so
+    it gets the same 422 every other rejected instant gets.
+    """
+    if value.microsecond:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Tile time instants must be RFC3339 with seconds precision.",
+            details={field_name: value.isoformat(), "expected_format": "YYYY-MM-DDTHH:MM:SSZ"},
+        )
+    try:
+        return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    except (OverflowError, ValueError) as exc:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Tile time instants must be representable in UTC.",
+            details={field_name: value.isoformat(), "expected_format": "YYYY-MM-DDTHH:MM:SSZ"},
+        ) from exc
+
+
+def _national_source_cycle_tile_input(
+    *,
+    source: str,
+    cycle_text: str,
+    variable: str,
+    valid_time: Any,
+    z: int,
+    x: int,
+    y: int,
+    source_digest: str,
+) -> TileInput:
+    """Cache identity for the canonical national tile.
+
+    `source` and the canonicalized `cycle` ride in `source_version`, so
+    `cache_key` -- and the file cache path derived from it -- separate two
+    identities that share a variable/valid_time/z/x/y. The ETag deliberately
+    does not: `stable_etag` hashes tile bytes only and is shared by all five
+    tile layers.
+
+    Factored out of the route so the identity can be asserted without a
+    database.
+    """
+    return TileInput(
+        layer_id=public_hydro_layer_id(variable),
+        source_id=HYDRO_NATIONAL_SOURCE_ID,
+        source_version=f"{HYDRO_NATIONAL_SOURCE_VERSION}:{source}:{cycle_text}:{source_digest}",
+        valid_time=_format_time(valid_time),
+        z=z,
+        x=x,
+        y=y,
+        variant_id=f"variable:{variable}",
+    )
