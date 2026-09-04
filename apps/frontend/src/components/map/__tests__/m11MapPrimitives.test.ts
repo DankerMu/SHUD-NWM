@@ -116,6 +116,13 @@ describe('m11NationalRiverPaint line-opacity', () => {
     expect(opacityExpression(true)).toBeTruthy()
   })
 
+  it('keeps opacity independent of the satellite basemap in both dim states', () => {
+    // 卫星底图只换配色（line-color），不该改透明度；没有这条断言，把 satellite 因子
+    // 混进 dimZoomScale 也能让整套测试保持绿色。
+    expect(nationalRiverPaint(false, true)['line-opacity']).toEqual(nationalRiverPaint(false, false)['line-opacity'])
+    expect(nationalRiverPaint(true, true)['line-opacity']).toEqual(nationalRiverPaint(true, false)['line-opacity'])
+  })
+
   it('rejects a nested zoom expression, proving the compile gate bites', () => {
     const illegalPaint = [
       'interpolate',
@@ -156,13 +163,15 @@ describe('m11NationalRiverPaint line-opacity', () => {
     expect(evaluateAt(opacity, 7, 5)).toBeCloseTo(0.94, 6)
     expect(evaluateAt(opacity, 7, 4)).toBeCloseTo(0.9, 6)
     expect(evaluateAt(opacity, 7, 3)).toBeCloseTo(0.72, 6)
-    // 旧表没有 z6 stop，Type 5/4/3 在 z6 是 z5-z7 的中点（0.92 / 0.83 / 0.57）；新 stop 不得低于它
+    // 旧表没有 z6 stop，Type 5/4/3 在 z6 是 z5-z7 的中点（0.92 / 0.83 / 0.57）；新 stop 不得低于它。
+    // Type 5 更进一步：新 z6 stop 的 0.92 是刻意选的常量，正好等于旧中点，所以这里钉死等值而非下界。
     expect(evaluateAt(opacity, 6, 5)).toBeCloseTo(0.92, 6)
     expect(evaluateAt(opacity, 6, 4)).toBeGreaterThanOrEqual(0.83)
     expect(evaluateAt(opacity, 6, 3)).toBeGreaterThanOrEqual(0.57)
   })
 
-  it('applies no dim discount at low zoom (z3, z5)', () => {
+  // 规格场景字面写的「zoom 3-5.99 不打折」只在 z <= 5.0 成立；(5, 6) 上的 ramp 见下一条用例。
+  it('applies no dim discount at the low-zoom stops z3 and z5', () => {
     const dimmed = opacityExpression(true)
     const plain = opacityExpression(false)
     // Type 5/4 在 z3 的未折扣值非零，断言才有内容（Type 1-3 在 z3 本就是 0）
@@ -175,6 +184,49 @@ describe('m11NationalRiverPaint line-opacity', () => {
         expect(undimmedValue).toBeGreaterThan(0)
         expect(evaluateAt(dimmed, zoom, type)).toBeCloseTo(undimmedValue, 6)
       }
+    }
+  })
+
+  /**
+   * 渲染器限制，不是 bug：line-opacity 是 composite 属性（同时被 ['zoom'] 和 ['get','Type'] 驱动），
+   * MapLibre 只在**整数** zoom 上求值一次、把 zoom / zoom+1 两份结果交给 GPU，再用**小数** map zoom
+   * 线性混合（maplibre-gl src/data/program_configuration.ts:307-308，`useIntegerZoom` 为 false）。
+   * 顶层 linear interpolate 因此无法表达「z6 处硬切」；本文件的 CPU `evaluate({ zoom: 5.5 })`
+   * 与 GPU 走的是同一个线性混合公式、数值一致，所以下面钉的就是用户真正看到的值。
+   *
+   * 结论：规格场景里字面写的「zoom 3-5.99 不打折」只在 z <= 5.0 成立；(5, 6) 开区间上折扣按
+   * 线性 ramp 逐步进来，到 z6 才是满额 0.42。这里把 ramp 钉住，让这个取舍显式可见而不是静默存在。
+   *
+   * 注意 ramp 只对 Type 5/4/3 存在：Type 1/2 在 z5 stop 的未折扣值是 0，混合退化成 0.42 * v(z6)，
+   * 所以它们在整个 (5, 6) 上的比值恒为 0.42。
+   */
+  it('ramps the dim discount in linearly across z5 -> z6 instead of cutting at z6', () => {
+    const dimmed = opacityExpression(true)
+    const plain = opacityExpression(false)
+    const ratioAt = (zoom: number, type: number) => evaluateAt(dimmed, zoom, type) / evaluateAt(plain, zoom, type)
+
+    // Type 5：z5 完全不打折 -> z6 满额 0.42，中间是线性 ramp
+    expect(ratioAt(5, 5)).toBeCloseTo(1, 6)
+    expect(ratioAt(5.5, 5)).toBeCloseTo(0.7068, 4)
+    expect(ratioAt(5.99, 5)).toBeCloseTo(0.4257, 4)
+    expect(ratioAt(6, 5)).toBeCloseTo(0.42, 6)
+    // 绝对值同样钉死（0.9 与 0.42*0.92 的线性混合，比值的长小数只是它的副产品）
+    expect(evaluateAt(dimmed, 5.5, 5)).toBeCloseTo(0.6432, 6)
+    expect(evaluateAt(dimmed, 5.99, 5)).toBeCloseTo(0.391536, 6)
+
+    // Type 4 同步 ramp（起点 0.76 更低，所以同一 zoom 的比值略小）
+    expect(ratioAt(5, 4)).toBeCloseTo(1, 6)
+    expect(ratioAt(5.5, 4)).toBeCloseTo(0.6955, 4)
+    expect(ratioAt(6, 4)).toBeCloseTo(0.42, 6)
+    expect(evaluateAt(dimmed, 5.5, 4)).toBeCloseTo(0.5564, 6)
+
+    // ramp 单调下行：(5, 6) 上没有反弹，也不存在提前触底
+    let previous = Number.POSITIVE_INFINITY
+    for (let zoom = 5; zoom <= 6.0001; zoom += 0.05) {
+      const ratio = ratioAt(zoom, 5)
+      expect(ratio).toBeLessThanOrEqual(previous + 1e-9)
+      expect(ratio).toBeGreaterThanOrEqual(0.42 - 1e-9)
+      previous = ratio
     }
   })
 
