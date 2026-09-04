@@ -17,7 +17,7 @@ describe('river-click Node/Playwright typecheck gate (static wiring)', () => {
     expect(pkg.scripts['check:types']).toBe('tsc -p tsconfig.node-playwright.json')
   })
 
-  it('is wired into the frontend CI job (build && test && check:types)', () => {
+  it('is wired into the frontend CI job so a type error blocks it', () => {
     const ci = readFileSync(path.join(repoRoot, '.github/workflows/ci.yml'), 'utf8')
     const start = ci.indexOf('frontend-build:')
     expect(start).toBeGreaterThanOrEqual(0)
@@ -25,9 +25,15 @@ describe('river-click Node/Playwright typecheck gate (static wiring)', () => {
     expect(frontendJob).toContain('check:types')
     expect(frontendJob).toContain('pnpm build')
     expect(frontendJob).toContain('pnpm test')
-    // The install line must run check:types in the same command so a type error
-    // blocks the build/test gate.
-    expect(frontendJob).toMatch(/pnpm build && pnpm run check:types && pnpm test|pnpm run check:types && pnpm build/)
+    // check:types must run in this job in a form that BLOCKS it: either fused
+    // into the build/test command, or (since #2022 split the fused line so the
+    // app typecheck could run before the build) as its own step. Steps fail
+    // fast, so a standalone step blocks the job just as hard — the job must
+    // declare no continue-on-error for that to hold.
+    expect(frontendJob).toMatch(
+      /pnpm build && pnpm run check:types && pnpm test|pnpm run check:types && pnpm build|run: cd apps\/frontend && pnpm run check:types/,
+    )
+    expect(frontendJob).not.toContain('continue-on-error')
   })
 
   it('does not recursively invoke pnpm from within a vitest test', () => {
