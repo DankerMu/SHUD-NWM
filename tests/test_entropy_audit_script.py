@@ -5041,6 +5041,25 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
         # CI/terminal log buffer, and the leg bypasses DB-absence stripping, so an
         # over-match here cannot be suppressed by a same-line no-database disclaimer.
         "node-22 mirror 的 CI scrollback 缓冲区调大到 5000 行",
+        # openspec/changes/display-v2-national-timeline-precip-overlay/specs/
+        # canonical-precip-copyback/spec.md:4 - inlined verbatim like the four above. An
+        # object-store copyback names a real rollback (_copyback_object_tree_with_rollback)
+        # over files, not a database rollback mirror, so the rollback leg must stand down
+        # when the line is explicitly an object-store copy and names no database.
+        (
+            "After a successful q_down publish for `(source, cycle)`, the publisher on node-22 SHALL "
+            "mirror `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/*.nc` and the "
+            "referenced `canonical/<storage_source>/grid/<grid_id>/grid.json` (storage source "
+            "`gfs`/`IFS` via `normalize_source_id`, cycle token `%Y%m%d%H`) from `OBJECT_STORE_ROOT` "
+            "to `NHMS_OBJECT_STORE_COPYBACK_ROOT` under the same keyspace using the existing "
+            "temp-tree + rollback copy pattern. The mirror MUST be idempotent (a destination file "
+            "with identical size is skipped) and MUST NOT fail the q_down publish when the source "
+            "products are missing; the failure MUST be recorded in copyback lineage as "
+            "`precip_mirror: failed` with the missing path."
+        ),
+        # The same carve-out in its Chinese and hyphenated surface forms.
+        "node-22 的对象存储 copyback 镜像沿用 temp-tree + 回滚 拷贝模式",
+        "the node-22 object-store rollback mirror copies canonical products only",
     ],
     ids=[
         "runbook-state-index-mirror",
@@ -5048,6 +5067,9 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
         "clone-script-scratch-mirror",
         "clone-script-canonical-index",
         "ci-scrollback-buffer-not-rollback",
+        "object-store-copyback-rollback-copy-pattern",
+        "chinese-object-store-copyback-rollback-mirror",
+        "hyphenated-object-store-rollback-mirror",
     ],
 )
 def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_lines(line: str) -> None:
@@ -5079,6 +5101,22 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         # this before the fallback tuple is reached. Pinned anyway: the behaviour must hold
         # whichever leg fires, so a future narrowing of that helper cannot silently drop it.
         "node-22 的主库通过 mirror 同步给 node-27",
+        # The rest of the local-postgres tuple and the rest of the explicit-DSN family: the
+        # object-store carve-out on the rollback leg must not reach any of these legs.
+        "Operators still hit the node-22 local pg for current state.",
+        "node-22 本地 pg 仍是当前查询入口",
+        "node-22 本机 pg 仍是当前查询入口",
+        "node-22 本地 postgresql 仍是当前查询入口",
+        "node-22 本机 postgresql 仍是当前查询入口",
+        "Set NODE22-URL before running the node-22 mirror sync.",
+        "Pass node22_dsn_file=/owner-only/path to the node-22 mirror helper.",
+        # rollback + mirror + a database token that survives DB-absence stripping, with no
+        # :55433 to catch it earlier.
+        "Run the node-22 rollback mirror database sync before node-27 ingest.",
+        # The carve-out is bounded: object-store wording suppresses only the rollback leg,
+        # so a real database token on the same line still reports.
+        "The node-22 object_store rollback mirror also syncs its production database to node-27.",
+        "node-22 object_store rollback mirror still exposes :55433 for current reads",
     ],
     ids=[
         "archived-port",
@@ -5100,6 +5138,16 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         "chinese-congku-mirror-serves-reads",
         "chinese-beiku-mirror-syncs-to-node27",
         "chinese-zhuku-mirror-syncs-to-node27",
+        "local-pg",
+        "chinese-bendi-pg",
+        "chinese-benji-pg",
+        "chinese-bendi-postgresql",
+        "chinese-benji-postgresql",
+        "node22-url-with-mirror",
+        "node22-dsn-file-underscore-with-mirror",
+        "rollback-mirror-plus-database-token",
+        "object-store-rollback-mirror-plus-database-token",
+        "object-store-rollback-mirror-plus-archived-port",
     ],
 )
 def test_entropy_audit_topology_mirror_fallback_still_reports_rollback_and_database_lines(
@@ -8332,6 +8380,73 @@ def test_route_authority_current_runbook_table_cell_redirect_context_is_per_ment
     assert active["allowlist_reason"] is None
     assert active["allowlist_key"] is None
     assert active["budget_counted"] is True
+    assert redirect["allowlist_state"] == "allowlisted"
+    assert redirect["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "| `/hydro-met` | 重定向到 `/`（旧别名行为不变） |",
+        "| `/hydro-met` | redirects to `/`, legacy alias behaviour unchanged |",
+    ],
+    ids=["chinese-redirect-cell", "english-redirect-cell"],
+)
+def test_route_authority_current_runbook_table_row_sees_redirect_wording_in_the_next_cell(
+    tmp_path: Path,
+    row: str,
+) -> None:
+    # A receipt records the route in one column and its disposition in the next, so the
+    # redirect wording never lands in the mention's own clause.
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        f"""
+        路由 smoke：
+
+        | 路径 | 结果 |
+        |---|---|
+        {row}
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["line"] == 5
+    assert _route_authority_token_from_finding(finding) == "/hydro-met"
+    assert finding["allowlist_state"] == "allowlisted"
+    assert finding["allowlist_reason"] == "M26 route-consolidation redirect alias"
+    assert finding["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
+    assert finding["budget_counted"] is False
+
+
+def test_route_authority_table_row_redirect_cell_does_not_launder_a_sibling_row(
+    tmp_path: Path,
+) -> None:
+    # Narrowness pin: the row is the span, not the table. A neighbouring row's redirect
+    # wording must not allowlist a current route value in a different row.
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        | 路径 | 结果 |
+        |---|---|
+        | Deep links | --path=/forecast |
+        | `/hydro-met` | 重定向到 `/`（旧别名行为不变） |
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_token = _route_authority_findings_by_token(findings)
+
+    assert set(by_token) == {"/forecast", "/hydro-met"}
+    drift = by_token["/forecast"]
+    redirect = by_token["/hydro-met"]
+    assert drift["line"] == 3
+    assert drift["allowlist_state"] == "unallowlisted"
+    assert drift["allowlist_reason"] is None
+    assert drift["budget_counted"] is True
+    assert redirect["line"] == 4
     assert redirect["allowlist_state"] == "allowlisted"
     assert redirect["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
 
