@@ -3228,3 +3228,25 @@ later-round 计数），round 2 是 Phase 7 终审且判 DO-NOT-BLOCK、零发�
 
 另：本文件此前已指出 `min_multiround` 默认 8（当时样本 168，现为 170），这条 DECIDABLE 每次收尾必触发且
 已连续十余条同向 keep。降级为 NOTE 的处置仍跟踪在 **#2036**，本条不重复论证。
+
+## Revisit 2026-09-04（PR #2027 / issue #2007 合并后 audit 再次 DECIDABLE）
+
+样本 **171** 个多轮 merged PR（较上条 +1），later-round catches **core=166 vs rotated=304 / skipped=15**
+（较上条 core +5、rotated +2）。方向未变，**keep rotation 维持**（autonomous default-keep，翻转仍须
+maintainer 裁定），无行为变更。
+
+本条值得单独记一句，因为它是本 ADR 尾部第四项「计数口径的可识别性上限」目前最干净的一个实例：
+
+issue #2007 跑了**四轮**交叉审查、11 个 lens，在生产代码里**一个功能缺陷都没有**。四轮的产出全部是
+oracle 覆盖与文书。轮换进来的 lens 确实在贡献 catch（round-4 的 `review-invariant-state` 抓到
+`cache_key` 的 x/y/valid_time 无 oracle，`review-security-perf` 提出的压缩 chunk 暴露面候选被实机
+**证伪**），所以计数器会把这轮记成「rotation 有效」。但真正把这个 issue 从「看起来对」推到「证明对」
+的不是任何一个 lens，而是**突变测试**——把谓词删掉再跑真实 DB，看套件是否变红。四轮里每一轮的
+决定性证据都是这个动作，而它在本文件的三个计数器里**不可见**：它既不是 catch，也不属于任何 lens。
+
+同样不可见的是「证伪」的价值。round-4 的 `review-security-perf` 提了一条 P1 候选，实测（旧路由 2.82 s
+vs 新路由 3.15 s，同一批压缩 chunk）判定该暴露面**改前就存在**。按 catch 计数它是噪音；按工程价值它
+省掉了一次没必要的设计改动。这与本文件此前记的「昂贵假设证伪」是同一类。
+
+`min_multiround` 默认 8、样本 171、这条 DECIDABLE 每次收尾必触发且已连续十余条同向 keep——降级为 NOTE
+的处置仍跟踪在 **#2036**，本条不重复论证。

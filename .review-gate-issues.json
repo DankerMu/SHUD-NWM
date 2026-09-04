@@ -2639,7 +2639,13 @@
     "2007": {
       "ceilingPrs": [],
       "gateEntries": 2,
-      "closed": []
+      "closed": [
+        {
+          "pr": 2027,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
     }
   },
   "1736": {
