@@ -91,6 +91,18 @@ _WINDOW_START = _CYCLE_TIME
 _GAP_TIME = _CYCLE_TIME + timedelta(hours=1)
 _WINDOW_END = _CYCLE_TIME + timedelta(hours=2)
 
+# #2007's second source. Production stores `gfs` lower-case and `IFS`
+# UPPER-case (`SELECT DISTINCT source_id FROM hydro.hydro_run` on node-27
+# returns exactly those two), so the upper-case spelling is the one that proves
+# the `lower(h.source_id) = :source` match. A cycle of its own keeps the two
+# identities independent of one another.
+_IFS_SOURCE_ID = "IFS"
+_IFS_FORCING_VERSION_ID = f"{_PREFIX}_forcing_ifs_v1"
+_IFS_RUN_ID = f"{_PREFIX}_forecast_run_ifs"
+_IFS_CYCLE_TIME = _CYCLE_TIME + timedelta(hours=6)
+_IFS_WINDOW_START = _IFS_CYCLE_TIME
+_IFS_WINDOW_END = _IFS_CYCLE_TIME + timedelta(hours=2)
+
 _ZOOM = 9
 
 
@@ -241,10 +253,91 @@ def _seed(database_url: str) -> None:
         connection.close()
 
 
-def _refresh_coverage(database_url: str) -> None:
+def _seed_uppercase_ifs_run(database_url: str) -> None:
+    """A second display-ready identity whose ``source_id`` is stored ``'IFS'``.
+
+    Seeded only by the tests that need it, so the three pre-existing cases keep
+    running against exactly the data they were written for.
+
+    It needs its own ``met.data_source`` AND ``met.forcing_version`` rows, not
+    just a ``hydro.hydro_run`` row: the display-coverage window is a
+    GREATEST/LEAST against the forcing window, so a run without one materializes
+    a NULL window and this case would fail on the no-coverage branch instead of
+    on the thing it is testing.
+    """
+    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO met.data_source
+                    (source_id, source_name, source_type, status, native_format, adapter_name)
+                VALUES (%s, 'IFS 2007', 'forecast', 'mock', 'netcdf', 'ifs')
+                """,
+                (_IFS_SOURCE_ID,),
+            )
+            cursor.execute(
+                """
+                INSERT INTO met.forcing_version
+                    (forcing_version_id, model_id, source_id, cycle_time, start_time, end_time,
+                     station_count, forcing_package_uri, checksum)
+                VALUES (%s, %s, %s, %s, %s, %s, 1, 's3://nhms/forcing/2007-ifs/', 'forcing-sha-ifs')
+                """,
+                (
+                    _IFS_FORCING_VERSION_ID,
+                    _MODEL_ID,
+                    _IFS_SOURCE_ID,
+                    _IFS_CYCLE_TIME,
+                    _IFS_WINDOW_START,
+                    _IFS_WINDOW_END,
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO hydro.hydro_run
+                    (run_id, run_type, scenario_id, model_id, basin_version_id, forcing_version_id,
+                     source_id, cycle_time, start_time, end_time, status, run_manifest_uri)
+                VALUES (%s, 'forecast', 'sc', %s, %s, %s, %s, %s, %s, %s, 'parsed', 's3://nhms/manifest')
+                """,
+                (
+                    _IFS_RUN_ID,
+                    _MODEL_ID,
+                    _BASIN_VERSION_ID,
+                    _IFS_FORCING_VERSION_ID,
+                    _IFS_SOURCE_ID,
+                    _IFS_CYCLE_TIME,
+                    _IFS_WINDOW_START,
+                    _IFS_WINDOW_END,
+                ),
+            )
+            insert_river_timeseries_dual_written(
+                cursor,
+                [
+                    (
+                        _IFS_RUN_ID,
+                        _BASIN_VERSION_ID,
+                        _NETWORK_ID,
+                        segment_id,
+                        valid_time,
+                        lead,
+                        _VARIABLE,
+                        200.0 + index,
+                        "m3/s",
+                        "ok",
+                    )
+                    for lead, valid_time in enumerate((_IFS_WINDOW_START, _IFS_WINDOW_END))
+                    for index, segment_id in enumerate(_SEGMENT_IDS)
+                ],
+            )
+    finally:
+        connection.close()
+
+
+def _refresh_coverage(database_url: str, run_id: str = _RUN_ID) -> None:
     connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
     try:
-        assert refresh_run_display_coverage(connection, _RUN_ID) is True
+        assert refresh_run_display_coverage(connection, run_id) is True
     finally:
         connection.close()
 
@@ -276,10 +369,32 @@ def national_tile(
         yield throwaway_database_url, client
 
 
+def _stamp(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _request_tile(client: TestClient, valid_time: datetime) -> Any:
+    """The legacy source-less route: also this file's regression oracle for it."""
     x, y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, _ZOOM)
-    stamp = valid_time.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return client.get(f"/api/v1/tiles/hydro-national/{_VARIABLE}/{stamp}/{_ZOOM}/{x}/{y}.pbf")
+    return client.get(f"/api/v1/tiles/hydro-national/{_VARIABLE}/{_stamp(valid_time)}/{_ZOOM}/{x}/{y}.pbf")
+
+
+def _request_identity_tile(client: TestClient, source: str, cycle: datetime, valid_time: datetime) -> Any:
+    """The canonical `{source}/{cycle}` route (#2007)."""
+    x, y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, _ZOOM)
+    return client.get(
+        f"/api/v1/tiles/hydro-national/{source}/{_stamp(cycle)}/{_VARIABLE}"
+        f"/{_stamp(valid_time)}/{_ZOOM}/{x}/{y}.pbf"
+    )
+
+
+def _assert_tile_carries_the_seeded_features(response: Any) -> None:
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith(MVT_MEDIA_TYPE)
+    assert response.content, "a 200 with empty bytes would mean the probe answered 1 for nothing"
+    for segment_id in _SEGMENT_IDS:
+        assert segment_id.encode() in response.content, segment_id
+    assert _NETWORK_ID.encode() in response.content
 
 
 def _assert_probe_said_no_data(response: Any) -> None:
@@ -371,3 +486,51 @@ def test_national_tile_is_200_with_a_non_empty_mvt_when_the_instant_has_data(nat
     for segment_id in _SEGMENT_IDS:
         assert segment_id.encode() in response.content, segment_id
     assert _NETWORK_ID.encode() in response.content
+
+
+def test_national_identity_tile_is_424_for_the_source_without_a_run_at_that_cycle(national_tile: Any) -> None:
+    """#2007's fail-closed case, and the only oracle that can see a half-bound query.
+
+    Binding `(source, cycle)` in the `latest_runs` data CTE alone leaves the
+    identity probe answering from ANY source's run: `source_identity_count`
+    stays 1, the data CTE selects nothing, and the route serves an empty 200
+    where the contract requires 424. Everything else in the repo passes under
+    that bug, because a fake session never runs the SQL.
+    """
+    database_url, client = national_tile
+    _refresh_coverage(database_url)
+
+    assert _query(
+        database_url,
+        "SELECT source_id FROM hydro.hydro_run WHERE cycle_time = %s ORDER BY source_id",
+        (_CYCLE_TIME,),
+    ) == [{"source_id": _SOURCE_ID}], "only gfs may hold a run at this cycle, or the case proves nothing"
+
+    _assert_tile_carries_the_seeded_features(
+        _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
+    )
+    _assert_probe_said_no_data(_request_identity_tile(client, "ifs", _CYCLE_TIME, _WINDOW_END))
+
+
+def test_national_identity_tile_matches_an_uppercase_source_id_from_a_lowercase_path(national_tile: Any) -> None:
+    """Path segment `ifs` must find a run stored as `source_id = 'IFS'`.
+
+    Production stores exactly `gfs` and `IFS`, so an equality match instead of
+    `lower(h.source_id) = :source` would 424 every IFS tile in the fleet, and
+    no other test in the repo would notice.
+    """
+    database_url, client = national_tile
+    _seed_uppercase_ifs_run(database_url)
+    _refresh_coverage(database_url, _IFS_RUN_ID)
+
+    assert _query(
+        database_url,
+        "SELECT source_id FROM hydro.hydro_run WHERE run_id = %s",
+        (_IFS_RUN_ID,),
+    ) == [{"source_id": "IFS"}], "the stored spelling must be upper-case, or the case proves nothing"
+
+    _assert_tile_carries_the_seeded_features(
+        _request_identity_tile(client, "ifs", _IFS_CYCLE_TIME, _IFS_WINDOW_END)
+    )
+    # The gfs identity has no run at the IFS cycle, so it stays fail-closed.
+    _assert_probe_said_no_data(_request_identity_tile(client, "gfs", _IFS_CYCLE_TIME, _IFS_WINDOW_END))

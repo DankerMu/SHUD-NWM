@@ -53,7 +53,36 @@ NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v3"
 # serving pre-switch cached tiles and split the fleet between stale and fresh.
 # The inventory digest below separately changes whenever an active network/run
 # changes, including when a new basin is registered.
-NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v4"
+NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
+
+# The national run selection is bound to the requested `(source, cycle)`
+# identity (issue #2007). `postgis_tile_sql(layer)` keeps its single-argument
+# signature: both values travel as named binds, exactly like `:z`. The SAME
+# predicate pair is spelled at THREE run-selection sites, and they must stay
+# identical or the layer starts disagreeing with itself:
+#
+#     AND (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)
+#     AND (CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)
+#
+#   * `postgis_tile_sql("hydro-national")`'s `latest_runs` data CTE,
+#   * the `source_identity_stats_sql` probe's inline run-discovery sub-select,
+#     which decides the route's 424 fail-closed (binding only the CTE would let
+#     another source's run answer "identity present" and serve an empty 200),
+#   * `national_discharge_source_version`'s ranked sub-query, which digests the
+#     runs the cache key is derived from.
+#
+# The NULL guard is what keeps the legacy source-less route byte-identical: it
+# binds both names as NULL, every candidate run stays eligible, and its selected
+# runs, response bytes and 200/424 verdict do not move. `text()` raises on a
+# missing named bind, so the legacy callers pass `None` rather than omitting it.
+#
+# `CAST(:source AS text)`, never `:source::text`: SQLAlchemy's `text()` bind
+# regex backtracks across a following `::` and emits a bogus shorter bind name.
+# Measured on SQLAlchemy 2.0.49, `text('... :source::text ...')` yields binds
+# `['sourc', 'source']` while the CAST form yields `['source']`. The bogus bind
+# is invisible to fake-session tests and only fails against a real driver.
+# `lower(h.source_id)`: production stores `gfs` lower-case and `IFS` upper-case,
+# so the lower-case path segment must match case-insensitively.
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
@@ -687,6 +716,11 @@ def postgis_tile_sql(layer: str) -> str:
                     WHERE h.status IN ('succeeded', 'parsed', 'published')
                       AND mi.river_network_version_id IS NOT NULL
                       AND mi.active_flag
+                      -- #2007: the SAME identity pair as the latest_runs CTE
+                      -- below. This sub-select decides the route's 424, so a
+                      -- divergence here answers "present" from another source.
+                      AND (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)
+                      AND (CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)
                     ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
                 ) lr
                 CROSS JOIN LATERAL (
@@ -727,6 +761,10 @@ def postgis_tile_sql(layer: str) -> str:
                 WHERE h.status IN ('succeeded', 'parsed', 'published')
                   AND mi.river_network_version_id IS NOT NULL
                   AND mi.active_flag
+                  -- #2007: the SAME identity pair as the source_identity_stats
+                  -- probe above; NULL binds keep the legacy route unchanged.
+                  AND (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)
+                  AND (CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)
                 ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
             ),
             network_stream_max AS MATERIALIZED (
@@ -1488,8 +1526,21 @@ def display_ready_run(session: Session) -> Mapping[str, Any] | None:
     return dict(row) if row is not None else None
 
 
-def national_discharge_source_version(session: Session) -> str:
-    """Digest the latest display-ready, river-bearing run for every active basin/network."""
+def national_discharge_source_version(
+    session: Session,
+    *,
+    source: str | None = None,
+    cycle: datetime | None = None,
+) -> str:
+    """Digest the latest display-ready, river-bearing run for every active basin/network.
+
+    With no arguments this ranks each network's OVERALL latest run, which is the
+    right question for the legacy source-less route and for the layer catalog.
+    It is the wrong question for an addressable `(source, cycle)` identity: a
+    re-run of a non-latest identity would leave the digest — and therefore
+    `source_version` and `cache_key` — unchanged while the tile went stale.
+    Passing the identity narrows the ranking to it (issue #2007).
+    """
     rows = (
         session.execute(
             text(
@@ -1516,11 +1567,16 @@ def national_discharge_source_version(session: Session) -> str:
                     WHERE h.status IN ('succeeded', 'parsed', 'published')
                       AND mi.river_network_version_id IS NOT NULL
                       AND mi.active_flag
+                      -- #2007: the same NULL-guarded identity pair the two
+                      -- run-selection sites in postgis_tile_sql carry.
+                      AND (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)
+                      AND (CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)
                 ) ranked
                 WHERE rn = 1
                 ORDER BY river_network_version_id, run_id
                 """
-            )
+            ),
+            {"source": source, "cycle": cycle},
         )
         .mappings()
         .all()

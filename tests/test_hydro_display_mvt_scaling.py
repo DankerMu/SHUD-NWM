@@ -3,12 +3,17 @@ from __future__ import annotations
 import re
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import quote
 
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import text
 
+from apps.api import main
 from apps.api.errors import ApiError
 from apps.api.routes import hydro_display
 from services.tiles.mvt import (
@@ -16,6 +21,7 @@ from services.tiles.mvt import (
     NATIONAL_DISCHARGE_QUERY_VERSION,
     TileInput,
     TileResponse,
+    cache_key,
     layer_metadata,
     national_discharge_source_version,
     national_discharge_valid_times,
@@ -497,3 +503,301 @@ def test_concurrent_cold_requests_generate_one_tile(monkeypatch: Any, tmp_path: 
     assert len(responses) == 2
     assert {response.headers["x-tile-checksum"] for response in responses} == {"checksum"}
     assert stored is not None and stored.data == b"pbf"
+
+
+# --- #2007: the hydro-national {source}/{cycle} identity -------------------
+#
+# `postgis_tile_sql` keeps its single-argument signature, so the identity
+# travels as the named binds `:source` / `:cycle`. Two independent run
+# selections consume them and they must agree, because one produces the tile's
+# rows and the other produces the 0/1 the route turns into 200 vs 424.
+
+_NATIONAL_CYCLE = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
+_NATIONAL_VALID_TIME = datetime(2026, 9, 3, 0, 0, tzinfo=UTC)
+_NATIONAL_TILE_Z = 4
+_NATIONAL_TILE_X = 13
+_NATIONAL_TILE_Y = 6
+_NATIONAL_ROUTE_PREFIX = "/api/v1/tiles/hydro-national"
+
+
+def _national_sql_sites() -> tuple[str, str]:
+    """The two run-selection slices of the national tile SQL, located not counted.
+
+    A `count(...) >= 2` would pass with both occurrences inside the data CTE,
+    which is exactly the bug design D1 warns about: the identity probe would
+    then still answer "present" from another source's run and the route would
+    serve an empty 200 where the contract requires 424. So each site is sliced
+    out by its own landmark and asserted separately.
+    """
+    sql = postgis_tile_sql("hydro-national")
+    cte_start = sql.index("WITH latest_runs AS MATERIALIZED (")
+    cte_end = sql.index("network_stream_max AS MATERIALIZED", cte_start)
+    probe_start = sql.index("source_identity_stats AS (")
+    probe_end = sql.index("AS source_identity_count", probe_start)
+    # Non-vacuity: the slices are disjoint and in this order, so neither
+    # assertion below can be satisfied by the other site's text.
+    assert cte_start < cte_end < probe_start < probe_end
+    return sql[cte_start:cte_end], sql[probe_start:probe_end]
+
+
+def test_national_tile_sql_binds_source_and_cycle_at_both_run_selection_sites() -> None:
+    cte_slice, probe_slice = _national_sql_sites()
+
+    for site_name, site in (("latest_runs CTE", cte_slice), ("identity probe", probe_slice)):
+        assert "lower(h.source_id) = :source" in site, site_name
+        assert "h.cycle_time = :cycle" in site, site_name
+        # The NULL guard is what keeps the legacy 5-segment route's run
+        # selection unchanged, so it is part of the locked shape. It also splits
+        # the two sub-predicates apart, which is why they are located
+        # individually and never as one contiguous string.
+        assert "CAST(:source AS text) IS NULL OR" in site, site_name
+        assert "CAST(:cycle AS timestamptz) IS NULL OR" in site, site_name
+        # `:source::text` would make SQLAlchemy's bind regex backtrack and emit
+        # a bogus `sourc` bind that no fake-session test can see.
+        assert ":source::" not in site, site_name
+        assert ":cycle::" not in site, site_name
+
+    binds = set(text(postgis_tile_sql("hydro-national"))._bindparams)
+    assert {"source", "cycle"} <= binds
+    assert not binds & {"sourc", "cycl"}
+
+
+def test_sibling_tile_layers_carry_no_source_or_cycle_bind() -> None:
+    for layer in ("hydro", "river-network-national", "river-network", "met-stations"):
+        layer_sql = postgis_tile_sql(layer)
+        assert ":source" not in layer_sql, layer
+        assert ":cycle" not in layer_sql, layer
+
+
+def test_national_digest_narrows_to_the_requested_identity_and_stays_null_without_one() -> None:
+    """The digest feeds `source_version`, so it must answer the identity's question.
+
+    Ranking each network's OVERALL latest run would leave the digest — and the
+    cache key — unchanged when a non-latest `(source, cycle)` is re-run, and
+    this issue is what makes such an identity addressable.
+    """
+    rows = [
+        {
+            "run_id": "run_a",
+            "river_network_version_id": "rnv_a",
+            "cycle_time": "2026-09-02T12:00:00Z",
+            "updated_at": "2026-09-02T13:00:00Z",
+        }
+    ]
+    unbound = _CapturingSession(rows)
+    bound = _CapturingSession(rows)
+
+    national_discharge_source_version(unbound)
+    national_discharge_source_version(bound, source="gfs", cycle=_NATIONAL_CYCLE)
+
+    assert unbound.params == [{"source": None, "cycle": None}]
+    assert bound.params == [{"source": "gfs", "cycle": _NATIONAL_CYCLE}]
+    assert "CAST(:source AS text) IS NULL OR lower(h.source_id) = :source" in bound.sql
+    assert "CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle" in bound.sql
+    # One shared status set, one occurrence: `test_display_publish_status_only`
+    # pins the counts this helper contributes.
+    assert bound.sql.count("h.status IN ('succeeded', 'parsed', 'published')") == 1
+
+
+class _CapturingSession(_Session):
+    def __init__(self, rows: list[dict[str, Any]], dialect: str = "postgresql") -> None:
+        super().__init__(rows, dialect=dialect)
+        self.params: list[dict[str, Any]] = []
+
+    def execute(self, statement: Any, params: Any = None) -> _Rows:
+        self.params.append(dict(params or {}))
+        return super().execute(statement, params)
+
+
+class _TileResult:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def mappings(self) -> _TileResult:
+        return self
+
+    def all(self) -> list[dict[str, Any]]:
+        return self._rows
+
+    def first(self) -> dict[str, Any] | None:
+        return self._rows[0] if self._rows else None
+
+
+class _NationalRouteSession:
+    """Answers both statements the national route issues, and records their binds."""
+
+    _DIGEST_ROWS = [
+        {
+            "run_id": "run_a",
+            "river_network_version_id": "rnv_a",
+            "cycle_time": "2026-09-02T12:00:00Z",
+            "updated_at": "2026-09-02T13:00:00Z",
+        }
+    ]
+    _TILE_ROW = {
+        "tile": b"pbf-bytes",
+        "source_identity_count": 1,
+        "source_feature_count": 1,
+        "feature_count": 1,
+        "coordinate_count": 2,
+        "feature_coordinate_overflow_count": 0,
+        "coordinate_dimension_overflow_count": 0,
+        "invalid_property_count": 0,
+        "invalid_properties": None,
+    }
+
+    def __init__(self) -> None:
+        self.bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+        self.tile_params: list[dict[str, Any]] = []
+
+    def execute(self, statement: Any, params: Any = None) -> _TileResult:
+        if "ST_AsMVT" in str(statement):
+            self.tile_params.append(dict(params or {}))
+            return _TileResult([dict(self._TILE_ROW)])
+        return _TileResult([dict(row) for row in self._DIGEST_ROWS])
+
+    def get_bind(self) -> Any:
+        return self.bind
+
+
+class _ExplodingSession:
+    """Any use at all is a failure: validation must precede every statement."""
+
+    def execute(self, *_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a validation failure must not reach the database")
+
+    def get_bind(self) -> Any:
+        raise AssertionError("a validation failure must not reach the database")
+
+
+def _national_identity_url(source: str, cycle: str, valid_time: str = "2026-09-03T00:00:00Z") -> str:
+    return (
+        f"{_NATIONAL_ROUTE_PREFIX}/{source}/{cycle}/q_down/{valid_time}"
+        f"/{_NATIONAL_TILE_Z}/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"
+    )
+
+
+def _request_national_identity_tile(
+    url: str,
+    session: Any,
+    monkeypatch: Any,
+    tmp_path: Any,
+) -> tuple[Any, list[TileInput]]:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(tmp_path))
+    captured: list[TileInput] = []
+
+    def fake_read(_session: object, tile: TileInput) -> TileResponse | None:
+        captured.append(tile)
+        return None
+
+    def fake_build(_session: object, tile: TileInput, data: bytes) -> TileResponse:
+        return TileResponse(
+            data=data,
+            checksum="checksum",
+            etag='W/"etag"',
+            cache_key=cache_key(tile),
+            cache_status="miss",
+            layer_id=tile.layer_id,
+        )
+
+    monkeypatch.setattr(hydro_display, "read_cached_tile_response", fake_read)
+    monkeypatch.setattr(hydro_display, "build_raw_tile_response", fake_build)
+
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(url)
+    finally:
+        app.dependency_overrides.clear()
+    return response, captured
+
+
+def test_national_identity_route_collapses_time_spellings_onto_one_bind_and_one_cache_key(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """`.000Z`, `+00:00` and `Z` are one instant, one `:cycle` bind, one cache entry."""
+    spellings = ("2026-09-02T12:00:00.000Z", "2026-09-02T12:00:00+00:00", "2026-09-02T12:00:00Z")
+    keys: list[str] = []
+    binds: list[Any] = []
+    captured: list[TileInput] = []
+    for index, spelling in enumerate(spellings):
+        session = _NationalRouteSession()
+        response, captured = _request_national_identity_tile(
+            _national_identity_url("gfs", quote(spelling, safe="")),
+            session,
+            monkeypatch,
+            tmp_path / f"cache-{index}",
+        )
+        assert response.status_code == 200, response.text
+        assert response.content == b"pbf-bytes"
+        # The single-flight re-reads the cache inside the lock, so one request
+        # offers the same TileInput twice; what matters is that it is the same.
+        assert captured and len({cache_key(tile) for tile in captured}) == 1
+        keys.append(cache_key(captured[0]))
+        assert len(session.tile_params) == 1
+        binds.append(session.tile_params[0])
+
+    assert len(set(keys)) == 1, keys
+    for bound in binds:
+        assert bound["source"] == "gfs"
+        assert bound["cycle"] == _NATIONAL_CYCLE
+        assert bound["valid_time"] == _NATIONAL_VALID_TIME
+    # Vacuity guard: the canonical cycle really is inside the cache identity.
+    assert ":gfs:2026-09-02T12:00:00Z:" in captured[0].source_version
+
+
+def test_national_identity_route_gives_two_identities_two_cache_keys(monkeypatch: Any, tmp_path: Any) -> None:
+    keys: list[str] = []
+    for index, (source, cycle) in enumerate(
+        (("gfs", "2026-09-02T12:00:00Z"), ("ifs", "2026-09-02T12:00:00Z"), ("gfs", "2026-09-02T00:00:00Z"))
+    ):
+        response, captured = _request_national_identity_tile(
+            _national_identity_url(source, cycle),
+            _NationalRouteSession(),
+            monkeypatch,
+            tmp_path / f"cache-{index}",
+        )
+        assert response.status_code == 200, response.text
+        keys.append(cache_key(captured[0]))
+
+    assert len(set(keys)) == 3, keys
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        _national_identity_url("ERA5", "2026-09-02T12:00:00Z"),
+        _national_identity_url("best", "2026-09-02T12:00:00Z"),
+        _national_identity_url("gfs", "not-an-instant"),
+        _national_identity_url("gfs", quote("2026-09-02T12:00:00.500Z", safe="")),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time=quote("2026-09-03T00:00:00.500Z", safe="")),
+    ],
+)
+def test_national_identity_route_rejects_a_bad_identity_before_running_any_sql(url: str) -> None:
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: _ExplodingSession()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(url)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422, response.text
+
+
+def test_runtime_openapi_documents_the_national_identity_tile_route() -> None:
+    """Without the `mvt_paths` entry the runtime schema and the hand-written yaml
+    would be consistently WRONG, so the equality drift test could not catch it."""
+    operation = main.create_app().openapi()["paths"][
+        "/api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf"
+    ]["get"]
+    parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
+
+    assert operation["responses"]["424"] == {"$ref": "#/components/responses/MvtLivePostgisUnavailable"}
+    assert parameters["variable"]["schema"]["enum"] == ["q_down"]
+    assert parameters["source"]["schema"]["enum"] == ["gfs", "ifs"]
+    assert parameters["z"]["schema"]["maximum"] == 14
+    assert parameters["x"]["schema"]["maximum"] == 16383
+    assert parameters["y"]["schema"]["maximum"] == 16383

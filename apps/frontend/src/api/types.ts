@@ -602,6 +602,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Hydro National Source Cycle Mvt Tile
+         * @description Canonical national discharge tile for one (source, cycle) identity; 424 when it has no display-ready run.
+         */
+        get: operations["hydro_national_source_cycle_mvt_tile_api_v1_tiles_hydro_national__source___cycle___variable___valid_time___z___x___y__pbf_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf": {
         parameters: {
             query?: never;
@@ -3282,6 +3302,47 @@ export interface operations {
             header?: never;
             path: {
                 run_id: string;
+                variable: "q_down";
+                valid_time: string;
+                /** @description Web Mercator XYZ zoom level. */
+                z: number;
+                /** @description Web Mercator XYZ tile column. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= x < 2^z. */
+                x: number;
+                /** @description Web Mercator XYZ tile row. Global schema bounds are 0..16383 for max zoom 14; each request also enforces 0 <= y < 2^z. */
+                y: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Raw Mapbox vector tile */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Layer-ID"?: string;
+                    "X-Tile-Checksum"?: string;
+                    "X-Tile-Cache"?: "hit" | "miss" | "bypass";
+                    "X-Tile-Cache-Key"?: string;
+                    "X-MVT-Schema-Version"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-protobuf": string;
+                };
+            };
+            424: components["responses"]["MvtLivePostgisUnavailable"];
+            "4XX": components["responses"]["Error"];
+            "5XX": components["responses"]["Error"];
+        };
+    };
+    hydro_national_source_cycle_mvt_tile_api_v1_tiles_hydro_national__source___cycle___variable___valid_time___z___x___y__pbf_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: "gfs" | "ifs";
+                cycle: string;
                 variable: "q_down";
                 valid_time: string;
                 /** @description Web Mercator XYZ zoom level. */

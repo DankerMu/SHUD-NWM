@@ -338,6 +338,7 @@ def _patch_mvt_tile_openapi(schema: dict) -> None:
         "/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf",
+        "/api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
         "/api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf",
     )
