@@ -10,6 +10,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 
 import type { components } from '@/api/types'
 import { cn } from '@/lib/cn'
+import { formatUnitForDisplay } from '@/lib/format'
 import {
   buildBasinFeatureCollection,
   buildBasinRiverFeatureCollection,
@@ -404,7 +405,9 @@ export function M11MapLibreSurface({
   )
 }
 
-function M11RiverTooltip({ feature }: { feature: BasinRiverFeature | null }) {
+// Exported so the river popup's rendered text has a behavioural oracle; it is a
+// pure presentational component and is not part of this module's runtime API.
+export function M11RiverTooltip({ feature }: { feature: BasinRiverFeature | null }) {
   if (!feature) return null
   const props = feature.properties
   return (
@@ -418,7 +421,7 @@ function M11RiverTooltip({ feature }: { feature: BasinRiverFeature | null }) {
         <dt>河段 ID</dt>
         <dd className="min-w-0 truncate font-mono text-neutral-900">{props.river_segment_id}</dd>
         <dt>当前流量</dt>
-        <dd>{props.q_value === null ? '无数据' : `${props.q_value.toLocaleString('en-US')} ${props.q_unit}`}</dd>
+        <dd>{props.q_value === null ? '无数据' : `${props.q_value.toLocaleString('en-US')} ${formatUnitForDisplay(props.q_unit)}`}</dd>
       </dl>
     </div>
   )

@@ -148,6 +148,17 @@ describe('M11 overview data contracts', () => {
     expect(getM11LayerLegend('discharge')).not.toHaveLength(0)
   })
 
+  it('spells the discharge legend with a superscript exponent, never m3/s', () => {
+    const labels = getM11LayerLegend('discharge').map((entry) => entry.label)
+
+    const withUnit = labels.filter((label) => label.includes('/s'))
+    expect(withUnit).not.toHaveLength(0)
+    withUnit.forEach((label) => {
+      expect(label).toContain('m³/s')
+      expect(label).not.toContain('m3/s')
+    })
+  })
+
   it('builds basin river rows from discharge feature properties without alert-derived fields', () => {
     const rows = normalizeBasinSegmentRows({
       query,

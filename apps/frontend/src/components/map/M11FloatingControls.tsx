@@ -19,7 +19,7 @@ export interface M11FloatingLayerOption {
 }
 
 export const m11FloatingLayerOptions: M11FloatingLayerOption[] = [
-  { value: 'discharge', label: '流量', description: 'q_down / m3/s', icon: Droplets },
+  { value: 'discharge', label: '流量', description: 'q_down / m³/s', icon: Droplets },
 ]
 
 /**
@@ -173,7 +173,7 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
       {entries.length > 0 ? (
         <div className="space-y-1" data-testid="m11-floating-legend-entries">
           {entries.map((entry) => (
-            // label 已自带数值区间（如「500-1000 m3/s」），不再重复渲染右侧数字列。
+            // label 已自带数值区间（如「500-1000 m³/s」），不再重复渲染右侧数字列。
             <div key={`${entry.label}-${entry.color}`} className="flex items-center gap-2 text-xs text-neutral-700">
               <span className="h-3 w-7 shrink-0 rounded-sm" style={{ backgroundColor: entry.color }} aria-hidden="true" />
               <span className="truncate">{entry.label}</span>
