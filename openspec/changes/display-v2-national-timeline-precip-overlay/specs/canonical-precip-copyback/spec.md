@@ -1,64 +1,70 @@
 ## ADDED Requirements
 
-### Requirement: q_down publish mirrors canonical precipitation products
-After a q_down publish for `(source, cycle)` has completed its q_down copyback, artifact writes, and layer registration — that is, at the last step before the publish lineage is assembled — the publisher on node-22 SHALL mirror `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` and every `canonical/<storage_source>/grid/<grid_id>/` directory that exists under the source root (storage source `gfs`/`IFS` via `normalize_source_id`, cycle token `%Y%m%d%H`) from `OBJECT_STORE_ROOT` to `NHMS_OBJECT_STORE_COPYBACK_ROOT` under the same keyspace using the existing temp-tree + rollback copy pattern with its own rollback batch, never the q_down batch.
+### Requirement: The DB-free forecast terminal stage mirrors canonical precipitation products
+When the forecast chain reaches its terminal stage for `(source, cycle)` on a deployment whose terminal stage is `forecast_state_save_qc` — the DB-free compute profile — the orchestrator SHALL mirror `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` and every `canonical/<storage_source>/grid/<grid_id>/` directory that exists under the source root (storage source `gfs`/`IFS` via `normalize_source_id`, cycle token `%Y%m%d%H`) from `OBJECT_STORE_ROOT` to `NHMS_OBJECT_STORE_COPYBACK_ROOT` under the same keyspace using the existing temp-tree + rollback copy pattern with its own rollback batch, never the q_down batch.
 
 The mirror is idempotent at **tree** granularity: a mirrored tree whose destination holds exactly the same file names with identical sizes is skipped without rewriting any file; any other state (missing file, extra file, size mismatch) replaces that whole tree atomically. Per-file skipping is not available because the reused copy helper rebuilds a temp tree and promotes it with a single `os.replace`.
 
-The mirror MUST NOT fail, block, or roll back the q_down publish for **any** reason — missing source products, unsafe entry names, symlinks, tree/byte/depth limits, IO errors, or a failed rollback. Every such failure is swallowed and recorded in the publish lineage under the top-level key `precip_mirror` as `{"status": "failed", ...}`, carrying `missing_path` when the cause is an absent source directory and `error`/`error_type` otherwise. On success the key records `{"status": "ok", "file_count": <files mirrored across all trees>, "trees": [...]}`; when every tree was skipped it records `{"status": "skipped", ...}`.
+The mirror MUST NOT fail, block, or roll back the forecast terminal stage for **any** reason — missing source products, unsafe entry names, symlinks, tree/byte/depth limits, IO errors, or a failed rollback. Every such failure is swallowed and recorded in the mirror receipt under the top-level key `precip_mirror` as `{"status": "failed", ...}`, carrying `missing_path` when the cause is an absent source directory and `error`/`error_type` otherwise. On success the key records `{"status": "ok", "file_count": <files mirrored across all trees>, "trees": [...]}`; when every tree was skipped it records `{"status": "skipped", ...}`.
 
 The `precip_mirror` payload MUST NOT claim work that did not happen, so each `trees[]` entry separates plan intent from outcome. `action` is the intent decided in the read-only plan phase and is always present: `copy` for a tree that needs replacing, `skip` for one whose destination already holds the same file names with identical sizes. `status` is the outcome and takes exactly five values: `skipped` (nothing to do), `pending` (a planned copy not yet promoted), `copied` (promoted, set only after the copy helper returned, with that tree's `file_count` **and** `byte_count` taken from the helper's returned counts rather than the plan-phase source stat, so the two numbers cannot describe different file sets), `rolled_back` (promoted and then undone by this step's own rollback, which returned cleanly), and `rollback_unknown` (promoted, this step's rollback raised, destination state unknown — the cycle MUST be re-mirrored before it is trusted).
 
 A status MUST NOT be written at a point where the corresponding filesystem outcome is not knowable. Therefore, when this step's own rollback raises, **every** tree still at `copied` becomes `rollback_unknown`: the rollback helper collects per-entry errors and raises once at the end, so a tree it did undo is indistinguishable from one it did not, and even a tree whose own rollback raised may be absent from disk. The top-level `rollback_error`/`rollback_error_type` carry the cause. Trees never promoted stay `pending`. `file_count` is present on the `ok` record and on the `trees_already_mirrored` `skipped` record, and MUST be absent from a `failed` record (the same-root `skipped` record of the next paragraph carries none either); the top-level `file_count` is summed after the copy phase, so every `copied` tree contributes the copy helper's own count, while a `skipped` tree contributes its plan-phase count — the only honest number available for it, because nothing was written. `trees` is absent when the failure happened during planning, before the list was attached to the record.
 
-The mirror runs only when the q_down copyback actually copied: when `NHMS_OBJECT_STORE_COPYBACK_ROOT` is unset the `precip_mirror` key is absent from the lineage, and when the copyback root resolves to the same directory identity as `OBJECT_STORE_ROOT` the key records `{"status": "skipped", "reason": "copyback_root_matches_object_store_root"}`.
+The mirror runs only when a copyback root is configured: when `NHMS_OBJECT_STORE_COPYBACK_ROOT` is unset no mirror is attempted and no `precip_mirror` receipt is emitted, and when the copyback root resolves to the same directory identity as `OBJECT_STORE_ROOT` the key records `{"status": "skipped", "reason": "copyback_root_matches_object_store_root"}`.
 
-The `<grid_id>` segment MUST NOT be derived by importing `workers/canonical_converter/converter.py`; both producers discover it by listing `canonical/<storage_source>/grid/*/` on the source root and mirroring each grid directory found. Discovery is directories-only, as `grid/*/` states: an entry under `canonical/<storage_source>/grid/` that is not a directory is not a tree to mirror and is ignored whatever its name, so it MUST NOT fail the mirror; a symlinked entry is still refused, and a *directory* whose name fails the safe-id rule is still refused by name. When `prcp_rate_or_amount` exists but no `grid.json` does, the status is `failed` with the absent grid path in `missing_path`. `missing_path` is used only where the path it names is genuinely absent: a `canonical/<storage_source>/grid/` that exists and lists successfully but holds no `<grid_id>` directory is reported with `error`/`error_type` instead, because the absent-`grid/` case emits that same path value and the two states would otherwise be indistinguishable in lineage — and because `missing_path` and `error`/`error_type` are mutually exclusive, the cause would be dropped entirely.
+The mirror receipt is a `pipeline_event` on the forecast cycle, `event_type = "canonical_precip_mirror"`, whose `details` carry the `precip_mirror` payload described above. On the DB-free profile the repository is `FileOrchestrationJournalRepository`, so the event is appended to `<NHMS_SCHEDULER_JOURNAL_ROOT>/journal/<source_id>/<cycle_token>.jsonl`. The payload key naming the cycle MUST be `cycle`, never `cycle_token`: the event passes through `redact_payload()`, whose sensitive-key regex substring-matches `token` and would blank the value.
+
+The producer derives its identity without a database: `storage_source` is the orchestration context's already-normalized `source_id`, and `cycle_token` is `format_cycle_time(context.cycle_time)`. Neither MAY be recovered from `context.cycle_id`, which lowercases the source and so loses the `IFS`/`ERA5` spelling that the `canonical/<storage_source>/` directory name requires.
+
+The mirror MUST NOT inherit the two gates that guard the sibling run-tree copyback at the same seam, because neither is a property of precipitation products: it MUST run even when the cycle has no active basins (the run-tree copyback early-returns on an empty `run_ids`, but precipitation is a source/cycle-level product), and it MUST run when the terminal stage ends `partially_failed` as well as `succeeded` (the products are written by the earlier `convert` stage and are valid regardless of per-basin forecast outcomes; skipping them would 404 the read side for a cycle whose data exists). The mirror is also fail-open where that sibling is fail-closed: a `RunTreeCopybackError` aborts the stage, whereas any mirror failure is swallowed into the receipt.
+
+The `<grid_id>` segment MUST NOT be derived by importing `workers/canonical_converter/converter.py`; both producers discover it by listing `canonical/<storage_source>/grid/*/` on the source root and mirroring each grid directory found. Discovery is directories-only, as `grid/*/` states: an entry under `canonical/<storage_source>/grid/` that is not a directory is not a tree to mirror and is ignored whatever its name, so it MUST NOT fail the mirror; a symlinked entry is still refused, and a *directory* whose name fails the safe-id rule is still refused by name. When `prcp_rate_or_amount` exists but no `grid.json` does, the status is `failed` with the absent grid path in `missing_path`. `missing_path` is used only where the path it names is genuinely absent: a `canonical/<storage_source>/grid/` that exists and lists successfully but holds no `<grid_id>` directory is reported with `error`/`error_type` instead, because the absent-`grid/` case emits that same path value and the two states would otherwise be indistinguishable in the receipt — and because `missing_path` and `error`/`error_type` are mutually exclusive, the cause would be dropped entirely.
 
 #### Scenario: Successful mirror
-- **WHEN** q_down publish succeeds for `gfs` cycle `2026090212` and the source root holds 56 `.nc` files plus one `grid.json`
+- **WHEN** the DB-free terminal stage completes for `gfs` cycle `2026090212` and the source root holds 56 `.nc` files plus one `grid.json`
 - **THEN** the copyback root contains the same 56 files and `grid.json` with identical bytes
-- **AND** lineage records `precip_mirror.status == "ok"` with `file_count == 57` (both trees counted)
+- **AND** the receipt records `precip_mirror.status == "ok"` with `file_count == 57` (both trees counted)
 
 #### Scenario: Idempotent re-run
 - **WHEN** the mirror runs again for a cycle whose every mirrored tree already holds the same file names with identical sizes
-- **THEN** no file is rewritten (mtimes unchanged) and lineage records `precip_mirror.status == "skipped"`
+- **THEN** no file is rewritten (mtimes unchanged) and the receipt records `precip_mirror.status == "skipped"`
 
 #### Scenario: Partially mirrored tree is replaced whole
 - **WHEN** the destination `prcp_rate_or_amount` tree is missing one `.nc` file or holds one of a different size
-- **THEN** that whole tree is replaced atomically and lineage records `precip_mirror.status == "ok"`
+- **THEN** that whole tree is replaced atomically and the receipt records `precip_mirror.status == "ok"`
 - **AND** the grid tree, being unchanged, is still skipped
 
-#### Scenario: Missing source does not block publish
+#### Scenario: Missing source does not block the terminal stage
 - **WHEN** the source `prcp_rate_or_amount` directory is absent
-- **THEN** q_down publish still completes with `status == "published"`
-- **AND** lineage records `precip_mirror.status == "failed"` naming the absent path in `missing_path`
+- **THEN** the forecast terminal stage still completes
+- **AND** the receipt records `precip_mirror.status == "failed"` naming the absent path in `missing_path`
 
-#### Scenario: Mirror failure other than a missing source does not block publish
+#### Scenario: Mirror failure other than a missing source does not block the terminal stage
 - **WHEN** the source tree is unsafe or unreadable — a symlinked entry, an entry over `_COPYBACK_MAX_FILE_BYTES`, or an `OSError` raised mid-copy
-- **THEN** q_down publish still completes with `status == "published"`
-- **AND** lineage records `precip_mirror.status == "failed"` with `error` and `error_type`, and — when the record carries no `rollback_error` — no temp tree is left under the copyback root
+- **THEN** the forecast terminal stage still completes
+- **AND** the receipt records `precip_mirror.status == "failed"` with `error` and `error_type`, and — when the record carries no `rollback_error` — no temp tree is left under the copyback root
 - **AND** the record carries no `file_count`, and no tree reports `copied` unless the destination holds the source bytes
 
 #### Scenario: A tree promoted before the batch failed is reported as rolled back
 - **WHEN** the first mirrored tree has been promoted and a later tree's copy fails, so this step's own rollback runs
 - **THEN** the promoted tree is removed (or restored byte-for-byte to the content the destination held before the run) and its `trees[]` entry reports `"action": "copy"` with `"status": "rolled_back"`, while a tree never attempted stays `"pending"`
-- **AND** q_down publish still completes with `status == "published"` and its copyback products are untouched
+- **AND** the forecast terminal stage still completes and its copyback products are untouched
 
 #### Scenario: A rollback that itself raised reports an unknown destination state, never `copied`
 - **WHEN** this step's own rollback runs and raises — the promoted tree was replaced by a symlink, or a restore failed between its `rmtree` and its `os.replace`, or one entry of a multi-tree batch failed while another was undone successfully
 - **THEN** no tree reports `copied`: every tree that had been promoted reports `"status": "rollback_unknown"`, including any the rollback did undo and whose destination is therefore absent, while a tree never attempted stays `"pending"`
-- **AND** lineage carries the top-level `rollback_error`/`rollback_error_type`, and a `.copyback-backup.<hex>` (or other `.copyback-*`) residue MAY be left under the copyback root — a restore that fails after its `rmtree` provably leaves one
-- **AND** q_down publish still completes with `status == "published"` and its copyback products are untouched
+- **AND** the receipt carries the top-level `rollback_error`/`rollback_error_type`, and a `.copyback-backup.<hex>` (or other `.copyback-*`) residue MAY be left under the copyback root — a restore that fails after its `rmtree` provably leaves one
+- **AND** the forecast terminal stage still completes and its copyback products are untouched
 
 #### Scenario: A non-directory beside the grid directories is ignored
 - **WHEN** `canonical/<storage_source>/grid/` holds a plain file next to the `<grid_id>` directories, with a name the safe-id rule accepts or rejects
-- **THEN** that entry is not mirrored and does not become a tree, and lineage records `precip_mirror.status == "ok"` with the `prcp_rate_or_amount` and `<grid_id>` trees mirrored as usual
+- **THEN** that entry is not mirrored and does not become a tree, and the receipt records `precip_mirror.status == "ok"` with the `prcp_rate_or_amount` and `<grid_id>` trees mirrored as usual
 - **AND** a *directory* under `canonical/<storage_source>/grid/` whose name the safe-id rule rejects is still `failed` with `error_type == "SafeFilesystemError"` naming the unsafe entry
 
 #### Scenario: A grid directory with no grid found reports the cause, not a missing path
 - **WHEN** `canonical/<storage_source>/grid/` exists and lists successfully but holds no `<grid_id>` directory
-- **THEN** lineage records `precip_mirror.status == "failed"` with `error`/`error_type` and no `missing_path`, so it is distinguishable from an absent `canonical/<storage_source>/grid/`, which does record `missing_path`
+- **THEN** the receipt records `precip_mirror.status == "failed"` with `error`/`error_type` and no `missing_path`, so it is distinguishable from an absent `canonical/<storage_source>/grid/`, which does record `missing_path`
 
 #### Scenario: A tree's counts describe the copy phase, not the plan phase
 - **WHEN** the converter writes one more lead into the source `prcp_rate_or_amount` tree between the read-only plan phase and the copy
@@ -66,7 +72,7 @@ The `<grid_id>` segment MUST NOT be derived by importing `workers/canonical_conv
 
 #### Scenario: Copyback root not configured
 - **WHEN** `NHMS_OBJECT_STORE_COPYBACK_ROOT` is unset
-- **THEN** no mirror is attempted and the lineage carries no `precip_mirror` key
+- **THEN** no mirror is attempted and no `precip_mirror` receipt is emitted
 
 ### Requirement: One-shot backfill mirrors retained cycles without touching the environment
 A script `scripts/canonical_precip_copyback_backfill.py` SHALL mirror every `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` directory present under `--source-root` and each source's `canonical/<storage_source>/grid/*/grid.json` using only the standard library (it MUST NOT import `services`, `packages`, `workers`, or any third-party module — the keyspace rule is not shared with the publisher; the script copies the on-disk directory names verbatim and never normalizes a source id), runnable on node-22 **from the repo root** as `cd /scratch/frd_muziyao/NWM && /scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill --source-root <root> --copyback-root <root>` (the `cd` is mandatory: from any other cwd the launch fails with `ModuleNotFoundError` and exit `1` — the same code as clause "completed but something failed", told apart only by the absent JSON summary); it MUST print a JSON summary (per cycle: copied/skipped/failed) to stdout. It writes by default and only `--dry-run` suppresses writes — the inverse of `services/tile_publisher/forcing_copyback_backfill.py`, because the node-22 operation in this change's tasks invokes it without a flag. Exit code: `0` when the run completes with no failure, `1` when the run completes but any cycle or grid reports `failed > 0` (the summary is still printed), `2` for unusable arguments or roots. A `canonical/` directory that exists under `--source-root` but is unreadable, is not a directory, or is a symlink IS an unusable root and exits `2` (the summary, carrying `root_error`, is still printed) — not `1`, because no cycle or grid entry exists for clause 1's predicate to be true of. An **absent** `canonical/` is not an error at all: there is nothing to mirror and the run exits `0`. Per file it skips a destination of identical size and otherwise copies through a temp name plus `os.replace`.

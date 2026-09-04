@@ -103,6 +103,25 @@ Boundary-surface checklist（4.1–4.3）:
 - 回填脚本默认写入、`--dry-run` 才不写，与兄弟 `services/tile_publisher/forcing_copyback_backfill.py` 的「默认 dry-run、`--apply` 才写」相反：本 change 的 4.5 node-22 命令不带任何标志就必须写入。
 - 回填脚本与 publisher 各自拼 keyspace（脚本照抄目录名、publisher 走 `normalize_source_id`），是 stdlib-only 硬约束的直接后果，不是重复实现。
 
+### #2034 修正镜像挂载点（DB-free seam）
+
+- [ ] 4.7 `services/tile_publisher/publisher.py`：把 `_copyback_canonical_precip` 暴露为公开方法（返回 summary，不写 publish lineage），并**移除** `_publish_qdown_from_database` 里的调用点——该路径在生产拓扑下永不执行，留着就是把 #2034 的缺陷固化。既有单测改为直接驱动公开方法。
+- [ ] 4.8 `services/orchestrator/chain_forecast_execution.py`：在 `_after_cycle_stage_terminal` 的 `reconcile_unverified` 早退之后、状态分派之前触发镜像，条件为终态 `forecast_state_save_qc` 且 stage 为 `state_save_qc`；`succeeded` 与 `partially_failed` 都触发；不看 `active_basins`；任何异常吞掉。身份用 `context.source_id` + `format_cycle_time(context.cycle_time)`。
+- [ ] 4.9 回执：`insert_pipeline_event(entity_type="forecast_cycle", event_type="canonical_precip_mirror", ...)`，`details` 带 `precip_mirror` payload，周期键名为 `cycle`。
+- [ ] 4.10 契约同步：spec Requirement 1 已改（本 PR）；`docs/runbooks/two-node-deployment-overview.md:150` 把 stale 的 `publish-qdown` 归属改为当前 DB-free 终态契约；runbook 给出回执判读入口（journal jsonl 路径 + 一条 `jq` 示例）。
+- [ ] 4.11 node-22 live receipt：一个**新**生产周期跑完后，`/ghdc/data/nwm/object-store/canonical/<S>/<cycle>/prcp_rate_or_amount/` 出现，且 journal 里有对应 `canonical_precip_mirror` 事件；`runs/` copyback 行为不变。
+
+### Invariant Matrix（4.7–4.9，issue #2034 补充）
+
+- 终态 `succeeded` -> 镜像触发且回执 `status == "ok"`
+- 终态 `partially_failed` -> **仍**镜像（降水由 `convert` 产出，与 basin 成败无关），回执照记
+- `active_basins` 为空 -> **仍**镜像（run-tree copyback 会早退，镜像不得跟随）
+- 镜像抛任何异常 -> stage 结果不变、不抛出，回执记 `failed` + `error`/`error_type`
+- `NHMS_OBJECT_STORE_COPYBACK_ROOT` 未配 -> 不尝试、不发回执
+- 回执 payload 的周期键是 `cycle`；断言 `[redacted]` 不出现在事件 JSON 里（`redact_payload` 会打掉 `cycle_token`）
+- `IFS` 源 -> 目录名与回执均为 `canonical/IFS/...`，绝不出现小写 `ifs`（证明身份未从 `cycle_id` 反解）
+- 非终态部署（终态非 `forecast_state_save_qc`）-> 不在该 seam 触发
+
 ## 5. Precipitation raster service (precipitation-raster-overlay, backend)
 
 - [ ] 5.1 新模块 `services/precip/`：`resolve_window(source, cycle, valid_time, mirror_root)`（最近 `C ≤ min(请求周期, T−3h)` 规则——请求周期是上界，只从请求周期或更早周期取片；缺片抛 `PrecipWindowIncomplete`）、`accumulate_24h(slices)`（netCDF4 + numpy，Σ rate×3/24）、`render_png(field, grid, palette)`（Mercator 重采样 1316 px 宽、bilinear、六级调色板、numpy+zlib 手写 PNG）、`palette_version`。

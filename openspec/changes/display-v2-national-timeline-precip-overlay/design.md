@@ -49,7 +49,10 @@
 - 渲染：`M11PrecipOverlayPrimitive` 用 MapLibre `image` source（四角 = bbox 四角）+ `raster` layer，`raster-opacity 0.55`，插入全国河网层之下；切换 valid_time 时更新 url。当前时次不在 `index.valid_times` 内则隐藏并提示。index 返回 404 `PRECIP_CYCLE_NOT_MIRRORED` 时用**另一条**文案（该周期无降水镜像），两种隐藏原因在 UI 与 vitest 里可区分。流域详情里 source 可能是 `best`/`compare`：只用解析出的具体 gfs/ifs 拼 URL，解析不出就隐藏并给原因，绝不请求 `/api/v1/precip/best|compare/...`。
 
 ### D6. copyback 镜像不阻塞 q_down 发布
-- `publisher.py` 在 q_down copyback 之后镜像 `canonical/<source>/<cycle>/prcp_rate_or_amount/` 与 `canonical/<source>/grid/<grid_id>/grid.json`，复用 temp-tree + rollback；目标存在且大小一致则跳过；源缺失记 lineage `precip_mirror: failed` 并继续。
+- 触发点是 node-22 DB-free 的 forecast 终态 stage（`chain_forecast_execution.py::_after_cycle_stage_terminal`，终态 `forecast_state_save_qc`），**不是** publisher 的 q_down 发布路径——后者在生产拓扑下永不执行（#2034）。镜像实现仍复用 `publisher.py::_copyback_canonical_precip`（纯文件系统、无 DB，经 #2028 五轮加固），经一个公开包装方法调用；目标存在且大小一致则跳过；源缺失记 `precip_mirror: failed` 并继续。
+- 回执走 `pipeline_event`（`event_type="canonical_precip_mirror"`），DB-free 下由 `FileOrchestrationJournalRepository` 落到 `<journal_root>/journal/<source>/<cycle>.jsonl`；payload 里周期键必须叫 `cycle` 不能叫 `cycle_token`（`redact_payload` 会把含 `token` 的键打成 `[redacted]`）。
+- 身份取 `context.source_id`（已 normalize）+ `format_cycle_time(context.cycle_time)`，**不得**从 `cycle_id` 反解（它把 source 小写化，丢掉 `IFS`/`ERA5` 拼写）。
+- 不继承兄弟 run-tree copyback 的两道闸：`active_basins` 为空时仍须镜像（降水是 source/cycle 级产物），`partially_failed` 时仍须镜像（降水由更早的 `convert` 产出）；失败语义相反——run-tree 是 fail-closed 抛错，镜像是 fail-open 吞掉记回执。
 - 回填脚本 `scripts/canonical_precip_copyback_backfill.py` 只依赖 `shutil`/`pathlib`，node-22 用钉住解释器执行。
 - retention：`node27_raw_retention.py` 目标集合扩到 `canonical/<storage_source>/<cycle_token>` 与 `NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>`，同一 cutoff（`display_watermark − retention_days`）；`canonical/<source>/grid/` 永不剪。脚本配置的 source 是小写 `gfs,ifs`，canonical 目录是 `gfs`/`IFS`，路径必须过 `normalize_source_id` 而不是直接拼小写 token。
 - keep 水位必须覆盖 cycles 端点能返回的全部周期再往前 24h（`oldest_listed_cycle − 24h ≥ cutoff`），receipt 记录不等式两边；不成立就加大 `retention_days`，不靠前端 404 兜底。
