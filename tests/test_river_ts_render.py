@@ -23,10 +23,13 @@ contract, that one owns the coverage.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 import pytest
 
 from packages.common.river_ts_render import (
+    _SUBQUERY_START,
+    _WHITESPACE,
     PUSHDOWN_AID_MARKER,
     RIVER_TABLE,
     RIVER_TABLE_LEGACY,
@@ -36,6 +39,10 @@ from packages.common.river_ts_render import (
     RiverTemplateError,
     _assert_key_predicates_retained,
     _assert_no_fact_text_identity,
+    _blank_non_code,
+    _in_comparison_value_position,
+    _lexical_subset_violation,
+    _scan_quoted,
     _strip_aids,
     aid_conjunct,
     assert_structurally_intact,
@@ -43,10 +50,15 @@ from packages.common.river_ts_render import (
     fact_table_name_occurrences,
     fact_table_text_identity_columns,
     non_code_spans,
+    outer_predicates,
     render_river_ts_sql,
     sql_chains,
+    strip_all_subqueries,
+    strip_comments,
+    strip_scalar_subqueries,
     text_fact_columns,
 )
+from tests.river_ts_template_registry import REGISTRY
 
 MARKER = PUSHDOWN_AID_MARKER
 
@@ -1128,30 +1140,6 @@ def test_a_non_nested_block_comment_with_an_apostrophe_keeps_todays_answer() -> 
     assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="plain-comment").sql
 
 
-@pytest.mark.parametrize(("label", "identifier"), [("ascii", "a$b$c"), ("non_ascii", "é$b$c")])
-def test_a_dollar_inside_an_identifier_does_not_open_a_dollar_quote(label: str, identifier: str) -> None:
-    """T2 — ``$`` is an identifier character in PostgreSQL after the first one.
-
-    ``a$b$c`` is ONE identifier (a documented PostgreSQL extension), so a
-    dollar-quote delimiter cannot begin in the middle of it. Reading ``$b$`` as
-    an opener blanked everything to the end of the text — the read included —
-    and both counters answered 0 (#2018 round-3 G1).
-
-    The ``non_ascii`` id is the scope of the guard's ``\\w``: PostgreSQL's
-    ``ident_cont`` includes non-ASCII letters, so an identifier may perfectly
-    well be ``é$b$c``. Spelling the lookbehind ``[A-Za-z0-9_$]`` instead puts
-    that one straight back into the phantom-dollar-quote class.
-    """
-    sql = f"SELECT {identifier} FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s AND rt.run_key = %(k)s"
-
-    assert non_code_spans(sql) == ()
-    assert fact_table_name_occurrences(sql) == 1
-    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
-    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
-        render_river_ts_sql(sql, "narrow", entry=label)
-    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
-
-
 def test_a_phantom_literal_that_closes_on_a_later_escape_string_still_loses_the_read() -> None:
     r"""T3 — the CLASS pin: the desynchronisation re-synchronises BEFORE the end of the text.
 
@@ -1226,23 +1214,90 @@ def test_a_carriage_return_ends_a_line_comment_for_the_sub_select_stripper_too()
     assert render_river_ts_sql(sql, "narrow", entry="cr-authority").sql == sql
 
 
-def test_an_identifier_containing_a_dollar_is_not_an_escape_string_prefix() -> None:
-    r"""``x$e'C:\'`` — ``$`` is an identifier character, so that ``e`` is a tail, not a prefix.
+def test_an_apostrophe_inside_a_quoted_identifier_does_not_desynchronise_the_scan() -> None:
+    r"""decision 17's quoted-identifier row, pinned on the arm it actually exercises.
 
-    Decision 17's first row (``$`` belongs to the identifier after its first
-    character) decides where an ``E'…'`` prefix can START as well as where a
-    dollar quote can open: ``_opens_escape_string`` reads the character before
-    the ``e``. Counting ``$`` as a separator makes the literal backslash-aware,
-    its closing quote escaped, and the phantom literal runs over the rest of the
-    statement — the round-1 B/P2-2 failure, one lexical rule over.
+    A ``"…"`` run is an IDENTIFIER: the scanner traverses it and records NO span,
+    because ``"hydro"."river_timeseries"`` is a read of the fact table that must
+    be counted while ``'hydro.river_timeseries'`` is data that must not. The
+    round-2 quoted-identifier tests pin the COUNTER's answer, not this arm — with
+    the arm deleted a ``"`` is simply skipped as ordinary code and every one of
+    them stays green (verifier #2018 round-4 J2 measured 461/461 under the
+    deletion mutant).
+
+    Only an APOSTROPHE inside the quotes discriminates. With the arm gone the
+    ``'`` of ``"it's value"`` opens a phantom literal that runs over the real
+    ``FROM`` and closes on the odd quote of ``E'q\'x'`` — measured at head: spans
+    ``((22, 85), (87, 90))``, occurrences 0, walk 0, text identity ``set()``,
+    legacy rendered UN-renamed and narrow rendered shipping ``rt.variable``. That
+    is the round-3 G1 class re-opened with the whole suite green, which is
+    exactly what decision 17's "every row carries a pin" preamble exists to
+    prevent.
+    """
+    sql = (
+        "SELECT rt.value AS \"it's value\" FROM hydro.river_timeseries rt "
+        "WHERE rt.variable = E'q\\'x' AND rt.run_key = %(k)s"
+    )
+
+    assert _is_code(sql, "FROM hydro.river_timeseries")
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_attribution(sql).reference_count == 1
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    assert fact_table_text_identity_columns(sql, entry="quoted-apostrophe") == {"variable"}
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
+        render_river_ts_sql(sql, "narrow", entry="quoted-apostrophe")
+    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry="quoted-apostrophe").sql
+
+
+def test_a_unicode_escaped_string_constant_is_refused_like_the_identifier_form() -> None:
+    """decision 17's ``U&'…'`` row: the guard is the PREFIX, not the quote that follows it.
+
+    ``_UNICODE_ESCAPED`` is ``\\bU&`` and deliberately says nothing about what
+    comes next, so a Unicode-escaped STRING is refused on the same prefix as a
+    Unicode-escaped identifier. Narrowing it to ``\\bU&(?=")`` — the obvious
+    "only identifiers can hide the table name" tidy — is fail-open and survived
+    every suite at 7be3e273 (verifier J2): the row claimed a ``U&'abc'`` control
+    that no test input contained.
+
+    The over-refusal is accepted and recorded: a template predicating on a
+    ``U&'…'`` literal is refused although it hides nothing. 0/20 registered
+    templates use the syntax at all.
+    """
+    sql = "SELECT r.value FROM hydro.river_timeseries r WHERE r.tag = U&'abc' AND r.run_key = %(k)s"
+
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
+            render_river_ts_sql(sql, store, entry="unicode-escaped-string")
+    with pytest.raises(RiverTemplateError, match="Unicode-escaped"):
+        fact_table_text_identity_columns(sql, entry="unicode-escaped-string")
+
+
+def test_a_dollar_before_an_escape_prefix_is_refused_as_outside_the_lexical_subset() -> None:
+    r"""``x$e'C:\'`` — the round-3 pin FLIPPED by decision 18, and why it had to flip.
+
+    Round 3 answered this shape by teaching :func:`_opens_escape_string` that
+    ``$`` is an identifier character, so the ``e`` in ``x$e`` is a tail and the
+    literal is a plain one. That answer was right about PostgreSQL and still a
+    liability: it made ``$`` a rule with FOUR sites in this module, and round 4
+    found the same rule wrong at two of them (#2018 I1/I2). Decision 18 removes
+    the rule instead — a ``$`` in code is refused, so no site has to be right.
+
+    The refusal here is the SUBSET one, not the unterminated belt, and that is
+    the check ORDER being pinned: with the subset check moved after the belt this
+    statement is still refused, but the message changes and the module claims to
+    have diagnosed a terminator when what it really met was an unmodelled
+    character. Its sibling ``x_e'C:\'`` (underscore, no dollar) is INSIDE the
+    subset and still not an escape prefix — that pin is
+    ``test_an_identifier_ending_in_underscore_e_is_not_an_escape_string_prefix``,
+    which is what keeps ``_IDENTIFIER_TAIL`` non-vacuous after ``$`` left it.
     """
     sql = r"SELECT rt.value FROM hydro.river_timeseries rt WHERE x$e'C:\' AND rt.run_id = :run_id"
-    start = sql.index("'C:")
 
-    assert non_code_spans(sql) == ((start, start + 5, "literal"),)
-    assert fact_table_name_occurrences(sql) == 1
-    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
-        render_river_ts_sql(sql, "narrow", entry="dollar-e")
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError, match="outside the modelled lexical subset"):
+            render_river_ts_sql(sql, store, entry="dollar-e")
+    with pytest.raises(RiverTemplateError, match="outside the modelled lexical subset"):
+        fact_table_text_identity_columns(sql, entry="dollar-e")
 
 
 @pytest.mark.parametrize(
@@ -1250,7 +1305,6 @@ def test_an_identifier_containing_a_dollar_is_not_an_escape_string_prefix() -> N
     [
         ("unterminated_literal", "AND rt.note = 'oops"),
         ("unterminated_block_comment", "AND rt.note = 'ok' /* oops"),
-        ("unterminated_dollar_quote", "AND rt.note = $tag$oops"),
     ],
 )
 def test_a_statement_that_ends_inside_an_unterminated_span_is_refused(label: str, tail: str) -> None:
@@ -1291,43 +1345,6 @@ def test_a_span_that_ends_at_the_end_of_the_text_is_not_the_same_as_an_untermina
         assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
 
 
-@pytest.mark.parametrize(("label", "tag"), [("named_tag", "$body$"), ("anonymous", "$$")])
-def test_a_real_dollar_quoted_body_is_data_and_not_a_second_read(label: str, tag: str) -> None:
-    """Non-vacuity for the ``$`` guard: a REAL dollar quote still hides what it holds.
-
-    The guard only refuses an opener that follows an identifier character, so
-    ``$tag$ … $tag$`` and ``$$ … $$`` keep blanking their bodies — a fact read
-    spelled inside one is data, exactly like one spelled inside ``'…'``.
-    """
-    sql = (
-        f"SELECT {tag}FROM hydro.river_timeseries{tag} AS note, rt.value "
-        "FROM hydro.river_timeseries rt WHERE rt.run_id = :run_id"
-    )
-
-    assert fact_table_name_occurrences(sql) == 1
-    assert fact_table_attribution(sql).reference_count == 1
-    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
-        render_river_ts_sql(sql, "narrow", entry=label)
-    rendered = render_river_ts_sql(sql, "legacy", entry=label)
-    assert f"{tag}FROM hydro.river_timeseries{tag} AS note" in rendered.sql
-    assert rendered.sql.count(RIVER_TABLE_LEGACY) == 1
-
-
-def test_a_positional_parameter_is_code_not_a_dollar_quote() -> None:
-    """``$1`` — a dollar-quote TAG cannot start with a digit (fixture decision 17).
-
-    The fourth placeholder dialect a wave-2 template could arrive in. If ``$1``
-    opened a quote, everything up to the next ``$`` would be blanked, which is
-    exactly the ``a$b$c`` failure with a different opener.
-    """
-    sql = "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = $1 AND rt.run_id = $2"
-
-    assert non_code_spans(sql) == ()
-    assert fact_table_name_occurrences(sql) == 1
-    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
-        render_river_ts_sql(sql, "narrow", entry="positional-parameter")
-
-
 @pytest.mark.parametrize(("label", "literal"), [("bit", "B'1010'"), ("hex", "X'FF'")])
 def test_a_bit_or_hex_constant_is_a_plain_literal(label: str, literal: str) -> None:
     """decision 17: ``B'…'`` / ``X'…'`` are ordinary literals — those prefixes escape nothing.
@@ -1343,6 +1360,545 @@ def test_a_bit_or_hex_constant_is_a_plain_literal(label: str, literal: str) -> N
     assert fact_table_name_occurrences(sql) == 1
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['run_id'\]"):
         render_river_ts_sql(sql, "narrow", entry=label)
+
+# ---------------------------------------------------------------------------
+# Round-4 review (#2018 I1/I2, fixture decision 18): the DECLARED LEXICAL SUBSET
+#
+# Rounds 1–4 all hit one invariant: the module's picture of where the fact table
+# is read must equal PostgreSQL's, that picture comes from a hand-rolled lexer
+# BOTH counters read, and so a lexer/PostgreSQL disagreement is common-mode —
+# both sides answer 0, the equality guard is satisfied by mutual blindness, and
+# the narrow render ships a text-identity column. Rounds 1–3 answered by teaching
+# the lexer one more §4.1 rule each time. Round 4 found the SAME rule (dollar
+# quoting) wrong at two sites — an ASCII tag class against §4.1's byte class, and
+# a whole second lexer in the traversal family with no dollar arm at all.
+#
+# Decision 18 answers by SHRINKING the module's input domain instead: the
+# renderer accepts a declared subset of §4.1 and refuses everything else. The
+# refused characters are `$` and any non-ASCII byte IN CODE, measured 0/20 over
+# the registry (its two `$` sit inside `'^[0-9]+$'` literals, its four `—` inside
+# comments), so nothing the readers use is lost. The pins below are the subset's
+# contract: what is refused, what is NOT refused, and that the refusal happens
+# before any traversal can mis-lex the statement.
+# ---------------------------------------------------------------------------
+
+
+_SUBSET_REFUSAL = "outside the modelled lexical subset"
+
+#: The suffix every decision-18 probe ends with: a REAL read of the fact table
+#: with a real text-identity predicate. Without it a "refused" verdict would be
+#: indistinguishable from "there was nothing here to get wrong" — each statement
+#: below is one the module MUST NOT render, because rendering it narrow ships
+#: `rt.variable` (or leaves the legacy table un-renamed).
+_REAL_READ = "rt.value FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s AND rt.run_key = %(k)s"
+
+
+def _assert_refused_as_outside_the_subset(sql: str, entry: str) -> None:
+    """Both stores and the text-identity oracle refuse ``sql``, and none names the table.
+
+    The three surfaces are asserted together because they are the three doors
+    into this module and decision 18 closes all three: ``render_river_ts_sql``
+    calls the guard for BOTH stores before it branches, and
+    ``fact_table_text_identity_columns`` calls it as its first statement.
+
+    The message must NOT contain the fact table's name: the statement census in
+    ``tests/test_river_ts_text_identity_cleanup.py`` counts that name in this
+    module's string constants, so a refusal message spelling it would add a
+    phantom "read site" to the census (census-2).
+    """
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError, match=_SUBSET_REFUSAL) as raised:
+            render_river_ts_sql(sql, store, entry=entry)
+        assert "river_timeseries" not in str(raised.value)
+    with pytest.raises(RiverTemplateError, match=_SUBSET_REFUSAL) as raised:
+        fact_table_text_identity_columns(sql, entry=entry)
+    assert "river_timeseries" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("dollar_dollar", f"SELECT $$a$$ AS note, {_REAL_READ}"),
+        ("tagged", f"SELECT $q$a$q$ AS note, {_REAL_READ}"),
+        (
+            "non_ascii_tag",
+            "SELECT $备注$don't$备注$ AS note, rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.variable = E'q\\'x' AND rt.run_key = %(k)s",
+        ),
+        ("symbol_tag", f"SELECT $€$x$€$ AS note, {_REAL_READ}"),
+        (
+            "positional",
+            "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_id = $1 AND rt.variable = $2",
+        ),
+        ("identifier_dollar", f"SELECT a$b$c, {_REAL_READ}"),
+        ("tag_after_number", f"SELECT 1$q$x$q$ AS note, {_REAL_READ}"),
+    ],
+    ids=[
+        "dollar_dollar",
+        "tagged",
+        "non_ascii_tag",
+        "symbol_tag",
+        "positional",
+        "identifier_dollar",
+        "tag_after_number",
+    ],
+)
+def test_a_dollar_sign_in_code_is_refused_as_outside_the_lexical_subset(label: str, sql: str) -> None:
+    """Every ``$`` in code is refused, whatever PostgreSQL would have made of it.
+
+    The point of the parameter list is that the module no longer has to KNOW
+    which of these opens a dollar quote. Round 3 shipped an opener pattern that
+    had to be right about all seven at once, and round 4 measured it wrong about
+    two:
+
+    * ``non_ascii_tag`` — verifier I's P1. PostgreSQL's ``dolq_start`` is the
+      BYTE class ``[A-Za-z\\200-\\377_]``, so ``$备注$`` is a real dollar quote;
+      the module's ASCII class opened nothing, the apostrophe of ``don't`` opened
+      a phantom literal over the real ``FROM``, both counters read 0, and the
+      narrow render shipped ``rt.variable = E'q\\'x'``. This is also the shape
+      that pins the guard ORDER: it passes the unterminated belt (its last span
+      closes on the escape string's odd quote), it passes the equality guard
+      (0 == 0) and it passes the sub-select delta, so the subset check is the
+      ONLY check that can refuse it;
+    * ``symbol_tag`` — the same class one step further: ``$€$`` is admitted by
+      the byte reading of ``scan.l`` and was not closed by round 4's proposed
+      ``\\w`` repair either.
+
+    The other five are shapes the round-3 module handled correctly and now
+    refuses instead: ``$$``/``$q$`` real bodies, ``$1`` positional parameters
+    (a placeholder dialect no registered template uses — 0/20), ``a$b$c`` (ONE
+    identifier under §4.1's ``$``-extension) and ``1$q$x$q$`` (a tag directly
+    after a numeric constant). Refusing them costs nothing measured and buys the
+    deletion of the rule that was wrong twice.
+    """
+    _assert_refused_as_outside_the_subset(sql, label)
+
+
+@pytest.mark.parametrize(
+    ("label", "body"),
+    [
+        ("line_comment", "$q$a -- b$q$"),
+        ("block_comment", "$q$a /* b$q$"),
+        ("unbalanced_paren", "$q$($q$"),
+    ],
+    ids=["line_comment", "block_comment", "unbalanced_paren"],
+)
+def test_a_dollar_body_hiding_a_comment_or_paren_is_refused_before_any_traversal(label: str, body: str) -> None:
+    """Verifier I's I2 statements: the refusal PRECEDES the traversal family.
+
+    These are ordinary ASCII with an ordinary ``$q$`` tag — at 7be3e273 the
+    SCANNER was right about them and the second lexer family was wrong. It
+    re-lexed with no dollar arm, so ``strip_comments`` read the ``--`` inside the
+    body as a real comment, deleted the rest of the line, and
+    ``outer_predicates`` handed the text-identity scan ``'SELECT $q$a'`` — the
+    ``FROM`` and the ``rt.variable`` predicate simply gone. The narrow render
+    shipped ``rt.variable``. The ``unbalanced_paren`` shape failed the other way:
+    ``assert_structurally_intact`` counted the ``(`` inside the body and refused
+    a legal statement for "unbalanced parentheses".
+
+    What is pinned is the MESSAGE, not merely the refusal: all three must be
+    refused as subset violations. A subset message proves the statement never
+    reached ``strip_comments``, ``outer_predicates`` or the paren walk at all —
+    which is how decision 18 closes I2 by deletion rather than by teaching the
+    second family a dollar arm it would then have to keep in step with the
+    first. An "unbalanced parentheses" message on ``unbalanced_paren``, or a
+    text-identity message on the other two, means the order regressed.
+    """
+    sql = f"SELECT {body} AS note, rt.value FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s"
+
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError, match=_SUBSET_REFUSAL) as raised:
+            render_river_ts_sql(sql, store, entry=label)
+        assert "unbalanced parentheses" not in str(raised.value)
+        assert "text identity column" not in str(raised.value)
+    with pytest.raises(RiverTemplateError, match=_SUBSET_REFUSAL):
+        fact_table_text_identity_columns(sql, entry=label)
+
+
+def test_a_dollar_sign_inside_a_literal_or_comment_stays_inside_the_subset() -> None:
+    """Non-vacuity, and the registry's OWN shape: the subset is asked over blanked text.
+
+    Two of the twenty registered templates contain a ``$`` — both inside a
+    ``'^[0-9]+$'`` regex literal — and this is why decision 18 costs the readers
+    nothing. A subset check spelled over the RAW text instead of the
+    comment/literal-blanked text would refuse them and take the whole change with
+    it, so the "0 ``$`` in code" measurement is pinned here as behaviour rather
+    than quoted as a number.
+    """
+    literal_sql = (
+        "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = %(k)s "
+        "AND rt.note ~ '^[0-9]+$' -- costs $0"
+    )
+    comment_sql = (
+        "SELECT rt.value /* $$ not a body $$ */ FROM hydro.river_timeseries rt WHERE rt.run_key = %(k)s"
+    )
+
+    for label, sql in (("literal_and_line_comment", literal_sql), ("block_comment", comment_sql)):
+        assert fact_table_name_occurrences(sql) == 1
+        assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+        assert fact_table_text_identity_columns(sql, entry=label) == set()
+        assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
+        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "identifier",
+            "SELECT rt.value AS 备注 FROM hydro.river_timeseries rt "
+            "WHERE rt.variable = %(v)s AND rt.run_key = %(k)s",
+        ),
+        (
+            "symbol_before_escape_prefix",
+            "SELECT €e'x\\' AS n, rt.value FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s",
+        ),
+    ],
+    ids=["identifier", "symbol_before_escape_prefix"],
+)
+def test_a_non_ascii_byte_in_code_is_refused_as_outside_the_lexical_subset(label: str, sql: str) -> None:
+    """The other half of the subset: PostgreSQL's identifier byte classes.
+
+    ``identifier`` is the plain case — §4.1.1 admits non-ASCII letters in an
+    unquoted identifier, so ``AS 备注`` is legal SQL this module will not model.
+
+    ``symbol_before_escape_prefix`` is the FOURTH site of the ``$``/byte-class
+    rule that verifier I named: ``_opens_escape_string`` asks
+    ``str.isalnum()``, which is Unicode-letter-aware (so ``é`` is covered) but
+    False for a symbol like ``€`` — so the module reads ``e'`` as an escape
+    prefix, the ``\\'`` as an escaped quote, and the literal runs to the end of
+    the statement over the real ``FROM``. Refused by the subset rule REGARDLESS
+    of how the scanner lexed it, which is the property that makes the fourth site
+    not need an answer of its own. It is also the id that discriminates the check
+    ORDER: with the subset check moved after the unterminated belt this statement
+    is refused as "unterminated", i.e. with a diagnosis of the wrong defect.
+    """
+    _assert_refused_as_outside_the_subset(sql, label)
+
+
+def test_non_ascii_text_inside_a_comment_or_literal_stays_inside_the_subset() -> None:
+    """Non-vacuity for the byte half: 4/20 registered templates do exactly this.
+
+    The four non-ASCII occurrences in the registry are ``—`` characters inside
+    ``--`` comments. Blanked text is what the rule reads, so prose comments and
+    ``'备注'`` literals are data and render normally for both stores.
+    """
+    comment_sql = (
+        "SELECT rt.value -- 注释 — dash\n"
+        "FROM hydro.river_timeseries rt WHERE rt.run_key = %(k)s"
+    )
+    literal_sql = "SELECT rt.value, '备注' AS note FROM hydro.river_timeseries rt WHERE rt.run_key = %(k)s"
+
+    for label, sql in (("comment", comment_sql), ("literal", literal_sql)):
+        assert fact_table_name_occurrences(sql) == 1
+        assert fact_table_text_identity_columns(sql, entry=label) == set()
+        assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
+        assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
+
+
+
+# ---------------------------------------------------------------------------
+# decision 18, second half: the TRAVERSAL FAMILY against the scanner
+#
+# `non_code_spans` is not the module's only lexer. `_skip_balanced`,
+# `strip_scalar_subqueries`, `strip_all_subqueries`, `strip_comments` (and
+# therefore `outer_predicates` and `sql_chains`) and the paren loop inside
+# `assert_structurally_intact` each walk the raw text with their own copy of the
+# same rules, because they must return the ORIGINAL text with non-comment spans
+# verbatim (`outer_predicates`'s exact strings are compared in
+# tests/test_migrations.py and tests/test_sql_shape_helpers.py), which consuming
+# blanked text cannot do. Round 4 (#2018 I2) found the family had NO dollar arm
+# while the scanner had one: `$q$a -- b$q$` truncated `outer_predicates` at a
+# comment that was really inside a literal, and the narrow render shipped
+# `rt.variable`. The round-3 checklist had recorded this family as "fail-closed
+# example measured" with no probe — the exact defect retro rule 4 forbids.
+#
+# Deleting the dollar arm from the scanner makes the two lexers agree by
+# construction. "By construction" is what the previous round claimed too, so it
+# is pinned here instead: each traversal is compared against a reference built
+# from `non_code_spans` itself, over the registry corpus plus an adversarial one.
+# ---------------------------------------------------------------------------
+
+
+def _opaque_runs(sql: str) -> tuple[tuple[int, int, str], ...]:
+    """Every run the SCANNER refuses to read as code, in document order.
+
+    The scanner's non-code spans PLUS the double-quoted identifier runs it skips
+    without recording (``non_code_spans`` deliberately reports no span for a
+    quoted identifier — in PostgreSQL that is code — but it does not read INSIDE
+    one either, and neither may the traversal family).
+
+    Derived from ``non_code_spans`` and the module's own ``_scan_quoted``, never
+    re-lexed from scratch: this list is the oracle for "the family agrees with
+    the scanner", so it has to BE the scanner's answer, not a third opinion.
+    """
+    spans = {start: (stop, kind) for start, stop, kind in non_code_spans(sql)}
+    runs: list[tuple[int, int, str]] = []
+    index = 0
+    while index < len(sql):
+        if index in spans:
+            stop, kind = spans[index]
+            runs.append((index, stop, kind))
+            index = stop
+            continue
+        if sql[index] == '"':
+            stop = _scan_quoted(sql, index, '"')
+            runs.append((index, stop, "identifier"))
+            index = stop
+            continue
+        index += 1
+    return tuple(runs)
+
+
+def _reference_strip_comments(sql: str) -> str:
+    """``strip_comments`` expressed as "replace each scanner COMMENT run with one space"."""
+    kept: list[str] = []
+    last = 0
+    for start, stop, kind in _opaque_runs(sql):
+        if kind != "comment":
+            continue
+        kept.append(sql[last:start])
+        kept.append(" ")
+        last = stop
+    kept.append(sql[last:])
+    return "".join(kept)
+
+
+def _reference_strip_subqueries(sql: str, *, comparison_position_only: bool) -> str:
+    """The two sub-select strippers, driven by the scanner's runs instead of their own lexer."""
+    runs = {start: stop for start, stop, _kind in _opaque_runs(sql)}
+
+    def skip_balanced(start: int) -> int:
+        depth = 0
+        index = start
+        while index < len(sql):
+            if index in runs:
+                index = runs[index]
+                continue
+            if sql[index] == "(":
+                depth += 1
+            elif sql[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+            index += 1
+        return len(sql)
+
+    kept: list[str] = []
+    index = 0
+    while index < len(sql):
+        if index in runs:
+            kept.append(sql[index : runs[index]])
+            index = runs[index]
+            continue
+        if (
+            sql[index] == "("
+            and _SUBQUERY_START.match(sql, index)
+            and (not comparison_position_only or _in_comparison_value_position(kept))
+        ):
+            index = skip_balanced(index)
+            continue
+        kept.append(sql[index])
+        index += 1
+    return "".join(kept)
+
+
+def _outcome(call: Callable[[], object]) -> str:
+    """``"ok"`` or the refusal's own reason, with the echoed text cut off."""
+    try:
+        call()
+    except RiverTemplateError as error:
+        return f"refused: {str(error).split(' -> ')[0]}"
+    return "ok"
+
+
+#: Statements built to make a family-only lexing divergence VISIBLE. Every entry
+#: is a shape some traversal has to lex the same way the scanner does, and most
+#: of them are the exact inputs one of the four review rounds used.
+_ADVERSARIAL_CORPUS: tuple[tuple[str, str], ...] = (
+    (
+        "nested_comment_apostrophe",
+        "SELECT 1 /* a /* b */ don't */ FROM hydro.river_timeseries rt WHERE rt.run_key = :k",
+    ),
+    (
+        "escape_string",
+        r"SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.variable = E'q\'x' AND rt.run_key = :k",
+    ),
+    ("doubled_quote", "SELECT 'a''b' AS n, rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = :k"),
+    (
+        "quoted_identifier_apostrophe",
+        "SELECT rt.value AS \"it's\" FROM hydro.river_timeseries rt WHERE rt.run_key = :k",
+    ),
+    ("carriage_return_comment", "SELECT rt.value -- note 'x\rFROM hydro.river_timeseries rt WHERE rt.run_key = :k"),
+    ("like_backslash", r"SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.note LIKE'C:\' AND rt.run_key = :k"),
+    ("underscore_e_backslash", r"SELECT rt.value FROM hydro.river_timeseries rt WHERE x_e'C:\' AND rt.run_key = :k"),
+    (
+        "paren_inside_literal",
+        "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = (SELECT run_key FROM hydro.hydro_run "
+        "WHERE note = '(SELECT 1' AND run_id = :r)",
+    ),
+    # The `_skip_balanced` discriminator: an UNBALANCED paren inside a literal
+    # inside a stripped group, with real text AFTER the group's own `)`. Without
+    # the trailing conjunct the mis-lexed skip and the correct one both truncate
+    # at the end of the statement and the mutant is invisible.
+    (
+        "paren_inside_literal_inside_a_stripped_group",
+        "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = (SELECT run_key FROM hydro.hydro_run "
+        "WHERE note = '(x' AND run_id = :r) AND rt.valid_time = :t",
+    ),
+    (
+        "subselect_spelled_inside_a_literal",
+        "SELECT rt.value, '(SELECT 1)' AS n FROM hydro.river_timeseries rt WHERE rt.run_key = :k",
+    ),
+    (
+        "comment_inside_parens",
+        "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = (/* pick */ SELECT run_key "
+        "FROM hydro.hydro_run WHERE run_id = :r)",
+    ),
+    (
+        "line_comment_with_apostrophe_before_a_scalar_subselect",
+        "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key -- don't stop\n"
+        "= (SELECT run_key FROM hydro.hydro_run WHERE run_id = :r)",
+    ),
+    (
+        "block_comment_with_apostrophe_before_a_scalar_subselect",
+        "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key /* don't stop */ "
+        "= (SELECT run_key FROM hydro.hydro_run WHERE run_id = :r)",
+    ),
+    (
+        "block_comment_holding_an_unbalanced_paren",
+        "SELECT rt.value /* ( */ FROM hydro.river_timeseries rt WHERE rt.run_key = :k",
+    ),
+    (
+        "quoted_identifier_holding_a_comment_opener",
+        'SELECT rt.value AS "a--b", rt.unit AS "c/*d" FROM hydro.river_timeseries rt WHERE rt.run_key = :k',
+    ),
+)
+
+#: Verifier I's I2 statements — the ones the family and the scanner lexed
+#: DIFFERENTLY at 7be3e273, where the scanner had a dollar arm and the traversals
+#: had none. They are kept here, and asserted to be REFUSED rather than compared,
+#: because that is precisely how decision 18 closes I2: not by teaching the
+#: second family a dollar arm that would then have to be kept in step with the
+#: first, but by putting every statement that could expose the difference outside
+#: the module's input domain. At 7be3e273 these are accepted and the two lexers
+#: disagree on them; here they never reach a traversal at all.
+_REFUSED_DIVERGENCE_CORPUS: tuple[tuple[str, str], ...] = (
+    (
+        "line_comment_inside_a_dollar_body",
+        "SELECT $q$a -- b$q$ AS note, rt.value FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s",
+    ),
+    (
+        "block_comment_inside_a_dollar_body",
+        "SELECT $q$a /* b$q$ AS note, rt.value FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s */",
+    ),
+    (
+        "unbalanced_paren_inside_a_dollar_body",
+        "SELECT $q$($q$ AS note, rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = %(k)s",
+    ),
+    (
+        "non_ascii_dollar_tag_over_a_real_read",
+        "SELECT $备注$don't$备注$ AS note, rt.value FROM hydro.river_timeseries rt "
+        "WHERE rt.variable = E'q\\'x' AND rt.run_key = %(k)s",
+    ),
+)
+
+
+def test_every_traversal_commutes_with_the_scanner_over_the_corpus() -> None:
+    """The SECOND lexer family answers "where is the code" exactly as the scanner does.
+
+    Not asserted as ``_blank_non_code(T(sql)) == T(_blank_non_code(sql,
+    keep_literal_quotes=True))``, which fixture decision 18 sketches: that
+    identity is FALSE at head for any statement containing a literal (the left
+    side blanks the literal's quotes, the right side keeps them), and the
+    repaired variant that normalises both sides is vacuous against exactly the
+    mutants it has to kill — blanking FIRST deletes the comment the mutant would
+    have mis-lexed, so a stripper with no block-comment arm passes. Recorded as a
+    deviation.
+
+    Asserted instead as agreement with a reference built FROM ``non_code_spans``
+    (:func:`_opaque_runs`): each traversal must delete/keep exactly the runs the
+    scanner calls non-code. That is the property decision 18 actually needs — one
+    notion of "code" for the counter, the walk, the rename, the structural check
+    and the strippers — and it goes red the moment a family member's private
+    lexer disagrees with the shared one, in EITHER direction.
+
+    ``strip_*`` are compared verbatim (no whitespace normalisation: they return
+    the original text with non-comment runs untouched). ``outer_predicates`` is
+    the one traversal that normalises whitespace itself, so its reference does
+    the same ``_WHITESPACE.sub`` it does. ``assert_structurally_intact`` and
+    ``sql_chains`` are compared as OUTCOMES against the pre-blanked text, which
+    is what their own private paren loop has to agree with.
+
+    Corpus: all 20 registered templates, both rendered variants of each, and the
+    adversarial list above. Samples outside the declared subset are excluded by
+    the module's own :func:`_lexical_subset_violation`, so this test says nothing
+    about statements decision 18 refuses — and the count of exclusions is
+    asserted to be 0 for the registry, which is the measurement decision 18 rests
+    on.
+    """
+    corpus: list[tuple[str, str]] = []
+    registry_excluded = 0
+    for entry in REGISTRY:
+        source = entry.source()
+        variants = [(entry.key, source)]
+        for store in ("legacy", "narrow"):
+            try:
+                variants.append((f"{entry.key}:{store}", render_river_ts_sql(source, store, entry=entry.key).sql))
+            except RiverTemplateError as error:  # pragma: no cover - a registry entry that refuses is a red elsewhere
+                raise AssertionError(f"{entry.key} does not render for {store}: {error}") from error
+        for label, sql in variants:
+            if _lexical_subset_violation(sql) is not None:
+                registry_excluded += 1
+                continue
+            corpus.append((label, sql))
+
+    assert registry_excluded == 0, (
+        "decision 18 rests on 0/20 registered templates using `$` or a non-ASCII byte in code"
+    )
+    assert len(corpus) == 3 * len(REGISTRY) == 60
+
+    adversarial_excluded = [label for label, sql in _ADVERSARIAL_CORPUS if _lexical_subset_violation(sql) is not None]
+    assert adversarial_excluded == [], f"the adversarial corpus must stay inside the subset, got {adversarial_excluded}"
+    corpus.extend(_ADVERSARIAL_CORPUS)
+
+    # The shapes that made the two lexers disagree are refused, not compared.
+    # This is the half of the assertion that is RED at 7be3e273: there they are
+    # accepted, and `strip_comments` then truncates the statement at a `--` that
+    # is really inside a literal.
+    still_accepted = [label for label, sql in _REFUSED_DIVERGENCE_CORPUS if _lexical_subset_violation(sql) is None]
+    assert still_accepted == [], (
+        f"these shapes reach the traversal family instead of being refused: {still_accepted!r} — "
+        "decision 18 closes I2 by keeping them out of the input domain, not by teaching the family a dollar arm"
+    )
+
+    for label, sql in corpus:
+        assert strip_comments(sql) == _reference_strip_comments(sql), f"strip_comments disagrees on {label}"
+        assert strip_scalar_subqueries(sql) == _reference_strip_subqueries(sql, comparison_position_only=True), (
+            f"strip_scalar_subqueries disagrees on {label}"
+        )
+        assert strip_all_subqueries(sql) == _reference_strip_subqueries(sql, comparison_position_only=False), (
+            f"strip_all_subqueries disagrees on {label}"
+        )
+        reference_outer = _WHITESPACE.sub(
+            " ",
+            _reference_strip_comments(_reference_strip_subqueries(sql, comparison_position_only=True)),
+        ).strip()
+        assert outer_predicates(sql) == reference_outer, f"outer_predicates disagrees on {label}"
+
+        # The paren loop inside `assert_structurally_intact` is the family's
+        # fifth member and re-lexes too. Against the pre-blanked text there is
+        # nothing left for it to mis-lex, so the two must agree.
+        blanked = _blank_non_code(sql, keep_literal_quotes=True)
+        assert _outcome(lambda: assert_structurally_intact(sql, label, allow_markers=True)) == _outcome(
+            lambda: assert_structurally_intact(blanked, label, allow_markers=True)
+        ), f"assert_structurally_intact disagrees with itself on blanked text for {label}"
+
+        blanked_chains = tuple(
+            tuple(_WHITESPACE.sub(" ", _blank_non_code(conjunct, keep_literal_quotes=True)) for conjunct in chain)
+            for chain in sql_chains(sql)
+        )
+        assert blanked_chains == sql_chains(blanked), f"sql_chains disagrees on {label}"
 
 
 def test_the_text_identity_vocabulary_is_total_and_disjoint() -> None:
@@ -1668,6 +2224,63 @@ def test_the_independent_counter_counts_a_quoted_identifier_and_a_table_name_qua
     # Quoted the same way: a double-quoted span is an IDENTIFIER, so the counter
     # reads the name inside it (:func:`non_code_spans` does not blank it).
     assert fact_table_name_occurrences('... x.run_key = hydro."river_timeseries"."run_key" ...') == 1
+
+
+def test_the_token_counter_keeps_its_trailing_boundary() -> None:
+    r"""``\b`` after the name: a SIBLING table whose name merely starts with it is not a mention.
+
+    ``_FACT_NAME_TOKEN`` is ``\briver_timeseries(?:_legacy)?\b``. Drop the
+    trailing ``\b`` and the engine backtracks out of ``(?:_legacy)?``, matching
+    the ``river_timeseries`` PREFIX of ``river_timeseries_audit`` — so an
+    ordinary join against a sibling table counts 2 against a walk that models 1
+    and the statement is refused. Head behaviour is correct and, until this pin,
+    unpinned in both directions: verifier #2018 round-4 I3 measured the mutant
+    surviving all five suites (408 passed) at 7be3e273, while the SAME mutation
+    is killed at 62f41fe0 — the barrier was removed by round 3's deletion of the
+    qualifier lookahead, which used to catch the over-match downstream.
+
+    The second assertion is the ``_valid_time_idx`` claim the ``_FACT_NAME_TOKEN``
+    docstring makes in prose ("Not a token, and deliberately so"). It has to be a
+    BARE identifier in code: the same name inside a string literal is blanked by
+    the scanner and would pass under the mutant too, i.e. it would not
+    discriminate.
+    """
+    sql = (
+        "SELECT rt.value FROM hydro.river_timeseries rt "
+        "JOIN hydro.river_timeseries_audit a ON a.run_key = rt.run_key "
+        "WHERE rt.run_key = %(k)s"
+    )
+
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_name_occurrences("SELECT 1 WHERE i = river_timeseries_valid_time_idx") == 0
+    # Only the fact table is renamed; the sibling keeps its own name.
+    legacy = render_river_ts_sql(sql, "legacy", entry="trailing-boundary").sql
+    assert "hydro.river_timeseries_legacy rt" in legacy
+    assert "hydro.river_timeseries_audit a" in legacy
+    assert render_river_ts_sql(sql, "narrow", entry="trailing-boundary").sql == sql
+
+
+def test_the_token_counter_keeps_its_leading_boundary() -> None:
+    r"""``\b`` before the name: a table whose name merely ENDS with it is not a mention either.
+
+    The twin of the trailing barrier, and the twin mutant verifier I measured
+    surviving at head: without the leading ``\b`` the counter finds the name
+    inside ``forcing_river_timeseries``, counts 2 against the walk's 1, and
+    refuses a legal statement. Both boundaries are asserted with a render
+    control, because the failure direction is a false REFUSAL — an assertion on
+    the count alone would leave "and it still renders" as prose.
+    """
+    sql = (
+        "SELECT rt.value FROM hydro.forcing_river_timeseries x "
+        "JOIN hydro.river_timeseries rt ON rt.run_key = x.run_key "
+        "WHERE rt.run_key = %(k)s"
+    )
+
+    assert fact_table_name_occurrences(sql) == 1
+    legacy = render_river_ts_sql(sql, "legacy", entry="leading-boundary").sql
+    assert "hydro.river_timeseries_legacy rt" in legacy
+    assert "hydro.forcing_river_timeseries x" in legacy
+    assert render_river_ts_sql(sql, "narrow", entry="leading-boundary").sql == sql
 
 
 # ---------------------------------------------------------------------------

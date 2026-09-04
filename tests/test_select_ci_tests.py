@@ -798,6 +798,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_display_coverage_refresh.py",
             "tests/test_river_ts_read_path_surrogate_keys.py",
             "tests/test_river_ts_render.py",
+            "tests/test_river_ts_render_reference_lexer.py",
             "tests/test_river_ts_template_golden.py",
             "tests/test_sql_shape_helpers.py",
             # #1728 merged the connection-attribution guards into this rule:
@@ -856,6 +857,7 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # pins for this exact file.
         "tests/test_river_ts_read_path_surrogate_keys.py",
         "tests/test_river_ts_render.py",
+        "tests/test_river_ts_render_reference_lexer.py",
         "tests/test_river_ts_template_golden.py",
         "tests/test_river_ts_text_identity_cleanup.py",
         # #1684 large-file guard repair: the 3.1-contract security half joined
@@ -893,6 +895,7 @@ def test_select_tests_maps_sql_shape_oracle_helper_to_its_consumer_pins() -> Non
         # text-identity vocabulary moved into packages/common/river_ts_render.py
         # and this module re-imports them, so a diff here can still blunt both.
         "tests/test_river_ts_render.py",
+        "tests/test_river_ts_render_reference_lexer.py",
         "tests/test_river_ts_template_golden.py",
         "tests/test_river_ts_text_identity_cleanup.py",
         # Every changed test suite drags the meta-guard suite along, because a
@@ -921,6 +924,7 @@ def test_select_tests_routes_the_template_golden_fixture_to_the_shape_oracles() 
         "tests/test_qhh_latest_fallback_pushdown.py",
         "tests/test_river_ts_read_path_surrogate_keys.py",
         "tests/test_river_ts_render.py",
+        "tests/test_river_ts_render_reference_lexer.py",
         "tests/test_river_ts_template_golden.py",
         "tests/test_river_ts_text_identity_cleanup.py",
         "tests/test_sql_shape_helpers.py",

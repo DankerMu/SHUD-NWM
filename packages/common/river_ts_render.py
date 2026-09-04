@@ -226,12 +226,20 @@ _NEWLINE = re.compile(r"[\n\r]")
 
 _WHITESPACE = re.compile(r"\s+")
 
-#: An identifier character in PostgreSQL: ``ident_cont`` is letters (including
-#: non-ASCII ones, hence ``\w`` where a regex is used), digits, ``_`` and ``$``
-#: (§4.1.1; the ``$`` is a documented non-standard extension). ONE notion,
-#: because two lexical rules depend on it — where a dollar quote may open and
-#: where an ``E'…'`` prefix may start — and they must not drift apart.
-_IDENTIFIER_TAIL = "_$"
+#: An identifier character, in the DECLARED SUBSET of PostgreSQL this module
+#: accepts (fixture decision 18): letters (including non-ASCII ones, hence
+#: ``\w`` where a regex is used), digits and ``_``.
+#:
+#: ``$`` is NOT listed, although PostgreSQL's ``ident_cont`` admits it after the
+#: first character: a ``$`` anywhere in code is refused by
+#: :func:`_lexical_subset_violation` before this constant's one remaining
+#: consumer (:func:`_opens_escape_string`) can be asked about it, so listing it
+#: here would be a second, unreachable model of a rule that is now answered by
+#: refusal. Round 4 measured why the model itself was the liability: the
+#: scanner's dollar rule was spelled with an ASCII class where PostgreSQL uses a
+#: byte class, and one rule spelled at four sites disagreed with §4.1 at two of
+#: them (#2018 round-4 I1/I2, retro-2018-2.md).
+_IDENTIFIER_TAIL = "_"
 
 
 def _opens_escape_string(sql: str, start: int) -> bool:
@@ -242,11 +250,18 @@ def _opens_escape_string(sql: str, start: int) -> bool:
     it is not, and reading the plain literal as an escape string would swallow a
     doubled quote the standard form uses as its escape.
 
-    ``$`` counts as an identifier character here for the same reason it does in
-    :data:`_DOLLAR_QUOTE_OPEN`: in ``x$e'C:\\'`` the ``e`` is the tail of the
-    identifier ``x$e``, and reading it as a prefix makes the literal
-    backslash-aware, its closing quote escaped, and the phantom literal runs over
-    the rest of the statement (#2018 round-3, decision 17's identifier row).
+    An identifier that contains a ``$`` (``x$e'C:\\'``) is NOT answered here any
+    more: ``$`` in code is outside the declared subset (fixture decision 18) and
+    :func:`_lexical_subset_violation` refuses the statement before any scan is
+    trusted, so this function never has to take a position on it. That is the
+    round-4 lesson made structural — the ``$`` rule had FOUR sites in this module
+    (this one, the dollar-quote opener, its scanner arm and the traversal family)
+    and disagreeing with §4.1 at any one of them blanked real code for every
+    counter at once (#2018 round-4 I1/I2). Pinned both ways:
+    ``test_a_dollar_before_an_escape_prefix_is_refused_as_outside_the_lexical_subset``
+    (the ``$`` spelling, refused) and
+    ``test_an_identifier_ending_in_underscore_e_is_not_an_escape_string_prefix``
+    (the ``_`` spelling, still inside the subset and still not a prefix).
     """
     if start == 0 or sql[start - 1] not in "Ee":
         return False
@@ -593,6 +608,44 @@ _FACT_QUOTED_ALIAS = re.compile(
 #: is the only part of it that is always literal.
 _UNICODE_ESCAPED = re.compile(r"\bU&", re.IGNORECASE)
 
+#: The characters that put a statement OUTSIDE this module's declared lexical
+#: subset (fixture decision 18): a dollar sign, and any non-ASCII byte.
+#:
+#: Both are places where the module's hand-rolled lexer and PostgreSQL's §4.1
+#: can differ, and every such difference is COMMON-MODE — it blanks real code for
+#: the occurrence counter and for the ``FROM`` / ``JOIN`` walk at once, so the
+#: equality guard below is satisfied by mutual blindness and a narrow render
+#: ships a text-identity column (four review rounds, one mechanism:
+#: retro-2018-2.md). Rounds 1–3 answered by teaching the lexer one more rule;
+#: round 4 found the SAME rule wrong at a second site (the dollar tag class is a
+#: byte class in ``scan.l``, spelled ASCII here) and in a second lexer (the
+#: traversal family). This constant answers by REFUSAL instead: the hole space is
+#: removed rather than enumerated.
+#:
+#: Affordable because it is measured, not assumed: over the 20 registered
+#: templates there are 0 ``$`` and 0 non-ASCII bytes IN CODE (the two ``$`` sit
+#: inside ``'^[0-9]+$'`` literals, the four ``—`` inside comments), so the subset
+#: costs the readers nothing. Widening it back is a fixture decision with its own
+#: pins, never a silent regex change.
+_LEXICAL_SUBSET_VIOLATION = re.compile(r"[$\x80-\U0010ffff]")
+
+
+def _lexical_subset_violation(sql: str) -> tuple[int, str] | None:
+    """``(offset, character)`` of the first code character outside the subset, or ``None``.
+
+    Asked over the comment/literal-blanked text, so a ``$`` or a non-ASCII
+    character inside a string literal or a comment is DATA and stays inside the
+    subset — which is what the registry actually contains (``'^[0-9]+$'``,
+    ``-- … — …``).
+
+    Public enough (module-private, but imported by the tests) that the
+    differential against the reference lexer can ask the module the SAME
+    question the guard asks: a sample the module refuses is a sample the
+    differential must not hold to a span-for-span answer.
+    """
+    match = _LEXICAL_SUBSET_VIOLATION.search(_blank_comments_and_literals(sql))
+    return None if match is None else (match.start(), match.group(0))
+
 
 def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     """Refuse a fact-table reference form the alias walk does not model.
@@ -601,9 +654,28 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     render or a text-identity answer unless the independent occurrence counter
     and the ``FROM`` / ``JOIN`` walk AGREE about how many times it reads the fact
     table, the counter is blind to no spelling of the table's name, and no read
-    hides where the text-identity scan cannot look. Four checks, in that order:
+    hides where the text-identity scan cannot look. SIX checks, in this order —
+    ``U&`` → lexical subset → unterminated belt → quoted alias → the counts →
+    the sub-select delta:
 
-    #. an UNTERMINATED literal, comment or dollar-quoted body — the statement
+    #. a Unicode-escaped identifier or literal (``U&"…"`` / ``U&'…'``) anywhere
+       in the code — the one syntax that can name the table with no occurrence of
+       its NAME, so the counter reads 0, the walk reads 0 and the equality below
+       is satisfied by mutual blindness. Refused wholesale rather than decoded;
+       the accepted over-refusal is a ``U&'…'`` string literal, which no
+       registered template has;
+    #. the LEXICAL SUBSET (fixture decision 18): a ``$`` or a non-ASCII byte in
+       the blanked code text. SECOND, and deliberately so — ahead of the belt,
+       the alias check, the counts and the delta — because those two characters
+       are where every lexer/PostgreSQL disagreement of rounds 3 and 4 started
+       (a dollar-quote tag class spelled ASCII against §4.1's byte class; a
+       dollar body hiding a ``--``, a ``/*`` or a ``(`` from the traversal
+       family), and a disagreement in the scanner corrupts the text every LATER
+       check reads. Refusing first removes the hole space instead of enumerating
+       it: the belt cannot see a phantom span that re-synchronises, and the
+       equality guard cannot see a read both sides are blind to, so neither is
+       able to answer for this class. Measured 0/20 over the registry, in code;
+    #. an UNTERMINATED literal or comment — the statement
        ends inside a span the scanner never closed, so the blanked text every
        later check reads is not this statement's code. A BELT and nothing more
        (fixture decision 17): verifier #2018 round-3 G measured that it catches
@@ -612,22 +684,19 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
        ``E'q\\'x'``, pinned as the re-synchronisation case — and so ends well
        before ``len(sql)`` with the read still blanked. That case is answered by
        :func:`non_code_spans` agreeing with PostgreSQL's lexer, never here;
-    #. a Unicode-escaped identifier or literal (``U&"…"``) anywhere in the code —
-       the one syntax that can name the table with no occurrence of its NAME, so
-       the counter reads 0, the walk reads 0 and the equality below is satisfied
-       by mutual blindness. Refused wholesale rather than decoded; the accepted
-       over-refusal is a ``U&'…'`` string literal, which no registered template
-       has;
     #. a double-quoted ALIAS, whose predicates the walk would attribute to the
        wrong table or to none;
-    #. the counts themselves — the permissive name counter against the strict
-       walk, and the whole statement against the statement with its
-       comparison-position sub-selects removed, because a fact read inside one of
-       those is stripped by :func:`outer_predicates` before any column is
-       attributed and is therefore invisible to the narrow check (review #2018
-       round-2, F4). The sub-select case is REFUSED rather than scanned:
-       extending the scan into comparison-position sub-selects false-refuses the
-       registered statements whose authority resolution lives there.
+    #. the COUNTS themselves — the permissive name counter against the strict
+       ``FROM`` / ``JOIN`` walk, which have to agree on how many times the
+       statement reads the fact table;
+    #. the SUB-SELECT DELTA — that same count for the whole statement against
+       the count for the statement with its comparison-position sub-selects
+       removed, because a fact read inside one of those is stripped by
+       :func:`outer_predicates` before any column is attributed and is therefore
+       invisible to the narrow check (review #2018 round-2, F4). REFUSED rather
+       than scanned: extending the scan into comparison-position sub-selects
+       false-refuses the registered statements whose authority resolution lives
+       there.
 
     Run over the comment/literal-blanked text so a quoted alias SPELLED inside a
     literal or a comment is data, not a refusal. Double-quoted spans survive that
@@ -639,13 +708,6 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     this module's string constants, and a refusal message that spelled it would
     add a phantom "read site" to that count.
     """
-    unterminated = _unterminated_span(sql)
-    if unterminated is not None:
-        raise RiverTemplateError(
-            f"{entry}: unmodelled fact-table reference form — the statement ends inside an unterminated "
-            f"literal or comment opened at offset {unterminated[0]}, so the blanked text every counter and "
-            "guard reads is not this statement's code; terminate it"
-        )
     blanked = _blank_comments_and_literals(sql)
     if _UNICODE_ESCAPED.search(blanked) is not None:
         raise RiverTemplateError(
@@ -653,6 +715,24 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
             "(U&) is not modelled: it can name the fact table with no occurrence of the table's name in "
             "the text, so neither the occurrence counter nor the FROM/JOIN walk can see the read; spell "
             "identifiers literally"
+        )
+    violation = _lexical_subset_violation(sql)
+    if violation is not None:
+        offset, character = violation
+        raise RiverTemplateError(
+            f"river template {entry!r}: outside the modelled lexical subset ({character!r} at offset "
+            f"{offset}) — fixture I1-1980 decision 18. This module lexes a declared subset of PostgreSQL "
+            "§4.1 ('…' with '', E'…' with backslash escapes, \"…\" with \"\", -- to a newline, nested "
+            "/* */, and the %s / %(name)s / :name placeholder dialects); a dollar sign or a non-ASCII "
+            "byte in CODE is where its lexer and PostgreSQL can disagree, and a disagreement there hides "
+            "a read from every counter at once, so the statement is refused instead of scanned"
+        )
+    unterminated = _unterminated_span(sql)
+    if unterminated is not None:
+        raise RiverTemplateError(
+            f"{entry}: unmodelled fact-table reference form — the statement ends inside an unterminated "
+            f"literal or comment opened at offset {unterminated[0]}, so the blanked text every counter and "
+            "guard reads is not this statement's code; terminate it"
         )
     match = _FACT_QUOTED_ALIAS.search(blanked)
     if match is not None:
@@ -746,32 +826,6 @@ def fact_table_attribution(sql: str) -> FactTableAttribution:
 _FACT_NAME_TOKEN = re.compile(r"\briver_timeseries(?:_legacy)?\b", re.IGNORECASE)
 
 
-#: Where a dollar-quoted literal may OPEN (§4.1.2.4, fixture decision 17).
-#:
-#: The leading ``(?<![\w$])`` is load-bearing: in PostgreSQL a ``$`` after the
-#: first character of an identifier belongs to the identifier (a documented
-#: non-standard extension), so ``a$b$c`` is ONE identifier and a delimiter cannot
-#: begin in the middle of it. Without the guard ``$b$`` opened a quote whose tag
-#: never recurred, everything to the end of the text was blanked, and the read it
-#: covered was invisible to BOTH counters (#2018 round-3 G1). ``\w`` rather than
-#: ``[A-Za-z0-9_]`` because PostgreSQL's ``ident_cont`` includes non-ASCII
-#: letters.
-#:
-#: The tag must start with a letter or ``_``, which is what keeps a positional
-#: parameter (``$1``) code.
-_DOLLAR_QUOTE_OPEN = re.compile(r"(?<![\w$])\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
-
-
-def _scan_dollar_quoted(sql: str, start: int, tag: str) -> int:
-    return _scan_dollar_quoted_span(sql, start, tag)[0]
-
-
-def _scan_dollar_quoted_span(sql: str, start: int, tag: str) -> tuple[int, bool]:
-    """Index just past the dollar-quoted body opening with ``tag`` at ``start``."""
-    end = sql.find(tag, start + len(tag))
-    return (len(sql), False) if end == -1 else (end + len(tag), True)
-
-
 _NON_CODE_COMMENT = "comment"
 _NON_CODE_LITERAL = "literal"
 
@@ -786,12 +840,27 @@ def non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     table's name inside ``'reads hydro.river_timeseries' AS note`` (round-3
     L2-3): one span helper cannot disagree with itself.
 
-    Covered: ``--`` line comments and ``/* … */`` block comments (kind
+    This scanner models a DECLARED SUBSET of PostgreSQL's lexical structure, not
+    all of it (fixture decision 18). The subset is: ``'…'`` with ``''`` escapes,
+    ``E'…'`` / ``e'…'`` with backslash escapes, ``"…"`` with ``""`` escapes,
+    ``--`` to ``\\n`` or ``\\r``, NESTED ``/* … */``, and the ``%s`` /
+    ``%(name)s`` / ``:name`` placeholder dialects. Everything outside it is
+    REFUSED upstream by :func:`_lexical_subset_violation`, called from
+    :func:`_assert_modelled_reference_forms` before any counter, traversal or
+    structural check runs — so no RENDER and no text-identity ANSWER is produced
+    for a statement outside the subset: :func:`render_river_ts_sql` (both stores)
+    and :func:`fact_table_text_identity_columns` refuse it first. The helpers
+    that carry NO guard — :func:`text_fact_columns`, :func:`sql_chains`,
+    :func:`fact_table_attribution`, :func:`fact_table_name_occurrences` — are
+    public and answer about whatever text they are handed, as their own
+    docstrings record; outside the subset their answer is undefined, and it is
+    the caller that owes the refusal.
+
+    Covered here: ``--`` line comments and ``/* … */`` block comments (kind
     ``"comment"``); single-quoted literals with doubled-quote escapes traversed
     (and backslash escapes too where the literal carries the ``E'…'`` prefix, see
-    :func:`_scan_quoted`), and dollar-quoted bodies ``$$ … $$`` / ``$tag$ … $tag$``
-    (kind ``"literal"``). An ``E`` prefix stays OUTSIDE the span: the span's own
-    first and last characters have to be the quotes, because
+    :func:`_scan_quoted`), kind ``"literal"``. An ``E`` prefix stays OUTSIDE the
+    span: the span's own first and last characters have to be the quotes, because
     :func:`_blank_non_code` keeps them when it blanks a literal's body.
 
     NOT covered, deliberately: double-quoted text. In PostgreSQL that is a
@@ -799,14 +868,26 @@ def non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     table and must be counted, while ``'hydro.river_timeseries'`` is data and
     must not.
 
-    Audited rule by rule against PostgreSQL §4.1 (fixture decision 17) after
-    #2018 round 3: this scanner is COMMON-MODE — the occurrence counter and the
-    ``FROM`` / ``JOIN`` walk read the text it blanks, so a divergence from
-    PostgreSQL's lexer blanks real code for both of them and the equality guard
-    is satisfied by mutual blindness. Every divergence is therefore either fixed
-    here (nested comments, ``$`` inside an identifier, ``\\r`` ending a line
-    comment) or REFUSED (``U&``, an unterminated span), and each carries a pin —
-    never a "cannot happen" argument.
+    NOT modelled at all: DOLLAR QUOTING. ``$$ … $$`` / ``$tag$ … $tag$`` used to
+    be a span here; the arm, its opener pattern and its scanner are DELETED. Any
+    ``$`` in code is a subset violation, which also disposes of ``$1``, ``a$b$c``
+    and a tag after a numeric constant without this module holding an opinion on
+    PostgreSQL's tag class — the opinion it did hold was ASCII where §4.1's is a
+    byte class, and the disagreement blanked a real read for every counter at
+    once (#2018 round-4 I1; ``$备注$``, ``$€$``).
+
+    Audited rule by rule against PostgreSQL §4.1 (fixture decisions 17 and 18)
+    after #2018 rounds 3 and 4: this scanner is COMMON-MODE — the occurrence
+    counter and the ``FROM`` / ``JOIN`` walk read the text it blanks, so a
+    divergence from PostgreSQL's lexer blanks real code for both of them and the
+    equality guard is satisfied by mutual blindness. Every divergence is
+    therefore either fixed here (nested comments, ``\\r`` ending a line comment)
+    or REFUSED (``U&``, a ``$`` or non-ASCII byte in code, an unterminated span),
+    and each carries a pin — never a "cannot happen" argument. The agreement
+    itself is pinned differentially against an independent §4.1 reference lexer
+    in ``tests/test_river_ts_render_reference_lexer.py``, and the traversal
+    family's agreement with THIS function is pinned by
+    ``test_every_traversal_commutes_with_the_scanner_over_the_corpus``.
     """
     return tuple((start, stop, kind) for start, stop, kind, _closed in _scan_non_code(sql))
 
@@ -836,8 +917,6 @@ def _scan_non_code(sql: str) -> tuple[tuple[int, int, str, bool], ...]:
             (end, closed), kind = (_scan_line_comment(sql, index), True), _NON_CODE_COMMENT
         elif sql.startswith("/*", index):
             (end, closed), kind = _scan_block_comment_span(sql, index), _NON_CODE_COMMENT
-        elif character == "$" and (opener := _DOLLAR_QUOTE_OPEN.match(sql, index)) is not None:
-            (end, closed), kind = _scan_dollar_quoted_span(sql, index, opener.group(0)), _NON_CODE_LITERAL
         else:
             index += 1
             continue
@@ -928,8 +1007,13 @@ def fact_table_name_occurrences(sql: str) -> int:
     both read the text :func:`non_code_spans` blanks, so a divergence there is
     COMMON-MODE — it blanks real code for both sides, both answer 0, and the
     equality guard is satisfied by mutual blindness (three rounds of #2018 hit
-    this one class). The scanner's divergences are therefore ENUMERATED in
-    decision 17 and each one is pinned; none of them is reasoned about here.
+    this one class). The scanner's divergences are therefore either FIXED and
+    pinned rule by rule (decision 17) or removed by shrinking the input domain:
+    the module lexes a declared SUBSET of §4.1 and
+    :func:`_lexical_subset_violation` refuses a ``$`` or a non-ASCII byte in code
+    before this counter is ever called (decision 18, after the same rule was
+    found wrong at a second site in round 4). None of them is reasoned about
+    here.
     Widening is counter-side only: teaching the WALK a spelling makes it
     "modelled" while the rename and the alias attribution still need the
     canonical literal, which is a new fail-open (fixture decision 16).
@@ -1387,8 +1471,11 @@ def _rename_table(template: str, store: str) -> str:
     ``\\b`` refuses to match before ``_legacy``, so rendering an already-legacy
     text is idempotent rather than producing ``..._legacy_legacy``.
 
-    Substituted only OUTSIDE comments, single-quoted literals and dollar-quoted
-    bodies (:func:`non_code_spans`, fixture decision 14). A name inside a literal
+    Substituted only OUTSIDE comments and single-quoted literals
+    (:func:`non_code_spans`, fixture decision 14; dollar-quoted bodies are not a
+    third case any more — a ``$`` in code is refused by
+    :func:`_lexical_subset_violation` before any render is attempted, decision
+    18). A name inside a literal
     is DATA — ``'reads hydro.river_timeseries' AS note`` is a string a caller may
     compare, log or store — and rewriting it changed the statement's output in
     the legacy branch while the occurrence counter, which already ignored

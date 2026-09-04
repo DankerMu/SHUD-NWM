@@ -722,6 +722,13 @@ SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
     # group means every rule that already routes a reader to the oracle routes it
     # to them too, and a helper-only diff still runs the whole set.
     "tests/test_river_ts_render.py",
+    # #1980 round 5 (fixture decision 18): the committed §4.1 reference-lexer
+    # differential. It is the ONLY suite that can see the module's scanner
+    # disagreeing with PostgreSQL on a construct no hand-written pin happens to
+    # name, and its subject is `packages/common/river_ts_render.py` — so a
+    # helper-only diff that never touches this file must still run it, which is
+    # exactly what membership of this group buys.
+    "tests/test_river_ts_render_reference_lexer.py",
     "tests/test_river_ts_template_golden.py",
 )
 
