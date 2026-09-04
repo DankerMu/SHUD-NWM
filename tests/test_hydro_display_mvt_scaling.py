@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import re
 import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
+from apps.api.errors import ApiError
 from apps.api.routes import hydro_display
 from services.tiles.mvt import (
+    MVT_MAX_COORDINATES,
     NATIONAL_DISCHARGE_QUERY_VERSION,
     TileInput,
     TileResponse,
@@ -29,15 +34,20 @@ class _Rows:
     def all(self) -> list[dict[str, Any]]:
         return self._rows
 
+    def first(self) -> dict[str, Any] | None:
+        return self._rows[0] if self._rows else None
+
 
 class _Session:
     def __init__(self, rows: list[dict[str, Any]], dialect: str = "postgresql") -> None:
         self.rows = rows
         self.sql = ""
+        self.executions: list[tuple[str, Any]] = []
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect))
 
     def execute(self, statement: Any, _params: Any = None) -> _Rows:
         self.sql = str(statement)
+        self.executions.append((self.sql, _params))
         return _Rows(self.rows)
 
     def get_bind(self) -> Any:
@@ -163,7 +173,7 @@ def test_national_river_generation_uses_only_active_network_inventory() -> None:
 
     version = national_river_network_source_version(session)
 
-    assert version.startswith("river-network-national:stream-type-aggregate-v2:")
+    assert version.startswith("river-network-national:stream-type-aggregate-v3:")
     assert "mi.active_flag = true" in session.sql
     assert "ORDER BY rnv.river_network_version_id" in session.sql
 
@@ -214,6 +224,188 @@ def test_national_hydro_tile_fairly_caps_rows_before_the_shared_mvt_budget() -> 
     assert "tile_coordinate_rank <= :collection_coordinate_limit" in hydro_sql
     assert hydro_sql.index("national_budget_window AS") < hydro_sql.index("budget_stats AS")
     assert "national_budget_window AS" not in single_run_sql
+
+
+def test_national_river_sql_uses_the_denser_stream_type_table_only_for_the_national_layer() -> None:
+    national_sql = postgis_tile_sql("river-network-national")
+    per_basin_sql = postgis_tile_sql("river-network")
+    hydro_sql = postgis_tile_sql("hydro-national")
+
+    for literal in (
+        "WHEN :z <= 4 THEN 4.0",
+        "WHEN :z = 5 THEN 3.0",
+        "WHEN :z = 6 THEN 2.0",
+        "WHEN :z = 7 THEN 1.0",
+    ):
+        assert literal in national_sql
+    assert "WHEN :z <= 4 THEN 5.0" not in national_sql
+    assert "WHEN :z = 7 THEN 2.0" not in national_sql
+
+    for literal in (
+        "WHEN :z <= 4 THEN 5.0",
+        "WHEN :z = 5 THEN 4.0",
+        "WHEN :z = 6 THEN 3.0",
+        "WHEN :z = 7 THEN 2.0",
+    ):
+        assert literal in per_basin_sql
+    assert "WHEN :z <= 4 THEN 4.0" not in per_basin_sql
+    assert "WHEN :z = 7 THEN 1.0" not in per_basin_sql
+
+    assert "WHEN :z <= 4 THEN 5.0" in hydro_sql
+
+
+def test_national_river_tile_fairly_caps_rows_before_the_shared_mvt_budget() -> None:
+    national_sql = postgis_tile_sql("river-network-national")
+    per_basin_sql = postgis_tile_sql("river-network")
+
+    assert "preeligible AS" in national_sql
+    assert "FROM bounded_rows" in national_sql
+    assert "national_ranked AS" in national_sql
+    assert "national_budget_window AS" in national_sql
+    assert "PARTITION BY river_network_version_id" in national_sql
+    assert "tile_feature_rank <= :feature_limit" in national_sql
+    assert "tile_coordinate_rank <= :collection_coordinate_limit" in national_sql
+    assert national_sql.index("preeligible AS") < national_sql.index("national_budget_window AS")
+    assert national_sql.index("national_budget_window AS") < national_sql.index("budget_stats AS")
+    # The window ranks the layer's existing eligibility filter, not bounded_rows,
+    # so the per-feature and dimension guards keep applying before ranking.
+    preeligible_body = national_sql[
+        national_sql.index("preeligible AS") : national_sql.index("national_ranked AS")
+    ]
+    assert "source_coordinate_count <= :feature_coordinate_limit" in preeligible_body
+    assert "source_coordinate_dimensions <= :max_coordinate_dimensions" in preeligible_body
+    assert "FROM preeligible" in national_sql
+
+    # All three window ORDER BY clauses the budget window introduces -- the
+    # per-network `network_rank`, the global `tile_feature_rank` and the running
+    # `tile_coordinate_rank` -- must END with the unique river_segment_id
+    # tiebreak: at z >= 9 the per-segment rows tie massively on "Type" and the
+    # truncation point would otherwise follow the execution plan while the bytes
+    # are cached under one generation. `network_rank` matters most: a non-unique
+    # rank there changes which rows the outer global order even considers.
+    window_start = national_sql.index("national_ranked AS")
+    window_block = national_sql[window_start : national_sql.index("eligible AS", window_start)]
+    order_by_clauses = re.findall(r"ORDER BY(.*?)(?:\)|ROWS BETWEEN)", window_block, re.S)
+    # Exactly three, so a future fourth ordering cannot slip past unasserted.
+    assert len(order_by_clauses) == 3
+    for clause in order_by_clauses:
+        assert clause.strip().endswith("river_segment_id")
+        # stream_type is nullable and the z >= 9 arm admits rows regardless of
+        # stream class, so a bare DESC (NULLS FIRST in Postgres) would let an
+        # unclassified segment outrank every trunk and eat the budget first.
+        assert '"Type" DESC NULLS LAST' in clause
+    assert re.search(r'"Type"\s+DESC(?!\s+NULLS\s+LAST)', national_sql) is None
+
+    assert "national_budget_window" not in per_basin_sql
+    assert "network_rank" not in per_basin_sql
+    assert "preeligible" not in per_basin_sql
+
+
+def test_collection_coordinate_limit_is_raised_only_for_the_national_river_layer() -> None:
+    def limits(**kwargs: Any) -> tuple[int, int]:
+        params = hydro_display._postgis_tile_params({}, z=6, x=48, y=25, **kwargs)
+        return params["collection_coordinate_limit"], params["feature_coordinate_limit"]
+
+    assert limits(layer="river-network-national") == (120000, 50000)
+    for layer in ("river-network", "hydro", "hydro-national", "met-stations"):
+        assert limits(layer=layer) == (50000, 50000)
+    # Existing script and test callers compare the exact binding dictionary and
+    # pass no layer; the default must stay on the shared limit.
+    assert limits() == (50000, 50000)
+    assert limits(layer=None) == (50000, 50000)
+
+
+def test_production_tile_bind_site_forwards_the_layer_to_the_collection_limit(monkeypatch: Any) -> None:
+    # `_fetch_postgis_tile_bytes` is the single production bind site for tile
+    # SQL. If it stopped forwarding `layer=layer`, `:collection_coordinate_limit`
+    # would bind to the shared limit while the 413 comparison used 120000: the
+    # window would truncate every hot national tile at the wrong point, nothing
+    # would raise, and no other test would notice. Assert the bound values.
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    layer_params: dict[str, dict[str, Any]] = {
+        "river-network-national": {},
+        "river-network": {"basin_version_id": "bv_a"},
+        "hydro": {"variable": "q_down"},
+        "hydro-national": {"variable": "q_down"},
+        "met-stations": {"basin_version_id": "bv_a"},
+    }
+    expected_collection_limits = {
+        "river-network-national": 120000,
+        "river-network": MVT_MAX_COORDINATES,
+        "hydro": MVT_MAX_COORDINATES,
+        "hydro-national": MVT_MAX_COORDINATES,
+        "met-stations": MVT_MAX_COORDINATES,
+    }
+
+    for layer, params in layer_params.items():
+        session = _Session([_budget_row(10)])
+
+        assert hydro_display._fetch_postgis_tile_bytes(session, layer, params, z=6, x=48, y=25) == b"pbf-bytes"
+
+        assert len(session.executions) == 1
+        bound = session.executions[0][1]
+        assert bound is not None, layer
+        assert bound["collection_coordinate_limit"] == expected_collection_limits[layer], layer
+        assert bound["feature_coordinate_limit"] == MVT_MAX_COORDINATES, layer
+
+
+def _budget_row(coordinate_count: int) -> dict[str, Any]:
+    return {
+        "tile": b"pbf-bytes",
+        "feature_count": 12,
+        "coordinate_count": coordinate_count,
+        "source_identity_count": 1,
+        "invalid_property_count": 0,
+        "invalid_properties": "",
+    }
+
+
+def test_national_river_tile_over_the_shared_limit_but_within_its_own_is_rendered(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_budget_row(119_999)])
+
+    tile = hydro_display._fetch_postgis_tile_bytes(session, "river-network-national", {}, z=3, x=6, y=3)
+
+    assert tile == b"pbf-bytes"
+
+
+def test_national_river_tile_above_its_own_limit_still_raises_413_against_that_limit(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_budget_row(120_001)])
+
+    with pytest.raises(ApiError) as excinfo:
+        hydro_display._fetch_postgis_tile_bytes(session, "river-network-national", {}, z=3, x=6, y=3)
+
+    assert excinfo.value.status_code == 413
+    assert excinfo.value.code == "MVT_TILE_BUDGET_EXCEEDED"
+    assert excinfo.value.details["max_coordinates"] == 120000
+    assert excinfo.value.details["coordinate_count"] == 120_001
+
+
+def test_national_hydro_tile_keeps_the_shared_413_limit(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_budget_row(60_000)])
+
+    with pytest.raises(ApiError) as excinfo:
+        hydro_display._fetch_postgis_tile_bytes(
+            session, "hydro-national", {"variable": "q_down"}, z=3, x=6, y=3
+        )
+
+    assert excinfo.value.status_code == 413
+    assert excinfo.value.details["max_coordinates"] == 50000
+
+
+def test_per_basin_river_tile_keeps_the_shared_413_limit(monkeypatch: Any) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([_budget_row(60_000)])
+
+    with pytest.raises(ApiError) as excinfo:
+        hydro_display._fetch_postgis_tile_bytes(
+            session, "river-network", {"basin_version_id": "bv_a"}, z=7, x=101, y=52
+        )
+
+    assert excinfo.value.status_code == 413
+    assert excinfo.value.details["max_coordinates"] == 50000
 
 
 def test_concurrent_cold_requests_generate_one_tile(monkeypatch: Any, tmp_path: Any) -> None:

@@ -28,12 +28,25 @@ MVT_MAX_ZOOM = 14
 MVT_MAX_TILE_COORDINATE = (1 << MVT_MAX_ZOOM) - 1
 MVT_MAX_FEATURES = 10_000
 MVT_MAX_COORDINATES = 50_000
+# Collection-level coordinate budget of the national river-network layer only.
+# The v3 stream_type table puts exactly one tile per zoom above 50,000 collection
+# coordinates (node-27, 516 China tiles) while every single feature stays far
+# below the per-feature limit. Raising MVT_MAX_COORDINATES globally was rejected:
+# the same constant is the per-feature guard, the collection guard and the 413
+# threshold of all five tile layers, so a global raise would also loosen
+# hydro-national's fair budget window and the per-basin layer's truncation.
+NATIONAL_RIVER_COLLECTION_COORDINATE_LIMIT = 120_000
 MVT_MAX_BYTES = 5_000_000
 MVT_VALID_TIME_SAMPLE_LIMIT = 100
 MVT_MIN_SIMPLIFICATION_TOLERANCE_M = 0.5
 MVT_MAX_SIMPLIFICATION_TOLERANCE_M = 256.0
 MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
-NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v2"
+# Bumped to v3: the national river-network query filters stream_type one class
+# denser at z<=7 and bounds its collection coordinate total with a fair
+# per-network budget window. The tile cache key does not hash the SQL, so
+# deploying the new shape without moving this generation would keep serving
+# pre-switch cached tiles.
+NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v3"
 # Bumped to v4: the national discharge query now applies a deterministic
 # fair-per-network budget before MVT encoding. The tile cache key does not hash
 # the SQL, so deploying a new shape without moving this generation would keep
@@ -192,6 +205,18 @@ def simplification_tolerance_m(z: int) -> float:
     tile_width_m = (WEB_MERCATOR_BOUNDS[2] - WEB_MERCATOR_BOUNDS[0]) / float(1 << z)
     pixel_width_m = tile_width_m / float(MVT_EXTENT)
     return min(MVT_MAX_SIMPLIFICATION_TOLERANCE_M, max(MVT_MIN_SIMPLIFICATION_TOLERANCE_M, pixel_width_m / 2.0))
+
+
+def collection_coordinate_limit(layer: str | None) -> int:
+    """Collection-level coordinate budget of one tile layer.
+
+    Only `river-network-national` carries a raised budget; every other layer --
+    and a caller that supplies no layer -- keeps `MVT_MAX_COORDINATES`. The
+    per-feature limit is not layer-specific and stays `MVT_MAX_COORDINATES`.
+    """
+    if layer == "river-network-national":
+        return NATIONAL_RIVER_COLLECTION_COORDINATE_LIMIT
+    return MVT_MAX_COORDINATES
 
 
 def build_tile_response(
@@ -366,6 +391,17 @@ def postgis_tile_sql(layer: str) -> str:
             else "EXISTS (SELECT 1 FROM core.model_instance mi "
             "WHERE mi.river_network_version_id = rnv.river_network_version_id AND mi.active_flag = true)"
         )
+        # The stream_type threshold table is layer-specific even though this CTE
+        # is shared. The national layer carries the denser v3 table (one class
+        # lower at every zoom it constrains); the per-basin layer keeps the v2
+        # table, because at z7 the denser table would put its worst tile at
+        # 10,870 features against MVT_MAX_FEATURES (10,000) -- measured on
+        # node-27, basins_jialingjiang_rivnet_vbasins tile 101/52. Editing these
+        # literals in place would silently loosen the per-basin layer.
+        stream_type_thresholds = (
+            ("4.0", "3.0", "2.0", "1.0") if layer == "river-network-national" else ("5.0", "4.0", "3.0", "2.0")
+        )
+        z4_threshold, z5_threshold, z6_threshold, z7_threshold = stream_type_thresholds
         source_cte = f"""
             SELECT (rs.river_network_version_id || '::' || rs.river_segment_id) AS feature_id,
                    rs.river_segment_id AS segment_id,
@@ -399,10 +435,10 @@ def postgis_tile_sql(layer: str) -> str:
               AND (
                   :z >= 9
                   OR rs.stream_type >= CASE
-                      WHEN :z <= 4 THEN 5.0
-                      WHEN :z = 5 THEN 4.0
-                      WHEN :z = 6 THEN 3.0
-                      WHEN :z = 7 THEN 2.0
+                      WHEN :z <= 4 THEN {z4_threshold}
+                      WHEN :z = 5 THEN {z5_threshold}
+                      WHEN :z = 6 THEN {z6_threshold}
+                      WHEN :z = 7 THEN {z7_threshold}
                       ELSE 1.0
                   END
               )
@@ -969,6 +1005,61 @@ def postgis_tile_sql(layer: str) -> str:
                    ) AS tile_feature_rank,
                    SUM(source_coordinate_count) OVER (
                        ORDER BY network_rank, value DESC NULLS LAST,
+                                river_network_version_id, river_segment_id
+                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                   ) AS tile_coordinate_rank
+            FROM national_ranked
+        ),
+        eligible AS (
+            SELECT *
+            FROM national_budget_window
+            WHERE tile_feature_rank <= :feature_limit
+              AND tile_coordinate_rank <= :collection_coordinate_limit
+        )
+        """
+    elif layer == "river-network-national":
+        eligibility_ctes = """
+        preeligible AS (
+            SELECT *
+            FROM bounded_rows
+            WHERE source_coordinate_count <= :feature_coordinate_limit
+              AND source_coordinate_dimensions <= :max_coordinate_dimensions
+        ),
+        -- The denser v3 stream_type table puts one tile per zoom above the
+        -- shared 50,000 collection budget. Bound it here instead of turning a
+        -- renderable overview tile into HTTP 413. `network_rank` interleaves
+        -- each network's strongest remaining stream class before any network
+        -- contributes its second, so one dense basin cannot evict every
+        -- smaller basin from the same tile.
+        --
+        -- All three ORDER BY clauses below end with `river_segment_id` on
+        -- purpose: at z<=8 the rows are merged per (network, "Type") and
+        -- "Type" is already unique within a network, but at z>=9 the
+        -- per-segment UNION ALL arm ties massively on "Type", and without a
+        -- unique tiebreak the truncation point would follow the execution plan
+        -- while the resulting bytes are cached under one generation.
+        --
+        -- They also order the stream class NULLS LAST on purpose:
+        -- core.river_segment.stream_type is nullable and the z>=9 arm admits
+        -- rows regardless of stream class, so Postgres' DESC default of NULLS
+        -- FIRST would let an unclassified segment outrank every trunk and
+        -- spend the collection budget before the network's real backbone.
+        national_ranked AS (
+            SELECT preeligible.*,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY river_network_version_id
+                       ORDER BY "Type" DESC NULLS LAST, river_segment_id
+                   ) AS network_rank
+            FROM preeligible
+        ),
+        national_budget_window AS (
+            SELECT national_ranked.*,
+                   ROW_NUMBER() OVER (
+                       ORDER BY network_rank, "Type" DESC NULLS LAST,
+                                river_network_version_id, river_segment_id
+                   ) AS tile_feature_rank,
+                   SUM(source_coordinate_count) OVER (
+                       ORDER BY network_rank, "Type" DESC NULLS LAST,
                                 river_network_version_id, river_segment_id
                        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
                    ) AS tile_coordinate_rank

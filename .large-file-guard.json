@@ -7,6 +7,7 @@
     "openspec/changes/*/specs/**",
     "openspec/specs/*/spec.md",
     "services/tiles/mvt.py",
+    "apps/api/routes/hydro_display.py",
     "db/seeds/seed_demo.py",
     "packages/common/forcing_domain_handoff_apply.py",
     "workers/output_parser/parser.py",
