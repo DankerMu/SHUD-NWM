@@ -105,17 +105,18 @@ Boundary-surface checklist（4.1–4.3）:
 
 ### #2034 修正镜像挂载点（DB-free seam）
 
-- [ ] 4.7 `services/tile_publisher/publisher.py`：把 `_copyback_canonical_precip` 暴露为公开方法（返回 summary），并在 summary 里补 `missing_object_key`（相对 object key，无前导 `/`，过得了回执脱敏）。**保留** `_publish_qdown_from_database` 里的既有调用点——移除它是安全的（无任何 profile 依赖，见 fixture review P2-7），但会连带重写21 个走 q_down 路径的测试（19 个 `test_publish_qdown_canonical_precip_*` 加 2 个同路径异名，742 行）并让 4.1–4.3 的矩阵整体失效，与本 issue「挪一个调用 + 加一个回执出口」的规模不相称；单独立单跟进。因此 4.1–4.3 的 publish 路径矩阵在本 PR 后仍然为真。
-- [ ] 4.8 `services/orchestrator/chain_forecast_execution.py`：在 `_after_cycle_stage_terminal` 的 `reconcile_unverified` 早退之后、状态分派之前触发镜像，条件为终态 `forecast_state_save_qc` 且 stage 为 `state_save_qc`；`succeeded` 与 `partially_failed` 都触发；不看 `active_basins`；任何异常吞掉。身份用 `context.source_id` + `format_cycle_time(context.cycle_time)`。
-- [ ] 4.9 回执：`insert_pipeline_event(entity_type="forecast_cycle", event_type="canonical_precip_mirror", ...)`，`details` 带 `precip_mirror` payload，周期键名为 `cycle`。
-- [ ] 4.10 契约同步：spec Requirement 1 已改（本 PR）；`docs/runbooks/two-node-deployment-overview.md:150` 把 stale 的 `publish-qdown` 归属改为当前 DB-free 终态契约；runbook 给出回执判读入口——journal 会按 `MAX_FILE_JOURNAL_CYCLE_SEGMENTS` 轮转出 `<cycle>.<n>.jsonl`，故 `jq` 示例必须 glob `<cycle>*.jsonl`，选择器为 `.payload.details.precip_mirror`（journal 记录把整个事件包在 `payload` 键下，事件自身的 `details` 嵌套与 journal 信封是两层，都要走）。
+- [x] 4.7 `services/tile_publisher/publisher.py`：把 `_copyback_canonical_precip` 暴露为公开方法（返回 summary），并在 summary 里补 `missing_object_key`（相对 object key，无前导 `/`，过得了回执脱敏）。**保留** `_publish_qdown_from_database` 里的既有调用点——移除它是安全的（无任何 profile 依赖，见 fixture review P2-7），但会连带重写21 个走 q_down 路径的测试（19 个 `test_publish_qdown_canonical_precip_*` 加 2 个同路径异名，742 行）并让 4.1–4.3 的矩阵整体失效，与本 issue「挪一个调用 + 加一个回执出口」的规模不相称；单独立单跟进。因此 4.1–4.3 的 publish 路径矩阵在本 PR 后仍然为真。
+- [x] 4.8 `services/orchestrator/chain_forecast_execution.py`：在 `_after_cycle_stage_terminal` 的 `reconcile_unverified` 早退之后、状态分派之前触发镜像，条件为终态 `forecast_state_save_qc` 且 stage 为 `state_save_qc`；`succeeded` 与 `partially_failed` 都触发；不看 `active_basins`；任何异常吞掉。身份用 `context.source_id` + `format_cycle_time(context.cycle_time)`。
+- [x] 4.9 回执：`insert_pipeline_event(entity_type="forecast_cycle", event_type="canonical_precip_mirror", ...)`，`details` 带 `precip_mirror` payload，周期键名为 `cycle`。
+- [x] 4.10 契约同步：spec Requirement 1 已改（本 PR）；`docs/runbooks/two-node-deployment-overview.md:150` 把 stale 的 `publish-qdown` 归属改为当前 DB-free 终态契约；runbook 给出回执判读入口——journal 会按 `MAX_FILE_JOURNAL_CYCLE_SEGMENTS` 轮转出 `<cycle>.<n>.jsonl`，故 `jq` 示例必须 glob `<cycle>*.jsonl`，选择器为 `.payload.details.precip_mirror`（journal 记录把整个事件包在 `payload` 键下，事件自身的 `details` 嵌套与 journal 信封是两层，都要走）。
 - [ ] 4.11 node-22 live receipt：一个**新**生产周期跑完后，`/ghdc/data/nwm/object-store/canonical/<S>/<cycle>/prcp_rate_or_amount/` 出现，且 journal 里有对应 `canonical_precip_mirror` 事件；`runs/` copyback 行为不变。
 
 ### Invariant Matrix（4.7–4.9，issue #2034 补充）
 
 - 终态 `succeeded` -> 镜像触发，**至少一条**回执记 `status == "ok"`（partial-array 重试会让 `_after_cycle_stage_terminal` 跑第二次，重复回执可为 `skipped`，故不得断言「最后一条」）
 - 终态 `partially_failed` -> **仍**镜像（降水由 `convert` 产出，与 basin 成败无关），回执照记
-- 终态为失败尾（`failed`/`cancelled`/`timeout`/`submission_failed`/`reservation_lost`/`permanently_failed`）-> **仍**镜像；唯一不触发的终态是 `reconcile_unverified`（在 hook 之前就 return）
+- **进入 hook 的**失败尾终态（`failed`/`cancelled`/`timeout`/`reservation_lost`/`permanently_failed`）-> **仍**镜像；进入 hook 后唯一不触发的是 `reconcile_unverified`（在 hook 之前就 return）
+- `submission_failed`（submit 臂铸造）-> 该 pass **不**进 hook（`_record_submission_failure` 早于 hook 调用点返回），但该状态不属 `_job_is_terminal_success`，周期会被重新规划、下一 pass 经 `resume_cycle_stage` 进 hook 并镜像 -> **暂态缺口**，超过 `NHMS_SCHEDULER_LOOKBACK_HOURS` 才永久（#2069）
 - 链在 `state_save_qc` 之前终止（stage 级失败）-> 不镜像，读侧对该周期 404（**已知缺口**，本 issue 不覆盖）
 - 回执写入本身抛 `FileOrchestrationJournalError`/`OrchestratorError` -> stage 结果不变、不抛出
 - `active_basins` 为空 -> **仍**镜像（run-tree copyback 会早退，镜像不得跟随）
