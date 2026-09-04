@@ -72,6 +72,46 @@ _DOLLAR_QUOTE_TAG = re.compile(r"\$(?:(?:[A-Za-z_]|[^\x00-\x7f])(?:[A-Za-z0-9_]|
 _REFERENCE_NEWLINE = re.compile(r"[\n\r]")
 
 
+def _consume_reference_numeric_token(sql: str, start: int) -> int | None:
+    """Half-open stop of the PostgreSQL numeric token opening at ``start``, or ``None``.
+
+    Written from §4.1.2.1, not from production ``_consume_numeric_token``: a
+    digit run or a leading-dot decimal, optional trailing-dot, then an optional
+    exponent ``e`` / ``E`` with optional sign and a required digit run. An
+    incomplete exponent (``1e``, ``1e+``, ``1EE``) is left unconsumed so the
+    following character remains its own token. Direct stop-offset pins live in
+    :func:`test_the_reference_numeric_token_consumer_stops_at_the_token_boundary`.
+    """
+    length = len(sql)
+    if start >= length:
+        return None
+
+    def digit_run(index: int) -> int:
+        while index < length and sql[index].isdigit():
+            index += 1
+        return index
+
+    if sql[start] == ".":
+        stop = digit_run(start + 1)
+        if stop == start + 1:
+            return None
+    elif sql[start].isdigit():
+        stop = digit_run(start)
+        if stop < length and sql[stop] == ".":
+            stop = digit_run(stop + 1)
+    else:
+        return None
+
+    if stop < length and sql[stop] in "Ee":
+        exponent = stop + 1
+        if exponent < length and sql[exponent] in "+-":
+            exponent += 1
+        digits = digit_run(exponent)
+        if digits > exponent:
+            stop = digits
+    return stop
+
+
 def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     r"""Half-open ``(start, stop, kind)`` runs of ``sql`` that PostgreSQL does not lex as code.
 
@@ -195,36 +235,9 @@ def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
             index = cursor
             continue
 
-        if character.isdigit() or (
-            character == "." and index + 1 < length and sql[index + 1].isdigit()
-        ):
-            cursor = index
-            if sql[cursor] == ".":
-                cursor += 1
-                while cursor < length and sql[cursor].isdigit():
-                    cursor += 1
-            else:
-                while cursor < length and sql[cursor].isdigit():
-                    cursor += 1
-                if cursor < length and sql[cursor] == ".":
-                    cursor += 1
-                    while cursor < length and sql[cursor].isdigit():
-                        cursor += 1
-            if (
-                cursor < length
-                and sql[cursor] in "Ee"
-                and cursor + 1 < length
-                and (sql[cursor + 1].isdigit() or sql[cursor + 1] in "+-")
-            ):
-                exponent = cursor + 1
-                if sql[exponent] in "+-":
-                    exponent += 1
-                if exponent < length and sql[exponent].isdigit():
-                    exponent += 1
-                    while exponent < length and sql[exponent].isdigit():
-                        exponent += 1
-                    cursor = exponent
-            index, previous_token = cursor, None
+        numeric_stop = _consume_reference_numeric_token(sql, index)
+        if numeric_stop is not None:
+            index, previous_token = numeric_stop, None
             continue
 
         if not character.isspace():
@@ -346,8 +359,9 @@ SAMPLE_COUNT = 2000
 #: fragments (``1E`` / ``1e`` and extended token composition) glued to a following
 #: quote-bearing fragment, which is decision 18's second arm (round-5 L2) — so
 #: the refusal arm is exercised by both halves of the subset rule. Accepted
-#: token-adjacent escape counts on the same seed: 232 uppercase ``E'…'``, 142
-#: lowercase ``e'…'``.
+#: token-adjacent escape counts on the same seed: 135 uppercase ``E'…'``, 128
+#: lowercase ``e'…'`` (true one-character ``E`` / ``e`` tokens; identifier-tail
+#: ``LIKE'…'`` / ``tablE'…'`` are not counted).
 #: Pinned well below the measurement so ordinary drift in the alphabet does
 #: not redden it, while the failure this floor exists to catch — a subset rule
 #: that widens until it refuses everything and the differential asserts nothing —
@@ -365,15 +379,21 @@ def _samples() -> list[str]:
 def _has_token_adjacent_escape(sql: str, prefix: str) -> bool:
     """Whether ``sql`` contains a token-adjacent ``{prefix}'`` that is not inside a span.
 
-    Independent of the production recognizer: walks THIS file's reference lexer
-    and looks for an escape-string span whose preceding character is ``prefix``.
-    Used only as an anti-vacuity count so an uppercase-only alphabet or an
-    uppercase-only reference cannot stay green.
+    Independent of the production recognizer: a quote qualifies only when the
+    immediately preceding complete unquoted identifier — using this file's
+    ``ident_start`` / ``ident_cont`` grammar — is the one-character token
+    ``prefix`` and sits against the quote. ``LIKE'…'`` and ``tablE'…'`` are
+    identifier tails, not ``E`` / ``e`` tokens. Used only as an anti-vacuity
+    count so an uppercase-only alphabet or an uppercase-only reference cannot
+    stay green.
     """
     for start, _stop, kind in reference_non_code_spans(sql):
-        if kind != "literal" or start == 0:
+        if kind != "literal" or start == 0 or sql[start] != "'":
             continue
-        if sql[start] == "'" and sql[start - 1] == prefix:
+        cursor = start
+        while cursor > 0 and _is_ident_cont(sql[cursor - 1]):
+            cursor -= 1
+        if cursor < start and _is_ident_start(sql[cursor]) and sql[cursor:start] == prefix:
             return True
     return False
 
@@ -516,3 +536,98 @@ def test_the_reference_lexer_answers_its_own_known_cases(
     this file exists to end.
     """
     assert reference_non_code_spans(sql) == expected
+
+
+@pytest.mark.parametrize(
+    ("label", "sql", "start", "stop"),
+    [
+        ("integer", "12 FROM t", 0, 2),
+        ("decimal", "1.5 FROM t", 0, 3),
+        ("trailing_dot", "1. FROM t", 0, 2),
+        ("exponent", "1e2 FROM t", 0, 3),
+        ("decimal_exponent", "1.2e3 FROM t", 0, 5),
+        ("signed_exponent", "1e+2 FROM t", 0, 4),
+        ("negative_exponent", "1E-2 FROM t", 0, 4),
+        ("leading_dot", ".5 FROM t", 0, 2),
+        ("leading_dot_signed_exponent", ".5e+2 FROM t", 0, 5),
+        ("incomplete_exponent", "1e FROM t", 0, 1),
+        ("incomplete_signed_exponent", "1e+ FROM t", 0, 1),
+        ("malformed_double_e", "1EE'x'", 0, 1),
+        ("valid_exponent_then_plain_quote", "1.5e3'x'", 0, 5),
+        ("select_list_exponent", "SELECT 1e2 FROM t", 7, 10),
+        ("select_list_leading_dot", "SELECT .5 FROM t", 7, 9),
+        ("not_a_number", "E'x'", 0, None),
+        ("dot_without_digits", ". FROM t", 0, None),
+    ],
+    ids=[
+        "integer",
+        "decimal",
+        "trailing_dot",
+        "exponent",
+        "decimal_exponent",
+        "signed_exponent",
+        "negative_exponent",
+        "leading_dot",
+        "leading_dot_signed_exponent",
+        "incomplete_exponent",
+        "incomplete_signed_exponent",
+        "malformed_double_e",
+        "valid_exponent_then_plain_quote",
+        "select_list_exponent",
+        "select_list_leading_dot",
+        "not_a_number",
+        "dot_without_digits",
+    ],
+)
+def test_the_reference_numeric_token_consumer_stops_at_the_token_boundary(
+    label: str, sql: str, start: int, stop: int | None
+) -> None:
+    """The reference numeric walk is pinned by stop offsets, not by the production L2 guard.
+
+    Numbers are code, so span comparison is blind to a walk that stops early on
+    ``1e2`` or never opens on ``.5``. Deleting exponent consumption, deleting
+    leading-dot support, or restoring a digit-only walker has to fail here.
+    """
+    assert _consume_reference_numeric_token(sql, start) == stop
+
+
+@pytest.mark.parametrize(
+    ("label", "sql", "prefix", "expected"),
+    [
+        ("bare_upper", r"E'q\'x'", "E", True),
+        ("bare_lower", r"e'q\'x'", "e", True),
+        ("after_paren_upper", ")E'x'", "E", True),
+        ("after_quoted_ident_upper", '"x"E\'x\'', "E", True),
+        ("after_paren_lower", ")e'x'", "e", True),
+        ("after_quoted_ident_lower", '"x"e\'x\'', "e", True),
+        ("keyword_tail_upper", r"LIKE'C:\'", "E", False),
+        ("identifier_tail_upper", "tablE'x'", "E", False),
+        ("keyword_tail_lower", "like'x'", "e", False),
+        ("identifier_tail_lower", "value'x'", "e", False),
+        ("whitespace_separated_upper", r"SELECT note E 'C:\' AS n", "E", False),
+        ("whitespace_separated_lower", r"SELECT note e 'C:\' AS n", "e", False),
+        ("case_mismatch_upper_query", "E'x'", "e", False),
+        ("case_mismatch_lower_query", "e'x'", "E", False),
+    ],
+    ids=[
+        "bare_upper",
+        "bare_lower",
+        "after_paren_upper",
+        "after_quoted_ident_upper",
+        "after_paren_lower",
+        "after_quoted_ident_lower",
+        "keyword_tail_upper",
+        "identifier_tail_upper",
+        "keyword_tail_lower",
+        "identifier_tail_lower",
+        "whitespace_separated_upper",
+        "whitespace_separated_lower",
+        "case_mismatch_upper_query",
+        "case_mismatch_lower_query",
+    ],
+)
+def test_token_adjacent_escape_is_a_one_character_identifier_token(
+    label: str, sql: str, prefix: str, expected: bool
+) -> None:
+    """L1's anti-vacuity predicate counts tokens, not the character before a quote."""
+    assert _has_token_adjacent_escape(sql, prefix) is expected
