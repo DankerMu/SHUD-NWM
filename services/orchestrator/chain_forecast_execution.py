@@ -87,7 +87,9 @@ StageRunResult = _chain.StageRunResult
 TERMINAL_JOB_STATUSES = _chain.TERMINAL_JOB_STATUSES
 TERMINAL_PIPELINE_SUCCESS_STATUSES = _chain.TERMINAL_PIPELINE_SUCCESS_STATUSES
 TerminalJobObservation = _chain.TerminalJobObservation
+TilePublisher = _chain.TilePublisher
 datetime = _chain.datetime
+format_cycle_time = _chain.format_cycle_time
 
 
 def _aggregation_from_task_results(*args, **kwargs):
@@ -850,6 +852,8 @@ def _after_cycle_stage_terminal(
     )
     if stage.stage == "forecast" and aggregation is not None and not accepted_submit_projection:
         _update_array_forecast_hydro_statuses(self, context, aggregation)
+    if _stage_should_mirror_canonical_precip(self, stage):
+        _mirror_canonical_precip(self, context)
     if result_status == "succeeded":
         if _stage_should_copyback_run_trees(self, stage):
             _copyback_stage_run_trees(self, context, stage=stage.stage)
@@ -976,6 +980,69 @@ def _copyback_stage_run_trees(self, context: CycleOrchestrationContext, *, stage
         message=f"Run-tree object-store copyback completed after {stage}.",
         details=_safe_pipeline_event_details({"stage": stage, **summary}),
     )
+
+
+def _stage_should_mirror_canonical_precip(self, stage: StageDefinition) -> bool:
+    return stage.stage == "state_save_qc" and self.config.terminal_stage == "forecast_state_save_qc"
+
+
+def _mirror_canonical_precip(self, context: CycleOrchestrationContext) -> None:
+    """Mirror the cycle's canonical precipitation products and record a receipt.
+
+    Three deliberate differences from the sibling ``_copyback_stage_run_trees``
+    at this same seam (canonical-precip-copyback spec, Requirement 1):
+    precipitation is a source/cycle-level product, so there is no
+    ``active_basins`` gate and no ``succeeded`` gate; and every failure -- the
+    mirror's and the ``insert_pipeline_event`` write's alike -- is swallowed
+    rather than raised.
+
+    Identity is taken from ``context.source_id`` and ``context.cycle_time``,
+    never from ``context.cycle_id``: the cycle id lowercases the source, and
+    the ``canonical/<storage_source>/`` directory name needs the ``IFS`` /
+    ``ERA5`` spelling.
+    """
+
+    copyback_root = os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", "").strip()
+    if not copyback_root:
+        return
+    storage_source = context.source_id
+    cycle_token: str | None = None
+    summary: dict[str, Any] | None
+    try:
+        cycle_token = format_cycle_time(context.cycle_time)
+        publisher = TilePublisher(
+            workspace_root=self.config.workspace_root,
+            object_store_root=self.config.object_store_root,
+            object_store_prefix=self.config.object_store_prefix,
+            object_store_copyback_root=copyback_root,
+        )
+        summary = publisher.copyback_canonical_precip(storage_source, cycle_token)
+    except Exception as error:
+        summary = {
+            "storage_source": storage_source,
+            # NOT `cycle_token`: redact_payload() blanks any key matching /token/.
+            "cycle": cycle_token,
+            "status": "failed",
+            "error": str(error),
+            "error_type": type(error).__name__,
+        }
+    if summary is None:
+        return
+    try:
+        self.repository.insert_pipeline_event(
+            entity_type="forecast_cycle",
+            entity_id=context.cycle_id,
+            event_type="canonical_precip_mirror",
+            status_from=None,
+            status_to=str(summary.get("status") or "failed"),
+            message="Canonical precipitation mirror ran after state_save_qc.",
+            details=_safe_pipeline_event_details({"precip_mirror": summary}),
+        )
+    except Exception:
+        # `insert_pipeline_event` raises `FileOrchestrationJournalError` on the
+        # DB-free profile, a sibling of `OrchestratorError` rather than a
+        # subclass, so the swallow cannot be narrowed to either one.
+        return
 
 
 def _copyback_extra_object_keys(object_store_root: str | Path, *, stage: str) -> tuple[str, ...]:

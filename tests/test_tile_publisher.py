@@ -3009,6 +3009,99 @@ def test_publish_qdown_canonical_precip_skips_when_copyback_root_is_the_object_s
     }
 
 
+# --------------------------------------------------------------------------- #
+# #2034: the public entry point the DB-free forecast terminal stage calls, and
+# the sanitizer-proof discriminator its receipt needs. `missing_path` is an
+# absolute path, and the pipeline_event outlet renders every `*_path` key as
+# `[local-path]`, so the two absent-source states would otherwise be
+# byte-identical in a receipt.
+# --------------------------------------------------------------------------- #
+def test_copyback_canonical_precip_public_method_mirrors_without_a_database(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    payloads = _seed_canonical_precip(publisher)
+
+    summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert publisher.database_url == ""
+    assert summary is not None
+    assert summary["status"] == "ok"
+    assert summary["file_count"] == 57
+    assert summary["storage_source"] == "gfs"
+    assert summary["cycle"] == COMPACT_TIME
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
+    _assert_no_copyback_residue(copyback_root)
+
+
+def test_copyback_canonical_precip_public_method_returns_none_without_a_copyback_root(tmp_path: Any) -> None:
+    publisher = _publisher(tmp_path)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+
+    assert publisher.copyback_canonical_precip("gfs", COMPACT_TIME) is None
+
+
+def test_copyback_canonical_precip_absent_prcp_tree_reports_a_relative_object_key(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    # `leads=()` writes grid.json but no `.nc`, so the prcp tree never exists.
+    _seed_canonical_precip(publisher, leads=())
+    assert not (Path(publisher.object_store.root) / _prcp_tree_key("gfs", COMPACT_TIME)).exists()
+
+    summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert summary is not None
+    assert summary["status"] == "failed"
+    assert summary["missing_path"] == str(Path(publisher.object_store.root) / _prcp_tree_key("gfs", COMPACT_TIME))
+    assert summary["missing_object_key"] == _prcp_tree_key("gfs", COMPACT_TIME)
+    assert not summary["missing_object_key"].startswith("/")
+
+
+def test_copyback_canonical_precip_absent_grid_dir_reports_a_distinguishable_object_key(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6), write_grid_json=False)
+    shutil.rmtree(Path(publisher.object_store.root) / "canonical/gfs/grid")
+
+    summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert summary is not None
+    assert summary["status"] == "failed"
+    assert summary["missing_object_key"] == "canonical/gfs/grid"
+    assert summary["missing_object_key"] != _prcp_tree_key("gfs", COMPACT_TIME)
+    assert not summary["missing_object_key"].startswith("/")
+
+
+def test_copyback_canonical_precip_absent_grid_json_reports_its_own_object_key(tmp_path: Any) -> None:
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6), write_grid_json=False)
+
+    summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert summary is not None
+    assert summary["status"] == "failed"
+    assert summary["missing_object_key"] == f"{_grid_tree_key('gfs', 'gfs_0p25')}/grid.json"
+
+
+def test_copyback_canonical_precip_error_record_carries_no_object_key(tmp_path: Any) -> None:
+    """`missing_object_key` rides with `missing_path`, so it is absent wherever that is."""
+
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    prcp_dir = Path(publisher.object_store.root) / _prcp_tree_key("gfs", COMPACT_TIME)
+    (prcp_dir / "linked.nc").symlink_to(prcp_dir / f"gfs_{COMPACT_TIME}_prcp_rate_or_amount_f003.nc")
+
+    summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert summary is not None
+    assert summary["status"] == "failed"
+    assert summary["error_type"] == "SafeFilesystemError"
+    assert "missing_object_key" not in summary
+    assert "missing_path" not in summary
+
+
 # Boundary: the copyback helper whitelist gained exactly two canonical shapes and
 # must not have loosened the `runs/` or `forcing/` shapes it already accepted.
 @pytest.mark.parametrize(
