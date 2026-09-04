@@ -3121,3 +3121,20 @@ PR #2020 是 `rounds: 1` 的单轮 PR（Round 1 双镜 correctness / spec-compli
 且至今**没有对应的 tracked issue**（`gh issue list --search "loop_log_audit rotation_attribution"`
 返回空）。在修好之前，基于该比值的 keep/cut **翻转**仍须 maintainer 人的裁定，不走
 autonomous default——这一约束自 2026-08-20 起未变。
+
+## Revisit 2026-09-04（PR #2021 / issue #2006 合并后 audit 再次 DECIDABLE）
+
+样本 **167** 个多轮 merged PR（较上条 +1），later-round catches **core=155 vs rotated=302**，
+与上两条**同值**。**维持 keep**，且本条同样必须写明：**本 PR 对该裁定的证据贡献为零。**
+
+PR #2021 是 `rounds: 2` 的多轮 PR，进入了 167 的分母，但两条 catch 全部落在 **Round 1**
+（`review-test-evidence`），later-round（Round 2）返回 clean、零 catch，因此对 core/rotated
+任一侧都不加数。Round 2 按 post-fix 规则只派了一名全范围 reviewer（`round_lenses` 第二项是
+第一项的子集），恰好又撞上前几条登记的第一项工具缺口——**`round_lenses` 为 round-1 子集时
+不应计入轮换分母**。这条缺口在本次再次实证：分母 +1 而分子不动，比值被稀释的方向是
+系统性的、与真实轮换效力无关。
+
+前几条登记的三项工具缺口（子集轮不计分母、Phase 7 终审轮排除或单列 `final_review` 桶、
+round-intent 未记录）**仍一条未修**，`gh issue list --search "loop_log_audit rotation_attribution"`
+仍返回空，**至今没有对应的 tracked issue**。在修好之前，基于该比值的 keep/cut **翻转**仍须
+maintainer 人的裁定，不走 autonomous default；keep 按 autonomous default 维持，无行为变更。
