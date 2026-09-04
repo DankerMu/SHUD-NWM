@@ -5,6 +5,17 @@ This project adheres to [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 
 ## [Unreleased]
 
+### Fixed
+
+- **lens-rotation 归因的分母与桶口径修正，且不再对已裁定的问题反复发问**（动机：NWM #2036。实测 526 行 log：168 条多轮 merged PR 里 45 条的 later round 只是 round-1 的**子集**——那是收缩不是轮换，其 catch 只能计 core，却仍占着分母；另有 45 条 `round_lenses[0]` 是**裸字符串**、1 条为空列表，`set("correctness")` 按字符拆解使 core 恒为 0，全部 catch 被强制记 rotated；Phase 7 终审在旧约定下以假 lens 名（`final-review`/`gap-sweep`/…，全库 91 条）写进 `catches`，同样必然记 rotated，而新约定的 `phase7_catches`（19 行 20 条）没有任何脚本读）：
+  - `loop_log_audit.py::rotation_sample`（新）：分母只收**真的轮换过**的 PR（某个 later round 引入 round-1 没有的 lens），并排除 `round_lenses[0]` 不可用（空列表 / 非列表）与 `rotation_intent: incidental` 的行；每类排除数以 `NOTE rotation sample` 打印，分母缩小可审计而非静默。
+  - `loop_log_audit.py::rotation_attribution`：返回 `Attribution(core, rotated, final_review, skipped)`，终审 catch（legacy 假 lens 兼容集 + `phase7_catches`）单列第三桶，**永不**落入 core/rotated。兼容集是**封闭**的，只服务已有行；`prose-truth-class-sweep` 因语义歧义**不**收录。
+  - `loop_log_audit.py`：新增 `--rotation-decision keep|cut|none`（默认 `keep`）——只有当证据**推翻** docs/adr/ 已记录的决定（keep 但 rotated 占比跌破 50%，或 cut 但仍 ≥ 50%）或样本仍低于 `--min-multiround` 时才升级为 DECIDABLE，否则打 `NOTE lens-rotation`。此前该门在 168 的样本上**每次收尾都必然触发**，已产出十余次相同的 keep 结论。`none` 保留旧的无条件行为。
+  - `evidence_check.py --loop-log-entry`：`round_lenses` 必须是列表，且**每个元素都是非空的 lens 名列表**——裸字符串（历史扁平形状，每轮一个 lens 名，45 条）当场拒绝并给出正确形状；形状判据 `is_lens_list()` 落在 `loop_log_audit.py` 单点定义，读侧写侧同源。读侧继续容忍历史行（计入 `NOTE rotation sample` 的 `non-list=`），写侧堵死新行——与 legacy 假 lens 名同一套处置。
+  - `evidence_check.py --loop-log-entry`：新行的 `catches[i].lens` 命中 legacy 终审假 lens 名一律**拒绝**并指向 `phase7_catches`（这才是两套约定不再分叉的地方）；`phase7_catches` 按同一 item schema 校验但**不要求** `round`（终审在编号轮之后）；`rotation_intent` 仅接受 `deliberate|incidental`。历史行不受影响——该校验只作用于待追加的 pending line。
+  - 口径修正前后（NWM 526 行 log）：`168 多轮 PR / core=161 rotated=302`（65.2%）→ `77 真轮换 PR / core=80 rotated=105 final_review=33`（rotated 占比 56.8%）。三个缺陷全部**低估 core**，修正后方向不变、**keep rotation 的结论不受影响**。
+  - 需求驱动单测 32 例新增（`tests/test_loop_log_audit_attribution.py`，按路径加载 `.agents/skills/**` 的受控源，资产缺失即 skip）。
+
 ## [0.31.1] - 2026-09-02
 
 ### Fixed
