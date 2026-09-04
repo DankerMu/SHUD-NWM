@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import random
 import re
+from typing import NamedTuple
 
 import pytest
 
@@ -79,8 +80,9 @@ def _consume_reference_numeric_token(sql: str, start: int) -> int | None:
     digit run or a leading-dot decimal, optional trailing-dot, then an optional
     exponent ``e`` / ``E`` with optional sign and a required digit run. An
     incomplete exponent (``1e``, ``1e+``, ``1EE``) is left unconsumed so the
-    following character remains its own token. Direct stop-offset pins live in
-    :func:`test_the_reference_numeric_token_consumer_stops_at_the_token_boundary`.
+    following character remains its own token. Direct stop-offset pins and the
+    scanner-connection pins that consume the same literal rows live on
+    ``_REFERENCE_NUMERIC_CASES``.
     """
     length = len(sql)
     if start >= length:
@@ -538,57 +540,123 @@ def test_the_reference_lexer_answers_its_own_known_cases(
     assert reference_non_code_spans(sql) == expected
 
 
-@pytest.mark.parametrize(
-    ("label", "sql", "start", "stop"),
-    [
-        ("integer", "12 FROM t", 0, 2),
-        ("decimal", "1.5 FROM t", 0, 3),
-        ("trailing_dot", "1. FROM t", 0, 2),
-        ("exponent", "1e2 FROM t", 0, 3),
-        ("decimal_exponent", "1.2e3 FROM t", 0, 5),
-        ("signed_exponent", "1e+2 FROM t", 0, 4),
-        ("negative_exponent", "1E-2 FROM t", 0, 4),
-        ("leading_dot", ".5 FROM t", 0, 2),
-        ("leading_dot_signed_exponent", ".5e+2 FROM t", 0, 5),
-        ("incomplete_exponent", "1e FROM t", 0, 1),
-        ("incomplete_signed_exponent", "1e+ FROM t", 0, 1),
-        ("malformed_double_e", "1EE'x'", 0, 1),
-        ("valid_exponent_then_plain_quote", "1.5e3'x'", 0, 5),
-        ("select_list_exponent", "SELECT 1e2 FROM t", 7, 10),
-        ("select_list_leading_dot", "SELECT .5 FROM t", 7, 9),
-        ("not_a_number", "E'x'", 0, None),
-        ("dot_without_digits", ". FROM t", 0, None),
-    ],
-    ids=[
-        "integer",
-        "decimal",
-        "trailing_dot",
-        "exponent",
-        "decimal_exponent",
-        "signed_exponent",
-        "negative_exponent",
-        "leading_dot",
-        "leading_dot_signed_exponent",
-        "incomplete_exponent",
-        "incomplete_signed_exponent",
-        "malformed_double_e",
+class _ReferenceNumericCase(NamedTuple):
+    """One independently authored numeric-token oracle row.
+
+    ``stop`` is the helper's half-open token end at ``start``. ``spans`` is the
+    exact ``reference_non_code_spans`` partition of the same ``sql``. Both are
+    literals in this table: neither is computed from the helper result, and
+    neither test may consult production ``_lexical_subset_violation``.
+    """
+
+    label: str
+    sql: str
+    start: int
+    stop: int | None
+    spans: tuple[tuple[int, int, str], ...]
+
+
+# Mantissa classes (integer / trailing-dot / fractional / leading-dot) crossed
+# with exponent shapes (none / e2 / E2 / e+2 / E-2), then incomplete, malformed
+# and nonnumeric controls. The following ``E'a\'x'`` / ``e'a\'x'`` fragment is
+# the scanner discriminator: a wrong numeric boundary changes whether the quote
+# is an adjacent escape prefix or a plain literal, so the helper-to-scanner
+# call cannot be bypassed without reddening the span pin.
+_REFERENCE_NUMERIC_CASES: tuple[_ReferenceNumericCase, ...] = (
+    _ReferenceNumericCase("integer_none", r"SELECT 12E'a\'x' AS n", 7, 9, ((10, 16, "literal"),)),
+    _ReferenceNumericCase("integer_exp_e", r"SELECT 12e2E'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
+    _ReferenceNumericCase("integer_exp_E", r"SELECT 12E2e'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
+    _ReferenceNumericCase("integer_exp_e_plus", r"SELECT 12e+2E'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
+    _ReferenceNumericCase("integer_exp_E_minus", r"SELECT 12E-2e'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
+    _ReferenceNumericCase("trailing_dot_none", r"SELECT 1.E'a\'x' AS n", 7, 9, ((10, 16, "literal"),)),
+    _ReferenceNumericCase("trailing_dot_exp_e", r"SELECT 1.e2E'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
+    _ReferenceNumericCase("trailing_dot_exp_E", r"SELECT 1.E2e'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
+    _ReferenceNumericCase("trailing_dot_exp_e_plus", r"SELECT 1.e+2E'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
+    _ReferenceNumericCase("trailing_dot_exp_E_minus", r"SELECT 1.E-2e'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
+    _ReferenceNumericCase("fractional_none", r"SELECT 1.2E'a\'x' AS n", 7, 10, ((11, 17, "literal"),)),
+    _ReferenceNumericCase("fractional_exp_e", r"SELECT 1.2e3E'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
+    _ReferenceNumericCase("fractional_exp_E", r"SELECT 1.2E3e'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
+    _ReferenceNumericCase("fractional_exp_e_plus", r"SELECT 1.2e+3E'a\'x' AS n", 7, 13, ((14, 20, "literal"),)),
+    _ReferenceNumericCase("fractional_exp_E_minus", r"SELECT 1.2E-3e'a\'x' AS n", 7, 13, ((14, 20, "literal"),)),
+    _ReferenceNumericCase("leading_dot_none", r"SELECT .5E'a\'x' AS n", 7, 9, ((10, 16, "literal"),)),
+    _ReferenceNumericCase("leading_dot_exp_e", r"SELECT .5e2E'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
+    _ReferenceNumericCase("leading_dot_exp_E", r"SELECT .5E2e'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
+    _ReferenceNumericCase("leading_dot_exp_e_plus", r"SELECT .5e+2E'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
+    _ReferenceNumericCase("leading_dot_exp_E_minus", r"SELECT .5E-2e'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
+    _ReferenceNumericCase("incomplete_exp_e", r"SELECT 1e'a\'x' AS n", 7, 8, ((9, 15, "literal"),)),
+    _ReferenceNumericCase(
+        "incomplete_exp_e_plus",
+        r"SELECT 1e+'a\'x' AS n",
+        7,
+        8,
+        ((10, 14, "literal"), (15, 21, "literal")),
+    ),
+    _ReferenceNumericCase("incomplete_trailing_dot_exp_e", r"SELECT 1.e'a\'x' AS n", 7, 9, ((10, 16, "literal"),)),
+    _ReferenceNumericCase(
+        "incomplete_trailing_dot_exp_e_plus",
+        r"SELECT 1.e+'a\'x' AS n",
+        7,
+        9,
+        ((11, 15, "literal"), (16, 22, "literal")),
+    ),
+    _ReferenceNumericCase(
+        "malformed_double_E",
+        r"SELECT 1EE'a\'x' AS n",
+        7,
+        8,
+        ((10, 14, "literal"), (15, 21, "literal")),
+    ),
+    _ReferenceNumericCase(
         "valid_exponent_then_plain_quote",
-        "select_list_exponent",
-        "select_list_leading_dot",
-        "not_a_number",
-        "dot_without_digits",
-    ],
+        r"SELECT 1.5e3'a\'x' AS n",
+        7,
+        12,
+        ((12, 16, "literal"), (17, 23, "literal")),
+    ),
+    _ReferenceNumericCase("nonnumeric_start", r"SELECT E'a\'x' AS n", 7, None, ((8, 14, "literal"),)),
+    _ReferenceNumericCase("dot_without_digits", r"SELECT .E'a\'x' AS n", 7, None, ((9, 15, "literal"),)),
+    _ReferenceNumericCase("empty_input", "", 0, None, ()),
+    _ReferenceNumericCase("start_eq_len", "12", 2, None, ()),
+    _ReferenceNumericCase("start_gt_len", "12", 3, None, ()),
+    _ReferenceNumericCase("nonzero_start_offset", r"SELECT 12e2E'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
+    _ReferenceNumericCase("start_zero_unsigned_exp", r"12e2E'a\'x'", 0, 4, ((5, 11, "literal"),)),
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    _REFERENCE_NUMERIC_CASES,
+    ids=[case.label for case in _REFERENCE_NUMERIC_CASES],
 )
 def test_the_reference_numeric_token_consumer_stops_at_the_token_boundary(
-    label: str, sql: str, start: int, stop: int | None
+    case: _ReferenceNumericCase,
 ) -> None:
-    """The reference numeric walk is pinned by stop offsets, not by the production L2 guard.
+    """Helper grammar is pinned by the table's literal stops, not by production L2.
 
-    Numbers are code, so span comparison is blind to a walk that stops early on
-    ``1e2`` or never opens on ``.5``. Deleting exponent consumption, deleting
-    leading-dot support, or restoring a digit-only walker has to fail here.
+    Numbers are code, so a disconnected scanner can still look green unless this
+    pin and the sibling span pin both fire. Deleting exponent, sign, leading-dot,
+    trailing-dot, or restoring a digit-only walker has to fail here.
     """
-    assert _consume_reference_numeric_token(sql, start) == stop
+    assert _consume_reference_numeric_token(case.sql, case.start) == case.stop
+
+
+@pytest.mark.parametrize(
+    "case",
+    _REFERENCE_NUMERIC_CASES,
+    ids=[case.label for case in _REFERENCE_NUMERIC_CASES],
+)
+def test_the_reference_scanner_uses_the_numeric_token_consumer(
+    case: _ReferenceNumericCase,
+) -> None:
+    """The real scanner must call the helper; expected spans are table literals.
+
+    Bypassing ``_consume_reference_numeric_token`` inside ``reference_non_code_spans``
+    leaves helper stops intact but changes the adjacent ``E'`` / ``e'`` partition.
+    This assertion compares against authored spans, never against the helper's
+    returned stop, so a test that derived expectations from the helper cannot
+    hide that hole.
+    """
+    assert reference_non_code_spans(case.sql) == case.spans
 
 
 @pytest.mark.parametrize(
