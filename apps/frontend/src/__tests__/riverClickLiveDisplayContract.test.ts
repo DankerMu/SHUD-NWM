@@ -11,6 +11,20 @@ const PASS_LIVE_SPEC = [
 ].join('\n')
 
 describe('river-click live display static contract', () => {
+  it('keeps the dedicated river-click command/profile separate from the two-URL monitoring lane', async () => {
+    const pkg = JSON.parse(readFileSync(path.resolve(__dirname, '../../package.json'), 'utf8'))
+    expect(pkg.scripts['test:e2e:live-display']).toMatch(/playwright-live-display\.sh/)
+    expect(pkg.scripts['test:e2e:live-display']).not.toMatch(/river-click/)
+    expect(pkg.scripts['test:e2e:live-river-click']).toMatch(/playwright-live-river-click\.sh|playwright\.live-river-click\.config/)
+    const monitoringConfig = readFileSync(path.resolve(__dirname, '../../playwright.live-display.config.ts'), 'utf8')
+    expect(monitoringConfig).not.toMatch(/playwright\.live-display\.global-setup/)
+    expect(monitoringConfig).not.toMatch(/PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH/)
+    const riverConfig = readFileSync(path.resolve(__dirname, '../../playwright.live-river-click.config.ts'), 'utf8')
+    expect(riverConfig).toMatch(/playwright\.live-display\.global-setup/)
+    expect(riverConfig).toMatch(/workers:\s*1/)
+    expect(riverConfig).toMatch(/retries:\s*0/)
+  })
+
   it('rejects a broad page.route API mock in the live spec before browser execution', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'nhms-river-live-'))
     try {
@@ -36,18 +50,40 @@ describe('river-click live display static contract', () => {
     }
   })
 
-  it('requires the live profile to pin exactly one worker and zero retries', async () => {
+  it('does not abort a two-URL monitoring-only invocation at config import', async () => {
+    const previous = { ...process.env }
+    vi.resetModules()
+    try {
+      process.env.PLAYWRIGHT_LIVE_BASE_URL = 'https://display.example.test'
+      process.env.PLAYWRIGHT_LIVE_API_BASE_URL = 'https://api.example.test'
+      delete process.env.PLAYWRIGHT_LIVE_RIVER_BASIN_ID
+      delete process.env.PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID
+      delete process.env.PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH
+      const config = await import('../../playwright.live-display.config')
+      expect(config.default.globalSetup).toBeUndefined()
+      expect(config.default.use?.baseURL).toBe('https://display.example.test')
+      expect(config.default.metadata).toMatchObject({
+        evidenceLane: 'live-display-readonly',
+        requiredEnv: ['PLAYWRIGHT_LIVE_BASE_URL', 'PLAYWRIGHT_LIVE_API_BASE_URL'],
+      })
+    } finally {
+      process.env = previous
+    }
+  })
+
+  it('requires the dedicated river-click profile to pin exactly one worker and zero retries', async () => {
     const previous = { ...process.env }
     try {
       process.env.PLAYWRIGHT_LIVE_BASE_URL = 'https://display.example.test'
       process.env.PLAYWRIGHT_LIVE_API_BASE_URL = 'https://api.example.test'
-      const config = await import('../../playwright.live-display.config')
+      const config = await import('../../playwright.live-river-click.config')
       expect(config.default.workers).toBe(1)
       expect(config.default.retries).toBe(0)
     } finally {
       process.env = previous
     }
   })
+
 
   it('the actual config module tolerates missing URLs so the owner can publish a BLOCKED receipt (no config-preempt)', async () => {
     // The live profile module MUST NOT throw at import when the required URLs
@@ -63,12 +99,13 @@ describe('river-click live display static contract', () => {
       delete process.env.PLAYWRIGHT_LIVE_RIVER_BASIN_ID
       delete process.env.PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID
       delete process.env.PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH
-      const config = await import('../../playwright.live-display.config')
+      const config = await import('../../playwright.live-river-click.config')
       expect(config.default).toBeDefined()
       // Missing URL must NOT throw at import (loadLiveDisplayEnv is tolerated
       // into the placeholder, so the owner's BLOCKED classification is the one
       // that runs and publishes before browser work).
       expect(config.default.use?.baseURL).toBe('http://127.0.0.1:0')
+
     } finally {
       process.env = previous
     }
@@ -79,10 +116,11 @@ describe('river-click live display static contract', () => {
     try {
       process.env.PLAYWRIGHT_LIVE_BASE_URL = 'https://display.example.test'
       process.env.PLAYWRIGHT_LIVE_API_BASE_URL = 'https://api.example.test'
-      const config = await import('../../playwright.live-display.config')
+      const config = await import('../../playwright.live-river-click.config')
       const projects = config.default.projects?.map((project) => project.name)
-      expect(projects).toEqual(['live-display-readonly-chromium'])
-      expect(config.default.metadata).toMatchObject({ evidenceLane: 'live-display-readonly' })
+      expect(projects).toEqual(['live-river-click-chromium'])
+      expect(config.default.metadata).toMatchObject({ evidenceLane: 'live-river-click' })
+
     } finally {
       process.env = previous
     }
@@ -93,8 +131,9 @@ describe('river-click live display static contract', () => {
     try {
       process.env.PLAYWRIGHT_LIVE_BASE_URL = 'https://display.example.test'
       process.env.PLAYWRIGHT_LIVE_API_BASE_URL = 'https://api.example.test'
-      const config = await import('../../playwright.live-display.config')
+      const config = await import('../../playwright.live-river-click.config')
       const required = config.default.metadata?.requiredEnv as string[]
+
       expect(required).toEqual([
         'PLAYWRIGHT_LIVE_BASE_URL',
         'PLAYWRIGHT_LIVE_API_BASE_URL',

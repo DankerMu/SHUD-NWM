@@ -266,12 +266,15 @@ readback, and mode 0600.
 
 ### Requirement: Live and mocked browser evidence MUST remain distinct
 
-Only the existing `live-display` Playwright profile SHALL run the river-click
+The dedicated `live-river-click` Playwright profile SHALL run the river-click
 receipt producer. The new test SHALL remain in `e2e/live-display.spec.ts` so the
 existing exact live-spec matcher and broad `page.route('**/api/v1/**')` mock
-prohibition cover it. The profile SHALL use one worker and zero retries. The new
-metric SHALL visit only viewer-accessible `/`; the existing `/monitoring` test
-SHALL remain unchanged, and this issue SHALL add no `/ops` visit or claim.
+prohibition cover it. The dedicated profile SHALL use one worker and zero
+retries. The new metric SHALL visit only viewer-accessible `/`; the existing
+`/monitoring` test SHALL remain unchanged on the two-URL `live-display`
+profile, and this issue SHALL add no `/ops` visit or claim. A two-URL
+monitoring-only invocation SHALL NOT run river-click `globalSetup` or infer a
+`/` PASS. #1895 SHALL invoke `test:e2e:live-river-click`.
 
 Focused Node publisher/unit tests MAY import the Node owner and write only their
 private temporary fixtures. React/component tests and mocked browser specs SHALL

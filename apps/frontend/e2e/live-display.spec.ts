@@ -24,7 +24,7 @@ import {
 } from '../playwright.river-click-evidence'
 
 test.describe('live display_readonly evidence', () => {
-  test('loads live display_readonly frontend without local or control-plane requests', async ({ page, baseURL }) => {
+  test('loads live display_readonly frontend without local or control-plane requests @live-monitoring', async ({ page, baseURL }) => {
     const apiBaseURL = process.env.PLAYWRIGHT_LIVE_API_BASE_URL
     if (!baseURL) throw new Error('PLAYWRIGHT_LIVE_BASE_URL is required for live display tests.')
     if (!apiBaseURL) throw new Error('PLAYWRIGHT_LIVE_API_BASE_URL is required for live display tests.')
@@ -87,7 +87,7 @@ test.describe('live display_readonly evidence', () => {
     ).toBe(binding.expectedOrigin)
   })
 
-  test('river-click one warmup plus 20 serial GFS+IFS clicks stay below the P95 gate', async ({ page }) => {
+  test('river-click one warmup plus 20 serial GFS+IFS clicks stay below the P95 gate @live-river-click', async ({ page }) => {
     test.setTimeout(390_000)
     const startedAt = new Date().toISOString()
     // The pre-browser owner/globalSetup already ran (before any browser

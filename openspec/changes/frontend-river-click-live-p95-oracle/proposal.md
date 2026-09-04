@@ -11,7 +11,8 @@ mocked browser test.
 - Add a default-off, read-only browser-test hook that can fit to a validated live
   river geometry, find the matching currently rendered MapLibre feature, and
   dispatch that feature through the existing river `onOverlayClick` path.
-- Extend the no-mock live-display Playwright lane to resolve a caller-supplied
+- Extend the no-mock live Playwright surface with a dedicated river-click lane
+  (`test:e2e:live-river-click`) that resolves a caller-supplied
   basin/segment pin from current live APIs, discard one warmup, collect exactly
   20 warm dual-source click-to-chart samples, and enforce nearest-rank P95
   strictly below 2000 ms.

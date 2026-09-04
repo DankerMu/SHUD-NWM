@@ -5,6 +5,7 @@ import {
   RIVER_CLICK_HOOK_CODES,
   RIVER_CLICK_M11_IDENTIFIER_PATTERN,
   RIVER_CLICK_PER_MAP_DEADLINE_MS,
+  isRiverClickHookIdentity,
   type RiverClickHookCode,
 } from './constants'
 import { createRiverClickDeadline, type RiverClickDeadline } from './deadline'
@@ -160,17 +161,17 @@ export function padRiverClickBbox(bbox: [[number, number], [number, number]]): [
   return [[outMinLon, outMinLat], [outMaxLon, outMaxLat]]
 }
 
-function validIdentity(value: string): boolean {
+function validConfiguredIdentity(value: string): boolean {
   return RIVER_CLICK_M11_IDENTIFIER_PATTERN.test(value)
 }
 
 export function validateRiverClickSelectionInput(input: RiverClickHookSelectionInput): string | null {
   if (!Array.isArray(input.bbox) || input.bbox.length !== 2 || !validBbox(input.bbox)) return 'invalid bbox'
   if (!Array.isArray(input.anchor) || input.anchor.length !== 2 || !validAnchor(input.anchor)) return 'invalid anchor'
-  if (!validIdentity(input.basinId)) return 'invalid basinId'
-  if (!validIdentity(input.riverSegmentId)) return 'invalid riverSegmentId'
-  if (!validIdentity(input.basinVersionId)) return 'invalid basinVersionId'
-  if (!validIdentity(input.riverNetworkVersionId)) return 'invalid riverNetworkVersionId'
+  if (!validConfiguredIdentity(input.basinId)) return 'invalid basinId'
+  if (!validConfiguredIdentity(input.riverSegmentId)) return 'invalid riverSegmentId'
+  if (!isRiverClickHookIdentity(input.basinVersionId)) return 'invalid basinVersionId'
+  if (!isRiverClickHookIdentity(input.riverNetworkVersionId)) return 'invalid riverNetworkVersionId'
   return null
 }
 

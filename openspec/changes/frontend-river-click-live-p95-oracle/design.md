@@ -308,12 +308,15 @@ evidence; a generic test-results path does not bind the operator's current run.
 
 ### D4 — Keep live and mocked lanes distinct
 
-The existing `live-display` profile remains the only browser oracle. For this
-metric it visits the viewer-accessible `/` route only and retains the static
-prohibition on broad `page.route('**/api/v1/**')` mocks. The existing
-`/monitoring` test remains unchanged and separate. This issue does not add an
-`/ops` visit: `/ops` is operator-RBAC protected, and neither `/monitoring` nor
-`/ops` PASS may be inferred from the `/` receipt. The live config sets workers
+The existing `live-display` profile remains the two-URL `/monitoring` browser
+oracle. The river-click P95 metric uses a dedicated `live-river-click` profile
+and `test:e2e:live-river-click` command. That dedicated lane visits the
+viewer-accessible `/` route only and retains the static prohibition on broad
+`page.route('**/api/v1/**')` mocks. The existing `/monitoring` test remains
+unchanged and separate: a two-URL monitoring-only invocation must not run
+river-click `globalSetup`. This issue does not add an `/ops` visit: `/ops` is
+operator-RBAC protected, and neither `/monitoring` nor `/ops` PASS may be
+inferred from the `/` receipt. The dedicated river-click config sets workers
 exactly 1 and retries exactly 0 for this serial metric.
 
 The new pure timing/config/receipt logic has local Vitest and component
@@ -403,7 +406,8 @@ Domain packs considered:
   may warm but every sample issues fresh GFS/IFS forecast-series requests;
   exclusive JSON artifact only.
 - Public routes/entrypoints: `/` live map, existing readonly APIs, `pnpm
-  test:e2e:live-display`; hook absent unless explicitly enabled by the test.
+  test:e2e:live-display` for `/monitoring` and `pnpm test:e2e:live-river-click`
+  for the `/` P95 metric; hook absent unless explicitly enabled by the test.
 - Frontend/downstream consumers: ordinary map pointer click, river panel,
   unchanged `/monitoring` live evidence, no `/ops` claim, and #1895/#1342
   runbooks.
@@ -431,7 +435,8 @@ Boundary-surface checklist:
 
 - Shared helper roots: Playwright config/evidence helpers only; no backend shared
   helper.
-- Public entrypoints: exact gated window hook and `test:e2e:live-display`.
+- Public entrypoints: exact gated window hook, `test:e2e:live-display` for
+  `/monitoring`, and `test:e2e:live-river-click` for the `/` P95 receipt.
 - Read surfaces: current live product/segment/MVT feature/forecast response
   metadata, all bounded.
 - Write/overwrite surfaces: one explicit receipt and private temp; no-clobber.

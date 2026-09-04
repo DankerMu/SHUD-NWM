@@ -41,6 +41,11 @@ export const RIVER_CLICK_RECEIPT_FILENAME_PATTERN =
 
 export const RIVER_CLICK_M11_IDENTIFIER_PATTERN = /^[A-Za-z0-9._:-]{1,96}$/
 
+export function isRiverClickHookIdentity(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length === 0) return false
+  return new TextEncoder().encode(value).byteLength <= RIVER_CLICK_IDENTITY_MAX_BYTES
+}
+
 export const RIVER_CLICK_BLOCKED_CODES = [
   'REQUIRED_ENV_MISSING',
   'RUNTIME_UNAVAILABLE',

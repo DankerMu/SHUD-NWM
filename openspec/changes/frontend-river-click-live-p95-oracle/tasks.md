@@ -105,9 +105,10 @@ Seams under test:
   publication failure is terminal failure.
 - [x] 3.4 Keep latest-product/detail/runtime/tile reads outside forecast duplicate
   counting; never inspect response bodies for evidence. Preserve the existing
-  `/monitoring` live test unchanged, add no `/ops` assertion or inferred PASS,
-  retain the broad-API-mock prohibition, and prevent Vitest/component/mocked
-  Playwright from importing the publisher or writing a live receipt.
+  `/monitoring` live test unchanged on the two-URL `live-display` profile, add
+  no `/ops` assertion or inferred PASS, retain the broad-API-mock prohibition,
+  prevent Vitest/component/mocked Playwright from importing the publisher or
+  writing a live receipt, and keep #1895 on `test:e2e:live-river-click`.
 
 ## 4. Operator and CI integration
 

@@ -99,6 +99,8 @@ describe('river-click live config parser', () => {
     expect(failParse({ PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID: '' }).code).toBe('CONFIG_INVALID')
     expect(failParse({ PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID: '   ' }).code).toBe('CONFIG_INVALID')
     expectOk(parse({ PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID: 'seg:1-2.3_4' }))
+    expect(failParse({ PLAYWRIGHT_LIVE_RIVER_BASIN_ID: 'X'.repeat(97) }).code).toBe('CONFIG_INVALID')
+    expectOk(parse({ PLAYWRIGHT_LIVE_RIVER_BASIN_ID: 'X'.repeat(96) }))
   })
 
   it('rejects every supplied run/model/version/cycle/scenario override', () => {

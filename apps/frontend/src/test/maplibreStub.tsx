@@ -13,9 +13,34 @@ export function installMaplibreStubMap(map: unknown) {
   maplibreStubState.current = { getMap: () => map }
 }
 
-export const MaplibreMapStub = forwardRef<unknown, { children?: React.ReactNode }>(function MaplibreMapStub(props, ref) {
+type MaplibreMapStubProps = {
+  children?: React.ReactNode
+  onClick?: (event: unknown) => void
+}
+
+/**
+ * Faithful ordinary-click seam: expose the production `onClick` so a test can
+ * drive `handleM11MapClick` without going through the gated hook. Tests stash
+ * the MapLibre-shaped event on `window.__nhmsOrdinaryMapClickEvent` so the
+ * stub can forward exact layer/feature/lngLat arguments.
+ */
+export const MaplibreMapStub = forwardRef<unknown, MaplibreMapStubProps>(function MaplibreMapStub(props, ref) {
   useImperativeHandle(ref, () => maplibreStubState.current)
-  return <div data-testid="mock-maplibre-map">{props.children}</div>
+  return (
+    <div data-testid="mock-maplibre-map">
+      <button
+        type="button"
+        data-testid="mock-maplibre-ordinary-click"
+        onClick={() => {
+          const event = (window as unknown as { __nhmsOrdinaryMapClickEvent?: unknown }).__nhmsOrdinaryMapClickEvent
+          props.onClick?.(event)
+        }}
+      >
+        ordinary-click
+      </button>
+      {props.children}
+    </div>
+  )
 })
 
 export function MaplibreControlStub() {

@@ -236,7 +236,7 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
   PLAYWRIGHT_LIVE_RIVER_BASIN_ID="${PLAYWRIGHT_LIVE_RIVER_BASIN_ID-}" \
   PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID="${PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID-}" \
   PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH="$RECEIPT" \
-  corepack pnpm@10.11.0 --dir "$REPO_ROOT/apps/frontend" run test:e2e:live-display; \
+  corepack pnpm@10.11.0 --dir "$REPO_ROOT/apps/frontend" run test:e2e:live-river-click; \
   CMD_EXIT=$?; set -e; \
   CMD_END=$(date -u +%s)
   test "$CMD_EXIT" = "0"
@@ -261,6 +261,7 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
   test "$CMD_START" -le "$(stat -c '%Y' "$RECEIPT")"
   test "$(stat -c '%Y' "$RECEIPT")" -le "$CMD_END"                 # mtime inside the bracket
   test "$(stat -c '%s' "$RECEIPT")" -gt 0                          # non-empty
+  test "$(stat -c '%s' "$RECEIPT")" -le 262144                     # refuse oversized content before unbounded schema parse
   test "$(stat -c '%a' "$RECEIPT")" = "600"                        # file 0600
   test "$(stat -c '%h' "$RECEIPT")" = "1"                          # nlink 1
   uv run check-jsonschema --schemafile schemas/frontend_river_click_live_evidence.schema.json "$RECEIPT"

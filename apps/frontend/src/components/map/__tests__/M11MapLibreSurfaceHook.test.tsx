@@ -1,7 +1,8 @@
-import { act, render } from '@testing-library/react'
+import { fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { M11MapLibreSurface } from '@/components/map/M11MapLibreSurface'
+import type { M11MapOverlayInteraction } from '@/components/map/m11MapInteractions'
 import { installMaplibreStubMap } from '@/test/maplibreStub'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
 import type { M11QueryState } from '@/lib/m11/queryState'
@@ -74,28 +75,39 @@ const layer: LayerState = {
   legend: [],
 }
 
+const ORDINARY_CLICK_FEATURE = {
+  id: 'feature-1',
+  layer: { id: 'm11-discharge-line-hit' },
+  geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
+  properties: {
+    basin_id: 'basins_qhh',
+    river_segment_id: 'seg-001',
+    segment_id: 'seg-001',
+    basin_version_id: 'bv-001',
+    river_network_version_id: 'rn-001',
+  },
+}
+
+const ORDINARY_CLICK_LNGLAT = { lng: 100.5, lat: 30.5 }
+
+function ordinaryMapClickEvent() {
+  return {
+    features: [ORDINARY_CLICK_FEATURE],
+    lngLat: ORDINARY_CLICK_LNGLAT,
+    point: { x: 40, y: 40 },
+    target: { getCanvas: () => ({ style: { cursor: '' } }) },
+  }
+}
+
 function installStubMap() {
   const map = {
     loaded: () => true,
     isStyleLoaded: () => true,
     fitBounds: vi.fn(),
     project: vi.fn((coord: [number, number]) => ({ x: 40 + (coord[0] - 100) * 10, y: 40 + (coord[1] - 30) * 10 })),
-    queryRenderedFeatures: vi.fn(() => [
-      {
-        id: 'feature-1',
-        layer: { id: 'm11-discharge-line-hit' },
-        geometry: { type: 'LineString', coordinates: [[100, 30], [101, 31]] },
-        properties: {
-          basin_id: 'basins_qhh',
-          river_segment_id: 'seg-001',
-          segment_id: 'seg-001',
-          basin_version_id: 'bv-001',
-          river_network_version_id: 'rn-001',
-        },
-      },
-    ]),
+    queryRenderedFeatures: vi.fn(() => [ORDINARY_CLICK_FEATURE]),
     getCanvas: () => ({ style: { cursor: '' } }),
-    once: (event: string, callback: () => void) => {
+    once: (_event: string, callback: () => void) => {
       queueMicrotask(callback)
     },
   }
@@ -104,7 +116,7 @@ function installStubMap() {
   return map
 }
 
-function renderSurface(onOverlayClick = vi.fn()) {
+function renderSurface(onOverlayClick?: (interaction: M11MapOverlayInteraction) => void) {
   return render(
     <M11MapLibreSurface
       state={state}
@@ -237,6 +249,38 @@ describe('M11MapLibreSurface river-click hook', () => {
     expect(hook.selectRenderedRiver).toBeTypeOf('function')
     expect((window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence).toHaveProperty('selectRenderedRiver')
     expect(Object.keys(hook).length).toBe(1)
+  })
+
+  it('dispatches the same ordinary MapLibre click through onOverlayClick with the gate absent and present, without invoking the hook', () => {
+    const fireOrdinaryClick = (onOverlayClick: (interaction: M11MapOverlayInteraction) => void) => {
+      const view = renderSurface(onOverlayClick)
+      const button = view.getByTestId('mock-maplibre-ordinary-click')
+      ;(window as unknown as { __nhmsOrdinaryMapClickEvent?: unknown }).__nhmsOrdinaryMapClickEvent = ordinaryMapClickEvent()
+      fireEvent.click(button)
+      view.unmount()
+      delete (window as unknown as { __nhmsOrdinaryMapClickEvent?: unknown }).__nhmsOrdinaryMapClickEvent
+    }
+    const withoutGate = vi.fn()
+    fireOrdinaryClick(withoutGate)
+    ;(window as unknown as Record<string, unknown>).__NHMS_E2E_HOOKS__ = true
+    const withGate = vi.fn()
+    fireOrdinaryClick(withGate)
+    expect(withoutGate).toHaveBeenCalledTimes(1)
+    expect(withGate).toHaveBeenCalledTimes(1)
+    const expected = {
+      layerId: 'discharge',
+      feature: ORDINARY_CLICK_FEATURE,
+      event: expect.objectContaining({
+        lngLat: ORDINARY_CLICK_LNGLAT,
+        features: [ORDINARY_CLICK_FEATURE],
+      }),
+    }
+    expect(withoutGate.mock.calls[0][0]).toMatchObject(expected)
+    expect(withGate.mock.calls[0][0]).toMatchObject(expected)
+    expect(withoutGate.mock.calls[0][0].feature).toBe(ORDINARY_CLICK_FEATURE)
+    expect(withGate.mock.calls[0][0].feature).toBe(ORDINARY_CLICK_FEATURE)
+    expect(Number.isFinite(withoutGate.mock.calls[0][0].event.lngLat.lng)).toBe(true)
+    expect(Number.isFinite(withoutGate.mock.calls[0][0].event.lngLat.lat)).toBe(true)
   })
 
   it('removes the hook global on unmount and cannot delete a newer generation', async () => {

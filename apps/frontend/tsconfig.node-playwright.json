@@ -24,7 +24,9 @@
     "playwright.live-display.global-setup.ts",
     "playwright.config.helpers.ts",
     "playwright.live-display.config.ts",
+    "playwright.live-river-click.config.ts",
     "e2e/live-display.spec.ts",
+    "scripts/river-click-receipt-binder-core.d.mts",
     "src/lib/riverClickEvidence/**/*.ts"
   ],
   "exclude": ["**/__tests__/**", "src/test/**"]

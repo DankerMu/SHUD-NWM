@@ -44,7 +44,7 @@ function validConfigEnv() {
 
 describe('phase2 closure: actual entrypoint owns the pre-browser decision', () => {
   it('the live profile wires a REAL globalSetup that invokes the pre-browser owner before ANY browser fixture', () => {
-    const config = readFileSync(path.join(repoRoot, 'apps/frontend/playwright.live-display.config.ts'), 'utf8')
+    const config = readFileSync(path.join(repoRoot, 'apps/frontend/playwright.live-river-click.config.ts'), 'utf8')
     expect(config).toMatch(/globalSetup:\s*'\.\/playwright\.live-display\.global-setup\.ts'/)
     const setup = readFileSync(path.join(repoRoot, 'apps/frontend/playwright.live-display.global-setup.ts'), 'utf8')
     expect(setup).toMatch(/runRiverClickLiveEvidenceOwner/)
@@ -102,12 +102,10 @@ describe('phase2 closure: one absolute whole-run deadline', () => {
         if (text.includes('chartVisible')) return { chart: true, chartVisible: true, partial: false, empty: false }
         return { chart: true, partial: false, empty: false }
       }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) {
-        return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
-      }
       if (text.includes('performance.now()')) return 1500
       return undefined
     }
+    state.closeImpl = () => ({ closed: true, mapPresent: true, mapSame: true, hookSame: true })
     const page = pageOf(state)
     const result = await runRiverClickLane(
       { config: config(), page } as RiverClickLaneEnv,
@@ -136,10 +134,10 @@ describe('phase2 closure: one absolute whole-run deadline', () => {
         return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
       if (text.includes('performance.now()')) return 1500
       return undefined
     }
+    state.closeImpl = () => ({ closed: true, mapPresent: true, mapSame: true, hookSame: true })
     const attempt = await runRiverClickAttempt(
       { config: config(), page: pageOf(state) },
       identity(),
@@ -366,7 +364,6 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
         // DOM present but NOT visible (rect zero): must not count as complete.
         return { chart: true, chartVisible: false, partial: false, empty: false }
       }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) return { closed: false, mapPresent: false, mapSame: false, hookSame: false }
       if (text.includes('performance.now()')) return 1500
       return undefined
     }
@@ -393,7 +390,6 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
         // Visible rect but display:none: real visibility, not only positive rect.
         return { chart: true, chartVisible: false, partial: false, empty: false }
       }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) return { closed: false, mapPresent: false, mapSame: false, hookSame: false }
       if (text.includes('performance.now()')) return 1500
       return undefined
     }
@@ -480,10 +476,10 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
         if (text.includes('chartVisible')) return { chart: true, chartVisible: true, partial: false, empty: false }
         return { chart: true, chartVisible: false, partial: false, empty: false }
       }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
       if (text.includes('performance.now()')) return 1500
       return undefined
     }
+    state.closeImpl = () => ({ closed: true, mapPresent: true, mapSame: true, hookSame: true })
     const attempt = await runRiverClickAttempt(
       { config: config(), page: pageOf(state) },
       identity(),
@@ -647,10 +643,10 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
         return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
       if (text.includes('performance.now()')) return 1500
       return undefined
     }
+    state.closeImpl = () => ({ closed: true, mapPresent: true, mapSame: true, hookSame: true })
     const attempt = await runRiverClickAttempt(
       { config: config(), page: pageOf(state) },
       identity(),
@@ -672,10 +668,10 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
         return { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) return { closed: false, mapPresent: false, mapSame: false, hookSame: false }
       if (text.includes('performance.now()')) return 1500
       return undefined
     }
+    state.closeImpl = () => ({ closed: false, mapPresent: false, mapSame: false, hookSame: false })
     const attempt = await runRiverClickAttempt(
       { config: config(), page: pageOf(state) },
       identity(),
@@ -684,6 +680,80 @@ describe('phase2 closure: attempt observation is request-identity strict', () =>
     )
     expect(attempt.ok).toBe(false)
     if (!attempt.ok) expect(attempt.failure.code).toBe('CHART_INCOMPLETE')
+  })
+
+  it('executes the production close helper against a present river panel and preserves the exact map/hook objects', async () => {
+    const { closeRiverClickPanelInPage } = await import('../../playwright.river-click-lane-attempt')
+    const hook = { marker: 'hook-original' }
+    ;(window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence = hook
+    document.body.innerHTML = `
+      <div data-testid="m11-map-surface" id="map-original">map</div>
+      <div data-testid="m11-river-forecast-panel">
+        <button type="button" aria-label="关闭面板">close</button>
+      </div>
+    `
+    const map = document.querySelector('[data-testid="m11-map-surface"]')
+    const panel = document.querySelector('[data-testid="m11-river-forecast-panel"]')
+    expect(panel).not.toBeNull()
+    const button = panel!.querySelector('[aria-label="关闭面板"]') as HTMLButtonElement
+    button.addEventListener('click', () => panel!.remove())
+    const outcome = await closeRiverClickPanelInPage({ hook, map, budgetMs: 250, pollMs: 5 })
+    expect(outcome).toEqual({ closed: true, mapPresent: true, mapSame: true, hookSame: true })
+    expect(document.querySelector('[data-testid="m11-river-forecast-panel"]')).toBeNull()
+    expect(document.querySelector('[data-testid="m11-map-surface"]')).toBe(map)
+    expect((window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence).toBe(hook)
+    document.body.innerHTML = ''
+    delete (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
+  })
+
+  it('production close helper fails when the panel is absent or the map/hook objects change', async () => {
+    const { closeRiverClickPanelInPage } = await import('../../playwright.river-click-lane-attempt')
+    const hook = { marker: 'hook-original' }
+    ;(window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence = hook
+    document.body.innerHTML = `<div data-testid="m11-map-surface" id="map-original">map</div>`
+    const map = document.querySelector('[data-testid="m11-map-surface"]')
+    const absent = await closeRiverClickPanelInPage({ hook, map, budgetMs: 50, pollMs: 5 })
+    expect(absent.closed).toBe(false)
+
+    document.body.innerHTML = `
+      <div data-testid="m11-map-surface" id="map-original">map</div>
+      <div data-testid="m11-river-forecast-panel">
+        <button type="button" aria-label="关闭面板">close</button>
+      </div>
+    `
+    const originalMap = document.querySelector('[data-testid="m11-map-surface"]')
+    const panel = document.querySelector('[data-testid="m11-river-forecast-panel"]')!
+    const button = panel.querySelector('[aria-label="关闭面板"]') as HTMLButtonElement
+    button.addEventListener('click', () => {
+      panel.remove()
+      document.querySelector('[data-testid="m11-map-surface"]')?.remove()
+      const replacement = document.createElement('div')
+      replacement.setAttribute('data-testid', 'm11-map-surface')
+      replacement.id = 'map-replaced'
+      document.body.appendChild(replacement)
+    })
+    const changedMap = await closeRiverClickPanelInPage({ hook, map: originalMap, budgetMs: 250, pollMs: 5 })
+    expect(changedMap.closed).toBe(true)
+    expect(changedMap.mapSame).toBe(false)
+
+    document.body.innerHTML = `
+      <div data-testid="m11-map-surface" id="map-original">map</div>
+      <div data-testid="m11-river-forecast-panel">
+        <button type="button" aria-label="关闭面板">close</button>
+      </div>
+    `
+    const mapAgain = document.querySelector('[data-testid="m11-map-surface"]')
+    const panelAgain = document.querySelector('[data-testid="m11-river-forecast-panel"]')!
+    const buttonAgain = panelAgain.querySelector('[aria-label="关闭面板"]') as HTMLButtonElement
+    buttonAgain.addEventListener('click', () => {
+      panelAgain.remove()
+      ;(window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence = { marker: 'hook-replaced' }
+    })
+    const changedHook = await closeRiverClickPanelInPage({ hook, map: mapAgain, budgetMs: 250, pollMs: 5 })
+    expect(changedHook.closed).toBe(true)
+    expect(changedHook.hookSame).toBe(false)
+    document.body.innerHTML = ''
+    delete (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
   })
 })
 
@@ -734,10 +804,10 @@ describe('phase2 closure: identity-drift FAIL retains the mismatching rendered i
         return { basinId: 'basins_qhh', riverSegmentId: 'seg-NEW', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', dispatchNowMs: 1000 }
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
       if (text.includes('performance.now()')) return 1500
       return undefined
     }
+    state.closeImpl = () => ({ closed: true, mapPresent: true, mapSame: true, hookSame: true })
     const lane = await runRiverClickLane(
       { config: config(), page: pageOf(state) } as RiverClickLaneEnv,
       defaultFetch() as never,

@@ -8,16 +8,23 @@
  * the underlying objects (real Playwright injects JSHandles as actual page-side
  * objects). Dispose calls are counted on the state so tests can prove exactly
  * two disposals per attempt.
+ *
+ * Close routing is identity-based: only the imported production helper
+ * `closeRiverClickPanelInPage` may be diverted to `closeImpl`. Source text and
+ * function names are never consulted.
  */
 
 import { vi } from 'vitest'
 
+import { closeRiverClickPanelInPage } from '../../playwright.river-click-lane-attempt'
 import type { RiverClickJsHandle, RiverClickLanePageSurface } from '../../playwright.river-click-lane-preflight'
 
 export interface RiverClickFakePageState {
   listeners: Record<string, Array<(arg: unknown) => void>>
   evaluateNames: string[]
   evaluateImpl: (text: string) => unknown
+  /** Explicit state-machine close outcome. Routed only when evaluate is the
+   *  production `closeRiverClickPanelInPage` function identity. */
   closeImpl?: (captured: unknown) => unknown
   sleepMs?: number
   /** Invoked when the quiet wait begins (long waitForTimeout call). */
@@ -89,13 +96,13 @@ export function makeFakePage(state: RiverClickFakePageState): RiverClickLanePage
       //   completion value), routed through evaluateImpl as the browser stand-in.
       if (typeof expr === 'function') {
         const fn = expr as (arg: unknown) => unknown
-        const source = String(fn)
-        if (source.includes('m11-river-forecast-panel')) {
+        const captured = unwrap(args[0])
+        if (fn === closeRiverClickPanelInPage) {
           state.evaluateNames.push('timeoutMs m11-map-surface closeFn')
-          if (state.closeImpl) return state.closeImpl(unwrap(args[0]))
-          return state.evaluateImpl('timeoutMs m11-map-surface closeFn')
+          if (state.closeImpl) return state.closeImpl(captured)
+          return fn(captured)
         }
-        const value = args.length > 0 ? fn(unwrap(args[0])) : fn(undefined)
+        const value = args.length > 0 ? fn(captured) : fn(undefined)
         state.evaluateNames.push(String(value))
         return value
       }

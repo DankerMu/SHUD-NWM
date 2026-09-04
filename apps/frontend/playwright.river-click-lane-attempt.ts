@@ -54,6 +54,66 @@ export function riverClickChartStateScript(): string {
   })()`
 }
 
+export interface RiverClickPanelCloseCaptured {
+  hook: unknown
+  map: unknown
+  budgetMs: number
+  pollMs: number
+}
+
+export interface RiverClickPanelCloseOutcome {
+  closed: boolean
+  mapPresent: boolean
+  mapSame: boolean
+  hookSame: boolean
+}
+
+/**
+ * Production-owned panel close used by Playwright `page.evaluate`. jsdom tests
+ * execute this exact function; the fake page must not synthesize a close result
+ * from source-string matching.
+ */
+export function closeRiverClickPanelInPage(
+  captured: RiverClickPanelCloseCaptured,
+): Promise<RiverClickPanelCloseOutcome> | RiverClickPanelCloseOutcome {
+  const panel = document.querySelector('[data-testid="m11-river-forecast-panel"]')
+  if (!panel) return { closed: false, mapPresent: false, mapSame: false, hookSame: false }
+  const close = panel.querySelector('[aria-label="关闭面板"]')
+  if (!(close instanceof HTMLElement)) return { closed: false, mapPresent: false, mapSame: false, hookSame: false }
+  const capturedHook = captured.hook
+  const capturedMap = captured.map
+  const budgetMs = captured.budgetMs
+  const poll = captured.pollMs
+  close.click()
+  return new Promise((resolve) => {
+    const startedAt = Date.now()
+    const probe = () => {
+      const panelNow = document.querySelector('[data-testid="m11-river-forecast-panel"]')
+      const mapNow = document.querySelector('[data-testid="m11-map-surface"]')
+      const hookNow = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
+      if (!panelNow) {
+        resolve({
+          closed: true,
+          mapPresent: Boolean(mapNow),
+          mapSame: mapNow === capturedMap,
+          hookSame: hookNow === capturedHook,
+        })
+        return
+      }
+      if (mapNow !== capturedMap || hookNow !== capturedHook) {
+        resolve({ closed: false, mapPresent: Boolean(mapNow), mapSame: mapNow === capturedMap, hookSame: hookNow === capturedHook })
+        return
+      }
+      if (Date.now() - startedAt >= budgetMs) {
+        resolve({ closed: false, mapPresent: Boolean(mapNow), mapSame: mapNow === capturedMap, hookSame: hookNow === capturedHook })
+        return
+      }
+      setTimeout(probe, poll)
+    }
+    probe()
+  })
+}
+
 export interface RiverClickAttemptOptions {
   attemptDeadlineMs?: number
   pollMs?: number
@@ -513,50 +573,9 @@ export async function runRiverClickAttempt(
         // hook + map compared here are the SAME objects captured BEFORE
         // dispatch, so a replacement between dispatch and close is a FAIL. No
         // window global is added: the handles are function arguments.
-        type CloseCaptured = { hook: unknown; map: unknown; budgetMs: number; pollMs: number }
-        type CloseOutcome = { closed: boolean; mapPresent: boolean; mapSame: boolean; hookSame: boolean }
-        const closeFn = (captured: CloseCaptured): Promise<CloseOutcome> | CloseOutcome => {
-          const currentHook = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
-          const panel = document.querySelector('[data-testid="m11-river-forecast-panel"]')
-          if (!panel) return { closed: false, mapPresent: false, mapSame: false, hookSame: false }
-          const close = panel.querySelector('[aria-label="关闭面板"]')
-          if (!(close instanceof HTMLElement)) return { closed: false, mapPresent: false, mapSame: false, hookSame: false }
-          const capturedHook = captured.hook
-          const capturedMap = captured.map
-          const budgetMs = captured.budgetMs
-          const poll = captured.pollMs
-          close.click()
-          return new Promise((resolve) => {
-            const startedAt = Date.now()
-            const probe = () => {
-              const panelNow = document.querySelector('[data-testid="m11-river-forecast-panel"]')
-              const mapNow = document.querySelector('[data-testid="m11-map-surface"]')
-              const hookNow = (window as unknown as Record<string, unknown>).__nhmsRiverClickEvidence
-              if (!panelNow) {
-                resolve({
-                  closed: true,
-                  mapPresent: Boolean(mapNow),
-                  mapSame: mapNow === capturedMap,
-                  hookSame: hookNow === capturedHook,
-                })
-                return
-              }
-              if (mapNow !== capturedMap || hookNow !== capturedHook) {
-                resolve({ closed: false, mapPresent: Boolean(mapNow), mapSame: mapNow === capturedMap, hookSame: hookNow === capturedHook })
-                return
-              }
-              if (Date.now() - startedAt >= budgetMs) {
-                resolve({ closed: false, mapPresent: Boolean(mapNow), mapSame: mapNow === capturedMap, hookSame: hookNow === capturedHook })
-                return
-              }
-              setTimeout(probe, poll)
-            }
-            probe()
-          })
-        }
         outcome = await withRiverClickDeadline(
-          page.evaluate<CloseOutcome | Promise<CloseOutcome>>(
-            closeFn as (arg: unknown) => CloseOutcome | Promise<CloseOutcome>,
+          page.evaluate<RiverClickPanelCloseOutcome | Promise<RiverClickPanelCloseOutcome>>(
+            closeRiverClickPanelInPage as (arg: unknown) => RiverClickPanelCloseOutcome | Promise<RiverClickPanelCloseOutcome>,
             { hook: hookHandle, map: mapHandle, budgetMs: Math.max(0, closeBudgetMs), pollMs },
           ),
           effectiveDeadline,

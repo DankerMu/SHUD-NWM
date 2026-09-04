@@ -51,6 +51,8 @@ describe('river-click Node/Playwright typecheck gate (static wiring)', () => {
     expect(include).toContain('src/lib/riverClickEvidence/**/*.ts')
     expect(include).toContain('playwright.config.helpers.ts')
     expect(include).toContain('playwright.live-display.config.ts')
+    expect(include).toContain('playwright.live-river-click.config.ts')
+    expect(include).toContain('scripts/river-click-receipt-binder-core.d.mts')
     expect(tsconfig.compilerOptions.types).toContain('node')
   })
 
@@ -69,12 +71,16 @@ describe('river-click Node/Playwright typecheck gate (static wiring)', () => {
       'src/__tests__/riverClickSchemaNegative.test.ts',
       'src/__tests__/riverClickTypecheck.test.ts',
       'src/__tests__/runbookContract.test.ts',
+      'src/__tests__/riverClickReceiptBinderCore.test.ts',
+      'src/__tests__/riverClickFakePage.test.ts',
       'src/__tests__/riverClickLiveDisplayContract.test.ts',
       'src/__tests__/riverClickPhase2Closure.test.ts',
       'src/__tests__/riverClickTerminalPublisher.test.ts',
       'src/components/map/__tests__/M11MapLibreSurfaceHook.test.tsx',
       'src/test/maplibreStub.tsx',
       'src/test/riverClickFakePage.ts',
+      'src/test/posixFdTable.ts',
+      'src/test/riverClickThresholdFixture.ts',
       'src/lib/riverClickEvidence/__tests__/config.test.ts',
       'src/lib/riverClickEvidence/__tests__/hook.test.ts',
       'src/lib/riverClickEvidence/__tests__/preflight.test.ts',
@@ -100,6 +106,7 @@ describe('river-click Node/Playwright typecheck gate (static wiring)', () => {
       'playwright.river-click-lane.ts',
       'playwright.river-click-terminal.ts',
       'playwright.live-display.global-setup.ts',
+      'playwright.live-river-click.config.ts',
       'e2e/live-display.spec.ts',
       'src/lib/riverClickEvidence/deadline.ts',
       'src/lib/riverClickEvidence/hook.ts',
@@ -121,10 +128,16 @@ describe('river-click Node/Playwright typecheck gate (static wiring)', () => {
       'src/components/map/__tests__/M11MapLibreSurfaceHook.test.tsx',
       'src/test/maplibreStub.tsx',
       'src/test/riverClickFakePage.ts',
+      'src/test/posixFdTable.ts',
+      'src/test/riverClickThresholdFixture.ts',
       'src/lib/riverClickEvidence/__tests__/hook.test.ts',
       'src/lib/riverClickEvidence/__tests__/preflight.test.ts',
       'src/lib/riverClickEvidence/__tests__/receipt.test.ts',
       'scripts/river-click-receipt-binder.mjs',
+      'scripts/river-click-receipt-binder-core.mjs',
+      'scripts/river-click-receipt-binder-core.d.mts',
+      'src/__tests__/riverClickReceiptBinderCore.test.ts',
+      'src/__tests__/riverClickFakePage.test.ts',
       'src/lib/riverClickEvidence/__tests__/deadline.test.ts',
       'src/lib/riverClickEvidence/__tests__/requestMatching.test.ts',
     ]

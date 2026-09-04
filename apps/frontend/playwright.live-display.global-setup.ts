@@ -1,5 +1,5 @@
 /**
- * Real Playwright globalSetup for the live-display profile (#1970).
+ * Real Playwright globalSetup for the dedicated river-click profile (#1970).
  *
  * Runs BEFORE any browser fixture or worker is launched. It invokes the real
  * config-before-browser owner (runRiverClickLiveEvidenceOwner) with the REAL

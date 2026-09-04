@@ -14,6 +14,11 @@ import {
   type RiverClickTerminalInput,
 } from '../receipt'
 import type { RiverClickFailureCode } from '../constants'
+import {
+  RIVER_CLICK_EXACT_THRESHOLD_DURATIONS,
+  RIVER_CLICK_JUST_BELOW_THRESHOLD_DURATIONS,
+  riverClickExactThresholdSamples,
+} from '../../../test/riverClickThresholdFixture'
 
 /** Typed PASS fixture; `base` overrides are spread with the same shape. */
 function passInput(base: Partial<RiverClickPassInput> = {}): RiverClickPassInput {
@@ -94,6 +99,23 @@ describe('river-click PASS evidence construction', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error('fixture must build')
     expect(result.receipt.p95_ms).toBe(118)
+  })
+
+  it('refuses a PASS-shaped document whose actual sample P95 is exactly 2000', () => {
+    const result = buildRiverClickPassEvidence(passInput({
+      samples: riverClickExactThresholdSamples(RIVER_CLICK_EXACT_THRESHOLD_DURATIONS),
+    }))
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('PASS builder must refuse exact-threshold equality')
+  })
+
+  it('accepts a just-below P95 of 1999.999 as PASS', () => {
+    const result = buildRiverClickPassEvidence(passInput({
+      samples: riverClickExactThresholdSamples(RIVER_CLICK_JUST_BELOW_THRESHOLD_DURATIONS),
+    }))
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('just-below fixture must build')
+    expect(result.receipt.p95_ms).toBe(1999.999)
   })
 
   it('returns {ok:false} rather than throwing when a product cycle_time is calendar-invalid', () => {
@@ -295,6 +317,32 @@ describe('closed river-click terminal classification', () => {
     expect(receipt.gfs).not.toBeNull()
     expect(receipt.ifs).not.toBeNull()
     expect(receipt.warmup).not.toBeNull()
+  })
+
+  it('carries exact p95_ms=2000 for the shared duration fixture through a THRESHOLD_EXCEEDED terminal', () => {
+    const samples = riverClickExactThresholdSamples()
+    const result = buildRiverClickTerminalEvidence({
+      startedAt: '2026-09-02T00:00:00Z',
+      endedAt: '2026-09-02T00:05:00Z',
+      frontendOrigin: 'https://display.example.test',
+      apiOrigin: 'https://api.example.test',
+      requestedFeature: { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001' },
+      renderedFeature: { basinId: 'basins_qhh', riverSegmentId: 'seg-001', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001' },
+      gfs: { sourceId: 'GFS', basinId: 'basins_qhh', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', runId: 'run-001', modelId: 'model-gfs', cycleTime: '2026-09-02T00:00:00Z', scenario: 'forecast_gfs_deterministic' },
+      ifs: { sourceId: 'IFS', basinId: 'basins_qhh', basinVersionId: 'bv-001', riverNetworkVersionId: 'rn-001', runId: 'run-002', modelId: 'model-ifs', cycleTime: '2026-09-02T06:00:00Z', scenario: 'forecast_ifs_deterministic' },
+      warmup: { index: 0, durationMs: 300, gfsStatus: 200, ifsStatus: 200 },
+      samples,
+      failure: { code: 'THRESHOLD_EXCEEDED', stage: 'threshold', sampleIndex: null, gfsStatus: null, ifsStatus: null, message: 'nearest-rank P95 2000 >= 2000 ms' },
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('exact-threshold FAIL fixture must build')
+    expect(result.receipt.status).toBe('FAIL')
+    expect(result.receipt.failure?.code).toBe('THRESHOLD_EXCEEDED')
+    expect(result.receipt.p95_ms).toBe(2000)
+    expect(result.receipt.accepted_count).toBe(20)
+    expect(validateRiverClickEvidenceDocument(result.receipt).ok).toBe(true)
+    const asPass = { ...result.receipt, status: 'PASS' as const, failure: null }
+    expect(validateRiverClickEvidenceDocument(asPass).ok).toBe(false)
   })
 
   it('refuses a THRESHOLD_EXCEEDED terminal with all identities null (false-PASS shape)', () => {

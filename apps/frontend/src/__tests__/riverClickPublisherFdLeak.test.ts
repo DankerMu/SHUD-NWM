@@ -9,20 +9,17 @@ import {
   type RiverClickEvidenceFs,
 } from '../../playwright.river-click-evidence'
 import { buildRiverClickPassEvidence } from '../lib/riverClickEvidence/receipt'
+import { listOwnedPosixFdTable, ownedPosixFdCount } from '../test/posixFdTable'
 
 /**
  * Publisher descriptor lifecycle: zero leaked file descriptors on every
  * failure/success terminal, exact codes, and exact final/temp byte/entry sets.
- * /dev/fd is a reliable fd counter on macOS/Linux; the count includes the
- * directory read fd itself, so comparisons are relative to the baseline.
+ * Inspection uses owned POSIX surfaces (`/proc/self/fd`, `/dev/fd`) and
+ * throws when none is inspectable — never a silent skip.
  */
 
 function fdCount(): number {
-  try {
-    return fs.readdirSync('/dev/fd').length
-  } catch {
-    return -1
-  }
+  return ownedPosixFdCount()
 }
 
 function passPayload() {
@@ -87,10 +84,25 @@ function catchCode(fn: () => unknown): string {
 
 const describeFd = (name: string, fn: () => void) => {
   it(name, () => {
-    if (fdCount() < 0) return
     fn()
   })
 }
+
+describe('owned POSIX fd table inspection', () => {
+  it('throws when no owned POSIX fd table is inspectable (never silent PASS)', () => {
+    expect(() => listOwnedPosixFdTable(['/no/such/fd-table', '/also/missing'], () => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' })
+    })).toThrow(/owned POSIX fd table is uninspectable/)
+  })
+
+  it('uses the first inspectable owned candidate', () => {
+    const names = listOwnedPosixFdTable(['/proc/self/fd', '/dev/fd'], (dir) => {
+      if (dir === '/proc/self/fd') throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      return ['0', '1', '2']
+    })
+    expect(names).toEqual(['0', '1', '2'])
+  })
+})
 
 describe('river-click publisher descriptor lifecycle', () => {
   describeFd('leaks no fd on success and leaves exactly the final', () => {

@@ -290,6 +290,22 @@ describe('river-click preflight product parse', () => {
     expect(parseRiverClickPreflightProduct({ ...GFS_PRODUCT, cycle_time: '2026-09-02T00:00:00+00:00' }, 'GFS', 'basins_qhh').ok).toBe(true)
   })
 
+  it('accepts a 97-character and a 256-byte version identity and rejects empty or over-bound values', () => {
+    const id97 = 'v'.repeat(97)
+    const id256 = 'w'.repeat(256)
+    const id257 = 'x'.repeat(257)
+    const id256multibyte = 'é'.repeat(128)
+    const id257multibyte = `${'é'.repeat(127)}xé`
+    expect(new TextEncoder().encode(id256multibyte).byteLength).toBe(256)
+    expect(new TextEncoder().encode(id257multibyte).byteLength).toBe(257)
+    expect(parseRiverClickPreflightProduct({ ...GFS_PRODUCT, basin_version_id: id97, river_network_version_id: id97 }, 'GFS', 'basins_qhh').ok).toBe(true)
+    expect(parseRiverClickPreflightProduct({ ...GFS_PRODUCT, basin_version_id: id256, river_network_version_id: id256 }, 'GFS', 'basins_qhh').ok).toBe(true)
+    expect(parseRiverClickPreflightProduct({ ...GFS_PRODUCT, basin_version_id: id256multibyte, river_network_version_id: id256multibyte }, 'GFS', 'basins_qhh').ok).toBe(true)
+    expect(parseRiverClickPreflightProduct({ ...GFS_PRODUCT, basin_version_id: id257 }, 'GFS', 'basins_qhh').ok).toBe(false)
+    expect(parseRiverClickPreflightProduct({ ...GFS_PRODUCT, river_network_version_id: id257multibyte }, 'GFS', 'basins_qhh').ok).toBe(false)
+    expect(parseRiverClickPreflightProduct({ ...GFS_PRODUCT, basin_version_id: '' }, 'GFS', 'basins_qhh').ok).toBe(false)
+  })
+
   it('normalizes any valid RFC3339 offset instant to canonical UTC toISOString', () => {
     const parsed = parseRiverClickPreflightProduct({ ...GFS_PRODUCT, cycle_time: '2026-09-02T08:00:00+08:00' }, 'GFS', 'basins_qhh')
     expect(parsed.ok).toBe(true)

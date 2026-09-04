@@ -16,6 +16,7 @@ import {
 } from '../../playwright.river-click-lane'
 import type { RiverClickLaneIdentity } from '../../playwright.river-click-lane'
 import { makeFakePage, makeFakePageState, type RiverClickFakePageState } from '../test/riverClickFakePage'
+import { RIVER_CLICK_EXACT_THRESHOLD_DURATIONS } from '../test/riverClickThresholdFixture'
 
 type FakePageState = RiverClickFakePageState
 
@@ -428,17 +429,15 @@ describe('river-click lane attempt observation', () => {
         return HOOK_OK
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
-      // The scoped close runs inside ONE evaluate carrying both map-surface and
-      // the promise probe. Emit the duplicate request there, before quiet.
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) {
-        if (!state.evaluateNames.some((name) => name.includes('quiet-dup-sent'))) {
-          state.evaluateNames.push('quiet-dup-sent')
-          emit(state, 'request', requestOf('GET', seriesQuery('GFS')))
-        }
-        return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
-      }
       if (text.includes('performance.now()')) return 1500
       return undefined
+    }
+    state.closeImpl = () => {
+      if (!state.evaluateNames.some((name) => name.includes('quiet-dup-sent'))) {
+        state.evaluateNames.push('quiet-dup-sent')
+        emit(state, 'request', requestOf('GET', seriesQuery('GFS')))
+      }
+      return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
     }
     const attempt = await runRiverClickAttempt(
       { config: config(), page: makeFakePage(state) },
@@ -594,17 +593,17 @@ describe('river-click lane orchestrator', () => {
         return { ...HOOK_OK, dispatchNowMs: 1000 + attempt * 0.5 }
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) {
-        closeCount += 1
-        activeDuringClose.push({
-          request: state.listeners.request.length,
-          response: state.listeners.response.length,
-          requestfailed: state.listeners.requestfailed.length,
-        })
-        return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
-      }
       if (text.includes('performance.now()')) return 1050 + attemptCount * 0.5
       return undefined
+    }
+    state.closeImpl = () => {
+      closeCount += 1
+      activeDuringClose.push({
+        request: state.listeners.request.length,
+        response: state.listeners.response.length,
+        requestfailed: state.listeners.requestfailed.length,
+      })
+      return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
     }
     const result = await runRiverClickLane(
       { config: config(), page: makeFakePage(state) },
@@ -643,6 +642,44 @@ describe('river-click lane orchestrator', () => {
     expect(state.handleDisposals).toBe(42)
   })
 
+  it('classifies a 20-duration fixture whose sorted index 18 is exactly 2000 as THRESHOLD_EXCEEDED with p95_ms=2000', async () => {
+    const state: FakePageState = {
+      listeners: { request: [], response: [], requestfailed: [] },
+      handleDisposals: 0,
+      evaluateNames: [],
+      evaluateImpl: () => undefined,
+    }
+    let attemptCount = 0
+    state.evaluateImpl = (text) => {
+      if (text.includes('typeof window.__nhmsRiverClickEvidence.selectRenderedRiver')) return true
+      if (text.includes('selectRenderedRiver')) {
+        attemptCount += 1
+        emitSeriesPair(state, 'GFS')
+        emitSeriesPair(state, 'IFS')
+        return { ...HOOK_OK, dispatchNowMs: 1000 }
+      }
+      if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
+      if (text.includes('performance.now()')) {
+        const sampleIndex = Math.max(0, attemptCount - 2)
+        const duration = attemptCount === 1 ? 100 : RIVER_CLICK_EXACT_THRESHOLD_DURATIONS[sampleIndex]
+        return 1000 + duration
+      }
+      return undefined
+    }
+    state.closeImpl = () => ({ closed: true, mapPresent: true, mapSame: true, hookSame: true })
+    const result = await runRiverClickLane(
+      { config: config(), page: makeFakePage(state) },
+      defaultFetch() as never,
+      { deadlineMs: RIVER_CLICK_WHOLE_RUN_DEADLINE_MS, attemptDeadlineMs: 500, mapDeadlineMs: 500, pollMs: 2, quietMs: 10 },
+    )
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('exact-threshold lane must FAIL')
+    expect(result.terminal.failure?.code).toBe('THRESHOLD_EXCEEDED')
+    expect(result.terminal.p95Ms).toBe(2000)
+    expect(result.terminal.samples).toHaveLength(20)
+    expect(result.terminal.warmup).not.toBeNull()
+  })
+
   it('fails at sample 7 while preserving warmup + samples 1..6 and rendered identity from the first success', async () => {
     const state: FakePageState = {
       listeners: { request: [], response: [], requestfailed: [] },
@@ -665,12 +702,10 @@ describe('river-click lane orchestrator', () => {
         return { ...HOOK_OK, dispatchNowMs: 1000 + attemptCount * 0.5 }
       }
       if (text.includes('m11-river-panel-chart')) return { chart: true, chartVisible: true, partial: false, empty: false }
-      if (text.includes('timeoutMs') && text.includes('m11-map-surface')) {
-        return { closed: true, mapPresent: true, mapSame: true, hookSame: true }
-      }
       if (text.includes('performance.now()')) return 1050 + attemptCount * 0.5
       return undefined
     }
+    state.closeImpl = () => ({ closed: true, mapPresent: true, mapSame: true, hookSame: true })
     const result = await runRiverClickLane(
       { config: config(), page: makeFakePage(state) },
       defaultFetch() as never,

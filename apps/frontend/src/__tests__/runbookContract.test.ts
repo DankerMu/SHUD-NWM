@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, chmodSync, realpathSync } from 'nod
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { RIVER_CLICK_EXACT_THRESHOLD_DURATIONS } from '../test/riverClickThresholdFixture'
 
 const repoRoot = path.resolve(__dirname, '../../../../')
 
@@ -81,7 +82,8 @@ describe('river-click runbook contract', () => {
       expect(section).toContain(key)
     }
     expect(section).not.toMatch(/PLAYWRIGHT_LIVE_RIVER_\*_ID/)
-    expect(section).toContain('test:e2e:live-display')
+    expect(section).toContain('test:e2e:live-river-click')
+    expect(section).not.toContain('test:e2e:live-display')
     expect(section).toContain('1895')
     expect(section).toContain('必须不存在')
     expect(section).toContain('0700')
@@ -90,12 +92,12 @@ describe('river-click runbook contract', () => {
   it('bringup checklist command resolves the actual frontend package importer from repo root (pnpm --dir)', () => {
     const text = readRunbook('docs/runbooks/node-27-bringup-checklist.md')
     const section = sliceSection(text, '#### C4-river-click：', '\n## 上线判定')
-    const commandBlocks = extractBashBlocks(section).filter((block) => block.includes('test:e2e:live-display'))
+    const commandBlocks = extractBashBlocks(section).filter((block) => block.includes('test:e2e:live-river-click'))
     expect(commandBlocks.length).toBeGreaterThanOrEqual(1)
     const command = commandBlocks[0]
     // The command must use --dir so the package importer resolves even though
     // the repo root has no package.json (the parent's direct repro).
-    expect(command).toMatch(/corepack pnpm@10\.11\.0 --dir "\$REPO_ROOT\/apps\/frontend" run test:e2e:live-display/)
+    expect(command).toMatch(/corepack pnpm@10\.11\.0 --dir "\$REPO_ROOT\/apps\/frontend" run test:e2e:live-river-click/)
     expect(command).toMatch(/cd "\$REPO_ROOT" \|\|/)
     expect(command).toMatch(/\$\{PLAYWRIGHT_LIVE_BASE_URL-\}/)
     expect(command).toMatch(/\$\{PLAYWRIGHT_LIVE_RIVER_BASIN_ID-\}/)
@@ -111,7 +113,7 @@ describe('river-click runbook contract', () => {
   it('bringup checklist brackets the command with set +e so CMD_EXIT is captured before set -e aborts', () => {
     const text = readRunbook('docs/runbooks/node-27-bringup-checklist.md')
     const section = sliceSection(text, '#### C4-river-click：', '\n## 上线判定')
-    const commandBlocks = extractBashBlocks(section).filter((block) => block.includes('test:e2e:live-display'))
+    const commandBlocks = extractBashBlocks(section).filter((block) => block.includes('test:e2e:live-river-click'))
     expect(commandBlocks.length).toBeGreaterThanOrEqual(1)
     const command = commandBlocks[0]
     expect(command).toMatch(/set \+e/)
@@ -249,6 +251,77 @@ describe('river-click runbook contract', () => {
         }
       }
       expect(linkRun(), 'binder must reject a receipt under a symlinked (non-canonical) parent').toBe(false)
+
+      // Exact-threshold PASS-shaped equality must fail even when all samples
+      // complete: durations drive p95_ms=2000, not a mutated declared field.
+      const equalityDoc = JSON.parse(JSON.stringify(base))
+      ;(equalityDoc.samples as Array<Record<string, unknown>>).forEach((sample, index) => {
+        sample.duration_ms = RIVER_CLICK_EXACT_THRESHOLD_DURATIONS[index]
+      })
+      equalityDoc.p95_ms = 2000
+      const equalityPath = writeReceipt('exact-threshold.json', equalityDoc)
+      expect(runBinder(equalityPath), 'binder must reject a PASS-shaped p95_ms=2000 derived from samples').toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('CLI binder accepts a bounded valid PASS and refuses oversized padded PASS and a symlink leaf', () => {
+    const binder = path.join(repoRoot, 'apps/frontend/scripts/river-click-receipt-binder.mjs')
+    const example = path.join(repoRoot, 'schemas/examples/frontend_river_click_live_evidence.example.json')
+    const root = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-binder-bound-')))
+    try {
+      chmodSync(root, 0o700)
+      const now = Math.floor(Date.now() / 1000)
+      const cmdStart = now - 1_000
+      const cmdEnd = now + 1_000
+      const iso = (sec: number) => new Date(sec * 1000).toISOString().replace('.000Z', 'Z')
+      const base = JSON.parse(readFileSync(example, 'utf8'))
+      base.started_at = iso(cmdStart)
+      base.ended_at = iso(now)
+      base.generated_at = iso(now)
+      const { utimesSync, symlinkSync } = require('node:fs') as typeof import('node:fs')
+      const writeReceipt = (name: string, body: string | Buffer) => {
+        const p = path.join(root, name)
+        writeFileSync(p, body)
+        chmodSync(p, 0o600)
+        const mtime = new Date(((cmdStart + now) / 2) * 1000)
+        utimesSync(p, mtime, mtime)
+        return p
+      }
+      const argsFor = (receiptPath: string) => [
+        '--receipt', receiptPath,
+        '--frontend-origin', 'https://test.nwm.ac.cn',
+        '--api-origin', 'https://test.nwm.ac.cn',
+        '--basin-id', 'basins_qhh',
+        '--segment-id', 'basins_qhh_shud_reach_000001',
+        '--cmd-start', String(cmdStart),
+        '--cmd-end', String(cmdEnd),
+      ]
+      const runBinder = (receiptPath: string): { ok: boolean; stderr: string } => {
+        try {
+          execFileSync('node', [binder, ...argsFor(receiptPath)], { encoding: 'utf8', stdio: 'pipe' })
+          return { ok: true, stderr: '' }
+        } catch (error) {
+          const e = error as { stderr?: string }
+          return { ok: false, stderr: e.stderr ?? '' }
+        }
+      }
+      const valid = writeReceipt('nhms-frontend-river-click-live-evidence-valid.json', JSON.stringify(base))
+      expect(runBinder(valid).ok, 'bounded valid PASS must be accepted').toBe(true)
+
+      const paddedJson = `${JSON.stringify(base)}${' '.repeat(262145)}`
+      expect(Buffer.byteLength(paddedJson, 'utf8')).toBeGreaterThan(262144)
+      const padded = writeReceipt('nhms-frontend-river-click-live-evidence-padded.json', paddedJson)
+      const paddedRun = runBinder(padded)
+      expect(paddedRun.ok, '262145-byte padded PASS must be refused').toBe(false)
+      expect(paddedRun.stderr).toMatch(/^BINDER: /)
+
+      const leafTarget = writeReceipt('nhms-frontend-river-click-live-evidence-leaf-target.json', JSON.stringify(base))
+      const leafLink = path.join(root, 'nhms-frontend-river-click-live-evidence-leaf.json')
+      symlinkSync(leafTarget, leafLink)
+      const leafRun = runBinder(leafLink)
+      expect(leafRun.ok, 'symlink leaf must be refused').toBe(false)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -362,7 +435,8 @@ describe('river-click runbook contract', () => {
     for (const key of REQUIRED_ENV_KEYS) {
       expect(section).toContain(key)
     }
-    expect(section).toContain('test:e2e:live-display')
+    expect(section).toContain('test:e2e:live-river-click')
+    expect(section).not.toContain('test:e2e:live-display')
     expect(section).toContain('0700')
     expect(section).toContain('0600')
     expect(section).toContain('frontend_river_click_live_evidence')
@@ -396,6 +470,7 @@ describe('river-click runbook contract', () => {
       expect(section).toContain("stat -c '%h'")
       expect(section).toContain('check-jsonschema')
       expect(section).toContain('river-click-receipt-binder.mjs')
+      expect(section).toContain('262144')
       expect(section).toContain('generated_at')
       expect(section).toMatch(/\$\(id -u\)/)
       expect(section).toMatch(/-f "\$RECEIPT"/)
@@ -419,13 +494,17 @@ describe('river-click runbook contract', () => {
     // The checked-in binder owns the semantic identity/count facts; the runbook
     // must point to it rather than inline a weaker Python copy.
     const binder = readFileSync(path.join(repoRoot, 'apps/frontend/scripts/river-click-receipt-binder.mjs'), 'utf8')
-    expect(binder).toMatch(/nearestRankP95/)
-    expect(binder).toMatch(/warmup_count\s*!==\s*WARMUP_COUNT/)
-    expect(binder).toMatch(/index\s*!==\s*i\s*\+\s*1/)
-    expect(binder).toMatch(/'GFS'/)
-    expect(binder).toMatch(/'IFS'/)
+    const core = readFileSync(path.join(repoRoot, 'apps/frontend/scripts/river-click-receipt-binder-core.mjs'), 'utf8')
+    expect(binder).toMatch(/acceptRiverClickReceipt/)
     expect(binder).toMatch(/cmd-start/)
     expect(binder).toMatch(/cmd-end/)
+    expect(core).toMatch(/nearestRankP95/)
+    expect(core).toMatch(/warmup_count\s*!==\s*WARMUP_COUNT/)
+    expect(core).toMatch(/index\s*!==\s*i\s*\+\s*1/)
+    expect(core).toMatch(/'GFS'/)
+    expect(core).toMatch(/'IFS'/)
+    expect(core).toMatch(/cmd-start/)
+    expect(core).toMatch(/cmd-end/)
   })
 
   it('checklist keeps the older C4 #389 path honest about delivered vs open work', () => {

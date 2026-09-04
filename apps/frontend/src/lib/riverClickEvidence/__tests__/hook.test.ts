@@ -209,6 +209,178 @@ describe('river-click hook post-fit idle gating', () => {
     expect(deleteRiverClickHookIfOwned(hook, hook, 6, 7)).toBe(false)
   })
 
+  it('selectRenderedRiverFeature uses exact fit options, a 16x16 projected box, and only the current hit layer', async () => {
+    const map = makeMap({
+      once: vi.fn((_event: string, callback: () => void) => {
+        queueMicrotask(callback)
+      }),
+    })
+    const result = await selectRenderedRiverFeature({
+      input: selectionInput(),
+      map: map as never,
+      getOverlayHitLayerId: () => 'm11-discharge-line-hit',
+      now: () => 0,
+      deadlineMs: RIVER_CLICK_PER_MAP_DEADLINE_MS,
+    })
+    expect(result.ok).toBe(true)
+    expect(map.fitBounds).toHaveBeenCalledWith([[100, 30], [102, 32]], { padding: 48, duration: 0, maxZoom: 14 })
+    expect(map.queryRenderedFeatures).toHaveBeenCalledWith(
+      [{ x: 32, y: 32 }, { x: 48, y: 48 }],
+      { layers: ['m11-discharge-line-hit'] },
+    )
+  })
+
+  it('rejects 65 total query results as HOOK_QUERY_LIMIT and does not dispatch through the evidence hook', async () => {
+    const extras = Array.from({ length: 65 }, (_, index) => ({
+      ...makeFeature(),
+      id: `feature-${index}`,
+    }))
+    const map = makeMap({
+      queryRenderedFeatures: vi.fn(() => extras),
+      once: vi.fn((_event: string, callback: () => void) => {
+        queueMicrotask(callback)
+      }),
+    })
+    const result = await selectRenderedRiverFeature({
+      input: selectionInput(),
+      map: map as never,
+      getOverlayHitLayerId: () => 'm11-discharge-line-hit',
+      now: () => 0,
+      deadlineMs: RIVER_CLICK_PER_MAP_DEADLINE_MS,
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.code).toBe('HOOK_QUERY_LIMIT')
+    const onOverlayClick = vi.fn()
+    const controller = createRiverClickHookController({
+      getMap: () => map as never,
+      getOverlayHitLayerId: () => 'm11-discharge-line-hit',
+      now: () => 0,
+      select: selectRenderedRiverFeature,
+    })
+    const hook = createRiverClickEvidenceHook({ onOverlayClick, controller, now: () => 0 })
+    await expect(hook.selectRenderedRiver(selectionInput())).rejects.toMatchObject({ code: 'HOOK_QUERY_LIMIT' })
+    expect(onOverlayClick).not.toHaveBeenCalled()
+  })
+
+  it('accepts 64 results with exactly one matching actual feature', async () => {
+    const others = Array.from({ length: 63 }, (_, index) => ({
+      ...makeFeature(),
+      id: `other-${index}`,
+      properties: { ...makeFeature().properties, river_segment_id: `other-${index}`, segment_id: `other-${index}` },
+    }))
+    const map = makeMap({
+      queryRenderedFeatures: vi.fn(() => [...others, makeFeature()]),
+      once: vi.fn((_event: string, callback: () => void) => {
+        queueMicrotask(callback)
+      }),
+    })
+    const result = await selectRenderedRiverFeature({
+      input: selectionInput(),
+      map: map as never,
+      getOverlayHitLayerId: () => 'm11-discharge-line-hit',
+      now: () => 0,
+      deadlineMs: RIVER_CLICK_PER_MAP_DEADLINE_MS,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('64-with-one-match must succeed')
+    expect(result.output.normalized.riverSegmentId).toBe('seg-001')
+  })
+
+  it('rejects two matching features, a wrong hit layer, zero match, and drifted identities as HOOK_FEATURE_MISMATCH without dispatch', async () => {
+    const twoMatches = [makeFeature(), { ...makeFeature(), id: 'feature-2' }]
+    const wrongLayer = [{ ...makeFeature(), layer: { id: 'm11-other-hit' } }]
+    const zero = [] as unknown[]
+    const drifted = [{
+      ...makeFeature(),
+      properties: { ...makeFeature().properties, basin_version_id: 'bv-DRIFT' },
+    }]
+    const cases: Array<{ results: unknown[]; label: string }> = [
+      { results: twoMatches, label: 'two matches' },
+      { results: wrongLayer, label: 'wrong hit layer' },
+      { results: zero, label: 'zero match' },
+      { results: drifted, label: 'drifted identity' },
+    ]
+    for (const { results } of cases) {
+      const map = makeMap({
+        queryRenderedFeatures: vi.fn(() => results),
+        once: vi.fn((_event: string, callback: () => void) => {
+          queueMicrotask(callback)
+        }),
+      })
+      const result = await selectRenderedRiverFeature({
+        input: selectionInput(),
+        map: map as never,
+        getOverlayHitLayerId: () => 'm11-discharge-line-hit',
+        now: () => 0,
+        deadlineMs: RIVER_CLICK_PER_MAP_DEADLINE_MS,
+      })
+      expect(result.ok, `case must fail`).toBe(false)
+      if (!result.ok) expect(result.code).toBe('HOOK_FEATURE_MISMATCH')
+      const onOverlayClick = vi.fn()
+      const controller = createRiverClickHookController({
+        getMap: () => map as never,
+        getOverlayHitLayerId: () => 'm11-discharge-line-hit',
+        now: () => 0,
+        select: selectRenderedRiverFeature,
+      })
+      const hook = createRiverClickEvidenceHook({ onOverlayClick, controller, now: () => 0 })
+      await expect(hook.selectRenderedRiver(selectionInput())).rejects.toMatchObject({ code: 'HOOK_FEATURE_MISMATCH' })
+      expect(onOverlayClick).not.toHaveBeenCalled()
+    }
+  })
+
+  it('accepts API-derived 97-character and 256-byte version identities through selection and dispatch', async () => {
+    const id97 = 'v'.repeat(97)
+    const id256 = 'w'.repeat(256)
+    const id256multibyte = 'é'.repeat(128)
+    const over = 'x'.repeat(257)
+    const empty = ''
+    const run = async (basinVersionId: string, riverNetworkVersionId: string) => {
+      const feature = {
+        ...makeFeature(),
+        properties: {
+          ...makeFeature().properties,
+          basin_version_id: basinVersionId,
+          river_network_version_id: riverNetworkVersionId,
+        },
+      }
+      const map = makeMap({
+        queryRenderedFeatures: vi.fn(() => [feature]),
+        once: vi.fn((_event: string, callback: () => void) => {
+          queueMicrotask(callback)
+        }),
+      })
+      const onOverlayClick = vi.fn()
+      const controller = createRiverClickHookController({
+        getMap: () => map as never,
+        getOverlayHitLayerId: () => 'm11-discharge-line-hit',
+        now: () => 0,
+        select: selectRenderedRiverFeature,
+      })
+      const hook = createRiverClickEvidenceHook({ onOverlayClick, controller, now: () => 0 })
+      return hook.selectRenderedRiver(selectionInput({ basinVersionId, riverNetworkVersionId }))
+        .then((output) => ({ ok: true as const, output, onOverlayClick }))
+        .catch((error: unknown) => ({ ok: false as const, error, onOverlayClick }))
+    }
+    const accepted97 = await run(id97, id97)
+    expect(accepted97.ok).toBe(true)
+    if (accepted97.ok) {
+      expect(accepted97.output.basinVersionId).toBe(id97)
+      expect(accepted97.onOverlayClick).toHaveBeenCalledTimes(1)
+    }
+    const accepted256 = await run(id256, id256)
+    expect(accepted256.ok).toBe(true)
+    const acceptedMultibyte = await run(id256multibyte, id256multibyte)
+    expect(acceptedMultibyte.ok).toBe(true)
+    const rejectedOver = await run(over, over)
+    expect(rejectedOver.ok).toBe(false)
+    if (!rejectedOver.ok) expect((rejectedOver.error as { code: string }).code).toBe('HOOK_INVALID_INPUT')
+    expect(rejectedOver.onOverlayClick).not.toHaveBeenCalled()
+    const rejectedEmpty = await run(empty, empty)
+    expect(rejectedEmpty.ok).toBe(false)
+    if (!rejectedEmpty.ok) expect((rejectedEmpty.error as { code: string }).code).toBe('HOOK_INVALID_INPUT')
+  })
+
   it('propagates a closed hook code verbatim (code membership validated on the source)', () => {
     // Any code the source emits is drawn from RIVER_CLICK_HOOK_CODES by
     // construction; the dispatcher must reject anything outside it.

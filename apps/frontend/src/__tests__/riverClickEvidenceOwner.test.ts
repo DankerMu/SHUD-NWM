@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, rmSync, chmodSync, realpathSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, rmSync, chmodSync, realpathSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -323,7 +323,7 @@ describe('river-click evidence-owner config-before-browser terminal publication'
       try {
         execFileSync('corepack', [
           'pnpm@10.11.0', '--dir', frontendDir, 'exec', 'playwright', 'test',
-          '--config', 'playwright.live-display.config.ts',
+          '--config', 'playwright.live-river-click.config.ts',
           'e2e/live-display.spec.ts',
           '-g', '__NO_SUCH_TEST_ABORTS_BEFORE_BROWSER__',
         ], {
@@ -373,7 +373,7 @@ describe('river-click evidence-owner config-before-browser terminal publication'
       try {
         execFileSync('corepack', [
           'pnpm@10.11.0', '--dir', frontendDir, 'exec', 'playwright', 'test',
-          '--config', 'playwright.live-display.config.ts',
+          '--config', 'playwright.live-river-click.config.ts',
           'e2e/live-display.spec.ts',
           '-g', '__NO_SUCH_TEST_ABORTS_BEFORE_BROWSER__',
         ], {
@@ -416,7 +416,7 @@ describe('river-click evidence-owner config-before-browser terminal publication'
       try {
         execFileSync('corepack', [
           'pnpm@10.11.0', '--dir', frontendDir, 'exec', 'playwright', 'test',
-          '--config', 'playwright.live-display.config.ts',
+          '--config', 'playwright.live-river-click.config.ts',
           'e2e/live-display.spec.ts',
           '-g', '__NO_SUCH_TEST_ABORTS_BEFORE_BROWSER__',
         ], {
@@ -457,4 +457,51 @@ describe('river-click evidence-owner config-before-browser terminal publication'
     expect(malformed.stderr).toMatch(/FAIL: CONFIG_INVALID:/)
     expect(malformed.stderr).not.toMatch(/receipt published/)
   }, 180_000)
+
+  it('Playwright monitoring profile selects the monitoring test without river owner/globalSetup and writes no river receipt', async () => {
+    const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-river-mon-')))
+    try {
+      const receiptPath = path.join(parent, 'nhms-frontend-river-click-live-evidence-monitoring.json')
+      const repoRoot = path.resolve(__dirname, '../../../../')
+      const frontendDir = path.join(repoRoot, 'apps/frontend')
+      const { execFileSync } = await import('node:child_process')
+      let stdout = ''
+      let stderr = ''
+      let exitCode = 0
+      try {
+        const output = execFileSync('corepack', [
+          'pnpm@10.11.0', '--dir', frontendDir, 'exec', 'playwright', 'test',
+          '--config', 'playwright.live-display.config.ts',
+          'e2e/live-display.spec.ts',
+          '-g', 'loads live display_readonly frontend without local or control-plane requests @live-monitoring',
+          '--list',
+        ], {
+          cwd: frontendDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+          env: {
+            ...process.env,
+            PLAYWRIGHT_LIVE_BASE_URL: 'https://display.example.test',
+            PLAYWRIGHT_LIVE_API_BASE_URL: 'https://api.example.test',
+            PLAYWRIGHT_LIVE_RIVER_BASIN_ID: '',
+            PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID: '',
+            PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH: '',
+          },
+        })
+        stdout = output
+      } catch (error) {
+        const e = error as { status?: number; stdout?: string; stderr?: string }
+        exitCode = e.status ?? 1
+        stdout = e.stdout ?? ''
+        stderr = e.stderr ?? ''
+      }
+      expect(exitCode).toBe(0)
+      expect(stdout).toMatch(/loads live display_readonly frontend without local or control-plane requests @live-monitoring/)
+      expect(stdout).not.toMatch(/@live-river-click/)
+      expect(stderr).not.toMatch(/BLOCKED: REQUIRED_ENV_MISSING:/)
+      expect(existsSync(receiptPath)).toBe(false)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  }, 120_000)
 })

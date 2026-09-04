@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
 import { nearestRankP95, validateRiverClickDurations } from '../timing'
+import {
+  RIVER_CLICK_ABOVE_THRESHOLD_DURATIONS,
+  RIVER_CLICK_EXACT_THRESHOLD_DURATIONS,
+  RIVER_CLICK_JUST_BELOW_THRESHOLD_DURATIONS,
+} from '../../../test/riverClickThresholdFixture'
 
 describe('nearest-rank river-click P95', () => {
   it('selects nearest-rank index 18 for exactly 20 accepted durations', () => {
@@ -20,6 +25,14 @@ describe('nearest-rank river-click P95', () => {
     expect(nearestRankP95([1000])).toBeNull()
     expect(nearestRankP95(Array.from({ length: 19 }, () => 100))).toBeNull()
     expect(nearestRankP95(Array.from({ length: 21 }, () => 100))).toBeNull()
+  })
+
+  it('selects exactly 2000 from the shared duration fixture whose sorted index 18 is 2000', () => {
+    const sorted = [...RIVER_CLICK_EXACT_THRESHOLD_DURATIONS].sort((a, b) => a - b)
+    expect(sorted[18]).toBe(2000)
+    expect(nearestRankP95([...RIVER_CLICK_EXACT_THRESHOLD_DURATIONS])).toBe(2000)
+    expect(nearestRankP95([...RIVER_CLICK_JUST_BELOW_THRESHOLD_DURATIONS])).toBe(1999.999)
+    expect(nearestRankP95([...RIVER_CLICK_ABOVE_THRESHOLD_DURATIONS])).toBe(2000.001)
   })
 
   it('does not apply any smoothing or interpolation', () => {
