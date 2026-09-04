@@ -5090,9 +5090,12 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
         # CI/terminal log buffer, and the leg bypasses DB-absence stripping, so an
         # over-match here cannot be suppressed by a same-line no-database disclaimer.
         "node-22 mirror 的 CI scrollback 缓冲区调大到 5000 行",
-        # A frozen snapshot of the pre-#2034 wording of Requirement 1 in
+        # A frozen snapshot of the pre-#2028 wording of Requirement 1 in
         # openspec/changes/display-v2-national-timeline-precip-overlay/specs/
-        # canonical-precip-copyback/spec.md - the q_down-era text, which #2034 rewrote.
+        # canonical-precip-copyback/spec.md. It byte-matched that file's line 4 when
+        # #2044 (d92910bd) added it here; #2028 (07132645) then rewrote that line on
+        # master and stranded the snapshot, and #2034 has since rewritten the
+        # post-#2028 text again.
         # Inlined like the four above, but retained deliberately as corpus rather than as
         # a copy of the live spec: it is NOT expected to track that file and must not be
         # refreshed from it. An object-store copyback names a real rollback
