@@ -341,7 +341,11 @@ jq -c 'select(.record_type == "pipeline_event"
   "$NHMS_SCHEDULER_JOURNAL_ROOT"/journal/IFS/2026050100*.jsonl
 ```
 
-判读：`status` 为 `ok`/`skipped` 即镜像可用；`failed` 时看 `missing_object_key`（源目录缺失，
+判读：`status` 为 `ok` 即镜像可用。`skipped` **必须再看 `reason`**——两种 `skipped` 语义相反：
+`trees_already_mirrored` 是幂等跳过（目标已在，可用）；而 `copyback_root_matches_object_store_root`
+是在写任何字节**之前**早退（copyback root 与 object store root 解析到同一目录身份），
+共享 NFS 上一个字节都没有，读侧照样 404 `PRECIP_CYCLE_NOT_MIRRORED`——那是配置错误，
+按 `infra/env/compute.scheduler-dbfree.env.example` 两者本应分别是 NFS 与本地 `/scratch`。`failed` 时`failed` 时看 `missing_object_key`（源目录缺失，
 值形如 `canonical/IFS/2026090212/prcp_rate_or_amount` 或 `canonical/IFS/grid`）或
 `error`/`error_type`。`root`/`missing_path` 在回执里被渲染成 `[local-path]`，是脱敏结果不是故障。
 一个周期可能有多条回执（partial-array 重试会重进该 hook），只要有一条记录了镜像结果即可，
