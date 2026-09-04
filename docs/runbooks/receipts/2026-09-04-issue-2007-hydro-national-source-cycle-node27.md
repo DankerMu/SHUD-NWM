@@ -302,13 +302,47 @@ distinct sources: 2
 淘汰机制本身归 #2032，本 PR 不实现。此处的作用是把**实测放大系数**留档，让 #2032 的容量决策
 不建立在改前的假设上。`GET /api/v1/layers/discharge/cycles`（I5/#2009）是客户端提示，不是服务端白名单。
 
-## 7. 覆盖到的 Evidence Floor 项
+## 7. rebase 到 #1980 之后：golden 链的声明式增量
+
+合并前最后一次 rebase 带进了 #1980 的等价 oracle `tests/test_river_ts_template_golden.py`——它把每个
+已登记河流读模板的谓词链冻结在基 `51f9d273`，并用 `GOLDEN_SHA256` 钉住 fixture 字节，防止「拿改后
+的树回炉重录」把 oracle 变成橡皮图章。本 issue 给 `hydro-national` 模板**合法地**加了两个合取项，
+于是 CI 的 Unit Tests 在 `e40966f0` 上红：
+
+```
+FAILED tests/test_river_ts_template_golden.py::...[mvt:postgis_tile_sql_hydro_national]
+AssertionError: mvt:postgis_tile_sql_hydro_national: chain 3 changed
+```
+
+处置按该测试自己写明的出口走——**定向增量 + 改一行钉并说明理由**，不是重录：
+
+- `tests/fixtures/river_ts_templates_51f9d273.json`：`git diff --numstat` 为 **`4 0`**，四行插入、零删除、
+  零改写。只动 `mvt:postgis_tile_sql_hydro_national` 一个条目的 chain 3 与 chain 21，各加同一对合取项。
+  解析后逐条比对确认：只有这一个条目、这两条链变化；`base_sha`、`note` 与其余 19 个条目字节不变；
+  条目仍 54 条链、全文件仍 215 条链。
+- `tests/river_ts_template_registry.py`：`GOLDEN_SHA256` 移位，旁边注明这是 #2007 的**声明式行为增量**
+  而非重录，并说明为何不动 `base_sha`。
+
+链与站点的对应是反直觉的（按渲染后偏移，不按源文件顺序）：**chain 3 是 `latest_runs` 数据 CTE**
+（偏移 169），**chain 21 是身份探针的 run 发现子查询**（偏移 14283——探针 SQL 在源文件里定义得更早，
+但插值位置更靠后）。两条链各自用定向突变证明是承重的：删 CTE 侧的 `:cycle` → `chain 3 changed`，
+删探针侧的 `:cycle` → `chain 21 changed`，各 1 failed；还原后 55 passed、生产 diff 为空。
+
+第三处站点 `national_discharge_source_version` 不在该注册表内且理应如此——它不读
+`hydro.river_timeseries`，落在 #1980 的河流事实表登记范围之外；它的身份绑定由
+`tests/test_hydro_display_mvt_scaling.py` 的形状断言与本文件第 4 节矩阵行 7 的真实 DB 执行覆盖。
+
+**只报不改**：该 fixture 的文件名、`note` 字段与 `test_the_golden_was_captured_at_the_change_base`
+的措辞现在描述的是 20 个条目里的 19 个。修辞上的订正会再次移动字节从而再移一次钉，应当搭车在下一次
+本就要移钉的改动里，不单独做。
+
+## 8. 覆盖到的 Evidence Floor 项
 
 group 3 Evidence Floor 中属于本 issue 的实机项全部满足，**终态 SHA 上的读数见第 5 节**（第 2 节是
 交叉审查前的首轮读数，保留作对照）：新路由 gfs/ifs 同 cycle 各一张 z4 瓦片（200、字节非空、
 `X-Tile-Cache-Key` 不同、ETag 因字节不同而不同）、无 run 时 424、旧路由仍 200、冷/热耗时已记录、
 真实 DB 集成 22 passed。`cycles` 端点与 57 项 valid-times 属 I5/#2009，不在本 receipt。
 
-## 8. 清理
+## 9. 清理
 
 `/home/nwm/wt-2007` worktree、`/home/nwm/tmp/mvt-cache-2007*` 缓存目录、`/home/nwm/run-2007-*.{sh,log}`、`/home/nwm/run-r2*.{sh,log}`、`/home/nwm/run-matrix27*.{sh,log}`、`/home/nwm/mut27.py`、`/home/nwm/*-2007.patch` 与 `/home/nwm/{mv,hd}.*.bak` 在合并后移除；生产服务与 `/home/nwm/NWM` 工作树自始至终停留在 master。

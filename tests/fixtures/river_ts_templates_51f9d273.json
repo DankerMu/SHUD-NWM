@@ -844,6 +844,8 @@
           "rdc.segment_count > 0"
         ],
         [
+          "(CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)",
+          "(CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)",
           "h.status IN ('succeeded', 'parsed', 'published')",
           "mi.active_flag",
           "mi.river_network_version_id IS NOT NULL"
@@ -923,6 +925,8 @@
           "rdc.segment_count > 0"
         ],
         [
+          "(CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)",
+          "(CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)",
           "h.status IN ('succeeded', 'parsed', 'published')",
           "mi.active_flag",
           "mi.river_network_version_id IS NOT NULL"
