@@ -36,7 +36,9 @@ export function M11FloatingLayerSwitcher({
 }) {
   return (
     <section
-      className={cn('absolute left-4 top-4 z-[120] w-52 p-2', GLASS_PANEL)}
+      // 与右下图例同因：固定 w-52 会在右侧留下约三分之一死白（实测卡片 208px /
+      // 内容只需 145.2px）。w-max 让宽度跟着最长的一行走，max-w-52 保住原上限。
+      className={cn('absolute left-4 top-4 z-[120] w-max max-w-52 p-2', GLASS_PANEL)}
       aria-label="地图图层切换"
       data-testid="m11-floating-layer-switcher"
     >
