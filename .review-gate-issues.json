@@ -2646,6 +2646,19 @@
           "rounds": 4
         }
       ]
+    },
+    "2008": {
+      "ceilingPrs": [
+        2028
+      ],
+      "gateEntries": 3,
+      "closed": [
+        {
+          "pr": 2028,
+          "outcome": "closed",
+          "rounds": 5
+        }
+      ]
     }
   },
   "1736": {
