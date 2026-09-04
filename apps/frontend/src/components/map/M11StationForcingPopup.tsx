@@ -12,6 +12,7 @@ import {
   M11PopupLoading,
 } from '@/components/map/M11PopupChrome'
 import { cn } from '@/lib/cn'
+import { formatUnitForDisplay } from '@/lib/format'
 import { formatStationDisplayName } from '@/lib/hydroMet/displayNames'
 import {
   HYDRO_MET_STATION_SERIES_API_TUPLE_LIMIT,
@@ -442,7 +443,7 @@ function StationVariableEcharts({
         backgroundColor: 'rgba(8, 14, 32, 0.92)',
         borderColor: 'rgba(34, 211, 238, 0.35)',
         textStyle: { color: '#e2e8f0' },
-        valueFormatter: (value: number) => `${Number(value).toFixed(3)} ${unit}`,
+        valueFormatter: (value: number) => `${Number(value).toFixed(3)} ${formatUnitForDisplay(unit)}`,
       },
       legend: {
         right: 8,

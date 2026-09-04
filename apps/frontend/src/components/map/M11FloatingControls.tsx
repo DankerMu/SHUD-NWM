@@ -19,7 +19,7 @@ export interface M11FloatingLayerOption {
 }
 
 export const m11FloatingLayerOptions: M11FloatingLayerOption[] = [
-  { value: 'discharge', label: '流量', description: 'q_down / m3/s', icon: Droplets },
+  { value: 'discharge', label: '流量', description: 'q_down / m³/s', icon: Droplets },
 ]
 
 /**
@@ -36,7 +36,9 @@ export function M11FloatingLayerSwitcher({
 }) {
   return (
     <section
-      className={cn('absolute left-4 top-4 z-[120] w-52 p-2', GLASS_PANEL)}
+      // 与右下图例同因：固定 w-52 会在右侧留下约三分之一死白（实测卡片 208px /
+      // 内容只需 145.2px）。w-max 让宽度跟着最长的一行走，max-w-52 保住原上限。
+      className={cn('absolute left-4 top-4 z-[120] w-max max-w-52 p-2', GLASS_PANEL)}
       aria-label="地图图层切换"
       data-testid="m11-floating-layer-switcher"
     >
@@ -162,7 +164,10 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
 
   return (
     <section
-      className={cn('absolute bottom-4 right-4 z-[120] w-56 p-3', GLASS_PANEL)}
+      // 宽度跟着最长的图例行走：固定 w-56 会在右侧留下约三分之一死白（实测内容区
+      // 200px / 最宽行 137px）。max-w-56 保住原来的上限，未来出现更长的标签也不会
+      // 把卡片撑过地图。
+      className={cn('absolute bottom-4 right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
       aria-label="地图图例"
       data-testid="m11-floating-legend"
     >
@@ -173,10 +178,10 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
       {entries.length > 0 ? (
         <div className="space-y-1" data-testid="m11-floating-legend-entries">
           {entries.map((entry) => (
-            // label 已自带数值区间（如「500-1000 m3/s」），不再重复渲染右侧数字列。
+            // label 已自带数值区间（如「500-1000 m³/s」），不再重复渲染右侧数字列。
             <div key={`${entry.label}-${entry.color}`} className="flex items-center gap-2 text-xs text-neutral-700">
               <span className="h-3 w-7 shrink-0 rounded-sm" style={{ backgroundColor: entry.color }} aria-hidden="true" />
-              <span className="truncate">{entry.label}</span>
+              <span className="min-w-0 truncate">{entry.label}</span>
             </div>
           ))}
         </div>

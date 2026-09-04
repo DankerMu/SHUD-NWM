@@ -795,7 +795,12 @@ class _StaleRouteContextFactory:
                 start,
                 end,
             )
-            context = " ".join(_preceding_context_lines(lines, start, section_headings))
+            context = _stale_route_table_redirect_governing_text(
+                lines,
+                line_index,
+                section_headings,
+                start,
+            )
             return _StaleRouteStructuralContext(
                 governing_text=governing_text,
                 redirect_governing_text=context,
@@ -2091,7 +2096,13 @@ def _topology_line_has_node22_local_postgres_or_mirror_drift(line: str) -> bool:
     # survives removal of explicit "no database here" claims on the same line.
     if not (_topology_mentions_node22(lowered) and _topology_line_mentions_mirror(lowered)):
         return False
-    if _topology_line_mentions_rollback(lowered):
+    # The rollback leg matches a lexeme, so it also fired on object-store copyback wording
+    # ("temp-tree + rollback copy pattern"), which names a file copy and no database at
+    # all - the same class of legitimate non-database mirror #1707 carved out for the
+    # state-index file mirror. Skip the rollback leg on an object-store copy line only; the
+    # database legs below still run, so object-store wording cannot launder a real database
+    # token (node-22 + mirror + rollback + db token stays a finding).
+    if _topology_line_mentions_rollback(lowered) and not _topology_line_is_object_store_copy(lowered):
         return True
     stripped = _topology_strip_db_absence_claims(lowered)
     if _topology_mentions_database(stripped):
@@ -2152,6 +2163,16 @@ def _topology_line_has_node22_database_url_scan_drift(line: str, context: str) -
 def _topology_line_mentions_mirror(text: str) -> bool:
     lowered = _topology_normalized(text)
     return "mirror" in lowered or "镜像" in lowered
+
+
+def _topology_line_is_object_store_copy(text: str) -> bool:
+    # Bounded like #1707 D10: only the three surface forms of the one term the object-store
+    # copyback contract actually uses. `object_store` covers OBJECT_STORE_ROOT and
+    # NHMS_OBJECT_STORE_COPYBACK_ROOT after normalisation. Deliberately not `copyback`,
+    # `keyspace` or `temp-tree` - those are separate propositions, and this predicate only
+    # suppresses the rollback leg, never the database legs.
+    lowered = _topology_normalized(text)
+    return any(token in lowered for token in ("object_store", "object store", "object-store", "对象存储"))
 
 
 def _topology_line_mentions_rollback(text: str) -> bool:
@@ -7839,10 +7860,34 @@ def _stale_route_redirect_governing_text_for_line(
             and _line_is_markdown_table_row(lines[table_start - 1])
         ):
             table_start -= 1
-        return " ".join(_preceding_context_lines(lines, table_start, section_headings))
+        return _stale_route_table_redirect_governing_text(
+            lines,
+            line_index,
+            section_headings,
+            table_start,
+        )
     if _line_is_list_or_list_continuation(lines, line_index):
         return _stale_route_list_redirect_governing_text(lines, line_index, section_headings)
     return governing_text
+
+
+def _stale_route_table_redirect_governing_text(
+    lines: list[str],
+    line_index: int,
+    section_headings: tuple[str | None, ...],
+    table_start: int,
+) -> str:
+    # A markdown table row names the route in one cell and its disposition in the next, so
+    # the redirect wording is never inside the mention's own clause. Paragraph context
+    # already includes its own line and list context includes its item's lines; the table
+    # branch excluded the mention's row, which is the asymmetry that made a table-shaped
+    # "重定向到 `/`" invisible. Only the mention's own row is added - not the header, not
+    # sibling rows, not the rest of the document.
+    parts = [
+        *_preceding_context_lines(lines, table_start, section_headings),
+        lines[line_index].strip(),
+    ]
+    return " ".join(part for part in parts if part).strip()
 
 
 def _stale_route_list_redirect_governing_texts(

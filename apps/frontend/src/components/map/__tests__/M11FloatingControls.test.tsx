@@ -40,6 +40,18 @@ const dischargeLayer: LayerState = {
   ],
 }
 
+/**
+ * 两张浮层卡片共用的宽度不变量：宽度跟着内容走、只保留一个上限。
+ * jsdom 不做布局，量不出像素，所以守的是意图——回填 `w-52`/`w-56` 之类的
+ * 固定宽度会让调用方变红。真实像素由 headless 浏览器量测覆盖（见 PR 证据）。
+ */
+function expectSizedToContent(card: HTMLElement) {
+  const classes = card.className.split(/\s+/)
+  expect(classes).toContain('w-max')
+  expect(classes.filter((name) => /^w-(?!max$|fit$)/.test(name))).toHaveLength(0)
+  expect(classes.some((name) => name.startsWith('max-w-'))).toBe(true)
+}
+
 describe('M11FloatingLayerSwitcher', () => {
   it('offers only the public discharge layer and dispatches station overlay separately', async () => {
     const onQueryChange = vi.fn()
@@ -54,6 +66,11 @@ describe('M11FloatingLayerSwitcher', () => {
 
     await user.click(screen.getByRole('button', { name: /气象代站/ }))
     expect(onQueryChange).toHaveBeenCalledWith({ metStations: true })
+  })
+
+  it('sizes the card to its widest row instead of pinning a fixed width', () => {
+    render(<M11FloatingLayerSwitcher layer="discharge" />)
+    expectSizedToContent(screen.getByTestId('m11-floating-layer-switcher'))
   })
 
   it('dispatches false when disabling the station overlay toggle', async () => {
@@ -94,6 +111,11 @@ describe('M11FloatingLegend', () => {
     expect(screen.getByText('径流量图例')).toBeInTheDocument()
     expect(screen.getByTestId('m11-floating-legend-entries')).toBeInTheDocument()
     expect(screen.getByText('<500 m3/s')).toBeInTheDocument()
+  })
+
+  it('sizes the card to its widest row instead of pinning a fixed width', () => {
+    render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} />)
+    expectSizedToContent(screen.getByTestId('m11-floating-legend'))
   })
 
   it('keeps the legend tied to the hydrology layer while stations are an overlay', () => {

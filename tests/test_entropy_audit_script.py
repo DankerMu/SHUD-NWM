@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -19,6 +20,54 @@ BASELINE = REPO_ROOT / ".entropy-baseline" / "latest.json"
 AUDIT_SCRIPT = REPO_ROOT / "scripts" / "governance" / "audit_repo_entropy.py"
 BASELINE_WRITER_SCRIPT = REPO_ROOT / "scripts" / "governance" / "write_entropy_baseline.py"
 
+_REPO_REPORT_MEMO: dict[tuple[str, str | None], dict[str, object]] = {}
+
+
+def _repo_report(
+    root: Path,
+    *,
+    mode: audit_repo_entropy.AuditMode = "report",
+    structural_base_ref: str | None = None,
+) -> dict[str, object]:
+    """Return ``build_report(root, ...)``, memoized for the whole-repository root.
+
+    A full-repository ``build_report`` walks every tracked file and costs ~20s per
+    call on a developer machine; this module asks for the same
+    ``(mode, structural_base_ref)`` combination from roughly ten places, which used
+    to dominate the file's runtime.
+
+    Memoizing is sound because ``build_report`` is a pure function of the tree it
+    scans except for ``metadata.generated_at``, a wall-clock timestamp: two
+    back-to-back calls on this repository compare equal in every other key,
+    including the full ``findings`` list, and no assertion in this file reads
+    ``generated_at`` off a real report (the only ``generated_at`` occurrences are
+    literals inside synthetic baseline fixtures). No test in this file writes into
+    the repository tree, so the scanned inputs cannot change mid-session.
+
+    Two guardrails keep the memo from leaking:
+
+    * Only ``REPO_ROOT`` is memoized. A ``tmp_path`` root is built fresh by each
+      test, so it always recomputes -- which also preserves the tests that
+      ``monkeypatch.setattr(audit_repo_entropy, "build_report", ...)``, since the
+      passthrough resolves the attribute at call time.
+    * Callers get a deep copy, so a test that mutates its report cannot corrupt a
+      sibling test's view. The copy costs milliseconds against a ~20s rebuild.
+    """
+    if root != REPO_ROOT:
+        return audit_repo_entropy.build_report(
+            root,
+            mode=mode,
+            structural_base_ref=structural_base_ref,
+        )
+    key = (mode, structural_base_ref)
+    if key not in _REPO_REPORT_MEMO:
+        _REPO_REPORT_MEMO[key] = audit_repo_entropy.build_report(
+            REPO_ROOT,
+            mode=mode,
+            structural_base_ref=structural_base_ref,
+        )
+    return copy.deepcopy(_REPO_REPORT_MEMO[key])
+
 
 def _structural_public_surface_detail(*tokens: str) -> str:
     return "new public surface tokens: " + ", ".join(
@@ -27,7 +76,7 @@ def _structural_public_surface_detail(*tokens: str) -> str:
 
 
 def test_entropy_audit_json_schema_is_stable() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
 
     assert set(report) == {"metadata", "module_heatmap", "findings", "high_spread_patterns"}
     metadata = report["metadata"]
@@ -182,7 +231,7 @@ def test_entropy_audit_json_schema_is_stable() -> None:
 
 
 def test_entropy_audit_report_mode_metadata_excludes_hard_gate_fields() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT, mode="report")
+    report = _repo_report(REPO_ROOT, mode="report")
     metadata = report["metadata"]
 
     assert isinstance(metadata, dict)
@@ -195,7 +244,7 @@ def test_entropy_audit_report_mode_metadata_excludes_hard_gate_fields() -> None:
 
 
 def test_entropy_audit_current_repo_has_zero_apps_api_layer_inversion_findings() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     summary_counts = metadata["summary_counts"]
@@ -212,7 +261,7 @@ def test_entropy_audit_current_repo_has_zero_apps_api_layer_inversion_findings()
 
 
 def test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT, mode="hard-gate")
+    report = _repo_report(REPO_ROOT, mode="hard-gate")
     metadata = report["metadata"]
     production_topology_findings = [
         finding
@@ -259,7 +308,7 @@ def test_entropy_audit_markdown_report_preserves_repository_baseline() -> None:
 
 
 def test_compatibility_facade_guard_current_repo_passes_with_inventories() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     guard = metadata["compatibility_facade_guard"]
@@ -3186,7 +3235,7 @@ def test_entropy_baseline_writer_creates_latest_with_required_fields_and_no_arch
 
 
 def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
     baseline = write_entropy_baseline.build_baseline_snapshot(REPO_ROOT, report)
     tracked_v1_summary = json.loads(BASELINE.read_text(encoding="utf-8"))["summary"]
 
@@ -3545,7 +3594,7 @@ def test_entropy_baseline_writer_v1_summary_source_count_excludes_context_famili
 
 
 def test_services_orchestrator_file_count_matches_tracked_module_surface() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
     baseline = write_entropy_baseline.build_baseline_snapshot(REPO_ROOT, report)
 
     orchestrator = baseline["modules"]["services/orchestrator"]
@@ -5041,6 +5090,25 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
         # CI/terminal log buffer, and the leg bypasses DB-absence stripping, so an
         # over-match here cannot be suppressed by a same-line no-database disclaimer.
         "node-22 mirror 的 CI scrollback 缓冲区调大到 5000 行",
+        # openspec/changes/display-v2-national-timeline-precip-overlay/specs/
+        # canonical-precip-copyback/spec.md:4 - inlined verbatim like the four above. An
+        # object-store copyback names a real rollback (_copyback_object_tree_with_rollback)
+        # over files, not a database rollback mirror, so the rollback leg must stand down
+        # when the line is explicitly an object-store copy and names no database.
+        (
+            "After a successful q_down publish for `(source, cycle)`, the publisher on node-22 SHALL "
+            "mirror `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/*.nc` and the "
+            "referenced `canonical/<storage_source>/grid/<grid_id>/grid.json` (storage source "
+            "`gfs`/`IFS` via `normalize_source_id`, cycle token `%Y%m%d%H`) from `OBJECT_STORE_ROOT` "
+            "to `NHMS_OBJECT_STORE_COPYBACK_ROOT` under the same keyspace using the existing "
+            "temp-tree + rollback copy pattern. The mirror MUST be idempotent (a destination file "
+            "with identical size is skipped) and MUST NOT fail the q_down publish when the source "
+            "products are missing; the failure MUST be recorded in copyback lineage as "
+            "`precip_mirror: failed` with the missing path."
+        ),
+        # The same carve-out in its Chinese and hyphenated surface forms.
+        "node-22 的对象存储 copyback 镜像沿用 temp-tree + 回滚 拷贝模式",
+        "the node-22 object-store rollback mirror copies canonical products only",
     ],
     ids=[
         "runbook-state-index-mirror",
@@ -5048,6 +5116,9 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
         "clone-script-scratch-mirror",
         "clone-script-canonical-index",
         "ci-scrollback-buffer-not-rollback",
+        "object-store-copyback-rollback-copy-pattern",
+        "chinese-object-store-copyback-rollback-mirror",
+        "hyphenated-object-store-rollback-mirror",
     ],
 )
 def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_lines(line: str) -> None:
@@ -5079,6 +5150,22 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         # this before the fallback tuple is reached. Pinned anyway: the behaviour must hold
         # whichever leg fires, so a future narrowing of that helper cannot silently drop it.
         "node-22 的主库通过 mirror 同步给 node-27",
+        # The rest of the local-postgres tuple and the rest of the explicit-DSN family: the
+        # object-store carve-out on the rollback leg must not reach any of these legs.
+        "Operators still hit the node-22 local pg for current state.",
+        "node-22 本地 pg 仍是当前查询入口",
+        "node-22 本机 pg 仍是当前查询入口",
+        "node-22 本地 postgresql 仍是当前查询入口",
+        "node-22 本机 postgresql 仍是当前查询入口",
+        "Set NODE22-URL before running the node-22 mirror sync.",
+        "Pass node22_dsn_file=/owner-only/path to the node-22 mirror helper.",
+        # rollback + mirror + a database token that survives DB-absence stripping, with no
+        # :55433 to catch it earlier.
+        "Run the node-22 rollback mirror database sync before node-27 ingest.",
+        # The carve-out is bounded: object-store wording suppresses only the rollback leg,
+        # so a real database token on the same line still reports.
+        "The node-22 object_store rollback mirror also syncs its production database to node-27.",
+        "node-22 object_store rollback mirror still exposes :55433 for current reads",
     ],
     ids=[
         "archived-port",
@@ -5100,6 +5187,16 @@ def test_entropy_audit_topology_mirror_fallback_ignores_non_database_mirror_line
         "chinese-congku-mirror-serves-reads",
         "chinese-beiku-mirror-syncs-to-node27",
         "chinese-zhuku-mirror-syncs-to-node27",
+        "local-pg",
+        "chinese-bendi-pg",
+        "chinese-benji-pg",
+        "chinese-bendi-postgresql",
+        "chinese-benji-postgresql",
+        "node22-url-with-mirror",
+        "node22-dsn-file-underscore-with-mirror",
+        "rollback-mirror-plus-database-token",
+        "object-store-rollback-mirror-plus-database-token",
+        "object-store-rollback-mirror-plus-archived-port",
     ],
 )
 def test_entropy_audit_topology_mirror_fallback_still_reports_rollback_and_database_lines(
@@ -8336,6 +8433,73 @@ def test_route_authority_current_runbook_table_cell_redirect_context_is_per_ment
     assert redirect["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
 
 
+@pytest.mark.parametrize(
+    "row",
+    [
+        "| `/hydro-met` | 重定向到 `/`（旧别名行为不变） |",
+        "| `/hydro-met` | redirects to `/`, legacy alias behaviour unchanged |",
+    ],
+    ids=["chinese-redirect-cell", "english-redirect-cell"],
+)
+def test_route_authority_current_runbook_table_row_sees_redirect_wording_in_the_next_cell(
+    tmp_path: Path,
+    row: str,
+) -> None:
+    # A receipt records the route in one column and its disposition in the next, so the
+    # redirect wording never lands in the mention's own clause.
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        f"""
+        路由 smoke：
+
+        | 路径 | 结果 |
+        |---|---|
+        {row}
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["line"] == 5
+    assert _route_authority_token_from_finding(finding) == "/hydro-met"
+    assert finding["allowlist_state"] == "allowlisted"
+    assert finding["allowlist_reason"] == "M26 route-consolidation redirect alias"
+    assert finding["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
+    assert finding["budget_counted"] is False
+
+
+def test_route_authority_table_row_redirect_cell_does_not_launder_a_sibling_row(
+    tmp_path: Path,
+) -> None:
+    # Narrowness pin: the row is the span, not the table. A neighbouring row's redirect
+    # wording must not allowlist a current route value in a different row.
+    _write(
+        tmp_path / "docs" / "runbooks" / "current.md",
+        """
+        | 路径 | 结果 |
+        |---|---|
+        | Deep links | --path=/forecast |
+        | `/hydro-met` | 重定向到 `/`（旧别名行为不变） |
+        """,
+    )
+
+    findings = _route_authority_findings(tmp_path)
+    by_token = _route_authority_findings_by_token(findings)
+
+    assert set(by_token) == {"/forecast", "/hydro-met"}
+    drift = by_token["/forecast"]
+    redirect = by_token["/hydro-met"]
+    assert drift["line"] == 3
+    assert drift["allowlist_state"] == "unallowlisted"
+    assert drift["allowlist_reason"] is None
+    assert drift["budget_counted"] is True
+    assert redirect["line"] == 4
+    assert redirect["allowlist_state"] == "allowlisted"
+    assert redirect["allowlist_key"] == "stale-display-route-token:m26-route-consolidation-or-redirect"
+
+
 def test_route_authority_current_runbook_same_table_cell_no_delimiter_redirect_context_is_per_mention(
     tmp_path: Path,
 ) -> None:
@@ -8968,9 +9132,7 @@ def _findings_by_check(
 ) -> list[dict[str, object]]:
     return [
         finding
-        for finding in audit_repo_entropy.build_report(root, structural_base_ref=structural_base_ref)[
-            "findings"
-        ]
+        for finding in _repo_report(root, structural_base_ref=structural_base_ref)["findings"]
         if finding["check_id"] == check_id
     ]
 
@@ -8980,7 +9142,7 @@ def _route_authority_findings(root: Path) -> list[dict[str, object]]:
 
 
 def _compatibility_facade_guard(root: Path, structural_base_ref: str) -> dict[str, object]:
-    report = audit_repo_entropy.build_report(root, structural_base_ref=structural_base_ref)
+    report = _repo_report(root, structural_base_ref=structural_base_ref)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     guard = metadata["compatibility_facade_guard"]
@@ -8989,7 +9151,7 @@ def _compatibility_facade_guard(root: Path, structural_base_ref: str) -> dict[st
 
 
 def _scoped_agent_context(root: Path) -> dict[str, object]:
-    report = audit_repo_entropy.build_report(root)
+    report = _repo_report(root)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     context = metadata["scoped_agent_context"]
@@ -9292,7 +9454,7 @@ def _baseline_archive_files(baseline_dir: Path) -> list[Path]:
 
 
 def _structural_budget(root: Path, *, structural_base_ref: str | None = None) -> dict[str, object]:
-    report = audit_repo_entropy.build_report(root, structural_base_ref=structural_base_ref)
+    report = _repo_report(root, structural_base_ref=structural_base_ref)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     budget = metadata["structural_file_budget"]

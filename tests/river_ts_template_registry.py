@@ -52,7 +52,28 @@ GOLDEN_FIXTURE = REPO_ROOT / "tests" / "fixtures" / f"river_ts_templates_{GOLDEN
 #: regeneration carries it along unchanged and the provenance check cannot see
 #: the re-capture; this pin can, and it makes any re-capture a one-line diff a
 #: reviewer must approve on purpose (review #1996, C10).
-GOLDEN_SHA256 = "1371c74b93b6bb6269ed4853b3de392243e868af10e8690c6fa7ba2c4b545d41"
+#:
+#: Moved for #2007, and that move is a DECLARED BEHAVIOURAL DELTA, not a
+#: re-capture. #2007 binds the national discharge layer's run selection to the
+#: requested `(source, cycle)` identity, which adds these two NULL-guarded
+#: conjuncts to two of `mvt:postgis_tile_sql_hydro_national`'s chains:
+#:
+#:     (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)
+#:     (CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)
+#:
+#: chain 3 is the `latest_runs` data CTE and chain 21 is the
+#: `source_identity_stats` probe's run-discovery sub-select — the two
+#: run-selection sites inside that one statement, in the RENDERED statement's
+#: order, which is the reverse of their order in `services/tiles/mvt.py` (the
+#: probe is a local built earlier and interpolated later). Each index was
+#: confirmed by deleting that site's conjunct and reading which chain reddened.
+#:
+#: The fixture was NOT regenerated. The change that moved this pin inserts four
+#: JSON lines and deletes none: nothing was removed or rewritten, the entry
+#: keeps its 54 chains and the file its 215, and all 19 other entries are
+#: byte-identical to the `51f9d273` capture. `base_sha` is therefore left
+#: alone — every other entry genuinely still comes from that base.
+GOLDEN_SHA256 = "d104d1c69cea55cdb86bd8a44d90d8f93c621580b43f74744f6b5cca7cd5a453"
 
 
 def golden_sha256() -> str:
