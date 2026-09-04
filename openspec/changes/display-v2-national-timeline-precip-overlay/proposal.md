@@ -31,6 +31,7 @@
 - `map-first-layout-conformance`: 顶部导航高度从 56px 改为 84px（V2.0 header），底部时间轴/控制条 64px（`m11VisualTokens.timelineHeight`）重新挂载并成为布局 oracle 的一部分。
 - `overview-data-contracts`（追加）：bootstrap 冷延迟预算随目录内含交集查询重新实测；cycles / valid-times / precip index 请求明确在 bootstrap 关键路径之外。
 - `national-overview-page`: header 品牌标题文案/字号与赞助商尺寸。
+- `frontend-visual-conformance`: 布局 token 基线的顶部导航高度由 56px 改为 84px（`SiteHeader` 品牌 header），与 `map-first-layout-conformance` 的 84px 顶栏同一口径；`docs/spec/06B_frontend_ui_design_spec.md` 与 `apps/frontend/src/index.css` 的 `--m11-nav-height` 同步。
 
 ## Impact
 

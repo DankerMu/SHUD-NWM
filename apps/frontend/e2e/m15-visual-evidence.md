@@ -60,8 +60,9 @@ retain the full three-viewport coverage above. The canonical state matrix covers
 
 ## Review Checklist
 
-- Top navigation remains visually stable at the 06B 56px token. A rendered 57px border-box height
-  is acceptable because the header includes a 1px bottom border.
+- Top navigation remains visually stable at the 06B 84px token (the V2.0 `SiteHeader` brand
+  header). The rendered border-box height is exactly 84px: the header uses `shadow-md` and has
+  no bottom border, so the 1px tolerance the retired M26 NavBar needed no longer applies.
 - M11 map-first routes keep the timeline visible, at least 64px tall, and vertically separated from
   the map surface.
 - Required desktop viewports have no horizontal document scroll.
@@ -80,7 +81,7 @@ retain the full three-viewport coverage above. The canonical state matrix covers
 - Exact map tile pixels are not gated because the evidence spec mocks API data and stubs external
   map assets with deterministic neutral responses while inspecting layout surfaces, not a production
   map-tile backend.
-- Header height may be `56px` content-box or `57px` rendered border-box.
+- Header height is `84px` content-box and `84px` rendered border-box (no bottom border).
 - Text wrapping inside panels is acceptable when it does not overflow, overlap, or hide controls.
 - Screenshot timestamps may differ between local and CI runs. SHA values must remain real commit
   hashes: all runs trace to checked-out git `HEAD`; explicit evidence SHA environment variables only

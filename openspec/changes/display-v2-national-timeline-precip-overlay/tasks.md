@@ -1,9 +1,10 @@
 ## 1. Header brand (national-overview-page)
 
-- [ ] 1.1 `apps/frontend/src/components/layout/SiteHeader.tsx`：标题改为 `全国水文模拟系统（V2.0）`，`text-[28px] font-extrabold tracking-wide`，header `h-[84px]`，赞助商 `h-14`；检查 `AppShell.tsx` 对 header 高度的布局假设（地图区高度/偏移）。
-- [ ] 1.2 vitest：断言标题文案（全角括号）、bold 类与赞助商尺寸类。
+- [x] 1.1 `apps/frontend/src/components/layout/SiteHeader.tsx`：标题改为 `全国水文模拟系统（V2.0）`，`text-[28px] font-extrabold tracking-wide`，header `h-[84px]`，赞助商 `h-14`；检查 `AppShell.tsx` 对 header 高度的布局假设（地图区高度/偏移）。
+- [x] 1.2 vitest：断言标题文案（全角括号）、bold 类、header `h-[84px]` 与赞助商尺寸类及 `object-contain`。
+- [x] 1.3 84px 基线同步（self-audit SC-1）：新增 change 内 `specs/frontend-visual-conformance/spec.md`（`## MODIFIED Requirements` 完整复制 `UI tokens and component proportions follow the design spec` 的两个 scenario，仅把顶导航 56px 改为 84px），`proposal.md` Modified Capabilities 加入该 capability；同步 `docs/spec/06B_frontend_ui_design_spec.md:143`（`高度：56px` → 84px）与 `apps/frontend/src/index.css` 第 46 行注释与第 69 行 `--m11-nav-height`（56px → 84px）。84px 唯一来源仍是 `SiteHeader.tsx` 的 className；`m11VisualTokens.navHeight` 保持 `'0px'` 不动。
 
-Evidence Floor：本地 `cd apps/frontend && pnpm exec tsc --noEmit -p tsconfig.app.json && pnpm test`（SiteHeader 用例）+ `pnpm build`（`pnpm build` 是裸 `vite build`，不做类型检查，tsc 不可省）。
+Evidence Floor：本地 `cd apps/frontend && pnpm exec tsc --noEmit -p tsconfig.app.json && pnpm test`（SiteHeader 用例） + `pnpm build`（`pnpm build` 是裸 `vite build`，不做类型检查，tsc 不可省） + `openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive`；本地 dev server 在 1920×1080 与 1280×900 视口自查 header 实测高度 84px 且 `document.body.scrollWidth <= innerWidth`（截图随 I15 的 node-27 receipt 汇总）。
 
 ## 2. National river density (national-river-density)
 
