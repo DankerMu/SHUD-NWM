@@ -3101,3 +3101,23 @@ flag shows the same pattern the round-intent caveat (rotation should be
 bought by breadth of the diff, not by a class repeat alone) is worth
 promoting from caveat to rule. Reversal still requires the attribution-
 schema, round-intent and round-role repairs plus maintainer review.
+
+## Revisit 2026-09-04（PR #2020 / issue #2004 合并后 audit 再次 DECIDABLE）
+
+样本 **166** 个多轮 merged PR，later-round catches **core=155 vs rotated=302**，
+与上一条同值。**维持 keep**，但本条的实质内容是：**本 PR 对该裁定贡献为零，不构成
+任何一侧的证据。**
+
+PR #2020 是 `rounds: 1` 的单轮 PR（Round 1 双镜 correctness / spec-compliance 均返回
+`Findings: None`，零候选发现，故 Phase 4.5 未派 verifier、未起修复轮），`catches` 为
+空数组。它既不进入 166 的多轮分母，也不向 core/rotated 任一侧加数。之所以仍记一条，
+是因为 audit 的 DECIDABLE 义务按「下一个 issue 开工前必须处置」触发，而不是因为有新证据。
+
+因此本条**不重复**「方向不变且压倒性」这类措辞——那会把一次零信息的记账伪装成一次确认。
+累计比值仍支持 keep，keep 按 autonomous default 维持，无行为变更。
+
+前几条登记的三项工具缺口（`round_lenses` 为 round-1 子集/相同时不应计入分母、Phase 7
+终审轮应排除出轮换归因或单列 `final_review` 桶、round-intent 未被记录）**一条都未修**，
+且至今**没有对应的 tracked issue**（`gh issue list --search "loop_log_audit rotation_attribution"`
+返回空）。在修好之前，基于该比值的 keep/cut **翻转**仍须 maintainer 人的裁定，不走
+autonomous default——这一约束自 2026-08-20 起未变。

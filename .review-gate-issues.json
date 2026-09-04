@@ -2568,6 +2568,17 @@
           "rounds": 4
         }
       ]
+    },
+    "2004": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2020,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
     }
   },
   "1736": {
