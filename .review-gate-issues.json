@@ -2614,12 +2614,19 @@
       ]
     },
     "1980": {
-      "ceilingPrs": [],
+      "ceilingPrs": [
+        2018
+      ],
       "closed": [
         {
           "outcome": "superseded-by-split",
           "pr": 1996,
           "rounds": 4
+        },
+        {
+          "pr": 2018,
+          "outcome": "superseded-by-split",
+          "rounds": 5
         }
       ],
       "gateEntries": 4
