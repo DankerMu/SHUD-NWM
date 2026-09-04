@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: National river-network tiles use the denser stream_type threshold table
-The national river-network MVT SQL SHALL filter `core.river_segment.stream_type` with the threshold table z≤4 → ≥4, z5 → ≥3, z6 → ≥2, z7 → ≥1, z≥8 → ≥1 (one class denser than the previous z≤4 → 5 / z5 → 4 / z6 → 3 / z7 → 2 table), and `NATIONAL_RIVER_NETWORK_QUERY_VERSION` SHALL be bumped to `stream-type-aggregate-v3` so cached tiles are regenerated. The threshold lives in ONE `CASE` expression inside the single SQL string that `postgis_tile_sql(layer: str) -> str` returns for `"river-network-national"`; zoom is a SQL bind (`:z`), not a Python argument, so the assertion seam is substring matching on that one string. The identically shaped `CASE` inside the `hydro-national` SQL is NOT changed by this requirement. The `CASE` is today built once in a `source_cte` shared by BOTH `"river-network"` (per-basin, per-segment, no aggregation) and `"river-network-national"` (the `if layer in {"river-network", "river-network-national"}` branch), so the v3 literals MUST be applied only when `layer == "river-network-national"`; the per-basin `river-network` layer SHALL keep the v2 table unchanged, because at z7 it would otherwise emit the full basin network per tile and the binding limit there is `MVT_MAX_FEATURES` (10 000), not the coordinate budget: measured on node-27 over the three densest active networks at the z7 tolerance, the worst per-basin z7 tile grows from 5 998 to 10 870 features under Type>=1 (basins_jialingjiang_rivnet_vbasins, tile 101/52) while its coordinate total stays at 38 014, well under 50 000. The feature count alone puts that tile over the budget. Nothing in the go/no-go measurement covers that layer.
+The national river-network MVT SQL SHALL filter `core.river_segment.stream_type` with the threshold table z≤4 → ≥4, z5 → ≥3, z6 → ≥2, z7 → ≥1, z≥8 → ≥1 (one class denser than the previous z≤4 → 5 / z5 → 4 / z6 → 3 / z7 → 2 table), and `NATIONAL_RIVER_NETWORK_QUERY_VERSION` SHALL be bumped to `stream-type-aggregate-v3` so cached tiles are regenerated. The threshold lives in ONE `CASE` expression inside the single SQL string that `postgis_tile_sql(layer: str) -> str` returns for `"river-network-national"`; zoom is a SQL bind (`:z`), not a Python argument, so the assertion seam is substring matching on that one string. The identically shaped `CASE` inside the `hydro-national` SQL is NOT changed by this requirement. The `CASE` is today built once in a `source_cte` shared by BOTH `"river-network"` (per-basin, per-segment, no aggregation) and `"river-network-national"` (the `if layer in {"river-network", "river-network-national"}` branch), so the v3 literals MUST be applied only when `layer == "river-network-national"`; the per-basin `river-network` layer SHALL keep the v2 table unchanged, because at z7 it would otherwise emit the full basin network per tile and the binding limit there is `MVT_MAX_FEATURES` (10 000), not the coordinate budget: measured on node-27 over the three densest active networks at the z7 tolerance, the worst per-basin z7 tile grows from 5 998 to 10 870 features under Type>=1 (basins_jialingjiang_rivnet_vbasins, tile 101/52) while its coordinate total stays at 38 014, well under 50 000. The feature count alone puts that tile over the budget. Those three-network numbers are recorded in the appendix of the same receipt; nothing in the national-layer go/no-go sweep itself covers this layer.
 
 #### Scenario: Threshold table is encoded in the river-network SQL string
 - **WHEN** `postgis_tile_sql("river-network-national")` is generated
@@ -168,10 +168,14 @@ value of `collection_coordinate_limit`.
 CTE, downstream of `bounded_rows`); the generalisation that does drive `ST_NPoints` is the hardcoded
 tolerance CASE inside `source_cte`.
 
-The "before" numbers SHALL be produced in the same run as the "after" numbers, by generating the v2 SQL
-string from the v3 one through a substitution of the four threshold literals that first asserts the
-threshold CASE is unique in the string and matches the expected source table. The receipt SHALL record
-both the measurement commit SHA and the fact that these four literals are the only bytes that differ.
+The "before" numbers SHALL be produced by running the pre-change SQL from a checkout of the change's merge
+base, and the "after" numbers from a checkout at the change head, against the same database. Substituting
+the four threshold literals inside the post-change SQL string SHALL NOT be used: once the collection budget
+window lands, that substituted string still contains the window, so its `coordinate_count` is capped at the
+bound limit and the before-numbers are wrong for exactly the tiles that were failing. The receipt SHALL
+record the measurement commit SHA, the baseline SHA, and a content anchor that survives a rebase -- the
+generated SQL digest of every layer -- so a reader can confirm that no layer other than the one under test
+moved between the two runs.
 These columns are outputs of the tile SQL (`services/tiles/mvt.py`, final `SELECT`) and are read by
 running that SQL directly against node-27's database, not from the tile HTTP route, which does not expose
 them.
@@ -201,7 +205,11 @@ them.
 - **THEN** it records at least two `z >= 9` national river tiles, each generated twice by running the SQL directly rather than through the route, since a second route request would be served from `map.tile_cache` or the file cache and prove nothing
 - **AND** the sampled tiles are chosen from the unbounded-limit run as ones that actually truncate, having `coordinate_count` above the collection limit or `feature_count` at the feature limit
 - **AND** the two generations of each sampled tile are byte-identical
-- **AND** if no `z >= 9` tile truncates, the receipt records "no valid sample" rather than recording a pass
+- **AND** if no `z >= 9` tile truncates at the layer's production collection limit, the receipt SHALL instead force the
+  truncation path by binding `:collection_coordinate_limit` below a sampled tile's own total, generate each forced
+  case under more than one execution-plan shape, and record the digests; a receipt that records "no valid sample" is
+  conforming only when even the forced construction is unavailable, and reporting a pass from untruncated tiles alone
+  is never conforming
 
 ### Requirement: Frontend national river paint is not dimmed at low zoom
 `m11NationalRiverPaint` SHALL apply the `dimmed` opacity discount only at zoom ≥ 6 via a zoom-interpolated expression, SHALL use wider z3–z5 line-width stops for trunk classes, and SHALL give the newly visible classes a non-zero opacity where the denser SQL now returns them: the v3 table returns `Type ≥ 2` at z6 and `Type ≥ 1` at z7, while today's `line-opacity` stops list only `Type 5..2` at z7 (`Type 1` falls to the `match` default `0`) and have no z6 stop at all (so `Type 2` interpolates to ≈0.25 and `Type 1` to 0 at z6). Those features would be fetched and drawn invisibly. The paint MUST therefore render `Type 2` at z6 with opacity ≥ 0.4 and `Type 1` with a non-zero opacity at z6 and ≥ 0.3 at z7.

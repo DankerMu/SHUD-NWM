@@ -1,7 +1,11 @@
 # Receipt: national river density v3 + fair collection budget (issue #2005, PR #2025)
 
 - Date: 2026-09-04 (node-27 local time)
-- Measured SHA: `e1bd2547d85227673716a24d1e8f020696a980c3` (PR #2025 head)
+- Measured SHA: `76a08fe9bbba4bac0cdd46100ae8eb721e10cfa6` — see below. The measurement ran at
+  `e1bd2547d85227673716a24d1e8f020696a980c3`, which was the PR head at the time and was rebased away
+  afterwards; that hash is now a dangling object and will not resolve in a fresh clone. The surviving commit with
+  the same two runtime files is `76a08fe9`, and the durable anchor is the five SQL digests below, which any reader
+  can recompute.
 - Baseline SHA: `1b56648b` (node-27 `/home/nwm/NWM`, master at measurement time)
 - Host: node-27, `postgresql://nhms_display_ro@127.0.0.1:55432/nhms`, read-only role, SELECT only
 - Method: the shipped `postgis_tile_sql("river-network-national")` executed with binds from
@@ -25,10 +29,14 @@
 |---|---|
 | `feature_coordinate_count < 50000` on every tile | **True** (max 19528) |
 | `feature_coordinate_overflow_count == 0` on every tile | **True** |
-| `coordinate_count <= 120000` on every tile | **True** (max 86160) |
+| `coordinate_count <= 120000` on every tile | **True** (max 86160 over the specified z3-z7 set; 114377 over every tile measured, at 0/0/0) |
 | production bind and unbounded (1e9) bind report equal `coordinate_count` | **True** (zero tiles truncated) |
 
 No zoom rolls back. The v3 threshold table ships as specified.
+
+Read the headroom from 114377, not from 86160. The specified measurement set is z3 to z7, and 86160 is its
+maximum, but z0 to z2 were measured too (see below) and 0/0/0 sits at 114377 of the 120000 limit. That is the
+number the residual-risk section is about.
 
 ## Per-zoom summary
 
@@ -128,9 +136,14 @@ planner shapes: default, `max_parallel_workers_per_gather = 4` with zero paralle
 | 3/6/3 | 15 000 | `5ea0d499b77eb17c53194c0a7033e093` | 12 925 | 9 |
 | 3/6/3 | 40 000 | `a7db4e9c2f8821a5d09a65cdf8f83f9b` | 38 531 | 23 |
 
-All three planner shapes produced the identical digest in every case: 24 generations, 8 distinct tiles,
-zero divergence. This is the evidence the `river_segment_id` tiebreak exists to produce, and it covers
-the truncating case rather than the trivially-equal untruncated one.
+All three planner shapes produced the identical digest in every case: 24 generations, zero divergence.
+Count them honestly: 4 distinct tiles x 2 bound limits = 8 cases, x 3 planner shapes = 24 generations.
+Six of the 8 cases actually truncate. The two that do not are `9/405/209` and `9/404/208` at the 40000
+bind, whose totals (22592 and 18090) are below that bind, so those two rows reproduce the untruncated
+values and prove only that an untruncated tile is stable. The truncating evidence is therefore 6 cases,
+of which 2 are at `z >= 9` -- the row shape where `"Type"` ties massively and the `river_segment_id`
+tiebreak is the only thing pinning the cut point. That is the claim this section supports; it is not
+8 tiles.
 
 ## Round-robin admission order
 
@@ -146,6 +159,13 @@ The spec requires that no network hold an admitted row of `network_rank = k + 1`
 At z<=8 the merged rows mean each network contributes at most five rows, so truncation admits every
 network's trunk class before any network's second class, which is exactly the intended behaviour: 23 of
 23 networks keep their strongest class rather than one dense basin consuming the budget.
+
+Note what the zero in that last column does and does not prove. In all three cases the highest admitted
+`network_rank` is 1, or only one network is present, so the spec's stated violation -- a network holding an
+admitted rank `k + 1` row while another network's rank `k` row was dropped -- has no opportunity to occur.
+The discriminating datum is the adjacent one: at `3/6/3` bound to 40000, 23 of 23 networks each keep
+exactly one row. If `network_rank` stopped leading the global order, a dense network would take several
+rows and starve others, and that count would collapse.
 
 ## Notes and residual risk
 
@@ -164,6 +184,30 @@ network's trunk class before any network's second class, which is exactly the in
   there, but the collection-limit raise does apply.
 - Cold generation at z0 to z2 is 3.3 to 4.0 seconds. Prewarm covers z3 to z5 only.
 
+## Appendix: the per-basin layer, and why it keeps the v2 table
+
+The go/no-go above covers `river-network-national` only. The single-basin `river-network` layer shares the
+same `source_cte`, so the decision to leave it on v2 needed its own number. Measured on node-27 against the
+three densest active networks, per-segment at the z7 tolerance of 200 m, assigning each segment to the tile
+containing its centroid. That assignment undercounts, since a segment crossing a tile boundary is counted
+once, so these are lower bounds.
+
+| network | worst z7 tile | v2 (Type>=2) features / coords | v3 (Type>=1) features / coords |
+|---|---|---|---|
+| basins_shj_nj_rivnet_vbasins | 107/45 | 2 750 / 18 154 | 5 424 / 36 178 |
+| basins_jialingjiang_rivnet_vbasins | 101/52 | 5 998 / 20 716 | **10 870** / 38 014 |
+| basins_longmen_zhi_sanmenxia_rivnet_vbasins | 102/50 | 4 564 / 16 674 | 8 832 / 29 842 |
+
+The binding limit for this layer is `MVT_MAX_FEATURES` (10 000), not the coordinate budget: the worst
+coordinate total under v3 is 38 014, comfortably under 50 000, while Jialingjiang's feature count reaches
+10 870 on one z7 tile. This is also the correction of a rationale that shipped earlier in the change and
+that a review found false -- the old text claimed a dense basin already exceeded 50 000 coordinates in one
+z7 tile, which the middle column disproves. The per-basin layer carries no budget window, so exceeding
+`MVT_MAX_FEATURES` there is a hard failure rather than a degradation.
+
+These numbers back the rationale at `services/tiles/mvt.py` (the `stream_type_thresholds` comment),
+`specs/national-river-density/spec.md` and `design.md` D7.
+
 ## Per-tile data
 
 The full per-tile table is machine-generated at
@@ -171,4 +215,5 @@ The full per-tile table is machine-generated at
 before and after values of `feature_coordinate_count`, `feature_coordinate_overflow_count`,
 `coordinate_count`, `length(tile)`, plus the after-side untruncated `coordinate_count`, the truncation
 flag, the feature count and the cold generation time. It covers the 516 China tiles at z3 to z7, the
-three z0 to z2 tiles, and the eight z9 samples.
+three z0 to z2 tiles, and the eight z9 samples -- 528 rows, because z2 contributes two tiles (`2/3/1`
+and the empty arctic `2/3/0`), not one.
