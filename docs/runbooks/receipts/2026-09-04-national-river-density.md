@@ -1,11 +1,13 @@
 # Receipt: national river density v3 + fair collection budget (issue #2005, PR #2025)
 
 - Date: 2026-09-04 (node-27 local time)
-- Measured SHA: `76a08fe9bbba4bac0cdd46100ae8eb721e10cfa6` — see below. The measurement ran at
-  `e1bd2547d85227673716a24d1e8f020696a980c3`, which was the PR head at the time and was rebased away
-  afterwards; that hash is now a dangling object and will not resolve in a fresh clone. The surviving commit with
-  the same two runtime files is `76a08fe9`, and the durable anchor is the five SQL digests below, which any reader
-  can recompute.
+- Measured tree: identified by the five generated layer SQL digests listed below, not by a commit hash.
+  The measurement ran at `e1bd2547d85227673716a24d1e8f020696a980c3`, the PR head at the time. That branch has
+  since been rebased twice as master advanced, so the hash is a dangling object and every restatement of it
+  would go stale the same way; the digests are the anchor that survives. At the time of writing, the feature
+  commit carrying that tree is `0e774b5e`, and
+  `git diff 0e774b5e HEAD -- services/tiles/mvt.py apps/api/routes/hydro_display.py` is empty. Anyone checking
+  this later should recompute the digests rather than trust the hash.
 - Baseline SHA: `1b56648b` (node-27 `/home/nwm/NWM`, master at measurement time)
 - Host: node-27, `postgresql://nhms_display_ro@127.0.0.1:55432/nhms`, read-only role, SELECT only
 - Method: the shipped `postgis_tile_sql("river-network-national")` executed with binds from
@@ -13,9 +15,8 @@
   binds match production by construction. The before pass ran in the master checkout, the after pass in a
   separate git worktree at the PR head, so no shared checkout was switched.
 - Bound `collection_coordinate_limit`: **120000** (after) / 50000 (before)
-- Validity after later commits on this branch: the measured SHA is the commit that generates the SQL.
-  Commits added after it touch only tests and OpenSpec/receipt text, so
-  `git diff <measured SHA> -- services/tiles/mvt.py apps/api/routes/hydro_display.py` is empty and the
+- Validity after later commits on this branch: every commit added after the measured tree touches only tests
+  and OpenSpec/receipt text, so the two runtime files are unchanged since the measurement and the
   five generated layer SQL digests are unchanged (`river-network-national` = `d35ec3b9a9dd539b`,
   `river-network` = `c2b710cf13b5df6e`, `hydro` = `e9b335142768ee61`, `hydro-national` =
   `271b526da0921c16`, `met-stations` = `2691870627724076`, sha256 truncated to 16 hex).
