@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -19,6 +20,54 @@ BASELINE = REPO_ROOT / ".entropy-baseline" / "latest.json"
 AUDIT_SCRIPT = REPO_ROOT / "scripts" / "governance" / "audit_repo_entropy.py"
 BASELINE_WRITER_SCRIPT = REPO_ROOT / "scripts" / "governance" / "write_entropy_baseline.py"
 
+_REPO_REPORT_MEMO: dict[tuple[str, str | None], dict[str, object]] = {}
+
+
+def _repo_report(
+    root: Path,
+    *,
+    mode: audit_repo_entropy.AuditMode = "report",
+    structural_base_ref: str | None = None,
+) -> dict[str, object]:
+    """Return ``build_report(root, ...)``, memoized for the whole-repository root.
+
+    A full-repository ``build_report`` walks every tracked file and costs ~20s per
+    call on a developer machine; this module asks for the same
+    ``(mode, structural_base_ref)`` combination from roughly ten places, which used
+    to dominate the file's runtime.
+
+    Memoizing is sound because ``build_report`` is a pure function of the tree it
+    scans except for ``metadata.generated_at``, a wall-clock timestamp: two
+    back-to-back calls on this repository compare equal in every other key,
+    including the full ``findings`` list, and no assertion in this file reads
+    ``generated_at`` off a real report (the only ``generated_at`` occurrences are
+    literals inside synthetic baseline fixtures). No test in this file writes into
+    the repository tree, so the scanned inputs cannot change mid-session.
+
+    Two guardrails keep the memo from leaking:
+
+    * Only ``REPO_ROOT`` is memoized. A ``tmp_path`` root is built fresh by each
+      test, so it always recomputes -- which also preserves the tests that
+      ``monkeypatch.setattr(audit_repo_entropy, "build_report", ...)``, since the
+      passthrough resolves the attribute at call time.
+    * Callers get a deep copy, so a test that mutates its report cannot corrupt a
+      sibling test's view. The copy costs milliseconds against a ~20s rebuild.
+    """
+    if root != REPO_ROOT:
+        return audit_repo_entropy.build_report(
+            root,
+            mode=mode,
+            structural_base_ref=structural_base_ref,
+        )
+    key = (mode, structural_base_ref)
+    if key not in _REPO_REPORT_MEMO:
+        _REPO_REPORT_MEMO[key] = audit_repo_entropy.build_report(
+            REPO_ROOT,
+            mode=mode,
+            structural_base_ref=structural_base_ref,
+        )
+    return copy.deepcopy(_REPO_REPORT_MEMO[key])
+
 
 def _structural_public_surface_detail(*tokens: str) -> str:
     return "new public surface tokens: " + ", ".join(
@@ -27,7 +76,7 @@ def _structural_public_surface_detail(*tokens: str) -> str:
 
 
 def test_entropy_audit_json_schema_is_stable() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
 
     assert set(report) == {"metadata", "module_heatmap", "findings", "high_spread_patterns"}
     metadata = report["metadata"]
@@ -182,7 +231,7 @@ def test_entropy_audit_json_schema_is_stable() -> None:
 
 
 def test_entropy_audit_report_mode_metadata_excludes_hard_gate_fields() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT, mode="report")
+    report = _repo_report(REPO_ROOT, mode="report")
     metadata = report["metadata"]
 
     assert isinstance(metadata, dict)
@@ -195,7 +244,7 @@ def test_entropy_audit_report_mode_metadata_excludes_hard_gate_fields() -> None:
 
 
 def test_entropy_audit_current_repo_has_zero_apps_api_layer_inversion_findings() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     summary_counts = metadata["summary_counts"]
@@ -212,7 +261,7 @@ def test_entropy_audit_current_repo_has_zero_apps_api_layer_inversion_findings()
 
 
 def test_entropy_audit_current_repo_hard_gate_has_zero_production_topology_findings() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT, mode="hard-gate")
+    report = _repo_report(REPO_ROOT, mode="hard-gate")
     metadata = report["metadata"]
     production_topology_findings = [
         finding
@@ -259,7 +308,7 @@ def test_entropy_audit_markdown_report_preserves_repository_baseline() -> None:
 
 
 def test_compatibility_facade_guard_current_repo_passes_with_inventories() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     guard = metadata["compatibility_facade_guard"]
@@ -3186,7 +3235,7 @@ def test_entropy_baseline_writer_creates_latest_with_required_fields_and_no_arch
 
 
 def test_entropy_baseline_writer_preserves_v1_trend_semantics_for_current_repo() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
     baseline = write_entropy_baseline.build_baseline_snapshot(REPO_ROOT, report)
     tracked_v1_summary = json.loads(BASELINE.read_text(encoding="utf-8"))["summary"]
 
@@ -3545,7 +3594,7 @@ def test_entropy_baseline_writer_v1_summary_source_count_excludes_context_famili
 
 
 def test_services_orchestrator_file_count_matches_tracked_module_surface() -> None:
-    report = audit_repo_entropy.build_report(REPO_ROOT)
+    report = _repo_report(REPO_ROOT)
     baseline = write_entropy_baseline.build_baseline_snapshot(REPO_ROOT, report)
 
     orchestrator = baseline["modules"]["services/orchestrator"]
@@ -9083,9 +9132,7 @@ def _findings_by_check(
 ) -> list[dict[str, object]]:
     return [
         finding
-        for finding in audit_repo_entropy.build_report(root, structural_base_ref=structural_base_ref)[
-            "findings"
-        ]
+        for finding in _repo_report(root, structural_base_ref=structural_base_ref)["findings"]
         if finding["check_id"] == check_id
     ]
 
@@ -9095,7 +9142,7 @@ def _route_authority_findings(root: Path) -> list[dict[str, object]]:
 
 
 def _compatibility_facade_guard(root: Path, structural_base_ref: str) -> dict[str, object]:
-    report = audit_repo_entropy.build_report(root, structural_base_ref=structural_base_ref)
+    report = _repo_report(root, structural_base_ref=structural_base_ref)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     guard = metadata["compatibility_facade_guard"]
@@ -9104,7 +9151,7 @@ def _compatibility_facade_guard(root: Path, structural_base_ref: str) -> dict[st
 
 
 def _scoped_agent_context(root: Path) -> dict[str, object]:
-    report = audit_repo_entropy.build_report(root)
+    report = _repo_report(root)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     context = metadata["scoped_agent_context"]
@@ -9407,7 +9454,7 @@ def _baseline_archive_files(baseline_dir: Path) -> list[Path]:
 
 
 def _structural_budget(root: Path, *, structural_base_ref: str | None = None) -> dict[str, object]:
-    report = audit_repo_entropy.build_report(root, structural_base_ref=structural_base_ref)
+    report = _repo_report(root, structural_base_ref=structural_base_ref)
     metadata = report["metadata"]
     assert isinstance(metadata, dict)
     budget = metadata["structural_file_budget"]
