@@ -171,6 +171,28 @@ def test_backfill_dry_run_writes_nothing_and_reports_planned_copies(
     assert list(copyback_root.rglob("*")) == []
 
 
+def test_backfill_dry_run_over_a_mirrored_destination_reports_skips(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """On a rerun the plan must say `skipped`, not `copied`."""
+
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+    assert backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)]) == 0
+    capsys.readouterr()
+    mirrored = sorted(str(path) for path in copyback_root.rglob("*"))
+
+    exit_code = backfill.main(
+        ["--source-root", str(source_root), "--copyback-root", str(copyback_root), "--dry-run"]
+    )
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert summary["dry_run"] is True
+    assert summary["totals"] == {"copied": 0, "skipped": 14, "failed": 0}
+    assert sorted(str(path) for path in copyback_root.rglob("*")) == mirrored
+
+
 def test_backfill_unreadable_cycle_is_reported_and_exits_one(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -857,6 +879,7 @@ def test_backfill_overlapping_roots_exit_two(tmp_path: Path) -> None:
 
     assert backfill.main(["--source-root", str(source_root), "--copyback-root", str(source_root)]) == 2
     assert backfill.main(["--source-root", str(source_root), "--copyback-root", str(source_root / "nested")]) == 2
+    assert backfill.main(["--source-root", str(source_root / "nested"), "--copyback-root", str(source_root)]) == 2
 
 
 def test_backfill_source_root_without_canonical_tree_exits_zero(

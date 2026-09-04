@@ -1145,8 +1145,7 @@ class TilePublisher:
         ``canonical/<storage_source>/<cycle>/prcp_rate_or_amount/`` plus every
         ``canonical/<storage_source>/grid/<grid_id>/`` directory discovered on the
         source root (design.md D3). ``<grid_id>`` is *listed*, never imported from
-        ``workers.canonical_converter`` -- that import chain needs third-party
-        packages this process must not require.
+        ``workers.canonical_converter``.
 
         This step MUST NOT fail, block or roll back the q_down publish for any
         reason. Every failure -- absent source, unsafe entry name, symlink, tree
@@ -1319,8 +1318,8 @@ class TilePublisher:
             raise _CanonicalPrecipSourceMissing(str(grid_dir)) from error
         grid_keys: list[str] = []
         for name in sorted(names):
-            # A non-directory entry is skipped. An unsafe-named directory
-            # raises `SafeFilesystemError`.
+            # A plain non-directory entry is skipped. A symlinked entry and
+            # an unsafe-named directory both raise `SafeFilesystemError`.
             if not stat.S_ISDIR(stat_no_follow(grid_dir / name, containment_root=source_root).st_mode):
                 continue
             if _SAFE_ID_RE.fullmatch(name) is None:

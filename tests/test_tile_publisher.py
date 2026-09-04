@@ -2697,6 +2697,42 @@ def test_publish_qdown_canonical_precip_write_error_does_not_block_publish(
     _assert_qdown_copyback_intact(copyback_root)
 
 
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="root bypasses the mode bits this test relies on to deny the read",
+)
+def test_publish_qdown_canonical_precip_object_store_error_does_not_block_publish(tmp_path: Any) -> None:
+    """An unreadable source file fails the mirror as `ObjectStoreError`, not `OSError`.
+
+    `LocalObjectStore.read_bytes_limited` wraps `OSError` into `ObjectStoreError`,
+    a `RuntimeError` subclass, so this is the class the copy path raises when no
+    test double is in play.
+    """
+
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    payloads = _seed_canonical_precip(publisher, leads=(3, 6))
+    unreadable = Path(publisher.object_store.root) / next(
+        key for key in payloads if key.endswith(".nc")
+    )
+    unreadable.chmod(0o000)
+
+    try:
+        result = _publish_with_canonical_precip(publisher)
+    finally:
+        unreadable.chmod(0o644)
+
+    assert result.status == "published"
+    mirror = result.lineage["precip_mirror"]
+    assert mirror["status"] == "failed"
+    assert mirror["error_type"] == "ObjectStoreError"
+    assert "file_count" not in mirror
+    assert not (copyback_root / _prcp_tree_key("gfs", COMPACT_TIME)).exists()
+    _assert_no_copyback_residue(copyback_root)
+    _assert_qdown_copyback_intact(copyback_root)
+
+
 # The mirror's *own* rollback branch: the first tree must be promoted before the
 # batch fails, otherwise `rollback_log` is empty and the branch never runs. The
 # injection is therefore scoped to `/grid/` keys -- `pending` is ordered
