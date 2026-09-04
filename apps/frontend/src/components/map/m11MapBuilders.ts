@@ -22,11 +22,17 @@ import {
 } from '@/lib/m11/overviewDataContracts'
 import type { M11Layer, M11QueryState } from '@/lib/m11/queryState'
 
+/**
+ * `LayerProps` 是按 `type` 判别的联合（background/circle/fill/line/...）。本模块注册的 overlay 恒为
+ * line 图层，直接用联合会让 `paint` / `layout` / `source-layer` 退化成所有变体的公共部分。
+ */
+export type M11LineLayerProps = Extract<LayerProps, { type: 'line' }>
+
 export interface M11RegisteredOverlay {
   layerId: M11Layer
   sourceId: string
   sourceKey: string
-  layer: LayerProps
+  layer: M11LineLayerProps
   source: { type: 'vector'; tiles: string[]; sourceLayer: string; minzoom: number; maxzoom: number; metadata: MvtLayerMetadata }
 }
 
@@ -409,7 +415,7 @@ export function zoomScaledValueWidth(valueStops: number[], lowZoomFactor: number
   return ['interpolate', ['linear'], ['zoom'], 4, widthAt(lowZoomFactor), 7, widthAt(1)] as unknown as number
 }
 
-function dischargeTileLayerPaint(): LayerProps['paint'] {
+function dischargeTileLayerPaint(): M11LineLayerProps['paint'] {
   return {
     'line-color': [
       'interpolate',

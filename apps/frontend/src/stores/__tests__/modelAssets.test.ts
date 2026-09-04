@@ -72,6 +72,7 @@ function makeBasinsModel(overrides: Partial<ModelAsset> = {}): ModelAsset {
     mesh_checksum: 'mesh-sha-1',
     shud_code_version: 'basins-shud',
     active_flag: false,
+    lifecycle_state: 'inactive',
     model_package_uri: PACKAGE_URI,
     package_checksum: 'package-sha-1',
     manifest_uri: MANIFEST_URI,
@@ -871,9 +872,11 @@ describe('useModelAssetsStore', () => {
 
     const preflightResponse = await useModelAssetsStore.getState().preflightModelOperation(BASINS_MODEL_ID, {
       operation: 'activate',
+      override_missing_active: false,
     })
     const resultResponse = await useModelAssetsStore.getState().runModelOperation(BASINS_MODEL_ID, {
       operation: 'activate',
+      override_missing_active: false,
     })
 
     expect(preflightResponse.status).toBe('ready')
@@ -926,15 +929,17 @@ describe('useModelAssetsStore', () => {
     await useModelAssetsStore.getState().preflightModelOperation(outgoing.model_id, {
       operation: 'rollback_version',
       previous_model_id: selectedPrior.model_id,
+      override_missing_active: false,
     })
     await useModelAssetsStore.getState().runModelOperation(outgoing.model_id, {
       operation: 'rollback_version',
       previous_model_id: selectedPrior.model_id,
+      override_missing_active: false,
     })
 
     expect(postedBodies).toEqual([
-      { operation: 'rollback_version', previous_model_id: selectedPrior.model_id },
-      { operation: 'rollback_version', previous_model_id: selectedPrior.model_id },
+      { operation: 'rollback_version', override_missing_active: false, previous_model_id: selectedPrior.model_id },
+      { operation: 'rollback_version', override_missing_active: false, previous_model_id: selectedPrior.model_id },
     ])
     expect(JSON.stringify(postedBodies)).not.toContain(staleSibling.model_id)
     expect(useModelAssetsStore.getState().operationPreflight?.restored_model_id).toBe(selectedPrior.model_id)
@@ -970,7 +975,7 @@ describe('useModelAssetsStore', () => {
     })
     vi.mocked(client.POST).mockResolvedValue(success(result) as never)
 
-    await useModelAssetsStore.getState().runModelOperation(candidate.model_id, { operation: 'activate' })
+    await useModelAssetsStore.getState().runModelOperation(candidate.model_id, { operation: 'activate', override_missing_active: false })
 
     const state = useModelAssetsStore.getState()
     expect(state.models.filter((model) => model.active_flag)).toHaveLength(1)
@@ -1018,6 +1023,7 @@ describe('useModelAssetsStore', () => {
     await useModelAssetsStore.getState().runModelOperation(outgoing.model_id, {
       operation: 'rollback_version',
       previous_model_id: restoredBefore.model_id,
+      override_missing_active: false,
     })
 
     const state = useModelAssetsStore.getState()
@@ -1039,7 +1045,7 @@ describe('useModelAssetsStore', () => {
     )
 
     await expect(
-      useModelAssetsStore.getState().runModelOperation(BASINS_MODEL_ID, { operation: 'activate' }),
+      useModelAssetsStore.getState().runModelOperation(BASINS_MODEL_ID, { operation: 'activate', override_missing_active: false }),
     ).rejects.toThrow('模型操作执行失败')
 
     expect(useModelAssetsStore.getState()).toMatchObject({

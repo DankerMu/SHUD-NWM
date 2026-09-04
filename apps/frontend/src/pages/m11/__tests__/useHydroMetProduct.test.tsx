@@ -67,6 +67,12 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+// `client.GET` 是 openapi-fetch 的泛型重载函数，`vi.mocked(...).mock.calls` 因此推断成 `never[]`，
+// 无法直接解构。按调用实参的运行时形状（[path, init]）读成 `unknown[][]`。
+function apiGetCalls(): unknown[][] {
+  return vi.mocked(client.GET).mock.calls
+}
+
 describe('useHydroMetProduct', () => {
   it('resolves product when basinId + concrete GFS/IFS source are present', async () => {
     vi.mocked(client.GET).mockResolvedValue({ data: success(latestProduct()), error: undefined } as never)
@@ -112,7 +118,7 @@ describe('useHydroMetProduct', () => {
     })
 
     // latest-product 只打一次（bootstrap 内部仅 latest-product GET，无 basin → 不取站点/河段）。
-    const latestCalls = vi.mocked(client.GET).mock.calls.filter(([path]) => path === '/api/v1/mvp/qhh/latest-product')
+    const latestCalls = apiGetCalls().filter(([path]) => path === '/api/v1/mvp/qhh/latest-product')
     expect(latestCalls).toHaveLength(1)
   })
 })

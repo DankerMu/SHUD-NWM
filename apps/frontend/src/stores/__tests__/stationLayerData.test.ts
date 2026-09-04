@@ -339,11 +339,13 @@ describe('stationLayerData store (M26-3)', () => {
   })
 
   it('does not reuse in-flight data for delimiter-colliding basin identities', async () => {
-    let resolveFirst: ((value: ReturnType<typeof stationPage>) => void) | null = null
+    // 用数组接住 resolver：`let x = null` 在回调里赋值时 TS 的控制流分析仍把使用点窄化成 null，
+    // 数组元素访问不参与该窄化。运行时语义不变（只会有一个 resolver）。
+    const firstResolvers: Array<(value: ReturnType<typeof stationPage>) => void> = []
     fetchHydroMetStationsByIdentityMock.mockImplementation((identity: { basinVersionId: string }) => {
       if (identity.basinVersionId === 'c') {
-        return new Promise((resolve) => {
-          resolveFirst = resolve
+        return new Promise<ReturnType<typeof stationPage>>((resolve) => {
+          firstResolvers.push(resolve)
         })
       }
       if (identity.basinVersionId === 'b:c') return Promise.resolve(stationPage([station('shape-b')], 1))
@@ -361,7 +363,7 @@ describe('stationLayerData store (M26-3)', () => {
       { basinVersionId: 'b:c' },
     ])
 
-    resolveFirst?.(stationPage([station('shape-a')], 1))
+    firstResolvers[0]?.(stationPage([station('shape-a')], 1))
     const [first, second] = await Promise.all([firstPromise, secondPromise])
 
     expect(first.stations[0]?.station_id).toBe('shape-a')
@@ -369,12 +371,12 @@ describe('stationLayerData store (M26-3)', () => {
   })
 
   it('does not overwrite a newer request with a stale earlier response', async () => {
-    let resolveFirst: ((value: unknown) => void) | null = null
+    const firstResolvers: Array<(value: unknown) => void> = []
     fetchHydroMetStationsByIdentityMock
       .mockImplementationOnce(
         () =>
           new Promise((resolve) => {
-            resolveFirst = resolve
+            firstResolvers.push(resolve)
           }),
       )
       .mockResolvedValueOnce(stationPage(stations('heihe', 10, 0), 10))
@@ -389,7 +391,7 @@ describe('stationLayerData store (M26-3)', () => {
     const secondData = await store.loadStationLayer(secondRequest)
 
     // 让过期的第一个请求晚一步 resolve。
-    resolveFirst?.(stationPage(stations('qhh', 5, 0), 5))
+    firstResolvers[0]?.(stationPage(stations('qhh', 5, 0), 5))
     await firstPromise
 
     expect(secondData.total).toBe(10)

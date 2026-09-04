@@ -69,7 +69,7 @@ export const useHydroMetProductDataStore = create<HydroMetProductDataState>((set
     activeRequestKey = key
     set({ loading: true, error: null })
 
-    const load = (async () => {
+    const runLoad = async (): Promise<QhhLatestProduct> => {
       try {
         const product = await fetchProduct(request)
         if (nonce === requestNonce && activeRequestKey === key) {
@@ -85,8 +85,9 @@ export const useHydroMetProductDataStore = create<HydroMetProductDataState>((set
       } finally {
         if (inFlight.get(key) === load) inFlight.delete(key)
       }
-    })()
+    }
 
+    const load = runLoad()
     inFlight.set(key, load)
     return load
   },

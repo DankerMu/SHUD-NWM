@@ -157,6 +157,13 @@ function getSeriesQuery(init: unknown) {
   return (init as { params: { query: SeriesQuery } }).params.query
 }
 
+// `client.GET` 是 openapi-fetch 的泛型重载函数，`vi.mocked(...).mock.calls` 因此推断成 `never[]`，
+// 无法直接解构。按调用实参的运行时形状（[path, init]）读成 `unknown[][]` 后交给下游的
+// `unknown` 入参守卫处理。
+function apiGetCalls(): unknown[][] {
+  return vi.mocked(client.GET).mock.calls
+}
+
 function sourceFromQuery(query: SeriesQuery): HydroMetSource {
   return query.source_id === 'IFS' ? 'IFS' : 'GFS'
 }
@@ -313,7 +320,7 @@ describe('M11StationForcingPopup', () => {
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'GFS', basinId: 'basins_qhh' }))
     expect(fetchHydroMetLatestProduct).toHaveBeenCalledWith(expect.objectContaining({ source: 'IFS', basinId: 'basins_qhh' }))
 
-    const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    const queries = apiGetCalls().map(([, init]) => getSeriesQuery(init))
     expect(queries.map((query) => query.source_id).sort()).toEqual(['GFS', 'IFS'])
     for (const query of queries) {
       expect(query).toEqual(expect.objectContaining({
@@ -473,7 +480,7 @@ describe('M11StationForcingPopup', () => {
     await waitFor(() => {
       expect(screen.getByTestId('m11-station-popup-partial')).toHaveTextContent('GFS：该起报 05-20 00:00 UTC')
     })
-    const retainedCycleQueries = vi.mocked(client.GET).mock.calls
+    const retainedCycleQueries = apiGetCalls()
       .map(([, init]) => getSeriesQuery(init))
       .filter((query) => query.cycle_time === RETAINED_OUT_CYCLE)
     for (const source of ['GFS', 'IFS'] satisfies HydroMetSource[]) {
@@ -524,7 +531,7 @@ describe('M11StationForcingPopup', () => {
       expect(client.GET).toHaveBeenCalledTimes(2)
     })
 
-    const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    const queries = apiGetCalls().map(([, init]) => getSeriesQuery(init))
     for (const source of ['GFS', 'IFS'] satisfies HydroMetSource[]) {
       expect(queries.find((query) => sourceFromQuery(query) === source)).toEqual(
         expect.objectContaining({
@@ -575,7 +582,7 @@ describe('M11StationForcingPopup', () => {
       expect(client.GET).toHaveBeenCalledTimes(2)
     })
 
-    const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    const queries = apiGetCalls().map(([, init]) => getSeriesQuery(init))
     for (const source of ['GFS', 'IFS'] satisfies HydroMetSource[]) {
       expect(queries.find((query) => sourceFromQuery(query) === source)).toEqual(
         expect.objectContaining({
@@ -605,8 +612,7 @@ describe('M11StationForcingPopup', () => {
 
   it('shows an empty state and draws no curve when cycle_time is missing for both sources', async () => {
     mockSeriesBySource((source, query) => {
-      const body = seriesResponseFor(source, seriesOverridesFromQuery(query))
-      delete body.cycle_time
+      const { cycle_time: _omittedCycleTime, ...body } = seriesResponseFor(source, seriesOverridesFromQuery(query))
       return body
     })
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
@@ -734,7 +740,7 @@ describe('M11StationForcingPopup', () => {
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
     await screen.findByTestId('m11-station-popup-loaded')
 
-    const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    const queries = apiGetCalls().map(([, init]) => getSeriesQuery(init))
     expect(queries).toHaveLength(2)
     expect(queries.map((query) => query.source_id).sort()).toEqual(['GFS', 'IFS'])
     for (const query of queries) {
@@ -775,7 +781,7 @@ describe('M11StationForcingPopup', () => {
     render(<M11StationForcingPopup basinId="basins_qhh" initialSource="GFS" station={station} />)
     await screen.findByTestId('m11-station-popup-loaded')
 
-    const preFlipQueries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    const preFlipQueries = apiGetCalls().map(([, init]) => getSeriesQuery(init))
     expect(preFlipQueries).toHaveLength(2)
     for (const query of preFlipQueries) {
       expect(query.model_id).toBe('m-old')
@@ -787,7 +793,7 @@ describe('M11StationForcingPopup', () => {
     await user.click(screen.getByRole('option', { name: formatIssueTime(RETAINED_OUT_CYCLE) }))
 
     await waitFor(() => expect(client.GET).toHaveBeenCalledTimes(2))
-    const postFlipQueries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    const postFlipQueries = apiGetCalls().map(([, init]) => getSeriesQuery(init))
     for (const query of postFlipQueries) {
       // The second loadSource cycle carries the NEW model_id — the
       // popup did not reuse the pre-cutover `m-old` value from the
@@ -866,12 +872,12 @@ describe('M11StationForcingPopup', () => {
     // request for a DB/archive fallback (e.g.
     // `/api/v1/history/station-archive`) would keep count=2 but hit a
     // different path. Assert every call targets the station-series endpoint.
-    const paths = vi.mocked(client.GET).mock.calls.map(([path]) => path)
+    const paths = apiGetCalls().map(([path]) => path)
     expect(paths).toEqual([
       '/api/v1/met/stations/{station_id}/series',
       '/api/v1/met/stations/{station_id}/series',
     ])
-    const queries = vi.mocked(client.GET).mock.calls.map(([, init]) => getSeriesQuery(init))
+    const queries = apiGetCalls().map(([, init]) => getSeriesQuery(init))
     expect(queries.map((query) => query.source_id).sort()).toEqual(['GFS', 'IFS'])
     for (const query of queries) {
       expect(query.cycle_time).toBe(RETAINED_OUT_CYCLE)

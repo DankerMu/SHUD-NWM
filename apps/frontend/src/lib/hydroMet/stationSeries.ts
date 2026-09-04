@@ -192,7 +192,7 @@ export function validateHydroMetStationSeriesIdentity(
   stationId: string,
 ) {
   const messages: string[] = []
-  const responseRecord = isRecord(response) ? response : {}
+  const responseRecord: Record<string, unknown> = isRecord(response) ? response : {}
   const responseStationId = responseRecord.station_id
   const responseModelId = responseRecord.model_id
   const responseSourceId = responseRecord.source_id

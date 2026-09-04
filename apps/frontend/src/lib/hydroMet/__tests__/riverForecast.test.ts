@@ -20,6 +20,8 @@ function product(
   overrides: Partial<HydroMetRiverForecastProductIdentity> = {},
 ): HydroMetRiverForecastProductIdentity {
   return {
+    run_id: 'run-1',
+    model_id: 'm-1',
     basin_version_id: 'bv-1',
     river_network_version_id: 'rn-1',
     source_id: 'GFS',

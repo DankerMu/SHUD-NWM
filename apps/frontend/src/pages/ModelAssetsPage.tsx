@@ -65,7 +65,6 @@ function sourcePathValue(model: ModelAsset, profile: Record<string, unknown>, so
     model.source_path ??
     sourceLineage.source_path ??
     sourceLineage.local_path ??
-    model.local_path ??
     profile.source_path ??
     firstString(sourceLineage.uris)
   )
@@ -87,6 +86,9 @@ function lifecyclePayload(
 ): ModelAssetLifecycleRequest {
   return {
     operation,
+    // 后端 ModelLifecyclePayload.override_missing_active 默认 False（apps/api/routes/models.py:148），
+    // openapi-typescript 把带 default 的属性渲染成非可选，故显式写出该默认值。
+    override_missing_active: false,
     ...(operation === 'rollback_version' && previousModelId ? { previous_model_id: previousModelId } : {}),
   }
 }

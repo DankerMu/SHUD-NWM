@@ -13,7 +13,44 @@ export type ApiHydroRunPage = components['schemas']['HydroRunPage']
 export type ApiLayer = components['schemas']['Layer']
 export type ApiPipelineStatus = components['schemas']['PipelineStatus']
 export type ApiQueueDepth = components['schemas']['QueueDepth']
-export type ApiLineageResponse = components['schemas']['LineageResponse']
+// `/api/v1/lineage/river-point` 后端从未实现（生产恒 404，overviewData.ts 的 try/catch 把它降级成
+// '河段追溯暂不可用' partialError）。没有路由就不可能有 OpenAPI schema，故这三个形状在前端就地声明，
+// 逐字段沿用 b97c16e2^ 时期 types.ts 里的旧定义。
+export interface ApiForcingVersion {
+  forcing_version_id: string
+  model_id: string
+  source_id: string
+  cycle_time?: string | null
+  start_time: string
+  end_time: string
+  station_count: number
+  forcing_package_uri: string
+  checksum?: string | null
+  lineage_json?: { [key: string]: unknown } | null
+  created_at: string
+}
+
+export interface ApiQcResult {
+  qc_id: number
+  qc_checkpoint: string
+  target_type: string
+  target_id: string
+  run_id?: string | null
+  passed: boolean
+  severity: string
+  checks_json: { [key: string]: unknown }
+  message?: string | null
+  created_at: string
+}
+
+export interface ApiLineageResponse {
+  target_type: string
+  target_id: string
+  nodes: { [key: string]: unknown }[]
+  edges: { [key: string]: unknown }[]
+  forcing_versions?: ApiForcingVersion[]
+  qc_results?: ApiQcResult[]
+}
 export type ApiForecastPayload = components['schemas']['RiverSeriesResponse'] | components['schemas']['SplicedForecastResponse']
 
 export type M11ResolvedSource = 'GFS' | 'IFS' | 'GFS+IFS' | 'Unknown'
