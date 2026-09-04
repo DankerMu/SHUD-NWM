@@ -35,6 +35,7 @@ from services.tiles.mvt import (
     TileResponse,
     ValidTimeDiscovery,
     canonical_mvt_time,
+    collection_coordinate_limit,
     display_ready_run,
     layer_metadata,
     national_discharge_source_version,
@@ -511,7 +512,9 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
         if layer in {"hydro", "hydro-national"} and "variable" in params
         else layer
     )
-    row = session.execute(text(postgis_tile_sql(layer)), _postgis_tile_params(params, z=z, x=x, y=y)).mappings().first()
+    max_coordinates = collection_coordinate_limit(layer)
+    bind = _postgis_tile_params(params, z=z, x=x, y=y, layer=layer)
+    row = session.execute(text(postgis_tile_sql(layer)), bind).mappings().first()
     feature_count = int(row.get("feature_count") or 0) if row else 0
     coordinate_count = int(row.get("coordinate_count") or 0) if row else 0
     source_identity_count = int(row.get("source_identity_count") or 0) if row else 0
@@ -530,7 +533,7 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
                 "properties": _mvt_invalid_properties(row.get("invalid_properties") if row else None),
             },
         )
-    if feature_count > MVT_MAX_FEATURES or coordinate_count > MVT_MAX_COORDINATES:
+    if feature_count > MVT_MAX_FEATURES or coordinate_count > max_coordinates:
         raise ApiError(
             status_code=413,
             code="MVT_TILE_BUDGET_EXCEEDED",
@@ -543,7 +546,7 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
                 "feature_count": feature_count,
                 "max_features": MVT_MAX_FEATURES,
                 "coordinate_count": coordinate_count,
-                "max_coordinates": MVT_MAX_COORDINATES,
+                "max_coordinates": max_coordinates,
             },
         )
     if not row or source_identity_count <= 0:
@@ -976,7 +979,9 @@ def _validate_supported_hydro_variable(variable: str) -> None:
     )
 
 
-def _postgis_tile_params(params: dict[str, Any], *, z: int, x: int, y: int) -> dict[str, Any]:
+def _postgis_tile_params(
+    params: dict[str, Any], *, z: int, x: int, y: int, layer: str | None = None
+) -> dict[str, Any]:
     return {
         **params,
         "z": z,
@@ -984,7 +989,7 @@ def _postgis_tile_params(params: dict[str, Any], *, z: int, x: int, y: int) -> d
         "y": y,
         "feature_limit": MVT_MAX_FEATURES,
         "feature_coordinate_limit": MVT_MAX_COORDINATES,
-        "collection_coordinate_limit": MVT_MAX_COORDINATES,
+        "collection_coordinate_limit": collection_coordinate_limit(layer),
         "max_coordinate_dimensions": 3,
         "extent": MVT_EXTENT,
         "buffer": MVT_BUFFER,

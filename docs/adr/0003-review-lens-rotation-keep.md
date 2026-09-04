@@ -3101,3 +3101,108 @@ flag shows the same pattern the round-intent caveat (rotation should be
 bought by breadth of the diff, not by a class repeat alone) is worth
 promoting from caveat to rule. Reversal still requires the attribution-
 schema, round-intent and round-role repairs plus maintainer review.
+
+## Revisit 2026-09-04（PR #2020 / issue #2004 合并后 audit 再次 DECIDABLE）
+
+样本 **166** 个多轮 merged PR，later-round catches **core=155 vs rotated=302**，
+与上一条同值。**维持 keep**，但本条的实质内容是：**本 PR 对该裁定贡献为零，不构成
+任何一侧的证据。**
+
+PR #2020 是 `rounds: 1` 的单轮 PR（Round 1 双镜 correctness / spec-compliance 均返回
+`Findings: None`，零候选发现，故 Phase 4.5 未派 verifier、未起修复轮），`catches` 为
+空数组。它既不进入 166 的多轮分母，也不向 core/rotated 任一侧加数。之所以仍记一条，
+是因为 audit 的 DECIDABLE 义务按「下一个 issue 开工前必须处置」触发，而不是因为有新证据。
+
+因此本条**不重复**「方向不变且压倒性」这类措辞——那会把一次零信息的记账伪装成一次确认。
+累计比值仍支持 keep，keep 按 autonomous default 维持，无行为变更。
+
+前几条登记的三项工具缺口（`round_lenses` 为 round-1 子集/相同时不应计入分母、Phase 7
+终审轮应排除出轮换归因或单列 `final_review` 桶、round-intent 未被记录）**一条都未修**，
+且至今**没有对应的 tracked issue**（`gh issue list --search "loop_log_audit rotation_attribution"`
+返回空）。在修好之前，基于该比值的 keep/cut **翻转**仍须 maintainer 人的裁定，不走
+autonomous default——这一约束自 2026-08-20 起未变。
+
+## Revisit 2026-09-04（PR #2021 / issue #2006 合并后 audit 再次 DECIDABLE）
+
+样本 **167** 个多轮 merged PR（较上条 +1），later-round catches **core=155 vs rotated=302**，
+与上两条**同值**。**维持 keep**，且本条同样必须写明：**本 PR 对该裁定的证据贡献为零。**
+
+PR #2021 是 `rounds: 2` 的多轮 PR，进入了 167 的分母，但两条 catch 全部落在 **Round 1**
+（`review-test-evidence`），later-round（Round 2）返回 clean、零 catch，因此对 core/rotated
+任一侧都不加数。Round 2 按 post-fix 规则只派了一名 reviewer，但其 brief 覆盖的镜组与 Round 1 **完全相同**
+（correctness / spec-compliance / test-evidence，故 `round_lenses` 两项等值；此处按本文件惯例
+记该轮实际覆盖的镜组，而非 agent 数），恰好又撞上前几条登记的第一项工具缺口——**`round_lenses`
+为 round-1 子集或与之相同时不应计入轮换分母**。这条缺口在本次再次实证：分母 +1 而分子不动，比值被稀释的方向是
+系统性的、与真实轮换效力无关。
+
+前几条登记的三项工具缺口（子集轮不计分母、Phase 7 终审轮排除或单列 `final_review` 桶、
+round-intent 未记录）**仍一条未修**，`gh issue list --search "loop_log_audit rotation_attribution"`
+仍返回空，**至今没有对应的 tracked issue**。在修好之前，基于该比值的 keep/cut **翻转**仍须
+maintainer 人的裁定，不走 autonomous default；keep 按 autonomous default 维持，无行为变更。
+
+## Revisit 2026-09-04（PR #2025 / issue #2005 合并后 audit 再次 DECIDABLE）
+
+样本 **168** 个多轮 merged PR（较上条 +1），later-round catches **core=161 vs rotated=302**。
+**维持 keep**，但本条与上两条不同：**本 PR 的证据贡献是负向的，全部落在 core 一侧。**
+
+PR #2025 是 `rounds: 2`。Round 1 派了四个镜组（spec-compliance / test-evidence / integration /
+security-perf），Round 2 **轮换进了 `review-correctness`**，另两名沿用 Round 1 的 test-evidence 与
+spec-compliance。结果是：Round 2 的 6 条 later-round catch **全部来自那两个 core 镜组**（证据完整性
+与 spec/code 一致性），**轮换进来的 correctness 返回零发现**。core 因此 +6、rotated +0。
+
+这不是说轮换无用——correctness 那一轮的零发现本身是有价值的独立复核（它逐字节复核了四个未改图层的
+生成 SQL、v2/v3 缓存键分离，把「RG-D1 类污染」这条最贵的风险钉死了）。但它恰好例证了前几条反复登记的
+第二项工具缺口：**审查的价值不等于 catch 数**，而 `loop_log_audit` 的 core/rotated 比值只数 catch。
+一个把高风险假设证伪、从而让人敢合并的镜组，在这个指标里与「没跑」无法区分。
+
+另外本 PR 的 Phase 7 终审扫出 2 条 P2（design.md 里无来源的冷生成耗时、无背书的 simplify 容差结论），
+按现有口径记在 `phase7_catches`，**不进 core/rotated 任一侧**——这正是第二项缺口的另一半。
+
+前几条登记的三项工具缺口此前**一条未修且无 tracked issue**。本次已立单：**#2036**，标题含
+`loop_log_audit` 与 `rotation_attribution` 两个 token，所以 ADR 反复运行的那条 search 从此能命中它。
+
+立单时的复核把问题**改写得比本文件历来记的更糟**，两处必须更正本文件的既有措辞：
+
+- 第一项缺口不是「稀释」，是**单向偏置**。`loop_log_audit.py` 把 `core_lenses` 钉死为 `round_lenses[0]`，
+  所以镜组与 round 1 相同的后续轮**只能给 core 加数、结构上永远给不了 rotated**，同时分母 +1。
+  当前 168 个多轮 PR 里有 **46 个（27.4%）**的后续轮全是 round-1 子集。
+- 第二项缺口比记的更严重：日志里同时存在**两套相反口径**。旧口径把终审 catch 写进 `catches`、`lens` 记作
+  `final-review` / `gap-sweep` 之类伪镜名，这类名字按定义不在 `round_lenses[0]` 里，于是被**全额记为
+  rotated**——当前 `rotated=302` 中**至少 56 条（18.5%，跨 35 个 PR）**是这么来的，记为 core 的是 0 条；
+  新口径的 `phase7_catches` 共 20 条，脚本里**零引用**，两侧都不计。也就是说同一类事件在同一份日志里
+  语义相反，而这次重解释**此前已经无声发生过一次**。
+
+### 更正（同日，实测重算后）
+
+本节初稿写的是「这个比值既不能支持 keep 也不能支持 cut」。**那句话是错的，方向也搞反了，特此更正。**
+
+把两处缺口都改掉重算——只保留后续轮真的轮换过镜组的 PR（168 → **122**），并把终审轮的 catch 单列成
+第三个桶（62 条，用镜名含 `final` / `gap-sweep` / `phase7` / `sweep` 匹配）——结果是：
+
+| 口径 | 样本 | core | rotated | final_review | rotated 占比 |
+|---|---|---|---|---|---|
+| 现行（有缺口） | 168 | 161 | 302 | —（混在 rotated 里） | 65.2% |
+| 修正后 | 122 | 80 | 237 | 56 | **74.8%** |
+
+**两处缺口都是系统性地压低轮换、抬高 core 的。** 零轮换的后续轮结构上只能给 core 加数，去掉它们 core
+从 161 掉到 80；终审轮的伪镜名虽然虚增 rotated，但抽掉之后 rotated 占比反而**从 65.2% 升到 74.8%**,
+因为分母里 core 掉得更多。
+
+所以正确的结论是：**修正缺口让 keep 的证据变强，不是变弱。** 之前那句「不能支持 keep」是我只看了偏置
+存在、没算偏置方向就下的判断。keep 维持不变，而且现在这个比值**可以**作为 keep 的证据引用——按修正
+口径引用，别引 65.2% 那个数。
+
+仍然成立的是第四项（零发现轮不可见）：它不是估计量的偏置，是**可识别性上限**——按 catch 计数的口径
+永远看不见「轮进来的镜把一条昂贵假设证伪、从而让人敢合并」这类价值，本 PR 的 `review-correctness`
+就是实例。这一条靠改公式解决不了，只能靠不把该比值当作轮换价值的**唯一**度量。
+
+### 后续处置
+
+跟踪见 **#2036**。三项机械缺口里，前两项可修可回填（子集轮排除；终审 catch 单列 `final_review` 桶，
+历史 62 行按镜名一次性显式改写而不是运行时正则），第三项（round intent）只能向前生效。第四项不修。
+
+另需注意：`min_multiround` 默认 8，当前样本 168，**这条 DECIDABLE 从此每次收尾都会触发**，而它已经
+连续产出十余条同向 keep、从未改变过行为。#2036 落地时应一并把它从 DECIDABLE 降级为 NOTE——决定已经
+定了，继续每次收尾都要求人裁一次是纯仪式。
+
+keep 按 autonomous default 维持，无行为变更。翻转仍须 maintainer 裁定。

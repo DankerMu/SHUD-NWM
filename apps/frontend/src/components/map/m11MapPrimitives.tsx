@@ -163,7 +163,14 @@ export function M11OverlayPrimitive({
 }
 
 export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; satellite: boolean }): LayerProps['paint'] {
-  const opacityScale = dimmed ? 0.42 : 1
+  // `dimmed` 的折扣在 z5->z6 之间线性 ramp 进来（z5 stop 不打折，z6 起满额 0.42）：这是取舍，不是限制。
+  // 顶层 `step` 确实能在 z6 硬切，但它在每个 stop（3/5/6/7/9）都跳变、丢掉本 paint 依赖的跨 zoom
+  // 平滑，也不符合需求「zoom 插值表达式」的措辞。选 linear interpolate 的代价就是：line-opacity 是
+  // composite 属性，GPU 只在整数 zoom 采样、再按小数 zoom 插值，折扣只能沿 z5->z6 ramp 进来。
+  // MapLibre 又只接受 `['zoom']` 作为**顶层** interpolate/step 的直接输入，嵌套 zoom 表达式会被
+  // createPropertyExpression 判为非法，所以折扣因子只能按 stop 烘成 JS 常量。
+  const lowZoomScale = 1
+  const dimZoomScale = dimmed ? 0.42 : 1
   return {
     'line-color': [
       'interpolate',
@@ -181,9 +188,11 @@ export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; 
       ['linear'],
       ['zoom'],
       3,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.45, 5, 1.5],
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.55, 5, 1.7],
+      5,
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.9, 5, 2.8],
       6,
-      ['interpolate', ['linear'], ['get', 'Type'], 1, 0.9, 5, 2.6],
+      ['interpolate', ['linear'], ['get', 'Type'], 1, 1.0, 5, 2.9],
       9,
       ['interpolate', ['linear'], ['get', 'Type'], 1, 1.5, 5, 3.6],
       12,
@@ -194,13 +203,15 @@ export function m11NationalRiverPaint({ dimmed, satellite }: { dimmed: boolean; 
       ['linear'],
       ['zoom'],
       3,
-      ['*', opacityScale, ['match', ['get', 'Type'], 5, 0.82, 4, 0.45, 0]],
+      ['*', lowZoomScale, ['match', ['get', 'Type'], 5, 0.82, 4, 0.45, 0]],
       5,
-      ['*', opacityScale, ['match', ['get', 'Type'], 5, 0.9, 4, 0.76, 3, 0.42, 0]],
+      ['*', lowZoomScale, ['match', ['get', 'Type'], 5, 0.9, 4, 0.76, 3, 0.42, 0]],
+      6,
+      ['*', dimZoomScale, ['match', ['get', 'Type'], 5, 0.92, 4, 0.84, 3, 0.6, 2, 0.45, 1, 0.2, 0]],
       7,
-      ['*', opacityScale, ['match', ['get', 'Type'], 5, 0.94, 4, 0.9, 3, 0.72, 2, 0.5, 0]],
+      ['*', dimZoomScale, ['match', ['get', 'Type'], 5, 0.94, 4, 0.9, 3, 0.72, 2, 0.5, 1, 0.35, 0]],
       9,
-      0.88 * opacityScale,
+      0.88 * dimZoomScale,
     ],
   }
 }

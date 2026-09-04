@@ -2568,6 +2568,39 @@
           "rounds": 4
         }
       ]
+    },
+    "2004": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2020,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
+    "2006": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2021,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
+    "2005": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2025,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
     }
   },
   "1736": {
