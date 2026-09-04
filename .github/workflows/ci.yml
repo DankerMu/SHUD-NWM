@@ -260,7 +260,13 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (needs.changes.outputs.backend == 'true' && github.event_name == 'push')
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 60: the suite reached a 43-min median against the old 45-min cap and was
+    # killed at 45:14 on two consecutive backend merges (#2025, #2040) with zero
+    # failures, at 99% progress. Reproduced locally at 44:32 on the same commit,
+    # so this is the suite's real length, not runner noise. Same remedy as the
+    # 20 -> 35 raise on unit-test-targeted below. --durations makes the next
+    # increment visible before it hits the wall again; see #2044.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -275,8 +281,12 @@ jobs:
           sudo mkdir -p /scratch/frd_muziyao
           sudo chown "$USER:$(id -gn)" /scratch/frd_muziyao
           chmod u+rwx /scratch/frd_muziyao
-      - name: Run tests with coverage
-        run: pytest tests/ -v --tb=short -m "not e2e and not grib and not integration"
+      - name: Run full unit test suite
+        # -q, not -v: nothing downstream parses this log, unit-test-targeted
+        # already uses -q, and -v prints a line per test across ~16.5k tests.
+        # --durations=25 is the instrument: it names the slowest tests in every
+        # run, so a future slowdown is attributable instead of guessed at.
+        run: pytest tests/ -q --tb=short --durations=25 -m "not e2e and not grib and not integration"
 
   # PR merge gate: run a focused suite derived from changed files. The selector maps runtime
   # modules/config surfaces to their owning tests and falls back to core smoke tests for unknown
