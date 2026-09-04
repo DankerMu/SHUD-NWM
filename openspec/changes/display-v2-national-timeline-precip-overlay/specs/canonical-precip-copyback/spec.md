@@ -7,6 +7,8 @@ The mirror is idempotent at **tree** granularity: a mirrored tree whose destinat
 
 The mirror MUST NOT fail, block, or roll back the q_down publish for **any** reason — missing source products, unsafe entry names, symlinks, tree/byte/depth limits, IO errors, or a failed rollback. Every such failure is swallowed and recorded in the publish lineage under the top-level key `precip_mirror` as `{"status": "failed", ...}`, carrying `missing_path` when the cause is an absent source directory and `error`/`error_type` otherwise. On success the key records `{"status": "ok", "file_count": <files mirrored across all trees>, "trees": [...]}`; when every tree was skipped it records `{"status": "skipped", ...}`.
 
+The `precip_mirror` payload MUST NOT claim work that did not happen, so each `trees[]` entry separates plan intent from outcome. `action` is the intent decided in the read-only plan phase and is always present: `copy` for a tree that needs replacing, `skip` for one whose destination already holds the same file names with identical sizes. `status` is the outcome and takes exactly four values: `skipped` (nothing to do), `pending` (a planned copy not yet promoted), `copied` (promoted, set only after the copy helper returned, with that tree's `byte_count` taken from the helper's returned byte count rather than the source stat), and `rolled_back` (promoted and then undone by this step's own rollback). A tree whose rollback itself raised keeps `copied` — the rollback did not undo it — and the top-level `rollback_error`/`rollback_error_type` are the signal that the destination state is unknown. `file_count` is recorded on the `ok` and `skipped` records only and MUST be absent from a `failed` record; `trees` is absent when the failure happened during planning, before the list existed.
+
 The mirror runs only when the q_down copyback actually copied: when `NHMS_OBJECT_STORE_COPYBACK_ROOT` is unset the `precip_mirror` key is absent from the lineage, and when the copyback root resolves to the same directory identity as `OBJECT_STORE_ROOT` the key records `{"status": "skipped", "reason": "copyback_root_matches_object_store_root"}`.
 
 The `<grid_id>` segment MUST NOT be derived by importing `workers/canonical_converter/converter.py` (its import chain needs third-party packages); both producers discover it by listing `canonical/<storage_source>/grid/*/` on the source root and mirroring each grid directory found. When `prcp_rate_or_amount` exists but no `grid.json` does, the status is `failed` with the absent grid path.
@@ -34,13 +36,21 @@ The `<grid_id>` segment MUST NOT be derived by importing `workers/canonical_conv
 - **WHEN** the source tree is unsafe or unreadable — a symlinked entry, an entry over `_COPYBACK_MAX_FILE_BYTES`, or an `OSError` raised mid-copy
 - **THEN** q_down publish still completes with `status == "published"`
 - **AND** lineage records `precip_mirror.status == "failed"` with `error` and `error_type`, and no temp tree is left under the copyback root
+- **AND** the record carries no `file_count`, and no tree reports `copied` unless the destination holds the source bytes
+
+#### Scenario: A tree promoted before the batch failed is reported as rolled back
+- **WHEN** the first mirrored tree has been promoted and a later tree's copy fails, so this step's own rollback runs
+- **THEN** the promoted tree is removed (or restored byte-for-byte to the content the destination held before the run) and its `trees[]` entry reports `"action": "copy"` with `"status": "rolled_back"`, while a tree never attempted stays `"pending"`
+- **AND** q_down publish still completes with `status == "published"` and its copyback products are untouched
 
 #### Scenario: Copyback root not configured
 - **WHEN** `NHMS_OBJECT_STORE_COPYBACK_ROOT` is unset
 - **THEN** no mirror is attempted and the lineage carries no `precip_mirror` key
 
 ### Requirement: One-shot backfill mirrors retained cycles without touching the environment
-A script `scripts/canonical_precip_copyback_backfill.py` SHALL mirror every `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` directory present under `--source-root` and each source's `canonical/<storage_source>/grid/*/grid.json` using only the standard library (it MUST NOT import `services`, `packages`, `workers`, or any third-party module — the keyspace rule is not shared with the publisher; the script copies the on-disk directory names verbatim and never normalizes a source id), runnable on node-22 as `/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill --source-root <root> --copyback-root <root>`; it MUST print a JSON summary (per cycle: copied/skipped/failed) to stdout. It writes by default and only `--dry-run` suppresses writes — the inverse of `services/tile_publisher/forcing_copyback_backfill.py`, because the node-22 operation in this change's tasks invokes it without a flag. Exit code: `0` when the run completes with no failure, `1` when the run completes but any cycle or grid reports `failed > 0` (the summary is still printed), `2` for unusable arguments or roots. Per file it skips a destination of identical size and otherwise copies through a temp name plus `os.replace`.
+A script `scripts/canonical_precip_copyback_backfill.py` SHALL mirror every `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` directory present under `--source-root` and each source's `canonical/<storage_source>/grid/*/grid.json` using only the standard library (it MUST NOT import `services`, `packages`, `workers`, or any third-party module — the keyspace rule is not shared with the publisher; the script copies the on-disk directory names verbatim and never normalizes a source id), runnable on node-22 as `/scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill --source-root <root> --copyback-root <root>`; it MUST print a JSON summary (per cycle: copied/skipped/failed) to stdout. It writes by default and only `--dry-run` suppresses writes — the inverse of `services/tile_publisher/forcing_copyback_backfill.py`, because the node-22 operation in this change's tasks invokes it without a flag. Exit code: `0` when the run completes with no failure, `1` when the run completes but any cycle or grid reports `failed > 0` (the summary is still printed), `2` for unusable arguments or roots. A `canonical/` directory that exists under `--source-root` but is unreadable, is not a directory, or is a symlink IS an unusable root and exits `2` (the summary, carrying `root_error`, is still printed) — not `1`, because no cycle or grid entry exists for clause 1's predicate to be true of. An **absent** `canonical/` is not an error at all: there is nothing to mirror and the run exits `0`. Per file it skips a destination of identical size and otherwise copies through a temp name plus `os.replace`.
+
+The script MUST NOT follow a symlinked tree **root**: `canonical/`, `canonical/<storage_source>/grid/` and `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` are built as paths and are therefore `lstat`ed before being descended into, so a symlink there is recorded as a failure ("refusing to mirror a symlinked directory") rather than deep-copied out of `--source-root` into the shared copyback root. This is the same rule the script already applies per entry inside a tree, and it matches the publisher, which `S_ISLNK`-rejects every path component. Every directory the script creates under `--copyback-root` MUST be left group/world readable (`0o755`, applied with an explicit `chmod` because `mkdir` masks its mode with the process umask), because node-22 writes as one account and node-27 reads the same NFS as another; directories the script did not create are left alone.
 
 #### Scenario: Backfill summary
 - **WHEN** the script runs against a source root with two sources and N cycles each
@@ -53,6 +63,19 @@ A script `scripts/canonical_precip_copyback_backfill.py` SHALL mirror every `can
 #### Scenario: Failed cycle is signalled by the exit code
 - **WHEN** one cycle cannot be mirrored (its source directory is unreadable) while others succeed
 - **THEN** the summary is still printed with that cycle's `failed` count non-zero and the process exits 1
+
+#### Scenario: A symlinked tree root is refused, not followed
+- **WHEN** `canonical/`, `canonical/<storage_source>/grid/` or `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/` is a symlink to a directory outside `--source-root`
+- **THEN** the run exits non-zero (2 for `canonical/`, 1 for the other two), the summary reports the refusal with `failed > 0`, and no file from outside `--source-root` exists under `--copyback-root`
+
+#### Scenario: Created directories stay readable under a restrictive umask
+- **WHEN** the script runs with a process umask of `0o077`
+- **THEN** every directory it created under `--copyback-root`, intermediates included, is group/world readable and traversable
+
+#### Scenario: Unusable canonical root exits 2 while an absent one exits 0
+- **WHEN** `canonical/` under `--source-root` is a regular file or is unreadable
+- **THEN** the summary is printed with `root_error` and the process exits 2
+- **AND** when `canonical/` is simply absent the run exits 0 with empty `cycles` and `grids`
 
 #### Scenario: Standard library only
 - **WHEN** the script's imports are inspected, or it is run as `python -m scripts.canonical_precip_copyback_backfill` in a subprocess

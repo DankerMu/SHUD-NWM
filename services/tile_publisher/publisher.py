@@ -1160,12 +1160,22 @@ class TilePublisher:
         temp tree and promotes it with a single ``os.replace``, so a tree whose
         destination holds the same names with the same sizes is skipped whole and
         anything else is replaced whole.
+
+        Each ``trees[]`` entry separates plan intent (``action``: ``copy`` /
+        ``skip``) from outcome (``status``: ``pending`` -> ``copied`` ->
+        ``rolled_back``, or ``skipped``). A payload must never claim work that
+        did not happen, so ``status`` is only advanced after the write helper
+        returns, ``byte_count`` for a copied tree is the helper's own byte count,
+        and a failed record carries no ``file_count`` at all.
         """
         if self.object_store_copyback_root is None:
             return None
 
         copyback_root_raw = self.object_store_copyback_root
         summary: dict[str, Any] = {"root": str(copyback_root_raw)}
+        # Bound into `summary` after planning; mutated in place afterwards, so
+        # the failure payload reports the outcome each tree actually reached.
+        trees: list[dict[str, Any]] = []
         rollback_log: list[_CopybackRollbackEntry] = []
         copyback_root: Path | None = None
         try:
@@ -1210,45 +1220,63 @@ class TilePublisher:
                 self._plan_canonical_precip_tree(grid_key, copyback_store, required_file=_CANONICAL_GRID_FILE)
                 for grid_key in self._discover_canonical_grid_keys(storage_source)
             )
-            trees = [
+            trees.extend(
                 {
                     "object_key": key,
-                    "status": "copied" if needs_copy else "skipped",
+                    "action": "copy" if needs_copy else "skip",
+                    "status": "pending" if needs_copy else "skipped",
                     "file_count": len(source_tree.files),
                     "byte_count": sum(size for _name, size in source_tree.file_sizes),
                 }
                 for key, source_tree, needs_copy in plans
-            ]
+            )
             # file_count counts every file the mirror holds for this cycle, copied
             # and already-identical trees alike, so the 56 `.nc` + `grid.json`
-            # cycle reports 57 whether or not the grid tree needed rewriting.
-            summary["file_count"] = sum(int(tree["file_count"]) for tree in trees)
+            # cycle reports 57 whether or not the grid tree needed rewriting. It
+            # is attached to the `ok` / `skipped` payloads only: on a failure no
+            # such claim can be made, so the key is absent.
+            file_count = sum(int(tree["file_count"]) for tree in trees)
             summary["trees"] = trees
 
-            pending = [key for key, _source_tree, needs_copy in plans if needs_copy]
+            pending = [tree for tree in trees if tree["action"] == "copy"]
             if not pending:
-                return {**summary, "status": "skipped", "reason": "trees_already_mirrored"}
+                return {
+                    **summary,
+                    "status": "skipped",
+                    "reason": "trees_already_mirrored",
+                    "file_count": file_count,
+                }
 
             # Phase 2 writes, on a rollback batch of its own: a precip failure
             # must never roll back the q_down products copied earlier.
-            for key in pending:
-                self._copyback_object_tree_with_rollback(
-                    key,
+            for tree in pending:
+                counts = self._copyback_object_tree_with_rollback(
+                    str(tree["object_key"]),
                     copyback_store,
                     validate_source_tree=_accept_canonical_precip_tree,
                     rollback_log=rollback_log,
                 )
+                # Only now has this tree been promoted; before this line it is
+                # still `pending` and the destination holds nothing new.
+                tree["status"] = "copied"
+                tree["byte_count"] = counts["byte_count"]
             _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
-            return {**summary, "status": "ok"}
+            return {**summary, "status": "ok", "file_count": file_count}
         except Exception as error:
             if copyback_root is not None and rollback_log:
                 try:
                     _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
                 except (OSError, SafeFilesystemError) as rollback_error:
                     # A failed rollback is evidence, never an exception the
-                    # publish has to survive.
+                    # publish has to survive. The promoted trees keep `copied`:
+                    # the rollback did not undo them, and `rollback_error` is the
+                    # signal that the destination state is unknown.
                     summary["rollback_error"] = str(rollback_error)
                     summary["rollback_error_type"] = type(rollback_error).__name__
+                else:
+                    for tree in trees:
+                        if tree["status"] == "copied":
+                            tree["status"] = "rolled_back"
             if isinstance(error, _CanonicalPrecipSourceMissing):
                 return {**summary, "status": "failed", "missing_path": error.missing_path}
             return {

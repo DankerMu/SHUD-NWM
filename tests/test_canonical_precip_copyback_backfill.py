@@ -12,13 +12,23 @@ Contract (canonical-precip-copyback spec, Requirement 2):
 * exit 0 with no failure, 1 when something failed, 2 for unusable roots;
 * imports the standard library only, so node-22's frozen checkout can run it as
   ``<pinned python> -m scripts.canonical_precip_copyback_backfill`` without
-  triggering an environment build.
+  triggering an environment build;
+* refuses a symlinked *tree root* (``canonical/``, ``canonical/<S>/grid/``,
+  ``canonical/<S>/<cycle>/prcp_rate_or_amount/``) instead of deep-copying
+  whatever lives outside ``--source-root``, the same rule it already applies to
+  entries inside a tree;
+* leaves every directory it creates under ``--copyback-root`` group/world
+  readable regardless of the process umask (node-22 writes as one account,
+  node-27 reads the same NFS as another).
 """
 
 from __future__ import annotations
 
 import ast
 import json
+import os
+import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -212,6 +222,171 @@ def test_backfill_refuses_to_mirror_a_symlinked_entry(
     assert entry["failed"] == 1
     assert any("symlink" in message for message in entry["errors"])
     assert not (copyback_root / "canonical/gfs/2026090212/prcp_rate_or_amount/linked.nc").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Symlinked tree ROOTS. The per-entry rule above only covers entries *inside* a
+# tree: `canonical/`, `canonical/<S>/grid/` and
+# `canonical/<S>/<cycle>/prcp_rate_or_amount/` are built as paths and would be
+# followed straight out of --source-root into the shared copyback root.
+# --------------------------------------------------------------------------- #
+OUTSIDE_MARKER = b"outside-the-source-root"
+
+
+def _seed_outside_tree(tmp_path: Path, *, relative: str, files: tuple[str, ...]) -> Path:
+    """A payload directory that lives outside --source-root entirely."""
+
+    outside = tmp_path / "outside" / relative
+    outside.mkdir(parents=True)
+    for name in files:
+        (outside / name).write_bytes(OUTSIDE_MARKER + name.encode("utf-8"))
+    return outside
+
+
+def _assert_nothing_copied_from_outside(copyback_root: Path) -> None:
+    leaked = [
+        str(path)
+        for path in copyback_root.rglob("*")
+        if path.is_file() and OUTSIDE_MARKER in path.read_bytes()
+    ]
+    assert leaked == []
+
+
+def test_backfill_refuses_a_symlinked_canonical_root(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    source_root.mkdir()
+    copyback_root.mkdir()
+    outside = _seed_outside_tree(
+        tmp_path,
+        relative="gfs/2026090212/prcp_rate_or_amount",
+        files=("gfs_2026090212_prcp_rate_or_amount_f003.nc",),
+    )
+    (source_root / "canonical").symlink_to(outside.parents[2])
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    # An unusable `canonical/` is a root problem, not a per-cycle failure.
+    assert exit_code == 2
+    assert summary["totals"]["failed"] > 0
+    assert "refusing to mirror a symlinked directory" in summary["root_error"]
+    _assert_nothing_copied_from_outside(copyback_root)
+
+
+def test_backfill_refuses_a_symlinked_grid_root(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+    outside = _seed_outside_tree(tmp_path, relative="grid/gfs_0p25", files=("grid.json",))
+    grid_root = source_root / "canonical" / "gfs" / "grid"
+    shutil.rmtree(grid_root)
+    grid_root.symlink_to(outside.parent)
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert summary["totals"]["failed"] > 0
+    entry = next(grid for grid in summary["grids"] if grid["source"] == "gfs")
+    assert entry["status"] == "failed"
+    assert any("refusing to mirror a symlinked directory" in message for message in entry["errors"])
+    _assert_nothing_copied_from_outside(copyback_root)
+
+
+def test_backfill_refuses_a_symlinked_precipitation_root(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+    outside = _seed_outside_tree(
+        tmp_path,
+        relative="prcp_rate_or_amount",
+        files=("gfs_2026090212_prcp_rate_or_amount_f003.nc",),
+    )
+    prcp_root = source_root / "canonical" / "gfs" / "2026090212" / "prcp_rate_or_amount"
+    shutil.rmtree(prcp_root)
+    prcp_root.symlink_to(outside)
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert summary["totals"]["failed"] > 0
+    entry = next(
+        cycle for cycle in summary["cycles"] if cycle["source"] == "gfs" and cycle["cycle_token"] == "2026090212"
+    )
+    assert entry["status"] == "failed"
+    assert any("refusing to mirror a symlinked directory" in message for message in entry["errors"])
+    _assert_nothing_copied_from_outside(copyback_root)
+
+
+def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """node-22 writes as one account; node-27 reads the same NFS as another."""
+
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+
+    previous_umask = os.umask(0o077)
+    try:
+        exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    finally:
+        os.umask(previous_umask)
+    capsys.readouterr()
+
+    assert exit_code == 0
+    created_dirs = [path for path in copyback_root.rglob("*") if path.is_dir()]
+    # Intermediates (canonical/, canonical/<S>/, canonical/<S>/<cycle>/) too, not
+    # just the leaves: mkdir(parents=True) creates them all at the umask.
+    assert len(created_dirs) >= 10
+    unreadable = [
+        str(path) for path in created_dirs if stat.S_IMODE(path.stat().st_mode) & 0o055 != 0o055
+    ]
+    assert unreadable == []
+
+
+def test_backfill_canonical_root_that_is_not_a_directory_exits_two(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    source_root.mkdir()
+    copyback_root.mkdir()
+    (source_root / "canonical").write_bytes(b"not a directory")
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    # Exit 2 is "unusable root": no cycle or grid entry exists to carry a
+    # failure, so clause 1's own predicate is literally false here.
+    assert exit_code == 2
+    assert summary["root_error"]
+    assert summary["cycles"] == [] and summary["grids"] == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root sails straight through a chmod-000 directory")
+def test_backfill_unreadable_canonical_root_exits_two(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+    canonical_root = source_root / "canonical"
+    os.chmod(canonical_root, 0o000)
+    try:
+        exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+        summary = json.loads(capsys.readouterr().out)
+    finally:
+        os.chmod(canonical_root, 0o755)
+
+    assert exit_code == 2
+    assert summary["root_error"]
 
 
 @pytest.mark.parametrize("missing", ["source", "copyback"])

@@ -25,7 +25,17 @@ script *writes by default*; only ``--dry-run`` suppresses writes, because the
 node-22 operation invokes it without any flag.
 
 Exit codes: 0 = completed with no failure, 1 = completed but something failed
-(the summary is still printed), 2 = unusable arguments or roots.
+(the summary is still printed), 2 = unusable arguments or roots -- which
+includes a ``canonical/`` under ``--source-root`` that exists but is unreadable,
+not a directory, or a symlink. An *absent* ``canonical/`` is not an error: there
+is simply nothing to mirror, and the run exits 0.
+
+Path safety: a tree root that is itself a symlink (``canonical/``,
+``canonical/<S>/grid/`` or ``canonical/<S>/<cycle>/prcp_rate_or_amount/``) is
+refused rather than followed, the same rule this script already applies to every
+entry inside a tree. Every directory the script creates under ``--copyback-root``
+is chmod'ed 0o755 explicitly, because node-22 writes as one account and node-27
+reads the same NFS as another and the process umask must not decide that.
 """
 
 from __future__ import annotations
@@ -49,8 +59,21 @@ PRCP_DIR = "prcp_rate_or_amount"
 CYCLE_TOKEN_LENGTH = 10
 
 
+DIR_MODE = 0o755
+FILE_MODE = 0o644
+
+
 class BackfillUsageError(Exception):
     """The arguments or the roots they name cannot be used (exit 2)."""
+
+
+class SymlinkedDirectoryError(OSError):
+    """A directory the script was asked to descend into is a symlink.
+
+    Subclasses ``OSError`` so every caller that already records a listing
+    failure records this one too, instead of silently deep-copying whatever
+    lives outside ``--source-root``.
+    """
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,15 +123,54 @@ def _sorted_child_dir_names(path: Path) -> list[str]:
     """Names of the real (non-symlink) subdirectories of ``path``, sorted.
 
     Raises ``FileNotFoundError`` when ``path`` is absent and ``OSError`` when it
-    exists but cannot be listed (unreadable, or not a directory at all).
+    exists but cannot be listed (unreadable, not a directory at all, or a
+    symlink -- ``os.scandir`` would happily follow that one).
     """
 
+    _reject_symlinked_directory(path)
     names: list[str] = []
     with os.scandir(path) as entries:
         for entry in entries:
             if entry.is_dir(follow_symlinks=False):
                 names.append(entry.name)
     return sorted(names)
+
+
+def _reject_symlinked_directory(path: Path) -> None:
+    """Fail closed on a tree root that is itself a symlink.
+
+    Entries *inside* a tree are already filtered with ``follow_symlinks=False``;
+    the roots (``canonical/``, ``canonical/<S>/grid/``,
+    ``canonical/<S>/<cycle>/prcp_rate_or_amount/``) are built as paths and would
+    otherwise be followed out of ``--source-root``. Raises ``FileNotFoundError``
+    when ``path`` is absent, so callers keep distinguishing "nothing to mirror".
+    """
+
+    if stat.S_ISLNK(path.lstat().st_mode):
+        raise SymlinkedDirectoryError(f"refusing to mirror a symlinked directory: {path}")
+
+
+def _ensure_target_directory(directory: Path) -> None:
+    """``mkdir -p`` the destination and chmod 0o755 every directory created here.
+
+    ``mkdir(mode=...)`` is masked by the process umask, so the mode has to be
+    applied afterwards with an explicit ``chmod``; under ``umask 027`` the plain
+    ``mkdir`` leaves 0o750 and node-27's reader account loses the tree.
+    Pre-existing directories are left alone -- this script only owns what it
+    creates.
+    """
+
+    created: list[Path] = []
+    probe = directory
+    while not probe.exists():
+        created.append(probe)
+        parent = probe.parent
+        if parent == probe:
+            break
+        probe = parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for path in created:
+        os.chmod(path, DIR_MODE)
 
 
 def _is_cycle_token(name: str) -> bool:
@@ -130,6 +192,16 @@ def mirror_tree(source_dir: Path, target_dir: Path, *, dry_run: bool) -> _TreeRe
     """Mirror one directory tree file by file; identical-size destinations are skipped."""
 
     result = _TreeResult()
+    try:
+        _reject_symlinked_directory(source_dir)
+    except SymlinkedDirectoryError as error:
+        result.failed += 1
+        result.errors.append(str(error))
+        return result
+    except OSError as error:
+        result.failed += 1
+        result.errors.append(f"failed to stat {source_dir}: {error}")
+        return result
     _mirror_directory(source_dir, target_dir, dry_run=dry_run, result=result)
     return result
 
@@ -193,9 +265,9 @@ def _mirror_file(
 
     temp_file = target_file.parent / f".{target_file.name}.backfill.{os.getpid()}.tmp"
     try:
-        target_file.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_target_directory(target_file.parent)
         shutil.copyfile(source_file, temp_file)
-        os.chmod(temp_file, 0o644)
+        os.chmod(temp_file, FILE_MODE)
         os.replace(temp_file, target_file)
     except OSError as error:
         try:
@@ -266,10 +338,25 @@ def _backfill_cycle(
     relative = Path(CANONICAL_DIR) / storage_source / cycle_token / PRCP_DIR
     source_dir = source_root / relative
     entry: dict[str, Any] = {"source": storage_source, "cycle_token": cycle_token}
-    if not source_dir.exists():
+    try:
+        # lstat, not exists(): a dangling symlink here is a refusal (recorded by
+        # mirror_tree below), never "this cycle has no precipitation products".
+        source_dir.lstat()
+    except FileNotFoundError:
         # A canonical cycle directory may legitimately hold other variables only;
         # nothing to mirror is not a failure.
         entry.update({"status": "no_precip_products", "copied": 0, "skipped": 0, "failed": 0, "errors": []})
+        return entry
+    except OSError as error:
+        entry.update(
+            {
+                "status": "failed",
+                "copied": 0,
+                "skipped": 0,
+                "failed": 1,
+                "errors": [f"failed to stat {source_dir}: {error}"],
+            }
+        )
         return entry
     result = mirror_tree(source_dir, copyback_root / relative, dry_run=dry_run)
     entry.update({"status": "failed" if result.failed else "ok", **result.as_dict()})
@@ -354,6 +441,12 @@ def main(argv: list[str] | None = None) -> int:
     summary = backfill(source_root, copyback_root, dry_run=bool(args.dry_run))
     # stdout carries the JSON summary and nothing else.
     print(json.dumps(summary, indent=2, sort_keys=True))
+    if summary.get("root_error") is not None:
+        # `canonical/` exists but is unreadable, not a directory, or a symlink:
+        # an unusable root, not a per-cycle failure -- no cycle or grid entry
+        # even exists. Exit 2 (the summary has still been printed). An *absent*
+        # `canonical/` is not a root error and stays exit 0.
+        return EXIT_USAGE
     return EXIT_FAILURES if int(summary["totals"]["failed"]) else EXIT_OK
 
 
