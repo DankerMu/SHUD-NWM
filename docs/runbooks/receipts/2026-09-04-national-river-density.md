@@ -19,6 +19,12 @@
   five generated layer SQL digests are unchanged (`river-network-national` = `d35ec3b9a9dd539b`,
   `river-network` = `c2b710cf13b5df6e`, `hydro` = `e9b335142768ee61`, `hydro-national` =
   `271b526da0921c16`, `met-stations` = `2691870627724076`, sha256 truncated to 16 hex).
+- Baseline side of the same anchor, so the reader need not rebuild it: at `1b56648b` the four untouched layers
+  carry those same four digests, and `river-network-national` is `6994850d956ff2a5`. Exactly one layer moved
+  between the two runs.
+- `1b56648b` is node-27's master at measurement time, not literally this change's merge base (`70337533`).
+  `git diff 1b56648b 70337533 -- services/tiles/mvt.py apps/api/routes/hydro_display.py` is empty, so the two
+  are interchangeable for this measurement.
 - Bound `feature_coordinate_limit`: 50000 (unchanged, all layers)
 - Tile set: `scripts/node27_mvt_prewarm.py::xyz_tiles(CHINA_BOUNDS, [3,4,5,6,7])` = 516 tiles
 - Raw data: `.workplans/2005/measurements/receipt_{before,after,z9,z012_before,z012_after}.json` (gitignored working copies)
@@ -52,6 +58,9 @@ number the residual-risk section is about.
 
 These are the tiles that exceeded 50 000 collection coordinates under the v3 threshold table and that the
 budget window plus the raised per-layer limit exist to rescue.
+
+The `features before -> after` column comes from the measurement run's JSON, not from the CSV, which
+records only the after-side feature count.
 
 | tile | coordinate_count before | after | untruncated | features before -> after | bytes | cold s |
 |---|---|---|---|---|---|---|
@@ -183,6 +192,26 @@ rows and starve others, and that count would collapse.
 - z8 was not measured. It uses the merged row shape like z<=7, and the threshold table does not move
   there, but the collection-limit raise does apply.
 - Cold generation at z0 to z2 is 3.3 to 4.0 seconds. Prewarm covers z3 to z5 only.
+
+## Appendix: why raising the simplification tolerance was not the remedy
+
+Before adding the budget window, the obvious cheaper fix was to generalise the geometry harder at the
+zooms that were over budget. Measured on node-27, `coordinate_count` for the worst tile of four of the five over-budget zooms as the
+`ST_SimplifyPreserveTopology` tolerance rises. z5 was not swept: its shape matches z4, and the z3/z4 result
+had already settled the question.
+
+| tile | class filter | sweep | outcome |
+|---|---|---|---|
+| 3/6/3 | Type>=4 | 2000 m 86 160 / 3000 m 86 146 / 4000 m 86 146 / 6000 m 86 146 | saturated |
+| 4/12/6 | Type>=4 | 2000 m 52 458 / 2500 m 52 452 / 3000 m 52 452 / 4000 m 52 452 | saturated |
+| 6/52/24 | Type>=2 | 500 m 56 354 / 700 m 53 508 / 900 m 52 652 / 1200 m 52 548 | saturated above budget |
+| 7/107/46 | Type>=1 | 200 m 52 381 / 300 m 36 727 / 400 m 28 617 / 600 m 20 987 | effective |
+
+`ST_SimplifyPreserveTopology` cannot go below roughly two points per surviving component, so at low zoom
+the coordinate cost is set by how many segments survive the class filter, not by how densely each is
+sampled. Tripling the z3 tolerance buys 14 coordinates out of 86 160. Only z7 has real headroom, and a
+remedy that works at one of the four swept zooms is not a remedy. This is the measurement behind the design
+note's claim that the tolerance route is saturated.
 
 ## Appendix: the per-basin layer, and why it keeps the v2 table
 
