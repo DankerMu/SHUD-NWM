@@ -13870,6 +13870,10 @@ REGISTRY_PARTITION_DATABASE_ABSENT: tuple[str, ...] = (
     "tests/test_qhh_production_bootstrap.py",
     "tests/test_qhh_production_bootstrap_state.py",
 )
+# Active OpenSpec fixture prefix for the #1913 issue-scoped guard-diff contract.
+# The durable check is in force only while this directory exists AND a current
+# change path is under it; archive or an unrelated future PR must no-op.
+REGISTRY_PARTITION_OPENSPEC_PREFIX = "openspec/changes/partition-basins-registry-import-tests/"
 
 
 def _registry_load_partition_oracle() -> dict[str, Any]:
@@ -14713,10 +14717,42 @@ def test_registry_partition_all_eight_outputs_stay_below_the_structural_limit() 
     assert oracle["structural"]["line_limit"] == REGISTRY_PARTITION_STRUCTURAL_LIMIT
 
 
+def _registry_partition_scope_change_set(repo_root: Path | None = None) -> tuple[str, ...] | None:
+    """The current change set while the #1913 guard-diff contract is in force, else None.
+
+    Reuses the already-tested ``_qhh_current_change_set`` seam (branch commits since
+    merge-base(HEAD, origin/master) plus staged, unstaged, and scoped untracked). The
+    contract holds only while the active OpenSpec change directory exists AND a current
+    change path is under that prefix: after merge, or once a later PR archives the
+    directory, the durable test must no-op instead of reading the archive (or an
+    unrelated branch's diff) as #1913 business scope. Upstream guard movement before
+    the merge-base is excluded by that shared seam
+    (``test_qhh_partition_scope_change_set_excludes_upstream_before_merge_base``).
+    """
+    prefix = REGISTRY_PARTITION_OPENSPEC_PREFIX
+    if not (Path(repo_root or ".") / prefix).is_dir():
+        return None
+    changed = _qhh_current_change_set(repo_root=repo_root)
+    if not any(path.startswith(prefix) for path in changed):
+        return None
+    return changed
+
+
+def _registry_guard_offenders(changed: Iterable[str], *, guard_path: str) -> tuple[str, ...]:
+    """Issue-scoped guard edits in ``changed`` (the #1913 zero-diff subset)."""
+    return tuple(sorted(path for path in changed if path == guard_path))
+
+
+def _registry_assert_no_issue_scoped_guard_diff(changed: Iterable[str], *, guard_path: str) -> None:
+    offenders = _registry_guard_offenders(changed, guard_path=guard_path)
+    assert not offenders, f"issue-scoped guard edit: {list(offenders)}"
+
+
 def test_registry_partition_keeps_the_structural_guard_contract_and_out_of_the_change_set() -> None:
     # #1913 must not move the structural guard: the current guard stays enabled at 1,000
-    # lines with no registry exclusion, and the frozen provenance blob still hashes to the
-    # contract's recorded digest (issue-start provenance only).
+    # lines with no registry exclusion, the frozen provenance blob still hashes to the
+    # contract's recorded digest (issue-start provenance only), and the issue-scoped
+    # change set contains no guard edit while the active OpenSpec fixture is in force.
     oracle = _registry_partition_oracle()
     paths = [*_registry_partitions(), REGISTRY_PARTITION_HELPER]
     guard_path = oracle["structural"]["guard_path"]
@@ -14733,6 +14769,81 @@ def test_registry_partition_keeps_the_structural_guard_contract_and_out_of_the_c
     assert not [pattern for pattern in guard["exclude"] if "basins_registry_import" in pattern], (
         "a registry glob exclusion would undo the point of the partition"
     )
+    changed = _registry_partition_scope_change_set()
+    if changed is None:
+        return
+    _registry_assert_no_issue_scoped_guard_diff(changed, guard_path=guard_path)
+
+
+@pytest.mark.parametrize(
+    "state",
+    ("committed", "staged", "unstaged"),
+    ids=["guard-committed", "guard-staged", "guard-unstaged"],
+)
+def test_registry_partition_scope_names_and_reddens_a_guard_change_next_to_the_active_fixture(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    # An ACTIVE #1913 fixture change plus a guard edit in any of the three PR-visible
+    # states must be NAMED (present in the derived scope) and RED (the same offender
+    # check the production test uses).
+    _qhh_scope_repo_init(tmp_path)
+    fixture = REGISTRY_PARTITION_OPENSPEC_PREFIX.rstrip("/")
+    guard_path = ".large-file-guard.json"
+    (tmp_path / guard_path).write_text("base\n", encoding="utf-8")
+    (tmp_path / fixture).mkdir(parents=True)
+    (tmp_path / fixture / "design.md").write_text("base\n", encoding="utf-8")
+    _qhh_scope_commit(tmp_path, guard_path, f"{fixture}/design.md", message="base")
+    _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=tmp_path)
+    _qhh_owned_git("checkout", "-q", "-b", "feature", repo_root=tmp_path)
+    (tmp_path / fixture / "README.md").write_text("issue\n", encoding="utf-8")
+    if state == "committed":
+        (tmp_path / guard_path).write_text("guard edit\n", encoding="utf-8")
+        _qhh_scope_commit(tmp_path, f"{fixture}/README.md", guard_path, message="issue")
+    else:
+        _qhh_scope_commit(tmp_path, f"{fixture}/README.md", message="issue")
+        (tmp_path / guard_path).write_text("guard edit\n", encoding="utf-8")
+        if state == "staged":
+            _qhh_owned_git("add", "--", guard_path, repo_root=tmp_path)
+
+    changed = _registry_partition_scope_change_set(repo_root=tmp_path)
+    assert changed is not None, "the active fixture change keeps the #1913 contract in force"
+    assert guard_path in changed, "a guard edit next to the fixture is invisible"
+    offenders = _registry_guard_offenders(changed, guard_path=guard_path)
+    assert guard_path in offenders, f"guard edit not named as issue-scoped drift: {list(offenders)}"
+    with pytest.raises(AssertionError, match=re.escape(guard_path)):
+        _registry_assert_no_issue_scoped_guard_diff(changed, guard_path=guard_path)
+
+
+@pytest.mark.parametrize(
+    "fixture_present",
+    [True, False],
+    ids=["fixture-committed-but-unrelated", "fixture-absent"],
+)
+def test_registry_partition_scope_gate_noops_without_an_active_fixture_change(
+    tmp_path: Path,
+    fixture_present: bool,
+) -> None:
+    # The #1913 guard-diff contract must not fire on merged master or an unrelated
+    # future PR: once the active OpenSpec directory is archived/moved (absent) or the
+    # current diff touches nothing under its prefix (present but unrelated), the gate
+    # no-ops even though the branch carries a real change set.
+    _qhh_scope_repo_init(tmp_path)
+    fixture = REGISTRY_PARTITION_OPENSPEC_PREFIX.rstrip("/")
+    (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
+    if fixture_present:
+        (tmp_path / fixture).mkdir(parents=True)
+        (tmp_path / fixture / "design.md").write_text("base\n", encoding="utf-8")
+        _qhh_scope_commit(tmp_path, "README.md", f"{fixture}/design.md", message="base")
+    else:
+        _qhh_scope_commit(tmp_path, "README.md", message="base")
+    _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=tmp_path)
+    _qhh_owned_git("checkout", "-q", "-b", "feature", repo_root=tmp_path)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/unrelated_plugin.py").write_text("x\n", encoding="utf-8")
+    _qhh_scope_commit(tmp_path, "scripts/unrelated_plugin.py", message="unrelated")
+
+    assert _registry_partition_scope_change_set(repo_root=tmp_path) is None
 
 
 def test_registry_partition_live_commands_name_all_seven_suites() -> None:
