@@ -3702,7 +3702,10 @@ def test_canonical_precip_mirror_failure_receipt_keeps_the_cycle_token_unredacte
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    # The event fields sit under `payload`; only `record_type` is top level.
+    # The journal envelope carries identity fields (`event_id`, `entity_id`,
+    # `source_id`, `cycle_time`, `sequence`) at the top level alongside `payload`,
+    # but `event_type` and `details` live only under `payload`, so both levels are
+    # traversed to reach the receipt.
     events = [
         record["payload"]
         for record in records
@@ -3806,7 +3809,10 @@ def test_canonical_precip_mirror_receipt_survives_the_journal_sanitizer(
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    # The event fields sit under `payload`; only `record_type` is top level.
+    # The journal envelope carries identity fields (`event_id`, `entity_id`,
+    # `source_id`, `cycle_time`, `sequence`) at the top level alongside `payload`,
+    # but `event_type` and `details` live only under `payload`, so both levels are
+    # traversed to reach the receipt.
     events = [
         record["payload"]
         for record in records
@@ -3864,7 +3870,10 @@ def test_canonical_precip_mirror_persisted_success_renders_object_keys_verbatim(
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
-    # The event fields sit under `payload`; only `record_type` is top level.
+    # The journal envelope carries identity fields (`event_id`, `entity_id`,
+    # `source_id`, `cycle_time`, `sequence`) at the top level alongside `payload`,
+    # but `event_type` and `details` live only under `payload`, so both levels are
+    # traversed to reach the receipt.
     events = [
         record["payload"]
         for record in records

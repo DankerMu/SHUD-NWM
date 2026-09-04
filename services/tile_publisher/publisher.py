@@ -1157,20 +1157,26 @@ class TilePublisher:
     def _copyback_canonical_precip(self, source: str, cycle: str) -> dict[str, Any] | None:
         """Mirror the canonical precipitation products for one cycle (#2008, D6).
 
-        ``source`` is the raw source id parsed out of the cycle id and ``cycle``
-        its ``%Y%m%d%H`` token; the mirror keyspace is
+        ``source`` is any spelling ``normalize_source_id`` accepts -- the q_down
+        publish path passes the token ``_cycle_filter`` splits out of the cycle
+        id, the DB-free forecast terminal-stage seam passes the already
+        normalized ``context.source_id`` -- and ``cycle`` is the cycle's
+        ``%Y%m%d%H`` token; the mirror keyspace is
         ``canonical/<storage_source>/<cycle>/prcp_rate_or_amount/`` plus every
         ``canonical/<storage_source>/grid/<grid_id>/`` directory discovered on the
         source root (design.md D3). ``<grid_id>`` is *listed*, never imported from
         ``workers.canonical_converter``.
 
-        This step MUST NOT fail, block or roll back the q_down publish for any
-        reason. Every failure -- absent source, unsafe entry name, symlink, tree
-        limit, mid-copy ``OSError``, ``SafeFilesystemError``, even a failed
-        rollback -- is swallowed and reported through the returned
-        ``precip_mirror`` lineage entry. The sibling ``_copyback_qdown_products``
-        converts these same exceptions into ``PublishError`` and raises; copying
-        that shape here would be a bug.
+        This step MUST NOT fail, block or roll back its caller -- the q_down
+        publish or the DB-free forecast terminal stage -- for any reason. Every
+        failure -- absent source, unsafe entry name, symlink, tree limit,
+        mid-copy ``OSError``, ``SafeFilesystemError``, even a failed rollback --
+        is swallowed and reported through the returned summary, which each
+        caller records under ``precip_mirror`` at its own outlet: publish
+        lineage, or the ``canonical_precip_mirror`` pipeline_event's
+        ``details``. The sibling ``_copyback_qdown_products`` converts these same
+        exceptions into ``PublishError`` and raises; copying that shape here
+        would be a bug.
 
         Idempotency is tree-granular: the reused copy helper always rebuilds a
         temp tree and promotes it with a single ``os.replace``, so a tree whose

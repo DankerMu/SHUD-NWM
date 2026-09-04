@@ -5090,11 +5090,15 @@ def test_entropy_audit_topology_guardrails_flag_unmarked_rollback_mirror(tmp_pat
         # CI/terminal log buffer, and the leg bypasses DB-absence stripping, so an
         # over-match here cannot be suppressed by a same-line no-database disclaimer.
         "node-22 mirror 的 CI scrollback 缓冲区调大到 5000 行",
+        # A frozen snapshot of the pre-#2034 wording of Requirement 1 in
         # openspec/changes/display-v2-national-timeline-precip-overlay/specs/
-        # canonical-precip-copyback/spec.md:4 - inlined verbatim like the four above. An
-        # object-store copyback names a real rollback (_copyback_object_tree_with_rollback)
-        # over files, not a database rollback mirror, so the rollback leg must stand down
-        # when the line is explicitly an object-store copy and names no database.
+        # canonical-precip-copyback/spec.md - the q_down-era text, which #2034 rewrote.
+        # Inlined like the four above, but retained deliberately as corpus rather than as
+        # a copy of the live spec: it is NOT expected to track that file and must not be
+        # refreshed from it. An object-store copyback names a real rollback
+        # (_copyback_object_tree_with_rollback) over files, not a database rollback
+        # mirror, so the rollback leg must stand down when the line is explicitly an
+        # object-store copy and names no database.
         (
             "After a successful q_down publish for `(source, cycle)`, the publisher on node-22 SHALL "
             "mirror `canonical/<storage_source>/<cycle_token>/prcp_rate_or_amount/*.nc` and the "

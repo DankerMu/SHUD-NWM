@@ -147,7 +147,7 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 | 操作 | node-22（compute_control） | node-27（display_readonly） |
 | --- | --- | --- |
 | `nhms-pipeline plan-production`（调度计划/提交） | 拥有（dry-run 计划 + `--submit` 提交） | 禁止（不运行正式调度入口） |
-| `nhms-pipeline publish-qdown`（发布 q_down 产物） | 生产链路不跑（DB-free，终态 `forecast_state_save_qc`；手工执行会 `DATABASE_URL_MISSING`） | 禁止 |
+| `nhms-pipeline publish-qdown`（发布 q_down 产物） | 生产链路不跑（DB-free，终态 `forecast_state_save_qc`；手工执行在未配 `DATABASE_URL` 时报 `DATABASE_URL_MISSING`） | 禁止 |
 | canonical 降水镜像（终态 `state_save_qc` 后写 shared object-store） | 拥有（写 `canonical/<S>/<cycle>/prcp_rate_or_amount/` 与 `canonical/<S>/grid/`） | 禁止 |
 | `nhms-pipeline publish-tiles`（发布瓦片产物） | 拥有（写 published） | 禁止 |
 | retry / cancel（控制面动作） | 拥有（写 DB + Gateway） | 禁止（只展示诊断和处理建议，无真实控制入口） |
@@ -330,8 +330,9 @@ fail-open：失败不影响 stage 结果，只在回执里留证据，所以判�
 
 DB-free 下回执落在文件 journal，目录按 **normalize 后的** source 分（`gfs` / `IFS`，不是
 cycle id 里的小写 `ifs`）；journal 会轮转出 `<cycle>.1.jsonl`、`<cycle>.2.jsonl`，所以必须
-glob 而不是只读 `<cycle>.jsonl`。事件字段整体嵌在记录的 `payload` 下，只有 `record_type`
-在顶层，所以选择器是 `.payload.details.precip_mirror`：
+glob 而不是只读 `<cycle>.jsonl`。事件字段整体嵌在记录的 `payload` 下；顶层除 `record_type` 外还有 journal 信封并列携带的
+身份字段（`event_id`/`entity_id` 是复制而非搬移，payload 里仍在）（`event_id`、`entity_id`、`source_id`、`cycle_time`、`sequence` 等），但 `event_type`
+与 `details` **不**在其中，所以选择器是 `.payload.details.precip_mirror`：
 
 ```bash
 jq -c 'select(.record_type == "pipeline_event"
