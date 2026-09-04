@@ -3250,3 +3250,31 @@ vs 新路由 3.15 s，同一批压缩 chunk）判定该暴露面**改前就存�
 
 `min_multiround` 默认 8、样本 171、这条 DECIDABLE 每次收尾必触发且已连续十余条同向 keep——降级为 NOTE
 的处置仍跟踪在 **#2036**，本条不重复论证。
+
+## Revisit 2026-09-04（PR #2028 / issue #2008 合并后 audit 再次 DECIDABLE）
+
+样本 **172** 个多轮 merged PR（较上条 +1），later-round catches **core=170 vs rotated=312 / skipped=15**
+（较上条 core +4、rotated +8）。方向未变，**keep rotation 维持**（autonomous default-keep，翻转仍须
+maintainer 裁定），无行为变更。
+
+本条补一个上一条没有的观察：**轮换的收益正在被"同一 lens 的深度"稀释**。早期样本 rotated 占比 80%
+（8:2）、97%（57:2），本次为 65%（312:170）——仍然满足 keep 判据，但比值在长期单调下滑。#2008 是一个
+干净的解释样本：五轮里 rotated-in 的 `review-claim-integrity` 与 `review-test-strength` 确实贡献了
+round-4 与 round-5 的全部 catch，计数器会记成"rotation 有效"；但这两轮真正的分界不是"换了个 lens"，
+而是**同一个 lens 被执行到了不同深度**。round-5 的 `review-test-strength` 做了 45 个突变加 4 个
+sensitivity control，才挖出那条 P1（镜像的失败 oracle 断言了一个生产路径永远发不出的异常类）；
+同一个 lens 在前几轮以常规深度跑过，什么都没找到。计数器无法区分"新 lens"与"旧 lens 跑得更深"，
+于是把后者的收益记在了前者账上。
+
+这与本 ADR 尾部第四项"计数口径的可识别性上限"是同一条限制的又一实例，且方向相反于上一条：#2007 的
+例子是**突变测试的价值不可见**，#2008 的例子是**突变测试的价值被错误归因给 lens 轮换**。两条合起来
+说明同一件事——本 ADR 的三个计数器度量的是 lens 组合，而近两个 issue 的决定性证据都来自执行深度。
+若要让 keep/cut 判据继续可信，缺的是一个"证据强度"维度（是否做了突变/是否有 red-capable oracle），
+而不是更大的样本。
+
+另一个不可见项，#2008 同样典型：本轮 6 条已验证 finding 中有 2 条是**上一轮修复自己引进的**（删掉
+symlink 分支说明后，幸存的句子变成断言相反的事）。计数器把它们记成"rotation 抓到的 catch"，但它们
+本不该存在——真实归因是修复简报的缺陷，不是审查的战果。
+
+`min_multiround` 默认 8、样本 172、这条 DECIDABLE 每次收尾必触发且已连续十余条同向 keep——降级为 NOTE
+的处置仍跟踪在 **#2036**，本条不重复论证。
