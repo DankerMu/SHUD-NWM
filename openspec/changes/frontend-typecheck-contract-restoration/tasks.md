@@ -15,7 +15,7 @@
 - [x] 3.1 为以下路由补具名 200 响应：`/api/v1/basins`（1.1 完成）、`/api/v1/basins/{basin_id}/versions`、`/api/v1/basin-versions/{id}/river-segments`（列表/GeoJSON）、`.../river-segments/{segment_id}`（详情）、`/api/v1/models`、`/api/v1/models/{model_id}`、`POST /api/v1/models/{model_id}/preflight`、`POST .../lifecycle`、`/api/v1/runs`、`/api/v1/metrics/stage-duration`、`/api/v1/metrics/success-rate`、`.../forecast-series`。
   - **形状权威是当前 store / handler 实现**（见 design.md「Shape Oracle」）。`b97c16e2^:openapi/nhms.v1.yaml` 只作起草稿：逐个 schema 必须打开构造它的 store 函数、枚举实际写入的 key 集合，**不是**拿旧 yaml 做 diff。重点核对 `_model_public_projection`（`packages/common/model_registry.py:3601`，28 字段）、`store.list_runs` 行形状、`store.preflight_model_operation`（21 字段）、`store.forecast_series` / `_empty_forecast_response`（`forecast_store.py:3987`）。
   - **`required` 同样以运行时为准**，不得照抄旧 yaml。旧 yaml 的 `required` 是手写的，实测已知一处说谎：`RiverSeriesResponse.required` 含 `frequency_thresholds`（该字段要删）。判据是 store 函数是否**恒**写入该 key。
-  - **已知必须偏离旧 yaml 的五处**（实测，见 proposal.md）：① 删 `HydroRun.product_quality`；② 删 `RiverSeriesResponse.frequency_thresholds`（`properties` 与 `required` **两处都改**）；③ 删 `SplicedForecastResponse.frequency_thresholds` —— 该字段在旧 yaml 里是 `{type: object, allOf: [$ref FloodFrequencyThresholds], nullable: true}`，**照抄会 `$ref` 到一个本次不补写的组件，造成悬空引用**；④ 删 `RunStatus` 的 `frequency_done` 枚举值（DB enum `hydro.run_status` 共 11 值、从无此值，见 `db/migrations/000003_enums.sql:10-21` + `000013_enum_remediation.sql:3`，删它是在纠正反向的谎言）；⑤ 给 `SeriesSegment` 补 `variable`。发现其他差异同样以当前实现为准，并逐条记进 PR body。
+  - **已知必须偏离旧 yaml 的五处**（实测，见 proposal.md）：① 删 `HydroRun.product_quality`；② 删 `RiverSeriesResponse.frequency_thresholds`（`properties` 与 `required` **两处都改**）；③ 删 `SplicedForecastResponse.frequency_thresholds` —— 该字段在旧 yaml 里是 `{type: object, allOf: [$ref FloodFrequencyThresholds], nullable: true}`，**照抄会 `$ref` 到一个本次不补写的组件，造成悬空引用**；④ 删 `RunStatus` 的 `frequency_done` 枚举值。**合并后 task 7.4 实机复核推翻了本条原来的依据**（原文：「DB enum 共 11 值、从无此值」）——node-27 生产库有 12 值、含 `frequency_done`；它由 `b97c16e2` 从**已应用**的 `000003_enums.sql` 里追溯删除，而 PostgreSQL 无法 DROP enum 成员，所以生产上删不掉。删除动作本身仍正确，但依据是「该阶段已被 `b97c16e2` 主动退休、当前 `*.py` 零写入、live 零行、且 `RunStatus` 只被 `HydroRun.status` 响应体引用」，不是「DB 从来没有」。账本漂移已立单 #2048；⑤ 给 `SeriesSegment` 补 `variable`。发现其他差异同样以当前实现为准，并逐条记进 PR body。
   - `RunType` 无需偏离：旧 yaml 的 `['analysis','forecast','hindcast']` 与 `000045_hydro_run_type_hindcast.sql` 后的 DB enum 一致。
   - **`forecast-series` 特例**：200 是裸 `oneOf: [RiverSeriesResponse, SplicedForecastResponse]`，**没有 SuccessEnvelope**（handler 直接 return，不经 `_ok`）。不得套用其余 13 条的 `allOf` 组合。
   - **`_set_operation_response_schema` 只处理 GET**（`openapi_patching.py:1054` 硬编码 `.get("get")`），对两条 POST 路由会**静默 no-op**。给它加 `method` 参数或对这两条直写 `operation["responses"]`。
@@ -65,11 +65,20 @@
 ## 7. 证据与收尾
 
 - [x] 7.1 PR body 列出 **33 个名字的逐名归宿表**：24 个 OpenAPI 具名（载体 · 路由 · 形状来源 store 函数 · 与旧 yaml 的差异）、1 个重指（`ModelLifecycleRequest`→`ModelLifecyclePayload`）、1 个因运行时无该字段而删（`GeoJsonPoint`）、3 个前端本地、4 个随死字段整支删除。24+1+1+3+4=33。
-- [ ] 7.6 为两条越界发现立 issue（只报不修）。① **已立单 #2038**——立单核查确认这是真实的脱敏绕过而非潜在风险（同一响应体内 `preflight.lineage.mesh_properties.source_path` 为 `[redacted]`、`model.mesh_properties_json.source_path` 为真实路径），并纠正了原观察两处：`/preflight` **不受影响**，但 `PUT .../active` 同样受影响。② **仍未立单**。原始观察：① `_model_public_projection`（`model_registry.py:3601-3622`）不 pop `mesh_properties_json`，而 `_model_asset_detail:3545` 会 pop —— lifecycle 响应会外泄原始 mesh properties JSON，属潜在路径/血缘泄漏；② `docs/spec/03_database_design.md:68`、`docs/appendices/C_database_schema_draft.md:28`、`docs/runbooks/forcing-copyback-backfill.md:66` 把 `frequency_done` 当作 `hydro.run_status` 合法成员，其中一处写进 `status IN (...)` 的 SQL、对该字面量恒不命中。
+- [x] 7.6 为两条越界发现立 issue（只报不修）。① **已立单 #2038**——立单核查确认这是真实的脱敏绕过而非潜在风险（同一响应体内 `preflight.lineage.mesh_properties.source_path` 为 `[redacted]`、`model.mesh_properties_json.source_path` 为真实路径），并纠正了原观察两处：`/preflight` **不受影响**，但 `PUT .../active` 同样受影响。② **已立单 #2047**，但原始观察的**归因是反的**：文档「多出 `frequency_done`」这一半并非它们独有的错，同一个值在 live 生产库里**至今存在**（`db/migrations/` 相对生产的漂移才是根因，见 #2048）。立单核查另纠正两点——文档真正的缺陷是同时**多了**已退役的 `frequency_done`、**少了** `000013` 补入的 `pending`（冻在原始快照上的双向陈旧）；且 `forcing-copyback-backfill.md:66` 那条 SQL 在生产上**命中 4742 行**（全为 `published`），并非原观察所说的「恒不命中」，只有 `frequency_done` 那个析取项惰性。在全新迁移建的库上该字面量会报 `invalid input value for enum hydro.run_status`。原始观察：① `_model_public_projection`（`model_registry.py:3601-3622`）不 pop `mesh_properties_json`，而 `_model_asset_detail:3545` 会 pop —— lifecycle 响应会外泄原始 mesh properties JSON，属潜在路径/血缘泄漏；② `docs/spec/03_database_design.md:68`、`docs/appendices/C_database_schema_draft.md:28`、`docs/runbooks/forcing-copyback-backfill.md:66` 把 `frequency_done` 当作 `hydro.run_status` 合法成员，其中一处写进 `status IN (...)` 的 SQL、对该字面量恒不命中。
 - [x] 7.2 记录 residual：新增 schema 是纯文档，**不做运行时校验**（与 `b97c16e2^` 之前的状态一致，非能力降级）；`response_model=` 升级另立 issue。
 - [x] 7.3 为 `/api/v1/lineage/river-point` 后端路由缺失（生产静默降级）立 issue。已立单 **#2039**；立单时对公网实测确认 404，并查实修法是造功能而非注册路由（无血缘图存储，`docs/spec/04_api_design.md:227-251` 与前端 interface 两份契约互斥）。
-- [ ] 7.4 **（合并前唯一未闭合项）** node-27 跑后端契约测试（`tests/test_api_contract.py` 与 3.4 的新校验测试按 CLAUDE.md 路由需真实 DB oracle 复核）。
-  - 附带一行闭环删 `frequency_done` 的决定：`SELECT unnest(enum_range(NULL::hydro.run_status));` —— 仓库迁移证据已足够强，但排除不了带外 `ALTER TYPE ... ADD VALUE`。
+- [x] 7.4 **（合并后补跑）** node-27 跑后端契约测试（`tests/test_api_contract.py` 与 3.4 的新校验测试按 CLAUDE.md 路由需真实 DB oracle 复核）。
+  - 附带一行闭环删 `frequency_done` 的决定：`SELECT unnest(enum_range(NULL::hydro.run_status));`
+  - **本任务当初写下的怀疑（「排除不了带外 `ALTER TYPE`」）方向对、机制猜错，而且它是本 issue 唯一拦住该错误的控制点。**
+    实测：live 12 值、含 `frequency_done`；不是带外 `ADD VALUE`，是 `b97c16e2` 追溯改写了已应用的迁移文件。
+    判据是中段序号——`frequency_done@7` 夹在 `parsed@6` 与 `published@8` 之间且为**整数**，而中段 `ADD VALUE`
+    必产生分数（`pending@2.5` 即是）；尾部追加同样拿整数，故「整数即原始」不可一般化。
+  - receipt（node-27 @ `d812def6`）：`uv run pytest tests/test_api_contract.py`
+    `tests/test_openapi_response_conformance.py tests/test_openapi_drift.py tests/test_openapi_31_contract.py -q`
+    → **149 passed in 28.67s**。
+  - 牵出的账本漂移已立单 **#2048**（重头不是枚举：`hydro.hydro_run` 的 6 个 partial index 全部与账本背离，
+    其中 4 个对 `services/tiles/mvt.py:1466` 的谓词不蕴含），PR #2037 上已补两条更正评论。
 - [x] 7.5 PR body 记一句 `PUT /api/v1/models/{model_id}/active`：旧 yaml 里它同样 `$ref` 到 `ModelLifecycleResult`，但前端无 typed 消费方（`apps/frontend/src` 无任何 `client.PUT(`），不构成 tsc 缺口，故不在本次 14 条路由内 —— 代价是同一形状在文档里具名/匿名并存，显式取舍。
 
 ## Evidence Floor

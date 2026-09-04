@@ -3210,3 +3210,21 @@ catch 强行记成 rotated。它们占 rotated 总数的一半以上，而且方
 定了，继续每次收尾都要求人裁一次是纯仪式。
 
 keep 按 autonomous default 维持，无行为变更。翻转仍须 maintainer 裁定。
+
+## Revisit 2026-09-04（PR #2037 / issue #2022 合并后 audit 再次 DECIDABLE）
+
+样本 **170** 个多轮 merged PR（较上条 +1），later-round catches **core=161 vs rotated=302 / skipped=15**
+——三个计数器**逐个未动**。#2022 的两轮里，round 1 出的两条 catch 都在轮内（记为 round 1，不进
+later-round 计数），round 2 是 Phase 7 终审且判 DO-NOT-BLOCK、零发现，所以本条只贡献分母。
+方向未变，**keep rotation 维持**（autonomous default-keep，翻转仍须 maintainer 裁定），无行为变更。
+
+值得记一句的不是这个计数器，而是它**看不见**的东西：本 issue 真正最贵的一次拦截发生在 round 0
+（fixture 评审指出把一份自证从未被校验过的旧 yaml 当形状权威是自相矛盾），而最贵的一次**逃逸**
+发生在合并之后——五个 reviewer、一个 verifier 加我自己的考古全都把 `db/migrations/000003_enums.sql`
+当成原始事实，没有人对这个文件跑过 `git log`，而它被 `b97c16e2` 追溯改写过。拦住它的是 task 7.4
+的实机 enum 查询，不是任何一轮评审。按 catch 计数的口径，这次逃逸对本文件的三个数字**零影响**，
+这正是本 ADR 尾部第四项「零发现轮不可见 / 计数口径的可识别性上限」的又一个实例，方向相同：
+计数器度量的是评审轮之间的相对产出，度量不了「评审整体是否看错了事实基座」。
+
+另：本文件此前已指出 `min_multiround` 默认 8（当时样本 168，现为 170），这条 DECIDABLE 每次收尾必触发且
+已连续十余条同向 keep。降级为 NOTE 的处置仍跟踪在 **#2036**，本条不重复论证。
