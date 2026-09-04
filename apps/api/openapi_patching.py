@@ -421,6 +421,32 @@ def _patch_layer_metadata_openapi(schema: dict) -> None:
         _set_operation_response_schema(schema, "/api/v1/layers/{layer_id}/valid-times", layer_valid_times_response)
 
 
+def _patch_basin_registry_openapi(schema: dict) -> None:
+    """Restore the published ``Basin`` schema and the basin-list response body.
+
+    ``GET /api/v1/basins`` returns the ``_ok()`` envelope around a list of
+    registry rows, so its handler is annotated ``dict[str, Any]`` and FastAPI can
+    only emit an opaque ``additionalProperties: true`` body. The named component
+    and the envelope-wrapped 200 body are therefore hand-written here, exactly as
+    the layer and station-series contracts are, without touching the route (a
+    ``response_model`` would filter the response body at runtime).
+
+    ``SuccessEnvelope`` is (re)assigned rather than assumed so this patch is
+    order-independent with respect to ``_patch_layer_metadata_openapi``, which
+    renames the route-generated ``ApiSuccessEnvelope`` component.
+    """
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    schemas["SuccessEnvelope"] = _success_envelope_schema()
+    schemas["Basin"] = _basin_schema()
+
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/basins",
+        _success_response_schema({"type": "array", "items": {"$ref": "#/components/schemas/Basin"}}),
+    )
+
+
 def _patch_station_series_openapi(schema: dict) -> None:
     components = schema.setdefault("components", {})
     schemas = components.setdefault("schemas", {})
@@ -1711,6 +1737,18 @@ def _nullable(schema: dict) -> dict:
     return {**schema, "nullable": True}
 
 
+def _null_union(schema: dict) -> dict:
+    """Nullability as a native OpenAPI 3.1 union instead of the 3.0 keyword.
+
+    ``_nullable`` emits the 3.0-only ``nullable: true`` keyword that
+    ``_finalize_openapi_schema`` has to rewrite, and every such node is pinned by
+    ``tests/test_openapi_31_contract.py::BASELINE_NULLABLE_COUNT``. Hand-written
+    schemas added from here on express the union directly, so they need no
+    finalizer rewrite and leave that baseline untouched.
+    """
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
 def _layer_metadata_schema() -> dict:
     string_array = {"type": "array", "items": {"type": "string"}}
     number_array = {"type": "array", "items": {"type": "number"}}
@@ -1762,5 +1800,19 @@ def _layer_metadata_schema() -> dict:
             "fallback_endpoint": _nullable({"type": "string"}),
             "release_blocking": {"type": "boolean"},
             "production_mvt_readiness_claimed": _nullable({"type": "boolean"}),
+        },
+    }
+
+
+def _basin_schema() -> dict:
+    return {
+        "type": "object",
+        "required": ["basin_id", "basin_name", "created_at"],
+        "properties": {
+            "basin_id": {"type": "string"},
+            "basin_name": {"type": "string"},
+            "basin_group": _null_union({"type": "string"}),
+            "description": _null_union({"type": "string"}),
+            "created_at": {"type": "string", "format": "date-time"},
         },
     }

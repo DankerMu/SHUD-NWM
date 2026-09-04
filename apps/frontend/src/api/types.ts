@@ -1345,6 +1345,14 @@ export interface components {
             observed_count: number;
             truncated: boolean;
         };
+        Basin: {
+            basin_id: string;
+            basin_name: string;
+            basin_group?: string | null;
+            description?: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
         JobStatusCounts: {
             succeeded: number;
             failed: number;
@@ -1629,8 +1637,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["Basin"][];
                     };
                 };
             };

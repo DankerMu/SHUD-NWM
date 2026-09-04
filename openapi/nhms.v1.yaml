@@ -76,9 +76,16 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                additionalProperties: true
-                title: Response List Basins Api V1 Basins Get
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      type: array
+                      items:
+                        $ref: '#/components/schemas/Basin'
         '422':
           description: Validation Error
           content:
@@ -3944,6 +3951,28 @@ components:
           type: integer
         truncated:
           type: boolean
+    Basin:
+      type: object
+      required:
+      - basin_id
+      - basin_name
+      - created_at
+      properties:
+        basin_id:
+          type: string
+        basin_name:
+          type: string
+        basin_group:
+          anyOf:
+          - type: string
+          - type: 'null'
+        description:
+          anyOf:
+          - type: string
+          - type: 'null'
+        created_at:
+          type: string
+          format: date-time
     JobStatusCounts:
       type: object
       required:
