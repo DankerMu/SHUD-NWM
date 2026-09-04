@@ -55,14 +55,16 @@ import psycopg2
 import pytest
 from fastapi.testclient import TestClient
 from psycopg2.extras import RealDictCursor
+from sqlalchemy.orm import Session
 
 from apps.api.main import app
 from packages.common.display_coverage import refresh_run_display_coverage
-from services.tiles.mvt import MVT_MEDIA_TYPE
+from services.tiles.mvt import MVT_MEDIA_TYPE, national_discharge_source_version
 from tests.integration_helpers import (
     apply_migrations_from_zero,
     insert_river_timeseries_dual_written,
     set_integration_env,
+    sqlalchemy_engine,
 )
 
 pytestmark = pytest.mark.integration
@@ -137,6 +139,15 @@ _SAME_CYCLE_IFS_FORCING_VERSION_ID = "it2007_forcing_ifs_same_cycle_v1"
 # valid_time. Older rather than newer so the request is a plausible hindcast
 # rather than a cycle issued after the instant it forecasts.
 _PRUNED_CYCLE_TIME = _CYCLE_TIME - timedelta(hours=6)
+
+# A cycle NEWER than every seeded run, also never seeded. `_PRUNED_CYCLE_TIME`
+# alone cannot tell `h.cycle_time = :cycle` from `h.cycle_time <= :cycle`: it is
+# older than every run, so both spellings select nothing and both answer 424.
+# This one is the other direction — the production shape is a client asking for
+# a cycle that has not landed yet — and there `<=` silently paints the newest
+# run as if it were the requested cycle, at HTTP 200. Kept off `_WINDOW_END`'s
+# value so a reader cannot confuse a cycle with a valid_time.
+_UNLANDED_CYCLE_TIME = _CYCLE_TIME + timedelta(hours=3)
 
 _ZOOM = 9
 
@@ -669,6 +680,27 @@ def test_national_identity_tile_matches_an_uppercase_source_id_from_a_lowercase_
     # The gfs identity has no run at the IFS cycle, so it stays fail-closed.
     _assert_probe_said_no_data(_request_identity_tile(client, "gfs", _IFS_CYCLE_TIME, _IFS_WINDOW_END))
 
+    # The legacy source-less alias, at the SAME instant, is the only place in
+    # the repo where its `source=None` bind is observable: this test refreshes
+    # coverage for the IFS run ONLY, so `_IFS_WINDOW_END` is an instant no gfs
+    # run can serve. Everywhere else — every other case here and every unit
+    # case — the seed is `_SOURCE_ID = "gfs"`, so a legacy route that started
+    # binding `source="gfs"` instead of NULL would answer identically and stay
+    # green. Here it 424s.
+    assert _query(
+        database_url,
+        "SELECT run_id FROM hydro.run_display_coverage ORDER BY run_id",
+        (),
+    ) == [{"run_id": _IFS_RUN_ID}], "only the IFS run may be display-ready here, or the case proves nothing"
+    legacy = _request_tile(client, _IFS_WINDOW_END)
+    _assert_tile_carries_the_seeded_features(legacy)
+    # `_assert_tile_was_painted_by` cannot be used for this pair: `_RUN_ID`
+    # (`it1596_forecast_run`) is a PREFIX of `_IFS_RUN_ID`
+    # (`it1596_forecast_run_ifs`), and that helper rejects such a pair outright
+    # because its negative half would be unfalsifiable. The positive assertion
+    # on the longer id is strictly stronger than the pair would have been.
+    assert _IFS_RUN_ID.encode() in legacy.content, _IFS_RUN_ID
+
 
 # --- #2007: two competing runs, one bound identity -------------------------
 #
@@ -788,8 +820,85 @@ def test_national_identity_tile_serves_the_requested_cycle_not_the_newest_one(na
         (_PRUNED_CYCLE_TIME,),
     )[0]["n"] == 0, "the pruned cycle must have no run at all, or the case proves nothing"
     _assert_probe_said_no_data(_request_identity_tile(client, "gfs", _PRUNED_CYCLE_TIME, _WINDOW_END))
+    # The same fail-closed demand from the OTHER side of the seeded cycles. The
+    # pruned case above is older than every run, so `h.cycle_time <= :cycle`
+    # selects nothing there either and answers 424 exactly like `=` does; only a
+    # cycle NEWER than the newest run separates the two. Under `<=` this request
+    # is painted by the late run, i.e. a not-yet-issued cycle silently served
+    # with an older cycle's discharge at HTTP 200.
+    assert _query(
+        database_url,
+        "SELECT COUNT(*) AS n FROM hydro.hydro_run WHERE cycle_time >= %s",
+        (_UNLANDED_CYCLE_TIME,),
+    )[0]["n"] == 0, "the unlanded cycle must be newer than every seeded run, or the case proves nothing"
+    _assert_probe_said_no_data(_request_identity_tile(client, "gfs", _UNLANDED_CYCLE_TIME, _WINDOW_END))
     # Unbound default, unchanged: newest cycle wins.
     _assert_tile_was_painted_by(_request_tile(client, _WINDOW_END), _LATE_GFS_RUN_ID, _RUN_ID)
+
+
+def test_national_digest_narrows_the_ranked_runs_to_the_bound_identity(national_tile: Any) -> None:
+    """`national_discharge_source_version`'s narrowing, EXECUTED, which nothing ever did.
+
+    The third `(source, cycle)` site lives in this helper's ranked sub-query and
+    it was the only one with no behavioral oracle anywhere: `_CapturingSession`
+    in `tests/test_hydro_display_mvt_scaling.py` records binds and returns
+    canned rows without running SQL, so a predicate that is present but
+    ineffective — the `AND (` -> `OR  (` flip, which SQL precedence turns into
+    "every unbound row, OR the matching ones" — kept the whole suite green.
+    `grep -rn "AND (CAST(:source" tests/` matched nothing before this case.
+
+    Two seeded gfs cycles on one network, so the ranking has something to
+    choose between:
+
+    * bound to the EARLY cycle -> ranks run_a,
+    * bound to the LATE cycle -> ranks the late run,
+    * bound to nothing -> ranks each network's overall latest, i.e. the late run
+      again, which is the legacy/catalog question and must not move,
+    * bound to a cycle with no run at all -> ranks nothing.
+
+    Under the flip all four collapse onto the unbound value. Freshness is what
+    that costs: the digest reaches `source_version` and therefore `cache_key`,
+    so a re-run of a non-latest identity would stop rotating its cache entry
+    while the tile it names went stale, and the tile file cache has no TTL.
+    """
+    database_url, _client = national_tile
+    _seed_rival_display_ready_run(
+        database_url,
+        run_id=_LATE_GFS_RUN_ID,
+        source_id=_SOURCE_ID,
+        forcing_version_id=_LATE_GFS_FORCING_VERSION_ID,
+        cycle_time=_LATE_CYCLE_TIME,
+        window_start=_LATE_CYCLE_TIME,
+        window_end=_WINDOW_END,
+        value_base=300.0,
+    )
+    # The digest's ranked sub-query INNER JOINs `hydro.run_display_coverage`, so
+    # a run without a refreshed coverage row is not a candidate at all and the
+    # comparisons below would be vacuous.
+    _refresh_coverage(database_url)
+    _refresh_coverage(database_url, _LATE_GFS_RUN_ID)
+    _assert_both_runs_are_candidates_at(database_url, (_RUN_ID, _LATE_GFS_RUN_ID), _WINDOW_END)
+
+    engine = sqlalchemy_engine(database_url)
+    try:
+        with Session(engine) as session:
+            unbound = national_discharge_source_version(session)
+            early = national_discharge_source_version(session, source="gfs", cycle=_CYCLE_TIME)
+            late = national_discharge_source_version(session, source="gfs", cycle=_LATE_CYCLE_TIME)
+            pruned = national_discharge_source_version(session, source="gfs", cycle=_PRUNED_CYCLE_TIME)
+    finally:
+        # The throwaway database is DROPped on teardown; a live pooled
+        # connection would make the DROP block and take the file down with it.
+        engine.dispose()
+
+    assert early != late, "the digest does not narrow: both cycles rank the same run"
+    assert unbound == late, "the unbound digest must stay the overall-latest question"
+    assert pruned not in (unbound, early, late), "a cycle with no run must digest an empty ranking"
+    # Non-vacuity for `unbound == late`: it is an equality, so it would also
+    # hold if the helper returned a constant. `early` differing from it is what
+    # rules that out, and `pruned` differing from all three rules out a digest
+    # that only ever sees two shapes.
+    assert len({unbound, early, pruned}) == 3
 
 
 def test_national_identity_tile_serves_the_requested_source_not_the_other_one_at_that_cycle(

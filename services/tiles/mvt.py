@@ -47,12 +47,19 @@ MVT_FILE_CACHE_DIR_ENV = "NHMS_MVT_FILE_CACHE_DIR"
 # deploying the new shape without moving this generation would keep serving
 # pre-switch cached tiles.
 NATIONAL_RIVER_NETWORK_QUERY_VERSION = "stream-type-aggregate-v3"
-# Bumped to v4: the national discharge query now applies a deterministic
-# fair-per-network budget before MVT encoding. The tile cache key does not hash
-# the SQL, so deploying a new shape without moving this generation would keep
-# serving pre-switch cached tiles and split the fleet between stale and fresh.
-# The inventory digest below separately changes whenever an active network/run
-# changes, including when a new basin is registered.
+# The name still says `fair-network-budget` because v4 is why the budget exists:
+# the national discharge query applies a deterministic fair-per-network budget
+# before MVT encoding. The tile cache key does not hash the SQL, so deploying a
+# new shape without moving this generation would keep serving pre-switch cached
+# tiles and split the fleet between stale and fresh. The inventory digest below
+# separately changes whenever an active network/run changes, including when a
+# new basin is registered.
+#
+# Now at v5, bumped for the identity binding documented immediately below: the
+# run selection gained `(source, cycle)` predicates, which changes which run a
+# given tile is painted from. The legacy source-less route's cache key rotates
+# once as a result -- one post-deploy cold miss per legacy tile, expected, not a
+# regression in the node-27 cold/hot numbers.
 NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
 
 # The national run selection is bound to the requested `(source, cycle)`

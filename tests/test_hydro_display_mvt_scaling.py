@@ -519,6 +519,19 @@ _NATIONAL_TILE_X = 13
 _NATIONAL_TILE_Y = 6
 _NATIONAL_ROUTE_PREFIX = "/api/v1/tiles/hydro-national"
 
+# The identity pair verbatim, INCLUDING the leading `AND (`. Asserting only the
+# inner `CAST(...) IS NULL OR ...` half leaves the conjunct/disjunct distinction
+# unpinned, and that distinction is the whole predicate: SQL's AND binds tighter
+# than OR, so `... AND mi.active_flag OR (guard OR match) AND (guard OR match)`
+# parses as `(everything unbound) OR (both matches)` and admits EVERY candidate
+# run again. Measured: with the digest's `AND (` flipped to `OR  (`, all three
+# of `national_discharge_source_version(session)`,
+# `...(source="gfs", cycle=<early>)` and `...(source="gfs", cycle=<late>)`
+# collapse onto one value against a real database, and the whole unit suite
+# stayed green before these constants existed.
+_SOURCE_CONJUNCT = "AND (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)"
+_CYCLE_CONJUNCT = "AND (CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)"
+
 
 def _national_sql_sites() -> tuple[str, str]:
     """The two run-selection slices of the national tile SQL, located not counted.
@@ -544,14 +557,14 @@ def test_national_tile_sql_binds_source_and_cycle_at_both_run_selection_sites() 
     cte_slice, probe_slice = _national_sql_sites()
 
     for site_name, site in (("latest_runs CTE", cte_slice), ("identity probe", probe_slice)):
-        assert "lower(h.source_id) = :source" in site, site_name
-        assert "h.cycle_time = :cycle" in site, site_name
         # The NULL guard is what keeps the legacy 5-segment route's run
         # selection unchanged, so it is part of the locked shape. It also splits
         # the two sub-predicates apart, which is why they are located
-        # individually and never as one contiguous string.
-        assert "CAST(:source AS text) IS NULL OR" in site, site_name
-        assert "CAST(:cycle AS timestamptz) IS NULL OR" in site, site_name
+        # individually and never as one contiguous string. The leading `AND (`
+        # is inside the pinned literal: without it a conjunct -> disjunct flip
+        # keeps every substring satisfied while the predicate narrows nothing.
+        assert _SOURCE_CONJUNCT in site, site_name
+        assert _CYCLE_CONJUNCT in site, site_name
         # `:source::text` would make SQLAlchemy's bind regex backtrack and emit
         # a bogus `sourc` bind that no fake-session test can see.
         assert ":source::" not in site, site_name
@@ -604,8 +617,14 @@ def test_national_digest_narrows_to_the_requested_identity_and_stays_null_withou
 
     assert unbound.params == [{"source": None, "cycle": None}]
     assert bound.params == [{"source": "gfs", "cycle": _NATIONAL_CYCLE}]
-    assert "CAST(:source AS text) IS NULL OR lower(h.source_id) = :source" in bound.sql
-    assert "CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle" in bound.sql
+    # Same locked literal as the two `postgis_tile_sql` sites, `AND (` included:
+    # this helper's narrowing has no fake-session oracle at all (`_Session` never
+    # executes SQL), so the shape assertion is the only local guard and a
+    # conjunct -> disjunct flip must not pass it. The BEHAVIORAL oracle is
+    # `tests/test_mvt_national_identity_probe_integration.py`
+    # ::test_national_digest_narrows_the_ranked_runs_to_the_bound_identity.
+    assert _SOURCE_CONJUNCT in bound.sql
+    assert _CYCLE_CONJUNCT in bound.sql
     # One shared status set, one occurrence: `test_display_publish_status_only`
     # pins the counts this helper contributes.
     assert bound.sql.count("h.status IN ('succeeded', 'parsed', 'published')") == 1
@@ -658,10 +677,13 @@ class _NationalRouteSession:
         "invalid_properties": None,
     }
 
-    def __init__(self) -> None:
+    def __init__(self, digest_rows: list[dict[str, Any]] | None = None) -> None:
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
         self.tile_params: list[dict[str, Any]] = []
         self.digest_params: list[dict[str, Any]] = []
+        # Per instance, never by mutating `_DIGEST_ROWS`: the class attribute is
+        # shared by every other case in this file.
+        self.digest_rows = self._DIGEST_ROWS if digest_rows is None else digest_rows
 
     def execute(self, statement: Any, params: Any = None) -> _TileResult:
         if "ST_AsMVT" in str(statement):
@@ -672,7 +694,7 @@ class _NationalRouteSession:
         # what lets a case assert the route narrowed it to the requested
         # identity (the tile binds alone cannot see that call at all).
         self.digest_params.append(dict(params or {}))
-        return _TileResult([dict(row) for row in self._DIGEST_ROWS])
+        return _TileResult([dict(row) for row in self.digest_rows])
 
     def get_bind(self) -> Any:
         return self.bind
@@ -688,11 +710,16 @@ class _ExplodingSession:
         raise AssertionError("a validation failure must not reach the database")
 
 
-def _national_identity_url(source: str, cycle: str, valid_time: str = "2026-09-03T00:00:00Z") -> str:
-    return (
-        f"{_NATIONAL_ROUTE_PREFIX}/{source}/{cycle}/q_down/{valid_time}"
-        f"/{_NATIONAL_TILE_Z}/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"
-    )
+def _national_identity_url(
+    source: str,
+    cycle: str,
+    valid_time: str = "2026-09-03T00:00:00Z",
+    variable: str = "q_down",
+    z: int = _NATIONAL_TILE_Z,
+    x: int = _NATIONAL_TILE_X,
+    y: int = _NATIONAL_TILE_Y,
+) -> str:
+    return f"{_NATIONAL_ROUTE_PREFIX}/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf"
 
 
 def _request_national_identity_tile(
@@ -735,17 +762,26 @@ def _request_national_identity_tile(
 def test_national_identity_route_collapses_time_spellings_onto_one_bind_and_one_cache_key(
     monkeypatch: Any, tmp_path: Any
 ) -> None:
-    """`.000Z`, `+00:00`, `+08:00` and `Z` are one instant, one `:cycle` bind, one cache entry.
+    """`.000Z`, `+00:00`, `+08:00`, `-08:00` and `Z` are one instant, one `:cycle` bind, one cache entry.
 
     `+08:00` is here because the RFC3339 shape gate (#2007 F4) must not narrow
     the accepted spellings to UTC: `2026-09-02T20:00:00+08:00` is the SAME
     instant as the other three and must collapse onto the same canonical
-    `2026-09-02T12:00:00Z` bind and cache key, not a fourth one.
+    `2026-09-02T12:00:00Z` bind and cache key, not a fifth one.
+
+    `2026-09-02T04:00:00-08:00` is the same instant again, and it is the ONLY
+    accepted NEGATIVE offset anywhere in this file. Without it, narrowing
+    `_RFC3339_INSTANT_RE`'s offset alternative from `[+-]` to `\\+` stays green:
+    the only other negative-offset spelling in the suite is the year-9999
+    reject-set case, which is rejected for RANGE, not shape, and would simply
+    start being rejected one layer earlier -- silently taking the `OverflowError`
+    guard's last discriminating oracle with it.
     """
     spellings = (
         "2026-09-02T12:00:00.000Z",
         "2026-09-02T12:00:00+00:00",
         "2026-09-02T20:00:00+08:00",
+        "2026-09-02T04:00:00-08:00",
         "2026-09-02T12:00:00Z",
     )
     keys: list[str] = []
@@ -819,6 +855,15 @@ def test_national_identity_route_gives_two_identities_two_cache_keys(monkeypatch
         # i.e. an HTTP 500 from a public URL. It is a bad request, so it is 422.
         _national_identity_url("gfs", quote("9999-12-31T23:59:59-08:00", safe="")),
         _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time=quote("9999-12-31T23:59:59-08:00", safe="")),
+        # `variable` is a path segment on this route too, and the route body's
+        # comment claims a bad one costs no SQL. Only the SUPPORTED-set check has
+        # a distinct oracle: `SUPPORTED_HYDRO_MVT_VARIABLES == ("q_down",)`, and
+        # `q_down` satisfies `SAFE_TILE_IDENTIFIER_RE`, so every shape-invalid
+        # spelling is also unsupported and `validate_identifier(variable, ...)`
+        # can never be the layer that rejects. Both spellings are pinned anyway
+        # because both are client-visible; the malformed one is subsumed.
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", variable="q_up"),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", variable=quote("q down", safe="")),
     ],
 )
 def test_national_identity_route_rejects_a_bad_identity_before_running_any_sql(url: str) -> None:
@@ -838,6 +883,53 @@ def test_national_identity_route_rejects_a_bad_identity_before_running_any_sql(u
     assert response.json()["error"]["code"] == "VALIDATION_ERROR", response.text
 
 
+@pytest.mark.parametrize(
+    ("case", "url"),
+    [
+        # z above MVT_MAX_ZOOM (14).
+        ("z-too-large", _national_identity_url("gfs", "2026-09-02T12:00:00Z", z=15, x=0, y=0)),
+        # z below 0. FastAPI parses `-1` as an int path param, so this really
+        # does reach `validate_xyz` rather than failing to route.
+        ("z-negative", _national_identity_url("gfs", "2026-09-02T12:00:00Z", z=-1, x=0, y=0)),
+        # In-range z, x/y outside that zoom's 2^z matrix (z=4 -> 0..15).
+        ("x-out-of-matrix", _national_identity_url("gfs", "2026-09-02T12:00:00Z", z=4, x=16, y=6)),
+        ("y-out-of-matrix", _national_identity_url("gfs", "2026-09-02T12:00:00Z", z=4, x=13, y=16)),
+    ],
+)
+def test_national_identity_route_rejects_bad_tile_coordinates_before_running_any_sql(
+    case: str, url: str
+) -> None:
+    """`validate_xyz(z, x, y)` on the new route, which nothing pinned before.
+
+    The route's `z`/`x`/`y` are plain `int` path params: the `maximum: 14` /
+    `16383` in the runtime OpenAPI comes from
+    `apps/api/openapi_patching.py::_patch_mvt_tile_openapi`, which rewrites the
+    DOCUMENT and installs no validator. So `validate_xyz` is the only thing
+    between a bad coordinate and the tile SQL, and deleting that one line from
+    the route left the whole suite green -- `grep -rn "validate_xyz" tests/`
+    matched nothing repo-wide.
+
+    Under the deletion the request reaches `national_discharge_source_version`,
+    `_ExplodingSession` raises, and the response becomes a 500: both the status
+    and the code below move.
+
+    The code is `TILE_XYZ_INVALID`, NOT the `VALIDATION_ERROR` every other
+    rejection on this route renders. That is the pre-existing contract of
+    `services/tiles/mvt.py::validate_xyz`, shared with the four sibling tile
+    routes, and this route joins it rather than inventing a fifth spelling.
+    """
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: _ExplodingSession()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(url)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422, f"{case}: {response.text}"
+    assert response.json()["error"]["code"] == "TILE_XYZ_INVALID", f"{case}: {response.text}"
+
+
 def _legacy_national_url(valid_time: str = "2026-09-03T00:00:00Z") -> str:
     return (
         f"{_NATIONAL_ROUTE_PREFIX}/q_down/{valid_time}"
@@ -846,14 +938,18 @@ def _legacy_national_url(valid_time: str = "2026-09-03T00:00:00Z") -> str:
 
 
 @pytest.mark.parametrize(
-    ("route_name", "url"),
+    ("route_name", "url", "expected_identity_binds"),
     [
-        ("identity", _national_identity_url("gfs", "2026-09-02T12:00:00Z")),
-        ("legacy", _legacy_national_url()),
+        (
+            "identity",
+            _national_identity_url("gfs", "2026-09-02T12:00:00Z"),
+            {"source": "gfs", "cycle": _NATIONAL_CYCLE},
+        ),
+        ("legacy", _legacy_national_url(), {"source": None, "cycle": None}),
     ],
 )
 def test_every_national_tile_sql_bind_is_supplied_by_the_route_that_executes_it(
-    route_name: str, url: str, monkeypatch: Any, tmp_path: Any
+    route_name: str, url: str, expected_identity_binds: dict[str, Any], monkeypatch: Any, tmp_path: Any
 ) -> None:
     """No bind in the national tile SQL may be missing from a call site's params.
 
@@ -877,6 +973,19 @@ def test_every_national_tile_sql_bind_is_supplied_by_the_route_that_executes_it(
     assert len(session.tile_params) == 1
     supplied = set(session.tile_params[0])
     assert declared - supplied == set(), f"{route_name} route omits binds the SQL declares"
+    # ...and the VALUES, not just the key set. A key-set-only check is satisfied
+    # by any value at all, so the legacy route binding `source="gfs"` -- which
+    # would silently make the source-less alias filter on one source -- passed
+    # here, passed
+    # `test_each_national_route_hands_the_digest_helper_its_own_identity` (that
+    # one asserts the DIGEST binds, a different call), and passed every
+    # integration case, because every one of them seeds `_SOURCE_ID = "gfs"`.
+    # The behavioral half is
+    # `tests/test_mvt_national_identity_probe_integration.py`
+    # ::test_national_identity_tile_matches_an_uppercase_source_id_from_a_lowercase_path,
+    # where the legacy route must serve an `IFS`-only instant.
+    identity_binds = {name: session.tile_params[0][name] for name in expected_identity_binds}
+    assert identity_binds == expected_identity_binds, route_name
 
 
 @pytest.mark.parametrize(
@@ -921,6 +1030,118 @@ def test_each_national_route_hands_the_digest_helper_its_own_identity(
     # would mean a third statement now lands on this branch.
     assert len(session.digest_params) == 1, f"{route_name} route: {session.digest_params}"
     assert session.digest_params[0] == expected_digest_params, route_name
+
+
+def test_national_identity_cache_key_moves_when_the_identity_digest_moves(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """The digest must REACH the cache key, which is the freshness half of #2007.
+
+    `test_each_national_route_hands_the_digest_helper_its_own_identity` proves
+    the route passes `(source, cycle)` down, and
+    `test_national_digest_narrows_to_the_requested_identity_and_stays_null_without_one`
+    proves the helper uses them -- but neither looks at what the returned digest
+    does next. Dropping `:{source_digest}` from `_national_source_cycle_tile_input`'s
+    `source_version` leaves both of them green and every identity still gets its
+    own cache key (the literal source and cycle text are in there too); what
+    breaks is exactly the case the narrowing exists for: a RE-RUN of the SAME
+    `(source, cycle)` no longer rotates the key, and the tile file cache has no
+    TTL, so the stale tile is served until something else evicts it.
+
+    Same identity, same URL, two different sets of ranked runs -> two keys.
+    """
+    rerun_rows = [{**_NationalRouteSession._DIGEST_ROWS[0], "run_id": "run_b"}]
+    # Non-vacuity: the two digests really do differ, so a difference downstream
+    # can be attributed to the digest rather than to anything else.
+    assert national_discharge_source_version(_Session(_NationalRouteSession._DIGEST_ROWS)) != (
+        national_discharge_source_version(_Session(rerun_rows))
+    )
+
+    url = _national_identity_url("gfs", "2026-09-02T12:00:00Z")
+    keys: list[str] = []
+    for index, rows in enumerate((None, rerun_rows)):
+        _response, captured = _request_national_identity_tile(
+            url, _NationalRouteSession(rows), monkeypatch, tmp_path / f"cache-{index}"
+        )
+        assert _response.status_code == 200, _response.text
+        keys.append(cache_key(captured[0]))
+
+    assert len(set(keys)) == 2, keys
+
+
+def test_legacy_national_route_keeps_accepting_the_instant_spellings_it_always_did(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """The RFC3339 shape gate is on the NEW route only, and that is load-bearing.
+
+    `Rfc3339Instant` is deliberately not applied to the legacy 5-segment alias:
+    `valid_time: datetime` there has always accepted offset-less and
+    space-separated spellings, and clients are already sending them. Annotating
+    the alias with `Rfc3339Instant` would turn those into 422s -- a silent
+    break of the very route this change promises to leave alone -- and nothing
+    in the repo noticed, because every legacy case in every suite happens to
+    spell its instant `...Z`.
+
+    This is a regression pin on the alias's pre-existing accept-set, not an
+    endorsement of lax parsing; the new canonical route is where the shape gate
+    lives.
+    """
+    session = _NationalRouteSession()
+    response, captured = _request_national_identity_tile(
+        _legacy_national_url(valid_time="2026-09-03T00:00:00"), session, monkeypatch, tmp_path
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(session.tile_params) == 1
+    # It lands on the same instant the `...Z` spelling does, so this pins the
+    # accept-set without also blessing a second cache identity for it.
+    assert captured[0].valid_time == "2026-09-03T00:00:00Z"
+
+
+def test_layer_catalog_still_digests_every_source_not_one_identity(monkeypatch: Any) -> None:
+    """`GET /api/v1/layers` must call the digest helper with NO identity (task 3.1).
+
+    The helper grew keyword-only `source`/`cycle` in this change. The catalog's
+    call is the one site that must NOT use them: the catalog advertises the
+    legacy source-less template until I5/#2009 moves it, and narrowing its
+    digest to one identity would rotate `source_generation` on a schedule that
+    has nothing to do with what the catalog describes. Nothing else in the repo
+    looks at this call's arguments -- `_default_layer_catalog` is exercised
+    directly by `tests/test_api_contract.py`, which passes
+    `national_hydro_source_version` in as a literal string and never reaches the
+    helper at all.
+    """
+    recorded: list[dict[str, Any]] = []
+
+    def _recording_digest(_session: Any, **kwargs: Any) -> str:
+        recorded.append(kwargs)
+        return "national-hydro-digest"
+
+    monkeypatch.setattr(hydro_display, "national_discharge_source_version", _recording_digest)
+    monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: {"run_id": "run_1"})
+    monkeypatch.setattr(hydro_display, "_run_source_version", lambda _run: "run-source-v1")
+    monkeypatch.setattr(
+        hydro_display, "_require_run_source_identity", lambda _run, layer_id: ("bv_a", "rnv_a")
+    )
+    monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
+    monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
+    monkeypatch.setattr(hydro_display, "_default_layer_catalog", lambda *_a, **_k: [])
+    # `display_catalog_cached` is a process-wide TTL cache; without this the
+    # loader may never run and `recorded` would be empty for the wrong reason.
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: object()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    # Non-vacuity: the catalog path really did reach the digest helper once.
+    assert len(recorded) == 1, recorded
+    assert recorded[0] == {}
 
 
 def test_runtime_openapi_documents_the_national_identity_tile_route() -> None:
