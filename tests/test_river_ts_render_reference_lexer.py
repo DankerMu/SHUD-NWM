@@ -195,10 +195,35 @@ def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
             index = cursor
             continue
 
-        if character.isdigit():
+        if character.isdigit() or (
+            character == "." and index + 1 < length and sql[index + 1].isdigit()
+        ):
             cursor = index
-            while cursor < length and (sql[cursor].isdigit() or sql[cursor] == "."):
+            if sql[cursor] == ".":
                 cursor += 1
+                while cursor < length and sql[cursor].isdigit():
+                    cursor += 1
+            else:
+                while cursor < length and sql[cursor].isdigit():
+                    cursor += 1
+                if cursor < length and sql[cursor] == ".":
+                    cursor += 1
+                    while cursor < length and sql[cursor].isdigit():
+                        cursor += 1
+            if (
+                cursor < length
+                and sql[cursor] in "Ee"
+                and cursor + 1 < length
+                and (sql[cursor + 1].isdigit() or sql[cursor + 1] in "+-")
+            ):
+                exponent = cursor + 1
+                if sql[exponent] in "+-":
+                    exponent += 1
+                if exponent < length and sql[exponent].isdigit():
+                    exponent += 1
+                    while exponent < length and sql[exponent].isdigit():
+                        exponent += 1
+                    cursor = exponent
             index, previous_token = cursor, None
             continue
 
@@ -234,7 +259,9 @@ ALPHABET: tuple[str, ...] = (
     "/**/ ",
     "'q_down' ",
     "E'q\\'x' ",
+    "e'q\\'x' ",
     "E'a''b' ",
+    "e'a''b' ",
     "'it''s' ",
     "'a' ",
     "'a'\n'b' ",
@@ -270,12 +297,15 @@ ALPHABET: tuple[str, ...] = (
     "e ",
     '"x"E',
     ")E",
-    # In-subset on its own, out of subset only in COMPOSITION: glued to a
-    # following `'…'` fragment it spells `1E'`, which decision 18's second arm
-    # refuses (round-5 L2). Addable only because that arm exists — with the
-    # corrected reference and no arm the pair is a real 18-mismatch divergence
-    # over 20 seeds, which is what L2 measured.
+    '"x"e',
+    ")e",
+    # In-subset on their own, out of subset only in COMPOSITION: glued to a
+    # following `'…'` fragment they spell `1E'` / `1e'`, which decision 18's
+    # second arm refuses (round-5 L2). Addable only because that arm exists —
+    # with the corrected reference and no arm the pair is a real 18-mismatch
+    # divergence over 20 seeds, which is what L2 measured.
     "1E",
+    "1e",
     "AS n ",
     ", ",
     "|| ",
@@ -309,12 +339,15 @@ IN_SUBSET_ALPHABET: tuple[str, ...] = tuple(
 SEED = 20180905
 SAMPLE_COUNT = 2000
 
-#: Measured at this commit: 836/2000 samples (41.8%) are inside the declared
-#: subset and are therefore actually compared span-for-span. Of the other 1164,
-#: 1159 carry one of the eleven out-of-subset fragments and 5 are refused only in
-#: COMPOSITION — the in-subset fragment ``1E`` glued to a following ``'…'``,
-#: which is decision 18's second arm (round-5 L2) — so the refusal arm is
-#: exercised by both halves of the subset rule.
+#: Measured at this commit: 892/2000 samples (44.6%) are inside the declared
+#: subset and are therefore actually compared span-for-span. Of the other 1108,
+#: 1101 include at least one of the eleven intrinsically out-of-subset fragments
+#: and 7 are refused only in COMPOSITION — individually in-subset numeric-prefix
+#: fragments (``1E`` / ``1e`` and extended token composition) glued to a following
+#: quote-bearing fragment, which is decision 18's second arm (round-5 L2) — so
+#: the refusal arm is exercised by both halves of the subset rule. Accepted
+#: token-adjacent escape counts on the same seed: 232 uppercase ``E'…'``, 142
+#: lowercase ``e'…'``.
 #: Pinned well below the measurement so ordinary drift in the alphabet does
 #: not redden it, while the failure this floor exists to catch — a subset rule
 #: that widens until it refuses everything and the differential asserts nothing —
@@ -327,6 +360,22 @@ def _samples() -> list[str]:
     return [
         "".join(generator.choice(ALPHABET) for _ in range(generator.randint(2, 7))) for _ in range(SAMPLE_COUNT)
     ]
+
+
+def _has_token_adjacent_escape(sql: str, prefix: str) -> bool:
+    """Whether ``sql`` contains a token-adjacent ``{prefix}'`` that is not inside a span.
+
+    Independent of the production recognizer: walks THIS file's reference lexer
+    and looks for an escape-string span whose preceding character is ``prefix``.
+    Used only as an anti-vacuity count so an uppercase-only alphabet or an
+    uppercase-only reference cannot stay green.
+    """
+    for start, _stop, kind in reference_non_code_spans(sql):
+        if kind != "literal" or start == 0:
+            continue
+        if sql[start] == "'" and sql[start - 1] == prefix:
+            return True
+    return False
 
 
 def test_the_scanner_agrees_with_a_reference_lexer_or_refuses() -> None:
@@ -384,6 +433,17 @@ def test_the_scanner_agrees_with_a_reference_lexer_or_refuses() -> None:
     # And the refusal arm is genuinely exercised, not a branch nothing takes.
     assert len(accepted) < len(samples)
 
+    # L1's case split is not a substring of ``"e "`` / ``"E "``. Those fragments
+    # only generate whitespace-separated prefixes; the adjacent forms that
+    # actually exercise ``previous_token in ("E", "e") and previous_end == index``
+    # come from ``E'…'`` / ``e'…'`` and from ``"x"E`` / ``)E`` / ``"x"e`` / ``)e``
+    # glued to a following quote. An uppercase-only reference mutant stays green
+    # unless both counts are non-zero (PR #2057 cand-LOWER-01).
+    adjacent_upper = sum(1 for sample in accepted if _has_token_adjacent_escape(sample, "E"))
+    adjacent_lower = sum(1 for sample in accepted if _has_token_adjacent_escape(sample, "e"))
+    assert adjacent_upper > 0, "seeded alphabet generated no accepted adjacent E'…' samples"
+    assert adjacent_lower > 0, "seeded alphabet generated no accepted adjacent e'…' samples"
+
 
 def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None:
     """The deterministic sibling: the twenty real templates, and both renders of each.
@@ -416,7 +476,9 @@ def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None
         ("nested_block_comment", "/* a /* b */ c */ SELECT 1", ((0, 17, "comment"),)),
         ("carriage_return_line_comment", "SELECT 1 -- note\rFROM t", ((9, 16, "comment"),)),
         ("escape_string", r"SELECT E'a\'b' FROM t", ((8, 14, "literal"),)),
+        ("escape_string_lowercase", r"SELECT e'a\'b' FROM t", ((8, 14, "literal"),)),
         ("escape_prefix_needs_adjacency", r"SELECT note E 'C:\' AS n", ((14, 19, "literal"),)),
+        ("escape_prefix_needs_adjacency_lowercase", r"SELECT note e 'C:\' AS n", ((14, 19, "literal"),)),
         ("plain_backslash_literal", r"SELECT 'C:\' FROM t", ((7, 12, "literal"),)),
         ("quoted_identifier_is_code", "SELECT \"it's\" FROM t", ()),
         ("dollar_body", "SELECT $q$a'b$q$ FROM t", ((7, 16, "literal"),)),
@@ -425,7 +487,9 @@ def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None
         "nested_block_comment",
         "carriage_return_line_comment",
         "escape_string",
+        "escape_string_lowercase",
         "escape_prefix_needs_adjacency",
+        "escape_prefix_needs_adjacency_lowercase",
         "plain_backslash_literal",
         "quoted_identifier_is_code",
         "dollar_body",

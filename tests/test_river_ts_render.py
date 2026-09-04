@@ -1396,7 +1396,9 @@ _SUBSET_REFUSAL = "outside the modelled lexical subset"
 _REAL_READ = "rt.value FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s AND rt.run_key = %(k)s"
 
 
-def _assert_refused_as_outside_the_subset(sql: str, entry: str) -> None:
+def _assert_refused_as_outside_the_subset(
+    sql: str, entry: str, *, offending: str | None = None
+) -> None:
     """Both stores and the text-identity oracle refuse ``sql``, and none names the table.
 
     The three surfaces are asserted together because they are the three doors
@@ -1405,10 +1407,11 @@ def _assert_refused_as_outside_the_subset(sql: str, entry: str) -> None:
     ``fact_table_text_identity_columns`` calls it as its first statement.
 
     The public message is the fixture's own shape: it names the supplied
-    ``entry`` and quotes the complete offending text at its offset — the same
-    ``(offset, text)`` :func:`_lexical_subset_violation` answers, interpolated
-    as ``{text!r} at offset {offset}``. The private-tuple pin cannot see a
-    mutation that drops those fields from :func:`_assert_modelled_reference_forms`.
+    ``entry`` and quotes the complete offending text at its offset — interpolated
+    as ``{text!r} at offset {offset}``. When ``offending`` is supplied it is a
+    known-good literal from the statement, not the recognizer's own answer, so a
+    mutant that still refuses a truncated tail (``2E'`` of ``1e+2E'``) cannot
+    stay green.
 
     The message must NOT contain the fact table's name: the statement census in
     ``tests/test_river_ts_text_identity_cleanup.py`` counts that name in this
@@ -1418,6 +1421,9 @@ def _assert_refused_as_outside_the_subset(sql: str, entry: str) -> None:
     violation = _lexical_subset_violation(sql)
     assert violation is not None
     offset, text = violation
+    if offending is not None:
+        expected_offset = sql.index(offending)
+        assert (offset, text) == (expected_offset, offending)
     locus = f"{text!r} at offset {offset}"
 
     def _assert_public_door(raised: pytest.ExceptionInfo[RiverTemplateError]) -> None:
@@ -1618,28 +1624,77 @@ def test_non_ascii_text_inside_a_comment_or_literal_stays_inside_the_subset() ->
 
 
 @pytest.mark.parametrize(
-    ("label", "sql"),
+    ("label", "sql", "offending"),
     [
         (
             "select_list",
             r"SELECT 1E'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
             r"WHERE rt.variable = %(v)s AND rt.run_key = 1E'b\'y'",
+            "1E'",
         ),
         (
             "predicate",
             r"SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.variable = %(v)s "
             r"AND rt.note = 1E'a\'x' AND rt.tag = 1E'b\'y'",
+            "1E'",
         ),
         (
             "lowercase_e",
             r"SELECT 1e'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
             r"WHERE rt.variable = %(v)s AND rt.run_key = 1e'b\'y'",
+            "1e'",
+        ),
+        (
+            "exponent",
+            r"SELECT 1e2E'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = 1e2E'b\'y'",
+            "1e2E'",
+        ),
+        (
+            "decimal_exponent",
+            r"SELECT 1.2e3E'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = 1.2e3E'b\'y'",
+            "1.2e3E'",
+        ),
+        (
+            "signed_exponent",
+            r"SELECT 1e+2E'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = 1e+2E'b\'y'",
+            "1e+2E'",
+        ),
+        (
+            "negative_exponent",
+            r"SELECT 1E-2e'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = 1E-2e'b\'y'",
+            "1E-2e'",
+        ),
+        (
+            "leading_dot",
+            r"SELECT .5E'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = .5E'b\'y'",
+            ".5E'",
+        ),
+        (
+            "leading_dot_signed_exponent",
+            r"SELECT .5e+2E'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = .5e+2E'b\'y'",
+            ".5e+2E'",
         ),
     ],
-    ids=["select_list", "predicate", "lowercase_e"],
+    ids=[
+        "select_list",
+        "predicate",
+        "lowercase_e",
+        "exponent",
+        "decimal_exponent",
+        "signed_exponent",
+        "negative_exponent",
+        "leading_dot",
+        "leading_dot_signed_exponent",
+    ],
 )
 def test_a_numeric_literal_glued_to_an_escape_prefix_is_refused_as_outside_the_lexical_subset(
-    label: str, sql: str
+    label: str, sql: str, offending: str
 ) -> None:
     r"""The subset's second arm (#2018 round-5 L2): ``1E'`` is a shape, not a character.
 
@@ -1673,8 +1728,13 @@ def test_a_numeric_literal_glued_to_an_escape_prefix_is_refused_as_outside_the_l
       clause, so the statement is refused for a DIFFERENT reason (text identity)
       and the legacy render succeeds. It is here because the arm has to reach a
       glued literal wherever it sits, not only ahead of the read.
+
+    ``offending`` is a known-good literal from the statement text, not the
+    recognizer's own answer: a mutant that still refuses a truncated tail
+    (``2E'`` of ``1e+2E'``) stays green if the three doors only check that
+    *some* subset refusal happened.
     """
-    _assert_refused_as_outside_the_subset(sql, label)
+    _assert_refused_as_outside_the_subset(sql, label, offending=offending)
 
 
 def test_the_glued_escape_prefix_arm_reports_the_whole_numeric_constant() -> None:
@@ -1695,6 +1755,12 @@ def test_the_glued_escape_prefix_arm_reports_the_whole_numeric_constant() -> Non
     """
     assert _lexical_subset_violation(r"SELECT 12E'a\'x' AS n, " + _REAL_READ) == (7, "12E'")
     assert _lexical_subset_violation(r"SELECT 1.5e'a\'x' AS n, " + _REAL_READ) == (7, "1.5e'")
+    assert _lexical_subset_violation(r"SELECT 1e2E'a\'x' AS n, " + _REAL_READ) == (7, "1e2E'")
+    assert _lexical_subset_violation(r"SELECT 1.2e3E'a\'x' AS n, " + _REAL_READ) == (7, "1.2e3E'")
+    assert _lexical_subset_violation(r"SELECT 1e+2E'a\'x' AS n, " + _REAL_READ) == (7, "1e+2E'")
+    assert _lexical_subset_violation(r"SELECT 1E-2e'a\'x' AS n, " + _REAL_READ) == (7, "1E-2e'")
+    assert _lexical_subset_violation(r"SELECT .5E'a\'x' AS n, " + _REAL_READ) == (7, ".5E'")
+    assert _lexical_subset_violation(r"SELECT .5e+2E'a\'x' AS n, " + _REAL_READ) == (7, ".5e+2E'")
     assert _lexical_subset_violation(r"SELECT 1.5e3'a\'x' AS n, " + _REAL_READ) is None
     assert _lexical_subset_violation(r"SELECT 1EE'a\'x' AS n, " + _REAL_READ) is None
 
@@ -1791,6 +1857,41 @@ def test_a_digit_glued_to_a_double_quoted_identifier_stays_inside_the_subset() -
     with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]") as raised:
         render_river_ts_sql(sql, "narrow", entry="double_quoted")
     assert _SUBSET_REFUSAL not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("uppercase", 'SELECT rt.value AS "1E\'" FROM hydro.river_timeseries rt WHERE rt.run_key = :k'),
+        ("lowercase", 'SELECT rt.value AS "1e\'" FROM hydro.river_timeseries rt WHERE rt.run_key = :k'),
+        ("decimal", 'SELECT rt.value AS "a 1.5e\'" FROM hydro.river_timeseries rt WHERE rt.run_key = :k'),
+        ("exponent", 'SELECT rt.value AS "1e2E\'" FROM hydro.river_timeseries rt WHERE rt.run_key = :k'),
+        ("doubled_quote", 'SELECT rt.value AS "1E\'""x" FROM hydro.river_timeseries rt WHERE rt.run_key = :k'),
+    ],
+    ids=["uppercase", "lowercase", "decimal", "exponent", "doubled_quote"],
+)
+def test_a_quoted_identifier_holding_numeric_escape_bytes_stays_inside_the_subset(
+    label: str, sql: str
+) -> None:
+    """L2's quoted-identifier mask is THIS ARM ONLY: the bytes stay CODE everywhere else.
+
+    ``SELECT rt.value AS "1E'" FROM …`` is a legal quoted identifier. The
+    substring regex fired on the body and refused a statement the rest of the
+    module already lexes as in-subset (PR #2057 cand-QI-01). Skipping the
+    complete ``"…"`` run — including ``""`` escapes — keeps L2 silent without
+    reclassifying the identifier as non-code for the occurrence counter, the
+    attribution walk, the ``$`` / non-ASCII arm, the rename or the structural
+    check. Removing that skip reddens this pin; broadening the glued prefix to
+    a double quote reddens
+    :func:`test_a_digit_glued_to_a_double_quoted_identifier_stays_inside_the_subset`.
+    """
+    assert _lexical_subset_violation(sql) is None
+    assert non_code_spans(sql) == ()
+    assert fact_table_name_occurrences(sql) == 1
+    assert fact_table_attribution(sql).reference_count == 1
+    assert fact_table_text_identity_columns(sql, entry=label) == set()
+    assert render_river_ts_sql(sql, "narrow", entry=label).sql == sql
+    assert "hydro.river_timeseries_legacy rt" in render_river_ts_sql(sql, "legacy", entry=label).sql
 
 
 # ---------------------------------------------------------------------------

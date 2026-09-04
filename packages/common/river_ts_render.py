@@ -267,7 +267,7 @@ def _opens_escape_string(sql: str, start: int) -> bool:
     any more either: this function says "plain literal" (the ``1`` is
     ``isalnum``), §4.1's token rule says "escape string", and no PostgreSQL
     version EXECUTES either reading, so decision 18 refuses the shape instead
-    (:data:`_NUMERIC_GLUED_ESCAPE_PREFIX`, #2018 round-5 L2). Pinned both ways:
+    (:func:`_numeric_glued_escape_prefix`, #2018 round-5 L2 / PR #2057). Pinned both ways:
     ``test_a_numeric_literal_glued_to_an_escape_prefix_is_refused_as_outside_the_lexical_subset``
     (refused) and
     ``test_an_identifier_character_before_the_digit_keeps_todays_answer`` (the
@@ -622,7 +622,7 @@ _UNICODE_ESCAPED = re.compile(r"\bU&", re.IGNORECASE)
 #: The CHARACTER arm of the declared lexical subset (fixture decision 18): the
 #: characters that put a statement outside it wherever they appear in code — a
 #: dollar sign, and any non-ASCII byte. (The second arm is a two-token SHAPE,
-#: :data:`_NUMERIC_GLUED_ESCAPE_PREFIX`.)
+#: :func:`_numeric_glued_escape_prefix`.)
 #:
 #: Both are places where the module's hand-rolled lexer and PostgreSQL's §4.1
 #: can differ, and every such difference is COMMON-MODE — it blanks real code for
@@ -643,34 +643,130 @@ _UNICODE_ESCAPED = re.compile(r"\bU&", re.IGNORECASE)
 #: its own pins, never a silent regex change.
 _LEXICAL_SUBSET_VIOLATION = re.compile(r"[$\x80-\U0010ffff]")
 
-#: The SECOND arm of the subset (fixture decision 18, amended in #2018 round 5):
-#: a numeric constant glued directly to an ``E'`` / ``e'`` escape-string prefix —
-#: ``1E'a\'x'``, ``12E'…'``, ``1.5e'…'``.
-#:
-#: §4.1.2.2 requires the ``E`` to be a token start, so this module reads the
-#: quote as opening a PLAIN literal (backslash-blind) while an independent §4.1
-#: reference lexer reads an ESCAPE string — the two answers differ, and the
-#: difference is the usual common-mode one: verifier #2018 round-5 L2 measured
-#: ``SELECT 1E'a\'x' AS n, … WHERE rt.variable = %(v)s AND rt.run_key = 1E'b\'y'``
-#: lexed with a phantom literal over the whole ``FROM`` clause, occurrences 0 ==
-#: walk 0, and the narrow render shipping ``rt.variable``. No PostgreSQL version
-#: EXECUTES either reading — a lex error on 15+, a parse error on ≤14 (verifier
-#: #2018 round-5 L2 (iv); the analysis is from ``scan.l``, unverified against a
-#: live server, which this loop has no access to) — so there is no ground truth
-#: to implement faithfully here and the subset refuses the shape instead.
-#:
-#: ``(?<!\w)`` keeps the arm on NUMERIC constants: in ``col1E'x'`` / ``x1e'…'``
-#: the digit is inside an identifier, ``E`` is not a token, and the module already
-#: agrees with §4.1 (measured), so those keep the answer they have today.
-#: ``[0-9.]*`` makes the reported text start at the constant's own first digit,
-#: and stops where PostgreSQL's exponent does — ``1.5e3'…'`` and ``1EE'…'`` are
-#: NOT refused. Both boundaries are pinned by
-#: ``test_the_glued_escape_prefix_arm_reports_the_whole_numeric_constant``.
-#: Asked over :func:`_blank_non_code` with ``keep_literal_quotes=True`` — the
-#: quote-blanking form the other checks read would have deleted the very quote
-#: this arm looks for; pinned by
-#: ``test_a_digit_before_an_escape_prefix_inside_a_literal_or_comment_stays_inside_the_subset``.
-_NUMERIC_GLUED_ESCAPE_PREFIX = re.compile(r"(?<!\w)[0-9][0-9.]*[Ee]'")
+def _skip_quoted_identifier(sql: str, start: int) -> int:
+    """Index just past the double-quoted identifier opening at ``start``.
+
+    PostgreSQL doubled-quote escapes (``""``) stay INSIDE the identifier. Used
+    only by :func:`_numeric_glued_escape_prefix`: quoted identifiers remain CODE
+    for every other check in this module (occurrence counter, attribution,
+    ``$`` / non-ASCII subset, rename, structural check, traversal family).
+    """
+    index = start + 1
+    length = len(sql)
+    while index < length:
+        if sql[index] == '"':
+            if index + 1 < length and sql[index + 1] == '"':
+                index += 2
+                continue
+            return index + 1
+        index += 1
+    return length
+
+
+def _consume_numeric_token(sql: str, start: int) -> int | None:
+    """Stop offset of the PostgreSQL numeric token opening at ``start``, or ``None``.
+
+    Integer / decimal, optional exponent ``e`` / ``E`` with optional ``+`` /
+    ``-`` and required digits, and leading-dot forms (``.5``, ``.5e+2``). A
+    trailing ``E`` that is NOT a well-formed exponent (``1EE'``, ``1E'``) is
+    left for the caller: this function stops at the last consumed numeric
+    character so an immediately following ``E'`` / ``e'`` is a NEW token.
+    """
+    length = len(sql)
+    if start >= length:
+        return None
+    index = start
+    if sql[index] == ".":
+        index += 1
+        if index >= length or not sql[index].isdigit():
+            return None
+        while index < length and sql[index].isdigit():
+            index += 1
+    elif sql[index].isdigit():
+        while index < length and sql[index].isdigit():
+            index += 1
+        if index < length and sql[index] == ".":
+            index += 1
+            while index < length and sql[index].isdigit():
+                index += 1
+    else:
+        return None
+    if (
+        index < length
+        and sql[index] in "Ee"
+        and index + 1 < length
+        and (sql[index + 1].isdigit() or sql[index + 1] in "+-")
+    ):
+        cursor = index + 1
+        if sql[cursor] in "+-":
+            cursor += 1
+        if cursor < length and sql[cursor].isdigit():
+            cursor += 1
+            while cursor < length and sql[cursor].isdigit():
+                cursor += 1
+            index = cursor
+    return index
+
+
+def _numeric_glued_escape_prefix(sql: str) -> tuple[int, str] | None:
+    """``(offset, text)`` of the first numeric token glued to ``E'`` / ``e'``, or ``None``.
+
+    The SECOND arm of the subset (fixture decision 18, #2018 round 5 / PR #2057):
+    a PostgreSQL numeric constant glued directly to an ``E'`` / ``e'``
+    escape-string prefix — ``1E'a\\'x'``, ``12E'…'``, ``1.5e'…'``, ``1e2E'``,
+    ``1.2e3E'``, ``1e+2E'``, ``1E-2e'``, ``.5E'``, ``.5e+2E'``.
+
+    §4.1.2.2 requires the ``E`` to be a token start, so this module reads the
+    quote as opening a PLAIN literal (backslash-blind) while an independent §4.1
+    reference lexer reads an ESCAPE string — the two answers differ, and the
+    difference is the usual common-mode one: verifier #2018 round-5 L2 measured
+    ``SELECT 1E'a\\'x' AS n, … WHERE rt.variable = %(v)s AND rt.run_key = 1E'b\\'y'``
+    lexed with a phantom literal over the whole ``FROM`` clause, occurrences 0 ==
+    walk 0, and the narrow render shipping ``rt.variable``. No PostgreSQL version
+    EXECUTES either reading — a lex error on 15+, a parse error on ≤14 (verifier
+    #2018 round-5 L2 (iv); the analysis is from ``scan.l``, unverified against a
+    live server, which this loop has no access to) — so there is no ground truth
+    to implement faithfully here and the subset refuses the shape instead.
+
+    Token walk, not a substring regex: ``1e+2E'`` reports the whole constant
+    from its true start rather than the truncated tail ``2E'``; ``1.5e3'…'``
+    and ``1EE'…'`` are NOT refused, because the character before the quote is
+    not a new ``E'`` / ``e'`` prefix. Both boundaries are pinned by
+    ``test_the_glued_escape_prefix_arm_reports_the_whole_numeric_constant``.
+
+    Asked over :func:`_blank_non_code` with ``keep_literal_quotes=True`` so a
+    ``1E'`` inside a string or a comment is DATA; then complete double-quoted
+    identifiers — including ``""`` escapes — are skipped FOR THIS ARM ONLY.
+    ``col1E'x'`` is still an identifier (the digit is not a token start) and
+    keeps the answer it has today. Pinned by
+    ``test_a_digit_before_an_escape_prefix_inside_a_literal_or_comment_stays_inside_the_subset``
+    and ``test_a_quoted_identifier_holding_numeric_escape_bytes_stays_inside_the_subset``.
+    """
+    view = _blank_non_code(sql, keep_literal_quotes=True)
+    index = 0
+    length = len(view)
+    while index < length:
+        character = view[index]
+        if character == '"':
+            index = _skip_quoted_identifier(view, index)
+            continue
+        leading_dot = character == "." and index + 1 < length and view[index + 1].isdigit()
+        digit = character.isdigit()
+        if leading_dot or digit:
+            if digit and index > 0 and (view[index - 1].isalnum() or view[index - 1] == "_"):
+                index += 1
+                continue
+            stop = _consume_numeric_token(view, index)
+            if stop is None:
+                index += 1
+                continue
+            if stop + 1 < length and view[stop] in "Ee" and view[stop + 1] == "'":
+                end = stop + 2
+                return index, sql[index:end]
+            index = stop
+            continue
+        index += 1
+    return None
 
 
 def _lexical_subset_violation(sql: str) -> tuple[int, str] | None:
@@ -683,9 +779,10 @@ def _lexical_subset_violation(sql: str) -> tuple[int, str] | None:
     #. a ``$`` or a non-ASCII character, over the text with comments and literal
        BODIES AND QUOTES blanked;
     #. a numeric constant glued to an ``E'`` escape prefix, over the text with
-       literal quotes KEPT (:data:`_NUMERIC_GLUED_ESCAPE_PREFIX`) — the arm is
+       literal quotes KEPT (:func:`_numeric_glued_escape_prefix`) — the arm is
        about a quote's own meaning, so it cannot run on text that has blanked the
-       quotes away.
+       quotes away. Quoted identifiers are skipped here only; they remain code
+       everywhere else.
 
     The earlier offset wins, so the message diagnoses the first thing the reader
     can see rather than whichever arm ran first.
@@ -699,9 +796,9 @@ def _lexical_subset_violation(sql: str) -> tuple[int, str] | None:
     character = _LEXICAL_SUBSET_VIOLATION.search(_blank_comments_and_literals(sql))
     if character is not None:
         violations.append((character.start(), character.group(0)))
-    glued = _NUMERIC_GLUED_ESCAPE_PREFIX.search(_blank_non_code(sql, keep_literal_quotes=True))
+    glued = _numeric_glued_escape_prefix(sql)
     if glued is not None:
-        violations.append((glued.start(), glued.group(0)))
+        violations.append(glued)
     return min(violations) if violations else None
 
 
