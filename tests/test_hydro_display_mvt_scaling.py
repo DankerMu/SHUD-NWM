@@ -814,12 +814,34 @@ def test_national_identity_route_collapses_time_spellings_onto_one_bind_and_one_
 
 
 def test_national_identity_route_gives_two_identities_two_cache_keys(monkeypatch: Any, tmp_path: Any) -> None:
+    """EVERY dimension `_national_source_cycle_tile_input` puts in the identity separates the cache.
+
+    `source` and `cycle` ride in `source_version`; `valid_time` and `z`/`x`/`y`
+    are fields of the `TileInput` itself, and the whole point of the route is
+    that two requests that differ in ANY of them are two cache entries. The
+    file cache has no TTL, so a dimension that silently drops out of the key
+    serves the second requester the first requester's bytes forever.
+
+    The x/y values are chosen so the two SLOT-SWAP mutations collide, which a
+    pairwise `!=` between an arbitrary pair would not catch: against the base
+    `(z=4, x=13, y=6)`, `y=y` → `y=x` makes the `y=13` case the base's twin,
+    `x=x` → `x=y` makes the `x=6` case the base's twin, and `z=z` → `z=x` makes
+    the `z=5` case the base's twin. Hence the assertion is on the SIZE of the
+    distinct-key set: one collision in one dimension is one missing key.
+    """
+    urls = (
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z"),
+        _national_identity_url("ifs", "2026-09-02T12:00:00Z"),
+        _national_identity_url("gfs", "2026-09-02T00:00:00Z"),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time="2026-09-03T06:00:00Z"),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", z=5),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", x=6),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", y=13),
+    )
     keys: list[str] = []
-    for index, (source, cycle) in enumerate(
-        (("gfs", "2026-09-02T12:00:00Z"), ("ifs", "2026-09-02T12:00:00Z"), ("gfs", "2026-09-02T00:00:00Z"))
-    ):
+    for index, url in enumerate(urls):
         response, captured = _request_national_identity_tile(
-            _national_identity_url(source, cycle),
+            url,
             _NationalRouteSession(),
             monkeypatch,
             tmp_path / f"cache-{index}",
@@ -827,7 +849,7 @@ def test_national_identity_route_gives_two_identities_two_cache_keys(monkeypatch
         assert response.status_code == 200, response.text
         keys.append(cache_key(captured[0]))
 
-    assert len(set(keys)) == 3, keys
+    assert len(set(keys)) == len(urls), keys
 
 
 @pytest.mark.parametrize(

@@ -4,7 +4,8 @@
 - 分支：`feat/issue-2007-hydro-national-source-cycle-route`
 - **读数与 SHA 的对应**（不要混看）：第 1、2 节取自 `6c30e33d`（交叉审查前，基 master `70337533`）；
   第 3 节 (a)(b)(c) 取自 round-1 修复后的 `9ac6aaf3`；第 3 节 (d) 取自 round-2 修复后的 `cdfbc3d3`；
-  第 4 节的突变矩阵取自 rebase 到 master `d812def6` 并完成 invariant-closure 修复后的树。
+  第 4 节的突变矩阵取自 rebase 到 master `d812def6` 并完成 invariant-closure 修复后的树；
+  第 5 节是再次 rebase 到 `fec21541` 后、终态 SHA 上的全套复验。
   `6c30e33d` → `cdfbc3d3` 之间生产代码逐字未变（`git diff --stat 6c30e33d cdfbc3d3 -- services apps` 为空），
   故第 2 节的实机读数对后续 SHA 仍然成立；rebase 引入的 #2005 改动只落在 `river-network-national` 分支。
 - PR：#2027 ・ epic #2003 (m27) ・ OpenSpec change `display-v2-national-timeline-precip-overlay` group 3
@@ -163,7 +164,7 @@ round-2 交叉审查发现两条「代码对、但没人看得住」的洞：路
 
 三轮交叉审查全部 not-clean，触发三轮硬闸。持久化的 Review Failure Retro（形状 `depth`）判定根因是
 修复提示词太窄——每轮只补被点名的洞。纠正动作是 **invariant closure retry**：枚举每条行为声明、
-写出最小破坏突变与必须变红的测试，验收门是**整张矩阵都得红**。完整 26 行矩阵在
+写出最小破坏突变与必须变红的测试，验收门是**整张矩阵都得红**。完整矩阵（本节写就时 26 行；round-4 关闭 A1 后扩到 30 行）在
 `openspec/changes/display-v2-national-timeline-precip-overlay/invariant-matrix-i4-2007.md`
 的 `## Mutation matrix`；本节是其中必须在真实 PG 上跑的那些行。
 
@@ -190,12 +191,124 @@ round-2 交叉审查发现两条「代码对、但没人看得住」的洞：路
 | 11 | 旧路由改绑 `source="gfs"` | 1 failed, 7 passed | `..._matches_an_uppercase_source_id_from_a_lowercase_path` 里旧路由在 `_IFS_WINDOW_END` 的那次请求——该时刻只有 IFS run 有 coverage，旧路由一旦开始过滤就 424 |
 | 12 | 去掉 NULL 保护（留下裸谓词） | 4 failed, 4 passed | 三条改前既有的旧路由用例之一 + 三条身份用例；旧路由绑 NULL 后谓词成 `NULL = NULL`，200 全变 424 |
 
-矩阵中其余 15 行在本地单测层结算（其中 14 条由实现者逐条实测），见 `invariant-matrix-i4-2007.md`。
+本节结算矩阵的第 1–7、11、12 行（9 行）。第 8 行的 `Where` 写作「node-27 + local」，但它的判别
+其实在本地就已决定——把 `source`/`cycle` 改成必填会让 `national_discharge_source_version(session)`
+的旧路由与目录调用直接 `TypeError`，无需真实 DB；故本节表中不单列。其余 21 行在本地单测层结算，其中 18 条由实现者逐条实测
+（17 红 1 绿，那条绿的已作为「无 oracle」记录在案）；行 27–30 是 round-4 关闭 A1 时补的
+`valid_time` / `z` / `x` / `y` 四个 `cache_key` 维度，四条突变各自独立变红（每次 1 failed / 125 passed）。
+见 `invariant-matrix-i4-2007.md`。
 
-## 5. 覆盖到的 Evidence Floor 项
+## 5. 终态 SHA 的实机复验（rebase 到 `fec21541` 之后）
 
-group 3 Evidence Floor 中属于本 issue 的实机项全部满足：新路由 gfs/ifs 同 cycle 各一张 z4 瓦片（200、字节非空、`X-Tile-Cache-Key` 不同、ETag 因字节不同而不同）、无 run 时 424、旧路由仍 200、冷/热耗时已记录。`cycles` 端点与 57 项 valid-times 属 I5/#2009，不在本 receipt。
+分支两次 rebase（先 `d812def6`，再 `fec21541`），期间 #2005 / #2006 / #2022 合入 master。
+node-27 上把工作树 checkout 到 `fec21541` 再打本 PR 的完整补丁，`md5sum` 与本地逐字一致
+（`services/tiles/mvt.py` `3c88decc…`、`apps/api/routes/hydro_display.py` `69edabcb…`），
+然后重跑全部实机证据。周期与 valid_time 由脚本按当时库内数据动态选取，不写死。
 
-## 6. 清理
+```
+A. NHMS_RUN_INTEGRATION=1 ... uv run pytest \
+     tests/test_mvt_national_identity_probe_integration.py \
+     tests/test_river_ts_read_path_surrogate_keys_integration.py -q
+   -> 22 passed in 50.66s
+
+B. CYCLE=2026-09-03T12:00:00Z  EMPTY_CYCLE=2026-09-03T13:00:00Z  VALID_TIME=2026-09-04T00:00:00Z
+   z4 / x12 / y6，空文件缓存目录，独立 uvicorn :8092
+```
+
+| 用例 | HTTP | 字节 | 秒 | cache | cache key 前 16 位 |
+|---|---|---|---|---|---|
+| 新路由 gfs 冷 | 200 | 1374322 | 2.257 | miss | `25c9c21deae87ec6` |
+| 新路由 gfs 热 | 200 | 1374322 | 0.036 | hit | `25c9c21deae87ec6` |
+| 新路由 ifs 冷 | 200 | 1374333 | 2.523 | miss | `a43e158a25bb58af` |
+| 新路由 ifs 热 | 200 | 1374333 | 0.036 | hit | `a43e158a25bb58af` |
+| 旧 5 段路由 冷 | 200 | 1374333 | 1.899 | miss | `b8737e2b770af516` |
+| 旧 5 段路由 热 | 200 | 1374333 | 0.056 | hit | `b8737e2b770af516` |
+
+- 两源分流依旧：字节与 cache key 均不同。
+- **旧路由行为不变**：字节与 ETag 与 **ifs** 那张完全一致（`…c410bc52e1a0fc7`），cache key 独立——
+  与第 2 节在 `6c30e33d` 上观察到的指纹结构一模一样，说明两次 rebase 没有改动旧路由的选 run。
+- 文件缓存最终只有 3 个条目（gfs / ifs / legacy 各一），四种时间拼写没有写出第二份瓦片。
+
+| 校验用例 | HTTP | 秒 | error.code |
+|---|---|---|---|
+| `source=ERA5` | 422 | 0.0026 | `VALIDATION_ERROR` |
+| `cycle=not-an-instant` | 422 | 0.0030 | `VALIDATION_ERROR` |
+| `cycle=…T12:00:00.500Z` | 422 | 0.0023 | `VALIDATION_ERROR`（秒精度） |
+| `cycle=1756814400`（epoch） | 422 | 0.0025 | `VALIDATION_ERROR` |
+| `cycle=…T12:00:00`（无偏移） | 422 | 0.0025 | `VALIDATION_ERROR` |
+| `z=99` | 422 | 0.0022 | **`TILE_XYZ_INVALID`** |
+
+| 时间拼写 | HTTP | cache key 前 16 位 |
+|---|---|---|
+| `2026-09-03T12:00:00Z` | 200 | `25c9c21deae87ec6` |
+| `2026-09-03T12:00:00.000Z` | 200 | `25c9c21deae87ec6` |
+| `2026-09-03T12:00:00+00:00` | 200 | `25c9c21deae87ec6` |
+| `2026-09-03T04:00:00-08:00` | 200 | `25c9c21deae87ec6` |
+
+最后两行实机验证了 round-3 补的两条 oracle：`z=99` 走 `TILE_XYZ_INVALID`（新路由确实调了
+`validate_xyz`），负偏移拼写与 `Z` 归一到同一条缓存（RFC3339 正则的 `[+-]` 两侧都在用）。
+
+**旧路由 accept-set 未被形状门收紧的实机证据**：`GET /api/v1/tiles/hydro-national/q_down/1756814400/4/12/6.pbf`
+（epoch 形式的 `valid_time`）返回 **424** 而不是 422——旧路由照旧接受该拼写、把它解析成 2025-09-02
+再去查 run，查不到才 fail-closed。新路由的同一拼写是 422。这正是「形状门只加在新路由上」的分界线。
+
+## 6. 新暴露面的实测量化（round-4 安全/性能 lens）
+
+round-4 提出两条与「新增公共路由」相关的候选，一条实测证伪、一条属实且记录如下。
+
+### （a）压缩 chunk 上的历史 cycle 是否是新暴露面 —— **证伪**
+
+担心：`{source}/{cycle}` 让非最新 run 可公开寻址，而 `hydro.river_timeseries` 是压缩 hypertable，
+`services/tiles/mvt.py` 的注释里留有「23–37 s per compressed instant」的历史读数。
+
+实测（`timescaledb_information.chunks`：5 个 chunk 中 3 个已压缩，覆盖 2026-08-13 → 09-03；
+取压缩区间内的 `2026-08-27T00:00:00Z`，该 cycle gfs 侧 38/38 河网 display-ready）：
+
+| 用例 | HTTP | 字节 | 秒 |
+|---|---|---|---|
+| 新路由 `gfs/2026-08-27T00:00:00Z`，`valid_time=+3h` 冷 | 200 | 1374018 | 3.152 |
+| 同上 热 | 200 | 1374018 | 0.035 |
+| 新路由 同 cycle，`valid_time=+4h` 冷 | 200 | 1374017 | 2.188 |
+| 同上 热 | 200 | 1374017 | 0.037 |
+| **旧路由** 同一 `valid_time=+3h` 冷 | 200 | 1374140 | 2.824 |
+| 同上 热 | 200 | 1374140 | 0.053 |
+| **旧路由** 同一 `valid_time=+4h` 冷 | 200 | 1374165 | 2.208 |
+| 同上 热 | 200 | 1374165 | 0.052 |
+
+结论：**旧路由光凭 `valid_time` 就已经能点名同一批压缩 chunk**——探针的 `rdc.river_valid_time_start
+<= :valid_time AND rdc.river_valid_time_end >= :valid_time` 会把覆盖该时刻的**历史** run 选进候选，
+与是否绑定 `(source, cycle)` 无关。两条路由在同一份压缩数据上的冷读代价同量级（3.15 s vs 2.82 s），
+且都正常入缓存、第二次是毫秒级。注释里的 23–38 s 是优化前的历史读数，不是当前形态。
+本 issue 未新增这个面。
+
+另需更正该候选的一个前提：`valid_time = cycle + 4h` 并非「内部空洞」，实测返回 200 并照常缓存，
+因此不存在「昂贵 424 可无限重放」的路径。
+
+### （b）可缓存身份空间的放大 —— **属实，记录在案**
+
+实测（同一套判定 display-ready 的 join 条件）：
+
+```
+distinct (source, cycle) with display-ready coverage: 357
+distinct cycles: 179
+distinct sources: 2
+```
+
+改前，一组 `(valid_time, z/x/y)` 只对应 1 个缓存条目（隐式的「每河网最新 run」）；改后对应的是
+**覆盖该 valid_time 的 `(source, cycle)` 对的数量**。全库当前有 357 个这样的身份对。
+单张 z4 瓦片约 1.3 MB、冷读 2–3 s，缓存无 TTL 无淘汰，请求路径上无认证也无限流
+（`apps/api/main.py` 的 mutation policy 对 GET 一律放行，nginx 443 块无 `limit_req`/`limit_conn`）。
+
+淘汰机制本身归 #2032，本 PR 不实现。此处的作用是把**实测放大系数**留档，让 #2032 的容量决策
+不建立在改前的假设上。`GET /api/v1/layers/discharge/cycles`（I5/#2009）是客户端提示，不是服务端白名单。
+
+## 7. 覆盖到的 Evidence Floor 项
+
+group 3 Evidence Floor 中属于本 issue 的实机项全部满足，**终态 SHA 上的读数见第 5 节**（第 2 节是
+交叉审查前的首轮读数，保留作对照）：新路由 gfs/ifs 同 cycle 各一张 z4 瓦片（200、字节非空、
+`X-Tile-Cache-Key` 不同、ETag 因字节不同而不同）、无 run 时 424、旧路由仍 200、冷/热耗时已记录、
+真实 DB 集成 22 passed。`cycles` 端点与 57 项 valid-times 属 I5/#2009，不在本 receipt。
+
+## 8. 清理
 
 `/home/nwm/wt-2007` worktree、`/home/nwm/tmp/mvt-cache-2007*` 缓存目录、`/home/nwm/run-2007-*.{sh,log}`、`/home/nwm/run-r2*.{sh,log}`、`/home/nwm/run-matrix27*.{sh,log}`、`/home/nwm/mut27.py`、`/home/nwm/*-2007.patch` 与 `/home/nwm/{mv,hd}.*.bak` 在合并后移除；生产服务与 `/home/nwm/NWM` 工作树自始至终停留在 master。
