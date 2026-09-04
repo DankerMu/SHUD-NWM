@@ -20,8 +20,9 @@ Contract (canonical-precip-copyback spec, Requirement 2):
   script *discovers* by listing (``<S>``, ``<cycle_token>``, ``<grid_id>``) are
   silently skipped by ``is_dir(follow_symlinks=False)``. Path *components* under
   ``--copyback-root`` are not checked at all, but the per-file leaf is: the temp
-  name is opened ``O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW``, so a symlink or a stale
-  temp planted there is refused and recorded rather than written through;
+  name is opened ``O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW``, so a symlink or a
+  regular file at this run's own temp name is refused and recorded rather than
+  written through;
 * leaves every directory it creates under ``--copyback-root`` group/world
   readable, and every file it promotes there ``0o644``, regardless of the
   process umask (node-22 writes as one account, node-27 reads the same NFS as
@@ -481,14 +482,9 @@ def test_backfill_partially_created_directory_chain_stays_readable(
 
 
 def test_backfill_refuses_a_symlink_planted_at_the_per_file_temp_name(tmp_path: Path) -> None:
-    """The per-file temp name is opened `O_NOFOLLOW`, so a link there is refused.
-
-    Destination-side path *components* are followed by design (the script only
-    `mkdir -p`s into an operator-supplied root). The leaf write is a different
-    matter: `copyfile` + `chmod` would follow a link planted at the predictable
-    temp name, overwrite an arbitrary file outside `--copyback-root` with the
-    source bytes, widen its mode to 0o644, rename the link itself into the
-    mirror -- and still count the file `copied` with exit 0.
+    """The per-file temp name is opened `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW`, so
+    a link planted there is recorded as a failure, the file it points at keeps
+    its bytes and its mode, and no link is renamed into the mirror.
 
     `backfill()` is called in-process because the temp name embeds `os.getpid()`.
     """
@@ -524,11 +520,8 @@ def test_backfill_refuses_a_symlink_planted_at_the_per_file_temp_name(tmp_path: 
 
 
 def test_backfill_refuses_a_stale_regular_temp_file_then_recovers_on_a_rerun(tmp_path: Path) -> None:
-    """`O_EXCL` refuses a stale temp instead of writing through it.
-
-    A temp file left by a crashed run carries no guarantee about what it is; the
-    run that meets it records a failure and unlinks it, so the next clean run
-    mirrors the file normally.
+    """A regular file at this run's own temp name is recorded as a failure and
+    unlinked instead of being written through; the next run mirrors the file.
     """
 
     source_root = tmp_path / "object-store"
@@ -555,6 +548,34 @@ def test_backfill_refuses_a_stale_regular_temp_file_then_recovers_on_a_rerun(tmp
     assert second["totals"] == {"copied": 1, "skipped": 0, "failed": 0}
     key = f"canonical/gfs/2026090212/prcp_rate_or_amount/{target_name}"
     assert (copyback_root / key).read_bytes() == payloads[key]
+
+
+def test_backfill_leaves_a_foreign_pid_temp_residue_alone(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A temp residue carrying another pid keeps its bytes and its place."""
+
+    source_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    source_root.mkdir()
+    copyback_root.mkdir()
+    payloads = _seed_cycle(source_root, "gfs", "2026090212", leads=(3,))
+    target_name = "gfs_2026090212_prcp_rate_or_amount_f003.nc"
+    target_dir = copyback_root / "canonical" / "gfs" / "2026090212" / "prcp_rate_or_amount"
+    target_dir.mkdir(parents=True)
+    residue = target_dir / f".{target_name}.backfill.{os.getpid() + 1}.tmp"
+    residue.write_bytes(b"an in-flight temp belonging to another process")
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert summary["totals"] == {"copied": 1, "skipped": 0, "failed": 0}
+    assert residue.read_bytes() == b"an in-flight temp belonging to another process"
+    key = f"canonical/gfs/2026090212/prcp_rate_or_amount/{target_name}"
+    assert (copyback_root / key).read_bytes() == payloads[key]
+
 
 @pytest.mark.parametrize(
     ("level", "link_at", "outside_relative", "summary_key", "summary_field", "planted_name"),
@@ -626,6 +647,33 @@ def test_backfill_silently_skips_a_symlinked_discovered_directory_name(
     assert summary["totals"]["failed"] == 0
     assert exit_code == 0
     _assert_nothing_copied_from_outside(copyback_root)
+
+
+def test_backfill_silently_skips_a_non_directory_discovered_name(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A plain file at `<S>`, `<cycle_token>` or `<grid_id>` is skipped, not reported."""
+
+    source_root, copyback_root, payloads = _seed_two_source_store(tmp_path)
+    planted_names = {"evil_source", "2026090300", "evil_grid"}
+    for relative in ("canonical/evil_source", "canonical/gfs/2026090300", "canonical/gfs/grid/evil_grid"):
+        (source_root / relative).write_bytes(b"a plain file where a directory belongs")
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert summary["totals"] == {"copied": 14, "skipped": 0, "failed": 0}
+    assert {cycle["source"] for cycle in summary["cycles"]} & planted_names == set()
+    assert {cycle["cycle_token"] for cycle in summary["cycles"]} & planted_names == set()
+    assert {grid["source"] for grid in summary["grids"]} & planted_names == set()
+    assert {grid["grid_id"] for grid in summary["grids"]} & planted_names == set()
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
+    assert not (copyback_root / "canonical" / "evil_source").exists()
+    assert not (copyback_root / "canonical" / "gfs" / "2026090300").exists()
+    assert not (copyback_root / "canonical" / "gfs" / "grid" / "evil_grid").exists()
 
 
 def test_backfill_dangling_destination_component_is_recorded_not_widened(
@@ -877,11 +925,10 @@ def test_backfill_runs_as_a_module_in_a_subprocess(tmp_path: Path) -> None:
 def test_backfill_module_launch_outside_the_repo_root_fails_with_no_summary(tmp_path: Path) -> None:
     """The documented `-m` invocation needs the repo root as cwd, and says so.
 
-    There is no `scripts/__init__.py` (PEP 420), so `-m` resolves the module only
-    because it puts the cwd on `sys.path`. Launched from anywhere else the
-    interpreter exits 1 -- colliding with this script's own "completed but
-    something failed" code -- so the only distinguisher an operator or a wrapper
-    has is that stdout carries no JSON summary at all.
+    Launched from anywhere else the interpreter exits 1 -- colliding with this
+    script's own "completed but something failed" code -- so the only
+    distinguisher an operator or a wrapper has is that stdout carries no JSON
+    summary at all.
     """
 
     source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)

@@ -1319,16 +1319,8 @@ class TilePublisher:
             raise _CanonicalPrecipSourceMissing(str(grid_dir)) from error
         grid_keys: list[str] = []
         for name in sorted(names):
-            # The directory filter runs first because it is what defines the
-            # discovery set: Requirement 1 has both producers list
-            # `canonical/<S>/grid/*/`, and the backfill resolves the same input
-            # with `entry.is_dir(follow_symlinks=False)`. A plain file alongside
-            # the grid directories is simply not a tree to mirror, so it must not
-            # fail the whole mirror -- prcp tree included -- on its name.
-            # A symlinked entry is still refused whatever its name -- the reorder
-            # changes which guard reports it, not the outcome -- and the name
-            # check below still refuses an unsafe-named *directory* before it can
-            # become a key segment.
+            # A non-directory entry is skipped. An unsafe-named directory
+            # raises `SafeFilesystemError`.
             if not stat.S_ISDIR(stat_no_follow(grid_dir / name, containment_root=source_root).st_mode):
                 continue
             if _SAFE_ID_RE.fullmatch(name) is None:

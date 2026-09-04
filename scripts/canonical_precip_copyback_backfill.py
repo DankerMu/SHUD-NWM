@@ -14,10 +14,9 @@ maintenance window, so this must run as::
         --source-root <root> --copyback-root <root>
 
 without triggering any environment build. The ``cd`` is mandatory, not decoration:
-there is no ``scripts/__init__.py`` (PEP 420), so ``-m`` resolves the module only
-because it puts the cwd on ``sys.path``. From anywhere else the interpreter exits
-1 with ``ModuleNotFoundError`` -- the same exit code this script uses for
-"completed but something failed", distinguishable only by the empty stdout.
+from anywhere else the interpreter exits 1 with ``ModuleNotFoundError`` -- the
+same exit code this script uses for "completed but something failed",
+distinguishable only by the empty stdout.
 
 It therefore imports nothing from ``services`` / ``packages`` / ``workers`` and
 no third-party module. The direct
@@ -57,8 +56,8 @@ Path safety, stated as exactly what is enforced and nothing more:
   with ``O_NOFOLLOW``. The per-file *leaf* is not in that gap: the temp name
   ``.<name>.backfill.<pid>.tmp`` is opened
   ``O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW``, so a symlink planted at it is refused
-  and recorded as a failure rather than followed out of the root, and a stale
-  temp from a crashed run is refused rather than written through.
+  and recorded as a failure rather than followed out of the root, and so is a
+  regular file already at this run's own temp name.
 
 Every directory the script creates under ``--copyback-root`` is chmod'ed 0o755
 explicitly, and every file it promotes there is chmod'ed 0o644 on the temp name
@@ -319,13 +318,9 @@ def _mirror_file(
     temp_file = target_file.parent / f".{target_file.name}.backfill.{os.getpid()}.tmp"
     try:
         _ensure_target_directory(target_file.parent)
-        # O_NOFOLLOW: the temp name is predictable, and `copyfile` + `chmod`
-        # would follow a symlink planted there straight out of --copyback-root,
-        # overwrite whatever it points at and widen its mode, while the summary
-        # still counted the file `copied`. O_EXCL refuses a stale temp rather
-        # than writing through it; the handler below unlinks it, so a rerun is
-        # clean. The mode argument is masked by the umask exactly as `mkdir`'s
-        # is, hence the explicit `fchmod`.
+        # The flag set `O_CREAT|O_EXCL|O_NOFOLLOW` refuses a symlink or a
+        # regular file already at this run's own temp name, and the copy is
+        # recorded as a failure.
         descriptor = os.open(temp_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, FILE_MODE)
         with os.fdopen(descriptor, "wb") as temp_stream:
             os.fchmod(descriptor, FILE_MODE)

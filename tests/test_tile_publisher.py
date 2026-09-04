@@ -2414,18 +2414,15 @@ def test_publish_qdown_canonical_precip_missing_grid_json_does_not_block_publish
 
 
 # --------------------------------------------------------------------------- #
-# `canonical/<S>/grid/` discovery. Requirement 1 has both producers discover
-# `<grid_id>` by listing `canonical/<storage_source>/grid/*/`, so the directory
-# filter is what defines the discovery set and the name check applies to the
-# directories that survive it.
+# `canonical/<S>/grid/` discovery. Both producers list
+# `canonical/<storage_source>/grid/*/` and mirror only the directories; the name
+# check applies to those.
 # --------------------------------------------------------------------------- #
 def test_publish_qdown_canonical_precip_non_directory_beside_grid_dirs_is_ignored(tmp_path: Any) -> None:
     """A non-directory in `grid/` is not a tree to mirror -- safe-named or not.
 
-    `grid/*/` is directories-only, and the sibling backfill producer resolves
-    the same input with `entry.is_dir(follow_symlinks=False)`. Failing the whole
-    mirror on such an entry would stop every cycle of that source, the healthy
-    `prcp_rate_or_amount` tree included, until an operator removed the file.
+    The mirror still reports `ok` and still carries the `prcp_rate_or_amount`
+    tree.
     """
 
     copyback_root = tmp_path / "shared-object-store"
@@ -2455,12 +2452,10 @@ def test_publish_qdown_canonical_precip_non_directory_beside_grid_dirs_is_ignore
 
 
 def test_publish_qdown_canonical_precip_unsafe_named_grid_directory_fails_the_mirror(tmp_path: Any) -> None:
-    """A *directory* whose name fails `_SAFE_ID_RE` is still refused by name.
+    """A *directory* whose name fails `_SAFE_ID_RE` is refused by name.
 
-    The directory filter decides what is a candidate; the name check decides
-    whether a candidate may become a key segment. Dropping the second check
-    would push an unsafe name down to the copyback key whitelist, which rejects
-    it as an unsupported tree key -- a different, less specific cause.
+    The mirror fails with a `SafeFilesystemError` naming the entry, and nothing
+    is mirrored.
     """
 
     copyback_root = tmp_path / "shared-object-store"
@@ -2484,12 +2479,8 @@ def test_publish_qdown_canonical_precip_unsafe_named_grid_directory_fails_the_mi
 
 
 def test_publish_qdown_canonical_precip_symlinked_grid_entry_is_refused(tmp_path: Any) -> None:
-    """A symlinked entry under `grid/` is refused whatever its name.
-
-    The directory filter runs first, so this is what keeps the reorder from
-    weakening containment: the discovery stat never follows, and a link there
-    would otherwise mirror a tree from outside the source root under a
-    `<grid_id>` key.
+    """A symlinked entry under `canonical/<S>/grid/` mirrors no tree and is
+    reported as a `SafeFilesystemError` containing "must not be a symlink".
     """
 
     copyback_root = tmp_path / "shared-object-store"
