@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -16,13 +16,17 @@ from sqlalchemy import text
 from apps.api import main
 from apps.api.errors import ApiError
 from apps.api.routes import hydro_display
+from scripts.node27_raw_retention import DEFAULT_RETENTION_DAYS
+from services.tiles import mvt as mvt_module
 from services.tiles.mvt import (
     MVT_MAX_COORDINATES,
     NATIONAL_DISCHARGE_QUERY_VERSION,
     TileInput,
     TileResponse,
     cache_key,
+    canonical_mvt_time,
     layer_metadata,
+    national_discharge_cycles,
     national_discharge_source_version,
     national_discharge_valid_times,
     national_river_network_source_version,
@@ -86,12 +90,32 @@ def test_national_source_generations_change_with_data_identity() -> None:
 
 
 def test_national_valid_times_use_active_basin_identity_not_transient_model_id() -> None:
+    # #2009: the coverage query now returns one row per (network, cycle), so the
+    # rows carry `cycle_time` and `rn-a` has three of them. The no-argument branch
+    # must still answer the pre-#2009 question -- each network's OVERALL latest
+    # run -- which it now decides in Python. `rn-a`'s newest cycle is deliberately
+    # NEITHER the first nor the last row of its group, and the two stale windows
+    # would each move the asserted list, so "take whichever row arrived first" and
+    # "take whichever arrived last" are both red here, not just "take them all".
     session = _Session(
         [
+            {
+                "run_id": "run-a-stale",
+                "basin_version_id": "bv-a",
+                "river_network_version_id": "rn-a",
+                "cycle_time": "2026-07-11T00:00:00Z",
+                "segment_count": 2,
+                "river_sample_count": 4,
+                "river_valid_time_start": "2026-07-11T05:00:00Z",
+                "river_valid_time_end": "2026-07-11T06:00:00Z",
+                "min_lead_time_hours": 0,
+                "max_lead_time_hours": 1,
+            },
             {
                 "run_id": "run-a",
                 "basin_version_id": "bv-a",
                 "river_network_version_id": "rn-a",
+                "cycle_time": "2026-07-11T06:00:00Z",
                 "segment_count": 2,
                 "river_sample_count": 8,
                 "river_valid_time_start": "2026-07-11T08:00:00Z",
@@ -100,9 +124,22 @@ def test_national_valid_times_use_active_basin_identity_not_transient_model_id()
                 "max_lead_time_hours": 3,
             },
             {
+                "run_id": "run-a-middle",
+                "basin_version_id": "bv-a",
+                "river_network_version_id": "rn-a",
+                "cycle_time": "2026-07-11T03:00:00Z",
+                "segment_count": 2,
+                "river_sample_count": 6,
+                "river_valid_time_start": "2026-07-11T05:00:00Z",
+                "river_valid_time_end": "2026-07-11T07:00:00Z",
+                "min_lead_time_hours": 0,
+                "max_lead_time_hours": 2,
+            },
+            {
                 "run_id": "run-b",
                 "basin_version_id": "bv-b",
                 "river_network_version_id": "rn-b",
+                "cycle_time": "2026-07-11T06:00:00Z",
                 "segment_count": 3,
                 "river_sample_count": 9,
                 "river_valid_time_start": "2026-07-11T09:00:00Z",
@@ -134,6 +171,7 @@ def test_national_valid_times_fail_closed_for_non_rectangular_coverage() -> None
                 "run_id": "run-a",
                 "basin_version_id": "bv-a",
                 "river_network_version_id": "rn-a",
+                "cycle_time": "2026-07-11T06:00:00Z",
                 "segment_count": 2,
                 "river_sample_count": 7,
                 "river_valid_time_start": "2026-07-11T08:00:00Z",
@@ -1120,19 +1158,8 @@ def test_legacy_national_route_keeps_accepting_the_instant_spellings_it_always_d
     assert captured[0].valid_time == "2026-09-03T00:00:00Z"
 
 
-def test_layer_catalog_still_digests_every_source_not_one_identity(monkeypatch: Any) -> None:
-    """`GET /api/v1/layers` must call the digest helper with NO identity (task 3.1).
-
-    The helper grew keyword-only `source`/`cycle` in this change. The catalog's
-    call is the one site that must NOT use them: the catalog advertises the
-    legacy source-less template until I5/#2009 moves it, and narrowing its
-    digest to one identity would rotate `source_generation` on a schedule that
-    has nothing to do with what the catalog describes. Nothing else in the repo
-    looks at this call's arguments -- `_default_layer_catalog` is exercised
-    directly by `tests/test_api_contract.py`, which passes
-    `national_hydro_source_version` in as a literal string and never reaches the
-    helper at all.
-    """
+def _recording_digest_calls(monkeypatch: Any) -> list[dict[str, Any]]:
+    """Swap `national_discharge_source_version` for a recorder of its kwargs."""
     recorded: list[dict[str, Any]] = []
 
     def _recording_digest(_session: Any, **kwargs: Any) -> str:
@@ -1140,6 +1167,60 @@ def test_layer_catalog_still_digests_every_source_not_one_identity(monkeypatch: 
         return "national-hydro-digest"
 
     monkeypatch.setattr(hydro_display, "national_discharge_source_version", _recording_digest)
+    return recorded
+
+
+def test_layer_catalog_digests_the_identity_it_advertises(monkeypatch: Any) -> None:
+    """`GET /api/v1/layers` must digest `(default_source, default_cycle)`, nothing wider.
+
+    The OPPOSITE of what this file pinned before #2009. Task 3.1 kept #2007's
+    catalog call argument-free *because the catalog change is this issue's*, and
+    named the hole verbatim: "一个非最新 `(source, cycle)` 身份的 re-run 不改变 digest,
+    `cache_key` 不变而 tile 已陈旧——该洞正是因为本 issue 让旧身份可寻址才被打开". This is
+    that issue, and the catalog now advertises `(default_source, default_cycle)`,
+    so the digest must observe exactly those runs.
+
+    Why the argument-free form is wrong here and not merely wider: it keeps one
+    `rn = 1` row per network across ALL sources and cycles, so in the normal
+    propagation state (some networks already on the next cycle) it observes no run
+    of the advertised identity at all, and an `ifs` newest cycle blinds it to `gfs`
+    entirely. A corrective re-run of the advertised identity would then leave
+    `metadata.version` / `cache_version` unchanged, so the frontend's cache token
+    and MapLibre source key would not move and the browser would keep the
+    superseded tiles. Over-inclusion (an `ifs` landing rotating the `gfs` entry)
+    goes away as a side effect.
+
+    `_default_layer_catalog` runs for real here -- stubbing it away is what let the
+    previous version of this test pass while asserting the wrong call shape.
+    `tests/test_api_contract.py` still passes `national_hydro_source_version` as a
+    literal and therefore never reaches the helper.
+    """
+
+    class _ValidTimes:
+        valid_times = ["2026-09-02T12:00:00Z", "2026-09-02T15:00:00Z"]
+        limit = 24
+        observed_count = 2
+        truncated = False
+
+    recorded = _recording_digest_calls(monkeypatch)
+    monkeypatch.setattr(
+        hydro_display,
+        "national_discharge_cycles",
+        lambda _session, **_kwargs: {
+            "source": "gfs",
+            "cycles": [
+                {
+                    "cycle_time": "2026-09-02T12:00:00Z",
+                    "valid_time_start": "2026-09-02T12:00:00Z",
+                    "valid_time_end": "2026-09-02T15:00:00Z",
+                }
+            ],
+            "default_cycle": "2026-09-02T12:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        hydro_display, "national_discharge_valid_times", lambda _session, **_kwargs: _ValidTimes()
+    )
     monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: {"run_id": "run_1"})
     monkeypatch.setattr(hydro_display, "_run_source_version", lambda _run: "run-source-v1")
     monkeypatch.setattr(
@@ -1147,7 +1228,7 @@ def test_layer_catalog_still_digests_every_source_not_one_identity(monkeypatch: 
     )
     monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
     monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
-    monkeypatch.setattr(hydro_display, "_default_layer_catalog", lambda *_a, **_k: [])
+    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
     # `display_catalog_cached` is a process-wide TTL cache; without this the
     # loader may never run and `recorded` would be empty for the wrong reason.
     monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
@@ -1161,7 +1242,137 @@ def test_layer_catalog_still_digests_every_source_not_one_identity(monkeypatch: 
         app.dependency_overrides.clear()
 
     assert response.status_code == 200, response.text
-    # Non-vacuity: the catalog path really did reach the digest helper once.
+    # Exactly one call: `list_layers` no longer digests separately, so a leftover
+    # argument-free call there would show up here as a second entry.
+    assert len(recorded) == 1, recorded
+    assert recorded[0] == {"source": "gfs", "cycle": datetime(2026, 9, 2, 12, tzinfo=UTC)}
+    # The digest is scoped to the identity the SAME response advertises.
+    assert _entry(response.json()["data"], "discharge")["metadata"]["default_cycle"] == (
+        "2026-09-02T12:00:00Z"
+    )
+
+
+@pytest.mark.parametrize(
+    ("advertised_default_cycle", "advertised_valid_times"),
+    [
+        pytest.param(None, [], id="intersection-already-empty-at-the-cycles-query"),
+        pytest.param(
+            "2026-09-02T12:00:00Z", [], id="intersection-empties-between-the-two-snapshots"
+        ),
+    ],
+)
+def test_layer_catalog_falls_back_to_the_argument_free_digest_when_no_cycle_is_advertised(
+    monkeypatch: Any, advertised_default_cycle: str | None, advertised_valid_times: list[str]
+) -> None:
+    """With nothing addressable advertised, the digest must take NO identity kwargs.
+
+    The other half of `test_layer_catalog_digests_the_identity_it_advertises`,
+    which only pins the happy identity and stays green if the null branch is
+    dropped. What makes the null branch worth its own pin is that dropping it
+    fails QUIETLY. `national_discharge_source_version`'s cycle predicate is a
+    null passthrough -- `CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time =
+    :cycle` (`services/tiles/mvt.py`) -- so calling it with
+    `source=NATIONAL_DISCHARGE_DEFAULT_SOURCE, cycle=None` raises nothing and
+    selects nothing empty; it silently degenerates to source-only narrowing and
+    returns a perfectly plausible digest of the latest `gfs` run per network.
+    That is the wrong question for an entry that advertises no identity at all:
+    the ranking it should reflect is every network's overall latest run, the one
+    the argument-free form answers. Scoped to `gfs`, the digest stops observing
+    the rest of the pipeline -- an `ifs` cycle landing, or changing which
+    networks are covered, no longer moves `metadata.version`, and the frontend
+    derives its cache token and MapLibre source key from exactly that string.
+    `default_cycle = null` advertises nothing, so the honest input is every
+    ranked run, i.e. the argument-free call.
+
+    The second parameter is the ordering pin (invariant-matrix decision 10):
+    `national_discharge_cycles` DOES hand back a cycle, and the emptiness only
+    shows up in `national_discharge_valid_times`, which is a real race -- the two
+    queries take separate `read committed` snapshots. `_default_layer_catalog`
+    forces `default_cycle`/`default_cycle_instant` back to `None` on an empty
+    timeline, and the digest must be computed AFTER that forcing. Hoisting the
+    digest above it -- a plausible "compute the identity once, up top" cleanup --
+    leaves this case digesting a cycle the response then refuses to advertise.
+    """
+
+    recorded = _recording_digest_calls(monkeypatch)
+    monkeypatch.setattr(
+        hydro_display,
+        "national_discharge_cycles",
+        lambda _session, **_kwargs: {
+            "source": "gfs",
+            "cycles": [],
+            "default_cycle": advertised_default_cycle,
+        },
+    )
+    monkeypatch.setattr(
+        hydro_display,
+        "national_discharge_valid_times",
+        lambda _session, **_kwargs: SimpleNamespace(
+            valid_times=advertised_valid_times,
+            limit=24,
+            observed_count=len(advertised_valid_times),
+            truncated=False,
+        ),
+    )
+    monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: {"run_id": "run_1"})
+    monkeypatch.setattr(hydro_display, "_run_source_version", lambda _run: "run-source-v1")
+    monkeypatch.setattr(
+        hydro_display, "_require_run_source_identity", lambda _run, layer_id: ("bv_a", "rnv_a")
+    )
+    monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
+    monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
+    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
+    # `display_catalog_cached` is a process-wide TTL cache; without this the
+    # loader may never run and `recorded` would be empty for the wrong reason.
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: object()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert len(recorded) == 1, recorded
+    assert recorded[0] == {}
+    # Non-vacuity: the digest is argument-free BECAUSE the entry ended up
+    # advertising nothing. `(C, [])` is the forbidden pair, so an empty timeline
+    # next to a non-null `default_cycle` would mean the forcing never ran and the
+    # argument-free digest above was reached for some other reason.
+    discharge = _entry(response.json()["data"], "discharge")
+    assert discharge["metadata"]["default_cycle"] is None
+    assert discharge["metadata"]["valid_times"] == []
+
+
+
+def test_legacy_national_tile_route_digest_stays_argument_free(monkeypatch: Any) -> None:
+    """The 5-segment alias advertises no identity, so its digest must not narrow.
+
+    Companion to `test_layer_catalog_digests_the_identity_it_advertises`: the
+    catalog moved, this call site did not. Narrowing it would change the alias's
+    `source_version` and therefore its cache key, for a route whose whole contract
+    is "unchanged run selection, unchanged bytes".
+    """
+    recorded = _recording_digest_calls(monkeypatch)
+    monkeypatch.setattr(
+        hydro_display,
+        "_cached_or_generated_mvt_response",
+        lambda *_a, **_k: hydro_display.Response(
+            content=b"pbf", media_type=hydro_display.MVT_MEDIA_TYPE
+        ),
+    )
+
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: object()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(_legacy_national_url())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
     assert len(recorded) == 1, recorded
     assert recorded[0] == {}
 
@@ -1180,3 +1391,1282 @@ def test_runtime_openapi_documents_the_national_identity_tile_route() -> None:
     assert parameters["z"]["schema"]["maximum"] == 14
     assert parameters["x"]["schema"]["maximum"] == 16383
     assert parameters["y"]["schema"]["maximum"] == 16383
+
+
+# ---------------------------------------------------------------------------
+# #2009: the national discharge cycles catalog and its per-cycle valid times.
+#
+# The fixture below answers the two statements `_national_discharge_coverage_rows`
+# runs and filters the coverage rows by the BOUND VALUES, never by the SQL text.
+# That is deliberate: a fake that ignored `params` would keep every "the argument
+# reaches the query" claim green while the call site dropped it.
+# ---------------------------------------------------------------------------
+
+_CYCLE = datetime(2026, 9, 2, 12, tzinfo=UTC)
+_PREVIOUS_CYCLE = datetime(2026, 9, 2, 6, tzinfo=UTC)
+_INSTANT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+# `national_discharge_cycles` bounds its scan at `now() - LOOKBACK`, but the cases
+# above and below are about intersection, ordering and spelling, and they express
+# their expectations as FIXED instants. Left alone they would pass today and start
+# failing the day wall-clock time walks past `_CYCLE + 12 days` -- a suite that
+# rots on a calendar, not on a code change. So the window is widened for the whole
+# module and the three cases that are actually ABOUT the bound put the real value
+# back. `national_discharge_cycles` reads the module global on every call, so this
+# reaches the route/catalog tests through `TestClient` as well.
+_REAL_CYCLE_LOOKBACK_DAYS = mvt_module.NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS
+
+
+@pytest.fixture(autouse=True)
+def _keep_fixed_instant_fixtures_inside_the_cycle_lookback(monkeypatch: Any) -> None:
+    monkeypatch.setattr(mvt_module, "NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS", 100_000)
+
+
+def _cycle_days_ago(days: int) -> datetime:
+    """A cycle `days` before now, aligned to the hour.
+
+    Relative, because these are the cases the lookback bound actually moves, and
+    hour-aligned because `_format_time` spells seconds and the rectangle check
+    divides the coverage window by 3600.
+    """
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    return now - timedelta(days=days)
+
+
+def _coverage_row(
+    *,
+    network: str,
+    cycle: datetime,
+    start: datetime,
+    end: datetime,
+    source: str = "gfs",
+    segment_count: int = 2,
+    run_id: str | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """One `hydro.run_display_coverage` row that proves a complete hourly rectangle."""
+    lead_count = int((end - start).total_seconds()) // 3600 + 1
+    row: dict[str, Any] = {
+        "run_id": run_id or f"run-{network}-{cycle:%Y%m%d%H}",
+        "basin_version_id": f"bv-{network}",
+        "river_network_version_id": network,
+        "cycle_time": cycle,
+        "source_id": source,
+        "segment_count": segment_count,
+        "river_sample_count": segment_count * lead_count,
+        "river_valid_time_start": start,
+        "river_valid_time_end": end,
+        "min_lead_time_hours": 0,
+        "max_lead_time_hours": lead_count - 1,
+    }
+    row.update(overrides)
+    return row
+
+
+class _NationalDiscoverySession:
+    """Answers the active-network query and the identity-bound coverage query."""
+
+    def __init__(self, rows: list[dict[str, Any]], *, active_networks: list[str] | None = None) -> None:
+        self.rows = rows
+        self.active_networks = (
+            active_networks
+            if active_networks is not None
+            else sorted({row["river_network_version_id"] for row in rows})
+        )
+        self.executions: list[tuple[str, Any]] = []
+        self.bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+    def execute(self, statement: Any, params: Any = None) -> _Rows:
+        sql = str(statement)
+        self.executions.append((sql, params))
+        if "core.model_instance mi" in sql and "hydro.hydro_run" not in sql:
+            return _Rows([{"river_network_version_id": network} for network in self.active_networks])
+        if "hydro.run_display_coverage" not in sql:
+            # Anything else (`display_ready_run`, `_run_row`) finds nothing.
+            return _Rows([])
+        bound = params or {}
+        source = bound.get("source")
+        cycle = bound.get("cycle")
+        since = bound.get("since")
+        selected = []
+        for row in self.rows:
+            if source is not None and str(row["source_id"]).lower() != source:
+                continue
+            if cycle is not None and canonical_mvt_time(row["cycle_time"]) != canonical_mvt_time(cycle):
+                continue
+            # `h.cycle_time >= :since` in SQL, NULL semantics included: `NULL >= x`
+            # is NULL, so a run with no cycle is dropped by a bound `:since` rather
+            # than kept. Without this branch the lookback predicate could be deleted
+            # from the statement and no behavioural test would notice.
+            if since is not None and (row["cycle_time"] is None or row["cycle_time"] < since):
+                continue
+            # The real statement does not select `source_id`; neither does this.
+            selected.append({key: value for key, value in row.items() if key != "source_id"})
+        return _Rows(selected)
+
+    def get_bind(self) -> Any:
+        return self.bind
+
+
+def _full_coverage_rows(cycle: datetime, networks: tuple[str, ...] = ("rn-a", "rn-b", "rn-c")) -> list[dict[str, Any]]:
+    return [
+        _coverage_row(network=network, cycle=cycle, start=cycle, end=cycle + timedelta(hours=168))
+        for network in networks
+    ]
+
+
+def test_national_cycles_intersection_excludes_a_partially_covered_cycle() -> None:
+    """38-networks-have-A / 37-have-B, shrunk to three and two."""
+    session = _NationalDiscoverySession(
+        _full_coverage_rows(_CYCLE) + _full_coverage_rows(_PREVIOUS_CYCLE, networks=("rn-a", "rn-b"))
+    )
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert [entry["cycle_time"] for entry in result["cycles"]] == ["2026-09-02T12:00:00Z"]
+    assert result["default_cycle"] == "2026-09-02T12:00:00Z"
+    assert result["source"] == "gfs"
+
+
+def test_national_cycles_are_sorted_newest_first_and_default_to_the_newest() -> None:
+    cycles = [_CYCLE, _PREVIOUS_CYCLE, datetime(2026, 9, 2, 0, tzinfo=UTC)]
+    rows: list[dict[str, Any]] = []
+    # Interleaved on purpose: sorted() must do the work, not the row order.
+    for cycle in (cycles[1], cycles[2], cycles[0]):
+        rows.extend(_full_coverage_rows(cycle))
+    session = _NationalDiscoverySession(rows)
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert [entry["cycle_time"] for entry in result["cycles"]] == [
+        "2026-09-02T12:00:00Z",
+        "2026-09-02T06:00:00Z",
+        "2026-09-02T00:00:00Z",
+    ]
+    assert result["default_cycle"] == result["cycles"][0]["cycle_time"]
+
+
+def test_national_cycle_lookback_leaves_a_day_of_precip_mirror_margin() -> None:
+    """`canonical-precip-copyback`: `oldest_listed_cycle - 24h >= display_watermark - retention_days`.
+
+    With lookback `L` and the raw-retention run's `retention_days` `R` that sentence
+    reduces to `L <= R - 1` -- an INEQUALITY, which is why this asserts one instead
+    of matching the retention default. The same run prunes the canonical
+    precipitation mirror and the precipitation PNG cache on that cutoff, so `R` is
+    the right constant to pin against even though the discharge tiles' own
+    timeseries lane is wider.
+
+    Raising the DEPLOYED retention (`NODE27_RAW_RETENTION_DAYS` / `--retention-days`) is the
+    copyback spec's own remedy, but this test does not observe it: what it pins is the SOURCE
+    default `DEFAULT_RETENTION_DAYS` (`scripts/node27_raw_retention.py:33`), and lowering THAT
+    below 13 is what goes red. The inequality is the load-bearing half -- round 1 asserted
+    `== 14` under a name claiming a coupling it never checked, and that green test passed.
+    """
+    assert _REAL_CYCLE_LOOKBACK_DAYS <= DEFAULT_RETENTION_DAYS - 1
+    assert _REAL_CYCLE_LOOKBACK_DAYS == 12
+
+
+def test_national_cycles_list_only_cycles_inside_the_lookback_window(monkeypatch: Any) -> None:
+    """Both cycles are covered by EVERY active network; only the recent one is listed."""
+    monkeypatch.setattr(
+        mvt_module, "NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS", _REAL_CYCLE_LOOKBACK_DAYS
+    )
+    recent = _cycle_days_ago(1)
+    stale = _cycle_days_ago(30)
+    session = _NationalDiscoverySession(_full_coverage_rows(recent) + _full_coverage_rows(stale))
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert [entry["cycle_time"] for entry in result["cycles"]] == [canonical_mvt_time(recent)]
+    assert result["default_cycle"] == canonical_mvt_time(recent)
+    # The fake filters on the BOUND value, so the behavioural assertions above stay
+    # green if the predicate is deleted from the statement but the bind is left in
+    # place. This pins the statement half of the same claim.
+    coverage_sql = next(sql for sql, _ in session.executions if "hydro.run_display_coverage" in sql)
+    assert "AND (CAST(:since AS timestamptz) IS NULL OR h.cycle_time >= :since)" in coverage_sql
+
+
+def test_national_cycles_lookback_reads_the_module_constant(monkeypatch: Any) -> None:
+    """The call site must consult `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS`, not a literal.
+
+    The other lookback cases put the REAL value back and use 20/30-day-old cycles,
+    which are stale under any plausible literal too -- so hardcoding `days=14` at
+    the `since=` call site -- the constant's value at that head -- left the whole
+    suite green (measured `360 pass / 0 fail` at review round 2). This case moves
+    the constant to 3, past the module's autouse widening, and puts one cycle at
+    1 day and one at 5: both are inside any literal the window could be hardcoded
+    to, so only a call site that really reads the constant drops the 5-day one.
+    """
+    monkeypatch.setattr(mvt_module, "NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS", 3)
+    inside = _cycle_days_ago(1)
+    outside = _cycle_days_ago(5)
+    session = _NationalDiscoverySession(_full_coverage_rows(inside) + _full_coverage_rows(outside))
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert [entry["cycle_time"] for entry in result["cycles"]] == [canonical_mvt_time(inside)]
+    assert result["default_cycle"] == canonical_mvt_time(inside)
+
+
+def test_national_cycles_are_empty_when_every_covered_cycle_predates_the_lookback(
+    monkeypatch: Any,
+) -> None:
+    """An ingest stall longer than the window: fail-closed, not a stale advertisement."""
+    monkeypatch.setattr(
+        mvt_module, "NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS", _REAL_CYCLE_LOOKBACK_DAYS
+    )
+    session = _NationalDiscoverySession(
+        _full_coverage_rows(_cycle_days_ago(20)) + _full_coverage_rows(_cycle_days_ago(30))
+    )
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
+
+
+def test_no_argument_national_valid_times_keep_a_network_whose_newest_run_predates_the_lookback(
+    monkeypatch: Any,
+) -> None:
+    """The bound belongs to `cycles` alone; the no-argument branch stays unbounded.
+
+    `rn-a`'s newest display-ready run is 20 days old and still covers the next few
+    days. Master intersects it with the other two networks; binding the same
+    `:since` here would drop `rn-a` from the intersection entirely and widen the
+    advertised window to one `rn-a` cannot render.
+    """
+    monkeypatch.setattr(
+        mvt_module, "NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS", _REAL_CYCLE_LOOKBACK_DAYS
+    )
+    stale = _cycle_days_ago(20)
+    fresh = _cycle_days_ago(1)
+    common_end = fresh + timedelta(days=3)
+    session = _NationalDiscoverySession(
+        [
+            _coverage_row(network="rn-a", cycle=stale, start=stale, end=common_end),
+            _coverage_row(network="rn-b", cycle=fresh, start=fresh, end=fresh + timedelta(days=6)),
+            _coverage_row(network="rn-c", cycle=fresh, start=fresh, end=fresh + timedelta(days=6)),
+        ]
+    )
+
+    discovery = national_discharge_valid_times(session)
+
+    assert discovery.valid_times[0] == canonical_mvt_time(fresh)
+    assert discovery.valid_times[-1] == canonical_mvt_time(common_end)
+    assert discovery.observed_count == 73
+    assert discovery.truncated is False
+
+
+def test_national_cycles_fail_closed_when_a_network_activates_between_the_two_statements() -> None:
+    """Equal cardinality, different membership -- the minimal fail-OPEN race.
+
+    The denominator query and the coverage query are two statements with their own
+    READ COMMITTED snapshots. Statement 1 sees the active set `{rn-b, rn-c1, rn-c2}`;
+    `rn-a` is then activated and already holds a display-ready run for the cycle,
+    so statement 2 (which re-evaluates `active_flag`) returns `{rn-a, rn-c1, rn-c2}`
+    while `rn-b` never had that cycle at all. `3 == 3`, so a cardinality comparison
+    lists a cycle the active network `rn-b` cannot render. The set comparison
+    refuses it.
+    """
+    session = _NationalDiscoverySession(
+        _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-c1", "rn-c2")),
+        active_networks=["rn-b", "rn-c1", "rn-c2"],
+    )
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    # Non-vacuity: the two statements really do disagree at equal size.
+    assert len(session.active_networks) == 3
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
+
+
+def test_national_cycles_fail_closed_when_one_active_network_has_no_run_for_the_source() -> None:
+    """The uncovered network contributes NO row, so only `core.model_instance` can see it."""
+    session = _NationalDiscoverySession(
+        _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-b")),
+        active_networks=["rn-a", "rn-b", "rn-c"],
+    )
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
+
+
+def test_national_cycles_treat_a_zero_segment_run_as_uncovered() -> None:
+    rows = _full_coverage_rows(_CYCLE)
+    rows[-1] = _coverage_row(
+        network="rn-c",
+        cycle=_CYCLE,
+        start=_CYCLE,
+        end=_CYCLE + timedelta(hours=168),
+        segment_count=0,
+        river_sample_count=0,
+    )
+    session = _NationalDiscoverySession(rows)
+
+    assert national_discharge_cycles(session, source="gfs")["cycles"] == []
+
+
+def test_national_cycles_list_only_the_requested_source() -> None:
+    rows = _full_coverage_rows(_CYCLE)
+    rows.extend(
+        _coverage_row(
+            network=network,
+            cycle=_PREVIOUS_CYCLE,
+            start=_PREVIOUS_CYCLE,
+            end=_PREVIOUS_CYCLE + timedelta(hours=168),
+            source="IFS",
+            run_id=f"run-ifs-{network}",
+        )
+        for network in ("rn-a", "rn-b", "rn-c")
+    )
+    session = _NationalDiscoverySession(rows)
+
+    gfs = national_discharge_cycles(session, source="gfs")
+    ifs = national_discharge_cycles(session, source="ifs")
+
+    assert [entry["cycle_time"] for entry in gfs["cycles"]] == ["2026-09-02T12:00:00Z"]
+    # `lower(h.source_id)`: production stores `IFS` upper-case.
+    assert [entry["cycle_time"] for entry in ifs["cycles"]] == ["2026-09-02T06:00:00Z"]
+
+
+def test_national_cycles_skip_a_cycle_whose_window_holds_no_stride_instant() -> None:
+    """`run_display_coverage` is HOURLY, so a covered window can miss the 3-hour grid."""
+    session = _NationalDiscoverySession(
+        [
+            _coverage_row(
+                network=network,
+                cycle=_CYCLE,
+                start=_CYCLE + timedelta(hours=1),
+                end=_CYCLE + timedelta(hours=2),
+            )
+            for network in ("rn-a", "rn-b")
+        ]
+    )
+
+    assert national_discharge_cycles(session, source="gfs")["cycles"] == []
+
+
+def test_national_cycles_and_valid_times_agree_on_every_listed_window() -> None:
+    """Cross-endpoint: the cycles row's endpoints ARE the endpoints of the list."""
+    rows = _full_coverage_rows(_CYCLE)
+    rows[0] = _coverage_row(
+        network="rn-a", cycle=_CYCLE, start=_CYCLE + timedelta(hours=6), end=_CYCLE + timedelta(hours=96)
+    )
+    rows.extend(_full_coverage_rows(_PREVIOUS_CYCLE))
+    session = _NationalDiscoverySession(rows)
+
+    listed = national_discharge_cycles(session, source="gfs")["cycles"]
+
+    assert len(listed) == 2
+    for entry in listed:
+        discovery = national_discharge_valid_times(
+            session, source="gfs", cycle=datetime.fromisoformat(entry["cycle_time"])
+        )
+        assert discovery.valid_times[0] == entry["valid_time_start"]
+        assert discovery.valid_times[-1] == entry["valid_time_end"]
+    assert listed[0]["valid_time_start"] == "2026-09-02T18:00:00Z"
+    assert listed[0]["valid_time_end"] == "2026-09-06T12:00:00Z"
+
+
+def test_national_per_cycle_valid_times_are_fifty_seven_three_hour_entries() -> None:
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+
+    discovery = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    assert len(discovery.valid_times) == 57
+    assert discovery.valid_times[0] == "2026-09-02T12:00:00Z"
+    assert discovery.valid_times[-1] == "2026-09-09T12:00:00Z"
+    assert discovery.observed_count == 57
+    assert discovery.truncated is False
+    instants = [datetime.fromisoformat(value) for value in discovery.valid_times]
+    assert {later - earlier for earlier, later in zip(instants, instants[1:])} == {timedelta(hours=3)}
+
+
+def test_national_per_cycle_valid_times_stop_at_the_earliest_coverage_end() -> None:
+    rows = _full_coverage_rows(_CYCLE)
+    rows[1] = _coverage_row(network="rn-b", cycle=_CYCLE, start=_CYCLE, end=_CYCLE + timedelta(hours=96))
+    session = _NationalDiscoverySession(rows)
+
+    discovery = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    assert discovery.valid_times[0] == "2026-09-02T12:00:00Z"
+    assert discovery.valid_times[-1] == "2026-09-06T12:00:00Z"
+    assert len(discovery.valid_times) == 33
+
+
+def test_national_per_cycle_valid_times_start_at_the_latest_coverage_start() -> None:
+    """Clamped below too: advertising an instant no basin can render is the bug."""
+    rows = _full_coverage_rows(_CYCLE)
+    rows[1] = _coverage_row(
+        network="rn-b", cycle=_CYCLE, start=_CYCLE + timedelta(hours=6), end=_CYCLE + timedelta(hours=168)
+    )
+    session = _NationalDiscoverySession(rows)
+
+    discovery = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    assert discovery.valid_times[0] == "2026-09-02T18:00:00Z"
+    assert discovery.valid_times[-1] == "2026-09-09T12:00:00Z"
+    assert len(discovery.valid_times) == 55
+
+
+def test_national_per_cycle_valid_times_fail_closed_for_an_off_phase_coverage_grid() -> None:
+    """`run_display_coverage` is an HOURLY grid, and this branch strides from the cycle.
+
+    `rn-b` starts 90 minutes after the cycle, so its samples land at `:30` and it
+    has NO sample at any `cycle + 3k h`. The rectangle check cannot see this --
+    it is translation-invariant in the start instant, and this row is a perfectly
+    complete 13-lead rectangle. The no-argument branch has carried the equivalent
+    guarantee since before #2009 (`(common_end - start) % 3600`); moving the
+    catalog's advertised list onto this branch must not lose it.
+    """
+    rows = [
+        _coverage_row(network="rn-a", cycle=_CYCLE, start=_CYCLE, end=_CYCLE + timedelta(hours=12)),
+        _coverage_row(
+            network="rn-b",
+            cycle=_CYCLE,
+            start=_CYCLE + timedelta(minutes=90),
+            end=_CYCLE + timedelta(hours=13, minutes=30),
+        ),
+    ]
+    session = _NationalDiscoverySession(rows)
+
+    assert national_discharge_valid_times(session, source="gfs", cycle=_CYCLE).valid_times == []
+    # `national_discharge_cycles` computes its entries through the same helper, so
+    # it inherits the guard: an unrenderable cycle is not listed either.
+    assert national_discharge_cycles(session, source="gfs")["cycles"] == []
+
+
+def test_national_per_cycle_valid_times_are_empty_for_a_cycle_outside_the_intersection() -> None:
+    session = _NationalDiscoverySession(
+        _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-b")),
+        active_networks=["rn-a", "rn-b", "rn-c"],
+    )
+
+    discovery = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    assert discovery.valid_times == []
+    assert discovery.observed_count == 0
+
+
+def test_national_per_cycle_valid_times_answer_for_the_requested_cycle() -> None:
+    """Two cycles with DIFFERENT windows, so mixing them in changes the answer."""
+    rows = _full_coverage_rows(_CYCLE)
+    rows.extend(
+        _coverage_row(
+            network=network,
+            cycle=_PREVIOUS_CYCLE,
+            start=_PREVIOUS_CYCLE,
+            end=_PREVIOUS_CYCLE + timedelta(hours=12),
+        )
+        for network in ("rn-a", "rn-b", "rn-c")
+    )
+    session = _NationalDiscoverySession(rows)
+
+    older = national_discharge_valid_times(session, source="gfs", cycle=_PREVIOUS_CYCLE)
+
+    assert older.valid_times[0] == "2026-09-02T06:00:00Z"
+    assert older.valid_times[-1] == "2026-09-02T18:00:00Z"
+    assert len(older.valid_times) == 5
+
+
+def test_national_per_cycle_valid_times_keep_the_first_entries_when_truncated() -> None:
+    """Unlike the no-argument branch, which keeps the TAIL: this list starts at the cycle."""
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+
+    discovery = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE, limit=5)
+
+    assert discovery.valid_times == [
+        "2026-09-02T12:00:00Z",
+        "2026-09-02T15:00:00Z",
+        "2026-09-02T18:00:00Z",
+        "2026-09-02T21:00:00Z",
+        "2026-09-03T00:00:00Z",
+    ]
+    assert discovery.observed_count == 57
+    assert discovery.limit == 5
+    assert discovery.truncated is True
+
+
+def test_no_argument_national_valid_times_discard_an_older_malformed_cycle() -> None:
+    """Selection BEFORE validation: one bad historical row must not blank the catalog."""
+    rows = [
+        _coverage_row(network="rn-a", cycle=_CYCLE, start=_CYCLE, end=_CYCLE + timedelta(hours=3)),
+        _coverage_row(
+            network="rn-a",
+            cycle=_PREVIOUS_CYCLE,
+            start=_PREVIOUS_CYCLE,
+            end=_PREVIOUS_CYCLE + timedelta(hours=3),
+            river_sample_count=3,  # not segment_count * lead_count -> not a rectangle
+        ),
+    ]
+    session = _NationalDiscoverySession(rows)
+
+    discovery = national_discharge_valid_times(session)
+
+    assert discovery.valid_times == [
+        "2026-09-02T12:00:00Z",
+        "2026-09-02T13:00:00Z",
+        "2026-09-02T14:00:00Z",
+        "2026-09-02T15:00:00Z",
+    ]
+
+
+def test_no_argument_national_valid_times_rank_a_null_cycle_first_like_the_tile_ctes() -> None:
+    """PostgreSQL's `ORDER BY h.cycle_time DESC` implies NULLS FIRST.
+
+    Pre-#2009 that ordering lived entirely in SQL, so a display-ready run with
+    `cycle_time IS NULL` won `rn = 1` for its network. The two national tile CTEs
+    still rank in raw SQL and are untouched by #2009, so ranking such a row LAST
+    in Python would make the discovery endpoint advertise one run's window while
+    the tile route paints a different run's geometry.
+    """
+    rows = [
+        _coverage_row(
+            network="rn-a",
+            cycle=_CYCLE,
+            start=_CYCLE,
+            end=_CYCLE + timedelta(hours=3),
+            run_id="run-a-null-cycle",
+            cycle_time=None,
+        ),
+        _coverage_row(
+            network="rn-a",
+            cycle=_CYCLE,
+            start=_CYCLE + timedelta(hours=10),
+            end=_CYCLE + timedelta(hours=12),
+            run_id="run-a-cycled",
+        ),
+    ]
+    session = _NationalDiscoverySession(rows)
+
+    discovery = national_discharge_valid_times(session)
+
+    assert discovery.valid_times == [
+        "2026-09-02T12:00:00Z",
+        "2026-09-02T13:00:00Z",
+        "2026-09-02T14:00:00Z",
+        "2026-09-02T15:00:00Z",
+    ]
+    # The cycles list goes the OTHER way on purpose: a NULL cycle has no spelling
+    # to put in `cycles[].cycle_time` or a tile URL's `{cycle}`, so it is skipped
+    # and only the real cycle is advertised.
+    listed = national_discharge_cycles(session, source="gfs")["cycles"]
+    assert [entry["cycle_time"] for entry in listed] == ["2026-09-02T12:00:00Z"]
+
+
+def test_national_valid_times_reject_half_an_identity() -> None:
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+
+    with pytest.raises(ValueError):
+        national_discharge_valid_times(session, source="gfs")
+    with pytest.raises(ValueError):
+        national_discharge_valid_times(session, cycle=_CYCLE)
+
+
+def test_layer_source_refs_refuses_the_discharge_layer() -> None:
+    """`layer_metadata` short-circuits discharge to `source_refs={}`; this is the backstop.
+
+    A future refactor that wires discharge back through this helper would put
+    `run_id` into the metadata version hash input again and split the runless and
+    run-scoped catalogs' ETags. The entry assertion has existed since PR #602 with
+    no test at all.
+    """
+    with pytest.raises(AssertionError):
+        mvt_module._layer_source_refs(
+            layer_id="discharge",
+            run_id="run_1",
+            source_version="v1",
+            basin_version_id="bv_a",
+            river_network_version_id="rnv_a",
+        )
+
+
+def test_national_discharge_metadata_advertises_exactly_one_identity() -> None:
+    metadata = layer_metadata(
+        "discharge",
+        run_id="run_1",
+        source_version="national-hydro-v1",
+        valid_times=["2026-09-02T12:00:00Z"],
+        national=True,
+        default_cycle="2026-09-02T12:00:00Z",
+    )
+
+    assert metadata["tile_url_template"] == (
+        "/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    )
+    assert metadata["url_template"] == metadata["tile_url_template"]
+    assert metadata["required_placeholders"] == ["source", "cycle", "valid_time", "z", "x", "y"]
+    assert "{run_id}" not in metadata["tile_url_template"]
+    assert metadata["default_source"] == "gfs"
+    assert metadata["default_cycle"] == "2026-09-02T12:00:00Z"
+    assert metadata["cycles_url_template"] == "/api/v1/layers/discharge/cycles?source={source}"
+    assert metadata["valid_times_url_template"] == (
+        "/api/v1/layers/discharge/valid-times?source={source}&cycle={cycle}"
+    )
+    assert metadata["maplibre_source_layer"] == "hydro"
+    assert "basin_id" in metadata["property_schema"]["required"]
+    assert metadata["source_refs"] == {}
+
+
+@pytest.mark.parametrize("field", ["default_source", "cycles_url_template", "valid_times_url_template"])
+def test_national_discharge_metadata_version_hashes_every_identity_field(monkeypatch: Any, field: str) -> None:
+    """Each of the four is in the `_stable_json_hash` input, not only in the payload.
+
+    The version is the ETag input, so a contract field that the payload advertises
+    and the hash ignores would let a client keep a cached catalog whose identity
+    has changed underneath it.
+    """
+    kwargs: dict[str, Any] = {
+        "source_version": "national-hydro-v1",
+        "valid_times": ["2026-09-02T12:00:00Z"],
+        "national": True,
+        "default_cycle": "2026-09-02T12:00:00Z",
+    }
+    baseline = layer_metadata("discharge", **kwargs)["cache_version"]
+
+    assert layer_metadata("discharge", **{**kwargs, "default_cycle": "2026-09-02T06:00:00Z"})[
+        "cache_version"
+    ] != baseline
+    monkeypatch.setitem(mvt_module._NATIONAL_DISCHARGE_METADATA, field, "/moved")
+    assert layer_metadata("discharge", **kwargs)["cache_version"] != baseline
+
+
+def test_sibling_layer_metadata_versions_are_untouched_by_the_discharge_identity() -> None:
+    """Frozen against the values master emits: the four new fields are discharge-only.
+
+    Adding them unconditionally to the hash input would rotate every layer's
+    `cache_version` and therefore every layer's metadata ETag, for a contract
+    that only the discharge entry changed.
+    """
+    national_river = layer_metadata("river-network", source_version="generation-a", national=True)
+    run_scoped_river = layer_metadata(
+        "river-network",
+        run_id="run_1",
+        basin_version_id="bv_a",
+        river_network_version_id="rnv_a",
+        source_version="run-source-v1",
+    )
+
+    assert national_river["tile_url_template"] == "/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf"
+    assert national_river["required_placeholders"] == ["z", "x", "y"]
+    assert national_river["cache_version"] == (
+        "3781c3e391aa38d7dc3072c5f50ee9ec07396277c83e9d9aa95ec8e5b3e91679"
+    )
+    assert run_scoped_river["tile_url_template"] == (
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf"
+    )
+    assert run_scoped_river["required_placeholders"] == ["basin_version_id", "z", "x", "y"]
+    assert run_scoped_river["cache_version"] == (
+        "73a44576017f0956ff4e93f0d9b99e0e6315b32b2801b06cc0eb305b4a5ca733"
+    )
+    for metadata in (national_river, run_scoped_river):
+        for field in ("default_source", "default_cycle", "cycles_url_template", "valid_times_url_template"):
+            assert field not in metadata
+
+
+def _national_catalog_app(
+    monkeypatch: Any,
+    session: Any,
+    *,
+    display_ready: dict[str, Any] | None = None,
+) -> Any:
+    """A `/api/v1/layers` app whose ONLY live query path is the national discovery one."""
+    monkeypatch.setattr(
+        hydro_display, "display_ready_run", lambda _session: display_ready or {"run_id": "run_latest"}
+    )
+    monkeypatch.setattr(hydro_display, "_run_source_version", lambda _run: "run-source-v1")
+    monkeypatch.setattr(hydro_display, "_require_run_source_identity", lambda _run, layer_id: ("bv_a", "rnv_a"))
+    monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
+    monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
+    monkeypatch.setattr(
+        hydro_display, "national_discharge_source_version", lambda _s, **_k: "national-hydro-v1"
+    )
+    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    return app
+
+
+def _entry(items: list[dict[str, Any]], layer_id: str) -> dict[str, Any]:
+    return next(item for item in items if item["layer_id"] == layer_id)
+
+
+def test_layer_catalog_discharge_entry_is_byte_identical_runless_and_run_scoped(monkeypatch: Any) -> None:
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+    app = _national_catalog_app(monkeypatch, session)
+    # A DIFFERENT run than the latest one, so a `run_id`-dependent default cycle
+    # would have to diverge somewhere.
+    monkeypatch.setattr(
+        hydro_display, "_require_display_ready", lambda _s, run_id: {"run_id": run_id, "status": "published"}
+    )
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            runless = client.get("/api/v1/layers")
+            run_scoped = client.get("/api/v1/layers", params={"run_id": "run_other"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert runless.status_code == 200, runless.text
+    assert run_scoped.status_code == 200, run_scoped.text
+    discharge = _entry(runless.json()["data"], "discharge")
+    assert discharge == _entry(run_scoped.json()["data"], "discharge")
+
+    metadata = discharge["metadata"]
+    assert metadata["tile_url_template"] == (
+        "/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    )
+    assert metadata["required_placeholders"] == ["source", "cycle", "valid_time", "z", "x", "y"]
+    assert metadata["default_source"] == "gfs"
+    assert metadata["default_cycle"] == "2026-09-02T12:00:00Z"
+    assert len(metadata["valid_times"]) == 57
+    assert metadata["source_refs"] == {}
+    assert metadata["maplibre_source_layer"] == "hydro"
+    assert "basin_id" in metadata["property_schema"]["required"]
+    assert _INSTANT_RE.match(metadata["default_cycle"])
+    assert all(_INSTANT_RE.match(instant) for instant in metadata["valid_times"])
+
+    # Unchanged sibling: `river-network` keeps its two caller-shaped templates.
+    assert _entry(runless.json()["data"], "river-network")["metadata"]["tile_url_template"] == (
+        "/api/v1/tiles/river-network-national/{z}/{x}/{y}.pbf"
+    )
+    assert _entry(run_scoped.json()["data"], "river-network")["metadata"]["tile_url_template"] == (
+        "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf"
+    )
+
+
+def test_layer_catalog_keeps_the_discharge_entry_when_the_intersection_is_empty(monkeypatch: Any) -> None:
+    """Runs exist, no cycle covers every network: an honest fail-closed entry, not a drop."""
+    session = _NationalDiscoverySession(
+        _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-b")),
+        active_networks=["rn-a", "rn-b", "rn-c"],
+    )
+    app = _national_catalog_app(monkeypatch, session)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers")
+    finally:
+        app.dependency_overrides.clear()
+
+    metadata = _entry(response.json()["data"], "discharge")["metadata"]
+    assert metadata["default_cycle"] is None
+    assert metadata["valid_times"] == []
+    assert metadata["default_source"] == "gfs"
+
+
+class _NetworkVanishesBetweenCallsSession(_NationalDiscoverySession):
+    """`read committed`: the catalog's two coverage queries take two snapshots.
+
+    The unbound query (`national_discharge_cycles`) still sees every network
+    covered; the `cycle`-bound query that follows finds `rn-c` gone -- what a
+    network being newly ACTIVATED without a display-ready run for that cycle, or
+    a covered run's status being rewritten, looks like from here.
+    """
+
+    def execute(self, statement: Any, params: Any = None) -> _Rows:
+        rows = super().execute(statement, params)
+        if (params or {}).get("cycle") is None:
+            return rows
+        return _Rows([row for row in rows.all() if row["river_network_version_id"] != "rn-c"])
+
+
+def test_layer_catalog_never_advertises_a_cycle_whose_timeline_came_back_empty(monkeypatch: Any) -> None:
+    """`(default_cycle=C, valid_times=[])` is a state the contract forbids.
+
+    The empty intersection has exactly one spelling -- `default_cycle` null AND
+    `valid_times` empty -- so the frontend cannot read "there is a default cycle,
+    it just has no timeline" and pin the map to a cycle nothing can render.
+    """
+    session = _NetworkVanishesBetweenCallsSession(_full_coverage_rows(_CYCLE))
+    app = _national_catalog_app(monkeypatch, session)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    metadata = _entry(response.json()["data"], "discharge")["metadata"]
+    assert metadata["valid_times"] == []
+    assert metadata["default_cycle"] is None
+    # Still the fail-closed ENTRY, not a dropped layer (the other empty state).
+    assert metadata["default_source"] == "gfs"
+
+
+def test_layer_catalog_is_empty_when_no_run_is_display_ready(monkeypatch: Any) -> None:
+    """The other empty state: no ghost discharge entry when nothing is renderable at all."""
+    session = _NationalDiscoverySession([])
+    monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: None)
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"] == []
+
+
+def test_layer_catalog_rejects_an_unknown_run_without_a_discharge_side_channel(monkeypatch: Any) -> None:
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+    app = _national_catalog_app(monkeypatch, session)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers", params={"run_id": "run_missing"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["code"] == "RUN_NOT_FOUND"
+    assert "data" not in response.json()
+
+
+def test_layer_catalog_advertises_the_list_the_valid_times_endpoint_serves(monkeypatch: Any) -> None:
+    """One stride implementation: the catalog's list and the endpoint's must be identical.
+
+    The fixture clamps the lower bound (one network starts six hours late), so a
+    second, private stride computation in the catalog would have to reproduce the
+    clamp as well to stay equal.
+    """
+    rows = _full_coverage_rows(_CYCLE)
+    rows[0] = _coverage_row(
+        network="rn-a", cycle=_CYCLE, start=_CYCLE + timedelta(hours=6), end=_CYCLE + timedelta(hours=96)
+    )
+    session = _NationalDiscoverySession(rows)
+    app = _national_catalog_app(monkeypatch, session)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            catalog = client.get("/api/v1/layers")
+            metadata = _entry(catalog.json()["data"], "discharge")["metadata"]
+            endpoint = client.get(
+                "/api/v1/layers/discharge/valid-times",
+                params={"source": metadata["default_source"], "cycle": metadata["default_cycle"]},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert endpoint.status_code == 200, endpoint.text
+    assert metadata["valid_times"] == endpoint.json()["data"]["valid_times"]
+    assert metadata["valid_times"][0] == "2026-09-02T18:00:00Z"
+    assert metadata["valid_times"][-1] == "2026-09-06T12:00:00Z"
+    # The advertised list is the per-cycle 3-hour stride, not the no-argument
+    # branch's hourly union: falling back to the old list would keep the two
+    # sides equal while advertising an identity nothing asked for.
+    instants = [datetime.fromisoformat(value) for value in metadata["valid_times"]]
+    assert {later - earlier for earlier, later in zip(instants, instants[1:])} == {timedelta(hours=3)}
+
+
+def test_discharge_cycles_route_returns_the_intersection_in_the_pinned_spelling(monkeypatch: Any) -> None:
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE) + _full_coverage_rows(_PREVIOUS_CYCLE))
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers/discharge/cycles", params={"source": "gfs"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["source"] == "gfs"
+    assert data["default_cycle"] == "2026-09-02T12:00:00Z"
+    assert [entry["cycle_time"] for entry in data["cycles"]] == [
+        "2026-09-02T12:00:00Z",
+        "2026-09-02T06:00:00Z",
+    ]
+    instants = [data["default_cycle"]]
+    for entry in data["cycles"]:
+        instants.extend([entry["cycle_time"], entry["valid_time_start"], entry["valid_time_end"]])
+    assert all(_INSTANT_RE.match(instant) for instant in instants), instants
+
+
+def test_valid_times_route_serves_the_requested_identity_in_the_pinned_spelling(monkeypatch: Any) -> None:
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(
+                "/api/v1/layers/discharge/valid-times",
+                params={"source": "gfs", "cycle": "2026-09-02T12:00:00Z"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    valid_times = response.json()["data"]["valid_times"]
+    assert len(valid_times) == 57
+    assert valid_times[0] == "2026-09-02T12:00:00Z"
+    assert all(_INSTANT_RE.match(instant) for instant in valid_times), valid_times
+
+
+def test_valid_times_route_without_arguments_keeps_serving_the_national_list(monkeypatch: Any) -> None:
+    """The no-argument branch is a live route, not just an internal default.
+
+    `scripts/node27_mvt_prewarm.py` and the frontend's fallback both call it, so
+    making `source`/`cycle` mandatory would break them.
+    """
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers/discharge/valid-times")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    valid_times = response.json()["data"]["valid_times"]
+    assert valid_times
+    assert all(_INSTANT_RE.match(instant) for instant in valid_times), valid_times
+
+
+def test_valid_times_cache_key_collapses_spellings_and_separates_identities(monkeypatch: Any) -> None:
+    keys: list[str] = []
+
+    def _record(_request: Any, key: str, load: Any) -> Any:
+        keys.append(key)
+        return load()
+
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", _record)
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            for params in (
+                {"source": "gfs", "cycle": "2026-09-02T12:00:00Z"},
+                {"source": "gfs", "cycle": "2026-09-02T12:00:00.000Z"},
+                # Same instant again, spelled with a non-UTC offset: only the
+                # canonicalized value collapses this one onto the first two.
+                {"source": "gfs", "cycle": "2026-09-02T20:00:00+08:00"},
+                {"source": "gfs", "cycle": "2026-09-02T15:00:00Z"},
+                {"source": "ifs", "cycle": "2026-09-02T12:00:00Z"},
+            ):
+                assert client.get("/api/v1/layers/discharge/valid-times", params=params).status_code == 200
+    finally:
+        app.dependency_overrides.clear()
+
+    assert keys[0] == keys[1] == keys[2], keys
+    assert len(set(keys)) == 3, keys
+
+
+def test_cycles_cache_key_separates_the_two_sources(monkeypatch: Any) -> None:
+    """The only red-capable oracle for this route's key.
+
+    `display_catalog_cached` returns `loader()` directly unless `display_readonly`
+    is on, and this route's other test discards the key entirely -- so replacing
+    it with a constant is green everywhere locally while node-27 serves the gfs
+    intersection under `?source=ifs` for a whole cache window.
+    """
+    keys: list[str] = []
+
+    def _record(_request: Any, key: str, load: Any) -> Any:
+        keys.append(key)
+        return load()
+
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", _record)
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            for source in ("gfs", "ifs"):
+                response = client.get("/api/v1/layers/discharge/cycles", params={"source": source})
+                assert response.status_code == 200, response.text
+    finally:
+        app.dependency_overrides.clear()
+
+    assert keys == ["discharge-cycles:gfs", "discharge-cycles:ifs"]
+
+
+@pytest.mark.parametrize(
+    ("case", "path", "params"),
+    [
+        ("cycle-without-source", "/api/v1/layers/discharge/valid-times", {"cycle": "2026-09-02T12:00:00Z"}),
+        ("source-without-cycle", "/api/v1/layers/discharge/valid-times", {"source": "gfs"}),
+        (
+            "run-id-with-identity",
+            "/api/v1/layers/discharge/valid-times",
+            {"source": "gfs", "cycle": "2026-09-02T12:00:00Z", "run_id": "run_1"},
+        ),
+        (
+            "identity-on-another-layer",
+            "/api/v1/layers/river-network/valid-times",
+            {"source": "gfs", "cycle": "2026-09-02T12:00:00Z"},
+        ),
+        (
+            "sub-second-cycle",
+            "/api/v1/layers/discharge/valid-times",
+            {"source": "gfs", "cycle": "2026-09-02T12:00:00.500Z"},
+        ),
+        (
+            "unshaped-cycle",
+            "/api/v1/layers/discharge/valid-times",
+            {"source": "gfs", "cycle": "2026-09-02 12:00:00"},
+        ),
+        ("unknown-source", "/api/v1/layers/discharge/valid-times", {"source": "ERA5", "cycle": "2026-09-02T12:00:00Z"}),
+        ("cased-source", "/api/v1/layers/discharge/valid-times", {"source": "GFS", "cycle": "2026-09-02T12:00:00Z"}),
+        ("cycles-unknown-source", "/api/v1/layers/discharge/cycles", {"source": "ERA5"}),
+        ("cycles-best-source", "/api/v1/layers/discharge/cycles", {"source": "best"}),
+        ("cycles-cased-source", "/api/v1/layers/discharge/cycles", {"source": "GFS"}),
+        ("cycles-missing-source", "/api/v1/layers/discharge/cycles", {}),
+    ],
+)
+def test_national_discovery_routes_reject_half_formed_selectors_before_any_sql(
+    case: str, path: str, params: dict[str, str]
+) -> None:
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: _ExplodingSession()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(path, params=params)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR", response.text
+
+
+# ---------------------------------------------------------------------------
+# Post-gate site-rule oracles (#2009 review round 4). Appended at the END of the
+# file on purpose: every line-number citation in the invariant matrix and in the
+# mutation driver anchors on the cases above, so inserting between them would
+# invalidate the fixture rather than extend it.
+# ---------------------------------------------------------------------------
+
+
+def test_national_per_cycle_valid_times_fail_closed_when_a_network_activates_between_the_two_statements() -> None:
+    """The per-cycle twin of `test_national_cycles_fail_closed_when_a_network_activates...`.
+
+    Row 40's oracle only ever touched the `national_discharge_cycles` site; this
+    one drives the SECOND set comparison, the one inside
+    `national_discharge_valid_times`' per-cycle branch. Same race, same shape:
+    equal cardinality, different membership. Statement 1 sees the active set
+    `{rn-b, rn-c1, rn-c2}`; `rn-a` is activated with a display-ready run for the
+    requested cycle, so statement 2 returns `{rn-a, rn-c1, rn-c2}` while `rn-b`
+    never had that cycle at all. `3 == 3`, so a cardinality comparison would
+    serve `rn-b`'s basins a timeline they cannot render.
+    """
+    session = _NationalDiscoverySession(
+        _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-c1", "rn-c2")),
+        active_networks=["rn-b", "rn-c1", "rn-c2"],
+    )
+
+    result = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    # Non-vacuity: the two statements really do disagree AT EQUAL SIZE, so a
+    # cardinality comparison would pass where the set comparison fails.
+    assert len(session.active_networks) == 3
+    assert len({row["river_network_version_id"] for row in session.rows}) == 3
+    assert result.valid_times == []
+    assert result.observed_count == 0
+    assert result.truncated is False
+
+
+def test_no_argument_national_valid_times_are_empty_with_no_coverage_rows() -> None:
+    """Zero coverage rows on the no-argument branch: `[]`, not a crash.
+
+    Every other no-argument case in this file feeds the branch at least one row,
+    so the `if not latest_by_network` guard had no oracle: deleting it lets the
+    empty `coverage` list reach `max(start for start, _ in coverage)`, which
+    raises `ValueError` and turns a fail-closed empty timeline into an HTTP 500.
+    """
+    session = _NationalDiscoverySession([], active_networks=["rn-a", "rn-b"])
+
+    discovery = national_discharge_valid_times(session)
+
+    assert discovery.valid_times == []
+    assert discovery.observed_count == 0
+
+
+def test_discharge_routes_pass_ifs_through_to_the_coverage_bind(monkeypatch: Any) -> None:
+    """`?source=ifs` must reach the SQL bind on BOTH routes, not a `gfs` literal.
+
+    The fixture separates the two sources by CYCLE (`gfs` at `_CYCLE`, `ifs` at
+    `_PREVIOUS_CYCLE`), so any call site that hardcodes `gfs` -- the route's own
+    `source=` argument, the response echo, or the helper's forward into
+    `_national_discharge_coverage_rows` -- answers for the wrong cycle.
+
+    The helper-level NEGATIVE half at the end is the only oracle for the
+    forward at `services/tiles/mvt.py`'s per-cycle `_national_discharge_coverage_rows`
+    call: dropping `source=source` binds `None`, which both the SQL and this
+    file's fake read as "no filter", so the `ifs` half stays green while `gfs`
+    at `_PREVIOUS_CYCLE` starts answering with the `ifs` rows.
+    """
+    rows = _full_coverage_rows(_CYCLE)
+    rows.extend(
+        _coverage_row(
+            network=network,
+            cycle=_PREVIOUS_CYCLE,
+            start=_PREVIOUS_CYCLE,
+            end=_PREVIOUS_CYCLE + timedelta(hours=168),
+            source="ifs",
+            run_id=f"run-ifs-{network}",
+        )
+        for network in ("rn-a", "rn-b", "rn-c")
+    )
+    session = _NationalDiscoverySession(rows)
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            cycles_response = client.get("/api/v1/layers/discharge/cycles", params={"source": "ifs"})
+            ifs_times = client.get(
+                "/api/v1/layers/discharge/valid-times",
+                params={"source": "ifs", "cycle": canonical_mvt_time(_PREVIOUS_CYCLE)},
+            )
+            gfs_times = client.get(
+                "/api/v1/layers/discharge/valid-times",
+                params={"source": "gfs", "cycle": canonical_mvt_time(_PREVIOUS_CYCLE)},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert cycles_response.status_code == 200, cycles_response.text
+    body = cycles_response.json()["data"]
+    assert body["source"] == "ifs"
+    assert [entry["cycle_time"] for entry in body["cycles"]] == [canonical_mvt_time(_PREVIOUS_CYCLE)]
+    assert body["default_cycle"] == canonical_mvt_time(_PREVIOUS_CYCLE)
+
+    assert ifs_times.status_code == 200, ifs_times.text
+    assert len(ifs_times.json()["data"]["valid_times"]) == 57
+    assert gfs_times.status_code == 200, gfs_times.text
+    assert gfs_times.json()["data"]["valid_times"] == []
+
+    helper_ifs = national_discharge_valid_times(session, source="ifs", cycle=_PREVIOUS_CYCLE)
+    helper_gfs = national_discharge_valid_times(session, source="gfs", cycle=_PREVIOUS_CYCLE)
+    assert helper_ifs.valid_times
+    assert helper_gfs.valid_times == []
+    assert helper_gfs.observed_count == 0
+
+
+def test_national_per_cycle_valid_times_are_not_truncated_when_observed_equals_the_limit() -> None:
+    """`truncated` is `observed > limit`, strictly: a full-but-not-over list is complete.
+
+    Today's cases sit at 57 < 100 or 57 > 5, so both spellings agree on them and
+    `>=` would ship a list that IS the whole window while telling the frontend
+    there is more behind it.
+    """
+    session = _NationalDiscoverySession(
+        [
+            _coverage_row(network=network, cycle=_CYCLE, start=_CYCLE, end=_CYCLE + timedelta(hours=12))
+            for network in ("rn-a", "rn-b", "rn-c")
+        ]
+    )
+
+    discovery = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE, limit=5)
+
+    assert len(discovery.valid_times) == 5
+    assert discovery.observed_count == 5
+    assert discovery.truncated is False
+
+
+def test_national_per_cycle_valid_times_clamp_an_off_grid_window_inward() -> None:
+    """Both clamp ends round INWARD: an advertised instant must be inside the coverage.
+
+    `run_display_coverage` is an hourly grid, so a window can start and end off
+    the 3-hour stride. `C+4h … C+97h` has its first stride instant at `C+6h` and
+    its last at `C+96h`; rounding the start down would advertise `C+3h` (before
+    any basin has data) and rounding the end up would advertise `C+99h` (after
+    the earliest coverage end).
+    """
+    session = _NationalDiscoverySession(
+        [
+            _coverage_row(
+                network=network,
+                cycle=_CYCLE,
+                start=_CYCLE + timedelta(hours=4),
+                end=_CYCLE + timedelta(hours=97),
+            )
+            for network in ("rn-a", "rn-b", "rn-c")
+        ]
+    )
+
+    discovery = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    assert discovery.valid_times[0] == canonical_mvt_time(_CYCLE + timedelta(hours=6))
+    assert discovery.valid_times[-1] == canonical_mvt_time(_CYCLE + timedelta(hours=96))
+    assert discovery.observed_count == 31
+
+
+def test_national_cycles_pass_their_limit_to_the_per_cycle_clamp() -> None:
+    """`national_discharge_cycles(limit=)` must reach the per-cycle stride computation.
+
+    No route or catalog call site passes `limit` to this function, so the
+    argument's only forwarding site was unobserved: hardcoding the module
+    constant there leaves every existing case green (a 168 h rectangle yields 57
+    entries, under the constant 100). With `limit=5` the retained list stops at
+    the fifth stride instant and the listed window's END is what shows it.
+    """
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+
+    result = national_discharge_cycles(session, source="gfs", limit=5)
+
+    assert [entry["cycle_time"] for entry in result["cycles"]] == [canonical_mvt_time(_CYCLE)]
+    assert result["cycles"][0]["valid_time_start"] == canonical_mvt_time(_CYCLE)
+    assert result["cycles"][0]["valid_time_end"] == canonical_mvt_time(_CYCLE + timedelta(hours=12))
+
+
+def test_national_coverage_statements_pin_their_shape() -> None:
+    """TRIPWIRES, not oracles, for the coverage query's SQL shape.
+
+    `_NationalDiscoverySession` never parses SQL: it matches on a table name and
+    filters its canned rows by the BOUND values, so every predicate and window
+    clause below is invisible to it for any row data whatsoever. The behavioural
+    oracle for seven of these eight literals is the node-27 integration file
+    (`tests/test_mvt_national_identity_probe_integration.py`, matrix rows 50-56);
+    what this case buys is a loud local signal the moment one of them is edited
+    or deleted, so the change cannot reach review looking untouched.
+
+    The eighth, `AND rdc.segment_count > 0`, is matrix row 3, and this assertion
+    is its ONLY local signal -- its behavioural oracle is likewise on node-27
+    (`test_national_cycles_keep_a_cycle_whose_zero_segment_rival_run_sorts_first`).
+
+    `SELECT DISTINCT` is asserted as SHAPE only: as enumeration site 50 it is
+    excluded as result-equivalent, so its presence here is a tripwire and never
+    a behavioural claim.
+
+    The `:since` predicate already has its own pin in
+    `test_national_cycles_list_only_cycles_inside_the_lookback_window` and is
+    deliberately not repeated here.
+    """
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+
+    national_discharge_cycles(session, source="gfs")
+
+    active_sql = next(
+        sql
+        for sql, _ in session.executions
+        if "core.model_instance mi" in sql and "hydro.hydro_run" not in sql
+    )
+    coverage_sql = next(sql for sql, _ in session.executions if "hydro.run_display_coverage" in sql)
+
+    # The denominator: only ACTIVE instances, and only those naming a network.
+    # `AND mi.river_network_version_id IS NOT NULL` also occurs in the coverage
+    # statement, so it is asserted against the active statement alone.
+    assert "SELECT DISTINCT mi.river_network_version_id" in active_sql
+    assert "WHERE mi.active_flag" in active_sql
+    assert "AND mi.river_network_version_id IS NOT NULL" in active_sql
+
+    # The ranked read: one winner per (network, cycle), newest run first, both
+    # identity conjuncts present, and `rn = 1` selecting that winner.
+    assert _SOURCE_CONJUNCT in coverage_sql
+    assert _CYCLE_CONJUNCT in coverage_sql
+    assert "PARTITION BY mi.river_network_version_id, h.cycle_time" in coverage_sql
+    assert "ORDER BY h.run_id DESC" in coverage_sql
+    assert "WHERE rn = 1" in coverage_sql
+
+    # The join-side emptiness filter: a coverage row with no segments is not a
+    # candidate at all, so it cannot win its (network, cycle) partition.
+    assert "AND rdc.segment_count > 0" in coverage_sql
