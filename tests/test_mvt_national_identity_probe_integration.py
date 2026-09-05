@@ -962,7 +962,7 @@ def test_national_identity_tile_serves_the_requested_source_not_the_other_one_at
 #   that is `segment_count=2, river_sample_count=4, min_lead=0, max_lead=1`,
 #   window `C … C+2h` -- and `_national_coverage_window`
 #   (`services/tiles/mvt.py:2084-2091`) REJECTS it, because `7200 !=
-#   (lead_count - 1) * 3600` with `lead_count = 2`. The nine tile cases above
+#   (lead_count - 1) * 3600` with `lead_count = 2`. The eight tile cases above
 #   never reach that function, so their green says nothing here. Everything
 #   below therefore seeds through `_seed_hourly_display_ready_run`, which writes
 #   EVERY segment at EVERY hour with `lead_time_hours` = the hour offset.

@@ -2624,10 +2624,18 @@ def test_national_coverage_statements_pin_their_shape() -> None:
     `_NationalDiscoverySession` never parses SQL: it matches on a table name and
     filters its canned rows by the BOUND values, so every predicate and window
     clause below is invisible to it for any row data whatsoever. The behavioural
-    oracle for these seven literals is the node-27 integration file
+    oracle for seven of these eight literals is the node-27 integration file
     (`tests/test_mvt_national_identity_probe_integration.py`, matrix rows 50-56);
     what this case buys is a loud local signal the moment one of them is edited
     or deleted, so the change cannot reach review looking untouched.
+
+    The eighth, `AND rdc.segment_count > 0`, is matrix row 3, and this assertion
+    is its ONLY local signal -- its behavioural oracle is likewise on node-27
+    (`test_national_cycles_keep_a_cycle_whose_zero_segment_rival_run_sorts_first`).
+
+    `SELECT DISTINCT` is asserted as SHAPE only: as enumeration site 50 it is
+    excluded as result-equivalent, so its presence here is a tripwire and never
+    a behavioural claim.
 
     The `:since` predicate already has its own pin in
     `test_national_cycles_list_only_cycles_inside_the_lookback_window` and is
@@ -2658,3 +2666,7 @@ def test_national_coverage_statements_pin_their_shape() -> None:
     assert "PARTITION BY mi.river_network_version_id, h.cycle_time" in coverage_sql
     assert "ORDER BY h.run_id DESC" in coverage_sql
     assert "WHERE rn = 1" in coverage_sql
+
+    # The join-side emptiness filter: a coverage row with no segments is not a
+    # candidate at all, so it cannot win its (network, cycle) partition.
+    assert "AND rdc.segment_count > 0" in coverage_sql
