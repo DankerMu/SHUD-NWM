@@ -16,6 +16,7 @@ from sqlalchemy import text
 from apps.api import main
 from apps.api.errors import ApiError
 from apps.api.routes import hydro_display
+from scripts.node27_raw_retention import DEFAULT_RETENTION_DAYS
 from services.tiles import mvt as mvt_module
 from services.tiles.mvt import (
     MVT_MAX_COORDINATES,
@@ -1157,19 +1158,8 @@ def test_legacy_national_route_keeps_accepting_the_instant_spellings_it_always_d
     assert captured[0].valid_time == "2026-09-03T00:00:00Z"
 
 
-def test_layer_catalog_still_digests_every_source_not_one_identity(monkeypatch: Any) -> None:
-    """`GET /api/v1/layers` must call the digest helper with NO identity (task 3.1).
-
-    The helper grew keyword-only `source`/`cycle` in this change. The catalog's
-    call is the one site that must NOT use them: the catalog advertises the
-    legacy source-less template until I5/#2009 moves it, and narrowing its
-    digest to one identity would rotate `source_generation` on a schedule that
-    has nothing to do with what the catalog describes. Nothing else in the repo
-    looks at this call's arguments -- `_default_layer_catalog` is exercised
-    directly by `tests/test_api_contract.py`, which passes
-    `national_hydro_source_version` in as a literal string and never reaches the
-    helper at all.
-    """
+def _recording_digest_calls(monkeypatch: Any) -> list[dict[str, Any]]:
+    """Swap `national_discharge_source_version` for a recorder of its kwargs."""
     recorded: list[dict[str, Any]] = []
 
     def _recording_digest(_session: Any, **kwargs: Any) -> str:
@@ -1177,6 +1167,60 @@ def test_layer_catalog_still_digests_every_source_not_one_identity(monkeypatch: 
         return "national-hydro-digest"
 
     monkeypatch.setattr(hydro_display, "national_discharge_source_version", _recording_digest)
+    return recorded
+
+
+def test_layer_catalog_digests_the_identity_it_advertises(monkeypatch: Any) -> None:
+    """`GET /api/v1/layers` must digest `(default_source, default_cycle)`, nothing wider.
+
+    The OPPOSITE of what this file pinned before #2009. Task 3.1 kept #2007's
+    catalog call argument-free *because the catalog change is this issue's*, and
+    named the hole verbatim: "一个非最新 `(source, cycle)` 身份的 re-run 不改变 digest,
+    `cache_key` 不变而 tile 已陈旧——该洞正是因为本 issue 让旧身份可寻址才被打开". This is
+    that issue, and the catalog now advertises `(default_source, default_cycle)`,
+    so the digest must observe exactly those runs.
+
+    Why the argument-free form is wrong here and not merely wider: it keeps one
+    `rn = 1` row per network across ALL sources and cycles, so in the normal
+    propagation state (some networks already on the next cycle) it observes no run
+    of the advertised identity at all, and an `ifs` newest cycle blinds it to `gfs`
+    entirely. A corrective re-run of the advertised identity would then leave
+    `metadata.version` / `cache_version` unchanged, so the frontend's cache token
+    and MapLibre source key would not move and the browser would keep the
+    superseded tiles. Over-inclusion (an `ifs` landing rotating the `gfs` entry)
+    goes away as a side effect.
+
+    `_default_layer_catalog` runs for real here -- stubbing it away is what let the
+    previous version of this test pass while asserting the wrong call shape.
+    `tests/test_api_contract.py` still passes `national_hydro_source_version` as a
+    literal and therefore never reaches the helper.
+    """
+
+    class _ValidTimes:
+        valid_times = ["2026-09-02T12:00:00Z", "2026-09-02T15:00:00Z"]
+        limit = 24
+        observed_count = 2
+        truncated = False
+
+    recorded = _recording_digest_calls(monkeypatch)
+    monkeypatch.setattr(
+        hydro_display,
+        "national_discharge_cycles",
+        lambda _session, **_kwargs: {
+            "source": "gfs",
+            "cycles": [
+                {
+                    "cycle_time": "2026-09-02T12:00:00Z",
+                    "valid_time_start": "2026-09-02T12:00:00Z",
+                    "valid_time_end": "2026-09-02T15:00:00Z",
+                }
+            ],
+            "default_cycle": "2026-09-02T12:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        hydro_display, "national_discharge_valid_times", lambda _session, **_kwargs: _ValidTimes()
+    )
     monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: {"run_id": "run_1"})
     monkeypatch.setattr(hydro_display, "_run_source_version", lambda _run: "run-source-v1")
     monkeypatch.setattr(
@@ -1184,7 +1228,7 @@ def test_layer_catalog_still_digests_every_source_not_one_identity(monkeypatch: 
     )
     monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
     monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
-    monkeypatch.setattr(hydro_display, "_default_layer_catalog", lambda *_a, **_k: [])
+    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
     # `display_catalog_cached` is a process-wide TTL cache; without this the
     # loader may never run and `recorded` would be empty for the wrong reason.
     monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
@@ -1198,7 +1242,137 @@ def test_layer_catalog_still_digests_every_source_not_one_identity(monkeypatch: 
         app.dependency_overrides.clear()
 
     assert response.status_code == 200, response.text
-    # Non-vacuity: the catalog path really did reach the digest helper once.
+    # Exactly one call: `list_layers` no longer digests separately, so a leftover
+    # argument-free call there would show up here as a second entry.
+    assert len(recorded) == 1, recorded
+    assert recorded[0] == {"source": "gfs", "cycle": datetime(2026, 9, 2, 12, tzinfo=UTC)}
+    # The digest is scoped to the identity the SAME response advertises.
+    assert _entry(response.json()["data"], "discharge")["metadata"]["default_cycle"] == (
+        "2026-09-02T12:00:00Z"
+    )
+
+
+@pytest.mark.parametrize(
+    ("advertised_default_cycle", "advertised_valid_times"),
+    [
+        pytest.param(None, [], id="intersection-already-empty-at-the-cycles-query"),
+        pytest.param(
+            "2026-09-02T12:00:00Z", [], id="intersection-empties-between-the-two-snapshots"
+        ),
+    ],
+)
+def test_layer_catalog_falls_back_to_the_argument_free_digest_when_no_cycle_is_advertised(
+    monkeypatch: Any, advertised_default_cycle: str | None, advertised_valid_times: list[str]
+) -> None:
+    """With nothing addressable advertised, the digest must take NO identity kwargs.
+
+    The other half of `test_layer_catalog_digests_the_identity_it_advertises`,
+    which only pins the happy identity and stays green if the null branch is
+    dropped. What makes the null branch worth its own pin is that dropping it
+    fails QUIETLY. `national_discharge_source_version`'s cycle predicate is a
+    null passthrough -- `CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time =
+    :cycle` (`services/tiles/mvt.py`) -- so calling it with
+    `source=NATIONAL_DISCHARGE_DEFAULT_SOURCE, cycle=None` raises nothing and
+    selects nothing empty; it silently degenerates to source-only narrowing and
+    returns a perfectly plausible digest of the latest `gfs` run per network.
+    That is the wrong question for an entry that advertises no identity at all:
+    the ranking it should reflect is every network's overall latest run, the one
+    the argument-free form answers. Scoped to `gfs`, the digest stops observing
+    the rest of the pipeline -- an `ifs` cycle landing, or changing which
+    networks are covered, no longer moves `metadata.version`, and the frontend
+    derives its cache token and MapLibre source key from exactly that string.
+    `default_cycle = null` advertises nothing, so the honest input is every
+    ranked run, i.e. the argument-free call.
+
+    The second parameter is the ordering pin (invariant-matrix decision 10):
+    `national_discharge_cycles` DOES hand back a cycle, and the emptiness only
+    shows up in `national_discharge_valid_times`, which is a real race -- the two
+    queries take separate `read committed` snapshots. `_default_layer_catalog`
+    forces `default_cycle`/`default_cycle_instant` back to `None` on an empty
+    timeline, and the digest must be computed AFTER that forcing. Hoisting the
+    digest above it -- a plausible "compute the identity once, up top" cleanup --
+    leaves this case digesting a cycle the response then refuses to advertise.
+    """
+
+    recorded = _recording_digest_calls(monkeypatch)
+    monkeypatch.setattr(
+        hydro_display,
+        "national_discharge_cycles",
+        lambda _session, **_kwargs: {
+            "source": "gfs",
+            "cycles": [],
+            "default_cycle": advertised_default_cycle,
+        },
+    )
+    monkeypatch.setattr(
+        hydro_display,
+        "national_discharge_valid_times",
+        lambda _session, **_kwargs: SimpleNamespace(
+            valid_times=advertised_valid_times,
+            limit=24,
+            observed_count=len(advertised_valid_times),
+            truncated=False,
+        ),
+    )
+    monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: {"run_id": "run_1"})
+    monkeypatch.setattr(hydro_display, "_run_source_version", lambda _run: "run-source-v1")
+    monkeypatch.setattr(
+        hydro_display, "_require_run_source_identity", lambda _run, layer_id: ("bv_a", "rnv_a")
+    )
+    monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
+    monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
+    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
+    # `display_catalog_cached` is a process-wide TTL cache; without this the
+    # loader may never run and `recorded` would be empty for the wrong reason.
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: object()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get("/api/v1/layers")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    assert len(recorded) == 1, recorded
+    assert recorded[0] == {}
+    # Non-vacuity: the digest is argument-free BECAUSE the entry ended up
+    # advertising nothing. `(C, [])` is the forbidden pair, so an empty timeline
+    # next to a non-null `default_cycle` would mean the forcing never ran and the
+    # argument-free digest above was reached for some other reason.
+    discharge = _entry(response.json()["data"], "discharge")
+    assert discharge["metadata"]["default_cycle"] is None
+    assert discharge["metadata"]["valid_times"] == []
+
+
+
+def test_legacy_national_tile_route_digest_stays_argument_free(monkeypatch: Any) -> None:
+    """The 5-segment alias advertises no identity, so its digest must not narrow.
+
+    Companion to `test_layer_catalog_digests_the_identity_it_advertises`: the
+    catalog moved, this call site did not. Narrowing it would change the alias's
+    `source_version` and therefore its cache key, for a route whose whole contract
+    is "unchanged run selection, unchanged bytes".
+    """
+    recorded = _recording_digest_calls(monkeypatch)
+    monkeypatch.setattr(
+        hydro_display,
+        "_cached_or_generated_mvt_response",
+        lambda *_a, **_k: hydro_display.Response(
+            content=b"pbf", media_type=hydro_display.MVT_MEDIA_TYPE
+        ),
+    )
+
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: object()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(_legacy_national_url())
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
     assert len(recorded) == 1, recorded
     assert recorded[0] == {}
 
@@ -1372,9 +1546,24 @@ def test_national_cycles_are_sorted_newest_first_and_default_to_the_newest() -> 
     assert result["default_cycle"] == result["cycles"][0]["cycle_time"]
 
 
-def test_national_cycle_lookback_is_the_raw_retention_default() -> None:
-    """14 days, the literal the spec names and `node27_raw_retention` defaults to."""
-    assert _REAL_CYCLE_LOOKBACK_DAYS == 14
+def test_national_cycle_lookback_leaves_a_day_of_precip_mirror_margin() -> None:
+    """`canonical-precip-copyback`: `oldest_listed_cycle - 24h >= display_watermark - retention_days`.
+
+    With lookback `L` and the raw-retention run's `retention_days` `R` that sentence
+    reduces to `L <= R - 1` -- an INEQUALITY, which is why this asserts one instead
+    of matching the retention default. The same run prunes the canonical
+    precipitation mirror and the precipitation PNG cache on that cutoff, so `R` is
+    the right constant to pin against even though the discharge tiles' own
+    timeseries lane is wider.
+
+    Raising `NODE27_RAW_RETENTION_DAYS` keeps this green (the copyback spec's own
+    remedy); lowering it below 13 goes red, which is the intended alarm. The
+    literal is pinned alongside, but the inequality is the load-bearing half --
+    round 1 asserted `== 14` under a name claiming a coupling it never checked,
+    and that is how a value violating the requirement passed a green test.
+    """
+    assert _REAL_CYCLE_LOOKBACK_DAYS <= DEFAULT_RETENTION_DAYS - 1
+    assert _REAL_CYCLE_LOOKBACK_DAYS == 12
 
 
 def test_national_cycles_list_only_cycles_inside_the_lookback_window(monkeypatch: Any) -> None:
@@ -1395,6 +1584,28 @@ def test_national_cycles_list_only_cycles_inside_the_lookback_window(monkeypatch
     # place. This pins the statement half of the same claim.
     coverage_sql = next(sql for sql, _ in session.executions if "hydro.run_display_coverage" in sql)
     assert "AND (CAST(:since AS timestamptz) IS NULL OR h.cycle_time >= :since)" in coverage_sql
+
+
+def test_national_cycles_lookback_reads_the_module_constant(monkeypatch: Any) -> None:
+    """The call site must consult `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS`, not a literal.
+
+    The other lookback cases put the REAL value back and use 20/30-day-old cycles,
+    which are stale under any plausible literal too -- so hardcoding `days=12` at
+    the `since=` call site left the whole suite green (measured `360 pass / 0 fail`
+    at review round 2). This case moves the constant to 3, past the module's
+    autouse widening, and puts one cycle at 1 day and one at 5: both are inside any
+    literal the window could be hardcoded to, so only a call site that really reads
+    the constant drops the 5-day one.
+    """
+    monkeypatch.setattr(mvt_module, "NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS", 3)
+    inside = _cycle_days_ago(1)
+    outside = _cycle_days_ago(5)
+    session = _NationalDiscoverySession(_full_coverage_rows(inside) + _full_coverage_rows(outside))
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    assert [entry["cycle_time"] for entry in result["cycles"]] == [canonical_mvt_time(inside)]
+    assert result["default_cycle"] == canonical_mvt_time(inside)
 
 
 def test_national_cycles_are_empty_when_every_covered_cycle_predates_the_lookback(
@@ -1444,6 +1655,30 @@ def test_no_argument_national_valid_times_keep_a_network_whose_newest_run_predat
     assert discovery.valid_times[-1] == canonical_mvt_time(common_end)
     assert discovery.observed_count == 73
     assert discovery.truncated is False
+
+
+def test_national_cycles_fail_closed_when_a_network_activates_between_the_two_statements() -> None:
+    """Equal cardinality, different membership -- the minimal fail-OPEN race.
+
+    The denominator query and the coverage query are two statements with their own
+    READ COMMITTED snapshots. Statement 1 sees the active set `{rn-b, rn-c1, rn-c2}`;
+    `rn-a` is then activated and already holds a display-ready run for the cycle,
+    so statement 2 (which re-evaluates `active_flag`) returns `{rn-a, rn-c1, rn-c2}`
+    while `rn-b` never had that cycle at all. `3 == 3`, so a cardinality comparison
+    lists a cycle the active network `rn-b` cannot render. The set comparison
+    refuses it.
+    """
+    session = _NationalDiscoverySession(
+        _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-c1", "rn-c2")),
+        active_networks=["rn-b", "rn-c1", "rn-c2"],
+    )
+
+    result = national_discharge_cycles(session, source="gfs")
+
+    # Non-vacuity: the two statements really do disagree at equal size.
+    assert len(session.active_networks) == 3
+    assert result["cycles"] == []
+    assert result["default_cycle"] is None
 
 
 def test_national_cycles_fail_closed_when_one_active_network_has_no_run_for_the_source() -> None:

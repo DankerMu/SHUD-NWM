@@ -247,6 +247,14 @@ CREATE TABLE core.model_instance (
 > - **展示 source-version 摘要**：`services/tiles/mvt.py:1426`
 >   （`national_river_network_source_version`，方言相关谓词）、`:1590`
 >   （`national_discharge_valid_times`，函数头 `:1544`）；
+> - **全国 discharge 交集分母**（#2009）：`services/tiles/mvt.py:2000`
+>   （`_national_discharge_coverage_rows` 的 `SELECT DISTINCT
+>   mi.river_network_version_id … WHERE mi.active_flag`）。爆炸半径在展示面里最大：
+>   这条 query 是 `/api/v1/layers/discharge/cycles`、per-cycle valid-times 与
+>   `/api/v1/layers` catalog 三者共用的**交集分母**，一个 flag 翻转就会改变分母集合，
+>   而交集是 fail-closed 的——某个 network 被激活却没有对应 cycle 的 display-ready run
+>   时，整张全国 discharge 图层直接失效（`apps/api/routes/hydro_display.py` 的
+>   `default_cycle = null` + `valid_times = []`），不是只少一个流域；
 > - **前端**：`activeModelCount`（`apps/frontend/src/lib/m11/overviewDataContracts.ts:408`、`:617`）、
 >   ops 侧 model-asset 过滤器（`apps/frontend/src/stores/modelAssets.ts:637`）、
 >   model-assets 页的 supersede 候选筛选与启用/停用徽章

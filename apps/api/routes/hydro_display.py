@@ -277,14 +277,16 @@ def list_layers(
         basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="layers")
         source_version = _run_source_version(run)
         river_network_source_version = _river_network_source_version(session, basin_version_id)
-        national_hydro_source_version = national_discharge_source_version(session)
         national_river_source_version = national_river_network_source_version(session)
+        # No `national_discharge_source_version` call here: the discharge entry's
+        # digest is scoped to the `(default_source, default_cycle)` identity the
+        # entry advertises, which only `_default_layer_catalog` knows. Same single
+        # digest query, two more binds -- not an extra round trip.
         layers = _default_layer_catalog(
             session,
             run_id=resolved_run_id,
             source_version=source_version,
             river_network_source_version=river_network_source_version,
-            national_hydro_source_version=national_hydro_source_version,
             national_river_source_version=national_river_source_version,
             basin_version_id=basin_version_id,
             river_network_version_id=river_network_version_id,
@@ -306,9 +308,15 @@ def list_discharge_cycles(
 ) -> dict[str, Any]:
     """Cycles of `source` that EVERY active river network can render, newest first.
 
-    Fail-closed: one active network without a display-ready run for `source`
-    empties the list and `default_cycle`. `source` is rejected by FastAPI itself
-    before this body runs, so a bad or missing one costs no SQL.
+    Only cycles inside a 12-day lookback window are considered, so neither this
+    list nor the query behind it grows with the pipeline's lifetime; a cycle older
+    than the window is not listed even when every network covers it.
+
+    Fail-closed: one active network without a display-ready run for `source` --
+    or a pipeline stalled for longer than the window -- yields `cycles: []` and
+    `default_cycle: null`, and the national discharge layer renders disabled.
+    `source` is rejected by FastAPI itself before this body runs, so a bad or
+    missing one costs no SQL.
     """
 
     def _load() -> dict[str, Any]:
@@ -1118,8 +1126,12 @@ def _default_layer_catalog(
     basin_version_id: str,
     river_network_version_id: str,
     river_network_source_version: str,
-    national_hydro_source_version: str,
     national_river_source_version: str,
+    # Left `None` by `/api/v1/layers`, which cannot compute it: the discharge
+    # entry's digest is scoped to the identity resolved BELOW. Callers that already
+    # hold a digest (tests exercising this helper directly) pass it and the
+    # identity-scoped query is skipped entirely.
+    national_hydro_source_version: str | None = None,
     national: bool = False,
 ) -> list[Layer]:
     layers = []
@@ -1134,26 +1146,50 @@ def _default_layer_catalog(
             default_cycle = national_discharge_cycles(session, source=NATIONAL_DISCHARGE_DEFAULT_SOURCE)[
                 "default_cycle"
             ]
+            # `canonical_mvt_time` spelling only: seconds precision with a literal
+            # `Z`, which `fromisoformat` reads back exactly. Parsed once and reused
+            # by the valid-times call and the digest below.
+            default_cycle_instant = None if default_cycle is None else datetime.fromisoformat(default_cycle)
             valid_time_sample = (
                 _empty_valid_times()
-                if default_cycle is None
+                if default_cycle_instant is None
                 else national_discharge_valid_times(
                     session,
                     source=NATIONAL_DISCHARGE_DEFAULT_SOURCE,
-                    # `canonical_mvt_time` spelling only: seconds precision with a
-                    # literal `Z`, which `fromisoformat` reads back exactly.
-                    cycle=datetime.fromisoformat(default_cycle),
+                    cycle=default_cycle_instant,
                 )
             )
             # The two calls above take separate `read committed` snapshots, so the
             # intersection can empty out between them -- newly ACTIVATING a network
             # with no display-ready run for `default_cycle`, or a covered run's
             # status / coverage row being rewritten. (Deactivation cannot do it: it
-            # decrements both sides of the count.) The contract spells the empty
-            # intersection `default_cycle = null` AND `valid_times = []` together;
+            # removes the network from both sides of the set comparison.) The
+            # contract spells the empty intersection
+            # `default_cycle = null` AND `valid_times = []` together;
             # `(C, [])` advertises a cycle whose timeline is empty and is forbidden.
             if not valid_time_sample.valid_times:
                 default_cycle = None
+                default_cycle_instant = None
+            if national_hydro_source_version is None:
+                # Digest the identity this entry ADVERTISES. The argument-free form
+                # keeps one row per network across ALL sources and cycles, so in the
+                # normal propagation state (some networks already on the next cycle,
+                # or an `ifs` cycle newest) it observes no run of
+                # `(default_source, default_cycle)` at all: a corrective re-run of the
+                # advertised identity would leave `metadata.version` -- and therefore
+                # the frontend's cache token and MapLibre source key -- unchanged, and
+                # browsers would keep the superseded tiles. With `default_cycle` null
+                # the entry advertises nothing addressable, so the argument-free digest
+                # is the honest input.
+                national_hydro_source_version = (
+                    national_discharge_source_version(session)
+                    if default_cycle_instant is None
+                    else national_discharge_source_version(
+                        session,
+                        source=NATIONAL_DISCHARGE_DEFAULT_SOURCE,
+                        cycle=default_cycle_instant,
+                    )
+                )
         else:
             valid_time_sample = _empty_valid_times()
         layers.append(

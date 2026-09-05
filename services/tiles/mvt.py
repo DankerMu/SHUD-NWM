@@ -65,7 +65,7 @@ NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
 # The national run selection is bound to the requested `(source, cycle)`
 # identity (issue #2007). `postgis_tile_sql(layer)` keeps its single-argument
 # signature: both values travel as named binds, exactly like `:z`. The SAME
-# predicate pair is spelled at THREE run-selection sites, and they must stay
+# predicate pair is spelled at FOUR run-selection sites, and they must stay
 # identical or the layer starts disagreeing with itself:
 #
 #     AND (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)
@@ -77,6 +77,14 @@ NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
 #     another source's run answer "identity present" and serve an empty 200),
 #   * `national_discharge_source_version`'s ranked sub-query, which digests the
 #     runs the cache key is derived from.
+#
+# Those three are the TILE-side sites. The fourth is off the tile path:
+#
+#   * `_national_discharge_coverage_rows`'s inner run-selection query (issue
+#     #2009), which the catalog, `/layers/discharge/cycles` and
+#     `/layers/{id}/valid-times` all discover through. It must agree with the
+#     three above or the API advertises a `(source, cycle)` the tile route then
+#     refuses -- and vice versa.
 #
 # The NULL guard is what keeps the legacy source-less route byte-identical: it
 # binds both names as NULL, every candidate run stays eligible, and its selected
@@ -90,6 +98,7 @@ NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
 # is invisible to fake-session tests and only fails against a real driver.
 # `lower(h.source_id)`: production stores `gfs` lower-case and `IFS` upper-case,
 # so the lower-case path segment must match case-insensitively.
+
 # The national discharge identity the `/api/v1/layers` catalog advertises when
 # the caller expresses no preference, and the stride of every per-cycle
 # valid-time list. Three hours is the display cadence the national timeline is
@@ -98,14 +107,23 @@ NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
 NATIONAL_DISCHARGE_DEFAULT_SOURCE = "gfs"
 NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS = 3
 # Bounds the CYCLE dimension of `national_discharge_cycles` so neither the
-# coverage scan nor `cycles[]` grows with the pipeline's lifetime. 14 days is the
-# raw-retention default -- `scripts/node27_raw_retention.py`'s
-# `DEFAULT_RETENTION_DAYS`, which is also the shipped default of
-# `NODE27_RAW_RETENTION_DAYS` and `NHMS_RETENTION_DAYS` -- so the window matches
-# the horizon beyond which the inputs behind a cycle are expected to be gone.
+# coverage scan nor `cycles[]` grows with the pipeline's lifetime. The value is
+# pinned to raw retention by an INEQUALITY, not by equality:
+# `canonical-precip-copyback` requires
+# `oldest_listed_cycle - 24h >= display_watermark - retention_days`, which with
+# this lookback `L` and that run's `retention_days` `R` reduces to `L <= R - 1`.
+# `R` is `scripts/node27_raw_retention.py`'s `DEFAULT_RETENTION_DAYS` (14, the
+# shipped default of `NODE27_RAW_RETENTION_DAYS`), and that run prunes, on the
+# SAME cutoff, the canonical precipitation mirror and the precipitation PNG
+# cache -- the lane the precipitation overlay actually renders from, which is
+# why the copyback spec phrases the requirement against it. 12 therefore leaves
+# a full day of margin under any anchor and independent of pipeline lag; 14
+# would break the requirement in steady state and hold only while the pipeline
+# runs a day behind. If an operator ever sets retention below 13 the remedy the
+# copyback spec names is to raise retention, never to lower this lookback.
 # A literal on purpose: the display read path reads no environment today, and
 # giving it one is a different change with its own deployment surface.
-NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS = 14
+NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS = 12
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
@@ -1792,15 +1810,17 @@ def national_discharge_valid_times(
     # one cycle by `:cycle`, and the no-argument branch must keep including a network
     # whose newest display-ready run is older than the window -- dropping it would
     # shrink the intersection and change a result master publishes today.
-    rows, active_network_total = _national_discharge_coverage_rows(
+    rows, active_networks = _national_discharge_coverage_rows(
         session, source=source, cycle=cycle, since=None
     )
 
     if cycle is not None:
         # Intersection-scoped, like `national_discharge_cycles`: a cycle the
         # catalog refuses to list must not get times from this endpoint either.
-        covered_networks = len({row.get("river_network_version_id") for row in rows})
-        if covered_networks != active_network_total:
+        # SETS, not cardinalities -- see `national_discharge_cycles` for the
+        # activation race equal counts cannot see.
+        covered_networks = frozenset(row["river_network_version_id"] for row in rows)
+        if covered_networks != active_networks:
             return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
         return _national_cycle_valid_times(rows, cycle=cycle, limit=sample_limit)
 
@@ -1848,12 +1868,22 @@ def national_discharge_cycles(
 ) -> dict[str, Any]:
     """Cycles of ``source`` that EVERY active river network can render, newest first.
 
-    Intersection, fail-closed: a cycle is listed only when the number of active
-    networks holding a display-ready run for it equals the number of active
-    networks that exist. One network without a run for the source at all
-    therefore empties the whole list -- the alternative, a union, would paint a
-    national map with colourless basins that look like "no flow" rather than
-    "no data".
+    Intersection, fail-closed: a cycle is listed only when the SET of active
+    networks holding a display-ready run for it equals the set of active networks
+    that exist. One network without a run for the source at all therefore empties
+    the whole list -- the alternative, a union, would paint a national map with
+    colourless basins that look like "no flow" rather than "no data".
+
+    Sets, not cardinalities, because the denominator and the coverage rows come
+    from two statements with their own READ COMMITTED snapshots. Activating a
+    network between them is enough to make equal counts lie: statement 1 sees
+    ``{B, C1, C2}``, ``A`` is activated with a run for cycle K, statement 2
+    returns ``{A, C1, C2}`` for K, and ``3 == 3`` would list a cycle the active
+    network ``B`` cannot render. Without a race the two forms agree (same
+    predicates, one snapshot, so covered is a subset of active). A network
+    activated with ZERO display-ready rows never appears in statement 2 at all
+    and no comparison of statement-2 output can catch it -- that branch needs a
+    single-statement merge or a higher isolation level and is deferred.
 
     ``valid_time_start`` / ``valid_time_end`` are the FIRST and LAST entries of
     that cycle's clamped 3-hour list, produced by the same function
@@ -1868,12 +1898,13 @@ def national_discharge_cycles(
     Only cycles newer than ``now() - NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS`` are
     considered, which is what stops both the scan and the list from growing with
     the pipeline's lifetime. The bound anchors on ``now()``, not on the retention
-    watermark, so an ingest stall longer than the window empties the list and the
-    layer renders disabled -- the same fail-closed state as an empty intersection,
-    and preferred over advertising a cycle whose raw inputs retention has removed.
+    watermark, so a stall longer than the window empties the list and the layer
+    renders disabled -- the same fail-closed state as an empty intersection, and
+    preferred over advertising a cycle whose companion precipitation mirror and
+    PNG cache the raw-retention run has already pruned.
     """
     sample_limit = max(0, limit)
-    rows, active_network_total = _national_discharge_coverage_rows(
+    rows, active_networks = _national_discharge_coverage_rows(
         session,
         source=source,
         since=datetime.now(UTC) - timedelta(days=NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS),
@@ -1882,19 +1913,25 @@ def national_discharge_cycles(
     for row in rows:
         cycle_time = _coverage_datetime(row.get("cycle_time"))
         if cycle_time is None:
-            # Deliberately the OPPOSITE of `_national_run_rank`, which ranks a NULL
-            # `cycle_time` FIRST to reproduce the tile CTEs' `ORDER BY ... DESC`
-            # (NULLS FIRST). A NULL cycle has no identity to advertise: it cannot be
-            # spelled in `cycles[].cycle_time` nor bound into a tile URL's `{cycle}`,
-            # so listing it would publish a selector no route can honour.
+            # UNREACHABLE on the bound path, and kept anyway. `NULL >= :since` is
+            # NULL, so the SQL above already drops every NULL-cycle row and this
+            # guard is not the live NULL-skip oracle it may look like. What it
+            # buys is failure MODE: `sorted()` over a dict keyed by
+            # `datetime | None` raises `TypeError`, so deleting it would turn any
+            # future `since=None` relaxation of this call from a fail-closed drop
+            # into an HTTP 500 on `/cycles`. (The drop is also the right answer on
+            # its own terms -- a NULL cycle cannot be spelled in
+            # `cycles[].cycle_time` nor bound into a tile URL's `{cycle}` -- and is
+            # deliberately the OPPOSITE of `_national_run_rank`, which ranks NULL
+            # FIRST to reproduce the tile CTEs' `ORDER BY ... DESC` NULLS FIRST.)
             continue
         rows_by_cycle.setdefault(cycle_time, []).append(row)
 
     cycles: list[dict[str, str]] = []
     for cycle_time in sorted(rows_by_cycle, reverse=True):
         cycle_rows = rows_by_cycle[cycle_time]
-        covered_networks = len({row.get("river_network_version_id") for row in cycle_rows})
-        if covered_networks != active_network_total:
+        covered_networks = frozenset(row["river_network_version_id"] for row in cycle_rows)
+        if covered_networks != active_networks:
             continue
         discovery = _national_cycle_valid_times(cycle_rows, cycle=cycle_time, limit=sample_limit)
         if not discovery.valid_times:
@@ -1919,8 +1956,8 @@ def _national_discharge_coverage_rows(
     source: str | None = None,
     cycle: datetime | None = None,
     since: datetime | None = None,
-) -> tuple[list[Mapping[str, Any]], int]:
-    """Display-ready national coverage rows, plus the number of active networks.
+) -> tuple[list[Mapping[str, Any]], frozenset[str]]:
+    """Display-ready national coverage rows, plus the SET of active networks.
 
     The single owner of the national discovery path's display-ready status
     predicate: ``national_discharge_valid_times`` and ``national_discharge_cycles``
@@ -1932,11 +1969,14 @@ def _national_discharge_coverage_rows(
     needs every cycle of every network, and the no-argument valid-times branch
     picks the newest cycle per network from the same rows in Python.
 
-    The active-network count comes from ``core.model_instance``, NOT from the
+    The active-network set comes from ``core.model_instance``, NOT from the
     returned rows. A network with zero display-ready runs contributes no row and
-    is precisely the case that must fail the intersection closed; counting the
-    rows would make it invisible and turn the intersection into a union over
-    whoever happens to have data.
+    is precisely the case that must fail the intersection closed; deriving the set
+    from the rows would make it invisible and turn the intersection into a union
+    over whoever happens to have data. Callers compare it to the covered networks
+    as a SET: the two statements take separate READ COMMITTED snapshots, and a
+    network activated between them can keep the cardinalities equal while the
+    membership differs (see ``national_discharge_cycles``).
 
     ``source`` / ``cycle`` / ``since`` are NULL-guarded in the
     ``CAST(:x AS type) IS NULL OR`` form the three tile-side run-selection sites
@@ -1966,7 +2006,7 @@ def _national_discharge_coverage_rows(
         .mappings()
         .all()
     )
-    active_network_total = len({row["river_network_version_id"] for row in active_networks})
+    active_network_ids = frozenset(row["river_network_version_id"] for row in active_networks)
     rows = (
         session.execute(
             text(
@@ -2011,7 +2051,7 @@ def _national_discharge_coverage_rows(
         .mappings()
         .all()
     )
-    return list(rows), active_network_total
+    return list(rows), active_network_ids
 
 
 def _national_run_rank(row: Mapping[str, Any]) -> tuple[datetime, str]:

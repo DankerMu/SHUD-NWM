@@ -579,9 +579,15 @@ export interface paths {
          * List Discharge Cycles
          * @description Cycles of `source` that EVERY active river network can render, newest first.
          *
-         *     Fail-closed: one active network without a display-ready run for `source`
-         *     empties the list and `default_cycle`. `source` is rejected by FastAPI itself
-         *     before this body runs, so a bad or missing one costs no SQL.
+         *     Only cycles inside a 12-day lookback window are considered, so neither this
+         *     list nor the query behind it grows with the pipeline's lifetime; a cycle older
+         *     than the window is not listed even when every network covers it.
+         *
+         *     Fail-closed: one active network without a display-ready run for `source` --
+         *     or a pipeline stalled for longer than the window -- yields `cycles: []` and
+         *     `default_cycle: null`, and the national discharge layer renders disabled.
+         *     `source` is rejected by FastAPI itself before this body runs, so a bad or
+         *     missing one costs no SQL.
          */
         get: operations["list_discharge_cycles_api_v1_layers_discharge_cycles_get"];
         put?: never;
@@ -1426,7 +1432,7 @@ export interface components {
         DischargeCycles: {
             /** @enum {string} */
             source: "gfs" | "ifs";
-            /** @description Cycles every active river network has a display-ready run for, newest first. valid_time_start/valid_time_end are the first and last entries of that cycle's 3-hour valid-time list, the same values GET /api/v1/layers/discharge/valid-times returns for it. */
+            /** @description Cycles every active river network has a display-ready run for, newest first, restricted to a 12-day lookback window: a cycle older than the window is not listed even when fully covered, so a pipeline stalled for longer than that yields an empty list. valid_time_start/valid_time_end are the first and last entries of that cycle's 3-hour valid-time list, the same values GET /api/v1/layers/discharge/valid-times returns for it. */
             cycles: {
                 /** Format: date-time */
                 cycle_time: string;
@@ -1437,7 +1443,7 @@ export interface components {
             }[];
             /**
              * Format: date-time
-             * @description Newest intersected cycle; null when no cycle covers every network.
+             * @description Newest intersected cycle; null when no cycle inside the 12-day lookback window covers every active network, including when the whole pipeline is stale.
              */
             default_cycle: string | null;
         };

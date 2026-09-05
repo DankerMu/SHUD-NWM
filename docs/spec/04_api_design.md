@@ -46,6 +46,7 @@ GET /api/v1/models?basin_version_id=&active=true
 GET /api/v1/data-sources
 GET /api/v1/data-sources/{source_id}/cycles?from=&to=&status=
 GET /api/v1/layers
+GET /api/v1/layers/discharge/cycles?source=gfs|ifs
 GET /api/v1/layers/{layer_id}/valid-times
 GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}
 GET /api/v1/basin-versions/{basin_version_id}/river-segments/{segment_id}/forecast-series?issue_time=latest&variables=q_down,stage&scenarios=GFS,IFS
@@ -92,7 +93,8 @@ GET /api/v1/pipeline/status?source=&cycle_time=
 
 ```http
 GET /api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf
-GET /api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # canonical discharge layer URL (per PR #602)
+GET /api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # canonical discharge layer URL (#2007/#2009); the template /api/v1/layers advertises
+GET /api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # legacy source-less alias of the above (was canonical per PR #602); same bytes, run selection unbound; runtime-only, not in the public static OpenAPI; still issued by scripts/node27_mvt_prewarm.py:69
 GET /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # direct-deeplink only; not surfaced via /api/v1/layers discharge entry — see openspec/specs/mvt-tile-contract/spec.md
 GET /api/v1/tiles/flood-return-period?run_id=&duration=1h&valid_time=&bbox=&return_period=
 GET /api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf
