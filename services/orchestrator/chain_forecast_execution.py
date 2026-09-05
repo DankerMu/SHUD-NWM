@@ -1000,9 +1000,15 @@ def _mirror_canonical_precip(self, context: CycleOrchestrationContext) -> None:
     forecast terminal stage: ``convert`` is what writes the products, so
     "products exist" and "this hook ran" coincide within a pass that runs it.
 
-    That terminal entry includes ``convert``'s failure tail: ``timeout``,
-    ``cancelled`` and ``reservation_lost`` are all minted without cancelling the
-    Slurm job, so the source tree may still be mid-write when the copy runs. A
+    That terminal entry includes ``convert``'s failure tail, and one arm of it
+    can still have a live writer. ``record_cycle_stage_poll_timeout`` gives up on
+    the poll and records ``failed`` with ``error_code == "SLURM_JOB_TIMEOUT"``
+    without cancelling anything -- the orchestrator issues no ``scancel`` of its
+    own on any failure-tail path -- so the gateway may still report the job
+    running while this hook copies the tree it is writing. (``cancelled`` is
+    observed from the gateway, i.e. Slurm already stopped the job, and
+    ``reservation_lost`` is minted only on a *confirmed* accounting absence, so
+    those two leave a stalled or empty tree rather than a mid-write one.) A
     ``status: "ok"`` receipt therefore means the destination matched the source
     AT COPY TIME -- not that ``convert`` succeeded, and not that the lead set is
     complete: ``status`` reads ``ok`` either way, and only ``file_count``

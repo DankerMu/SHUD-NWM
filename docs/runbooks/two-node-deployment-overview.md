@@ -346,7 +346,7 @@ jq -c 'select(.record_type == "pipeline_event"
 ```
 
 判读：`status` 为 `ok` **只表示拷贝当刻目的地与源一致**，不表示该周期产物完整——门挂在 `convert`
-上，而 `timeout`/`cancelled`/`reservation_lost` 是 orchestrator 单方面铸造的终态、**不会 scancel**，
+上，而 而 orchestrator 在任何失败尾都**不会 scancel**（唯一 `cancel_job` 调用点是运维入口）；最尖锐的一臂是轮询超时——它不是独立状态，而是带 `error_code == "SLURM_JOB_TIMEOUT"` 的 `failed`，此时 gateway 仍报作业 running，
 此时 sbatch 可能仍在写，镜像会忠实地拷走半棵树并记 `ok`。所以同一条回执若对应的 stage 结果不是
 `succeeded`，必须再把 `trees[].file_count` 与该源该周期的预期 lead 数比对，比对不上就当作**不完整周期**
 （后续全链重规划会经 `resume_cycle_stage` 再入 hook 整树替换）。`skipped` **必须再看 `reason`**——两种 `skipped` 语义相反：

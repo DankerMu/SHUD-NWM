@@ -3481,6 +3481,12 @@ def test_canonical_precip_mirror_identity_comes_from_the_context_not_the_cycle_i
         # arm needs an `ArrayAggregation`, which `chain_stage_execution` builds
         # only for `stage.is_array`, and `convert` is not an array stage. The
         # "no `succeeded` gate" invariant is carried by the failure tail below.
+        # `timeout` and `submission_failed` below are kept as deliberate over-
+        # coverage rather than as reachable terminals: `timeout` is an event type
+        # and never a member of `TERMINAL_JOB_STATUSES` (a poll timeout arrives
+        # as `failed` + `SLURM_JOB_TIMEOUT`), and `submission_failed` returns
+        # before the hook call site. They cost nothing and pin that the gate
+        # never grows a status allow-list.
         "failed",
         "cancelled",
         "timeout",

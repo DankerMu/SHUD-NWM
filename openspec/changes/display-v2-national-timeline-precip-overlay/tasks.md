@@ -138,7 +138,7 @@ Boundary-surface checklist（4.1–4.3）:
 
 - [x] 4.12 `services/orchestrator/chain_forecast_execution.py:985-986` `_stage_should_mirror_canonical_precip`：门由 `stage.stage == "state_save_qc" and self.config.terminal_stage == "forecast_state_save_qc"` 改为 `stage.stage == "convert"`。**`terminal_stage` 检查删除**（fixture review 裁定项，理由见下）。hook 位置（`reconcile_unverified` 早退之后、状态分发之前）与 fail-open 吞异常语义**不动**（排序/墙钟归 #2070）。
 - [x] 4.13 回执 message `"Canonical precipitation mirror ran after state_save_qc."` -> `"Canonical precipitation mirror ran after convert."`；`_mirror_canonical_precip` docstring 里指向 state_save_qc 终态的表述同步为 convert（"sibling `_copyback_stage_run_trees` at this same seam" 仍成立——两者仍在同一个 hook，只是门的 stage 不同了）。
-- [x] 4.14 **不得**误改的同形谓词：`_stage_should_copyback_run_trees`（`chain_forecast_execution.py:931-934`——它多一条 `if stage.stage == "parse": return True` 前置分支，但 **return 行与旧镜像门逐字节相同**，是最可能被 sed 误伤的一处）与 `_copyback_extra_object_keys`（`:1044`，`stage != "state_save_qc"` 早退）**保持原样**。
+- [x] 4.14 **不得**误改的同形谓词：`_stage_should_copyback_run_trees`（`chain_forecast_execution.py:931-934`——它多一条 `if stage.stage == "parse": return True` 前置分支，但 **return 行与旧镜像门逐字节相同**，是最可能被 sed 误伤的一处）与 `_copyback_extra_object_keys`（master `:1048-1049`，`stage != "state_save_qc"` 早退）**保持原样**。
 - [x] 4.15 测试 `tests/test_orchestration_chain.py`：
   - (a) stage 门单测：`_stage_should_mirror_canonical_precip` 对 `convert` 为 True，对其余**五个** `M3_STAGES`（`forcing`/`forecast`/`parse`/`state_save_qc`/`publish`）为 False；并钉住 `terminal_stage=None` 的 orchestrator 下 `convert` 仍为 True（证明谓词不再读 `terminal_stage`）。
   - (b) 可达性集成测试（**关闭「10 个 hook 测试全是直接调用」盲区**）：`orchestrator._submit_and_wait_cycle_stage(M3_STAGES[0], context)` 驱动 convert 终态（模板见 `tests/test_orchestration_chain.py:13372` 的同名驱动），断言 journal/repository 出现 `canonical_precip_mirror` 事件且 `status_to == "ok"`、镜像目录落盘。源树用 `_seed_canonical_precip_tree` 预置（fake client 不真跑 convert，seed 代替其产物——docstring 写明）。
@@ -153,7 +153,7 @@ Boundary-surface checklist（4.1–4.3）:
 
 `terminal_stage` 检查去留 —— 裁定：**删除**（fixture review 复核项）：
 - 该谓词编码的是 run-tree copyback 的「链终态」语义，对 `convert` 产物无意义（降水由 `workers/canonical_converter/converter.py` 在 convert 阶段写出，与 hydro 终态是否提交无关）。
-- profile 围栏由别处保证，不靠这个谓词：`apps/api/runtime_mode.py:32` 把 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 列入 display profile **禁止** env，而 `_mirror_canonical_precip` 在该 env 未配时于 `:1003` 早退——node-27 既不跑 forecast chain，也拿不到 copyback root。
+- profile 围栏由别处保证，不靠这个谓词：`apps/api/runtime_mode.py:32` 把 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 列入 display profile **禁止** env，而 `_mirror_canonical_precip` 在该 env 未配时早退（master `:1006`）——node-27 既不跑 forecast chain，也拿不到 copyback root。
 - 线上是否设 `NHMS_ORCHESTRATOR_TERMINAL_STAGE` **无法从 tracked 源判定**：全仓提到它的只有 `infra/env/compute.example:185`（compose lane，`:5-12` 自述不得当作生产 scheduler 配置）与文档（`infra/env/README.md:193`、`docs/runbooks/current-production-ops.md:170`），**没有任何 tracked 的生产 scheduler env 设它**，`infra/env/compute.scheduler-dbfree.env.example` **不含该键**且 `README.md:174-177` 明禁 source `compute.example`；线上 `nhms-compute-scheduler.service` 只加载 untracked 的 `compute.scheduler-dbfree.env`。两种情况 DROP 都成立但含义不同：已设 -> DROP 无行为变化；未设 -> 现门从未在 node-22 生产触发过（与 4.11 live receipt 至今未勾选相符），DROP 是让镜像**第一次生效**。无论哪种，`terminal_stage` 都不是围栏。（dbfree 模板缺该键与 `infra/env/README.md:193` / `docs/runbooks/current-production-ops.md:170` 的「必须设」相矛盾，是既有问题，不由本单修，另行立单。）
 - 代价：#2034 的 Invariant Matrix 行「非终态部署 -> 不在该 seam 触发」失效，由下面的 delta 取代。
 
@@ -169,7 +169,7 @@ Boundary-surface checklist（4.1–4.3）:
 
 新增/改写行：
 - `convert` 终态 `succeeded` -> 镜像触发，回执记 `status == "ok"`；且必须由 `_submit_and_wait_cycle_stage` 真实驱动到 hook（不接受直接调用作为该行的证据）
-- `convert` 终态的失败尾（`failed`/`cancelled`/`timeout`/`reservation_lost`/`permanently_failed`）-> **仍**进 hook 即仍镜像，stage 结果不变；进入 hook 后唯一不触发的仍是 `reconcile_unverified`。失败尾**不是**「源产物不存在」——分两类：`failed`/`permanently_failed` 作业已结束，树可能残缺也可能不存在；`timeout`/`cancelled`/`reservation_lost` 由 orchestrator 单方面铸造而**不 scancel**（`record_cycle_stage_poll_timeout` 只写 `SLURM_JOB_TIMEOUT` 就 return），此时 sbatch **可能仍在写**，镜像会把半棵树拷走并记 `ok`（#2072 round 1 A1，已实测复现）。`ok` 只表示"拷贝当刻目的地与源一致"，不表示 convert 成功或 lead 集合完整
+- `convert` 终态的失败尾（`failed`/`cancelled`/`timeout`/`reservation_lost`/`permanently_failed`）-> **仍**进 hook 即仍镜像，stage 结果不变；进入 hook 后唯一不触发的仍是 `reconcile_unverified`。失败尾**不是**「源产物不存在」——分两类：`failed`/`permanently_failed` 作业已结束，树可能残缺也可能不存在；轮询超时（**不是独立状态**，而是带 `error_code == "SLURM_JOB_TIMEOUT"` 的 `failed`；`timeout` 只是 event_type，不在 `TERMINAL_JOB_STATUSES` 内）由 `record_cycle_stage_poll_timeout` 记完就 return 且从不 scancel，此时 gateway 仍报 running、sbatch **可能仍在写**；`cancelled` 是 gateway 观测（Slurm 已杀），`reservation_lost` 只在 accounting **确认无此作业**时铸造（即 sbatch 根本没生效、无产物），镜像会把半棵树拷走并记 `ok`（#2072 round 1 A1，已实测复现）。`ok` 只表示"拷贝当刻目的地与源一致"，不表示 convert 成功或 lead 集合完整
 - `convert` 的 `submit_result_ambiguous` -> **对本 stage 不可达**（`chain_stage_execution.py` 的 ambiguous 臂整个在 `is_forecast_cohort_stage(stage)` 守卫内，`convert` 不在 `_FORECAST_STAGE_ALIASES`；实跑 `is_forecast_cohort_stage` 对六个 M3 stage 只有 `forecast` 为 True）。此前把它记作"真残留"是过宽表述，已在 spec 中删除
 - `convert` 自身 `submission_failed`（sbatch 未被接受）-> 该 pass 不进 hook；**不是缺口**：没被接受的提交不会写出产物
 - `state_save_qc`（及 `forcing`/`forecast`/`parse`/`publish`）终态 -> **不**触发镜像（门只认 convert）；`_stage_should_copyback_run_trees` 的 state_save_qc 行为不变
