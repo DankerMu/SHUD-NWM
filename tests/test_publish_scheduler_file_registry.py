@@ -22,6 +22,7 @@ from services.orchestrator.scheduler_file_providers import (
     publish_canonical_readiness_index,
     publish_scheduler_registry_manifest,
 )
+from tests.basins_registry_import_helpers import _make_valid_model, _write_registry_fixture
 from tests.provider_mode_helpers import make_directory_with_explicit_mode, write_provider_destination
 from workers.canonical_converter.converter import required_standard_variables_for_source
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin, repair_performed
@@ -585,7 +586,6 @@ def test_real_registry_refresh_keeps_packages_private_and_canonical_manifest_sha
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tests.test_basins_registry_import import _write_registry_fixture
 
     basins_root, _input_dir, _inventory_path, _manifest_path, model_id = (
         _write_registry_fixture(tmp_path / "fixture")
@@ -889,7 +889,6 @@ def _write_healthy_basin_pair(basins_root: Path) -> None:
     template matcher keys on, so alpha's ``*.tsd.rl`` is a valid template for
     bravo once bravo loses its own.
     """
-    from tests.test_basins_registry_import import _make_valid_model
 
     lai_header = "900\t18\t19810101\t20551201\t86400\n"
     for slug in ("alpha", "bravo"):
@@ -1371,7 +1370,6 @@ def test_declared_retirement_lets_the_refresh_publish_without_the_skipped_model(
 
 
 def test_repaired_package_is_reused_across_run_scoped_workspaces(tmp_path: Path) -> None:
-    from tests.test_basins_registry_import import _write_registry_fixture
 
     basins_root, input_dir, _inventory_path, _manifest_path, model_id = _write_registry_fixture(
         tmp_path / "fixture"
@@ -1436,7 +1434,6 @@ def _write_out_of_bounds_calibration_fixture(tmp_path: Path, *, parameter: str) 
     now copy them through untouched.
     """
 
-    from tests.test_basins_registry_import import _write_registry_fixture
 
     basins_root, input_dir, _inventory_path, _manifest_path, model_id = _write_registry_fixture(
         tmp_path / "fixture"
@@ -2474,7 +2471,6 @@ def _write_override_fixture(tmp_path: Path) -> Path:
 
 def _write_basin_with_source_calibration(basins_root: Path, slug: str) -> None:
     """One more publishable basin carrying ``_SOURCE_CALIB_TEXT``."""
-    from tests.test_basins_registry_import import _make_valid_model
 
     lai_header = "900\t18\t19810101\t20551201\t86400\n"
     input_dir = _make_valid_model(basins_root / slug, slug, sp_segment_count=2)
@@ -2892,7 +2888,6 @@ def test_refresh_lane_applies_the_same_declaration_as_the_manual_publisher(
     byte-level agreement: the two lanes must produce the same
     ``package_checksum`` for the same inputs.
     """
-    from tests.test_basins_registry_import import _write_registry_fixture
 
     basins_root, input_dir, _inventory_path, _manifest_path, model_id = _write_registry_fixture(
         tmp_path / "fixture"
