@@ -114,11 +114,17 @@ class _CanonicalPrecipSourceMissing(RuntimeError):
     Carried separately from every other mirror failure because the lineage
     contract reports an absent source as ``missing_path`` and everything else as
     ``error`` + ``error_type`` (canonical-precip-copyback spec, Requirement 1).
+
+    ``object_key`` is the same absent location as a relative object key. The
+    pipeline_event receipt outlet renders every ``*_path`` key as
+    ``[local-path]``, so ``missing_path`` alone cannot tell an absent
+    ``prcp_rate_or_amount`` tree from an absent ``canonical/<S>/grid/``.
     """
 
-    def __init__(self, missing_path: str) -> None:
+    def __init__(self, missing_path: str, object_key: str) -> None:
         super().__init__(f"Canonical precipitation source is missing: {missing_path}")
         self.missing_path = missing_path
+        self.object_key = object_key
 
 
 class TilePublisher:
@@ -1137,23 +1143,40 @@ class TilePublisher:
         }
         return summary
 
+    def copyback_canonical_precip(self, source: str, cycle: str) -> dict[str, Any] | None:
+        """Mirror one cycle's canonical precipitation products and return the summary.
+
+        Public entry point for callers that own their own receipt outlet -- the
+        DB-free forecast terminal stage writes the returned mapping into a
+        ``canonical_precip_mirror`` pipeline_event. Touches no session or
+        engine, so it is callable without ``DATABASE_URL``.
+        """
+
+        return self._copyback_canonical_precip(source, cycle)
+
     def _copyback_canonical_precip(self, source: str, cycle: str) -> dict[str, Any] | None:
         """Mirror the canonical precipitation products for one cycle (#2008, D6).
 
-        ``source`` is the raw source id parsed out of the cycle id and ``cycle``
-        its ``%Y%m%d%H`` token; the mirror keyspace is
+        ``source`` is any spelling ``normalize_source_id`` accepts -- the q_down
+        publish path passes the token ``_cycle_filter`` splits out of the cycle
+        id, the DB-free forecast terminal-stage seam passes the already
+        normalized ``context.source_id`` -- and ``cycle`` is the cycle's
+        ``%Y%m%d%H`` token; the mirror keyspace is
         ``canonical/<storage_source>/<cycle>/prcp_rate_or_amount/`` plus every
         ``canonical/<storage_source>/grid/<grid_id>/`` directory discovered on the
         source root (design.md D3). ``<grid_id>`` is *listed*, never imported from
         ``workers.canonical_converter``.
 
-        This step MUST NOT fail, block or roll back the q_down publish for any
-        reason. Every failure -- absent source, unsafe entry name, symlink, tree
-        limit, mid-copy ``OSError``, ``SafeFilesystemError``, even a failed
-        rollback -- is swallowed and reported through the returned
-        ``precip_mirror`` lineage entry. The sibling ``_copyback_qdown_products``
-        converts these same exceptions into ``PublishError`` and raises; copying
-        that shape here would be a bug.
+        This step MUST NOT fail, block or roll back its caller -- the q_down
+        publish or the DB-free forecast terminal stage -- for any reason. Every
+        failure -- absent source, unsafe entry name, symlink, tree limit,
+        mid-copy ``OSError``, ``SafeFilesystemError``, even a failed rollback --
+        is swallowed and reported through the returned summary, which each
+        caller records under ``precip_mirror`` at its own outlet: publish
+        lineage, or the ``canonical_precip_mirror`` pipeline_event's
+        ``details``. The sibling ``_copyback_qdown_products`` converts these same
+        exceptions into ``PublishError`` and raises; copying that shape here
+        would be a bug.
 
         Idempotency is tree-granular: the reused copy helper always rebuilds a
         temp tree and promotes it with a single ``os.replace``, so a tree whose
@@ -1298,7 +1321,12 @@ class TilePublisher:
                         if tree["status"] == "copied":
                             tree["status"] = "rolled_back"
             if isinstance(error, _CanonicalPrecipSourceMissing):
-                return {**summary, "status": "failed", "missing_path": error.missing_path}
+                return {
+                    **summary,
+                    "status": "failed",
+                    "missing_path": error.missing_path,
+                    "missing_object_key": error.object_key,
+                }
             return {
                 **summary,
                 "status": "failed",
@@ -1315,7 +1343,7 @@ class TilePublisher:
         try:
             names = list_directory_no_follow(grid_dir, containment_root=source_root)
         except FileNotFoundError as error:
-            raise _CanonicalPrecipSourceMissing(str(grid_dir)) from error
+            raise _CanonicalPrecipSourceMissing(str(grid_dir), grid_key) from error
         grid_keys: list[str] = []
         for name in sorted(names):
             # A plain non-directory entry is skipped. A symlinked entry and
@@ -1347,9 +1375,9 @@ class TilePublisher:
         try:
             source_tree = _collect_copyback_source_tree(self.object_store, key)
         except FileNotFoundError as error:
-            raise _CanonicalPrecipSourceMissing(str(source_root / key)) from error
+            raise _CanonicalPrecipSourceMissing(str(source_root / key), key) from error
         if required_file is not None and f"{key}/{required_file}" not in source_tree.files:
-            raise _CanonicalPrecipSourceMissing(str(source_root / key / required_file))
+            raise _CanonicalPrecipSourceMissing(str(source_root / key / required_file), f"{key}/{required_file}")
         try:
             target_tree = _collect_copyback_source_tree(copyback_store, key)
         except (OSError, SafeFilesystemError):

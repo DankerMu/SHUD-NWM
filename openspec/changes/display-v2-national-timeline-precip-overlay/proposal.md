@@ -10,7 +10,7 @@
 - 全国静态河网 `stream_type` 阈值每级下移一档（缓存查询版本递增），前端 z<6 不再因流量叠加打折且加粗；以 node-27 实测为合并 go/no-go：z3/z4/z5/z6/z7 全部 516 张覆盖中国的瓦片，四条并列硬门（`feature_coordinate_count < 50000`、`overflow == 0`、`coordinate_count <=` 该层集合上限、两遍绑定读数相等即未被预算窗口截断）。该层集合上限由 50000 提到 120000，并新增公平集合预算窗口。
 - **BREAKING（目录契约）**：`/api/v1/layers` 的 `discharge` 条目 `tile_url_template` 改为带 `{source}/{cycle}` 的新全国路由 `/api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf`，`required_placeholders` 统一为 `["source","cycle","valid_time","z","x","y"]`（沿用后端现有含 z/x/y 的形状），`metadata.valid_times` 改为 `(default_source, default_cycle)` 的列表；旧无源路由保留为别名、行为不变。
 - 新增 `GET /api/v1/layers/discharge/cycles?source=`（各活动河网交集，fail-closed）；`valid-times` 支持 `source`+`cycle` 查询，返回从起报时刻起 3h 步长的全范围列表。全部 API 时间实例统一 `YYYY-MM-DDTHH:MM:SSZ`（秒精度、无小数秒），路径段、列表与缓存文件名同一拼写。
-- 新增「过去 24h 累积降水」栅格图层：node-22 发布 copyback 把 canonical 降水 `.nc` + `grid.json` 镜像到 NFS；node-27 display API 跨周期取 8 个 3h 切片求和，渲染 Web-Mercator 六级调色板 PNG（numpy+zlib，无新依赖），文件缓存下发；`/api/v1/layers` 新增 `precip` 条目；一次性回填现存周期；镜像纳入 retention 剪枝。
+- 新增「过去 24h 累积降水」栅格图层：node-22 的 DB-free forecast 终态 stage 把 canonical 降水 `.nc` + `grid.json` 镜像到 NFS；node-27 display API 跨周期取 8 个 3h 切片求和，渲染 Web-Mercator 六级调色板 PNG（numpy+zlib，无新依赖），文件缓存下发；`/api/v1/layers` 新增 `precip` 条目；一次性回填现存周期；镜像纳入 retention 剪枝。
 - 前端：底部玻璃风格控制条（起报时次选择、GFS/IFS 分段开关、复用 `M11Timeline`），默认停在 lead=0；降水为布尔开关（默认开，`precip=0` 关）跟随水文 source/cycle/valid_time；全国尺度不再提供 Best Available；图例叠加降水六级；浮层位移。
 - 预热脚本扩展到 z3–4 × 双源 × 各源自己的最新周期全部时次 + 降水 PNG；某源 cycles 为空则该源零请求，不伪造周期。
 - `openapi/nhms.v1.yaml` 手工补齐 4 条新路由与 `/api/v1/layers`、`valid-times` 的形状变化（无生成器；drift 测试按等值比对），再 `pnpm generate:api` / `check:api-types`。
@@ -21,7 +21,7 @@
 ### New Capabilities
 - `precipitation-raster-overlay`: 过去 24h 累积降水 PNG 渲染/索引端点、跨周期切片解析、fail-closed 窗口、`precip` 目录条目与前端 image-source 叠加/图例/URL 开关。
 - `national-river-density`: 全国静态河网 `stream_type` 阈值表、查询版本换代、公平集合预算窗口与按图层集合上限、前端低缩放不打折加粗、node-27 四条硬门 go/no-go。
-- `canonical-precip-copyback`: q_down 发布后镜像 canonical 降水产品与 grid.json 到 copyback root（幂等、不阻塞发布）、一次性回填脚本、retention 同水位剪枝。
+- `canonical-precip-copyback`: DB-free forecast 终态 stage（`state_save_qc`）后镜像 canonical 降水产品与 grid.json 到 copyback root（幂等、不阻塞该 stage，回执走 `canonical_precip_mirror` pipeline_event）、一次性回填脚本、retention 同水位剪枝。
 
 ### Modified Capabilities
 - `overview-data-contracts`: `discharge` 目录条目的全国模板/占位符/`valid_times` 来源随 BREAKING 改动更新（新增 `default_source`/`default_cycle`，交集为空时 `default_cycle: null` + `valid_times: []`）。
@@ -35,7 +35,7 @@
 
 ## Impact
 
-- 后端：`services/tiles/mvt.py`（阈值表、hydro-national source/cycle SQL、cycles/valid-times、两个查询版本号）、`apps/api/routes/hydro_display.py`（新路由、cycles、precip 目录条目）、`apps/api/openapi_patching.py`（`_patch_mvt_tile_openapi` 的 `mvt_paths` 追加新全国路由）、新模块 `services/precip/`、新路由 `apps/api/routes/precip.py`、`services/tile_publisher/publisher.py`（canonical 镜像）、`scripts/canonical_precip_copyback_backfill.py`（新）、`scripts/node27_raw_retention.py`、`scripts/node27_mvt_prewarm.py`。
+- 后端：`services/tiles/mvt.py`（阈值表、hydro-national source/cycle SQL、cycles/valid-times、两个查询版本号）、`apps/api/routes/hydro_display.py`（新路由、cycles、precip 目录条目）、`apps/api/openapi_patching.py`（`_patch_mvt_tile_openapi` 的 `mvt_paths` 追加新全国路由）、新模块 `services/precip/`、新路由 `apps/api/routes/precip.py`、`services/tile_publisher/publisher.py`（canonical 镜像实现 + 公开包装）、`services/orchestrator/chain_forecast_execution.py`（终态 stage 挂载点与回执）、`scripts/canonical_precip_copyback_backfill.py`（新）、`scripts/node27_raw_retention.py`、`scripts/node27_mvt_prewarm.py`。
 - 前端：`SiteHeader.tsx`、`m11MapPrimitives.tsx`、`m11MapBuilders.ts`、`queryState.ts`、`overviewDataContracts.ts`、`OverviewPage.tsx`、`M11FloatingControls.tsx`、`M11Controls.tsx`（复用 timeline）、新 `M11PrecipOverlayPrimitive`、stores。
 - 契约文件：`openapi/nhms.v1.yaml`（手工维护，4 条新路由 + `/api/v1/layers` 与 `valid-times` 形状）、`apps/frontend/src/api/types.ts`（`pnpm generate:api` 产物）。
 - 测试：`tests/test_hydro_display_mvt_scaling.py:175`、`tests/test_api_contract.py:1409`、`tests/test_openapi_drift.py`、`tests/test_openapi_31_contract.py`、`tests/test_node27_mvt_prewarm.py`、`M11Shell.test.tsx` fixture、新增 precip/copyback/cycles 测试与 vitest。
