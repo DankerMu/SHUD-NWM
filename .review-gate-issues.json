@@ -2671,6 +2671,11 @@
         }
       ]
     },
+    "2050": {
+      "ceilingPrs": [],
+      "gateEntries": 3,
+      "closed": []
+    },
     "2069": {
       "ceilingPrs": [],
       "gateEntries": 0,
