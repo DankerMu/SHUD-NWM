@@ -169,9 +169,9 @@ Boundary-surface checklist（4.1–4.3）:
 
 新增/改写行：
 - `convert` 终态 `succeeded` -> 镜像触发，回执记 `status == "ok"`；且必须由 `_submit_and_wait_cycle_stage` 真实驱动到 hook（不接受直接调用作为该行的证据）
-- `convert` 终态的失败尾（`failed`/`cancelled`/`timeout`/`reservation_lost`/`permanently_failed`）-> **仍**进 hook 即仍镜像（多半记 `failed`，源产物不存在），stage 结果不变；进入 hook 后唯一不触发的仍是 `reconcile_unverified`
+- `convert` 终态的失败尾（`failed`/`cancelled`/`timeout`/`reservation_lost`/`permanently_failed`）-> **仍**进 hook 即仍镜像，stage 结果不变；进入 hook 后唯一不触发的仍是 `reconcile_unverified`。失败尾**不是**「源产物不存在」——分两类：`failed`/`permanently_failed` 作业已结束，树可能残缺也可能不存在；`timeout`/`cancelled`/`reservation_lost` 由 orchestrator 单方面铸造而**不 scancel**（`record_cycle_stage_poll_timeout` 只写 `SLURM_JOB_TIMEOUT` 就 return），此时 sbatch **可能仍在写**，镜像会把半棵树拷走并记 `ok`（#2072 round 1 A1，已实测复现）。`ok` 只表示"拷贝当刻目的地与源一致"，不表示 convert 成功或 lead 集合完整
+- `convert` 的 `submit_result_ambiguous` -> **对本 stage 不可达**（`chain_stage_execution.py` 的 ambiguous 臂整个在 `is_forecast_cohort_stage(stage)` 守卫内，`convert` 不在 `_FORECAST_STAGE_ALIASES`；实跑 `is_forecast_cohort_stage` 对六个 M3 stage 只有 `forecast` 为 True）。此前把它记作"真残留"是过宽表述，已在 spec 中删除
 - `convert` 自身 `submission_failed`（sbatch 未被接受）-> 该 pass 不进 hook；**不是缺口**：没被接受的提交不会写出产物
-- `convert` 的 `submit_result_ambiguous`（`chain_stage_execution.py:386-398`，在 hook 调用点之前 return）-> 该 pass 不进 hook，但 sbatch **可能已在跑**，产物**可能存在** -> 这是真残留，恢复靠 reconcile 的 exact-comment 匹配后经 `resume_cycle_stage` 再入 hook（`reservation_lost` 同路），或 Requirement 2 的回填脚本；本单不新增修复，随 F1 一并立单
 - `state_save_qc`（及 `forcing`/`forecast`/`parse`/`publish`）终态 -> **不**触发镜像（门只认 convert）；`_stage_should_copyback_run_trees` 的 state_save_qc 行为不变
 - `state_save_qc` submit 在整个 pass 全部失败的周期 -> 镜像**仍在**（#2069 原始场景），回执 `ok`
 - `terminal_stage` 为 `None` 或非 `forecast_state_save_qc` 的 orchestrator -> convert 终态**仍**触发（谓词不读 `terminal_stage`）

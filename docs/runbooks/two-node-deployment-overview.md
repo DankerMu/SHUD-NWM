@@ -345,7 +345,11 @@ jq -c 'select(.record_type == "pipeline_event"
   "$NHMS_SCHEDULER_JOURNAL_ROOT"/journal/IFS/2026050100*.jsonl
 ```
 
-判读：`status` 为 `ok` 即镜像可用。`skipped` **必须再看 `reason`**——两种 `skipped` 语义相反：
+判读：`status` 为 `ok` **只表示拷贝当刻目的地与源一致**，不表示该周期产物完整——门挂在 `convert`
+上，而 `timeout`/`cancelled`/`reservation_lost` 是 orchestrator 单方面铸造的终态、**不会 scancel**，
+此时 sbatch 可能仍在写，镜像会忠实地拷走半棵树并记 `ok`。所以同一条回执若对应的 stage 结果不是
+`succeeded`，必须再把 `trees[].file_count` 与该源该周期的预期 lead 数比对，比对不上就当作**不完整周期**
+（后续全链重规划会经 `resume_cycle_stage` 再入 hook 整树替换）。`skipped` **必须再看 `reason`**——两种 `skipped` 语义相反：
 `trees_already_mirrored` 是幂等跳过（目标已在，可用）；而 `copyback_root_matches_object_store_root`
 是在写任何字节**之前**早退（copyback root 与 object store root 解析到同一目录身份），
 共享 NFS 上没有任何产物，读侧因此取不到该周期——那是配置错误，按

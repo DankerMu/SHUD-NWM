@@ -987,9 +987,9 @@ def _stage_should_mirror_canonical_precip(self, stage: StageDefinition) -> bool:
     # precipitation products. It deliberately does NOT read
     # `self.config.terminal_stage` -- that predicate encodes the sibling
     # `_stage_should_copyback_run_trees`'s chain-terminal semantics, which say
-    # nothing about a `convert` product, and it is not the profile fence.
-    # `NHMS_OBJECT_STORE_COPYBACK_ROOT` is (the display profile forbids it and
-    # `_mirror_canonical_precip` early-returns when it is unset).
+    # nothing about a `convert` product. The profile fence is
+    # `NHMS_OBJECT_STORE_COPYBACK_ROOT`, which the display profile forbids
+    # outright (`apps/api/runtime_mode.py`) and which the mirror early-returns on.
     return stage.stage == "convert"
 
 
@@ -999,6 +999,14 @@ def _mirror_canonical_precip(self, context: CycleOrchestrationContext) -> None:
     Bound to the ``convert`` stage's terminal entry (#2069), not to the chain's
     forecast terminal stage: ``convert`` is what writes the products, so
     "products exist" and "this hook ran" coincide within a pass that runs it.
+
+    That terminal entry includes ``convert``'s failure tail: ``timeout``,
+    ``cancelled`` and ``reservation_lost`` are all minted without cancelling the
+    Slurm job, so the source tree may still be mid-write when the copy runs. A
+    ``status: "ok"`` receipt therefore means the destination matched the source
+    AT COPY TIME -- not that ``convert`` succeeded, and not that the lead set is
+    complete: ``status`` reads ``ok`` either way, and only ``file_count``
+    reflects how much of the tree existed when the copy ran.
 
     Three deliberate differences from the sibling ``_copyback_stage_run_trees``
     at this same seam (canonical-precip-copyback spec, Requirement 1) -- both
