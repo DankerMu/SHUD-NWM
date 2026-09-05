@@ -11,6 +11,7 @@ import sys
 import typing
 from pathlib import Path
 
+import pytest
 import shapefile
 
 from packages.common import safe_fs
@@ -557,6 +558,18 @@ FIXTURE_PATHS = {
     "basin-a/input/alias-a/gis/seg.shx",
 }
 
+MAPPING_HASH_TRANSITION = {
+    "base": {
+        "basin-a/input/alias-a/alias-a.sp.riv": "debf08491b0e22a39c06502d0354b9ae14c169fbd581d2941b78ac61f7907863",
+        "basin-a/input/alias-a/alias-a.sp.rivseg": "4eaccab2a297cdd5d09f13f193cb73c9048996dab9423340ce4092383188cb0f",
+    },
+    "current": {
+        "basin-a/input/alias-a/alias-a.sp.riv": "be55461a1989a709dfc877325684f180de910e2e67a390b6972efde20ac68609",
+        "basin-a/input/alias-a/alias-a.sp.rivseg": "1294386985e2de5f70bd1fd339b4def948574d1a86cd0e6fc9956fe12365b18d",
+    },
+}
+
+
 STABLE_TEXT_SHA256 = {
     "basin-a/forcing/X000001.csv": "423a249b26ea5e3f783ad57b5f682511b44d89f29bca75ab2e61dc99d485ac32",
     "basin-a/input/alias-a/alias-a.cfg.calib": "251d4e26182b3a103b3d3e28650a9f86347da575063d8191a71b705284a41d69",
@@ -567,8 +580,8 @@ STABLE_TEXT_SHA256 = {
     "basin-a/input/alias-a/alias-a.para.soil": "0639649f9c1e77154c4cdba301818513b7d709b43dad5006afde28d8e315c398",
     "basin-a/input/alias-a/alias-a.sp.att": "9dffc9ea997725ce961d405ddbe2f6521a8da67777659cec6d23d31a76d57f05",
     "basin-a/input/alias-a/alias-a.sp.mesh": "b5f37f42d323523d14e8df16228dfb94707a10cf3b3e696072daf37efa8cc452",
-    "basin-a/input/alias-a/alias-a.sp.riv": "debf08491b0e22a39c06502d0354b9ae14c169fbd581d2941b78ac61f7907863",
-    "basin-a/input/alias-a/alias-a.sp.rivseg": "4eaccab2a297cdd5d09f13f193cb73c9048996dab9423340ce4092383188cb0f",
+    "basin-a/input/alias-a/alias-a.sp.riv": "be55461a1989a709dfc877325684f180de910e2e67a390b6972efde20ac68609",
+    "basin-a/input/alias-a/alias-a.sp.rivseg": "1294386985e2de5f70bd1fd339b4def948574d1a86cd0e6fc9956fe12365b18d",
     "basin-a/input/alias-a/alias-a.tsd.forc": "ac60bea2aced8b2c409ccc5f4546d0cb468a67242cf45796963e2dc962ef7404",
     "basin-a/input/alias-a/alias-a.tsd.lai": "c4b1c17939cce478599268db0b09e636311babaebc5b1538b506342111d14c52",
     "basin-a/input/alias-a/alias-a.tsd.mf": "c00cbb6c21249c20f09ed9a2e0e1867dda37f556128a85f5ee6056f2b3c6b498",
@@ -734,6 +747,30 @@ def test_fresh_process_importers_and_module_usage_keep_historical_facade() -> No
     assert "Usage:" in usage.stderr and "No such option" in usage.stderr and "Traceback" not in usage.stderr
 
 
+def test_object_store_fixture_mapping_transition_is_limited_to_merge_base_mapping_literals() -> None:
+    fixture_path = "services/production_closure/object_store_validation_fixture.py"
+    base = subprocess.run(
+        ["git", "show", f"27dc6aab5a0772c5489b04049eb483a660cf60d8:{fixture_path}"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    current = (ROOT / fixture_path).read_text(encoding="utf-8")
+    old_riv = '"2 6\\n1 0 0 0.01 100 0\\n"'
+    old_rivseg = '"2 4\\n1 1 1 100\\n"'
+    new_riv = '"2 6\\nIndex Down Type Slope Length BC\\n1 2 0 0.01 100 0\\n2 0 0 0.01 100 0\\n"'
+    new_rivseg = '"2 4\\nIndex iRiv iEle Length\\n1 1 1 100\\n2 2 2 100\\n"'
+    assert old_riv in base and old_rivseg in base
+    assert new_riv in current and new_rivseg in current
+    assert base.replace(old_riv, new_riv).replace(old_rivseg, new_rivseg) == current
+
+    unrelated_mutation = current.replace('input_name = "alias-a"', 'input_name = "alias-b"', 1)
+    assert unrelated_mutation != current
+    with pytest.raises(AssertionError):
+        assert base.replace(old_riv, new_riv).replace(old_rivseg, new_rivseg) == unrelated_mutation
+
+
 def test_fixture_stable_text_hashes_and_shapefile_semantics_are_preserved(tmp_path: Path) -> None:
     root = tmp_path / "Basins"
     facade.write_synthetic_basins_fixture(root)
@@ -742,9 +779,19 @@ def test_fixture_stable_text_hashes_and_shapefile_semantics_are_preserved(tmp_pa
     actual_files = [path for path in entries if stat.S_ISREG(path.lstat().st_mode)]
     assert len(actual_files) == 27
     assert {path.relative_to(root).as_posix() for path in actual_files} == FIXTURE_PATHS
-    assert {
+    actual_hashes = {
         relative: hashlib.sha256((root / relative).read_bytes()).hexdigest() for relative in STABLE_TEXT_SHA256
-    } == STABLE_TEXT_SHA256
+    }
+    assert actual_hashes == STABLE_TEXT_SHA256
+    assert {
+        path: actual_hashes[path] for path in MAPPING_HASH_TRANSITION["current"]
+    } == MAPPING_HASH_TRANSITION["current"]
+    assert set(MAPPING_HASH_TRANSITION["base"]) == set(MAPPING_HASH_TRANSITION["current"])
+    assert all(
+        actual_hashes[path] == expected
+        for path, expected in STABLE_TEXT_SHA256.items()
+        if path not in MAPPING_HASH_TRANSITION["current"]
+    )
     gis_dir = root / "basin-a" / "input" / "alias-a" / "gis"
     for name, expected in SHAPEFILE_SEMANTICS.items():
         reader = shapefile.Reader(str(gis_dir / f"{name}.shp"))

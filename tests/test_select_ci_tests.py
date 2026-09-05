@@ -8334,20 +8334,12 @@ def test_retention_owner_reds_when_a_partition_is_removed(
 
 
 # ---------------------------------------------------------------------------
-# #1912: the Basins package publication corpus
+# #1912/#1903: the Basins package publication corpus
 #
-# The 3,582-line `tests/test_basins_package_publication.py` monolith became six
-# collectible partitions plus one non-collectible helper, all below the 1,000-line
-# structural limit. Physical ownership moved; the 88 publication cases and their
-# oracles did not. That makes the two routing boundaries the only thing standing
-# between a partitioned corpus and a silently blind PR lane: the retained core path
-# still exists and still passes, while five sixths of the corpus would sit unrun on
-# every `workers/model_registry/**` change.
-#
-# Unlike #1872's retention partitions, the retained core here is NOT recoverable
-# through same-name derivation either — the production owner is `basins_package.py`,
-# which derives `tests/test_basins_package.py` — so all six edges, core included,
-# are rule-only and all six are pinned per-edge below.
+# Six frozen baseline partitions retain all 80 definitions / 88 nodes, while the
+# additive rivseg owner exercises the mapping invariant. All seven are explicit
+# rule-only edges for a `workers/model_registry/**` change: the production owner
+# `basins_package.py` derives `tests/test_basins_package.py`, not a publication suite.
 # ---------------------------------------------------------------------------
 
 BASINS_PUBLICATION_MODEL_REGISTRY_PATTERN = "workers/model_registry/**"
@@ -8357,7 +8349,7 @@ BASINS_PUBLICATION_OWNER_PRODUCTION_FILE = "workers/model_registry/basins_packag
 
 
 def _tracked_basins_publication_suites() -> set[str]:
-    """The tracked six, derived from the tree — never from the selector tuple.
+    """The tracked seven, derived from the tree — never from the selector tuple.
 
     Pathspecs name the frozen owners one by one rather than globbing `tests/**basins*`,
     so corpus growth is a decision and not an accident: a new partition only joins the
@@ -8384,15 +8376,11 @@ def _basins_helper_selection() -> set[str]:
     return set(select_tests([BASINS_PACKAGE_HELPERS_PATH], repo_root=Path(".")))
 
 
-def test_basins_publication_suite_count_is_the_frozen_six() -> None:
-    # The partition contract is "exactly six collectible suites". A seventh collectible
-    # owner adds no requirement (design.md D1) and an eighth file would be a silent
-    # routing gap until the tree-derived equality below caught it — this pin catches it
-    # at the count, naming the drifted set, before any route assertion can pass vacuously.
+def test_basins_publication_suite_count_is_the_exact_seven() -> None:
     tracked = _tracked_basins_publication_suites()
 
-    assert len(BASINS_PACKAGE_PUBLICATION_TESTS) == 6
-    assert len(tracked) == 6, f"tracked publication suites drifted from six: {sorted(tracked)}"
+    assert len(BASINS_PACKAGE_PUBLICATION_TESTS) == 7
+    assert len(tracked) == 7, f"tracked publication suites drifted from seven: {sorted(tracked)}"
     assert sorted(BASINS_PACKAGE_PUBLICATION_TESTS) == sorted(tracked)
 
 
@@ -8408,7 +8396,7 @@ def test_basins_publication_authority_tuple_is_sorted_and_explicit() -> None:
 
 def test_basins_publication_partitions_are_collectible_and_the_helper_is_not() -> None:
     # Routing to a non-collectible file is the #1453 defect: ci.yml's `check=True` renders
-    # pytest's exit-5 as a red carrying zero assertion information. Each of the six must be
+    # pytest's exit-5 as a red carrying zero assertion information. Each of the seven must be
     # a real pytest-collectible suite, and the helper must collect nothing — otherwise the
     # corpus is not partitioned, it is duplicated or shimmed.
     for suite in BASINS_PACKAGE_PUBLICATION_TESTS:
@@ -8440,6 +8428,47 @@ def test_basins_publication_core_is_a_real_suite_not_a_reexport_shim() -> None:
     assert "import *" not in source, f"{core} re-exports another module's cases"
 
 
+def test_basins_package_helper_mapping_transition_is_the_exact_merge_base_replacement() -> None:
+    helper = "tests/basins_package_helpers.py"
+    base_commit = "27dc6aab5a0772c5489b04049eb483a660cf60d8"
+    before = subprocess.run(
+        ["git", "show", f"{base_commit}:{helper}"],
+        cwd=Path("."),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    current = Path(helper).read_text(encoding="utf-8")
+    old_loop_members = '        "sp.riv",\n        "sp.rivseg",\n'
+    mesh_write = (
+        '    (input_dir / f"{input_name}.sp.mesh").write_text('
+        '"484\\t8\\nID\\tNode1\\n", encoding="utf-8")\n'
+    )
+    riv_write = (
+        '    (input_dir / f"{input_name}.sp.riv").write_text(\n'
+        '        "1 6\\nIndex Down Type Slope Length BC\\n1 0 0 0.01 100 0\\n",\n'
+        '        encoding="utf-8",\n'
+        '    )\n'
+    )
+    rivseg_write = (
+        '    (input_dir / f"{input_name}.sp.rivseg").write_text(\n'
+        '        "1 4\\nIndex iRiv iEle Length\\n1 1 1 100\\n",\n'
+        '        encoding="utf-8",\n'
+        '    )\n'
+    )
+    mapping_writes = riv_write + rivseg_write
+
+    assert old_loop_members in before
+    assert mapping_writes in current
+    expected = before.replace(old_loop_members, "", 1).replace(mesh_write, mesh_write + mapping_writes, 1)
+    assert expected == current
+
+    unrelated_mutation = current.replace('"radiation\\n"', '"changed\\n"', 1)
+    assert unrelated_mutation != current
+    with pytest.raises(AssertionError):
+        assert expected == unrelated_mutation
+
+
 def test_basins_publication_every_partition_imports_the_helper_at_module_scope() -> None:
     # Module-scope import is what makes helper-only selection load-bearing (and what keeps
     # the routing independent of import order): a partition that imports lazily inside a
@@ -8452,32 +8481,26 @@ def test_basins_publication_every_partition_imports_the_helper_at_module_scope()
     ), "the sibling suite lost its redirected helper import"
 
 
-def test_basins_publication_helper_importer_closure_derives_the_exact_seven() -> None:
-    # Independent of the rule table: derive who actually imports the helper from the
-    # tracked tree and require the routed consumer tuple to equal it. A partition that
-    # stops importing the helper while staying routed (dead edge) and a new importer suite
-    # that nobody routes (missing edge) both redden here.
+def test_basins_publication_helper_importer_closure_derives_the_exact_eight() -> None:
     derived = _non_gated_top_level_importer_tests("tests.basins_package_helpers")
 
     assert derived == set(BASINS_PACKAGE_HELPERS_CONSUMER_TESTS), (
         "Basins helper consumer set drifted: "
         f"derived={sorted(derived)} routed={sorted(BASINS_PACKAGE_HELPERS_CONSUMER_TESTS)}"
     )
-    assert len(derived) == 7
+    assert len(derived) == 8
 
 
-def test_basins_publication_model_registry_owner_selects_all_six_partitions() -> None:
-    # The green production-owner route: a `workers/model_registry/**` change must run the
-    # whole publication corpus, not the retained core alone.
+def test_basins_publication_model_registry_owner_selects_all_seven_partitions() -> None:
     selected = _basins_publication_owner_selection()
 
     missing = sorted(set(BASINS_PACKAGE_PUBLICATION_TESTS) - selected)
     assert not missing, f"{BASINS_PUBLICATION_OWNER_PRODUCTION_FILE} stopped selecting partitions {missing}"
-    assert len(BASINS_PACKAGE_PUBLICATION_TESTS) == 6
+    assert len(BASINS_PACKAGE_PUBLICATION_TESTS) == 7
 
 
 def test_basins_publication_owner_rule_preserves_its_pre_existing_targets() -> None:
-    # "Replace the single core target with all six" must not mean "swap the corpus for
+    # "Extend the frozen six-owner baseline with the additive seventh target" must not mean "swap the corpus for
     # something else": every target the rule carried before #1912 is still carried, so the
     # partitioning removed no existing coverage. The frozen names below are the pre-#1912
     # rule content on master, kept as a literal so this guard cannot be satisfied by
@@ -8516,10 +8539,10 @@ def test_basins_publication_owner_reds_when_a_partition_edge_is_removed(
     monkeypatch: pytest.MonkeyPatch,
     removed: str,
 ) -> None:
-    # The fracture pin, all six edges (retained core included, which #1872 could not
+    # The fracture pin, all seven edges (retained core included, which #1872 could not
     # assert for its own core): rebuilding the model-registry rule WITHOUT one partition
     # must drop exactly that partition from the production-owner selection. Passing this
-    # row is what proves each of the six is load-bearing rather than decorative.
+    # row is what proves each of the seven is load-bearing rather than decorative.
     from scripts import select_ci_tests
 
     patched = tuple(
@@ -8563,7 +8586,7 @@ def test_basins_publication_helper_route_reds_when_a_consumer_edge_is_removed(
     monkeypatch: pytest.MonkeyPatch,
     removed: str,
 ) -> None:
-    # The helper's seven consumer edges are each load-bearing: with the exact rule rebuilt
+    # The helper's eight consumer edges are each load-bearing: with the exact rule rebuilt
     # WITHOUT one consumer, a helper-only diff drops that suite and keeps the rest (plus
     # the selector's own meta-guard rider, which the support-module branch adds and this
     # rule must not duplicate).
@@ -8586,7 +8609,7 @@ def test_basins_publication_helper_route_reds_when_a_consumer_edge_is_removed(
     selected = select_tests([BASINS_PACKAGE_HELPERS_PATH], repo_root=Path("."))
 
     assert removed not in selected
-    # Only the removed edge disappears — the other six consumers and the branch's
+    # Only the removed edge disappears — the other seven consumers and the branch's
     # meta-guard rider survive the mutation, so the row cannot be satisfied by a
     # patch that empties the rule.
     survivors = sorted(set(BASINS_PACKAGE_HELPERS_CONSUMER_TESTS) - {removed})
@@ -8594,10 +8617,7 @@ def test_basins_publication_helper_route_reds_when_a_consumer_edge_is_removed(
     assert SELECTOR_META_GUARD_TEST in selected
 
 
-def test_basins_publication_helper_route_selects_exactly_seven_consumers_plus_the_rider() -> None:
-    # Exact-set pin on the green table: helper routing adds the six partitions plus the
-    # sibling suite and nothing else of its own; the meta-guard is the support-module
-    # branch's rider, not a rule target.
+def test_basins_publication_helper_route_selects_exactly_eight_consumers_plus_the_rider() -> None:
     rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == BASINS_PACKAGE_HELPERS_PATH)
     selected = _basins_helper_selection()
 
@@ -8732,7 +8752,7 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
     # The #1809 gateway-reconcile split's two shared fixture modules.
     ("tests/gateway_reconcile_helpers.py", "tests/test_gateway_reconcile_file_cohort_comment.py"),
     ("tests/gateway_reconcile_writer_helpers.py", "tests/test_gateway_reconcile_idempotency_barrier.py"),
-    # #1912: the Basins publication corpus's shared helper. All six partitions plus the
+    # #1912: the Basins publication corpus's shared helper. All seven partitions plus the
     # sibling packaging suite import it at module scope; the retained core is a valid
     # anchor for the same reason #1872 pinned the retention core.
     ("tests/basins_package_helpers.py", "tests/test_basins_package_publication.py"),
@@ -13845,13 +13865,18 @@ REGISTRY_PARTITION_SOURCE_BASELINE_SHA = "3c29698f9eda5efdd2d48f3c2922da8df0d3aa
 # this blob, and the blob itself must hash to it.
 REGISTRY_PARTITION_BASELINE_SOURCE_SHA256 = "c61c61f6e905ee951b9e5fb1c7566722367c8cc3e1fd07baad21bda91461f708"
 REGISTRY_PARTITION_CONTRACT_SHA256 = "42803dd59276621d559bf6719b4c31cccc64ad751ed0f46105c373ba7b17c60c"
+# The original #1913 helper aggregate is independent pre-transition provenance.
+# It remains a literal rather than being replaced by the current oracle digest.
+REGISTRY_PARTITION_PRE_1903_HELPER_SOURCE_DIGEST = (
+    "90973ba3e2ad0b30e5803be4a77aaffe155bb4141771eb60d452c3b6fed1b7ea"
+)
 REGISTRY_PARTITION_FROZEN_DIGESTS: dict[str, str] = {
     "suffix": "ba89c8cb7520a24aab19195dc0a724ecbf4034675d2bd38fba8b9e04aff6c5c8",
     "integration_suffix": "2531bdef5d481f1024fafe0d5fe36ae7aabb47c478746ceb3286952bccefd73c",
     "definition": "9fcffe77f64696af9189c76cc35415b88ad024bbc65b908c92586d72eb5dfe7a",
     "ast": "d4f069c7dbb343b32253a5bea204f4cc6df7cbc35f155ee4cc1042e12959fa54",
     "helper_inventory": "8840823ea7c0041ef3bc775601485452eeb6c04838dce454481d0c9ab43e5335",
-    "helper_source": "90973ba3e2ad0b30e5803be4a77aaffe155bb4141771eb60d452c3b6fed1b7ea",
+    "helper_source": "3a2e691d64683dc397f9fd6da6bf28cd61e8cfc099039d51eec95a7ea61e3abc",
     "owner_map": "f4f71687d744df2551f9ff0926e10fdd0498ade214fe67f6bb78ba62ee6879a9",
 }
 # The exact eight-path `database:` authority this change freezes (design D6): the six
@@ -14133,6 +14158,84 @@ def test_registry_partition_rejected_regenerated_oracle_rewrites_the_source_anch
 
     with pytest.raises(AssertionError, match=REGISTRY_PARTITION_BASELINE_SOURCE_SHA256):
         _registry_assert_baseline_source_anchor(payload["captured_from"])
+
+
+def test_registry_helper_mapping_transition_is_exactly_the_allowed_merge_base_change() -> None:
+    oracle = _registry_partition_oracle()
+    transition = oracle["issue_1903_mapping_transition"]
+    assert transition["base_commit"] == "27dc6aab5a0772c5489b04049eb483a660cf60d8"
+    assert transition["member"] == "_make_valid_model"
+    assert transition["allowed_change"] == "sp_rivseg_rows_only"
+    before = _qhh_blob_at(transition["base_commit"], REGISTRY_PARTITION_HELPER).decode("utf-8")
+    current = Path(REGISTRY_PARTITION_HELPER).read_text(encoding="utf-8")
+    before_members = _registry_members_from_text(before, REGISTRY_PARTITION_HELPER)
+    current_members = _registry_members(REGISTRY_PARTITION_HELPER)
+    assert set(before_members) == set(current_members)
+    assert {
+        name for name in current_members if current_members[name] != before_members[name]
+    } == {"_make_valid_model"}
+    assert transition["base_source_sha256"] == before_members["_make_valid_model"][0]
+    assert transition["base_ast_sha256"] == before_members["_make_valid_model"][1]
+    assert transition["current_source_sha256"] == current_members["_make_valid_model"][0]
+    assert transition["current_ast_sha256"] == current_members["_make_valid_model"][1]
+    assert _registry_digest_lines(
+        [f"{name}:{row[0]}" for name, row in sorted(before_members.items())]
+    ) == REGISTRY_PARTITION_PRE_1903_HELPER_SOURCE_DIGEST
+    assert "sp_rivseg_rows" not in before
+    assert "sp_rivseg_rows" in current
+
+
+def _registry_members_from_text(content: str, path: str) -> dict[str, tuple[str, str]]:
+    lines = content.splitlines()
+    out: dict[str, tuple[str, str]] = {}
+    for node in ast.parse(content, filename=path).body:
+        name = node.name if isinstance(node, ast.ClassDef) else _qhh_member_name(node)
+        if name is None:
+            continue
+        start = _qhh_definition_start(node, lines) if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else node.lineno
+        fragment = "\n".join(lines[start - 1 : node.end_lineno]) + "\n"
+        out[name] = (
+            hashlib.sha256(fragment.encode()).hexdigest(),
+            hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest(),
+        )
+    return out
+
+
+def test_registry_helper_transition_rejects_self_consistent_unrelated_member_mutation() -> None:
+    oracle = _registry_partition_oracle()
+    payload = json.loads(json.dumps(oracle, sort_keys=True))
+    payload["helper"]["rows"]["_sha256_file"][1] = "0" * 64
+    payload["digests"]["helper_source"] = _registry_digest_lines(
+        [f"{name}:{row[1]}" for name, row in sorted(payload["helper"]["rows"].items())]
+    )
+    payload["digests"]["self"] = _registry_oracle_self_digest(payload)
+    assert payload["digests"]["self"] == _registry_oracle_self_digest(payload)
+    assert payload["digests"]["helper_source"] != REGISTRY_PARTITION_FROZEN_DIGESTS["helper_source"]
+    with pytest.raises(AssertionError, match="helper_source"):
+        for key, frozen in REGISTRY_PARTITION_FROZEN_DIGESTS.items():
+            assert payload["digests"][key] == frozen, key
+
+
+def test_registry_helper_transition_rejects_an_actual_unrelated_member_mutation() -> None:
+    before = _qhh_blob_at("27dc6aab5a0772c5489b04049eb483a660cf60d8", REGISTRY_PARTITION_HELPER).decode(
+        "utf-8"
+    )
+    mutated = before.replace(
+        '"unknown"',
+        '"unexpected"',
+        1,
+    )
+    before_members = _registry_members_from_text(before, REGISTRY_PARTITION_HELPER)
+    mutated_members = _registry_members_from_text(mutated, REGISTRY_PARTITION_HELPER)
+
+    assert set(mutated_members) == set(before_members)
+    assert {
+        name for name in mutated_members if mutated_members[name] != before_members[name]
+    } == {"_PUBLIC_IMPORT_UNKNOWN_TARGET_ID"}
+    with pytest.raises(AssertionError):
+        assert {
+            name for name in mutated_members if mutated_members[name] != before_members[name]
+        } == {"_make_valid_model"}
 
 
 def test_registry_partition_oracle_shape_is_the_frozen_contract_authority() -> None:

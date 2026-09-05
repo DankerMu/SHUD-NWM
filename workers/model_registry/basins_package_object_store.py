@@ -722,15 +722,29 @@ def _write_source_file_to_store(
     write_file_to_store_streaming: Callable[..., tuple[int, str]],
     verify_object_bytes: Callable[..., None]
 ) -> dict[str, Any]:
-    size_bytes, sha256 = write_file_to_store_streaming(
-        store,
-        source_file.object_key,
-        source_file.source_path,
-        source_file.source_root,
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
+    snapshot_bytes = getattr(source_file, "snapshot_bytes", None)
+    snapshot_sha256 = getattr(source_file, "snapshot_sha256", None)
+    if isinstance(snapshot_bytes, bytes) and isinstance(snapshot_sha256, str):
+        _write_bytes_to_store_atomic(
+            store,
+            source_file.object_key,
+            snapshot_bytes,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+        size_bytes = len(snapshot_bytes)
+        sha256 = snapshot_sha256
+    else:
+        size_bytes, sha256 = write_file_to_store_streaming(
+            store,
+            source_file.object_key,
+            source_file.source_path,
+            source_file.source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
     verify_object_bytes(
         store,
         source_file.object_key,

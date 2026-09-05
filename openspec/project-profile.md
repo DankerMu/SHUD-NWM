@@ -34,6 +34,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Service-to-service auth and OpenAPI security parity across dual-mounted control routes
 - Manifest/QC evidence bound to the producing run and provider snapshot
 - Published artifact identity across DB rows, object URIs, and frontend display
+- SHUD required-file content integrity before package source identity/publication: bounded verified reads and zero partial object-store output
 
 ## Typical evidence
 
@@ -88,3 +89,4 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - `SHUD`, `shud`, `shud_runtime`, `restart`, `IC`, `forcing`, `meteoCov`
 - `forecast window`, `GFS`, `ERA5`, `IFS`, `CDS`, `ECMWF`
 - `run_manifest`, `qc_result`, `provider snapshot`
+- `.sp.riv`, `.sp.rivseg`, `iRiv`, `source_identity`, `BASINS_RIVSEG_MAPPING_*`

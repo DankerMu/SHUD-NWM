@@ -26,11 +26,138 @@ from .basins_package_source_io import (
     _normalize_relative_path,
     _reject_source_symlink_path,
     _resolve_package_path,
-    _safe_source_dir,
-    _safe_source_file,
     _source_file_evidence,
 )
 
+
+def _safe_source_dir(
+    value: Any,
+    inventory_root: Path,
+    inventory_relative_root: Path | None,
+    source_root: Path,
+    field_name: str,
+    *,
+    expected_path: Path,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> Path:
+    if not isinstance(value, str) or not value:
+        raise BasinsPackageError(
+            "BASINS_INVENTORY_INVALID",
+            f"Basins model record is missing {field_name}.",
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = _source_dir_from_relative_inventory_value(
+            path,
+            inventory_root,
+            inventory_relative_root,
+            source_root,
+            expected_path,
+            field_name,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+    _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
+    resolved = _resolve_package_path(path)
+    _ensure_under_root(
+        resolved,
+        inventory_root,
+        error_code="BASINS_INVENTORY_PATH_MISMATCH",
+        message=f"Basins model {field_name} resolves outside the inventory root.",
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
+    if not resolved.is_dir():
+        raise BasinsPackageError(
+            "BASINS_SOURCE_NOT_FOUND",
+            f"Basins source directory does not exist: {path}",
+            model_id=model_id,
+            version=version,
+            path=str(path),
+            manifest_uri=manifest_uri,
+        )
+    return resolved
+
+def _source_dir_from_relative_inventory_value(
+    path: Path,
+    inventory_root: Path,
+    inventory_relative_root: Path | None,
+    source_root: Path,
+    expected_path: Path,
+    field_name: str,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> Path:
+    normalized = Path(_normalize_relative_path(path.as_posix()))
+    if _relative_inventory_path_matches_expected(
+        normalized,
+        inventory_root,
+        inventory_relative_root,
+        source_root,
+        expected_path,
+    ):
+        return expected_path
+    candidate = inventory_root / normalized
+    raise BasinsPackageError(
+        "BASINS_INVENTORY_PATH_MISMATCH",
+        f"Basins inventory {field_name} does not match the selected model's canonical source path.",
+        model_id=model_id,
+        version=version,
+        path=str(candidate),
+        manifest_uri=manifest_uri,
+    )
+
+def _relative_inventory_path_matches_expected(
+    relative_path: Path,
+    inventory_root: Path,
+    inventory_relative_root: Path | None,
+    source_root: Path,
+    expected_path: Path,
+) -> bool:
+    expected_relative_paths: set[Path] = set()
+    for base in (source_root, inventory_root):
+        try:
+            expected_relative_paths.add(expected_path.relative_to(base))
+        except ValueError:
+            continue
+    if inventory_relative_root is not None:
+        try:
+            expected_relative_paths.add(inventory_relative_root / expected_path.relative_to(inventory_root))
+        except ValueError:
+            pass
+    return relative_path in expected_relative_paths
+
+def _safe_source_file(
+    path: Path,
+    source_root: Path,
+    *,
+    model_id: str | None = None,
+    version: str | None = None,
+    manifest_uri: str | None = None,
+) -> Path:
+    _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
+    resolved = _resolve_package_path(path)
+    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
+    if not resolved.is_file():
+        raise BasinsPackageError(
+            "BASINS_SOURCE_NOT_FOUND",
+            f"Basins source file does not exist: {path}",
+            model_id=model_id,
+            version=version,
+            path=str(path),
+            manifest_uri=manifest_uri,
+        )
+    return resolved
 
 def _read_inventory(path: str | Path) -> tuple[dict[str, Any], bytes]:
     inventory_path = Path(path).expanduser()
@@ -56,6 +183,7 @@ def _read_inventory(path: str | Path) -> tuple[dict[str, Any], bytes]:
             path=str(inventory_path),
         )
     return payload, content
+
 
 def _find_publishable_model(inventory: dict[str, Any], model_id: str, version: str) -> dict[str, Any]:
     models = inventory.get("models")
@@ -99,6 +227,7 @@ def _find_publishable_model(inventory: dict[str, Any], model_id: str, version: s
         version=version,
     )
 
+
 def _verify_model_id_matches_canonical_identity(model: dict[str, Any], model_id: str, version: str) -> None:
     basin_slug = model.get("basin_slug")
     suggested_ids = model.get("suggested_ids")
@@ -127,6 +256,7 @@ def _verify_model_id_matches_canonical_identity(model: dict[str, Any], model_id:
             version=version,
             path=str(model.get("source_path") or ""),
         )
+
 
 def _canonical_basin_slug_from_source_path(model: dict[str, Any], model_id: str, version: str) -> str:
     root_relative = model.get("root_relative_resolved_path") or model.get("root_relative_path")
@@ -158,6 +288,7 @@ def _canonical_basin_slug_from_source_path(model: dict[str, Any], model_id: str,
         )
     return canonical_slug
 
+
 def _resolved_inventory_root(inventory: dict[str, Any], model_id: str, version: str) -> Path:
     resolved = inventory.get("resolved_root")
     if not isinstance(resolved, str) or not resolved:
@@ -178,6 +309,7 @@ def _resolved_inventory_root(inventory: dict[str, Any], model_id: str, version: 
         )
     return inventory_root
 
+
 def _recorded_relative_inventory_root(inventory: dict[str, Any]) -> Path | None:
     root = inventory.get("root")
     if not isinstance(root, str) or not root:
@@ -192,6 +324,7 @@ def _recorded_relative_inventory_root(inventory: dict[str, Any]) -> Path | None:
     if normalized == Path("."):
         return None
     return normalized
+
 
 def _resolved_source_root(model: dict[str, Any], inventory_root: Path, model_id: str, version: str) -> Path:
     root_relative = model.get("root_relative_resolved_path") or model.get("root_relative_path")
@@ -251,6 +384,7 @@ def _resolved_source_root(model: dict[str, Any], inventory_root: Path, model_id:
         )
     return source_root
 
+
 def _optional_shud_runtime_files(
     input_dir: Path,
     source_root: Path,
@@ -290,6 +424,7 @@ def _optional_shud_runtime_files(
         )
     return files
 
+
 def _validated_canonical_required_source_files(
     required_files: dict[str, Any],
     input_dir: Path,
@@ -318,9 +453,7 @@ def _validated_canonical_required_source_files(
         role_extras = [name for name in normalized_names if name != expected_path]
         extras.extend(f"{role}:{name}" for name in role_extras)
         direct_same_pattern_extras.extend(
-            f"{role}:{name}"
-            for name in role_extras
-            if len(Path(name).parts) == 1 and fnmatchcase(name, pattern)
+            f"{role}:{name}" for name in role_extras if len(Path(name).parts) == 1 and fnmatchcase(name, pattern)
         )
         if expected_count == 0:
             missing.append(role)
@@ -414,6 +547,7 @@ def _validated_canonical_required_source_files(
         )
     return files
 
+
 def _canonical_shud_required_file_name(input_name: str, pattern: str) -> str:
     if not pattern.startswith("*"):
         raise BasinsPackageError(
@@ -421,6 +555,7 @@ def _canonical_shud_required_file_name(input_name: str, pattern: str) -> str:
             f"Unsupported SHUD required file pattern: {pattern}",
         )
     return f"{input_name}{pattern.removeprefix('*')}"
+
 
 def _source_file_for_package(
     source_path: Path,
@@ -440,6 +575,7 @@ def _source_file_for_package(
         object_uri=object_store.uri_for_key(object_key) if object_store is not None else "",
         role=role,
     )
+
 
 def _expected_input_dir(
     model: dict[str, Any],
@@ -476,6 +612,7 @@ def _expected_input_dir(
         )
     return _resolve_package_path(source_root / "input" / safe_name, model_id=model_id, version=version)
 
+
 def _expected_forcing_dir(
     model: dict[str, Any],
     source_root: Path,
@@ -493,6 +630,7 @@ def _expected_forcing_dir(
             path=str(forcing_dir_original_name or ""),
         )
     return _resolve_package_path(source_root / forcing_dir_original_name, model_id=model_id, version=version)
+
 
 def _ensure_inventory_path_matches_expected(
     actual: Path,
@@ -512,6 +650,7 @@ def _ensure_inventory_path_matches_expected(
             path=str(actual),
         )
 
+
 def _planned_file_entry(
     source_file: SourceFile,
     *,
@@ -519,19 +658,26 @@ def _planned_file_entry(
     version: str,
     manifest_uri: str | None,
 ) -> dict[str, Any]:
-    size_bytes, sha256 = _source_file_evidence(
-        source_file.source_path,
-        source_file.source_root,
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
+    snapshot_bytes = getattr(source_file, "snapshot_bytes", None)
+    snapshot_sha256 = getattr(source_file, "snapshot_sha256", None)
+    if isinstance(snapshot_bytes, bytes) and isinstance(snapshot_sha256, str):
+        size_bytes = len(snapshot_bytes)
+        sha256 = snapshot_sha256
+    else:
+        size_bytes, sha256 = _source_file_evidence(
+            source_file.source_path,
+            source_file.source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
     return {
         "relative_path": source_file.relative_path,
         "role": source_file.role,
         "size_bytes": size_bytes,
         "sha256": sha256,
     }
+
 
 def _source_identity_from_plan(
     *,
@@ -576,6 +722,7 @@ def _source_identity_from_plan(
         planned_entries,
     )
 
+
 def _verify_expected_source_identity(
     expected: dict[str, Any] | None,
     actual: dict[str, Any],
@@ -598,6 +745,7 @@ def _verify_expected_source_identity(
             manifest_uri=manifest_uri,
         )
 
+
 def _package_source_files(
     model: dict[str, Any],
     inventory_root: Path,
@@ -609,7 +757,7 @@ def _package_source_files(
     model_id: str,
     version: str,
     manifest_uri: str | None,
-    walk_source_files: Callable[[Path, Path], Iterator[Path]]
+    walk_source_files: Callable[[Path, Path], Iterator[Path]],
 ) -> list[SourceFile]:
     expected_input_dir = _expected_input_dir(model, source_root, model_id=model_id, version=version)
     input_dir = _safe_source_dir(
@@ -689,9 +837,7 @@ def _package_source_files(
                     relative_path=relative_path,
                     object_key=f"{package_key}/{relative_path}" if object_store is not None else "",
                     object_uri=(
-                        object_store.uri_for_key(f"{package_key}/{relative_path}")
-                        if object_store is not None
-                        else ""
+                        object_store.uri_for_key(f"{package_key}/{relative_path}") if object_store is not None else ""
                     ),
                     role="calibration",
                 )

@@ -15,283 +15,130 @@ from pathlib import Path
 from typing import Any, Callable
 from typing import BinaryIO as BinaryIO
 
-from packages.common.object_store import MAX_OBJECT_MANIFEST_BYTES, LocalObjectStore, ObjectStoreError
+from packages.common.object_store import (
+    MAX_OBJECT_MANIFEST_BYTES,
+    LocalObjectStore,
+    ObjectStoreError,
+    normalize_object_key,
+)
 from packages.common.storage import validate_object_path as validate_object_path
 
-from .basins_discovery import (
-    GIS_REQUIRED_FILES as GIS_REQUIRED_FILES,
-)
-from .basins_discovery import (
-    SHUD_REQUIRED_PATTERNS as SHUD_REQUIRED_PATTERNS,
-)
-from .basins_discovery import (
-    BasinsDiscoveryError as BasinsDiscoveryError,
-)
-from .basins_discovery import (
-    _classify_basins_root_metadata as _classify_basins_root_metadata,
-)
+from .basins_discovery import GIS_REQUIRED_FILES as GIS_REQUIRED_FILES
+from .basins_discovery import SHUD_REQUIRED_PATTERNS as SHUD_REQUIRED_PATTERNS
+from .basins_discovery import BasinsDiscoveryError as BasinsDiscoveryError
+from .basins_discovery import _classify_basins_root_metadata as _classify_basins_root_metadata
 from .basins_discovery import _slug_id as _basins_slug_id  # noqa: F401
-from .basins_discovery import (
-    discover_basins_inventory as discover_basins_inventory,
-)
-from .basins_package_contracts import (
-    BASINS_MIGRATION_REPORT_SCHEMA_VERSION as BASINS_MIGRATION_REPORT_SCHEMA_VERSION,
-)
-from .basins_package_contracts import (
-    BASINS_PACKAGE_SCHEMA_VERSION as BASINS_PACKAGE_SCHEMA_VERSION,
-)
-from .basins_package_contracts import (
-    BASINS_PACKAGE_SCHEMA_VERSION_V1 as BASINS_PACKAGE_SCHEMA_VERSION_V1,
-)
+from .basins_discovery import discover_basins_inventory as discover_basins_inventory
+from .basins_package_contracts import BASINS_MIGRATION_REPORT_SCHEMA_VERSION as BASINS_MIGRATION_REPORT_SCHEMA_VERSION
+from .basins_package_contracts import BASINS_PACKAGE_SCHEMA_VERSION as BASINS_PACKAGE_SCHEMA_VERSION
+from .basins_package_contracts import BASINS_PACKAGE_SCHEMA_VERSION_V1 as BASINS_PACKAGE_SCHEMA_VERSION_V1
 from .basins_package_contracts import (
     BASINS_PACKAGE_SOURCE_IDENTITY_SCHEMA_VERSION as BASINS_PACKAGE_SOURCE_IDENTITY_SCHEMA_VERSION,
 )
-from .basins_package_contracts import (
-    FORCING_SAMPLE_BYTE_LIMIT as FORCING_SAMPLE_BYTE_LIMIT,
-)
-from .basins_package_contracts import (
-    FORCING_SAMPLE_LINE_LIMIT as FORCING_SAMPLE_LINE_LIMIT,
-)
+from .basins_package_contracts import FORCING_SAMPLE_BYTE_LIMIT as FORCING_SAMPLE_BYTE_LIMIT
+from .basins_package_contracts import FORCING_SAMPLE_LINE_LIMIT as FORCING_SAMPLE_LINE_LIMIT
 from .basins_package_contracts import (
     SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS as SUPPORTED_BASINS_PACKAGE_SCHEMA_VERSIONS,
 )
-from .basins_package_contracts import (
-    BasinsPackageError as BasinsPackageError,
-)
-from .basins_package_contracts import (
-    ObjectStoreParent as ObjectStoreParent,
-)
-from .basins_package_contracts import (
-    SourceFile as SourceFile,
-)
-from .basins_package_contracts import (
-    _json_bytes as _json_bytes,
-)
-from .basins_package_contracts import (
-    _sha256_bytes as _sha256_bytes,
-)
-from .basins_package_contracts import (
-    _sha256_file as _sha256_file,
-)
-from .basins_package_contracts import (
-    _sha256_handle as _sha256_handle,
-)
-from .basins_package_contracts import (
-    _sha256_json as _sha256_json,
-)
+from .basins_package_contracts import BasinsPackageError as BasinsPackageError
+from .basins_package_contracts import ObjectStoreParent as ObjectStoreParent
+from .basins_package_contracts import SourceFile as SourceFile
+from .basins_package_contracts import _json_bytes as _json_bytes
+from .basins_package_contracts import _sha256_bytes as _sha256_bytes
+from .basins_package_contracts import _sha256_file as _sha256_file
+from .basins_package_contracts import _sha256_handle as _sha256_handle
+from .basins_package_contracts import _sha256_json as _sha256_json
 from .basins_package_contracts import (
     forcing_checksum_material_for_schema_version as forcing_checksum_material_for_schema_version,
 )
-from .basins_package_inventory import (
-    _canonical_basin_slug_from_source_path as _canonical_basin_slug_from_source_path,
-)
-from .basins_package_inventory import (
-    _canonical_shud_required_file_name as _canonical_shud_required_file_name,
-)
-from .basins_package_inventory import (
-    _ensure_inventory_path_matches_expected as _ensure_inventory_path_matches_expected,
-)
-from .basins_package_inventory import (
-    _expected_forcing_dir as _expected_forcing_dir,
-)
-from .basins_package_inventory import (
-    _expected_input_dir as _expected_input_dir,
-)
-from .basins_package_inventory import (
-    _find_publishable_model as _find_publishable_model,
-)
-from .basins_package_inventory import (
-    _optional_shud_runtime_files as _optional_shud_runtime_files,
-)
+from .basins_package_inventory import _canonical_basin_slug_from_source_path as _canonical_basin_slug_from_source_path
+from .basins_package_inventory import _canonical_shud_required_file_name as _canonical_shud_required_file_name
+from .basins_package_inventory import _ensure_inventory_path_matches_expected as _ensure_inventory_path_matches_expected
+from .basins_package_inventory import _expected_forcing_dir as _expected_forcing_dir
+from .basins_package_inventory import _expected_input_dir as _expected_input_dir
+from .basins_package_inventory import _find_publishable_model as _find_publishable_model
+from .basins_package_inventory import _optional_shud_runtime_files as _optional_shud_runtime_files
 from .basins_package_inventory import _package_source_files as _leaf_package_source_files
+from .basins_package_inventory import _planned_file_entry as _planned_file_entry
+from .basins_package_inventory import _read_inventory as _read_inventory
+from .basins_package_inventory import _recorded_relative_inventory_root as _recorded_relative_inventory_root
 from .basins_package_inventory import (
-    _planned_file_entry as _planned_file_entry,
+    _relative_inventory_path_matches_expected as _relative_inventory_path_matches_expected,
 )
+from .basins_package_inventory import _resolved_inventory_root as _resolved_inventory_root
+from .basins_package_inventory import _resolved_source_root as _resolved_source_root
+from .basins_package_inventory import _safe_source_dir as _safe_source_dir
+from .basins_package_inventory import _safe_source_file as _safe_source_file
 from .basins_package_inventory import (
-    _read_inventory as _read_inventory,
+    _source_dir_from_relative_inventory_value as _source_dir_from_relative_inventory_value,
 )
-from .basins_package_inventory import (
-    _recorded_relative_inventory_root as _recorded_relative_inventory_root,
-)
-from .basins_package_inventory import (
-    _resolved_inventory_root as _resolved_inventory_root,
-)
-from .basins_package_inventory import (
-    _resolved_source_root as _resolved_source_root,
-)
-from .basins_package_inventory import (
-    _source_file_for_package as _source_file_for_package,
-)
-from .basins_package_inventory import (
-    _source_identity_from_plan as _source_identity_from_plan,
-)
+from .basins_package_inventory import _source_file_for_package as _source_file_for_package
+from .basins_package_inventory import _source_identity_from_plan as _source_identity_from_plan
 from .basins_package_inventory import (
     _validated_canonical_required_source_files as _validated_canonical_required_source_files,
 )
-from .basins_package_inventory import (
-    _verify_expected_source_identity as _verify_expected_source_identity,
-)
+from .basins_package_inventory import _verify_expected_source_identity as _verify_expected_source_identity
 from .basins_package_inventory import (
     _verify_model_id_matches_canonical_identity as _verify_model_id_matches_canonical_identity,
 )
-from .basins_package_manifest import (
-    _calibration_metadata as _calibration_metadata,
-)
+from .basins_package_manifest import _calibration_metadata as _calibration_metadata
 from .basins_package_manifest import _forcing_metadata as _leaf_forcing_metadata
-from .basins_package_manifest import (
-    _forcing_metadata_from_written_entries as _forcing_metadata_from_written_entries,
-)
-from .basins_package_manifest import (
-    _manifest_file_entry as _manifest_file_entry,
-)
-from .basins_package_manifest import (
-    _manifest_payload_without_self_entry as _manifest_payload_without_self_entry,
-)
-from .basins_package_manifest import (
-    _manifest_with_manifest_entry as _manifest_with_manifest_entry,
-)
-from .basins_package_manifest import (
-    _success_payload as _success_payload,
-)
+from .basins_package_manifest import _forcing_metadata_from_written_entries as _forcing_metadata_from_written_entries
+from .basins_package_manifest import _manifest_file_entry as _manifest_file_entry
+from .basins_package_manifest import _manifest_payload_without_self_entry as _manifest_payload_without_self_entry
+from .basins_package_manifest import _manifest_with_manifest_entry as _manifest_with_manifest_entry
+from .basins_package_manifest import _success_payload as _success_payload
 from .basins_package_manifest import _verify_existing_manifest_consistency as _leaf_verify_existing_manifest_consistency
-from .basins_package_object_store import (
-    _acquire_publish_lock as _acquire_publish_lock,
-)
-from .basins_package_object_store import (
-    _directory_uri as _directory_uri,
-)
-from .basins_package_object_store import (
-    _manifest_file_entry_for_source_file as _manifest_file_entry_for_source_file,
-)
-from .basins_package_object_store import (
-    _object_cloexec_flag as _object_cloexec_flag,
-)
-from .basins_package_object_store import (
-    _object_exists_no_symlinks as _object_exists_no_symlinks,
-)
-from .basins_package_object_store import (
-    _object_key_parts as _object_key_parts,
-)
-from .basins_package_object_store import (
-    _object_no_follow_flag as _object_no_follow_flag,
-)
-from .basins_package_object_store import (
-    _object_os_open as _object_os_open,
-)
-from .basins_package_object_store import (
-    _object_os_replace as _object_os_replace,
-)
-from .basins_package_object_store import (
-    _object_os_stat as _object_os_stat,
-)
-from .basins_package_object_store import (
-    _object_os_unlink as _object_os_unlink,
-)
-from .basins_package_object_store import (
-    _object_parent_for_existing_read as _object_parent_for_existing_read,
-)
-from .basins_package_object_store import (
-    _object_parent_for_existing_write as _object_parent_for_existing_write,
-)
-from .basins_package_object_store import (
-    _object_parent_for_write as _object_parent_for_write,
-)
-from .basins_package_object_store import (
-    _object_path_component_is_symlink as _object_path_component_is_symlink,
-)
-from .basins_package_object_store import (
-    _object_path_for_key as _object_path_for_key,
-)
-from .basins_package_object_store import (
-    _object_path_rejecting_symlinks as _object_path_rejecting_symlinks,
-)
-from .basins_package_object_store import (
-    _object_path_unsafe_error as _object_path_unsafe_error,
-)
+from .basins_package_object_store import _acquire_publish_lock as _acquire_publish_lock
+from .basins_package_object_store import _directory_uri as _directory_uri
+from .basins_package_object_store import _manifest_file_entry_for_source_file as _manifest_file_entry_for_source_file
+from .basins_package_object_store import _object_cloexec_flag as _object_cloexec_flag
+from .basins_package_object_store import _object_exists_no_symlinks as _object_exists_no_symlinks
+from .basins_package_object_store import _object_key_parts as _object_key_parts
+from .basins_package_object_store import _object_no_follow_flag as _object_no_follow_flag
+from .basins_package_object_store import _object_os_open as _object_os_open
+from .basins_package_object_store import _object_os_replace as _object_os_replace
+from .basins_package_object_store import _object_os_stat as _object_os_stat
+from .basins_package_object_store import _object_os_unlink as _object_os_unlink
+from .basins_package_object_store import _object_parent_for_existing_read as _object_parent_for_existing_read
+from .basins_package_object_store import _object_parent_for_existing_write as _object_parent_for_existing_write
+from .basins_package_object_store import _object_parent_for_write as _object_parent_for_write
+from .basins_package_object_store import _object_path_component_is_symlink as _object_path_component_is_symlink
+from .basins_package_object_store import _object_path_for_key as _object_path_for_key
+from .basins_package_object_store import _object_path_rejecting_symlinks as _object_path_rejecting_symlinks
+from .basins_package_object_store import _object_path_unsafe_error as _object_path_unsafe_error
 from .basins_package_object_store import _object_size_and_checksum_streaming as _leaf_object_size_and_checksum_streaming
-from .basins_package_object_store import (
-    _object_store_from_env as _object_store_from_env,
-)
-from .basins_package_object_store import (
-    _open_object_file_no_symlinks as _open_object_file_no_symlinks,
-)
-from .basins_package_object_store import (
-    _open_object_parent_at as _open_object_parent_at,
-)
-from .basins_package_object_store import (
-    _preflight_object_store_keys as _preflight_object_store_keys,
-)
-from .basins_package_object_store import (
-    _read_object_bytes_no_symlinks as _read_object_bytes_no_symlinks,
-)
-from .basins_package_object_store import (
-    _release_publish_lock as _release_publish_lock,
-)
-from .basins_package_object_store import (
-    _remove_object_temp_path as _remove_object_temp_path,
-)
-from .basins_package_object_store import (
-    _validate_object_key_segment as _validate_object_key_segment,
-)
+from .basins_package_object_store import _object_store_from_env as _object_store_from_env
+from .basins_package_object_store import _open_object_file_no_symlinks as _open_object_file_no_symlinks
+from .basins_package_object_store import _open_object_parent_at as _open_object_parent_at
+from .basins_package_object_store import _preflight_object_store_keys as _preflight_object_store_keys
+from .basins_package_object_store import _read_object_bytes_no_symlinks as _read_object_bytes_no_symlinks
+from .basins_package_object_store import _release_publish_lock as _release_publish_lock
+from .basins_package_object_store import _remove_object_temp_path as _remove_object_temp_path
+from .basins_package_object_store import _validate_object_key_segment as _validate_object_key_segment
 from .basins_package_object_store import _verify_object_bytes as _leaf_verify_object_bytes
-from .basins_package_object_store import (
-    _write_bytes_to_store_atomic as _write_bytes_to_store_atomic,
-)
+from .basins_package_object_store import _write_bytes_to_store_atomic as _write_bytes_to_store_atomic
 from .basins_package_object_store import _write_file_to_store_streaming as _leaf_write_file_to_store_streaming
 from .basins_package_object_store import _write_source_file_to_store as _leaf_write_source_file_to_store
+from .basins_package_source_io import _bind_mapping_source_files as _leaf_bind_mapping_source_files
 from .basins_package_source_io import _csv_time_evidence as _leaf_csv_time_evidence
 from .basins_package_source_io import _directory_evidence as _leaf_directory_evidence
-from .basins_package_source_io import (
-    _ensure_under_root as _ensure_under_root,
-)
-from .basins_package_source_io import (
-    _ensure_under_source_root as _ensure_under_source_root,
-)
-from .basins_package_source_io import (
-    _is_ignored_source_path as _is_ignored_source_path,
-)
+from .basins_package_source_io import _ensure_under_root as _ensure_under_root
+from .basins_package_source_io import _ensure_under_source_root as _ensure_under_source_root
+from .basins_package_source_io import _is_ignored_source_path as _is_ignored_source_path
 from .basins_package_source_io import _migration_source_file_evidence as _leaf_migration_source_file_evidence
-from .basins_package_source_io import (
-    _normalize_relative_path as _normalize_relative_path,
-)
-from .basins_package_source_io import (
-    _open_verified_source_file as _open_verified_source_file,
-)
-from .basins_package_source_io import (
-    _open_verified_source_file_at as _open_verified_source_file_at,
-)
-from .basins_package_source_io import (
-    _preflight_json_output_path as _preflight_json_output_path,
-)
-from .basins_package_source_io import (
-    _reject_source_symlink_path as _reject_source_symlink_path,
-)
-from .basins_package_source_io import (
-    _relative_inventory_path_matches_expected as _relative_inventory_path_matches_expected,
-)
-from .basins_package_source_io import (
-    _resolve_package_path as _resolve_package_path,
-)
-from .basins_package_source_io import (
-    _safe_source_dir as _safe_source_dir,
-)
-from .basins_package_source_io import (
-    _safe_source_file as _safe_source_file,
-)
-from .basins_package_source_io import (
-    _source_dir_from_relative_inventory_value as _source_dir_from_relative_inventory_value,
-)
-from .basins_package_source_io import (
-    _source_file_evidence as _source_file_evidence,
-)
+from .basins_package_source_io import _normalize_relative_path as _normalize_relative_path
+from .basins_package_source_io import _open_verified_source_file as _open_verified_source_file
+from .basins_package_source_io import _open_verified_source_file_at as _open_verified_source_file_at
+from .basins_package_source_io import _preflight_json_output_path as _preflight_json_output_path
+from .basins_package_source_io import _reject_source_symlink_path as _reject_source_symlink_path
+from .basins_package_source_io import _resolve_package_path as _resolve_package_path
+from .basins_package_source_io import _source_file_evidence as _source_file_evidence
 from .basins_package_source_io import _source_file_size as _leaf_source_file_size
-from .basins_package_source_io import (
-    _verified_source_file_evidence as _verified_source_file_evidence,
-)
+from .basins_package_source_io import _validate_rivseg_reach_mapping as _leaf_validate_rivseg_reach_mapping
+from .basins_package_source_io import _verified_source_file_evidence as _verified_source_file_evidence
 from .basins_package_source_io import _walk_source_files as _leaf_walk_source_files
-from .basins_package_source_io import (
-    _write_json_file as _write_json_file,
-)
+from .basins_package_source_io import _write_json_file as _write_json_file
 
 # #1813: forcing CSV payload evidence left package identity here.  The bump is
 # itself the named identity migration -- BASINS_PACKAGE_SCHEMA_VERSION is inside
@@ -333,15 +180,15 @@ def publish_basins_package(
     _validate_object_key_segment(version, "version", model_id=model_id, version=version)
     inventory, inventory_bytes = _read_inventory(inventory_path)
     model = _find_publishable_model(inventory, model_id, version)
-    store = object_store or _object_store_from_env(model_id=model_id, version=version)
 
     base_key = f"models/{model_id}/{version}"
     package_key = f"{base_key}/package"
     forcing_key = f"{base_key}/forcing"
     manifest_key = f"{base_key}/manifest.json"
     lock_key = f"{base_key}/.publish.lock"
-    model_package_uri = _directory_uri(store, package_key)
-    manifest_uri = store.uri_for_key(manifest_key)
+    store = object_store
+    manifest_uri = _planned_object_uri(manifest_key, object_store=store)
+    model_package_uri = _planned_directory_uri(package_key, object_store=store)
     inventory_root = _resolved_inventory_root(inventory, model_id, version)
     inventory_relative_root = _recorded_relative_inventory_root(inventory)
     source_root = _resolved_source_root(model, inventory_root, model_id, version)
@@ -351,11 +198,26 @@ def publish_basins_package(
         inventory_root,
         inventory_relative_root,
         source_root,
-        store,
-        package_key,
+        None,
+        "",
         model_id=model_id,
         version=version,
         manifest_uri=manifest_uri,
+    )
+    package_files = _validate_rivseg_reach_mapping(
+        package_files,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    if store is None:
+        store = _object_store_from_env(model_id=model_id, version=version)
+    manifest_uri = store.uri_for_key(manifest_key)
+    model_package_uri = _directory_uri(store, package_key)
+    package_files = _bind_mapping_source_files(
+        package_files,
+        object_store=store,
+        package_key=package_key,
     )
     forcing, forcing_files = _forcing_metadata(
         model=model,
@@ -627,6 +489,12 @@ def basins_package_source_identity(
         version=version,
         manifest_uri=None,
     )
+    package_files = _validate_rivseg_reach_mapping(
+        package_files,
+        model_id=model_id,
+        version=version,
+        manifest_uri=None,
+    )
     forcing, forcing_files = _forcing_metadata(
         model=model,
         inventory_root=inventory_root,
@@ -709,6 +577,20 @@ def _forcing_checksum_material(forcing: Mapping[str, Any]) -> dict[str, Any]:
     return forcing_checksum_material_for_schema_version(forcing, BASINS_PACKAGE_SCHEMA_VERSION)
 
 
+def _planned_object_uri(key: str, *, object_store: LocalObjectStore | None) -> str:
+    """Compute a publication URI without constructing an environment-backed store."""
+
+    if object_store is not None:
+        return object_store.uri_for_key(key)
+    prefix = os.getenv("OBJECT_STORE_PREFIX", "").strip()
+    normalized_key = normalize_object_key(key, prefix)
+    return f"{prefix.rstrip('/')}/{normalized_key}" if prefix else normalized_key
+
+
+def _planned_directory_uri(key: str, *, object_store: LocalObjectStore | None) -> str:
+    return _planned_object_uri(key, object_store=object_store).rstrip("/") + "/"
+
+
 def _read_existing_manifest(
     store: LocalObjectStore,
     manifest_key: str,
@@ -777,6 +659,36 @@ def _package_source_files(
 
 def _walk_source_files(root: Path, source_root: Path) -> Iterator[Path]:
     return _leaf_walk_source_files(root, source_root)
+
+
+def _validate_rivseg_reach_mapping(
+    source_files: Sequence[SourceFile],
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> list[SourceFile]:
+    """Facade-global validator binding shared by both public package seams."""
+
+    return _leaf_validate_rivseg_reach_mapping(
+        source_files,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+
+
+def _bind_mapping_source_files(
+    source_files: Sequence[SourceFile],
+    *,
+    object_store: LocalObjectStore,
+    package_key: str,
+) -> list[SourceFile]:
+    return _leaf_bind_mapping_source_files(
+        source_files,
+        object_store=object_store,
+        package_key=package_key,
+    )
 
 
 def _csv_time_evidence(

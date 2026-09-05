@@ -114,8 +114,6 @@ def _make_valid_model(
     for suffix in (
         "cfg.para",
         "cfg.calib",
-        "sp.riv",
-        "sp.rivseg",
         "sp.att",
         "lake.bathy",
         "lake.ic",
@@ -134,6 +132,14 @@ def _make_valid_model(
         "484\t6\t38920320.000000\n1\t0.1\n", encoding="utf-8"
     )
     (input_dir / f"{input_name}.sp.mesh").write_text("484\t8\nID\tNode1\n", encoding="utf-8")
+    (input_dir / f"{input_name}.sp.riv").write_text(
+        "1 6\nIndex Down Type Slope Length BC\n1 0 0 0.01 100 0\n",
+        encoding="utf-8",
+    )
+    (input_dir / f"{input_name}.sp.rivseg").write_text(
+        "1 4\nIndex iRiv iEle Length\n1 1 1 100\n",
+        encoding="utf-8",
+    )
     (input_dir / f"{input_name}.lake.sp").write_text("lake.sp\n", encoding="utf-8")
     if include_tsd_rl:
         (input_dir / f"{input_name}.tsd.rl").write_text("radiation\n", encoding="utf-8")

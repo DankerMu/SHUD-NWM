@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, replace
 from errno import ENOENT
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -12,11 +13,437 @@ from .basins_package_contracts import (
     FORCING_SAMPLE_BYTE_LIMIT,
     FORCING_SAMPLE_LINE_LIMIT,
     BasinsPackageError,
+    SourceFile,
     _json_bytes,
     _sha256_handle,
 )
 
 _OS_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
+
+MAX_RIVSEG_MAPPING_BYTES = 16 * 1024 * 1024
+MAX_RIVSEG_LEADING_SKIP_LINES = 32
+MAX_RIVSEG_INT_DIGITS = 18
+MAX_RIVSEG_REPORTED_MISSING_IRIV = 16
+
+
+@dataclass(frozen=True)
+class _MappingSourceFile(SourceFile):
+    snapshot_bytes: bytes
+    snapshot_sha256: str
+
+
+def _validate_rivseg_reach_mapping(
+    source_files: Sequence[SourceFile],
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> list[SourceFile]:
+    riv = _canonical_mapping_source(
+        source_files,
+        ".sp.riv",
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    rivseg = _canonical_mapping_source(
+        source_files,
+        ".sp.rivseg",
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    riv_snapshot = _mapping_snapshot(
+        riv,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    rivseg_snapshot = _mapping_snapshot(
+        rivseg,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    reach_count, reach_ids = _parse_riv_reach_indices(
+        riv_snapshot,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    segment_count, mapped_reach_ids = _parse_rivseg_mapped_reaches(
+        rivseg_snapshot,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    missing_ids = sorted(mapped_reach_ids - reach_ids)
+    if missing_ids:
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=str(rivseg.source_path),
+            manifest_uri=manifest_uri,
+            cause="missing_reference",
+            details={"missing_iriv": missing_ids[:MAX_RIVSEG_REPORTED_MISSING_IRIV]},
+        )
+    if reach_count > 1 and segment_count > 1 and len(mapped_reach_ids) == 1:
+        raise BasinsPackageError(
+            "BASINS_RIVSEG_MAPPING_DEGENERATE",
+            "SHUD .sp.rivseg maps every segment to one reach.",
+            model_id=model_id,
+            version=version,
+            path=str(rivseg.source_path),
+            manifest_uri=manifest_uri,
+            details={
+                "reach_count": reach_count,
+                "segment_count": segment_count,
+                "mapped_reach_count": 1,
+                "mapped_reach_id": next(iter(mapped_reach_ids)),
+            },
+        )
+    snapshots = {riv.source_path: riv_snapshot, rivseg.source_path: rivseg_snapshot}
+    return [snapshots.get(source_file.source_path, source_file) for source_file in source_files]
+
+
+def _canonical_mapping_source(
+    source_files: Sequence[SourceFile],
+    suffix: str,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> SourceFile:
+    matches = [
+        source_file
+        for source_file in source_files
+        if source_file.role == "runtime_input" and source_file.relative_path.endswith(suffix)
+    ]
+    if len(matches) != 1:
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=None,
+            manifest_uri=manifest_uri,
+            cause="canonical_mapping_file_count",
+            details={"suffix": suffix, "count": len(matches)},
+        )
+    return matches[0]
+
+
+def _mapping_snapshot(
+    source_file: SourceFile,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> _MappingSourceFile:
+    content = _read_verified_mapping_bytes(
+        source_file,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+    )
+    return _MappingSourceFile(
+        source_path=source_file.source_path,
+        source_root=source_file.source_root,
+        relative_path=source_file.relative_path,
+        object_key=source_file.object_key,
+        object_uri=source_file.object_uri,
+        role=source_file.role,
+        snapshot_bytes=content,
+        snapshot_sha256=hashlib.sha256(content).hexdigest(),
+    )
+
+
+def _read_verified_mapping_bytes(
+    source_file: SourceFile,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> bytes:
+    try:
+        with _open_verified_source_file(
+            source_file.source_path,
+            source_file.source_root,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        ) as handle:
+            size_bytes = os.fstat(handle.fileno()).st_size
+            if size_bytes > MAX_RIVSEG_MAPPING_BYTES:
+                raise _mapping_invalid_error(
+                    model_id=model_id,
+                    version=version,
+                    path=str(source_file.source_path),
+                    manifest_uri=manifest_uri,
+                    cause="over_limit",
+                    details={"limit_bytes": MAX_RIVSEG_MAPPING_BYTES, "size_bytes": size_bytes},
+                )
+            content = handle.read(MAX_RIVSEG_MAPPING_BYTES + 1)
+    except BasinsPackageError:
+        raise
+    except OSError:
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=str(source_file.source_path),
+            manifest_uri=manifest_uri,
+            cause="unreadable",
+        ) from None
+    if len(content) > MAX_RIVSEG_MAPPING_BYTES:
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=str(source_file.source_path),
+            manifest_uri=manifest_uri,
+            cause="over_limit",
+            details={"limit_bytes": MAX_RIVSEG_MAPPING_BYTES},
+        )
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=str(source_file.source_path),
+            manifest_uri=manifest_uri,
+            cause="invalid_utf8",
+        ) from None
+    return content
+
+
+def _parse_riv_reach_indices(
+    source_file: _MappingSourceFile,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> tuple[int, set[int]]:
+    count, rows = _parse_declared_mapping_rows(
+        source_file,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+        standard_header=("Index", "Down", "Type", "Slope", "Length", "BC"),
+        forbid_extra_rows=False,
+    )
+    reach_ids: set[int] = set()
+    for row in rows:
+        reach_id = _mapping_integer_column(
+            row,
+            0,
+            source_file=source_file,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+        if reach_id in reach_ids:
+            raise _mapping_invalid_error(
+                model_id=model_id,
+                version=version,
+                path=str(source_file.source_path),
+                manifest_uri=manifest_uri,
+                cause="duplicate_reach_index",
+                details={"index": reach_id},
+            )
+        reach_ids.add(reach_id)
+    return count, reach_ids
+
+
+def _parse_rivseg_mapped_reaches(
+    source_file: _MappingSourceFile,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> tuple[int, set[int]]:
+    count, rows = _parse_declared_mapping_rows(
+        source_file,
+        model_id=model_id,
+        version=version,
+        manifest_uri=manifest_uri,
+        standard_header=("Index", "iRiv", "iEle", "Length"),
+        forbid_extra_rows=True,
+    )
+    mapped_reach_ids: set[int] = set()
+    for row in rows:
+        _mapping_integer_column(
+            row,
+            0,
+            source_file=source_file,
+            model_id=model_id,
+            version=version,
+            manifest_uri=manifest_uri,
+        )
+        mapped_reach_ids.add(
+            _mapping_integer_column(
+                row,
+                1,
+                source_file=source_file,
+                model_id=model_id,
+                version=version,
+                manifest_uri=manifest_uri,
+            )
+        )
+    return count, mapped_reach_ids
+
+
+def _parse_declared_mapping_rows(
+    source_file: _MappingSourceFile,
+    *,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+    standard_header: tuple[str, ...],
+    forbid_extra_rows: bool,
+) -> tuple[int, list[list[str]]]:
+    lines = source_file.snapshot_bytes.decode("utf-8").splitlines()
+    position = 0
+    skipped = 0
+    while position < len(lines) and _is_mapping_blank_or_comment(lines[position]):
+        skipped += 1
+        if skipped > MAX_RIVSEG_LEADING_SKIP_LINES:
+            raise _mapping_invalid_error(
+                model_id=model_id,
+                version=version,
+                path=str(source_file.source_path),
+                manifest_uri=manifest_uri,
+                cause="leading_skip_exceeded",
+                details={"limit_lines": MAX_RIVSEG_LEADING_SKIP_LINES},
+            )
+        position += 1
+    if position >= len(lines):
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=str(source_file.source_path),
+            manifest_uri=manifest_uri,
+            cause="missing_count",
+        )
+    count = _parse_mapping_integer(lines[position].split()[0] if lines[position].split() else "")
+    if count is None or count < 1:
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=str(source_file.source_path),
+            manifest_uri=manifest_uri,
+            cause="invalid_count",
+        )
+    position += 1
+    while position < len(lines) and _is_mapping_blank_or_comment(lines[position]):
+        position += 1
+    if position < len(lines):
+        tokens = lines[position].split()
+        if tuple(tokens) == standard_header:
+            position += 1
+        elif tokens and _parse_mapping_integer(tokens[0]) is None:
+            raise _mapping_invalid_error(
+                model_id=model_id,
+                version=version,
+                path=str(source_file.source_path),
+                manifest_uri=manifest_uri,
+                cause="invalid_header",
+            )
+    rows: list[list[str]] = []
+    while position < len(lines) and len(rows) < count:
+        line = lines[position]
+        position += 1
+        if not _is_mapping_blank_or_comment(line):
+            rows.append(line.split())
+    if len(rows) != count:
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=str(source_file.source_path),
+            manifest_uri=manifest_uri,
+            cause="truncated_block",
+            details={"declared_count": count, "row_count": len(rows)},
+        )
+    if forbid_extra_rows and any(not _is_mapping_blank_or_comment(line) for line in lines[position:]):
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=str(source_file.source_path),
+            manifest_uri=manifest_uri,
+            cause="extra_segment_row",
+        )
+    return count, rows
+
+
+def _mapping_integer_column(
+    row: Sequence[str],
+    column: int,
+    *,
+    source_file: _MappingSourceFile,
+    model_id: str,
+    version: str,
+    manifest_uri: str | None,
+) -> int:
+    token = row[column] if column < len(row) else ""
+    value = _parse_mapping_integer(token)
+    if value is None:
+        raise _mapping_invalid_error(
+            model_id=model_id,
+            version=version,
+            path=str(source_file.source_path),
+            manifest_uri=manifest_uri,
+            cause="missing_column" if column >= len(row) else "invalid_integer",
+        )
+    return value
+
+
+def _parse_mapping_integer(token: str) -> int | None:
+    body = token[1:] if token and token[0] in "+-" else token
+    if not body or len(body) > MAX_RIVSEG_INT_DIGITS:
+        return None
+    if not body.isascii() or any(character < "0" or character > "9" for character in body):
+        return None
+    return int(token, 10)
+
+
+def _is_mapping_blank_or_comment(line: str) -> bool:
+    stripped = line.strip()
+    return not stripped or stripped.startswith(("#", "//", "%"))
+
+
+def _mapping_invalid_error(
+    *,
+    model_id: str,
+    version: str,
+    path: str | None,
+    manifest_uri: str | None,
+    cause: str,
+    details: dict[str, Any] | None = None,
+) -> BasinsPackageError:
+    return BasinsPackageError(
+        "BASINS_RIVSEG_MAPPING_INVALID",
+        "SHUD .sp.riv / .sp.rivseg mapping is invalid.",
+        model_id=model_id,
+        version=version,
+        path=path,
+        manifest_uri=manifest_uri,
+        details={"cause": cause, **(details or {})},
+    )
+
+
+def _bind_mapping_source_files(
+    source_files: Sequence[SourceFile],
+    *,
+    object_store: Any,
+    package_key: str,
+) -> list[SourceFile]:
+    """Bind package object locations while preserving validated mapping snapshots."""
+
+    return [
+        replace(
+            source_file,
+            object_key=f"{package_key}/{source_file.relative_path}",
+            object_uri=object_store.uri_for_key(f"{package_key}/{source_file.relative_path}"),
+        )
+        for source_file in source_files
+    ]
 
 
 def _source_file_evidence(
@@ -37,6 +464,7 @@ def _source_file_evidence(
         manifest_uri=manifest_uri,
     )
 
+
 def _migration_source_file_evidence(path: Path, source_root: Path) -> tuple[int, str]:
     return _verified_source_file_evidence(
         path,
@@ -44,6 +472,7 @@ def _migration_source_file_evidence(path: Path, source_root: Path) -> tuple[int,
         read_error_code="BASINS_MIGRATION_EVIDENCE_READ_FAILED",
         read_error_message="Failed to read Basins migration evidence source file",
     )
+
 
 def _source_file_size(
     path: Path,
@@ -73,6 +502,7 @@ def _source_file_size(
             path=str(path),
             manifest_uri=manifest_uri,
         ) from error
+
 
 def _verified_source_file_evidence(
     path: Path,
@@ -106,6 +536,7 @@ def _verified_source_file_evidence(
         ) from error
     return size_bytes, sha256
 
+
 def _open_verified_source_file(
     path: Path,
     source_root: Path,
@@ -117,11 +548,7 @@ def _open_verified_source_file(
     _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
     resolved = _resolve_package_path(path, model_id=model_id, version=version)
     _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
-    if (
-        hasattr(os, "O_NOFOLLOW")
-        and hasattr(os, "O_DIRECTORY")
-        and _OS_OPEN_SUPPORTS_DIR_FD
-    ):
+    if hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY") and _OS_OPEN_SUPPORTS_DIR_FD:
         return _open_verified_source_file_at(
             resolved,
             source_root,
@@ -159,6 +586,7 @@ def _open_verified_source_file(
                 manifest_uri=manifest_uri,
             ) from error
         raise
+
 
 def _open_verified_source_file_at(
     resolved: Path,
@@ -302,134 +730,6 @@ def _open_verified_source_file_at(
             except OSError:
                 pass
 
-def _safe_source_dir(
-    value: Any,
-    inventory_root: Path,
-    inventory_relative_root: Path | None,
-    source_root: Path,
-    field_name: str,
-    *,
-    expected_path: Path,
-    model_id: str | None = None,
-    version: str | None = None,
-    manifest_uri: str | None = None,
-) -> Path:
-    if not isinstance(value, str) or not value:
-        raise BasinsPackageError(
-            "BASINS_INVENTORY_INVALID",
-            f"Basins model record is missing {field_name}.",
-            model_id=model_id,
-            version=version,
-            manifest_uri=manifest_uri,
-        )
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = _source_dir_from_relative_inventory_value(
-            path,
-            inventory_root,
-            inventory_relative_root,
-            source_root,
-            expected_path,
-            field_name,
-            model_id=model_id,
-            version=version,
-            manifest_uri=manifest_uri,
-        )
-    _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
-    resolved = _resolve_package_path(path)
-    _ensure_under_root(
-        resolved,
-        inventory_root,
-        error_code="BASINS_INVENTORY_PATH_MISMATCH",
-        message=f"Basins model {field_name} resolves outside the inventory root.",
-        model_id=model_id,
-        version=version,
-        manifest_uri=manifest_uri,
-    )
-    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
-    if not resolved.is_dir():
-        raise BasinsPackageError(
-            "BASINS_SOURCE_NOT_FOUND",
-            f"Basins source directory does not exist: {path}",
-            model_id=model_id,
-            version=version,
-            path=str(path),
-            manifest_uri=manifest_uri,
-        )
-    return resolved
-
-def _source_dir_from_relative_inventory_value(
-    path: Path,
-    inventory_root: Path,
-    inventory_relative_root: Path | None,
-    source_root: Path,
-    expected_path: Path,
-    field_name: str,
-    *,
-    model_id: str | None = None,
-    version: str | None = None,
-    manifest_uri: str | None = None,
-) -> Path:
-    normalized = Path(_normalize_relative_path(path.as_posix()))
-    if _relative_inventory_path_matches_expected(
-        normalized,
-        inventory_root,
-        inventory_relative_root,
-        source_root,
-        expected_path,
-    ):
-        return expected_path
-    candidate = inventory_root / normalized
-    raise BasinsPackageError(
-        "BASINS_INVENTORY_PATH_MISMATCH",
-        f"Basins inventory {field_name} does not match the selected model's canonical source path.",
-        model_id=model_id,
-        version=version,
-        path=str(candidate),
-        manifest_uri=manifest_uri,
-    )
-
-def _relative_inventory_path_matches_expected(
-    relative_path: Path,
-    inventory_root: Path,
-    inventory_relative_root: Path | None,
-    source_root: Path,
-    expected_path: Path,
-) -> bool:
-    expected_relative_paths: set[Path] = set()
-    for base in (source_root, inventory_root):
-        try:
-            expected_relative_paths.add(expected_path.relative_to(base))
-        except ValueError:
-            continue
-    if inventory_relative_root is not None:
-        try:
-            expected_relative_paths.add(inventory_relative_root / expected_path.relative_to(inventory_root))
-        except ValueError:
-            pass
-    return relative_path in expected_relative_paths
-
-def _safe_source_file(
-    path: Path,
-    source_root: Path,
-    *,
-    model_id: str | None = None,
-    version: str | None = None,
-    manifest_uri: str | None = None,
-) -> Path:
-    _reject_source_symlink_path(path, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
-    resolved = _resolve_package_path(path)
-    _ensure_under_source_root(resolved, source_root, model_id=model_id, version=version, manifest_uri=manifest_uri)
-    if not resolved.is_file():
-        raise BasinsPackageError(
-            "BASINS_SOURCE_NOT_FOUND",
-            f"Basins source file does not exist: {path}",
-            model_id=model_id,
-            version=version,
-            path=str(path),
-            manifest_uri=manifest_uri,
-        )
-    return resolved
 
 def _reject_source_symlink_path(
     path: Path,
