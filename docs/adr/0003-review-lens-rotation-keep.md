@@ -3308,3 +3308,45 @@ look at" — and that is not something the rotation figures can answer.
 
 Prior samples for trend: 172 (core=170, rotated=312), and the rotated share of
 later-round catches across earlier addenda ran 80% → 97% → 65%.
+
+## Addendum — 2026-09-05, sample 173 unchanged (PR #2072 / issue #2069)
+
+`loop_log_audit` returns DECIDABLE lens-rotation again: 173 multi-round merged
+PRs, later-round catches core=177 rotated=312 skipped=15. **The keep stands, and
+this run adds no evidence either way** — PR #2072 is a single-round line, so it
+contributes nothing to a statistic computed over later-round catches on
+multi-round PRs. The figures are byte-identical to the previous addendum's.
+
+Recording it anyway, because the *shape* of this sample sharpens the point the
+last addendum made about scope being an axis the log does not measure.
+
+All five catches on #2072 were claim-accuracy defects in prose the PR itself
+wrote, and none was found by lens rotation. The round-1 mix (correctness /
+integration / test-evidence) found two of them, and two independent lenses
+converged on the same one — a signal about the defect being real, not about the
+lens being well-chosen. The remaining three were found by the Phase 7 final
+review across three successive loops, each catching an error introduced by the
+*previous repair* rather than by the original diff. That is a distinct failure
+mode from anything the rotation ledger tracks: not "which lens looks at the
+code" but "who checks the fix." No round-1 lens, rotated or core, could have
+caught a defect that did not exist until the repair for a different defect was
+written.
+
+Two observations worth carrying forward, neither of which the rotation figures
+can settle:
+
+1. **Repair-introduced defects deserve their own accounting.** Three of five
+   catches here were regressions in text, introduced by fixes. The log's `catches`
+   array attributes by lens and round; it has no field distinguishing "found in
+   the original diff" from "found in a repair." If that ratio is high across the
+   corpus, the useful intervention is a mandatory re-read of one's own repair —
+   which is a process change, not a rotation change.
+2. **Prose-heavy fixtures are the recurring locus.** As in #2028 and #2067, the
+   code here was never faulted: three independent Phase 7 reviews each judged
+   their head mergeable and no reviewer found a defect in the gate change. What
+   kept failing was confident prose misdescribing a mechanism — here, naming a
+   status (`timeout`) that is not in `TERMINAL_JOB_STATUSES` at all. Tests cannot
+   constrain that class, and rotating lenses does not address it either.
+
+Prior samples for trend: 173 (core=177, rotated=312) — unchanged from the
+previous addendum, as expected for a single-round line.
