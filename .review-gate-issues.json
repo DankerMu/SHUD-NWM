@@ -2674,7 +2674,13 @@
     "2050": {
       "ceilingPrs": [],
       "gateEntries": 3,
-      "closed": []
+      "closed": [
+        {
+          "pr": 2057,
+          "outcome": "merged",
+          "rounds": 5
+        }
+      ]
     },
     "2069": {
       "ceilingPrs": [],
