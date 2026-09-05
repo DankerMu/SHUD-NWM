@@ -97,9 +97,18 @@ The system SHALL keep the default `gfs+discharge` overview cold first-paint with
 
 #### Scenario: Cold `/api/v1/layers` budget
 - **WHEN** a force-refresh load issues `GET /api/v1/layers` (runless) and `GET /api/v1/layers?run_id=<latest>` on a cold cache, with the intersection and default-cycle valid-time queries included in the catalog computation
-- **THEN** each response MUST return within ≤ 200 ms p95 on node-27 production hardware
+- **THEN** each response MUST return within ≤ 400 ms p95 on node-27 production hardware
 - **AND** no other bootstrap-critical endpoint MUST exceed 500 ms p95
 - **AND** the node-27 receipt for this change MUST record the measured cold p95 of `GET /api/v1/layers` before and after the change
+- **AND** the receipt MUST also record, for the after-measurement, the coverage-query row count and `len(cycles)` returned by the runless catalog, so a later budget regression can be attributed to row growth rather than re-measured blind
+
+> Budget note (user decision, i5-2009 round 1). The threshold in this scenario was ≤ 200 ms when the
+> change was authored. Two node-27 receipts measured master's own pre-change cold p95 for
+> `GET /api/v1/layers` at 331–392 ms, i.e. the 200 ms figure was already unmet before any code in this
+> change existed and is a mis-set budget, not a regression introduced here. The user set the threshold
+> to **400 ms**, which keeps the criterion red-capable against this change's own cost (the intersection
+> plus per-cycle valid-time queries) while not asserting a number master never met. Epic #2003's
+> acceptance item 2 still spells 200 ms and is amended separately — see the PR's 偏离记录.
 
 #### Scenario: Cold first-paint interactivity budget
 - **WHEN** the default `gfs+discharge` overview is opened on a cold cache with the precipitation overlay enabled and `loadOverview` is invoked

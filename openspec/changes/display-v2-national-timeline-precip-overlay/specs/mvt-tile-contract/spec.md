@@ -77,11 +77,15 @@ AND the `m11VectorSourceKey` case MUST assert a key that distinguishes `(source,
 ## ADDED Requirements
 
 ### Requirement: National discharge cycles and per-cycle valid times
-The backend SHALL expose `GET /api/v1/layers/discharge/cycles?source=gfs|ifs` returning `{source, cycles: [{cycle_time, valid_time_start, valid_time_end}], default_cycle}` where a cycle is listed only if **every** active river network has a display-ready run (`segment_count > 0`) for that source and cycle (intersection, fail-closed: an empty list when any network has no run). `GET /api/v1/layers/discharge/valid-times` SHALL accept optional `source` and `cycle` query parameters and, when both are given, return valid times from `cycle` at 3-hour stride restricted to the intersection coverage window `[max(river_valid_time_start), min(river_valid_time_end)]` across active networks for that source/cycle, so the list never advertises an instant some basin cannot render; and it SHALL return the empty list when any active network has no display-ready run for that `(source, cycle)`, the same fail-closed intersection rule the `cycles` list uses. Without those parameters the existing default-window behavior is preserved.
+The backend SHALL expose `GET /api/v1/layers/discharge/cycles?source=gfs|ifs` returning `{source, cycles: [{cycle_time, valid_time_start, valid_time_end}], default_cycle}` where, among cycles inside a bounded lookback window, a cycle is listed only if **every** active river network has a display-ready run (`segment_count > 0`) for that source and cycle (intersection, fail-closed: an empty list when any network has no run). The lookback window is `now() - 14 days`, matching the raw-retention default (`NHMS_RETENTION_DAYS` / `NODE27_RAW_RETENTION_DAYS`), and bounds the cycle dimension so `cycles[]` and the coverage query behind it do not grow without limit as cycles accumulate. Cycles older than the window are not listed even when fully covered; if ingest stalls for longer than the window the list becomes empty and the layer renders disabled, which is the same fail-closed state as an empty intersection. `GET /api/v1/layers/discharge/valid-times` SHALL accept optional `source` and `cycle` query parameters and, when both are given, return valid times from `cycle` at 3-hour stride restricted to the intersection coverage window `[max(river_valid_time_start), min(river_valid_time_end)]` across active networks for that source/cycle, so the list never advertises an instant some basin cannot render; and it SHALL return the empty list when any active network has no display-ready run for that `(source, cycle)`, the same fail-closed intersection rule the `cycles` list uses. Without those parameters the existing default-window behavior is preserved.
 
 #### Scenario: Intersection excludes a partially covered cycle
 - **WHEN** 38 networks have gfs runs for cycle A but only 37 have runs for cycle B
 - **THEN** `cycles` contains A and not B
+
+#### Scenario: A cycle older than the lookback window is not listed
+- **WHEN** two cycles are fully covered by every active network, one inside the 14-day lookback window and one older than it
+- **THEN** `cycles` contains only the newer cycle and `default_cycle` is that newer cycle
 
 #### Scenario: Fail-closed on a network without runs
 - **WHEN** one active network has no display-ready gfs run at all

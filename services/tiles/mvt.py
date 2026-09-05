@@ -97,6 +97,15 @@ NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
 # display decision and the coverage window is the clamp applied to it.
 NATIONAL_DISCHARGE_DEFAULT_SOURCE = "gfs"
 NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS = 3
+# Bounds the CYCLE dimension of `national_discharge_cycles` so neither the
+# coverage scan nor `cycles[]` grows with the pipeline's lifetime. 14 days is the
+# raw-retention default -- `scripts/node27_raw_retention.py`'s
+# `DEFAULT_RETENTION_DAYS`, which is also the shipped default of
+# `NODE27_RAW_RETENTION_DAYS` and `NHMS_RETENTION_DAYS` -- so the window matches
+# the horizon beyond which the inputs behind a cycle are expected to be gone.
+# A literal on purpose: the display read path reads no environment today, and
+# giving it one is a different change with its own deployment surface.
+NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS = 14
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
@@ -1778,7 +1787,14 @@ def national_discharge_valid_times(
             "given would serve one source's times under another's request."
         )
     sample_limit = max(0, limit)
-    rows, active_network_total = _national_discharge_coverage_rows(session, source=source, cycle=cycle)
+    # `since=None` on BOTH branches, deliberately: the cycle-dimension bound belongs
+    # to `national_discharge_cycles` alone. The per-cycle branch is already pinned to
+    # one cycle by `:cycle`, and the no-argument branch must keep including a network
+    # whose newest display-ready run is older than the window -- dropping it would
+    # shrink the intersection and change a result master publishes today.
+    rows, active_network_total = _national_discharge_coverage_rows(
+        session, source=source, cycle=cycle, since=None
+    )
 
     if cycle is not None:
         # Intersection-scoped, like `national_discharge_cycles`: a cycle the
@@ -1848,13 +1864,29 @@ def national_discharge_cycles(
 
     ``source`` is the lower-case route enum value (`gfs`/`ifs`); the SQL matches
     it against ``lower(h.source_id)`` because production stores `gfs` and `IFS`.
+
+    Only cycles newer than ``now() - NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS`` are
+    considered, which is what stops both the scan and the list from growing with
+    the pipeline's lifetime. The bound anchors on ``now()``, not on the retention
+    watermark, so an ingest stall longer than the window empties the list and the
+    layer renders disabled -- the same fail-closed state as an empty intersection,
+    and preferred over advertising a cycle whose raw inputs retention has removed.
     """
     sample_limit = max(0, limit)
-    rows, active_network_total = _national_discharge_coverage_rows(session, source=source)
+    rows, active_network_total = _national_discharge_coverage_rows(
+        session,
+        source=source,
+        since=datetime.now(UTC) - timedelta(days=NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS),
+    )
     rows_by_cycle: dict[datetime, list[Mapping[str, Any]]] = {}
     for row in rows:
         cycle_time = _coverage_datetime(row.get("cycle_time"))
         if cycle_time is None:
+            # Deliberately the OPPOSITE of `_national_run_rank`, which ranks a NULL
+            # `cycle_time` FIRST to reproduce the tile CTEs' `ORDER BY ... DESC`
+            # (NULLS FIRST). A NULL cycle has no identity to advertise: it cannot be
+            # spelled in `cycles[].cycle_time` nor bound into a tile URL's `{cycle}`,
+            # so listing it would publish a selector no route can honour.
             continue
         rows_by_cycle.setdefault(cycle_time, []).append(row)
 
@@ -1886,6 +1918,7 @@ def _national_discharge_coverage_rows(
     *,
     source: str | None = None,
     cycle: datetime | None = None,
+    since: datetime | None = None,
 ) -> tuple[list[Mapping[str, Any]], int]:
     """Display-ready national coverage rows, plus the number of active networks.
 
@@ -1905,10 +1938,18 @@ def _national_discharge_coverage_rows(
     rows would make it invisible and turn the intersection into a union over
     whoever happens to have data.
 
-    ``source`` / ``cycle`` are NULL-guarded in the ``CAST(:x AS type) IS NULL OR``
-    form the three tile-side run-selection sites use (see the module header for
-    why ``CAST``, never ``:source::text``), so the no-argument callers bind both
-    as ``None`` and every candidate run stays eligible.
+    ``source`` / ``cycle`` / ``since`` are NULL-guarded in the
+    ``CAST(:x AS type) IS NULL OR`` form the three tile-side run-selection sites
+    use (see the module header for why ``CAST``, never ``:source::text``), so the
+    no-argument callers bind them as ``None`` and every candidate run stays eligible.
+
+    ``since`` is the lower bound on ``cycle_time`` that keeps the cycle dimension
+    finite. ONLY ``national_discharge_cycles`` passes it. In particular
+    ``national_discharge_valid_times`` passes ``None`` on both of its branches: the
+    no-argument branch takes each network's newest run whatever its age, and a
+    network whose newest display-ready run predates the window must stay IN that
+    intersection -- bounding it there would silently drop the network and change a
+    result the catalog has always published.
     """
     active_networks = (
         session.execute(
@@ -1959,12 +2000,13 @@ def _national_discharge_coverage_rows(
                       AND mi.active_flag
                       AND (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)
                       AND (CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)
+                      AND (CAST(:since AS timestamptz) IS NULL OR h.cycle_time >= :since)
                 ) ranked
                 WHERE rn = 1
                 ORDER BY river_network_version_id, cycle_time DESC
                 """
             ),
-            {"source": source, "cycle": cycle},
+            {"source": source, "cycle": cycle, "since": since},
         )
         .mappings()
         .all()
@@ -1977,10 +2019,14 @@ def _national_run_rank(row: Mapping[str, Any]) -> tuple[datetime, str]:
 
     The pre-#2009 SQL decided this with ``ORDER BY h.cycle_time DESC, h.run_id DESC``
     inside the window function. Now that the window partitions by cycle as well,
-    the across-cycle half of that ordering moves here and must stay identical.
+    the across-cycle half of that ordering moves here and must stay identical --
+    including PostgreSQL's ``DESC`` implying NULLS FIRST, which is why a NULL
+    ``cycle_time`` sorts as ``datetime.max`` (highest rank) and not ``datetime.min``.
+    The two national tile CTEs still order in raw SQL, so ranking a NULL row last
+    here would let the discovery endpoints and the tile route pick different runs.
     """
     cycle_time = _coverage_datetime(row.get("cycle_time"))
-    return (cycle_time or datetime.min.replace(tzinfo=UTC), str(row.get("run_id") or ""))
+    return (cycle_time or datetime.max.replace(tzinfo=UTC), str(row.get("run_id") or ""))
 
 
 def _national_coverage_window(row: Mapping[str, Any]) -> tuple[datetime, datetime] | None:
@@ -2021,6 +2067,13 @@ def _national_cycle_valid_times(
     for row in rows:
         window = _national_coverage_window(row)
         if window is None:
+            return ValidTimeDiscovery(valid_times=[], limit=limit, observed_count=0, truncated=False)
+        # Grid phase, the per-cycle twin of the no-argument branch's
+        # `(common_end - start) % 3600` guard. The rectangle check above is
+        # translation-invariant in the start instant, so a row whose hourly grid
+        # sits at `:30` passes it while having no sample at ANY `cycle + 3k h`.
+        # Advertising such an instant is exactly what this branch must not do.
+        if int((window[0] - cycle).total_seconds()) % 3600:
             return ValidTimeDiscovery(valid_times=[], limit=limit, observed_count=0, truncated=False)
         windows.append(window)
     if not windows:

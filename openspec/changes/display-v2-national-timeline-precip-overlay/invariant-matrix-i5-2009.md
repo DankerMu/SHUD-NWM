@@ -152,9 +152,21 @@ through `canonical_mvt_time` (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision, literal
    that could drift from the endpoint. (An earlier draft of this addendum derived the list from the
    cycles rows to save a round trip; rejected, because the equivalence the two specs require would then
    rest on a duplicated stride implementation with no oracle.) Both share
-   `_national_discharge_coverage_rows`, so the stride logic exists once. The cold p95 ≤ 200 ms budget is
+   `_national_discharge_coverage_rows`, so the stride logic exists once. The cold p95 budget is
    measured, not assumed: the node-27 receipt records `GET /api/v1/layers` before and after, and a
-   regression against the budget is a finding, not an accepted cost.
+   regression against the budget is a finding, not an accepted cost. **The threshold is ≤ 400 ms, not
+   the ≤ 200 ms this addendum originally carried** — a user decision taken at i5-2009 review round 1
+   after two node-27 receipts measured master's own pre-change cold p95 at 331–392 ms, i.e. the 200 ms
+   figure was unmet before this change existed. `overview-data-contracts`'s "Cold `/api/v1/layers`
+   budget" scenario carries the same 400 ms and the same reasoning; Epic #2003's acceptance item 2 still
+   spells 200 ms and is amended outside this PR (recorded in the PR's 偏离记录).
+   The receipt is not just two latency numbers. It MUST also record, for the same run:
+   (a) `SELECT count(DISTINCT river_network_version_id) FROM core.model_instance WHERE active_flag` —
+   the intersection denominator; (b) the coverage query's returned row count and the observed
+   `covered_networks` for the winning cycle, asserted equal to (a); (c) `len(cycles)` and
+   `default_cycle` from the runless catalog, asserted non-empty / non-null for `gfs`. Without (a)-(c) a
+   green latency number is indistinguishable from a fail-closed empty intersection that is fast because
+   it returns nothing.
    `hydro_display.py:262`'s `national_discharge_source_version(session)` stays **argument-free** —
    pinned by `test_layer_catalog_still_digests_every_source_not_one_identity` (I4 mutation row 20).
 11. **Cache keys.** `cycles` → `discharge-cycles:{source}`. `valid-times` →
@@ -200,6 +212,65 @@ through `canonical_mvt_time` (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision, literal
     `cd apps/frontend && pnpm check:api-types`, and (because `src/api/types.ts` changes and CI's path
     scope will run the frontend job) `pnpm exec tsc --noEmit -p tsconfig.app.json && pnpm test`.
 
+15. **Cycle-dimension bound on `national_discharge_cycles` (user decision, review round 1).** The
+    coverage query behind `cycles` is unbounded in the cycle dimension: every cycle a network ever had a
+    display-ready run for stays in the scan and, once fully covered, in the response, so both the query
+    cost and `len(cycles)` grow linearly with the pipeline's lifetime. Review round 1 raised this as
+    cand-02 and the verifier ruled that landing a bound *silently* would be an oracle violation, because
+    it narrows the normative "every active river network" sentence and changes a fixture-named call
+    shape. The user's call was to amend the fixture and add the bound in this PR. Its shape:
+    - `national_discharge_cycles` passes `since = now(UTC) - timedelta(days=NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS)`;
+      the constant is module-level in `services/tiles/mvt.py` and set to **14**, matching
+      `scripts/node27_raw_retention.py:33`'s `DEFAULT_RETENTION_DAYS` and the `NHMS_RETENTION_DAYS` /
+      `NODE27_RAW_RETENTION_DAYS` defaults. `mvt.py` MUST NOT read the environment for it — the display
+      read path has no env surface today and adding one is a different change.
+    - The predicate lives in `_national_discharge_coverage_rows`'s SQL as
+      `AND (CAST(:since AS timestamptz) IS NULL OR h.cycle_time >= :since)` — the same NULL-guard idiom
+      as the existing `:source` / `:cycle` binds (decision 6), never a `::timestamptz` cast.
+    - **Every other caller passes `since=None`.** `national_discharge_valid_times` passes `None` on both
+      its branches: the per-cycle branch already binds `:cycle`, and the no-arg branch is pinned
+      byte-identical to master by its own regression row. This is what keeps the no-arg path unchanged —
+      a network whose newest display-ready run predates the window is *included* by master, and a
+      `:since` on that path would drop it and change the intersection.
+    - **Second, independent reason the no-arg branch must pass `None`, found while implementing:**
+      `NULL >= :since` evaluates to NULL, so a bound `:since` also silently drops every run with a NULL
+      `cycle_time` — exactly the rows decision 1 / FIX-3 keeps *first* in the no-arg ranking to match the
+      two untouched tile CTEs (PostgreSQL `ORDER BY ... DESC` implies NULLS FIRST). Binding `:since` on
+      that branch would therefore break the tile-CTE agreement as well as the intersection, and the
+      `_NationalDiscoverySession` filter must reproduce the same NULL semantics (drop, not keep) or the
+      fake diverges from the SQL it stands in for.
+    - **The test fixture must not rot by calendar.** Because the bound is `now()`-relative while ~10
+      existing cases pin absolute `2026-09-02`-era cycle literals, those cases would all start failing on
+      a wall-clock date once the fake filters on `since` — a defect that appears with no code change. A
+      module-level autouse fixture widens `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS` for the file and the
+      three cases that are actually about the bound monkeypatch the real 14 back. Rewriting every legacy
+      case to relative instants is the alternative and touches far more of the decision-13 protected
+      files; it was rejected for that reason. `test_national_cycle_lookback_is_the_raw_retention_default`
+      pins the literal 14 so the widening cannot hide a changed constant.
+    - Consequence, stated so round 2 does not rediscover it: the bound anchors on `now()`, not on the
+      retention watermark, so an ingest stall longer than 14 days empties `cycles[]` →
+      `default_cycle = null` → the national layer renders disabled even though renderable tiles still
+      exist. That is the same fail-closed state as an empty intersection (decision 3) and is accepted.
+    - Consequence, second: this bounds `cycles[]` and the catalog's discharge branch only. The runless
+      `/valid-times` route's own row growth is **not** bounded here and remains a known limit routed to
+      I13, whose prewarm rewrite is its only consumer.
+    - The index that serves the range scan is `hydro_run_latest_ready_run_idx` (`db/migrations/000021`,
+      `(cycle_time DESC, run_id DESC)`), because `cycle_time` is its leading column. The
+      `hydro_run_display_ready_*` family (`000024` / `000030` / `000040`) leads with
+      `(LOWER(source_id), run_type, basin_version_id, …)` and the coverage query binds no `run_type`, so
+      `cycle_time` is not a usable leading prefix there. No new migration is needed.
+    - Oracle: `tests/test_hydro_display_mvt_scaling.py` gains a case with one fully-covered cycle inside
+      the window and one older, asserting only the newer is listed and is `default_cycle`. For that test
+      to be red-capable, `_NationalDiscoverySession.execute` (`tests/test_hydro_display_mvt_scaling.py:1305-1331`) must filter on the `since`
+      bind the way it already filters on `source` and `cycle`; without that the predicate could be
+      deleted and nothing would fail. The four SQL-text assertions at `:159-162` are substring `in`
+      checks and are unaffected. Editing `_NationalDiscoverySession` and adding this case is the one
+      exception to decision 13's "no other test is edited" — the file is already in decision 13's
+      allowlist, the census in `tests/test_river_ts_read_path_surrogate_keys.py` is not touched, and the
+      `h.status IN (...)` occurrence counts pinned at 2/1/1/5 by
+      `tests/test_display_publish_status_only.py` MUST stay unchanged (the new predicate is on
+      `h.cycle_time`, not on status, and adds no second SQL shape).
+
 ## Surfaces
 
 - **Producers**: `services/tiles/mvt.py::_national_discharge_coverage_rows` (new, sole owner of the
@@ -236,6 +307,8 @@ through `canonical_mvt_time` (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision, literal
 | same, a cycle whose clamped window holds no 3-hour stride instant | that cycle is not listed (decision 3) |
 | same, one active network has zero gfs display-ready runs | `cycles == []`, `default_cycle is None` |
 | same, a network's run exists but `segment_count == 0` | that network counts as uncovered → cycle excluded |
+| same, two fully-covered cycles: one inside the 14-day lookback window, one older | only the newer is listed; `default_cycle` is the newer (decision 15) |
+| same, every fully-covered cycle is older than the lookback window | `cycles == []`, `default_cycle is None` — the ingest-stall case, fail-closed by design (decision 15) |
 | `national_discharge_valid_times(session, source="gfs", cycle=C)`, all networks cover `C+168h` | 57 entries, first `== C`, last `== C+168h`, adjacent delta 3 h |
 | same, one network ends at `C+96h` (non-rectangular) | list truncated at `C+96h` |
 | same, `(source, cycle)` missing in one active network | `valid_times == []` (decision 7) |
@@ -268,42 +341,57 @@ present in the SQL string but ineffective, or an argument passed but unasserted,
 test fail. String-shape assertions are not oracles.** The implementer MUST run each mutation, record the
 measured pass/fail counts, and extend the table rather than re-derive it.
 
-`local` = the pytest command in decision 14 (eight files, including the three placement/SQL-shape oracles).
+`local` = the pytest command in decision 14 (eight files, including the three placement/SQL-shape
+oracles). `Measured` is filled in by the implementer from the actual run — `local N pass / M fail` —
+and is what makes the row evidence rather than an intention. Rows 1–30 (plus 4a/7a/29a/29b/29c) are the
+original 35; rows 31–34 were added at review round 1 for the four fixes FIX-1..FIX-4 and rows 36/36b/37
+for the cycle-dimension bound (decision 15, FIX-6) — **35 is deliberately unused**, so the table has 42
+rows with one numbering gap. FIX-6 changed the oracle mechanism itself (`_NationalDiscoverySession` now
+also filters on the `since` bind, and four tests were added), which invalidates any count taken before
+it; every `Measured` cell in this table is therefore measured against the post-FIX-6 baseline of
+`local 360 passed`.
 
-|#|Claim|Mutation|Test that must go red|
-|---|---|---|---|
-|1|The intersection is an intersection, not a union|drop the `covered_networks == active_network_total` condition in `national_discharge_cycles`|partial-coverage case (cycle B) starts appearing in `cycles`|
-|2|A network with **zero** runs for the source fails the whole list closed|compute the network total from the rows returned instead of from `core.model_instance`|the "one network has no gfs run at all" case returns a non-empty `cycles`|
-|3|`segment_count > 0` is load-bearing|delete that predicate|a zero-segment run makes an uncovered cycle look covered|
-|4|`default_cycle` is the **newest** intersected cycle|reverse the sort / take `cycles[-1]`|default-cycle assertion|
-|4a|`cycles[]` itself is descending|drop the sort (return DB/dict order)|the three-intersected-cycles ordering case|
-|5|The stride is 3 h, not 1 h|`timedelta(hours=3)` → `hours=1`|57-entry / adjacent-delta case|
-|6|The list is clamped to `min(river_valid_time_end)`|drop the upper clamp|non-rectangular-coverage case|
-|7|…and to the coverage start (decision 8)|drop the lower clamp|the `one network starts at C+6h` regression case|
-|7a|`cycles[].valid_time_start` uses the same clamp as the list|clamp the list but leave `cycles[].valid_time_start = cycle_time`|the cross-endpoint consistency case|
-|8|`source` reaches the SQL bind|drop `source=` from the helper call in `national_discharge_cycles`|an ifs-only cycle appears in the gfs list|
-|9|`cycle` reaches the SQL bind|drop `cycle=` from the helper call in `national_discharge_valid_times`|the per-cycle list stops depending on the requested cycle|
-|10|The no-arg path still exists and is exercised|make `source`/`cycle` required kwargs on `national_discharge_valid_times`|the two no-arg cases in `tests/test_hydro_display_mvt_scaling.py` and the no-argument `valid-times` route case (`TypeError`). NOT the catalog — decision 10 makes it pass both kwargs|
-|11|The catalog's four new metadata fields exist and are correct|delete any one of `default_source` / `default_cycle` / `cycles_url_template` / `valid_times_url_template`|catalog shape assertion|
-|12|…and they reach the `metadata.version` hash input|remove them from `_stable_json_hash`'s dict|a test that pins the discharge `metadata.version` against a recomputed hash including them|
-|13|…and they do NOT reach non-discharge entries' hash input|add them unconditionally|`river-network` `metadata.version` moves off its pinned value|
-|14|Runless and run-scoped discharge entries are byte-identical|make `default_cycle` depend on the requested `run_id`|two-call identity assertion|
-|15|The empty intersection still returns the entry|return `None`/skip the entry when `default_cycle is None`|empty-intersection catalog case|
-|16|…and is distinct from the zero-run empty catalog|synthesize a discharge entry when `display_ready_run` is `None`|zero-run `data == []` case|
-|17|`cycle` without `source` is rejected before SQL|delete the guard|422 case (session whose `execute` raises)|
-|18|`source` without `cycle` is rejected|delete the guard|422 case|
-|19|`run_id` + `source`/`cycle` is rejected|delete the guard|422 case|
-|20|`source`/`cycle` on a non-discharge layer is rejected|delete the guard|422 case|
-|21|The source enum rejects `ERA5`/`best`/`GFS`-cased input before SQL|widen the enum check|422 case|
-|22|Spellings collapse onto one cache entry|drop the canonicalization from the cache key|`...T12:00:00.000Z` and `...T12:00:00Z` case|
-|23|`(source, cycle)` separates two cache entries|drop `source` or `cycle` from the key|two-identity cache case|
-|24|Every instant is seconds-precision|emit `isoformat()` instead of `canonical_mvt_time`|regex assertion over every field|
-|25|The cycles route is in the runtime schema and the yaml|delete either the yaml block or the route|`test_static_openapi_matches_runtime_schema`|
-|26|`LayerMetadata` documents the four new fields|delete them from `_layer_metadata_schema`|drift test (yaml/runtime divergence)|
-|27|`_layer_source_refs` refuses `discharge`|delete the `assert`|the new `AssertionError` case|
-|28|The status predicate count is untouched|add a second `h.status IN (...)` to the new helper|`tests/test_display_publish_status_only.py:192` (valid-times slice 1→2) and `:193` (module 5→6); `:187`/`:191` do NOT move|
-|29|The catalog's list is the endpoint's list|change the stride or the lower bound in one caller only (e.g. inline a second stride computation in `_default_layer_catalog`)|the catalog-vs-endpoint equality case|
-|29a|The no-arg branch still ranks latest-cycle-per-network|drop the max-`cycle_time` selection in the no-arg Python path|the `one network with two cycles` case|
-|29c|Selection happens before validation|validate all returned rows first, then select|the `older malformed cycle` case (whole discovery blanks)|
-|29b|Truncation keeps the FIRST entries in the per-cycle branch|reuse the no-arg `retained_start = end - ...` tail-keeping logic|the over-limit truncation case|
-|30|`hydro_display.py:262`'s digest call stays identity-free|pass `source="gfs"`|`test_layer_catalog_still_digests_every_source_not_one_identity` (I4)|
+|#|Claim|Mutation|Test that must go red|Measured|
+|---|---|---|---|---|
+|1|The intersection is an intersection, not a union|drop the `covered_networks == active_network_total` condition in `national_discharge_cycles`|partial-coverage case (cycle B) starts appearing in `cycles`|`local 358 pass / 2 fail`|
+|2|A network with **zero** runs for the source fails the whole list closed|compute the network total from the rows returned instead of from `core.model_instance`|the "one network has no gfs run at all" case returns a non-empty `cycles`|`local 356 pass / 4 fail`|
+|3|`segment_count > 0` is load-bearing|delete that predicate|**node-27 lane only — no local oracle.** SQL semantics: a zero-segment run then wins `rn = 1` for its `(network, cycle)`, so a **covered** cycle disappears from `cycles` (the predicate sits in the JOIN `ON` upstream of `ROW_NUMBER()`, `services/tiles/mvt.py:1997`) — it is liveness, not safety. But `_NationalDiscoverySession` (`tests/test_hydro_display_mvt_scaling.py:1292-1334`) never executes SQL; it matches on `"hydro.run_display_coverage" in sql` and returns its own canned rows, so a predicate inside the JOIN `ON` is unobservable locally for *any* row data. The only local signal would be a string-shape assertion, which this preamble does not accept as an oracle. Recorded honestly rather than padded|`local 360 pass / 0 fail` — no local oracle, see the claim column|
+|4|`default_cycle` is the **newest** intersected cycle|reverse the sort / take `cycles[-1]`|default-cycle assertion|`local 358 pass / 2 fail`|
+|4a|`cycles[]` itself is descending|drop the sort (return DB/dict order)|the three-intersected-cycles ordering case|`local 359 pass / 1 fail`|
+|5|The stride is 3 h, not 1 h|`timedelta(hours=3)` → `hours=1`|57-entry / adjacent-delta case|`local 351 pass / 9 fail`|
+|6|The list is clamped to `min(river_valid_time_end)`|drop the upper clamp|non-rectangular-coverage case|`local 357 pass / 3 fail`|
+|7|…and to the coverage start (decision 8)|drop the lower clamp|the `one network starts at C+6h` regression case|`local 356 pass / 4 fail`|
+|7a|`cycles[].valid_time_start` uses the same clamp as the list|clamp the list but leave `cycles[].valid_time_start = cycle_time`|the cross-endpoint consistency case|`local 359 pass / 1 fail`|
+|8|`source` reaches the SQL bind|drop `source=` from the helper call in `national_discharge_cycles`|an ifs-only cycle appears in the gfs list|`local 359 pass / 1 fail`|
+|9|`cycle` reaches the SQL bind|drop `cycle=` from the helper call in `national_discharge_valid_times`|the per-cycle list stops depending on the requested cycle|`local 357 pass / 3 fail`|
+|10|The no-arg path still exists and is exercised|make `source`/`cycle` required kwargs on `national_discharge_valid_times`|the two no-arg cases in `tests/test_hydro_display_mvt_scaling.py` and the no-argument `valid-times` route case (`TypeError`). NOT the catalog — decision 10 makes it pass both kwargs|`local 353 pass / 7 fail`|
+|11|The catalog's four new metadata fields exist and are correct|delete any one of `default_source` / `default_cycle` / `cycles_url_template` / `valid_times_url_template`|catalog shape assertion|`local 351 pass / 9 fail`|
+|12|…and they reach the `metadata.version` hash input|remove them from `_stable_json_hash`'s dict|a test that pins the discharge `metadata.version` against a recomputed hash including them|`local 357 pass / 3 fail`|
+|13|…and they do NOT reach non-discharge entries' hash input|add them unconditionally|`river-network` `metadata.version` moves off its pinned value|`local 359 pass / 1 fail`|
+|14|Runless and run-scoped discharge entries are byte-identical|make `default_cycle` depend on the requested `run_id`|two-call identity assertion|`local 355 pass / 5 fail`|
+|15|The empty intersection still returns the entry|return `None`/skip the entry when `default_cycle is None`|empty-intersection catalog case|`local 358 pass / 2 fail`|
+|16|…and is distinct from the zero-run empty catalog|synthesize a discharge entry when `display_ready_run` is `None`|zero-run `data == []` case|`local 359 pass / 1 fail`|
+|17|`cycle` without `source` is rejected before SQL|delete the guard|422 case (session whose `execute` raises)|`local 359 pass / 1 fail`|
+|18|`source` without `cycle` is rejected|delete the guard|422 case|`local 359 pass / 1 fail`|
+|19|`run_id` + `source`/`cycle` is rejected|delete the guard|422 case|`local 359 pass / 1 fail`|
+|20|`source`/`cycle` on a non-discharge layer is rejected|delete the guard|422 case|`local 359 pass / 1 fail`|
+|21|The source enum rejects `ERA5`/`best`/`GFS`-cased input before SQL|widen the enum check|422 case|`local 354 pass / 6 fail`|
+|22|Spellings collapse onto one cache entry|drop the canonicalization from the cache key|`test_valid_times_cache_key_collapses_spellings_and_separates_identities`. Note the discriminating spelling is the offset form (`...T20:00:00+08:00`), not the `...T12:00:00.000Z` / `...T12:00:00Z` pair this row originally named — FastAPI's datetime parsing already folds those two onto the same `datetime` before the key is built, so they cannot separate entries. The test is correct; the row's wording was not|`local 359 pass / 1 fail`|
+|23|`(source, cycle)` separates two cache entries|drop `source` or `cycle` from the key|two-identity cache case|`local 359 pass / 1 fail`|
+|24|Every instant is seconds-precision|emit `isoformat()` instead of `canonical_mvt_time`|regex assertion over every field|`local 341 pass / 19 fail`|
+|25|The cycles route is in the runtime schema and the yaml|delete either the yaml block or the route|`test_static_openapi_matches_runtime_schema`|`local 352 pass / 8 fail`|
+|26|`LayerMetadata` documents the four new fields|delete them from `_layer_metadata_schema`|drift test (yaml/runtime divergence)|`local 357 pass / 3 fail`|
+|27|`_layer_source_refs` refuses `discharge`|delete the `assert`|the new `AssertionError` case|`local 359 pass / 1 fail`|
+|28|The status predicate count is untouched|add a second `h.status IN (...)` to the new helper|`tests/test_display_publish_status_only.py:192` (valid-times slice 1→2) and `:193` (module 5→6); `:187`/`:191` do NOT move|`local 359 pass / 1 fail`|
+|29|The catalog's list is the endpoint's list|change the stride or the lower bound in one caller only (e.g. inline a second stride computation in `_default_layer_catalog`)|the catalog-vs-endpoint equality case|`local 355 pass / 5 fail`|
+|29a|The no-arg branch still ranks latest-cycle-per-network|drop the max-`cycle_time` selection in the no-arg Python path|the `one network with two cycles` case|`local 359 pass / 1 fail`|
+|29c|Selection happens before validation|validate all returned rows first, then select|the `older malformed cycle` case (whole discovery blanks)|`local 359 pass / 1 fail`|
+|29b|Truncation keeps the FIRST entries in the per-cycle branch|reuse the no-arg `retained_start = end - ...` tail-keeping logic|the over-limit truncation case|`local 359 pass / 1 fail`|
+|30|`hydro_display.py:262`'s digest call stays identity-free|pass `source="gfs"`|`test_layer_catalog_still_digests_every_source_not_one_identity` (I4)|`local 359 pass / 1 fail`|
+|31|The per-cycle branch fails closed on an off-phase hourly coverage grid — the per-cycle twin of the no-arg branch's `(common_end - start) % 3600` guard (review round 1, FIX-1: this change had dropped the guarantee on the new path)|delete the `int((window[0] - cycle).total_seconds()) % 3600` guard in `_national_cycle_valid_times`|`test_national_per_cycle_valid_times_fail_closed_for_an_off_phase_coverage_grid`|`local 359 pass / 1 fail`|
+|32|The catalog never advertises `default_cycle = C` together with `valid_times = []` (review round 1, FIX-2: READ COMMITTED gives each of the two calls its own snapshot)|delete the `if not valid_time_sample.valid_times: default_cycle = None` forcing in `_default_layer_catalog`|`test_layer_catalog_never_advertises_a_cycle_whose_timeline_came_back_empty`|`local 359 pass / 1 fail`|
+|33|A NULL `cycle_time` ranks FIRST in the no-arg branch, reproducing PostgreSQL's `ORDER BY ... DESC` = NULLS FIRST and the two untouched national tile CTEs (review round 1, FIX-3)|`datetime.max` sentinel → `datetime.min` in `_national_run_rank`|`test_no_argument_national_valid_times_rank_a_null_cycle_first_like_the_tile_ctes`|`local 359 pass / 1 fail`|
+|34|The cycles cache key separates the two sources (review round 1, FIX-4: decision 11 pinned the spelling with no oracle behind it)|drop `{source}` from `f"discharge-cycles:{source}"`|`test_cycles_cache_key_separates_the_two_sources`|`local 359 pass / 1 fail`|
+|36|The lookback predicate actually bounds the **DB scan**|drop `AND (CAST(:since AS timestamptz) IS NULL OR h.cycle_time >= :since)` from the SQL, keep the bind|**node-27 lane, same as row 3.** No local oracle: `_NationalDiscoverySession` filters by bound values and deliberately never by SQL text (`tests/test_hydro_display_mvt_scaling.py`, the `_NationalDiscoverySession` docstring), so with the bind still passed the fake keeps filtering and nothing about the scan is observable locally. The local signal is a predicate-text assertion in `test_national_cycles_list_only_cycles_inside_the_lookback_window`, recorded below but **not counted as an oracle** — the preamble disowns string-shape assertions. Row 36b carries the behavioral half; the node-27 receipt (row-count + `EXPLAIN (ANALYZE, BUFFERS)` showing `hydro_run_latest_ready_run_idx`) carries the scan half|`local 359 pass / 1 fail` (text pin only)|
+|36b|…and it is actually applied — the bound value reaches the query|`national_discharge_cycles` passes `since=None`|`test_national_cycles_list_only_cycles_inside_the_lookback_window` + `test_national_cycles_are_empty_when_every_covered_cycle_predates_the_lookback` — the older cycle is listed again and the all-stale case stops being empty|`local 358 pass / 2 fail`|
+|37|…and only `cycles` passes it — the no-arg path stays unbounded on purpose|pass the same `since` from `national_discharge_valid_times`'s no-arg branch|two tests, for two independent reasons: `test_no_argument_national_valid_times_keep_a_network_whose_newest_run_predates_the_lookback` (the intersection-membership reason) and `test_no_argument_national_valid_times_rank_a_null_cycle_first_like_the_tile_ctes` (the NULL-cycle reason below). Note the byte-identical no-arg regression case this row originally named does **not** go red — every network there has a recent newest run — so the first of the two tests had to be written for this row|`local 358 pass / 2 fail`|

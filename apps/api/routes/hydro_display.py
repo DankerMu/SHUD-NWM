@@ -1145,6 +1145,15 @@ def _default_layer_catalog(
                     cycle=datetime.fromisoformat(default_cycle),
                 )
             )
+            # The two calls above take separate `read committed` snapshots, so the
+            # intersection can empty out between them -- newly ACTIVATING a network
+            # with no display-ready run for `default_cycle`, or a covered run's
+            # status / coverage row being rewritten. (Deactivation cannot do it: it
+            # decrements both sides of the count.) The contract spells the empty
+            # intersection `default_cycle = null` AND `valid_times = []` together;
+            # `(C, [])` advertises a cycle whose timeline is empty and is forbidden.
+            if not valid_time_sample.valid_times:
+                default_cycle = None
         else:
             valid_time_sample = _empty_valid_times()
         layers.append(
