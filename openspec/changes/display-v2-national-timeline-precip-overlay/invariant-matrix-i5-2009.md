@@ -40,11 +40,11 @@ through `canonical_mvt_time` (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision, literal
    `national_discharge_valid_times` path picks the max-`cycle_time` row per network **in Python**.
    That is a real change to the no-arg branch's SQL text and result columns, so the existing fake-row
    oracle must gain a `cycle_time` column (see decision 13) — the change is recorded, not hidden.
-   The four text assertions `tests/test_hydro_display_mvt_scaling.py:124-127` makes
+   The four text assertions `tests/test_hydro_display_mvt_scaling.py:161-164` makes
    (`mi.basin_version_id = h.basin_version_id` present, `hydro.run_display_coverage` present,
    `mi.model_id = h.model_id` absent, `hydro.river_timeseries` absent) MUST still hold verbatim.
    Note what is NOT an oracle here: the `ROW_NUMBER() OVER` / `ORDER BY h.cycle_time DESC, h.run_id DESC`
-   / `AND mi.active_flag` string assertions at `:80-82` belong to
+   / `AND mi.active_flag` string assertions at `:84` belong to
    `test_national_source_generations_change_with_data_identity`, which drives
    `national_discharge_source_version` — a **different** statement this PR does not touch. The ranking
    change therefore has no inherited string pin, and its only oracle is the new behavioral case in
@@ -278,23 +278,23 @@ through `canonical_mvt_time` (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision, literal
       `scripts/node27_raw_retention.py:33`'s `DEFAULT_RETENTION_DAYS`". Both halves of that were wrong.
       (a) The *form* of the coupling was wrong: "matching" asserted equality with the retention
       default, but the relation this change's own spec imposes is an inequality.
-      `specs/canonical-precip-copyback/spec.md:173` requires
+      `specs/canonical-precip-copyback/spec.md:191` requires
       `oldest_listed_cycle − 24h ≥ display_watermark − retention_days`, which with lookback `L` and
       retention `R` reduces to `L ≤ R − 1d = 13`. At `L = 14` the requirement fails in steady state and
       holds only while the pipeline is a full day behind. (b) The *reason* given was wrong too: the
       round-1 text described raw retention as deleting "raw GRIB", implying nothing on a tile path reads
-      it. In this change the raw-retention run prunes, on the same cutoff, the canonical precipitation
-      mirror (`canonical-precip-copyback/spec.md:138-139`) and the precipitation PNG cache (`:155`) —
-      which is exactly what the precipitation overlay renders from, and exactly why `:173` is phrased
+      it. In this change the raw-retention run is REQUIRED to prune, on the same cutoff, the canonical precipitation
+      mirror (`canonical-precip-copyback/spec.md:156-157`) and the precipitation PNG cache (`:173`) —
+      which is exactly what the precipitation overlay renders from (spec-level today: task 4.4 is still unticked and `scripts/node27_raw_retention.py:8` on this HEAD still says it does not touch `canonical/`; the inequality argument does not depend on delivery), and exactly why `:191` is phrased
       against that run's `retention_days` (`NODE27_RAW_RETENTION_DAYS`, default 14 at
       `scripts/node27_raw_retention.py:33`). So the raw-retention default is the right constant to pin
       against; the pin's form is the inequality, not equality. The discharge tiles' own lane, the
       timeseries retention window (`packages/common/storage.py:35`, also 14), is wider in effect — with
       168 h forecast spans and `range_end <= cutoff`, a cycle's chunks survive to roughly
-      `watermark − 21 d` — and is not the binding constraint. 12 satisfies `:173` with 24 h of margin
+      `watermark − 21 d` — and is not the binding constraint. 12 satisfies `:191` with 24 h of margin
       under any anchor and independent of pipeline lag. If an operator ever sets
       `NODE27_RAW_RETENTION_DAYS < 13` the inequality breaks again; the remedy is the one
-      `canonical-precip-copyback/spec.md:181-183` already names — raise `retention_days`, never lower
+      `canonical-precip-copyback/spec.md:199-200` already names — raise `retention_days`, never lower
       this lookback.
     - **Considered and declined in round 2: anchoring on the display watermark.**
       `packages/common/display_watermark.py:3-5` states that lifecycle age on node-27 is measured from
@@ -309,7 +309,7 @@ through `canonical_mvt_time` (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision, literal
       opens its own psycopg2 connection from a DSN with its own timeout, and `mvt.py` holds a
       SQLAlchemy `Session` and imports no `packages.*`; the only in-session form is a 5th round trip on
       a catalog path already at 4, in a second READ COMMITTED snapshot. (c) It is neutral to
-      `canonical-precip-copyback:173` — under the watermark the constraint is exactly `L ≤ R − 1d`,
+      `canonical-precip-copyback:191` — under the watermark the constraint is exactly `L ≤ R − 1d`,
       under `now()` it is `L ≤ R − 1d + lag`, so the anchor never decides the value. (d) An in-SQL
       self-anchor (`MAX(h.cycle_time) OVER ()` over the coverage-joined rows) was also declined: it
       demotes the bound from a scan bound to a post-filter, losing the scale property the bound exists
@@ -337,11 +337,11 @@ through `canonical_mvt_time` (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision, literal
       three cases that are actually about the bound monkeypatch the real value back. Rewriting every
       legacy case to relative instants is the alternative and touches far more of the decision-13
       protected files; it was rejected for that reason. The constant's own pin asserts the
-      `canonical-precip-copyback:173` inequality against the real retention default
+      `canonical-precip-copyback:191` inequality against the real retention default
       (`NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS <= DEFAULT_RETENTION_DAYS - 1`, imported from
       `scripts.node27_raw_retention`) rather than the bare literal — round 1's pin asserted `== 14` under
       a name claiming a raw-retention coupling it never checked, which is how a value that violates
-      `:173` passed a green test. The literal may be pinned alongside it, but the inequality is the
+      `:191` passed a green test. The literal may be pinned alongside it, but the inequality is the
       load-bearing half.
     - Consequence, accepted: an ingest or coverage-refresh stall longer than 12 days empties `cycles[]`
       → `default_cycle = null` → the national layer renders disabled even though renderable tiles may
@@ -365,9 +365,9 @@ through `canonical_mvt_time` (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision, literal
       `cycle_time` is not a usable leading prefix there. No new migration is needed.
     - Oracle: `tests/test_hydro_display_mvt_scaling.py` gains a case with one fully-covered cycle inside
       the window and one older, asserting only the newer is listed and is `default_cycle`. For that test
-      to be red-capable, `_NationalDiscoverySession.execute` (`tests/test_hydro_display_mvt_scaling.py:1305-1331`) must filter on the `since`
+      to be red-capable, `_NationalDiscoverySession.execute` (`tests/test_hydro_display_mvt_scaling.py:1479-1506`) must filter on the `since`
       bind the way it already filters on `source` and `cycle`; without that the predicate could be
-      deleted and nothing would fail. The four SQL-text assertions at `:159-162` are substring `in`
+      deleted and nothing would fail. The four SQL-text assertions at `:161-164` are substring `in`
       checks and are unaffected. Editing `_NationalDiscoverySession` and adding this case is the one
       exception to decision 13's "no other test is edited" — the file is already in decision 13's
       allowlist, the census in `tests/test_river_ts_read_path_surrogate_keys.py` is not touched, and the
@@ -478,7 +478,7 @@ and is what makes the row evidence rather than an intention. Rows 1–30 (plus 4
 original 35; rows 31–34 were added at review round 1 for the four fixes FIX-1..FIX-4 and rows 36/36b/37
 for the cycle-dimension bound (decision 15, FIX-6); review round 2 inverted row 30 (decision 10 reversed)
 and added 30b (the argument-free fallback after the FIX-2 forcing), 38 (the constant is consulted), 39
-(the `:173` inequality) and 40 (set comparison, decision 16) — **35 is deliberately unused**, so the
+(the `:191` inequality) and 40 (set comparison, decision 16) — **35 is deliberately unused**, so the
 table has 46 rows with one numbering gap. Each fix pass that changes the oracle mechanism invalidates
 every count taken before it (FIX-6 in round 1; the round-2 pass rewrote the pinning test behind row 30,
 changed the helper's return type and added four tests — five test cases, one is parametrized ×2), so after each such pass the **whole** table is
@@ -489,7 +489,7 @@ re-measured, never spot-fixed. Every `Measured` cell below is against the post-r
 |---|---|---|---|---|
 |1|The intersection is an intersection, not a union|drop the `covered_networks == active_network_total` condition in `national_discharge_cycles`|partial-coverage case (cycle B) starts appearing in `cycles`|`local 362 pass / 3 fail`|
 |2|A network with **zero** runs for the source fails the whole list closed|compute the network total from the rows returned instead of from `core.model_instance`|the "one network has no gfs run at all" case returns a non-empty `cycles`|`local 360 pass / 5 fail`|
-|3|`segment_count > 0` is load-bearing|delete that predicate|**node-27 lane only — no local oracle.** SQL semantics: a zero-segment run then wins `rn = 1` for its `(network, cycle)`, so a **covered** cycle disappears from `cycles` (the predicate sits in the JOIN `ON` upstream of `ROW_NUMBER()`, `services/tiles/mvt.py:1997`) — it is liveness, not safety. But `_NationalDiscoverySession` (`tests/test_hydro_display_mvt_scaling.py:1292-1334`) never executes SQL; it matches on `"hydro.run_display_coverage" in sql` and returns its own canned rows, so a predicate inside the JOIN `ON` is unobservable locally for *any* row data. The only local signal would be a string-shape assertion, which this preamble does not accept as an oracle. Recorded honestly rather than padded|`local 365 pass / 0 fail`|
+|3|`segment_count > 0` is load-bearing|delete that predicate|**node-27 lane only — no local oracle.** SQL semantics: a zero-segment run then wins `rn = 1` for its `(network, cycle)`, so a **covered** cycle disappears from `cycles` (the predicate sits in the JOIN `ON` upstream of `ROW_NUMBER()`, `services/tiles/mvt.py:2041`) — it is liveness, not safety. But `_NationalDiscoverySession` (`tests/test_hydro_display_mvt_scaling.py:1466-1509`) never executes SQL; it matches on `"hydro.run_display_coverage" in sql` and returns its own canned rows, so a predicate inside the JOIN `ON` is unobservable locally for *any* row data. The only local signal would be a string-shape assertion, which this preamble does not accept as an oracle. Recorded honestly rather than padded|`local 365 pass / 0 fail`|
 |4|`default_cycle` is the **newest** intersected cycle|reverse the sort / take `cycles[-1]`|default-cycle assertion|`local 363 pass / 2 fail`|
 |4a|`cycles[]` itself is descending|drop the sort (return DB/dict order)|the three-intersected-cycles ordering case|`local 364 pass / 1 fail`|
 |5|The stride is 3 h, not 1 h|`timedelta(hours=3)` → `hours=1`|57-entry / adjacent-delta case|`local 356 pass / 9 fail`|
@@ -531,5 +531,5 @@ re-measured, never spot-fixed. Every `Measured` cell below is against the post-r
 |36b|…and it is actually applied — the bound value reaches the query|`national_discharge_cycles` passes `since=None`|`test_national_cycles_list_only_cycles_inside_the_lookback_window` + `test_national_cycles_are_empty_when_every_covered_cycle_predates_the_lookback` — the older cycle is listed again and the all-stale case stops being empty|`local 362 pass / 3 fail`|
 |37|…and only `cycles` passes it — the no-arg path stays unbounded on purpose|pass the same `since` from `national_discharge_valid_times`'s no-arg branch|two tests, for two independent reasons: `test_no_argument_national_valid_times_keep_a_network_whose_newest_run_predates_the_lookback` (the intersection-membership reason) and `test_no_argument_national_valid_times_rank_a_null_cycle_first_like_the_tile_ctes` (the NULL-cycle reason below). Note the byte-identical no-arg regression case this row originally named does **not** go red — every network there has a recent newest run — so the first of the two tests had to be written for this row|`local 363 pass / 2 fail`|
 |38|`NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS` is actually **consulted** by the query path, not merely defined (review round 2, r2-test-1 — a CONFIRMED coverage gap: hardcoding `days=14` at the call site measured `360 pass / 0 fail` on the round-2 head)|replace `days=NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS` at the `since=` call site with the literal `days=12`|`test_national_cycles_lookback_reads_the_module_constant`: monkeypatch the real constant to 3 (past the autouse widening), seed a fully-covered cycle at 1 d and another at 5 d, assert only the 1 d cycle is listed — red whenever the call site ignores the constant|`local 364 pass / 1 fail`|
-|39|The lookback value satisfies `canonical-precip-copyback:173` against the real retention default (decision 15)|set the constant to 13 or 14|`test_national_cycle_lookback_leaves_a_day_of_precip_mirror_margin`: `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS <= DEFAULT_RETENTION_DAYS - 1` with `DEFAULT_RETENTION_DAYS` imported from `scripts.node27_raw_retention` — raising retention stays green (allowed by `:181-183`), lowering it below 13 goes red|`local 364 pass / 1 fail`|
+|39|The lookback value satisfies `canonical-precip-copyback:191` against the real retention default (decision 15)|set the constant to 13 or 14|`test_national_cycle_lookback_leaves_a_day_of_precip_mirror_margin`: `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS <= DEFAULT_RETENTION_DAYS - 1` with `DEFAULT_RETENTION_DAYS` imported from `scripts.node27_raw_retention` — raising retention stays green (allowed by `:199-200`), lowering it below 13 goes red|`local 364 pass / 1 fail`|
 |40|The intersection compares network sets, not counts (decision 16)|compare `len(covered) == len(active)` instead of the sets|`test_national_cycles_fail_closed_when_a_network_activates_between_the_two_statements`: a session whose second statement returns a covered set of equal size but different membership from the first statement's active set — the cycle must not be listed|`local 364 pass / 1 fail`|

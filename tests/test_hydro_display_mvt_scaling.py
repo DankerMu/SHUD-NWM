@@ -1590,12 +1590,12 @@ def test_national_cycles_lookback_reads_the_module_constant(monkeypatch: Any) ->
     """The call site must consult `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS`, not a literal.
 
     The other lookback cases put the REAL value back and use 20/30-day-old cycles,
-    which are stale under any plausible literal too -- so hardcoding `days=12` at
-    the `since=` call site left the whole suite green (measured `360 pass / 0 fail`
-    at review round 2). This case moves the constant to 3, past the module's
-    autouse widening, and puts one cycle at 1 day and one at 5: both are inside any
-    literal the window could be hardcoded to, so only a call site that really reads
-    the constant drops the 5-day one.
+    which are stale under any plausible literal too -- so hardcoding `days=14` at
+    the `since=` call site -- the constant's value at that head -- left the whole
+    suite green (measured `360 pass / 0 fail` at review round 2). This case moves
+    the constant to 3, past the module's autouse widening, and puts one cycle at
+    1 day and one at 5: both are inside any literal the window could be hardcoded
+    to, so only a call site that really reads the constant drops the 5-day one.
     """
     monkeypatch.setattr(mvt_module, "NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS", 3)
     inside = _cycle_days_ago(1)

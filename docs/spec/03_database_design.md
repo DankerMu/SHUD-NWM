@@ -245,9 +245,10 @@ CREATE TABLE core.model_instance (
 > - **展示成员判定**：全国 river-network MVT（`services/tiles/mvt.py:367`，
 >   另见 `:442`、`:653`、`:691`、`:1411`）；
 > - **展示 source-version 摘要**：`services/tiles/mvt.py:1426`
->   （`national_river_network_source_version`，方言相关谓词）、`:1590`
->   （`national_discharge_valid_times`，函数头 `:1544`）；
-> - **全国 discharge 交集分母**（#2009）：`services/tiles/mvt.py:2000`
+>   （`national_river_network_source_version`，方言相关谓词）、`:2044`
+>   （`national_discharge_valid_times`，函数头 `:1773`，谓词已下沉到
+>   `_national_discharge_coverage_rows`）；
+> - **全国 discharge 交集分母**（#2009）：`services/tiles/mvt.py:2004`
 >   （`_national_discharge_coverage_rows` 的 `SELECT DISTINCT
 >   mi.river_network_version_id … WHERE mi.active_flag`）。爆炸半径在展示面里最大：
 >   这条 query 是 `/api/v1/layers/discharge/cycles`、per-cycle valid-times 与
