@@ -3278,3 +3278,33 @@ symlink 分支说明后，幸存的句子变成断言相反的事）。计数器
 
 `min_multiround` 默认 8、样本 172、这条 DECIDABLE 每次收尾必触发且已连续十余条同向 keep——降级为 NOTE
 的处置仍跟踪在 **#2036**，本条不重复论证。
+
+## Addendum — 2026-09-05, sample 173 (PR #2067 / issue #2034)
+
+Decision unchanged: **keep**. Later-round attribution is now core=177, rotated=312.
+
+The movement is what matters. Rotated held at **exactly 312** while core gained
+**exactly 7** — this PR's seven later-round catches were all attributed to core
+lenses. Rotation contributed nothing here, and the honest reading is that it
+did not need to: this PR's defect class was not one a rotated lens finds.
+
+Every catch was a prose claim the test suite cannot constrain, and the two that
+three scoped review rounds had missed were found by neither rotation nor depth.
+They were found by changing the **scope** of the audit — a whole-surface sweep
+over all seven files of the fixture's claim surface at once, by an agent given
+none of the prior rounds' framing — after the three-round hard gate forced a
+retro that classified the shape as breadth. Both defects sat in text that
+predated the PR's own diff, which is precisely why every diff-scoped round,
+whatever its lens, was structurally incapable of seeing them.
+
+So the keep stands on the cumulative 312-vs-177 record, not on this sample.
+What this sample argues is narrower and worth stating separately: **lens
+rotation and audit scope are independent axes, and the log currently measures
+only the first.** A fixture whose claim surface spans many files can pass any
+number of well-rotated diff-scoped rounds with a contradiction sitting in an
+unchanged file. If a future sample shows core continuing to close the gap, the
+question to ask is not "rotate differently" but "what is each round allowed to
+look at" — and that is not something the rotation figures can answer.
+
+Prior samples for trend: 172 (core=170, rotated=312), and the rotated share of
+later-round catches across earlier addenda ran 80% → 97% → 65%.
