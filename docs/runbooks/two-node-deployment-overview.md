@@ -147,7 +147,8 @@ Slurm 计算节点不是第三个业务部署节点，但它是 22 计算控制�
 | 操作 | node-22（compute_control） | node-27（display_readonly） |
 | --- | --- | --- |
 | `nhms-pipeline plan-production`（调度计划/提交） | 拥有（dry-run 计划 + `--submit` 提交） | 禁止（不运行正式调度入口） |
-| `nhms-pipeline publish-qdown`（发布 q_down 产物） | 拥有（写 published） | 禁止 |
+| `nhms-pipeline publish-qdown`（发布 q_down 产物） | 生产链路不跑（DB-free，终态 `forecast_state_save_qc`；手工执行在未配 `DATABASE_URL` 时报 `DATABASE_URL_MISSING`） | 禁止 |
+| canonical 降水镜像（`convert` 终态入口后写 shared object-store） | 拥有（写 `canonical/<S>/<cycle>/prcp_rate_or_amount/` 与 `canonical/<S>/grid/`） | 禁止 |
 | `nhms-pipeline publish-tiles`（发布瓦片产物） | 拥有（写 published） | 禁止 |
 | retry / cancel（控制面动作） | 拥有（写 DB + Gateway） | 禁止（只展示诊断和处理建议，无真实控制入口） |
 | DB `hydro` schema 写 | 读写 | 只读 |
@@ -319,6 +320,47 @@ systemd 不是新的应用运行模式，也不会改变 22/27 的职责边界�
 - 27 容器挂载 Docker socket、Slurm/Munge 或额外可写业务目录。
 
 这些都是角色边界破坏，应该先修部署配置或回滚展示入口，而不是临时把 27 改成单机控制面。
+
+### 7.4 canonical 降水镜像回执判读
+
+22 的 `convert` stage（链首，也就是**写出**降水产物的那个 stage）走到终态后会把
+`canonical/<S>/<cycle>/prcp_rate_or_amount/` 和 `canonical/<S>/grid/<grid_id>/` 镜像到
+`NHMS_OBJECT_STORE_COPYBACK_ROOT`，并写一条 `canonical_precip_mirror` pipeline_event。镜像
+fail-open：失败不影响 stage 结果，只在回执里留证据，所以判读入口就是这条回执。
+门只认 stage，**不再**读 `NHMS_ORCHESTRATOR_TERMINAL_STAGE`（旧口径挂在 forecast 终态
+`state_save_qc` / 终态契约 `forecast_state_save_qc` 上，已由 #2069 取代）：唯一的 profile
+围栏是 `NHMS_OBJECT_STORE_COPYBACK_ROOT`，未配即不镜像也不发回执。因此
+`state_save_qc` 整个周期都提交失败时，降水镜像**仍在**——两条生命周期无关。
+
+DB-free 下回执落在文件 journal，目录按 **normalize 后的** source 分（`gfs` / `IFS`，不是
+cycle id 里的小写 `ifs`）；journal 会轮转出 `<cycle>.1.jsonl`、`<cycle>.2.jsonl`，所以必须
+glob 而不是只读 `<cycle>.jsonl`。事件字段整体嵌在记录的 `payload` 下；顶层除 `record_type` 外还有 journal 信封并列携带的
+身份字段（`event_id`/`entity_id` 是复制而非搬移，payload 里仍在）（`event_id`、`entity_id`、`source_id`、`cycle_time`、`sequence` 等），但 `event_type`
+与 `details` **不**在其中，所以选择器是 `.payload.details.precip_mirror`：
+
+```bash
+jq -c 'select(.record_type == "pipeline_event"
+        and .payload.event_type == "canonical_precip_mirror")
+       | .payload.details.precip_mirror' \
+  "$NHMS_SCHEDULER_JOURNAL_ROOT"/journal/IFS/2026050100*.jsonl
+```
+
+判读：`status` 为 `ok` **只表示拷贝当刻目的地与源一致**，不表示该周期产物完整——门挂在 `convert`
+上，而 orchestrator 在任何失败尾都**不会 scancel**（唯一 `cancel_job` 调用点是运维入口）。最尖锐的一臂是轮询超时——
+它不是独立状态，而是带 `error_code == "SLURM_JOB_TIMEOUT"` 的 `failed`；此时 gateway 仍报作业 running、
+sbatch 可能仍在写，镜像会忠实地拷走半棵树并记 `ok`。所以同一条回执若对应的 stage 结果不是
+`succeeded`，必须再把 `trees[].file_count` 与该源该周期的预期 lead 数比对，比对不上就当作**不完整周期**
+（后续全链重规划会经 `resume_cycle_stage` 再入 hook 整树替换）。`skipped` **必须再看 `reason`**——两种 `skipped` 语义相反：
+`trees_already_mirrored` 是幂等跳过（目标已在，可用）；而 `copyback_root_matches_object_store_root`
+是在写任何字节**之前**早退（copyback root 与 object store root 解析到同一目录身份），
+共享 NFS 上没有任何产物，读侧因此取不到该周期——那是配置错误，按
+`infra/env/compute.scheduler-dbfree.env.example` 两者本应分别是 NFS（`:60`）与本地 `/scratch`（`:87`）。
+`failed` 时看 `missing_object_key`（源目录缺失，
+值形如 `canonical/IFS/2026090212/prcp_rate_or_amount` 或 `canonical/IFS/grid`）或
+`error`/`error_type`。`root`/`missing_path` 在回执里被渲染成 `[local-path]`，是脱敏结果不是故障。
+一个周期可能有多条回执（`convert` 非 array，重复来自失败后的重试 attempt 或后续 pass 经
+`resume_cycle_stage` 再进该 hook，不是 partial-array 重试），只要有一条记录了镜像结果即可，
+重复的那条通常是 `skipped`。
 
 ## 8. 部署前检查清单
 

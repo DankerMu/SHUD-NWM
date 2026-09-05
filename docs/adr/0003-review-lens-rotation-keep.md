@@ -3278,3 +3278,75 @@ symlink 分支说明后，幸存的句子变成断言相反的事）。计数器
 
 `min_multiround` 默认 8、样本 172、这条 DECIDABLE 每次收尾必触发且已连续十余条同向 keep——降级为 NOTE
 的处置仍跟踪在 **#2036**，本条不重复论证。
+
+## Addendum — 2026-09-05, sample 173 (PR #2067 / issue #2034)
+
+Decision unchanged: **keep**. Later-round attribution is now core=177, rotated=312.
+
+The movement is what matters. Rotated held at **exactly 312** while core gained
+**exactly 7** — this PR's seven later-round catches were all attributed to core
+lenses. Rotation contributed nothing here, and the honest reading is that it
+did not need to: this PR's defect class was not one a rotated lens finds.
+
+Every catch was a prose claim the test suite cannot constrain, and the two that
+three scoped review rounds had missed were found by neither rotation nor depth.
+They were found by changing the **scope** of the audit — a whole-surface sweep
+over all seven files of the fixture's claim surface at once, by an agent given
+none of the prior rounds' framing — after the three-round hard gate forced a
+retro that classified the shape as breadth. Both defects sat in text that
+predated the PR's own diff, which is precisely why every diff-scoped round,
+whatever its lens, was structurally incapable of seeing them.
+
+So the keep stands on the cumulative 312-vs-177 record, not on this sample.
+What this sample argues is narrower and worth stating separately: **lens
+rotation and audit scope are independent axes, and the log currently measures
+only the first.** A fixture whose claim surface spans many files can pass any
+number of well-rotated diff-scoped rounds with a contradiction sitting in an
+unchanged file. If a future sample shows core continuing to close the gap, the
+question to ask is not "rotate differently" but "what is each round allowed to
+look at" — and that is not something the rotation figures can answer.
+
+Prior samples for trend: 172 (core=170, rotated=312), and the rotated share of
+later-round catches across earlier addenda ran 80% → 97% → 65%.
+
+## Addendum — 2026-09-05, sample 173 unchanged (PR #2072 / issue #2069)
+
+`loop_log_audit` returns DECIDABLE lens-rotation again: 173 multi-round merged
+PRs, later-round catches core=177 rotated=312 skipped=15. **The keep stands, and
+this run adds no evidence either way** — PR #2072 is a single-round line, so it
+contributes nothing to a statistic computed over later-round catches on
+multi-round PRs. The figures are byte-identical to the previous addendum's.
+
+Recording it anyway, because the *shape* of this sample sharpens the point the
+last addendum made about scope being an axis the log does not measure.
+
+All five catches on #2072 were claim-accuracy defects in prose the PR itself
+wrote, and none was found by lens rotation. The round-1 mix (correctness /
+integration / test-evidence) found two of them, and two independent lenses
+converged on the same one — a signal about the defect being real, not about the
+lens being well-chosen. The remaining three were found by the Phase 7 final
+review across three successive loops, each catching an error introduced by the
+*previous repair* rather than by the original diff. That is a distinct failure
+mode from anything the rotation ledger tracks: not "which lens looks at the
+code" but "who checks the fix." No round-1 lens, rotated or core, could have
+caught a defect that did not exist until the repair for a different defect was
+written.
+
+Two observations worth carrying forward, neither of which the rotation figures
+can settle:
+
+1. **Repair-introduced defects deserve their own accounting.** Three of five
+   catches here were regressions in text, introduced by fixes. The log's `catches`
+   array attributes by lens and round; it has no field distinguishing "found in
+   the original diff" from "found in a repair." If that ratio is high across the
+   corpus, the useful intervention is a mandatory re-read of one's own repair —
+   which is a process change, not a rotation change.
+2. **Prose-heavy fixtures are the recurring locus.** As in #2028 and #2067, the
+   code here was never faulted: three independent Phase 7 reviews each judged
+   their head mergeable and no reviewer found a defect in the gate change. What
+   kept failing was confident prose misdescribing a mechanism — here, naming a
+   status (`timeout`) that is not in `TERMINAL_JOB_STATUSES` at all. Tests cannot
+   constrain that class, and rotating lenses does not address it either.
+
+Prior samples for trend: 173 (core=177, rotated=312) — unchanged from the
+previous addendum, as expected for a single-round line.
