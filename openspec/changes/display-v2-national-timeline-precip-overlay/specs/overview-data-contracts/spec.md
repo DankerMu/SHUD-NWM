@@ -11,6 +11,7 @@ This guarantees that the default `discharge` overview renders **every basin's ri
 - **THEN** the response item with `layer_id === 'discharge'` MUST have `metadata.tile_url_template === '/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf'`
 - **AND** that item MUST have `metadata.required_placeholders === ['source', 'cycle', 'valid_time', 'z', 'x', 'y']` (no `run_id` placeholder)
 - **AND** that item MUST carry `metadata.default_source === 'gfs'`, a `metadata.default_cycle` equal to the newest cycle of `national_discharge_cycles(session, source='gfs')`, and `metadata.cycles_url_template` / `metadata.valid_times_url_template`
+- **AND** `metadata.default_cycle` MUST instead be `null` whenever the resolved `metadata.valid_times` is empty, even if `national_discharge_cycles` returned a non-empty list: a cycle the catalog cannot prove a valid-time list for MUST NOT be advertised as the default, because the frontend would substitute it into the tile template and request tiles the backend refuses to serve. This is the fail-closed pairing of `default_cycle` and `valid_times` — the two are advertised together or not at all
 - **AND** that item's `metadata.valid_times` MUST be sourced from `national_discharge_valid_times(session, source=default_source, cycle=default_cycle)` — the 3-hour-stride list of that one `(default_source, default_cycle)`, NOT the previous union across each basin's latest display-ready run
 - **AND** that item's `metadata.maplibre_source_layer` MUST equal `'hydro'`
 - **AND** that item's `metadata.properties` MUST include `basin_id` (so click-to-curve resolves basin without an N+1 round-trip)
@@ -97,9 +98,35 @@ The system SHALL keep the default `gfs+discharge` overview cold first-paint with
 
 #### Scenario: Cold `/api/v1/layers` budget
 - **WHEN** a force-refresh load issues `GET /api/v1/layers` (runless) and `GET /api/v1/layers?run_id=<latest>` on a cold cache, with the intersection and default-cycle valid-time queries included in the catalog computation
-- **THEN** each response MUST return within ≤ 200 ms p95 on node-27 production hardware
+- **THEN** each response MUST return within ≤ 500 ms p95 on node-27 production hardware
 - **AND** no other bootstrap-critical endpoint MUST exceed 500 ms p95
-- **AND** the node-27 receipt for this change MUST record the measured cold p95 of `GET /api/v1/layers` before and after the change
+- **AND** the node-27 receipt for this change MUST record the measured cold p95 of `GET /api/v1/layers` both before and after the change, each computed from at least 10 cold samples taken in the same session by the same method — a 3-sample figure is a maximum, not a p95, and does not satisfy this clause
+- **AND** the after-measurement MUST NOT exceed the before-measurement by more than 50 ms within that same receipt
+- **AND** the receipt MUST also record, for the after-measurement, the coverage-query row count and `len(cycles)` returned by the runless catalog, so a later budget regression can be attributed to row growth rather than re-measured blind
+
+> Budget note (user decision, i5-2009 round 2; supersedes the round-1 note). The threshold in this
+> scenario was ≤ 200 ms when the change was authored. Three node-27 receipts measure master's own
+> pre-change cold latency for `GET /api/v1/layers`:
+> `docs/runbooks/receipts/issue-612-cold-waterfall-rerun-2026-06-21.md:42` (three cold TTFB samples,
+> `Median` 392 ms, `Max` 405 ms), `docs/runbooks/receipts/display-bootstrap-decoupling-20260620.md:100`
+> (three cold TTFB samples, `Median` 413 ms, `Max` 418 ms), and
+> `docs/runbooks/receipts/2026-07-20-node27-display-scaling.md:181` (a single public sample at 0.331 s).
+> **No existing receipt reports a p95 for `GET /api/v1/layers`** — the two tables carry `Median` and
+> `Max` columns over three runs, which is why the ≥ 10-sample clause above exists. The 200 ms figure was
+> therefore already unmet before any code in this change existed — a mis-set budget, not a regression
+> introduced here.
+>
+> A round-1 note in this position claimed master sits at "331–392 ms" and set the threshold to 400 ms
+> on that basis. That premise was wrong: 392 and 413 are medians, their own tables report maxima of
+> 405 ms and 418 ms, and 0.331 s is one sample. Both three-sample tables exceed 400 ms at their maximum,
+> so a 400 ms absolute threshold would have failed on master under any percentile reading of them. The user's corrected decision is a
+> **500 ms absolute ceiling** — the same tier this scenario already applies to every other
+> bootstrap-critical endpoint — **plus a regression clause**: within one receipt, measured by one
+> method, `after − before` MUST NOT exceed 50 ms. The ceiling stops absolute drift; the regression
+> clause is what stays red-capable against this change's own cost (the 38-network intersection plus
+> the per-cycle valid-time query), which a 500 ms ceiling alone would not catch given master already
+> measures 405–418 ms. Epic #2003's acceptance item 2 and issue #2009's acceptance criteria still
+> spell 200 ms and are amended separately — see the PR's 偏离记录.
 
 #### Scenario: Cold first-paint interactivity budget
 - **WHEN** the default `gfs+discharge` overview is opened on a cold cache with the precipitation overlay enabled and `loadOverview` is invoked

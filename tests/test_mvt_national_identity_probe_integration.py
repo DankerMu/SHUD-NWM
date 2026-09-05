@@ -947,3 +947,645 @@ def test_national_identity_tile_serves_the_requested_source_not_the_other_one_at
     _assert_tile_was_painted_by(
         _request_identity_tile(client, "ifs", _CYCLE_TIME, _WINDOW_END), _SAME_CYCLE_IFS_RUN_ID, _RUN_ID
     )
+
+
+# ---------------------------------------------------------------------------
+# #2009 (I5): the national discharge CYCLES catalog and its per-cycle valid
+# times. Appended at the end of the file so every line citation above keeps its
+# number.
+#
+# Why these cases cannot reuse the seeds above (verified against the code):
+#
+# * The three existing seeds write only the TWO window endpoints (`_seed` at
+#   `:279-296` writes lead 0 at `_WINDOW_START` and lead 1 at `_WINDOW_END`,
+#   deliberately nothing at `_GAP_TIME`). The coverage row that materialises from
+#   that is `segment_count=2, river_sample_count=4, min_lead=0, max_lead=1`,
+#   window `C … C+2h` -- and `_national_coverage_window`
+#   (`services/tiles/mvt.py:2084-2091`) REJECTS it, because `7200 !=
+#   (lead_count - 1) * 3600` with `lead_count = 2`. The eight tile cases above
+#   never reach that function, so their green says nothing here. Everything
+#   below therefore seeds through `_seed_hourly_display_ready_run`, which writes
+#   EVERY segment at EVERY hour with `lead_time_hours` = the hour offset.
+# * The ranked national query joins `core.model_instance mi ON mi.basin_version_id
+#   = h.basin_version_id` (`mvt.py:2038`), and
+#   `model_instance_active_basin_version_uidx`
+#   (`db/migrations/000022_model_asset_lifecycle.sql:61-63`) allows only ONE
+#   active `model_instance` per `basin_version_id`. A second ACTIVE network
+#   therefore needs its own `core.basin_version` as well as its own
+#   `core.river_network_version`; sharing basin version 1 is both rejected by the
+#   index and would make network 2 see all of network 1's runs.
+# * `hydro.hydro_run.run_id` is TEXT (`db/migrations/000006_hydro.sql:2`), so
+#   `ORDER BY h.run_id DESC` is a lexical order. Run ids below carry an explicit
+#   `_run_<n>_` rank segment, and every case whose outcome depends on that order
+#   asserts it against the database's own collation before asserting behaviour.
+# * Matrix row 51 (`AND mi.river_network_version_id IS NOT NULL`) gets NO case
+#   here: `core.model_instance.river_network_version_id` is `TEXT NOT NULL`
+#   (`db/migrations/000004_core.sql:74`) and no later migration drops that, so
+#   the row the case would need is unsatisfiable by schema. Tripwire-only, in
+#   `tests/test_hydro_display_mvt_scaling.py::test_national_coverage_statements_pin_their_shape`.
+#
+# The seed cycle is months older than the real 12-day cycle lookback, so every
+# case except the lookback one widens
+# `services.tiles.mvt.NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS` (read at call time,
+# `mvt.py:1914`).
+# ---------------------------------------------------------------------------
+
+_I5_PREFIX = f"{_PREFIX}_i5"
+_SECOND_BASIN_VERSION_ID = f"{_I5_PREFIX}_basin_v2"
+_SECOND_NETWORK_ID = f"{_I5_PREFIX}_rnv_v2"
+_SECOND_MODEL_ID = f"{_I5_PREFIX}_model_2"
+_SECOND_SEGMENT_IDS = (f"{_I5_PREFIX}_seg_c", f"{_I5_PREFIX}_seg_d")
+
+# Cycle A is the base seed's cycle; B is newer, P is older. A 2-hour window holds
+# exactly ONE 3-hour-stride instant (the cycle itself), which is what makes the
+# per-cycle list assertions below single-valued and easy to read.
+_I5_CYCLE_A = _CYCLE_TIME
+_I5_CYCLE_B = _CYCLE_TIME + timedelta(hours=12)
+_I5_CYCLE_P = _CYCLE_TIME - timedelta(hours=6)
+_I5_IFS_CYCLE = _CYCLE_TIME + timedelta(hours=6)
+_I5_WINDOW = timedelta(hours=2)
+
+_WIDE_CYCLE_LOOKBACK = "services.tiles.mvt.NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS"
+
+
+def _seed_hourly_display_ready_run(
+    database_url: str,
+    *,
+    run_id: str,
+    cycle_time: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    source_id: str = _SOURCE_ID,
+    forcing_version_id: str | None = None,
+    value_base: float = 500.0,
+    model_id: str = _MODEL_ID,
+    basin_version_id: str = _BASIN_VERSION_ID,
+    network_id: str = _NETWORK_ID,
+    segment_ids: tuple[str, ...] = _SEGMENT_IDS,
+    new_data_source_name: str | None = None,
+    seed_river_rows: bool = True,
+) -> None:
+    """A display-ready run whose river timeseries fill the window HOURLY.
+
+    The difference from ``_seed_rival_display_ready_run`` is the only thing that
+    matters to the cycles catalog: that helper writes the two window endpoints,
+    which materialises ``max_lead - min_lead + 1 == 2`` over a 2-hour window and
+    is rejected by ``_national_coverage_window``'s rectangle check. This one
+    writes every segment at every hour with ``lead_time_hours`` equal to the hour
+    offset, so ``river_sample_count == segment_count * lead_count`` and
+    ``end - start == (lead_count - 1) * 3600`` both hold.
+
+    ``seed_river_rows=False`` writes the run and its forcing version but no river
+    rows at all: ``refresh_run_display_coverage`` still materialises a row for it
+    (``packages/common/display_coverage.py:756-773``), with ``segment_count = 0``.
+    That is the zero-segment rival the ``segment_count > 0`` JOIN predicate has to
+    drop.
+    """
+    assert int((window_end - window_start).total_seconds()) % 3600 == 0, "hourly grid only"
+    forcing_version_id = forcing_version_id or f"{run_id}_fv"
+    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            if new_data_source_name is not None:
+                cursor.execute(
+                    """
+                    INSERT INTO met.data_source
+                        (source_id, source_name, source_type, status, native_format, adapter_name)
+                    VALUES (%s, %s, 'forecast', 'mock', 'netcdf', %s)
+                    """,
+                    (source_id, new_data_source_name, source_id.lower()),
+                )
+            cursor.execute(
+                """
+                INSERT INTO met.forcing_version
+                    (forcing_version_id, model_id, source_id, cycle_time, start_time, end_time,
+                     station_count, forcing_package_uri, checksum)
+                VALUES (%s, %s, %s, %s, %s, %s, 1, %s, %s)
+                """,
+                (
+                    forcing_version_id,
+                    model_id,
+                    source_id,
+                    cycle_time,
+                    window_start,
+                    window_end,
+                    f"s3://nhms/forcing/{forcing_version_id}/",
+                    f"forcing-sha-{forcing_version_id}",
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO hydro.hydro_run
+                    (run_id, run_type, scenario_id, model_id, basin_version_id, forcing_version_id,
+                     source_id, cycle_time, start_time, end_time, status, run_manifest_uri)
+                VALUES (%s, 'forecast', 'sc', %s, %s, %s, %s, %s, %s, %s, 'parsed', 's3://nhms/manifest')
+                """,
+                (
+                    run_id,
+                    model_id,
+                    basin_version_id,
+                    forcing_version_id,
+                    source_id,
+                    cycle_time,
+                    window_start,
+                    window_end,
+                ),
+            )
+            if not seed_river_rows:
+                return
+            lead_hours = int((window_end - window_start).total_seconds()) // 3600
+            insert_river_timeseries_dual_written(
+                cursor,
+                [
+                    (
+                        run_id,
+                        basin_version_id,
+                        network_id,
+                        segment_id,
+                        window_start + timedelta(hours=lead),
+                        lead,
+                        _VARIABLE,
+                        value_base + index,
+                        "m3/s",
+                        "ok",
+                    )
+                    for lead in range(lead_hours + 1)
+                    for index, segment_id in enumerate(segment_ids)
+                ],
+            )
+    finally:
+        connection.close()
+
+
+def _seed_second_network(database_url: str, *, active: bool = True) -> None:
+    """A second river network with its own basin version and model instance.
+
+    Its own ``core.basin_version`` is mandatory, not stylistic: the partial unique
+    index ``model_instance_active_basin_version_uidx``
+    (``db/migrations/000022_model_asset_lifecycle.sql:61-63``) permits exactly one
+    ACTIVE model instance per basin version, and the national ranked query joins
+    model instances to runs on ``basin_version_id``, so a second instance on
+    basin version 1 would also inherit every one of network 1's runs.
+
+    ``active=False`` sets ``lifecycle_state='inactive'`` alongside
+    ``active_flag=false``: the CHECK at ``000022_model_asset_lifecycle.sql:41-46``
+    ties the two together, and the intersection denominator is a DISTINCT over
+    ``river_network_version_id`` restricted to ``active_flag``, so the inactive
+    network must carry its OWN network id to be a real exclusion case.
+    """
+    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO core.basin_version
+                    (basin_version_id, basin_id, version_label, geom, active_flag)
+                VALUES (%s, %s, 'v2',
+                        ST_SetSRID(ST_GeomFromText(
+                            'MULTIPOLYGON(((99 37, 99 39, 101 39, 101 37, 99 37)))'), 4490),
+                        true)
+                """,
+                (_SECOND_BASIN_VERSION_ID, _BASIN_ID),
+            )
+            cursor.execute(
+                """
+                INSERT INTO core.river_network_version
+                    (river_network_version_id, basin_version_id, version_label, segment_count)
+                VALUES (%s, %s, 'v2', %s)
+                """,
+                (_SECOND_NETWORK_ID, _SECOND_BASIN_VERSION_ID, len(_SECOND_SEGMENT_IDS)),
+            )
+            for index, segment_id in enumerate(_SECOND_SEGMENT_IDS):
+                cursor.execute(
+                    f"""
+                    INSERT INTO core.river_segment
+                        (river_segment_id, river_network_version_id, segment_order,
+                         geom, properties_json)
+                    VALUES (%s, %s, %s, {_segment_geom_sql(index + 10)}, '{{"Type": 5}}'::jsonb)
+                    """,
+                    (segment_id, _SECOND_NETWORK_ID, index),
+                )
+            cursor.execute(
+                """
+                INSERT INTO core.model_instance
+                    (model_id, basin_version_id, river_network_version_id, mesh_version_id,
+                     calibration_version_id, shud_code_version, model_package_uri,
+                     active_flag, lifecycle_state)
+                VALUES (%s, %s, %s, 'mesh-2009', 'cal-2009', '1.0', 's3://nhms/model',
+                        %s, %s)
+                """,
+                (
+                    _SECOND_MODEL_ID,
+                    _SECOND_BASIN_VERSION_ID,
+                    _SECOND_NETWORK_ID,
+                    active,
+                    "active" if active else "inactive",
+                ),
+            )
+    finally:
+        connection.close()
+
+
+def _seed_second_network_run(
+    database_url: str,
+    *,
+    run_id: str,
+    cycle_time: datetime,
+    window_start: datetime,
+    window_end: datetime,
+    forcing_version_id: str | None = None,
+) -> None:
+    """An hourly display-ready run on the SECOND network's model and basin version.
+
+    A named helper rather than a bare call with six overrides, for the same
+    reason ``_seed_rival_display_ready_run`` is separate from
+    ``_seed_uppercase_ifs_run``: the cases that need a second network must be able
+    to fail on their own predicate, not on someone else's default drifting.
+    """
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=run_id,
+        cycle_time=cycle_time,
+        window_start=window_start,
+        window_end=window_end,
+        forcing_version_id=forcing_version_id,
+        value_base=600.0,
+        model_id=_SECOND_MODEL_ID,
+        basin_version_id=_SECOND_BASIN_VERSION_ID,
+        network_id=_SECOND_NETWORK_ID,
+        segment_ids=_SECOND_SEGMENT_IDS,
+    )
+
+
+def _cycles(client: TestClient, source: str = "gfs") -> dict[str, Any]:
+    response = client.get("/api/v1/layers/discharge/cycles", params={"source": source})
+    assert response.status_code == 200, response.text
+    return dict(response.json()["data"])
+
+
+def _valid_times(client: TestClient, *, cycle: datetime, source: str = "gfs") -> list[str]:
+    response = client.get(
+        "/api/v1/layers/discharge/valid-times",
+        params={"source": source, "cycle": _stamp(cycle)},
+    )
+    assert response.status_code == 200, response.text
+    return list(response.json()["data"]["valid_times"])
+
+
+def _assert_coverage_segment_counts(database_url: str, expected: dict[str, int]) -> None:
+    """Non-vacuity: the runs a case argues about really are (or are not) candidates."""
+    observed = _query(
+        database_url,
+        "SELECT run_id, segment_count FROM hydro.run_display_coverage WHERE run_id = ANY(%s) ORDER BY run_id",
+        (sorted(expected),),
+    )
+    assert observed == [{"run_id": run_id, "segment_count": expected[run_id]} for run_id in sorted(expected)]
+
+
+def _assert_run_id_order(database_url: str, run_ids: tuple[str, ...]) -> None:
+    """The DB's own collation puts ``run_ids`` in this order under ``ORDER BY run_id DESC``.
+
+    ``ORDER BY h.run_id DESC`` is a TEXT sort, and which run wins ``rn = 1`` is
+    the whole point of the cases that call this. Asserting the order in the
+    database rather than in Python keeps the case honest under any collation.
+    """
+    observed = _query(
+        database_url,
+        "SELECT run_id FROM hydro.hydro_run WHERE run_id = ANY(%s) ORDER BY run_id DESC",
+        (sorted(run_ids),),
+    )
+    assert [row["run_id"] for row in observed] == list(run_ids)
+
+
+def test_national_cycles_list_only_cycles_covered_by_every_network(
+    national_tile: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matrix row 52: one ranked row per (network, cycle), not one per network.
+
+    Network 1 holds cycles A and B (B newer AND its run id sorts higher);
+    network 2 holds A only. Partitioning by network alone lets B win ``rn = 1``
+    for network 1, after which NO cycle is covered by both networks and the
+    catalog empties -- the fail-closed direction, but on a cycle that really is
+    nationally covered.
+    """
+    database_url, client = national_tile
+    monkeypatch.setattr(_WIDE_CYCLE_LOOKBACK, 100_000)
+    n1_a = f"{_I5_PREFIX}_n1_run_1_at_a"
+    n1_b = f"{_I5_PREFIX}_n1_run_2_at_b"
+    n2_a = f"{_I5_PREFIX}_n2_run_1_at_a"
+    _seed_second_network(database_url)
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=n1_a,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + _I5_WINDOW,
+    )
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=n1_b,
+        cycle_time=_I5_CYCLE_B,
+        window_start=_I5_CYCLE_B,
+        window_end=_I5_CYCLE_B + _I5_WINDOW,
+    )
+    _seed_second_network_run(
+        database_url,
+        run_id=n2_a,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + _I5_WINDOW,
+    )
+    for run_id in (n1_a, n1_b, n2_a):
+        _refresh_coverage(database_url, run_id)
+    # Without this the mutated partition would pick A for network 1 by accident
+    # and the case would stay green for the wrong reason.
+    _assert_run_id_order(database_url, (n1_b, n1_a))
+    _assert_coverage_segment_counts(database_url, {n1_a: 2, n1_b: 2, n2_a: 2})
+    assert _query(
+        database_url,
+        "SELECT count(DISTINCT river_network_version_id) AS n FROM core.model_instance WHERE active_flag",
+        (),
+    ) == [{"n": 2}]
+
+    data = _cycles(client)
+
+    assert data["cycles"] == [
+        {
+            "cycle_time": _stamp(_I5_CYCLE_A),
+            "valid_time_start": _stamp(_I5_CYCLE_A),
+            "valid_time_end": _stamp(_I5_CYCLE_A),
+        }
+    ]
+    assert data["default_cycle"] == _stamp(_I5_CYCLE_A)
+
+
+def test_national_valid_times_are_empty_for_a_cycle_outside_the_intersection(
+    national_tile: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matrix row 55: ``:cycle`` narrows the per-cycle query in SQL, not only in the fake.
+
+    Both networks hold cycle A. P (= A - 6h) is a cycle NO run is ever seeded at
+    -- the same production shape ``_PRUNED_CYCLE_TIME`` above stands for -- so it
+    is outside the intersection and its timeline must be empty.
+
+    P must be EARLIER than A, and P must hold no rows of its own. Dropping the
+    ``:cycle`` conjunct does NOT collapse the result to one row per network (the
+    window still partitions by ``(network, cycle)``, matrix row 52); it returns
+    every ranked row, so the mutated call for P sees exactly the two A-rows,
+    ``covered == active``, and the clamp from P lands on ``A`` -- non-empty, which
+    is the red. Seeding P a run of its own would instead put ``[P, P+2h]`` into the
+    intersection, ``window_end < window_start``, and ``mvt.py:2129`` would empty the
+    mutated result too; a LATER cycle fails the same way. Either variant is green
+    under the mutation and is NOT an oracle.
+    """
+    database_url, client = national_tile
+    monkeypatch.setattr(_WIDE_CYCLE_LOOKBACK, 100_000)
+    n1_a = f"{_I5_PREFIX}_n1_run_1_at_a"
+    n2_a = f"{_I5_PREFIX}_n2_run_1_at_a"
+    _seed_second_network(database_url)
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=n1_a,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + _I5_WINDOW,
+    )
+    _seed_second_network_run(
+        database_url,
+        run_id=n2_a,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + _I5_WINDOW,
+    )
+    for run_id in (n1_a, n2_a):
+        _refresh_coverage(database_url, run_id)
+    _assert_coverage_segment_counts(database_url, {n1_a: 2, n2_a: 2})
+    # Non-vacuity: P really is unseeded, so the empty answer below is about the
+    # intersection and not about a run that happens to be missing coverage.
+    assert _query(
+        database_url,
+        "SELECT count(*) AS n FROM hydro.hydro_run WHERE cycle_time = %s",
+        (_I5_CYCLE_P,),
+    ) == [{"n": 0}]
+
+    assert _valid_times(client, cycle=_I5_CYCLE_P) == []
+    assert _valid_times(client, cycle=_I5_CYCLE_A) == [_stamp(_I5_CYCLE_A)]
+
+
+def test_national_cycles_ignore_an_inactive_network(
+    national_tile: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matrix row 50: only ACTIVE instances form the intersection denominator.
+
+    The second network is inactive and has no runs at all. With
+    ``WHERE mi.active_flag`` widened to ``WHERE TRUE`` it joins the denominator,
+    nothing covers it, and a nationally covered cycle disappears.
+    """
+    database_url, client = national_tile
+    monkeypatch.setattr(_WIDE_CYCLE_LOOKBACK, 100_000)
+    n1_a = f"{_I5_PREFIX}_n1_run_1_at_a"
+    _seed_second_network(database_url, active=False)
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=n1_a,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + _I5_WINDOW,
+    )
+    _refresh_coverage(database_url, n1_a)
+    # Two networks exist; exactly one of them is active.
+    assert _query(
+        database_url,
+        "SELECT count(*) AS n FROM core.river_network_version",
+        (),
+    ) == [{"n": 2}]
+    assert _query(
+        database_url,
+        "SELECT count(DISTINCT river_network_version_id) AS n FROM core.model_instance WHERE active_flag",
+        (),
+    ) == [{"n": 1}]
+
+    data = _cycles(client)
+
+    assert [entry["cycle_time"] for entry in data["cycles"]] == [_stamp(_I5_CYCLE_A)]
+    assert data["default_cycle"] == _stamp(_I5_CYCLE_A)
+
+
+def test_national_cycles_keep_a_cycle_whose_zero_segment_rival_run_sorts_first(
+    national_tile: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matrix row 3: ``AND rdc.segment_count > 0`` sits upstream of ``ROW_NUMBER()``.
+
+    One network, two runs at cycle A: a complete hourly one and a rival with no
+    river timeseries at all, whose run id sorts ABOVE it. Unmutated the JOIN
+    predicate drops the zero-segment run before the ranking, so the complete run
+    wins ``rn = 1`` and A is listed. Delete the predicate and the zero-segment run
+    wins instead, ``_national_coverage_window`` rejects its NULL window, and a
+    covered cycle vanishes.
+
+    A SINGLE zero-segment run is not an oracle here: the cycle is unlisted either
+    way. The rival pair is what makes the predicate observable.
+    """
+    database_url, client = national_tile
+    monkeypatch.setattr(_WIDE_CYCLE_LOOKBACK, 100_000)
+    complete_run = f"{_I5_PREFIX}_n1_run_1_complete"
+    zero_segment_run = f"{_I5_PREFIX}_n1_run_2_zero_segment"
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=complete_run,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + _I5_WINDOW,
+    )
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=zero_segment_run,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + _I5_WINDOW,
+        seed_river_rows=False,
+    )
+    _refresh_coverage(database_url, complete_run)
+    _refresh_coverage(database_url, zero_segment_run)
+    _assert_run_id_order(database_url, (zero_segment_run, complete_run))
+    _assert_coverage_segment_counts(database_url, {complete_run: 2, zero_segment_run: 0})
+
+    data = _cycles(client)
+
+    assert [entry["cycle_time"] for entry in data["cycles"]] == [_stamp(_I5_CYCLE_A)]
+    assert data["default_cycle"] == _stamp(_I5_CYCLE_A)
+
+
+def test_national_cycles_skip_a_cycle_older_than_the_lookback(national_tile: Any) -> None:
+    """Matrix row 36: the lookback predicate really bounds the DB scan.
+
+    The ONE case here that must run against the REAL
+    ``NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS`` -- no widening. Both networks cover
+    the seed cycle A (months old) and a recent cycle R, so the intersection alone
+    would list both; only the ``h.cycle_time >= :since`` conjunct drops A.
+    """
+    database_url, client = national_tile
+    recent = datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(days=1)
+    n1_a = f"{_I5_PREFIX}_n1_run_1_at_a"
+    n1_r = f"{_I5_PREFIX}_n1_run_2_at_r"
+    n2_a = f"{_I5_PREFIX}_n2_run_1_at_a"
+    n2_r = f"{_I5_PREFIX}_n2_run_2_at_r"
+    _seed_second_network(database_url)
+    for run_id, cycle_time in ((n1_a, _I5_CYCLE_A), (n1_r, recent)):
+        _seed_hourly_display_ready_run(
+            database_url,
+            run_id=run_id,
+            cycle_time=cycle_time,
+            window_start=cycle_time,
+            window_end=cycle_time + _I5_WINDOW,
+        )
+    for run_id, cycle_time in ((n2_a, _I5_CYCLE_A), (n2_r, recent)):
+        _seed_second_network_run(
+            database_url,
+            run_id=run_id,
+            cycle_time=cycle_time,
+            window_start=cycle_time,
+            window_end=cycle_time + _I5_WINDOW,
+        )
+    for run_id in (n1_a, n1_r, n2_a, n2_r):
+        _refresh_coverage(database_url, run_id)
+    _assert_coverage_segment_counts(database_url, {n1_a: 2, n1_r: 2, n2_a: 2, n2_r: 2})
+
+    data = _cycles(client)
+
+    # A is fully covered by both networks and still absent: age is the only
+    # difference between it and R.
+    assert [entry["cycle_time"] for entry in data["cycles"]] == [_stamp(recent)]
+    assert data["default_cycle"] == _stamp(recent)
+
+
+def test_national_cycles_match_an_uppercase_source_id_from_a_lowercase_query(
+    national_tile: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matrix row 54: ``lower(h.source_id) = :source`` narrows the query in SQL.
+
+    Production stores ``gfs`` lower-case and ``IFS`` UPPER-case. The two sources
+    sit at different cycles, so dropping the conjunct (keeping the bind) makes
+    each request list both cycles instead of its own.
+    """
+    database_url, client = national_tile
+    monkeypatch.setattr(_WIDE_CYCLE_LOOKBACK, 100_000)
+    gfs_run = f"{_I5_PREFIX}_n1_run_1_gfs"
+    ifs_run = f"{_I5_PREFIX}_n1_run_2_ifs"
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=gfs_run,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + _I5_WINDOW,
+    )
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=ifs_run,
+        source_id=_IFS_SOURCE_ID,
+        cycle_time=_I5_IFS_CYCLE,
+        window_start=_I5_IFS_CYCLE,
+        window_end=_I5_IFS_CYCLE + _I5_WINDOW,
+        value_base=700.0,
+        new_data_source_name="IFS 2009",
+    )
+    _refresh_coverage(database_url, gfs_run)
+    _refresh_coverage(database_url, ifs_run)
+    _assert_coverage_segment_counts(database_url, {gfs_run: 2, ifs_run: 2})
+    assert _query(
+        database_url,
+        "SELECT source_id FROM hydro.hydro_run WHERE run_id = %s",
+        (ifs_run,),
+    ) == [{"source_id": "IFS"}], "the case is about case folding; the seed must be upper-case"
+
+    assert [entry["cycle_time"] for entry in _cycles(client, "ifs")["cycles"]] == [_stamp(_I5_IFS_CYCLE)]
+    assert [entry["cycle_time"] for entry in _cycles(client, "gfs")["cycles"]] == [_stamp(_I5_CYCLE_A)]
+
+
+def test_national_cycles_take_the_newest_run_at_a_cycle(
+    national_tile: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matrix rows 53 and 56: ``ORDER BY h.run_id DESC`` picks the winner, ``rn = 1`` keeps it.
+
+    Two runs at cycle A on one network: the older covers ``A … A+2h``, the newer
+    ``A … A+5h``. The listed window's END is the discriminator -- ``A+3h`` from the
+    newer run, ``A`` from the older one. ``ORDER BY ... ASC`` picks the older run;
+    ``WHERE rn >= 1`` keeps BOTH rows and the intersection clamp then takes the
+    shorter window. Both mutations land on ``A``.
+    """
+    database_url, client = national_tile
+    monkeypatch.setattr(_WIDE_CYCLE_LOOKBACK, 100_000)
+    older_run = f"{_I5_PREFIX}_n1_run_1_short_window"
+    newer_run = f"{_I5_PREFIX}_n1_run_2_long_window"
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=older_run,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + timedelta(hours=2),
+    )
+    _seed_hourly_display_ready_run(
+        database_url,
+        run_id=newer_run,
+        cycle_time=_I5_CYCLE_A,
+        window_start=_I5_CYCLE_A,
+        window_end=_I5_CYCLE_A + timedelta(hours=5),
+        value_base=800.0,
+    )
+    _refresh_coverage(database_url, older_run)
+    _refresh_coverage(database_url, newer_run)
+    _assert_run_id_order(database_url, (newer_run, older_run))
+    _assert_coverage_segment_counts(database_url, {older_run: 2, newer_run: 2})
+
+    data = _cycles(client)
+
+    assert data["cycles"] == [
+        {
+            "cycle_time": _stamp(_I5_CYCLE_A),
+            "valid_time_start": _stamp(_I5_CYCLE_A),
+            "valid_time_end": _stamp(_I5_CYCLE_A + timedelta(hours=3)),
+        }
+    ]
+    assert data["default_cycle"] == _stamp(_I5_CYCLE_A)

@@ -30,7 +30,7 @@
 
 ### D2. 起报时次 = 活动河网交集，fail-closed
 - `national_discharge_cycles(session, source)`：对每个 active 河网收集该源 display-ready run 的 `cycle_time` 集合，取交集；任一河网集合为空则整体为空。返回 `cycles[]`（降序）+ `default_cycle`（最新）。
-- `national_discharge_valid_times(session, source, cycle)`：从 `cycle` 起 3h 步到该周期各河网 `river_valid_time_end` 最小值；57 项在现 `MVT_VALID_TIME_SAMPLE_LIMIT=100` 内。无参调用保持旧行为（兼容 `metadata.valid_times` 与旧脚本）。
+- `national_discharge_valid_times(session, source, cycle)`：3h 步长，两端都 clamp 到交集窗口内侧——起点是各河网 `river_valid_time_start` 的最大值与 `cycle` 二者之大（向上取整到步长格点），终点是各河网 `river_valid_time_end` 的最小值（向下取整）；#2009 决策 8 明确取代了原来"从 `cycle` 起"的写法（规范文本见 `specs/mvt-tile-contract/spec.md`）。57 项在现 `MVT_VALID_TIME_SAMPLE_LIMIT=100` 内。无参调用保持旧行为（兼容 `metadata.valid_times` 与旧脚本）。
 - 替代：并集。否决：用户拍板 fail-closed，避免部分流域无色却看似正常。
 
 ### D3. 降水累积在 node-27 服务端求和，跨周期切片规则唯一

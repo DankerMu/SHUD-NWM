@@ -30,6 +30,7 @@ from services.tiles.mvt import (
     MVT_MEDIA_TYPE,
     MVT_SCHEMA_VERSION,
     MVT_VALID_TIME_SAMPLE_LIMIT,
+    NATIONAL_DISCHARGE_DEFAULT_SOURCE,
     SUPPORTED_HYDRO_MVT_VARIABLES,
     TileError,
     TileInput,
@@ -39,6 +40,7 @@ from services.tiles.mvt import (
     collection_coordinate_limit,
     display_ready_run,
     layer_metadata,
+    national_discharge_cycles,
     national_discharge_source_version,
     national_discharge_valid_times,
     national_river_network_source_version,
@@ -173,6 +175,22 @@ class LayerValidTimesResponse(ApiSuccessEnvelope):
     data: LayerValidTimes
 
 
+class DischargeCycle(BaseModel):
+    cycle_time: str
+    valid_time_start: str
+    valid_time_end: str
+
+
+class DischargeCycles(BaseModel):
+    source: str
+    cycles: list[DischargeCycle]
+    default_cycle: str | None = None
+
+
+class DischargeCyclesResponse(ApiSuccessEnvelope):
+    data: DischargeCycles
+
+
 @lru_cache
 def _engine(database_url: str) -> Engine:
     return create_engine(
@@ -259,14 +277,16 @@ def list_layers(
         basin_version_id, river_network_version_id = _require_run_source_identity(run, layer_id="layers")
         source_version = _run_source_version(run)
         river_network_source_version = _river_network_source_version(session, basin_version_id)
-        national_hydro_source_version = national_discharge_source_version(session)
         national_river_source_version = national_river_network_source_version(session)
+        # No `national_discharge_source_version` call here: the discharge entry's
+        # digest is scoped to the `(default_source, default_cycle)` identity the
+        # entry advertises, which only `_default_layer_catalog` knows. Same single
+        # digest query, two more binds -- not an extra round trip.
         layers = _default_layer_catalog(
             session,
             run_id=resolved_run_id,
             source_version=source_version,
             river_network_source_version=river_network_source_version,
-            national_hydro_source_version=national_hydro_source_version,
             national_river_source_version=national_river_source_version,
             basin_version_id=basin_version_id,
             river_network_version_id=river_network_version_id,
@@ -277,11 +297,41 @@ def list_layers(
     return _ok(request, display_catalog_cached(request, f"layers:{run_id}:{limit}:{offset}", _load))
 
 
+@router.get("/api/v1/layers/discharge/cycles", response_model=DischargeCyclesResponse)
+def list_discharge_cycles(
+    request: Request,
+    # `Literal`, deliberately not a Python `Enum`, for the same reason as the
+    # canonical tile route: an Enum makes FastAPI emit a `$ref` the
+    # hand-maintained `openapi/nhms.v1.yaml` would have to mirror twice.
+    source: Literal["gfs", "ifs"] = Query(),
+    session: Session = Depends(get_hydro_display_session),
+) -> dict[str, Any]:
+    """Cycles of `source` that EVERY active river network can render, newest first.
+
+    Only cycles inside a 12-day lookback window are considered, so neither this
+    list nor the query behind it grows with the pipeline's lifetime; a cycle older
+    than the window is not listed even when every network covers it.
+
+    Fail-closed: one active network without a display-ready run for `source` --
+    or a pipeline stalled for longer than the window -- yields `cycles: []` and
+    `default_cycle: null`, and the national discharge layer renders disabled.
+    `source` is rejected by FastAPI itself before this body runs, so a bad or
+    missing one costs no SQL.
+    """
+
+    def _load() -> dict[str, Any]:
+        return national_discharge_cycles(session, source=source)
+
+    return _ok(request, display_catalog_cached(request, f"discharge-cycles:{source}", _load))
+
+
 @router.get("/api/v1/layers/{layer_id}/valid-times", response_model=LayerValidTimesResponse)
 def list_layer_valid_times(
     request: Request,
     layer_id: str,
     run_id: str | None = Query(default=None),
+    source: Literal["gfs", "ifs"] | None = Query(default=None),
+    cycle: Rfc3339Instant | None = Query(default=None),
     session: Session = Depends(get_hydro_display_session),
 ) -> dict[str, Any]:
     validate_identifier(layer_id, "layer_id")
@@ -292,10 +342,16 @@ def list_layer_valid_times(
             message="Unsupported layer_id for valid-time discovery.",
             details={"layer_id": layer_id, "supported": sorted(SUPPORTED_PUBLIC_LAYER_IDS)},
         )
+    cycle_instant = _validated_national_valid_time_selector(
+        layer_id=layer_id, run_id=run_id, source=source, cycle=cycle
+    )
     requested_run_id = run_id
+    cycle_key = _format_time(cycle_instant) if cycle_instant is not None else None
 
     def _load() -> dict[str, Any]:
         run_id = requested_run_id
+        if source is not None and cycle_instant is not None:
+            return national_discharge_valid_times(session, source=source, cycle=cycle_instant).model_dump()
         if run_id is None and layer_id == "discharge":
             return national_discharge_valid_times(session).model_dump()
         if layer_id != "discharge":
@@ -318,7 +374,58 @@ def list_layer_valid_times(
         )
         return valid_time_sample.model_dump()
 
-    return _ok(request, display_catalog_cached(request, f"valid-times:{layer_id}:{requested_run_id}", _load))
+    # The canonicalized cycle spelling, not the raw query string: `...T12:00:00.000Z`
+    # and `...T12:00:00Z` name one instant and must share one cache entry.
+    return _ok(
+        request,
+        display_catalog_cached(
+            request,
+            f"valid-times:{layer_id}:{requested_run_id}:{source}:{cycle_key}",
+            _load,
+        ),
+    )
+
+
+def _validated_national_valid_time_selector(
+    *,
+    layer_id: str,
+    run_id: str | None,
+    source: str | None,
+    cycle: datetime | None,
+) -> datetime | None:
+    """Fail closed on every half-formed national valid-time selector, before any SQL.
+
+    A source alone has no defined window, a cycle alone has no source to resolve
+    it against, `run_id` names a different identity than `(source, cycle)` does,
+    and only `discharge` has a national source/cycle contract at all. Each of
+    those is 422 rather than a silently-ignored argument, which would otherwise
+    serve gfs times under an ifs request.
+    """
+    if source is None and cycle is None:
+        return None
+    details: dict[str, Any] = {"layer_id": layer_id, "source": source, "run_id": run_id}
+    if layer_id != "discharge":
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="source/cycle valid-time discovery is defined for the discharge layer only.",
+            details=details,
+        )
+    if source is None or cycle is None:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="source and cycle must be given together.",
+            details=details,
+        )
+    if run_id is not None:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="run_id cannot be combined with source/cycle: they name different identities.",
+            details=details,
+        )
+    return _require_seconds_precision_instant(cycle, "cycle")
 
 
 @router.get(
@@ -1019,14 +1126,70 @@ def _default_layer_catalog(
     basin_version_id: str,
     river_network_version_id: str,
     river_network_source_version: str,
-    national_hydro_source_version: str,
     national_river_source_version: str,
+    # Left `None` by `/api/v1/layers`, which cannot compute it: the discharge
+    # entry's digest is scoped to the identity resolved BELOW. Callers that already
+    # hold a digest (tests exercising this helper directly) pass it and the
+    # identity-scoped query is skipped entirely.
+    national_hydro_source_version: str | None = None,
     national: bool = False,
 ) -> list[Layer]:
     layers = []
+    default_cycle: str | None = None
     for layer_id, name, layer_type, variables in PUBLIC_LAYER_DEFINITIONS:
         if layer_id == "discharge":
-            valid_time_sample = national_discharge_valid_times(session)
+            # One national identity for the whole entry, independent of `run_id`:
+            # the default cycle comes from the fail-closed intersection, and the
+            # advertised list comes from the SAME function
+            # `/api/v1/layers/discharge/valid-times?source=&cycle=` serves, so the
+            # frontend can skip the round trip while the identity is the default.
+            default_cycle = national_discharge_cycles(session, source=NATIONAL_DISCHARGE_DEFAULT_SOURCE)[
+                "default_cycle"
+            ]
+            # `canonical_mvt_time` spelling only: seconds precision with a literal
+            # `Z`, which `fromisoformat` reads back exactly. Parsed once and reused
+            # by the valid-times call and the digest below.
+            default_cycle_instant = None if default_cycle is None else datetime.fromisoformat(default_cycle)
+            valid_time_sample = (
+                _empty_valid_times()
+                if default_cycle_instant is None
+                else national_discharge_valid_times(
+                    session,
+                    source=NATIONAL_DISCHARGE_DEFAULT_SOURCE,
+                    cycle=default_cycle_instant,
+                )
+            )
+            # The two calls above take separate `read committed` snapshots, so the
+            # intersection can empty out between them -- newly ACTIVATING a network
+            # with no display-ready run for `default_cycle`, or a covered run's
+            # status / coverage row being rewritten. Deactivation empties it too (fail-closed),
+            # intra-call: statement 1's active set still holds it, statement 2 drops its rows. The
+            # contract spells the empty intersection
+            # `default_cycle = null` AND `valid_times = []` together;
+            # `(C, [])` advertises a cycle whose timeline is empty and is forbidden.
+            if not valid_time_sample.valid_times:
+                default_cycle = None
+                default_cycle_instant = None
+            if national_hydro_source_version is None:
+                # Digest the identity this entry ADVERTISES. The argument-free form
+                # keeps one row per network across ALL sources and cycles, so in the
+                # normal propagation state (some networks already on the next cycle,
+                # or an `ifs` cycle newest) it observes no run of
+                # `(default_source, default_cycle)` at all: a corrective re-run of the
+                # advertised identity would leave `metadata.version` -- and therefore
+                # the frontend's cache token and MapLibre source key -- unchanged, and
+                # browsers would keep the superseded tiles. With `default_cycle` null
+                # the entry advertises nothing addressable, so the argument-free digest
+                # is the honest input.
+                national_hydro_source_version = (
+                    national_discharge_source_version(session)
+                    if default_cycle_instant is None
+                    else national_discharge_source_version(
+                        session,
+                        source=NATIONAL_DISCHARGE_DEFAULT_SOURCE,
+                        cycle=default_cycle_instant,
+                    )
+                )
         else:
             valid_time_sample = _empty_valid_times()
         layers.append(
@@ -1055,6 +1218,7 @@ def _default_layer_catalog(
                     river_network_version_id=river_network_version_id,
                     release_blocking=not _mvt_live_postgis_enabled(session),
                     national=layer_id == "discharge" or (national and layer_id == "river-network"),
+                    default_cycle=default_cycle if layer_id == "discharge" else None,
                 ),
             )
         )
