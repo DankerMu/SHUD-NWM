@@ -1680,6 +1680,24 @@ def test_non_ascii_text_inside_a_comment_or_literal_stays_inside_the_subset() ->
             r"WHERE rt.variable = %(v)s AND rt.run_key = .5e+2E'b\'y'",
             ".5e+2E'",
         ),
+        (
+            "multi_digit_exponent",
+            r"SELECT 1.2e34E'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = 1.2e34E'b\'y'",
+            "1.2e34E'",
+        ),
+        (
+            "uppercase_plus_exponent",
+            r"SELECT 12E+23e'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = 12E+23e'b\'y'",
+            "12E+23e'",
+        ),
+        (
+            "lowercase_minus_exponent",
+            r"SELECT 12e-23E'a\'x' AS n, rt.value FROM hydro.river_timeseries rt "
+            r"WHERE rt.variable = %(v)s AND rt.run_key = 12e-23E'b\'y'",
+            "12e-23E'",
+        ),
     ],
     ids=[
         "select_list",
@@ -1691,6 +1709,9 @@ def test_non_ascii_text_inside_a_comment_or_literal_stays_inside_the_subset() ->
         "negative_exponent",
         "leading_dot",
         "leading_dot_signed_exponent",
+        "multi_digit_exponent",
+        "uppercase_plus_exponent",
+        "lowercase_minus_exponent",
     ],
 )
 def test_a_numeric_literal_glued_to_an_escape_prefix_is_refused_as_outside_the_lexical_subset(
@@ -1761,6 +1782,9 @@ def test_the_glued_escape_prefix_arm_reports_the_whole_numeric_constant() -> Non
     assert _lexical_subset_violation(r"SELECT 1E-2e'a\'x' AS n, " + _REAL_READ) == (7, "1E-2e'")
     assert _lexical_subset_violation(r"SELECT .5E'a\'x' AS n, " + _REAL_READ) == (7, ".5E'")
     assert _lexical_subset_violation(r"SELECT .5e+2E'a\'x' AS n, " + _REAL_READ) == (7, ".5e+2E'")
+    assert _lexical_subset_violation(r"SELECT 1.2e34E'a\'x' AS n, " + _REAL_READ) == (7, "1.2e34E'")
+    assert _lexical_subset_violation(r"SELECT 12E+23e'a\'x' AS n, " + _REAL_READ) == (7, "12E+23e'")
+    assert _lexical_subset_violation(r"SELECT 12e-23E'a\'x' AS n, " + _REAL_READ) == (7, "12e-23E'")
     assert _lexical_subset_violation(r"SELECT 1.5e3'a\'x' AS n, " + _REAL_READ) is None
     assert _lexical_subset_violation(r"SELECT 1EE'a\'x' AS n, " + _REAL_READ) is None
 

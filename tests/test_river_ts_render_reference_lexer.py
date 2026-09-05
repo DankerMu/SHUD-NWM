@@ -65,6 +65,36 @@ def _is_ident_cont(character: str) -> bool:
     return _is_ident_start(character) or character.isdigit() or character == "$"
 
 
+class _ReferenceToken(NamedTuple):
+    """One identifier or numeric token emitted by the single reference scanner pass."""
+
+    kind: str
+    start: int
+    stop: int
+    text: str
+
+
+class _ReferenceLexResult(NamedTuple):
+    """Literal-comparable product of one ``_reference_lex`` pass.
+
+    Final non-code spans are a projection; identifier and numeric events are the
+    token boundaries the scanner actually consumed. A mutant that skips the
+    numeric helper on some rows can keep the same spans and still disagree here.
+    """
+
+    spans: tuple[tuple[int, int, str], ...]
+    identifiers: tuple[_ReferenceToken, ...]
+    numerics: tuple[_ReferenceToken, ...]
+
+
+def _ident(start: int, stop: int, text: str) -> _ReferenceToken:
+    return _ReferenceToken("identifier", start, stop, text)
+
+
+def _num(start: int, stop: int, text: str) -> _ReferenceToken:
+    return _ReferenceToken("numeric", start, stop, text)
+
+
 #: ``dolq_start [A-Za-z\200-\377_]`` / ``dolq_cont [A-Za-z\200-\377_0-9]`` — the
 #: tag of a dollar-quoted string follows the unquoted-identifier rules except
 #: that it cannot contain a ``$`` (§4.1.2.4). An EMPTY tag (``$$``) is legal.
@@ -81,8 +111,8 @@ def _consume_reference_numeric_token(sql: str, start: int) -> int | None:
     exponent ``e`` / ``E`` with optional sign and a required digit run. An
     incomplete exponent (``1e``, ``1e+``, ``1EE``) is left unconsumed so the
     following character remains its own token. Direct stop-offset pins and the
-    scanner-connection pins that consume the same literal rows live on
-    ``_REFERENCE_NUMERIC_CASES``.
+    scanner-result pins that consume the same literal rows live on
+    ``_REFERENCE_LEX_CASES``.
     """
     length = len(sql)
     if start >= length:
@@ -114,8 +144,8 @@ def _consume_reference_numeric_token(sql: str, start: int) -> int | None:
     return stop
 
 
-def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
-    r"""Half-open ``(start, stop, kind)`` runs of ``sql`` that PostgreSQL does not lex as code.
+def _reference_lex(sql: str) -> _ReferenceLexResult:
+    r"""One scanner pass: non-code spans plus the identifier and numeric tokens it consumed.
 
     Comments (``--`` to ``non_newline``, NESTED ``/* */``), string constants
     (``'…'`` with ``''`` escapes; ``E'…'``/``e'…'`` additionally with backslash
@@ -142,11 +172,18 @@ def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
     ``escape_prefix_needs_adjacency`` row of
     :func:`test_the_reference_lexer_answers_its_own_known_cases`.
 
+    Identifier and numeric events are appended at the branches that consume those
+    tokens. They are not reconstructed from the final spans: a scanner that
+    bypasses the numeric helper on no-exponent or signed rows can still emit the
+    same literal spans.
+
     Unterminated runs extend to the end of the input, which is also what the
     module does; the difference between "closed" and "ran out" is the module's
     own belt and is not part of this comparison.
     """
     spans: list[tuple[int, int, str]] = []
+    identifiers: list[_ReferenceToken] = []
+    numerics: list[_ReferenceToken] = []
     index = 0
     length = len(sql)
     previous_token: str | None = None
@@ -234,18 +271,25 @@ def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
             while cursor < length and _is_ident_cont(sql[cursor]):
                 cursor += 1
             previous_token, previous_end = sql[index:cursor], cursor
+            identifiers.append(_ident(index, cursor, previous_token))
             index = cursor
             continue
 
         numeric_stop = _consume_reference_numeric_token(sql, index)
         if numeric_stop is not None:
+            numerics.append(_num(index, numeric_stop, sql[index:numeric_stop]))
             index, previous_token = numeric_stop, None
             continue
 
         if not character.isspace():
             previous_token = None
         index += 1
-    return tuple(spans)
+    return _ReferenceLexResult(tuple(spans), tuple(identifiers), tuple(numerics))
+
+
+def reference_non_code_spans(sql: str) -> tuple[tuple[int, int, str], ...]:
+    """Half-open ``(start, stop, kind)`` runs of ``sql`` that PostgreSQL does not lex as code."""
+    return _reference_lex(sql).spans
 
 
 # ---------------------------------------------------------------------------
@@ -382,20 +426,17 @@ def _has_token_adjacent_escape(sql: str, prefix: str) -> bool:
     """Whether ``sql`` contains a token-adjacent ``{prefix}'`` that is not inside a span.
 
     Independent of the production recognizer: a quote qualifies only when the
-    immediately preceding complete unquoted identifier — using this file's
-    ``ident_start`` / ``ident_cont`` grammar — is the one-character token
-    ``prefix`` and sits against the quote. ``LIKE'…'`` and ``tablE'…'`` are
-    identifier tails, not ``E`` / ``e`` tokens. Used only as an anti-vacuity
-    count so an uppercase-only alphabet or an uppercase-only reference cannot
-    stay green.
+    preceding identifier event from the same ``_reference_lex`` pass is the
+    one-character token ``prefix`` and its stop equals the quote start.
+    ``LIKE'…'`` and ``tablE'…'`` are identifier tails, not ``E`` / ``e``
+    tokens. Used only as an anti-vacuity count so an uppercase-only alphabet
+    or an uppercase-only reference cannot stay green.
     """
-    for start, _stop, kind in reference_non_code_spans(sql):
+    lexed = _reference_lex(sql)
+    for start, _stop, kind in lexed.spans:
         if kind != "literal" or start == 0 or sql[start] != "'":
             continue
-        cursor = start
-        while cursor > 0 and _is_ident_cont(sql[cursor - 1]):
-            cursor -= 1
-        if cursor < start and _is_ident_start(sql[cursor]) and sql[cursor:start] == prefix:
+        if any(token.stop == start and token.text == prefix for token in lexed.identifiers):
             return True
     return False
 
@@ -540,123 +581,560 @@ def test_the_reference_lexer_answers_its_own_known_cases(
     assert reference_non_code_spans(sql) == expected
 
 
-class _ReferenceNumericCase(NamedTuple):
-    """One independently authored numeric-token oracle row.
+class _ReferenceLexCase(NamedTuple):
+    """One independently authored scanner-result oracle row.
 
-    ``stop`` is the helper's half-open token end at ``start``. ``spans`` is the
-    exact ``reference_non_code_spans`` partition of the same ``sql``. Both are
-    literals in this table: neither is computed from the helper result, and
-    neither test may consult production ``_lexical_subset_violation``.
+    ``helper_stop`` is the helper's half-open token end at ``helper_start``.
+    ``spans`` / ``identifiers`` / ``numerics`` are the exact ``_reference_lex``
+    partition of the same ``sql``. Every expected value is a literal in this
+    table: none is computed from helper output, and neither consumer may consult
+    production ``_lexical_subset_violation``.
     """
 
     label: str
     sql: str
-    start: int
-    stop: int | None
+    helper_start: int
+    helper_stop: int | None
     spans: tuple[tuple[int, int, str], ...]
+    identifiers: tuple[_ReferenceToken, ...]
+    numerics: tuple[_ReferenceToken, ...]
 
 
-# Mantissa classes (integer / trailing-dot / fractional / leading-dot) crossed
-# with exponent shapes (none / e2 / E2 / e+2 / E-2), then incomplete, malformed
-# and nonnumeric controls. The following ``E'a\'x'`` / ``e'a\'x'`` fragment is
-# the scanner discriminator: a wrong numeric boundary changes whether the quote
-# is an adjacent escape prefix or a plain literal, so the helper-to-scanner
-# call cannot be bypassed without reddening the span pin.
-_REFERENCE_NUMERIC_CASES: tuple[_ReferenceNumericCase, ...] = (
-    _ReferenceNumericCase("integer_none", r"SELECT 12E'a\'x' AS n", 7, 9, ((10, 16, "literal"),)),
-    _ReferenceNumericCase("integer_exp_e", r"SELECT 12e2E'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
-    _ReferenceNumericCase("integer_exp_E", r"SELECT 12E2e'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
-    _ReferenceNumericCase("integer_exp_e_plus", r"SELECT 12e+2E'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
-    _ReferenceNumericCase("integer_exp_E_minus", r"SELECT 12E-2e'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
-    _ReferenceNumericCase("trailing_dot_none", r"SELECT 1.E'a\'x' AS n", 7, 9, ((10, 16, "literal"),)),
-    _ReferenceNumericCase("trailing_dot_exp_e", r"SELECT 1.e2E'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
-    _ReferenceNumericCase("trailing_dot_exp_E", r"SELECT 1.E2e'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
-    _ReferenceNumericCase("trailing_dot_exp_e_plus", r"SELECT 1.e+2E'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
-    _ReferenceNumericCase("trailing_dot_exp_E_minus", r"SELECT 1.E-2e'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
-    _ReferenceNumericCase("fractional_none", r"SELECT 1.2E'a\'x' AS n", 7, 10, ((11, 17, "literal"),)),
-    _ReferenceNumericCase("fractional_exp_e", r"SELECT 1.2e3E'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
-    _ReferenceNumericCase("fractional_exp_E", r"SELECT 1.2E3e'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
-    _ReferenceNumericCase("fractional_exp_e_plus", r"SELECT 1.2e+3E'a\'x' AS n", 7, 13, ((14, 20, "literal"),)),
-    _ReferenceNumericCase("fractional_exp_E_minus", r"SELECT 1.2E-3e'a\'x' AS n", 7, 13, ((14, 20, "literal"),)),
-    _ReferenceNumericCase("leading_dot_none", r"SELECT .5E'a\'x' AS n", 7, 9, ((10, 16, "literal"),)),
-    _ReferenceNumericCase("leading_dot_exp_e", r"SELECT .5e2E'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
-    _ReferenceNumericCase("leading_dot_exp_E", r"SELECT .5E2e'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
-    _ReferenceNumericCase("leading_dot_exp_e_plus", r"SELECT .5e+2E'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
-    _ReferenceNumericCase("leading_dot_exp_E_minus", r"SELECT .5E-2e'a\'x' AS n", 7, 12, ((13, 19, "literal"),)),
-    _ReferenceNumericCase("incomplete_exp_e", r"SELECT 1e'a\'x' AS n", 7, 8, ((9, 15, "literal"),)),
-    _ReferenceNumericCase(
+# Finite lexical-transition oracle. 50 scanner-result rows: 4 mantissa
+# classes × 7 exponent states (28), plus incomplete/malformed/EOF/ident
+# controls. Expected values are authored literals, not helper output.
+# Unsigned uppercase and signed plus/minus rows use two exponent digits
+# so the post-first-digit loop is discriminated by stop and token text.
+_REFERENCE_LEX_CASES: tuple[_ReferenceLexCase, ...] = (
+    _ReferenceLexCase(
+        "integer_none",
+        r"SELECT 12E'a\'x' AS n",
+        7,
+        9,
+        ((10, 16, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(9, 10, "E"), _ident(17, 19, "AS"), _ident(20, 21, "n")),
+        (_num(7, 9, "12"),),
+    ),
+    _ReferenceLexCase(
+        "integer_exp_e",
+        r"SELECT 12e2E'a\'x' AS n",
+        7,
+        11,
+        ((12, 18, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(11, 12, "E"), _ident(19, 21, "AS"), _ident(22, 23, "n")),
+        (_num(7, 11, "12e2"),),
+    ),
+    _ReferenceLexCase(
+        "integer_exp_E",
+        r"SELECT 12E34e'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "e"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, "12E34"),),
+    ),
+    _ReferenceLexCase(
+        "integer_exp_e_plus",
+        r"SELECT 12e+2E'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "E"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, "12e+2"),),
+    ),
+    _ReferenceLexCase(
+        "integer_exp_E_plus",
+        r"SELECT 12E+23e'a\'x' AS n",
+        7,
+        13,
+        ((14, 20, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(13, 14, "e"), _ident(21, 23, "AS"), _ident(24, 25, "n")),
+        (_num(7, 13, "12E+23"),),
+    ),
+    _ReferenceLexCase(
+        "integer_exp_e_minus",
+        r"SELECT 12e-23E'a\'x' AS n",
+        7,
+        13,
+        ((14, 20, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(13, 14, "E"), _ident(21, 23, "AS"), _ident(24, 25, "n")),
+        (_num(7, 13, "12e-23"),),
+    ),
+    _ReferenceLexCase(
+        "integer_exp_E_minus",
+        r"SELECT 12E-2e'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "e"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, "12E-2"),),
+    ),
+    _ReferenceLexCase(
+        "trailing_dot_none",
+        r"SELECT 1.E'a\'x' AS n",
+        7,
+        9,
+        ((10, 16, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(9, 10, "E"), _ident(17, 19, "AS"), _ident(20, 21, "n")),
+        (_num(7, 9, "1."),),
+    ),
+    _ReferenceLexCase(
+        "trailing_dot_exp_e",
+        r"SELECT 1.e2E'a\'x' AS n",
+        7,
+        11,
+        ((12, 18, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(11, 12, "E"), _ident(19, 21, "AS"), _ident(22, 23, "n")),
+        (_num(7, 11, "1.e2"),),
+    ),
+    _ReferenceLexCase(
+        "trailing_dot_exp_E",
+        r"SELECT 1.E34e'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "e"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, "1.E34"),),
+    ),
+    _ReferenceLexCase(
+        "trailing_dot_exp_e_plus",
+        r"SELECT 1.e+2E'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "E"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, "1.e+2"),),
+    ),
+    _ReferenceLexCase(
+        "trailing_dot_exp_E_plus",
+        r"SELECT 1.E+23e'a\'x' AS n",
+        7,
+        13,
+        ((14, 20, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(13, 14, "e"), _ident(21, 23, "AS"), _ident(24, 25, "n")),
+        (_num(7, 13, "1.E+23"),),
+    ),
+    _ReferenceLexCase(
+        "trailing_dot_exp_e_minus",
+        r"SELECT 1.e-23E'a\'x' AS n",
+        7,
+        13,
+        ((14, 20, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(13, 14, "E"), _ident(21, 23, "AS"), _ident(24, 25, "n")),
+        (_num(7, 13, "1.e-23"),),
+    ),
+    _ReferenceLexCase(
+        "trailing_dot_exp_E_minus",
+        r"SELECT 1.E-2e'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "e"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, "1.E-2"),),
+    ),
+    _ReferenceLexCase(
+        "fractional_none",
+        r"SELECT 1.25E'a\'x' AS n",
+        7,
+        11,
+        ((12, 18, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(11, 12, "E"), _ident(19, 21, "AS"), _ident(22, 23, "n")),
+        (_num(7, 11, "1.25"),),
+    ),
+    _ReferenceLexCase(
+        "fractional_exp_e",
+        r"SELECT 1.2e34E'a\'x' AS n",
+        7,
+        13,
+        ((14, 20, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(13, 14, "E"), _ident(21, 23, "AS"), _ident(24, 25, "n")),
+        (_num(7, 13, "1.2e34"),),
+    ),
+    _ReferenceLexCase(
+        "fractional_exp_E",
+        r"SELECT 1.2E3e'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "e"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, "1.2E3"),),
+    ),
+    _ReferenceLexCase(
+        "fractional_exp_e_plus",
+        r"SELECT 1.2e+2E'a\'x' AS n",
+        7,
+        13,
+        ((14, 20, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(13, 14, "E"), _ident(21, 23, "AS"), _ident(24, 25, "n")),
+        (_num(7, 13, "1.2e+2"),),
+    ),
+    _ReferenceLexCase(
+        "fractional_exp_E_plus",
+        r"SELECT 1.2E+23e'a\'x' AS n",
+        7,
+        14,
+        ((15, 21, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(14, 15, "e"), _ident(22, 24, "AS"), _ident(25, 26, "n")),
+        (_num(7, 14, "1.2E+23"),),
+    ),
+    _ReferenceLexCase(
+        "fractional_exp_e_minus",
+        r"SELECT 1.2e-23E'a\'x' AS n",
+        7,
+        14,
+        ((15, 21, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(14, 15, "E"), _ident(22, 24, "AS"), _ident(25, 26, "n")),
+        (_num(7, 14, "1.2e-23"),),
+    ),
+    _ReferenceLexCase(
+        "fractional_exp_E_minus",
+        r"SELECT 1.2E-2e'a\'x' AS n",
+        7,
+        13,
+        ((14, 20, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(13, 14, "e"), _ident(21, 23, "AS"), _ident(24, 25, "n")),
+        (_num(7, 13, "1.2E-2"),),
+    ),
+    _ReferenceLexCase(
+        "leading_dot_none",
+        r"SELECT .25E'a\'x' AS n",
+        7,
+        10,
+        ((11, 17, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(10, 11, "E"), _ident(18, 20, "AS"), _ident(21, 22, "n")),
+        (_num(7, 10, ".25"),),
+    ),
+    _ReferenceLexCase(
+        "leading_dot_exp_e",
+        r"SELECT .5e2E'a\'x' AS n",
+        7,
+        11,
+        ((12, 18, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(11, 12, "E"), _ident(19, 21, "AS"), _ident(22, 23, "n")),
+        (_num(7, 11, ".5e2"),),
+    ),
+    _ReferenceLexCase(
+        "leading_dot_exp_E",
+        r"SELECT .5E34e'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "e"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, ".5E34"),),
+    ),
+    _ReferenceLexCase(
+        "leading_dot_exp_e_plus",
+        r"SELECT .5e+2E'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "E"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, ".5e+2"),),
+    ),
+    _ReferenceLexCase(
+        "leading_dot_exp_E_plus",
+        r"SELECT .5E+23e'a\'x' AS n",
+        7,
+        13,
+        ((14, 20, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(13, 14, "e"), _ident(21, 23, "AS"), _ident(24, 25, "n")),
+        (_num(7, 13, ".5E+23"),),
+    ),
+    _ReferenceLexCase(
+        "leading_dot_exp_e_minus",
+        r"SELECT .5e-23E'a\'x' AS n",
+        7,
+        13,
+        ((14, 20, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(13, 14, "E"), _ident(21, 23, "AS"), _ident(24, 25, "n")),
+        (_num(7, 13, ".5e-23"),),
+    ),
+    _ReferenceLexCase(
+        "leading_dot_exp_E_minus",
+        r"SELECT .5E-2e'a\'x' AS n",
+        7,
+        12,
+        ((13, 19, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(12, 13, "e"), _ident(20, 22, "AS"), _ident(23, 24, "n")),
+        (_num(7, 12, ".5E-2"),),
+    ),
+    _ReferenceLexCase(
+        "incomplete_exp_e",
+        r"SELECT 1e'a\'x' AS n",
+        7,
+        8,
+        ((9, 15, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(8, 9, "e"), _ident(16, 18, "AS"), _ident(19, 20, "n")),
+        (_num(7, 8, "1"),),
+    ),
+    _ReferenceLexCase(
+        "incomplete_exp_E",
+        r"SELECT 1E'a\'x' AS n",
+        7,
+        8,
+        ((9, 15, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(8, 9, "E"), _ident(16, 18, "AS"), _ident(19, 20, "n")),
+        (_num(7, 8, "1"),),
+    ),
+    _ReferenceLexCase(
         "incomplete_exp_e_plus",
         r"SELECT 1e+'a\'x' AS n",
         7,
         8,
         ((10, 14, "literal"), (15, 21, "literal")),
+        (_ident(0, 6, "SELECT"), _ident(8, 9, "e"), _ident(14, 15, "x")),
+        (_num(7, 8, "1"),),
     ),
-    _ReferenceNumericCase("incomplete_trailing_dot_exp_e", r"SELECT 1.e'a\'x' AS n", 7, 9, ((10, 16, "literal"),)),
-    _ReferenceNumericCase(
+    _ReferenceLexCase(
+        "incomplete_exp_E_minus",
+        r"SELECT 1E-'a\'x' AS n",
+        7,
+        8,
+        ((10, 14, "literal"), (15, 21, "literal")),
+        (_ident(0, 6, "SELECT"), _ident(8, 9, "E"), _ident(14, 15, "x")),
+        (_num(7, 8, "1"),),
+    ),
+    _ReferenceLexCase(
+        "incomplete_trailing_dot_exp_e",
+        r"SELECT 1.e'a\'x' AS n",
+        7,
+        9,
+        ((10, 16, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(9, 10, "e"), _ident(17, 19, "AS"), _ident(20, 21, "n")),
+        (_num(7, 9, "1."),),
+    ),
+    _ReferenceLexCase(
         "incomplete_trailing_dot_exp_e_plus",
         r"SELECT 1.e+'a\'x' AS n",
         7,
         9,
         ((11, 15, "literal"), (16, 22, "literal")),
+        (_ident(0, 6, "SELECT"), _ident(9, 10, "e"), _ident(15, 16, "x")),
+        (_num(7, 9, "1."),),
     ),
-    _ReferenceNumericCase(
+    _ReferenceLexCase(
+        "incomplete_trailing_dot_exp_E_minus",
+        r"SELECT 1.E-'a\'x' AS n",
+        7,
+        9,
+        ((11, 15, "literal"), (16, 22, "literal")),
+        (_ident(0, 6, "SELECT"), _ident(9, 10, "E"), _ident(15, 16, "x")),
+        (_num(7, 9, "1."),),
+    ),
+    _ReferenceLexCase(
         "malformed_double_E",
         r"SELECT 1EE'a\'x' AS n",
         7,
         8,
         ((10, 14, "literal"), (15, 21, "literal")),
+        (_ident(0, 6, "SELECT"), _ident(8, 10, "EE"), _ident(14, 15, "x")),
+        (_num(7, 8, "1"),),
     ),
-    _ReferenceNumericCase(
+    _ReferenceLexCase(
         "valid_exponent_then_plain_quote",
         r"SELECT 1.5e3'a\'x' AS n",
         7,
         12,
         ((12, 16, "literal"), (17, 23, "literal")),
+        (_ident(0, 6, "SELECT"), _ident(16, 17, "x")),
+        (_num(7, 12, "1.5e3"),),
     ),
-    _ReferenceNumericCase("nonnumeric_start", r"SELECT E'a\'x' AS n", 7, None, ((8, 14, "literal"),)),
-    _ReferenceNumericCase("dot_without_digits", r"SELECT .E'a\'x' AS n", 7, None, ((9, 15, "literal"),)),
-    _ReferenceNumericCase("empty_input", "", 0, None, ()),
-    _ReferenceNumericCase("start_eq_len", "12", 2, None, ()),
-    _ReferenceNumericCase("start_gt_len", "12", 3, None, ()),
-    _ReferenceNumericCase("nonzero_start_offset", r"SELECT 12e2E'a\'x' AS n", 7, 11, ((12, 18, "literal"),)),
-    _ReferenceNumericCase("start_zero_unsigned_exp", r"12e2E'a\'x'", 0, 4, ((5, 11, "literal"),)),
+    _ReferenceLexCase(
+        "nonnumeric_start",
+        r"SELECT E'a\'x' AS n",
+        7,
+        None,
+        ((8, 14, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(7, 8, "E"), _ident(15, 17, "AS"), _ident(18, 19, "n")),
+        (),
+    ),
+    _ReferenceLexCase(
+        "dot_without_digits",
+        r"SELECT .E'a\'x' AS n",
+        7,
+        None,
+        ((9, 15, "literal"),),
+        (_ident(0, 6, "SELECT"), _ident(8, 9, "E"), _ident(16, 18, "AS"), _ident(19, 20, "n")),
+        (),
+    ),
+    _ReferenceLexCase(
+        "empty_input",
+        "",
+        0,
+        None,
+        (),
+        (),
+        (),
+    ),
+    _ReferenceLexCase(
+        "eof_one_digit",
+        "1",
+        0,
+        1,
+        (),
+        (),
+        (_num(0, 1, "1"),),
+    ),
+    _ReferenceLexCase(
+        "eof_integer",
+        "12",
+        0,
+        2,
+        (),
+        (),
+        (_num(0, 2, "12"),),
+    ),
+    _ReferenceLexCase(
+        "eof_decimal",
+        "1.25",
+        0,
+        4,
+        (),
+        (),
+        (_num(0, 4, "1.25"),),
+    ),
+    _ReferenceLexCase(
+        "eof_trailing_dot",
+        "1.",
+        0,
+        2,
+        (),
+        (),
+        (_num(0, 2, "1."),),
+    ),
+    _ReferenceLexCase(
+        "eof_leading_dot",
+        ".25",
+        0,
+        3,
+        (),
+        (),
+        (_num(0, 3, ".25"),),
+    ),
+    _ReferenceLexCase(
+        "eof_exponent",
+        "1e2",
+        0,
+        3,
+        (),
+        (),
+        (_num(0, 3, "1e2"),),
+    ),
+    _ReferenceLexCase(
+        "eof_signed_exponent",
+        "12E+23",
+        0,
+        6,
+        (),
+        (),
+        (_num(0, 6, "12E+23"),),
+    ),
+    _ReferenceLexCase(
+        "start_zero_unsigned_exp",
+        r"12e2E'a\'x'",
+        0,
+        4,
+        ((5, 11, "literal"),),
+        (_ident(4, 5, "E"),),
+        (_num(0, 4, "12e2"),),
+    ),
+    _ReferenceLexCase(
+        "ident_digit_upper",
+        r"SELECT col1E'C:\' AS n, value FROM t",
+        7,
+        None,
+        ((12, 17, "literal"),),
+        (
+            _ident(0, 6, "SELECT"),
+            _ident(7, 12, "col1E"),
+            _ident(18, 20, "AS"),
+            _ident(21, 22, "n"),
+            _ident(24, 29, "value"),
+            _ident(30, 34, "FROM"),
+            _ident(35, 36, "t"),
+        ),
+        (),
+    ),
+    _ReferenceLexCase(
+        "ident_digit_lower",
+        r"SELECT x1e'C:\' AS n, value FROM t",
+        7,
+        None,
+        ((10, 15, "literal"),),
+        (
+            _ident(0, 6, "SELECT"),
+            _ident(7, 10, "x1e"),
+            _ident(16, 18, "AS"),
+            _ident(19, 20, "n"),
+            _ident(22, 27, "value"),
+            _ident(28, 32, "FROM"),
+            _ident(33, 34, "t"),
+        ),
+        (),
+    ),
 )
+
+# Helper-only start guards on the same EOF integer as eof_integer.
+_REFERENCE_HELPER_EDGE_CASES: tuple[_ReferenceLexCase, ...] = (
+    _ReferenceLexCase(
+        "start_eq_len",
+        "12",
+        2,
+        None,
+        (),
+        (),
+        (_num(0, 2, "12"),),
+    ),
+    _ReferenceLexCase(
+        "start_gt_len",
+        "12",
+        3,
+        None,
+        (),
+        (),
+        (_num(0, 2, "12"),),
+    ),
+)
+
+_REFERENCE_HELPER_CASES = _REFERENCE_LEX_CASES + _REFERENCE_HELPER_EDGE_CASES
 
 
 @pytest.mark.parametrize(
     "case",
-    _REFERENCE_NUMERIC_CASES,
-    ids=[case.label for case in _REFERENCE_NUMERIC_CASES],
+    _REFERENCE_HELPER_CASES,
+    ids=[case.label for case in _REFERENCE_HELPER_CASES],
 )
 def test_the_reference_numeric_token_consumer_stops_at_the_token_boundary(
-    case: _ReferenceNumericCase,
+    case: _ReferenceLexCase,
 ) -> None:
     """Helper grammar is pinned by the table's literal stops, not by production L2.
 
     Numbers are code, so a disconnected scanner can still look green unless this
-    pin and the sibling span pin both fire. Deleting exponent, sign, leading-dot,
-    trailing-dot, or restoring a digit-only walker has to fail here.
+    pin and the sibling scanner-result pin both fire. Deleting exponent, sign,
+    leading-dot, trailing-dot, the multi-digit exponent loop, EOF consumption, or
+    restoring a digit-only walker has to fail here.
     """
-    assert _consume_reference_numeric_token(case.sql, case.start) == case.stop
+    assert _consume_reference_numeric_token(case.sql, case.helper_start) == case.helper_stop
 
 
 @pytest.mark.parametrize(
     "case",
-    _REFERENCE_NUMERIC_CASES,
-    ids=[case.label for case in _REFERENCE_NUMERIC_CASES],
+    _REFERENCE_LEX_CASES,
+    ids=[case.label for case in _REFERENCE_LEX_CASES],
 )
-def test_the_reference_scanner_uses_the_numeric_token_consumer(
-    case: _ReferenceNumericCase,
+def test_the_reference_scanner_emits_the_literal_lex_result(
+    case: _ReferenceLexCase,
 ) -> None:
-    """The real scanner must call the helper; expected spans are table literals.
+    """The real scanner must emit authored spans AND token events in one pass.
 
-    Bypassing ``_consume_reference_numeric_token`` inside ``reference_non_code_spans``
-    leaves helper stops intact but changes the adjacent ``E'`` / ``e'`` partition.
-    This assertion compares against authored spans, never against the helper's
-    returned stop, so a test that derived expectations from the helper cannot
-    hide that hole.
+    A mutant that uses the numeric helper only for unsigned-exponent rows can
+    keep the same final spans on no-exponent and signed rows. Token events are
+    emitted at the consuming branches, so that bypass fails here even when the
+    span projection stays equal. Expected values are table literals, never
+    derived from helper output.
     """
     assert reference_non_code_spans(case.sql) == case.spans
+    assert _reference_lex(case.sql) == _ReferenceLexResult(case.spans, case.identifiers, case.numerics)
 
 
 @pytest.mark.parametrize(
@@ -665,13 +1143,15 @@ def test_the_reference_scanner_uses_the_numeric_token_consumer(
         ("bare_upper", r"E'q\'x'", "E", True),
         ("bare_lower", r"e'q\'x'", "e", True),
         ("after_paren_upper", ")E'x'", "E", True),
-        ("after_quoted_ident_upper", '"x"E\'x\'', "E", True),
+        ("after_quoted_ident_upper", "\"x\"E'x'", "E", True),
         ("after_paren_lower", ")e'x'", "e", True),
-        ("after_quoted_ident_lower", '"x"e\'x\'', "e", True),
+        ("after_quoted_ident_lower", "\"x\"e'x'", "e", True),
         ("keyword_tail_upper", r"LIKE'C:\'", "E", False),
         ("identifier_tail_upper", "tablE'x'", "E", False),
         ("keyword_tail_lower", "like'x'", "e", False),
         ("identifier_tail_lower", "value'x'", "e", False),
+        ("ident_digit_upper", r"SELECT col1E'C:\' AS n, value FROM t", "E", False),
+        ("ident_digit_lower", r"SELECT x1e'C:\' AS n, value FROM t", "e", False),
         ("whitespace_separated_upper", r"SELECT note E 'C:\' AS n", "E", False),
         ("whitespace_separated_lower", r"SELECT note e 'C:\' AS n", "e", False),
         ("case_mismatch_upper_query", "E'x'", "e", False),
@@ -688,6 +1168,8 @@ def test_the_reference_scanner_uses_the_numeric_token_consumer(
         "identifier_tail_upper",
         "keyword_tail_lower",
         "identifier_tail_lower",
+        "ident_digit_upper",
+        "ident_digit_lower",
         "whitespace_separated_upper",
         "whitespace_separated_lower",
         "case_mismatch_upper_query",
