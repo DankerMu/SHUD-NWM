@@ -21,7 +21,7 @@
 ### New Capabilities
 - `precipitation-raster-overlay`: 过去 24h 累积降水 PNG 渲染/索引端点、跨周期切片解析、fail-closed 窗口、`precip` 目录条目与前端 image-source 叠加/图例/URL 开关。
 - `national-river-density`: 全国静态河网 `stream_type` 阈值表、查询版本换代、公平集合预算窗口与按图层集合上限、前端低缩放不打折加粗、node-27 四条硬门 go/no-go。
-- `canonical-precip-copyback`: DB-free forecast 终态 stage（`state_save_qc`）后镜像 canonical 降水产品与 grid.json 到 copyback root（幂等、不阻塞该 stage，回执走 `canonical_precip_mirror` pipeline_event）、一次性回填脚本、retention 同水位剪枝。
+- `canonical-precip-copyback`（触发 stage 自 #2069 起为 `convert` 终态，以 spec Requirement 1 为准；下句为 #2034 时的原文，按共享 change 纪律保留）: DB-free forecast 终态 stage（`state_save_qc`）后镜像 canonical 降水产品与 grid.json 到 copyback root（幂等、不阻塞该 stage，回执走 `canonical_precip_mirror` pipeline_event）、一次性回填脚本、retention 同水位剪枝。
 
 ### Modified Capabilities
 - `overview-data-contracts`: `discharge` 目录条目的全国模板/占位符/`valid_times` 来源随 BREAKING 改动更新（新增 `default_source`/`default_cycle`，交集为空时 `default_cycle: null` + `valid_times: []`）。

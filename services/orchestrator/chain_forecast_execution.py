@@ -983,14 +983,26 @@ def _copyback_stage_run_trees(self, context: CycleOrchestrationContext, *, stage
 
 
 def _stage_should_mirror_canonical_precip(self, stage: StageDefinition) -> bool:
-    return stage.stage == "state_save_qc" and self.config.terminal_stage == "forecast_state_save_qc"
+    # The gate is the stage alone (#2069): `convert` is the stage that WRITES the
+    # precipitation products. It deliberately does NOT read
+    # `self.config.terminal_stage` -- that predicate encodes the sibling
+    # `_stage_should_copyback_run_trees`'s chain-terminal semantics, which say
+    # nothing about a `convert` product, and it is not the profile fence.
+    # `NHMS_OBJECT_STORE_COPYBACK_ROOT` is (the display profile forbids it and
+    # `_mirror_canonical_precip` early-returns when it is unset).
+    return stage.stage == "convert"
 
 
 def _mirror_canonical_precip(self, context: CycleOrchestrationContext) -> None:
     """Mirror the cycle's canonical precipitation products and record a receipt.
 
+    Bound to the ``convert`` stage's terminal entry (#2069), not to the chain's
+    forecast terminal stage: ``convert`` is what writes the products, so
+    "products exist" and "this hook ran" coincide within a pass that runs it.
+
     Three deliberate differences from the sibling ``_copyback_stage_run_trees``
-    at this same seam (canonical-precip-copyback spec, Requirement 1):
+    at this same seam (canonical-precip-copyback spec, Requirement 1) -- both
+    still hang off ``_after_cycle_stage_terminal``, only the gated stage differs:
     precipitation is a source/cycle-level product, so there is no
     ``active_basins`` gate and no ``succeeded`` gate; and every failure -- the
     mirror's and the ``insert_pipeline_event`` write's alike -- is swallowed
@@ -1035,7 +1047,7 @@ def _mirror_canonical_precip(self, context: CycleOrchestrationContext) -> None:
             event_type="canonical_precip_mirror",
             status_from=None,
             status_to=str(summary.get("status") or "failed"),
-            message="Canonical precipitation mirror ran after state_save_qc.",
+            message="Canonical precipitation mirror ran after convert.",
             details=_safe_pipeline_event_details({"precip_mirror": summary}),
         )
     except Exception:
