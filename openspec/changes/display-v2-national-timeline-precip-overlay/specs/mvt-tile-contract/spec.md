@@ -77,7 +77,7 @@ AND the `m11VectorSourceKey` case MUST assert a key that distinguishes `(source,
 ## ADDED Requirements
 
 ### Requirement: National discharge cycles and per-cycle valid times
-The backend SHALL expose `GET /api/v1/layers/discharge/cycles?source=gfs|ifs` returning `{source, cycles: [{cycle_time, valid_time_start, valid_time_end}], default_cycle}` where a cycle is listed only if **every** active river network has a display-ready run (`segment_count > 0`) for that source and cycle (intersection, fail-closed: an empty list when any network has no run). `GET /api/v1/layers/discharge/valid-times` SHALL accept optional `source` and `cycle` query parameters and, when both are given, return valid times from `cycle` at 3-hour stride up to the minimum `river_valid_time_end` across active networks for that source/cycle; without them the existing default-window behavior is preserved.
+The backend SHALL expose `GET /api/v1/layers/discharge/cycles?source=gfs|ifs` returning `{source, cycles: [{cycle_time, valid_time_start, valid_time_end}], default_cycle}` where a cycle is listed only if **every** active river network has a display-ready run (`segment_count > 0`) for that source and cycle (intersection, fail-closed: an empty list when any network has no run). `GET /api/v1/layers/discharge/valid-times` SHALL accept optional `source` and `cycle` query parameters and, when both are given, return valid times from `cycle` at 3-hour stride restricted to the intersection coverage window `[max(river_valid_time_start), min(river_valid_time_end)]` across active networks for that source/cycle, so the list never advertises an instant some basin cannot render; and it SHALL return the empty list when any active network has no display-ready run for that `(source, cycle)`, the same fail-closed intersection rule the `cycles` list uses. Without those parameters the existing default-window behavior is preserved.
 
 #### Scenario: Intersection excludes a partially covered cycle
 - **WHEN** 38 networks have gfs runs for cycle A but only 37 have runs for cycle B
@@ -90,6 +90,15 @@ The backend SHALL expose `GET /api/v1/layers/discharge/cycles?source=gfs|ifs` re
 #### Scenario: Per-cycle valid times at 3h stride
 - **WHEN** `valid-times?source=gfs&cycle=2026-09-02T12:00:00Z` is requested and every network covers through `cycle + 168h`
 - **THEN** the response has 57 entries from `cycle` to `cycle + 168h` at 3-hour spacing
+
+#### Scenario: Coverage that starts after the cycle clamps the first entry
+- **WHEN** `valid-times?source=gfs&cycle=2026-09-02T12:00:00Z` is requested and one active network's `river_valid_time_start` is `2026-09-02T18:00:00Z`
+- **THEN** the first entry is `2026-09-02T18:00:00Z`, not the cycle itself
+- **AND** the matching `cycles[]` row for that cycle carries the same `valid_time_start`
+
+#### Scenario: A cycle outside the intersection has no valid times
+- **WHEN** `valid-times?source=gfs&cycle=<C>` is requested for a cycle that `cycles` does not list because some active network has no display-ready gfs run for it
+- **THEN** the response `valid_times` is `[]`, not a partial list over the networks that do have a run
 
 #### Scenario: Unknown source or cycle
 - **WHEN** `source` is not `gfs`/`ifs`, or `cycle` is given without `source`
