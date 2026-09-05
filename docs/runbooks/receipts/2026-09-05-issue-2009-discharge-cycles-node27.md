@@ -2,9 +2,14 @@
 
 - 日期：2026-09-05（node-27 本机时间戳为 `+08:00`，下文 `2026-09-06T02:4x+08:00` 即 UTC 09-05 18:4x）
 - 分支：`feat/issue-2009-discharge-cycles-catalog` ・ PR #2073 ・ epic #2003 (m27) ・ OpenSpec change `display-v2-national-timeline-precip-overlay` group 3（I5）
-- **读数与 SHA 的对应**：全部读数取自受审终态 `5bd69f97`（Phase 7 终审 head）。node-27 上的树是 throwaway worktree `/home/nwm/tmp/wt-2073` 的本地 commit `1835d103` = origin/master `27dc6aab` + `git diff origin/master 5bd69f97` 补丁；`services/tiles/mvt.py`、`apps/api/routes/hydro_display.py`、`tests/test_hydro_display_mvt_scaling.py`、`tests/test_mvt_national_identity_probe_integration.py`、`openapi/nhms.v1.yaml` 五个文件 sha256 与本地 `5bd69f97` 逐一相同。第 5 节 SQL 行 mutation 取自门后 oracle pass 的 `db83a0c1`（`node27-run.log` 头部的 `HEAD=e5daedaf` 是当时 throwaway worktree 的本地 wip commit，其文件集 ≡ `db83a0c1`，见 `mutation-results/README.md`），两者之间生产代码与集成文件除一行 docstring 外零差异（`git diff --stat db83a0c1 5bd69f97 -- services apps openapi tests/test_mvt_national_identity_probe_integration.py`）。
+- **读数与 SHA 的对应**：全部读数取自受审终态 `5bd69f97`（Phase 7 终审 head）。node-27 上的树是 throwaway worktree `/home/nwm/tmp/wt-2073` 的本地 commit `1835d103` = origin/master `27dc6aab` + `git diff origin/master 5bd69f97` 补丁；
+  `services/tiles/mvt.py`、`apps/api/routes/hydro_display.py`、`tests/test_hydro_display_mvt_scaling.py`、`tests/test_mvt_national_identity_probe_integration.py`、`openapi/nhms.v1.yaml` 五个文件 sha256 与本地 `5bd69f97` 逐一相同。
+  第 5 节 SQL 行 mutation 取自门后 oracle pass 的 `db83a0c1`（`node27-run.log` 头部的 `HEAD=e5daedaf` 是当时 throwaway worktree 的本地 wip commit，其文件集 ≡ `db83a0c1`，见 `mutation-results/README.md`），两者之间生产代码与集成文件除一行 docstring 外零差异（`git diff --stat db83a0c1 5bd69f97 -- services apps openapi tests/test_mvt_national_identity_probe_integration.py`）。
 - 节点：node-27（`210.77.77.27`），active primary PG `:55432`
-- 执行方式：**未动生产**。生产 `nhms-display-api.service`（:8080，`/home/nwm/NWM` 仍在 master `f14edc0e`）与 `https://test.nwm.ac.cn` 全程未重启、未 `git pull`；「改后」侧是从 `wt-2073` 另起的单 worker uvicorn `127.0.0.1:8090`，`set -a; . infra/env/display.env`（同一 `nhms_display_ro` 角色）+ `PYTHONPATH=/home/nwm/tmp/wt-2073` + 生产解释器 `/home/nwm/NWM/.venv/bin/python`（`uv.lock`/`pyproject.toml` 在 `master..origin/master` 无差异，故解释器等价且不触发 resync）+ `NHMS_MVT_FILE_CACHE_DIR` 指向本次专用空目录。判别器：`GET /api/v1/layers/discharge/cycles?source=gfs` 在 :8080 为 404、在 :8090 为 200；`/api/v1/runtime/config` 报 `service_role=display_readonly`。两侧各先打 3 次不计数的 `x-nhms-cache-warm: refresh` 预热，再采样（预热在外层 runner `/home/nwm/tmp/run-2073-receipts.sh` 里，不在 receipt 脚本本身；runner 全文、`before2` 对照与首轮读数的终端捕获、`45.52s` 的集成日志尾都归档在 `.workplans/pr-2073/phase8/node27-receipts-raw.md`）。
+- 执行方式：**未动生产**。生产 `nhms-display-api.service`（:8080，`/home/nwm/NWM` 仍在 master `f14edc0e`）与 `https://test.nwm.ac.cn` 全程未重启、未 `git pull`；
+  「改后」侧是从 `wt-2073` 另起的单 worker uvicorn `127.0.0.1:8090`，`set -a; . infra/env/display.env`（同一 `nhms_display_ro` 角色）+ `PYTHONPATH=/home/nwm/tmp/wt-2073` + 生产解释器 `/home/nwm/NWM/.venv/bin/python`（`uv.lock`/`pyproject.toml` 在 `master..origin/master` 无差异，故解释器等价且不触发 resync）+ `NHMS_MVT_FILE_CACHE_DIR` 指向本次专用空目录。
+  判别器：`GET /api/v1/layers/discharge/cycles?source=gfs` 在 :8080 为 404、在 :8090 为 200；`/api/v1/runtime/config` 报 `service_role=display_readonly`。两侧各先打 3 次不计数的 `x-nhms-cache-warm: refresh` 预热，再采样（预热在外层 runner `/home/nwm/tmp/run-2073-receipts.sh` 里，不在 receipt 脚本本身；
+  runner 全文、`before2` 对照与首轮读数的终端捕获、`45.52s` 的集成日志尾都归档在 `.workplans/pr-2073/phase8/node27-receipts-raw.md`）。
 - 数据库连接串一律脱敏为 `postgresql://nhms:***@127.0.0.1:55432/nhms`（从 `infra/env/*.env` 远端读取，未回显）。
 
 ## 1. 真实 DB 集成测试（终态树 `1835d103` ≡ `5bd69f97`）
@@ -17,7 +22,8 @@ TMPDIR=/home/nwm/tmp PYTHONPATH=/home/nwm/tmp/wt-2073 \
 ```
 
 15 = 既有 8 条 `{source}/{cycle}` 瓦片用例（含旧 5 段全国路由三条回归）+ 本 PR 新增 7 条：
-`test_national_cycles_list_only_cycles_covered_by_every_network`、`…_valid_times_are_empty_for_a_cycle_outside_the_intersection`、`…_cycles_ignore_an_inactive_network`、`…_cycles_keep_a_cycle_whose_zero_segment_rival_run_sorts_first`、`…_cycles_skip_a_cycle_older_than_the_lookback`、`…_cycles_match_an_uppercase_source_id_from_a_lowercase_query`、`…_cycles_take_the_newest_run_at_a_cycle`（第二流域用独立 `core.basin_version` + 逐小时 seed，per-test throwaway DB）。
+`test_national_cycles_list_only_cycles_covered_by_every_network`、`…_valid_times_are_empty_for_a_cycle_outside_the_intersection`、`…_cycles_ignore_an_inactive_network`、`…_cycles_keep_a_cycle_whose_zero_segment_rival_run_sorts_first`、
+`…_cycles_skip_a_cycle_older_than_the_lookback`、`…_cycles_match_an_uppercase_source_id_from_a_lowercase_query`、`…_cycles_take_the_newest_run_at_a_cycle`（第二流域用独立 `core.basin_version` + 逐小时 seed，per-test throwaway DB）。
 门后 oracle pass 树（`db83a0c1` 文件集）上同一命令曾 `15 passed in 34.78s`（`2026-09-06T01:03:02+08:00`）。
 
 第二个集成文件（同一 throwaway worktree、同一解释器、同一 URL）：
@@ -101,7 +107,9 @@ cache key 不同、字节非空、两张 body 不同（`cmp` 不等），ETag �
 
 覆盖新鲜度基线（给 #2080 起点）：coverage 表在采样前 1 min 刚刷新过，而 display-ready 最新周期 09-05T00Z 的交集尚未闭合——差的不是 coverage 刷新滞后，而是部分河网 09-05T00Z 的 run 还没 display-ready。
 
-**`EXPLAIN (ANALYZE, BUFFERS)` 覆盖语句（gfs，12 天）**，顶层 `Sort` 节点 actual 11.8 ms、800 行（脚本 `head -12` 截掉了 `Execution Time` 行，总耗时略高于 11.8 ms，未记）。**披露**：脚本里的语句是手抄的覆盖查询，把应用 SQL 的 `(CAST(:since AS timestamptz) IS NULL OR h.cycle_time >= :since)` / `(CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)` 拍平成裸谓词、投影列更少（应用原文见 `services/tiles/mvt.py:2016-2050`）；psycopg2 客户端内插常量后 PG 会把 `Const IS NULL OR …` 常量折叠成同样的裸谓词，计划形状与行数不受影响，但严格说这是「等价语句的计划」而非应用语句原文的计划，后续 receipt 应直接 EXPLAIN 应用原文：
+**`EXPLAIN (ANALYZE, BUFFERS)` 覆盖语句（gfs，12 天）**，顶层 `Sort` 节点 actual 11.8 ms、800 行（脚本 `head -12` 截掉了 `Execution Time` 行，总耗时略高于 11.8 ms，未记）。
+**披露**：脚本里的语句是手抄的覆盖查询，把应用 SQL 的 `(CAST(:since AS timestamptz) IS NULL OR h.cycle_time >= :since)` / `(CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)` 拍平成裸谓词、投影列更少（应用原文见 `services/tiles/mvt.py:2016-2050`）；
+psycopg2 客户端内插常量后 PG 会把 `Const IS NULL OR …` 常量折叠成同样的裸谓词，计划形状与行数不受影响，但严格说这是「等价语句的计划」而非应用语句原文的计划，后续 receipt 应直接 EXPLAIN 应用原文：
 
 ```
 Sort (actual time=11.752..11.804 rows=800)
