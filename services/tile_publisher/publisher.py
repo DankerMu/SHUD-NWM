@@ -1147,8 +1147,8 @@ class TilePublisher:
         """Mirror one cycle's canonical precipitation products and return the summary.
 
         Public entry point for callers that own their own receipt outlet -- the
-        DB-free forecast terminal stage writes the returned mapping into a
-        ``canonical_precip_mirror`` pipeline_event. Touches no session or
+        orchestrator's ``convert``-terminal hook writes the returned mapping into
+        a ``canonical_precip_mirror`` pipeline_event. Touches no session or
         engine, so it is callable without ``DATABASE_URL``.
         """
 
@@ -1159,7 +1159,7 @@ class TilePublisher:
 
         ``source`` is any spelling ``normalize_source_id`` accepts -- the q_down
         publish path passes the token ``_cycle_filter`` splits out of the cycle
-        id, the DB-free forecast terminal-stage seam passes the already
+        id, the orchestrator's ``convert``-terminal seam passes the already
         normalized ``context.source_id`` -- and ``cycle`` is the cycle's
         ``%Y%m%d%H`` token; the mirror keyspace is
         ``canonical/<storage_source>/<cycle>/prcp_rate_or_amount/`` plus every
@@ -1168,8 +1168,8 @@ class TilePublisher:
         ``workers.canonical_converter``.
 
         This step MUST NOT fail, block or roll back its caller -- the q_down
-        publish or the DB-free forecast terminal stage -- for any reason. Every
-        failure -- absent source, unsafe entry name, symlink, tree limit,
+        publish or the orchestrator's ``convert``-terminal hook -- for any reason.
+        Every failure -- absent source, unsafe entry name, symlink, tree limit,
         mid-copy ``OSError``, ``SafeFilesystemError``, even a failed rollback --
         is swallowed and reported through the returned summary, which each
         caller records under ``precip_mirror`` at its own outlet: publish

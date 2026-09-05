@@ -49,6 +49,7 @@
 - 渲染：`M11PrecipOverlayPrimitive` 用 MapLibre `image` source（四角 = bbox 四角）+ `raster` layer，`raster-opacity 0.55`，插入全国河网层之下；切换 valid_time 时更新 url。当前时次不在 `index.valid_times` 内则隐藏并提示。index 返回 404 `PRECIP_CYCLE_NOT_MIRRORED` 时用**另一条**文案（该周期无降水镜像），两种隐藏原因在 UI 与 vitest 里可区分。流域详情里 source 可能是 `best`/`compare`：只用解析出的具体 gfs/ifs 拼 URL，解析不出就隐藏并给原因，绝不请求 `/api/v1/precip/best|compare/...`。
 
 ### D6. canonical 降水镜像挂在 DB-free 终态 stage，不阻塞该 stage
+- **Superseded by #2069（2026-09-05）**：触发点已由 hydro 终态 `state_save_qc` 改为 `convert` 终态，谓词不再读 `config.terminal_stage`；本节以下关于触发 stage 的表述与末尾「排序理由」段的墙钟推导按 spec `canonical-precip-copyback` Requirement 1 与 `tasks.md` 的 `### #2069` 节为准（共享 change 纪律：原文保留不原地改写）。
 - 触发点是 node-22 DB-free 的 forecast 终态 stage（`chain_forecast_execution.py::_after_cycle_stage_terminal`，终态 `forecast_state_save_qc`），**不是** publisher 的 q_down 发布路径——后者在生产拓扑下永不执行（#2034）。镜像实现仍复用 `publisher.py::_copyback_canonical_precip`（纯文件系统、无 DB，经 #2028 五轮加固），经一个公开包装方法调用；目标存在且大小一致则跳过；源缺失记 `precip_mirror: failed` 并继续。
 - 回执走 `pipeline_event`（`event_type="canonical_precip_mirror"`），DB-free 下由 `FileOrchestrationJournalRepository` 落到 `<journal_root>/journal/<storage_source>/<cycle>.jsonl`（目录按 **normalize 后**的 source 分，`IFS` 而非 cycle id 里的 `ifs`；且会按 `MAX_FILE_JOURNAL_CYCLE_SEGMENTS` 轮转出 `<cycle>.<n>.jsonl`，读取必须 glob）；payload 里周期键必须叫 `cycle` 不能叫 `cycle_token`（`redact_payload` 会把含 `token` 的键打成 `[redacted]`）。
 - 身份取 `context.source_id`（已 normalize）+ `format_cycle_time(context.cycle_time)`，**不得**从 `cycle_id` 反解（它把 source 小写化，丢掉 `IFS`/`ERA5` 拼写）。

@@ -983,14 +983,40 @@ def _copyback_stage_run_trees(self, context: CycleOrchestrationContext, *, stage
 
 
 def _stage_should_mirror_canonical_precip(self, stage: StageDefinition) -> bool:
-    return stage.stage == "state_save_qc" and self.config.terminal_stage == "forecast_state_save_qc"
+    # The gate is the stage alone (#2069): `convert` is the stage that WRITES the
+    # precipitation products. It deliberately does NOT read
+    # `self.config.terminal_stage` -- that predicate encodes the sibling
+    # `_stage_should_copyback_run_trees`'s chain-terminal semantics, which say
+    # nothing about a `convert` product. The profile fence is
+    # `NHMS_OBJECT_STORE_COPYBACK_ROOT`, which the display profile forbids
+    # outright (`apps/api/runtime_mode.py`) and which the mirror early-returns on.
+    return stage.stage == "convert"
 
 
 def _mirror_canonical_precip(self, context: CycleOrchestrationContext) -> None:
     """Mirror the cycle's canonical precipitation products and record a receipt.
 
+    Bound to the ``convert`` stage's terminal entry (#2069), not to the chain's
+    forecast terminal stage: ``convert`` is what writes the products, so
+    "products exist" and "this hook ran" coincide within a pass that runs it.
+
+    That terminal entry includes ``convert``'s failure tail, and one arm of it
+    can still have a live writer. ``record_cycle_stage_poll_timeout`` gives up on
+    the poll and records ``failed`` with ``error_code == "SLURM_JOB_TIMEOUT"``
+    without cancelling anything -- the orchestrator issues no ``scancel`` of its
+    own on any failure-tail path -- so the gateway may still report the job
+    running while this hook copies the tree it is writing. (``cancelled`` is
+    observed from the gateway, i.e. Slurm already stopped the job, and
+    ``reservation_lost`` is minted only on a *confirmed* accounting absence, so
+    those two leave a stalled or empty tree rather than a mid-write one.) A
+    ``status: "ok"`` receipt therefore means the destination matched the source
+    AT COPY TIME -- not that ``convert`` succeeded, and not that the lead set is
+    complete: ``status`` reads ``ok`` either way, and only ``file_count``
+    reflects how much of the tree existed when the copy ran.
+
     Three deliberate differences from the sibling ``_copyback_stage_run_trees``
-    at this same seam (canonical-precip-copyback spec, Requirement 1):
+    at this same seam (canonical-precip-copyback spec, Requirement 1) -- both
+    still hang off ``_after_cycle_stage_terminal``, only the gated stage differs:
     precipitation is a source/cycle-level product, so there is no
     ``active_basins`` gate and no ``succeeded`` gate; and every failure -- the
     mirror's and the ``insert_pipeline_event`` write's alike -- is swallowed
@@ -1035,7 +1061,7 @@ def _mirror_canonical_precip(self, context: CycleOrchestrationContext) -> None:
             event_type="canonical_precip_mirror",
             status_from=None,
             status_to=str(summary.get("status") or "failed"),
-            message="Canonical precipitation mirror ran after state_save_qc.",
+            message="Canonical precipitation mirror ran after convert.",
             details=_safe_pipeline_event_details({"precip_mirror": summary}),
         )
     except Exception:

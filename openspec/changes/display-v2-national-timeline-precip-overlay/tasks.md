@@ -128,6 +128,61 @@ Boundary-surface checklist（4.1–4.3）:
 - `IFS` 源 -> 目录名与回执均为 `canonical/IFS/...`，绝不出现小写 `ifs`（证明身份未从 `cycle_id` 反解）
 - 非终态部署（终态非 `forecast_state_save_qc`）-> 不在该 seam 触发
 
+### #2069 镜像门移到 convert 终态（wave 1）
+
+风险分级（Phase 0.5）:
+- Issue type: bugfix · Blast radius: medium · Fixture level: **compact**（上游建议 compact，同意）
+- 为何不升 expanded：命中 profile 的 `orchestrator` / 持久态转移触发词只是**命名空间**层面，不是语义层面——本单不改任何 status、transition、终态映射、hook 位置或回执 payload 形状，只改「哪个 stage 的终态入口触发一个既有副作用」以及一条 message 字符串。
+- Repair intensity: **medium**（回执出口 `_copyback_canonical_precip` / `insert_pipeline_event` / `_safe_pipeline_event_details` 均不动，证据链形状不变；共享 change 已有 Invariant Matrix，本节按 delta 追加）
+- 风险包：selected = 「Concurrency / shared state / ordering」（hook 在状态分发之前，触发 stage 前移）、「Error handling / rollback / partial outputs」（fail-open 语义不得变）、「Documentation / migration notes」（spec Req 1 + runbook §7.4 + §3.4 权限矩阵同批）、「File IO / path safety / overwrite」（镜像实现不动，仅继承——本单不新增任何路径构造）；not selected = Public API/CLI（无入口变更）、Config/setup（无新 env）、Schema/units（payload 形状不变）、Auth/secrets（无）、Resource limits（copy 上限不动）、Legacy compatibility（无旧调用点变更，#2068 另单）、Release/packaging（无依赖变更）。
+
+- [x] 4.12 `services/orchestrator/chain_forecast_execution.py:985-986` `_stage_should_mirror_canonical_precip`：门由 `stage.stage == "state_save_qc" and self.config.terminal_stage == "forecast_state_save_qc"` 改为 `stage.stage == "convert"`。**`terminal_stage` 检查删除**（fixture review 裁定项，理由见下）。hook 位置（`reconcile_unverified` 早退之后、状态分发之前）与 fail-open 吞异常语义**不动**（排序/墙钟归 #2070）。
+- [x] 4.13 回执 message `"Canonical precipitation mirror ran after state_save_qc."` -> `"Canonical precipitation mirror ran after convert."`；`_mirror_canonical_precip` docstring 里指向 state_save_qc 终态的表述同步为 convert（"sibling `_copyback_stage_run_trees` at this same seam" 仍成立——两者仍在同一个 hook，只是门的 stage 不同了）。
+- [x] 4.14 **不得**误改的同形谓词：`_stage_should_copyback_run_trees`（`chain_forecast_execution.py:931-934`——它多一条 `if stage.stage == "parse": return True` 前置分支，但 **return 行与旧镜像门逐字节相同**，是最可能被 sed 误伤的一处）与 `_copyback_extra_object_keys`（master `:1048-1049`，`stage != "state_save_qc"` 早退）**保持原样**。
+- [x] 4.15 测试 `tests/test_orchestration_chain.py`：
+  - (a) stage 门单测：`_stage_should_mirror_canonical_precip` 对 `convert` 为 True，对其余**五个** `M3_STAGES`（`forcing`/`forecast`/`parse`/`state_save_qc`/`publish`）为 False；并钉住 `terminal_stage=None` 的 orchestrator 下 `convert` 仍为 True（证明谓词不再读 `terminal_stage`）。
+  - (b) 可达性集成测试（**关闭「10 个 hook 测试全是直接调用」盲区**）：`orchestrator._submit_and_wait_cycle_stage(M3_STAGES[0], context)` 驱动 convert 终态（模板见 `tests/test_orchestration_chain.py:13372` 的同名驱动），断言 journal/repository 出现 `canonical_precip_mirror` 事件且 `status_to == "ok"`、镜像目录落盘。源树用 `_seed_canonical_precip_tree` 预置（fake client 不真跑 convert，seed 代替其产物——docstring 写明）。
+  - (c) 原始场景回归：输入 = `_orchestrator(..., terminal_stage="forecast_state_save_qc")` + `monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))` + 在 `orchestrate_cycle` **之前** `_seed_canonical_precip_tree(Path(orchestrator.config.object_store_root), storage_source="gfs", cycle_token="2026050100")`（注意 source 是 `gfs`，不是既有 12 个测试用的 `IFS`——驱动是 `orchestrate_cycle("gfs", "2026050100", _basins(2))`）+ `client.fail_next_array_submission_stage = "state_save_qc"`（该 knob 持久匹配，重试也会继续失败）。期望输出 = `repository.jobs["job_cycle_gfs_2026050100_state_save_qc"]["status"] == "submission_failed"` **且** `copyback_root/canonical/gfs/2026050100/prcp_rate_or_amount` 存在、恰有一条 `canonical_precip_mirror` 且 `status_to == "ok"`（单 pass 受控，故此处可断言「恰一条」；spec 的通用契约仍是「至少一条」）。
+  - (d) 常量 `_PRECIP_STATE_SAVE_QC_STAGE`（`tests/test_orchestration_chain.py:3331` 定义 + 12 处调用：`3449/3497/3525/3563/3592/3614/3642/3687/3762/3797/3858/3861`）改名为 convert 常量并取自 `M3_STAGES` 的 `convert`；`:3325-3330` 的段落注释（「hangs off the DB-free forecast terminal stage」）同步改写，否则测试文件自述与新门矛盾。`:3464` 参数化列表**移除** `partially_failed`（裁定，不留分叉）：非 array 的 convert 在真实链路拿不到 `ArrayAggregation`，该状态对本门不可达；移除处留一行注释说明理由，「不按 succeeded 设门」的不变量继续由 `failed`/`cancelled`/`timeout`/`reservation_lost`/`permanently_failed` 覆盖。
+    改名会连带破坏的四处，逐一裁定（**不得**只做机械改名）：
+    1. `:3575` `test_canonical_precip_mirror_does_not_run_when_the_deployment_is_not_db_free_terminal`（`:3590` 断言 `terminal_stage != "forecast_state_save_qc"`、`:3595-3596` 断言不镜像）钉的正是被本单删除的那个门 -> **删除该测试**；其正面语义由 4.15(a) 的 `terminal_stage=None` 断言承接。
+    2. `:3645` 与 `:3766` 的 `assert orchestrator.repository.cycle_statuses[-1:] == ["complete"]` -> 改为 `["canonical_ready"]`（`convert` 的 `success_cycle_status` 是 `canonical_ready`，见 `chain_stages.py` `M3_STAGES`）。
+    3. `:3570` 的 `assert run_tree_calls == []` 改名后变成空断言（convert 本就不满足 `_stage_should_copyback_run_trees`）-> 保留但加注释说明它现在钉的是「convert 不触发 run-tree copyback」，或改由 4.15(a) 的 stage 矩阵承担。
+    4. `:3855` 附近注释「a partial-array retry re-enters this hook」对非 array 的 convert 为假 -> 改写为 resume/retry 再入。
+- [x] 4.16 契约同步（同批）：spec `specs/canonical-precip-copyback/spec.md` Requirement 1 触发面改为 convert 终态、删除 `submission_failed` known gap 与 `#2069` 追踪句；`docs/runbooks/two-node-deployment-overview.md` §7.4 判读入口（`:326` 附近）与 §3.4 权限矩阵行（`:151`，`canonical 降水镜像（终态 state_save_qc 后写…）`）触发 stage 改 convert（`:150` 的 `publish-qdown` 行讲的是链终态契约，**不**改）。同一 change 内 `proposal.md:24` 与 `design.md` D6（标题、首条触发点、末尾「排序理由」段）仍按 #2034 的 state_save_qc 口径书写：受「共享 change 只改 Requirement 1 与本单 tasks」纪律约束，**不原地改写**，改为在两处各追加一行 supersession 指针（指向 spec Requirement 1 与本节），并在 PR 偏离记录说明。
+
+`terminal_stage` 检查去留 —— 裁定：**删除**（fixture review 复核项）：
+- 该谓词编码的是 run-tree copyback 的「链终态」语义，对 `convert` 产物无意义（降水由 `workers/canonical_converter/converter.py` 在 convert 阶段写出，与 hydro 终态是否提交无关）。
+- profile 围栏由别处保证，不靠这个谓词：`apps/api/runtime_mode.py:32` 把 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 列入 display profile **禁止** env，而 `_mirror_canonical_precip` 在该 env 未配时早退（master `:1006`）——node-27 既不跑 forecast chain，也拿不到 copyback root。
+- 线上是否设 `NHMS_ORCHESTRATOR_TERMINAL_STAGE` **无法从 tracked 源判定**：全仓提到它的只有 `infra/env/compute.example:185`（compose lane，`:5-12` 自述不得当作生产 scheduler 配置）与文档（`infra/env/README.md:193`、`docs/runbooks/current-production-ops.md:170`），**没有任何 tracked 的生产 scheduler env 设它**，`infra/env/compute.scheduler-dbfree.env.example` **不含该键**且 `README.md:174-177` 明禁 source `compute.example`；线上 `nhms-compute-scheduler.service` 只加载 untracked 的 `compute.scheduler-dbfree.env`。两种情况 DROP 都成立但含义不同：已设 -> DROP 无行为变化；未设 -> 现门从未在 node-22 生产触发过（与 4.11 live receipt 至今未勾选相符），DROP 是让镜像**第一次生效**。无论哪种，`terminal_stage` 都不是围栏。（dbfree 模板缺该键与 `infra/env/README.md:193` / `docs/runbooks/current-production-ops.md:170` 的「必须设」相矛盾，是既有问题，不由本单修，另行立单。）
+- 代价：#2034 的 Invariant Matrix 行「非终态部署 -> 不在该 seam 触发」失效，由下面的 delta 取代。
+
+### Invariant Matrix delta（4.12–4.16，issue #2069）
+
+本节**取代**上面 #2034 Invariant Matrix 的五行（原文保留为历史记录，不原地改写）：
+- ~~`submission_failed`（submit 臂铸造）-> …暂态缺口…（#2069）~~ -> **失效**：门在 convert 之后，`state_save_qc` 的 submit 成败与镜像无关。
+- ~~链在 `state_save_qc` 之前终止 -> 不镜像，读侧 404（已知缺口）~~ -> **收窄**：只有链在 **convert 终态之前**终止才不镜像，而那种情况下 convert 没有产物可镜像，读侧 404 与「数据存在却不可见」不再是同一件事。
+- ~~非终态部署（终态非 `forecast_state_save_qc`）-> 不在该 seam 触发~~ -> **失效**：谓词不再读 `terminal_stage`；围栏是 `NHMS_OBJECT_STORE_COPYBACK_ROOT`。
+- ~~终态 `succeeded` -> …（**partial-array 重试**会让 hook 跑第二次）~~ -> **理由失效**：convert 是 `is_array=False`，不存在 partial-array 重试。「一个周期可有多条回执、故不得断言最后一条」的**结论保留**，新成因是 convert 失败后的重试新 attempt 或后续 pass 经 `resume_cycle_stage` 再入 hook（spec Req 1 已同步改写）。
+- ~~终态 `partially_failed` -> **仍**镜像~~ -> **不可达**：非 array 的 convert 在真实链路拿不到 `ArrayAggregation`，该状态进不了 hook 的 partial 臂。「不按 `succeeded` 设门」的不变量改由失败尾终态承担（下一行）。
+- 失败尾终态包含 `reservation_lost`（由 reconcile 带外铸造、经 `resume_cycle_stage` 进入），对 convert 同样成立，不得在改门时静默丢掉。
+
+新增/改写行：
+- `convert` 终态 `succeeded` -> 镜像触发，回执记 `status == "ok"`；且必须由 `_submit_and_wait_cycle_stage` 真实驱动到 hook（不接受直接调用作为该行的证据）
+- `convert` 终态的失败尾（`failed`/`cancelled`/`reservation_lost`/`permanently_failed`；**`timeout` 不在其中**——它只是 event_type，不在 `TERMINAL_JOB_STATUSES` 内，轮询超时到达 hook 时是带 `error_code == "SLURM_JOB_TIMEOUT"` 的 `failed`）-> **仍**进 hook 即仍镜像，stage 结果不变；进入 hook 后唯一不触发的仍是 `reconcile_unverified`。原先写的「源产物不存在」是错的，四条臂的产物形态各不相同：(a) 轮询超时（`failed` + `SLURM_JOB_TIMEOUT`）由 `record_cycle_stage_poll_timeout` 记完就 return 且从不 scancel，此时 gateway 仍报 running、sbatch **可能仍在写**，镜像会把半棵树拷走并记 `ok`（#2072 round 1 A1，已实测复现）；(b) 其余 `failed` 与 `permanently_failed` 作业已结束，树可能残缺也可能不存在；(c) `cancelled` 是 gateway 观测（Slurm 已杀），树是冻结的残缺态而非边写边拷；(d) `reservation_lost` 只在 accounting **确认无此作业**时铸造，即 sbatch 根本没生效，**没有任何产物**。`ok` 只表示"拷贝当刻目的地与源一致"，不表示 convert 成功或 lead 集合完整
+- `convert` 的 `submit_result_ambiguous` -> **对本 stage 不可达**（`chain_stage_execution.py` 的 ambiguous 臂整个在 `is_forecast_cohort_stage(stage)` 守卫内，`convert` 不在 `_FORECAST_STAGE_ALIASES`；实跑 `is_forecast_cohort_stage` 对六个 M3 stage 只有 `forecast` 为 True）。此前把它记作"真残留"是过宽表述，已在 spec 中删除
+- `convert` 自身 `submission_failed`（sbatch 未被接受）-> 该 pass 不进 hook；**不是缺口**：没被接受的提交不会写出产物
+- `state_save_qc`（及 `forcing`/`forecast`/`parse`/`publish`）终态 -> **不**触发镜像（门只认 convert）；`_stage_should_copyback_run_trees` 的 state_save_qc 行为不变
+- `state_save_qc` submit 在整个 pass 全部失败的周期 -> 镜像**仍在**（#2069 原始场景），回执 `ok`
+- `terminal_stage` 为 `None` 或非 `forecast_state_save_qc` 的 orchestrator -> convert 终态**仍**触发（谓词不读 `terminal_stage`）
+- `NHMS_OBJECT_STORE_COPYBACK_ROOT` 未配 -> 不尝试、不发回执（唯一 profile 围栏，行为不变）
+- fail-open 语义不变：镜像或回执写入抛任何异常 -> convert stage 结果不变、不抛出
+- `context.restart_stage` 落在 convert **下游**（`DOWNSTREAM_RESTART_STAGES`，`scheduler_state_types.py:61`）-> 该 pass 在 `_run_cycle_chain` 的 `stage_index < start_stage_index`（`chain_forecast_execution.py:157,166-168`）整段跳过 convert，**不进 hook、不镜像**；恢复靠后续全链重规划的 `resume_cycle_stage` 再入或 Requirement 2 回填脚本
+- 镜像记 `failed` 后 -> 本门**没有**阶段内重试；旧门挂链尾时任何下游重启都会再入 hook 重试，新门下不会（这是相对旧门的**收窄**，非本单修复项，随 F1 立单跟踪）
+- 墙钟暴露面**扩大**（相对旧门）：镜像同步执行，卡住时挡的不再是链尾一次状态写，而是该周期后续全部 stage 与所在 scheduler pass -> #2070 的 blast radius 由本单扩大，需回写该 issue
+
+Evidence Floor（#2069）：本地 `uv run pytest tests/test_orchestration_chain.py -q` + `uv run ruff check .` + `openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive`；node-27 跑 `tests/test_orchestration_chain.py`（`mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`）。node-22 实机 receipt 不在本单——4.11 / #2016 的「新周期镜像」触发点按本单口径读作 convert。
+
 ## 5. Precipitation raster service (precipitation-raster-overlay, backend)
 
 - [ ] 5.1 新模块 `services/precip/`：`resolve_window(source, cycle, valid_time, mirror_root)`（最近 `C ≤ min(请求周期, T−3h)` 规则——请求周期是上界，只从请求周期或更早周期取片；缺片抛 `PrecipWindowIncomplete`）、`accumulate_24h(slices)`（netCDF4 + numpy，Σ rate×3/24）、`render_png(field, grid, palette)`（Mercator 重采样 1316 px 宽、bilinear、六级调色板、numpy+zlib 手写 PNG）、`palette_version`。
