@@ -75,6 +75,8 @@ Focused M9 Basins closeout checks:
 ```bash
 # #1912: the publication corpus is six partitioned suites; the core path alone is
 # no longer the corpus and must never be used as shorthand for it.
+# #1913: the registry-import corpus is seven partitioned suites; its retained
+# historical path alone is likewise no longer the corpus.
 uv run pytest -q \
   tests/test_basins_discovery.py \
   tests/test_basins_migration_report.py \
@@ -84,6 +86,12 @@ uv run pytest -q \
   tests/test_basins_package_publication_refusal.py \
   tests/test_basins_package_publication_toctou.py \
   tests/test_basins_registry_import.py \
+  tests/test_basins_registry_import_auth.py \
+  tests/test_basins_registry_import_cli.py \
+  tests/test_basins_registry_import_db.py \
+  tests/test_basins_registry_import_parser.py \
+  tests/test_basins_registry_import_qhh.py \
+  tests/test_basins_registry_import_security.py \
   tests/test_shud_runtime.py \
   tests/test_model_registration.py \
   tests/test_api_contract.py \
@@ -483,7 +491,8 @@ Real registry import smoke also needs a PostgreSQL/PostGIS integration database 
 ```bash
 export NHMS_RUN_REAL_BASINS_IMPORT=1
 export DATABASE_URL=postgresql://nhms:nhms_dev@localhost:5432/nhms
-uv run pytest -q tests/test_basins_registry_import.py
+# #1913: the opt-in real-Basins import smoke lives in the DB partition.
+uv run pytest -q tests/test_basins_registry_import_db.py
 ```
 
 ## Backend Integration

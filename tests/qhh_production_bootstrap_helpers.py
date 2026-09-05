@@ -1,9 +1,10 @@
 """QHH production bootstrap support: builders, seeds and scheduler-readiness helpers.
 
 Non-collectible (the filename is deliberately not `test_*`), so pytest never runs it
-as a suite; its three QHH bootstrap consumers import it. This module is also the only
-partition that still imports the baseline registry monolith — #1913 retargets those
-two imports.
+as a suite; its three QHH bootstrap consumers import it. Its two registry-fixture
+imports come from the #1913 non-collectible registry helper
+(`tests/basins_registry_import_helpers.py`), never from a collectible registry
+suite, and no QHH bootstrap partition imports that helper directly.
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ from psycopg2.extras import Json
 
 from packages.common.met_store import PsycopgMetStore
 from services.orchestrator.scheduler import _MetStoreCanonicalReadinessProvider
+from tests.basins_registry_import_helpers import _write_registry_fixture
 from tests.integration_helpers import psycopg_connection
-from tests.test_basins_registry_import import _write_registry_fixture
 from tests.test_production_scheduler import FakeAdapter, _dt
 from workers.canonical_converter.converter import GFS_REQUIRED_STANDARD_VARIABLES
 
@@ -247,7 +248,7 @@ def _refresh_inventory_and_manifest(
     inventory_path: Path,
     manifest_path: Path,
 ) -> None:
-    from tests.test_basins_registry_import import _package_manifest_for_model
+    from tests.basins_registry_import_helpers import _package_manifest_for_model
     from workers.model_registry.basins_discovery import discover_basins_inventory, write_inventory
 
     inventory = discover_basins_inventory(root)

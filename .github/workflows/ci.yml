@@ -108,7 +108,19 @@ jobs:
               - 'tests/integration_helpers.py'
               - 'tests/*integration*.py'
               - 'tests/**/*integration*.py'
+              # #1913: the registry-import monolith is seven partitioned suites plus one
+              # shared helper. Only the three integration-owning partitions (auth 5, DB 5,
+              # QHH 7 nodes), the retained core (owns the CLI/database gate contracts whose
+              # refusal proofs must rerun on database-lane changes) and the helper open this
+              # lane; parser, CLI and security own no integration node and deliberately do
+              # NOT. Exact literals, never a `test_basins_registry_import*` glob: the glob
+              # would rescue deletion of any one edge and sweep the three non-integration
+              # owners into the lane.
+              - 'tests/basins_registry_import_helpers.py'
               - 'tests/test_basins_registry_import.py'
+              - 'tests/test_basins_registry_import_auth.py'
+              - 'tests/test_basins_registry_import_db.py'
+              - 'tests/test_basins_registry_import_qhh.py'
               - 'tests/test_basins_reingest.py'
               - 'tests/test_migrations.py'
               - 'tests/test_node27_timeseries_decompression_replay.py'

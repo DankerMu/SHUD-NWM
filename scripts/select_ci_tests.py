@@ -433,6 +433,44 @@ BASINS_PACKAGE_HELPERS_CONSUMER_TESTS: tuple[str, ...] = (
     "tests/test_basins_package.py",
 )
 
+# #1913: the Basins registry-import corpus was physically partitioned out of the
+# 3,931-line `tests/test_basins_registry_import.py` monolith into seven collectible
+# suites below the 1,000-line structural limit, with one shared non-collectible helper.
+# The retained historical path alone is NO LONGER the corpus: a
+# `workers/model_registry/**` change that reaches only it runs 18 of the 94 registry
+# definitions and leaves the six moved partitions blind in the PR lane — the same
+# failure class #1912 closed for the publication corpus. This tuple is the single
+# seven-owner route authority, and tests/test_select_ci_tests.py derives the tracked
+# `tests/test_basins_registry_import*.py` suite set against it, so an eighth partition
+# reddens the meta-guard instead of falling out. Explicit sorted tuple, never derived
+# at import time (same reason as MAPPING_BUILDER_TESTS / BASINS_PACKAGE_PUBLICATION_TESTS).
+BASINS_REGISTRY_IMPORT_TESTS: tuple[str, ...] = (
+    "tests/test_basins_registry_import.py",
+    "tests/test_basins_registry_import_auth.py",
+    "tests/test_basins_registry_import_cli.py",
+    "tests/test_basins_registry_import_db.py",
+    "tests/test_basins_registry_import_parser.py",
+    "tests/test_basins_registry_import_qhh.py",
+    "tests/test_basins_registry_import_security.py",
+)
+# The helper owns all 19 support functions, `_FakeRiverSegmentCursor` and the four
+# private constants of the former monolith, so a helper-only diff must run its eight
+# direct collectible importers — the seven registry suites plus
+# `tests/test_publish_scheduler_file_registry.py`, which imports `_write_registry_fixture`
+# and `_make_valid_model` at module scope. SUPPORT_MODULE_TEST_RULES does not recursively
+# expand one helper rule through another, and the QHH-bootstrap helper
+# (`tests/qhh_production_bootstrap_helpers.py`, the sole support-to-support importer)
+# imports this helper at module and function scope while its three collectible
+# partitions never import it directly — so the QHH A/B/C partitions are named
+# explicitly here, eleven collectible suites total. The selector meta-guard rider is
+# added by the support-module branch itself, deliberately not repeated.
+BASINS_REGISTRY_IMPORT_HELPERS_PATH = "tests/basins_registry_import_helpers.py"
+BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS: tuple[str, ...] = (
+    *BASINS_REGISTRY_IMPORT_TESTS,
+    "tests/test_publish_scheduler_file_registry.py",
+    *QHH_PRODUCTION_BOOTSTRAP_TESTS,
+)
+
 # #1684 shared-auth owner-to-focused-suite mappings (EVID-01). These shared
 # modules have no same-name derivable suite and their consumers are the focused
 # partitioned Slurm auth suites, not the broad core-smoke/API/orchestrator
@@ -1100,6 +1138,19 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         "tests/river_ts_template_registry.py",
         SQL_SHAPE_ORACLE_TESTS,
     ),
+    PathTestRule(
+        # #1913: the registry-import helper owns the former monolith's 19 support
+        # functions, `_FakeRiverSegmentCursor` and the four private constants. Its eight
+        # direct collectible importers are the seven registry suites plus
+        # `tests/test_publish_scheduler_file_registry.py`, all at module scope. The
+        # support-to-support edge — `tests/qhh_production_bootstrap_helpers.py` importing
+        # `_write_registry_fixture` at module scope and `_package_manifest_for_model` at
+        # function scope — is invisible to the non-recursive support-rule walk, so the
+        # three QHH bootstrap partitions are routed explicitly here: eleven collectible
+        # suites total, meta-guard rider added by the support-module branch itself.
+        BASINS_REGISTRY_IMPORT_HELPERS_PATH,
+        BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS,
+    ),
 )
 
 
@@ -1373,7 +1424,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # derivation is not this rule's leg — so every one of the six is proven
             # load-bearing by tests/test_select_ci_tests.py's per-edge RED rows.
             *BASINS_PACKAGE_PUBLICATION_TESTS,
-            "tests/test_basins_registry_import.py",
+            # #1913: the single registry monolith literal is replaced by the
+            # seven-way partition authority. Only the retained core is same-name
+            # derivable from a Basins production module, and even that derivation is
+            # not this rule's leg for a probe like
+            # `workers/model_registry/basins_reingest.py` — so every one of the seven
+            # is proven load-bearing by tests/test_select_ci_tests.py's per-edge RED
+            # rows.
+            *BASINS_REGISTRY_IMPORT_TESTS,
             "tests/test_basins_reingest.py",
             "tests/test_direct_grid_variant_registration.py",
             "tests/test_hhe_mvt_binding.py",
