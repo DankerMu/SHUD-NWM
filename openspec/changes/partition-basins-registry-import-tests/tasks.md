@@ -72,13 +72,13 @@
   RED rows, all eight database RED rows, AST importer closure, and QHH controlled-transition
   guards; require every restored table GREEN.
 - [x] 5.4 Run QHH A/B/C, scheduler-file-registry, reingest, affected Basins consumers, and
-  full `uv run pytest -q`; focused suites pass, and full pytest reports 16,975 passed / 225
-  skipped with only the two pure-master failures routed to #2029 and #2043, so #1913 adds no
-  SQL/schema/geometry/auth/oracle regression.
+  full `uv run pytest -q`; focused suites pass, and full pytest reports 17,142 passed / 230
+  skipped / one warning with zero failures, so #1913 adds no SQL/schema/geometry/auth/oracle
+  regression.
 - [x] 5.5 Run Ruff for changed Python, strict single/all OpenSpec validation, Markdown lint,
   entropy report/differential, `git diff --check`, scope/guard audits, and a non-vacuous
-  23-path ordinary-hook proof; require zero #1913 findings while recording master hard-gate
-  issue #2029 rather than misreporting the absolute gate as green.
+  23-path ordinary-hook proof; require zero #1913 findings. Pure-master/current entropy reports
+  both contain 755 findings, their added/removed sets are empty, and both hard gates pass.
 - [x] 5.6 On node-27 at the frozen final SHA, run the 17 registry integration nodes plus 11
   QHH-bootstrap scheduler nodes against one isolated temporary database on local PostgreSQL
   `:55432`; require 28 collected, 27 passed, only the disabled real-Basins smoke skipped,

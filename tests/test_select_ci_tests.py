@@ -13874,6 +13874,29 @@ REGISTRY_PARTITION_DATABASE_ABSENT: tuple[str, ...] = (
 # The durable check is in force only while this directory exists AND a current
 # change path is under it; archive or an unrelated future PR must no-op.
 REGISTRY_PARTITION_OPENSPEC_PREFIX = "openspec/changes/partition-basins-registry-import-tests/"
+# Independent structural-guard identity (not oracle-controlled). The live contract
+# binds these literals exactly; aliases such as `./.large-file-guard.json` are
+# rejected rather than normalized. Provenance is the issue-start blob only.
+REGISTRY_PARTITION_GUARD_PATH = ".large-file-guard.json"
+REGISTRY_PARTITION_GUARD_PROVENANCE_BASELINE_SHA = "8a8643313b74ea81e1745529eba767e0f2292681"
+REGISTRY_PARTITION_GUARD_PROVENANCE_SHA256 = "5c06fad8ba8f488d8bfc836e747cd7af642232a880bec25ae132e1bd17ab87ad"
+REGISTRY_PARTITION_GUARD_HOOK_PATH = ".claude/hooks/large-file-guard/large-file-guard.sh"
+# Mirrored from the hook; `_registry_assert_hook_default_exclude_literals` keeps
+# the mirror honest. Effective exclusions = configured `exclude` + this list.
+REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE: tuple[str, ...] = (
+    "*.lock",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "*.min.*",
+    "*.svg",
+    "*.map",
+    "*.snap",
+    "dist/**",
+    "build/**",
+    "vendor/**",
+    "node_modules/**",
+)
 
 
 def _registry_load_partition_oracle() -> dict[str, Any]:
@@ -14006,6 +14029,46 @@ def _registry_assert_baseline_source_anchor(captured: dict[str, Any]) -> None:
     )
 
 
+def _registry_oracle_self_digest(payload: dict[str, Any]) -> str:
+    """SHA-256 of the oracle payload excluding ``digests`` (canonical JSON)."""
+    canonical = json.dumps(
+        {key: value for key, value in payload.items() if key != "digests"},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _registry_bind_guard_identity(oracle: dict[str, Any]) -> tuple[str, str, str]:
+    """Bind loaded oracle guard identity to independent literals; reject aliases/decoys.
+
+    Returns the canonical ``(path, provenance_baseline_sha, provenance_sha256)``.
+    Equality is exact: ``./.large-file-guard.json`` and other decoys stay RED.
+    """
+    captured = oracle["captured_from"]
+    structural = oracle["structural"]
+    recorded_path = structural["guard_path"]
+    recorded_baseline = captured["guard_provenance_baseline_sha"]
+    recorded_digest = structural["guard_provenance_sha256"]
+    assert recorded_path == REGISTRY_PARTITION_GUARD_PATH, (
+        f"oracle structural.guard_path {recorded_path!r} != canonical {REGISTRY_PARTITION_GUARD_PATH!r}"
+    )
+    assert recorded_baseline == REGISTRY_PARTITION_GUARD_PROVENANCE_BASELINE_SHA, (
+        "oracle captured_from.guard_provenance_baseline_sha "
+        f"{recorded_baseline!r} != canonical {REGISTRY_PARTITION_GUARD_PROVENANCE_BASELINE_SHA!r}"
+    )
+    assert recorded_digest == REGISTRY_PARTITION_GUARD_PROVENANCE_SHA256, (
+        "oracle structural.guard_provenance_sha256 "
+        f"{recorded_digest!r} != canonical {REGISTRY_PARTITION_GUARD_PROVENANCE_SHA256!r}"
+    )
+    return (
+        REGISTRY_PARTITION_GUARD_PATH,
+        REGISTRY_PARTITION_GUARD_PROVENANCE_BASELINE_SHA,
+        REGISTRY_PARTITION_GUARD_PROVENANCE_SHA256,
+    )
+
+
 def test_registry_partition_oracle_is_tracked_and_anchored() -> None:
     tracked_fixtures = [
         line for line in _qhh_git_stdout("ls-files", "--", "tests/fixtures").splitlines() if line
@@ -14034,10 +14097,8 @@ def test_registry_partition_oracle_self_digest_covers_its_own_payload() -> None:
     # so editing a frozen row, an owner map, a database path or an execution summary in the
     # tracked oracle changes the digest and reddens this guard.
     oracle = _registry_partition_oracle()
-    payload = {key: value for key, value in oracle.items() if key != "digests"}
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
-    assert oracle["digests"]["self"] == hashlib.sha256(canonical).hexdigest(), (
+    assert oracle["digests"]["self"] == _registry_oracle_self_digest(oracle), (
         "the tracked oracle's payload no longer matches its own self-digest"
     )
 
@@ -14050,25 +14111,12 @@ def test_registry_partition_rejected_regenerated_oracle_rewrites_the_source_anch
     oracle = _registry_partition_oracle()
     payload = json.loads(json.dumps(oracle, sort_keys=True))
     payload["captured_from"]["sha256"] = "0" * 64
-    payload["digests"]["self"] = hashlib.sha256(
-        json.dumps(
-            {key: value for key, value in payload.items() if key != "digests"},
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode()
-    ).hexdigest()
+    payload["digests"]["self"] = _registry_oracle_self_digest(payload)
 
     # Premise: the tampered payload is internally consistent — self-digest recomputed over
     # its own payload and every digest the shape test re-derives from rows unchanged — so
     # ONLY the independent frozen anchor can reject it.
-    canonical = json.dumps(
-        {key: value for key, value in payload.items() if key != "digests"},
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-    assert payload["digests"]["self"] == hashlib.sha256(canonical).hexdigest()
+    assert payload["digests"]["self"] == _registry_oracle_self_digest(payload)
     for key in ("definition", "ast", "helper_inventory", "helper_source", "owner_map"):
         assert payload["digests"][key] == oracle["digests"][key], key
     assert payload["captured_from"]["sha256"] != REGISTRY_PARTITION_BASELINE_SOURCE_SHA256, (
@@ -14748,31 +14796,148 @@ def _registry_assert_no_issue_scoped_guard_diff(changed: Iterable[str], *, guard
     assert not offenders, f"issue-scoped guard edit: {list(offenders)}"
 
 
+def _registry_hook_excludes_path(path: str, pattern: str) -> bool:
+    """Hook-equivalent exclusion: full path OR basename, ``fnmatch`` each pattern."""
+    return fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(os.path.basename(path), pattern)
+
+
+def _registry_assert_hook_default_exclude_literals() -> None:
+    """Keep the mirrored DEFAULT_EXCLUDE list honest against the hook source."""
+    hook = Path(REGISTRY_PARTITION_GUARD_HOOK_PATH).read_text(encoding="utf-8")
+    expected = "DEFAULT_EXCLUDE = [\n" + "".join(
+        f'    "{item}",\n' for item in REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE
+    ) + "]"
+    assert expected in hook, (
+        f"{REGISTRY_PARTITION_GUARD_HOOK_PATH} DEFAULT_EXCLUDE drifted from "
+        f"{list(REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE)}"
+    )
+
+
+def _registry_effective_guard_exclusions(guard: dict[str, Any]) -> tuple[str, ...]:
+    """Configured ``exclude`` plus the hook's DEFAULT_EXCLUDE, in that order."""
+    _registry_assert_hook_default_exclude_literals()
+    return tuple(list(guard.get("exclude", [])) + list(REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE))
+
+
+def _registry_exclusion_matches(
+    paths: Sequence[str], exclusions: Sequence[str]
+) -> tuple[tuple[str, str], ...]:
+    """``(path, pattern)`` pairs the hook would exclude from ``paths``."""
+    return tuple(
+        (path, pattern)
+        for path in paths
+        for pattern in exclusions
+        if _registry_hook_excludes_path(path, pattern)
+    )
+
+
+def _registry_assert_no_registry_guard_exclusions(
+    paths: Sequence[str], exclusions: Sequence[str]
+) -> None:
+    offenders = _registry_exclusion_matches(paths, exclusions)
+    assert not offenders, f"hook-equivalent registry exclusion: {list(offenders)}"
+
+
 def test_registry_partition_keeps_the_structural_guard_contract_and_out_of_the_change_set() -> None:
     # #1913 must not move the structural guard: the current guard stays enabled at 1,000
-    # lines with no registry exclusion, the frozen provenance blob still hashes to the
-    # contract's recorded digest (issue-start provenance only), and the issue-scoped
-    # change set contains no guard edit while the active OpenSpec fixture is in force.
+    # lines with no registry exclusion (hook-equivalent fnmatch, not exact/substr
+    # proxies), the frozen provenance blob still hashes to the independent digest
+    # (issue-start provenance only), and the issue-scoped change set contains no
+    # canonical-path guard edit while the active OpenSpec fixture is in force.
     oracle = _registry_partition_oracle()
     paths = [*_registry_partitions(), REGISTRY_PARTITION_HELPER]
-    guard_path = oracle["structural"]["guard_path"]
+    guard_path, provenance_baseline, provenance_digest = _registry_bind_guard_identity(oracle)
     guard = json.loads(Path(guard_path).read_text(encoding="utf-8"))
 
-    provenance = _qhh_blob_at(oracle["captured_from"]["guard_provenance_baseline_sha"], guard_path)
-    assert hashlib.sha256(provenance).hexdigest() == oracle["structural"]["guard_provenance_sha256"], (
+    provenance = _qhh_blob_at(provenance_baseline, guard_path)
+    assert hashlib.sha256(provenance).hexdigest() == provenance_digest, (
         "the guard blob at the guard-provenance baseline no longer matches the frozen digest"
     )
     assert guard["enabled"] is True and guard["maxLines"] == REGISTRY_PARTITION_STRUCTURAL_LIMIT
-    assert not [path for path in paths if path in guard["exclude"]], (
-        "a replacement exclusion would undo the point of the partition"
-    )
-    assert not [pattern for pattern in guard["exclude"] if "basins_registry_import" in pattern], (
-        "a registry glob exclusion would undo the point of the partition"
-    )
+    _registry_assert_no_registry_guard_exclusions(paths, _registry_effective_guard_exclusions(guard))
     changed = _registry_partition_scope_change_set()
     if changed is None:
         return
     _registry_assert_no_issue_scoped_guard_diff(changed, guard_path=guard_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("path", "./.large-file-guard.json"),
+        ("path", "decoy/.large-file-guard.json"),
+        ("baseline", "0" * 40),
+        ("digest", "0" * 64),
+    ),
+    ids=["path-dot-slash-alias", "path-decoy", "provenance-baseline", "provenance-digest"],
+)
+def test_registry_partition_guard_identity_binding_reds_on_self_consistent_oracle_mutation(
+    field: str,
+    value: str,
+) -> None:
+    # Identity is bound to independent literals, not the editable oracle. A self-consistent
+    # payload that rewrites path / provenance baseline / provenance digest and recomputes
+    # `digests.self` must still RED; aliases are rejected, never normalized.
+    oracle = _registry_partition_oracle()
+    payload = json.loads(json.dumps(oracle, sort_keys=True))
+    if field == "path":
+        payload["structural"]["guard_path"] = value
+    elif field == "baseline":
+        payload["captured_from"]["guard_provenance_baseline_sha"] = value
+    else:
+        payload["structural"]["guard_provenance_sha256"] = value
+    payload["digests"]["self"] = _registry_oracle_self_digest(payload)
+
+    assert payload["digests"]["self"] == _registry_oracle_self_digest(payload)
+    assert payload["digests"]["self"] != oracle["digests"]["self"]
+    with pytest.raises(AssertionError, match=re.escape(value)):
+        _registry_bind_guard_identity(payload)
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected_count"),
+    (
+        ("tests/**", 8),
+        ("tests/*.py", 8),
+        ("*.py", 8),
+        ("tests/test_*.py", 7),
+        ("test_*.py", 7),
+        (REGISTRY_PARTITION_RETAINED_CORE, 1),
+        ("*basins_registry_import*", 8),
+    ),
+    ids=[
+        "tests-starstar",
+        "tests-star-py",
+        "star-py",
+        "tests-test-star-py",
+        "test-star-py",
+        "exact-core",
+        "registry-named-glob",
+    ],
+)
+def test_registry_partition_hook_equivalent_exclusion_reds_for_registry_globs(
+    pattern: str,
+    expected_count: int,
+) -> None:
+    # Exact-path / substring proxies stay green for these hook-true globs; the production
+    # matcher must name the `(path, pattern)` pairs and RED. Counts are independently
+    # verified against hook `fnmatch(path) or fnmatch(basename)` over the eight outputs.
+    paths = [*_registry_partitions(), REGISTRY_PARTITION_HELPER]
+    matches = _registry_exclusion_matches(paths, (pattern,))
+
+    assert len(paths) == 8
+    assert len(matches) == expected_count, list(matches)
+    with pytest.raises(AssertionError, match=r"hook-equivalent registry exclusion:"):
+        _registry_assert_no_registry_guard_exclusions(paths, (pattern,))
+
+
+def test_registry_partition_current_effective_exclusions_leave_registry_outputs_unmatched() -> None:
+    oracle = _registry_partition_oracle()
+    paths = [*_registry_partitions(), REGISTRY_PARTITION_HELPER]
+    guard_path, _, _ = _registry_bind_guard_identity(oracle)
+    guard = json.loads(Path(guard_path).read_text(encoding="utf-8"))
+
+    _registry_assert_no_registry_guard_exclusions(paths, _registry_effective_guard_exclusions(guard))
 
 
 @pytest.mark.parametrize(
@@ -14789,7 +14954,7 @@ def test_registry_partition_scope_names_and_reddens_a_guard_change_next_to_the_a
     # check the production test uses).
     _qhh_scope_repo_init(tmp_path)
     fixture = REGISTRY_PARTITION_OPENSPEC_PREFIX.rstrip("/")
-    guard_path = ".large-file-guard.json"
+    guard_path = REGISTRY_PARTITION_GUARD_PATH
     (tmp_path / guard_path).write_text("base\n", encoding="utf-8")
     (tmp_path / fixture).mkdir(parents=True)
     (tmp_path / fixture / "design.md").write_text("base\n", encoding="utf-8")
