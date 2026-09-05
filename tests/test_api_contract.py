@@ -1383,9 +1383,28 @@ def test_run_scoped_layer_catalog_keeps_discharge_national_source_refs() -> None
         truncated = False
 
     original_valid_times = hydro_display_routes.national_discharge_valid_times
+    original_cycles = hydro_display_routes.national_discharge_cycles
     original_mvt_enabled = hydro_display_routes._mvt_live_postgis_enabled
     try:
-        hydro_display_routes.national_discharge_valid_times = lambda _session: _ValidTimes()  # type: ignore[assignment]
+        # Both national discovery symbols must be patched, and both must accept
+        # the `(source, cycle)` identity: the discharge branch of
+        # `_default_layer_catalog` resolves `default_cycle` from the cycles
+        # intersection and then asks for that identity's list. The session here
+        # is a bare `object()`, so anything reaching real SQL raises.
+        hydro_display_routes.national_discharge_valid_times = (  # type: ignore[assignment]
+            lambda _session, **_kwargs: _ValidTimes()
+        )
+        hydro_display_routes.national_discharge_cycles = (  # type: ignore[assignment]
+            lambda _session, **_kwargs: {
+                "source": "gfs",
+                "cycles": [{
+                    "cycle_time": "2026-06-27T00:00:00Z",
+                    "valid_time_start": "2026-06-27T12:00:00Z",
+                    "valid_time_end": "2026-06-27T12:00:00Z",
+                }],
+                "default_cycle": "2026-06-27T00:00:00Z",
+            }
+        )
         hydro_display_routes._mvt_live_postgis_enabled = lambda _session: False  # type: ignore[assignment]
         layers = hydro_display_routes._default_layer_catalog(
             object(),
@@ -1400,13 +1419,19 @@ def test_run_scoped_layer_catalog_keeps_discharge_national_source_refs() -> None
         )
     finally:
         hydro_display_routes.national_discharge_valid_times = original_valid_times  # type: ignore[assignment]
+        hydro_display_routes.national_discharge_cycles = original_cycles  # type: ignore[assignment]
         hydro_display_routes._mvt_live_postgis_enabled = original_mvt_enabled  # type: ignore[assignment]
 
     by_id = {layer.layer_id: layer for layer in layers}
     discharge_metadata = by_id["discharge"].metadata or {}
     river_metadata = by_id["river-network"].metadata or {}
     assert discharge_metadata["source_refs"] == {}
-    assert discharge_metadata["tile_url_template"] == "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    assert discharge_metadata["tile_url_template"] == (
+        "/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf"
+    )
+    assert discharge_metadata["required_placeholders"] == ["source", "cycle", "valid_time", "z", "x", "y"]
+    assert discharge_metadata["default_source"] == "gfs"
+    assert discharge_metadata["default_cycle"] == "2026-06-27T00:00:00Z"
     assert river_metadata["source_refs"]["basin_version_id"] == "basin_v1"
     assert river_metadata["source_refs"]["river_network_version_id"] == "river_v1"
 

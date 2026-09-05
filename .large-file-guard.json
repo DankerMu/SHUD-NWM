@@ -81,6 +81,10 @@
     "tests/test_entropy_audit_script.py",
     "openapi/nhms.v1.yaml",
     "services/orchestrator/retry.py",
-    "apps/api/routes/pipeline.py"
+    "apps/api/routes/pipeline.py",
+    "apps/frontend/src/api/types.ts",
+    "apps/api/openapi_patching.py",
+    "tests/test_api_contract.py",
+    "tests/test_hydro_display_mvt_scaling.py"
   ]
 }

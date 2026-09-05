@@ -568,6 +568,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/layers/discharge/cycles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Discharge Cycles
+         * @description Cycles of `source` that EVERY active river network can render, newest first.
+         *
+         *     Fail-closed: one active network without a display-ready run for `source`
+         *     empties the list and `default_cycle`. `source` is rejected by FastAPI itself
+         *     before this body runs, so a bad or missing one costs no SQL.
+         */
+        get: operations["list_discharge_cycles_api_v1_layers_discharge_cycles_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/layers/{layer_id}/valid-times": {
         parameters: {
             query?: never;
@@ -1372,6 +1396,12 @@ export interface components {
             source_refs?: {
                 [key: string]: unknown;
             } | null;
+            /** @enum {string} */
+            default_source?: "gfs" | "ifs";
+            /** Format: date-time */
+            default_cycle?: string | null;
+            cycles_url_template?: string;
+            valid_times_url_template?: string;
             source_generation?: string | null;
             cache_layer_id?: string | null;
             route_variable?: string | null;
@@ -1392,6 +1422,24 @@ export interface components {
             limit: number;
             observed_count: number;
             truncated: boolean;
+        };
+        DischargeCycles: {
+            /** @enum {string} */
+            source: "gfs" | "ifs";
+            /** @description Cycles every active river network has a display-ready run for, newest first. valid_time_start/valid_time_end are the first and last entries of that cycle's 3-hour valid-time list, the same values GET /api/v1/layers/discharge/valid-times returns for it. */
+            cycles: {
+                /** Format: date-time */
+                cycle_time: string;
+                /** Format: date-time */
+                valid_time_start: string;
+                /** Format: date-time */
+                valid_time_end: string;
+            }[];
+            /**
+             * Format: date-time
+             * @description Newest intersected cycle; null when no cycle covers every network.
+             */
+            default_cycle: string | null;
         };
         Basin: {
             basin_id: string;
@@ -3261,10 +3309,45 @@ export interface operations {
             };
         };
     };
+    list_discharge_cycles_api_v1_layers_discharge_cycles_get: {
+        parameters: {
+            query: {
+                source: "gfs" | "ifs";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["DischargeCycles"];
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_layer_valid_times_api_v1_layers__layer_id__valid_times_get: {
         parameters: {
             query?: {
                 run_id?: string | null;
+                source?: ("gfs" | "ifs") | null;
+                cycle?: string | null;
             };
             header?: never;
             path: {

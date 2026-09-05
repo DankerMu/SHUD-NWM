@@ -443,8 +443,11 @@ def _patch_layer_metadata_openapi(schema: dict) -> None:
     components.pop("Layer", None)
     components.pop("LayerMetadata", None)
     components.pop("LayerValidTimes", None)
+    components.pop("DischargeCycle", None)
+    components.pop("DischargeCycles", None)
     layer_list_response = components.pop("LayerListResponse", None)
     layer_valid_times_response = components.pop("LayerValidTimesResponse", None)
+    discharge_cycles_response = components.pop("DischargeCyclesResponse", None)
     api_success_envelope = components.pop("ApiSuccessEnvelope", None)
 
     if api_success_envelope is not None:
@@ -452,6 +455,7 @@ def _patch_layer_metadata_openapi(schema: dict) -> None:
     components["Layer"] = _layer_schema()
     components["LayerMetadata"] = _layer_metadata_schema()
     components["LayerValidTimes"] = _layer_valid_times_schema()
+    components["DischargeCycles"] = _discharge_cycles_schema()
 
     if layer_list_response is not None:
         layer_list_response = _success_response_schema(
@@ -462,6 +466,10 @@ def _patch_layer_metadata_openapi(schema: dict) -> None:
     if layer_valid_times_response is not None:
         layer_valid_times_response = _success_response_schema({"$ref": "#/components/schemas/LayerValidTimes"})
         _set_operation_response_schema(schema, "/api/v1/layers/{layer_id}/valid-times", layer_valid_times_response)
+
+    if discharge_cycles_response is not None:
+        discharge_cycles_response = _success_response_schema({"$ref": "#/components/schemas/DischargeCycles"})
+        _set_operation_response_schema(schema, "/api/v1/layers/discharge/cycles", discharge_cycles_response)
 
 
 def _patch_basin_registry_openapi(schema: dict) -> None:
@@ -1928,6 +1936,41 @@ def _layer_valid_times_schema() -> dict:
     }
 
 
+def _discharge_cycles_schema() -> dict:
+    instant = {"type": "string", "format": "date-time"}
+    return {
+        "type": "object",
+        "required": ["source", "cycles", "default_cycle"],
+        "properties": {
+            "source": {"type": "string", "enum": ["gfs", "ifs"]},
+            "cycles": {
+                "type": "array",
+                "description": (
+                    "Cycles every active river network has a display-ready run for, newest first. "
+                    "valid_time_start/valid_time_end are the first and last entries of that cycle's "
+                    "3-hour valid-time list, the same values GET /api/v1/layers/discharge/valid-times "
+                    "returns for it."
+                ),
+                "items": {
+                    "type": "object",
+                    "required": ["cycle_time", "valid_time_start", "valid_time_end"],
+                    "properties": {
+                        "cycle_time": instant,
+                        "valid_time_start": instant,
+                        "valid_time_end": instant,
+                    },
+                },
+            },
+            "default_cycle": _nullable(
+                {
+                    **instant,
+                    "description": "Newest intersected cycle; null when no cycle covers every network.",
+                }
+            ),
+        },
+    }
+
+
 def _nullable(schema: dict) -> dict:
     return {**schema, "nullable": True}
 
@@ -1970,6 +2013,13 @@ def _layer_metadata_schema() -> dict:
                     "additionalProperties": True,
                 }
             ),
+            # National discharge only: the one (source, cycle) identity the
+            # catalog advertises, and where the other choices are discoverable.
+            # Absent from every other layer's metadata.
+            "default_source": {"type": "string", "enum": ["gfs", "ifs"]},
+            "default_cycle": _nullable({"type": "string", "format": "date-time"}),
+            "cycles_url_template": {"type": "string"},
+            "valid_times_url_template": {"type": "string"},
             "source_generation": _nullable({"type": "string"}),
             "cache_layer_id": _nullable({"type": "string"}),
             "route_variable": _nullable({"type": "string"}),

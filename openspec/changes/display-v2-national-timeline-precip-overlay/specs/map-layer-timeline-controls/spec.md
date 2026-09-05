@@ -50,6 +50,8 @@ The system SHALL support explicit GFS/IFS source selection for the national over
 
 The system SHALL drive time selection from `/api/v1/layers/discharge/cycles` and `/api/v1/layers/{layer_id}/valid-times?source=&cycle=` as the primary layer-time contract for the national overview, and from payload-derived valid times only for non-layer detail payloads that do not have a layer contract. The bottom control bar SHALL contain a cycle (起报时次) selector, the GFS/IFS segmented control, and the timeline, and SHALL default to the newest cycle at lead 0.
 
+Throughout this capability, "lead 0" names the **first entry of the active cycle's advertised `valid_times[]`**, which equals the cycle instant itself in the fully-covered case. When `mvt-tile-contract` clamps a cycle's list to the intersection coverage window (`max(river_valid_time_start)` after the cycle), the first entry is that clamped instant; the normative selection rule stays "the first entry", and the `+0h … +168h` / 57-entry figures below describe the fully-covered production case rather than constraining the clamped one.
+
 The same control bar is reused in basin detail, but its cycle options there SHALL come from that basin's `/api/v1/runs` run list (the existing basin-detail data path) and its valid times from the selected run's metadata — NOT from `/api/v1/layers/discharge/cycles`, which is national-intersection scoped. The national fail-closed empty-cycles rule therefore does not apply in basin detail: a basin with runs keeps a usable cycle selector even when no cycle covers every basin nationally.
 
 #### Scenario: Active layer has valid times from layer API

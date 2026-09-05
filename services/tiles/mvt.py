@@ -90,6 +90,13 @@ NATIONAL_DISCHARGE_QUERY_VERSION = "fair-network-budget-v5"
 # is invisible to fake-session tests and only fails against a real driver.
 # `lower(h.source_id)`: production stores `gfs` lower-case and `IFS` upper-case,
 # so the lower-case path segment must match case-insensitively.
+# The national discharge identity the `/api/v1/layers` catalog advertises when
+# the caller expresses no preference, and the stride of every per-cycle
+# valid-time list. Three hours is the display cadence the national timeline is
+# built for; `run_display_coverage` itself is an HOURLY grid, so the stride is a
+# display decision and the coverage window is the clamp applied to it.
+NATIONAL_DISCHARGE_DEFAULT_SOURCE = "gfs"
+NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS = 3
 SUPPORTED_HYDRO_MVT_VARIABLES = ("q_down",)
 POSTGIS_NON_FINITE_DOUBLE_SQL = (
     "'NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision"
@@ -1308,8 +1315,14 @@ def _mvt_tile_order_by(layer: str) -> str:
 
 
 _NATIONAL_DISCHARGE_METADATA = {
-    "tile_url_template": "/api/v1/tiles/hydro-national/q_down/{valid_time}/{z}/{x}/{y}.pbf",
-    "required_placeholders": ["valid_time", "z", "x", "y"],
+    "tile_url_template": "/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf",
+    "required_placeholders": ["source", "cycle", "valid_time", "z", "x", "y"],
+    # Source/cycle selection is explicit, so the catalog also has to say where
+    # the other choices live. Same `{name}` placeholder syntax as
+    # `tile_url_template`, so one frontend substitution routine serves all three.
+    "default_source": NATIONAL_DISCHARGE_DEFAULT_SOURCE,
+    "cycles_url_template": "/api/v1/layers/discharge/cycles?source={source}",
+    "valid_times_url_template": "/api/v1/layers/discharge/valid-times?source={source}&cycle={cycle}",
     # 全国并集瓦片在密集流域（如黑河）单块塞下整流域河段会超 per-tile 预算（413）。改为按 zoom
     # 干流概化：postgis_tile_sql("hydro-national") 用 q_down(value) 的 per-network PERCENT_RANK
     # 渐进保留高流量干流（z<=4 顶 10%、z5 顶 30%、z6 顶 60%、z7 顶 85%、z8 顶 96%、z>=9 全量），
@@ -1356,6 +1369,7 @@ def layer_metadata(
     river_network_version_id: str | None = None,
     release_blocking: bool = False,
     national: bool = False,
+    default_cycle: str | None = None,
 ) -> dict[str, Any]:
     metadata_by_layer = {
         "river-network": {
@@ -1427,8 +1441,23 @@ def layer_metadata(
     alias_semantic = None
     legacy_layer_ids = ["hydro:q_down"] if layer_id == "discharge" else []
     property_schema = {"version": MVT_SCHEMA_VERSION, "required": base["properties"]}
+    # Only the national discharge entry has a source/cycle identity to advertise,
+    # so only it carries these four -- and only it feeds them into the version
+    # hash. Adding them unconditionally would rotate `river-network`'s
+    # `cache_version` (and its ETag) for a contract that did not change.
+    national_identity_fields = (
+        {
+            "default_source": base["default_source"],
+            "default_cycle": default_cycle,
+            "cycles_url_template": base["cycles_url_template"],
+            "valid_times_url_template": base["valid_times_url_template"],
+        }
+        if national_discharge
+        else {}
+    )
     version = _stable_json_hash(
         {
+            **national_identity_fields,
             "alias_of": alias_of,
             "alias_semantic": alias_semantic,
             "cache_layer_id": cache_layer_id,
@@ -1452,6 +1481,7 @@ def layer_metadata(
         }
     )
     return {
+        **national_identity_fields,
         "layer_id": layer_id,
         "tile_format": "mvt",
         "url_template": base["tile_url_template"],
@@ -1716,76 +1746,63 @@ def national_discharge_valid_times(
     *,
     variable: str = "q_down",
     limit: int = MVT_VALID_TIME_SAMPLE_LIMIT,
+    source: str | None = None,
+    cycle: datetime | None = None,
 ) -> ValidTimeDiscovery:
-    """Common discharge valid-times across every active basin's latest river-bearing run.
+    """Common discharge valid-times across every active river network.
 
-    Mirrors the national tile SQL stable identity selection (latest river-bearing
-    run for each active basin/network). ``run_display_coverage`` may define the hourly
-    grid only when its sample count proves a complete segment × lead-time rectangle;
-    the returned range is then the intersection across every selected network. This
-    avoids scanning millions of duplicate segment/time rows and prevents the national
-    single-time control from selecting a horizon that leaves some basins unclickable.
-    Incomplete or inconsistent coverage fails closed with no advertised times.
+    Two branches over the ONE coverage query in
+    ``_national_discharge_coverage_rows``:
+
+    * ``source`` + ``cycle`` -- the national identity the catalog advertises.
+      The 3-hour stride runs from ``cycle``, clamped to the intersection window
+      ``[max(river_valid_time_start), min(river_valid_time_end)]`` over that
+      identity's runs, and the whole list fails closed to ``[]`` when any active
+      network has no display-ready run for it. Advertising an instant some basin
+      cannot render is exactly what the clamp and the fail-closed rule prevent.
+    * no arguments -- the pre-#2009 behaviour, preserved for the legacy
+      source-less callers: each active network's OVERALL latest run, intersected.
+
+    ``run_display_coverage`` may define the hourly grid only when its sample count
+    proves a complete segment × lead-time rectangle; incomplete or inconsistent
+    coverage fails closed with no advertised times. Selection happens BEFORE that
+    validation: the query now returns one row per (network, cycle), so validating
+    every returned row first would let a single malformed historical cycle blank
+    out the no-argument result -- and with it the catalog's ``metadata.valid_times``
+    -- which the pre-#2009 one-row-per-network shape never did.
     """
-    sample_limit = max(0, limit)
-    rows = (
-        session.execute(
-            text(
-                """
-                SELECT run_id, basin_version_id, river_network_version_id,
-                       segment_count, river_sample_count,
-                       river_valid_time_start, river_valid_time_end,
-                       min_lead_time_hours, max_lead_time_hours
-                FROM (
-                    SELECT h.run_id,
-                           h.basin_version_id,
-                           mi.river_network_version_id,
-                           rdc.segment_count,
-                           rdc.river_sample_count,
-                           rdc.river_valid_time_start,
-                           rdc.river_valid_time_end,
-                           rdc.min_lead_time_hours,
-                           rdc.max_lead_time_hours,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY mi.river_network_version_id
-                               ORDER BY h.cycle_time DESC, h.run_id DESC
-                           ) AS rn
-                    FROM hydro.hydro_run h
-                    JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
-                    JOIN hydro.run_display_coverage rdc
-                      ON rdc.run_id = h.run_id
-                     AND rdc.segment_count > 0
-                    WHERE h.status IN ('succeeded', 'parsed', 'published')
-                      AND mi.river_network_version_id IS NOT NULL
-                      AND mi.active_flag
-                ) ranked
-                WHERE rn = 1
-                ORDER BY river_network_version_id
-                """
-            ),
+    if (source is None) != (cycle is None):
+        raise ValueError(
+            "national_discharge_valid_times takes both `source` and `cycle` or neither: "
+            "half an identity has no defined window, and silently ignoring the half "
+            "given would serve one source's times under another's request."
         )
-        .mappings()
-        .all()
-    )
-    if not rows:
+    sample_limit = max(0, limit)
+    rows, active_network_total = _national_discharge_coverage_rows(session, source=source, cycle=cycle)
+
+    if cycle is not None:
+        # Intersection-scoped, like `national_discharge_cycles`: a cycle the
+        # catalog refuses to list must not get times from this endpoint either.
+        covered_networks = len({row.get("river_network_version_id") for row in rows})
+        if covered_networks != active_network_total:
+            return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
+        return _national_cycle_valid_times(rows, cycle=cycle, limit=sample_limit)
+
+    latest_by_network: dict[Any, Mapping[str, Any]] = {}
+    for row in rows:
+        network = row.get("river_network_version_id")
+        current = latest_by_network.get(network)
+        if current is None or _national_run_rank(row) > _national_run_rank(current):
+            latest_by_network[network] = row
+    if not latest_by_network:
         return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
 
     coverage: list[tuple[datetime, datetime]] = []
-    for row in rows:
-        start = _coverage_datetime(row.get("river_valid_time_start"))
-        end = _coverage_datetime(row.get("river_valid_time_end"))
-        segment_count = int(row.get("segment_count") or 0)
-        sample_count = int(row.get("river_sample_count") or 0)
-        min_lead = row.get("min_lead_time_hours")
-        max_lead = row.get("max_lead_time_hours")
-        if start is None or end is None or segment_count <= 0 or min_lead is None or max_lead is None:
+    for row in latest_by_network.values():
+        window = _national_coverage_window(row)
+        if window is None:
             return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
-        lead_count = int(max_lead) - int(min_lead) + 1
-        if lead_count <= 0 or sample_count != segment_count * lead_count:
-            return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
-        if end < start or int((end - start).total_seconds()) != (lead_count - 1) * 3600:
-            return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)
-        coverage.append((start, end))
+        coverage.append(window)
 
     common_start = max(start for start, _ in coverage)
     common_end = min(end for _, end in coverage)
@@ -1804,6 +1821,234 @@ def national_discharge_valid_times(
         limit=sample_limit,
         observed_count=observed_count,
         truncated=observed_count > sample_limit,
+    )
+
+
+def national_discharge_cycles(
+    session: Session,
+    source: str,
+    *,
+    limit: int = MVT_VALID_TIME_SAMPLE_LIMIT,
+) -> dict[str, Any]:
+    """Cycles of ``source`` that EVERY active river network can render, newest first.
+
+    Intersection, fail-closed: a cycle is listed only when the number of active
+    networks holding a display-ready run for it equals the number of active
+    networks that exist. One network without a run for the source at all
+    therefore empties the whole list -- the alternative, a union, would paint a
+    national map with colourless basins that look like "no flow" rather than
+    "no data".
+
+    ``valid_time_start`` / ``valid_time_end`` are the FIRST and LAST entries of
+    that cycle's clamped 3-hour list, produced by the same function
+    ``valid-times?source=&cycle=`` returns, so the two endpoints cannot disagree.
+    ``run_display_coverage`` is an hourly grid, so a coverage bound need not fall
+    on the 3-hour stride at all; a cycle whose clamped window holds no stride
+    instant is not listed.
+
+    ``source`` is the lower-case route enum value (`gfs`/`ifs`); the SQL matches
+    it against ``lower(h.source_id)`` because production stores `gfs` and `IFS`.
+    """
+    sample_limit = max(0, limit)
+    rows, active_network_total = _national_discharge_coverage_rows(session, source=source)
+    rows_by_cycle: dict[datetime, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        cycle_time = _coverage_datetime(row.get("cycle_time"))
+        if cycle_time is None:
+            continue
+        rows_by_cycle.setdefault(cycle_time, []).append(row)
+
+    cycles: list[dict[str, str]] = []
+    for cycle_time in sorted(rows_by_cycle, reverse=True):
+        cycle_rows = rows_by_cycle[cycle_time]
+        covered_networks = len({row.get("river_network_version_id") for row in cycle_rows})
+        if covered_networks != active_network_total:
+            continue
+        discovery = _national_cycle_valid_times(cycle_rows, cycle=cycle_time, limit=sample_limit)
+        if not discovery.valid_times:
+            continue
+        cycles.append(
+            {
+                "cycle_time": _format_time(cycle_time),
+                "valid_time_start": discovery.valid_times[0],
+                "valid_time_end": discovery.valid_times[-1],
+            }
+        )
+    return {
+        "source": source,
+        "cycles": cycles,
+        "default_cycle": cycles[0]["cycle_time"] if cycles else None,
+    }
+
+
+def _national_discharge_coverage_rows(
+    session: Session,
+    *,
+    source: str | None = None,
+    cycle: datetime | None = None,
+) -> tuple[list[Mapping[str, Any]], int]:
+    """Display-ready national coverage rows, plus the number of active networks.
+
+    The single owner of the national discovery path's display-ready status
+    predicate: ``national_discharge_valid_times`` and ``national_discharge_cycles``
+    both read through here, so the two endpoints and the catalog cannot drift onto
+    different notions of "renderable".
+
+    One row per ``(river_network_version_id, cycle_time)`` -- the newest run of
+    that pair -- which answers both questions with one statement: the cycles list
+    needs every cycle of every network, and the no-argument valid-times branch
+    picks the newest cycle per network from the same rows in Python.
+
+    The active-network count comes from ``core.model_instance``, NOT from the
+    returned rows. A network with zero display-ready runs contributes no row and
+    is precisely the case that must fail the intersection closed; counting the
+    rows would make it invisible and turn the intersection into a union over
+    whoever happens to have data.
+
+    ``source`` / ``cycle`` are NULL-guarded in the ``CAST(:x AS type) IS NULL OR``
+    form the three tile-side run-selection sites use (see the module header for
+    why ``CAST``, never ``:source::text``), so the no-argument callers bind both
+    as ``None`` and every candidate run stays eligible.
+    """
+    active_networks = (
+        session.execute(
+            text(
+                """
+                SELECT DISTINCT mi.river_network_version_id
+                FROM core.model_instance mi
+                WHERE mi.active_flag
+                  AND mi.river_network_version_id IS NOT NULL
+                ORDER BY mi.river_network_version_id
+                """
+            )
+        )
+        .mappings()
+        .all()
+    )
+    active_network_total = len({row["river_network_version_id"] for row in active_networks})
+    rows = (
+        session.execute(
+            text(
+                """
+                SELECT run_id, basin_version_id, river_network_version_id, cycle_time,
+                       segment_count, river_sample_count,
+                       river_valid_time_start, river_valid_time_end,
+                       min_lead_time_hours, max_lead_time_hours
+                FROM (
+                    SELECT h.run_id,
+                           h.basin_version_id,
+                           mi.river_network_version_id,
+                           h.cycle_time,
+                           rdc.segment_count,
+                           rdc.river_sample_count,
+                           rdc.river_valid_time_start,
+                           rdc.river_valid_time_end,
+                           rdc.min_lead_time_hours,
+                           rdc.max_lead_time_hours,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY mi.river_network_version_id, h.cycle_time
+                               ORDER BY h.run_id DESC
+                           ) AS rn
+                    FROM hydro.hydro_run h
+                    JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+                    JOIN hydro.run_display_coverage rdc
+                      ON rdc.run_id = h.run_id
+                     AND rdc.segment_count > 0
+                    WHERE h.status IN ('succeeded', 'parsed', 'published')
+                      AND mi.river_network_version_id IS NOT NULL
+                      AND mi.active_flag
+                      AND (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)
+                      AND (CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)
+                ) ranked
+                WHERE rn = 1
+                ORDER BY river_network_version_id, cycle_time DESC
+                """
+            ),
+            {"source": source, "cycle": cycle},
+        )
+        .mappings()
+        .all()
+    )
+    return list(rows), active_network_total
+
+
+def _national_run_rank(row: Mapping[str, Any]) -> tuple[datetime, str]:
+    """Newest-run ordering within one network: cycle first, run_id as tiebreak.
+
+    The pre-#2009 SQL decided this with ``ORDER BY h.cycle_time DESC, h.run_id DESC``
+    inside the window function. Now that the window partitions by cycle as well,
+    the across-cycle half of that ordering moves here and must stay identical.
+    """
+    cycle_time = _coverage_datetime(row.get("cycle_time"))
+    return (cycle_time or datetime.min.replace(tzinfo=UTC), str(row.get("run_id") or ""))
+
+
+def _national_coverage_window(row: Mapping[str, Any]) -> tuple[datetime, datetime] | None:
+    """The row's hourly coverage rectangle, or ``None`` when it does not prove one."""
+    start = _coverage_datetime(row.get("river_valid_time_start"))
+    end = _coverage_datetime(row.get("river_valid_time_end"))
+    segment_count = int(row.get("segment_count") or 0)
+    sample_count = int(row.get("river_sample_count") or 0)
+    min_lead = row.get("min_lead_time_hours")
+    max_lead = row.get("max_lead_time_hours")
+    if start is None or end is None or segment_count <= 0 or min_lead is None or max_lead is None:
+        return None
+    lead_count = int(max_lead) - int(min_lead) + 1
+    if lead_count <= 0 or sample_count != segment_count * lead_count:
+        return None
+    if end < start or int((end - start).total_seconds()) != (lead_count - 1) * 3600:
+        return None
+    return (start, end)
+
+
+def _national_cycle_valid_times(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    cycle: datetime,
+    limit: int,
+) -> ValidTimeDiscovery:
+    """The 3-hour stride from ``cycle``, clamped to the rows' intersection window.
+
+    Truncation keeps the FIRST ``limit`` entries, deliberately unlike the
+    no-argument branch's tail-keeping ``retained_start`` rule: this list's
+    contract is that it starts at the beginning of the covered window, and a
+    tail-keeping rule would silently drop that beginning once a horizon longer
+    than ``MVT_VALID_TIME_SAMPLE_LIMIT`` × 3 h exists. A 168 h horizon yields 57
+    entries and never truncates today; the rule is pinned before it can be
+    decided by accident.
+    """
+    windows: list[tuple[datetime, datetime]] = []
+    for row in rows:
+        window = _national_coverage_window(row)
+        if window is None:
+            return ValidTimeDiscovery(valid_times=[], limit=limit, observed_count=0, truncated=False)
+        windows.append(window)
+    if not windows:
+        return ValidTimeDiscovery(valid_times=[], limit=limit, observed_count=0, truncated=False)
+
+    window_start = max(cycle, max(start for start, _ in windows))
+    window_end = min(end for _, end in windows)
+    step_seconds = NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS * 3600
+    if window_end < window_start:
+        return ValidTimeDiscovery(valid_times=[], limit=limit, observed_count=0, truncated=False)
+    # Stride indices relative to the cycle: the first one at or after the covered
+    # start (ceiling division), the last one at or before the covered end.
+    first_index = -(-int((window_start - cycle).total_seconds()) // step_seconds)
+    last_index = int((window_end - cycle).total_seconds()) // step_seconds
+    if last_index < first_index:
+        return ValidTimeDiscovery(valid_times=[], limit=limit, observed_count=0, truncated=False)
+
+    observed_count = last_index - first_index + 1
+    retained_count = min(limit, observed_count)
+    valid_times = [
+        _format_time(cycle + timedelta(seconds=step_seconds * (first_index + offset)))
+        for offset in range(retained_count)
+    ]
+    return ValidTimeDiscovery(
+        valid_times=valid_times,
+        limit=limit,
+        observed_count=observed_count,
+        truncated=observed_count > limit,
     )
 
 
