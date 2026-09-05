@@ -536,12 +536,73 @@ def outer_predicates(sql: str) -> str:
     return _WHITESPACE.sub(" ", strip_comments(strip_scalar_subqueries(sql))).strip()
 
 
+# PostgreSQL lower-folds unquoted identifiers. `re.ASCII` keeps Python's
+# case-insensitive matching from broadening that bare-identifier domain beyond
+# the module's ASCII unquoted-token subset.
+_UNQUOTED_IDENTIFIER_FLAGS = re.IGNORECASE | re.ASCII
+
+
+def _outer_code_for_text_identity_columns(sql: str) -> str:
+    """Outer-query text for unquoted text-identity matching, with data blanked.
+
+    :func:`outer_predicates` first removes only comparison-position scalar
+    sub-selects, keeping the authority table's ``WHERE run_id`` out of the fact
+    scan. The shared scanner then blanks literals and comments; complete
+    double-quoted identifier runs are blanked only for this column-comparison
+    seam, because ``"rt.variable"`` is one identifier rather than an unquoted
+    alias/column pair. Quoted identifiers remain code everywhere else.
+    """
+    outer = _blank_non_code(outer_predicates(sql))
+    masked = list(outer)
+    index = 0
+    while index < len(outer):
+        if outer[index] != '"':
+            index += 1
+            continue
+        stop, closed = _scan_quoted_span(outer, index, '"')
+        if closed:
+            masked[index:stop] = " " * (stop - index)
+        index = stop
+    return "".join(masked)
+
+
+def _text_identity_columns_for_references(
+    sql: str,
+    aliases: frozenset[str],
+    *,
+    has_unaliased_reference: bool,
+) -> set[str]:
+    """Text identity columns matched through the supplied unquoted references."""
+    outer = _outer_code_for_text_identity_columns(sql)
+    found: set[str] = set()
+    for column in TEXT_IDENTITY_COLUMNS:
+        if any(
+            re.search(
+                rf"\b{re.escape(alias)}\.{re.escape(column)}\b",
+                outer,
+                flags=_UNQUOTED_IDENTIFIER_FLAGS,
+            )
+            is not None
+            for alias in aliases
+        ):
+            found.add(column)
+        if has_unaliased_reference and re.search(
+            rf"(?<![.\w]){re.escape(column)}\b\s*(=|<>|!=|\bIN\b|\bLIKE\b|=\s*ANY)",
+            outer,
+            flags=_UNQUOTED_IDENTIFIER_FLAGS,
+        ) is not None:
+            found.add(column)
+    return found
+
+
 def text_fact_columns(sql: str, alias: str) -> set[str]:
     """Text identity columns of the fact table referenced by the outer query.
 
-    ``\\b`` after the column name is load-bearing: it keeps ``ts.variable`` from
-    matching ``ts.variable_e`` (and ``ts.unit`` from ``ts.unit_e``), which would
-    make every pin unsatisfiable rather than discriminating.
+    Unquoted ``alias`` and column tokens follow PostgreSQL's ASCII lower-folding
+    rule. ``\\b`` after the column name is load-bearing: it keeps
+    ``ts.variable`` from matching ``ts.variable_e`` (and ``ts.unit`` from
+    ``ts.unit_e``), which would make every pin unsatisfiable rather than
+    discriminating.
 
     Deliberately NOT guarded by :func:`_assert_modelled_reference_forms`, and
     therefore NOT the answer to "does this statement predicate on the fact
@@ -557,12 +618,11 @@ def text_fact_columns(sql: str, alias: str) -> set[str]:
     that this helper answers for an unmodelled reference form while
     :func:`fact_table_text_identity_columns` refuses the same statement.
     """
-    outer = outer_predicates(sql)
-    return {
-        column
-        for column in TEXT_IDENTITY_COLUMNS
-        if re.search(rf"\b{re.escape(alias)}\.{column}\b", outer) is not None
-    }
+    return _text_identity_columns_for_references(
+        sql,
+        frozenset({alias}),
+        has_unaliased_reference=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +1010,7 @@ def fact_table_attribution(sql: str) -> FactTableAttribution:
         if alias is None:
             unaliased = True
         else:
-            aliases.add(alias)
+            aliases.add(alias.lower())
     return FactTableAttribution(frozenset(aliases), unaliased, count)
 
 
@@ -1227,21 +1287,11 @@ def fact_table_text_identity_columns(sql: str, *, entry: str = "<template>") -> 
     """
     _assert_modelled_reference_forms(sql, entry)
     attribution = fact_table_attribution(sql)
-    outer = outer_predicates(sql)
-    found: set[str] = set()
-    for alias in attribution.aliases:
-        found |= {
-            column
-            for column in TEXT_IDENTITY_COLUMNS
-            if re.search(rf"\b{re.escape(alias)}\.{column}\b", outer) is not None
-        }
-    if attribution.has_unaliased_reference:
-        found |= {
-            column
-            for column in TEXT_IDENTITY_COLUMNS
-            if re.search(rf"(?<![.\w]){column}\s*(=|<>|!=|\bIN\b|\bLIKE\b|=\s*ANY)", outer) is not None
-        }
-    return found
+    return _text_identity_columns_for_references(
+        sql,
+        attribution.aliases,
+        has_unaliased_reference=attribution.has_unaliased_reference,
+    )
 
 
 # ---------------------------------------------------------------------------

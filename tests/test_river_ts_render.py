@@ -818,6 +818,195 @@ def test_text_fact_columns_answers_about_the_alias_it_is_given_without_the_form_
         fact_table_text_identity_columns(sql, entry="single-alias")
 
 
+# ---------------------------------------------------------------------------
+# PostgreSQL unquoted identifier case folding (#2053)
+# ---------------------------------------------------------------------------
+
+_CASE_FOLDING_TEMPLATE = f"""\
+SELECT RT.value
+FROM hydro.river_timeseries RT
+WHERE RT.run_key = %(run_key)s
+  {MARKER}
+  AND RT.run_id = %(run_id)s
+  AND rt.variable = 'q_down'
+"""
+
+
+def test_mixed_case_unquoted_aliases_are_canonicalised_before_attribution() -> None:
+    attribution = fact_table_attribution(_CASE_FOLDING_TEMPLATE)
+
+    assert attribution.aliases == frozenset({"rt"})
+    assert fact_table_text_identity_columns(_CASE_FOLDING_TEMPLATE, entry="mixed-case") == {"run_id", "variable"}
+
+
+def test_two_case_variants_of_the_same_unquoted_alias_are_one_attribution_member() -> None:
+    sql = (
+        "SELECT RT.value FROM hydro.river_timeseries RT "
+        "UNION ALL SELECT rt.value FROM hydro.river_timeseries rt"
+    )
+
+    attribution = fact_table_attribution(sql)
+
+    assert attribution.aliases == frozenset({"rt"})
+    assert attribution.reference_count == 2
+
+
+def test_text_fact_columns_folds_the_unquoted_alias_it_is_given() -> None:
+    upper = text_fact_columns(_CASE_FOLDING_TEMPLATE, "RT")
+    lower = text_fact_columns(_CASE_FOLDING_TEMPLATE, "rt")
+
+    assert upper == lower
+    assert upper == {"run_id", "variable"}
+
+
+def test_a_mixed_case_unmarked_text_predicate_is_refused_in_narrow_render() -> None:
+    with pytest.raises(RiverTemplateError) as raised:
+        render_river_ts_sql(_CASE_FOLDING_TEMPLATE, "narrow", entry="mixed-case")
+
+    assert "mixed-case" in str(raised.value)
+    assert "text identity column(s) ['variable']" in str(raised.value)
+    assert "unmodelled" not in str(raised.value)
+
+
+def test_an_uppercase_qualified_text_identity_column_is_attributed_and_narrow_refused() -> None:
+    sql = "SELECT RT.value FROM hydro.river_timeseries RT WHERE RT.VARIABLE = :variable AND RT.run_key = :run_key"
+
+    assert fact_table_text_identity_columns(sql, entry="uppercase-qualified") == {"variable"}
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
+        render_river_ts_sql(sql, "narrow", entry="uppercase-qualified")
+
+
+def test_an_uppercase_unaliased_text_identity_column_is_attributed_and_narrow_refused() -> None:
+    sql = "SELECT value FROM hydro.river_timeseries WHERE VARIABLE = :variable AND run_key = :run_key"
+
+    assert fact_table_text_identity_columns(sql, entry="uppercase-unaliased") == {"variable"}
+    with pytest.raises(RiverTemplateError, match=r"text identity column\(s\) \['variable'\]"):
+        render_river_ts_sql(sql, "narrow", entry="uppercase-unaliased")
+
+
+@pytest.mark.parametrize(
+    ("label", "alias", "column"),
+    [
+        ("all-lower", "rt", "variable"),
+        ("all-uppercase", "RT", "VARIABLE"),
+    ],
+)
+def test_all_lower_and_all_upper_unquoted_fact_tokens_have_coherent_attribution(
+    label: str, alias: str, column: str
+) -> None:
+    sql = f"SELECT {alias}.value FROM hydro.river_timeseries {alias} WHERE {alias}.{column} = :variable"
+
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    assert fact_table_text_identity_columns(sql, entry=label) == {"variable"}
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "plain-literal",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.note = 'it''s rt.variable = x' AND rt.run_key = :run_key",
+        ),
+        (
+            "uppercase-plain-literal",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.note = 'RT.VARIABLE = X' AND rt.run_key = :run_key",
+        ),
+        (
+            "upper-escape-literal",
+            r"SELECT E'a\' RT.VARIABLE = x' AS note, rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = :run_key",
+        ),
+        (
+            "lower-escape-literal",
+            r"SELECT e'a\' rt.variable = x' AS note, rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = :run_key",
+        ),
+        (
+            "line-comment",
+            "SELECT rt.value -- RT.VARIABLE\nFROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+        (
+            "nested-block-comment",
+            "SELECT rt.value /* outer /* RT.VARIABLE */ tail */ "
+            "FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+        (
+            "authority-subquery",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = (SELECT run_key FROM hydro.hydro_run WHERE RUN_ID = :run_id)",
+        ),
+    ],
+)
+def test_case_folded_matching_ignores_non_code_and_authority_subqueries(label: str, sql: str) -> None:
+    assert fact_table_text_identity_columns(sql, entry=label) == set()
+    assert text_fact_columns(sql, "RT") == set()
+
+
+@pytest.mark.parametrize("column", ["VARIABLE_E", "UNIT_E", "QUALITY_FLAG_E"])
+def test_case_folded_matching_keeps_the_text_identity_column_trailing_boundary(column: str) -> None:
+    sql = f"SELECT RT.value FROM hydro.river_timeseries RT WHERE RT.{column} = :value"
+
+    assert fact_table_text_identity_columns(sql, entry=column) == set()
+    assert text_fact_columns(sql, "RT") == set()
+
+
+def test_case_folded_matching_does_not_attribute_another_relations_text_column() -> None:
+    sql = (
+        "SELECT RT.value FROM hydro.river_timeseries RT JOIN core.river_segment RS "
+        "ON RS.river_segment_key = RT.river_segment_key WHERE RS.VARIABLE = :variable"
+    )
+
+    assert fact_table_text_identity_columns(sql, entry="other-alias") == set()
+    assert text_fact_columns(sql, "RT") == set()
+
+
+@pytest.mark.parametrize("quoted_identifier", ['"rt.variable"', '"rt.variable""suffix"'])
+def test_a_complete_quoted_identifier_body_is_not_an_unquoted_alias_column_pair(quoted_identifier: str) -> None:
+    sql = f"SELECT {quoted_identifier}, rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key"
+
+    assert fact_table_text_identity_columns(sql, entry="quoted-body") == set()
+    assert text_fact_columns(sql, "rt") == set()
+
+
+@pytest.mark.parametrize("quoted_column", ['rt."variable"', '"rt"."variable"'])
+def test_qualified_quoted_columns_keep_their_existing_unattributed_answer(quoted_column: str) -> None:
+    sql = f"SELECT rt.value FROM hydro.river_timeseries rt WHERE {quoted_column} = :variable AND rt.run_key = :run_key"
+
+    assert fact_table_text_identity_columns(sql, entry="quoted-column") == set()
+    assert text_fact_columns(sql, "rt") == set()
+    assert render_river_ts_sql(sql, "narrow", entry="quoted-column").sql == sql
+
+
+@pytest.mark.parametrize("reference", ['hydro.river_timeseries AS "r"', 'hydro.river_timeseries "r"'])
+def test_case_folding_does_not_change_the_quoted_fact_alias_refusal(reference: str) -> None:
+    sql = f'SELECT "r".value FROM {reference} WHERE "r".variable = :variable'
+
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
+            render_river_ts_sql(sql, store, entry="quoted-fact-alias")
+    with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
+        fact_table_text_identity_columns(sql, entry="quoted-fact-alias")
+
+
+def test_an_uppercase_marked_aid_remains_a_fail_closed_mis_shape() -> None:
+    template = f"""\
+SELECT RT.value
+FROM hydro.river_timeseries RT
+WHERE RT.run_key = :run_key
+  {MARKER}
+  AND RT.RUN_ID = :run_id
+"""
+
+    assert aid_conjunct("AND RT.RUN_ID = :run_id") is None
+    with pytest.raises(RiverTemplateError) as raised:
+        render_river_ts_sql(template, "narrow", entry="uppercase-marked-aid")
+
+    assert "uppercase-marked-aid" in str(raised.value)
+    assert "not exactly one aid conjunct" in str(raised.value)
+
+
 @pytest.mark.parametrize("prefix", ["U&", "u&"])
 @pytest.mark.parametrize(
     ("label", "quoted"),
