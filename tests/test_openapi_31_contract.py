@@ -17,7 +17,14 @@ from apps.api.routes import pipeline as pipeline_routes
 # Layer.metadata node is the one type+allOf composition; the rest are ordinary
 # scalar/array/object typed nodes. The exact count and the composed-node identity
 # are pinned so a regression in either direction reddens.
-BASELINE_NULLABLE_COUNT = 111
+#
+# 111 -> 113 with #2009: `LayerMetadata.default_cycle` and
+# `DischargeCycles.default_cycle` are two genuinely nullable new API fields (the
+# fail-closed empty intersection is spelled `null`, not an absent key), so the
+# census of nullable nodes moves by exactly two. The count is a coverage
+# tripwire on the finalizer, not a freeze on the API surface: the assertions
+# below still prove every one of them is rewritten into a 3.1 type union.
+BASELINE_NULLABLE_COUNT = 113
 COMPOSED_NULLABLE_PATH = ("components", "schemas", "Layer", "properties", "metadata")
 
 # The exact pinned openapi-typescript package the generated-type assertions run

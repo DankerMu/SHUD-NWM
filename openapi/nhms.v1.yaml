@@ -1992,6 +1992,51 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/layers/discharge/cycles:
+    get:
+      tags:
+      - hydro-display
+      summary: List Discharge Cycles
+      description: 'Cycles of `source` that EVERY active river network can render,
+        newest first.
+
+
+        Fail-closed: one active network without a display-ready run for `source`
+
+        empties the list and `default_cycle`. `source` is rejected by FastAPI itself
+
+        before this body runs, so a bad or missing one costs no SQL.'
+      operationId: list_discharge_cycles_api_v1_layers_discharge_cycles_get
+      parameters:
+      - name: source
+        in: query
+        required: true
+        schema:
+          enum:
+          - gfs
+          - ifs
+          type: string
+          title: Source
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/DischargeCycles'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/layers/{layer_id}/valid-times:
     get:
       tags:
@@ -2013,6 +2058,26 @@ paths:
           - type: string
           - type: 'null'
           title: Run Id
+      - name: source
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - enum:
+            - gfs
+            - ifs
+            type: string
+          - type: 'null'
+          title: Source
+      - name: cycle
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            format: date-time
+          - type: 'null'
+          title: Cycle
       responses:
         '200':
           description: Successful Response
@@ -4119,6 +4184,20 @@ components:
             including run_id, basin_version_id, river_network_version_id, and bounded
             source_version/run revision when advertised by required_placeholders.
           additionalProperties: true
+        default_source:
+          type: string
+          enum:
+          - gfs
+          - ifs
+        default_cycle:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        cycles_url_template:
+          type: string
+        valid_times_url_template:
+          type: string
         source_generation:
           type:
           - string
@@ -4192,6 +4271,46 @@ components:
           type: integer
         truncated:
           type: boolean
+    DischargeCycles:
+      type: object
+      required:
+      - source
+      - cycles
+      - default_cycle
+      properties:
+        source:
+          type: string
+          enum:
+          - gfs
+          - ifs
+        cycles:
+          type: array
+          description: Cycles every active river network has a display-ready run for,
+            newest first. valid_time_start/valid_time_end are the first and last entries
+            of that cycle's 3-hour valid-time list, the same values GET /api/v1/layers/discharge/valid-times
+            returns for it.
+          items:
+            type: object
+            required:
+            - cycle_time
+            - valid_time_start
+            - valid_time_end
+            properties:
+              cycle_time:
+                type: string
+                format: date-time
+              valid_time_start:
+                type: string
+                format: date-time
+              valid_time_end:
+                type: string
+                format: date-time
+        default_cycle:
+          type:
+          - string
+          - 'null'
+          format: date-time
+          description: Newest intersected cycle; null when no cycle covers every network.
     Basin:
       type: object
       required:
