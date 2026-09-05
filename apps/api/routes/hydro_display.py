@@ -1162,8 +1162,8 @@ def _default_layer_catalog(
             # The two calls above take separate `read committed` snapshots, so the
             # intersection can empty out between them -- newly ACTIVATING a network
             # with no display-ready run for `default_cycle`, or a covered run's
-            # status / coverage row being rewritten. (Deactivation cannot do it: it
-            # removes the network from both sides of the set comparison.) The
+            # status / coverage row being rewritten. Deactivation empties it too (fail-closed),
+            # intra-call: statement 1's active set still holds it, statement 2 drops its rows. The
             # contract spells the empty intersection
             # `default_cycle = null` AND `valid_times = []` together;
             # `(C, [])` advertises a cycle whose timeline is empty and is forbidden.

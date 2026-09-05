@@ -126,7 +126,7 @@ def test_finalizer_replaces_all_nullables_and_keeps_dialect() -> None:
         ]
     }
     assert len(_nullable_paths(finalized)) == 0
-    # The 110 ordinary nodes become scalar type unions [T, "null"]; the composed
+    # The 112 ordinary nodes become scalar type unions [T, "null"]; the composed
     # node becomes an anyOf union. FastAPI's own anyOf-null unions stay untouched
     # (they were never nullable-keyword nodes, so they keep their shape).
     assert _scalar_type_union_null_count(finalized) == BASELINE_NULLABLE_COUNT - 1

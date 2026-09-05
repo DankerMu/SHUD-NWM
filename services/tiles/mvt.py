@@ -1819,8 +1819,8 @@ def national_discharge_valid_times(
     if cycle is not None:
         # Intersection-scoped, like `national_discharge_cycles`: a cycle the
         # catalog refuses to list must not get times from this endpoint either.
-        # SETS, not cardinalities -- see `national_discharge_cycles` for the
-        # activation race equal counts cannot see.
+        # SETS, not cardinalities, the second site of the `national_discharge_cycles`
+        # rule: equal counts with different members is the fail-open case (matrix 40b).
         covered_networks = frozenset(row["river_network_version_id"] for row in rows)
         if covered_networks != active_networks:
             return ValidTimeDiscovery(valid_times=[], limit=sample_limit, observed_count=0, truncated=False)

@@ -94,7 +94,7 @@ GET /api/v1/pipeline/status?source=&cycle_time=
 ```http
 GET /api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf
 GET /api/v1/tiles/hydro-national/{source}/{cycle}/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # canonical discharge layer URL (#2007/#2009); the template /api/v1/layers advertises
-GET /api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # legacy source-less alias of the above (was canonical per PR #602); same bytes, run selection unbound; runtime-only, not in the public static OpenAPI; still issued by scripts/node27_mvt_prewarm.py:69
+GET /api/v1/tiles/hydro-national/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # legacy source-less alias of the above (was canonical per PR #602); same bytes, run selection unbound; also in openapi/nhms.v1.yaml:2308 (present on master since #2007) and pinned by tests/test_openapi_drift.py::test_static_openapi_matches_runtime_schema; still issued by scripts/node27_mvt_prewarm.py:69
 GET /api/v1/tiles/hydro/{run_id}/{variable}/{valid_time}/{z}/{x}/{y}.pbf  # direct-deeplink only; not surfaced via /api/v1/layers discharge entry — see openspec/specs/mvt-tile-contract/spec.md
 GET /api/v1/tiles/flood-return-period?run_id=&duration=1h&valid_time=&bbox=&return_period=
 GET /api/v1/tiles/met-stations/{basin_version_id}/{z}/{x}/{y}.pbf

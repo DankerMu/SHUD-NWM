@@ -1409,7 +1409,7 @@ _INSTANT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 # `national_discharge_cycles` bounds its scan at `now() - LOOKBACK`, but the cases
 # above and below are about intersection, ordering and spelling, and they express
 # their expectations as FIXED instants. Left alone they would pass today and start
-# failing the day wall-clock time walks past `_CYCLE + 14 days` -- a suite that
+# failing the day wall-clock time walks past `_CYCLE + 12 days` -- a suite that
 # rots on a calendar, not on a code change. So the window is widened for the whole
 # module and the three cases that are actually ABOUT the bound put the real value
 # back. `national_discharge_cycles` reads the module global on every call, so this
@@ -1556,11 +1556,11 @@ def test_national_cycle_lookback_leaves_a_day_of_precip_mirror_margin() -> None:
     the right constant to pin against even though the discharge tiles' own
     timeseries lane is wider.
 
-    Raising `NODE27_RAW_RETENTION_DAYS` keeps this green (the copyback spec's own
-    remedy); lowering it below 13 goes red, which is the intended alarm. The
-    literal is pinned alongside, but the inequality is the load-bearing half --
-    round 1 asserted `== 14` under a name claiming a coupling it never checked,
-    and that is how a value violating the requirement passed a green test.
+    Raising the DEPLOYED retention (`NODE27_RAW_RETENTION_DAYS` / `--retention-days`) is the
+    copyback spec's own remedy, but this test does not observe it: what it pins is the SOURCE
+    default `DEFAULT_RETENTION_DAYS` (`scripts/node27_raw_retention.py:33`), and lowering THAT
+    below 13 is what goes red. The inequality is the load-bearing half -- round 1 asserted
+    `== 14` under a name claiming a coupling it never checked, and that green test passed.
     """
     assert _REAL_CYCLE_LOOKBACK_DAYS <= DEFAULT_RETENTION_DAYS - 1
     assert _REAL_CYCLE_LOOKBACK_DAYS == 12
@@ -2435,3 +2435,226 @@ def test_national_discovery_routes_reject_half_formed_selectors_before_any_sql(
 
     assert response.status_code == 422, response.text
     assert response.json()["error"]["code"] == "VALIDATION_ERROR", response.text
+
+
+# ---------------------------------------------------------------------------
+# Post-gate site-rule oracles (#2009 review round 4). Appended at the END of the
+# file on purpose: every line-number citation in the invariant matrix and in the
+# mutation driver anchors on the cases above, so inserting between them would
+# invalidate the fixture rather than extend it.
+# ---------------------------------------------------------------------------
+
+
+def test_national_per_cycle_valid_times_fail_closed_when_a_network_activates_between_the_two_statements() -> None:
+    """The per-cycle twin of `test_national_cycles_fail_closed_when_a_network_activates...`.
+
+    Row 40's oracle only ever touched the `national_discharge_cycles` site; this
+    one drives the SECOND set comparison, the one inside
+    `national_discharge_valid_times`' per-cycle branch. Same race, same shape:
+    equal cardinality, different membership. Statement 1 sees the active set
+    `{rn-b, rn-c1, rn-c2}`; `rn-a` is activated with a display-ready run for the
+    requested cycle, so statement 2 returns `{rn-a, rn-c1, rn-c2}` while `rn-b`
+    never had that cycle at all. `3 == 3`, so a cardinality comparison would
+    serve `rn-b`'s basins a timeline they cannot render.
+    """
+    session = _NationalDiscoverySession(
+        _full_coverage_rows(_CYCLE, networks=("rn-a", "rn-c1", "rn-c2")),
+        active_networks=["rn-b", "rn-c1", "rn-c2"],
+    )
+
+    result = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    # Non-vacuity: the two statements really do disagree AT EQUAL SIZE, so a
+    # cardinality comparison would pass where the set comparison fails.
+    assert len(session.active_networks) == 3
+    assert len({row["river_network_version_id"] for row in session.rows}) == 3
+    assert result.valid_times == []
+    assert result.observed_count == 0
+    assert result.truncated is False
+
+
+def test_no_argument_national_valid_times_are_empty_with_no_coverage_rows() -> None:
+    """Zero coverage rows on the no-argument branch: `[]`, not a crash.
+
+    Every other no-argument case in this file feeds the branch at least one row,
+    so the `if not latest_by_network` guard had no oracle: deleting it lets the
+    empty `coverage` list reach `max(start for start, _ in coverage)`, which
+    raises `ValueError` and turns a fail-closed empty timeline into an HTTP 500.
+    """
+    session = _NationalDiscoverySession([], active_networks=["rn-a", "rn-b"])
+
+    discovery = national_discharge_valid_times(session)
+
+    assert discovery.valid_times == []
+    assert discovery.observed_count == 0
+
+
+def test_discharge_routes_pass_ifs_through_to_the_coverage_bind(monkeypatch: Any) -> None:
+    """`?source=ifs` must reach the SQL bind on BOTH routes, not a `gfs` literal.
+
+    The fixture separates the two sources by CYCLE (`gfs` at `_CYCLE`, `ifs` at
+    `_PREVIOUS_CYCLE`), so any call site that hardcodes `gfs` -- the route's own
+    `source=` argument, the response echo, or the helper's forward into
+    `_national_discharge_coverage_rows` -- answers for the wrong cycle.
+
+    The helper-level NEGATIVE half at the end is the only oracle for the
+    forward at `services/tiles/mvt.py`'s per-cycle `_national_discharge_coverage_rows`
+    call: dropping `source=source` binds `None`, which both the SQL and this
+    file's fake read as "no filter", so the `ifs` half stays green while `gfs`
+    at `_PREVIOUS_CYCLE` starts answering with the `ifs` rows.
+    """
+    rows = _full_coverage_rows(_CYCLE)
+    rows.extend(
+        _coverage_row(
+            network=network,
+            cycle=_PREVIOUS_CYCLE,
+            start=_PREVIOUS_CYCLE,
+            end=_PREVIOUS_CYCLE + timedelta(hours=168),
+            source="ifs",
+            run_id=f"run-ifs-{network}",
+        )
+        for network in ("rn-a", "rn-b", "rn-c")
+    )
+    session = _NationalDiscoverySession(rows)
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            cycles_response = client.get("/api/v1/layers/discharge/cycles", params={"source": "ifs"})
+            ifs_times = client.get(
+                "/api/v1/layers/discharge/valid-times",
+                params={"source": "ifs", "cycle": canonical_mvt_time(_PREVIOUS_CYCLE)},
+            )
+            gfs_times = client.get(
+                "/api/v1/layers/discharge/valid-times",
+                params={"source": "gfs", "cycle": canonical_mvt_time(_PREVIOUS_CYCLE)},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert cycles_response.status_code == 200, cycles_response.text
+    body = cycles_response.json()["data"]
+    assert body["source"] == "ifs"
+    assert [entry["cycle_time"] for entry in body["cycles"]] == [canonical_mvt_time(_PREVIOUS_CYCLE)]
+    assert body["default_cycle"] == canonical_mvt_time(_PREVIOUS_CYCLE)
+
+    assert ifs_times.status_code == 200, ifs_times.text
+    assert len(ifs_times.json()["data"]["valid_times"]) == 57
+    assert gfs_times.status_code == 200, gfs_times.text
+    assert gfs_times.json()["data"]["valid_times"] == []
+
+    helper_ifs = national_discharge_valid_times(session, source="ifs", cycle=_PREVIOUS_CYCLE)
+    helper_gfs = national_discharge_valid_times(session, source="gfs", cycle=_PREVIOUS_CYCLE)
+    assert helper_ifs.valid_times
+    assert helper_gfs.valid_times == []
+    assert helper_gfs.observed_count == 0
+
+
+def test_national_per_cycle_valid_times_are_not_truncated_when_observed_equals_the_limit() -> None:
+    """`truncated` is `observed > limit`, strictly: a full-but-not-over list is complete.
+
+    Today's cases sit at 57 < 100 or 57 > 5, so both spellings agree on them and
+    `>=` would ship a list that IS the whole window while telling the frontend
+    there is more behind it.
+    """
+    session = _NationalDiscoverySession(
+        [
+            _coverage_row(network=network, cycle=_CYCLE, start=_CYCLE, end=_CYCLE + timedelta(hours=12))
+            for network in ("rn-a", "rn-b", "rn-c")
+        ]
+    )
+
+    discovery = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE, limit=5)
+
+    assert len(discovery.valid_times) == 5
+    assert discovery.observed_count == 5
+    assert discovery.truncated is False
+
+
+def test_national_per_cycle_valid_times_clamp_an_off_grid_window_inward() -> None:
+    """Both clamp ends round INWARD: an advertised instant must be inside the coverage.
+
+    `run_display_coverage` is an hourly grid, so a window can start and end off
+    the 3-hour stride. `C+4h … C+97h` has its first stride instant at `C+6h` and
+    its last at `C+96h`; rounding the start down would advertise `C+3h` (before
+    any basin has data) and rounding the end up would advertise `C+99h` (after
+    the earliest coverage end).
+    """
+    session = _NationalDiscoverySession(
+        [
+            _coverage_row(
+                network=network,
+                cycle=_CYCLE,
+                start=_CYCLE + timedelta(hours=4),
+                end=_CYCLE + timedelta(hours=97),
+            )
+            for network in ("rn-a", "rn-b", "rn-c")
+        ]
+    )
+
+    discovery = national_discharge_valid_times(session, source="gfs", cycle=_CYCLE)
+
+    assert discovery.valid_times[0] == canonical_mvt_time(_CYCLE + timedelta(hours=6))
+    assert discovery.valid_times[-1] == canonical_mvt_time(_CYCLE + timedelta(hours=96))
+    assert discovery.observed_count == 31
+
+
+def test_national_cycles_pass_their_limit_to_the_per_cycle_clamp() -> None:
+    """`national_discharge_cycles(limit=)` must reach the per-cycle stride computation.
+
+    No route or catalog call site passes `limit` to this function, so the
+    argument's only forwarding site was unobserved: hardcoding the module
+    constant there leaves every existing case green (a 168 h rectangle yields 57
+    entries, under the constant 100). With `limit=5` the retained list stops at
+    the fifth stride instant and the listed window's END is what shows it.
+    """
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+
+    result = national_discharge_cycles(session, source="gfs", limit=5)
+
+    assert [entry["cycle_time"] for entry in result["cycles"]] == [canonical_mvt_time(_CYCLE)]
+    assert result["cycles"][0]["valid_time_start"] == canonical_mvt_time(_CYCLE)
+    assert result["cycles"][0]["valid_time_end"] == canonical_mvt_time(_CYCLE + timedelta(hours=12))
+
+
+def test_national_coverage_statements_pin_their_shape() -> None:
+    """TRIPWIRES, not oracles, for the coverage query's SQL shape.
+
+    `_NationalDiscoverySession` never parses SQL: it matches on a table name and
+    filters its canned rows by the BOUND values, so every predicate and window
+    clause below is invisible to it for any row data whatsoever. The behavioural
+    oracle for these seven literals is the node-27 integration file
+    (`tests/test_mvt_national_identity_probe_integration.py`, matrix rows 50-56);
+    what this case buys is a loud local signal the moment one of them is edited
+    or deleted, so the change cannot reach review looking untouched.
+
+    The `:since` predicate already has its own pin in
+    `test_national_cycles_list_only_cycles_inside_the_lookback_window` and is
+    deliberately not repeated here.
+    """
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+
+    national_discharge_cycles(session, source="gfs")
+
+    active_sql = next(
+        sql
+        for sql, _ in session.executions
+        if "core.model_instance mi" in sql and "hydro.hydro_run" not in sql
+    )
+    coverage_sql = next(sql for sql, _ in session.executions if "hydro.run_display_coverage" in sql)
+
+    # The denominator: only ACTIVE instances, and only those naming a network.
+    # `AND mi.river_network_version_id IS NOT NULL` also occurs in the coverage
+    # statement, so it is asserted against the active statement alone.
+    assert "SELECT DISTINCT mi.river_network_version_id" in active_sql
+    assert "WHERE mi.active_flag" in active_sql
+    assert "AND mi.river_network_version_id IS NOT NULL" in active_sql
+
+    # The ranked read: one winner per (network, cycle), newest run first, both
+    # identity conjuncts present, and `rn = 1` selecting that winner.
+    assert _SOURCE_CONJUNCT in coverage_sql
+    assert _CYCLE_CONJUNCT in coverage_sql
+    assert "PARTITION BY mi.river_network_version_id, h.cycle_time" in coverage_sql
+    assert "ORDER BY h.run_id DESC" in coverage_sql
+    assert "WHERE rn = 1" in coverage_sql
