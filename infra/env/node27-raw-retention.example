@@ -67,13 +67,45 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #     stops being usable as a raw-lane signal.
 #   - The historical ops criterion `counts.failed == 0` (2026-06-27 receipt)
 #     CANNOT hold again until #2100 is resolved. Do not re-adopt it.
-#   - The real signal is a `failed[]` entry whose `error_type` is NOT
-#     `PermissionError`. Check the newest summary:
-#       jq -e '[.failed[] | select(.error_type != "PermissionError")] | length == 0' \
-#         "$(ls -t /home/nwm/node27-raw-retention-logs/raw-retention-*.json | head -1)"
-#     Exit 0 = only the known #2100 failures; exit 1 = a real IO failure, read
-#     that entry's `key`/`error`. Also watch `counts.deleted` and
-#     `freed_bytes`: raw and precip-cache must keep pruning normally.
+#   - `failed[]` alone is NOT the signal. It stays empty in two states where
+#     retention has silently stopped:
+#       * A lane retired silently. If `<object-store>` itself loses `x` (or
+#         returns ESTALE), `config_from_env`'s `resolve(strict=True)` still
+#         succeeds, so the loud `preflight_blocked` rc=2 path is NOT taken;
+#         `_resolve_lane_root` records a `<lane>_root_unsafe` /
+#         `path_unavailable` entry in `skipped[]`, `failed[]` stays empty,
+#         `main()` returns 0, and the cache lane keeps pruning, so
+#         `counts.deleted` and `freed_bytes` still look healthy. Measured:
+#         rc=0, counts {'deleted': 1, 'failed': 0, 'skipped': 2}.
+#       * A stale receipt. If the run raises before writing its summary (#2104
+#         item 1) no new file appears, so `ls -t ... | head -1` returns the
+#         PREVIOUS tick's healthy file.
+#     Check freshness, all three lanes and the failure kind together:
+#       jq -e '
+#         (.status == "completed")
+#         and ((.finished_at | fromdateiso8601) > (now - 26*3600))
+#         and ([.failed[]  | select(.error_type != "PermissionError")]        | length == 0)
+#         and ([.skipped[] | select(.reason | endswith("_root_unsafe"))]      | length == 0)
+#       ' "$(ls -t /home/nwm/node27-raw-retention-logs/raw-retention-*.json | head -1)"
+#     26h is not a magic constant: it is the 24h tick of
+#     nhms-node27-raw-retention.timer (`OnCalendar=*-*-* 03:35:00 UTC`, daily)
+#     plus slack. Measured exit codes over five constructed summary shapes:
+#       0  expected steady state -- fresh file, canonical `PermissionError`
+#          entries only, all three lanes live.
+#       1  a lane silently retired via `*_root_unsafe`.
+#       1  a stale receipt, i.e. no new summary since the last tick.
+#       1  a genuine IO failure in `failed[]` -- read that entry's `key`/`error`.
+#       1  `NODE27_RAW_RETENTION_ENABLED=false`, i.e. `status: "disabled"`.
+#          Intended, not a false alarm: this check answers "is retention
+#          actually pruning right now", and a unit an operator switched off is
+#          not. `preflight_blocked` needs no clause of its own -- it already
+#          exits rc=2.
+#     Exit 0 therefore means: the run completed recently, kept all three lanes
+#     live, and failed only in the way #2100 describes. It is not a global
+#     health claim beyond those three things.
+#     Forward pointer: a `skipped[]` entry for an unsafe lane root carries no
+#     errno today, so when the `_root_unsafe` clause trips, the diagnosis is in
+#     the wrapper log, not the JSON -- tracked as #2104 item 3.
 
 # Rollout/rollback gates (issue #1407). Both default to today's execute-only
 # behaviour, so leaving them unset changes nothing:

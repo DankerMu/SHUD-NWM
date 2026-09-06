@@ -763,12 +763,23 @@ def test_an_unreadable_object_store_ancestor_skips_only_its_two_lanes(
 ) -> None:
     """A non-traversable lane-root ancestor retires that lane, never the run.
 
-    `pathlib` swallows only ENOENT/ENOTDIR/EBADF/ELOOP, so `is_symlink()` on
-    `<object-store>/raw` raises EACCES when the object store itself is not
-    traversable by this uid -- the 0750 `frd_muziyao:nfsdata` shape. Because
-    `collect_targets` completes before the first `rmtree`, an escaping error
-    would zero out ALL THREE lanes and skip the summary write, leaving the
-    `--summary-path` receipt silently stale from the previous tick.
+    On CPython 3.11-3.13 `pathlib` swallows only ENOENT/ENOTDIR/EBADF/ELOOP
+    (`_IGNORED_ERRNOS`), so `is_symlink()` on `<object-store>/raw` raises EACCES
+    when the object store itself is not traversable by this uid -- the 0750
+    `frd_muziyao:nfsdata` shape. Because `collect_targets` completes before the
+    first `rmtree`, an escaping error would zero out ALL THREE lanes and skip
+    the summary write, leaving the `--summary-path` receipt silently stale from
+    the previous tick. That is the invariant the assertions below pin.
+
+    That errno set is version-scoped. From CPython 3.14 `exists`/`is_dir`/
+    `is_symlink` route through `os.path.*` and swallow every `OSError`, so the
+    unreadable root is reported as `raw_root_missing` rather than
+    `raw_root_unsafe` / `path_unavailable`. This test is therefore pinned to the
+    repo's 3.11 interpreter (root `.python-version`) and WILL fail under
+    `uv run --python 3.14 pytest` for that version reason, not for a defect
+    (measured on 3.14.2). The assertions stay exact on purpose: widening them
+    to accept either receipt would merge two different meanings and delete the
+    invariant. The label fix is tracked by #2104.
     """
     if os.geteuid() == 0:
         pytest.skip("root traverses any directory mode, so the failure cannot be simulated")

@@ -262,13 +262,29 @@ def _resolve_lane_root(
     first production tick after deploy, before an operator has edited the env
     file -- strictly worse than not pruning a cache.
 
-    Every probe here is wrapped: `pathlib` swallows only ENOENT/ENOTDIR/EBADF/
-    ELOOP, so an EACCES or ESTALE on a lane root (a non-traversable ancestor --
-    e.g. a 0750 object-store tree owned by another uid) would otherwise escape
-    `collect_targets`, which runs to completion BEFORE any deletion. That would
-    retire all three lanes at once and skip the summary write entirely, leaving
-    the `--summary-path` receipt silently stale. Locality is the promise this
-    function makes, so an unreadable root is one lane's skip like any other.
+    Every probe here is wrapped, and on the repo's pinned interpreter that
+    wrapping is load-bearing. On CPython 3.11-3.13 `pathlib` swallows only
+    ENOENT/ENOTDIR/EBADF/ELOOP (`_IGNORED_ERRNOS`; 3.11/3.12 `pathlib.py`,
+    3.13 `pathlib/_abc.py`) and re-raises the rest, so an EACCES or ESTALE on a
+    lane root (a non-traversable ancestor -- e.g. a 0750 object-store tree owned
+    by another uid) would without this `except OSError` escape `collect_targets`,
+    which runs to completion BEFORE any deletion. That would retire all three
+    lanes at once and skip the summary write entirely, leaving the
+    `--summary-path` receipt silently stale.
+
+    That errno set is version-scoped, not a property of `pathlib`. From CPython
+    3.14 there is no `_IGNORED_ERRNOS`: `exists`/`is_dir`/`is_symlink` route
+    through `os.path.exists`/`isdir`/`islink`, which swallow EVERY `OSError`
+    (measured 3.14.2). The guard below then degrades to a no-op and an
+    unreadable root falls out of `root.exists()` as `<lane>_root_missing`
+    instead of `<lane>_root_unsafe` / `path_unavailable`. That is still safe --
+    one per-lane skip, no wider blast radius -- but the receipt mislabels "not
+    traversable" as "absent". `pyproject.toml` declares `requires-python
+    >=3.11`, so the mislabel is inside the supported range; the label fix is
+    tracked by #2104.
+
+    Locality is the promise this function makes on every supported version, so
+    an unreadable root is one lane's skip like any other.
     """
     try:
         if root.is_symlink():
@@ -368,6 +384,17 @@ def _collect_mapped_lane(
             skipped.append({"key": f"{key_prefix}/{source}", "reason": "source_unmappable"})
             continue
         source_root = lane_root / storage_source
+        # Known limit (#2104): every probe in `_resolve_lane_root` and
+        # `_safe_resolved_dir` stats the lane root FROM ITS PARENT, so they
+        # need `x` on `object-store`, never on the lane root itself. A
+        # `canonical/` at 0770/0700 therefore clears the whole lane-root gate,
+        # and this is the first syscall needing `x` on `canonical` itself: on
+        # the pinned 3.11 it raises PermissionError, nothing between here and
+        # `main()` catches `OSError`, so all three lanes end with zero
+        # deletions and no summary is written. Not reachable on node-27's
+        # measured tree (object-store 775, canonical 755); it becomes reachable
+        # if a permission change removes this uid's traversal of `canonical/`.
+        # #2104 must land before #2100's mode change.
         if source_root.is_symlink() or not source_root.is_dir():
             continue
         for cycle_dir in _iter_dirs(source_root):
