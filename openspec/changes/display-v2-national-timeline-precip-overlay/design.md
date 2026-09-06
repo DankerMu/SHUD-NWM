@@ -34,15 +34,17 @@
 - 替代：并集。否决：用户拍板 fail-closed，避免部分流域无色却看似正常。
 
 ### D3. 降水累积在 node-27 服务端求和，跨周期切片规则唯一
-- `resolve_window(source, cycle, valid_time, available_cycles)`：窗口截止时刻 T ∈ {valid_time−21h, …, valid_time}（8 个）；每个 T 取同源、`C ≤ min(请求周期, T−3h)` 的**最近**已镜像周期 C，`lead = T−C`。请求周期是**上界**：只允许用请求周期或更早周期（决策 5/9），镜像里出现更新的周期也不改变解析结果——这既让「窗口落在预报时效内」场景自洽（此时 `min(...)` 就是请求周期本身），也让 PNG 缓存 key 确定（只要被选中的 `≤ 请求周期` 的周期仍在镜像里，结果不变；剪枝由 canonical-precip-copyback 的 keep 水位与 PNG 缓存同水位剪枝兜底）。`C ≤ T−3h` 保证 lead ≥ 3，GFS 无 f000 不构成缺口。
+- `resolve_window(source, cycle, valid_time, mirror_root)`：窗口截止时刻 T ∈ {valid_time−21h, …, valid_time}（8 个）；每个 T 取同源、`C ≤ min(请求周期, T−3h)` 的**最近**已镜像周期 C，`lead = T−C`。请求周期是**上界**：只允许用请求周期或更早周期（决策 5/9），镜像里出现更新的周期也不改变解析结果——这既让「窗口落在预报时效内」场景自洽（此时 `min(...)` 就是请求周期本身），也让解析结果只依赖 `≤ 请求周期` 的已镜像周期集合：更新周期入镜像不改变结果，但中间周期迟到镜像会改变切片集合——该情形由 D4 的 `<slice_digest>` 文件名与 ETag 同步变化承接（新集合写新文件，绝不命中旧字节；剪枝由 canonical-precip-copyback 的 keep 水位兜底）。`C ≤ T−3h` 保证 lead ≥ 3，GFS 无 f000 不构成缺口。
 - **路由三元组 → 镜像路径**只用两条规则：source 先过 `{gfs, ifs}` 枚举（422 早于任何文件系统/归一化调用，`normalize_source_id` 也接受 `ERA5`），再经 `packages/common/source_identity.py::normalize_source_id` 得存储 source（`ifs`→`IFS`、`gfs`→`gfs`）；cycle 的 RFC3339 实例渲染成目录 token `%Y%m%d%H`（同 `workers/canonical_converter/converter.py::format_cycle_time`）。切片文件 `canonical/<S>/<K>/prcp_rate_or_amount/<S>_<K>_prcp_rate_or_amount_f<lead:03d>.nc`，grid `canonical/<S>/grid/<grid_id>/grid.json`（`gfs_0p25` / `ifs_0p25`）。
 - 替代：只用本周期、lead<24h 显示部分累积。否决：部分窗口是错误数值，且与「lead=0 默认」冲突。
 - 累积：Σ(rate_i × 3/24) → mm/24h；实现用 `netCDF4` + `numpy`，不引入 xarray 路径（display API 进程内不依赖 cfgrib）。
+- 「已镜像周期」的判定（#2010 落定，copyback spec 明示交给本 resolver 的残余）：`canonical/<S>/<K>/prcp_rate_or_amount/` 目录存在即视为已镜像；被选中周期内缺 lead 文件按 `PrecipWindowIncomplete` fail-closed，**不**回退到更老周期——回退会让同一三元组的切片集合随镜像完整性漂移，破坏缓存 key 的确定性。
+- 镜像根 env（#2010 落定）：display API 读 `NHMS_PRECIP_MIRROR_ROOT`，不读 `NHMS_OBJECT_STORE_COPYBACK_ROOT`——后者在 `apps/api/runtime_mode.py` 的 display_readonly 禁止列表里，存在即拒绝启动，且 `canonical-precip-copyback` spec 已把该禁令写成规范；两者在两节点上指向同一份 NFS 树。
 
 ### D4. PNG 由 numpy + zlib 直接写调色板 PNG，Web-Mercator 重采样
 - 输出宽 1316 px（4×329），高按 Mercator 纵横比取整；对每个输出像素中心反算 lon/lat，对 0.25° 场做 bilinear；再按六级阈值映射到 8-bit 调色板索引（索引 0 = 透明；1–6 依次 `#A6F28F`/`#3DBA3D`/`#61B8FF`/`#0000FF`/`#FA00FA`/`#800040`，与 index/目录 `legend[].color` 同源）。PNG 写入为手写 IHDR/PLTE/tRNS/IDAT（zlib）+ CRC，约 60 行，无 Pillow。
 - 替代 A：SVG/矢量等值线。否决：需 contour 算法与新依赖，且渲染代价在客户端。替代 B：MVT 格点多边形。否决：74025 格点 × 57 步瓦片体量远大于单张 PNG。替代 C：EPSG:4326 直出交给 MapLibre 拉伸。否决：`image` source 在 Mercator 中线性映射，56° 纬度跨度会把雨带错位数十公里。
-- 缓存：`NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>/<valid_time>.<palette_version>.png`，其中 `<storage_source>/<cycle_token>` 与镜像的 `canonical/<S>/<K>` **逐字节同名**（`IFS/2026090212`），`<valid_time>` 用秒精度 RFC3339；tmp+rename；生成耗时 100 ms 量级，不加跨 worker 互斥。同名是为了让 retention 按名字一一对应地同步剪 PNG 缓存（D6）。
+- 缓存：`NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>/<valid_time>.<palette_version>.<slice_digest>.png`（`<slice_digest>` = 切片 key 列表 sha256 前 12 hex，#2010 落定：中间周期迟到镜像改变切片集合时写新文件，不复用旧字节），其中 `<storage_source>/<cycle_token>` 与镜像的 `canonical/<S>/<K>` **逐字节同名**（`IFS/2026090212`），`<valid_time>` 用秒精度 RFC3339；tmp+rename；生成耗时 100 ms 量级，不加跨 worker 互斥。同名是为了让 retention 按名字一一对应地同步剪 PNG 缓存（D6）。
 
 ### D5. 降水在前端是布尔叠加，不是 `M11Layer` 枚举值
 - `M11QueryState.precip: boolean`（默认 true）；约束落在导出面：`parseM11QueryState` 读 `precip=0` 为 false、其余为 true，`serializeM11QueryState` 的白名单在 false 时产出 `precip=0`。实现上要动私有 `queryParamsFromState`（现在丢掉所有 false 布尔，会让 `serializeM11QueryState` 内部那趟 parse 归一把 false 吃回 true）并把 `precip` 加进白名单；其它布尔行为不变。目录 `precip` 条目（`layer_type: meteorology`, `tile_format: png`）提供 `image_url_template` / `index_url_template` / `bounds` / `legend`，前端 `normalizeLayerStates` 的 `requiredLayers` 仍只含 `discharge`。
