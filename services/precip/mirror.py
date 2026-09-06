@@ -22,6 +22,7 @@ from pathlib import Path
 from packages.common.source_identity import normalize_source_id
 from services.precip.constants import (
     GRID_IDS,
+    PRECIP_FORECAST_HORIZON_HOURS,
     PRECIP_ROUTE_SOURCES,
     PRECIP_STEP_HOURS,
     PRECIP_VARIABLE,
@@ -100,6 +101,18 @@ def discover_mirrored_cycles(mirror_root: Path, storage_source: str) -> tuple[da
             continue
         cycles.append(parsed)
     return tuple(sorted(cycles))
+
+
+def horizon_valid_times(cycle: datetime) -> list[datetime]:
+    """The 3h grid `cycle + 3h*k` for `k = 0 ... 56`, i.e. `[cycle, cycle+168h]`.
+
+    The single definition of "a valid_time this cycle can answer for": the index
+    enumerates it, the PNG route's request-shape gate tests membership in it, and
+    #2013's prewarm reuses it. Lives here rather than in the route so the three
+    cannot drift apart.
+    """
+    steps = PRECIP_FORECAST_HORIZON_HOURS // PRECIP_STEP_HOURS
+    return [cycle + timedelta(hours=PRECIP_STEP_HOURS * step) for step in range(steps + 1)]
 
 
 def window_end_times(valid_time: datetime) -> tuple[datetime, ...]:

@@ -141,9 +141,20 @@ def _slice_values(item: Slice, grid: GridDefinition) -> np.ndarray:
             unit = getattr(dataset, "unit", None)
             if unit != SLICE_UNIT:
                 raise PrecipSliceInvalid(item.object_key, "slice_unit_mismatch")
-            # netCDF4 hands back a masked array when `_FillValue` is set; fill the
-            # mask with NaN rather than the fill value so the gap keeps propagating.
-            values = np.ma.filled(variable[:], np.nan).astype("float64", copy=False).ravel()
+            try:
+                # netCDF4 hands back a masked array when `_FillValue` is set; fill
+                # the mask with NaN rather than the fill value so the gap keeps
+                # propagating.
+                values = np.ma.filled(variable[:], np.nan).astype("float64", copy=False).ravel()
+            except (OSError, RuntimeError, ValueError) as exc:
+                # A file that OPENS can still fail during the data read: a
+                # corrupted HDF5 data region raises `RuntimeError: NetCDF: HDF
+                # error`, and an NFS slice pruned under us (#2011) raises ESTALE.
+                # Both are the same fail-closed 404 as an absent slice, never a
+                # 500. Deliberately narrower than the whole `try` block above:
+                # `PrecipError` subclasses `RuntimeError`, so wrapping the
+                # variable/unit checks too would relabel their reasons.
+                raise PrecipSliceInvalid(item.object_key, "slice_unreadable") from exc
         finally:
             dataset.close()
     if values.size != grid.point_count:

@@ -11,9 +11,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import uuid
 from pathlib import Path
 
 from services.precip.constants import FILE_CACHE_DIR_ENV
+
+# The 8-byte PNG signature and the shortest byte count a complete PNG can have:
+# signature (8) + IHDR chunk (4 length + 4 tag + 13 data + 4 CRC = 25) + IEND
+# chunk (4 + 4 + 0 + 4 = 12). Anything shorter cannot be a whole image, so it is
+# a half-written or truncated file rather than a cache hit.
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MINIMUM_PNG_BYTES = 45
 
 
 def cache_root() -> Path | None:
@@ -37,17 +46,36 @@ def cache_file_path(
 
 
 def tmp_suffix() -> str:
-    """Per-writer tmp name discriminator (the pid, as the MVT cache uses)."""
-    return str(os.getpid())
+    """Per-WRITER tmp name discriminator: pid, thread ident and a fresh uuid4.
+
+    The pid alone (what the MVT cache uses) is not enough here: FastAPI runs
+    these `def` handlers in the anyio worker threadpool, so two concurrent cold
+    renders inside ONE uvicorn worker share a pid and would therefore share a tmp
+    path — the second `write_bytes` truncates the file the first is about to
+    `os.replace` into place, publishing a half-written PNG under the correct
+    identity ETag. A uuid4 per call makes every writer's tmp file its own.
+    """
+    return f"{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}"
 
 
 def read_cached_png(path: Path) -> bytes | None:
+    """The cached bytes, or None when there is nothing trustworthy to serve.
+
+    A file that does not begin with the PNG signature, or that is shorter than
+    the minimal complete PNG, is treated as a MISS rather than as a hit: the
+    ETag is derived from the identity tuple, not from the bytes, so serving a
+    truncated body once would let the client's next `If-None-Match` confirm it
+    with a 304 forever. A miss re-renders and overwrites the file (tmp+rename).
+    """
     try:
         if not path.is_file():
             return None
-        return path.read_bytes()
+        data = path.read_bytes()
     except OSError:
         return None
+    if len(data) < MINIMUM_PNG_BYTES or not data.startswith(PNG_SIGNATURE):
+        return None
+    return data
 
 
 def write_cached_png(path: Path, data: bytes) -> bool:

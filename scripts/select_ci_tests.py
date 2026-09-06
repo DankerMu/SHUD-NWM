@@ -1197,6 +1197,18 @@ CONNECTION_ATTRIBUTION_STORE_PATHS: tuple[str, ...] = (
 # apps/api/main.py (the handler install + the request-id middleware); the
 # `apps/api/**` rule's three broad API suites assert none of it.
 API_ERROR_LOGGING_TEST = "tests/test_api_errors_logging.py"
+# #2010 precipitation raster service. The suite is the ONLY oracle for
+# `services/precip/**` (window resolution, accumulation, PNG structure, file
+# cache) and for the two `/api/v1/precip` routes; the three OpenAPI/contract
+# suites are the hand-maintained-yaml and generated-frontend-types oracles the
+# routes' public shape rides on. Shared by the directory rule and the exact
+# route rule so the two cannot drift.
+PRECIP_SURFACE_TESTS: tuple[str, ...] = (
+    "tests/test_precip_overlay.py",
+    "tests/test_openapi_drift.py",
+    "tests/test_openapi_31_contract.py",
+    "tests/test_api_contract.py",
+)
 
 
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
@@ -1805,6 +1817,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # which imports services.tiles.mvt, so it is a one-hop importer
             # here (and a DIRECT importer on the hydro_display rule below).
             "tests/test_api_errors_logging.py",
+            # #2010: same guard-derived provenance — the precip suite imports
+            # services.tiles.mvt (layer_metadata / MVT_FILE_CACHE_DIR_ENV) at
+            # file level, so it is a DIRECT non-gated importer here.
+            "tests/test_precip_overlay.py",
             # I1 #1980 river_ts_render: this file's river read templates are
             # registered in tests/river_ts_template_registry.py and rendered per
             # timeseries store by the whole SQL-shape oracle group, so a layout
@@ -1856,6 +1872,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # a one-hop importer via tests/test_openapi_31_contract.py.
             "tests/test_slurm_gateway_openapi_security.py",
             "tests/test_openapi_drift.py",
+            # #2010: guard-derived — the precip suite imports
+            # apps/api/routes/hydro_display.py at file level (the shared
+            # `Rfc3339Instant` / seconds-precision gate and the DB-dependency
+            # assertion), so it is a DIRECT non-gated importer.
+            "tests/test_precip_overlay.py",
             "tests/test_river_ts_read_path_surrogate_keys.py",
             "tests/test_runtime_mode.py",
             # I1 #1980 river_ts_render: this file's river read templates are
@@ -1868,6 +1889,22 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # PATH_TEST_RULES entry for an already-owned module.)
             *SQL_SHAPE_ORACLE_TESTS,
         ),
+    ),
+    PathTestRule(
+        # #2010: the precipitation raster service's own tree. `services/**` has
+        # no broad rule, so before this entry a mirror/window/render/cache diff
+        # selected only the same-name derivation (which finds nothing: there is
+        # no tests/test_mirror.py) and reached the PR lane with zero assertions.
+        "services/precip/**",
+        PRECIP_SURFACE_TESTS,
+    ),
+    PathTestRule(
+        # #2010: the two public routes. `apps/api/**` below buys the three broad
+        # API suites, none of which exercises a precip route; the exact entry
+        # adds the behavioural oracle plus the public-contract suites. Exact path
+        # beside the broad rule is the same shape the hydro_display.py rule uses.
+        "apps/api/routes/precip.py",
+        PRECIP_SURFACE_TESTS,
     ),
     PathTestRule(
         # #1455: the directory's 25 importer gaps collapse onto four suites, all

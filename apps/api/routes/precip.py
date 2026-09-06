@@ -15,7 +15,7 @@ The three mutable path segments all come from closed sets: `source` from the
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -32,7 +32,14 @@ from apps.api.routes.hydro_display import (
 )
 from apps.api.routes.pipeline import _ok
 from packages.common.source_identity import normalize_source_id
-from services.precip import (
+from services.precip import cache as precip_cache
+
+# Imported from the leaf modules, not from the package: `services.precip`
+# re-exports the numpy/netCDF4 names lazily (pinned decision 15) so that
+# importing `services.precip.constants` from `services/tiles/mvt.py` stays
+# stdlib-only. This module legitimately needs the array stack, so it says so.
+from services.precip.constants import (
+    MIRROR_ROOT_ENV,
     PALETTE_VERSION,
     PRECIP_FORECAST_HORIZON_HOURS,
     PRECIP_LEGEND,
@@ -40,22 +47,19 @@ from services.precip import (
     PRECIP_STEP_HOURS,
     PRECIP_UNIT,
     PRECIP_WINDOW_HOURS,
-    GridDefinition,
-    PrecipSliceInvalid,
-    PrecipWindowIncomplete,
-    accumulate_24h,
+)
+from services.precip.errors import PrecipSliceInvalid, PrecipWindowIncomplete
+from services.precip.field import GridDefinition, accumulate_24h, load_grid
+from services.precip.mirror import (
     cycle_token,
     discover_mirrored_cycles,
     grid_id_for,
-    image_size,
-    load_grid,
+    horizon_valid_times,
     precip_directory_key,
-    render_png,
     resolve_window,
     slice_digest,
 )
-from services.precip import cache as precip_cache
-from services.precip.constants import MIRROR_ROOT_ENV
+from services.precip.render import image_size, render_png
 from services.tiles.mvt import canonical_mvt_time
 
 router = APIRouter(tags=["precip"])
@@ -155,7 +159,7 @@ def precip_index(
     """Window-complete valid times of one (source, cycle), plus the render contract; existence checks only."""
     # No NetCDF file is opened here, however many valid times are listed: the
     # index resolves each candidate window by file existence alone.
-    cycle_instant = _require_seconds_precision_instant(cycle, "cycle")
+    cycle_instant = _require_whole_hour_instant(_require_seconds_precision_instant(cycle, "cycle"), "cycle")
     mirror_root = _mirror_root()
     storage_source = normalize_source_id(source)
     token = cycle_token(cycle_instant)
@@ -167,7 +171,7 @@ def precip_index(
         mirrored = discover_mirrored_cycles(mirror_root, storage_source)
         valid_times = [
             _instant(candidate)
-            for candidate in _horizon_valid_times(cycle_instant)
+            for candidate in horizon_valid_times(cycle_instant)
             if _window_resolves(source, cycle_instant, candidate, mirror_root, mirrored)
         ]
         return {
@@ -182,7 +186,11 @@ def precip_index(
             "valid_times": valid_times,
         }
 
-    return _ok(request, display_catalog_cached(request, f"precip-index:{storage_source}:{token}", _load))
+    # Keyed on the canonical INSTANT, not on the `%Y%m%d%H` token: the token
+    # drops minutes, so before the whole-hour gate above existed a `:30` request
+    # could park its own payload under the whole-hour key (pinned decision 12).
+    cache_key = f"precip-index:{storage_source}:{_instant(cycle_instant)}"
+    return _ok(request, display_catalog_cached(request, cache_key, _load))
 
 
 @router.get(
@@ -197,8 +205,11 @@ def precip_png(
     valid_time: Rfc3339Instant,
 ) -> Response:
     """The past-24h precipitation field at valid_time as an 8-bit palette PNG, rendered once and file-cached."""
-    cycle_instant = _require_seconds_precision_instant(cycle, "cycle")
-    valid_time_instant = _require_seconds_precision_instant(valid_time, "valid_time")
+    cycle_instant = _require_whole_hour_instant(_require_seconds_precision_instant(cycle, "cycle"), "cycle")
+    valid_time_instant = _require_whole_hour_instant(
+        _require_seconds_precision_instant(valid_time, "valid_time"), "valid_time"
+    )
+    _require_horizon_valid_time(cycle_instant, valid_time_instant)
     mirror_root = _mirror_root()
     storage_source = normalize_source_id(source)
     token = cycle_token(cycle_instant)
@@ -312,9 +323,53 @@ def _slice_invalid_error(exc: PrecipSliceInvalid) -> ApiError:
     )
 
 
-def _horizon_valid_times(cycle: datetime) -> list[datetime]:
-    steps = PRECIP_FORECAST_HORIZON_HOURS // PRECIP_STEP_HOURS
-    return [cycle + timedelta(hours=PRECIP_STEP_HOURS * step) for step in range(steps + 1)]
+def _require_whole_hour_instant(value: datetime, field_name: str) -> datetime:
+    """Whole-hour gate (pinned decision 12), before any filesystem access.
+
+    `cycle` and `valid_time` both address a 3h-gridded product: the cycle token
+    is `%Y%m%d%H` and every lead is a whole number of hours. Without this gate a
+    `...T15:30:00Z` request resolves the 15:00Z slice set (lead arithmetic floors
+    to the hour) and answers 200 -- under its OWN cache file name and ETag, so a
+    client could mint unbounded distinct cache entries for one image, and a `:30`
+    cycle's payload could land under the whole-hour index cache key. It is a
+    request-shape error, so 422, exactly like the sub-second gate.
+    """
+    if value.minute or value.second:
+        raise ApiError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="Precipitation instants must fall on a whole hour.",
+            details={field_name: _instant(value), "expected_format": "YYYY-MM-DDTHH:00:00Z"},
+        )
+    return value
+
+
+def _require_horizon_valid_time(cycle: datetime, valid_time: datetime) -> None:
+    """`valid_time` must be one of the 3h steps in `[cycle, cycle+168h]` (decision 12).
+
+    Runs BEFORE `resolve_window`, which is what keeps `0001-01-01T00:00:00Z` out
+    of the window arithmetic: `valid_time - 21h` there raises `OverflowError`
+    below `datetime.min` and surfaced as a bare 500 on a public URL. Same reason
+    the horizon list itself is built defensively -- a cycle at `datetime.max`
+    passes both instant gates and cannot be stepped forward.
+    """
+    try:
+        horizon = horizon_valid_times(cycle)
+    except OverflowError:
+        horizon = []
+    if valid_time in horizon:
+        return
+    raise ApiError(
+        status_code=422,
+        code="VALIDATION_ERROR",
+        message="valid_time must be a 3-hour step within the cycle's 168h forecast horizon.",
+        details={
+            "valid_time": _instant(valid_time),
+            "cycle": _instant(cycle),
+            "step_hours": PRECIP_STEP_HOURS,
+            "horizon_hours": PRECIP_FORECAST_HORIZON_HOURS,
+        },
+    )
 
 
 def _window_resolves(

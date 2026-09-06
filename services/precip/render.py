@@ -18,7 +18,13 @@ from services.precip.constants import OUTPUT_WIDTH, PRECIP_PALETTE, Palette
 from services.precip.field import GridDefinition
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-_ZLIB_LEVEL = 9
+# Level 6 (zlib's default), not 9. Measured on the live 1316xH raster: level 9
+# takes 0.394 s and emits 91 KB, level 6 takes 0.024 s and emits 109 KB -- 16x
+# the CPU for 17% fewer bytes, which breaks the "cold generation costs order
+# 100 ms" premise the lock-free two-writer cache design rests on. The encode
+# stays deterministic, which is the property that design actually needs, and the
+# cache key schema is unchanged.
+_ZLIB_LEVEL = 6
 
 
 def mercator_y(latitude_degrees: float) -> float:

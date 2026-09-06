@@ -22,6 +22,8 @@ import math
 import os
 import pathlib
 import struct
+import subprocess
+import sys
 import threading
 import time
 import zlib
@@ -79,6 +81,35 @@ CYCLE_0903_00 = datetime(2026, 9, 3, 0, tzinfo=UTC)
 
 FULL_LEADS = tuple(range(3, 169, 3))
 WINDOW_LEADS = tuple(range(3, 25, 3))
+
+# The IFS producer emits leads on a SEGMENTED cadence -- 3-hourly out to lead
+# 144h, 6-hourly after that -- so f147/f153/f159/f165 do not exist in any
+# mirror. Modelling IFS with the GFS `range(3, 169, 3)` shape would let an index
+# test assert a +168h horizon production cannot produce. The segment tuple is
+# transcribed from the producer's own default (`((144, 3), (360, 6))`); the
+# adapter module is deliberately NOT imported, because it belongs to the compute
+# plane and this suite exercises the display plane.
+IFS_LEAD_SEGMENTS = ((144, 3), (360, 6))
+
+
+def _segmented_leads(
+    segments: Sequence[tuple[int, int]] = IFS_LEAD_SEGMENTS, *, max_lead: int = 168
+) -> tuple[int, ...]:
+    """Lead hours of a segmented cadence, capped at ``max_lead`` (the mirror horizon)."""
+    leads: list[int] = []
+    previous = -1
+    for boundary, step in segments:
+        start = 0 if previous < 0 else previous + step
+        for lead in range(start, min(boundary, max_lead) + 1, step):
+            leads.append(lead)
+        if leads:
+            previous = leads[-1]
+        if previous >= max_lead:
+            break
+    return tuple(leads)
+
+
+IFS_LEADS = _segmented_leads()
 
 SMALL_LATITUDES = (40.0, 39.75, 39.5, 39.25)
 SMALL_LONGITUDES = (116.0, 116.25, 116.5, 116.75, 117.0)
@@ -262,6 +293,21 @@ def _precip_client(
     return TestClient(main.create_app(), raise_server_exceptions=False)
 
 
+def _expected_cache_path(
+    mirror: Path, cache: Path, *, source: str, cycle: datetime, valid_time: datetime
+) -> Path:
+    """The cache file the PNG route will use for this request, derived independently."""
+    slices = resolve_window(source, cycle, valid_time, mirror)
+    return cache_file_path(
+        cache,
+        storage_source="IFS" if source == "ifs" else "gfs",
+        cycle_token=_cycle_token(cycle),
+        valid_time=valid_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        palette_version=PALETTE_VERSION,
+        digest=slice_digest(slices),
+    )
+
+
 def _png_chunks(data: bytes) -> list[tuple[str, bytes]]:
     assert data[:8] == b"\x89PNG\r\n\x1a\n"
     chunks: list[tuple[str, bytes]] = []
@@ -396,6 +442,15 @@ def test_resolve_window_rejects_a_non_enum_source_before_touching_the_filesystem
             with pytest.raises(ValueError):
                 resolve_window(source, CYCLE_0902_12, CYCLE_0902_12, tmp_path)
     assert counter.paths == []
+
+    # Positive control: the same hooks DO observe this resolver's probes, so the
+    # empty list above is an observation and not a blind counter.
+    _write_cycle(tmp_path, storage_source="gfs", cycle=CYCLE_0901_12, leads=FULL_LEADS)
+    _write_cycle(tmp_path, storage_source="gfs", cycle=CYCLE_0902_00, leads=FULL_LEADS)
+    with monkeypatch.context() as patch:
+        control = _FsCounter(patch, tmp_path)
+        assert len(resolve_window("gfs", CYCLE_0902_12, CYCLE_0902_12, tmp_path)) == 8
+    assert control.paths
 
 
 def test_ifs_route_source_resolves_to_the_upper_case_mirror_directory(tmp_path: Path) -> None:
@@ -689,21 +744,27 @@ def test_mercator_row_mapping_is_monotonic_from_north_to_south() -> None:
 
 
 def _complete_ifs_mirror(root: Path) -> None:
-    """Three consecutive IFS cycles, so a lead-3h window resolves completely."""
+    """Three consecutive IFS cycles on the producer cadence, so a lead-3h window resolves."""
     for cycle in (CYCLE_0901_12, CYCLE_0902_00, CYCLE_0902_12):
-        _write_cycle(root, storage_source="IFS", cycle=cycle, leads=FULL_LEADS)
+        _write_cycle(root, storage_source="IFS", cycle=cycle, leads=IFS_LEADS)
     _write_grid(root, storage_source="IFS")
 
 
 def _solo_ifs_mirror(root: Path) -> None:
     """Only the requested cycle is mirrored (the oldest-retained-cycle shape)."""
-    _write_cycle(root, storage_source="IFS", cycle=CYCLE_0902_12, leads=FULL_LEADS)
+    _write_cycle(root, storage_source="IFS", cycle=CYCLE_0902_12, leads=IFS_LEADS)
     _write_grid(root, storage_source="IFS")
 
 
 def _complete_gfs_mirror(root: Path, *, cycles: Sequence[datetime] = (CYCLE_0901_12, CYCLE_0902_12)) -> None:
     for cycle in cycles:
         _write_cycle(root, storage_source="gfs", cycle=cycle, leads=FULL_LEADS)
+    _write_grid(root, storage_source="gfs")
+
+
+def _solo_gfs_mirror(root: Path) -> None:
+    """GFS keeps the uniform 3-hourly cadence out to +168h; only the requested cycle."""
+    _write_cycle(root, storage_source="gfs", cycle=CYCLE_0902_12, leads=FULL_LEADS)
     _write_grid(root, storage_source="gfs")
 
 
@@ -786,6 +847,13 @@ def test_if_none_match_returns_304_without_reading_the_cache_body(
     assert response.headers["cache-control"] == "public, max-age=300"
     assert response.content == b""
     assert reads == []
+
+    # Positive control: the same hook records the cache read of a 200 answered
+    # from that very file, so the empty list above is an observation.
+    served = client.get(url)
+    assert served.status_code == 200
+    assert served.headers["x-tile-cache"] == "hit"
+    assert reads, "the read_bytes hook never fired, so the 304 assertion is vacuous"
 
 
 def test_three_spellings_of_one_valid_time_share_one_cache_file(
@@ -932,6 +1000,93 @@ def test_two_cold_writers_leave_exactly_one_cache_file(tmp_path: Path, monkeypat
     assert len(names) == 1, names
     assert not any(name.endswith(".tmp") for name in names)
     assert (directory / names[0]).read_bytes() == results[0].content
+
+
+def test_two_real_threads_writing_one_cache_path_publish_a_complete_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two anyio worker threads of ONE process must not share a tmp file name.
+
+    `tmp_suffix` is deliberately NOT monkeypatched here -- the test above models
+    two worker PROCESSES, this one models the intra-process case a pid-only
+    suffix cannot separate. The interleave is forced deterministically rather
+    than hoped for: each writer stops halfway through its tmp write and waits for
+    the other, which is exactly the window a shared name leaves open (the second
+    `open(..., "wb")` truncates the file the first is about to `os.replace` into
+    place). The payload lengths differ on purpose -- two identical payloads
+    cannot expose an interleave -- so "byte-identical" is asserted as "the
+    published file equals ONE writer's complete payload".
+    """
+    path = tmp_path / "precip" / "IFS" / "2026090212" / "2026-09-02T15:00:00Z.pv1.abc123abc123.png"
+    long_payload = b"A" * (64 * 1024)
+    short_payload = b"B" * (16 * 1024)
+    real_write_bytes = pathlib.Path.write_bytes
+    halfway = threading.Barrier(2, timeout=30)
+
+    def _halting_write_bytes(this: pathlib.Path, data: bytes) -> int:
+        if not str(this).endswith(".tmp"):
+            return real_write_bytes(this, data)
+        middle = len(data) // 2
+        with open(this, "wb") as handle:
+            handle.write(data[:middle])
+            handle.flush()
+            halfway.wait()
+            handle.write(data[middle:])
+        return len(data)
+
+    monkeypatch.setattr(pathlib.Path, "write_bytes", _halting_write_bytes)
+    start = threading.Barrier(2, timeout=30)
+
+    def _write(payload: bytes) -> None:
+        start.wait()
+        precip_cache.write_cached_png(path, payload)
+
+    threads = [threading.Thread(target=_write, args=(payload,)) for payload in (long_payload, short_payload)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not any(thread.is_alive() for thread in threads)
+    published = path.read_bytes()
+    assert published in (long_payload, short_payload), (
+        f"published file is a mixture of both writers ({len(published)} bytes)"
+    )
+    assert [entry.name for entry in path.parent.iterdir() if entry.name.endswith(".tmp")] == []
+
+
+@pytest.mark.parametrize(
+    "planted",
+    [
+        pytest.param(b"", id="empty-file"),
+        pytest.param(b"not a png at all, just bytes on disk", id="garbage-bytes"),
+        pytest.param(b"\x89PNG\r\n\x1a\n", id="signature-only-truncated"),
+    ],
+)
+def test_a_corrupt_cache_file_is_a_miss_and_is_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planted: bytes
+) -> None:
+    """A half-written cache file must never be served: the ETag is derived from the
+    identity tuple, not from the bytes, so one truncated 200 would be confirmed
+    by the client's next `If-None-Match` as a 304 forever (pinned decision 13).
+    """
+    mirror = tmp_path / "mirror"
+    cache = tmp_path / "cache"
+    _complete_ifs_mirror(mirror)
+    cache_path = _expected_cache_path(
+        mirror, cache, source="ifs", cycle=CYCLE_0902_12, valid_time=datetime(2026, 9, 2, 15, tzinfo=UTC)
+    )
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(planted)
+    client = _precip_client(monkeypatch, mirror, cache)
+
+    response = client.get("/api/v1/precip/ifs/2026-09-02T12:00:00Z/2026-09-02T15:00:00Z.png")
+
+    assert response.status_code == 200, response.text
+    assert response.headers["x-tile-cache"] == "miss"
+    assert [tag for tag, _body in _png_chunks(response.content)] == ["IHDR", "PLTE", "tRNS", "IDAT", "IEND"]
+    assert cache_path.read_bytes() == response.content
+    assert cache_path.read_bytes() != planted
 
 
 def test_a_cache_write_failure_still_serves_the_png(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1119,6 +1274,51 @@ def test_png_route_404s_on_an_invalid_grid_definition_rather_than_500(
     assert error["details"]["object_key"] == "canonical/IFS/grid/ifs_0p25/grid.json"
 
 
+def test_a_slice_that_opens_but_fails_during_the_read_is_a_404_not_a_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pinned decision 15: a corrupted HDF5 data region (or an ESTALE from #2011
+    pruning the file under us) raises during `variable[:]`, long after the open
+    succeeded. That is the same fail-closed 404 as an absent slice.
+    """
+    mirror = tmp_path / "mirror"
+    cache = tmp_path / "cache"
+    _complete_ifs_mirror(mirror)
+    client = _precip_client(monkeypatch, mirror, cache)
+    real_dataset = netCDF4.Dataset
+
+    class _FailingVariable:
+        def __getitem__(self, item: Any) -> Any:
+            raise RuntimeError("NetCDF: HDF error")
+
+    class _DatasetFailingMidRead:
+        """Opens for real (so the unit/variable checks pass), then fails on read."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._dataset = real_dataset(*args, **kwargs)
+            self.variables = {"prcp_rate_or_amount": _FailingVariable()}
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(object.__getattribute__(self, "_dataset"), name)
+
+        def close(self) -> None:
+            object.__getattribute__(self, "_dataset").close()
+
+    monkeypatch.setattr(netCDF4, "Dataset", _DatasetFailingMidRead)
+
+    response = client.get("/api/v1/precip/ifs/2026-09-02T12:00:00Z/2026-09-02T15:00:00Z.png")
+
+    assert response.status_code == 404, response.text
+    error = response.json()["error"]
+    assert error["code"] == "PRECIP_WINDOW_INCOMPLETE"
+    assert error["details"]["reason"] == "slice_unreadable"
+    first_slice = resolve_window("ifs", CYCLE_0902_12, datetime(2026, 9, 2, 15, tzinfo=UTC), mirror)[0]
+    assert error["details"]["object_key"] == first_slice.object_key
+    assert error["details"]["object_key"].startswith("canonical/IFS/")
+    assert str(mirror) not in response.text
+    assert not cache.exists()
+
+
 def test_a_sub_second_instant_is_rejected_with_422(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     mirror = tmp_path / "mirror"
     _complete_ifs_mirror(mirror)
@@ -1129,16 +1329,95 @@ def test_a_sub_second_instant_is_rejected_with_422(tmp_path: Path, monkeypatch: 
     assert response.status_code == 422, response.text
 
 
+# The request-shape gate (pinned decision 12): `cycle` and `valid_time` address a
+# 3h-gridded product, so an off-hour or out-of-horizon instant is a bad request,
+# not a mirror state. Each row is (cycle, valid_time).
+_OFF_GRID_PNG_INSTANTS = [
+    pytest.param("2026-09-02T12:00:00Z", "2026-09-02T15:30:00Z", id="off-hour-valid-time"),
+    pytest.param("2026-09-02T12:30:00Z", "2026-09-02T15:00:00Z", id="off-hour-cycle"),
+    pytest.param("2026-09-02T12:00:00Z", "2026-09-02T09:00:00Z", id="valid-time-before-cycle"),
+    pytest.param("2026-09-02T12:00:00Z", "2026-09-09T15:00:00Z", id="valid-time-past-plus-168h"),
+    pytest.param("2026-09-02T12:00:00Z", "0001-01-01T00:00:00Z", id="valid-time-underflows-window-arithmetic"),
+    pytest.param("9999-12-31T23:00:00Z", "2026-09-02T12:00:00Z", id="cycle-overflows-the-horizon-walk"),
+]
+
+
+@pytest.mark.parametrize(("cycle", "valid_time"), _OFF_GRID_PNG_INSTANTS)
+def test_png_route_422s_off_grid_instants_before_any_filesystem_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cycle: str, valid_time: str
+) -> None:
+    """Decision 12. `...T15:30:00Z` otherwise renders the 15:00Z slice set under its OWN
+    cache file name and ETag (client-controlled unbounded cache writes), and
+    `0001-01-01T00:00:00Z` reaches `valid_time - 21h` and answers a bare 500.
+    """
+    mirror = tmp_path / "mirror"
+    cache = tmp_path / "cache"
+    _complete_ifs_mirror(mirror)
+    client = _precip_client(monkeypatch, mirror, cache)
+    rendered: list[Any] = []
+    monkeypatch.setattr(
+        precip_routes, "render_png", lambda *a, **k: rendered.append(a) or b""
+    )
+
+    with monkeypatch.context() as patch:
+        counter = _FsCounter(patch, mirror)
+        response = client.get(f"/api/v1/precip/ifs/{cycle}/{valid_time}.png")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert rendered == []
+    assert counter.paths == []
+    assert not cache.exists()
+
+
+@pytest.mark.parametrize("cycle", ["2026-09-02T12:30:00Z", "2026-09-02T12:00:30Z"])
+def test_index_route_422s_an_off_hour_cycle_before_any_filesystem_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cycle: str
+) -> None:
+    mirror = tmp_path / "mirror"
+    _complete_ifs_mirror(mirror)
+    client = _precip_client(monkeypatch, mirror, tmp_path / "cache")
+
+    with monkeypatch.context() as patch:
+        counter = _FsCounter(patch, mirror)
+        response = client.get(f"/api/v1/precip/ifs/{cycle}/index")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert counter.paths == []
+
+
+def test_png_route_422s_an_off_hour_cycle_before_any_filesystem_access(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mirror = tmp_path / "mirror"
+    _complete_ifs_mirror(mirror)
+    client = _precip_client(monkeypatch, mirror, tmp_path / "cache")
+
+    with monkeypatch.context() as patch:
+        counter = _FsCounter(patch, mirror)
+        response = client.get("/api/v1/precip/ifs/2026-09-02T12:00:30Z/2026-09-02T15:00:00Z.png")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert counter.paths == []
+
+
 def test_precip_routes_take_no_database_dependency() -> None:
     """The routes are DB-free: a bad request must not open a session."""
     paths = {
         "/api/v1/precip/{source}/{cycle}/index",
         "/api/v1/precip/{source}/{cycle}/{valid_time}.png",
     }
+    matched = 0
     for route in main.app.routes:
         if getattr(route, "path", None) in paths:
+            matched += 1
             names = {dependency.call for dependency in route.dependant.dependencies}
             assert hydro_display.get_hydro_display_session not in names
+    # Positive control: both routes were actually inspected, so the assertion
+    # above is an observation rather than an empty loop.
+    assert matched == 2, f"expected both precip routes to be registered, matched {matched}"
 
 
 # --------------------------------------------------------------------------
@@ -1150,14 +1429,14 @@ def test_index_lists_only_windows_that_resolve_completely(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     mirror = tmp_path / "mirror"
-    _solo_ifs_mirror(mirror)
+    _solo_gfs_mirror(mirror)
     client = _precip_client(monkeypatch, mirror, tmp_path / "cache")
 
-    response = client.get("/api/v1/precip/ifs/2026-09-02T12:00:00Z/index")
+    response = client.get("/api/v1/precip/gfs/2026-09-02T12:00:00Z/index")
 
     assert response.status_code == 200, response.text
     data = response.json()["data"]
-    assert data["source"] == "ifs"
+    assert data["source"] == "gfs"
     assert data["cycle"] == "2026-09-02T12:00:00Z"
     assert data["window_hours"] == 24
     assert data["unit"] == "mm/24h"
@@ -1166,11 +1445,65 @@ def test_index_lists_only_windows_that_resolve_completely(
     assert data["image_size"] == list(image_size(_small_grid()))
     # Only the requested cycle is mirrored, so the first complete window is the
     # one whose earliest end time is the cycle + 3h: lead 24h, then every 3h step
-    # through +168h.
+    # through +168h. GFS is uniformly 3-hourly, so the whole horizon is reachable.
     assert data["valid_times"][0] == "2026-09-03T12:00:00Z"
     assert data["valid_times"][-1] == "2026-09-09T12:00:00Z"
     assert len(data["valid_times"]) == 49
     assert all(instant.endswith("Z") and "." not in instant for instant in data["valid_times"])
+
+
+def test_index_on_a_fully_mirrored_gfs_history_covers_the_whole_horizon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With the two preceding cycles mirrored, the lead-0 window resolves too: 57 steps."""
+    mirror = tmp_path / "mirror"
+    _complete_gfs_mirror(mirror, cycles=(CYCLE_0901_12, CYCLE_0902_00, CYCLE_0902_12))
+    client = _precip_client(monkeypatch, mirror, tmp_path / "cache")
+
+    data = client.get("/api/v1/precip/gfs/2026-09-02T12:00:00Z/index").json()["data"]
+
+    assert data["valid_times"][0] == "2026-09-02T12:00:00Z"
+    assert data["valid_times"][-1] == "2026-09-09T12:00:00Z"
+    assert len(data["valid_times"]) == 57
+
+
+def test_ifs_lead_fixtures_follow_the_producer_segmented_cadence() -> None:
+    """Anti-vacuity for the two IFS index tests: the fixture models the real cadence."""
+    assert IFS_LEADS[:4] == (0, 3, 6, 9)
+    assert tuple(lead for lead in IFS_LEADS if lead <= 144) == tuple(range(0, 145, 3))
+    assert tuple(lead for lead in IFS_LEADS if lead > 144) == (150, 156, 162, 168)
+    # The four leads a 3-hourly model would have and IFS never emits.
+    assert not {147, 153, 159, 165} & set(IFS_LEADS)
+
+
+def test_index_on_the_ifs_cadence_stops_at_the_last_complete_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Known limit: a +147h window needs lead 147, which the 6-hourly tail never emits."""
+    mirror = tmp_path / "mirror"
+    _solo_ifs_mirror(mirror)
+    client = _precip_client(monkeypatch, mirror, tmp_path / "cache")
+
+    data = client.get("/api/v1/precip/ifs/2026-09-02T12:00:00Z/index").json()["data"]
+
+    assert data["valid_times"][0] == "2026-09-03T12:00:00Z"  # cycle + 24h
+    assert data["valid_times"][-1] == "2026-09-08T12:00:00Z"  # cycle + 144h, not + 168h
+    assert len(data["valid_times"]) == 41
+
+
+def test_index_on_a_fully_mirrored_ifs_history_still_stops_at_plus_144h(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """More history extends the window backwards (49 steps), never past the +144h cap."""
+    mirror = tmp_path / "mirror"
+    _complete_ifs_mirror(mirror)
+    client = _precip_client(monkeypatch, mirror, tmp_path / "cache")
+
+    data = client.get("/api/v1/precip/ifs/2026-09-02T12:00:00Z/index").json()["data"]
+
+    assert data["valid_times"][0] == "2026-09-02T12:00:00Z"
+    assert data["valid_times"][-1] == "2026-09-08T12:00:00Z"
+    assert len(data["valid_times"]) == 49
 
 
 def test_index_reads_no_netcdf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1440,4 +1773,148 @@ def test_etag_is_derived_from_the_identity_tuple(tmp_path: Path, monkeypatch: py
     ).encode("utf-8")
     assert response.headers["etag"] == f'W/"precip-{hashlib.sha256(payload).hexdigest()}"'
 
+
+# --------------------------------------------------------------------------
+# 5.5 import boundary and the display_readonly index cache
+# --------------------------------------------------------------------------
+
+
+def _import_probe(statement: str) -> subprocess.CompletedProcess[str]:
+    """Run one import in a FRESH interpreter; `sys.modules` here is already polluted."""
+    return subprocess.run(
+        [sys.executable, "-c", statement],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_importing_the_tile_module_does_not_load_numpy_or_netcdf4() -> None:
+    """`services/tiles/mvt.py` calls its precip import "stdlib-only constants"; make it true.
+
+    Importing `services.precip.constants` executes `services/precip/__init__.py`
+    first, so an eager `from services.precip.field import ...` there drags numpy
+    and netCDF4 into every display request that touches the layer catalog
+    (pinned decision 15). The names stay re-exported through a PEP 562
+    `__getattr__`.
+    """
+    probe = _import_probe(
+        "import sys, services.tiles.mvt\n"
+        "heavy = sorted(name for name in sys.modules if name.split('.')[0] in {'netCDF4', 'numpy'})\n"
+        "assert not heavy, heavy\n"
+    )
+
+    assert probe.returncode == 0, probe.stderr
+
+
+def test_importing_the_precip_package_alone_does_not_load_numpy_or_netcdf4() -> None:
+    probe = _import_probe(
+        "import sys, services.precip\n"
+        "heavy = sorted(name for name in sys.modules if name.split('.')[0] in {'netCDF4', 'numpy'})\n"
+        "assert not heavy, heavy\n"
+        "assert services.precip.horizon_valid_times is not None\n"
+    )
+
+    assert probe.returncode == 0, probe.stderr
+
+
+def test_the_lazy_reexports_still_resolve_and_do_load_the_array_stack() -> None:
+    """Positive control: the boundary assertions above are not passing by accident."""
+    probe = _import_probe(
+        "import sys, services.precip\n"
+        "assert 'netCDF4' not in sys.modules\n"
+        "from services.precip import GridDefinition, accumulate_24h, load_grid, render_png\n"
+        "assert 'netCDF4' in sys.modules and 'numpy' in sys.modules\n"
+        "assert render_png.__module__ == 'services.precip.render'\n"
+        "assert GridDefinition.__module__ == 'services.precip.field'\n"
+        "assert accumulate_24h.__module__ == 'services.precip.field'\n"
+        "assert load_grid.__module__ == 'services.precip.field'\n"
+    )
+
+    assert probe.returncode == 0, probe.stderr
+
+
+def test_importing_the_field_module_directly_loads_netcdf4() -> None:
+    """The other half of the control: the probe DOES observe a loaded netCDF4."""
+    probe = _import_probe(
+        "import sys, services.precip.field\n"
+        "assert 'netCDF4' in sys.modules and 'numpy' in sys.modules\n"
+    )
+
+    assert probe.returncode == 0, probe.stderr
+
+
+def _display_readonly_precip_client(
+    monkeypatch: pytest.MonkeyPatch, mirror_root: Path, cache_root: Path, object_store_root: Path
+) -> TestClient:
+    """A client on the PRODUCTION role, where `display_catalog_cached` actually caches.
+
+    Under DEV_MONOLITH (what every other test here builds) `display_catalog_cached`
+    is a pass-through, so the index cache key is never exercised. The role env is
+    handed to `create_app` explicitly rather than exported, so the display
+    boundary check sees exactly these three variables and none of the
+    compute-only ones this process may carry. The warmer thread `create_app`
+    starts is stopped by the autouse `_stop_display_catalog_warmer` fixture,
+    which also clears the catalog cache between tests.
+    """
+    monkeypatch.setenv(MIRROR_ROOT_ENV, str(mirror_root))
+    monkeypatch.setenv(FILE_CACHE_DIR_ENV, str(cache_root))
+    object_store_root.mkdir(parents=True, exist_ok=True)
+    app = main.create_app(
+        {
+            "NHMS_REQUIRE_SERVICE_ROLE": "true",
+            "NHMS_SERVICE_ROLE": "display_readonly",
+            "OBJECT_STORE_ROOT": str(object_store_root),
+        }
+    )
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_display_readonly_index_cache_is_keyed_per_cycle_and_never_poisoned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production caching branch: one entry per cycle, and no off-hour entry at all.
+
+    The `:30` request goes FIRST on purpose. The old `%Y%m%d%H` cache key drops
+    minutes, so a cold `00:30Z` request parked its own payload (echoing
+    `cycle: ...T00:30:00Z`, and off-hour `valid_times`) under the whole-hour key
+    and every later `00:00Z` visitor was served it for up to 600 s.
+    """
+    mirror = tmp_path / "mirror"
+    _write_cycle(mirror, storage_source="gfs", cycle=CYCLE_0902_00, leads=FULL_LEADS)
+    _write_cycle(mirror, storage_source="gfs", cycle=CYCLE_0902_12, leads=FULL_LEADS)
+    _write_grid(mirror, storage_source="gfs")
+    client = _display_readonly_precip_client(
+        monkeypatch, mirror, tmp_path / "cache", tmp_path / "object-store"
+    )
+    loads: list[str] = []
+    real_load_grid = precip_routes.load_grid
+
+    def _counting_load_grid(*args: Any, **kwargs: Any) -> Any:
+        loads.append("load")
+        return real_load_grid(*args, **kwargs)
+
+    monkeypatch.setattr(precip_routes, "load_grid", _counting_load_grid)
+
+    poison = client.get("/api/v1/precip/gfs/2026-09-02T00:30:00Z/index")
+    assert poison.status_code == 422, poison.text
+    assert loads == []
+
+    first = client.get("/api/v1/precip/gfs/2026-09-02T00:00:00Z/index")
+    second = client.get("/api/v1/precip/gfs/2026-09-02T12:00:00Z/index")
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["data"]["cycle"] == "2026-09-02T00:00:00Z"
+    assert second.json()["data"]["cycle"] == "2026-09-02T12:00:00Z"
+    assert first.json()["data"]["valid_times"] != second.json()["data"]["valid_times"]
+    assert len(loads) == 2
+
+    repeat = client.get("/api/v1/precip/gfs/2026-09-02T00:00:00Z/index")
+
+    assert repeat.json()["data"] == first.json()["data"]
+    # The second visit to the same cycle is served from the catalog cache: the
+    # loader (and therefore the mirror walk) is not re-entered.
+    assert len(loads) == 2
 
