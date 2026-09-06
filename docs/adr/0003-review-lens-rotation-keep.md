@@ -3384,3 +3384,38 @@ and was clean; all three verified catches came from Round 1, so it adds no
 later-round catch to either side. The measured direction therefore remains
 unchanged: **keep rotation**. Next revisit on the audit's next flag or a
 maintainer override.
+
+## Revisit 2026-09-06 (post-merge #2099 / #2011)
+
+The audit re-flagged DECIDABLE at 179 multi-round merged PRs: later-round
+catches core=197, rotated=265, phase=51, with 15 non-attributable catches
+skipped. Direction unchanged: **keep rotation**. But this sample argues the
+point less comfortably than the last three, and the discomfort is worth
+recording rather than smoothing over.
+
+This PR, #2099, is the one new multi-round sample, and the whole of its `+4`
+lands on the core side. Round 1 ran four seats (`correctness`, `invariant-state`,
+`test-evidence+spec-compliance`, `security-perf+integration`) and returned a
+P1, which under the current policy entitles Round 2 to rotate a complementary
+lens into its one free seat. Round 2 did not use that entitlement: it ran three
+seats, all of them repeats from Round 1, dropping `invariant-state` rather than
+rotating anything new in. It still produced four verified findings. So the
+rotated share moved 57.9% -> 57.4% not because rotation underperformed, but
+because a round that was entitled to rotate and declined still caught four
+things with repeat seats.
+
+The sharper signal in this PR points somewhere adjacent to rotation rather than
+at it. Phase 7 — a fresh independent seat that took part in neither
+comprehensive round — found two further defects that all three Round 2 seats
+had missed, and both were in text the orchestrator itself had written during
+the fix passes. That is an argument for a genuinely uninvolved reader late in
+the loop, which the phase-lens column already counts separately (phase=51) and
+which rotation between seat lenses does not supply. It also suggests the
+audit's core-vs-rotated split may be measuring seat identity when the useful
+variable is reviewer independence from the work under review.
+
+No policy change on that observation alone: one PR is one sample, and the
+orchestrator-authored-text failure mode it exposes is specific to a run where
+the orchestrator wrote a substantial ops artifact mid-review. Recorded here so
+the next revisit can check whether the phase-lens column keeps outperforming
+its size. Next revisit on the audit's next flag or a maintainer override.
