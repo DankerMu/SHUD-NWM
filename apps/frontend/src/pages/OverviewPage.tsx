@@ -68,9 +68,12 @@ export function OverviewPage() {
     navigate({ pathname: location.pathname, search: normalizedSearch ? `?${normalizedSearch}` : '' }, { replace: true })
   }, [location.pathname, navigate, needsQueryReplacement, normalizedSearch])
 
-  // 刷新/直达带 basinId 的 URL：仅首挂载剥离 basinId，落到全国总览主页；会话内点流域（挂载后写
-  // basinId）不受影响。剥离期间同步按总览渲染（绝不挂 BasinDetailMode），否则详情副作用会把 basinId
-  // 回写 URL、盖掉剥离形成竞态。闸门只认「首挂载是否带 basinId」，basinId 真正消失后即关闭。
+  // 刷新/直达带 basinId 的 URL：仅首挂载剥离 basinId（`replace`），落到全国总览主页。剥离期间同步
+  // 按总览渲染（绝不挂 BasinDetailMode），否则详情副作用会把 basinId 回写 URL、盖掉剥离形成竞态。
+  // 闸门只认「首挂载是否带 basinId」，basinId 真正消失后即关闭，此后挂载期内写入的 basinId 不受影响。
+  // 现状：本 build 里没有任何「挂载后写非空 basinId」的路径 —— 两处写 basinId 的调用点写的都是 null
+  // （BasinDetailPanels.tsx `backToOverview`、本文件的剥离 effect），全国视图点流域只做相机 fit
+  // （见 handleMapOverlayClick）。因此 BasinDetailMode 目前只对未来新增的写入方可达。
   const initialBasinStripRef = useRef(Boolean(state.basinId))
   const strippingInitialBasin = initialBasinStripRef.current && Boolean(state.basinId)
   useEffect(() => {

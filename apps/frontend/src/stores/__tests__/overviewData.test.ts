@@ -858,12 +858,26 @@ describe('overview data store discharge loading', () => {
         validTimes: [OTHER_CYCLE, '2026-05-17T15:00:00Z', '2026-05-17T18:00:00Z'],
       },
     })
+    // 先清掉模块级 HTTP 缓存再进流域详情：否则「没发 per-cycle 请求」是缓存造成的真空断言 ——
+    // 上面的 loadOverview 已把 (gfs, OTHER_CYCLE) 的响应落进 `cached()`，泄漏的请求根本到不了
+    // `client.GET`。`clearOverviewDataCache()` 连 store 的 `validTimesByCycle` 一并清（它俩同寿），
+    // 而本用例的前提正是那份共享列表还在，故快照后回填。HTTP 缓存有 TTL、store 状态没有，
+    // 「缓存已过期而共享列表仍在」是真实可达状态，不是为断言捏造的。
+    const sharedValidTimes = useOverviewDataStore.getState().validTimesByCycle
+    clearOverviewDataCache()
+    useOverviewDataStore.setState({ validTimesByCycle: sharedValidTimes })
     const callsBeforeBasinLoad = calls.length
 
     const snapshot = await useOverviewDataStore.getState().loadBasinDetail('basin-demo', otherCycleQuery)
 
     // 流域详情自身这一段没有再发 per-cycle valid-times。
     expect(perCycleValidTimesCalls(calls.slice(callsBeforeBasinLoad))).toHaveLength(0)
+    // 非空对照：清缓存后这一段的请求确实到得了 client.GET（run-scoped valid-times 就在里面），
+    // 所以上面的 0 是「真没发」而不是「发了但被缓存吃掉」。
+    const runScopedValidTimesCalls = calls
+      .slice(callsBeforeBasinLoad)
+      .filter((call) => call.path === VALID_TIMES_PATH && call.query?.run_id === 'run-001')
+    expect(runScopedValidTimesCalls).not.toHaveLength(0)
     const discharge = snapshot.layers.find((item) => item.layerId === 'discharge')
     expect(discharge?.available).toBe(true)
     expect(discharge?.disabledReason).toBeNull()
