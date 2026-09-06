@@ -3373,3 +3373,14 @@ seats but zero later-round catches; all 10 of its net catches came from
 round 1 (2 P1 from spec-compliance + integration) and the fixture review.
 Direction unchanged: **keep rotation**. Next revisit on the audit's next
 flag or maintainer override.
+
+## Revisit 2026-09-06 (post-merge #2093 / #2086)
+
+The canonical audit re-flagged DECIDABLE at 178 multi-round merged PRs:
+later-round catches core=193, rotated=265, phase=51, with 15
+non-attributable catches skipped. #2093 is the one new multi-round sample. Its
+Round 2 used the pinned `correctness` and `test-evidence+spec-compliance` seats
+and was clean; all three verified catches came from Round 1, so it adds no
+later-round catch to either side. The measured direction therefore remains
+unchanged: **keep rotation**. Next revisit on the audit's next flag or a
+maintainer override.
