@@ -97,8 +97,8 @@ def _assert_invalid_both_seams(
 def _assert_valid_both_seams(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    riv: str,
-    rivseg: str,
+    riv: bytes | str,
+    rivseg: bytes | str,
     *,
     version: str,
 ) -> None:
@@ -217,6 +217,26 @@ def test_genuine_single_reach_mapping_remains_compatible_at_both_seams(
 
 
 @pytest.mark.parametrize(
+    ("reach_token", "version"),
+    (
+        ("123456789012345678", "v-rivseg-exact-18-unsigned"),
+        ("+123456789012345678", "v-rivseg-exact-18-signed"),
+    ),
+    ids=("unsigned-18-digit", "explicitly-signed-18-digit"),
+)
+def test_exact_18_digit_reach_identifier_is_accepted_at_both_public_seams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reach_token: str,
+    version: str,
+) -> None:
+    riv = f"1 6\nIndex Down Type Slope Length BC\n{reach_token} 0 0 0.01 100 0\n"
+    rivseg = f"1 4\nIndex iRiv iEle Length\n1 {reach_token} 1 100\n"
+
+    _assert_valid_both_seams(tmp_path, monkeypatch, riv, rivseg, version=version)
+
+
+@pytest.mark.parametrize(
     ("riv", "rivseg", "version"),
     (
         (
@@ -327,6 +347,23 @@ def test_missing_reference_list_is_sorted_and_bounded_at_both_public_seams(
     )
 
 
+def test_mapping_file_at_exact_cap_is_accepted_at_both_public_seams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical_mapping = _VALID_SINGLE_RIVSEG.encode("utf-8")
+    exact_cap_mapping = canonical_mapping.ljust(_MAPPING_BYTE_LIMIT, b"#")
+    assert len(exact_cap_mapping) == _MAPPING_BYTE_LIMIT
+
+    _assert_valid_both_seams(
+        tmp_path,
+        monkeypatch,
+        _VALID_SINGLE_RIV,
+        exact_cap_mapping,
+        version="v-rivseg-exact-16-mib",
+    )
+
+
 def test_mapping_file_at_cap_plus_one_is_refused_at_both_public_seams(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -337,6 +374,60 @@ def test_mapping_file_at_cap_plus_one_is_refused_at_both_public_seams(
         _VALID_SINGLE_RIV,
         b"#" * (_MAPPING_BYTE_LIMIT + 1),
         cause="over_limit",
+    )
+
+
+def test_normalized_qhh_tab_separated_mapping_is_accepted_at_both_public_seams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture_root = Path(__file__).parent / "fixtures" / "basins" / "qhh-sample"
+    riv_source = (fixture_root / "qhh.sp.riv").read_bytes()
+    rivseg_source = (fixture_root / "qhh.sp.rivseg").read_bytes()
+    riv = b"5" + riv_source[riv_source.index(b"\t") :]
+    rivseg = b"18" + rivseg_source[rivseg_source.index(b"\t") :]
+
+    assert riv_source.startswith(b"1633\t6\n")
+    assert rivseg_source.startswith(b"3738\t4\n")
+    assert riv.split(b"\t", 1)[1] == riv_source.split(b"\t", 1)[1]
+    assert rivseg.split(b"\t", 1)[1] == rivseg_source.split(b"\t", 1)[1]
+    assert riv.endswith(b"\n")
+    assert rivseg.endswith(b"\n")
+    assert riv.splitlines()[0] == b"5\t6"
+    assert rivseg.splitlines()[0] == b"18\t4"
+    assert riv.splitlines()[1] == b"Index\tDown\tType\tSlope\tLength\tBC"
+    assert rivseg.splitlines()[1] == b"Index\tiRiv\tiEle\tLength"
+    assert [line.split(b"\t", 1)[0] for line in riv.splitlines()[2:]] == [b"1", b"2", b"3", b"9", b"180"]
+    assert [line.split(b"\t", 1)[0] for line in rivseg.splitlines()[2:]] == [
+        b"1",
+        b"2",
+        b"3",
+        b"4",
+        b"5",
+        b"6",
+        b"7",
+        b"8",
+        b"9",
+        b"10",
+        b"11",
+        b"12",
+        b"22",
+        b"23",
+        b"24",
+        b"25",
+        b"404",
+        b"405",
+    ]
+    assert {line.split(b"\t")[1] for line in rivseg.splitlines()[2:]} == {b"1", b"2", b"3", b"9", b"180"}
+    assert all(b"\t" in line for line in riv.splitlines())
+    assert all(b"\t" in line for line in rivseg.splitlines())
+
+    _assert_valid_both_seams(
+        tmp_path,
+        monkeypatch,
+        riv,
+        rivseg,
+        version="v-rivseg-qhh-tab-normalized-5-18",
     )
 
 
