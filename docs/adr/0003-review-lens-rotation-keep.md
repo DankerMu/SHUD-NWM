@@ -3360,3 +3360,16 @@ a zero-round `none` fixture (ops receipt, review-not-required record) and
 contributes no attribution data; the sample moved only by the three
 single-round lines landed since the previous addendum. Next revisit on
 the audit's next flag or maintainer override.
+
+## Addendum 2026-09-06 (post-merge #2094 / #2010, self-accounting PR #2095)
+
+Audit re-flagged DECIDABLE at 177 multi-round merged PRs, later-round
+catches core=193 vs rotated=265 phase=51 (rotated share 58% of seat-lens
+catches, skipped=15 non-attributable; the audit now reports phase-lens
+catches separately, which is why the rotated figure dropped from 316 to
+265 without any keep-relevant change). #2094 is the one new sample: its
+round 2 ran three paired seats and was clean, so it contributes rotation
+seats but zero later-round catches; all 10 of its net catches came from
+round 1 (2 P1 from spec-compliance + integration) and the fixture review.
+Direction unchanged: **keep rotation**. Next revisit on the audit's next
+flag or maintainer override.

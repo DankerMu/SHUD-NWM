@@ -854,6 +854,11 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_node27_timeseries_compression_live_evidence.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        # #2010: guard-derived entry, synced from the selector's own output per
+        # the procedure above — the precip suite imports services.tiles.mvt
+        # (layer_metadata / MVT_FILE_CACHE_DIR_ENV) at file level, so the
+        # closure guard puts it on this rule as a DIRECT importer.
+        "tests/test_precip_overlay.py",
         # I1 #1980, same group as the coverage-refresh entry above.
         "tests/test_qhh_latest_fallback_pushdown.py",
         # Issue #1341 added the surrogate-key / transitional-pushdown shape

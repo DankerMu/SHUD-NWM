@@ -10,21 +10,21 @@ Every instant this capability places in a URL path segment, in a JSON `cycle`/`v
 
 #### Scenario: Alternate spellings collapse to one cache entry
 - **WHEN** the PNG is requested with `valid_time` spelled `2026-09-02T12:00:00.000Z`, then `2026-09-02T12:00:00+00:00`, then `2026-09-02T12:00:00Z`
-- **THEN** all three resolve to the same cache file and the second and third requests are cache hits
+- **THEN** all three resolve to the same cache file (same slice set, same digest) and the second and third requests are cache hits
 - **AND** no second file is written under a fractional-second or offset-bearing name
 
 ### Requirement: Route triple maps to canonical mirror paths by two pinned rules
-The resolver SHALL translate a `(source, cycle)` route pair to mirror paths with exactly two rules and no ad-hoc string handling. **Source:** the route segment is validated against the enum `{gfs, ifs}` FIRST — the enum check rejects anything else (`ERA5`, `best`, `compare`, upper-case spellings) with HTTP 422 before any normalization or filesystem access — and only then translated to the storage source id with `packages/common/source_identity.py::normalize_source_id` (`"gfs" → "gfs"`, `"ifs" → "IFS"`). **Cycle:** the canonical RFC3339 instant is rendered to the compact directory token `%Y%m%d%H`, the same token `workers/canonical_converter/converter.py::format_cycle_time` produces. For storage source `S`, cycle token `K` and lead hour `L`, the slice file is `<copyback_root>/canonical/<S>/<K>/prcp_rate_or_amount/<S>_<K>_prcp_rate_or_amount_f<L:03d>.nc` and the grid definition is `<copyback_root>/canonical/<S>/grid/<grid_id>/grid.json` with `grid_id = gfs_0p25` for `gfs` and `ifs_0p25` for `IFS`.
+The resolver SHALL translate a `(source, cycle)` route pair to mirror paths with exactly two rules and no ad-hoc string handling. **Source:** the route segment is validated against the enum `{gfs, ifs}` FIRST — the enum check rejects anything else (`ERA5`, `best`, `compare`, upper-case spellings) with HTTP 422 before any normalization or filesystem access — and only then translated to the storage source id with `packages/common/source_identity.py::normalize_source_id` (`"gfs" → "gfs"`, `"ifs" → "IFS"`). **Cycle:** the canonical RFC3339 instant is rendered to the compact directory token `%Y%m%d%H`, the same token `workers/canonical_converter/converter.py::format_cycle_time` produces. For storage source `S`, cycle token `K` and lead hour `L`, the slice file is `<mirror_root>/canonical/<S>/<K>/prcp_rate_or_amount/<S>_<K>_prcp_rate_or_amount_f<L:03d>.nc` and the grid definition is `<mirror_root>/canonical/<S>/grid/<grid_id>/grid.json` with `grid_id = gfs_0p25` for `gfs` and `ifs_0p25` for `IFS`.
 
 #### Scenario: ifs route resolves to the upper-case mirror directory
 - **WHEN** the resolver handles route source `ifs`, cycle `2026-09-02T12:00:00Z` and a slice end time `T = 2026-09-02T15:00:00Z` (lead 3h)
-- **THEN** it reads `<copyback_root>/canonical/IFS/2026090212/prcp_rate_or_amount/IFS_2026090212_prcp_rate_or_amount_f003.nc`
-- **AND** the grid comes from `<copyback_root>/canonical/IFS/grid/ifs_0p25/grid.json`
+- **THEN** it reads `<mirror_root>/canonical/IFS/2026090212/prcp_rate_or_amount/IFS_2026090212_prcp_rate_or_amount_f003.nc`
+- **AND** the grid comes from `<mirror_root>/canonical/IFS/grid/ifs_0p25/grid.json`
 
 #### Scenario: gfs route keeps the lower-case mirror directory
 - **WHEN** the resolver handles route source `gfs`, cycle `2026-09-02T12:00:00Z` and a slice end time `T = 2026-09-02T15:00:00Z`
-- **THEN** it reads `<copyback_root>/canonical/gfs/2026090212/prcp_rate_or_amount/gfs_2026090212_prcp_rate_or_amount_f003.nc`
-- **AND** the grid comes from `<copyback_root>/canonical/gfs/grid/gfs_0p25/grid.json`
+- **THEN** it reads `<mirror_root>/canonical/gfs/2026090212/prcp_rate_or_amount/gfs_2026090212_prcp_rate_or_amount_f003.nc`
+- **AND** the grid comes from `<mirror_root>/canonical/gfs/grid/gfs_0p25/grid.json`
 
 #### Scenario: Enum check precedes normalization
 - **WHEN** the route is called with `source=ERA5` (a value `normalize_source_id` would happily accept)
@@ -51,13 +51,17 @@ The requested cycle is an upper bound: slices come from the requested cycle or f
 - **AND** no slice is read from `2026-09-02T00:00:00Z` or `2026-09-02T12:00:00Z`, even though an unbounded "most recent `C ≤ T − 3h`" rule would have selected `2026-09-02T00:00:00Z` for the end times at or after `2026-09-02T03:00:00Z`
 - **AND** mirroring a further newer cycle afterwards leaves the resolved slice set and the PNG cache key unchanged
 
+#### Scenario: No mirrored cycle before a window end time
+- **WHEN** the mirror holds only the requested cycle `C` and `valid_time = C` (the first 24 h window of the oldest retained cycle)
+- **THEN** the resolver raises `PrecipWindowIncomplete` with `reason == "no_mirrored_cycle_before_window_end"` and `window_end == C − 21h`, and the PNG route answers 404 `PRECIP_WINDOW_INCOMPLETE` with `details.reason` and `details.window_end`, never a 500
+
 #### Scenario: Missing slice fails closed
 - **WHEN** any of the 8 resolved slice files is absent from the mirror
 - **THEN** the resolver raises `PrecipWindowIncomplete` naming the missing slice
 - **AND** no partial field is rendered or cached
 
 ### Requirement: Precipitation PNG rendering is Web-Mercator aligned and dependency-free
-The display API SHALL render the mm/24h field to an 8-bit palette PNG whose rows are resampled to Web-Mercator spacing over the grid bbox (63–145E, 8–64N), width 1316 px, height derived from the Mercator aspect ratio, using bilinear sampling of the 0.25° field. The palette MUST be the CMA 24h six-class scale in PLTE index order: index 0 = transparent (<0.1 mm/24h); 1 = `#A6F28F` 淡绿 (0.1–10); 2 = `#3DBA3D` 绿 (10–25); 3 = `#61B8FF` 蓝 (25–50); 4 = `#0000FF` 深蓝 (50–100); 5 = `#FA00FA` 紫 (100–250); 6 = `#800040` 深紫 (≥250). The same six hex values in the same order MUST be returned as `legend[].color` by the precip index and by the `precip` entry of `/api/v1/layers`, and `palette_version` MUST change whenever any hex value or threshold changes. Encoding MUST use only numpy + zlib (no Pillow) and MUST write the PNG atomically to `NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>/<valid_time>.<palette_version>.png`, where `<storage_source>` and `<cycle_token>` are the SAME `normalize_source_id` / `%Y%m%d%H` pair used for the mirror path (so the cache directory for a cycle carries the identical name as `canonical/<storage_source>/<cycle_token>`) and `<valid_time>` is the seconds-precision RFC3339 spelling.
+The display API SHALL render the mm/24h field to an 8-bit palette PNG whose rows are resampled to Web-Mercator spacing over the grid bbox (63–145E, 8–64N), width 1316 px, height derived from the Mercator aspect ratio, using bilinear sampling of the 0.25° field. The palette MUST be the CMA 24h six-class scale in PLTE index order: index 0 = transparent (<0.1 mm/24h); 1 = `#A6F28F` 淡绿 (0.1–10); 2 = `#3DBA3D` 绿 (10–25); 3 = `#61B8FF` 蓝 (25–50); 4 = `#0000FF` 深蓝 (50–100); 5 = `#FA00FA` 紫 (100–250); 6 = `#800040` 深紫 (≥250). The same six hex values in the same order MUST be returned as `legend[].color` by the precip index and by the `precip` entry of `/api/v1/layers`, and `palette_version` MUST change whenever any hex value or threshold changes. Encoding MUST use only numpy + zlib (no Pillow) and MUST write the PNG atomically to `NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>/<valid_time>.<palette_version>.<slice_digest>.png`, where `<storage_source>` and `<cycle_token>` are the SAME `normalize_source_id` / `%Y%m%d%H` pair used for the mirror path (so the cache directory for a cycle carries the identical name as `canonical/<storage_source>/<cycle_token>`), `<valid_time>` is the seconds-precision RFC3339 spelling, and `<slice_digest>` is the first 12 hex characters of the sha256 over the resolved slice object keys in window order — so a later-arriving intermediate cycle that changes the resolved slice set produces a new cache file rather than serving stale bytes under a new ETag.
 
 #### Scenario: Valid PNG structure
 - **WHEN** `render_png` is called with a 225×329 field and the grid definition
@@ -76,15 +80,15 @@ The display API SHALL render the mm/24h field to an 8-bit palette PNG whose rows
 
 #### Scenario: Cache path mirrors the canonical cycle directory
 - **WHEN** the PNG for `source=ifs`, `cycle=2026-09-02T12:00:00Z`, `valid_time=2026-09-02T15:00:00Z` is written
-- **THEN** the file is `NHMS_MVT_FILE_CACHE_DIR/precip/IFS/2026090212/2026-09-02T15:00:00Z.<palette_version>.png`
+- **THEN** the file is `NHMS_MVT_FILE_CACHE_DIR/precip/IFS/2026090212/2026-09-02T15:00:00Z.<palette_version>.<slice_digest>.png`
 - **AND** the directory component `IFS/2026090212` equals the mirror component `canonical/IFS/2026090212`
 
 #### Scenario: Cache hit
-- **WHEN** the PNG for `(source, cycle, valid_time, palette_version)` already exists in the file cache
+- **WHEN** the PNG for `(source, cycle, valid_time, palette_version, resolved slice set)` already exists in the file cache
 - **THEN** the route serves the cached bytes without reading NetCDF
 
 ### Requirement: Precipitation endpoints and catalog entry
-The display API SHALL expose `GET /api/v1/precip/{source}/{cycle}/index` and `GET /api/v1/precip/{source}/{cycle}/{valid_time}.png` with `source ∈ {gfs, ifs}` and RFC3339 `cycle`/`valid_time` canonicalized per the seconds-precision requirement, and SHALL add a `precip` entry to `/api/v1/layers` with `layer_type = meteorology`, `tile_format = png`, and metadata `image_url_template`, `index_url_template`, `bounds`, `legend`, `window_hours = 24`, `unit = "mm/24h"`. Both routes and both `/api/v1/layers` shape changes MUST be reflected in the hand-maintained `openapi/nhms.v1.yaml`.
+The display API SHALL expose `GET /api/v1/precip/{source}/{cycle}/index` and `GET /api/v1/precip/{source}/{cycle}/{valid_time}.png` with `source ∈ {gfs, ifs}` and RFC3339 `cycle`/`valid_time` canonicalized per the seconds-precision requirement, and SHALL add a `precip` entry to `/api/v1/layers` with `layer_type = meteorology`, `tile_format = png`, and metadata `image_url_template`, `index_url_template`, `bounds`, `legend`, `window_hours = 24`, `unit = "mm/24h"`. Both routes and both `/api/v1/layers` shape changes MUST be reflected in the hand-maintained `openapi/nhms.v1.yaml`. The mirror root is read from the display-side, read-only env `NHMS_PRECIP_MIRROR_ROOT` (the node-27 view of the same NFS tree node-22 writes under `NHMS_OBJECT_STORE_COPYBACK_ROOT`); the display API MUST NOT read `NHMS_OBJECT_STORE_COPYBACK_ROOT`, which the `display_readonly` profile forbids outright (`apps/api/runtime_mode.py`).
 
 #### Scenario: Index lists only complete windows
 - **WHEN** the index is requested for a mirrored cycle
@@ -95,8 +99,13 @@ The display API SHALL expose `GET /api/v1/precip/{source}/{cycle}/index` and `GE
 - **THEN** the route returns HTTP 404 with code `PRECIP_WINDOW_INCOMPLETE`
 
 #### Scenario: Unmirrored cycle
-- **WHEN** the requested `cycle` directory does not exist in the copyback root (never mirrored, or pruned by retention)
-- **THEN** the route returns HTTP 404 with code `PRECIP_CYCLE_NOT_MIRRORED`
+- **WHEN** the requested cycle's `canonical/<S>/<K>/prcp_rate_or_amount/` directory does not exist under the mirror root (never mirrored, or pruned by retention), even when older mirrored cycles could cover the whole window
+- **THEN** the route returns HTTP 404 with code `PRECIP_CYCLE_NOT_MIRRORED` before any slice lookup
+
+#### Scenario: Mirror root unconfigured
+- **WHEN** `NHMS_PRECIP_MIRROR_ROOT` is unset or empty on the serving deployment
+- **THEN** both routes return HTTP 404 with code `PRECIP_CYCLE_NOT_MIRRORED` and `details.reason == "mirror_root_unconfigured"`, never a 500
+- **AND** no filesystem path is stat-ed
 
 #### Scenario: PNG response carries MVT cache semantics
 - **WHEN** a PNG is served (cold or from the file cache)
@@ -106,6 +115,18 @@ The display API SHALL expose `GET /api/v1/precip/{source}/{cycle}/index` and `GE
 #### Scenario: Invalid source
 - **WHEN** `source` is not `gfs` or `ifs`
 - **THEN** the route returns HTTP 422 without touching the filesystem
+
+#### Scenario: Off-hour or out-of-horizon instant
+- **WHEN** `cycle` or `valid_time` carries a non-zero minute or second, or the PNG route's `valid_time` is not one of the 3-hour steps from `cycle` to `cycle + 168h` (including any instant before `cycle` or so far out of range that window arithmetic would overflow)
+- **THEN** the route returns HTTP 422 with code `VALIDATION_ERROR` before any filesystem access, writes no cache file, and never answers 500
+
+#### Scenario: IFS index ends at the last complete window
+- **WHEN** the mirrored IFS products follow the producer's cadence (3-hourly to lead 144 h, 6-hourly after)
+- **THEN** `valid_times[]` ends at `cycle + 144h`, because every later window needs a 3-hourly lead the producer never emits; this is the documented consequence of listing only complete windows, not an error
+
+#### Scenario: Corrupt cache or slice never reaches the client
+- **WHEN** a cache file does not start with the PNG signature, or a mirrored slice opens but fails during the data read
+- **THEN** the cache file is treated as a miss and rewritten by a complete render, and the failed slice maps to HTTP 404 `PRECIP_WINDOW_INCOMPLETE` with `details.reason == "slice_unreadable"`
 
 ### Requirement: Prewarm envelope is per-source, cycle-aware, and bounded
 This requirement is deliberately hosted in `precipitation-raster-overlay` (rather than `national-river-density`) because the precipitation PNG set is the new surface prewarm gains; it nevertheless governs the whole prewarm envelope, including the discharge-tile and river-network parts. `scripts/node27_mvt_prewarm.py` SHALL discover the newest cycle per source from `GET /api/v1/layers/discharge/cycles?source=<source>` for each of `gfs` and `ifs`, and warm exactly this envelope: for each source with a non-empty cycle list, the z3–z4 China tiles of `/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf` for every valid time of that source's newest cycle, plus one `/api/v1/precip/{source}/{cycle}/{valid_time}.png` per valid time of that cycle; the national river-network prewarm stays z3–z5 and unchanged. The emitted request count and elapsed time MUST be part of the run summary and the deployment receipt. The script MUST NOT fabricate a cycle: an empty `cycles[]` for a source means that source contributes zero requests.

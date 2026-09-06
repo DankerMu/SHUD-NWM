@@ -18,6 +18,20 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+# Stdlib-only constants module (no numpy / netCDF4 pulled in by this import).
+from services.precip.constants import (
+    PALETTE_VERSION,
+    PRECIP_BOUNDS,
+    PRECIP_BOUNDS_CRS,
+    PRECIP_IMAGE_URL_TEMPLATE,
+    PRECIP_INDEX_URL_TEMPLATE,
+    PRECIP_LAYER_ID,
+    PRECIP_LEGEND,
+    PRECIP_REQUIRED_PLACEHOLDERS,
+    PRECIP_UNIT,
+    PRECIP_WINDOW_HOURS,
+)
+
 SAFE_TILE_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 MVT_MEDIA_TYPE = "application/x-protobuf"
 MVT_EXTENT = 4096
@@ -1400,6 +1414,34 @@ def layer_metadata(
     national: bool = False,
     default_cycle: str | None = None,
 ) -> dict[str, Any]:
+    # #2010: the precipitation raster is a PNG overlay served by
+    # `/api/v1/precip/...`, so it carries no tile/source-ref machinery at all.
+    # The entry is deliberately independent of `run_id`, of `source_version` and
+    # of `release_blocking`: the same bytes must appear in the national catalog
+    # and in a `run_id`-scoped one, and nothing about a hydrological run can make
+    # a mirrored precipitation cycle more or less renderable. Bounds are the
+    # static grid bbox constants -- the catalog path must not touch the mirror
+    # filesystem; the per-cycle truth is in the precip index.
+    if layer_id == PRECIP_LAYER_ID:
+        return {
+            "layer_id": PRECIP_LAYER_ID,
+            "tile_format": "png",
+            "fallback_available": False,
+            "release_blocking": False,
+            "image_url_template": PRECIP_IMAGE_URL_TEMPLATE,
+            "index_url_template": PRECIP_INDEX_URL_TEMPLATE,
+            "required_placeholders": list(PRECIP_REQUIRED_PLACEHOLDERS),
+            "bounds": list(PRECIP_BOUNDS),
+            "bounds_crs": PRECIP_BOUNDS_CRS,
+            "legend": [dict(entry) for entry in PRECIP_LEGEND],
+            "window_hours": PRECIP_WINDOW_HOURS,
+            "unit": PRECIP_UNIT,
+            "palette_version": PALETTE_VERSION,
+            "valid_times": [],
+            "valid_time_limit": valid_time_limit,
+            "valid_time_observed_count": 0,
+            "valid_times_truncated": False,
+        }
     metadata_by_layer = {
         "river-network": {
             "tile_url_template": "/api/v1/tiles/river-network/{basin_version_id}/{z}/{x}/{y}.pbf",

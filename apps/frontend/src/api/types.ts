@@ -720,6 +720,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/precip/{source}/{cycle}/index": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Precip Index
+         * @description Window-complete valid times of one (source, cycle), plus the render contract; existence checks only.
+         */
+        get: operations["precip_index_api_v1_precip__source___cycle__index_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/precip/{source}/{cycle}/{valid_time}.png": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Precip Png
+         * @description The past-24h precipitation field at valid_time as an 8-bit palette PNG, rendered once and file-cached.
+         */
+        get: operations["precip_png_api_v1_precip__source___cycle___valid_time__png_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runtime/config": {
         parameters: {
             query?: never;
@@ -1051,6 +1091,41 @@ export interface components {
             /** Reason */
             reason?: string | null;
         };
+        /** PrecipIndex */
+        PrecipIndex: {
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "gfs" | "ifs";
+            /** Cycle */
+            cycle: string;
+            /** Window Hours */
+            window_hours: number;
+            /** Unit */
+            unit: string;
+            /** Bounds */
+            bounds: number[];
+            /** Image Size */
+            image_size: number[];
+            /** Legend */
+            legend: components["schemas"]["PrecipLegendEntry"][];
+            /** Palette Version */
+            palette_version: string;
+            /** Valid Times */
+            valid_times: string[];
+        };
+        /** PrecipLegendEntry */
+        PrecipLegendEntry: {
+            /** Min */
+            min: number;
+            /** Max */
+            max?: number | null;
+            /** Color */
+            color: string;
+            /** Label */
+            label: string;
+        };
         /** ResetRequest */
         ResetRequest: {
             /**
@@ -1377,7 +1452,7 @@ export interface components {
         LayerMetadata: {
             layer_id: string;
             /** @enum {string} */
-            tile_format: "mvt" | "geojson_compatibility";
+            tile_format: "mvt" | "geojson_compatibility" | "png";
             url_template?: string | null;
             tile_url_template?: string | null;
             required_placeholders?: string[];
@@ -1421,6 +1496,12 @@ export interface components {
             fallback_endpoint?: string | null;
             release_blocking: boolean;
             production_mvt_readiness_claimed?: boolean | null;
+            image_url_template?: string;
+            index_url_template?: string;
+            legend?: components["schemas"]["PrecipLegendEntry"][];
+            window_hours?: number;
+            unit?: string;
+            palette_version?: string;
         };
         LayerValidTimes: {
             valid_times: string[];
@@ -3616,6 +3697,127 @@ export interface operations {
             424: components["responses"]["MvtLivePostgisUnavailable"];
             "4XX": components["responses"]["Error"];
             "5XX": components["responses"]["Error"];
+        };
+    };
+    precip_index_api_v1_precip__source___cycle__index_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: "gfs" | "ifs";
+                cycle: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuccessEnvelope"] & {
+                        data: components["schemas"]["PrecipIndex"];
+                    };
+                };
+            };
+            /** @description The requested cycle is not mirrored (or no mirror root is configured), or the past-24h window cannot be assembled from cycles at or before it. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        request_id: string;
+                        /** @enum {string} */
+                        status: "error";
+                        error: {
+                            /** @enum {string} */
+                            code: "PRECIP_CYCLE_NOT_MIRRORED" | "PRECIP_WINDOW_INCOMPLETE";
+                            message: string;
+                            details?: {
+                                [key: string]: unknown;
+                            } | null;
+                        };
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    precip_png_api_v1_precip__source___cycle___valid_time__png_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source: "gfs" | "ifs";
+                cycle: string;
+                valid_time: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Past-24h precipitation raster as an 8-bit palette PNG. */
+            200: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    "X-Tile-Cache"?: "hit" | "miss";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": string;
+                };
+            };
+            /** @description The client's If-None-Match matches the current ETag; the body is not re-read. */
+            304: {
+                headers: {
+                    "Cache-Control"?: string;
+                    ETag?: string;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested cycle is not mirrored (or no mirror root is configured), or the past-24h window cannot be assembled from cycles at or before it. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        request_id: string;
+                        /** @enum {string} */
+                        status: "error";
+                        error: {
+                            /** @enum {string} */
+                            code: "PRECIP_CYCLE_NOT_MIRRORED" | "PRECIP_WINDOW_INCOMPLETE";
+                            message: string;
+                            details?: {
+                                [key: string]: unknown;
+                            } | null;
+                        };
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     getRuntimeConfig: {

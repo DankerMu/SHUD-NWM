@@ -170,7 +170,7 @@ The script MUST NOT follow a symlinked tree **root**: `canonical/`, `canonical/<
 - **THEN** `canonical/<storage_source>/grid/**` is never a target regardless of age
 
 ### Requirement: Precipitation PNG file cache is pruned on the mirror watermark
-node-27 SHALL prune `NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>` in the same retention run and on the same cutoff that prunes `canonical/<storage_source>/<cycle_token>`, so a cycle whose mirror is gone cannot keep being served from rendered PNGs. The `<storage_source>/<cycle_token>` pair is byte-identical between the two trees, so the prune is a name-for-name mapping and needs no separate policy. The resulting cache inventory is bounded by `2 sources × 57 PNGs per cycle × kept cycles`.
+node-27 SHALL prune `NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>` in the same retention run and on the same cutoff that prunes `canonical/<storage_source>/<cycle_token>`, so a cycle whose mirror is gone cannot keep being served from rendered PNGs. The `<storage_source>/<cycle_token>` pair is byte-identical between the two trees, so the prune is a name-for-name mapping and needs no separate policy. The resulting cache inventory is bounded by `2 sources × 57 distinct (valid_time, palette_version) pairs per cycle × kept cycles`; a valid time MAY hold more than one PNG (one per `<slice_digest>`, see `precipitation-raster-overlay`) when a later-arriving intermediate cycle changed its resolved slice set, until the cycle directory itself is pruned.
 
 #### Scenario: Pruned cycle stops serving cached PNGs
 - **WHEN** the mirror directory `canonical/IFS/2026083012` is pruned and a PNG for that cycle was previously rendered and cached
@@ -179,13 +179,13 @@ node-27 SHALL prune `NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_toke
 
 #### Scenario: Cache inventory stays bounded
 - **WHEN** retention has run and `K` cycles remain mirrored per source
-- **THEN** `NHMS_MVT_FILE_CACHE_DIR/precip/**` holds at most `2 × 57 × K` PNG files, and no directory exists under it whose `<storage_source>/<cycle_token>` has no counterpart under `canonical/`
+- **THEN** `NHMS_MVT_FILE_CACHE_DIR/precip/**` holds at most `2 × 57 × K` distinct `(valid_time, palette_version)` pairs (a pair MAY carry more than one `<slice_digest>` file until its cycle directory is pruned), and no directory exists under it whose `<storage_source>/<cycle_token>` has no counterpart under `canonical/`
 - **AND** the node-27 deployment receipt records the measured file count and `df -h` for the cache filesystem
 
 #### Scenario: A kept cycle that borrowed from a pruned cycle degrades through the index
 - **WHEN** a kept cycle's lead 0–21h windows borrowed slices from a cycle that has since been pruned
 - **THEN** the index for the kept cycle stops listing those valid times (the resolver is evaluated against the mirror as it exists now), so the frontend hides the overlay for them by the existing index rule
-- **AND** an already-cached PNG for such a valid time MAY still be served on a direct request, because it was rendered from a then-complete window; the cache is only invalidated when the cycle it belongs to is itself pruned
+- **AND** a direct PNG request for such a valid time is answered from the resolver first: it either resolves a different slice set (a different `<slice_digest>`, so the old file is not hit and a re-render or 404 follows) or raises `PrecipWindowIncomplete` (404); the old-digest file stays on disk unreferenced until the cycle directory it belongs to is pruned
 
 ### Requirement: Mirror keep watermark covers every selectable cycle
 The precipitation mirror keep set SHALL cover every cycle that `GET /api/v1/layers/discharge/cycles` can return for either source, plus the earlier cycles that the oldest listed cycle's lead-0 window borrows from — that is, `oldest_listed_cycle − 24h ≥ display_watermark − retention_days` MUST hold for both sources. The node-27 deployment receipt MUST record both sides of that inequality. If it does not hold, `retention_days` MUST be raised (deviation recorded in the receipt) rather than leaving the cycle selector offering cycles whose precipitation cannot be rendered.
