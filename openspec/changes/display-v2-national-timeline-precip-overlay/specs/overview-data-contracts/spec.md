@@ -74,7 +74,7 @@ The system SHALL split the single `loading` flag in `useOverviewDataStore` into 
 #### Scenario: Map bootstrap completes before enrichment
 - **WHEN** `loadOverview` runs and the bootstrap critical path settles
 - **THEN** the store MUST set `mapBootstrapLoading=false` once basins, runless layers catalog, and the selected layer's valid_time are settled
-- **AND** the store MUST keep `enrichmentLoading=true` until pipeline status, queue depth, per-basin versions, and any other non-bootstrap fetch settle
+- **AND** the store MUST keep `enrichmentLoading=true` until pipeline status, queue depth, per-basin versions, and any other non-bootstrap fetch settle, **except** the layer-time enrichment chain — the discharge cycles request, the per-cycle valid-times request, and the precipitation index request — which settles independently: each of the three carries its own scoped state, and `enrichmentLoading` MUST NOT wait on them. Callers needing to know whether the active cycle's valid-time list has arrived MUST read that layer's own state, not this flag
 - **AND** the OverviewPage `surfaceSettling` indicator MUST react only to `mapBootstrapLoading || !overview?.bootstrap`, not to `enrichmentLoading`
 
 #### Scenario: Map bootstrap rejection

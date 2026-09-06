@@ -1206,6 +1206,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     let bootstrapSnapshot: OverviewBootstrapSnapshot | null = null
     // 最近一次 normalizeLayerStates 的入参：per-cycle valid-times 晚到时据此原地重算 layer 状态。
     let layerStateInputs: { query: M11QueryState; layers: ApiLayer[]; resolvedRun: ApiHydroRun | null } | null = null
+    // 本轮阶段 3 已确定被跳过（bootstrap 失败 → 一条 per-cycle valid-times 请求都不会发）。
+    // 此时「记录缺席」不再是「还在取」，把派生的 pending 顶成 error 终态。
+    let layerTimeEnrichmentSkipped = false
 
     // 单一构造路径：活动 `(source, cycle)` 非默认对时，用 store 已取回的 per-cycle 列表顶掉
     // 目录里默认周期的 metadata.valid_times（fixture 决策 4：LayerState 本身必须是活动周期的列表）。
@@ -1215,10 +1218,16 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       // 非默认对一律传覆盖：记录缺席 = 列表还没取回 → `pending`（空列表 + 独立文案），
       // 绝不静默回落到目录里**默认周期**的 metadata.valid_times。默认对仍传 undefined
       // （metadata 路径，同一次加载零次 valid-times 请求）。
+      // 例外：阶段 3 已被跳过时请求永远不会发出，`pending` 就是谎报「还在取」——记录缺席直接
+      // 落到与 reject 同一条终态文案（spec frontend-mvt-layer-consumption
+      // 「The active cycle's list is unresolved」：跳过的那次同样必须到达终态）。
+      const missingRecord: ActiveCycleValidTimesOverride = layerTimeEnrichmentSkipped
+        ? { status: 'error' }
+        : { status: 'pending' }
       const activeCycleValidTimes: Record<string, ActiveCycleValidTimesOverride> | undefined =
         pair && !pair.isDefault
           ? {
-              discharge: get().validTimesByCycle[m11SourceCycleKey(pair.source, pair.cycle)] ?? { status: 'pending' },
+              discharge: get().validTimesByCycle[m11SourceCycleKey(pair.source, pair.cycle)] ?? missingRecord,
             }
           : undefined
       return normalizeLayerStates({
@@ -1235,6 +1244,19 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     const writeValidTimes = (key: string, value: ValidTimesState) => {
       if (!isCurrentRequest()) return
       set((state) => ({ validTimesByCycle: { ...state.validTimesByCycle, [key]: value } }))
+      const inputs = layerStateInputs
+      if (!inputs) return
+      const layers = buildLayerStates(inputs)
+      set((state) => (state.overview ? { overview: { ...state.overview, layers } } : {}))
+    }
+
+    // 阶段 3 被跳过的终态写入口：与 `writeValidTimes` 的 reject 臂同构（只是没有 per-cycle 记录可
+    // 写——`snapshot` 为 null 时连活动对都解不出来），同样必须就地重算 layers，否则「跳过」这条
+    // 路径会把 UI 永久钉在 pending 文案上：既无请求在途，也永远不会有终态覆盖它。
+    // 顺序无关：signal 先到 → 阶段 2 的 buildLayerStates 直接读到 error；阶段 2 先到 → 这里原地重算。
+    const markLayerTimeEnrichmentSkipped = () => {
+      if (!isCurrentRequest()) return
+      layerTimeEnrichmentSkipped = true
       const inputs = layerStateInputs
       if (!inputs) return
       const layers = buildLayerStates(inputs)
@@ -1410,7 +1432,14 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     // `overviewRequestNonce` 递增后迟到的结果一律丢弃（spec overview-data-contracts ADDED 需求）。
     const layerTimeEnrichmentPromise = (async () => {
       const snapshot = await bootstrapPromise.catch(() => null)
-      if (!snapshot || !isCurrentRequest()) return
+      // 新一轮请求已接管 store：本轮什么都不写（连 skipped signal 也不写）。
+      if (!isCurrentRequest()) return
+      if (!snapshot) {
+        // bootstrap 失败 → 本链一条请求都不发，但阶段 2 仍会用 run-scoped 目录构造 layer 状态，
+        // 非默认对的记录缺席会派生出 pending。给这条路径补终态。
+        markLayerTimeEnrichmentSkipped()
+        return
+      }
       const source = nationalConcreteSource(query.source)
       // `best` 已归一为 gfs；`compare` 解析不出具体源 → 这三类请求一条都不发。
       if (!source) return

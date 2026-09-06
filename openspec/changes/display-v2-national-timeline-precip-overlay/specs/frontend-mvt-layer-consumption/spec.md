@@ -13,6 +13,13 @@ The frontend SHALL consume `apiLayer.metadata.valid_times` returned by `GET /api
 - **THEN** the frontend MUST fetch `/api/v1/layers/discharge/valid-times?source=<source>&cycle=<cycle>` and store it keyed by `(source, cycle)`
 - **AND** `buildM11RegisteredOverlay` MUST resolve the overlay using that stored list, producing a non-null overlay when `validTime` is in it
 
+#### Scenario: The active cycle's list is unresolved
+- **WHEN** the active `(source, cycle)` is not the metadata default and its `valid_times[]` has not been fetched yet, that fetch was rejected, or the layer-time enrichment chain was skipped because map bootstrap failed (so no per-cycle fetch will ever be issued)
+- **THEN** the frontend MUST NOT fall back to `metadata.valid_times` (which describes the *default* cycle), MUST treat the layer as unavailable, and MUST NOT register an overlay or request a tile for that cycle
+- **AND** the layer's `disabledReason` MUST be distinct from the time-less reason and from the fail-closed "no cycle covers every basin" reason, and the not-yet-fetched and rejected cases MUST be distinguishable from each other
+- **AND** the frontend MUST NOT rewrite the URL's `validTime` while the list is unresolved, so a shared `?cycle=<cycle>&validTime=<t>` link survives the load
+- **AND** the unresolved state MUST reach a terminal state: a rejected fetch, and equally a fetch that will never be issued because the enrichment chain was skipped, MUST be recorded as such (the skipped case resolving to the same rejected reason, since no further attempt is pending) and MUST re-render the layer states in place, so the transition out of "still loading" is observable rather than latched
+
 #### Scenario: Metadata.valid_times is intentionally empty (time-less layer)
 - **WHEN** `apiLayer.metadata.valid_times === []` for any layer other than `discharge` (e.g. `river-network` is a topology layer with no time dimension, and `precip` carries its times in its own index rather than in the catalog)
 - **THEN** the frontend MUST treat the layer as having no time dimension

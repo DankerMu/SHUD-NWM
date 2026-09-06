@@ -543,17 +543,39 @@ describe('overview data store discharge loading', () => {
   it('degrades to a distinct error state when the non-default cycle list rejects', async () => {
     // cand-01 的第二条终态：reject 必须写终态并重算 layers，不能永久停在 pending 文案上；
     // 且这是 scoped 降级，不是 bootstrap 失败。
-    mockApi({
-      [VALID_TIMES_PATH]: () => {
+    // 闸门与上面的成功用例同构：不闸住 reject，阶段 2 自己那次 buildLayerStates 就能满足全部断言，
+    // 删掉 `writeValidTimes` 里的就地重算也照样绿（R2-01）。闸门把 reject 推到阶段 2 落定**之后**，
+    // 于是「文案是 error」+「layers 引用被换掉」两条都只能由就地重算满足。
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const calls = mockApi({
+      [VALID_TIMES_PATH]: async () => {
+        await gate
         throw new Error('valid-times down')
       },
     })
     const cycleQuery = { ...query, cycle: '2026-05-17T12:00:00.000Z', validTime: '2026-05-17T15:00:00.000Z' }
 
-    await useOverviewDataStore.getState().loadOverview(cycleQuery)
+    const load = useOverviewDataStore.getState().loadOverview(cycleQuery)
+    await vi.waitFor(() => {
+      expect(calls.some((call) => call.path === VALID_TIMES_PATH)).toBe(true)
+      expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false)
+    })
+    // 阶段 2 已落定：此刻的 layers 是「reject 之前」的引用，终态必须在它之上原地重算。
+    const layersBeforeReject = useOverviewDataStore.getState().overview?.layers
+    expect(
+      (layersBeforeReject ?? []).find((item) => item.layerId === 'discharge')?.disabledReason,
+    ).toBe(pendingActiveCycleValidTimesDisabledReason)
+
+    release()
+    await load
 
     const state = useOverviewDataStore.getState()
     expect(state.validTimesByCycle).toEqual({ [`gfs|${OTHER_CYCLE}`]: { status: 'error' } })
+    // pending → error 的转移必须真的渲染出来：只写 record 不重算，这里的引用不会变。
+    expect(state.overview?.layers).not.toBe(layersBeforeReject)
     const discharge = (state.overview?.layers ?? []).find((item) => item.layerId === 'discharge')
     expect(discharge?.available).toBe(false)
     expect(discharge?.disabledReason).toBe(activeCycleValidTimesErrorDisabledReason)
@@ -567,6 +589,42 @@ describe('overview data store discharge loading', () => {
     expect(state.bootstrapError).toBeNull()
     expect(state.error).toBeNull()
     expect(state.mapBootstrapLoading).toBe(false)
+  })
+
+  it('resolves the non-default cycle to the error state when bootstrap failure skips the layer-time chain', async () => {
+    // spec frontend-mvt-layer-consumption「The active cycle's list is unresolved」第三种未定情形：
+    // bootstrap 失败 → 阶段 3 直接 return，一条 per-cycle valid-times 请求都不会发；而阶段 2 仍用
+    // run-scoped 目录（default_cycle 非空）构造 layer 状态，记录缺席会派生出 pending。
+    // 「还在加载」是谎报：既无请求在途，也不会再有终态覆盖它 → 必须与 reject 同文案落到终态。
+    const calls = mockApi({
+      '/api/v1/basins': () => {
+        throw new Error('basins down')
+      },
+    })
+    const cycleQuery = { ...query, cycle: '2026-05-17T12:00:00.000Z', validTime: '2026-05-17T15:00:00.000Z' }
+
+    await useOverviewDataStore.getState().loadOverview(cycleQuery)
+
+    const state = useOverviewDataStore.getState()
+    // (i) 这一轮确实一条 per-cycle 请求都没发，且没有任何 per-cycle 记录被写入。
+    expect(calls.filter((call) => call.path === VALID_TIMES_PATH)).toHaveLength(0)
+    expect(state.validTimesByCycle).toEqual({})
+    // bootstrap 确实失败了（否则本用例根本没进那条 skip 分支）。
+    expect(state.bootstrapError).not.toBeNull()
+    expect(state.overview?.bootstrap).toBeNull()
+    expect(state.mapBootstrapLoading).toBe(false)
+    expect(state.enrichmentLoading).toBe(false)
+    // (ii) 终态而非 pending：文案与 reject 臂一致（"could not be loaded"），且仍与其余两条禁用文案可分。
+    const discharge = (state.overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(discharge?.disabledReason).toBe(activeCycleValidTimesErrorDisabledReason)
+    expect(discharge?.disabledReason).not.toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(discharge?.disabledReason).not.toBe('Layer has no valid times.')
+    expect(discharge?.disabledReason).not.toBe(failClosedDischargeDisabledReason)
+    expect(discharge?.available).toBe(false)
+    // 未定态照旧不回落到默认周期的 metadata 列表：零瓦片、URL 的 validTime 不被改写。
+    expect(discharge?.validTimes).toEqual([])
+    expect(buildM11RegisteredOverlay(cycleQuery, state.overview?.layers ?? [])).toBeNull()
+    expect(resolveM11NationalValidTimeCorrection(cycleQuery, state.overview?.layers ?? [])).toBeUndefined()
   })
 
   it('clears the three layer-time records together with the HTTP cache', async () => {
