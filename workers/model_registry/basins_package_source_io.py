@@ -19,7 +19,6 @@ from .basins_package_contracts import (
 )
 
 _OS_OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
-
 MAX_RIVSEG_MAPPING_BYTES = 16 * 1024 * 1024
 MAX_RIVSEG_LEADING_SKIP_LINES = 32
 MAX_RIVSEG_INT_DIGITS = 18
@@ -290,6 +289,21 @@ def _parse_rivseg_mapped_reaches(
     return count, mapped_reach_ids
 
 
+def _iter_mapping_snapshot_lines(source_file: _MappingSourceFile) -> Iterator[str]:
+    snapshot = source_file.snapshot_bytes.decode("utf-8")
+    line_start = 0
+    for line_end, character in enumerate(snapshot):
+        if character not in "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029":
+            continue
+        if character == "\n" and line_end and snapshot[line_end - 1] == "\r":
+            line_start = line_end + 1
+            continue
+        yield snapshot[line_start:line_end]
+        line_start = line_end + 1
+    if line_start < len(snapshot):
+        yield snapshot[line_start:]
+
+
 def _parse_declared_mapping_rows(
     source_file: _MappingSourceFile,
     *,
@@ -298,78 +312,60 @@ def _parse_declared_mapping_rows(
     manifest_uri: str | None,
     standard_header: tuple[str, ...],
     forbid_extra_rows: bool,
-) -> tuple[int, list[list[str]]]:
-    lines = source_file.snapshot_bytes.decode("utf-8").splitlines()
-    position = 0
-    skipped = 0
-    while position < len(lines) and _is_mapping_blank_or_comment(lines[position]):
-        skipped += 1
-        if skipped > MAX_RIVSEG_LEADING_SKIP_LINES:
-            raise _mapping_invalid_error(
-                model_id=model_id,
-                version=version,
-                path=str(source_file.source_path),
-                manifest_uri=manifest_uri,
-                cause="leading_skip_exceeded",
-                details={"limit_lines": MAX_RIVSEG_LEADING_SKIP_LINES},
-            )
-        position += 1
-    if position >= len(lines):
-        raise _mapping_invalid_error(
+) -> tuple[int, Iterator[Sequence[str]]]:
+    def invalid(cause: str, details: dict[str, Any] | None = None) -> BasinsPackageError:
+        return _mapping_invalid_error(
             model_id=model_id,
             version=version,
             path=str(source_file.source_path),
             manifest_uri=manifest_uri,
-            cause="missing_count",
+            cause=cause,
+            details=details,
         )
-    count = _parse_mapping_integer(lines[position].split()[0] if lines[position].split() else "")
-    if count is None or count < 1:
-        raise _mapping_invalid_error(
-            model_id=model_id,
-            version=version,
-            path=str(source_file.source_path),
-            manifest_uri=manifest_uri,
-            cause="invalid_count",
-        )
-    position += 1
-    while position < len(lines) and _is_mapping_blank_or_comment(lines[position]):
-        position += 1
-    if position < len(lines):
-        tokens = lines[position].split()
-        if tuple(tokens) == standard_header:
-            position += 1
-        elif tokens and _parse_mapping_integer(tokens[0]) is None:
-            raise _mapping_invalid_error(
-                model_id=model_id,
-                version=version,
-                path=str(source_file.source_path),
-                manifest_uri=manifest_uri,
-                cause="invalid_header",
-            )
-    rows: list[list[str]] = []
-    while position < len(lines) and len(rows) < count:
-        line = lines[position]
-        position += 1
+
+    lines = _iter_mapping_snapshot_lines(source_file)
+    for skipped, line in enumerate(lines, start=1):
         if not _is_mapping_blank_or_comment(line):
-            rows.append(line.split())
-    if len(rows) != count:
-        raise _mapping_invalid_error(
-            model_id=model_id,
-            version=version,
-            path=str(source_file.source_path),
-            manifest_uri=manifest_uri,
-            cause="truncated_block",
-            details={"declared_count": count, "row_count": len(rows)},
-        )
-    if forbid_extra_rows and any(not _is_mapping_blank_or_comment(line) for line in lines[position:]):
-        raise _mapping_invalid_error(
-            model_id=model_id,
-            version=version,
-            path=str(source_file.source_path),
-            manifest_uri=manifest_uri,
-            cause="extra_segment_row",
-        )
-    return count, rows
+            break
+        if skipped > MAX_RIVSEG_LEADING_SKIP_LINES:
+            raise invalid("leading_skip_exceeded", {"limit_lines": MAX_RIVSEG_LEADING_SKIP_LINES})
+    else:
+        raise invalid("missing_count")
+    count = _parse_mapping_integer(line.split()[0])
+    if count is None or count < 1:
+        raise invalid("invalid_count")
+    first_row: Sequence[str] | None = None
+    for line in lines:
+        if _is_mapping_blank_or_comment(line):
+            continue
+        tokens = line.split()
+        if tuple(tokens) == standard_header:
+            break
+        if tokens and _parse_mapping_integer(tokens[0]) is None:
+            raise invalid("invalid_header")
+        first_row = tokens
+        break
+
+    def declared_rows() -> Iterator[Sequence[str]]:
+        row_count = 0
+        pending_row = first_row
+        while row_count < count:
+            if pending_row is None:
+                for row_line in lines:
+                    if not _is_mapping_blank_or_comment(row_line):
+                        pending_row = row_line.split()
+                        break
+                else:
+                    raise invalid("truncated_block", {"declared_count": count, "row_count": row_count})
+            row_count += 1
+            yield pending_row
+            pending_row = None
+        if forbid_extra_rows:
+            for row_line in lines:
+                if not _is_mapping_blank_or_comment(row_line):
+                    raise invalid("extra_segment_row")
+
+    return count, declared_rows()
 
 
 def _mapping_integer_column(
@@ -483,7 +479,6 @@ def _source_file_size(
     manifest_uri: str | None = None,
 ) -> int:
     """Size of a source file under the same symlink/regular-file guards as hashing, without reading it."""
-
     try:
         with _open_verified_source_file(
             path,
@@ -616,7 +611,6 @@ def _open_verified_source_file_at(
             path=str(resolved),
             manifest_uri=manifest_uri,
         )
-
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     file_flags = os.O_RDONLY | os.O_NOFOLLOW
     if hasattr(os, "O_CLOEXEC"):
@@ -767,6 +761,7 @@ def _reject_source_symlink_path(
                 manifest_uri=manifest_uri,
             )
 
+
 def _ensure_under_source_root(
     path: Path,
     source_root: Path,
@@ -784,6 +779,7 @@ def _ensure_under_source_root(
         version=version,
         manifest_uri=manifest_uri,
     )
+
 
 def _ensure_under_root(
     path: Path,
@@ -807,6 +803,7 @@ def _ensure_under_root(
             manifest_uri=manifest_uri,
         ) from error
 
+
 def _resolve_package_path(path: Path, *, model_id: str | None = None, version: str | None = None) -> Path:
     # Strict resolution + errno split: non-strict resolution stopped raising
     # on symlink loops in CPython 3.13+, so the loop verdict must come from
@@ -829,6 +826,7 @@ def _resolve_package_path(path: Path, *, model_id: str | None = None, version: s
             path=str(path),
         ) from error
 
+
 def _normalize_relative_path(value: str) -> str:
     path = Path(value)
     if path.is_absolute() or ".." in path.parts:
@@ -837,6 +835,7 @@ def _normalize_relative_path(value: str) -> str:
     if not normalized:
         raise BasinsPackageError("BASINS_PACKAGE_PATH_UNSAFE", "Package relative path is empty.")
     return normalized
+
 
 def _walk_source_files(root: Path, source_root: Path) -> Iterator[Path]:
     resolved_root = _resolve_package_path(root)
@@ -871,6 +870,7 @@ def _walk_source_files(root: Path, source_root: Path) -> Iterator[Path]:
                 stack.append(resolved)
             elif child.is_file():
                 yield resolved
+
 
 def _directory_evidence(
     root: Path,
@@ -944,8 +944,10 @@ def _csv_time_evidence(
             manifest_uri=manifest_uri,
         ) from error
 
+
 def _is_ignored_source_path(path: Path) -> bool:
     return any(part == ".DS_Store" or part == "@eaDir" or part.endswith("@SynoEAStream") for part in path.parts)
+
 
 def _write_json_file(
     path: str | Path,
@@ -973,6 +975,7 @@ def _write_json_file(
             path=str(output),
             manifest_uri=manifest_uri,
         ) from error
+
 
 def _preflight_json_output_path(
     path: str | Path,

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 import workers.model_registry.basins_package as basins_package
+import workers.model_registry.basins_package_source_io as basins_package_source_io
 from packages.common.object_store import LocalObjectStore
 from tests.basins_package_helpers import _object_store_env, _write_valid_inventory
 
@@ -168,11 +169,7 @@ def test_calibration_mapping_suffix_collision_preserves_canonical_mapping_and_ca
     )
 
     manifest = json.loads(output.read_text(encoding="utf-8"))
-    entry = next(
-        entry
-        for entry in manifest["included_files"]
-        if entry["relative_path"] == f"CALIB/{calibration_name}"
-    )
+    entry = next(entry for entry in manifest["included_files"] if entry["relative_path"] == f"CALIB/{calibration_name}")
     assert result["status"] == "published"
     assert entry["role"] == "calibration"
     assert entry["size_bytes"] == len(calibration_bytes)
@@ -214,6 +211,32 @@ def test_genuine_single_reach_mapping_remains_compatible_at_both_seams(
         _VALID_SINGLE_RIVSEG,
         version="v-rivseg-single",
     )
+
+
+@pytest.mark.parametrize(
+    ("riv", "rivseg", "version"),
+    (
+        (
+            "1 6\nIndex Down Type Slope Length BC\n10 0 0 0.01 100 0\n",
+            "2 4\nIndex iRiv iEle Length\n1 10 1 100\n2 10 2 100\n",
+            "v-rivseg-one-reach-two-segments",
+        ),
+        (
+            "2 6\nIndex Down Type Slope Length BC\n10 0 0 0.01 100 0\n30 0 0 0.01 100 0\n",
+            "1 4\nIndex iRiv iEle Length\n1 10 1 100\n",
+            "v-rivseg-two-reaches-one-segment",
+        ),
+    ),
+    ids=("one-reach-two-segments", "two-reaches-one-segment"),
+)
+def test_single_axis_mapping_does_not_trigger_multi_axis_collapse_guard_at_both_public_seams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    riv: str,
+    rivseg: str,
+    version: str,
+) -> None:
+    _assert_valid_both_seams(tmp_path, monkeypatch, riv, rivseg, version=version)
 
 
 @pytest.mark.parametrize(
@@ -375,6 +398,56 @@ def test_mapping_file_at_cap_plus_one_is_refused_at_both_public_seams(
         b"#" * (_MAPPING_BYTE_LIMIT + 1),
         cause="over_limit",
     )
+
+
+def test_high_density_leading_comments_stop_at_limit_before_environment_store_or_output_at_both_public_seams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inventory_path, model_id = _inventory_with_mapping(
+        tmp_path,
+        b"#\n" * 500_000,
+        _VALID_SINGLE_RIVSEG,
+    )
+    original_lines = basins_package_source_io._iter_mapping_snapshot_lines
+    consumed_lines: list[int] = []
+
+    def count_and_limit_lines(
+        source_file: basins_package_source_io._MappingSourceFile,
+    ) -> object:
+        iterator = original_lines(source_file)
+        consumed = 0
+        while True:
+            try:
+                line = next(iterator)
+            except StopIteration:
+                return
+            consumed += 1
+            if consumed == 33:
+                consumed_lines.append(consumed)
+            if consumed > 33:
+                pytest.fail(f"mapping parser consumed more than 33 leading physical lines ({consumed=})")
+            yield line
+
+    monkeypatch.setattr(basins_package_source_io, "_iter_mapping_snapshot_lines", count_and_limit_lines)
+    with pytest.raises(basins_package.BasinsPackageError) as identity_error:
+        basins_package.basins_package_source_identity(inventory_path=inventory_path, model_id=model_id)
+    _assert_invalid_error(identity_error, "leading_skip_exceeded")
+    assert consumed_lines == [33]
+
+    root = _object_store_env(tmp_path, monkeypatch)
+    output = tmp_path / "high-density-output" / "manifest.json"
+    with pytest.raises(basins_package.BasinsPackageError) as publication_error:
+        basins_package.publish_basins_package(
+            inventory_path=inventory_path,
+            model_id=model_id,
+            version="v-rivseg-high-density-leading-comments",
+            output_path=output,
+        )
+    _assert_invalid_error(publication_error, "leading_skip_exceeded")
+    assert consumed_lines == [33, 33]
+    assert not root.exists()
+    assert not output.exists()
 
 
 def test_normalized_qhh_tab_separated_mapping_is_accepted_at_both_public_seams(
