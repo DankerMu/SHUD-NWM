@@ -3350,3 +3350,13 @@ can settle:
 
 Prior samples for trend: 173 (core=177, rotated=312) — unchanged from the
 previous addendum, as expected for a single-round line.
+
+## Revisit 2026-09-06 (post PR #2090 / issue #2016)
+
+Audit re-flagged DECIDABLE at 176 multi-round merged PRs, later-round
+catches core=193 vs rotated=316 (rotated share 62%, skipped=15
+non-attributable). Direction unchanged: **keep rotation**. #2016 itself is
+a zero-round `none` fixture (ops receipt, review-not-required record) and
+contributes no attribution data; the sample moved only by the three
+single-round lines landed since the previous addendum. Next revisit on
+the audit's next flag or maintainer override.
