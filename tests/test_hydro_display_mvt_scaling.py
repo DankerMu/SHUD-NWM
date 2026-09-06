@@ -1558,7 +1558,7 @@ def test_national_cycle_lookback_leaves_a_day_of_precip_mirror_margin() -> None:
 
     Raising the DEPLOYED retention (`NODE27_RAW_RETENTION_DAYS` / `--retention-days`) is the
     copyback spec's own remedy, but this test does not observe it: what it pins is the SOURCE
-    default `DEFAULT_RETENTION_DAYS` (`scripts/node27_raw_retention.py:33`), and lowering THAT
+    default `DEFAULT_RETENTION_DAYS` (`scripts/node27_raw_retention.py`), and lowering THAT
     below 13 is what goes red. The inequality is the load-bearing half -- round 1 asserted
     `== 14` under a name claiming a coupling it never checked, and that green test passed.
     """

@@ -129,8 +129,10 @@ NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS = 3
 # `R` is `scripts/node27_raw_retention.py`'s `DEFAULT_RETENTION_DAYS` (14, the
 # shipped default of `NODE27_RAW_RETENTION_DAYS`), and that run is required to
 # prune, on the SAME cutoff, the canonical precipitation mirror and the
-# precipitation PNG cache (a spec-level requirement, NOT delivered on this HEAD:
-# the script still only targets `raw/`, and copyback tasks.md 4.4 is unticked)
+# precipitation PNG cache (delivered by issue #2011 / copyback tasks.md 4.4:
+# one run enumerates and removes `raw/`, `canonical/` and the PNG cache on one
+# cutoff, so this inequality now binds a shipped deletion path rather than a
+# prospective one)
 # -- the lane the precipitation overlay actually renders from, which is
 # why the copyback spec phrases the requirement against it. 12 therefore leaves
 # a full day of margin under any anchor and independent of pipeline lag; 14
@@ -1945,9 +1947,10 @@ def national_discharge_cycles(
     watermark, so a stall longer than the window empties the list and the layer
     renders disabled -- the same fail-closed state as an empty intersection, and
     preferred over advertising a cycle whose companion precipitation mirror and
-    PNG cache the raw-retention run has already pruned (that pruning is a
-    spec-level requirement not delivered on this HEAD -- the run still only
-    targets `raw/`, copyback tasks.md 4.4 is unticked).
+    PNG cache the raw-retention run has already pruned (that pruning is
+    delivered by issue #2011 / copyback tasks.md 4.4 -- one run removes `raw/`,
+    `canonical/` and the PNG cache on one cutoff -- so a cycle outside this
+    window is one that run is entitled to have already taken away).
     """
     sample_limit = max(0, limit)
     rows, active_networks = _national_discharge_coverage_rows(

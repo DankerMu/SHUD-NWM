@@ -127,6 +127,14 @@
   Evidence: `scripts/node27_raw_retention.py`,
   `scripts/node27_raw_retention_once.sh`,
   `infra/env/node27-raw-retention.example`, and focused tests.
+  Superseded scope (2026-09-06, issue #2011 / PR #2099): the "only targets
+  `<object-store-root>/raw/<source>/<YYYYMMDDHH>`" clause above records this
+  task's delivered state and is NOT back-edited. The runner now prunes three
+  lanes under one cutoff -- `raw/<source>/<K>`, `canonical/<S>/<K>` and
+  `<display cache>/precip/<S>/<K>`. Current authority: spec
+  `openspec/changes/display-v2-national-timeline-precip-overlay/specs/canonical-precip-copyback/spec.md`
+  Requirement "Canonical mirror is pruned with the raw retention watermark",
+  delivered by that change's task 4.4.
 - [x] 5.2 Install and run the node-27 raw retention systemd timer.
   Evidence floor: node-27 has `nhms-node27-raw-retention.timer` enabled for
   user `nwm`, a live summary JSON exists under the retention log root, and the
