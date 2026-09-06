@@ -1,13 +1,22 @@
 #!/usr/bin/env python
-"""Retention cleanup for node-27-owned raw forecast bundles.
+"""Retention cleanup for node-27-owned raw bundles, canonical precipitation
+mirrors and their rendered PNG cache.
 
-This script only targets source raw data under:
+This script targets exactly three lanes, all on ONE cutoff in ONE run:
 
     <object-store-root>/raw/<source>/<YYYYMMDDHH>
+    <object-store-root>/canonical/<storage-source>/<YYYYMMDDHH>
+    <precip-cache-root>/precip/<storage-source>/<YYYYMMDDHH>
 
-It deliberately does not touch canonical, forcing, runs, published products, or
-static grids. Production retention deletes aged raw cycles after safety
-preflight and emits bounded JSON evidence for operator review.
+A cycle's canonical mirror directory and its PNG cache directory therefore live
+and die together (issue #2011): the display API cannot keep serving rendered
+precipitation for a cycle whose mirror is gone.
+
+It deliberately does not touch `canonical/<storage-source>/grid/**` (grid
+definitions cannot be regenerated on node-27), anything under the precipitation
+cache root outside `precip/` (the MVT tile cache is a sibling there), forcing,
+runs, or published products. Production retention deletes aged directories after
+safety preflight and emits bounded JSON evidence for operator review.
 
 Two environment gates exist for staged rollout and rollback and default to the
 execute-only behaviour: ``NODE27_RAW_RETENTION_ENABLED`` (default true) and
@@ -28,11 +37,28 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from packages.common.display_watermark import fetch_display_watermark
+from packages.common.source_identity import normalize_source_id
 
-SCHEMA_VERSION = "nhms.node27_raw_retention.production.v3"
+# `services.precip.constants` is deliberately stdlib-only (its own docstring
+# pins that), so naming the cache env here costs no numpy/netCDF4 import.
+from services.precip.constants import FILE_CACHE_DIR_ENV
+
+SCHEMA_VERSION = "nhms.node27_raw_retention.production.v4"
 DEFAULT_RETENTION_DAYS = 14
 DEFAULT_SOURCES = ("gfs", "ifs")
 CYCLE_NAME_LENGTH = 10
+
+# Lane identity: (target key prefix, `planned[].reason`).
+RAW_LANE_KEY = "raw"
+RAW_LANE_REASON = "raw_cycle_aged_out"
+CANONICAL_LANE_KEY = "canonical"
+CANONICAL_LANE_REASON = "canonical_cycle_aged_out"
+PRECIP_CACHE_LANE_KEY = "precip-cache"
+PRECIP_CACHE_LANE_REASON = "precip_cache_aged_out"
+# The one directory name under `canonical/<S>/` that is never a cycle: grid
+# definitions are not reproducible from node-27, so they are pinned out of the
+# target set explicitly instead of relying on `_parse_cycle_name` alone.
+GRID_DIR_NAME = "grid"
 
 # Anchor disclosure (issue #1407 / design D4). This process keeps the display
 # watermark as its cutoff anchor instead of the pipeline frontier used by the
@@ -79,6 +105,11 @@ class RawRetentionConfig:
     # deliberately have no CLI flags (the ones 9c1625ee removed stay removed).
     enabled: bool = True
     dry_run: bool = False
+    # Display-side PNG cache root (`NHMS_MVT_FILE_CACHE_DIR`). Optional on
+    # purpose: an unconfigured cache root is a per-lane skip, never a preflight
+    # blocker, so the first production tick after deploy still prunes raw and
+    # canonical instead of returning zero deletions.
+    precip_cache_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +119,7 @@ class RetentionTarget:
     source: str
     cycle_time: datetime
     size_bytes: int
+    reason: str
 
 
 def _env_int(name: str, *, default: int) -> int:
@@ -180,6 +212,13 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
     if not sources:
         blockers.append({"field": "sources", "reason": "empty"})
 
+    # Same env name the display API reads (`services.precip.constants` /
+    # `services.tiles.mvt`); it must hold the value the display PROCESS has, not
+    # the value in infra/env/display.example. Blank or unset is not a blocker --
+    # the cache lane skips itself and the other two lanes still prune.
+    cache_value = (os.getenv(FILE_CACHE_DIR_ENV) or "").strip()
+    precip_cache_root = Path(cache_value).expanduser() if cache_value else None
+
     if blockers or resolved_root is None:
         return None, blockers
     return (
@@ -194,34 +233,75 @@ def config_from_env(args: argparse.Namespace) -> tuple[RawRetentionConfig | None
             # would silently return production to zero deletions. Under the new
             # name any such leftover line is inert.
             dry_run=_env_flag("NODE27_RAW_RETENTION_PLAN_ONLY", default=False),
+            precip_cache_root=precip_cache_root,
         ),
         [],
     )
 
 
-def _safe_target(raw_root: Path, target: Path) -> bool:
+def _safe_target(lane_root: Path, target: Path) -> bool:
+    """True only for a real `<lane_root>/<S>/<K>` directory (never a symlink).
+
+    The parts count is what pins every lane at exactly two levels below its own
+    root, so no lane can ever reach a sibling tree or a grid definition.
+    """
     try:
-        relative = target.resolve(strict=True).relative_to(raw_root)
+        relative = target.resolve(strict=True).relative_to(lane_root)
     except (OSError, ValueError):
         return False
     return len(relative.parts) == 2 and target.is_dir() and not target.is_symlink()
 
 
-def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[RetentionTarget], list[dict[str, Any]]]:
-    raw_root = config.object_store_root / "raw"
+def _resolve_lane_root(
+    root: Path, *, key: str, prefix: str
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """The resolved lane root, or the skip entry that retires ONLY this lane.
+
+    Absence and unsafety are symmetric across the three lanes and always local:
+    making any of them a preflight blocker would zero out raw retention on the
+    first production tick after deploy, before an operator has edited the env
+    file -- strictly worse than not pruning a cache.
+    """
+    if root.is_symlink():
+        return None, {
+            "key": key,
+            "reason": f"{prefix}_root_unsafe",
+            "path": str(root),
+            "detail": "path_is_symlink",
+        }
+    if not root.exists():
+        return None, {"key": key, "reason": f"{prefix}_root_missing", "path": str(root)}
+    if not root.is_dir():
+        return None, {
+            "key": key,
+            "reason": f"{prefix}_root_unsafe",
+            "path": str(root),
+            "detail": "path_not_directory",
+        }
+    resolved, blocker = _safe_resolved_dir(root, label=f"{prefix}_root")
+    if resolved is None:
+        return None, {
+            "key": key,
+            "reason": f"{prefix}_root_unsafe",
+            "path": str(root),
+            "detail": (blocker or {}).get("reason", "path_unsafe"),
+        }
+    return resolved, None
+
+
+def _collect_raw_lane(
+    config: RawRetentionConfig, *, raw_root: Path, cutoff: datetime
+) -> tuple[list[RetentionTarget], list[dict[str, Any]]]:
+    """Raw lane: iterate the directories that exist and match them case-insensitively."""
     skipped: list[dict[str, Any]] = []
     targets: list[RetentionTarget] = []
-    if not raw_root.is_dir():
-        skipped.append({"key": "raw", "reason": "raw_root_missing", "path": str(raw_root)})
-        return targets, skipped
-    cutoff = now.astimezone(UTC) - timedelta(days=config.retention_days)
     for source_dir in _iter_dirs(raw_root):
         source_key = source_dir.name.lower()
         if source_key not in config.sources:
-            skipped.append({"key": f"raw/{source_dir.name}", "reason": "source_not_enabled"})
+            skipped.append({"key": f"{RAW_LANE_KEY}/{source_dir.name}", "reason": "source_not_enabled"})
             continue
         for cycle_dir in _iter_dirs(source_dir):
-            key = f"raw/{source_dir.name}/{cycle_dir.name}"
+            key = f"{RAW_LANE_KEY}/{source_dir.name}/{cycle_dir.name}"
             cycle_time = _parse_cycle_name(cycle_dir.name)
             if cycle_time is None:
                 skipped.append({"key": key, "reason": "unparseable_cycle_name"})
@@ -239,8 +319,125 @@ def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[
                     source=source_dir.name,
                     cycle_time=cycle_time,
                     size_bytes=_dir_size(cycle_dir),
+                    reason=RAW_LANE_REASON,
                 )
             )
+    return targets, skipped
+
+
+def _collect_mapped_lane(
+    config: RawRetentionConfig,
+    *,
+    lane_root: Path,
+    key_prefix: str,
+    reason: str,
+    cutoff: datetime,
+) -> tuple[list[RetentionTarget], list[dict[str, Any]]]:
+    """Canonical / PNG-cache lane: enumerate CONFIGURED sources through
+    `normalize_source_id`, never the directory names found on disk.
+
+    That direction is the constructive guarantee that no `canonical/ifs/...` or
+    `precip-cache/ifs/...` path can be produced from the lower-case configured
+    token: the storage spelling can only come out of the shared normalizer, so
+    the mirror tree and the PNG cache tree are addressed by one identity.
+    """
+    skipped: list[dict[str, Any]] = []
+    targets: list[RetentionTarget] = []
+    for source in sorted(config.sources):
+        try:
+            storage_source = normalize_source_id(source)
+        except ValueError:
+            # `_split_sources` accepts arbitrary free text from the env file; an
+            # unmappable entry retires itself, never the run.
+            skipped.append({"key": f"{key_prefix}/{source}", "reason": "source_unmappable"})
+            continue
+        source_root = lane_root / storage_source
+        if source_root.is_symlink() or not source_root.is_dir():
+            continue
+        for cycle_dir in _iter_dirs(source_root):
+            key = f"{key_prefix}/{storage_source}/{cycle_dir.name}"
+            if cycle_dir.name == GRID_DIR_NAME:
+                skipped.append({"key": key, "reason": "grid_definitions_preserved"})
+                continue
+            cycle_time = _parse_cycle_name(cycle_dir.name)
+            if cycle_time is None:
+                skipped.append({"key": key, "reason": "unparseable_cycle_name"})
+                continue
+            if cycle_time >= cutoff:
+                skipped.append({"key": key, "reason": "within_retention_window"})
+                continue
+            if not _safe_target(lane_root, cycle_dir):
+                skipped.append({"key": key, "reason": "unsafe_target_path"})
+                continue
+            targets.append(
+                RetentionTarget(
+                    path=cycle_dir,
+                    key=key,
+                    source=storage_source,
+                    cycle_time=cycle_time,
+                    size_bytes=_dir_size(cycle_dir),
+                    reason=reason,
+                )
+            )
+    return targets, skipped
+
+
+def collect_targets(config: RawRetentionConfig, *, now: datetime) -> tuple[list[RetentionTarget], list[dict[str, Any]]]:
+    """The three lanes of one retention run, on ONE cutoff.
+
+    Raw, canonical and PNG-cache targets are collected together so a cycle's
+    mirror directory and its rendered PNGs are removed by the same tick.
+    """
+    cutoff = now.astimezone(UTC) - timedelta(days=config.retention_days)
+    skipped: list[dict[str, Any]] = []
+    targets: list[RetentionTarget] = []
+
+    raw_root, raw_blocker = _resolve_lane_root(
+        config.object_store_root / "raw", key=RAW_LANE_KEY, prefix="raw"
+    )
+    if raw_blocker is not None:
+        skipped.append(raw_blocker)
+    elif raw_root is not None:
+        lane_targets, lane_skipped = _collect_raw_lane(config, raw_root=raw_root, cutoff=cutoff)
+        targets.extend(lane_targets)
+        skipped.extend(lane_skipped)
+
+    canonical_root, canonical_blocker = _resolve_lane_root(
+        config.object_store_root / "canonical", key=CANONICAL_LANE_KEY, prefix="canonical"
+    )
+    if canonical_blocker is not None:
+        skipped.append(canonical_blocker)
+    elif canonical_root is not None:
+        lane_targets, lane_skipped = _collect_mapped_lane(
+            config,
+            lane_root=canonical_root,
+            key_prefix=CANONICAL_LANE_KEY,
+            reason=CANONICAL_LANE_REASON,
+            cutoff=cutoff,
+        )
+        targets.extend(lane_targets)
+        skipped.extend(lane_skipped)
+
+    if config.precip_cache_root is None:
+        skipped.append({"key": PRECIP_CACHE_LANE_KEY, "reason": "precip_cache_root_unconfigured"})
+        return targets, skipped
+    # Only ever descend into `<cache>/precip`: the MVT tile cache is a sibling
+    # under the same root and must never be enumerated, let alone deleted.
+    cache_root, cache_blocker = _resolve_lane_root(
+        config.precip_cache_root / "precip", key=PRECIP_CACHE_LANE_KEY, prefix="precip_cache"
+    )
+    if cache_blocker is not None:
+        skipped.append(cache_blocker)
+    elif cache_root is not None:
+        lane_targets, lane_skipped = _collect_mapped_lane(
+            config,
+            lane_root=cache_root,
+            key_prefix=PRECIP_CACHE_LANE_KEY,
+            reason=PRECIP_CACHE_LANE_REASON,
+            cutoff=cutoff,
+        )
+        targets.extend(lane_targets)
+        skipped.extend(lane_skipped)
     return targets, skipped
 
 
@@ -259,7 +456,7 @@ def _target_payload(target: RetentionTarget) -> dict[str, Any]:
         "source": target.source,
         "cycle_time": target.cycle_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "size_bytes": target.size_bytes,
-        "reason": "raw_cycle_aged_out",
+        "reason": target.reason,
     }
 
 
@@ -278,6 +475,10 @@ def run_retention(
         "reference_time": reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "object_store_root": str(config.object_store_root),
         "raw_root": str(config.object_store_root / "raw"),
+        "canonical_root": str(config.object_store_root / "canonical"),
+        "precip_cache_root": (
+            None if config.precip_cache_root is None else str(config.precip_cache_root)
+        ),
         "sources": sorted(config.sources),
         "retention_days": config.retention_days,
         "cutoff": cutoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -308,7 +509,14 @@ def run_retention(
             try:
                 shutil.rmtree(target.path)
             except OSError as error:
-                failed.append({**payload, "error": str(error)})
+                # Known limit (measured on node-27, 2026-09-06): the canonical
+                # tree is `755 frd_muziyao nfsdata` while this runner is `nwm`,
+                # so every canonical target fails here with PermissionError on
+                # each tick. `error_type` keeps that distinguishable from other
+                # IO failures in the receipt. The remedy is a directory-mode or
+                # group change on the mirror producers (#2008/#2069) or an ops
+                # group membership change -- both outside this script.
+                failed.append({**payload, "error": str(error), "error_type": type(error).__name__})
                 continue
             deleted.append(payload)
             freed_bytes += int(payload["size_bytes"])

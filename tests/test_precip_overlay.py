@@ -1133,6 +1133,50 @@ def test_precip_file_cache_env_is_the_mvt_file_cache_env() -> None:
     assert FILE_CACHE_DIR_ENV == MVT_FILE_CACHE_DIR_ENV == "NHMS_MVT_FILE_CACHE_DIR"
 
 
+def test_retention_prunes_the_cached_png_and_the_cycle_then_404s(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2011 joint seam: one retention run removes the PNG cache AND the mirror.
+
+    The 404 alone would only prove the mirror gate (`_require_mirrored_cycle`
+    runs before any cache read), so the cache directory is asserted separately.
+    """
+    from scripts import node27_raw_retention
+
+    mirror = tmp_path / "mirror"
+    cache = tmp_path / "cache"
+    _complete_ifs_mirror(mirror)
+    client = _precip_client(monkeypatch, mirror, cache)
+    url = "/api/v1/precip/ifs/2026-09-02T12:00:00Z/2026-09-02T15:00:00Z.png"
+
+    cold = client.get(url)
+
+    assert cold.status_code == 200, cold.text
+    cached = cache / "precip" / "IFS" / "2026090212"
+    assert [path.suffix for path in cached.iterdir()] == [".png"]
+
+    summary = node27_raw_retention.run_retention(
+        node27_raw_retention.RawRetentionConfig(
+            object_store_root=mirror,
+            retention_days=14,
+            sources=frozenset({"gfs", "ifs"}),
+            summary_path=None,
+            precip_cache_root=cache,
+        ),
+        now=datetime(2026, 10, 1, 0, tzinfo=UTC),
+    )
+
+    assert "canonical/IFS/2026090212" in [item["key"] for item in summary["deleted"]]
+    assert "precip-cache/IFS/2026090212" in [item["key"] for item in summary["deleted"]]
+    assert not cached.exists()
+    assert (mirror / "canonical/IFS/grid/ifs_0p25/grid.json").exists()
+
+    after = client.get(url)
+
+    assert after.status_code == 404, after.text
+    assert after.json()["error"]["code"] == "PRECIP_CYCLE_NOT_MIRRORED"
+
+
 # --------------------------------------------------------------------------
 # 5.3 route errors
 # --------------------------------------------------------------------------

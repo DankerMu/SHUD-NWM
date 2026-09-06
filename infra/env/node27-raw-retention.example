@@ -19,6 +19,27 @@ NODE27_RAW_RETENTION_SOURCES=GFS,IFS
 # Relative to the latest displayable forecast cycle, not the host clock.
 NODE27_RAW_RETENTION_DAYS=14
 
+# Display-side rendered-PNG cache root (issue #2011). Retention prunes
+# <root>/precip/<storage_source>/<cycle_token> on the SAME cutoff as
+# canonical/<storage_source>/<cycle_token>, so a cycle whose mirror is gone
+# cannot keep being served from cached PNGs. Nothing else under this root is
+# touched -- the MVT tile cache is a sibling directory here.
+#
+# ROOT-EQUALITY PRECONDITION (this is the first place retention's env is coupled
+# to the display API's env; the guarantee only holds while both point at ONE
+# tree):
+#   NODE27_RAW_RETENTION_OBJECT_STORE_ROOT  ==  the display API's
+#       NHMS_PRECIP_MIRROR_ROOT   (both hold the same canonical/ tree)
+#   NHMS_MVT_FILE_CACHE_DIR                 ==  the value the display API
+#       PROCESS actually has
+# Measured on node-27 (2026-09-06): object store root /home/ghdc/nwm/object-store;
+# display cache /home/nwm/.cache/nhms/mvt -- that is the ExecStart default in
+# nhms-display-api.service, NOT infra/env/display.example's /tmp/nhms-mvt-cache,
+# so copy the running process's value, never the template's.
+# Leaving it unset is safe but degrades: the cache lane records
+# `precip_cache_root_unconfigured` and raw + canonical are still pruned.
+NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
+
 # Rollout/rollback gates (issue #1407). Both default to today's execute-only
 # behaviour, so leaving them unset changes nothing:
 #   NODE27_RAW_RETENTION_ENABLED   (default true)  false => summary status
