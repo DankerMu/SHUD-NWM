@@ -1136,6 +1136,27 @@ def test_a_quoted_text_identity_prefix_with_an_escaped_suffix_remains_unattribut
     assert render_river_ts_sql(sql, "narrow", entry="quoted-suffix").sql == sql
 
 
+@pytest.mark.parametrize(
+    ("label", "quoted_column"),
+    [
+        ("uppercase", '"VARIABLE"'),
+        ("mixed-case", '"Variable"'),
+        ("escaped-suffix", '"variable""suffix"'),
+    ],
+)
+def test_an_unaliased_nonexact_quoted_text_identity_column_remains_unattributed_in_comparison_position(
+    label: str,
+    quoted_column: str,
+) -> None:
+    entry = f"quoted-unaliased-nonexact-{label}"
+    sql = f"SELECT value FROM hydro.river_timeseries WHERE {quoted_column} = :value"
+
+    assert fact_table_text_identity_columns(sql, entry=entry) == set()
+    assert text_fact_columns(sql, "RT") == set()
+    assert text_fact_columns(sql, "rt") == set()
+    assert render_river_ts_sql(sql, "narrow", entry=entry).sql == sql
+
+
 def test_an_unaliased_exact_quoted_column_does_not_match_a_qualified_other_relation_column() -> None:
     sql = "SELECT value FROM hydro.river_timeseries WHERE rs.\"variable\" = :value"
 
@@ -1199,6 +1220,20 @@ def test_an_authority_scalar_subquery_with_an_exact_quoted_text_column_remains_u
     assert fact_table_text_identity_columns(sql, entry="quoted-authority") == set()
     assert text_fact_columns(sql, "rt") == set()
     assert render_river_ts_sql(sql, "narrow", entry="quoted-authority").sql == sql
+
+
+def test_an_unaliased_fact_read_with_an_exact_quoted_authority_column_remains_unattributed() -> None:
+    """Only the outer fact predicate may reach the unaliased quoted-column arm."""
+    entry = "quoted-unaliased-authority"
+    sql = (
+        "SELECT value FROM hydro.river_timeseries "
+        "WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE \"run_id\" = :run_id)"
+    )
+
+    assert fact_table_text_identity_columns(sql, entry=entry) == set()
+    assert text_fact_columns(sql, "RT") == set()
+    assert text_fact_columns(sql, "rt") == set()
+    assert render_river_ts_sql(sql, "narrow", entry=entry).sql == sql
 
 
 @pytest.mark.parametrize(
