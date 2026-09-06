@@ -285,9 +285,9 @@ through `canonical_mvt_time` (`YYYY-MM-DDTHH:MM:SSZ`, seconds precision, literal
       round-1 text described raw retention as deleting "raw GRIB", implying nothing on a tile path reads
       it. In this change the raw-retention run is REQUIRED to prune, on the same cutoff, the canonical precipitation
       mirror (`canonical-precip-copyback/spec.md:156-157`) and the precipitation PNG cache (`:173`) —
-      which is exactly what the precipitation overlay renders from (spec-level today: task 4.4 is still unticked and `scripts/node27_raw_retention.py:8` on this HEAD still says it does not touch `canonical/`; the inequality argument does not depend on delivery), and exactly why `:191` is phrased
+      which is exactly what the precipitation overlay renders from (delivered by issue #2011 / PR #2099: task 4.4 is ticked and the module docstring now names all three lanes; the inequality argument never depended on delivery, and now binds a shipped deletion path), and exactly why `:191` is phrased
       against that run's `retention_days` (`NODE27_RAW_RETENTION_DAYS`, default 14 at
-      `scripts/node27_raw_retention.py:33`). So the raw-retention default is the right constant to pin
+      `scripts/node27_raw_retention.py`'s `DEFAULT_RETENTION_DAYS`). So the raw-retention default is the right constant to pin
       against; the pin's form is the inequality, not equality. The discharge tiles' own lane, the
       timeseries retention window (`packages/common/storage.py:35`, also 14), is wider in effect — with
       168 h forecast spans and `range_end <= cutoff`, a cycle's chunks survive to roughly

@@ -542,17 +542,17 @@ def outer_predicates(sql: str) -> str:
 _UNQUOTED_IDENTIFIER_FLAGS = re.IGNORECASE | re.ASCII
 
 
-def _outer_code_for_text_identity_columns(sql: str) -> str:
-    """Outer-query text for unquoted text-identity matching, with data blanked.
+_TEXT_IDENTITY_COMPARISON_OPERATOR = r"(=|<>|!=|(?i:\bIN\b|\bLIKE\b|=\s*ANY))"
 
-    :func:`outer_predicates` first removes only comparison-position scalar
-    sub-selects, keeping the authority table's ``WHERE run_id`` out of the fact
-    scan. The shared scanner then blanks literals and comments; complete
-    double-quoted identifier runs are blanked only for this column-comparison
-    seam, because ``"rt.variable"`` is one identifier rather than an unquoted
-    alias/column pair. Quoted identifiers remain code everywhere else.
+
+def _mask_quoted_identifier_spans(outer: str, *, preserve: frozenset[str]) -> str:
+    """Mask complete quoted identifiers except exact accepted reference tokens.
+
+    ``outer`` has already passed through the shared code scanner. A token is
+    admitted only after :func:`_scan_quoted_span` has found its closing quote and
+    its entire body equals one of ``preserve``; a doubled quote therefore cannot
+    turn a longer identifier into a prefix match.
     """
-    outer = _blank_non_code(outer_predicates(sql))
     masked = list(outer)
     index = 0
     while index < len(outer):
@@ -560,10 +560,29 @@ def _outer_code_for_text_identity_columns(sql: str) -> str:
             index += 1
             continue
         stop, closed = _scan_quoted_span(outer, index, '"')
-        if closed:
+        if closed and outer[index + 1 : stop - 1] not in preserve:
             masked[index:stop] = " " * (stop - index)
         index = stop
     return "".join(masked)
+
+
+def _outer_code_for_text_identity_columns(sql: str, aliases: frozenset[str]) -> tuple[str, str]:
+    """Paired outer-query views for unquoted and exact quoted references.
+
+    Both views derive from one scanner-owned ``outer`` value after authority
+    scalar sub-selects, literals and comments have been removed. The first keeps
+    the existing unquoted grammar by masking every complete quoted identifier.
+    The second preserves only exact lower-case aliases supplied by the caller and
+    exact lower-case text-identity members; every other quoted identifier is
+    opaque to the matcher.
+    """
+    outer = _blank_non_code(outer_predicates(sql))
+    unquoted = _mask_quoted_identifier_spans(outer, preserve=frozenset())
+    quoted_references = _mask_quoted_identifier_spans(
+        outer,
+        preserve=frozenset((*aliases, *TEXT_IDENTITY_COLUMNS)),
+    )
+    return unquoted, quoted_references
 
 
 def _text_identity_columns_for_references(
@@ -572,8 +591,9 @@ def _text_identity_columns_for_references(
     *,
     has_unaliased_reference: bool,
 ) -> set[str]:
-    """Text identity columns matched through the supplied unquoted references."""
-    outer = _outer_code_for_text_identity_columns(sql)
+    """Text identity columns matched through supplied bare fact references."""
+    canonical_aliases = frozenset(alias.lower() for alias in aliases)
+    outer, quoted_references = _outer_code_for_text_identity_columns(sql, canonical_aliases)
     found: set[str] = set()
     for column in TEXT_IDENTITY_COLUMNS:
         if any(
@@ -583,13 +603,35 @@ def _text_identity_columns_for_references(
                 flags=_UNQUOTED_IDENTIFIER_FLAGS,
             )
             is not None
-            for alias in aliases
+            for alias in canonical_aliases
+        ):
+            found.add(column)
+        if any(
+            re.search(
+                rf"\b(?i:{re.escape(alias)})\.\"{re.escape(column)}\"",
+                quoted_references,
+                flags=re.ASCII,
+            )
+            is not None
+            or re.search(
+                rf"\"{re.escape(alias)}\"\.(?:(?i:{re.escape(column)})\b|\"{re.escape(column)}\")",
+                quoted_references,
+                flags=re.ASCII,
+            )
+            is not None
+            for alias in canonical_aliases
         ):
             found.add(column)
         if has_unaliased_reference and re.search(
-            rf"(?<![.\w]){re.escape(column)}\b\s*(=|<>|!=|\bIN\b|\bLIKE\b|=\s*ANY)",
+            rf"(?<![.\w]){re.escape(column)}\b\s*{_TEXT_IDENTITY_COMPARISON_OPERATOR}",
             outer,
             flags=_UNQUOTED_IDENTIFIER_FLAGS,
+        ) is not None:
+            found.add(column)
+        if has_unaliased_reference and re.search(
+            rf"(?<![.\w])\"{re.escape(column)}\"\s*{_TEXT_IDENTITY_COMPARISON_OPERATOR}",
+            quoted_references,
+            flags=re.ASCII,
         ) is not None:
             found.add(column)
     return found

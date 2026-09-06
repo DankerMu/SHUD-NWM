@@ -191,14 +191,74 @@ $ head -c 8 <ifs_0p25/grid.json> | od -c → { " a x i s _ o   ；gfs_0p25/grid.
 - 三个新代码 pass 之后（01:06:40Z）NFS 镜像完好：`canonical/gfs` 26 周期 / 1456 `.nc`、`canonical/IFS` 26 周期 / 1378 `.nc`、2 个 `grid.json`——新代码的 in-pass retention 没有把 copyback root 上的 `canonical/` 当剪枝目标（与 `services/orchestrator/retention.py` 「additional roots 只剪 `runs/`」一致）。
 - 既有 `SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN`（§8）在 `.err` 里未新增行——因为 `.err` 只在 circuit 状态变化时写；其 18 个被阻候选前滚后不变。
 
-## 6. 新周期镜像（`convert` 终态 → NFS + journal `canonical_precip_mirror`）——**等待窗口，本 PR 未观测**
+## 6. 新周期镜像（`convert` 终态 → NFS + journal `canonical_precip_mirror`）——**PR #2090 冻结时未观测，§6.1 已补录**
 
 - 触发点：timer start（00:37:08Z）之后首个进入 `convert` 终态的周期，按 `cycle_window.cycle_lag_hours=16` 预计为 `2026090512`，最早 `2026-09-06T04:00Z` 进入候选窗口（NFS raw 已齐）；运维方口径整条链落地约需再等 ~10 h。
 - 判据（tasks.md 4.11a / runbook §7.4）：
   - journal：`$NHMS_SCHEDULER_JOURNAL_ROOT/journal/<S>/2026090512*.jsonl` 里 `record_type == "pipeline_event"` 且 `payload.event_type == "canonical_precip_mirror"` 的记录，`payload.details.precip_mirror.status == "ok"`；
   - trees：`object_key` 以 `/prcp_rate_or_amount` 结尾的 `trees[]` 项 `action == "copy"` 且 `status == "copied"`；`grid/<grid_id>` 项因本次回填已镜像而合法地为 `skip`/`skipped`；
   - NFS：出现 `canonical/<S>/2026090512/prcp_rate_or_amount/` 且 node-27 以 `nwm` 可读（hook 走 publisher 拷贝助手，不是回填脚本的显式 chmod，须单独抽查）。
-- 状态：截至本 receipt 冻结未观测。tasks.md 4.11 / 4.11a 保持未勾选；**#2068 前置条件 1 判为未满足**。事件落地后以 docs-only 补录 commit 追加到本节（同一文件），并在 #2068 留证。
+- 状态（PR #2090 冻结时）：未观测。tasks.md 4.11 / 4.11a 当时保持未勾选；**#2068 前置条件 1 当时判为未满足**。事件落地后以 docs-only 补录 commit 追加到本节（同一文件），并在 #2068 留证。**已于 2026-09-06T09:38–09:40Z 完成补录，结论见 §6.1：两源事件均 `ok`，4.11 / 4.11a 均已勾选，#2068 前置条件 1 已满足。**
+
+### 6.1 补录（2026-09-06T09:38–09:40Z 观测，docs-only）
+
+- 观测时间：node-22 `2026-09-06T09:38:08Z`–`09:38:57Z`、node-27 `2026-09-06T09:39:14Z`（两端 `date -u +%FT%TZ` 实读）。本次**全程只读**，命令清单见 §7 补录段。
+- journal 绝对根（从 node-22 生效 env `infra/env/compute.scheduler-dbfree.env` 解析）：`NHMS_SCHEDULER_JOURNAL_ROOT=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal`，故事件文件在 `$NHMS_SCHEDULER_JOURNAL_ROOT/journal/<S>/`（注意 `journal/journal/` 两层；`object-store/journal/…` 不是该根）。
+- 本周期两源各只有单段 `2026090512.jsonl`（未触发 `MAX_FILE_JOURNAL_CYCLE_SEGMENTS` 轮转），`<cycle>*.jsonl` glob 与单文件结果等价。
+- node-22 状态：`git rev-parse --short HEAD` = `71fbfe4d`（与 §5 一致，未前滚）；`nhms-compute-scheduler.timer` `ActiveState=active`、`ActiveEnterTimestamp` = `2026-09-06T00:37:08Z`。
+
+时序（全部 UTC，取自 journal 记录自身的 `created_at`，不依赖文件 mtime）：
+
+| 源 | `convert` job | convert started | convert finished | `canonical_precip_mirror` `created_at` |
+|---|---|---|---|---|
+| gfs | `job_cycle_gfs_2026090512_convert_cohort_44f168c553e3_convert` | 04:14:36Z | 04:15:19Z | 04:15:54.045217Z（`payload.created_at` 04:15:53.987633Z） |
+| IFS | `job_cycle_ifs_2026090512_convert_cohort_15774060b152_convert` | 04:14:55Z | 04:15:45Z | 04:16:09.253363Z（`payload.created_at` 04:16:09.146505Z） |
+
+两源事件均落在 timer start（00:37:08Z）之后，且在 §6 预测的「最早 04:00Z 进入候选窗口」内；覆盖该时间窗的 scheduler pass 是 `scheduler_2026090604_428c99830451`（`started_at` 04:04:56.359032Z）。
+
+journal 摘要（`record_type == "pipeline_event"`、`payload.event_type == "canonical_precip_mirror"`，每源命中数 **1**；信封字段 `schema_version=nhms.scheduler.file_orchestration_journal.v1`、`sequence=9`、`payload.status_to="ok"`；`payload.details` 除 `precip_mirror` 外为空）：
+
+```json
+{"cycle":"2026090512","file_count":57,"root":"[local-path]","status":"ok","storage_source":"gfs","trees":[
+  {"action":"copy","byte_count":67794864,"file_count":56,"object_key":"canonical/gfs/2026090512/prcp_rate_or_amount","status":"copied"},
+  {"action":"skip","byte_count":3392,"file_count":1,"object_key":"canonical/gfs/grid/gfs_0p25","status":"skipped"}]}
+{"cycle":"2026090512","file_count":54,"root":"[local-path]","status":"ok","storage_source":"IFS","trees":[
+  {"action":"copy","byte_count":64007033,"file_count":53,"object_key":"canonical/IFS/2026090512/prcp_rate_or_amount","status":"copied"},
+  {"action":"skip","byte_count":3392,"file_count":1,"object_key":"canonical/IFS/grid/ifs_0p25","status":"skipped"}]}
+```
+
+判据逐条：`status == "ok"` ✅（两源）；`prcp_rate_or_amount` 树 `action == "copy"` 且 `status == "copied"` ✅（两源）；`grid/<grid_id>` 树 `skip`/`skipped` ✅——`grid.json` 已被 §2 回填，按 4.11a 明文合法，不要求 `copy`。`root` 字段本身在 journal 里就是字面量 `[local-path]`（写入侧脱敏），照录。
+
+NFS 目录（node-22 视角，`/ghdc/data/nwm/object-store/`；`ls` 显示的 `Sep 6 12:16` = `04:16Z`）：
+
+| 源 | 目录 | mode/owner | `.nc` 数 | 与事件 `file_count` 一致 |
+|---|---|---|---|---|
+| gfs | `canonical/gfs/2026090512/prcp_rate_or_amount/` | `755 frd_muziyao:huser` | 56 | ✅ 56 |
+| IFS | `canonical/IFS/2026090512/prcp_rate_or_amount/` | `755 frd_muziyao:huser` | 53 | ✅ 53 |
+
+表中「与事件 `file_count` 一致」比的是 prcp 树自身的 `trees[].file_count`（56 / 53）；事件顶层 `file_count`（57 / 54）多出的 1 是同一事件里 `skip` 的 `grid.json`。
+
+两源 `canonical/<S>/` 下条目数现为 28 = 27 个周期目录 + 1 个 `grid/`，相对 §5（01:06:40Z 的 26 个周期目录）净增 `2026090512` 一个新周期；总 `.nc` gfs 1456 → 1512（+56）、IFS 1378 → 1431（+53），增量与事件 `trees[].file_count` 逐源吻合。
+
+node-27 可读性实测（`nwm` 账号，同一份 NFS 的 `/home/ghdc/nwm/object-store/` 前缀）——hook 走 publisher 拷贝助手、**没有**回填脚本的显式 `chmod 0644`，故必须实测而非推断：
+
+| 检查 | gfs | IFS |
+|---|---|---|
+| 周期目录 / `prcp_rate_or_amount/` `stat -c '%a %U:%G'` | `755 frd_muziyao:nfsdata` | `755 frd_muziyao:nfsdata` |
+| 目录内 `.nc` mode 去重（`stat -c %a`） | 全部 `644` | 全部 `644` |
+| 首文件 `head -c 8` 经 `od -c` | `211 H D F \r \n 032 \n`（HDF5 魔数） | 同左 |
+| 末文件（`…_f168.nc`）`head -c 8` | 同上，HDF5 魔数 | 同上，HDF5 魔数 |
+| `[ -r ]` 以 `nwm` 判定 | `readable_by_nwm=yes` | `readable_by_nwm=yes` |
+
+结论：hook 写出的树 owner 是 `frd_muziyao:nfsdata`、mode `0755`/`0644`，`nwm` 走 other 位可读，实读到 HDF5 魔数——与回填脚本显式 chmod 的结果等价，**AC5 可读性判据满足**。两源 `grid/<grid_id>/grid.json` 仍为 `644`（本次 `skip` 未改动）。node-27 容量 `df -h`：`/` 98G 用 72G（77%）、`/home` 1.7T 用 1.2T（424G 可用）；本次镜像由 node-22 写入 NFS，27 侧只读。
+
+`runs/` copyback 照常（4.11 的第二半判据）：`2026090512` 的 run 目录源侧（`/scratch/frd_muziyao/nhms-prod/object-store/runs/`）与 NFS 侧各 **gfs 38 / IFS 38**，数量一致。
+抽样 `fcst_gfs_2026090512_dg_0883c7e9c1006c6fd347df500315e9df` 具备 `input/`、`logs/`、`output/`（含 `output/state_checkpoints/`）完整结构，mtime `05:55:19Z`；`canonical/` 与 `runs/` 两条路径互不干扰。
+
+scheduler 健康度：`.err` 路径由 unit 的 `StandardError=append:…/workspace/scheduler/logs/nhms-compute-scheduler.err` 回读确定，行数 **588 → 588**，与 §5 的 timer start 前后读数一致，本次窗口零新增行、零新增 traceback（文件内累计 23 处 `Traceback` 为历史存量，非本次新增）。
+`.err` 只在 circuit 状态变化时写，§8 的 `SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN threshold=3 open=18` 仍是尾行，状态未变。
+
+**判定**：tasks.md 4.11 与 4.11a 判据全部满足（新周期 `canonical_precip_mirror` 事件 + NFS 目录 + node-27 `nwm` 可读 + `runs/` copyback 不变 + 新代码 pass `pass:finished` 且 `.err` 无新 traceback），本补录 commit 一并勾选两项；**#2068 前置条件 1（本回执 §6 补录完成）已满足**。
 
 ## 7. 命令审计（无 `uv sync` / 裸 `uv run` / `--active`）
 
@@ -222,6 +282,18 @@ cd /home/nwm/NWM && set -a && . infra/env/node27-raw-retention.env && set +a && 
 ```
 
 （该次调用没有显式 `PYTHONPATH=/home/nwm/NWM`，靠 cwd 解析 `packages.common`，结果与 tasks.md Evidence Floor 规定形态等价；`NODE27_DISPLAY_WATERMARK_DATABASE_URL` 未回显。）
+
+### 7.1 补录窗口命令审计（2026-09-06T09:38–09:40Z，两端全只读）
+
+本次补录**没有任何写/状态变更命令**。node-22 只跑 `date -u`、`ls`、`stat`、`find`、`wc`、`grep`、`jq`、`cut`、`git rev-parse --short HEAD`、`git status --porcelain`（计数用）、`systemctl --user is-active` / `show` / `cat`；node-27 只跑 `date -u`、`id -un`、`ls`、`stat`、`head -c 8`、`od -c`、`[ -r ]`、`df -h`。
+**未执行** `uv sync` / 裸 `uv run` / `uv run --active`（本次两端连 Python 都未调用），未 `git pull`、未改动任何 gitignored 目录、未连接 `:55433`、未回显 `NODE27_DISPLAY_WATERMARK_DATABASE_URL` 或 `DATABASE_URL`（env 读取用 `grep -E` 白名单键并显式滤除 `database`/`url`）。
+
+判读用的 `jq` 选择器（runbook §7.4 口径，`<S>` ∈ {`gfs`,`IFS`}）：
+
+```bash
+J=/scratch/frd_muziyao/nhms-prod/workspace/scheduler/journal/journal
+jq -c 'select(.payload.event_type=="canonical_precip_mirror") | .payload.details.precip_mirror' "$J/<S>/2026090512"*.jsonl
+```
 
 ## 8. 顺带发现（不在本单修）
 
