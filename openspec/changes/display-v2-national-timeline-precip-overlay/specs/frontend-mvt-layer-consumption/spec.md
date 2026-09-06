@@ -20,6 +20,13 @@ The frontend SHALL consume `apiLayer.metadata.valid_times` returned by `GET /api
 - **AND** the frontend MUST NOT rewrite the URL's `validTime` while the list is unresolved, so a shared `?cycle=<cycle>&validTime=<t>` link survives the load
 - **AND** the unresolved state MUST reach a terminal state: a rejected fetch, and equally a fetch that will never be issued because the enrichment chain was skipped, MUST be recorded as such (the skipped case resolving to the same rejected reason, since no further attempt is pending) and MUST re-render the layer states in place, so the transition out of "still loading" is observable rather than latched
 
+#### Scenario: Basin detail renders the national discharge overlay only for the catalog default pair
+- **WHEN** the basin-detail surface builds its layer states and the active `(source, cycle)` carried by the URL is not the catalog's `(default_source, default_cycle)`
+- **THEN** the frontend MUST apply the same unresolved-list treatment as the national overview: empty `valid_times[]`, the layer unavailable with the terminal reason, and no tile requested for that pair
+- **AND** it MUST NOT fall back to `metadata.valid_times`, because the backend serves the national discharge template for run-scoped `/api/v1/layers?run_id=` responses too, so the substituted `{source}`/`{cycle}` would otherwise name an identity whose list was never fetched
+- **AND** basin detail MUST NOT issue the per-cycle form of that request (`?source=&cycle=`) — its time axis comes from the selected run per `map-layer-timeline-controls`, and it keeps issuing the existing run-scoped form (`?run_id=`); a per-cycle list is consumed only when the shared store cache already holds it
+- **AND** the active pair MUST be resolved with the same national-scope source resolution the tile builder applies, so a URL that resolves `best` to a concrete source cannot validate one identity and substitute another
+
 #### Scenario: Metadata.valid_times is intentionally empty (time-less layer)
 - **WHEN** `apiLayer.metadata.valid_times === []` for any layer other than `discharge` (e.g. `river-network` is a topology layer with no time dimension, and `precip` carries its times in its own index rather than in the catalog)
 - **THEN** the frontend MUST treat the layer as having no time dimension

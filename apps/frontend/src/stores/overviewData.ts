@@ -1686,10 +1686,32 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
         })
       }
 
+      // 流域详情同样落在**全国** discharge 模板上：后端对 run-scoped `/api/v1/layers?run_id=` 也合并
+      // `_NATIONAL_DISCHARGE_METADATA`（`services/tiles/mvt.py`），于是 `isNationalOverlayMetadata` 为真、
+      // `{source}`/`{cycle}` 由 URL 状态代入，而 `metadata.valid_times` 只是目录**默认对**的列表。
+      // 非默认对必须与全国分支同样顶掉，否则会拼出「用默认对的时次去请求另一身份瓦片」的良构错身份 URL
+      // （spec frontend-mvt-layer-consumption「Basin detail renders the national discharge overlay only
+      // for the catalog default pair」）。
+      // 活动对按 `requestQuery` 解析（全国口径 `best`→`gfs`），与 `buildM11RegisteredOverlay` 里
+      // `resolveNationalScaleSource(state.source)` 代入的身份同源；用 `concreteSurfaceQuery`（可能把
+      // `best` 解析成 run 的具体源）解析会变成「校验一个身份、代入另一个身份」。
+      // 记录缺席一律落 `error` 终态：流域详情的时间轴来自选中的 run，**不发**任何 per-cycle
+      // valid-times（决策 9 / spec map-layer-timeline-controls），既无请求在途也不会再有终态覆盖，
+      // `pending`（"还在取"）就是谎报。共享的 `validTimesByCycle` 已被全国总览填过则直接复用。
+      const nationalPair = nationalDischargeActivePair(requestQuery, layers)
+      const activeCycleValidTimes: Record<string, ActiveCycleValidTimesOverride> | undefined =
+        nationalPair && !nationalPair.isDefault
+          ? {
+              discharge: get().validTimesByCycle[m11SourceCycleKey(nationalPair.source, nationalPair.cycle)] ?? {
+                status: 'error',
+              },
+            }
+          : undefined
       const layerStates = normalizeLayerStates({
         query: concreteSurfaceQuery,
         layers,
         validTimesByLayerId,
+        activeCycleValidTimes,
         resolvedRun: useSingleRunSurfaces ? latestRun : null,
       })
       const snapshot: BasinDataSnapshot = {
