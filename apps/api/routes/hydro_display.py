@@ -78,6 +78,11 @@ PUBLIC_LAYER_DEFINITIONS: tuple[tuple[str, str, str, list[str]], ...] = (
     ("discharge", "Discharge", "hydrology", ["q_down"]),
     ("river-network", "River network", "base", ["geometry"]),
     ("met-stations", "Meteorological stations", "base", ["station_point"]),
+    # #2010: the precipitation raster is a PNG overlay, not an MVT layer. Its
+    # entry is independent of `run_id` and of live-PostGIS readiness, and its
+    # valid times come from `/api/v1/precip/{source}/{cycle}/index`, not from
+    # `valid-times` (which answers `[]` for it via the non-discharge branch).
+    ("precip", "Precipitation (past 24h)", "meteorology", ["precip_24h"]),
 )
 SUPPORTED_PUBLIC_LAYER_IDS = frozenset(definition[0] for definition in PUBLIC_LAYER_DEFINITIONS)
 MVT_RESPONSE_HEADERS = {
