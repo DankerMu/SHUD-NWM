@@ -179,13 +179,26 @@ $ head -c 8 <ifs_0p25/grid.json> | od -c → { " a x i s _ o   ；gfs_0p25/grid.
   - 镜像源侧（node-22 canonical，`NHMS_RETENTION_DAYS=14`）当前最老周期 `2026082312`，也覆盖 `oldest_listed − 24h`。
 - 已知限制：node-27 侧 `node27_raw_retention.py` 尚未把 `canonical/<S>/<K>` 纳入剪枝目标（4.4 / #2011 未落地），故 NFS 镜像在 #2011 合并前只增不减；该 plan-only 汇总的 `planned = 4` 是 raw 目录里早于 cutoff 的 4 个周期（`2026-08-21T00Z/12Z` × 2 源），与本单无关且 plan-only 未删除。
 
-## 5. 首个新代码 pass（node-22）
+## 5. 首个新代码 pass（node-22，`HEAD 71fbfe4d`）
 
-（本节在 timer 重启后的首个 pass 结束时补录，见下。）
+| pass_id | started | finished | status | candidates | retention（新代码） |
+|---|---|---|---|---|---|
+| `scheduler_2026090600_ef252ee9668d`（timer start 后首个） | 00:37:10Z | 00:45:16Z | `planned` | 0 | `completed`，planned 0 / deleted 0 / skipped 9649 |
+| `scheduler_2026090600_6926eed315a6` | 00:45:25Z | 00:53:32Z | `planned` | 0 | 同上 |
+| `scheduler_2026090600_296ae6d9cdc5` | 00:53:41Z | 01:01:48Z | `planned` | 0 | 同上 |
 
-## 6. 新周期镜像（`convert` 终态 → NFS + journal `canonical_precip_mirror`）
+- `pass:finished` 正常；`.err` 行数 588 → 588（timer start 前后），新增 traceback 0。
+- 三个新代码 pass 之后（01:06:40Z）NFS 镜像完好：`canonical/gfs` 26 周期 / 1456 `.nc`、`canonical/IFS` 26 周期 / 1378 `.nc`、2 个 `grid.json`——新代码的 in-pass retention 没有把 copyback root 上的 `canonical/` 当剪枝目标（与 `services/orchestrator/retention.py` 「additional roots 只剪 `runs/`」一致）。
+- 既有 `SCHEDULER_NO_PROGRESS_CIRCUIT_OPEN`（§8）在 `.err` 里未新增行——因为 `.err` 只在 circuit 状态变化时写；其 18 个被阻候选前滚后不变。
 
-（本节在 timer start 之后首个 convert 终态周期——按 `cycle_lag_hours=16` 预计 `2026090512`，最早 04:00Z 进窗口——落地后补录；判据见 tasks.md 4.11a。）
+## 6. 新周期镜像（`convert` 终态 → NFS + journal `canonical_precip_mirror`）——**等待窗口，本 PR 未观测**
+
+- 触发点：timer start（00:37:08Z）之后首个进入 `convert` 终态的周期，按 `cycle_window.cycle_lag_hours=16` 预计为 `2026090512`，最早 `2026-09-06T04:00Z` 进入候选窗口（NFS raw 已齐）；运维方口径整条链落地约需再等 ~10 h。
+- 判据（tasks.md 4.11a / runbook §7.4）：
+  - journal：`$NHMS_SCHEDULER_JOURNAL_ROOT/journal/<S>/2026090512*.jsonl` 里 `record_type == "pipeline_event"` 且 `payload.event_type == "canonical_precip_mirror"` 的记录，`payload.details.precip_mirror.status == "ok"`；
+  - trees：`object_key` 以 `/prcp_rate_or_amount` 结尾的 `trees[]` 项 `action == "copy"` 且 `status == "copied"`；`grid/<grid_id>` 项因本次回填已镜像而合法地为 `skip`/`skipped`；
+  - NFS：出现 `canonical/<S>/2026090512/prcp_rate_or_amount/` 且 node-27 以 `nwm` 可读（hook 走 publisher 拷贝助手，不是回填脚本的显式 chmod，须单独抽查）。
+- 状态：截至本 receipt 冻结未观测。tasks.md 4.11 / 4.11a 保持未勾选；**#2068 前置条件 1 判为未满足**。事件落地后以 docs-only 补录 commit 追加到本节（同一文件），并在 #2068 留证。
 
 ## 7. 命令审计（无 `uv sync` / 裸 `uv run` / `--active`）
 
