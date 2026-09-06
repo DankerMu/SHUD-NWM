@@ -54,33 +54,39 @@ NODE27_RAW_RETENTION_DAYS=14
 # `precip_cache_root_unconfigured` and raw + canonical are still pruned.
 NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 
-# HOW TO READ THIS UNIT UNTIL #2100 LANDS (issue #2011, measured on node-27
-# 2026-09-06). The canonical tree is `755 frd_muziyao nfsdata` and this runner
-# is `nwm`, so every canonical target fails with `PermissionError`. That is the
-# EXPECTED STEADY STATE, not an incident:
+# HOW TO READ THIS UNIT UNTIL #2100 LANDS (issue #2011; node-27 observations
+# 2026-09-06, local reproductions marked as such). The canonical tree is `755
+# frd_muziyao nfsdata` and this runner is `nwm`, so every canonical target
+# fails with `PermissionError`. That is the EXPECTED STEADY STATE, not an
+# incident:
 #   - `failed[]` is permanently non-empty on the canonical lane, so the runner
-#     returns rc=1 on every tick (`return 1 if counts.failed else 0`), the
-#     wrapper propagates it, and this `Type=oneshot` unit therefore sits
+#     returns rc=1 on every tick (`return 1 if payload["counts"]["failed"] else
+#     0`), the wrapper propagates that rc unchanged (`RC=$?` ... `exit "$RC"`),
+#     and this `Type=oneshot` unit sets no `SuccessExitStatus=`, so it sits
 #     permanently in `systemctl --user --failed`. The unit carries no
 #     `OnFailure=` (unlike nhms-node27-timeseries-retention and
 #     nhms-node27-resource-governance), so nothing pages -- but the exit code
 #     stops being usable as a raw-lane signal.
-#   - The historical ops criterion `counts.failed == 0` (2026-06-27 receipt)
+#   - The historical ops criterion `counts.failed == 0`
+#     (docs/runbooks/receipts/2026-06-27-node27-raw-retention-live-proof.md)
 #     CANNOT hold again until #2100 is resolved. Do not re-adopt it.
 #   - `failed[]` alone is NOT the signal. It stays empty in two states where
 #     retention has silently stopped:
-#       * A lane retired silently. If `<object-store>` itself loses `x` (or
-#         returns ESTALE), `config_from_env`'s `resolve(strict=True)` still
-#         succeeds, so the loud `preflight_blocked` rc=2 path is NOT taken;
-#         `_resolve_lane_root` records a `<lane>_root_unsafe` /
-#         `path_unavailable` entry in `skipped[]`, `failed[]` stays empty,
-#         `main()` returns 0, and the cache lane keeps pruning, so
-#         `counts.deleted` and `freed_bytes` still look healthy. Measured:
-#         rc=0, counts {'deleted': 1, 'failed': 0, 'skipped': 2}.
+#       * Lanes retired silently. If `<object-store>` itself loses `x`,
+#         `config_from_env`'s `resolve(strict=True)` still succeeds (it stats
+#         that root from its PARENT), so the loud `preflight_blocked` rc=2 path
+#         is NOT taken; `_resolve_lane_root` records a `<lane>_root_unsafe` /
+#         `path_unavailable` entry in `skipped[]` for BOTH lanes under it (raw
+#         and canonical), `failed[]` stays empty, `main()` returns 0, and the
+#         cache lane keeps pruning, so `counts.deleted` and `freed_bytes` still
+#         look healthy. Reproduced locally on 3.11 by dropping `x` on the object
+#         store: rc=0, counts {'deleted': 1, 'failed': 0, 'skipped': 2}. An
+#         ESTALE raised on a lane root lands in that same `except OSError`; an
+#         ESTALE on `<object-store>` itself is a preflight blocker instead.
 #       * A stale receipt. If the run raises before writing its summary (#2104
-#         item 1) no new file appears, so `ls -t ... | head -1` returns the
-#         PREVIOUS tick's healthy file.
-#     Check freshness, all three lanes and the failure kind together:
+#         items 1 and 4) no new file appears, so `ls -t ... | head -1` returns
+#         the PREVIOUS tick's healthy file.
+#     Check freshness, execution mode and the failure kind together:
 #       jq -e '
 #         (.execution_mode == "production_execute")
 #         and ((.finished_at | fromdateiso8601) > (now - 26*3600))
@@ -89,12 +95,15 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #       ' "$(ls -t /home/nwm/node27-raw-retention-logs/raw-retention-*.json | head -1)"
 #     26h is not a magic constant: it is the 24h tick of
 #     nhms-node27-raw-retention.timer (`OnCalendar=*-*-* 03:35:00 UTC`, daily)
-#     plus slack. Measured exit codes over seven constructed summary shapes:
-#       0  expected steady state -- fresh file, canonical `PermissionError`
-#          entries only, all three lanes live.
+#     plus slack. Exit codes over seven summary shapes -- six produced by
+#     driving the shipped script, the stale one a real summary with only
+#     `finished_at` aged past the window:
+#       0  expected steady state -- fresh file, `production_execute`,
+#          `PermissionError` entries only, no lane-root skip.
 #       1  a lane silently retired via `*_root_unsafe`.
 #       1  a stale receipt, i.e. no new summary since the last tick.
-#       1  a genuine IO failure in `failed[]` -- read that entry's `key`/`error`.
+#       1  a genuine IO failure in `failed[]` (driven as `error_type: "OSError"`
+#          / `[Errno 30] Read-only file system`) -- read its `key`/`error`.
 #       1  `NODE27_RAW_RETENTION_ENABLED=false`, i.e. `execution_mode:
 #          "disabled"`.
 #       1  `NODE27_RAW_RETENTION_PLAN_ONLY=true`, i.e. `execution_mode:
@@ -105,13 +114,27 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #          a unit an operator switched off nor one that only lists targets is.
 #       1  `preflight_blocked` -- nothing ran; the runner already exits rc=2
 #          there.
-#     Exit 0 therefore means: the run completed recently, actually executed its
-#     deletions rather than planning them, kept all three lanes live, and failed
-#     only in the way #2100 describes. It is not a global health claim beyond
-#     those four things.
-#     Forward pointer: a `skipped[]` entry for an unsafe lane root carries no
-#     errno today, so when the `_root_unsafe` clause trips, the diagnosis is in
-#     the wrapper log, not the JSON -- tracked as #2104 item 3.
+#     Exit 0 means those four clauses and nothing more: fresh summary,
+#     `production_execute`, every `failed[]` entry a `PermissionError` (on ANY
+#     lane -- the clause does not single out canonical), and no `*_root_unsafe`
+#     lane root. It does NOT mean all three lanes ran: a lane that retired
+#     itself with `<lane>_root_missing` or `precip_cache_root_unconfigured`
+#     passes clause 4 deliberately, because `_resolve_lane_root` treats absence
+#     as a benign per-lane skip and matching it would hold a fresh install at
+#     exit 1 until every lane root exists. Reproduced locally: canonical tree
+#     and `<cache>/precip` both absent -> counts {'deleted': 1, 'failed': 0},
+#     criterion still exits 0.
+#     Lane liveness lives in `skipped[]`, so read it on every tick --
+#     `jq '.skipped[] | select(.key | contains("/") | not)' <summary>` lists
+#     exactly the lane-level retirements. The same `_root_missing` reason means
+#     opposite things per lane: `precip_cache_root_missing` is expected until
+#     the display API caches its first PNG (`<cache>/precip` is created lazily
+#     on write, services/precip/cache.py), whereas `canonical_root_missing` on
+#     node-27 means the mirror tree is gone.
+#     Forward pointer: those `skipped[]` entries carry no errno, and
+#     `_resolve_lane_root` discards the `OSError` without logging it, so when
+#     the `_root_unsafe` clause trips the errno is in NEITHER the JSON nor the
+#     wrapper log -- probe the path by hand. Tracked as #2104 item 3.
 
 # Rollout/rollback gates (issue #1407). Both default to today's execute-only
 # behaviour, so leaving them unset changes nothing:
