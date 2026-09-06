@@ -344,7 +344,9 @@ Risk triage（`subagent-workflow` Phase 0.5，fixture level `expanded`，与上�
     - `stat -c '%a %U %G'` → `/home/ghdc/nwm/object-store` `775 frd_muziyao nfsdata`；`.../canonical` `755 frd_muziyao nfsdata`；`.../canonical/IFS` `755 frd_muziyao nfsdata`；而 `.../raw` `777 frd_muziyao nfsdata` 且 `raw/{gfs,IFS}` 是 `775 nwm nwm`——这正是 raw 车道今天能删的原因。
     - 探针 `mkdir /home/ghdc/nwm/object-store/canonical/IFS/.perm-probe-2011` → `Permission denied`（`nwm` 不在 `nfsdata` 组，`canonical/<S>/` 对 other 只有 `r-x`）。
     - 后果：`shutil.rmtree` 需要父目录写权限，故生产上 **canonical 车道的每个目标都会以 `PermissionError` 落 `failed[]`**，每个 tick 复现；缓存车道不受影响（`/home/nwm/.cache/nhms/mvt` 属 `nwm nwm 775`）。
-    - 本单的义务是**语义稳定 + 显式路由**，不是就地修复：`PermissionError` 是 `OSError` 子类，必须落 `failed[]` 且带可区分的稳定标识（不得崩进程、不得静默计入 `deleted`），并作为 known limit 走 deferral 路由。修复面在镜像生产侧（`_copyback_canonical_precip` / `scripts/canonical_precip_copyback_backfill.py` 的目录模式，#2008/#2069）加一次性 `chgrp`/setgid 运维过账，或把 `nwm` 加进 `nfsdata` 组——三者都在本 PR 的 `PR Boundary`（「不动 publisher」）之外；node-22 也不能改由自己剪（DB-free，拿不到 display watermark）。
+    - 本单的义务是**语义稳定 + 显式路由**，不是就地修复：`PermissionError` 是 `OSError` 子类，必须落 `failed[]` 且带可区分的稳定标识（不得崩进程、不得静默计入 `deleted`），并作为 known limit 走 deferral 路由。修复面在镜像生产侧（`_copyback_canonical_precip` / `scripts/canonical_precip_copyback_backfill.py` 的目录模式）加一次性 `chgrp`/setgid 运维过账，或把 `nwm` 加进 `nfsdata` 组——三者都在本 PR 的 `PR Boundary`（「不动 publisher」）之外；node-22 也不能改由自己剪（DB-free，拿不到 display watermark）。**deferral 落在 #2100**（round-1 review 指出原文指向的 #2008/#2069 均已 CLOSED，是死指针）。
+    - **`rc=1` 稳态是本单引入的次生后果，必须在运维面披露**（round-1 verified，cand-02）：`main()` 是 `return 1 if payload["counts"]["failed"] else 0`，unit 是 `Type=oneshot`，故首个 canonical 周期越过 cutoff 之后每个 tick 都 rc=1，unit 永久停在 `systemctl --user --failed`，历史 receipt 的 `counts.failed == 0` 判据在 #2100 解决前不再可能成立，且退出码从此不能区分「canonical 权限（预期）」与「raw 车道真删除失败」。**不改退出码语义**（本 Invariant Matrix 明确要求 `failed` 非空即 rc=1），改的是 `infra/env/node27-raw-retention.example` 里的运维口径：真实信号是 `failed[]` 中 `error_type != "PermissionError"` 的条目。该 unit **没有** `OnFailure=`（兄弟的 timeseries-retention / resource-governance 才有），故是静默 failed 而非告警风暴。
+    - **部分删除（cand-05）已裁为 PLAUSIBLE/DEFER，路由到 #2100 作为 rollout 前置条件**：今日不可达——实测 canonical 树每一层（含 `<K>` 与 `<K>/prcp_rate_or_amount`）都是 `755 frd_muziyao nfsdata` 且无扩展 ACL，`shutil.rmtree` 在第一个 `.nc` 的 `unlink` 上即 `EACCES`，一个字节都删不掉。只有当 #2100 的修复只覆盖内层、没覆盖 `canonical/<S>/` 时才会出现「切片删光、空壳目录留下」的混合形态。
   - Legacy compatibility / examples — not selected（部分）：raw 车道语义、anchor（#1407）、env gate 名字与默认值全部不变，由现有用例回归保证；无外部示例消费该 summary。
   - Release / packaging / dependency compatibility — not selected：仅标准库，无依赖变化。
   - Documentation / migration notes — **selected**：模块 docstring 现写「deliberately does not touch canonical」，与新行为矛盾，必须改；systemd unit `Description` 与 env example 同步。
@@ -361,7 +363,7 @@ Risk triage（`subagent-workflow` Phase 0.5，fixture level `expanded`，与上�
   - 「kept 周期借用了已剪周期切片」——spec 明写按当前镜像评估、不需要额外策略。
   - anchor 语义（#1407）不变。
   - node-27 实机 env 文件更新（含把两个根按实测值抄进 `node27-raw-retention.env`）、spec `canonical-precip-copyback` 的缓存清单度量（`precip/**` 文件数上界 `2 × 57 × K` 与缓存卷 `df -h`）—— 属 I15/#2017 部署 receipt 范围，本 PR 只改 `.example` 模板，实机项作为记录在案的 deferral 路由出去。
-  - canonical 车道的 POSIX 删除权限修复（改镜像生产侧目录模式 / setgid / 组成员）—— 见 Auth 包，修复面在 `PR Boundary` 之外，按 deferral 路由为独立 issue；本 PR 只保证失败语义稳定可观测。
+  - canonical 车道的 POSIX 删除权限修复（改镜像生产侧目录模式 / setgid / 组成员）—— 见 Auth 包，修复面在 `PR Boundary` 之外，已按 deferral 路由为 **#2100**；本 PR 只保证失败语义稳定可观测，并在 env example 披露 `rc=1` 稳态。
 
 #### Invariant Matrix（4.4，issue #2011；high 强度要求）
 
@@ -388,6 +390,8 @@ Risk triage（`subagent-workflow` Phase 0.5，fixture level `expanded`，与上�
   - `<root>/canonical` 不存在（现有全部 tmp root 的形状）→ 记 `canonical_root_missing`，raw 与缓存车道照常剪。
   - `NODE27_RAW_RETENTION_ENABLED=false` 与 `NODE27_RAW_RETENTION_PLAN_ONLY=true` → 三条车道全部零删除，canonical 与缓存目录仍在（现有 gate 用例只建 `raw/`，新删除车道的 kill switch 目前无人钉）。
   - canonical 目标的父目录不可写（模拟生产属主）→ 该目标落 `failed[]` 且带稳定可区分标识，raw 与缓存车道的删除不受影响，进程退出码仍为 1（`failed` 非空）而非崩溃。
+  - 任一 lane root 的**祖先不可穿越**（如 `0750` 的 object-store，#2035 弱点 B 的形态）→ 只跳该车道并记 `<lane>_root_unsafe` / `path_unavailable`，另两条车道照常删除，且 summary JSON 仍然写出（round-1 verified，cand-04：`pathlib` 只吞 `ENOENT/ENOTDIR/EBADF/ELOOP`，`EACCES`/`ESTALE` 会逃出 `_resolve_lane_root` 的三个前置检查、中止整轮并让 `--summary-path` 回执静默停留在上一 tick）。
+  - **本 PR 让任何既有断言变假的地方都必须同轮改掉**（round-1 pattern escalation，class `contract`）：`services/tiles/mvt.py` 两处（`NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS = 12` 的立论块与 `national_discharge_cycles` docstring）写着「剪枝未交付、4.4 未勾」，本 PR 交付并勾选后即为假；其中 `L <= R - 1` 不等式仍然正确且从文档级变为活约束，故 `infra/env/node27-raw-retention.example` 补 `NODE27_RAW_RETENTION_DAYS >= 13` 下限与违反后果（时间轴列出的周期渲染 404）。历史 receipt 不回改。
   - 未改动的兄弟消费者：现有 raw 剪枝、anchor 披露、env gate、preflight、symlink/非周期名跳过等全部用例不变通过。
 
 #### 边界面清单（4.4，high 强度要求）

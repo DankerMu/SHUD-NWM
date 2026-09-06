@@ -17,6 +17,20 @@ NODE27_RAW_RETENTION_LOG_ROOT=/home/nwm/node27-raw-retention-logs
 NODE27_RAW_RETENTION_LOCK_PATH=/tmp/node27-raw-retention.lock
 NODE27_RAW_RETENTION_SOURCES=GFS,IFS
 # Relative to the latest displayable forecast cycle, not the host clock.
+#
+# FLOOR (issue #2011): this value MUST be >= the display API's
+# `NATIONAL_DISCHARGE_CYCLE_LOOKBACK_DAYS` + 1 -- 12 + 1 = 13 today
+# (`services/tiles/mvt.py`). The copyback spec requires
+# `oldest_listed_cycle - 24h >= display_watermark - retention_days`, which with
+# lookback `L` and retention `R` reduces to `L <= R - 1`. Set it below the floor
+# and the failure is silent on BOTH sides: `GET /api/v1/layers/discharge/cycles`
+# keeps listing cycles back to `now() - L` while this run has already pruned
+# their canonical mirror, so the timeline advertises cycles whose precipitation
+# index answers HTTP 404 `PRECIP_CYCLE_NOT_MIRRORED` -- and the retention
+# summary reports those deletions as ordinary successes, so nothing here alarms.
+# The spec's remedy is to RAISE this value, never to lower the lookback. The
+# inequality is enforced by the node-27 deployment receipt (copyback task 4.6 /
+# #2016), not by a check in the script.
 NODE27_RAW_RETENTION_DAYS=14
 
 # Display-side rendered-PNG cache root (issue #2011). Retention prunes
@@ -39,6 +53,27 @@ NODE27_RAW_RETENTION_DAYS=14
 # Leaving it unset is safe but degrades: the cache lane records
 # `precip_cache_root_unconfigured` and raw + canonical are still pruned.
 NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
+
+# HOW TO READ THIS UNIT UNTIL #2100 LANDS (issue #2011, measured on node-27
+# 2026-09-06). The canonical tree is `755 frd_muziyao nfsdata` and this runner
+# is `nwm`, so every canonical target fails with `PermissionError`. That is the
+# EXPECTED STEADY STATE, not an incident:
+#   - `failed[]` is permanently non-empty on the canonical lane, so the runner
+#     returns rc=1 on every tick (`return 1 if counts.failed else 0`), the
+#     wrapper propagates it, and this `Type=oneshot` unit therefore sits
+#     permanently in `systemctl --user --failed`. The unit carries no
+#     `OnFailure=` (unlike nhms-node27-timeseries-retention and
+#     nhms-node27-resource-governance), so nothing pages -- but the exit code
+#     stops being usable as a raw-lane signal.
+#   - The historical ops criterion `counts.failed == 0` (2026-06-27 receipt)
+#     CANNOT hold again until #2100 is resolved. Do not re-adopt it.
+#   - The real signal is a `failed[]` entry whose `error_type` is NOT
+#     `PermissionError`. Check the newest summary:
+#       jq -e '[.failed[] | select(.error_type != "PermissionError")] | length == 0' \
+#         "$(ls -t /home/nwm/node27-raw-retention-logs/raw-retention-*.json | head -1)"
+#     Exit 0 = only the known #2100 failures; exit 1 = a real IO failure, read
+#     that entry's `key`/`error`. Also watch `counts.deleted` and
+#     `freed_bytes`: raw and precip-cache must keep pruning normally.
 
 # Rollout/rollback gates (issue #1407). Both default to today's execute-only
 # behaviour, so leaving them unset changes nothing:

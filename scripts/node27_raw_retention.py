@@ -261,24 +261,40 @@ def _resolve_lane_root(
     making any of them a preflight blocker would zero out raw retention on the
     first production tick after deploy, before an operator has edited the env
     file -- strictly worse than not pruning a cache.
+
+    Every probe here is wrapped: `pathlib` swallows only ENOENT/ENOTDIR/EBADF/
+    ELOOP, so an EACCES or ESTALE on a lane root (a non-traversable ancestor --
+    e.g. a 0750 object-store tree owned by another uid) would otherwise escape
+    `collect_targets`, which runs to completion BEFORE any deletion. That would
+    retire all three lanes at once and skip the summary write entirely, leaving
+    the `--summary-path` receipt silently stale. Locality is the promise this
+    function makes, so an unreadable root is one lane's skip like any other.
     """
-    if root.is_symlink():
+    try:
+        if root.is_symlink():
+            return None, {
+                "key": key,
+                "reason": f"{prefix}_root_unsafe",
+                "path": str(root),
+                "detail": "path_is_symlink",
+            }
+        if not root.exists():
+            return None, {"key": key, "reason": f"{prefix}_root_missing", "path": str(root)}
+        if not root.is_dir():
+            return None, {
+                "key": key,
+                "reason": f"{prefix}_root_unsafe",
+                "path": str(root),
+                "detail": "path_not_directory",
+            }
+        resolved, blocker = _safe_resolved_dir(root, label=f"{prefix}_root")
+    except OSError:
         return None, {
             "key": key,
             "reason": f"{prefix}_root_unsafe",
             "path": str(root),
-            "detail": "path_is_symlink",
+            "detail": "path_unavailable",
         }
-    if not root.exists():
-        return None, {"key": key, "reason": f"{prefix}_root_missing", "path": str(root)}
-    if not root.is_dir():
-        return None, {
-            "key": key,
-            "reason": f"{prefix}_root_unsafe",
-            "path": str(root),
-            "detail": "path_not_directory",
-        }
-    resolved, blocker = _safe_resolved_dir(root, label=f"{prefix}_root")
     if resolved is None:
         return None, {
             "key": key,
@@ -514,8 +530,9 @@ def run_retention(
                 # so every canonical target fails here with PermissionError on
                 # each tick. `error_type` keeps that distinguishable from other
                 # IO failures in the receipt. The remedy is a directory-mode or
-                # group change on the mirror producers (#2008/#2069) or an ops
-                # group membership change -- both outside this script.
+                # group change on the mirror producers, or an ops group
+                # membership change -- both outside this script, and both
+                # tracked by #2100.
                 failed.append({**payload, "error": str(error), "error_type": type(error).__name__})
                 continue
             deleted.append(payload)

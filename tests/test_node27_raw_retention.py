@@ -756,3 +756,59 @@ def test_an_undeletable_canonical_target_fails_without_stopping_the_other_lanes(
     assert not aged_cache.exists()
     # rmtree removes the children it can before the parent-owned rmdir fails.
     assert canonical_cycle.exists()
+
+
+def test_an_unreadable_object_store_ancestor_skips_only_its_two_lanes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A non-traversable lane-root ancestor retires that lane, never the run.
+
+    `pathlib` swallows only ENOENT/ENOTDIR/EBADF/ELOOP, so `is_symlink()` on
+    `<object-store>/raw` raises EACCES when the object store itself is not
+    traversable by this uid -- the 0750 `frd_muziyao:nfsdata` shape. Because
+    `collect_targets` completes before the first `rmtree`, an escaping error
+    would zero out ALL THREE lanes and skip the summary write, leaving the
+    `--summary-path` receipt silently stale from the previous tick.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root traverses any directory mode, so the failure cannot be simulated")
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    _write_raw_cycle(store, "gfs", "2026060100")
+    _write_canonical_cycle(store, "IFS", "2026060100")
+    aged_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    for name in (
+        "NODE27_RAW_RETENTION_ENABLED",
+        "NODE27_RAW_RETENTION_PLAN_ONLY",
+        "NODE27_RAW_RETENTION_DAYS",
+        "NODE27_RAW_RETENTION_SOURCES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(cache))
+    monkeypatch.setenv("NODE27_RAW_RETENTION_OBJECT_STORE_ROOT", str(store))
+    monkeypatch.setenv("NODE27_RAW_RETENTION_SUMMARY_PATH", str(summary_path))
+
+    store.chmod(0o000)
+    try:
+        exit_code = node27_raw_retention.main(
+            ["--sources", "gfs,ifs", "--reference-time", "2026-06-27T12:00:00Z"]
+        )
+        payload = json.loads(capsys.readouterr().out)
+    finally:
+        store.chmod(0o755)
+
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == payload
+    skipped = {
+        (str(entry["reason"]), str(entry.get("detail")))
+        for entry in payload["skipped"]
+    }
+    assert ("raw_root_unsafe", "path_unavailable") in skipped
+    assert ("canonical_root_unsafe", "path_unavailable") in skipped
+    assert _keys(payload["deleted"]) == ["precip-cache/IFS/2026060100"]
+    assert payload["counts"]["failed"] == 0
+    assert not aged_cache.exists()
+    assert (store / "raw" / "gfs" / "2026060100").is_dir()
+    assert (store / "canonical" / "IFS" / "2026060100").is_dir()
