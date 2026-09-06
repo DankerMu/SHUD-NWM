@@ -3393,8 +3393,8 @@ skipped. Direction unchanged: **keep rotation**. But this sample argues the
 point less comfortably than the last three, and the discomfort is worth
 recording rather than smoothing over.
 
-#2099 is the one new multi-round sample, and the whole of its `+4` lands on
-the core side. Round 1 ran four seats (`correctness`, `invariant-state`,
+This PR, #2099, is the one new multi-round sample, and the whole of its `+4`
+lands on the core side. Round 1 ran four seats (`correctness`, `invariant-state`,
 `test-evidence+spec-compliance`, `security-perf+integration`) and returned a
 P1, which under the current policy entitles Round 2 to rotate a complementary
 lens into its one free seat. Round 2 did not use that entitlement: it ran three
