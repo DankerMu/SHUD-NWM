@@ -295,11 +295,28 @@ const layerLabels: Record<M11Layer, string> = {
   discharge: 'Discharge',
 }
 
+/**
+ * 全国尺度的 `best → gfs` 归一（spec map-layer-timeline-controls
+ * 「a restored URL with `source=best` at national scale MUST resolve to `gfs`」）。
+ *
+ * 只在 selection 层的**全国调用点**生效，绝不在 `parseM11QueryState` 里做：
+ * `parseM11QueryState('source=best').source` 必须仍是 `'best'`，否则 serialize 往返会把
+ * 用户 URL 里的 `best` 改写掉；流域详情共用的 `createSourceScenarioSelection` 也不得无条件归一，
+ * 否则会静默吃掉 "Best Available exposes provenance"。
+ */
+export function resolveNationalScaleSource(source: M11Source): M11Source {
+  return source === 'best' ? 'gfs' : source
+}
+
 export function createSourceScenarioSelection(
   query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>,
   availableSources: M11ResolvedSource[] = [],
+  // 默认 `'basin'`：流域详情语义（`best` 保留 Best Available 的 provenance）。
+  // 只有全国尺度调用点显式传 `'national'`，把 `best` 归一为 `gfs`。
+  options: { scale?: 'national' | 'basin' } = {},
 ): SourceScenarioSelectionState {
-  const source = normalizeRequestedSource(query.source)
+  const scopedSource = options.scale === 'national' ? resolveNationalScaleSource(query.source) : query.source
+  const source = normalizeRequestedSource(scopedSource)
   const resolvedSource = resolveSelectedSource(source, availableSources)
   const scenarioIds =
     source === 'compare'
@@ -347,7 +364,7 @@ export function createFreshnessMetadata(input: Partial<FreshnessMetadata> = {}):
 }
 
 export function createEmptyOverviewSummary(query: Pick<M11QueryState, 'source' | 'cycle' | 'validTime'>): OverviewSummary {
-  const sourceSelection = createSourceScenarioSelection(query)
+  const sourceSelection = createSourceScenarioSelection(query, [], { scale: 'national' })
   return {
     completedCyclesToday: null,
     runningJobs: null,
@@ -463,11 +480,15 @@ export function normalizeOverviewSummary(input: {
   partialErrors?: string[]
 }): OverviewSummary {
   const availableSources = sourcesFromRuns(input.runs ?? (input.latestRun ? [input.latestRun] : []))
+  // 周期回退推广到所有非 compare 源（与 `pipelineRequestParams` 同形）：默认源由 `best` 翻成 `gfs`
+  // 后，若仍只在 best 分支回退，默认全国总览的 `sourceSelection.cycleTime` 恒为 null——时间轴的
+  // 分析/预报分界线（M11Controls 用它算 dividerIndex）与 provenance 里的周期会静默消失。
+  // 显式 URL 周期优先于 run 周期（run 本就是按该周期过滤出来的）。
   const selectionQuery =
-    input.query.source === 'best'
-      ? { ...input.query, cycle: input.latestRun?.cycle_time ?? input.pipeline?.cycle_time ?? input.query.cycle }
-      : input.query
-  const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources)
+    input.query.source === 'compare'
+      ? input.query
+      : { ...input.query, cycle: input.query.cycle ?? input.latestRun?.cycle_time ?? input.pipeline?.cycle_time ?? null }
+  const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources, { scale: 'national' })
   const completedCyclesToday = input.pipeline?.job_counts.succeeded ?? null
   const runningJobs = input.queue?.running ?? input.pipeline?.job_counts.running ?? null
   const latestUpdate = latestIso([
@@ -530,6 +551,11 @@ export function normalizeLayerStates(input: {
   // Fallback override：仅当某 layer 的 metadata.valid_times 缺失（undefined/null）时使用；
   // metadata 已为数组（含空数组）时此入参对应 layer 即被忽略，避免反向重写真实 time-less 语义。
   validTimesByLayerId?: Record<string, string[] | undefined>
+  // 活动 `(source, cycle)` 的列表（store 按 `(source, cycle)` 取回并缓存）。
+  // 「metadata 已是数组即忽略覆盖」的规则只适用于**默认对**：非默认周期时 metadata.valid_times
+  // 仍是默认周期的列表，必须由此入参顶掉，否则 LayerState/时间轴/lead 0 都停在默认周期上
+  // （spec frontend-mvt-layer-consumption「Non-default cycle fetches its own list」）。
+  activeCycleValidTimes?: Record<string, string[] | undefined>
   derivedValidTimes?: Record<string, string[] | undefined>
   resolvedRun?: ApiHydroRun | null
 }): LayerState[] {
@@ -543,7 +569,12 @@ export function normalizeLayerStates(input: {
     const { validTimes: metadataValidTimes, requiresFallback } = resolveLayerValidTimesFromMetadata(metadata)
     // metadata 已是数组（含空数组）→ 完全忽略 fallback 覆盖；metadata 缺失才用调用方注入的 fallback。
     const fallbackValidTimes = requiresFallback ? normalizeValidTimes(input.validTimesByLayerId?.[layerId]) : []
-    const apiValidTimes = requiresFallback ? fallbackValidTimes : metadataValidTimes
+    const activeCycleOverride = input.activeCycleValidTimes?.[layerId]
+    const apiValidTimes = Array.isArray(activeCycleOverride)
+      ? normalizeValidTimes(activeCycleOverride)
+      : requiresFallback
+        ? fallbackValidTimes
+        : metadataValidTimes
     const derivedValidTimes = normalizeValidTimes(input.derivedValidTimes?.[layerId])
     const validTimes = apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes
     const currentValidTime = pickCurrentValidTime(validTimes, input.query.validTime)
@@ -568,9 +599,11 @@ export function normalizeLayerStates(input: {
           ? 'Layer is registered but no renderable map source is implemented in this repository.'
           : !apiLayer && isKnownRequired
             ? 'Layer is not registered by the API.'
-            : validTimes.length === 0
-              ? 'Layer has no valid times.'
-              : null,
+            : isFailClosedDischargeMetadata(layerId, metadata)
+              ? failClosedDischargeDisabledReason
+              : validTimes.length === 0
+                ? 'Layer has no valid times.'
+                : null,
       freshness: createFreshnessMetadata({
         cycleTime: input.resolvedRun?.cycle_time ?? input.query.cycle,
         validTime: currentValidTime,
@@ -614,6 +647,33 @@ export function mergeLayerStates(bootstrapLayers: LayerState[], snapshotLayers: 
 
 function isTimeLessLayerMetadata(metadata: ApiLayer['metadata'] | null | undefined) {
   return Array.isArray(metadata?.valid_times) && metadata.valid_times.length === 0
+}
+
+/**
+ * fail-closed 禁用态的文案。必须与 `'Layer has no valid times.'` **不相等**：
+ * I11/I12 据此区分「该图层本来就没有时间维度」与「没有任何起报时次覆盖全部流域」
+ * （spec map-layer-timeline-controls「Cycle selector is fail-closed」）。
+ */
+export const failClosedDischargeDisabledReason =
+  'No cycle covers every basin, so the national discharge layer is disabled.'
+
+/**
+ * `discharge` 的 `metadata.valid_times === []` 且 `default_cycle` 为空 = 全国交集 fail-closed 禁用态，
+ * **不是** time-less 图层（spec frontend-mvt-layer-consumption「Discharge with an empty list is
+ * fail-closed, not time-less」）：不发 fallback valid-times、不请求瓦片、不注册 overlay。
+ * `default_cycle` 用宽松判空（`== null`）：老目录/测试 fixture 可能整个字段缺省。
+ */
+export function isFailClosedDischargeMetadata(
+  layerId: string,
+  metadata: ApiLayer['metadata'] | null | undefined,
+): boolean {
+  return (
+    layerId === 'discharge' &&
+    Boolean(metadata) &&
+    Array.isArray(metadata?.valid_times) &&
+    metadata.valid_times.length === 0 &&
+    metadata.default_cycle == null
+  )
 }
 
 export function getM11LayerLegend(layerId: string): LayerLegendEntry[] {
@@ -718,10 +778,16 @@ export function normalizeSelectedSegmentDetail(input: {
       ...sourcesFromRuns(input.resolvedRun ? [input.resolvedRun] : []),
     ]),
   ] as M11ResolvedSource[]
+  // 同上：默认源翻成 gfs 后，周期回退必须覆盖所有非 compare 源，否则默认流域详情的
+  // provenance 与 handoff URL 会丢掉具体周期。非 best 仍以解析出的具体源 query 为基。
+  const selectionBase = input.query.source === 'best' ? input.query : input.resolvedQuery ?? input.query
   const selectionQuery =
-    input.query.source === 'best'
-      ? { ...input.query, cycle: input.resolvedRun?.cycle_time ?? input.resolvedQuery?.cycle ?? input.query.cycle }
-      : input.resolvedQuery ?? input.query
+    input.query.source === 'compare'
+      ? selectionBase
+      : {
+          ...selectionBase,
+          cycle: selectionBase.cycle ?? input.resolvedRun?.cycle_time ?? input.resolvedQuery?.cycle ?? null,
+        }
   const sourceSelection = createSourceScenarioSelection(selectionQuery, availableSources)
   const handoffSource =
     input.query.source === 'best' && (sourceSelection.resolvedSource === 'GFS' || sourceSelection.resolvedSource === 'IFS')
@@ -1211,11 +1277,16 @@ function normalizeValidTimes(values: string[] | undefined): string[] {
   )
 }
 
+/**
+ * 默认位置是活动周期的**首项**（lead 0），不是末项——spec map-layer-timeline-controls
+ * 「Default position is the cycle start」/「Active layer changes」：URL 无 validTime、或切换
+ * source/cycle 后旧时次不在新列表里，都必须回到首项，绝不渲染陈旧数据。
+ */
 function pickCurrentValidTime(validTimes: string[], queryValidTime: string | null): string | null {
   if (validTimes.length === 0) return null
   const normalizedQuery = normalizeIsoString(queryValidTime)
   if (normalizedQuery && validTimes.includes(normalizedQuery)) return normalizedQuery
-  return validTimes[validTimes.length - 1]
+  return validTimes[0]
 }
 
 function layerGroup(layer: ApiLayer | undefined, layerId: string): LayerState['group'] {

@@ -32,7 +32,8 @@ The frontend SHALL consume `apiLayer.metadata.valid_times` returned by `GET /api
 
 #### Scenario: National template substitution
 - **WHEN** the overlay is built for `source=ifs`, `cycle=2026-09-02T12:00:00Z`, `validTime=2026-09-02T15:00:00Z`
-- **THEN** the tile URL is `/api/v1/tiles/hydro-national/ifs/2026-09-02T12:00:00Z/q_down/2026-09-02T15:00:00Z/{z}/{x}/{y}.pbf`
+- **THEN** the tile URL's percent-decoded path is `/api/v1/tiles/hydro-national/ifs/2026-09-02T12:00:00Z/q_down/2026-09-02T15:00:00Z/{z}/{x}/{y}.pbf`
+- **AND** the literal string carries the repository's existing substitution encoding: `buildMvtTileUrlTemplate` percent-encodes every substituted value, so the colons of the `{cycle}` and `{valid_time}` segments appear as `%3A` on the wire (the same encoding the single-run `/api/v1/tiles/hydro/{run_id}/...` route has always used, decoded back by the server before routing). Tests MUST assert the decoded path rather than weaken the assertion, and MUST NOT change `buildMvtTileUrlTemplate`'s encoding to make a literal comparison pass
 - **AND** the MapLibre source key changes when any of source, cycle, or validTime changes
 
 #### Scenario: Substituted instants are canonicalized to seconds precision

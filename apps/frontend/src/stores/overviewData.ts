@@ -4,6 +4,7 @@ import { apiFetch } from '@/api/base'
 import { client } from '@/api/client'
 import { getApiErrorMessage, unwrapApiData } from '@/api/response'
 import type { components } from '@/api/types'
+import { toSecondsPrecisionInstant } from '@/lib/m11/instants'
 import {
   createEmptyBasinDetail,
   createEmptyOverviewSummary,
@@ -16,6 +17,7 @@ import {
   normalizeOverviewBasins,
   normalizeOverviewSummary,
   normalizeSelectedSegmentDetail,
+  resolveNationalScaleSource,
   type AggregationEndpointDecision,
   type ApiBasin,
   type ApiBasinVersion,
@@ -64,6 +66,29 @@ export interface M11BasinRequestScope extends M11SnapshotRequestScope {
 }
 
 type ModelInstancePage = components['schemas']['ModelInstancePage']
+
+export type DischargeCycles = components['schemas']['DischargeCycles']
+export type PrecipIndex = components['schemas']['PrecipIndex']
+
+/** 起报时次列表：拿到即 available；enrichment 失败只产 scoped `'error'`，不是 bootstrap 错误。 */
+export type DischargeCyclesState = { status: 'available'; cycles: DischargeCycles } | { status: 'error' }
+
+/**
+ * 降水 index 恰好三态（spec design.md D5 / precipitation-raster-overlay）：
+ * - `available`：200，index 对象
+ * - `not_mirrored`：404 且 `error.code === 'PRECIP_CYCLE_NOT_MIRRORED'`（该周期无降水镜像）
+ * - `error`：其余一切失败（含 404 `PRECIP_WINDOW_INCOMPLETE`、网络错误）
+ * 「当前时次不在 index 内」是从 `available` 的 `valid_times[]` 派生的判定，不是第四种状态。
+ */
+export type PrecipIndexState =
+  | { status: 'available'; index: PrecipIndex }
+  | { status: 'not_mirrored' }
+  | { status: 'error' }
+
+/** `(source, cycle)` 缓存键：周期一律按秒精度归一，避免同一周期两种拼写写出两份缓存。 */
+export function m11SourceCycleKey(source: string, cycle: string): string {
+  return `${source}|${toSecondsPrecisionInstant(cycle) ?? cycle}`
+}
 
 /**
  * mapBootstrap critical-path snapshot：阶段 1 settle 后冻结的最小字段集，足够 OverviewPage
@@ -124,6 +149,15 @@ interface OverviewDataState {
   bootstrapError: string | null
   error: string | null
   basinError: string | null
+  // 以下三项一律是 enrichment（`mapBootstrapLoading` 落 false **之后**才发出的非阻塞请求），
+  // 失败只产 scoped 状态，绝不写 bootstrapError / mapBootstrapLoading
+  // （spec overview-data-contracts「Cycles and precipitation index requests stay off the
+  // bootstrap critical path」）。
+  cyclesBySource: Record<string, DischargeCyclesState>
+  /** key = `m11SourceCycleKey(source, cycle)`；只为**非默认** `(source, cycle)` 写入。 */
+  validTimesByCycle: Record<string, string[]>
+  /** key = `m11SourceCycleKey(source, cycle)`。 */
+  precipIndexByCycle: Record<string, PrecipIndexState>
   loadOverview: (query: M11QueryState) => Promise<OverviewDataSnapshot>
   loadBasinDetail: (basinId: string, query: M11QueryState) => Promise<BasinDataSnapshot>
   clearCache: () => void
@@ -230,18 +264,38 @@ function cacheKey(path: string, params?: unknown) {
   return `${path}:${JSON.stringify(params ?? {})}`
 }
 
+/**
+ * 降水叠加是纯渲染开关，不参与任何取数身份：把 `precip` 带进 store 的 query 会让降水开关
+ * 整轮重载 overview（`overviewRequestNonce` 递增 → 在途的 cycles / valid-times / precip index
+ * enrichment 全部作废）。取数入口一律先经此归一。
+ */
+function dataIdentityQuery(query: M11QueryState): M11QueryState {
+  return query.precip === defaultM11QueryState.precip ? query : { ...query, precip: defaultM11QueryState.precip }
+}
+
 function requestScopeQueryKey(query: M11QueryState) {
   // basinId 由 requestScope.basinId 单独匹配，故从序列化键中剔除：
   // 加 basinId 字段后键的输出与改动前字节完全一致，零缓存 churn（R1 缓解）。
-  return serializeM11QueryState({ ...query, metStations: false, basinId: null, basemap: defaultM11QueryState.basemap, validTime: null })
+  return serializeM11QueryState({
+    ...dataIdentityQuery(query),
+    metStations: false,
+    basinId: null,
+    basemap: defaultM11QueryState.basemap,
+    validTime: null,
+  })
 }
 
 function requestScopeDataKey(query: M11QueryState) {
-  return serializeM11QueryState({ ...query, metStations: false, basinId: null, basemap: defaultM11QueryState.basemap })
+  return serializeM11QueryState({
+    ...dataIdentityQuery(query),
+    metStations: false,
+    basinId: null,
+    basemap: defaultM11QueryState.basemap,
+  })
 }
 
 function basinRequestIdentityQuery(query: M11QueryState): M11QueryState {
-  return { ...query, q: null }
+  return { ...dataIdentityQuery(query), q: null }
 }
 
 function overviewRequestScope(query: M11QueryState): M11OverviewRequestScope {
@@ -486,7 +540,9 @@ function pipelineRequestParams(query: M11QueryState, run: ApiHydroRun | null = n
   if (query.source === 'compare') return null
   const concreteQuery = concreteQueryForSurfaces(query, run)
   const source = sourceForApi(concreteQuery.source)
-  const cycle = query.cycle ?? (query.source === 'best' ? run?.cycle_time : null)
+  // 回退到 run 的周期对所有非 compare 源生效：默认源由 `best` 翻成 `gfs` 后，若仍只在 best 分支
+  // 回退，默认全国总览的 cycle 恒为 null，`/api/v1/pipeline/status` 会静默不再发出（摘要卡片空掉）。
+  const cycle = query.cycle ?? run?.cycle_time ?? null
   return source && cycle ? { source, cycle } : null
 }
 
@@ -526,6 +582,80 @@ function scenariosForQuery(source: M11QueryState['source']) {
   if (source === 'compare') return 'forecast_gfs_deterministic,forecast_ifs_deterministic'
   if (source === 'best') return null
   return 'forecast_gfs_deterministic'
+}
+
+/**
+ * 全国尺度的具体源：`best` 归一为 `gfs`（selection 层的全国口径），`compare` 解析不出具体源。
+ * store 绝不发出 `cycles?source=best|compare`、`valid-times?source=best|compare`、
+ * `/api/v1/precip/best|compare/...`——解析不出就一条都不发（fixture 决策 8）。
+ */
+function nationalConcreteSource(source: M11QueryState['source']): 'gfs' | 'ifs' | null {
+  const resolved = resolveNationalScaleSource(source)
+  return resolved === 'gfs' || resolved === 'ifs' ? resolved : null
+}
+
+type NationalDischargePair = { source: 'gfs' | 'ifs'; cycle: string; isDefault: boolean }
+
+/**
+ * 活动 `(source, cycle)`：周期 = `query.cycle ?? metadata.default_cycle`，秒精度。
+ * `default_cycle` 为空 = fail-closed（没有任何周期覆盖全部流域）→ 返回 null，调用方据此
+ * 不发 valid-times、不发 precip index、不请求瓦片，也不会拼出字面 `{cycle}`。
+ */
+function nationalDischargeActivePair(query: M11QueryState, layers: ApiLayer[]): NationalDischargePair | null {
+  const source = nationalConcreteSource(query.source)
+  if (!source) return null
+  const metadata = layers.find((layer) => layer.layer_id === 'discharge')?.metadata ?? null
+  const defaultCycle = toSecondsPrecisionInstant(metadata?.default_cycle ?? null)
+  if (!defaultCycle) return null
+  const cycle = toSecondsPrecisionInstant(query.cycle) ?? defaultCycle
+  // 默认对判定同样走秒精度：`metadata.default_cycle` 是秒精度而 URL 里是毫秒形，
+  // 朴素 `===` 会把默认周期误判成非默认并多发一次 valid-times。
+  return { source, cycle, isDefault: cycle === defaultCycle && (metadata?.default_source ?? 'gfs') === source }
+}
+
+function apiErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== 'object') return null
+  const envelope = (error as { error?: unknown }).error
+  if (!envelope || typeof envelope !== 'object') return null
+  const code = (envelope as { code?: unknown }).code
+  return typeof code === 'string' ? code : null
+}
+
+async function fetchDischargeCycles(source: 'gfs' | 'ifs') {
+  return cached(cacheKey('/api/v1/layers/discharge/cycles', { source }), () =>
+    getApi<DischargeCycles>('/api/v1/layers/discharge/cycles', { params: { query: { source } } }, '获取起报时次失败'),
+  )
+}
+
+async function fetchLayerValidTimesForCycle(layerId: string, source: 'gfs' | 'ifs', cycle: string) {
+  return cached(cacheKey('/api/v1/layers/{layer_id}/valid-times', { layerId, source, cycle }), () =>
+    getApi<components['schemas']['LayerValidTimes'] | string[]>(
+      '/api/v1/layers/{layer_id}/valid-times',
+      { params: { path: { layer_id: layerId }, query: { source, cycle } } },
+      '获取图层有效时间失败',
+    ).then(normalizeLayerValidTimesResponse),
+  )
+}
+
+/**
+ * `getApi` 只把错误转成 `new Error(message)`、**丢掉 `error.code`**，而降水 index 的两条状态
+ * 恰恰靠 code 区分，所以这里走一条 code-aware 取数路径（不改 `getApi` 既有调用者的行为）。
+ * 无 code 的失败（网络 / 5xx）抛出，让 `cached()` 不落缓存、下一轮可重试，调用方降级为 `'error'`。
+ */
+async function fetchPrecipIndex(source: 'gfs' | 'ifs', cycle: string): Promise<PrecipIndexState> {
+  return cached(cacheKey('/api/v1/precip/{source}/{cycle}/index', { source, cycle }), async () => {
+    const { data, error } = await (client.GET as (path: string, options?: unknown) => Promise<{ data?: unknown; error?: unknown }>)(
+      '/api/v1/precip/{source}/{cycle}/index',
+      { params: { path: { source, cycle } } },
+    )
+    if (error) {
+      const code = apiErrorCode(error)
+      if (code === 'PRECIP_CYCLE_NOT_MIRRORED') return { status: 'not_mirrored' }
+      if (code === 'PRECIP_WINDOW_INCOMPLETE') return { status: 'error' }
+      throw new Error(getApiErrorMessage(error, '获取降水索引失败'))
+    }
+    return { status: 'available', index: unwrapApiData<PrecipIndex>(data, '获取降水索引失败') }
+  })
 }
 
 async function fetchBasins() {
@@ -1034,8 +1164,12 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
   bootstrapError: null,
   error: null,
   basinError: null,
+  cyclesBySource: {},
+  validTimesByCycle: {},
+  precipIndexByCycle: {},
   clearCache: clearOverviewDataCache,
-  loadOverview: async (query) => {
+  loadOverview: async (inputQuery) => {
+    const query = dataIdentityQuery(inputQuery)
     const requestKey = cacheKey('overview', query)
     const existingLoad = overviewLoads.get(requestKey)
     if (existingLoad && activeOverviewRequestKey === requestKey) return existingLoad
@@ -1047,8 +1181,33 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
 
     // 共享谓词：写 set 前要求 nonce 仍匹配（stale 防御），否则丢弃。
     const isCurrentRequest = () => requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey
+    const writeCycles = (source: string, value: DischargeCyclesState) => {
+      if (!isCurrentRequest()) return
+      set((state) => ({ cyclesBySource: { ...state.cyclesBySource, [source]: value } }))
+    }
+    const writePrecipIndex = (key: string, value: PrecipIndexState) => {
+      if (!isCurrentRequest()) return
+      set((state) => ({ precipIndexByCycle: { ...state.precipIndexByCycle, [key]: value } }))
+    }
     // 阶段 1 settle 时已写入的 bootstrap 快照（phase 2 合并到 final snapshot 时复用）。
     let bootstrapSnapshot: OverviewBootstrapSnapshot | null = null
+    // 最近一次 normalizeLayerStates 的入参：per-cycle valid-times 晚到时据此原地重算 layer 状态。
+    let layerStateInputs: { query: M11QueryState; layers: ApiLayer[]; resolvedRun: ApiHydroRun | null } | null = null
+
+    // 单一构造路径：活动 `(source, cycle)` 非默认对时，用 store 已取回的 per-cycle 列表顶掉
+    // 目录里默认周期的 metadata.valid_times（fixture 决策 4：LayerState 本身必须是活动周期的列表）。
+    // pair 一律按**全国口径**的 query.source 解析，保证 enrichment 写入键与此处读取键一致。
+    const buildLayerStates = (inputs: NonNullable<typeof layerStateInputs>): LayerState[] => {
+      const pair = nationalDischargeActivePair(query, inputs.layers)
+      const activeList =
+        pair && !pair.isDefault ? get().validTimesByCycle[m11SourceCycleKey(pair.source, pair.cycle)] : undefined
+      return normalizeLayerStates({
+        query: inputs.query,
+        layers: inputs.layers,
+        activeCycleValidTimes: activeList ? { discharge: activeList } : undefined,
+        resolvedRun: inputs.resolvedRun,
+      })
+    }
 
     // 阶段 1（mapBootstrap critical path）：basins + runless layers + 当前 layer 的 valid_time。
     // 不依赖 fetchRuns/fetchModels/fetchPipelineStatus/fetchBasinVersions/fetchLayerValidTimes。
@@ -1075,11 +1234,8 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       // 这里不发 /layers/<id>/valid-times、也不预解 metadata.valid_times：fallback 入参只在
       // metadata 缺失（schema gap）才被消费，而 phase-1 仍由同一份 metadata 决定，没有独立 fallback
       // 来源 → 传 fallback 等于死代码（与 enrichment 默认 path ~L1332 保持一致：不传 validTimesByLayerId）。
-      const bootstrapLayerStates = normalizeLayerStates({
-        query,
-        layers: runlessLayers,
-        resolvedRun: null,
-      })
+      layerStateInputs = { query, layers: runlessLayers, resolvedRun: null }
+      const bootstrapLayerStates = buildLayerStates(layerStateInputs)
       const currentLayerState = bootstrapLayerStates.find((state) => state.layerId === query.layer) ?? null
       const currentLayerValidTime = currentLayerState?.currentValidTime ?? null
 
@@ -1194,13 +1350,12 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       // 但 bootstrap=null（OverviewPage 将识别为 mapBootstrap 失败态而非 ready）。
       const bootstrapForSnapshot = await bootstrapPromise.catch(() => null)
       const layers = mergeLayerCatalogs(bootstrapForSnapshot?.layers ?? [], scopedLayers)
-      const layerStates = normalizeLayerStates({
-        query: concreteSurfaceQuery,
-        layers,
-        // 默认 path 不传 validTimesByLayerId：normalizeLayerStates 三态优先消费 metadata.valid_times；
-        // metadata 缺失（schema gap）的 fallback 留给独立 PR / 后续按需触发。
-        resolvedRun: useSingleRunSurfaces ? latestRun : null,
-      })
+      // 默认 path 不传 validTimesByLayerId：normalizeLayerStates 三态优先消费 metadata.valid_times；
+      // metadata 缺失（schema gap）的 fallback 留给独立 PR / 后续按需触发。
+      // 本块从 `await bootstrapPromise` 到 `set` 之间没有 await，故与 enrichment 的写入互斥：
+      // 列表先到 → 这里读得到；列表后到 → enrichment 在本快照之上原地重算。
+      layerStateInputs = { query: concreteSurfaceQuery, layers, resolvedRun: useSingleRunSurfaces ? latestRun : null }
+      const layerStates = buildLayerStates(layerStateInputs)
       const finalSnapshot: OverviewDataSnapshot = {
         requestScope: overviewRequestScope(query),
         bootstrap: bootstrapForSnapshot,
@@ -1216,9 +1371,58 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       return finalSnapshot
     })()
 
+    // 阶段 3（layer-time enrichment）：cycles / per-cycle valid-times / precip index。
+    // 一律在 `mapBootstrapLoading` 落 false **之后**发出（本链以 `await bootstrapPromise` 开头，
+    // 而 bootstrapPromise 在 resolve 前已 set false），绝不进被 await 的 bootstrap 关键路径；
+    // 三者的 reject 只产 scoped 状态，不碰 bootstrapError / mapBootstrapLoading；
+    // `overviewRequestNonce` 递增后迟到的结果一律丢弃（spec overview-data-contracts ADDED 需求）。
+    const layerTimeEnrichmentPromise = (async () => {
+      const snapshot = await bootstrapPromise.catch(() => null)
+      if (!snapshot || !isCurrentRequest()) return
+      const source = nationalConcreteSource(query.source)
+      // `best` 已归一为 gfs；`compare` 解析不出具体源 → 这三类请求一条都不发。
+      if (!source) return
+      const pair = nationalDischargeActivePair(query, snapshot.layers)
+
+      const cyclesTask = fetchDischargeCycles(source).then(
+        (cycles) => writeCycles(source, { status: 'available', cycles }),
+        // scoped 降级：周期选择器限于默认周期，不是 bootstrap 错误。
+        () => writeCycles(source, { status: 'error' }),
+      )
+
+      // 默认对直接用 metadata.valid_times：同一次 overview 加载**零**次 valid-times 请求。
+      const validTimesTask =
+        pair && !pair.isDefault
+          ? fetchLayerValidTimesForCycle('discharge', pair.source, pair.cycle).then(
+              (validTimes) => {
+                if (!isCurrentRequest()) return
+                const key = m11SourceCycleKey(pair.source, pair.cycle)
+                set((state) => ({ validTimesByCycle: { ...state.validTimesByCycle, [key]: validTimes } }))
+                const inputs = layerStateInputs
+                if (!inputs) return
+                const layers = buildLayerStates(inputs)
+                set((state) => (state.overview ? { overview: { ...state.overview, layers } } : {}))
+              },
+              () => undefined,
+            )
+          : Promise.resolve()
+
+      const precipTask = pair
+        ? fetchPrecipIndex(pair.source, pair.cycle)
+            .catch((): PrecipIndexState => ({ status: 'error' }))
+            .then((precipState) => writePrecipIndex(m11SourceCycleKey(pair.source, pair.cycle), precipState))
+        : Promise.resolve()
+
+      await Promise.all([cyclesTask, validTimesTask, precipTask])
+    })()
+
     const load = (async () => {
       // 同时等两阶段；阶段 1 reject 不阻 enrichment（bootstrapPromise 在 reject 路径已 set false）。
-      const [, enrichmentResult] = await Promise.allSettled([bootstrapPromise, enrichmentPromise])
+      const [, enrichmentResult] = await Promise.allSettled([
+        bootstrapPromise,
+        enrichmentPromise,
+        layerTimeEnrichmentPromise,
+      ])
       if (enrichmentResult.status === 'fulfilled') return enrichmentResult.value
       throw enrichmentResult.reason
     })()
@@ -1255,7 +1459,8 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       if (overviewLoads.get(requestKey) === load) overviewLoads.delete(requestKey)
     }
   },
-  loadBasinDetail: async (basinId, query) => {
+  loadBasinDetail: async (basinId, inputQuery) => {
+    const query = dataIdentityQuery(inputQuery)
     const requestQuery = basinRequestIdentityQuery(query)
     const requestKey = cacheKey('basin-detail', { basinId, query: requestQuery })
     const existingLoad = basinLoads.get(requestKey)

@@ -57,6 +57,9 @@ export function useBasinDetailMode({
       validTime: state.validTime,
       layer: state.layer,
       metStations: false,
+      // precip 是纯渲染开关，不参与取数身份：带进 store 的 query 会让降水开关整轮重载
+      // overview（并作废在途的 cycles / valid-times / precip index enrichment）。
+      precip: defaultM11QueryState.precip,
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
       riverNetworkVersionId: state.riverNetworkVersionId,

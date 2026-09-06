@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { components } from '@/api/types'
 import {
+  createSourceScenarioSelection,
   filterBasinSegmentRows,
   getM11LayerLegend,
   mergeLayerCatalogs,
@@ -146,6 +147,103 @@ describe('M11 overview data contracts', () => {
     expect(layers.map((layer) => layer.layerId)).toEqual(['discharge'])
     expect(layers[0]).toMatchObject({ available: true, currentValidTime: '2026-05-18T06:00:00.000Z' })
     expect(getM11LayerLegend('discharge')).not.toHaveLength(0)
+  })
+
+  it('defaults the timeline to lead 0, the first entry of the active list', () => {
+    // spec map-layer-timeline-controls「Default position is the cycle start」：URL 无 validTime 时
+    // 选活动周期列表的**首项**（本 issue 前是末项）。
+    const layers = normalizeLayerStates({
+      query: { ...query, validTime: null },
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: {
+            layer_id: 'discharge',
+            valid_times: ['2026-05-18T00:00:00Z', '2026-05-18T03:00:00Z', '2026-05-18T06:00:00Z'],
+          } as never,
+        },
+      ],
+    })
+
+    expect(layers[0].currentValidTime).toBe('2026-05-18T00:00:00.000Z')
+  })
+
+  it('falls back to lead 0 when the previous valid time is not in the new list', () => {
+    // spec「Active layer changes」：切 source/cycle 后旧时次不在新列表 → 回首项，不渲染陈旧数据。
+    const layers = normalizeLayerStates({
+      query: { ...query, validTime: '2026-05-18T06:00:00.000Z' },
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: { layer_id: 'discharge', valid_times: ['2026-05-19T00:00:00Z', '2026-05-19T03:00:00Z'] } as never,
+        },
+      ],
+    })
+
+    expect(layers[0].currentValidTime).toBe('2026-05-19T00:00:00.000Z')
+  })
+
+  it('lets the active (source, cycle) list override the default cycle metadata list', () => {
+    // spec frontend-mvt-layer-consumption「Non-default cycle fetches its own list」：目录 metadata
+    // 只带默认周期的列表，非默认周期必须由 store 取回的 per-cycle 列表顶掉（fixture 决策 4）。
+    const layers = normalizeLayerStates({
+      query: { ...query, cycle: '2026-05-18T12:00:00.000Z', validTime: null },
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: { layer_id: 'discharge', valid_times: ['2026-05-18T06:00:00Z'] } as never,
+        },
+      ],
+      activeCycleValidTimes: { discharge: ['2026-05-18T12:00:00Z', '2026-05-18T15:00:00Z'] },
+    })
+
+    expect(layers[0].validTimes).toEqual(['2026-05-18T12:00:00.000Z', '2026-05-18T15:00:00.000Z'])
+    expect(layers[0].currentValidTime).toBe('2026-05-18T12:00:00.000Z')
+  })
+
+  it('marks an empty discharge list with a null default cycle as fail-closed, not time-less', () => {
+    // spec「Discharge with an empty list is fail-closed, not time-less」：disabledReason 必须与
+    // 'Layer has no valid times.' 不相等，供 I11/I12 出「无周期覆盖全部流域」文案。
+    const layers = normalizeLayerStates({
+      query,
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: { layer_id: 'discharge', valid_times: [], default_cycle: null } as never,
+        },
+      ],
+    })
+
+    expect(layers[0].available).toBe(false)
+    expect(layers[0].disabledReason).not.toBe('Layer has no valid times.')
+    expect(layers[0].disabledReason).toContain('No cycle covers every basin')
+  })
+
+  it('keeps Best Available provenance on the basin-detail selection path', () => {
+    // fixture 决策 1 的**反向**用例：`best → gfs` 只在全国 selection 调用点，不得下沉进
+    // `createSourceScenarioSelection` 本体——流域详情共用它，无条件归一会吃掉
+    // spec map-layer-timeline-controls「Best Available exposes provenance」。
+    const basinScoped = createSourceScenarioSelection({ ...query, source: 'best' }, ['IFS'])
+
+    expect(basinScoped.requestedSource).toBe('best')
+    expect(basinScoped.resolvedSource).toBe('IFS')
+    expect(basinScoped.scenarioIds).toEqual(['forecast_ifs_deterministic'])
+    expect(basinScoped.provenanceLabel).toContain('Best Available (IFS)')
+
+    const nationalScoped = createSourceScenarioSelection({ ...query, source: 'best' }, ['IFS'], { scale: 'national' })
+    expect(nationalScoped.requestedSource).toBe('gfs')
   })
 
   it('spells the discharge legend with a superscript exponent, never m3/s', () => {

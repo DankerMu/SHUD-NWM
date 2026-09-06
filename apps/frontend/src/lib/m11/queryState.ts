@@ -8,6 +8,11 @@ export interface M11QueryState {
   validTime: string | null
   layer: M11Layer
   metStations: boolean
+  /**
+   * 降水叠加是布尔开关，不是 `M11Layer` 枚举值（spec design.md D5）。
+   * URL 约定：缺省/任何非 `0` 值 → true；`precip=0` → false。
+   */
+  precip: boolean
   basemap: M11Basemap
   basinVersionId: string | null
   riverNetworkVersionId: string | null
@@ -26,11 +31,15 @@ const basemaps = ['terrain', 'satellite', 'vector'] as const
 const legacyMetStationsLayer = 'met-stations'
 
 export const defaultM11QueryState: M11QueryState = {
-  source: 'best',
+  // 全国尺度默认源为 GFS（spec map-layer-timeline-controls「Source selector renders required choices」）。
+  // `best` 仍是合法可解析值（流域详情 Best Available），但不再是默认值；`best → gfs` 的归一
+  // 属于 selection 层（`createSourceScenarioSelection` 的 national scale），不在本 parser 内。
+  source: 'gfs',
   cycle: null,
   validTime: null,
   layer: 'discharge',
   metStations: false,
+  precip: true,
   basemap: 'vector',
   basinVersionId: null,
   riverNetworkVersionId: null,
@@ -139,6 +148,7 @@ export function parseM11QueryState(input: string | URLSearchParams): M11QuerySta
     validTime: normalizeIsoInstant(params.get('validTime')),
     layer: layer ?? defaultM11QueryState.layer,
     metStations: params.get('metStations') === '1' || hasLegacyMetStationsLayer,
+    precip: params.get('precip') !== '0',
     basemap: isOneOf(basemap, basemaps) ? basemap : defaultM11QueryState.basemap,
     basinVersionId: normalizeM11Identifier(params.get('basinVersionId')),
     riverNetworkVersionId: normalizeM11Identifier(params.get('riverNetworkVersionId')),
@@ -154,6 +164,9 @@ function queryParamsFromState(state: M11QueryPatch) {
     if (value === undefined || value === null || value === '') return
     if (typeof value === 'boolean') {
       if (value) params.set(key, '1')
+      // 其它布尔一律「false 即丢弃」（逐字保持既有行为）；只有 precip 的 false 必须带着
+      // 走完 `serializeM11QueryState` 内部那趟 parse 归一，否则会被默认值 true 吃回去。
+      else if (key === 'precip') params.set(key, '0')
       return
     }
     params.set(key, String(value))
@@ -170,6 +183,7 @@ export function serializeM11QueryState(state: M11QueryPatch) {
   if (normalized.validTime) params.set('validTime', normalized.validTime)
   if (normalized.layer !== defaultM11QueryState.layer) params.set('layer', normalized.layer)
   if (normalized.metStations) params.set('metStations', '1')
+  if (!normalized.precip) params.set('precip', '0')
   if (normalized.basemap !== defaultM11QueryState.basemap) params.set('basemap', normalized.basemap)
   if (normalized.basinVersionId) params.set('basinVersionId', normalized.basinVersionId)
   if (normalized.riverNetworkVersionId) params.set('riverNetworkVersionId', normalized.riverNetworkVersionId)
