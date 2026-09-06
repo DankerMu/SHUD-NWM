@@ -30,6 +30,7 @@ const state: M11QueryState = {
   validTime: null,
   layer: 'discharge',
   metStations: false,
+  precip: true,
   basemap: 'vector',
   basinVersionId: null,
   riverNetworkVersionId: null,

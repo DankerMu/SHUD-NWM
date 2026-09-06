@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import type { components } from '@/api/types'
 import {
+  activeCycleValidTimesErrorDisabledReason,
+  createSourceScenarioSelection,
+  failClosedDischargeDisabledReason,
   filterBasinSegmentRows,
   getM11LayerLegend,
   mergeLayerCatalogs,
@@ -9,6 +12,7 @@ import {
   normalizeBasinSegmentRows,
   normalizeLayerStates,
   normalizeSelectedSegmentDetail,
+  pendingActiveCycleValidTimesDisabledReason,
 } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
 import type { M11QueryState } from '@/lib/m11/queryState'
@@ -146,6 +150,171 @@ describe('M11 overview data contracts', () => {
     expect(layers.map((layer) => layer.layerId)).toEqual(['discharge'])
     expect(layers[0]).toMatchObject({ available: true, currentValidTime: '2026-05-18T06:00:00.000Z' })
     expect(getM11LayerLegend('discharge')).not.toHaveLength(0)
+  })
+
+  it('defaults the timeline to lead 0, the first entry of the active list', () => {
+    // spec map-layer-timeline-controls「Default position is the cycle start」：URL 无 validTime 时
+    // 选活动周期列表的**首项**（本 issue 前是末项）。
+    const layers = normalizeLayerStates({
+      query: { ...query, validTime: null },
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: {
+            layer_id: 'discharge',
+            valid_times: ['2026-05-18T00:00:00Z', '2026-05-18T03:00:00Z', '2026-05-18T06:00:00Z'],
+          } as never,
+        },
+      ],
+    })
+
+    expect(layers[0].currentValidTime).toBe('2026-05-18T00:00:00.000Z')
+  })
+
+  it('falls back to lead 0 when the previous valid time is not in the new list', () => {
+    // spec「Active layer changes」：切 source/cycle 后旧时次不在新列表 → 回首项，不渲染陈旧数据。
+    const layers = normalizeLayerStates({
+      query: { ...query, validTime: '2026-05-18T06:00:00.000Z' },
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: { layer_id: 'discharge', valid_times: ['2026-05-19T00:00:00Z', '2026-05-19T03:00:00Z'] } as never,
+        },
+      ],
+    })
+
+    expect(layers[0].currentValidTime).toBe('2026-05-19T00:00:00.000Z')
+  })
+
+  it('lets the active (source, cycle) list override the default cycle metadata list', () => {
+    // spec frontend-mvt-layer-consumption「Non-default cycle fetches its own list」：目录 metadata
+    // 只带默认周期的列表，非默认周期必须由 store 取回的 per-cycle 列表顶掉（fixture 决策 4）。
+    const layers = normalizeLayerStates({
+      query: { ...query, cycle: '2026-05-18T12:00:00.000Z', validTime: null },
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: { layer_id: 'discharge', valid_times: ['2026-05-18T06:00:00Z'] } as never,
+        },
+      ],
+      activeCycleValidTimes: {
+        discharge: { status: 'available', validTimes: ['2026-05-18T12:00:00Z', '2026-05-18T15:00:00Z'] },
+      },
+    })
+
+    expect(layers[0].validTimes).toEqual(['2026-05-18T12:00:00.000Z', '2026-05-18T15:00:00.000Z'])
+    expect(layers[0].currentValidTime).toBe('2026-05-18T12:00:00.000Z')
+  })
+
+  it('never falls back to the default cycle metadata while the active cycle list is unresolved', () => {
+    // cand-01：`pending` / `error` 都必须解析成空列表 —— 否则非默认周期会带着**默认周期**的
+    // metadata.valid_times 报 available，overlay 随即拼出跨周期瓦片 URL。
+    const nonDefaultQuery = { ...query, cycle: '2026-05-18T12:00:00.000Z', validTime: null }
+    const layerCatalog = [
+      {
+        layer_id: 'discharge',
+        layer_name: 'Discharge',
+        layer_type: 'hydrology',
+        variables: ['q_down'],
+        metadata: { layer_id: 'discharge', valid_times: ['2026-05-18T06:00:00Z'], default_cycle: '2026-05-18T00:00:00Z' } as never,
+      },
+    ]
+
+    const pending = normalizeLayerStates({
+      query: nonDefaultQuery,
+      layers: layerCatalog,
+      activeCycleValidTimes: { discharge: { status: 'pending' } },
+    })
+    expect(pending[0].validTimes).toEqual([])
+    expect(pending[0].currentValidTime).toBeNull()
+    expect(pending[0].validTimeSource).toBe('none')
+    expect(pending[0].available).toBe(false)
+    expect(pending[0].disabledReason).toBe(pendingActiveCycleValidTimesDisabledReason)
+
+    const errored = normalizeLayerStates({
+      query: nonDefaultQuery,
+      layers: layerCatalog,
+      activeCycleValidTimes: { discharge: { status: 'error' } },
+    })
+    expect(errored[0].validTimes).toEqual([])
+    expect(errored[0].available).toBe(false)
+    expect(errored[0].disabledReason).toBe(activeCycleValidTimesErrorDisabledReason)
+
+    // 两条文案彼此不同，且与既有两条禁用文案都不同（I11/I12 据此出四种提示）。
+    for (const reason of [pendingActiveCycleValidTimesDisabledReason, activeCycleValidTimesErrorDisabledReason]) {
+      expect(reason).not.toBe('Layer has no valid times.')
+      expect(reason).not.toBe(failClosedDischargeDisabledReason)
+    }
+    expect(pendingActiveCycleValidTimesDisabledReason).not.toBe(activeCycleValidTimesErrorDisabledReason)
+  })
+
+  it('does not let derivedValidTimes resurrect an unresolved active cycle list', () => {
+    // cand-01 的旁路封堵：未定态必须**同时**清空 api 与 derived 两路，不能经
+    // `apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes` 复活 available。
+    const layers = normalizeLayerStates({
+      query: { ...query, cycle: '2026-05-18T12:00:00.000Z', validTime: null },
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: { layer_id: 'discharge', valid_times: ['2026-05-18T06:00:00Z'] } as never,
+        },
+      ],
+      activeCycleValidTimes: { discharge: { status: 'pending' } },
+      derivedValidTimes: { discharge: ['2026-05-18T09:00:00Z'] },
+    })
+
+    expect(layers[0].validTimes).toEqual([])
+    expect(layers[0].available).toBe(false)
+    expect(layers[0].validTimeSource).toBe('none')
+    expect(layers[0].disabledReason).toBe(pendingActiveCycleValidTimesDisabledReason)
+  })
+
+  it('marks an empty discharge list with a null default cycle as fail-closed, not time-less', () => {
+    // spec「Discharge with an empty list is fail-closed, not time-less」：disabledReason 必须与
+    // 'Layer has no valid times.' 不相等，供 I11/I12 出「无周期覆盖全部流域」文案。
+    const layers = normalizeLayerStates({
+      query,
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: { layer_id: 'discharge', valid_times: [], default_cycle: null } as never,
+        },
+      ],
+    })
+
+    expect(layers[0].available).toBe(false)
+    expect(layers[0].disabledReason).not.toBe('Layer has no valid times.')
+    expect(layers[0].disabledReason).toContain('No cycle covers every basin')
+  })
+
+  it('keeps Best Available provenance on the basin-detail selection path', () => {
+    // fixture 决策 1 的**反向**用例：`best → gfs` 只在全国 selection 调用点，不得下沉进
+    // `createSourceScenarioSelection` 本体——流域详情共用它，无条件归一会吃掉
+    // spec map-layer-timeline-controls「Best Available exposes provenance」。
+    const basinScoped = createSourceScenarioSelection({ ...query, source: 'best' }, ['IFS'])
+
+    expect(basinScoped.requestedSource).toBe('best')
+    expect(basinScoped.resolvedSource).toBe('IFS')
+    expect(basinScoped.scenarioIds).toEqual(['forecast_ifs_deterministic'])
+    expect(basinScoped.provenanceLabel).toContain('Best Available (IFS)')
+
+    const nationalScoped = createSourceScenarioSelection({ ...query, source: 'best' }, ['IFS'], { scale: 'national' })
+    expect(nationalScoped.requestedSource).toBe('gfs')
   })
 
   it('spells the discharge legend with a superscript exponent, never m3/s', () => {

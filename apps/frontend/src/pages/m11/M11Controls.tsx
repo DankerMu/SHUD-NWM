@@ -25,6 +25,7 @@ import {
 import { cn } from '@/lib/cn'
 import {
   getM11LayerLegend,
+  isM11ActiveCycleValidTimesUnresolved,
   type BasinSegmentRow,
   type LayerState,
   type OverviewBasin,
@@ -497,6 +498,25 @@ export function resolveM11ValidTimeCorrection(
   const current = normalizeIso(state.validTime)
   if (current && validTimes.includes(current)) return undefined
   return validTimes[validTimes.length - 1]
+}
+
+/**
+ * 全国 discharge 叠加层的 validTime 校正闸门：活动 `(source, cycle)` 的时次列表还未定
+ * （pending / error）时**不校正**。裸 `resolveM11ValidTimeCorrection` 对空列表返回 `null`
+ * （= 清空 `validTime`），在 `?cycle=<非默认>&validTime=T` 下会在 per-cycle 列表落地前就把
+ * `T` 从 URL 里抹掉。未定期间的正确表现是诚实禁用 + 保住 URL 状态；列表落地后本函数照常校正。
+ * 全国总览（`OverviewPage`）与流域详情（`BasinDetailPanels`）**都**用本包装：详情页的 discharge
+ * 也是全国 `{source}/{cycle}` 模板，非默认对同样会落进未定态，而且它永不取 per-cycle 列表，
+ * 未定即终态 —— 用裸函数丢的 `validTime` 不会再被任何后续落地补回来。
+ */
+export function resolveM11NationalValidTimeCorrection(
+  state: Pick<M11QueryState, 'layer' | 'validTime'>,
+  layers: LayerState[],
+  derivedTimes?: M11TimelineDerivedTimes | null,
+): string | null | undefined {
+  const activeLayer = layers.find((layer) => layer.layerId === state.layer)
+  if (isM11ActiveCycleValidTimesUnresolved(activeLayer)) return undefined
+  return resolveM11ValidTimeCorrection(state, layers, derivedTimes)
 }
 
 export function buildM11TimelineViewModel(
