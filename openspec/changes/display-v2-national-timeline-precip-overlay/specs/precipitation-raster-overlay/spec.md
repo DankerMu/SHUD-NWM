@@ -116,6 +116,18 @@ The display API SHALL expose `GET /api/v1/precip/{source}/{cycle}/index` and `GE
 - **WHEN** `source` is not `gfs` or `ifs`
 - **THEN** the route returns HTTP 422 without touching the filesystem
 
+#### Scenario: Off-hour or out-of-horizon instant
+- **WHEN** `cycle` or `valid_time` carries a non-zero minute or second, or the PNG route's `valid_time` is not one of the 3-hour steps from `cycle` to `cycle + 168h` (including any instant before `cycle` or so far out of range that window arithmetic would overflow)
+- **THEN** the route returns HTTP 422 with code `VALIDATION_ERROR` before any filesystem access, writes no cache file, and never answers 500
+
+#### Scenario: IFS index ends at the last complete window
+- **WHEN** the mirrored IFS products follow the producer's cadence (3-hourly to lead 144 h, 6-hourly after)
+- **THEN** `valid_times[]` ends at `cycle + 144h`, because every later window needs a 3-hourly lead the producer never emits; this is the documented consequence of listing only complete windows, not an error
+
+#### Scenario: Corrupt cache or slice never reaches the client
+- **WHEN** a cache file does not start with the PNG signature, or a mirrored slice opens but fails during the data read
+- **THEN** the cache file is treated as a miss and rewritten by a complete render, and the failed slice maps to HTTP 404 `PRECIP_WINDOW_INCOMPLETE` with `details.reason == "slice_unreadable"`
+
 ### Requirement: Prewarm envelope is per-source, cycle-aware, and bounded
 This requirement is deliberately hosted in `precipitation-raster-overlay` (rather than `national-river-density`) because the precipitation PNG set is the new surface prewarm gains; it nevertheless governs the whole prewarm envelope, including the discharge-tile and river-network parts. `scripts/node27_mvt_prewarm.py` SHALL discover the newest cycle per source from `GET /api/v1/layers/discharge/cycles?source=<source>` for each of `gfs` and `ifs`, and warm exactly this envelope: for each source with a non-empty cycle list, the z3–z4 China tiles of `/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf` for every valid time of that source's newest cycle, plus one `/api/v1/precip/{source}/{cycle}/{valid_time}.png` per valid time of that cycle; the national river-network prewarm stays z3–z5 and unchanged. The emitted request count and elapsed time MUST be part of the run summary and the deployment receipt. The script MUST NOT fabricate a cycle: an empty `cycles[]` for a source means that source contributes zero requests.
 
