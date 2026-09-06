@@ -38,6 +38,23 @@ Index iRiv iEle Length
 """
 _VALID_SINGLE_RIV = "1 6\nIndex Down Type Slope Length BC\n1 0 0 0.01 100 0\n"
 _VALID_SINGLE_RIVSEG = "1 4\nIndex iRiv iEle Length\n1 1 1 100\n"
+_SINGLE_MAPPING_LINES = {
+    "riv": ("1 6", "Index Down Type Slope Length BC", "1 0 0 0.01 100 0"),
+    "rivseg": ("1 4", "Index iRiv iEle Length", "1 1 1 100"),
+}
+_SPLITLINES_SEPARATOR_CASES = (
+    ("lf", "\n"),
+    ("cr", "\r"),
+    ("crlf", "\r\n"),
+    ("vertical-tab", "\v"),
+    ("form-feed", "\f"),
+    ("file-separator", "\x1c"),
+    ("group-separator", "\x1d"),
+    ("record-separator", "\x1e"),
+    ("next-line", "\x85"),
+    ("line-separator", " "),
+    ("paragraph-separator", " "),
+)
 
 
 def _mapping_paths(tmp_path: Path) -> tuple[Path, Path]:
@@ -197,6 +214,32 @@ def test_mapping_with_exactly_32_leading_comment_lines_reaches_both_public_seams
         _VALID_SINGLE_RIV,
         "# leading comment\n" * 32 + _VALID_SINGLE_RIVSEG,
         version="v-rivseg-leading-comments",
+    )
+
+
+@pytest.mark.parametrize(
+    ("separator_id", "separator"),
+    _SPLITLINES_SEPARATOR_CASES,
+    ids=tuple(separator_id for separator_id, _ in _SPLITLINES_SEPARATOR_CASES),
+)
+@pytest.mark.parametrize("target", ("riv", "rivseg"), ids=("sp-riv", "sp-rivseg"))
+def test_mapping_splitlines_separators_with_32_comments_reach_both_public_seams(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    separator_id: str,
+    separator: str,
+    target: str,
+) -> None:
+    target_mapping = separator.join(("# leading comment",) * 32 + _SINGLE_MAPPING_LINES[target])
+    riv = target_mapping if target == "riv" else _VALID_SINGLE_RIV
+    rivseg = target_mapping if target == "rivseg" else _VALID_SINGLE_RIVSEG
+
+    _assert_valid_both_seams(
+        tmp_path,
+        monkeypatch,
+        riv,
+        rivseg,
+        version=f"v-rivseg-splitlines-{target}-{separator_id}",
     )
 
 
