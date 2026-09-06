@@ -2,7 +2,7 @@
 
 - 日期：2026-09-06（node-27 本机 `+08:00`；run 2 UTC `2026-09-06T04:18Z` 即本机 12:18；run 1 `02:58Z`）
 - 分支：`feat/issue-2010-precip-raster-service` ・ PR #2094 ・ epic #2003 ・ OpenSpec change `display-v2-national-timeline-precip-overlay` group 5
-- **读数与 SHA 的对应**：下文读数取自 **run 2 = `b2092981`**（round-1 修复 `4e29818a` + fixture 钉定 `b2092981` 之后的 head；终态 push 只再加本 receipt 与 docs，`git diff b2092981 <final> -- '*.py' '*.yaml' '*.ts'` 为空）。run 1（`3b80f46e`，修复前）读数归档在 `.workplans/issue-2010/phase8/node27-receipt-run1-3b80f46e.log`，两次差异见 §8。
+- **读数与 SHA 的对应**：下文读数取自 **run 2 = `b2092981`**（round-1 修复 `4e29818a` + fixture 钉定 `b2092981` 之后的 head；终态 push 只再加本 receipt、docs 与 `services/precip/errors.py` 一段 docstring（Phase 7 终审补记，无行为变化），`git diff b2092981 <final> -- '*.yaml' '*.ts'` 为空、`-- '*.py'` 仅该 docstring）。run 1（`3b80f46e`，修复前）读数归档在 `.workplans/issue-2010/phase8/node27-receipt-run1-3b80f46e.log`，两次差异见 §8。
 - 节点：node-27（`210.77.77.27`）。本 receipt **不连 DB**（两条 precip 路由 DB-free；`display.env` 只为拿到 `NHMS_SERVICE_ROLE=display_readonly` 等角色配置）。
 - 执行方式：**未动生产**。生产 :8080（`/home/nwm/NWM` 在 `hotfix/node27-rollback-pre-2073` = `5a86841c`，porcelain 11 条本地未提交内容全程未碰）不 `git pull`、不重启；
   只做 `git fetch origin <branch>`（仅更新 remote-tracking ref）+ throwaway worktree `/home/nwm/tmp/wt-2094`（`git worktree add --detach FETCH_HEAD`），

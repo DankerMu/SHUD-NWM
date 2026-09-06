@@ -244,7 +244,7 @@ Invariant Matrix（high）：
 - Storage/cache/query：`NHMS_MVT_FILE_CACHE_DIR/precip/<S>/<K>/<valid_time>.<palette_version>.<slice_digest>.png`（tmp+rename）；`display_catalog_cached` 的 index 缓存；镜像根 `NHMS_PRECIP_MIRROR_ROOT`（只读）。
 - Public routes/entrypoints：`apps/api/routes/precip.py` 两条路由；`apps/api/routes/hydro_display.py::/api/v1/layers`（`precip` 条目）与 `valid-times`（`precip` → `[]`）；`apps/api/route_registry.py`。
 - Frontend/downstream consumers：`apps/frontend/src/api/types.ts`（生成）；`mvtLayerMetadata.ts::isMvtLayerMetadata`（对 `png` 为 false）；`overviewDataContracts.ts::layerGroup`；#2013 prewarm（读 index `data.valid_times`）；#2011 retention（按 `precip/<S>/<K>` 目录名剪枝）。
-- Failure paths/rollback/stale state：`PrecipCycleNotMirrored`/`PrecipWindowIncomplete`/`PrecipSliceInvalid` → 404 两码；根未配置 → 404 + reason；缓存写失败 → 不缓存；同名同尺寸重镜像不改 ETag（已知限制，见 Non-goals）；中间周期迟到镜像 → 新 digest 新文件（决策 8）。
+- Failure paths/rollback/stale state：路由级镜像门（路由直接抛 `ApiError`；`PrecipCycleNotMirrored` 类为未来库调用方保留，当前无人抛出——Phase 7 终审补记）/`PrecipWindowIncomplete`/`PrecipSliceInvalid` → 404 两码；根未配置 → 404 + reason；缓存写失败 → 不缓存；同名同尺寸重镜像不改 ETag（已知限制，见 Non-goals）；中间周期迟到镜像 → 新 digest 新文件（决策 8）。
 - Evidence/audit/readiness：`tests/test_precip_overlay.py`；`tests/test_openapi_drift.py`；`tests/test_openapi_31_contract.py`；`pnpm check:api-types`；node-27 receipt `docs/runbooks/receipts/2026-09-06-issue-2010-precip-raster-node27.md`。
 - Regression rows：
   - `resolve_window("gfs", 09-02T12Z, 09-02T12Z)`，镜像含 09-02T00Z 与 09-01T12Z（各 f003–f168）→ 8 片 = 09-02T00Z f003/f006/f009/f012 + 09-01T12Z f003/f006/f009/f012，不含请求周期，GFS 无 f000 不报缺。

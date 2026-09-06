@@ -17,9 +17,12 @@ class PrecipError(RuntimeError):
 class PrecipCycleNotMirrored(PrecipError):
     """The requested cycle has no `canonical/<S>/<K>/prcp_rate_or_amount/` tree.
 
-    Raised by the route-level gate (pinned decision 9), never by
-    `resolve_window`: the lead-0 window is legitimately served entirely by
-    earlier cycles, so the resolver must not require the requested cycle itself.
+    The mirrored-cycle check is route-level (pinned decision 9) and never part
+    of `resolve_window`: the lead-0 window is legitimately served entirely by
+    earlier cycles, so the resolver must not require the requested cycle
+    itself. The display routes answer that gate with `ApiError` directly, so
+    nothing in this repository raises this class today; it is reserved for a
+    future library caller (`cycle_is_mirrored` is the predicate to use).
     """
 
     def __init__(self, *, reason: str = "cycle_not_mirrored") -> None:
