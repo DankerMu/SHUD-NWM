@@ -7,7 +7,7 @@
 - 执行方式：**未动生产**。生产 :8080（`/home/nwm/NWM` 在 `hotfix/node27-rollback-pre-2073` = `5a86841c`，porcelain 11 条本地未提交内容全程未碰）不 `git pull`、不重启；
   只做 `git fetch origin <branch>`（仅更新 remote-tracking ref）+ throwaway worktree `/home/nwm/tmp/wt-2094`（`git worktree add --detach FETCH_HEAD`），
   从中另起单 worker uvicorn `127.0.0.1:8090`：`set -a; . infra/env/display.env; set +a` + `NHMS_PRECIP_MIRROR_ROOT=/home/ghdc/nwm/object-store`
-  + 专用空 `NHMS_MVT_FILE_CACHE_DIR=/home/nwm/tmp/precip-cache-2094` + `PYTHONPATH=/home/nwm/tmp/wt-2094` + 生产解释器 `/home/nwm/NWM/.venv/bin/python`
+  加 专用空 `NHMS_MVT_FILE_CACHE_DIR=/home/nwm/tmp/precip-cache-2094` + `PYTHONPATH=/home/nwm/tmp/wt-2094` + 生产解释器 `/home/nwm/NWM/.venv/bin/python`
   （runner 先断言 `git diff --quiet HEAD FETCH_HEAD -- pyproject.toml uv.lock` 为真才复用解释器，未触发任何 `uv sync`）。**未导出** `NHMS_OBJECT_STORE_COPYBACK_ROOT`。
   runner 全文 `node27-receipt-2010.sh` 与原始日志归档在 `.workplans/issue-2010/phase8/`（本地）。
 - 判别器：`GET /api/v1/precip/gfs/2026-09-05T12:00:00Z/index` 在生产 :8080 为 **404**、在 :8090 为 **200**；`/api/v1/runtime/config` 报 `service_role=display_readonly`、`display_readonly=true`。
