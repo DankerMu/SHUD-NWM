@@ -3419,3 +3419,13 @@ orchestrator-authored-text failure mode it exposes is specific to a run where
 the orchestrator wrote a substantial ops artifact mid-review. Recorded here so
 the next revisit can check whether the phase-lens column keeps outperforming
 its size. Next revisit on the audit's next flag or a maintainer override.
+
+## Revisit 2026-09-06 (post-merge #2111 / #2092)
+
+The canonical audit re-flagged DECIDABLE at the unchanged sample of 179
+multi-round merged PRs: later-round catches remain core=197, rotated=265 and
+phase=51, with 15 non-attributable catches skipped. PR #2111 ran one clean
+comprehensive round, so it adds neither a multi-round sample nor a later-round
+seat-lens catch. There is no new evidence against the preceding decision:
+**keep rotation**. Next revisit on the audit's next flag or a maintainer
+override.
