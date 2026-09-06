@@ -2748,6 +2748,17 @@
         }
       ]
     },
+    "2092": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2111,
+          "outcome": "merged",
+          "rounds": 1
+        }
+      ]
+    },
     "2012": {
       "ceilingPrs": [],
       "gateEntries": 1,

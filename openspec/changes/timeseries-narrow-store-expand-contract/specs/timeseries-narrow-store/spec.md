@@ -52,6 +52,10 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **WHEN** the shape oracle renders every registered template with store `narrow`
 - **THEN** no rendered statement references `run_id`, `basin_version_id`, `river_network_version_id`, `river_segment_id`, `variable`, `unit` or `quality_flag` as a column of the fact table, no marker line remains, and every key predicate present in the legacy variant is present in the narrow variant
 
+#### Scenario: PostgreSQL qualified-name separator whitespace cannot bypass text-identity refusal
+- **WHEN** a fact alias declared as a bare identifier qualifies any text identity column through a PostgreSQL-valid dot separator containing spaces, tabs, newlines, a block comment or a newline-terminated line comment, with either side using its already-modelled bare or exact lower-case quoted token form
+- **THEN** the renderer attributes the canonical text identity member through the same public helper responsibilities as the direct-dot form and refuses the narrow variant before returning SQL; comments and whitespace inside string literals/comments remain data, non-exact quoted tokens and other-relation or unmodelled multi-part references do not become fact-column attribution, including when the candidate alias is preceded by another dot-separated component
+
 #### Scenario: Renderer refuses a mis-shaped marker
 - **WHEN** a template places the marker above a line that is not a single aid conjunct
 - **THEN** the renderer raises before returning SQL and the shape oracle fails naming the template
