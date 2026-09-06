@@ -2,7 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
 import { buildM11RegisteredOverlay } from '@/components/map/m11MapBuilders'
+import {
+  activeCycleValidTimesErrorDisabledReason,
+  failClosedDischargeDisabledReason,
+  pendingActiveCycleValidTimesDisabledReason,
+} from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, type M11QueryState } from '@/lib/m11/queryState'
+import { resolveM11NationalValidTimeCorrection, resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { clearOverviewDataCache, useOverviewDataStore } from '@/stores/overviewData'
 import { useMonitoringStore, type RuntimeConfig } from '@/stores/monitoring'
 
@@ -347,11 +353,10 @@ describe('overview data store discharge loading', () => {
     const stored = useOverviewDataStore.getState()
     // 缓存键是 `(source, cycle)`，周期按秒精度归一（URL 里是毫秒形 `…T12:00:00.000Z`）。
     expect(Object.keys(stored.validTimesByCycle)).toEqual([`gfs|${OTHER_CYCLE}`])
-    expect(Object.values(stored.validTimesByCycle)[0]).toEqual([
-      OTHER_CYCLE,
-      '2026-05-17T15:00:00Z',
-      '2026-05-17T18:00:00Z',
-    ])
+    expect(Object.values(stored.validTimesByCycle)[0]).toEqual({
+      status: 'available',
+      validTimes: [OTHER_CYCLE, '2026-05-17T15:00:00Z', '2026-05-17T18:00:00Z'],
+    })
     // LayerState 本身必须是活动 (source, cycle) 的列表，而不是目录里默认周期的列表。
     const discharge = stored.overview?.layers.find((item) => item.layerId === 'discharge')
     expect(discharge?.validTimes).toEqual([
@@ -429,26 +434,155 @@ describe('overview data store discharge loading', () => {
     expect(buildM11RegisteredOverlay({ ...query, cycle: null }, state.overview?.layers ?? [])).not.toBeNull()
   })
 
-  it('discards enrichment results that arrive after overviewRequestNonce advanced', async () => {
+  // 三条 layer-time enrichment 通路各自的 `isCurrentRequest()` 守卫都必须真的挡住迟到写入。
+  // 一律用**非默认周期**加载：`cycle: null` 时活动对是默认对，per-cycle valid-times 分支
+  // 结构上根本进不去，只能证明其中一条通路。
+  const lateEnrichmentPaths = [
+    { name: 'cycles', path: CYCLES_PATH, payload: () => success({ source: 'gfs', cycles: [], default_cycle: null }) },
+    {
+      name: 'per-cycle valid times',
+      path: VALID_TIMES_PATH,
+      payload: () => success({ layer_id: 'discharge', valid_times: [OTHER_CYCLE, '2026-05-17T18:00:00Z'] }),
+    },
+    { name: 'precip index', path: PRECIP_INDEX_PATH, payload: () => success(precipIndex) },
+  ] as const
+
+  it.each(lateEnrichmentPaths)(
+    'discards $name results that arrive after overviewRequestNonce advanced',
+    async ({ path, payload }) => {
+      let release: () => void = () => undefined
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const calls = mockApi({
+        [path]: async () => {
+          await gate
+          return payload()
+        },
+      })
+
+      const load = useOverviewDataStore.getState().loadOverview({ ...query, cycle: '2026-05-17T12:00:00.000Z' })
+      await vi.waitFor(() => expect(calls.some((call) => call.path === path)).toBe(true))
+      // 新一轮请求已开始（nonce 递增）：迟到的结果一律不写入 store。
+      clearOverviewDataCache()
+      // bump **之后**取参照：bump 之前 enrichment 的最终 set 可能尚未落地，比对会变成竞态。
+      const layersAfterBump = useOverviewDataStore.getState().overview?.layers
+      release()
+      await load
+
+      const state = useOverviewDataStore.getState()
+      expect(state.cyclesBySource).toEqual({})
+      expect(state.validTimesByCycle).toEqual({})
+      expect(state.precipIndexByCycle).toEqual({})
+      // valid-times 的写入口还会就地重算 layers：迟到写入若漏守卫，这里的引用会被换掉。
+      expect(state.overview?.layers).toBe(layersAfterBump)
+    },
+  )
+
+  it('keeps the discharge layer disabled while the non-default cycle list is still in flight', async () => {
+    // cand-01：列表未到时**不得**回落到目录里默认周期的 metadata.valid_times，
+    // 否则图层报 available 并拼出跨周期瓦片 URL。
     let release: () => void = () => undefined
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
     const calls = mockApi({
-      [CYCLES_PATH]: async () => {
+      [VALID_TIMES_PATH]: async () => {
         await gate
-        return success({ source: 'gfs', cycles: [], default_cycle: null })
+        return success({
+          layer_id: 'discharge',
+          valid_times: [OTHER_CYCLE, '2026-05-17T15:00:00Z', '2026-05-17T18:00:00Z'],
+        })
       },
     })
+    const cycleQuery = { ...query, cycle: '2026-05-17T12:00:00.000Z', validTime: '2026-05-17T15:00:00.000Z' }
 
-    const load = useOverviewDataStore.getState().loadOverview({ ...query, cycle: null })
-    await vi.waitFor(() => expect(calls.some((call) => call.path === CYCLES_PATH)).toBe(true))
-    // 新一轮请求已开始（nonce 递增）：迟到的结果一律不写入 store。
-    clearOverviewDataCache()
+    const load = useOverviewDataStore.getState().loadOverview(cycleQuery)
+    await vi.waitFor(() => {
+      expect(calls.some((call) => call.path === VALID_TIMES_PATH)).toBe(true)
+      expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false)
+    })
+
+    const pendingState = useOverviewDataStore.getState()
+    const pendingLayers = pendingState.overview?.layers ?? []
+    const pendingDischarge = pendingLayers.find((item) => item.layerId === 'discharge')
+    // 「尚未取回」= 记录缺席。
+    expect(pendingState.validTimesByCycle).toEqual({})
+    expect(pendingDischarge?.available).toBe(false)
+    expect(pendingDischarge?.disabledReason).toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(pendingDischarge?.validTimes).toEqual([])
+    // 尤其**不是**默认周期那份列表。
+    expect(pendingDischarge?.validTimes).not.toContain('2026-05-18T00:00:00.000Z')
+    // 零瓦片请求：overlay 注册不出来。
+    expect(buildM11RegisteredOverlay(cycleQuery, pendingLayers)).toBeNull()
+    // 校正闸门：裸函数会把 URL 里的 validTime 清成 null，全国包装函数在未定期间不校正。
+    expect(resolveM11ValidTimeCorrection(cycleQuery, pendingLayers)).toBeNull()
+    expect(resolveM11NationalValidTimeCorrection(cycleQuery, pendingLayers)).toBeUndefined()
+
     release()
     await load
 
-    expect(useOverviewDataStore.getState().cyclesBySource).toEqual({})
+    // pending → available 的转移必须真的渲染出来（错误/成功两条终态都就地重算 layers）。
+    const settledLayers = useOverviewDataStore.getState().overview?.layers ?? []
+    const settledDischarge = settledLayers.find((item) => item.layerId === 'discharge')
+    expect(settledDischarge?.available).toBe(true)
+    expect(settledDischarge?.validTimes).toEqual([
+      '2026-05-17T12:00:00.000Z',
+      '2026-05-17T15:00:00.000Z',
+      '2026-05-17T18:00:00.000Z',
+    ])
+    expect(buildM11RegisteredOverlay(cycleQuery, settledLayers)).not.toBeNull()
+    // 闸门只在未定期间挡；列表落地后包装函数照常委派给裸函数：越界的 validTime 被校正回
+    // 该图层的 currentValidTime（此处即活动列表里由 cycleQuery.validTime 命中的那项）。
+    expect(
+      resolveM11NationalValidTimeCorrection({ ...cycleQuery, validTime: '2026-05-19T00:00:00.000Z' }, settledLayers),
+    ).toBe(settledDischarge?.currentValidTime)
+    expect(settledDischarge?.currentValidTime).toBe('2026-05-17T15:00:00.000Z')
+  })
+
+  it('degrades to a distinct error state when the non-default cycle list rejects', async () => {
+    // cand-01 的第二条终态：reject 必须写终态并重算 layers，不能永久停在 pending 文案上；
+    // 且这是 scoped 降级，不是 bootstrap 失败。
+    mockApi({
+      [VALID_TIMES_PATH]: () => {
+        throw new Error('valid-times down')
+      },
+    })
+    const cycleQuery = { ...query, cycle: '2026-05-17T12:00:00.000Z', validTime: '2026-05-17T15:00:00.000Z' }
+
+    await useOverviewDataStore.getState().loadOverview(cycleQuery)
+
+    const state = useOverviewDataStore.getState()
+    expect(state.validTimesByCycle).toEqual({ [`gfs|${OTHER_CYCLE}`]: { status: 'error' } })
+    const discharge = (state.overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(discharge?.available).toBe(false)
+    expect(discharge?.disabledReason).toBe(activeCycleValidTimesErrorDisabledReason)
+    expect(discharge?.disabledReason).not.toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(discharge?.disabledReason).not.toBe('Layer has no valid times.')
+    expect(discharge?.disabledReason).not.toBe(failClosedDischargeDisabledReason)
+    expect(discharge?.validTimes).toEqual([])
+    expect(buildM11RegisteredOverlay(cycleQuery, state.overview?.layers ?? [])).toBeNull()
+    expect(resolveM11NationalValidTimeCorrection(cycleQuery, state.overview?.layers ?? [])).toBeUndefined()
+    // scoped 降级：既不是 bootstrap 失败，也不进 enrichment 的 partial error。
+    expect(state.bootstrapError).toBeNull()
+    expect(state.error).toBeNull()
+    expect(state.mapBootstrapLoading).toBe(false)
+  })
+
+  it('clears the three layer-time records together with the HTTP cache', async () => {
+    // tasks.md：三个缓存与既有 `cache` 同寿，由 `clearOverviewDataCache()` / `clearCache()` 清除。
+    useOverviewDataStore.setState({
+      cyclesBySource: { gfs: { status: 'error' } },
+      validTimesByCycle: { [`gfs|${OTHER_CYCLE}`]: { status: 'available', validTimes: [OTHER_CYCLE] } },
+      precipIndexByCycle: { [`gfs|${DEFAULT_CYCLE}`]: { status: 'error' } },
+    })
+
+    useOverviewDataStore.getState().clearCache()
+
+    const state = useOverviewDataStore.getState()
+    expect(state.cyclesBySource).toEqual({})
+    expect(state.validTimesByCycle).toEqual({})
+    expect(state.precipIndexByCycle).toEqual({})
   })
 
   it('keeps a not-mirrored cycle distinguishable from any other precip index failure', async () => {

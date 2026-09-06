@@ -31,7 +31,7 @@ import {
 } from '@/lib/m11/queryState'
 import { withStaticBasinBboxes } from '@/lib/m11/staticBasinFallback'
 import { prefetchHydroMetLatestProducts } from '@/pages/hydroMet/bootstrap'
-import { resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
+import { resolveM11NationalValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { useAuthStore } from '@/stores/auth'
@@ -294,7 +294,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   useEffect(() => {
     // validTime 校正只需 bootstrap 落定即可（与 enrichment 解耦）。
     if (mapBootstrapLoading || !overviewMetadataMatchesQuery || metadataLayers.length === 0) return
-    const correctedValidTime = resolveM11ValidTimeCorrection(state, metadataLayers)
+    // 活动周期的时次列表未定（pending / error）时不校正：见 resolveM11NationalValidTimeCorrection。
+    const correctedValidTime = resolveM11NationalValidTimeCorrection(state, metadataLayers)
     if (correctedValidTime === undefined) return
     onQueryChange({ validTime: correctedValidTime })
   }, [onQueryChange, mapBootstrapLoading, metadataLayers, overviewMetadataMatchesQuery, state])

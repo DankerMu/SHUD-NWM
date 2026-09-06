@@ -18,6 +18,7 @@ import {
   normalizeOverviewSummary,
   normalizeSelectedSegmentDetail,
   resolveNationalScaleSource,
+  type ActiveCycleValidTimesOverride,
   type AggregationEndpointDecision,
   type ApiBasin,
   type ApiBasinVersion,
@@ -84,6 +85,14 @@ export type PrecipIndexState =
   | { status: 'available'; index: PrecipIndex }
   | { status: 'not_mirrored' }
   | { status: 'error' }
+
+/**
+ * 非默认 `(source, cycle)` 的时次列表：拿到即 available，reject 产 scoped `'error'`。
+ * 「尚未取回」由**记录缺席**表达，故本类型只有两态；缺席 → contract 层的 `pending` 覆盖。
+ * 没有终态就无法把「还没到」「取失败」与「拿到空列表」区分开，图层会带着默认周期的时次
+ * 报 available 并拼出跨周期瓦片 URL。
+ */
+export type ValidTimesState = { status: 'available'; validTimes: string[] } | { status: 'error' }
 
 /** `(source, cycle)` 缓存键：周期一律按秒精度归一，避免同一周期两种拼写写出两份缓存。 */
 export function m11SourceCycleKey(source: string, cycle: string): string {
@@ -154,8 +163,8 @@ interface OverviewDataState {
   // （spec overview-data-contracts「Cycles and precipitation index requests stay off the
   // bootstrap critical path」）。
   cyclesBySource: Record<string, DischargeCyclesState>
-  /** key = `m11SourceCycleKey(source, cycle)`；只为**非默认** `(source, cycle)` 写入。 */
-  validTimesByCycle: Record<string, string[]>
+  /** key = `m11SourceCycleKey(source, cycle)`；只为**非默认** `(source, cycle)` 写入；缺席 = 尚未取回。 */
+  validTimesByCycle: Record<string, ValidTimesState>
   /** key = `m11SourceCycleKey(source, cycle)`。 */
   precipIndexByCycle: Record<string, PrecipIndexState>
   loadOverview: (query: M11QueryState) => Promise<OverviewDataSnapshot>
@@ -258,6 +267,10 @@ export function clearOverviewDataCache() {
   basinRequestNonce += 1
   activeOverviewRequestKey = null
   activeBasinRequestKey = null
+  // 三个 layer-time 缓存与 HTTP `cache` 同寿（tasks.md「由 clearOverviewDataCache() / clearCache()
+  // 清除」）：留着它们会让下一轮加载在新 nonce 下读到上一轮的 `(source, cycle)` 列表 / index。
+  // 调用一律发生在模块初始化之后，故此处对 `useOverviewDataStore` 的前向引用在运行时安全。
+  useOverviewDataStore.setState({ cyclesBySource: {}, validTimesByCycle: {}, precipIndexByCycle: {} })
 }
 
 function cacheKey(path: string, params?: unknown) {
@@ -1199,14 +1212,33 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     // pair 一律按**全国口径**的 query.source 解析，保证 enrichment 写入键与此处读取键一致。
     const buildLayerStates = (inputs: NonNullable<typeof layerStateInputs>): LayerState[] => {
       const pair = nationalDischargeActivePair(query, inputs.layers)
-      const activeList =
-        pair && !pair.isDefault ? get().validTimesByCycle[m11SourceCycleKey(pair.source, pair.cycle)] : undefined
+      // 非默认对一律传覆盖：记录缺席 = 列表还没取回 → `pending`（空列表 + 独立文案），
+      // 绝不静默回落到目录里**默认周期**的 metadata.valid_times。默认对仍传 undefined
+      // （metadata 路径，同一次加载零次 valid-times 请求）。
+      const activeCycleValidTimes: Record<string, ActiveCycleValidTimesOverride> | undefined =
+        pair && !pair.isDefault
+          ? {
+              discharge: get().validTimesByCycle[m11SourceCycleKey(pair.source, pair.cycle)] ?? { status: 'pending' },
+            }
+          : undefined
       return normalizeLayerStates({
         query: inputs.query,
         layers: inputs.layers,
-        activeCycleValidTimes: activeList ? { discharge: activeList } : undefined,
+        activeCycleValidTimes,
         resolvedRun: inputs.resolvedRun,
       })
+    }
+
+    // per-cycle 列表的**唯一**写入口：两条终态（available / error）都必须就地重算 layers。
+    // 「pending」是记录缺席派生出来的，只写 record 不重算会把 UI 永久钉在 pending 文案上，
+    // pending→error / pending→available 的转移永远渲染不出来。
+    const writeValidTimes = (key: string, value: ValidTimesState) => {
+      if (!isCurrentRequest()) return
+      set((state) => ({ validTimesByCycle: { ...state.validTimesByCycle, [key]: value } }))
+      const inputs = layerStateInputs
+      if (!inputs) return
+      const layers = buildLayerStates(inputs)
+      set((state) => (state.overview ? { overview: { ...state.overview, layers } } : {}))
     }
 
     // 阶段 1（mapBootstrap critical path）：basins + runless layers + 当前 layer 的 valid_time。
@@ -1394,16 +1426,9 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       const validTimesTask =
         pair && !pair.isDefault
           ? fetchLayerValidTimesForCycle('discharge', pair.source, pair.cycle).then(
-              (validTimes) => {
-                if (!isCurrentRequest()) return
-                const key = m11SourceCycleKey(pair.source, pair.cycle)
-                set((state) => ({ validTimesByCycle: { ...state.validTimesByCycle, [key]: validTimes } }))
-                const inputs = layerStateInputs
-                if (!inputs) return
-                const layers = buildLayerStates(inputs)
-                set((state) => (state.overview ? { overview: { ...state.overview, layers } } : {}))
-              },
-              () => undefined,
+              (validTimes) => writeValidTimes(m11SourceCycleKey(pair.source, pair.cycle), { status: 'available', validTimes }),
+              // scoped 降级：该周期不可用（禁用态 + 独立文案），不是 bootstrap 错误。
+              () => writeValidTimes(m11SourceCycleKey(pair.source, pair.cycle), { status: 'error' }),
             )
           : Promise.resolve()
 

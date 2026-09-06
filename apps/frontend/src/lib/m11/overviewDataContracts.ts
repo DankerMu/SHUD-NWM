@@ -545,6 +545,39 @@ export function resolveLayerValidTimesFromMetadata(metadata: ApiLayer['metadata'
   return { validTimes: normalizeValidTimes(raw), requiresFallback: false }
 }
 
+/**
+ * 活动 `(source, cycle)` 列表的三态覆盖。非默认周期时 store 必须传入本入参，且必须能表达
+ * 「还没取回来」与「取失败了」——否则调用方只能传 `undefined`，`normalizeLayerStates` 会回落到
+ * `metadata.valid_times`（**默认周期**的列表），图层报 `available: true` 却带着错周期的时次，
+ * `buildM11RegisteredOverlay` 随即拼出跨周期瓦片 URL。
+ * `pending` / `error` 一律解析为空列表（`available: false`，overlay 为 null，零瓦片请求），
+ * 并各自对应一条独立文案。
+ */
+export type ActiveCycleValidTimesOverride =
+  | { status: 'available'; validTimes: string[] }
+  | { status: 'pending' }
+  | { status: 'error' }
+
+/**
+ * 活动周期的时次列表尚未取回时的禁用文案。必须与 `'Layer has no valid times.'` 和
+ * `failClosedDischargeDisabledReason` 都不相等：这是「还在取」，不是「该周期没有时次」，
+ * 也不是「无周期覆盖全部流域」。
+ */
+export const pendingActiveCycleValidTimesDisabledReason =
+  'Valid times for the selected cycle are still loading.'
+
+/** 活动周期的时次列表取回失败（scoped 降级，不是 bootstrap 失败）的禁用文案。 */
+export const activeCycleValidTimesErrorDisabledReason =
+  'Valid times for the selected cycle could not be loaded.'
+
+/** 活动周期列表处于未定态（pending / error）：调用方据此暂缓 validTime 自动校正，保住 URL 状态。 */
+export function isM11ActiveCycleValidTimesUnresolved(layer: LayerState | null | undefined): boolean {
+  return (
+    layer?.disabledReason === pendingActiveCycleValidTimesDisabledReason ||
+    layer?.disabledReason === activeCycleValidTimesErrorDisabledReason
+  )
+}
+
 export function normalizeLayerStates(input: {
   query: Pick<M11QueryState, 'layer' | 'validTime' | 'source' | 'cycle'>
   layers: ApiLayer[]
@@ -555,7 +588,7 @@ export function normalizeLayerStates(input: {
   // 「metadata 已是数组即忽略覆盖」的规则只适用于**默认对**：非默认周期时 metadata.valid_times
   // 仍是默认周期的列表，必须由此入参顶掉，否则 LayerState/时间轴/lead 0 都停在默认周期上
   // （spec frontend-mvt-layer-consumption「Non-default cycle fetches its own list」）。
-  activeCycleValidTimes?: Record<string, string[] | undefined>
+  activeCycleValidTimes?: Record<string, ActiveCycleValidTimesOverride | undefined>
   derivedValidTimes?: Record<string, string[] | undefined>
   resolvedRun?: ApiHydroRun | null
 }): LayerState[] {
@@ -570,12 +603,18 @@ export function normalizeLayerStates(input: {
     // metadata 已是数组（含空数组）→ 完全忽略 fallback 覆盖；metadata 缺失才用调用方注入的 fallback。
     const fallbackValidTimes = requiresFallback ? normalizeValidTimes(input.validTimesByLayerId?.[layerId]) : []
     const activeCycleOverride = input.activeCycleValidTimes?.[layerId]
-    const apiValidTimes = Array.isArray(activeCycleOverride)
-      ? normalizeValidTimes(activeCycleOverride)
-      : requiresFallback
-        ? fallbackValidTimes
-        : metadataValidTimes
-    const derivedValidTimes = normalizeValidTimes(input.derivedValidTimes?.[layerId])
+    // 未定态（pending/error）一律清空两路时次来源：不能落回 metadata（默认周期的列表），
+    // 也不能经 `apiValidTimes.length > 0 ? … : derivedValidTimes` 从 derived 复活 `available: true`。
+    const unresolvedActiveCycle =
+      activeCycleOverride && activeCycleOverride.status !== 'available' ? activeCycleOverride.status : null
+    const apiValidTimes = unresolvedActiveCycle
+      ? []
+      : activeCycleOverride?.status === 'available'
+        ? normalizeValidTimes(activeCycleOverride.validTimes)
+        : requiresFallback
+          ? fallbackValidTimes
+          : metadataValidTimes
+    const derivedValidTimes = unresolvedActiveCycle ? [] : normalizeValidTimes(input.derivedValidTimes?.[layerId])
     const validTimes = apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes
     const currentValidTime = pickCurrentValidTime(validTimes, input.query.validTime)
     const isKnownRequired = (requiredLayers as string[]).includes(layerId)
@@ -601,9 +640,13 @@ export function normalizeLayerStates(input: {
             ? 'Layer is not registered by the API.'
             : isFailClosedDischargeMetadata(layerId, metadata)
               ? failClosedDischargeDisabledReason
-              : validTimes.length === 0
-                ? 'Layer has no valid times.'
-                : null,
+              : unresolvedActiveCycle === 'pending'
+                ? pendingActiveCycleValidTimesDisabledReason
+                : unresolvedActiveCycle === 'error'
+                  ? activeCycleValidTimesErrorDisabledReason
+                  : validTimes.length === 0
+                    ? 'Layer has no valid times.'
+                    : null,
       freshness: createFreshnessMetadata({
         cycleTime: input.resolvedRun?.cycle_time ?? input.query.cycle,
         validTime: currentValidTime,

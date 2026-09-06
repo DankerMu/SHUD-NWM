@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 
 import type { components } from '@/api/types'
 import {
+  activeCycleValidTimesErrorDisabledReason,
   createSourceScenarioSelection,
+  failClosedDischargeDisabledReason,
   filterBasinSegmentRows,
   getM11LayerLegend,
   mergeLayerCatalogs,
@@ -10,6 +12,7 @@ import {
   normalizeBasinSegmentRows,
   normalizeLayerStates,
   normalizeSelectedSegmentDetail,
+  pendingActiveCycleValidTimesDisabledReason,
 } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState } from '@/lib/m11/queryState'
 import type { M11QueryState } from '@/lib/m11/queryState'
@@ -203,11 +206,79 @@ describe('M11 overview data contracts', () => {
           metadata: { layer_id: 'discharge', valid_times: ['2026-05-18T06:00:00Z'] } as never,
         },
       ],
-      activeCycleValidTimes: { discharge: ['2026-05-18T12:00:00Z', '2026-05-18T15:00:00Z'] },
+      activeCycleValidTimes: {
+        discharge: { status: 'available', validTimes: ['2026-05-18T12:00:00Z', '2026-05-18T15:00:00Z'] },
+      },
     })
 
     expect(layers[0].validTimes).toEqual(['2026-05-18T12:00:00.000Z', '2026-05-18T15:00:00.000Z'])
     expect(layers[0].currentValidTime).toBe('2026-05-18T12:00:00.000Z')
+  })
+
+  it('never falls back to the default cycle metadata while the active cycle list is unresolved', () => {
+    // cand-01：`pending` / `error` 都必须解析成空列表 —— 否则非默认周期会带着**默认周期**的
+    // metadata.valid_times 报 available，overlay 随即拼出跨周期瓦片 URL。
+    const nonDefaultQuery = { ...query, cycle: '2026-05-18T12:00:00.000Z', validTime: null }
+    const layerCatalog = [
+      {
+        layer_id: 'discharge',
+        layer_name: 'Discharge',
+        layer_type: 'hydrology',
+        variables: ['q_down'],
+        metadata: { layer_id: 'discharge', valid_times: ['2026-05-18T06:00:00Z'], default_cycle: '2026-05-18T00:00:00Z' } as never,
+      },
+    ]
+
+    const pending = normalizeLayerStates({
+      query: nonDefaultQuery,
+      layers: layerCatalog,
+      activeCycleValidTimes: { discharge: { status: 'pending' } },
+    })
+    expect(pending[0].validTimes).toEqual([])
+    expect(pending[0].currentValidTime).toBeNull()
+    expect(pending[0].validTimeSource).toBe('none')
+    expect(pending[0].available).toBe(false)
+    expect(pending[0].disabledReason).toBe(pendingActiveCycleValidTimesDisabledReason)
+
+    const errored = normalizeLayerStates({
+      query: nonDefaultQuery,
+      layers: layerCatalog,
+      activeCycleValidTimes: { discharge: { status: 'error' } },
+    })
+    expect(errored[0].validTimes).toEqual([])
+    expect(errored[0].available).toBe(false)
+    expect(errored[0].disabledReason).toBe(activeCycleValidTimesErrorDisabledReason)
+
+    // 两条文案彼此不同，且与既有两条禁用文案都不同（I11/I12 据此出四种提示）。
+    for (const reason of [pendingActiveCycleValidTimesDisabledReason, activeCycleValidTimesErrorDisabledReason]) {
+      expect(reason).not.toBe('Layer has no valid times.')
+      expect(reason).not.toBe(failClosedDischargeDisabledReason)
+    }
+    expect(pendingActiveCycleValidTimesDisabledReason).not.toBe(activeCycleValidTimesErrorDisabledReason)
+  })
+
+  it('does not let derivedValidTimes resurrect an unresolved active cycle list', () => {
+    // cand-01 的旁路封堵：未定态必须**同时**清空 api 与 derived 两路，不能经
+    // `apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes` 复活 available。
+    const layers = normalizeLayerStates({
+      query: { ...query, cycle: '2026-05-18T12:00:00.000Z', validTime: null },
+      layers: [
+        {
+          layer_id: 'discharge',
+          layer_name: 'Discharge',
+          layer_type: 'hydrology',
+          variables: ['q_down'],
+          metadata: { layer_id: 'discharge', valid_times: ['2026-05-18T06:00:00Z'] } as never,
+        },
+      ],
+      activeCycleValidTimes: { discharge: { status: 'pending' } },
+      derivedValidTimes: { discharge: ['2026-05-18T09:00:00Z'] },
+    })
+
+    expect(layers[0].validTimes).toEqual([])
+    expect(layers[0].available).toBe(false)
+    expect(layers[0].validTimeSource).toBe('none')
+    expect(layers[0].disabledReason).toBe(pendingActiveCycleValidTimesDisabledReason)
   })
 
   it('marks an empty discharge list with a null default cycle as fail-closed, not time-less', () => {
