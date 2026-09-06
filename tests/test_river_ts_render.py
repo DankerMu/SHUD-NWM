@@ -1308,6 +1308,198 @@ WHERE RT.run_key = :run_key
     assert "not exactly one aid conjunct" in str(raised.value)
 
 
+# ---------------------------------------------------------------------------
+# PostgreSQL qualified-name separator whitespace/comments (#2092)
+# ---------------------------------------------------------------------------
+
+# The fixture, rather than the implementation's derived tuple, is the source of
+# truth for the enumeration below. The existing direct-dot #2053/#2086 nodes own
+# their no-whitespace behaviour; these rows own the legal separator expansion.
+_SEPARATOR_TEXT_IDENTITY_COLUMNS = (
+    "run_id",
+    "river_network_version_id",
+    "variable",
+    "basin_version_id",
+    "river_segment_id",
+    "unit",
+    "quality_flag",
+)
+
+
+def test_the_separator_member_enumeration_matches_the_shared_identity_contract() -> None:
+    assert _SEPARATOR_TEXT_IDENTITY_COLUMNS == TEXT_IDENTITY_COLUMNS
+
+
+def _assert_qualified_separator_text_identity(reference: str, *, entry: str, column: str) -> None:
+    """Assert the public seams for one qualified reference after token normalisation."""
+    sql = f"SELECT RT.value FROM hydro.river_timeseries RT WHERE {reference} = :value"
+    message = _quoted_text_identity_refusal(sql, entry=entry)
+
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    assert (
+        fact_table_text_identity_columns(sql, entry=entry),
+        text_fact_columns(sql, "RT"),
+        text_fact_columns(sql, "rt"),
+        message is not None,
+    ) == ({column}, {column}, {column}, True)
+    _assert_exact_quoted_text_identity_refusal(message, entry=entry, column=column)
+
+
+@pytest.mark.parametrize("column", _SEPARATOR_TEXT_IDENTITY_COLUMNS)
+@pytest.mark.parametrize(
+    ("label", "reference_template"),
+    [
+        ("bare-bare", "rt . {bare_column}"),
+        ("bare-quoted", 'rt . "{column}"'),
+        ("quoted-bare", '"rt" . {bare_column}'),
+        ("quoted-quoted", '"rt" . "{column}"'),
+    ],
+)
+def test_spaced_qualified_text_identity_members_are_attributed_by_both_helpers_and_narrow_refused(
+    column: str,
+    label: str,
+    reference_template: str,
+) -> None:
+    """Every #2092 token combination denotes the same bare-declared fact member."""
+    entry = f"separator-{label}-{column}"
+    reference = reference_template.format(column=column, bare_column=column.upper())
+
+    _assert_qualified_separator_text_identity(reference, entry=entry, column=column)
+
+
+@pytest.mark.parametrize(
+    ("label", "left"),
+    [
+        ("direct-no-whitespace", ""),
+        ("one-ascii-space", " "),
+        ("multiple-ascii-spaces", "   "),
+        ("horizontal-tab", "\t"),
+        ("newline", "\n"),
+        ("nested-block-comment", " /* left /* nested */ tail */ "),
+        ("line-comment", " -- left separator\n"),
+    ],
+)
+def test_qualified_separator_accepts_each_left_side_form(
+    label: str,
+    left: str,
+) -> None:
+    """Only the separator's left side varies, so its optional whitespace is observable."""
+    _assert_qualified_separator_text_identity(
+        f'rt{left}."variable"',
+        entry=f"separator-left-{label}",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "right"),
+    [
+        ("direct-no-whitespace", ""),
+        ("one-ascii-space", " "),
+        ("multiple-ascii-spaces", "   "),
+        ("horizontal-tab", "\t"),
+        ("newline", "\n"),
+        ("nested-block-comment", " /* right /* nested */ tail */ "),
+        ("line-comment", " -- right separator\n"),
+    ],
+)
+def test_qualified_separator_accepts_each_right_side_form(
+    label: str,
+    right: str,
+) -> None:
+    """Only the separator's right side varies, so its optional whitespace is observable."""
+    _assert_qualified_separator_text_identity(
+        f'rt.{right}"variable"',
+        entry=f"separator-right-{label}",
+        column="variable",
+    )
+
+
+def test_qualified_separator_accepts_block_comments_on_both_sides_of_the_dot() -> None:
+    """Comments become scanner-owned whitespace; the matcher never parses comment syntax."""
+    _assert_qualified_separator_text_identity(
+        'rt/*left*/./*right*/"variable"',
+        entry="separator-block-comments-both-sides",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "ordinary-literal",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.note = 'rt/*left*/./*right*/\"variable\"' AND rt.run_key = :run_key",
+        ),
+        (
+            "upper-escape-literal",
+            "SELECT E'rt/*left*/./*right*/\"variable\"' AS note, rt.value "
+            "FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+        (
+            "lower-escape-literal",
+            "SELECT e'rt/*left*/./*right*/\"variable\"' AS note, rt.value "
+            "FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+        (
+            "line-comment",
+            "SELECT rt.value -- rt/*left*/./*right*/\"variable\"\n"
+            "FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+        (
+            "nested-block-comment",
+            "SELECT rt.value /* rt/*left*/./*right*/\"variable\" */ "
+            "FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+    ],
+)
+def test_qualified_separator_bytes_inside_non_code_remain_data(label: str, sql: str) -> None:
+    """The same comment-shaped bytes are data inside literals and comment bodies."""
+    assert fact_table_text_identity_columns(sql, entry=f"separator-data-{label}") == set()
+    assert text_fact_columns(sql, "rt") == set()
+    assert render_river_ts_sql(sql, "narrow", entry=f"separator-data-{label}").sql == sql
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("bare-bare", "other . rt . variable"),
+        ("bare-quoted", 'other . rt . "variable"'),
+        ("quoted-bare", 'other . "rt" . VARIABLE'),
+        ("quoted-quoted", 'other . "rt" . "variable"'),
+    ],
+)
+def test_an_unrelated_prefix_cannot_be_truncated_into_a_fact_alias_reference(label: str, reference: str) -> None:
+    """A separately declared ``rt`` must not turn the final two multipart tokens into a fact reference."""
+    entry = f"separator-unrelated-prefix-{label}"
+    sql = f"SELECT rt.value FROM hydro.river_timeseries rt WHERE {reference} = :value"
+
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    assert fact_table_text_identity_columns(sql, entry=entry) == set()
+    assert text_fact_columns(sql, "RT") == set()
+    assert text_fact_columns(sql, "rt") == set()
+    assert render_river_ts_sql(sql, "narrow", entry=entry).sql == sql
+
+
+def test_a_spaced_table_name_qualifier_remains_fail_closed() -> None:
+    """#2092 does not widen the existing table-name qualification model."""
+    entry = "separator-spaced-table-name"
+    sql = (
+        "SELECT value FROM hydro.river_timeseries "
+        "WHERE hydro . river_timeseries . variable = :value"
+    )
+
+    assert fact_table_name_occurrences(sql) == 2
+    assert fact_table_attribution(sql).has_unaliased_reference is True
+    assert text_fact_columns(sql, "rt") == set()
+    with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
+        fact_table_text_identity_columns(sql, entry=entry)
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
+            render_river_ts_sql(sql, store, entry=entry)
+
+
 @pytest.mark.parametrize("prefix", ["U&", "u&"])
 @pytest.mark.parametrize(
     ("label", "quoted"),
