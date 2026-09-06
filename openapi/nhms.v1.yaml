@@ -2635,6 +2635,192 @@ paths:
           $ref: '#/components/responses/Error'
         5XX:
           $ref: '#/components/responses/Error'
+  /api/v1/precip/{source}/{cycle}/index:
+    get:
+      tags:
+      - precip
+      summary: Precip Index
+      description: Window-complete valid times of one (source, cycle), plus the render
+        contract; existence checks only.
+      operationId: precip_index_api_v1_precip__source___cycle__index_get
+      parameters:
+      - name: source
+        in: path
+        required: true
+        schema:
+          enum:
+          - gfs
+          - ifs
+          type: string
+          title: Source
+      - name: cycle
+        in: path
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: Cycle
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/SuccessEnvelope'
+                - type: object
+                  required:
+                  - data
+                  properties:
+                    data:
+                      $ref: '#/components/schemas/PrecipIndex'
+        '404':
+          description: The requested cycle is not mirrored (or no mirror root is configured),
+            or the past-24h window cannot be assembled from cycles at or before it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - request_id
+                - status
+                - error
+                properties:
+                  request_id:
+                    type: string
+                  status:
+                    type: string
+                    enum:
+                    - error
+                  error:
+                    type: object
+                    required:
+                    - code
+                    - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                        - PRECIP_CYCLE_NOT_MIRRORED
+                        - PRECIP_WINDOW_INCOMPLETE
+                      message:
+                        type: string
+                      details:
+                        type:
+                        - object
+                        - 'null'
+                        additionalProperties: true
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /api/v1/precip/{source}/{cycle}/{valid_time}.png:
+    get:
+      tags:
+      - precip
+      summary: Precip Png
+      description: The past-24h precipitation field at valid_time as an 8-bit palette
+        PNG, rendered once and file-cached.
+      operationId: precip_png_api_v1_precip__source___cycle___valid_time__png_get
+      parameters:
+      - name: source
+        in: path
+        required: true
+        schema:
+          enum:
+          - gfs
+          - ifs
+          type: string
+          title: Source
+      - name: cycle
+        in: path
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: Cycle
+      - name: valid_time
+        in: path
+        required: true
+        schema:
+          type: string
+          format: date-time
+          title: Valid Time
+      responses:
+        '200':
+          description: Past-24h precipitation raster as an 8-bit palette PNG.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+            X-Tile-Cache:
+              schema:
+                type: string
+                enum:
+                - hit
+                - miss
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '304':
+          description: The client's If-None-Match matches the current ETag; the body
+            is not re-read.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            ETag:
+              schema:
+                type: string
+        '404':
+          description: The requested cycle is not mirrored (or no mirror root is configured),
+            or the past-24h window cannot be assembled from cycles at or before it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - request_id
+                - status
+                - error
+                properties:
+                  request_id:
+                    type: string
+                  status:
+                    type: string
+                    enum:
+                    - error
+                  error:
+                    type: object
+                    required:
+                    - code
+                    - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                        - PRECIP_CYCLE_NOT_MIRRORED
+                        - PRECIP_WINDOW_INCOMPLETE
+                      message:
+                        type: string
+                      details:
+                        type:
+                        - object
+                        - 'null'
+                        additionalProperties: true
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /api/v1/runtime/config:
     get:
       tags:
@@ -3235,6 +3421,80 @@ components:
       required:
       - operation
       title: ModelLifecyclePayload
+    PrecipIndex:
+      properties:
+        source:
+          type: string
+          enum:
+          - gfs
+          - ifs
+          title: Source
+        cycle:
+          type: string
+          title: Cycle
+        window_hours:
+          type: integer
+          title: Window Hours
+        unit:
+          type: string
+          title: Unit
+        bounds:
+          items:
+            type: number
+          type: array
+          title: Bounds
+        image_size:
+          items:
+            type: integer
+          type: array
+          title: Image Size
+        legend:
+          items:
+            $ref: '#/components/schemas/PrecipLegendEntry'
+          type: array
+          title: Legend
+        palette_version:
+          type: string
+          title: Palette Version
+        valid_times:
+          items:
+            type: string
+          type: array
+          title: Valid Times
+      type: object
+      required:
+      - source
+      - cycle
+      - window_hours
+      - unit
+      - bounds
+      - image_size
+      - legend
+      - palette_version
+      - valid_times
+      title: PrecipIndex
+    PrecipLegendEntry:
+      properties:
+        min:
+          type: number
+          title: Min
+        max:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Max
+        color:
+          type: string
+          title: Color
+        label:
+          type: string
+          title: Label
+      type: object
+      required:
+      - min
+      - color
+      - label
+      title: PrecipLegendEntry
     ResetRequest:
       properties:
         restore_defaults:
@@ -4107,6 +4367,7 @@ components:
           enum:
           - mvt
           - geojson_compatibility
+          - png
         url_template:
           type:
           - string
@@ -4249,6 +4510,20 @@ components:
           type:
           - boolean
           - 'null'
+        image_url_template:
+          type: string
+        index_url_template:
+          type: string
+        legend:
+          type: array
+          items:
+            $ref: '#/components/schemas/PrecipLegendEntry'
+        window_hours:
+          type: integer
+        unit:
+          type: string
+        palette_version:
+          type: string
     LayerValidTimes:
       type: object
       required:

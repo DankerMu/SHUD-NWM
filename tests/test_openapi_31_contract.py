@@ -24,7 +24,16 @@ from apps.api.routes import pipeline as pipeline_routes
 # census of nullable nodes moves by exactly two. The count is a coverage
 # tripwire on the finalizer, not a freeze on the API surface: the assertions
 # below still prove every one of them is rewritten into a 3.1 type union.
-BASELINE_NULLABLE_COUNT = 113
+#
+# 113 -> 115 with #2010: the two precipitation routes each declare a typed 404
+# whose `error.details` is the same nullable object every typed error response
+# in this API carries (`_typed_error_response`), so the census moves by exactly
+# two -- one per route. `LayerMetadata.legend` and the precip index's own
+# `legend` both `$ref` the single generated `PrecipLegendEntry`, whose
+# `max: float | None` pydantic already emits as a 3.1 `anyOf` union rather than
+# a `nullable` node; the open-ended top class stays nullable (pinned decision 5)
+# and was NOT made non-nullable to keep this number still.
+BASELINE_NULLABLE_COUNT = 115
 COMPOSED_NULLABLE_PATH = ("components", "schemas", "Layer", "properties", "metadata")
 
 # The exact pinned openapi-typescript package the generated-type assertions run

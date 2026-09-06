@@ -23,6 +23,13 @@ NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 NHMS_ENABLE_LIVE_POSTGIS_MVT=true
 NHMS_MVT_FILE_CACHE_DIR=/tmp/nhms-mvt-cache
 
+# #2010: read-only mirror root for the canonical precipitation products the
+# node-22 copyback writes onto the shared NFS tree. Display-side name on purpose:
+# the display_readonly profile refuses to start when the compute-side
+# NHMS_OBJECT_STORE_COPYBACK_ROOT is merely present (apps/api/runtime_mode.py).
+# Commented out here; the real value is configured with the deployment (#2017).
+# NHMS_PRECIP_MIRROR_ROOT=/home/ghdc/nwm/object-store
+
 # Use a real readonly database role. The username here is intentionally ro-suffixed.
 # #1714: the display API ships a default application_name `nhms-display-api` (libpq
 # fallback_application_name) so pg_stat_activity can attribute it. To override,

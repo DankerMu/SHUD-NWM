@@ -331,6 +331,7 @@ def _patch_openapi_schema(schema: dict) -> None:
     _patch_qhh_latest_product_openapi(schema)
     _patch_met_stations_list_openapi(schema)
     _patch_layer_metadata_openapi(schema)
+    _patch_precip_openapi(schema)
     _patch_basin_registry_openapi(schema)
     _patch_river_segment_openapi(schema)
     _patch_model_instance_openapi(schema)
@@ -352,6 +353,7 @@ _patch_station_series_openapi = openapi_patching._patch_station_series_openapi
 _patch_qhh_latest_product_openapi = openapi_patching._patch_qhh_latest_product_openapi
 _patch_met_stations_list_openapi = openapi_patching._patch_met_stations_list_openapi
 _patch_layer_metadata_openapi = openapi_patching._patch_layer_metadata_openapi
+_patch_precip_openapi = openapi_patching._patch_precip_openapi
 _patch_basin_registry_openapi = openapi_patching._patch_basin_registry_openapi
 _patch_river_segment_openapi = openapi_patching._patch_river_segment_openapi
 _patch_model_instance_openapi = openapi_patching._patch_model_instance_openapi

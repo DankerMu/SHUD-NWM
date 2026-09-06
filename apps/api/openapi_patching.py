@@ -1989,7 +1989,7 @@ def _layer_metadata_schema() -> dict:
         "required": ["layer_id", "tile_format", "fallback_available", "release_blocking"],
         "properties": {
             "layer_id": {"type": "string"},
-            "tile_format": {"type": "string", "enum": ["mvt", "geojson_compatibility"]},
+            "tile_format": {"type": "string", "enum": ["mvt", "geojson_compatibility", "png"]},
             "url_template": _nullable({"type": "string"}),
             "tile_url_template": _nullable({"type": "string"}),
             "required_placeholders": string_array,
@@ -2039,5 +2039,37 @@ def _layer_metadata_schema() -> dict:
             "fallback_endpoint": _nullable({"type": "string"}),
             "release_blocking": {"type": "boolean"},
             "production_mvt_readiness_claimed": _nullable({"type": "boolean"}),
+            # #2010, `precip` only: a PNG overlay addressed by two templates
+            # rather than an XYZ tile URL. Absent from every MVT layer's
+            # metadata, hence optional. `legend` shares the one
+            # `PrecipLegendEntry` component the precip index answers with, so
+            # the six colours and thresholds cannot drift between the two
+            # surfaces.
+            "image_url_template": {"type": "string"},
+            "index_url_template": {"type": "string"},
+            "legend": {"type": "array", "items": {"$ref": "#/components/schemas/PrecipLegendEntry"}},
+            "window_hours": {"type": "integer"},
+            "unit": {"type": "string"},
+            "palette_version": {"type": "string"},
         },
     }
+
+
+def _patch_precip_openapi(schema: dict) -> None:
+    """#2010: the precip index answers the shared ``_ok`` envelope.
+
+    FastAPI emits a standalone ``PrecipIndexResponse`` for the declared response
+    model; every other envelope-returning display route publishes
+    ``allOf: [SuccessEnvelope, {data}]`` instead, and the hand-maintained
+    ``openapi/nhms.v1.yaml`` mirrors that one shape. ``PrecipIndex`` and
+    ``PrecipLegendEntry`` stay as generated -- ``LayerMetadata.legend`` refs the
+    latter.
+    """
+    components = schema.setdefault("components", {}).setdefault("schemas", {})
+    if components.pop("PrecipIndexResponse", None) is None:
+        return
+    _set_operation_response_schema(
+        schema,
+        "/api/v1/precip/{source}/{cycle}/index",
+        _success_response_schema({"$ref": "#/components/schemas/PrecipIndex"}),
+    )
