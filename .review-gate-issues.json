@@ -2762,7 +2762,13 @@
     "2012": {
       "ceilingPrs": [],
       "gateEntries": 1,
-      "closed": []
+      "closed": [
+        {
+          "pr": 2101,
+          "outcome": "merged",
+          "rounds": 3
+        }
+      ]
     }
   },
   "1736": {
