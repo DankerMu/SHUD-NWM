@@ -10,12 +10,17 @@ national river network at `--zooms` (unchanged), plus -- for each of `gfs` and
 every valid time of that cycle and one precipitation PNG per valid time. A
 source with no cycle contributes zero requests; a source whose discovery FAILS
 is a different terminal state and is reported as an error.
+
+The whole run is bounded by `--deadline-seconds` as well as by the per-request
+`--timeout`: once the deadline passes the remaining requests are abandoned
+rather than issued, counted as `deadline_skipped`, and the exit code is non-zero.
 """
 
 from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import http.client
 import json
 import math
 import sys
@@ -55,12 +60,21 @@ PRECIP_CYCLE_NOT_MIRRORED = "PRECIP_CYCLE_NOT_MIRRORED"
 # be absorbed as "expected". `mirror_root_unconfigured` is a deployment fault
 # (`apps/api/routes/precip.py::_mirror_root`) and stays a failure.
 EXPECTED_NOT_MIRRORED_REASON = "cycle_not_mirrored"
-
-# Discovery errors are captured per source; these are the ones that mean "this
-# source could not be discovered", not "the process is broken". `HTTPError`,
-# `URLError`, `TimeoutError` and `json.JSONDecodeError` are all covered by
-# `OSError` / `ValueError`. `TypeError` is deliberately NOT here.
-DISCOVERY_ERRORS = (KeyError, ValueError, OSError)
+# Same whitelist treatment, for the same reason: `PRECIP_WINDOW_INCOMPLETE` has
+# TWO producers in the route. `_window_incomplete_error`
+# (`apps/api/routes/precip.py`) is genuine mirror lag and its reason set is
+# exactly these two (`services/precip/errors.py`'s default `missing_slice`, and
+# `services/precip/mirror.py`'s `no_mirrored_cycle_before_window_end`).
+# `_slice_invalid_error` reuses the SAME code for the 14 `grid_definition_*` /
+# `slice_*` reasons of `services/precip/field.py`, every one of which is a data
+# or deployment fault -- a missing `grid.json` would otherwise turn all 57 of a
+# source's PNGs into a silent `rc=0`.
+EXPECTED_WINDOW_INCOMPLETE_REASONS = frozenset({"missing_slice", "no_mirrored_cycle_before_window_end"})
+# Half the 600 s ingest timer period this script is invoked from, so one
+# degraded run cannot span several ticks. `--timeout` bounds ONE socket
+# operation; at 8 workers the 1639-request envelope's per-request worst case is
+# ~102 min, which is why the run needs a total wall-clock bound of its own.
+DEFAULT_DEADLINE_SECONDS = 300.0
 
 
 @dataclass(frozen=True)
@@ -228,7 +242,14 @@ def warm_url(url: str, timeout: float) -> WarmResult:
             error_code=error_code,
             error_reason=error_reason,
         )
-    except (TimeoutError, URLError, OSError) as exc:
+    except (TimeoutError, URLError, OSError, http.client.HTTPException) as exc:
+        # `http.client.HTTPException` is listed for `IncompleteRead`, whose MRO
+        # is `(IncompleteRead, HTTPException, Exception, ...)` -- it is neither
+        # an `OSError` nor a `ValueError`, so the other three do not cover it,
+        # and a truncated response body on the graceful-uvicorn-restart path
+        # would otherwise escape this function. `prewarm` has a backstop for
+        # direct escapees, but only here is the URL of the failed request known
+        # to be reportable as a network fault rather than an unknown one.
         return WarmResult(url=url, status=0, bytes=0, cache=None, error=type(exc).__name__)
 
 
@@ -241,7 +262,7 @@ def classify_png_failure(result: WarmResult) -> str | None:
     """
     if result.status != 404:
         return None
-    if result.error_code == PRECIP_WINDOW_INCOMPLETE:
+    if result.error_code == PRECIP_WINDOW_INCOMPLETE and result.error_reason in EXPECTED_WINDOW_INCOMPLETE_REASONS:
         return "png_window_incomplete"
     if result.error_code == PRECIP_CYCLE_NOT_MIRRORED and result.error_reason == EXPECTED_NOT_MIRRORED_REASON:
         return "png_not_mirrored"
@@ -254,12 +275,17 @@ def prewarm(
     zooms: list[int],
     workers: int,
     timeout: float,
+    deadline_seconds: float = DEFAULT_DEADLINE_SECONDS,
     fetch_json: Callable[[str, float], Any] = fetch_json,
     warm: Callable[[str, float], WarmResult] = warm_url,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[int, dict[str, Any]]:
     if workers < 1 or workers > 32:
         raise ValueError("workers must be between 1 and 32")
-    started = time.monotonic()
+    if deadline_seconds <= 0:
+        raise ValueError("deadline_seconds must be positive")
+    started = clock()
+    deadline_at = started + deadline_seconds
     river_tiles = xyz_tiles(CHINA_BOUNDS, zooms)
     discharge_tiles = xyz_tiles(CHINA_BOUNDS, DISCHARGE_ZOOMS)
 
@@ -268,32 +294,68 @@ def prewarm(
     for source in PREWARM_SOURCES:
         entry = _new_source_entry()
         per_source[source] = entry
+        source_urls: list[str] = []
         try:
             discovery = discover_source(base_url, source, timeout=timeout, fetch_json=fetch_json)
-        except DISCOVERY_ERRORS as exc:
-            # Per-source isolation: one source's discovery hiccup must not stop
-            # the other from being warmed, nor suppress the summary.
+            entry["cycle"] = discovery.cycle
+            entry["valid_times"] = len(discovery.valid_times)
+            if discovery.cycle is not None:
+                out_of_contract = partition_png_valid_times(discovery.cycle, discovery.valid_times)[1]
+                entry["png_out_of_contract"] = len(out_of_contract)
+                source_urls = build_warm_urls(
+                    base_url,
+                    discharge_tiles,
+                    source=source,
+                    cycle=discovery.cycle,
+                    valid_times=discovery.valid_times,
+                )
+        except Exception as exc:
+            # Per-source isolation by exception CLASS, not by an allow-list of
+            # types: one source's discovery hiccup must not stop the other from
+            # being warmed, nor suppress the summary. The previous allow-list
+            # deliberately excluded `TypeError` so a programming bug could not
+            # be absorbed -- but `http.client.IncompleteRead` is neither an
+            # `OSError` nor a `ValueError` either, so the list silently let a
+            # REACHABLE transport fault through as well. A bug is still not
+            # absorbed silently: it is named in `per_source[<s>].error`, forces
+            # a non-zero exit code, and merely stops destroying the other
+            # source's work and the whole summary on its way out. Everything
+            # that can raise for one source is inside this block, including the
+            # horizon partition and URL construction.
             entry["error"] = f"{type(exc).__name__}: {exc}"
             continue
-        entry["cycle"] = discovery.cycle
-        entry["valid_times"] = len(discovery.valid_times)
-        if discovery.cycle is None:
-            continue
-        entry["png_out_of_contract"] = len(partition_png_valid_times(discovery.cycle, discovery.valid_times)[1])
-        for url in build_warm_urls(
-            base_url,
-            discharge_tiles,
-            source=source,
-            cycle=discovery.cycle,
-            valid_times=discovery.valid_times,
-        ):
+        for url in source_urls:
             jobs.append(WarmJob(url=url, source=source, kind="png" if url.endswith(".png") else "discharge"))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mvt-prewarm") as executor:
-        results = list(executor.map(lambda job: warm(job.url, timeout), jobs))
+    def run_job(job: WarmJob) -> WarmResult | None:
+        """One pool task. `None` means "not issued": the deadline had passed.
 
+        The deadline is checked here rather than by cancelling in-flight work,
+        so the pool drains the remainder at once. Any exception out of `warm`
+        becomes a failed result instead of escaping `executor.map`, which
+        re-raises in the caller and would take the entire summary with it.
+        """
+        if clock() >= deadline_at:
+            return None
+        try:
+            return warm(job.url, timeout)
+        except Exception as exc:
+            return WarmResult(url=job.url, status=0, bytes=0, cache=None, error=type(exc).__name__)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mvt-prewarm") as executor:
+        outcomes = list(executor.map(run_job, jobs))
+
+    results: list[WarmResult] = []
     failed: list[WarmResult] = []
-    for job, result in zip(jobs, results, strict=True):
+    deadline_skipped = 0
+    for job, outcome in zip(jobs, outcomes, strict=True):
+        if outcome is None:
+            # Not issued, so not counted as a request and not counted per
+            # source either; `deadline_skipped` is its only accounting home.
+            deadline_skipped += 1
+            continue
+        result = outcome
+        results.append(result)
         ok = 200 <= result.status < 300
         if job.source is not None:
             entry = per_source[job.source]
@@ -326,10 +388,12 @@ def prewarm(
         "cache_hits": sum(result.cache == "hit" for result in results),
         "bytes": sum(result.bytes for result in results),
         "failures": [asdict(result) for result in failed[:20]],
-        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "elapsed_seconds": round(clock() - started, 3),
+        "deadline_seconds": deadline_seconds,
+        "deadline_skipped": deadline_skipped,
         "per_source": per_source,
     }
-    rc = 1 if (failed or discovery_failed or out_of_contract) else 0
+    rc = 1 if (failed or discovery_failed or out_of_contract or deadline_skipped) else 0
     return rc, summary
 
 
@@ -377,7 +441,10 @@ def _parse_error_envelope(exc: HTTPError) -> tuple[str | None, str | None]:
         code = error.get("code")
         details = error.get("details")
         reason = details.get("reason") if isinstance(details, dict) else None
-    except (AttributeError, LookupError, OSError, TypeError, ValueError):
+    except (AttributeError, LookupError, OSError, TypeError, ValueError, http.client.HTTPException):
+        # `http.client.HTTPException` covers a truncated body: `exc.read()` is a
+        # real socket read here, and losing the already-known status code to it
+        # would relabel a classified 404 as a bare transport error.
         return None, None
     code = code if isinstance(code, str) else None
     reason = reason if isinstance(reason, str) else None
@@ -402,7 +469,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--zooms", default="3,4,5", help="river-network zoom set only; discharge is pinned to z3-z4")
     parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=float, default=30.0, help="per-request socket timeout")
+    parser.add_argument(
+        "--deadline-seconds",
+        type=float,
+        default=DEFAULT_DEADLINE_SECONDS,
+        help="total wall-clock budget; once passed, remaining requests are abandoned, not issued",
+    )
     args = parser.parse_args(argv)
     try:
         zooms = sorted({int(value) for value in args.zooms.split(",") if value.strip()})
@@ -413,10 +486,16 @@ def main(argv: list[str] | None = None) -> int:
             zooms=zooms,
             workers=args.workers,
             timeout=args.timeout,
+            deadline_seconds=args.deadline_seconds,
         )
-    except (ValueError, HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
-        # Process-level failures only (bad arguments and the like). A single
-        # source's discovery failure is reported inside the full summary.
+    except Exception as exc:
+        # Process-level failures only (bad arguments and the like), and this is
+        # the ONLY path that returns 2. `prewarm` already isolates every
+        # per-source and per-request failure into the full summary at rc=1, so
+        # catching broadly here does not hide them -- it stops an unforeseen
+        # escapee from exiting 1 through Python's default handler, which would
+        # be indistinguishable from "some requests failed" while printing no
+        # summary at all.
         print(json.dumps({"schema": SUMMARY_SCHEMA, "status": "failed", "error": str(exc)}))
         return 2
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))

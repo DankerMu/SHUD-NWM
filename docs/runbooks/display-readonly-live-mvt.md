@@ -90,11 +90,21 @@ cycle-aware）：
   （`DISCHARGE_ZOOMS`，固定，不随 `--zooms` 变）；
 - 每个时次一张降水 PNG `/api/v1/precip/{source}/{cycle}/{valid_time}.png`。
 
-某源 `default_cycle` 为 `null` 是合法终态（该源零请求）；发现失败是**另一种**终态，
+某源 `default_cycle` 为 `null` 是合法终态（该源零请求）；`default_cycle` 有值但
+`valid-times` 为空（clamp 后覆盖窗口为空）同样是合法终态；发现失败是**另一种**终态，
 按源记 `per_source[<s>].error` 并置非零退出码，另一源照常预热。汇总 schema 为
 `nhms.node27-mvt-prewarm.v2`，含 `requests_total`（只计预热请求，不含发现请求）与
 `elapsed_seconds`。同一 cache key 由跨进程 `flock` single-flight
 保护，多 worker 和预热并发不会重复执行 PostGIS 生成。
+
+整轮预热另有**总墙钟上限** `--deadline-seconds`（默认 300 s，即 ingest timer 周期
+600 s 的一半）：`--timeout` 只管单个 socket 操作，包络放大到 1639 条后 8 并发的最坏
+值可达约 102 min、横跨十个 tick。越界后剩余请求**不再发起**（不是取消在途请求），
+计入汇总的 `deadline_skipped`，退出码非 0；`requests_total` 只计实际发起的请求，故
+`requests_total + deadline_skipped` 才是本轮计划的请求总数。退出码为 0 当且仅当
+`failed_count == 0`、所有 `per_source[<s>].error` 为 `null`、所有
+`png_out_of_contract == 0` 且 `deadline_skipped == 0`；`rc=2` 只留给进程级失败
+（参数错误一类），此时打印的是一行式失败信封而不是完整汇总。
 
 ## node-27 Live Receipt（2026-06-08，本机实测）
 

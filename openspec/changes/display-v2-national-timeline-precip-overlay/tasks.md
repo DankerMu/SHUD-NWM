@@ -484,7 +484,8 @@ Minimal mergeable slice（issue 原文，逐字记录）：「atomic: URL 生成
 
 - 必须钉住的设计点（不许实现者自行裁量）：
   1. **1️⃣ 失败判据看 `error.code`，不看状态码。** 错误信封形状是 `{"request_id":…,"status":"error","error":{"code":…,"message":…,"details":{…}}}`（`apps/api/errors.py:325-333`，`details` 不被脱敏——`_CLIENT_INPUT_KEYS` 只有 `rejected_value`/`rejected_values`，且脱敏只作用于日志行）。`warm_url` 的 `except HTTPError` 必须 `exc.read()` 并解析出 `error.code` 与 `error.details.reason`，记进 `WarmResult.error_code` / `error_reason`；**非 2xx 且信封无法解析 = 失败**（不许静默放行）。只有降水 PNG URL 上的下面两类算「预期、计数、不置退出码」：
-     - 404 `PRECIP_WINDOW_INCOMPLETE` → `png_window_incomplete`
+     - 404 `PRECIP_WINDOW_INCOMPLETE` 且 `error.details.reason ∈ {"missing_slice", "no_mirrored_cycle_before_window_end"}` → `png_window_incomplete`
+       （**round-1 review 补钉**：我原先只对 `PRECIP_CYCLE_NOT_MIRRORED` 做了 reason 收窄，`PRECIP_WINDOW_INCOMPLETE` 直接放行——不对称，而且是同一条失效类。这个码在路由侧有**两个产者**：`apps/api/routes/precip.py:303-314` 的 `_window_incomplete_error` 是真·镜像滞后，reason 恰两个（`services/precip/errors.py:45` 的默认 `missing_slice` / `services/precip/mirror.py:162-166` 的 `no_mirrored_cycle_before_window_end`）；`apps/api/routes/precip.py:317-323` 的 `_slice_invalid_error` 用的是**同一个码**，reason 是 `services/precip/field.py:64-161` 的 14 个 `grid_definition_*` / `slice_*`，全是数据/部署故障。可达性还比想的强：`resolve_window` 只做 `path.is_file()`（`services/precip/mirror.py:169-171`）不看大小，中断的 copyback 留下的 0 字节 NetCDF 能过窗口门，到 `accumulate_24h` 才炸成 `slice_unreadable`。不收窄的话，`grid.json` 缺失会让该源 57 张 PNG 全 404、`failed_count=0`、`rc=0`。）
      - 404 `PRECIP_CYCLE_NOT_MIRRORED` 且 `error.details.reason == "cycle_not_mirrored"` → `png_not_mirrored`（**白名单，不是排除法**：写成 `!= "mirror_root_unconfigured"` 的话，后端将来新增第三种 reason 会被默认吸收成「预期」，把这条失效类推迟而不是消灭。今天该码只有两种 reason，`precip.py:277,292`）
 
      **404 `PRECIP_CYCLE_NOT_MIRRORED` 且 `details.reason == "mirror_root_unconfigured"` 算失败**（`apps/api/routes/precip.py:268-279`：`NHMS_PRECIP_MIRROR_ROOT` 没配时 `_mirror_root()` 也走这个 404）。理由是最省事的写法恰恰最危险：只看状态码的话，一台镜像根没配的机器会每 tick 打印 `rc=0` 加 114 张静默失败的 PNG——那是把部署事故伪装成「降水镜像还没跟上」。其余任何非 2xx 照旧算失败。放宽 404 的原始理由不变：降水镜像天然滞后于流量，若把它一律算失败，cron 日志会常态出现 `rc=1 (non-fatal)`，训练运维忽略这一行。
@@ -516,8 +517,14 @@ Minimal mergeable slice（issue 原文，逐字记录）：「atomic: URL 生成
      - `request_count` → **改名 `requests_total`**，口径见 Resource limits 包（不含发现请求）。
      - `failures` 保留（截前 20 条），条目多出 `error_code` / `error_reason` 两个字段。
      - `main()` 里那条一行式失败信封（`node27_mvt_prewarm.py:154`）的 `schema` 串**同样升 `.v2`**——脚本里有两处该常量，只升一处会让 receipt 同时出现两个版本号。
-     - 新增 `elapsed_seconds`、`per_source`。`per_source[<s>]` 形状固定为 `{cycle, valid_times, discharge_requests, png_ok, png_not_mirrored, png_window_incomplete, png_out_of_contract, png_failed, error}`。
-     - 退出码：`0` 当且仅当 `failed_count == 0` **且**所有 `per_source[s].error` 为 `null` **且**所有 `png_out_of_contract == 0`。
+     - 新增 `elapsed_seconds`、`deadline_seconds`、`deadline_skipped`、`per_source`。`per_source[<s>]` 形状固定为 `{cycle, valid_times, discharge_requests, png_ok, png_not_mirrored, png_window_incomplete, png_out_of_contract, png_failed, error}`。
+     - 退出码：`0` 当且仅当 `failed_count == 0` **且**所有 `per_source[s].error` 为 `null` **且**所有 `png_out_of_contract == 0` **且** `deadline_skipped == 0`。
+
+  9. **9️⃣ 总墙钟 deadline（round-1 review 补钉）。** 包络从 86 放大到 1639 条之后，「prewarm 单独撑爆一个 ingest tick」从不可达变成可达：`--timeout` 只管**单个 socket 操作**，8 并发下的最坏值从 v1 的 `ceil(86/8)×30 = 330 s`（< timer 周期 600 s）变成 `ceil(1639/8)×30 = 6150 s ≈ 102 min`。机制是 v1 继承的，阈值是本单跨过的，所以本单负责。
+     - 新增 `--deadline-seconds`，默认 **300**（timer 周期 600 s 的一半；稳态实测 warm hit median 0.017 s、冷周期约 1 min，留 5 倍余量）。
+     - 越界后**不再发起**剩余请求（不是取消在途请求）：最省事也最可靠的写法是在提交给线程池的那个函数里先判 deadline，越界即直接返回一个「未发起」结果，池会很快把剩余 job 排空。
+     - 未发起的条数进汇总 `deadline_skipped`，且**退出码非 0**——一次跑不完是要吵的信号，不是稳态。
+     - 不动 `scripts/node27_autopipe_cron.sh`（把 prewarm 移出 `flock` 临界区是另一单的事）；`tasks.md` Non-goals 排除的是「`--workers` 默认值与并发策略调整」，总墙钟上限不是并发策略。
 
 - 已知会产生的文档漂移（本单必须一并修，不得留给下一单）：
   - `docs/spec/04_api_design.md:97` 写着 legacy 无源 alias「still issued by scripts/node27_mvt_prewarm.py:69」——本单之后不再成立。
@@ -536,7 +543,16 @@ Minimal mergeable slice（issue 原文，逐字记录）：「atomic: URL 生成
   - AC **镜像根未配置算失败** → 注入 404 `PRECIP_CYCLE_NOT_MIRRORED` + `details.reason == "mirror_root_unconfigured"`，断言它进 `png_failed`、rc != 0（而不是被 `png_not_mirrored` 吸收）；再注入一个非 2xx 且 body 不是 JSON 的响应，断言也算失败。
   - AC **horizon 越界要吵** → `/valid-times` 多返回一个 `cycle+171h` 的时次（共 58 个），断言：该时次的 PNG **不在** URL 集合里、`per_source[s].png_out_of_contract == 1`、rc != 0，**且该时次的 13 张流量瓦片仍在** URL 集合里。
   - AC **半点周期要吵** → `default_cycle` 为 `2026-09-02T12:30:00Z`，断言该源全部 PNG 落入 `png_out_of_contract`、零 PNG URL、rc != 0，而流量瓦片照常预热。
-  - AC **v2 键集自洽** → 一条断言钉住汇总顶层键集**恰等于** `{schema, base_url, zooms, discharge_zooms, river_tile_count, requests_total, failed_count, cache_hits, bytes, failures, elapsed_seconds, per_source}`（一次覆盖 `river_tile_count` / `discharge_zooms` / 改名三项），外加自洽等式 `requests_total == river_tile_count + Σ discharge_requests + Σ(png_ok + png_not_mirrored + png_window_incomplete + png_failed)`；`failures[]` 条目含 `error_code` / `error_reason` 两键。
+  - AC **v2 键集自洽** → 一条断言钉住汇总顶层键集**恰等于** `{schema, base_url, zooms, discharge_zooms, river_tile_count, requests_total, failed_count, cache_hits, bytes, failures, elapsed_seconds, deadline_seconds, deadline_skipped, per_source}`（一次覆盖 `river_tile_count` / `discharge_zooms` / 改名三项 / deadline 两项），外加自洽等式 `requests_total == river_tile_count + Σ discharge_requests + Σ(png_ok + png_not_mirrored + png_window_incomplete + png_failed)`；`failures[]` 条目含 `error_code` / `error_reason` 两键。
+    **该等式只在 `deadline_skipped == 0` 时成立**（fix pass 的语义抉择，采纳并记账于此）：`requests_total` 只计**实际发起**的请求，而 deadline 越界时 `river_tile_count` 仍是**计划量**、其余计数器是发起量。deadline 下改用 `requests_total + deadline_skipped == 计划总数`，两条不变式各有用例。
   - AC **valid_times 元素垃圾** → 列表里混一个 `"not-a-time"`，断言走的是 `per_source[s].error` 非空 + rc != 0 + 汇总照常打印，**不是** `main()` 的一行式失败信封。
+  - AC **两类预期 404 的分桶映射**（round-1 P2）→ **非对称**注入：2 张 `PRECIP_WINDOW_INCOMPLETE` 对 1 张 `PRECIP_CYCLE_NOT_MIRRORED`，断言 `(png_window_incomplete, png_not_mirrored) == (2, 1)`。对称的 1/1 无法证明「各自」——把两个桶名对调后 24 条用例全绿。注入的 reason 必须用后端**真产**的串（`missing_slice`，不是现有用例写的 `slice_missing`）。
+  - AC **损坏侧 reason 算失败**（round-1 P1）→ 注入 404 `PRECIP_WINDOW_INCOMPLETE` + `reason == "slice_unreadable"`（以及一个 `grid_definition_missing`），断言进 `png_failed`、rc != 0，**不**被 `png_window_incomplete` 吸收。
+  - AC **异常分类学不得击穿逐源隔离**（round-1 P2）→ 让 `fetch_json` 抛 `http.client.IncompleteRead`，断言走 `per_source[s].error` + rc != 0 + 汇总照常打印；让 `warm` 抛同一异常，断言汇总照常打印且该请求计入失败。测试替身必须**能**表达「抛异常」这一模式——现有 `_FakeWarmer.__call__` 永远返回 `WarmResult`，结构上豁免了这一整类。
+  - AC **真实 body 走一遍 `_parse_error_envelope`**（round-1 P2）→ 现有 `mirror_root_unconfigured` 用例喂的是已解析好的三元组，「非 JSON body」只在形式上被满足；补一条喂真实 HTML/截断字节的用例。
+  - AC **`base_url` 尾斜杠归一化**（round-1 P3）→ 用 `_BASE_URL + "/"` 跑一遍完整流程（一次覆盖三处 `rstrip("/")`），断言 URL 里不出现 `//api/v1/`。
+  - AC **`elapsed_seconds` / `cache_hits` / `bytes` 不是空断言**（round-1 P2）→ `cache_hits == requests_total`、`bytes == 128 * requests_total`（假 warmer 已按 ok 返回 `bytes=128` / `cache="hit"`）；`elapsed_seconds` 用**单调递增**的假时钟钉一个确定值（注意 `ThreadPoolExecutor` 内部也会读 `time.monotonic`，假钟不能是两值迭代器）。
+  - AC **第三合法终态**（round-1 P2）→ `default_cycle` 有值但 `/valid-times` 返回 `[]`：该源零流量瓦片零 PNG、`per_source[s] == {cycle: <该周期>, valid_times: 0, …, error: null}`、rc == 0。这也是旧用例「无时次 ⇒ 零流量 URL」那半个 oracle 在新签名下的唯一落点。
+  - AC **墙钟 deadline**（round-1 P2）→ 假时钟越过 deadline 后：剩余请求**未发起**（URL 集合里没有它们）、`deadline_skipped > 0`、rc != 0、汇总照常打印。
   - AC 无效 zoom / worker 边界 → 既有用例语义不变，仅随新签名更新。
 - Non-goals：node-27 实跑与 receipt（7.2，归 I15）；后端 cycles/precip 端点（I5/I8）；z≥5 的流量瓦片预热；`--workers` 默认值与并发策略调整；把无参 `/valid-times` 路由改成必填参数。
