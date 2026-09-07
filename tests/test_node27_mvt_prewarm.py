@@ -678,9 +678,11 @@ def test_an_on_grid_valid_time_beyond_the_png_horizon_is_out_of_contract() -> No
     `docs/adr/0003-review-lens-rotation-keep.md`. From `_GFS_CYCLE`
     (`2026-09-02T12:00:00Z`) to `2027-01-01T00:00:00Z` is 2892 h; 2892 = 964 x 3,
     so the instant sits exactly on the 3 h grid, and it is 2724 h past the
-    horizon's last member. A single published entry is also the only shape that
-    reaches the gate at all: as the sole entry it anchors the lead window itself,
-    so `select_lead_window` cannot truncate it away first.
+    horizon's last member. A single published entry is the simplest shape that
+    reaches the gate at all -- as the sole entry it anchors the lead window
+    itself, so `select_lead_window` cannot truncate it away first. It is not the
+    only one: two consecutive far-future instants would reach it too, the first
+    anchoring the window and the second landing inside it.
 
     If the horizon bound is deleted and only the grid test survives, this instant
     becomes "requestable", the PNG goes out, and every assertion below flips.
