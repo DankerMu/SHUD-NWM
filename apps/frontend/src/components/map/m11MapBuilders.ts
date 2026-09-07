@@ -16,10 +16,12 @@ import {
   getM11SelectedSegmentGeometryBudgetStatus,
   m11BasinRiverCollectionBudget,
   m11BasinRiverLayerColor,
+  resolveNationalScaleSource,
   type BasinSegmentRow,
   type LayerState,
   type OverviewBasin,
 } from '@/lib/m11/overviewDataContracts'
+import { toSecondsPrecisionInstant } from '@/lib/m11/instants'
 import type { M11Layer, M11QueryState } from '@/lib/m11/queryState'
 
 /**
@@ -111,17 +113,23 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   const selectedLayer = layers.find((layer) => layer.layerId === state.layer)
   if (!selectedLayer?.available) return null
 
-  const selectedValidTime = normalizeIso(state.validTime)
-  const validTime =
-    selectedValidTime && selectedLayer.validTimes.includes(selectedValidTime) ? selectedValidTime : selectedLayer.currentValidTime
+  // 时次校验一律对活动 `(source, cycle)` 的列表（`LayerState.validTimes`，由 store 按活动周期填充），
+  // 且按秒精度比对：state 里是毫秒形 `…T06:00:00.000Z`，API 列表是 `…T06:00:00Z`。
+  const selectedValidTime = toSecondsPrecisionInstant(state.validTime)
+  const inActiveList =
+    selectedValidTime !== null &&
+    selectedLayer.validTimes.some((candidate) => toSecondsPrecisionInstant(candidate) === selectedValidTime)
+  const validTime = inActiveList ? selectedValidTime : toSecondsPrecisionInstant(selectedLayer.currentValidTime)
   if (!validTime) return null
 
   const metadata = selectedLayer.metadata
-  if (!isMvtLayerMetadata(metadata) || metadata.release_blocking || !metadataHasValidTime(metadata, validTime)) {
-    return null
-  }
+  if (!isMvtLayerMetadata(metadata) || metadata.release_blocking) return null
 
   const national = isNationalOverlayMetadata(metadata)
+  // 全国模板的时次由上面的活动列表把关：目录里的 `metadata.valid_times` 只带**默认周期**的列表，
+  // 用 metadataHasValidTime 校验会让任何非默认周期恒得到 overlay=null（本 issue 的 Current behavior）。
+  if (!national && !metadataHasValidTime(metadata, validTime)) return null
+
   const runId = selectedLayer.freshness.runId
   if (!national) {
     if (!runId) return null
@@ -135,11 +143,26 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
     }
   }
 
+  // 全国 source/cycle 模板：`best` 归一为 `gfs`（全国尺度），`compare` 没有对应瓦片路由 → 不注册。
+  const nationalSource = national ? resolveNationalScaleSource(state.source) : null
+  const nationalCycle = national ? resolveNationalOverlayCycle(state, metadata) : null
+  if (national) {
+    if (templateNeeds(metadata, 'source') && nationalSource !== 'gfs' && nationalSource !== 'ifs') return null
+    // `default_cycle` 为空即 fail-closed：无论 URL 上有没有 cycle 都不注册叠加层，
+    // 也就不会有任何含字面 `{cycle}` 或自造周期的瓦片请求。
+    if (templateNeeds(metadata, 'cycle') && !nationalCycle) return null
+  }
+
   const sourceId = `m11-${state.layer}-source`
   const layerId = `m11-${state.layer}-line`
   const variable = 'q_down'
   const replacements: Record<string, string> = national
-    ? { valid_time: validTime, variable }
+    ? {
+        valid_time: validTime,
+        variable,
+        ...(nationalSource ? { source: nationalSource } : {}),
+        ...(nationalCycle ? { cycle: nationalCycle } : {}),
+      }
     : { run_id: runId as string, valid_time: validTime, variable }
 
   return {
@@ -148,6 +171,8 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
     sourceKey: m11VectorSourceKey({
       layerId: selectedLayer.layerId,
       runId: national ? null : runId,
+      source: national ? nationalSource : null,
+      cycle: national ? nationalCycle : null,
       validTime,
       variable,
       metadata,
@@ -170,15 +195,25 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
   }
 }
 
+/**
+ * MapLibre source 身份：必须随 source / cycle / validTime **任一**变化而变化，否则切周期时
+ * MapLibre 会复用旧 source，地图静默显示上一周期的数据（spec mvt-tile-contract 的 fixture
+ * scenario「the `m11VectorSourceKey` case MUST assert a key that distinguishes (source, cycle,
+ * valid_time) rather than run_id」）。`run_id` 保留给流域详情的单 run 路径，全国路径传 null。
+ */
 export function m11VectorSourceKey({
   layerId,
   runId,
+  source,
+  cycle,
   validTime,
   variable,
   metadata,
 }: {
   layerId: string
   runId: string | null
+  source?: string | null
+  cycle?: string | null
   validTime: string
   variable: string
   metadata: NonNullable<LayerState['metadata']>
@@ -188,15 +223,36 @@ export function m11VectorSourceKey({
     cache_etag: metadata.cache_etag ?? null,
     cache_version: metadata.cache_version ?? null,
     canonical_route_layer_id: metadata.canonical_route_layer_id ?? metadata.layer_id,
+    cycle: cycle ?? null,
     encoder_version: metadata.encoder_version ?? null,
     layer_id: layerId,
     maplibre_source_layer: metadata.maplibre_source_layer,
     run_id: runId,
     schema_version: metadata.schema_version ?? metadata.property_schema_version ?? null,
+    source: source ?? null,
     source_refs: metadata.source_refs ?? null,
     valid_time: validTime,
     variable,
   })
+}
+
+/** 模板/必需占位符里是否真的要求该占位符（旧 run-agnostic alias 模板不含 source/cycle）。 */
+function templateNeeds(metadata: MvtLayerMetadata, placeholder: 'source' | 'cycle'): boolean {
+  return (
+    metadata.url_template.includes(`{${placeholder}}`) ||
+    (Array.isArray(metadata.required_placeholders) && metadata.required_placeholders.includes(placeholder))
+  )
+}
+
+/**
+ * 有效周期 = `state.cycle ?? metadata.default_cycle`，秒精度拼写。
+ * `metadata.default_cycle` 为空时一律返回 null——目录没能证明任何周期可渲染，
+ * 客户端不得自造周期（spec map-layer-timeline-controls「Cycle selector is fail-closed」）。
+ */
+function resolveNationalOverlayCycle(state: M11QueryState, metadata: MvtLayerMetadata): string | null {
+  const defaultCycle = toSecondsPrecisionInstant(metadata.default_cycle ?? null)
+  if (!defaultCycle) return null
+  return toSecondsPrecisionInstant(state.cycle) ?? defaultCycle
 }
 
 export function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasinIds: string[] | undefined): BasinFeatureCollection {
@@ -451,10 +507,4 @@ function selectedSegmentUnavailableReason(reason: string | null | undefined) {
 
 function serializedByteLength(value: unknown): number {
   return new TextEncoder().encode(JSON.stringify(value)).length
-}
-
-function normalizeIso(value: string | null | undefined) {
-  if (!value) return null
-  const timestamp = Date.parse(value)
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
 }

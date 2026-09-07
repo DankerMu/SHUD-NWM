@@ -86,6 +86,8 @@
     "apps/api/openapi_patching.py",
     "tests/test_api_contract.py",
     "tests/test_hydro_display_mvt_scaling.py",
+    "apps/frontend/src/lib/m11/overviewDataContracts.ts",
+    "apps/frontend/src/stores/overviewData.ts",
     "tests/test_precip_overlay.py"
   ]
 }

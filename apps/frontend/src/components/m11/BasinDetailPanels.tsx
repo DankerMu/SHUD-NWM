@@ -17,7 +17,7 @@ import {
   type M11QueryState,
 } from '@/lib/m11/queryState'
 import { staticBasinBboxIndex, withStaticBasinBboxes } from '@/lib/m11/staticBasinFallback'
-import { resolveM11ValidTimeCorrection } from '@/pages/m11/M11Controls'
+import { resolveM11NationalValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { basinSnapshotMatchesQuery, basinSnapshotMetadataMatchesQuery, useOverviewDataStore } from '@/stores/overviewData'
@@ -57,6 +57,9 @@ export function useBasinDetailMode({
       validTime: state.validTime,
       layer: state.layer,
       metStations: false,
+      // precip 是纯渲染开关，不参与取数身份：带进 store 的 query 会让降水开关整轮重载
+      // overview（并作废在途的 cycles / valid-times / precip index enrichment）。
+      precip: defaultM11QueryState.precip,
       basemap: defaultM11QueryState.basemap,
       basinVersionId: state.basinVersionId,
       riverNetworkVersionId: state.riverNetworkVersionId,
@@ -89,7 +92,11 @@ export function useBasinDetailMode({
 
   useEffect(() => {
     if (loading || !basinMetadataMatchesQuery) return
-    const correctedValidTime = resolveM11ValidTimeCorrection(state, metadataLayers, derivedTimeline)
+    // 流域详情的全国 discharge 叠加层同样会落进「活动 (source, cycle) 未定」态（非默认对且共享
+    // 缓存没有该对的列表 → 终态 error），且此处**永不**再取 per-cycle 列表，未定即终态。裸
+    // `resolveM11ValidTimeCorrection` 会把这种空列表当成「该图层没有时次」而清空 validTime，
+    // 深链里的 validTime 就此永久丢失；必须走与全国总览同一个闸门。
+    const correctedValidTime = resolveM11NationalValidTimeCorrection(state, metadataLayers, derivedTimeline)
     if (correctedValidTime === undefined) return
     onQueryChange({ validTime: correctedValidTime })
   }, [basinMetadataMatchesQuery, derivedTimeline, onQueryChange, loading, metadataLayers, state])

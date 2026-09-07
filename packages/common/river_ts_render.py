@@ -541,6 +541,16 @@ def outer_predicates(sql: str) -> str:
 # the module's ASCII unquoted-token subset.
 _UNQUOTED_IDENTIFIER_FLAGS = re.IGNORECASE | re.ASCII
 
+# The text-identity views have already passed through ``outer_predicates`` and
+# ``_blank_non_code``. Comments are consequently scanner-normalised to ASCII
+# whitespace here; the matcher deliberately does not parse comment syntax.
+_QUALIFIED_REFERENCE_SEPARATOR = r"[ \t\r\n\f]*\.[ \t\r\n\f]*"
+# A multipart reference must not be truncated to its final alias/column pair.
+# The whitespace arm starts at the BEGINNING of its run, so a dot cannot hide
+# behind one or several whitespace characters; the zero-whitespace arm retains
+# the bare token boundary that the direct-dot matcher had.
+_QUALIFIED_REFERENCE_LEFT_BOUNDARY = r"(?:^|(?<![. \t\r\n\f])[ \t\r\n\f]+|(?<![.\w \t\r\n\f]))"
+
 
 _TEXT_IDENTITY_COMPARISON_OPERATOR = r"(=|<>|!=|(?i:\bIN\b|\bLIKE\b|=\s*ANY))"
 
@@ -598,7 +608,8 @@ def _text_identity_columns_for_references(
     for column in TEXT_IDENTITY_COLUMNS:
         if any(
             re.search(
-                rf"\b{re.escape(alias)}\.{re.escape(column)}\b",
+                rf"{_QUALIFIED_REFERENCE_LEFT_BOUNDARY}{re.escape(alias)}"
+                rf"{_QUALIFIED_REFERENCE_SEPARATOR}{re.escape(column)}\b",
                 outer,
                 flags=_UNQUOTED_IDENTIFIER_FLAGS,
             )
@@ -608,13 +619,15 @@ def _text_identity_columns_for_references(
             found.add(column)
         if any(
             re.search(
-                rf"\b(?i:{re.escape(alias)})\.\"{re.escape(column)}\"",
+                rf"{_QUALIFIED_REFERENCE_LEFT_BOUNDARY}(?i:{re.escape(alias)})"
+                rf"{_QUALIFIED_REFERENCE_SEPARATOR}\"{re.escape(column)}\"",
                 quoted_references,
                 flags=re.ASCII,
             )
             is not None
             or re.search(
-                rf"\"{re.escape(alias)}\"\.(?:(?i:{re.escape(column)})\b|\"{re.escape(column)}\")",
+                rf"{_QUALIFIED_REFERENCE_LEFT_BOUNDARY}\"{re.escape(alias)}\""
+                rf"{_QUALIFIED_REFERENCE_SEPARATOR}(?:(?i:{re.escape(column)})\b|\"{re.escape(column)}\")",
                 quoted_references,
                 flags=re.ASCII,
             )
