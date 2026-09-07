@@ -659,6 +659,56 @@ def test_out_of_horizon_valid_time_is_reported_and_its_discharge_tiles_still_war
     assert rc != 0
 
 
+def test_an_on_grid_valid_time_beyond_the_png_horizon_is_out_of_contract() -> None:
+    """The SECOND conjunct of the PNG request-shape gate, asserted on its own.
+
+    `partition_png_valid_times` gates on `valid_time in horizon_valid_times(cycle)`,
+    a single membership test that folds two independent conditions together: ON
+    the 3 h grid measured from the cycle, AND inside the +168 h forecast horizon.
+    Every other case in this file exercises only the grid conjunct -- the
+    `cycle+4h` outlier above is off the grid, the half-hour case fails on the
+    cycle instead -- so dropping the horizon bound entirely left the whole file
+    green (measured, round 5 PROSE-1). This case is the horizon conjunct alone:
+    on the grid, far outside the horizon.
+
+    The arithmetic is stated as literals rather than recomputed, because an
+    expectation derived by calling `horizon_valid_times` (or by reading
+    `PRECIP_FORECAST_HORIZON_HOURS` / `PRECIP_STEP_HOURS`) would be the code's
+    own model answering for the code -- round-3 B-1's defect, written up in
+    `docs/adr/0003-review-lens-rotation-keep.md`. From `_GFS_CYCLE`
+    (`2026-09-02T12:00:00Z`) to `2027-01-01T00:00:00Z` is 2892 h; 2892 = 964 x 3,
+    so the instant sits exactly on the 3 h grid, and it is 2724 h past the
+    horizon's last member. A single published entry is also the only shape that
+    reaches the gate at all: as the sole entry it anchors the lead window itself,
+    so `select_lead_window` cannot truncate it away first.
+
+    If the horizon bound is deleted and only the grid test survives, this instant
+    becomes "requestable", the PNG goes out, and every assertion below flips.
+    """
+    far_future = "2027-01-01T00:00:00Z"
+    offset = datetime.fromisoformat(far_future) - datetime.fromisoformat(_GFS_CYCLE)
+    assert offset == timedelta(hours=2892), "the fixture must stay on the stated offset"
+    assert 2892 % 3 == 0, "the fixture must stay ON the 3 h grid, or it proves the wrong conjunct"
+
+    rc, summary, warmer, _ = _run(_plan(gfs_valid_times=[far_future]))
+
+    assert _png_urls("gfs", _GFS_CYCLE, [far_future]).isdisjoint(warmer.urls)
+    assert not [url for url in warmer.urls if url.startswith(f"{_BASE_URL}/api/v1/precip/gfs/")]
+    # The discharge route carries no such gate, so its tiles are still warmed.
+    assert _discharge_urls("gfs", _GFS_CYCLE, [far_future]) <= set(warmer.urls)
+    gfs = summary["per_source"]["gfs"]
+    assert gfs["png_out_of_contract"] == 1
+    assert gfs["png_ok"] == 0
+    assert gfs["valid_times_available"] == 1
+    assert gfs["valid_times_warmed"] == 1
+    assert gfs["discharge_requests"] == _DISCHARGE_TILE_COUNT
+    # Out of contract is a reported state, not a discovery error and not a
+    # request failure -- but it does have to be noisy.
+    assert gfs["error"] is None
+    assert summary["failed_count"] == 0
+    assert rc != 0
+
+
 def test_half_hour_cycle_puts_every_png_out_of_contract_but_still_warms_tiles() -> None:
     half_hour = "2026-09-02T12:30:00Z"
     gfs_times = _steps(half_hour, _VALID_TIME_COUNT)
@@ -746,10 +796,13 @@ def test_a_clamped_first_valid_time_is_warmed_from_that_entry_not_from_the_cycle
     # PNG horizon -- cycle+15h .. cycle+27h -- so every one of them gets a PNG.
     # Being on the grid is NOT on its own sufficient: `horizon_valid_times`
     # stops at cycle+168h (`services/precip/mirror.py:106-115`), so a grid
-    # instant beyond that is out of contract. The `single-far-future-entry`
-    # parametrization below is exactly that case, and it lands in
-    # `png_out_of_contract` at rc=1. What is pinned here is this window, not the
-    # general implication. Even the grid claim holds only while
+    # instant beyond that is out of contract. That branch is ASSERTED by
+    # `test_an_on_grid_valid_time_beyond_the_png_horizon_is_out_of_contract`
+    # above -- and only there. The `single-far-future-entry` parametrization
+    # below feeds the same input but asserts the exit-code RULE
+    # (`rc == (1 if png_out_of_contract else 0)`), never the counter's value, so
+    # it stays green with the horizon bound removed. What is pinned here is this
+    # window, not the general implication. Even the grid claim holds only while
     # `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`
     # (`services/tiles/mvt.py:122`) equals `PRECIP_STEP_HOURS`
     # (`services/precip/constants.py:28`) -- two independently declared 3s, with
@@ -852,16 +905,26 @@ def test_the_summary_reports_the_effective_worker_count_not_the_module_default()
     record round-3 B-2 closed on a value production never uses. Membership in
     `_SUMMARY_V2_KEYS` proves the key exists; only this proves its value.
 
-    Two distinct counts, both different from `DEFAULT_WORKERS`, so neither the
-    constant nor any single hardcoded literal can satisfy it.
+    The discriminating mechanism is that the two counts differ from EACH OTHER,
+    not that either differs from `DEFAULT_WORKERS`: any implementation that
+    reports a constant `c` yields `(c, c)`, and `(c, c) != (4, 1)` because
+    `4 != 1`. So the pair assertion below kills `"workers": DEFAULT_WORKERS`
+    whatever the constant happens to be -- including if it were 4 or 1.
     """
     _, four, _, _ = _run(_plan(), workers=4)
     _, one, _, _ = _run(_plan(), workers=1)
 
     assert (four["workers"], one["workers"]) == (4, 1)
+    # Fixture hygiene, NOT a second oracle: the assertion above already carries
+    # the whole discriminating power, by the arithmetic in the docstring, and it
+    # keeps it even at DEFAULT_WORKERS == 4. This line exists only to tell the
+    # maintainer that the fixture counts have collided with the production
+    # default, which makes the case harder to read than it needs to be. Nothing
+    # about the code under test is wrong when it fires.
     assert prewarm.DEFAULT_WORKERS not in {4, 1}, (
-        f"DEFAULT_WORKERS drifted to {prewarm.DEFAULT_WORKERS}; pick fixture counts that still "
-        "discriminate the parameter from the constant"
+        f"fixture hygiene only: DEFAULT_WORKERS drifted to {prewarm.DEFAULT_WORKERS}, colliding with a "
+        "fixture count. The assertion above still discriminates the parameter from the constant; pick "
+        "two other distinct counts so the case reads unambiguously"
     )
 
 

@@ -2336,7 +2336,22 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # core-smoke fallback never arms for it; without this rule a
         # wrapper-only PR selects nothing and CI degrades to --collect-only.
         "scripts/node27_autopipe_cron.sh",
-        ("tests/test_node27_autopipeline_preflight.py",),
+        (
+            "tests/test_node27_autopipeline_preflight.py",
+            # #2013: a SECOND reader of the same wrapper, added by the prewarm
+            # suite -- it parses the `${AUTOPIPE_MVT_PREWARM_WORKERS:-8}` and
+            # `${AUTOPIPE_MVT_PREWARM_ZOOMS:-3,4,5}` fallbacks and asserts they
+            # equal the module defaults, which is the only in-repo guard against
+            # cron/module drift. The preflight suite carries no such assertion,
+            # so before this entry a wrapper-only PR flipping `:-8` to `:-2`
+            # merged green. Same discipline as the comment below: targets track
+            # real references found by `grep -rln 'node27_autopipe_cron.sh'
+            # tests/`, filtered to suites that actually READ the file. That grep
+            # has two further hits, both correctly out: one names the wrapper in
+            # a docstring only, the other is this row's own complement pin in
+            # tests/test_select_ci_tests.py.
+            "tests/test_node27_mvt_prewarm.py",
+        ),
     ),
     # Shell wrappers with committed guard suites (#1138). Like the autopipe
     # cron rule above, none of these are backend python paths, so without an
@@ -2426,6 +2441,22 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_retention.py",
+        ),
+    ),
+    PathTestRule(
+        # #2013: same shape as the retention `.timer` row above. A timer-only
+        # diff matched NOTHING before this rule -- `infra/**` is not a backend
+        # python path and `_is_backend_shell_path` is scoped to `scripts/**.sh`,
+        # so not even the core-smoke fallback armed and CI degraded to
+        # --collect-only. Both targets really read this file: the preflight
+        # suite asserts `OnUnitActiveSec=10min` is present, and the prewarm
+        # suite parses the same directive into seconds and pins the budget
+        # inequality `DEFAULT_DEADLINE_SECONDS + DEFAULT_TIMEOUT_SECONDS <=
+        # tick`, so shortening the tick must red here rather than after merge.
+        "infra/systemd/nhms-node27-autopipe.timer",
+        (
+            "tests/test_node27_autopipeline_preflight.py",
+            "tests/test_node27_mvt_prewarm.py",
         ),
     ),
     PathTestRule(

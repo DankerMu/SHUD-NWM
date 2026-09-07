@@ -183,6 +183,11 @@ This requirement is deliberately hosted in `precipitation-raster-overlay` (rathe
 - **THEN** no precipitation PNG request is issued for that valid time, it is counted per source, and the exit code is non-zero
 - **AND** the discharge tiles for that same valid time are still warmed, because the discharge tile route carries no such gate
 
+#### Scenario: A valid time on the 3-hour grid but beyond the forecast horizon is also out of contract
+- **WHEN** the lead window for a source's cycle contains a valid time that IS an exact 3-hour step from a whole-hour cycle but lies beyond the +168-hour precipitation forecast horizon, which the lead window can admit whenever the source's published list is clamped that far out
+- **THEN** it is treated exactly as the previous scenario's out-of-contract valid times: no precipitation PNG request is issued for it, it is counted per source, the discharge tiles for that same valid time are still warmed, and the exit code is non-zero
+- **AND** being on the 3-hour grid is NOT on its own sufficient for a PNG request — the grid has no upper bound and the horizon does, so the request-shape gate MUST check both conditions and MUST NOT be satisfied by the grid condition alone
+
 #### Scenario: The run is bounded by a wall-clock deadline, not only by per-request timeouts
 - **WHEN** the elapsed wall-clock time passes the run's deadline while requests remain
 - **THEN** no further request is issued, and the abandoned count appears in the run summary

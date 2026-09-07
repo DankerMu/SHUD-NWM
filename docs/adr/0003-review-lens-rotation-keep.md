@@ -3630,12 +3630,80 @@ to actually do:
 - **A hand-picked file list is not evidence.** The round-4 fix pass reported
   "163 + 54 + 96 passed" against four suites it chose itself, and could not see
   that it had broken the closure guard, because the lane appends the selector
-  meta-guard suite unconditionally for any changed `tests/**` file
-  (`scripts/select_ci_tests.py:3266-3270`) and that was the one suite the list
+  meta-guard suite unconditionally for any changed `tests/**.py` suite
+  (`scripts/select_ci_tests.py:3304-3305`, reached through the
+  `path.startswith("tests/") and path.endswith(".py")` gate at `:3245`; a
+  non-`.py` change under `tests/` does NOT arm it — measured:
+  `tests/fixtures/data.json` alone selects nothing) and that was the one suite the list
   omitted. Reproduce the lane's own selection over the PR diff and run exactly
   that set. This is now an explicit Evidence Floor line in
   `openspec/changes/display-v2-national-timeline-precip-overlay/tasks.md`
   (group 7).
+
+Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
+a maintainer override.
+
+## Revisit 2026-09-07 (post PR #2117 round 5, same issue #2013) — routing is not only where a guard forces it
+
+Fourth gate entry on the same PR, and its last: round 5 hit the 5-round ceiling
+(`review_gate.py:343` refuses a 6th), so the terminal record is
+`.workplans/pr-2117/review/round-ceiling-decision.md` rather than another retro.
+Round 5 was not clean — 7 candidates adjudicated: 6 CONFIRMED (5 FIX_NOW, 1
+DEFER) and 1 REFUTED, highest severity major — and two of its three failure
+classes repeat round 4's:
+`selector-closure-drift` and `oracle-does-not-bite`. The third was
+`citation-drift`.
+
+The honest reading of the repeat: the round-4 rule above was applied, but only to
+the single edge that a mechanical guard forced. The closure guard over
+`GUARDED_MODULE_CLOSURES` (`tests/test_select_ci_tests.py`) covers Python
+importer edges, so the
+`services/tiles/mvt.py` -> prewarm-suite edge got routed. The same PR introduced
+three sibling edges that no mechanical guard covers, and all three were left
+unrouted:
+
+- a **shell-script reader** — the prewarm suite parses
+  `scripts/node27_autopipe_cron.sh` for its `${AUTOPIPE_MVT_PREWARM_*:-…}`
+  fallbacks, while the selector row for that wrapper named only the preflight
+  suite, which has no such assertion. A PR flipping the cron default would have
+  merged green against a fixture that declares it must red (ROUTE-A, P1);
+- a **systemd-unit reader** — the same suite parses
+  `infra/systemd/nhms-node27-autopipe.timer` for `OnUnitActiveSec` and pins the
+  budget inequality against it. `infra/**` is neither a backend Python path nor a
+  `scripts/**.sh` path, so a timer-only diff matched nothing, armed no fallback,
+  and degraded to a zero-assertion collect-only smoke (ROUTE-B, P3);
+- a **cross-package import** — the script imports `services.precip.mirror`, whose
+  `PRECIP_STEP_HOURS` is a discriminating input. Deferred to a tracked issue
+  rather than fixed here (ROUTE-C, P3), because nothing written in the repo
+  demands that edge today and the one-hop closure bound is explicit policy.
+
+### The fourth generalization (cumulative with the three above)
+
+**When a change introduces a NEW reader of any file, every such reader must be
+routed to that file — and the absence of a mechanical closure guard for that file
+type is not an exemption, it is the reason the check has to be manual and
+explicit.** Where a guard exists it will fail loudly and do the work for you;
+where none exists, nothing will say anything, which is exactly the condition
+under which a missing edge survives review. The concrete discipline the repo
+already documents for this is the grep-derived target list at
+`scripts/select_ci_tests.py` (the "targets were derived from
+`grep -rln '<script>.sh' tests/` and must track real references" comment on the
+shell-wrapper block); read it as applying to shell scripts, systemd units,
+fixtures and any other non-Python readable, not just to `.sh`.
+
+Round 5's other confirmed class is the same `oracle-does-not-bite` shape one
+level finer. `partition_png_valid_times` gates on a single membership test that
+folds two conjuncts together — on the 3 h grid AND inside the +168 h horizon —
+and only the grid conjunct was asserted anywhere. The case the fixture named as
+the horizon guard ends in `assert rc == (1 if png_out_of_contract else 0)`, which
+pins the exit-code RULE and is satisfied for any value of the counter, so it is
+input-independent for the property it was credited with. Verified by executed
+mutation: with the horizon bound removed, the whole 51-test file stayed green,
+against a live-patch control that reds 25. The spec had the matching hole — it
+enumerated two of the three out-of-contract triggers — which is why five rounds
+of readers did not notice. **A missing spec scenario and a missing assertion are
+the same defect seen from two sides; when an oracle is found not to bite, check
+whether the requirement it serves was ever written down.**
 
 Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
 a maintainer override.

@@ -283,6 +283,25 @@ def test_node27_retention_service_row_selects_exactly_the_retention_suite() -> N
     ]
 
 
+def test_node27_autopipe_timer_row_selects_both_of_its_readers() -> None:
+    """#2013 — a timer-only diff used to select NOTHING at all.
+
+    `infra/**` is not a backend python path and `_is_backend_shell_path` is
+    scoped to `scripts/**.sh`, so without an explicit row this path matched no
+    rule and armed no fallback: CI degraded to a zero-assertion `--collect-only`
+    smoke. Both targets really read the file — the preflight suite asserts the
+    `OnUnitActiveSec=10min` directive is present, and the prewarm suite parses
+    the same directive into seconds and pins prewarm's budget against it — so
+    exact equality, not a subset: dropping either reader must red here.
+    """
+    assert Path("infra/systemd/nhms-node27-autopipe.timer").exists()
+
+    assert select_tests(["infra/systemd/nhms-node27-autopipe.timer"], repo_root=Path(".")) == [
+        "tests/test_node27_autopipeline_preflight.py",
+        "tests/test_node27_mvt_prewarm.py",
+    ]
+
+
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
     consumers = (
         "tests/test_node27_cold_tablespace_identity.py",
@@ -1069,11 +1088,21 @@ def test_select_tests_maps_autopipe_cron_wrapper_without_core_smoke_fallback() -
     # explicit rule a wrapper-only PR selected nothing at all and CI degraded to
     # --collect-only, even though the wrapper is covered by real assertions in
     # tests/test_node27_autopipeline_preflight.py.
+    #
+    # #2013 widened the row to both real readers. The preflight suite asserts the
+    # wrapper's structure; only tests/test_node27_mvt_prewarm.py parses the
+    # `${AUTOPIPE_MVT_PREWARM_*:-…}` fallbacks and compares them against the
+    # module defaults, so a wrapper-only PR that flips one of those defaults is
+    # caught by the second target alone. Exact equality, not `in`: dropping
+    # either target must red here.
     assert Path("scripts/node27_autopipe_cron.sh").exists()
 
     selected = select_tests(["scripts/node27_autopipe_cron.sh"], repo_root=Path("."))
 
-    assert selected == ["tests/test_node27_autopipeline_preflight.py"]
+    assert selected == [
+        "tests/test_node27_autopipeline_preflight.py",
+        "tests/test_node27_mvt_prewarm.py",
+    ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
