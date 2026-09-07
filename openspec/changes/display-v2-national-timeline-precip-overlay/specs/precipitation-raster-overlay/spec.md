@@ -129,12 +129,32 @@ The display API SHALL expose `GET /api/v1/precip/{source}/{cycle}/index` and `GE
 - **THEN** the cache file is treated as a miss and rewritten by a complete render, and the failed slice maps to HTTP 404 `PRECIP_WINDOW_INCOMPLETE` with `details.reason == "slice_unreadable"`
 
 ### Requirement: Prewarm envelope is per-source, cycle-aware, and bounded
-This requirement is deliberately hosted in `precipitation-raster-overlay` (rather than `national-river-density`) because the precipitation PNG set is the new surface prewarm gains; it nevertheless governs the whole prewarm envelope, including the discharge-tile and river-network parts. `scripts/node27_mvt_prewarm.py` SHALL discover the newest cycle per source from `GET /api/v1/layers/discharge/cycles?source=<source>` for each of `gfs` and `ifs`, and warm exactly this envelope: for each source with a non-empty cycle list, the z3–z4 China tiles of `/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf` for every valid time of that source's newest cycle, plus one `/api/v1/precip/{source}/{cycle}/{valid_time}.png` per valid time of that cycle; the national river-network prewarm stays z3–z5 and unchanged. The emitted request count and elapsed time MUST be part of the run summary and the deployment receipt. The script MUST NOT fabricate a cycle: an empty `cycles[]` for a source means that source contributes zero requests.
+This requirement is deliberately hosted in `precipitation-raster-overlay` (rather than `national-river-density`) because the precipitation PNG set is the new surface prewarm gains; it nevertheless governs the whole prewarm envelope, including the discharge-tile and river-network parts. `scripts/node27_mvt_prewarm.py` SHALL discover the newest cycle per source from `GET /api/v1/layers/discharge/cycles?source=<source>` for each of `gfs` and `ifs`, and warm exactly this envelope: for each source with a non-empty cycle list, the z3–z4 China tiles of `/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf` for every valid time of that source's newest cycle **that falls within a fixed lead window measured from the earliest valid time that cycle publishes**, plus one `/api/v1/precip/{source}/{cycle}/{valid_time}.png` per valid time in that same window; the national river-network prewarm stays z3–z5 and unchanged. The envelope is bounded by a lead window rather than by the whole published timeline because the whole timeline does not fit: the run is the last of three serial phases inside the ingest tick's lock (`scripts/node27_autopipe_cron.sh`), and the measured cold cost of one national discharge tile is of the order of ten seconds, so "warm every valid time" and "finish inside one tick" cannot both hold. Two things SHALL be asserted against the constants they constrain rather than stated in prose: that the run's deadline plus one per-request timeout is no larger than the ingest tick interval, and that the PLANNED size of the envelope — derived end to end from the published valid-time stride, the lead window, the zoom sets and the source list as the production path derives it — is the expected request count, so that any change to the envelope must be re-argued. Whether that envelope FITS inside the deadline is an UNVERIFIED estimate with no oracle in this repository; it SHALL be recorded as such in prose, and only a node-27 run receipt settles it. The window is anchored on the first valid time the cycle publishes — which is what the frontend opens on (`map-layer-timeline-controls`'s "lead 0") and which equals the cycle instant only when coverage is not clamped — rather than on the cycle instant or the wall clock; a non-empty published list therefore always warms at least its first entry. The emitted request count, elapsed time and EFFECTIVE worker count MUST be part of the run summary and the deployment receipt — the worker count because the deployed invocation always overrides it, so it is the one input of the cost estimate that no test can observe. The script MUST NOT fabricate a cycle: an empty `cycles[]` for a source means that source contributes zero requests. An empty result and a failed discovery are distinct terminal states: a source whose discovery call fails, or whose 200 response does not carry the expected envelope, MUST be reported as an error for that source and MUST NOT be reported as a source that legitimately contributes zero requests, and the other source MUST still be warmed. The exit code is zero only when no request failed, no source reported a discovery error, no valid time fell outside the PNG request-shape contract, and the run did not stop early against its wall-clock deadline; the run summary MUST be emitted in every one of those cases. The run SHALL carry a total wall-clock deadline, because it is invoked from the ingest tick and the per-request timeout alone bounds only one request: once the deadline passes, the remaining requests MUST be abandoned rather than issued, counted in the summary, and reported with a non-zero exit code.
 
 #### Scenario: Envelope and request count
-- **WHEN** prewarm runs and both sources report a newest cycle with 57 valid times
-- **THEN** the request set is `river-network-national` z3–z5 China tiles (unchanged) plus, per source, `|z3–z4 China tiles| × 57` discharge tile requests and `57` precipitation PNG requests
+- **WHEN** prewarm runs and both sources report a newest cycle whose valid times include `W` entries inside the lead window
+- **THEN** the request set is `river-network-national` z3–z5 China tiles (unchanged) plus, per source, `|z3–z4 China tiles| × W` discharge tile requests and `W` precipitation PNG requests
 - **AND** the summary reports the total request count and elapsed seconds, and both land in the deployment receipt
+- **AND** the summary reports the lead window and, per source, both the number of valid times the catalogue published and the number actually warmed, so the descope is visible in the receipt rather than inferred from the request total
+
+#### Scenario: The envelope is bounded by a lead window, selected by timestamp
+- **WHEN** a source's newest cycle publishes valid times beyond the lead window
+- **THEN** only the valid times satisfying `first <= valid_time <= first + lead window`, where `first` is the earliest instant in the published list, are warmed, for discharge tiles and precipitation PNGs alike
+- **AND** the selection is made by comparing timestamps, never by taking a fixed-length prefix of the published list, because neither the ordering nor the step of that list is a property this script may assume
+- **AND** the valid times outside the window are neither warmed nor counted as failures: they are a recorded descope, not an error
+
+#### Scenario: A coverage-clamped cycle still warms the view the frontend opens on
+- **WHEN** a source's newest cycle publishes a list whose first valid time is later than the cycle instant by more than the lead window, because the intersection coverage window starts there
+- **THEN** the window is measured from that first published valid time, so the source warms the first entry and the ones inside the window after it, and the `{cycle}` path segment of every warmed URL stays the published cycle
+- **AND** a source that published at least one valid time never reports zero warmed valid times
+
+#### Scenario: The envelope's size is asserted from the production path
+- **WHEN** the published valid-time stride, the lead window, the discharge zoom set, the river zoom default, or the source list changes
+- **THEN** an assertion that builds the published grid from the stride the catalogue publishes with, cuts it with the run's own window selection, and expands it with the run's own tile and URL builders fails unless the planned request count is still the expected one
+- **AND** a second assertion reads the ingest tick interval from the deployment unit that invokes prewarm and fails unless the default deadline plus one default per-request timeout still fits inside it
+- **AND** a third assertion reads the deployed invocation's `--workers` and `--zooms` fallbacks and fails unless they still match the module's defaults, because the deployed caller always passes both flags
+- **AND** no assertion recomputes an input of the envelope from a second source — a parallel constant, a sibling module's grid or a hardcoded literal — because such an assertion stays green exactly when the envelope changes underneath it
+- **AND** none of them is claimed to establish that the run fits inside its deadline: that is an UNVERIFIED estimate whose only oracle is the node-27 deployment receipt
 
 #### Scenario: Per-source newest cycle
 - **WHEN** `gfs` newest cycle is `2026-09-02T12:00:00Z` and `ifs` newest cycle is `2026-09-02T00:00:00Z`
@@ -143,6 +163,36 @@ This requirement is deliberately hosted in `precipitation-raster-overlay` (rathe
 #### Scenario: Empty cycles list warms nothing for that source
 - **WHEN** `cycles[]` is empty for a source (fail-closed intersection)
 - **THEN** prewarm emits zero discharge-tile and zero precipitation requests for that source, reports it in the summary, and MUST NOT substitute a cycle from the other source, from `metadata.valid_times`, or from the current wall clock
+
+#### Scenario: A failed discovery is not an empty cycle list
+- **WHEN** one source's cycles or valid-times request fails, or answers 200 with an envelope that does not carry the expected `default_cycle` key or a list of valid times
+- **THEN** that source is recorded in the summary with a non-empty error and the run's exit code is non-zero
+- **AND** it is NOT recorded as a source that legitimately contributes zero requests
+- **AND** the other source is still warmed with its full envelope, and the run summary is still emitted in full
+
+#### Scenario: Expected precipitation 404s do not fail the run, an unconfigured mirror does
+- **WHEN** a precipitation PNG request answers HTTP 404
+- **THEN** the outcome is classified by the response body's `error.code` and `error.details.reason`, never by the status code alone
+- **AND** both expected classes are named by an explicit reason whitelist, never by code alone: `PRECIP_WINDOW_INCOMPLETE` whose reason says a slice is missing or that no mirrored cycle precedes the window end, and `PRECIP_CYCLE_NOT_MIRRORED` whose reason is the pruned-or-absent-cycle reason, are counted per source and do not affect the exit code
+- **AND** a reason outside those whitelists counts as a failure, because the same two codes are also the route's answer for a mirrored product that violates the canonical contract — a corrupt or truncated slice, or an unreadable grid definition — which is a deployment fault, not mirror lag
+- **AND** `PRECIP_CYCLE_NOT_MIRRORED` whose reason is that no mirror root is configured on the deployment counts as a failure and sets a non-zero exit code
+- **AND** any non-2xx response whose body cannot be parsed as that error envelope counts as a failure
+
+#### Scenario: A valid time outside the PNG request-shape contract is reported, not skipped
+- **WHEN** the discharge valid-times list for a source's cycle contains a valid time that is inside the lead window but is not a 3-hour step from the cycle, or the cycle itself does not fall on a whole hour
+- **THEN** no precipitation PNG request is issued for that valid time, it is counted per source, and the exit code is non-zero
+- **AND** the discharge tiles for that same valid time are still warmed, because the discharge tile route carries no such gate
+
+#### Scenario: A valid time on the 3-hour grid but beyond the forecast horizon is also out of contract
+- **WHEN** the lead window for a source's cycle contains a valid time that IS an exact 3-hour step from a whole-hour cycle but lies beyond the +168-hour precipitation forecast horizon, which the lead window can admit whenever the source's published list is clamped that far out
+- **THEN** it is treated exactly as the previous scenario's out-of-contract valid times: no precipitation PNG request is issued for it, it is counted per source, the discharge tiles for that same valid time are still warmed, and the exit code is non-zero
+- **AND** being on the 3-hour grid is NOT on its own sufficient for a PNG request — the grid has no upper bound and the horizon does, so the request-shape gate MUST check both conditions and MUST NOT be satisfied by the grid condition alone
+
+#### Scenario: The run is bounded by a wall-clock deadline, not only by per-request timeouts
+- **WHEN** the elapsed wall-clock time passes the run's deadline while requests remain
+- **THEN** no further request is issued, and the abandoned count appears in the run summary
+- **AND** the exit code is non-zero and the summary is still emitted in full
+- **AND** the deadline is bounded by the interval at which the ingest tick invokes prewarm, so one degraded run cannot span several ticks
 
 ### Requirement: Frontend precipitation overlay follows the hydrology selection
 The frontend SHALL render the precipitation PNG as a MapLibre `image` source + `raster` layer (opacity 0.55, linear resampling) placed beneath the national river layers, driven by the same `(source, cycle, validTime)` as the discharge layer. The overlay SHALL be a boolean query-state field `precip` defaulting to `true`, serialized as `precip=0` when disabled, and MUST NOT be a member of the `M11Layer` union. The overlay URL MUST only ever name a concrete `gfs` or `ifs` source: when the active source is `best` or `compare` (still offered in basin detail), the frontend MUST use the concrete resolved source if one exists — the same resolution `map-layer-timeline-controls` already requires for run, pipeline and forecast APIs — and otherwise hide the overlay with a stated reason. A request to `/api/v1/precip/best/...` or `/api/v1/precip/compare/...` MUST never be issued.

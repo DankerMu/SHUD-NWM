@@ -74,6 +74,7 @@
 - 浮层位移：图例/返回按钮 `bottom-4`→`bottom-24`，notices `bottom-20`→`bottom-40`。
 
 ### D9. 预热有界
+- **Superseded by #2013 的 round-2/round-3 纠正动作（2026-09-07）**：包络不再是「该周期的全部 valid_times」，而是收窄到锚在**该源已发布首个时次**的 `PREWARM_LEAD_HOURS` 窗口（3 h 网格上每源 5 个时次，全轮 183 条请求），以 spec `precipitation-raster-overlay` 的 “Prewarm envelope is per-source, cycle-aware, and bounded” Requirement 与 `tasks.md` 的设计点 🔟 为准（**共享 change 纪律：原文保留不原地改写**）。本节以下为 #2034 时的原文。
 - `node27_mvt_prewarm.py`：**逐源**按 `cycles?source=` 取该源自己的最新周期（两源最新周期可能不同），对该周期的全部 valid_times 预热 z3–4 流量瓦片 + 降水 PNG；河网 z3–5 不变。某源 cycles 为空则该源零请求，不借用另一源周期、不按墙钟伪造。总请求数与耗时写 receipt。
 - 现有 `tests/test_node27_mvt_prewarm.py` 钉住旧无源 URL 与单 valid_time 签名，随本改动一起更新。
 

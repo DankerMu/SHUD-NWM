@@ -3475,3 +3475,235 @@ Two observations for the next revisit, neither sufficient to change policy alone
    diversity.
 
 Next revisit on the audit's next flag or a maintainer override.
+
+## Revisit 2026-09-07 (post PR #2117 / issue #2013) — the exemption rule was too narrow
+
+No audit flag this time. This entry records a **scope correction to the standing
+instruction proposed in the previous revisit**, because PR #2117 falsified it by
+counter-example within the same session that wrote it.
+
+The previous revisit proposed: *an exemption clause in the fixture must carry a
+checkable basis, and a reviewer may treat an uncheckable exemption as a finding.*
+That rule was applied in #2117's fixture — design point 4️⃣ exempts the national
+river-network prewarm from the per-source rewrite and cites
+`_NATIONAL_RIVER_NETWORK_METADATA`'s `required_placeholders == [z, x, y]` as its
+checkable basis. That clause held under three rounds of review.
+
+Two other fixture sentences in the same document did not, and neither was an
+exemption clause:
+
+- Design point 9️⃣ set the run's wall-clock deadline default to 300 s, justified
+  by "冷周期约 1 min". That quantity has no source anywhere in the repo; the only
+  measured figure is 11.63 s / 13.26 s per canonical z4 national discharge tile
+  (`docs/runbooks/receipts/2026-09-05-issue-2009-discharge-cycles-node27.md`).
+  The 1-minute figure is the v1 envelope's magnitude, applied to an envelope
+  19× larger. Round-2 verified P1.
+- Design point 7️⃣ declared a third terminal state "legal" because "the clamped
+  window is empty". `services/tiles/mvt.py:1985-1987` filters exactly those
+  cycles out of `cycles[]`, so `default_cycle` can never be one. The false
+  premise was then copied into a runbook paragraph and a test docstring.
+  Round-2 verified finding.
+
+Both are the same invariant the Same-invariant gate fired on at #2101
+(*premise-as-guard*: a safety property resting on a claim rather than a guard).
+The exemption-clause rule did not catch them because it named the wrong carrier.
+An exemption clause is one place a fixture asserts something about the backend;
+a **justification** for a constant, a threshold, or a terminal-state
+classification is another, and it is load-bearing in exactly the same way — every
+seat in every round inherits it from the same document as the implementer.
+
+### The generalized instruction
+
+Any **quantity** or **backend behaviour** asserted in a fixture, spec delta,
+code comment, or test docstring must either
+
+1. cite `file:line` or a receipt path, or
+2. be labelled `UNVERIFIED`, in which case **no default, threshold, or exemption
+   may be derived from it** — a budget that needs it must state a margin rule
+   over the labelled uncertainty and pin the arithmetic in an assertion.
+
+A reviewer may treat an unlabelled, uncited quantity or behavioural claim as a
+finding, exactly as with an uncheckable exemption.
+
+PR #2117's corrective fix demonstrated the labelling shape — but only the
+labelling shape, and the next round showed that was not enough (see the revisit
+below, which supersedes the worked example that stood here). What survives of it
+in the shipped code is what can actually be checked in this repository:
+`DEFAULT_DEADLINE_SECONDS + DEFAULT_TIMEOUT_SECONDS <= OnUnitActiveSec`, read
+from the deployment unit, and an assertion on the *planned envelope size*
+derived end to end from the production path. The cost estimate that motivates
+the 540 s number is `UNVERIFIED` prose in the fixture and the runbook, no
+constant and no assertion depends on it, and its only oracle is the node-27
+receipt (task 7.2 / #2017); neither the PR body nor the runbook may claim more.
+
+Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
+a maintainer override.
+
+## Revisit 2026-09-07 (post PR #2117 round 3, same issue #2013) — a citation is not an oracle
+
+Second gate entry on the same PR, same failure shape (depth), recorded in
+`.workplans/pr-2117/review/review-failure-retro-2.md`. The instruction written
+above was executed completely — every quantity cited a `file:line` or a receipt,
+the two unmeasured inputs were labelled `UNVERIFIED` with margin rules, and two
+assertions pinned the arithmetic. Round 3 then found four defects **inside that
+model** and none in the behaviour it existed to protect. The labelling rule
+could not have caught any of them, because all four carried correct citations.
+
+### The generalized instruction (superseding the previous one in scope, not in force)
+
+**An oracle for a production property must consume the same inputs the
+production path consumes. A test that recomputes an input from a second source —
+a parallel constant, a sibling module's grid, a hardcoded literal, or a default
+the production caller overrides — is not an oracle for that property, however
+well cited it is.** The labelling rule above still stands for prose; this rule
+governs assertions.
+
+Two worked examples, both from the assertion the previous revisit held up as the
+model:
+
+- **B-1.** The assertion derived the number of warmed valid times from
+  `horizon_valid_times`, the precipitation 3 h grid (`services/precip/constants.py`).
+  The envelope's actual width comes from `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`
+  (`services/tiles/mvt.py`). Two independently declared 3s. Densifying the
+  display stride to 2 h — ordinary product work, which the constant's own
+  comment invites — takes the real cost to 633 s against a 540 s deadline with
+  the assertion still green. The citation was correct; the derivation was not.
+- **B-2.** The same assertion divided by `DEFAULT_WORKERS`, a constant the sole
+  production caller overrides on every invocation
+  (`scripts/node27_autopipe_cron.sh:244` always passes
+  `--workers "${AUTOPIPE_MVT_PREWARM_WORKERS:-8}"`). An assertion about
+  production concurrency that reads a value production never uses is not about
+  production concurrency. Note the direction, which the paragraph above stated
+  backwards (round-3 note H-4): because the constant was a *divisor*, raising it
+  kept the assertion green — only lowering it turned red.
+
+The corrective action was **subtractive**, and that is the shape this rule
+implies: the cost model was deleted rather than repaired, and replaced by an
+assertion on the planned envelope size that walks the production path end to end
+(the published stride → the run's own window selection → its own tile and URL
+builders) and compares one number. A change to any input of the envelope turns
+it red; it depends on no unmeasured quantity; and it makes no claim the
+repository cannot check. Where a property genuinely has no in-repo oracle — does
+183 requests fit in 540 s, what concurrency does the deployed environment
+actually grant — the honest move is prose labelled `UNVERIFIED` plus a named
+receipt line in the deployment task, not an assertion shaped like a guarantee.
+
+Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
+a maintainer override.
+
+## Revisit 2026-09-07 (post PR #2117 round 4, same issue #2013) — an oracle is only as good as its routing
+
+Third gate entry on the same PR, same failure shape (depth), recorded in
+`.workplans/pr-2117/review/review-failure-retro-3.md`. The instruction written
+above was executed completely and correctly: the parallel cost model was
+deleted, and the replacement — an assertion on the planned envelope size that
+walks the production path end to end — consumes exactly the inputs production
+consumes. Round 4 re-derived it from a standalone interpreter and confirmed that
+every input it names moves the number off 183, the stride included. The
+assertion is a real oracle by the previous rule, and it still failed to protect
+anything.
+
+### The third generalization (cumulative with the two above, not a replacement)
+
+**An oracle is only as good as its routing. A test that is red-capable but
+unreachable from the diff that would break it is not a guard.** Verifying a new
+oracle therefore means demonstrating that the lane which will run it actually
+selects it — not that it goes red when you run it by hand.
+
+Worked example, round-4 C-1. The envelope assertion imports
+`NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS` from `services/tiles/mvt.py`
+precisely so that a stride change reds the count. But
+`scripts/select_ci_tests.py` was never extended with the new importer edge, so a
+PR changing only that constant did not select
+`tests/test_node27_mvt_prewarm.py`. The assertion was correct, cited, red-capable
+on demand, and absent from the one diff it existed to catch. That is the previous
+rule one layer out: the previous rule governs an oracle's *inputs*, this one
+governs its *reachability*.
+
+Two consequences worth stating separately, because they are what a fix pass has
+to actually do:
+
+- **A new cross-module import in a test file is a routing change, not just an
+  import.** Where the repository has a closure guard, it will say so; where it
+  does not, nothing will. Adding the import and running the suite proves the
+  assertion works and proves nothing about whether it will ever run.
+- **A hand-picked file list is not evidence.** The round-4 fix pass reported
+  "163 + 54 + 96 passed" against four suites it chose itself, and could not see
+  that it had broken the closure guard, because the lane appends the selector
+  meta-guard suite unconditionally for any changed `tests/**.py` suite
+  (`scripts/select_ci_tests.py:3304-3305`, reached through the
+  `path.startswith("tests/") and path.endswith(".py")` gate at `:3245`; a
+  non-`.py` change under `tests/` does NOT arm it — measured:
+  `tests/fixtures/data.json` alone selects nothing) and that was the one suite the list
+  omitted. Reproduce the lane's own selection over the PR diff and run exactly
+  that set. This is now an explicit Evidence Floor line in
+  `openspec/changes/display-v2-national-timeline-precip-overlay/tasks.md`
+  (group 7).
+
+Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
+a maintainer override.
+
+## Revisit 2026-09-07 (post PR #2117 round 5, same issue #2013) — routing is not only where a guard forces it
+
+Fourth gate entry on the same PR, and its last: round 5 hit the 5-round ceiling
+(`review_gate.py:343` refuses a 6th), so the terminal record is
+`.workplans/pr-2117/review/round-ceiling-decision.md` rather than another retro.
+Round 5 was not clean — 7 candidates adjudicated: 6 CONFIRMED (5 FIX_NOW, 1
+DEFER) and 1 REFUTED, highest severity major — and two of its three failure
+classes repeat round 4's:
+`selector-closure-drift` and `oracle-does-not-bite`. The third was
+`citation-drift`.
+
+The honest reading of the repeat: the round-4 rule above was applied, but only to
+the single edge that a mechanical guard forced. The closure guard over
+`GUARDED_MODULE_CLOSURES` (`tests/test_select_ci_tests.py`) covers Python
+importer edges, so the
+`services/tiles/mvt.py` -> prewarm-suite edge got routed. The same PR introduced
+three sibling edges that no mechanical guard covers, and all three were left
+unrouted:
+
+- a **shell-script reader** — the prewarm suite parses
+  `scripts/node27_autopipe_cron.sh` for its `${AUTOPIPE_MVT_PREWARM_*:-…}`
+  fallbacks, while the selector row for that wrapper named only the preflight
+  suite, which has no such assertion. A PR flipping the cron default would have
+  merged green against a fixture that declares it must red (ROUTE-A, P1);
+- a **systemd-unit reader** — the same suite parses
+  `infra/systemd/nhms-node27-autopipe.timer` for `OnUnitActiveSec` and pins the
+  budget inequality against it. `infra/**` is neither a backend Python path nor a
+  `scripts/**.sh` path, so a timer-only diff matched nothing, armed no fallback,
+  and degraded to a zero-assertion collect-only smoke (ROUTE-B, P3);
+- a **cross-package import** — the script imports `services.precip.mirror`, whose
+  `PRECIP_STEP_HOURS` is a discriminating input. Deferred to a tracked issue
+  rather than fixed here (ROUTE-C, P3), because nothing written in the repo
+  demands that edge today and the one-hop closure bound is explicit policy.
+
+### The fourth generalization (cumulative with the three above)
+
+**When a change introduces a NEW reader of any file, every such reader must be
+routed to that file — and the absence of a mechanical closure guard for that file
+type is not an exemption, it is the reason the check has to be manual and
+explicit.** Where a guard exists it will fail loudly and do the work for you;
+where none exists, nothing will say anything, which is exactly the condition
+under which a missing edge survives review. The concrete discipline the repo
+already documents for this is the grep-derived target list at
+`scripts/select_ci_tests.py` (the "targets were derived from
+`grep -rln '<script>.sh' tests/` and must track real references" comment on the
+shell-wrapper block); read it as applying to shell scripts, systemd units,
+fixtures and any other non-Python readable, not just to `.sh`.
+
+Round 5's other confirmed class is the same `oracle-does-not-bite` shape one
+level finer. `partition_png_valid_times` gates on a single membership test that
+folds two conjuncts together — on the 3 h grid AND inside the +168 h horizon —
+and only the grid conjunct was asserted anywhere. The case the fixture named as
+the horizon guard ends in `assert rc == (1 if png_out_of_contract else 0)`, which
+pins the exit-code RULE and is satisfied for any value of the counter, so it is
+input-independent for the property it was credited with. Verified by executed
+mutation: with the horizon bound removed, the whole 51-test file stayed green,
+against a live-patch control that reds 25. The spec had the matching hole — it
+enumerated two of the three out-of-contract triggers — which is why five rounds
+of readers did not notice. **A missing spec scenario and a missing assertion are
+the same defect seen from two sides; when an oracle is found not to bite, check
+whether the requirement it serves was ever written down.**
+
+Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
+a maintainer override.
