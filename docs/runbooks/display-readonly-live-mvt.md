@@ -80,8 +80,20 @@ SIGTERM 既有 uvicorn（10s timeout + SIGKILL 兜底）→
 且其 ad-hoc 流程不 source env file，已被本脚本取代。
 
 node-27 autopipeline 每次 publish/coverage 后调用
-`scripts/node27_mvt_prewarm.py`，有限并发预热中国默认视野 z3/z4/z5 的基础河网与
-当前最新 valid time 流量瓦片。同一 cache key 由跨进程 `flock` single-flight
+`scripts/node27_mvt_prewarm.py`，有限并发预热中国默认视野的以下包络（#2013 起逐源
+cycle-aware）：
+
+- 基础河网 `river-network-national` z3/z4/z5（`--zooms`，语义不变——该路由无
+  source/cycle 维度）；
+- `gfs` 与 `ifs` **各自**经 `GET /api/v1/layers/discharge/cycles?source=` 发现自己的
+  最新周期，对该周期 `valid-times` 的**每一个时次**预热 z3/z4 全国流量瓦片
+  （`DISCHARGE_ZOOMS`，固定，不随 `--zooms` 变）；
+- 每个时次一张降水 PNG `/api/v1/precip/{source}/{cycle}/{valid_time}.png`。
+
+某源 `default_cycle` 为 `null` 是合法终态（该源零请求）；发现失败是**另一种**终态，
+按源记 `per_source[<s>].error` 并置非零退出码，另一源照常预热。汇总 schema 为
+`nhms.node27-mvt-prewarm.v2`，含 `requests_total`（只计预热请求，不含发现请求）与
+`elapsed_seconds`。同一 cache key 由跨进程 `flock` single-flight
 保护，多 worker 和预热并发不会重复执行 PostGIS 生成。
 
 ## node-27 Live Receipt（2026-06-08，本机实测）
