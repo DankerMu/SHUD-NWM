@@ -3429,3 +3429,49 @@ comprehensive round, so it adds neither a multi-round sample nor a later-round
 seat-lens catch. There is no new evidence against the preceding decision:
 **keep rotation**. Next revisit on the audit's next flag or a maintainer
 override.
+
+## Revisit 2026-09-06 (post-merge #2101 / #2012)
+
+The audit re-flagged DECIDABLE at 180 multi-round merged PRs (one more than the
+previous revisit — PR #2101 contributes the new multi-round sample). Later-round
+catches move to core=202, rotated=265, phase=51, with 15 non-attributable
+catches skipped. **Keep rotation** — rotated-in lenses still hold the majority of
+later-round catches, and this PR does not argue otherwise.
+
+But it does supply a datum worth recording against the *core-vs-rotated* framing
+itself, which the previous revisit already flagged as possibly measuring the
+wrong variable.
+
+PR #2101's decisive catch was not made by any seat lens. It was made by the
+**Phase 7 gap sweep** (phase lens), and what it caught was not a coding slip: it
+was a false premise in the OpenSpec fixture — decision 4 asserted that the
+basin-detail surface kept the old code path "because `required_placeholders`
+contains `run_id`", which the backend contradicts unconditionally. Three
+comprehensive rounds across seven seat-lens seats had each read that sentence and
+skipped the surface it exempted. Rotating seats did not help, and could not have:
+every seat inherited the same false premise from the same fixture.
+
+Then round 3 — three seats, all rotated relative to round 1's mix — independently
+converged on a *single* candidate, the consumer half of the same invariant. Three
+different lenses produced one finding. That is the opposite of the diversity
+argument rotation rests on, and it is consistent with the reading that what
+actually varies is not seat identity but **whether the reviewer's premises come
+from the same document as the implementer's**.
+
+Two observations for the next revisit, neither sufficient to change policy alone:
+
+1. A fixture sentence that exempts a surface is load-bearing for every seat in
+   every round, so it is a single point of failure that no amount of lens
+   rotation covers. The cheap countermeasure is not another lens — it is a
+   standing instruction that an exemption clause in the fixture must carry a
+   checkable basis, and that a reviewer may treat an uncheckable exemption as a
+   finding. Worth trying before buying more seats.
+2. Both of this PR's expensive catches (the round-1 major and the Phase-7 P1)
+   were the same failure class at different entry points. The audit's rotation
+   columns cannot see that, because they count catches per lens, not recurrence
+   per invariant. The Same-invariant gate did see it, and fired. If the rotation
+   figures are ever used to justify more seats, this is the counter-example: the
+   second and third instances were bought by an invariant gate, not by lens
+   diversity.
+
+Next revisit on the audit's next flag or a maintainer override.
