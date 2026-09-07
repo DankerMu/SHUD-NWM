@@ -3525,16 +3525,68 @@ code comment, or test docstring must either
 A reviewer may treat an unlabelled, uncited quantity or behavioural claim as a
 finding, exactly as with an uncheckable exemption.
 
-#2117's corrective fix demonstrates the shape: `PREWARM_LEAD_HOURS` and
-`DEFAULT_DEADLINE_SECONDS` are derived from two measured constants (each with its
-receipt cited at the definition site) plus two explicitly `UNVERIFIED` inputs —
-cold PNG cost, and whether eight prewarm workers scale linearly against the
-display API — which are absorbed by charging PNGs at the discharge-tile upper
-bound and budgeting at half the nominal worker count. Two tests re-derive the
-inequalities, so raising the window, the zoom set, or the worker default turns
-red. Those tests prove the *re-derivation*, not the model; the model's oracle is
-the node-27 receipt (task 7.2 / #2017), and neither the PR body nor the runbook
-may claim more.
+PR #2117's corrective fix demonstrated the labelling shape — but only the
+labelling shape, and the next round showed that was not enough (see the revisit
+below, which supersedes the worked example that stood here). What survives of it
+in the shipped code is what can actually be checked in this repository:
+`DEFAULT_DEADLINE_SECONDS + DEFAULT_TIMEOUT_SECONDS <= OnUnitActiveSec`, read
+from the deployment unit, and an assertion on the *planned envelope size*
+derived end to end from the production path. The cost estimate that motivates
+the 540 s number is `UNVERIFIED` prose in the fixture and the runbook, no
+constant and no assertion depends on it, and its only oracle is the node-27
+receipt (task 7.2 / #2017); neither the PR body nor the runbook may claim more.
+
+Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
+a maintainer override.
+
+## Revisit 2026-09-07 (post PR #2117 round 3, same issue #2013) — a citation is not an oracle
+
+Second gate entry on the same PR, same failure shape (depth), recorded in
+`.workplans/pr-2117/review/review-failure-retro-2.md`. The instruction written
+above was executed completely — every quantity cited a `file:line` or a receipt,
+the two unmeasured inputs were labelled `UNVERIFIED` with margin rules, and two
+assertions pinned the arithmetic. Round 3 then found four defects **inside that
+model** and none in the behaviour it existed to protect. The labelling rule
+could not have caught any of them, because all four carried correct citations.
+
+### The generalized instruction (superseding the previous one in scope, not in force)
+
+**An oracle for a production property must consume the same inputs the
+production path consumes. A test that recomputes an input from a second source —
+a parallel constant, a sibling module's grid, a hardcoded literal, or a default
+the production caller overrides — is not an oracle for that property, however
+well cited it is.** The labelling rule above still stands for prose; this rule
+governs assertions.
+
+Two worked examples, both from the assertion the previous revisit held up as the
+model:
+
+- **B-1.** The assertion derived the number of warmed valid times from
+  `horizon_valid_times`, the precipitation 3 h grid (`services/precip/constants.py`).
+  The envelope's actual width comes from `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`
+  (`services/tiles/mvt.py`). Two independently declared 3s. Densifying the
+  display stride to 2 h — ordinary product work, which the constant's own
+  comment invites — takes the real cost to 633 s against a 540 s deadline with
+  the assertion still green. The citation was correct; the derivation was not.
+- **B-2.** The same assertion divided by `DEFAULT_WORKERS`, a constant the sole
+  production caller overrides on every invocation
+  (`scripts/node27_autopipe_cron.sh:244` always passes
+  `--workers "${AUTOPIPE_MVT_PREWARM_WORKERS:-8}"`). An assertion about
+  production concurrency that reads a value production never uses is not about
+  production concurrency. Note the direction, which the paragraph above stated
+  backwards (round-3 note H-4): because the constant was a *divisor*, raising it
+  kept the assertion green — only lowering it turned red.
+
+The corrective action was **subtractive**, and that is the shape this rule
+implies: the cost model was deleted rather than repaired, and replaced by an
+assertion on the planned envelope size that walks the production path end to end
+(the published stride → the run's own window selection → its own tile and URL
+builders) and compares one number. A change to any input of the envelope turns
+it red; it depends on no unmeasured quantity; and it makes no claim the
+repository cannot check. Where a property genuinely has no in-repo oracle — does
+183 requests fit in 540 s, what concurrency does the deployed environment
+actually grant — the honest move is prose labelled `UNVERIFIED` plus a named
+receipt line in the deployment task, not an assertion shaped like a guarantee.
 
 Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
 a maintainer override.

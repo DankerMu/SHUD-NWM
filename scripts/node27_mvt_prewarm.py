@@ -7,16 +7,20 @@ database and is safe to run after every idempotent autopipeline tick.
 Envelope (per `precipitation-raster-overlay`'s prewarm requirement): the
 national river network at `--zooms` (unchanged), plus -- for each of `gfs` and
 `ifs`, at that source's OWN newest cycle -- the z3-z4 China discharge tiles for
-the valid times inside `PREWARM_LEAD_HOURS` of that cycle, and one precipitation
-PNG per such valid time. A source with no cycle contributes zero requests; a
-source whose discovery FAILS is a different terminal state and is reported as an
-error.
+the valid times inside `PREWARM_LEAD_HOURS` of that cycle's FIRST PUBLISHED
+valid time, and one precipitation PNG per such valid time. A source with no
+cycle contributes zero requests; a source whose discovery FAILS is a different
+terminal state and is reported as an error.
 
 The lead window is a DESCOPE, not a fix: the published timeline does not fit
 inside one ingest tick at the measured cold tile cost, so the valid times beyond
-the window stay cold reads. The budget that fixes the window's width is on
-`DEFAULT_DEADLINE_SECONDS` below; the known limit is spelled out in
-`docs/runbooks/display-readonly-live-mvt.md`.
+the window stay cold reads. The window's width is a judgement call whose only
+oracle is the node-27 receipt of task 7.2 (#2017); the estimate behind it, the
+known limit, and the fact that it is UNVERIFIED are all spelled out in
+`docs/runbooks/display-readonly-live-mvt.md` and in design point 10 of
+`openspec/changes/display-v2-national-timeline-precip-overlay/tasks.md`. What IS
+pinned in this repository is the PLANNED envelope size and inequality A below;
+see `tests/test_node27_mvt_prewarm.py`.
 
 The whole run is bounded by `--deadline-seconds` as well as by the per-request
 `--timeout`: once the deadline passes the remaining requests are abandoned
@@ -86,48 +90,39 @@ EXPECTED_NOT_MIRRORED_REASON = "cycle_not_mirrored"
 # or deployment fault -- a missing `grid.json` would otherwise turn every one of
 # a source's PNGs into a silent `rc=0`.
 EXPECTED_WINDOW_INCOMPLETE_REASONS = frozenset({"missing_slice", "no_mirrored_cycle_before_window_end"})
-# The cycle-anchored lead window the envelope is cut to. Anchored on the cycle
-# instant rather than the wall clock because the frontend's default timeline
-# position is the cycle start (`map-layer-timeline-controls`; implemented in
-# `apps/frontend/src/lib/m11/overviewDataContracts.ts::pickCurrentValidTime`),
-# so a cycle-anchored window is the one that covers the default view. 12 h on
-# the published 3 h grid is 5 valid times per source; the value is DERIVED from
-# the budget below, not chosen -- 15 h (6 valid times) does not fit.
+# The lead window the envelope is cut to, measured from the FIRST PUBLISHED
+# valid time of the source's newest cycle -- which is exactly the instant the
+# frontend opens on: `pickCurrentValidTime` returns element 0 of the sorted list
+# (`apps/frontend/src/lib/m11/overviewDataContracts.ts`), and
+# `map-layer-timeline-controls` defines "lead 0" as the first entry of the
+# advertised `valid_times[]`, equal to the cycle instant only in the
+# fully-covered case (`services/tiles/mvt.py:2171` clamps it to the coverage
+# start otherwise). Anchoring on the published first entry rather than on the
+# cycle is what makes "the default view is warm" a property of the code instead
+# of a claim about the data.
+# 12 h on the published 3 h grid is 5 valid times per source. That width is a
+# judgement call from an UNVERIFIED cost estimate -- see design point 10 of
+# `openspec/changes/display-v2-national-timeline-precip-overlay/tasks.md` and
+# `docs/runbooks/display-readonly-live-mvt.md`; its only oracle is the node-27
+# receipt of task 7.2 (#2017). What is pinned in-repo is the PLANNED envelope
+# size that follows from this constant.
 PREWARM_LEAD_HOURS = 12
-# Nominal pool width. Kept as a constant, not an argparse literal, so the budget
-# assertions can read the number they are constraining.
+# Nominal pool width. Kept as a constant, not an argparse literal, so the test
+# suite can assert that `scripts/node27_autopipe_cron.sh`'s `--workers` fallback
+# and this default have not drifted apart.
 DEFAULT_WORKERS = 8
 # Per-SOCKET-OPERATION bound, not a bound on the run.
 DEFAULT_TIMEOUT_SECONDS = 30.0
-# Measured cold cost of one national z4 discharge tile: the slower of the two
-# runs in `docs/runbooks/receipts/2026-09-05-issue-2009-discharge-cycles-node27.md`
-# (gfs 11.63 s, ifs 13.26 s) on z4/12/6, which is the densest tile over China --
-# so it is an UPPER bound on the mean of the 13-tile set, not an average.
-MEASURED_COLD_DISCHARGE_TILE_SECONDS = 13.26
-# Measured cold cost of one national river-network tile:
-# `docs/runbooks/receipts/2026-07-20-node27-display-scaling.md`
-# ("基础河网 cold SQL 首次 918.182 ms").
-MEASURED_COLD_RIVER_TILE_SECONDS = 0.92
-# DERIVED, not chosen, and pinned by two assertions in the test suite:
-#   A. `DEFAULT_DEADLINE_SECONDS + DEFAULT_TIMEOUT_SECONDS <= OnUnitActiveSec`
-#      (600 s, `infra/systemd/nhms-node27-autopipe.timer`), so one degraded run
-#      cannot span several ingest ticks.
-#   B. the worst-case envelope at HALF the nominal concurrency fits inside it:
-#      `(43 * 0.92 + 2 * 70 * 13.26) / (8 / 2) = 474.0 s <= 540`.
-#      Two of B's inputs are UNVERIFIED; each is absorbed by a stated margin:
-#      - cold PNG cost: UNVERIFIED, nothing in this repo measures it. Margin:
-#        the per-source factor is 70 (65 tiles + 5 PNGs), i.e. every PNG is
-#        charged at `MEASURED_COLD_DISCHARGE_TILE_SECONDS` -- an 8-slice read
-#        plus one render is very unlikely to cost more than the densest
-#        national discharge tile.
-#      - linear scaling of the worker pool: UNVERIFIED, not measurable locally
-#        (8 prewarm workers against 2 uvicorn workers,
-#        `infra/systemd/nhms-display-api.service:9`, each with pool_size 4 +
-#        max_overflow 2, `apps/api/routes/hydro_display.py:206-207`). Margin:
-#        the divisor is `DEFAULT_WORKERS / 2`, i.e. only half the nominal
-#        concurrency is assumed to be realised.
-# Neither the deadline nor the cost model is claimed to be measured end to end;
-# the oracle for the model is the node-27 receipt of task 7.2 (#2017).
+# Bounded by one assertion in the test suite, inequality A:
+#   `DEFAULT_DEADLINE_SECONDS + DEFAULT_TIMEOUT_SECONDS <= OnUnitActiveSec`
+#   (600 s, `infra/systemd/nhms-node27-autopipe.timer`), so prewarm's budget is
+#   never larger than the ingest tick interval.
+# That inequality is exact and provable here. Whether the envelope actually
+# FITS in 540 s is not: the estimate behind the number is UNVERIFIED, it is
+# stated in prose in the fixture and the runbook rather than in a constant or an
+# assertion here, and its only oracle is the node-27 receipt of task 7.2
+# (#2017). A model that cannot be validated in this repository must not be
+# spelled as if it were a guarantee.
 DEFAULT_DEADLINE_SECONDS = 540.0
 
 
@@ -211,20 +206,36 @@ def discover_source(
     return SourceDiscovery(cycle=cycle, valid_times=tuple(values))
 
 
-def select_lead_window(cycle: str, valid_times: Sequence[str]) -> list[str]:
-    """The valid times inside `[cycle, cycle + PREWARM_LEAD_HOURS]`, in input order.
+def select_lead_window(valid_times: Sequence[str]) -> list[str]:
+    """The valid times inside `[first, first + PREWARM_LEAD_HOURS]`, in input order.
 
-    BY TIMESTAMP, never `valid_times[:N]`: neither the ordering nor the step of
-    `/valid-times` is a property this script may assume, and a fixed-length
-    prefix would turn "the list happens to be a sorted 3 h grid today" into yet
-    another premise-as-guard.
+    `first` is the EARLIEST published instant, computed with `min()` -- not
+    `valid_times[0]`, because neither the ordering nor the step of
+    `/valid-times` is a property this script may assume, and not the cycle
+    instant either. `services/tiles/mvt.py:2171` clamps a cycle's list to the
+    intersection coverage start (`max(cycle, max(window starts))`), and
+    `map-layer-timeline-controls` makes the first published entry -- not the
+    cycle -- what the frontend opens on. A cycle-anchored window would warm
+    NOTHING for a source clamped more than `PREWARM_LEAD_HOURS` past its cycle,
+    silently and at rc=0.
+    Consequence, and the point of the change: a non-empty list always yields a
+    non-empty window, so `valid_times_available > 0` implies
+    `valid_times_warmed > 0`. There is deliberately no `warmed == 0` error
+    branch, because with this anchor it is unreachable -- an error branch for an
+    unreachable state is the same premise-as-guard defect in a new place.
+
+    BY TIMESTAMP, never `valid_times[:N]`: a fixed-length prefix would turn "the
+    list happens to be a sorted 3 h grid today" into yet another premise.
 
     The valid times outside the window are a recorded DESCOPE -- not failures,
     not `png_out_of_contract`. They stay cold reads; see the module docstring.
     """
-    cycle_instant = _parse_instant(cycle)
-    window_end = cycle_instant + timedelta(hours=PREWARM_LEAD_HOURS)
-    return [value for value in valid_times if cycle_instant <= _parse_instant(value) <= window_end]
+    if not valid_times:
+        return []
+    instants = {value: _parse_instant(value) for value in valid_times}
+    window_start = min(instants.values())
+    window_end = window_start + timedelta(hours=PREWARM_LEAD_HOURS)
+    return [value for value in valid_times if instants[value] <= window_end]
 
 
 def partition_png_valid_times(cycle: str, valid_times: Sequence[str]) -> tuple[list[str], list[str]]:
@@ -396,7 +407,7 @@ def prewarm(
                 # request-shape gate, the URL set, every per-source counter --
                 # sees only the warmed window. A valid time the window dropped
                 # is a descope, so it must not surface as `png_out_of_contract`.
-                warmed = select_lead_window(discovery.cycle, discovery.valid_times)
+                warmed = select_lead_window(discovery.valid_times)
                 entry["valid_times_warmed"] = len(warmed)
                 out_of_contract = partition_png_valid_times(discovery.cycle, warmed)[1]
                 entry["png_out_of_contract"] = len(out_of_contract)
@@ -492,6 +503,13 @@ def prewarm(
         "base_url": base_url,
         "zooms": zooms,
         "discharge_zooms": list(DISCHARGE_ZOOMS),
+        # The EFFECTIVE pool width, not `DEFAULT_WORKERS`: the sole production
+        # caller always passes `--workers` (`scripts/node27_autopipe_cron.sh`),
+        # so an operator's `AUTOPIPE_MVT_PREWARM_WORKERS` is the only value that
+        # matters and no test can observe it. Emitting it is what lets the
+        # node-27 receipt of task 7.2 (#2017) see the concurrency the cost
+        # estimate assumes.
+        "workers": workers,
         "river_tile_count": len(river_tiles),
         "requests_total": len(results),
         "failed_count": len(failed),

@@ -12,7 +12,7 @@
 - 新增 `GET /api/v1/layers/discharge/cycles?source=`（各活动河网交集，fail-closed）；`valid-times` 支持 `source`+`cycle` 查询，返回从起报时刻起 3h 步长的全范围列表。全部 API 时间实例统一 `YYYY-MM-DDTHH:MM:SSZ`（秒精度、无小数秒），路径段、列表与缓存文件名同一拼写。
 - 新增「过去 24h 累积降水」栅格图层：node-22 的 DB-free forecast 终态 stage 把 canonical 降水 `.nc` + `grid.json` 镜像到 NFS；node-27 display API 跨周期取 8 个 3h 切片求和，渲染 Web-Mercator 六级调色板 PNG（numpy+zlib，无新依赖），文件缓存下发；`/api/v1/layers` 新增 `precip` 条目；一次性回填现存周期；镜像纳入 retention 剪枝。
 - 前端：底部玻璃风格控制条（起报时次选择、GFS/IFS 分段开关、复用 `M11Timeline`），默认停在 lead=0；降水为布尔开关（默认开，`precip=0` 关）跟随水文 source/cycle/valid_time；全国尺度不再提供 Best Available；图例叠加降水六级；浮层位移。
-- 预热脚本扩展到 z3–4 × 双源 × 各源自己的最新周期全部时次 + 降水 PNG；某源 cycles 为空则该源零请求，不伪造周期。
+- 预热脚本扩展到 z3–4 × 双源 × 各源自己的最新周期全部时次 + 降水 PNG；某源 cycles 为空则该源零请求，不伪造周期。（包络自 #2013 的纠正动作起收窄到锚在**已发布首个时次**的 `PREWARM_LEAD_HOURS` 窗口，以 spec `precipitation-raster-overlay` 的 prewarm Requirement 与 `tasks.md` 设计点 🔟 为准；上句为原文，按共享 change 纪律保留。）
 - `openapi/nhms.v1.yaml` 手工补齐 4 条新路由与 `/api/v1/layers`、`valid-times` 的形状变化（无生成器；drift 测试按等值比对），再 `pnpm generate:api` / `check:api-types`。
 - 降水 PNG 文件缓存 `precip/<storage_source>/<cycle_token>/` 与 canonical 镜像同水位剪枝。
 

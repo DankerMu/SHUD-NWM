@@ -15,10 +15,11 @@ from urllib.parse import parse_qsl, quote, urlsplit
 import pytest
 
 from scripts import node27_mvt_prewarm as prewarm
-from services.precip.mirror import horizon_valid_times
+from services.tiles.mvt import NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SYSTEMD_AUTOPIPE_TIMER = REPO_ROOT / "infra" / "systemd" / "nhms-node27-autopipe.timer"
+AUTOPIPE_CRON_SCRIPT = REPO_ROOT / "scripts" / "node27_autopipe_cron.sh"
 
 _BASE_URL = "http://127.0.0.1:8080"
 _GFS_CYCLE = "2026-09-02T12:00:00Z"
@@ -232,6 +233,7 @@ _SUMMARY_V2_KEYS = {
     "base_url",
     "zooms",
     "discharge_zooms",
+    "workers",
     "river_tile_count",
     "requests_total",
     "failed_count",
@@ -706,6 +708,80 @@ def test_the_lead_window_is_cut_by_timestamp_not_by_list_position() -> None:
     assert rc == 0
 
 
+def test_a_clamped_first_valid_time_is_warmed_from_that_entry_not_from_the_cycle() -> None:
+    """The coverage-clamped case: `/valid-times` starts well after the cycle.
+
+    `services/tiles/mvt.py:2171` sets `window_start = max(cycle, max(coverage
+    starts))`, so a source whose river coverage begins later publishes a list
+    whose FIRST entry is not the cycle instant -- and that first entry is what
+    `map-layer-timeline-controls` calls lead 0 and what the frontend opens on.
+    A cycle-anchored window would have warmed NOTHING here (the first entry is
+    15 h out, past `PREWARM_LEAD_HOURS`), at rc=0, with no counter and no
+    assertion able to see it.
+
+    The cycle is still the cycle: it is a separate dimension of the URL, and the
+    `{cycle}` path segment must stay the published cycle rather than follow the
+    anchor.
+    """
+    head_offset = timedelta(hours=15)
+    first = datetime.fromisoformat(_GFS_CYCLE) + head_offset
+    assert head_offset > timedelta(hours=prewarm.PREWARM_LEAD_HOURS), "the head offset must clear the window"
+    clamped = _steps(_instant(first), _VALID_TIME_COUNT)
+    expected_warmed = clamped[:_WARMED_VALID_TIME_COUNT]
+
+    rc, summary, warmer, _ = _run(_plan(gfs_valid_times=clamped))
+
+    gfs_urls = {url for url in warmer.urls if "/gfs/" in url}
+    assert gfs_urls == _discharge_urls("gfs", _GFS_CYCLE, expected_warmed) | _png_urls(
+        "gfs", _GFS_CYCLE, expected_warmed
+    )
+    assert {_cycle_segment(url) for url in gfs_urls} == {quote(_GFS_CYCLE, safe="")}
+    gfs = summary["per_source"]["gfs"]
+    assert gfs["cycle"] == _GFS_CYCLE
+    assert gfs["valid_times_available"] == _VALID_TIME_COUNT
+    assert gfs["valid_times_warmed"] == _WARMED_VALID_TIME_COUNT
+    assert gfs["discharge_requests"] == _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
+    # The clamped entries stay on the 3 h grid measured from the CYCLE
+    # (`mvt.py:2176` takes ceiling division on that grid), so they are still
+    # inside `horizon_valid_times(cycle)` and every one of them gets a PNG.
+    assert gfs["png_ok"] == _WARMED_VALID_TIME_COUNT
+    assert gfs["png_out_of_contract"] == 0
+    assert gfs["error"] is None
+    assert rc == 0
+
+
+@pytest.mark.parametrize(
+    "published",
+    [
+        pytest.param(_steps(_GFS_CYCLE, _VALID_TIME_COUNT), id="fully-covered"),
+        pytest.param(_steps("2026-09-03T03:00:00Z", 4), id="clamped-past-the-window"),
+        pytest.param(["2027-01-01T00:00:00Z"], id="single-far-future-entry"),
+        pytest.param(list(reversed(_steps(_GFS_CYCLE, 9))), id="descending"),
+    ],
+)
+def test_a_non_empty_published_list_always_warms_at_least_its_first_entry(published: list[str]) -> None:
+    """`valid_times_available > 0` implies `valid_times_warmed > 0`, unconditionally.
+
+    This is the property that makes the silent-zero state unreachable, which is
+    why there is no `warmed == 0` error branch to test: anchoring the window on
+    the earliest published instant means the window always contains it. An error
+    branch for a state the code cannot reach would be the same premise-as-guard
+    defect wearing a different hat.
+    """
+    rc, summary, warmer, _ = _run(_plan(gfs_valid_times=published))
+
+    gfs = summary["per_source"]["gfs"]
+    assert gfs["valid_times_available"] == len(published)
+    assert gfs["valid_times_warmed"] >= 1
+    lead_zero = min(published, key=datetime.fromisoformat)
+    assert _discharge_urls("gfs", _GFS_CYCLE, [lead_zero]) <= set(warmer.urls)
+    # Whatever else the run reports, the source itself discovered cleanly: the
+    # window is a descope, never an error.
+    assert gfs["error"] is None
+    assert summary["failed_count"] == 0
+    assert rc == (1 if gfs["png_out_of_contract"] else 0)
+
+
 def test_job_submission_interleaves_the_two_sources_lead_by_lead() -> None:
     """A deadline truncation must degrade both sources symmetrically.
 
@@ -1099,8 +1175,13 @@ def test_an_empty_zoom_set_is_rejected_before_prewarm_is_ever_called(
     assert calls == []
 
 
-def test_the_cli_defaults_are_the_module_constants_the_budget_asserts_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The budget assertions read constants; argparse must not hardcode copies."""
+def _cli_kwargs(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> dict[str, Any]:
+    """What `main(argv)` would hand `prewarm()`, with `prewarm()` stubbed out.
+
+    The production argument parser is the only thing that turns a `--zooms`
+    string into a zoom list, so every comparison below goes through it instead
+    of re-implementing the split.
+    """
     captured: dict[str, Any] = {}
 
     def _record(**kwargs: Any) -> tuple[int, dict[str, Any]]:
@@ -1108,8 +1189,13 @@ def test_the_cli_defaults_are_the_module_constants_the_budget_asserts_on(monkeyp
         return 0, {}
 
     monkeypatch.setattr(prewarm, "prewarm", _record)
+    assert prewarm.main(argv) == 0
+    return captured
 
-    assert prewarm.main([]) == 0
+
+def test_the_cli_defaults_are_the_module_constants_the_assertions_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inequality A and the cron-drift check read constants; argparse must not hardcode copies."""
+    captured = _cli_kwargs(monkeypatch, [])
 
     assert captured["workers"] == prewarm.DEFAULT_WORKERS
     assert captured["timeout"] == prewarm.DEFAULT_TIMEOUT_SECONDS
@@ -1139,37 +1225,89 @@ def test_the_default_deadline_plus_one_timeout_fits_inside_the_ingest_tick() -> 
     assert prewarm.DEFAULT_DEADLINE_SECONDS + prewarm.DEFAULT_TIMEOUT_SECONDS <= tick_seconds
 
 
-def test_the_worst_case_envelope_fits_inside_the_deadline_at_half_concurrency() -> None:
-    """Budget inequality B, recomputed from the code, with nothing hardcoded.
+def test_the_planned_envelope_is_183_requests_derived_end_to_end_from_the_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The size of the envelope prewarm PLANS, computed the way production computes it.
 
-    Cost model, all of it conservative or measured:
-      - river tiles at the measured cold river SQL (0.92 s);
-      - discharge tiles at the SLOWER of the two measured cold national tiles
-        (13.26 s), itself an upper bound because that tile (z4/12/6) is the
-        densest one in China;
-      - PNGs charged at the SAME discharge-tile upper bound, because cold PNG
-        cost is unmeasured (8 slice reads + a render is almost certainly
-        cheaper);
-      - effective concurrency assumed to be HALF of `DEFAULT_WORKERS`.
+    This replaces the deleted "worst-case cost at half concurrency" inequality,
+    which modelled the envelope with a second source for every input it needed
+    (the precipitation 3 h grid instead of the discharge stride, a hardcoded
+    river zoom list instead of the CLI default) and therefore stayed green when
+    the real envelope changed. Here every factor comes from the production path:
 
-    What this proves: changing `PREWARM_LEAD_HOURS`, `DISCHARGE_ZOOMS`,
-    `DEFAULT_WORKERS` or `DEFAULT_DEADLINE_SECONDS` forces the budget to be
-    redone. What it does NOT prove: that the cost model is right. That oracle is
-    the node-27 receipt of task 7.2 (#2017), not this assertion.
+      - the published grid steps by `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`
+        (`services/tiles/mvt.py`), which is what `/valid-times` actually emits;
+      - the window is cut by the real `select_lead_window`;
+      - the river zoom set is the one `main()`'s parser yields by default, i.e.
+        the one the cron passes;
+      - the tile counts come from `xyz_tiles`, the URL set from
+        `build_warm_url_groups` / `build_warm_urls` including its PNG gate.
+
+    So `183` is the ONLY literal here, and a change to the stride, to
+    `PREWARM_LEAD_HOURS`, to `DISCHARGE_ZOOMS`, to the river zoom default or to
+    `PREWARM_SOURCES` turns it red. What it does NOT claim is that 183 requests
+    fit inside `DEFAULT_DEADLINE_SECONDS`; that has no in-repo oracle and is
+    settled only by the node-27 receipt of task 7.2 (#2017).
     """
-    river_tiles = len(prewarm.xyz_tiles(prewarm.CHINA_BOUNDS, [3, 4, 5]))
-    discharge_tiles_per_valid_time = len(prewarm.xyz_tiles(prewarm.CHINA_BOUNDS, prewarm.DISCHARGE_ZOOMS))
-    cycle = datetime(2026, 9, 2, 12, tzinfo=UTC)
-    published = [_instant(value) for value in horizon_valid_times(cycle)]
-    # The real predicate, not a re-spelling of it, so an inclusivity change here
-    # cannot drift from the implementation.
-    warmed = len(prewarm.select_lead_window(_instant(cycle), published))
-    per_source_requests = warmed * discharge_tiles_per_valid_time + warmed
-    cost_seconds = (
-        river_tiles * prewarm.MEASURED_COLD_RIVER_TILE_SECONDS
-        + len(prewarm.PREWARM_SOURCES) * per_source_requests * prewarm.MEASURED_COLD_DISCHARGE_TILE_SECONDS
-    )
+    cycle_instant = datetime(2026, 9, 2, 12, tzinfo=UTC)
+    cycle = _instant(cycle_instant)
+    # A grid twice the lead window wide: long enough that the WINDOW is what
+    # bounds the envelope whatever the stride is, and deliberately not a model
+    # of how far the catalogue actually publishes (that length is irrelevant
+    # here -- anything strictly beyond the window gives the same answer).
+    span = timedelta(hours=2 * prewarm.PREWARM_LEAD_HOURS)
+    stride = timedelta(hours=NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS)
+    published = [_instant(cycle_instant + stride * step) for step in range(int(span / stride) + 1)]
+    warmed = prewarm.select_lead_window(published)
+    assert len(warmed) < len(published), "the synthetic grid must outrun the window, or the golden proves nothing"
 
-    # Today: (43 * 0.92 + 2 * 70 * 13.26) / 4 = 474.0 s. Every count above is
-    # recomputed from the code, so none of 43 / 13 / 5 is written down here.
-    assert cost_seconds / (prewarm.DEFAULT_WORKERS / 2) <= prewarm.DEFAULT_DEADLINE_SECONDS
+    river_zooms = _cli_kwargs(monkeypatch, [])["zooms"]
+    planned = len(prewarm.build_river_urls(_BASE_URL, prewarm.xyz_tiles(prewarm.CHINA_BOUNDS, river_zooms)))
+    for source in prewarm.PREWARM_SOURCES:
+        groups = prewarm.build_warm_url_groups(
+            _BASE_URL,
+            prewarm.xyz_tiles(prewarm.CHINA_BOUNDS, prewarm.DISCHARGE_ZOOMS),
+            source=source,
+            cycle=cycle,
+            valid_times=warmed,
+        )
+        planned += sum(len(group) for group in groups)
+
+    # 43 river + 2 x (5 x 13 discharge + 5 PNG). None of 43 / 13 / 5 appears
+    # above: they are consequences of the constants, and this is their total.
+    assert planned == 183
+
+
+def _shell_fallback(script_text: str, variable: str) -> str:
+    """The single `${VAR:-fallback}` default declared for `variable`.
+
+    Fails closed on two different fallbacks for the same variable, which is the
+    drift this would otherwise hide.
+    """
+    found = set(re.findall(rf"\$\{{{re.escape(variable)}:-([^}}]*)\}}", script_text))
+    assert len(found) == 1, f"{variable} must declare exactly one fallback, found {sorted(found)}"
+    return found.pop()
+
+
+def test_the_cron_fallbacks_match_the_module_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The deployed invocation always overrides `--workers` and `--zooms`.
+
+    `scripts/node27_autopipe_cron.sh` passes both flags on every tick, so
+    argparse's defaults are never reached in production and a drift between the
+    two files is invisible to every other test in this file. Reading the cron
+    script here is the same move `_on_unit_active_seconds` already makes for the
+    timer unit; nothing modifies it, which `tasks.md`'s Non-goals forbid.
+    This closes only the in-repo half: an operator exporting
+    `AUTOPIPE_MVT_PREWARM_WORKERS` in the deployed environment is observable
+    solely through the summary's `workers` key on the node-27 receipt (#2017).
+    """
+    cron_text = AUTOPIPE_CRON_SCRIPT.read_text(encoding="utf-8")
+
+    workers = _shell_fallback(cron_text, "AUTOPIPE_MVT_PREWARM_WORKERS")
+    zooms = _shell_fallback(cron_text, "AUTOPIPE_MVT_PREWARM_ZOOMS")
+
+    assert int(workers) == prewarm.DEFAULT_WORKERS
+    # Both strings go through the production parser rather than being compared
+    # as text, so `3,4,5` and `5,4,3` are correctly the same zoom set.
+    assert _cli_kwargs(monkeypatch, ["--zooms", zooms])["zooms"] == _cli_kwargs(monkeypatch, [])["zooms"]
