@@ -162,7 +162,7 @@ uv run nhms-production validate-object-store \
 Local #148 verification uses these fast regression commands:
 
 ```bash
-# #1912: the publication corpus is six partitioned suites; the core path alone is
+# #1912/#1903: the publication corpus is seven partitioned suites; the core path alone is
 # no longer the corpus and must never be used as shorthand for it.
 openspec validate m10-production-closure --strict --no-interactive
 .venv/bin/ruff check \
@@ -175,6 +175,7 @@ openspec validate m10-production-closure --strict --no-interactive
   tests/test_basins_package_publication.py \
   tests/test_basins_package_publication_failures.py \
   tests/test_basins_package_publication_refusal.py \
+  tests/test_basins_package_publication_rivseg.py \
   tests/test_basins_package_publication_toctou.py \
   tests/basins_package_helpers.py \
   docs/validation/production-closure.md
@@ -185,6 +186,7 @@ openspec validate m10-production-closure --strict --no-interactive
   tests/test_basins_package_publication.py \
   tests/test_basins_package_publication_failures.py \
   tests/test_basins_package_publication_refusal.py \
+  tests/test_basins_package_publication_rivseg.py \
   tests/test_basins_package_publication_toctou.py \
   tests/test_basins_registry_import.py \
   tests/test_basins_registry_import_auth.py \

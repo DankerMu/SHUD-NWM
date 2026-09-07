@@ -73,7 +73,7 @@ passes; deterministic MVT evidence alone must not set
 Focused M9 Basins closeout checks:
 
 ```bash
-# #1912: the publication corpus is six partitioned suites; the core path alone is
+# #1912/#1903: the publication corpus is seven partitioned suites; the core path alone is
 # no longer the corpus and must never be used as shorthand for it.
 # #1913: the registry-import corpus is seven partitioned suites; its retained
 # historical path alone is likewise no longer the corpus.
@@ -84,6 +84,7 @@ uv run pytest -q \
   tests/test_basins_package_publication.py \
   tests/test_basins_package_publication_failures.py \
   tests/test_basins_package_publication_refusal.py \
+  tests/test_basins_package_publication_rivseg.py \
   tests/test_basins_package_publication_toctou.py \
   tests/test_basins_registry_import.py \
   tests/test_basins_registry_import_auth.py \
@@ -483,6 +484,7 @@ NHMS_RUN_BASINS_SMOKE=1 uv run pytest -q \
   tests/test_basins_package_publication.py \
   tests/test_basins_package_publication_failures.py \
   tests/test_basins_package_publication_refusal.py \
+  tests/test_basins_package_publication_rivseg.py \
   tests/test_basins_package_publication_toctou.py
 ```
 
