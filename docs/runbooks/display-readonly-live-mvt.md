@@ -103,7 +103,15 @@ cycle-aware）：
 `services/tiles/mvt.py:2171` 的 `window_start = max(cycle, max(start …))` 一旦 clamp，
 首项就晚于 cycle。锚在 cycle 的旧口径下，一个首项比 cycle 晚 12 h 以上的源会**一条都预热不到**
 且 rc=0；锚在首项之后，「发布了至少一个时次就至少预热一个」是有断言的代码性质。
-clamp 后的时次仍在以 cycle 为原点的 3 h 网格上，因此照常有降水 PNG。
+clamp 后的时次仍落在以 cycle 为原点的 3 h 网格上；**只要它同时还在 168 h 的 PNG horizon 之内**
+（`horizon_valid_times` 只列到 `cycle+168h`，见 `services/precip/mirror.py:106-115` 与
+`services/precip/constants.py:30` 的 `PRECIP_FORECAST_HORIZON_HOURS`），就照常有降水 PNG。
+**「在 3 h 网格上」并不蕴含「在 horizon 之内」**：网格没有上界而 horizon 有，`cycle+171h` 就是
+一个在网格上、却在 horizon 之外的时次。真出现这种时次时按下文的越界口径走——该时次的 PNG
+不发、计入 `png_out_of_contract` 并置非零退出码，汇总照常打印，这是**有意的吵闹**，不是脚本 bug。
+另注：「以 cycle 为原点的 3 h 网格」本身依赖
+`NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`（`services/tiles/mvt.py:122`）与
+`PRECIP_STEP_HOURS`（`services/precip/constants.py:28`）这两个各自声明的 3 相等，仓内没有断言把它们锁在一起。
 
 某源 `default_cycle` 为 `null` 是合法终态（该源零请求）；`default_cycle` 有值但
 `valid-times` 返回 `[]` 则是**两跳互不一致**：`/cycles` 逐候选周期先算一遍
@@ -135,8 +143,8 @@ deadline 命中时两源对称降级，而不是永远截断同一个源的默�
 `tests/test_node27_mvt_prewarm.py`。**(A) 说的是「prewarm 的预算不大于 tick 周期」，
 不是「整个 tick 装得下」**——prewarm 是同一把 `flock` 里 ingest → coverage backstop →
 prewarm 三个串行阶段的第三个。真跑超时的后果是**下一个 tick 被 `flock -n` 跳过**
-（`scripts/node27_autopipe_cron.sh:185-186` 记一行 “previous run still active, skipping tick”
-后 exit 0；`infra/systemd/nhms-node27-autopipe.service` 是 `Type=oneshot` +
+（`scripts/node27_autopipe_cron.sh:185-186` 取非阻塞锁失败后，`:187` 记一行
+“previous run still active, skipping tick”、`:188` exit 0；`infra/systemd/nhms-node27-autopipe.service` 是 `Type=oneshot` +
 `TimeoutStartSec=0`，没有任何东西会掐掉长跑），即**有界、有日志的节奏降级**，不是堆积或丢数据。
 
 540 这个数字背后的成本估算是 **UNVERIFIED 的**，只写在这里与 `tasks.md` 设计点 🔟 的 prose 里，

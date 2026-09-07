@@ -850,6 +850,12 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # apps/api/routes/hydro_display.py.
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
+        # #2013: guard-derived entry, synced from the selector's own output per
+        # the procedure above — the prewarm envelope assertion imports
+        # NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS from services.tiles.mvt at
+        # file level, so the closure guard puts it on this rule as a DIRECT
+        # importer.
+        "tests/test_node27_mvt_prewarm.py",
         "tests/test_node27_timeseries_compression_benchmark.py",
         "tests/test_node27_timeseries_compression_live_evidence.py",
         "tests/test_openapi_31_contract.py",

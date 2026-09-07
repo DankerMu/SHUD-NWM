@@ -741,9 +741,19 @@ def test_a_clamped_first_valid_time_is_warmed_from_that_entry_not_from_the_cycle
     assert gfs["valid_times_available"] == _VALID_TIME_COUNT
     assert gfs["valid_times_warmed"] == _WARMED_VALID_TIME_COUNT
     assert gfs["discharge_requests"] == _DISCHARGE_TILE_COUNT * _WARMED_VALID_TIME_COUNT
-    # The clamped entries stay on the 3 h grid measured from the CYCLE
-    # (`mvt.py:2176` takes ceiling division on that grid), so they are still
-    # inside `horizon_valid_times(cycle)` and every one of them gets a PNG.
+    # These clamped entries are on the 3 h grid measured from the CYCLE
+    # (`mvt.py:2178` takes ceiling division on that grid) AND inside the 168 h
+    # PNG horizon -- cycle+15h .. cycle+27h -- so every one of them gets a PNG.
+    # Being on the grid is NOT on its own sufficient: `horizon_valid_times`
+    # stops at cycle+168h (`services/precip/mirror.py:106-115`), so a grid
+    # instant beyond that is out of contract. The `single-far-future-entry`
+    # parametrization below is exactly that case, and it lands in
+    # `png_out_of_contract` at rc=1. What is pinned here is this window, not the
+    # general implication. Even the grid claim holds only while
+    # `NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS`
+    # (`services/tiles/mvt.py:122`) equals `PRECIP_STEP_HOURS`
+    # (`services/precip/constants.py:28`) -- two independently declared 3s, with
+    # no assertion coupling them.
     assert gfs["png_ok"] == _WARMED_VALID_TIME_COUNT
     assert gfs["png_out_of_contract"] == 0
     assert gfs["error"] is None
@@ -830,6 +840,29 @@ def test_summary_v2_key_set_and_accounting_identity() -> None:
         assert "error_reason" in entry
     # The whole summary stays JSON-serialisable, exactly as `main()` prints it.
     json.dumps(summary, ensure_ascii=False, sort_keys=True)
+
+
+def test_the_summary_reports_the_effective_worker_count_not_the_module_default() -> None:
+    """`workers` must round-trip the PARAMETER, not `DEFAULT_WORKERS`.
+
+    The deployed invocation always overrides `--workers`
+    (`scripts/node27_autopipe_cron.sh`), so this key is the only thing that can
+    tell the #2017 receipt what concurrency actually ran. A silent fallback to
+    the module constant would make the receipt read 8 against a deployed 2 and
+    record round-3 B-2 closed on a value production never uses. Membership in
+    `_SUMMARY_V2_KEYS` proves the key exists; only this proves its value.
+
+    Two distinct counts, both different from `DEFAULT_WORKERS`, so neither the
+    constant nor any single hardcoded literal can satisfy it.
+    """
+    _, four, _, _ = _run(_plan(), workers=4)
+    _, one, _, _ = _run(_plan(), workers=1)
+
+    assert (four["workers"], one["workers"]) == (4, 1)
+    assert prewarm.DEFAULT_WORKERS not in {4, 1}, (
+        f"DEFAULT_WORKERS drifted to {prewarm.DEFAULT_WORKERS}; pick fixture counts that still "
+        "discriminate the parameter from the constant"
+    )
 
 
 def test_discovery_requests_force_a_display_catalog_refresh(monkeypatch: pytest.MonkeyPatch) -> None:

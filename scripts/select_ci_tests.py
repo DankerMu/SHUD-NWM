@@ -1792,6 +1792,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_hhe_mvt_binding.py",
             "tests/test_hydro_display_mvt_scaling.py",
+            # #2013: same guard-derived provenance — the prewarm suite imports
+            # NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS from services.tiles.mvt
+            # at file level (issue #2013's planned-envelope assertion steps the
+            # published valid-time grid with it, so a stride change reds the
+            # envelope count), which makes it a DIRECT non-gated importer here.
+            # Its own entry, not one of the "eight below" above: the list is
+            # sorted, so it is INTERPOSED among them by position only and the
+            # #1597 census stays true.
+            "tests/test_node27_mvt_prewarm.py",
             "tests/test_node27_timeseries_compression_benchmark.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_openapi_31_contract.py",

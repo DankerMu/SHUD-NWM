@@ -3590,3 +3590,52 @@ receipt line in the deployment task, not an assertion shaped like a guarantee.
 
 Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
 a maintainer override.
+
+## Revisit 2026-09-07 (post PR #2117 round 4, same issue #2013) — an oracle is only as good as its routing
+
+Third gate entry on the same PR, same failure shape (depth), recorded in
+`.workplans/pr-2117/review/review-failure-retro-3.md`. The instruction written
+above was executed completely and correctly: the parallel cost model was
+deleted, and the replacement — an assertion on the planned envelope size that
+walks the production path end to end — consumes exactly the inputs production
+consumes. Round 4 re-derived it from a standalone interpreter and confirmed that
+every input it names moves the number off 183, the stride included. The
+assertion is a real oracle by the previous rule, and it still failed to protect
+anything.
+
+### The third generalization (cumulative with the two above, not a replacement)
+
+**An oracle is only as good as its routing. A test that is red-capable but
+unreachable from the diff that would break it is not a guard.** Verifying a new
+oracle therefore means demonstrating that the lane which will run it actually
+selects it — not that it goes red when you run it by hand.
+
+Worked example, round-4 C-1. The envelope assertion imports
+`NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS` from `services/tiles/mvt.py`
+precisely so that a stride change reds the count. But
+`scripts/select_ci_tests.py` was never extended with the new importer edge, so a
+PR changing only that constant did not select
+`tests/test_node27_mvt_prewarm.py`. The assertion was correct, cited, red-capable
+on demand, and absent from the one diff it existed to catch. That is the previous
+rule one layer out: the previous rule governs an oracle's *inputs*, this one
+governs its *reachability*.
+
+Two consequences worth stating separately, because they are what a fix pass has
+to actually do:
+
+- **A new cross-module import in a test file is a routing change, not just an
+  import.** Where the repository has a closure guard, it will say so; where it
+  does not, nothing will. Adding the import and running the suite proves the
+  assertion works and proves nothing about whether it will ever run.
+- **A hand-picked file list is not evidence.** The round-4 fix pass reported
+  "163 + 54 + 96 passed" against four suites it chose itself, and could not see
+  that it had broken the closure guard, because the lane appends the selector
+  meta-guard suite unconditionally for any changed `tests/**` file
+  (`scripts/select_ci_tests.py:3266-3270`) and that was the one suite the list
+  omitted. Reproduce the lane's own selection over the PR diff and run exactly
+  that set. This is now an explicit Evidence Floor line in
+  `openspec/changes/display-v2-national-timeline-precip-overlay/tasks.md`
+  (group 7).
+
+Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
+a maintainer override.
