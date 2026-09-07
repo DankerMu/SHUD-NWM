@@ -7,9 +7,16 @@ database and is safe to run after every idempotent autopipeline tick.
 Envelope (per `precipitation-raster-overlay`'s prewarm requirement): the
 national river network at `--zooms` (unchanged), plus -- for each of `gfs` and
 `ifs`, at that source's OWN newest cycle -- the z3-z4 China discharge tiles for
-every valid time of that cycle and one precipitation PNG per valid time. A
-source with no cycle contributes zero requests; a source whose discovery FAILS
-is a different terminal state and is reported as an error.
+the valid times inside `PREWARM_LEAD_HOURS` of that cycle, and one precipitation
+PNG per such valid time. A source with no cycle contributes zero requests; a
+source whose discovery FAILS is a different terminal state and is reported as an
+error.
+
+The lead window is a DESCOPE, not a fix: the published timeline does not fit
+inside one ingest tick at the measured cold tile cost, so the valid times beyond
+the window stay cold reads. The budget that fixes the window's width is on
+`DEFAULT_DEADLINE_SECONDS` below; the known limit is spelled out in
+`docs/runbooks/display-readonly-live-mvt.md`.
 
 The whole run is bounded by `--deadline-seconds` as well as by the per-request
 `--timeout`: once the deadline passes the remaining requests are abandoned
@@ -27,7 +34,7 @@ import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -51,8 +58,17 @@ PREWARM_SOURCES = ("gfs", "ifs")
 # Fixed by the spec, NOT `zooms & {3, 4}`: an operator setting
 # AUTOPIPE_MVT_PREWARM_ZOOMS=5,6,7 must not silently warm zero discharge tiles.
 DISCHARGE_ZOOMS = (3, 4)
-# `apps/api/display_cache.py`: /cycles and /valid-times are catalog-cached with a
-# 60 s TTL and 600 s stale-while-revalidate, and prewarm runs right after publish.
+# /cycles and /valid-times are served from the display process catalog cache for
+# up to 600 s: `DISPLAY_CATALOG_STALE_MAX_SECONDS`
+# (`apps/api/display_cache.py:29`) is the ONLY freshness check on the hit path
+# (`apps/api/display_cache.py:90`), and paths touched within the last 1800 s
+# (`apps/api/display_cache.py:31`) are re-warmed every 45 s by the background
+# loop (`apps/api/display_cache.py:30`, both read in `_warm_loop`,
+# `apps/api/display_cache.py:163` and `:169`). `:28` also defines a 60 s TTL
+# constant, but `display_catalog_cached` never reads it -- "fresh vs stale" is
+# not a distinction the code makes. Prewarm runs right after publish and must
+# bypass that window, so `fetch_json` sends this header with the value `refresh`,
+# the only value that forces a reload (`apps/api/display_cache.py:32`, `:54`).
 CACHE_WARM_HEADER = "x-nhms-cache-warm"
 PRECIP_WINDOW_INCOMPLETE = "PRECIP_WINDOW_INCOMPLETE"
 PRECIP_CYCLE_NOT_MIRRORED = "PRECIP_CYCLE_NOT_MIRRORED"
@@ -67,14 +83,52 @@ EXPECTED_NOT_MIRRORED_REASON = "cycle_not_mirrored"
 # `services/precip/mirror.py`'s `no_mirrored_cycle_before_window_end`).
 # `_slice_invalid_error` reuses the SAME code for the 14 `grid_definition_*` /
 # `slice_*` reasons of `services/precip/field.py`, every one of which is a data
-# or deployment fault -- a missing `grid.json` would otherwise turn all 57 of a
-# source's PNGs into a silent `rc=0`.
+# or deployment fault -- a missing `grid.json` would otherwise turn every one of
+# a source's PNGs into a silent `rc=0`.
 EXPECTED_WINDOW_INCOMPLETE_REASONS = frozenset({"missing_slice", "no_mirrored_cycle_before_window_end"})
-# Half the 600 s ingest timer period this script is invoked from, so one
-# degraded run cannot span several ticks. `--timeout` bounds ONE socket
-# operation; at 8 workers the 1639-request envelope's per-request worst case is
-# ~102 min, which is why the run needs a total wall-clock bound of its own.
-DEFAULT_DEADLINE_SECONDS = 300.0
+# The cycle-anchored lead window the envelope is cut to. Anchored on the cycle
+# instant rather than the wall clock because the frontend's default timeline
+# position is the cycle start (`map-layer-timeline-controls`; implemented in
+# `apps/frontend/src/lib/m11/overviewDataContracts.ts::pickCurrentValidTime`),
+# so a cycle-anchored window is the one that covers the default view. 12 h on
+# the published 3 h grid is 5 valid times per source; the value is DERIVED from
+# the budget below, not chosen -- 15 h (6 valid times) does not fit.
+PREWARM_LEAD_HOURS = 12
+# Nominal pool width. Kept as a constant, not an argparse literal, so the budget
+# assertions can read the number they are constraining.
+DEFAULT_WORKERS = 8
+# Per-SOCKET-OPERATION bound, not a bound on the run.
+DEFAULT_TIMEOUT_SECONDS = 30.0
+# Measured cold cost of one national z4 discharge tile: the slower of the two
+# runs in `docs/runbooks/receipts/2026-09-05-issue-2009-discharge-cycles-node27.md`
+# (gfs 11.63 s, ifs 13.26 s) on z4/12/6, which is the densest tile over China --
+# so it is an UPPER bound on the mean of the 13-tile set, not an average.
+MEASURED_COLD_DISCHARGE_TILE_SECONDS = 13.26
+# Measured cold cost of one national river-network tile:
+# `docs/runbooks/receipts/2026-07-20-node27-display-scaling.md`
+# ("基础河网 cold SQL 首次 918.182 ms").
+MEASURED_COLD_RIVER_TILE_SECONDS = 0.92
+# DERIVED, not chosen, and pinned by two assertions in the test suite:
+#   A. `DEFAULT_DEADLINE_SECONDS + DEFAULT_TIMEOUT_SECONDS <= OnUnitActiveSec`
+#      (600 s, `infra/systemd/nhms-node27-autopipe.timer`), so one degraded run
+#      cannot span several ingest ticks.
+#   B. the worst-case envelope at HALF the nominal concurrency fits inside it:
+#      `(43 * 0.92 + 2 * 70 * 13.26) / (8 / 2) = 474.0 s <= 540`.
+#      Two of B's inputs are UNVERIFIED; each is absorbed by a stated margin:
+#      - cold PNG cost: UNVERIFIED, nothing in this repo measures it. Margin:
+#        the per-source factor is 70 (65 tiles + 5 PNGs), i.e. every PNG is
+#        charged at `MEASURED_COLD_DISCHARGE_TILE_SECONDS` -- an 8-slice read
+#        plus one render is very unlikely to cost more than the densest
+#        national discharge tile.
+#      - linear scaling of the worker pool: UNVERIFIED, not measurable locally
+#        (8 prewarm workers against 2 uvicorn workers,
+#        `infra/systemd/nhms-display-api.service:9`, each with pool_size 4 +
+#        max_overflow 2, `apps/api/routes/hydro_display.py:206-207`). Margin:
+#        the divisor is `DEFAULT_WORKERS / 2`, i.e. only half the nominal
+#        concurrency is assumed to be realised.
+# Neither the deadline nor the cost model is claimed to be measured end to end;
+# the oracle for the model is the node-27 receipt of task 7.2 (#2017).
+DEFAULT_DEADLINE_SECONDS = 540.0
 
 
 @dataclass(frozen=True)
@@ -157,6 +211,22 @@ def discover_source(
     return SourceDiscovery(cycle=cycle, valid_times=tuple(values))
 
 
+def select_lead_window(cycle: str, valid_times: Sequence[str]) -> list[str]:
+    """The valid times inside `[cycle, cycle + PREWARM_LEAD_HOURS]`, in input order.
+
+    BY TIMESTAMP, never `valid_times[:N]`: neither the ordering nor the step of
+    `/valid-times` is a property this script may assume, and a fixed-length
+    prefix would turn "the list happens to be a sorted 3 h grid today" into yet
+    another premise-as-guard.
+
+    The valid times outside the window are a recorded DESCOPE -- not failures,
+    not `png_out_of_contract`. They stay cold reads; see the module docstring.
+    """
+    cycle_instant = _parse_instant(cycle)
+    window_end = cycle_instant + timedelta(hours=PREWARM_LEAD_HOURS)
+    return [value for value in valid_times if cycle_instant <= _parse_instant(value) <= window_end]
+
+
 def partition_png_valid_times(cycle: str, valid_times: Sequence[str]) -> tuple[list[str], list[str]]:
     """Split `valid_times` into the PNG-requestable ones and the rest.
 
@@ -213,6 +283,27 @@ def build_warm_urls(
         if valid_time in requestable:
             urls.append(f"{root}/api/v1/precip/{encoded_source}/{encoded_cycle}/{encoded_time}.png")
     return urls
+
+
+def build_warm_url_groups(
+    base_url: str,
+    tiles: Iterable[tuple[int, int, int]],
+    *,
+    source: str,
+    cycle: str,
+    valid_times: Sequence[str],
+) -> list[list[str]]:
+    """One group per valid time, in `valid_times` order.
+
+    Grouping exists so the two sources can be submitted lead by lead: with a
+    source-major job list a deadline hit always truncates the SAME source,
+    including its lead-0 default view.
+    """
+    tiles = list(tiles)
+    return [
+        build_warm_urls(base_url, tiles, source=source, cycle=cycle, valid_times=[valid_time])
+        for valid_time in valid_times
+    ]
 
 
 def warm_url(url: str, timeout: float) -> WarmResult:
@@ -291,23 +382,30 @@ def prewarm(
 
     jobs = [WarmJob(url=url, source=None, kind="river") for url in build_river_urls(base_url, river_tiles)]
     per_source: dict[str, dict[str, Any]] = {}
+    source_groups: dict[str, list[list[str]]] = {}
     for source in PREWARM_SOURCES:
         entry = _new_source_entry()
         per_source[source] = entry
-        source_urls: list[str] = []
+        source_groups[source] = []
         try:
             discovery = discover_source(base_url, source, timeout=timeout, fetch_json=fetch_json)
             entry["cycle"] = discovery.cycle
-            entry["valid_times"] = len(discovery.valid_times)
+            entry["valid_times_available"] = len(discovery.valid_times)
             if discovery.cycle is not None:
-                out_of_contract = partition_png_valid_times(discovery.cycle, discovery.valid_times)[1]
+                # The lead cut happens FIRST: everything downstream -- the PNG
+                # request-shape gate, the URL set, every per-source counter --
+                # sees only the warmed window. A valid time the window dropped
+                # is a descope, so it must not surface as `png_out_of_contract`.
+                warmed = select_lead_window(discovery.cycle, discovery.valid_times)
+                entry["valid_times_warmed"] = len(warmed)
+                out_of_contract = partition_png_valid_times(discovery.cycle, warmed)[1]
                 entry["png_out_of_contract"] = len(out_of_contract)
-                source_urls = build_warm_urls(
+                source_groups[source] = build_warm_url_groups(
                     base_url,
                     discharge_tiles,
                     source=source,
                     cycle=discovery.cycle,
-                    valid_times=discovery.valid_times,
+                    valid_times=warmed,
                 )
         except Exception as exc:
             # Per-source isolation by exception CLASS, not by an allow-list of
@@ -324,8 +422,20 @@ def prewarm(
             # horizon partition and URL construction.
             entry["error"] = f"{type(exc).__name__}: {exc}"
             continue
-        for url in source_urls:
-            jobs.append(WarmJob(url=url, source=source, kind="png" if url.endswith(".png") else "discharge"))
+
+    # Lead-major, source-interleaved submission: river tiles, then
+    # `(k=0 gfs, k=0 ifs, k=1 gfs, k=1 ifs, ...)`, with one valid time's 13
+    # discharge tiles and its PNG kept together. `executor.map` is FIFO, so a
+    # source-major list would make every deadline truncation fall on the same
+    # source -- and its lead-0 group is the frontend's default view. This only
+    # reorders an existing list: per-source attribution, the summary identity
+    # and the `zip(jobs, outcomes, strict=True)` pairing are untouched.
+    for index in range(max((len(groups) for groups in source_groups.values()), default=0)):
+        for source, groups in source_groups.items():
+            if index >= len(groups):
+                continue
+            for url in groups[index]:
+                jobs.append(WarmJob(url=url, source=source, kind="png" if url.endswith(".png") else "discharge"))
 
     def run_job(job: WarmJob) -> WarmResult | None:
         """One pool task. `None` means "not issued": the deadline had passed.
@@ -391,6 +501,7 @@ def prewarm(
         "elapsed_seconds": round(clock() - started, 3),
         "deadline_seconds": deadline_seconds,
         "deadline_skipped": deadline_skipped,
+        "lead_hours": PREWARM_LEAD_HOURS,
         "per_source": per_source,
     }
     rc = 1 if (failed or discovery_failed or out_of_contract or deadline_skipped) else 0
@@ -400,7 +511,11 @@ def prewarm(
 def _new_source_entry() -> dict[str, Any]:
     return {
         "cycle": None,
-        "valid_times": 0,
+        # `available` is what `/valid-times` published; `warmed` is what
+        # survived the lead cut. Both are in the summary so the receipt can SEE
+        # how much was descoped instead of inferring it from the request total.
+        "valid_times_available": 0,
+        "valid_times_warmed": 0,
         "discharge_requests": 0,
         "png_ok": 0,
         "png_not_mirrored": 0,
@@ -468,8 +583,10 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--zooms", default="3,4,5", help="river-network zoom set only; discharge is pinned to z3-z4")
-    parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--timeout", type=float, default=30.0, help="per-request socket timeout")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
+    parser.add_argument(
+        "--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="per-request socket timeout"
+    )
     parser.add_argument(
         "--deadline-seconds",
         type=float,

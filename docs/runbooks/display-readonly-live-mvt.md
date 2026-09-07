@@ -84,27 +84,62 @@ node-27 autopipeline 每次 publish/coverage 后调用
 cycle-aware）：
 
 - 基础河网 `river-network-national` z3/z4/z5（`--zooms`，语义不变——该路由无
-  source/cycle 维度）；
+  source/cycle 维度），43 张；
 - `gfs` 与 `ifs` **各自**经 `GET /api/v1/layers/discharge/cycles?source=` 发现自己的
-  最新周期，对该周期 `valid-times` 的**每一个时次**预热 z3/z4 全国流量瓦片
-  （`DISCHARGE_ZOOMS`，固定，不随 `--zooms` 变）；
-- 每个时次一张降水 PNG `/api/v1/precip/{source}/{cycle}/{valid_time}.png`。
+  最新周期，对该周期 `valid-times` 中**落在 cycle 起算 `PREWARM_LEAD_HOURS`（12 h）
+  窗口内**的时次预热 z3/z4 全国流量瓦片（`DISCHARGE_ZOOMS`，固定，不随 `--zooms`
+  变）；3 h 网格上即每源 5 个时次 × 13 张 = 65 张；
+- 窗口内每个时次一张降水 PNG `/api/v1/precip/{source}/{cycle}/{valid_time}.png`，
+  每源 5 张。
+
+合计每轮 43 + 2 × 70 = **183** 条预热请求。窗口按**时间戳**截断（`select_lead_window`），
+不是取列表前 N 项——`/valid-times` 的排序与步长都不是本脚本可以假设的事实。窗口锚在
+cycle 而不是墙钟，因为前端默认时次就是 cycle 起点。
 
 某源 `default_cycle` 为 `null` 是合法终态（该源零请求）；`default_cycle` 有值但
-`valid-times` 为空（clamp 后覆盖窗口为空）同样是合法终态；发现失败是**另一种**终态，
+`valid-times` 返回 `[]` 则是**两跳互不一致**：`/cycles` 逐候选周期先算一遍
+`_national_cycle_valid_times`，时次列表为空的周期直接 `continue`
+（`services/tiles/mvt.py:1985-1987`），
+所以 `default_cycle` 不可能是这种周期；真正的来源是两跳之间的**发布竞态**（同周期重跑
+落地而 `run_display_coverage` 矩形尚未补齐，`mvt.py:2129-2135` 返回 `None`），下个 tick
+自愈，故保持 rc 不变——**有记录、不告警**（`scripts/node27_autopipe_cron.sh:244` 每 tick
+把整份汇总 JSON 写进 `$LOG`，`:245` 只在失败时另加一行）。发现失败是**另一种**终态，
 按源记 `per_source[<s>].error` 并置非零退出码，另一源照常预热。汇总 schema 为
-`nhms.node27-mvt-prewarm.v2`，含 `requests_total`（只计预热请求，不含发现请求）与
-`elapsed_seconds`。同一 cache key 由跨进程 `flock` single-flight
-保护，多 worker 和预热并发不会重复执行 PostGIS 生成。
+`nhms.node27-mvt-prewarm.v2`，含 `requests_total`（只计预热请求，不含发现请求）、
+`elapsed_seconds`、`lead_hours`，以及每源的 `valid_times_available`（目录发布了多少个
+时次）与 `valid_times_warmed`（截断后实际预热多少个）——两者相等才说明整条时间轴都热。
+job 提交顺序是河网优先、之后双源按 lead 交错（`k=0 gfs, k=0 ifs, k=1 gfs, …`），这样
+deadline 命中时两源对称降级，而不是永远截断同一个源的默认视图。**MVT 瓦片**同一 cache key
+由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py:260-280`；唯一调用点
+`apps/api/routes/hydro_display.py:689` 在持锁后二次查缓存），多 worker 与预热并发不会
+重复执行 PostGIS 生成。该保护有前提：`NHMS_MVT_FILE_CACHE_DIR` 未配置时
+`_file_cache_lock_path` 返回 `None`（`services/tiles/mvt.py:2338`），
+`tile_generation_lock` 直接 `yield`（`services/tiles/mvt.py:271-273`），只剩进程内
+线程锁；生产由
+`infra/systemd/nhms-display-api.service:9` 的默认值兜住。**降水 PNG 不在此保护内**：
+跨 worker 的文件缓存竞争是 by design 的无锁双写（D4，`services/precip/field.py:113-115`），
+靠确定性渲染让两个写者产出相同字节。
 
-整轮预热另有**总墙钟上限** `--deadline-seconds`（默认 300 s，即 ingest timer 周期
-600 s 的一半）：`--timeout` 只管单个 socket 操作，包络放大到 1639 条后 8 并发的最坏
-值可达约 102 min、横跨十个 tick。越界后剩余请求**不再发起**（不是取消在途请求），
-计入汇总的 `deadline_skipped`，退出码非 0；`requests_total` 只计实际发起的请求，故
-`requests_total + deadline_skipped` 才是本轮计划的请求总数。退出码为 0 当且仅当
-`failed_count == 0`、所有 `per_source[<s>].error` 为 `null`、所有
+整轮预热另有**总墙钟上限** `--deadline-seconds`（默认 540 s）：`--timeout`（默认 30 s）
+只管单个 socket 操作。540 是**反推**出来的，不是拍脑袋——两条不等式都有断言钉在
+`tests/test_node27_mvt_prewarm.py`：(A) `540 + 30 ≤ 600`，600 s 是
+`infra/systemd/nhms-node27-autopipe.timer` 的 `OnUnitActiveSec`，保证一轮降级跑不会横跨
+多个 tick；(B) 最坏成本按半并发核算 `(43 × 0.92 + 2 × 70 × 13.26) / (8 / 2) ≈ 474 s
+≤ 540`。**这两条断言只证明「谁动了包络就必须重做预算」，不证明预算一定够**：成本模型本身
+的 oracle 是 node-27 实跑 receipt（task 7.2 / #2017）。越界后剩余请求**不再发起**（不是
+取消在途请求），计入汇总的 `deadline_skipped`，退出码非 0；`requests_total` 只计实际发起
+的请求，故 `requests_total + deadline_skipped` 才是本轮计划的请求总数。退出码为 0 当且仅
+当 `failed_count == 0`、所有 `per_source[<s>].error` 为 `null`、所有
 `png_out_of_contract == 0` 且 `deadline_skipped == 0`；`rc=2` 只留给进程级失败
 （参数错误一类），此时打印的是一行式失败信封而不是完整汇总。
+
+> **已知代价（不粉饰）**：`PREWARM_LEAD_HOURS` 之外的时次**不预热**，仍是**每张约十秒量级
+> 的冷读**——目录发布 56 个时次，预热只覆盖 cycle 起 12 h 内的那 5 个。lead 窗口是绕开「单张全国流量瓦片
+> 229.5 ms（`docs/runbooks/receipts/2026-07-20-node27-display-scaling.md`）→ 11.63 s
+> （`docs/runbooks/receipts/2026-09-05-issue-2009-discharge-cycles-node27.md`）」这个
+> pre-existing 回归的**权宜**，不是修好了它；修那个成本回归超出 #2013 范围。包络自身的成本
+> 模型也只有 node-27 实跑 receipt（task 7.2 / #2017）才能定论，在那之前上面的 474 s 是
+> 推算值而不是实测值。
 
 ## node-27 Live Receipt（2026-06-08，本机实测）
 

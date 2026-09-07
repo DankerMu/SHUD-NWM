@@ -3475,3 +3475,66 @@ Two observations for the next revisit, neither sufficient to change policy alone
    diversity.
 
 Next revisit on the audit's next flag or a maintainer override.
+
+## Revisit 2026-09-07 (post PR #2117 / issue #2013) — the exemption rule was too narrow
+
+No audit flag this time. This entry records a **scope correction to the standing
+instruction proposed in the previous revisit**, because PR #2117 falsified it by
+counter-example within the same session that wrote it.
+
+The previous revisit proposed: *an exemption clause in the fixture must carry a
+checkable basis, and a reviewer may treat an uncheckable exemption as a finding.*
+That rule was applied in #2117's fixture — design point 4️⃣ exempts the national
+river-network prewarm from the per-source rewrite and cites
+`_NATIONAL_RIVER_NETWORK_METADATA`'s `required_placeholders == [z, x, y]` as its
+checkable basis. That clause held under three rounds of review.
+
+Two other fixture sentences in the same document did not, and neither was an
+exemption clause:
+
+- Design point 9️⃣ set the run's wall-clock deadline default to 300 s, justified
+  by "冷周期约 1 min". That quantity has no source anywhere in the repo; the only
+  measured figure is 11.63 s / 13.26 s per canonical z4 national discharge tile
+  (`docs/runbooks/receipts/2026-09-05-issue-2009-discharge-cycles-node27.md`).
+  The 1-minute figure is the v1 envelope's magnitude, applied to an envelope
+  19× larger. Round-2 verified P1.
+- Design point 7️⃣ declared a third terminal state "legal" because "the clamped
+  window is empty". `services/tiles/mvt.py:1985-1987` filters exactly those
+  cycles out of `cycles[]`, so `default_cycle` can never be one. The false
+  premise was then copied into a runbook paragraph and a test docstring.
+  Round-2 verified finding.
+
+Both are the same invariant the Same-invariant gate fired on at #2101
+(*premise-as-guard*: a safety property resting on a claim rather than a guard).
+The exemption-clause rule did not catch them because it named the wrong carrier.
+An exemption clause is one place a fixture asserts something about the backend;
+a **justification** for a constant, a threshold, or a terminal-state
+classification is another, and it is load-bearing in exactly the same way — every
+seat in every round inherits it from the same document as the implementer.
+
+### The generalized instruction
+
+Any **quantity** or **backend behaviour** asserted in a fixture, spec delta,
+code comment, or test docstring must either
+
+1. cite `file:line` or a receipt path, or
+2. be labelled `UNVERIFIED`, in which case **no default, threshold, or exemption
+   may be derived from it** — a budget that needs it must state a margin rule
+   over the labelled uncertainty and pin the arithmetic in an assertion.
+
+A reviewer may treat an unlabelled, uncited quantity or behavioural claim as a
+finding, exactly as with an uncheckable exemption.
+
+#2117's corrective fix demonstrates the shape: `PREWARM_LEAD_HOURS` and
+`DEFAULT_DEADLINE_SECONDS` are derived from two measured constants (each with its
+receipt cited at the definition site) plus two explicitly `UNVERIFIED` inputs —
+cold PNG cost, and whether eight prewarm workers scale linearly against the
+display API — which are absorbed by charging PNGs at the discharge-tile upper
+bound and budgeting at half the nominal worker count. Two tests re-derive the
+inequalities, so raising the window, the zoom set, or the worker default turns
+red. Those tests prove the *re-derivation*, not the model; the model's oracle is
+the node-27 receipt (task 7.2 / #2017), and neither the PR body nor the runbook
+may claim more.
+
+Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
+a maintainer override.
