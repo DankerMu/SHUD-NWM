@@ -3707,3 +3707,42 @@ whether the requirement it serves was ever written down.**
 
 Rotation itself is unchanged: **keep**. Next revisit on the audit's next flag or
 a maintainer override.
+
+## Revisit 2026-09-07 (post-merge PR #2117 / issue #2013) — audit flag, decision keep, with this PR as a counter-datum
+
+`loop_log_audit.py` flags the lens-rotation question DECIDABLE again with PR #2117's
+line included: 182 multi-round merged PRs, later-round catches **core=210,
+rotated=266, gap-sweep=53**, 15 skipped as non-attributable. In aggregate the catches
+still concentrate in rotated-in seats, so the standing decision is unchanged:
+**keep the rotation.**
+
+Recording the counter-datum, because a keep decision supported only by the aggregate
+is the kind of premise this issue spent five rounds learning not to trust.
+
+**PR #2117 points the other way.** Its later-round catches were core=6, rotated=1.
+The pinned core seats (`correctness`, `test-evidence`+`spec-compliance`) produced
+every substantive finding from round 2 onward. The rotated-in `integration` seat, seated
+in rounds 3 and 5, contributed exactly one finding no core seat also produced — ROUTE-C,
+a P3 that was verified and then deferred to a tracked issue. On the decisive P1
+(ROUTE-A, the unrouted cron reader) the rotated-in seat and a core seat landed on the
+same defect independently in the same round; the rotation corroborated, it did not
+discover.
+
+**What did discover, twice, was the phase lens.** Both Phase 7 gap-sweep catches
+(`gap-sweep`, round 5 in the ledger) were defects that no seat could have found,
+because this PR's own fix commits created them after the rounds had run — a stale
+`591` that the same commit had made `592`, then a line-anchor drift introduced by the
+two docstring lines that fixed it. That is the second consecutive PR in this change
+(after PR #2101, recorded above) whose decisive late catch came from the gap sweep
+rather than from any seat lens, core or rotated.
+
+The tentative reading, offered as a hypothesis for the next revisit rather than as a
+finding: rotation buys **breadth across defect classes**, which is what the aggregate
+measures, while a PR whose defects all belong to **one recurring class** — as #2117's
+did, five times over — gets little from a new seat and much from a fresh clean-slate
+pass. If that holds, the seat plan's cost signal is not "which lens catches most" but
+"is this PR's failure mode still branching, or has it collapsed to one invariant". The
+round ledger already carries the answer in its `repeats prior class` field, which read
+`yes` for the first time at round 5 here.
+
+Next revisit on the audit's next flag or a maintainer override.
