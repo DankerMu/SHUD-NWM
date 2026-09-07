@@ -2773,7 +2773,13 @@
     "1903": {
       "ceilingPrs": [],
       "gateEntries": 1,
-      "closed": []
+      "closed": [
+        {
+          "pr": 1875,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
     }
   },
   "1736": {
