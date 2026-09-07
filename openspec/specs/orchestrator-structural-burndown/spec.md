@@ -373,25 +373,48 @@ idempotency, and cleanup MUST remain equivalent.
 
 ### Requirement: Object-store validation facade split preserves runtime and evidence contracts
 
-The repository SHALL split
-`services.production_closure.object_store_validation` into the eight responsibility
-owners defined by this change. The historical facade and every new owner MUST remain
-below 1,000 lines while `.large-file-guard.json` remains byte-identical. Every
-pre-split facade attribute, callable signature and dataclass shape MUST remain
-available: eight callable seams use runtime facade forwarding, other helpers use plain
-re-export, and module/class attribute patches observe the same authority objects.
-Standalone and packaged CLI behavior, synthetic fixture bytes, result/blocker/redaction,
-evidence/manifest/checksum identity, path safety, runtime staging and cleanup MUST
-remain equivalent.
+The repository SHALL keep
+`services.production_closure.object_store_validation` split into the eight responsibility
+owners defined by its structural change. The historical facade and every owner MUST remain
+below 1,000 lines while `.large-file-guard.json` remains byte-identical. Every pre-split
+facade attribute, callable signature and dataclass shape MUST remain available: eight
+callable seams use runtime facade forwarding, other helpers use plain re-export, and
+module/class attribute patches observe the same authority objects. Standalone and packaged
+CLI behavior, result/blocker/redaction, path safety, runtime staging and cleanup remain
+equivalent.
+
+Issue #1903 SHALL make one controlled synthetic-fixture transition: only
+`alias-a.sp.riv` and `alias-a.sp.rivseg` change from their merge-base placeholder/truncated
+bytes to a complete valid two-reach/two-segment mapping. Every other fixture path, text byte,
+shapefile schema/record/geometry byte, function signature, and facade identity SHALL remain
+unchanged from merge-base `27dc6aab…`. Package/manifest/checksum identity changes only as a
+deterministic consequence of those two replacement payloads; it SHALL NOT be hand-pinned to
+unrelated new material. Tests SHALL retain the old two mapping hashes as before-blob
+provenance and pin the two exact replacement hashes plus all unchanged hashes.
 
 #### Scenario: existing callers import and validate through the facade
 
 - **WHEN** `slurm_validation`, readiness consumers or an existing test imports the
-  historical module and validates a deterministic object-store fixture
+  historical module and validates the deterministic object-store fixture
 - **THEN** all baseline names, signatures, dataclasses and class identities resolve
   without an import cycle
-- **AND** fixture/package/manifest/checksum bytes, evidence files, staged receipts,
-  blocker ordering, redacted summary and object effects are identical to baseline.
+- **AND** evidence files, staged receipts, blocker ordering, redacted summary and object
+  effects retain baseline behavior
+- **AND** package/manifest/checksum movement is fully explained by the two controlled
+  mapping payloads and no other fixture byte.
+
+#### Scenario: synthetic fixture mapping transition is exact
+
+- **WHEN** the fixture generated at merge-base `27dc6aab…` is compared to the issue #1903
+  fixture
+- **THEN** the old `.sp.riv` hash
+  `debf08491b0e22a39c06502d0354b9ae14c169fbd581d2941b78ac61f7907863` and old
+  `.sp.rivseg` hash
+  `4eaccab2a297cdd5d09f13f193cb73c9048996dab9423340ce4092383188cb0f` are the only
+  replaced stable-text hashes
+- **AND** the replacement declares two reach rows with actual Index values `{1, 2}` and two
+  segment rows whose `iRiv` values are `{1, 2}`
+- **AND** an unrelated fixture-byte mutation makes the controlled-transition proof RED.
 
 #### Scenario: a historical dynamic dependency is patched
 
@@ -429,42 +452,63 @@ remain equivalent.
 
 ### Requirement: Basins package publication tests remain complete under physical partitioning
 
-The repository SHALL partition the Basins package publication pytest corpus into exactly
-six collectible modules and one non-collectible helper whose individual line counts are
-below 1,000, without changing `.large-file-guard.json` or retaining a collectible
-compatibility shim. Every baseline case SHALL be collected exactly once after
-partitioning: module prefixes may change, but all 88 unique `::test_name[param-id]`
-suffixes and all 80 normalized test bodies, decorators, fixture arguments, parameter
-values/IDs, assertions, skips and monkeypatch targets MUST remain equivalent.
+The repository SHALL retain every case from the frozen Basins package publication baseline
+while extending the current corpus to exactly seven collectible modules and one
+non-collectible helper, each below 1,000 lines, without changing
+`.large-file-guard.json` or retaining a collectible compatibility shim. The six original
+partitions SHALL still contain all 88 unique baseline `::test_name[param-id]` suffixes and
+all 80 normalized baseline test bodies, decorators, fixture arguments, parameter values/IDs,
+assertions, skips and monkeypatch targets exactly once. The seventh owner,
+`tests/test_basins_package_publication_rivseg.py`, SHALL contain only additive issue #1903
+mapping tests and SHALL import `tests.basins_package_helpers` at module scope.
 
-#### Scenario: collection identity and test oracles are preserved one-to-one
+#### Scenario: frozen collection identity and additive tests are both preserved
 
-- **WHEN** the baseline monolith and all six post-partition suites are collected and fingerprinted
-- **THEN** each side yields exactly 88 unique identical sorted node suffixes and 80 one-to-one normalized test definitions
-- **AND** executing the six files produces the same pass/skip semantics without dropped, duplicated, renamed or weakened cases
+- **WHEN** the baseline monolith, the six baseline partitions, and the seven current suites
+  are collected and fingerprinted
+- **THEN** the six baseline owners yield exactly the frozen 88 unique suffixes and 80
+  one-to-one normalized definitions without dropped, duplicated, renamed or weakened cases
+- **AND** the seventh owner collects the finite issue #1903 scenario matrix exactly once
+- **AND** executing all seven files preserves the baseline pass/skip semantics and adds real
+  mapping assertions
 - **AND** `tests/basins_package_helpers.py` collects no tests.
 
 #### Scenario: production-owner selection reaches every publication partition
 
 - **WHEN** targeted selection runs for a changed file under `workers/model_registry/**`
-- **THEN** all six publication partitions remain in the existing model-registry owner set alongside its prior consumers
-- **AND** removing any one of the six partition edges—including retained core, which is not same-name-derived from the production owner—makes the selector contract RED before the edge is restored.
+- **THEN** all seven publication partitions remain in the existing model-registry owner set
+  alongside its prior consumers
+- **AND** removing any one of the seven partition edges—including retained core, which is
+  not same-name-derived from the production owner—makes the selector contract RED before
+  the edge is restored.
 
 #### Scenario: helper-only selection reaches every consumer
 
 - **WHEN** only `tests/basins_package_helpers.py` changes
-- **THEN** targeted selection includes exactly all six publication partitions and `tests/test_basins_package.py`, plus the selector's existing meta-guard rider
-- **AND** each collectible partition imports the helper at module scope and the historical sibling helper import remains valid
-- **AND** deleting any required helper-consumer edge makes the selector contract RED.
+- **THEN** targeted selection includes exactly all seven publication partitions and
+  `tests/test_basins_package.py`, plus the selector's existing meta-guard rider
+- **AND** each collectible partition imports the helper at module scope and the historical
+  sibling helper import remains valid
+- **AND** deleting any of the eight required helper-consumer edges makes the selector
+  contract RED.
 
-#### Scenario: structural guard and current validation commands match the new layout
+#### Scenario: structural guard and current validation commands match the extended layout
 
-- **WHEN** the seven Python outputs, root/child current validation matrices, guard configuration and documentation authority are evaluated
-- **THEN** every changed/new text source is strictly below 1,000 lines, the guard threshold and exclusion list are byte-identical, and an ordinary commit passes the hook
-- **AND** the heading-bounded baseline M10 #147–#152 family is preserved under `docs/validation/production-closure.md`, with changes limited to the six-file publication commands and moved self-lint paths
-- **AND** all six original root heading texts and anchor slugs remain byte-identical as links resolving to the matching child headings, both post-split files are below 1,000 lines, and both paths are current validation authority
-- **AND** the live M9 closeout, #148 regression and opt-in Basins smoke commands execute all six suites, the moved real-smoke node still runs, and historical M9 result bullets plus archived evidence remain unchanged
-- **AND** the structural diff contains no production, registry-corpus, database-filter or #1903 mapping behavior.
+- **WHEN** the eight Python outputs, root/child current validation matrices, guard
+  configuration and documentation authority are evaluated
+- **THEN** every changed/new text source is strictly below 1,000 lines, the guard threshold
+  and exclusion list are byte-identical, and an ordinary commit passes the hook
+- **AND** the heading-bounded baseline M10 #147–#152 family remains under
+  `docs/validation/production-closure.md`, with documentation changes limited to retargeting
+  current publication commands to seven suites and the existing moved self-lint paths
+- **AND** all six original root heading texts and anchor slugs remain byte-identical as links
+  resolving to matching child headings, both post-split documentation files remain below
+  1,000 lines, and both paths remain current validation authority
+- **AND** the live M9 closeout, #148 regression and opt-in Basins smoke commands execute all
+  seven suites, the moved real-smoke node still runs, and historical M9 result bullets plus
+  archived evidence remain unchanged
+- **AND** the structural diff changes no frozen baseline test definition, production
+  database filter, or unrelated #1912 owner contract.
 
 ### Requirement: QHH production-bootstrap tests remain complete under physical partitioning
 
@@ -540,13 +584,23 @@ definitions and all 12 support functions plus four constants MUST remain equival
 
 ### Requirement: Basins registry-import tests remain complete under physical partitioning
 
-The repository SHALL partition the Basins registry-import pytest corpus into exactly seven
+The repository SHALL keep the Basins registry-import pytest corpus at exactly seven
 collectible modules and one non-collectible helper whose individual line counts are below
 1,000, without changing `.large-file-guard.json` or retaining a collectible compatibility
-shim. Every case in the frozen `3c29698f…` baseline SHALL be collected exactly once after
-partitioning: module prefixes may change, but all 96 unique `::test_name[param-id]` suffixes
-and all 94 test definitions, decorators, fixture arguments, parameter values/IDs,
-assertions, skips, markers, and monkeypatch targets MUST remain equivalent.
+shim. Every case in the frozen `3c29698f…` baseline SHALL remain collected exactly once: all
+96 unique `::test_name[param-id]` suffixes and all 94 test definitions, decorators, fixture
+arguments, parameter values/IDs, assertions, skips, markers, and monkeypatch targets remain
+equivalent.
+
+The helper SHALL retain its exact 19-function, one-class, four-constant member inventory.
+Issue #1903 may change only `_make_valid_model`'s `.sp.rivseg` synthetic row construction so
+the declared segment block is complete and distributes rows deterministically over actual
+reach IDs. That transition SHALL be independently bound to the merge-base
+`27dc6aab…` helper blob. The tracked partition oracle may update only the
+`_make_valid_model` source/AST row, helper aggregate/self digests, and explicit transition
+metadata; every test-definition, owner, marker, consumer-route, database-authority, count,
+and execution row remains frozen. A self-consistent whole-helper recapture without the
+before-blob allowlist SHALL fail.
 
 #### Scenario: Collection identity and test oracles are preserved one-to-one
 
@@ -561,6 +615,16 @@ assertions, skips, markers, and monkeypatch targets MUST remain equivalent.
 - **AND** the retained-core BUG-008 command passes exactly the two `output_segment_count`
   cases.
 
+#### Scenario: Registry helper transition is independently bounded
+
+- **WHEN** the current helper is compared to its merge-base `27dc6aab…` blob member by member
+- **THEN** the same 19 functions, one class and four constants exist
+- **AND** only `_make_valid_model` differs, only its `.sp.rivseg` row construction changes,
+  and its signature, `.sp.riv` construction, shapefile construction, forcing fixture, and
+  all other statements remain equivalent
+- **AND** deleting the transition allowlist, changing another helper member, or regenerating
+  every oracle digest around an unrelated helper mutation makes the proof RED.
+
 #### Scenario: Helper ownership and two-level QHH consumption remain explicit
 
 - **WHEN** imports of `tests/basins_registry_import_helpers.py` are derived from tracked
@@ -570,9 +634,9 @@ assertions, skips, markers, and monkeypatch targets MUST remain equivalent.
 - **AND** `tests/qhh_production_bootstrap_helpers.py` is its sole non-collectible support
   importer, while QHH-bootstrap A, B, and C import that QHH helper rather than the registry
   helper directly
-- **AND** the two D-to-registry imports are the only controlled QHH-helper fingerprint
-  transition, with all other QHH rows, 66 nodes, owners, markers, and execution summaries
-  unchanged and the QHH oracle self-digest valid
+- **AND** the two D-to-registry imports remain the only QHH-helper transition, with all QHH
+  rows, 66 nodes, owners, markers, and execution summaries unchanged and the QHH oracle
+  self-digest valid
 - **AND** no collectible registry suite remains imported as a support module.
 
 #### Scenario: Helper-only and production-owner selection reach every required suite
@@ -596,13 +660,13 @@ assertions, skips, markers, and monkeypatch targets MUST remain equivalent.
   DB cases map to `tests/test_basins_registry_import_db.py`, and seven QHH/crosswalk cases
   map to `tests/test_basins_registry_import_qhh.py`
 - **AND** the exact relevant database authority is the six registry paths for helper, core,
-  auth, DB, QHH, and reingest united with #1948's QHH helper and scheduler-owner paths
+  auth, DB, QHH, and reingest united with the QHH helper and scheduler-owner paths
 - **AND** parser, CLI, security, and QHH-bootstrap A/B paths are absent, and no broad registry
   glob substitutes for an exact path
 - **AND** removing any one of the eight exact paths leaves that path unmatched while the
   other seven remain matched and unrelated future database patterns remain permitted.
 
-#### Scenario: Node-27 executes all ungated integration cases rather than skipping them
+#### Scenario: Node-27 executes all affected integration cases rather than skipping them
 
 - **WHEN** the frozen final SHA is checked on node-27 with integration enabled against an
   isolated temporary database derived from node-27's local PostgreSQL `:55432`
@@ -613,18 +677,18 @@ assertions, skips, markers, and monkeypatch targets MUST remain equivalent.
   SKIPPED
 - **AND** the temporary database and role are removed, production DB/display identity is
   unchanged, no real-Basins ingest gate is enabled, and no credential enters public evidence
-- **AND** node-22 is not accessed and remains DB-free.
+- **AND** node-22 is not accessed for this database proof and remains DB-free.
 
-#### Scenario: Structural guard and current commands match the new layout
+#### Scenario: Structural guard and current commands match the maintained layout
 
 - **WHEN** the eight registry test/helper outputs, selector routes, database filter, current
-  validation commands, and guard configuration are evaluated
-- **THEN** every replacement or new test/helper file is strictly below 1,000 lines, the
-  current guard remains enabled at 1,000 lines with no registry exclusion, and the issue
-  change set contains no guard edit
+  validation commands, controlled helper transition and guard configuration are evaluated
+- **THEN** every registry test/helper file is strictly below 1,000 lines, the guard remains
+  enabled at 1,000 lines with no registry exclusion, and the issue change set contains no
+  guard edit
 - **AND** an ordinary commit passes the wired hook, live full-registry commands execute all
   seven suites, and the BUG-008 retained-core command remains valid
-- **AND** historical evidence remains unchanged and the structural diff contains no
-  production SQL/schema/geometry/auth behavior, Basins fixture-byte change, or #1903 mapping
-  behavior.
+- **AND** historical and archived evidence remains unchanged; current changes are limited
+  to the controlled `_make_valid_model` fixture transition and oracle evidence, with no
+  production registry SQL/schema/geometry/auth behavior or Basins real-fixture byte change.
 

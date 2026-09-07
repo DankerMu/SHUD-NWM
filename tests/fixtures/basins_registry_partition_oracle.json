@@ -112,11 +112,11 @@
     "helper_consumers": "ee7fa88945e78bce81b049a5c82d5511362f454a276efb59b1ba0afb67f023b1",
     "helper_inventory": "8840823ea7c0041ef3bc775601485452eeb6c04838dce454481d0c9ab43e5335",
     "helper_route": "1039257007bcdadfb75462fbca1145953631132cd39230b072391d5f17c58c91",
-    "helper_source": "90973ba3e2ad0b30e5803be4a77aaffe155bb4141771eb60d452c3b6fed1b7ea",
+    "helper_source": "3a2e691d64683dc397f9fd6da6bf28cd61e8cfc099039d51eec95a7ea61e3abc",
     "integration_suffix": "2531bdef5d481f1024fafe0d5fe36ae7aabb47c478746ceb3286952bccefd73c",
     "oracle": "dfbe7bcf913562a012ab3a870a2810f67ecde9964cb59cac4cf09bfab9a86492",
     "owner_map": "f4f71687d744df2551f9ff0926e10fdd0498ade214fe67f6bb78ba62ee6879a9",
-    "self": "f0badbe99fa96bc100a29e3835e5f80f5db4a439fb0be3ba890223ff02332e47",
+    "self": "6fed8d1373b5dcaf91ccea54956e21a17e36e73112f777a101c74a4f65f0ef6b",
     "suffix": "ba89c8cb7520a24aab19195dc0a724ecbf4034675d2bd38fba8b9e04aff6c5c8"
   },
   "execution": {
@@ -174,7 +174,7 @@
         "_assert_registry_fixture_rows_absent": ["function","1fbdd25530a9da70717e86f4f1bda2618577592f18098c0ce8b9812b592b5204","1d9b17d4ceb388386570910079fa25134db26b2d062dd26e89edb7fa1b6f4788"],
         "_copy_matching_fixture_payload": ["function","3ce4e2dd1e52db164412fc2ec42d72b981f7a635ec1a7813d2029ec5041d323d","a8ccf7f3d0b2c39a0d12ef45afea67783529897addfcf682cc0976ef4d9a9ea0"],
         "_invoke_click": ["function","e95fbafd04454d4d1475295a0f82980ca6b502546252932d63445edc1a56382a","be1fdd64304045df389f9597cc79f006a91a8903c0840802053a2f7f2d80b4c9"],
-        "_make_valid_model": ["function","56e21289d9378a1d7d2606de3c80cd3fdb7c1849d0e5bda885256a67b7b43f64","481c2a8129f1de429429a86dc8144fa4bf43512197240c2eb5edcb16006735e6"],
+        "_make_valid_model": ["function","ab86ad97acc4cfb067959502d4bf246ca54cfe050d8b7de914be769c4c789629","c6eb324fcfa04858c6019a4b852561ce15834fb1547dd6d6b5c412435cf6a6f5"],
         "_package_manifest_for_model": ["function","bef11349c96327bed6ab711ceb6f7084d869927e3d2be83e92936d1eb6d9f4fb","c69a90455b08fba7a801aaaab7f0d78d2edf0bc48e616e1db69f101747df5f70"],
         "_parse_qhh_sample": ["function","ad31997dc140aef1ccb200c4c46bb0dbb62a824bc0159032a28439d8e9c4f58e","f39754394e98e21f90d1e1621f13f6462db5d3bedf6fff4cdb8705d4f1d6a285"],
         "_patch_execute_values": ["function","ad4922d037ac4b2f4e0411bfea631917bf16c255593d0847004a9de368527568","92ccedc30d21d2f42575f822c0ce38a5002404ce214942307fa06e50acb965e5"],
@@ -727,6 +727,7 @@
       "test_segment_slice_river_segment_id_preserves_frontend_contract": ["tests/test_basins_registry_import_qhh.py","c59eb054eccd7e31207d50a598cc7d042c4a54baee9713ba8b324e799df3ad9b","1f90e5b7d93f2cbdcb3e12e9bf133f00c8a96046656cd8590dd68a1fc020e005","integration","8fd223865e1e8686fa123a3c09ba36c63106558e53963211ec126c6de3bc57d0","8f30f473b0794c09bda0006f1f35519b31884ff9407723492cb9a06fe90a0cb8","01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b"]
     },
   "schema": "basins-registry-partition-oracle/v1",
+  "issue_1903_mapping_transition": {"allowed_change":"sp_rivseg_rows_only","base_ast_sha256":"481c2a8129f1de429429a86dc8144fa4bf43512197240c2eb5edcb16006735e6","base_commit":"27dc6aab5a0772c5489b04049eb483a660cf60d8","base_source_sha256":"56e21289d9378a1d7d2606de3c80cd3fdb7c1849d0e5bda885256a67b7b43f64","current_ast_sha256":"c6eb324fcfa04858c6019a4b852561ce15834fb1547dd6d6b5c412435cf6a6f5","current_source_sha256":"ab86ad97acc4cfb067959502d4bf246ca54cfe050d8b7de914be769c4c789629","member":"_make_valid_model"},
   "structural": {
     "guard_path": ".large-file-guard.json",
     "guard_provenance_sha256": "5c06fad8ba8f488d8bfc836e747cd7af642232a880bec25ae132e1bd17ab87ad",

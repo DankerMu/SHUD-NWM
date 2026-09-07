@@ -692,6 +692,8 @@ _PUBLIC_ENTRYPOINTS = (
 _SEAM_FORWARDING_EDGES = (
     ("_package_source_files", "publish_basins_package"),
     ("_package_source_files", "basins_package_source_identity"),
+    ("_validate_rivseg_reach_mapping", "publish_basins_package"),
+    ("_validate_rivseg_reach_mapping", "basins_package_source_identity"),
     ("_walk_source_files", "_package_source_files"),
     ("_walk_source_files", "_forcing_metadata"),
     ("_walk_source_files", "_directory_evidence"),

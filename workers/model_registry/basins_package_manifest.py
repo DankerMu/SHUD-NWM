@@ -18,9 +18,9 @@ from .basins_package_contracts import (
     _sha256_json,
     forcing_checksum_material_for_schema_version,
 )
-from .basins_package_inventory import _ensure_inventory_path_matches_expected, _expected_forcing_dir
+from .basins_package_inventory import _ensure_inventory_path_matches_expected, _expected_forcing_dir, _safe_source_dir
 from .basins_package_object_store import _directory_uri
-from .basins_package_source_io import _normalize_relative_path, _safe_source_dir, _source_file_evidence
+from .basins_package_source_io import _normalize_relative_path, _source_file_evidence
 
 
 def _manifest_file_entry(
