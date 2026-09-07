@@ -576,15 +576,17 @@ def _mask_quoted_identifier_spans(outer: str, *, preserve: frozenset[str]) -> st
     return "".join(masked)
 
 
-def _outer_code_for_text_identity_columns(sql: str, aliases: frozenset[str]) -> tuple[str, str]:
-    """Paired outer-query views for unquoted and exact quoted references.
+def _outer_code_for_text_identity_columns(sql: str, aliases: frozenset[str]) -> tuple[str, str, str]:
+    """Raw, unquoted, and exact-quoted views of scanner-owned outer-query code.
 
-    Both views derive from one scanner-owned ``outer`` value after authority
-    scalar sub-selects, literals and comments have been removed. The first keeps
-    the existing unquoted grammar by masking every complete quoted identifier.
-    The second preserves only exact lower-case aliases supplied by the caller and
-    exact lower-case text-identity members; every other quoted identifier is
-    opaque to the matcher.
+    All views derive from one scanner-owned ``outer`` value after authority scalar
+    sub-selects, literals and comments have been removed. The raw view belongs to
+    the parenthesized whole-row classifier, whose expression-start boundary must
+    still distinguish a quoted function name from whitespace. The unquoted view
+    keeps the existing direct-reference grammar by masking every complete quoted
+    identifier. The quoted-reference view preserves only exact lower-case aliases
+    supplied by the caller and exact lower-case text-identity members; every other
+    quoted identifier is opaque to the direct matcher.
     """
     outer = _blank_non_code(outer_predicates(sql))
     unquoted = _mask_quoted_identifier_spans(outer, preserve=frozenset())
@@ -592,7 +594,285 @@ def _outer_code_for_text_identity_columns(sql: str, aliases: frozenset[str]) -> 
         outer,
         preserve=frozenset((*aliases, *TEXT_IDENTITY_COLUMNS)),
     )
-    return unquoted, quoted_references
+    return outer, unquoted, quoted_references
+
+
+# Parenthesized whole-row selection has one deliberately finite grammar.  The
+# classifier walks the scanner-owned outer-code view, never the raw SQL: comments
+# and literal bodies are already blanked by ``outer_predicates`` /
+# ``_blank_non_code``, so it does not grow a second comment lexer.
+_BARE_IDENTIFIER_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*", re.ASCII)
+_PARENTHESES_SPACE = " \t\r\n\f"
+# A bare or quoted identifier immediately before ``(`` is a suffix call/name
+# unless the completed prefix is one of these SQL clause/operator tails.  This
+# finite grammar rule keeps keyword/operator operands separate from arbitrary
+# function names without building a general SQL parser.
+_PARENTHESES_OPERAND_TAIL = re.compile(
+    r"\b(?:SELECT|WHERE|ON|HAVING|RETURNING|LIMIT|OFFSET|FETCH|VALUES|CASE|WHEN|THEN|ELSE|"
+    r"BY|DISTINCT|ALL|ANY|SOME|AND|OR|NOT|IS|IN|LIKE|ILIKE|BETWEEN|AS|ESCAPE|"
+    r"ORDER\s+BY|GROUP\s+BY|FETCH\s+(?:FIRST|NEXT)|IS\s+(?:NOT\s+)?DISTINCT\s+FROM|AT\s+TIME\s+ZONE|"
+    r"SIMILAR\s+TO)\s*$",
+    re.IGNORECASE | re.ASCII,
+)
+_PARENTHESES_OPERATOR_DECLARATION_TAIL = re.compile(
+    r"\bOPERATOR[ \t\r\n\f]*\([^()]*\)[ \t\r\n\f]*$",
+    re.IGNORECASE | re.ASCII,
+)
+_PARENTHESES_TYPE_NAME_PREFIX = re.compile(r"(?:\bAS|::)[ \t\r\n\f]*$", re.IGNORECASE | re.ASCII)
+_PARENTHESES_SEPARATOR = re.compile(_QUALIFIED_REFERENCE_SEPARATOR)
+
+
+@dataclass(frozen=True)
+class _ParenthesizedFactAliasSelections:
+    """Exact fields and conservative unsupported selections in one outer-code view."""
+
+    exact_columns: frozenset[str]
+    has_unsupported_alias_rooted_selection: bool
+
+
+def _identifier_continuation(character: str) -> bool:
+    """Whether ``character`` can keep a bare identifier from ending in our subset."""
+    return character.isascii() and (character.isalnum() or character == "_")
+
+
+def _bare_identifier_token_at(text: str, start: int) -> tuple[str, int] | None:
+    """One complete bare identifier from ``start``, restricted to the ASCII subset."""
+    match = _BARE_IDENTIFIER_TOKEN.match(text, start)
+    if match is None:
+        return None
+    end = match.end()
+    if end < len(text) and _identifier_continuation(text[end]):
+        return None
+    return match.group(0), end
+
+
+def _known_parenthesized_field_at(text: str, start: int) -> tuple[str, int] | None:
+    """Known bare-folded or exact-lowercase-quoted member beginning at ``start``."""
+    if start >= len(text):
+        return None
+    if text[start] == '"':
+        end, closed = _scan_quoted_span(text, start, '"')
+        if closed:
+            member = text[start + 1 : end - 1]
+            if member in TEXT_IDENTITY_COLUMNS:
+                return member, end
+        return None
+    token = _bare_identifier_token_at(text, start)
+    if token is None:
+        return None
+    member, end = token
+    canonical = member.lower()
+    return (canonical, end) if canonical in TEXT_IDENTITY_COLUMNS else None
+
+
+def _canonical_parenthesized_alias(body: str, aliases: frozenset[str]) -> str | None:
+    """The canonical alias when ``body`` is exactly one admitted row-alias token."""
+    token = _bare_identifier_token_at(body, 0)
+    if token is not None and token[1] == len(body):
+        canonical = token[0].lower()
+        return canonical if canonical in aliases else None
+    if body.startswith('"'):
+        end, closed = _scan_quoted_span(body, 0, '"')
+        if closed and end == len(body):
+            alias = body[1 : end - 1]
+            return alias if alias in aliases else None
+    return None
+
+
+def _parenthesized_previous_significant_character(text: str, start: int) -> int | None:
+    """The code character before ``start`` after scanner-normalised whitespace."""
+    index = start - 1
+    while index >= 0 and text[index] in _PARENTHESES_SPACE:
+        index -= 1
+    return index if index >= 0 else None
+
+
+def _parenthesized_next_significant_character(text: str, start: int) -> int | None:
+    """The code character at or after ``start`` after scanner-normalised whitespace."""
+    index = start
+    while index < len(text) and text[index] in _PARENTHESES_SPACE:
+        index += 1
+    return index if index < len(text) else None
+
+
+def _is_parenthesized_placeholder_name(text: str, start: int, end: int) -> bool:
+    """Whether the bare token is the name inside a supported named placeholder."""
+    if start > 0 and text[start - 1] == ":":
+        return True
+    return start >= 2 and text[start - 2 : start] == "%(" and text[end :].startswith(")s")
+
+
+def _is_parenthesized_type_name(text: str, start: int) -> bool:
+    """Whether the bare token is immediately the type name after ``AS`` or ``::``."""
+    return _PARENTHESES_TYPE_NAME_PREFIX.search(text[:start]) is not None
+
+
+def _is_parenthesized_named_argument_label(text: str, end: int) -> bool:
+    """Whether the token ending at ``end`` is a function named-argument label."""
+    next_character = _parenthesized_next_significant_character(text, end)
+    return next_character is not None and text.startswith(("=>", ":="), next_character)
+
+
+def _parenthesized_dotted_name_calls(text: str, end: int) -> bool:
+    """Whether the identifier ending at ``end`` starts a dotted function name.
+
+    This accepts only a finite identifier/quoted-identifier dot chain ending in
+    ``(``; a bare ``rt.foo`` remains an alias field expression, not a function.
+    """
+    cursor = end
+    while True:
+        dot = _parenthesized_next_significant_character(text, cursor)
+        if dot is None or text[dot] != ".":
+            return False
+        component_start = _parenthesized_next_significant_character(text, dot + 1)
+        if component_start is None:
+            return False
+        if text[component_start] == '"':
+            component_end, closed = _scan_quoted_span(text, component_start, '"')
+            if not closed:
+                return False
+        else:
+            component = _bare_identifier_token_at(text, component_start)
+            if component is None:
+                return False
+            _component_name, component_end = component
+        following = _parenthesized_next_significant_character(text, component_end)
+        if following is None:
+            return False
+        if text[following] == "(":
+            return True
+        if text[following] != ".":
+            return False
+        cursor = component_end
+
+
+def _is_parenthesized_nonvalue_alias_token(text: str, start: int, end: int) -> bool:
+    """Whether an alias-spelled token is a non-value syntactic role.
+
+    Placeholder/type/label names and any component of a dotted function name are
+    identifiers, not fact-alias values. A dotted chain without a call remains an
+    actual field expression and is therefore not excluded.
+    """
+    previous = _parenthesized_previous_significant_character(text, start)
+    following = _parenthesized_next_significant_character(text, end)
+    return (
+        _is_parenthesized_placeholder_name(text, start, end)
+        or _is_parenthesized_type_name(text, start)
+        or _is_parenthesized_named_argument_label(text, end)
+        or (previous is not None and text[previous] == ".")
+        or (following is not None and text[following] == "(")
+        or _parenthesized_dotted_name_calls(text, end)
+    )
+
+
+def _contains_canonical_parenthesized_alias(body: str, aliases: frozenset[str]) -> bool:
+    """Whether ``body`` contains a whole-token fact alias used as an expression value.
+
+    Names in the repository's placeholder dialects, ``AS`` type positions,
+    qualified function names, and named-argument labels are identifiers but not
+    values of the fact alias.  This is a finite role filter, not SQL parsing.
+    """
+    index = 0
+    while index < len(body):
+        if body[index] == '"':
+            end, closed = _scan_quoted_span(body, index, '"')
+            if closed and body[index + 1 : end - 1] in aliases and not _is_parenthesized_nonvalue_alias_token(
+                body, index, end
+            ):
+                return True
+            index = end
+            continue
+        token = _bare_identifier_token_at(body, index)
+        if token is not None:
+            alias, end = token
+            if alias.lower() in aliases and not _is_parenthesized_nonvalue_alias_token(body, index, end):
+                return True
+            index = end
+            continue
+        index += 1
+    return False
+
+
+def _parenthesized_group_starts_row_expression(outer: str, opening: int) -> bool:
+    """Whether ``opening`` begins an expression operand instead of a suffix call/group.
+
+    A preceding identifier or quote is a call/name suffix; a preceding dot or a
+    completed group is a multipart/nested expression, while an opening group or
+    subscript is an enclosing operand container.  Every other operator boundary
+    begins an operand.  Bare words are admitted only at the finite SQL
+    clause/operator prefixes; multiword and ``OPERATOR(...)`` tails are handled as
+    complete tails rather than by growing a keyword allow-list.
+    """
+    prefix = outer[:opening]
+    previous = _parenthesized_previous_significant_character(prefix, len(prefix))
+    if previous is None:
+        return True
+    character = prefix[previous]
+    tail = prefix[: previous + 1]
+    if _PARENTHESES_OPERAND_TAIL.search(tail) is not None:
+        return True
+    if _PARENTHESES_OPERATOR_DECLARATION_TAIL.search(tail) is not None:
+        return True
+    if character in ".)]":
+        return False
+    if character == '"' or _identifier_continuation(character):
+        return False
+    return True
+
+
+def _parenthesized_fact_alias_selections(
+    outer: str,
+    aliases: frozenset[str],
+) -> _ParenthesizedFactAliasSelections:
+    """Classify every balanced group that immediately selects a known text member.
+
+    This is intentionally not an expression parser.  A supported selection is
+    one standalone ``(<canonical alias>) . <known member>`` group; every other
+    group that selects a known member and contains that alias is reported for the
+    guarded fail-closed path.  Walking one character after each opener rather
+    than jumping to the matching close makes nested groups and later independent
+    groups observable too.
+    """
+    if not aliases:
+        return _ParenthesizedFactAliasSelections(frozenset(), False)
+
+    exact_columns: set[str] = set()
+    unsupported = False
+    index = 0
+    while index < len(outer):
+        if outer[index] == '"':
+            index = _scan_quoted(outer, index, '"')
+            continue
+        if outer[index] != "(":
+            index += 1
+            continue
+        end = _skip_balanced(outer, index)
+        if end <= index + 1 or outer[end - 1] != ")":
+            index += 1
+            continue
+        separator = _PARENTHESES_SEPARATOR.match(outer, end)
+        if separator is not None:
+            field = _known_parenthesized_field_at(outer, separator.end())
+            if field is not None:
+                member, field_end = field
+                body = _WHITESPACE.sub(" ", outer[index + 1 : end - 1]).strip()
+                # The group body has no qualified-name grammar of its own: a
+                # dot inside it makes the expression unsupported, not a
+                # separator around the outer field-selection dot.
+                exact = (
+                    "." not in body
+                    and _parenthesized_group_starts_row_expression(outer, index)
+                    and _canonical_parenthesized_alias(body, aliases) is not None
+                    # A further dot makes this a multipart expression rather than
+                    # the finite one-field grammar this helper admits.
+                    and _PARENTHESES_SEPARATOR.match(outer, field_end) is None
+                )
+                if exact:
+                    exact_columns.add(member)
+                elif _contains_canonical_parenthesized_alias(body, aliases):
+                    unsupported = True
+        index += 1
+    return _ParenthesizedFactAliasSelections(frozenset(exact_columns), unsupported)
 
 
 def _text_identity_columns_for_references(
@@ -603,8 +883,9 @@ def _text_identity_columns_for_references(
 ) -> set[str]:
     """Text identity columns matched through supplied bare fact references."""
     canonical_aliases = frozenset(alias.lower() for alias in aliases)
-    outer, quoted_references = _outer_code_for_text_identity_columns(sql, canonical_aliases)
-    found: set[str] = set()
+    raw_outer, outer, quoted_references = _outer_code_for_text_identity_columns(sql, canonical_aliases)
+    parenthesized = _parenthesized_fact_alias_selections(raw_outer, canonical_aliases)
+    found = set(parenthesized.exact_columns)
     for column in TEXT_IDENTITY_COLUMNS:
         if any(
             re.search(
@@ -659,8 +940,10 @@ def text_fact_columns(sql: str, alias: str) -> set[str]:
     ``ts.unit_e``), which would make every pin unsatisfiable rather than
     discriminating.
 
-    Deliberately NOT guarded by :func:`_assert_modelled_reference_forms`, and
-    therefore NOT the answer to "does this statement predicate on the fact
+    Deliberately NOT guarded by :func:`_assert_modelled_reference_forms`: exact
+    parenthesized one-token alias selections are matched here, but unsupported
+    forms are not refusals here. It is therefore NOT the answer to "does this
+    statement predicate on the fact
     table's text identity" — that question is
     :func:`fact_table_text_identity_columns`, which refuses an unmodelled
     reference form instead of answering it. This helper answers about the ONE
@@ -920,13 +1203,13 @@ def _lexical_subset_violation(sql: str) -> tuple[int, str] | None:
 def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     """Refuse a fact-table reference form the alias walk does not model.
 
-    The guarantee, in one sentence (fixture decision 16): no statement reaches a
-    render or a text-identity answer unless the independent occurrence counter
+    The guarantee, in one sentence (fixture decisions 16 and 22): no statement
+    reaches a render or a text-identity answer unless the independent occurrence counter
     and the ``FROM`` / ``JOIN`` walk AGREE about how many times it reads the fact
     table, the counter is blind to no spelling of the table's name, and no read
-    hides where the text-identity scan cannot look. SIX checks, in this order —
-    ``U&`` → lexical subset → unterminated belt → quoted alias → the counts →
-    the sub-select delta:
+    hides where the text-identity scan cannot look. SEVEN checks, in this order —
+    ``U&`` → lexical subset → unterminated belt → quoted alias → parenthesized
+    field selection → the counts → the sub-select delta:
 
     #. a Unicode-escaped identifier or literal (``U&"…"`` / ``U&'…'``) anywhere
        in the code — the one syntax that can name the table with no occurrence of
@@ -960,6 +1243,9 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
        :func:`non_code_spans` agreeing with PostgreSQL's lexer, never here;
     #. a double-quoted ALIAS, whose predicates the walk would attribute to the
        wrong table or to none;
+    #. an unsupported PARENTHESIZED fact-alias field selection: a known text
+       member selected from a group that contains the attributed alias but is not
+       the one-token whole-row grammar is refused rather than guessed at;
     #. the COUNTS themselves — the permissive name counter against the strict
        ``FROM`` / ``JOIN`` walk, which have to agree on how many times the
        statement reads the fact table;
@@ -1015,6 +1301,14 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
             f"{entry}: unmodelled fact-table reference form {match.group(0).strip()!r} — a double-quoted "
             "alias is not modelled by the alias walk, so this statement's text-identity columns cannot be "
             "attributed to the fact table; alias the table with a bare identifier"
+        )
+    attribution = fact_table_attribution(sql)
+    raw_outer, _outer, _quoted_references = _outer_code_for_text_identity_columns(sql, attribution.aliases)
+    parenthesized = _parenthesized_fact_alias_selections(raw_outer, attribution.aliases)
+    if parenthesized.has_unsupported_alias_rooted_selection:
+        raise RiverTemplateError(
+            f"{entry}: unmodelled parenthesized fact-alias field selection — only one standalone "
+            "parenthesized fact alias may select a text identity column"
         )
     occurrences = fact_table_name_occurrences(sql)
     modelled = fact_table_attribution(sql).reference_count
@@ -1337,8 +1631,9 @@ def fact_table_text_identity_columns(sql: str, *, entry: str = "<template>") -> 
       their authority sub-selects are already stripped.
 
     Raises :class:`RiverTemplateError`, naming ``entry``, on a reference form the
-    alias walk does not model rather than returning the empty set that form would
-    otherwise produce.
+    alias walk does not model or an unsupported parenthesized fact-alias field
+    selection rather than returning the empty set that form would otherwise
+    produce.
     """
     _assert_modelled_reference_forms(sql, entry)
     attribution = fact_table_attribution(sql)
