@@ -129,7 +129,7 @@ The display API SHALL expose `GET /api/v1/precip/{source}/{cycle}/index` and `GE
 - **THEN** the cache file is treated as a miss and rewritten by a complete render, and the failed slice maps to HTTP 404 `PRECIP_WINDOW_INCOMPLETE` with `details.reason == "slice_unreadable"`
 
 ### Requirement: Prewarm envelope is per-source, cycle-aware, and bounded
-This requirement is deliberately hosted in `precipitation-raster-overlay` (rather than `national-river-density`) because the precipitation PNG set is the new surface prewarm gains; it nevertheless governs the whole prewarm envelope, including the discharge-tile and river-network parts. `scripts/node27_mvt_prewarm.py` SHALL discover the newest cycle per source from `GET /api/v1/layers/discharge/cycles?source=<source>` for each of `gfs` and `ifs`, and warm exactly this envelope: for each source with a non-empty cycle list, the z3–z4 China tiles of `/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf` for every valid time of that source's newest cycle, plus one `/api/v1/precip/{source}/{cycle}/{valid_time}.png` per valid time of that cycle; the national river-network prewarm stays z3–z5 and unchanged. The emitted request count and elapsed time MUST be part of the run summary and the deployment receipt. The script MUST NOT fabricate a cycle: an empty `cycles[]` for a source means that source contributes zero requests.
+This requirement is deliberately hosted in `precipitation-raster-overlay` (rather than `national-river-density`) because the precipitation PNG set is the new surface prewarm gains; it nevertheless governs the whole prewarm envelope, including the discharge-tile and river-network parts. `scripts/node27_mvt_prewarm.py` SHALL discover the newest cycle per source from `GET /api/v1/layers/discharge/cycles?source=<source>` for each of `gfs` and `ifs`, and warm exactly this envelope: for each source with a non-empty cycle list, the z3–z4 China tiles of `/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf` for every valid time of that source's newest cycle, plus one `/api/v1/precip/{source}/{cycle}/{valid_time}.png` per valid time of that cycle; the national river-network prewarm stays z3–z5 and unchanged. The emitted request count and elapsed time MUST be part of the run summary and the deployment receipt. The script MUST NOT fabricate a cycle: an empty `cycles[]` for a source means that source contributes zero requests. An empty result and a failed discovery are distinct terminal states: a source whose discovery call fails, or whose 200 response does not carry the expected envelope, MUST be reported as an error for that source and MUST NOT be reported as a source that legitimately contributes zero requests, and the other source MUST still be warmed. The exit code is zero only when no request failed, no source reported a discovery error, and no valid time fell outside the PNG request-shape contract; the run summary MUST be emitted in every one of those cases.
 
 #### Scenario: Envelope and request count
 - **WHEN** prewarm runs and both sources report a newest cycle with 57 valid times
@@ -143,6 +143,24 @@ This requirement is deliberately hosted in `precipitation-raster-overlay` (rathe
 #### Scenario: Empty cycles list warms nothing for that source
 - **WHEN** `cycles[]` is empty for a source (fail-closed intersection)
 - **THEN** prewarm emits zero discharge-tile and zero precipitation requests for that source, reports it in the summary, and MUST NOT substitute a cycle from the other source, from `metadata.valid_times`, or from the current wall clock
+
+#### Scenario: A failed discovery is not an empty cycle list
+- **WHEN** one source's cycles or valid-times request fails, or answers 200 with an envelope that does not carry the expected `default_cycle` key or a list of valid times
+- **THEN** that source is recorded in the summary with a non-empty error and the run's exit code is non-zero
+- **AND** it is NOT recorded as a source that legitimately contributes zero requests
+- **AND** the other source is still warmed with its full envelope, and the run summary is still emitted in full
+
+#### Scenario: Expected precipitation 404s do not fail the run, an unconfigured mirror does
+- **WHEN** a precipitation PNG request answers HTTP 404
+- **THEN** the outcome is classified by the response body's `error.code` and `error.details.reason`, never by the status code alone
+- **AND** `PRECIP_WINDOW_INCOMPLETE`, and `PRECIP_CYCLE_NOT_MIRRORED` whose reason is the pruned-or-absent-cycle reason, are counted per source and do not affect the exit code
+- **AND** `PRECIP_CYCLE_NOT_MIRRORED` whose reason is that no mirror root is configured on the deployment counts as a failure and sets a non-zero exit code
+- **AND** any non-2xx response whose body cannot be parsed as that error envelope counts as a failure
+
+#### Scenario: A valid time outside the PNG request-shape contract is reported, not skipped
+- **WHEN** the discharge valid-times list for a source's cycle contains a valid time that is not a 3-hour step within `[cycle, cycle+168h]`, or the cycle itself does not fall on a whole hour
+- **THEN** no precipitation PNG request is issued for that valid time, it is counted per source, and the exit code is non-zero
+- **AND** the discharge tiles for that same valid time are still warmed, because the discharge tile route carries no such gate
 
 ### Requirement: Frontend precipitation overlay follows the hydrology selection
 The frontend SHALL render the precipitation PNG as a MapLibre `image` source + `raster` layer (opacity 0.55, linear resampling) placed beneath the national river layers, driven by the same `(source, cycle, validTime)` as the discharge layer. The overlay SHALL be a boolean query-state field `precip` defaulting to `true`, serialized as `precip=0` when disabled, and MUST NOT be a member of the `M11Layer` union. The overlay URL MUST only ever name a concrete `gfs` or `ifs` source: when the active source is `best` or `compare` (still offered in basin detail), the frontend MUST use the concrete resolved source if one exists — the same resolution `map-layer-timeline-controls` already requires for run, pipeline and forecast APIs — and otherwise hide the overlay with a stated reason. A request to `/api/v1/precip/best/...` or `/api/v1/precip/compare/...` MUST never be issued.

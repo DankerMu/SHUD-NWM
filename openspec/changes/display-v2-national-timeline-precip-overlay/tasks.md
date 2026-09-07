@@ -292,12 +292,13 @@ Evidence Floor：本地 `cd apps/frontend && pnpm exec tsc --noEmit -p tsconfig.
 
 ## 7. Prewarm and deployment receipt
 
-- [ ] 7.1 `scripts/node27_mvt_prewarm.py`：**逐源**通过 `cycles?source=` 发现该源自己的最新周期，对该周期全部 valid-times 预热 z3–4 全国流量瓦片与降水 PNG；河网 z3–5 不变；某源 cycles 为空则该源零请求且不伪造周期；输出请求总数与耗时。
-- [ ] 7.1a `tests/test_node27_mvt_prewarm.py`：现有用例钉住旧无源 URL（`/hydro-national/q_down/<valid_time>/...`）与 `build_warm_urls(base, tiles, valid_time)` 单时次签名，随本改动更新为 cycle-aware URL 集合（双源 × 流量瓦片 + 降水 PNG），并新增「某源 cycles 为空 → 该源零 URL」用例；同文件 `test_invalid_zoom_and_worker_bounds_fail_closed` 钉住的 `prewarm(..., valid_time=None)` 关键字签名也随新签名更新。
+- [ ] 7.1 `scripts/node27_mvt_prewarm.py`：**逐源**通过 `cycles?source=` 发现该源自己的最新周期，对该周期全部 valid-times 预热 `DISCHARGE_ZOOMS = (3, 4)` 全国流量瓦片与降水 PNG；河网 z3–5 不变；某源 cycles 为空则该源零请求且不伪造周期；发现失败按源隔离（不吞另一源）且置退出码；失败判据看 `error.code` 而非状态码（`mirror_root_unconfigured` 算失败）；PNG 请求形状用导入的 `horizon_valid_times` 现场检查、越界即吵；汇总升 `.v2`，输出 `per_source` / `requests_total` / `elapsed_seconds`。详细口径见本文件末 `### #2013` 一节的设计点 1️⃣–8️⃣。
+- [ ] 7.1a `tests/test_node27_mvt_prewarm.py`：现有用例钉住旧无源 URL（`/hydro-national/q_down/<valid_time>/...`）与 `build_warm_urls(base, tiles, valid_time)` 单时次签名，随本改动更新为 cycle-aware URL 集合（双源 × 流量瓦片 + 降水 PNG），并按 `### #2013` 的 Evidence mapping 逐条新增用例（双源皆空 / 双源皆错 / `{"data": {}}` 信封门 / 单源两跳分别失败 / 三类 PNG 404 分流 / `mirror_root_unconfigured` 算失败 / horizon 越界 / 半点周期）；同文件 `test_invalid_zoom_and_worker_bounds_fail_closed` 钉住的 `prewarm(..., valid_time=None)` 关键字签名也随新签名更新。
+- [ ] 7.1b 文档漂移随 7.1 一并修：`docs/spec/04_api_design.md:97` 的「still issued by scripts/node27_mvt_prewarm.py:69」在本单后不再成立；`docs/runbooks/display-readonly-live-mvt.md:83` 的预热集合描述同步为逐源 cycle-aware 包络（河网 z3–5 不变、流量 z3–4 × 各源最新周期全部时次、每时次一张降水 PNG）；`tests/test_hydro_display_mvt_scaling.py:2311-2316` 的 docstring 里「`scripts/node27_mvt_prewarm.py` … call it」半句不再成立，**只改 docstring、不动断言**。
 - [ ] 7.2 node-27 部署（本轮 2.4/2.5 的测量脚本未入库，见 #2005 PR 偏离记录；本任务落地时应把脚本提交到 `scripts/`，参照 `scripts/node27_timeseries_compression_live_evidence.py` 的先例）：`git pull --ff-only`、重启 display API、跑 prewarm、产出 receipt（河网 z3/z4/**z5**/z6/z7 的 `feature_coordinate_count`、`feature_coordinate_overflow_count` 与 `coordinate_count`——后者是 413 的判据，该层集合上限为 120000、瓦片冷热耗时、`GET /api/v1/layers` 冷 p95 与 `mapBootstrapLoading` 落 false 耗时（降水开启，须 ≤200 ms / <1 s）、PNG 耗时、预热请求总数与耗时、`df -h / /home` **加上 `NHMS_MVT_FILE_CACHE_DIR` 所在卷与 `precip/` 缓存文件数**、keep 水位不等式 `oldest_listed_cycle − 24h ≥ display_watermark − retention_days`（逐源）、浏览器截图）。
 - [ ] 7.3 文档：`docs/runbooks/` 补降水镜像与回填步骤；`openspec/project-profile.md` 若入口/契约变化则更新。
 
-Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_node27_mvt_prewarm.py -q` + `openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive`；node-27 receipt `docs/runbooks/receipts/<date>-display-v2.md`。
+Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_node27_mvt_prewarm.py tests/test_hydro_display_mvt_scaling.py -q` + `openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive` + markdownlint（CI，7.1b 改 `docs/**`）；node-27 receipt `docs/runbooks/receipts/<date>-display-v2.md`。
 
 ### #2016 node-22 回填 canonical 降水镜像 + keep 水位不等式核查（wave 1，ops receipt）
 
@@ -464,3 +465,78 @@ Minimal mergeable slice（issue 原文，逐字记录）：「首刀 = 6.1 query
   - AC4 附加（Public API 包的默认翻转）→ 同文件两条：(a) 以**未改动的 `defaultM11QueryState`** 跑 `loadOverview`，断言仍发 `/api/v1/pipeline/status`（`pipelineRequestParams` 已修）且 `/api/v1/runs` 带 `source=GFS`；(b) 以**未改动的 `defaultM11QueryState`** 跑 `loadBasinDetail('<id>', ...)`，断言流域详情默认同样是 GFS——`/api/v1/runs` 带 `source=GFS`，且 forecast-series 请求带 `scenarios=forecast_gfs_deterministic`（钉住「全局默认 gfs 适用于流域详情」这条产品裁定，防止后续静默漂回 `best`）。
   - AC5 fixture 重钉 → `M11Shell.test.tsx` 的 `dischargeMetadata` 四条断言 + 同文件两处旧断言同步。
 - Non-goals：6.4 降水叠加原语 / 6.5 底部控制条 / 6.6 图层开关与提示文案（I11/I12）；后端任何改动；node-27 浏览器 e2e receipt（第 6 组 Evidence Floor 的该项由 I11/I12/I15 汇总产出，本单的验收标准全部是本地命令）。**边界澄清**：`best`/`compare` 下不发降水/cycles/valid-times 请求的**闸在 store，归本单**（决策 8）；对应的隐藏与两条提示文案归 I11。
+
+### #2013 prewarm 逐源 cycle-aware（wave 2，I13：`scripts/node27_mvt_prewarm.py` + 其测试）
+
+Risk triage（`subagent-workflow` Phase 0.5，fixture level **compact**，与上游 `Suggested fixture level: compact` 一致；repair intensity **medium**）：单脚本、纯函数为主、无 DB、无鉴权、无持久化写、无发布/删除面，每一种失效模式都能由 pytest 用假取数器直接断言。**不降为 none 的理由**：该脚本被 node-27 的 autopipe cron 每 tick 调用（`scripts/node27_autopipe_cron.sh:239-247`），且本改动把请求包络从 86 条放大到 1639 条（下面有算式），Resource limits 包必须选。
+
+**修订记录（fixture review 第 1 轮判 `revise`）**：本节四条 P1 已改写——404 判据从状态码改为 `error.code`（下面 1️⃣）、horizon 从「已证断言」改写为「被检查的条件」（5️⃣，我原先写的那句是错的，见下）、逐源部分失败语义补齐（7️⃣）、双源皆空/皆错的断言补齐（Evidence mapping）。
+
+Minimal mergeable slice（issue 原文，逐字记录）：「atomic: URL 生成、逐源发现、空 cycles 守卫是同一函数的三个分支」——本 PR 一刀交付。
+
+- Issue type: feature；blast radius: small——`scripts/node27_mvt_prewarm.py` 与 `tests/test_node27_mvt_prewarm.py`（外加 7.1b 的三处文档/注释漂移）；不动后端端点、不动 retention、不动 cron 脚本本身。
+- 核心风险包：
+  - Resource limits / large input / discovery — **selected**：包络算式必须钉死，且**用代码实测而不是估**。`xyz_tiles(CHINA_BOUNDS, [3])` = 4、`[4]` = 9、`[5]` = 30（实测，与既有用例 `[3,4,5]` = 43 自洽）。故 |z3–4| = **13**。双源各 57 时次时，预热请求总数 = 河网 z3–5 **43** + 每源（13 × 57 = 741 流量瓦片 + 57 张 PNG = 798）× 2 = **1639**。改前是 43 + 43 = 86，放大 **19 倍**。`requests_total` **只计预热请求，不含 2–4 次发现请求**（双源各 `cycles` + `valid-times`），所以金样本是 1639 而不是 1643——这条必须在测试里钉死，否则两种口径会在 receipt 里长期打架。并发仍是 `--workers` 默认 8，不在本单调整。
+  - Error handling / rollback / partial outputs — **selected**，见下面设计点 1️⃣/2️⃣/5️⃣/7️⃣ 的四条硬约束（「空」≠「错」、404 按 `error.code` 判、horizon 越界要吵、逐源隔离）。
+  - Legacy compatibility / examples — **selected**：`node27_autopipe_cron.sh:241-244` 只传 `--zooms` 与 `--workers`，**不传** `--valid-time`（已核实原文）。故删除 `--valid-time` 不破坏生产调用方；`grep -rn 'node27_mvt_prewarm' --include='*.sh' --include='*.yml'` 全仓也只有这一处调用。`tests/test_node27_autopipeline_preflight.py:1677` 只断言文件存在，不涉签名。**`--zooms` 的语义保持不变**（河网 zoom 集合，默认 `3,4,5`），cron 的现有 env 变量一字不改。
+  - Schema / columns / units / field names — **selected**：汇总升版到 `nhms.node27-mvt-prewarm.v2`，逐键去向见 8️⃣。全仓没有任何消费方解析该 JSON（`grep -rn 'node27-mvt-prewarm'` 只命中脚本自身两处），所以升版是无痛的；不升才是问题——receipt 里会同时存在两种形状的历史输出。
+  - Concurrency / shared state / ordering、File IO / path safety、Auth / permissions / secrets、Config / project setup、Public API / CLI（后端）、Release / packaging、Documentation / migration notes — not selected：脚本只对本机 display API 发只读 HTTP，不写文件、不碰凭据、不改依赖。文档漂移单列在下面 7.1b。
+
+- 必须钉住的设计点（不许实现者自行裁量）：
+  1. **1️⃣ 失败判据看 `error.code`，不看状态码。** 错误信封形状是 `{"request_id":…,"status":"error","error":{"code":…,"message":…,"details":{…}}}`（`apps/api/errors.py:325-333`，`details` 不被脱敏——`_CLIENT_INPUT_KEYS` 只有 `rejected_value`/`rejected_values`，且脱敏只作用于日志行）。`warm_url` 的 `except HTTPError` 必须 `exc.read()` 并解析出 `error.code` 与 `error.details.reason`，记进 `WarmResult.error_code` / `error_reason`；**非 2xx 且信封无法解析 = 失败**（不许静默放行）。只有降水 PNG URL 上的下面两类算「预期、计数、不置退出码」：
+     - 404 `PRECIP_WINDOW_INCOMPLETE` → `png_window_incomplete`
+     - 404 `PRECIP_CYCLE_NOT_MIRRORED` 且 `error.details.reason == "cycle_not_mirrored"` → `png_not_mirrored`（**白名单，不是排除法**：写成 `!= "mirror_root_unconfigured"` 的话，后端将来新增第三种 reason 会被默认吸收成「预期」，把这条失效类推迟而不是消灭。今天该码只有两种 reason，`precip.py:277,292`）
+
+     **404 `PRECIP_CYCLE_NOT_MIRRORED` 且 `details.reason == "mirror_root_unconfigured"` 算失败**（`apps/api/routes/precip.py:268-279`：`NHMS_PRECIP_MIRROR_ROOT` 没配时 `_mirror_root()` 也走这个 404）。理由是最省事的写法恰恰最危险：只看状态码的话，一台镜像根没配的机器会每 tick 打印 `rc=0` 加 114 张静默失败的 PNG——那是把部署事故伪装成「降水镜像还没跟上」。其余任何非 2xx 照旧算失败。放宽 404 的原始理由不变：降水镜像天然滞后于流量，若把它一律算失败，cron 日志会常态出现 `rc=1 (non-fatal)`，训练运维忽略这一行。
+  2. **2️⃣ 逐源发现走两跳，且信封形状本身是门。** `GET /api/v1/layers/discharge/cycles?source=<s>` 取 `data["default_cycle"]`（`DischargeCycles` `hydro_display.py:187-190` / `DischargeCyclesResponse` `:193-194`），再 `GET /api/v1/layers/discharge/valid-times?source=<s>&cycle=<c>` 取 `data["valid_times"]`。**不做「默认对省一次 RTT」的优化**：那个优化在前端存在是因为它压在地图 bootstrap 关键路径上，prewarm 没有这条路径，而那个分支恰恰是 #2012 整条失效类的源头。少一个分支比省一次 RTT 值钱。
+     **「空」与「错」不得合流**，且这条要盖住三种入口，不只 HTTP 错：
+     - `default_cycle` 为 `null`（键在、值为空）→ **合法终态**，该源零请求，`per_source[s].cycle == null`、`error == null`、不置退出码（后端 fail-closed 交集，`hydro_display.py:320-322`；`cycles[] == [] ⟺ default_cycle is null` 同源计算，`mvt.py:1998`）。
+     - `default_cycle` 键**缺失**、或 `valid_times` 不是 list、或 200 的信封根本不是预期形状 → **错误**，`per_source[s].error` 非空、退出码非 0。必须写成 `data["default_cycle"]`（KeyError 即错），**不许**写 `data.get("default_cycle")` ——那一个字母就把「后端没给这个字段」折叠成「后端说没有周期」，正是 #2012 那一单反复踩的同一类。
+     - `valid_times` 是 list 但**元素不可解析**（不是 RFC3339 instant）→ **错误**，同上。这条要单列：horizon 谓词遇到垃圾字符串会抛 `ValueError`，而 `main()` 现有的 `except (ValueError, …) -> return 2`（`node27_mvt_prewarm.py:153-155`）会把它吃成进程级失败——无汇总、无 `per_source`，与 7️⃣ 的逐源隔离直接冲突。
+     - cycles / valid-times 请求本身失败（HTTP 错误、超时、JSON 解析失败）→ **错误**，同上。
+     两跳都带请求头 `x-nhms-cache-warm: refresh`（`apps/api/display_cache.py:32`）：`/cycles`、`/valid-times` 走 `display_catalog_cached`（TTL 60 s、stale-while-revalidate 600 s），而 prewarm 恰恰在 publish 之后立刻跑——不强制刷新就可能拿着上一周期的目录去预热。
+  3. **3️⃣ 绝不伪造周期**：不借另一源的周期、不用 `metadata.valid_times`、不按墙钟推算。这三条要各有一个断言，而不是一条笼统的「不伪造」。`default_cycle` 是唯一的周期来源，**不得**回退到 `cycles[0]` 自行挑选。
+  4. **4️⃣ 河网 z3–5 预热保持不变**——豁免条款，附可核验依据：`river-network-national` 的瓦片路由不含身份占位符（`required_placeholders` 为 `[z,x,y]`，`services/tiles/mvt.py` 的 `_NATIONAL_RIVER_NETWORK_METADATA`），故它**结构上**没有 source/cycle 维度可言，不是「本次不改它」而是「它没有可改的维度」。若实现者发现该前提不成立，那是发现，不是绕道。
+  5. **5️⃣ PNG 的请求形状是被检查的条件，不是被断言的事实。**（**改正我在前一版里写错的一句**：我写过「valid-times 返回的必然落在 `[cycle, cycle+168h]` 内，这是可核验的断言」。下界确实是结构性的——`mvt.py:2171` `window_start = max(cycle, …)`；**上界没有任何 clamp**：`window_end = min(river_valid_time_end)`（`mvt.py:2121-2136`），而 `MVT_VALID_TIME_SAMPLE_LIMIT = 100`（`mvt.py:54`）× 3 h 步长最远可列到 `cycle+297h`，`mvt.py:2151` 的 docstring 自己也只说「A 168 h horizon **yields** 57」。第二条独立的 422 通道：PNG 路由对 `cycle` 也有整点门（`precip.py:326-344`），而 `/cycles` 不过滤 `h.cycle_time` 的分秒。把假设当事实、再禁止「容错绕过」，正是上一单 retro 写的 premise-as-guard。）
+     与已钉决策 12（本文件 `:233`）对齐的做法——决策 12 把 `horizon_valid_times` 移进 `services/precip/mirror.py:106-115` 时，docstring 明写「#2013's prewarm reuses it」，所以本单**导入它，不重新推导**：
+     - `from services.precip.mirror import horizon_valid_times`（实测 11 ms，不拉 numpy/PIL）。脚本按 `scripts/node27_autopipeline.py:57-59` 的先例做 repo-root `sys.path` 引导——**但要如实记账**（前一版我写的「不引导则 import 失败」是错的，已实测证伪：cron 用 `"$REPO/.venv/bin/python" "$REPO/scripts/…"` 起进程时 `sys.path[0]` 确实是 `scripts/`、cwd 不在路径上，然而 `.venv` 里的 `__editable__.nhms-0.1.0.pth` 配合 `pyproject.toml` 的 `include = ["apps*","services*","workers*","packages*"]` 已经把 `services` 装进环境，直跑 import 成功）。所以引导是**防御性冗余**（覆盖非 editable-install 的运行方式），不是必需前提；而 `tests/test_node27_mvt_prewarm.py` 顶层的 `from scripts import node27_mvt_prewarm` **不是**它的 oracle——pytest 下 repo root 本就在 `sys.path` 上，引导写没写都过。cron 形态的唯一 oracle 是 7.2 的 node-27 receipt。
+     - **PNG 可请求谓词**（逐 `(source, cycle, valid_time)`）：`cycle.minute == cycle.second == 0` **且** `valid_time ∈ horizon_valid_times(cycle)`。
+     - 不满足的 valid_time：**不发这张 PNG 请求**，计入 `per_source[s].png_out_of_contract`，且**退出码非 0**——这是两个后端窗口口径打架的信号，要吵出来，不许静默跳过，也不许在脚本里加「容错」把它抹平。
+     - 同一个 valid_time 的 **13 张流量瓦片照常预热**：瓦片路由没有 horizon 门，且 `/valid-times` 与瓦片服务的是同一个覆盖窗口（`_national_cycle_valid_times` ← `_national_coverage_window`，`mvt.py:2121-2136`）。
+  6. **6️⃣ 签名与 URL 形状。** `build_warm_urls` 按 issue 的 Key interfaces：`(base, tiles, *, source, cycle, valid_times)`；URL 形状 `/api/v1/tiles/hydro-national/{source}/{cycle}/q_down/{valid_time}/{z}/{x}/{y}.pbf` 与 `/api/v1/precip/{source}/{cycle}/{valid_time}.png`，`{cycle}`/`{valid_time}` 沿用既有 `quote(..., safe="")` 编码（与既有用例的 `%3A` 断言同源，不得为了凑字面量改编码器）。`tiles` 形参**只指 `DISCHARGE_ZOOMS` 那 13 张流量瓦片**；河网那 43 张在逐源循环**之外**构一次（v1 的 `build_warm_urls` 在同一个循环里同时吐河网与流量 URL，`node27_mvt_prewarm.py:62-70`，照搬会变成 86 张河网、与 1639 金样本冲突）。**`warm_url` 保持「笨」**：它只记录 `status / bytes / cache / error_code / error_reason`，**不认识 URL 种类**；1️⃣ 的「PNG 上哪些 404 算预期」由知道 URL 种类的汇总层判定，否则 `warm_url` 会长出一条 URL 模式分支。
+     流量瓦片的 zoom 集合是**模块常量 `DISCHARGE_ZOOMS = (3, 4)`**，不是 `zooms ∩ {3,4}`：后者让 `AUTOPIPE_MVT_PREWARM_ZOOMS=5,6,7` 静默预热零张流量瓦片，而 spec 钉的是固定 z3–4。`--zooms` 仍只管河网。
+  7. **7️⃣ 逐源隔离，部分失败不吞另一源。** 发现失败**按源捕获**：一次 gfs `/cycles` 抖动不得让 ifs 的 798 条请求一条都不发，也不得让汇总一个字都不打印。`main()` 现有的 `except (…) -> return 2` 一行式失败信封（`node27_mvt_prewarm.py:153-155`）**不再是**单源发现失败的路径——那条只留给参数错误一类的进程级失败。任一 `per_source[s].error` 非空即退出码非 0，且完整汇总（`per_source` / `requests_total` / `elapsed_seconds`）照常打印。
+     第三种状态（cycles 非空、`default_cycle` 有值，但 `/valid-times` 返回 `[]`）是**合法**的（clamp 后窗口为空）：该源零流量瓦片、零 PNG，`per_source[s].cycle` 有值、`valid_times == 0`、`error == null`、不置退出码。
+  8. **8️⃣ 汇总升到 `.v2`，逐键去向写死。** v1 键：`schema / base_url / valid_time / zooms / tile_count / request_count / failed_count / cache_hits / bytes / failures`。
+     - `schema` → `"nhms.node27-mvt-prewarm.v2"`；`base_url` / `cache_hits` / `bytes` 语义不变。
+     - `failed_count` **语义收窄**：`= 非 2xx 请求数 − 两类预期 PNG 404`。v1 它是全部非 2xx（`node27_mvt_prewarm.py:105`），照搬会让每张 `cycle_not_mirrored` 的 PNG 都把退出码顶成非 0——正是 1️⃣ 要避免的 `rc=1 (non-fatal)` 噪声。配套：预期 404 **不**进 `failures[:20]`；PNG 上的 500 同时进 `png_failed` 与 `failed_count`。
+     - `valid_time` **删除**（不再有全局单时次）。
+     - `zooms` 保留（河网 zoom 集合），新增 `discharge_zooms`（即 `DISCHARGE_ZOOMS`）。
+     - `tile_count` → **改名 `river_tile_count`**（旧名在逐源语境下歧义）。
+     - `request_count` → **改名 `requests_total`**，口径见 Resource limits 包（不含发现请求）。
+     - `failures` 保留（截前 20 条），条目多出 `error_code` / `error_reason` 两个字段。
+     - `main()` 里那条一行式失败信封（`node27_mvt_prewarm.py:154`）的 `schema` 串**同样升 `.v2`**——脚本里有两处该常量，只升一处会让 receipt 同时出现两个版本号。
+     - 新增 `elapsed_seconds`、`per_source`。`per_source[<s>]` 形状固定为 `{cycle, valid_times, discharge_requests, png_ok, png_not_mirrored, png_window_incomplete, png_out_of_contract, png_failed, error}`。
+     - 退出码：`0` 当且仅当 `failed_count == 0` **且**所有 `per_source[s].error` 为 `null` **且**所有 `png_out_of_contract == 0`。
+
+- 已知会产生的文档漂移（本单必须一并修，不得留给下一单）：
+  - `docs/spec/04_api_design.md:97` 写着 legacy 无源 alias「still issued by scripts/node27_mvt_prewarm.py:69」——本单之后不再成立。
+  - `docs/runbooks/display-readonly-live-mvt.md:83` 描述的预热集合需同步为逐源 cycle-aware 包络。
+  - `tests/test_hydro_display_mvt_scaling.py:2311-2316` 的 docstring 写着「`scripts/node27_mvt_prewarm.py` and the frontend's fallback both call it」——本单之后前半句不成立。**只改 docstring，不动该用例的断言**：无参路由仍是活路由（前端 fallback 还在调），把它改成必填参数是另一单的事。
+
+- Evidence mapping（AC → 断言落点，全部在 `tests/test_node27_mvt_prewarm.py`）：
+  - AC 包络与计数 → 双源各 57 时次的 URL 集合断言：恰为河网 43 + 每源 741 + 每源 57，`requests_total == 1639`（**不是 1643**，发现请求不计）；汇总含 `elapsed_seconds`；`schema == "nhms.node27-mvt-prewarm.v2"` 且 `valid_time` 键已不存在。
+  - AC 逐源周期 → gfs `2026-09-02T12:00:00Z` / ifs `2026-09-02T00:00:00Z`，断言两源 URL 各自只出现自己的周期，**且交叉断言**（gfs 的 URL 集合里不含 ifs 的周期字符串，反之亦然）。
+  - AC 空 cycles → 该源零流量瓦片、零 PNG；`per_source[<s>] == {cycle: null, valid_times: 0, …, error: null}`；并**分别**断言未借另一源周期、未用 `metadata.valid_times`、未用墙钟（墙钟那条用「注入一个可控 now 也不改变输出」或「URL 集合中不含任何非 fixture 提供的周期」来钉）。
+  - AC **双源皆空** → 预热 URL 集合**恰为**那 43 张河网瓦片，`requests_total == 43`，两源 `cycle` 皆 `null`、`error` 皆 `null`，rc == 0。
+  - AC **双源皆错**（两次 `/cycles` 都抛）→ URL 集合同样恰为 43 张河网瓦片，但两源 `error` 皆非空、rc != 0，且汇总照常打印。这条与上一条成对，是「空 ≠ 错」在聚合层的 oracle；缺了它，双源皆空与双源皆错在 URL 集合上无法区分。
+  - AC 信封形状门 → `/cycles` 返回 `{"data": {}}`（200、`default_cycle` 键缺失）→ `per_source[s].error` 非空、rc != 0，**不是**零请求成功路径；`valid_times` 返回非 list 同理。
+  - AC 单源发现失败不吞另一源 → 分别让 gfs 的 `/cycles` 与 gfs 的 `/valid-times` 抛错（两条用例），断言 ifs 仍拿到完整 798 条、`per_source["gfs"].error` 非空、rc != 0、汇总完整打印。
+  - AC PNG 预期 404 → 注入 404 `PRECIP_WINDOW_INCOMPLETE` 与 404 `PRECIP_CYCLE_NOT_MIRRORED`（`details.reason` 非 `mirror_root_unconfigured`），断言各自计入 `png_window_incomplete` / `png_not_mirrored` 且**不**置退出码；再注入一个 500，断言它照旧算失败。
+  - AC **镜像根未配置算失败** → 注入 404 `PRECIP_CYCLE_NOT_MIRRORED` + `details.reason == "mirror_root_unconfigured"`，断言它进 `png_failed`、rc != 0（而不是被 `png_not_mirrored` 吸收）；再注入一个非 2xx 且 body 不是 JSON 的响应，断言也算失败。
+  - AC **horizon 越界要吵** → `/valid-times` 多返回一个 `cycle+171h` 的时次（共 58 个），断言：该时次的 PNG **不在** URL 集合里、`per_source[s].png_out_of_contract == 1`、rc != 0，**且该时次的 13 张流量瓦片仍在** URL 集合里。
+  - AC **半点周期要吵** → `default_cycle` 为 `2026-09-02T12:30:00Z`，断言该源全部 PNG 落入 `png_out_of_contract`、零 PNG URL、rc != 0，而流量瓦片照常预热。
+  - AC **v2 键集自洽** → 一条断言钉住汇总顶层键集**恰等于** `{schema, base_url, zooms, discharge_zooms, river_tile_count, requests_total, failed_count, cache_hits, bytes, failures, elapsed_seconds, per_source}`（一次覆盖 `river_tile_count` / `discharge_zooms` / 改名三项），外加自洽等式 `requests_total == river_tile_count + Σ discharge_requests + Σ(png_ok + png_not_mirrored + png_window_incomplete + png_failed)`；`failures[]` 条目含 `error_code` / `error_reason` 两键。
+  - AC **valid_times 元素垃圾** → 列表里混一个 `"not-a-time"`，断言走的是 `per_source[s].error` 非空 + rc != 0 + 汇总照常打印，**不是** `main()` 的一行式失败信封。
+  - AC 无效 zoom / worker 边界 → 既有用例语义不变，仅随新签名更新。
+- Non-goals：node-27 实跑与 receipt（7.2，归 I15）；后端 cycles/precip 端点（I5/I8）；z≥5 的流量瓦片预热；`--workers` 默认值与并发策略调整；把无参 `/valid-times` 路由改成必填参数。
