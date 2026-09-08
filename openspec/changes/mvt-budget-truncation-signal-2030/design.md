@@ -56,7 +56,11 @@ issue from a PR #2025 review deferral).
   infrastructure (grep: no prometheus/statsd client under `apps/`); the display API already routes
   `apps.api.*` WARNING+ to `/tmp/display-api.log` via systemd `StandardError`. A greppable token
   `MVT_TILE_BUDGET_TRUNCATED` makes it a runtime capability (`grep -c` on the log) instead of a one-off
-  SQL replay. Message is one line: `MVT_TILE_BUDGET_TRUNCATED layer_id=<id> z=<z> x=<x> y=<y>
+  SQL replay. The count is of *generations* (cache misses), not served responses: a tile truncated before
+  deploy and still warm in the file cache is served without re-entering the bind site, so answering "what
+  is truncated right now" needs a cache-cold pass (or the prewarm) rather than a raw grep. New truncation
+  from inventory growth rotates the national keys (the source digests hash the active-network inventory;
+  `hydro-national` keys also rotate per `valid_time`), so it fires on its first regeneration. Message is one line: `MVT_TILE_BUDGET_TRUNCATED layer_id=<id> z=<z> x=<x> y=<y>
   feature_count=<n>/<intersecting> max_features=<n> coordinate_count=<n>/<intersecting> max_coordinates=<n>`
   (the `/` pairs read "selected/intersecting"), plus the same fields in `extra=` for structured handlers.
 - **D2 — Condition uses all four columns.** Overflow rows are removed by `preeligible` (window layers) /

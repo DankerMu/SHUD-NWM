@@ -635,6 +635,9 @@ def test_budget_truncation_signal_matrix(
     # The spec pins the severity, not just the token: an ERROR would page an
     # operator for a tile that still rendered.
     assert records[0].levelno == logging.WARNING
+    # The name is load-bearing: only the `apps.api` tree reaches the stderr handler
+    # in apps/api/main.py that feeds /tmp/display-api.log, and caplog sits on the root.
+    assert records[0].name == _TILE_ROUTE_LOGGER
     message = records[0].getMessage()
     for fragment in fragments:
         assert fragment in message, (fragment, message)

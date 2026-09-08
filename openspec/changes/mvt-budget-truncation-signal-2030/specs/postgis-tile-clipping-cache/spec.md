@@ -7,7 +7,9 @@ and `prefilter_stats.intersecting_coordinate_count` (the pre-truncation totals o
 every tile layer, and the single production bind site `_fetch_postgis_tile_bytes` SHALL emit exactly one
 `WARNING` log record (logger `apps.api.routes.hydro_display`, token `MVT_TILE_BUDGET_TRUNCATED`, carrying
 `layer_id`, `z`, `x`, `y`, `feature_count`, `intersecting_feature_count`, `max_features`,
-`coordinate_count`, `intersecting_coordinate_count`, `max_coordinates`) whenever a tile is returned with
+`coordinate_count`, `intersecting_coordinate_count`, `max_coordinates`) whenever a tile is generated — a cache
+miss on both the database and file tiers; cache hits never re-enter the bind site, so the record counts generations,
+not served responses — with
 `(intersecting_coordinate_count > coordinate_count OR intersecting_feature_count > feature_count) AND
 feature_coordinate_overflow_count = 0 AND coordinate_dimension_overflow_count = 0`. Tile bytes, HTTP
 status semantics (200/413/424/500), binds, cache identity and `*_QUERY_VERSION` literals SHALL be unchanged
