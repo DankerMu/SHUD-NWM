@@ -67,9 +67,10 @@ issue from a PR #2025 review deferral).
   meaning exactly "the fair budget window dropped rows". A tile with BOTH an overflow row AND budget
   truncation therefore stays silent — accepted, recorded as a non-goal.
 - **D3 — Strict `>` on either axis.** `intersecting == selected` on both axes is the untruncated state and
-  must be silent (node-27: all 516 tiles today). `feature_count` truncation is unreachable in practice
-  (`:feature_limit` = 10 000 vs ≤ 1 078 rows measured) but costs one comparison and closes the second
-  arm of the issue's finding.
+  must be silent (node-27: all 516 `river-network-national` tiles today). The feature arm is not academic:
+  the node-27 receipt found `hydro-national q_down` 3/6/3 truncated on exactly that arm in production
+  (feature_count 10 000 / 10 991 against `:feature_limit` = `MVT_MAX_FEATURES`, coordinates 20 005 / 21 987
+  well under 50 000), so a coordinate-only check would have stayed silent on the first real truncation.
 - **D4 — Warning placement after the 424 check.** On a 424 (`source_identity_count <= 0`) there are no
   source rows, so `intersecting == 0 == selected` — nothing to warn about; on 413/500 the raise already
   carries the numbers. Emitting only on the bytes-returning path keeps one signal per outcome.
