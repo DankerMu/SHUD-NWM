@@ -31,6 +31,11 @@ import {
 } from '@/lib/m11/queryState'
 import { withStaticBasinBboxes } from '@/lib/m11/staticBasinFallback'
 import { prefetchHydroMetLatestProducts } from '@/pages/hydroMet/bootstrap'
+import {
+  M11BottomControlBar,
+  deriveM11ControlBarModel,
+  type M11BottomControlBarProps,
+} from '@/pages/m11/M11BottomControlBar'
 import { resolveM11NationalValidTimeCorrection } from '@/pages/m11/M11Controls'
 import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
@@ -116,6 +121,7 @@ function M11FullscreenMap({
   boundaryLoading,
   fitTo,
   mapLabel,
+  controlBar,
   onQueryChange,
   onOverlayHover,
   onOverlayClick,
@@ -140,6 +146,8 @@ function M11FullscreenMap({
   boundaryLoading?: boolean
   fitTo?: M11MapCameraFit | null
   mapLabel: string
+  /** 底部控制条模型（全国模式）。null / 不传 = 不渲染任何控制条 DOM（流域详情模式）。 */
+  controlBar?: M11BottomControlBarProps | null
   onQueryChange: (patch: M11QueryPatch) => void
   onOverlayHover?: (interaction: M11MapOverlayInteraction | null) => void
   onOverlayClick?: (interaction: M11MapOverlayInteraction) => void
@@ -178,6 +186,7 @@ function M11FullscreenMap({
       <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
       <M11OpsLink visible={opsVisible} />
       {children}
+      {controlBar ? <M11BottomControlBar {...controlBar} onQueryChange={onQueryChange} /> : null}
       <M11FloatingLegend layer={state.layer} layers={layers} />
       </section>
     </div>
@@ -275,6 +284,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const error = useOverviewDataStore((store) => store.error)
   const bootstrapError = useOverviewDataStore((store) => store.bootstrapError)
   const loadOverview = useOverviewDataStore((store) => store.loadOverview)
+  // 起报时次列表是 enrichment（bootstrap 之后才到）：控制条只读它，尚未到达时回落 default_cycle。
+  const cyclesBySource = useOverviewDataStore((store) => store.cyclesBySource)
   const overviewMatchesQuery = overviewSnapshotMatchesQuery(overview, state)
   const overviewMetadataMatchesQuery = overviewSnapshotMetadataMatchesQuery(overview, state)
   const currentOverview = overviewMatchesQuery ? overview : null
@@ -314,6 +325,18 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   )
   const summary = currentOverview?.summary ?? mapOverview?.summary
   const sourceSelection = summary?.sourceSelection ?? null
+  // 底部控制条：全部派生自上面这组只读快照，零新增请求、零 store 写入。
+  const controlBar = useMemo(
+    () =>
+      deriveM11ControlBarModel({
+        state,
+        layers,
+        metadata: layers.find((layer) => layer.layerId === state.layer)?.metadata ?? null,
+        cyclesBySource,
+        sourceSelection,
+      }),
+    [cyclesBySource, layers, sourceSelection, state],
+  )
   // basin_version_id → basin_id：全国点河段开流量弹窗时反查所属流域去取该流域 latest-product。
   const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? mapOverview?.basinVersionToBasinId ?? {}
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
@@ -484,6 +507,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       boundaryLoading={nationalGeo.loading}
       fitTo={basinFit}
       mapLabel="全国总览地图"
+      controlBar={controlBar}
       onQueryChange={onQueryChange}
       onOverlayHover={handleMapOverlayHover}
       onOverlayClick={handleMapOverlayClick}
