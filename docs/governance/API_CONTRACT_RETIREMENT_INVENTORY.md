@@ -175,7 +175,7 @@ rg --files apps/frontend/e2e | sort
   `apps/frontend/src/lib/hydroMet/riverForecast.ts:121` call the generated
   `forecast-series` path.
 - Frontend test evidence: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`
-  asserts generated forecast-series calls; `apps/frontend/src/stores/__tests__/overviewData.test.ts`
+  asserts generated forecast-series calls; `apps/frontend/src/stores/__tests__/overviewDataSourceSelection.test.ts`
   contains many forecast-series path assertions.
 - E2E/mocked evidence: `apps/frontend/e2e/m11-routes.spec.ts:276` and
   `apps/frontend/e2e/m15-visual-conformance.spec.ts:563` branch on URL

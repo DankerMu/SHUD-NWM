@@ -145,11 +145,11 @@ export function buildM11RegisteredOverlay(state: M11QueryState, layers: LayerSta
 
   // 全国 source/cycle 模板：`best` 归一为 `gfs`（全国尺度），`compare` 没有对应瓦片路由 → 不注册。
   const nationalSource = national ? resolveNationalScaleSource(state.source) : null
-  const nationalCycle = national ? resolveNationalOverlayCycle(state, metadata) : null
+  const nationalCycle = national ? resolveNationalOverlayCycle(selectedLayer) : null
   if (national) {
     if (templateNeeds(metadata, 'source') && nationalSource !== 'gfs' && nationalSource !== 'ifs') return null
-    // `default_cycle` 为空即 fail-closed：无论 URL 上有没有 cycle 都不注册叠加层，
-    // 也就不会有任何含字面 `{cycle}` 或自造周期的瓦片请求。
+    // 章为空即 fail-closed（目录 `default_cycle` 为空、或活动源的周期解不出来）：无论 URL 上
+    // 有没有 cycle 都不注册叠加层，也就不会有任何含字面 `{cycle}`、自造周期或跨源周期的瓦片请求。
     if (templateNeeds(metadata, 'cycle') && !nationalCycle) return null
   }
 
@@ -245,14 +245,21 @@ function templateNeeds(metadata: MvtLayerMetadata, placeholder: 'source' | 'cycl
 }
 
 /**
- * 有效周期 = `state.cycle ?? metadata.default_cycle`，秒精度拼写。
- * `metadata.default_cycle` 为空时一律返回 null——目录没能证明任何周期可渲染，
- * 客户端不得自造周期（spec map-layer-timeline-controls「Cycle selector is fail-closed」）。
+ * 有效周期 = store 盖在这批时次上的章（`LayerState.activeNationalCycle`），只做秒精度归一。
+ *
+ * **这里不再有第二份「哪个周期是活动的」规则**（#2014 决策 13 孪生要求）。解析规则只在
+ * `nationalDischargeActivePair`（`apps/frontend/src/stores/overviewData.ts`）一处：URL 周期，
+ * 否则该源自己声明的默认周期（默认源才是目录的 `metadata.default_cycle`）。
+ * 曾经的 `state.cycle ?? metadata.default_cycle` 与源无关，而 `metadata.default_cycle` 是
+ * **GFS 专有事实**（后端 `list_layers` 签名里没有 `source`，`_default_layer_catalog` 固定按
+ * `NATIONAL_DISCHARGE_DEFAULT_SOURCE` 计算）：按源分叉的活动对落地后，`source=ifs` + URL 无 cycle
+ * 这个正常终态会拼出 `/hydro-national/ifs/<C_gfs>/q_down/<ifs 有效时刻>/…` —— 一个从未存在过的
+ * 三元组，比「没有图层」更糟（它会真的去取瓦片）。故本函数**不得**再回落 `metadata.default_cycle`：
+ * 章为空 = store 没解出周期（fail-closed / 该源 cycles 未到达或取回失败）= 不注册叠加层。
+ * 章与 `LayerState.validTimes` 同批产出，于是 cycle 段与 valid_time 段按构造属于同一个身份。
  */
-function resolveNationalOverlayCycle(state: M11QueryState, metadata: MvtLayerMetadata): string | null {
-  const defaultCycle = toSecondsPrecisionInstant(metadata.default_cycle ?? null)
-  if (!defaultCycle) return null
-  return toSecondsPrecisionInstant(state.cycle) ?? defaultCycle
+function resolveNationalOverlayCycle(layer: LayerState): string | null {
+  return toSecondsPrecisionInstant(layer.activeNationalCycle)
 }
 
 export function buildBasinFeatureCollection(basins: OverviewBasin[], visibleBasinIds: string[] | undefined): BasinFeatureCollection {

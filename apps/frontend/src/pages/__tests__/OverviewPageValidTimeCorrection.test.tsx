@@ -1,9 +1,9 @@
-import { act, render, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
-import { pendingActiveCycleValidTimesDisabledReason } from '@/lib/m11/overviewDataContracts'
+import { isFailClosedDischargeMetadata, pendingActiveCycleValidTimesDisabledReason } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, serializeM11QueryState } from '@/lib/m11/queryState'
 import { OverviewPage } from '@/pages/OverviewPage'
 import { useMonitoringStore, type RuntimeConfig } from '@/stores/monitoring'
@@ -37,6 +37,8 @@ const DEFAULT_CYCLE = '2026-05-18T00:00:00Z'
 // 闸门放开后校正必须真的改写它，用来证明这个 effect 是活的（不是「从未触发」冒充的绿）。
 const SHARED_VALID_TIME = '2026-05-18T06:00:00.000Z'
 const IFS_VALID_TIMES = ['2026-05-18T00:00:00Z', '2026-05-18T03:00:00Z']
+/** IFS 自己声明的默认周期，刻意 ≠ 目录（GFS 专有）的 `default_cycle`。 */
+const IFS_OWN_CYCLE = '2026-05-17T06:00:00Z'
 
 const displayRuntimeConfig: RuntimeConfig = {
   service_role: 'display_readonly',
@@ -82,10 +84,18 @@ const dischargeLayer = {
   },
 }
 
+/** 全国交集 fail-closed 的目录形状（与 AC7(g) 同式）：空 valid_times + 无默认周期。 */
+const failClosedDischargeMetadata = { ...dischargeLayer.metadata, valid_times: [], default_cycle: null }
+
 type MockOptions = { params?: { query?: Record<string, unknown>; path?: Record<string, unknown> } }
 
-/** 闸住 per-cycle valid-times：bootstrap 正常落定，pending 窗口在测试控制下保持打开。 */
-function mockApiWithGatedValidTimes() {
+/**
+ * 闸住 per-cycle valid-times：bootstrap 正常落定，pending 窗口在测试控制下保持打开。
+ *
+ * `failClosedCatalog`：目录换成 AC7(g) 的 fail-closed 形状（`valid_times: []` + `default_cycle: null`），
+ * 其余路径逐字不变——AC10 要的正是「目录 fail-closed + 健康 IFS」这一格。
+ */
+function mockApiWithGatedValidTimes({ failClosedCatalog = false }: { failClosedCatalog?: boolean } = {}) {
   let release: () => void = () => undefined
   const gate = new Promise<void>((resolve) => {
     release = resolve
@@ -97,7 +107,8 @@ function mockApiWithGatedValidTimes() {
     }
     if (path === '/api/v1/basins') return success([basin])
     if (path === '/api/v1/basins/{basin_id}/versions') return success([])
-    if (path === '/api/v1/layers') return success([dischargeLayer])
+    if (path === '/api/v1/layers')
+      return success([failClosedCatalog ? { ...dischargeLayer, metadata: failClosedDischargeMetadata } : dischargeLayer])
     if (path === '/api/v1/models') return success({ items: [], total: 0, limit: 200, offset: 0 })
     if (path === '/api/v1/runs') return success({ items: [], total: 0, limit: 20, offset: 0 })
     if (path === CYCLES_PATH) {
@@ -132,11 +143,66 @@ function mockApiWithGatedValidTimes() {
   return { release: () => release() }
 }
 
-function renderOverviewAt(search: string) {
+function renderOverviewRouterAt(search: string) {
   const router = createMemoryRouter([{ path: '/', element: <OverviewPage /> }], { initialEntries: [`/?${search}`] })
   render(<RouterProvider router={router} />)
   // MemoryRouter 不碰 window.location：URL 一律从 router 自己的 location 读。
-  return () => new URLSearchParams(router.state.location.search).get('validTime')
+  return (key: string) => new URLSearchParams(router.state.location.search).get(key)
+}
+
+function renderOverviewAt(search: string) {
+  const param = renderOverviewRouterAt(search)
+  return () => param('validTime')
+}
+
+/** 按 `query.source` 分叉的 cycles / valid-times：切源后活动周期必须真的换一份。 */
+function mockApiWithSourceScopedCycles() {
+  const calls: Array<{ path: string; query?: Record<string, unknown> }> = []
+  vi.mocked(client.GET).mockImplementation((async (path: string, options?: MockOptions) => {
+    calls.push({ path, query: options?.params?.query })
+    if (path === VALID_TIMES_PATH) {
+      // 后端对**未覆盖**的 (source, cycle) 返回 200 + 空列表（不是 4xx）——这正是
+      // `'Layer has no valid times.'` 这句假文案的来源，也是本用例要证明「请求根本没发」的原因。
+      const cycle = options?.params?.query?.cycle as string | undefined
+      return success({ layer_id: 'discharge', valid_times: cycle === IFS_OWN_CYCLE ? IFS_VALID_TIMES : [] })
+    }
+    if (path === '/api/v1/basins') return success([basin])
+    if (path === '/api/v1/basins/{basin_id}/versions') return success([])
+    if (path === '/api/v1/layers') return success([dischargeLayer])
+    if (path === '/api/v1/models') return success({ items: [], total: 0, limit: 200, offset: 0 })
+    if (path === '/api/v1/runs') return success({ items: [], total: 0, limit: 20, offset: 0 })
+    if (path === CYCLES_PATH) {
+      const source = options?.params?.query?.source
+      const cycleTime = source === 'ifs' ? IFS_OWN_CYCLE : DEFAULT_CYCLE
+      return success({
+        source,
+        cycles: [{ cycle_time: cycleTime, valid_time_start: cycleTime, valid_time_end: cycleTime }],
+        default_cycle: cycleTime,
+      })
+    }
+    if (path === PRECIP_INDEX_PATH) {
+      return success({
+        source: 'ifs',
+        cycle: IFS_OWN_CYCLE,
+        window_hours: 24,
+        unit: 'mm',
+        bounds: [73, 18, 135, 54],
+        image_size: [1316, 800],
+        legend: [],
+        palette_version: 'v1',
+        valid_times: IFS_VALID_TIMES,
+      })
+    }
+    if (path === '/api/v1/pipeline/status') {
+      return success({
+        cycle_time: DEFAULT_CYCLE,
+        updated_at: '2026-05-18T00:30:00Z',
+        job_counts: { succeeded: 1, running: 0, failed: 0, pending: 0 },
+      })
+    }
+    throw new Error(`Unexpected GET ${path}`)
+  }) as never)
+  return calls
 }
 
 function dischargeDisabledReason() {
@@ -191,6 +257,10 @@ describe('OverviewPage validTime auto-correction gate', () => {
     const search = serializeM11QueryState({ ...defaultM11QueryState, source: 'ifs', validTime: SHARED_VALID_TIME })
     const currentValidTime = renderOverviewAt(search)
     expect(currentValidTime()).toBe(SHARED_VALID_TIME)
+    // #2014 的挂载接缝（round-1 finding G）：`OverviewMode → M11FullscreenMap → M11BottomControlBar`
+    // 这条接线此前零断言 —— 忘传 `controlBar` prop 或忘渲染都会全绿。`deriveM11ControlBarModel`
+    // 永不返回 null，故控制条从首帧起就在 DOM 里，这里同步断言、不用 waitFor。
+    expect(screen.getByTestId('m11-bottom-control-bar')).toBeTruthy()
 
     // bootstrap 已落定（校正 effect 的早退闸门 `mapBootstrapLoading` 已抬起），
     // 且活动 (ifs, default_cycle) 的列表确实还未定 —— 断言是在真实的 pending 窗口里做的。
@@ -207,5 +277,83 @@ describe('OverviewPage validTime auto-correction gate', () => {
     release()
     await waitFor(() => expect(dischargeDisabledReason()).toBeNull())
     await waitFor(() => expect(currentValidTime()).toBe('2026-05-18T00:00:00.000Z'))
+  })
+
+  it('keeps the shared validTime under a fail-closed catalog while the IFS cycle list is in flight', async () => {
+    // AC10（round-4 finding R4-A）：目录判 fail-closed 是 **GFS 专有事实**，却对任何 `query.source`
+    // 生效——`?source=ifs` 且 IFS 周期列表在途时 store 诚实写 pending，文案分支若仍报 fail-closed，
+    // `isM11ActiveCycleValidTimesUnresolved` 就是 false，校正立刻把分享链接的 T 抹成 null，
+    // IFS 列表落地后 `pickCurrentValidTime` 落到列表首项。T 取列表**第二项**，正是为了把
+    // 「T 存活」与「回落首项」区分开。
+    const { release } = mockApiWithGatedValidTimes({ failClosedCatalog: true })
+    const sharedValidTime = '2026-05-18T03:00:00.000Z'
+    expect(IFS_VALID_TIMES.indexOf(sharedValidTime.replace('.000Z', 'Z'))).toBe(1)
+    const search = serializeM11QueryState({ ...defaultM11QueryState, source: 'ifs', validTime: sharedValidTime })
+    const currentValidTime = renderOverviewAt(search)
+
+    await waitFor(() => expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(false))
+    // 入参钉死：目录确实是 fail-closed 形状（否则本用例什么也不鉴别）。断言落在**目录事实**上，
+    // 而不是 bootstrap 层的 `disabledReason`——后者正是 R4-A 要改掉的那个代理量。
+    const bootstrapCatalog = useOverviewDataStore.getState().overview?.bootstrap?.layers ?? []
+    const bootstrapDischarge = bootstrapCatalog.find((item) => item.layer_id === 'discharge')
+    expect(isFailClosedDischargeMetadata('discharge', bootstrapDischarge?.metadata)).toBe(true)
+
+    await waitFor(() => expect(dischargeDisabledReason()).toBe(pendingActiveCycleValidTimesDisabledReason))
+    await waitFor(() => expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false))
+    await flushPendingEffects()
+
+    expect(dischargeDisabledReason()).toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(currentValidTime()).toBe(sharedValidTime)
+    // pending 窗口里整条控制条是禁用的：下面「放开后按钮可用」才是被观测到的**翻转**。
+    expect((screen.getByRole('button', { name: '上一个有效时刻' }) as HTMLButtonElement).disabled).toBe(true)
+
+    release()
+    await waitFor(() => expect(dischargeDisabledReason()).toBeNull())
+    expect(
+      useOverviewDataStore.getState().overview?.layers.find((item) => item.layerId === 'discharge')?.available,
+    ).toBe(true)
+    expect(currentValidTime()).toBe(sharedValidTime)
+    // R4-D：`getState()` 证明不了「算对的层到达了 DOM」。合并后的 discharge 层真的喂进了控制条，
+    // 时次落在列表第二项上（`disabled || atFirst` 两半都为假），这颗按钮才可用。
+    await waitFor(() =>
+      expect((screen.getByRole('button', { name: '上一个有效时刻' }) as HTMLButtonElement).disabled).toBe(false),
+    )
+    // 终态再钉一次：T 存活与 DOM 翻转必须同时成立（迟到的校正不得在上面那次断言之后把 T 抹掉）。
+    expect(currentValidTime()).toBe(sharedValidTime)
+  })
+})
+
+describe('OverviewPage source segment', () => {
+  it('does not carry the previous source cycle into the newly selected source', async () => {
+    // AC9 / 决策 15 的接缝半边：`handleQueryChange` 是 `{...state, ...patch}` 无跨字段重置，
+    // 源分段若只发 `{ source }`，GFS 上选定的周期会原样存活 → `nationalDischargeActivePair`
+    // 取 `query.cycle` 拼出 `(ifs, C_gfs)` → 后端 200 + 空 → C1 要消灭的那句假文案在**最常见
+    // 路径**上复活。本用例走真页面 + 真路由 + 真 store，断言的是那条请求根本没被发出。
+    const calls = mockApiWithSourceScopedCycles()
+    const search = serializeM11QueryState({ ...defaultM11QueryState, cycle: DEFAULT_CYCLE })
+    const param = renderOverviewRouterAt(search)
+
+    await waitFor(() => expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(false))
+    await waitFor(() => expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false))
+    // 前置条件：URL 上确实带着 GFS 的周期，且默认对走目录 metadata（此刻零 valid-times 请求）。
+    expect(param('cycle')).toBe('2026-05-18T00:00:00.000Z')
+    expect(calls.filter((call) => call.path === VALID_TIMES_PATH)).toHaveLength(0)
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'IFS' }))
+    })
+    await waitFor(() => expect(param('source')).toBe('ifs'))
+    await waitFor(() => expect(useOverviewDataStore.getState().cyclesBySource.ifs).toBeTruthy())
+    await waitFor(() => expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false))
+    await flushPendingEffects()
+
+    const ifsValidTimeCycles = calls
+      .filter((call) => call.path === VALID_TIMES_PATH && call.query?.source === 'ifs')
+      .map((call) => call.query?.cycle)
+    // 主 oracle：`(ifs, C_gfs)` 这条请求根本不该存在。
+    expect(ifsValidTimeCycles).not.toContain(DEFAULT_CYCLE)
+    expect([...new Set(ifsValidTimeCycles)]).toEqual([IFS_OWN_CYCLE])
+    // 机理那半：URL 上的 GFS 周期被切源的 patch 清掉了（`{...state, ...patch}` 无跨字段重置）。
+    expect(param('cycle')).toBeNull()
   })
 })

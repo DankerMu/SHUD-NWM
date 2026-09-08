@@ -58,6 +58,9 @@ const dischargeLayer: LayerState = {
   currentValidTime: '2026-05-18T06:00:00Z',
   validTimeSource: 'api',
   disabledReason: null,
+  // store 为活动源解析出的周期（此 fixture = 目录默认对，`state.cycle` 与 `default_cycle` 同值）。
+  // 决策 13 起 URL 的 cycle 只经 store 解析后到达这里，地图侧不再自己回落 `metadata.default_cycle`。
+  activeNationalCycle: '2026-05-18T00:00:00Z',
   freshness: {
     updatedAt: null,
     cycleTime: state.cycle,
@@ -138,7 +141,13 @@ describe('M11 discharge shell contracts', () => {
       validTime: '2026-09-02T15:00:00Z',
     }
     const overlay = buildM11RegisteredOverlay(ifsState, [
-      { ...dischargeLayer, validTimes: ['2026-09-02T15:00:00Z'], currentValidTime: '2026-09-02T15:00:00Z' },
+      {
+        ...dischargeLayer,
+        validTimes: ['2026-09-02T15:00:00Z'],
+        currentValidTime: '2026-09-02T15:00:00Z',
+        // 时次与周期同批产出：store 为 `ifs` 解出的活动对就是 (ifs, 2026-09-02T12:00:00Z)。
+        activeNationalCycle: '2026-09-02T12:00:00Z',
+      },
     ])
 
     expect(decodedTilePath(overlay?.source.tiles[0] as string)).toBe(
@@ -156,7 +165,10 @@ describe('M11 discharge shell contracts', () => {
       cycle: '2026-05-18T00:00:00.000Z',
       validTime: '2026-05-18T06:00:00.000Z',
     }
-    const overlay = buildM11RegisteredOverlay(millisecondState, [dischargeLayer])
+    // 周期章也按毫秒形喂进来：秒精度归一必须发生在拼 URL 这一侧，不能指望上游已经归一。
+    const overlay = buildM11RegisteredOverlay(millisecondState, [
+      { ...dischargeLayer, activeNationalCycle: '2026-05-18T00:00:00.000Z' },
+    ])
 
     const path = decodedTilePath(overlay?.source.tiles[0] as string)
     expect(path).toContain('/gfs/2026-05-18T00:00:00Z/q_down/2026-05-18T06:00:00Z/')
@@ -176,7 +188,12 @@ describe('M11 discharge shell contracts', () => {
       validTime: '2026-05-18T18:00:00Z',
     }
     const overlay = buildM11RegisteredOverlay(nonDefault, [
-      { ...dischargeLayer, validTimes: ['2026-05-18T18:00:00Z'], currentValidTime: '2026-05-18T18:00:00Z' },
+      {
+        ...dischargeLayer,
+        validTimes: ['2026-05-18T18:00:00Z'],
+        currentValidTime: '2026-05-18T18:00:00Z',
+        activeNationalCycle: '2026-05-18T12:00:00Z',
+      },
     ])
 
     expect(overlay).not.toBeNull()
@@ -188,13 +205,31 @@ describe('M11 discharge shell contracts', () => {
   it('registers no overlay and no literal {cycle} when the catalog advertises no default cycle', () => {
     // spec map-layer-timeline-controls「Cycle selector is fail-closed」：default_cycle 为 null 时，
     // 无论 URL 上有没有 cycle 都不注册叠加层，也就不会请求含字面 {cycle} 的瓦片。
+    // 目录判 fail-closed 时 store 的活动对为 null，故这批时次身上也没有周期章 —— 「default_cycle
+    // 为空 ⇒ 不注册」这条因果链自决策 13 起落在 store 的 `nationalDischargeActivePair` 上，
+    // 由 `overviewData.test.ts` 的 fail-closed 用例守；这里守的是地图侧对空章的处置。
     const failClosedLayer: LayerState = {
       ...dischargeLayer,
       metadata: { ...(dischargeMetadata as object), default_cycle: null } as never,
+      activeNationalCycle: null,
     }
 
     expect(buildM11RegisteredOverlay(state, [failClosedLayer])).toBeNull()
     expect(buildM11RegisteredOverlay({ ...state, cycle: null }, [failClosedLayer])).toBeNull()
+  })
+
+  it('registers no overlay when the store resolved no cycle for the active source', () => {
+    // 决策 13 孪生要求的空态：活动源的周期解不出来时（store 的 `nationalDischargeActivePair`
+    // 返回 null，例如 `cyclesBySource[ifs]` 尚未到达或取回失败）不注册叠加层，**绝不**回落目录的
+    // `default_cycle` —— 那是 GFS 专有事实，借它充数就拼出 `/hydro-national/ifs/<gfs 周期>/…`
+    // 这条跨身份 URL。图层本身可用、时次非空，所以这条断言钉的是周期这道闸，不是 `!available`。
+    const unresolved: LayerState = { ...dischargeLayer, activeNationalCycle: null }
+
+    expect(unresolved.available).toBe(true)
+    expect(unresolved.validTimes).not.toHaveLength(0)
+    expect(buildM11RegisteredOverlay({ ...state, source: 'ifs' }, [unresolved])).toBeNull()
+    // URL 上带 cycle 也不得复活：URL 周期同样要经 store 解析（它可能属于另一个源）。
+    expect(buildM11RegisteredOverlay({ ...state, source: 'ifs', cycle: null }, [unresolved])).toBeNull()
   })
 
   it('uses a vector source key that varies with each of source, cycle and validTime', () => {
