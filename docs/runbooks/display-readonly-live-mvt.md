@@ -127,11 +127,11 @@ clamp 后的时次仍落在以 cycle 为原点的 3 h 网格上；**只要它同
 时次）与 `valid_times_warmed`（截断后实际预热多少个）——两者相等才说明整条时间轴都热。
 job 提交顺序是河网优先、之后双源按 lead 交错（`k=0 gfs, k=0 ifs, k=1 gfs, …`），这样
 deadline 命中时两源对称降级，而不是永远截断同一个源的默认视图。**MVT 瓦片**同一 cache key
-由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py:260-280`；唯一调用点
+由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py::tile_generation_lock`；唯一调用点
 `apps/api/routes/hydro_display.py:689` 在持锁后二次查缓存），多 worker 与预热并发不会
 重复执行 PostGIS 生成。该保护有前提：`NHMS_MVT_FILE_CACHE_DIR` 未配置时
-`_file_cache_lock_path` 返回 `None`（`services/tiles/mvt.py:2338`），
-`tile_generation_lock` 直接 `yield`（`services/tiles/mvt.py:271-273`），只剩进程内
+`_file_cache_lock_path` 返回 `None`（`services/tiles/mvt.py::_file_cache_lock_path`），
+`tile_generation_lock` 直接 `yield`（`tile_generation_lock` 的 `lock_path is None` 分支），只剩进程内
 线程锁；生产由
 `infra/systemd/nhms-display-api.service:9` 的默认值兜住。**降水 PNG 不在此保护内**：
 跨 worker 的文件缓存竞争是 by design 的无锁双写（D4，`services/precip/field.py:113-115`），
@@ -171,6 +171,108 @@ ifs 13.26 两次实测中**较慢的那一次**（没有证据说它是 13 张�
 > 估算也只有 node-27 实跑 receipt（task 7.2 / #2017）才能定论：在那之前上面的 474 s 是
 > **UNVERIFIED 的推算值**，不是实测值，本仓也没有任何断言在验它。
 
+### 强制刷新身份（issue #2079）
+
+目录缓存的强制刷新（`display_catalog_cached` 跳过 store 查找、直接重算并写回）**只认两种身份**，
+其余请求无论带什么头都按 TTL / stale 规则命中：
+
+1. **进程内预热**：`_replay_targets` 把 app 包一层，在 ASGI `scope["state"]` 里打
+   `nhms_display_cache_warm=True` 再交给 `httpx.ASGITransport`。这个键由服务器侧构造，
+   网络上写不进去，也不需要任何配置——所以**预热永远有效，与 token 是否部署无关**。
+2. **持有 token 的调用方**：请求头 `x-nhms-cache-warm` 的值与 `NHMS_DISPLAY_CACHE_WARM_TOKEN`
+   按 `hmac.compare_digest`（两侧都先 `encode("utf-8", "surrogateescape")` 成 bytes，
+   因为 Starlette 按 latin-1 解头值、而 `compare_digest` 对非 ASCII `str` 抛 `TypeError`）相等。
+   唯一的合法持有者是 node-27 prewarm。
+
+**字面值 `refresh` 已退役**：它曾是唯一的特权值，而 display 侧 GET 无鉴权、nginx 也不剥这个头，
+于是公网任意客户端都能逐请求把目录端点打回冷路径（实测 2–4 ms → 73–92 ms，约 30–40 倍：
+[`receipts/2026-09-08-issue-2079-cache-warm-measurement-node27.md`](receipts/2026-09-08-issue-2079-cache-warm-measurement-node27.md)）。
+现在它和任何其它头值一样命中缓存。
+
+**部署（两处，同值，均 0600）**：`infra/env/display.env` 的 `NHMS_DISPLAY_CACHE_WARM_TOKEN`
+供 display 进程比对，`infra/env/node27-ingest.env` 的同名键供 autopipe → prewarm 发送
+（`scripts/node27_autopipe_cron.sh` 硬拒 source `display.env`，所以必须写两遍）。改完
+`bash scripts/ops/start-display-api.sh` 重启 display API。**token 值不得进 receipt。**
+两个 `.example` 模板里该键是**注释掉的**（unset 即安全默认），部署时才取消注释并填真值——
+模板里留生效占位值等于给每个照抄的部署发一个仓库公开 token。用 `openssl rand -hex 32` 生成。
+**token 必须是 ASCII**（`openssl rand -hex 32` 就是）：prewarm 经 `http.client.putheader` 发头，
+值里出现任何 latin-1 之外的字符（如 `令牌`）会在发出前抛 `UnicodeEncodeError`，该 tick 的两跳发现
+全部失败；而且非 latin-1 的 token 在 display 侧永远比不中（Starlette 按 latin-1 解头值）。
+运行时不做校验（design D3），这是运维纪律。
+
+**缺失时的退化（安全默认，不是失败）**：token 未配置 → 外部永远无法强制刷新，进程内预热照常每 45 s
+刷新热 key；prewarm 不发该头、每进程向 stderr 打一条
+`prewarm: NHMS_DISPLAY_CACHE_WARM_TOKEN unset; discovery may see up to 45 s stale catalog`
+（可见于 autopipe 日志），发现流程照常返回。代价是 publish 后的发现请求最长看到 45 s 陈旧目录
+（热 key；冷 key 最长 600 s），该 tick 可能预热上一周期，下一 tick 自愈。两处 token 不一致的后果相同，
+但**没有 warning**——这是配置漂移唯一不吵的失败面，改 token 时两边一起改。
+
+**已知缺口**：`infra/compose.display.yml` 逐条列举 `environment:`，**不透传**该键；当前生产不走 compose
+（走 `nhms-display-api.service` / `scripts/ops/start-display-api.sh` 的 `set -a; . display.env` 整份注入）。
+日后若改走 compose，必须同时加透传并把该键加进 `scripts/validate_two_node_docker_runtime.py` 的
+`DISPLAY_AUDITED_INTERPOLATION_ENV`，否则 token 声明了却进不了应用，prewarm 发着应用不认的 token 静默退化。
+
+## MVT 文件缓存回收（issue #2032）
+
+`NHMS_MVT_FILE_CACHE_DIR` 从 M16 起**只写不删**：node-27 实测 5 天 4380 张 `.pbf` / 757 MB、
+4383 个锁文件，增长由 autopipe 每 tick 的 prewarm 主动推动（实测见
+[`docs/runbooks/receipts/2026-09-08-issue-2032-mvt-cache-measurement-node27.md`](receipts/2026-09-08-issue-2032-mvt-cache-measurement-node27.md)）。
+DB 侧 `map.tile_cache` 为 0 行（display 角色只有 SELECT），所以增长全部落在文件侧。
+
+**回收 runner**：`scripts/node27_mvt_cache_retention.py`（仅 stdlib，**不连 DB**）。
+wrapper `scripts/node27_mvt_cache_retention_once.sh`，user 级 unit
+`infra/systemd/nhms-node27-mvt-cache-retention.{service,timer}`（`OnCalendar=*-*-* 04:05:00 UTC`、
+`Persistent=true`），env 模板 `infra/env/node27-mvt-cache-retention.example`（装到
+`infra/env/node27-mvt-cache-retention.env`，**0600**）。
+
+只剪**三种精确形状**，按墙钟 `mtime` 早于 `reference_time − NODE27_MVT_CACHE_RETENTION_DAYS`
+（默认 14）：
+
+| 形状 | 生产者 | `kind` |
+|---|---|---|
+| `<root>/<hh>/<sha256>.pbf` | `services/tiles/mvt.py::_write_file_cache` | `pbf` |
+| `<root>/<hh>/.<sha256>.pbf.<pid>.tmp` | 同上（崩溃时残留的中间文件） | `tmp` |
+| `<root>/.locks/<hh>/<sha256>.lock` | `services/tiles/mvt.py::tile_generation_lock` | `lock` |
+
+`<hh>` 是 cache key 的前两位，必须匹配 `[0-9a-f]{2}` 且是**非 symlink 目录**；枚举**固定两级**，
+`lstat` 必须是常规文件。因此 **`<root>/precip/**` 天然不可达**（`precip` 不匹配 `[0-9a-f]{2}`），
+它由 `scripts/node27_raw_retention.py` 按 display watermark 口径负责——两个 runner 共享
+`NHMS_MVT_FILE_CACHE_DIR` 这一个值，各自只碰自己的子树，回执里的 `precip_root_untouched`
+就是给运维直接断言这一点的。锚不同是有意的：瓦片被剪掉只是下次请求走一次 miss 重新生成，
+不是 404，所以 `#2011` 的 `L ≤ R − 1` 下限**不适用**于本 runner。
+
+锁文件删除是并发安全的：runner 用 `os.open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK)`（**无 `O_CREAT`**；`O_NONBLOCK` 对常规文件无影响，只为让被替换成 FIFO 的路径不会把 open 永久挂住）
+取 fd 后先 `fstat` 判常规文件（被换成 symlink/目录/FIFO → `skipped[not_regular_file]`，在任何 flock 之前），
+再 `flock(LOCK_EX|LOCK_NB)`，拿不到就记 `skipped[lock_held]`；拿到后再用
+`fstat(fd)` 与 `lstat(path)` 的 `(st_dev, st_ino)` 复核一次，不等即 `already_gone` 不删
+（路径已被活 miss 重建）。`already_gone` / `lock_held` / `not_regular_file` 都是 **skip 不是 failure**；
+根、`.locks` 或某个 `<hh>` 目录本身无法枚举（权限/ESTALE）则是 `failed[]` 里的 `enumeration_unavailable`（rc 1），修权限而不是清盘。
+
+**锁文件自清理**（同一 issue 的另一半）：`tile_generation_lock` 现在在 `finally` 里**先 unlink
+后 `LOCK_UN`**，获取时以 `(st_dev, st_ino)` 复核 flock 到的 inode 仍是路径上的 inode，不是则重开
+（`_TILE_LOCK_REACQUIRE_LIMIT = 8` 次尝试，耗尽则记 warning 后**无锁生成**，绝不挂起请求）。
+顺序是硬约束：先释放后 unlink 会让等待者拿到一个已被 unlink 的 inode，与下一个到来者重复生成。
+所以稳态下 `.locks/**` 只含**在途 miss**，不再随请求数单调增长；runner 的锁 lane 是遗留文件的兜底。
+
+**门与回执**：`NODE27_MVT_CACHE_RETENTION_ENABLED`（默认 true）/ `_PLAN_ONLY`（默认 false），
+`--summary-path` 写 JSON 回执（未给时打 stdout），rc `0` 正常 / `1` 有 `failed[]` / `2` preflight
+blocked（零删除）。健康判据（env 模板里逐字给出）：
+
+```bash
+jq -e '
+  (.execution_mode == "production_execute")
+  and ((.finished_at | fromdateiso8601) > (now - 26*3600))
+  and (.failed | length == 0)
+' "$(ls -t /home/nwm/node27-mvt-cache-retention-logs/mvt-cache-retention-*.json | head -1)"
+```
+
+**首次安装 / 回滚**：装 env（0600）+ unit + timer → 先跑
+`NODE27_MVT_CACHE_RETENTION_PLAN_ONLY=true` 看 `planned[]`（确认无任何 `precip/` 路径）→
+`systemctl --user enable --now nhms-node27-mvt-cache-retention.timer`。锁改动要
+`bash scripts/ops/start-display-api.sh` 重启 display API 才生效。回滚：
+`systemctl --user disable --now nhms-node27-mvt-cache-retention.timer`，或在 env 里置
+`NODE27_MVT_CACHE_RETENTION_ENABLED=false`。
+
 ## node-27 Live Receipt（2026-06-08，本机实测）
 
 ```text
@@ -193,6 +295,23 @@ river-network/<bv> z6/49/24           http=413  353 bytes      (低 zoom 整流�
 > （node-27 master `122ea95`，冷启 413 ms，≥ 51.9× 提速 lower bound）。
 
 结论：live PostGIS MVT 在只读节点**完全可用**，424/409 根因（开关未启用 + 图层未注册）已消除；#351 已闭合 #343。
+
+## 预算窗口截断信号（#2030）
+
+- **信号**（WARNING）：`MVT_TILE_BUDGET_TRUNCATED layer_id z x y feature_count=<入选>/<相交> max_features
+  coordinate_count=<入选>/<相交> max_coordinates`；logger `apps.api.routes.hydro_display` → `apps.api` stderr
+  handler（`apps/api/main.py::_install_api_log_handler`）→ systemd `StandardError` → `/tmp/display-api.log`。
+- **每次生成一条，缓存命中不重进 bind site**：记录发在 `_cached_or_generated_mvt_response` 的 `producer()` 内，
+  即 DB 层（`map.tile_cache`）与文件层（`NHMS_MVT_FILE_CACHE_DIR`）**双层缓存都 miss** 时才到达。故
+  `grep -c MVT_TILE_BUDGET_TRUNCATED /tmp/display-api.log` 数的是**生成次数，不是被截断的响应数**——部署前
+  已截断、缓存仍热的瓦片照常服务且不产生任何行。
+- **要枚举「此刻哪些瓦片被截断」**：跑一次冷缓存路径（清掉相关 key 后的 prewarm，或
+  [`receipts/2026-09-08-issue-2030-budget-truncation-signal-node27.md`](receipts/2026-09-08-issue-2030-budget-truncation-signal-node27.md)
+  的取证方法），不要拿历史日志裸 grep 当现状。
+- **清单增长引入的新截断会自动现形**：新 run / 新流域轮换全国瓦片的 `source_version` 与 `cache_key`，首次重新
+  生成即触发本记录。
+- **`layer_id=discharge` 在本记录里恒指 `hydro-national`**：预算窗口只在全国层（`services/tiles/mvt.py` 的
+  `national_budget_window` CTE），按 run 的 `hydro` 层没有该窗口。
 
 ## 残留风险与处置
 

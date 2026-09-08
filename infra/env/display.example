@@ -18,6 +18,35 @@ UV_CACHE_DIR=/tmp/nhms-uv-cache
 NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 
+# #2079: shared secret that lets an out-of-process caller force a display
+# catalog cache refresh (header `x-nhms-cache-warm: <token>`, compared with
+# hmac.compare_digest). Its only legitimate holder is the node-27 prewarm, so
+# infra/env/node27-ingest.env MUST carry the SAME value. The key below is
+# commented out on purpose: unset is the safe default, and this template is
+# installed verbatim by the bootstrap in infra/README.two-node-docker.md -- an
+# active placeholder here would ship a repo-public value as the real token to
+# every deployment that forgot to edit it, silently re-opening #2079 with no
+# warning and no validator finding. Unset means no header value forces a refresh
+# and only the in-process warmer (an ASGI scope mark) can, at the cost of a
+# <=45 s stale discovery window. Generate a real value with
+# `openssl rand -hex 32`; never deploy a placeholder, and never put the real
+# value in a receipt.
+# The token MUST be ASCII (`openssl rand -hex 32` is). node-27 prewarm sends it
+# through http.client.putheader, which raises UnicodeEncodeError on any
+# character outside latin-1 -- the tick's discovery would fail before a byte
+# leaves the host -- and a non-latin-1 token can never match on this side
+# anyway, because Starlette decodes header values as latin-1. Not validated at
+# runtime (#2079 design D3).
+# NOTE (known gap, #2079 design D5): infra/compose.display.yml enumerates its
+# `environment:` keys one by one and does NOT pass this one through. The current
+# deployment path is not compose -- it is `set -a; . display.env` from
+# infra/systemd/nhms-display-api.service / scripts/ops/start-display-api.sh,
+# which injects the whole file. A future compose deployment must add the
+# passthrough AND the key to DISPLAY_AUDITED_INTERPOLATION_ENV in
+# scripts/validate_two_node_docker_runtime.py, or the token will be declared
+# here, never reach the app, and prewarm will silently degrade.
+# NHMS_DISPLAY_CACHE_WARM_TOKEN=
+
 # Enable readonly live PostGIS MVT overlays. This does not grant write/control
 # capability; keep DATABASE_URL on a readonly role and keep control mutations off.
 NHMS_ENABLE_LIVE_POSTGIS_MVT=true

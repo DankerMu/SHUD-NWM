@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from apps.api import display_cache
 from apps.api.display_cache import (
@@ -19,11 +21,31 @@ from apps.api.display_cache import (
 )
 
 WARMER_THREAD_NAME = "display-catalog-warmer"
+# 规格字面量（openspec/changes/display-cache-warm-header-trust/specs/…/spec.md）：
+# 独立于被测模块的常量，模块改名/改值必须变红而不是跟着漂。
+WARM_HEADER = "x-nhms-cache-warm"
+WARM_SCOPE_KEY = "nhms_display_cache_warm"
 
 
-def _request(display_readonly: bool) -> SimpleNamespace:
-    config = SimpleNamespace(display_readonly=display_readonly)
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime_config=config)))
+def _request(
+    display_readonly: bool,
+    *,
+    headers: dict[str, Any] | None = None,
+    scope: dict[str, Any] | None = None,
+    token: str | None = None,
+) -> SimpleNamespace:
+    """构造最小 request 替身。
+
+    `headers`/`scope` 只在显式给出时才设置属性——「既无 `.headers` 也无 `.scope`」
+    是 `_force_refresh` 必须容忍的真实形状，默认路径不能悄悄补上它们。
+    """
+    config = SimpleNamespace(display_readonly=display_readonly, display_cache_warm_token=token)
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime_config=config)))
+    if headers is not None:
+        request.headers = headers
+    if scope is not None:
+        request.scope = scope
+    return request
 
 
 def _warmer_threads() -> list[threading.Thread]:
@@ -94,14 +116,189 @@ def test_stale_max_expiry_recomputes(monkeypatch: pytest.MonkeyPatch) -> None:
     assert display_catalog_cached(request, "k", lambda: "second") == "second"
 
 
-def test_force_refresh_header_bypasses_cache() -> None:
+def test_external_refresh_header_no_longer_bypasses_cache() -> None:
+    # 字面值 refresh 曾是特权值；display 侧 GET 无鉴权，公网任意客户端都能拿它把
+    # 目录端点打回冷路径。退役后它必须和其它头值一样命中缓存。
+    calls: list[int] = []
     request = _request(display_readonly=True)
     assert display_catalog_cached(request, "k", lambda: "first") == "first"
-    warm_request = _request(display_readonly=True)
-    warm_request.headers = {display_cache.DISPLAY_CACHE_FORCE_REFRESH_HEADER: "refresh"}
+
+    warm_request = _request(display_readonly=True, headers={WARM_HEADER: "refresh"}, token=None)
+    value = display_catalog_cached(warm_request, "k", lambda: calls.append(1) or "warmed")
+
+    assert value == "first"
+    assert calls == []
+
+
+def test_configured_token_forces_recompute_and_stores_the_new_value() -> None:
+    request = _request(display_readonly=True, token="abc")
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+
+    warm_request = _request(display_readonly=True, headers={WARM_HEADER: "abc"}, token="abc")
     assert display_catalog_cached(warm_request, "k", lambda: "warmed") == "warmed"
-    # 预热写回后，普通请求命中新值。
+
+    # 写回后普通请求命中新值。
     assert display_catalog_cached(request, "k", lambda: "miss") == "warmed"
+
+
+def test_wrong_token_value_hits_the_cache() -> None:
+    calls: list[int] = []
+    request = _request(display_readonly=True, token="abc")
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+
+    warm_request = _request(display_readonly=True, headers={WARM_HEADER: "abd"}, token="abc")
+    value = display_catalog_cached(warm_request, "k", lambda: calls.append(1) or "warmed")
+
+    assert value == "first"
+    assert calls == []
+
+
+def test_non_ascii_header_value_is_a_hit_not_an_error() -> None:
+    # Starlette 按 latin-1 解头，所以 >=0x80 的字节到达时是非 ASCII `str`；
+    # `hmac.compare_digest` 对非 ASCII `str` 抛 TypeError。若按 str 比较，
+    # token 部署后任意客户端发一个这样的头值就能把每条目录 GET 打成 500。
+    calls: list[int] = []
+    request = _request(display_readonly=True, token="abc")
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+
+    warm_request = _request(display_readonly=True, headers={WARM_HEADER: "abé"}, token="abc")
+    value = display_catalog_cached(warm_request, "k", lambda: calls.append(1) or "warmed")
+
+    assert value == "first"
+    assert calls == []
+
+
+def test_token_carrying_an_invalid_utf8_byte_is_a_hit_not_an_error() -> None:
+    # token 来自 `os.environ`，CPython 按 surrogateescape 解码——`display.env` 里一个非法
+    # UTF-8 字节会变成 `\udcXX`。token 侧若按纯 utf-8 encode，比较时抛 UnicodeEncodeError，
+    # 每条带该头的目录 GET 变 500。所以两侧都必须 `encode("utf-8", "surrogateescape")`。
+    calls: list[int] = []
+    token = "ab\udcff"
+    request = _request(display_readonly=True, token=token)
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+
+    warm_request = _request(display_readonly=True, headers={WARM_HEADER: "x"}, token=token)
+    assert display_cache._force_refresh(warm_request) is False
+    value = display_catalog_cached(warm_request, "k", lambda: calls.append(1) or "warmed")
+
+    assert value == "first"
+    assert calls == []
+
+
+@pytest.mark.parametrize("header_value", ["refresh", "abc", "", "true", "1"])
+def test_no_header_value_forces_a_refresh_while_the_token_is_unset(header_value: str) -> None:
+    calls: list[int] = []
+    request = _request(display_readonly=True, token=None)
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+
+    warm_request = _request(display_readonly=True, headers={WARM_HEADER: header_value}, token=None)
+    value = display_catalog_cached(warm_request, "k", lambda: calls.append(1) or "warmed")
+
+    assert value == "first"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "request_obj",
+    [
+        _request(display_readonly=True, token="abc"),
+        _request(display_readonly=True, scope={"type": "http"}, token="abc"),
+        _request(display_readonly=True, scope={"type": "http", "state": {}}, token="abc"),
+        SimpleNamespace(),
+        SimpleNamespace(headers={WARM_HEADER: "abc"}),
+        SimpleNamespace(scope={}, headers={WARM_HEADER: "abc"}),
+        SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()), headers={WARM_HEADER: "abc"}),
+        _request(display_readonly=True, headers={WARM_HEADER: b"abc"}, token="abc"),
+        _request(display_readonly=True, headers={WARM_HEADER: "   "}, token="   "),
+    ],
+)
+def test_force_refresh_is_false_and_never_raises_on_degenerate_requests(request_obj: Any) -> None:
+    # 缺 scope / 缺 headers / 缺 app / 缺 runtime_config / 头值非 str / 空 token：
+    # 一律 False，且绝不抛——`_force_refresh` 跑在每条目录 GET 的最前面。
+    assert display_cache._force_refresh(request_obj) is False
+
+
+def test_mark_warm_scope_marks_http_scopes_and_passes_others_through() -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def _fake_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        del receive, send
+        seen.append(scope)
+
+    wrapped = display_cache._mark_warm_scope(_fake_app)
+
+    original_http = {"type": "http", "path": "/api/v1/runs"}
+    asyncio.run(wrapped(original_http, None, None))
+    original_lifespan = {"type": "lifespan"}
+    asyncio.run(wrapped(original_lifespan, None, None))
+
+    assert seen[0]["state"][WARM_SCOPE_KEY] is True
+    assert seen[0]["path"] == "/api/v1/runs"
+    # 原 scope 不被就地改写（httpx 的 ASGITransport scope 无 "state" 键）。
+    assert "state" not in original_http
+    assert seen[1] is original_lifespan
+
+
+def test_in_process_warm_scope_mark_forces_recompute_without_any_token() -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def _fake_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        del receive, send
+        seen.append(scope)
+
+    asyncio.run(display_cache._mark_warm_scope(_fake_app)({"type": "http"}, None, None))
+    marked_scope = seen[0]
+
+    request = _request(display_readonly=True, token=None)
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+
+    warm_request = _request(display_readonly=True, scope=marked_scope, token=None)
+    assert display_catalog_cached(warm_request, "k", lambda: "warmed") == "warmed"
+    assert display_catalog_cached(request, "k", lambda: "miss") == "warmed"
+
+
+def test_truthy_but_non_true_scope_marker_does_not_force_a_refresh() -> None:
+    # 标记必须 `is True`：换成 `bool(...)` 就会把 `scope["state"]` 里任何同名真值
+    # （日后某个中间件塞的计数器/字符串）当成进程内预热身份——而那是唯一不需要
+    # token 的旁路，放宽它等于把特权还给一个不受本模块控制的键。
+    calls: list[int] = []
+    request = _request(display_readonly=True, token=None)
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+
+    warm_request = _request(
+        display_readonly=True,
+        scope={"type": "http", "state": {WARM_SCOPE_KEY: 1}},
+        token=None,
+    )
+    assert display_cache._force_refresh(warm_request) is False
+    value = display_catalog_cached(warm_request, "k", lambda: calls.append(1) or "warmed")
+
+    assert value == "first"
+    assert calls == []
+
+
+async def test_replay_targets_still_refreshes_a_real_app_without_a_token() -> None:
+    # 端到端钉「预热仍生效」：token 未配置时进程内回放必须照旧重算并写回。
+    calls: list[int] = []
+    app = FastAPI()
+    app.state.runtime_config = SimpleNamespace(display_readonly=True, display_cache_warm_token=None)
+
+    @app.get("/api/v1/runs")
+    def _runs(request: Request) -> dict[str, int]:
+        return display_catalog_cached(request, "e2e", lambda: calls.append(1) or {"n": len(calls)})
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://display-cache-test") as client:
+        first = await client.get("/api/v1/runs")
+    assert first.status_code == 200
+    assert first.json() == {"n": 1}
+    assert calls == [1]
+
+    await display_cache._replay_targets(app, ["/api/v1/runs"])
+
+    # `_replay_targets` 吞掉每 path 的异常，所以 loader 调用次数才是活性 oracle。
+    assert calls == [1, 1]
+    assert display_cache._store["e2e"][1] == {"n": 2}
 
 
 def test_loader_errors_are_not_cached() -> None:

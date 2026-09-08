@@ -3729,8 +3729,9 @@ before a receipt exists.
 
    **KNOWN LIMITATION — scope.** The `systemd.err` file lane is retired for
    this unit and, under #1765, for `nhms-node27-resource-governance.service`.
-   The other six node-27 units (`autopipe`, `download`, `frontier-alert`,
-   `raw-retention`, `timeseries-compression`, `timeseries-compression-replay`)
+   The other seven node-27 units (`autopipe`, `download`, `frontier-alert`,
+   `mvt-cache-retention`, `raw-retention`, `timeseries-compression`,
+   `timeseries-compression-replay`)
    still write `StandardError=append:…/systemd.err`, and their alerts (where
    they have one) still quote lifecycle lines only. `StandardOutput=append:`
    is unchanged here, but do not read it as the bracket destination: the

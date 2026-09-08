@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -12,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import IO, Any, Iterable, Mapping
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -149,8 +150,20 @@ POSTGIS_NON_FINITE_DOUBLE_SQL = (
 WEB_MERCATOR_BOUNDS = [-20037508.342789244, -20037508.342789244, 20037508.342789244, 20037508.342789244]
 CHINA_WGS84_BOUNDS = [73.5, 18.1, 134.8, 53.6]
 
+logger = logging.getLogger(__name__)
+
 _LOCAL_TILE_LOCKS_GUARD = threading.Lock()
+# Bounded by IN-FLIGHT misses, not by keys ever missed: the value is the only
+# strong reference holder's `threading.Lock`, so the entry disappears as soon as
+# the last holder/waiter of that key drops it (issue #2032 pins this existing
+# behaviour with a test and deliberately does not change the type).
 _LOCAL_TILE_LOCKS: weakref.WeakValueDictionary[str, threading.Lock] = weakref.WeakValueDictionary()
+
+# Total number of open + flock + identity-compare ATTEMPTS `_open_live_lock_file`
+# makes before it gives up and runs the guarded block without the cross-process
+# lock (issue #2032 / design D3). "Total attempts", not "retries": the identity
+# probe is called exactly this many times on the exhaustion path.
+_TILE_LOCK_REACQUIRE_LIMIT = 8
 
 
 @dataclass(frozen=True)
@@ -256,6 +269,81 @@ def cache_key(tile: TileInput) -> str:
     return hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+def _lock_path_identity(path: Path) -> tuple[int, int] | None:
+    """`(st_dev, st_ino)` of whatever the lock PATH names now, or `None`.
+
+    Module-level on purpose: it is the single injectable probe the identity
+    recheck of `_open_live_lock_file` goes through, so a test can drive the
+    reacquire loop without patching `os.stat` globally (issue #2032, design D3).
+    """
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _lock_file_identity(fd: int) -> tuple[int, int]:
+    """`(st_dev, st_ino)` of the inode the HELD descriptor refers to."""
+    info = os.fstat(fd)
+    return info.st_dev, info.st_ino
+
+
+def _open_live_lock_file(lock_path: Path) -> IO[bytes] | None:
+    """A descriptor holding `LOCK_EX` on the inode the path names, or `None`.
+
+    Because `tile_generation_lock` unlinks its lock file before releasing (see
+    there), the inode a waiter finally flocks may already be an orphan: the
+    holder unlinked it and a later miss recreated the path as a different inode.
+    Serialising on an orphan is not single-flight, so every attempt rechecks
+    `(st_dev, st_ino)` of the held descriptor against the path and reopens on a
+    mismatch (or on `ENOENT`, which `_lock_path_identity` reports as `None`).
+
+    `_TILE_LOCK_REACQUIRE_LIMIT` is the TOTAL attempt count, and exhausting it
+    needs NO external actor -- ordinary same-key contention reaches it. Each
+    holder handover (unlink then `LOCK_UN`) costs every waiter still blocked on
+    that inode one attempt: they wake on an inode the path no longer names,
+    mismatch, and reopen. So the k-th cross-process waiter on one key spends
+    about k attempts before its turn, and `_TILE_LOCK_REACQUIRE_LIMIT + 1`
+    simultaneous same-key contenders can push the last of them over the limit.
+    That count is bounded by `NHMS_DISPLAY_WORKERS`
+    (`infra/systemd/nhms-display-api.service` passes it through uncapped), so
+    the reachable degrade is: that one request generates its tile without the
+    cross-process lock, i.e. at most one duplicate generation of a deterministic
+    tile. Degrading is the point -- `os.replace` in `_write_file_cache` is
+    atomic and the bytes are deterministic, so a duplicate is wasted CPU, never
+    a corrupt tile, and it is strictly better than spinning or blocking the
+    request. On give-up the path is deliberately NOT unlinked -- it may already
+    be another process's live lock -- and the aged-out file is left to
+    `scripts/node27_mvt_cache_retention.py`. Every failed attempt closes its own
+    descriptor, so the caller can only ever leak the one it is handed.
+    """
+    for _ in range(_TILE_LOCK_REACQUIRE_LIMIT):
+        lock_file = lock_path.open("a+b")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            # `_lock_path_identity` first, so it is called exactly
+            # `_TILE_LOCK_REACQUIRE_LIMIT` times on the exhaustion path. Both
+            # probes are INSIDE the `try`: once the `flock` is taken, anything
+            # that raises before the `return` must still release it, and
+            # `_lock_path_identity` only swallows `ENOENT` -- an `EACCES` or
+            # `ESTALE` from it would otherwise propagate with the descriptor
+            # still open and still locked, held until the traceback dies.
+            if _lock_path_identity(lock_path) == _lock_file_identity(lock_file.fileno()):
+                return lock_file
+        except BaseException:
+            lock_file.close()
+            raise
+        lock_file.close()
+    logger.warning(
+        "tile generation lock path kept changing identity after %d attempts; "
+        "generating without the cross-process lock: %s",
+        _TILE_LOCK_REACQUIRE_LIMIT,
+        lock_path,
+    )
+    return None
+
+
 @contextmanager
 def tile_generation_lock(tile: TileInput) -> Iterable[None]:
     """Single-flight a cache miss in this process and across uvicorn workers."""
@@ -269,15 +357,39 @@ def tile_generation_lock(tile: TileInput) -> Iterable[None]:
     with local_lock:
         lock_path = _file_cache_lock_path(key)
         if lock_path is None:
+            # No file cache configured: the in-process lock above is the whole
+            # of single-flight. Unchanged by issue #2032.
             yield
             return
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with lock_path.open("a+b") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        lock_file = _open_live_lock_file(lock_path)
+        if lock_file is None:
+            yield
+            return
+        try:
+            yield
+        finally:
+            # ORDER IS A HARD CONSTRAINT (issue #2032, design D3): unlink BEFORE
+            # `LOCK_UN`. Released first, a waiter could acquire the lock, pass
+            # its identity recheck (the path still names this inode), and only
+            # THEN have the path unlinked underneath it by us -- leaving that
+            # waiter holding an orphan while the next arrival creates a fresh
+            # inode and generates the same tile concurrently. Unlinking while we
+            # still hold the lock makes that window impossible: every waiter
+            # that wakes up either sees `ENOENT` or a different inode and
+            # reopens (`_open_live_lock_file`).
             try:
-                yield
-            finally:
+                lock_path.unlink()
+            except FileNotFoundError:
+                # Someone else's retention tick (or a legacy worker) got there
+                # first; nothing to do.
+                pass
+            except OSError as error:
+                logger.warning("failed to unlink tile generation lock %s: %s", lock_path, error)
+            try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                lock_file.close()
 
 
 def stable_etag(data: bytes) -> str:
@@ -1288,6 +1400,8 @@ def postgis_tile_sql(layer: str) -> str:
         (SELECT source_feature_count FROM source_stats) AS source_feature_count,
         (SELECT feature_count FROM budget_stats) AS feature_count,
         (SELECT coordinate_count FROM budget_stats) AS coordinate_count,
+        (SELECT intersecting_feature_count FROM prefilter_stats) AS intersecting_feature_count,
+        (SELECT intersecting_coordinate_count FROM prefilter_stats) AS intersecting_coordinate_count,
         (SELECT feature_coordinate_overflow_count FROM prefilter_stats) AS feature_coordinate_overflow_count,
         (SELECT feature_coordinate_count FROM prefilter_stats) AS feature_coordinate_count,
         (SELECT coordinate_dimension_overflow_count FROM prefilter_stats) AS coordinate_dimension_overflow_count,
@@ -2366,6 +2480,16 @@ def _safe_read_cache(
 
 
 def _file_cache_path(key: str) -> Path | None:
+    """`<root>/<key[:2]>/<key>.pbf`.
+
+    PATH SHAPE IS A CROSS-PROCESS CONTRACT: the three regexes in
+    `scripts/node27_mvt_cache_retention.py` (`HEX_DIR_PATTERN`, `PBF_PATTERN`,
+    `TMP_PATTERN`, `LOCK_PATTERN`) match exactly what this function,
+    `_file_cache_lock_path` and `_write_file_cache` produce, and
+    `tests/test_node27_mvt_cache_retention.py` pins the two sides against each
+    other. Change the layout here and the retention runner silently stops
+    pruning; update its patterns in the same commit.
+    """
     root = os.getenv(MVT_FILE_CACHE_DIR_ENV, "").strip()
     if not root:
         return None
@@ -2375,6 +2499,7 @@ def _file_cache_path(key: str) -> Path | None:
 
 
 def _file_cache_lock_path(key: str) -> Path | None:
+    """`<root>/.locks/<key[:2]>/<key>.lock` -- shape contract: see `_file_cache_path`."""
     root = os.getenv(MVT_FILE_CACHE_DIR_ENV, "").strip()
     if not root or not re.fullmatch(r"[0-9a-f]{64}", key):
         return None
@@ -2566,6 +2691,13 @@ def _safe_write_cache(session: Session, tile: TileInput, key: str, data: bytes, 
 
 
 def _write_file_cache(key: str, data: bytes) -> bool:
+    """Atomically publish one tile body through `.<name>.<pid>.tmp` + `os.replace`.
+
+    The intermediate's shape (`.<sha256>.pbf.<pid>.tmp`) is the third path shape
+    `scripts/node27_mvt_cache_retention.py` prunes -- a crash between
+    `write_bytes` and `os.replace` leaves one behind, so it ages out on the same
+    cutoff as the body. Shape contract: see `_file_cache_path`.
+    """
     path = _file_cache_path(key)
     if path is None:
         return False
