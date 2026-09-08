@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 RIVER_TABLE = "hydro.river_timeseries"
@@ -389,6 +390,18 @@ def _skip_balanced(sql: str, start: int) -> int:
     ``(SELECT ... WHERE name = ')' ...)`` is consumed whole rather than cut at
     the literal.
     """
+    return _skip_balanced_span(sql, start)[0]
+
+
+def _skip_balanced_span(sql: str, start: int) -> tuple[int, bool]:
+    """:func:`_skip_balanced`'s answer plus whether the matching close was FOUND.
+
+    The flag is what separates a complete group whose last byte happens to be
+    ``)`` from an unclosed remainder that merely ends on an inner group's
+    close. Inferring closure from ``sql[end - 1] == ')'`` is the latter's
+    false positive: the stripper still consumes through EOF, but a last-byte
+    gate would either drop the remainder or steal the inner close.
+    """
     depth = 0
     index = start
     length = len(sql)
@@ -408,9 +421,9 @@ def _skip_balanced(sql: str, start: int) -> int:
         elif character == ")":
             depth -= 1
             if depth == 0:
-                return index + 1
+                return index + 1, True
         index += 1
-    return length
+    return length, False
 
 
 def _in_comparison_value_position(kept: list[str]) -> bool:
@@ -453,6 +466,55 @@ def strip_scalar_subqueries(sql: str) -> str:
         kept.append(character)
         index += 1
     return "".join(kept)
+
+
+def _walk_comparison_position_scalar_bodies(sql: str) -> Iterator[str]:
+    """Yield every comparison-position scalar-subquery body in original bytes.
+
+    The walk is the collector twin of :func:`strip_scalar_subqueries`: same quoted,
+    comment, ``_SUBQUERY_START``, comparison-position and balanced-group rules, but
+    the skipped group is returned instead of deleted. Nested bodies are yielded
+    from a recursive walk of each body so a later independent sibling and an
+    inner-only candidate are separately visible. A matching close yields the
+    original bytes inside the parentheses; an unclosed remainder yields the
+    full consumed tail so a closed inner group at EOF stays visible.
+    Matcher/scanner normalisation stays the matcher's job.
+    """
+    kept: list[str] = []
+    index = 0
+    length = len(sql)
+    while index < length:
+        character = sql[index]
+        if character in "'\"":
+            end = _scan_quoted(sql, index, character)
+            kept.append(sql[index:end])
+            index = end
+            continue
+        if sql.startswith("--", index):
+            end = _scan_line_comment(sql, index)
+            kept.append(sql[index:end])
+            index = end
+            continue
+        if sql.startswith("/*", index):
+            end = _scan_block_comment(sql, index)
+            kept.append(sql[index:end])
+            index = end
+            continue
+        if character == "(" and _SUBQUERY_START.match(sql, index) and _in_comparison_value_position(kept):
+            end, closed = _skip_balanced_span(sql, index)
+            if end > index + 1:
+                body = sql[index + 1 : end - 1] if closed else sql[index + 1 : end]
+                yield body
+                yield from _walk_comparison_position_scalar_bodies(body)
+            index = end
+            continue
+        kept.append(character)
+        index += 1
+
+
+def _comparison_position_scalar_bodies(sql: str) -> tuple[str, ...]:
+    """Every comparison-position scalar-subquery body, including nested and later ones."""
+    return tuple(_walk_comparison_position_scalar_bodies(sql))
 
 
 def strip_all_subqueries(sql: str) -> str:
@@ -875,13 +937,27 @@ def _parenthesized_fact_alias_selections(
     return _ParenthesizedFactAliasSelections(frozenset(exact_columns), unsupported)
 
 
-def _text_identity_columns_for_references(
+@dataclass(frozen=True)
+class _AliasMemberAnalysis:
+    """One owner for direct/quoted/separator and parenthesized alias-member grammar."""
+
+    exact_columns: frozenset[str]
+    has_unsupported_alias_rooted_selection: bool
+
+
+def _alias_member_analysis(
     sql: str,
     aliases: frozenset[str],
     *,
     has_unaliased_reference: bool,
-) -> set[str]:
-    """Text identity columns matched through supplied bare fact references."""
+) -> _AliasMemberAnalysis:
+    """Classify known text members through the supplied fact aliases.
+
+    Direct bare/exact-quoted/#2092 separator arms and the #2112 exact/unsupported
+    parenthesized classifier share this helper so a scalar-body visibility check
+    cannot grow a second matcher. ``has_unaliased_reference`` stays the outer
+    unaliased fallback; scalar-body consumers pass ``False``.
+    """
     canonical_aliases = frozenset(alias.lower() for alias in aliases)
     raw_outer, outer, quoted_references = _outer_code_for_text_identity_columns(sql, canonical_aliases)
     parenthesized = _parenthesized_fact_alias_selections(raw_outer, canonical_aliases)
@@ -928,7 +1004,23 @@ def _text_identity_columns_for_references(
             flags=re.ASCII,
         ) is not None:
             found.add(column)
-    return found
+    return _AliasMemberAnalysis(frozenset(found), parenthesized.has_unsupported_alias_rooted_selection)
+
+
+def _text_identity_columns_for_references(
+    sql: str,
+    aliases: frozenset[str],
+    *,
+    has_unaliased_reference: bool,
+) -> set[str]:
+    """Text identity columns matched through supplied bare fact references."""
+    return set(
+        _alias_member_analysis(
+            sql,
+            aliases,
+            has_unaliased_reference=has_unaliased_reference,
+        ).exact_columns
+    )
 
 
 def text_fact_columns(sql: str, alias: str) -> set[str]:
@@ -1203,13 +1295,13 @@ def _lexical_subset_violation(sql: str) -> tuple[int, str] | None:
 def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     """Refuse a fact-table reference form the alias walk does not model.
 
-    The guarantee, in one sentence (fixture decisions 16 and 22): no statement
+    The guarantee, in one sentence (fixture decisions 16, 22 and 23): no statement
     reaches a render or a text-identity answer unless the independent occurrence counter
     and the ``FROM`` / ``JOIN`` walk AGREE about how many times it reads the fact
     table, the counter is blind to no spelling of the table's name, and no read
-    hides where the text-identity scan cannot look. SEVEN checks, in this order —
+    hides where the text-identity scan cannot look. EIGHT checks, in this order —
     ``U&`` → lexical subset → unterminated belt → quoted alias → parenthesized
-    field selection → the counts → the sub-select delta:
+    field selection → the counts → the sub-select delta → correlated scalar bodies:
 
     #. a Unicode-escaped identifier or literal (``U&"…"`` / ``U&'…'``) anywhere
        in the code — the one syntax that can name the table with no occurrence of
@@ -1256,7 +1348,12 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
        invisible to the narrow check (review #2018 round-2, F4). REFUSED rather
        than scanned: extending the scan into comparison-position sub-selects
        false-refuses the registered statements whose authority resolution lives
-       there.
+       there;
+    #. a CORRELATED SCALAR BODY — a known text member, or an unsupported
+       parenthesized alias-rooted selection, through an already-attributed outer
+       fact alias inside any comparison-position scalar body (fixture decision 23).
+       LAST, so an inner fact-table reread keeps the older count-delta reason.
+       The body walk reuses the same matcher; it does not return a member set.
 
     Run over the comment/literal-blanked text so a quoted alias SPELLED inside a
     literal or a comment is data, not a refusal. Double-quoted spans survive that
@@ -1303,9 +1400,12 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
             "attributed to the fact table; alias the table with a bare identifier"
         )
     attribution = fact_table_attribution(sql)
-    raw_outer, _outer, _quoted_references = _outer_code_for_text_identity_columns(sql, attribution.aliases)
-    parenthesized = _parenthesized_fact_alias_selections(raw_outer, attribution.aliases)
-    if parenthesized.has_unsupported_alias_rooted_selection:
+    analysis = _alias_member_analysis(
+        sql,
+        attribution.aliases,
+        has_unaliased_reference=False,
+    )
+    if analysis.has_unsupported_alias_rooted_selection:
         raise RiverTemplateError(
             f"{entry}: unmodelled parenthesized fact-alias field selection — only one standalone "
             "parenthesized fact alias may select a text identity column"
@@ -1328,6 +1428,18 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
             "so its text-identity predicates are never seen; resolve identity through the authority "
             "table in that position instead"
         )
+    if attribution.aliases:
+        for body in _comparison_position_scalar_bodies(sql):
+            body_analysis = _alias_member_analysis(
+                body,
+                attribution.aliases,
+                has_unaliased_reference=False,
+            )
+            if body_analysis.exact_columns or body_analysis.has_unsupported_alias_rooted_selection:
+                raise RiverTemplateError(
+                    f"{entry}: correlated outer fact-alias reference inside comparison-position "
+                    "scalar subquery"
+                )
 
 
 @dataclass(frozen=True)

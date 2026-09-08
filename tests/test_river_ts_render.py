@@ -2056,6 +2056,452 @@ def test_parenthesized_extension_preserves_the_quoted_fact_alias_declaration_ref
         fact_table_text_identity_columns(sql, entry=entry)
 
 
+# ---------------------------------------------------------------------------
+# Correlated outer fact-alias references inside comparison-position scalars (#2114)
+# ---------------------------------------------------------------------------
+# Guarded preflight must see already-attributed outer aliases inside scalar
+# bodies. ``outer_predicates`` and unguarded ``text_fact_columns`` stay
+# outer-query-only; the three whole-statement doors refuse instead of answering
+# a member set. Unaliased/unqualified names remain #2148.
+
+_CORRELATED_SCALAR_TEXT_IDENTITY_COLUMNS = (
+    "run_id",
+    "river_network_version_id",
+    "variable",
+    "basin_version_id",
+    "river_segment_id",
+    "unit",
+    "quality_flag",
+)
+_CORRELATED_SCALAR_REASON = (
+    "correlated outer fact-alias reference inside comparison-position scalar subquery"
+)
+_CORRELATED_SCALAR_AUTHORITY_OUTER = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key ="
+)
+_CORRELATED_SCALAR_LATER_INDEPENDENT_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT max(hr.run_key) FROM hydro.hydro_run hr WHERE hr.run_id = :r) "
+    "AND rt.basin_version_key = "
+    "(SELECT max(hr2.basin_version_key) FROM hydro.hydro_run hr2 "
+    "WHERE hr2.run_id = :r2 AND rt.variable = :v)"
+)
+_CORRELATED_SCALAR_NESTED_ONLY_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT max(hr.run_key) FROM hydro.hydro_run hr WHERE hr.run_key = "
+    "(SELECT max(hr2.run_key) FROM hydro.hydro_run hr2 WHERE rt.variable = :v))"
+)
+
+
+def _correlated_scalar_authority_sql(reference: str) -> str:
+    """Cardinality-safe authority scalar skeleton from the #2114 red proof."""
+    return (
+        "SELECT rt.value\n"
+        "FROM hydro.river_timeseries rt\n"
+        "WHERE rt.run_key = (\n"
+        "  SELECT hr.run_key\n"
+        "  FROM hydro.hydro_run hr\n"
+        "  WHERE hr.run_id = :run_id\n"
+        f"    AND {reference} = :v\n"
+        "  LIMIT 1\n"
+        ")"
+    )
+
+
+def _assert_correlated_scalar_refusal(sql: str, *, entry: str) -> None:
+    """The three guarded doors refuse; the unguarded alias helper stays empty."""
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    assert text_fact_columns(sql, "rt") == set()
+    assert text_fact_columns(sql, "RT") == set()
+
+    for door in ("guarded", "legacy", "narrow"):
+        with pytest.raises(RiverTemplateError) as raised:
+            if door == "guarded":
+                fact_table_text_identity_columns(sql, entry=entry)
+            else:
+                render_river_ts_sql(sql, door, entry=entry)
+        message = str(raised.value)
+        assert entry in message
+        assert _CORRELATED_SCALAR_REASON in message
+        assert "text identity column(s)" not in message
+        assert _PARENTHESES_UNMODELLED not in message
+        assert "comparison-position sub-select" not in message
+        assert "unbalanced parentheses" not in message
+
+
+def _assert_correlated_scalar_clean(sql: str, *, entry: str) -> None:
+    """Authority/other/data controls keep the pre-#2114 guarded-empty answer."""
+    assert fact_table_text_identity_columns(sql, entry=entry) == set()
+    assert text_fact_columns(sql, "rt") == set()
+    assert text_fact_columns(sql, "RT") == set()
+    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
+    narrow = render_river_ts_sql(sql, "narrow", entry=entry)
+    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    assert narrow.sql == sql
+    assert legacy.removed_placeholders == narrow.removed_placeholders == ()
+
+
+def test_correlated_scalar_member_enumeration_matches_the_shared_identity_contract() -> None:
+    assert _CORRELATED_SCALAR_TEXT_IDENTITY_COLUMNS == TEXT_IDENTITY_COLUMNS
+
+
+@pytest.mark.parametrize("column", _CORRELATED_SCALAR_TEXT_IDENTITY_COLUMNS)
+@pytest.mark.parametrize(
+    ("label", "reference_template"),
+    [
+        ("bare-bare", "rt.{column}"),
+        ("bare-quoted", 'rt."{column}"'),
+        ("quoted-bare", '"rt".{bare_column}'),
+        ("quoted-quoted", '"rt"."{column}"'),
+    ],
+)
+def test_correlated_scalar_direct_member_token_forms_fail_closed(
+    column: str,
+    label: str,
+    reference_template: str,
+) -> None:
+    """Seven members × four direct/exact-quoted spellings are one correlated candidate."""
+    entry = f"correlated-scalar-direct-{label}-{column}"
+    sql = _correlated_scalar_authority_sql(
+        reference_template.format(column=column, bare_column=column.upper())
+    )
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("spaces", "rt . variable"),
+        ("tabs", "rt\t.\tvariable"),
+        ("newlines", "rt\n.\nvariable"),
+        ("nested-block-comment", "rt /* outer /* inner */ tail */ . variable"),
+        ("line-comment", "rt -- separator\n . variable"),
+    ],
+)
+def test_correlated_scalar_separator_forms_fail_closed(label: str, reference: str) -> None:
+    """#2092 scanner-normalised separators remain visible after the body is restored."""
+    entry = f"correlated-scalar-separator-{label}"
+    sql = _correlated_scalar_authority_sql(reference)
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("bare-alias-bare-column", "(rt).variable"),
+        ("bare-alias-quoted-column", '(rt)."variable"'),
+        ("quoted-alias-bare-column", '("rt").VARIABLE'),
+        ("quoted-alias-quoted-column", '("rt")."variable"'),
+    ],
+)
+def test_correlated_scalar_exact_parenthesized_forms_fail_closed(label: str, reference: str) -> None:
+    """#2112 exact one-token groups inside a scalar body take the correlated-scalar reason."""
+    entry = f"correlated-scalar-paren-exact-{label}"
+    sql = _correlated_scalar_authority_sql(reference)
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("function-call", "f(rt).variable"),
+        ("nested-group", "((rt)).variable"),
+    ],
+)
+def test_correlated_scalar_representative_unsupported_parenthesized_forms_fail_closed(
+    label: str,
+    reference: str,
+) -> None:
+    """Representative #2112 unsupported forms are refused as correlated, not outer-unmodelled."""
+    entry = f"correlated-scalar-paren-unsupported-{label}"
+    sql = _correlated_scalar_authority_sql(reference)
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_correlated_scalar_later_independent_body_fails_closed() -> None:
+    """First scalar is authority-clean; only the later body carries ``rt.variable``."""
+    sql = _CORRELATED_SCALAR_LATER_INDEPENDENT_SQL
+    entry = "correlated-scalar-later-independent"
+
+    assert "rt.variable" not in outer_predicates(sql)
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_correlated_scalar_nested_only_body_fails_closed() -> None:
+    """Only the inner nested scalar carries the candidate, so top-level-only walks fail."""
+    sql = _CORRELATED_SCALAR_NESTED_ONLY_SQL
+    entry = "correlated-scalar-nested-only"
+
+    assert "rt.variable" not in outer_predicates(sql)
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+_CORRELATED_SCALAR_UNCLOSED_SIMPLE_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT hr.run_key FROM hydro.hydro_run hr WHERE rt.variable = :v"
+)
+_CORRELATED_SCALAR_UNCLOSED_NESTED_INNER_CLOSED_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT 1 FROM t WHERE b = (SELECT rt.variable FROM dual)"
+)
+_CORRELATED_SCALAR_UNCLOSED_LATER_INDEPENDENT_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT max(hr.run_key) FROM hydro.hydro_run hr WHERE hr.run_id = :r) "
+    "AND rt.basin_version_key = "
+    "(SELECT max(hr2.basin_version_key) FROM hydro.hydro_run hr2 "
+    "WHERE hr2.run_id = :r2 AND rt.variable = :v"
+)
+_CORRELATED_SCALAR_UNCLOSED_AUTHORITY_CLEAN_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT hr.run_key FROM hydro.hydro_run hr WHERE hr.run_id = :r"
+)
+
+
+def test_an_unclosed_comparison_position_scalar_remainder_is_still_a_correlated_candidate() -> None:
+    """The stripper consumes an unclosed comparison-position scalar through EOF.
+
+    A last-byte ``)`` gate would drop that remainder, so the guarded helper would
+    answer empty and both renders would fall through to the structural check.
+    """
+    sql = _CORRELATED_SCALAR_UNCLOSED_SIMPLE_SQL
+    entry = "correlated-scalar-unclosed-simple"
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    assert text_fact_columns(sql, "rt") == set()
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_an_unclosed_outer_scalar_does_not_steal_an_inner_close_at_eof() -> None:
+    """An inner group's closing ``)`` at EOF is not the outer scalar's matching close.
+
+    Recursing into the full remainder keeps the closed inner body visible as its
+    own correlated candidate.
+    """
+    sql = _CORRELATED_SCALAR_UNCLOSED_NESTED_INNER_CLOSED_SQL
+    entry = "correlated-scalar-unclosed-nested-inner-closed"
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    assert text_fact_columns(sql, "rt") == set()
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_a_later_unclosed_correlated_scalar_is_refused_before_the_structural_check() -> None:
+    """First scalar is closed and authority-clean; only the later unclosed body correlates.
+
+    ``max`` avoids the existing ``LIMIT 1`` skeleton. The structural check still
+    refuses the unbalanced later group, but that refusal is unrelated: preflight
+    owns the correlated-scalar reason on every guarded door.
+    """
+    sql = _CORRELATED_SCALAR_UNCLOSED_LATER_INDEPENDENT_SQL
+    entry = "correlated-scalar-unclosed-later-independent"
+
+    assert "rt.variable" not in outer_predicates(sql)
+    assert text_fact_columns(sql, "rt") == set()
+    with pytest.raises(RiverTemplateError, match="unbalanced parentheses"):
+        assert_structurally_intact(sql, entry)
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_an_authority_clean_unclosed_scalar_stays_empty_and_renders_unbalanced() -> None:
+    """No outer-alias candidate: the helper stays empty and both renders refuse unbalanced."""
+    sql = _CORRELATED_SCALAR_UNCLOSED_AUTHORITY_CLEAN_SQL
+    entry = "correlated-scalar-unclosed-authority-clean"
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    assert text_fact_columns(sql, "rt") == set()
+    assert fact_table_text_identity_columns(sql, entry=entry) == set()
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError) as raised:
+            render_river_ts_sql(sql, store, entry=entry)
+        message = str(raised.value)
+        assert entry in message
+        assert "unbalanced parentheses" in message
+        assert _CORRELATED_SCALAR_REASON not in message
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("simple", _CORRELATED_SCALAR_UNCLOSED_SIMPLE_SQL + ")"),
+        ("nested-inner-closed", _CORRELATED_SCALAR_UNCLOSED_NESTED_INNER_CLOSED_SQL + ")"),
+        ("later-independent", _CORRELATED_SCALAR_UNCLOSED_LATER_INDEPENDENT_SQL + ")"),
+    ],
+)
+def test_closed_twins_of_the_unclosed_scalar_remainders_keep_the_correlated_reason(
+    label: str,
+    sql: str,
+) -> None:
+    """Closing the same three shapes must not change the correlated-scalar reason."""
+    entry = f"correlated-scalar-closed-twin-{label}"
+
+    assert "rt.variable" not in outer_predicates(sql)
+    assert text_fact_columns(sql, "rt") == set()
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_correlated_scalar_local_alias_shadow_is_conservatively_refused() -> None:
+    """A body-local relation reusing the outer alias is not guessed to be local."""
+    sql = (
+        "SELECT rt.value\n"
+        "FROM hydro.river_timeseries rt\n"
+        "WHERE rt.run_key = (\n"
+        "  SELECT rt.run_key\n"
+        "  FROM hydro.hydro_run rt\n"
+        "  WHERE rt.variable = :v\n"
+        "  LIMIT 1\n"
+        ")"
+    )
+    _assert_correlated_scalar_refusal(sql, entry="correlated-scalar-local-shadow")
+
+
+def test_correlated_scalar_inner_fact_reread_keeps_count_delta_precedence() -> None:
+    """An inner fact-table read keeps the older comparison-position sub-select reason."""
+    entry = "correlated-scalar-inner-fact-reread"
+    sql = (
+        "SELECT rt.value FROM hydro.river_timeseries rt "
+        "WHERE rt.run_key = ("
+        "SELECT r2.run_key FROM hydro.river_timeseries r2 "
+        "WHERE rt.variable = :v LIMIT 1)"
+    )
+
+    assert text_fact_columns(sql, "rt") == set()
+    for door in ("guarded", "legacy", "narrow"):
+        with pytest.raises(RiverTemplateError) as raised:
+            if door == "guarded":
+                fact_table_text_identity_columns(sql, entry=entry)
+            else:
+                render_river_ts_sql(sql, door, entry=entry)
+        message = str(raised.value)
+        assert entry in message
+        assert "comparison-position sub-select" in message
+        assert _CORRELATED_SCALAR_REASON not in message
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("authority-run-id", _correlated_scalar_authority_sql("hr.run_id")),
+        ("other-relation-variable", _correlated_scalar_authority_sql("hr.variable")),
+        ("enum-variable", _correlated_scalar_authority_sql("rt.variable_e")),
+        ("enum-unit", _correlated_scalar_authority_sql("rt.unit_e")),
+        ("enum-quality", _correlated_scalar_authority_sql("rt.quality_flag_e")),
+        ("nonexact-quoted-column", _correlated_scalar_authority_sql('rt."Variable"')),
+        ("multipart", _correlated_scalar_authority_sql("other.rt.variable")),
+        (
+            "ordinary-literal",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = ("
+            "SELECT hr.run_key FROM hydro.hydro_run hr "
+            "WHERE hr.run_id = :run_id AND hr.note = 'rt.variable' LIMIT 1)",
+        ),
+        (
+            "upper-escape-literal",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = ("
+            "SELECT hr.run_key FROM hydro.hydro_run hr "
+            r"WHERE hr.run_id = :run_id AND hr.note = E'rt.variable' LIMIT 1)",
+        ),
+        (
+            "lower-escape-literal",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = ("
+            "SELECT hr.run_key FROM hydro.hydro_run hr "
+            r"WHERE hr.run_id = :run_id AND hr.note = e'rt.variable' LIMIT 1)",
+        ),
+        (
+            "line-comment",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = ("
+            "SELECT hr.run_key FROM hydro.hydro_run hr "
+            "WHERE hr.run_id = :run_id -- rt.variable = :v\n"
+            "  AND hr.run_key IS NOT NULL LIMIT 1)",
+        ),
+        (
+            "nested-block-comment",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = ("
+            "SELECT hr.run_key FROM hydro.hydro_run hr "
+            "WHERE hr.run_id = :run_id /* outer /* rt.variable */ tail */ "
+            "AND hr.run_key IS NOT NULL LIMIT 1)",
+        ),
+        (
+            "complete-quoted-identifier",
+            _correlated_scalar_authority_sql('"rt.variable"'),
+        ),
+    ],
+)
+def test_correlated_scalar_authority_other_enum_and_data_controls_remain_clean(
+    label: str,
+    sql: str,
+) -> None:
+    _assert_correlated_scalar_clean(sql, entry=f"correlated-scalar-control-{label}")
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("bare", "variable"),
+        ("folded", "VARIABLE"),
+        ("exact-quoted", '"variable"'),
+    ],
+)
+def test_correlated_scalar_unaliased_unqualified_names_remain_routed_to_issue_2148(
+    label: str,
+    reference: str,
+) -> None:
+    """Routed, not claimed safe: unaliased outer fact + unqualified scalar-body names."""
+    entry = f"correlated-scalar-routed-2148-{label}"
+    sql = (
+        "SELECT value\n"
+        "FROM hydro.river_timeseries\n"
+        "WHERE run_key = (\n"
+        "  SELECT hr.run_key\n"
+        "  FROM hydro.hydro_run hr\n"
+        "  WHERE hr.run_id = :r\n"
+        f"    AND {reference} = :v\n"
+        "  LIMIT 1\n"
+        ")"
+    )
+
+    attribution = fact_table_attribution(sql)
+    assert attribution.aliases == frozenset()
+    assert attribution.has_unaliased_reference is True
+    _assert_correlated_scalar_clean(sql, entry=entry)
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("functional-notation-2141", "variable(rt)"),
+        ("whole-row-star-2115", "rt.*"),
+    ],
+)
+def test_correlated_scalar_functional_notation_and_star_remain_routed(
+    label: str,
+    reference: str,
+) -> None:
+    """#2141 and #2115 stay outside this slice and must not inherit the new reason."""
+    sql = _correlated_scalar_authority_sql(reference)
+    _assert_correlated_scalar_clean(sql, entry=f"correlated-scalar-routed-{label}")
+
+
+def test_correlated_scalar_outer_predicates_and_alias_helper_stay_outer_only() -> None:
+    """Public outer-only contracts stay byte-identical on the original scalar skeleton."""
+    sql = _correlated_scalar_authority_sql("rt.variable")
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    assert text_fact_columns(sql, "rt") == set()
+    assert "rt.variable" not in outer_predicates(sql)
+
+
 @pytest.mark.parametrize("prefix", ["U&", "u&"])
 @pytest.mark.parametrize(
     ("label", "quoted"),
