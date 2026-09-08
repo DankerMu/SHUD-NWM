@@ -255,6 +255,23 @@ river-network/<bv> z6/49/24           http=413  353 bytes      (低 zoom 整流�
 
 结论：live PostGIS MVT 在只读节点**完全可用**，424/409 根因（开关未启用 + 图层未注册）已消除；#351 已闭合 #343。
 
+## 预算窗口截断信号（#2030）
+
+- **信号**（WARNING）：`MVT_TILE_BUDGET_TRUNCATED layer_id z x y feature_count=<入选>/<相交> max_features
+  coordinate_count=<入选>/<相交> max_coordinates`；logger `apps.api.routes.hydro_display` → `apps.api` stderr
+  handler（`apps/api/main.py::_install_api_log_handler`）→ systemd `StandardError` → `/tmp/display-api.log`。
+- **每次生成一条，缓存命中不重进 bind site**：记录发在 `_cached_or_generated_mvt_response` 的 `producer()` 内，
+  即 DB 层（`map.tile_cache`）与文件层（`NHMS_MVT_FILE_CACHE_DIR`）**双层缓存都 miss** 时才到达。故
+  `grep -c MVT_TILE_BUDGET_TRUNCATED /tmp/display-api.log` 数的是**生成次数，不是被截断的响应数**——部署前
+  已截断、缓存仍热的瓦片照常服务且不产生任何行。
+- **要枚举「此刻哪些瓦片被截断」**：跑一次冷缓存路径（清掉相关 key 后的 prewarm，或
+  [`receipts/2026-09-08-issue-2030-budget-truncation-signal-node27.md`](receipts/2026-09-08-issue-2030-budget-truncation-signal-node27.md)
+  的取证方法），不要拿历史日志裸 grep 当现状。
+- **清单增长引入的新截断会自动现形**：新 run / 新流域轮换全国瓦片的 `source_version` 与 `cache_key`，首次重新
+  生成即触发本记录。
+- **`layer_id=discharge` 在本记录里恒指 `hydro-national`**：预算窗口只在全国层（`services/tiles/mvt.py` 的
+  `national_budget_window` CTE），按 run 的 `hydro` 层没有该窗口。
+
 ## 残留风险与处置
 
 - **首请求偶发 424（瞬态）**：冷连接池 fast-fail，立即重试即 200（receipt 复测 ×3 全 200）。

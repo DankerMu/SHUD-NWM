@@ -1400,6 +1400,8 @@ def postgis_tile_sql(layer: str) -> str:
         (SELECT source_feature_count FROM source_stats) AS source_feature_count,
         (SELECT feature_count FROM budget_stats) AS feature_count,
         (SELECT coordinate_count FROM budget_stats) AS coordinate_count,
+        (SELECT intersecting_feature_count FROM prefilter_stats) AS intersecting_feature_count,
+        (SELECT intersecting_coordinate_count FROM prefilter_stats) AS intersecting_coordinate_count,
         (SELECT feature_coordinate_overflow_count FROM prefilter_stats) AS feature_coordinate_overflow_count,
         (SELECT feature_coordinate_count FROM prefilter_stats) AS feature_coordinate_count,
         (SELECT coordinate_dimension_overflow_count FROM prefilter_stats) AS coordinate_dimension_overflow_count,
