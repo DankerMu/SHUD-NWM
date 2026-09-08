@@ -1960,8 +1960,12 @@ paths:
         schema:
           type: integer
           minimum: 0
+          description: Zero-based offset into the run's layer catalog; an offset at
+            or beyond the catalog length yields an empty `data` page (HTTP 200).
           default: 0
           title: Offset
+        description: Zero-based offset into the run's layer catalog; an offset at or
+          beyond the catalog length yields an empty `data` page (HTTP 200).
       - name: run_id
         in: query
         required: false

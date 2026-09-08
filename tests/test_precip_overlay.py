@@ -1632,7 +1632,7 @@ def _catalog_app(monkeypatch: pytest.MonkeyPatch) -> Any:
         lambda _s, **_k: {"source": "gfs", "cycles": [], "default_cycle": "2026-09-02T00:00:00Z"},
     )
     monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
-    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: object()
     return app

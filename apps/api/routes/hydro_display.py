@@ -274,7 +274,14 @@ def read_cached_tile_response(session: Session, tile: TileInput) -> TileResponse
 def list_layers(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        description=(
+            "Zero-based offset into the run's layer catalog; an offset at or beyond "
+            "the catalog length yields an empty `data` page (HTTP 200)."
+        ),
+    ),
     run_id: str | None = Query(default=None),
     session: Session = Depends(get_hydro_display_session),
 ) -> dict[str, Any]:
@@ -304,9 +311,13 @@ def list_layers(
             river_network_version_id=river_network_version_id,
             national=run_id is None,
         )
-        return [layer.model_dump() for layer in layers[offset : offset + limit]]
+        return [layer.model_dump() for layer in layers]
 
-    return _ok(request, display_catalog_cached(request, f"layers:{run_id}:{limit}:{offset}", _load))
+    # 分页在缓存**之后**（#2078）：key 不含 `limit`/`offset`，所以客户端可控的无界
+    # offset 维度不再制造缓存条目；越界 offset 从缓存值切出 `[]`，不落 DB。切片结果
+    # 与从前在 loader 里切片逐字节相同。
+    catalog = display_catalog_cached(request, f"layers:{run_id}", _load)
+    return _ok(request, catalog[offset : offset + limit])
 
 
 @router.get("/api/v1/layers/discharge/cycles", response_model=DischargeCyclesResponse)
@@ -394,6 +405,9 @@ def list_layer_valid_times(
             request,
             f"valid-times:{layer_id}:{requested_run_id}:{source}:{cycle_key}",
             _load,
+            # 空 `valid_times`（交集外的 fail-closed cycle、无覆盖的国家级列表、非
+            # discharge 图层）不进缓存也不进热 path：`cycle` 是客户端可控的无界维度。
+            cacheable=lambda payload: bool(payload["valid_times"]),
         ),
     )
 

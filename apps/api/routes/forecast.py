@@ -122,6 +122,9 @@ def list_runs(
                 limit=capped_limit,
                 offset=offset,
             ),
+            # 自由文本 `basin_id`/`source`/`status` 与越界 `offset` 命中的空页照常
+            # 返回 200，但不进缓存也不进热 path（#2078）：那是无界的 key 维度。
+            cacheable=lambda page: bool(page["items"]),
         )
         return _ok(request, _paginated_payload(page))
     except ForecastStoreError as error:

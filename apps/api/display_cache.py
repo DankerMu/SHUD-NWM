@@ -10,6 +10,14 @@
 - 超过 STALE_MAX：阻塞重算（真冷路径，仅进程刚启动或长期无人访问后出现）。
 - 自预热：记录最近访问的目录 GET path，后台线程每 45s 经 ASGI 回放
   （在 ASGI scope 里打进程内预热标记以旁路缓存），保持热 key 常新。
+- 准入（#2078）：调用方可给 `cacheable` 谓词，loader 返回值不满足时只回给访客，
+  既不写 `_store` 也不登记热 path，并把该 key 从两表移除——空结果的无界维度
+  （runs 空页、valid-times 空列表）不再换来一条能被回放的缓存条目。
+- 淘汰（#2078）：两表都是 `_MAX_ENTRIES` 封顶的 OrderedDict LRU，命中 `move_to_end`，
+  到顶只 `popitem(last=False)` 淘汰最旧一条；除测试钩子外永不整表 clear——公网
+  请求用很多个不同 key 最多挤掉最旧的条目，挤不空整表。
+- 回放上界（#2078）：预热线程每 tick 只回放活跃窗口内按「命中计数降序、最近访问
+  降序」排序的前 `DISPLAY_CATALOG_WARM_REPLAY_MAX` 条热 path。
 
 边界（honest）：缓存的是 store 层 payload（不含 request_id 信封）；
 根治（目录查询索引与覆盖物化）见后端慢查询专项。
@@ -21,6 +29,7 @@ import asyncio
 import hmac
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -30,6 +39,10 @@ DISPLAY_CATALOG_TTL_SECONDS = 60.0
 DISPLAY_CATALOG_STALE_MAX_SECONDS = 600.0
 DISPLAY_CATALOG_WARM_INTERVAL_SECONDS = 45.0
 DISPLAY_CATALOG_WARM_ACTIVE_WINDOW_SECONDS = 1800.0
+# 每个 tick 的回放上界（#2078）：活跃窗口内按命中计数排序取前 K 条。封顶的是回放的
+# 「量」不是「身份」——无鉴权下没有抗操纵的排序键，但被垃圾 key 占满时的代价也只是
+# 「K 条冷查询 / tick」而不是整表回放。测试 monkeypatch 该模块全局。
+DISPLAY_CATALOG_WARM_REPLAY_MAX = 32
 # 强制刷新头。头的存在不再是特权：只有当值与 NHMS_DISPLAY_CACHE_WARM_TOKEN
 # 配置的 token 相等（`hmac.compare_digest`）时才生效；token 未配置时任何值都不生效
 # （#2079：display 侧 GET 无鉴权、nginx 不剥头，字面值 `refresh` 曾让公网任意客户端
@@ -41,9 +54,10 @@ _WARM_SCOPE_KEY = "nhms_display_cache_warm"
 _MAX_ENTRIES = 256
 
 _lock = threading.Lock()
-_store: dict[str, tuple[float, Any]] = {}
-# key -> (带 query 的请求 path, 最近访问时刻)；预热线程按活跃窗口回放。
-_hot_paths: dict[str, tuple[str, float]] = {}
+# 两表都是 LRU：插入到尾、命中 move_to_end、到顶淘汰头部一条（`_lru_set`）。
+_store: OrderedDict[str, tuple[float, Any]] = OrderedDict()
+# key -> (带 query 的请求 path, 最近访问时刻, 命中计数)；预热线程按活跃窗口 + 计数回放。
+_hot_paths: OrderedDict[str, tuple[str, float, int]] = OrderedDict()
 _warmer_started = False
 # 预热线程停止信号 + 线程句柄（stop 钩子用；生产进程不调用，线程活到进程退出）。
 _stop_event = threading.Event()
@@ -103,34 +117,75 @@ def _mark_warm_scope(app: Callable[..., Awaitable[None]]) -> Callable[..., Await
     return _marked
 
 
-def _record_hot_path(request: Request, key: str) -> None:
+def _request_path(request: Request) -> str | None:
+    """带 query 的请求 path（预热回放的目标）；request 没有 `.url` 时返回 None。"""
     url = getattr(request, "url", None)
     if url is None:
-        return
+        return None
     query = getattr(url, "query", "") or ""
-    path = f"{url.path}?{query}" if query else str(url.path)
+    return f"{url.path}?{query}" if query else str(url.path)
+
+
+def _lru_set(mapping: OrderedDict[str, Any], key: str, value: Any) -> None:
+    """LRU 写入（调用方必须持 `_lock`）。
+
+    只有**新** key 才可能触发淘汰：已存在的 key 直接改值 + `move_to_end`（`OrderedDict`
+    的赋值不移动位置，漏掉 `move_to_end` 就等于没有 LRU），否则表满时重写一条既有
+    条目会莫名其妙淘汰掉另一条。到顶时 `popitem(last=False)` 只淘汰最旧一条——绝不
+    整表 `clear()`：那正是公网请求能把整份缓存冲空的原因（#2078）。
+    """
+    if key in mapping:
+        mapping[key] = value
+        mapping.move_to_end(key)
+        return
+    if len(mapping) >= _MAX_ENTRIES:
+        mapping.popitem(last=False)
+    mapping[key] = value
+
+
+def _record_hot_path(key: str, path: str, hits: int) -> None:
     with _lock:
-        if len(_hot_paths) >= _MAX_ENTRIES:
-            _hot_paths.clear()
-        _hot_paths[key] = (path, time.monotonic())
+        _lru_set(_hot_paths, key, (path, time.monotonic(), hits))
 
 
 def _store_value(key: str, value: Any) -> None:
     with _lock:
-        if len(_store) >= _MAX_ENTRIES:
-            _store.clear()
-        _store[key] = (time.monotonic(), value)
+        _lru_set(_store, key, (time.monotonic(), value))
 
 
-def display_catalog_cached(request: Request, key: str, loader: Callable[[], Any]) -> Any:
-    """display_readonly 下按 key 缓存 loader 结果（TTL + stale-while-revalidate）。"""
+def _forget(key: str) -> None:
+    """把 key 从两表移除（不可缓存的结果不该留下条目，也不该继续被回放）。"""
+    with _lock:
+        _store.pop(key, None)
+        _hot_paths.pop(key, None)
+
+
+def display_catalog_cached(
+    request: Request,
+    key: str,
+    loader: Callable[[], Any],
+    *,
+    cacheable: Callable[[Any], bool] | None = None,
+) -> Any:
+    """display_readonly 下按 key 缓存 loader 结果（TTL + stale-while-revalidate）。
+
+    `cacheable` 是可选的准入谓词，只看 loader 的返回值：为假时结果照常回给访客，但
+    不入 `_store`、不登记 `_hot_paths`，并把该 key 从两表移除（force-refresh 分支同样
+    适用——回放拿到空结果说明旧值已过期或该 key 本就是垃圾）。默认 `None` = 一律可
+    缓存。非 display 角色直通，谓词不被求值。
+    """
     if not _display_readonly(request):
         return loader()
     if _force_refresh(request):
+        # 回放不登记热 path：登记会让预热线程每 tick 给自己的目标续上活跃窗口与命中
+        # 计数，1800 s 窗口永不过期，排序前提也就没了。
         value = loader()
-        _store_value(key, value)
+        if cacheable is None or cacheable(value):
+            _store_value(key, value)
+        else:
+            _forget(key)
         return value
-    _record_hot_path(request, key)
+    path = _request_path(request)
     now = time.monotonic()
     with _lock:
         hit = _store.get(key)
@@ -139,9 +194,18 @@ def display_catalog_cached(request: Request, key: str, loader: Callable[[], Any]
             if age < DISPLAY_CATALOG_STALE_MAX_SECONDS:
                 # 新鲜直接命中；过期但未超 stale 上限也先回 stale（预热线程负责刷新），
                 # 不让访客阻塞在 12s 级慢查询上。
+                _store.move_to_end(key)
+                if path is not None:
+                    previous = _hot_paths.get(key)
+                    _lru_set(_hot_paths, key, (path, now, previous[2] + 1 if previous else 1))
                 return hit[1]
     value = loader()
+    if cacheable is not None and not cacheable(value):
+        _forget(key)
+        return value
     _store_value(key, value)
+    if path is not None:
+        _record_hot_path(key, path, 1)
     return value
 
 
@@ -212,11 +276,15 @@ def _warm_loop(app: FastAPI) -> None:
     while not _stop_event.wait(DISPLAY_CATALOG_WARM_INTERVAL_SECONDS):
         now = time.monotonic()
         with _lock:
-            targets = [
-                path
-                for (path, last_access) in _hot_paths.values()
+            # 锁内只做快照（排序与回放都在锁外）：回放路径自己要取同一把锁。
+            active = [
+                (hits, last_access, path)
+                for (path, last_access, hits) in _hot_paths.values()
                 if now - last_access < DISPLAY_CATALOG_WARM_ACTIVE_WINDOW_SECONDS
             ]
+        # 命中计数降序、最近访问降序；只取前 K 条（上界每轮从模块全局读，便于压缩）。
+        active.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        targets = [path for (_hits, _last_access, path) in active[:DISPLAY_CATALOG_WARM_REPLAY_MAX]]
         if not targets:
             continue
         try:

@@ -3365,6 +3365,7 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                /** @description Zero-based offset into the run's layer catalog; an offset at or beyond the catalog length yields an empty `data` page (HTTP 200). */
                 offset?: number;
                 run_id?: string | null;
             };
