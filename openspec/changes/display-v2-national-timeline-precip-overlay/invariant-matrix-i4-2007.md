@@ -181,3 +181,33 @@ tests/test_mvt_national_identity_probe_integration.py tests/test_river_ts_read_p
 - The comment claim that a `.500` fractional part "gets the precision message rather than a shape one"
   has no oracle by design: both render 422 `VALIDATION_ERROR` and the route's contract is that they are
   indistinguishable to a client. Only the `.000` half is behavioral, and it is pinned by row 15.
+
+## Appendix — issue #2031 (digest ⊄ tile domain; written back per its acceptance criterion 7)
+
+Measured on node-27 (`docs/runbooks/receipts/2026-09-08-issue-2031-digest-precondition.md`, 2026-09-08
+11:01Z, `nhms_display_ro`): the digest's ranked sub-query ranks over a wider domain than `latest_runs`
+because it lacks the coverage-window predicate. Run-side precondition for the `(source, cycle)` route is
+**structurally reachable** (20 identity groups on `basins_lh_ylj_rivnet_vbasins` carry two display-ready
+runs at the same `(source, cycle)`, produced by retired `dg_*` direct-grid model_instances joining the
+active network through `basin_version_id`) but **not diverging today** (identical windows); the legacy
+source-less route's divergence is reachable on 38/38 networks (older runs cover instants the latest run's
+window excludes). The `model_instance` multiplicity shape does not exist (1 active per pair). Geometry
+side: 0 rows would backfill today; `core.river_network_version` has no spare column.
+
+Ruling (change `fix-national-digest-cache-identity-2031`, design.md D1–D8):
+
+- **A is fixed in the digest SQL.** `national_discharge_source_version` gains kw-only `valid_time`; its
+  ranked sub-query applies the NULL-guarded coverage-window predicate (CAST form, decision 1 above) and
+  joins `core.river_network_version`. Task 3.1's "旧路由与目录调用保持无参" is **superseded only for the
+  `valid_time` kwarg**: both tile routes now pass `valid_time`; `source`/`cycle` stay NULL on the legacy
+  route and the catalog call (row 20) still passes neither. Rows 7/8/9/10/26 keep their oracles; the
+  unbound SQL still satisfies the shape assertions at `tests/test_hydro_display_mvt_scaling.py:82-90`. The tile CTE keeps its
+  unguarded predicate, so "逐字一致" no longer holds for `valid_time` — the oracle is behavioural (bound
+  digest picks the run `latest_runs` picks), pinned on node-27.
+- **B via `core.river_network_version.geometry_generation`** (migration `000057`), bumped by
+  `_backfill_output_segment_geometry` only when it updated ≥1 row, projected by BOTH national digests.
+  `checksum` is not reused (import `CHECKSUM_CONFLICT` semantics).
+- **No `QUERY_VERSION` bump** (row 24 and the `-v3` pin stay); the projection change rotates every
+  national key once on deploy. Legacy tiles whose instant precedes the overall-latest window rotate once
+  more — same accepted class as the v5 rotation described at the top of this file.
+- **Deploy order**: `000057` first (idempotent, safe ahead of code), display API second.

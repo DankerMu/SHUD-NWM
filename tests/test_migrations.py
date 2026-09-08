@@ -1114,6 +1114,123 @@ def test_state_snapshot_clone_gate_kind_migration_is_column_only_forward_upgrade
         )
 
 
+def test_river_network_geometry_generation_migration_is_column_only_forward_upgrade() -> None:
+    """000057 (#2031), same column-only house style as 000046/000053.
+
+    ``core.river_network_version`` is a live parent table: every
+    ``core.river_segment`` row and every ``core.model_instance`` references it,
+    so a typo that turned this ADD COLUMN into a DROP/UPDATE/ALTER COLUMN would
+    take the whole registry with it, and only a static check can see that
+    without a database.
+
+    Beyond the shared house style this pins two things the change depends on:
+    ``NOT NULL DEFAULT 0`` (both national digests project the column, so a NULL
+    would land in the digest basis of every pre-existing network), and the
+    sequential number, because ``apply_migrations_from_zero`` and the production
+    runner both apply ``sorted(glob("*.sql"))`` — a duplicate or out-of-order
+    number is how a migration silently never runs.
+    """
+
+    migration_sql = dict(_migration_sql())
+    migration_names = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+    migration_name = "000057_river_network_version_geometry_generation.sql"
+
+    assert migration_name in migration_sql, (
+        f"{migration_name} must exist as the geometry-generation migration for the "
+        "fix-national-digest-cache-identity-2031 change"
+    )
+    # The NEXT number, and the last one: 000056 immediately precedes it and
+    # nothing follows. A second 000057_* would break the sorted-glob contract
+    # the runner relies on.
+    assert migration_names.index("000056_hydro_run_parsed_at.sql") + 1 == (
+        migration_names.index(migration_name)
+    )
+    assert migration_names[-1] == migration_name, (
+        f"{migration_name} must be the highest-numbered migration; found {migration_names[-3:]}"
+    )
+    assert [name for name in migration_names if name.startswith("000057")] == [migration_name]
+
+    migration = migration_sql[migration_name]
+
+    normalized = migration.strip()
+    assert normalized, f"{migration_name} is empty"
+    assert normalized.lower().endswith(";"), f"{migration_name} should end with a SQL terminator"
+
+    # Re-runnable, and defined for every pre-existing row.
+    assert "ADD COLUMN IF NOT EXISTS geometry_generation INTEGER NOT NULL DEFAULT 0" in migration, (
+        f"{migration_name} must add geometry_generation as INTEGER NOT NULL DEFAULT 0, "
+        "re-runnably (IF NOT EXISTS)"
+    )
+    # Header comment naming the issue, so the column's reason survives the file.
+    assert "#2031" in migration, f"{migration_name} must cite the issue it comes from"
+
+    code_lines = [
+        line
+        for line in migration.splitlines()
+        if not line.lstrip().startswith("--")
+    ]
+    code_body = "\n".join(code_lines)
+    forbidden_token_patterns = (
+        r"\bDROP\s+INDEX\b",
+        r"\bDROP\s+CONSTRAINT\b",
+        r"\bDROP\s+COLUMN\b",
+        r"\bDROP\s+TABLE\b",
+        r"\bDROP\s+TRIGGER\b",
+        r"\bCREATE\s+INDEX\b",
+        r"\bCREATE\s+UNIQUE\s+INDEX\b",
+        r"\bCREATE\s+TABLE\b",
+        r"\bCREATE\s+TRIGGER\b",
+        r"\bCREATE\s+FUNCTION\b",
+        r"\bALTER\s+COLUMN\b",
+        r"\bALTER\s+INDEX\b",
+        r"\bTRUNCATE\b",
+        r"\bRENAME\b",
+        r"\bGRANT\b",
+        r"\bREVOKE\b",
+        r"\bUPDATE\b",
+        r"\bINSERT\b",
+        r"\bDELETE\b",
+        r"\bCOMMENT\s+ON\b",
+    )
+    for token_pattern in forbidden_token_patterns:
+        matches = [
+            line
+            for line in code_lines
+            if re.search(token_pattern, line, re.IGNORECASE)
+        ]
+        assert not matches, (
+            f"Forbidden DDL matching {token_pattern!r} found in {migration_name}: {matches}"
+        )
+
+    add_column_stmts = re.findall(r"\bADD\s+COLUMN\b", code_body, re.IGNORECASE)
+    assert len(add_column_stmts) == 1, (
+        f"Migration {migration_name} must add exactly 1 column, "
+        f"found {len(add_column_stmts)}"
+    )
+    alter_table_stmts = re.findall(r"\bALTER\s+TABLE\b", code_body, re.IGNORECASE)
+    assert len(alter_table_stmts) == 1, (
+        f"Migration {migration_name} must have exactly 1 ALTER TABLE statement, "
+        f"found {len(alter_table_stmts)}"
+    )
+    # One statement, split by the runner's own splitter rather than by eye.
+    statements = [statement for statement in split_sql_statements(migration) if statement.strip()]
+    assert len(statements) == 1, f"{migration_name} must be a single statement, found {len(statements)}"
+
+    altered_tables = re.findall(
+        r"\bALTER\s+TABLE\s+(\S+)", code_body, re.IGNORECASE
+    )
+    assert altered_tables == ["core.river_network_version"], (
+        f"Migration {migration_name} must ONLY touch core.river_network_version, "
+        f"found altered tables: {altered_tables}"
+    )
+
+    # No references to future migration objects (000058..000099).
+    for future in [f"{n:06d}" for n in range(58, 100)]:
+        assert future not in migration, (
+            f"{migration_name} must not reference future migration {future}"
+        )
+
+
 def test_authority_stats_hygiene_migration_splits_into_the_expected_statements() -> None:
     """000052 mixes a DO block with four CONCURRENTLY statements (issue #1468).
 

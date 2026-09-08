@@ -91,6 +91,15 @@ display/frontend oracle 都在 node-27。
 
 ### C1. 部署 receipt（开发期本地起服务，非 docker compose up）
 
+> **部署顺序（migration 先于 display API 重启）**：display API 的 SQL 引用了 `db/migrations` 里的列，
+> 所以**先把待应用的 migration 全部 apply 到 active PG（node-27 本机 `:55432`），再重启/拉起 display API**。
+> 反向顺序会让新代码打到缺列的库上，national tile 与 `/api/v1/layers` 全部 500。
+> migration 一侧是安全的：本仓 migration 走 `ADD COLUMN IF NOT EXISTS` 之类的 forward-only 幂等 DDL，
+> 提前于代码应用不影响在跑的旧版本（列没人读）。
+> - #2031 的 `000057_river_network_version_geometry_generation.sql`（`core.river_network_version.geometry_generation`）
+>   即属此类：两个 national digest 都投影该列，**必须先 apply 000057，再重启 display API**；
+>   apply 后按 C1–C4 对两条 national tile 路由 + `/api/v1/layers` 出 live receipt（200 / 预期 424，不得 500）。
+
 - [ ] **开发期：27 本地起 display API**（不 `docker compose up`）：只读派生端口，
   再启动 wrapper。
 

@@ -1641,6 +1641,7 @@ def national_discharge_source_version(
     *,
     source: str | None = None,
     cycle: datetime | None = None,
+    valid_time: datetime | None = None,
 ) -> str:
     """Digest the latest display-ready, river-bearing run for every active basin/network.
 
@@ -1650,13 +1651,28 @@ def national_discharge_source_version(
     re-run of a non-latest identity would leave the digest — and therefore
     `source_version` and `cache_key` — unchanged while the tile went stale.
     Passing the identity narrows the ranking to it (issue #2007).
+
+    `valid_time` narrows it one step further (issue #2031). The tile SQL's
+    `latest_runs` CTE only considers runs whose display-coverage window CONTAINS
+    the requested instant; without the same clamp here the digest ranks a run
+    the tile never paints, so two instants served by two different runs share
+    one cache key and the newer run's landing does not rotate the older
+    instant's key. Passed NULL (the catalog, which has no instant) the clamp is
+    inert and the overall-latest question is unchanged.
+
+    `rnv.geometry_generation` is projected because the run rows alone cannot see
+    an in-place geometry rewrite: `_backfill_output_segment_geometry` moves
+    `core.river_segment.geom`/`stream_type` under a network without touching any
+    run, so the tile's picture changes while every digested run row stays
+    byte-identical. The write side bumps that counter in the same transaction.
     """
     rows = (
         session.execute(
             text(
                 """
                 SELECT run_id, river_network_version_id, cycle_time, updated_at,
-                       river_valid_time_start, river_valid_time_end, river_sample_count
+                       river_valid_time_start, river_valid_time_end, river_sample_count,
+                       geometry_generation
                 FROM (
                     SELECT h.run_id,
                            mi.river_network_version_id,
@@ -1665,12 +1681,15 @@ def national_discharge_source_version(
                            rdc.river_valid_time_start,
                            rdc.river_valid_time_end,
                            rdc.river_sample_count,
+                           rnv.geometry_generation,
                            ROW_NUMBER() OVER (
                                PARTITION BY mi.river_network_version_id
                                ORDER BY h.cycle_time DESC, h.run_id DESC
                            ) AS rn
                     FROM hydro.hydro_run h
                     JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
+                    JOIN core.river_network_version rnv
+                      ON rnv.river_network_version_id = mi.river_network_version_id
                     JOIN hydro.run_display_coverage rdc
                       ON rdc.run_id = h.run_id
                      AND rdc.segment_count > 0
@@ -1681,12 +1700,26 @@ def national_discharge_source_version(
                       -- run-selection sites in postgis_tile_sql carry.
                       AND (CAST(:source AS text) IS NULL OR lower(h.source_id) = :source)
                       AND (CAST(:cycle AS timestamptz) IS NULL OR h.cycle_time = :cycle)
+                      -- #2031: the coverage-window clamp `latest_runs` applies,
+                      -- NULL-guarded so the instant-less callers keep ranking
+                      -- each network's overall-latest run. It sits INSIDE the
+                      -- ranked sub-query, before ROW_NUMBER(): a run that does
+                      -- not cover the instant must drop out of the ranking so
+                      -- the next candidate becomes rank 1, not be filtered off
+                      -- the outer `rn = 1` result and leave the network absent.
+                      AND (
+                          CAST(:valid_time AS timestamptz) IS NULL
+                          OR (
+                              rdc.river_valid_time_start <= :valid_time
+                              AND rdc.river_valid_time_end >= :valid_time
+                          )
+                      )
                 ) ranked
                 WHERE rn = 1
                 ORDER BY river_network_version_id, run_id
                 """
             ),
-            {"source": source, "cycle": cycle},
+            {"source": source, "cycle": cycle, "valid_time": valid_time},
         )
         .mappings()
         .all()
@@ -1695,7 +1728,15 @@ def national_discharge_source_version(
 
 
 def national_river_network_source_version(session: Session) -> str:
-    """Digest active river-network identities and their immutable inventory metadata."""
+    """Digest active river-network identities and their immutable inventory metadata.
+
+    `geometry_generation` (#2031) is the one non-immutable member of the basis:
+    `segment_count`/`checksum` describe the imported package, and a geometry
+    backfill rewrites `core.river_segment.geom`/`stream_type` in place without
+    moving either. The counter is bumped by `_backfill_output_segment_geometry`
+    in the same transaction as the rewrite, so this layer's cache key rotates
+    with the geometry it paints.
+    """
     active_predicate = "mi.active_flag = 1" if session.get_bind().dialect.name == "sqlite" else "mi.active_flag = true"
     rows = (
         session.execute(
@@ -1705,6 +1746,7 @@ def national_river_network_source_version(session: Session) -> str:
                        rnv.basin_version_id,
                        rnv.segment_count,
                        rnv.checksum,
+                       rnv.geometry_generation,
                        rnv.created_at
                 FROM core.river_network_version rnv
                 JOIN core.model_instance mi
