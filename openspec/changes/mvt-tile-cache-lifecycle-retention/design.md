@@ -34,9 +34,9 @@
 - 空的 `<hh>` 目录保留（固定 256 + 256，有界）。
 
 ### D3. 锁文件删除的并发安全：runner 侧 `LOCK_NB`，API 侧 unlink-before-release + inode 复核
-- runner：对 `.lock` 用 `os.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)`（**无 `O_CREAT`**——删除器绝不能重建文件；`ENOENT` 即 `already_gone`，`ELOOP` 即 symlink 跳过）取 fd，再 `flock(LOCK_EX|LOCK_NB)`，拿不到记 `lock_held` 跳过；拿到后**再比一次身份**——`os.fstat(fd)` 与 `os.lstat(path)` 的 `(st_dev, st_ino)` 不等或 `ENOENT` 即 `already_gone`、不 unlink（窗口：runner 打开旧 inode I 后，持有者完成并 unlink，新 miss 重建为 inode J 并进入生成；runner 对孤儿 I 的 `LOCK_NB` 会成功，若此时按路径 unlink 会删掉活锁 J）；身份相等才 unlink，然后释放。这使「删除正被持有的锁」不可能发生。`.pbf`/`.tmp` 直接 `os.unlink`，不打开。`.locks` lane 级跳过用兄弟 `_resolve_lane_root` 的词汇：缺失 → `locks_root_missing`（新建缓存根的正常状态，不是错误），symlink/非目录 → `locks_root_unsafe` + `detail: path_is_symlink|path_not_directory`。
+- runner：对 `.lock` 用 `os.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)`（**无 `O_CREAT`**——删除器绝不能重建文件；`O_NONBLOCK` 让换进来的无写端 FIFO 不能把 runner 挂死——unit 是 `TimeoutStartSec=0`、wrapper 是 `flock -n`，一次挂死等于此后每个 tick 都 exit 0 跳过；`ENOENT` 即 `already_gone`，`ELOOP`/`EMLINK` 即 `not_regular_file`）取 fd，**先 `fstat` 判 `S_ISREG`**（非常规 → `not_regular_file`，目录/FIFO 在任何 flock 之前就被归类），再 `flock(LOCK_EX|LOCK_NB)`，拿不到记 `lock_held` 跳过；拿到后**再比一次身份**——`os.fstat(fd)` 与 `os.lstat(path)` 的 `(st_dev, st_ino)` 不等或 `ENOENT` 即 `already_gone`、不 unlink（窗口：runner 打开旧 inode I 后，持有者完成并 unlink，新 miss 重建为 inode J 并进入生成；runner 对孤儿 I 的 `LOCK_NB` 会成功，若此时按路径 unlink 会删掉活锁 J）；身份相等才 unlink，然后释放。这使「删除正被持有的锁」不可能发生。`.pbf`/`.tmp` 直接 `os.unlink`，不打开。`.locks` lane 级跳过用兄弟 `_resolve_lane_root` 的词汇：缺失 → `locks_root_missing`（新建缓存根的正常状态，不是错误），symlink/非目录 → `locks_root_unsafe` + `detail: path_is_symlink|path_not_directory|path_unavailable`。**枚举失败不是空 lane**：根、`.locks`、任一 `<hh>` 的 `scandir` 抛 `OSError`（EACCES/ESTALE）→ `failed[]` 一条 `{path, kind: null, reason: enumeration_unavailable, error, error_type}`、其余目录照常、rc 1——否则不可读的根会产出 `completed/production_execute/failed []` 的绿回执而缓存无限增长（round-1 verified cand-01）；单个条目在 `scandir` 与 `stat` 之间消失是并发 miss 的正常竞态，静默跳过。
 - API：`tile_generation_lock` 在 `finally` 里**先 unlink 后 `LOCK_UN`**。顺序是硬约束：若先释放后 unlink，等待者可能在释放后取得锁、复核通过（路径仍指向同一 inode）、然后路径被持有者 unlink——等待者持有一个已 unlink 的 inode，下一个到来者创建新 inode 并同时生成。
-- 获取：`open("a+b")` → `flock(LOCK_EX)` → `fstat(fd)` 与 `stat(path)` 比 `(st_dev, st_ino)`；不等或 `ENOENT` 即关闭重开。`_TILE_LOCK_REACQUIRE_LIMIT = 8` 定义为**尝试总数**（每次尝试 = open + flock + 比较；`_lock_path_identity` 调用次数 == 上限），耗尽则 `logger.warning` 后无锁执行——退化为重复生成（`os.replace` 原子，字节幂等），绝不挂起请求；每条失败分支都关闭 fd，且**放弃时不 unlink 路径**（它可能已是他人的活锁），交给 runner 按 mtime 兜底。
+- 获取：`open("a+b")` → `flock(LOCK_EX)` → `fstat(fd)` 与 `stat(path)` 比 `(st_dev, st_ino)`；不等或 `ENOENT` 即关闭重开。`_TILE_LOCK_REACQUIRE_LIMIT = 8` 定义为**尝试总数**（每次尝试 = open + flock + 比较；`_lock_path_identity` 调用次数 == 上限），耗尽则 `logger.warning` 后无锁执行——退化为重复生成（`os.replace` 原子，字节幂等），绝不挂起请求；每条失败分支都关闭 fd，比较阶段抛出的任何异常（如探针的 `PermissionError`）也先关 fd（同时释放 flock）再传播，且**放弃时不 unlink 路径**（它可能已是他人的活锁），交给 runner 按 mtime 兜底。
 - 进程内 `_LOCAL_TILE_LOCKS` **不改**：它已是 `weakref.WeakValueDictionary[str, threading.Lock]`（`services/tiles/mvt.py:153`），条目在最后一个持有者/等待者的强引用消失时自动移除，因此「有界于在途 miss」今天已成立（fixture review 实测：正常返回与异常返回后 `key in _LOCAL_TILE_LOCKS` 均为 `False`）。本 change 只用测试钉住该事实；唯一已知的非确定性是异常 traceback 仍钉住 generator frame 期间条目会多活一会儿（`pytest.raises` 作用域内），测试断言必须在该作用域之外做。
 - inode 复核的 stat 调用经模块级探针 `_lock_path_identity(path) -> tuple[int, int] | None`（`ENOENT` → `None`）与 `_lock_file_identity(fd) -> tuple[int, int]` 进行，测试只 monkeypatch 前者，不打全局 `os.stat`。
 - runner 与等待者的交互：runner 用 `LOCK_NB` 只删**无人持有**的锁；一个正阻塞在该 inode 上的等待者不持锁，因此 runner 可能删掉它阻塞的文件——等待者随后取得的是已 unlink 的 inode，靠 inode 复核转到新文件。且 14 天口径下在途锁文件不可能早于 cutoff，该交错只在遗留锁文件被旧代码复用时理论可达。
@@ -44,7 +44,7 @@
 
 ### D4. 回执与门沿用兄弟约定
 - `NODE27_MVT_CACHE_RETENTION_ENABLED`（默认 true）/ `NODE27_MVT_CACHE_RETENTION_PLAN_ONLY`（默认 false）——不用 `DRY_RUN` 名（#1407 理由：历史 `*_DRY_RUN=true` 残留会静默归零删除）。
-- `--summary-path` JSON（未给时打印到 stdout，与兄弟一致）、`execution_mode` 三值、rc 0/1/2、`already_gone` 归 skipped；`skipped[]` 条目统一 `{path, kind, reason}`（`kind` 为 `pbf|tmp|lock`，lane 级跳过为 `null`），`mtime` 为 RFC3339 UTC 秒精度字符串；回执另带 `precip_root_untouched`。
+- `--summary-path` JSON（未给时打印到 stdout，与兄弟一致；runner **不读** `NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH`——wrapper 保留该 env override 并总是传 flag——相对路径按 cwd 解析、不设 blocker，blocker 集合与 spec Req 2 一致）、`execution_mode` 三值、rc 0/1/2、`already_gone` 归 skipped；`skipped[]` 条目统一 `{path, kind, reason}`（`kind` 为 `pbf|tmp|lock`，lane 级跳过为 `null`），`mtime` 为 RFC3339 UTC 秒精度字符串；回执另带 `precip_root_untouched`。
 - **与兄弟的显式偏离**：不复用 `node27_raw_retention._env_int` 的「非法值静默回落默认」——`NODE27_MVT_CACHE_RETENTION_DAYS` / `--retention-days` 解析失败或 `< 1` 一律 `preflight_blocked` rc 2（spec 要求）；`--retention-days 0` 不得因 `or` 短路落回 env 默认。根路径按显示进程口径 `Path(root).expanduser()`（**不 resolve**，枚举也用未 resolve 的路径），且必须绝对、不得为 `/`、`is_symlink()`（lstat）为假、真实目录；symlink 检查必须在任何 `resolve()` 之前——兄弟 `_safe_resolved_dir` 先 `resolve(strict=True)` 再 `is_symlink()` 的分支是死代码（resolve 后永不为 symlink），不得照抄。`--reference-time` 非 RFC3339 同样是 preflight blocker（`reason: not_rfc3339`），否则会在写回执前抛出，正是兄弟为 `OSError` 包裹所记录的「陈旧回执」失效模式。`<root>/.locks` 本身若为 symlink/非目录，只跳过锁 lane（lane 级 `skipped` 条目），因为 `os.scandir` 会跟随 symlink 而把删除面带出缓存根。blocked 回执与正常回执用同一 sink（文件或 stdout）。
 - env 模板逐字复制「取显示进程实际值，不是 `display.example` 的 `/tmp/...`」警告。
 
@@ -56,7 +56,7 @@
 
 - [runner 与 API 同时操作同一 `.pbf`] → API 只写新文件（fresh mtime）、读旧文件；读侧 `_safe_read_file_cache` 把并发 unlink 引起的 `OSError` 当 miss，回退到生成。
 - [14 天口径下遗留锁文件要到 09-18 才开始老化] → 遗留 4383 个 inode 只占 3% inode 的 0.004%，不是事故；receipt 记老化日期。
-- [重试耗尽走无锁分支] → 只在路径 inode 被外力持续替换时发生（理论上需另一个进程连续 8 次在我们 open 与 stat 之间创建/删除），后果是重复生成一次。
+- [重试耗尽走无锁分支] → 无需外力：持有者每次交接（unlink + `LOCK_UN`）让阻塞在该 inode 上的每个等待者花掉一次尝试，第 k 个同 key 跨进程等待者约需 k 次，所以 ≥ `_TILE_LOCK_REACQUIRE_LIMIT + 1` = 9 个同 key 跨进程竞争者即可触顶——与 `NHMS_DISPLAY_WORKERS` 耦合（`start-display-api.sh` 上限 4，但 `nhms-display-api.service` 直接透传 env 不设上限）。后果是重复生成一次，不是事故；调大 worker 数时要记得这条。
 - [prewarm 并发（线程池）× 2 worker] → 正是 flock 路径的生产触发面；跨进程测试用 `multiprocessing` spawn 覆盖。
 
 ## Invariant Matrix

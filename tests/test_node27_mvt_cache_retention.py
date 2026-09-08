@@ -16,6 +16,7 @@ import os
 import shutil
 import stat
 import subprocess
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -47,7 +48,6 @@ _ENV_NAMES = (
     "NODE27_MVT_CACHE_RETENTION_DAYS",
     "NODE27_MVT_CACHE_RETENTION_ENABLED",
     "NODE27_MVT_CACHE_RETENTION_PLAN_ONLY",
-    "NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH",
 )
 
 
@@ -242,7 +242,7 @@ def test_a_lock_path_recreated_after_open_is_not_unlinked(
     replacement = _touch(tmp_path / "replacement.lock", mtime=_AGED, content=b"new")
     original_inode = os.lstat(lock_path).st_ino
 
-    targets, _ = runner.collect_targets(root, cutoff=datetime(2026, 8, 25, tzinfo=UTC))
+    targets, _, _ = runner.collect_targets(root, cutoff=datetime(2026, 8, 25, tzinfo=UTC))
     assert [target.kind for target in targets] == ["lock"]
 
     stale_fd = os.open(lock_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -254,6 +254,136 @@ def test_a_lock_path_recreated_after_open_is_not_unlinked(
     assert (outcome, error) == ("already_gone", None)
     assert lock_path.read_bytes() == b"new"
     assert os.lstat(lock_path).st_ino != original_inode
+
+
+def _collected_lock_target(root: Path) -> runner.CacheTarget:
+    """The one aged lock target of `root`, exactly as `collect_targets` sees it.
+
+    Every branch below is driven with a REAL collected target and then races the
+    path, which is the only interleaving that reaches `_remove_lock_target`'s
+    post-collection classifications in production.
+    """
+    targets, _, failed = runner.collect_targets(root, cutoff=datetime(2026, 8, 25, tzinfo=UTC))
+    assert failed == []
+    assert [target.kind for target in targets] == ["lock"]
+    return targets[0]
+
+
+def test_a_lock_file_unlinked_after_collection_is_already_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `open` ENOENT branch: a display worker released between the two steps."""
+    root = tmp_path / "cache"
+    lock_path = _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    target = _collected_lock_target(root)
+
+    lock_path.unlink()
+
+    assert runner._remove_lock_target(target) == ("already_gone", None)
+
+    # The same race through the runner, so the summary vocabulary is pinned too.
+    _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    real_collect = runner.collect_targets
+
+    def collect_then_unlink(root_path: Path, *, cutoff: datetime) -> Any:
+        collected = real_collect(root_path, cutoff=cutoff)
+        lock_path.unlink()
+        return collected
+
+    monkeypatch.setattr(runner, "collect_targets", collect_then_unlink)
+
+    payload = runner.run_retention(_config(root), now=_NOW)
+
+    assert payload["skipped"] == [
+        {"path": str(lock_path), "kind": "lock", "reason": "already_gone"}
+    ]
+    assert payload["failed"] == []
+    assert payload["deleted"] == []
+
+
+def test_a_lock_path_replaced_by_a_symlink_after_collection_is_not_regular_file(
+    tmp_path: Path,
+) -> None:
+    """`O_NOFOLLOW` refuses it (ELOOP/EMLINK), so the link's TARGET is safe."""
+    root = tmp_path / "cache"
+    lock_path = _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    victim = _touch(tmp_path / "victim.lock", mtime=_AGED, content=b"live")
+    target = _collected_lock_target(root)
+
+    lock_path.unlink()
+    lock_path.symlink_to(victim)
+
+    assert runner._remove_lock_target(target) == ("not_regular_file", None)
+    assert lock_path.is_symlink()
+    assert victim.read_bytes() == b"live"
+
+
+def test_a_lock_path_replaced_by_a_directory_after_collection_is_not_regular_file(
+    tmp_path: Path,
+) -> None:
+    """`O_RDONLY` on a directory SUCCEEDS; only the `fstat` shape check catches it."""
+    root = tmp_path / "cache"
+    lock_path = _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    target = _collected_lock_target(root)
+
+    lock_path.unlink()
+    lock_path.mkdir()
+
+    assert runner._remove_lock_target(target) == ("not_regular_file", None)
+    assert lock_path.is_dir()
+
+
+def test_a_lock_path_replaced_by_a_fifo_after_collection_returns_promptly(tmp_path: Path) -> None:
+    """The `O_NONBLOCK` oracle: without it this call never returns.
+
+    Opening a writer-less FIFO read-only blocks until a writer appears, and the
+    retention unit is `Type=oneshot` with `TimeoutStartSec=0` behind a wrapper
+    whose `flock -n` would then skip every later tick at rc 0 -- a hang that
+    reports as healthy. The worker thread is a daemon so that a red here cannot
+    also wedge the interpreter at shutdown.
+    """
+    root = tmp_path / "cache"
+    lock_path = _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    target = _collected_lock_target(root)
+
+    lock_path.unlink()
+    os.mkfifo(lock_path)
+    observed: list[Any] = []
+    worker = threading.Thread(
+        target=lambda: observed.append(runner._remove_lock_target(target)), daemon=True
+    )
+    worker.start()
+    worker.join(5.0)
+
+    assert not worker.is_alive(), "the open blocked: _open_lock_fd is missing os.O_NONBLOCK"
+    assert observed == [("not_regular_file", None)]
+    assert stat.S_ISFIFO(os.lstat(lock_path).st_mode)
+
+
+def test_not_regular_file_is_a_lock_lane_skip_in_the_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "cache"
+    lock_path = _touch(root / ".locks" / "ab" / f"{_SHA_A}.lock", mtime=_AGED, content=b"")
+    aged_pbf = _touch(root / "ab" / f"{_SHA_B}.pbf", mtime=_AGED)
+    real_collect = runner.collect_targets
+
+    def collect_then_replace(root_path: Path, *, cutoff: datetime) -> Any:
+        collected = real_collect(root_path, cutoff=cutoff)
+        lock_path.unlink()
+        lock_path.mkdir()
+        return collected
+
+    monkeypatch.setattr(runner, "collect_targets", collect_then_replace)
+
+    payload = runner.run_retention(_config(root), now=_NOW)
+
+    assert payload["skipped"] == [
+        {"path": str(lock_path), "kind": "lock", "reason": "not_regular_file"}
+    ]
+    assert payload["failed"] == []
+    assert _paths(payload["deleted"]) == [str(aged_pbf)]
+    assert lock_path.is_dir()
 
 
 def test_a_target_that_disappears_before_unlink_is_a_skip_not_a_failure(
@@ -372,6 +502,115 @@ def test_a_symlinked_hex_directory_is_never_enumerated(tmp_path: Path) -> None:
 
     assert payload["counts"]["planned"] == 0
     assert victim.exists()
+
+
+# ---------------------------------------------------------------------------
+# Scenario: a directory that cannot be enumerated is a FAILURE, never silence
+# ---------------------------------------------------------------------------
+_ENUMERATION_FAILURE_KEYS = {"path", "kind", "reason", "error", "error_type"}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 directory anyway")
+def test_an_unreadable_hex_directory_fails_the_run_and_the_siblings_still_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An unlistable `<hh>` hides an unknown number of aged files.
+
+    Reporting it as a skip (or as nothing at all) would leave `counts.failed`
+    at 0 and rc at 0, and the env template's health criterion
+    (`.failed | length == 0`) would stay GREEN over a cache root that has
+    silently stopped being pruned.
+    """
+    root = tmp_path / "cache"
+    unreadable = root / "ab"
+    hidden_pbf = _touch(unreadable / f"{_SHA_A}.pbf", mtime=_AGED)
+    sibling_pbf = _touch(root / "cd" / f"{_SHA_B}.pbf", mtime=_AGED)
+    (root / ".locks").mkdir()
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
+    unreadable.chmod(0o000)
+    try:
+        monkeypatch.setenv("NODE27_MVT_CACHE_RETENTION_PLAN_ONLY", "true")
+        plan_rc = runner.main(["--reference-time", "2026-09-08T12:00:00Z"])
+        plan_payload = json.loads(capsys.readouterr().out)
+        monkeypatch.delenv("NODE27_MVT_CACHE_RETENTION_PLAN_ONLY")
+        exit_code = runner.main(["--reference-time", "2026-09-08T12:00:00Z"])
+        payload = json.loads(capsys.readouterr().out)
+    finally:
+        unreadable.chmod(0o755)
+
+    expected_failure = {
+        "path": str(unreadable),
+        "kind": None,
+        "reason": "enumeration_unavailable",
+        "error": payload["failed"][0]["error"],
+        "error_type": "PermissionError",
+    }
+    assert exit_code == 1
+    assert payload["status"] == "completed"
+    assert payload["failed"] == [expected_failure]
+    assert set(payload["failed"][0]) == _ENUMERATION_FAILURE_KEYS
+    assert payload["failed"][0]["error"]
+    assert payload["counts"]["failed"] == 1
+    # The readable lanes did their work anyway; one bad directory is not a halt.
+    assert _paths(payload["deleted"]) == [str(sibling_pbf)]
+    assert not sibling_pbf.exists()
+    assert hidden_pbf.exists()
+    # `plan_only` is not an excuse either: a plan that could not read a
+    # directory is as incomplete as an execution that could not.
+    assert plan_rc == 1
+    assert plan_payload["execution_mode"] == "plan_only"
+    assert plan_payload["deleted"] == []
+    assert plan_payload["counts"]["planned"] == 1
+    assert [
+        {key: entry[key] for key in ("path", "kind", "reason", "error_type")}
+        for entry in plan_payload["failed"]
+    ] == [{key: expected_failure[key] for key in ("path", "kind", "reason", "error_type")}]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 directory anyway")
+def test_an_unreadable_cache_root_is_a_failure_not_a_clean_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Preflight passes -- `is_dir()` only needs the PARENT's permissions -- so
+    the whole run would otherwise report `completed` with zero of everything."""
+    root = tmp_path / "cache"
+    survivor = _touch(root / "ab" / f"{_SHA_A}.pbf", mtime=_AGED)
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
+    root.chmod(0o000)
+    try:
+        exit_code = runner.main(["--reference-time", "2026-09-08T12:00:00Z"])
+        payload = json.loads(capsys.readouterr().out)
+    finally:
+        root.chmod(0o755)
+
+    assert exit_code == 1
+    assert payload["status"] == "completed"
+    assert payload["failed"] == [
+        {
+            "path": str(root),
+            "kind": None,
+            "reason": "enumeration_unavailable",
+            "error": payload["failed"][0]["error"],
+            "error_type": "PermissionError",
+        }
+    ]
+    assert set(payload["failed"][0]) == _ENUMERATION_FAILURE_KEYS
+    assert payload["counts"]["planned"] == 0
+    assert payload["counts"]["deleted"] == 0
+    # The lock lane never reaches an `os.scandir`: `<root>/.locks` cannot even
+    # be `lstat`-ed through an unreadable parent, so it retires itself through
+    # the existing lane skip instead of a second `failed[]` entry. rc is
+    # already 1 from the root entry, which is what the health criterion reads.
+    assert payload["skipped"] == [
+        {
+            "path": str(root / ".locks"),
+            "kind": None,
+            "reason": "locks_root_unsafe",
+            "detail": "path_unavailable",
+            "error": payload["skipped"][0]["error"],
+        }
+    ]
+    assert survivor.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +847,48 @@ def test_summary_carries_every_required_field(
     }
 
 
+def test_a_relative_summary_path_is_a_valid_sink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The receipt is a file this process CREATES, not a tree it deletes from,
+    so the absoluteness `cache_root` needs buys nothing here."""
+    root = tmp_path / "cache"
+    aged_pbf = _touch(root / "ab" / f"{_SHA_A}.pbf", mtime=_AGED)
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
+    monkeypatch.chdir(tmp_path)
+
+    exit_code = runner.main(
+        ["--summary-path", "logs/summary.json", "--reference-time", "2026-09-08T12:00:00Z"]
+    )
+    printed = json.loads(capsys.readouterr().out)
+    payload = json.loads((tmp_path / "logs" / "summary.json").read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert printed == payload
+    assert _paths(payload["deleted"]) == [str(aged_pbf)]
+
+
+def test_the_summary_path_env_variable_is_not_a_runner_sink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH` belongs to the WRAPPER, which
+    resolves it and always passes the result as `--summary-path`. A second
+    reader here would only be a way for the two to disagree."""
+    root = tmp_path / "cache"
+    _touch(root / "ab" / f"{_SHA_A}.pbf", mtime=_AGED)
+    ghost = tmp_path / "ghost-logs" / "summary.json"
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(root))
+    monkeypatch.setenv("NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH", str(ghost))
+
+    exit_code = runner.main(["--reference-time", "2026-09-08T12:00:00Z"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    assert payload["counts"]["deleted"] == 1
+    assert not ghost.parent.exists(), "stdout was the sink; the env var is inert"
+
+
 def test_an_undeletable_target_is_a_failure_and_exit_code_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -659,11 +940,19 @@ def test_the_cutoff_is_wall_clock_relative_to_the_reference_time(tmp_path: Path)
         root / "ab" / f"{_SHA_B}.pbf",
         mtime=datetime(2026, 8, 25, 12, 0, 1, tzinfo=UTC).timestamp(),
     )
+    # The cutoff instant itself. The comparison is `st_mtime < cutoff`, so this
+    # one SURVIVES; a `<=` would delete it and nothing else in this file notices.
+    on_the_cutoff = _touch(
+        root / "ab" / f"{_SHA_C}.pbf",
+        mtime=datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC).timestamp(),
+    )
 
     payload = runner.run_retention(_config(root, reference_time=_NOW), now=_NOW)
 
     assert _paths(payload["deleted"]) == [str(just_inside)]
+    assert _paths(payload["planned"]) == [str(just_inside)]
     assert just_outside.exists()
+    assert on_the_cutoff.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -739,7 +1028,7 @@ def test_a_real_mvt_cache_write_is_collected_by_the_runner(
         body = mvt._file_cache_path(key)
         assert body is not None
         os.utime(body, (_AGED, _AGED))
-        targets, _ = runner.collect_targets(tmp_path, cutoff=datetime(2026, 8, 25, tzinfo=UTC))
+        targets, _, _ = runner.collect_targets(tmp_path, cutoff=datetime(2026, 8, 25, tzinfo=UTC))
 
     assert sorted(target.kind for target in targets) == ["lock", "pbf"]
     assert {str(target.path) for target in targets} == {str(body), str(lock_path)}
@@ -1048,7 +1337,7 @@ def test_wrapper_never_opens_the_lock_file_with_o_creat_in_the_runner() -> None:
     a deleter that can recreate the file it removes is not a deleter."""
     text = (_REPO_ROOT / "scripts/node27_mvt_cache_retention.py").read_text(encoding="utf-8")
 
-    assert "os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC" in text
+    assert "os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK" in text
     assert "os.O_CREAT" not in text
     assert "O_CREAT" not in _code_only(text)
 
@@ -1122,7 +1411,7 @@ def test_a_fifo_wearing_a_target_name_is_not_a_target(tmp_path: Path) -> None:
     os.mkfifo(fifo)
     os.utime(fifo, (_AGED, _AGED))
 
-    targets, _ = runner.collect_targets(root, cutoff=datetime(2026, 8, 25, tzinfo=UTC))
+    targets, _, _ = runner.collect_targets(root, cutoff=datetime(2026, 8, 25, tzinfo=UTC))
 
     assert targets == []
     assert stat.S_ISFIFO(os.lstat(fifo).st_mode)

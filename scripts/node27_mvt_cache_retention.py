@@ -175,6 +175,21 @@ def _resolve_retention_days(args: argparse.Namespace) -> tuple[int | None, dict[
     return parsed, None
 
 
+def _summary_sink(args: argparse.Namespace) -> Path | None:
+    """Where the receipt goes: `--summary-path`, or `None` for stdout only.
+
+    The CLI flag is the ONLY source. There is deliberately no env fallback: the
+    wrapper (`scripts/node27_mvt_cache_retention_once.sh`) resolves its own
+    `NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH` override and always passes the
+    result as `--summary-path`, so a second reader here would only add a way for
+    the two to disagree. A RELATIVE path is a valid sink -- it is a file this
+    process creates, not a tree it deletes from, so the absoluteness that
+    `cache_root` needs buys nothing here.
+    """
+    value = (args.summary_path or "").strip()
+    return Path(value).expanduser() if value else None
+
+
 def config_from_env(
     args: argparse.Namespace,
 ) -> tuple[MvtCacheRetentionConfig | None, list[dict[str, Any]]]:
@@ -205,10 +220,7 @@ def config_from_env(
                 {"field": "reference_time", "reason": "not_rfc3339", "value": args.reference_time}
             )
 
-    summary_value = (args.summary_path or os.getenv("NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH") or "").strip()
-    summary_path = Path(summary_value).expanduser() if summary_value else None
-    if summary_path is not None and not summary_path.is_absolute():
-        blockers.append({"field": "summary_path", "reason": "path_not_absolute", "path": str(summary_path)})
+    summary_path = _summary_sink(args)
 
     if blockers or cache_root is None or retention_days is None:
         return None, blockers
@@ -225,12 +237,38 @@ def config_from_env(
     )
 
 
-def _hex_directories(parent: Path) -> list[Path]:
+def _enumeration_failure(directory: Path, error: OSError) -> dict[str, Any]:
+    """The `failed[]` entry for a directory this run could not READ AT ALL.
+
+    Deliberately a FAILURE and not a skip: a directory that cannot be
+    enumerated hides an unknown number of aged files, so the run neither
+    deleted them nor can promise there was nothing to delete. Reporting it as a
+    skip would leave `counts.failed == 0` and rc 0, and the env template's
+    health criterion (`.failed | length == 0`) would stay green over a cache
+    root that is silently no longer being pruned. `kind` is `None` because the
+    entry names a directory, not one of the three target shapes.
+    """
+    return {
+        "path": str(directory),
+        "kind": None,
+        "reason": "enumeration_unavailable",
+        "error": str(error),
+        "error_type": type(error).__name__,
+    }
+
+
+def _hex_directories(parent: Path) -> tuple[list[Path], dict[str, Any] | None]:
     """The `[0-9a-f]{2}` NON-SYMLINK subdirectories of `parent`, sorted.
+
+    Returns `(directories, failure_or_None)`. A failure means `parent` itself
+    could not be listed; the caller records it and carries on with the other
+    lane, so one unreadable directory never suppresses the rest of the run.
 
     `follow_symlinks=False` throughout: `DirEntry.is_dir()` follows links by
     default, which would let a `<root>/ab -> /elsewhere` symlink drag the
-    deletion surface out of the cache root.
+    deletion surface out of the cache root. The PER-ENTRY `OSError` stays a
+    silent skip: that is the ENOENT race of an entry vanishing mid-scan, i.e.
+    exactly the concurrency this runner is built to tolerate.
     """
     found: list[Path] = []
     try:
@@ -243,16 +281,21 @@ def _hex_directories(parent: Path) -> list[Path]:
                         found.append(Path(entry.path))
                 except OSError:
                     continue
-    except OSError:
-        return []
-    return sorted(found)
+    except OSError as error:
+        return [], _enumeration_failure(parent, error)
+    return sorted(found), None
 
 
 def _lane_targets(
     hex_dir: Path,
     patterns: tuple[tuple[re.Pattern[str], str], ...],
     cutoff: datetime,
-) -> list[CacheTarget]:
+) -> tuple[list[CacheTarget], dict[str, Any] | None]:
+    """`(aged targets, failure_or_None)` for one `<hh>` directory.
+
+    Same split as `_hex_directories`: an unreadable `<hh>` is a `failed[]`
+    entry, a single entry that vanishes or refuses `stat` mid-scan is not.
+    """
     cutoff_ts = cutoff.timestamp()
     found: list[CacheTarget] = []
     try:
@@ -279,9 +322,9 @@ def _lane_targets(
                         mtime=datetime.fromtimestamp(info.st_mtime, UTC),
                     )
                 )
-    except OSError:
-        return []
-    return sorted(found, key=lambda target: str(target.path))
+    except OSError as error:
+        return [], _enumeration_failure(hex_dir, error)
+    return sorted(found, key=lambda target: str(target.path)), None
 
 
 def _locks_root_skip(locks_root: Path) -> dict[str, Any] | None:
@@ -321,28 +364,43 @@ def _locks_root_skip(locks_root: Path) -> dict[str, Any] | None:
     return None
 
 
-def collect_targets(root: Path, *, cutoff: datetime) -> tuple[list[CacheTarget], list[dict[str, Any]]]:
-    """Every aged target of the two lanes, plus the lane-level skips.
+def collect_targets(
+    root: Path, *, cutoff: datetime
+) -> tuple[list[CacheTarget], list[dict[str, Any]], list[dict[str, Any]]]:
+    """`(aged targets, lane-level skips, enumeration failures)`.
 
     Exactly two levels are ever read: `<root>/<hh>/` and `<root>/.locks/<hh>/`.
     Nothing at the root, nothing one level deeper, and nothing under a directory
     whose name is not `[0-9a-f]{2}` is enumerated -- which is why `precip/` is
     unreachable without naming it.
+
+    A directory that cannot be listed is collected into the third list rather
+    than raising: the sibling lanes must still prune, and the caller turns the
+    entries into `failed[]` (rc 1).
     """
     targets: list[CacheTarget] = []
     skipped: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
 
-    for hex_dir in _hex_directories(root):
-        targets.extend(_lane_targets(hex_dir, _TILE_LANE_PATTERNS, cutoff))
+    def collect_lane(parent: Path, patterns: tuple[tuple[re.Pattern[str], str], ...]) -> None:
+        hex_dirs, failure = _hex_directories(parent)
+        if failure is not None:
+            failed.append(failure)
+        for hex_dir in hex_dirs:
+            lane, lane_failure = _lane_targets(hex_dir, patterns, cutoff)
+            if lane_failure is not None:
+                failed.append(lane_failure)
+            targets.extend(lane)
+
+    collect_lane(root, _TILE_LANE_PATTERNS)
 
     locks_root = root / LOCKS_DIR_NAME
     lane_skip = _locks_root_skip(locks_root)
     if lane_skip is not None:
         skipped.append(lane_skip)
-        return targets, skipped
-    for hex_dir in _hex_directories(locks_root):
-        targets.extend(_lane_targets(hex_dir, _LOCK_LANE_PATTERNS, cutoff))
-    return targets, skipped
+        return targets, skipped, failed
+    collect_lane(locks_root, _LOCK_LANE_PATTERNS)
+    return targets, skipped, failed
 
 
 def _open_lock_fd(path: Path) -> int:
@@ -351,10 +409,16 @@ def _open_lock_fd(path: Path) -> int:
     NO `O_CREAT`: a deleter must not be able to recreate what it is removing.
     `O_NOFOLLOW` makes a symlink an `ELOOP` instead of a reach outside the cache
     root, and `O_CLOEXEC` keeps the descriptor out of anything this process
-    might exec. Separated out as a module-level function because it is the seam
-    the recreate-race test drives.
+    might exec. `O_NONBLOCK` is inert on a regular file -- the only shape this
+    runner ever wants to delete -- and is here for the shape it does NOT want:
+    opening a writer-less FIFO read-only BLOCKS FOREVER without it, and the
+    systemd unit runs with `TimeoutStartSec=0` while the wrapper's `flock -n`
+    would then skip every later tick at rc 0. With it the open returns at once
+    and the `fstat` below classifies the FIFO as `not_regular_file`.
+    Separated out as a module-level function because it is the seam the
+    recreate-race test drives.
     """
-    return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
 
 
 def _remove_lock_target(target: CacheTarget) -> tuple[str, OSError | None]:
@@ -362,6 +426,12 @@ def _remove_lock_target(target: CacheTarget) -> tuple[str, OSError | None]:
 
     Returns `("deleted" | "already_gone" | "lock_held" | "not_regular_file" |
     "failed", error)`.
+
+    Order: open -> `fstat` shape check -> `flock` -> identity recheck -> unlink.
+    The shape check runs BEFORE the `flock` on purpose: `flock` on a FIFO or a
+    directory descriptor is not what this runner wants to reason about, and
+    answering `not_regular_file` from the `fstat` alone makes the classification
+    of a path replaced by a non-file deterministic.
 
     The identity recheck after the `flock` is what makes deleting a LIVE lock
     impossible. The window it closes: we open inode I, the holder finishes and
@@ -380,15 +450,15 @@ def _remove_lock_target(target: CacheTarget) -> tuple[str, OSError | None]:
             return "not_regular_file", None
         return "failed", error
     try:
+        held = os.fstat(fd)
+        if not stat.S_ISREG(held.st_mode):
+            return "not_regular_file", None
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return "lock_held", None
         except OSError as error:
             return "failed", error
-        held = os.fstat(fd)
-        if not stat.S_ISREG(held.st_mode):
-            return "not_regular_file", None
         try:
             current = os.lstat(target.path)
         except FileNotFoundError:
@@ -461,10 +531,12 @@ def run_retention(config: MvtCacheRetentionConfig, *, now: datetime) -> dict[str
             "freed_bytes": 0,
         }
 
-    targets, skipped = collect_targets(config.cache_root, cutoff=cutoff)
+    # `failed` starts NON-EMPTY when a directory could not be enumerated: those
+    # entries survive `plan_only` too, because a plan that could not read a
+    # directory is as incomplete as an execution that could not.
+    targets, skipped, failed = collect_targets(config.cache_root, cutoff=cutoff)
     planned = [_target_payload(target) for target in targets]
     deleted: list[dict[str, Any]] = []
-    failed: list[dict[str, Any]] = []
     freed_bytes = 0
     if not config.plan_only:
         for target, payload in zip(targets, planned, strict=True):
@@ -555,13 +627,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config, blockers = config_from_env(args)
     if config is None:
-        summary_value = (
-            args.summary_path or os.getenv("NODE27_MVT_CACHE_RETENTION_SUMMARY_PATH") or ""
-        ).strip()
-        blocked_sink = Path(summary_value).expanduser() if summary_value else None
-        if blocked_sink is not None and not blocked_sink.is_absolute():
-            blocked_sink = None
-        _emit(_blocked_payload(blockers), blocked_sink)
+        # Same sink a completed run would have used, or the operator's health
+        # check reads yesterday's receipt and calls a blocked run healthy.
+        _emit(_blocked_payload(blockers), _summary_sink(args))
         return 2
     payload = run_retention(config, now=datetime.now(UTC))
     _emit(payload, config.summary_path)

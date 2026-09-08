@@ -299,26 +299,41 @@ def _open_live_lock_file(lock_path: Path) -> IO[bytes] | None:
     `(st_dev, st_ino)` of the held descriptor against the path and reopens on a
     mismatch (or on `ENOENT`, which `_lock_path_identity` reports as `None`).
 
-    `_TILE_LOCK_REACQUIRE_LIMIT` is the TOTAL attempt count. Exhausting it means
-    something is replacing the path between our `open` and our `stat` over and
-    over; the answer is to degrade to duplicate generation (`os.replace` in
-    `_write_file_cache` is atomic and the bytes are deterministic), never to
-    spin or block a request. On give-up the path is deliberately NOT unlinked --
-    it may already be another process's live lock -- and the aged-out file is
-    left to `scripts/node27_mvt_cache_retention.py`. Every failed attempt closes
-    its own descriptor, so the caller can only ever leak the one it is handed.
+    `_TILE_LOCK_REACQUIRE_LIMIT` is the TOTAL attempt count, and exhausting it
+    needs NO external actor -- ordinary same-key contention reaches it. Each
+    holder handover (unlink then `LOCK_UN`) costs every waiter still blocked on
+    that inode one attempt: they wake on an inode the path no longer names,
+    mismatch, and reopen. So the k-th cross-process waiter on one key spends
+    about k attempts before its turn, and `_TILE_LOCK_REACQUIRE_LIMIT + 1`
+    simultaneous same-key contenders can push the last of them over the limit.
+    That count is bounded by `NHMS_DISPLAY_WORKERS`
+    (`infra/systemd/nhms-display-api.service` passes it through uncapped), so
+    the reachable degrade is: that one request generates its tile without the
+    cross-process lock, i.e. at most one duplicate generation of a deterministic
+    tile. Degrading is the point -- `os.replace` in `_write_file_cache` is
+    atomic and the bytes are deterministic, so a duplicate is wasted CPU, never
+    a corrupt tile, and it is strictly better than spinning or blocking the
+    request. On give-up the path is deliberately NOT unlinked -- it may already
+    be another process's live lock -- and the aged-out file is left to
+    `scripts/node27_mvt_cache_retention.py`. Every failed attempt closes its own
+    descriptor, so the caller can only ever leak the one it is handed.
     """
     for _ in range(_TILE_LOCK_REACQUIRE_LIMIT):
         lock_file = lock_path.open("a+b")
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        except OSError:
+            # `_lock_path_identity` first, so it is called exactly
+            # `_TILE_LOCK_REACQUIRE_LIMIT` times on the exhaustion path. Both
+            # probes are INSIDE the `try`: once the `flock` is taken, anything
+            # that raises before the `return` must still release it, and
+            # `_lock_path_identity` only swallows `ENOENT` -- an `EACCES` or
+            # `ESTALE` from it would otherwise propagate with the descriptor
+            # still open and still locked, held until the traceback dies.
+            if _lock_path_identity(lock_path) == _lock_file_identity(lock_file.fileno()):
+                return lock_file
+        except BaseException:
             lock_file.close()
             raise
-        # `_lock_path_identity` first, so it is called exactly
-        # `_TILE_LOCK_REACQUIRE_LIMIT` times on the exhaustion path.
-        if _lock_path_identity(lock_path) == _lock_file_identity(lock_file.fileno()):
-            return lock_file
         lock_file.close()
     logger.warning(
         "tile generation lock path kept changing identity after %d attempts; "

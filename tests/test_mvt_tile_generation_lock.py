@@ -14,6 +14,7 @@ also fails the two tests which are supposed to be green before the change.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import sys
@@ -53,6 +54,11 @@ def _open_fd_count() -> int:
 #     raise INSIDE this block).
 # ---------------------------------------------------------------------------
 def test_lock_file_is_gone_after_a_normal_miss(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The `_LOCAL_TILE_LOCKS` half mirrors the producer-raises test below and
+    pins EXISTING behaviour (the map is already a `weakref.WeakValueDictionary`):
+    on a normal exit the context manager's generator is exhausted, so the last
+    strong reference to that key's `threading.Lock` is gone and the entry with
+    it. Only the lock-FILE assertions are new in issue #2032."""
     monkeypatch.setenv(mvt.MVT_FILE_CACHE_DIR_ENV, str(tmp_path))
     tile = _tile()
     key = mvt.cache_key(tile)
@@ -64,6 +70,44 @@ def test_lock_file_is_gone_after_a_normal_miss(tmp_path: Path, monkeypatch: pyte
 
     assert not lock_path.exists()
     assert list(lock_path.parent.iterdir()) == []
+    assert key not in mvt._LOCAL_TILE_LOCKS
+
+
+def test_the_lock_file_is_unlinked_before_the_lock_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deterministic oracle for the unlink-BEFORE-`LOCK_UN` order.
+
+    Swapping the two statements in `tile_generation_lock`'s `finally` leaves
+    every other test in this file green -- the file is gone either way once the
+    block ends -- so the order needs an observer INSIDE the release. `mvt.fcntl`
+    is the stdlib module object, so patching `flock` on it is what the module
+    under test actually calls; the spy wraps the real one, so the lock is still
+    really taken and really released.
+    """
+    monkeypatch.setenv(mvt.MVT_FILE_CACHE_DIR_ENV, str(tmp_path))
+    tile = _tile("2026-09-01T12:00:00Z")
+    lock_path = mvt._file_cache_lock_path(mvt.cache_key(tile))
+    assert lock_path is not None
+    real_flock = mvt.fcntl.flock
+    existed_at_unlock: list[bool] = []
+
+    def spy(fd: int, operation: int) -> None:
+        if operation == fcntl.LOCK_UN:
+            existed_at_unlock.append(lock_path.exists())
+        return real_flock(fd, operation)
+
+    monkeypatch.setattr(mvt.fcntl, "flock", spy)
+
+    with mvt.tile_generation_lock(tile):
+        assert lock_path.exists()
+
+    assert existed_at_unlock == [False], (
+        "LOCK_UN ran while the path still existed: released first, a waiter can "
+        "acquire the lock and pass its identity recheck, and only then have the "
+        "path unlinked underneath it"
+    )
+    assert not lock_path.exists()
 
 
 def test_lock_file_is_gone_after_the_producer_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,6 +242,48 @@ def test_retry_exhaustion_runs_the_block_without_the_cross_process_lock(
     # Give-up must not unlink: the path may already be another process's live
     # lock. The MVT retention runner ages it out instead.
     assert lock_path.exists()
+
+
+def test_a_raising_identity_probe_leaves_no_descriptor_and_no_held_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_lock_path_identity` only swallows `ENOENT`.
+
+    An `EACCES` or `ESTALE` from it lands between the `flock` and the `return`,
+    and if the comparison sits outside the `try` the exception propagates with
+    the descriptor still open AND still `LOCK_EX`-held -- released only whenever
+    the traceback that pins the frame is finally collected. The fresh
+    `flock(LOCK_EX | LOCK_NB)` below is the part a plain fd count cannot see.
+    """
+    monkeypatch.setenv(mvt.MVT_FILE_CACHE_DIR_ENV, str(tmp_path))
+    tile = _tile("2026-09-02T12:00:00Z")
+    lock_path = mvt._file_cache_lock_path(mvt.cache_key(tile))
+    assert lock_path is not None
+
+    def refuses(path: Path) -> tuple[int, int] | None:
+        raise PermissionError("identity probe refused")
+
+    monkeypatch.setattr(mvt, "_lock_path_identity", refuses)
+    before = _open_fd_count()
+
+    with pytest.raises(PermissionError) as caught:
+        with mvt.tile_generation_lock(tile):  # pragma: no cover - never entered
+            pass
+
+    # Everything below runs while `caught` is STILL ALIVE, and that is the whole
+    # point: the `ExceptionInfo` pins the traceback, the traceback pins
+    # `_open_live_lock_file`'s frame, and that frame holds the only reference to
+    # a leaked descriptor. Drop the traceback first and CPython's refcounting
+    # closes the leak for us -- which is exactly how this test goes vacuous.
+    assert caught.value.args == ("identity probe refused",)
+    assert _open_fd_count() == before, "the descriptor must be closed before the raise"
+    probe = os.open(lock_path, os.O_RDONLY)
+    try:
+        # Reds with BlockingIOError if the LOCK_EX was still held.
+        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(probe, fcntl.LOCK_UN)
+    finally:
+        os.close(probe)
 
 
 # ---------------------------------------------------------------------------

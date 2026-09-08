@@ -200,7 +200,7 @@ wrapper `scripts/node27_mvt_cache_retention_once.sh`，user 级 unit
 就是给运维直接断言这一点的。锚不同是有意的：瓦片被剪掉只是下次请求走一次 miss 重新生成，
 不是 404，所以 `#2011` 的 `L ≤ R − 1` 下限**不适用**于本 runner。
 
-锁文件删除是并发安全的：runner 用 `os.open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC)`（**无 `O_CREAT`**）
+锁文件删除是并发安全的：runner 用 `os.open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK)`（**无 `O_CREAT`**；`O_NONBLOCK` 对常规文件无影响，只为让被替换成 FIFO 的路径不会把 open 永久挂住）
 取 fd 后 `flock(LOCK_EX|LOCK_NB)`，拿不到就记 `skipped[lock_held]`；拿到后再用
 `fstat(fd)` 与 `lstat(path)` 的 `(st_dev, st_ino)` 复核一次，不等即 `already_gone` 不删
 （路径已被活 miss 重建）。`already_gone` / `lock_held` 都是 **skip 不是 failure**。
