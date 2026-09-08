@@ -2493,8 +2493,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # to `scripts/**.sh`, so a unit-only diff matches NOTHING and CI
         # degrades to --collect-only. The suite really reads this file: the
         # `ExecStartPre` < `ExecStart` ordering and the append log paths.
+        # #2170: the sibling-lane pin in `tests/test_node27_timeseries_retention.py`
+        # is a glob reader over `infra/systemd/nhms-node27-*.service`, so a
+        # path-exact unit rule that does not target it makes targeted PR CI
+        # constructively skip the pin -- it only reds on master's full run.
         "infra/systemd/nhms-node27-mvt-cache-retention.service",
-        ("tests/test_node27_mvt_cache_retention.py",),
+        (
+            "tests/test_node27_mvt_cache_retention.py",
+            "tests/test_node27_timeseries_retention.py",
+        ),
     ),
     PathTestRule(
         # #2032: the same suite parses `OnCalendar=*-*-* 04:05:00 UTC` and

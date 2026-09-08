@@ -302,6 +302,19 @@ def test_node27_autopipe_timer_row_selects_both_of_its_readers() -> None:
     ]
 
 
+def test_node27_mvt_cache_retention_unit_selects_the_sibling_lane_pin() -> None:
+    # #2170: the unit's own suite is not the only reader. The sibling
+    # `systemd.err` lane pin in tests/test_node27_timeseries_retention.py is a
+    # glob reader over `infra/systemd/nhms-node27-*.service`, so a path-exact
+    # rule that does not name it lets a unit-only PR pass targeted CI while
+    # master's full run reds -- exactly what #2032 did. Both suites, never empty.
+    selected = set(select_tests(["infra/systemd/nhms-node27-mvt-cache-retention.service"], repo_root=Path(".")))
+
+    assert "tests/test_node27_mvt_cache_retention.py" in selected, "the unit lost its own suite"
+    assert "tests/test_node27_timeseries_retention.py" in selected, "the unit does not select the sibling lane pin"
+    assert selected, "the unit selected an empty test set (collect-only)"
+
+
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
     consumers = (
         "tests/test_node27_cold_tablespace_identity.py",

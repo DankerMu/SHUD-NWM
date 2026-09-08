@@ -3921,19 +3921,22 @@ def test_retention_unit_routes_stderr_to_the_journal() -> None:
 def test_sibling_units_keep_their_systemd_err_lane() -> None:
     """The retirement is scoped, and the scope is pinned as a SET, not a sample.
 
-    Eight units sit beside this one. Six of them were only ever registered,
+    Nine units sit beside this one. Seven of them were only ever registered,
     never diagnosed here — changing them would be an unreviewed behaviour
     change on lanes this issue never looked at, so this asserts exactly which
-    six still carry `StandardError=append:…/systemd.err`. Equality rather than
-    membership: a subset check would let a seventh unit lose its lane, or a
-    ninth appear without one, without anybody noticing.
+    seven still carry `StandardError=append:…/systemd.err`. Equality rather
+    than membership: a subset check would let an eighth unit lose its lane, or
+    a tenth appear without one, without anybody noticing. The seventh append
+    lane arrived with #2032's `nhms-node27-mvt-cache-retention.service` — it is
+    intentional and positively pinned by
+    `tests/test_node27_mvt_cache_retention.py`.
 
     The remaining two are the whole of the difference:
     `nhms-node27-resource-governance.service` is the one deliberate retirement
     (#1765 gives it `StandardError=journal` + `OnFailure=`), re-asserted
     negatively below because that is the fact #1712/#1765 must not silently
     reacquire; `nhms-node27-unit-failure-alert@.service` never had a
-    `StandardError=` directive at all. 6 + 1 + 1 = 8.
+    `StandardError=` directive at all. 7 + 1 + 1 = 9.
     """
     siblings = sorted(
         path
@@ -3954,6 +3957,7 @@ def test_sibling_units_keep_their_systemd_err_lane() -> None:
         "nhms-node27-autopipe.service",
         "nhms-node27-download.service",
         "nhms-node27-frontier-alert.service",
+        "nhms-node27-mvt-cache-retention.service",
         "nhms-node27-raw-retention.service",
         "nhms-node27-timeseries-compression.service",
         "nhms-node27-timeseries-compression-replay.service",
