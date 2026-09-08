@@ -193,6 +193,12 @@ ifs 13.26 两次实测中**较慢的那一次**（没有证据说它是 13 张�
 供 display 进程比对，`infra/env/node27-ingest.env` 的同名键供 autopipe → prewarm 发送
 （`scripts/node27_autopipe_cron.sh` 硬拒 source `display.env`，所以必须写两遍）。改完
 `bash scripts/ops/start-display-api.sh` 重启 display API。**token 值不得进 receipt。**
+两个 `.example` 模板里该键是**注释掉的**（unset 即安全默认），部署时才取消注释并填真值——
+模板里留生效占位值等于给每个照抄的部署发一个仓库公开 token。用 `openssl rand -hex 32` 生成。
+**token 必须是 ASCII**（`openssl rand -hex 32` 就是）：prewarm 经 `http.client.putheader` 发头，
+值里出现任何 latin-1 之外的字符（如 `令牌`）会在发出前抛 `UnicodeEncodeError`，该 tick 的两跳发现
+全部失败；而且非 latin-1 的 token 在 display 侧永远比不中（Starlette 按 latin-1 解头值）。
+运行时不做校验（design D3），这是运维纪律。
 
 **缺失时的退化（安全默认，不是失败）**：token 未配置 → 外部永远无法强制刷新，进程内预热照常每 45 s
 刷新热 key；prewarm 不发该头、每进程向 stderr 打一条

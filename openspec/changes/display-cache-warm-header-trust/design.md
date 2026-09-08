@@ -17,8 +17,8 @@
 - nginx 剥头：需 root 改线上 conf，仓内 conf 不是线上真相，且不覆盖直连 :8080。
 - 通用鉴权/限流：产品决策，超出「关掉一个特权头」。
 - #2078 的 `_MAX_ENTRIES`/`clear()`/`offset`/自由文本 key：同模块另一缺陷，串行处理，本 PR 不碰。
-- 活动 change `display-v2-national-timeline-precip-overlay` 的 `tasks.md:509` 与 `invariant-matrix-i5-2009.md:440,470` 措辞：后者把 `-H 'x-nhms-cache-warm: refresh'` 写成 receipt 方法，部署 token 后按字面执行只量到 warm 路径——记入偏离记录，不改活动 change。
-- 生产部署（token 写入 `display.env` 与 `node27-ingest.env` + 重启）：活动树停在回滚分支（#2162/#2145），部署随该维护窗口；在此之前生产行为与今天相同（头仍被尊重）。
+- 活动 change `display-v2-national-timeline-precip-overlay` 的 `tasks.md:509` 与 `invariant-matrix-i5-2009.md:440,470` 措辞：后者把 `-H 'x-nhms-cache-warm: refresh'` 写成 receipt 方法；同 change `tasks.md:32` 的 Evidence Floor 行也带该头。**本 change 的代码在 node-27 跑起来的那一刻起**这些方法就只量到 warm 路径——与 token 是否配置无关（token 未配置 → `_force_refresh` 在读头前就返回 `False`；已配置 → 字面 `refresh` 与 token 不等）——记入偏离记录，不改活动 change。
+- 生产部署（token 写入 `display.env` 与 `node27-ingest.env` + 重启）：活动树停在回滚分支（#2162/#2145），部署随该维护窗口；在此之前生产（旧代码）行为与今天相同（头仍被尊重）；一旦活动树拉到含本 change 的代码并重启，`refresh` 立即失效，token 只决定 prewarm 能否强制刷新。
 
 ## Decisions
 

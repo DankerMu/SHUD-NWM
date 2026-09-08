@@ -43,7 +43,17 @@ AUTOPIPE_MVT_PREWARM_WORKERS=8
 # degrades to a <=45 s stale window that self-heals on the next tick; the tick
 # does NOT fail. A value that does not match the display side degrades the same
 # way but without the warning.
-NHMS_DISPLAY_CACHE_WARM_TOKEN=change-me-cache-warm-token
+# Commented out on purpose: unset is the safe default, and this template gets
+# installed verbatim -- an active placeholder would ship a repo-public value as
+# the real token on both sides and silently re-open #2079. Generate the shared
+# value with `openssl rand -hex 32`, write the SAME value into both files (0600),
+# never deploy a placeholder, and never put the real value in a receipt.
+# The token MUST be ASCII (`openssl rand -hex 32` is): prewarm sends it through
+# http.client.putheader, which raises UnicodeEncodeError on any character outside
+# latin-1 -- discovery then fails before a byte leaves the host, for every tick --
+# and a non-latin-1 token can never match on the display side anyway, because
+# Starlette decodes header values as latin-1. Not validated at runtime.
+# NHMS_DISPLAY_CACHE_WARM_TOKEN=
 AUTOPIPE_EXCLUDE_BASINS=zhaochen_hhy
 OUTPUT_PARSER_BATCH_SIZE=10000
 AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log

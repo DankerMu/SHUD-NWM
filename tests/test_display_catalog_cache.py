@@ -168,6 +168,23 @@ def test_non_ascii_header_value_is_a_hit_not_an_error() -> None:
     assert calls == []
 
 
+def test_token_carrying_an_invalid_utf8_byte_is_a_hit_not_an_error() -> None:
+    # token 来自 `os.environ`，CPython 按 surrogateescape 解码——`display.env` 里一个非法
+    # UTF-8 字节会变成 `\udcXX`。token 侧若按纯 utf-8 encode，比较时抛 UnicodeEncodeError，
+    # 每条带该头的目录 GET 变 500。所以两侧都必须 `encode("utf-8", "surrogateescape")`。
+    calls: list[int] = []
+    token = "ab\udcff"
+    request = _request(display_readonly=True, token=token)
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+
+    warm_request = _request(display_readonly=True, headers={WARM_HEADER: "x"}, token=token)
+    assert display_cache._force_refresh(warm_request) is False
+    value = display_catalog_cached(warm_request, "k", lambda: calls.append(1) or "warmed")
+
+    assert value == "first"
+    assert calls == []
+
+
 @pytest.mark.parametrize("header_value", ["refresh", "abc", "", "true", "1"])
 def test_no_header_value_forces_a_refresh_while_the_token_is_unset(header_value: str) -> None:
     calls: list[int] = []
@@ -238,6 +255,26 @@ def test_in_process_warm_scope_mark_forces_recompute_without_any_token() -> None
     warm_request = _request(display_readonly=True, scope=marked_scope, token=None)
     assert display_catalog_cached(warm_request, "k", lambda: "warmed") == "warmed"
     assert display_catalog_cached(request, "k", lambda: "miss") == "warmed"
+
+
+def test_truthy_but_non_true_scope_marker_does_not_force_a_refresh() -> None:
+    # 标记必须 `is True`：换成 `bool(...)` 就会把 `scope["state"]` 里任何同名真值
+    # （日后某个中间件塞的计数器/字符串）当成进程内预热身份——而那是唯一不需要
+    # token 的旁路，放宽它等于把特权还给一个不受本模块控制的键。
+    calls: list[int] = []
+    request = _request(display_readonly=True, token=None)
+    assert display_catalog_cached(request, "k", lambda: "first") == "first"
+
+    warm_request = _request(
+        display_readonly=True,
+        scope={"type": "http", "state": {WARM_SCOPE_KEY: 1}},
+        token=None,
+    )
+    assert display_cache._force_refresh(warm_request) is False
+    value = display_catalog_cached(warm_request, "k", lambda: calls.append(1) or "warmed")
+
+    assert value == "first"
+    assert calls == []
 
 
 async def test_replay_targets_still_refreshes_a_real_app_without_a_token() -> None:

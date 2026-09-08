@@ -9,7 +9,7 @@
 - `apps/api/display_cache.py`：强制刷新只在两种身份下生效——(1) 进程内预热线程 `_replay_targets` 经 `httpx.ASGITransport` 回放时在 ASGI `scope["state"]` 里打的标记（网络侧不可伪造，无需配置）；(2) 请求头 `x-nhms-cache-warm` 的值与配置的 `NHMS_DISPLAY_CACHE_WARM_TOKEN` 以 `hmac.compare_digest` 相等。token 未配置时**任何**头值都不生效；字面值 `refresh` 不再是特权值。
 - `apps/api/runtime_mode.py::RuntimeConfig`：新增 `display_cache_warm_token: str | None`（`repr=False`，不进 `public_dict`，故 `/api/v1/runtime/config` 不泄露）。
 - `scripts/node27_mvt_prewarm.py::fetch_json`：从 `NHMS_DISPLAY_CACHE_WARM_TOKEN` 取值作为头值；未配置时不发该头、向 stderr 打一条 warning、发现流程照常（退化为 ≤ 45 s 的 stale 窗口，即 #2013 之前的行为，而不是失败）。这是对 issue「无外部调用方」前提的**修正**：#2013（`43ad7179`）起 prewarm 的两跳发现请求就带这个头，且其 fixture 明文要求 publish 后立刻旁路 stale 窗口。
-- env 模板：`infra/env/display.example` 与 `infra/env/node27-ingest.example` 各加 `NHMS_DISPLAY_CACHE_WARM_TOKEN`（autopipe 只 source `node27-ingest.env` 且硬拒 `display.env`，所以是两处、同值）。
+- env 模板：`infra/env/display.example` 与 `infra/env/node27-ingest.example` 各加**注释掉的** `NHMS_DISPLAY_CACHE_WARM_TOKEN` 键与说明（unset 是安全默认；autopipe 只 source `node27-ingest.env` 且硬拒 `display.env`，所以部署时是两处、同值）。
 - 测试：`tests/test_display_catalog_cache.py::test_force_refresh_header_bypasses_cache` 改写为「外部 `refresh` 命中缓存、loader 不被调用」+ token/进程内标记两条阳性用例（AC 明说改写不删）；`tests/test_node27_mvt_prewarm.py` 的头断言改为 token 语义；`tests/test_runtime_mode.py` 钉 token 解析与不泄露。
 - 文档：`docs/runbooks/display-readonly-live-mvt.md` 目录缓存/预热段补 token 语义与两处 env 的部署步骤。
 - **不做**：nginx 剥头（线上 conf 非仓内真相、需 root、绕反代直连仍中招）；display 路由通用鉴权/限流；#2078 的 key 空间/容量策略；`display-v2-national-timeline-precip-overlay/tasks.md:509` 与 `invariant-matrix-i5-2009.md:440,470` 的历史措辞（活动 change，记入偏离记录不改）。
