@@ -41,7 +41,7 @@ TBD - created by archiving change m25-multibasin-frontend-production. Update Pur
 
 #### Scenario: 内部诊断仍可访问
 - **WHEN** 具备 operator/model_admin/sys_admin 角色的用户直接访问 `/ops`
-- **THEN** 页面以"内部诊断"形态可访问，不再以"运维工作台"作为业务化主交付
+- **THEN** 页面以“内部诊断”形态可访问，不再以“运维工作台”作为业务化主交付
 
 #### Scenario: 只读展示 viewer 可访问诊断页
 - **WHEN** runtime config 同时报告 `service_role=display_readonly` 与 `display_readonly=true` 且 viewer 直接访问 `/ops`
