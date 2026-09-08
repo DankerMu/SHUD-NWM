@@ -2878,11 +2878,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "packages/common/evidence_io.py",
         ISSUE1895_READINESS_C1_C2_C3_TESTS,
     ),
-    # C3 verifies the scheduler manifest's shipping schema/checksum primitives;
-    # a change there must run C3's consumer contract as well as producer tests.
+    # C3 verifies the scheduler manifest's shipping schema/checksum primitives.
+    # After the readiness suite split that consumer contract lives in
+    # test_issue1895_readiness_c3.py, while the shared C1/C2 helpers remain in
+    # test_issue1895_readiness_c1_c2_c3.py; a change here must run both
+    # partitions. This exact owner has no same-name suite.
     PathTestRule(
         "services/orchestrator/scheduler_file_providers.py",
-        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
+        ISSUE1895_READINESS_C1_C2_C3_TESTS,
     ),
     PathTestRule(
         "packages/common/node27_issue1895_commit.py",

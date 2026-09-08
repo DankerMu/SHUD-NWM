@@ -11331,29 +11331,39 @@ def test_issue1895_evidence_io_rule_reds_when_removed(monkeypatch: pytest.Monkey
 
 
 def test_issue1895_c3_registry_manifest_primitives_select_their_consumer_contract() -> None:
-    producers = (
-        "packages/common/node27_issue1895_publication.py",
-        "services/orchestrator/scheduler_file_providers.py",
-    )
-    for producer in producers:
+    # Scheduler file-provider primitives are imported by the split C3 suite and
+    # the leftover C1/C2 helper module. publication.py does not import those
+    # MAX_* constants; its own rule still selects the shared helper partition
+    # plus storage/c14 consumers, not as a C3-primitive owner.
+    expected = {
+        "packages/common/node27_issue1895_publication.py": {
+            "tests/test_issue1895_readiness_c1_c2_c3.py",
+        },
+        "services/orchestrator/scheduler_file_providers.py": set(ISSUE1895_READINESS_C1_C2_C3_TESTS),
+    }
+    for producer, required in expected.items():
         selected = set(select_tests([producer], repo_root=Path(".")))
-        assert "tests/test_issue1895_readiness_c1_c2_c3.py" in selected
+        missing = sorted(required - selected)
+        assert not missing, f"{producer}: C3 consumer contract not selected {missing}"
 
 
 def test_issue1895_c3_registry_manifest_rule_reds_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
     from scripts import select_ci_tests
 
-    producers = (
-        "packages/common/node27_issue1895_publication.py",
-        "services/orchestrator/scheduler_file_providers.py",
-    )
+    expected = {
+        "packages/common/node27_issue1895_publication.py": {
+            "tests/test_issue1895_readiness_c1_c2_c3.py",
+        },
+        "services/orchestrator/scheduler_file_providers.py": set(ISSUE1895_READINESS_C1_C2_C3_TESTS),
+    }
     monkeypatch.setattr(
         select_ci_tests,
         "PATH_TEST_RULES",
-        tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in producers),
+        tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in expected),
     )
-    for producer in producers:
-        assert "tests/test_issue1895_readiness_c1_c2_c3.py" not in select_tests([producer], repo_root=Path("."))
+    for producer, required in expected.items():
+        leaked = sorted(required & set(select_tests([producer], repo_root=Path("."))))
+        assert not leaked, f"{producer}: C3 consumer contract still selected after rule removal {leaked}"
 
 
 def test_issue1895_b2b_owner_selects_receipt_contract_and_canonical_readonly_suite() -> None:
