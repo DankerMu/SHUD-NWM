@@ -517,6 +517,10 @@ def test_a_cacheable_burst_evicts_one_entry_at_a_time_and_a_hit_saves_the_legit_
     assert len(display_cache._store) == 256
     # 最旧的一条（第一批的第一个）已被淘汰，而不是整表归零。
     assert "first-0" not in display_cache._store
+    # 命中侧的 LRU 同样要生效：`k` 是热 path 表里最早插入的一条，命中若不把它移到
+    # MRU 端（漏 `move_to_end`），第二批的第一条就会把它挤掉。
+    assert "k" in display_cache._hot_paths
+    assert display_cache._hot_paths["k"][2] == 2
 
 
 def test_a_cacheable_burst_without_a_hit_evicts_the_legit_key_but_never_empties_the_store() -> None:
@@ -526,7 +530,9 @@ def test_a_cacheable_burst_without_a_hit_evicts_the_legit_key_but_never_empties_
 
     for index in range(300):
         display_catalog_cached(_junk_request(index), f"burst-{index}", lambda index=index: index)
-        assert len(display_cache._store) >= 1, index
+        # 逐步精确尺寸（`k` 是第 1 条，之后每步再插 1 条，到顶只淘汰 1 条）：
+        # `>= 1` 对整表 clear() 的实现也成立，等于没断言。
+        assert len(display_cache._store) == min(index + 2, 256), index
 
     assert "k" not in display_cache._store
     assert len(display_cache._store) == 256
@@ -553,7 +559,8 @@ def test_hot_paths_record_after_the_outcome_with_a_hit_counter() -> None:
 def test_hot_paths_are_lru_bounded_and_never_cleared_as_a_whole() -> None:
     for index in range(300):
         display_catalog_cached(_junk_request(index), f"hot-{index}", lambda index=index: index)
-        assert len(display_cache._hot_paths) >= 1, index
+        # 同上：热 path 表从空开始，第 index 步之后恰好 index+1 条（到 256 封顶）。
+        assert len(display_cache._hot_paths) == min(index + 1, 256), index
     assert len(display_cache._hot_paths) == 256
     assert "hot-0" not in display_cache._hot_paths
     assert display_cache._hot_paths["hot-299"][0] == "/api/v1/runs?basin_id=junk-299&limit=1"
@@ -613,6 +620,25 @@ def test_a_forced_refresh_yielding_a_non_cacheable_value_forgets_the_key() -> No
     assert calls == ["replay", "plain"]
 
 
+def test_a_normal_request_forgets_a_stale_entry_whose_recomputation_is_not_cacheable() -> None:
+    """普通（非回放）请求走冷路径后拿到不可缓存的值，必须把旧条目从两表都摘掉。
+
+    否则超过 STALE_MAX 的旧值会一直躺在 `_store` 里（下次访问再算一次、再留一次），
+    而 `_hot_paths` 里的条目会让预热线程继续把这个已知不可缓存的 key 当回放目标。
+    """
+    display_cache._store["k"] = (time.monotonic() - 601.0, {"n": 1})
+    display_cache._hot_paths["k"] = ("/api/v1/x", time.monotonic(), 3)
+    request = _request(display_readonly=True, url="/api/v1/x")
+
+    value = display_catalog_cached(
+        request, "k", lambda: {"items": []}, cacheable=lambda _value: False
+    )
+
+    assert value == {"items": []}
+    assert "k" not in display_cache._store
+    assert "k" not in display_cache._hot_paths
+
+
 def test_non_display_role_passes_through_without_evaluating_the_predicate() -> None:
     evaluated: list[Any] = []
     calls: list[int] = []
@@ -634,15 +660,17 @@ def test_non_display_role_passes_through_without_evaluating_the_predicate() -> N
 
 
 def _seed_active_hot_paths() -> str:
-    """40 条活跃热 path：1 条 hits=5（最旧），39 条 hits=1（更新）。
+    """40 条活跃热 path：1 条 hits=5（last_access 最旧、且**最后**插入），39 条 hits=1。
 
     hits=5 那条故意最旧：只按 last_access 排序的实现会把它排到最后，被前 32 条挤掉。
+    插入顺序也故意与目标顺序相反：`_hot_paths` 是 OrderedDict，先插 hits=5 的话
+    「不排序」与「按命中计数排序」得到的前 K 条恰好相同，断言就成了空转。
     """
     now = time.monotonic()
     hot_path = "/api/v1/runs?limit=1"
-    display_cache._hot_paths["hot"] = (hot_path, now - 100.0, 5)
     for index in range(39):
         display_cache._hot_paths[f"junk-{index}"] = (f"/api/v1/runs?basin_id=junk-{index}", now - index, 1)
+    display_cache._hot_paths["hot"] = (hot_path, now - 100.0, 5)
     return hot_path
 
 
@@ -729,8 +757,8 @@ def test_an_empty_runs_page_is_served_but_never_cached() -> None:
     assert first.json()["status"] == "ok"
     assert first.json()["data"] == forecast_routes._paginated_payload(_EMPTY_RUNS_PAGE)
     assert second.json()["data"] == first.json()["data"]
-    assert "runs:no-such-basin:None:None:None:1:0" not in display_cache._store
-    assert "runs:no-such-basin:None:None:None:1:0" not in display_cache._hot_paths
+    assert "runs:'no-such-basin':None:None:None:1:0" not in display_cache._store
+    assert "runs:'no-such-basin':None:None:None:1:0" not in display_cache._hot_paths
     assert display_cache._store == {}
     assert display_cache._hot_paths == {}
     # 不缓存 ⇒ 第二次请求必须再落一次 store。
@@ -751,7 +779,50 @@ def test_a_runs_page_with_items_is_cached() -> None:
     assert first.json()["data"] == forecast_routes._paginated_payload(_ONE_RUN_PAGE)
     assert second.json()["data"] == first.json()["data"]
     assert len(calls) == 1
-    key = "runs:basin-a:None:None:None:1:0"
+    key = "runs:'basin-a':None:None:None:1:0"
     assert display_cache._store[key][1] == _ONE_RUN_PAGE
     assert display_cache._hot_paths[key][0] == "/api/v1/runs?basin_id=basin-a&limit=1"
     assert display_cache._hot_paths[key][2] == 2
+
+
+def test_a_literal_basin_id_none_does_not_fold_into_the_unfiltered_runs_entry() -> None:
+    """`?basin_id=None` 是普通字面量，不是「没给 basin_id」。
+
+    改前红：key 用裸 `f"runs:{basin_id}:…"`，字面量 `None` 与不带过滤的请求同 key ——
+    访客拿到的是全量首页而不是该 basin 的空页，热 path 还被改写成
+    `/api/v1/runs?basin_id=None`；预热线程每 tick 回放它，`list_runs(basin_id="None")`
+    返回空页、准入谓词为假，`_forget` 于是连带驱逐合法的全量条目（自伤 flush）。
+    """
+    calls: list[dict[str, Any]] = []
+
+    class _BasinFilteringStore:
+        def list_runs(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            page = _EMPTY_RUNS_PAGE if kwargs["basin_id"] == "None" else _ONE_RUN_PAGE
+            return {key: list(value) if isinstance(value, list) else value for key, value in page.items()}
+
+    app = FastAPI()
+    app.state.runtime_config = SimpleNamespace(display_readonly=True, display_cache_warm_token=None)
+    app.include_router(forecast_routes.router)
+    app.dependency_overrides[forecast_routes.get_forecast_store] = _BasinFilteringStore
+    try:
+        with TestClient(app) as client:
+            unfiltered = client.get("/api/v1/runs")
+            literal = client.get("/api/v1/runs", params={"basin_id": "None"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert unfiltered.status_code == 200, unfiltered.text
+    assert unfiltered.json()["data"] == forecast_routes._paginated_payload(_ONE_RUN_PAGE)
+    # 字面量请求必须自己落 store，拿到的是空页，不是缓存里那份全量首页。
+    assert literal.status_code == 200, literal.text
+    assert literal.json()["data"] == forecast_routes._paginated_payload(_EMPTY_RUNS_PAGE)
+    assert [call["basin_id"] for call in calls] == [None, "None"]
+
+    unfiltered_key = f"runs:None:None:None:None:{forecast_routes.DEFAULT_LIMIT}:0"
+    assert display_cache._store[unfiltered_key][1] == _ONE_RUN_PAGE
+    # 热 path 不被劫持：预热回放的仍是 `/api/v1/runs` 自己。
+    assert display_cache._hot_paths[unfiltered_key][0] == "/api/v1/runs"
+    literal_key = f"runs:'None':None:None:None:{forecast_routes.DEFAULT_LIMIT}:0"
+    assert literal_key not in display_cache._store
+    assert literal_key not in display_cache._hot_paths

@@ -13,8 +13,8 @@ Project profile: NHMS（`openspec/project-profile.md`，无需更新）
 ## 1. 实现（implementer）
 
 - [x] 1.1 `apps/api/display_cache.py`：`_store`/`_hot_paths` 改 `OrderedDict` LRU（D1；`_MAX_ENTRIES` 不变，永不整表 clear）；`display_catalog_cached` 加 `*, cacheable=None`（D2；两条分支都过谓词；谓词为假 → 不存、不登记、`_forget(key)`）；热 path 登记后置 + `(path, last_access, hits)`（D3）；`DISPLAY_CATALOG_WARM_REPLAY_MAX = 32` 与 `_warm_loop` 排序取前 K（D4；锁内快照、锁外回放）；模块 docstring 的机制段补「准入/淘汰/回放上界」三句；`clear_display_catalog_cache`、`stop_display_catalog_warmer`、`_force_refresh`、`_mark_warm_scope`、`_replay_targets` 不改。
-- [x] 1.2 `apps/api/routes/hydro_display.py`：`/api/v1/layers` key `layers:{run_id}`、loader 返回完整目录、缓存后切片、`offset` 的 `Query` 加 description（D5，文案见 design）；`valid-times` 传 `cacheable=lambda v: bool(v["valid_times"])`；`discharge/cycles` 不动。
-- [x] 1.3 `apps/api/routes/forecast.py` `/api/v1/runs`：传 `cacheable=lambda page: bool(page["items"])`；key 与 `_paginated_payload` 不动。
+- [x] 1.2 `apps/api/routes/hydro_display.py`：`/api/v1/layers` key `layers:{run_id!r}`（round-1 A1）、loader 返回完整目录、缓存后切片、`offset` 的 `Query` 加 description（D5，文案见 design）；`valid-times` 传 `cacheable=lambda v: bool(v["valid_times"])`；`discharge/cycles` 不动。
+- [x] 1.3 `apps/api/routes/forecast.py` `/api/v1/runs`：传 `cacheable=lambda page: bool(page["items"])`；key 的 `str | None` 维度改 `!r`（round-1 A1 同族，valid-times key 同步）；`_paginated_payload` 不动。
 - [x] 1.4 `openapi/nhms.v1.yaml:1957-1964`：`/api/v1/layers` 的 `offset` 参数加 `description`（与 1.2 同文），**两处同文**——`parameters[].description`（参数级）与 `parameters[].schema.description`（schema 级）：本仓 FastAPI/Pydantic 对 `Query(description=)` 两处都发出，先例 `openapi/nhms.v1.yaml:248,251`（`search`）与 `:261,263`（`stream_order_min`）。`/api/v1/runs` 不动。随后 `cd apps/frontend && pnpm generate:api` 再生成 `apps/frontend/src/api/types.ts`（参数 description 会变成 JSDoc，`:3368` 附近）。
 
 ## 2. 测试（implementer，与实现同 PR；**能红的用例**——300 个不可缓存 key 后合法 key 仍在、255+hit+255 后合法 key 仍在、垃圾 key 不进 `_hot_paths`、回放上界 32——改前跑红一次并贴红/绿输出：用文件互换而不是 stash——把改后的 `display_cache.py` 复制到 scratch，`git show HEAD:apps/api/display_cache.py > apps/api/display_cache.py` 跑，再复制回来）

@@ -4,7 +4,7 @@
 
 ### Requirement: Cache admission and eviction never let a public request wipe the catalog cache
 
-`display_catalog_cached` SHALL accept an optional keyword-only `cacheable: Callable[[Any], bool]` predicate; when the predicate is given and returns false for the loader's value, the value SHALL be returned to the caller but SHALL NOT be stored in `_store`, SHALL NOT be recorded in `_hot_paths`, and any existing `_store`/`_hot_paths` entry for that key SHALL be removed, on both the normal path and the forced-refresh path. `_store` and `_hot_paths` SHALL be bounded LRU maps of at most `_MAX_ENTRIES` (256) entries: a hit moves the key to the most-recently-used end, inserting beyond the bound evicts exactly the least-recently-used entry, and neither map is ever cleared as a whole except by the test hook `clear_display_catalog_cache`. Hot-path recording SHALL happen after the cache outcome is known and only for cacheable outcomes on the normal (non-forced) path, as `(path, last_access, hits)` with `hits` starting at 1 on a miss and incremented on every hit. The forced-refresh path SHALL NOT record or refresh `_hot_paths` (a warmer replay must not extend its own 1800 s active window; the window expires only through real client access); on that path the predicate only stores a cacheable value or, when false, triggers the removal above. `/api/v1/runs` SHALL pass a predicate that is true only when the page's `items` is non-empty; `/api/v1/layers/{layer_id}/valid-times` SHALL pass a predicate that is true only when `valid_times` is non-empty; `/api/v1/layers/discharge/cycles` SHALL pass no predicate. Non-display roles SHALL keep calling the loader directly without evaluating the predicate.
+`display_catalog_cached` SHALL accept an optional keyword-only `cacheable: Callable[[Any], bool]` predicate; when the predicate is given and returns false for the loader's value, the value SHALL be returned to the caller but SHALL NOT be stored in `_store`, SHALL NOT be recorded in `_hot_paths`, and any existing `_store`/`_hot_paths` entry for that key SHALL be removed, on both the normal path and the forced-refresh path. `_store` and `_hot_paths` SHALL be bounded LRU maps of at most `_MAX_ENTRIES` (256) entries: a hit moves the key to the most-recently-used end, inserting beyond the bound evicts exactly the least-recently-used entry, and neither map is ever cleared as a whole except by the test hook `clear_display_catalog_cache`. Hot-path recording SHALL happen after the cache outcome is known and only for cacheable outcomes on the normal (non-forced) path, as `(path, last_access, hits)` with `hits` starting at 1 on a miss and incremented on every hit. The forced-refresh path SHALL NOT record or refresh `_hot_paths` (a warmer replay must not extend its own 1800 s active window; the window expires only through real client access); on that path the predicate only stores a cacheable value or, when false, triggers the removal above. `/api/v1/runs` SHALL pass a predicate that is true only when the page's `items` is non-empty; `/api/v1/layers/{layer_id}/valid-times` SHALL pass a predicate that is true only when `valid_times` is non-empty; `/api/v1/layers/discharge/cycles` SHALL pass no predicate. Client-controlled `str | None` key dimensions of `/api/v1/runs` (`basin_id`, `source`, `cycle_time`, `status`) and of `/api/v1/layers/{layer_id}/valid-times` (`run_id`, `source`, `cycle`) SHALL be interpolated with `!r`, so an absent dimension keeps its `None` spelling while a literal query value `None` cannot fold into the absent-dimension key or rewrite its hot path. Non-display roles SHALL keep calling the loader directly without evaluating the predicate.
 
 #### Scenario: Non-cacheable keys neither evict nor become replay targets
 
@@ -15,7 +15,7 @@
 
 - **WHEN** 255 distinct cacheable keys are stored, key `k` is then hit, and 255 more distinct cacheable keys are stored
 - **THEN** `k` is still in `_store`, `len(_store) == 256`, and the oldest of the first 255 keys has been evicted
-- **AND** storing 300 distinct cacheable keys without touching `k` leaves `len(_store) == 256` at every step (the map is never emptied)
+- **AND** storing 300 distinct cacheable keys without touching `k` leaves `len(_store) == min(stored + 1, 256)` after every store (`k` plus the keys stored so far, capped at 256 — the map is never emptied) and `len(_store) == 256` at the end
 
 #### Scenario: A forced refresh never touches the hot-path table
 
@@ -32,6 +32,11 @@
 - **WHEN** the display_readonly role serves `GET /api/v1/runs?basin_id=<unknown>&limit=1` and the store returns `items: []`
 - **THEN** the response is HTTP 200 with the same body as before this change, the key is absent from `_store` and `_hot_paths`, and a second identical request calls the store again
 - **AND** a request whose page has items is cached and a second identical request does not call the store
+
+#### Scenario: A literal `None` query value never folds into an absent-dimension key
+
+- **WHEN** the display_readonly role has the unfiltered runs page cached and serves `GET /api/v1/runs?basin_id=None`, and has the national valid-times list cached and serves `GET /api/v1/layers/discharge/valid-times?run_id=None`
+- **THEN** the runs request is answered from the store with the page for `basin_id == "None"` (an empty page, not cached), the unfiltered entry is still in `_store` and its hot path is still `/api/v1/runs`; the valid-times request is HTTP 404 and the national entry's hot path is unchanged
 
 #### Scenario: An empty valid-times list is served but not cached
 
@@ -50,7 +55,7 @@ Each warmer tick SHALL replay at most `DISPLAY_CATALOG_WARM_REPLAY_MAX` (32) hot
 
 ### Requirement: `/api/v1/layers` pagination is applied after the cache and out-of-range offsets yield an empty page
 
-`/api/v1/layers` SHALL cache the complete layer catalog under the key `layers:{run_id}` and apply `[offset : offset + limit]` to the cached value. The sliced body SHALL be byte-identical to the previous loader-side slice for the same parameters. An `offset` at or beyond the catalog length SHALL yield HTTP 200 with `data: []` without a database query or a new cache entry; this contract SHALL be stated in the `offset` parameter's `description` in both the route's `Query(...)` and `openapi/nhms.v1.yaml`, and no `maximum` SHALL be added to `offset`.
+`/api/v1/layers` SHALL cache the complete layer catalog under the key `layers:{run_id!r}` (so the national catalog lives under `layers:None` while a literal `run_id=None` query value maps to `layers:'None'` and takes the cold path) and apply `[offset : offset + limit]` to the cached value. The sliced body SHALL be byte-identical to the previous loader-side slice for the same parameters. An `offset` at or beyond the catalog length SHALL yield HTTP 200 with `data: []` without a database query or a new cache entry; this contract SHALL be stated in the `offset` parameter's `description` in both the route's `Query(...)` and `openapi/nhms.v1.yaml`, and no `maximum` SHALL be added to `offset`.
 
 #### Scenario: Three page requests, one catalog build
 

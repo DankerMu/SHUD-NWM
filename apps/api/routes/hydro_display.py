@@ -316,7 +316,9 @@ def list_layers(
     # 分页在缓存**之后**（#2078）：key 不含 `limit`/`offset`，所以客户端可控的无界
     # offset 维度不再制造缓存条目；越界 offset 从缓存值切出 `[]`，不落 DB。切片结果
     # 与从前在 loader 里切片逐字节相同。
-    catalog = display_catalog_cached(request, f"layers:{run_id}", _load)
+    # key 用 `!r` 而不是裸插值：字面量 `?run_id=None` 通过 `SAFE_TILE_IDENTIFIER_RE`，
+    # 裸插值会让它折叠进国家级 key（`layers:None`），拿到别人的目录还顺手劫持热 path。
+    catalog = display_catalog_cached(request, f"layers:{run_id!r}", _load)
     return _ok(request, catalog[offset : offset + limit])
 
 
@@ -403,7 +405,10 @@ def list_layer_valid_times(
         request,
         display_catalog_cached(
             request,
-            f"valid-times:{layer_id}:{requested_run_id}:{source}:{cycle_key}",
+            # `!r` 隔离客户端可控的维度：字面量 `?run_id=None` 记作 `'None'`，不与
+            # 「没给 run_id」的国家级条目同 key（#2078）。`layer_id` 被
+            # `SUPPORTED_PUBLIC_LAYER_IDS` 限死，是有界维度。
+            f"valid-times:{layer_id}:{requested_run_id!r}:{source!r}:{cycle_key!r}",
             _load,
             # 空 `valid_times`（交集外的 fail-closed cycle、无覆盖的国家级列表、非
             # discharge 图层）不进缓存也不进热 path：`cycle` 是客户端可控的无界维度。

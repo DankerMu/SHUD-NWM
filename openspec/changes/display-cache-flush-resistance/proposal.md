@@ -14,10 +14,10 @@ node-27 实测（`docs/runbooks/receipts/2026-09-08-issue-2078-cache-flush-measu
   - 热 path 登记移到缓存查找**之后**、且只对可缓存结果登记：命中 → 命中计数 +1 并刷新时刻；miss 且可缓存 → 以计数 1 登记。`_hot_paths` 值变为 `(path, last_access, hits)`。
   - 预热线程每 tick 只回放活跃窗口内按「命中计数降序、最近访问降序」排序的前 `DISPLAY_CATALOG_WARM_REPLAY_MAX = 32` 条；自伤上界由此从「≤ 256 条 × 冷查询」变为「≤ 32 条 × 冷查询」（按实测 43–85 ms/条：≤ 2.7 s / 45 s tick）。
 - `apps/api/routes/hydro_display.py`
-  - `/api/v1/layers`：缓存 key 收敛为 `layers:{run_id}`，loader 返回**完整**目录（`_default_layer_catalog` 本来就整表构建），`layers[offset : offset + limit]` 的切片移到缓存之后。响应体逐字节不变；越界 `offset` 变成不落 DB、不产生缓存条目的空页 200，契约写进 OpenAPI `offset` 的 `description`（不加 `maximum`：目录长度不是常量，安全性来自 key 不再含 offset，而不是给 offset 封顶）。
+  - `/api/v1/layers`：缓存 key 收敛为 `layers:{run_id!r}`（`repr` 让字面值 `None` 与缺省不折叠，design D5），loader 返回**完整**目录（`_default_layer_catalog` 本来就整表构建），`layers[offset : offset + limit]` 的切片移到缓存之后。响应体逐字节不变；越界 `offset` 变成不落 DB、不产生缓存条目的空页 200，契约写进 OpenAPI `offset` 的 `description`（不加 `maximum`：目录长度不是常量，安全性来自 key 不再含 offset，而不是给 offset 封顶）。
   - `/api/v1/layers/{layer_id}/valid-times`：`cacheable=lambda v: bool(v["valid_times"])`——空 `valid_times`（fail-closed、无覆盖、非 discharge 图层）不进缓存、不进热 path。
   - `/api/v1/layers/discharge/cycles`：不变（`source` 是 `Literal["gfs","ifs"]`，key 空间为 2，空 `cycles` 照旧缓存）。
-- `apps/api/routes/forecast.py` `/api/v1/runs`：`cacheable=lambda page: bool(page["items"])`——自由文本过滤命中空页不进缓存、不进热 path。key、`_paginated_payload`、OpenAPI 不变。
+- `apps/api/routes/forecast.py` `/api/v1/runs`：`cacheable=lambda page: bool(page["items"])`；key 的 `str | None` 维度改 `!r` 插值（valid-times 同）——自由文本过滤命中空页不进缓存、不进热 path。key、`_paginated_payload`、OpenAPI 不变。
 - `openapi/nhms.v1.yaml:1957-1964` `/api/v1/layers` 的 `offset` 参数加 `description`（参数级与 schema 级两处，与路由 `Query(..., description=...)` 同文，`tests/test_openapi_drift.py::test_static_openapi_matches_runtime_schema` 要求静态 == 运行时）；`apps/frontend/src/api/types.ts` 由 `pnpm generate:api` 再生成。
 - `scripts/select_ci_tests.py`：`apps/api/routes/forecast.py` → `tests/test_forecast_api.py` 规则（该 suite 钉 `/api/v1/runs` 响应体，今天不在该路径的 PR 选测里）。
 - 测试：`tests/test_display_catalog_cache.py` 新增 LRU/谓词/登记时机/回放上界用例；`_seed_hot_path` 改为三元组；`tests/test_hydro_display_mvt_scaling.py` 与 `tests/test_precip_overlay.py` 里 monkeypatch `display_catalog_cached` 的 3 位置参数替身加 `**_`（否则新关键字参数让它们 `TypeError`）；路由级用例钉 layers 后切片、runs/valid-times 空结果不入缓存。
