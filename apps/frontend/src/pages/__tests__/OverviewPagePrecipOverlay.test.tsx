@@ -121,7 +121,7 @@ function expectPrecipFacesAgree() {
 }
 
 /**
- * 目录里的 `precip` 条目：解析器的入参是 `state.precip && precipAvailability !== 'absent'`
+ * 目录里的 `precip` 条目：解析器的入参是 `state.precip && precipCatalog.status !== 'absent'`
  * （fixture 决策 1 第 1 臂），所以**任何**期待 URL 或提示的用例都必须先让目录带上这一条，
  * 否则它断的其实是「目录没条目 → disabled」那一格，什么也不鉴别。
  */
@@ -194,9 +194,10 @@ describe('OverviewPage precipitation overlay mount seam', () => {
   })
 
   it('keeps the whole overlay silent, not just the toggle, while the catalog serves no precip entry', async () => {
-    // 挂载接缝的另一半：`OverviewMode` 的 `precipAvailability` 推导（目录里有没有 `precip` 条目）
-    // 必须同时到达浮层开关**和**解析器。默认目录只有 `discharge`，而 index 路由照常给 200——
-    // 部署错位窗口就是这一格：只闸开关的话会出现「栅格已画 / 提示已出，开关却标未实现且按不动」。
+    // 挂载接缝的另一半：`OverviewMode` 的 `precipCatalog` 单对象推导（目录里有没有 `precip` 条目）必须
+    // 同时到达浮层开关（`.status` 喂开关的 `precipAvailability` prop）**和**解析器（`.status !== 'absent'`
+    // 并进 `precip` 入参）。默认目录只有 `discharge`，而 index 路由照常给 200——部署错位窗口就是这一格：
+    // 只闸开关的话会出现「栅格已画 / 提示已出，开关却标未实现且按不动」。
     mockApi()
     renderOverview()
     await settled()
