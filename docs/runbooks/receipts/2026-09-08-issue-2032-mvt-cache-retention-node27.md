@@ -4,7 +4,7 @@
 被测 head：`ebb9f13840872af4a3f4fab85ec9f144d3d5e712`（PR #2151，round-1 修复后）；对照 `origin/master` = `d1c628b4`。
 方法：一次性 worktree `/home/nwm/tmp/wt-2032-pr`（PR head）与 `/home/nwm/tmp/wt-2032-master`（master），各自 `uv sync --all-extras --dev`（Python 3.11.15），
 `TMPDIR=/home/nwm/tmp`；活动树与生产 display API（:8080）全程未动，结束后两个 worktree 已 `git worktree remove`。
-同一脚本在修复前 head `05a75297` 上跑过一次（13 页 receipt 略），除 pytest 计数（799 → 810，新增 round-1 用例）外各项结果与本节逐字一致。
+同一脚本在修复前 head `05a75297` 上跑过一次（日志 `/home/nwm/tmp/receipt-2032-05a75297.log`），除 pytest 计数（799 → 810，新增 round-1 用例）外各项结果与本节逐字一致。
 测量前提与裁定见 [2026-09-08-issue-2032-mvt-cache-measurement-node27.md](2026-09-08-issue-2032-mvt-cache-measurement-node27.md)。
 
 ## 1. Linux 端 pytest（PR worktree）
