@@ -3916,3 +3916,19 @@ it changes none of the three catch counters. Decision unchanged: **keep
 rotation**. The cumulative rotated count still exceeds core, while the existing
 measurement caveats remain load-bearing. Next revisit on the audit's next flag
 or a maintainer override.
+
+## 2026-09-08 revisit — PR #2176 (#2078, fixture `expanded`)
+
+The audit flagged DECIDABLE again with `core=226`, `rotated=269`, and `phase=53`
+over 192 multi-round merged PRs. PR #2176 ran the same three seats in both
+rounds (correctness; test-evidence + spec-compliance; security-perf +
+integration), so it adds one denominator and one later-round catch on the
+core side: Round 2's spec-compliance checklist caught a stale PR body (head
+SHA, scenario count, test refs — docs, P2), while the three Round 1 findings
+(literal `None` key fold, unpinned LRU/hot-path assertions, receipt drift) were
+all fixed and stayed fixed. No rotated-in seat was used, so the sample says
+nothing about rotation yield either way.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, and the measurement caveats above still apply. Next
+revisit on the audit's next flag or a maintainer override.
