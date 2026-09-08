@@ -272,7 +272,12 @@ issue #1893 (`scripts/node27_cold_residency.py`,
 `packages/common/compressed_chunk_cold_*`), issue #1929 (numeric runtime
 identity in `packages/common/compressed_chunk_cold_target.py`), issue #1894
 (`scripts/node27_cold_tablespace_install.py`,
-`packages/common/node27_cold_tablespace_*`), and this runbook section.
+`packages/common/node27_cold_tablespace_*`), issue #1970 (river-click oracle),
+issue #2123 (the promoted C4 producer/validator/private publisher/binder), issue
+#2130 (C4 input-classification precedence), and issue #2137 (this executable G0
+runbook plus census/C1-C3/G8 owners, schemas, binders and acceptance routing).
+Issue #2137 merges this content without remote access; it consumes rather than
+reimplements C4.
 
 **Step 1 — local readiness only (nothing on node-27 runs yet).** This runs on
 the machine that owns the PR; it must not be confused with the node-27 session
@@ -295,8 +300,10 @@ install runs before that PR is merged** and before `REVIEWED_SHA` names its
 merge commit. Re-run Step 1 inside the window with the same commands before
 Step 2: the SHA node-27 lands on must equal the reviewed SHA exactly.
 
-**Step 2 — one node-27 session, after Step 1 proves green.** The `ssh` command
-is **not** a place to paste the rest of the gate; the fence below is the whole
+**Step 2 — one node-27 session, task 4.1+ only after #2137 merges and Step 1
+proves green.** This step is forbidden while #2137 is under review; the child
+must not execute this SSH fence. The `ssh` command is **not** a place to paste
+the rest of the gate; the fence below is the whole
 session entry, and the remote script is fed through a **quoted heredoc** so the
 local shell cannot expand or execute any part of it. The reviewed SHA crosses
 the boundary as an environment assignment in ssh's first remote argument — the

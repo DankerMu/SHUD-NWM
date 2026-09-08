@@ -1,0 +1,26 @@
+# #2137 Python/readiness child current state — 2026-09-08
+
+## Boundary
+
+Issue #2137 is the second child selected by the #1895 breadth retro. It delivers only the local, merge-before-access G0 Python/readiness chain: census, C1-C3/G8 owners, schemas/binders, shared private evidence/file primitives, canonical readonly validator split, executable runbook contract and selector/tests.
+
+It is a prerequisite for #1895, not a replacement. It does not access node-27/node-22, run census/probe/install/live C1-C4, move chunks, restore timers, close #1895/#1891, or archive this shared change. Tasks 4.1-4.8 remain unchecked and belong to the post-merge #1895 maintenance window.
+
+## Prerequisites now merged
+
+- #1893 runner, #1894 installer, #1929 numeric runtime principal and #1970 river-click oracle are closed.
+- #2123 C4 producer/validator/private publisher/binder merged through PR #2126; PR #2133 archived its change and promoted the authoritative `c4-live-display-evidence` spec.
+- #2130 merged through PR #2134; PR #2135 archived the change and promoted the C4 input-classification precedence requirement.
+
+## Current implementation state
+
+- Issue #2137 is OPEN and implementation-ready. Its GitHub body carries the local-only PR boundary and complete Evidence Floor.
+- The rebuilt branch contains census/runbook commit `0924dc7b`, readiness owner commit `a0b6ccf9`, and selector closure `432762f2`; no PR has been opened for this child yet.
+- The old complete recovery anchor remains `preserve/issue-1895-pre-c4-replay` at `2f7e95b4`; it is not a delivery branch or review SHA.
+- The branch was rebuilt from master `a285835c`, but `origin/master` subsequently advanced to `49710a2d`; the child must integrate that tip before frozen verification/review.
+- The eight selector routes exposed during replay now use the existing C1/C2/C3 and storage partition tuples. Shipping exact-set checks matched 8/8 and removal mutants failed 8/8; runtime pytest/CI evidence is still pending.
+- This current-state addendum supersedes stale status statements in the 2026-09-07 historical records without deleting their process disclosures.
+
+## Remaining gate
+
+The checklist ownership wording, focused fixture/alignment review and target OpenSpec strict validation are complete. Latest-master integration and the child’s local/CI/review gates remain. Tasks 4.1-4.8 remain untouched until #2137 merges; no node-27 access is permitted before then.

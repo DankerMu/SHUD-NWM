@@ -15,8 +15,11 @@ Seams under test:
   -> exact `uid:gid` writable probe -> observed schema-1.1 target evidence.
 - Installer/governance CLI: host/container/catalog evidence -> NO-GO or exact
   topology receipt.
-- Node-27 rollout: frozen reviewed SHA + approved maintenance inputs -> live
-  parity/performance/timer receipt.
+- Local G0 readiness chain: production census owners + C1/C2/C3/G8 CLIs,
+  schemas and binders + shared private-file primitives + canonical readonly
+  facade + CI selector -> fail-closed current-run evidence without remote access.
+- Node-27 rollout (tasks 4.1-4.8 only): merged reviewed SHA + approved
+  maintenance inputs -> live parity/performance/timer receipt.
 
 ## 1. #1892 — Freeze the TimescaleDB 2.10.2 contract
 
@@ -182,21 +185,39 @@ Seams under test:
 
 ## 4. #1895 — Controlled node-27 rollout and closure
 
-- [ ] 4.0 Before any node-27 access, commit and review an executable #1895 live
-  runbook at the exact SHA to be deployed, pass this issue-specific read-only
-  fixture review, and pass strict OpenSpec validation. The runbook must provide:
-  a pre-target census using the production catalog/inventory/parity owners
-  (`ranked_candidates_from_execute`, `derive_bound_inventories`,
-  `collect_residency_group`, `compute_window_parity`,
-  `compression_before_bytes`, `retained_source_bytes`) without calling target
-  preflight; the complete #1894 installer argv; canonical-decimal env assembly;
-  one-group-at-a-time invoke/readback/halt commands; the exhaustive D9 trigger
-  table; current-run receipt checks; and evidence-PR/close/archive order. It must
-  bind rollback wording to the shipping installer state machine: only a failed or
-  interrupted install with a still-live private authority may reconcile/roll back,
-  while terminal `installed` closes that authority and every later trigger stops
-  and preserves the installed topology. It must name the historical
-  §4.3.3/manual `docker run` recipe as forbidden for this cold bind.
+- [ ] 4.0 Merge child #2137 before any node-27 access. That atomic child owns the
+  executable G0 runbook contract; production pre-target census and C1-C3/G8
+  Python owners and CLIs; C1-C3 schemas/examples/binders; bounded private receipt
+  and file-publication primitives; the canonical readonly-validator
+  behavior-preserving split; complete CI selector routing; tests, review and
+  local evidence. Its census derives durable keys and capacity inputs from the
+  production catalog/inventory/parity owners without target preflight. Its
+  receipts reject missing or mismatched inputs, SHA, invocation bracket,
+  identity, digest, private path and partial/stale state. C3 only binds raw C4
+  PASS bytes from the capability merged by #2123 under the #2130 precedence; it
+  neither embeds that frontend producer nor lets a C4 CLI PASS replace G0/C3
+  SHA/digest gates. The readonly split preserves canonical exports and the
+  `run_display_route_smoke`, `importlib` and `psycopg2` patch seams. The selector
+  must execute every acceptance partition rather than fall back to collect-only.
+  This child performs no SSH, census, probe, install, movement, live C1-C4 or
+  timer work; it does not close #1895/#1891, archive this change, or check any of
+  4.1-4.8.
+- [ ] 4.1 At the reviewed SHA, execute the merged live runbook for the first
+  node-27 observation. Before access, its exact deployed SHA must have passed
+  the #2137 issue-specific fixture review, strict OpenSpec validation, contract
+  tests and normal CI. The runbook must provide: a pre-target census using the
+  production catalog/inventory/parity owners (`ranked_candidates_from_execute`,
+  `derive_bound_inventories`, `collect_residency_group`,
+  `compute_window_parity`, `compression_before_bytes`,
+  `retained_source_bytes`) without calling target preflight; the complete #1894
+  installer argv; canonical-decimal env assembly; one-group-at-a-time
+  invoke/readback/halt commands; the exhaustive D9 trigger table; current-run
+  receipt checks; and evidence-PR/close/archive order. It must bind rollback
+  wording to the shipping installer state machine: only a failed or interrupted
+  install with a still-live private authority may reconcile/roll back, while
+  terminal `installed` closes that authority and every later trigger stops and
+  preserves the installed topology. It must name the historical §4.3.3/manual
+  `docker run` recipe as forbidden for this cold bind.
 
   Production root evidence is one fixed contract, never the synthetic #1894
   helper: JSON envelope schema `1.0`; hostname equal to the exact `/bin/hostname`
@@ -221,8 +242,8 @@ Seams under test:
   `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY`. Installer `--expected-mode` is `0700`;
   `--expected-uid/gid` and runner UID/GID are the freshly observed canonical
   numeric `.Config.User` pair, never the historical `1005:1005` text.
-- [ ] 4.1 At the reviewed SHA, capture the read-only live preflight: clean
-  worktree, container config/image/runtime UID:GID, cluster/catalog, every
+  At the reviewed SHA, capture the read-only live preflight: clean worktree,
+  container config/image/runtime UID:GID, cluster/catalog, every
   candidate/hot group identity/member residency/rows/checksum, both filesystems,
   timer/writer/lock state, backup readiness, fresh root RAID/SMART evidence, API
   valid-times/publication and #1342 baselines. The six compressed groups observed
@@ -295,23 +316,40 @@ Seams under test:
 
 ## Risk-pack evidence mapping
 
-- Public API / CLI / config: tasks 2.2, 2.4, 2A.1-2A.2, 3.1-3.3;
-  invalid/missing values -> pre-connect/pre-mutation refusal.
-- File IO / path / permissions / secrets: tasks 1.2, 2.3, 2A.1-2A.4,
-  3.1-3.2; symlink/alias/mode/credential/principal cases -> stable refusal,
-  redaction, exact numeric execution and no unsafe overwrite.
-- Schema / evidence identity: tasks 1.7, 2.3, 2A.2-2A.5, 3.1-3.7, 4.8;
-  historical 1.0 + current 1.1 residency target evidence, installer private
-  recovery authority and public installer/governance receipts -> schema
-  validation, redaction/secret rejection, durable publication, and independent
-  semantic readback.
-- Concurrency / resources / rollback: tasks 1.6, 2.1-2.5, 3.5-3.6, 4.2-4.6;
-  lock/timeout/full/interruption/race -> rollback or explicit recovery state.
-- Legacy/display compatibility: tasks 2.4, 2A.3, 3.3, 4.5-4.7; historical
-  receipt recovery plus unchanged hot/new chunks, ingest, retention and display
-  -> existing behavior and performance.
-- TimescaleDB/time-series domain: tasks 1.3-1.6, 2.1-2.5, 4.4-4.7; exact 2.10.2 catalog/lifecycle and business-time boundaries -> real isolated/live oracle evidence.
-- Documentation/migration/backup: tasks 1.8, 3.6, 4.1-4.8; ADR/runbook/readiness and rollback evidence -> no production mutation without all gates.
+- Public API / CLI / config: tasks 2.2, 2.4, 2A.1-2A.2, 3.1-3.3 and
+  4.0. The 4.0 evidence covers `node27_cold_residency_census_policy.py`,
+  `packages/common/node27_issue1895_*.py` and every corresponding census/C1-C3/G8
+  CLI; missing inputs, invalid canonical values or a wrong SHA fail before remote
+  access, publication or mutation.
+- File IO / path / permissions / secrets: tasks 1.2, 2.3, 2A.1-2A.4, 3.1-3.2
+  and 4.0. The 4.0 evidence covers `packages/common/evidence_io.py`,
+  `packages/common/safe_fs_publication.py`, private receipt owners and readonly
+  DSN binding; symlink, alias, mode, nlink, replacement, stale/private-path and
+  secret-bearing cases fail without unsafe overwrite or disclosure.
+- Schema / evidence identity: tasks 1.7, 2.3, 2A.2-2A.5, 3.1-3.7, 4.0 and
+  4.8. The 4.0 evidence covers all C1-C3 schemas/examples/binders and requires
+  exact identity, digest and invocation bracket. Historical 1.0/current 1.1
+  residency evidence, installer private authority and live receipts retain
+  schema validation, redaction, durable publication and semantic readback.
+- Concurrency / resources / rollback: tasks 1.6, 2.1-2.5, 3.5-3.6, 4.0 and
+  4.2-4.6. The 4.0 current-run owners prove ordered publication and allow C3
+  binding only after raw C4 PASS bytes exist; lock, timeout, full, interruption,
+  race, stale or partial output yields explicit non-PASS state.
+- Legacy/display compatibility: tasks 2.4, 2A.3, 3.3, 4.0 and 4.5-4.7. The
+  4.0 evidence covers `services/production_closure/readonly_db_{types,probe_adapter,
+  permission_probes,merge,route_smoke,validation}.py`, preserving public exports
+  and `run_display_route_smoke`/`importlib`/`psycopg2` patch seams. It consumes
+  the promoted #2123/#2130 C4 contract and never reimplements that producer.
+- TimescaleDB/time-series domain: tasks 1.3-1.6, 2.1-2.5, 4.0 and 4.4-4.7.
+  The 4.0 census uses production catalog/inventory/parity owners without target
+  preflight; six remains a fresh count gate rather than reusable identity.
+- Published NHMS identity: tasks 4.0 and 4.6-4.8. C1-C3/G8 identity and digest
+  binders, source-scoped current publication and raw C4 bytes prove the local
+  acceptance chain first and exact-SHA live display identity only after merge.
+- Documentation/migration/backup: tasks 1.8, 3.6, 4.0 and 4.1-4.8. The 4.0
+  evidence covers the executable G0 text and `scripts/select_ci_tests.py` exact
+  acceptance partitions/removal mutants; C4 uses `test:e2e:live-c4-display`, not
+  legacy `e2e/monitoring.spec.ts`, and no production access precedes all gates.
 
 Non-goals:
 

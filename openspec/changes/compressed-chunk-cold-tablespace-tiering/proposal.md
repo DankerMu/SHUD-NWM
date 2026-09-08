@@ -50,9 +50,13 @@ not merely the near-empty origin chunk shell.
   evidence; no image-user-name or root fallback is allowed.
 - #1895: controlled node-27 deployment and live receipts for migration,
   automatic convergence, hot/cold reads, timers, and display performance. Its
-  reviewed executable runbook lands before node-27 access; six is a historical
-  preflight count rather than reusable identity, and rollback acceptance uses
-  the exact-SHA disposable move-back branch plus live read-only compatibility.
+  reviewed executable runbook and Python readiness owners land first through
+  dedicated child #2137, before node-27 access; six is a historical preflight
+  count rather than reusable identity, and rollback acceptance uses the exact-SHA
+  disposable move-back branch plus live read-only compatibility. The independent
+  C4 producer/validator/publisher/binder has already merged through #2123, and its
+  input-classification precedence was clarified by #2130; #1895 consumes that
+  promoted capability for live evidence rather than reimplementing it.
   The installer may reconcile/roll back only an in-progress install whose private
   authority still exists; terminal `installed` closes that authority, so every
   later trigger preserves the installed topology. After movement, reversal also

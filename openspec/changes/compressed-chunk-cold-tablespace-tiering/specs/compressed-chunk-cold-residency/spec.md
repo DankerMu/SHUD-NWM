@@ -570,6 +570,60 @@ SHALL be redacted or rejected before serialization.
   database URL, container environment credentials, signed URLs or raw secret
   evidence
 
+### Requirement: The complete local G0 acceptance chain MUST merge before remote access
+
+The rollout SHALL have one atomic merge-before-access child that delivers the
+executable G0 runbook contract; production pre-target census; C1-C3/G8 owners
+and CLIs; C1-C3 schemas, examples and binders; bounded private evidence/file
+publication; canonical readonly-validation compatibility; and complete CI test
+selection. Before that child merges, no issue-owned node-27/node-22 access,
+census, probe, install, movement, live C1-C4 or timer operation SHALL occur, and
+no local, mock, historical or CI evidence SHALL be described as live PASS.
+
+The census SHALL use production catalog, inventory and parity owners without
+requiring the not-yet-created cold target. Historical six SHALL be only a fresh
+count expectation, never a reusable key set or selector. Every C1-C3/G8
+acceptance owner SHALL fail closed on missing or mismatched required input,
+reviewed SHA, invocation bracket, identity or digest and on stale, partial,
+secret-bearing or unapproved private-path evidence. Private receipt publication
+SHALL preserve default umask behavior when no explicit mode is supplied and
+SHALL enforce exact `0600`, no-follow, no-clobber, single-link descriptor/path
+identity, durable write/readback and bounded content when private acceptance
+receipts require it.
+
+C3 SHALL consume and bind the exact raw C4 PASS bytes produced by the promoted
+`c4-live-display-evidence` capability after that lane completes. It SHALL NOT
+embed another frontend C4 producer or treat the C4 command's PASS as a substitute
+for the outer G0/C3 reviewed-SHA and digest gates. The C4 live command SHALL be
+`test:e2e:live-c4-display`, subject to the promoted #2130 input-classification
+precedence; the legacy `e2e/monitoring.spec.ts` lane SHALL NOT satisfy C4.
+
+The readonly validation split SHALL preserve its canonical public imports and
+observable patch seams, including `run_display_route_smoke`, `importlib` and
+`psycopg2`. CI selection SHALL map every changed G0 owner, CLI, schema and shared
+helper to all corresponding assertion-bearing partitions; a collect-only
+fallback SHALL NOT satisfy this acceptance chain.
+
+#### Scenario: Local child blocks the maintenance window until merge
+
+- **WHEN** the local G0 child is under review or any required fixture, schema, binder, compatibility or selector gate is incomplete
+- **THEN** tasks 4.1-4.8 remain unexecuted, no node is accessed, and the result cannot claim a production receipt
+
+#### Scenario: C1-C3 evidence is current and identity-bound
+
+- **WHEN** a C1, C2 or C3 binder receives a missing or mismatched SHA, digest, bracket, identity, stale/partial receipt, unsafe private path or trailing content
+- **THEN** it refuses PASS without publishing a replacement that could make prior evidence look current
+
+#### Scenario: C4 has one promoted producer
+
+- **WHEN** live C4 evidence is requested after the local child has merged
+- **THEN** the rollout executes `test:e2e:live-c4-display`, C3 binds those exact completed PASS bytes, and neither an embedded producer nor `e2e/monitoring.spec.ts` can satisfy C4
+
+#### Scenario: Readonly and CI seams remain compatible
+
+- **WHEN** canonical readonly validation is imported or patched and when a changed G0 surface is selected for CI
+- **THEN** existing public/patch seams remain observable and all relevant assertion-bearing test partitions execute rather than degrading to collect-only
+
 ### Requirement: Live rollout MUST preserve data, hot placement, display behavior and performance
 
 Before node-27 access, the rollout SHALL commit and review an executable live
