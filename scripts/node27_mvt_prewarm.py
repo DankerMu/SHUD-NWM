@@ -34,6 +34,7 @@ import concurrent.futures
 import http.client
 import json
 import math
+import os
 import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -64,16 +65,33 @@ PREWARM_SOURCES = ("gfs", "ifs")
 DISCHARGE_ZOOMS = (3, 4)
 # /cycles and /valid-times are served from the display process catalog cache for
 # up to 600 s: `DISPLAY_CATALOG_STALE_MAX_SECONDS`
-# (`apps/api/display_cache.py:29`) is the ONLY freshness check on the hit path
-# (`apps/api/display_cache.py:90`), and paths touched within the last 1800 s
-# (`apps/api/display_cache.py:31`) are re-warmed every 45 s by the background
-# loop (`apps/api/display_cache.py:30`, both read in `_warm_loop`,
-# `apps/api/display_cache.py:163` and `:169`). `:28` also defines a 60 s TTL
-# constant, but `display_catalog_cached` never reads it -- "fresh vs stale" is
-# not a distinction the code makes. Prewarm runs right after publish and must
-# bypass that window, so `fetch_json` sends this header with the value `refresh`,
-# the only value that forces a reload (`apps/api/display_cache.py:32`, `:54`).
+# (`apps/api/display_cache.py`) is the ONLY freshness check on the hit path
+# (`display_catalog_cached`), and paths touched within the last 1800 s
+# (`DISPLAY_CATALOG_WARM_ACTIVE_WINDOW_SECONDS`) are re-warmed every 45 s by the
+# background loop (`DISPLAY_CATALOG_WARM_INTERVAL_SECONDS`, both read in
+# `_warm_loop`). `DISPLAY_CATALOG_TTL_SECONDS` also defines a 60 s TTL constant,
+# but `display_catalog_cached` never reads it -- "fresh vs stale" is not a
+# distinction the code makes. Prewarm runs right after publish and must bypass
+# that window.
+#
+# #2079: carrying this header is no longer enough. `display_cache._force_refresh`
+# grants a forced refresh to exactly two identities: the in-process warmer (an
+# ASGI scope mark, unreachable from the network) and a caller whose header value
+# equals the display process's `NHMS_DISPLAY_CACHE_WARM_TOKEN` under
+# `hmac.compare_digest`. The literal `refresh` is retired. So `fetch_json` sends
+# the token from its OWN environment (`infra/env/node27-ingest.env`, which must
+# hold the SAME value as the display process's `infra/env/display.env`); with no
+# token configured it sends no header at all, warns once, and discovery degrades
+# to the pre-#2013 behaviour -- a <=45 s stale window on hot keys, self-healing
+# on the next tick -- rather than failing the tick.
 CACHE_WARM_HEADER = "x-nhms-cache-warm"
+CACHE_WARM_TOKEN_ENV = "NHMS_DISPLAY_CACHE_WARM_TOKEN"
+CACHE_WARM_TOKEN_UNSET_WARNING = (
+    "prewarm: NHMS_DISPLAY_CACHE_WARM_TOKEN unset; discovery may see up to 45 s stale catalog"
+)
+# Process-level latch: one warning per prewarm process, not one per discovery
+# request (two hops x two sources = four lines an operator would learn to skip).
+_warned_cache_warm_token_unset = False
 PRECIP_WINDOW_INCOMPLETE = "PRECIP_WINDOW_INCOMPLETE"
 PRECIP_CYCLE_NOT_MIRRORED = "PRECIP_CYCLE_NOT_MIRRORED"
 # Whitelist, not `!= "mirror_root_unconfigured"`: a future third reason must not
@@ -167,10 +185,16 @@ def xyz_tiles(bounds: tuple[float, float, float, float], zooms: Iterable[int]) -
 
 
 def fetch_json(url: str, timeout: float) -> Any:
-    request = Request(  # noqa: S310 - operator-controlled localhost URL
-        url,
-        headers={"Accept": "application/json", CACHE_WARM_HEADER: "refresh"},
-    )
+    global _warned_cache_warm_token_unset
+
+    headers = {"Accept": "application/json"}
+    token = os.environ.get(CACHE_WARM_TOKEN_ENV, "").strip()
+    if token:
+        headers[CACHE_WARM_HEADER] = token
+    elif not _warned_cache_warm_token_unset:
+        _warned_cache_warm_token_unset = True
+        print(CACHE_WARM_TOKEN_UNSET_WARNING, file=sys.stderr)
+    request = Request(url, headers=headers)  # noqa: S310 - operator-controlled localhost URL
     with urlopen(request, timeout=timeout) as response:  # noqa: S310 - operator-controlled localhost URL
         return json.loads(response.read())
 

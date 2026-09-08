@@ -2623,56 +2623,223 @@ jialingjiang，而这两个流域各已有 73 条 published run。
 （另注意 node-22 的 `BASINS_ROOT=/volume/nwm/Basins` 在本地 175T 盘上，
 与 NFS `/ghdc/data` 不是同一个文件系统。）
 
-### 5.8 node-22 file-journal cycle cold archive（未启用）
+### 5.8 node-22 file-journal cycle cold archive（已启用，#2119）
 
-`nhms-scheduler-journal-retention.timer` 是独立的 user-systemd oneshot：只会读取并在
-明确启用后归档 `NHMS_SCHEDULER_JOURNAL_ROOT` 内的 `latest/`、`journal/` 和
-`pipeline-events/` 的完整 `(source_id, cycle)` 切片。它**不会**扫描、改写或删除
-`pipeline-jobs/`、`reconcile-inventory/`、`.locks/` 或 state-index；它也不会给 tar
-archive 加透明读取层或自动恢复器。
+自 2026-09-08 起，生产 `nhms-scheduler-journal-retention.timer` 已启用；激活审计证据见
+[2026-09-08 node-22 journal-retention live activation](receipts/2026-09-08-node22-journal-retention-live-activation.md)
+（[#2119](https://github.com/DankerMu/SHUD-NWM/issues/2119)）。长期 provider-timer 漂移治理由
+[#2146](https://github.com/DankerMu/SHUD-NWM/issues/2146) 跟踪。
 
-本 PR 安装的默认配置为 `ENABLED=false`、`DRY_RUN=true`，timer 文件本身也是 inert，
-不会安装或 enable 任何生产 unit。首次部署**不得覆盖**已有的 untracked
-`infra/env/compute.scheduler-dbfree.env`。先保留现场 0600 文件，按模板仅合并并逐项核对以下四个
-retention key：`NHMS_SCHEDULER_JOURNAL_RETENTION_ENABLED=false`、
-`NHMS_SCHEDULER_JOURNAL_RETENTION_DRY_RUN=true`、
-`NHMS_SCHEDULER_JOURNAL_RETENTION_DAYS=90`、
-`NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT=.../journal-archive`。unit 的安装与任何 dry-run
-均为后续已授权操作；本 PR 不执行 SSH、安装、start 或 enable。node-22 维护窗口前如获授权，
-必须使用已激活解释器，禁止环境重建命令：
+此 user-systemd oneshot 仅会归档 `NHMS_SCHEDULER_JOURNAL_ROOT` 下 `latest/`、`journal/` 和
+`pipeline-events/` 中完整的 `(source_id, cycle)` 切片。它**不会**扫描、改写或删除
+`pipeline-jobs/`、`reconcile-inventory/`、`.locks/`、state-index 或 quarantine；quarantine
+绝不由本服务删除。它不为 tar archive 增加透明读取层，也不会自动恢复。node-22 保持 DB-free：
+retention 命令与 service 不连接任何数据库、也不提交 Slurm 作业；不得运行 `uv sync`、裸 `uv run`
+或任何重建环境的命令。scheduler 自身的业务提交不在本服务范围内。
 
-```bash
-# 在 node-22 的 /scratch/frd_muziyao/NWM 执行；先编辑既有 0600 env，
-# 保留所有现场 key，只合并上面四个 retention key。
-grep '^NHMS_SCHEDULER_JOURNAL_RETENTION_' infra/env/compute.scheduler-dbfree.env
-install -m 0644 infra/systemd/nhms-scheduler-journal-retention.service \
-  ~/.config/systemd/user/nhms-scheduler-journal-retention.service
-install -m 0644 infra/systemd/nhms-scheduler-journal-retention.timer \
-  ~/.config/systemd/user/nhms-scheduler-journal-retention.timer
-systemctl --user daemon-reload
-/scratch/frd_muziyao/NWM/.venv/bin/python \
-  /scratch/frd_muziyao/NWM/scripts/node22_scheduler_journal_retention.py
+当前生效的四个 retention key 为：
+
+|Key|最终值|
+|---|---|
+|`NHMS_SCHEDULER_JOURNAL_RETENTION_ENABLED`|`true`|
+|`NHMS_SCHEDULER_JOURNAL_RETENTION_DRY_RUN`|`false`|
+|`NHMS_SCHEDULER_JOURNAL_RETENTION_DAYS`|`90`|
+|`NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT`|既有 0600 envfile 中已批准的绝对 journal-archive root；其非公开路径不记录于此|
+
+`DAYS=90` 是本次批准的生产窗口，不是代码硬最小值；未经授权不得缩短。现场的
+`/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env` 是既有 0600 envfile；保留全部
+现场 key，只可原子地修改上述四个 key，且不得以模板覆盖它。service 必须使用固定解释器和 envfile：
+
+```text
+EnvironmentFile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+ExecStart=/scratch/frd_muziyao/NWM/.venv/bin/python /scratch/frd_muziyao/NWM/scripts/node22_scheduler_journal_retention.py
 ```
 
-receipt 写在 `<NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT>/retention/`。先看
-`preflight_blockers`（空才有安全证明）、`frontier`（必须是 fresh `status=ok`）、
-`discovery`（必须完整而非 blocked），再看每 cycle 的 `status` / `reason`：
+已安装的 user unit 为 `~/.config/systemd/user/nhms-scheduler-journal-retention.service` 与
+`~/.config/systemd/user/nhms-scheduler-journal-retention.timer`。timer 按 `*-*-* 04:45:00 UTC`
+调度，`RandomizedDelaySec=15m`、`Persistent=true`；没有 scheduler-wide idle 条件。每个 cycle
+仍由既有非阻塞 flock 串行，锁忙即跳过。最近 scheduler passes 均 `planning_only` 且 Slurm queue
+为空，但 scheduler service 仍须运行以发布稳定 snapshots，不能把 queue 空误判为可以绕过 frontier
+或停止服务。
 
-- `planned`：dry-run 识别了完整成员列表和字节数，未创建 archive、未删热文件；
-- `archived`：已验证 archive/manifest 后才删除 manifest 绑定的热成员；
-- `live_row`、`pipeline_frontier_exempt`、`in_flight`：分别表示可恢复 scheduler 行、
-  当前 frontier 窗口和 writer 锁争用，均为保留而非故障；
-- `blocked`：前置窗口、frontier、发现、成员完整性、archive 冲突或工具验证没有证明安全，
-  不得绕过；修根因后重跑。已发布 archive 而只删掉部分成员可安全重跑；冲突 archive 必须
-  人工比较 manifest/digest，绝不覆盖。
+初始交付状态曾为 `ENABLED=false`、`DRY_RUN=true` 且不安装/enable unit；该默认关闭背景是合同的一部分，
+现已由 #2119 完成启用，不能再作为当前生产状态引用。
 
-**后续启用不属于本 PR。** 只有在 live-tree dry-run receipt 和隔离副本 enforce/restore
-演练都由操作负责人审阅后，才可在独立变更中先将 `ENABLED=true` 且仍保留
-`DRY_RUN=true` 观察，再设置 `DRY_RUN=false` 并明确 `systemctl --user enable --now`
-timer。没有 scheduler-wide idle 条件；每一个 cycle 由既有 flock 非阻塞串行，锁忙直接跳过。
+#### 查看 timer 与 receipt
 
-恢复始终是离线、单 cycle 操作：先停止或排除该 cycle 的 writer，保存 archive 前的
-`query_pipeline_jobs_by_cycle` 输出，然后验证、stage 并 no-clobber restore，最后比对查询：
+每次调用都会在 `<NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT>/retention/` 写入有界 JSON receipt。先确认
+unit 与 timer 状态，再找最新 receipt；不要以 receipt 文件数判断一次运行是否发生。
+
+```bash
+systemctl --user status nhms-scheduler-journal-retention.service \
+  nhms-scheduler-journal-retention.timer
+systemctl --user list-timers nhms-scheduler-journal-retention.timer
+journalctl --user -u nhms-scheduler-journal-retention.service --since '24 hours ago'
+# 只读出已批准的 archive root；不要 source 整个 envfile。
+NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT=$(
+  awk -F= '/^NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT=/{print substr($0, index($0,$2)); exit}' \
+    /scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+)
+find "${NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT:?set approved archive root}/retention" \
+  -maxdepth 1 -type f -name '*.json' -print
+```
+
+先读 `preflight_blockers`（必须为空）、`frontier`（必须 fresh 且 `status=ok`）和 `discovery`
+（必须完整、非 `blocked`），再看每个 cycle 的 `status` / `reason`：
+
+- `planned`：dry-run 已识别完整成员与字节数，未创建 archive、未删热文件；
+- `archived`：仅在 archive/manifest 验证后，才删除 manifest 绑定的热成员；
+- `live_row`、`pipeline_frontier_exempt`、`in_flight`：分别是可恢复 scheduler 行、当前
+  frontier 窗口和 writer 锁争用，均为保留而非故障；
+- `blocked`：前置窗口、frontier、发现、成员完整性、archive 冲突或工具验证未能证明安全；
+  修复根因后重跑，绝不绕过。已发布 archive 后的部分删除可安全重跑；冲突 archive 必须人工比较
+  manifest/digest，绝不覆盖。
+
+#### 回滚与恢复
+
+**配置回滚（已记录、未在最终激活后执行）**：先 `disable --now` timer 并 stop service；再用固定
+`.venv/bin/python` 对既有 0600 envfile 做 fail-closed 原子两键替换（不 source 该 envfile）；grep
+核对四键后才 `start` service 做一次 dry-run 并核验 receipt。下列命令都是可执行步骤。本段只记录回滚程序；
+最终激活后并未执行它。
+
+```bash
+set -eu
+cd /scratch/frd_muziyao/NWM
+systemctl --user disable --now nhms-scheduler-journal-retention.timer
+systemctl --user stop nhms-scheduler-journal-retention.service
+/scratch/frd_muziyao/NWM/.venv/bin/python - <<'PY'
+from __future__ import annotations
+
+import os
+import stat
+import sys
+from pathlib import Path
+
+REPO = Path("/scratch/frd_muziyao/NWM")
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from packages.common.safe_fs import (
+    atomic_write_bytes_no_follow,
+    read_bytes_limited_no_follow,
+    stat_no_follow,
+)
+
+ENV = REPO / "infra" / "env" / "compute.scheduler-dbfree.env"
+MAX_BYTES = 65536
+ENABLED = "NHMS_SCHEDULER_JOURNAL_RETENTION_ENABLED"
+DRY_RUN = "NHMS_SCHEDULER_JOURNAL_RETENTION_DRY_RUN"
+DAYS = "NHMS_SCHEDULER_JOURNAL_RETENTION_DAYS"
+ARCHIVE = "NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT"
+KEYS = (ENABLED, DRY_RUN, DAYS, ARCHIVE)
+
+
+def fail(message: str) -> None:
+    raise SystemExit(message)
+
+
+def line_ending(line: str) -> str:
+    if line.endswith("\r\n"):
+        return "\r\n"
+    if line.endswith("\n"):
+        return "\n"
+    if line.endswith("\r"):
+        return "\r"
+    return ""
+
+
+info = stat_no_follow(ENV, containment_root=REPO)
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    fail("envfile must be a regular non-symlink file")
+if (info.st_mode & 0o777) != 0o600:
+    fail("envfile mode must be 0600")
+if info.st_uid != os.getuid():
+    fail("envfile owner must be the current uid")
+
+raw = read_bytes_limited_no_follow(ENV, max_bytes=MAX_BYTES, containment_root=REPO)
+if len(raw) > MAX_BYTES:
+    fail("envfile exceeds 65536-byte ceiling")
+try:
+    text = raw.decode("utf-8")
+except UnicodeDecodeError as error:
+    fail(f"envfile is not strict utf-8: {error}")
+
+found = {key: 0 for key in KEYS}
+out: list[str] = []
+for line in text.splitlines(keepends=True):
+    ending = line_ending(line)
+    payload = line[: len(line) - len(ending)]
+    matched = False
+    for key in KEYS:
+        prefix = f"{key}="
+        if not payload.startswith(prefix):
+            continue
+        found[key] += 1
+        value = payload[len(prefix) :]
+        if key == ENABLED:
+            if value not in {"true", "false"}:
+                fail(f"{key} must be true or false")
+            out.append(f"{prefix}false{ending}")
+        elif key == DRY_RUN:
+            if value not in {"true", "false"}:
+                fail(f"{key} must be true or false")
+            out.append(f"{prefix}true{ending}")
+        elif key == DAYS:
+            if value != "90":
+                fail(f"{key} must remain 90")
+            out.append(line)
+        else:
+            if not value:
+                fail(f"{key} must be non-empty")
+            out.append(line)
+        matched = True
+        break
+    if not matched:
+        out.append(line)
+
+for key, count in found.items():
+    if count != 1:
+        fail(f"{key} must occur exactly once, found {count}")
+
+atomic_write_bytes_no_follow(
+    ENV,
+    "".join(out).encode("utf-8"),
+    containment_root=REPO,
+    mode=0o600,
+    require_durable_replace=True,
+)
+after = stat_no_follow(ENV, containment_root=REPO)
+if not stat.S_ISREG(after.st_mode) or (after.st_mode & 0o777) != 0o600:
+    fail("replaced envfile must remain a regular 0600 file")
+if after.st_uid != os.getuid():
+    fail("replaced envfile owner must remain the current uid")
+print("retention env rolled back: ENABLED=false DRY_RUN=true DAYS=90")
+PY
+envfile=/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env
+test "$(grep -c '^NHMS_SCHEDULER_JOURNAL_RETENTION_ENABLED=false$' "$envfile")" = 1
+test "$(grep -c '^NHMS_SCHEDULER_JOURNAL_RETENTION_DRY_RUN=true$' "$envfile")" = 1
+test "$(grep -c '^NHMS_SCHEDULER_JOURNAL_RETENTION_DAYS=90$' "$envfile")" = 1
+test "$(grep -c '^NHMS_SCHEDULER_JOURNAL_RETENTION_ENABLED=' "$envfile")" = 1
+test "$(grep -c '^NHMS_SCHEDULER_JOURNAL_RETENTION_DRY_RUN=' "$envfile")" = 1
+test "$(grep -c '^NHMS_SCHEDULER_JOURNAL_RETENTION_DAYS=' "$envfile")" = 1
+test "$(grep -c '^NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT=' "$envfile")" = 1
+NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT=$(
+  awk -F= '/^NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT=/{print substr($0, index($0,$2)); exit}' \
+    "$envfile"
+)
+systemctl --user start nhms-scheduler-journal-retention.service
+systemctl --user status nhms-scheduler-journal-retention.service
+find "${NHMS_SCHEDULER_JOURNAL_ARCHIVE_ROOT:?set approved archive root}/retention" \
+  -maxdepth 1 -type f -name '*.json' -print
+```
+
+`atomic_write_bytes_no_follow(..., mode=0o600, require_durable_replace=True)` 在同目录以
+`O_CREAT|O_EXCL|O_NOFOLLOW` 写 temp、`fchmod 0600`（创建者为当前 uid，故 owner 与当前进程相同）、
+fsync 文件与父目录后 `os.replace`；失败则删除 temp。不要删除任何 archive 或 quarantine。激活期间的失败
+路径曾多次证明其回滚动作；这不等同于声称最终激活后的 rollback dry-run 已执行。
+
+恢复始终是离线、单 cycle 操作：先停止或排除目标 cycle 的 writer，保存 archive 前的
+`query_pipeline_jobs_by_cycle` 输出，然后验证、stage 并 no-clobber restore，最后比较查询：
 
 ```bash
 # 写入隔离 staging 根；目标热文件已存在、路径逃逸、symlink 或 digest 不同都会拒绝。
@@ -2693,9 +2860,9 @@ print(json.dumps(repo.query_pipeline_jobs_by_cycle("gfs_2026050100"), sort_keys=
 PY
 ```
 
-将最后的 JSON 与 archive 前捕获的 cycle query 作逐字节或结构化等价比对，确认每个 restored
-member 的 manifest SHA-256；确认 `pipeline-jobs/` 与 state-index 的前后 checksum 不变后，才
-重新允许 writer。恢复不编辑 direct records、inventory 或 state-index。
+将最后的 JSON 与 archive 前捕获的 cycle query 作逐字节或结构化等价比对，并确认每个 restored member
+的 manifest SHA-256。确认 `pipeline-jobs/` 与 state-index 的前后 checksum 不变后，才重新允许
+writer。恢复不编辑 direct records、inventory 或 state-index。
 
 ## 6. 如何判断是否卡住
 

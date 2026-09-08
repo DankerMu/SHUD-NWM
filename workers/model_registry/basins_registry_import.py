@@ -1272,6 +1272,28 @@ def _backfill_output_segment_geometry(
         template="(%s, %s, %s, %s)",
         fetch=True,
     )
+    if updated_rows:
+        # #2031: the national display digests
+        # (`services/tiles/mvt.py::national_discharge_source_version` /
+        # `::national_river_network_source_version`) are computed from run rows
+        # and the network's inventory metadata, none of which move when geometry
+        # is rewritten UNDER an unchanged network version. This counter is that
+        # missing signal, and it is bumped on the SAME cursor so it commits and
+        # rolls back with the geometry it describes.
+        #
+        # Gated on `updated_rows` rather than on `updates`: `ST_Length > 0` can
+        # empty the batch, and both early exits above return before this point.
+        # Every bootstrap tick runs `only_missing=True` over already-complete
+        # networks, so an unguarded bump would rotate every national tile cache
+        # key on every tick for no data change at all.
+        cursor.execute(
+            """
+            UPDATE core.river_network_version
+            SET geometry_generation = geometry_generation + 1
+            WHERE river_network_version_id = %s
+            """,
+            (river_network_version_id,),
+        )
     return len(updated_rows)
 
 

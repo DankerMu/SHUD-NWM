@@ -93,6 +93,28 @@ C4 producer 已由 #2123 合并；C1-C3/G8 owner 与可执行 G0 合同由 #2137
 
 ### C1. 部署 receipt（开发期本地起服务，非 docker compose up）
 
+> **部署顺序（migration 先于 display API 重启）**：display API 的 SQL 引用了 `db/migrations` 里的列，
+> 所以**先把待应用的 migration 全部 apply 到 active PG（node-27 本机 `:55432`），再重启/拉起 display API**。
+> 反向顺序会让新代码打到缺列的库上，national tile 与 `/api/v1/layers` 全部 500。
+> 「提前 apply 是安全的」这句只对**该条 migration 本身是纯 ADD COLUMN IF NOT EXISTS**时成立
+> （新列没人读，在跑的旧版本不受影响）；**不要外推到全仓**：`000041` / `000042` / `000049` 都是
+> `DROP INDEX`，提前 apply 会直接改变在跑旧代码的执行计划。逐条判断。
+> - #2031 的 `000057_river_network_version_geometry_generation.sql`（`core.river_network_version.geometry_generation`）
+>   属于纯 ADD COLUMN 的安全一类：三条 national tile 路由（两条 hydro-national + `river_network_national_mvt_tile`）
+>   与 `/api/v1/layers` 背后的两个 national digest 都投影该列，**必须先 apply 000057，再重启 display API**；
+>   apply 后按 C1–C4 对这三条路由 + `/api/v1/layers` 出 live receipt（200 / 预期 424，不得 500）。
+>   重启会把每个 national cache key 轮换一次（一轮 100% cold miss，自愈；prewarm 覆盖 z=3–5），属预期。
+> - **000057 的写侧同样硬依赖该列，且不需要重启就会生效**：`_backfill_output_segment_geometry`
+>   （`workers/model_registry/basins_registry_import.py`）在改写 geometry 的同一事务里 bump
+>   `geometry_generation`。触达路径有三条：(a) `nhms-node27-autopipe.timer`（每 10 分钟）在**新 basin** seed 时
+>   拉起的 `import-basins-registry` 子进程（默认 backfill）；(b) 同一 timer 对**已 seed** basin 的 display-ready 臂
+>   （`_ensure_seeded_basin_display_ready` → `_backfill_output_geometry(only_missing=True)`）；(c) 运维手跑
+>   `qhh_production_bootstrap.py`（`only_missing=False`，必 bump）。列不在时 `UndefinedColumn` 会让整个 backfill/import
+>   事务回滚 —— (a) basin 不注册、tick 记 `seed_failed` / `stage=import`；(b) tick 记 `stage=display_ready`；并每 10 分钟重演。
+>   这条路径**只要 `git pull --ff-only` 就已经生效**（timer 直接跑仓库里的脚本，没有服务需要重启），
+>   所以 **000057 必须与这次 pull 同一个窗口 apply，早于下一次 timer tick、早于任何 bootstrap**。
+>   geometry 已完整的网络上它是休眠的（`only_missing=True` 的路径在 bump 之前就返回 0）。
+
 - [ ] **开发期：27 本地起 display API**（不 `docker compose up`）：只读派生端口，
   再启动 wrapper。#1895 的 C1 receipt owner 只解析 `NHMS_DISPLAY_API_PORT`（缺省
   `8080`）而不 source 该 env，随后必须通过 systemd MainPID/cgroup、`/health`、

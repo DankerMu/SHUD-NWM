@@ -3795,3 +3795,109 @@ core catches carried the count. The measurement caveats above remain
 load-bearing; any reversal still requires maintainer review rather than an
 automatic ratio threshold. Next revisit on the audit's next flag or a
 maintainer override.
+
+### Revisit after PR #2138 (issue #2015, 2026-09-08)
+
+`loop_log_audit.py` returned DECIDABLE again after the #2138 line was appended:
+185 multi-round merged PRs, later-round catches `core=225`, `rotated=269`,
+`phase=53`, 15 skipped as non-attributable. Relative to the sample recorded
+after PR #2125 (220 / 269 / 53 / 15), this PR moved core by +5 and rotated by
++0.
+
+PR #2138 is an expanded fixture that ran four comprehensive rounds with the
+**same three seats in every round** (correctness, test-evidence+spec-compliance,
+invariant-state) — invariant-state was seated from round 1 because #2014 had
+just closed the same failure class (in-flight / terminal collapsed into one
+predicate) on the neighbouring surface. The audit therefore attributes all five
+later-round catches to the core mix; none were rotated-in. By count this PR is
+the strongest pro-core sample so far, but it is not evidence *against*
+rotation: it is evidence that when the prior PR has already identified the
+recurring invariant, seating that lens from round 1 is the right call, and the
+seat that carried it (invariant-state, 4 of the 5 later catches, including the
+round-3 P2 that triggered the three-round gate) is exactly the lens rotation
+brought in during #2014. The cumulative rotated count still exceeds core.
+
+Decision unchanged: **keep rotation**, with one refinement recorded for the
+seat-plan rather than the policy: when the previous merged PR on the same
+surface closed a named invariant class, seat that class's lens in round 1 of
+the successor (as done here) instead of rotating it in later. The measurement
+caveats above remain load-bearing; any reversal still requires maintainer
+review rather than an automatic ratio threshold. Next revisit on the audit's
+next flag or a maintainer override.
+
+## Revisit 2026-09-08 (post-merge PR #2120 / issue #2112)
+
+`loop_log_audit.py` flags the question DECIDABLE at 186 multi-round merged PRs,
+with later-round catches `core=225`, `rotated=269`, `phase=53`, and 15 skipped
+as non-attributable. Relative to the immediately preceding #2138 sample, this
+PR adds one multi-round denominator and changes none of the four attribution
+counts.
+
+PR #2120's only net catch was the Round 1 test-evidence finding that final RED
+and mutation provenance were incomplete. It was closed evidence-only. Round 2
+used a pinned correctness/invariant seat plus a focused test-evidence/spec seat
+and returned zero candidates; Phase 7 was also clean. This is therefore not a
+rotation-effect sample: no later-round catch exists to attribute, so the added
+denominator cannot distinguish useful rotation from an already-complete fix.
+
+Decision unchanged: **keep rotation**. The cumulative rotated count still
+exceeds core, but #2120 adds no evidentiary strength in either direction. The
+measurement caveats above remain load-bearing; any reversal still requires
+maintainer review rather than an automatic ratio threshold. Next revisit on
+the audit's next flag or a maintainer override.
+
+## 2026-09-08 revisit — PR #2149 (#2031, fixture `high`)
+
+The audit flagged DECIDABLE again on the same cumulative figures (core=225 /
+rotated=269 / phase=53 over 187 multi-round merged PRs). PR #2149 changes none of
+them: all four net catches came in Round 1 (test-evidence, invariant-state,
+correctness, security-perf — the full `high` seat set), Round 2 ran the pinned
+risk-pack core only (invariant-state + test-evidence/spec-compliance) and
+returned zero candidates, Phase 7 approved with no finding. No later-round catch
+exists to attribute, so this sample adds denominator without signal.
+
+Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
+maintainer override.
+
+## 2026-09-08 revisit — PR #2151 (#2032, fixture `high`)
+
+The audit flagged DECIDABLE again on unchanged cumulative figures (core=225 /
+rotated=269 / phase=53, now over 188 multi-round merged PRs). PR #2151 adds
+denominator without rotation signal: all eight net catches came in Round 1 (the
+full `high` seat set: correctness, invariant-state, test-evidence/spec-compliance,
+security-perf/integration), Round 2 seated correctness + test-evidence/
+spec-compliance + invariant-state and returned Notes only (zero candidates), and
+the one Phase 7 catch (runbook line-ref drift, minor) belongs to the final-review
+seat, which the rotation question does not attribute either way.
+
+Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
+maintainer override.
+
+## 2026-09-08 revisit — PR #2168 (#2079, fixture `high`)
+
+The audit flagged DECIDABLE again on unchanged cumulative figures (core=225 /
+rotated=269 / phase=53, now over 190 multi-round merged PRs). PR #2168 adds
+denominator without rotation signal: all five net catches came in Round 1 (the
+full `high` seat set: correctness, invariant-state, test-evidence/spec-compliance,
+security-perf/integration — three of the five, including the only P1, from the
+security-perf/integration seat), Round 2 seated correctness + test-evidence/
+spec-compliance + security-perf/integration and returned zero candidates, and the
+one Phase 7 catch (receipt threshold wording and a stale design sentence, minor)
+belongs to the final-review seat, which the rotation question does not attribute
+either way.
+
+Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
+maintainer override.
+
+## 2026-09-08 revisit — PR #2172 (#2170, fixture `compact`)
+
+The audit flagged DECIDABLE again on unchanged cumulative figures (core=225 /
+rotated=269 / phase=53 over 190 multi-round merged PRs). PR #2172 is a
+single-round `compact` sample (correctness + test-evidence/spec-compliance,
+both clean, no verifier batch), so it adds neither a multi-round denominator
+nor a later-round catch; the one Phase 7 catch (spec-delta title wording,
+minor) belongs to the final-review seat, which the rotation question does not
+attribute either way.
+
+Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
+maintainer override.

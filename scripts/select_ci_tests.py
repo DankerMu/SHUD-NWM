@@ -1944,6 +1944,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_direct_grid_display_cutover_model_resolution.py",
             "tests/test_hhe_mvt_binding.py",
             "tests/test_hydro_display_mvt_scaling.py",
+            # #2032: guard-derived, not hand-curated — both new suites import
+            # services.tiles.mvt at file level. The lock suite drives
+            # tile_generation_lock / _open_live_lock_file directly; the
+            # retention suite pins its three path regexes against
+            # _file_cache_path / _file_cache_lock_path / _write_file_cache, so
+            # a layout change here must red there rather than after merge.
+            # Neither suite imports apps.api.routes.hydro_display, so that
+            # rule is deliberately left alone.
+            "tests/test_mvt_tile_generation_lock.py",
+            "tests/test_node27_mvt_cache_retention.py",
             # #2013: same guard-derived provenance — the prewarm suite imports
             # NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS from services.tiles.mvt
             # at file level (issue #2013's planned-envelope assertion steps the
@@ -2320,6 +2330,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2079. The catalog cache's own suite is named after the CAPABILITY, not
+        # after the module, so same-name derivation (`tests/test_display_cache.py`)
+        # cannot reach it, and the `apps/api/**` rule above only buys the three
+        # generic API suites -- none of which exercise `_force_refresh`.
+        "apps/api/display_cache.py",
+        ("tests/test_display_catalog_cache.py",),
+    ),
+    PathTestRule(
         "db/**",
         ("tests/test_migrations.py",),
     ),
@@ -2632,6 +2650,29 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_node27_timeseries_retention.py",),
     ),
     PathTestRule(
+        # #2032: same shape as the retention `.service` row above. `infra/**`
+        # is not a backend python path and `_is_backend_shell_path` is scoped
+        # to `scripts/**.sh`, so a unit-only diff matches NOTHING and CI
+        # degrades to --collect-only. The suite really reads this file: the
+        # `ExecStartPre` < `ExecStart` ordering and the append log paths.
+        # #2170: the sibling-lane pin in `tests/test_node27_timeseries_retention.py`
+        # is a glob reader over `infra/systemd/nhms-node27-*.service`, so a
+        # path-exact unit rule that does not target it makes targeted PR CI
+        # constructively skip the pin -- it only reds on master's full run.
+        "infra/systemd/nhms-node27-mvt-cache-retention.service",
+        (
+            "tests/test_node27_mvt_cache_retention.py",
+            "tests/test_node27_timeseries_retention.py",
+        ),
+    ),
+    PathTestRule(
+        # #2032: the same suite parses `OnCalendar=*-*-* 04:05:00 UTC` and
+        # `Persistent=true` out of the timer, so the schedule is assertable at
+        # PR time rather than at `systemctl --user list-timers`.
+        "infra/systemd/nhms-node27-mvt-cache-retention.timer",
+        ("tests/test_node27_mvt_cache_retention.py",),
+    ),
+    PathTestRule(
         "schemas/timeseries_compression_receipt.schema.json",
         (
             "tests/test_node27_timeseries_compression.py",
@@ -2644,6 +2685,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_sequential_budget.py",
         ),
+    ),
+    PathTestRule(
+        # #2032: the `infra/env/node27-*.example` glob above only buys
+        # tests/test_node27_write_roles.py, which never reads this template.
+        # This row is what makes the cache-root warning, the health `jq`
+        # criterion and the two rollback gates assertable at PR time. Additive:
+        # the glob row still matches and both target sets are unioned.
+        "infra/env/node27-mvt-cache-retention.example",
+        ("tests/test_node27_mvt_cache_retention.py",),
     ),
     PathTestRule(
         "infra/env/node27-timeseries-compression.example",
@@ -3328,6 +3378,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "scripts/node27_raw_retention_once.sh",
         ("tests/test_node27_wrapper_pythonpath.py",),
+    ),
+    PathTestRule(
+        # #2032: the MVT cache-retention wrapper. `scripts/**.sh` only arms the
+        # core-smoke fallback when no rule matches, so without this row a
+        # wrapper-only diff would reach the PR lane with the env-file refusal,
+        # flock-skip and rc-propagation assertions unexecuted. Deliberately not
+        # routed to tests/test_node27_wrapper_pythonpath.py: this wrapper
+        # exports no PYTHONPATH (its runner imports nothing from the repo).
+        "scripts/node27_mvt_cache_retention_once.sh",
+        ("tests/test_node27_mvt_cache_retention.py",),
     ),
     PathTestRule(
         "scripts/node27_frontier_stall_alert_once.sh",

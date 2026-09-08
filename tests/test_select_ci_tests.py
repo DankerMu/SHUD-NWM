@@ -304,6 +304,19 @@ def test_node27_autopipe_timer_row_selects_both_of_its_readers() -> None:
     ]
 
 
+def test_node27_mvt_cache_retention_unit_selects_the_sibling_lane_pin() -> None:
+    # #2170: the unit's own suite is not the only reader. The sibling
+    # `systemd.err` lane pin in tests/test_node27_timeseries_retention.py is a
+    # glob reader over `infra/systemd/nhms-node27-*.service`, so a path-exact
+    # rule that does not name it lets a unit-only PR pass targeted CI while
+    # master's full run reds -- exactly what #2032 did. Both suites, never empty.
+    selected = set(select_tests(["infra/systemd/nhms-node27-mvt-cache-retention.service"], repo_root=Path(".")))
+
+    assert "tests/test_node27_mvt_cache_retention.py" in selected, "the unit lost its own suite"
+    assert "tests/test_node27_timeseries_retention.py" in selected, "the unit does not select the sibling lane pin"
+    assert selected, "the unit selected an empty test set (collect-only)"
+
+
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
     consumers = (
         "tests/test_node27_cold_tablespace_identity.py",
@@ -861,12 +874,21 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_hhe_mvt_binding.py",
         "tests/test_hydro_display_mvt_scaling.py",
         "tests/test_migrations.py",
+        # #2032: guard-derived entries, synced from the selector's own output
+        # per the procedure above — both new suites import services.tiles.mvt
+        # at file level (the lock suite drives tile_generation_lock; the
+        # retention suite pins its three path regexes against the cache-path
+        # builders), so the closure guard puts them on this rule as DIRECT
+        # importers.
+        "tests/test_mvt_tile_generation_lock.py",
         # #1714: ninth guard-derived entry, synced from the selector's own
         # output per the procedure above — the closure guard put the attribution
         # suite on the mvt rule as a one-hop importer through
         # apps/api/routes/hydro_display.py.
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
+        # #2032: the second of the two entries described above.
+        "tests/test_node27_mvt_cache_retention.py",
         # #2013: guard-derived entry, synced from the selector's own output per
         # the procedure above — the prewarm envelope assertion imports
         # NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS from services.tiles.mvt at

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from collections.abc import Generator
@@ -69,6 +70,12 @@ router = APIRouter(tags=["hydro-display"])
 # treats fallback_application_name as a default only, so an operator's
 # explicit ?application_name=... in DATABASE_URL still wins.
 _APPLICATION_NAME = "nhms-display-api"
+
+# #2030: budget-window truncation signal. `apps.api.routes.hydro_display` is a
+# child of the `apps.api` tree that `apps/api/main.py::_install_api_log_handler`
+# gives a stderr handler, so WARNING+ reaches systemd's
+# `StandardError=append:/tmp/display-api.log` with no extra wiring.
+logger = logging.getLogger(__name__)
 
 HYDRO_NATIONAL_SOURCE_ID = "hydro-national"
 HYDRO_NATIONAL_SOURCE_VERSION = "hydro-national-latest-per-basin-stream-type-v3"
@@ -530,7 +537,12 @@ def hydro_national_source_cycle_mvt_tile(
         z=z,
         x=x,
         y=y,
-        source_digest=national_discharge_source_version(session, source=source, cycle=cycle_instant),
+        # `valid_time` too (#2031): the tile SQL's `latest_runs` clamps candidate
+        # runs to the instant's coverage window, so a digest that skips the clamp
+        # describes a run this tile may never paint.
+        source_digest=national_discharge_source_version(
+            session, source=source, cycle=cycle_instant, valid_time=valid_time_instant
+        ),
     )
     return _cached_or_generated_mvt_response(
         session,
@@ -567,7 +579,15 @@ def hydro_national_mvt_tile(
     tile_input = TileInput(
         layer_id=public_hydro_layer_id(variable),
         source_id=HYDRO_NATIONAL_SOURCE_ID,
-        source_version=f"{HYDRO_NATIONAL_SOURCE_VERSION}:{national_discharge_source_version(session)}",
+        # `source`/`cycle` stay NULL — this alias binds no identity — but the
+        # instant is bound (#2031), and it is the SAME `valid_time` object the
+        # tile SQL below is given, so the digest ranks the run the tile reads.
+        # Bytes and the 200/424 verdict are unchanged; the cache key rotates once
+        # for instants outside the overall-latest run's window.
+        source_version=(
+            f"{HYDRO_NATIONAL_SOURCE_VERSION}:"
+            f"{national_discharge_source_version(session, valid_time=valid_time)}"
+        ),
         valid_time=_format_time(valid_time),
         z=z,
         x=x,
@@ -726,6 +746,12 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
     coordinate_count = int(row.get("coordinate_count") or 0) if row else 0
     source_identity_count = int(row.get("source_identity_count") or 0) if row else 0
     invalid_property_count = int(row.get("invalid_property_count") or 0) if row else 0
+    # #2030: pre-truncation totals over `bounded_rows` plus the two non-budget
+    # drop counters, so the fair-budget window stops dropping rows silently.
+    intersecting_feature_count = int(row.get("intersecting_feature_count") or 0) if row else 0
+    intersecting_coordinate_count = int(row.get("intersecting_coordinate_count") or 0) if row else 0
+    feature_coordinate_overflow_count = int(row.get("feature_coordinate_overflow_count") or 0) if row else 0
+    coordinate_dimension_overflow_count = int(row.get("coordinate_dimension_overflow_count") or 0) if row else 0
     if invalid_property_count > 0:
         raise ApiError(
             status_code=500,
@@ -762,6 +788,43 @@ def _fetch_postgis_tile_bytes(session: Session, layer: str, params: dict[str, An
             code="MVT_LIVE_POSTGIS_UNAVAILABLE",
             message="Live PostGIS MVT query returned no source rows for the requested identity.",
             details={"layer_id": detail_layer_id, "z": z, "x": x, "y": y},
+        )
+    # #2030: on a window layer `budget_stats` is computed FROM the already
+    # truncated `eligible`, so the 413 predicate above is unreachable there and an
+    # over-budget tile is a 200 with fewer rows. Compare the selected totals with
+    # the intersecting ones and say so. Both overflow counters must be 0: those
+    # two paths drop rows before `budget_stats` for a different reason and keep
+    # their existing (signal-free) behavior.
+    if (
+        (intersecting_coordinate_count > coordinate_count or intersecting_feature_count > feature_count)
+        and feature_coordinate_overflow_count == 0
+        and coordinate_dimension_overflow_count == 0
+    ):
+        logger.warning(
+            "MVT_TILE_BUDGET_TRUNCATED layer_id=%s z=%s x=%s y=%s "
+            "feature_count=%s/%s max_features=%s coordinate_count=%s/%s max_coordinates=%s",
+            detail_layer_id,
+            z,
+            x,
+            y,
+            feature_count,
+            intersecting_feature_count,
+            MVT_MAX_FEATURES,
+            coordinate_count,
+            intersecting_coordinate_count,
+            max_coordinates,
+            extra={
+                "layer_id": detail_layer_id,
+                "z": z,
+                "x": x,
+                "y": y,
+                "feature_count": feature_count,
+                "intersecting_feature_count": intersecting_feature_count,
+                "max_features": MVT_MAX_FEATURES,
+                "coordinate_count": coordinate_count,
+                "intersecting_coordinate_count": intersecting_coordinate_count,
+                "max_coordinates": max_coordinates,
+            },
         )
     return bytes(row["tile"] or b"")
 

@@ -258,7 +258,7 @@ function templateNeeds(metadata: MvtLayerMetadata, placeholder: 'source' | 'cycl
  * 章为空 = store 没解出周期（fail-closed / 该源 cycles 未到达或取回失败）= 不注册叠加层。
  * 章与 `LayerState.validTimes` 同批产出，于是 cycle 段与 valid_time 段按构造属于同一个身份。
  */
-function resolveNationalOverlayCycle(layer: LayerState): string | null {
+export function resolveNationalOverlayCycle(layer: LayerState): string | null {
   return toSecondsPrecisionInstant(layer.activeNationalCycle)
 }
 
