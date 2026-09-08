@@ -47,7 +47,7 @@ Fixture level: expanded · repair intensity: high · seats round 1: 4 (`correctn
 | node-27 read-only measurement of A's precondition, with SQL + output | receipt `2026-09-08-issue-2031-digest-precondition.md` |
 | Ruling recorded (fix A in digest SQL + sync 3.1 / matrix / test contract) | design.md D1–D3, matrix appendix, tasks 4.x |
 | If A fixed: digest and `latest_runs` pick the same run for one `(source, cycle, valid_time)`; two same-cycle runs with different windows | 5.1 on node-27 (pytest output in PR): digest half by the three digest assertions; tile half by the post-seed identity-route request served as a cache MISS (tile-cache rows deleted between seeding and the request, `X-Tile-Cache: miss`) and painted by the base run — reverse-proved on node-27 by removing `latest_runs`' window predicate |
-| If A fixed: legacy route 200/424 and bytes unchanged | three existing probe cases green on node-27 (legacy route untouched; the byte path is unchanged by construction) |
+| If A fixed: legacy route 200/424 and bytes unchanged | three existing probe cases green on node-27 (the legacy route's run-selection semantics and byte path are unchanged; only its cache key rotates once, D3) |
 | B: backfill updating ≥1 row changes a national digest — unit + node-27 receipt | 3.2(a) local; 5.2 node-27 |
 | B covers `national_river_network_source_version` too | 4.2 + 5.2 asserts both digests |
 | Conclusions written back to i4-2007 matrix | 6.2 |

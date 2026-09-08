@@ -104,10 +104,11 @@ display/frontend oracle 都在 node-27。
 >   重启会把每个 national cache key 轮换一次（一轮 100% cold miss，自愈；prewarm 覆盖 z=3–5），属预期。
 > - **000057 的写侧同样硬依赖该列，且不需要重启就会生效**：`_backfill_output_segment_geometry`
 >   （`workers/model_registry/basins_registry_import.py`）在改写 geometry 的同一事务里 bump
->   `geometry_generation`。触达路径有两条：(a) `nhms-node27-autopipe.timer`（每 10 分钟）在**新 basin** seed 时
->   拉起的 `import-basins-registry` 子进程（默认 backfill）；(b) 运维手跑 `qhh_production_bootstrap.py`
->   （`only_missing=False`，必 bump）。列不在时 `UndefinedColumn` 会让整个 import 事务回滚 —— basin 不注册，
->   tick 记 `seed_failed` / `stage=import`，并每 10 分钟重演。
+>   `geometry_generation`。触达路径有三条：(a) `nhms-node27-autopipe.timer`（每 10 分钟）在**新 basin** seed 时
+>   拉起的 `import-basins-registry` 子进程（默认 backfill）；(b) 同一 timer 对**已 seed** basin 的 display-ready 臂
+>   （`_ensure_seeded_basin_display_ready` → `_backfill_output_geometry(only_missing=True)`）；(c) 运维手跑
+>   `qhh_production_bootstrap.py`（`only_missing=False`，必 bump）。列不在时 `UndefinedColumn` 会让整个 backfill/import
+>   事务回滚 —— (a) basin 不注册、tick 记 `seed_failed` / `stage=import`；(b) tick 记 `stage=display_ready`；并每 10 分钟重演。
 >   这条路径**只要 `git pull --ff-only` 就已经生效**（timer 直接跑仓库里的脚本，没有服务需要重启），
 >   所以 **000057 必须与这次 pull 同一个窗口 apply，早于下一次 timer tick、早于任何 bootstrap**。
 >   geometry 已完整的网络上它是休眠的（`only_missing=True` 的路径在 bump 之前就返回 0）。

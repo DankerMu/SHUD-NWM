@@ -20,7 +20,7 @@ acceptance criterion 1). Nothing was written; the role has no INSERT/UPDATE/DELE
 | `hydro_run` uniqueness on `(model_id, source_id, cycle_time)` (Q4) | no unique index; data is unique today (7189 groups, all `n = 1`) | a re-run with a new `run_id` remains schema-legal |
 | B: output-river rows a backfill would move today (Q5) | 38 networks, `geom_null = 0`, `type_missing = 0` everywhere | B is **latent** (fires on the next basin bootstrap / re-import), not active |
 | B: spare column on `core.river_network_version` (Q5b) | 8 columns, none free (`checksum` is import-owned) | a geometry-generation signal needs a migration |
-| C: `map.tile_cache` rows (Q6) | **0 rows** | the DB tile cache is unused on node-27 (`nhms_display_ro` cannot write it); the 4.0 GB `NHMS_MVT_FILE_CACHE_DIR` file cache is the live cache layer |
+| C: `map.tile_cache` rows (Q6) | **0 rows** | the DB tile cache is unused on node-27 (`nhms_display_ro` cannot write it); the ~4.0 GB `NHMS_MVT_FILE_CACHE_DIR` file cache is the live cache layer (size from a separate `du -sh` on the display.env cache dir in the same session — not part of the SQL script below; #2032's acceptance still owes the full `du`/`.pbf`/`.locks`/`df` set) |
 
 Ruling taken from these numbers is recorded in
 `openspec/changes/fix-national-digest-cache-identity-2031/design.md` (D1–D8) and in the appendix of

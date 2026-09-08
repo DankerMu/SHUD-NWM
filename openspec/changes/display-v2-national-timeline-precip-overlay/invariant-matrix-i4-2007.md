@@ -210,4 +210,4 @@ Ruling (change `fix-national-digest-cache-identity-2031`, design.md D1–D8):
 - **No `QUERY_VERSION` bump** (row 24 and the `-v3` pin stay); the projection change rotates every
   national key once on deploy. Legacy tiles whose instant precedes the overall-latest window rotate once
   more — same accepted class as the v5 rotation described at the top of this file.
-- **Deploy order**: `000057` first (idempotent, safe ahead of code), display API second.
+- **Deploy order**: `000057` first (a pure `ADD COLUMN IF NOT EXISTS`, safe ahead of code), applied in the same window as the `git pull` on node-27 — the write side (`_backfill_output_segment_geometry`'s bump, reached by the autopipe timer on both arms and by the qhh bootstrap) goes live on the pull alone and raises `UndefinedColumn` without the column — then the display API restart (three national tile routes + `/api/v1/layers` read the column). Tracked in #2145.
