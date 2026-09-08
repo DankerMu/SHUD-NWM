@@ -17,7 +17,12 @@ It is a prerequisite for #1895, not a replacement. It does not access node-27/no
 - Issue #2137 is OPEN and implementation-ready. Its GitHub body carries the local-only PR boundary and complete Evidence Floor.
 - The rebuilt branch contains census/runbook commit `0924dc7b`, readiness owner commit `a0b6ccf9`, selector closure `432762f2`, and post-master selector repair `1ba75811`; PR #2144 is open for this child.
 - The old complete recovery anchor remains `preserve/issue-1895-pre-c4-replay` at `2f7e95b4`; it is not a delivery branch or review SHA.
-- The branch was rebuilt from master `a285835c`; it then integrated `origin/master` at `49710a2d` through merge commit `2e0357ec` before final local verification.
+- The branch was rebuilt from master `a285835c`; it first integrated
+  `origin/master` at `49710a2d` through merge commit `2e0357ec`, then integrated
+  the latest `origin/master` at `4c79cc39` through merge commit `9aab3720`. The
+  only conflict was the append-like cross-PR gate-memory file. All common JSON
+  records were structurally identical, and the resolution retained master's
+  seven new closed-issue records plus the branch's open #2137 record.
 - The eight selector routes exposed during replay use the existing C1/C2/C3 and
   storage partition tuples. Shipping exact-set checks matched 8/8 and removal
   mutants failed 8/8. The post-merge scheduler manifest importer gap was repaired
@@ -25,7 +30,12 @@ It is a prerequisite for #1895, not a replacement. It does not access node-27/no
   the default full local unit row passed 18,058. After round-1 closure, the same
   rows passed 6,594 and 18,125 assertions respectively. After the round-2 depth
   closure, they passed 6,607 and 18,138 assertions.
-- This current-state addendum supersedes stale status statements in the 2026-09-07 historical records without deleting their process disclosures.
+- Post-master verification at
+  `9aab37209ac104002a75ea03776bad9ab07ae2a5` kept the shipping selector at 72
+  entries and ran 6,609 targeted assertions. Full-tree collection found 18,642
+  tests, and the default full unit row passed 18,409 assertions. This current-
+  state addendum supersedes stale status statements in the 2026-09-07 historical
+  records without deleting their process disclosures.
 
 ## Remaining gate
 

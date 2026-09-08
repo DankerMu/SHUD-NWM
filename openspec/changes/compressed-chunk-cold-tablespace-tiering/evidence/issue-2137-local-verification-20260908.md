@@ -223,6 +223,37 @@ no accidental current-run opt-out, no long-lived-directory chmod workaround and
 no remaining unsafe matching pattern. The full report is
 `.workplans/pr-2144/review/invariant-audit-round2.md`.
 
+## Latest-master integration and final local Phase 2
+
+The branch fetched and integrated `origin/master` at
+`4c79cc39c1e3522683633d8e69677c84a2ad7d56` through merge commit
+`9aab37209ac104002a75ea03776bad9ab07ae2a5`. GitHub had reported the PR as
+conflicting. Four overlapping runbook/selector paths merged automatically. The
+only content conflict was `.review-gate-issues.json`: all common records were
+structurally identical as parsed JSON, so the resolution retained master's seven
+new closed-issue records and the branch's open #2137 record. No record was
+replaced or dropped.
+
+Phase 2 then ran serially against that exact merge head:
+
+- Changed-Python Ruff and compilation: PASS across 82 changed Python files.
+- Target OpenSpec strict validation: PASS.
+- C1-C3 metaschema and shipping-example validation: six checks PASS.
+- JSON parse, `git diff --check` and changed-file line-count gates: PASS.
+- Shipping selector: 72 entries, 56 de-duplicated pytest targets,
+  `meta_guard_only=false`, `collection_smoke_required=true`.
+- Targeted assertion row: `6609 passed, 4 skipped, 8 deselected, 1 warning` in
+  653.98 seconds.
+- Full-tree collection smoke: `18642 tests collected` in 10.90 seconds; this is
+  import/syntax evidence only, not an assertion claim.
+- Default full unit row: `18409 passed, 15 skipped, 218 deselected, 1 warning`
+  in 1565.61 seconds.
+
+The only warning in both assertion rows was the unchanged local ecCodes 2.41.0
+recommendation for 2.42.0 or newer. No stash/reset/checkout/clean, node access,
+remote DB, live receipt or parallel pytest run occurred. The pre-existing shared
+stash SHA remained unchanged.
+
 ## Pending at this record
 
 - Complete the one budgeted comprehensive review, Gap Sweep and GitHub CI gates.
