@@ -127,11 +127,11 @@ clamp 后的时次仍落在以 cycle 为原点的 3 h 网格上；**只要它同
 时次）与 `valid_times_warmed`（截断后实际预热多少个）——两者相等才说明整条时间轴都热。
 job 提交顺序是河网优先、之后双源按 lead 交错（`k=0 gfs, k=0 ifs, k=1 gfs, …`），这样
 deadline 命中时两源对称降级，而不是永远截断同一个源的默认视图。**MVT 瓦片**同一 cache key
-由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py:332-377`；唯一调用点
+由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py::tile_generation_lock`；唯一调用点
 `apps/api/routes/hydro_display.py:689` 在持锁后二次查缓存），多 worker 与预热并发不会
 重复执行 PostGIS 生成。该保护有前提：`NHMS_MVT_FILE_CACHE_DIR` 未配置时
-`_file_cache_lock_path` 返回 `None`（`services/tiles/mvt.py:2442-2447`），
-`tile_generation_lock` 直接 `yield`（`services/tiles/mvt.py:343-348`），只剩进程内
+`_file_cache_lock_path` 返回 `None`（`services/tiles/mvt.py::_file_cache_lock_path`），
+`tile_generation_lock` 直接 `yield`（`tile_generation_lock` 的 `lock_path is None` 分支），只剩进程内
 线程锁；生产由
 `infra/systemd/nhms-display-api.service:9` 的默认值兜住。**降水 PNG 不在此保护内**：
 跨 worker 的文件缓存竞争是 by design 的无锁双写（D4，`services/precip/field.py:113-115`），

@@ -55,3 +55,20 @@ ETag 即 body sha256（`W/"m16-<sha256>"`），三对 HTTP 码与 ETag 逐一相
 
 - `df -h`：`/` 98G 78%（22G 可用）、`/home` 1.7T 84%（261G 可用），与测量 receipt 同量级；`/home/nwm/tmp` 下的隔离缓存目录与两个 worktree 已删除，`git worktree list` 回到运行前的 5 条（其余 4 条是节点上早已存在的他人 worktree，本次未动）。
 - 生产 display API（:8080）与活动树 checkout（`5a86841c`，落后 master）全程未重启、未 pull；merge 后部署（tasks 5.3）另记。
+
+
+## 6. merge 后部署（tasks 5.3）——deferred，未执行
+
+- 时间：2026-09-08T14:15Z 前后，PR #2151 已合并（merge commit `e0cfe40b`），远端分支已删。
+- 活动树实测：`/home/nwm/NWM` 在分支 `hotfix/node27-rollback-pre-2073`（`5a86841c`，无 upstream，`git pull --ff-only` 按字面不可执行），落后 `origin/master` 165 个提交。
+- `git status --porcelain` 仅 untracked（`.entropy-baseline/*.json`、两个 `node27-1069-provenance-*/` 目录），未碰。
+- 该回滚是 2026-09-06 的外部操作（见 `2026-09-06-precip-copyback-backfill.md` §外部变动），仓库内无回滚原因记录。
+- 差距审计命令：`git log 5a86841c..origin/master -- db/ infra/env/ infra/systemd/nhms-display-api.service uv.lock pyproject.toml`。
+- 差距内容：#2031 的 migration `db/migrations/000057_river_network_version_geometry_generation.sql`（部署由 #2145 跟踪）、#2010 的 `NHMS_PRECIP_MIRROR_ROOT`（#2017）、#2011 的 raw-retention 改动；`uv.lock`/`pyproject.toml`/display unit 无变化。
+- 把活动树恢复到 master 等于把这 165 个提交一并投产，是运维决策，不在本 issue 的 PR Boundary 内。
+- unit 不可先装：`infra/systemd/nhms-node27-mvt-cache-retention.service` 的 `ExecStart` 指向 `/home/nwm/NWM/scripts/node27_mvt_cache_retention_once.sh`，该脚本在 `5a86841c` 不存在（`ls` 报 No such file），装了 timer 只会每 tick 失败。
+- 改指 throwaway worktree 会偏离交付的 unit，未做。
+- 现网代价（本节记录、不处置）：生产缓存 `/home/nwm/.cache/nhms/mvt` 此刻 `.locks/**` 4383 个、`.pbf` 4380 个，随每次 miss 增长；`df -h`：`/` 78%、`/home` 84%（261G 可用）。
+- `loginctl show-user nwm` 为 `Linger=yes`，user timer 前提已满足。
+- 处置：5.3 整项 deferred 到 issue #2162（依赖 #2145 的迁移部署，同一维护窗口内先恢复活动树、再按 5.3 原文执行并在本 receipt 追加 §7）。
+- 生产 display API（:8080，`--workers 2`）全程未重启、未 pull。
