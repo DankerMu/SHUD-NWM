@@ -3795,3 +3795,32 @@ core catches carried the count. The measurement caveats above remain
 load-bearing; any reversal still requires maintainer review rather than an
 automatic ratio threshold. Next revisit on the audit's next flag or a
 maintainer override.
+
+### Revisit after PR #2138 (issue #2015, 2026-09-08)
+
+`loop_log_audit.py` returned DECIDABLE again after the #2138 line was appended:
+185 multi-round merged PRs, later-round catches `core=225`, `rotated=269`,
+`phase=53`, 15 skipped as non-attributable. Relative to the sample recorded
+after PR #2125 (220 / 269 / 53 / 15), this PR moved core by +5 and rotated by
++0.
+
+PR #2138 is an expanded fixture that ran four comprehensive rounds with the
+**same three seats in every round** (correctness, test-evidence+spec-compliance,
+invariant-state) — invariant-state was seated from round 1 because #2014 had
+just closed the same failure class (in-flight / terminal collapsed into one
+predicate) on the neighbouring surface. The audit therefore attributes all five
+later-round catches to the core mix; none were rotated-in. By count this PR is
+the strongest pro-core sample so far, but it is not evidence *against*
+rotation: it is evidence that when the prior PR has already identified the
+recurring invariant, seating that lens from round 1 is the right call, and the
+seat that carried it (invariant-state, 4 of the 5 later catches, including the
+round-3 P2 that triggered the three-round gate) is exactly the lens rotation
+brought in during #2014. The cumulative rotated count still exceeds core.
+
+Decision unchanged: **keep rotation**, with one refinement recorded for the
+seat-plan rather than the policy: when the previous merged PR on the same
+surface closed a named invariant class, seat that class's lens in round 1 of
+the successor (as done here) instead of rotating it in later. The measurement
+caveats above remain load-bearing; any reversal still requires maintainer
+review rather than an automatic ratio threshold. Next revisit on the audit's
+next flag or a maintainer override.
