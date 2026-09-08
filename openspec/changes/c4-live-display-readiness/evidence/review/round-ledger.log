@@ -1,0 +1,1 @@
+Round 1 | 775dfe7c9fe6652826fd2bb9e47ae24084a7a76f | not-clean | verified findings: 4 | highest severity: major | failure classes: test-evidence, contract, authorization | repeats prior class: no | seats: correctness, invariant-state, test-evidence+spec-compliance, security-perf+integration | gate: none

@@ -623,6 +623,43 @@ describe('C4 live lane', () => {
     expect(result.ok).toBe(true)
   })
 
+  it('fails home with RUNTIME_CONFIG_INVALID for a complete 200 contradictory runtime body', async () => {
+    const state = makeC4FakePageState({
+      homeResponses: [
+        {
+          url: 'https://api.example.test/api/v1/runtime/config',
+          status: 200,
+          body: { data: { service_role: 'display_readonly', display_readonly: false } },
+        },
+        homeResponses()[1],
+      ],
+    })
+
+    const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch())
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('contradictory runtime config must fail')
+    expect(result.terminal.failure?.code).toBe('RUNTIME_CONFIG_INVALID')
+  })
+
+  it('fails home with RUNTIME_CONFIG_INVALID when runtime config completionError is set', async () => {
+    const state = makeC4FakePageState({
+      homeResponses: [
+        {
+          ...homeResponses()[0],
+          finished: () => Promise.resolve(new Error('runtime config body failed')),
+        },
+        homeResponses()[1],
+      ],
+    })
+
+    const result = await runC4DisplayLane({ config: config(), page: makeC4FakePage(state) }, defaultFetch())
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('runtime completionError must fail')
+    expect(result.terminal.failure?.code).toBe('RUNTIME_CONFIG_INVALID')
+  })
+
   it.each([
     ['home runtime config', 'https://api.example.test/api/v1/runtime/config', 'HOME_NOT_READY'],
     ['home current read', 'https://api.example.test/api/v1/basins?limit=200', 'HOME_NOT_READY'],

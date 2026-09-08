@@ -38,7 +38,7 @@ Validators/preflight: `config.ts`、lane preflight、schema/semantic validator�
 Storage/publish: `playwright.private-receipt-publication.ts`、C4 publisher；仅当前执行创建的临时文件可清理。
 Public/downstream: C4 shell/config/spec、`RBACGate`/App、monitoring store；unchanged sibling 为 river-click publisher、其它 RBAC 路由与普通 Playwright discovery。
 Failure/stale: loading 等待；source/permission/runtime/required response 错误阻止 PASS；超时、变化/旧 evidence、非法文件和 secret 均 fail-closed。
-Regression rows: 合法双源完整运行→PASS；缺配置→BLOCKED；required failure/quiet 后异常/超时→非 PASS；C4 错误身份/额外字段/job/log/bracket/POSIX facts→拒绝；端到端 SHA/C4 digest mismatch→由 #1895 G0/C3 门拒绝（本前置项不声称已运行）；symlink/FIFO/权限/nlink/已有目标/交换→拒绝且无覆盖；有效 readonly viewer→ops 可达但无控制，其它路由/runtime→既有门；river-click 既有成功/原生 errno/FD→契约不变；empty browser cache→Vitest 通过而 live profile 不伪造执行。
+Regression rows: 合法双源完整运行→PASS；URL/receipt path 缺失→BLOCKED；basin/segment pin 缺失、空白或非法→FAIL CONFIG_INVALID；required failure/quiet 后异常/超时→非 PASS；C4 错误身份/额外字段/job/log/bracket/POSIX facts→拒绝；端到端 SHA/C4 digest mismatch→由 #1895 G0/C3 门拒绝（本前置项不声称已运行）；symlink/FIFO/权限/nlink/已有目标/交换→拒绝且无覆盖；有效 readonly viewer→ops 可达但无控制，其它路由/runtime→既有门；river-click 既有成功/原生 errno/FD→契约不变；empty browser cache→Vitest 通过而 live profile 不伪造执行。
 
 ## Risks / Trade-offs
 

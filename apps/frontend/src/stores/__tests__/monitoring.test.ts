@@ -623,7 +623,7 @@ describe('useMonitoringStore', () => {
     expect(useMonitoringStore.getState().stages).toHaveLength(3)
   })
 
-  it('normalizes drifted display runtime config and skips queue depth fail-closed', async () => {
+  it('normalizes drifted display runtime config safe-control fields without coercing a false readonly flag', async () => {
     const paths: string[] = []
     vi.mocked(client.GET).mockImplementation(async (...args: unknown[]) => {
       const path = String(args[0])
@@ -643,8 +643,9 @@ describe('useMonitoringStore', () => {
       control_mutations_enabled: false,
       slurm_routes_enabled: false,
       queue_depth_mode: 'display_readonly_unavailable',
-      display_readonly: true,
+      display_readonly: false,
     })
+    expect(isDisplayReadonlyRuntimeConfig(useMonitoringStore.getState().runtimeConfig)).toBe(false)
     expect(paths).toEqual(['/api/v1/runtime/config', '/api/v1/pipeline/status', '/api/v1/pipeline/stages'])
     expect(useMonitoringStore.getState().queueError).toContain('display_readonly')
   })

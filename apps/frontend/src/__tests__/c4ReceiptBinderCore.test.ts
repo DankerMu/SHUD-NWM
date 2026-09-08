@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import {
   chmodSync,
+  copyFileSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -147,6 +151,146 @@ describe('C4 receipt binder core', () => {
       const extraPath = writePass(parent, 'nhms-frontend-c4-live-evidence-extra.json', extra, cmdStart, now)
       expect(refusedMessage(acceptC4Receipt(argsFor(extraPath, cmdStart, cmdEnd)))).toMatch(/top-level key/)
       expect(acceptRiverClickReceipt(args).ok).toBe(false)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  it.each([
+    'receipt',
+    'frontend-origin',
+    'api-origin',
+    'basin-id',
+    'segment-id',
+    'cmd-start',
+    'cmd-end',
+  ] as const)('refuses a missing %s binder argument', (key) => {
+    const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-c4-binder-missing-')))
+    try {
+      chmodSync(parent, 0o700)
+      const { doc, cmdStart, cmdEnd, now } = bracketedDoc()
+      const receiptPath = writePass(parent, 'nhms-frontend-c4-live-evidence-missing.json', doc, cmdStart, now)
+      const args = { ...argsFor(receiptPath, cmdStart, cmdEnd) }
+      delete args[key]
+      expect(refusedMessage(acceptC4Receipt(args))).toBe('missing required binder arguments')
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a malformed or reordered command bracket', () => {
+    const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-c4-binder-bracket-')))
+    try {
+      chmodSync(parent, 0o700)
+      const { doc, cmdStart, cmdEnd, now } = bracketedDoc()
+      const receiptPath = writePass(parent, 'nhms-frontend-c4-live-evidence-bracket.json', doc, cmdStart, now)
+      const args = argsFor(receiptPath, cmdStart, cmdEnd)
+      expect(refusedMessage(acceptC4Receipt({ ...args, 'cmd-start': '123junk' }))).toMatch(/CMD_START/)
+      expect(refusedMessage(acceptC4Receipt({
+        ...args,
+        'cmd-start': String(cmdEnd),
+        'cmd-end': String(cmdStart),
+      }))).toMatch(/CMD_START\/CMD_END bracket/)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses receipt mtime, started_at, and ended_at outside the command bracket', () => {
+    const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-c4-binder-window-')))
+    try {
+      chmodSync(parent, 0o700)
+      const { doc, cmdStart, cmdEnd, now } = bracketedDoc()
+      const iso = (sec: number) => new Date(sec * 1000).toISOString().replace('.000Z', 'Z')
+      const mtimePath = writePass(parent, 'nhms-frontend-c4-live-evidence-mtime.json', doc, cmdStart, now)
+      const earlyMtime = new Date((cmdStart - 5) * 1000)
+      utimesSync(mtimePath, earlyMtime, earlyMtime)
+      expect(refusedMessage(acceptC4Receipt(argsFor(mtimePath, cmdStart, cmdEnd)))).toMatch(/mtime is before CMD_START/)
+
+      const started = { ...doc, started_at: iso(cmdStart - 1), ended_at: iso(now), generated_at: iso(now) }
+      const startedPath = writePass(parent, 'nhms-frontend-c4-live-evidence-started.json', started, cmdStart, now)
+      expect(refusedMessage(acceptC4Receipt(argsFor(startedPath, cmdStart, cmdEnd)))).toMatch(/started_at is before CMD_START/)
+
+      const ended = { ...doc, started_at: iso(cmdStart), ended_at: iso(cmdEnd + 1), generated_at: iso(cmdEnd + 1) }
+      const endedPath = writePass(parent, 'nhms-frontend-c4-live-evidence-ended.json', ended, cmdStart, now)
+      expect(refusedMessage(acceptC4Receipt(argsFor(endedPath, cmdStart, cmdEnd)))).toMatch(/ended_at is after CMD_END/)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses the wrong receipt mode, nlink, and parent mode', () => {
+    const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-c4-binder-posix-')))
+    try {
+      chmodSync(parent, 0o700)
+      const { doc, cmdStart, cmdEnd, now } = bracketedDoc()
+      const modePath = writePass(parent, 'nhms-frontend-c4-live-evidence-mode.json', doc, cmdStart, now)
+      chmodSync(modePath, 0o644)
+      expect(refusedMessage(acceptC4Receipt(argsFor(modePath, cmdStart, cmdEnd)))).toMatch(/mode is not 600/)
+
+      const nlinkPath = writePass(parent, 'nhms-frontend-c4-live-evidence-nlink.json', doc, cmdStart, now)
+      linkSync(nlinkPath, path.join(parent, 'nhms-frontend-c4-live-evidence-nlink-hard.json'))
+      expect(refusedMessage(acceptC4Receipt(argsFor(nlinkPath, cmdStart, cmdEnd)))).toMatch(/nlink is not 1/)
+
+      const parentModePath = writePass(parent, 'nhms-frontend-c4-live-evidence-parent-mode.json', doc, cmdStart, now)
+      chmodSync(parent, 0o755)
+      expect(refusedMessage(acceptC4Receipt(argsFor(parentModePath, cmdStart, cmdEnd)))).toMatch(/parent mode is not 700/)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses a hook-driven parent identity change after pathname facts', () => {
+    const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-c4-binder-parent-')))
+    try {
+      chmodSync(parent, 0o700)
+      const { doc, cmdStart, cmdEnd, now } = bracketedDoc()
+      const receiptPath = writePass(parent, 'nhms-frontend-c4-live-evidence-parent.json', doc, cmdStart, now)
+      const result = acceptC4Receipt(argsFor(receiptPath, cmdStart, cmdEnd), {
+        hooks: {
+          afterPathnameFacts: ({ parentPath, receiptPath: current }) => {
+            const replacement = `${parentPath}.replacement`
+            mkdirSync(replacement, { mode: 0o700 })
+            chmodSync(replacement, 0o700)
+            copyFileSync(current, path.join(replacement, path.basename(current)))
+            chmodSync(path.join(replacement, path.basename(current)), 0o600)
+            renameSync(parentPath, `${parentPath}.old`)
+            renameSync(replacement, parentPath)
+          },
+        },
+      })
+      expect(result.ok).toBe(false)
+      expect(refusedMessage(result)).toMatch(/parent identity changed|descriptor identity differs|open failed/)
+    } finally {
+      rmSync(parent, { recursive: true, force: true })
+      rmSync(`${parent}.old`, { recursive: true, force: true })
+      rmSync(`${parent}.replacement`, { recursive: true, force: true })
+    }
+  })
+
+  it('CLI binder refuses a missing required argument without inventing flags', () => {
+    const parent = realpathSync(mkdtempSync(path.join(tmpdir(), 'nhms-c4-binder-cli-')))
+    try {
+      chmodSync(parent, 0o700)
+      const { doc, cmdStart, now } = bracketedDoc()
+      const receiptPath = writePass(parent, 'nhms-frontend-c4-live-evidence-cli.json', doc, cmdStart, now)
+      const binder = path.resolve(__dirname, '../../scripts/c4-receipt-binder.mjs')
+      const argv = [
+        binder,
+        '--receipt', receiptPath,
+        '--frontend-origin', 'https://test.nwm.ac.cn',
+        '--api-origin', 'https://test.nwm.ac.cn',
+        '--basin-id', 'basins_qhh',
+        '--segment-id', 'basins_qhh_shud_reach_000001',
+        '--cmd-start', String(cmdStart),
+      ]
+      expect(() => execFileSync('node', argv, { encoding: 'utf8', stdio: 'pipe' })).toThrow()
+      try {
+        execFileSync('node', argv, { encoding: 'utf8', stdio: 'pipe' })
+      } catch (error) {
+        const stderr = (error as { stderr?: string }).stderr ?? ''
+        expect(stderr).toMatch(/missing required binder arguments/)
+      }
     } finally {
       rmSync(parent, { recursive: true, force: true })
     }

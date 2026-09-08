@@ -212,7 +212,6 @@ function validateRuntimeConfig(value: RuntimeConfig) {
       control_mutations_enabled: false,
       slurm_routes_enabled: false,
       queue_depth_mode: 'display_readonly_unavailable',
-      display_readonly: true,
     } satisfies RuntimeConfig
   }
   return value

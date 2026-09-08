@@ -1,9 +1,16 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { client } from '@/api/client'
 import { DISPLAY_READONLY_RUNTIME_CONFIG_DEADLINE_MS, RBACGate } from '@/components/layout/RBACGate'
 import { type AuthRole, useAuthStore } from '@/stores/auth'
-import { useMonitoringStore } from '@/stores/monitoring'
+import { isDisplayReadonlyRuntimeConfig, useMonitoringStore } from '@/stores/monitoring'
+
+vi.mock('@/api/client', () => ({
+  client: {
+    GET: vi.fn(),
+  },
+}))
 
 const allowedRoles: AuthRole[] = ['operator', 'model_admin', 'sys_admin']
 
@@ -18,6 +25,7 @@ function renderGate(allowDisplayReadonly = false) {
 describe('RBACGate', () => {
   beforeEach(() => {
     vi.useRealTimers()
+    vi.clearAllMocks()
     useAuthStore.setState({ role: 'viewer' })
     useMonitoringStore.setState({ runtimeConfig: null, runtimeConfigError: null, fetchRuntimeConfig: async () => undefined })
   })
@@ -147,6 +155,40 @@ describe('RBACGate', () => {
     renderGate(true)
 
     expect(screen.getByText('权限不足')).toBeInTheDocument()
+    expect(screen.queryByText('allowed content')).not.toBeInTheDocument()
+  })
+
+  it('denies a viewer after fetchRuntimeConfig stores a contradictory raw GET body', async () => {
+    useMonitoringStore.setState({
+      fetchRuntimeConfig: useMonitoringStore.getInitialState().fetchRuntimeConfig,
+    })
+    vi.mocked(client.GET).mockResolvedValue({
+      data: {
+        status: 'success',
+        data: {
+          service_role: 'display_readonly',
+          display_readonly: false,
+          control_mutations_enabled: true,
+          slurm_routes_enabled: true,
+          queue_depth_mode: 'slurm_gateway',
+        },
+      },
+      error: undefined,
+    } as never)
+
+    renderGate(true)
+    await waitFor(() => expect(client.GET).toHaveBeenCalledWith('/api/v1/runtime/config'))
+    await waitFor(() => expect(screen.getByText('权限不足')).toBeInTheDocument())
+
+    const stored = useMonitoringStore.getState().runtimeConfig
+    expect(stored).toMatchObject({
+      service_role: 'display_readonly',
+      display_readonly: false,
+      control_mutations_enabled: false,
+      slurm_routes_enabled: false,
+      queue_depth_mode: 'display_readonly_unavailable',
+    })
+    expect(isDisplayReadonlyRuntimeConfig(stored)).toBe(false)
     expect(screen.queryByText('allowed content')).not.toBeInTheDocument()
   })
 
