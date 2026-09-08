@@ -25,8 +25,10 @@ Width exception: multi-path - 同一接受链的 browser/RBAC/filesystem 故障�
 
 ## 4. Reviewed delivery
 
-- [ ] 4.1 含实际切片提交的独立 bounded comprehensive review/verdict ledger与最终 Gap Sweep已完成（`evidence/review/`）；等待最终证据提交 push 后的 exact branch tip/CI/oracle integrity，未满足前保持未勾。
-- [ ] 4.2 中文 PR/工作说明与偏离记录；merge 后单独 accountability，不关闭 #1895/#1891，不勾其 live tasks。
+- [x] 4.1 完成含实际切片提交的 bounded comprehensive review、独立 verdict ledger 与最终 Gap Sweep（`evidence/review/`）；最终 push 后的 exact branch-tip、required CI 与 oracle-integrity 是外部 pre-merge 硬门，不能靠勾选本任务替代。
+- [x] 4.2 中文 PR/工作说明与完整偏离记录已生成并在最终 push 后以文件方式发布；不关闭 #1895/#1891，不勾其 live tasks。
+
+Post-merge obligation: 合并后以独立 accountability/archive 变更记录最终 merge SHA、关闭 #2123 并归档本 change。该动作不在等待 CI 时通过 docs-only 尾随 commit 注入本 PR，也不改变 #1895 的 live 先后顺序。
 
 ## Evidence boundary
 
