@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NHMS #1895 C2 readonly boundary acceptance receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "schema_version", "status", "head_sha", "reviewed_sha", "run_id", "started_at", "ended_at", "generated_at", "canonical_summary", "authoritative_files", "checks"],
+  "properties": {
+    "artifact": {"const": "nhms-issue1895-c2-readonly-boundary"}, "schema_version": {"const": "1.0"}, "status": {"const": "PASS"},
+    "head_sha": {"$ref": "#/$defs/sha"}, "reviewed_sha": {"$ref": "#/$defs/sha"},
+    "run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"},
+    "started_at": {"$ref": "#/$defs/time"}, "ended_at": {"$ref": "#/$defs/time"}, "generated_at": {"$ref": "#/$defs/time"},
+    "canonical_summary": {"$ref": "#/$defs/file_facts"},
+    "authoritative_files": {
+      "type": "object", "additionalProperties": false,
+      "required": ["summary.json", "role.json", "route_smoke.json", "permission_probes.json"],
+      "properties": {"summary.json": {"$ref": "#/$defs/file_facts"}, "role.json": {"$ref": "#/$defs/file_facts"}, "route_smoke.json": {"$ref": "#/$defs/file_facts"}, "permission_probes.json": {"$ref": "#/$defs/file_facts"}}
+    },
+    "checks": {
+      "type": "object", "additionalProperties": false,
+      "required": ["summary_live_schema", "summary_pass", "summary_live_provenance", "summary_full_gfs_ifs_scope", "summary_run_id", "readonly_role", "siblings_match"],
+      "properties": {"summary_live_schema": {"const": true}, "summary_pass": {"const": true}, "summary_live_provenance": {"const": true}, "summary_full_gfs_ifs_scope": {"$ref": "#/$defs/full_scope"}, "summary_run_id": {"const": true}, "readonly_role": {"const": true}, "siblings_match": {"const": true}}
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "time": {"type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"},
+    "full_scope": {"type": "object", "additionalProperties": false, "required": ["merged_source_evidence", "declared_sources", "reduced_scope", "source_bundle_count", "source_artifact_sources", "display_identity_sources"], "properties": {"merged_source_evidence": {"const": true}, "declared_sources": {"const": ["GFS", "IFS"]}, "reduced_scope": {"const": false}, "source_bundle_count": {"const": 2}, "source_artifact_sources": {"const": [["GFS"], ["IFS"]]}, "display_identity_sources": {"const": ["GFS", "IFS"]}}},
+    "file_facts": {"type": "object", "additionalProperties": false, "required": ["st_dev", "st_ino", "st_uid", "st_mode", "st_nlink", "st_size", "sha256"], "properties": {"st_dev": {"type": "integer", "minimum": 0}, "st_ino": {"type": "integer", "minimum": 0}, "st_uid": {"type": "integer", "minimum": 0}, "st_mode": {"const": 384}, "st_nlink": {"const": 1}, "st_size": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/digest"}}}
+  }
+}

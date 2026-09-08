@@ -19,6 +19,7 @@ executable fence patterns — never the whole-section prose.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -55,9 +56,7 @@ def _gate(gate: str) -> str:
     section = _section()
     start = section.index(f"### {gate} ")
     candidates = [
-        section.index(f"### {candidate} ")
-        for candidate in GATE_ORDER
-        if section.find(f"### {candidate} ") > start
+        section.index(f"### {candidate} ") for candidate in GATE_ORDER if section.find(f"### {candidate} ") > start
     ]
     nxt = min(candidates) if candidates else len(section)
     return section[start:nxt]
@@ -69,13 +68,34 @@ def _norm(text: str) -> str:
 
 
 def _bash_fences(text: str) -> list[tuple[int, str]]:
-    """All bash fences in the text, as (opening line number, body)."""
-    return [
-        (opening, body)
-        for match in re.finditer(r"```bash\n(.*?)\n```", text, flags=re.DOTALL)
-        for opening in [text.count("\n", 0, match.start()) + 1]
-        for body in [match.group(1)]
-    ]
+    """All bash fences in the text, as (opening line number, body).
+
+    Markdown permits indented fences. A closing fence may be no more indented
+    than its opener, which avoids treating a nested ````` block in an unrelated
+    indented list as the end of a shell fence.
+    """
+
+    opening = re.compile(r"^( {0,3})(`{3,}|~{3,})([^\s]*)[^\n]*$", flags=re.MULTILINE)
+    lines = text.splitlines()
+    fences: list[tuple[int, str]] = []
+    active: tuple[int, str, int, int, int] | None = None
+    for line_number, line in enumerate(lines, start=1):
+        if active is None:
+            match = opening.match(line)
+            if match is None or match.group(3).lower() not in {"bash", "sh", "shell"}:
+                continue
+            active = (line_number, match.group(2)[0], len(match.group(2)), len(match.group(1)), line_number)
+            continue
+        line_start, character, width, indentation, body_start = active
+        stripped = line.lstrip(" ")
+        leading = len(line) - len(stripped)
+        if leading <= indentation and stripped.startswith(character * width) and set(stripped) == {character}:
+            body_lines = lines[body_start: line_number - 1]
+            fences.append((line_start, "\n".join(body_lines)))
+            active = None
+    if active is not None:
+        raise AssertionError(f"unclosed bash fence at line {active[0]}")
+    return fences
 
 
 def _gate_bash(gate: str) -> list[tuple[int, str]]:
@@ -159,6 +179,14 @@ def test_section_has_no_docker_run_in_any_fence() -> None:
         if re.search(r"\bdocker run\b", line)
     ]
     assert not offenders, "docker run inside the #1895 executable fence:\n" + "\n".join(offenders)
+
+
+def test_issue1895_bash_fences_pass_bash_n(tmp_path: Path) -> None:
+    for opening, body in _bash_fences(_section()):
+        script = tmp_path / f"tier-issue1895-fence-{opening}.sh"
+        script.write_text(body, encoding="utf-8")
+        completed = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True, check=False)
+        assert completed.returncode == 0, f"line {opening}: {completed.stderr}"
 
 
 def test_section_names_the_historical_recipe_as_forbidden_entrypoint() -> None:
@@ -281,7 +309,7 @@ def test_root_evidence_uses_production_parsers_and_exact_argv() -> None:
 def test_g2_output_is_verbatim_producer_text_not_json_roundtrip() -> None:
     g2 = _gate("G2")
     assert '"output": backup_text' in g2
-    assert 'json.dumps(backup_document' not in g2
+    assert "json.dumps(backup_document" not in g2
 
 
 def test_root_evidence_never_invokes_the_synthetic_helper_for_production() -> None:
@@ -296,7 +324,7 @@ def test_g5_recaptures_evidence_before_enforce() -> None:
     recapture = g5.index("EVID_STAMP2")
     enforce = g5.index("ENFORCE_RECEIPT")
     assert dry_run < recapture < enforce, "G5 must re-capture with -2 paths before enforce"
-    assert "INSTALL_ARGS=(" in g5[g5.index("Then the single enforce invocation"):]
+    assert "INSTALL_ARGS=(" in g5[g5.index("Then the single enforce invocation") :]
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +394,7 @@ def test_g1_captures_public_valid_times_baseline_before_mutation() -> None:
     g1 = _gate("G1")
     assert "valid-times-baseline.json" in g1
     assert "BASELINE_BRACKET" in g1
-    assert "chmod 600 \"$BASELINE_FILE\"" in g1
+    assert 'chmod 600 "$BASELINE_FILE"' in g1
     assert "G7" not in g1 or "baseline" in g1.lower()
 
 
@@ -388,13 +416,13 @@ def test_oracle_uses_shipping_probe_parser_and_owned_unique_identity() -> None:
     assert "^nhms-1892-probe-[0-9a-f]{8,32}$" in g3
     assert "--host-port" in g3 and "55492" in g3
     assert 'docker inspect "$PROBE_NAME"' in g3
-    assert "test ! -e \"$PROBE_ROOT\"" in g3
+    assert 'test ! -e "$PROBE_ROOT"' in g3
 
 
 def test_g3_cleanup_is_exact_no_prefix_grep() -> None:
     g3 = _gate("G3")
     assert "docker ps -a" not in g3
-    assert "grep -F \"nhms-1892-probe-\"" not in g3
+    assert 'grep -F "nhms-1892-probe-"' not in g3
     assert "grep -F nhms-1892-probe" not in g3
 
 
@@ -476,10 +504,12 @@ def test_installer_rollback_legal_only_before_terminal_via_reconcile() -> None:
 
 def test_runner_receipt_requires_fresh_migrated_and_one_per_receipt() -> None:
     g6 = _gate("G6")
-    assert '"migrated"' in g6
+    assert "unique_migrated_observation" in g6
+    assert "assert_sequential_tick_receipt" in g6
+    assert "scripts/node27_issue1895_sequential_receipt.py" in g6
+    assert 'len(receipt["selected"]) == 1 and not receipt["deferred"]' not in g6
+    assert "already_cold" in _gate("G8")
     assert 'in {"migrated", "already_cold"}' not in g6
-    assert "already_cold" not in g6
-    assert 'assert observation["outcome"] == "migrated"' in g6
 
 
 def test_intent_sidecar_path_matches_the_shipping_owner_rule() -> None:
@@ -498,10 +528,7 @@ def test_runner_invocation_sources_the_private_env() -> None:
     for _opening, body in _gate_bash("G6"):
         if ". /home/nwm/NWM/infra/env/node27-cold-residency.env" in body:
             sources += 1
-    assert sources == 2, (
-        f"G6 must source the cold env before preview and again before the "
-        f"loop, found {sources}"
-    )
+    assert sources == 2, f"G6 must source the cold env before preview and again before the loop, found {sources}"
 
 
 def test_one_invocation_per_group_with_per_tick_bound_one() -> None:
@@ -523,17 +550,17 @@ def test_g6_loop_reads_without_word_splitting() -> None:
 def test_g6_preview_requires_exactly_one_matching_key() -> None:
     g6 = _gate("G6")
     assert "selected_keys <= set(census" not in g6
-    assert 'assert len(receipt["selected"]) == 1' in g6
-    assert 'assert key == census["group_keys"][0]' in g6
+    assert "assert_sequential_tick_receipt" in g6
+    assert "call_index=1" in g6
+    assert 'census["group_keys"][0]' in g6
     assert 'receipt["outcome"] == "clean"' in g6
+    assert 'assert len(receipt["selected"]) == 1' not in g6
 
 
 def test_receipt_key_binds_to_the_current_census_key_not_a_group_count() -> None:
     g6 = _gate("G6")
     assert "group_keys" in g6
-    assert "origin_oid" in g6
-    assert "range_start" in g6
-    assert "range_end" in g6
+    assert "durable_key" in g6
     assert "assert key == expected_key" in g6
     assert "COUNT(DISTINCT" not in g6
     assert "count(DISTINCT" not in g6
@@ -564,14 +591,64 @@ def test_plan_gates_do_not_ban_decompresschunk_wholesale() -> None:
     assert "not chunks" not in g7
 
 
+def test_issue1895_receipt_fences_use_nanosecond_instants_and_c2_closes_after_publication() -> None:
+    section = _section()
+    assert "date -u +%FT%T%:z" not in section
+    assert section.count("date -u +%FT%T.%N%:z") >= 6
+    g7 = _gate("G7")
+    c2_start = g7.index("C2_CMD_START")
+    c2_accept = g7.index("scripts/node27_issue1895_readonly_accept.py")
+    c2_end = g7.index("C2_CMD_END")
+    c2_bind = g7.index("scripts/node27_issue1895_readonly_accept_bind.py")
+    assert c2_start < c2_accept < c2_end < c2_bind
+
+
+def test_g7_c1_c2_c3_owners_replace_grep_and_empty_aggregator() -> None:
+    g7 = _gate("G7")
+    for token in (
+        "scripts/node27_issue1895_display_runtime.py",
+        "scripts/node27_issue1895_display_runtime_bind.py",
+        "scripts/node27_issue1895_readonly_accept.py",
+        "scripts/node27_issue1895_readonly_accept_bind.py",
+        "scripts/node27_issue1895_publication_current.py",
+        "scripts/node27_issue1895_publication_current_bind.py",
+    ):
+        assert token in g7
+    assert "scripts/validate_two_node_e2e_evidence.py" not in g7
+    assert "--full-scope" not in g7
+    c1_c3 = g7[g7.index("C1:") : g7.index("The #1342 SQL/API oracle")]
+    assert "curl -fsS" not in c1_c3
+    assert "docker exec nhms-db psql" not in c1_c3
+    assert 'mktemp -d "$REPO_ROOT/artifacts/.nhms-issue1895-readonly-XXXXXX"' in g7
+    assert '--evidence-root "$RUN_ROOT/receipts/readonly-boundary"' not in g7
+    assert "unset NHMS_DISPLAY_READONLY_DATABASE_URL NHMS_READONLY_DB_VALIDATION_DATABASE_URL" in g7
+    assert "--merge-declared-source GFS --merge-declared-source IFS" in g7
+    assert 'mktemp -d "$RUN_ROOT/receipts/c4-display-XXXXXX"' in g7
+    assert 'mktemp -d "$RUN_ROOT/receipts/river-click-XXXXXX"' in g7
+    assert "$REPO_ROOT/.nhms-issue1895-c4-display-" not in g7
+    assert "$REPO_ROOT/.nhms-issue1895-riverclick-" not in g7
+
+
+def test_g7_orders_direct_c3_after_c4_river_click_and_performance_binders() -> None:
+    g7 = _gate("G7")
+    c3_owner = g7.index("scripts/node27_issue1895_publication_current.py")
+    assert c3_owner > g7.index("c4-receipt-binder.mjs")
+    assert c3_owner > g7.index("river-click-receipt-binder.mjs")
+    assert c3_owner > g7.index("scripts/node27_issue1895_performance_bind.py")
+
+
 def test_g7_covers_performance_plans_display_and_internal_observability() -> None:
     g7 = _gate("G7")
     for token in ("valid-times", "publication", "GFS", "IFS", "#1342", "river-click", "P95"):
         assert token in g7, f"G7 missing token {token}"
-    assert "test:e2e:live-display" in g7
+    assert "test:e2e:live-c4-display" in g7
+    assert "c4-receipt-binder.mjs" in g7
+    assert "schemas/frontend_c4_live_evidence.schema.json" in g7
+    assert "test:e2e:live-display" not in g7
     assert "start-display-api.sh" in g7
     assert "validate_readonly_db_boundary.py" in g7
-    assert "display_readonly" in g7
+    assert "scripts/node27_issue1895_display_runtime.py" in g7
+    assert "C1 evidence" in g7
 
 
 def test_g7_valid_times_references_the_g1_baseline_path() -> None:
@@ -583,27 +660,34 @@ def test_g7_valid_times_references_the_g1_baseline_path() -> None:
 
 def test_g7_publication_counts_bind_canonical_sources_and_current_cycle() -> None:
     g7 = _gate("G7")
-    assert "CURRENT_CYCLE" in g7
-    assert "source_id" in g7
-    assert 'for SOURCE in gfs IFS' in g7
+    assert "scripts/node27_issue1895_publication_current.py" in g7
+    assert "--registry" not in g7
+    publication_owner = (
+        REPO_ROOT / "packages" / "common" / "node27_issue1895_publication_current.py"
+    ).read_text(encoding="utf-8")
+    assert "CANONICAL_SCHEDULER_REGISTRY_MANIFEST" in publication_owner
+    assert 'Path("/home/ghdc/nwm/object-store/scheduler/registry/manifest-last.json")' in publication_owner
+    assert "CANONICAL_SCHEDULER_REGISTRY_MANIFEST_ALIASES" not in publication_owner
+    assert "registry_generated_at" in publication_owner
+    assert "_registry_checksum" in publication_owner
+    assert "registry mtime is not a freshness oracle" in g7
+    assert '--c4-receipt "$C4_RECEIPT"' in g7
+    assert "scripts/node27_issue1895_publication_prove.py" not in g7
     assert "grep -ci 'gfs'" not in g7
+    assert "CURRENT_CYCLE" not in g7
+    assert "gfs_expected_count=sum" not in g7
 
 
 def test_g7_plan_binder_does_real_all_chunk_comparison() -> None:
     g7 = _gate("G7")
-    assert "plan_decompressed" in g7
-    assert "wrapper_wall_seconds" not in g7 or "candidate count" in g7
-    # The guard must be a machine-asserted strict-subset comparison between the
-    # plan's DecompressChunk nodes and the same-window catalog candidate count
-    # -- never a bare print, never an "assert not chunks" ban.
-    lines = " ".join(_gate_lines("G7"))
-    assert "CANDIDATES=" in lines, "candidate count not captured"
-    assert "hypertable_name='river_timeseries'" in lines, (
-        "candidate query must be scoped to the plan's hypertable"
-    )
-    assert "plan_decompressed < candidates" in lines, (
-        "strict-subset all-chunk comparison missing"
-    )
+    assert "Seq Scan" in g7
+    assert "DecompressChunk" in g7
+    assert "scripts/node27_issue1895_performance_oracle.py" in g7
+    assert "--display-env /home/nwm/NWM/infra/env/display.env" in g7
+    assert "scripts/node27_issue1895_performance_bind.py" in g7
+    for _opening, body in _gate_bash("G7"):
+        assert "Shared Read Buffers:" not in body
+        assert "json.load(open(path))" not in body
     assert "assert not chunks" not in g7
 
 
@@ -636,19 +720,19 @@ def test_g8_restores_by_recorded_unit_file_state_without_enable_now() -> None:
     # A static unit has no [Install] section (shipping unit files confirm), so
     # "static" must be a no-op, never `systemctl --user enable` (which fails on
     # a static unit) and never a hand start.
-    static_branch = g8[g8.index("static)"): g8.index("masked|unknown)")]
+    static_branch = g8[g8.index("static)") : g8.index("masked|unknown)")]
     assert "systemctl --user enable" not in static_branch, "static branch enables a static unit"
     assert "systemctl --user start" not in static_branch, "static branch starts a unit"
     assert ":" in static_branch, "static branch must be a no-op"
     # The enabled branch must re-arm a stopped timer in this live session:
     # enable alone persists the symlink but does not make a stopped timer active.
-    enabled_branch = g8[g8.index('enabled)') : g8.index("static)")]
+    enabled_branch = g8[g8.index("enabled)") : g8.index("static)")]
     assert "systemctl --user enable" in enabled_branch
     assert re.search(r"/usr/bin/systemctl --user start \"\$UNIT\"", enabled_branch), (
         "enabled branch must start the timer to re-arm it"
     )
     # Fail-closed: an enabled non-timer must be refused, not started.
-    assert "echo \"NO-GO: enabled" in enabled_branch
+    assert 'echo "NO-GO: enabled' in enabled_branch
 
 
 def test_g8_observes_natural_tick_through_systemd_fields_not_sleep_or_inotify() -> None:
@@ -668,17 +752,70 @@ def test_g8_observes_natural_tick_through_systemd_fields_not_sleep_or_inotify() 
     # The proof fields must be machine-compared in the fence, not merely named
     # in prose.
     assert "TIMER_AFTER" in " ".join(lines) and "SERVICE_NOW" in " ".join(lines)
-    assert "test \"$TIMER_AFTER\" != \"$TIMER_BEFORE\"" in " ".join(lines)
-    assert "test \"$SERVICE_NOW\" != \"$SERVICE_BEFORE\"" in " ".join(lines)
+    assert 'test "$TIMER_AFTER" != "$TIMER_BEFORE"' in " ".join(lines)
+    assert 'test "$SERVICE_NOW" != "$SERVICE_BEFORE"' in " ".join(lines)
 
 
 def test_g8_noop_requires_catalog_proof_and_moved_key_presence() -> None:
     g8 = _gate("G8")
-    assert 'receipt["outcome"] == "no_op"' in g8
-    assert "REMAINING_ALL_SOURCE" in g8
-    assert 'test "$REMAINING_ALL_SOURCE" = "0"' in g8
-    assert "MOVED_GROUPS" in g8
-    assert 'test "$MOVED_GROUPS" -ge "$REQUIRE_COUNT"' in g8
+    assert "REMAINING_ALL_SOURCE" not in g8
+    assert "scripts/node27_issue1895_post_target_observe.py" in g8
+    assert "scripts/node27_issue1895_group_reconcile.py" in g8
+    assert "assert_natural_receipt_identity" in g8
+    assert "newly_terminal_keys" in g8
+    assert "complete_source_keys" in g8
+    assert 'test "$MOVED_GROUPS" -ge "$REQUIRE_COUNT"' not in g8
+    assert "no_op" in g8
+
+
+def test_rollout_conventions_require_one_maintenance_shell_for_cross_fence_state() -> None:
+    section = _section()
+    assert "One maintenance shell owns G0…G8." in section
+    assert "in that same shell" in section
+    assert "Never paste an individual downstream" in section
+    for variable in ("$RUN_ROOT", "$RUN_STAMP", "$REVIEWED_SHA", "$UNITS_ENABLE_STATE", "TIMER_BEFORE", "W8_PATH"):
+        assert variable in section
+
+
+def test_g8_binds_a_post_tick_external_horizon_before_receipt_or_group_validation() -> None:
+    g8 = _gate("G8")
+    restore = g8.index('/usr/bin/systemctl --user start "$UNIT"')
+    service_success = g8.index('test "$RESULT" = "success"')
+    service_exit = g8.index('SERVICE_EXIT=')
+    w8_owner = g8.index('scripts/node27_issue1895_watermark.py')
+    receipt_identity = g8.index("assert_natural_receipt_identity")
+    receipt_horizon = g8.index("assert_independent_receipt_horizon")
+    group_reconcile = g8.index("scripts/node27_issue1895_group_reconcile.py")
+    pre_observation = g8.index('output "$PRE_NATURAL"')
+
+    assert pre_observation < restore < service_success < service_exit < w8_owner
+    assert w8_owner < receipt_identity < group_reconcile
+    assert w8_owner < receipt_horizon < group_reconcile
+    assert 'test ! -e "$W8_PATH"' in g8
+    assert "post-tick external independent horizon" in g8
+    assert "not G1" in g8
+    assert "never receipt self-report" in g8
+    assert g8.index('output "$PRE_NATURAL"') < g8.index('scripts/node27_issue1895_watermark.py')
+    assert "expected_watermark=receipt" not in g8
+    assert "expected_cutoff=receipt" not in g8
+    assert '--expected-cutoff "$(/home/nwm/NWM/.venv/bin/python -c' in g8
+    assert '--expected-watermark "$(/home/nwm/NWM/.venv/bin/python -c' in g8
+
+
+def test_g8_systemd_facts_output_is_exclusive_private_and_checked() -> None:
+    g8 = _gate("G8")
+    timer_show = g8.index('TIMER_SHOW="$RUN_ROOT/receipts/timer-show-$RUN_STAMP.txt"')
+    service_show = g8.index('SERVICE_SHOW="$RUN_ROOT/receipts/service-show-$RUN_STAMP.txt"')
+    output = g8.index('SYSTEMD_FACTS="$RUN_ROOT/receipts/systemd-facts-$RUN_STAMP.json"')
+    absent = g8.index('test ! -e "$RUN_ROOT/receipts/systemd-facts-$RUN_STAMP.json"')
+    owner = g8.index("scripts/node27_issue1895_systemd_facts.py")
+    regular = g8.index('test -f "$SYSTEMD_FACTS" && test ! -L "$SYSTEMD_FACTS"')
+    mode = g8.index("stat -c '%a' \"$SYSTEMD_FACTS\")\" = \"600\"")
+    nlink = g8.index("stat -c '%h' \"$SYSTEMD_FACTS\")\" = \"1\"")
+
+    assert timer_show < service_show < output < absent < owner < regular < mode < nlink
+    assert 'test ! -e "$TIMER_SHOW"' in g8
+    assert 'test ! -e "$SERVICE_SHOW"' in g8
 
 
 # ---------------------------------------------------------------------------
@@ -715,16 +852,14 @@ def test_rollback_table_matches_three_state_contract() -> None:
     # Rollback rows that restore timer enablement must re-arm the recorded
     # `.timer`s (start), not just `enable` — otherwise a stopped timer never
     # fires again until the user manager restarts.
-    restore_rows = [
-        line for line in table.splitlines()
-        if line.startswith("| Before any mutation")
-        or line.startswith("| After the writer drain")
-    ]
-    assert len(restore_rows) == 2, restore_rows
-    for line in restore_rows:
-        assert "`start` on each recorded `.timer`" in line, line
-        assert "never `enable --now`" in line, line
-        assert "never start a `.service`" in line, line
+    before = next(line for line in table.splitlines() if line.startswith("| Before any mutation"))
+    assert "no-op" in before.lower()
+    assert "does not exist yet" in before
+    assert "must not be referenced" in before
+    drain = next(line for line in table.splitlines() if line.startswith("| After the writer drain"))
+    assert "`start` on each recorded `.timer`" in drain
+    assert "never `enable --now`" in drain
+    assert "never start a `.service`" in drain
     # Six and only six rows, matching the three-state fixture: pre-mutation,
     # post-drain, post-assembly, live-authority install, terminal installed,
     # post-movement.
@@ -762,9 +897,7 @@ def test_budget_assembly_matches_the_committed_sequential_contract() -> None:
 def test_repo_python_runs_via_no_sync_uv_or_pinned_interpreter_only() -> None:
     for line in _section_lines():
         if "python scripts/" in line or "python packages/" in line:
-            assert "uv run --no-sync" in line or ".venv/bin/python" in line, (
-                f"bare repo-python invocation: {line}"
-            )
+            assert "uv run --no-sync" in line or ".venv/bin/python" in line, f"bare repo-python invocation: {line}"
         if "uv run" in line:
             assert "--no-sync" in line, f"uv run without --no-sync: {line}"
 

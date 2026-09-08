@@ -40,12 +40,12 @@ def is_test_suite_path(path: str) -> bool:
     return any(fnmatch.fnmatch(name, pattern) for pattern in CHANGED_TEST_SUITE_BASENAME_PATTERNS)
 
 
-# #1561: the only auto-skip marker names pytest collection treats as file-level
-# gates. A suite carrying a file-level `pytestmark` of either marker skips in the
+# #1561: the only auto-skipker names pytest collection treats as file-level
+# gates. A suite carrying a file-level `pytestmark` of eitherker skips in the
 # pull-request lane (tests/conftest.py's pytest_collection_modifyitems), so an
-# importer suite so marked must not join the ordinary importer closure — the
+# importer suite soked must not join the ordinary importer closure — the
 # closure is for suites that RUN their assertions on the PR. Function-level
-# marks do not gate the whole file and never appear here: the marker is read
+# ks do not gate the whole file and never appear here: theker is read
 # from a module-level `pytestmark` assignment only.
 SUITE_FILE_GATING_MARKERS: frozenset[str] = frozenset({"integration", "e2e"})
 
@@ -107,7 +107,7 @@ def _import_from_base(path: str, node: ast.ImportFrom) -> str | None:
 
 
 def _file_level_gating_markers(tree: ast.Module) -> frozenset[str]:
-    """File-level gating marker names a module-level ``pytestmark`` applies.
+    """File-level gatingker names a module-level ``pytestmark`` applies.
 
     Read from the AST, not the file text: a ``@pytest.mark.integration``
     decorator on one function gates that function, not the file, and a
@@ -283,9 +283,7 @@ OPENAPI_CONTRACT_TESTS: tuple[str, ...] = (
 # dependency. Both the config file and the dependency lock select it (plus the
 # selector meta-guard, which guards the selector's own rules), so a pyproject
 # or lock change cannot ship without re-proving the policy.
-THREAD_EXCEPTION_POLICY_TESTS: tuple[str, ...] = (
-    "tests/test_pytest_thread_exception_policy.py",
-)
+THREAD_EXCEPTION_POLICY_TESTS: tuple[str, ...] = ("tests/test_pytest_thread_exception_policy.py",)
 
 # #1711: every tracked `tests/test_mapping_builder_*.py` suite. Explicit sorted
 # tuple — deliberately NOT derived at import time: deriving it would run
@@ -313,9 +311,7 @@ MAPPING_BUILDER_TESTS: tuple[str, ...] = (
 # are the recalibration core, the recalibration CLI end-to-end, the recalibration
 # CLI validation split, and the baseline-cutover CLI suite). Kept as explicit
 # constants so the rule site and the meta-tests read one authority.
-STATE_CLONE_HOOK_TESTS: tuple[str, ...] = (
-    "tests/test_state_clone_cutover_hook.py",
-)
+STATE_CLONE_HOOK_TESTS: tuple[str, ...] = ("tests/test_state_clone_cutover_hook.py",)
 NODE22_CLONE_CUTOVER_STATES_TESTS: tuple[str, ...] = (
     "tests/test_state_clone_recalibration.py",
     "tests/test_state_clone_recalibration_cli.py",
@@ -334,7 +330,7 @@ RECALIBRATION_CLI_FIXTURES_TESTS: tuple[str, ...] = (
 
 # #1571: the repository default Python pin and its instruction source are the
 # producer pair for the Python-environment truth oracle. Neither is a backend
-# Python path (the pin is a bare version file, shared.md a markdown instruction
+# Python path (the pin is a bare version file, shared.md akdown instruction
 # source), so without these rules a pin/instruction-only PR would never run the
 # suite that locks 3.11 (the ci.yml backend filter does start the lane, but the
 # selector would yield an empty list and CI would fall to collect-only with
@@ -525,9 +521,7 @@ ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS: tuple[str, ...] = (
     "services/orchestrator/scheduler.py",
 )
 
-DIRECT_GRID_E2E_TESTS: tuple[str, ...] = (
-    "tests/test_direct_grid_e2e.py",
-)
+DIRECT_GRID_E2E_TESTS: tuple[str, ...] = ("tests/test_direct_grid_e2e.py",)
 
 DIRECT_GRID_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_forcing_producer.py::test_direct_grid_contract_valid_nested_manifest_still_parses",
@@ -630,9 +624,7 @@ CHAIN_IMPORTER_TESTS: tuple[str, ...] = (
 # test_warm_start_chaining.py); this additive non-stop rule attaches the focused
 # suite so an owner-only PR runs its own assertions instead of falling to
 # integration-only coverage.
-FORCED_RESUBMIT_SURFACE_TESTS: tuple[str, ...] = (
-    "tests/test_forced_resubmit_veto.py",
-)
+FORCED_RESUBMIT_SURFACE_TESTS: tuple[str, ...] = ("tests/test_forced_resubmit_veto.py",)
 
 SCHEDULER_IMPORTER_TESTS: tuple[str, ...] = (
     "tests/test_cli_publish_qdown.py",
@@ -684,8 +676,8 @@ FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS: tuple[str, ...] = (
     # rides this at-site tuple rather than the `services/orchestrator/**` list.
     # 9 tests in 0.29s.
     "tests/test_hydro_status_set_parity.py",
-    # #1825: the node-22 manual-retry marker suite top-level-imports the journal
-    # repository and pins the marker contract (per-run row vs cohort master) the
+    # #1825: the node-22 manual-retryker suite top-level-imports the journal
+    # repository and pins theker contract (per-run row vs cohort master) the
     # operator channel depends on. It runs in well under a second, so a rule is
     # the right disposition rather than a rule-gap exclusion.
     "tests/test_node22_manual_retry_failed_runs.py",
@@ -797,6 +789,38 @@ NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS: tuple[str, ...] = (
     "tests/test_issue1895_runbook_contract.py",
 )
 
+READONLY_DB_VALIDATION_TESTS: tuple[str, ...] = (
+    "tests/test_readonly_db_validation.py",
+    "tests/test_readonly_db_validation_probes.py",
+    "tests/test_readonly_db_validation_routes.py",
+)
+
+ISSUE1895_READINESS_C1_C2_C3_TESTS: tuple[str, ...] = (
+    "tests/test_issue1895_readiness_c1_c2_c3.py",
+    "tests/test_issue1895_readiness_c3.py",
+)
+
+ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS: tuple[str, ...] = (
+    "tests/test_issue1895_readiness_performance_live.py",
+    "tests/test_issue1895_readiness_performance_live_cli.py",
+)
+
+ISSUE1895_READINESS_STORAGE_TESTS: tuple[str, ...] = (
+    "tests/test_issue1895_readiness_storage.py",
+    "tests/test_issue1895_readiness_storage_publication.py",
+)
+
+ISSUE1895_READINESS_TESTS: tuple[str, ...] = (
+    *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    "tests/test_issue1895_readiness_gates.py",
+    "tests/test_issue1895_readiness_env.py",
+    "tests/test_issue1895_readiness_performance.py",
+    *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+    "tests/test_issue1895_readiness_performance_publication.py",
+    "tests/test_issue1895_readiness_c14.py",
+    *ISSUE1895_READINESS_STORAGE_TESTS,
+)
+
 ISSUE1895_RUNBOOK_CONTRACT_TESTS: tuple[str, ...] = (
     *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
     "tests/test_node27_cold_identity_observe.py",
@@ -809,6 +833,7 @@ ISSUE1895_RUNBOOK_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_node27_cold_residency_runtime_identity.py",
     "tests/test_probe_compressed_chunk_cold_tablespace.py",
     "tests/test_timeseries_storage_schemas.py",
+    *ISSUE1895_READINESS_TESTS,
 )
 
 CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
@@ -820,6 +845,66 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "tests/test_issue1895_runbook_contract.py",
         ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_c1_c2_c3.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_c3.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_gates.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_env.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_performance.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_performance_live.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_performance_live_cli.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_performance_publication.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_c14.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_storage.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_storage_publication.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_cold_residency_census.py",
+        NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS + ISSUE1895_READINESS_TESTS,
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1976,6 +2061,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         PRECIP_SURFACE_TESTS,
     ),
     PathTestRule(
+        "services/production_closure/readonly_db_validation.py",
+        (
+            *READONLY_DB_VALIDATION_TESTS,
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        ),
+    ),
+    PathTestRule(
         # #1455: the directory's 25 importer gaps collapse onto four suites, all
         # of which are production-closure suites that other rules happened to own
         # (real_backend.py, forcing_producer, the readonly-db script). The
@@ -2004,7 +2096,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_production_scale_validation.py",
             "tests/test_production_e2e_validation.py",
             "tests/test_production_met_validation.py",
-            "tests/test_readonly_db_validation.py",
+            *READONLY_DB_VALIDATION_TESTS,
             "tests/test_two_node_e2e_evidence.py",
         ),
     ),
@@ -2347,7 +2439,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/validate_readonly_db_boundary.py",
-        ("tests/test_readonly_db_validation.py",),
+        (
+            *READONLY_DB_VALIDATION_TESTS,
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        ),
     ),
     PathTestRule(
         # #1571: the continuous entrypoint's dedicated current-authority owner
@@ -2583,7 +2678,432 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # contracts it binds; a section-only PR must run its contract suite
             # instead of falling to collect-only.
             "tests/test_issue1895_runbook_contract.py",
+            *ISSUE1895_READINESS_TESTS,
         ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_env_rewrite.py",
+        (
+            "tests/test_issue1895_readiness_env.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_performance_oracle.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_performance_bind.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_bind_readonly_dsn.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_display_runtime.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_display_runtime_bind.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_readonly_accept.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+            *READONLY_DB_VALIDATION_TESTS,
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_readonly_accept_bind.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_publication_current.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_publication_current_bind.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_fs_reconcile.py",
+        (
+            "tests/test_issue1895_readiness_c14.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_group_reconcile.py",
+        (
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_readiness_gates.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_env.py",
+        (
+            "tests/test_issue1895_readiness_env.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_performance.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_query.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_lanes.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_catalog.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_identity.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_private_receipt.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_display_runtime.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_readonly_accept.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+            *READONLY_DB_VALIDATION_TESTS,
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_publication_current.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    # C1 reads the pinned private display.env through evidence_io's
+    # descriptor-bound byte/identity primitive. This exact owner has no
+    # same-name suite, so route its one direct receipt contract without pulling
+    # unrelated legacy evidence suites; shared core/invariant riders remain
+    # additive outside PATH_TEST_RULES.
+    PathTestRule(
+        "packages/common/evidence_io.py",
+        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
+    ),
+    # C3 verifies the scheduler manifest's shipping schema/checksum primitives;
+    # a change there must run C3's consumer contract as well as producer tests.
+    PathTestRule(
+        "services/orchestrator/scheduler_file_providers.py",
+        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_commit.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_receipt_validate.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_performance_live.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_http.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_sql.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_readiness_gates.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_probe.py",
+        ("tests/test_issue1895_readiness_gates.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_process.py",
+        ("tests/test_issue1895_readiness_gates.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_dsn.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+            *READONLY_DB_VALIDATION_TESTS,
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_fs.py",
+        (
+            "tests/test_issue1895_readiness_c14.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_timer.py",
+        (
+            "tests/test_issue1895_readiness_gates.py",
+            "tests/test_issue1895_readiness_c14.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_publication.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_c14.py",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_gates.py",
+        ("tests/test_issue1895_readiness_gates.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_rollback.py",
+        ("tests/test_issue1895_readiness_gates.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_engine.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_census_bind.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_receipt.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_post_target.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_watermark.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_engine.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_census_bind.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_sequential_receipt.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_post_target_observe.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_publication_prove.py",
+        (
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_watermark.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_systemd_facts.py",
+        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_percentiles.py",
+        (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "packages/common/node27_issue1895_types.py",
+        (
+            "tests/test_issue1895_readiness_gates.py",
+            "tests/test_issue1895_readiness_env.py",
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_readiness_c14.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "docs/runbooks/node-27-bringup-checklist.md",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        "schemas/node27_issue1895_c1_display_runtime_receipt.schema.json",
+        ("tests/test_issue1895_readiness_c1_c2_c3.py", "tests/test_issue1895_readiness_c14.py"),
+    ),
+    PathTestRule(
+        "schemas/node27_issue1895_c2_readonly_boundary_receipt.schema.json",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            *READONLY_DB_VALIDATION_TESTS,
+        ),
+    ),
+    PathTestRule(
+        "schemas/node27_issue1895_c3_current_publication_display_receipt.schema.json",
+        (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            "tests/test_issue1895_readiness_c14.py",
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+        ),
+    ),
+    PathTestRule(
+        "schemas/examples/node27_issue1895_c1_display_runtime_receipt.example.json",
+        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
+    ),
+    PathTestRule(
+        "schemas/examples/node27_issue1895_c2_readonly_boundary_receipt.example.json",
+        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
+    ),
+    PathTestRule(
+        "schemas/examples/node27_issue1895_c3_current_publication_display_receipt.example.json",
+        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
     ),
     PathTestRule(
         # #1895 task 4.0: the pre-target census CLI freezes the group/capacity
@@ -2848,7 +3368,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         # #1571: the two-node Docker runbook is `infra/**`, which already opens
         # the backend lane; the rule converts that collect-only lane into real
-        # assertions. Exact path, deliberately NOT a glob over infra markdown —
+        # assertions. Exact path, deliberately NOT a glob over infrakdown —
         # other runbooks must not start the backend lane (inventory scope).
         "infra/README.two-node-docker.md",
         (TWO_NODE_DOCKER_RUNBOOK_ENV_TEST,),
@@ -2962,7 +3482,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1646: a pytest-config change must re-prove the thread-exception
         # policy (the file carries the exact filter and the no-timeout
         # decision) and still keep core smoke plus the selector meta-guard.
-        # #1894 additionally registers the dedicated disposable-Docker marker,
+        # #1894 additionally registers the dedicated disposable-Dockerker,
         # whose gate contract is asserted without executing its real rows.
         "pyproject.toml",
         (
@@ -3022,7 +3542,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # imported by the residency unit suite at module scope, so a support-only
         # PR previously selected core-smoke plus the #1656 rider and skipped the
         # focused probe contract. Ownership/cleanup lives in a sibling suite so a
-        # support-only PR cannot skip the created-container marker. Additive: the
+        # support-only PR cannot skip the created-containerker. Additive: the
         # #1744 shared-library baseline remains outside this rule.
         "packages/common/compressed_chunk_cold_probe/**",
         (
@@ -3323,9 +3843,7 @@ def _collection_smoke_required(changed: Sequence[str], *, meta_guard_only: bool)
     """
     if meta_guard_only:
         return True
-    return any(
-        path in ("scripts/select_ci_tests.py", SELECTOR_META_GUARD_TEST) for path in changed
-    )
+    return any(path in ("scripts/select_ci_tests.py", SELECTOR_META_GUARD_TEST) for path in changed)
 
 
 def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -> list[str]:
@@ -3604,9 +4122,7 @@ def _write_github_output(
     # non-collapsed (selector source + Timescale invariant, #1744/#1656).
     # `changed_paths` is the already-normalized set the selection loop ran on;
     # no ambient git state is inspected and no diff is re-run.
-    collection_smoke_required = _collection_smoke_required(
-        changed_paths, meta_guard_only=meta_guard_only
-    )
+    collection_smoke_required = _collection_smoke_required(changed_paths, meta_guard_only=meta_guard_only)
     with output_path.open("a", encoding="utf-8") as handle:
         handle.write(f"count={len(tests)}\n")
         handle.write(f"tests={' '.join(tests)}\n")

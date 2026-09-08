@@ -432,9 +432,16 @@ move-back entrypoint to land through its owner before reversal.
 Every manual value is short canonical decimal and every accepted receipt is
 bound to this invocation's reviewed SHA, generated-at bracket, mode/outcome and
 exit status. This makes #1938 non-blocking without permitting a stale clean file
-to satisfy readiness. The evidence PR merges while the shared change is still
-strict-valid; #1895 and then #1891 close only after that merge, and archival is
-an immediate post-merge follow-up after final strict validation.
+to satisfy readiness. For C1/C2/C3, #1895 uses a direct current
+publication/display receipt: it binds C4 PASS bytes and strict GFS/IFS job-log
+facts to local display identity-only reads, readonly DB exact identities,
+source-scoped registry complete-cycle counts, and the G1 valid-times frontier.
+It does not claim node-22 scheduling and is not a substitute for the generic
+producer-complete twelve-lane/full-scope aggregator. That aggregator remains
+fail-closed and may run only against its complete producer bundle; creating an
+empty directory never closes it. The evidence PR merges while the shared change
+is still strict-valid; #1895 and then #1891 close only after that merge, and
+archival is an immediate post-merge follow-up after final strict validation.
 
 ## Risk Packs
 

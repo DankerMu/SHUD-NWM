@@ -92,7 +92,9 @@ display/frontend oracle 都在 node-27。
 ### C1. 部署 receipt（开发期本地起服务，非 docker compose up）
 
 - [ ] **开发期：27 本地起 display API**（不 `docker compose up`）：只读派生端口，
-  再启动 wrapper。
+  再启动 wrapper。#1895 的 C1 receipt owner 只解析 `NHMS_DISPLAY_API_PORT`（缺省
+  `8080`）而不 source 该 env，随后必须通过 systemd MainPID/cgroup、`/health`、
+  runtime 五键精确值和 `/api/v1/slurm/health` 的 404；start log 不是 receipt。
 
   ```bash
   DISPLAY_API_PORT="$(
@@ -113,7 +115,7 @@ display/frontend oracle 都在 node-27。
 
 ### C2. 只读 DB denied-write receipt（tasks 5.1/5.2/5.4/5.8）
 
-- [ ] 用 27 真实只读账号设 `NHMS_DISPLAY_READONLY_DATABASE_URL`（或 `NHMS_READONLY_DB_VALIDATION_DATABASE_URL`），跑 readonly DB validation 入口，产出脱敏 evidence：
+- [ ] 用 27 真实只读账号设 `NHMS_DISPLAY_READONLY_DATABASE_URL`（或 `NHMS_READONLY_DB_VALIDATION_DATABASE_URL`），跑 canonical readonly DB validation 入口，产出脱敏 evidence。#1895 从显式私有 `display.env` 绑定唯一短生命周期 DSN，环境中的旧 DSN 不可覆盖；canonical evidence 必须在已批准 `artifacts/` 根的唯一子树，以本次 run-id 运行，成功后由 C2 acceptance receipt 绑定四个 authoritative 文件 digest 与 exact reviewed SHA：
   - display API（health/models/stations/latest-product/pipeline status·stages·jobs·logs/runtime config）在只读凭证下 PASS，identity-bound 路由用一个 strict `source/cycle_time/run_id/model_id`、logs 绑 `job_id`。
   - permission-denied 矩阵：`hydro/met/ops` 关键表的 INSERT/UPDATE/DELETE/DDL/TRUNCATE/sequence/schema CREATE 全被拒，记录 `current_user` + DB role 类型。
   - 缺真实 DB 时入口必须报 `BLOCKED`，不得 mock 冒充 PASS。
@@ -144,7 +146,7 @@ ingest / download / compression / cold-residency / retention 五条 lane 全部�
 
 ### C3. cross-plane identity live（tasks 4.3 + §10.2/10.3）
 
-- [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：22 生产 → DB 状态 → published logs → `/api/v1/mvp/qhh/latest-product` → 27 `/` 单页地图 + `/ops`，**拒 historical latest 冒充**。
+- [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：22 生产 → DB 状态 → published logs → `/api/v1/mvp/qhh/latest-product` → 27 `/` 单页地图 + `/ops`，**拒 historical latest 冒充**。#1895 的 direct current C3 receipt 在 C4 PASS 后绑定其 exact bytes、readonly DB exact API identity、source-scoped registry complete-cycle 集合和 valid-times baseline；它不冒充通用 producer-complete full-scope/twelve-lane aggregator，后者仍只接受完整 producer bundle。
 - [ ] GFS + IFS 双源都过 strict latest/series/ops/logs/browser 才算 cross-plane `PASS`；单源为 `PARTIAL`。
 
 ### C4. 浏览器 e2e（tasks 6.8 + §10.4）
