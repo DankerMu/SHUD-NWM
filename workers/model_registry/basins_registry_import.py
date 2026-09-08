@@ -1222,7 +1222,7 @@ def _backfill_output_segment_geometry(
             stream_type,
         )
 
-    updates: list[tuple[str, str, float | None, str]] = []
+    updates: list[tuple[str, str, float | None, str, str]] = []
     for index, reach_rows in reaches_by_index.items():
         reach_geom = reach_geom_by_index.get(index)
         if reach_geom is None:
@@ -1239,7 +1239,7 @@ def _backfill_output_segment_geometry(
         for reach_id, geom_missing in reach_rows:
             if only_missing and not geom_missing and stream_type is None:
                 continue
-            updates.append((reach_id, geom_wkt, total_length, provenance))
+            updates.append((reach_id, geom_wkt, total_length, provenance, river_network_version_id))
 
     if not updates:
         return 0
@@ -1249,6 +1249,10 @@ def _backfill_output_segment_geometry(
     # (default 100 rows/page) and cursor.rowcount would then report only the LAST
     # page, undercounting; RETURNING + fetch=True concatenates every page's updated
     # rows so the returned count is accurate and paging-safe for any basin size.
+    # #2158: the network id rides in the VALUES tuple (5th column) instead of a
+    # second bind because execute_values accepts exactly one %s placeholder;
+    # matching the full composite PK keeps a same-id row in another network
+    # untouched.
     updated_rows = execute_values(
         cursor,
         """
@@ -1261,15 +1265,17 @@ def _backfill_output_segment_geometry(
                 value.river_segment_id::text AS river_segment_id,
                 ST_Multi(ST_GeomFromText(value.wkt, 4490)) AS geom,
                 value.length_m::double precision AS length_m,
-                value.provenance::jsonb AS provenance
-            FROM (VALUES %s) AS value(river_segment_id, wkt, length_m, provenance)
+                value.provenance::jsonb AS provenance,
+                value.river_network_version_id::text AS river_network_version_id
+            FROM (VALUES %s) AS value(river_segment_id, wkt, length_m, provenance, river_network_version_id)
         ) AS source
         WHERE target.river_segment_id = source.river_segment_id
+          AND target.river_network_version_id = source.river_network_version_id
           AND ST_Length(source.geom) > 0
         RETURNING target.river_segment_id
         """,
         updates,
-        template="(%s, %s, %s, %s)",
+        template="(%s, %s, %s, %s, %s)",
         fetch=True,
     )
     if updated_rows:
