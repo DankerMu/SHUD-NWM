@@ -1164,11 +1164,15 @@ CONNECTION_ATTRIBUTION_TESTS: tuple[str, ...] = (
 # The route modules the unit-level guard walks from the registry, plus the
 # registry itself: each declares a module-level `_APPLICATION_NAME` and injects
 # it into its store factories.
+# #2078: apps/api/routes/forecast.py is deliberately absent — it gained an exact
+# rule (tests/test_forecast_api.py) and these suites are MERGED into that entry
+# instead, exactly like forecast_store.py / state_manager.py below: a duplicate
+# pattern splits the module's ownership across two rules
+# (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
 CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
     "apps/api/route_registry.py",
     "apps/api/routes/best_available.py",
     "apps/api/routes/data_sources.py",
-    "apps/api/routes/forecast.py",
     "apps/api/routes/models.py",
     "apps/api/routes/pipeline.py",
     "apps/api/routes/state_snapshots.py",
@@ -2177,6 +2181,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # generic API suites -- none of which exercise `_force_refresh`.
         "apps/api/display_cache.py",
         ("tests/test_display_catalog_cache.py",),
+    ),
+    PathTestRule(
+        # #2078. `/api/v1/runs` response body (envelope + `total`/`total_count`
+        # duplication) is pinned only by this suite; the `apps/api/**` rule above
+        # buys the three generic API suites, none of which call `list_runs`, so a
+        # diff that changed the runs page shape reached CI green.
+        "apps/api/routes/forecast.py",
+        (
+            "tests/test_forecast_api.py",
+            # #1728's connection-attribution guards, MERGED here rather than left
+            # in CONNECTION_ATTRIBUTION_ROUTE_PATHS: this module now has an exact
+            # rule, and a duplicate pattern splits its ownership across two.
+            *CONNECTION_ATTRIBUTION_TESTS,
+        ),
     ),
     PathTestRule(
         "db/**",
