@@ -61,6 +61,11 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **THEN** both public helpers attribute the canonical member and the renderer refuses the narrow variant as a text-identity predicate before returning SQL; if a balanced parenthesized selection of a known text member contains the attributed fact alias but is a nested, cast, function, row or multipart expression outside that exact grammar, the guarded helper and both render variants instead refuse it as an unmodelled parenthesized fact-alias field selection, while other-relation, non-exact quoted and enum/key expressions retain their prior no-attribution answers
 - **AND** this scenario makes no claim about an outer fact-alias reference inside a comparison-position scalar subquery, whose visibility is tracked independently by #2114 before reader wiring
 
+#### Scenario: Correlated outer fact aliases inside comparison-position scalar subqueries cannot bypass guarded rendering
+- **WHEN** a comparison-position scalar subquery body contains a known text-identity member reference through a fact alias already attributed in the surrounding query, using an existing direct/exact-quoted/separator or exact/unsupported parenthesized grammar
+- **THEN** guarded `fact_table_text_identity_columns` and both render variants fail closed before returning an answer, naming the entry and the correlated scalar-subquery reference reason; every nested and later comparison-position scalar body is inspected, including when an earlier independent body is authority-clean and only a later body contains the candidate, a local relation that shadows the outer alias is conservatively refused rather than guessed, and an inner fact-table reread retains the existing count-delta refusal precedence
+- **AND** `outer_predicates` and alias-scoped `text_fact_columns` remain outer-query-only; authority-local and other-relation columns, enum/key siblings and non-code bytes retain their prior outcomes, while an unaliased outer fact read with an unqualified scalar-body name remains independently tracked by #2148
+
 #### Scenario: Renderer refuses a mis-shaped marker
 - **WHEN** a template places the marker above a line that is not a single aid conjunct
 - **THEN** the renderer raises before returning SQL and the shape oracle fails naming the template
