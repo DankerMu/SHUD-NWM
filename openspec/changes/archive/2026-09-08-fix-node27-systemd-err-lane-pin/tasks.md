@@ -42,7 +42,7 @@ Non-goals:
 
 - [x] 3.1 `uv run ruff check scripts tests`
 - [x] 3.2 `openspec validate fix-node27-systemd-err-lane-pin --strict --no-interactive`
-- [ ] 3.3 merge 后：master merge commit 的「Unit Tests (full)」0 failed（`gh run view`），记入 #2170；若仍红且失败项不是本 pin，作为独立观察上报
+- [x] 3.3 merge 后：master merge commit 的「Unit Tests (full)」0 failed（`gh run view`），记入 #2170；若仍红且失败项不是本 pin，作为独立观察上报——已核：merge commit 45d74ac8 的 run 34258294408「Unit Tests (full)」success，18021 passed / 0 failed / 16 skipped
 
 ## Evidence Floor
 
