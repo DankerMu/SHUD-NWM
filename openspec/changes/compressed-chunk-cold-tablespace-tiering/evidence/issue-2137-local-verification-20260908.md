@@ -70,9 +70,25 @@ verified that the pre-existing shared stash entry remained exactly:
 No temporary red-proof stash remained. This is a workflow-discipline deviation,
 not a product-semantic change, and is retained for PR review/accountability.
 
+## Post-repair local results
+
+- Shipping selector: 72 path/node-id entries; `meta_guard_only=false` and
+  `collection_smoke_required=true`.
+- Complete shipping targeted assertion run: `6527 passed, 12 skipped` in
+  936.01 seconds. The only warning reported local ecCodes 2.41.0 below its
+  recommended 2.42.0; no test failure occurred.
+- Selector-required full-tree import/syntax smoke: `18288 tests collected` in
+  11.49 seconds. This is recorded only as collection smoke, not assertion proof.
+- C1-C3 schema negative/positive and runbook contract focus: `63 passed`.
+- Shipping `check-jsonschema` metaschema plus example validation for all three
+  changed C1-C3 schema/example pairs: six checks passed.
+- Changed-file line-count gate: every new readiness Python file is at most 1000 lines
+  except the pre-existing selector governance files
+  `scripts/select_ci_tests.py` and `tests/test_select_ci_tests.py`.
+- Full branch `git diff --check`: PASS.
+
 ## Pending at this record
 
-- Re-run the complete shipping targeted assertion set after the selector repair.
-- Run selector-required full collection smoke.
-- Complete local seam/line-count checks and the formal PR review/CI gates.
+- Run the default full non-e2e/non-grib/non-integration pytest row.
+- Complete the formal PR review/CI gates.
 - Do not access node-27 before #2137 merges.
