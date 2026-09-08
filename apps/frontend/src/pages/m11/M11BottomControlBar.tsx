@@ -3,6 +3,7 @@ import { GLASS_PANEL } from '@/components/map/M11FloatingControls'
 import { cn } from '@/lib/cn'
 import { toSecondsPrecisionInstant } from '@/lib/m11/instants'
 import {
+  failClosedDischargeDisabledReason,
   resolveNationalScaleSource,
   type LayerState,
   type SourceScenarioSelectionState,
@@ -24,9 +25,11 @@ export interface M11BottomControlBarProps {
   cycles: string[]
   /** 有效 cycle（秒精度）：`state.cycle ?? metadata.default_cycle`。 */
   cycle: string | null
-  /** 与 `LayerState.validTimes` 同形（毫秒形），升序，原样透传不做精度转换。 */
-  validTimes: string[]
-  validTime: string | null
+  /**
+   * 聚合禁用位，透传给 `M11Timeline` 的可选 `disabled`（起报时次 `<select>` **不**并入，见下）。
+   * 时次列表本身不在本类型里：`M11Timeline` 自己从 `layers` 派生（`buildM11TimelineViewModel`），
+   * 契约里再放一份 `validTimes` / `validTime` 只会描述一条不存在的数据流。
+   */
   disabled: boolean
   disabledReason: string | null
   // M11Timeline 直接消费的既有入参，原样透传
@@ -66,16 +69,18 @@ const controlBarHeightClass = m11ControlBarHeightClass(m11VisualTokens.timelineH
 const controlBarTimelineClassName = 'flex min-w-0 flex-1 items-center gap-3 text-sm'
 
 /**
- * 底部控制条模型（#2014 决策 2）：cycles 来源与回落、有效 cycle、validTimes、默认三元组、
+ * 底部控制条模型（#2014 决策 2）：cycles 来源与回落、有效 cycle、默认三元组、
  * disabled / disabledReason 全部在这里派生，展示组件只做 DOM。
  *
  * - 具体源身份**只**经 `resolveNationalScaleSource`（store 写 `cyclesBySource` 用的就是它）：
  *   直接拿 `state.source` 当 key 时 `best` 永远查不到。`compare` 恒缺席 → 回落单项 default_cycle、
  *   分段无选中态（地图侧本来就不注册 overlay，无数据错误）。
  * - cycles 尚未到达（enrichment 在 bootstrap 之后才发）或取回失败 → 回落 `[metadata.default_cycle]`，
- *   到达后扩展为端点全列表；两态之间已选 cycle / validTime 不跳变（都不从 cycles 列表推导）。
- * - validTime 跟随 `LayerState.currentValidTime`（#2012 已保证是活动列表首项 = lead 0），
- *   只有 URL 的 validTime 确实在当前列表里时才用 URL 的值。
+ *   到达后扩展为端点全列表；两态之间已选 cycle 不跳变（有效 cycle 不从 cycles 列表推导）。
+ * - fail-closed 时 cycles 恒空：`cyclesBySource` 与目录 metadata 是两条独立的取数与缓存路径，
+ *   「目录判 fail-closed」与「该源有非空 cycles」可以同时成立（下面 `failClosed` 处有详注）。
+ * - 时次列表**不在**本模型里：`M11Timeline` 从 `layers` 自派生（`buildM11TimelineViewModel`），
+ *   它已经保证「URL 时次不在当前列表时跟随 `LayerState.currentValidTime`」。
  */
 export function deriveM11ControlBarModel(input: M11ControlBarInput): M11BottomControlBarProps {
   const source = resolveNationalScaleSource(input.state.source)
@@ -83,15 +88,24 @@ export function deriveM11ControlBarModel(input: M11ControlBarInput): M11BottomCo
   const validTimes = activeLayer?.validTimes ?? []
   const defaultCycle = toSecondsPrecisionInstant(input.metadata?.default_cycle)
   const cyclesState = input.cyclesBySource[source]
-  const cycles =
-    cyclesState?.status === 'available'
+  /**
+   * fail-closed 闸口按**理由**走，不按 `defaultCycle === null` 走：后者在 bootstrap 之前
+   * （`metadata` 为 null）同样成立，会把每次切源的过渡窗口也变成空且禁用的 select，
+   * 违背决策 5 的「先回落、后扩展」。pending / error 两个过渡态的理由不等于该常量，
+   * 故不受这道闸影响 —— 那是起报时次 `<select>` 唯一的自救通道。
+   */
+  const failClosed = activeLayer?.disabledReason === failClosedDischargeDisabledReason
+  // `unwrapApiData` 是裸 `as T` 断言、零运行时校验：变形响应会带着 `cycles: undefined` 进来，
+  // 不守卫则 `.map` 在 render 里抛，而这条路径上没有 error boundary（整页白屏）。
+  const cycles = failClosed
+    ? []
+    : cyclesState?.status === 'available' && Array.isArray(cyclesState.cycles?.cycles)
       ? cyclesState.cycles.cycles
           .map((entry) => toSecondsPrecisionInstant(entry.cycle_time))
           .filter((entry): entry is string => entry !== null)
       : defaultCycle
         ? [defaultCycle]
         : []
-  const requestedValidTime = normalizeMillisecondsIso(input.state.validTime)
   // 图层目录尚未落地（`layers` 为空，bootstrap 之前的窗口）时复用 `LayerGroupControls` 的同一份
   // 文案常量（不再各写一份字面量）；有 `LayerState` 时一律透传它自己的 `disabledReason`。
   const disabledReason = activeLayer ? activeLayer.disabledReason : m11LayerCatalogPendingDisabledReason
@@ -103,8 +117,6 @@ export function deriveM11ControlBarModel(input: M11ControlBarInput): M11BottomCo
     // 有效 cycle 必须显式产出：全国默认态 `state.cycle === null`，不回落 default_cycle 就
     // 既没有 lead 也没有 Analysis/Forecast 分界（决策 11）。
     cycle: toSecondsPrecisionInstant(input.state.cycle ?? input.metadata?.default_cycle),
-    validTimes,
-    validTime: validTimes.find((entry) => entry === requestedValidTime) ?? activeLayer?.currentValidTime ?? null,
     disabled: validTimes.length === 0 || disabledReason !== null,
     disabledReason,
     state: input.state,
@@ -122,6 +134,7 @@ export function M11BottomControlBar({
   source,
   cycles,
   cycle,
+  disabled,
   disabledReason,
   state,
   layers,
@@ -168,8 +181,9 @@ export function M11BottomControlBar({
           value={cycle ?? ''}
           // **不**跟聚合 `disabled` 一起禁：issue 只要求零周期（`default_cycle === null`）时禁用，
           // 而按聚合布尔禁 select 会让「某周期 valid-times 取回失败」这个终态下用户无法从控制条
-          // 切回别的周期 —— 恰好废掉这个控件唯一的自救用途。fail-closed 时 cycles 本就为空，
-          // 这条件下 select 依然是 disabled。
+          // 切回别的周期 —— 恰好废掉这个控件唯一的自救用途。fail-closed 时 select 仍是 disabled，
+          // 这一点自 round-1 finding A 起**由构造保证**（`deriveM11ControlBarModel` 的 `failClosed`
+          // 闸口让 cycles 恒空），不再是「碰巧 cyclesBySource 也没数据」的巧合。
           disabled={cycleOptions.length === 0}
           onChange={(event) => onQueryChange({ cycle: event.target.value })}
         >
@@ -185,6 +199,7 @@ export function M11BottomControlBar({
       <M11Timeline
         className={controlBarTimelineClassName}
         cycle={cycle}
+        disabled={disabled}
         state={state}
         layers={layers}
         sourceSelection={sourceSelection}
@@ -211,11 +226,4 @@ export function M11BottomControlBar({
 function formatCycleLabel(cycle: string): string {
   const match = /^\d{4}-(\d{2}-\d{2})T(\d{2}):/.exec(cycle)
   return match ? `${match[1]} ${match[2]}Z` : cycle
-}
-
-/** 与 `buildM11TimelineViewModel` 同口径的毫秒形归一：`LayerState.validTimes` 是毫秒形。 */
-function normalizeMillisecondsIso(value: string | null | undefined): string | null {
-  if (!value) return null
-  const timestamp = Date.parse(value)
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null
 }

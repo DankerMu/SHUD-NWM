@@ -337,8 +337,18 @@ export function M11Timeline({
   derivedTimes,
   className,
   cycle,
+  disabled: disabledProp,
   onQueryChange,
-}: SharedControlProps & { derivedTimes?: M11TimelineDerivedTimes | null; className?: string; cycle?: string | null }) {
+}: SharedControlProps & {
+  derivedTimes?: M11TimelineDerivedTimes | null
+  className?: string
+  cycle?: string | null
+  /**
+   * 调用方显式接管禁用位（#2014 的底部控制条传 `deriveM11ControlBarModel().disabled`）。
+   * 不传时下面的表达式逐字退化为今天的自派生，既有调用点 DOM 不变。
+   */
+  disabled?: boolean
+}) {
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
   const model = useMemo(
@@ -351,7 +361,7 @@ export function M11Timeline({
     [cycle, model.currentIndex, model.validTimes],
   )
 
-  const disabled = model.validTimes.length === 0 || !onQueryChange
+  const disabled = disabledProp ?? (model.validTimes.length === 0 || !onQueryChange)
   const atFirst = model.currentIndex <= 0
   const atLast = model.currentIndex < 0 || model.currentIndex >= model.validTimes.length - 1
 
@@ -432,7 +442,12 @@ export function M11Timeline({
         </label>
       </div>
 
-      <div className="min-w-0 flex-1">
+      {/*
+        `data-testid` 是右侧列的**行数预算** oracle（#2014 决策 10）：jsdom 量不了像素，能挡住
+        「再加一行让流高从 64px 回到 80px」的只有直接钉 `children.length === 3`。不要改用
+        `div.min-w-0.flex-1` 之类的类名选择器 —— 类名会漂，testid 不会。
+      */}
+      <div className="min-w-0 flex-1" data-testid="m11-timeline-rows">
         <div className="flex items-center justify-between gap-3">
           <span className="truncate font-medium text-neutral-900">{model.currentValidTime ?? '当前图层没有有效时间'}</span>
           {/*

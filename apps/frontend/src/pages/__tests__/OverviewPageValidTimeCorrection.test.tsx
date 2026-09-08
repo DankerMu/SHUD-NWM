@@ -1,4 +1,4 @@
-import { act, render, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -191,6 +191,10 @@ describe('OverviewPage validTime auto-correction gate', () => {
     const search = serializeM11QueryState({ ...defaultM11QueryState, source: 'ifs', validTime: SHARED_VALID_TIME })
     const currentValidTime = renderOverviewAt(search)
     expect(currentValidTime()).toBe(SHARED_VALID_TIME)
+    // #2014 的挂载接缝（round-1 finding G）：`OverviewMode → M11FullscreenMap → M11BottomControlBar`
+    // 这条接线此前零断言 —— 忘传 `controlBar` prop 或忘渲染都会全绿。`deriveM11ControlBarModel`
+    // 永不返回 null，故控制条从首帧起就在 DOM 里，这里同步断言、不用 waitFor。
+    expect(screen.getByTestId('m11-bottom-control-bar')).toBeTruthy()
 
     // bootstrap 已落定（校正 effect 的早退闸门 `mapBootstrapLoading` 已抬起），
     // 且活动 (ifs, default_cycle) 的列表确实还未定 —— 断言是在真实的 pending 窗口里做的。
