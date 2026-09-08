@@ -248,23 +248,88 @@ def test_g7_and_live_dsn_refuse_symlink_display_env_before_materialization(tmp_p
     assert "display-secret" not in str(live.value)
 
 
-def test_g7_display_env_reader_refuses_parent_mode_0755(tmp_path: Path) -> None:
+def _write_private_display_env(parent: Path, *, secret: str = "display-secret") -> Path:
+    env = parent / "display.env"
+    env.write_text(f"DATABASE_URL=postgresql://nhms_display_ro:{secret}@127.0.0.1/nhms\n", encoding="utf-8")
+    os.chmod(env, 0o600)
+    return env
+
+
+def test_g7_and_live_dsn_accept_valid_display_env_under_parent_0755(tmp_path: Path) -> None:
     from packages.common.node27_issue1895_dsn import read_display_env_text
 
-    private = _private_parent(tmp_path / "private")
-    env = private / "display.env"
-    env.write_text("DATABASE_URL=postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms\n", encoding="utf-8")
-    os.chmod(env, 0o600)
-    os.chmod(private, 0o755)
-    with pytest.raises(Issue1895ReadinessError) as refused:
-        read_display_env_text(env)
-    assert refused.value.code in {
-        "DSN_UNREADABLE",
-        "READINESS_INPUT_IDENTITY",
-        "READINESS_INPUT_INVALID",
-        "INPUT_PARENT_MODE",
-    }
-    assert "display-secret" not in str(refused.value)
+    checkout = tmp_path / "infra" / "env"
+    checkout.mkdir(parents=True)
+    os.chmod(checkout, 0o755)
+    env = _write_private_display_env(checkout)
+    expected = "postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms"
+    assert extract_display_database_url(read_display_env_text(env)) == expected
+    assert resolve_live_dsn(display_env_path=env, environ={}) == expected
+
+    output_parent = _private_parent(tmp_path / "run-root" / "env")
+    target = output_parent / "readonly.env"
+    import importlib.util
+
+    script = REPO_ROOT / "scripts" / "node27_issue1895_bind_readonly_dsn.py"
+    spec = importlib.util.spec_from_file_location("issue1895_bind_readonly_dsn_parent0755", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.main(["--display-env", str(env), "--rc-dsn-file", str(target)]) == 0
+    assert oct(target.stat().st_mode & 0o777) == "0o600"
+    assert target.stat().st_nlink == 1
+    assert oct(output_parent.stat().st_mode & 0o777) == "0o700"
+    assert target.read_text(encoding="utf-8") == f"NHMS_DISPLAY_READONLY_DATABASE_URL={expected}\n"
+    assert "display-secret" not in str(target.parent)
+
+
+@pytest.mark.parametrize("kind", ("symlink", "mode", "hardlink"))
+def test_g7_and_live_dsn_refuse_unsafe_display_env_file_identity(tmp_path: Path, kind: str) -> None:
+    from tests.test_issue1895_readiness_storage import _substitute_identity
+
+    checkout = tmp_path / "infra" / "env"
+    checkout.mkdir(parents=True)
+    os.chmod(checkout, 0o755)
+    env = _write_private_display_env(checkout)
+    _substitute_identity(env, kind)
+    with pytest.raises(Issue1895ReadinessError) as live:
+        resolve_live_dsn(display_env_path=env, environ={})
+    assert live.value.code == "DSN_UNREADABLE"
+    assert "display-secret" not in str(live.value)
+    import importlib.util
+
+    script = REPO_ROOT / "scripts" / "node27_issue1895_bind_readonly_dsn.py"
+    spec = importlib.util.spec_from_file_location(f"issue1895_bind_readonly_dsn_{kind}", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    target = _private_parent(tmp_path / "run-root" / "env") / "readonly.env"
+    assert module.main(["--display-env", str(env), "--rc-dsn-file", str(target)]) == 1
+    assert not os.path.lexists(target)
+
+
+def test_g7_and_live_dsn_refuse_parent_symlink_display_env(tmp_path: Path) -> None:
+    real_parent = tmp_path / "infra" / "env"
+    real_parent.mkdir(parents=True)
+    os.chmod(real_parent, 0o755)
+    _write_private_display_env(real_parent)
+    linked_parent = tmp_path / "linked-env"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    linked = linked_parent / "display.env"
+    with pytest.raises(Issue1895ReadinessError) as live:
+        resolve_live_dsn(display_env_path=linked, environ={})
+    assert live.value.code == "DSN_UNREADABLE"
+    assert "display-secret" not in str(live.value)
+    import importlib.util
+
+    script = REPO_ROOT / "scripts" / "node27_issue1895_bind_readonly_dsn.py"
+    spec = importlib.util.spec_from_file_location("issue1895_bind_readonly_dsn_parent_symlink", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    target = _private_parent(tmp_path / "run-root" / "env") / "readonly.env"
+    assert module.main(["--display-env", str(linked), "--rc-dsn-file", str(target)]) == 1
+    assert not os.path.lexists(target)
 
 
 def test_bind_readonly_dsn_cli_ignores_ambient_writer_and_stale_readonly_urls(

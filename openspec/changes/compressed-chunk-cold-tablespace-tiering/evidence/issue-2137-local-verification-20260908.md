@@ -167,7 +167,54 @@ hidden as `no deviations`.
 - No stash/reset/checkout/clean, remote-node access or live receipt occurred in
   the round-1 fix pass. The pre-existing shared stash SHA remained unchanged.
 
+## Round 2 depth closure
+
+Round 2 reviewed `d2564eeb83b2e0bae305588cc272218950ae573b` with
+`invariant-state` full scope and `test-evidence+spec-compliance` delta scope.
+Both reviewers identified one path-safety root-policy candidate. An independent
+verifier confirmed both normal-input subclaims:
+
+- Long-lived euid-owned mode-0600 `infra/env/display.env` normally has a mode-
+  0755 parent. C1 already accepts that contract, while the new unconditional
+  current-run parent-0700 reader made G7, W8, performance and post-target refuse.
+- #1893's natural receipt is mode 0600 under `artifacts/receipts`; its shipping
+  publisher creates/accepts a 0755 parent. G8's unconditional current-run reader
+  therefore rejected the normal producer output.
+
+This repeated round-1 path-safety class and triggered the same-invariant gate.
+The registered depth retro is
+`.workplans/pr-2144/review/review-failure-retro-round2.md`; it records one
+remaining comprehensive-round budget and rejects a PR split because one shared
+helper policy spans the atomic G0 chain.
+
+The corrective action separates invariant layers:
+
+- Held file identity always requires no-follow directory/leaf traversal,
+  euid-owned exact-0600 regular file, nlink 1, bounded EOF and stable pathname/
+  descriptor identity.
+- Parent euid/mode-0700/inode stability remains the default for issue-owned
+  current-run roots.
+- Only `display.env` and #1893 natural receipt explicitly use file-only parent
+  policy. G8 baseline/observed/W8 and every other `$RUN_ROOT` input remain strict.
+- No long-lived directory is chmodded as a workaround.
+
+New tests were red on the unconditional policy and then proved valid 0755-parent
+producer inputs pass while symlink, mode-0644, nlink>1, parent-symlink and
+identity-swap inputs still fail. Main-loop focused verification passed 176 tests.
+The full serial Phase 2 results were:
+
+- Shipping targeted selection: 72 entries; `6607 passed, 12 skipped` in 661.58
+  seconds.
+- Full collection smoke: `18368 tests collected` in 6.69 seconds; not assertion
+  evidence.
+- Default full unit row: `18138 passed, 14 skipped, 216 deselected, 1 warning`.
+  The only warning remained the local ecCodes 2.41.0 recommendation.
+- Ruff, compilation, line-count and diff checks: PASS. Every changed non-exempt
+  Python file remains below 1000 lines.
+- No stash/reset/checkout/clean, node access or live evidence occurred.
+
 ## Pending at this record
 
-- Complete the post-fix comprehensive review, Gap Sweep and GitHub CI gates.
+- Complete Phase 6.2 invariant audit, the one budgeted comprehensive review, Gap
+  Sweep and GitHub CI gates.
 - Do not access node-27 before #2137 merges.

@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load(path: Path) -> dict:
+def _load(path: Path, *, require_private_parent: bool = True) -> dict:
     try:
         _raw, document, _facts = read_held_private_json(
             path,
@@ -46,6 +46,7 @@ def _load(path: Path) -> dict:
             identity_code="GROUP_ARTIFACT_INVALID",
             toctou_code="GROUP_ARTIFACT_INVALID",
             json_code="GROUP_ARTIFACT_INVALID",
+            require_private_parent=require_private_parent,
         )
     except Issue1895ReadinessError as error:
         if error.code.startswith("READINESS_INPUT_"):
@@ -80,7 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         baseline_doc = _load(args.baseline)
         observed_doc = _load(args.observed)
-        receipt = _load(args.receipt)
+        receipt = _load(args.receipt, require_private_parent=False)
         persist_baseline_groups(_groups(baseline_doc))
         assert_exact_cold_groups(_groups(observed_doc), baseline=_groups(baseline_doc))
         assert_natural_receipt_identity(

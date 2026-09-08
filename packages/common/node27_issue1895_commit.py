@@ -17,7 +17,7 @@ from packages.common.node27_issue1895_probe import assert_report_within_command_
 from packages.common.node27_issue1895_receipt_validate import validate_performance_receipt
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from packages.common.redaction import redact_text
-from packages.common.safe_fs import SafeFilesystemError
+from packages.common.safe_fs import SafeFilesystemError, open_file_no_follow
 from packages.common.safe_fs_publication import move_regular_file_no_follow_exclusive
 
 RFC3339_UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
@@ -66,7 +66,9 @@ def _lstat_regular(path: Path, *, code_prefix: str) -> os.stat_result:
     return info
 
 
-def _parent_facts(path: Path, *, code_prefix: str) -> os.stat_result:
+def _parent_facts(
+    path: Path, *, code_prefix: str, require_private_parent: bool = True
+) -> os.stat_result:
     parent = path.parent
     try:
         info = os.lstat(parent)
@@ -75,11 +77,30 @@ def _parent_facts(path: Path, *, code_prefix: str) -> os.stat_result:
         raise
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
         _refuse("parent must be a real directory", f"{code_prefix}_PARENT_INVALID")
-    if info.st_uid != os.geteuid():
-        _refuse("parent owner differs from the effective user", f"{code_prefix}_PARENT_OWNER")
-    if (info.st_mode & 0o777) != PARENT_MODE:
-        _refuse("parent must be mode 0700", f"{code_prefix}_PARENT_MODE")
+    if require_private_parent:
+        if info.st_uid != os.geteuid():
+            _refuse("parent owner differs from the effective user", f"{code_prefix}_PARENT_OWNER")
+        if (info.st_mode & 0o777) != PARENT_MODE:
+            _refuse("parent must be mode 0700", f"{code_prefix}_PARENT_MODE")
     return info
+
+
+def _open_held_regular(path: Path, *, code_prefix: str, require_private_parent: bool) -> int:
+    """Open the named regular file without following the leaf or its parent.
+
+    Current-run callers keep the historical pathname ``O_NOFOLLOW`` open after
+    ``_parent_facts`` has already required a real 0700 parent. File-only
+    callers additionally walk every directory component through the shipping
+    no-follow opener so a parent symlink cannot authorize the file.
+    """
+
+    try:
+        if require_private_parent:
+            return os.open(path, OPEN_FLAGS)
+        return open_file_no_follow(path)
+    except (OSError, SafeFilesystemError):
+        _refuse("path cannot be opened without following", f"{code_prefix}_OPEN")
+        raise
 
 
 def _same_inode(left: os.stat_result, right: os.stat_result) -> bool:
@@ -101,13 +122,22 @@ def _read_held_descriptor(
     code_prefix: str,
     expected_parent: os.stat_result | None = None,
     max_bytes: int = MAX_RECEIPT_BYTES,
+    require_private_parent: bool = True,
 ) -> tuple[bytes, os.stat_result, os.stat_result]:
-    before_parent = expected_parent if expected_parent is not None else _parent_facts(path, code_prefix=code_prefix)
+    before_parent = (
+        expected_parent
+        if expected_parent is not None
+        else _parent_facts(path, code_prefix=code_prefix, require_private_parent=require_private_parent)
+    )
     before = _lstat_regular(path, code_prefix=code_prefix)
     fd: int | None = None
     try:
         try:
-            fd = os.open(path, OPEN_FLAGS)
+            fd = _open_held_regular(
+                path, code_prefix=code_prefix, require_private_parent=require_private_parent
+            )
+        except Issue1895ReadinessError:
+            raise
         except OSError:
             _refuse("path cannot be opened without following", f"{code_prefix}_OPEN")
             raise
@@ -159,10 +189,14 @@ def _read_held_descriptor(
         after_path = _lstat_regular(path, code_prefix=code_prefix)
         if not _same_inode(after, after_path) or after_path.st_size != after.st_size:
             _refuse("path inode drifted from the held descriptor", f"{code_prefix}_INODE_SWAP")
-        after_parent = _parent_facts(path, code_prefix=code_prefix)
+        after_parent = _parent_facts(
+            path, code_prefix=code_prefix, require_private_parent=require_private_parent
+        )
         if not _same_inode(before_parent, after_parent):
             _refuse("parent inode drifted while reading", f"{code_prefix}_PARENT_DRIFT")
-        if (after_parent.st_mode & 0o777) != PARENT_MODE or after_parent.st_uid != os.geteuid():
+        if require_private_parent and (
+            (after_parent.st_mode & 0o777) != PARENT_MODE or after_parent.st_uid != os.geteuid()
+        ):
             _refuse("parent mode/owner drifted while reading", f"{code_prefix}_PARENT_DRIFT")
         return data, after, after_parent
     finally:

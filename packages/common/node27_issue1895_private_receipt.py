@@ -195,12 +195,23 @@ def read_held_private_bytes(
     unreadable_code: str = "READINESS_INPUT_INVALID",
     identity_code: str = "READINESS_INPUT_IDENTITY",
     toctou_code: str = "READINESS_INPUT_TOCTOU",
+    require_private_parent: bool = True,
 ) -> tuple[bytes, os.stat_result]:
-    """Read one private file through the C1-C3 held descriptor, including parent 0700/euid."""
+    """Read one private file through the held descriptor.
+
+    File identity is always euid-owned exact-0600 nlink-1 no-follow. Parent
+    euid/mode-0700 is the default current-run contract; callers of long-lived
+    producer files must pass ``require_private_parent=False``.
+    """
 
     del label
     try:
-        raw, info, _parent = _read_held_descriptor(Path(path), code_prefix="INPUT", max_bytes=max_bytes)
+        raw, info, _parent = _read_held_descriptor(
+            Path(path),
+            code_prefix="INPUT",
+            max_bytes=max_bytes,
+            require_private_parent=require_private_parent,
+        )
     except Issue1895ReadinessError as error:
         mapped = _map_held_descriptor_code(
             error.code,
@@ -224,6 +235,7 @@ def read_held_private_text(
     unreadable_code: str = "READINESS_INPUT_INVALID",
     identity_code: str = "READINESS_INPUT_IDENTITY",
     toctou_code: str = "READINESS_INPUT_TOCTOU",
+    require_private_parent: bool = True,
 ) -> str:
     raw, _info = read_held_private_bytes(
         path,
@@ -233,6 +245,7 @@ def read_held_private_text(
         unreadable_code=unreadable_code,
         identity_code=identity_code,
         toctou_code=toctou_code,
+        require_private_parent=require_private_parent,
     )
     try:
         return raw.decode("utf-8")
@@ -252,8 +265,13 @@ def read_held_private_json(
     identity_code: str = "READINESS_INPUT_IDENTITY",
     toctou_code: str = "READINESS_INPUT_TOCTOU",
     json_code: str = "READINESS_INPUT_JSON",
+    require_private_parent: bool = True,
 ) -> tuple[bytes, Any, dict[str, int | str]]:
-    """Held private JSON with parent 0700/euid plus bounded complexity checks."""
+    """Held private JSON with bounded complexity checks.
+
+    Parent euid/mode-0700 remains the default; long-lived producer files must
+    pass ``require_private_parent=False``.
+    """
 
     raw, info = read_held_private_bytes(
         path,
@@ -263,6 +281,7 @@ def read_held_private_json(
         unreadable_code=unreadable_code,
         identity_code=identity_code,
         toctou_code=toctou_code,
+        require_private_parent=require_private_parent,
     )
     try:
         value = json.loads(raw.decode("utf-8"))

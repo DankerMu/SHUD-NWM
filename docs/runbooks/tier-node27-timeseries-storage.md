@@ -2283,7 +2283,7 @@ from pathlib import Path
 from packages.common.node27_issue1895_private_receipt import read_held_private_json
 from packages.common.node27_issue1895_timer import assert_natural_receipt_identity
 from packages.common.node27_issue1895_watermark import assert_independent_receipt_horizon
-_raw, receipt, _facts = read_held_private_json(Path(os.environ["NATURAL_RECEIPT"]), label="G8 natural receipt", stage="timer")
+_raw, receipt, _facts = read_held_private_json(Path(os.environ["NATURAL_RECEIPT"]), label="G8 natural receipt", stage="timer", require_private_parent=False)
 _hraw, horizon, _hfacts = read_held_private_json(Path(os.environ["W8_PATH"]), label="G8 watermark", stage="timer")
 def _utc(value):
     value = value.strip()

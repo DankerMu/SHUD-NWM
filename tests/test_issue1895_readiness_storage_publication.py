@@ -411,13 +411,70 @@ def test_g8_group_reconcile_cli_refuses_unsafe_baseline_observed_or_receipt_iden
     assert group_reconcile_cli.main(_group_reconcile_argv(baseline_path, observed_path, receipt_path)) == 1
 
 
-def test_g8_group_reconcile_cli_refuses_parent_mode_0755(tmp_path: Path) -> None:
+def test_g8_group_reconcile_cli_refuses_baseline_or_observed_parent_mode_0755(tmp_path: Path) -> None:
     baseline_path, observed_path, receipt_path = _write_group_reconcile_documents(
         tmp_path,
         receipt=_natural_group_receipt(outcome="no_op", selected=[], deferred=[]),
     )
     os.chmod(baseline_path.parent, 0o755)
     assert group_reconcile_cli.main(_group_reconcile_argv(baseline_path, observed_path, receipt_path)) == 1
+    os.chmod(baseline_path.parent, 0o700)
+    os.chmod(observed_path.parent, 0o755)
+    assert group_reconcile_cli.main(_group_reconcile_argv(baseline_path, observed_path, receipt_path)) == 1
+
+
+def test_g8_natural_receipt_under_parent_0755_succeeds_with_private_current_run_census(tmp_path: Path) -> None:
+    from packages.common.node27_issue1895_private_receipt import read_held_private_json
+    from packages.common.node27_issue1895_timer import assert_natural_receipt_identity
+
+    receipt_document = _natural_group_receipt(outcome="no_op", selected=[], deferred=[])
+    run_root = tmp_path / "run-root"
+    census_parent = run_root / "census"
+    census_parent.mkdir(parents=True)
+    os.chmod(run_root, 0o700)
+    os.chmod(census_parent, 0o700)
+    artifacts = tmp_path / "artifacts" / "receipts"
+    artifacts.mkdir(parents=True)
+    os.chmod(artifacts, 0o755)
+    baseline_path = _write_private_json(
+        census_parent / "baseline.json",
+        {"groups": [_group(KEYS[index - 1], index) for index in range(1, 7)]},
+    )
+    observed_path = _write_private_json(
+        census_parent / "observed.json",
+        {"groups": [_group(KEYS[index - 1], index) for index in range(1, 7)]},
+    )
+    receipt_path = _write_private_json(artifacts / "node27_timeseries_cold_residency.json", receipt_document)
+    os.chmod(artifacts, 0o755)
+    _raw, receipt, _facts = read_held_private_json(
+        receipt_path,
+        label="G8 natural receipt",
+        stage="timer",
+        require_private_parent=False,
+    )
+    assert_natural_receipt_identity(
+        receipt,
+        reviewed_sha=SHA,
+        expected_cutoff="2026-09-04T00:00:00Z",
+        expected_watermark="2026-09-06T00:00:00Z",
+        invoked_unit="nhms-node27-timeseries-compression.service",
+    )
+    assert group_reconcile_cli.main(_group_reconcile_argv(baseline_path, observed_path, receipt_path)) == 0
+
+
+def test_g8_inline_natural_receipt_fence_opts_file_only_parent_policy() -> None:
+    fences = [body for _opening, body in _gate_bash("G8")]
+    natural = next(
+        body
+        for body in fences
+        if "NATURAL_RECEIPT" in body and "assert_natural_receipt_identity" in body and "W8_PATH" in body
+    )
+    receipt_line = next(
+        line for line in natural.splitlines() if "NATURAL_RECEIPT" in line and "read_held_private_json" in line
+    )
+    horizon_line = next(line for line in natural.splitlines() if "W8_PATH" in line and "read_held_private_json" in line)
+    assert "require_private_parent=False" in receipt_line
+    assert "require_private_parent=False" not in horizon_line
 
 
 def test_g8_owner_inputs_use_held_reader_before_parameter_derivation() -> None:

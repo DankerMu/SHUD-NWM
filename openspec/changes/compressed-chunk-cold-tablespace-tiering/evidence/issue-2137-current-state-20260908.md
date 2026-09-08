@@ -23,13 +23,16 @@ It is a prerequisite for #1895, not a replacement. It does not access node-27/no
   mutants failed 8/8. The post-merge scheduler manifest importer gap was repaired
   by `1ba75811`; the pre-review shipping targeted run passed 6,527 assertions and
   the default full local unit row passed 18,058. After round-1 closure, the same
-  rows passed 6,594 and 18,125 assertions respectively.
+  rows passed 6,594 and 18,125 assertions respectively. After the round-2 depth
+  closure, they passed 6,607 and 18,138 assertions.
 - This current-state addendum supersedes stale status statements in the 2026-09-07 historical records without deleting their process disclosures.
 
 ## Remaining gate
 
 The checklist ownership wording, focused fixture/alignment review, target OpenSpec
 strict validation, latest-master integration, round-1 verification/fix closure
-and post-fix local validation are complete. Post-fix comprehensive review, Gap
-Sweep and GitHub CI remain. Tasks 4.1-4.8 remain untouched until #2137 merges;
+and post-fix local validation are complete. Round 2 triggered a registered
+path-safety depth retro; its corrective action and local verification are now
+complete. One budgeted comprehensive round, Gap Sweep and GitHub CI remain.
+Tasks 4.1-4.8 remain untouched until #2137 merges;
 no node-27 access is permitted before then.

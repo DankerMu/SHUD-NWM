@@ -834,31 +834,86 @@ def test_w8_cli_refuses_symlink_display_env_before_cutoff(tmp_path: Path, monkey
     assert not output.exists()
 
 
-def test_w8_cli_refuses_parent_mode_0755_display_env_before_cutoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    private = _private_dir(tmp_path / "private")
-    env = private / "display.env"
+def _checkout_display_env(tmp_path: Path) -> Path:
+    parent = tmp_path / "infra" / "env"
+    parent.mkdir(parents=True)
+    os.chmod(parent, 0o755)
+    env = parent / "display.env"
     env.write_text("DATABASE_URL=postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms\n", encoding="utf-8")
     os.chmod(env, 0o600)
-    os.chmod(private, 0o755)
-    called = {"n": 0}
+    return env
 
-    def observe(**_kwargs: object) -> dict[str, object]:
-        called["n"] += 1
-        raise AssertionError("observe_current_cutoff must not run on unsafe display.env")
+
+def _w8_output(tmp_path: Path) -> Path:
+    output = tmp_path / "out" / "w8.json"
+    output.parent.mkdir()
+    os.chmod(output.parent, 0o700)
+    return output
+
+
+def test_w8_and_post_target_accept_valid_display_env_under_parent_0755(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = _checkout_display_env(tmp_path)
+    expected = "postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms"
+    observed = {"dsn": None, "n": 0}
+
+    def observe(**kwargs: object) -> dict[str, object]:
+        observed["dsn"] = kwargs.get("dsn")
+        observed["n"] += 1
+        return {"watermark": "2026-09-06T12:00:00Z", "cutoff": "2026-09-04T12:00:00Z", "lag_seconds": 172800}
 
     monkeypatch.setattr(watermark_cli, "observe_current_cutoff", observe)
     monkeypatch.delenv("NHMS_DISPLAY_READONLY_DATABASE_URL", raising=False)
     monkeypatch.delenv("NHMS_READONLY_DB_VALIDATION_DATABASE_URL", raising=False)
-    output = tmp_path / "out" / "w8.json"
-    output.parent.mkdir()
-    os.chmod(output.parent, 0o700)
-    assert watermark_cli.main(
-        ["--output", str(output), "--lag-seconds", "172800", "--display-env", str(env)]
-    ) == 1
-    assert called["n"] == 0
-    assert not output.exists()
+    output = _w8_output(tmp_path)
+    assert watermark_cli.main(["--output", str(output), "--lag-seconds", "172800", "--display-env", str(env)]) == 0
+    assert observed == {"dsn": expected, "n": 1}
+    assert oct(output.stat().st_mode & 0o777) == "0o600"
+    captured: dict[str, object] = {}
+
+    def capture(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(post_target_observe_cli, "run_post_target_observation", capture)
+    baseline = _write_private_json(_private_dir(tmp_path / "census") / "baseline.json", {"groups": []})
+    argv = [
+        "--baseline",
+        str(baseline),
+        "--output",
+        str(baseline.with_name("observed.json")),
+        "--reviewed-sha",
+        SHA,
+        "--lag-seconds",
+        "172800",
+        "--display-env",
+        str(env),
+    ]
+    assert post_target_observe_cli.main(argv) == 0
+    assert captured["dsn"] == expected and captured["baseline_path"] == baseline
+
+
+@pytest.mark.parametrize("kind", ("symlink", "mode", "hardlink", "parent-symlink"))
+def test_w8_cli_refuses_unsafe_display_env_identity_before_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    env = _checkout_display_env(tmp_path)
+    display_env = env
+    if kind == "parent-symlink":
+        linked = tmp_path / "linked-env"
+        linked.symlink_to(env.parent, target_is_directory=True)
+        display_env = linked / "display.env"
+    else:
+        _substitute_identity(env, kind)
+    called = {"n": 0}
+    monkeypatch.setattr(watermark_cli, "observe_current_cutoff", lambda **_k: called.__setitem__("n", called["n"] + 1))
+    monkeypatch.delenv("NHMS_DISPLAY_READONLY_DATABASE_URL", raising=False)
+    monkeypatch.delenv("NHMS_READONLY_DB_VALIDATION_DATABASE_URL", raising=False)
+    output = _w8_output(tmp_path)
+    argv = ["--output", str(output), "--lag-seconds", "172800", "--display-env", str(display_env)]
+    assert watermark_cli.main(argv) == 1
+    assert called["n"] == 0 and not output.exists()
 
 
 def test_fs_reconcile_cli_refuses_symlink_and_parent_0755_receipt_before_approval(

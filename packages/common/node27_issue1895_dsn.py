@@ -111,6 +111,7 @@ def read_display_env_text(path: str | Path) -> str:
         unreadable_code="DSN_UNREADABLE",
         identity_code="DSN_UNREADABLE",
         toctou_code="DSN_UNREADABLE",
+        require_private_parent=False,
     )
 
 

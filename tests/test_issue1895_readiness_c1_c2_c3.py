@@ -254,6 +254,35 @@ def test_held_private_reader_refuses_parent_mode_0755(tmp_path: Path) -> None:
         read_held_private_json(target, label="private input")
 
 
+def test_held_private_reader_parent_policy_is_explicit_and_defaults_strict() -> None:
+    for reader in (read_held_private_bytes, read_held_private_text, read_held_private_json):
+        defaults = reader.__kwdefaults__
+        assert defaults is not None
+        assert defaults["require_private_parent"] is True
+
+
+def _swap_parent_on_second_stat(commit: Any, *, parent_mode: int = 0o700):
+    seen = {"n": 0}
+    real = commit._parent_facts
+
+    def swap_on_restat(path: Path, *, code_prefix: str, **kwargs: Any):
+        info = real(path, code_prefix=code_prefix, **kwargs)
+        seen["n"] += 1
+        if seen["n"] != 2:
+            return info
+        parent = path.parent
+        moved = parent.with_name(parent.name + ".moved")
+        name = path.name
+        parent.rename(moved)
+        parent.mkdir()
+        os.chmod(parent, parent_mode)
+        os.rename(moved / name, parent / name)
+        os.rmdir(moved)
+        return real(path, code_prefix=code_prefix, **kwargs)
+
+    return seen, swap_on_restat
+
+
 def test_held_private_reader_refuses_parent_inode_swap_during_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -264,24 +293,7 @@ def test_held_private_reader_refuses_parent_inode_swap_during_read(
     target = private / "input.json"
     target.write_text('{"ok":true}', encoding="utf-8")
     os.chmod(target, 0o600)
-    seen = {"n": 0}
-    real = commit._parent_facts
-
-    def swap_on_restat(path: Path, *, code_prefix: str):
-        info = real(path, code_prefix=code_prefix)
-        seen["n"] += 1
-        if seen["n"] != 2:
-            return info
-        parent = path.parent
-        moved = parent.with_name(parent.name + ".moved")
-        name = path.name
-        parent.rename(moved)
-        parent.mkdir()
-        os.chmod(parent, 0o700)
-        os.rename(moved / name, parent / name)
-        os.rmdir(moved)
-        return real(path, code_prefix=code_prefix)
-
+    seen, swap_on_restat = _swap_parent_on_second_stat(commit)
     monkeypatch.setattr(commit, "_parent_facts", swap_on_restat)
     with pytest.raises(Issue1895ReadinessError) as refused:
         read_held_private_json(target, label="private input")
@@ -291,6 +303,80 @@ def test_held_private_reader_refuses_parent_inode_swap_during_read(
         "READINESS_INPUT_TOCTOU",
         "INPUT_PARENT_DRIFT",
         "INPUT_PARENT_MODE",
+    }
+    assert seen["n"] >= 1
+
+
+def test_held_private_reader_file_only_accepts_parent_0755_but_refuses_unsafe_identities(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    _private(private)
+    target = private / "input.json"
+    target.write_text('{"ok":true}', encoding="utf-8")
+    os.chmod(target, 0o600)
+    os.chmod(private, 0o755)
+    file_only = {"label": "private input", "require_private_parent": False}
+    raw, info = read_held_private_bytes(target, **file_only)
+    assert json.loads(raw) == {"ok": True}
+    assert info.st_nlink == 1
+    assert info.st_uid == os.geteuid()
+    assert read_held_private_text(target, **file_only) == '{"ok":true}'
+    _raw, document, _facts = read_held_private_json(target, **file_only)
+    assert document == {"ok": True}
+
+    os.chmod(target, 0o644)
+    with pytest.raises(Issue1895ReadinessError) as mode:
+        read_held_private_bytes(target, **file_only)
+    assert mode.value.code in {"READINESS_INPUT_IDENTITY", "READINESS_INPUT_INVALID", "INPUT_IDENTITY_DRIFT"}
+    os.chmod(target, 0o600)
+    os.link(target, target.with_name("alink"))
+    with pytest.raises(Issue1895ReadinessError) as hardlink:
+        read_held_private_bytes(target, **file_only)
+    assert hardlink.value.code in {"READINESS_INPUT_IDENTITY", "READINESS_INPUT_INVALID", "INPUT_IDENTITY_DRIFT"}
+    os.unlink(target.with_name("alink"))
+    real = target.with_name("real.json")
+    target.rename(real)
+    target.symlink_to(real)
+    with pytest.raises(Issue1895ReadinessError) as linked:
+        read_held_private_bytes(target, **file_only)
+    assert linked.value.code in {
+        "READINESS_INPUT_IDENTITY",
+        "READINESS_INPUT_INVALID",
+        "INPUT_NOT_REGULAR",
+        "INPUT_OPEN",
+    }
+
+
+def test_held_private_reader_file_only_refuses_parent_symlink_and_identity_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from packages.common import node27_issue1895_commit as commit
+
+    real_parent = tmp_path / "real"
+    _private(real_parent)
+    real_target = real_parent / "input.json"
+    real_target.write_text('{"ok":true}', encoding="utf-8")
+    os.chmod(real_target, 0o600)
+    linked_parent = tmp_path / "linked"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    file_only = {"label": "private input", "require_private_parent": False}
+    with pytest.raises(Issue1895ReadinessError) as parent_link:
+        read_held_private_bytes(linked_parent / "input.json", **file_only)
+    assert parent_link.value.code in {
+        "READINESS_INPUT_IDENTITY",
+        "READINESS_INPUT_INVALID",
+        "INPUT_PARENT_INVALID",
+    }
+
+    os.chmod(real_parent, 0o755)
+    seen, swap_on_restat = _swap_parent_on_second_stat(commit, parent_mode=0o755)
+    monkeypatch.setattr(commit, "_parent_facts", swap_on_restat)
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        read_held_private_json(real_target, **file_only)
+    assert refused.value.code in {
+        "READINESS_INPUT_IDENTITY",
+        "READINESS_INPUT_INVALID",
+        "READINESS_INPUT_TOCTOU",
+        "INPUT_PARENT_DRIFT",
     }
     assert seen["n"] >= 1
 
