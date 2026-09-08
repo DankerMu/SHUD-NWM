@@ -68,9 +68,9 @@ function surface() {
 }
 
 /**
- * 目录里的 `precip` 条目：解析器的入参是 `state.precip && precipAvailable`（fixture 决策 1
- * 第 1 臂），所以**任何**期待 URL 或提示的用例都必须先让目录带上这一条，否则它断的其实是
- * 「目录没条目 → disabled」那一格，什么也不鉴别。
+ * 目录里的 `precip` 条目：解析器的入参是 `state.precip && precipAvailability !== 'absent'`
+ * （fixture 决策 1 第 1 臂），所以**任何**期待 URL 或提示的用例都必须先让目录带上这一条，
+ * 否则它断的其实是「目录没条目 → disabled」那一格，什么也不鉴别。
  */
 function catalogWithPrecip() {
   return { '/api/v1/layers': () => success([layer, precipLayer]) }
@@ -134,7 +134,7 @@ describe('OverviewPage precipitation overlay mount seam', () => {
   })
 
   it('keeps the whole overlay silent, not just the toggle, while the catalog serves no precip entry', async () => {
-    // 挂载接缝的另一半：`OverviewMode` 的 `precipAvailable` 推导（目录里有没有 `precip` 条目）
+    // 挂载接缝的另一半：`OverviewMode` 的 `precipAvailability` 推导（目录里有没有 `precip` 条目）
     // 必须同时到达浮层开关**和**解析器。默认目录只有 `discharge`，而 index 路由照常给 200——
     // 部署错位窗口就是这一格：只闸开关的话会出现「栅格已画 / 提示已出，开关却标未实现且按不动」。
     mockApi()
@@ -168,6 +168,55 @@ describe('OverviewPage precipitation overlay mount seam', () => {
       expect(toggle.getAttribute('aria-pressed')).toBe('true')
       expect(toggle.textContent).not.toContain('未实现')
     })
+  })
+
+  it('says 目录未就绪 rather than 未实现 while the layer catalog is still in flight', async () => {
+    // IS-4/IS-5：目录在途那一帧 `layers` 就是 `[]`，在二值谓词下与「目录到了且没有 `precip` 条目」
+    // 同映射。塌成布尔有两个受害面：(a) 开关对用户发出一句当时没有证据的**终态**断言「未实现」；
+    // (b) 解析器把在途折进 `disabled` 臂，于是 `data-precip-hidden-reason` 分不出「用户关了」
+    // 与「还没到」。两条都只有在 `settled()` **之前**读才抓得到。
+    let releaseLayers: () => void = () => undefined
+    const layersGate = new Promise<void>((resolve) => {
+      releaseLayers = resolve
+    })
+    let layersCalls = 0
+    mockApi({
+      '/api/v1/layers': async () => {
+        layersCalls += 1
+        await layersGate
+        return success([layer, precipLayer])
+      },
+    })
+    renderOverview()
+
+    // 前置条件：确实停在目录在途窗口里——请求已发出、bootstrap 未落定、快照一份都还没有。
+    await waitFor(() => expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(true))
+    // 目录请求已发出但一条都没落地（阶段 1 的 runless 与阶段 2 的 run-scoped 共用这道闸）。
+    expect(layersCalls).toBeGreaterThan(0)
+    expect(useOverviewDataStore.getState().overview).toBeNull()
+
+    const pendingToggle = screen.getByRole('button', { name: /过去 24h 累积降水/ }) as HTMLButtonElement
+    expect(pendingToggle.disabled).toBe(true)
+    expect(pendingToggle.getAttribute('aria-pressed')).toBe('false')
+    expect(pendingToggle.textContent).toContain('目录未就绪')
+    expect(pendingToggle.textContent).not.toContain('未实现')
+    expect(pendingToggle.getAttribute('title')).not.toContain('未实现')
+    // 在途落第 3 臂（同一 render 内 discharge 图层必为 null → 周期未解出），**不是** `disabled`。
+    expect(surface().getAttribute('data-precip-hidden-reason')).toBe('index_pending')
+    expect(surface().hasAttribute('data-precip-url')).toBe(false)
+    expect(screen.queryByTestId('m11-precip-notice')).toBeNull()
+
+    releaseLayers()
+    await settled()
+
+    // 目录落地后这一格必须自愈成「可用且按下」，否则上面的否定断言可以被「永远说加载中」骗过。
+    await waitFor(() => {
+      const toggle = screen.getByRole('button', { name: /过去 24h 累积降水/ }) as HTMLButtonElement
+      expect(toggle.disabled).toBe(false)
+      expect(toggle.getAttribute('aria-pressed')).toBe('true')
+      expect(toggle.textContent).not.toContain('目录未就绪')
+    })
+    await waitFor(() => expect(surface().getAttribute('data-precip-url')).toBe(EXPECTED_URL))
   })
 
   it('threads the catalog precip legend into the floating legend card', async () => {

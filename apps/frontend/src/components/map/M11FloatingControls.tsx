@@ -48,26 +48,38 @@ function LayerGroupTitle({ title }: { title: string }) {
 }
 
 /**
+ * 目录里有没有 `precip` 条目是**三值**事实，不是布尔（fixture #2015 决策 8，round-2 更正）：
+ * 「目录还没到」与「目录到了且没有这一条」是两件事，塌成一个布尔就会在首屏/切源那一帧对用户
+ * 发出一句它当时并没有证据支持的终态断言（「未实现」）。
+ */
+export type M11PrecipAvailability = 'unknown' | 'available' | 'absent'
+
+/**
  * 浮层图层切换器（M26 单页全屏）。玻璃卡片浮在地图左上角，按「水文」/「气象」两组呈现
  * （spec map-layer-timeline-controls「Layer groups render」；base 组本单不交付，故不伪造）。
  *
- * `precipAvailable` 可选、默认 `false`：目录里没有 `precip` 条目时降水开关禁用并标「未实现」
- * （spec「Unimplemented meteorology layers are disabled」的诚实面）。这个判定由调用方**一处**
- * 从目录推出并传入（`OverviewMode`），组件内不重复 find；流域详情不传 → 恒禁用，直到 #2109 裁决。
+ * `precipAvailability` 可选、默认 `'absent'`（「没告诉我」= 终态没有，供流域详情省略，直到
+ * #2109 裁决）：`'absent'` 时降水开关禁用并标「未实现」（spec「Unimplemented meteorology
+ * layers are disabled」的诚实面）；`'unknown'`（目录在途、或快照属上一 query）同样禁用，但只说
+ * 「目录未就绪」：不说「加载中」——`bootstrapError` 且没有阶段 2 快照时 `overviewMetadataMatchesQuery`
+ * 恒假，`'unknown'` 就是**终态**，「加载中」会把终态谎报成在途；「未就绪」在途与终态都为真，而硬
+ * 失败本身由别处呈现。也不说「未实现」——那要正向证据（一份与当前 query 匹配且不含 `precip` 条目的目录）。
+ * 这个判定由调用方**一处**从目录推出并**显式**传入（`OverviewMode`），组件内不重复 find。
  */
 export function M11FloatingLayerSwitcher({
   layer,
   metStations = false,
   precip = false,
-  precipAvailable = false,
+  precipAvailability = 'absent',
   onQueryChange,
 }: {
   layer: M11Layer
   metStations?: boolean
   precip?: boolean
-  precipAvailable?: boolean
+  precipAvailability?: M11PrecipAvailability
   onQueryChange?: (patch: M11QueryPatch) => void
 }) {
+  const precipEnabled = precipAvailability === 'available'
   return (
     <section
       // 与右下图例同因：固定 w-52 会在右侧留下约三分之一死白（实测卡片 208px /
@@ -110,13 +122,14 @@ export function M11FloatingLayerSwitcher({
         <div className="space-y-1">
           <button
             type="button"
-            className={layerRowClassName({ selected: precipAvailable && precip, disabled: !precipAvailable })}
-            // 目录没有 `precip` 条目时按下态恒为 false：一颗禁用却显示"已按下"的开关，
-            // 正是 spec 明令禁止的"假装那些图层在渲染"。
-            aria-pressed={precipAvailable ? precip : false}
-            aria-disabled={!precipAvailable}
-            disabled={!precipAvailable}
-            title={precipAvailable ? undefined : '降水叠加未实现'}
+            className={layerRowClassName({ selected: precipEnabled && precip, disabled: !precipEnabled })}
+            // 目录没有 `precip` 条目（或目录还没到）时按下态恒为 false：一颗禁用却显示"已按下"
+            // 的开关，正是 spec 明令禁止的"假装那些图层在渲染"。
+            aria-pressed={precipEnabled ? precip : false}
+            aria-disabled={!precipEnabled}
+            disabled={!precipEnabled}
+            // `'unknown'` 的 title 也不得出现「未实现」：那是终态断言，此刻还没有证据。
+            title={precipEnabled ? undefined : precipAvailability === 'unknown' ? '降水图层目录未就绪' : '降水叠加未实现'}
             data-testid="m11-layer-toggle-precip"
             onClick={() => onQueryChange?.({ precip: !precip })}
           >
@@ -124,7 +137,7 @@ export function M11FloatingLayerSwitcher({
             <span className="min-w-0">
               <span className="block text-sm font-medium leading-tight">过去 24h 累积降水</span>
               <span className="block truncate text-xs text-neutral-600">
-                {precipAvailable ? 'mm/24h 栅格叠加' : '未实现'}
+                {precipEnabled ? 'mm/24h 栅格叠加' : precipAvailability === 'unknown' ? '目录未就绪' : '未实现'}
               </span>
             </span>
           </button>

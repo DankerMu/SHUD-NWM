@@ -365,4 +365,37 @@ describe('overview data store discharge loading', () => {
     expect(buildM11RegisteredOverlay(cycleQuery, state.overview?.layers ?? [])).toBeNull()
     expect(resolveM11NationalValidTimeCorrection(cycleQuery, state.overview?.layers ?? [])).toBeUndefined()
   })
+
+  it('clears the layer-time skip marker at the start of the next load', async () => {
+    // T6：`layerTimeEnrichmentSkipped` 是**整轮**事实（fixture 决策 1 第 3 臂），三个写点里只有
+    // 「置真」那个有 oracle。标记若粘住，下一轮**成功**加载的 index 在途窗口会把静默的
+    // `index_pending` 升成 `index_error` + 提示 B——对着一条正在飞的请求谎报索引失败。
+    mockApi({
+      '/api/v1/basins': () => {
+        throw new Error('basins down')
+      },
+    })
+
+    await useOverviewDataStore.getState().loadOverview(query)
+    // 前置条件：这一轮确实走了跳过分支（否则下面的复位断言什么也不鉴别）。
+    expect(useOverviewDataStore.getState().layerTimeEnrichmentSkipped).toBe(true)
+
+    // 换周期 → requestKey 不同，不会命中 `overviewLoads` 的既有 promise 早返回。
+    const next = useOverviewDataStore.getState().loadOverview({ ...query, cycle: '2026-05-17T12:00:00.000Z' })
+    // **同步**读：复位必须发生在 loadOverview 起始的那次 set 里。留到 enrichment 落定才复位，
+    // 整个在途窗口都会带着上一轮的终态标记。
+    expect(useOverviewDataStore.getState().layerTimeEnrichmentSkipped).toBe(false)
+    await next
+  })
+
+  it('clears the layer-time skip marker together with the layer-time caches', () => {
+    // 第三个写点：`clearOverviewDataCache()` 与三个 map 同寿。缓存清空后「键缺席」重新只意味着
+    // 「还没取」，标记留着就是谎报终态。
+    useOverviewDataStore.setState({ layerTimeEnrichmentSkipped: true })
+    expect(useOverviewDataStore.getState().layerTimeEnrichmentSkipped).toBe(true)
+
+    clearOverviewDataCache()
+
+    expect(useOverviewDataStore.getState().layerTimeEnrichmentSkipped).toBe(false)
+  })
 })

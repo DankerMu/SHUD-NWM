@@ -15,6 +15,7 @@ import {
   M11FloatingLegend,
   M11FloatingNotice,
   M11OpsLink,
+  type M11PrecipAvailability,
 } from '@/components/map/M11FloatingControls'
 import { resolveNationalOverlayCycle } from '@/components/map/m11MapBuilders'
 import { resolveM11PrecipOverlay, type M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
@@ -121,7 +122,7 @@ function M11FullscreenMap({
   stationFeatureCollection,
   popup,
   precipOverlay,
-  precipAvailable,
+  precipAvailability,
   precipLegend,
   loading,
   boundaryLoading,
@@ -150,8 +151,8 @@ function M11FullscreenMap({
   popup?: M11MapPopupSlot | null
   /** 已解析的降水叠加模型；不传 = 无叠加（流域详情模式，blocked by #2109）。 */
   precipOverlay?: M11PrecipOverlayModel | null
-  /** 目录里是否有 `precip` 条目；不传 = 降水开关禁用并标「未实现」。 */
-  precipAvailable?: boolean
+  /** 目录里有没有 `precip` 条目的**三值**事实；不传 = `'absent'` = 降水开关禁用并标「未实现」。 */
+  precipAvailability?: M11PrecipAvailability
   /** 降水图例色阶（目录 `precip` 条目的 `metadata.legend`）；不传/null = 不渲染降水图例段。 */
   precipLegend?: import('@/api/types').components['schemas']['PrecipLegendEntry'][] | null
   loading?: boolean
@@ -199,7 +200,7 @@ function M11FullscreenMap({
         layer={state.layer}
         metStations={state.metStations}
         precip={state.precip}
-        precipAvailable={precipAvailable}
+        precipAvailability={precipAvailability}
         onQueryChange={onQueryChange}
       />
       <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
@@ -368,19 +369,31 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // 目录里的 `precip` 条目：**一处**推导，既喂浮层开关的可用性，也喂图例段的色阶，也喂解析器的
   // 总闸（同一条目、同一语义；开第二条 find 就是让「开关说有」和「图例说没有」各自漂）。
   const precipCatalogLayer = useMemo(() => layers.find((entry) => entry.layerId === 'precip') ?? null, [layers])
-  const precipAvailable = precipCatalogLayer !== null
+  // 目录可用性是**三值**（fixture 决策 1 第 1 臂 round-2 再更正 / IS-4）：闸门与本文件时次校正
+  // effect 的既有闸**逐字同源**（`mapBootstrapLoading || !overviewMetadataMatchesQuery ||
+  // metadataLayers.length === 0`）。单用 `mapBootstrapLoading` 或 `surfaceSettling` 都漏一帧：
+  // `onQueryChange({ source })` 之后、`loadOverview` 的 effect 执行之前，快照仍属上一 query 而
+  // `layers` 已经是 `[]`，两者却都还是 false——那一帧会对用户发出没有证据的「未实现」。
+  const precipAvailability: M11PrecipAvailability =
+    mapBootstrapLoading || !overviewMetadataMatchesQuery || metadataLayers.length === 0
+      ? 'unknown'
+      : precipCatalogLayer
+        ? 'available'
+        : 'absent'
   const precipOverlay = useMemo(
     () =>
       resolveM11PrecipOverlay({
-        // 目录闸并进 `disabled`：开关按不动时，栅格与提示也必须一起沉默（fixture 决策 1 第 1 臂）。
-        precip: state.precip && precipAvailable,
+        // 目录闸并进 `disabled`，但只有**确认无条目**才算（fixture 决策 1 第 1 臂）：`'unknown'`
+        // 期照旧落到第 3 臂 `index_pending`，否则 `disabled` 会同时承载「用户关了」「目录无条目」
+        // 「目录在途」三件事，`data-precip-hidden-reason` 这个 oracle 失去区分力（IS-5）。
+        precip: state.precip && precipAvailability !== 'absent',
         concreteSource: nationalConcreteSource(state.source),
         cycle: dischargeLayer ? resolveNationalOverlayCycle(dischargeLayer) : null,
         validTime: dischargeLayer?.currentValidTime ?? null,
         precipIndexByCycle,
         enrichmentSkipped: layerTimeEnrichmentSkipped,
       }),
-    [dischargeLayer, layerTimeEnrichmentSkipped, precipAvailable, precipIndexByCycle, state.precip, state.source],
+    [dischargeLayer, layerTimeEnrichmentSkipped, precipAvailability, precipIndexByCycle, state.precip, state.source],
   )
   // 图例单一来源 = 目录 `precip` 条目的 `metadata.legend`（fixture 决策 7），前端零硬编码调色板。
   // 开关关掉时不渲染图例段：给一个没画出来的图层留着色阶就是在假装它还在。
@@ -552,7 +565,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       selectedStationId={stationPopup?.station.station_id ?? null}
       stationFeatureCollection={stationLayer.featureCollection}
       precipOverlay={precipOverlay}
-      precipAvailable={precipAvailable}
+      precipAvailability={precipAvailability}
       precipLegend={precipLegend}
       loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}

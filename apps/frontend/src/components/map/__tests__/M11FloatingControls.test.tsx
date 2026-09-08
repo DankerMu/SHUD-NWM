@@ -10,6 +10,7 @@ import {
   M11FloatingLegend,
   M11FloatingNotice,
   M11OpsLink,
+  type M11PrecipAvailability,
 } from '@/components/map/M11FloatingControls'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
 import { precipLegend } from '@/test/overviewDataFixture'
@@ -110,7 +111,7 @@ describe('M11FloatingLayerSwitcher', () => {
   })
 
   it('groups hydrology and meteorology controls and puts the precipitation toggle in meteorology', () => {
-    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailable />)
+    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailability="available" />)
 
     const hydrology = screen.getByRole('group', { name: '水文' })
     const meteorology = screen.getByRole('group', { name: '气象' })
@@ -122,7 +123,7 @@ describe('M11FloatingLayerSwitcher', () => {
   })
 
   it('marks the precipitation toggle pressed and implemented when the catalog serves a precip entry', () => {
-    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailable />)
+    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailability="available" />)
 
     const toggle = screen.getByRole('button', { name: /过去 24h 累积降水/ }) as HTMLButtonElement
     expect(toggle.getAttribute('aria-pressed')).toBe('true')
@@ -134,7 +135,7 @@ describe('M11FloatingLayerSwitcher', () => {
   it('dispatches precip=false when the operator turns the precipitation overlay off', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
-    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailable onQueryChange={onQueryChange} />)
+    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailability="available" onQueryChange={onQueryChange} />)
 
     await user.click(screen.getByRole('button', { name: /过去 24h 累积降水/, pressed: true }))
     expect(onQueryChange).toHaveBeenCalledWith({ precip: false })
@@ -143,30 +144,53 @@ describe('M11FloatingLayerSwitcher', () => {
   it('dispatches precip=true when the overlay is currently off', async () => {
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
-    render(<M11FloatingLayerSwitcher layer="discharge" precip={false} precipAvailable onQueryChange={onQueryChange} />)
+    render(<M11FloatingLayerSwitcher layer="discharge" precip={false} precipAvailability="available" onQueryChange={onQueryChange} />)
 
     await user.click(screen.getByRole('button', { name: /过去 24h 累积降水/, pressed: false }))
     expect(onQueryChange).toHaveBeenCalledWith({ precip: true })
   })
 
-  it.each([
-    ['explicitly unavailable', { precipAvailable: false }],
+  const absentCases: Array<[string, { precipAvailability?: M11PrecipAvailability }]> = [
+    ['explicitly absent', { precipAvailability: 'absent' }],
     ['prop omitted', {}],
-  ])('disables the precipitation toggle and marks it 未实现 when the catalog has no precip entry (%s)', async (
-    _label,
-    props: { precipAvailable?: boolean },
-  ) => {
+  ]
+
+  it.each(absentCases)(
+    'disables the precipitation toggle and marks it 未实现 when the catalog has no precip entry (%s)',
+    async (_label, props) => {
+      const onQueryChange = vi.fn()
+      const user = userEvent.setup()
+      render(<M11FloatingLayerSwitcher layer="discharge" precip onQueryChange={onQueryChange} {...props} />)
+
+      const toggle = screen.getByRole('button', { name: /过去 24h 累积降水/ }) as HTMLButtonElement
+      expect(toggle.disabled).toBe(true)
+      expect(toggle.getAttribute('aria-disabled')).toBe('true')
+      expect(toggle.getAttribute('title')).toBe('降水叠加未实现')
+      expect(toggle.textContent).toContain('未实现')
+      // 禁用却显示"已按下"就是在假装该图层正在渲染（spec 明令禁止）。
+      expect(toggle.getAttribute('aria-pressed')).toBe('false')
+
+      await user.click(toggle)
+      expect(onQueryChange).not.toHaveBeenCalled()
+    },
+  )
+
+  it('disables the precipitation toggle without claiming 未实现 while the catalog is still unknown', async () => {
+    // fixture 决策 8（round-2 更正）：「未实现」是**终态**断言，需要正向证据——一份与当前 query
+    // 匹配且不含 `precip` 条目的目录。目录在途（首屏、切源/切周期/改搜索框那一帧）时把它说出口
+    // 就是在猜；此刻只能说「还不知道」，开关照旧按不动。
     const onQueryChange = vi.fn()
     const user = userEvent.setup()
-    render(<M11FloatingLayerSwitcher layer="discharge" precip onQueryChange={onQueryChange} {...props} />)
+    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailability="unknown" onQueryChange={onQueryChange} />)
 
     const toggle = screen.getByRole('button', { name: /过去 24h 累积降水/ }) as HTMLButtonElement
     expect(toggle.disabled).toBe(true)
     expect(toggle.getAttribute('aria-disabled')).toBe('true')
-    expect(toggle.getAttribute('title')).toBe('降水叠加未实现')
-    expect(toggle.textContent).toContain('未实现')
-    // 禁用却显示"已按下"就是在假装该图层正在渲染（spec 明令禁止）。
     expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    expect(toggle.textContent).toContain('目录未就绪')
+    // 「未实现」不得出现在这一行的**任何**面上：文本与 title（后者不进 textContent）。
+    expect(toggle.textContent).not.toContain('未实现')
+    expect(toggle.getAttribute('title')).not.toContain('未实现')
 
     await user.click(toggle)
     expect(onQueryChange).not.toHaveBeenCalled()

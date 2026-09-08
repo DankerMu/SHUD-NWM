@@ -7,7 +7,9 @@ import { m11SourceCycleKey, type PrecipIndexState } from '@/stores/overviewData'
  * 把它塌成 `visible: boolean` 会让三种互不相同的事实（在途 / 取回失败 / 该周期无镜像）
  * 共用一条文案，用户与 vitest 都分不出「等一下就有」和「这个周期永远没有」。
  *
- * - `disabled`            `state.precip === false`：不注册 source、无提示、无图例段
+ * - `disabled`            入参 `precip === false`，即「用户关了开关」**或**「目录已确认无 `precip`
+ *                         条目」这两个**终态**（见 `M11PrecipOverlayInput.precip`）：不注册
+ *                         source、无提示、无图例段。目录**在途**不属此臂——它落第 3 臂
  * - `no_concrete_source`  `compare`，或 `best` 未解析出具体源：隐藏 + 提示 A
  * - `index_pending`       活动 `(source, cycle)` 未解出，或 store 里键缺席**且本轮 enrichment 未被跳过**
  *                         （请求真的在途）：隐藏，**无提示**
@@ -40,10 +42,13 @@ export interface M11PrecipOverlayModel {
 
 export interface M11PrecipOverlayInput {
   /**
-   * 「叠加是否被请求」的**合成**开关：调用点必须传 `state.precip && precipAvailable`
-   * （目录里有无 `precip` 条目）。目录无条目时开关本就 `disabled` 并标「未实现」，叠加与提示
-   * 必须一并归 `disabled`——否则会出现「栅格已画 / 提示已出，开关却按不动」这一格（fixture
-   * #2015 决策 1 第 1 臂 / T2-IS-3，部署错位窗口可达）。
+   * 「叠加是否被请求」的**合成**开关 =「用户开着」**且**「目录未被确认为无 `precip` 条目」：
+   * 调用点必须传 `state.precip && precipAvailability !== 'absent'`（目录可用性是三值，见
+   * `M11PrecipAvailability`）。目录**确认**无条目时开关本就 `disabled` 并标「未实现」，叠加与
+   * 提示必须一并归 `disabled`——否则会出现「栅格已画 / 提示已出，开关却按不动」这一格（fixture
+   * #2015 决策 1 第 1 臂 / T2-IS-3，部署错位窗口可达）。而目录**在途**（`'unknown'`）必须传
+   * `true`：它不是终态否定，落第 3 臂 `index_pending` 才诚实，否则 `disabled` 臂同时承载三件
+   * 互不相同的事实，`hiddenReason` 这个 oracle 失去区分力（IS-5）。
    */
   precip: boolean
   /**
