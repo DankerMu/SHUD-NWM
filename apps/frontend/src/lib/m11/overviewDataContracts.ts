@@ -669,7 +669,11 @@ export function normalizeLayerStates(input: {
             : // 「该源的周期列表已到达且为空」与「目录判 fail-closed」是同一件事的两个观测面
               // （前者按源、后者只对 GFS 目录成立），故必须在**同一分支等级**上求值——把它排到
               // 下面 pending/error 之后，就会被那两个过渡态文案吃掉（round-3 finding A1）。
-              isFailClosedDischargeMetadata(layerId, metadata) || activeCycleOverrideStatus === 'fail-closed'
+              // 目录那半是 **GFS 专有事实**，故存在按源覆盖时一律让位（round-4 finding R4-A）：
+              // 否则 fail-closed 目录会盖掉在途非默认源诚实的 pending，校正随即抹掉分享链接的
+              // `validTime`。默认源在 fail-closed 目录下恒传 `undefined`，闸门对它是恒等变换。
+              (activeCycleOverride === undefined && isFailClosedDischargeMetadata(layerId, metadata)) ||
+                activeCycleOverrideStatus === 'fail-closed'
               ? failClosedDischargeDisabledReason
               : activeCycleOverrideStatus === 'pending'
                 ? pendingActiveCycleValidTimesDisabledReason

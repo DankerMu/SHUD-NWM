@@ -190,8 +190,12 @@ export function M11BottomControlBar({
             // `{...state, ...patch}` 无跨字段重置，只发 `{ source }` 会让 GFS 上选定的周期在点
             // IFS 后原样存活 —— store 据此拼出 `(ifs, C_gfs)`（后端 200 + 空列表 → 假文案），
             // 上面的 `cycleOptions` 还会把它**前置**成 IFS 的选中项。`validTime` 不动：
-            // `pickCurrentValidTime` 已处理「旧时次不在新列表内」。
-            onClick={() => onQueryChange({ source: option.value, cycle: null })}
+            // `pickCurrentValidTime` 已处理「旧时次不在新列表内」。选中项本身是**幂等**的
+            // （toggle 语义）：不加这道守卫，再点一次已选中的分段就会把用户在 `<select>` 里
+            // 选好的周期清掉并触发一次整轮重载（round-4 finding R4-B）。
+            onClick={() => {
+              if (source !== option.value) onQueryChange({ source: option.value, cycle: null })
+            }}
           >
             {option.label}
           </button>

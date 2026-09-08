@@ -508,6 +508,26 @@ describe('M11BottomControlBar', () => {
     expect(onQueryChange).toHaveBeenLastCalledWith({ cycle: '2026-05-17T12:00:00Z' })
   })
 
+  it('is a no-op when the already selected source segment is clicked again', async () => {
+    // AC11（round-4 finding R4-B）：分段无 `disabled`，已选中项照常可点，而 `{ source, cycle: null }`
+    // 会把用户在 `<select>` 里选好的非默认周期清掉 → URL 掉 `cycle` → `loadOverview` 重跑、
+    // 条与图跳回默认周期。toggle 语义下选中项必须是 no-op。
+    const user = userEvent.setup()
+    const onQueryChange = vi.fn()
+    const query = { ...defaultM11QueryState, cycle: '2026-05-17T12:00:00Z' }
+    renderControlBar(
+      inputFor(query, { cyclesBySource: { gfs: availableCycles([DEFAULT_CYCLE, '2026-05-17T12:00:00Z']) } }),
+      onQueryChange,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'GFS', pressed: true }))
+    expect(onQueryChange).not.toHaveBeenCalled()
+
+    // 守卫只挡同源：切源那条路径逐字不变。
+    await user.click(screen.getByRole('button', { name: 'IFS' }))
+    expect(onQueryChange).toHaveBeenLastCalledWith({ source: 'ifs', cycle: null })
+  })
+
   it('shows the active cycle even when the cycles list does not carry it yet', () => {
     // 手敲 `?cycle=` / 列表尚未覆盖该周期：`<select>` 必须显示活动周期，而不是默认落在首项上。
     const query = { ...defaultM11QueryState, cycle: '2026-05-17T18:00:00.000Z' }

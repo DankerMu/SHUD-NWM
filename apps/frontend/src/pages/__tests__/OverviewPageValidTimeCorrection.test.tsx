@@ -3,7 +3,7 @@ import { RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
-import { pendingActiveCycleValidTimesDisabledReason } from '@/lib/m11/overviewDataContracts'
+import { isFailClosedDischargeMetadata, pendingActiveCycleValidTimesDisabledReason } from '@/lib/m11/overviewDataContracts'
 import { defaultM11QueryState, serializeM11QueryState } from '@/lib/m11/queryState'
 import { OverviewPage } from '@/pages/OverviewPage'
 import { useMonitoringStore, type RuntimeConfig } from '@/stores/monitoring'
@@ -84,10 +84,18 @@ const dischargeLayer = {
   },
 }
 
+/** 全国交集 fail-closed 的目录形状（与 AC7(g) 同式）：空 valid_times + 无默认周期。 */
+const failClosedDischargeMetadata = { ...dischargeLayer.metadata, valid_times: [], default_cycle: null }
+
 type MockOptions = { params?: { query?: Record<string, unknown>; path?: Record<string, unknown> } }
 
-/** 闸住 per-cycle valid-times：bootstrap 正常落定，pending 窗口在测试控制下保持打开。 */
-function mockApiWithGatedValidTimes() {
+/**
+ * 闸住 per-cycle valid-times：bootstrap 正常落定，pending 窗口在测试控制下保持打开。
+ *
+ * `failClosedCatalog`：目录换成 AC7(g) 的 fail-closed 形状（`valid_times: []` + `default_cycle: null`），
+ * 其余路径逐字不变——AC10 要的正是「目录 fail-closed + 健康 IFS」这一格。
+ */
+function mockApiWithGatedValidTimes({ failClosedCatalog = false }: { failClosedCatalog?: boolean } = {}) {
   let release: () => void = () => undefined
   const gate = new Promise<void>((resolve) => {
     release = resolve
@@ -99,7 +107,8 @@ function mockApiWithGatedValidTimes() {
     }
     if (path === '/api/v1/basins') return success([basin])
     if (path === '/api/v1/basins/{basin_id}/versions') return success([])
-    if (path === '/api/v1/layers') return success([dischargeLayer])
+    if (path === '/api/v1/layers')
+      return success([failClosedCatalog ? { ...dischargeLayer, metadata: failClosedDischargeMetadata } : dischargeLayer])
     if (path === '/api/v1/models') return success({ items: [], total: 0, limit: 200, offset: 0 })
     if (path === '/api/v1/runs') return success({ items: [], total: 0, limit: 20, offset: 0 })
     if (path === CYCLES_PATH) {
@@ -268,6 +277,49 @@ describe('OverviewPage validTime auto-correction gate', () => {
     release()
     await waitFor(() => expect(dischargeDisabledReason()).toBeNull())
     await waitFor(() => expect(currentValidTime()).toBe('2026-05-18T00:00:00.000Z'))
+  })
+
+  it('keeps the shared validTime under a fail-closed catalog while the IFS cycle list is in flight', async () => {
+    // AC10（round-4 finding R4-A）：目录判 fail-closed 是 **GFS 专有事实**，却对任何 `query.source`
+    // 生效——`?source=ifs` 且 IFS 周期列表在途时 store 诚实写 pending，文案分支若仍报 fail-closed，
+    // `isM11ActiveCycleValidTimesUnresolved` 就是 false，校正立刻把分享链接的 T 抹成 null，
+    // IFS 列表落地后 `pickCurrentValidTime` 落到列表首项。T 取列表**第二项**，正是为了把
+    // 「T 存活」与「回落首项」区分开。
+    const { release } = mockApiWithGatedValidTimes({ failClosedCatalog: true })
+    const sharedValidTime = '2026-05-18T03:00:00.000Z'
+    expect(IFS_VALID_TIMES.indexOf(sharedValidTime.replace('.000Z', 'Z'))).toBe(1)
+    const search = serializeM11QueryState({ ...defaultM11QueryState, source: 'ifs', validTime: sharedValidTime })
+    const currentValidTime = renderOverviewAt(search)
+
+    await waitFor(() => expect(useOverviewDataStore.getState().mapBootstrapLoading).toBe(false))
+    // 入参钉死：目录确实是 fail-closed 形状（否则本用例什么也不鉴别）。断言落在**目录事实**上，
+    // 而不是 bootstrap 层的 `disabledReason`——后者正是 R4-A 要改掉的那个代理量。
+    const bootstrapCatalog = useOverviewDataStore.getState().overview?.bootstrap?.layers ?? []
+    const bootstrapDischarge = bootstrapCatalog.find((item) => item.layer_id === 'discharge')
+    expect(isFailClosedDischargeMetadata('discharge', bootstrapDischarge?.metadata)).toBe(true)
+
+    await waitFor(() => expect(dischargeDisabledReason()).toBe(pendingActiveCycleValidTimesDisabledReason))
+    await waitFor(() => expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false))
+    await flushPendingEffects()
+
+    expect(dischargeDisabledReason()).toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(currentValidTime()).toBe(sharedValidTime)
+    // pending 窗口里整条控制条是禁用的：下面「放开后按钮可用」才是被观测到的**翻转**。
+    expect((screen.getByRole('button', { name: '上一个有效时刻' }) as HTMLButtonElement).disabled).toBe(true)
+
+    release()
+    await waitFor(() => expect(dischargeDisabledReason()).toBeNull())
+    expect(
+      useOverviewDataStore.getState().overview?.layers.find((item) => item.layerId === 'discharge')?.available,
+    ).toBe(true)
+    expect(currentValidTime()).toBe(sharedValidTime)
+    // R4-D：`getState()` 证明不了「算对的层到达了 DOM」。合并后的 discharge 层真的喂进了控制条，
+    // 时次落在列表第二项上（`disabled || atFirst` 两半都为假），这颗按钮才可用。
+    await waitFor(() =>
+      expect((screen.getByRole('button', { name: '上一个有效时刻' }) as HTMLButtonElement).disabled).toBe(false),
+    )
+    // 终态再钉一次：T 存活与 DOM 翻转必须同时成立（迟到的校正不得在上面那次断言之后把 T 抹掉）。
+    expect(currentValidTime()).toBe(sharedValidTime)
   })
 })
 

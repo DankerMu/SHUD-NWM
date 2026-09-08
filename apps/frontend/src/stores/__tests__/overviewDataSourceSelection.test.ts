@@ -4,6 +4,7 @@ import { buildM11RegisteredOverlay } from '@/components/map/m11MapBuilders'
 import {
   activeCycleValidTimesErrorDisabledReason,
   failClosedDischargeDisabledReason,
+  isFailClosedDischargeMetadata,
   mergeLayerStates,
   pendingActiveCycleValidTimesDisabledReason,
 } from '@/lib/m11/overviewDataContracts'
@@ -259,6 +260,14 @@ describe('overview data store discharge loading', () => {
     const validTimesCalls = calls.filter((call) => call.path === VALID_TIMES_PATH)
     // 默认源那轮走目录 metadata（零请求），切源后按 ifs 自己的默认周期发出恰好一次。
     expect(validTimesCalls.map((call) => call.query)).toEqual([{ source: 'ifs', cycle: IFS_CYCLE }])
+    // R4-C：precip 与 valid-times 读同一个 `pair`，但发出条件不同（前者 `pair ?`，后者
+    // `pair && !pair.isDefault`），故切源边上必须各自钉一条。这里钉整条序列而不是 AC7(b) 的
+    // `calls.find(...)`：本用例是**两轮**加载，默认源那轮自己就发过一条 precip，`find` 取到的
+    // 是它、与切源无关。
+    expect(calls.filter((call) => call.path === PRECIP_INDEX_PATH).map((call) => call.pathParams)).toEqual([
+      { source: 'gfs', cycle: DEFAULT_CYCLE },
+      { source: 'ifs', cycle: IFS_CYCLE },
+    ])
     const discharge = (state.overview?.layers ?? []).find((item) => item.layerId === 'discharge')
     expect(discharge?.activeNationalCycle).toBe(IFS_CYCLE)
     expect(discharge?.available).toBe(true)
@@ -283,10 +292,11 @@ describe('overview data store discharge loading', () => {
 
     const state = useOverviewDataStore.getState()
     const bootstrapLayers = state.overview?.bootstrap?.layerStates ?? []
-    // 入参钉死：bootstrap 那层确实是 fail-closed 目录（否则本用例什么也不鉴别）。
-    expect(bootstrapLayers.find((item) => item.layerId === 'discharge')?.disabledReason).toBe(
-      failClosedDischargeDisabledReason,
-    )
+    // 入参钉死：bootstrap 目录确实是 fail-closed（钉目录事实，不钉下游文案——round-4 R4-A 后
+    // `source=ifs` 的 bootstrap 层诚实地是 pending）。
+    const bootstrapCatalog = state.overview?.bootstrap?.layers ?? []
+    const bootstrapDischarge = bootstrapCatalog.find((item) => item.layer_id === 'discharge')
+    expect(isFailClosedDischargeMetadata('discharge', bootstrapDischarge?.metadata)).toBe(true)
     // store 侧已经算对了（AC7(b) 的那半），本用例要证明的是它能不能活着穿过展示边界。
     expect((state.overview?.layers ?? []).find((item) => item.layerId === 'discharge')?.available).toBe(true)
 
