@@ -6,7 +6,13 @@ import { render, screen } from '@testing-library/react'
 import { JobsTable } from '@/components/monitoring/JobsTable'
 import { useMonitoringStore } from '@/stores/monitoring'
 import { parseC4DisplayConfig } from '../lib/c4DisplayEvidence/config'
-import { inspectC4HomeInPage, inspectC4OpsInPage, openC4JobLogInPage } from '../lib/c4DisplayEvidence/dom'
+import {
+  inspectC4HomeInPage,
+  inspectC4OpsInPage,
+  openC4JobLogInPage,
+  type C4HomeDomObservation,
+  type C4OpsDomObservation,
+} from '../lib/c4DisplayEvidence/dom'
 import { extractC4JobIdFromJobsPayload, matchC4OpsRequest } from '../lib/c4DisplayEvidence/requestMatching'
 import { runC4DisplayLane } from '../../playwright.c4-display-lane'
 import { mapRiverFailure } from '../../playwright.c4-display-lane-preflight'
@@ -131,6 +137,9 @@ describe('C4 request matching and job selection', () => {
     const failure = mapRiverFailure({
       code: 'PREFLIGHT_HTTP_ERROR',
       stage: 'preflight',
+      sampleIndex: null,
+      gfsStatus: null,
+      ifsStatus: null,
       message: 'file:///private/secret ws://socket.example.test user@example.test',
     })
     expect(failure.message).toBe('C4 preflight request failed')

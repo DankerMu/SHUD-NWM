@@ -259,7 +259,8 @@ export function makeC4FakePage(state: C4FakePageState): C4LanePageSurface {
       }
     }),
     waitForTimeout: vi.fn(async (ms: number) => {
-      if (state.sleepMs) await new Promise((resolve) => setTimeout(resolve, Math.min(state.sleepMs, ms)))
+      const sleepMs = state.sleepMs
+      if (sleepMs) await new Promise((resolve) => setTimeout(resolve, Math.min(sleepMs, ms)))
     }),
     evaluate: vi.fn(async (expr: unknown, ...args: unknown[]) => {
       if (typeof expr === 'function') {
