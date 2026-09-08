@@ -18,6 +18,24 @@ UV_CACHE_DIR=/tmp/nhms-uv-cache
 NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS=true
 NHMS_DISPLAY_ALLOW_LOCAL_FILE_LOGS=false
 
+# #2079: shared secret that lets an out-of-process caller force a display
+# catalog cache refresh (header `x-nhms-cache-warm: <token>`, compared with
+# hmac.compare_digest). Its only legitimate holder is the node-27 prewarm, so
+# infra/env/node27-ingest.env MUST carry the SAME value. Leaving it unset is the
+# safe default: no header value forces a refresh and only the in-process warmer
+# (an ASGI scope mark) can, at the cost of a <=45 s stale discovery window.
+# Never leave the placeholder below in a deployed display.env, and never put the
+# real value in a receipt.
+# NOTE (known gap, #2079 design D5): infra/compose.display.yml enumerates its
+# `environment:` keys one by one and does NOT pass this one through. The current
+# deployment path is not compose -- it is `set -a; . display.env` from
+# infra/systemd/nhms-display-api.service / scripts/ops/start-display-api.sh,
+# which injects the whole file. A future compose deployment must add the
+# passthrough AND the key to DISPLAY_AUDITED_INTERPOLATION_ENV in
+# scripts/validate_two_node_docker_runtime.py, or the token will be declared
+# here, never reach the app, and prewarm will silently degrade.
+NHMS_DISPLAY_CACHE_WARM_TOKEN=change-me-cache-warm-token
+
 # Enable readonly live PostGIS MVT overlays. This does not grant write/control
 # capability; keep DATABASE_URL on a readonly role and keep control mutations off.
 NHMS_ENABLE_LIVE_POSTGIS_MVT=true

@@ -35,6 +35,15 @@ AUTOPIPE_COVERAGE_WORKERS=2
 AUTOPIPE_MVT_PREWARM_ENABLED=1
 AUTOPIPE_MVT_PREWARM_ZOOMS=3,4,5
 AUTOPIPE_MVT_PREWARM_WORKERS=8
+# #2079: MUST be identical to NHMS_DISPLAY_CACHE_WARM_TOKEN in
+# infra/env/display.env -- it is the display process that compares the two. It is
+# what makes the two prewarm discovery hops (/cycles, /valid-times) bypass the
+# catalog cache right after publish. When it is missing here, prewarm sends no
+# such header, prints one warning line to stderr per process, and discovery
+# degrades to a <=45 s stale window that self-heals on the next tick; the tick
+# does NOT fail. A value that does not match the display side degrades the same
+# way but without the warning.
+NHMS_DISPLAY_CACHE_WARM_TOKEN=change-me-cache-warm-token
 AUTOPIPE_EXCLUDE_BASINS=zhaochen_hhy
 OUTPUT_PARSER_BATCH_SIZE=10000
 AUTOPIPE_LOG_FILE=/home/nwm/autopipe-logs/autopipe.log

@@ -930,29 +930,69 @@ def test_the_summary_reports_the_effective_worker_count_not_the_module_default()
     )
 
 
-def test_discovery_requests_force_a_display_catalog_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+class _DiscoveryResponse:
+    def read(self) -> bytes:
+        return json.dumps({"data": {"default_cycle": None}}).encode()
+
+    def __enter__(self) -> _DiscoveryResponse:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+def _capture_discovery_requests(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     captured: list[Any] = []
-
-    class _Response:
-        def read(self) -> bytes:
-            return json.dumps({"data": {"default_cycle": None}}).encode()
-
-        def __enter__(self) -> _Response:
-            return self
-
-        def __exit__(self, *_: object) -> None:
-            return None
 
     def _fake_urlopen(request: Any, timeout: float) -> Any:
         captured.append(request)
-        return _Response()
+        return _DiscoveryResponse()
 
     monkeypatch.setattr(prewarm, "urlopen", _fake_urlopen)
+    # Process-level latch: reset it so the assertions below count THIS test's
+    # warnings, not whatever an earlier test in the session already burned.
+    monkeypatch.setattr(prewarm, "_warned_cache_warm_token_unset", False)
+    return captured
+
+
+def test_discovery_requests_carry_the_configured_cache_warm_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #2079: the display side grants a forced refresh only to a header value that
+    # equals its configured token, so the value must come from the environment --
+    # the retired literal `refresh` would now be an ordinary cache hit.
+    captured = _capture_discovery_requests(monkeypatch)
+    monkeypatch.setenv("NHMS_DISPLAY_CACHE_WARM_TOKEN", "  s3cr3t-token  ")
+
     prewarm.fetch_json(f"{_BASE_URL}/api/v1/layers/discharge/cycles?source=gfs", 1.0)
 
     assert len(captured) == 1
     # urllib capitalizes header names on `add_header`, so look it up the same way.
-    assert captured[0].get_header("X-nhms-cache-warm") == "refresh"
+    assert captured[0].get_header("X-nhms-cache-warm") == "s3cr3t-token"
+    assert captured[0].get_header("Accept") == "application/json"
+
+
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_discovery_without_a_token_sends_no_header_and_warns_once(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    blank: str | None,
+) -> None:
+    captured = _capture_discovery_requests(monkeypatch)
+    if blank is None:
+        monkeypatch.delenv("NHMS_DISPLAY_CACHE_WARM_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("NHMS_DISPLAY_CACHE_WARM_TOKEN", blank)
+
+    first = prewarm.fetch_json(f"{_BASE_URL}/api/v1/layers/discharge/cycles?source=gfs", 1.0)
+    second = prewarm.fetch_json(f"{_BASE_URL}/api/v1/layers/discharge/cycles?source=ifs", 1.0)
+
+    # Degradation, not failure: discovery still parses normally.
+    assert first == second == {"data": {"default_cycle": None}}
+    assert len(captured) == 2
+    assert [request.get_header("X-nhms-cache-warm") for request in captured] == [None, None]
+    assert [request.get_header("Accept") for request in captured] == ["application/json"] * 2
+    assert capsys.readouterr().err.strip().splitlines() == [
+        "prewarm: NHMS_DISPLAY_CACHE_WARM_TOKEN unset; discovery may see up to 45 s stale catalog"
+    ]
 
 
 def test_warm_url_parses_the_error_envelope_and_survives_a_bodyless_error(monkeypatch: pytest.MonkeyPatch) -> None:

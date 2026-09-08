@@ -2171,6 +2171,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2079. The catalog cache's own suite is named after the CAPABILITY, not
+        # after the module, so same-name derivation (`tests/test_display_cache.py`)
+        # cannot reach it, and the `apps/api/**` rule above only buys the three
+        # generic API suites -- none of which exercise `_force_refresh`.
+        "apps/api/display_cache.py",
+        ("tests/test_display_catalog_cache.py",),
+    ),
+    PathTestRule(
         "db/**",
         ("tests/test_migrations.py",),
     ),
