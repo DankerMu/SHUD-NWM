@@ -366,38 +366,39 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // discharge `LayerState.currentValidTime`（`pickCurrentValidTime` 已把 URL 的 T 与活动列表调和过，
   // 与 `buildM11RegisteredOverlay` 取到的时次逐字相同）。这里不新造任何第二份解析规则。
   const dischargeLayer = useMemo(() => layers.find((entry) => entry.layerId === 'discharge') ?? null, [layers])
-  // 目录里的 `precip` 条目：**一处**推导，既喂浮层开关的可用性，也喂图例段的色阶，也喂解析器的
-  // 总闸（同一条目、同一语义；开第二条 find 就是让「开关说有」和「图例说没有」各自漂）。
-  const precipCatalogLayer = useMemo(() => layers.find((entry) => entry.layerId === 'precip') ?? null, [layers])
-  // 目录可用性是**三值**（fixture 决策 1 第 1 臂 round-2 再更正 / IS-4）：闸门与本文件时次校正
-  // effect 的既有闸**逐字同源**（`mapBootstrapLoading || !overviewMetadataMatchesQuery ||
-  // metadataLayers.length === 0`）。单用 `mapBootstrapLoading` 或 `surfaceSettling` 都漏一帧：
-  // `onQueryChange({ source })` 之后、`loadOverview` 的 effect 执行之前，快照仍属上一 query 而
-  // `layers` 已经是 `[]`，两者却都还是 false——那一帧会对用户发出没有证据的「未实现」。
-  const precipAvailability: M11PrecipAvailability =
-    mapBootstrapLoading || !overviewMetadataMatchesQuery || metadataLayers.length === 0
-      ? 'unknown'
-      : precipCatalogLayer
-        ? 'available'
-        : 'absent'
+  // 降水目录可用性是**三值**事实（尚未知 / 已知在场 / 已知缺席），且只有**一个**来源：合并后的
+  // `layers`。三个消费者——浮层开关的 `precipAvailability`、图例段的色阶、解析器的总闸——都只读
+  // 这一个对象，按构造不可能互相矛盾（fixture 决策 1 第 1 臂 round-3 规则 / IS-2·IS-4·IS-7 retro：
+  // 三轮修复各在新站点写了一个新的二元谓词，缝隙就出在站点之间）。
+  //
+  // `layers.length === 0` 是唯一的 `'unknown'`：`onQueryChange` 之后、`loadOverview` 的 effect 执行
+  // 之前那一帧，快照属上一 query，`layers` 已经是 `[]`——那一帧被这里兜住，靠的就是空数组本身。
+  // 反过来，`mapBootstrapLoading` **不**是可用性的证据：validTime-only 重载（时间轴步进/播放）
+  // 期间目录仍在手、栅格与图例照画，把它当「未就绪」就是已知冒充未知（IS-7）。
+  const precipCatalog = useMemo<{ status: M11PrecipAvailability; layer: LayerState | null }>(() => {
+    if (layers.length === 0) return { status: 'unknown', layer: null }
+    const entry = layers.find((item) => item.layerId === 'precip') ?? null
+    return { status: entry ? 'available' : 'absent', layer: entry }
+  }, [layers])
   const precipOverlay = useMemo(
     () =>
       resolveM11PrecipOverlay({
         // 目录闸并进 `disabled`，但只有**确认无条目**才算（fixture 决策 1 第 1 臂）：`'unknown'`
-        // 期照旧落到第 3 臂 `index_pending`，否则 `disabled` 会同时承载「用户关了」「目录无条目」
-        // 「目录在途」三件事，`data-precip-hidden-reason` 这个 oracle 失去区分力（IS-5）。
-        precip: state.precip && precipAvailability !== 'absent',
+        // 期落到第 3 臂 `index_pending`（`layers` 为空 ⇒ `dischargeLayer` 为 null ⇒ 周期解不出，
+        // 由同一个空数组推出），否则 `disabled` 会同时承载「用户关了」「目录无条目」「目录在途」
+        // 三件事，`data-precip-hidden-reason` 这个 oracle 失去区分力（IS-5）。
+        precip: state.precip && precipCatalog.status !== 'absent',
         concreteSource: nationalConcreteSource(state.source),
         cycle: dischargeLayer ? resolveNationalOverlayCycle(dischargeLayer) : null,
         validTime: dischargeLayer?.currentValidTime ?? null,
         precipIndexByCycle,
         enrichmentSkipped: layerTimeEnrichmentSkipped,
       }),
-    [dischargeLayer, layerTimeEnrichmentSkipped, precipAvailability, precipIndexByCycle, state.precip, state.source],
+    [dischargeLayer, layerTimeEnrichmentSkipped, precipCatalog.status, precipIndexByCycle, state.precip, state.source],
   )
   // 图例单一来源 = 目录 `precip` 条目的 `metadata.legend`（fixture 决策 7），前端零硬编码调色板。
   // 开关关掉时不渲染图例段：给一个没画出来的图层留着色阶就是在假装它还在。
-  const precipLegend = state.precip ? (precipCatalogLayer?.metadata?.legend ?? null) : null
+  const precipLegend = state.precip ? (precipCatalog.layer?.metadata?.legend ?? null) : null
   // basin_version_id → basin_id：全国点河段开流量弹窗时反查所属流域去取该流域 latest-product。
   const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? mapOverview?.basinVersionToBasinId ?? {}
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
@@ -565,7 +566,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       selectedStationId={stationPopup?.station.station_id ?? null}
       stationFeatureCollection={stationLayer.featureCollection}
       precipOverlay={precipOverlay}
-      precipAvailability={precipAvailability}
+      precipAvailability={precipCatalog.status}
       precipLegend={precipLegend}
       loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}
