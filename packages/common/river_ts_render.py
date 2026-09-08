@@ -643,12 +643,13 @@ def _outer_code_for_text_identity_columns(sql: str, aliases: frozenset[str]) -> 
 
     All views derive from one scanner-owned ``outer`` value after authority scalar
     sub-selects, literals and comments have been removed. The raw view belongs to
-    the parenthesized whole-row classifier, whose expression-start boundary must
-    still distinguish a quoted function name from whitespace. The unquoted view
-    keeps the existing direct-reference grammar by masking every complete quoted
-    identifier. The quoted-reference view preserves only exact lower-case aliases
-    supplied by the caller and exact lower-case text-identity members; every other
-    quoted identifier is opaque to the direct matcher.
+    the parenthesized whole-row classifier and the unqualified functional-field
+    classifier, whose expression-start boundary must still distinguish a quoted
+    function name from whitespace. The unquoted view keeps the existing
+    direct-reference grammar by masking every complete quoted identifier. The
+    quoted-reference view preserves only exact lower-case aliases supplied by the
+    caller and exact lower-case text-identity members; every other quoted
+    identifier is opaque to the direct matcher.
     """
     outer = _blank_non_code(outer_predicates(sql))
     unquoted = _mask_quoted_identifier_spans(outer, preserve=frozenset())
@@ -938,11 +939,79 @@ def _parenthesized_fact_alias_selections(
 
 
 @dataclass(frozen=True)
+class _FunctionalFactAliasFields:
+    """Exact one-argument calls and conservative unsupported known-member calls."""
+
+    exact_columns: frozenset[str]
+    has_unsupported_alias_rooted_call: bool
+
+
+def _functional_fact_alias_fields(
+    outer: str,
+    aliases: frozenset[str],
+) -> _FunctionalFactAliasFields:
+    """Classify unqualified known-member calls whose argument mentions a fact alias.
+
+    This is a finite scanner subset, not a parser. An exact form is one known
+    ``TEXT_IDENTITY_COLUMNS`` token — bare ASCII lower-folded or a complete exact
+    lower-case quoted identifier — applied to exactly one canonical fact alias,
+    with no suffix field-selection dot. A previous-significant-code ``.`` keeps
+    the spelling a schema-qualified function. Any other unqualified known-member
+    call whose argument contains that alias as an expression value is reported
+    unsupported. Traversal trusts :func:`_skip_balanced_span`'s ``closed`` flag
+    so an unclosed call keeps the EOF tail instead of stealing an inner close.
+    """
+    if not aliases:
+        return _FunctionalFactAliasFields(frozenset(), False)
+
+    exact_columns: set[str] = set()
+    unsupported = False
+    index = 0
+    while index < len(outer):
+        member = _known_parenthesized_field_at(outer, index)
+        if member is None:
+            if outer[index] == '"':
+                index = _scan_quoted(outer, index, '"')
+            else:
+                token = _bare_identifier_token_at(outer, index)
+                index = token[1] if token is not None else index + 1
+            continue
+
+        _name, member_end = member
+        previous = _parenthesized_previous_significant_character(outer, index)
+        opening = _parenthesized_next_significant_character(outer, member_end)
+        if previous is not None and outer[previous] == ".":
+            index = member_end
+            continue
+        if opening is None or outer[opening] != "(":
+            index = member_end
+            continue
+
+        # Trust closed rather than the last consumed byte: an unclosed outer call
+        # whose tail happens to end on an inner ``)`` is still unclosed.
+        end, closed = _skip_balanced_span(outer, opening)
+        body = outer[opening + 1 : end - 1] if closed else outer[opening + 1 : end]
+        normalized = _WHITESPACE.sub(" ", body).strip()
+        suffix = _parenthesized_next_significant_character(outer, end) if closed else None
+        if (
+            closed
+            and (suffix is None or outer[suffix] != ".")
+            and _canonical_parenthesized_alias(normalized, aliases) is not None
+        ):
+            exact_columns.add(_name)
+        elif _contains_canonical_parenthesized_alias(body, aliases):
+            unsupported = True
+        index = end
+    return _FunctionalFactAliasFields(frozenset(exact_columns), unsupported)
+
+
+@dataclass(frozen=True)
 class _AliasMemberAnalysis:
-    """One owner for direct/quoted/separator and parenthesized alias-member grammar."""
+    """One owner for direct/quoted/separator, parenthesized and functional grammar."""
 
     exact_columns: frozenset[str]
     has_unsupported_alias_rooted_selection: bool
+    has_unsupported_functional_alias_rooted_call: bool
 
 
 def _alias_member_analysis(
@@ -953,15 +1022,18 @@ def _alias_member_analysis(
 ) -> _AliasMemberAnalysis:
     """Classify known text members through the supplied fact aliases.
 
-    Direct bare/exact-quoted/#2092 separator arms and the #2112 exact/unsupported
-    parenthesized classifier share this helper so a scalar-body visibility check
-    cannot grow a second matcher. ``has_unaliased_reference`` stays the outer
-    unaliased fallback; scalar-body consumers pass ``False``.
+    Direct bare/exact-quoted/#2092 separator arms, the #2112 exact/unsupported
+    parenthesized classifier and the #2141 exact/unsupported functional classifier
+    share this helper so a scalar-body visibility check cannot grow a second
+    matcher. ``has_unaliased_reference`` stays the outer unaliased fallback;
+    scalar-body consumers pass ``False``.
     """
     canonical_aliases = frozenset(alias.lower() for alias in aliases)
     raw_outer, outer, quoted_references = _outer_code_for_text_identity_columns(sql, canonical_aliases)
     parenthesized = _parenthesized_fact_alias_selections(raw_outer, canonical_aliases)
+    functional = _functional_fact_alias_fields(raw_outer, canonical_aliases)
     found = set(parenthesized.exact_columns)
+    found.update(functional.exact_columns)
     for column in TEXT_IDENTITY_COLUMNS:
         if any(
             re.search(
@@ -1004,7 +1076,11 @@ def _alias_member_analysis(
             flags=re.ASCII,
         ) is not None:
             found.add(column)
-    return _AliasMemberAnalysis(frozenset(found), parenthesized.has_unsupported_alias_rooted_selection)
+    return _AliasMemberAnalysis(
+        frozenset(found),
+        parenthesized.has_unsupported_alias_rooted_selection,
+        functional.has_unsupported_alias_rooted_call,
+    )
 
 
 def _text_identity_columns_for_references(
@@ -1033,9 +1109,9 @@ def text_fact_columns(sql: str, alias: str) -> set[str]:
     discriminating.
 
     Deliberately NOT guarded by :func:`_assert_modelled_reference_forms`: exact
-    parenthesized one-token alias selections are matched here, but unsupported
-    forms are not refusals here. It is therefore NOT the answer to "does this
-    statement predicate on the fact
+    parenthesized one-token alias selections and exact one-argument functional
+    field notation are matched here, but unsupported forms are not refusals here.
+    It is therefore NOT the answer to "does this statement predicate on the fact
     table's text identity" — that question is
     :func:`fact_table_text_identity_columns`, which refuses an unmodelled
     reference form instead of answering it. This helper answers about the ONE
@@ -1295,13 +1371,14 @@ def _lexical_subset_violation(sql: str) -> tuple[int, str] | None:
 def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     """Refuse a fact-table reference form the alias walk does not model.
 
-    The guarantee, in one sentence (fixture decisions 16, 22 and 23): no statement
+    The guarantee, in one sentence (fixture decisions 16, 22, 23 and 24): no statement
     reaches a render or a text-identity answer unless the independent occurrence counter
     and the ``FROM`` / ``JOIN`` walk AGREE about how many times it reads the fact
     table, the counter is blind to no spelling of the table's name, and no read
-    hides where the text-identity scan cannot look. EIGHT checks, in this order —
+    hides where the text-identity scan cannot look. NINE checks, in this order —
     ``U&`` → lexical subset → unterminated belt → quoted alias → parenthesized
-    field selection → the counts → the sub-select delta → correlated scalar bodies:
+    field selection → functional field notation → the counts → the sub-select delta
+    → correlated scalar bodies:
 
     #. a Unicode-escaped identifier or literal (``U&"…"`` / ``U&'…'``) anywhere
        in the code — the one syntax that can name the table with no occurrence of
@@ -1338,6 +1415,11 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     #. an unsupported PARENTHESIZED fact-alias field selection: a known text
        member selected from a group that contains the attributed alias but is not
        the one-token whole-row grammar is refused rather than guessed at;
+    #. an unsupported FUNCTIONAL fact-alias field notation: an unqualified known
+       text-member call whose argument contains the attributed alias but is not
+       the exact one-argument grammar is refused rather than guessed at, and
+       separately from the parenthesized reason so the two surfaces stay
+       independently mutation-owned;
     #. the COUNTS themselves — the permissive name counter against the strict
        ``FROM`` / ``JOIN`` walk, which have to agree on how many times the
        statement reads the fact table;
@@ -1350,10 +1432,11 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
        false-refuses the registered statements whose authority resolution lives
        there;
     #. a CORRELATED SCALAR BODY — a known text member, or an unsupported
-       parenthesized alias-rooted selection, through an already-attributed outer
-       fact alias inside any comparison-position scalar body (fixture decision 23).
-       LAST, so an inner fact-table reread keeps the older count-delta reason.
-       The body walk reuses the same matcher; it does not return a member set.
+       parenthesized or functional alias-rooted form, through an already-attributed
+       outer fact alias inside any comparison-position scalar body (fixture
+       decisions 23 and 24). LAST, so an inner fact-table reread keeps the older
+       count-delta reason. The body walk reuses the same matcher; it does not
+       return a member set.
 
     Run over the comment/literal-blanked text so a quoted alias SPELLED inside a
     literal or a comment is data, not a refusal. Double-quoted spans survive that
@@ -1410,6 +1493,11 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
             f"{entry}: unmodelled parenthesized fact-alias field selection — only one standalone "
             "parenthesized fact alias may select a text identity column"
         )
+    if analysis.has_unsupported_functional_alias_rooted_call:
+        raise RiverTemplateError(
+            f"{entry}: unmodelled functional fact-alias field notation — only one unqualified "
+            "known text member may be applied to a single fact alias"
+        )
     occurrences = fact_table_name_occurrences(sql)
     modelled = fact_table_attribution(sql).reference_count
     if occurrences != modelled:
@@ -1435,7 +1523,11 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
                 attribution.aliases,
                 has_unaliased_reference=False,
             )
-            if body_analysis.exact_columns or body_analysis.has_unsupported_alias_rooted_selection:
+            if (
+                body_analysis.exact_columns
+                or body_analysis.has_unsupported_alias_rooted_selection
+                or body_analysis.has_unsupported_functional_alias_rooted_call
+            ):
                 raise RiverTemplateError(
                     f"{entry}: correlated outer fact-alias reference inside comparison-position "
                     "scalar subquery"
@@ -1743,9 +1835,9 @@ def fact_table_text_identity_columns(sql: str, *, entry: str = "<template>") -> 
       their authority sub-selects are already stripped.
 
     Raises :class:`RiverTemplateError`, naming ``entry``, on a reference form the
-    alias walk does not model or an unsupported parenthesized fact-alias field
-    selection rather than returning the empty set that form would otherwise
-    produce.
+    alias walk does not model or an unsupported parenthesized or functional
+    fact-alias field form rather than returning the empty set that form would
+    otherwise produce.
     """
     _assert_modelled_reference_forms(sql, entry)
     attribution = fact_table_attribution(sql)

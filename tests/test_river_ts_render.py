@@ -1517,6 +1517,7 @@ _PARENTHESIZED_TEXT_IDENTITY_COLUMNS = (
     "quality_flag",
 )
 _PARENTHESES_UNMODELLED = "unmodelled parenthesized fact-alias field selection"
+_FUNCTIONAL_UNMODELLED = "unmodelled functional fact-alias field notation"
 
 
 def _parenthesized_fact_sql(reference: str) -> str:
@@ -2057,6 +2058,448 @@ def test_parenthesized_extension_preserves_the_quoted_fact_alias_declaration_ref
 
 
 # ---------------------------------------------------------------------------
+# Unqualified one-argument functional composite field notation (#2141)
+# ---------------------------------------------------------------------------
+# Keep this literal enumeration independent of the implementation tuple.  The
+# shared tuple is the production contract; this list makes an accidental member
+# addition, deletion, or reordering visible rather than deriving every expected
+# row from the code under test. Five exact token forms × seven members is the
+# public 35-node arithmetic owner.
+_FUNCTIONAL_TEXT_IDENTITY_COLUMNS = (
+    "run_id",
+    "river_network_version_id",
+    "variable",
+    "basin_version_id",
+    "river_segment_id",
+    "unit",
+    "quality_flag",
+)
+_FUNCTIONAL_EXACT_FORMS = (
+    ("bare-alias-bare-member", "{member}({alias})"),
+    ("quoted-member-bare-alias", '"{member}"({alias})'),
+    ("folded-member-bare-alias", "{folded_member}({alias})"),
+    ("bare-member-quoted-alias", '{member}("{alias}")'),
+    ("quoted-member-quoted-alias", '"{member}"("{alias}")'),
+)
+_FUNCTIONAL_EXACT_NODE_COUNT = 35
+_FUNCTIONAL_WHITESPACE_COMMENT_PADDING = (
+    ("space", " "),
+    ("tab", "\t"),
+    ("newline", "\n"),
+    ("nested-block-comment", " /* outer /* inner */ tail */ "),
+    ("line-comment", " -- functional field\n"),
+)
+
+
+def _functional_field_sql(reference: str) -> str:
+    return f"SELECT RT.value FROM hydro.river_timeseries RT WHERE {reference} = :value"
+
+
+def _assert_functional_field_exact_sql(sql: str, *, entry: str, column: str) -> None:
+    """Exercise an exact one-argument call through each public attribution seam."""
+    message = _quoted_text_identity_refusal(sql, entry=entry)
+
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    assert (
+        fact_table_text_identity_columns(sql, entry=entry),
+        text_fact_columns(sql, "RT"),
+        text_fact_columns(sql, "rt"),
+        message is not None,
+    ) == ({column}, {column}, {column}, True)
+    _assert_exact_quoted_text_identity_refusal(message, entry=entry, column=column)
+
+    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
+    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    assert legacy.removed_placeholders == ()
+
+
+def _assert_functional_field_exact(reference: str, *, entry: str, column: str) -> None:
+    _assert_functional_field_exact_sql(_functional_field_sql(reference), entry=entry, column=column)
+
+
+def _assert_functional_field_clean_sql(sql: str, *, entry: str) -> None:
+    """Schema-qualified, other-relation, role and data forms keep the base outcome."""
+    assert fact_table_text_identity_columns(sql, entry=entry) == set()
+    assert text_fact_columns(sql, "RT") == set()
+    assert text_fact_columns(sql, "rt") == set()
+
+    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
+    narrow = render_river_ts_sql(sql, "narrow", entry=entry)
+    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    assert narrow.sql == sql
+    assert legacy.removed_placeholders == narrow.removed_placeholders == ()
+
+
+def _assert_functional_field_clean(reference: str, *, entry: str) -> None:
+    _assert_functional_field_clean_sql(_functional_field_sql(reference), entry=entry)
+
+
+def _assert_functional_field_unsupported(sql: str, *, entry: str) -> None:
+    """Guarded helper plus both stores refuse; the unguarded matcher stays empty."""
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    assert text_fact_columns(sql, "RT") == set()
+    assert text_fact_columns(sql, "rt") == set()
+
+    for door in ("guarded", "legacy", "narrow"):
+        with pytest.raises(RiverTemplateError) as raised:
+            if door == "guarded":
+                fact_table_text_identity_columns(sql, entry=entry)
+            else:
+                render_river_ts_sql(sql, door, entry=entry)
+        message = str(raised.value)
+        assert entry in message
+        assert _FUNCTIONAL_UNMODELLED in message
+        assert "text identity column(s)" not in message
+        assert _PARENTHESES_UNMODELLED not in message
+        assert _CORRELATED_SCALAR_REASON not in message
+        assert "unbalanced parentheses" not in message
+        assert "comparison-position sub-select" not in message
+
+
+def test_the_functional_field_member_enumeration_matches_the_shared_identity_contract() -> None:
+    """Seven members times five exact token forms is the public 35-node owner."""
+    assert _FUNCTIONAL_TEXT_IDENTITY_COLUMNS == TEXT_IDENTITY_COLUMNS
+    assert (
+        len(_FUNCTIONAL_TEXT_IDENTITY_COLUMNS) * len(_FUNCTIONAL_EXACT_FORMS)
+        == _FUNCTIONAL_EXACT_NODE_COUNT
+        == 35
+    )
+
+
+@pytest.mark.parametrize("column", _FUNCTIONAL_TEXT_IDENTITY_COLUMNS)
+@pytest.mark.parametrize(("label", "reference_template"), _FUNCTIONAL_EXACT_FORMS)
+def test_exact_functional_field_notation_forms_are_attributed_and_narrow_refused(
+    column: str,
+    label: str,
+    reference_template: str,
+) -> None:
+    """Every PostgreSQL-equivalent bare/folded/exact-quoted call is one fact member."""
+    entry = f"functional-field-exact-{label}-{column}"
+    reference = reference_template.format(
+        member=column,
+        folded_member=column.upper(),
+        alias="rt",
+    )
+    _assert_functional_field_exact(reference, entry=entry, column=column)
+
+
+def test_functional_field_notation_folds_an_unquoted_alias() -> None:
+    """A bare alias token lower-folds; this is the same exact grammar as ``variable(rt)``."""
+    _assert_functional_field_exact(
+        "variable(RT)",
+        entry="functional-field-exact-folded-alias",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(("label", "padding"), _FUNCTIONAL_WHITESPACE_COMMENT_PADDING)
+def test_functional_field_notation_accepts_whitespace_and_comments_before_the_open(
+    label: str,
+    padding: str,
+) -> None:
+    """Only the bytes between the member and ``(`` vary."""
+    _assert_functional_field_exact(
+        f"variable{padding}(rt)",
+        entry=f"functional-field-before-open-{label}",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(("label", "padding"), _FUNCTIONAL_WHITESPACE_COMMENT_PADDING)
+def test_functional_field_notation_accepts_whitespace_and_comments_after_the_open(
+    label: str,
+    padding: str,
+) -> None:
+    """Only the bytes after ``(`` vary."""
+    _assert_functional_field_exact(
+        f"variable({padding}rt)",
+        entry=f"functional-field-after-open-{label}",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(("label", "padding"), _FUNCTIONAL_WHITESPACE_COMMENT_PADDING)
+def test_functional_field_notation_accepts_whitespace_and_comments_before_the_close(
+    label: str,
+    padding: str,
+) -> None:
+    """Only the bytes before ``)`` vary."""
+    _assert_functional_field_exact(
+        f"variable(rt{padding})",
+        entry=f"functional-field-before-close-{label}",
+        column="variable",
+    )
+
+
+def test_functional_field_notation_accepts_argument_internal_comments_on_both_sides() -> None:
+    """Both token gaps around the alias are independently scanner-normalised."""
+    _assert_functional_field_exact(
+        "variable(/*c*/rt/*d*/)",
+        entry="functional-field-argument-internal-both-sides",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("tight-hydro", "hydro.variable(rt)"),
+        ("spaced-hydro", "hydro . variable(rt)"),
+        ("comment-separated-pg-catalog", "pg_catalog /*c*/ . variable(rt)"),
+        ("quoted-schema", '"hydro" . variable(rt)'),
+        ("tight-pg-catalog", "pg_catalog.variable(rt)"),
+    ],
+)
+def test_schema_qualified_functional_field_notation_remains_unattributed(
+    label: str,
+    reference: str,
+) -> None:
+    """A previous-significant-code-character dot keeps the call a schema-qualified function."""
+    _assert_functional_field_clean(reference, entry=f"functional-field-schema-{label}")
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("other-relation", "variable(hr)"),
+        ("alias-prefix-superstring", "variable(art)"),
+        ("alias-suffix-superstring", "variable(rt2)"),
+    ],
+)
+def test_functional_field_other_relation_and_alias_superstrings_remain_unattributed(
+    label: str,
+    reference: str,
+) -> None:
+    """Whole-token containment prevents ``art`` and ``rt2`` from becoming ``rt``."""
+    _assert_functional_field_clean(reference, entry=f"functional-field-clean-{label}")
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("uppercase-quoted-member", '"VARIABLE"(rt)'),
+        ("mixed-quoted-member", '"Variable"(rt)'),
+        ("quoted-member-doubled-suffix", '"variable""suffix"(rt)'),
+        ("uppercase-quoted-alias", 'variable("RT")'),
+        ("quoted-alias-doubled-suffix", 'variable("rt""suffix")'),
+        ("complete-quoted-body", '"variable(rt)"'),
+    ],
+)
+def test_functional_field_nonexact_quoted_tokens_remain_unattributed(label: str, reference: str) -> None:
+    _assert_functional_field_clean(reference, entry=f"functional-field-nonexact-{label}")
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "variable_e(rt)",
+        "unit_e(rt)",
+        "quality_flag_e(rt)",
+        '"variable_e"(rt)',
+    ],
+)
+def test_functional_field_enum_and_key_members_remain_unattributed(reference: str) -> None:
+    _assert_functional_field_clean(reference, entry=f"functional-field-enum-key-{reference}")
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("colon-placeholder-name", "variable(:rt)"),
+        ("named-psycopg-placeholder", "variable(%(rt)s)"),
+        ("type-name", "variable(CAST(x AS rt))"),
+        ("cast-type-name", "variable(x::rt)"),
+        ("quoted-type-name", 'variable(CAST(x AS "rt"))'),
+        ("named-argument-arrow-label", "variable(rt => :x)"),
+        ("quoted-named-argument-label", 'variable("rt" => :x)'),
+        ("named-argument-colon-label", "variable(rt := :x)"),
+        ("dotted-function-name", "variable(rt.foo(:x))"),
+        ("qualified-function-first-component", "variable(schema.rt(:x))"),
+    ],
+)
+def test_functional_field_nonvalue_alias_roles_remain_unattributed(label: str, reference: str) -> None:
+    """Placeholders, type names, argument labels and dotted function names are not alias values."""
+    _assert_functional_field_clean(reference, entry=f"functional-field-role-{label}")
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "plain-literal",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.note = 'variable(rt)' AND rt.run_key = :run_key",
+        ),
+        (
+            "upper-escape-literal",
+            "SELECT E'variable(rt)' AS note, rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = :run_key",
+        ),
+        (
+            "lower-escape-literal",
+            "SELECT e'variable(rt)' AS note, rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = :run_key",
+        ),
+        (
+            "line-comment",
+            "SELECT rt.value -- variable(rt)\n"
+            "FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+        (
+            "nested-block-comment",
+            "SELECT rt.value /* outer /* variable(rt) */ tail */ "
+            "FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+    ],
+)
+def test_functional_field_bytes_inside_non_code_remain_data(label: str, sql: str) -> None:
+    _assert_functional_field_clean_sql(sql, entry=f"functional-field-data-{label}")
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("argument-star", "variable(rt.*)"),
+        ("multi-arg", "variable(rt, 1)"),
+        ("nested-arg", "variable(f(rt))"),
+        ("cast-arg", "variable(rt::record)"),
+        ("row-arg", "variable(ROW(rt))"),
+        ("result-field-suffix", "variable(rt).value"),
+        ("spaced-result-field-suffix", "variable(rt) . value"),
+    ],
+)
+def test_unsupported_functional_field_notation_fail_closed(label: str, reference: str) -> None:
+    """Known-member calls that contain the alias but exceed the one-argument grammar fail closed."""
+    _assert_functional_field_unsupported(
+        _functional_field_sql(reference),
+        entry=f"functional-field-unsupported-{label}",
+    )
+
+
+_FUNCTIONAL_UNCLOSED_SIMPLE_SQL = "SELECT RT.value FROM hydro.river_timeseries RT WHERE variable(rt"
+_FUNCTIONAL_UNCLOSED_INNER_CLOSED_SQL = "SELECT RT.value FROM hydro.river_timeseries RT WHERE variable(f(rt)"
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("simple", _FUNCTIONAL_UNCLOSED_SIMPLE_SQL),
+        ("outer-unclosed-inner-closed", _FUNCTIONAL_UNCLOSED_INNER_CLOSED_SQL),
+    ],
+)
+def test_unclosed_functional_field_notation_is_refused_before_the_structural_check(
+    label: str,
+    sql: str,
+) -> None:
+    """``_skip_balanced_span.closed`` owns EOF; an inner close is not the outer match."""
+    entry = f"functional-field-unclosed-{label}"
+
+    with pytest.raises(RiverTemplateError, match="unbalanced parentheses"):
+        assert_structurally_intact(sql, entry)
+    _assert_functional_field_unsupported(sql, entry=entry)
+
+
+@pytest.mark.parametrize(
+    ("label", "reference", "kind"),
+    [
+        ("simple", "variable(rt)", "exact"),
+        ("nested-arg", "variable(f(rt))", "unsupported"),
+    ],
+)
+def test_closed_twins_of_unclosed_functional_field_notation_keep_their_reasons(
+    label: str,
+    reference: str,
+    kind: str,
+) -> None:
+    """Closing the same shapes must not flip exact vs unsupported ownership."""
+    entry = f"functional-field-closed-twin-{label}"
+    if kind == "exact":
+        _assert_functional_field_exact(reference, entry=entry, column="variable")
+    else:
+        _assert_functional_field_unsupported(_functional_field_sql(reference), entry=entry)
+
+
+def test_functional_field_extension_leaves_direct_separator_and_parenthesized_controls_unchanged() -> None:
+    """The new classifier must not change #2053/#2086, #2092 or #2112 ownership."""
+    _assert_functional_field_exact(
+        "RT.VARIABLE",
+        entry="functional-field-direct-control",
+        column="variable",
+    )
+    _assert_functional_field_exact(
+        '"rt" /* left */ . /* right */ "variable"',
+        entry="functional-field-separator-control",
+        column="variable",
+    )
+    _assert_functional_field_exact(
+        "(rt).variable",
+        entry="functional-field-parenthesized-exact-control",
+        column="variable",
+    )
+    sql = _functional_field_sql("f(rt).variable")
+    entry = "functional-field-parenthesized-unsupported-control"
+    assert text_fact_columns(sql, "rt") == set()
+    for door in ("guarded", "legacy", "narrow"):
+        with pytest.raises(RiverTemplateError) as raised:
+            if door == "guarded":
+                fact_table_text_identity_columns(sql, entry=entry)
+            else:
+                render_river_ts_sql(sql, door, entry=entry)
+        message = str(raised.value)
+        assert entry in message
+        assert _PARENTHESES_UNMODELLED in message
+        assert _FUNCTIONAL_UNMODELLED not in message
+
+
+def test_functional_field_inner_fact_reread_keeps_count_delta_precedence() -> None:
+    """An inner fact-table read keeps the older comparison-position sub-select reason."""
+    entry = "functional-field-inner-fact-reread"
+    sql = (
+        "SELECT rt.value FROM hydro.river_timeseries rt "
+        "WHERE rt.run_key = ("
+        "SELECT r2.run_key FROM hydro.river_timeseries r2 "
+        "WHERE variable(rt) = :v LIMIT 1)"
+    )
+
+    assert text_fact_columns(sql, "rt") == set()
+    for door in ("guarded", "legacy", "narrow"):
+        with pytest.raises(RiverTemplateError) as raised:
+            if door == "guarded":
+                fact_table_text_identity_columns(sql, entry=entry)
+            else:
+                render_river_ts_sql(sql, door, entry=entry)
+        message = str(raised.value)
+        assert entry in message
+        assert "comparison-position sub-select" in message
+        assert _CORRELATED_SCALAR_REASON not in message
+        assert _FUNCTIONAL_UNMODELLED not in message
+
+
+def test_correlated_scalar_exact_functional_field_notation_fails_closed() -> None:
+    """Decision 23 consumes the shared analysis; exact ``variable(rt)`` correlates."""
+    sql = _correlated_scalar_authority_sql("variable(rt)")
+    entry = "correlated-scalar-functional-field-exact"
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_correlated_scalar_unsupported_functional_field_notation_fails_closed() -> None:
+    """Unsupported functional grammar inside a scalar body is still correlated, not outer-unmodelled."""
+    sql = _correlated_scalar_authority_sql("variable(rt.*)")
+    entry = "correlated-scalar-functional-field-unsupported"
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_correlated_scalar_schema_qualified_functional_field_notation_remains_clean() -> None:
+    """A schema-qualified function inside a scalar body stays unattributed."""
+    sql = _correlated_scalar_authority_sql("hydro.variable(rt)")
+    _assert_correlated_scalar_clean(sql, entry="correlated-scalar-functional-field-schema")
+
+
+# ---------------------------------------------------------------------------
 # Correlated outer fact-alias references inside comparison-position scalars (#2114)
 # ---------------------------------------------------------------------------
 # Guarded preflight must see already-attributed outer aliases inside scalar
@@ -2125,6 +2568,7 @@ def _assert_correlated_scalar_refusal(sql: str, *, entry: str) -> None:
         assert _CORRELATED_SCALAR_REASON in message
         assert "text identity column(s)" not in message
         assert _PARENTHESES_UNMODELLED not in message
+        assert _FUNCTIONAL_UNMODELLED not in message
         assert "comparison-position sub-select" not in message
         assert "unbalanced parentheses" not in message
 
@@ -2480,7 +2924,6 @@ def test_correlated_scalar_unaliased_unqualified_names_remain_routed_to_issue_21
 @pytest.mark.parametrize(
     ("label", "reference"),
     [
-        ("functional-notation-2141", "variable(rt)"),
         ("whole-row-star-2115", "rt.*"),
     ],
 )
@@ -2488,7 +2931,7 @@ def test_correlated_scalar_functional_notation_and_star_remain_routed(
     label: str,
     reference: str,
 ) -> None:
-    """#2141 and #2115 stay outside this slice and must not inherit the new reason."""
+    """#2115 whole-row star stays routed; the #2141 functional arm is inverted below."""
     sql = _correlated_scalar_authority_sql(reference)
     _assert_correlated_scalar_clean(sql, entry=f"correlated-scalar-routed-{label}")
 
