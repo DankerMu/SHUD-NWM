@@ -2869,14 +2869,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_issue1895_runbook_contract.py",
         ),
     ),
-    # C1 reads the pinned private display.env through evidence_io's
-    # descriptor-bound byte/identity primitive. This exact owner has no
-    # same-name suite, so route its one direct receipt contract without pulling
-    # unrelated legacy evidence suites; shared core/invariant riders remain
-    # additive outside PATH_TEST_RULES.
+    # C1 and C3 read pinned evidence through evidence_io's descriptor-bound
+    # byte/JSON identity primitives. This exact owner has no same-name suite,
+    # so route both receipt contract partitions without pulling unrelated legacy
+    # evidence suites; shared core/invariant riders remain additive outside
+    # PATH_TEST_RULES.
     PathTestRule(
         "packages/common/evidence_io.py",
-        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
+        ISSUE1895_READINESS_C1_C2_C3_TESTS,
     ),
     # C3 verifies the scheduler manifest's shipping schema/checksum primitives;
     # a change there must run C3's consumer contract as well as producer tests.
@@ -3013,19 +3013,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/node27_issue1895_engine.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
         "scripts/node27_issue1895_census_bind.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
         "scripts/node27_issue1895_sequential_receipt.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
         "scripts/node27_issue1895_post_target_observe.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
         "scripts/node27_issue1895_publication_prove.py",
@@ -3037,11 +3037,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/node27_issue1895_watermark.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
         "scripts/node27_issue1895_systemd_facts.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
         "packages/common/node27_issue1895_percentiles.py",
@@ -3075,7 +3075,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "schemas/node27_issue1895_c1_display_runtime_receipt.schema.json",
-        ("tests/test_issue1895_readiness_c1_c2_c3.py", "tests/test_issue1895_readiness_c14.py"),
+        (*ISSUE1895_READINESS_C1_C2_C3_TESTS, "tests/test_issue1895_readiness_c14.py"),
     ),
     PathTestRule(
         "schemas/node27_issue1895_c2_readonly_boundary_receipt.schema.json",
