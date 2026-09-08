@@ -3,7 +3,7 @@
 ## Scope
 
 Read-only expanded/high fixture and issue-alignment review for the atomic 96-file
-#2137 local G0 child. This is not implementation review and contains no node-27
+Issue #2137 local G0 child. This is not implementation review and contains no node-27
 or node-22 execution.
 
 ## First verdict
@@ -54,7 +54,7 @@ The same reviewer confirmed every first-verdict condition now reaches an
 executable surface: task ownership, all selected risk packs, Invariant Matrix,
 capability requirements, C4 checklist, G0 prerequisites, Step 2 boundary and
 parent #1895 dependencies/PR boundary. No remaining fixture path can direct
-#2137 to perform live work, run legacy `e2e/monitoring.spec.ts`, or reimplement
+Issue #2137 to perform live work, run legacy `e2e/monitoring.spec.ts`, or reimplement
 C4.
 
 This is the second and final fixture-repair review. It did not review the

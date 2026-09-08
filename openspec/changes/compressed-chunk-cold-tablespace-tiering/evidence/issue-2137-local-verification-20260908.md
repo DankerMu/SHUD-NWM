@@ -87,8 +87,26 @@ not a product-semantic change, and is retained for PR review/accountability.
   `scripts/select_ci_tests.py` and `tests/test_select_ci_tests.py`.
 - Full branch `git diff --check`: PASS.
 
+## Full local regression
+
+The default full unit row ran as:
+
+```text
+uv run --no-sync pytest tests/ -q --tb=short --durations=25 \
+  -m "not e2e and not grib and not integration"
+```
+
+Result:
+
+```text
+18058 passed, 14 skipped, 216 deselected, 1 warning in 2334.56s
+```
+
+The single warning was the same local ecCodes 2.41.0 recommendation. The slowest
+reported readiness case was the shipping C4-builder/C3 acceptance at 12.97
+seconds; no test failed.
+
 ## Pending at this record
 
-- Run the default full non-e2e/non-grib/non-integration pytest row.
-- Complete the formal PR review/CI gates.
+- Complete the formal PR review and GitHub CI gates.
 - Do not access node-27 before #2137 merges.

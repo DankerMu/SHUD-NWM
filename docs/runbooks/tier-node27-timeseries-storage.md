@@ -273,8 +273,8 @@ issue #1893 (`scripts/node27_cold_residency.py`,
 identity in `packages/common/compressed_chunk_cold_target.py`), issue #1894
 (`scripts/node27_cold_tablespace_install.py`,
 `packages/common/node27_cold_tablespace_*`), issue #1970 (river-click oracle),
-issue #2123 (the promoted C4 producer/validator/private publisher/binder), issue
-#2130 (C4 input-classification precedence), and issue #2137 (this executable G0
+issue #2123 (the promoted C4 producer/validator/private publisher/binder),
+issue #2130 (C4 input-classification precedence), and issue #2137 (this executable G0
 runbook plus census/C1-C3/G8 owners, schemas, binders and acceptance routing).
 Issue #2137 merges this content without remote access; it consumes rather than
 reimplements C4.

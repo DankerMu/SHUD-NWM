@@ -220,8 +220,8 @@ freshly samples both devices; a prior group's free-space sample is never reused
 for a later rewrite. Both `NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES`
 and `NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES` are mandatory positive integer
 byte inputs with no Python, shell, or example-template default. This fixture
-does not invent a universal reserve from disposable WAL observations. Issue
-#1895 derives `E` from the fresh six-group live catalog expansion census and
+does not invent a universal reserve from disposable WAL observations.
+Issue #1895 derives `E` from the fresh six-group live catalog expansion census and
 uses that same byte value for both reserves: the WAL reserve is an explicitly
 conservative same-order expansion proxy, not a measured/per-group-attributed WAL
 claim and not the disposable 165736-byte LSN delta. Exact equality is admitted,
@@ -436,7 +436,7 @@ bound to this invocation's reviewed SHA, generated-at bracket, mode/outcome and
 exit status. This makes #1938 non-blocking without permitting a stale clean file
 to satisfy readiness. For C1/C2/C3, #1895 uses a direct current
 publication/display receipt. The C4 lane is the promoted capability delivered by
-#2123 (with #2130 classification precedence), and #1895 only executes it live. C3
+Issue #2123 (with #2130 classification precedence), and #1895 only executes it live. C3
 binds those C4 PASS bytes and strict GFS/IFS job-log
 facts to local display identity-only reads, readonly DB exact identities,
 source-scoped registry complete-cycle counts, and the G1 valid-times frontier.

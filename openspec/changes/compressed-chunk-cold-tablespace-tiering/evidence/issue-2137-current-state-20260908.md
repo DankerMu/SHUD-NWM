@@ -17,10 +17,14 @@ It is a prerequisite for #1895, not a replacement. It does not access node-27/no
 - Issue #2137 is OPEN and implementation-ready. Its GitHub body carries the local-only PR boundary and complete Evidence Floor.
 - The rebuilt branch contains census/runbook commit `0924dc7b`, readiness owner commit `a0b6ccf9`, and selector closure `432762f2`; no PR has been opened for this child yet.
 - The old complete recovery anchor remains `preserve/issue-1895-pre-c4-replay` at `2f7e95b4`; it is not a delivery branch or review SHA.
-- The branch was rebuilt from master `a285835c`, but `origin/master` subsequently advanced to `49710a2d`; the child must integrate that tip before frozen verification/review.
-- The eight selector routes exposed during replay now use the existing C1/C2/C3 and storage partition tuples. Shipping exact-set checks matched 8/8 and removal mutants failed 8/8; runtime pytest/CI evidence is still pending.
+- The branch was rebuilt from master `a285835c`; it then integrated `origin/master` at `49710a2d` through merge commit `2e0357ec` before final local verification.
+- The eight selector routes exposed during replay use the existing C1/C2/C3 and
+  storage partition tuples. Shipping exact-set checks matched 8/8 and removal
+  mutants failed 8/8. The post-merge scheduler manifest importer gap was repaired
+  by `1ba75811`; the final shipping targeted run passed 6,527 assertions and the
+  default full local unit row passed 18,058.
 - This current-state addendum supersedes stale status statements in the 2026-09-07 historical records without deleting their process disclosures.
 
 ## Remaining gate
 
-The checklist ownership wording, focused fixture/alignment review and target OpenSpec strict validation are complete. Latest-master integration and the child’s local/CI/review gates remain. Tasks 4.1-4.8 remain untouched until #2137 merges; no node-27 access is permitted before then.
+The checklist ownership wording, focused fixture/alignment review, target OpenSpec strict validation, latest-master integration and local verification are complete. Formal PR review and GitHub CI remain. Tasks 4.1-4.8 remain untouched until #2137 merges; no node-27 access is permitted before then.
