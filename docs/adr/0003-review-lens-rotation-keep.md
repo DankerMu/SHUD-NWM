@@ -3932,3 +3932,17 @@ nothing about rotation yield either way.
 Decision unchanged: **keep rotation**. Rotated catches still exceed core
 catches cumulatively, and the measurement caveats above still apply. Next
 revisit on the audit's next flag or a maintainer override.
+
+## 2026-09-08 revisit — PR #2179 (#2173, fixture `compact`)
+
+The audit flagged DECIDABLE with the counters unchanged from the PR #2176
+revisit: `core=226`, `rotated=269`, `phase=53` over 192 multi-round merged
+PRs. PR #2179 was a single-round PR (Round 1 clean under the P2-only rule with
+one CONFIRMED P2 deferred to #2180; Phase 7 clean), so it enters neither the
+multi-round denominator nor any later-round catch counter, and its round-1
+seats (correctness; test-evidence + spec-compliance) were the compact default
+mix with no rotated-in lens. The sample carries no rotation signal.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, and the measurement caveats above still apply. Next
+revisit on the audit's next flag or a maintainer override.
