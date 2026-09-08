@@ -15,7 +15,7 @@ It is a prerequisite for #1895, not a replacement. It does not access node-27/no
 ## Current implementation state
 
 - Issue #2137 is OPEN and implementation-ready. Its GitHub body carries the local-only PR boundary and complete Evidence Floor.
-- The rebuilt branch contains census/runbook commit `0924dc7b`, readiness owner commit `a0b6ccf9`, and selector closure `432762f2`; no PR has been opened for this child yet.
+- The rebuilt branch contains census/runbook commit `0924dc7b`, readiness owner commit `a0b6ccf9`, selector closure `432762f2`, and post-master selector repair `1ba75811`; PR #2144 is open for this child.
 - The old complete recovery anchor remains `preserve/issue-1895-pre-c4-replay` at `2f7e95b4`; it is not a delivery branch or review SHA.
 - The branch was rebuilt from master `a285835c`; it then integrated `origin/master` at `49710a2d` through merge commit `2e0357ec` before final local verification.
 - The eight selector routes exposed during replay use the existing C1/C2/C3 and
