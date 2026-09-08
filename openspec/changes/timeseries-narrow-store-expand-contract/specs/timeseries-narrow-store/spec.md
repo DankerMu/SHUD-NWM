@@ -56,6 +56,11 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **WHEN** a fact alias declared as a bare identifier qualifies any text identity column through a PostgreSQL-valid dot separator containing spaces, tabs, newlines, a block comment or a newline-terminated line comment, with either side using its already-modelled bare or exact lower-case quoted token form
 - **THEN** the renderer attributes the canonical text identity member through the same public helper responsibilities as the direct-dot form and refuses the narrow variant before returning SQL; comments and whitespace inside string literals/comments remain data, non-exact quoted tokens and other-relation or unmodelled multi-part references do not become fact-column attribution, including when the candidate alias is preceded by another dot-separated component
 
+#### Scenario: Parenthesized whole-row alias field selection cannot bypass text-identity refusal
+- **WHEN** scanner-visible outer-query code field-selects a text identity member from exactly one parenthesized bare-declared fact-alias token, with the alias and member written in their bare-folded or exact lower-case quoted forms and with legal scanner-normalised whitespace/comments inside the group or around the dot
+- **THEN** both public helpers attribute the canonical member and the renderer refuses the narrow variant as a text-identity predicate before returning SQL; if a balanced parenthesized selection of a known text member contains the attributed fact alias but is a nested, cast, function, row or multipart expression outside that exact grammar, the guarded helper and both render variants instead refuse it as an unmodelled parenthesized fact-alias field selection, while other-relation, non-exact quoted and enum/key expressions retain their prior no-attribution answers
+- **AND** this scenario makes no claim about an outer fact-alias reference inside a comparison-position scalar subquery, whose visibility is tracked independently by #2114 before reader wiring
+
 #### Scenario: Renderer refuses a mis-shaped marker
 - **WHEN** a template places the marker above a line that is not a single aid conjunct
 - **THEN** the renderer raises before returning SQL and the shape oracle fails naming the template

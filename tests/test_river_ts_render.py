@@ -1500,6 +1500,562 @@ def test_a_spaced_table_name_qualifier_remains_fail_closed() -> None:
             render_river_ts_sql(sql, store, entry=entry)
 
 
+# ---------------------------------------------------------------------------
+# Parenthesized whole-row fact-alias field selection (#2112)
+# ---------------------------------------------------------------------------
+# Keep this literal enumeration independent of the implementation tuple.  The
+# shared tuple is the production contract; this list makes an accidental member
+# addition, deletion, or reordering visible rather than deriving every expected
+# row from the code under test.
+_PARENTHESIZED_TEXT_IDENTITY_COLUMNS = (
+    "run_id",
+    "river_network_version_id",
+    "variable",
+    "basin_version_id",
+    "river_segment_id",
+    "unit",
+    "quality_flag",
+)
+_PARENTHESES_UNMODELLED = "unmodelled parenthesized fact-alias field selection"
+
+
+def _parenthesized_fact_sql(reference: str) -> str:
+    return f"SELECT RT.value FROM hydro.river_timeseries RT WHERE {reference} = :value"
+
+
+def _assert_parenthesized_exact_sql(sql: str, *, entry: str, column: str) -> None:
+    """Exercise an exact one-token selection through each public attribution seam."""
+    message = _quoted_text_identity_refusal(sql, entry=entry)
+
+    assert fact_table_attribution(sql).aliases == frozenset({"rt"})
+    assert (
+        fact_table_text_identity_columns(sql, entry=entry),
+        text_fact_columns(sql, "RT"),
+        text_fact_columns(sql, "rt"),
+        message is not None,
+    ) == ({column}, {column}, {column}, True)
+    _assert_exact_quoted_text_identity_refusal(message, entry=entry, column=column)
+
+    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
+    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    assert legacy.removed_placeholders == ()
+
+
+def _assert_parenthesized_exact_text_identity(reference: str, *, entry: str, column: str) -> None:
+    _assert_parenthesized_exact_sql(_parenthesized_fact_sql(reference), entry=entry, column=column)
+
+
+def _assert_parenthesized_clean_sql(sql: str, *, entry: str) -> None:
+    """Assert that a non-fact parenthesized expression keeps its base outcome."""
+    assert fact_table_text_identity_columns(sql, entry=entry) == set()
+    assert text_fact_columns(sql, "RT") == set()
+    assert text_fact_columns(sql, "rt") == set()
+
+    legacy = render_river_ts_sql(sql, "legacy", entry=entry)
+    narrow = render_river_ts_sql(sql, "narrow", entry=entry)
+    assert legacy.sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    assert narrow.sql == sql
+    assert legacy.removed_placeholders == narrow.removed_placeholders == ()
+
+
+def _assert_parenthesized_alias_operand_refusal(reference: str, *, entry: str) -> None:
+    """An alias used as an expression value remains unsupported outside exact form."""
+    sql = _parenthesized_fact_sql(reference)
+
+    assert text_fact_columns(sql, "RT") == set()
+    assert text_fact_columns(sql, "rt") == set()
+    for door in ("guarded", "legacy", "narrow"):
+        with pytest.raises(RiverTemplateError) as raised:
+            if door == "guarded":
+                fact_table_text_identity_columns(sql, entry=entry)
+            else:
+                render_river_ts_sql(sql, door, entry=entry)
+        message = str(raised.value)
+        assert entry in message
+        assert _PARENTHESES_UNMODELLED in message
+
+
+def _assert_parenthesized_unsupported_selection(reference: str, *, entry: str, door: str) -> None:
+    """Each guarded whole-statement door independently refuses unsupported selection."""
+    sql = _parenthesized_fact_sql(reference)
+
+    with pytest.raises(RiverTemplateError) as raised:
+        if door == "guarded":
+            fact_table_text_identity_columns(sql, entry=entry)
+        else:
+            render_river_ts_sql(sql, door, entry=entry)
+    message = str(raised.value)
+    assert entry in message
+    assert _PARENTHESES_UNMODELLED in message
+
+
+def test_the_parenthesized_member_enumeration_matches_the_shared_identity_contract() -> None:
+    assert _PARENTHESIZED_TEXT_IDENTITY_COLUMNS == TEXT_IDENTITY_COLUMNS
+
+
+@pytest.mark.parametrize("column", _PARENTHESIZED_TEXT_IDENTITY_COLUMNS)
+@pytest.mark.parametrize(
+    ("label", "reference_template"),
+    [
+        ("bare-alias-bare-column", "(rt).{bare_column}"),
+        ("bare-alias-quoted-column", '(rt)."{column}"'),
+        ("quoted-alias-bare-column", '("rt").{bare_column}'),
+        ("quoted-alias-quoted-column", '("rt")."{column}"'),
+    ],
+)
+def test_exact_parenthesized_fact_alias_field_selections_are_attributed_and_narrow_refused(
+    column: str,
+    label: str,
+    reference_template: str,
+) -> None:
+    """Every PostgreSQL-equivalent bare/exact-quoted token pair is one fact member."""
+    entry = f"parenthesized-exact-{label}-{column}"
+    reference = reference_template.format(column=column, bare_column=column.upper())
+
+    _assert_parenthesized_exact_text_identity(reference, entry=entry, column=column)
+
+
+@pytest.mark.parametrize(
+    ("label", "padding"),
+    [
+        ("space", " "),
+        ("tab", "\t"),
+        ("newline", "\n"),
+        ("nested-block-comment", " /* outer /* inner */ tail */ "),
+        ("line-comment", " -- parenthesized left\n"),
+    ],
+)
+def test_parenthesized_alias_group_accepts_each_internal_left_form(label: str, padding: str) -> None:
+    """Only the bytes after ``(`` vary, so left-side normalisation is observable."""
+    _assert_parenthesized_exact_text_identity(
+        f'({padding}rt)."variable"',
+        entry=f"parenthesized-internal-left-{label}",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "padding"),
+    [
+        ("space", " "),
+        ("tab", "\t"),
+        ("newline", "\n"),
+        ("nested-block-comment", " /* outer /* inner */ tail */ "),
+        ("line-comment", " -- parenthesized right\n"),
+    ],
+)
+def test_parenthesized_alias_group_accepts_each_internal_right_form(label: str, padding: str) -> None:
+    """Only the bytes before ``)`` vary, so right-side normalisation is observable."""
+    _assert_parenthesized_exact_text_identity(
+        f'(rt{padding})."variable"',
+        entry=f"parenthesized-internal-right-{label}",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "padding"),
+    [
+        ("space", " "),
+        ("tab", "\t"),
+        ("newline", "\n"),
+        ("nested-block-comment", " /* outer /* inner */ tail */ "),
+        ("line-comment", " -- parenthesized separator left\n"),
+    ],
+)
+def test_parenthesized_alias_group_reuses_the_separator_left_side(label: str, padding: str) -> None:
+    """The existing #2092 separator owns whitespace/comments after the group."""
+    _assert_parenthesized_exact_text_identity(
+        f'(rt){padding}."variable"',
+        entry=f"parenthesized-separator-left-{label}",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "padding"),
+    [
+        ("space", " "),
+        ("tab", "\t"),
+        ("newline", "\n"),
+        ("nested-block-comment", " /* outer /* inner */ tail */ "),
+        ("line-comment", " -- parenthesized separator right\n"),
+    ],
+)
+def test_parenthesized_alias_group_reuses_the_separator_right_side(label: str, padding: str) -> None:
+    """The other #2092 separator side stays independently observable."""
+    _assert_parenthesized_exact_text_identity(
+        f'(rt).{padding}"variable"',
+        entry=f"parenthesized-separator-right-{label}",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("positional-placeholder", "(CAST(%s AS record)).variable"),
+        ("colon-placeholder-name", "(CAST(:rt AS record)).variable"),
+        ("named-psycopg-placeholder", "(CAST(%(rt)s AS record)).variable"),
+        ("type-name", "(CAST(:x AS rt)).variable"),
+        ("cast-type-name", "(:x::rt).variable"),
+        ("quoted-type-name", '(CAST(:x AS "rt")).variable'),
+        ("unqualified-function", "(rt(:x)).variable"),
+        ("quoted-function", '("rt"(:x)).variable'),
+        ("qualified-function", "(schema.rt(:x)).variable"),
+        ("qualified-function-first-component", "(rt.foo(:x)).variable"),
+        ("quoted-qualified-function-first-component", '("rt".foo(:x)).variable'),
+        ("named-argument-arrow-label", "(f(rt => :x)).variable"),
+        ("quoted-named-argument-label", '(f("rt" => :x)).variable'),
+        ("named-argument-colon-label", "(f(rt := :x)).variable"),
+    ],
+)
+def test_parenthesized_nonvalue_alias_spellings_remain_unattributed(
+    label: str,
+    reference: str,
+) -> None:
+    """Placeholders, type/function names, and argument labels are not alias values."""
+    _assert_parenthesized_clean_sql(
+        _parenthesized_fact_sql(reference),
+        entry=f"parenthesized-nonvalue-{label}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("function-operand", "f(rt).variable"),
+        ("quoted-function-operand", 'f("rt").variable'),
+        ("cast-operand", "(rt::record).variable"),
+        ("left-addend", "(:x + rt).variable"),
+        ("right-addend", "(rt + :x).variable"),
+        ("field-operand", "(rt.foo).variable"),
+        ("quoted-field-operand", '("rt".foo).variable'),
+    ],
+)
+def test_parenthesized_actual_alias_operands_remain_unsupported(
+    label: str,
+    reference: str,
+) -> None:
+    _assert_parenthesized_alias_operand_refusal(
+        reference,
+        entry=f"parenthesized-alias-operand-{label}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "sql", "column"),
+    [
+        (
+            "binary-operator",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE :x = (rt).variable",
+            "variable",
+        ),
+        (
+            "is-distinct-from",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE NULL IS DISTINCT FROM (rt).variable",
+            "variable",
+        ),
+        (
+            "at-time-zone",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE now() AT TIME ZONE (rt).unit",
+            "unit",
+        ),
+        (
+            "operator",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE foo OPERATOR(pg_catalog.=) (rt).variable",
+            "variable",
+        ),
+        (
+            "select-list",
+            "SELECT (rt).variable FROM hydro.river_timeseries RT",
+            "variable",
+        ),
+        (
+            "returning",
+            "DELETE FROM hydro.river_timeseries RT RETURNING (rt).variable",
+            "variable",
+        ),
+        (
+            "order-by",
+            "SELECT RT.value FROM hydro.river_timeseries RT ORDER BY (rt).variable",
+            "variable",
+        ),
+        (
+            "group-by",
+            "SELECT (rt).variable FROM hydro.river_timeseries RT GROUP BY (rt).variable",
+            "variable",
+        ),
+        (
+            "case-then",
+            "SELECT CASE WHEN true THEN (rt).variable ELSE NULL END "
+            "FROM hydro.river_timeseries RT",
+            "variable",
+        ),
+        (
+            "limit",
+            "SELECT RT.value FROM hydro.river_timeseries RT LIMIT (rt).run_id",
+            "run_id",
+        ),
+        (
+            "offset",
+            "SELECT RT.value FROM hydro.river_timeseries RT OFFSET (rt).run_id",
+            "run_id",
+        ),
+        (
+            "fetch-first",
+            "SELECT RT.value FROM hydro.river_timeseries RT FETCH FIRST (rt).run_id ROWS ONLY",
+            "run_id",
+        ),
+        (
+            "fetch-next",
+            "SELECT RT.value FROM hydro.river_timeseries RT FETCH NEXT (rt).run_id ROWS ONLY",
+            "run_id",
+        ),
+    ],
+)
+def test_parenthesized_alias_field_selection_starts_an_expression_operand(
+    label: str,
+    sql: str,
+    column: str,
+) -> None:
+    _assert_parenthesized_exact_sql(sql, entry=f"parenthesized-operand-{label}", column=column)
+
+
+@pytest.mark.parametrize(
+    ("label", "sql", "column"),
+    [
+        (
+            "function-argument",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE coalesce((rt).variable, 'x') IS NOT NULL",
+            "variable",
+        ),
+        (
+            "array-element",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE ARRAY[(rt).variable] IS NOT NULL",
+            "variable",
+        ),
+        (
+            "row-element",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE ROW((rt).variable) IS NOT NULL",
+            "variable",
+        ),
+        (
+            "outer-grouping",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE ((rt).variable) IS NOT NULL",
+            "variable",
+        ),
+        (
+            "in-list",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE :x IN ((rt).variable, :y)",
+            "variable",
+        ),
+        (
+            "case-operand",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE CASE ((rt).variable) WHEN 'x' THEN true ELSE false END",
+            "variable",
+        ),
+        (
+            "subscript",
+            "SELECT RT.value FROM hydro.river_timeseries RT "
+            "WHERE ARRAY[1][(rt).run_id] IS NOT NULL",
+            "run_id",
+        ),
+    ],
+)
+def test_parenthesized_alias_field_selection_inside_operand_containers_is_attributed_and_narrow_refused(
+    label: str,
+    sql: str,
+    column: str,
+) -> None:
+    """An enclosing operand container does not turn the exact group into a suffix."""
+    _assert_parenthesized_exact_sql(sql, entry=f"parenthesized-container-{label}", column=column)
+
+
+@pytest.mark.parametrize("door", ["guarded", "legacy", "narrow"])
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("nested", "((rt)).variable"),
+        ("dot-inside-group", "(rt . ).variable"),
+        ("cast-operator", "(rt::record).variable"),
+        ("cast-function", "CAST(rt AS record).variable"),
+        ("row", "ROW(rt).variable"),
+        # The opening parenthesis must be the row-expression start: neither a
+        # suffix cut out of a call/identifier nor a multipart component may be
+        # mistaken for the supported direct group.
+        ("space-before-function-call", "f (rt).variable"),
+        ("tight-function-call", "f(rt).variable"),
+        ("quoted-function-call", '"f"(rt).variable'),
+        ("identifier-suffix", "x(rt).variable"),
+        ("multipart", "other.(rt).variable"),
+        ("completed-group-suffix", "(:x)(rt).variable"),
+    ],
+)
+def test_unsupported_parenthesized_fact_alias_field_selections_fail_closed(
+    label: str,
+    reference: str,
+    door: str,
+) -> None:
+    """The finite grammar does not pretend to parse arbitrary row expressions."""
+    _assert_parenthesized_unsupported_selection(
+        reference,
+        entry=f"parenthesized-unsupported-{label}",
+        door=door,
+    )
+
+
+@pytest.mark.parametrize("door", ["guarded", "legacy", "narrow"])
+def test_every_balanced_group_is_inspected_after_an_irrelevant_selection(door: str) -> None:
+    """An earlier other-relation group cannot hide a later alias-rooted unsupported one."""
+    _assert_parenthesized_unsupported_selection(
+        "(rs).variable AND f(rt).variable",
+        entry="parenthesized-later-unsupported",
+        door=door,
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("other-relation", "(rs).variable"),
+        ("alias-prefix-superstring", "(art).variable"),
+        ("alias-suffix-superstring", "(rt2).unit"),
+    ],
+)
+def test_parenthesized_other_relation_and_alias_superstrings_remain_unattributed(
+    label: str,
+    reference: str,
+) -> None:
+    """Whole-token containment prevents ``art`` and ``rt2`` from becoming ``rt``."""
+    # This unguarded helper remains intentionally non-refusing on an unsupported
+    # form; exact matching is its only #2112 responsibility.
+    assert text_fact_columns(_parenthesized_fact_sql("f(rt).variable"), "rt") == set()
+    _assert_parenthesized_clean_sql(
+        _parenthesized_fact_sql(reference),
+        entry=f"parenthesized-clean-{label}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "reference"),
+    [
+        ("uppercase-quoted-alias", '("RT").variable'),
+        ("quoted-alias-doubled-suffix", '("rt""suffix").variable'),
+        ("uppercase-quoted-member", '(rt)."VARIABLE"'),
+        ("mixed-quoted-member", '(rt)."Variable"'),
+        ("quoted-member-doubled-suffix", '(rt)."variable""suffix"'),
+        ("complete-quoted-body", '("rt.variable").variable'),
+    ],
+)
+def test_parenthesized_nonexact_quoted_tokens_remain_unattributed(label: str, reference: str) -> None:
+    _assert_parenthesized_clean_sql(
+        _parenthesized_fact_sql(reference),
+        entry=f"parenthesized-nonexact-{label}",
+    )
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "(rt).variable_e",
+        "(rt).unit_e",
+        "(rt).quality_flag_e",
+        "(rt).run_key",
+        '(rt)."variable_e"',
+    ],
+)
+def test_parenthesized_enum_and_key_members_remain_unattributed(reference: str) -> None:
+    _assert_parenthesized_clean_sql(
+        _parenthesized_fact_sql(reference),
+        entry=f"parenthesized-enum-key-{reference}",
+    )
+
+
+def test_parenthesized_extension_leaves_direct_and_separator_reference_controls_unchanged() -> None:
+    """The new group classifier must not change #2053/#2086 or #2092 ownership."""
+    _assert_parenthesized_exact_text_identity(
+        "RT.VARIABLE",
+        entry="parenthesized-direct-control",
+        column="variable",
+    )
+    _assert_parenthesized_exact_text_identity(
+        '"rt" /* left */ . /* right */ "variable"',
+        entry="parenthesized-separator-control",
+        column="variable",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        (
+            "plain-literal",
+            "SELECT rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.note = '(rt).variable' AND rt.run_key = :run_key",
+        ),
+        (
+            "upper-escape-literal",
+            "SELECT E'(rt).variable' AS note, rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = :run_key",
+        ),
+        (
+            "lower-escape-literal",
+            "SELECT e'(rt).variable' AS note, rt.value FROM hydro.river_timeseries rt "
+            "WHERE rt.run_key = :run_key",
+        ),
+        (
+            "line-comment",
+            "SELECT rt.value -- (rt).variable\n"
+            "FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+        (
+            "nested-block-comment",
+            "SELECT rt.value /* outer /* (rt).variable */ tail */ "
+            "FROM hydro.river_timeseries rt WHERE rt.run_key = :run_key",
+        ),
+    ],
+)
+def test_parenthesized_field_selection_bytes_inside_non_code_remain_data(label: str, sql: str) -> None:
+    _assert_parenthesized_clean_sql(sql, entry=f"parenthesized-data-{label}")
+
+
+def test_parenthesized_authority_table_local_column_remains_unattributed() -> None:
+    """A comparison-position authority subquery stays stripped before classification."""
+    sql = (
+        "SELECT rt.value FROM hydro.river_timeseries rt "
+        "WHERE rt.run_key = (SELECT h.run_key FROM hydro.hydro_run h WHERE (h).run_id = :run_id)"
+    )
+
+    _assert_parenthesized_clean_sql(sql, entry="parenthesized-authority-local")
+
+
+def test_parenthesized_extension_preserves_the_quoted_fact_alias_declaration_refusal() -> None:
+    """A quoted declaration remains outside both the direct and parenthesized grammar."""
+    entry = "parenthesized-quoted-declaration"
+    sql = 'SELECT "rt".value FROM hydro.river_timeseries AS "rt" WHERE ("rt").variable = :value'
+
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError) as rendered:
+            render_river_ts_sql(sql, store, entry=entry)
+        message = str(rendered.value)
+        assert entry in message
+        assert "unmodelled fact-table reference form" in message
+        assert _PARENTHESES_UNMODELLED not in message
+    with pytest.raises(RiverTemplateError, match="unmodelled fact-table reference form"):
+        fact_table_text_identity_columns(sql, entry=entry)
+
+
 @pytest.mark.parametrize("prefix", ["U&", "u&"])
 @pytest.mark.parametrize(
     ("label", "quoted"),
