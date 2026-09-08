@@ -7,7 +7,7 @@ import { getM11LayerLegend, type LayerLegendEntry, type LayerState } from '@/lib
 import type { M11Basemap, M11Layer, M11QueryPatch } from '@/lib/m11/queryState'
 
 // 玻璃质感容器：半透明 + backdrop-blur + 细描边 + 圆角 + 阴影。统一浮层外观。
-const GLASS_PANEL =
+export const GLASS_PANEL =
   'rounded-lg border border-white/40 bg-white/70 shadow-lg backdrop-blur-md supports-[backdrop-filter]:bg-white/55'
 
 /** 浮层水文图层切换器可选项。 */

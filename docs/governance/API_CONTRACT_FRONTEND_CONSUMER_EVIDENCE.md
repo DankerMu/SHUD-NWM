@@ -102,7 +102,7 @@ Search `F2`/`F3` found active frontend consumers of the canonical route:
 - Generated type binding: `apps/frontend/src/api/types.ts` exposes the canonical
   `forecast-series` path entry.
 - Frontend test coverage: `apps/frontend/src/pages/hydroMet/__tests__/bootstrap.test.ts`
-  and `apps/frontend/src/stores/__tests__/overviewData.test.ts` assert generated
+  and `apps/frontend/src/stores/__tests__/overviewDataSourceSelection.test.ts` assert generated
   forecast-series calls.
 
 These are active canonical-contract dependencies. #412 explicitly retains this
