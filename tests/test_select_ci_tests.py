@@ -315,6 +315,51 @@ def test_node27_mvt_cache_retention_unit_selects_the_sibling_lane_pin() -> None:
     assert selected, "the unit selected an empty test set (collect-only)"
 
 
+def test_every_node27_service_unit_selects_the_sibling_lane_pin() -> None:
+    """#2173 — the sibling-lane pin is a GLOB reader, so every unit it reads must select it.
+
+    ``tests/test_node27_timeseries_retention.py::test_sibling_units_keep_their_systemd_err_lane``
+    collects `infra/systemd/nhms-node27-*.service` by glob and pins the lane-carrying set by
+    equality, so any of these units changes its input. The unit list is derived from the tree
+    (not frozen here) so the rule stays aligned to the same glob the pin reads: before #2173 the
+    four path-exact rows left six units selecting NOTHING (a zero-assertion `--collect-only`
+    degrade) and two selecting only their own suite, which is the #2032 -> #2170 failure mode --
+    targeted PR CI green, master's full run red on the pin.
+    """
+    units = sorted(Path("infra/systemd").glob("nhms-node27-*.service"))
+
+    assert len(units) >= 10, f"expected at least 10 node-27 service units, found {len(units)}: {units}"
+
+    for unit in units:
+        selected = set(select_tests([unit.as_posix()], repo_root=Path(".")))
+        assert selected, f"{unit.name} selected an empty test set (collect-only)"
+        assert (
+            "tests/test_node27_timeseries_retention.py" in selected
+        ), f"{unit.name} does not select the sibling lane pin"
+
+
+def test_a_future_node27_service_unit_selects_the_sibling_lane_pin() -> None:
+    """#2173 — a unit created later is covered without anyone remembering to add a row.
+
+    The selector never stats a producer path (the rule loop is pure ``fnmatch``), so a name that
+    does not exist yet is a direct observation of the rule's SHAPE: a glob aligned to the pin's
+    own `nhms-node27-*.service`, not a fifth path-exact row. The `.timer` sibling is asserted
+    negatively because the pin's glob is `*.service` -- timers are deliberately out of this rule's
+    scope and keep whatever their own path-exact rows give them.
+    """
+    future = "infra/systemd/nhms-node27-brand-new.service"
+    assert not Path(future).exists(), f"{future} exists; pick a name that does not, or the test proves nothing"
+
+    selected = set(select_tests([future], repo_root=Path(".")))
+
+    assert selected, f"{future} selected an empty test set (collect-only)"
+    assert "tests/test_node27_timeseries_retention.py" in selected, f"{future} does not select the sibling lane pin"
+
+    assert "tests/test_node27_timeseries_retention.py" not in set(
+        select_tests(["infra/systemd/nhms-node27-brand-new.timer"], repo_root=Path("."))
+    ), "the `.service` glob leaked onto a `.timer` path"
+
+
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
     consumers = (
         "tests/test_node27_cold_tablespace_identity.py",

@@ -2522,6 +2522,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2173: the general case of the two rows above. The sibling-lane pin in
+        # `tests/test_node27_timeseries_retention.py` is a GLOB reader over
+        # exactly `infra/systemd/nhms-node27-*.service`, so the rule is aligned
+        # to the same glob instead of chasing it one path-exact row at a time --
+        # eight of ten units had no row naming the pin, six had no row at all
+        # and degraded to --collect-only. Matches accumulate (`selected.update`
+        # below, no `stop_on_match`), so every path-exact unit rule above and
+        # below keeps its own targets and the retention `.service` selection
+        # stays exactly the pin suite. A unit created later is covered without a
+        # per-unit rule. `.timer` files are outside the pin's glob and are
+        # deliberately not covered here.
+        "infra/systemd/nhms-node27-*.service",
+        ("tests/test_node27_timeseries_retention.py",),
+    ),
+    PathTestRule(
         # #2032: the same suite parses `OnCalendar=*-*-* 04:05:00 UTC` and
         # `Persistent=true` out of the timer, so the schedule is assertable at
         # PR time rather than at `systemctl --user list-timers`.
