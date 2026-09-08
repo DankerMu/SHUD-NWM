@@ -193,7 +193,7 @@ function strictIdentityQuery(identity: MonitoringStrictIdentity | null) {
 }
 
 export function isDisplayReadonlyRuntimeConfig(runtimeConfig: RuntimeConfig | null) {
-  return runtimeConfig?.service_role === 'display_readonly' || Boolean(runtimeConfig?.display_readonly)
+  return runtimeConfig?.service_role === 'display_readonly' && runtimeConfig.display_readonly === true
 }
 
 function validateRuntimeConfig(value: RuntimeConfig) {
@@ -212,7 +212,6 @@ function validateRuntimeConfig(value: RuntimeConfig) {
       control_mutations_enabled: false,
       slurm_routes_enabled: false,
       queue_depth_mode: 'display_readonly_unavailable',
-      display_readonly: true,
     } satisfies RuntimeConfig
   }
   return value

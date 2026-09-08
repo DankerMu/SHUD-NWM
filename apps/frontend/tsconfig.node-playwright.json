@@ -22,12 +22,23 @@
     "playwright.river-click-lane-attempt.ts",
     "playwright.river-click-terminal.ts",
     "playwright.live-display.global-setup.ts",
+    "playwright.live-c4-display.global-setup.ts",
     "playwright.config.helpers.ts",
     "playwright.live-display.config.ts",
     "playwright.live-river-click.config.ts",
+    "playwright.live-c4-display.config.ts",
+    "playwright.private-receipt-publication.ts",
+    "playwright.c4-display-evidence.ts",
+    "playwright.c4-display-evidence-owner.ts",
+    "playwright.c4-display-lane.ts",
+    "playwright.c4-display-lane-preflight.ts",
+    "playwright.c4-display-terminal.ts",
     "e2e/live-display.spec.ts",
+    "e2e/live-c4-display.spec.ts",
     "scripts/river-click-receipt-binder-core.d.mts",
-    "src/lib/riverClickEvidence/**/*.ts"
+    "scripts/c4-receipt-binder-core.d.mts",
+    "src/lib/riverClickEvidence/**/*.ts",
+    "src/lib/c4DisplayEvidence/**/*.ts"
   ],
   "exclude": ["**/__tests__/**", "src/test/**"]
 }

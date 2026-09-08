@@ -1,0 +1,49 @@
+{
+  "artifact": "nhms-frontend-c4-live-evidence",
+  "schema_version": "1.0",
+  "status": "FAIL",
+  "generated_at": "2026-09-04T01:01:03Z",
+  "started_at": "2026-09-04T01:00:00Z",
+  "ended_at": "2026-09-04T01:01:03Z",
+  "origins": {
+    "frontend": "https://test.nwm.ac.cn",
+    "api": "https://test.nwm.ac.cn"
+  },
+  "requested_pins": {
+    "basin_id": "basins_qhh",
+    "river_segment_id": "basins_qhh_shud_reach_000001"
+  },
+  "gfs": {
+    "source_id": "GFS",
+    "basin_id": "basins_qhh",
+    "basin_version_id": "bv-2026-09",
+    "river_network_version_id": "rn-2026-09",
+    "run_id": "qhh_20260904_gfs",
+    "model_id": "shud-gfs",
+    "cycle_time": "2026-09-04T00:00:00Z",
+    "scenario": "forecast_gfs_deterministic"
+  },
+  "ifs": null,
+  "home": {
+    "path": "/",
+    "map_surface_visible": true,
+    "runtime_config_status": 200,
+    "runtime_service_role": "display_readonly",
+    "current_read_observed": true,
+    "current_read_path": "/api/v1/basins"
+  },
+  "ops": {
+    "gfs": null,
+    "ifs": null
+  },
+  "source_switch": null,
+  "no_control": {
+    "slurm_request_count": 0,
+    "non_get_control_count": 0
+  },
+  "failure": {
+    "code": "PERMISSION_DENIED",
+    "stage": "ops",
+    "message": "production bundle role cannot access /ops"
+  }
+}

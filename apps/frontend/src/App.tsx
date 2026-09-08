@@ -83,7 +83,7 @@ export default function App() {
             <Route
               path="/ops"
               element={
-                <RBACGate roles={['operator', 'model_admin', 'sys_admin']}>
+                <RBACGate roles={['operator', 'model_admin', 'sys_admin']} allowDisplayReadonly>
                   <MonitoringPage mode="ops" />
                 </RBACGate>
               }

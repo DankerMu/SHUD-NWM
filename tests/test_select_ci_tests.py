@@ -9013,6 +9013,23 @@ def _database_filter_block(workflow: str) -> str:
 _BACKEND_FILTER_KEY = "\n            backend:\n"
 
 
+def _frontend_filter_block(workflow: str) -> str:
+    """ci.yml's `frontend:` paths-filter block, from its key to the next key."""
+    key = "\n            frontend:\n"
+    start = workflow.find(key)
+    assert start != -1, f"{CI_WORKFLOW_PATH} no longer defines a `frontend:` paths-filter block"
+    body_start = start + len(key)
+    following = _NEXT_FILTER_KEY_LINE.search(workflow, body_start)
+    return workflow[body_start : following.start() if following else len(workflow)]
+
+
+def test_c4_schema_only_change_runs_frontend_ajv_negative_suite() -> None:
+    frontend = _frontend_filter_block(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+    assert "'schemas/frontend_c4_live_evidence.schema.json'" in frontend
+    assert "'schemas/examples/frontend_c4_live_evidence*.json'" in frontend
+    assert "'schemas/**'" not in frontend
+
+
 def _backend_filter_block(workflow: str) -> str:
     """ci.yml's `backend:` paths-filter block, from its key to the next key.
 
