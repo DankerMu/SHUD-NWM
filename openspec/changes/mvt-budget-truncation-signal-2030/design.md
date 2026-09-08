@@ -58,7 +58,8 @@ issue from a PR #2025 review deferral).
   `MVT_TILE_BUDGET_TRUNCATED` makes it a runtime capability (`grep -c` on the log) instead of a one-off
   SQL replay. The count is of *generations* (cache misses), not served responses: a tile truncated before
   deploy and still warm in the file cache is served without re-entering the bind site, so answering "what
-  is truncated right now" needs a cache-cold pass (or the prewarm) rather than a raw grep. New truncation
+  is truncated right now" needs a cache-cold pass — the receipt method (direct bind-site call with no cache tier), or the prewarm
+  only after the relevant keys have been cleared — rather than a raw grep. New truncation
   from inventory growth rotates the national keys (the source digests hash the active-network inventory;
   `hydro-national` keys also rotate per `valid_time`), so it fires on its first regeneration. Message is one line: `MVT_TILE_BUDGET_TRUNCATED layer_id=<id> z=<z> x=<x> y=<y>
   feature_count=<n>/<intersecting> max_features=<n> coordinate_count=<n>/<intersecting> max_coordinates=<n>`
