@@ -236,21 +236,31 @@ describe('M11FloatingLegend', () => {
     ).toEqual(precipLegend.map((entry) => entry.label))
   })
 
-  it('follows the legend data when a swatch colour changes instead of a hardcoded palette', () => {
+  it('follows the legend data when a swatch colour and a threshold label change instead of a hardcoded palette', () => {
     const mutatedColor = '#123456'
-    // 前置条件：这个色值不在 fixture 里，否则"跟着变"与"写死"无法区分。
+    // spec「Legend shows both layers」说的是 colours **and** thresholds：只变色的话，一张写死
+    // 六条 fixture 阈值文字的前端表格照样全绿（行数仍来自数据数组，长度对得上）。
+    const mutatedLabel = '0.1-12'
+    // 前置条件：这两个值都不在 fixture 里，否则"跟着变"与"写死"无法区分。
     expect(precipLegend.map((entry) => entry.color)).not.toContain(mutatedColor)
+    expect(precipLegend.map((entry) => entry.label)).not.toContain(mutatedLabel)
     // 复制后改，不动共享 fixture 导出。
-    const mutated = precipLegend.map((entry, index) => (index === 0 ? { ...entry, color: mutatedColor } : entry))
+    const mutated = precipLegend.map((entry, index) =>
+      index === 0 ? { ...entry, color: mutatedColor, label: mutatedLabel } : entry,
+    )
 
     const { rerender } = render(
       <M11FloatingLegend layer="discharge" layers={[dischargeLayer]} precipLegend={precipLegend} />,
     )
     expect(precipSwatchColors()[0]).toBe(normalizedColor(precipLegend[0].color))
+    expect(screen.getAllByTestId('m11-floating-legend-precip-row')[0].textContent).toBe(precipLegend[0].label)
 
     rerender(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} precipLegend={mutated} />)
     expect(precipSwatchColors()).toEqual(mutated.map((entry) => normalizedColor(entry.color)))
     expect(precipSwatchColors()[0]).toBe(normalizedColor(mutatedColor))
+    expect(screen.getAllByTestId('m11-floating-legend-precip-row').map((row) => row.textContent)).toEqual(
+      mutated.map((entry) => entry.label),
+    )
   })
 
   it.each([

@@ -31,6 +31,7 @@ function input(overrides: Partial<M11PrecipOverlayInput> = {}): M11PrecipOverlay
     validTime: VALID_TIME_MS,
     precipIndexByCycle:
       source && cycle ? { [m11SourceCycleKey(source, cycle)]: indexState() } : {},
+    enrichmentSkipped: false,
     ...overrides,
   }
 }
@@ -116,12 +117,34 @@ describe('resolveM11PrecipOverlay hidden ladder', () => {
   it.each([
     ['cycle unresolved', { cycle: null }],
     ['validTime unresolved', { validTime: null }],
-    ['index record absent', { precipIndexByCycle: {} }],
+    ['index record absent while the enrichment chain is still running', { precipIndexByCycle: {} }],
   ])('reports index_pending without a notice when %s', (_label, overrides) => {
-    const model = resolveM11PrecipOverlay(input(overrides as Partial<M11PrecipOverlayInput>))
+    const model = resolveM11PrecipOverlay(
+      input({ ...(overrides as Partial<M11PrecipOverlayInput>), enrichmentSkipped: false }),
+    )
     expect(model.hiddenReason).toBe('index_pending')
     expect(model.notice).toBeNull()
     expect(model.url).toBeNull()
+  })
+
+  it('reports index_error when the record is absent because the enrichment chain was skipped', () => {
+    // 键缺席的两态判别：bootstrap 失败 → 阶段 3 整段跳过 → index 请求一条都不会发。
+    // 此时「无提示地静默隐藏」是把终态失败渲染成在途（IS-2 / #2014 retro 同一类）。
+    const pending = resolveM11PrecipOverlay(input({ precipIndexByCycle: {}, enrichmentSkipped: false }))
+    const skipped = resolveM11PrecipOverlay(input({ precipIndexByCycle: {}, enrichmentSkipped: true }))
+
+    expect(pending.hiddenReason).toBe('index_pending')
+    expect(skipped.hiddenReason).toBe('index_error')
+    expect(skipped.notice).toBe(M11_PRECIP_NOTICE_INDEX_ERROR)
+    expect(skipped.url).toBeNull()
+  })
+
+  it('keeps a delivered record terminal regardless of the skipped flag', () => {
+    // 跳过标记只升级「键缺席」那一态：已到达的记录自己就是终态事实（与 store 的
+    // `unresolvedSourceRecord` 同构），不得被跳过标记改写。
+    const model = resolveM11PrecipOverlay(input({ enrichmentSkipped: true }))
+    expect(model.hiddenReason).toBeNull()
+    expect(model.url).toBe(`/api/v1/precip/gfs/${CYCLE_SECONDS}/${VALID_TIME_SECONDS}.png`)
   })
 
   it('reports index_error for a failed index fetch', () => {
@@ -142,6 +165,34 @@ describe('resolveM11PrecipOverlay hidden ladder', () => {
     expect(model.hiddenReason).toBe('index_error')
     expect(model.notice).toBe(M11_PRECIP_NOTICE_INDEX_ERROR)
     expect(model.coordinates).toBeNull()
+  })
+
+  it('reports index_error instead of throwing when bounds is missing entirely', () => {
+    // `unwrapApiData` 是裸 `as T`（零字段校验）且全仓无 ErrorBoundary：`bounds.length` 抛出
+    // 就是整页白屏。契约被破坏时必须 fail-closed 成 index_error，不是崩。
+    const model = resolveM11PrecipOverlay(
+      input({
+        precipIndexByCycle: {
+          [m11SourceCycleKey('gfs', CYCLE_SECONDS)]: indexState({ bounds: undefined as unknown as number[] }),
+        },
+      }),
+    )
+    expect(model.hiddenReason).toBe('index_error')
+    expect(model.notice).toBe(M11_PRECIP_NOTICE_INDEX_ERROR)
+    expect(model.coordinates).toBeNull()
+  })
+
+  it('reports index_error instead of throwing when valid_times is missing entirely', () => {
+    const model = resolveM11PrecipOverlay(
+      input({
+        precipIndexByCycle: {
+          [m11SourceCycleKey('gfs', CYCLE_SECONDS)]: indexState({ valid_times: undefined as unknown as string[] }),
+        },
+      }),
+    )
+    expect(model.hiddenReason).toBe('index_error')
+    expect(model.notice).toBe(M11_PRECIP_NOTICE_INDEX_ERROR)
+    expect(model.url).toBeNull()
   })
 
   it('reports cycle_not_mirrored for a 404 PRECIP_CYCLE_NOT_MIRRORED cycle', () => {

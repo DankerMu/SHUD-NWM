@@ -56,14 +56,23 @@ export function MaplibreControlStub() {
 export function MaplibreSourceStub({
   type,
   url,
+  coordinates,
   children,
 }: {
   type?: string
   url?: string
+  coordinates?: unknown
   children?: React.ReactNode
 }) {
   return (
-    <div data-testid="maplibre-source" data-source-type={type} data-source-url={url ?? undefined}>
+    <div
+      data-testid="maplibre-source"
+      data-source-type={type}
+      data-source-url={url ?? undefined}
+      // `image` source 的四角：spec 要求栅格贴在 index 的 bbox 上，而「从模型推出四角」与
+      // 「把四角真的传给 Source」是两件事——后者没有观测面时，硬编码 bbox 的漂移抓不到。
+      data-source-coordinates={coordinates ? JSON.stringify(coordinates) : undefined}
+    >
       {children}
     </div>
   )
@@ -72,9 +81,26 @@ export function MaplibreSourceStub({
 /**
  * `Layer` 的观测面：`beforeId` 是本仓唯一无法从 `Source` 侧观测的 prop（决策 4 的
  * 「仅当河网 source 存在时才传」形状断言要读它），故这里也从 `null` 升级为可断言的 DOM 节点。
+ * `paint` 同理：spec 把降水栅格的 opacity 0.55 / linear 重采样写在 requirement 正文里，
+ * 不透出就没有 oracle。
  */
-export function MaplibreLayerStub({ id, beforeId }: { id?: string; beforeId?: string }) {
-  return <div data-testid="maplibre-layer" data-layer-id={id} data-layer-before-id={beforeId ?? undefined} />
+export function MaplibreLayerStub({
+  id,
+  beforeId,
+  paint,
+}: {
+  id?: string
+  beforeId?: string
+  paint?: unknown
+}) {
+  return (
+    <div
+      data-testid="maplibre-layer"
+      data-layer-id={id}
+      data-layer-before-id={beforeId ?? undefined}
+      data-layer-paint={paint ? JSON.stringify(paint) : undefined}
+    />
+  )
 }
 
 export function MaplibreMarkerStub({ children }: { children?: React.ReactNode }) {

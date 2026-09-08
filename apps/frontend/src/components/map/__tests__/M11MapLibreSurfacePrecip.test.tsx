@@ -81,6 +81,7 @@ function visibleModel(): M11PrecipOverlayModel {
     precipIndexByCycle: {
       [m11SourceCycleKey('gfs', CYCLE)]: indexState({ valid_times: [VALID_TIME] }),
     },
+    enrichmentSkipped: false,
   })
 }
 
@@ -91,6 +92,7 @@ function hiddenModel(): M11PrecipOverlayModel {
     cycle: CYCLE,
     validTime: VALID_TIME,
     precipIndexByCycle: { [m11SourceCycleKey('gfs', CYCLE)]: { status: 'not_mirrored' } },
+    enrichmentSkipped: false,
   })
 }
 
@@ -152,6 +154,15 @@ describe('M11MapLibreSurface precipitation overlay mount', () => {
     const sources = imageSources()
     expect(sources).toHaveLength(1)
     expect(sources[0].getAttribute('data-source-url')).toBe(EXPECTED_URL)
+    // 栅格四角必须**真的**传进 `Source`：从 bounds 推四角与把四角交给 MapLibre 是两件事，
+    // 只断前者时一个硬编码 bbox（spec 里的实机值 `[63, 8, 145, 64]`）照样全绿。
+    expect(JSON.parse(sources[0].getAttribute('data-source-coordinates') ?? 'null')).toEqual(model.coordinates)
+    // spec `precipitation-raster-overlay` 把这两个数写在 requirement 正文里（opacity 0.55、
+    // linear 重采样）：没有 oracle 就是没交付。
+    expect(JSON.parse(precipRasterLayer()?.getAttribute('data-layer-paint') ?? 'null')).toEqual({
+      'raster-opacity': 0.55,
+      'raster-resampling': 'linear',
+    })
     const surface = screen.getByTestId('m11-map-surface')
     expect(surface.getAttribute('data-precip-url')).toBe(EXPECTED_URL)
     expect(surface.hasAttribute('data-precip-hidden-reason')).toBe(false)

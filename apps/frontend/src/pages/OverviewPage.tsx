@@ -307,6 +307,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const cyclesBySource = useOverviewDataStore((store) => store.cyclesBySource)
   // 降水 index 同属 enrichment（bootstrap 之后才到）：键缺席 = 在途，不是错误态。
   const precipIndexByCycle = useOverviewDataStore((store) => store.precipIndexByCycle)
+  // ……除非本轮 enrichment 整段被跳过（bootstrap 失败）：那时 index 永远不会到达，键缺席是终态。
+  const layerTimeEnrichmentSkipped = useOverviewDataStore((store) => store.layerTimeEnrichmentSkipped)
   const overviewMatchesQuery = overviewSnapshotMatchesQuery(overview, state)
   const overviewMetadataMatchesQuery = overviewSnapshotMetadataMatchesQuery(overview, state)
   const currentOverview = overviewMatchesQuery ? overview : null
@@ -363,21 +365,23 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   // discharge `LayerState.currentValidTime`（`pickCurrentValidTime` 已把 URL 的 T 与活动列表调和过，
   // 与 `buildM11RegisteredOverlay` 取到的时次逐字相同）。这里不新造任何第二份解析规则。
   const dischargeLayer = useMemo(() => layers.find((entry) => entry.layerId === 'discharge') ?? null, [layers])
+  // 目录里的 `precip` 条目：**一处**推导，既喂浮层开关的可用性，也喂图例段的色阶，也喂解析器的
+  // 总闸（同一条目、同一语义；开第二条 find 就是让「开关说有」和「图例说没有」各自漂）。
+  const precipCatalogLayer = useMemo(() => layers.find((entry) => entry.layerId === 'precip') ?? null, [layers])
+  const precipAvailable = precipCatalogLayer !== null
   const precipOverlay = useMemo(
     () =>
       resolveM11PrecipOverlay({
-        precip: state.precip,
+        // 目录闸并进 `disabled`：开关按不动时，栅格与提示也必须一起沉默（fixture 决策 1 第 1 臂）。
+        precip: state.precip && precipAvailable,
         concreteSource: nationalConcreteSource(state.source),
         cycle: dischargeLayer ? resolveNationalOverlayCycle(dischargeLayer) : null,
         validTime: dischargeLayer?.currentValidTime ?? null,
         precipIndexByCycle,
+        enrichmentSkipped: layerTimeEnrichmentSkipped,
       }),
-    [dischargeLayer, precipIndexByCycle, state.precip, state.source],
+    [dischargeLayer, layerTimeEnrichmentSkipped, precipAvailable, precipIndexByCycle, state.precip, state.source],
   )
-  // 目录里的 `precip` 条目：**一处**推导，既喂浮层开关的可用性，也喂图例段的色阶
-  // （同一条目、同一语义；开第二条 find 就是让「开关说有」和「图例说没有」各自漂）。
-  const precipCatalogLayer = useMemo(() => layers.find((entry) => entry.layerId === 'precip') ?? null, [layers])
-  const precipAvailable = precipCatalogLayer !== null
   // 图例单一来源 = 目录 `precip` 条目的 `metadata.legend`（fixture 决策 7），前端零硬编码调色板。
   // 开关关掉时不渲染图例段：给一个没画出来的图层留着色阶就是在假装它还在。
   const precipLegend = state.precip ? (precipCatalogLayer?.metadata?.legend ?? null) : null
@@ -566,13 +570,15 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         <M11FloatingNotice testId="m11-met-station-status">{stationLayer.statusNote}</M11FloatingNotice>
       ) : surfaceSettling ? (
         <M11FloatingNotice testId="m11-overview-loading">总览数据加载中</M11FloatingNotice>
-      ) : precipOverlay.notice ? (
-        // 链位钉死在 `surfaceSettling` 之后、`emptyBasinReason` 之前（fixture 决策 9）：
-        // 加载中不让降水提示盖过「加载中」；加载完成后降水提示优先于空流域提示。
-        // 所有 M11FloatingNotice 同坐标绝对定位，并列挂两条会像素重叠，故必须留在这条互斥链上。
-        <M11FloatingNotice testId="m11-precip-notice">{precipOverlay.notice}</M11FloatingNotice>
       ) : emptyBasinReason ? (
         <M11FloatingNotice testId="m11-overview-empty">{emptyBasinReason}</M11FloatingNotice>
+      ) : precipOverlay.notice ? (
+        // 链位钉死在**链尾**（fixture 决策 9，round-1 更正）：`emptyBasinReason` 是本组件里
+        // `bootstrapError` / enrichment `error` 的**唯一**渲染面（`overview-data-contracts` spec
+        // 要求 bootstrap 失败必须如实呈现），而降水提示可以是持久的（`?source=compare` 的提示 A、
+        // 镜像滞后的提示 C）——排在它前面会把硬失败永久盖掉。降水是装饰层信息，让位于任何硬失败。
+        // 所有 M11FloatingNotice 同坐标绝对定位，并列挂两条会像素重叠，故必须留在这条互斥链上。
+        <M11FloatingNotice testId="m11-precip-notice">{precipOverlay.notice}</M11FloatingNotice>
       ) : null}
     </M11FullscreenMap>
   )
