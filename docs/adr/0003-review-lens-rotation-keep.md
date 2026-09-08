@@ -3766,3 +3766,32 @@ exceeds core, but this PR adds no evidentiary strength to that direction. The
 measurement caveats and the #2117 counter-datum above remain load-bearing; any
 future reversal still requires maintainer review rather than an automatic
 ratio threshold. Next revisit on the audit's next flag or a maintainer override.
+
+## Revisit 2026-09-08 (post-merge PR #2125 / issue #2014)
+
+`loop_log_audit.py` flags the question DECIDABLE at 184 multi-round merged PRs,
+with later-round catches `core=220`, `rotated=269`, `phase=53`, and 15 skipped
+as non-attributable. Relative to the sample recorded after PR #2126
+(183 / 210 / 266 / 53 / 15), this PR alone moved core by +10 and rotated by +3.
+
+PR #2125 is an expanded fixture that ran five comprehensive rounds. Round 1
+seated the core mix (correctness, test-evidence+spec-compliance, integration);
+rounds 2–5 rotated integration out and invariant-state in. Attributable
+later-round catches split core=10 (test-evidence 8, correctness 2) against
+rotated=3 (invariant-state), so by count this PR leans the same way #2117 did:
+once the failure mode had collapsed to one invariant (time-less / fail-closed /
+in-flight are three states, not two), most later catches came from the core
+seats re-reading the same predicate. The counter-weight is severity, not count:
+the rotated-in seat produced the only later-round P1 (round 2, cross-source
+identity) and both round-4 findings that closed the fourth and final site of
+that invariant, while the core seats' later catches were mostly
+test-discrimination minors and notes. Two depth retros on the same class also
+confirm the #2117 hypothesis that a PR with one recurring class gains more from
+a clean-slate pass than from breadth.
+
+Decision unchanged: **keep rotation**. The cumulative rotated count still
+exceeds core, and this PR's rotated catches carried the weight even where the
+core catches carried the count. The measurement caveats above remain
+load-bearing; any reversal still requires maintainer review rather than an
+automatic ratio threshold. Next revisit on the audit's next flag or a
+maintainer override.
