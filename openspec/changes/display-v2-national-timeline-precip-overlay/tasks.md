@@ -772,3 +772,81 @@ Minimal mergeable slice（issue 原文，逐字记录）：「atomic: 分段/选
     **【round-1 修订，2026-09-07】只钉字符串挡不住再加一行**（verified finding F）：上面那两条只约束了两个特定字符串的有无，任何一条既不含 `Analysis / Forecast` 也不含 `sourceLabel` 的新行都能悄悄插进去，流高照样回到 80px 而测试全绿。**必须改为直接钉行数**：给 `M11Timeline` 右侧列容器加 `data-testid="m11-timeline-rows"`（**不要**用 `div.min-w-0.flex-1` 这种 Tailwind 类名选择器——类名是会漂的），在传 `cycle`（且有时次）与不传 `cycle` 两个分支下都断言 `children.length === 3`。字符串那两条保留，它们钉的是「哪一行被替换掉了」，与行数是两件事。jsdom 量不了 80px vs 64px，行数是这里唯一可得的结构性 oracle。实测 64px/16px/无横向 body 滚动的浏览器截图随 I15 的 node-27 receipt。
   - **挂载接缝**（【round-1 补，2026-09-07】verified finding G）：上述断言全部打在纯函数与孤立渲染的组件上，`OverviewMode → M11FullscreenMap → M11BottomControlBar` 这条接线在测试里一次都没被走过——把 `controlBar` prop 忘了传、或 `M11FullscreenMap` 忘了渲染，全绿。落点复用既有的 `apps/frontend/src/pages/__tests__/OverviewPageValidTimeCorrection.test.tsx`（它已挂真 `OverviewPage` + mock client + maplibre stub 并路由到 `OverviewMode`，且 `deriveM11ControlBarModel` 永不返回 null，故控制条从首帧起就在 DOM 里）：给其中一条既有用例加 `expect(screen.getByTestId('m11-bottom-control-bar')).toBeTruthy()`。不新建测试文件。
 - Non-goals：**流域详情半边的全部内容**（run 周期选择器、run metadata 时次、四项源分段、`BasinDataSnapshot` 新字段、`loadBasinDetail` 任何改动、`buildM11TimelineViewModel` / `resolveM11ValidTimeCorrection` 的 `derivedTimes` 臂首项改造）——blocked by #2109，连同 #2110 一并回流上游；6.4 降水叠加原语 / 6.6 浮层开关·图例·两条隐藏提示·**浮层位移**（I11 / #2015）；header（I1）；后端任何改动；node-27 浏览器 e2e receipt 与控制条 vs MapLibre 版权归属的实测像素（I15）；~~store 与 `lib/m11/overviewDataContracts.ts` 的任何行为改动（#2012 已定，本单纯只读）~~ ——**【round-2 用户裁定扩范围 + round-3 决策 14 后作废】**，两者均已在本单改动，见决策 13 / 14，并作为计划偏离记入 PR。
+
+### #2015 降水叠加原语 + 图层开关 + 图例（wave 3，I11：`M11PrecipOverlayPrimitive` + `M11FloatingControls` 的开关/图例/提示/位移）
+
+Risk triage（`subagent-workflow` Phase 0.5，fixture level `expanded`，与上游 `Suggested fixture level: expanded` 一致，无升降；repair intensity **medium**）：命中 high 触发词 `shared helper behavior` 一处——`M11FloatingControls.tsx`（`apps/frontend/src/components/map/`）是全国总览与流域详情共用的浮层文件，本单要改它的四个导出组件。**有意维持 medium**，理由与 #2012/#2014 同构：纯浏览器端，无文件 IO、无鉴权、无持久化写、无发布/回滚面；每一种失败模式都能由 vitest 直接断言。按 medium 规则，第二条同类发现即触发 Phase 6.2 不变量审计——**本单最可能重复的类正是 #2014 两次 depth retro 的那条**：把「隐藏原因」的多态塌成二元 `visible` 布尔（见决策 1 的状态表）。
+
+**引用约定**：本节一律按**符号名**引用（`函数名` / `组件名` / `类型名` + 文件路径），不写行号（与 `### #2014` 节同一理由）。
+
+**issue 正文两处与仓内事实不符（勘察于 master `49710a2d`，实现者以此为准，并记入 `偏离记录`）**：
+
+- 「图层面板把降水气象层标为未实现禁用」——`未实现`/`UnavailableLayerRow` 只存在于 `apps/frontend/src/pages/m11/M11Controls.tsx` 的 `LayerGroupControls`，该组件自 M26 起**零挂载点**（全仓无 import）。活的图层面板是 `M11FloatingLayerSwitcher`（`apps/frontend/src/components/map/M11FloatingControls.tsx`），今天只有 `discharge` 一个水文选项 + 一个无分组标题的「气象代站」开关，**根本没有降水条目**。故「不再列为未实现」在活代码里的落法是：**新增**气象分组与降水开关，而不是把某个禁用态改为启用态。死的是 `LayerGroupControls` 这个组件（同文件的 `M11Timeline` / `m11SourceOptions` 等仍被活引用），本单不动它也不清理（report-only）。issue 正文「其它气象层（气温/风）仍保持『未实现禁用』」同样与活代码不符——活开关里根本没有这两项，本单也不新增它们。
+- 「图例 `bottom-4`」——`M11FloatingLegend` 现值已是 `bottom-12`（为避开 MapLibre attribution 控件抬过一次，见其行内注释）。本单目标值 `bottom-24` 不变，起点按 `bottom-12` 记。返回按钮 `bottom-4`、notices `bottom-20` 与 issue 正文一致。
+
+#### 范围裁定：沿用 #2014 的模式边界，流域详情端到端不在本单
+
+issue 验收标准第三条的前半「`source=best` 解析到 `ifs` → URL 含 `/api/v1/precip/ifs/`」只在流域详情模式成立（全国尺度 `best` 恒解析为 `gfs`）。两条互相独立的事实使它在本单**不能端到端交付**：(i) issue 自己的 PR Boundary 写明「不动 store」，而 `loadBasinDetail`（`apps/frontend/src/stores/overviewData.ts`）**从不**请求 precip index（全仓唯一调用点在 `loadOverview` 的 enrichment 段，键是全国 `(source, cycle)` 对）；(ii) 整条流域详情车道按构造不可达（#2109，未裁决，见 `### #2014` 节）。**处置**：`best→ifs` 与 `compare→隐藏` 两条在**纯解析函数**层面交付并测试（解析函数把「具体源」作为入参，见决策 2），流域详情的 store 取数与挂载**不做**，与 #2014 同样记 blocked-by-#2109，待裁决后重新切片。全国模式下 `best`（→`gfs`）与 `compare`（→ 无具体源 → 隐藏 + 原因）两条**完整可达、完整交付**。
+
+**未满足的 spec 条款与 scenario（显式记录，不冒充覆盖）**：`precipitation-raster-overlay` 的 scenario「Non-concrete source resolves or hides」中「**in basin detail**」这一前提下的端到端行为——本单只在解析函数层满足其 URL 形状与「不发 best/compare 请求」两条断言（后者的 store 侧闸由 #2012 决策 8 的用例 `never spells best or compare…` 已钉，本单引用不重测）；流域详情实机路径 blocked by #2109。**注意**：本单对「`source=best` 解析到 `ifs`」这一**解析步骤**没有任何 oracle——AC3 的用例直接传 `concreteSource: 'ifs'`，测的是 URL 形状，不是解析；解析归流域详情切片。
+- `map-layer-timeline-controls` 的 scenario「Layer groups render」中「base controls MUST include basin boundaries and river network」子句——本单不交付 base 分组（活面板今天也没有），记未满足，不冒充覆盖；hydrology / meteorology 两组由本单交付。
+- 同 scenario 在**流域详情模式**下的降水开关/图例——按决策 7/8 的裁定在 `BasinDetailMode` 恒为「未实现禁用 + 无图例段」（否则 #2109 下会出现「按下了却永远不渲染栅格」的假象），待 #2109 裁决后随流域详情切片一并交付。
+
+Minimal mergeable slice（issue 原文，逐字记录）：「首刀 = 6.4 原语 + 开关 + 三种隐藏原因（含 vitest）；第二刀 = 图例叠加 + 浮层位移」——本 PR 一次交付两刀，实现与提交按这两刀分块，闸门若判 split 直接沿此边界切。
+
+- Issue type: feature；blast radius: medium——新文件 `apps/frontend/src/components/map/m11PrecipOverlay.ts`（纯解析）与 `M11PrecipOverlayPrimitive`（放 `m11MapPrimitives.tsx` 或独立文件，实现者择一）、`M11MapLibreSurface.tsx`（挂载 + 新 prop）、`M11FloatingControls.tsx`（开关/图例/提示/位移）、`OverviewPage.tsx`（穿线）、`apps/frontend/src/test/overviewDataFixture.ts`（新增六级 legend 与 `precip` 目录条目 fixture）及相关 vitest。**仅加 `export`（各一行，记入 `偏离记录`，与 #2014 认领 `GLASS_PANEL` 的先例同构）**：`m11MapBuilders.ts` 的 `resolveNationalOverlayCycle`、`stores/overviewData.ts` 的 `nationalConcreteSource`。**不动**：`lib/m11/queryState.ts`、`M11BottomControlBar`、上述两文件的其它任何行、后端。
+- 核心风险包：
+  - Public API / CLI / script entry — **selected**：`M11MapLibreSurfaceProps` 新增 `precipIndexByCycle`（或等价的已解析 `precipOverlay` 输入）prop；`M11FloatingLayerSwitcher` 新增 `precipAvailable?: boolean`（**可选，默认 `false`**；`state.precip` 它已经拿得到），`M11FloatingLegend` 新增 `precipLegend?: PrecipLegendEntry[] | null`（可选，默认无）。两者可选是为了让 `__tests__/M11FloatingControls.test.tsx` 三处不带新 prop 的既有 render 逐字不变，也让 `BasinDetailMode` 零改动即得到「禁用 + 无图例段」。既有调用点（`OverviewMode` 与 `BasinDetailMode`）都必须编译通过；流域详情调用点不传即「无叠加」，不得为它造第二条解析路径。
+  - Schema / columns / units / field names — **selected**：PNG URL 形状 `/api/v1/precip/{source}/{cycle}/{validTime}.png`，`cycle`/`validTime` **秒精度**（`toSecondsPrecisionInstant`，与 #2012 决策 3 同一 helper）；`valid_times[]` 成员判定同样先转秒精度（`LayerState` 时次是毫秒形，index 是秒形——#2014 已踩过）；`PrecipIndex.bounds` 的类型是 `number[]`（`api/types.ts`），语义 `[w, s, e, n]`，长度 ≠ 4 时归 `index_error` 臂（决策 1）；MapLibre `image` source 的四角顺序是 **NW, NE, SE, SW** = `[[w,n],[e,n],[e,s],[w,s]]`（`maplibre-gl` `image_source.ts` 文档：从左上角起顺时针）；`PrecipLegendEntry {min, max?, color, label}` → 图例渲染。
+  - Concurrency / shared state / ordering — **selected**：`beforeId` 时序（决策 4）；index 在途（store 键**缺席**）不是错误态；`state.precip` 切换发生在河网层已存在之后，`react-map-gl` 的 `Layer` 在 `beforeId` 变化时调 `moveLayer`，挂载顺序不能只靠 JSX 顺序。
+  - Error handling / rollback / partial outputs — **selected**：决策 1 的状态表是本单核心；index `error`（含 `PRECIP_WINDOW_INCOMPLETE` 404、网络错误）与 `not_mirrored` 与「在途」三者不得折叠；任何隐藏态下 `image` source **不渲染**（url 为 null 即不注册），流量层与时间轴不受影响。
+  - Legacy compatibility / examples — **selected**：`M11FloatingControls.test.tsx` 既有的 `w-max`/`max-w-*` 尺寸不变量与行为用例逐字不变；「气象代站」开关保留（并入气象分组）；`e2e/m11-overlay-collision.mocked.spec.ts` 不钉 `bottom-12` 字面量，抬到 `bottom-24` 不需要改它。
+  - Resource limits / large input / discovery、Config / project setup、File IO / path safety、Auth / permissions / secrets、Release / packaging / dependency compatibility、Documentation / migration notes — not selected：单张 PNG、纯浏览器端，不碰构建配置、依赖与文件系统；`package.json` / lockfile 不动。
+- Domain packs（`openspec/project-profile.md` 全部 8 项）：
+  - Hydro-met time series / forcing windows — **selected**：降水 PNG 的 `(source, cycle, validTime)` 三元组必须与流量层**同源**（决策 3）；切三元组任一维 URL 即变。
+  - Published NHMS artifacts / display identity — **selected**：图例六个 hex 与阈值只能来自 API 数据（目录 `precip` 条目 `metadata.legend`），前端零硬编码调色板，否则图例与 PNG 调色板会漂移。
+  - 其余六项 — not selected：本单不产出/不改任何几何、模型、DB、调度、资料源或 manifest 数据。
+- 钉住的实现决策（fixture review 与 reviewer 以此为准，不必重开辩论）：
+  1. **隐藏原因是闭合枚举 + 状态表，不是布尔**。纯函数 `resolveM11PrecipOverlay(input) → M11PrecipOverlayModel`：
+     ```ts
+     type M11PrecipHiddenReason =
+       | 'disabled'            // state.precip === false：不注册、无提示、无图例段
+       | 'no_concrete_source'  // compare，或 best 未解析出具体源：隐藏 + 提示 A
+       | 'index_pending'       // 活动 (source, cycle) 在 precipIndexByCycle 里缺席（在途/未取）：隐藏，**无提示**
+       | 'index_error'         // store `{status:'error'}`（含 PRECIP_WINDOW_INCOMPLETE 404、网络错误）：隐藏 + 提示 B
+       | 'cycle_not_mirrored'  // store `{status:'not_mirrored'}`：隐藏 + 提示 C
+       | 'window_incomplete'   // available 但 validTime ∉ valid_times[]（秒精度）：隐藏 + 提示 D
+     interface M11PrecipOverlayModel {
+       url: string | null            // 仅 visible 时非 null
+       coordinates: [[number,number],[number,number],[number,number],[number,number]] | null  // 由 index.bounds 推出
+       hiddenReason: M11PrecipHiddenReason | null   // null ⇔ visible ⇔ url !== null
+       notice: string | null         // 按上表；pending 与 disabled 恒为 null
+     }
+     ```
+     **求值阶梯（前一臂命中即短路，枚举声明顺序不是规则，这一条才是）**：
+     1. `state.precip === false` → `disabled`；
+     2. `concreteSource === null`（含全国 `compare`——它同时也没有活动对、键也缺席，但本臂先命中，用户看到提示 A）→ `no_concrete_source`；
+     3. `cycle === null`（全国 discharge fail-closed，`activeNationalCycle` 为 null）**或** `validTime === null`（活动列表 `error`/`pending` 时 `currentValidTime` 会为 null，而同键 index 仍可能 `available`）**或** `precipIndexByCycle[m11SourceCycleKey(source, cycle)]` 缺席 → `index_pending`（隐藏、**无提示**——流量层的禁用/fail-closed 文案已覆盖）；
+     4. `{status:'error'}`，或 `available` 但 `index.bounds.length !== 4` → `index_error`；
+     5. `{status:'not_mirrored'}` → `cycle_not_mirrored`；
+     6. `available` 且 `toSecondsPrecisionInstant(validTime) ∉ valid_times.map(toSecondsPrecisionInstant)` → `window_incomplete`；
+     7. 否则 visible：`url` = `/api/v1/precip/{source}/{cycle}/{validTime}.png`（秒精度），`coordinates` 由 `bounds` 推出。
+     四条提示文案 A/B/C/D **两两不相等**，vitest 用一条 pairwise 断言钉住；`index_pending` 的三种入口（cycle null / validTime null / 键缺席）各一条用例，都断言 `notice === null` 且 `hiddenReason === 'index_pending'`。
+  2. **解析函数把「具体源」作为入参**：`input.concreteSource: 'gfs' | 'ifs' | null`。全国调用点用 `nationalConcreteSource(state.source)`（`stores/overviewData.ts` 现有私有函数，语义正是 `gfs|ifs` 或 null，本单只加 `export`；不要用 `lib/m11/overviewDataContracts.ts` 的 `resolveNationalScaleSource`——它返回含 `'compare'` 的 `M11Source`，还得再窄化一次）；流域详情将来用 `resolveSelectedSource` 的结果。`best→ifs` 用例即传 `concreteSource: 'ifs'` 断言 URL 含 `/api/v1/precip/ifs/`；`compare`/未解析用例传 `null` 断言 `no_concrete_source`。**禁止**在解析函数内自行解析 `best`。
+  3. **活动周期只有一个来源**：`resolveNationalOverlayCycle(dischargeLayerState)`（`m11MapBuilders.ts` 现有**私有**函数，读 `LayerState.activeNationalCycle`，#2014 决策 13；本单只给它加 `export`，不内联 `toSecondsPrecisionInstant(layer.activeNationalCycle)`——那正是本条要禁的第二份周期规则），store 键用 `m11SourceCycleKey(source, cycle)`（`stores/overviewData.ts` 既有导出）。**不得**复制第二份「有效周期 = state.cycle ?? default_cycle」规则；`nationalDischargeActivePair` 未导出，也不要为此导出它。
+  4. **`beforeId` 时序守卫**：`maplibre-gl` 的 `addLayer(layer, beforeId)` 在 `beforeId` 不存在时**触发 ErrorEvent 且不添加**，本仓 `handleMapError`（`m11MapRuntime.tsx`）会把它显示为「地图源加载失败」横幅。钉住：`M11PrecipOverlayPrimitive` 在 `M11MapLibreSurface.tsx` 里**紧跟** `M11NationalRiverPrimitive` 之后挂载，`beforeId={M11_NATIONAL_RIVER_LINE_LAYER_ID}` **仅当** `nationalRiverVectorSource` 为真时传入，否则不传 `beforeId`。此守卫经 stub 不可单测（stub 是 no-op），观测面路由到 I15 的 node-27 浏览器 receipt；本单只钉「条件传 prop」的形状断言。
+  5. **原语是 `react-map-gl` 的 `<Source type="image" url coordinates>` + `<Layer type="raster" paint={{'raster-opacity': 0.55, 'raster-resampling': 'linear'}}>`**，url/coordinates 变化由 `Source` 组件的 `updateImage` 处理，不写 imperative ref。`url === null` 时**整个 Source 不渲染**（这就是「隐藏 ⇒ 不发 PNG 请求」的闸）。观测面两层：(a) 测试桩 `src/test/maplibreStub.tsx` 的 `MaplibreSourceStub` 改为渲染 `<div data-testid="maplibre-source" data-source-type={type} data-source-url={url ?? undefined}>{children}</div>`（纯测试桩，不动生产码；既有用例若只查 `m11-map-surface` 属性不受影响），「隐藏 ⇒ 无 `type="image"` 的 source 元素」断在真正闸住请求的那个组件上；(b) `M11MapLibreSurface` 包装 `<div data-testid="m11-map-surface">` 追加 `data-precip-url` 与 `data-precip-hidden-reason` 作为辅助断言（既有 `data-overlay-source-type` 模式）。
+  6. **bbox 来自 `index.bounds`**，前端不写 `[63, 8, 145, 64]` 常量（spec 里那是实机值不是来源）；隐藏态下无需 bounds。
+  7. **图例单一来源 = 目录 `precip` 条目 `metadata.legend`**（`layers.find(l => l.layerId === 'precip')?.metadata.legend`，`LayerMetadata` 已有 `legend?: PrecipLegendEntry[]` 类型，`layerGroup()` 已把它归 `meteorology`）。不走 `layerLegend()` / `LayerState.legend` / `LayerState.available`（三者都写死 `discharge`，不为本单改）。`OverviewMode` 在 `state.precip === true` 且目录有 `precip` 条目时推出 `precipLegend` 传给 `M11FloatingLegend`；`BasinDetailMode` 不传（图例段抑制，直到 #2109 裁决）。图例段仅在收到非空 `precipLegend` 时渲染，位于流量图例之下、同一浮层卡片内，标题含 `mm/24h`；色块 `style.backgroundColor`（或等价可断言属性）与阈值文字逐项来自 `legend[]`。
+  8. **开关进 `M11FloatingLayerSwitcher`**：新增「水文」/「气象」两个分组标题；气象组含「过去 24h 累积降水」（绑定 `state.precip`，`aria-pressed`，点击派发 `{ precip: !state.precip }`）与既有「气象代站」。目录**无** `precip` 条目时降水开关 `disabled` 并标「未实现」（spec「Unimplemented meteorology layers are disabled」的诚实面）。卡片现有标题「水文图层」改为分组标题「水文」（既有用例若断言该标题须同步）。`M11FloatingLayerSwitcher` 因此需要知道目录里有没有 `precip`——`precipAvailable?: boolean`（默认 false），只由 `OverviewMode` 从 `layers` 推出并传入（一处推导，不在组件内重复 find）；`BasinDetailMode` 不传 → 恒禁用 + 「未实现」，直到 #2109 裁决。
+  9. **提示复用 `M11FloatingNotice`**：`OverviewMode` 里 notice 是一条**互斥三元链**（`metStations` 提示 → `surfaceSettling` → `emptyBasinReason`），一次只出一条，且所有 `M11FloatingNotice` 同坐标绝对定位（并列挂两条会像素重叠）。降水提示作为链上新分支，位置钉在 **`surfaceSettling` 之后、`emptyBasinReason` 之前**：加载中不让降水提示盖过「加载中」，加载完成后降水提示优先于空流域提示。不新造第二个提示组件，不并列挂载。
+  10. **偏移**：`M11FloatingLegend` `bottom-12`→`bottom-24`、`M11BackToOverviewButton` `bottom-4`→`bottom-24`、`M11FloatingNotice` `bottom-20`→`bottom-40`（64px 条 + 16px 底距推出）。vitest 断言按**空白切 token** 后含目标值且不含旧值（沿用 `expectSizedToContent` 的写法；朴素 `not.toContain('bottom-4')` 会被 `bottom-40` 假红）。
+  11. **不动 `queryState.ts`**：`precip` 布尔与 `precip=0` 往返已由 #2012 落地并测试，本单只消费。
+- Evidence mapping（issue Acceptance Criteria → 断言落点）：
+  - AC1 本地三命令 → `cd apps/frontend && pnpm exec tsc --noEmit -p tsconfig.app.json && pnpm test && pnpm build`；CI 前端车道另加 `pnpm check:bundle && pnpm check:api-types`。
+  - AC2 原语/状态表 → 新文件 `apps/frontend/src/components/map/__tests__/m11PrecipOverlay.test.ts`（纯函数）：三元组变化 URL 变且为秒精度字面（fixture `precipIndex.valid_times` 是秒形，`state.validTime` 传毫秒形以证明归一）；`precip=false` → `disabled`、url null；`window_incomplete` / `cycle_not_mirrored` / `index_error` 三臂各一条且提示文案 pairwise 不等；`index_pending` 三入口（cycle null / validTime null / 键缺席）→ notice null；`bounds` 长度 ≠ 4 → `index_error`；全国 `compare` → `no_concrete_source`（不是 `index_pending`）；coordinates 由 fixture `bounds [73,18,135,54]` 推出 `[[73,54],[135,54],[135,18],[73,18]]`。「未发 PNG 请求」的诚实 oracle 是 **`url === null` ⇒ Source 不渲染**（jsdom + stub 下本就不会有网络请求，fetch spy 是空断言），落在 `M11MapLibreSurface` 的 stub 渲染用例：隐藏态 DOM 里**没有** `data-source-type="image"` 元素（决策 5 的桩观测面），可见态有且其 `data-source-url` 等于模型 url；`data-precip-url` 只作辅助。
+  - AC3 best/compare → 同纯函数文件：`concreteSource: 'ifs'` → URL 含 `/api/v1/precip/ifs/`；`null` → `no_concrete_source`。store 侧「不发 `best|compare` index 请求」引用 #2012 的既有用例，不重测。
+  - AC4 图例/开关 → `apps/frontend/src/components/map/__tests__/M11FloatingControls.test.tsx`：用新 fixture `precipLayer`（六级 legend）渲染，断言六个色块与阈值来自 fixture；**改 fixture 一个色值重渲染，对应色块跟着变**；降水开关默认 `aria-pressed=true`、位于「气象」分组、无「未实现」标记；`precipAvailable=false` 时 `disabled` + 「未实现」。
+  - AC5 偏移 → 同文件：图例与返回按钮类名含 `bottom-24`、notice 含 `bottom-40`，且分别不含 `bottom-12`/`bottom-4`/`bottom-20`。
+  - **挂载接缝**（#2014 round-1 finding G 的同类教训）：`apps/frontend/src/pages/__tests__/` 下一条 `OverviewPage` stub 渲染用例走通 `OverviewMode → M11MapLibreSurface`：mock index 为 `available` 且含当前时次 → `data-precip-url` 为 spec 形状；mock 为 `PRECIP_CYCLE_NOT_MIRRORED` → `data-precip-hidden-reason="cycle_not_mirrored"` 且提示 C 出现在 DOM（surface 已 settle 后断言，钉决策 9 的链位置）。
+- Non-goals：流域详情的 precip index 取数与挂载、流域详情下的降水开关/图例（blocked by #2109）；图层面板 base 分组（未满足记录见上）；后端；`M11Controls.tsx` 死代码清理（report-only）；#2128（控制条与 attribution 在 <1334px 相交，独立单）；其它气象层（气温/风）仍不提供；node-27 浏览器 receipt 归 I15。
