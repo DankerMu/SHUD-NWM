@@ -70,10 +70,12 @@
 - 前端 `m11NationalRiverPaint`：`dimmed` 折扣改为 zoom 插值（z<6 不折扣），z3–5 线宽 stops 上调（Type 4 在 z3 ≥1.4px、z5 ≥2.2px；Type 5 在 z3 >1.5px、z5 >2.3px，严格高于现值），并给 z6 的 Type 2、z6/z7 的 Type 1 补非零 opacity——现表 z7 的 match 只列 Type 5..2、无 z6 stop，新增的这两类会被取到却画成透明。
 
 ### D8. 时间轴控制条复用 `M11Timeline`
+- **Superseded by #2014（2026-09-07）**：本节「流域详情模式共用控制条，周期来自该流域 run 列表、时次来自 run metadata（**现有逻辑**）」的括注前提在两条轴上都不成立——(i) run 周期在仓内**无任何透出面**（`BasinDataSnapshot` 无该字段，且 `fetchRunsPageByStatus` 按 URL `cycle` 过滤 run 列表），(ii) run 的时次列表虽由 `fetchLayerValidTimes('discharge', <run_id>)` 取回，但 `normalizeLayerStates` 恒消费 `metadata.valid_times`（全国合并保证其为数组）而将其丢弃（issue #2110）。更根本地，整条流域详情车道在当前构建里按构造不可达（issue #2109，未裁决）。**落地范围裁定（用户拍板）**：#2014 只交付本节的**全国半边**（起报时次 `<select>` + GFS/IFS 分段 + `M11Timeline` 复用 + `+{lead}h` 刻度 + fail-closed 禁用态）；**流域详情半边 blocked by #2109**，待裁决后按裁决方向重新切片（裁「删除」则本节该半边与相关 spec scenario 一并消失）。口径以 `tasks.md` 的 `### #2014` 节为准（**共享 change 纪律：原文保留不原地改写**）。
 - 底部居中玻璃条：起报时次 `<select>` + GFS/IFS 分段 + `M11Timeline`。`pickCurrentValidTime` 默认改为首项（lead=0）。全国尺度 URL `source=best` 解析为 `gfs`。流域详情模式共用控制条，周期来自该流域 run 列表、时次来自 run metadata（现有逻辑）。
 - 浮层位移：图例/返回按钮 `bottom-4`→`bottom-24`，notices `bottom-20`→`bottom-40`。
 
 ### D9. 预热有界
+- **Superseded by #2013 的 round-2/round-3 纠正动作（2026-09-07）**：包络不再是「该周期的全部 valid_times」，而是收窄到锚在**该源已发布首个时次**的 `PREWARM_LEAD_HOURS` 窗口（3 h 网格上每源 5 个时次，全轮 183 条请求），以 spec `precipitation-raster-overlay` 的 “Prewarm envelope is per-source, cycle-aware, and bounded” Requirement 与 `tasks.md` 的设计点 🔟 为准（**共享 change 纪律：原文保留不原地改写**）。本节以下为 #2034 时的原文。
 - `node27_mvt_prewarm.py`：**逐源**按 `cycles?source=` 取该源自己的最新周期（两源最新周期可能不同），对该周期的全部 valid_times 预热 z3–4 流量瓦片 + 降水 PNG；河网 z3–5 不变。某源 cycles 为空则该源零请求，不借用另一源周期、不按墙钟伪造。总请求数与耗时写 receipt。
 - 现有 `tests/test_node27_mvt_prewarm.py` 钉住旧无源 URL 与单 valid_time 签名，随本改动一起更新。
 

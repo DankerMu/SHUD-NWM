@@ -283,6 +283,25 @@ def test_node27_retention_service_row_selects_exactly_the_retention_suite() -> N
     ]
 
 
+def test_node27_autopipe_timer_row_selects_both_of_its_readers() -> None:
+    """#2013 — a timer-only diff used to select NOTHING at all.
+
+    `infra/**` is not a backend python path and `_is_backend_shell_path` is
+    scoped to `scripts/**.sh`, so without an explicit row this path matched no
+    rule and armed no fallback: CI degraded to a zero-assertion `--collect-only`
+    smoke. Both targets really read the file — the preflight suite asserts the
+    `OnUnitActiveSec=10min` directive is present, and the prewarm suite parses
+    the same directive into seconds and pins prewarm's budget against it — so
+    exact equality, not a subset: dropping either reader must red here.
+    """
+    assert Path("infra/systemd/nhms-node27-autopipe.timer").exists()
+
+    assert select_tests(["infra/systemd/nhms-node27-autopipe.timer"], repo_root=Path(".")) == [
+        "tests/test_node27_autopipeline_preflight.py",
+        "tests/test_node27_mvt_prewarm.py",
+    ]
+
+
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
     consumers = (
         "tests/test_node27_cold_tablespace_identity.py",
@@ -850,6 +869,12 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         # apps/api/routes/hydro_display.py.
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
+        # #2013: guard-derived entry, synced from the selector's own output per
+        # the procedure above — the prewarm envelope assertion imports
+        # NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS from services.tiles.mvt at
+        # file level, so the closure guard puts it on this rule as a DIRECT
+        # importer.
+        "tests/test_node27_mvt_prewarm.py",
         "tests/test_node27_timeseries_compression_benchmark.py",
         "tests/test_node27_timeseries_compression_live_evidence.py",
         "tests/test_openapi_31_contract.py",
@@ -1063,11 +1088,21 @@ def test_select_tests_maps_autopipe_cron_wrapper_without_core_smoke_fallback() -
     # explicit rule a wrapper-only PR selected nothing at all and CI degraded to
     # --collect-only, even though the wrapper is covered by real assertions in
     # tests/test_node27_autopipeline_preflight.py.
+    #
+    # #2013 widened the row to both real readers. The preflight suite asserts the
+    # wrapper's structure; only tests/test_node27_mvt_prewarm.py parses the
+    # `${AUTOPIPE_MVT_PREWARM_*:-…}` fallbacks and compares them against the
+    # module defaults, so a wrapper-only PR that flips one of those defaults is
+    # caught by the second target alone. Exact equality, not `in`: dropping
+    # either target must red here.
     assert Path("scripts/node27_autopipe_cron.sh").exists()
 
     selected = select_tests(["scripts/node27_autopipe_cron.sh"], repo_root=Path("."))
 
-    assert selected == ["tests/test_node27_autopipeline_preflight.py"]
+    assert selected == [
+        "tests/test_node27_autopipeline_preflight.py",
+        "tests/test_node27_mvt_prewarm.py",
+    ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -8976,6 +9011,23 @@ def _database_filter_block(workflow: str) -> str:
 
 
 _BACKEND_FILTER_KEY = "\n            backend:\n"
+
+
+def _frontend_filter_block(workflow: str) -> str:
+    """ci.yml's `frontend:` paths-filter block, from its key to the next key."""
+    key = "\n            frontend:\n"
+    start = workflow.find(key)
+    assert start != -1, f"{CI_WORKFLOW_PATH} no longer defines a `frontend:` paths-filter block"
+    body_start = start + len(key)
+    following = _NEXT_FILTER_KEY_LINE.search(workflow, body_start)
+    return workflow[body_start : following.start() if following else len(workflow)]
+
+
+def test_c4_schema_only_change_runs_frontend_ajv_negative_suite() -> None:
+    frontend = _frontend_filter_block(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+    assert "'schemas/frontend_c4_live_evidence.schema.json'" in frontend
+    assert "'schemas/examples/frontend_c4_live_evidence*.json'" in frontend
+    assert "'schemas/**'" not in frontend
 
 
 def _backend_filter_block(workflow: str) -> str:

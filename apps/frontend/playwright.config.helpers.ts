@@ -37,7 +37,9 @@ export interface LiveDisplayPageEvidence {
 
 const liveDisplayRequiredEnv = ['PLAYWRIGHT_LIVE_BASE_URL', 'PLAYWRIGHT_LIVE_API_BASE_URL'] as const
 export const liveDisplaySpecPattern = /(^|[/\\])live-display\.spec\.ts$/
+export const c4LiveSpecPattern = /(^|[/\\])live-c4-display\.spec\.ts$/
 const broadApiRouteMockPattern = /page\s*\.\s*route\s*\(\s*(['"`])\*\*\/api\/v1\/\*\*\1/g
+const anyRouteMockPattern = /(?:page|context)\s*(?:\.\s*(?:route|routeFromHAR)\s*\(|\[\s*['\"](?:route|routeFromHAR)['\"]\s*\]\s*\()/g
 const liveDisplayRuntimeConfigMaxBytes = 4096
 const generatedDirNames = new Set(['node_modules', 'dist', 'coverage', 'playwright-report', 'test-results'])
 const monitoringReadApiPaths = new Set([
@@ -129,10 +131,48 @@ export function isLiveDisplaySpecFile(file: string) {
   return liveDisplaySpecPattern.test(file)
 }
 
+export function isC4LiveSpecFile(file: string) {
+  return c4LiveSpecPattern.test(file)
+}
+
+export function findC4LiveSpecFiles(testDir: string | URL) {
+  const root = path.resolve(pathFromInput(testDir))
+  if (!existsSync(root)) return []
+
+  const files: string[] = []
+  const visit = (entry: string) => {
+    const resolved = path.resolve(entry)
+    const relative = path.relative(root, resolved)
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return
+
+    const stat = lstatSync(resolved)
+    if (stat.isSymbolicLink()) return
+    if (stat.isDirectory()) {
+      if (generatedDirNames.has(path.basename(resolved))) return
+      for (const child of readdirSync(resolved)) visit(path.join(resolved, child))
+      return
+    }
+    if (stat.isFile() && isC4LiveSpecFile(resolved)) files.push(resolved)
+  }
+
+  visit(root)
+  return files.sort()
+}
+
 export function findBroadApiRouteMocks(files: string[]) {
   return files.flatMap((file) => {
     const content = readFileSync(file, 'utf8')
     return [...content.matchAll(broadApiRouteMockPattern)].map((match) => ({
+      file,
+      line: content.slice(0, match.index).split('\n').length,
+    }))
+  })
+}
+
+export function findAnyRouteMocks(files: string[]) {
+  return files.flatMap((file) => {
+    const content = readFileSync(file, 'utf8')
+    return [...content.matchAll(anyRouteMockPattern)].map((match) => ({
       file,
       line: content.slice(0, match.index).split('\n').length,
     }))
@@ -164,6 +204,23 @@ export function assertRiverClickLiveDisplayContract(testDir: string | URL) {
   return assertLiveDisplaySpecsDoNotMockApis(testDir)
 }
 
+/**
+ * Direct static check only: detects literal page/context route and routeFromHAR
+ * calls (including bracket notation), not imported helpers or aliases.
+ */
+export function assertC4LiveSpecsDoNotMockApis(testDir: string | URL) {
+  const files = findC4LiveSpecFiles(testDir)
+  assertNoBroadApiRouteMocks(files, 'live C4 display')
+  const anyRoute = findAnyRouteMocks(files)
+  if (anyRoute.length > 0) {
+    const locations = anyRoute.map((violation) => `${violation.file}:${violation.line}`).join(', ')
+    throw new Error(
+      `live C4 display Playwright specs cannot register direct page/context route or routeFromHAR APIs: ${locations}`,
+    )
+  }
+  return files
+}
+
 export function unwrapApiData(value: unknown) {
   if (value && typeof value === 'object' && 'data' in value) {
     return (value as { data: unknown }).data
@@ -174,8 +231,7 @@ export function unwrapApiData(value: unknown) {
 export function isDisplayReadonlyRuntimeConfig(value: unknown) {
   const runtimeConfig = unwrapApiData(value) as LiveDisplayRuntimeConfig | null
   if (!runtimeConfig || typeof runtimeConfig !== 'object') return false
-  if (runtimeConfig.service_role !== 'display_readonly') return false
-  return runtimeConfig.display_readonly === undefined || runtimeConfig.display_readonly === true
+  return runtimeConfig.service_role === 'display_readonly' && runtimeConfig.display_readonly === true
 }
 
 function runtimeConfigParseFailure(url: string, status: number, parseError: string): LiveDisplayBrowserResponse {

@@ -23,6 +23,7 @@ import {
   type M11StationFeatureCollection,
 } from '@/components/map/M11MapLibreSurface'
 import { cn } from '@/lib/cn'
+import { toSecondsPrecisionInstant } from '@/lib/m11/instants'
 import {
   getM11LayerLegend,
   isM11ActiveCycleValidTimesUnresolved,
@@ -209,6 +210,12 @@ export function SourceScenarioControls({ state, sourceSelection, onQueryChange }
   )
 }
 
+/**
+ * 图层目录尚未落地（`/api/v1/layers` 还没回、`layers` 里没有该图层）时的诚实禁用文案。
+ * 单一来源：`LayerGroupControls` 与底部控制条（#2014）共用，不允许两处各写一份字面量。
+ */
+const layerCatalogPendingDisabledReason = '等待 /api/v1/layers 图层注册状态'
+
 export function LayerGroupControls({ state, layers = [], onQueryChange }: SharedControlProps) {
   const layerById = useMemo(() => new Map(layers.map((layer) => [String(layer.layerId), layer])), [layers])
 
@@ -219,7 +226,7 @@ export function LayerGroupControls({ state, layers = [], onQueryChange }: Shared
         {hydrologyLayers.map((item) => {
           const layer = layerById.get(item.value)
           const selected = state.layer === item.value
-          const unavailableReason = layer?.disabledReason ?? (!layer ? '等待 /api/v1/layers 图层注册状态' : null)
+          const unavailableReason = layer?.disabledReason ?? (!layer ? layerCatalogPendingDisabledReason : null)
           const available = Boolean(layer?.available)
           const hasLayerMetadata = Boolean(layer)
           return (
@@ -316,20 +323,42 @@ export function LayerLegendPanel({ layers = [] }: SharedControlProps) {
   )
 }
 
+/**
+ * `M11Timeline` 的默认外壳类名（网格单元样式）。缺省时逐字保持 M26 以来的字符串：
+ * 底部控制条（#2014）传入自己的玻璃条类名，其它调用点（今天没有）DOM 不变。
+ */
+const defaultM11TimelineClassName =
+  'flex min-h-16 items-center gap-3 border-t border-neutral-300 bg-white px-4 text-sm xl:col-span-3'
+
 export function M11Timeline({
   state,
   layers = [],
   sourceSelection,
   derivedTimes,
+  className,
+  cycle,
   onQueryChange,
-}: SharedControlProps & { derivedTimes?: M11TimelineDerivedTimes | null }) {
+}: SharedControlProps & {
+  derivedTimes?: M11TimelineDerivedTimes | null
+  className?: string
+  cycle?: string | null
+}) {
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
   const model = useMemo(
-    () => buildM11TimelineViewModel(state, layers, derivedTimes ?? null, sourceSelection ?? null),
-    [derivedTimes, layers, sourceSelection, state],
+    () => buildM11TimelineViewModel(state, layers, derivedTimes ?? null, sourceSelection ?? null, cycle ?? null),
+    [cycle, derivedTimes, layers, sourceSelection, state],
+  )
+  // 刻度行只在调用方显式传入有效 cycle 时渲染：不传 cycle 的默认路径 DOM 与今天逐字相同。
+  const ticks = useMemo(
+    () => (cycle ? buildM11TimelineTicks(model.validTimes, cycle, model.currentIndex) : []),
+    [cycle, model.currentIndex, model.validTimes],
   )
 
+  // 纯自派生（finding D3）：全国路径上调用方传下来的聚合位与这条恒等——`M11Layer` 是单成员
+  // 类型，`buildLayerStates` 既不传 `validTimesByLayerId` 也不传 `derivedValidTimes`，
+  // `normalizeLayerStates` 里唯一能造出「validTimes 非空且 disabledReason 非空」的 `!apiLayer`
+  // 分支在全国不可达，控制条又恒传 `onQueryChange`。加一个恒等的可选形参 = 不可证伪的契约。
   const disabled = model.validTimes.length === 0 || !onQueryChange
   const atFirst = model.currentIndex <= 0
   const atLast = model.currentIndex < 0 || model.currentIndex >= model.validTimes.length - 1
@@ -359,7 +388,7 @@ export function M11Timeline({
 
   return (
     <section
-      className="flex min-h-16 items-center gap-3 border-t border-neutral-300 bg-white px-4 text-sm xl:col-span-3"
+      className={className ?? defaultM11TimelineClassName}
       aria-label="M11 时间轴"
       data-testid="m11-timeline"
       data-valid-time-source={model.sourceKind}
@@ -398,8 +427,10 @@ export function M11Timeline({
           <span className="sr-only">播放速度</span>
           <select
             aria-label="播放速度"
-            className="h-8 rounded border border-neutral-300 bg-white px-1 text-xs"
+            className="h-8 rounded border border-neutral-300 bg-white px-1 text-xs disabled:cursor-not-allowed disabled:text-neutral-500"
             value={speed}
+            // 倍速是播放控件：fail-closed（列表为空 / 无 onQueryChange）时与三个播放按钮一同禁用。
+            disabled={disabled}
             onChange={(event) => setSpeed(Number(event.target.value))}
           >
             <option value={1}>1x</option>
@@ -409,9 +440,20 @@ export function M11Timeline({
         </label>
       </div>
 
-      <div className="min-w-0 flex-1">
+      {/*
+        `data-testid` 是右侧列的**行数预算** oracle（#2014 决策 10）：jsdom 量不了像素，能挡住
+        「再加一行让流高从 64px 回到 80px」的只有直接钉 `children.length === 3`。不要改用
+        `div.min-w-0.flex-1` 之类的类名选择器 —— 类名会漂，testid 不会。
+      */}
+      <div className="min-w-0 flex-1" data-testid="m11-timeline-rows">
         <div className="flex items-center justify-between gap-3">
           <span className="truncate font-medium text-neutral-900">{model.currentValidTime ?? '当前图层没有有效时间'}</span>
+          {/*
+            刻度行取代底行时（传 cycle），`sourceLabel` 上移并入本行 —— spec
+            map-layer-timeline-controls「Timeline renders design metadata」要求 MUST show the
+            current data-source label，不能随底行一起丢。本行仍由 `text-sm` 行高定为 20px。
+          */}
+          {cycle ? <span className="truncate text-xs text-neutral-500">{model.sourceLabel}</span> : null}
           <span className="shrink-0 text-xs text-neutral-700">{model.nativeResolutionLabel}</span>
         </div>
         <div className="relative mt-2">
@@ -436,10 +478,38 @@ export function M11Timeline({
             onChange={(event) => onQueryChange?.({ validTime: model.validTimes[Number(event.target.value)] })}
           />
         </div>
-        <div className="mt-1 flex items-center justify-between gap-3 text-xs text-neutral-500">
-          <span className="truncate">{model.sourceLabel}</span>
-          <span>Analysis / Forecast</span>
-        </div>
+        {ticks.length > 0 ? (
+          // `h-4`：标签是 `pt-1` + 12px 文字（16px），`h-3` 装不下、自身要溢出 4px。
+          <div className="relative mt-1 h-4" data-testid="m11-timeline-ticks">
+            {ticks.map((tick) => (
+              <span
+                key={tick.validTime}
+                data-testid="m11-timeline-tick"
+                data-lead={tick.lead}
+                title={`${tick.leadLabel} ${tick.validTime}`}
+                className="absolute top-0 block -translate-x-1/2 whitespace-nowrap text-[10px] leading-3 text-neutral-500 before:absolute before:left-1/2 before:top-0 before:h-1 before:w-px before:bg-neutral-300 before:content-['']"
+                style={{ left: `${tick.percent}%` }}
+              >
+                {tick.label ? <span className="block pt-1">{tick.label}</span> : null}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {/*
+          底行与刻度行是**二选一**，不是叠加：首版把刻度行（当时是 `h-3`）追加在底行之上，右侧列
+          流高 = 20（当前时次行）+ (8+16)（滑块）+ (4+12)（刻度行）+ (4+16)（底行）= 80px，而控制条
+          是固定 `h-16`（64px，`m11VisualTokens.timelineHeight`）+ `items-center` 且无 overflow 控制，
+          上下各溢出 8px，底行会压进 MapLibre 版权归属带。改 `min-h-16` 不可接受（token 是高度不是
+          下限，会让 AC6 的耦合断言不再校验「条真的是 64px」；且 #2015 的 bottom-24 / bottom-40 是
+          按控制条占 16–80px 推出来的）。二选一后流高回到 20 + 24 + 20 = 64px 整。
+          缺省（不传 cycle）时刻度行不渲染、底行照旧，默认路径 DOM 逐字不变。
+        */}
+        {cycle ? null : (
+          <div className="mt-1 flex items-center justify-between gap-3 text-xs text-neutral-500">
+            <span className="truncate">{model.sourceLabel}</span>
+            <span>Analysis / Forecast</span>
+          </div>
+        )}
       </div>
     </section>
   )
@@ -519,11 +589,20 @@ export function resolveM11NationalValidTimeCorrection(
   return resolveM11ValidTimeCorrection(state, layers, derivedTimes)
 }
 
+/**
+ * 时间轴视图模型。
+ *
+ * `effectiveCycle`（第 5 个可选形参，#2014）：调用方显式传入的有效 cycle，用于 lead 与
+ * Analysis/Forecast 分界。全国默认态 `defaultM11QueryState.cycle === null` 且
+ * `sourceSelection` 可能为 null，不显式传就既没有 lead 也没有分界。不传时表达式退化为
+ * `sourceSelection?.cycleTime ?? state.cycle`，既有调用点行为逐字不变。
+ */
 export function buildM11TimelineViewModel(
   state: Pick<M11QueryState, 'layer' | 'validTime' | 'cycle'>,
   layers: LayerState[],
   derivedTimes: M11TimelineDerivedTimes | null,
   sourceSelection: SourceScenarioSelectionState | null,
+  effectiveCycle?: string | null,
 ) {
   const activeLayer = layers.find((layer) => layer.layerId === state.layer)
   const usesLayer = Boolean(activeLayer)
@@ -536,7 +615,7 @@ export function buildM11TimelineViewModel(
         ? activeLayer?.currentValidTime ?? validTimes[validTimes.length - 1] ?? null
         : validTimes[validTimes.length - 1] ?? null
   const currentIndex = currentValidTime ? validTimes.indexOf(currentValidTime) : -1
-  const cycle = normalizeIso(sourceSelection?.cycleTime ?? state.cycle)
+  const cycle = normalizeIso(effectiveCycle ?? sourceSelection?.cycleTime ?? state.cycle)
   const dividerIndex = cycle ? validTimes.findIndex((validTime) => Date.parse(validTime) > Date.parse(cycle)) : -1
   const dividerPercent =
     dividerIndex > 0 && validTimes.length > 1 ? Math.round((dividerIndex / (validTimes.length - 1)) * 100) : null
@@ -559,6 +638,52 @@ export function buildM11TimelineViewModel(
     sourceKind,
     sourceLabel,
   }
+}
+
+interface M11TimelineTick {
+  validTime: string
+  /** lead 小时（`data-lead`）：整数即整数拼写，非整点保留一位小数，不四舍五入成假整点。 */
+  lead: string
+  /** 带符号的 lead 文案（`+168h` / `-3h`），用于 `title` 与稀疏可见标签。 */
+  leadLabel: string
+  /** 沿滑块轨道的位置百分比，与 `dividerPercent` 同一几何。 */
+  percent: number
+  /** 可见文字标签：只在 24h 倍数与当前刻度出现（57 项全标会糊成一片）。 */
+  label: string | null
+}
+
+/**
+ * `+{lead}h` 刻度（#2014 决策 10/12）。lead = `(validTime − 有效 cycle) / 3600e3`，
+ * 两端先过 `toSecondsPrecisionInstant` 再相减（毫秒形与秒精度形混用会算出亚秒残差）。
+ * 有效 cycle 缺失或不可解析 → 空数组（不渲染刻度行），绝不猜 3h 步长。
+ */
+function buildM11TimelineTicks(
+  validTimes: string[],
+  effectiveCycle: string | null | undefined,
+  currentIndex: number,
+): M11TimelineTick[] {
+  const cycleInstant = toSecondsPrecisionInstant(effectiveCycle)
+  const cycleMilliseconds = cycleInstant ? Date.parse(cycleInstant) : Number.NaN
+  if (!Number.isFinite(cycleMilliseconds) || validTimes.length === 0) return []
+  const span = Math.max(validTimes.length - 1, 1)
+
+  return validTimes.flatMap((validTime, index) => {
+    const validInstant = toSecondsPrecisionInstant(validTime)
+    const validMilliseconds = validInstant ? Date.parse(validInstant) : Number.NaN
+    if (!Number.isFinite(validMilliseconds)) return []
+    const leadHours = (validMilliseconds - cycleMilliseconds) / 3_600_000
+    const lead = Number.isInteger(leadHours) ? String(leadHours) : leadHours.toFixed(1)
+    const leadLabel = `${leadHours >= 0 ? '+' : ''}${lead}h`
+    return [
+      {
+        validTime,
+        lead,
+        leadLabel,
+        percent: Math.round((index / span) * 10_000) / 100,
+        label: leadHours % 24 === 0 || index === currentIndex ? leadLabel : null,
+      },
+    ]
+  })
 }
 
 function validTimeSourceLabel(source: string) {
@@ -587,4 +712,9 @@ function formatDuration(milliseconds: number) {
   return `${minutes}m`
 }
 
-export { fallbackLegends as m11FallbackLegends, basemapOptions as m11BasemapOptions }
+export {
+  fallbackLegends as m11FallbackLegends,
+  basemapOptions as m11BasemapOptions,
+  sourceOptions as m11SourceOptions,
+  layerCatalogPendingDisabledReason as m11LayerCatalogPendingDisabledReason,
+}

@@ -15,7 +15,7 @@ export default defineConfig({
   // m15-visual-conformance 是 M15 里程碑的多页视觉/几何证据门（NavBar + 各独立全页布局），
   // 其多页前提在 M26 单图下已不成立；它有独立 runner（pnpm test:e2e:m15-visual）且在 CI 已暂停，
   // 不属于 M26 单图 mocked regression 合同，故与 preview-deeplink/live-display 一样从本门排除。
-  testIgnore: [/preview-deeplink\.spec\.ts/, /live-display\.spec\.ts/, /m15-visual-conformance\.spec\.ts/],
+  testIgnore: [/preview-deeplink\.spec\.ts/, /live-display\.spec\.ts/, /live-c4-display\.spec\.ts/, /m15-visual-conformance\.spec\.ts/],
   metadata: {
     evidenceLane: 'mocked-regression',
     broadApiMocks: 'allowed-in-mocked-regression-only',
