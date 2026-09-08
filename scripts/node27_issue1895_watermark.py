@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from packages.common.display_watermark import DisplayWatermarkError
-from packages.common.node27_issue1895_dsn import resolve_readonly_dsn
+from packages.common.node27_issue1895_dsn import read_display_env_text, resolve_readonly_dsn
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from packages.common.node27_issue1895_watermark import observe_current_cutoff
 from packages.common.redaction import redact_text
@@ -31,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         display_text = None
         if args.display_env is not None:
-            display_text = args.display_env.read_text(encoding="utf-8")
+            display_text = read_display_env_text(args.display_env)
         dsn = resolve_readonly_dsn(display_env_text=display_text, environ=dict(os.environ))
         document = observe_current_cutoff(dsn=dsn, lag_seconds=args.lag_seconds)
         write_bytes_no_follow_exclusive(

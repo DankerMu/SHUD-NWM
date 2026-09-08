@@ -7,8 +7,18 @@ import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from packages.common.compressed_chunk_cold_target import (
+    CONTAINER_EXEC_ID_MAX,
+    CONTAINER_EXEC_ID_MIN,
+    container_exec_id_from_decimal,
+)
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from packages.common.safe_fs import atomic_write_bytes_no_follow
+
+UID_KEYS = {
+    "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID",
+    "NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID",
+}
 
 ASSIGNMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 DECIMAL_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
@@ -129,7 +139,22 @@ def rewrite_cold_env_text(
         if key == LAG_SECONDS_KEY:
             validate_canonical_positive_decimal(value, label=key)
             continue
-        if DECIMAL_RE.fullmatch(value) is None:
+        if key in UID_KEYS:
+            if DECIMAL_RE.fullmatch(value) is None:
+                raise Issue1895ReadinessError(
+                    f"{key} is not a canonical decimal",
+                    code="ENV_VALUE_INVALID",
+                    stage="env",
+                )
+            parsed = container_exec_id_from_decimal(value)
+            if parsed is None or parsed < CONTAINER_EXEC_ID_MIN or parsed > CONTAINER_EXEC_ID_MAX:
+                raise Issue1895ReadinessError(
+                    f"{key} is not a canonical decimal",
+                    code="ENV_VALUE_INVALID",
+                    stage="env",
+                )
+            continue
+        if POSITIVE_DECIMAL_RE.fullmatch(value) is None:
             raise Issue1895ReadinessError(
                 f"{key} is not a canonical decimal",
                 code="ENV_VALUE_INVALID",

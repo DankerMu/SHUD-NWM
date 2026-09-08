@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -20,8 +20,8 @@ from packages.common.node27_issue1895_watermark import (
 from scripts import node27_issue1895_group_reconcile as group_reconcile_cli
 from scripts import node27_issue1895_systemd_facts as systemd_facts_cli
 from tests.test_issue1895_readiness_c14 import _group
-from tests.test_issue1895_readiness_storage import KEYS, SHA, _durable
-from tests.test_issue1895_runbook_contract import _gate, _gate_lines
+from tests.test_issue1895_readiness_storage import KEYS, SHA, _durable, _substitute_identity, _write_private_json
+from tests.test_issue1895_runbook_contract import _gate, _gate_bash, _gate_lines
 
 
 def _canonical_systemd_facts() -> tuple[dict[str, str], dict[str, str]]:
@@ -87,10 +87,13 @@ def test_systemd_facts_publication_is_exclusive_private_and_preserves_existing_b
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    timer_show = tmp_path / "timer-show.txt"
-    service_show = tmp_path / "service-show.txt"
-    output = tmp_path / "systemd-facts.json"
-    target = tmp_path / "symlink-target.json"
+    private = tmp_path / "private"
+    private.mkdir()
+    os.chmod(private, 0o700)
+    timer_show = private / "timer-show.txt"
+    service_show = private / "service-show.txt"
+    output = private / "systemd-facts.json"
+    target = private / "symlink-target.json"
     timer_show.write_text(
         "\n".join(
             (
@@ -120,6 +123,8 @@ def test_systemd_facts_publication_is_exclusive_private_and_preserves_existing_b
         ),
         encoding="utf-8",
     )
+    os.chmod(timer_show, 0o600)
+    os.chmod(service_show, 0o600)
     argv = ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
 
     assert systemd_facts_cli.main(argv) == 0
@@ -155,6 +160,78 @@ def test_systemd_facts_closes_unreadable_inputs_without_path_or_traceback(
     assert captured.err.strip() == "SYSTEMD_FACTS_UNAVAILABLE"
     assert str(secret_path) not in captured.err
     assert "Traceback" not in captured.err
+
+
+def _write_systemd_show(path: Path, *, service: bool) -> Path:
+    if service:
+        text = "\n".join(
+            (
+                "Id=nhms-node27-timeseries-compression.service",
+                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.service",
+                "ExecStart={ path=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh ; "
+                "argv[]=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce }",
+                "ExecStart={ path=/home/nwm/NWM/scripts/node27_cold_residency_once.sh ; "
+                "argv[]=/home/nwm/NWM/scripts/node27_cold_residency_once.sh --enforce }",
+                "InvocationID=abc123",
+                "ExecMainStartTimestamp=Fri 2026-09-04 04:25:00 UTC",
+                "ExecMainExitTimestamp=Fri 2026-09-04 04:26:00 UTC",
+                "Result=success",
+                "",
+            )
+        )
+    else:
+        text = "\n".join(
+            (
+                "Id=nhms-node27-timeseries-compression.timer",
+                "Unit=nhms-node27-timeseries-compression.service",
+                "FragmentPath=/home/nwm/NWM/infra/systemd/nhms-node27-timeseries-compression.timer",
+                "",
+            )
+        )
+    path.write_text(text, encoding="utf-8")
+    os.chmod(path, 0o600)
+    return path
+
+
+def test_systemd_facts_refuses_symlink_and_parent_0755_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    private = tmp_path / "private"
+    private.mkdir()
+    os.chmod(private, 0o700)
+    timer_show = _write_systemd_show(private / "timer-show.txt", service=False)
+    service_show = _write_systemd_show(private / "service-show.txt", service=True)
+    output = private / "systemd-facts.json"
+    called = {"n": 0}
+
+    def refuse_assert(*_args: object, **_kwargs: object) -> dict[str, str]:
+        called["n"] += 1
+        raise AssertionError("assert_systemd_invocation_facts must not run on unsafe inputs")
+
+    monkeypatch.setattr(systemd_facts_cli, "assert_systemd_invocation_facts", refuse_assert)
+    linked = tmp_path / "timer-link.txt"
+    linked.symlink_to(timer_show)
+    rc = systemd_facts_cli.main(
+        ["--timer-show", str(linked), "--service-show", str(service_show), "--output", str(output)]
+    )
+    assert rc == 1
+    assert called["n"] == 0
+    assert not output.exists()
+    captured = capsys.readouterr()
+    assert "SYSTEMD_FACTS_UNAVAILABLE" in captured.err or "READINESS_INPUT" in captured.err
+    os.chmod(private, 0o755)
+    rc = systemd_facts_cli.main(
+        ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
+    )
+    assert rc == 1
+    assert called["n"] == 0
+    assert not output.exists()
+    os.chmod(private, 0o700)
+    monkeypatch.setattr(systemd_facts_cli, "assert_systemd_invocation_facts", assert_systemd_invocation_facts)
+    assert systemd_facts_cli.main(
+        ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
+    ) == 0
+    assert output.exists()
 
 
 def test_independent_w8_and_systemd_facts_refuse_self_bind() -> None:
@@ -261,15 +338,12 @@ def _group_reconcile_documents(*, receipt: dict) -> tuple[dict, dict, dict]:
 
 def _write_group_reconcile_documents(tmp_path: Path, *, receipt: dict) -> tuple[Path, Path, Path]:
     baseline, observed, receipt_document = _group_reconcile_documents(receipt=receipt)
-    baseline_path = tmp_path / "baseline.json"
-    observed_path = tmp_path / "observed.json"
-    receipt_path = tmp_path / "receipt.json"
-    for path, document in (
-        (baseline_path, baseline),
-        (observed_path, observed),
-        (receipt_path, receipt_document),
-    ):
-        path.write_text(json.dumps(document), encoding="utf-8")
+    private = tmp_path / "private"
+    private.mkdir(parents=True, exist_ok=True)
+    private.chmod(0o700)
+    baseline_path = _write_private_json(private / "baseline.json", baseline)
+    observed_path = _write_private_json(private / "observed.json", observed)
+    receipt_path = _write_private_json(private / "receipt.json", receipt_document)
     return baseline_path, observed_path, receipt_path
 
 
@@ -321,6 +395,56 @@ def test_group_reconcile_cli_accepts_truthful_noop_with_empty_cli_sets(tmp_path:
     )
 
     assert group_reconcile_cli.main(_group_reconcile_argv(baseline_path, observed_path, receipt_path)) == 0
+
+
+@pytest.mark.parametrize("kind", ("symlink", "mode", "hardlink"))
+@pytest.mark.parametrize("which", ("baseline", "observed", "receipt"))
+def test_g8_group_reconcile_cli_refuses_unsafe_baseline_observed_or_receipt_identity(
+    tmp_path: Path, kind: str, which: str
+) -> None:
+    baseline_path, observed_path, receipt_path = _write_group_reconcile_documents(
+        tmp_path,
+        receipt=_natural_group_receipt(outcome="no_op", selected=[], deferred=[]),
+    )
+    target = {"baseline": baseline_path, "observed": observed_path, "receipt": receipt_path}[which]
+    _substitute_identity(target, kind)
+    assert group_reconcile_cli.main(_group_reconcile_argv(baseline_path, observed_path, receipt_path)) == 1
+
+
+def test_g8_group_reconcile_cli_refuses_parent_mode_0755(tmp_path: Path) -> None:
+    baseline_path, observed_path, receipt_path = _write_group_reconcile_documents(
+        tmp_path,
+        receipt=_natural_group_receipt(outcome="no_op", selected=[], deferred=[]),
+    )
+    os.chmod(baseline_path.parent, 0o755)
+    assert group_reconcile_cli.main(_group_reconcile_argv(baseline_path, observed_path, receipt_path)) == 1
+
+
+def test_g8_owner_inputs_use_held_reader_before_parameter_derivation() -> None:
+    fences = [body for _opening, body in _gate_bash("G8")]
+    natural = next(
+        body
+        for body in fences
+        if "NATURAL_RECEIPT" in body and "assert_natural_receipt_identity" in body and "W8_PATH" in body
+    )
+    assert "json.load(open" not in natural
+    assert "read_held_private_json" in natural
+    assert natural.index("read_held_private_json") < natural.index("assert_natural_receipt_identity")
+
+    derive = next(body for body in fences if "newly_terminal_keys" in body and "group_reconcile.py" in body)
+    assert "json.load(open" not in derive
+    assert "read_held_private_json" in derive
+    newly_cmd = derive[derive.index("NEWLY=") : derive.index("REMAINING=")]
+    remaining_cmd = derive[derive.index("REMAINING=") : derive.index("group_reconcile.py")]
+    assert "read_held_private_json" in newly_cmd
+    assert "read_held_private_json" in remaining_cmd
+    cutoff_cmd = derive[derive.index("--expected-cutoff") : derive.index("--expected-watermark")]
+    watermark_cmd = derive[derive.index("--expected-watermark") : derive.index("--invoked-unit")]
+    assert "read_held_private_json" in cutoff_cmd
+    assert "read_held_private_json" in watermark_cmd
+    assert derive.index("NEWLY=") < derive.index("group_reconcile.py")
+    assert derive.index("REMAINING=") < derive.index("group_reconcile.py")
+    assert "while IFS= read -r GROUP" not in derive
 
 
 def test_group_reconcile_cli_accepts_migrated_newline_sets_and_deferred_suffix(tmp_path: Path) -> None:

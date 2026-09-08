@@ -106,7 +106,68 @@ The single warning was the same local ecCodes 2.41.0 recommendation. The slowest
 reported readiness case was the shipping C4-builder/C3 acceptance at 12.97
 seconds; no test failed.
 
+## Round 1 verified finding closure
+
+PR #2144 round 1 reviewed `b04f4001e1f26d2abb50c560a27c42561edd389f`
+with four high-risk seats. Eight raw P1 candidates deduplicated to seven. Four
+independent verifier batches returned all seven as `CONFIRMED / FIX_NOW`:
+
+- C1-C3 wrong/invalid SHA and out-of-bracket failure proof.
+- C4 FAIL/BLOCKED rejection before C3 publication.
+- C1-C3 example-only selector routing to the assertion-bearing C3 partition.
+- Exclusive no-clobber DSN publication plus held no-follow `display.env` reads.
+- Held private current-run reads across G1/G3/G4/G5/G6/G7/G8 authorizers.
+- G1 SHA256 digest validation separate from canonical decimal capacity fields.
+- G4 positive reserve/per-tick and bounded numeric UID/GID validation.
+
+The first implementation pass left G6 group enumeration and G8 expected-value
+derivation on pathname reads. The orchestrator rejected the claim that a later
+safe binder could close a pre-mutation input; the same implementer added held
+reads before preview, group selection and parameter derivation. Subsequent
+surface scans found and closed sibling pathname reads in W8 DSN provenance,
+performance bracket, filesystem receipt, systemd facts, valid-times baseline,
+isolated oracle, runtime projection and installer receipts.
+
+A final audit found two more issues before Phase 2:
+
+- DSN `mode=0644` was published before readback rejection. Exact `0600` is now
+  required before payload construction or publication, and invalid modes leave no
+  file.
+- G3 read held report bytes but took bracket mtime from a later pathname stat.
+  Held JSON facts now carry `st_mtime_ns`, and the bracket uses metadata from the
+  same descriptor as the content.
+
+The reusable private reader uses the existing C1-C3 `_read_held_descriptor` and
+therefore checks parent euid/mode-0700/inode before and after the bounded read,
+file mode-0600/nlink-1/no-follow identity, exact EOF and pathname/descriptor
+stability. It adds bounded JSON complexity without globally tightening C2 nested
+evidence readers. Intentional known-file env replacement, producer-local root
+evidence assembly, standalone non-G `publication_prove.py`, and the historical
+runbook section outside G0-G8 remain explicitly out of this invariant.
+
+Tests were added before production changes and observed red for each behavior.
+The implementer reported the initial G6 scope judgment, one late G4 sibling,
+minor test-fixture/order mistakes and the final G3 content/mtime split; none was
+hidden as `no deviations`.
+
+## Post-fix Phase 2
+
+- Complete round-1 focused suites, including the full selector suite: `824 passed`.
+- Shipping selector remained 72 entries and selected every modified acceptance
+  partition. Assertion run: `6594 passed, 12 skipped` in 894.44 seconds.
+- Selector-required full-tree import/syntax smoke: `18355 tests collected` in
+  8.01 seconds; this remains collection evidence only.
+- Default full unit row: `18125 passed, 14 skipped, 216 deselected, 1 warning`
+  in 2001.31 seconds. The only warning remained local ecCodes 2.41.0 below the
+  recommended 2.42.0.
+- Changed Python Ruff, compilation, line-count gate and full diff check: PASS.
+  `tests/test_issue1895_runbook_contract.py` was behavior-preservingly reduced
+  from 1019 to 982 lines; only the two pre-existing selector governance files
+  remain over 1000 lines.
+- No stash/reset/checkout/clean, remote-node access or live receipt occurred in
+  the round-1 fix pass. The pre-existing shared stash SHA remained unchanged.
+
 ## Pending at this record
 
-- Complete the formal PR review and GitHub CI gates.
+- Complete the post-fix comprehensive review, Gap Sweep and GitHub CI gates.
 - Do not access node-27 before #2137 merges.

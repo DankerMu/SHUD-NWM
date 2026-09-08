@@ -14,6 +14,7 @@ from packages.common.node27_issue1895_env import (
     rewrite_cold_env_text,
 )
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
+from scripts import node27_issue1895_env_rewrite as env_cli
 from tests.test_issue1895_runbook_contract import _gate
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -97,6 +98,105 @@ def test_rewrite_file_publishes_privately(tmp_path: Path) -> None:
     )
     assert next(line for line in text.splitlines() if line.startswith("DATABASE_URL=")) == original_url
     assert "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES=4096" in text
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    (
+        ("--cold-reserve-bytes", "0"),
+        ("--wal-reserve-bytes", "0"),
+        ("--per-tick-bound", "0"),
+        ("--container-exec-uid", "0"),
+        ("--container-exec-gid", "0"),
+        ("--container-exec-uid", "4294967295"),
+        ("--container-exec-gid", "4294967295"),
+    ),
+)
+def test_g4_owner_refuses_zero_or_out_of_range_values_before_rewrite(
+    tmp_path: Path, flag: str, value: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "node27-cold-residency.env"
+    original = EXAMPLE.read_text(encoding="utf-8")
+    path.write_text(original, encoding="utf-8")
+    argv = {
+        "--cold-reserve-bytes": "4096",
+        "--wal-reserve-bytes": "4096",
+        "--per-tick-bound": "1",
+        "--container-exec-uid": "1005",
+        "--container-exec-gid": "1005",
+    }
+    argv[flag] = value
+    rc = env_cli.main(["--path", str(path), *[item for pair in argv.items() for item in pair]])
+    assert rc == 1
+    assert "ENV_VALUE_INVALID" in capsys.readouterr().err
+    assert path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("uid", "gid"),
+    (("1", "1"), ("4294967294", "4294967294"), ("1005", "1005")),
+)
+def test_g4_owner_accepts_positive_and_bound_uid_gid(tmp_path: Path, uid: str, gid: str) -> None:
+    path = tmp_path / "node27-cold-residency.env"
+    path.write_text(EXAMPLE.read_text(encoding="utf-8"), encoding="utf-8")
+    assert env_cli.main(
+        [
+            "--path",
+            str(path),
+            "--cold-reserve-bytes",
+            "4096",
+            "--wal-reserve-bytes",
+            "4096",
+            "--per-tick-bound",
+            "1",
+            "--container-exec-uid",
+            uid,
+            "--container-exec-gid",
+            gid,
+        ]
+    ) == 0
+    text = path.read_text(encoding="utf-8")
+    assert f"NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID={uid}" in text
+    assert f"NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID={gid}" in text
+
+
+def test_g4_owner_still_rejects_leading_zero_and_empty(tmp_path: Path) -> None:
+    path = tmp_path / "node27-cold-residency.env"
+    original = EXAMPLE.read_text(encoding="utf-8")
+    path.write_text(original, encoding="utf-8")
+    assert env_cli.main(
+        [
+            "--path",
+            str(path),
+            "--cold-reserve-bytes",
+            "01",
+            "--wal-reserve-bytes",
+            "4096",
+            "--per-tick-bound",
+            "1",
+            "--container-exec-uid",
+            "1005",
+            "--container-exec-gid",
+            "1005",
+        ]
+    ) == 1
+    assert path.read_text(encoding="utf-8") == original
+    with pytest.raises(SystemExit):
+        env_cli.main(
+            [
+                "--path",
+                str(path),
+                "--cold-reserve-bytes",
+                "4096",
+                "--wal-reserve-bytes",
+                "4096",
+                "--per-tick-bound",
+                "1",
+                "--container-exec-uid",
+                "1005",
+            ]
+        )
+    assert path.read_text(encoding="utf-8") == original
 
 
 def test_g4_fence_invokes_the_checked_in_rewrite_owner() -> None:

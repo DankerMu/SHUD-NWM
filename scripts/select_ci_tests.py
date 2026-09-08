@@ -3098,15 +3098,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "schemas/examples/node27_issue1895_c1_display_runtime_receipt.example.json",
-        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
+        ISSUE1895_READINESS_C1_C2_C3_TESTS,
     ),
     PathTestRule(
         "schemas/examples/node27_issue1895_c2_readonly_boundary_receipt.example.json",
-        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
+        ISSUE1895_READINESS_C1_C2_C3_TESTS,
     ),
     PathTestRule(
         "schemas/examples/node27_issue1895_c3_current_publication_display_receipt.example.json",
-        ("tests/test_issue1895_readiness_c1_c2_c3.py",),
+        ISSUE1895_READINESS_C1_C2_C3_TESTS,
     ),
     PathTestRule(
         # #1895 task 4.0: the pre-target census CLI freezes the group/capacity

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
 from packages.common.node27_issue1895_probe import assert_report_within_command_bracket, parse_bracket_instant
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 
@@ -16,13 +16,23 @@ REQUIRE_COUNT = 6
 def _load_object(path: str | Path, *, label: str) -> dict:
     target = Path(path)
     try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        raise Issue1895ReadinessError(
-            f"{label} census is not readable JSON",
-            code="CENSUS_JSON_INVALID",
+        _raw, payload, _facts = read_held_private_json(
+            target,
+            label=f"{label} census",
             stage="census",
-        ) from None
+            unreadable_code="CENSUS_JSON_INVALID",
+            identity_code="CENSUS_JSON_INVALID",
+            toctou_code="CENSUS_JSON_INVALID",
+            json_code="CENSUS_JSON_INVALID",
+        )
+    except Issue1895ReadinessError as error:
+        if error.code.startswith("READINESS_INPUT_"):
+            raise Issue1895ReadinessError(
+                f"{label} census is not a private identity-bound JSON object",
+                code="CENSUS_JSON_INVALID",
+                stage="census",
+            ) from error
+        raise
     if not isinstance(payload, dict):
         raise Issue1895ReadinessError(
             f"{label} census is not an object",
@@ -64,7 +74,24 @@ def bind_pre_movement_census(
 
     current = _load_object(current_path, label="current")
     original = _load_object(original_path, label="original")
-    lines = [line.strip() for line in Path(bracket_path).read_text(encoding="utf-8").splitlines() if line.strip()]
+    try:
+        bracket_text = read_held_private_text(
+            Path(bracket_path),
+            label="census bracket",
+            stage="census",
+            unreadable_code="CENSUS_BRACKET_INVALID",
+            identity_code="CENSUS_BRACKET_INVALID",
+            toctou_code="CENSUS_BRACKET_INVALID",
+        )
+    except Issue1895ReadinessError as error:
+        if error.code.startswith("READINESS_INPUT_"):
+            raise Issue1895ReadinessError(
+                "pre-movement census bracket is not a private identity-bound current-run",
+                code="CENSUS_BRACKET_INVALID",
+                stage="census",
+            ) from error
+        raise
+    lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
     if len(lines) != 3 or lines[2] != "0":
         raise Issue1895ReadinessError(
             "pre-movement census bracket is not a successful current-run",

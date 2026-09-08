@@ -20,13 +20,21 @@ from packages.common.node27_issue1895_display_runtime import (
     parse_display_port,
 )
 from packages.common.node27_issue1895_http import fetch_local_expected_status
-from packages.common.node27_issue1895_private_receipt import read_private_receipt
+from packages.common.node27_issue1895_private_receipt import (
+    read_held_private_bytes,
+    read_held_private_json,
+    read_held_private_text,
+    read_private_receipt,
+)
 from packages.common.node27_issue1895_readonly_accept import accept_c2_evidence, bind_c2_receipt, validate_c2_receipt
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from services.production_closure.readonly_db_validation import AUTHORITATIVE_EVIDENCE_FILENAMES
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 40
+WRONG_SHA = "b" * 40
+INVALID_SHA = "not-a-sha"
+PAST_BRACKET = ("2020-01-01T00:00:00Z", "2020-01-01T00:00:01Z")
 REGISTRY_SCHEMA_VERSION = "nhms.scheduler.file_model_registry.v1"
 NOW = "2026-09-06T12:00:00Z"
 LATER = "2026-09-06T12:00:01Z"
@@ -228,6 +236,96 @@ def test_private_receipt_and_http_json_readers_close_deep_json_without_traceback
     with pytest.raises(Issue1895ReadinessError) as http_error:
         read_bounded_json_body(response, body_limit=10_000, stage="test")
     assert http_error.value.code == "API_BODY_INVALID"
+
+
+def test_held_private_reader_refuses_parent_mode_0755(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    _private(private)
+    target = private / "input.json"
+    target.write_text('{"ok":true}', encoding="utf-8")
+    os.chmod(target, 0o600)
+    os.chmod(private, 0o755)
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        read_held_private_bytes(target, label="private input")
+    assert refused.value.code in {"READINESS_INPUT_IDENTITY", "READINESS_INPUT_INVALID", "INPUT_PARENT_MODE"}
+    with pytest.raises(Issue1895ReadinessError):
+        read_held_private_text(target, label="private input")
+    with pytest.raises(Issue1895ReadinessError):
+        read_held_private_json(target, label="private input")
+
+
+def test_held_private_reader_refuses_parent_inode_swap_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from packages.common import node27_issue1895_commit as commit
+
+    private = tmp_path / "private"
+    _private(private)
+    target = private / "input.json"
+    target.write_text('{"ok":true}', encoding="utf-8")
+    os.chmod(target, 0o600)
+    seen = {"n": 0}
+    real = commit._parent_facts
+
+    def swap_on_restat(path: Path, *, code_prefix: str):
+        info = real(path, code_prefix=code_prefix)
+        seen["n"] += 1
+        if seen["n"] != 2:
+            return info
+        parent = path.parent
+        moved = parent.with_name(parent.name + ".moved")
+        name = path.name
+        parent.rename(moved)
+        parent.mkdir()
+        os.chmod(parent, 0o700)
+        os.rename(moved / name, parent / name)
+        os.rmdir(moved)
+        return real(path, code_prefix=code_prefix)
+
+    monkeypatch.setattr(commit, "_parent_facts", swap_on_restat)
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        read_held_private_json(target, label="private input")
+    assert refused.value.code in {
+        "READINESS_INPUT_IDENTITY",
+        "READINESS_INPUT_INVALID",
+        "READINESS_INPUT_TOCTOU",
+        "INPUT_PARENT_DRIFT",
+        "INPUT_PARENT_MODE",
+    }
+    assert seen["n"] >= 1
+
+
+def test_held_private_reader_accepts_mode_0700_parent_and_0600_file(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    _private(private)
+    target = private / "input.json"
+    target.write_text('{"ok":true}', encoding="utf-8")
+    os.chmod(target, 0o600)
+    raw, info = read_held_private_bytes(target, label="private input")
+    assert json.loads(raw) == {"ok": True}
+    assert info.st_nlink == 1
+    assert read_held_private_text(target, label="private input") == '{"ok":true}'
+    _raw, document, facts = read_held_private_json(target, label="private input")
+    assert document == {"ok": True}
+    assert isinstance(facts["st_mtime_ns"], int) and not isinstance(facts["st_mtime_ns"], bool)
+
+
+def test_held_private_json_facts_mtime_ns_is_from_held_descriptor_not_later_path(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    _private(private)
+    target = private / "input.json"
+    target.write_text('{"ok":true}', encoding="utf-8")
+    os.chmod(target, 0o600)
+    before = os.lstat(target)
+    _raw, document, facts = read_held_private_json(target, label="private input")
+    assert document == {"ok": True}
+    assert facts["st_mtime_ns"] == int(before.st_mtime_ns)
+    replacement = 2_000_000_000 if int(before.st_mtime_ns) != 2_000_000_000 else 3_000_000_000
+    os.utime(target, ns=(replacement, replacement))
+    after = os.lstat(target)
+    assert int(after.st_mtime_ns) != facts["st_mtime_ns"]
+    assert facts["st_dev"] == int(before.st_dev)
+    assert facts["st_ino"] == int(before.st_ino)
 
 
 def test_expected_status_http_reader_keeps_no_proxy_no_redirect_contract() -> None:
@@ -440,3 +538,127 @@ def test_c2_acceptance_refuses_permission_probe_that_is_not_denied_write_pass(tm
             now=_now_values(),
         )
     assert failed_probe.value.code == "C2_SUMMARY_PROBES"
+
+
+def test_c1_owner_refuses_invalid_or_mismatched_sha_without_publishing(tmp_path: Path) -> None:
+    receipt = tmp_path / "c1.json"
+    with pytest.raises(Issue1895ReadinessError) as invalid:
+        observe_display_runtime(
+            display_env=tmp_path / "display.env",
+            receipt_path=receipt,
+            head_sha=INVALID_SHA,
+            reviewed_sha=INVALID_SHA,
+        )
+    assert invalid.value.code == "READINESS_SHA_INVALID"
+    assert not receipt.exists()
+    with pytest.raises(Issue1895ReadinessError) as mismatch:
+        observe_display_runtime(
+            display_env=tmp_path / "display.env",
+            receipt_path=receipt,
+            head_sha=SHA,
+            reviewed_sha=WRONG_SHA,
+        )
+    assert mismatch.value.code == "READINESS_SHA_MISMATCH"
+    assert not receipt.exists()
+
+
+def test_c1_binder_refuses_wrong_invalid_sha_and_out_of_bracket(tmp_path: Path) -> None:
+    private = tmp_path / "private"
+    _private(private)
+    env = private / "display.env"
+    env.write_text("NHMS_DISPLAY_API_PORT=18080\n", encoding="utf-8")
+    os.chmod(env, 0o600)
+    receipt = private / "c1.json"
+    observe_display_runtime(
+        display_env=env,
+        receipt_path=receipt,
+        head_sha=SHA,
+        reviewed_sha=SHA,
+        opener=_c1_opener(),
+        run_systemctl=_c1_show,
+        read_cgroup=lambda pid: f"0::/user.slice/nhms-display-api.service/{pid}",
+        now=_now_values(),
+        expected_display_env=env,
+    )
+    original = receipt.read_bytes()
+    cmd_start, cmd_end = _current_bracket()
+    with pytest.raises(Issue1895ReadinessError) as wrong:
+        bind_c1_receipt(receipt, reviewed_sha=WRONG_SHA, expected_port=18080, cmd_start=cmd_start, cmd_end=cmd_end)
+    assert wrong.value.code == "C1_BIND_SHA"
+    assert receipt.read_bytes() == original
+    with pytest.raises(Issue1895ReadinessError) as invalid:
+        bind_c1_receipt(receipt, reviewed_sha=INVALID_SHA, expected_port=18080, cmd_start=cmd_start, cmd_end=cmd_end)
+    assert invalid.value.code == "READINESS_SHA_INVALID"
+    assert receipt.read_bytes() == original
+    with pytest.raises(Issue1895ReadinessError) as bracket:
+        bind_c1_receipt(
+            receipt,
+            reviewed_sha=SHA,
+            expected_port=18080,
+            cmd_start=PAST_BRACKET[0],
+            cmd_end=PAST_BRACKET[1],
+        )
+    assert bracket.value.code == "READINESS_BRACKET"
+    assert receipt.read_bytes() == original
+
+
+def test_c2_owner_refuses_invalid_or_mismatched_sha_without_publishing(tmp_path: Path) -> None:
+    receipt = tmp_path / "c2.json"
+    with pytest.raises(Issue1895ReadinessError) as invalid:
+        accept_c2_evidence(
+            evidence_root=tmp_path,
+            run_id="issue1895-readonly-now",
+            receipt_path=receipt,
+            head_sha=INVALID_SHA,
+            reviewed_sha=INVALID_SHA,
+        )
+    assert invalid.value.code == "READINESS_SHA_INVALID"
+    assert not receipt.exists()
+    with pytest.raises(Issue1895ReadinessError) as mismatch:
+        accept_c2_evidence(
+            evidence_root=tmp_path,
+            run_id="issue1895-readonly-now",
+            receipt_path=receipt,
+            head_sha=SHA,
+            reviewed_sha=WRONG_SHA,
+        )
+    assert mismatch.value.code == "READINESS_SHA_MISMATCH"
+    assert not receipt.exists()
+
+
+def test_c2_binder_refuses_wrong_invalid_sha_and_out_of_bracket(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    _private(root)
+    run_id = "issue1895-readonly-now"
+    _canonical_c2_files(root, run_id)
+    receipt_parent = tmp_path / "private"
+    _private(receipt_parent)
+    receipt = receipt_parent / "c2.json"
+    accept_c2_evidence(
+        evidence_root=root, run_id=run_id, receipt_path=receipt, head_sha=SHA, reviewed_sha=SHA, now=_now_values()
+    )
+    original = receipt.read_bytes()
+    cmd_start, cmd_end = _current_bracket()
+    with pytest.raises(Issue1895ReadinessError) as wrong:
+        bind_c2_receipt(
+            receipt, evidence_root=root, run_id=run_id, reviewed_sha=WRONG_SHA, cmd_start=cmd_start, cmd_end=cmd_end
+        )
+    assert wrong.value.code == "C2_BIND_SHA"
+    assert receipt.read_bytes() == original
+    with pytest.raises(Issue1895ReadinessError) as invalid:
+        bind_c2_receipt(
+            receipt, evidence_root=root, run_id=run_id, reviewed_sha=INVALID_SHA, cmd_start=cmd_start, cmd_end=cmd_end
+        )
+    assert invalid.value.code == "READINESS_SHA_INVALID"
+    assert receipt.read_bytes() == original
+    with pytest.raises(Issue1895ReadinessError) as bracket:
+        bind_c2_receipt(
+            receipt,
+            evidence_root=root,
+            run_id=run_id,
+            reviewed_sha=SHA,
+            cmd_start=PAST_BRACKET[0],
+            cmd_end=PAST_BRACKET[1],
+        )
+    assert bracket.value.code == "READINESS_BRACKET"
+    assert receipt.read_bytes() == original

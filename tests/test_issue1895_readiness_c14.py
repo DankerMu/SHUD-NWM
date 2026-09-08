@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from packages.common.node27_issue1895_dsn import (
     resolve_readonly_dsn,
 )
 from packages.common.node27_issue1895_fs import reconcile_moved_group_filesystem
+from packages.common.node27_issue1895_performance_live import resolve_live_dsn
 from packages.common.node27_issue1895_publication import prove_gfs_ifs_products, registry_expected_identities
 from packages.common.node27_issue1895_timer import (
     assert_exact_cold_groups,
@@ -129,7 +131,8 @@ def test_g7_binds_readonly_dsn_from_display_env_before_c2(tmp_path: Path) -> Non
     text = DISPLAY_EXAMPLE.read_text(encoding="utf-8")
     dsn = extract_display_database_url(text)
     assert "nhms_display_ro" in dsn
-    target = tmp_path / "readonly-dsn.env"
+    private = _private_parent(tmp_path / "private")
+    target = private / "readonly-dsn.env"
     bind_rc_dsn_file(target, dsn=dsn)
     assert oct(target.stat().st_mode & 0o777) == "0o600"
     assert target.read_text(encoding="utf-8").startswith("NHMS_DISPLAY_READONLY_DATABASE_URL=")
@@ -149,6 +152,121 @@ def test_g7_binds_readonly_dsn_from_display_env_before_c2(tmp_path: Path) -> Non
     assert 'test -s "$RC_DSN_FILE"' not in g7 or "bind_readonly_dsn" in g7
 
 
+def _private_parent(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def test_bind_rc_dsn_file_refuses_a_destination_created_after_precheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = _private_parent(tmp_path / "private")
+    target = private / "readonly.env"
+    attacker = b"NHMS_DISPLAY_READONLY_DATABASE_URL=postgresql://nhms_display_ro:first@127.0.0.1/nhms\n"
+    dsn = "postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms"
+    planted = {"done": False}
+    real_lexists = os.path.lexists
+
+    def plant() -> None:
+        if planted["done"] or real_lexists(target):
+            return
+        target.write_bytes(attacker)
+        os.chmod(target, 0o600)
+        planted["done"] = True
+
+    def race_exists(path: object) -> bool:
+        if Path(path) == target:
+            plant()
+            return False
+        return real_lexists(path)
+
+    import packages.common.node27_issue1895_dsn as dsn_mod
+
+    for name in ("atomic_write_bytes_no_follow", "write_bytes_no_follow_exclusive"):
+        if not hasattr(dsn_mod, name):
+            continue
+        real = getattr(dsn_mod, name)
+
+        def wrapped(*args: object, _real=real, **kwargs: object):
+            plant()
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(dsn_mod, name, wrapped)
+    monkeypatch.setattr(os.path, "lexists", race_exists)
+    try:
+        bind_rc_dsn_file(target, dsn=dsn)
+    except Issue1895ReadinessError as refused:
+        assert refused.code in {"DSN_FILE_EXISTS", "DSN_FILE_INVALID"}
+        assert "display-secret" not in str(refused)
+        assert "first" not in str(refused)
+    else:
+        pytest.fail("bind_rc_dsn_file must refuse a destination created after the precheck")
+    assert target.read_bytes() == attacker
+
+
+@pytest.mark.parametrize("mode", [0o644, 0o400, True])
+def test_bind_rc_dsn_file_refuses_non_0600_mode_before_publication(tmp_path: Path, mode: int | bool) -> None:
+    private = _private_parent(tmp_path / "private")
+    target = private / "readonly.env"
+    dsn = "postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms"
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        bind_rc_dsn_file(target, dsn=dsn, mode=mode)
+    assert refused.value.code in {"DSN_FILE_INVALID", "DSN_FILE_MODE_INVALID"}
+    assert "display-secret" not in str(refused.value)
+    assert "postgresql://" not in str(refused.value)
+    assert not target.exists()
+    assert not target.is_symlink()
+    assert not os.path.lexists(target)
+
+
+def test_g7_and_live_dsn_refuse_symlink_display_env_before_materialization(tmp_path: Path) -> None:
+    private = _private_parent(tmp_path / "private")
+    real = private / "display.env"
+    real.write_text("DATABASE_URL=postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms\n", encoding="utf-8")
+    os.chmod(real, 0o600)
+    linked = tmp_path / "display.env"
+    linked.symlink_to(real)
+    import importlib.util
+
+    script = REPO_ROOT / "scripts" / "node27_issue1895_bind_readonly_dsn.py"
+    spec = importlib.util.spec_from_file_location("issue1895_bind_readonly_dsn_symlink", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    target = private / "readonly.env"
+    assert module.main(["--display-env", str(linked), "--rc-dsn-file", str(target)]) == 1
+    assert not target.exists()
+    with pytest.raises(Issue1895ReadinessError) as live:
+        resolve_live_dsn(display_env_path=linked, environ={})
+    assert live.value.code in {
+        "DSN_UNREADABLE",
+        "C1_DISPLAY_ENV_UNREADABLE",
+        "C1_DISPLAY_ENV_INVALID",
+        "READINESS_INPUT_INVALID",
+    }
+    assert "display-secret" not in str(live.value)
+
+
+def test_g7_display_env_reader_refuses_parent_mode_0755(tmp_path: Path) -> None:
+    from packages.common.node27_issue1895_dsn import read_display_env_text
+
+    private = _private_parent(tmp_path / "private")
+    env = private / "display.env"
+    env.write_text("DATABASE_URL=postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms\n", encoding="utf-8")
+    os.chmod(env, 0o600)
+    os.chmod(private, 0o755)
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        read_display_env_text(env)
+    assert refused.value.code in {
+        "DSN_UNREADABLE",
+        "READINESS_INPUT_IDENTITY",
+        "READINESS_INPUT_INVALID",
+        "INPUT_PARENT_MODE",
+    }
+    assert "display-secret" not in str(refused.value)
+
+
 def test_bind_readonly_dsn_cli_ignores_ambient_writer_and_stale_readonly_urls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -161,12 +279,13 @@ def test_bind_readonly_dsn_cli_ignores_ambient_writer_and_stale_readonly_urls(
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    env = tmp_path / "display.env"
-    expected = "postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms"
-    env.write_text(f"DATABASE_URL={expected}\n", encoding="utf-8")
     private = tmp_path / "private"
     private.mkdir()
     private.chmod(0o700)
+    env = private / "display.env"
+    expected = "postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms"
+    env.write_text(f"DATABASE_URL={expected}\n", encoding="utf-8")
+    os.chmod(env, 0o600)
     target = private / "readonly.env"
     monkeypatch.setenv("NHMS_DISPLAY_READONLY_DATABASE_URL", "postgresql://nhms_ingest_rw:writer-secret@127.0.0.1/nhms")
     monkeypatch.setenv(

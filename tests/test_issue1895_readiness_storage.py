@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,7 +20,11 @@ from packages.common.node27_issue1895_env import (
     validate_canonical_positive_decimal,
 )
 from packages.common.node27_issue1895_fs import reconcile_moved_group_filesystem
-from packages.common.node27_issue1895_post_target import newly_terminal_keys, observe_named_group
+from packages.common.node27_issue1895_post_target import (
+    newly_terminal_keys,
+    observe_named_group,
+    run_post_target_observation,
+)
 from packages.common.node27_issue1895_receipt import (
     assert_sequential_tick_receipt,
     durable_key,
@@ -29,14 +34,45 @@ from packages.common.node27_issue1895_timer import assert_exact_cold_groups, ass
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from scripts import node27_issue1895_census_bind as census_bind_cli
 from scripts import node27_issue1895_env_rewrite as env_cli
+from scripts import node27_issue1895_fs_reconcile as fs_reconcile_cli
 from scripts import node27_issue1895_post_target_observe as post_target_observe_cli
+from scripts import node27_issue1895_sequential_receipt as sequential_receipt_cli
 from scripts import node27_issue1895_watermark as watermark_cli
 from tests.test_issue1895_readiness_c14 import _group
-from tests.test_issue1895_runbook_contract import _gate_lines
+from tests.test_issue1895_runbook_contract import _gate_bash, _gate_lines
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = REPO_ROOT / "infra" / "env" / "node27-cold-residency.example"
 SHA = "a" * 40
+
+
+def _private_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def _write_private(path: Path, text: str) -> Path:
+    _private_dir(path.parent)
+    path.write_text(text, encoding="utf-8")
+    os.chmod(path, 0o600)
+    return path
+
+
+def _write_private_json(path: Path, document: dict) -> Path:
+    return _write_private(path, json.dumps(document))
+
+
+def _substitute_identity(path: Path, kind: str) -> None:
+    if kind == "symlink":
+        real = path.with_name(path.name + ".real")
+        path.rename(real)
+        path.symlink_to(real)
+        return
+    if kind == "mode":
+        os.chmod(path, 0o644)
+        return
+    os.link(path, path.with_name(path.name + ".alink"))
 
 def _durable(index: int) -> dict:
     return _group(f"k{index}", index)["durable"]
@@ -106,12 +142,10 @@ def test_g3_engine_gate_accepts_ubuntu_suffix_and_rejects_wrong_major() -> None:
 def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
     current = _census_artifact()
     original = _census_artifact()
-    current_path = tmp_path / "current.json"
-    original_path = tmp_path / "original.json"
-    bracket = tmp_path / "bracket"
-    current_path.write_text(json.dumps(current), encoding="utf-8")
-    original_path.write_text(json.dumps(original), encoding="utf-8")
-    bracket.write_text("2026-09-04T04:00:00+00:00\n2026-09-04T04:01:00+00:00\n0\n", encoding="utf-8")
+    private = _private_dir(tmp_path / "private")
+    current_path = _write_private_json(private / "current.json", current)
+    original_path = _write_private_json(private / "original.json", original)
+    bracket = _write_private(private / "bracket", "2026-09-04T04:00:00+00:00\n2026-09-04T04:01:00+00:00\n0\n")
     bound = bind_pre_movement_census(
         current_path=current_path,
         original_path=original_path,
@@ -121,6 +155,7 @@ def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
     )
     assert bound["verdict"] == "GO"
     bracket.write_text("not-a-bracket\n2026-09-04T04:01:00+00:00\n0\n", encoding="utf-8")
+    os.chmod(bracket, 0o600)
     assert census_bind_cli.main(
         [
             "--current", str(current_path), "--original", str(original_path), "--digest", "abc",
@@ -128,6 +163,7 @@ def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
         ]
     ) == 1
     bracket.write_text("2026-09-04T04:00:00+00:00\n2026-09-04T04:01:00+00:00\n0\n", encoding="utf-8")
+    os.chmod(bracket, 0o600)
     rc = census_bind_cli.main(
         [
             "--current",
@@ -146,6 +182,7 @@ def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
     drifted = dict(current)
     drifted["census_digest"] = "nope"
     current_path.write_text(json.dumps(drifted), encoding="utf-8")
+    os.chmod(current_path, 0o600)
     with pytest.raises(Issue1895ReadinessError) as digest:
         bind_pre_movement_census(
             current_path=current_path,
@@ -158,6 +195,38 @@ def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
     g5 = " ".join(_gate_lines("G5"))
     assert "scripts/node27_issue1895_census_bind.py" in g5
     assert "assert current[\"verdict\"]" not in g5
+
+
+@pytest.mark.parametrize("kind", ("symlink", "mode", "hardlink"))
+@pytest.mark.parametrize("which", ("current", "original", "bracket"))
+def test_g5_census_binder_refuses_unsafe_current_original_or_bracket_identity(
+    tmp_path: Path, kind: str, which: str
+) -> None:
+    private = _private_dir(tmp_path / "private")
+    current_path = _write_private_json(private / "current.json", _census_artifact())
+    original_path = _write_private_json(private / "original.json", _census_artifact())
+    bracket = _write_private(private / "bracket", "2026-09-04T04:00:00+00:00\n2026-09-04T04:01:00+00:00\n0\n")
+    target = {"current": current_path, "original": original_path, "bracket": bracket}[which]
+    _substitute_identity(target, kind)
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        bind_pre_movement_census(
+            current_path=current_path,
+            original_path=original_path,
+            expected_digest="abc",
+            bracket_path=bracket,
+            reviewed_sha=SHA,
+        )
+    assert refused.value.code in {
+        "CENSUS_JSON_INVALID",
+        "CENSUS_BRACKET_INVALID",
+        "READINESS_INPUT_IDENTITY",
+        "READINESS_INPUT_INVALID",
+        "CENSUS_IDENTITY",
+        "CENSUS_NOT_REGULAR",
+        "CENSUS_IDENTITY_DRIFT",
+        "CENSUS_OPEN",
+        "CENSUS_MISSING",
+    }
 
 
 def test_g4_then_g5_env_rewrite_passes_through_live_compression_lag(tmp_path: Path) -> None:
@@ -296,6 +365,144 @@ def test_g6_sequential_receipts_bind_one_migrated_key_and_suffix() -> None:
     g6 = " ".join(_gate_lines("G6"))
     assert "scripts/node27_issue1895_sequential_receipt.py" in g6
     assert 'len(receipt["selected"]) == 1 and not receipt["deferred"]' not in g6
+
+
+@pytest.mark.parametrize("kind", ("symlink", "mode", "hardlink"))
+@pytest.mark.parametrize("which", ("census", "receipt"))
+def test_g6_sequential_receipt_cli_refuses_unsafe_census_or_receipt_identity(
+    tmp_path: Path, kind: str, which: str
+) -> None:
+    private = _private_dir(tmp_path / "private")
+    census_path = _write_private_json(private / "census.json", _census_artifact())
+    receipt_path = _write_private_json(private / "receipt.json", _shipping_receipt(call_index=1))
+    target = census_path if which == "census" else receipt_path
+    _substitute_identity(target, kind)
+    rc = sequential_receipt_cli.main(
+        ["--receipt", str(receipt_path), "--census", str(census_path), "--call-index", "1"]
+    )
+    assert rc == 1
+
+
+def test_g6_sequential_receipt_cli_accepts_valid_private_files(tmp_path: Path) -> None:
+    private = _private_dir(tmp_path / "private")
+    census_path = _write_private_json(private / "census.json", _census_artifact())
+    receipt_path = _write_private_json(private / "receipt.json", _shipping_receipt(call_index=1))
+    assert sequential_receipt_cli.main(
+        ["--receipt", str(receipt_path), "--census", str(census_path), "--call-index", "1"]
+    ) == 0
+
+
+def test_g5_and_g6_owners_refuse_parent_mode_0755(tmp_path: Path) -> None:
+    private = _private_dir(tmp_path / "private")
+    current_path = _write_private_json(private / "current.json", _census_artifact())
+    original_path = _write_private_json(private / "original.json", _census_artifact())
+    bracket = _write_private(private / "bracket", "2026-09-04T04:00:00+00:00\n2026-09-04T04:01:00+00:00\n0\n")
+    os.chmod(private, 0o755)
+    with pytest.raises(Issue1895ReadinessError) as census:
+        bind_pre_movement_census(
+            current_path=current_path,
+            original_path=original_path,
+            expected_digest="abc",
+            bracket_path=bracket,
+            reviewed_sha=SHA,
+        )
+    assert census.value.code in {
+        "CENSUS_JSON_INVALID",
+        "CENSUS_BRACKET_INVALID",
+        "READINESS_INPUT_IDENTITY",
+        "READINESS_INPUT_INVALID",
+        "INPUT_PARENT_MODE",
+    }
+    census_path = _write_private_json(private / "census.json", _census_artifact())
+    receipt_path = _write_private_json(private / "receipt.json", _shipping_receipt(call_index=1))
+    os.chmod(private, 0o755)
+    assert sequential_receipt_cli.main(
+        ["--receipt", str(receipt_path), "--census", str(census_path), "--call-index", "1"]
+    ) == 1
+
+
+def test_g6_preview_and_group_enumeration_use_held_reader_before_mutation() -> None:
+    fences = [body for _opening, body in _gate_bash("G6")]
+    preview = next(body for body in fences if "PREVIEW_RECEIPT" in body and "ORIGINAL_CENSUS" in body)
+    assert "json.load(open" not in preview
+    assert "open(bracket)" not in preview
+    assert "read_held_private_json" in preview
+    assert "read_held_private_text" in preview
+    helper_at = min(preview.index("read_held_private_json"), preview.index("read_held_private_text"))
+    assert helper_at < preview.index("assert_sequential_tick_receipt")
+
+    loop = next(body for body in fences if "while IFS= read -r GROUP" in body and "--enforce" in body)
+    assert "json.load(open" not in loop
+    assert "< <(" in loop
+    substitution = loop[loop.index("< <(") :]
+    assert "read_held_private_json" in substitution
+    assert "group_keys" in substitution
+    assert "json.load(open" not in substitution
+    assert loop.index("while IFS= read -r GROUP") < loop.index("--enforce")
+    assert loop.index("< <(") > loop.index("--enforce")
+    assert substitution.index("read_held_private_json") < substitution.index("group_keys")
+    assert "IFS= read -r GROUP" in loop
+    assert "for GROUP in" not in loop
+
+
+def test_post_target_observation_refuses_unsafe_baseline_identity(tmp_path: Path) -> None:
+    private = _private_dir(tmp_path / "private")
+    baseline = _write_private_json(
+        private / "baseline.json",
+        {"groups": [_group(key, index) for index, key in enumerate(KEYS, start=1)]},
+    )
+    output = private / "observed.json"
+    linked = tmp_path / "baseline-link.json"
+    linked.symlink_to(baseline)
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        run_post_target_observation(
+            baseline_path=linked,
+            output_path=output,
+            reviewed_sha=SHA,
+            lag_seconds=172800,
+            execute=lambda *_args, **_kwargs: [],
+            watermark=datetime(2026, 9, 6, tzinfo=UTC),
+            dsn="postgresql://nhms_display_ro@127.0.0.1/nhms",
+        )
+    assert refused.value.code in {
+        "POST_TARGET_BASELINE_INVALID",
+        "READINESS_INPUT_IDENTITY",
+        "READINESS_INPUT_INVALID",
+        "POST_TARGET_IDENTITY",
+        "POST_TARGET_NOT_REGULAR",
+        "POST_TARGET_IDENTITY_DRIFT",
+        "POST_TARGET_OPEN",
+        "POST_TARGET_MISSING",
+    }
+    assert not output.exists()
+    assert refused.value.code != "POST_TARGET_BASELINE_COUNT"
+
+
+def test_post_target_observation_refuses_parent_mode_0755(tmp_path: Path) -> None:
+    private = _private_dir(tmp_path / "private")
+    baseline = _write_private_json(
+        private / "baseline.json",
+        {"groups": [_group(key, index) for index, key in enumerate(KEYS, start=1)]},
+    )
+    output = private / "observed.json"
+    os.chmod(private, 0o755)
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        run_post_target_observation(
+            baseline_path=baseline,
+            output_path=output,
+            reviewed_sha=SHA,
+            lag_seconds=172800,
+            execute=lambda *_args, **_kwargs: [],
+            watermark=datetime(2026, 9, 6, tzinfo=UTC),
+            dsn="postgresql://nhms_display_ro@127.0.0.1/nhms",
+        )
+    assert refused.value.code in {
+        "POST_TARGET_BASELINE_INVALID",
+        "READINESS_INPUT_IDENTITY",
+        "READINESS_INPUT_INVALID",
+        "INPUT_PARENT_MODE",
+    }
+    assert not output.exists()
 
 
 def test_filesystem_10mib_zero_reversed_and_tolerance_bounds() -> None:
@@ -601,3 +808,91 @@ def test_w8_cli_closes_display_watermark_failures_without_secret_or_traceback(
     assert captured.err.strip() == "WATERMARK_UNAVAILABLE"
     assert secret not in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_w8_cli_refuses_symlink_display_env_before_cutoff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    private = _private_dir(tmp_path / "private")
+    real = private / "display.env"
+    real.write_text("DATABASE_URL=postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms\n", encoding="utf-8")
+    os.chmod(real, 0o600)
+    linked = tmp_path / "display.env"
+    linked.symlink_to(real)
+    called = {"n": 0}
+
+    def observe(**_kwargs: object) -> dict[str, object]:
+        called["n"] += 1
+        raise AssertionError("observe_current_cutoff must not run on unsafe display.env")
+
+    monkeypatch.setattr(watermark_cli, "observe_current_cutoff", observe)
+    monkeypatch.delenv("NHMS_DISPLAY_READONLY_DATABASE_URL", raising=False)
+    monkeypatch.delenv("NHMS_READONLY_DB_VALIDATION_DATABASE_URL", raising=False)
+    output = private / "w8.json"
+    assert watermark_cli.main(
+        ["--output", str(output), "--lag-seconds", "172800", "--display-env", str(linked)]
+    ) == 1
+    assert called["n"] == 0
+    assert not output.exists()
+
+
+def test_w8_cli_refuses_parent_mode_0755_display_env_before_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = _private_dir(tmp_path / "private")
+    env = private / "display.env"
+    env.write_text("DATABASE_URL=postgresql://nhms_display_ro:display-secret@127.0.0.1/nhms\n", encoding="utf-8")
+    os.chmod(env, 0o600)
+    os.chmod(private, 0o755)
+    called = {"n": 0}
+
+    def observe(**_kwargs: object) -> dict[str, object]:
+        called["n"] += 1
+        raise AssertionError("observe_current_cutoff must not run on unsafe display.env")
+
+    monkeypatch.setattr(watermark_cli, "observe_current_cutoff", observe)
+    monkeypatch.delenv("NHMS_DISPLAY_READONLY_DATABASE_URL", raising=False)
+    monkeypatch.delenv("NHMS_READONLY_DB_VALIDATION_DATABASE_URL", raising=False)
+    output = tmp_path / "out" / "w8.json"
+    output.parent.mkdir()
+    os.chmod(output.parent, 0o700)
+    assert watermark_cli.main(
+        ["--output", str(output), "--lag-seconds", "172800", "--display-env", str(env)]
+    ) == 1
+    assert called["n"] == 0
+    assert not output.exists()
+
+
+def test_fs_reconcile_cli_refuses_symlink_and_parent_0755_receipt_before_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    private = _private_dir(tmp_path / "private")
+    receipt = _write_private_json(private / "receipt.json", _shipping_receipt(call_index=1))
+    called = {"n": 0}
+
+    def approve(**_kwargs: object) -> dict[str, object]:
+        called["n"] += 1
+        return {"approved": True, "moved_member_bytes": 10}
+
+    monkeypatch.setattr(fs_reconcile_cli, "reconcile_moved_group_filesystem", approve)
+    linked = tmp_path / "receipt-link.json"
+    linked.symlink_to(receipt)
+    argv = [
+        "--receipt",
+        str(linked),
+        "--hot-avail-before",
+        "100",
+        "--hot-avail-after",
+        "110",
+        "--cold-avail-before",
+        "210",
+        "--cold-avail-after",
+        "200",
+    ]
+    assert fs_reconcile_cli.main(argv) == 1
+    assert called["n"] == 0
+    os.chmod(private, 0o755)
+    argv[1] = str(receipt)
+    assert fs_reconcile_cli.main(argv) == 1
+    assert called["n"] == 0
+    os.chmod(private, 0o700)
+    assert fs_reconcile_cli.main(argv) == 0
+    assert called["n"] == 1

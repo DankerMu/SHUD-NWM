@@ -11388,7 +11388,9 @@ def test_issue1895_b2b_examples_select_their_receipt_contract() -> None:
         "schemas/examples/node27_issue1895_c3_current_publication_display_receipt.example.json",
     }
     for path in examples:
-        assert {"tests/test_issue1895_readiness_c1_c2_c3.py"} <= set(select_tests([path], repo_root=Path(".")))
+        selected = set(select_tests([path], repo_root=Path(".")))
+        assert set(ISSUE1895_READINESS_C1_C2_C3_TESTS) <= selected
+        assert "tests/test_issue1895_readiness_c3.py" in selected
 
 
 def test_issue1895_b2b_example_rules_red_when_collectively_removed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -11402,7 +11404,9 @@ def test_issue1895_b2b_example_rules_red_when_collectively_removed(monkeypatch: 
     mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in examples)
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
     for path in examples:
-        assert "tests/test_issue1895_readiness_c1_c2_c3.py" not in select_tests([path], repo_root=Path("."))
+        selected = set(select_tests([path], repo_root=Path(".")))
+        assert "tests/test_issue1895_readiness_c1_c2_c3.py" not in selected
+        assert "tests/test_issue1895_readiness_c3.py" not in selected
 
 
 def test_issue1895_b2b_schemas_select_their_receipt_contracts() -> None:

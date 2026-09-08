@@ -161,6 +161,132 @@ def _assert_regular_private(info: os.stat_result, *, code: str, stage: str) -> N
         refuse("authoritative input ownership or mode drifted", code, stage=stage)
 
 
+def _map_held_descriptor_code(
+    code: str,
+    *,
+    unreadable_code: str,
+    identity_code: str,
+    toctou_code: str,
+) -> str:
+    if code.endswith(("_PARENT_DRIFT", "_INODE_SWAP")):
+        return toctou_code
+    if code.endswith(
+        (
+            "_PARENT_MODE",
+            "_PARENT_INVALID",
+            "_PARENT_OWNER",
+            "_NOT_REGULAR",
+            "_IDENTITY_DRIFT",
+            "_MISSING",
+            "_OPEN",
+            "_FSTAT",
+        )
+    ):
+        return identity_code
+    return unreadable_code
+
+
+def read_held_private_bytes(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = MAX_INPUT_BYTES,
+    stage: str = "readiness",
+    unreadable_code: str = "READINESS_INPUT_INVALID",
+    identity_code: str = "READINESS_INPUT_IDENTITY",
+    toctou_code: str = "READINESS_INPUT_TOCTOU",
+) -> tuple[bytes, os.stat_result]:
+    """Read one private file through the C1-C3 held descriptor, including parent 0700/euid."""
+
+    del label
+    try:
+        raw, info, _parent = _read_held_descriptor(Path(path), code_prefix="INPUT", max_bytes=max_bytes)
+    except Issue1895ReadinessError as error:
+        mapped = _map_held_descriptor_code(
+            error.code,
+            unreadable_code=unreadable_code,
+            identity_code=identity_code,
+            toctou_code=toctou_code,
+        )
+        refuse(str(error), mapped, stage=stage)
+        raise AssertionError("unreachable")
+    if len(raw) > max_bytes:
+        refuse("authoritative input is unavailable, unsafe, or oversized", unreadable_code, stage=stage)
+    return raw, info
+
+
+def read_held_private_text(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = MAX_INPUT_BYTES,
+    stage: str = "readiness",
+    unreadable_code: str = "READINESS_INPUT_INVALID",
+    identity_code: str = "READINESS_INPUT_IDENTITY",
+    toctou_code: str = "READINESS_INPUT_TOCTOU",
+) -> str:
+    raw, _info = read_held_private_bytes(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+        stage=stage,
+        unreadable_code=unreadable_code,
+        identity_code=identity_code,
+        toctou_code=toctou_code,
+    )
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        refuse("authoritative input is not UTF-8", unreadable_code, stage=stage)
+        raise AssertionError("unreachable")
+
+
+def read_held_private_json(
+    path: Path,
+    *,
+    label: str,
+    max_bytes: int = MAX_INPUT_BYTES,
+    require_mapping: bool = True,
+    stage: str = "readiness",
+    unreadable_code: str = "READINESS_INPUT_INVALID",
+    identity_code: str = "READINESS_INPUT_IDENTITY",
+    toctou_code: str = "READINESS_INPUT_TOCTOU",
+    json_code: str = "READINESS_INPUT_JSON",
+) -> tuple[bytes, Any, dict[str, int | str]]:
+    """Held private JSON with parent 0700/euid plus bounded complexity checks."""
+
+    raw, info = read_held_private_bytes(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+        stage=stage,
+        unreadable_code=unreadable_code,
+        identity_code=identity_code,
+        toctou_code=toctou_code,
+    )
+    try:
+        value = json.loads(raw.decode("utf-8"))
+        validate_json_complexity(
+            value,
+            label=label,
+            max_depth=PRIVATE_RECEIPT_MAX_DEPTH,
+            max_nodes=PRIVATE_RECEIPT_MAX_NODES,
+            max_array_items=PRIVATE_RECEIPT_MAX_ARRAY_ITEMS,
+            max_object_items=PRIVATE_RECEIPT_MAX_OBJECT_ITEMS,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, BoundedEvidenceError):
+        refuse("authoritative JSON input is unavailable, unsafe, or oversized", json_code, stage=stage)
+        raise AssertionError("unreachable")
+    if require_mapping and not isinstance(value, Mapping):
+        refuse("authoritative JSON input root is not an object", json_code, stage=stage)
+    facts: dict[str, int | str] = {
+        **descriptor_facts(info),
+        "st_mtime_ns": int(info.st_mtime_ns),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+    return raw, dict(value) if isinstance(value, Mapping) else value, facts
+
+
 def read_authoritative_json(
     path: Path,
     *,
@@ -237,6 +363,9 @@ __all__ = (
     "private_parent_facts",
     "publish_private_receipt",
     "read_authoritative_json",
+    "read_held_private_bytes",
+    "read_held_private_json",
+    "read_held_private_text",
     "read_private_receipt",
     "refuse",
     "require_matching_shas",

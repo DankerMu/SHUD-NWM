@@ -10,7 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from packages.common.node27_issue1895_dsn import bind_rc_dsn_file, resolve_readonly_dsn
+from packages.common.node27_issue1895_dsn import bind_rc_dsn_file, read_display_env_text, resolve_readonly_dsn
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from packages.common.redaction import redact_text
 
@@ -25,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        text = args.display_env.read_text(encoding="utf-8")
+        text = read_display_env_text(args.display_env)
         # Explicit display.env provenance wins over every ambient readonly key.
         # The caller deliberately passes an empty mapping: inherited writer or
         # stale readonly DSNs must never redirect this private bind.

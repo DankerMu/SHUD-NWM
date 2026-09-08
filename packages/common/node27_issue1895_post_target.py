@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +23,7 @@ from packages.common.compressed_chunk_cold_runtime_catalog import (
     snapshot_group,
 )
 from packages.common.display_watermark import fetch_display_watermark
+from packages.common.node27_issue1895_private_receipt import read_held_private_json
 from packages.common.node27_issue1895_receipt import DURABLE_FIELDS, durable_key
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from scripts.node27_cold_residency_census import close_observer_connection, open_readonly_connection
@@ -246,7 +246,24 @@ def run_post_target_observation(
     watermark: datetime | None = None,
     dsn: str | None = None,
 ) -> dict[str, Any]:
-    baseline = json.loads(Path(baseline_path).read_text(encoding="utf-8"))
+    try:
+        _raw, baseline, _facts = read_held_private_json(
+            Path(baseline_path),
+            label="post-target baseline",
+            stage="post-target",
+            unreadable_code="POST_TARGET_BASELINE_INVALID",
+            identity_code="POST_TARGET_BASELINE_INVALID",
+            toctou_code="POST_TARGET_BASELINE_INVALID",
+            json_code="POST_TARGET_BASELINE_INVALID",
+        )
+    except Issue1895ReadinessError as error:
+        if error.code.startswith("READINESS_INPUT_"):
+            raise Issue1895ReadinessError(
+                "baseline artifact is invalid",
+                code="POST_TARGET_BASELINE_INVALID",
+                stage="post-target",
+            ) from error
+        raise
     if not isinstance(baseline, dict) or not isinstance(baseline.get("groups"), list):
         raise Issue1895ReadinessError(
             "baseline artifact is invalid",

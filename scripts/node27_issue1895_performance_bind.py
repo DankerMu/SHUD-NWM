@@ -9,6 +9,7 @@ from pathlib import Path
 
 from packages.common.node27_issue1895_commit import bind_performance_artifacts
 from packages.common.node27_issue1895_performance import format_refusal
+from packages.common.node27_issue1895_private_receipt import read_held_private_text
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 
 
@@ -27,7 +28,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _bracket_instants(args: argparse.Namespace) -> tuple[str | None, str | None]:
     if args.bracket is not None:
-        lines = [line.strip() for line in args.bracket.read_text(encoding="utf-8").splitlines() if line.strip()]
+        try:
+            text = read_held_private_text(
+                args.bracket,
+                label="performance bracket",
+                stage="performance",
+                unreadable_code="COMMIT_BRACKET",
+                identity_code="COMMIT_BRACKET",
+                toctou_code="COMMIT_BRACKET",
+            )
+        except Issue1895ReadinessError as error:
+            if error.code.startswith("READINESS_INPUT_"):
+                raise Issue1895ReadinessError(
+                    "command bracket is incomplete",
+                    code="COMMIT_BRACKET",
+                    stage="performance",
+                ) from error
+            raise
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
         if len(lines) < 2:
             raise Issue1895ReadinessError(
                 "command bracket is incomplete",

@@ -18,6 +18,8 @@ executable fence patterns — never the whole-section prose.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -390,12 +392,83 @@ def test_g1_policy_file_is_exclusive_no_clobber_write() -> None:
     assert 'open(os.environ["POLICY_FILE"], "w"' not in g1
 
 
-def test_g1_captures_public_valid_times_baseline_before_mutation() -> None:
+def _python_heredoc(body: str, marker: str = "PY") -> str:
+    start = body.index(f"<<'{marker}'")
+    after = body[start:].split("\n", 1)[1]
+    return after[: after.index(f"\n{marker}")]
+
+
+def _held_fence(gate: str, needle: str) -> str:
+    body = next(item[1] for item in _gate_bash(gate) if needle in item[1])
+    assert "json.load(open" not in body and "open(bracket)" not in body
+    assert "read_held_private_json" in body and "read_held_private_text" in body
+    return body
+
+
+def test_g1_freeze_validates_digest_as_lowercase_hex_and_bytes_as_decimal(tmp_path: Path) -> None:
+    freeze = next(body for _opening, body in _gate_bash("G1") if "CENSUS_DIGEST" in body and "POLICY_FILE" in body)
+    python = _python_heredoc(freeze)
+    digest = "0a1b2c3d4e5f6789abcdef0123456789abcdef0123456789abcdef0123456789"
+    os.chmod(tmp_path, 0o700)
+    census = tmp_path / "census.json"
+    policy_bytes = {
+        "E": "4096",
+        "S": "8192",
+        "cold_reserve_bytes": "4096",
+        "wal_reserve_bytes": "4096",
+        "install_required_bytes": "16384",
+        "rollback_headroom_bytes": "8192",
+    }
+    census.write_text(
+        json.dumps({"verdict": "GO", "census_digest": digest, "capacity_policy": policy_bytes}),
+        encoding="utf-8",
+    )
+    os.chmod(census, 0o600)
+    policy = tmp_path / "capacity-policy.env"
+    completed = subprocess.run(
+        ["uv", "run", "--no-sync", "python", "-c", python],
+        cwd=tmp_path,
+        env={**os.environ, "CENSUS_ARTIFACT": str(census), "POLICY_FILE": str(policy), "PYTHONPATH": str(REPO_ROOT)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    text = policy.read_text(encoding="utf-8")
+    assert f"CENSUS_DIGEST={digest}" in text
+    assert "E=4096" in text and "S=8192" in text
+    assert re.search(r"\[0-9a-f\]\{64\}", python)
+    values_block = python.split("values = {", 1)[1].split("}", 1)[0]
+    assert "CENSUS_DIGEST" not in values_block
+
+
+def test_current_run_g1_g3_g4_g5_g6_g8_fences_use_held_helpers() -> None:
     g1 = _gate("G1")
-    assert "valid-times-baseline.json" in g1
-    assert "BASELINE_BRACKET" in g1
+    assert "read_held_private_json" in g1 and "read_held_private_text" in g1
+    assert "valid-times-baseline.json" in g1 and "BASELINE_BRACKET" in g1
     assert 'chmod 600 "$BASELINE_FILE"' in g1
     assert "G7" not in g1 or "baseline" in g1.lower()
+    _held_fence("G1", "valid-times-baseline.json")
+    python = _python_heredoc(_held_fence("G3", "parse_probe_report"))
+    assert "os.lstat" not in python and "os.stat(" not in python
+    assert "Path(path).stat" not in python
+    held = python.split("read_held_private_json", 1)[1]
+    assert "assert_report_within_command_bracket" in held
+    assert 'report_mtime=facts["st_mtime_ns"]' in held
+    projection = next(body for _opening, body in _gate_bash("G4") if "runtime-projection.json" in body)
+    assert "json.load(open" not in projection
+    g4_py = _python_heredoc(projection)
+    assert "read_held_private_json" in g4_py and "parse_container_exec_user" in g4_py
+    assert "parse_container_exec_user(" in g4_py.split("read_held_private_json", 1)[1]
+    enforce = next(body for _opening, body in _gate_bash("G5") if '"outcome"' in body and "installed" in body)
+    assert "json.load(open" not in enforce and "open(bracket)" not in enforce
+    assert "read_held_private_json" in enforce and "read_held_private_text" in enforce
+    g5, g6, g8 = (" ".join(_gate_lines(name)) for name in ("G5", "G6", "G8"))
+    assert "scripts/node27_issue1895_census_bind.py" in g5
+    assert "scripts/node27_issue1895_sequential_receipt.py" in g6
+    assert "read_held_private_json" in _gate("G6")
+    assert "scripts/node27_issue1895_group_reconcile.py" in g8
+    assert "scripts/node27_issue1895_post_target_observe.py" in g8
 
 
 # ---------------------------------------------------------------------------

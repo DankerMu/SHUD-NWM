@@ -401,11 +401,14 @@ census), and every capacity value is a checked canonical decimal:
 set -euo pipefail
 test "$(stat -c '%a' "$CENSUS_ARTIFACT")" = "600"
 /home/nwm/NWM/.venv/bin/python - "$CENSUS_ARTIFACT" "$REVIEWED_SHA" "$REQUIRE_COUNT" "$CENSUS_BRACKET" <<'PY'
-import json, re, sys
+import re, sys
 from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
 path, head, required, bracket = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
-artifact = json.load(open(path))
-start, end, _rc = [line.strip() for line in open(bracket) if line.strip()]
+_raw, artifact, _facts = read_held_private_json(Path(path), label="G1 census", stage="census")
+bracket_text = read_held_private_text(Path(bracket), label="G1 census bracket", stage="census")
+start, end, _rc = [line.strip() for line in bracket_text.splitlines() if line.strip()]
 def _utc(value):
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
@@ -457,11 +460,15 @@ set -euo pipefail
 POLICY_FILE="$RUN_ROOT/env/capacity-policy-$RUN_STAMP.env"
 export CENSUS_ARTIFACT POLICY_FILE
 /home/nwm/NWM/.venv/bin/python <<'PY'
-import json, os, re
-artifact = json.load(open(os.environ["CENSUS_ARTIFACT"]))
+import os, re
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json
+census_path = Path(os.environ["CENSUS_ARTIFACT"])
+_raw, artifact, _facts = read_held_private_json(census_path, label="G1 census", stage="census")
 policy = artifact["capacity_policy"]
 assert artifact["verdict"] == "GO"
 decimal = re.compile(r"^(?:0|[1-9][0-9]*)$")
+digest_re = re.compile(r"^[0-9a-f]{64}$")
 values = {
     "E": policy["E"],
     "S": policy["S"],
@@ -469,11 +476,12 @@ values = {
     "WAL_RESERVE": policy["wal_reserve_bytes"],
     "INSTALL_REQUIRED": policy["install_required_bytes"],
     "ROLLBACK_HEADROOM": policy["rollback_headroom_bytes"],
-    "CENSUS_DIGEST": artifact["census_digest"],
 }
 for name, value in values.items():
     assert decimal.match(value), name
-payload = "".join(f"{name}={value}\n" for name, value in values.items())
+digest = artifact["census_digest"]
+assert digest_re.fullmatch(digest), "CENSUS_DIGEST"
+payload = "".join(f"{name}={value}\n" for name, value in values.items()) + f"CENSUS_DIGEST={digest}\n"
 target = os.environ["POLICY_FILE"]
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 fd = os.open(target, flags, 0o600)
@@ -514,10 +522,13 @@ printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$BASELINE_BRACKET"
 test "$rc" -eq 0
 chmod 600 "$BASELINE_FILE" "$BASELINE_BRACKET"
 /home/nwm/NWM/.venv/bin/python - "$BASELINE_FILE" "$BASELINE_BRACKET" <<'PY'
-import json, sys
+import sys
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
 path, bracket = sys.argv[1], sys.argv[2]
-document = json.load(open(path))
-lines = [line.strip() for line in open(bracket) if line.strip()]
+_raw, document, _facts = read_held_private_json(Path(path), label="G1 valid-times baseline", stage="census")
+bracket_text = read_held_private_text(Path(bracket), label="G1 valid-times baseline bracket", stage="census")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
 assert len(lines) == 3 and lines[2] == "0", lines
 assert document["request_id"] and document["status"] == "ok", document
 data = document["data"]
@@ -805,18 +816,21 @@ _end="$(/usr/bin/date -u +%FT%T.%N%:z)"
 printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$ORACLE_BRACKET"
 test "$rc" -eq 0
 /home/nwm/NWM/.venv/bin/python - "$ORACLE_REPORT" "$ORACLE_BRACKET" "$PROBE_NAME" "$PROBE_ROOT" <<'PY'
-import json, os, sys
+import sys
 from pathlib import Path
 from packages.common.compressed_chunk_cold_probe.report import parse_probe_report
 from packages.common.compressed_chunk_cold_probe.types import OWNED_NAME_RE, PROBE_NAME_PREFIX
 from packages.common.compressed_chunk_cold_residency import ACCEPTED_SEQUENCE_NAME
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
 from packages.common.node27_issue1895_probe import assert_report_within_command_bracket, parse_bracket_instant
 path, bracket, probe_name, probe_root = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-lines = [line.strip() for line in open(bracket) if line.strip()]
+bracket_text = read_held_private_text(Path(bracket), label="G3 oracle bracket", stage="probe")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
 assert len(lines) == 3 and lines[2] == "0", lines
 assert OWNED_NAME_RE.fullmatch(probe_name), probe_name
 assert Path(probe_root).name == probe_name and PROBE_NAME_PREFIX in Path(probe_root).name
-report = parse_probe_report(json.load(open(path)))
+_raw, payload, facts = read_held_private_json(Path(path), label="G3 oracle report", stage="probe")
+report = parse_probe_report(payload)
 assert report["status"] == "passed"
 assert report["sequence"]["accepted"] == ACCEPTED_SEQUENCE_NAME
 lifecycle = report["lifecycle"]
@@ -828,10 +842,8 @@ cleanup = report["cleanup"]
 assert cleanup["container_absent"] is True
 assert cleanup["work_root_absent"] is True
 assert cleanup["identity_bound"] is True
-report_path = Path(path)
-mtime = os.stat(report_path).st_mtime
 assert_report_within_command_bracket(
-    report_mtime=mtime,
+    report_mtime=facts["st_mtime_ns"] / 1_000_000_000,
     start=parse_bracket_instant(lines[0]),
     end=parse_bracket_instant(lines[1]),
 )
@@ -986,9 +998,11 @@ INSPECT_FORMAT='{"Mounts":{{json .Mounts}},"User":{{json .Config.User}}}'
 chmod 600 "$RUN_ROOT/env/runtime-projection.json"
 export RUNTIME_PROJECTION="$RUN_ROOT/env/runtime-projection.json"
 RUNNER_UID_GID="$(/home/nwm/NWM/.venv/bin/python - "$RUNTIME_PROJECTION" <<'PY'
-import json, sys
+import sys
+from pathlib import Path
 from packages.common.compressed_chunk_cold_target import parse_container_exec_user
-projection = json.load(open(sys.argv[1]))
+from packages.common.node27_issue1895_private_receipt import read_held_private_json
+_raw, projection, _facts = read_held_private_json(Path(sys.argv[1]), label="G4 runtime projection", stage="env")
 identity = parse_container_exec_user(projection["User"])
 print(f"{identity.uid} {identity.gid}")
 PY
@@ -1174,16 +1188,19 @@ printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$DRY_RECEIPT.bracket"
 test "$rc" -eq 0 || { echo "NO-GO: installer dry-run exit $rc" >&2; exit 1; }
 stat -c '%a' "$DRY_RECEIPT" | /usr/bin/grep -qx 600
 /home/nwm/NWM/.venv/bin/python - "$DRY_RECEIPT" "$REVIEWED_SHA" "$DRY_RECEIPT.bracket" <<'PY'
-import json, sys
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
 path, head, bracket = sys.argv[1], sys.argv[2], sys.argv[3]
-lines = [line.strip() for line in open(bracket) if line.strip()]
+bracket_text = read_held_private_text(Path(bracket), label="G5 installer bracket", stage="census")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
 assert len(lines) == 3 and lines[2] == "0", lines
 start_str, end_str = lines[0], lines[1]
 def _utc(value):
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-document = json.load(open(path))
+_raw, document, _facts = read_held_private_json(Path(path), label="G5 installer receipt", stage="census")
 generated = _utc(document["generated_at"])
 assert document["schema_version"] == "1.0"
 assert document["mode"] == "dry-run" and document["outcome"] == "dry_run"
@@ -1409,15 +1426,18 @@ if [ -e "$ENFORCE_AUTHORITY" ]; then
 fi
 test ! -e "$ENFORCE_AUTHORITY" || { echo "NO-GO: terminal installed must have removed the authority" >&2; exit 1; }
 /home/nwm/NWM/.venv/bin/python - "$ENFORCE_RECEIPT" "$REVIEWED_SHA" "$ENFORCE_RECEIPT.bracket" <<'PY'
-import json, sys
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
 path, head, bracket = sys.argv[1], sys.argv[2], sys.argv[3]
-lines = [line.strip() for line in open(bracket) if line.strip()]
+bracket_text = read_held_private_text(Path(bracket), label="G5 enforce bracket", stage="census")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
 assert len(lines) == 3 and lines[2] == "0", lines
 def _utc(value):
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-document = json.load(open(path))
+_raw, document, _facts = read_held_private_json(Path(path), label="G5 enforce receipt", stage="census")
 generated = _utc(document["generated_at"])
 assert document["mode"] == "enforce" and document["outcome"] == "installed"
 assert document["state"] == "installed"
@@ -1577,12 +1597,15 @@ _end="$(/usr/bin/date -u +%FT%T.%N%:z)"
 printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$PREVIEW_BRACKET"
 test "$rc" -eq 0 || { echo "NO-GO: cold preview exit $rc" >&2; exit 1; }
 /home/nwm/NWM/.venv/bin/python - "$PREVIEW_RECEIPT" "$ORIGINAL_CENSUS" "$PREVIEW_BRACKET" "$REVIEWED_SHA" <<'PY'
-import json, sys
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
 receipt_path, census_path, bracket, head = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-receipt = json.load(open(receipt_path))
-census = json.load(open(census_path))
-lines = [line.strip() for line in open(bracket) if line.strip()]
+_raw, receipt, _facts = read_held_private_json(Path(receipt_path), label="G6 preview receipt", stage="receipt")
+_craw, census, _cfacts = read_held_private_json(Path(census_path), label="G6 preview census", stage="receipt")
+bracket_text = read_held_private_text(Path(bracket), label="G6 preview bracket", stage="receipt")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
 assert len(lines) == 3 and lines[2] == "0", lines
 def _utc(value):
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -1660,17 +1683,20 @@ while IFS= read -r GROUP; do
   uv run --no-sync python scripts/node27_issue1895_sequential_receipt.py \
     --receipt "$RECEIPT" --census "$ORIGINAL_CENSUS" --call-index "$GROUP_INDEX" --migrate-outcome migrated
   /home/nwm/NWM/.venv/bin/python - "$RECEIPT" "$BRACKET" "$REVIEWED_SHA" "$ORIGINAL_CENSUS" "$GROUP" "$E" <<'PY'
-import json, sys
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
 from packages.common.node27_issue1895_receipt import unique_migrated_observation, durable_key
 path, bracket, head, census_path, expected_key, e_value = sys.argv[1:7]
-lines = [line.strip() for line in open(bracket) if line.strip()]
+bracket_text = read_held_private_text(Path(bracket), label="G6 receipt bracket", stage="receipt")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
 assert len(lines) == 3 and lines[2] == "0", lines
 def _utc(value):
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-receipt = json.load(open(path))
-census = json.load(open(census_path))
+_raw, receipt, _facts = read_held_private_json(Path(path), label="G6 receipt", stage="receipt")
+_craw, census, _cfacts = read_held_private_json(Path(census_path), label="G6 census", stage="receipt")
 generated = _utc(receipt["generated_at"])
 assert receipt["schema_version"] == "1.1"
 assert receipt["mode"] == "enforce" and receipt["outcome"] == "clean"
@@ -1702,7 +1728,7 @@ assert capacity["retained_source_bytes"] == bound["retained_source_bytes"]
 assert receipt["target"]["device_identity"] and receipt["target"]["container_exec_uid"]
 print("group OK:", key)
 PY
-done < <(/home/nwm/NWM/.venv/bin/python -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["group_keys"]))' "$ORIGINAL_CENSUS")
+done < <(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, census, _facts = read_held_private_json(Path(sys.argv[1]), label="G6 census keys", stage="receipt"); print("\n".join(census["group_keys"]))' "$ORIGINAL_CENSUS")
 test "$GROUP_INDEX" -eq "$REQUIRE_COUNT"
 ```
 
@@ -2251,12 +2277,14 @@ NATURAL_RECEIPT="$NATURAL_RECEIPT" \
   TIMER_AFTER="$TIMER_AFTER" SERVICE_START="$SERVICE_START" SERVICE_EXIT="$SERVICE_EXIT" \
   REVIEWED_SHA="$REVIEWED_SHA" W8_PATH="$W8_PATH" \
   /home/nwm/NWM/.venv/bin/python <<'PY'
-import json, os
+import os
 from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json
 from packages.common.node27_issue1895_timer import assert_natural_receipt_identity
 from packages.common.node27_issue1895_watermark import assert_independent_receipt_horizon
-receipt = json.load(open(os.environ["NATURAL_RECEIPT"]))
-horizon = json.load(open(os.environ["W8_PATH"]))
+_raw, receipt, _facts = read_held_private_json(Path(os.environ["NATURAL_RECEIPT"]), label="G8 natural receipt", stage="timer")
+_hraw, horizon, _hfacts = read_held_private_json(Path(os.environ["W8_PATH"]), label="G8 watermark", stage="timer")
 def _utc(value):
     value = value.strip()
     try:
@@ -2308,15 +2336,15 @@ uv run --no-sync python scripts/node27_issue1895_post_target_observe.py \
   --baseline "$ORIGINAL_CENSUS" --output "$POST_NATURAL" --reviewed-sha "$REVIEWED_SHA" \
   --lag-seconds "$NODE27_COLD_RESIDENCY_LAG_SECONDS" --display-env /home/nwm/NWM/infra/env/display.env
 chmod 600 "$POST_NATURAL"
-NEWLY="$(/home/nwm/NWM/.venv/bin/python -c 'import json,sys; from packages.common.node27_issue1895_post_target import newly_terminal_keys; pre=json.load(open(sys.argv[1])); post=json.load(open(sys.argv[2])); print("\n".join(newly_terminal_keys(pre_target_keys=pre["complete_target_keys"], post_target_keys=post["complete_target_keys"])))' "$PRE_NATURAL" "$POST_NATURAL")"
-REMAINING="$(/home/nwm/NWM/.venv/bin/python -c 'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["complete_source_keys"]))' "$POST_NATURAL")"
+NEWLY="$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; from packages.common.node27_issue1895_post_target import newly_terminal_keys; _pr, pre, _pf = read_held_private_json(Path(sys.argv[1]), label="G8 pre-natural", stage="post-target"); _po, post, _of = read_held_private_json(Path(sys.argv[2]), label="G8 post-natural", stage="post-target"); print("\n".join(newly_terminal_keys(pre_target_keys=pre["complete_target_keys"], post_target_keys=post["complete_target_keys"])))' "$PRE_NATURAL" "$POST_NATURAL")"
+REMAINING="$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, post, _facts = read_held_private_json(Path(sys.argv[1]), label="G8 post-natural remaining", stage="post-target"); print("\n".join(post["complete_source_keys"]))' "$POST_NATURAL")"
 uv run --no-sync python scripts/node27_issue1895_group_reconcile.py \
   --baseline "$ORIGINAL_CENSUS" \
   --observed "$POST_NATURAL" \
   --receipt "$NATURAL_RECEIPT" \
   --reviewed-sha "$REVIEWED_SHA" \
-  --expected-cutoff "$(/home/nwm/NWM/.venv/bin/python -c 'import json,sys; print(json.load(open(sys.argv[1]))["cutoff"])' "$W8_PATH")" \
-  --expected-watermark "$(/home/nwm/NWM/.venv/bin/python -c 'import json,sys; print(json.load(open(sys.argv[1]))["watermark"])' "$W8_PATH")" \
+  --expected-cutoff "$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, horizon, _facts = read_held_private_json(Path(sys.argv[1]), label="G8 watermark cutoff", stage="timer"); print(horizon["cutoff"])' "$W8_PATH")" \
+  --expected-watermark "$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, horizon, _facts = read_held_private_json(Path(sys.argv[1]), label="G8 watermark watermark", stage="timer"); print(horizon["watermark"])' "$W8_PATH")" \
   --invoked-unit nhms-node27-timeseries-compression.service \
   --remaining-all-source-keys "$REMAINING" \
   --newly-terminal-key "$NEWLY"

@@ -17,7 +17,7 @@ from packages.common.node27_issue1895_commit import (
     publish_performance_receipt,
 )
 from packages.common.node27_issue1895_display_runtime import DISPLAY_ENV_PATH, read_display_port
-from packages.common.node27_issue1895_dsn import assert_readonly_identity, resolve_readonly_dsn
+from packages.common.node27_issue1895_dsn import assert_readonly_identity, read_display_env_text, resolve_readonly_dsn
 from packages.common.node27_issue1895_http import (
     NoRedirect,
     close_response,
@@ -151,14 +151,7 @@ def resolve_live_dsn(
     environ: dict[str, str] | None = None,
 ) -> str:
     env = os.environ if environ is None else environ
-    try:
-        text = display_env_path.read_text(encoding="utf-8")
-    except OSError:
-        raise Issue1895ReadinessError(
-            "readonly DSN provenance is unreadable",
-            code="DSN_UNREADABLE",
-            stage="dsn",
-        ) from None
+    text = read_display_env_text(display_env_path)
     return resolve_readonly_dsn(display_env_text=text, environ=dict(env))
 
 

@@ -10,7 +10,8 @@ from urllib.parse import urlsplit
 from psycopg2.extensions import parse_dsn
 
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
-from packages.common.safe_fs import atomic_write_bytes_no_follow
+from packages.common.safe_fs import SafeFilesystemError
+from packages.common.safe_fs_publication import write_bytes_no_follow_exclusive
 
 DISPLAY_ENV_PATH = Path("/home/nwm/NWM/infra/env/display.env")
 DISPLAY_ENV_RELATIVE = Path("infra/env/display.env")
@@ -98,14 +99,35 @@ def resolve_readonly_dsn(*, display_env_text: str | None = None, environ: dict[s
     return extract_display_database_url(display_env_text)
 
 
+def read_display_env_text(path: str | Path) -> str:
+    """Read display.env through the shared held no-follow private identity reader."""
+
+    from packages.common.node27_issue1895_private_receipt import read_held_private_text
+
+    return read_held_private_text(
+        Path(path),
+        label="display.env",
+        stage="dsn",
+        unreadable_code="DSN_UNREADABLE",
+        identity_code="DSN_UNREADABLE",
+        toctou_code="DSN_UNREADABLE",
+    )
+
+
 def bind_rc_dsn_file(
     path: str | Path,
     *,
     dsn: str,
     mode: int = 0o600,
 ) -> None:
-    """Write RC_DSN_FILE privately. Never log the DSN."""
+    """Write RC_DSN_FILE privately. Never log the DSN. Never replace an existing path."""
 
+    if not isinstance(mode, int) or isinstance(mode, bool) or mode != 0o600:
+        raise Issue1895ReadinessError(
+            "RC_DSN_FILE mode must be exact private 0600 before publication",
+            code="DSN_FILE_INVALID",
+            stage="dsn",
+        )
     _dsn_user(dsn)
     target = Path(path)
     try:
@@ -118,6 +140,7 @@ def bind_rc_dsn_file(
         ) from None
     if (
         not target.is_absolute()
+        or "\x00" in str(target)
         or target.is_symlink()
         or not target.parent.is_dir()
         or parent.st_uid != os.geteuid()
@@ -135,23 +158,40 @@ def bind_rc_dsn_file(
             stage="dsn",
         )
     payload = f"{RC_DSN_ASSIGNMENT}={dsn}\n".encode("utf-8")
-    atomic_write_bytes_no_follow(
-        target,
-        payload,
-        containment_root=target.parent,
-        mode=mode,
-        require_durable_replace=True,
-    )
-    os.chmod(target, mode)
+    from packages.common.node27_issue1895_private_receipt import read_held_private_bytes
+
     try:
-        info = os.lstat(target)
-    except OSError:
+        write_bytes_no_follow_exclusive(
+            target,
+            payload,
+            containment_root=target.parent,
+            require_durable_create=True,
+            mode=mode,
+        )
+    except FileExistsError:
         raise Issue1895ReadinessError(
-            "RC_DSN_FILE cannot be stated after bind",
+            "RC_DSN_FILE already exists",
+            code="DSN_FILE_EXISTS",
+            stage="dsn",
+        ) from None
+    except (OSError, SafeFilesystemError):
+        raise Issue1895ReadinessError(
+            "RC_DSN_FILE cannot be published exclusively",
             code="DSN_FILE_INVALID",
             stage="dsn",
         ) from None
-    if info.st_uid != os.geteuid() or (info.st_mode & 0o777) != mode or info.st_nlink != 1:
+    try:
+        readback, info = read_held_private_bytes(
+            target,
+            label="RC_DSN_FILE",
+            stage="dsn",
+            unreadable_code="DSN_FILE_INVALID",
+            identity_code="DSN_FILE_INVALID",
+            toctou_code="DSN_FILE_INVALID",
+        )
+    except Issue1895ReadinessError:
+        raise
+    if readback != payload or (info.st_mode & 0o777) != mode or info.st_nlink != 1 or info.st_uid != os.geteuid():
         raise Issue1895ReadinessError(
             "RC_DSN_FILE post-publication identity is unsafe",
             code="DSN_FILE_INVALID",

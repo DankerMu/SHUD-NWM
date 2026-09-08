@@ -17,6 +17,7 @@ from packages.common.node27_issue1895_commit import (
 from packages.common.node27_issue1895_lanes import freeze_lanes
 from packages.common.node27_issue1895_performance import build_performance_receipt, validate_performance_receipt
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
+from scripts import node27_issue1895_performance_bind as performance_bind_cli
 from tests.test_issue1895_readiness_performance import _four_lanes, _public_lane
 from tests.test_issue1895_readiness_performance_live import BASIN, ORIGIN, SEGMENT, SHA
 
@@ -137,6 +138,56 @@ def test_performance_binder_closes_deep_json_without_traceback(tmp_path: Path) -
             expected_segment=SEGMENT,
         )
     assert invalid.value.code == "COMMIT_JSON"
+
+
+def test_performance_bind_cli_refuses_unsafe_bracket_before_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir()
+    os.chmod(parent, 0o700)
+    receipt = parent / "performance.json"
+    marker = parent / "performance.json.commit"
+    receipt.write_text("{}", encoding="utf-8")
+    marker.write_text("{}", encoding="utf-8")
+    os.chmod(receipt, 0o600)
+    os.chmod(marker, 0o600)
+    called = {"n": 0}
+
+    def refuse_bind(*_args: object, **_kwargs: object) -> dict[str, object]:
+        called["n"] += 1
+        raise AssertionError("bind_performance_artifacts must not run on unsafe bracket")
+
+    monkeypatch.setattr(performance_bind_cli, "bind_performance_artifacts", refuse_bind)
+    linked = tmp_path / "bracket-link"
+    real = parent / "bracket"
+    real.write_text("2026-09-04T00:00:00Z\n2026-09-04T00:01:00Z\n0\n", encoding="utf-8")
+    os.chmod(real, 0o600)
+    linked.symlink_to(real)
+    argv = [
+        "--receipt",
+        str(receipt),
+        "--commit",
+        str(marker),
+        "--reviewed-sha",
+        SHA,
+        "--basin-id",
+        BASIN,
+        "--segment-id",
+        SEGMENT,
+        "--bracket",
+        str(linked),
+    ]
+    assert performance_bind_cli.main(argv) == 1
+    assert called["n"] == 0
+    os.chmod(parent, 0o755)
+    argv[-1] = str(real)
+    assert performance_bind_cli.main(argv) == 1
+    assert called["n"] == 0
+    os.chmod(parent, 0o700)
+    explicit = list(argv[:-2]) + ["--cmd-start", "2026-09-04T00:00:00Z", "--cmd-end", "2026-09-04T00:01:00Z"]
+    monkeypatch.setattr(performance_bind_cli, "bind_performance_artifacts", lambda *_a, **_k: {"status": "PASS"})
+    assert performance_bind_cli.main(explicit) == 0
 
 
 def test_binder_rejects_inode_swap_parent_drift_and_post_link_failure(

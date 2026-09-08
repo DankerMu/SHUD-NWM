@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from packages.common.display_watermark import DisplayWatermarkError
-from packages.common.node27_issue1895_dsn import resolve_readonly_dsn
+from packages.common.node27_issue1895_dsn import read_display_env_text, resolve_readonly_dsn
 from packages.common.node27_issue1895_env import validate_canonical_positive_decimal
 from packages.common.node27_issue1895_post_target import run_post_target_observation
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         lag = int(validate_canonical_positive_decimal(args.lag_seconds, label="lag_seconds"))
         display_text = None
         if args.display_env is not None:
-            display_text = args.display_env.read_text(encoding="utf-8")
+            display_text = read_display_env_text(args.display_env)
         dsn = resolve_readonly_dsn(display_env_text=display_text, environ=dict(os.environ))
         run_post_target_observation(
             baseline_path=args.baseline,

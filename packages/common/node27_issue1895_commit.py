@@ -100,6 +100,7 @@ def _read_held_descriptor(
     *,
     code_prefix: str,
     expected_parent: os.stat_result | None = None,
+    max_bytes: int = MAX_RECEIPT_BYTES,
 ) -> tuple[bytes, os.stat_result, os.stat_result]:
     before_parent = expected_parent if expected_parent is not None else _parent_facts(path, code_prefix=code_prefix)
     before = _lstat_regular(path, code_prefix=code_prefix)
@@ -118,7 +119,7 @@ def _read_held_descriptor(
         _assert_regular_private(opened, code_prefix=code_prefix)
         if not _same_inode(before, opened):
             _refuse("opened inode drifted from the path lstat", f"{code_prefix}_INODE_SWAP")
-        if opened.st_size > MAX_RECEIPT_BYTES:
+        if opened.st_size > max_bytes:
             _refuse("file exceeds the byte ceiling", f"{code_prefix}_TOO_LARGE")
         chunks: list[bytes] = []
         remaining = int(opened.st_size)

@@ -8,10 +8,10 @@ receipt, never a catalog row count.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
+from packages.common.node27_issue1895_private_receipt import read_held_private_json
 from packages.common.node27_issue1895_timer import (
     COMPRESSION_SERVICE,
     assert_exact_cold_groups,
@@ -37,7 +37,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load(path: Path) -> dict:
-    document = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        _raw, document, _facts = read_held_private_json(
+            path,
+            label="group artifact",
+            stage="census",
+            unreadable_code="GROUP_ARTIFACT_INVALID",
+            identity_code="GROUP_ARTIFACT_INVALID",
+            toctou_code="GROUP_ARTIFACT_INVALID",
+            json_code="GROUP_ARTIFACT_INVALID",
+        )
+    except Issue1895ReadinessError as error:
+        if error.code.startswith("READINESS_INPUT_"):
+            raise Issue1895ReadinessError(
+                "artifact is not a private identity-bound JSON object",
+                code="GROUP_ARTIFACT_INVALID",
+                stage="census",
+            ) from error
+        raise
     if not isinstance(document, dict):
         raise Issue1895ReadinessError(
             "artifact is not an object",

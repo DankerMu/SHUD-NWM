@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from packages.common.node27_issue1895_fs import reconcile_moved_group_filesystem
+from packages.common.node27_issue1895_private_receipt import read_held_private_json
 from packages.common.node27_issue1895_receipt import unique_migrated_observation
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from packages.common.redaction import redact_text
@@ -29,7 +30,24 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        receipt = json.loads(args.receipt.read_text(encoding="utf-8"))
+        try:
+            _raw, receipt, _facts = read_held_private_json(
+                args.receipt,
+                label="filesystem receipt",
+                stage="filesystem",
+                unreadable_code="RECEIPT_SELECTED_INVALID",
+                identity_code="RECEIPT_SELECTED_INVALID",
+                toctou_code="RECEIPT_SELECTED_INVALID",
+                json_code="RECEIPT_SELECTED_INVALID",
+            )
+        except Issue1895ReadinessError as error:
+            if error.code.startswith("READINESS_INPUT_"):
+                raise Issue1895ReadinessError(
+                    "receipt selected is missing",
+                    code="RECEIPT_SELECTED_INVALID",
+                    stage="filesystem",
+                ) from error
+            raise
         observation = unique_migrated_observation(receipt)
         after = observation.get("after") if isinstance(observation.get("after"), dict) else {}
         members = after.get("members") or observation.get("members") or []

@@ -29,10 +29,13 @@ from packages.common.node27_issue1895_readonly_accept import validate_c2_receipt
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from services.orchestrator.scheduler_file_providers import MAX_FILE_PROVIDER_JSON_NODES, MAX_REGISTRY_MANIFEST_BYTES
 from tests.test_issue1895_readiness_c1_c2_c3 import (
+    INVALID_SHA,
     NOW,
+    PAST_BRACKET,
     REGISTRY_SCHEMA_VERSION,
     ROOT,
     SHA,
+    WRONG_SHA,
     FakeOpener,
     FakeResponse,
     _current_bracket,
@@ -366,6 +369,205 @@ def test_c3_owner_binds_current_display_api_db_registry_frontier_and_c4(tmp_path
     assert any(sql == EXACT_IDENTITY_SQL and isinstance(params, tuple) for sql, params in connection.executed)
     assert any(sql == COMPLETE_RUN_SQL and isinstance(params, tuple) for sql, params in connection.executed)
     assert all(request.get_method() == "GET" for request in opener.requests)
+
+
+def _c3_owner_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, FakeC3Connection, FakeOpener]:
+    private = tmp_path / "private"
+    _private(private)
+    display_env = private / "display.env"
+    display_env.write_text("NHMS_DISPLAY_API_PORT=18080\n", encoding="utf-8")
+    os.chmod(display_env, 0o600)
+    gfs = _c3_identity("GFS", run_id="gfs-run", cycle_time="2026-09-06T00:00:00Z")
+    ifs = _c3_identity("IFS", run_id="ifs-run", cycle_time="2026-09-06T06:00:00Z")
+    registry = private / "manifest-last.json"
+    registry.write_text(
+        json.dumps(
+            _registry_payload(
+                generated_at="2026-09-06T11:00:00Z",
+                models=[{"model_id": "model", "basin_id": "basin"}],
+            )
+        ),
+        encoding="utf-8",
+    )
+    baseline = private / "valid-times-baseline.json"
+    baseline.write_text(json.dumps({"valid_times": ["2026-09-06T00:00:00Z"]}), encoding="utf-8")
+    c4 = private / "c4.json"
+    c4.write_text(json.dumps(_c4_pass_document(gfs, ifs)), encoding="utf-8")
+    for path in (registry, baseline, c4):
+        os.chmod(path, 0o600)
+    connection = FakeC3Connection(
+        {"GFS": gfs, "IFS": ifs},
+        {
+            "gfs": [_c3_complete_row(gfs, "gfs")],
+            "IFS": [_c3_complete_row(ifs, "IFS")],
+        },
+    )
+    origin = "http://127.0.0.1:18080"
+    opener = FakeOpener(
+        {
+            f"{origin}/api/v1/mvp/qhh/latest-product?source=GFS&identity_only=true&basin_id=basin": (
+                _identity_response(gfs)
+            ),
+            f"{origin}/api/v1/mvp/qhh/latest-product?source=IFS&identity_only=true&basin_id=basin": (
+                _identity_response(ifs)
+            ),
+            f"{origin}/api/v1/layers/discharge/valid-times": FakeResponse(
+                json.dumps({"valid_times": ["2026-09-06T06:00:00Z"]}).encode()
+            ),
+        }
+    )
+    return display_env, registry, baseline, c4, private / "c3.json", connection, opener
+
+
+def test_c3_owner_refuses_invalid_or_mismatched_sha_without_publishing(tmp_path: Path) -> None:
+    display_env, registry, baseline, c4, receipt, connection, opener = _c3_owner_inputs(tmp_path)
+    with pytest.raises(Issue1895ReadinessError) as invalid:
+        observe_current_publication(
+            display_env=display_env,
+            registry=registry,
+            canonical_registry_path=registry,
+            allow_test_registry_override=True,
+            expected_display_env=display_env,
+            allow_test_display_env_override=True,
+            basin_id="basin",
+            baseline_valid_times=baseline,
+            c4_receipt=c4,
+            receipt_path=receipt,
+            head_sha=INVALID_SHA,
+            reviewed_sha=INVALID_SHA,
+            dsn="postgresql://nhms_display_ro@127.0.0.1/nhms",
+            opener=opener,
+            connect=lambda _dsn: connection,
+            now=lambda: "2026-09-06T12:00:00Z",
+        )
+    assert invalid.value.code == "READINESS_SHA_INVALID"
+    assert not receipt.exists()
+    with pytest.raises(Issue1895ReadinessError) as mismatch:
+        observe_current_publication(
+            display_env=display_env,
+            registry=registry,
+            canonical_registry_path=registry,
+            allow_test_registry_override=True,
+            expected_display_env=display_env,
+            allow_test_display_env_override=True,
+            basin_id="basin",
+            baseline_valid_times=baseline,
+            c4_receipt=c4,
+            receipt_path=receipt,
+            head_sha=SHA,
+            reviewed_sha=WRONG_SHA,
+            dsn="postgresql://nhms_display_ro@127.0.0.1/nhms",
+            opener=opener,
+            connect=lambda _dsn: connection,
+            now=lambda: "2026-09-06T12:00:00Z",
+        )
+    assert mismatch.value.code == "READINESS_SHA_MISMATCH"
+    assert not receipt.exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "failure"),
+    (("FAIL", None), ("BLOCKED", {"reason": "ops"}), ("PASS", {"reason": "ops"})),
+)
+def test_c3_owner_refuses_non_pass_c4_without_publishing(
+    tmp_path: Path, status: str, failure: dict[str, str] | None
+) -> None:
+    display_env, registry, baseline, c4, receipt, connection, opener = _c3_owner_inputs(tmp_path)
+    payload = json.loads(c4.read_text(encoding="utf-8"))
+    payload["status"] = status
+    payload["failure"] = failure
+    c4.write_text(json.dumps(payload), encoding="utf-8")
+    os.chmod(c4, 0o600)
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        observe_current_publication(
+            display_env=display_env,
+            registry=registry,
+            canonical_registry_path=registry,
+            allow_test_registry_override=True,
+            expected_display_env=display_env,
+            allow_test_display_env_override=True,
+            basin_id="basin",
+            baseline_valid_times=baseline,
+            c4_receipt=c4,
+            receipt_path=receipt,
+            head_sha=SHA,
+            reviewed_sha=SHA,
+            dsn="postgresql://nhms_display_ro@127.0.0.1/nhms",
+            opener=opener,
+            connect=lambda _dsn: connection,
+            now=lambda: "2026-09-06T12:00:00Z",
+        )
+    assert refused.value.code == "C3_C4_STATUS"
+    assert not receipt.exists()
+
+
+def test_c3_binder_refuses_wrong_invalid_sha_and_out_of_bracket(tmp_path: Path) -> None:
+    parent = tmp_path / "private"
+    _private(parent)
+    c4 = parent / "c4.json"
+    c4.write_text("{}", encoding="utf-8")
+    registry = parent / "manifest-last.json"
+    registry.write_text(
+        json.dumps(
+            _registry_payload(
+                generated_at="2026-09-06T11:00:00Z",
+                models=[{"model_id": "model", "basin_id": "basin"}],
+            )
+        ),
+        encoding="utf-8",
+    )
+    for path in (c4, registry):
+        os.chmod(path, 0o600)
+    receipt = parent / "c3.json"
+    document = _c3_document(c4)
+    document["registry_facts"] = _registry_document(registry)
+    document["registry_sha256"] = document["registry_facts"]["sha256"]
+    document["registry_generated_at"] = "2026-09-06T11:00:00Z"
+    publish_private_receipt(receipt, document, code_prefix="C3_RECEIPT", stage="c3")
+    original = receipt.read_bytes()
+    cmd_start, cmd_end = _current_bracket()
+    with pytest.raises(Issue1895ReadinessError) as wrong:
+        bind_c3_receipt(
+            receipt,
+            reviewed_sha=WRONG_SHA,
+            basin_id="basin",
+            c4_receipt=c4,
+            registry=registry,
+            canonical_registry_path=registry,
+            allow_test_registry_override=True,
+            cmd_start=cmd_start,
+            cmd_end=cmd_end,
+        )
+    assert wrong.value.code == "C3_BIND_SHA"
+    assert receipt.read_bytes() == original
+    with pytest.raises(Issue1895ReadinessError) as invalid:
+        bind_c3_receipt(
+            receipt,
+            reviewed_sha=INVALID_SHA,
+            basin_id="basin",
+            c4_receipt=c4,
+            registry=registry,
+            canonical_registry_path=registry,
+            allow_test_registry_override=True,
+            cmd_start=cmd_start,
+            cmd_end=cmd_end,
+        )
+    assert invalid.value.code == "READINESS_SHA_INVALID"
+    assert receipt.read_bytes() == original
+    with pytest.raises(Issue1895ReadinessError) as bracket:
+        bind_c3_receipt(
+            receipt,
+            reviewed_sha=SHA,
+            basin_id="basin",
+            c4_receipt=c4,
+            registry=registry,
+            canonical_registry_path=registry,
+            allow_test_registry_override=True,
+            cmd_start=PAST_BRACKET[0],
+            cmd_end=PAST_BRACKET[1],
+        )
+    assert bracket.value.code == "READINESS_BRACKET"
+    assert receipt.read_bytes() == original
 
 
 @pytest.mark.parametrize(
