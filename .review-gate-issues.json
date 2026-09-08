@@ -2830,7 +2830,13 @@
     "2015": {
       "ceilingPrs": [],
       "gateEntries": 1,
-      "closed": []
+      "closed": [
+        {
+          "pr": 2138,
+          "outcome": "merged",
+          "rounds": 4
+        }
+      ]
     }
   }
 }
