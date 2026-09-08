@@ -1,0 +1,27 @@
+{
+  "artifact": "nhms-frontend-c4-live-evidence",
+  "schema_version": "1.0",
+  "status": "BLOCKED",
+  "generated_at": "2026-09-04T01:00:01Z",
+  "started_at": "2026-09-04T01:00:00Z",
+  "ended_at": "2026-09-04T01:00:01Z",
+  "origins": {
+    "frontend": null,
+    "api": null
+  },
+  "requested_pins": null,
+  "gfs": null,
+  "ifs": null,
+  "home": null,
+  "ops": {
+    "gfs": null,
+    "ifs": null
+  },
+  "source_switch": null,
+  "no_control": null,
+  "failure": {
+    "code": "REQUIRED_ENV_MISSING",
+    "stage": "runtime",
+    "message": "missing required C4 live evidence env: PLAYWRIGHT_LIVE_C4_RECEIPT_PATH"
+  }
+}

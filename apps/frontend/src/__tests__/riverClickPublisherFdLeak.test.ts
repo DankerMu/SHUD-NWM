@@ -121,27 +121,31 @@ describe('river-click publisher descriptor lifecycle', () => {
     }
   })
 
-  describeFd('leaks no fd on parent-fstat failure (PARENT_CHANGED) and leaves no temp', () => {
+  describeFd('wraps a native parent-fstat EBADF as RiverClickPublicationError PARENT_CHANGED and leaves no temp', () => {
     const runDir = privateRunDir()
     try {
-      let mutated = false
+      let parentFd: number | null = null
       const fsSeam: RiverClickEvidenceFs = {
         ...normalFs(),
-        lstatSync: (p) => {
-          const info = fs.lstatSync(p)
-          if (p === runDir && !mutated) {
-            mutated = true
-            const modified = Object.create(Object.getPrototypeOf(info))
-            Object.assign(modified, info)
-            modified.ino = info.ino + 1
-            return modified as fs.Stats
-          }
-          return info
+        openSync: (p, flags, mode) => {
+          const fd = fs.openSync(p, flags, mode)
+          if (p === runDir) parentFd = fd
+          return fd
+        },
+        fstatSync: (fd) => {
+          if (fd === parentFd) throw Object.assign(new Error('native EBADF'), { code: 'EBADF' })
+          return fs.fstatSync(fd)
         },
       }
       const before = fdCount()
-      const code = catchCode(() => publishRiverClickEvidence(receiptName(runDir), passPayload(), { fs: fsSeam }))
-      expect(code).toBe('PARENT_CHANGED')
+      let thrown: unknown
+      try {
+        publishRiverClickEvidence(receiptName(runDir), passPayload(), { fs: fsSeam })
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(RiverClickPublicationError)
+      expect((thrown as RiverClickPublicationError).code).toBe('PARENT_CHANGED')
       expect(fdCount()).toBe(before)
       expect(fs.readdirSync(runDir)).toEqual([])
     } finally {
