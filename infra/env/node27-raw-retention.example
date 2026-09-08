@@ -38,6 +38,14 @@ NODE27_RAW_RETENTION_DAYS=14
 # canonical/<storage_source>/<cycle_token>, so a cycle whose mirror is gone
 # cannot keep being served from cached PNGs. Nothing else under this root is
 # touched -- the MVT tile cache is a sibling directory here.
+# That sibling has its OWN retention runner, issue #2032:
+# scripts/node27_mvt_cache_retention.py (unit
+# nhms-node27-mvt-cache-retention.timer, env template
+# infra/env/node27-mvt-cache-retention.example) prunes
+# <root>/<hh>/<sha256>.pbf, <root>/<hh>/.<sha256>.pbf.<pid>.tmp and
+# <root>/.locks/<hh>/<sha256>.lock on a WALL-CLOCK cutoff. The two runners
+# share this env value and nothing else, and neither ever enumerates the
+# other's subtree.
 #
 # ROOT-EQUALITY PRECONDITION (this is the first place retention's env is coupled
 # to the display API's env; the guarantee only holds while both point at ONE

@@ -1,0 +1,12 @@
+[Unit]
+Description=NHMS node-27 retention: MVT tile file cache (.pbf / .tmp / .lock)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/nwm/NWM
+Environment=NODE27_MVT_CACHE_RETENTION_ENV_FILE=/home/nwm/NWM/infra/env/node27-mvt-cache-retention.env
+ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-mvt-cache-retention-logs
+ExecStart=/home/nwm/NWM/scripts/node27_mvt_cache_retention_once.sh
+StandardOutput=append:/home/nwm/node27-mvt-cache-retention-logs/systemd.log
+StandardError=append:/home/nwm/node27-mvt-cache-retention-logs/systemd.err
+TimeoutStartSec=0
