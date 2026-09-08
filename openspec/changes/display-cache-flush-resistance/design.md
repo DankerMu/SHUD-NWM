@@ -32,7 +32,7 @@
 ### D2. 准入谓词 `cacheable`
 `display_catalog_cached(request, key, loader, *, cacheable: Callable[[Any], bool] | None = None)`。`value = loader()` 后：`cacheable is None or cacheable(value)` 为真 → 照旧 `_store_value` 并登记热 path；为假 → 不存、不登记，并调用 `_forget(key)` 把该 key 从 `_store` 与 `_hot_paths` 移除（**force-refresh 分支同样过谓词**：为真只 `_store_value`，为假 `_forget`；回放拿到空结果说明数据已过期或 key 本就是垃圾，继续保留旧值或继续回放都是错的）。force-refresh 分支**绝不**登记或刷新 `_hot_paths`（今天 `:129-132` 也不登记）：回放若刷新 `last_access`，热集合（含攻击者塞进来的 32 个可缓存 key）就永不过期，D4 的代价模型失去 1800 s 活跃窗口这个衰减项。谓词只看 loader 返回值，不看 request。非 display 角色直通时忽略谓词。
 - `/api/v1/runs`：`cacheable=lambda page: bool(page["items"])`——自由文本过滤与越界 offset 的空页每次都真跑一次 `list_runs`（两条 SQL，实测 ≈ 43 ms），接受：这是今天冷 miss 的代价，只是不再换来一条能被回放的缓存条目。
-- `/api/v1/layers/{layer_id}/valid-times`：`cacheable=lambda v: bool(v["valid_times"])`——交集外 `cycle` 的 fail-closed 空列表、无覆盖行的国家级空列表、非 discharge 图层的 `_empty_valid_times()` 都不进缓存（后两者本就不落 SQL 或只落一次）。
+- `/api/v1/layers/{layer_id}/valid-times`：`cacheable=lambda v: bool(v["valid_times"])`——交集外 `cycle` 的 fail-closed 空列表、无覆盖行的国家级空列表、非 discharge 图层的 `_empty_valid_times()` 都不进缓存。代价如实记：国家级无参形态在 fail-closed 期间每个请求都会跑一次 `_national_discharge_coverage_rows`（两条语句），改前该空列表会被缓存 ≤ 600 s——这是 Risks 里已接受的「空结果不缓存」代价；非 discharge 图层分支不落 SQL。谓词**不能**按「key 有界与否」缩窄到 `(source, cycle)` 形态（round-2 V1 否决）：非 discharge 图层的 `?run_id=<任意>` 在 `validate_identifier` 之前就返回空列表，若对它放开准入，就多出一条零 SQL、无界、可回放的 key 维度。
 - key 里的客户端可控 `str | None` 维度一律 `!r` 插值（round-1 A1 的同族：`runs:{basin_id!r}:{source!r}:{cycle!r}:{status!r}:…`、`valid-times:{layer_id}:{requested_run_id!r}:{source!r}:{cycle_key!r}`）：`repr(None) == "None"` 保留缺省维度的拼写，而字面值 `"None"` 变成 `'None'`，不再与缺省折叠。不做这一步的后果比 layers 更重——`GET /api/v1/runs?basin_id=None` 命中无过滤条目后把它的热 path 改写成带过滤的 URL，预热回放得到空页、谓词为假、`_forget` 每 tick 把合法无过滤条目清掉。
 - `/api/v1/layers/discharge/cycles`：不传谓词。`source` 是 `Literal`，key 空间为 2，空 `cycles` 缓存与否都无风险；保持不变以免改 timing。
 - `/api/v1/layers`：不传谓词。D5 之后 key 空间 = 已存在且 display-ready 的 `run_id` 集合 + `None`（未知 `run_id` → `_require_display_ready` → 404 抛出 → `test_loader_errors_are_not_cached` 已钉「异常不缓存」），有界（未知 run → 404，已知但未 ready → 409，都是异常 → 不缓存）；「无 display-ready run → `[]`」是一条 key，照旧缓存。
@@ -65,7 +65,7 @@ key `layers:{run_id!r}`（round-1 A1：`SAFE_TILE_IDENTIFIER_RE` 放行字面值
 ## Invariant Matrix
 
 - Governing invariant: 任何公网请求都不能整表清空 `_store`/`_hot_paths`；只有产生**可缓存结果**的请求才新增缓存条目或回放目标；每 tick 回放 ≤ `DISPLAY_CATALOG_WARM_REPLAY_MAX` 条且命中计数高者优先；四条路由响应体逐字节不变。
-- Source-of-truth identity/contract: `display_catalog_cached(..., cacheable=)` 的谓词（runs `items` 非空、valid-times `valid_times` 非空）；`layers:{run_id}` 的完整目录 + 缓存后切片；`_hot_paths[key] = (path, last_access, hits)`。
+- Source-of-truth identity/contract: `display_catalog_cached(..., cacheable=)` 的谓词（runs `items` 非空、valid-times `valid_times` 非空）；`layers:{run_id!r}` 的完整目录 + 缓存后切片；`_hot_paths[key] = (path, last_access, hits)`。
 - Producers: 四条目录 GET（`hydro_display.py` layers/cycles/valid-times，`forecast.py` runs）+ `precip.py:193` precip-index（key 空间以已镜像 cycle 为界，不改）；`_replay_targets`（force-refresh 分支，同受谓词约束）。
 - Validators/preflight: `Query(ge=/le=)`、`validate_identifier`、`Literal` source、`_validated_national_valid_time_selector`（422 在缓存之前）；本 change 的 `cacheable` 谓词。
 - Storage/cache/query: `display_cache._store`/`_hot_paths`（OrderedDict LRU）、`_store_value`/`_record_hot_path`/`_forget`、`_warm_loop` 排序快照。

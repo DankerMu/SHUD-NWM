@@ -230,7 +230,7 @@ ifs 13.26 两次实测中**较慢的那一次**（没有证据说它是 13 张�
 回放本身不登记也不刷新 `_hot_paths`，所以 1800 s 活跃窗口只由真实访问续期。
 回放拿到不可缓存的空结果时该 key 被忘记，不再是回放目标。
 
-**`/api/v1/layers` 分页在缓存之后**：key 收敛为 `layers:{run_id}`，缓存的是完整目录，路由再切
+**`/api/v1/layers` 分页在缓存之后**：key 收敛为 `layers:{run_id!r}`，缓存的是完整目录，路由再切
 `[offset : offset + limit]`。所以越界 `offset` 是不落 DB、不产生缓存条目的空页 200（契约写在 OpenAPI
 的 `offset` `description` 里，**不加** `maximum`：目录长度不是常量，安全性来自 key 不再含 offset）。
 
