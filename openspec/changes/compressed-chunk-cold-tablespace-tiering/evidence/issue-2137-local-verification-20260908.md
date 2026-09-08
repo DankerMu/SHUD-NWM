@@ -213,8 +213,17 @@ The full serial Phase 2 results were:
   Python file remains below 1000 lines.
 - No stash/reset/checkout/clean, node access or live evidence occurred.
 
+## Phase 6.2 invariant audit
+
+A read-only audit at `dd55eda06aa05b5f6574ae06bded994e4c6ed19a`
+covered the shared held-reader helper roots, every direct and indirect caller,
+producer/consumer boundaries, publication/readback, unchanged consumers and the
+regression matrix. It found no omitted `display.env` or natural-receipt opt-out,
+no accidental current-run opt-out, no long-lived-directory chmod workaround and
+no remaining unsafe matching pattern. The full report is
+`.workplans/pr-2144/review/invariant-audit-round2.md`.
+
 ## Pending at this record
 
-- Complete Phase 6.2 invariant audit, the one budgeted comprehensive review, Gap
-  Sweep and GitHub CI gates.
+- Complete the one budgeted comprehensive review, Gap Sweep and GitHub CI gates.
 - Do not access node-27 before #2137 merges.
