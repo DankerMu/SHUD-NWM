@@ -616,8 +616,11 @@ function nationalDischargeDefaultSource(layers: ApiLayer[]): string {
 
 /**
  * 某个源自己声明的默认周期（`/api/v1/layers/discharge/cycles?source=` 的 `default_cycle`）。
+ * 解不出来（记录缺席 / 非 available / `default_cycle` 为空）一律返回 null；**记录本身的状态**
+ * 由调用方另行区分（`buildLayerStates` 的三态分类），本函数只回答「有没有周期」。
  * `unwrapApiData` 是裸 `as T` 断言、零运行时校验，变形响应会带着 `cycles: undefined` 进来，
- * 故这里按「像没到达一样」处理，而不是让 `.default_cycle` 在取数链里抛。
+ * 故这里宽松判空而不是让 `.default_cycle` 在取数链里抛——响应已到达但畸形时，它与「到达且为空」
+ * 归入同一个终态（都不会再有第二次到达）。
  */
 function dischargeCyclesDefaultCycle(state: DischargeCyclesState | undefined): string | null {
   if (!state || state.status !== 'available') return null
@@ -1258,20 +1261,37 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     const buildLayerStates = (inputs: NonNullable<typeof layerStateInputs>): LayerState[] => {
       const cyclesBySource = get().cyclesBySource
       const pair = nationalDischargeActivePair(query, inputs.layers, cyclesBySource)
-      // 非默认对一律传覆盖：记录缺席 = 列表还没取回 → `pending`（空列表 + 独立文案），
-      // 绝不静默回落到目录里**默认周期**的 metadata.valid_times。默认对仍传 undefined
-      // （metadata 路径，同一次加载零次 valid-times 请求）。
-      // 例外：阶段 3 已被跳过时请求永远不会发出，`pending` 就是谎报「还在取」——记录缺席直接
-      // 落到与 reject 同一条终态文案（spec frontend-mvt-layer-consumption
-      // 「The active cycle's list is unresolved」：跳过的那次同样必须到达终态）。
-      // 第二处终态来源：非默认源的 cycles **取回失败**时活动对永远解不出来，之后不会再有任何
-      // valid-times 终态来覆盖它，`pending`（"还在取"）同样是谎报。
+      // 非默认对一律传覆盖：绝不静默回落到目录里**默认周期**的 metadata.valid_times。
+      // 默认对仍传 undefined（metadata 路径，同一次加载零次 valid-times 请求）。
+      //
+      // 「活动对解不出来」不是一个二元量，它有**三个**互不相同的成因，各自对应一条独立文案
+      // （#2014 round-3 finding A1：把它们塌成 error/非 error 的谓词已经第三次吃掉第三态）：
+      //   - 该源的 cycles 记录**缺席** → 请求真的在途 → `pending`。诚实，之后必有终态覆盖。
+      //   - 记录是 `error`（取回被拒）→ 活动对永远解不出来，不会再有 valid-times 终态来覆盖它，
+      //     `pending`（"还在取"）就是谎报 → `error` 终态。
+      //   - 记录是 `available` 而这里仍未解出对 = 列表**已到达且为空**（`default_cycle == null`，
+      //     后端按网交集 fail-closed 时的正常 200 输出，见 `hydro_display.py` 的路由 docstring）
+      //     → `fail-closed` 终态。什么都没有加载失败，故**不得**复用 error 文案。
+      // 阶段 3 被跳过（bootstrap 失败 → 请求永远不会发出）只**升级**记录缺席那一态：
+      // 已到达的记录自己就是终态事实，跳过与否都不改变它。
       const concreteSource = nationalConcreteSource(query.source)
       const sourceUnresolved = nationalDischargeSourceUnresolved(query, inputs.layers, cyclesBySource)
-      const sourceCyclesFailed =
-        sourceUnresolved && concreteSource !== null && cyclesBySource[concreteSource]?.status === 'error'
-      const missingRecord: ActiveCycleValidTimesOverride =
-        layerTimeEnrichmentSkipped || sourceCyclesFailed ? { status: 'error' } : { status: 'pending' }
+      const sourceCyclesRecord = concreteSource !== null ? cyclesBySource[concreteSource] : undefined
+      const unresolvedSourceRecord = (): ActiveCycleValidTimesOverride => {
+        switch (sourceCyclesRecord?.status) {
+          case 'error':
+            return { status: 'error' }
+          case 'available':
+            return { status: 'fail-closed' }
+          default:
+            return layerTimeEnrichmentSkipped ? { status: 'error' } : { status: 'pending' }
+        }
+      }
+      const missingRecord: ActiveCycleValidTimesOverride = sourceUnresolved
+        ? unresolvedSourceRecord()
+        : layerTimeEnrichmentSkipped
+          ? { status: 'error' }
+          : { status: 'pending' }
       const activeCycleValidTimes: Record<string, ActiveCycleValidTimesOverride> | undefined =
         pair && !pair.isDefault
           ? {

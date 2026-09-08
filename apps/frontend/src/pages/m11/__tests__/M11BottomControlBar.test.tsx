@@ -60,6 +60,10 @@ function layersFor(
   query: M11QueryState,
   metadata: CatalogMetadata,
   activeCycleValidTimes?: Parameters<typeof normalizeLayerStates>[0]['activeCycleValidTimes'],
+  // store 盖在 `LayerState` 上的活动周期章（`nationalDischargeActivePair` 的产物）。地图侧只读它
+  // 拼瓦片 URL，所以「条与图三元组同源」这条域包不变量的唯一判别入参就是它——不传 = 恒 null =
+  // `buildM11RegisteredOverlay` 恒短路，并列断言恒真（round-3 finding B1）。
+  activeNationalCycle?: string | null,
 ): LayerState[] {
   return normalizeLayerStates({
     query,
@@ -73,7 +77,13 @@ function layersFor(
       },
     ],
     activeCycleValidTimes,
+    activeNationalCycle,
   })
+}
+
+/** 全国瓦片 URL 的解码路径：cycle 段是「条与图同源」这条断言唯一的客观判据。 */
+function decodedTilePath(overlay: { source: { tiles: string[] } } | null): string | null {
+  return overlay ? decodeURIComponent(new URL(overlay.source.tiles[0], 'http://localhost').pathname) : null
 }
 
 function inputFor(
@@ -107,6 +117,11 @@ function availableCycles(cycleTimes: string[], source: 'gfs' | 'ifs' = 'gfs'): D
       default_cycle: cycleTimes[0] ?? null,
     },
   }
+}
+
+/** 某个源的 cycles **已到达且为空**：后端按网交集 fail-closed 时的正常 200 输出。 */
+function emptyCycles(source: 'gfs' | 'ifs' = 'ifs'): DischargeCyclesState {
+  return { status: 'available', cycles: { source, cycles: [], default_cycle: null } }
 }
 
 describe('deriveM11ControlBarModel', () => {
@@ -242,7 +257,7 @@ describe('deriveM11ControlBarModel', () => {
     expect(model.cycle).toBeNull()
   })
 
-  it('is fail-closed on a null default cycle, the same input that registers no overlay', () => {
+  it('is fail-closed on a null default cycle', () => {
     // AC3：`default_cycle === null` + 空 valid_times = 全国交集 fail-closed。
     const query = { ...defaultM11QueryState, validTime: '2026-05-18T06:00:00.000Z' }
     const metadata = dischargeMetadata({ valid_times: [], default_cycle: null })
@@ -254,11 +269,10 @@ describe('deriveM11ControlBarModel', () => {
     // round-2 finding C2：fail-closed 时有效 cycle 也归 null，否则展示层的
     // `cycleOptions = cycle && !cycles.includes(cycle) ? [cycle, ...cycles] : cycles` 把它塞回去。
     expect(model.cycle).toBeNull()
-    // 同一入参下地图侧也不注册叠加层。**两侧不再是同一条判据**（决策 13 孪生要求落地后）：
-    // 控制条看 `LayerState.disabledReason`，地图侧看 store 盖的 `activeNationalCycle` 章
-    // （这里 `layersFor` 不盖章，且 `valid_times: []` 让图层先在 `!available` 就短路）。
-    // 二者对 fail-closed 输入的**结论**仍必须一致，这正是本行钉的东西。
-    expect(buildM11RegisteredOverlay(query, layers)).toBeNull()
+    // 【round-3 finding B1】原先并列的 `expect(buildM11RegisteredOverlay(query, layers)).toBeNull()`
+    // 是一条**恒真** oracle（`layersFor` 不盖 `activeNationalCycle` 章，且 `valid_times: []` 让
+    // `!selectedLayer.available` 更早短路），已删除。「条与图三元组同源」的真 oracle 见下面
+    // AC8 的三臂，正臂用瓦片 URL 里的 cycle 段作判据。
   })
 
   it('empties the cycle list on a fail-closed catalog even when a cycles payload already arrived', () => {
@@ -308,6 +322,69 @@ describe('deriveM11ControlBarModel', () => {
       // —— DOM 那半见「keeps the cycle selector usable when one cycle failed to resolve its valid times」。
       expect(model.cycles).toEqual([DEFAULT_CYCLE])
     }
+  })
+
+  // ── AC8（round-3 finding B1）：条与图的周期必须同源。三臂缺一不可 —— 只写正臂会漏掉
+  // 「两侧皆 null」的终态，只写 null 臂会把「在途时条显示 URL 周期」这条**刻意保留的自救通道**
+  // 误禁掉。三臂由 orchestrator 裁定，不得二选一。
+
+  it('shows the same cycle the store stamped on the layer and the map substitutes into the tile URL', () => {
+    // AC8 正臂：`activeNationalCycle` 非 null 时两侧必须**同值**，判据是瓦片 URL 的 cycle 段。
+    // 这条承载「分歧严格是 null vs 非 null，从不在『哪个 cycle』上分歧」这条不变量；同时它让
+    // `buildM11RegisteredOverlay` 真的产出非 null overlay，堵死原先那条恒真的并列断言。
+    const query = { ...defaultM11QueryState, source: 'ifs' as const, validTime: MILLISECOND_VALID_TIMES[2] }
+    const metadata = dischargeMetadata()
+    const layers = layersFor(query, metadata, { discharge: { status: 'available', validTimes: VALID_TIMES } }, IFS_CYCLE)
+    const model = deriveM11ControlBarModel(
+      inputFor(query, { metadata, layers, cyclesBySource: { ifs: availableCycles([IFS_CYCLE], 'ifs') } }),
+    )
+
+    const stamped = layers.find((layer) => layer.layerId === 'discharge')?.activeNationalCycle
+    expect(stamped).toBe(IFS_CYCLE)
+    expect(model.cycle).toBe(stamped)
+    // 目录的 GFS 周期不得出现在任何一侧（两侧同为 null 也能让上面那条相等断言通过）。
+    expect(model.cycle).not.toBe(DEFAULT_CYCLE)
+    const overlay = buildM11RegisteredOverlay(query, layers)
+    expect(overlay).not.toBeNull()
+    expect(decodedTilePath(overlay)).toBe(
+      `/api/v1/tiles/hydro-national/ifs/${IFS_CYCLE}/q_down/${VALID_TIMES[2]}/{z}/{x}/{y}.pbf`,
+    )
+  })
+
+  it('drops a cross-source ?cycle= once the chosen source cycle list arrived empty', () => {
+    // AC8 已到达且为空臂（**今天红、修后绿**）：store 三态化后该输入的覆盖是 fail-closed 终态，
+    // 于是条侧 `failClosed` 闸口自然为真 → `cycles` 空 **且** `cycle` 归 null，两侧皆 null。
+    // 今天该臂落在 `pending`/`'Layer has no valid times.'` 上，闸口不开：`cycleOptions` 把
+    // `?cycle=X` 前置成 IFS 的选中项，select 可用 —— 正是本 PR 自己新建的控件上的跨身份显示。
+    const query = { ...defaultM11QueryState, source: 'ifs' as const, cycle: '2026-05-17T18:00:00.000Z' }
+    const metadata = dischargeMetadata()
+    const layers = layersFor(query, metadata, { discharge: { status: 'fail-closed' } }, null)
+    const { model } = renderControlBar(inputFor(query, { metadata, layers, cyclesBySource: { ifs: emptyCycles('ifs') } }))
+
+    const discharge = layers.find((layer) => layer.layerId === 'discharge')
+    expect(discharge?.disabledReason).toBe(failClosedDischargeDisabledReason)
+    expect(discharge?.activeNationalCycle).toBeNull()
+    expect(model.cycle).toBe(discharge?.activeNationalCycle ?? null)
+    expect(model.cycles).toEqual([])
+    const select = screen.getByLabelText('起报时次') as HTMLSelectElement
+    expect(select.disabled).toBe(true)
+    expect([...select.options].map((option) => option.textContent)).toEqual(['无可用起报时次'])
+  })
+
+  it('keeps the URL cycle selectable while the chosen source cycle list is still in flight', () => {
+    // AC8 在途臂（今天绿、修后仍绿）：记录**缺席** = 请求真的在途，那是诚实的过渡态，
+    // 条显示 URL 周期 + 并列渲染 pending 理由，`<select>` 保持可用 —— 这是起报时次控件唯一的
+    // 自救通道（决策 5 / AC3 明文保留），不得被三态化顺手禁掉。
+    const query = { ...defaultM11QueryState, source: 'ifs' as const, cycle: '2026-05-17T18:00:00.000Z' }
+    const metadata = dischargeMetadata()
+    const layers = layersFor(query, metadata, { discharge: { status: 'pending' } }, null)
+    const { model } = renderControlBar(inputFor(query, { metadata, layers, cyclesBySource: {} }))
+
+    expect(model.disabledReason).toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(model.cycle).toBe('2026-05-17T18:00:00Z')
+    const select = screen.getByLabelText('起报时次') as HTMLSelectElement
+    expect(select.disabled).toBe(false)
+    expect(select.value).toBe('2026-05-17T18:00:00Z')
   })
 
   it('stays renderable before the layer catalog lands', () => {
@@ -423,7 +500,9 @@ describe('M11BottomControlBar', () => {
     )
 
     await user.click(screen.getByRole('button', { name: 'IFS' }))
-    expect(onQueryChange).toHaveBeenLastCalledWith({ source: 'ifs' })
+    // AC9 / 决策 15：切源必须同时清 `cycle`，否则 GFS 上选定的周期会作为 IFS 的选中项存活
+    // （`cycleOptions` 还会把它**前置**成 IFS 的第一项），并让 store 拼出 `(ifs, C_gfs)`。
+    expect(onQueryChange).toHaveBeenLastCalledWith({ source: 'ifs', cycle: null })
 
     await user.selectOptions(screen.getByLabelText('起报时次'), '2026-05-17T12:00:00Z')
     expect(onQueryChange).toHaveBeenLastCalledWith({ cycle: '2026-05-17T12:00:00Z' })

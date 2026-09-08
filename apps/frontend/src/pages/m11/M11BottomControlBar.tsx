@@ -186,7 +186,12 @@ export function M11BottomControlBar({
             )}
             aria-pressed={source === option.value}
             title={option.description}
-            onClick={() => onQueryChange({ source: option.value })}
+            // 切源同时清 `cycle`（#2014 决策 15）：`OverviewPage.handleQueryChange` 是
+            // `{...state, ...patch}` 无跨字段重置，只发 `{ source }` 会让 GFS 上选定的周期在点
+            // IFS 后原样存活 —— store 据此拼出 `(ifs, C_gfs)`（后端 200 + 空列表 → 假文案），
+            // 上面的 `cycleOptions` 还会把它**前置**成 IFS 的选中项。`validTime` 不动：
+            // `pickCurrentValidTime` 已处理「旧时次不在新列表内」。
+            onClick={() => onQueryChange({ source: option.value, cycle: null })}
           >
             {option.label}
           </button>

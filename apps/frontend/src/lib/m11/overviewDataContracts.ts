@@ -556,17 +556,25 @@ export function resolveLayerValidTimesFromMetadata(metadata: ApiLayer['metadata'
 }
 
 /**
- * 活动 `(source, cycle)` 列表的三态覆盖。非默认周期时 store 必须传入本入参，且必须能表达
- * 「还没取回来」与「取失败了」——否则调用方只能传 `undefined`，`normalizeLayerStates` 会回落到
- * `metadata.valid_times`（**默认周期**的列表），图层报 `available: true` 却带着错周期的时次，
- * `buildM11RegisteredOverlay` 随即拼出跨周期瓦片 URL。
- * `pending` / `error` 一律解析为空列表（`available: false`，overlay 为 null，零瓦片请求），
- * 并各自对应一条独立文案。
+ * 活动 `(source, cycle)` 列表的**四态**覆盖。非默认周期时 store 必须传入本入参——否则调用方只能
+ * 传 `undefined`，`normalizeLayerStates` 会回落到 `metadata.valid_times`（**默认周期**的列表），
+ * 图层报 `available: true` 却带着错周期的时次，`buildM11RegisteredOverlay` 随即拼出跨周期瓦片 URL。
+ *
+ * 非 `available` 的三个状态**互不相同**，不得塌成一个二元谓词（#2014 round-3 finding A1 的根因）：
+ * - `pending`：请求真的在途（记录缺席）。诚实的过渡态，之后必有终态覆盖。
+ * - `error`：取回被拒 / 该次请求永不会发出。终态。
+ * - `fail-closed`：**已到达且为空**——该源没有任何起报时次覆盖全部流域（后端按网交集的正常
+ *   200 输出，见 `apps/api/routes/hydro_display.py` 的 `/layers/discharge/cycles` docstring）。
+ *   同样是终态，但什么都没有加载失败，故文案取 `failClosedDischargeDisabledReason`，
+ *   与目录 metadata 判定的 fail-closed 落在**同一分支等级**上。
+ *
+ * 三者一律解析为空列表（`available: false`，overlay 为 null，零瓦片请求），各自对应一条独立文案。
  */
 export type ActiveCycleValidTimesOverride =
   | { status: 'available'; validTimes: string[] }
   | { status: 'pending' }
   | { status: 'error' }
+  | { status: 'fail-closed' }
 
 /**
  * 活动周期的时次列表尚未取回时的禁用文案。必须与 `'Layer has no valid times.'` 和
@@ -580,7 +588,11 @@ export const pendingActiveCycleValidTimesDisabledReason =
 export const activeCycleValidTimesErrorDisabledReason =
   'Valid times for the selected cycle could not be loaded.'
 
-/** 活动周期列表处于未定态（pending / error）：调用方据此暂缓 validTime 自动校正，保住 URL 状态。 */
+/**
+ * 活动周期列表处于**未定**态（pending / error）：调用方据此暂缓 validTime 自动校正，保住 URL 状态。
+ * `fail-closed` **刻意不在**其中：那是终态，不会再有列表到来，校正照常进行——与目录 metadata
+ * 判定的 fail-closed 行为一致（两者产出同一条 `disabledReason`）。
+ */
 export function isM11ActiveCycleValidTimesUnresolved(layer: LayerState | null | undefined): boolean {
   return (
     layer?.disabledReason === pendingActiveCycleValidTimesDisabledReason ||
@@ -617,18 +629,19 @@ export function normalizeLayerStates(input: {
     // metadata 已是数组（含空数组）→ 完全忽略 fallback 覆盖；metadata 缺失才用调用方注入的 fallback。
     const fallbackValidTimes = requiresFallback ? normalizeValidTimes(input.validTimesByLayerId?.[layerId]) : []
     const activeCycleOverride = input.activeCycleValidTimes?.[layerId]
-    // 未定态（pending/error）一律清空两路时次来源：不能落回 metadata（默认周期的列表），
-    // 也不能经 `apiValidTimes.length > 0 ? … : derivedValidTimes` 从 derived 复活 `available: true`。
-    const unresolvedActiveCycle =
+    // 非 available 的三态（pending / error / fail-closed）一律清空两路时次来源：不能落回 metadata
+    // （默认周期的列表），也不能经 `apiValidTimes.length > 0 ? … : derivedValidTimes` 从 derived
+    // 复活 `available: true`。**状态本身**（不是「是/否未定」这个布尔）向下传给文案分支。
+    const activeCycleOverrideStatus =
       activeCycleOverride && activeCycleOverride.status !== 'available' ? activeCycleOverride.status : null
-    const apiValidTimes = unresolvedActiveCycle
+    const apiValidTimes = activeCycleOverrideStatus
       ? []
       : activeCycleOverride?.status === 'available'
         ? normalizeValidTimes(activeCycleOverride.validTimes)
         : requiresFallback
           ? fallbackValidTimes
           : metadataValidTimes
-    const derivedValidTimes = unresolvedActiveCycle ? [] : normalizeValidTimes(input.derivedValidTimes?.[layerId])
+    const derivedValidTimes = activeCycleOverrideStatus ? [] : normalizeValidTimes(input.derivedValidTimes?.[layerId])
     const validTimes = apiValidTimes.length > 0 ? apiValidTimes : derivedValidTimes
     const currentValidTime = pickCurrentValidTime(validTimes, input.query.validTime)
     const isKnownRequired = (requiredLayers as string[]).includes(layerId)
@@ -653,11 +666,14 @@ export function normalizeLayerStates(input: {
           ? 'Layer is registered but no renderable map source is implemented in this repository.'
           : !apiLayer && isKnownRequired
             ? 'Layer is not registered by the API.'
-            : isFailClosedDischargeMetadata(layerId, metadata)
+            : // 「该源的周期列表已到达且为空」与「目录判 fail-closed」是同一件事的两个观测面
+              // （前者按源、后者只对 GFS 目录成立），故必须在**同一分支等级**上求值——把它排到
+              // 下面 pending/error 之后，就会被那两个过渡态文案吃掉（round-3 finding A1）。
+              isFailClosedDischargeMetadata(layerId, metadata) || activeCycleOverrideStatus === 'fail-closed'
               ? failClosedDischargeDisabledReason
-              : unresolvedActiveCycle === 'pending'
+              : activeCycleOverrideStatus === 'pending'
                 ? pendingActiveCycleValidTimesDisabledReason
-                : unresolvedActiveCycle === 'error'
+                : activeCycleOverrideStatus === 'error'
                   ? activeCycleValidTimesErrorDisabledReason
                   : validTimes.length === 0
                     ? 'Layer has no valid times.'
@@ -692,12 +708,22 @@ export function mergeLayerCatalogs(runlessLayers: ApiLayer[], scopedLayers: ApiL
   return [...merged.values()]
 }
 
-/** 在展示边界再次保留 bootstrap 的 time-less 基础图层，防止异步快照切换造成图层闪退。 */
+/**
+ * 在展示边界再次保留 bootstrap 的 time-less 基础图层，防止异步快照切换造成图层闪退。
+ *
+ * **fail-closed 的全国 discharge 不算 time-less**（#2014 round-3 finding A2）：后端在样本时次为空时
+ * 把 `default_cycle` 也抹成 `None`（`apps/api/routes/hydro_display.py`），故 `valid_times == []` 与
+ * `default_cycle == null` 恒同现——目录 fail-closed 恰好长成 time-less 的样子。照旧钉死的话，store
+ * 按所选源重算出的健康 discharge 层既到不了 DOM 也到不了瓦片，store 测试全绿而页面上什么都没变。
+ * 排除它是安全的：`discharge` 在 `requiredLayers` 内、恒存在于 `snapshotLayers`，不会造成该钉死
+ * 本要防的图层闪退。`mergeLayerCatalogs` 的同名判定**不动**——那是 runless vs run-scoped 的身份问题。
+ */
 export function mergeLayerStates(bootstrapLayers: LayerState[], snapshotLayers: LayerState[]): LayerState[] {
   const merged = new Map(bootstrapLayers.map((layer) => [layer.layerId, layer]))
   for (const layer of snapshotLayers) {
     const bootstrap = merged.get(layer.layerId)
-    if (bootstrap && isTimeLessLayerMetadata(bootstrap.metadata)) continue
+    if (bootstrap && isTimeLessLayerMetadata(bootstrap.metadata) && !isFailClosedDischargeMetadata(layer.layerId, bootstrap.metadata))
+      continue
     merged.set(layer.layerId, layer)
   }
   return [...merged.values()]
