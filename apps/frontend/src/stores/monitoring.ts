@@ -193,7 +193,7 @@ function strictIdentityQuery(identity: MonitoringStrictIdentity | null) {
 }
 
 export function isDisplayReadonlyRuntimeConfig(runtimeConfig: RuntimeConfig | null) {
-  return runtimeConfig?.service_role === 'display_readonly' || Boolean(runtimeConfig?.display_readonly)
+  return runtimeConfig?.service_role === 'display_readonly' && runtimeConfig.display_readonly === true
 }
 
 function validateRuntimeConfig(value: RuntimeConfig) {

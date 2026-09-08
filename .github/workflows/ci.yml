@@ -137,6 +137,10 @@ jobs:
             frontend:
               - 'apps/frontend/**'
               - 'openapi/**'
+              # C4's AJV negative suite is frontend-only. Schema metavalidation
+              # and positive examples cannot prove its branch rejections.
+              - 'schemas/frontend_c4_live_evidence.schema.json'
+              - 'schemas/examples/frontend_c4_live_evidence*.json'
             docs:
               - 'docs/**'
             openapi:

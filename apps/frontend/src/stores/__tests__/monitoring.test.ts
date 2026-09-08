@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { client } from '@/api/client'
 import type { PipelineCycle, PipelineJob, PipelineJobPage, PipelineStage, QueueState, RuntimeConfig } from '@/stores/monitoring'
-import { useMonitoringStore } from '@/stores/monitoring'
+import { isDisplayReadonlyRuntimeConfig, useMonitoringStore } from '@/stores/monitoring'
 
 vi.mock('@/api/client', () => ({
   client: {
@@ -648,6 +648,25 @@ describe('useMonitoringStore', () => {
     expect(paths).toEqual(['/api/v1/runtime/config', '/api/v1/pipeline/status', '/api/v1/pipeline/stages'])
     expect(useMonitoringStore.getState().queueError).toContain('display_readonly')
   })
+
+  it.each(['compute_control', 'dev_monolith', 'slurm_gateway'] as const)(
+    'does not treat a %s runtime payload with display_readonly=true as readonly',
+    async (serviceRole) => {
+      const runtimeConfig: RuntimeConfig = {
+        service_role: serviceRole,
+        control_mutations_enabled: false,
+        slurm_routes_enabled: false,
+        queue_depth_mode: 'display_readonly_unavailable',
+        display_readonly: true,
+      }
+      vi.mocked(client.GET).mockResolvedValue(success(runtimeConfig) as never)
+
+      await useMonitoringStore.getState().fetchRuntimeConfig()
+
+      expect(useMonitoringStore.getState().runtimeConfig).toEqual(runtimeConfig)
+      expect(isDisplayReadonlyRuntimeConfig(useMonitoringStore.getState().runtimeConfig)).toBe(false)
+    },
+  )
 
   it('rejects wrong-run strict jobs instead of storing mismatched PASS evidence', async () => {
     useMonitoringStore.setState({

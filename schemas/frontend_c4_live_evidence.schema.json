@@ -1,0 +1,369 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NHMS Frontend C4 Live Evidence",
+  "description": "Schema-1.0 PASS/FAIL/BLOCKED receipt for the dedicated #1895 C4 live display browser evidence lane. Draft 2020-12 validates representable structure and formats; PASS-only semantic validation and the binder additionally require ops.gfs.job_id and ops.ifs.job_id to differ.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact",
+    "schema_version",
+    "status",
+    "generated_at",
+    "started_at",
+    "ended_at",
+    "origins",
+    "requested_pins",
+    "gfs",
+    "ifs",
+    "home",
+    "ops",
+    "source_switch",
+    "no_control",
+    "failure"
+  ],
+  "properties": {
+    "artifact": {"const": "nhms-frontend-c4-live-evidence"},
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED"]},
+    "generated_at": {"$ref": "#/$defs/utc_rfc3339"},
+    "started_at": {"$ref": "#/$defs/utc_rfc3339"},
+    "ended_at": {"$ref": "#/$defs/utc_rfc3339"},
+    "origins": {"$ref": "#/$defs/origins"},
+    "requested_pins": {"$ref": "#/$defs/pins"},
+    "gfs": {"$ref": "#/$defs/product_gfs"},
+    "ifs": {"$ref": "#/$defs/product_ifs"},
+    "home": {"$ref": "#/$defs/home"},
+    "ops": {"$ref": "#/$defs/ops"},
+    "source_switch": {"$ref": "#/$defs/source_switch"},
+    "no_control": {"$ref": "#/$defs/no_control"},
+    "failure": {"$ref": "#/$defs/failure"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "PASS"}}},
+      "then": {
+        "properties": {
+          "requested_pins": {"not": {"type": "null"}},
+          "gfs": {"not": {"type": "null"}},
+          "ifs": {"not": {"type": "null"}},
+          "home": {"not": {"type": "null"}},
+          "origins": {
+            "properties": {
+              "frontend": {"not": {"type": "null"}},
+              "api": {"not": {"type": "null"}}
+            }
+          },
+          "ops": {
+            "properties": {
+              "gfs": {
+                "allOf": [
+                  {"not": {"type": "null"}},
+                  {
+                    "properties": {
+                      "slurm_request_count": {"const": 0},
+                      "non_get_control_count": {"const": 0}
+                    }
+                  }
+                ]
+              },
+              "ifs": {
+                "allOf": [
+                  {"not": {"type": "null"}},
+                  {
+                    "properties": {
+                      "slurm_request_count": {"const": 0},
+                      "non_get_control_count": {"const": 0}
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "source_switch": {"not": {"type": "null"}},
+          "no_control": {
+            "allOf": [
+              {"not": {"type": "null"}},
+              {
+                "properties": {
+                  "slurm_request_count": {"const": 0},
+                  "non_get_control_count": {"const": 0}
+                }
+              }
+            ]
+          },
+          "failure": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "BLOCKED"}}},
+      "then": {
+        "properties": {
+          "origins": {"properties": {"frontend": {"type": "null"}, "api": {"type": "null"}}},
+          "requested_pins": {"type": "null"},
+          "gfs": {"type": "null"},
+          "ifs": {"type": "null"},
+          "home": {"type": "null"},
+          "ops": {"properties": {"gfs": {"type": "null"}, "ifs": {"type": "null"}}},
+          "source_switch": {"type": "null"},
+          "no_control": {"type": "null"},
+          "failure": {"not": {"type": "null"}}
+        },
+        "allOf": [
+          {
+            "if": {"required": ["failure"]},
+            "then": {
+              "properties": {
+                "failure": {"properties": {"code": {"enum": ["REQUIRED_ENV_MISSING", "RUNTIME_UNAVAILABLE"]}}}
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"status": {"const": "FAIL"}}},
+      "then": {
+        "properties": {
+          "failure": {"not": {"type": "null"}}
+        },
+        "allOf": [
+          {
+            "if": {"required": ["failure"]},
+            "then": {
+              "properties": {
+                "failure": {"properties": {"code": {"not": {"enum": ["REQUIRED_ENV_MISSING", "RUNTIME_UNAVAILABLE"]}}}}
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "utc_rfc3339": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "identity": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "not": {
+        "anyOf": [
+          {"pattern": "^(?:[Hh][Tt][Tt][Pp][Ss]?|[Ff][Tt][Pp]|[Ff][Ii][Ll][Ee]|[Ww][Ss][Ss]?):"},
+          {"pattern": "^(?:[A-Za-z][A-Za-z0-9+.-]*:)?\\/\\/"},
+          {"pattern": "^[^\\s\\/@]+@[^\\s\\/@]+$"}
+        ]
+      }
+    },
+    "http_2xx": {
+      "type": "integer",
+      "minimum": 200,
+      "maximum": 299
+    },
+    "origins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frontend", "api"],
+      "properties": {
+        "frontend": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 256}]},
+        "api": {"anyOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 256}]}
+      }
+    },
+    "pins": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["basin_id", "river_segment_id"],
+          "properties": {
+            "basin_id": {"$ref": "#/$defs/identity"},
+            "river_segment_id": {"$ref": "#/$defs/identity"}
+          }
+        }
+      ]
+    },
+    "product_common": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id", "basin_id", "basin_version_id", "river_network_version_id",
+        "run_id", "model_id", "cycle_time", "scenario"
+      ],
+      "properties": {
+        "source_id": {"enum": ["GFS", "IFS"]},
+        "basin_id": {"$ref": "#/$defs/identity"},
+        "basin_version_id": {"$ref": "#/$defs/identity"},
+        "river_network_version_id": {"$ref": "#/$defs/identity"},
+        "run_id": {"$ref": "#/$defs/identity"},
+        "model_id": {"$ref": "#/$defs/identity"},
+        "cycle_time": {"$ref": "#/$defs/utc_rfc3339"},
+        "scenario": {"enum": ["forecast_gfs_deterministic", "forecast_ifs_deterministic"]}
+      }
+    },
+    "product_gfs": {
+      "anyOf": [
+        {"type": "null"},
+        {"allOf": [
+          {"$ref": "#/$defs/product_common"},
+          {"properties": {"source_id": {"const": "GFS"}, "scenario": {"const": "forecast_gfs_deterministic"}}}
+        ]}
+      ]
+    },
+    "product_ifs": {
+      "anyOf": [
+        {"type": "null"},
+        {"allOf": [
+          {"$ref": "#/$defs/product_common"},
+          {"properties": {"source_id": {"const": "IFS"}, "scenario": {"const": "forecast_ifs_deterministic"}}}
+        ]}
+      ]
+    },
+    "home": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "path", "map_surface_visible", "runtime_config_status", "runtime_service_role",
+            "current_read_observed", "current_read_path"
+          ],
+          "properties": {
+            "path": {"const": "/"},
+            "map_surface_visible": {"const": true},
+            "runtime_config_status": {"$ref": "#/$defs/http_2xx"},
+            "runtime_service_role": {"const": "display_readonly"},
+            "current_read_observed": {"const": true},
+            "current_read_path": {"enum": ["/api/v1/basins", "/api/v1/layers", "/api/v1/mvp/qhh/latest-product"]}
+          }
+        }
+      ]
+    },
+    "ops_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id", "path", "heading_observed", "permission_denied", "runtime_unavailable",
+        "status_status", "stages_status", "jobs_status", "job_id", "logs_status",
+        "role_selector_count", "retry_cancel_control_count", "slurm_request_count",
+        "non_get_control_count", "queue_readonly_visible", "operator_recovery_visible"
+      ],
+      "properties": {
+        "source_id": {"enum": ["GFS", "IFS"]},
+        "path": {"const": "/ops"},
+        "heading_observed": {"const": true},
+        "permission_denied": {"const": false},
+        "runtime_unavailable": {"const": false},
+        "status_status": {"$ref": "#/$defs/http_2xx"},
+        "stages_status": {"$ref": "#/$defs/http_2xx"},
+        "jobs_status": {"$ref": "#/$defs/http_2xx"},
+        "job_id": {"$ref": "#/$defs/identity"},
+        "logs_status": {"$ref": "#/$defs/http_2xx"},
+        "role_selector_count": {"const": 0},
+        "retry_cancel_control_count": {"const": 0},
+        "slurm_request_count": {"type": "integer", "minimum": 0},
+        "non_get_control_count": {"type": "integer", "minimum": 0},
+        "queue_readonly_visible": {"const": true},
+        "operator_recovery_visible": {"const": true}
+      }
+    },
+    "ops": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gfs", "ifs"],
+      "properties": {
+        "gfs": {
+          "anyOf": [
+            {"type": "null"},
+            {"allOf": [{"$ref": "#/$defs/ops_check"}, {"properties": {"source_id": {"const": "GFS"}}}]}
+          ]
+        },
+        "ifs": {
+          "anyOf": [
+            {"type": "null"},
+            {"allOf": [{"$ref": "#/$defs/ops_check"}, {"properties": {"source_id": {"const": "IFS"}}}]}
+          ]
+        }
+      }
+    },
+    "source_switch": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["both_sources_completed", "identities_distinct_or_source_bound"],
+          "properties": {
+            "both_sources_completed": {"const": true},
+            "identities_distinct_or_source_bound": {"const": true}
+          }
+        }
+      ]
+    },
+    "no_control": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["slurm_request_count", "non_get_control_count"],
+          "properties": {
+            "slurm_request_count": {"type": "integer", "minimum": 0},
+            "non_get_control_count": {"type": "integer", "minimum": 0}
+          }
+        }
+      ]
+    },
+    "failure": {
+      "anyOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "stage", "message"],
+          "properties": {
+            "code": {"enum": [
+              "REQUIRED_ENV_MISSING",
+              "RUNTIME_UNAVAILABLE",
+              "CONFIG_INVALID",
+              "PREFLIGHT_HTTP_ERROR",
+              "PREFLIGHT_RESPONSE_INVALID",
+              "PRODUCT_UNAVAILABLE",
+              "IDENTITY_MISMATCH",
+              "SEGMENT_GEOMETRY_INVALID",
+              "HOME_NOT_READY",
+              "RUNTIME_CONFIG_INVALID",
+              "PERMISSION_DENIED",
+              "OPS_UNAVAILABLE",
+              "OPS_IDENTITY_MISMATCH",
+              "JOB_LOG_MISSING",
+              "FORBIDDEN_CONTROL",
+              "SOURCE_SWITCH_FAILED",
+              "WHOLE_RUN_TIMEOUT",
+              "STEP_TIMEOUT",
+              "IDENTITY_DRIFT",
+              "INTERNAL_ERROR",
+              "LISTENER_LEAK"
+            ]},
+            "stage": {"enum": ["config", "runtime", "preflight", "home", "ops", "source_switch", "timeout"]},
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "not": {
+                "anyOf": [
+                  {"pattern": "(?:[Hh][Tt][Tt][Pp][Ss]?|[Ff][Tt][Pp]|[Ff][Ii][Ll][Ee]|[Ww][Ss][Ss]?):"},
+                  {"pattern": "\\b[^\\s\\/@]+@[^\\s\\/@]+\\b"}
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
