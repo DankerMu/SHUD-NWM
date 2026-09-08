@@ -3824,3 +3824,24 @@ the successor (as done here) instead of rotating it in later. The measurement
 caveats above remain load-bearing; any reversal still requires maintainer
 review rather than an automatic ratio threshold. Next revisit on the audit's
 next flag or a maintainer override.
+
+## Revisit 2026-09-08 (post-merge PR #2120 / issue #2112)
+
+`loop_log_audit.py` flags the question DECIDABLE at 186 multi-round merged PRs,
+with later-round catches `core=225`, `rotated=269`, `phase=53`, and 15 skipped
+as non-attributable. Relative to the immediately preceding #2138 sample, this
+PR adds one multi-round denominator and changes none of the four attribution
+counts.
+
+PR #2120's only net catch was the Round 1 test-evidence finding that final RED
+and mutation provenance were incomplete. It was closed evidence-only. Round 2
+used a pinned correctness/invariant seat plus a focused test-evidence/spec seat
+and returned zero candidates; Phase 7 was also clean. This is therefore not a
+rotation-effect sample: no later-round catch exists to attribute, so the added
+denominator cannot distinguish useful rotation from an already-complete fix.
+
+Decision unchanged: **keep rotation**. The cumulative rotated count still
+exceeds core, but #2120 adds no evidentiary strength in either direction. The
+measurement caveats above remain load-bearing; any reversal still requires
+maintainer review rather than an automatic ratio threshold. Next revisit on
+the audit's next flag or a maintainer override.
