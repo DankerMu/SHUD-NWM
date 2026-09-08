@@ -3872,3 +3872,19 @@ seat, which the rotation question does not attribute either way.
 
 Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
 maintainer override.
+
+## 2026-09-08 revisit — PR #2168 (#2079, fixture `high`)
+
+The audit flagged DECIDABLE again on unchanged cumulative figures (core=225 /
+rotated=269 / phase=53, now over 190 multi-round merged PRs). PR #2168 adds
+denominator without rotation signal: all five net catches came in Round 1 (the
+full `high` seat set: correctness, invariant-state, test-evidence/spec-compliance,
+security-perf/integration — three of the five, including the only P1, from the
+security-perf/integration seat), Round 2 seated correctness + test-evidence/
+spec-compliance + security-perf/integration and returned zero candidates, and the
+one Phase 7 catch (receipt threshold wording and a stale design sentence, minor)
+belongs to the final-review seat, which the rotation question does not attribute
+either way.
+
+Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
+maintainer override.
