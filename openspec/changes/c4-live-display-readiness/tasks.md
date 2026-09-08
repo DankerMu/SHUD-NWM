@@ -34,4 +34,4 @@ Post-merge obligation: 合并后以独立 accountability/archive 变更记录最
 
 历史 798 frontend tests 和相关 Python green 只作线索，不满足本切片整合 master 后的 frozen-SHA Evidence Floor。项目 display live oracle 无豁免：本 PR 只合并未部署能力，生产激活与 node-27 C1–C4 receipt 由完整 readiness merge 后的 #1895 完成。在此之前不得声称本切片生产验收完成。
 
-验证证据：`evidence/phase2.md` 绑定实现提交 `97c7ec4e`。3.6 的 frontend 部分通过，Python CI-scope 断言等待 CI，整项不提前勾选；3.4 的勾选仅对应本切片 C4 契约，不代替 #1895 外层 SHA/digest 验收。
+验证证据：`evidence/phase2.md` 绑定实现提交 `97c7ec4e`，round-1 fix verification 绑定 `7a4ada4c`；3.6 的 Python CI-scope 断言已由 `evidence/ci-selector.md` 证明实际执行。3.4 的勾选仅对应本切片 C4 契约，不代替 #1895 外层 SHA/digest 验收。
