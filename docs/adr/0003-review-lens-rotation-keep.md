@@ -3746,3 +3746,23 @@ round ledger already carries the answer in its `repeats prior class` field, whic
 `yes` for the first time at round 5 here.
 
 Next revisit on the audit's next flag or a maintainer override.
+
+## Revisit 2026-09-08 (post-merge PR #2126 / issue #2123)
+
+`loop_log_audit.py` flags the question DECIDABLE at 183 multi-round merged PRs,
+with later-round catches `core=210`, `rotated=266`, `phase=53`, and 15 skipped
+as non-attributable. Relative to the immediately preceding recorded sample after
+PR #2117 (182 / 210 / 266 / 53 / 15), only the denominator moved.
+
+PR #2126 produced four verified catches in Round 1. Its three-seat Round 2
+closed those fixes and found one P2 wording ambiguity, which was routed to
+#2130 under the P2-only policy; no later-round catch was attributed to any seat.
+The Phase 7 Gap Sweep was clean. This sample therefore says nothing about
+whether rotation helped or hurt: a clean follow-up round adds an opportunity
+but no attributable catch, and the aggregate cannot infer value from absence.
+
+Decision unchanged: **keep rotation**. The cumulative rotated count still
+exceeds core, but this PR adds no evidentiary strength to that direction. The
+measurement caveats and the #2117 counter-datum above remain load-bearing; any
+future reversal still requires maintainer review rather than an automatic
+ratio threshold. Next revisit on the audit's next flag or a maintainer override.
