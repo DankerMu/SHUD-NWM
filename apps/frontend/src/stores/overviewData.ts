@@ -167,6 +167,15 @@ interface OverviewDataState {
   validTimesByCycle: Record<string, ValidTimesState>
   /** key = `m11SourceCycleKey(source, cycle)`。 */
   precipIndexByCycle: Record<string, PrecipIndexState>
+  /**
+   * 本轮 `loadOverview` 的阶段 3（layer-time enrichment）已确定被整段跳过（bootstrap 失败 →
+   * cycles / per-cycle valid-times / precip index 一条都不会发）。
+   *
+   * 上面三个 map 的「键缺席」在跳过之后不再是「还在取」——阶段 2 仍能用 run-scoped 目录把图层
+   * 渲染正常，页面看上去健康，而 index 永远不会到达。消费方（`resolveM11PrecipOverlay`）据此把
+   * 「在途」与「终态失败」分开（fixture #2015 决策 1 第 3 臂）。
+   */
+  layerTimeEnrichmentSkipped: boolean
   loadOverview: (query: M11QueryState) => Promise<OverviewDataSnapshot>
   loadBasinDetail: (basinId: string, query: M11QueryState) => Promise<BasinDataSnapshot>
   clearCache: () => void
@@ -270,7 +279,13 @@ export function clearOverviewDataCache() {
   // 三个 layer-time 缓存与 HTTP `cache` 同寿（tasks.md「由 clearOverviewDataCache() / clearCache()
   // 清除」）：留着它们会让下一轮加载在新 nonce 下读到上一轮的 `(source, cycle)` 列表 / index。
   // 调用一律发生在模块初始化之后，故此处对 `useOverviewDataStore` 的前向引用在运行时安全。
-  useOverviewDataStore.setState({ cyclesBySource: {}, validTimesByCycle: {}, precipIndexByCycle: {} })
+  useOverviewDataStore.setState({
+    cyclesBySource: {},
+    validTimesByCycle: {},
+    precipIndexByCycle: {},
+    // 与三个 map 同寿：缓存清空后「键缺席」重新只意味着「还没取」，跳过标记留着就是谎报终态。
+    layerTimeEnrichmentSkipped: false,
+  })
 }
 
 function cacheKey(path: string, params?: unknown) {
@@ -602,7 +617,7 @@ function scenariosForQuery(source: M11QueryState['source']) {
  * store 绝不发出 `cycles?source=best|compare`、`valid-times?source=best|compare`、
  * `/api/v1/precip/best|compare/...`——解析不出就一条都不发（fixture 决策 8）。
  */
-function nationalConcreteSource(source: M11QueryState['source']): 'gfs' | 'ifs' | null {
+export function nationalConcreteSource(source: M11QueryState['source']): 'gfs' | 'ifs' | null {
   const resolved = resolveNationalScaleSource(source)
   return resolved === 'gfs' || resolved === 'ifs' ? resolved : null
 }
@@ -1229,6 +1244,7 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
   cyclesBySource: {},
   validTimesByCycle: {},
   precipIndexByCycle: {},
+  layerTimeEnrichmentSkipped: false,
   clearCache: clearOverviewDataCache,
   loadOverview: async (inputQuery) => {
     const query = dataIdentityQuery(inputQuery)
@@ -1239,7 +1255,14 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     const requestNonce = ++overviewRequestNonce
     activeOverviewRequestKey = requestKey
     // 两阶段同时进入 loading；spec scenario "Map bootstrap completes before enrichment" 允许两者同时为 true。
-    set({ mapBootstrapLoading: true, enrichmentLoading: true, bootstrapError: null, error: null })
+    set({
+      mapBootstrapLoading: true,
+      enrichmentLoading: true,
+      bootstrapError: null,
+      error: null,
+      // 新一轮加载：阶段 3 还没被判跳过，键缺席重新只意味着「还没取」。
+      layerTimeEnrichmentSkipped: false,
+    })
 
     // 共享谓词：写 set 前要求 nonce 仍匹配（stale 防御），否则丢弃。
     const isCurrentRequest = () => requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey
@@ -1344,6 +1367,10 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     const markLayerTimeEnrichmentSkipped = () => {
       if (!isCurrentRequest()) return
       layerTimeEnrichmentSkipped = true
+      // 同一事实的第二个消费面：`precipIndexByCycle` 没有「跳过」对应的终态写入口（本轮连
+      // `fetchPrecipIndex` 都不会发），所以跳过信号必须自己进 state，否则降水叠加会把
+      // 「永远不会到达」渲染成「在途」（fixture #2015 决策 1 第 3 臂 / IS-2）。
+      set({ layerTimeEnrichmentSkipped: true })
       const inputs = layerStateInputs
       if (!inputs) return
       const layers = buildLayerStates(inputs)

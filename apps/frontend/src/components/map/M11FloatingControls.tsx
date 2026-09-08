@@ -1,10 +1,14 @@
 import type { ReactNode } from 'react'
-import { ArrowLeft, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench, type LucideIcon } from 'lucide-react'
+import { ArrowLeft, CloudRain, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench, type LucideIcon } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
+import type { components } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { getM11LayerLegend, type LayerLegendEntry, type LayerState } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryPatch } from '@/lib/m11/queryState'
+
+/** 降水图例条目：形状只认 API 契约（目录 `precip` 条目的 `metadata.legend`），前端不另立一份。 */
+type PrecipLegendEntry = components['schemas']['PrecipLegendEntry']
 
 // 玻璃质感容器：半透明 + backdrop-blur + 细描边 + 圆角 + 阴影。统一浮层外观。
 export const GLASS_PANEL =
@@ -22,18 +26,61 @@ export const m11FloatingLayerOptions: M11FloatingLayerOption[] = [
   { value: 'discharge', label: '流量', description: 'q_down / m³/s', icon: Droplets },
 ]
 
+/** 浮层图层行的共用外观：选中态高亮、禁用态置灰且不再有 hover 反馈。 */
+function layerRowClassName({ selected, disabled }: { selected: boolean; disabled: boolean }) {
+  return cn(
+    'flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors',
+    disabled
+      ? 'cursor-not-allowed border-transparent text-neutral-400'
+      : selected
+        ? 'cursor-pointer border-primary-600 bg-primary-600/15 text-primary-700'
+        : 'cursor-pointer border-transparent text-neutral-700 hover:bg-white/60',
+  )
+}
+
+function LayerGroupTitle({ title }: { title: string }) {
+  return (
+    <div className="flex items-center gap-2 px-1 pb-2 text-xs font-semibold text-neutral-900">
+      <Layers className="h-4 w-4 text-primary-600" aria-hidden="true" />
+      {title}
+    </div>
+  )
+}
+
 /**
- * 浮层图层切换器（M26 单页全屏）。玻璃卡片浮在地图左上角。
+ * 目录里有没有 `precip` 条目是**三值**事实，不是布尔（fixture #2015 决策 8，round-2 更正）：
+ * 「目录还没到」与「目录到了且没有这一条」是两件事，塌成一个布尔就会在首屏/切源那一帧对用户
+ * 发出一句它当时并没有证据支持的终态断言（「未实现」）。
+ */
+export type M11PrecipAvailability = 'unknown' | 'available' | 'absent'
+
+/**
+ * 浮层图层切换器（M26 单页全屏）。玻璃卡片浮在地图左上角，按「水文」/「气象」两组呈现
+ * （spec map-layer-timeline-controls「Layer groups render」；base 组本单不交付，故不伪造）。
+ *
+ * `precipAvailability` 可选、默认 `'absent'`（「没告诉我」= 终态没有，供流域详情省略，直到
+ * #2109 裁决）：`'absent'` 时降水开关禁用并标「未实现」（spec「Unimplemented meteorology
+ * layers are disabled」的诚实面）；`'unknown'`（= 调用方手上的目录数组为空：目录在途、或快照属
+ * 上一 query）同样禁用，但只说「目录未就绪」：不说「加载中」——`bootstrapError` 且没有阶段 2 快照
+ * 时目录数组恒为空，`'unknown'` 就是**终态**，「加载中」会把终态谎报成在途；「未就绪」在途与终态
+ * 都为真，而硬失败本身由别处呈现。也不说「未实现」——那要正向证据（一份到手且不含 `precip` 条目
+ * 的目录）。这个判定由调用方**一处**从目录推出并**显式**传入（`OverviewMode` 的 `precipCatalog`），
+ * 组件内不重复 find。
  */
 export function M11FloatingLayerSwitcher({
   layer,
   metStations = false,
+  precip = false,
+  precipAvailability = 'absent',
   onQueryChange,
 }: {
   layer: M11Layer
   metStations?: boolean
+  precip?: boolean
+  precipAvailability?: M11PrecipAvailability
   onQueryChange?: (patch: M11QueryPatch) => void
 }) {
+  const precipEnabled = precipAvailability === 'available'
   return (
     <section
       // 与右下图例同因：固定 w-52 会在右侧留下约三分之一死白（实测卡片 208px /
@@ -42,54 +89,72 @@ export function M11FloatingLayerSwitcher({
       aria-label="地图图层切换"
       data-testid="m11-floating-layer-switcher"
     >
-      <div className="flex items-center gap-2 px-1 pb-2 text-xs font-semibold text-neutral-900">
-        <Layers className="h-4 w-4 text-primary-600" aria-hidden="true" />
-        水文图层
+      <div role="group" aria-label="水文" data-testid="m11-layer-group-hydrology">
+        <LayerGroupTitle title="水文" />
+        <div className="space-y-1">
+          {m11FloatingLayerOptions.map((option) => {
+            const Icon = option.icon
+            const selected = layer === option.value
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={layerRowClassName({ selected, disabled: false })}
+                aria-pressed={selected}
+                onClick={() => onQueryChange?.({ layer: option.value })}
+              >
+                <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium leading-tight">{option.label}</span>
+                  <span className="block truncate text-xs text-neutral-600">{option.description}</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
       </div>
-      <div className="space-y-1">
-        {m11FloatingLayerOptions.map((option) => {
-          const Icon = option.icon
-          const selected = layer === option.value
-          return (
-            <button
-              key={option.value}
-              type="button"
-              className={cn(
-                'flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors',
-                selected
-                  ? 'border-primary-600 bg-primary-600/15 text-primary-700'
-                  : 'border-transparent text-neutral-700 hover:bg-white/60',
-              )}
-              aria-pressed={selected}
-              onClick={() => onQueryChange?.({ layer: option.value })}
-            >
-              <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span className="min-w-0">
-                <span className="block text-sm font-medium leading-tight">{option.label}</span>
-                <span className="block truncate text-xs text-neutral-600">{option.description}</span>
+      <div
+        role="group"
+        aria-label="气象"
+        data-testid="m11-layer-group-meteorology"
+        className="mt-2 border-t border-white/50 pt-2"
+      >
+        <LayerGroupTitle title="气象" />
+        <div className="space-y-1">
+          <button
+            type="button"
+            className={layerRowClassName({ selected: precipEnabled && precip, disabled: !precipEnabled })}
+            // 目录没有 `precip` 条目（或目录还没到）时按下态恒为 false：一颗禁用却显示"已按下"
+            // 的开关，正是 spec 明令禁止的"假装那些图层在渲染"。
+            aria-pressed={precipEnabled ? precip : false}
+            aria-disabled={!precipEnabled}
+            disabled={!precipEnabled}
+            // `'unknown'` 的 title 也不得出现「未实现」：那是终态断言，此刻还没有证据。
+            title={precipEnabled ? undefined : precipAvailability === 'unknown' ? '降水图层目录未就绪' : '降水叠加未实现'}
+            data-testid="m11-layer-toggle-precip"
+            onClick={() => onQueryChange?.({ precip: !precip })}
+          >
+            <CloudRain className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium leading-tight">过去 24h 累积降水</span>
+              <span className="block truncate text-xs text-neutral-600">
+                {precipEnabled ? 'mm/24h 栅格叠加' : precipAvailability === 'unknown' ? '目录未就绪' : '未实现'}
               </span>
-            </button>
-          )
-        })}
-      </div>
-      <div className="mt-2 border-t border-white/50 pt-2">
-        <button
-          type="button"
-          className={cn(
-            'flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors',
-            metStations
-              ? 'border-primary-600 bg-primary-600/15 text-primary-700'
-              : 'border-transparent text-neutral-700 hover:bg-white/60',
-          )}
-          aria-pressed={metStations}
-          onClick={() => onQueryChange?.({ metStations: !metStations })}
-        >
-          <MapPin className="h-4 w-4 shrink-0" aria-hidden="true" />
-          <span className="min-w-0">
-            <span className="block text-sm font-medium leading-tight">气象代站</span>
-            <span className="block truncate text-xs text-neutral-600">点位代站叠加</span>
-          </span>
-        </button>
+            </span>
+          </button>
+          <button
+            type="button"
+            className={layerRowClassName({ selected: metStations, disabled: false })}
+            aria-pressed={metStations}
+            onClick={() => onQueryChange?.({ metStations: !metStations })}
+          >
+            <MapPin className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium leading-tight">气象代站</span>
+              <span className="block truncate text-xs text-neutral-600">点位代站叠加</span>
+            </span>
+          </button>
+        </div>
       </div>
     </section>
   )
@@ -156,11 +221,30 @@ function legendTitle(_layer: M11Layer) {
 }
 
 /**
+ * 降水图例段的标题。含单位 `mm/24h`（spec precipitation-raster-overlay
+ * 「Legend shows both layers」要求图例自报单位，否则六级色阶读不出量纲）。
+ */
+const M11_PRECIP_LEGEND_TITLE = '过去 24h 累积降水（mm/24h）'
+
+/**
  * 浮层图例（M26 单页全屏）。玻璃卡片浮在地图右下角，跟随 active layer 渲染图例。
  * 气象代站无图例合同 → honest 文案，不伪造色阶。
+ *
+ * `precipLegend` 可选、默认无：**唯一**来源是目录 `precip` 条目的 `metadata.legend`
+ * （fixture 决策 7），由 `OverviewMode` 一处推出并传入；组件内零硬编码调色板与阈值，
+ * 否则图例的六个 hex 会与 PNG 的 PLTE 漂移。流域详情不传 → 无降水图例段（blocked by #2109）。
  */
-export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: LayerState[] }) {
+export function M11FloatingLegend({
+  layer,
+  layers,
+  precipLegend,
+}: {
+  layer: M11Layer
+  layers: LayerState[]
+  precipLegend?: PrecipLegendEntry[] | null
+}) {
   const entries = resolveM11FloatingLegend(layer, layers)
+  const precipEntries = precipLegend?.length ? precipLegend : null
 
   return (
     <section
@@ -168,11 +252,13 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
       // 200px / 最宽行 137px）。max-w-56 保住原来的上限，未来出现更长的标签也不会
       // 把卡片撑过地图。
       //
-      // bottom-12 而不是 bottom-4：地图右下角是 MapLibre 版权归属的固定位置，
-      // 实测它离底 10px、高 24px（折叠成小钮后是 36x24，一样高），bottom-4 会压掉一角。
-      // 版权标注是瓦片供应商的硬要求，让我们自己的浮层避让。48px 留 14px 余量，
-      // 几何由 e2e/m11-overlay-collision.mocked.spec.ts 守住。
-      className={cn('absolute bottom-12 right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
+      // bottom-24 而不是 bottom-12：底部控制条（`M11BottomControlBar`）自身 `bottom-4`
+      // 且固定 `h-16`（64px，`m11VisualTokens.timelineHeight`），占据 16–80px 这一带；
+      // bottom-12（48px）会被它压掉。96px = 80px 条顶 + 16px 间隙
+      // （spec map-layer-timeline-controls「Floating controls clear the control bar」）。
+      // 这也顺带继续避开离底 10px、高 24px 的 MapLibre 版权归属带——版权标注是瓦片供应商的
+      // 硬要求，几何由 e2e/m11-overlay-collision.mocked.spec.ts 守住（它量矩形，不钉类名）。
+      className={cn('absolute bottom-24 right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
       aria-label="地图图例"
       data-testid="m11-floating-legend"
     >
@@ -195,6 +281,36 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
           当前图层暂无图例合同。
         </p>
       )}
+      {precipEntries ? (
+        // 降水段挂在流量段**之下、同一张卡片内**（spec「the legend panel shows the six-class
+        // precipitation legend (mm/24h) beneath the discharge legend」）。并列第二张浮层卡片会
+        // 与右下角这张重叠，故不另起 section。
+        <div className="mt-3 border-t border-white/50 pt-2" data-testid="m11-floating-legend-precip">
+          <div className="flex items-center gap-2 pb-2 text-xs font-semibold text-neutral-900">
+            <CloudRain className="h-4 w-4 text-primary-600" aria-hidden="true" />
+            {M11_PRECIP_LEGEND_TITLE}
+          </div>
+          <div className="space-y-1" data-testid="m11-floating-legend-precip-entries">
+            {precipEntries.map((entry) => (
+              // 色块颜色与阈值文字逐项来自 `legend[]`：label 已自带区间（如「0.1-10」「≥250」），
+              // 前端不再从 min/max 另拼一套阈值文案——那就是第二份会漂的阈值来源。
+              <div
+                key={`${entry.label}-${entry.color}`}
+                className="flex items-center gap-2 text-xs text-neutral-700"
+                data-testid="m11-floating-legend-precip-row"
+              >
+                <span
+                  className="h-3 w-7 shrink-0 rounded-sm"
+                  style={{ backgroundColor: entry.color }}
+                  data-testid="m11-floating-legend-precip-swatch"
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 truncate">{entry.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -205,7 +321,8 @@ export function M11BackToOverviewButton({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       className={cn(
-        'absolute bottom-4 left-4 z-[120] flex items-center gap-2 px-3 py-2 text-sm font-medium text-primary-700 transition-colors hover:bg-white/70',
+        // bottom-24：与右下图例同因——底部控制条占 16–80px，96px = 条顶 + 16px 间隙。
+        'absolute bottom-24 left-4 z-[120] flex items-center gap-2 px-3 py-2 text-sm font-medium text-primary-700 transition-colors hover:bg-white/70',
         GLASS_PANEL,
       )}
       onClick={onClick}
@@ -250,7 +367,10 @@ export function M11FloatingNotice({ children, testId }: { children: ReactNode; t
   return (
     <div
       className={cn(
-        'absolute left-1/2 bottom-20 z-[110] max-w-[min(30rem,calc(100%-8rem))] -translate-x-1/2 px-3 py-2 text-xs text-neutral-800',
+        // bottom-40：与图例/返回按钮同因抬过 16–80px 的控制条，并保持提示条原先就比
+        // 那两张卡片再高一层的相对关系（bottom-20 之于 bottom-12/bottom-4）。
+        // 注意本值只保证越过控制条：卡片高度不定，居中提示与右下图例的水平交叠归 I15 的实机 receipt。
+        'absolute left-1/2 bottom-40 z-[110] max-w-[min(30rem,calc(100%-8rem))] -translate-x-1/2 px-3 py-2 text-xs text-neutral-800',
         GLASS_PANEL,
       )}
       role="status"

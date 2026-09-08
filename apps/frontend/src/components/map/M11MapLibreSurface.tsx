@@ -34,11 +34,14 @@ import {
   M11BasinRiverPrimitive,
   M11NationalRiverPrimitive,
   M11OverlayPrimitive,
+  M11PrecipOverlayPrimitive,
   M11SelectedSegmentPrimitive,
   M11StationClusterPrimitive,
+  M11_NATIONAL_RIVER_LINE_LAYER_ID,
   m11RegisteredOverlayHitLayerId,
   type M11StationFeatureCollection,
 } from '@/components/map/m11MapPrimitives'
+import type { M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
 import {
   M11MapPopupSlotPrimitive,
   m11SelectionDataAttributes,
@@ -118,6 +121,11 @@ interface M11MapLibreSurfaceProps {
   metStations?: boolean
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
+  /**
+   * 已解析的降水叠加模型（`resolveM11PrecipOverlay` 的输出）。
+   * 不传 / null = 无叠加（流域详情模式）：绝不在本组件里造第二条解析路径。
+   */
+  precipOverlay?: M11PrecipOverlayModel | null
   /** 数据加载中（overview/basin 取数）：抑制叠加层/边界/河段"未就绪"类瞬态空态，避免刷新闪烁。 */
   loading?: boolean
   /** 静态底图几何加载中：额外抑制"流域边界未就绪"瞬态（静态边界回填晚于 overview 接口时）。 */
@@ -142,6 +150,7 @@ export function M11MapLibreSurface({
   metStations,
   stationFeatureCollection = null,
   popup = null,
+  precipOverlay = null,
   loading = false,
   boundaryLoading = false,
   className,
@@ -338,6 +347,8 @@ export function M11MapLibreSurface({
       data-national-river-generation={
         layers.find((layer) => layer.layerId === 'river-network')?.metadata?.source_generation ?? ''
       }
+      {...(precipOverlay?.url ? { 'data-precip-url': precipOverlay.url } : {})}
+      {...(precipOverlay?.hiddenReason ? { 'data-precip-hidden-reason': precipOverlay.hiddenReason } : {})}
     >
       <Map
         ref={mapRef}
@@ -359,6 +370,18 @@ export function M11MapLibreSurface({
             maxzoom={nationalRiverVectorSource.maxzoom}
             dimmed={Boolean(renderableOverlay) || basinRiverFeatureCollection.features.length > 0}
             satellite={state.basemap === 'satellite'}
+          />
+        ) : null}
+        {/*
+          紧跟河网原语挂载，`beforeId` **仅当**河网 source 真的存在时才传（fixture 决策 4）：
+          `maplibre-gl` 的 `addLayer(layer, beforeId)` 在 `beforeId` 指向的图层不存在时会触发
+          ErrorEvent 且**不添加**该图层，本组件的 `handleMapError` 会把它显示成「地图源加载失败」
+          横幅——降水叠加静默消失，还顺带诬告整张地图。
+        */}
+        {precipOverlay ? (
+          <M11PrecipOverlayPrimitive
+            model={precipOverlay}
+            beforeId={nationalRiverVectorSource ? M11_NATIONAL_RIVER_LINE_LAYER_ID : undefined}
           />
         ) : null}
         {basinFeatureCollection.features.length > 0 ? (
