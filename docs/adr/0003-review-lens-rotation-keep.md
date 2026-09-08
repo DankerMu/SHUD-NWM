@@ -3858,3 +3858,17 @@ exists to attribute, so this sample adds denominator without signal.
 
 Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
 maintainer override.
+
+## 2026-09-08 revisit — PR #2151 (#2032, fixture `high`)
+
+The audit flagged DECIDABLE again on unchanged cumulative figures (core=225 /
+rotated=269 / phase=53, now over 188 multi-round merged PRs). PR #2151 adds
+denominator without rotation signal: all eight net catches came in Round 1 (the
+full `high` seat set: correctness, invariant-state, test-evidence/spec-compliance,
+security-perf/integration), Round 2 seated correctness + test-evidence/
+spec-compliance + invariant-state and returned Notes only (zero candidates), and
+the one Phase 7 catch (runbook line-ref drift, minor) belongs to the final-review
+seat, which the rotation question does not attribute either way.
+
+Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
+maintainer override.
