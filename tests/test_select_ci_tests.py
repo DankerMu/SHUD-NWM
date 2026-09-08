@@ -11303,6 +11303,185 @@ def test_cold_residency_identity_producer_selects_its_contract_suites(
         assert (Path(".") / suite).is_file(), f"{producer}: routes to a missing suite {suite}"
 
 
+# #1895 task 4.0 second leg: the two new read-only CLIs and the runbook contract.
+# Each CLI is an explicit producer->consumer rule because the same-name
+# derivation would select only the CLI's own suite; the related production owner
+# suites and the runbook contract are the closure the fixture names. The runbook
+# rule selects the contract suite; the contract suite's own change is a
+# CHANGED_TEST_FILE_RULES redirect back onto the owners.
+ISSUE1895_CLI_CONSUMER_MAP: dict[str, tuple[str, ...]] = {
+    "scripts/node27_cold_residency_census.py": (
+        # #1895 task 4.0 structural split (1,000-line guard): the census suite is
+        # two modules. A CLI change must run BOTH halves, not just the core one
+        # a bare same-name derivation would reach.
+        "tests/test_node27_cold_residency_census.py",
+        "tests/test_node27_cold_residency_census_publication.py",
+        "tests/test_compressed_chunk_cold_runtime.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_cold_identity_observe.py": (
+        "tests/test_node27_cold_identity_observe.py",
+        "tests/test_node27_cold_tablespace_host.py",
+        "tests/test_compressed_chunk_cold_target.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+}
+
+
+def test_issue1895_cli_producers_select_their_focused_contract_suites() -> None:
+    for producer, required in ISSUE1895_CLI_CONSUMER_MAP.items():
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        missing = sorted(set(required) - selected)
+        assert not missing, f"{producer}: #1895 contract suites not selected {missing}"
+        for suite in required:
+            assert (Path(".") / suite).is_file(), f"{producer}: routes to a missing suite {suite}"
+        # The two CLIs must never drag core-smoke fallback: each is known-routed.
+        smoke = sorted(set(CORE_SMOKE_TESTS) & selected)
+        assert not smoke, f"{producer}: unowned core smoke {smoke}"
+
+
+def test_issue1895_cli_producer_rules_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    producer_patterns = set(ISSUE1895_CLI_CONSUMER_MAP)
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in producer_patterns)
+    assert len(mutant) == len(PATH_TEST_RULES) - len(producer_patterns)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for producer, required in ISSUE1895_CLI_CONSUMER_MAP.items():
+        selected = select_tests([producer], repo_root=Path("."))
+        assert "tests/test_issue1895_runbook_contract.py" not in selected, (
+            f"mutant table without {producer}'s rule still selects the runbook contract"
+        )
+
+
+def test_issue1895_runbook_selects_the_live_rollout_contract() -> None:
+    selected = set(select_tests(["docs/runbooks/tier-node27-timeseries-storage.md"], repo_root=Path(".")))
+    assert "tests/test_issue1895_runbook_contract.py" in selected
+    # The runbook's broader sequential/cold-residency owners stay intact.
+    for suite in (
+        "tests/test_node27_timeseries_sequential_budget.py",
+        "tests/test_node27_cold_residency_runtime_identity.py",
+        "tests/test_node27_cold_residency.py",
+    ):
+        assert suite in selected, f"runbook selection lost {suite}"
+
+
+def test_issue1895_runbook_contract_change_redirects_to_the_owners() -> None:
+    from scripts.select_ci_tests import ISSUE1895_RUNBOOK_CONTRACT_TESTS
+
+    selected = set(
+        select_tests(["tests/test_issue1895_runbook_contract.py"], repo_root=Path("."))
+    )
+    assert selected == set(ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
+
+
+def test_issue1895_runbook_contract_redirect_reds_when_owner_leg_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+    from scripts.select_ci_tests import PathTestRule
+
+    owner = "tests/test_issue1895_runbook_contract.py"
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != "tests/test_node27_cold_residency_census.py"),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == owner
+        else rule
+        for rule in select_ci_tests.CHANGED_TEST_FILE_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", patched)
+
+    selected = select_tests([owner], repo_root=Path("."))
+    assert "tests/test_node27_cold_residency_census.py" not in selected
+
+
+def test_issue1895_census_policy_owner_selects_both_census_halves_and_contract() -> None:
+    # #1895 task 4.0 structural split: the shared capacity-policy module has no
+    # same-name suite, so without its own PATH rule a policy-only change would
+    # select only the #1744 shared-library smoke baseline (zero capacity
+    # assertions). The rule must reach BOTH census halves plus the runtime owner
+    # and the runbook contract. Membership, not equality: #1744 adds the
+    # core-smoke baseline for packages/common/** and #1656 adds the invariant.
+    policy = "packages/common/node27_cold_residency_census_policy.py"
+    assert Path(policy).is_file()
+    selected = set(select_tests([policy], repo_root=Path(".")))
+    for suite in (
+        "tests/test_node27_cold_residency_census.py",
+        "tests/test_node27_cold_residency_census_publication.py",
+        "tests/test_compressed_chunk_cold_runtime.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ):
+        assert suite in selected, f"policy owner selection lost {suite}"
+    # The shared baseline is retained by policy (#1744) — this is not fallback leakage.
+    assert set(CORE_SMOKE_TESTS) <= set(selected)
+
+
+def test_issue1895_census_policy_owner_rule_reds_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    policy = "packages/common/node27_cold_residency_census_policy.py"
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != policy)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = set(select_tests([policy], repo_root=Path(".")))
+    assert "tests/test_node27_cold_residency_census_publication.py" not in selected, (
+        "mutant table without the policy rule still selects the publication suite"
+    )
+    assert "tests/test_issue1895_runbook_contract.py" not in selected, (
+        "mutant table without the policy rule still selects the runbook contract"
+    )
+
+
+def test_issue1895_census_publication_suite_change_redirects_to_the_whole_census_closure() -> None:
+    # #1895 task 4.0 structural split: the publication half physically moved out
+    # of the census core. A test-only change to it is a CHANGED_TEST_FILE_RULES
+    # redirect (like the runbook contract and sql-shape oracle) so the PR lane
+    # runs BOTH census halves plus the producer/contract closure instead of the
+    # ordinary self-selection + importer closure (which would run only the
+    # publication module itself and its own importers).
+    owner = "tests/test_node27_cold_residency_census_publication.py"
+    redirect_targets = _changed_test_rule_redirects_for(owner, [owner])
+    assert redirect_targets, "publication suite must be an unconditional redirect"
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected == redirect_targets | {SELECTOR_META_GUARD_TEST}
+    for suite in (
+        "tests/test_node27_cold_residency_census.py",
+        owner,
+        "tests/test_compressed_chunk_cold_runtime.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ):
+        assert suite in selected, f"publication-suite redirect lost {suite}"
+
+
+def test_issue1895_census_publication_redirect_reds_when_rule_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    owner = "tests/test_node27_cold_residency_census_publication.py"
+    mutant = tuple(
+        rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner
+    )
+    assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert "tests/test_node27_cold_residency_census.py" not in selected, (
+        "mutant table without the redirect still runs the core census suite"
+    )
+    assert "tests/test_issue1895_runbook_contract.py" not in selected, (
+        "mutant table without the redirect still runs the runbook contract"
+    )
+
+
 def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
     # #1564 Round 2 selector gap: the shared demote fixture gained a NEW consumer
     # through a local (function-scope) import in tests/test_orchestration_chain.py,

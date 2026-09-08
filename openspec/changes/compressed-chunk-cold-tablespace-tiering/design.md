@@ -220,10 +220,12 @@ freshly samples both devices; a prior group's free-space sample is never reused
 for a later rewrite. Both `NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES`
 and `NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES` are mandatory positive integer
 byte inputs with no Python, shell, or example-template default. This fixture
-does not invent a universal reserve from disposable WAL observations; #1895
-freezes measured live values in the mode-0600 environment before installing the
-unit. Exact equality is admitted, and either one-byte short case refuses before
-movement SQL.
+does not invent a universal reserve from disposable WAL observations. Issue
+#1895 derives `E` from the fresh six-group live catalog expansion census and
+uses that same byte value for both reserves: the WAL reserve is an explicitly
+conservative same-order expansion proxy, not a measured/per-group-attributed WAL
+claim and not the disposable 165736-byte LSN delta. Exact equality is admitted,
+and either one-byte short case refuses before movement SQL.
 
 Receipt publication is atomic, mode 0600, schema-validated before replacement,
 and bound to the exact head SHA, config, business watermark, lag/cutoff, cluster
@@ -318,7 +320,12 @@ root evidence file identities and freshness, parsed RAID/SMART state, backup
 inventory, capacity/rollback decision, catalog/bind/writability readback,
 mutation ownership, rollback state and stable redacted errors. An existing
 complete topology is an idempotent no-write `already_ready`; any partial or
-drifted topology is NO-GO rather than an implicit repair.
+drifted topology is NO-GO rather than an implicit repair. During an interrupted
+or failed install, the private authority drives only the installer's own
+reconciliation or rollback. A terminal `installed` receipt is published only
+after that authority is durably removed and reported closed; a later
+`already_ready` invocation is observation-only and is not an operator rollback
+entrypoint.
 
 ### D8 — Governance reports both devices without collapsing categories
 
@@ -341,20 +348,93 @@ blocker. The normal example proves two-device reconciliation; a drift example
 proves catalog/filesystem/bind disagreement remains NO-GO. Credentials, raw
 secret-bearing environment values and signed URLs never enter either receipt.
 
-### D9 — Rollout is bounded and independently reversible
+### D9 — Rollout is bounded and fails closed at shipping recovery boundaries
 
-Issue #1895 freezes exact reviewed HEAD and pre-mutation catalog/data/filesystem/API
-baselines, quiesces writers and lifecycle timers, passes D7 gates, creates the
-fresh tablespace, previews candidates, then moves one group at a time with
-post-group parity. It restores timers only after all six baseline groups and
-all active/hot exclusions are proven. It validates one natural tick and either
-a newly terminal group migration or a provable no-op, plus hot/cold SQL and
-public display behavior against #1342 thresholds.
+Issue #1895 first commits and reviews an executable live runbook at the exact SHA
+to be deployed. Only that runbook may supply the pre-target census, root-evidence
+capture, installer, one-group runner, current-receipt, stop/resume and close/archive
+commands; the historical manual container-recreation section is explicitly not a
+cold-bind entrypoint. The census calls the production catalog/inventory/parity
+owners directly and never calls the absent target preflight. No node-27 access
+starts before the issue-specific fixture review and strict validation pass.
 
-Rollback moves one group back to `pg_default` through the same transactional
-primitive. Container/path deletion is forbidden while catalog references
-remain. A live failure stops further groups and follows the verified rollback;
-it never adds a production-only patch.
+Root evidence uses schema `1.0`, the exact `/bin/hostname` output, UTC RFC3339
+capture time, root:root mode `0600`, 900-second freshness, exact leaf argv
+`/usr/sbin/mdadm --detail /dev/md0`, `/usr/sbin/smartctl -H <parsed-member>` for
+each of exactly two active-sync members, and `/usr/local/sbin/nhms-backup-inventory
+--json`, exact subjects/nonempty outputs, and PGDATA-plus-sorted-external-target
+coverage including the future `nhms_cold` container path. The #1894 synthetic
+helper is forbidden; a missing production producer is NO-GO.
+
+Installer and runner device identities are intentionally distinct. Before path
+creation, `node27_cold_tablespace_host.inspect_host_path()` supplies the installer
+mount identity `major:minor:mount-id:source`; after creation,
+`compressed_chunk_cold_target.inspect_host_path()` supplies the runner descriptor
+identity `st_dev:st_ino`. They are recorded under separate names and never copied
+between installer argv and runner env. Mode is `0700`; UID/GID come only from the
+fresh canonical numeric `.Config.User`, never the historical deployment value.
+
+The read-only preflight freezes exact HEAD plus catalog/data/filesystem/API
+baselines. The six compressed groups observed on 2026-08-29 are a historical
+count only. A fresh census that does not require the absent cold target must
+resolve exactly six complete eligible source groups and bind each durable
+origin/window key, current compressed sibling, complete member digest,
+production inventory/parity, pre-compression expansion and retained-source
+bytes. A missing group, unexplained extra group or identity/count drift ends the window as NO-GO; the
+rollout never substitutes an arbitrary oldest six. Let `E` be the positive
+maximum `before_compression_total_bytes` and `S` the positive sum of the six
+retained-source group bytes. Checked, non-overflowing canonical decimal policy
+is `cold_reserve=E`, `wal_reserve=E`, `install_required=S`, and
+`rollback_headroom=2*E`. Here `wal_reserve=E` is a conservative same-order proxy
+from fresh live expansion, not a WAL measurement or attribution. The existing
+gates therefore require installer cold free >= `S + 2E`, and each group freshly
+requires cold free >= its expansion + `E` and hot free >= `E`; no disposable WAL
+number, LSN delta or historical free-space value supplies a default.
+
+Before any live mutation, the exact reviewed SHA reruns the isolated #1892 oracle
+and requires current-run complete cold movement, inverse complete-group move-back,
+parity and owned-resource cleanup, followed by live read-only compatibility. The
+accepted primitive supports `pg_default`, but the shipping production runner
+exposes only convergence to `nhms_cold`; this is the issue acceptance criterion's
+equivalent-disposable branch, not authority for ad hoc live SQL.
+
+Writers and lifecycle timers are then quiesced. The #1894 installer is the sole
+container/catalog mutation entry. If installation fails or is interrupted while
+its private authority remains live, only the same installer state machine may
+reconcile or roll back that in-progress install. A terminal `installed` receipt
+closes and removes the authority; it does not leave an operator rollback handle.
+After install, a second census must match the same six keys and preimages with no
+extra eligible group before the first movement SQL. A failure at this post-install
+boundary stops and preserves the terminally installed topology even when zero
+groups have moved. Enforce fixes `PER_TICK_BOUND=1` and does not start group N+1
+until group N's uniquely named, current-SHA, invocation-bracketed receipt proves
+complete target, parity and filesystem reconciliation. Recurring timers remain
+stopped through a controlled ingest smoke and all catalog/data/display/performance
+gates; they resume only after a written preliminary GO.
+
+Rollback/NO-GO triggers are exhaustive: head/worktree or engine drift; a missing
+or extra census key; inventory/parity/member/source-state drift; target catalog,
+bind, path, device or runtime UID/GID drift; active writer/lock; stale, malformed,
+non-root or non-PASS RAID/SMART/backup evidence; capacity failure; installer or
+private-authority failure; nonzero command exit; missing/stale/wrong-SHA/wrong-mode
+receipt; mixed/unknown/non-complete residency; filesystem reconciliation failure;
+Seq Scan or all-chunk decompression regression; #1342/API/MVT/click/publication
+failure; or natural-tick/unit failure. Any trigger stops later mutation, forbids
+ad hoc SQL and deletion of referenced topology, and keeps the 4.3 quiesced state
+until a written GO or reviewed owning-implementation response. Timer state may be
+restored after a proven pre-install no-mutation abort or after the installer itself
+publishes a completed rollback for a still-live in-progress authority. Once the
+installer publishes terminal `installed`, every later trigger preserves that
+installed topology even when no residency group has moved. After a live group has
+moved, the same stop-and-preserve rule additionally requires any future live
+move-back entrypoint to land through its owner before reversal.
+
+Every manual value is short canonical decimal and every accepted receipt is
+bound to this invocation's reviewed SHA, generated-at bracket, mode/outcome and
+exit status. This makes #1938 non-blocking without permitting a stale clean file
+to satisfy readiness. The evidence PR merges while the shared change is still
+strict-valid; #1895 and then #1891 close only after that merge, and archival is
+an immediate post-merge follow-up after final strict validation.
 
 ## Risk Packs
 
@@ -425,9 +505,12 @@ Domain packs considered:
   compression, decompression replay, retention.
 - Failure paths/rollback/stale state: lock/statement/wall timeout, target full,
   process kill, relation deletion/decompression, catalog/path drift, mixed
-  residency, receipt publication failure, group move-back.
-- Evidence/audit/readiness: pinned isolated-cluster probe, schema-valid receipts,
-  same-time dual-device governance, exact-SHA node-27 C1-C4/cold gates.
+  residency and receipt publication failure; pre-mutation disposable inverse,
+  installer-owned reconciliation/rollback only while an in-progress private
+  authority remains live, then stop-and-preserve after terminal installation.
+- Evidence/audit/readiness: current-run exact-SHA isolated rollback probe,
+  invocation-bracketed schema-valid receipts, same-time dual-device governance,
+  exact-SHA node-27 C1-C4/cold gates and merged rollout evidence.
 
 Regression rows:
 
@@ -439,9 +522,12 @@ Regression rows:
   -> complete deterministic accounting, fair bounded progress, no rewrite for
   already-cold.
 - Any member missing/drifted/mixed, target missing/wrong device/unwritable/full,
-  lock/timeout/kill, or receipt publish failure -> no false success and a
-  recovery-classified receipt or safely preserved prior receipt per publication
-  stage.
+  lock/timeout/kill, or receipt publish failure -> no false success, no later
+  group or timer resume, and a current-run recovery-classified receipt or
+  preserved authoritative topology; a prior clean receipt cannot satisfy GO.
+- Fresh pre-install and post-install census -> exactly the same six durable keys,
+  complete-source preimages and inventory/parity inputs with no extra eligible
+  key, or zero movement and terminal NO-GO.
 - Cold decompression + replay + recompression -> every resulting member cold;
   retention/drop -> no orphan relation/catalog/file remains.
 - New active chunks after installation -> `pg_default`; neither hypertable has
@@ -458,7 +544,9 @@ Boundary-surface checklist:
 - Read/write surfaces: catalog/OID resolution, relation files, tablespace paths,
   receipt publication, no business-row rewrite.
 - Staging/publish/rollback: database transaction + post-commit reconciliation;
-  atomic receipt; same primitive for cold/hot rollback.
+  atomic current-run receipt; disposable inverse before live mutation; installer-
+  owned recovery only for a still-live in-progress authority; quiesced stop-and-
+  preserve after terminal installation, including a zero-group post-install abort.
 - Evidence boundaries: image/cluster identity -> probe; watermark/config/group
   identity -> runner receipt; RAID/mount/backup identity -> install receipt;
   exact SHA + parity/performance -> rollout receipt.
@@ -480,8 +568,9 @@ Boundary-surface checklist:
    requires the measured numeric runtime UID/GID; one bounded inspect proves that
    pair and the bind, the same pair executes writability, and schema `1.1` records
    it while retaining read compatibility for historical `1.0` recovery evidence.
-5. #1895 performs the controlled live install/migration/rollback proof and
-   validates automatic convergence plus display/performance.
+5. #1895 performs the controlled live install/migration, consumes the
+   pre-mutation disposable inverse proof, and validates shipping installer
+   recovery boundaries, automatic convergence, and display/performance.
 6. Archive this shared OpenSpec change only after #1895; earlier PRs leave later
    task groups unchecked so unimplemented behavior is never published as done.
 

@@ -182,18 +182,116 @@ Seams under test:
 
 ## 4. #1895 — Controlled node-27 rollout and closure
 
-- [ ] 4.1 Freeze exact reviewed HEAD and capture preflight: clean worktree,
-  container config/image, cluster/catalog, every candidate/hot group identity/
-  member residency/rows/checksum, both filesystems, timer/writer/lock state,
-  backup readiness, root RAID/SMART evidence, API valid-times/publication and
-  #1342 plans/latencies.
-- [ ] 4.2 Stop and drain autopipe/compression/residency/retention writers under the documented mutex/lock order; any active writer, conflicting lock, unknown health, insufficient worst-case rollback space, or identity mismatch is NO-GO.
-- [ ] 4.3 Establish the fresh `nhms_cold` bind/tablespace from #1894 and deploy #1893 at the exact reviewed SHA; prove catalog/bind/device identity, no hypertable attach, and new-chunk `pg_default` placement before moving data.
-- [ ] 4.4 Run a dry-run preview and bounded enforce to migrate the six baseline eligible compressed groups one at a time; after each group prove complete origin/compressed/index/TOAST residency, row/identity/checksum/query parity, duration/wait/bytes, and hot/cold filesystem reconciliation.
-- [ ] 4.5 Prove active/uncompressed groups remain wholly in `pg_default`, current ingest can resume, and a controlled move-back returns one complete group hot without data drift or orphaned paths.
-- [ ] 4.6 Restore timers and observe at least one natural serialized tick plus one newly terminal group's automatic convergence or a catalog-proven no-op; require active timers and no issue-owned failed unit.
-- [ ] 4.7 Validate hot/cold SQL plans and #1342 thresholds (buffers <= 5000, SQL P95 <= 300 ms, local API P95 <= 500 ms, frontend click P95 < 2 s), public hot/cold curves/MVT/click flow, non-regressing valid-times, and complete GFS/IFS publication counts.
-- [ ] 4.8 Post schema-valid live receipts and GO/NO-GO with exact deviations/rollback triggers, pass node-27 C1-C4 plus cold-residency gates and real-DB pytest, close #1891 only after #1892-#1895 acceptance is complete, then archive this shared OpenSpec change.
+- [ ] 4.0 Before any node-27 access, commit and review an executable #1895 live
+  runbook at the exact SHA to be deployed, pass this issue-specific read-only
+  fixture review, and pass strict OpenSpec validation. The runbook must provide:
+  a pre-target census using the production catalog/inventory/parity owners
+  (`ranked_candidates_from_execute`, `derive_bound_inventories`,
+  `collect_residency_group`, `compute_window_parity`,
+  `compression_before_bytes`, `retained_source_bytes`) without calling target
+  preflight; the complete #1894 installer argv; canonical-decimal env assembly;
+  one-group-at-a-time invoke/readback/halt commands; the exhaustive D9 trigger
+  table; current-run receipt checks; and evidence-PR/close/archive order. It must
+  bind rollback wording to the shipping installer state machine: only a failed or
+  interrupted install with a still-live private authority may reconcile/roll back,
+  while terminal `installed` closes that authority and every later trigger stops
+  and preserves the installed topology. It must name the historical
+  §4.3.3/manual `docker run` recipe as forbidden for this cold bind.
+
+  Production root evidence is one fixed contract, never the synthetic #1894
+  helper: JSON envelope schema `1.0`; hostname equal to the exact `/bin/hostname`
+  output passed to the installer; `captured_at` UTC RFC3339; root:root owner;
+  mode `0600`; maximum age `900` seconds; exact leaf argv
+  `/usr/sbin/mdadm --detail /dev/md0`, `/usr/sbin/smartctl -H <each of the two
+  parsed active-sync members>`, and `/usr/local/sbin/nhms-backup-inventory
+  --json`; exact subject identities; nonempty output; and backup `covered_paths`
+  matching PGDATA plus the sorted catalog-derived external targets including
+  `/home/postgres/pgdata/tablespaces/nhms_cold`. A missing producer or mismatched
+  owner/mode/argv/subject/hostname/freshness/coverage is NO-GO.
+
+  The two device identities are deliberately different fields and must never be
+  copied between configs. `INSTALLER_DEVICE_IDENTITY` is the exact
+  `device_identity` returned before install by
+  `node27_cold_tablespace_host.inspect_host_path()` for the absent production
+  child (mount identity `major:minor:mount-id:source`) and feeds installer
+  `--expected-device-identity`. After install,
+  `RUNNER_DEVICE_IDENTITY` is freshly returned by
+  `compressed_chunk_cold_target.inspect_host_path()` for the created directory
+  (descriptor identity `st_dev:st_ino`) and alone feeds
+  `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY`. Installer `--expected-mode` is `0700`;
+  `--expected-uid/gid` and runner UID/GID are the freshly observed canonical
+  numeric `.Config.User` pair, never the historical `1005:1005` text.
+- [ ] 4.1 At the reviewed SHA, capture the read-only live preflight: clean
+  worktree, container config/image/runtime UID:GID, cluster/catalog, every
+  candidate/hot group identity/member residency/rows/checksum, both filesystems,
+  timer/writer/lock state, backup readiness, fresh root RAID/SMART evidence, API
+  valid-times/publication and #1342 baselines. The six compressed groups observed
+  on 2026-08-29 are a historical count, not reusable identities: the fresh
+  census must resolve exactly six complete eligible source groups and freeze
+  each durable key, current sibling/member digest, production inventory/parity,
+  `before_compression_total_bytes` and `retained_source_bytes`; missing, extra or
+  unexplained drift ends this window as NO-GO, never an arbitrary oldest-six
+  subset. Let `E` be the checked positive maximum expansion and `S` the checked
+  positive sum of all six retained-source byte values; freeze canonical decimal values
+  `COLD_RESERVE=E`, `WAL_RESERVE=E`, `INSTALL_REQUIRED=S`, and
+  `ROLLBACK_HEADROOM=2*E`, rejecting overflow or any stale/probe-derived value.
+  `WAL_RESERVE=E` is an intentionally conservative same-order proxy derived from
+  fresh live expansion, not a measured or per-group-attributed WAL value; no LSN
+  probe or the disposable 165736-byte observation participates.
+- [ ] 4.2 Before any live service, container, catalog or relation mutation, rerun
+  `scripts/probe_compressed_chunk_cold_tablespace.py --mode isolated-cluster` at
+  the exact reviewed SHA with pinned image and isolated names/port/paths. Require
+  a current-run PASS proving complete `nhms_cold` movement, inverse `pg_default`
+  move-back, parity, and owned container/path cleanup; historical #1892 evidence
+  cannot satisfy this gate. Then live-read-only recheck the engine and group
+  contract inputs used by that primitive.
+- [ ] 4.3 Stop and drain autopipe/compression/residency/retention writers under
+  the documented mutex/lock order. Any active writer, conflicting lock, unknown
+  health, insufficient worst-case rollback space or identity mismatch is NO-GO;
+  units remain at this quiesced state until a written GO, a proven pre-install
+  no-mutation abort, or a completed installer-owned rollback receipt authorizes
+  restoration.
+- [ ] 4.4 Establish the fresh `nhms_cold` bind/tablespace only through the #1894
+  installer using the 4.1 values, and deploy #1893/#1929 at the exact reviewed
+  SHA. Re-observe numeric runtime identity and prove catalog/bind/device identity,
+  no hypertable attach and new-chunk `pg_default` placement. An installer failure
+  or interruption with a live private authority is reconciled only by the same
+  installer contract. A terminal `installed` receipt closes and removes that
+  authority; every later trigger, including a post-install pre-movement failure
+  with zero groups moved, stops and preserves the installed topology rather than
+  invoking a fictional operator rollback. The historical manual container recipe
+  is never an alternate install or rollback path.
+- [ ] 4.5 Run a dry-run preview and, before the first movement SQL, re-census the
+  same six 4.1 keys as complete source with the same inventory/parity inputs and
+  no unexplained extra eligible group. Set `PER_TICK_BOUND=1`; issue exactly one
+  enforce invocation per group and do not issue the next until the unique
+  current-run receipt passes head/time/config/outcome, complete residency,
+  parity, duration/wait/bytes and hot/cold filesystem reconciliation. Any D9
+  trigger stops all later groups, forbids ad hoc SQL and path/catalog deletion,
+  leaves every writer/timer quiesced and routes a reviewed owning-implementation
+  response. The shipping runner has no live move-back entrypoint.
+- [ ] 4.6 With recurring timers still stopped, prove all active/uncompressed
+  groups remain wholly `pg_default`, perform one bounded controlled ingest smoke
+  and re-quiesce its writer, then pass node-27 real-DB pytest, C1-C4, hot/cold
+  curve/MVT/click flows and #1342 plans/latencies. Both hot and cold plans must
+  have no Seq Scan or all-chunk decompression regression; require buffers <=
+  5000, SQL P95 <= 300 ms, local API P95 <= 500 ms, frontend click P95 < 2 s,
+  non-regressing valid-times and complete current GFS/IFS publication counts.
+- [ ] 4.7 Only after 4.6 has a written preliminary GO, restore the original
+  autopipe/compression/retention timer enablement and observe at least one natural
+  serialized tick plus one newly terminal group's automatic convergence or a
+  catalog-proven truthful no-op. Require current-run schema-valid receipt, active
+  timers and no issue-owned failed unit; any trigger returns to the 4.3 quiesced
+  state rather than continuing or patching production.
+- [ ] 4.8 Post schema-valid current-run live receipts and final GO/NO-GO with exact
+  deviations/triggers. Historical #1894/#1929 receipts may anchor contracts but
+  cannot satisfy a 4.x observation, and #1938 is a non-blocking parser follow-up:
+  every manual value is short canonical decimal and every GO receipt must match
+  this invocation's reviewed SHA, bracketed `generated_at`, mode/outcome and exit
+  status rather than a pre-existing clean file. Merge the evidence PR while the
+  shared change is still strict-valid; then close #1895, update/close #1891, and
+  archive this shared OpenSpec change in the immediate post-merge follow-up only
+  after its final strict validation gate.
 
 ## Risk-pack evidence mapping
 

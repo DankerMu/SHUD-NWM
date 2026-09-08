@@ -49,6 +49,14 @@ not merely the near-empty origin chunk shell.
   observed numeric container runtime UID/GID and carry that principal in receipt
   evidence; no image-user-name or root fallback is allowed.
 - #1895: controlled node-27 deployment and live receipts for migration,
-  automatic convergence, hot/cold reads, timers, and display performance.
+  automatic convergence, hot/cold reads, timers, and display performance. Its
+  reviewed executable runbook lands before node-27 access; six is a historical
+  preflight count rather than reusable identity, and rollback acceptance uses
+  the exact-SHA disposable move-back branch plus live read-only compatibility.
+  The installer may reconcile/roll back only an in-progress install whose private
+  authority still exists; terminal `installed` closes that authority, so every
+  later trigger preserves the installed topology. After movement, reversal also
+  waits for a reviewed live move-back entrypoint from its owning implementation
+  issue.
 - No row-schema migration, public API change, TimescaleDB/PostgreSQL upgrade,
   node-22 scheduling change, or archive-lane restoration.

@@ -572,37 +572,149 @@ SHALL be redacted or rejected before serialization.
 
 ### Requirement: Live rollout MUST preserve data, hot placement, display behavior and performance
 
+Before node-27 access, the rollout SHALL commit and review an executable live
+runbook at the exact head to be deployed. It SHALL include a pre-target read-only
+census using the production catalog/inventory/parity owners without target
+preflight; production root-evidence capture; full installer argv;
+canonical-decimal env assembly; one-group invoke/readback/halt commands;
+exhaustive trigger table; current-run receipt checks; and evidence-merge/closure/
+archive ordering. It SHALL name the historical manual container-recreation recipe
+as forbidden for the cold bind.
+
+Root evidence SHALL use schema `1.0`, exact `/bin/hostname` output, UTC RFC3339
+capture time, root:root mode `0600`, 900-second freshness, exact mdadm/SMART/
+backup leaf argv and subject identities, nonempty output, and PGDATA plus every
+sorted external target including `nhms_cold`; the synthetic helper or missing
+producer SHALL be NO-GO. The installer mount identity
+`major:minor:mount-id:source` SHALL come from the pre-install host observer. The
+runner descriptor identity `st_dev:st_ino` SHALL be observed only after path
+creation; the two fields SHALL never be interchanged. Installer mode SHALL be
+`0700`, and UID/GID SHALL be freshly parsed from canonical numeric
+`.Config.User` rather than copied from historical evidence.
+
 The rollout SHALL freeze the exact reviewed head and pre-mutation container,
 cluster/catalog, group identity, row-count/checksum, dual-filesystem and public
-API baselines. It SHALL quiesce writers and conflicting lifecycle operations,
-install the fresh target, preview candidates, then migrate at most the bounded
-groups one at a time with post-group parity. Existing baseline compressed
-groups SHALL become completely cold; active/uncompressed groups SHALL remain
-in `pg_default` and ingest SHALL resume. Timers SHALL be restored only after
-catalog, data and display checks pass.
+API baselines. The six compressed groups observed on 2026-08-29 SHALL be treated
+as a historical count, not as reusable group identity. Before mutation, a census
+that does not require the absent cold target SHALL resolve exactly six complete
+eligible source groups and bind every durable origin/window key, current
+compressed sibling, member digest, production inventory/parity,
+`before_compression_total_bytes`, and retained-source bytes. Missing, extra or
+unexplained count/identity drift SHALL terminate the window as NO-GO rather than
+selecting an arbitrary subset.
+
+Let `E` be the checked positive maximum of the six expansion values and `S` the
+checked positive sum of their retained-source bytes. With checked non-overflowing
+canonical decimals, the rollout SHALL configure `cold_reserve=E`,
+`wal_reserve=E`, `install_required=S`, and `rollback_headroom=2*E`.
+`wal_reserve=E` SHALL be described as a conservative same-order proxy derived
+from fresh live expansion, not as measured/per-group-attributed WAL and never as
+the disposable LSN delta. The installer SHALL therefore require cold free space
+of at least `S + 2E`; each group SHALL still use fresh runtime observations and
+require cold free space of at least its expansion plus `E` and hot free space of
+at least `E`. Historical free-space values and disposable WAL observations SHALL
+NOT supply these inputs.
+
+Before any live mutation, the exact reviewed SHA SHALL run the isolated #1892
+oracle and prove a complete `nhms_cold` move, inverse `pg_default` move-back,
+parity and owned-resource cleanup, followed by live read-only compatibility
+checks. The rollout SHALL then quiesce writers and conflicting lifecycle
+operations, install the fresh target only through the reviewed #1894 installer,
+and re-census the same six keys and complete-source preimages with no unexplained
+extra eligible group before the first movement SQL.
+
+Enforce SHALL use `PER_TICK_BOUND=1` and SHALL issue only one invocation at a
+time. The next group SHALL NOT start until the preceding invocation's uniquely
+named receipt matches its reviewed head, generated-at bracket, mode/outcome and
+exit status and proves complete target, parity and filesystem reconciliation.
+Existing baseline groups SHALL become completely cold; active/uncompressed
+groups SHALL remain in `pg_default`. Recurring timers SHALL remain stopped while
+a bounded controlled ingest smoke is run and re-quiesced and while catalog,
+data, display, C1-C4, real-DB pytest, hot/cold plan and performance gates run.
+Timers SHALL be restored only after a written preliminary GO.
+
+The accepted primitive supports an inverse target, but the shipping runner has
+no live move-back entrypoint. During an interrupted or failed installation, a
+live private authority SHALL be consumed only by the same installer's
+reconciliation/rollback state machine. A terminal `installed` receipt SHALL
+prove that authority closed and was removed; it SHALL NOT be treated as a latent
+operator rollback handle. Every subsequent rollback/NO-GO trigger, including a
+post-install pre-movement failure with zero groups moved, SHALL stop later work,
+preserve referenced bind/catalog/path objects, forbid ad hoc SQL, and keep the
+quiesced state until a reviewed owning-implementation response exists. Triggers
+SHALL include head/worktree or engine
+drift; missing/extra census keys; inventory/parity/member/source drift; target,
+bind, device or runtime-principal drift; active writers/locks; RAID/SMART/backup/
+capacity failure; installer/authority or command failure; missing/stale/wrong-run
+receipt; mixed/unknown residency; filesystem reconciliation failure; Seq Scan or
+all-chunk decompression regression; #1342/API/MVT/click/publication failure; and
+natural-tick/unit failure.
 
 The rollout SHALL observe at least one natural serialized tick and either a new
 terminal group's automatic cold convergence or a provable clean no-op. Hot and
-cold SQL plans and public API/MVT/curve paths SHALL meet the #1342 gates:
-buffers no more than 5000, SQL P95 no more than 300 ms, local API P95 no more
-than 500 ms, and frontend river-click P95 under 2 seconds.
+cold SQL plans SHALL contain neither a Seq Scan nor all-chunk decompression
+regression. Public API/MVT/curve paths SHALL meet the #1342 gates: buffers no
+more than 5000, SQL P95 no more than 300 ms, local API P95 no more than 500 ms,
+and frontend river-click P95 under 2 seconds.
+
+Every accepted 4.x receipt SHALL be from the current invocation and exact
+reviewed head; a pre-existing clean file cannot satisfy GO. Issue #1938 SHALL
+remain a non-blocking parser follow-up, so all manually supplied values SHALL be
+short canonical decimals. The evidence PR SHALL merge while this change remains
+strict-valid; only then SHALL #1895 and #1891 close, followed by immediate
+post-merge archival after final strict validation.
+
+#### Scenario: Executable runbook precedes remote access
+
+- **WHEN** Issue #1895 reaches its first node-27 observation
+- **THEN** the exact reviewed head already contains all census, evidence, install, one-group, halt, receipt and closure commands and explicitly forbids the historical manual container recipe for the cold bind
+
+#### Scenario: Historical baseline is rebound before mutation
+
+- **WHEN** the fresh preflight census runs before the first live mutation
+- **THEN** it resolves exactly six complete eligible source groups and records every durable key, member/inventory/parity and capacity input, or ends the window as NO-GO without choosing an arbitrary six
+
+#### Scenario: Capacity inputs derive from the same six-group preimage
+
+- **WHEN** the rollout freezes the installer and runner capacity values
+- **THEN** it checks positive non-overflowing `E` and `S`, records `cold_reserve=E`, `wal_reserve=E` as a live-expansion proxy rather than a WAL measurement, `install_required=S`, `rollback_headroom=2*E`, and rejects historical or disposable values as substitutes
+
+#### Scenario: Disposable rollback proof closes the pre-mutation gate
+
+- **WHEN** the issue-approved disposable branch runs before live mutation
+- **THEN** the exact reviewed SHA proves one complete group can move cold and return wholly to `pg_default` with data parity and owned-resource cleanup, and live read-only checks prove compatible engine/catalog/group inputs
+
+#### Scenario: Terminal install closes its recovery authority
+
+- **WHEN** the installer publishes a terminal `installed` receipt
+- **THEN** the private recovery authority is closed and absent, a later complete-topology invocation is observation-only, and any subsequent trigger preserves the installed topology rather than claiming an operator rollback path
+
+#### Scenario: Post-install census is unchanged before movement
+
+- **WHEN** the fresh target is installed and the first movement is about to start
+- **THEN** the same six keys remain complete source with matching inventory/parity and no unexplained extra eligible key, or movement remains zero, rollout is NO-GO, and the terminally installed topology remains preserved
 
 #### Scenario: Existing eligible groups migrate with data parity
 
-- **WHEN** the controlled rollout processes the six baseline compressed groups
-- **THEN** every complete group is cold with no mixed member, row count/identity/aggregate checksum and representative query results match before/after, and hot/cold filesystem deltas are reconciled against relation bytes
+- **WHEN** the controlled rollout processes the six census-bound baseline compressed groups with one invocation per group
+- **THEN** every invocation is current-run-bound, every complete group is cold with no mixed member, row count/identity/aggregate checksum and representative query results match before/after, and filesystem deltas reconcile against relation bytes before the next invocation
 
 #### Scenario: Hot window remains writable and hot
 
-- **WHEN** migration completes and ingest resumes
-- **THEN** every active/uncompressed group remains in `pg_default`, current writers succeed, valid-times remain nonempty and non-regressing, and current GFS/IFS publication counts remain complete
+- **WHEN** migration completes and the bounded ingest smoke runs before timer restoration
+- **THEN** every active/uncompressed group remains in `pg_default`, current writers succeed and are re-quiesced, valid-times remain nonempty/non-regressing, and current GFS/IFS publication counts remain complete
 
-#### Scenario: Rollback returns one group hot without data drift
+#### Scenario: Post-movement trigger fails closed
 
-- **WHEN** a rollback trigger fires or the planned rollback drill selects one cold group
-- **THEN** the same transactional primitive returns its complete group to `pg_default`, data parity holds, and no referenced host path or catalog object is deleted
+- **WHEN** any enumerated trigger fires after a live group has moved and no reviewed live move-back entrypoint exists
+- **THEN** later groups and timer restoration stop, every referenced topology object remains intact, the rollout reports NO-GO, and no ad hoc SQL or production-only patch is executed
 
 #### Scenario: Natural lifecycle tick is healthy
 
-- **WHEN** timers are restored and the next natural compression/residency lifecycle tick completes
-- **THEN** its schema-valid receipt is clean or a truthful no-op, all required timers are active, and `systemctl --user --failed` contains no issue-owned failure
+- **WHEN** preliminary GO permits timer restoration and the next natural compression/residency lifecycle tick completes
+- **THEN** its current-run schema-valid receipt is clean or a truthful no-op, all required timers are active, and `systemctl --user --failed` contains no issue-owned failure
+
+#### Scenario: Evidence merges before closure and archive
+
+- **WHEN** all live acceptance gates pass
+- **THEN** the strict-valid evidence PR merges first, #1895 then #1891 close, and the shared change archives only in the immediate validated post-merge follow-up

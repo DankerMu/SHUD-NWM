@@ -765,10 +765,72 @@ SQL_SHAPE_ORACLE_TESTS: tuple[str, ...] = (
 )
 
 
+# #1895 task 4.0 second leg: the runbook contract suite is the review gate for
+# the two read-only CLIs, the installer/runner receipt contracts and the probe
+# parser tokens it pins. The suite is a CHANGED_TEST_FILE_RULES redirect because
+# rewriting it can silently weaken its pins; a contract-only PR must run the
+# owners the contract protects (the CLI/host/target/installer/runner surfaces),
+# replacing the ordinary self-selection + importer closure exactly like the
+# SQL-shape oracle does. The runbook rule (PATH_TEST_RULES) still selects this
+# suite on a runbook-only change; this redirect covers the test-only change.
+# #1895 task 4.0 structural split (large-file guard): the census test suite is
+# physically partitioned into the core module (capacity arithmetic, exact-count,
+# group-state, engine/read-only, head-freeze, connection setup) and the
+# publication / no-clobber / secret / import-surface module. Both halves are ONE
+# contract: the publication half imports the core module's shared fake helpers
+# at module scope, and the runbook binds the artifact the CLI publishes. This
+# tuple is the single two-partition route authority for the CLI rule, the
+# policy-owner rule, the runbook-contract redirect and the publication-suite
+# redirect below, so a future third partition reddens the meta-tests instead of
+# falling out of one of the four routes.
+NODE27_COLD_RESIDENCY_CENSUS_TESTS: tuple[str, ...] = (
+    "tests/test_node27_cold_residency_census.py",
+    "tests/test_node27_cold_residency_census_publication.py",
+)
+
+# Producer/contract closure for the census CLI and its capacity-policy owner:
+# both census halves, the #1893 runtime owner the CLI calls, and the runbook
+# contract that binds the artifact schema it publishes.
+NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS: tuple[str, ...] = (
+    *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
+    "tests/test_compressed_chunk_cold_runtime.py",
+    "tests/test_issue1895_runbook_contract.py",
+)
+
+ISSUE1895_RUNBOOK_CONTRACT_TESTS: tuple[str, ...] = (
+    *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
+    "tests/test_node27_cold_identity_observe.py",
+    "tests/test_node27_cold_tablespace_cli.py",
+    "tests/test_node27_cold_tablespace_install.py",
+    "tests/test_node27_cold_tablespace_host.py",
+    "tests/test_compressed_chunk_cold_target.py",
+    "tests/test_compressed_chunk_cold_runtime.py",
+    "tests/test_node27_cold_residency.py",
+    "tests/test_node27_cold_residency_runtime_identity.py",
+    "tests/test_probe_compressed_chunk_cold_tablespace.py",
+    "tests/test_timeseries_storage_schemas.py",
+)
+
 CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "tests/test_sql_shape_helpers.py",
         SQL_SHAPE_ORACLE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_runbook_contract.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        # The publication half of the census suite moved out of the core module
+        # for the 1,000-line guard. A test-only change to it must run BOTH
+        # census halves plus the producer/contract closure (the CLI rule, the
+        # runbook contract it binds, and the runtime owner), replacing the
+        # ordinary self-selection + importer closure exactly like the runbook
+        # contract redirect does.
+        "tests/test_node27_cold_residency_census_publication.py",
+        NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
         stop_on_match=True,
     ),
     PathTestRule(
@@ -969,6 +1031,11 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # at file scope (`FakeConnection`), so a fakes-only edit must run it —
             # its 1.0/1.1 target-shape rows are asserted against these fixtures.
             "tests/test_node27_cold_residency_schema_compat.py",
+            # #1895 task 4.0 structural split: both census halves import the
+            # shared fakes at module scope (the publication half imports the
+            # core half, which imports the fakes). A fakes-only edit must run
+            # both, or the split leaves the publication half blind.
+            *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
         ),
     ),
     PathTestRule(
@@ -2511,6 +2578,43 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_sequential_budget.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
             "tests/test_node27_timeseries_sequential_wrappers.py",
+            # #1895 task 4.0 second leg: the live-rollout section is the review
+            # gate for the two new read-only CLIs and the installer/runner
+            # contracts it binds; a section-only PR must run its contract suite
+            # instead of falling to collect-only.
+            "tests/test_issue1895_runbook_contract.py",
+        ),
+    ),
+    PathTestRule(
+        # #1895 task 4.0: the pre-target census CLI freezes the group/capacity
+        # preimage at the exact reviewed SHA. Any change to it invalidates the
+        # two census suites (core + publication), the #1893 production owners it
+        # calls, and the runbook contract that binds the artifact schema it
+        # publishes.
+        "scripts/node27_cold_residency_census.py",
+        NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
+    ),
+    PathTestRule(
+        # #1895 task 4.0 structural split: the shared canonical-decimal capacity
+        # policy owner has no same-name suite (it is not a CLI), so a policy-only
+        # change must run the census suites that assert the arithmetic plus the
+        # runtime owner and runbook contract, instead of falling to the #1744
+        # shared-baseline smoke which asserts none of it.
+        "packages/common/node27_cold_residency_census_policy.py",
+        NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
+    ),
+    PathTestRule(
+        # #1895 task 4.0: the read-only identity observer supplies the two
+        # deliberately distinct device identities (installer mount identity and
+        # runner descriptor identity). A change to it must run its own suite,
+        # the two host/target owners it calls, and the runbook contract that
+        # pins the two lanes.
+        "scripts/node27_cold_identity_observe.py",
+        (
+            "tests/test_node27_cold_identity_observe.py",
+            "tests/test_node27_cold_tablespace_host.py",
+            "tests/test_compressed_chunk_cold_target.py",
+            "tests/test_issue1895_runbook_contract.py",
         ),
     ),
     PathTestRule(
