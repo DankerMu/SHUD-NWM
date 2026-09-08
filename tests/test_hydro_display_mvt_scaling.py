@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+import logging
 import re
 import threading
 import time
@@ -414,7 +416,31 @@ def test_production_tile_bind_site_forwards_the_layer_to_the_collection_limit(mo
         assert bound["feature_coordinate_limit"] == MVT_MAX_COORDINATES, layer
 
 
+# #2030: the tile route's logger tree; `apps.api.routes.hydro_display` propagates
+# to the root, which is where `caplog` attaches.
+_TILE_ROUTE_LOGGER = "apps.api.routes.hydro_display"
+_TILE_LAYERS = ("river-network", "river-network-national", "hydro", "hydro-national", "met-stations")
+
+
+def _truncation_records(caplog: Any) -> list[Any]:
+    return [record for record in caplog.records if "MVT_TILE_BUDGET_TRUNCATED" in record.getMessage()]
+
+
+def _final_select_text(layer: str) -> str:
+    """Text of `postgis_tile_sql(layer)` after the one final outer `SELECT ST_AsMVT(`.
+
+    `ST_AsMVTGeom` inside the `clipped` CTE is not preceded by `SELECT `, so the
+    literal is unique and the slice is exactly the outer projection list.
+    """
+    sql = postgis_tile_sql(layer)
+    assert sql.count("SELECT ST_AsMVT(") == 1, layer
+    return sql.split("SELECT ST_AsMVT(", 1)[1]
+
+
 def _budget_row(coordinate_count: int) -> dict[str, Any]:
+    # #2030: the four truncation-signal columns default to the untruncated state
+    # (intersecting == selected, no overflow), so every pre-existing caller of
+    # this helper keeps its 413/200 verdict *and* stays silent.
     return {
         "tile": b"pbf-bytes",
         "feature_count": 12,
@@ -422,16 +448,25 @@ def _budget_row(coordinate_count: int) -> dict[str, Any]:
         "source_identity_count": 1,
         "invalid_property_count": 0,
         "invalid_properties": "",
+        "intersecting_feature_count": 12,
+        "intersecting_coordinate_count": coordinate_count,
+        "feature_coordinate_overflow_count": 0,
+        "coordinate_dimension_overflow_count": 0,
     }
 
 
-def test_national_river_tile_over_the_shared_limit_but_within_its_own_is_rendered(monkeypatch: Any) -> None:
+def test_national_river_tile_over_the_shared_limit_but_within_its_own_is_rendered(
+    monkeypatch: Any, caplog: Any
+) -> None:
     monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
     session = _Session([_budget_row(119_999)])
 
-    tile = hydro_display._fetch_postgis_tile_bytes(session, "river-network-national", {}, z=3, x=6, y=3)
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(session, "river-network-national", {}, z=3, x=6, y=3)
 
     assert tile == b"pbf-bytes"
+    # #2030: a big-but-untruncated tile must not cry wolf.
+    assert _truncation_records(caplog) == []
 
 
 def test_national_river_tile_above_its_own_limit_still_raises_413_against_that_limit(monkeypatch: Any) -> None:
@@ -471,6 +506,180 @@ def test_per_basin_river_tile_keeps_the_shared_413_limit(monkeypatch: Any) -> No
 
     assert excinfo.value.status_code == 413
     assert excinfo.value.details["max_coordinates"] == 50000
+
+
+# #2030: budget-window layers compute `budget_stats` FROM the already truncated
+# `eligible`, so the 413 predicate is unreachable there and over-budget tiles are
+# a silent 200 with fewer rows. These stub rows drive the four columns the route
+# now reads and pin both the firing and the silent boundaries.
+_TRUNCATION_CASES = (
+    pytest.param(
+        "river-network-national",
+        {},
+        {
+            "feature_count": 23,
+            "intersecting_feature_count": 23,
+            "coordinate_count": 38531,
+            "intersecting_coordinate_count": 38531,
+        },
+        (),
+        {},
+        id="a-equal-counts-are-silent",
+    ),
+    pytest.param(
+        "river-network-national",
+        {},
+        {
+            "feature_count": 23,
+            "intersecting_feature_count": 56,
+            "coordinate_count": 38531,
+            "intersecting_coordinate_count": 86160,
+        },
+        (
+            "MVT_TILE_BUDGET_TRUNCATED",
+            "layer_id=river-network-national",
+            "z=3 x=6 y=3",
+            "feature_count=23/56",
+            "max_features=10000",
+            "coordinate_count=38531/86160",
+            "max_coordinates=120000",
+        ),
+        {"layer_id": "river-network-national", "intersecting_coordinate_count": 86160},
+        id="b-both-arms-fire",
+    ),
+    pytest.param(
+        "river-network-national",
+        {},
+        {
+            "feature_count": 23,
+            "intersecting_feature_count": 24,
+            "coordinate_count": 38531,
+            "intersecting_coordinate_count": 38531,
+        },
+        ("MVT_TILE_BUDGET_TRUNCATED", "feature_count=23/24", "coordinate_count=38531/38531"),
+        {},
+        id="c-feature-arm-alone-fires",
+    ),
+    pytest.param(
+        "river-network-national",
+        {},
+        {
+            "feature_count": 23,
+            "intersecting_feature_count": 23,
+            "coordinate_count": 38531,
+            "intersecting_coordinate_count": 86160,
+            "feature_coordinate_overflow_count": 1,
+        },
+        (),
+        {},
+        id="d-per-feature-coordinate-overflow-is-silent",
+    ),
+    pytest.param(
+        "river-network-national",
+        {},
+        {
+            "feature_count": 23,
+            "intersecting_feature_count": 23,
+            "coordinate_count": 38531,
+            "intersecting_coordinate_count": 86160,
+            "coordinate_dimension_overflow_count": 1,
+        },
+        (),
+        {},
+        id="e-coordinate-dimension-overflow-is-silent",
+    ),
+    pytest.param(
+        "hydro-national",
+        {"variable": "q_down"},
+        {
+            "feature_count": 23,
+            "intersecting_feature_count": 23,
+            "coordinate_count": 40000,
+            "intersecting_coordinate_count": 60000,
+        },
+        (
+            "MVT_TILE_BUDGET_TRUNCATED",
+            "layer_id=discharge",
+            "z=3 x=6 y=3",
+            "coordinate_count=40000/60000",
+            "max_coordinates=50000",
+        ),
+        {"layer_id": "discharge", "max_coordinates": 50000},
+        id="f-hydro-national-uses-the-public-layer-id",
+    ),
+)
+
+
+@pytest.mark.parametrize(("layer", "params", "overrides", "fragments", "attrs"), _TRUNCATION_CASES)
+def test_budget_truncation_signal_matrix(
+    monkeypatch: Any,
+    caplog: Any,
+    layer: str,
+    params: dict[str, Any],
+    overrides: dict[str, Any],
+    fragments: tuple[str, ...],
+    attrs: dict[str, Any],
+) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([{**_budget_row(0), **overrides}])
+
+    with caplog.at_level(logging.WARNING, logger=_TILE_ROUTE_LOGGER):
+        tile = hydro_display._fetch_postgis_tile_bytes(session, layer, params, z=3, x=6, y=3)
+
+    assert tile == b"pbf-bytes"
+    records = _truncation_records(caplog)
+    if not fragments:
+        assert records == []
+        return
+    assert len(records) == 1
+    # The spec pins the severity, not just the token: an ERROR would page an
+    # operator for a tile that still rendered.
+    assert records[0].levelno == logging.WARNING
+    message = records[0].getMessage()
+    for fragment in fragments:
+        assert fragment in message, (fragment, message)
+    for name, value in attrs.items():
+        assert getattr(records[0], name) == value, name
+
+
+def test_every_tile_layer_projects_the_prefilter_intersecting_counts() -> None:
+    # The bare `AS intersecting_*` aliases already exist once inside the
+    # `prefilter_stats` CTE, so this counts the full projection expression in the
+    # final SELECT slice only.
+    for layer in _TILE_LAYERS:
+        final_select = _final_select_text(layer)
+        for column in ("intersecting_feature_count", "intersecting_coordinate_count"):
+            projection = f"(SELECT {column} FROM prefilter_stats) AS {column}"
+            assert final_select.count(projection) == 1, (layer, column)
+
+
+def test_every_column_the_tile_route_reads_is_projected_by_every_layer() -> None:
+    # Route -> SQL coverage lock: read the keys out of the live route source
+    # rather than restating them, so a column the route starts reading (or a
+    # layer that stops projecting one) fails here instead of at runtime.
+    source = inspect.getsource(hydro_display._fetch_postgis_tile_bytes)
+    keys = set(re.findall(r'row\.get\("([a-z_]+)"\)', source)) | set(re.findall(r'row\["([a-z_]+)"\]', source))
+
+    assert keys, "no row column reads found in _fetch_postgis_tile_bytes"
+    assert {
+        "tile",
+        "feature_count",
+        "coordinate_count",
+        "source_identity_count",
+        "invalid_property_count",
+        "invalid_properties",
+        "intersecting_feature_count",
+        "intersecting_coordinate_count",
+        "feature_coordinate_overflow_count",
+        "coordinate_dimension_overflow_count",
+    } <= keys
+
+    for layer in _TILE_LAYERS:
+        final_select = _final_select_text(layer)
+        for key in sorted(keys):
+            # `\b` so `AS tile` does not match `AS tile_rows` and `AS feature_count`
+            # does not match `AS feature_coordinate_count`.
+            assert re.search(rf"\bAS {re.escape(key)}\b", final_select), (layer, key)
 
 
 def test_concurrent_cold_requests_generate_one_tile(monkeypatch: Any, tmp_path: Any) -> None:
