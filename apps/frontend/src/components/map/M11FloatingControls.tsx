@@ -2,9 +2,13 @@ import type { ReactNode } from 'react'
 import { ArrowLeft, CloudRain, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench, type LucideIcon } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
+import type { components } from '@/api/types'
 import { cn } from '@/lib/cn'
 import { getM11LayerLegend, type LayerLegendEntry, type LayerState } from '@/lib/m11/overviewDataContracts'
 import type { M11Basemap, M11Layer, M11QueryPatch } from '@/lib/m11/queryState'
+
+/** 降水图例条目：形状只认 API 契约（目录 `precip` 条目的 `metadata.legend`），前端不另立一份。 */
+type PrecipLegendEntry = components['schemas']['PrecipLegendEntry']
 
 // 玻璃质感容器：半透明 + backdrop-blur + 细描边 + 圆角 + 阴影。统一浮层外观。
 export const GLASS_PANEL =
@@ -203,11 +207,30 @@ function legendTitle(_layer: M11Layer) {
 }
 
 /**
+ * 降水图例段的标题。含单位 `mm/24h`（spec precipitation-raster-overlay
+ * 「Legend shows both layers」要求图例自报单位，否则六级色阶读不出量纲）。
+ */
+const M11_PRECIP_LEGEND_TITLE = '过去 24h 累积降水（mm/24h）'
+
+/**
  * 浮层图例（M26 单页全屏）。玻璃卡片浮在地图右下角，跟随 active layer 渲染图例。
  * 气象代站无图例合同 → honest 文案，不伪造色阶。
+ *
+ * `precipLegend` 可选、默认无：**唯一**来源是目录 `precip` 条目的 `metadata.legend`
+ * （fixture 决策 7），由 `OverviewMode` 一处推出并传入；组件内零硬编码调色板与阈值，
+ * 否则图例的六个 hex 会与 PNG 的 PLTE 漂移。流域详情不传 → 无降水图例段（blocked by #2109）。
  */
-export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: LayerState[] }) {
+export function M11FloatingLegend({
+  layer,
+  layers,
+  precipLegend,
+}: {
+  layer: M11Layer
+  layers: LayerState[]
+  precipLegend?: PrecipLegendEntry[] | null
+}) {
   const entries = resolveM11FloatingLegend(layer, layers)
+  const precipEntries = precipLegend?.length ? precipLegend : null
 
   return (
     <section
@@ -215,11 +238,13 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
       // 200px / 最宽行 137px）。max-w-56 保住原来的上限，未来出现更长的标签也不会
       // 把卡片撑过地图。
       //
-      // bottom-12 而不是 bottom-4：地图右下角是 MapLibre 版权归属的固定位置，
-      // 实测它离底 10px、高 24px（折叠成小钮后是 36x24，一样高），bottom-4 会压掉一角。
-      // 版权标注是瓦片供应商的硬要求，让我们自己的浮层避让。48px 留 14px 余量，
-      // 几何由 e2e/m11-overlay-collision.mocked.spec.ts 守住。
-      className={cn('absolute bottom-12 right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
+      // bottom-24 而不是 bottom-12：底部控制条（`M11BottomControlBar`）自身 `bottom-4`
+      // 且固定 `h-16`（64px，`m11VisualTokens.timelineHeight`），占据 16–80px 这一带；
+      // bottom-12（48px）会被它压掉。96px = 80px 条顶 + 16px 间隙
+      // （spec map-layer-timeline-controls「Floating controls clear the control bar」）。
+      // 这也顺带继续避开离底 10px、高 24px 的 MapLibre 版权归属带——版权标注是瓦片供应商的
+      // 硬要求，几何由 e2e/m11-overlay-collision.mocked.spec.ts 守住（它量矩形，不钉类名）。
+      className={cn('absolute bottom-24 right-4 z-[120] w-max max-w-56 p-3', GLASS_PANEL)}
       aria-label="地图图例"
       data-testid="m11-floating-legend"
     >
@@ -242,6 +267,36 @@ export function M11FloatingLegend({ layer, layers }: { layer: M11Layer; layers: 
           当前图层暂无图例合同。
         </p>
       )}
+      {precipEntries ? (
+        // 降水段挂在流量段**之下、同一张卡片内**（spec「the legend panel shows the six-class
+        // precipitation legend (mm/24h) beneath the discharge legend」）。并列第二张浮层卡片会
+        // 与右下角这张重叠，故不另起 section。
+        <div className="mt-3 border-t border-white/50 pt-2" data-testid="m11-floating-legend-precip">
+          <div className="flex items-center gap-2 pb-2 text-xs font-semibold text-neutral-900">
+            <CloudRain className="h-4 w-4 text-primary-600" aria-hidden="true" />
+            {M11_PRECIP_LEGEND_TITLE}
+          </div>
+          <div className="space-y-1" data-testid="m11-floating-legend-precip-entries">
+            {precipEntries.map((entry) => (
+              // 色块颜色与阈值文字逐项来自 `legend[]`：label 已自带区间（如「0.1-10」「≥250」），
+              // 前端不再从 min/max 另拼一套阈值文案——那就是第二份会漂的阈值来源。
+              <div
+                key={`${entry.label}-${entry.color}`}
+                className="flex items-center gap-2 text-xs text-neutral-700"
+                data-testid="m11-floating-legend-precip-row"
+              >
+                <span
+                  className="h-3 w-7 shrink-0 rounded-sm"
+                  style={{ backgroundColor: entry.color }}
+                  data-testid="m11-floating-legend-precip-swatch"
+                  aria-hidden="true"
+                />
+                <span className="min-w-0 truncate">{entry.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -252,7 +307,8 @@ export function M11BackToOverviewButton({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       className={cn(
-        'absolute bottom-4 left-4 z-[120] flex items-center gap-2 px-3 py-2 text-sm font-medium text-primary-700 transition-colors hover:bg-white/70',
+        // bottom-24：与右下图例同因——底部控制条占 16–80px，96px = 条顶 + 16px 间隙。
+        'absolute bottom-24 left-4 z-[120] flex items-center gap-2 px-3 py-2 text-sm font-medium text-primary-700 transition-colors hover:bg-white/70',
         GLASS_PANEL,
       )}
       onClick={onClick}
@@ -297,7 +353,10 @@ export function M11FloatingNotice({ children, testId }: { children: ReactNode; t
   return (
     <div
       className={cn(
-        'absolute left-1/2 bottom-20 z-[110] max-w-[min(30rem,calc(100%-8rem))] -translate-x-1/2 px-3 py-2 text-xs text-neutral-800',
+        // bottom-40：与图例/返回按钮同因抬过 16–80px 的控制条，并保持提示条原先就比
+        // 那两张卡片再高一层的相对关系（bottom-20 之于 bottom-12/bottom-4）。
+        // 注意本值只保证越过控制条：卡片高度不定，居中提示与右下图例的水平交叠归 I15 的实机 receipt。
+        'absolute left-1/2 bottom-40 z-[110] max-w-[min(30rem,calc(100%-8rem))] -translate-x-1/2 px-3 py-2 text-xs text-neutral-800',
         GLASS_PANEL,
       )}
       role="status"

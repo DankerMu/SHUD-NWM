@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import { RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -16,6 +16,7 @@ import {
   mockApi,
   precipIndex,
   precipLayer,
+  precipLegend,
   resetOverviewDataTestState,
   success,
 } from '@/test/overviewDataFixture'
@@ -59,6 +60,18 @@ async function settled() {
 
 function surface() {
   return screen.getByTestId('m11-map-surface')
+}
+
+/** 浮层图例卡片。`mm/24h` 在图层开关的副标题里也出现，所有单位断言必须收在这张卡片内。 */
+function legendCard() {
+  return screen.getByTestId('m11-floating-legend')
+}
+
+/** jsdom 把 `style.backgroundColor` 归一成 `rgb(...)`；期望值走同一条 CSSOM 路径归一。 */
+function normalizedColor(color: string) {
+  const probe = document.createElement('span')
+  probe.style.backgroundColor = color
+  return probe.style.backgroundColor
 }
 
 beforeEach(() => {
@@ -130,6 +143,38 @@ describe('OverviewPage precipitation overlay mount seam', () => {
       expect(toggle.getAttribute('aria-pressed')).toBe('true')
       expect(toggle.textContent).not.toContain('未实现')
     })
+  })
+
+  it('threads the catalog precip legend into the floating legend card', async () => {
+    // 图例的**唯一**来源是目录 `precip` 条目的 `metadata.legend`（fixture 决策 7）：
+    // 这条走通 `OverviewMode → M11FloatingLegend` 的穿线，断言六个色块逐字来自目录数据。
+    mockApi({ '/api/v1/layers': () => success([layer, precipLayer]) })
+    renderOverview()
+    await settled()
+
+    await waitFor(() => expect(within(legendCard()).getByText(/mm\/24h/)).toBeInTheDocument())
+    const swatches = within(legendCard())
+      .getAllByTestId('m11-floating-legend-precip-swatch')
+      .map((node) => node.style.backgroundColor)
+    expect(swatches).toEqual(precipLegend.map((entry) => normalizedColor(entry.color)))
+    expect(precipLayer.metadata.legend).toBe(precipLegend)
+  })
+
+  it('suppresses the precipitation legend section while the overlay is switched off', async () => {
+    // `?precip=0`：目录条目照旧到达（开关仍可用），但图例段不得渲染——给一个没画出来的
+    // 图层留着色阶就是在假装它还在。
+    mockApi({ '/api/v1/layers': () => success([layer, precipLayer]) })
+    renderOverview({ precip: false })
+    await settled()
+
+    // 前置条件：目录确实到了（否则本用例断的是「目录没来」，什么也不鉴别）。
+    await waitFor(() => {
+      const toggle = screen.getByRole('button', { name: /过去 24h 累积降水/ }) as HTMLButtonElement
+      expect(toggle.disabled).toBe(false)
+      expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    })
+    expect(within(legendCard()).queryByText(/mm\/24h/)).toBeNull()
+    expect(screen.queryByTestId('m11-floating-legend-precip')).toBeNull()
   })
 
   it('keeps the overlay pending while the active cycle valid-time list is unresolved', async () => {

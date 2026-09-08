@@ -122,6 +122,7 @@ function M11FullscreenMap({
   popup,
   precipOverlay,
   precipAvailable,
+  precipLegend,
   loading,
   boundaryLoading,
   fitTo,
@@ -151,6 +152,8 @@ function M11FullscreenMap({
   precipOverlay?: M11PrecipOverlayModel | null
   /** 目录里是否有 `precip` 条目；不传 = 降水开关禁用并标「未实现」。 */
   precipAvailable?: boolean
+  /** 降水图例色阶（目录 `precip` 条目的 `metadata.legend`）；不传/null = 不渲染降水图例段。 */
+  precipLegend?: import('@/api/types').components['schemas']['PrecipLegendEntry'][] | null
   loading?: boolean
   boundaryLoading?: boolean
   fitTo?: M11MapCameraFit | null
@@ -203,7 +206,7 @@ function M11FullscreenMap({
       <M11OpsLink visible={opsVisible} />
       {children}
       {controlBar ? <M11BottomControlBar {...controlBar} onQueryChange={onQueryChange} /> : null}
-      <M11FloatingLegend layer={state.layer} layers={layers} />
+      <M11FloatingLegend layer={state.layer} layers={layers} precipLegend={precipLegend} />
       </section>
     </div>
   )
@@ -371,8 +374,13 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       }),
     [dischargeLayer, precipIndexByCycle, state.precip, state.source],
   )
-  // 目录里有没有 `precip` 条目：**一处**推导，传给浮层开关（组件内不重复 find）。
-  const precipAvailable = useMemo(() => layers.some((entry) => entry.layerId === 'precip'), [layers])
+  // 目录里的 `precip` 条目：**一处**推导，既喂浮层开关的可用性，也喂图例段的色阶
+  // （同一条目、同一语义；开第二条 find 就是让「开关说有」和「图例说没有」各自漂）。
+  const precipCatalogLayer = useMemo(() => layers.find((entry) => entry.layerId === 'precip') ?? null, [layers])
+  const precipAvailable = precipCatalogLayer !== null
+  // 图例单一来源 = 目录 `precip` 条目的 `metadata.legend`（fixture 决策 7），前端零硬编码调色板。
+  // 开关关掉时不渲染图例段：给一个没画出来的图层留着色阶就是在假装它还在。
+  const precipLegend = state.precip ? (precipCatalogLayer?.metadata?.legend ?? null) : null
   // basin_version_id → basin_id：全国点河段开流量弹窗时反查所属流域去取该流域 latest-product。
   const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? mapOverview?.basinVersionToBasinId ?? {}
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
@@ -541,6 +549,7 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       stationFeatureCollection={stationLayer.featureCollection}
       precipOverlay={precipOverlay}
       precipAvailable={precipAvailable}
+      precipLegend={precipLegend}
       loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}
       fitTo={basinFit}

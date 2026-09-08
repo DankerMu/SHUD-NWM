@@ -8,9 +8,11 @@ import {
   M11FloatingBasemapSwitcher,
   M11FloatingLayerSwitcher,
   M11FloatingLegend,
+  M11FloatingNotice,
   M11OpsLink,
 } from '@/components/map/M11FloatingControls'
 import type { LayerState } from '@/lib/m11/overviewDataContracts'
+import { precipLegend } from '@/test/overviewDataFixture'
 
 const dischargeLayer: LayerState = {
   layerId: 'discharge',
@@ -52,6 +54,29 @@ function expectSizedToContent(card: HTMLElement) {
   expect(classes).toContain('w-max')
   expect(classes.filter((name) => /^w-(?!max$|fit$)/.test(name))).toHaveLength(0)
   expect(classes.some((name) => name.startsWith('max-w-'))).toBe(true)
+}
+
+/**
+ * 底部偏移不变量：按**空白切 token** 比对，不用子串。
+ * 朴素的 `not.toContain('bottom-4')` 会被 `bottom-40` 假红（反之 `toContain('bottom-4')` 会被
+ * `bottom-40` 假绿），而这三个类名恰好两两互为前缀。
+ */
+function expectBottomOffset(element: HTMLElement, expected: string, replaced: string) {
+  const classes = element.className.split(/\s+/)
+  expect(classes).toContain(expected)
+  expect(classes).not.toContain(replaced)
+}
+
+/** jsdom 把 `style.backgroundColor` 归一成 `rgb(...)`；用同一条 CSSOM 路径把期望值也归一，
+ * 避免测试里再手写一份 hex→rgb 换算（那就是第二份会漂的颜色表示）。 */
+function normalizedColor(color: string) {
+  const probe = document.createElement('span')
+  probe.style.backgroundColor = color
+  return probe.style.backgroundColor
+}
+
+function precipSwatchColors() {
+  return screen.getAllByTestId('m11-floating-legend-precip-swatch').map((node) => node.style.backgroundColor)
 }
 
 describe('M11FloatingLayerSwitcher', () => {
@@ -187,6 +212,89 @@ describe('M11FloatingLegend', () => {
     render(<M11FloatingLegend layer="discharge" layers={[{ ...dischargeLayer, legend: [] }]} />)
     expect(screen.getByText('径流量图例')).toBeInTheDocument()
     expect(screen.getByTestId('m11-floating-legend-entries')).toBeInTheDocument()
+  })
+
+  it('renders the six-class precipitation legend beneath the discharge legend inside the same card', () => {
+    render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} precipLegend={precipLegend} />)
+
+    const card = screen.getByTestId('m11-floating-legend')
+    const dischargeBlock = screen.getByTestId('m11-floating-legend-entries')
+    const precipBlock = screen.getByTestId('m11-floating-legend-precip')
+    // 同一张卡片内（并列第二张浮层会与右下角这张像素重叠），且排在流量段**之后**。
+    expect(card).toContainElement(precipBlock)
+    expect(dischargeBlock.compareDocumentPosition(precipBlock) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // 标题必须自报单位，否则六级色阶读不出量纲（spec「Legend shows both layers」）。
+    expect(within(card).getByText(/mm\/24h/)).toBeInTheDocument()
+  })
+
+  it('takes every precipitation swatch colour and threshold text from the legend data, in order', () => {
+    render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} precipLegend={precipLegend} />)
+
+    expect(precipSwatchColors()).toEqual(precipLegend.map((entry) => normalizedColor(entry.color)))
+    expect(
+      screen.getAllByTestId('m11-floating-legend-precip-row').map((row) => row.textContent),
+    ).toEqual(precipLegend.map((entry) => entry.label))
+  })
+
+  it('follows the legend data when a swatch colour changes instead of a hardcoded palette', () => {
+    const mutatedColor = '#123456'
+    // 前置条件：这个色值不在 fixture 里，否则"跟着变"与"写死"无法区分。
+    expect(precipLegend.map((entry) => entry.color)).not.toContain(mutatedColor)
+    // 复制后改，不动共享 fixture 导出。
+    const mutated = precipLegend.map((entry, index) => (index === 0 ? { ...entry, color: mutatedColor } : entry))
+
+    const { rerender } = render(
+      <M11FloatingLegend layer="discharge" layers={[dischargeLayer]} precipLegend={precipLegend} />,
+    )
+    expect(precipSwatchColors()[0]).toBe(normalizedColor(precipLegend[0].color))
+
+    rerender(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} precipLegend={mutated} />)
+    expect(precipSwatchColors()).toEqual(mutated.map((entry) => normalizedColor(entry.color)))
+    expect(precipSwatchColors()[0]).toBe(normalizedColor(mutatedColor))
+  })
+
+  it.each([
+    ['prop omitted', {}],
+    ['prop null', { precipLegend: null }],
+    ['prop empty', { precipLegend: [] }],
+  ])('renders no precipitation legend section when there is no legend data (%s)', (
+    _label,
+    props: { precipLegend?: typeof precipLegend | null },
+  ) => {
+    render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} {...props} />)
+
+    expect(screen.queryByTestId('m11-floating-legend-precip')).toBeNull()
+    expect(screen.queryAllByTestId('m11-floating-legend-precip-swatch')).toHaveLength(0)
+    expect(within(screen.getByTestId('m11-floating-legend')).queryByText(/mm\/24h/)).toBeNull()
+    // 流量图例不受影响。
+    expect(screen.getByTestId('m11-floating-legend-entries')).toBeInTheDocument()
+  })
+
+  it('keeps sizing the card to its content once the precipitation section is present', () => {
+    render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} precipLegend={precipLegend} />)
+    expectSizedToContent(screen.getByTestId('m11-floating-legend'))
+  })
+})
+
+/**
+ * spec map-layer-timeline-controls「Floating controls clear the control bar」：
+ * `M11BottomControlBar` 自身 `bottom-4` + 固定 `h-16`（64px）占据 16–80px 这一带，
+ * 三个浮层必须整体抬到它上面。
+ */
+describe('floating controls clear the bottom control bar', () => {
+  it('lifts the legend from bottom-12 to bottom-24', () => {
+    render(<M11FloatingLegend layer="discharge" layers={[dischargeLayer]} />)
+    expectBottomOffset(screen.getByTestId('m11-floating-legend'), 'bottom-24', 'bottom-12')
+  })
+
+  it('lifts the back-to-overview button from bottom-4 to bottom-24', () => {
+    render(<M11BackToOverviewButton onClick={vi.fn()} />)
+    expectBottomOffset(screen.getByTestId('m11-back-to-overview'), 'bottom-24', 'bottom-4')
+  })
+
+  it('lifts the floating notice from bottom-20 to bottom-40', () => {
+    render(<M11FloatingNotice testId="m11-offset-notice">降水提示</M11FloatingNotice>)
+    expectBottomOffset(screen.getByTestId('m11-offset-notice'), 'bottom-40', 'bottom-20')
   })
 })
 
