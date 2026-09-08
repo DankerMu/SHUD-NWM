@@ -9,7 +9,7 @@
   （stale-while-revalidate；展示数据小时级节奏下 10min 内陈旧诚实可接受）。
 - 超过 STALE_MAX：阻塞重算（真冷路径，仅进程刚启动或长期无人访问后出现）。
 - 自预热：记录最近访问的目录 GET path，后台线程每 45s 经 ASGI 回放
-  （带 force-refresh 头旁路缓存），保持热 key 常新。
+  （在 ASGI scope 里打进程内预热标记以旁路缓存），保持热 key 常新。
 
 边界（honest）：缓存的是 store 层 payload（不含 request_id 信封）；
 根治（目录查询索引与覆盖物化）见后端慢查询专项。
@@ -18,9 +18,10 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -29,7 +30,14 @@ DISPLAY_CATALOG_TTL_SECONDS = 60.0
 DISPLAY_CATALOG_STALE_MAX_SECONDS = 600.0
 DISPLAY_CATALOG_WARM_INTERVAL_SECONDS = 45.0
 DISPLAY_CATALOG_WARM_ACTIVE_WINDOW_SECONDS = 1800.0
+# 强制刷新头。头的存在不再是特权：只有当值与 NHMS_DISPLAY_CACHE_WARM_TOKEN
+# 配置的 token 相等（`hmac.compare_digest`）时才生效；token 未配置时任何值都不生效
+# （#2079：display 侧 GET 无鉴权、nginx 不剥头，字面值 `refresh` 曾让公网任意客户端
+# 逐请求把目录端点打回冷路径）。常量名保留：prewarm 与测试都引用它。
 DISPLAY_CACHE_FORCE_REFRESH_HEADER = "x-nhms-cache-warm"
+# 进程内预热身份：`_replay_targets` 在 ASGI scope["state"] 上打的标记。网络侧不可
+# 伪造（uvicorn 自建 scope["state"]，客户端写不进去），也不需要任何配置。
+_WARM_SCOPE_KEY = "nhms_display_cache_warm"
 _MAX_ENTRIES = 256
 
 _lock = threading.Lock()
@@ -48,10 +56,51 @@ def _display_readonly(request: Request) -> bool:
 
 
 def _force_refresh(request: Request) -> bool:
+    """两种身份才能强制冷路径：进程内预热标记，或持有配置 token 的调用方。
+
+    绝不抛：本函数跑在每条目录 GET 的最前面，任何 `TypeError`/`AttributeError`
+    都会变成 500。特别地 `hmac.compare_digest` 对含非 ASCII 的 `str` 抛
+    `TypeError`，而 Starlette 按 latin-1 解头值——所以两侧一律先 encode 成
+    bytes 再比。`surrogateescape` 兜住 `os.environ` 里一个非法 UTF-8 字节
+    （会解成 `\\udcXX`）的 token。
+    """
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        state = scope.get("state")
+        if isinstance(state, dict) and state.get(_WARM_SCOPE_KEY) is True:
+            return True
+
+    config = getattr(getattr(getattr(request, "app", None), "state", None), "runtime_config", None)
+    token = getattr(config, "display_cache_warm_token", None)
+    if not isinstance(token, str) or not token.strip():
+        return False
     headers = getattr(request, "headers", None)
     if headers is None:
         return False
-    return headers.get(DISPLAY_CACHE_FORCE_REFRESH_HEADER) == "refresh"
+    header_value = headers.get(DISPLAY_CACHE_FORCE_REFRESH_HEADER)
+    if not isinstance(header_value, str):
+        return False
+    return hmac.compare_digest(
+        header_value.encode("utf-8", "surrogateescape"),
+        token.encode("utf-8", "surrogateescape"),
+    )
+
+
+def _mark_warm_scope(app: Callable[..., Awaitable[None]]) -> Callable[..., Awaitable[None]]:
+    """把 app 包一层，在 http scope 的 `state` 上打进程内预热标记。
+
+    拷贝 scope 与 state（不就地改写调用方的字典）；非 http scope 原样透传。
+    """
+
+    async def _marked(scope: Any, receive: Any, send: Any) -> None:
+        if isinstance(scope, dict) and scope.get("type") == "http":
+            scope = dict(scope)
+            state = dict(scope.get("state") or {})
+            state[_WARM_SCOPE_KEY] = True
+            scope["state"] = state
+        await app(scope, receive, send)
+
+    return _marked
 
 
 def _record_hot_path(request: Request, key: str) -> None:
@@ -179,11 +228,13 @@ def _warm_loop(app: FastAPI) -> None:
 async def _replay_targets(app: FastAPI, targets: list[str]) -> None:
     import httpx
 
-    transport = httpx.ASGITransport(app=app)
+    # 身份走 ASGI scope 标记而不是头：预热是进程内的，没必要（也不应该）依赖一个
+    # 网络可伪造、且需要部署 token 才生效的头。
+    transport = httpx.ASGITransport(app=_mark_warm_scope(app))
     async with httpx.AsyncClient(transport=transport, base_url="http://display-cache-warmer") as client:
         for path in targets:
             try:
-                await client.get(path, headers={DISPLAY_CACHE_FORCE_REFRESH_HEADER: "refresh"}, timeout=120.0)
+                await client.get(path, timeout=120.0)
             except Exception:  # noqa: BLE001 - 单 path 失败不影响其余预热
                 continue
 

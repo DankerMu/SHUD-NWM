@@ -171,6 +171,47 @@ ifs 13.26 两次实测中**较慢的那一次**（没有证据说它是 13 张�
 > 估算也只有 node-27 实跑 receipt（task 7.2 / #2017）才能定论：在那之前上面的 474 s 是
 > **UNVERIFIED 的推算值**，不是实测值，本仓也没有任何断言在验它。
 
+### 强制刷新身份（issue #2079）
+
+目录缓存的强制刷新（`display_catalog_cached` 跳过 store 查找、直接重算并写回）**只认两种身份**，
+其余请求无论带什么头都按 TTL / stale 规则命中：
+
+1. **进程内预热**：`_replay_targets` 把 app 包一层，在 ASGI `scope["state"]` 里打
+   `nhms_display_cache_warm=True` 再交给 `httpx.ASGITransport`。这个键由服务器侧构造，
+   网络上写不进去，也不需要任何配置——所以**预热永远有效，与 token 是否部署无关**。
+2. **持有 token 的调用方**：请求头 `x-nhms-cache-warm` 的值与 `NHMS_DISPLAY_CACHE_WARM_TOKEN`
+   按 `hmac.compare_digest`（两侧都先 `encode("utf-8", "surrogateescape")` 成 bytes，
+   因为 Starlette 按 latin-1 解头值、而 `compare_digest` 对非 ASCII `str` 抛 `TypeError`）相等。
+   唯一的合法持有者是 node-27 prewarm。
+
+**字面值 `refresh` 已退役**：它曾是唯一的特权值，而 display 侧 GET 无鉴权、nginx 也不剥这个头，
+于是公网任意客户端都能逐请求把目录端点打回冷路径（实测 2–4 ms → 73–92 ms，约 30–40 倍：
+[`receipts/2026-09-08-issue-2079-cache-warm-measurement-node27.md`](receipts/2026-09-08-issue-2079-cache-warm-measurement-node27.md)）。
+现在它和任何其它头值一样命中缓存。
+
+**部署（两处，同值，均 0600）**：`infra/env/display.env` 的 `NHMS_DISPLAY_CACHE_WARM_TOKEN`
+供 display 进程比对，`infra/env/node27-ingest.env` 的同名键供 autopipe → prewarm 发送
+（`scripts/node27_autopipe_cron.sh` 硬拒 source `display.env`，所以必须写两遍）。改完
+`bash scripts/ops/start-display-api.sh` 重启 display API。**token 值不得进 receipt。**
+两个 `.example` 模板里该键是**注释掉的**（unset 即安全默认），部署时才取消注释并填真值——
+模板里留生效占位值等于给每个照抄的部署发一个仓库公开 token。用 `openssl rand -hex 32` 生成。
+**token 必须是 ASCII**（`openssl rand -hex 32` 就是）：prewarm 经 `http.client.putheader` 发头，
+值里出现任何 latin-1 之外的字符（如 `令牌`）会在发出前抛 `UnicodeEncodeError`，该 tick 的两跳发现
+全部失败；而且非 latin-1 的 token 在 display 侧永远比不中（Starlette 按 latin-1 解头值）。
+运行时不做校验（design D3），这是运维纪律。
+
+**缺失时的退化（安全默认，不是失败）**：token 未配置 → 外部永远无法强制刷新，进程内预热照常每 45 s
+刷新热 key；prewarm 不发该头、每进程向 stderr 打一条
+`prewarm: NHMS_DISPLAY_CACHE_WARM_TOKEN unset; discovery may see up to 45 s stale catalog`
+（可见于 autopipe 日志），发现流程照常返回。代价是 publish 后的发现请求最长看到 45 s 陈旧目录
+（热 key；冷 key 最长 600 s），该 tick 可能预热上一周期，下一 tick 自愈。两处 token 不一致的后果相同，
+但**没有 warning**——这是配置漂移唯一不吵的失败面，改 token 时两边一起改。
+
+**已知缺口**：`infra/compose.display.yml` 逐条列举 `environment:`，**不透传**该键；当前生产不走 compose
+（走 `nhms-display-api.service` / `scripts/ops/start-display-api.sh` 的 `set -a; . display.env` 整份注入）。
+日后若改走 compose，必须同时加透传并把该键加进 `scripts/validate_two_node_docker_runtime.py` 的
+`DISPLAY_AUDITED_INTERPOLATION_ENV`，否则 token 声明了却进不了应用，prewarm 发着应用不认的 token 静默退化。
+
 ## MVT 文件缓存回收（issue #2032）
 
 `NHMS_MVT_FILE_CACHE_DIR` 从 M16 起**只写不删**：node-27 实测 5 天 4380 张 `.pbf` / 757 MB、

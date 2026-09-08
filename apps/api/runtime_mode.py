@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -70,6 +70,11 @@ class RuntimeConfig:
     auth_mode: str | None
     production_like: bool
     object_store_root: Path | None = None
+    # #2079: the shared secret that lets an out-of-process caller (the node-27
+    # prewarm) force a display catalog cache refresh. `repr=False` and absent
+    # from `public_dict()` on purpose -- `/api/v1/runtime/config` and every
+    # dataclass repr in a traceback must not leak it.
+    display_cache_warm_token: str | None = field(default=None, repr=False)
 
     @property
     def control_mutations_enabled(self) -> bool:
@@ -157,6 +162,7 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
         )
 
     object_store_root = _runtime_object_store_root(source_env, role)
+    display_cache_warm_token = source_env.get("NHMS_DISPLAY_CACHE_WARM_TOKEN", "").strip() or None
 
     if role == ServiceRole.DISPLAY_READONLY:
         blockers = display_boundary_blockers(source_env)
@@ -174,6 +180,7 @@ def load_runtime_config(env: Mapping[str, str] | None = None) -> RuntimeConfig:
         auth_mode=auth_mode,
         production_like=production_like,
         object_store_root=object_store_root,
+        display_cache_warm_token=display_cache_warm_token,
     )
 
 

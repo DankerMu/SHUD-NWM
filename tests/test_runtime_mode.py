@@ -34,7 +34,41 @@ _ROLE_ENV_KEYS = (
     "SHUD_EXECUTABLE",
     "DOCKER_HOST",
     "NHMS_DISPLAY_DISABLE_CONTROL_MUTATIONS",
+    "NHMS_DISPLAY_CACHE_WARM_TOKEN",
 )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (" abc ", "abc"),
+        ("abc", "abc"),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_display_cache_warm_token_is_stripped_and_blank_means_unset(raw: str, expected: str | None) -> None:
+    config = load_runtime_config(_clean_env({"NHMS_DISPLAY_CACHE_WARM_TOKEN": raw}))
+
+    assert config.display_cache_warm_token == expected
+
+
+def test_display_cache_warm_token_defaults_to_none_when_the_variable_is_missing() -> None:
+    config = load_runtime_config(_clean_env())
+
+    assert config.display_cache_warm_token is None
+
+
+def test_display_cache_warm_token_never_reaches_the_public_config_surface(tmp_path: Path) -> None:
+    # `/api/v1/runtime/config` and the OpenAPI patch both render `public_dict()`;
+    # a dataclass repr reaches every traceback and log line that formats config.
+    config = load_runtime_config(_display_env(tmp_path, {"NHMS_DISPLAY_CACHE_WARM_TOKEN": " s3cr3t "}))
+
+    assert config.display_cache_warm_token == "s3cr3t"
+    public = config.public_dict()
+    assert "display_cache_warm_token" not in public
+    assert "s3cr3t" not in repr(public)
+    assert "s3cr3t" not in repr(config)
 
 
 def test_local_default_runtime_role_is_dev_monolith() -> None:
