@@ -198,6 +198,16 @@ export interface LayerState {
   currentValidTime: string | null
   validTimeSource: 'api' | 'derived' | 'none'
   disabledReason: string | null
+  /**
+   * store 为**活动源**解析出的全国起报时次（`nationalDischargeActivePair().cycle`），解不出即 null。
+   * 与 `validTimes` 同批产出，故「这批时次属于哪个周期」不再是调用方各自推算的事
+   * （#2014 决策 13 的孪生要求）：`buildM11RegisteredOverlay` 只读本字段拼瓦片 URL 的 cycle 段，
+   * 从而保证 `(source, cycle, valid_time)` 三元组与 store 解析出的活动对逐字同源。
+   * 目录 metadata 的 `default_cycle` **不得**再当回落——它是 GFS 专有事实（后端 `list_layers`
+   * 签名里没有 `source`），非默认源借它充数就是 `/hydro-national/ifs/<gfs 周期>/…` 这条跨身份 URL。
+   * 非全国（run-scoped）图层与无周期维度的图层恒为 null，与它们不消费 `{cycle}` 模板一致。
+   */
+  activeNationalCycle: string | null
   freshness: FreshnessMetadata
   legend: LayerLegendEntry[]
 }
@@ -589,6 +599,10 @@ export function normalizeLayerStates(input: {
   // 仍是默认周期的列表，必须由此入参顶掉，否则 LayerState/时间轴/lead 0 都停在默认周期上
   // （spec frontend-mvt-layer-consumption「Non-default cycle fetches its own list」）。
   activeCycleValidTimes?: Record<string, ActiveCycleValidTimesOverride | undefined>
+  // 活动源解析出的全国起报时次，原样盖到每个 LayerState 的 `activeNationalCycle` 上（纯透传，
+  // 不参与本函数任何既有字段的计算）。解析规则只有 store 的 `nationalDischargeActivePair` 一处，
+  // 这里既不推算也不回落；不传 = null = 调用方没有解出周期 → 下游不注册全国叠加层。
+  activeNationalCycle?: string | null
   derivedValidTimes?: Record<string, string[] | undefined>
   resolvedRun?: ApiHydroRun | null
 }): LayerState[] {
@@ -632,6 +646,7 @@ export function normalizeLayerStates(input: {
       validTimes,
       currentValidTime,
       validTimeSource: apiValidTimes.length > 0 ? 'api' : derivedValidTimes.length > 0 ? 'derived' : 'none',
+      activeNationalCycle: input.activeNationalCycle ?? null,
       disabledReason: available
         ? null
         : apiLayer && validTimes.length > 0 && !renderable

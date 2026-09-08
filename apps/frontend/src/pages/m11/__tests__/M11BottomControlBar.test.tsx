@@ -23,6 +23,8 @@ import type { DischargeCyclesState } from '@/stores/overviewData'
 
 /** 全国 discharge 的 57 项 3h 列表（`+0h … +168h`），秒精度拼写与后端一致。 */
 const DEFAULT_CYCLE = '2026-05-18T00:00:00Z'
+/** 另一源自己声明的默认周期（`cyclesBySource.ifs.cycles.default_cycle`），与目录的 GFS 周期不同。 */
+const IFS_CYCLE = '2026-05-17T06:00:00Z'
 const VALID_TIMES = Array.from({ length: 57 }, (_, index) =>
   new Date(Date.parse(DEFAULT_CYCLE) + index * 3 * 3_600_000).toISOString().replace('.000Z', 'Z'),
 )
@@ -92,11 +94,11 @@ function inputFor(
   }
 }
 
-function availableCycles(cycleTimes: string[]): DischargeCyclesState {
+function availableCycles(cycleTimes: string[], source: 'gfs' | 'ifs' = 'gfs'): DischargeCyclesState {
   return {
     status: 'available',
     cycles: {
-      source: 'gfs',
+      source,
       cycles: cycleTimes.map((cycleTime) => ({
         cycle_time: cycleTime,
         valid_time_start: cycleTime,
@@ -130,7 +132,6 @@ describe('deriveM11ControlBarModel', () => {
     // lead 0 = 活动列表首项（毫秒形，与 `LayerState.validTimes` 同形）。
     expect(MILLISECOND_VALID_TIMES[0]).toBe('2026-05-18T00:00:00.000Z')
     expect(screen.getByText(MILLISECOND_VALID_TIMES[0])).toBeTruthy()
-    expect(model.disabled).toBe(false)
     expect(model.disabledReason).toBeNull()
   })
 
@@ -145,6 +146,41 @@ describe('deriveM11ControlBarModel', () => {
 
     expect(model.source).toBe('gfs')
     expect(model.cycles).toEqual([DEFAULT_CYCLE, '2026-05-17T12:00:00Z'])
+  })
+
+  it('reads the chosen source own default cycle instead of the catalog GFS-only one', () => {
+    // round-2 finding C1（P1）：目录的 `default_cycle` / `valid_times` / `default_source` 三者都是
+    // **GFS 专有事实**（后端 `list_layers` 签名里没有 `source`，`_default_layer_catalog` 固定按
+    // `NATIONAL_DISCHARGE_DEFAULT_SOURCE = 'gfs'` 算）。点 IFS 后若仍回落目录的 default_cycle，
+    // 控制条会把一个 GFS 周期显示成 IFS 的选中周期，而后端对未覆盖对返回 200 + 空列表。
+    const model = deriveM11ControlBarModel(
+      inputFor(
+        { ...defaultM11QueryState, source: 'ifs' },
+        { cyclesBySource: { gfs: availableCycles([DEFAULT_CYCLE]), ifs: availableCycles([IFS_CYCLE, '2026-05-17T00:00:00Z'], 'ifs') } },
+      ),
+    )
+
+    expect(IFS_CYCLE).not.toBe(DEFAULT_CYCLE)
+    expect(model.source).toBe('ifs')
+    expect(model.cycle).toBe(IFS_CYCLE)
+    expect(model.cycles).toEqual([IFS_CYCLE, '2026-05-17T00:00:00Z'])
+  })
+
+  it('renders an honest empty state for a non-default source whose cycles have not arrived', () => {
+    // 同 finding C1 的另一半：非默认源且该源 cycles 未到达/取回失败时，**不得**借 GFS 的
+    // default_cycle 充数 —— 那是「把假文案换成假数据」。诚实空态与 bootstrap 之前同构。
+    const snapshots: Array<Record<string, DischargeCyclesState>> = [
+      {},
+      { ifs: { status: 'error' } },
+      { gfs: availableCycles([DEFAULT_CYCLE]) },
+    ]
+    for (const cyclesBySource of snapshots) {
+      const model = deriveM11ControlBarModel(inputFor({ ...defaultM11QueryState, source: 'ifs' }, { cyclesBySource }))
+
+      expect(model.source).toBe('ifs')
+      expect(model.cycles).toEqual([])
+      expect(model.cycle).toBeNull()
+    }
   })
 
   it('falls back to the single default cycle before the cycles list arrives, then expands without moving the selection', () => {
@@ -188,8 +224,11 @@ describe('deriveM11ControlBarModel', () => {
     expect(model.cycles).toEqual([DEFAULT_CYCLE])
   })
 
-  it('leaves ?source=compare without a segment selection and falls back to the default cycle', () => {
-    // 已知边角（决策 5）：store 从不为 `compare` 写 cyclesBySource，故恒回落单项、分段无选中态。
+  it('leaves ?source=compare without a segment selection and without borrowed cycles', () => {
+    // 已知边角（决策 5）：store 从不为 `compare` 写 cyclesBySource，分段也没有选中态。
+    // 【round-2 修订，finding C1】`compare` 同样**不是**目录声明的默认源，故 round 1 的
+    // 「回落单项 default_cycle」在这里一并失效：借 GFS 的周期给 `compare`，与借给 IFS 是同一种
+    // 假事实。改为诚实空态（地图侧本来就不注册 overlay，无数据错误）。
     const model = deriveM11ControlBarModel(
       inputFor(
         { ...defaultM11QueryState, source: 'compare' },
@@ -199,7 +238,8 @@ describe('deriveM11ControlBarModel', () => {
 
     expect(model.source).toBe('compare')
     expect(model.sourceOptions.map((option) => option.value)).not.toContain('compare')
-    expect(model.cycles).toEqual([DEFAULT_CYCLE])
+    expect(model.cycles).toEqual([])
+    expect(model.cycle).toBeNull()
   })
 
   it('is fail-closed on a null default cycle, the same input that registers no overlay', () => {
@@ -209,10 +249,15 @@ describe('deriveM11ControlBarModel', () => {
     const layers = layersFor(query, metadata)
     const model = deriveM11ControlBarModel(inputFor(query, { metadata, layers }))
 
-    expect(model.disabled).toBe(true)
     expect(model.disabledReason).toBe(failClosedDischargeDisabledReason)
     expect(model.cycles).toEqual([])
-    // 同一入参下地图侧也不注册叠加层：控制条与地图对 fail-closed 的判断同源。
+    // round-2 finding C2：fail-closed 时有效 cycle 也归 null，否则展示层的
+    // `cycleOptions = cycle && !cycles.includes(cycle) ? [cycle, ...cycles] : cycles` 把它塞回去。
+    expect(model.cycle).toBeNull()
+    // 同一入参下地图侧也不注册叠加层。**两侧不再是同一条判据**（决策 13 孪生要求落地后）：
+    // 控制条看 `LayerState.disabledReason`，地图侧看 store 盖的 `activeNationalCycle` 章
+    // （这里 `layersFor` 不盖章，且 `valid_times: []` 让图层先在 `!available` 就短路）。
+    // 二者对 fail-closed 输入的**结论**仍必须一致，这正是本行钉的东西。
     expect(buildM11RegisteredOverlay(query, layers)).toBeNull()
   })
 
@@ -258,7 +303,6 @@ describe('deriveM11ControlBarModel', () => {
       // 否则下面两条会退化成「只要 reason 非空就禁用」的同义反复。
       expect(layers.find((layer) => layer.layerId === 'discharge')?.validTimes).toEqual([])
       expect(model.disabledReason).toBe(reason)
-      expect(model.disabled).toBe(true)
       // 过渡态不是 fail-closed：cycles 仍照常派生（不塌成空），fail-closed 才是空列表。
       // 展示层据此让起报时次 `<select>` 保持可用（禁用条件是 cycles 为空，不是这个聚合 `disabled`）
       // —— DOM 那半见「keeps the cycle selector usable when one cycle failed to resolve its valid times」。
@@ -268,14 +312,29 @@ describe('deriveM11ControlBarModel', () => {
 
   it('stays renderable before the layer catalog lands', () => {
     // bootstrap 之前 `mergeLayerStates` 返回空数组：控制条必须诚实禁用，而不是抛错或伪造时次。
-    // 这一态**不是** fail-closed（理由是「等待图层注册」），故不走 finding A 的那道闸口——
-    // 把闸口写成 `defaultCycle === null` 会连这条过渡窗口一起塌掉，故意留作反例。
+    // 这一态**不是** fail-closed（理由是「等待图层注册」）。
+    // 【round-2 更正，finding D2】本条**不**鉴别「闸口写成 `defaultCycle === null`」：入参的
+    // `cyclesBySource` 是 `{}`，两种写法都出 `[]`。原注释自称反例是假声明。真正的判别输入见
+    // 下一条用例（`cyclesBySource` 非空 + `metadata` 为 null）。
     const model = deriveM11ControlBarModel(inputFor(defaultM11QueryState, { metadata: null, layers: [] }))
 
-    expect(model.disabled).toBe(true)
     expect(model.disabledReason).toBe('等待 /api/v1/layers 图层注册状态')
     expect(model.cycles).toEqual([])
     expect(model.cycle).toBeNull()
+  })
+
+  it('keeps the arrived cycles list through the catalog-less window between source switches', () => {
+    // round-2 finding D2 的判别输入：两种闸口写法只在「`metadata` 为 null 或其 `valid_times`
+    // 非空，且 `cyclesBySource[source]` 已是非空 `available`」时分歧。该窗口真实可达——
+    // `OverviewMode` 在 `requestScopeQueryKey` 不匹配时清空 `layers` / `metadata`，而
+    // `cyclesBySource` 跨轮存活。闸口若写成 `defaultCycle === null`，这里会塌成 `[]`（变红）。
+    const model = deriveM11ControlBarModel(
+      inputFor(defaultM11QueryState, { metadata: null, layers: [], cyclesBySource: { gfs: availableCycles([DEFAULT_CYCLE]) } }),
+    )
+
+    expect(model.cycles).toEqual([DEFAULT_CYCLE])
+    // 目录尚未落地时有效 cycle 只能来自该源自己的 `cycles.default_cycle`（回落链第 2 段）。
+    expect(model.cycle).toBe(DEFAULT_CYCLE)
   })
 })
 
@@ -336,6 +395,24 @@ describe('M11BottomControlBar', () => {
     expect(screen.getByText('+24h')).toBeTruthy()
   })
 
+  it('computes the lead from the effective cycle when it is offset from the first valid time', () => {
+    // round-2 finding D1：现有那条唯一断言 `data-lead` 的用例其有效 cycle 恰等于 `validTimes[0]`
+    // 且列表 3h 均匀 —— `lead = index * 3`（域包明令禁止的「前端推算步长」）与真实实现逐字节
+    // 同输出。偏移不是假设输入：后端 `_national_cycle_valid_times` 的交集窗口晚于 cycle 时首项
+    // 即 `cycle + n*3h`，目录 metadata 走的就是这条分支。
+    const offsetCycle = '2026-05-17T18:00:00Z'
+    expect(Date.parse(VALID_TIMES[0]) - Date.parse(offsetCycle)).toBe(6 * 3_600_000)
+    renderControlBar(inputFor(defaultM11QueryState, { metadata: dischargeMetadata({ default_cycle: offsetCycle }) }))
+
+    const ticks = screen.getAllByTestId('m11-timeline-tick')
+    expect(ticks).toHaveLength(57)
+    expect(ticks[0].getAttribute('data-lead')).toBe('6')
+    expect(ticks[0].getAttribute('title')).toBe('+6h 2026-05-18T00:00:00.000Z')
+    const last = ticks[ticks.length - 1]
+    expect(last.getAttribute('data-lead')).toBe('174')
+    expect(last.getAttribute('title')).toBe('+174h 2026-05-25T00:00:00.000Z')
+  })
+
   it('dispatches source and cycle changes to the URL', async () => {
     // 决策 6：分段写 `{ source }`、起报时次写 `{ cycle }`，都不新建取数路径。
     const user = userEvent.setup()
@@ -378,6 +455,25 @@ describe('M11BottomControlBar', () => {
     expect(screen.getByText(failClosedDischargeDisabledReason)).toBeTruthy()
     // 列表为空那半也落在渲染上（模型不再带 `validTimes`，round-1 finding D）。
     expect(screen.getByText('当前图层没有有效时间')).toBeTruthy()
+  })
+
+  it('keeps the cycle selector disabled under a fail-closed banner even with ?cycle= in the URL', () => {
+    // round-2 finding C2（P2）：round 1 只把闸口接到 `cycles` 上，`cycle` 仍是
+    // `state.cycle ?? metadata.default_cycle`，展示层的 `cycleOptions` 又把它塞回去 ——
+    // `?cycle=X` 下 select 依旧可用且有选中项，finding A 要消除的 UI 原样复现。同一入参下地图侧
+    // 恒不注册叠加层（决策 13 孪生要求落地后：fail-closed 目录让 store 的活动对为 null，
+    // `LayerState.activeNationalCycle` 就是空章，`resolveNationalOverlayCycle` 随之返回 null）：
+    // 条显示 X、图零注册，违反「条与图三元组同源」。三条 fail-closed 用例的入参今天全是
+    // `cycle: null`，该分支零覆盖。
+    const query = { ...defaultM11QueryState, cycle: '2026-05-17T18:00:00.000Z' }
+    const metadata = dischargeMetadata({ valid_times: [], default_cycle: null })
+    renderControlBar(inputFor(query, { metadata, layers: layersFor(query, metadata) }))
+
+    const select = screen.getByLabelText('起报时次') as HTMLSelectElement
+    expect(select.disabled).toBe(true)
+    expect([...select.options].map((option) => option.textContent)).toEqual(['无可用起报时次'])
+    // `M11Timeline` 收到 `cycle={null}` → 刻度行由 prop 门控不渲染、底行回来 → 右列恢复 3 行。
+    expect(screen.getByTestId('m11-timeline-rows').children.length).toBe(3)
   })
 
   it('sits 16px above the viewport bottom at the shared timeline height token', () => {
@@ -429,6 +525,11 @@ describe('M11BottomControlBar', () => {
     renderControlBar(inputFor(query, { metadata, layers }), onQueryChange)
 
     expect(screen.getByText(activeCycleValidTimesErrorDisabledReason)).toBeTruthy()
+    // 行数预算的**第三条分支**（round-2 finding D4：「两臂皆 3 行」是假的全称命题）：刻度行的
+    // 条件是 `ticks.length > 0`、底行的条件是 `cycle ? null : …`，两者互相独立。这里 `cycle`
+    // 非空而活动列表为空 → 两行都不渲染，右列只有 2 个子节点。2 行只会更矮，固定 `h-16` 装得下，
+    // `sourceLabel` 已在第一行不丢，丢的只有装饰性静态文字 —— 裁定为 fixture 错、代码对。
+    expect(screen.getByTestId('m11-timeline-rows').children.length).toBe(2)
     expect((screen.getByLabelText('有效时间滑块') as HTMLInputElement).disabled).toBe(true)
     expect((screen.getByLabelText('播放速度') as HTMLSelectElement).disabled).toBe(true)
 

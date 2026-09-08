@@ -17,6 +17,8 @@ const VALID_TIMES_PATH = '/api/v1/layers/{layer_id}/valid-times'
 const PRECIP_INDEX_PATH = '/api/v1/precip/{source}/{cycle}/index'
 const DEFAULT_CYCLE = '2026-05-18T00:00:00Z'
 const OTHER_CYCLE = '2026-05-17T12:00:00Z'
+/** IFS 自己声明的默认周期（`/layers/discharge/cycles?source=ifs` 的 `default_cycle`）。 */
+const IFS_CYCLE = '2026-05-17T06:00:00Z'
 
 vi.mock('@/api/client', () => ({
   client: { GET: vi.fn() },
@@ -627,6 +629,190 @@ describe('overview data store discharge loading', () => {
     expect(resolveM11NationalValidTimeCorrection(cycleQuery, state.overview?.layers ?? [])).toBeUndefined()
   })
 
+  // AC7（决策 13 / finding C1）：目录 metadata 的 `default_cycle` 是 **GFS 专有事实**
+  // （后端 `list_layers` 无 `source` 参数），非默认源必须读该源自己的 `cycles.default_cycle`。
+  // 本单新增的源分段是全仓唯一写 `onQueryChange({ source })` 的调用点，故这条路径首次可达。
+  const ifsQuery = { ...query, source: 'ifs' as const, cycle: null, validTime: null }
+  const cyclesPayload = (source: unknown) =>
+    source === 'ifs'
+      ? success({
+          source: 'ifs',
+          cycles: [{ cycle_time: IFS_CYCLE, valid_time_start: IFS_CYCLE, valid_time_end: '2026-05-17T18:00:00Z' }],
+          default_cycle: IFS_CYCLE,
+        })
+      : success({
+          source: 'gfs',
+          cycles: [{ cycle_time: DEFAULT_CYCLE, valid_time_start: DEFAULT_CYCLE, valid_time_end: '2026-05-18T06:00:00Z' }],
+          default_cycle: DEFAULT_CYCLE,
+        })
+
+  it('never spells another source default cycle into a valid-times or precip request', async () => {
+    // AC7(a)（C1 的红证）：`cyclesBySource.ifs` 尚未到达时，`(ifs, <gfs 的 default_cycle>)`
+    // 是一个未覆盖对——后端对它返回 **200 + 空列表**（不是 4xx），图层随即落到一条假文案。
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const calls = mockApi({
+      [CYCLES_PATH]: async (options) => {
+        await gate
+        return cyclesPayload(options.params?.query?.source)
+      },
+    })
+
+    const load = useOverviewDataStore.getState().loadOverview(ifsQuery)
+    await vi.waitFor(() => {
+      expect(calls.some((call) => call.path === CYCLES_PATH)).toBe(true)
+      expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false)
+    })
+
+    // 一条都不发：活动对解不出来（复用既有 fail-closed 语义），不是「用别人的周期先试试」。
+    expect(calls.filter((call) => call.path === VALID_TIMES_PATH)).toHaveLength(0)
+    expect(calls.filter((call) => call.path === PRECIP_INDEX_PATH)).toHaveLength(0)
+    // GFS 的默认周期不得出现在这三条 layer-time 请求的任何一条上（`/pipeline/status` 的
+    // `cycle_time` 是另一条既有通路，不在本断言范围内）。
+    expect(
+      JSON.stringify(calls.filter((call) => [CYCLES_PATH, VALID_TIMES_PATH, PRECIP_INDEX_PATH].includes(call.path))),
+    ).not.toContain(DEFAULT_CYCLE)
+    const discharge = (useOverviewDataStore.getState().overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    // 尤其**不得**把 GFS 的 `metadata.valid_times` 当 IFS 的时次渲染（把假文案换成假数据更糟）。
+    expect(discharge?.validTimes).toEqual([])
+    expect(discharge?.validTimes).not.toContain('2026-05-18T00:00:00.000Z')
+    expect(discharge?.available).toBe(false)
+    expect(discharge?.disabledReason).toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(buildM11RegisteredOverlay(ifsQuery, useOverviewDataStore.getState().overview?.layers ?? [])).toBeNull()
+
+    release()
+    await load
+  })
+
+  it('recomputes the layers and fetches valid times for the cycle the chosen source declares', async () => {
+    // AC7(b)：`cyclesBySource.ifs` 到达（`cycles.default_cycle = C_ifs ≠ C_gfs`）→ 活动对变为
+    // (ifs, C_ifs)，valid-times / precip 按该对发出。
+    const calls = mockApi({ [CYCLES_PATH]: (options) => cyclesPayload(options.params?.query?.source) })
+
+    await useOverviewDataStore.getState().loadOverview(ifsQuery)
+
+    const state = useOverviewDataStore.getState()
+    expect(state.cyclesBySource.ifs).toEqual({
+      status: 'available',
+      cycles: {
+        source: 'ifs',
+        cycles: [{ cycle_time: IFS_CYCLE, valid_time_start: IFS_CYCLE, valid_time_end: '2026-05-17T18:00:00Z' }],
+        default_cycle: IFS_CYCLE,
+      },
+    })
+    const validTimesCalls = calls.filter((call) => call.path === VALID_TIMES_PATH)
+    expect(validTimesCalls).toHaveLength(1)
+    expect(validTimesCalls[0].query).toEqual({ source: 'ifs', cycle: IFS_CYCLE })
+    expect(Object.keys(state.validTimesByCycle)).toEqual([`ifs|${IFS_CYCLE}`])
+    expect(calls.find((call) => call.path === PRECIP_INDEX_PATH)?.pathParams).toEqual({ source: 'ifs', cycle: IFS_CYCLE })
+    // 图层重算到该对自己的列表上（mock 的 valid-times 回 `[cycle, 15:00, 18:00]`）。
+    const discharge = (state.overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(discharge?.validTimes).toEqual([
+      '2026-05-17T06:00:00.000Z',
+      '2026-05-17T15:00:00.000Z',
+      '2026-05-17T18:00:00.000Z',
+    ])
+    expect(discharge?.available).toBe(true)
+    expect(discharge?.disabledReason).toBeNull()
+  })
+
+  it('substitutes the cycle the chosen source declares into the national tile URL', async () => {
+    // AC7(b) 的孪生要求（决策 13 末段）：overlay 的 `(source, cycle, valid_time)` 必须与 store
+    // 解析出的活动对**同源**，判据就是这条瓦片 URL。地图侧若仍按目录的 `default_cycle`（GFS 专有
+    // 事实）解析周期，同一入参会拼出 `/hydro-national/ifs/<C_gfs>/q_down/<ifs 的有效时刻>/…` ——
+    // 一个从未存在过的三元组，比「没有图层」更糟（会真的去取瓦片）。
+    mockApi({ [CYCLES_PATH]: (options) => cyclesPayload(options.params?.query?.source) })
+
+    await useOverviewDataStore.getState().loadOverview(ifsQuery)
+
+    const layers = useOverviewDataStore.getState().overview?.layers ?? []
+    // 有效时刻取列表里**不等于**周期的那一项：否则 cycle 段与 valid_time 段同字符串，
+    // 断言分不出是哪一段错了。
+    const overlayQuery = { ...ifsQuery, validTime: '2026-05-17T15:00:00.000Z' }
+    const path = decodedTilePath(buildM11RegisteredOverlay(overlayQuery, layers))
+
+    expect(path).toBe(
+      `/api/v1/tiles/hydro-national/ifs/${IFS_CYCLE}/q_down/2026-05-17T15:00:00Z/{z}/{x}/{y}.pbf`,
+    )
+    // 冗余但独立的一条：GFS 的默认周期不得出现在 URL 的任何位置。
+    expect(path).not.toContain(DEFAULT_CYCLE)
+  })
+
+  it('resolves a non-default source to a terminal error state when its cycle list rejects', async () => {
+    // AC7(b) 的第二条终态，同时是 `writeCycles` 重算边的红证：cycles 取回失败后活动对永远解不出
+    // 来，没有任何 valid-times 终态会再来覆盖 layers —— 不在 `writeCycles` 里就地重算，UI 就
+    // 永久停在「还在加载」这条谎报上（与同文件 `writeValidTimes` 的 reject 臂同构）。
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const calls = mockApi({
+      [CYCLES_PATH]: async () => {
+        await gate
+        throw new Error('cycles down')
+      },
+    })
+
+    const load = useOverviewDataStore.getState().loadOverview(ifsQuery)
+    await vi.waitFor(() => {
+      expect(calls.some((call) => call.path === CYCLES_PATH)).toBe(true)
+      expect(useOverviewDataStore.getState().enrichmentLoading).toBe(false)
+    })
+    // 阶段 2 已落定：此刻的 layers 是「reject 之前」的引用，终态必须在它之上原地重算。
+    const layersBeforeReject = useOverviewDataStore.getState().overview?.layers
+    expect((layersBeforeReject ?? []).find((item) => item.layerId === 'discharge')?.disabledReason).toBe(
+      pendingActiveCycleValidTimesDisabledReason,
+    )
+
+    release()
+    await load
+
+    const state = useOverviewDataStore.getState()
+    expect(state.cyclesBySource).toEqual({ ifs: { status: 'error' } })
+    expect(calls.filter((call) => call.path === VALID_TIMES_PATH)).toHaveLength(0)
+    // pending → error 的转移必须真的渲染出来：只写 record 不重算，这里的引用不会变。
+    expect(state.overview?.layers).not.toBe(layersBeforeReject)
+    const discharge = (state.overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(discharge?.disabledReason).toBe(activeCycleValidTimesErrorDisabledReason)
+    expect(discharge?.disabledReason).not.toBe(pendingActiveCycleValidTimesDisabledReason)
+    expect(discharge?.validTimes).toEqual([])
+    expect(discharge?.available).toBe(false)
+    // scoped 降级：不是 bootstrap 失败。
+    expect(state.bootstrapError).toBeNull()
+    expect(state.mapBootstrapLoading).toBe(false)
+  })
+
+  it('keeps the default source on the catalog default cycle even when the cycles endpoint declares another one', async () => {
+    // AC7(c)：默认源路径逐字不变 —— 目录 metadata 仍是唯一来源，同一次加载**零**次 valid-times
+    // 请求。实现若对所有源都改读 `cyclesBySource`，这里会多发一次请求并换掉时次列表（变红）。
+    const calls = mockApi({
+      [CYCLES_PATH]: () =>
+        success({
+          source: 'gfs',
+          cycles: [{ cycle_time: OTHER_CYCLE, valid_time_start: OTHER_CYCLE, valid_time_end: '2026-05-17T18:00:00Z' }],
+          default_cycle: OTHER_CYCLE,
+        }),
+    })
+
+    await useOverviewDataStore.getState().loadOverview({ ...query, cycle: null, validTime: null })
+
+    expect(calls.filter((call) => call.path === VALID_TIMES_PATH)).toHaveLength(0)
+    expect(useOverviewDataStore.getState().validTimesByCycle).toEqual({})
+    expect(calls.find((call) => call.path === PRECIP_INDEX_PATH)?.pathParams).toEqual({
+      source: 'gfs',
+      cycle: DEFAULT_CYCLE,
+    })
+    const discharge = (useOverviewDataStore.getState().overview?.layers ?? []).find((item) => item.layerId === 'discharge')
+    expect(discharge?.validTimes).toEqual([
+      '2026-05-18T00:00:00.000Z',
+      '2026-05-18T03:00:00.000Z',
+      '2026-05-18T06:00:00.000Z',
+    ])
+    expect(discharge?.currentValidTime).toBe('2026-05-18T00:00:00.000Z')
+  })
+
   it('clears the three layer-time records together with the HTTP cache', async () => {
     // tasks.md：三个缓存与既有 `cache` 同寿，由 `clearOverviewDataCache()` / `clearCache()` 清除。
     useOverviewDataStore.setState({
@@ -779,6 +965,39 @@ describe('overview data store discharge loading', () => {
     expect(discharge?.disabledReason).not.toBe(failClosedDischargeDisabledReason)
     // 零瓦片请求：跨身份的 `/hydro-national/ifs/<gfs 的默认周期>/…` 拼不出来。
     expect(buildM11RegisteredOverlay(ifsQuery, snapshot.layers)).toBeNull()
+  })
+
+  it('resolves basin detail on the chosen source own cycle once the overview filled the shared cache', async () => {
+    // 决策 13 让活动对按源分叉后，流域详情这一侧新增了一个可达态：总览在 IFS 上取回过
+    // (ifs, C_ifs) 的列表，用户再进流域详情 —— 两侧调用的是**同一个** `nationalDischargeActivePair`，
+    // 故这里解出的对与总览一致，直接复用共享缓存，而不是落回「解不出对 → 终态 error」。
+    // （`cyclesBySource[ifs]` 缺席那一态仍是上一条用例守的终态 error。）
+    const calls = mockApi({ [CYCLES_PATH]: (options) => cyclesPayload(options.params?.query?.source) })
+    const basinIfsQuery = { ...query, source: 'ifs' as const, cycle: null, validTime: '2026-05-17T15:00:00.000Z' }
+
+    await useOverviewDataStore.getState().loadOverview({ ...basinIfsQuery, validTime: null })
+    const sharedCycles = useOverviewDataStore.getState().cyclesBySource
+    const sharedValidTimes = useOverviewDataStore.getState().validTimesByCycle
+    expect(Object.keys(sharedValidTimes)).toEqual([`ifs|${IFS_CYCLE}`])
+    // 与上面同一套手法：先清模块级 HTTP 缓存，再回填两份 store 记录（它们与 `cached()` 同寿，
+    // 但 HTTP 缓存有 TTL 而 store 状态没有，「缓存过期而共享记录仍在」是真实可达态）。
+    clearOverviewDataCache()
+    useOverviewDataStore.setState({ cyclesBySource: sharedCycles, validTimesByCycle: sharedValidTimes })
+    const callsBeforeBasinLoad = calls.length
+
+    const snapshot = await useOverviewDataStore.getState().loadBasinDetail('basin-demo', basinIfsQuery)
+
+    expect(perCycleValidTimesCalls(calls.slice(callsBeforeBasinLoad))).toHaveLength(0)
+    const discharge = snapshot.layers.find((item) => item.layerId === 'discharge')
+    expect(discharge?.available).toBe(true)
+    expect(discharge?.disabledReason).toBeNull()
+    expect(discharge?.validTimes).toEqual([
+      '2026-05-17T06:00:00.000Z',
+      '2026-05-17T15:00:00.000Z',
+      '2026-05-17T18:00:00.000Z',
+    ])
+    // 尤其不是目录默认对（GFS）那份列表。
+    expect(discharge?.validTimes).not.toContain('2026-05-18T00:00:00.000Z')
   })
 
   it('fails closed in basin detail when the URL cycle is not the catalog default cycle', async () => {

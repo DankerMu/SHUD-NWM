@@ -22,6 +22,8 @@ const dischargeLayer: LayerState = {
   currentValidTime: null,
   validTimeSource: 'none',
   disabledReason: null,
+  // 图例/浮层不消费全国周期章（本 fixture 的 metadata 就是 null）。
+  activeNationalCycle: null,
   freshness: {
     updatedAt: null,
     cycleTime: null,

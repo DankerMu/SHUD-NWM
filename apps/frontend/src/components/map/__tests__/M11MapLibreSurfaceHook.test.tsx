@@ -61,6 +61,8 @@ const layer: LayerState = {
   currentValidTime: '2026-09-02T00:00:00Z',
   validTimeSource: 'api',
   disabledReason: null,
+  // 本 fixture 的 `url_template` 没有 `{cycle}` 占位符（点击链路测试），周期章不参与替换。
+  activeNationalCycle: null,
   freshness: {
     updatedAt: null,
     cycleTime: state.cycle,

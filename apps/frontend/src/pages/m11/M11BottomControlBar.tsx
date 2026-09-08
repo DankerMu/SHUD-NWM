@@ -23,14 +23,13 @@ export interface M11BottomControlBarProps {
   source: M11Source
   /** 秒精度 RFC3339，最新在前（后端口径）。 */
   cycles: string[]
-  /** 有效 cycle（秒精度）：`state.cycle ?? metadata.default_cycle`。 */
+  /** 有效 cycle（秒精度）：见 `deriveM11ControlBarModel` 里钉死的回落次序；fail-closed 时为 null。 */
   cycle: string | null
   /**
-   * 聚合禁用位，透传给 `M11Timeline` 的可选 `disabled`（起报时次 `<select>` **不**并入，见下）。
-   * 时次列表本身不在本类型里：`M11Timeline` 自己从 `layers` 派生（`buildM11TimelineViewModel`），
-   * 契约里再放一份 `validTimes` / `validTime` 只会描述一条不存在的数据流。
+   * 时次列表与聚合 `disabled` 都**不在**本类型里：`M11Timeline` 自己从 `layers` 派生
+   * （`buildM11TimelineViewModel`），契约里再放一份只会描述一条不存在的数据流。
+   * `disabledReason` 留下，因为它有独立的 DOM 消费者（控制条右端的理由文案）。
    */
-  disabled: boolean
   disabledReason: string | null
   // M11Timeline 直接消费的既有入参，原样透传
   state: M11QueryState
@@ -70,13 +69,18 @@ const controlBarTimelineClassName = 'flex min-w-0 flex-1 items-center gap-3 text
 
 /**
  * 底部控制条模型（#2014 决策 2）：cycles 来源与回落、有效 cycle、默认三元组、
- * disabled / disabledReason 全部在这里派生，展示组件只做 DOM。
+ * `disabledReason` 全部在这里派生，展示组件只做 DOM。
  *
  * - 具体源身份**只**经 `resolveNationalScaleSource`（store 写 `cyclesBySource` 用的就是它）：
- *   直接拿 `state.source` 当 key 时 `best` 永远查不到。`compare` 恒缺席 → 回落单项 default_cycle、
- *   分段无选中态（地图侧本来就不注册 overlay，无数据错误）。
+ *   直接拿 `state.source` 当 key 时 `best` 永远查不到。`compare` 既不在 `cyclesBySource` 里、
+ *   也不是目录默认源 → 空 cycles + 空有效 cycle + 分段无选中态（地图侧本来就不注册 overlay，
+ *   无数据错误）。
  * - cycles 尚未到达（enrichment 在 bootstrap 之后才发）或取回失败 → 回落 `[metadata.default_cycle]`，
- *   到达后扩展为端点全列表；两态之间已选 cycle 不跳变（有效 cycle 不从 cycles 列表推导）。
+ *   到达后扩展为端点全列表；两态之间已选 cycle 不跳变（有效 cycle 不从 cycles 列表**位置**推导）。
+ *   **该回落只对目录声明的默认源合法**（finding C1）：`metadata.default_cycle` / `valid_times` /
+ *   `default_source` 三者都是 GFS 专有事实（后端 `list_layers` 签名里没有 `source`），非默认源
+ *   借它充数就是把一个 GFS 周期显示成 IFS 的选中周期。非默认源的 cycles 未到达时是
+ *   `cycles: []` + `cycle: null` 的诚实空态。
  * - fail-closed 时 cycles 恒空：`cyclesBySource` 与目录 metadata 是两条独立的取数与缓存路径，
  *   「目录判 fail-closed」与「该源有非空 cycles」可以同时成立（下面 `failClosed` 处有详注）。
  * - 时次列表**不在**本模型里：`M11Timeline` 从 `layers` 自派生（`buildM11TimelineViewModel`），
@@ -85,9 +89,13 @@ const controlBarTimelineClassName = 'flex min-w-0 flex-1 items-center gap-3 text
 export function deriveM11ControlBarModel(input: M11ControlBarInput): M11BottomControlBarProps {
   const source = resolveNationalScaleSource(input.state.source)
   const activeLayer = input.layers.find((layer) => layer.layerId === input.state.layer)
-  const validTimes = activeLayer?.validTimes ?? []
-  const defaultCycle = toSecondsPrecisionInstant(input.metadata?.default_cycle)
+  // 目录的默认源身份与 store 侧 `nationalDischargeActivePair` 同一个表达式（identity 同源）；
+  // 目录尚未落地（`metadata` 为 null）时**没有**默认源，故任何源都不得回落目录周期。
+  const catalogDefaultSource = input.metadata ? input.metadata.default_source ?? 'gfs' : null
+  const catalogDefaultCycle = source === catalogDefaultSource ? toSecondsPrecisionInstant(input.metadata?.default_cycle) : null
   const cyclesState = input.cyclesBySource[source]
+  const sourceDefaultCycle =
+    cyclesState?.status === 'available' ? toSecondsPrecisionInstant(cyclesState.cycles?.default_cycle) : null
   /**
    * fail-closed 闸口按**理由**走，不按 `defaultCycle === null` 走：后者在 bootstrap 之前
    * （`metadata` 为 null）同样成立，会把每次切源的过渡窗口也变成空且禁用的 select，
@@ -103,9 +111,20 @@ export function deriveM11ControlBarModel(input: M11ControlBarInput): M11BottomCo
       ? cyclesState.cycles.cycles
           .map((entry) => toSecondsPrecisionInstant(entry.cycle_time))
           .filter((entry): entry is string => entry !== null)
-      : defaultCycle
-        ? [defaultCycle]
+      : catalogDefaultCycle
+        ? [catalogDefaultCycle]
         : []
+  /**
+   * 有效 cycle 的回落次序（决策 13 钉死）：URL → 该源自己声明的默认周期 → 目录默认周期
+   * （**仅**当该源就是目录默认源）。默认源上第二段与第三段的先后是刻意的：目录 metadata 与
+   * `/cycles` 是两条独立缓存路径（TTL 60s / stale 600s），默认源以目录为准才能保证
+   * 「cycles 到达前后已选周期不跳变」，也才能与 store 侧的活动对同源（决策 13 要求默认源
+   * 的 store 行为逐字不变，即只看目录）。非默认源目录里没有可用事实，只能读该源自己的。
+   */
+  const effectiveCycle = failClosed
+    ? null
+    : toSecondsPrecisionInstant(input.state.cycle) ??
+      (source === catalogDefaultSource ? catalogDefaultCycle ?? sourceDefaultCycle : sourceDefaultCycle)
   // 图层目录尚未落地（`layers` 为空，bootstrap 之前的窗口）时复用 `LayerGroupControls` 的同一份
   // 文案常量（不再各写一份字面量）；有 `LayerState` 时一律透传它自己的 `disabledReason`。
   const disabledReason = activeLayer ? activeLayer.disabledReason : m11LayerCatalogPendingDisabledReason
@@ -113,11 +132,13 @@ export function deriveM11ControlBarModel(input: M11ControlBarInput): M11BottomCo
   return {
     sourceOptions: nationalSourceOptions,
     source,
+    // 有效 cycle 必须显式产出：全国默认态 `state.cycle === null`，不回落默认周期就
+    // 既没有 lead 也没有 Analysis/Forecast 分界（决策 11）。fail-closed 时它与 `cycles` 一起
+    // 归零：只闸 `cycles` 的话，展示层的 `cycleOptions` 会把 `?cycle=X` 原样塞回去，
+    // select 在 fail-closed 横幅下依旧可用且有选中项，而地图侧拿到的是空的
+    // `LayerState.activeNationalCycle`（store 的活动对为 null）——条显示 X、图零注册（finding C2）。
     cycles,
-    // 有效 cycle 必须显式产出：全国默认态 `state.cycle === null`，不回落 default_cycle 就
-    // 既没有 lead 也没有 Analysis/Forecast 分界（决策 11）。
-    cycle: toSecondsPrecisionInstant(input.state.cycle ?? input.metadata?.default_cycle),
-    disabled: validTimes.length === 0 || disabledReason !== null,
+    cycle: effectiveCycle,
     disabledReason,
     state: input.state,
     layers: input.layers,
@@ -134,7 +155,6 @@ export function M11BottomControlBar({
   source,
   cycles,
   cycle,
-  disabled,
   disabledReason,
   state,
   layers,
@@ -179,11 +199,12 @@ export function M11BottomControlBar({
           aria-label="起报时次"
           className="h-8 rounded border border-neutral-300 bg-white/80 px-1 text-xs disabled:cursor-not-allowed disabled:text-neutral-500"
           value={cycle ?? ''}
-          // **不**跟聚合 `disabled` 一起禁：issue 只要求零周期（`default_cycle === null`）时禁用，
-          // 而按聚合布尔禁 select 会让「某周期 valid-times 取回失败」这个终态下用户无法从控制条
-          // 切回别的周期 —— 恰好废掉这个控件唯一的自救用途。fail-closed 时 select 仍是 disabled，
-          // 这一点自 round-1 finding A 起**由构造保证**（`deriveM11ControlBarModel` 的 `failClosed`
-          // 闸口让 cycles 恒空），不再是「碰巧 cyclesBySource 也没数据」的巧合。
+          // **不**按图层的聚合禁用位禁：issue 只要求零周期（`default_cycle === null`）时禁用，
+          // 而那样会让「某周期 valid-times 取回失败」这个终态下用户无法从控制条切回别的周期
+          // —— 恰好废掉这个控件唯一的自救用途。fail-closed 时 select 仍然是 disabled，这一点
+          // **由构造保证**：`deriveM11ControlBarModel` 的 `failClosed` 闸口同时把 `cycles` 清空
+          // **和**把 `cycle` 归 null（finding C2），于是 `cycleOptions` 无从被 `?cycle=X` 填回，
+          // 恒为空。round-1 只闸了 `cycles`，那时这句话还是假的。
           disabled={cycleOptions.length === 0}
           onChange={(event) => onQueryChange({ cycle: event.target.value })}
         >
@@ -199,7 +220,6 @@ export function M11BottomControlBar({
       <M11Timeline
         className={controlBarTimelineClassName}
         cycle={cycle}
-        disabled={disabled}
         state={state}
         layers={layers}
         sourceSelection={sourceSelection}

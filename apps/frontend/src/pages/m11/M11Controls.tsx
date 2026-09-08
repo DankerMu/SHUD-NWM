@@ -337,17 +337,11 @@ export function M11Timeline({
   derivedTimes,
   className,
   cycle,
-  disabled: disabledProp,
   onQueryChange,
 }: SharedControlProps & {
   derivedTimes?: M11TimelineDerivedTimes | null
   className?: string
   cycle?: string | null
-  /**
-   * 调用方显式接管禁用位（#2014 的底部控制条传 `deriveM11ControlBarModel().disabled`）。
-   * 不传时下面的表达式逐字退化为今天的自派生，既有调用点 DOM 不变。
-   */
-  disabled?: boolean
 }) {
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
@@ -361,7 +355,11 @@ export function M11Timeline({
     [cycle, model.currentIndex, model.validTimes],
   )
 
-  const disabled = disabledProp ?? (model.validTimes.length === 0 || !onQueryChange)
+  // 纯自派生（finding D3）：全国路径上调用方传下来的聚合位与这条恒等——`M11Layer` 是单成员
+  // 类型，`buildLayerStates` 既不传 `validTimesByLayerId` 也不传 `derivedValidTimes`，
+  // `normalizeLayerStates` 里唯一能造出「validTimes 非空且 disabledReason 非空」的 `!apiLayer`
+  // 分支在全国不可达，控制条又恒传 `onQueryChange`。加一个恒等的可选形参 = 不可证伪的契约。
+  const disabled = model.validTimes.length === 0 || !onQueryChange
   const atFirst = model.currentIndex <= 0
   const atLast = model.currentIndex < 0 || model.currentIndex >= model.validTimes.length - 1
 

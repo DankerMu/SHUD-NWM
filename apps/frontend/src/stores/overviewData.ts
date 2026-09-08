@@ -609,21 +609,67 @@ function nationalConcreteSource(source: M11QueryState['source']): 'gfs' | 'ifs' 
 
 type NationalDischargePair = { source: 'gfs' | 'ifs'; cycle: string; isDefault: boolean }
 
+/** 目录声明的默认源。`metadata.default_cycle` / `valid_times` 只对这个源成立。 */
+function nationalDischargeDefaultSource(layers: ApiLayer[]): string {
+  return layers.find((layer) => layer.layer_id === 'discharge')?.metadata?.default_source ?? 'gfs'
+}
+
 /**
- * 活动 `(source, cycle)`：周期 = `query.cycle ?? metadata.default_cycle`，秒精度。
- * `default_cycle` 为空 = fail-closed（没有任何周期覆盖全部流域）→ 返回 null，调用方据此
- * 不发 valid-times、不发 precip index、不请求瓦片，也不会拼出字面 `{cycle}`。
+ * 某个源自己声明的默认周期（`/api/v1/layers/discharge/cycles?source=` 的 `default_cycle`）。
+ * `unwrapApiData` 是裸 `as T` 断言、零运行时校验，变形响应会带着 `cycles: undefined` 进来，
+ * 故这里按「像没到达一样」处理，而不是让 `.default_cycle` 在取数链里抛。
  */
-function nationalDischargeActivePair(query: M11QueryState, layers: ApiLayer[]): NationalDischargePair | null {
+function dischargeCyclesDefaultCycle(state: DischargeCyclesState | undefined): string | null {
+  if (!state || state.status !== 'available') return null
+  return toSecondsPrecisionInstant(state.cycles?.default_cycle ?? null)
+}
+
+/**
+ * 活动 `(source, cycle)`：周期 = `query.cycle ?? 该源自己的默认周期`，秒精度。
+ * 默认周期解不出来 = fail-closed → 返回 null，调用方据此不发 valid-times、不发 precip index、
+ * 不请求瓦片，也不会拼出字面 `{cycle}`。
+ *
+ * **「该源自己的默认周期」按源分叉**（#2014 决策 13 / finding C1）：目录 metadata 的
+ * `default_cycle` 是 **GFS 专有事实**——后端 `list_layers`（`apps/api/routes/hydro_display.py`）
+ * 签名里没有 `source`，`_default_layer_catalog` 固定按 `NATIONAL_DISCHARGE_DEFAULT_SOURCE = 'gfs'`
+ * 算。把它当成与源无关的默认值，切到 IFS 就会拼出 `(ifs, <gfs 周期>)` 这个未覆盖对，而后端
+ * `national_discharge_valid_times` 对它返回 **200 + 空列表**（不是 4xx），图层落到一条假文案
+ * （'Layer has no valid times.'——IFS 有时次，只是不在那个周期）。故非默认源只读该源自己的
+ * `cyclesBySource[source].cycles.default_cycle`，未到达/取回失败即返回 null（复用同一条
+ * fail-closed 语义）。默认源的行为逐字不变：仍只看目录 metadata。
+ */
+function nationalDischargeActivePair(
+  query: M11QueryState,
+  layers: ApiLayer[],
+  cyclesBySource: Record<string, DischargeCyclesState>,
+): NationalDischargePair | null {
   const source = nationalConcreteSource(query.source)
   if (!source) return null
   const metadata = layers.find((layer) => layer.layer_id === 'discharge')?.metadata ?? null
-  const defaultCycle = toSecondsPrecisionInstant(metadata?.default_cycle ?? null)
+  const isDefaultSource = nationalDischargeDefaultSource(layers) === source
+  const defaultCycle = isDefaultSource
+    ? toSecondsPrecisionInstant(metadata?.default_cycle ?? null)
+    : dischargeCyclesDefaultCycle(cyclesBySource[source])
   if (!defaultCycle) return null
   const cycle = toSecondsPrecisionInstant(query.cycle) ?? defaultCycle
   // 默认对判定同样走秒精度：`metadata.default_cycle` 是秒精度而 URL 里是毫秒形，
   // 朴素 `===` 会把默认周期误判成非默认并多发一次 valid-times。
-  return { source, cycle, isDefault: cycle === defaultCycle && (metadata?.default_source ?? 'gfs') === source }
+  return { source, cycle, isDefault: cycle === defaultCycle && isDefaultSource }
+}
+
+/**
+ * 非默认源的活动对**尚未解出**（该源 cycles 未到达 / 取回失败）。此时 `activeCycleValidTimes`
+ * 必须传显式覆盖：`undefined` 会让 `normalizeLayerStates` 回落到 **GFS 的** `metadata.valid_times`，
+ * 把假文案换成假数据——更糟。
+ */
+function nationalDischargeSourceUnresolved(
+  query: M11QueryState,
+  layers: ApiLayer[],
+  cyclesBySource: Record<string, DischargeCyclesState>,
+): boolean {
+  const source = nationalConcreteSource(query.source)
+  if (!source || source === nationalDischargeDefaultSource(layers)) return false
+  return nationalDischargeActivePair(query, layers, cyclesBySource) === null
 }
 
 function apiErrorCode(error: unknown): string | null {
@@ -1194,10 +1240,6 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
 
     // 共享谓词：写 set 前要求 nonce 仍匹配（stale 防御），否则丢弃。
     const isCurrentRequest = () => requestNonce === overviewRequestNonce && activeOverviewRequestKey === requestKey
-    const writeCycles = (source: string, value: DischargeCyclesState) => {
-      if (!isCurrentRequest()) return
-      set((state) => ({ cyclesBySource: { ...state.cyclesBySource, [source]: value } }))
-    }
     const writePrecipIndex = (key: string, value: PrecipIndexState) => {
       if (!isCurrentRequest()) return
       set((state) => ({ precipIndexByCycle: { ...state.precipIndexByCycle, [key]: value } }))
@@ -1214,28 +1256,53 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
     // 目录里默认周期的 metadata.valid_times（fixture 决策 4：LayerState 本身必须是活动周期的列表）。
     // pair 一律按**全国口径**的 query.source 解析，保证 enrichment 写入键与此处读取键一致。
     const buildLayerStates = (inputs: NonNullable<typeof layerStateInputs>): LayerState[] => {
-      const pair = nationalDischargeActivePair(query, inputs.layers)
+      const cyclesBySource = get().cyclesBySource
+      const pair = nationalDischargeActivePair(query, inputs.layers, cyclesBySource)
       // 非默认对一律传覆盖：记录缺席 = 列表还没取回 → `pending`（空列表 + 独立文案），
       // 绝不静默回落到目录里**默认周期**的 metadata.valid_times。默认对仍传 undefined
       // （metadata 路径，同一次加载零次 valid-times 请求）。
       // 例外：阶段 3 已被跳过时请求永远不会发出，`pending` 就是谎报「还在取」——记录缺席直接
       // 落到与 reject 同一条终态文案（spec frontend-mvt-layer-consumption
       // 「The active cycle's list is unresolved」：跳过的那次同样必须到达终态）。
-      const missingRecord: ActiveCycleValidTimesOverride = layerTimeEnrichmentSkipped
-        ? { status: 'error' }
-        : { status: 'pending' }
+      // 第二处终态来源：非默认源的 cycles **取回失败**时活动对永远解不出来，之后不会再有任何
+      // valid-times 终态来覆盖它，`pending`（"还在取"）同样是谎报。
+      const concreteSource = nationalConcreteSource(query.source)
+      const sourceUnresolved = nationalDischargeSourceUnresolved(query, inputs.layers, cyclesBySource)
+      const sourceCyclesFailed =
+        sourceUnresolved && concreteSource !== null && cyclesBySource[concreteSource]?.status === 'error'
+      const missingRecord: ActiveCycleValidTimesOverride =
+        layerTimeEnrichmentSkipped || sourceCyclesFailed ? { status: 'error' } : { status: 'pending' }
       const activeCycleValidTimes: Record<string, ActiveCycleValidTimesOverride> | undefined =
         pair && !pair.isDefault
           ? {
               discharge: get().validTimesByCycle[m11SourceCycleKey(pair.source, pair.cycle)] ?? missingRecord,
             }
-          : undefined
+          : // 活动对解不出来但源是非默认源：绝不回落目录 metadata（那是 GFS 的列表）。
+            sourceUnresolved
+            ? { discharge: missingRecord }
+            : undefined
       return normalizeLayerStates({
         query: inputs.query,
         layers: inputs.layers,
         activeCycleValidTimes,
+        // 与上面那份列表同批盖章：地图侧不再自行解析周期，直接读这枚章拼瓦片 URL 的 cycle 段
+        // （决策 13 孪生要求）。解不出对 = null = 不注册叠加层，绝不回落目录的 GFS 周期。
+        activeNationalCycle: pair?.cycle ?? null,
         resolvedRun: inputs.resolvedRun,
       })
+    }
+
+    // 按源周期列表的**唯一**写入口：与下面的 `writeValidTimes` 同构（记录 → 重算 → 合并）。
+    // 非默认源的活动对由该源自己的 `cycles.default_cycle` 决定（`nationalDischargeActivePair`），
+    // 没有这条反应边，切到非默认源后第一次进来会永久停在 pair 为 null 的未落定态：
+    // available 臂没人去发那条 valid-times，error 臂更是连终态文案都换不上去。
+    const writeCycles = (source: string, value: DischargeCyclesState) => {
+      if (!isCurrentRequest()) return
+      set((state) => ({ cyclesBySource: { ...state.cyclesBySource, [source]: value } }))
+      const inputs = layerStateInputs
+      if (!inputs) return
+      const layers = buildLayerStates(inputs)
+      set((state) => (state.overview ? { overview: { ...state.overview, layers } } : {}))
     }
 
     // per-cycle 列表的**唯一**写入口：两条终态（available / error）都必须就地重算 layers。
@@ -1443,13 +1510,21 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       const source = nationalConcreteSource(query.source)
       // `best` 已归一为 gfs；`compare` 解析不出具体源 → 这三类请求一条都不发。
       if (!source) return
-      const pair = nationalDischargeActivePair(query, snapshot.layers)
 
       const cyclesTask = fetchDischargeCycles(source).then(
         (cycles) => writeCycles(source, { status: 'available', cycles }),
         // scoped 降级：周期选择器限于默认周期，不是 bootstrap 错误。
         () => writeCycles(source, { status: 'error' }),
       )
+
+      // 非默认源的活动周期**只能**来自这条 cycles 响应（目录的 default_cycle 是 GFS 专有事实），
+      // 故必须等 `cyclesTask` 落定后再解析 pair；默认源不加这个 await，请求顺序与行为逐字不变。
+      if (source !== nationalDischargeDefaultSource(snapshot.layers)) {
+        await cyclesTask
+        // await 期间新一轮请求可能已接管 store：本轮不再发出任何请求。
+        if (!isCurrentRequest()) return
+      }
+      const pair = nationalDischargeActivePair(query, snapshot.layers, get().cyclesBySource)
 
       // 默认对直接用 metadata.valid_times：同一次 overview 加载**零**次 valid-times 请求。
       const validTimesTask =
@@ -1698,7 +1773,11 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
       // 记录缺席一律落 `error` 终态：流域详情的时间轴来自选中的 run，**不发**任何 per-cycle
       // valid-times（决策 9 / spec map-layer-timeline-controls），既无请求在途也不会再有终态覆盖，
       // `pending`（"还在取"）就是谎报。共享的 `validTimesByCycle` 已被全国总览填过则直接复用。
-      const nationalPair = nationalDischargeActivePair(requestQuery, layers)
+      // 活动对按源分叉后（决策 13），非默认源在该源 cycles 缺席时解不出对；流域详情**不发**
+      // cycles，故这一态在这里是终态，同样必须传显式覆盖——否则 `normalizeLayerStates` 会拿
+      // 目录默认对（GFS）的 `metadata.valid_times` 当它的时次渲染。
+      const nationalCyclesBySource = get().cyclesBySource
+      const nationalPair = nationalDischargeActivePair(requestQuery, layers, nationalCyclesBySource)
       const activeCycleValidTimes: Record<string, ActiveCycleValidTimesOverride> | undefined =
         nationalPair && !nationalPair.isDefault
           ? {
@@ -1706,12 +1785,20 @@ export const useOverviewDataStore = create<OverviewDataState>((set, get) => ({
                 status: 'error',
               },
             }
-          : undefined
+          : nationalDischargeSourceUnresolved(requestQuery, layers, nationalCyclesBySource)
+            ? { discharge: { status: 'error' } }
+            : undefined
       const layerStates = normalizeLayerStates({
         query: concreteSurfaceQuery,
         layers,
         validTimesByLayerId,
         activeCycleValidTimes,
+        // 与全国那侧同一枚章、同一个 `nationalDischargeActivePair`：流域详情的 discharge 目录条目
+        // 同样是 `{source}/{cycle}` 全国模板（后端对 run-scoped `/layers` 合并同一份 metadata），
+        // 所以它的叠加层也必须按这枚章拼 URL；解不出对即 null → 不注册（既有的失败闭合行为）。
+        // 注意用 `requestQuery`（URL 的全国口径源），不是 `concreteSurfaceQuery`（按 run 解析的源）：
+        // 与 `activeCycleValidTimes` 上方 `nationalPair` 的解析入参保持同一份。
+        activeNationalCycle: nationalPair?.cycle ?? null,
         resolvedRun: useSingleRunSurfaces ? latestRun : null,
       })
       const snapshot: BasinDataSnapshot = {
