@@ -16,6 +16,8 @@ import {
   M11FloatingNotice,
   M11OpsLink,
 } from '@/components/map/M11FloatingControls'
+import { resolveNationalOverlayCycle } from '@/components/map/m11MapBuilders'
+import { resolveM11PrecipOverlay, type M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
 import { bboxToMapFit, mapFeatureStringProperty, popupAnchorFromInteraction, useBasinDetailMode } from '@/components/m11/BasinDetailPanels'
 import { M11RiverForecastPanel, type M11RiverPopupSegment } from '@/components/map/M11RiverForecastPanel'
 import { M11StationForcingPopup, type M11StationPopupStation } from '@/components/map/M11StationForcingPopup'
@@ -41,6 +43,7 @@ import { useNationalBasinGeo } from '@/pages/m11/useNationalBasinGeo'
 import { useMetStationLayer } from '@/pages/m11/useStationLayer'
 import { useAuthStore } from '@/stores/auth'
 import {
+  nationalConcreteSource,
   overviewSnapshotMatchesQuery,
   overviewSnapshotMetadataMatchesQuery,
   useOverviewDataStore,
@@ -117,6 +120,8 @@ function M11FullscreenMap({
   selectedStationId,
   stationFeatureCollection,
   popup,
+  precipOverlay,
+  precipAvailable,
   loading,
   boundaryLoading,
   fitTo,
@@ -142,6 +147,10 @@ function M11FullscreenMap({
   selectedStationId?: string | null
   stationFeatureCollection?: M11StationFeatureCollection | null
   popup?: M11MapPopupSlot | null
+  /** 已解析的降水叠加模型；不传 = 无叠加（流域详情模式，blocked by #2109）。 */
+  precipOverlay?: M11PrecipOverlayModel | null
+  /** 目录里是否有 `precip` 条目；不传 = 降水开关禁用并标「未实现」。 */
+  precipAvailable?: boolean
   loading?: boolean
   boundaryLoading?: boolean
   fitTo?: M11MapCameraFit | null
@@ -176,13 +185,20 @@ function M11FullscreenMap({
         selectedStationId={selectedStationId}
         stationFeatureCollection={stationFeatureCollection}
         popup={popup}
+        precipOverlay={precipOverlay}
         loading={loading}
         boundaryLoading={boundaryLoading}
         fitTo={fitTo}
         onOverlayHover={onOverlayHover}
         onOverlayClick={onOverlayClick}
       />
-      <M11FloatingLayerSwitcher layer={state.layer} metStations={state.metStations} onQueryChange={onQueryChange} />
+      <M11FloatingLayerSwitcher
+        layer={state.layer}
+        metStations={state.metStations}
+        precip={state.precip}
+        precipAvailable={precipAvailable}
+        onQueryChange={onQueryChange}
+      />
       <M11FloatingBasemapSwitcher basemap={state.basemap} onQueryChange={onQueryChange} />
       <M11OpsLink visible={opsVisible} />
       {children}
@@ -286,6 +302,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
   const loadOverview = useOverviewDataStore((store) => store.loadOverview)
   // 起报时次列表是 enrichment（bootstrap 之后才到）：控制条只读它，尚未到达时回落 default_cycle。
   const cyclesBySource = useOverviewDataStore((store) => store.cyclesBySource)
+  // 降水 index 同属 enrichment（bootstrap 之后才到）：键缺席 = 在途，不是错误态。
+  const precipIndexByCycle = useOverviewDataStore((store) => store.precipIndexByCycle)
   const overviewMatchesQuery = overviewSnapshotMatchesQuery(overview, state)
   const overviewMetadataMatchesQuery = overviewSnapshotMetadataMatchesQuery(overview, state)
   const currentOverview = overviewMatchesQuery ? overview : null
@@ -337,6 +355,24 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       }),
     [cyclesBySource, layers, sourceSelection, state],
   )
+  // 降水叠加：三元组与流量层**逐字同源**——具体源走 store 的 `nationalConcreteSource`，
+  // 周期走 `resolveNationalOverlayCycle`（读 store 盖的 `activeNationalCycle` 章），时次走同一个
+  // discharge `LayerState.currentValidTime`（`pickCurrentValidTime` 已把 URL 的 T 与活动列表调和过，
+  // 与 `buildM11RegisteredOverlay` 取到的时次逐字相同）。这里不新造任何第二份解析规则。
+  const dischargeLayer = useMemo(() => layers.find((entry) => entry.layerId === 'discharge') ?? null, [layers])
+  const precipOverlay = useMemo(
+    () =>
+      resolveM11PrecipOverlay({
+        precip: state.precip,
+        concreteSource: nationalConcreteSource(state.source),
+        cycle: dischargeLayer ? resolveNationalOverlayCycle(dischargeLayer) : null,
+        validTime: dischargeLayer?.currentValidTime ?? null,
+        precipIndexByCycle,
+      }),
+    [dischargeLayer, precipIndexByCycle, state.precip, state.source],
+  )
+  // 目录里有没有 `precip` 条目：**一处**推导，传给浮层开关（组件内不重复 find）。
+  const precipAvailable = useMemo(() => layers.some((entry) => entry.layerId === 'precip'), [layers])
   // basin_version_id → basin_id：全国点河段开流量弹窗时反查所属流域去取该流域 latest-product。
   const basinVersionToBasinId = currentOverview?.basinVersionToBasinId ?? mapOverview?.basinVersionToBasinId ?? {}
   const visibleBasinIdList = useMemo(() => basins.map((basin) => basin.basinId), [basins])
@@ -503,6 +539,8 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
       selectedSegmentId={riverPopup?.segment.river_segment_id ?? null}
       selectedStationId={stationPopup?.station.station_id ?? null}
       stationFeatureCollection={stationLayer.featureCollection}
+      precipOverlay={precipOverlay}
+      precipAvailable={precipAvailable}
       loading={surfaceSettling}
       boundaryLoading={nationalGeo.loading}
       fitTo={basinFit}
@@ -519,6 +557,11 @@ function OverviewMode({ state, onQueryChange }: { state: M11QueryState; onQueryC
         <M11FloatingNotice testId="m11-met-station-status">{stationLayer.statusNote}</M11FloatingNotice>
       ) : surfaceSettling ? (
         <M11FloatingNotice testId="m11-overview-loading">总览数据加载中</M11FloatingNotice>
+      ) : precipOverlay.notice ? (
+        // 链位钉死在 `surfaceSettling` 之后、`emptyBasinReason` 之前（fixture 决策 9）：
+        // 加载中不让降水提示盖过「加载中」；加载完成后降水提示优先于空流域提示。
+        // 所有 M11FloatingNotice 同坐标绝对定位，并列挂两条会像素重叠，故必须留在这条互斥链上。
+        <M11FloatingNotice testId="m11-precip-notice">{precipOverlay.notice}</M11FloatingNotice>
       ) : emptyBasinReason ? (
         <M11FloatingNotice testId="m11-overview-empty">{emptyBasinReason}</M11FloatingNotice>
       ) : null}

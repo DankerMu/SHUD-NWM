@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { BrowserRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
@@ -82,6 +82,69 @@ describe('M11FloatingLayerSwitcher', () => {
 
     await user.click(screen.getByRole('button', { name: /气象代站/, pressed: true }))
     expect(onQueryChange).toHaveBeenCalledWith({ metStations: false })
+  })
+
+  it('groups hydrology and meteorology controls and puts the precipitation toggle in meteorology', () => {
+    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailable />)
+
+    const hydrology = screen.getByRole('group', { name: '水文' })
+    const meteorology = screen.getByRole('group', { name: '气象' })
+    // 流量留在水文组、降水与代站在气象组：结构断言，不靠文本相邻。
+    expect(within(hydrology).getByRole('button', { name: /流量/ })).toBeInTheDocument()
+    expect(within(meteorology).getByRole('button', { name: /过去 24h 累积降水/ })).toBeInTheDocument()
+    expect(within(meteorology).getByRole('button', { name: /气象代站/ })).toBeInTheDocument()
+    expect(within(hydrology).queryByRole('button', { name: /过去 24h 累积降水/ })).not.toBeInTheDocument()
+  })
+
+  it('marks the precipitation toggle pressed and implemented when the catalog serves a precip entry', () => {
+    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailable />)
+
+    const toggle = screen.getByRole('button', { name: /过去 24h 累积降水/ }) as HTMLButtonElement
+    expect(toggle.getAttribute('aria-pressed')).toBe('true')
+    expect(toggle.disabled).toBe(false)
+    expect(toggle.getAttribute('aria-disabled')).toBe('false')
+    expect(toggle.textContent).not.toContain('未实现')
+  })
+
+  it('dispatches precip=false when the operator turns the precipitation overlay off', async () => {
+    const onQueryChange = vi.fn()
+    const user = userEvent.setup()
+    render(<M11FloatingLayerSwitcher layer="discharge" precip precipAvailable onQueryChange={onQueryChange} />)
+
+    await user.click(screen.getByRole('button', { name: /过去 24h 累积降水/, pressed: true }))
+    expect(onQueryChange).toHaveBeenCalledWith({ precip: false })
+  })
+
+  it('dispatches precip=true when the overlay is currently off', async () => {
+    const onQueryChange = vi.fn()
+    const user = userEvent.setup()
+    render(<M11FloatingLayerSwitcher layer="discharge" precip={false} precipAvailable onQueryChange={onQueryChange} />)
+
+    await user.click(screen.getByRole('button', { name: /过去 24h 累积降水/, pressed: false }))
+    expect(onQueryChange).toHaveBeenCalledWith({ precip: true })
+  })
+
+  it.each([
+    ['explicitly unavailable', { precipAvailable: false }],
+    ['prop omitted', {}],
+  ])('disables the precipitation toggle and marks it 未实现 when the catalog has no precip entry (%s)', async (
+    _label,
+    props: { precipAvailable?: boolean },
+  ) => {
+    const onQueryChange = vi.fn()
+    const user = userEvent.setup()
+    render(<M11FloatingLayerSwitcher layer="discharge" precip onQueryChange={onQueryChange} {...props} />)
+
+    const toggle = screen.getByRole('button', { name: /过去 24h 累积降水/ }) as HTMLButtonElement
+    expect(toggle.disabled).toBe(true)
+    expect(toggle.getAttribute('aria-disabled')).toBe('true')
+    expect(toggle.getAttribute('title')).toBe('降水叠加未实现')
+    expect(toggle.textContent).toContain('未实现')
+    // 禁用却显示"已按下"就是在假装该图层正在渲染（spec 明令禁止）。
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+
+    await user.click(toggle)
+    expect(onQueryChange).not.toHaveBeenCalled()
   })
 })
 

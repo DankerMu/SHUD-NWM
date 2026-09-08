@@ -140,6 +140,40 @@ export const layer = {
   metadata: nationalDischargeMetadata,
 }
 
+/**
+ * CMA 24h 六级色阶（spec precipitation-raster-overlay「Precipitation PNG rendering …」的
+ * PLTE 索引 1–6）。图例、目录 `precip` 条目与 PNG 调色板共用这六个 hex，前端零硬编码。
+ */
+export const precipLegend = [
+  { min: 0.1, max: 10, color: '#A6F28F', label: '0.1-10' },
+  { min: 10, max: 25, color: '#3DBA3D', label: '10-25' },
+  { min: 25, max: 50, color: '#61B8FF', label: '25-50' },
+  { min: 50, max: 100, color: '#0000FF', label: '50-100' },
+  { min: 100, max: 250, color: '#FA00FA', label: '100-250' },
+  { min: 250, max: null, color: '#800040', label: '≥250' },
+]
+
+/** `/api/v1/layers` 的 `precip` 目录条目（`layer_type: meteorology`, `tile_format: png`）。 */
+export const precipLayer = {
+  layer_id: 'precip',
+  layer_name: 'Past 24h precipitation',
+  layer_type: 'meteorology',
+  variables: ['prcp_rate_or_amount'],
+  metadata: {
+    layer_id: 'precip',
+    tile_format: 'png',
+    image_url_template: '/api/v1/precip/{source}/{cycle}/{valid_time}.png',
+    index_url_template: '/api/v1/precip/{source}/{cycle}/index',
+    bounds: [63, 8, 145, 64],
+    legend: precipLegend,
+    window_hours: 24,
+    unit: 'mm/24h',
+    palette_version: 'v1',
+    fallback_available: false,
+    release_blocking: false,
+  },
+}
+
 export const precipIndex = {
   source: 'gfs',
   cycle: DEFAULT_CYCLE,

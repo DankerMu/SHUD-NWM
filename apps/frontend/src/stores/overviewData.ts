@@ -602,7 +602,7 @@ function scenariosForQuery(source: M11QueryState['source']) {
  * store 绝不发出 `cycles?source=best|compare`、`valid-times?source=best|compare`、
  * `/api/v1/precip/best|compare/...`——解析不出就一条都不发（fixture 决策 8）。
  */
-function nationalConcreteSource(source: M11QueryState['source']): 'gfs' | 'ifs' | null {
+export function nationalConcreteSource(source: M11QueryState['source']): 'gfs' | 'ifs' | null {
   const resolved = resolveNationalScaleSource(source)
   return resolved === 'gfs' || resolved === 'ifs' ? resolved : null
 }

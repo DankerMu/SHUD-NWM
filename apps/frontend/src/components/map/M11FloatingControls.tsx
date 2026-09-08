@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { ArrowLeft, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench, type LucideIcon } from 'lucide-react'
+import { ArrowLeft, CloudRain, Droplets, Layers, Map as MapIcon, MapPin, Mountain, Satellite, Wrench, type LucideIcon } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 import { cn } from '@/lib/cn'
@@ -22,16 +22,46 @@ export const m11FloatingLayerOptions: M11FloatingLayerOption[] = [
   { value: 'discharge', label: '流量', description: 'q_down / m³/s', icon: Droplets },
 ]
 
+/** 浮层图层行的共用外观：选中态高亮、禁用态置灰且不再有 hover 反馈。 */
+function layerRowClassName({ selected, disabled }: { selected: boolean; disabled: boolean }) {
+  return cn(
+    'flex w-full items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors',
+    disabled
+      ? 'cursor-not-allowed border-transparent text-neutral-400'
+      : selected
+        ? 'cursor-pointer border-primary-600 bg-primary-600/15 text-primary-700'
+        : 'cursor-pointer border-transparent text-neutral-700 hover:bg-white/60',
+  )
+}
+
+function LayerGroupTitle({ title }: { title: string }) {
+  return (
+    <div className="flex items-center gap-2 px-1 pb-2 text-xs font-semibold text-neutral-900">
+      <Layers className="h-4 w-4 text-primary-600" aria-hidden="true" />
+      {title}
+    </div>
+  )
+}
+
 /**
- * 浮层图层切换器（M26 单页全屏）。玻璃卡片浮在地图左上角。
+ * 浮层图层切换器（M26 单页全屏）。玻璃卡片浮在地图左上角，按「水文」/「气象」两组呈现
+ * （spec map-layer-timeline-controls「Layer groups render」；base 组本单不交付，故不伪造）。
+ *
+ * `precipAvailable` 可选、默认 `false`：目录里没有 `precip` 条目时降水开关禁用并标「未实现」
+ * （spec「Unimplemented meteorology layers are disabled」的诚实面）。这个判定由调用方**一处**
+ * 从目录推出并传入（`OverviewMode`），组件内不重复 find；流域详情不传 → 恒禁用，直到 #2109 裁决。
  */
 export function M11FloatingLayerSwitcher({
   layer,
   metStations = false,
+  precip = false,
+  precipAvailable = false,
   onQueryChange,
 }: {
   layer: M11Layer
   metStations?: boolean
+  precip?: boolean
+  precipAvailable?: boolean
   onQueryChange?: (patch: M11QueryPatch) => void
 }) {
   return (
@@ -42,54 +72,71 @@ export function M11FloatingLayerSwitcher({
       aria-label="地图图层切换"
       data-testid="m11-floating-layer-switcher"
     >
-      <div className="flex items-center gap-2 px-1 pb-2 text-xs font-semibold text-neutral-900">
-        <Layers className="h-4 w-4 text-primary-600" aria-hidden="true" />
-        水文图层
+      <div role="group" aria-label="水文" data-testid="m11-layer-group-hydrology">
+        <LayerGroupTitle title="水文" />
+        <div className="space-y-1">
+          {m11FloatingLayerOptions.map((option) => {
+            const Icon = option.icon
+            const selected = layer === option.value
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={layerRowClassName({ selected, disabled: false })}
+                aria-pressed={selected}
+                onClick={() => onQueryChange?.({ layer: option.value })}
+              >
+                <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium leading-tight">{option.label}</span>
+                  <span className="block truncate text-xs text-neutral-600">{option.description}</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
       </div>
-      <div className="space-y-1">
-        {m11FloatingLayerOptions.map((option) => {
-          const Icon = option.icon
-          const selected = layer === option.value
-          return (
-            <button
-              key={option.value}
-              type="button"
-              className={cn(
-                'flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors',
-                selected
-                  ? 'border-primary-600 bg-primary-600/15 text-primary-700'
-                  : 'border-transparent text-neutral-700 hover:bg-white/60',
-              )}
-              aria-pressed={selected}
-              onClick={() => onQueryChange?.({ layer: option.value })}
-            >
-              <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span className="min-w-0">
-                <span className="block text-sm font-medium leading-tight">{option.label}</span>
-                <span className="block truncate text-xs text-neutral-600">{option.description}</span>
+      <div
+        role="group"
+        aria-label="气象"
+        data-testid="m11-layer-group-meteorology"
+        className="mt-2 border-t border-white/50 pt-2"
+      >
+        <LayerGroupTitle title="气象" />
+        <div className="space-y-1">
+          <button
+            type="button"
+            className={layerRowClassName({ selected: precipAvailable && precip, disabled: !precipAvailable })}
+            // 目录没有 `precip` 条目时按下态恒为 false：一颗禁用却显示"已按下"的开关，
+            // 正是 spec 明令禁止的"假装那些图层在渲染"。
+            aria-pressed={precipAvailable ? precip : false}
+            aria-disabled={!precipAvailable}
+            disabled={!precipAvailable}
+            title={precipAvailable ? undefined : '降水叠加未实现'}
+            data-testid="m11-layer-toggle-precip"
+            onClick={() => onQueryChange?.({ precip: !precip })}
+          >
+            <CloudRain className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium leading-tight">过去 24h 累积降水</span>
+              <span className="block truncate text-xs text-neutral-600">
+                {precipAvailable ? 'mm/24h 栅格叠加' : '未实现'}
               </span>
-            </button>
-          )
-        })}
-      </div>
-      <div className="mt-2 border-t border-white/50 pt-2">
-        <button
-          type="button"
-          className={cn(
-            'flex w-full cursor-pointer items-center gap-2 rounded-md border px-2 py-2 text-left transition-colors',
-            metStations
-              ? 'border-primary-600 bg-primary-600/15 text-primary-700'
-              : 'border-transparent text-neutral-700 hover:bg-white/60',
-          )}
-          aria-pressed={metStations}
-          onClick={() => onQueryChange?.({ metStations: !metStations })}
-        >
-          <MapPin className="h-4 w-4 shrink-0" aria-hidden="true" />
-          <span className="min-w-0">
-            <span className="block text-sm font-medium leading-tight">气象代站</span>
-            <span className="block truncate text-xs text-neutral-600">点位代站叠加</span>
-          </span>
-        </button>
+            </span>
+          </button>
+          <button
+            type="button"
+            className={layerRowClassName({ selected: metStations, disabled: false })}
+            aria-pressed={metStations}
+            onClick={() => onQueryChange?.({ metStations: !metStations })}
+          >
+            <MapPin className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span className="min-w-0">
+              <span className="block text-sm font-medium leading-tight">气象代站</span>
+              <span className="block truncate text-xs text-neutral-600">点位代站叠加</span>
+            </span>
+          </button>
+        </div>
       </div>
     </section>
   )

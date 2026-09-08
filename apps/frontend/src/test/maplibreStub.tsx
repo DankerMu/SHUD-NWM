@@ -47,12 +47,34 @@ export function MaplibreControlStub() {
   return null
 }
 
-export function MaplibreSourceStub({ children }: { children?: React.ReactNode }) {
-  return <>{children}</>
+/**
+ * `Source` 的观测面（fixture #2015 决策 5）：把 `type` / `url` 暴露成 DOM 属性，让
+ * 「隐藏 ⇒ 没有 `type="image"` 的 source 元素 ⇒ 不发 PNG 请求」这条断言落在真正闸住
+ * 请求的那个组件上，而不是靠 fetch spy（jsdom + stub 下本就不会有网络请求，那是空断言）。
+ * 除多包一层 `div` 外仍是纯透传桩，不影响只查 `m11-map-surface` 属性的既有用例。
+ */
+export function MaplibreSourceStub({
+  type,
+  url,
+  children,
+}: {
+  type?: string
+  url?: string
+  children?: React.ReactNode
+}) {
+  return (
+    <div data-testid="maplibre-source" data-source-type={type} data-source-url={url ?? undefined}>
+      {children}
+    </div>
+  )
 }
 
-export function MaplibreLayerStub() {
-  return null
+/**
+ * `Layer` 的观测面：`beforeId` 是本仓唯一无法从 `Source` 侧观测的 prop（决策 4 的
+ * 「仅当河网 source 存在时才传」形状断言要读它），故这里也从 `null` 升级为可断言的 DOM 节点。
+ */
+export function MaplibreLayerStub({ id, beforeId }: { id?: string; beforeId?: string }) {
+  return <div data-testid="maplibre-layer" data-layer-id={id} data-layer-before-id={beforeId ?? undefined} />
 }
 
 export function MaplibreMarkerStub({ children }: { children?: React.ReactNode }) {

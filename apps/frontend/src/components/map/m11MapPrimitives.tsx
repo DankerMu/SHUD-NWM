@@ -12,6 +12,7 @@ import {
   type M11RegisteredOverlay,
   type SelectedSegmentFeatureCollection,
 } from '@/components/map/m11MapBuilders'
+import type { M11PrecipOverlayModel } from '@/components/map/m11PrecipOverlay'
 
 export const MET_STATION_SOURCE_ID = 'm11-met-stations-source'
 export const MET_STATION_CLUSTER_LAYER_ID = 'clusters'
@@ -33,6 +34,8 @@ export const M11_BASIN_RIVER_SELECTED_LINE_LAYER_ID = 'm11-basin-river-selected-
 export const M11_SELECTED_SEGMENT_SOURCE_ID = 'm11-selected-segment-source'
 export const M11_SELECTED_SEGMENT_HALO_LAYER_ID = 'm11-selected-segment-halo'
 export const M11_SELECTED_SEGMENT_LINE_LAYER_ID = 'm11-selected-segment-line'
+export const M11_PRECIP_SOURCE_ID = 'm11-precip-image'
+export const M11_PRECIP_RASTER_LAYER_ID = 'm11-precip-raster'
 export const M11_ROUND_LINE_LAYOUT = { 'line-cap': 'round', 'line-join': 'round' } as const
 
 const M11_OVERLAY_HIT_PAINT: M11LineLayerProps['paint'] = {
@@ -246,6 +249,34 @@ export function M11NationalRiverPrimitive({
         source-layer="river_network"
         layout={M11_ROUND_LINE_LAYOUT}
         paint={m11NationalRiverPaint({ dimmed, satellite })}
+      />
+    </Source>
+  )
+}
+
+/**
+ * 过去 24h 累积降水栅格叠加（fixture #2015 决策 5）。
+ *
+ * `image` source + `raster` layer；url / coordinates 变化交给 `Source` 组件的 `updateImage`，
+ * **不写 imperative ref**。`model.url === null` 时整个 `Source` 不渲染——这就是「隐藏 ⇒ 浏览器
+ * 绝不发 PNG 请求」的唯一闸门（隐藏原因由 `resolveM11PrecipOverlay` 判定，本组件不做二次判断）。
+ */
+export function M11PrecipOverlayPrimitive({
+  model,
+  beforeId,
+}: {
+  model: M11PrecipOverlayModel
+  beforeId?: string
+}) {
+  if (model.url === null || model.coordinates === null) return null
+  return (
+    <Source id={M11_PRECIP_SOURCE_ID} type="image" url={model.url} coordinates={model.coordinates}>
+      <Layer
+        id={M11_PRECIP_RASTER_LAYER_ID}
+        type="raster"
+        source={M11_PRECIP_SOURCE_ID}
+        paint={{ 'raster-opacity': 0.55, 'raster-resampling': 'linear' }}
+        beforeId={beforeId}
       />
     </Source>
   )
