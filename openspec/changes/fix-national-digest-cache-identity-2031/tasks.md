@@ -30,9 +30,9 @@ Fixture level: expanded · repair intensity: high · seats round 1: 4 (`correctn
 
 ## 5. Real-DB integration (node-27 oracle)
 
-- [ ] 5.1 A divergence case in `tests/test_mvt_national_identity_probe_integration.py` (or a sibling file reusing its fixture/helpers; the three legacy cases must stay untouched): baseline `digest(gfs, cycle, valid_time=_WINDOW_END)`; seed a rival at the SAME cycle with a lexically greater `run_id` and window `[cycle, cycle+1h]`; refresh coverage for both; assert digest at `_WINDOW_END` == baseline, digest at `cycle+1h` != its pre-rival value, unbound digest moved, tile at `_WINDOW_END` still 200 with the same bytes as before seeding.
-- [ ] 5.2 B case: seed output-river rows with NULL geom + matching reach rows, run `_backfill_output_segment_geometry` (psycopg cursor, committed) → `geometry_generation` 0→1, both national digests differ from before; second pass `only_missing=True` → returns 0, generation stays 1, digests unchanged.
-- [ ] 5.3 Red proof: 5.1 and 4.4's route assertion must fail against pre-change `services/tiles/mvt.py` / `hydro_display.py`; 5.2 and 3.2(a) must fail against pre-change `basins_registry_import.py` (batched red-proof stash, popped immediately).
+- [x] 5.1 A divergence case in `tests/test_mvt_national_identity_probe_integration.py` (or a sibling file reusing its fixture/helpers; the three legacy cases must stay untouched): baseline `digest(gfs, cycle, valid_time=_WINDOW_END)`; seed a rival at the SAME cycle with a lexically greater `run_id` and window `[cycle, cycle+1h]`; refresh coverage for both; assert digest at `_WINDOW_END` == baseline, digest at `cycle+1h` != its pre-rival value, unbound digest moved, tile at `_WINDOW_END` still 200 with the same bytes as before seeding.
+- [x] 5.2 B case: seed output-river rows with NULL geom + matching reach rows, run `_backfill_output_segment_geometry` (psycopg cursor, committed) → `geometry_generation` 0→1, both national digests differ from before; second pass `only_missing=True` → returns 0, generation stays 1, digests unchanged.
+- [x] 5.3 Red proof: 5.1 and 4.4's route assertion must fail against pre-change `services/tiles/mvt.py` / `hydro_display.py`; 5.2 and 3.2(a) must fail against pre-change `basins_registry_import.py` (batched red-proof stash, popped immediately).
 
 ## 6. Docs / contract sync
 
