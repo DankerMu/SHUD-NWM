@@ -863,12 +863,21 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_hhe_mvt_binding.py",
         "tests/test_hydro_display_mvt_scaling.py",
         "tests/test_migrations.py",
+        # #2032: guard-derived entries, synced from the selector's own output
+        # per the procedure above — both new suites import services.tiles.mvt
+        # at file level (the lock suite drives tile_generation_lock; the
+        # retention suite pins its three path regexes against the cache-path
+        # builders), so the closure guard puts them on this rule as DIRECT
+        # importers.
+        "tests/test_mvt_tile_generation_lock.py",
         # #1714: ninth guard-derived entry, synced from the selector's own
         # output per the procedure above — the closure guard put the attribution
         # suite on the mvt rule as a one-hop importer through
         # apps/api/routes/hydro_display.py.
         "tests/test_node27_connection_attribution.py",
         "tests/test_node27_connection_attribution_delegated.py",
+        # #2032: the second of the two entries described above.
+        "tests/test_node27_mvt_cache_retention.py",
         # #2013: guard-derived entry, synced from the selector's own output per
         # the procedure above — the prewarm envelope assertion imports
         # NATIONAL_DISCHARGE_VALID_TIME_STRIDE_HOURS from services.tiles.mvt at

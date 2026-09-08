@@ -127,11 +127,11 @@ clamp 后的时次仍落在以 cycle 为原点的 3 h 网格上；**只要它同
 时次）与 `valid_times_warmed`（截断后实际预热多少个）——两者相等才说明整条时间轴都热。
 job 提交顺序是河网优先、之后双源按 lead 交错（`k=0 gfs, k=0 ifs, k=1 gfs, …`），这样
 deadline 命中时两源对称降级，而不是永远截断同一个源的默认视图。**MVT 瓦片**同一 cache key
-由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py:260-280`；唯一调用点
+由跨进程 `flock` single-flight 保护（`services/tiles/mvt.py:332-377`；唯一调用点
 `apps/api/routes/hydro_display.py:689` 在持锁后二次查缓存），多 worker 与预热并发不会
 重复执行 PostGIS 生成。该保护有前提：`NHMS_MVT_FILE_CACHE_DIR` 未配置时
-`_file_cache_lock_path` 返回 `None`（`services/tiles/mvt.py:2338`），
-`tile_generation_lock` 直接 `yield`（`services/tiles/mvt.py:271-273`），只剩进程内
+`_file_cache_lock_path` 返回 `None`（`services/tiles/mvt.py:2442-2447`），
+`tile_generation_lock` 直接 `yield`（`services/tiles/mvt.py:343-348`），只剩进程内
 线程锁；生产由
 `infra/systemd/nhms-display-api.service:9` 的默认值兜住。**降水 PNG 不在此保护内**：
 跨 worker 的文件缓存竞争是 by design 的无锁双写（D4，`services/precip/field.py:113-115`），
@@ -170,6 +170,65 @@ ifs 13.26 两次实测中**较慢的那一次**（没有证据说它是 13 张�
 > pre-existing 回归的**权宜**，不是修好了它；修那个成本回归超出 #2013 范围。包络自身的成本
 > 估算也只有 node-27 实跑 receipt（task 7.2 / #2017）才能定论：在那之前上面的 474 s 是
 > **UNVERIFIED 的推算值**，不是实测值，本仓也没有任何断言在验它。
+
+## MVT 文件缓存回收（issue #2032）
+
+`NHMS_MVT_FILE_CACHE_DIR` 从 M16 起**只写不删**：node-27 实测 5 天 4380 张 `.pbf` / 757 MB、
+4383 个锁文件，增长由 autopipe 每 tick 的 prewarm 主动推动（实测见
+[`docs/runbooks/receipts/2026-09-08-issue-2032-mvt-cache-measurement-node27.md`](receipts/2026-09-08-issue-2032-mvt-cache-measurement-node27.md)）。
+DB 侧 `map.tile_cache` 为 0 行（display 角色只有 SELECT），所以增长全部落在文件侧。
+
+**回收 runner**：`scripts/node27_mvt_cache_retention.py`（仅 stdlib，**不连 DB**）。
+wrapper `scripts/node27_mvt_cache_retention_once.sh`，user 级 unit
+`infra/systemd/nhms-node27-mvt-cache-retention.{service,timer}`（`OnCalendar=*-*-* 04:05:00 UTC`、
+`Persistent=true`），env 模板 `infra/env/node27-mvt-cache-retention.example`（装到
+`infra/env/node27-mvt-cache-retention.env`，**0600**）。
+
+只剪**三种精确形状**，按墙钟 `mtime` 早于 `reference_time − NODE27_MVT_CACHE_RETENTION_DAYS`
+（默认 14）：
+
+| 形状 | 生产者 | `kind` |
+|---|---|---|
+| `<root>/<hh>/<sha256>.pbf` | `services/tiles/mvt.py::_write_file_cache` | `pbf` |
+| `<root>/<hh>/.<sha256>.pbf.<pid>.tmp` | 同上（崩溃时残留的中间文件） | `tmp` |
+| `<root>/.locks/<hh>/<sha256>.lock` | `services/tiles/mvt.py::tile_generation_lock` | `lock` |
+
+`<hh>` 是 cache key 的前两位，必须匹配 `[0-9a-f]{2}` 且是**非 symlink 目录**；枚举**固定两级**，
+`lstat` 必须是常规文件。因此 **`<root>/precip/**` 天然不可达**（`precip` 不匹配 `[0-9a-f]{2}`），
+它由 `scripts/node27_raw_retention.py` 按 display watermark 口径负责——两个 runner 共享
+`NHMS_MVT_FILE_CACHE_DIR` 这一个值，各自只碰自己的子树，回执里的 `precip_root_untouched`
+就是给运维直接断言这一点的。锚不同是有意的：瓦片被剪掉只是下次请求走一次 miss 重新生成，
+不是 404，所以 `#2011` 的 `L ≤ R − 1` 下限**不适用**于本 runner。
+
+锁文件删除是并发安全的：runner 用 `os.open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC)`（**无 `O_CREAT`**）
+取 fd 后 `flock(LOCK_EX|LOCK_NB)`，拿不到就记 `skipped[lock_held]`；拿到后再用
+`fstat(fd)` 与 `lstat(path)` 的 `(st_dev, st_ino)` 复核一次，不等即 `already_gone` 不删
+（路径已被活 miss 重建）。`already_gone` / `lock_held` 都是 **skip 不是 failure**。
+
+**锁文件自清理**（同一 issue 的另一半）：`tile_generation_lock` 现在在 `finally` 里**先 unlink
+后 `LOCK_UN`**，获取时以 `(st_dev, st_ino)` 复核 flock 到的 inode 仍是路径上的 inode，不是则重开
+（`_TILE_LOCK_REACQUIRE_LIMIT = 8` 次尝试，耗尽则记 warning 后**无锁生成**，绝不挂起请求）。
+顺序是硬约束：先释放后 unlink 会让等待者拿到一个已被 unlink 的 inode，与下一个到来者重复生成。
+所以稳态下 `.locks/**` 只含**在途 miss**，不再随请求数单调增长；runner 的锁 lane 是遗留文件的兜底。
+
+**门与回执**：`NODE27_MVT_CACHE_RETENTION_ENABLED`（默认 true）/ `_PLAN_ONLY`（默认 false），
+`--summary-path` 写 JSON 回执（未给时打 stdout），rc `0` 正常 / `1` 有 `failed[]` / `2` preflight
+blocked（零删除）。健康判据（env 模板里逐字给出）：
+
+```bash
+jq -e '
+  (.execution_mode == "production_execute")
+  and ((.finished_at | fromdateiso8601) > (now - 26*3600))
+  and (.failed | length == 0)
+' "$(ls -t /home/nwm/node27-mvt-cache-retention-logs/mvt-cache-retention-*.json | head -1)"
+```
+
+**首次安装 / 回滚**：装 env（0600）+ unit + timer → 先跑
+`NODE27_MVT_CACHE_RETENTION_PLAN_ONLY=true` 看 `planned[]`（确认无任何 `precip/` 路径）→
+`systemctl --user enable --now nhms-node27-mvt-cache-retention.timer`。锁改动要
+`bash scripts/ops/start-display-api.sh` 重启 display API 才生效。回滚：
+`systemctl --user disable --now nhms-node27-mvt-cache-retention.timer`，或在 env 里置
+`NODE27_MVT_CACHE_RETENTION_ENABLED=false`。
 
 ## node-27 Live Receipt（2026-06-08，本机实测）
 

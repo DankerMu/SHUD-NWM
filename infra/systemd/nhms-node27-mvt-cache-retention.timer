@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NHMS node-27 MVT tile file-cache retention daily
+
+[Timer]
+OnCalendar=*-*-* 04:05:00 UTC
+Persistent=true
+Unit=nhms-node27-mvt-cache-retention.service
+
+[Install]
+WantedBy=timers.target

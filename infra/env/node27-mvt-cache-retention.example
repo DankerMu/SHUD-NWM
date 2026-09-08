@@ -1,0 +1,68 @@
+# Node-27 MVT tile file-cache retention (issue #2032).
+#
+# Copy to /home/nwm/NWM/infra/env/node27-mvt-cache-retention.env on node-27, set
+# mode 0600, and install infra/systemd/nhms-node27-mvt-cache-retention.{service,
+# timer} as user units for nwm.
+
+NODE27_MVT_CACHE_RETENTION_REPO=/home/nwm/NWM
+
+# The display API's MVT tile file cache. This runner prunes exactly three shapes
+# under it -- <root>/<hh>/<sha256>.pbf, <root>/<hh>/.<sha256>.pbf.<pid>.tmp and
+# <root>/.locks/<hh>/<sha256>.lock -- and never descends into <root>/precip/**,
+# which scripts/node27_raw_retention.py owns on its own (watermark) cutoff.
+#
+# ROOT-EQUALITY PRECONDITION: this must hold the value the display API PROCESS
+# actually has. Measured on node-27 (2026-09-06): display cache
+# /home/nwm/.cache/nhms/mvt -- that is the ExecStart default in
+# nhms-display-api.service, NOT infra/env/display.example's /tmp/nhms-mvt-cache,
+# so copy the running process's value, never the template's. A missing, relative,
+# symlinked or non-directory root is a preflight blocker (rc=2, zero deletions),
+# not a silent skip.
+NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
+
+# Wall-clock age, in days. Deliberately NOT anchored to the display watermark
+# (unlike NODE27_RAW_RETENTION_DAYS): a pruned tile is regenerated from the
+# database on the next request, so there is no `L <= R - 1` floor here and no
+# 404 surface to protect. Must parse as an integer >= 1; a typo or a `0` is a
+# preflight blocker (`reason: not_an_integer` / `must_be_at_least_one`) and is
+# NEVER silently replaced by the default, which is the one explicit departure
+# from node27_raw_retention's `_env_int`.
+NODE27_MVT_CACHE_RETENTION_DAYS=14
+
+NODE27_MVT_CACHE_RETENTION_LOG_ROOT=/home/nwm/node27-mvt-cache-retention-logs
+NODE27_MVT_CACHE_RETENTION_LOCK_PATH=/tmp/node27-mvt-cache-retention.lock
+
+# HEALTH CRITERION. The unit is Type=oneshot with no SuccessExitStatus=, so a
+# non-zero rc leaves it in `systemctl --user --failed`; but rc alone cannot see
+# a stale receipt or a rollback gate left switched on, so read the summary:
+#   jq -e '
+#     (.execution_mode == "production_execute")
+#     and ((.finished_at | fromdateiso8601) > (now - 26*3600))
+#     and (.failed | length == 0)
+#   ' "$(ls -t /home/nwm/node27-mvt-cache-retention-logs/mvt-cache-retention-*.json | head -1)"
+# 26h is the 24h timer tick (OnCalendar=*-*-* 04:05:00 UTC) plus slack.
+# Exit 0 means exactly those three clauses: a fresh summary, actually executing
+# (not `disabled` / `plan_only` / `preflight_blocked`), and no IO failure.
+# `skipped[]` is NOT a failure signal and must not be added to the criterion:
+#   - `lock_held`  -- a display worker is mid-miss on that key right now;
+#   - `already_gone` -- a concurrent writer or a previous tick got there first;
+#   - `locks_root_missing` -- the normal state of a cache root that has not
+#     served a miss yet, so it must not hold a fresh install at exit 1.
+# One entry worth eyeballing by hand: `locks_root_unsafe` means `<root>/.locks`
+# is a symlink or not a directory, so the lock lane is retiring itself every
+# tick while the .pbf lane keeps working:
+#   jq '.skipped[] | select(.kind == null)' <summary>
+
+# Rollout/rollback gates. Both default to today's execute-only behaviour, so
+# leaving them unset changes nothing:
+#   NODE27_MVT_CACHE_RETENTION_ENABLED   (default true)  false => summary
+#       execution_mode "disabled", zero deletions, rc 0.
+#   NODE27_MVT_CACHE_RETENTION_PLAN_ONLY (default false) true  => targets are
+#       still collected and reported in planned[], nothing is unlinked; note it
+#       still reports status "completed", which is why the criterion above reads
+#       execution_mode and not status.
+# Neither reuses a `*_DRY_RUN` name: that one defaulted to true, so a leftover
+# line in a live config would silently return production to zero deletions
+# (issue #1407). Under these names any leftover line is inert.
+# NODE27_MVT_CACHE_RETENTION_ENABLED=true
+# NODE27_MVT_CACHE_RETENTION_PLAN_ONLY=false
