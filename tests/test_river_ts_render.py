@@ -2126,6 +2126,7 @@ def _assert_correlated_scalar_refusal(sql: str, *, entry: str) -> None:
         assert "text identity column(s)" not in message
         assert _PARENTHESES_UNMODELLED not in message
         assert "comparison-position sub-select" not in message
+        assert "unbalanced parentheses" not in message
 
 
 def _assert_correlated_scalar_clean(sql: str, *, entry: str) -> None:
@@ -2240,6 +2241,109 @@ def test_correlated_scalar_nested_only_body_fails_closed() -> None:
     entry = "correlated-scalar-nested-only"
 
     assert "rt.variable" not in outer_predicates(sql)
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+_CORRELATED_SCALAR_UNCLOSED_SIMPLE_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT hr.run_key FROM hydro.hydro_run hr WHERE rt.variable = :v"
+)
+_CORRELATED_SCALAR_UNCLOSED_NESTED_INNER_CLOSED_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT 1 FROM t WHERE b = (SELECT rt.variable FROM dual)"
+)
+_CORRELATED_SCALAR_UNCLOSED_LATER_INDEPENDENT_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT max(hr.run_key) FROM hydro.hydro_run hr WHERE hr.run_id = :r) "
+    "AND rt.basin_version_key = "
+    "(SELECT max(hr2.basin_version_key) FROM hydro.hydro_run hr2 "
+    "WHERE hr2.run_id = :r2 AND rt.variable = :v"
+)
+_CORRELATED_SCALAR_UNCLOSED_AUTHORITY_CLEAN_SQL = (
+    "SELECT rt.value FROM hydro.river_timeseries rt WHERE rt.run_key = "
+    "(SELECT hr.run_key FROM hydro.hydro_run hr WHERE hr.run_id = :r"
+)
+
+
+def test_an_unclosed_comparison_position_scalar_remainder_is_still_a_correlated_candidate() -> None:
+    """The stripper consumes an unclosed comparison-position scalar through EOF.
+
+    A last-byte ``)`` gate would drop that remainder, so the guarded helper would
+    answer empty and both renders would fall through to the structural check.
+    """
+    sql = _CORRELATED_SCALAR_UNCLOSED_SIMPLE_SQL
+    entry = "correlated-scalar-unclosed-simple"
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    assert text_fact_columns(sql, "rt") == set()
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_an_unclosed_outer_scalar_does_not_steal_an_inner_close_at_eof() -> None:
+    """An inner group's closing ``)`` at EOF is not the outer scalar's matching close.
+
+    Recursing into the full remainder keeps the closed inner body visible as its
+    own correlated candidate.
+    """
+    sql = _CORRELATED_SCALAR_UNCLOSED_NESTED_INNER_CLOSED_SQL
+    entry = "correlated-scalar-unclosed-nested-inner-closed"
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    assert text_fact_columns(sql, "rt") == set()
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_a_later_unclosed_correlated_scalar_is_refused_before_the_structural_check() -> None:
+    """First scalar is closed and authority-clean; only the later unclosed body correlates.
+
+    ``max`` avoids the existing ``LIMIT 1`` skeleton. The structural check still
+    refuses the unbalanced later group, but that refusal is unrelated: preflight
+    owns the correlated-scalar reason on every guarded door.
+    """
+    sql = _CORRELATED_SCALAR_UNCLOSED_LATER_INDEPENDENT_SQL
+    entry = "correlated-scalar-unclosed-later-independent"
+
+    assert "rt.variable" not in outer_predicates(sql)
+    assert text_fact_columns(sql, "rt") == set()
+    with pytest.raises(RiverTemplateError, match="unbalanced parentheses"):
+        assert_structurally_intact(sql, entry)
+    _assert_correlated_scalar_refusal(sql, entry=entry)
+
+
+def test_an_authority_clean_unclosed_scalar_stays_empty_and_renders_unbalanced() -> None:
+    """No outer-alias candidate: the helper stays empty and both renders refuse unbalanced."""
+    sql = _CORRELATED_SCALAR_UNCLOSED_AUTHORITY_CLEAN_SQL
+    entry = "correlated-scalar-unclosed-authority-clean"
+
+    assert outer_predicates(sql) == _CORRELATED_SCALAR_AUTHORITY_OUTER
+    assert text_fact_columns(sql, "rt") == set()
+    assert fact_table_text_identity_columns(sql, entry=entry) == set()
+    for store in ("legacy", "narrow"):
+        with pytest.raises(RiverTemplateError) as raised:
+            render_river_ts_sql(sql, store, entry=entry)
+        message = str(raised.value)
+        assert entry in message
+        assert "unbalanced parentheses" in message
+        assert _CORRELATED_SCALAR_REASON not in message
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("simple", _CORRELATED_SCALAR_UNCLOSED_SIMPLE_SQL + ")"),
+        ("nested-inner-closed", _CORRELATED_SCALAR_UNCLOSED_NESTED_INNER_CLOSED_SQL + ")"),
+        ("later-independent", _CORRELATED_SCALAR_UNCLOSED_LATER_INDEPENDENT_SQL + ")"),
+    ],
+)
+def test_closed_twins_of_the_unclosed_scalar_remainders_keep_the_correlated_reason(
+    label: str,
+    sql: str,
+) -> None:
+    """Closing the same three shapes must not change the correlated-scalar reason."""
+    entry = f"correlated-scalar-closed-twin-{label}"
+
+    assert "rt.variable" not in outer_predicates(sql)
+    assert text_fact_columns(sql, "rt") == set()
     _assert_correlated_scalar_refusal(sql, entry=entry)
 
 

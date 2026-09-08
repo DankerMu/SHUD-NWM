@@ -390,6 +390,18 @@ def _skip_balanced(sql: str, start: int) -> int:
     ``(SELECT ... WHERE name = ')' ...)`` is consumed whole rather than cut at
     the literal.
     """
+    return _skip_balanced_span(sql, start)[0]
+
+
+def _skip_balanced_span(sql: str, start: int) -> tuple[int, bool]:
+    """:func:`_skip_balanced`'s answer plus whether the matching close was FOUND.
+
+    The flag is what separates a complete group whose last byte happens to be
+    ``)`` from an unclosed remainder that merely ends on an inner group's
+    close. Inferring closure from ``sql[end - 1] == ')'`` is the latter's
+    false positive: the stripper still consumes through EOF, but a last-byte
+    gate would either drop the remainder or steal the inner close.
+    """
     depth = 0
     index = start
     length = len(sql)
@@ -409,9 +421,9 @@ def _skip_balanced(sql: str, start: int) -> int:
         elif character == ")":
             depth -= 1
             if depth == 0:
-                return index + 1
+                return index + 1, True
         index += 1
-    return length
+    return length, False
 
 
 def _in_comparison_value_position(kept: list[str]) -> bool:
@@ -463,8 +475,10 @@ def _walk_comparison_position_scalar_bodies(sql: str) -> Iterator[str]:
     comment, ``_SUBQUERY_START``, comparison-position and balanced-group rules, but
     the skipped group is returned instead of deleted. Nested bodies are yielded
     from a recursive walk of each body so a later independent sibling and an
-    inner-only candidate are separately visible. The body is the original bytes
-    inside the parentheses; matcher/scanner normalisation stays the matcher's job.
+    inner-only candidate are separately visible. A matching close yields the
+    original bytes inside the parentheses; an unclosed remainder yields the
+    full consumed tail so a closed inner group at EOF stays visible.
+    Matcher/scanner normalisation stays the matcher's job.
     """
     kept: list[str] = []
     index = 0
@@ -487,9 +501,9 @@ def _walk_comparison_position_scalar_bodies(sql: str) -> Iterator[str]:
             index = end
             continue
         if character == "(" and _SUBQUERY_START.match(sql, index) and _in_comparison_value_position(kept):
-            end = _skip_balanced(sql, index)
-            if end > index + 1 and sql[end - 1] == ")":
-                body = sql[index + 1 : end - 1]
+            end, closed = _skip_balanced_span(sql, index)
+            if end > index + 1:
+                body = sql[index + 1 : end - 1] if closed else sql[index + 1 : end]
                 yield body
                 yield from _walk_comparison_position_scalar_bodies(body)
             index = end
