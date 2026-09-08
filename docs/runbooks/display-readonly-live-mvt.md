@@ -201,9 +201,11 @@ wrapper `scripts/node27_mvt_cache_retention_once.sh`，user 级 unit
 不是 404，所以 `#2011` 的 `L ≤ R − 1` 下限**不适用**于本 runner。
 
 锁文件删除是并发安全的：runner 用 `os.open(path, O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK)`（**无 `O_CREAT`**；`O_NONBLOCK` 对常规文件无影响，只为让被替换成 FIFO 的路径不会把 open 永久挂住）
-取 fd 后 `flock(LOCK_EX|LOCK_NB)`，拿不到就记 `skipped[lock_held]`；拿到后再用
+取 fd 后先 `fstat` 判常规文件（被换成 symlink/目录/FIFO → `skipped[not_regular_file]`，在任何 flock 之前），
+再 `flock(LOCK_EX|LOCK_NB)`，拿不到就记 `skipped[lock_held]`；拿到后再用
 `fstat(fd)` 与 `lstat(path)` 的 `(st_dev, st_ino)` 复核一次，不等即 `already_gone` 不删
-（路径已被活 miss 重建）。`already_gone` / `lock_held` 都是 **skip 不是 failure**。
+（路径已被活 miss 重建）。`already_gone` / `lock_held` / `not_regular_file` 都是 **skip 不是 failure**；
+根、`.locks` 或某个 `<hh>` 目录本身无法枚举（权限/ESTALE）则是 `failed[]` 里的 `enumeration_unavailable`（rc 1），修权限而不是清盘。
 
 **锁文件自清理**（同一 issue 的另一半）：`tile_generation_lock` 现在在 `finally` 里**先 unlink
 后 `LOCK_UN`**，获取时以 `(st_dev, st_ino)` 复核 flock 到的 inode 仍是路径上的 inode，不是则重开

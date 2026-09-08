@@ -48,6 +48,12 @@ NODE27_MVT_CACHE_RETENTION_LOCK_PATH=/tmp/node27-mvt-cache-retention.lock
 #   - `already_gone` -- a concurrent writer or a previous tick got there first;
 #   - `locks_root_missing` -- the normal state of a cache root that has not
 #     served a miss yet, so it must not hold a fresh install at exit 1.
+#   - `not_regular_file` -- the path was swapped for a symlink/directory/FIFO
+#     between collection and open; nothing was locked or deleted.
+# When `.failed` is non-empty, look at `.failed[].reason` first: a value of
+# `enumeration_unavailable` (kind null) means the root, `.locks` or one `<hh>`
+# directory could not be listed (permissions / ESTALE) -- fix the directory,
+# do not clean the cache by hand.
 # One entry worth eyeballing by hand: `locks_root_unsafe` means `<root>/.locks`
 # is a symlink or not a directory, so the lock lane is retiring itself every
 # tick while the .pbf lane keeps working:

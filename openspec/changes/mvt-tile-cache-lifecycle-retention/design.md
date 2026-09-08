@@ -64,11 +64,11 @@
 - Governing invariant: 显示 API 在 `NHMS_MVT_FILE_CACHE_DIR` 下、`precip/` 之外创建的每个文件都有有界寿命——锁文件只在一次在途 miss 持有期间存在，`.pbf`/`.tmp` 在 mtime 早于 cutoff 后被且仅被 MVT 回收 runner 删除，runner 只触碰三种精确形状、绝不进入 `precip/**`；跨进程 single-flight 在锁自清理后仍成立。
 - Source-of-truth identity/contract: 路径形状来自 `_file_cache_path` / `_file_cache_lock_path` / `_write_file_cache`（`<hh>` = sha256 前两位，文件名 = 完整 sha256）；锁活性以 `(st_dev, st_ino)` 判定；年龄以 `lstat().st_mtime` 对墙钟 cutoff 判定。
 - Producers: `services/tiles/mvt.py::_write_file_cache`（`.pbf` + `.tmp`）、`tile_generation_lock`（`.lock`）；`services/precip/cache.py`（`precip/**`，兄弟，不动）。
-- Validators/preflight: runner 的根校验（`expanduser` 后绝对、非 `/`、存在、非 symlink、目录；days 严格整数 ≥ 1，无静默回落）、三条正则、`lstat` 常规文件、`hh` 目录非 symlink、`.lock` 以 `O_RDONLY|O_NOFOLLOW|O_CLOEXEC` 打开；API 侧 inode 复核（`_lock_path_identity` / `_lock_file_identity`）。
+- Validators/preflight: runner 的根校验（`expanduser` 后绝对、非 `/`、存在、非 symlink、目录；days 严格整数 ≥ 1，无静默回落）、三条正则、`lstat` 常规文件、`hh` 目录非 symlink、`.lock` 以 `O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK` 打开且在 flock 前先 `fstat` 判 `S_ISREG`（非常规 → `not_regular_file`）；API 侧 inode 复核（`_lock_path_identity` / `_lock_file_identity`）。
 - Storage/cache/query: `_read_file_cache` / `_safe_read_file_cache`（并发 unlink → `OSError` → miss）、`read_cached_tile_response`。
 - Public routes/entrypoints: `apps/api/routes/hydro_display.py::_cached_or_generated_mvt_response` 服务的五条路由（`hydro`、`hydro-national` 旧 5 段与新 `{source}/{cycle}`、`river-network`、`river-network-national`、`met-stations`）；新 CLI `scripts/node27_mvt_cache_retention.py` 与 wrapper。
 - Frontend/downstream consumers: `scripts/node27_mvt_prewarm.py`（只走 HTTP，不感知锁/文件）；前端（无变化）；`scripts/node27_raw_retention.py` precip lane（同根不同子树）。
-- Failure paths/rollback/stale state: producer 在锁内抛 424/413/500 → 锁仍 unlink；重试耗尽 → warning + 无锁；runner unlink 遇 `ENOENT` → `already_gone`；锁被持有 → `lock_held`；根不安全 → `preflight_blocked` rc=2、零删除；`ENABLED=false` → disabled 零删除。
+- Failure paths/rollback/stale state: producer 在锁内抛 424/413/500 → 锁仍 unlink；重试耗尽 → warning + 无锁；runner unlink 遇 `ENOENT` → `already_gone`；锁被持有 → `lock_held`；路径被换成 symlink/目录/FIFO → `not_regular_file`；根/`.locks`/`<hh>` 枚举失败 → `failed[enumeration_unavailable]` rc 1（plan-only 同样）；探针在 flock 后抛非 ENOENT 的 `OSError` → 先关 fd 再传播；根不安全 → `preflight_blocked` rc=2、零删除；`ENABLED=false` → disabled 零删除。
 - Evidence/audit/readiness: `--summary-path` JSON；unit 文件测试；node-27 receipt（plan-only 两个口径 + 隔离 uvicorn 的锁计数）。
 - Regression rows:
   - runner + 混合树（三种 aged 形状、fresh `.pbf`、aged `precip/**`、非 hex 目录、非 sha 文件名、symlink、目录冒充 `.pbf`）→ 只删三种 aged 形状，其余全部存在，回执无 `precip/` 路径。
@@ -81,6 +81,11 @@
   - 两进程争同一 key（spawn）→ 后者在前者结束后才进入、无重叠、结束后 `.locks/**` 为空。
   - inode 复核：等待者阻塞的 inode 被持有者 unlink → 等待者在新 inode 上重新获取（不是在已 unlink 的 inode 上执行）。
   - 重试耗尽（monkeypatch stat 恒不等）→ 有界退出、warning、块仍执行。
+  - （round-1）runner + 不可读 `<hh>` / 不可读根 → `failed[enumeration_unavailable]`、同级照删、rc 1（plan-only 亦 rc 1）。
+  - （round-1）runner + collect 后锁路径 unlink / 换成 symlink / 目录 / 无写端 FIFO → `already_gone` / `not_regular_file`×3，替换物仍在，FIFO 用例即时返回。
+  - （round-1）`tile_generation_lock` + `fcntl.flock` spy → `LOCK_UN` 时锁路径已不存在（交换顺序即红）。
+  - （round-1）探针抛 `PermissionError` → 异常传播、fd 计数不变、路径可被新 `flock(LOCK_NB)` 取到。
+  - （round-1）`st_mtime == cutoff` 样本存活（`>=`→`>` 变异即红）；相对 `--summary-path` 可写、env 变量不改 sink。
   - unchanged sibling：`tests/test_hydro_display_mvt_scaling.py` 全部通过（五图层缓存 key/single-flight 再读语义不变）；`tests/test_node27_raw_retention.py` 全部通过；两个 runner 在同一根上互不列出对方路径。
 
 ## Boundary-surface checklist
