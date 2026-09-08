@@ -3,6 +3,10 @@
 - Date: 2026-09-08T23:18Z. Node: node-27 (`nwm@210.77.77.27`), production PG 15.18 on `127.0.0.1:55432`.
 - Tree: throwaway worktree `/home/nwm/tmp/wt-2158` at `665842c8fc3564aa45a54f058878a30413e8fb05` (PR head); the active checkout
   `/home/nwm/NWM` stayed on `hotfix/node27-rollback-pre-2073` (`5a86841c`) and was not pulled or restarted.
+- SHA note: `665842c8` was the pre-amend commit of the PR branch and is unreachable from any ref after the amend; the two files
+  under test (`workers/model_registry/basins_registry_import.py`, `tests/test_backfill_geometry_network_scope_integration.py`)
+  are byte-identical to PR head `d4486c38` and to merge commit `dd9f45c1` (`git diff --quiet 665842c8 dd9f45c1` restricted to those two paths
+  exits 0), so the green/red/green run below applies unchanged to the merged code.
 - Interpreter: `/home/nwm/NWM/.venv/bin/python` (3.11.15) with `PYTHONPATH=/home/nwm/tmp/wt-2158`; module resolution confirmed:
   `workers.model_registry.basins_registry_import.__file__` → `/home/nwm/tmp/wt-2158/workers/model_registry/basins_registry_import.py`.
 - Database: `NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=postgresql://nhms:***@127.0.0.1:55432/nhms` (owner role read from

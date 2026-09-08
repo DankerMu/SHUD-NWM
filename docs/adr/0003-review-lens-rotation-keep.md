@@ -3946,3 +3946,18 @@ mix with no rotated-in lens. The sample carries no rotation signal.
 Decision unchanged: **keep rotation**. Rotated catches still exceed core
 catches cumulatively, and the measurement caveats above still apply. Next
 revisit on the audit's next flag or a maintainer override.
+
+## 2026-09-08 revisit — PR #2184 (#2158, fixture `expanded`)
+
+The audit flagged DECIDABLE with the counters unchanged from the PR #2179
+revisit: `core=226`, `rotated=269`, `phase=53` over 192 multi-round merged
+PRs. PR #2184 was a single-round PR (Round 1 clean with zero candidates across
+three seats; Phase 7 clean), so it enters neither the multi-round denominator
+nor any later-round catch counter, and its round-1 seats (correctness +
+invariant-state; test-evidence + spec-compliance; integration + security-perf)
+were the expanded default mix with no rotated-in lens. The sample carries no
+rotation signal.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, and the measurement caveats above still apply. Next
+revisit on the audit's next flag or a maintainer override.
