@@ -746,15 +746,18 @@ def test_national_digests_join_the_network_version_and_project_its_geometry_gene
 
 
 def test_a_geometry_generation_bump_moves_both_national_digests() -> None:
-    """The projection reaches the digest VALUE, not just the SQL text.
+    """A returned `geometry_generation` reaches the digest basis.
 
-    Asserting the column is in the statement leaves the actual contract
-    unpinned: `_national_source_digest` hashes the returned rows, so a
-    projection that never reaches the basis (a helper that whitelists columns, a
-    row mapping that drops unknown keys) would keep every text assertion green
-    while the key stood still through a geometry rewrite. Same fake rows, one
-    incremented counter, two different digests -- on BOTH layers, because the
-    backfill repaints both.
+    Fake rows, so this proves the row-consuming half only: `_national_source_digest`
+    hashes whatever the query returns, with no column whitelist and no row
+    mapping that drops unknown keys -- either of which would keep every SQL-text
+    assertion green while the key stood still through a geometry rewrite. Same
+    fake rows, one incremented counter, two different digests -- on BOTH layers,
+    because the backfill repaints both.
+
+    That the real SQL actually PROJECTS the column is a different claim, pinned
+    elsewhere: the SQL-text assertions in this file, and 5.2 on node-27 against
+    a live database.
     """
     discharge_rows = [{**_NationalRouteSession._DIGEST_ROWS[0], "geometry_generation": 0}]
     bumped_discharge_rows = [{**discharge_rows[0], "geometry_generation": 1}]

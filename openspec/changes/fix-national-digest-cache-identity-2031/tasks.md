@@ -24,7 +24,7 @@ Fixture level: expanded · repair intensity: high · seats round 1: 4 (`correctn
 - [x] 4.1 `national_discharge_source_version(session, *, source=None, cycle=None, valid_time=None)`: ranked sub-query adds `JOIN core.river_network_version rnv ON rnv.river_network_version_id = mi.river_network_version_id`, projects `rnv.geometry_generation`, and adds the D2 predicate. Bind `valid_time` always (None allowed). Keep exactly one `h.status IN (...)`.
 - [x] 4.2 `national_river_network_source_version`: add `rnv.geometry_generation` to the `SELECT DISTINCT` projection (sqlite branch untouched otherwise).
 - [x] 4.3 Routes: `hydro_national_source_cycle_mvt_tile` passes `valid_time=valid_time_instant`; `hydro_national_mvt_tile` passes `valid_time=valid_time` (source/cycle stay None); `_default_layer_catalog` unchanged.
-- [x] 4.4 Unit tests (`tests/test_hydro_display_mvt_scaling.py`): digest SQL contains the guarded coverage predicate, `geometry_generation`, and the rnv join; a changed `geometry_generation` value in a fake row moves both digests; `test_each_national_route_hands_the_digest_helper_its_own_identity` extended — both tile routes pass `valid_time`, catalog passes none; existing shape assertions at `:82-90` and the version-literal pins (`:220`, `:616-625`) stay green unchanged.
+- [x] 4.4 Unit tests (`tests/test_hydro_display_mvt_scaling.py`): digest SQL contains the guarded coverage predicate, `geometry_generation`, and the rnv join; a changed `geometry_generation` value in a fake row moves both digests; `test_each_national_route_hands_the_digest_helper_its_own_identity` extended — both tile routes pass `valid_time`, catalog passes none; existing shape assertions at `:82-90` and the version-literal pins (`:220`, and the v5 literal pin now at ~`:789`) stay green unchanged.
 
 - [x] 4.5 Source-scan test (style of `tests/test_display_publish_status_only.py`): production code under `apps/ services/ workers/ packages/ scripts/` contains exactly one `UPDATE core.river_segment` statement and it is inside `_backfill_output_segment_geometry`; exactly one `INSERT … ON CONFLICT … DO UPDATE` targeting `core.river_segment` and it is inside `qhh_production_bootstrap.py::_seed_output_segment_rows`, and that upsert's `DO UPDATE SET` column list is exactly `segment_order, properties_json` (`geom` absent — a regex assertion on the SET clause, so adding `geom = EXCLUDED.geom` to the existing upsert or adding a new upsert both redden); the generation bump SQL appears exactly once in the module.
 
@@ -46,12 +46,12 @@ Fixture level: expanded · repair intensity: high · seats round 1: 4 (`correctn
 |---|---|
 | node-27 read-only measurement of A's precondition, with SQL + output | receipt `2026-09-08-issue-2031-digest-precondition.md` |
 | Ruling recorded (fix A in digest SQL + sync 3.1 / matrix / test contract) | design.md D1–D3, matrix appendix, tasks 4.x |
-| If A fixed: digest and `latest_runs` pick the same run for one `(source, cycle, valid_time)`; two same-cycle runs with different windows | 5.1 on node-27 (pytest output in PR) |
-| If A fixed: legacy route 200/424 and bytes unchanged | three existing probe cases green on node-27; 5.1 byte assertion |
+| If A fixed: digest and `latest_runs` pick the same run for one `(source, cycle, valid_time)`; two same-cycle runs with different windows | 5.1 on node-27 (pytest output in PR): digest half by the three digest assertions; tile half by the post-seed identity-route request served as a cache MISS (tile-cache rows deleted between seeding and the request, `X-Tile-Cache: miss`) and painted by the base run — reverse-proved on node-27 by removing `latest_runs`' window predicate |
+| If A fixed: legacy route 200/424 and bytes unchanged | three existing probe cases green on node-27 (legacy route untouched; the byte path is unchanged by construction) |
 | B: backfill updating ≥1 row changes a national digest — unit + node-27 receipt | 3.2(a) local; 5.2 node-27 |
 | B covers `national_river_network_source_version` too | 4.2 + 5.2 asserts both digests |
 | Conclusions written back to i4-2007 matrix | 6.2 |
-| Profile matrix row "Display/API → node-27 live receipt" | **Deferred to the deploy step**: apply `000057` on node-27, restart display API, receipt for both national tile routes + `/api/v1/layers` (200 / expected 424, no 500). Owner: node-27 operator; tracked issue #2145. Not satisfiable in this PR without production DDL (design.md D6). |
+| Profile matrix row "Display/API → node-27 live receipt" | **Deferred to the deploy step**: apply `000057` on node-27, restart display API, receipt for the three national tile routes + `/api/v1/layers` (200 / expected 424, no 500); the write side (timer seed / bootstrap backfill) also needs `000057` before it runs. Owner: node-27 operator; tracked issue #2145. Not satisfiable in this PR without production DDL (design.md D6). |
 
 ## Risk pack → evidence
 

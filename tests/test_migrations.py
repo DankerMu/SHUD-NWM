@@ -1139,14 +1139,13 @@ def test_river_network_geometry_generation_migration_is_column_only_forward_upgr
         f"{migration_name} must exist as the geometry-generation migration for the "
         "fix-national-digest-cache-identity-2031 change"
     )
-    # The NEXT number, and the last one: 000056 immediately precedes it and
-    # nothing follows. A second 000057_* would break the sorted-glob contract
-    # the runner relies on.
+    # The NEXT number: 000056 immediately precedes it. A second 000057_* would
+    # break the sorted-glob contract the runner relies on. Deliberately NOT a
+    # `migration_names[-1]` pin: the runner reads sorted glob + skip-if-applied
+    # and never the last position, so pinning it would only redden this test on
+    # the next unrelated 000058_*.
     assert migration_names.index("000056_hydro_run_parsed_at.sql") + 1 == (
         migration_names.index(migration_name)
-    )
-    assert migration_names[-1] == migration_name, (
-        f"{migration_name} must be the highest-numbered migration; found {migration_names[-3:]}"
     )
     assert [name for name in migration_names if name.startswith("000057")] == [migration_name]
 

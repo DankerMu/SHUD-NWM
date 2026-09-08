@@ -1690,6 +1690,27 @@ def _geometry_generation(database_url: str, river_network_version_id: str) -> in
     return int(rows[0]["geometry_generation"])
 
 
+def _clear_tile_cache(database_url: str) -> int:
+    """Drop the DB tile tier so the next request REGENERATES instead of replaying.
+
+    Deliberately not routed through `_query`: that helper opens a connection
+    without autocommit and never commits, so a DELETE through it is rolled back
+    on close and silently does nothing -- the exact failure mode that would turn
+    the tile-side oracle below back into a cache replay.
+
+    Only the DB tier needs clearing: the fixture never sets
+    `NHMS_MVT_FILE_CACHE_DIR`, so the file tier is off.
+    """
+    connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("DELETE FROM map.tile_cache")
+            return int(cursor.rowcount)
+    finally:
+        connection.close()
+
+
 def test_national_digest_binds_the_instant_so_a_rival_outside_the_window_moves_nothing(
     national_tile: Any,
 ) -> None:
@@ -1704,7 +1725,7 @@ def test_national_digest_binds_the_instant_so_a_rival_outside_the_window_moves_n
     key for `_WINDOW_END` and the key for an instant the rival DOES serve moved
     in lockstep, so one of the two was always describing the wrong run.
 
-    Three assertions, three different questions:
+    Four assertions, four different questions:
 
     * bound to `_WINDOW_END` -> UNCHANGED by the rival's arrival (the clamp
       excludes it). This is the one that fails without the fix.
@@ -1713,12 +1734,22 @@ def test_national_digest_binds_the_instant_so_a_rival_outside_the_window_moves_n
       simply ignored the rival everywhere would satisfy it.
     * unbound -> MOVED, because the instant-less question is still "each
       network's overall latest run" and that is now the rival.
+    * the TILE at `_WINDOW_END` is still painted by the base run -- the tile
+      half of the same clamp, read out of `latest_runs` rather than out of the
+      digest.
 
-    The byte equality on the tile is the weaker half and is asserted for
-    completeness rather than as the oracle: with the digest unchanged the cache
-    key is unchanged, so the second response is a cache hit by construction. The
-    load-bearing part of that line is `_assert_tile_was_painted_by`, which says
-    the RUN behind those bytes is still the base run.
+    That fourth question only exists because `_clear_tile_cache` runs first.
+    With the digest unchanged the cache key is unchanged too, so without the
+    clear the second response is a cache hit by construction and replays the
+    baseline bytes: `_assert_tile_was_painted_by` would then re-assert the
+    BASELINE tile and say nothing at all about how `latest_runs` ranks the two
+    runs now that the rival exists. Clearing the DB tile tier forces a
+    regeneration -- proved, not assumed, by `X-Tile-Cache: miss` -- so the run
+    identity in those bytes is the one the tile SQL just selected.
+
+    The byte equality is the weaker half and now asserts something different
+    from before: that regenerating the tile reproduces the baseline bytes.
+    `_assert_tile_was_painted_by` remains the load-bearing tile-side assertion.
     """
     database_url, client = national_tile
     _refresh_coverage(database_url)
@@ -1786,7 +1817,18 @@ def test_national_digest_binds_the_instant_so_a_rival_outside_the_window_moves_n
         "the instant-less question is unchanged: each network's overall latest run, now the rival"
     )
 
+    # The tile half of the same clamp. Non-vacuity: the baseline request must
+    # really have populated the DB tier, or there is nothing to clear and the
+    # "miss" below would be describing a cache that was never warm.
+    assert _clear_tile_cache(database_url) >= 1, (
+        "the baseline tile request must have written the DB tile tier, "
+        "or clearing it proves nothing about the request that follows"
+    )
     after_tile = _request_identity_tile(client, "gfs", _CYCLE_TIME, _WINDOW_END)
+    assert after_tile.headers["X-Tile-Cache"] == "miss", (
+        "this tile must be REGENERATED, not replayed: on a cache hit the run identity "
+        "below is the baseline's and asserts nothing about how latest_runs ranks the rival"
+    )
     _assert_tile_was_painted_by(after_tile, _RUN_ID, _RIVAL_RUN_ID)
     assert after_tile.content == baseline_tile.content
 

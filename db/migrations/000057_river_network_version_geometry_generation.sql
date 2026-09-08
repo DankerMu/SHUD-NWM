@@ -26,5 +26,13 @@
 -- of the code (an unread column); the reverse is not — code that projects
 -- `geometry_generation` against a database without it 500s every national tile
 -- and `/api/v1/layers`.
+--
+-- The WRITE side has no restart to wait for: the bump above runs inside the
+-- `import-basins-registry` subprocess the node-27 autopipe timer spawns for a
+-- new basin, and inside `qhh_production_bootstrap.py` — both live the moment
+-- the repo is pulled. Without this column that UPDATE raises `UndefinedColumn`
+-- and rolls the whole import transaction back (the basin never registers; the
+-- tick records `seed_failed stage=import`, every 10 minutes). Apply this in the
+-- SAME window as the pull, before the next timer tick or bootstrap run.
 ALTER TABLE core.river_network_version
   ADD COLUMN IF NOT EXISTS geometry_generation INTEGER NOT NULL DEFAULT 0;
