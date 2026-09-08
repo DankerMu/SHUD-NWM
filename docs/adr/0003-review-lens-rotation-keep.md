@@ -3755,8 +3755,8 @@ as non-attributable. Relative to the immediately preceding recorded sample after
 PR #2117 (182 / 210 / 266 / 53 / 15), only the denominator moved.
 
 PR #2126 produced four verified catches in Round 1. Its three-seat Round 2
-closed those fixes and found one P2 wording ambiguity, which was routed to
-#2130 under the P2-only policy; no later-round catch was attributed to any seat.
+closed those fixes and found one P2 wording ambiguity, which was routed to #2130
+under the P2-only policy; no later-round catch was attributed to any seat.
 The Phase 7 Gap Sweep was clean. This sample therefore says nothing about
 whether rotation helped or hurt: a clean follow-up round adds an opportunity
 but no attributable catch, and the aggregate cannot infer value from absence.
