@@ -3888,3 +3888,16 @@ either way.
 
 Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
 maintainer override.
+
+## 2026-09-08 revisit — PR #2172 (#2170, fixture `compact`)
+
+The audit flagged DECIDABLE again on unchanged cumulative figures (core=225 /
+rotated=269 / phase=53 over 190 multi-round merged PRs). PR #2172 is a
+single-round `compact` sample (correctness + test-evidence/spec-compliance,
+both clean, no verifier batch), so it adds neither a multi-round denominator
+nor a later-round catch; the one Phase 7 catch (spec-delta title wording,
+minor) belongs to the final-review seat, which the rotation question does not
+attribute either way.
+
+Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
+maintainer override.
