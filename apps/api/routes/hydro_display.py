@@ -530,7 +530,12 @@ def hydro_national_source_cycle_mvt_tile(
         z=z,
         x=x,
         y=y,
-        source_digest=national_discharge_source_version(session, source=source, cycle=cycle_instant),
+        # `valid_time` too (#2031): the tile SQL's `latest_runs` clamps candidate
+        # runs to the instant's coverage window, so a digest that skips the clamp
+        # describes a run this tile may never paint.
+        source_digest=national_discharge_source_version(
+            session, source=source, cycle=cycle_instant, valid_time=valid_time_instant
+        ),
     )
     return _cached_or_generated_mvt_response(
         session,
@@ -567,7 +572,15 @@ def hydro_national_mvt_tile(
     tile_input = TileInput(
         layer_id=public_hydro_layer_id(variable),
         source_id=HYDRO_NATIONAL_SOURCE_ID,
-        source_version=f"{HYDRO_NATIONAL_SOURCE_VERSION}:{national_discharge_source_version(session)}",
+        # `source`/`cycle` stay NULL — this alias binds no identity — but the
+        # instant is bound (#2031), and it is the SAME `valid_time` object the
+        # tile SQL below is given, so the digest ranks the run the tile reads.
+        # Bytes and the 200/424 verdict are unchanged; the cache key rotates once
+        # for instants outside the overall-latest run's window.
+        source_version=(
+            f"{HYDRO_NATIONAL_SOURCE_VERSION}:"
+            f"{national_discharge_source_version(session, valid_time=valid_time)}"
+        ),
         valid_time=_format_time(valid_time),
         z=z,
         x=x,

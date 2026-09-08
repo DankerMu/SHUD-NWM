@@ -613,6 +613,182 @@ def test_national_tile_sql_binds_source_and_cycle_at_both_run_selection_sites() 
     assert not binds & {"sourc", "cycl"}
 
 
+# The coverage-window clamp verbatim, `AND (` included, for the same reason the
+# two conjuncts above carry theirs: SQL's AND binds tighter than OR, so an
+# `AND (` -> `OR  (` flip turns the whole WHERE into "every unbound row, OR the
+# matching ones" and re-admits every candidate run while every inner substring
+# stays satisfied.
+#
+# Deliberately NOT byte-identical to the tile CTE's window predicate: that one
+# is an unguarded `JOIN ... ON` (the tile always has an instant), this one has
+# to stay inert for the instant-less catalog call. The oracle for the pair is
+# behavioural -- same run selected when both are bound --
+# `tests/test_mvt_national_identity_probe_integration.py`, not string equality.
+_VALID_TIME_CONJUNCT_HEAD = "AND ("
+_VALID_TIME_GUARD = "CAST(:valid_time AS timestamptz) IS NULL"
+_VALID_TIME_WINDOW_START = "rdc.river_valid_time_start <= :valid_time"
+_VALID_TIME_WINDOW_END = "rdc.river_valid_time_end >= :valid_time"
+
+
+def _national_digest_ranked_subquery(sql: str) -> str:
+    """The ranked sub-query alone, sliced out by its own landmarks.
+
+    A whole-statement `in` check would be satisfied by the predicate sitting in
+    the OUTER `WHERE rn = 1`, and that placement is a real, silent bug rather
+    than a style difference: filtering after `ROW_NUMBER()` drops the rank-1 row
+    of a network whose latest run misses the instant and leaves that network
+    absent from the digest entirely, instead of letting the next candidate
+    become rank 1 -- which is exactly the run the tile paints.
+    """
+    start = sql.index("FROM (")
+    end = sql.index(") ranked", start)
+    assert start < end
+    # Non-vacuity: the slice really is the sub-query, not the whole statement.
+    assert "WHERE rn = 1" not in sql[start:end]
+    return sql[start:end]
+
+
+def test_national_digest_clamps_its_ranking_to_the_requested_instants_coverage_window() -> None:
+    """#2031: the digest must rank the run `latest_runs` would paint, not the newest one.
+
+    Measured on node-27 (receipt `2026-09-08-issue-2031-digest-precondition.md`):
+    the legacy route's digest and its tile disagreed on the selected run for
+    every one of the 38 active networks, and the new route has 20 same-cycle
+    double-run groups one differing window away from the same split. When they
+    disagree, two instants painted from two different runs share one cache key
+    and the file tile cache has no TTL.
+
+    The NULL guard is half the contract: `/api/v1/layers` has no instant, and a
+    clamp that is not inert when unbound would empty the catalog's digest.
+    """
+    session = _CapturingSession(list(_NationalRouteSession._DIGEST_ROWS))
+
+    national_discharge_source_version(session, valid_time=_NATIONAL_VALID_TIME)
+
+    ranked = _national_digest_ranked_subquery(session.sql)
+    # Inside the ranked sub-query, before ROW_NUMBER() decides rank 1.
+    assert _VALID_TIME_GUARD in ranked
+    assert _VALID_TIME_WINDOW_START in ranked
+    assert _VALID_TIME_WINDOW_END in ranked
+    # Conjunct, not disjunct: the guard opens an `AND (`-introduced group.
+    guard_at = ranked.index(_VALID_TIME_GUARD)
+    assert _VALID_TIME_CONJUNCT_HEAD in ranked[:guard_at][-40:], (
+        f"the coverage clamp must be a conjunct; preceding text: {ranked[:guard_at][-40:]!r}"
+    )
+    # `:valid_time::timestamptz` would make SQLAlchemy's bind regex backtrack
+    # and emit a bogus `valid_tim` bind that no fake-session test can see.
+    assert ":valid_time::" not in session.sql
+    binds = set(text(session.sql)._bindparams)
+    assert binds == {"source", "cycle", "valid_time"}, binds
+    assert not binds & {"sourc", "cycl", "valid_tim"}
+
+
+def test_national_digest_always_binds_valid_time_even_when_no_instant_is_given() -> None:
+    """`text()` raises on a missing named bind, and no fake session can see that.
+
+    The catalog and every other instant-less caller reach the same statement, so
+    omitting the parameter instead of binding NULL is a runtime failure on the
+    real driver only -- the exact class of break #2007 left in four integration
+    cases.
+    """
+    session = _CapturingSession(list(_NationalRouteSession._DIGEST_ROWS))
+
+    national_discharge_source_version(session)
+
+    declared = set(text(session.sql)._bindparams)
+    supplied = set(session.params[0])
+    assert declared - supplied == set(), "the digest omits a bind its own SQL declares"
+    assert session.params[0]["valid_time"] is None
+
+
+def test_national_digests_join_the_network_version_and_project_its_geometry_generation() -> None:
+    """#2031's other half: an in-place geometry rewrite must move both keys.
+
+    `_backfill_output_segment_geometry` rewrites `core.river_segment.geom` and
+    the STORED `stream_type` UNDER an unchanged network version. No run row
+    moves, and `rnv.segment_count` / `rnv.checksum` describe the imported
+    package rather than the stored geometry, so before this column both national
+    digests were blind to it: the tile repainted and the cache key did not.
+
+    The INNER JOIN drops no candidate -- `core.model_instance.river_network_version_id`
+    is `NOT NULL REFERENCES core.river_network_version` (000004_core.sql) -- and it
+    aligns the digest's join shape with `latest_runs`.
+    """
+    discharge = _CapturingSession(list(_NationalRouteSession._DIGEST_ROWS))
+    national_discharge_source_version(discharge, source="gfs", cycle=_NATIONAL_CYCLE)
+
+    ranked = _national_digest_ranked_subquery(discharge.sql)
+    assert "JOIN core.river_network_version rnv" in ranked
+    assert "ON rnv.river_network_version_id = mi.river_network_version_id" in ranked
+    # Both projections: the inner one selects it, the OUTER list is explicit and
+    # would silently drop the column from the digest basis if it were forgotten.
+    assert "rnv.geometry_generation" in ranked
+    outer = discharge.sql[: discharge.sql.index("FROM (")]
+    assert "geometry_generation" in outer, f"outer projection drops the column: {outer!r}"
+
+    river = _Session(
+        [
+            {
+                "river_network_version_id": "rnv_a",
+                "basin_version_id": "bv_a",
+                "segment_count": 10,
+                "checksum": "abc",
+                "geometry_generation": 0,
+                "created_at": "2026-07-20T00:00:00Z",
+            }
+        ]
+    )
+    national_river_network_source_version(river)
+    assert "rnv.geometry_generation" in river.sql
+    # The sibling layer's version literal is NOT bumped by this projection
+    # change: the basis moves on its own, which is the whole point of D7.
+    assert "stream-type-aggregate-v3" in national_river_network_source_version(river)
+
+
+def test_a_geometry_generation_bump_moves_both_national_digests() -> None:
+    """A returned `geometry_generation` reaches the digest basis.
+
+    Fake rows, so this proves the row-consuming half only: `_national_source_digest`
+    hashes whatever the query returns, with no column whitelist and no row
+    mapping that drops unknown keys -- either of which would keep every SQL-text
+    assertion green while the key stood still through a geometry rewrite. Same
+    fake rows, one incremented counter, two different digests -- on BOTH layers,
+    because the backfill repaints both.
+
+    That the real SQL actually PROJECTS the column is a different claim, pinned
+    elsewhere: the SQL-text assertions in this file, and 5.2 on node-27 against
+    a live database.
+    """
+    discharge_rows = [{**_NationalRouteSession._DIGEST_ROWS[0], "geometry_generation": 0}]
+    bumped_discharge_rows = [{**discharge_rows[0], "geometry_generation": 1}]
+    assert national_discharge_source_version(_Session(discharge_rows)) != (
+        national_discharge_source_version(_Session(bumped_discharge_rows))
+    )
+
+    river_rows = [
+        {
+            "river_network_version_id": "rnv_a",
+            "basin_version_id": "bv_a",
+            "segment_count": 10,
+            "checksum": "abc",
+            "geometry_generation": 0,
+            "created_at": "2026-07-20T00:00:00Z",
+        }
+    ]
+    bumped_river_rows = [{**river_rows[0], "geometry_generation": 1}]
+    assert national_river_network_source_version(_Session(river_rows)) != (
+        national_river_network_source_version(_Session(bumped_river_rows))
+    )
+    # Non-vacuity: the same rows twice really do digest identically, so the
+    # inequalities above are attributable to the counter and not to nondeterminism.
+    assert national_discharge_source_version(_Session(discharge_rows)) == (
+        national_discharge_source_version(_Session(list(discharge_rows)))
+    )
+    assert national_river_network_source_version(_Session(river_rows)) == (
+        national_river_network_source_version(_Session(list(river_rows)))
+    )
+
+
 def test_national_discharge_query_version_is_pinned_to_the_literal_the_spec_names() -> None:
     """A literal, not the imported constant.
 
@@ -653,8 +829,8 @@ def test_national_digest_narrows_to_the_requested_identity_and_stays_null_withou
     national_discharge_source_version(unbound)
     national_discharge_source_version(bound, source="gfs", cycle=_NATIONAL_CYCLE)
 
-    assert unbound.params == [{"source": None, "cycle": None}]
-    assert bound.params == [{"source": "gfs", "cycle": _NATIONAL_CYCLE}]
+    assert unbound.params == [{"source": None, "cycle": None, "valid_time": None}]
+    assert bound.params == [{"source": "gfs", "cycle": _NATIONAL_CYCLE, "valid_time": None}]
     # Same locked literal as the two `postgis_tile_sql` sites, `AND (` included:
     # this helper's narrowing has no fake-session oracle at all (`_Session` never
     # executes SQL), so the shape assertion is the only local guard and a
@@ -1054,9 +1230,13 @@ def test_every_national_tile_sql_bind_is_supplied_by_the_route_that_executes_it(
         (
             "identity",
             _national_identity_url("gfs", "2026-09-02T12:00:00Z"),
-            {"source": "gfs", "cycle": _NATIONAL_CYCLE},
+            {"source": "gfs", "cycle": _NATIONAL_CYCLE, "valid_time": _NATIONAL_VALID_TIME},
         ),
-        ("legacy", _legacy_national_url(), {"source": None, "cycle": None}),
+        (
+            "legacy",
+            _legacy_national_url(),
+            {"source": None, "cycle": None, "valid_time": _NATIONAL_VALID_TIME},
+        ),
     ],
 )
 def test_each_national_route_hands_the_digest_helper_its_own_identity(
@@ -1246,6 +1426,13 @@ def test_layer_catalog_digests_the_identity_it_advertises(monkeypatch: Any) -> N
     # argument-free call there would show up here as a second entry.
     assert len(recorded) == 1, recorded
     assert recorded[0] == {"source": "gfs", "cycle": datetime(2026, 9, 2, 12, tzinfo=UTC)}
+    # #2031: identity only. Both TILE routes now bind their instant, and the
+    # catalog has none -- it advertises a cycle, not a frame. Binding one here
+    # would clamp the digest to a single instant of the timeline and leave the
+    # entry's `metadata.version` describing whichever instant happened to be
+    # picked. Subsumed by the equality above; spelled out because it is the
+    # assertion the change's contract names.
+    assert "valid_time" not in recorded[0], recorded[0]
     # The digest is scoped to the identity the SAME response advertises.
     assert _entry(response.json()["data"], "discharge")["metadata"]["default_cycle"] == (
         "2026-09-02T12:00:00Z"
@@ -1347,13 +1534,20 @@ def test_layer_catalog_falls_back_to_the_argument_free_digest_when_no_cycle_is_a
 
 
 
-def test_legacy_national_tile_route_digest_stays_argument_free(monkeypatch: Any) -> None:
-    """The 5-segment alias advertises no identity, so its digest must not narrow.
+def test_legacy_national_tile_route_digest_binds_the_instant_and_no_identity(monkeypatch: Any) -> None:
+    """The 5-segment alias advertises no identity, so its digest must not narrow on one.
 
     Companion to `test_layer_catalog_digests_the_identity_it_advertises`: the
-    catalog moved, this call site did not. Narrowing it would change the alias's
-    `source_version` and therefore its cache key, for a route whose whole contract
-    is "unchanged run selection, unchanged bytes".
+    catalog moved, this call site did not. Narrowing on `(source, cycle)` would
+    change the alias\'s run selection, for a route whose whole contract is
+    "unchanged run selection, unchanged bytes".
+
+    `valid_time` is the one exception and it is not a narrowing of the identity
+    (#2031): the alias\'s own tile SQL already clamps candidate runs to the
+    instant\'s coverage window, so the digest passing the same instant makes the
+    cache key describe the run the route actually paints. Its bytes and its
+    200/424 verdict are untouched — only the key rotates, once, for instants
+    outside the overall-latest run\'s window.
     """
     recorded = _recording_digest_calls(monkeypatch)
     monkeypatch.setattr(
@@ -1374,7 +1568,9 @@ def test_legacy_national_tile_route_digest_stays_argument_free(monkeypatch: Any)
 
     assert response.status_code == 200, response.text
     assert len(recorded) == 1, recorded
-    assert recorded[0] == {}
+    # Exactly the instant, and nothing else: `source`/`cycle` absent is what
+    # keeps the alias source-less.
+    assert recorded[0] == {"valid_time": datetime(2026, 9, 3, tzinfo=UTC)}
 
 
 def test_runtime_openapi_documents_the_national_identity_tile_route() -> None:

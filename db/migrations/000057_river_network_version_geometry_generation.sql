@@ -1,0 +1,38 @@
+-- #2031: a monotonic counter of in-place river geometry rewrites, so the
+-- national display cache identity can see them.
+--
+-- Both national digests (`services/tiles/mvt.py::national_discharge_source_version`
+-- and `::national_river_network_source_version`) are computed from run rows and
+-- this table's inventory metadata. `_backfill_output_segment_geometry`
+-- (workers/model_registry/basins_registry_import.py) rewrites
+-- `core.river_segment.geom` / the STORED `stream_type` UNDER an unchanged
+-- network version: `segment_count` and `checksum` describe the imported
+-- package and do not move, no run row is touched, and so the tile cache key
+-- stayed put while the tile's picture changed. The backfill bumps this column
+-- in the same transaction as the rewrite, and only when it actually updated a
+-- row.
+--
+-- NOT `checksum`: that value comes from the source geometry package and is
+-- compared by `BASINS_REGISTRY_CHECKSUM_CONFLICT` on re-import, so rewriting it
+-- on backfill would make the next import misreport a conflict.
+--
+-- `NOT NULL DEFAULT 0` so every pre-existing network starts at a defined
+-- generation and the digests never see NULL; import never resets it
+-- (`_refresh_parent_version_materialization` writes
+-- `segment_count`/`source_uri`/`checksum` only). ADD COLUMN IF NOT EXISTS so the
+-- migration is re-runnable.
+--
+-- Deploy order: apply this BEFORE restarting the display API. It is safe ahead
+-- of the code (an unread column); the reverse is not — code that projects
+-- `geometry_generation` against a database without it 500s every national tile
+-- and `/api/v1/layers`.
+--
+-- The WRITE side has no restart to wait for: the bump above runs inside the
+-- `import-basins-registry` subprocess the node-27 autopipe timer spawns for a
+-- new basin, and inside `qhh_production_bootstrap.py` — both live the moment
+-- the repo is pulled. Without this column that UPDATE raises `UndefinedColumn`
+-- and rolls the whole import transaction back (the basin never registers; the
+-- tick records `seed_failed stage=import`, every 10 minutes). Apply this in the
+-- SAME window as the pull, before the next timer tick or bootstrap run.
+ALTER TABLE core.river_network_version
+  ADD COLUMN IF NOT EXISTS geometry_generation INTEGER NOT NULL DEFAULT 0;
