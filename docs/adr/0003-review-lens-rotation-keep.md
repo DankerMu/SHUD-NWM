@@ -3845,3 +3845,16 @@ exceeds core, but #2120 adds no evidentiary strength in either direction. The
 measurement caveats above remain load-bearing; any reversal still requires
 maintainer review rather than an automatic ratio threshold. Next revisit on
 the audit's next flag or a maintainer override.
+
+## 2026-09-08 revisit — PR #2149 (#2031, fixture `high`)
+
+The audit flagged DECIDABLE again on the same cumulative figures (core=225 /
+rotated=269 / phase=53 over 187 multi-round merged PRs). PR #2149 changes none of
+them: all four net catches came in Round 1 (test-evidence, invariant-state,
+correctness, security-perf — the full `high` seat set), Round 2 ran the pinned
+risk-pack core only (invariant-state + test-evidence/spec-compliance) and
+returned zero candidates, Phase 7 approved with no finding. No later-round catch
+exists to attribute, so this sample adds denominator without signal.
+
+Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
+maintainer override.
