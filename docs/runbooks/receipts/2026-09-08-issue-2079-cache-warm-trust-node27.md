@@ -23,7 +23,7 @@
 | `/api/v1/runs` | 3.3–3.6 | 3.2–4.5 | 3.2–3.3 | 76.3–80.1 |
 | `/api/v1/layers/discharge/cycles?source=gfs` | 2.8–3.0 | 2.8–2.9 | 2.7–2.9 | 45.7–48.4 |
 
-(a) 外部 `refresh` 与错 token 均与不带头同量级（≤ 4.5 ms，对照实测 receipt 冷值 73–92 ms）；(b) 正确 token 回到冷路径量级（≥ 45 ms）。
+(a) 外部 `refresh` 与错 token 均与不带头同量级（≤ 4.5 ms，对照实测 receipt 冷值 73–92 ms）；(b) 正确 token 回到冷路径量级：`/api/v1/runs` 76.3–80.1 ms 满足 fixture 4.2 的 ≥ 50 ms；`/api/v1/layers/discharge/cycles?source=gfs` 无实测冷基线，45.7–48.4 ms 按其自身 warm/cold 约 16× 分离判定为冷路径（PR #2168 偏离记录 11）。
 
 ## 4. 20 并发（`/api/v1/runs`）
 
