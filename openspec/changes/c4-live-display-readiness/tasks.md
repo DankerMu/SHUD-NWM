@@ -20,12 +20,12 @@ Width exception: multi-path - 同一接受链的 browser/RBAC/filesystem 故障�
 - [x] 3.3 C4 lane/owner 测试：双源成功、multi-stage jobs 成功；loading 等待、source error/权限/runtime/required response 失败、headers-only/body/evaluate/quiet deadline、正常 abort 与 required failure 分流、Slurm/非 GET 控制请求均以预期 terminal 状态结束。
 - [x] 3.4 C4 publisher/binder + river-click sibling：symlink/parent swap/nonregular/nlink/权限/并发/已有目标/读回变化/oversize/depth/JSON/UTF-8/原生错误与 FD 覆盖，旧目标无覆盖；C4 输入/bracket/POSIX facts mismatch 拒绝。交付 frozen-SHA 见 3.1/4.1；#1895 G0/C3 的 reviewed-SHA/C4 sha256 mismatch 拒绝仍是强制后续验收，不能声称由 C4 CLI 完成。
 - [x] 3.5 RBAC/store tests：readonly 双字段 viewer 可达、loading 10s 有界拒绝/晚到恢复；其它 runtime、monitoring/model-assets 权限不放宽；role/retry/cancel 控件不存在。
-- [ ] 3.6 C4 CLI/config/static contract：五输入缺失、role/mock override、普通 test discovery、typecheck include、schema-only CI 路由；Python selector CI hunk 只运行其针对性测试（后端 oracle 仍按仓库节点纪律，不冒充本地生产验证）。
+- [x] 3.6 C4 CLI/config/static contract：五输入缺失、role/mock override、普通 test discovery、typecheck include、schema-only CI 路由；Python selector CI hunk 在 PR #2126 run `34174843099` 执行 `tests/test_select_ci_tests.py` 的 593 项断言通过（`evidence/ci-selector.md`），不是 collect-only 冒烟。后端 oracle 仍按仓库节点纪律，不冒充本地生产验证。
 - [x] 3.7 `openspec validate c4-live-display-readiness --strict --no-interactive`、改动 Python 文件 Ruff 与 `git diff --check`；与 CI 相同命令每个仅执行一次。新行为 red-proof 不使用 stash/reset/checkout；缺历史输出如实记录，由 implementer 给安全隔离 mutant proof。
 
 ## 4. Reviewed delivery
 
-- [ ] 4.1 含实际切片提交的独立 bounded comprehensive review/verdict ledger、最终 Gap Sweep、exact branch tip/CI/oracle integrity。
+- [ ] 4.1 含实际切片提交的独立 bounded comprehensive review/verdict ledger与最终 Gap Sweep已完成（`evidence/review/`）；等待最终证据提交 push 后的 exact branch tip/CI/oracle integrity，未满足前保持未勾。
 - [ ] 4.2 中文 PR/工作说明与偏离记录；merge 后单独 accountability，不关闭 #1895/#1891，不勾其 live tasks。
 
 ## Evidence boundary
