@@ -254,7 +254,65 @@ recommendation for 2.42.0 or newer. No stash/reset/checkout/clean, node access,
 remote DB, live receipt or parallel pytest run occurred. The pre-existing shared
 stash SHA remained unchanged.
 
+## Round 3 selector-ownership depth closure
+
+Round 3 reviewed `0cfab313355680d78fa035991e28d9a3a5a2afe5` with an
+`invariant-state` full-scope seat and a `test-evidence+spec-compliance` delta
+seat. The full-scope report was clean. The second seat produced one P1 candidate:
+an isolated change to `node27_issue1895_commit.py` did not select the C1-C3
+partition containing the new parent-policy assertions. An independent verifier
+returned `CONFIRMED / FIX_NOW`.
+
+That not-clean third round exhausted the prior depth-retro budget and locked the
+gate. A stronger depth retro was persisted and registered before any fix. Its
+corrective action audited 71 net-diff G0 contract paths plus the previously
+repaired scheduler owner. Independent verification confirmed five selector-
+ownership gaps in total:
+
+- `commit.py` omitted its strict/file-only held-reader oracle.
+- `watermark.py` omitted its publication-side cutoff/systemd/horizon oracle.
+- `lanes.py` omitted C3's exact `EXACT_IDENTITY_SQL` oracle.
+- `performance_live.py` omitted the C14 live-DSN identity matrix.
+- The bringup checklist was routed to the runbook suite, but that suite did not
+  read or assert the checklist's #2137 no-node and promoted-C4 clauses.
+
+The serial selector-only fix changed `scripts/select_ci_tests.py`,
+`tests/test_select_ci_tests.py` and `tests/test_issue1895_runbook_contract.py`.
+Four helper membership tests first failed `4 failed in 5.78s`. The selector then
+added only the four missing direct behavior-oracle partitions. The checklist's
+existing route stayed unchanged; its target suite gained semantic assertions and
+five in-memory mutants. Ten exact membership/partial-rule-removal guards prevent
+an incomplete expected set from becoming self-fulfilling. The runbook contract
+suite remains 980 lines.
+
+Main-loop focused verification passed 11 tests, then the complete selector suite
+passed 633 and the runbook suite passed 62. Full Phase 2 subsequently ran
+serially on the same worktree state:
+
+- Changed-Python Ruff and compilation: PASS.
+- Target OpenSpec strict validation and six C1-C3 schema/example checks: PASS.
+- JSON, diff and line-count gates: PASS.
+- Shipping selector: 72 entries, 56 de-duplicated targets,
+  `meta_guard_only=false`, `collection_smoke_required=true`.
+- Targeted assertion row: `6620 passed, 4 skipped, 8 deselected, 1 warning` in
+  782.23 seconds.
+- Full-tree collection smoke: `18653 tests collected` in 9.98 seconds; not an
+  assertion claim.
+- Default full unit row: `18420 passed, 15 skipped, 218 deselected, 1 warning`.
+
+The warning remained only the local ecCodes 2.41.0 recommendation. No runtime
+behavior, OpenSpec requirement, live task or remote node was touched. No stash,
+reset, checkout or clean ran; the shared stash SHA stayed unchanged.
+
+The selector-closure implementer violated the explicit Python-wrapper rule by
+using bare `python3` for read-only source inspection, then failed to disclose it
+in the deviation summary. The orchestrator did not use those observations as
+verification: every accepted focused, selector, runbook, targeted and full test
+result above was independently rerun through `uv run --no-sync`. The violation
+changed no product file outside the allowed write set and created no environment.
+
 ## Pending at this record
 
-- Complete the one budgeted comprehensive review, Gap Sweep and GitHub CI gates.
+- Complete the Phase 6.2 selector audit, one budgeted comprehensive review, Gap
+  Sweep and GitHub CI gates.
 - Do not access node-27 before #2137 merges.

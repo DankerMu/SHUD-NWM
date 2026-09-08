@@ -137,9 +137,7 @@ def _section_prose() -> str:
     return text
 
 
-# ---------------------------------------------------------------------------
 # Placement and gate order
-# ---------------------------------------------------------------------------
 
 
 def test_section_sits_after_the_1894_contract_and_before_timer_cadence() -> None:
@@ -168,9 +166,7 @@ def test_each_gate_names_its_blocking_contract_and_a_stop_condition() -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # Docker fence
-# ---------------------------------------------------------------------------
 
 
 def test_section_has_no_docker_run_in_any_fence() -> None:
@@ -201,9 +197,7 @@ def test_section_names_the_historical_recipe_as_forbidden_entrypoint() -> None:
     assert "docker run -d" in text[start : text.index("### 4.4", start)]
 
 
-# ---------------------------------------------------------------------------
 # Identity lanes
-# ---------------------------------------------------------------------------
 
 
 def test_identity_observer_covers_both_lanes_with_distinct_formats() -> None:
@@ -236,9 +230,7 @@ def test_identity_observation_runs_before_any_cold_bind_mutation() -> None:
     assert installer_observe < dry_run
 
 
-# ---------------------------------------------------------------------------
 # No tautologies / no placeholder binders / no historical hard-code
-# ---------------------------------------------------------------------------
 
 
 def test_no_tautological_assertions_or_placeholder_binders() -> None:
@@ -272,9 +264,7 @@ def test_fresh_numeric_user_uses_the_shipping_parser_and_exact_inspect_format() 
         assert "{{.Config.User}}" not in body.replace(INSPECT_FORMAT, "")
 
 
-# ---------------------------------------------------------------------------
 # Installer argv / root evidence contract
-# ---------------------------------------------------------------------------
 
 
 def test_installer_argv_carries_the_exact_root_evidence_contract() -> None:
@@ -329,9 +319,7 @@ def test_g5_recaptures_evidence_before_enforce() -> None:
     assert "INSTALL_ARGS=(" in g5[g5.index("Then the single enforce invocation") :]
 
 
-# ---------------------------------------------------------------------------
 # Census artifact contract (real schema)
-# ---------------------------------------------------------------------------
 
 
 def test_census_artifact_uses_real_top_level_and_config_nested_fields() -> None:
@@ -471,9 +459,7 @@ def test_current_run_g1_g3_g4_g5_g6_g8_fences_use_held_helpers() -> None:
     assert "scripts/node27_issue1895_post_target_observe.py" in g8
 
 
-# ---------------------------------------------------------------------------
 # Isolated oracle: real probe schema tokens
-# ---------------------------------------------------------------------------
 
 
 def test_oracle_uses_shipping_probe_parser_and_owned_unique_identity() -> None:
@@ -510,9 +496,7 @@ def test_g3_readonly_checks_are_machine_asserted() -> None:
     assert "node27_external_contract_snapshot.py --check" in g3
 
 
-# ---------------------------------------------------------------------------
 # Installer receipts
-# ---------------------------------------------------------------------------
 
 
 def test_installer_dry_run_receipt_asserts_mode_outcome_bracket_and_freshness() -> None:
@@ -570,9 +554,7 @@ def test_installer_rollback_legal_only_before_terminal_via_reconcile() -> None:
         assert "groups_moved" not in body, "groups_moved read inside a fence"
 
 
-# ---------------------------------------------------------------------------
 # Runner receipts, environment, one-group-at-a-time
-# ---------------------------------------------------------------------------
 
 
 def test_runner_receipt_requires_fresh_migrated_and_one_per_receipt() -> None:
@@ -651,9 +633,7 @@ def test_runner_fence_has_no_database_url_in_argv() -> None:
             assert "--database-url" not in body, f"{gate} passes a DSN by argv"
 
 
-# ---------------------------------------------------------------------------
 # G7: plan gates, display/publication families
-# ---------------------------------------------------------------------------
 
 
 def test_plan_gates_do_not_ban_decompresschunk_wholesale() -> None:
@@ -764,9 +744,7 @@ def test_g7_plan_binder_does_real_all_chunk_comparison() -> None:
     assert "assert not chunks" not in g7
 
 
-# ---------------------------------------------------------------------------
 # G8: restore semantics and natural tick evidence
-# ---------------------------------------------------------------------------
 
 
 def test_g8_restores_by_recorded_unit_file_state_without_enable_now() -> None:
@@ -891,9 +869,7 @@ def test_g8_systemd_facts_output_is_exclusive_private_and_checked() -> None:
     assert 'test ! -e "$SERVICE_SHOW"' in g8
 
 
-# ---------------------------------------------------------------------------
 # Closure order
-# ---------------------------------------------------------------------------
 
 
 def test_closure_order_is_merge_then_close_then_archive() -> None:
@@ -908,9 +884,7 @@ def test_closure_order_is_merge_then_close_then_archive() -> None:
     assert "strict" in lower
 
 
-# ---------------------------------------------------------------------------
 # Rollback table matches the shipping three-state fixture
-# ---------------------------------------------------------------------------
 
 
 def test_rollback_table_matches_three_state_contract() -> None:
@@ -946,9 +920,7 @@ def test_rollback_table_matches_three_state_contract() -> None:
         assert "groups_moved" not in body
 
 
-# ---------------------------------------------------------------------------
 # Existing contract must not regress
-# ---------------------------------------------------------------------------
 
 
 def test_runbook_keeps_timeout_budget_and_env_contract() -> None:
@@ -980,3 +952,29 @@ def test_no_ssh_paste_is_mistaken_for_local_execution() -> None:
     assert "bash -s <<'REMOTE'" in g0
     assert "heredoc body is executed" in g0
     assert "never in a local shell" in g0 or "Nothing in the heredoc body runs locally" in g0
+
+
+def _assert_bringup_checklist_g0_c4_contract(text: str) -> None:
+    prose = _norm(text)
+    assert re.search(r"#2137.{0,80}不访问\s*node-27", prose)
+    assert re.search(r"#2137.{0,80}不产.{0,24}live receipt", prose)
+    assert re.search(r"#2137.{0,40}先行合并", prose)
+    assert re.search(r"前置合并后.{0,48}#1895.{0,48}(node-27|27 实机)", prose)
+    assert re.search(r"C4.{0,80}只执行.{0,80}test:e2e:live-c4-display", prose)
+    assert re.search(r"e2e/monitoring\.spec\.ts.{0,24}不是 C4.{0,12}替代", prose)
+
+
+def test_bringup_checklist_requires_2137_merge_before_1895_and_c4_promoted_lane() -> None:
+    text = (REPO_ROOT / "docs/runbooks/node-27-bringup-checklist.md").read_text(encoding="utf-8")
+    _assert_bringup_checklist_g0_c4_contract(text)
+    for old, new in (
+        ("#2137 不访问 node-27，也不产 live receipt", "#2137 访问 node-27，也产 live receipt"),
+        ("先行合并", "后行合并"),
+        ("只有该前置合并后，#1895", "即使未合并，#1895"),
+        ("test:e2e:live-c4-display", "e2e/monitoring.spec.ts"),
+        ("不是 C4", "是 C4"),
+    ):
+        mutant = text.replace(old, new, 1)
+        assert mutant != text, old
+        with pytest.raises(AssertionError):
+            _assert_bringup_checklist_g0_c4_contract(mutant)

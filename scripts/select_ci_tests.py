@@ -2861,6 +2861,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_issue1895_lanes.py",
         (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
             "tests/test_issue1895_readiness_performance.py",
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
             "tests/test_issue1895_readiness_performance_publication.py",
@@ -2940,6 +2941,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_issue1895_commit.py",
         (
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
             "tests/test_issue1895_readiness_performance.py",
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
             "tests/test_issue1895_readiness_performance_publication.py",
@@ -2958,6 +2960,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_issue1895_performance_live.py",
         (
+            "tests/test_issue1895_readiness_c14.py",
             "tests/test_issue1895_readiness_performance.py",
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
             "tests/test_issue1895_readiness_performance_publication.py",
@@ -3062,7 +3065,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/node27_issue1895_watermark.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
     ),
     PathTestRule(
         "scripts/node27_issue1895_engine.py",

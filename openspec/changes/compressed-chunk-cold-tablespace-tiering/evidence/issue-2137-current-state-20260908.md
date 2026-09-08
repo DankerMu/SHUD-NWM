@@ -32,17 +32,19 @@ It is a prerequisite for #1895, not a replacement. It does not access node-27/no
   closure, they passed 6,607 and 18,138 assertions.
 - Post-master verification at
   `9aab37209ac104002a75ea03776bad9ab07ae2a5` kept the shipping selector at 72
-  entries and ran 6,609 targeted assertions. Full-tree collection found 18,642
-  tests, and the default full unit row passed 18,409 assertions. This current-
-  state addendum supersedes stale status statements in the 2026-09-07 historical
-  records without deleting their process disclosures.
+  entries and ran 6,609 targeted assertions. Round 3 then exposed one confirmed
+  shared-helper ownership gap. Its mandatory inventory checked 72 G0-related
+  paths and confirmed four sibling gaps. The selector-only closure added direct
+  behavior-oracle routes and partial-rule mutants; its serial Phase 2 ran 6,620
+  targeted assertions, collected 18,653 tests and passed 18,420 default-unit
+  assertions. This addendum supersedes stale status statements in the 2026-09-07
+  historical records without deleting their process disclosures.
 
 ## Remaining gate
 
-The checklist ownership wording, focused fixture/alignment review, target OpenSpec
-strict validation, latest-master integration, round-1 verification/fix closure
-and post-fix local validation are complete. Round 2 triggered a registered
-path-safety depth retro; its corrective action and local verification are now
-complete. One budgeted comprehensive round, Gap Sweep and GitHub CI remain.
-Tasks 4.1-4.8 remain untouched until #2137 merges;
-no node-27 access is permitted before then.
+The checklist ownership wording, fixture/alignment review, target OpenSpec strict
+validation, latest-master integration and three review/fix rounds are complete.
+Round 2's path-safety depth closure and round 3's selector-ownership depth closure
+both have green local Phase 2 evidence. A clean Phase 6.2 selector audit, the one
+budgeted comprehensive round, Gap Sweep and GitHub CI remain. Tasks 4.1-4.8 stay
+untouched until #2137 merges; no node-27 access is permitted before then.

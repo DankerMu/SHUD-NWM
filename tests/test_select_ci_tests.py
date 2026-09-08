@@ -11552,6 +11552,190 @@ def test_issue1895_performance_live_owner_rule_reds_when_removed(
         )
 
 
+ISSUE1895_COMMIT_OWNER = "packages/common/node27_issue1895_commit.py"
+ISSUE1895_WATERMARK_OWNER = "packages/common/node27_issue1895_watermark.py"
+ISSUE1895_LANES_OWNER = "packages/common/node27_issue1895_lanes.py"
+ISSUE1895_PERFORMANCE_LIVE_OWNER = "packages/common/node27_issue1895_performance_live.py"
+ISSUE1895_BRINGUP_CHECKLIST = "docs/runbooks/node-27-bringup-checklist.md"
+ISSUE1895_PERFORMANCE_CONTRACT_TESTS: tuple[str, ...] = (
+    "tests/test_issue1895_readiness_performance.py",
+    *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+    "tests/test_issue1895_readiness_performance_publication.py",
+    "tests/test_issue1895_runbook_contract.py",
+)
+ISSUE1895_COMMIT_REQUIRED_TESTS: tuple[str, ...] = (
+    *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    *ISSUE1895_PERFORMANCE_CONTRACT_TESTS,
+)
+ISSUE1895_WATERMARK_REQUIRED_TESTS: tuple[str, ...] = (
+    *ISSUE1895_READINESS_STORAGE_TESTS,
+    "tests/test_issue1895_runbook_contract.py",
+)
+ISSUE1895_LANES_REQUIRED_TESTS: tuple[str, ...] = (
+    *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    *ISSUE1895_PERFORMANCE_CONTRACT_TESTS,
+)
+ISSUE1895_PERFORMANCE_LIVE_REQUIRED_TESTS: tuple[str, ...] = (
+    "tests/test_issue1895_readiness_c14.py",
+    *ISSUE1895_PERFORMANCE_CONTRACT_TESTS,
+)
+ISSUE1895_CHECKLIST_REQUIRED_TESTS: tuple[str, ...] = (
+    *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    "tests/test_issue1895_readiness_c14.py",
+    "tests/test_issue1895_runbook_contract.py",
+)
+
+
+def _issue1895_path_rule(pattern: str) -> PathTestRule:
+    matching = [rule for rule in PATH_TEST_RULES if rule.pattern == pattern]
+    assert len(matching) == 1, f"expected exactly one PATH rule for {pattern}, got {len(matching)}"
+    return matching[0]
+
+
+def _issue1895_missing_partitions(
+    owner: str,
+    required: Sequence[str],
+    selected: Iterable[str] | None = None,
+) -> list[str]:
+    chosen = set(select_tests([owner], repo_root=Path("."))) if selected is None else set(selected)
+    return [f"{owner}: missing behavior-owning partition {suite}" for suite in required if suite not in chosen]
+
+
+def _issue1895_select_without_owner_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+    drop: Sequence[str],
+) -> set[str]:
+    from scripts import select_ci_tests
+
+    rule = _issue1895_path_rule(owner)
+    drop_set = set(drop)
+    for suite in drop:
+        assert suite in rule.tests, f"{owner} PATH rule is missing {suite}; partial removal cannot prove ownership"
+    mutant = replace(rule, tests=tuple(target for target in rule.tests if target not in drop_set))
+    monkeypatch.setattr(
+        select_ci_tests,
+        "PATH_TEST_RULES",
+        tuple(mutant if existing.pattern == owner else existing for existing in PATH_TEST_RULES),
+    )
+    return set(select_tests([owner], repo_root=Path(".")))
+
+
+def test_issue1895_commit_owner_selects_c1_c3_held_reader_and_performance_partitions() -> None:
+    missing = _issue1895_missing_partitions(ISSUE1895_COMMIT_OWNER, ISSUE1895_COMMIT_REQUIRED_TESTS)
+    assert not missing, "commit.py lost C1-C3 held-reader or performance partitions:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_commit_owner_rule_reds_when_only_c1_c3_tuple_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = _issue1895_select_without_owner_targets(
+        monkeypatch,
+        ISSUE1895_COMMIT_OWNER,
+        ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    )
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_COMMIT_OWNER,
+        ISSUE1895_COMMIT_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any("test_issue1895_readiness_c1_c2_c3.py" in item for item in missing), missing
+    assert any("test_issue1895_readiness_c3.py" in item for item in missing), missing
+    assert set(ISSUE1895_PERFORMANCE_CONTRACT_TESTS) <= selected
+
+
+def test_issue1895_watermark_owner_selects_both_storage_halves_and_runbook() -> None:
+    missing = _issue1895_missing_partitions(ISSUE1895_WATERMARK_OWNER, ISSUE1895_WATERMARK_REQUIRED_TESTS)
+    assert not missing, "watermark.py isolated selection lost a storage half or runbook:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_watermark_owner_rule_reds_when_only_storage_publication_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = "tests/test_issue1895_readiness_storage_publication.py"
+    selected = _issue1895_select_without_owner_targets(monkeypatch, ISSUE1895_WATERMARK_OWNER, (publication,))
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_WATERMARK_OWNER,
+        ISSUE1895_WATERMARK_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any(publication in item for item in missing), missing
+    assert "tests/test_issue1895_readiness_storage.py" in selected
+    assert "tests/test_issue1895_runbook_contract.py" in selected
+
+
+def test_issue1895_lanes_owner_selects_c1_c3_identity_sql_and_performance_partitions() -> None:
+    missing = _issue1895_missing_partitions(ISSUE1895_LANES_OWNER, ISSUE1895_LANES_REQUIRED_TESTS)
+    assert not missing, "lanes.py lost C1-C3 identity SQL or performance partitions:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_lanes_owner_rule_reds_when_only_c1_c3_tuple_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = _issue1895_select_without_owner_targets(
+        monkeypatch,
+        ISSUE1895_LANES_OWNER,
+        ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    )
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_LANES_OWNER,
+        ISSUE1895_LANES_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any("test_issue1895_readiness_c3.py" in item for item in missing), missing
+    assert set(ISSUE1895_PERFORMANCE_CONTRACT_TESTS) <= selected
+
+
+def test_issue1895_performance_live_owner_selects_c14_live_dsn_and_performance_partitions() -> None:
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_PERFORMANCE_LIVE_OWNER,
+        ISSUE1895_PERFORMANCE_LIVE_REQUIRED_TESTS,
+    )
+    assert not missing, "performance_live.py lost c14 live DSN or performance partitions:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_performance_live_owner_rule_reds_when_only_c14_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c14 = "tests/test_issue1895_readiness_c14.py"
+    selected = _issue1895_select_without_owner_targets(
+        monkeypatch,
+        ISSUE1895_PERFORMANCE_LIVE_OWNER,
+        (c14,),
+    )
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_PERFORMANCE_LIVE_OWNER,
+        ISSUE1895_PERFORMANCE_LIVE_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any(c14 in item for item in missing), missing
+    assert set(ISSUE1895_PERFORMANCE_CONTRACT_TESTS) <= selected
+
+
+def test_issue1895_bringup_checklist_selects_runbook_contract_reader() -> None:
+    missing = _issue1895_missing_partitions(ISSUE1895_BRINGUP_CHECKLIST, ISSUE1895_CHECKLIST_REQUIRED_TESTS)
+    assert not missing, "bringup checklist lost its runbook-contract reader:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_bringup_checklist_rule_reds_when_only_runbook_contract_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runbook = "tests/test_issue1895_runbook_contract.py"
+    selected = _issue1895_select_without_owner_targets(
+        monkeypatch,
+        ISSUE1895_BRINGUP_CHECKLIST,
+        (runbook,),
+    )
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_BRINGUP_CHECKLIST,
+        ISSUE1895_CHECKLIST_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any(runbook in item for item in missing), missing
+    assert set(ISSUE1895_READINESS_C1_C2_C3_TESTS) <= selected
+    assert "tests/test_issue1895_readiness_c14.py" in selected
+
+
 def test_issue1895_census_policy_owner_selects_both_census_halves_and_contract() -> None:
     # #1895 task 4.0 structural split: the shared capacity-policy module has no
     # same-name suite, so without its own PATH rule a policy-only change would
