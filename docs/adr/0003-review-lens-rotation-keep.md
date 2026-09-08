@@ -3901,3 +3901,18 @@ attribute either way.
 
 Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
 maintainer override.
+
+## 2026-09-08 revisit — PR #2161 (#2114, fixture `high`)
+
+The audit flagged DECIDABLE again with `core=225`, `rotated=269`, and `phase=53`
+over 191 multi-round merged PRs. PR #2161 adds one denominator but no
+later-round attribution signal: its only net catch came from Round 1
+correctness (the unclosed-scalar wrapper boundary), Round 2's pinned
+correctness/invariant and test-evidence/spec seats were clean, and the Phase 7
+Gap Sweep was also clean.
+
+This sample therefore cannot distinguish rotation from an already-complete fix;
+it changes none of the three catch counters. Decision unchanged: **keep
+rotation**. The cumulative rotated count still exceeds core, while the existing
+measurement caveats remain load-bearing. Next revisit on the audit's next flag
+or a maintainer override.
