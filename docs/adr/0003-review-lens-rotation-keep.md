@@ -4217,3 +4217,11 @@ A new keep/cut decision is deferred: this single-round sample cannot resolve
 the measurement limitations already recorded above, and the user authorized
 issue delivery/merge rather than a review-policy change. The existing recorded
 keep decision remains in force; no reviewer seat or gate is narrowed.
+
+## Revisit — PR #2218 (issue #2148), 2026-09-09
+
+The audit reports 196 multi-round PRs and unchanged later-round attribution:
+core=235, rotated=270, phase=53, skipped=15. PR #2218 was another single clean
+round with zero candidates. As with PR #2215, defer a new human keep/cut call:
+there is no new multi-round evidence to resolve the recorded measurement
+limitations. The existing keep decision and seat policy remain unchanged.
