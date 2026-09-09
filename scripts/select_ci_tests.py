@@ -2537,11 +2537,106 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_node27_timeseries_retention.py",),
     ),
     PathTestRule(
+        # #2180: the glob row above gives every unit the sibling-lane pin, but
+        # that pin asserts ONLY the `StandardError=append:…systemd.err` lane
+        # set -- it never reads this unit's directives, so before this row an
+        # autopipe-unit-only diff ran zero assertions about the unit's body.
+        # `tests/test_node27_autopipeline_preflight.py:19` resolves this exact
+        # path and `:1111-1119` asserts the `scripts/node27_autopipe_cron.sh`
+        # ExecStart, `NODE27_AUTOPIPE_BOOTSTRAP_LOG=…/bootstrap.log`, and that
+        # `infra/env/display.env` is absent (the data-plane / display-plane
+        # boundary). Matches accumulate (`selected.update`, no `stop_on_match`),
+        # so the pin suite arrives from the glob row and is deliberately not
+        # repeated here.
+        "infra/systemd/nhms-node27-autopipe.service",
+        ("tests/test_node27_autopipeline_preflight.py",),
+    ),
+    PathTestRule(
+        # #2180: `tests/test_node27_download_cycles.py:18` resolves this exact
+        # path and `:495` asserts the `scripts/node27_download_once.sh`
+        # ExecStart -- swapping the wrapper the unit runs is invisible to the
+        # lane pin. Pin suite comes from the glob row by accumulation, not
+        # repeated here.
+        "infra/systemd/nhms-node27-download.service",
+        ("tests/test_node27_download_cycles.py",),
+    ),
+    PathTestRule(
+        # #2180: `tests/test_node27_frontier_stall_alert.py:1427` resolves this
+        # exact path and `:1553-1562` asserts
+        # `Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1`,
+        # `EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env` and
+        # `TimeoutStartSec=900` -- deleting the sentinel `Environment=` line is
+        # invisible to the lane pin. Pin suite comes from the glob row by
+        # accumulation, not repeated here.
+        "infra/systemd/nhms-node27-frontier-alert.service",
+        ("tests/test_node27_frontier_stall_alert.py",),
+    ),
+    PathTestRule(
+        # #2180: `tests/test_node27_raw_retention.py:317-322` resolves this
+        # exact path and `:325-341` asserts
+        # `ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-raw-retention-logs`,
+        # `StandardOutput=append:…/systemd.log`, and that the `ExecStartPre=`
+        # line precedes `ExecStart=` (reordering them breaks the log-dir
+        # bootstrap and the lane pin cannot see it). Pin suite comes from the
+        # glob row by accumulation, not repeated here.
+        "infra/systemd/nhms-node27-raw-retention.service",
+        ("tests/test_node27_raw_retention.py",),
+    ),
+    PathTestRule(
+        # #2180: two suites read this unit by path.
+        # `tests/test_node27_timeseries_compression.py:31` + `:1964-1976`
+        # asserts the supervisor `--enforce` invocation and its
+        # `--run-plan-path` / `--ledger-path` / `--receipt-path` /
+        # `--finalizer-state-path` / `--wall-seconds 900` options, the
+        # `ExecStopPost=` + `--finalize-only` finalizer lane and
+        # `TimeoutStartSec=920`;
+        # `tests/test_node27_timeseries_compression_supervisor.py:1233-1238`
+        # asserts the
+        # `EnvironmentFile=/home/nwm/NWM/infra/env/node27-timeseries-compression-replay.env`
+        # digest pin. Both are targets. Pin suite comes from the glob row by
+        # accumulation, not repeated here.
+        "infra/systemd/nhms-node27-timeseries-compression-replay.service",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+        ),
+    ),
+    PathTestRule(
         # #2032: the same suite parses `OnCalendar=*-*-* 04:05:00 UTC` and
         # `Persistent=true` out of the timer, so the schedule is assertable at
         # PR time rather than at `systemctl --user list-timers`.
         "infra/systemd/nhms-node27-mvt-cache-retention.timer",
         ("tests/test_node27_mvt_cache_retention.py",),
+    ),
+    PathTestRule(
+        # #2180: same shape as the mvt-cache-retention `.timer` row above and
+        # the same zero-selection hole -- `infra/**` is not a backend python
+        # path, `_is_backend_shell_path` is scoped to `scripts/**.sh`, and the
+        # `#2173` pin glob is `*.service`, so a timer-only diff matched NOTHING
+        # and CI degraded to --collect-only. The suite really reads this file:
+        # `tests/test_node27_download_cycles.py:19` resolves the timer by path
+        # and `:496` asserts `OnUnitActiveSec=30min`, so lengthening the tick
+        # reds at PR time instead of at `systemctl --user list-timers`.
+        "infra/systemd/nhms-node27-download.timer",
+        ("tests/test_node27_download_cycles.py",),
+    ),
+    PathTestRule(
+        # #2180: two suites read this timer by path and assert its schedule --
+        # `tests/test_node27_cold_residency.py:118-119` and
+        # `tests/test_node27_timeseries_compression.py:1982-1985` both pin
+        # `OnCalendar=*-*-* 04:25:00 UTC`, and the latter also pins
+        # `Unit=nhms-node27-timeseries-compression.service`. Both are targets so
+        # the schedule cannot drift past either reader.
+        # `tests/test_node27_timeseries_compression_live_evidence.py:712-716`
+        # and `..._capture.py:134-139` only `read_bytes` this timer to copy it
+        # into a fixture and assert nothing about its content -- not targets.
+        # The `#2173` pin glob is `*.service`, so this row is the whole
+        # selection for a timer-only diff.
+        "infra/systemd/nhms-node27-timeseries-compression.timer",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_compression.py",
+        ),
     ),
     PathTestRule(
         "schemas/timeseries_compression_receipt.schema.json",
