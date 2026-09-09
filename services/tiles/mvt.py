@@ -208,6 +208,29 @@ class ValidTimeDiscovery:
         }
 
 
+class MvtTimeOutOfRangeError(ValueError):
+    """A tile instant whose normalization to UTC leaves `datetime`'s range.
+
+    CPython's `datetime.astimezone` raises `OverflowError` -- NOT `ValueError` --
+    when the shift would carry the value past `datetime.min` / `datetime.max`.
+    `9999-12-31T23:59:59-08:00` and `0001-01-01T00:00:00+08:00` are well-formed
+    RFC3339, so every string-shape gate passes them, and nothing on the tile path
+    caught `OverflowError`: both legacy tile routes answered HTTP 500 for them
+    (measured on the public reverse proxy, 2026-09-08).
+
+    `canonical_mvt_time` raises this instead, and never a sentinel: returning the
+    raw text would push a non-canonical spelling into `cache_key` and into the
+    cache-row identity comparison in `_read_cache`, minting a cache identity for
+    an instant that has no canonical spelling -- a worse, and invisible, failure
+    than the 500 it replaces.
+
+    `ValueError` is the base class so any caller that already treats bad time text
+    as a `ValueError` keeps working; the subclass exists so the route layer can
+    catch precisely. This module deliberately knows nothing about HTTP: the 422
+    translation lives in `apps/api/routes/hydro_display.py`.
+    """
+
+
 class TileError(RuntimeError):
     def __init__(
         self,
@@ -2866,15 +2889,33 @@ def canonical_mvt_time(value: Any) -> str | None:
         return None
     if isinstance(value, datetime):
         dt = value if value.tzinfo else value.replace(tzinfo=UTC)
-        return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        return _canonical_utc_text(dt, value)
     text_value = str(value)
     if " " in text_value and "T" not in text_value:
         text_value = text_value.replace(" ", "T", 1)
     parsed = _parse_iso_datetime(text_value)
     if parsed is not None:
         dt = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-        return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+        return _canonical_utc_text(dt, text_value)
     return text_value
+
+
+def _canonical_utc_text(dt: datetime, original: Any) -> str:
+    """The one guarded `.astimezone(UTC)` both `canonical_mvt_time` branches use.
+
+    One implementation rather than two copies of the same `try`: the string
+    branch is reached by `_read_cache`'s cache-row comparison with raw column
+    values, and the `datetime` branch by every route, so they must agree on the
+    failure type as well as on the spelling. `ValueError` is caught alongside
+    `OverflowError` because `astimezone` may raise either, and both mean the same
+    thing here: this value has no canonical UTC spelling.
+    """
+    try:
+        return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    except (OverflowError, ValueError) as exc:
+        raise MvtTimeOutOfRangeError(
+            f"Tile instant cannot be normalized to UTC: {original!r}"
+        ) from exc
 
 
 def _format_time(value: Any) -> str:

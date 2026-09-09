@@ -1962,3 +1962,87 @@ def test_display_readonly_index_cache_is_keyed_per_cycle_and_never_poisoned(
     # loader (and therefore the mirror walk) is not re-entered.
     assert len(loads) == 2
 
+
+
+# ---------------------------------------------------------------------------
+# #2033 blast-radius pins. `_require_seconds_precision_instant` is extracted in
+# `hydro_display.py` so three tile routes can share one range check; these two
+# routes are its OTHER callers, and `apps/api/routes/precip.py` is deliberately
+# not edited (design D4b). Every assertion below therefore describes behavior
+# that must be byte-identical before and after that extraction.
+# ---------------------------------------------------------------------------
+
+# Well-formed RFC3339 (so `Rfc3339Instant` passes it) whose shift to UTC leaves
+# `datetime.max` / `datetime.min`.
+_UNREPRESENTABLE_INSTANTS = ("9999-12-31T23:59:59-08:00", "0001-01-01T00:00:00%2B08:00")
+_UNREPRESENTABLE_INSTANT_MESSAGE = "Tile time instants must be representable in UTC."
+
+
+@pytest.mark.parametrize("instant", _UNREPRESENTABLE_INSTANTS)
+@pytest.mark.parametrize("route", ["index", "png-cycle", "png-valid-time"])
+def test_precip_routes_keep_their_unrepresentable_instant_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, instant: str
+) -> None:
+    """Both fields on both routes still 422 with the SHARED error body, no filesystem probe."""
+    mirror = tmp_path / "mirror"
+    cache = tmp_path / "cache"
+    _complete_ifs_mirror(mirror)
+    client = _precip_client(monkeypatch, mirror, cache)
+    if route == "index":
+        url = f"/api/v1/precip/ifs/{instant}/index"
+    elif route == "png-cycle":
+        url = f"/api/v1/precip/ifs/{instant}/2026-09-02T15:00:00Z.png"
+    else:
+        url = f"/api/v1/precip/ifs/2026-09-02T12:00:00Z/{instant}.png"
+    field = "valid_time" if route == "png-valid-time" else "cycle"
+
+    with monkeypatch.context() as patch:
+        counter = _FsCounter(patch, mirror)
+        response = client.get(url)
+
+    assert response.status_code == 422, response.text
+    error = response.json()["error"]
+    assert error["code"] == "VALIDATION_ERROR", response.text
+    assert error["message"] == _UNREPRESENTABLE_INSTANT_MESSAGE, response.text
+    # The whole `details` body, not just the code: the extraction must not move
+    # the field name, the echoed spelling, or the format hint.
+    assert error["details"] == {
+        field: instant.replace("%2B", "+"),
+        "expected_format": "YYYY-MM-DDTHH:MM:SSZ",
+    }, response.text
+    assert counter.paths == []
+    assert not cache.exists()
+
+
+@pytest.mark.parametrize("route", ["index", "png"])
+def test_precip_routes_still_reject_a_half_hour_offset_instant_on_the_whole_hour_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """Design D4c: `_require_seconds_precision_instant`'s RETURN VALUE is the contract.
+
+    `2026-09-02T20:00:00+05:30` is 14:30 UTC. `_RFC3339_INSTANT_RE` accepts
+    half-hour offsets, so if the extracted range check handed back the caller's
+    ORIGINAL object instead of a UTC-normalized one, `_require_whole_hour_instant`
+    would read `.minute == 0` off the +05:30 spelling, let it through, and
+    `cycle_token` would floor it to hour 14 -- one instant parked under another
+    instant's cache identity. No error-path assertion would notice.
+    """
+    mirror = tmp_path / "mirror"
+    _complete_ifs_mirror(mirror)
+    client = _precip_client(monkeypatch, mirror, tmp_path / "cache")
+    half_hour = "2026-09-02T20:00:00%2B05:30"
+    url = (
+        f"/api/v1/precip/ifs/{half_hour}/index"
+        if route == "index"
+        else f"/api/v1/precip/ifs/{half_hour}/2026-09-02T15:00:00Z.png"
+    )
+
+    response = client.get(url)
+
+    assert response.status_code == 422, response.text
+    error = response.json()["error"]
+    assert error["code"] == "VALIDATION_ERROR", response.text
+    assert error["message"] == "Precipitation instants must fall on a whole hour.", response.text
+    # The canonical UTC spelling of the rejected value, not the +05:30 one: the
+    # details are rendered from the normalized return.
+    assert error["details"]["cycle"] == "2026-09-02T14:30:00Z", response.text
