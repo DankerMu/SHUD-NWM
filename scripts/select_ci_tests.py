@@ -1911,8 +1911,25 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # no broad rule, so before this entry a mirror/window/render/cache diff
         # selected only the same-name derivation (which finds nothing: there is
         # no tests/test_mirror.py) and reached the PR lane with zero assertions.
+        # #2122: PR #2117 made scripts/node27_mvt_prewarm.py:57 import
+        # services.precip.mirror.horizon_valid_times at module level, and
+        # tests/test_node27_mvt_prewarm.py:17 imports that script at module
+        # level, so the prewarm suite is a one-hop importer suite of this tree.
+        # It is the sole holder of the clamped-first-valid-time / PNG-horizon
+        # contract, asserted by
+        # test_a_clamped_first_valid_time_is_warmed_from_that_entry_not_from_the_cycle
+        # (referenced by case name, never by line range, per openspec/changes/
+        # display-v2-national-timeline-precip-overlay/tasks.md:548), and
+        # PRECIP_STEP_HOURS feeds that grid — before this target the PR lane
+        # could not reach that oracle at all. It is NOT the only suite a step
+        # flip reds: tests/test_precip_overlay.py, already selected by this
+        # rule, discriminates on the step too (measured 31 failed at step 6).
+        # The union is spelled in place rather than appended to
+        # PRECIP_SURFACE_TESTS so the shared tuple (and with it the
+        # apps/api/routes/precip.py rule below) does not inherit the prewarm
+        # suite: a route-only diff must not pay for it.
         "services/precip/**",
-        PRECIP_SURFACE_TESTS,
+        (*PRECIP_SURFACE_TESTS, "tests/test_node27_mvt_prewarm.py"),
     ),
     PathTestRule(
         # #2010: the two public routes. `apps/api/**` below buys the three broad
