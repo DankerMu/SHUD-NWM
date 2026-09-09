@@ -441,9 +441,72 @@ only manual resolutions are evidence-only gate-memory unions. The final Phase 7
 review is rerun on the final merge SHA before CI/merge so combined-tree
 compatibility is not inferred from the pre-integration review.
 
+## Phase 8 exact-tree probe failure and `ci-only` repair
+
+The second latest-master integration was committed at
+`6d71e1f0026901a2721b4a0b45e102ed7b639df4`. Its shipping selector remained
+byte-identical to the prior 73-entry selection and continued to report
+`meta_guard_only=false` and `collection_smoke_required=true`. Exact-tree static
+checks and a 18,930-item collection smoke passed, but the full targeted row
+found one failure:
+
+```text
+FAILED tests/test_select_ci_tests.py::test_probe_cleans_descendants_on_timeout
+AssertionError: descendant fixture did not record its child PID
+1 failed, 6664 passed, 12 skipped, 1 warning in 2407.52s
+```
+
+No full unit row was started while the cause was unknown. A diagnosis-only
+subagent traced the test-owned process fixture and confirmed a startup race:
+`_run_probe_script` began its two-second business timeout immediately after
+`Popen`, while the fixture still had to schedule a Python wrapper, launch the
+sleeping descendant, and write its PID. Under the heavily delayed forty-minute
+selector row, process-group cleanup could correctly return status 124 before
+the PID observation existed. Changing only the timeout constructed the exact
+state (`status=124` with no PID file); whenever a PID was recorded, bounded
+group cleanup removed the descendant. The fixture/helper originated in older
+master commit `4210186b`; shipping `select_ci_tests.py` has no process or PID
+behavior.
+
+The failure was classified as a Phase 8 `ci-only` test-harness repair. Only
+`tests/test_select_ci_tests.py` changed. The timeout fixture now closes its PID
+record and publishes an atomic ready sentinel before sleeping. A finite,
+independent startup wait observes that sentinel before the existing business
+timeout begins. Startup deadline or premature parent exit uses the existing
+whole-group bounded cleanup and returns named status 126; business timeout 124
+and undrainable-cleanup status 125 retain their meanings. The closed trusted-
+variant boundary remains and no arbitrary workflow payload or pathname can
+request a readiness wait.
+
+Three deterministic readiness tests first failed against the old helper:
+
+```text
+3 failed in 6.11s
+```
+
+They cover delayed readiness beyond the business timeout, never-ready startup,
+and premature exit. After the repair:
+
+- Readiness/business-timeout/startup-failure/success/drain matrix: `8 passed`.
+- Original timeout cleanup test repeated serially: 8/8 passed.
+- Complete selector suite: `664 passed`.
+- Exact shipping targeted assertion row: `6668 passed, 12 skipped, 1 warning`
+  in 669.72 seconds.
+- Full-tree collection smoke: `18933 tests collected`; import/syntax only.
+- Default full unit row: `18699 passed, 15 skipped, 219 deselected, 1 warning`
+  in 1687.21 seconds.
+- Scoped Ruff, py_compile and diff checks: PASS.
+
+The only warning remained the local ecCodes 2.41.0 recommendation for 2.42.0.
+No task-owned descendant remained. A selector pytest in another worktree was
+observed and left untouched. The repair changes no production selector,
+workflow, public contract, OpenSpec requirement, runtime behavior or test
+assertion meaning; it makes the existing cleanup oracle start from an
+observable ready state rather than a scheduling race.
+
 ## Pending at this record
 
-- Complete the latest-master merge commit, rerun final review on that exact SHA,
-  and complete GitHub CI and pre-merge evidence gates.
+- Commit the classified `ci-only` repair, rerun Phase 7 final review on the
+  exact resulting SHA, and complete GitHub CI and pre-merge evidence gates.
 - Do not access node-27 before #2137 merges. Task 4.0 remains unchecked until
   that merge; live tasks 4.1-4.8 remain unexecuted.

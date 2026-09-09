@@ -5766,13 +5766,66 @@ _TRUSTED_COLLECTION_VARIANTS: dict[str, Callable[[str], str]] = {
     # executable; must be command-not-found (status 127) in the closed PATH.
     "ambient_command": lambda run: "if true; then\n  unique_ambient_marker_xyz\nfi",
     # Controlled descendant cleanup on TIMEOUT — starts a background child,
-    # records its PID, then stays alive forever so the probe times out and the
-    # new process group (including the child) must be killed.
+    # closes its PID record, then publishes readiness before its long sleep.
+    # The process group (including the child) must be killed on timeout.
     "descendant_timeout": lambda run: (
-        "python -c 'import subprocess, os; "
-        'p = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"]); '
-        'open(os.environ["CI_PROBE_DESCENDANT_PID"],"w").write(str(p.pid))\'\n'
-        "python -c 'import time; time.sleep(300)'\n"
+        "python - <<'PY'\n"
+        "import os\n"
+        "import subprocess\n"
+        "import time\n"
+        'child = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"])\n'
+        'with open(os.environ["CI_PROBE_DESCENDANT_PID"], "w", encoding="utf-8") as pid_file:\n'
+        "    pid_file.write(str(child.pid))\n"
+        'ready_path = os.environ["CI_PROBE_DESCENDANT_READY"]\n'
+        'with open(ready_path + ".tmp", "w", encoding="utf-8") as ready_file:\n'
+        '    ready_file.write("ready")\n'
+        'os.replace(ready_path + ".tmp", ready_path)\n'
+        "time.sleep(300)\n"
+        "PY\n"
+    ),
+    # The deterministic readiness-clock regression delays the sentinel longer
+    # than its caller's business timeout. The delay is before readiness; the
+    # long sleep is only entered after both context-managed files are closed.
+    "descendant_delayed_ready_timeout": lambda run: (
+        "python - <<'PY'\n"
+        "import os\n"
+        "import subprocess\n"
+        "import time\n"
+        'child = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"])\n'
+        'with open(os.environ["CI_PROBE_DESCENDANT_PID"], "w", encoding="utf-8") as pid_file:\n'
+        "    pid_file.write(str(child.pid))\n"
+        "time.sleep(0.25)\n"
+        'ready_path = os.environ["CI_PROBE_DESCENDANT_READY"]\n'
+        'with open(ready_path + ".tmp", "w", encoding="utf-8") as ready_file:\n'
+        '    ready_file.write("ready")\n'
+        'os.replace(ready_path + ".tmp", ready_path)\n'
+        "time.sleep(300)\n"
+        "PY\n"
+    ),
+    # The child record is published but the ready sentinel never is, so the
+    # finite startup-deadline path must clean the whole process group.
+    "descendant_never_ready": lambda run: (
+        "python - <<'PY'\n"
+        "import os\n"
+        "import subprocess\n"
+        "import time\n"
+        'child = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"])\n'
+        'with open(os.environ["CI_PROBE_DESCENDANT_PID"], "w", encoding="utf-8") as pid_file:\n'
+        "    pid_file.write(str(child.pid))\n"
+        "time.sleep(300)\n"
+        "PY\n"
+    ),
+    # A parent that exits after recording its child but before readiness must
+    # produce a startup failure, then still have its process group cleaned.
+    "descendant_premature_exit": lambda run: (
+        "python - <<'PY'\n"
+        "import os\n"
+        "import subprocess\n"
+        'child = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"])\n'
+        'with open(os.environ["CI_PROBE_DESCENDANT_PID"], "w", encoding="utf-8") as pid_file:\n'
+        "    pid_file.write(str(child.pid))\n"
+        "PY\n"
+        "exit 0\n"
     ),
     # Controlled descendant cleanup on SUCCESS — starts a background child with
     # its stdio detached (so the probe's pipe EOF resolves when the parent
@@ -5811,6 +5864,31 @@ COLLECTION_FAILURE_SENTINEL = "collect-only failure sentinel"
 # so the child's closed PATH cannot break the launcher). Also the shebang for
 # the stub executables, so they never depend on an ambient PATH lookup.
 _PROBE_BASH = "/bin/bash"
+
+# Only these closed, test-owned fixtures have an explicit descendant readiness
+# protocol. Keeping the set narrow ensures no workflow-derived payload can ask
+# the probe to wait on an arbitrary file or execute an arbitrary startup shape.
+_PROBE_READY_VARIANTS = frozenset(
+    {
+        "descendant_timeout",
+        "descendant_delayed_ready_timeout",
+        "descendant_never_ready",
+        "descendant_premature_exit",
+    }
+)
+
+# A fixture startup budget is deliberately independent of the caller's business
+# timeout: the latter begins only after a readiness sentinel exists. Polling is
+# short and bounded; no thread, async loop, or external dependency is needed.
+_PROBE_STARTUP_TIMEOUT = 5.0
+_PROBE_READY_POLL_INTERVAL = 0.01
+
+# Stable status/message for a trusted readiness fixture that exits before ready
+# or exceeds its finite startup budget. This remains distinct from business
+# timeout 124 and bounded-drain cleanup failure 125.
+_PROBE_STARTUP_FAILURE_STATUS = 126
+_PROBE_STARTUP_DEADLINE_MESSAGE = "probe startup failed: descendant readiness deadline expired"
+_PROBE_STARTUP_EXIT_MESSAGE = "probe startup failed: process exited before descendant readiness"
 
 # Bounded post-timeout drain (Phase 6.2 P1 round-2): every `communicate` call
 # after a timeout must carry a SHORT FINITE timeout so a child that ignores
@@ -5894,6 +5972,29 @@ def _probe_descendant_pid_gone(pid: int, *, deadline: float) -> bool:
     return False
 
 
+def _wait_for_probe_ready(
+    proc: subprocess.Popen,
+    ready_file: Path,
+    *,
+    deadline: float,
+) -> str | None:
+    """Wait boundedly for a trusted fixture readiness sentinel.
+
+    Returns ``None`` only after the sentinel exists. A parent exit or finite
+    deadline expiry returns its stable observable message; the caller owns the
+    shared process-group cleanup so startup failure uses the same bounded drain
+    mechanism as a business timeout.
+    """
+    while True:
+        if ready_file.is_file():
+            return None
+        if proc.poll() is not None:
+            return _PROBE_STARTUP_EXIT_MESSAGE
+        if time.monotonic() >= deadline:
+            return _PROBE_STARTUP_DEADLINE_MESSAGE
+        time.sleep(_PROBE_READY_POLL_INTERVAL)
+
+
 def _run_probe_script(
     trusted_variant: str,
     *,
@@ -5922,12 +6023,17 @@ def _run_probe_script(
     failure sentinel), ``cat`` and ``tail`` (safe single-argument readers).
     Bash runs with GitHub's failure policy (``-e -o pipefail``).
 
-    The child runs in a NEW PROCESS GROUP (``start_new_session=True``). On
-    timeout the ENTIRE group is killed (immediately with SIGKILL — the trusted
-    test-owned fixtures need no graceful shutdown) and drained with a SHORT
-    FINITE ``_PROBE_DRAIN_TIMEOUT``; if a drain still cannot finish after a
-    second group kill plus a direct-child fallback, the probe returns a stable
-    named cleanup-failure status (``_PROBE_CLEANUP_FAILURE_STATUS``) instead of
+    The child runs in a NEW PROCESS GROUP (``start_new_session=True``). The
+    closed descendant-readiness fixtures first receive a separate finite startup
+    budget; their caller business timeout begins only after the atomically
+    published readiness sentinel exists. Premature exit or startup-deadline
+    expiry returns the named status ``_PROBE_STARTUP_FAILURE_STATUS`` (126),
+    after the same bounded group cleanup. A business timeout still returns 124.
+    On either timeout the ENTIRE group is killed (immediately with SIGKILL — the
+    trusted test-owned fixtures need no graceful shutdown) and drained with a
+    SHORT FINITE ``_PROBE_DRAIN_TIMEOUT``; if a drain still cannot finish after
+    a second group kill plus a direct-child fallback, the probe returns stable
+    cleanup-failure status ``_PROBE_CLEANUP_FAILURE_STATUS`` (125) instead of
     blocking forever. A ``finally`` path kills any remaining group descendants
     on success, error, AND timeout, so a background child can never outlive the
     probe. Only ``ProcessLookupError`` (group already gone) is ignored; no other
@@ -5986,12 +6092,14 @@ def _run_probe_script(
     events_file = tmp / "events"
     summary_file = tmp / "summary.md"
     descendant_pid_file = tmp / "descendant.pid"
+    descendant_ready_file = tmp / "descendant.ready"
     script = tmp / "probe.sh"
     script.write_text(runnable, encoding="utf-8")
     env = {
         "PATH": str(tmp / "bin"),
         "CI_PROBE_EVENTS": str(events_file),
         "CI_PROBE_DESCENDANT_PID": str(descendant_pid_file),
+        "CI_PROBE_DESCENDANT_READY": str(descendant_ready_file),
         "GITHUB_STEP_SUMMARY": str(summary_file),
         "TARGETED_TESTS_JSON": '["tests/test_a.py"]',
     }
@@ -6004,17 +6112,39 @@ def _run_probe_script(
         start_new_session=True,
     )
     status = 0
+    stdout: bytes | str | None = b""
+    stderr: bytes | str | None = b""
     try:
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            status = proc.returncode
-        except subprocess.TimeoutExpired:
-            # Kill the ENTIRE new process group and drain with a bounded,
-            # finite timeout on EVERY drain call. A child that ignores
-            # termination can never block the probe: after a second group kill
-            # plus a direct-child kill fallback, an undrainable group returns a
-            # stable named cleanup-failure status (never an unbounded wait).
-            stdout, stderr, status = _kill_probe_group_and_drain(proc, timeout=timeout)
+        startup_message = None
+        if trusted_variant in _PROBE_READY_VARIANTS:
+            startup_message = _wait_for_probe_ready(
+                proc,
+                descendant_ready_file,
+                deadline=time.monotonic() + _PROBE_STARTUP_TIMEOUT,
+            )
+        if startup_message is not None:
+            # Startup failure uses the exact same whole-group bounded cleanup as
+            # a business timeout, but returns a distinct observable status and
+            # message so callers never confuse it with status 124 or 125.
+            stdout, stderr, cleanup_status = _kill_probe_group_and_drain(proc, timeout=timeout)
+            status = (
+                _PROBE_CLEANUP_FAILURE_STATUS
+                if cleanup_status == _PROBE_CLEANUP_FAILURE_STATUS
+                else _PROBE_STARTUP_FAILURE_STATUS
+            )
+            stderr = _probe_decode(stderr) + startup_message + "\n"
+        else:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+                status = proc.returncode
+            except subprocess.TimeoutExpired:
+                # Kill the ENTIRE new process group and drain with a bounded,
+                # finite timeout on EVERY drain call. A child that ignores
+                # termination can never block the probe: after a second group
+                # kill plus a direct-child kill fallback, an undrainable group
+                # returns a stable named cleanup-failure status (never an
+                # unbounded wait).
+                stdout, stderr, status = _kill_probe_group_and_drain(proc, timeout=timeout)
     finally:
         # On EVERY exit (success, error, timeout) terminate any background
         # descendants still alive in the new process group. Ignore only
@@ -6100,8 +6230,9 @@ def _probe_collection_consumer(
 
     Thin wrapper over ``_run_probe_script`` in a fresh temporary working
     directory. Accepts only a trusted variant NAME. Output is always ``str``
-    (bytes decoded with replacement); a timeout is a status-124 result, never a
-    crash. See ``_run_probe_script``.
+    (bytes decoded with replacement); a business timeout is status 124 and a
+    trusted fixture startup failure is status 126, never a crash. See
+    ``_run_probe_script``.
     """
     with tempfile.TemporaryDirectory() as td:
         return _run_probe_script(
@@ -6194,11 +6325,11 @@ def _run_scalar_violations(trusted_variant: str) -> list[str]:
     c3_pytest = pytest_events(c3_events)
     c3_combined = c3_output + "\n" + c3_stderr + "\n" + c3_summary
 
-    # A timeout (124) OR an undrainable cleanup failure (125) means the probe
-    # did not complete; both are stable named violations, never an unbounded
-    # wait or a crash.
+    # A business timeout (124), startup failure (126), or undrainable cleanup
+    # failure (125) means the probe did not complete; each is a stable named
+    # violation, never an unbounded wait or a crash.
     if any(
-        status == 124 or status == _PROBE_CLEANUP_FAILURE_STATUS
+        status in (124, _PROBE_CLEANUP_FAILURE_STATUS, _PROBE_STARTUP_FAILURE_STATUS)
         for status in (c0_status, c1_status, c2_status, c3_status)
     ):
         violations.append("collection-consumer probe must complete")
@@ -7423,9 +7554,85 @@ def test_unknown_trusted_variant_rejected_without_execution(tmp_path: Path) -> N
 # E — controlled descendant cleanup (Phase 6.2 P1 / task 2.10): a trusted
 # fixture spawns a background child and records its PID; the probe runs in a
 # new process group and must kill all descendants on timeout AND on success.
-# No network/DB/real tests are involved; a short deterministic timeout and a
-# bounded polling proof are used, and no orphan may survive.
+# Descendant timeout fixtures publish an atomic readiness sentinel only after
+# their PID record is closed, so the business timeout starts from an observable
+# fixture-ready state. No network/DB/real tests are involved; short bounded
+# polling proves no orphan may survive.
 # ---------------------------------------------------------------------------
+def test_probe_starts_business_timeout_after_descendant_readiness(tmp_path: Path) -> None:
+    # The trusted fixture waits 0.25s BEFORE publishing readiness, deliberately
+    # longer than this 0.05s business timeout. A probe that starts communicate()
+    # immediately returns 124 before the sentinel exists; a correct probe starts
+    # that clock only after ready and therefore returns 124 with a closed PID
+    # record and ready sentinel available for the cleanup proof.
+    events, stdout, stderr, summary, status = _run_probe_script(
+        "descendant_delayed_ready_timeout",
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=0.05,
+    )
+    assert status == 124, f"expected a business timeout status, got {status} (stderr={stderr!r})"
+    ready_file = tmp_path / "descendant.ready"
+    assert ready_file.read_text(encoding="utf-8") == "ready", "business timeout started before fixture readiness"
+    pid_file = tmp_path / "descendant.pid"
+    assert pid_file.is_file(), "ready fixture did not record its child PID"
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    assert _probe_descendant_pid_gone(pid, deadline=time.monotonic() + 5.0), (
+        f"descendant {pid} survived cleanup after readiness-gated business timeout"
+    )
+
+
+def test_probe_startup_deadline_is_distinct_and_cleans_descendants(tmp_path: Path) -> None:
+    # The trusted fixture never publishes readiness after closing its child PID.
+    # A 0.01s business timeout must not produce 124 during startup: the actual
+    # separate finite startup deadline must return named status 126 and clean
+    # the whole group.
+    events, stdout, stderr, summary, status = _run_probe_script(
+        "descendant_never_ready",
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=0.01,
+    )
+    assert status == 126, f"expected startup-deadline status 126, got {status} (stderr={stderr!r})"
+    assert stderr == "probe startup failed: descendant readiness deadline expired\n"
+    pid_file = tmp_path / "descendant.pid"
+    assert pid_file.is_file(), "never-ready fixture did not record its child PID"
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    assert _probe_descendant_pid_gone(pid, deadline=time.monotonic() + 5.0), (
+        f"descendant {pid} survived startup-deadline process-group cleanup"
+    )
+
+
+def test_probe_premature_startup_exit_is_named_and_cleans_descendants(tmp_path: Path) -> None:
+    # This fixture publishes the closed child PID then exits before readiness.
+    # The readiness wait must observe the parent exit without consuming the
+    # business timeout, return the distinct named 126 status, and kill the
+    # inherited-pipe descendant rather than leaving an orphan behind.
+    events, stdout, stderr, summary, status = _run_probe_script(
+        "descendant_premature_exit",
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=0.5,
+    )
+    assert status == 126, f"expected premature-startup status 126, got {status} (stderr={stderr!r})"
+    assert stderr == "probe startup failed: process exited before descendant readiness\n"
+    pid_file = tmp_path / "descendant.pid"
+    assert pid_file.is_file(), "premature-exit fixture did not record its child PID"
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    assert _probe_descendant_pid_gone(pid, deadline=time.monotonic() + 5.0), (
+        f"descendant {pid} survived premature-startup process-group cleanup"
+    )
+
+
 def test_probe_cleans_descendants_on_timeout(tmp_path: Path) -> None:
     # The `descendant_timeout` trusted variant starts a Python background child
     # (recording its PID) and then sleeps forever. The bounded probe times out,
@@ -7441,6 +7648,8 @@ def test_probe_cleans_descendants_on_timeout(tmp_path: Path) -> None:
         timeout=2.0,
     )
     assert status == 124, f"expected a timeout status, got {status} (stderr={stderr!r})"
+    ready_file = tmp_path / "descendant.ready"
+    assert ready_file.read_text(encoding="utf-8") == "ready", "descendant timeout started before fixture readiness"
     pid_file = tmp_path / "descendant.pid"
     assert pid_file.is_file(), "descendant fixture did not record its child PID"
     pid = int(pid_file.read_text(encoding="utf-8").strip())
