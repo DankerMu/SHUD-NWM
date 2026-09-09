@@ -439,6 +439,28 @@ def test_a_parenthesis_inside_a_string_literal_does_not_unbalance_the_check() ->
     )
 
 
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        pytest.param(
+            "quoted-identifier-unmatched-close",
+            'SELECT 1 AS "a)b" FROM t WHERE a = :a',
+            id="quoted-identifier-unmatched-close",
+        ),
+        pytest.param(
+            "quoted-identifier-unmatched-open",
+            'SELECT 1 AS "a(b" FROM t WHERE a = :a',
+            id="quoted-identifier-unmatched-open",
+        ),
+    ],
+)
+def test_the_structural_check_ignores_parenthesis_bytes_inside_complete_quoted_identifiers(
+    label: str, sql: str
+) -> None:
+    """m25's direct owner; the commutation pin owns only t1/m26."""
+    assert_structurally_intact(sql, label)
+
+
 # ---------------------------------------------------------------------------
 # table-scoped attribution
 # ---------------------------------------------------------------------------
@@ -4283,13 +4305,12 @@ def test_every_traversal_commutes_with_the_scanner_over_the_corpus() -> None:
     and the strippers — and it goes red the moment a family member's private
     lexer disagrees with the shared one, in EITHER direction.
 
-    What this pin does NOT reach, recorded rather than left for the next round to
-    find: ``assert_structurally_intact``'s own paren loop losing its quoted-
-    identifier arm (round-5 L3's mutant m25). It is compared here as an OUTCOME
+    This pin owns t1/m26 traversal-family agreement, not m25. Task 1.12's direct
+    ``test_the_structural_check_ignores_parenthesis_bytes_inside_complete_quoted_identifiers``
+    pin owns m25: this test compares ``assert_structurally_intact`` as an OUTCOME
     against ``_blank_non_code(sql, keep_literal_quotes=True)``, and blanking
-    leaves quoted identifiers untouched, so both sides count the same phantom
-    paren and agree — structurally, not by luck. Closing m25 needs a direct
-    structural pin, not another corpus line.
+    leaves quoted identifiers untouched, so an m25 mutant makes both sides count
+    the same phantom paren and this commutation outcome remains green.
 
     ``strip_*`` are compared verbatim (no whitespace normalisation: they return
     the original text with non-comment runs untouched). ``outer_predicates`` is
