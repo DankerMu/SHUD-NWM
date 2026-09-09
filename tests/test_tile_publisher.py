@@ -27,6 +27,7 @@ Contract (post q_down fix):
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -3672,6 +3673,161 @@ def test_qdown_copyback_leaves_every_level_it_created_traversable_under_umask_02
     )
     for level in levels:
         assert stat.S_IMODE(level.stat().st_mode) == 0o755, level
+
+
+def _batch_lock_is_held(copyback_root: Path) -> bool:
+    """True when this root's batch flock cannot be taken by a fresh descriptor.
+
+    `flock` is per open file description, so a second fd opened here contends
+    with the one the lane under test holds exactly as another process would.
+    Raw `os.open`/`fcntl` rather than `acquire_copyback_batch_lock`, because
+    this probe must answer only "is the lock held right now", with no deadline
+    wait and no identity re-assertion of its own.
+    """
+
+    fd = os.open(copyback_root / COPYBACK_BATCH_LOCK_NAME, os.O_RDWR)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_run_products_copyback_lock_timeout_raises_the_distinct_timeout_code(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E19, run-products lane x timeout code.
+
+    The sibling has no production caller today, which is exactly why the two
+    lanes are allowed to drift: only the unsafe arm of `_copyback_batch_mutex`
+    was pinned here, so a lane that stopped routing its timeout through that
+    contextmanager would have kept every existing row green.
+    """
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        with pytest.raises(PublishError) as error_info:
+            publisher._copyback_run_products(["run-a"])
+
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
+    assert error_info.value.error_code != "OBJECT_STORE_COPYBACK_LOCK_UNSAFE"
+    # No unlocked promote: the destination tree was never created.
+    assert not (copyback_root / "runs" / "run-a").exists()
+
+
+def test_run_products_copyback_leaves_every_level_it_created_traversable_under_umask_027(
+    tmp_path: Any,
+) -> None:
+    """E19, run-products lane x traversal widening, root included."""
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    assert not copyback_root.exists(), "this run must be what creates the root"
+
+    previous_umask = os.umask(0o027)
+    try:
+        summary = publisher._copyback_run_products(["run-a"])
+    finally:
+        os.umask(previous_umask)
+
+    assert summary is not None and summary["status"] == "copied"
+    levels = (
+        copyback_root,
+        copyback_root / "runs",
+        copyback_root / "runs" / "run-a",
+    )
+    for level in levels:
+        assert stat.S_IMODE(level.stat().st_mode) == 0o755, level
+
+
+def test_qdown_copyback_holds_the_batch_mutex_through_commit_and_rollback(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E19, q_down lane x "held through commit" and x "held through rollback".
+
+    The `with self._copyback_batch_mutex(...)` at `publisher.py:1042` lexically
+    encloses the batch `try/except`, so both properties are structural today --
+    and nothing asserted either of them, which is how round 2 found the same
+    hole one lane over. `_commit_qdown_copyback_batch` is made to probe and then
+    fail, so the SAME run also drives the `except` handler's
+    `_rollback_qdown_copyback_batch`; a build that released the mutex anywhere
+    inside that region flips one of the two probes.
+    """
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    run = _seed_qdown_run_without_a_database(publisher)
+    held_during: dict[str, bool] = {}
+    real_rollback = publisher_module._rollback_qdown_copyback_batch
+
+    def probing_failing_commit(_rollback_log: Any, *, containment_root: Path) -> None:
+        held_during["commit"] = _batch_lock_is_held(copyback_root)
+        raise safe_fs_module.SafeFilesystemError("injected commit failure after the promote")
+
+    def probing_rollback(rollback_log: Any, *, containment_root: Path) -> None:
+        assert rollback_log, "the rollback must run with real promoted entries"
+        held_during["rollback"] = _batch_lock_is_held(copyback_root)
+        return real_rollback(rollback_log, containment_root=containment_root)
+
+    monkeypatch.setattr(publisher_module, "_commit_qdown_copyback_batch", probing_failing_commit)
+    monkeypatch.setattr(publisher_module, "_rollback_qdown_copyback_batch", probing_rollback)
+
+    with pytest.raises(PublishError) as error_info:
+        publisher._copyback_qdown_products([run])
+
+    assert held_during == {"commit": True, "rollback": True}
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_FAILED"
+    # The rollback really undid the promote, so the window it ran in is the
+    # destructive one the mutex has to cover.
+    assert not (copyback_root / "runs" / "run-a").exists()
+
+
+def test_canonical_copyback_holds_the_batch_mutex_through_its_commit(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E19, canonical lane x "held through commit".
+
+    This lane does not use `_copyback_batch_mutex`: it calls
+    `acquire_copyback_batch_lock` directly inside its own `try:` and releases in
+    the method's `finally:` (`publisher.py:1308` / `:1413`), so the enclosure is
+    a matched pair of statements rather than one `with`. The rollback half of
+    the pair is pinned by
+    `test_copyback_batch_rollback_never_removes_another_writers_committed_tree`'s
+    second gate; this is the commit half.
+    """
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    held_during: dict[str, bool] = {}
+    real_commit = publisher_module._commit_qdown_copyback_batch
+
+    def probing_commit(rollback_log: Any, *, containment_root: Path) -> None:
+        assert rollback_log, "the commit must run with real promoted entries"
+        held_during["commit"] = _batch_lock_is_held(copyback_root)
+        return real_commit(rollback_log, containment_root=containment_root)
+
+    monkeypatch.setattr(publisher_module, "_commit_qdown_copyback_batch", probing_commit)
+
+    summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert summary is not None and summary["status"] == "ok"
+    assert held_during == {"commit": True}
 
 
 def test_a_pre_existing_copyback_level_keeps_its_restrictive_mode(tmp_path: Any) -> None:

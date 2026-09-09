@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import inspect
 import json
 import os
@@ -473,6 +474,12 @@ def test_cli_rejects_copyback_root_equal_object_store_root_without_already_prese
         if path.is_file()
     }
     assert after == before
+    # E19, forcing lane x "zero-write skip creates no lock file": the identity
+    # refusal is upstream of the only acquire site, so no lock file may appear
+    # inside the production object-store root. Stated explicitly rather than
+    # left to the byte-map compare above, which would report it as an opaque
+    # extra key.
+    assert list(object_store_root.rglob(COPYBACK_BATCH_LOCK_NAME)) == []
 
 
 @pytest.mark.parametrize("args", [(), ("--apply",)])
@@ -1396,6 +1403,76 @@ def test_apply_holds_the_batch_mutex_across_the_whole_rollback_log_lifetime(
     assert held_during == {"commit": True}
 
 
+def _batch_lock_is_held(copyback_root: Path) -> bool:
+    """True when this root's batch flock cannot be taken by a fresh descriptor.
+
+    `flock` is per open file description, so a second fd opened here contends
+    with the one `_copy_package` holds exactly as another process would. Raw
+    `os.open`/`fcntl` rather than `acquire_copyback_batch_lock`, because this
+    probe must answer only "is the lock held right now" with no deadline wait
+    and no identity re-assertion of its own.
+    """
+
+    fd = os.open(copyback_root / COPYBACK_BATCH_LOCK_NAME, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    return False
+
+
+def test_apply_holds_the_batch_mutex_while_the_rollback_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E19, forcing lane x "held through rollback": the reason the `ExitStack` exists.
+
+    `_copy_package` wraps the lock in an `ExitStack` entered inside the `try:`
+    precisely so the lock outlives `_rollback_qdown_copyback_batch` in the
+    `except` handler. A plain `with copyback_batch_lock(...)` inside that `try:`
+    would release on the way out of the body and the rollback -- which for a
+    `backup_dir is None` entry `rmtree`s whatever now sits at the target -- would
+    run unlocked, which is the exact defect shape this change removes.
+
+    The failure is injected at the commit, not inside the copy loop: a raise
+    inside `_copyback_collected_object_tree`'s file loop happens *before* the
+    promote, so `rollback_log` would still be empty and the rollback a no-op.
+    """
+
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest = _seed_valid_candidate(tmp_path)
+    held_during: dict[str, bool] = {}
+    real_rollback = backfill_module._rollback_qdown_copyback_batch
+
+    def failing_commit(_rollback_log: Any, *, containment_root: Path) -> None:
+        raise safe_fs_module.SafeFilesystemError("injected commit failure after the promote")
+
+    def probing_rollback(rollback_log: Any, *, containment_root: Path) -> None:
+        assert rollback_log, "the rollback must run with a real promoted entry"
+        held_during["rollback"] = _batch_lock_is_held(copyback_root)
+        return real_rollback(rollback_log, containment_root=containment_root)
+
+    monkeypatch.setattr(backfill_module, "_commit_qdown_copyback_batch", failing_commit)
+    monkeypatch.setattr(backfill_module, "_rollback_qdown_copyback_batch", probing_rollback)
+
+    report = run_backfill(
+        _base_config(
+            db_path=db_path,
+            object_store_root=object_store_root,
+            copyback_root=copyback_root,
+            apply=True,
+        )
+    )
+
+    assert held_during == {"rollback": True}
+    assert report["copied_count"] == 0
+    assert report["failure_count"] == 1
+    assert "injected commit failure" in report["failures"][0]["reason"]
+    # The rollback really undid the promote, so the window it ran in was the
+    # destructive one the mutex has to cover.
+    assert not (copyback_root / FORCING_KEY).exists()
+
+
 def test_apply_records_a_lock_timeout_as_its_own_failure_category(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1460,6 +1537,43 @@ def test_apply_records_an_unsafe_lock_file_as_the_same_failure_category(
     assert "deadline" not in report["failures"][0]["reason"]
     assert not (copyback_root / FORCING_KEY).exists()
     assert stat.S_IMODE(lock_file.stat().st_mode) == 0o644
+
+
+def test_apply_leaves_every_level_it_created_traversable_under_umask_027(
+    tmp_path: Path,
+) -> None:
+    """E19, forcing lane x traversal widening, the copyback root included.
+
+    This lane creates the root through `publisher._prepare_copyback_root` and
+    the `forcing/...` levels through the shared
+    `_copyback_collected_object_tree`; both were `0o750` under `umask 027`
+    before #2035, and node-27's reader account lost traversal of the chain.
+    """
+
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest = _seed_valid_candidate(tmp_path)
+    assert not copyback_root.exists(), "this run must be what creates the root"
+
+    previous_umask = os.umask(0o027)
+    try:
+        report = run_backfill(
+            _base_config(
+                db_path=db_path,
+                object_store_root=object_store_root,
+                copyback_root=copyback_root,
+                apply=True,
+            )
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert report["copied_count"] == 1
+    levels = [copyback_root]
+    walked = copyback_root
+    for part in Path(FORCING_KEY).parts:
+        walked = walked / part
+        levels.append(walked)
+    landed = {str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in levels}
+    assert landed == {str(path): "0o755" for path in levels}
 
 
 def test_the_batch_mutex_is_never_acquired_inside_the_shared_copy_helper() -> None:

@@ -2242,6 +2242,12 @@ ssh -p 32099 nwm@210.77.77.27 \
      属主断言同时比对**当前 euid** 与 **copyback root 的属主**，并且外来 uid 在
      `O_CREAT` 之前就被拒——两个方向都堵死，锁文件不会被别的账号「毒化」。
      互斥只在单机内成立（跨主机不在本机制范围内）。
+   - **`NHMS_OBJECT_STORE_COPYBACK_ROOT` 必须由那个唯一的写者 uid 属主持有。**
+     条件是 **uid 相等**，不是「写者能写这个 root」：一个属主是别的账号、靠组位开放写
+     的 root（例如容器 uid 在补充组里）会被**拒绝，而不是共享**——锁文件的属主锚定在
+     root 的属主上。核查：`stat -c '%u %a %n' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"`
+     与写者的 `id -u` 对比；不相等则每次 copyback 都 fail closed，报错里会同时给出
+     两个 uid 和锁文件路径。
    - **锁文件卡住时怎么处置**（只有两种情况，只有一种能动）：
      - **有活持有者**：`lsof <lock>` 或 `fuser -v <lock>` 打得出 pid → **不要动它**，
        等它结束或去查那个 writer 为什么卡住。
@@ -2250,15 +2256,18 @@ ssh -p 32099 nwm@210.77.77.27 \
        必须修，否则所有 writer 会永远 fail closed。
        `sudo chown "$(stat -c '%u:%g' "$NHMS_OBJECT_STORE_COPYBACK_ROOT")" <lock>`，
        或者**以它自己的属主身份** `rm -f <lock>`，让下一个 writer 重新创建。
+
        ```bash
        ssh -p 32099 frd_muziyao@210.77.77.22 \
          'L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock;
           ls -ln "$L"; stat -c "%u %n" /ghdc/data/nwm/object-store; fuser -v "$L" || echo "no holder"'
        ```
+
    - **`canonical_precip_mirror` 记了 `failed` receipt 怎么补**：没有任何东西会重试它。
      `_mirror_canonical_precip` 在 `convert` 终态 hook 里把异常吞成 receipt，cycle 照常
      往下走，失败的那个 cycle 的镜像**不会在下个 cycle 被补上**。唯一的补救是手工跑
      backfill：
+
      ```bash
      ssh -p 32099 frd_muziyao@210.77.77.22 \
        'cd /scratch/frd_muziyao/NWM &&
@@ -2268,6 +2277,7 @@ ssh -p 32099 nwm@210.77.77.27 \
           --source-root "$OBJECT_STORE_ROOT" \
           --copyback-root "$NHMS_OBJECT_STORE_COPYBACK_ROOT" --dry-run'
      ```
+
      `cd` 到仓库根是必须的（否则 `-m` 会 `ModuleNotFoundError` 退 1）。先看 dry-run 计划
      （dry-run 不取锁、不写任何东西），确认无误后去掉 `--dry-run` 实跑。退出码：`0` 全成功、
      `1` 跑完但有 `failed`、`2` 参数或 root 不可用——两个 root 必须都非空（空值会被

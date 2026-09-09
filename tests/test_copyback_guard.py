@@ -257,17 +257,33 @@ def test_a_foreign_owned_lock_file_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A writer under another account fails closed instead of running unlocked."""
+    """A writer under another account fails closed instead of running unlocked.
+
+    This is the branch a real foreign-uid writer hits *first*: the lock file
+    already exists and is owned by the copyback root's owner, so the euid
+    compare refuses before the root-owner compare below is ever reached. It is
+    therefore the first scene of a poisoning investigation, and `design.md`
+    ("Single uid") promises every ownership refusal names both uids and the lock
+    path so recovery needs no second round trip.
+    """
 
     root = _real_root(tmp_path)
-    (root / COPYBACK_BATCH_LOCK_NAME).write_bytes(b"")
-    os.chmod(root / COPYBACK_BATCH_LOCK_NAME, 0o600)
-    monkeypatch.setattr(os, "geteuid", lambda: os.getuid() + 4242)
+    lock_file = root / COPYBACK_BATCH_LOCK_NAME
+    lock_file.write_bytes(b"")
+    os.chmod(lock_file, 0o600)
+    foreign_euid = os.getuid() + 4242
+    monkeypatch.setattr(os, "geteuid", lambda: foreign_euid)
 
     with pytest.raises(CopybackLockError) as error_info:
         acquire_copyback_batch_lock(root, timeout_seconds=0.5)
 
-    assert "effective user" in str(error_info.value)
+    message = str(error_info.value)
+    assert "effective user" in message
+    # Same three facts the root-owner branch below already names.
+    assert str(foreign_euid) in message
+    assert str(lock_file.stat().st_uid) in message
+    assert str(lock_file) in message
+    assert not isinstance(error_info.value, CopybackLockTimeout)
 
 
 def test_a_foreign_uid_cannot_create_the_lock_file_in_the_first_place(

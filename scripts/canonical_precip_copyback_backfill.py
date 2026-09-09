@@ -445,7 +445,7 @@ def _mirror_tree_under_batch_lock(
     """Mirror one tree while holding the shared copyback batch mutex (#2035).
 
     Per tree, never once for the whole run: a whole-run acquisition on a long
-    backfill would hold the lock past the publisher's own 300 s deadline and turn
+    backfill would hold the lock past the publisher's own 900 s deadline and turn
     this fix into a mirror outage. The publisher's canonical batch promotes the
     very trees this script writes into, and its rollback's ``backup_dir is None``
     branch removes whatever now sits at the target -- so without this every file

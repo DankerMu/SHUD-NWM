@@ -208,6 +208,15 @@ unit → EnvironmentFile table above is the authority.
     a foreign uid is refused before it can create the file, so the lock cannot be
     poisoned from either direction. Exclusion is node-local — see the non-goals in
     `openspec/changes/harden-copyback-batch-mutex-and-dir-traversal/proposal.md`.
+  - **`NHMS_OBJECT_STORE_COPYBACK_ROOT` MUST be owned by the single writer uid**
+    — the account the publisher, orchestrator and both backfill CLIs run as. The
+    requirement is *equality of uid*, not "the writer can write the root": a
+    group-writable root owned by another account (a container uid in a
+    supplementary group, for example) is **refused, not shared**, because the
+    lock file's owner is anchored to the root's owner. Check with
+    `stat -c '%u %a %n' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"` and compare against
+    the writer's `id -u`; a mismatch fails every copyback closed with a message
+    naming both uids and the lock path.
   - **Recovering a stuck lock file.** Two cases, and only one of them is
     touchable:
     - a **live holder** — some process still holds the fd

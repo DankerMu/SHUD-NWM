@@ -85,6 +85,11 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
   跑在别的账号下的写者 fail closed，而不是静默地不加锁运行；属主同时比对当前 euid 与
   copyback root 的属主，且外来 uid 在 `O_CREAT` 之前就被拒，所以锁文件不会被别的账号毒化。
   互斥只在**单机**内成立。
+- **`NHMS_OBJECT_STORE_COPYBACK_ROOT` 必须由那个唯一的写者 uid 属主持有。** 条件是
+  **uid 相等**，不是「写者能写这个 root」：属主是别的账号、只靠组位开放写的 root
+  （例如容器 uid 在补充组里）会被**拒绝，而不是共享**——锁文件的属主锚定在 root 的属主上。
+  核查 `stat -c '%u %a %n' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"` 与写者 `id -u` 是否相等；
+  不相等则每个 package 都会记 `copyback_lock_unavailable`，报错里同时给出两个 uid 和锁文件路径。
 - 若某个 package 报 `category: copyback_lock_unavailable`，说明它没拿到锁（超时或锁文件被篡改），
   目标树本身完好无损，重跑即可。
 

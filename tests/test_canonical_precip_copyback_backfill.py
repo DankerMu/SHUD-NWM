@@ -897,6 +897,10 @@ def test_backfill_overlapping_roots_exit_two(tmp_path: Path) -> None:
     assert backfill.main(["--source-root", str(source_root), "--copyback-root", str(source_root)]) == 2
     assert backfill.main(["--source-root", str(source_root), "--copyback-root", str(source_root / "nested")]) == 2
     assert backfill.main(["--source-root", str(source_root / "nested"), "--copyback-root", str(source_root)]) == 2
+    # E19, script lane x "zero-write skip creates no lock file": `resolve_roots`
+    # refuses before `backfill()` runs, so the only acquire site is never
+    # reached and no lock file may appear inside the production source root.
+    assert list(source_root.rglob(COPYBACK_BATCH_LOCK_NAME)) == []
 
 
 def test_backfill_source_root_without_canonical_tree_exits_zero(
@@ -1155,6 +1159,46 @@ def test_a_lock_the_backfill_cannot_take_is_a_recorded_failure_not_a_crash(
     assert all("copyback batch lock unavailable" in entry["errors"][0] for entry in summary["grids"])
     mirrored = [path for path in copyback_root.rglob("*") if path.name != COPYBACK_BATCH_LOCK_NAME]
     assert mirrored == []
+
+
+def test_an_unsafe_lock_file_is_a_recorded_failure_not_an_escaped_exception(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """E19, script lane: the `except CopybackLockError` arm must catch the BASE class.
+
+    The timeout row above only exercises the `CopybackLockTimeout` subclass.
+    Narrowing `_mirror_tree_under_batch_lock`'s handler to that subclass lets a
+    tampered `0o644` lock file raise the base class, which is a `RuntimeError`
+    and so escapes every handler in the script -- out of both mirror call sites,
+    out of `main`, and past the `print(json.dumps(...))` that IS this script's
+    entire report. The exit code cannot discriminate that (`EXIT_FAILURES` is 1,
+    which is also the interpreter's uncaught-exception code), so the assertion is
+    on stdout still being a parsable summary that records the refusal.
+    """
+
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+    copyback_root.mkdir(parents=True, exist_ok=True)
+    lock_file = copyback_root / COPYBACK_BATCH_LOCK_NAME
+    lock_file.write_bytes(b"")
+    os.chmod(lock_file, 0o644)
+
+    backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    summary = json.loads(capsys.readouterr().out)
+
+    assert summary["totals"]["copied"] == 0
+    assert summary["totals"]["failed"] >= 1
+    errors = [message for entry in (*summary["cycles"], *summary["grids"]) for message in entry["errors"]]
+    assert errors, "the refusal must be recorded per tree, not merely aborted"
+    assert all("copyback batch lock unavailable" in message for message in errors)
+    # Distinct from a timeout in the recorded reason, which is the only
+    # discriminator this lane has: both map to the same per-tree failure.
+    assert all("0600" in message for message in errors)
+    assert not any("deadline" in message for message in errors)
+    # No unlocked mirror, and the tampered file is refused rather than repaired.
+    mirrored = [path for path in copyback_root.rglob("*") if path.name != COPYBACK_BATCH_LOCK_NAME]
+    assert mirrored == []
+    assert stat.S_IMODE(lock_file.stat().st_mode) == 0o644
 
 
 def test_a_publisher_rollback_cannot_remove_a_file_this_script_counted_as_copied(
