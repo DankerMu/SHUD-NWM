@@ -4184,3 +4184,24 @@ buckets to distinguish (a) defects in code under review, (b) orchestrator
 record-accuracy defects, and (c) prose-versus-code drift, and re-derive the
 margin from (a) alone. On this PR, (a) is zero and the other two account for all
 fourteen — a decomposition the current single number cannot express.
+
+## Revisit — PR #2209 (issue #1980), 2026-09-09
+
+Counters: 196 multi-round merged PRs; later-round catches core=235, rotated=270,
+phase=53, skipped=15. Margin 36 → **35**. PR #2209 contributed one later-round
+core catch and no rotated or phase catch.
+
+That catch was not a defect in the OpenSpec change. Round 2 found that the PR
+body named a nonexistent 40-character commit ID which shared only the first
+eight characters with the real frozen head. The production diff in this PR was
+empty by design, and the only other verified finding was a round-1 gap in the
+future evidence contract. Round 3 was clean after both evidence defects were
+fixed. This is another sample of the measurement problem recorded in the
+previous two revisits: the current core/rotated buckets attribute evidence and
+record-accuracy defects as though they measured reviewer coverage of code.
+
+Decision unchanged: **keep rotation**. The rotated margin remains positive, but
+its integer value is not a sound basis for changing the seat policy until the
+three defect classes named above are separated. This revisit therefore records
+the required human decision without treating PR-body bookkeeping as evidence
+against rotation.
