@@ -360,6 +360,72 @@ def test_a_future_node27_service_unit_selects_the_sibling_lane_pin() -> None:
     ), "the `.service` glob leaked onto a `.timer` path"
 
 
+# #2180: the owner suite of each node-27 unit file -- the suite that really
+# `read_text`s that exact path and asserts its DIRECTIVES, not just the
+# `systemd.err` lane set the glob pin covers. Keyed by unit path so the table
+# is the readable producer -> consumer statement, same shape as the
+# resource-governance table above.
+NODE27_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
+    "infra/systemd/nhms-node27-autopipe.service": frozenset(
+        {"tests/test_node27_autopipeline_preflight.py"}
+    ),
+    "infra/systemd/nhms-node27-download.service": frozenset({"tests/test_node27_download_cycles.py"}),
+    "infra/systemd/nhms-node27-frontier-alert.service": frozenset(
+        {"tests/test_node27_frontier_stall_alert.py"}
+    ),
+    "infra/systemd/nhms-node27-raw-retention.service": frozenset({"tests/test_node27_raw_retention.py"}),
+    "infra/systemd/nhms-node27-timeseries-compression-replay.service": frozenset(
+        {
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+        }
+    ),
+    "infra/systemd/nhms-node27-download.timer": frozenset({"tests/test_node27_download_cycles.py"}),
+    "infra/systemd/nhms-node27-timeseries-compression.timer": frozenset(
+        {
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_compression.py",
+        }
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("unit", "owners"),
+    sorted(NODE27_UNIT_OWNER_SUITES.items()),
+    ids=[PurePosixPath(unit).name for unit in sorted(NODE27_UNIT_OWNER_SUITES)],
+)
+def test_node27_unit_files_select_their_owner_suites(unit: str, owners: frozenset[str]) -> None:
+    """#2180 — the sibling-lane pin is not a substitute for a unit's own suite.
+
+    ``tests/test_node27_timeseries_retention.py::test_sibling_units_keep_their_systemd_err_lane``
+    asserts only the `StandardError=append:…/systemd.err` LANE SET; it never reads a unit's
+    `ExecStart`, `ExecStartPre`, `Environment`, `EnvironmentFile` or timeout directives. The
+    suites in this table do: each one `read_text`s the exact unit path and asserts those
+    directives. Before #2180 the five `.service` units selected ONLY the glob pin and the two
+    `.timer` files selected NOTHING (a zero-assertion `--collect-only` degrade), so breaking
+    `download.service`'s `ExecStart` or deleting frontier-alert's `Environment=` line passed
+    targeted PR CI and only redded on master's full run — the #2032 -> #2170 failure mode in the
+    "own suite" dimension. Parametrized rather than looped so every unit reds independently.
+    """
+    selected = set(select_tests([unit], repo_root=Path(".")))
+
+    assert owners <= selected, f"{unit} lost its owner suite(s): {sorted(owners - selected)}"
+
+    if unit.endswith(".service"):
+        # The `#2173` glob row accumulates on top of the path-exact row (no
+        # `stop_on_match`); this PR must not cost a unit its lane pin.
+        assert (
+            "tests/test_node27_timeseries_retention.py" in selected
+        ), f"{unit} does not select the sibling lane pin"
+    else:
+        # The pin's glob is `nhms-node27-*.service`; a `.timer` row must not
+        # smuggle the pin suite in through its own targets.
+        assert (
+            "tests/test_node27_timeseries_retention.py" not in selected
+        ), f"{unit} pulled in the `.service`-only sibling lane pin"
+
+
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
     consumers = (
         "tests/test_node27_cold_tablespace_identity.py",
