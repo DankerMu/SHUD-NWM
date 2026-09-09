@@ -4205,3 +4205,15 @@ its integer value is not a sound basis for changing the seat policy until the
 three defect classes named above are separated. This revisit therefore records
 the required human decision without treating PR-body bookkeeping as evidence
 against rotation.
+
+## Revisit — PR #2215 (issue #2115), 2026-09-09
+
+The post-merge audit reports 196 multi-round PRs, with later-round catches
+core=235, rotated=270, phase=53 and skipped=15, unchanged from the preceding
+revisit. PR #2215 had one clean comprehensive round and no candidate findings,
+so it contributes no evidence about follow-up-round rotation.
+
+A new keep/cut decision is deferred: this single-round sample cannot resolve
+the measurement limitations already recorded above, and the user authorized
+issue delivery/merge rather than a review-policy change. The existing recorded
+keep decision remains in force; no reviewer seat or gate is narrowed.
