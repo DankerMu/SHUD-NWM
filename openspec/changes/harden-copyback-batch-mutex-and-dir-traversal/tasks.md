@@ -141,7 +141,25 @@ per-open-file-description `flock` semantics the thread tests rely on hold on the
 local filesystem the suite runs on; on an NFS export that emulates `flock` with
 POSIX byte-range locks the granularity is per process instead. That is harmless in
 production, where the contending writers are separate processes.
-Each new-behavior test must be shown red against pre-change source first.
+Each new-behavior test must be shown red against pre-change source first, using
+the harness that stashes only the changed source files and leaves the tests and
+`packages/common/copyback_guard.py` on the tree (that module does not exist on
+master and is imported at module level by two test files, so removing it would
+make every row fail with `ImportError` and prove nothing).
+**Two things this rule demands that a gate-assertion failure does not give.**
+First, the rule is unconditional: E5, E6, E7, E13 and E14 all go red
+non-vacuously under that harness — E6/E7 because `safe_fs.py:91`'s
+`os.mkdir(part, 0o755, dir_fd=fd)` is umask-masked and the assertion is an exact
+`0o755` compare; E13/E14 because pre-change no lane acquires, so the
+`pytest.raises` never fires; E5 because `run_tree_copyback` had no lock — so each
+must have its failing assertion recorded, not just E2/E3/E4.
+Second, E2's and E3's red states below name *terminal* outcomes ("its tree is
+absent", "a file the script counted as `copied` is removed"), and those are what
+make the defect destructive. A red run that stops at the gate assertion proves
+only that the promote window is enterable. Observing the specified terminal state
+requires a red run with the gate assertion bypassed; record that run, or amend
+these rows to claim only what the gate proves. Reporting "red-proof exists" while
+the fixture asks for the terminal state is the one option that is not honest.
 
 - [ ] E1 `copyback_guard` lock unit tests: two threads on one root serialize (the
       second observes the first's completion); two distinct roots do not block each
@@ -157,8 +175,19 @@ Each new-behavior test must be shown red against pre-change source first.
       rollback. **Green**: serialized; every counted file survives.
 - [ ] E4 **batch-scope row** (the per-tree-lock discriminator): A promotes `prcp`
       into an empty slot, B commits into `prcp`, A then fails on `grid`. Expected:
-      A's batch rollback does not delete B's tree. Must fail if the lock is
-      narrowed to per-tree scope.
+      A's batch rollback does not delete B's tree.
+      **Scope of the discriminator, stated precisely** — the gate assertion fails
+      only for a per-tree lock placed *inside*
+      `_replace_directory_tree_for_qdown_batch`, i.e. released when that call
+      returns, which is the narrowing `design.md`'s four-step counterexample
+      describes. A per-tree lock wrapping the loop-body call site
+      (`publisher.py:1357-1362`) instead puts the gate's own wait inside the lock,
+      so the gate reads `[False]` and stops discriminating; what would remain is a
+      race between A's rollback (in the `except` handler, outside any per-tree
+      lock) and B's promote, which is timing-dependent rather than deterministically
+      red. Close that by additionally gating A's rollback — monkeypatch
+      `_rollback_qdown_copyback_batch` to wait on the competitor first — so the
+      terminal `read_bytes()` assertion is deterministic under either placement.
 - [ ] E5 `run_tree_copyback._replace_tree` × publisher batch: serialized; loser
       reports failure; winner's tree intact; no `rmtree` of a competitor's tree.
 - [ ] E6 `umask 027` publisher canonical copyback: assert the copyback root,
