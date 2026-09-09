@@ -11241,6 +11241,7 @@ def test_issue1895_runbook_selects_the_live_rollout_contract() -> None:
     (
         "tests/test_issue1895_runbook_contract.py",
         "tests/test_issue1895_readiness_gates.py",
+        "tests/test_issue1895_readiness_c3_bind.py",
     ),
 )
 def test_issue1895_contract_change_redirects_to_the_owners(owner: str) -> None:
@@ -11263,6 +11264,29 @@ def test_issue1895_gates_redirect_reds_when_rule_removed(
     selected = set(select_tests([owner], repo_root=Path(".")))
     assert selected != set(select_ci_tests.ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
     assert "tests/test_node27_cold_residency_census.py" not in selected
+
+
+def test_issue1895_c3_bind_redirect_reds_when_rule_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+    from scripts.select_ci_tests import ISSUE1895_RUNBOOK_CONTRACT_TESTS
+
+    owner = "tests/test_issue1895_readiness_c3_bind.py"
+    census = "tests/test_node27_cold_residency_census.py"
+    matching = [rule for rule in CHANGED_TEST_FILE_RULES if rule.pattern == owner]
+    assert len(matching) == 1, f"expected exactly one CHANGED_TEST_FILE_RULES entry for {owner}"
+    assert matching[0].stop_on_match is True
+    assert matching[0].tests == ISSUE1895_RUNBOOK_CONTRACT_TESTS
+    assert census in matching[0].tests
+    mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
+    assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected != set(ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
+    assert census not in selected
+    assert SELECTOR_META_GUARD_TEST in selected
 
 
 def test_issue1895_runbook_contract_redirect_reds_when_owner_leg_removed(
@@ -11386,6 +11410,35 @@ def test_issue1895_c3_registry_manifest_rule_reds_when_removed(monkeypatch: pyte
     for producer, required in expected.items():
         leaked = sorted(required & set(select_tests([producer], repo_root=Path("."))))
         assert not leaked, f"{producer}: C3 consumer contract still selected after rule removal {leaked}"
+
+
+def test_issue1895_c3_bind_partition_is_owned_by_publication_current_and_binder_cli() -> None:
+    partition = "tests/test_issue1895_readiness_c3_bind.py"
+    assert partition in ISSUE1895_READINESS_C1_C2_C3_TESTS
+    for owner in (
+        "packages/common/node27_issue1895_publication_current.py",
+        "scripts/node27_issue1895_publication_current_bind.py",
+    ):
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert partition in selected, f"{owner} isolated selection omitted {partition}"
+
+
+@pytest.mark.parametrize(
+    "owner",
+    (
+        "packages/common/node27_issue1895_publication_current.py",
+        "scripts/node27_issue1895_publication_current_bind.py",
+    ),
+)
+def test_issue1895_c3_bind_partition_reds_when_only_that_path_target_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+) -> None:
+    partition = "tests/test_issue1895_readiness_c3_bind.py"
+    retained = "tests/test_issue1895_readiness_c3.py"
+    selected = _issue1895_select_without_owner_targets(monkeypatch, owner, (partition,))
+    assert partition not in selected, f"{owner}: partial PATH removal still selected {partition}"
+    assert retained in selected, f"{owner}: partial PATH removal dropped retained C3 owner {retained}"
 
 
 def test_issue1895_b2b_owner_selects_receipt_contract_and_canonical_readonly_suite() -> None:

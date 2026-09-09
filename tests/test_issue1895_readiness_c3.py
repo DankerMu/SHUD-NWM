@@ -203,6 +203,11 @@ def _c4_pass_document(gfs: dict[str, Any], ifs: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _write_c4_pass(path: Path) -> None:
+    gfs = _c3_identity("GFS", run_id="run-gfs", cycle_time=NOW)
+    path.write_text(json.dumps(_c4_pass_document(gfs, {**gfs, "run_id": "run-ifs", "source_id": "IFS"})))
+
+
 @pytest.mark.skipif(_frontend_c4_builder() is None, reason="frontend C4 builder dependencies are unavailable")
 def test_c3_accepts_the_shipping_frontend_c4_builder_output(tmp_path: Path) -> None:
     fixture = tmp_path / "c4-builder.json"
@@ -505,7 +510,7 @@ def test_c3_binder_refuses_wrong_invalid_sha_and_out_of_bracket(tmp_path: Path) 
     parent = tmp_path / "private"
     _private(parent)
     c4 = parent / "c4.json"
-    c4.write_text("{}", encoding="utf-8")
+    _write_c4_pass(c4)
     registry = parent / "manifest-last.json"
     registry.write_text(
         json.dumps(
@@ -812,7 +817,7 @@ def _c3_document(c4: Path) -> dict[str, Any]:
         "registry_generated_at": "2026-09-06T11:00:00Z",
         "baseline_sha256": "c" * 64,
         "frontier": {"status": 200, "current_count": 2, "baseline_count": 1, "non_regressed": True},
-        "sources": {"GFS": source(identity, "job-gfs"), "IFS": source(ifs, "job-ifs")},
+        "sources": {"GFS": source(identity, "gfs-job"), "IFS": source(ifs, "ifs-job")},
         "c4_receipt": {
             "st_dev": facts.st_dev,
             "st_ino": facts.st_ino,
@@ -852,14 +857,14 @@ def test_c3_binder_rejects_c4_tamper_source_collapse_and_partial_counts(tmp_path
     parent = tmp_path / "private"
     _private(parent)
     c4 = parent / "c4.json"
-    c4.write_text("{}", encoding="utf-8")
+    _write_c4_pass(c4)
     os.chmod(c4, 0o600)
     receipt = parent / "c3.json"
     document = _c3_document(c4)
     validate_c3_receipt(document)
     publish_private_receipt(receipt, document, code_prefix="C3_RECEIPT", stage="c3")
     cmd_start, cmd_end = _current_bracket()
-    c4.write_text('{"changed":true}', encoding="utf-8")
+    c4.write_text(json.dumps({**json.loads(c4.read_text()), "generated_at": "2026-09-06T12:00:01.000Z"}))
     os.chmod(c4, 0o600)
     with pytest.raises(Issue1895ReadinessError) as tamper:
         bind_c3_receipt(
@@ -890,7 +895,7 @@ def test_c3_binder_rereads_canonical_registry_facts_and_generated_at(tmp_path: P
     parent = tmp_path / "private"
     _private(parent)
     c4 = parent / "c4.json"
-    c4.write_text("{}", encoding="utf-8")
+    _write_c4_pass(c4)
     registry = parent / "manifest-last.json"
     registry.write_text(
         json.dumps(
@@ -982,8 +987,6 @@ def test_new_receipt_schemas_accept_pass_examples_and_reject_negative_documents(
     jsonschema.Draft202012Validator.check_schema(schema)
     example = json.loads((ROOT / "schemas" / "examples" / example_name).read_text())
     jsonschema.Draft202012Validator(schema, format_checker=jsonschema.FormatChecker()).validate(example)
-    # Semantic validators intentionally require the actual euid on private input
-    # facts, so schema-valid C2/C3 fixtures do not stand in for a live accepted receipt.
     if schema_name == "node27_issue1895_c1_display_runtime_receipt.schema.json":
         assert validator(example)["status"] == "PASS"
     if schema_name == "node27_issue1895_c2_readonly_boundary_receipt.schema.json":

@@ -632,14 +632,16 @@ def bind_c3_receipt(
         _error("C3 receipt SHA does not bind reviewed SHA", "C3_BIND_SHA")
     if validated["basin_id"] != basin:
         _error("C3 receipt basin does not bind expected pin", "C3_BIND_BASIN")
-    raw_c4, _c4, facts = _read_json_input(
-        c4_receipt,
-        label="C3 C4 receipt",
-        max_bytes=C4_MAX_BYTES,
-        require_private=True,
-    )
+    raw_c4, c4, facts = _read_c4_receipt(c4_receipt, basin_id=basin)
     if hashlib.sha256(raw_c4).hexdigest() != validated["c4_receipt"]["sha256"] or facts != validated["c4_receipt"]:
         _error("C3 C4 receipt changed after acceptance", "C3_BIND_C4_TAMPER")
+    bound = {source: validated["sources"][source]["identity"] for source in SOURCES}
+    _validate_c4_matches_bound_identity(c4, bound=bound)
+    for source in SOURCES:
+        record = validated["sources"][source]
+        ops = c4["ops"][source]
+        if ops["job_id"] != record["c4_job_id"] or ops["logs_status"] != record["c4_logs_status"]:
+            _error("C3 C4 ops job/log facts differ from outer source records", "C3_BIND_C4_OPS")
     _models, registry_digest, registry_facts, registry_generated_at = _registry_models(
         registry,
         canonical_path=canonical_registry_path,

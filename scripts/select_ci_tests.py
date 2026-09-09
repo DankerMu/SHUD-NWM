@@ -798,6 +798,7 @@ READONLY_DB_VALIDATION_TESTS: tuple[str, ...] = (
 ISSUE1895_READINESS_C1_C2_C3_TESTS: tuple[str, ...] = (
     "tests/test_issue1895_readiness_c1_c2_c3.py",
     "tests/test_issue1895_readiness_c3.py",
+    "tests/test_issue1895_readiness_c3_bind.py",
 )
 
 ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS: tuple[str, ...] = (
@@ -854,6 +855,11 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "tests/test_issue1895_readiness_c3.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue1895_readiness_c3_bind.py",
         ISSUE1895_RUNBOOK_CONTRACT_TESTS,
         stop_on_match=True,
     ),

@@ -311,8 +311,76 @@ verification: every accepted focused, selector, runbook, targeted and full test
 result above was independently rerun through `uv run --no-sync`. The violation
 changed no product file outside the allowed write set and created no environment.
 
+## Round 4 clean and Gap Sweep GS-P1 closure
+
+Round 4 reviewed `68431872e8311ca4ad2c84495fdd4a3ff6449e61` with the
+`invariant-state` full-scope seat and the `test-evidence+spec-compliance` delta
+seat. Both reports were clean. The required Phase 7 Gap Sweep then found one P1
+contract candidate: the C3 owner semantically validated nested C4 PASS bytes,
+but `bind_c3_receipt` reread the same file as generic JSON and compared only its
+digest and file facts. An independent verifier returned `CONFIRMED / FIX_NOW`.
+A matching `{}`, FAIL or BLOCKED C4 could therefore authorize the G7 binder.
+
+The fix inventory covered the C1/C2/C3 owner-to-binder chain before source
+changes. Tests were written first against the reviewed implementation. Fourteen
+parameter instances failed because no `Issue1895ReadinessError` was raised for
+malformed/non-PASS C4, product identity splice or C4/outer ops splice. No
+stash, reset, checkout, clean or temporary product mutation was used for this
+red proof.
+
+The binder now reuses `_read_c4_receipt`: raw bytes, parsed semantics and file
+facts come from the same held read. After the existing closed PASS, null-failure,
+basin, control and ops checks, the binder compares digest/facts, reuses the
+owner's product-identity validator against the outer C3 source identities, and
+requires each C4 job/log status to equal the facts copied into the corresponding
+outer source record. Rejections never replace the outer receipt. No schema,
+frontend C4 producer, runbook, C1 or C2 implementation changed.
+
+A new `tests/test_issue1895_readiness_c3_bind.py` partition carries the nested
+C4 discriminator matrix. It is directly selected by both the shared C3 owner
+and shipping binder CLI. Target-only removal mutants preserve the old C3 leg
+while proving the new partition disappears; a separate changed-test-rule mutant
+proves the partition's runbook/census redirect. The existing C3 test file was
+already 997 lines, so no new cases were appended there.
+
+One implementation deviation was accepted and retained for review: the initial
+minimal write set excluded `tests/test_issue1895_readiness_c3.py`, but three
+existing binder tests used `{}` as their supposed valid C4 fixture. Semantic
+validation correctly made their intended SHA/bracket/tamper oracles unreachable.
+The implementer replaced only those fixtures with shipping-shape C4 PASS, aligned
+their outer job IDs, and changed the tamper payload to a still-valid PASS document
+with a different timestamp. Existing SHA, invalid-SHA, bracket, digest-tamper,
+registry-tamper, source-collapse, count and scenario assertions and error codes
+remain. Two comment-only lines were removed to keep that file at 1000 lines.
+
+Main-loop serial verification of the resulting state:
+
+- C3 owner and binder partitions: `39 passed`.
+- Complete selector contract suite: `638 passed`.
+- Runbook contract suite: `62 passed`.
+- Shipping selector: 73 path/node-id entries, including the new binder
+  partition; `meta_guard_only=false`, `collection_smoke_required=true`.
+- Shipping targeted assertion row: `6642 passed, 12 skipped, 1 warning` in
+  796.35 seconds. A first foreground attempt hit the tool's ten-minute timeout
+  at 84% and is not counted; the unchanged command was rerun to completion.
+- Full-tree collection smoke: `18675 tests collected`; this is import/syntax
+  evidence only, not assertion proof.
+- Default full unit row: `18442 passed, 15 skipped, 218 deselected, 1 warning`
+  in 1620.81 seconds.
+- Changed-Python Ruff and compilation: 83 files PASS.
+- Target OpenSpec strict validation, three schema metaschema checks, three
+  shipping-example checks, changed JSON/JSONL parsing, line-count, full diff,
+  edit-artifact and protected-state gates: PASS.
+
+The only pytest warning remained the local ecCodes 2.41.0 recommendation for
+2.42.0 or newer. A Phase 6.2 read-only invariant audit found no remaining GS-P1
+candidate across held reads, C3 cross-document binding, C1/C2 siblings, failure
+publication and selector ownership. Its persisted verdict is CLEAN.
+
 ## Pending at this record
 
-- Complete the Phase 6.2 selector audit, one budgeted comprehensive review, Gap
-  Sweep and GitHub CI gates.
-- Do not access node-27 before #2137 merges.
+- Commit the semantic fix, run the fifth and final budgeted comprehensive review,
+  rerun Phase 7 Gap Sweep on the resulting clean SHA, and complete GitHub CI and
+  pre-merge evidence gates.
+- Do not access node-27 before #2137 merges. Task 4.0 remains unchecked until
+  that merge; live tasks 4.1-4.8 remain unexecuted.
