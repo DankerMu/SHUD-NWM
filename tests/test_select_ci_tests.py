@@ -380,6 +380,11 @@ NODE27_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
             "tests/test_node27_timeseries_compression_supervisor.py",
         }
     ),
+    # #2188: runs on node-27 (its default cache dir is that box's
+    # `/home/nwm/.cache/nhms/mvt`) but is named outside the `nhms-node27-`
+    # prefix, so it is the first `.service` row here outside that prefix and,
+    # unlike the other `.service` rows, owes NO sibling lane pin.
+    "infra/systemd/nhms-display-api.service": frozenset({"tests/test_hydro_display_mvt_scaling.py"}),
     "infra/systemd/nhms-node27-download.timer": frozenset({"tests/test_node27_download_cycles.py"}),
     "infra/systemd/nhms-node27-timeseries-compression.timer": frozenset(
         {
@@ -412,18 +417,71 @@ def test_node27_unit_files_select_their_owner_suites(unit: str, owners: frozense
 
     assert owners <= selected, f"{unit} lost its owner suite(s): {sorted(owners - selected)}"
 
-    if unit.endswith(".service"):
+    # #2188: the predicate is the pin's OWN glob, not `.endswith(".service")`.
+    # The suffix spelling held only because every row in this table happened to
+    # carry the `nhms-node27-` prefix; `nhms-display-api.service` is the first
+    # row that is a node-27 unit WITHOUT that prefix, so it does not match the
+    # `#2173` glob, cannot get the pin, and must fall into the else branch and
+    # assert it does NOT carry the lane pin. That is a tightening, not a
+    # loosening: hanging display-api off the glob row would red here.
+    if fnmatch.fnmatch(unit, "infra/systemd/nhms-node27-*.service"):
         # The `#2173` glob row accumulates on top of the path-exact row (no
         # `stop_on_match`); this PR must not cost a unit its lane pin.
         assert (
             "tests/test_node27_timeseries_retention.py" in selected
         ), f"{unit} does not select the sibling lane pin"
     else:
-        # The pin's glob is `nhms-node27-*.service`; a `.timer` row must not
+        # The pin's glob is `nhms-node27-*.service`; a `.timer` row -- or a
+        # node-27 unit named outside the `nhms-node27-` prefix -- must not
         # smuggle the pin suite in through its own targets.
         assert (
             "tests/test_node27_timeseries_retention.py" not in selected
         ), f"{unit} pulled in the `.service`-only sibling lane pin"
+
+
+# #2188: the node-22 sibling of the table above -- same producer -> consumer
+# statement for units that live on the compute box. Kept as its own table
+# rather than merged into a generic `SYSTEMD_UNIT_OWNER_SUITES` because the
+# node-27 table's docstring and pin branch are lane-specific. Both rows are
+# outside the `#2173` glob `infra/systemd/nhms-node27-*.service`, so neither
+# owes the sibling lane pin.
+NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
+    "infra/systemd/nhms-scheduler-file-provider-refresh.service": frozenset(
+        {"tests/test_scheduler_file_provider_refresh.py"}
+    ),
+    "infra/systemd/nhms-scheduler-file-provider-refresh.timer": frozenset(
+        {"tests/test_scheduler_file_provider_refresh.py"}
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("unit", "owners"),
+    sorted(NODE22_UNIT_OWNER_SUITES.items()),
+    ids=[PurePosixPath(unit).name for unit in sorted(NODE22_UNIT_OWNER_SUITES)],
+)
+def test_node22_unit_files_select_their_owner_suites(unit: str, owners: frozenset[str]) -> None:
+    """#2188 — the node-22 refresh units had NO rule at all, not even a pin.
+
+    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `read_text`s both files and asserts the `.service`'s wrapper `ExecStart`,
+    `TimeoutStartSec=7200`, the absence of `PrivateTmp=true` and the
+    `Before=`/`ExecCondition=` scheduler-independence pair, plus the `.timer`'s
+    `OnCalendar`/`RandomizedDelaySec`/`Persistent=false` schedule. Before #2188 a
+    unit-only diff selected NOTHING, so all of that degraded to a zero-assertion
+    `--collect-only` smoke. Parametrized rather than looped so each unit reds
+    independently, same shape as the node-27 table's meta test above.
+    """
+    selected = set(select_tests([unit], repo_root=Path(".")))
+
+    assert owners <= selected, f"{unit} lost its owner suite(s): {sorted(owners - selected)}"
+
+    # These are node-22 units: the `#2173` pin glob is
+    # `infra/systemd/nhms-node27-*.service`, so neither row may smuggle the
+    # node-27 lane pin in through its own targets.
+    assert (
+        "tests/test_node27_timeseries_retention.py" not in selected
+    ), f"{unit} pulled in the node-27 sibling lane pin"
 
 
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
