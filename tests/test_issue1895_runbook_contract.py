@@ -22,6 +22,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -414,7 +415,7 @@ def test_g1_freeze_validates_digest_as_lowercase_hex_and_bytes_as_decimal(tmp_pa
     os.chmod(census, 0o600)
     policy = tmp_path / "capacity-policy.env"
     completed = subprocess.run(
-        ["uv", "run", "--no-sync", "python", "-c", python],
+        [sys.executable, "-c", python],
         cwd=tmp_path,
         env={**os.environ, "CENSUS_ARTIFACT": str(census), "POLICY_FILE": str(policy), "PYTHONPATH": str(REPO_ROOT)},
         capture_output=True,

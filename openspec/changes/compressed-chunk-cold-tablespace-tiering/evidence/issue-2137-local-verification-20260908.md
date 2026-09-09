@@ -582,10 +582,69 @@ root file `1l`; it was read, confirmed to be this session's empty artifact, and
 removed without touching protected path `2`. These repairs change no production
 selector, workflow, public contract, runtime behavior or OpenSpec requirement.
 
+## Final-head CI launcher failure and `ci-only` repair
+
+The two probe repairs were committed through
+`dfd35b08c2c5370ddd8a48fd49df25db331a131a`. A fresh exact-SHA Phase 7 Gap
+Sweep reviewed all post-baseline master integrations and test-only repairs and
+returned CLEAN. The then-current master advance touched eight unrelated
+OpenSpec/stage-log paths with zero overlap, so no fourth merge was required.
+The local and remote branch tips matched that SHA.
+
+GitHub CI run `34365513351` and Governance Audit run `34365513497` both used
+that exact head. Governance, Markdown and JSON Schema jobs passed. The targeted
+Unit Tests job selected 73 targets and executed real pytest assertions to 100%;
+it was neither collect-only nor selector-meta-only. Its sole failure was:
+
+```text
+FAILED tests/test_issue1895_runbook_contract.py::test_g1_freeze_validates_digest_as_lowercase_hex_and_bytes_as_decimal
+FileNotFoundError: [Errno 2] No such file or directory: 'uv'
+1 failed, 6678 passed, 11 skipped, 2 warnings in 936.57s
+```
+
+The targeted CI job deliberately has no setup-uv step and invokes its installed
+Python/pytest directly. Diagnosis proved that the failing dynamic runbook test
+used `uv run --no-sync python -c` only as its own child-process launcher. The
+production runbook uses its pinned repository interpreter, and another static
+contract already checks allowed runbook launch forms. The dynamic oracle tests
+the extracted G1 heredoc's held input, lowercase digest and canonical decimal
+capacity behavior; the `uv` executable is not part of that contract.
+
+The exact test passed on the normal local PATH, reproduced `FileNotFoundError`
+under a no-uv PATH, and passed under that same no-uv PATH when only its outer
+launcher was replaced by `[sys.executable, "-c", python]`. This was classified
+as a Phase 8 `ci-only` launcher compatibility repair. Only
+`tests/test_issue1895_runbook_contract.py` changed: it imports `sys` and uses
+that current test interpreter. The extracted heredoc, cwd, environment,
+CENSUS_ARTIFACT/POLICY_FILE/PYTHONPATH, output capture, `check=False` and every
+existing assertion remain unchanged. CI, runbook, selector, production code,
+schema and OpenSpec were not modified.
+
+Independent local verification of the repair tree:
+
+- No-uv focused discriminator: `1 passed`.
+- Complete runbook contract suite: `62 passed`.
+- Correct PR changed-file authority: 101 paths; shipping selector remains 73
+  targets, includes the runbook contract and C3 binder partition, and reports
+  `meta_guard_only=false`, `collection_smoke_required=true`. An implementer
+  report that used a 135-path/95-target worktree union was rejected and is not
+  evidence.
+- Exact shipping targeted assertion row: `6678 passed, 12 skipped, 1 warning`
+  in 744.24 seconds.
+- Full-tree collection smoke: `18945 tests collected` in 10.44 seconds;
+  import/syntax evidence only.
+- Default full unit row: `18711 passed, 15 skipped, 219 deselected, 1 warning`
+  in 1615.43 seconds.
+- Scoped Ruff, py_compile and diff checks: PASS.
+
+The remaining local warning is the unchanged ecCodes 2.41.0 recommendation for
+2.42.0. The second CI warning was runner-environment output, not another test
+failure. No remote node, live DB or live receipt was accessed.
+
 ## Remaining gates after this record
 
-- Treat the commit containing this second repair and evidence as `ci-only`,
-  rerun Phase 7 final review on its exact SHA, and complete GitHub CI and the
-  pre-merge hard gates.
+- Treat the commit containing this launcher repair and evidence as `ci-only`,
+  rerun Phase 7 on its exact SHA, push once, and require fresh exact-SHA GitHub
+  CI to execute assertions and pass before the pre-merge hard gate.
 - Do not access node-27 before #2137 merges. Task 4.0 remains unchecked until
   that merge; live tasks 4.1-4.8 remain unexecuted.
