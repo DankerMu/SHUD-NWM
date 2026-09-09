@@ -30,7 +30,14 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
         `0o600`, effective-uid owner, path/fd `(st_dev, st_ino)` match), bounded
         `LOCK_EX|LOCK_NB` poll loop with a **default 300 s** deadline overridable
         by `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS`, never unlinks the
-        lock file. The timeout error must be **raised as each lane's own type**
+        lock file. **Never reentrant**: `flock` is per open-file-description, so a
+        second acquisition on the same file from the same process blocks itself
+        until the deadline. Acquire at batch-owner level only; `copyback_batch_lock`
+        must never be called from inside `_copyback_object_tree_with_rollback`
+        (`publisher.py:1593`) or any helper it calls, because
+        `forcing_copyback_backfill._copy_package` (`:744`) calls that helper
+        directly while already holding the lock itself (T3).
+        The timeout error must be **raised as each lane's own type**
         (`RunTreeCopybackError` in the run-tree lane; `PublishError` with code
         `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` in the q_down/run-products lane) —
         `chain_forecast_execution.py:953` catches only `RunTreeCopybackError` and
@@ -38,8 +45,9 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
         ValueError`, so a foreign type escapes both. **Ordering: prepare the root →
         run its identity/overlap guards → open the lock → acquire**; a lane that
         returns `skipped` because the copyback root is the object-store root
-        (`publisher.py:1227-1228`, `run_tree_copyback.py:56-61`) must create no
-        lock file at all.
+        (canonical `publisher.py:1227-1228`, q_down `:933-948`, run-products
+        `:786-792`, run-tree `run_tree_copyback.py:56-61`) must create no lock
+        file at all.
       - `ensure_traversable_copyback_directory(path, *, containment_root=None)` —
         level-by-level create through `safe_fs.ensure_directory_no_follow`,
         `chmod 0o755` **unconditionally** on the levels this call created and on
@@ -64,13 +72,27 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
       `:982-1133`) and `publisher._copyback_canonical_precip` (def `:1157`; batch
       region `:1209-1335`) — acquired after the copyback root's identity/overlap
       guards and before planning, released only after commit or rollback returns.
-      `_copyback_run_products` has no production caller today
+      **Placement relative to each lane's `except Exception`**: in
+      `_copyback_qdown_products` the root guards already sit before the batch
+      `try:` at `:983`, so acquire there too — *outside* that try, because its
+      handler (`:1093`) rewraps any non-`PublishError` as
+      `OBJECT_STORE_COPYBACK_FAILED` and would erase the distinct timeout code. In
+      `_copyback_canonical_precip` the guards are *inside* the `try:` at `:1209`,
+      so the acquire is inside it as well; its handler (`:1301`) returns the
+      `failed` receipt carrying `error_type`, and `rollback_log` is still empty on
+      a timeout so no rollback runs. `_copyback_run_products` has no production
+      caller today
       (`publish_cycle:181` delegates to `publish_qdown_cycle`; only
       `tests/test_tile_publisher.py:1192`/`:1264` call it); lock it anyway so the
       two siblings cannot diverge.
 - [ ] T3 Hold the same lock in
-      `services/tile_publisher/forcing_copyback_backfill.py` (around the `:744`
-      copyback call) and in `scripts/canonical_precip_copyback_backfill.py`
+      `services/tile_publisher/forcing_copyback_backfill._copy_package` (def
+      `:734`) **per package** — wrap the whole `rollback_log` lifetime `:742-772`,
+      not just the `:744` copyback call: the lock must still be held when
+      `_commit_qdown_copyback_batch` (`:755`) or, on the `except` path,
+      `_rollback_qdown_copyback_batch` (`:758`) returns. Releasing at `:754` is
+      exactly the E4 defect shape. Per package, because `_copy_package` runs in a
+      loop at `:649`. And in `scripts/canonical_precip_copyback_backfill.py`
       **per cycle, inside `_backfill_cycle` (def `:388`, called from `:382`)** —
       never once for the whole run, which would hold the lock past the publisher's
       deadline.
@@ -98,7 +120,7 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
 | Lint | `uv run ruff check .` | clean | local |
 | Contract | `openspec validate harden-copyback-batch-mutex-and-dir-traversal --strict --no-interactive` | pass | local |
 | Backend targeted | `uv run pytest -q tests/test_copyback_guard.py tests/test_tile_publisher.py tests/test_run_tree_copyback.py tests/test_canonical_precip_copyback_backfill.py tests/test_forcing_copyback_backfill.py tests/test_safe_fs.py` | all pass | node-27 |
-| #1513 / #1631 no-regression | `uv run pytest -q tests/test_safe_fs.py tests/test_run_tree_copyback.py tests/test_production_scheduler.py -k "umask or provider_lock_parent or acl"` | green at node-27's default umask | node-27 |
+| #1513 / #1631 no-regression | `uv run pytest -q tests/test_safe_fs.py tests/test_scheduler_file_provider_refresh.py tests/test_state_manager.py -k "umask or provider_lock_parent or acl or copyback_state"` | green at node-27's default umask | node-27 |
 | Full backend regression | `uv run pytest -q` | pass | node-27 |
 | Cross-uid traversal | AC4 receipt procedure below | `cat` output is non-empty | node-22 write + node-27 read |
 
@@ -157,12 +179,24 @@ Each new-behavior test must be shown red against pre-change source first.
       succeed without the mutex.
 - [ ] E11 Lock timeout inside `_mirror_canonical_precip`: the cycle records a
       `failed` `canonical_precip_mirror` receipt and does not raise.
-- [ ] E13 Lock timeout in the run-tree lane raises `RunTreeCopybackError` and is
-      caught by `_copyback_stage_run_trees` (`chain_forecast_execution.py:953`) —
-      no exception escapes `_finalize_stage`.
-- [ ] E14 Lock timeout in the q_down lane raises `PublishError` with the
-      `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code and is caught by
-      `publish_qdown_cycle` (`publisher.py:199-202`).
+- [ ] E13 Lock timeout in the run-tree lane raises `RunTreeCopybackError`, is
+      caught by `_copyback_stage_run_trees` (`chain_forecast_execution.py:953`),
+      records an `object_store_copyback` / `failed` pipeline event, and then
+      **propagates as `_chain.OrchestratorError`** (`:971`). Assert the event and
+      the propagated type — not "no exception escapes". Accepted consequence,
+      recorded here because it is the one lane where a timeout is not free: the
+      call sits at `_after_cycle_stage_terminal:859` inside the
+      `result_status == "succeeded"` branch, so the raise skips
+      `update_forecast_cycle_status` (`:861`) and aborts the stage's success path.
+      The 300 s default was sized against the canonical hook's position; if this
+      lane proves to need a different budget, that is a follow-up, not a silent
+      retune.
+- [ ] E14 Lock timeout in the q_down lane raises `PublishError` and it
+      **propagates out of `publish_qdown_cycle` still carrying** the
+      `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code — `publisher.py:199-200` re-raises
+      `PublishError` unchanged; the point of the distinct type is that it is not
+      swallowed by the `SQLAlchemyError | OSError | ValueError` arm at `:201-202`
+      nor rewrapped as `OBJECT_STORE_COPYBACK_FAILED`.
 - [ ] E15 Copyback root identical to the object-store root: the lane returns
       `skipped` and **no lock file exists** anywhere under the object-store root.
 - [ ] E16 `state_manager._ensure_copyback_state_parent` still chmods `0o775` and

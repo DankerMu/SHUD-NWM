@@ -91,7 +91,8 @@ one more reason for 300 s rather than 1800 s.
   return `skipped` when the copyback root resolves to the object-store root itself
   (`publisher.py:1227-1228`, the same identity check in `_copyback_qdown_products`
   noted at `:918`, `run_tree_copyback.py:56-61`), and `_prepare_copyback_root`
-  deliberately only *verifies* in that case (`:1400`). Acquiring before the guards
+  deliberately only *verifies* in that case (`:1401`, under the branch at
+  `:1400`). Acquiring before the guards
   would create a lock file inside the production object-store root on a path that
   writes nothing.
 - **Blocking with a deadline**: contention must wait, not refuse — refusing would
@@ -113,9 +114,19 @@ one more reason for 300 s rather than 1800 s.
   `PublishError | SQLAlchemyError | OSError | ValueError` (`publisher.py:199-202`).
   So: `RunTreeCopybackError` in the run-tree lane; `PublishError` with a distinct
   `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code in the q_down/run-products lane; and in
-  the canonical lane the acquire sits inside `copyback_canonical_precip`, so the
-  existing `except Exception` at `chain_forecast_execution.py:1046` folds it into
-  the `failed` receipt.
+  the canonical lane the acquire sits inside `_copyback_canonical_precip`'s own
+  `try:` (`publisher.py:1209`), so its `except Exception` at `:1301` catches
+  first and returns the `failed` summary; `_mirror_canonical_precip`'s
+  `except Exception` (`chain_forecast_execution.py:1046`) is the outer net, not
+  the handler that fires. Same observable receipt either way.
+  One asymmetry is deliberate and recorded: the run-tree lane's timeout does *not*
+  degrade to a receipt. `_copyback_stage_run_trees` re-raises as
+  `_chain.OrchestratorError` (`:971`) from inside the
+  `result_status == "succeeded"` branch of `_after_cycle_stage_terminal` (`:859`),
+  so the stage's `update_forecast_cycle_status` (`:861`) is skipped. That is the
+  existing contract for a run-tree copyback failure and this change does not widen
+  it; it only adds one more way to reach it. E13 asserts it rather than leaving it
+  as a surprise.
 - **Backfill granularity**: `scripts/canonical_precip_copyback_backfill.py`
   acquires per cycle, inside `_backfill_cycle` (def `:388`, called from `:382`),
   not once for the whole

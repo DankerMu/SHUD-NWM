@@ -78,7 +78,7 @@ and it is why the mode-less `mkdir` at `:440` must stay exactly as it is.
     following the proven `packages/common/node27_timeseries_lifecycle_lock.py`
     idiom (no-follow open, mode/owner/nlink/`(st_dev, st_ino)` assertions, never
     unlinked).
-  - `ensure_traversable_copyback_directory(path, *, containment_root)`: creates
+  - `ensure_traversable_copyback_directory(path, *, containment_root=None)`: creates
     the chain one level at a time through `safe_fs.ensure_directory_no_follow`,
     and `chmod 0o755` **only** the levels this call created.
 - Hold `copyback_batch_lock` across every whole-batch directory-tree
