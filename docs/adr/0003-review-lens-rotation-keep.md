@@ -4055,3 +4055,24 @@ Decision unchanged: **keep rotation**. Rotated catches still exceed core
 catches cumulatively, though by a slightly narrower margin than at the previous
 revisit, and the measurement caveats above still apply. Next revisit on the
 audit's next flag or a maintainer override.
+
+## 2026-09-09 revisit — PR #2182 (#2141, fixture `high`)
+
+The audit again reports `core=227`, `rotated=269`, `phase=53` over 193
+multi-round merged PRs. PR #2182 completed in one comprehensive round, so it
+changes neither the multi-round denominator nor any later-round catch bucket.
+Round 1 used the complete high-fixture four-seat mix and returned zero candidate
+findings; the independent Phase 7 Gap Sweep was also clean. Therefore this PR
+adds no rotation signal in either direction.
+
+Its useful process signal sits before that metric: fixture review rejected four
+contract gaps before implementation, covering scalar-analysis ownership,
+schema-qualified left boundaries, whole-token alias containment, and actual
+balanced-close state. Those corrections are recorded in the implementation
+line's note but not counted as verifier verdicts or `gate_net_catch`, because no
+Phase 4.5 verification adjudicated them. That keeps the metric honest while
+preserving the fixture review's value in the audit trail.
+
+Decision unchanged: **keep rotation**. The cumulative rotated margin remains 42,
+the measurement caveats above still apply, and this single-round PR supplies no
+new evidence for revising the follow-up seat policy.
