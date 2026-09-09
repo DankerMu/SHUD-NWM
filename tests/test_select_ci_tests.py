@@ -6240,11 +6240,11 @@ def _run_probe_script(
     SHORT FINITE ``_PROBE_DRAIN_TIMEOUT``; if a drain still cannot finish after
     a second group kill plus a direct-child fallback, the probe returns stable
     cleanup-failure status ``_PROBE_CLEANUP_FAILURE_STATUS`` (125) instead of
-    blocking forever. A ``finally`` path kills any remaining group descendants
-    on success, error, AND timeout, so a background child can never outlive the
-    probe. Only ``ProcessLookupError`` (group already gone) is ignored; no other
-    cleanup failure is masked. The parent test runner's process group is never
-    touched.
+    blocking forever. The bounded helper owns group cleanup on startup failure
+    and timeout; the outer ``finally`` cleans success and other non-delegated
+    exits, so a background child can never outlive the probe. Only
+    ``ProcessLookupError`` (group already gone) is ignored; no other cleanup
+    failure is masked. The parent test runner's process group is never touched.
     """
     if trusted_variant not in _TRUSTED_COLLECTION_VARIANTS:
         raise ValueError(f"unknown trusted collection variant: {trusted_variant}")
@@ -6320,6 +6320,7 @@ def _run_probe_script(
     status = 0
     stdout: bytes | str | None = b""
     stderr: bytes | str | None = b""
+    group_cleanup_taken_over = False
     try:
         startup_message = None
         if trusted_variant in _PROBE_READY_VARIANTS:
@@ -6332,6 +6333,7 @@ def _run_probe_script(
             # Startup failure uses the exact same whole-group bounded cleanup as
             # a business timeout, but returns a distinct observable status and
             # message so callers never confuse it with status 124 or 125.
+            group_cleanup_taken_over = True
             stdout, stderr, cleanup_status = _kill_probe_group_and_drain(proc, timeout=timeout)
             status = (
                 _PROBE_CLEANUP_FAILURE_STATUS
@@ -6350,16 +6352,19 @@ def _run_probe_script(
                 # kill plus a direct-child kill fallback, an undrainable group
                 # returns a stable named cleanup-failure status (never an
                 # unbounded wait).
+                group_cleanup_taken_over = True
                 stdout, stderr, status = _kill_probe_group_and_drain(proc, timeout=timeout)
     finally:
-        # On EVERY exit (success, error, timeout) terminate any background
-        # descendants still alive in the new process group. Ignore only
+        # On every path that did not delegate group cleanup to the bounded
+        # helper, terminate remaining background descendants. Once delegated,
+        # a stale numeric PGID must never be signalled again. Ignore only
         # ProcessLookupError (the group is already gone); do not silently mask
         # other cleanup failures.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        if not group_cleanup_taken_over:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     events = _probe_events_from_file(events_file)
     summary = summary_file.read_text(encoding="utf-8") if summary_file.is_file() else ""
     return events, _probe_decode(stdout), _probe_decode(stderr), summary, status
@@ -7765,6 +7770,159 @@ def test_unknown_trusted_variant_rejected_without_execution(tmp_path: Path) -> N
 # fixture-ready state. No network/DB/real tests are involved; short bounded
 # polling proves no orphan may survive.
 # ---------------------------------------------------------------------------
+def _run_fake_probe_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    trusted_variant: str,
+    startup_exited: bool,
+    communicate_outcomes: tuple[tuple[bytes, bytes] | subprocess.TimeoutExpired, ...],
+    allowed_group_kills: int,
+) -> tuple[
+    tuple[list[tuple[str, tuple[str, ...]]], str, str, str, int],
+    list[tuple[int, int]],
+    list[int],
+]:
+    """Run a closed trusted variant through a fake process and signal boundary.
+
+    The fake never launches the generated script or a descendant. Its finite
+    outcome sequence models the initial communicate plus any helper drains;
+    accepting only the expected number of group kills turns a stale final PGID
+    retry into deterministic ``PermissionError`` rather than a real signal.
+    """
+    group_kills: list[tuple[int, int]] = []
+    child_kills: list[int] = []
+    outcomes = iter(communicate_outcomes)
+
+    class FakePopen:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        @property
+        def pid(self) -> int:
+            return 999_999
+
+        @property
+        def returncode(self) -> int:
+            return 0
+
+        def poll(self) -> int | None:
+            return 0 if startup_exited else None
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            outcome = next(outcomes)
+            if isinstance(outcome, subprocess.TimeoutExpired):
+                raise outcome
+            return outcome
+
+        def kill(self) -> None:
+            child_kills.append(self.pid)
+
+    def record_group_kill(pgid: int, sig: int) -> None:
+        group_kills.append((pgid, sig))
+        if len(group_kills) > allowed_group_kills:
+            raise PermissionError("unexpected stale probe process-group kill")
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(os, "killpg", record_group_kill)
+    result = _run_probe_script(
+        trusted_variant,
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=0.01,
+    )
+    return result, group_kills, child_kills
+
+
+def _fake_probe_timeout() -> subprocess.TimeoutExpired:
+    return subprocess.TimeoutExpired(cmd="probe", timeout=0.01, output=b"partial", stderr=b"err")
+
+
+def test_probe_timeout_handoff_prevents_stale_final_group_kill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The helper owns the one group kill after the business timeout. A duplicate
+    # final kill raises PermissionError in this fake, exactly as a stale numeric
+    # PGID must remain visible rather than being silently ignored.
+    result, group_kills, child_kills = _run_fake_probe_cleanup(
+        monkeypatch,
+        tmp_path,
+        trusted_variant="live",
+        startup_exited=False,
+        communicate_outcomes=(_fake_probe_timeout(), (b"timeout-out", b"timeout-err")),
+        allowed_group_kills=1,
+    )
+
+    assert result[-1] == 124
+    assert group_kills == [(999_999, signal.SIGKILL)]
+    assert child_kills == []
+
+
+def test_probe_startup_failure_handoff_prevents_stale_final_group_kill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The closed readiness fixture's fake parent exits before publishing ready,
+    # so startup cleanup—not the business-timeout path—takes over group cleanup.
+    result, group_kills, child_kills = _run_fake_probe_cleanup(
+        monkeypatch,
+        tmp_path,
+        trusted_variant="descendant_premature_exit",
+        startup_exited=True,
+        communicate_outcomes=((b"startup-out", b"startup-err"),),
+        allowed_group_kills=1,
+    )
+
+    assert result[-1] == 126
+    assert group_kills == [(999_999, signal.SIGKILL)]
+    assert child_kills == []
+
+
+def test_probe_drain_failure_handoff_prevents_third_group_kill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Initial timeout plus two bounded drain timeouts requires exactly the two
+    # helper group kills and one direct-child fallback; no stale final retry may
+    # occur after the stable cleanup-failure status is chosen.
+    result, group_kills, child_kills = _run_fake_probe_cleanup(
+        monkeypatch,
+        tmp_path,
+        trusted_variant="live",
+        startup_exited=False,
+        communicate_outcomes=(_fake_probe_timeout(), _fake_probe_timeout(), _fake_probe_timeout()),
+        allowed_group_kills=2,
+    )
+
+    assert result[-1] == 125
+    assert group_kills == [(999_999, signal.SIGKILL), (999_999, signal.SIGKILL)]
+    assert child_kills == [999_999]
+
+
+def test_probe_success_keeps_final_group_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # No helper takes over after ordinary completion, so the unconditional-final
+    # cleanup behavior remains responsible for its one group kill.
+    result, group_kills, child_kills = _run_fake_probe_cleanup(
+        monkeypatch,
+        tmp_path,
+        trusted_variant="live",
+        startup_exited=False,
+        communicate_outcomes=((b"success-out", b"success-err"),),
+        allowed_group_kills=1,
+    )
+
+    assert result[-1] == 0
+    assert group_kills == [(999_999, signal.SIGKILL)]
+    assert child_kills == []
+
+
 def test_probe_starts_business_timeout_after_descendant_readiness(tmp_path: Path) -> None:
     # The trusted fixture waits 0.25s BEFORE publishing readiness, deliberately
     # longer than this 0.05s business timeout. A probe that starts communicate()

@@ -447,7 +447,7 @@ The second latest-master integration was committed at
 `6d71e1f0026901a2721b4a0b45e102ed7b639df4`. Its shipping selector remained
 byte-identical to the prior 73-entry selection and continued to report
 `meta_guard_only=false` and `collection_smoke_required=true`. Exact-tree static
-checks and a 18,930-item collection smoke passed, but the full targeted row
+checks and an 18,930-item collection smoke passed, but the full targeted row
 found one failure:
 
 ```text
@@ -504,9 +504,88 @@ workflow, public contract, OpenSpec requirement, runtime behavior or test
 assertion meaning; it makes the existing cleanup oracle start from an
 observable ready state rather than a scheduling race.
 
-## Pending at this record
+## Third master advance and stale-PGID `ci-only` repair
 
-- Commit the classified `ci-only` repair, rerun Phase 7 final review on the
-  exact resulting SHA, and complete GitHub CI and pre-merge evidence gates.
+Before the readiness repair could become the final reviewed tip,
+`origin/master` advanced a third time from
+`7fc9a43c7fe524c76a8ad1a97ac56af799154054` to
+`6a7317f977116277de77f16a77926cbca99afc1c`. Its twelve-path delta again
+overlapped only gate memory and the two selector files. The new selector rules
+are additive precipitation composition-owner routes. Selector implementation
+and tests merged automatically. Structured gate-memory comparison proved 268
+common records identical, current master alone added closed issue `2098`, and
+this branch alone carried open issue `2137`; the final union preserves all 269
+master records and adds only `2137`, for 270 total.
+
+On that resolved merge tree, C3/runbook `101 passed`, the readiness cleanup
+matrix `6 passed`, Ruff/py_compile/OpenSpec/memory-union checks passed, and the
+first complete selector run passed `670`. A second complete selector run under
+higher process churn then exposed two failures:
+
+```text
+FAILED test_probe_startup_deadline_is_distinct_and_cleans_descendants
+FAILED test_probe_cleans_descendants_on_timeout
+PermissionError: [Errno 1] Operation not permitted
+2 failed, 668 passed in 724.47s
+```
+
+Both failures occurred at the outer unconditional final `killpg`. The bounded
+helper had already killed and drained the old process group for startup failure
+or business timeout; the final block then signalled the stale numeric PGID
+again. A fake-Popen call-order diagnosis, without real signals, confirmed the
+old matrix: 124 and 126 paths each sent two group kills, while status 125 sent
+three group kills plus a direct-child kill. `EPERM` is incompatible with the
+already drained same-user probe group and proves the numeric PGID no longer
+identified that group. Ignoring `PermissionError` would hide the race and would
+not prevent a same-UID reused PGID from receiving an unrelated signal.
+
+This second failure was also classified as a Phase 8 `ci-only` test-harness
+repair. `_run_probe_script` now marks group cleanup as taken over immediately
+before either bounded-helper call. The outer final kill runs only when no helper
+took over, preserving ordinary and successful-descendant cleanup while removing
+stale retries from 124, 125 and 126 paths. `PermissionError` is not caught or
+masked; timeout lengths, status meanings and `_kill_probe_group_and_drain`
+remain unchanged.
+
+Three deterministic fake-Popen discriminator tests first failed by triggering
+the duplicate final signal; the ordinary-success preservation test already
+passed:
+
+```text
+3 failed, 1 passed
+```
+
+After repair, the exact call matrix is:
+
+- business timeout 124: one helper group kill;
+- startup failure 126: one helper group kill;
+- drain failure 125: two helper group kills plus one direct-child kill;
+- ordinary/successful completion: one outer-final group kill.
+
+Final serial verification on the repaired third-merge tree:
+
+- Fake handoff plus real readiness/timeout/success/drain matrix: `10 passed`.
+- Complete selector contract suite: `674 passed`.
+- Shipping selector: 73 entries, including C3 binder;
+  `meta_guard_only=false`, `collection_smoke_required=true`.
+- Exact shipping targeted assertion row: `6678 passed, 12 skipped, 1 warning`
+  in 686.81 seconds.
+- Full-tree collection smoke: `18945 tests collected` in 10.06 seconds;
+  import/syntax evidence only.
+- Default full unit row: `18711 passed, 15 skipped, 219 deselected, 1 warning`
+  in 1601.00 seconds.
+- Ruff, py_compile, diff and protected-state checks: PASS.
+
+The only warning remained the local ecCodes 2.41.0 recommendation. No task-
+owned descendant remained. One malformed redirection token created an empty
+root file `1l`; it was read, confirmed to be this session's empty artifact, and
+removed without touching protected path `2`. These repairs change no production
+selector, workflow, public contract, runtime behavior or OpenSpec requirement.
+
+## Remaining gates after this record
+
+- Treat the commit containing this second repair and evidence as `ci-only`,
+  rerun Phase 7 final review on its exact SHA, and complete GitHub CI and the
+  pre-merge hard gates.
 - Do not access node-27 before #2137 merges. Task 4.0 remains unchecked until
   that merge; live tasks 4.1-4.8 remain unexecuted.
