@@ -4032,3 +4032,26 @@ not overturn a 42-catch cumulative margin, and the measurement caveats above
 still apply. Worth noting for the next revisit: the counters are now moving
 again, and if later-round core catches continue to accumulate while rotated
 stays flat, the margin is the thing to re-read rather than the per-PR story.
+
+## 2026-09-09 revisit — PR #2196 (#2188, fixture `compact`)
+
+The audit flagged DECIDABLE with the counters moved for the first time in
+several revisits: `core=227` (was 226), `rotated=269`, `phase=53` over 193
+multi-round merged PRs (was 192). The increment is not from this PR. PR #2196
+was single-round, so it enters neither the multi-round denominator nor any
+later-round catch counter; the new core catch and the new denominator come from
+PR #2190 (#2033), merged from another worktree in the same window.
+
+PR #2196's own sample is again rotation-silent: its round-1 seats
+(correctness; test-evidence + spec-compliance) were the compact default mix
+with no rotated-in lens, and its single finding was raised independently by
+both seats, at P3 from correctness and P2 from spec-compliance. The independent
+verifier then narrowed it to P3 by refuting the premise the higher rating
+rested on. That is the paired-seat layout doing what it is meant to do at
+`compact`, and it is also a reminder that seat severity is a proposal, not a
+verdict.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, though by a slightly narrower margin than at the previous
+revisit, and the measurement caveats above still apply. Next revisit on the
+audit's next flag or a maintainer override.
