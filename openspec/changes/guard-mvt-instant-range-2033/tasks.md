@@ -66,7 +66,10 @@ failing output in the implementer report.
 - [x] 3.4 Route regression: `not-an-instant` still 422 with `sql=0` (FastAPI-level, unchanged), and an
   in-range instant still reaches SQL (`execute_count > 0`) on both legacy routes.
 - [x] 3.5 Route regression: the `{source}/{cycle}` route still returns 422 for both extreme instants
-  **and** for an in-range sub-second instant (its existing guard must not regress).
+  **and** for an in-range sub-second instant (its existing guard must not regress). The 9999 upper bound
+  and the sub-second cases were already pinned by the `_ExplodingSession` URL table; round-1 review found
+  the **0001 lower bound had zero coverage on this route** and the fix pass added it in both the `cycle`
+  and `valid_time` positions (`quote(…, safe="")`-escaped so the `+08:00` offset survives the URL).
 - [x] 3.6 Legacy compatibility: an in-range sub-second instant on both legacy routes is **not** 422 and
   canonicalizes to `...:00.500000Z` — this is the test that fails if someone reuses
   `_require_seconds_precision_instant` on the legacy path.
@@ -93,7 +96,9 @@ failing output in the implementer report.
   out-of-range `cycle` / `valid_time`, and are byte-identical on the in-range whole-hour path (index
   body + PNG bytes + `cache_key` string). `precip.py` itself must NOT be edited (design D4b).
 - [x] 3.11a Naive-instant branch lock: both legacy routes with a **naive** `9999-12-31T23:59:59` and
-  `0001-01-01T00:00:00` are **not** 422 and reach SQL (`execute_count > 0`), identical to today —
+  `0001-01-01T00:00:00` answer **200** and reach SQL (`execute_count > 0`), identical to today —
+  round-1 review caught that the original `!= 422` also admitted a 5xx, the very status the spec
+  requirement forbids; the fix pass tightened it to `== 200` with a three-leg mutation proof —
   `canonical_mvt_time` treats naive as UTC and never overflows on them.
 - [x] 3.11 Return-value contract lock (the test that fails if 2.2 returns the original object):
   `precip_index` / `precip_png` with an in-range **half-hour-offset** instant such as
@@ -104,13 +109,13 @@ failing output in the implementer report.
 
 ## 4. Local verification (orchestrator, Phase 2)
 
-- [ ] 4.1 `uv run ruff check .` — zero findings.
-- [ ] 4.2 `uv run pytest -q tests/test_hydro_display_mvt_scaling.py` — green.
-- [ ] 4.3 `uv run pytest -q tests/test_hhe_mvt_binding.py tests/test_mvt_tile_generation_lock.py
+- [x] 4.1 `uv run ruff check .` — zero findings.
+- [x] 4.2 `uv run pytest -q tests/test_hydro_display_mvt_scaling.py` — green.
+- [x] 4.3 `uv run pytest -q tests/test_hhe_mvt_binding.py tests/test_mvt_tile_generation_lock.py
   tests/test_precip_overlay.py` — green (helper + refactored-validator consumers).
-- [ ] 4.4 `openspec validate guard-mvt-instant-range-2033 --strict --no-interactive` — pass.
-- [ ] 4.5 `grep -rn "DEBUG-" services/tiles/mvt.py apps/api/routes/hydro_display.py tests/` — clean.
-- [ ] 4.6 `git diff --stat origin/master -- apps/api/routes/precip.py` is empty (design D4b: precip is
+- [x] 4.4 `openspec validate guard-mvt-instant-range-2033 --strict --no-interactive` — pass.
+- [x] 4.5 `grep -rn "DEBUG-" services/tiles/mvt.py apps/api/routes/hydro_display.py tests/` — clean.
+- [x] 4.6 `git diff --stat origin/master -- apps/api/routes/precip.py` is empty (design D4b: precip is
   proven-unaffected, not modified).
 
 ### Non-goal: `tests/test_mvt_national_identity_probe_integration.py`
@@ -127,17 +132,17 @@ Method mirrors PR #2164 / #2030 task 5: an **isolated worktree at the PR head**,
 checkout (`/home/nwm/NWM` is parked on `hotfix/node27-rollback-pre-2073`, see design D6),
 `NHMS_ENABLE_LIVE_POSTGIS_MVT=true`, RO role URL read on the node and never written into the repo.
 
-- [ ] 5.1 All **six** tile routes (five layers, with both the legacy `hydro-national` alias and the
+- [x] 5.1 (partial — see receipt "Not covered") All **six** tile routes (five layers, with both the legacy `hydro-national` alias and the
   `{source}/{cycle}` route covered) × one real tile each at a normal in-range instant: tile bytes `md5`,
   ETag, and cache status identical between the master checkout and the PR-head worktree.
-- [ ] 5.2 Out-of-range instants against the in-process app on the live RO DB: both legacy routes ×
+- [x] 5.2 Out-of-range instants against the in-process app on the live RO DB: both legacy routes ×
   both extreme instants → `422` / `VALIDATION_ERROR` / `sql=0`. **Method for `sql=0` on a real session**:
   register a SQLAlchemy `before_cursor_execute` event listener on the live RO engine and count
   invocations across the request; the receipt records the listener snippet and the count, so the claim
   is reproducible rather than asserted.
-- [ ] 5.3 Pre-fix public baseline recorded verbatim (measured 2026-09-08 on `https://test.nwm.ac.cn`:
+- [x] 5.3 Pre-fix public baseline recorded verbatim (measured 2026-09-08 on `https://test.nwm.ac.cn`:
   `not-an-instant` 422, `9999-12-31T23:59:59-08:00` 500, `0001-01-01T00:00:00+08:00` 500).
-- [ ] 5.4 Receipt `docs/runbooks/receipts/2026-09-08-issue-2033-mvt-instant-range-node27.md`: method,
+- [x] 5.4 Receipt `docs/runbooks/receipts/2026-09-09-issue-2033-mvt-instant-range-node27.md`: method,
   worktree SHA, 5.1–5.3 tables, and the explicit statement that the public-URL post-fix re-measure is
   deferred to #2162's maintenance window (design D6).
 
@@ -150,7 +155,7 @@ checkout (`/home/nwm/NWM` is parked on `hotfix/node27-rollback-pre-2073`, see de
 | The 422 is returned before any SQL (`sql=0`) | 3.3, 5.2 |
 | Zero shift for in-range instants (cache key, SQL bind, sub-second on new route still 422) | 3.2, 3.5, 3.6, 3.7, 5.1 |
 | Tile contract tests extended with out-of-range cases and green | 3.1–3.11, 4.2, 4.3; `test_mvt_national_identity_probe_integration.py` is a recorded non-goal (§4 note) |
-| node-27 live receipt: five layers unchanged; public URL 422 | 5.1, 5.2, 5.4 — public-URL half **deferred to #2162** (design D6) |
+| node-27 live receipt: five layers unchanged; public URL 422 | 5.1, 5.2, 5.4 — receipt `docs/runbooks/receipts/2026-09-09-issue-2033-mvt-instant-range-node27.md`: 6/6 routes status/SQL-shape identical, byte/ETag/cache-key identity proven on `river-network` (the other four answer an identical pre-existing 500 from **#2145**'s un-applied migration on both arms); 4/4 out-of-range → 422 `sql=0` vs base 500 `sql=1`/`sql=2`. Public-URL half **deferred to #2162** (design D6) |
 
 ## Risk pack → evidence
 

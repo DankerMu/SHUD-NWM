@@ -1303,6 +1303,13 @@ def test_national_identity_route_gives_two_identities_two_cache_keys(monkeypatch
         # i.e. an HTTP 500 from a public URL. It is a bad request, so it is 422.
         _national_identity_url("gfs", quote("9999-12-31T23:59:59-08:00", safe="")),
         _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time=quote("9999-12-31T23:59:59-08:00", safe="")),
+        # The LOWER bound in both positions too -- task 3.5 says "both extreme
+        # instants", and `datetime.min` overflows on a POSITIVE offset, which the
+        # year-9999 pair cannot reach. `quote(..., safe="")` is mandatory here:
+        # an unescaped `+08:00` decodes as a space and would test a different,
+        # shape-invalid input.
+        _national_identity_url("gfs", quote("0001-01-01T00:00:00+08:00", safe="")),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time=quote("0001-01-01T00:00:00+08:00", safe="")),
         # `variable` is a path segment on this route too, and the route body's
         # comment claims a bad one costs no SQL. Only the SUPPORTED-set check has
         # a distinct oracle: `SUPPORTED_HYDRO_MVT_VARIABLES == ("q_down",)`, and
@@ -3424,6 +3431,15 @@ def test_legacy_tile_routes_reject_an_unrepresentable_instant_before_any_sql(
     # The MESSAGE too: the three tile routes share one validator precisely so
     # they cannot drift on the error body.
     assert error["message"] == _UNREPRESENTABLE_INSTANT_MESSAGE, response.text
+    # The whole `details` body, not just code + message: the field name is what
+    # points the client at the offending path segment, and the two legacy call
+    # sites pass it as an independent literal each. `_require_representable_instant`
+    # echoes `value.isoformat()` of the pydantic-parsed aware datetime, which
+    # round-trips the requested offset spelling verbatim.
+    assert error["details"] == {
+        "valid_time": datetime.fromisoformat(instant).isoformat(),
+        "expected_format": "YYYY-MM-DDTHH:MM:SSZ",
+    }, response.text
     assert session.execute_count == 0
 
 
@@ -3481,13 +3497,19 @@ def test_legacy_tile_routes_still_accept_a_naive_extreme_instant(
     written as `value.astimezone(UTC)` would reinterpret it in SERVER-LOCAL time
     and newly 422 these two -- platform-dependent, and invisible to every
     tz-aware case above.
+
+    `== 200`, not `!= 422`: the spec requirement is "a user-supplied tile instant
+    never produces a 5xx", and `!= 422` is satisfied by the 500 it forbids. The
+    cache read that fills `captured` happens BEFORE the producer runs, so
+    `execute_count > 0` and the `captured[0]` assertion are both already
+    satisfied by then -- a producer-side exception left all three green.
     """
     session, url_for = _legacy_route_case(route)
     response, captured = _request_national_identity_tile(
         url_for(quote(instant, safe="")), session, monkeypatch, tmp_path
     )
 
-    assert response.status_code != 422, response.text
+    assert response.status_code == 200, response.text
     assert session.execute_count > 0
     assert captured[0].valid_time == f"{instant}Z"
 
