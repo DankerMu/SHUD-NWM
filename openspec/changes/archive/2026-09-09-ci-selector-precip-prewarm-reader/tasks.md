@@ -36,7 +36,7 @@ Non-goals:
 - [x] 2.1 `tests/test_select_ci_tests.py` 新增 `test_precip_tree_module_selects_the_prewarm_reader_suite`（parametrize `services/precip/constants.py`、`services/precip/mirror.py`；`assert Path(module).exists()`；`==` 字面五条列表）。
 - [x] 2.2 同文件新增 `test_precip_route_rule_stays_without_the_prewarm_suite`（先 `assert Path("apps/api/routes/precip.py").exists()`，再 `apps/api/routes/precip.py` `==` 字面六条列表；注释写明是共享元组未改的反向护栏）。
 - [x] 2.3 红→绿证据（file swap，不用 stash）与 mutant 证据按 Required evidence 产出。
-- [x] 2.4 round-1 复审后补 `test_precip_tree_rule_carries_no_selection_flags`：spec delta 的「两个 flag 都不带」子句在行为面不可观测（该树之后无规则命中，加 `stop_on_match` 输出零变化），故直接钉在 rule 对象上，形状照 `tests/test_select_ci_tests.py:8837-8842` 的单规则 `next(...)` 先例。mutant：加 `stop_on_match=True` 后只有这条结构 pin 变红、三条输出 pin 全绿。
+- [x] 2.4 round-1 复审后补 `test_precip_tree_rule_carries_no_selection_flags`：spec delta 的「两个 flag 都不带」子句在行为面不可观测（该树之后无规则命中，加 `stop_on_match` 输出零变化），故直接钉在 rule 对象上，形状照 `test_basins_publication_helper_route_selects_exactly_eight_consumers_plus_the_rider` 的单规则 `next(...)` 先例（按用例名引用：合入前该用例的行段被本 change 自己的新增顶漂过一次）。mutant：加 `stop_on_match=True` 后只有这条结构 pin 变红、三条输出 pin 全绿。
 
 ## 3. 验证
 

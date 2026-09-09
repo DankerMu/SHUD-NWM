@@ -3976,3 +3976,26 @@ rotated-in lens. The sample carries no rotation signal.
 Decision unchanged: **keep rotation**. Rotated catches still exceed core
 catches cumulatively, and the measurement caveats above still apply. Next
 revisit on the audit's next flag or a maintainer override.
+
+## 2026-09-09 revisit — PR #2192 (#2122, fixture `compact`)
+
+The audit flagged DECIDABLE with the counters unchanged from the PR #2187
+revisit: `core=226`, `rotated=269`, `phase=53` over 192 multi-round merged
+PRs. PR #2192 was a single-round PR (Round 1 recorded clean under the
+minor-only rule; four CONFIRMED findings, highest P2, all fixed in-PR; Phase 7
+clean), so it enters neither the multi-round denominator nor any later-round
+catch counter, and its round-1 seats (correctness; test-evidence +
+spec-compliance) were the compact default mix with no rotated-in lens.
+
+The sample is worth one observation even though it carries no rotation signal.
+All four catches came from the round-1 default pair, and the load split evenly
+across the seats: correctness raised the false-rationale finding and the
+inverted docstring summary, test-evidence caught the convention-violating line
+cite, and spec-compliance caught the unpinnable flag clause. The P2 was the
+same defect seen independently by both seats, which is the redundancy the
+paired-seat layout is supposed to buy at `compact`. Nothing here argues for
+rotating a different lens into round 1.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, and the measurement caveats above still apply. Next
+revisit on the audit's next flag or a maintainer override.
