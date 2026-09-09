@@ -132,6 +132,56 @@ def test_openapi_patch_owner_module_preserves_main_monkeypatch_facade(
     assert schema["x-test-openapi-facade"]["pipeline_patch"] == "called"
 
 
+PRECIP_INDEX_PATH = "/api/v1/precip/{source}/{cycle}/index"
+
+
+def test_dropping_the_precip_openapi_patch_drifts_runtime_schema_from_static_yaml(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2098 — constructive proof that this suite reds when the runtime-OpenAPI edge breaks.
+
+    `apps/api/main.py` is a composition owner: `_patch_openapi_schema` calls
+    `_patch_precip_openapi(schema)`, which pops the generated `PrecipIndexResponse`
+    component and rewrites the index operation's 200 response onto the shared
+    `allOf: [SuccessEnvelope, {data}]` envelope that the hand-maintained
+    `openapi/nhms.v1.yaml` carries. `main.py` is now routed to this suite by
+    `scripts/select_ci_tests.py`; that selector edge is only justified if this suite
+    actually fails when the call site disappears, so both legs live here.
+
+    TWO LOCATIONS COMPARED INDIVIDUALLY, NOT WHOLE-DOCUMENT EQUALITY. The existing
+    `test_static_openapi_matches_runtime_schema` oracle compares whole documents against the
+    module-level singleton `app`; a freshly built application carries runtime-mode
+    environment differences that would make a whole-document "not equal" leg vacuously
+    green. The patch touches exactly two places, so exactly those two are asserted.
+
+    Isolation: `create_app()` builds a fresh application (with `openapi_schema` unset) per
+    call, `_patch_openapi_schema` looks `_patch_precip_openapi` up as a module-level name at
+    call time — the idiom
+    `test_openapi_patch_owner_module_preserves_main_monkeypatch_facade` already relies on —
+    and `monkeypatch` restores the attribute at teardown. The singleton `app` is deliberately
+    neither rebuilt nor mutated.
+    """
+    static_spec = _openapi_spec()
+    static_index_ok = static_spec["paths"][PRECIP_INDEX_PATH]["get"]["responses"]["200"]
+    # Grounding for the component leg: the committed document has no such schema, so
+    # "runtime declares it" is by itself a drift.
+    assert "PrecipIndexResponse" not in static_spec["components"]["schemas"]
+
+    # Positive leg: the unmutated pipeline agrees with the static document at both places.
+    patched = api_main.create_app().openapi()
+    assert patched["paths"][PRECIP_INDEX_PATH]["get"]["responses"]["200"] == static_index_ok
+    assert "PrecipIndexResponse" not in patched["components"]["schemas"]
+
+    monkeypatch.setattr(api_main, "_patch_precip_openapi", lambda schema: None)
+
+    # Negative leg: with the call neutered, both places disagree with the static document.
+    drifted = api_main.create_app().openapi()
+    assert drifted["paths"][PRECIP_INDEX_PATH]["get"]["responses"]["200"] != static_index_ok
+    assert "PrecipIndexResponse" in drifted["components"]["schemas"], (
+        "the generated component survived the un-patched build; the mutation was a no-op"
+    )
+
+
 def test_mvt_tile_z_above_documented_max_returns_runtime_validation_error() -> None:
     class FakeDialect:
         name = "sqlite"

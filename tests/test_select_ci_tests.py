@@ -1364,6 +1364,196 @@ def test_precip_tree_rule_carries_no_selection_flags() -> None:
     assert not rule.only_when_any_changed
 
 
+# #2098: the two precipitation application-composition owners. `apps/api/
+# route_registry.py` puts `precip_router` into `_BUSINESS_ROUTERS` (route
+# reachability) and `apps/api/main.py` calls `_patch_precip_openapi(schema)`
+# inside `_patch_openapi_schema` (runtime OpenAPI shape). Before this issue
+# neither selected a precipitation oracle, and both selections were non-empty
+# and plausible, so the #1182 zero-assertion warning never fired.
+#
+# NAMING CONSTRAINT (task 2.6): each of the five guards below is addressable by
+# its own full name as a `-k` substring; no name is a prefix of another.
+#
+# The expected sets are LITERAL strings on purpose (acceptance criterion 3 /
+# #1827): deriving them from `PRECIP_SURFACE_TESTS`, `CONNECTION_ATTRIBUTION_TESTS`
+# or `API_ERROR_LOGGING_TEST` would move production and expectation together and
+# the pin could never red.
+def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution() -> None:
+    """#2098 — exact selection for the route-registry composition owner.
+
+    Dropping `precip_router` from `_BUSINESS_ROUTERS` turns both published
+    precipitation endpoints into 404, and `tests/test_precip_overlay.py` is the only
+    suite that asserts either one. The two connection-attribution suites and the three
+    broad `apps/api/**` suites must survive the MERGE: this owner was moved OUT of
+    `CONNECTION_ATTRIBUTION_ROUTE_PATHS` into its own path-exact rule, and a move that
+    forgot to carry the attribution targets over would otherwise be green.
+    """
+    assert Path("apps/api/route_registry.py").exists()
+
+    assert select_tests(["apps/api/route_registry.py"], repo_root=Path(".")) == [
+        "tests/test_api.py",
+        "tests/test_api_contract.py",
+        "tests/test_monitoring_api.py",
+        "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+        "tests/test_precip_overlay.py",
+    ]
+
+
+def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None:
+    """#2098 — exact selection for the runtime-OpenAPI composition owner.
+
+    `_patch_openapi_schema` calls `_patch_precip_openapi(schema)`; dropping that call
+    drifts the runtime schema from `openapi/nhms.v1.yaml`, which only
+    `tests/test_openapi_drift.py` asserts. The pre-existing error-logging rider (#1704)
+    and the three broad `apps/api/**` suites must survive the widened target tuple.
+    """
+    assert Path("apps/api/main.py").exists()
+
+    assert select_tests(["apps/api/main.py"], repo_root=Path(".")) == [
+        "tests/test_api.py",
+        "tests/test_api_contract.py",
+        "tests/test_api_errors_logging.py",
+        "tests/test_monitoring_api.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+        "tests/test_precip_overlay.py",
+    ]
+
+
+# The three suites a composition owner reaches ONLY through its own #2098 rule.
+# `tests/test_api_contract.py` is deliberately not here: it is also a rider of the
+# broad `apps/api/**` rule, so it survives the mutant and naming it would red the
+# reverse-missing pins outright.
+_PRECIP_ONLY_VIA_OWNER_RULE = (
+    "tests/test_precip_overlay.py",
+    "tests/test_openapi_drift.py",
+    "tests/test_openapi_31_contract.py",
+)
+
+
+def _owner_rules_without_precip_targets(owner_pattern: str) -> tuple[PathTestRule, ...]:
+    """The live rule table with one owner's precipitation targets stripped.
+
+    Reading `PATH_TEST_RULES` here builds the MUTANT, never the expectation — the
+    expectation stays the literal `_PRECIP_ONLY_VIA_OWNER_RULE`, so the anti-self-
+    certification constraint holds (spec: "reading `PATH_TEST_RULES` solely to construct
+    the monkeypatched mutant ... is permitted").
+    """
+    stripped = set(_PRECIP_ONLY_VIA_OWNER_RULE) | {"tests/test_api_contract.py"}
+    mutant = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(target for target in rule.tests if target not in stripped),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == owner_pattern
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert len(mutant) == len(PATH_TEST_RULES)
+    assert sum(rule.pattern == owner_pattern for rule in mutant) == 1, (
+        f"{owner_pattern}: expected exactly one owner rule to mutate"
+    )
+    return mutant
+
+
+def test_route_registry_owner_loses_the_precip_suites_when_its_targets_are_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2098 — reverse-missing leg for the registry owner.
+
+    The exact-set pin above only reports "sets differ"; this one names the failure:
+    the three precipitation suites reach this path through nothing but the registry's
+    own rule, so stripping that rule's precipitation targets must make them vanish.
+    """
+    mutant = _owner_rules_without_precip_targets("apps/api/route_registry.py")
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", mutant)
+
+    selected = set(select_tests(["apps/api/route_registry.py"], repo_root=Path(".")))
+
+    for suite in _PRECIP_ONLY_VIA_OWNER_RULE:
+        assert suite not in selected, (
+            f"{suite} still selected for apps/api/route_registry.py without the owner rule's "
+            f"precip targets (got {sorted(selected)})"
+        )
+
+
+def test_main_owner_loses_the_precip_suites_when_its_targets_are_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2098 — reverse-missing leg for the main.py owner. Same shape as the registry leg."""
+    mutant = _owner_rules_without_precip_targets("apps/api/main.py")
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", mutant)
+
+    selected = set(select_tests(["apps/api/main.py"], repo_root=Path(".")))
+
+    for suite in _PRECIP_ONLY_VIA_OWNER_RULE:
+        assert suite not in selected, (
+            f"{suite} still selected for apps/api/main.py without the owner rule's precip "
+            f"targets (got {sorted(selected)})"
+        )
+
+
+def test_precip_composition_owner_rules_carry_neither_selection_flag() -> None:
+    """#2098 — structural pin for the spec's "neither flag" clause.
+
+    Both flags are behaviourally inert for these two paths today, so every output
+    assertion above stays green under either one — but `apps/api/**` matches AFTER both
+    owner rules and its three broad API suites must still accumulate, so
+    `stop_on_match=True` would silently amputate them, and `only_when_any_changed` would
+    make the owner edge conditional on an unrelated co-changed path.
+    """
+    for pattern in ("apps/api/route_registry.py", "apps/api/main.py"):
+        matching = [rule for rule in PATH_TEST_RULES if rule.pattern == pattern]
+        assert len(matching) == 1, f"{pattern}: expected exactly one rule, got {len(matching)}"
+        assert not matching[0].stop_on_match, pattern
+        assert not matching[0].only_when_any_changed, pattern
+
+
+def test_connection_attribution_tuple_peers_are_untouched_by_the_registry_split() -> None:
+    """#2098 — the MERGE-not-DROP guard for the shared attribution tuple.
+
+    `apps/api/route_registry.py` was removed from `CONNECTION_ATTRIBUTION_ROUTE_PATHS`
+    and given its own rule. Without this pin, deleting the registry from the tuple while
+    forgetting to merge `CONNECTION_ATTRIBUTION_TESTS` into the new rule is entirely
+    green, and the five remaining route members silently inheriting the precipitation
+    suites (e.g. by widening the shared tuple instead) is green too.
+
+    Membership rather than exact equality: same-name derivation adds a suite to some of
+    these paths (`apps/api/routes/best_available.py` picks up
+    `tests/test_best_available.py`), which is not what this guard is about.
+    """
+    peers = (
+        "apps/api/routes/best_available.py",
+        "apps/api/routes/data_sources.py",
+        "apps/api/routes/models.py",
+        "apps/api/routes/pipeline.py",
+        "apps/api/routes/state_snapshots.py",
+    )
+    attribution_suites = {
+        "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
+    }
+    for peer in peers:
+        assert Path(peer).exists()
+        selected = set(select_tests([peer], repo_root=Path(".")))
+        assert attribution_suites <= selected, (
+            f"{peer}: lost an attribution suite (got {sorted(selected)})"
+        )
+        leaked = set(_PRECIP_ONLY_VIA_OWNER_RULE) & selected
+        assert not leaked, f"{peer}: inherited precip suites {sorted(leaked)}"
+
+    registry_selected = set(select_tests(["apps/api/route_registry.py"], repo_root=Path(".")))
+    assert attribution_suites <= registry_selected, (
+        "the registry's own rule dropped the attribution suites instead of merging them "
+        f"(got {sorted(registry_selected)})"
+    )
+
+
 def test_select_tests_maps_sh_only_wrapper_change_to_its_guard_suite() -> None:
     # #1138: an sh-only change set must select the wrapper's guard suite (this
     # used to return [] and CI degraded to --collect-only with zero assertions).
