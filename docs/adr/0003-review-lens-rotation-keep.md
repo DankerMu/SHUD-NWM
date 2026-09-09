@@ -4136,3 +4136,51 @@ next revisit: if later-round catches keep concentrating in orchestrator
 record-accuracy rather than code defects, the rotation question is being
 measured on the wrong quantity and the metric should be split before the
 policy is revised.
+
+## Revisit — PR #2205 (issue #2098), 2026-09-09
+
+Counters: 195 multi-round merged PRs; later-round catches core=234, rotated=270,
+phase=53, skipped=15. Margin 40 → **36**. This PR contributed four core catches
+and zero rotated ones.
+
+The previous revisit flagged a condition for reopening the question: "if
+later-round catches keep concentrating in orchestrator record-accuracy rather
+than code defects, the rotation question is being measured on the wrong
+quantity." That condition did not merely recur here — it was the entire PR.
+Fourteen verified findings across three comprehensive rounds and a two-stage
+final review, and **not one landed in the rules, selections, or assertions**.
+Twelve sandboxed mutants showed no production-side regression escapes the new
+tests, and a whole-repo differential over 3585 tracked non-test paths found
+exactly two changed selections, both gain-only. The code was correct from its
+first commit and never found otherwise. Every defect was prose asserting
+something false about the code.
+
+Two facts here bear directly on the policy rather than on the metric.
+
+First, rounds 2 and 3 deliberately re-seated round 1's own lenses — no rotation
+at all — and round 2 still returned four verified defects. Those count as
+"core" and are why the margin narrowed. But they were not found because the
+lens was core; they were found because **the text under review had changed
+since round 1 looked at it**. The rotation metric buckets by lens identity and
+cannot see that. It therefore credits or debits rotation for an effect that is
+actually about artifact freshness. This is a second measurement defect,
+independent of the record-accuracy one already flagged, and it cuts the same
+way: the margin is softer than its integer suggests.
+
+Second, round 2's entire finding set was round 1's corrections applied
+incompletely — fixed in one file, left standing in another — and the final
+review then found two more overbroad superlatives plus a fabricated distinction
+from the precedent commit. No seat plan addresses that failure mode. It is not
+a lens-coverage problem; it is a problem of prose and code drifting apart
+across a repository where comments carry load-bearing rationale. Rotating
+lenses neither causes nor cures it.
+
+Decision unchanged: **keep rotation**. The margin remains positive and no
+evidence here shows rotation costing anything. But the flagged condition has now
+been met twice running, and the metric has acquired a second known distortion.
+Recommendation for whoever next revisits: do not revise the policy on the
+current numbers in either direction. Split `gate_net_catch` and the later-round
+buckets to distinguish (a) defects in code under review, (b) orchestrator
+record-accuracy defects, and (c) prose-versus-code drift, and re-derive the
+margin from (a) alone. On this PR, (a) is zero and the other two account for all
+fourteen — a decomposition the current single number cannot express.
