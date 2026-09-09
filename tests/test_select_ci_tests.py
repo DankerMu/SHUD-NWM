@@ -1239,6 +1239,73 @@ def test_select_tests_maps_autopipe_cron_wrapper_without_core_smoke_fallback() -
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
+@pytest.mark.parametrize("module", ["services/precip/constants.py", "services/precip/mirror.py"])
+def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> None:
+    """#2122 — the precip tree's one-hop importer suite must ride along.
+
+    `scripts/node27_mvt_prewarm.py:57` imports `services.precip.mirror.horizon_valid_times`
+    at module level and `tests/test_node27_mvt_prewarm.py:17` imports that script at module
+    level, so the prewarm suite reads this tree. `PRECIP_STEP_HOURS`
+    (`services/precip/constants.py`) feeds `horizon_valid_times` and thereby prewarm's
+    valid-time grid: flipping it 3 -> 6 reds
+    `test_a_clamped_first_valid_time_is_warmed_from_that_entry_not_from_the_cycle` in the
+    prewarm suite, the sole holder of the clamped-first-valid-time / PNG-horizon contract, so
+    before this target a constants-only PR could not reach that oracle in the targeted lane at
+    all. That flip also reds `tests/test_precip_overlay.py` (measured 31 failed at step 6),
+    which this rule already selected: the gap this leg closes is the missing oracle, not a
+    lane that was green.
+
+    The expected list is spelled out literally rather than built from
+    `PRECIP_SURFACE_TESTS` (#1827): an expectation derived from the shared tuple would
+    self-certify any edit to that tuple.
+    """
+    assert Path(module).exists()
+
+    assert select_tests([module], repo_root=Path(".")) == [
+        "tests/test_api_contract.py",
+        "tests/test_node27_mvt_prewarm.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+        "tests/test_precip_overlay.py",
+    ]
+
+
+def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:
+    """#2122 — the reverse guard: the tree rule's own target was widened, not the shared tuple.
+
+    `PRECIP_SURFACE_TESTS` is shared by the `services/precip/**` rule and this exact route
+    rule. Widening the shared tuple instead of the tree rule's own target would make a
+    route-only PR pay for the prewarm suite, which reads no route — so this pin must red if
+    the prewarm entry ever migrates into `PRECIP_SURFACE_TESTS`. Exact equality against a
+    literal list, for the same #1827 reason as the tree case.
+    """
+    assert Path("apps/api/routes/precip.py").exists()
+
+    assert select_tests(["apps/api/routes/precip.py"], repo_root=Path(".")) == [
+        "tests/test_api.py",
+        "tests/test_api_contract.py",
+        "tests/test_monitoring_api.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+        "tests/test_precip_overlay.py",
+    ]
+
+
+def test_precip_tree_rule_carries_no_selection_flags() -> None:
+    """#2122 — the spec delta's flag clause needs a structural pin, not an output pin.
+
+    Both flags are behaviourally inert for this rule today: no later rule matches
+    `services/precip/*.py`, so `stop_on_match=True` truncates nothing and every output
+    assertion above stays green under it. It would not stay harmless — a later rule added for
+    this tree would be silently amputated, the failure the duplicate-pattern guard warns
+    about — so the clause is pinned directly on the rule object instead.
+    """
+    rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == "services/precip/**")
+
+    assert not rule.stop_on_match
+    assert not rule.only_when_any_changed
+
+
 def test_select_tests_maps_sh_only_wrapper_change_to_its_guard_suite() -> None:
     # #1138: an sh-only change set must select the wrapper's guard suite (this
     # used to return [] and CI degraded to --collect-only with zero assertions).
