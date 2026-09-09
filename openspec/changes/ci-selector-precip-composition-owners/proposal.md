@@ -72,7 +72,7 @@ apps/api/route_registry.py -> CONNECTION_ATTRIBUTION_TESTS + PRECIP_SURFACE_TEST
   从选择集中消失（red leg）。**不含** `tests/test_api_contract.py`——它同时是 `apps/api/**` 的 rider，
   删掉 owner 的 precip targets 后依然在，写进断言会直接红。
 - 一条 flags 钉：两条 owner 行的 `stop_on_match` 与 `only_when_any_changed` 均为假。
-  二者对这两条路径**行为惰性**（`apps/api/**` 在后累加，精确集钉抓不到 flag 本身），
+  二者对这两条路径**行为惰性**（理由见上文 §1：`apps/api/**` 更早累加；精确集钉抓不到 flag 本身），
   spec delta 里「neither flag」那条 SHALL 需要独立钉。手法照 `test_precip_tree_rule_carries_no_selection_flags`。
 - 一条 attribution 表完整性钉：`CONNECTION_ATTRIBUTION_ROUTE_PATHS` 移出 registry 后，
   其余 5 个 route 路径的选择结果逐条不变，且 registry 仍选到两个 attribution suites
@@ -146,7 +146,7 @@ issue 的 in-scope 只点名 `route_registry.py` 与 `main.py` 两个 compositio
 - `select_tests(["apps/api/main.py"], repo_root=Path("."))` 的精确输出。
 - 两条 owner 行的 `stop_on_match` / `only_when_any_changed` 均为假。
 - `CONNECTION_ATTRIBUTION_ROUTE_PATHS` 其余成员的选择结果。
-- `route_registry._BUSINESS_ROUTERS` 去掉 `precip_router` 后两个公开降水路由的 HTTP 状态。
+- `route_registry._BUSINESS_ROUTERS` 去掉 `precip_router` 后两个公开降水路由**是否仍在新建 app 的路由表中**（**不是** HTTP 状态——404 在此为真空断言，见 §3）。
 - `main._patch_precip_openapi` 变 no-op 后 runtime schema 与静态 YAML 的相等性。
 
 ## Evidence mapping

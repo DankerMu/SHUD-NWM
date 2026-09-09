@@ -17,7 +17,7 @@ Must add/change:
 Seams under test:
 - `select_tests(["apps/api/route_registry.py"], repo_root=Path("."))` 与 `select_tests(["apps/api/main.py"], repo_root=Path("."))` 的精确输出
 - 两条 owner 行的两个 flag 均为假
-- `route_registry._BUSINESS_ROUTERS` 去 `precip_router` 后两个公开降水路由的 HTTP 状态
+- `route_registry._BUSINESS_ROUTERS` 去 `precip_router` 后两个公开降水路由**在新建 app 路由表中的成员性**（非 HTTP 状态；404 为真空断言，见 task 3.1）
 - `main._patch_precip_openapi` 变 no-op 后 runtime schema 与静态 YAML 的相等性
 Risk packs:
 - Public API / CLI / script entry: selected - `scripts/select_ci_tests.py` 是 CI 定向门选择入口；两条精确相等钉 + 反向缺失钉钉住输出
