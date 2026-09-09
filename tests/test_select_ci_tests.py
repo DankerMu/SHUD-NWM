@@ -1920,6 +1920,156 @@ def test_rollout_owner_producer_rules_red_when_removed(
         )
 
 
+# NAMING CONSTRAINT: only the exact-set pin immediately below may carry
+# `refresh_env` in its test name. This change's Evidence Floor runs
+# `pytest -q tests/test_select_ci_tests.py -k "refresh_env"` as a SINGLE-test
+# selector for that pin, so any sibling name containing the substring breaks it.
+# The other #2195 guards therefore spell themselves
+# `test_scheduler_provider_refresh_template_*`.
+REFRESH_ENV_TEMPLATE = "infra/env/compute.scheduler-provider-refresh.env.example"
+
+
+def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> None:
+    """#2195: the refresh env template must select the suite that reads it.
+
+    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `read_text`s this template and asserts its content: `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`
+    present, and none of `DATABASE_URL=` / `PIPELINE_DATABASE_URL=` / `PGHOST=` / `PGPORT=`
+    present. Before the #2195 rule the template matched only the `infra/env/**` rule, whose
+    sole target `tests/test_two_node_docker_runtime.py` never opens this file — a non-empty
+    selection with ZERO readers, so the #1182 zero-assertion warning stayed silent too.
+
+    Pinned as an EXACT set, not membership: `infra/env/**` is untouched and rule matches
+    accumulate (`selected.update(rule.tests)`), so the correct result is a 2-set, not the
+    owner suite alone. `tests/test_node27_write_roles.py` also reads this template (its
+    `_env_templates()` globs `infra/env/*.example`) and stays unselected by design — that leg
+    is out of scope for #2195.
+    """
+    assert set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))) == {
+        "tests/test_scheduler_file_provider_refresh.py",
+        "tests/test_two_node_docker_runtime.py",
+    }
+
+
+def test_scheduler_provider_refresh_template_rule_red_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2195 red leg: dropping the template's path-exact rule drops its owner suite.
+
+    Same idiom as the #1684 red leg above — the length assertion is what proves the
+    mutant really removed a row.
+    """
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != REFRESH_ENV_TEMPLATE)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))
+    assert "tests/test_scheduler_file_provider_refresh.py" not in selected, (
+        "mutant table without the refresh env template rule still selects its owner suite"
+    )
+
+
+def test_scheduler_provider_refresh_template_rule_carries_no_selection_flags() -> None:
+    """#2195: the spec delta's "neither flag" clause needs a structural pin of its own.
+
+    Both flags are behaviourally inert on this path today, so the exact-set pin above cannot
+    catch them: `infra/env/**` already matched earlier and no rule after this row matches the
+    template, so `stop_on_match=True` truncates nothing and the 2-set stays green under it.
+    Without this test the clause is simply unenforced -- and it would not stay harmless, since
+    a stray `stop_on_match` here would silently shadow every later rule for any future pattern
+    that also matches this template.
+    """
+    rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == REFRESH_ENV_TEMPLATE)
+
+    assert not rule.stop_on_match
+    assert not rule.only_when_any_changed
+
+
+@pytest.mark.parametrize(
+    "template, expected",
+    [
+        pytest.param(
+            "infra/env/compute.example",
+            [SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_two_node_docker_runtime.py"],
+            id="compute-example",
+        ),
+        pytest.param(
+            "infra/env/compute.scheduler-dbfree.env.example",
+            [SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_two_node_docker_runtime.py"],
+            id="compute-scheduler-dbfree",
+        ),
+        pytest.param(
+            "infra/env/display.example",
+            ["tests/test_two_node_docker_runtime.py"],
+            id="display-example",
+        ),
+    ],
+)
+def test_sibling_env_templates_keep_their_pinned_selections(template: str, expected: list[str]) -> None:
+    """#2195: these are the sibling selections the spec delta's second scenario pins.
+
+    The delta says the other `infra/env/*.example` templates keep their existing
+    selections, but the pre-existing references to `infra/env/compute.example` in this
+    suite (the two #1684 rollout-producer rows and the combined-PR leg) are membership
+    assertions only. Without this test the delta archives an unenforced requirement:
+    rewriting the existing `infra/env/compute.example` rule's targets turns that
+    template's 2-set into a 3-set with every other guard staying green.
+
+    The `display.example` row is the one that catches a narrowed `infra/env/**` — under
+    `infra/env/compute*` that template matches no rule at all and collapses to an EMPTY
+    selection, i.e. the zero-assertion `--collect-only` degradation #2195 exists to
+    prevent, while the #2195 exact-set pin above stays green because its own path-exact
+    row still matches. Hence exact list equality against `select_tests`'s sorted output,
+    not a subset — same reason as
+    `test_node27_autopipe_timer_row_selects_both_of_its_readers`.
+
+    The `exists()` leg keeps a renamed template redding here instead of silently
+    passing on a path nothing produces.
+    """
+    assert Path(template).exists()
+
+    assert select_tests([template], repo_root=Path(".")) == expected
+
+
+def test_scheduler_provider_refresh_template_rule_is_justified_by_a_literal_reader() -> None:
+    """#2195: tie the new rule to the reader that justifies it, derived not asserted.
+
+    The rule's whole warrant is that
+    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `read_text`s this template. If that line went away the rule would become decorative
+    and every other test here would stay green — a non-empty selection with zero readers
+    and no zero-assertion warning, which is the exact #2195 failure mode re-armed.
+
+    CATCHES: the reader's `read_text` line being deleted, and the reading function moving
+    to a different suite while this suite still exists — in both cases the derived
+    consumer set loses this suite and the membership assertion reds. The index skips
+    file-level-gated suites, so a file-level gate landing on the reader also reds here,
+    correctly: a gated reader would not run in the PR lane either.
+
+    DOES NOT COVER, deliberately: the reader suite being deleted or renamed. The
+    stale-target leg of `test_every_pinned_node_id_resolves_to_an_existing_test_function`
+    already reds for that, so a third guard here would be redundant — do not add one.
+
+    MEMBERSHIP, not subset. `derived <= selected` is vacuously green when the reader is
+    deleted, because the derived set becomes empty; measured on a reader-stripped copy,
+    membership reds and the subset form stays green. The subset line below is kept only
+    as a supplementary edge — it catches a NEW literal reader appearing without being
+    routed — and must not replace the membership assertion.
+    """
+    consumers = _literal_path_consumer_index(targets=[REFRESH_ENV_TEMPLATE]).get(REFRESH_ENV_TEMPLATE, set())
+
+    assert "tests/test_scheduler_file_provider_refresh.py" in consumers, (
+        f"nothing reads {REFRESH_ENV_TEMPLATE} by literal path any more, so its "
+        f"path-exact rule is decorative (derived consumers: {sorted(consumers)})"
+    )
+
+    assert consumers <= set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))), (
+        "a literal reader of the refresh env template is not routed by the rule table"
+    )
+
+
 def test_combined_pr_selection_includes_all_focused_auth_suites() -> None:
     # #1684 EVID-01 combined leg: the full PR changed-file set must include
     # every focused split module, not just the ones that ride slurm_gateway/**

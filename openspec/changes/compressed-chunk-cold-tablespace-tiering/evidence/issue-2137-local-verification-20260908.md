@@ -411,11 +411,35 @@ Affected-tree verification before completing the merge commit:
 - Target OpenSpec strict validation, staged diff check, no-unmerged-path check
   and exact gate-memory union assertions: PASS.
 
-This is a Phase 8 base integration, not a post-review product fix: the PR's net
-runtime semantics are unchanged relative to the new base, and the only manual
-resolution is the evidence-only gate-memory union. The final Phase 7 review is
-rerun on the merge SHA before CI/merge so combined-tree compatibility is not
-inferred from the pre-integration review.
+Before the first integration could freeze, `origin/master` advanced again from
+`7400c6f1a72dadd5e995803fed399ee73bf41524` to
+`7fc9a43c7fe524c76a8ad1a97ac56af799154054`. This second delta contained nine
+paths. The same three paths overlapped: gate memory and the two selector files.
+The new selector behavior is an independent additive owner route for the
+scheduler-provider refresh env template; both selector files again merged
+automatically. Gate memory again conflicted only at its append point. A first
+union assertion used the wrong shared-count constant and failed before writing;
+a non-`set -e` compound command then staged the still-conflicted file, but
+`git diff --cached --check` immediately rejected its conflict markers. That
+state is not counted as a valid resolution or check.
+
+The corrected resolution parsed the two committed parents directly, proved
+267 common records identical, preserved all 268 current master records, and
+added only this branch's `2137` record, producing 269 records. It required no
+reset, checkout, stash or whole-file ours/theirs selection. On the corrected
+second merge tree:
+
+- Complete selector suite: `661 passed`.
+- C3 owner/binder plus runbook contract suites: `101 passed`.
+- Ruff and py_compile over the overlapping selector/C3 files: PASS.
+- Target OpenSpec strict validation, no-unmerged-path and staged-diff checks:
+  PASS.
+
+These commits are Phase 8 base integrations, not post-review product fixes: the
+PR's net runtime semantics relative to the current base are unchanged, and the
+only manual resolutions are evidence-only gate-memory unions. The final Phase 7
+review is rerun on the final merge SHA before CI/merge so combined-tree
+compatibility is not inferred from the pre-integration review.
 
 ## Pending at this record
 

@@ -2488,6 +2488,28 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/README.md",
         (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
     ),
+    # #2195: this template's owner suite reads it BY PATH and asserts its
+    # content -- `tests/test_scheduler_file_provider_refresh.py`'s
+    # `test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    # `read_text`s `infra/env/compute.scheduler-provider-refresh.env.example`
+    # and asserts two groups: `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` is
+    # PRESENT, and none of `DATABASE_URL=`, `PIPELINE_DATABASE_URL=`, `PGHOST=`
+    # or `PGPORT=` appears. Before this row the template matched only the
+    # `infra/env/**` rule above, whose sole target
+    # `tests/test_two_node_docker_runtime.py` never opens this file: the
+    # selection was non-empty yet held ZERO readers of the changed file, so the
+    # #1182 zero-assertion warning stayed silent as well. Not folded into the
+    # #1684 group above because that group's target is the static deployment
+    # contract suite, and that suite's template list does not include this file
+    # -- it does not read it. This row does NOT make the selection
+    # reader-complete: `tests/test_node27_write_roles.py` also `read_text`s this
+    # template (its `_env_templates()` globs `infra/env/*.example`) and stays
+    # unselected here, because its rule glob is `infra/env/node27-*.example`
+    # and widening it is out of scope for #2195.
+    PathTestRule(
+        "infra/env/compute.scheduler-provider-refresh.env.example",
+        ("tests/test_scheduler_file_provider_refresh.py",),
+    ),
     PathTestRule(
         "scripts/validate_two_node_docker_runtime.py",
         ("tests/test_two_node_docker_runtime.py",),

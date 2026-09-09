@@ -4093,3 +4093,46 @@ CI, while the comprehensive reviewer found no defect after that proof existed.
 
 Decision unchanged: **keep rotation**. The cumulative margin remains 42 and no
 new multi-round evidence justifies changing the follow-up seat policy.
+
+## 2026-09-09 revisit — PR #2199 (#2195, fixture `compact`)
+
+The audit moves to `core=230`, `rotated=270`, `phase=53` over 194 multi-round
+merged PRs. PR #2199 is the increment: +1 to the denominator, +3 core and +1
+rotated in the later-round buckets. The cumulative rotated margin narrows from
+42 to 40.
+
+This PR is worth reading as evidence because it is the first in this series
+where the rotated-in seat and the core seats caught the *same* defect. Its round
+2 seated `correctness`, `test-evidence+spec-compliance` and the rotated-in
+`invariant-state`, and all three independently found the P1: a guard added by
+the round-1 fix pass carried a name that made the change's own
+`-k "refresh_env"` single-test selector collect two tests. Triple redundancy on
+one finding is a cost signal against rotation at this fixture level, not for it
+— the rotated seat's unique contribution that round was a pair of P2 fixture
+inconsistencies, and its most useful output was arguably the measured
+*non-findings* (comment-length distribution, assertion-style counts, absence of
+duplication) that stopped three plausible style objections from being raised.
+
+Against that, the rotation experiment's premise held elsewhere: round 1's two
+verified coverage gaps both came from the `test-evidence` checklist, which is
+the seat the rotation policy exists to keep seating. Both were genuine — two
+independent verifiers confirmed them as coverage gaps rather than wording, one
+of them refuting its own reviewer's stated rationale while upholding the
+finding.
+
+The caveat this PR adds to the whole series: five of its eight catches were
+record-accuracy defects introduced by the fix for the previous round, not
+defects in the code under review, which was unchanged from round 1 and never
+found defective. Attributing those to a lens flatters every seat that sat a
+later round. A rotation metric that counts them cannot distinguish "this seat
+found a real defect" from "this seat found the orchestrator's bookkeeping
+error". That is a measurement limitation of `gate_net_catch` and the later-round
+buckets alike, and it argues for reading the margin as softer than its integer
+suggests.
+
+Decision unchanged: **keep rotation**. The margin is still positive at 40 and
+one PR with a triple-caught P1 does not overturn the policy. Flagged for the
+next revisit: if later-round catches keep concentrating in orchestrator
+record-accuracy rather than code defects, the rotation question is being
+measured on the wrong quantity and the metric should be split before the
+policy is revised.
