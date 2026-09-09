@@ -135,6 +135,10 @@ checkout (`/home/nwm/NWM` is parked on `hotfix/node27-rollback-pre-2073`, see de
 - [x] 5.1 (partial — see receipt "Not covered") All **six** tile routes (five layers, with both the legacy `hydro-national` alias and the
   `{source}/{cycle}` route covered) × one real tile each at a normal in-range instant: tile bytes `md5`,
   ETag, and cache status identical between the master checkout and the PR-head worktree.
+  Attained: status + SQL-shape identity 6/6 routes; byte/ETag/checksum/cache-key identity on **3 of the 5
+  layers** — `river-network` (§5.1), and `hydro` + `met-stations` via the §5.1b supplement, which re-probes
+  those two at a coordinate/`basin_version_id` that yields a real tile (5/25/12 gave 413 on `hydro` and 404 on
+  `met-stations`; **neither was #2145**). Only `hydro-national` and `river-network-national` are #2145-blocked.
 - [x] 5.2 Out-of-range instants against the in-process app on the live RO DB: both legacy routes ×
   both extreme instants → `422` / `VALIDATION_ERROR` / `sql=0`. **Method for `sql=0` on a real session**:
   register a SQLAlchemy `before_cursor_execute` event listener on the live RO engine and count
@@ -155,7 +159,7 @@ checkout (`/home/nwm/NWM` is parked on `hotfix/node27-rollback-pre-2073`, see de
 | The 422 is returned before any SQL (`sql=0`) | 3.3, 5.2 |
 | Zero shift for in-range instants (cache key, SQL bind, sub-second on new route still 422) | 3.2, 3.5, 3.6, 3.7, 5.1 |
 | Tile contract tests extended with out-of-range cases and green | 3.1–3.11, 4.2, 4.3; `test_mvt_national_identity_probe_integration.py` is a recorded non-goal (§4 note) |
-| node-27 live receipt: five layers unchanged; public URL 422 | 5.1, 5.2, 5.4 — receipt `docs/runbooks/receipts/2026-09-09-issue-2033-mvt-instant-range-node27.md`: 6/6 routes status/SQL-shape identical, byte/ETag/cache-key identity proven on `river-network` (the other four answer an identical pre-existing 500 from **#2145**'s un-applied migration on both arms); 4/4 out-of-range → 422 `sql=0` vs base 500 `sql=1`/`sql=2`. Public-URL half **deferred to #2162** (design D6) |
+| node-27 live receipt: five layers unchanged; public URL 422 | 5.1, 5.1b, 5.2, 5.4 — receipt `docs/runbooks/receipts/2026-09-09-issue-2033-mvt-instant-range-node27.md`: 6/6 routes status/SQL-shape identical; byte/ETag/checksum/cache-key identity proven on **3 of 5 layers** — `river-network` (59 187 B), `hydro/{run_id}` at 7/100/50 (90 165 B, a **`valid_time`-bearing** route) and `met-stations/basins_heihe_vbasins` (66 631 B / 4 724 B). The remaining two layers (`hydro-national`, both routes, and `river-network-national`) answer an identical pre-existing 500 on both arms from **#2145**'s un-applied migration and are the only #2145-blocked ones; 4/4 out-of-range → 422 `sql=0` vs base 500 `sql=1`/`sql=2`. Public-URL half **deferred to #2162** (design D6) |
 
 ## Risk pack → evidence
 
