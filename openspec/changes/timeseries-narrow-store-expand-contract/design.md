@@ -103,7 +103,7 @@ per-tick 推导按表分别陈述：正名表 1 天 chunk，每表每天到达 1
 
 1. **渲染 SQL 形状 oracle**（最高、已有）：`tests/test_sql_shape_helpers.py` 机制作用于 `render_river_ts_sql` 的输出（跨-store statement helper 已在 #1996 第二次 gate 删除；task 1.4/Decision 26 改为 caller-owned occurrence-local 组合）——legacy 变体与规范化后的模板逐字等价（表名除外）、规范化后的模板与规范化前的 pin 语义等价（census/shape pin 重钉）、narrow 变体不含 text 身份列/标记行且键谓词完整。理由：一个 seam 覆盖 13 处读方 + 2 个 smoke 脚本。
 2. **parser replace chain 单测**（已有假 cursor seam）：只写窄表列、`ON CONFLICT` 键主键、DELETE 保持 run + network + variable + 闭区间窗、legacy run 拒绝且不发 DELETE、`timeseries_store` 与 `mark_run_parsed` 同事务。
-3. **真实 DB 集成（node-27 marker）**：expand 迁移幂等与改名、混合 store（一 legacy 一 narrow run）的 national-tile / coverage 查询两分支各碰自己的表、回退序列后 legacy run 可读可重解析、contract 迁移对非空 legacy 的拒绝、EXPLAIN 硬门。
+3. **真实 DB 集成（node-27 marker）**：expand 迁移幂等与改名、混合 store（一 legacy 一 narrow run）的 national-tile / coverage 查询保留两 store 的结果语义（两 run）且两分支各碰自己的表；named-identity valid-times 分别请求 legacy run 与 narrow run，每次只有匹配 route 的 branch 贡献该 run 的 `valid_time`，any-identity valid-times 则在一次查询中于唯一外层 `DISTINCT valid_time ORDER BY valid_time DESC LIMIT :limit` 之前纳入两 store 的 `valid_time`；这些查询的 `EXPLAIN` 显示每个 legacy/narrow 事实分支只引用对应物理表且非匹配 branch 不产出行、回退序列后 legacy run 可读可重解析、contract 迁移对非空 legacy 的拒绝、EXPLAIN 硬门。
 4. **治理推荐单测**（已有符号阈值风格）：投影公式、fits / does-not-fit / no-uncompressed / watermark-unavailable 四态、DB-size 降级、receipt schema 校验。
 
 ## Risks / Trade-offs

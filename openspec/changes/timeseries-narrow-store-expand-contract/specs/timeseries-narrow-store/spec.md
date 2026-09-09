@@ -92,8 +92,9 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **THEN** `candidate_runs` carries each run's route, `river_sample_rows` unions one matching branch per store, and the station legs, river aggregation, overwrite guard and single `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` remain outside and unchanged
 
 #### Scenario: Mixed-store discovery returns both
-- **WHEN** a national-tile or coverage query runs against a real database holding one `legacy` and one `narrow` published run
-- **THEN** both runs appear in the result, the enclosing aggregate/result/DML layer executes once, and `EXPLAIN` shows each fact branch touching only its matching table
+- **WHEN** a national-tile, coverage, or named/any-identity valid-time discovery query runs against a real database holding one `legacy` and one `narrow` published run
+- **THEN** both runs appear in the national-tile and coverage result, the enclosing aggregate/result/DML layer executes once, and `EXPLAIN` shows each fact branch touching only its matching table
+- **AND** separate named-identity requests for the legacy and narrow run each return only that routed run's `valid_time`, while one any-identity request includes `valid_time` values contributed by both stores in its fact-row union before one outer `DISTINCT valid_time ORDER BY valid_time DESC LIMIT :limit`; each form's `EXPLAIN` shows every fact branch references only its matching physical table and the non-matching named branch produces no rows
 
 #### Scenario: Reader transition activates with expand, not before
 - **WHEN** wave-2 reader changes have merged but the I7 maintenance-window deployment and expand migration have not run
