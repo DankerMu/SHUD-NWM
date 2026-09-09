@@ -66,6 +66,8 @@ DDL 顺序（迁移 header 记账项）：`CREATE TABLE`（PK + 两 FK 内联）
 
    #2115 / task 1.13 的 whole-row star closure 另由 outer-output classifier 拥有（详见 `fixtures/I1-1980.md` 的 #2115 addendum）：精确 `alias.*` / `(alias).*` 的 SELECT 顶层输出使两个 helper 报告全部七个 text identity members，legacy 仍只换表名，narrow 在返回前拒绝；其他 scanner-visible fact-alias-rooted star 在既有 functional refusal 之后保守拒绝。该 classifier 不进入 decision 23 消费的 `_alias_member_analysis`，不借本切片扩大 scalar-body visibility。风险是跨 store 输出 schema 漂移，而非 star 必然缺列。
 
+   #2148 / task 1.14 在纯未别名 outer fact read 下，独立检查每个 comparison-scalar body 的未限定 identity 候选；不能证明 inner-vs-outer 归属时，guarded helper 与两个 store 以 unaliased/scalar-scope 原因拒绝，不猜测或返回 fact-member 集合。三个已注册的 run/basin/network authority key-resolution **整句形状**继续放行，不能用任意表的列清单替代该有限模型；qualified inner member、outer fallback、`outer_predicates` 与 alias helper 保持原责任。具体完整正反例与每-body mutation owner 见 fixture #2148 addendum。
+
 3. **Caller-owned 路由与局部 UNION（task 1.4 Stage 5 re-entry）**：渲染器只接收一段事实行模板和一个 store；caller 决定是按已知 run 的路由只渲染一个变体，还是把两个变体组合成局部 `UNION ALL`。组合对象必须是本入口的事实行子关系，不能是包含聚合、`DISTINCT`/`ORDER BY`/`LIMIT`、HTTP 结果判定或 DML 的整句。两个分支复用同一组具名参数（不加 store 后缀），投影列名、类型和顺序一致；legacy 分支只读 `hydro.river_timeseries_legacy` 并保留 aid，narrow 分支只读 `hydro.river_timeseries` 且没有事实表 text 身份列。每个 occurrence-scoped 模板都由调用模块拥有并进入 registry/census；仓内不得新增 `render_union_all` 或任何无 caller 的 SQL binder/walker。
 
 | caller-owned entry | 路由与组合位置 | 必须保留的外层语义 |

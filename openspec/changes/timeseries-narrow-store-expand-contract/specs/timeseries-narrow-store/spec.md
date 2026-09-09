@@ -81,6 +81,12 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **AND** a scanner-visible fact-alias-rooted star whose exact output-expansion grammar cannot be established is refused by the guarded helper and both render variants as unmodelled whole-row star exposure, not reported clean; non-fact relation/CTE stars, complete quoted identifier data, non-exact quoted references, literals/comments and named key/enum projections retain their existing outcomes, and quoted fact-alias declarations retain their existing refusal
 - **AND** this guards cross-store result-schema drift rather than asserting that star necessarily names a nonexistent column; comparison-position scalar-body star visibility and unaliased scalar scope remain outside this outer-output slice, while the named-field and correlated named-member contracts remain intact
 
+#### Scenario: Unaliased fact reads cannot hide ambiguous unqualified scalar identity
+- **WHEN** a surrounding fact read is unaliased with no attributed fact alias, and any comparison-position scalar body contains a bare-folded or exact lower-case quoted unqualified text-identity candidate not proven safe by the existing finite authority key-resolution shape
+- **THEN** guarded `fact_table_text_identity_columns` and both render stores refuse before returning a clean set or SQL, with an entry-named unaliased/unqualified scalar-scope reason; the renderer does not guess whether an inner relation or the outer fact owns the name
+- **AND** qualified non-fact references and the existing run/basin/network authority key-resolution shapes remain accepted, outer unaliased comparisons keep existing attribution, and alias-scoped `text_fact_columns` plus `outer_predicates` remain unchanged
+- **AND** bare-folded and exact quoted candidates across all seven identity members, nested/later scalar bodies and ambiguous inner SELECT/derived namespaces are covered; literal/comment data, non-exact quoted names and key/enum tokens are not fact attribution, and aliased/scalar named-member, whole-row-star and structural sibling contracts are preserved
+
 #### Scenario: Renderer refuses a mis-shaped marker
 - **WHEN** a template places the marker above a line that is not a single aid conjunct
 - **THEN** the renderer raises before returning SQL and the shape oracle fails naming the template
