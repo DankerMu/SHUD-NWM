@@ -803,7 +803,7 @@ class PsycopgForecastStore:
             FROM hydro.river_timeseries rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
             WHERE {_SEGMENT_IDENTITY_PREDICATES}
-              AND LOWER(h.run_type) = ANY(%s)
+              AND LOWER(h.run_type::text) = ANY(%s)
             """,
             (
                 *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
@@ -844,7 +844,7 @@ class PsycopgForecastStore:
             JOIN core.river_network_version rnv
               ON rnv.river_network_version_key = rt.river_network_version_key
             WHERE {_SEGMENT_IDENTITY_PREDICATES}
-              AND LOWER(h.run_type) = ANY(%s)
+              AND LOWER(h.run_type::text) = ANY(%s)
               AND rt.valid_time >= %s
               AND rt.valid_time <= %s
             ORDER BY h.scenario_id, rt.valid_time

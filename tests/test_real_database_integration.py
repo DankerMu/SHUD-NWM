@@ -1432,3 +1432,96 @@ def test_three_day_chunk_migration_preserves_existing_chunks_and_only_changes_ne
                 assert new[3] is False
     finally:
         connection.close()
+
+
+def test_real_history_window_excludes_old_points_without_shortening_forecasts(
+    throwaway_database_url: str,
+) -> None:
+    from datetime import timedelta
+
+    import psycopg2
+
+    from packages.common.forecast_store import PsycopgForecastStore
+    from tests.integration_helpers import HINDCAST_RUN_ID, insert_river_timeseries_dual_written
+
+    apply_migrations_from_zero(throwaway_database_url)
+    seed_issue_126_data(throwaway_database_url)
+    connection = psycopg2.connect(throwaway_database_url)
+    try:
+        with connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE hydro.hydro_run SET start_time=%s, end_time=%s WHERE run_id=%s",
+                    (CYCLE_TIME, CYCLE_TIME + timedelta(days=7), FORECAST_RUN_ID),
+                )
+                cursor.execute(
+                    """
+                    UPDATE hydro.hydro_run
+                    SET run_type='analysis', scenario_id='analysis_true_field', start_time=%s, end_time=%s
+                    WHERE run_id=%s
+                    """,
+                    (CYCLE_TIME - timedelta(days=7), CYCLE_TIME, HINDCAST_RUN_ID),
+                )
+                rows = [
+                    (
+                        HINDCAST_RUN_ID,
+                        BASIN_VERSION_ID,
+                        RIVER_NETWORK_VERSION_ID,
+                        "it126_seg_inside",
+                        CYCLE_TIME + delta,
+                        0,
+                        "q_down",
+                        value,
+                        "m3/s",
+                        "ok",
+                    )
+                    for delta, value in (
+                        (timedelta(days=-4), 4.0),
+                        (timedelta(days=-3), 3.0),
+                        (timedelta(hours=-1), 1.0),
+                        (timedelta(0), 0.0),
+                    )
+                ]
+                rows.extend(
+                    (
+                        FORECAST_RUN_ID,
+                        BASIN_VERSION_ID,
+                        RIVER_NETWORK_VERSION_ID,
+                        "it126_seg_inside",
+                        CYCLE_TIME + timedelta(hours=hours),
+                        hours,
+                        "q_down",
+                        value,
+                        "m3/s",
+                        "ok",
+                    )
+                    for hours, value in ((168, 700.0), (169, 701.0))
+                )
+                insert_river_timeseries_dual_written(cursor, rows)
+
+        store = PsycopgForecastStore(throwaway_database_url)
+        parameters = {
+            "basin_version_id": BASIN_VERSION_ID,
+            "segment_id": "it126_seg_inside",
+            "river_network_version_id": RIVER_NETWORK_VERSION_ID,
+            "issue_time": CYCLE_TIME.isoformat(),
+            "variables": ["q_down"],
+            "scenarios": ["GFS"],
+        }
+        response = store.forecast_series(**parameters, include_analysis=True)
+        analysis = next(segment for segment in response["segments"] if segment["segment_role"] == "past_3_days")
+        forecast = next(segment for segment in response["segments"] if segment["segment_role"] == "future_7_days")
+        assert [point["value"] for point in analysis["data"]] == [3.0, 1.0]
+        assert [point["value"] for point in forecast["data"]] == [180.0, 250.0, 700.0]
+
+        with connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE hydro.hydro_run SET run_type='hindcast', scenario_id='hindcast_era5' WHERE run_id=%s",
+                    (HINDCAST_RUN_ID,),
+                )
+        parameters["issue_time"] = "latest"
+        history = store.forecast_series(**parameters, run_types=["hindcast"])
+        assert [point[1] for series in history["series"] for point in series["points"]] == [3.0, 1.0, 0.0]
+    finally:
+        connection.close()
