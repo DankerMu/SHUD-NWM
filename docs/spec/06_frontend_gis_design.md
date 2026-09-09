@@ -286,7 +286,7 @@ click 河段时，左侧弹出河段详情面板，内容包括：
 #### 7.6.3 中央主图 — 多源预报对比曲线
 
 **核心图表规格：**
-- 横轴：时间（过去 7 天 + 未来 7 天）
+- 横轴：时间（过去 3 天 + 未来 7 天）
 - 纵轴：流量 Q（m³/s）
 - Analysis 段（实线）：scenario = analysis_true_field，蓝色
 - GFS Forecast 段（实线）：scenario = forecast_gfs_deterministic，橙色

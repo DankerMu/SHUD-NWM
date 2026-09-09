@@ -11,7 +11,7 @@
 - [ ] 前端时间轴由图层 `valid_times[]` 驱动。
 - [ ] SHUD run 全部通过 Slurm 提交。
 - [ ] Forecast run 使用 analysis StateSnapshot warm-start。
-- [ ] 河段点击可展示过去 7 天 analysis 与未来 7 天 forecast。
+- [ ] 河段点击可展示过去 3 天 analysis 与未来 7 天 forecast。
 - [ ] 洪水重现期产品可在地图上展示。
 - [ ] 流域版本变化后，历史结果仍可按旧版本查询。
 

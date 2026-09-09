@@ -69,7 +69,7 @@ GET /api/v1/pipeline/status?source=&cycle_time=
   "series": [
     {
       "scenario_id": "analysis_true_field",
-      "segment_role": "past_7_days",
+      "segment_role": "past_3_days",
       "points": [["2026-04-29T00:00:00Z", 920.1]]
     },
     {

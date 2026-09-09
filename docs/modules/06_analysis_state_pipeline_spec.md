@@ -41,7 +41,7 @@
 ## 4. 输出
 
 ```text
-下游：Forecast Run、前端过去 7 天 analysis 曲线。
+下游：Forecast Run、前端过去 3 天 analysis 曲线。
 状态：created/running/succeeded/failed/published
 日志：结构化 JSON lines
 元数据：写入相关数据库表
@@ -115,7 +115,7 @@ analysis_state_pipeline:
 
 - [ ] 每个 active model 至少维护一个最新 StateSnapshot。
 - [ ] StateSnapshot valid_time 不晚于 forecast cycle_time。
-- [ ] analysis 结果可返回过去 7 天曲线。
+- [ ] analysis 结果可返回过去 3 天曲线。
 - [ ] 状态过旧时 forecast run 明确标记 degraded。
 
 ## 12. Definition of Done

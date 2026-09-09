@@ -16,6 +16,7 @@ QHH_LATEST_SEARCH_LIMIT = 1
 QHH_LATEST_CANDIDATE_LIMIT = QHH_LATEST_SEARCH_LIMIT
 QHH_LATEST_CONTEXT_LIMIT = 10
 QHH_LATEST_EXPECTED_HORIZON_HOURS = 168
+ANALYSIS_LOOKBACK_DAYS = 3
 QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
 QHH_LATEST_READY_RUN_STATUSES = ("succeeded", "parsed", "published")
 QHH_LATEST_REFLECTED_VALUE_LIMIT = 64
@@ -821,7 +822,7 @@ class PsycopgForecastStore:
         run_types: Sequence[str],
         end_time: datetime,
     ) -> list[dict[str, Any]]:
-        start_time = end_time - timedelta(days=7)
+        start_time = end_time - timedelta(days=ANALYSIS_LOOKBACK_DAYS)
         return self._attach_forcing_lineage(
             cursor,
             self._fetch_all(
@@ -1078,10 +1079,7 @@ class PsycopgForecastStore:
         normalized_search = search.strip() if search is not None else ""
         if normalized_search:
             like_pattern = f"%{_escape_like(normalized_search)}%"
-            clauses.append(
-                "(ms.station_id ILIKE %s ESCAPE '\\' "
-                "OR COALESCE(ms.station_name, '') ILIKE %s ESCAPE '\\')"
-            )
+            clauses.append("(ms.station_id ILIKE %s ESCAPE '\\' OR COALESCE(ms.station_name, '') ILIKE %s ESCAPE '\\')")
             params.extend([like_pattern, like_pattern])
             filters_applied["search"] = normalized_search
 
@@ -1306,9 +1304,7 @@ class PsycopgForecastStore:
         context_evaluations = evaluations[:QHH_LATEST_CONTEXT_LIMIT]
         reasons = _qhh_latest_context_reasons(context_evaluations)
         if not reasons:
-            reasons.append(
-                _qhh_latest_no_candidates_reason(basin_id=basin_id, source_id=source_id, identity=identity)
-            )
+            reasons.append(_qhh_latest_no_candidates_reason(basin_id=basin_id, source_id=source_id, identity=identity))
         details: dict[str, Any] = {
             "source_id": source_id,
             "basin_id": basin_id,
@@ -1358,9 +1354,7 @@ class PsycopgForecastStore:
                 details={"source_id": source_id, "basin_id": basin_id, "status": "unavailable"},
             )
         available_issue_times = [
-            _format_time(_datetime_value(row.get("cycle_time")))
-            for row in rows
-            if row.get("cycle_time") is not None
+            _format_time(_datetime_value(row.get("cycle_time"))) for row in rows if row.get("cycle_time") is not None
         ]
         target = rows[0]
         if requested_cycle is not None:
@@ -1368,9 +1362,7 @@ class PsycopgForecastStore:
                 (row for row in rows if _datetime_value(row.get("cycle_time")) == requested_cycle),
                 rows[0],
             )
-        return _qhh_identity_product(
-            target, basin_id=basin_id, available_issue_times=available_issue_times
-        )
+        return _qhh_identity_product(target, basin_id=basin_id, available_issue_times=available_issue_times)
 
     def _fetch_latest_qhh_identity_candidates(
         self,
@@ -2331,8 +2323,7 @@ class PsycopgForecastStore:
                 status_code=422,
                 code="MISSING_REQUIRED_FILTER",
                 message=(
-                    "forcing_version_id or model_id, source_id, and cycle_time are required "
-                    "for station series queries."
+                    "forcing_version_id or model_id, source_id, and cycle_time are required for station series queries."
                 ),
                 details={
                     "required_alternatives": [
@@ -2667,9 +2658,7 @@ class _PsycopgTransaction:
             ) from error
 
         self.psycopg2 = psycopg2
-        self.connection = psycopg2.connect(
-            self.database_url, **_attribution_connect_kwargs(self.application_name)
-        )
+        self.connection = psycopg2.connect(self.database_url, **_attribution_connect_kwargs(self.application_name))
         self.connection.set_session(isolation_level="REPEATABLE READ", readonly=True, autocommit=False)
         register_default_json(conn_or_curs=self.connection)
         register_default_jsonb(conn_or_curs=self.connection)
@@ -3090,9 +3079,7 @@ def _qhh_identity_product(
     source_id = _display_source_id(str(row.get("source_id") or ""))
     cycle_time = _datetime_value(row.get("cycle_time"))
     available_start_time, available_end_time = _qhh_latest_available_window(row)
-    horizon_hours = _qhh_latest_horizon_hours(
-        row, cycle_time=cycle_time, available_end_time=available_end_time
-    )
+    horizon_hours = _qhh_latest_horizon_hours(row, cycle_time=cycle_time, available_end_time=available_end_time)
     expected_horizon_hours = QHH_LATEST_EXPECTED_HORIZON_HOURS
     shorter_horizon = horizon_hours is not None and horizon_hours < expected_horizon_hours
     return {
@@ -3643,7 +3630,7 @@ def _bounded_reflected_value(value: Any) -> str:
     text = str(value or "")
     if len(text) <= QHH_LATEST_REFLECTED_VALUE_LIMIT:
         return text
-    return f"{text[:QHH_LATEST_REFLECTED_VALUE_LIMIT - 3]}..."
+    return f"{text[: QHH_LATEST_REFLECTED_VALUE_LIMIT - 3]}..."
 
 
 def _latest_datetime(*values: datetime | None) -> datetime | None:
@@ -3977,7 +3964,7 @@ def _run_display_coverage_available(cursor: Any) -> bool:
 
 def analysis_window_for_issue_time(issue_time: datetime) -> tuple[datetime, datetime]:
     end_time = _ensure_utc(issue_time)
-    return end_time - timedelta(days=7), end_time
+    return end_time - timedelta(days=ANALYSIS_LOOKBACK_DAYS), end_time
 
 
 def _latest_cycle_time(cycle_times_by_scenario: Mapping[str, datetime]) -> datetime | None:
@@ -4193,7 +4180,9 @@ def _station_forcing_readiness_response(
     effective_expected_station_count = (
         expected_station_count
         if expected_station_count is not None
-        else declared_station_count if declared_station_count > 0 else None
+        else declared_station_count
+        if declared_station_count > 0
+        else None
     )
     missing_reasons: list[dict[str, Any]] = []
     coverage: list[dict[str, Any]] = []
@@ -4344,7 +4333,7 @@ def _spliced_response_from_rows(
                 "scenario": "analysis_true_field",
                 "scenario_id": "analysis_true_field",
                 "source": _source_label(analysis_rows[0]),
-                "segment_role": "past_7_days",
+                "segment_role": "past_3_days",
                 "data": analysis_data,
             }
         )

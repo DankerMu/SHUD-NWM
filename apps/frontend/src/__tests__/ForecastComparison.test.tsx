@@ -395,7 +395,7 @@ describe('forecast comparison UI', () => {
           forecastSeries({
             scenario: 'analysis_true_field',
             source: 'ERA5',
-            role: 'past_7_days',
+            role: 'past_3_days',
             isAnalysis: true,
             label: '分析（ERA5）',
             color: '#2266cc',

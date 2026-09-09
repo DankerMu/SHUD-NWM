@@ -918,7 +918,7 @@ async def test_forecast_series_include_analysis_multi_source_has_one_analysis_se
     analysis_segments = [segment for segment in data["segments"] if segment["scenario_id"] == "analysis_true_field"]
     forecast_segments = [segment for segment in data["segments"] if segment["scenario_id"] != "analysis_true_field"]
     assert len(analysis_segments) == 1
-    assert analysis_segments[0]["segment_role"] == "past_7_days"
+    assert analysis_segments[0]["segment_role"] == "past_3_days"
     assert "source_id" not in analysis_segments[0]
     assert "cycle_time" not in analysis_segments[0]
     assert {segment["scenario_id"] for segment in forecast_segments} == {
@@ -999,16 +999,18 @@ def test_spliced_response_deduplicates_issue_time_boundary_and_uses_sources() ->
     )
 
     assert payload["segments"][0]["source"] == "ERA5"
+    assert payload["segments"][0]["segment_role"] == "past_3_days"
     assert payload["segments"][1]["source"] == "GFS"
+    assert payload["segments"][1]["segment_role"] == "future_7_days"
     assert payload["segments"][0]["data"] == [{"valid_time": "2026-05-06T00:00:00Z", "value": 10.0}]
     assert payload["segments"][1]["data"] == [{"valid_time": "2026-05-07T00:00:00Z", "value": 11.0}]
 
 
-def test_analysis_window_for_issue_time_uses_open_end_seven_day_range() -> None:
+def test_analysis_window_for_issue_time_uses_inclusive_start_exclusive_end_three_day_range() -> None:
     issue_time = _dt("2026-05-07T00:00:00Z")
     start_time, end_time = analysis_window_for_issue_time(issue_time)
 
-    assert start_time == _dt("2026-04-30T00:00:00Z")
+    assert start_time == _dt("2026-05-04T00:00:00Z")
     assert end_time == issue_time
 
 
@@ -1465,9 +1467,7 @@ def test_station_series_explicit_forcing_version_validates_redundant_tuple_filte
         ),
     ],
 )
-def test_station_series_rejects_not_finalized_forcing_versions(
-    checksum: str | None, kwargs: dict[str, Any]
-) -> None:
+def test_station_series_rejects_not_finalized_forcing_versions(checksum: str | None, kwargs: dict[str, Any]) -> None:
     forcing_rows = [_forcing_version_row(checksum=checksum)]
     store = SqlCaptureForecastStore([[_station_row()], forcing_rows])
 
@@ -1731,9 +1731,7 @@ def test_station_forcing_readiness_excludes_out_of_window_rows_from_sql_and_resp
 
 
 def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identity_counts() -> None:
-    store = SqlCaptureForecastStore(
-        [[_qhh_candidate_row(cycle_time=_dt("2026-05-07T00:00:00Z"), source_id="gfs")]]
-    )
+    store = SqlCaptureForecastStore([[_qhh_candidate_row(cycle_time=_dt("2026-05-07T00:00:00Z"), source_id="gfs")]])
 
     response = store.latest_qhh_display_product("gfs")
 
@@ -1778,9 +1776,7 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
     # the switched query. The pkey is still not the successor (no basin_version_id,
     # unbound river_segment_id at position 3). Measured provenance for the repin is
     # the E4(ii) node-27 EXPLAIN receipt on the #1442 PR.
-    assert [
-        item for item in response["quality"]["query_indexes"] if item["table"] == "hydro.river_timeseries"
-    ] == [
+    assert [item for item in response["quality"]["query_indexes"] if item["table"] == "hydro.river_timeseries"] == [
         {
             "table": "hydro.river_timeseries",
             "index": "river_ts_selected_identity_key_valid_time_idx",
@@ -1794,6 +1790,7 @@ def test_latest_qhh_display_product_selects_ready_gfs_product_and_reports_identi
             ],
         }
     ]
+
 
 def test_latest_qhh_no_candidate_full_404_still_raises() -> None:
     # 无任何候选时 latest-product 整体 404（既有契约不变）。
@@ -1837,9 +1834,7 @@ def test_latest_qhh_display_product_selects_heihe_basin_and_filters_sql_by_reque
 
 def test_latest_qhh_display_product_default_basin_is_qhh_backward_compatible() -> None:
     # Scenario: 缺省默认 QHH 向后兼容 — omitting basin_id behaves exactly as before.
-    store = SqlCaptureForecastStore(
-        [[_qhh_candidate_row(cycle_time=_dt("2026-05-07T00:00:00Z"), source_id="gfs")]]
-    )
+    store = SqlCaptureForecastStore([[_qhh_candidate_row(cycle_time=_dt("2026-05-07T00:00:00Z"), source_id="gfs")]])
 
     response = store.latest_qhh_display_product("gfs")
 
@@ -2401,9 +2396,7 @@ def test_latest_qhh_display_product_rejects_not_finalized_forcing(checksum: str 
     with pytest.raises(ForecastStoreError) as error:
         store.latest_qhh_display_product("GFS")
 
-    assert "FORCING_VERSION_NOT_FINALIZED" in {
-        reason["code"] for reason in error.value.details["unavailable_reasons"]
-    }
+    assert "FORCING_VERSION_NOT_FINALIZED" in {reason["code"] for reason in error.value.details["unavailable_reasons"]}
 
 
 def test_latest_qhh_display_product_rejects_forcing_and_model_identity_mismatches() -> None:
@@ -2668,8 +2661,7 @@ def test_latest_qhh_display_product_rejects_old_station_pollution_from_shared_fo
         store.latest_qhh_display_product("GFS")
 
     by_run = {
-        candidate["run_id"]: candidate["unavailable_reason_codes"]
-        for candidate in error.value.details["candidates"]
+        candidate["run_id"]: candidate["unavailable_reason_codes"] for candidate in error.value.details["candidates"]
     }
     assert "STATION_VARIABLE_MISSING" in by_run["qhh_gfs_candidate_a"]
     assert "FORCING_MODEL_MISMATCH" in by_run["qhh_gfs_candidate_b"]
@@ -2887,9 +2879,7 @@ def test_latest_qhh_display_product_fetches_nonready_context_without_consuming_r
         QHH_LATEST_CONTEXT_LIMIT,
     )
     assert error.value.details["candidate_count"] == 1
-    assert "RUN_STATUS_NOT_READY" in {
-        reason["code"] for reason in error.value.details["unavailable_reasons"]
-    }
+    assert "RUN_STATUS_NOT_READY" in {reason["code"] for reason in error.value.details["unavailable_reasons"]}
 
 
 def test_latest_qhh_display_product_strict_nonready_candidate_reports_full_identity() -> None:
@@ -3038,13 +3028,11 @@ async def test_qhh_latest_product_defaults_basin_id_to_qhh_when_omitted(fake_sto
     ("query", "field"),
     [
         (
-            "source=GFS&run_id=%20qhh_gfs_2026050700%20"
-            "&cycle_time=2026-05-07T00%3A00%3A00Z&model_id=basins_qhh_shud",
+            "source=GFS&run_id=%20qhh_gfs_2026050700%20&cycle_time=2026-05-07T00%3A00%3A00Z&model_id=basins_qhh_shud",
             "run_id",
         ),
         (
-            "source=GFS&run_id=qhh_gfs_2026050700"
-            "&cycle_time=2026-05-07T00%3A00%3A00Z&model_id=%20basins_qhh_shud%20",
+            "source=GFS&run_id=qhh_gfs_2026050700&cycle_time=2026-05-07T00%3A00%3A00Z&model_id=%20basins_qhh_shud%20",
             "model_id",
         ),
     ],
@@ -3568,23 +3556,14 @@ def _qhh_variable_coverage(
 
 
 def test_timeseries_segment_id_translates_reach_to_shud_riv() -> None:
-    assert (
-        _timeseries_segment_id("basins_qhh_shud_reach_000001")
-        == "basins_qhh_shud_shud_riv_000001"
-    )
-    assert (
-        _timeseries_segment_id("basins_heihe_shud_reach_004321")
-        == "basins_heihe_shud_shud_riv_004321"
-    )
+    assert _timeseries_segment_id("basins_qhh_shud_reach_000001") == "basins_qhh_shud_shud_riv_000001"
+    assert _timeseries_segment_id("basins_heihe_shud_reach_004321") == "basins_heihe_shud_shud_riv_004321"
 
 
 def test_timeseries_segment_id_passes_through_non_reach_ids() -> None:
     # Legacy / direct shud_riv ids must round-trip unchanged so this hotfix
     # doesn't corrupt any future basin that ingests output ids directly.
-    assert (
-        _timeseries_segment_id("basins_qhh_shud_shud_riv_000001")
-        == "basins_qhh_shud_shud_riv_000001"
-    )
+    assert _timeseries_segment_id("basins_qhh_shud_shud_riv_000001") == "basins_qhh_shud_shud_riv_000001"
     assert _timeseries_segment_id("legacy_seg_42_7") == "legacy_seg_42_7"
 
 
@@ -3645,11 +3624,7 @@ def test_forecast_series_validates_reach_id_but_queries_timeseries_with_shud_riv
     # Every hydro.river_timeseries query (latest-cycle probe + the forecast
     # fetch) must bind the shud_riv id, never the reach id, otherwise the
     # discharge chart comes back empty (issue #577).
-    ts_executions = [
-        (statement, params)
-        for statement, params in executions
-        if "hydro.river_timeseries" in statement
-    ]
+    ts_executions = [(statement, params) for statement, params in executions if "hydro.river_timeseries" in statement]
     assert len(ts_executions) >= 2
     for statement, params in ts_executions:
         assert shud_riv_id in params, statement
