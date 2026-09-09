@@ -3999,3 +3999,36 @@ rotating a different lens into round 1.
 Decision unchanged: **keep rotation**. Rotated catches still exceed core
 catches cumulatively, and the measurement caveats above still apply. Next
 revisit on the audit's next flag or a maintainer override.
+
+## 2026-09-09 revisit — PR #2190 (#2033, fixture `high`)
+
+The audit flagged DECIDABLE with counters that moved for the first time since
+the PR #2184 revisit: `core=227`, `rotated=269`, `phase=53` over 193
+multi-round merged PRs (was `core=226` over 192). PR #2190 is the first
+multi-round PR to enter the denominator in four revisits, so unlike the two
+preceding samples (#2187, #2192) it carries an actual rotation signal — one,
+and it favours core.
+
+The single later-round catch (round 2, lens `test-evidence`, class
+`evidence-ledger`) came from a **pinned core seat**, not a rotated-in one, and
+it was the most consequential finding of the PR: the node-27 receipt claimed
+four routes answered 500 "tracked as #2145" while its own table showed three,
+misattributing a 413 and a 404 to an unrelated migration issue. Left standing,
+it would have had maintainers waiting forever for two layers that were never
+blocked. No rotated lens was seated in rounds 2 or 3 to compete for the catch:
+rounds 1 and 2 were both minor-only with no repeated failure class, so the
+free-slot rotation was never bought and rounds 2/3 ran the pinned core pair.
+
+That is the honest reading of this sample, and it is a point *against* the
+rotation hypothesis rather than for it — but it is one catch. The cumulative
+margin (`rotated=269` vs `core=227`) still favours rotation by 42, and this
+PR's own round 1 does not contradict it: three of its four catches came from
+round 1 where two of the four seats (`invariant-state`,
+`security-perf+integration`) were rotation-tier seats bought by the `high`
+fixture, and `invariant-state` produced one of the three independently.
+
+Decision unchanged: **keep rotation**. One core-seat later-round catch does
+not overturn a 42-catch cumulative margin, and the measurement caveats above
+still apply. Worth noting for the next revisit: the counters are now moving
+again, and if later-round core catches continue to accumulate while rotated
+stays flat, the margin is the thing to re-read rather than the per-PR story.
