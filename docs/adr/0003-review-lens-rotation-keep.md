@@ -4005,8 +4005,9 @@ revisit on the audit's next flag or a maintainer override.
 The audit flagged DECIDABLE with counters that moved for the first time since
 the PR #2184 revisit: `core=227`, `rotated=269`, `phase=53` over 193
 multi-round merged PRs (was `core=226` over 192). PR #2190 is the first
-multi-round PR to enter the denominator in four revisits, so unlike #2187 and
-#2192 it carries an actual rotation signal — one, and it favours core.
+multi-round PR to enter the denominator in four revisits, so unlike the two
+preceding samples (#2187, #2192) it carries an actual rotation signal — one,
+and it favours core.
 
 The single later-round catch (round 2, lens `test-evidence`, class
 `evidence-ledger`) came from a **pinned core seat**, not a rotated-in one, and
