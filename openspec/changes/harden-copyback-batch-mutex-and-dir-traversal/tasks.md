@@ -162,12 +162,15 @@ the harness that stashes only the changed source files and leaves the tests and
 master and is imported at module level by two test files, so removing it would
 make every row fail with `ImportError` and prove nothing).
 **Two things this rule demands that a gate-assertion failure does not give.**
-First, the rule is unconditional: E5, E6, E7, E13 and E14 all go red
-non-vacuously under that harness — E6/E7 because `safe_fs.py:91`'s
-`os.mkdir(part, 0o755, dir_fd=fd)` is umask-masked and the assertion is an exact
-`0o755` compare; E13/E14 because pre-change no lane acquires, so the
-`pytest.raises` never fires; E5 because `run_tree_copyback` had no lock — so each
-must have its failing assertion recorded, not just E2/E3/E4.
+First, the rule is unconditional: E5, E6, E13 and E14 go red non-vacuously under
+that harness — E6 because `safe_fs.py:91`'s `os.mkdir(part, 0o755, dir_fd=fd)`
+is umask-masked and the assertion is an exact `0o755` compare; E13/E14 because
+pre-change no lane acquires, so the `pytest.raises` never fires; E5 because
+`run_tree_copyback` had no lock — so each must have its failing assertion
+recorded, not just E2/E3/E4. **E7 is the exception and is recorded as such**: at
+`umask 002` and `umask 022` the masked `mkdir` already lands `0o755`, so those
+two parameters are green pre-change. E7 is a no-regression row, not a
+defect-discriminating one, and must not claim a red proof.
 Second, E2's and E3's red states below name *terminal* outcomes ("its tree is
 absent", "a file the script counted as `copied` is removed"), and those are what
 make the defect destructive. A red run that stops at the gate assertion proves
@@ -176,19 +179,52 @@ requires a red run with the gate assertion bypassed; record that run, or amend
 these rows to claim only what the gate proves. Reporting "red-proof exists" while
 the fixture asks for the terminal state is the one option that is not honest.
 
+### Red-proof record (run 2026-09-09, local, macOS / Python 3.11.14)
+
+Harness: the changed source files are replaced in place with
+`git show <rev>:<path> > <path>` and restored with `git checkout HEAD -- <path>`
+— **not** `git stash`, because the stash stack is shared across worktrees.
+Tests and `packages/common/copyback_guard.py` stay on the tree throughout.
+Baseline is `master` unless a row names another revision.
+
+| Row | Baseline | Recorded failing assertion |
+|---|---|---|
+| E2 (gate) | master | `assert competitor_ran_inside_window == [False], "the competitor entered the promote window"` → `AssertionError: assert [True] == [False]` |
+| E2 (terminal, gate + `summary_a` assertions removed) | master | writer B reports `ok` and then `(copyback_root / key).read_bytes()` → `FileNotFoundError: .../canonical/gfs/2024060112/prcp_rate_or_amount/gfs_2024060112_prcp_rate_or_amount_f003.nc` |
+| E3 (gate) | master | `assert script_ran_inside_the_batch == [False], "the script committed inside the publisher's batch"` → `assert [True] == [False]` |
+| E3 (terminal, gate bypassed) | master | `script_summary[0]["totals"]["failed"] == 0` passes, then `(copyback_root / key).read_bytes()` → `FileNotFoundError: .../gfs_2026090200_prcp_rate_or_amount_f003.nc` |
+| E4 (gate 1) | master | `assert competitor_ran_between_trees == [False], "the competitor committed inside A's batch"` → `assert [True] == [False]` |
+| E4 (gate 2, the extended discriminator) | HEAD with the canonical lane's batch acquire replaced by a per-tree acquire around `publisher.py:1357-1362` | `assert competitor_ran_before_rollback == [False], "the competitor committed before A's batch rollback"` → `assert [True] == [False]`; gate 1 reads `[False]` under that placement, which is exactly why gate 2 exists |
+| E4 (terminal, both gates bypassed) | same per-tree build | `(copyback_root / key).read_bytes()` → `FileNotFoundError: .../gfs_2024060112_prcp_rate_or_amount_f003.nc` — A's batch rollback deleted B's committed tree |
+| E5 | master | `assert competitor_ran_inside_the_region == [False], "a competitor entered the promote region"` → `assert [True] == [False]` |
+| E6 (`umask 027`) | master | `assert landed == {str(path): "0o755" for path in levels}` → `.../shared-object-store/canonical: '0o750' != '0o755'` (and the same for `canonical/gfs`) |
+| E7 (`umask 022`, `umask 002`) | master | **green pre-change, by construction** — the masked `mkdir` already lands `0o755` at those umasks. Recorded as a no-regression row with no red proof, not as a discriminator. |
+| E13 | master | `with pytest.raises(OrchestratorError)` → `Failed: DID NOT RAISE <class 'services.orchestrator.chain_types.OrchestratorError'>` |
+| E14 | master | `with pytest.raises(PublishError)` → `Failed: DID NOT RAISE <class 'services.tile_publisher.publisher.PublishError'>` |
+| E17 (state-index merge outside the mutex) | `40cf8ed9` (this branch, pre-fix) | `assert batch_lock_free_during_merge == [True], "the state-index merge ran inside the batch mutex"` → `assert [False] == [True]` |
+| E18 (lock-owner poisoning) | `40cf8ed9` | create direction: `assert not (root / COPYBACK_BATCH_LOCK_NAME).exists()` → `assert not True`; root-owner row: `AttributeError: module 'packages.common.copyback_guard' has no attribute 'copyback_root_owner_uid'`; unstattable root: `'copyback root owner is unavailable' not in "cannot acquire copyback batch lock ..."`; deadline: `assert 300.0 == 900.0` |
+| E19 (`..._LOCK_UNSAFE` per lane) | master | four lanes `Failed: DID NOT RAISE`, canonical `assert 'ok' == 'failed'`, forcing `assert 1 == 0` |
+| E19 (narrowing variant — the defect the row actually guards) | HEAD with each `except CopybackLockError` arm narrowed to `CopybackLockTimeout` | `packages.common.copyback_guard.CopybackLockError: copyback batch lock must have mode 0600` escapes uncaught out of all four publisher/run-tree entry points, and the forcing report reads `assert 'failed' == 'copyback_lock_unavailable'` |
+| E20 (import-closure includes package `__init__`s) | the pre-fix test body from `40cf8ed9`, with `import numpy` planted in `packages/common/__init__.py` | pre-fix test: **1 passed** (vacuous); fixed test: `AssertionError: .../packages/common/__init__.py pulls in a third-party dependency: ['numpy']`. Both the plant and the pre-fix test body were reverted immediately. |
+
 - [ ] E1 `copyback_guard` lock unit tests: two threads on one root serialize (the
       second observes the first's completion); two distinct roots do not block each
       other; timeout raises the distinct error and performs no promote; a
       symlinked / `0o644` / foreign-owned lock file fails closed; a killed holder's
       lock is released by the kernel and the next writer proceeds.
-- [ ] E2 publisher × publisher race: competitor injected in the `:2380`→`:2382`
-      window. **Red proof (pre-change)**: winner reports `ok`, its tree is absent,
-      destination holds pre-race content. **Green**: the competitor blocks; both
-      writers report truthfully; the destination holds one writer's complete tree.
-- [ ] E3 publisher × `canonical_precip_copyback_backfill` race, same window.
+- [x] E2 publisher × publisher race: competitor injected in the `:2380`→`:2382`
+      window. **Red proof (pre-change), as actually observed**: the *competitor*
+      (B) completes a whole batch inside the window and reports `ok`, the first
+      writer (A) then hits `ENOTEMPTY` and its `_restore_copyback_backup`
+      `rmtree`s B's just-promoted tree — so B's `read_bytes()` raises
+      `FileNotFoundError` for content it already reported as copied, and A
+      reports `failed` rather than `ok`. (The earlier wording of this row put the
+      `ok` on the wrong writer.) **Green**: the competitor blocks; both writers
+      report truthfully; the destination holds one writer's complete tree.
+- [x] E3 publisher × `canonical_precip_copyback_backfill` race, same window.
       **Red**: a file the script counted as `copied` is removed by the publisher's
       rollback. **Green**: serialized; every counted file survives.
-- [ ] E4 **batch-scope row** (the per-tree-lock discriminator): A promotes `prcp`
+- [x] E4 **batch-scope row** (the per-tree-lock discriminator): A promotes `prcp`
       into an empty slot, B commits into `prcp`, A then fails on `grid`. Expected:
       A's batch rollback does not delete B's tree.
       **Scope of the discriminator, stated precisely** — the gate assertion fails
@@ -203,15 +239,16 @@ the fixture asks for the terminal state is the one option that is not honest.
       red. Close that by additionally gating A's rollback — monkeypatch
       `_rollback_qdown_copyback_batch` to wait on the competitor first — so the
       terminal `read_bytes()` assertion is deterministic under either placement.
-- [ ] E5 `run_tree_copyback._replace_tree` × publisher batch: serialized; loser
+- [x] E5 `run_tree_copyback._replace_tree` × publisher batch: serialized; loser
       reports failure; winner's tree intact; no `rmtree` of a competitor's tree.
-- [ ] E6 `umask 027` publisher canonical copyback: assert the copyback root,
+- [x] E6 `umask 027` publisher canonical copyback: assert the copyback root,
       `canonical/`, `canonical/<S>/`, `canonical/<S>/<cycle>/`,
       `canonical/<S>/grid/` each land `0o755` **individually**, including the case
       where this run is what creates the root. `os.umask` is process-global — set and restore in a
       fixture and keep the test off xdist, or run it in a subprocess.
-- [ ] E7 `umask 002` and `umask 022`: same levels land `0o755`; no group/other
-      write bit on any level.
+- [x] E7 `umask 002` and `umask 022`: same levels land `0o755`; no group/other
+      write bit on any level. No-regression row: green pre-change too (see the
+      red-proof record), so it claims no discrimination.
 - [ ] E8 ACL boundary row: create a level beneath a parent carrying
       `default:user:X:rwx` / `default:mask::rwx` and assert the mask is `r-x`
       **both before and after** the widening — i.e. the caller-side `chmod` changes
@@ -225,7 +262,7 @@ the fixture asks for the terminal state is the one option that is not honest.
       succeed without the mutex.
 - [ ] E11 Lock timeout inside `_mirror_canonical_precip`: the cycle records a
       `failed` `canonical_precip_mirror` receipt and does not raise.
-- [ ] E13 Lock timeout in the run-tree lane raises `RunTreeCopybackError`, is
+- [x] E13 Lock timeout in the run-tree lane raises `RunTreeCopybackError`, is
       caught by `_copyback_stage_run_trees` (`chain_forecast_execution.py:953`),
       records an `object_store_copyback` / `failed` pipeline event, and then
       **propagates as `_chain.OrchestratorError`** (`:971`). Assert the event and
@@ -241,7 +278,7 @@ the fixture asks for the terminal state is the one option that is not honest.
       (`chain_stage_execution.py:974`) re-enters `_after_cycle_stage_terminal`
       unconditionally, so the failure is retried on the next pass, and making it
       non-fatal would mark the cycle succeeded over absent data.
-- [ ] E14 Lock timeout in the q_down lane raises `PublishError` and it
+- [x] E14 Lock timeout in the q_down lane raises `PublishError` and it
       **propagates out of `publish_qdown_cycle` still carrying** the
       `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code — `publisher.py:199-200` re-raises
       `PublishError` unchanged; the point of the distinct type is that it is not
@@ -252,8 +289,30 @@ the fixture asks for the terminal state is the one option that is not honest.
 - [ ] E16 `state_manager._ensure_copyback_state_parent` still chmods `0o775` and
       still restores `mask::rwx` under an ACL'd parent — the `0o755` rule of this
       change must not have leaked onto it.
-- [ ] E12 `grep -rn "DEBUG-" ` clean before commit; `git stash list` shows no
-      leftover `red-proof` entry.
+- [x] E17 `copyback_run_trees` runs the `STATE_INDEX_OBJECT_KEY` merge with the
+      batch mutex **released** — probed by a non-blocking `flock` from a second
+      fd in the same process while the merge runs — and every other
+      `extra_object_keys` entry still copies inside it. The unbounded
+      `provider_destination_lock` must never nest inside the bounded mutex.
+- [x] E18 The lock refuses a foreign uid in **both** directions: an existing lock
+      file whose owner is not the copyback root's owner fails closed (separately
+      from the euid mismatch), and a foreign uid at a root with no lock file yet
+      is refused *before* `O_CREAT` so it leaves no orphan. Every message names
+      both uids and the lock path; none of them is a `CopybackLockTimeout`.
+- [x] E19 A raised base `CopybackLockError` surfaces as each lane's *unsafe* code,
+      distinct from its timeout code: q_down, run-products and the public
+      `publish_qdown_cycle` handler
+      (`PublishError`/`OBJECT_STORE_COPYBACK_LOCK_UNSAFE`), the canonical receipt
+      (`error_type: CopybackLockError`), the run-tree lane
+      (`RunTreeCopybackError`/`OBJECT_STORE_COPYBACK_LOCK_UNSAFE`) and the forcing
+      backfill (`copyback_lock_unavailable`).
+- [x] E20 The import-closure assertion parses the package `__init__.py` files on
+      the path to each allowed in-tree module, not just the module itself.
+- [x] E12 `grep -rn "DEBUG-" ` clean before commit; `git stash list` shows no
+      leftover `red-proof` entry — this pass created no stash entry at all: the
+      red-proof harness swapped source with `git show <rev>:<path>` and restored
+      with `git checkout HEAD -- <path>`, because the stash stack is shared
+      across worktrees.
 
 ## AC4 receipt procedure (cross-uid traversal, must be run, not asserted)
 

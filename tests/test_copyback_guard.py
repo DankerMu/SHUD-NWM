@@ -291,14 +291,14 @@ def test_a_foreign_uid_cannot_create_the_lock_file_in_the_first_place(
     with pytest.raises(CopybackLockError) as error_info:
         acquire_copyback_batch_lock(root, timeout_seconds=0.5)
 
+    # Refused *before* creating: no orphan is left behind to poison the mutex.
+    assert not (root / COPYBACK_BATCH_LOCK_NAME).exists()
     message = str(error_info.value)
     # Both uids and the path, so the operator can act without a round trip.
     assert str(foreign_uid) in message
     assert str(os.stat(root).st_uid) in message
     assert COPYBACK_BATCH_LOCK_NAME in message
     assert not isinstance(error_info.value, CopybackLockTimeout)
-    # Refused *before* creating: no orphan is left behind for anyone to clean up.
-    assert not (root / COPYBACK_BATCH_LOCK_NAME).exists()
 
 
 def test_a_lock_file_whose_owner_is_not_the_copyback_roots_owner_fails_closed(
