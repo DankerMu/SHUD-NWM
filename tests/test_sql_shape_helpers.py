@@ -492,6 +492,15 @@ def test_text_fact_columns_reports_only_the_alias_it_is_asked_about() -> None:
     assert text_fact_columns(sql, "cr") == set()
 
 
+@pytest.mark.parametrize("projection", ["rt.*", "(rt).*"], ids=["direct", "parenthesized"])
+def test_text_fact_columns_reports_whole_row_output_exposure(projection: str) -> None:
+    sql = f"SELECT {projection} FROM hydro.river_timeseries rt"
+    assert text_fact_columns(sql, "rt") == {
+        "run_id", "basin_version_id", "river_network_version_id", "river_segment_id",
+        "variable", "unit", "quality_flag",
+    }
+
+
 def test_text_fact_columns_does_not_confuse_a_text_column_with_its_enum_twin() -> None:
     sql = "WHERE ts.variable_e = 'q_down' AND ts.unit_e = 'm3/s' AND ts.quality_flag_e = 'ok'"
 

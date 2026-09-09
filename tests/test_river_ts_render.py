@@ -1522,6 +1522,133 @@ def test_a_spaced_table_name_qualifier_remains_fail_closed() -> None:
             render_river_ts_sql(sql, store, entry=entry)
 
 
+# Whole-row SELECT output exposure (#2115), independent of named-member grammar.
+@pytest.mark.parametrize(
+    "projection",
+    ["rt.*", "(rt).*", "RT.*", "(RT).*", '"rt".*', '("rt").*'],
+    ids=["direct", "parenthesized", "upper", "upper-group", "quoted", "quoted-group"],
+)
+def test_whole_row_star_exact_output_contract(projection: str) -> None:
+    _assert_whole_row_star_output(f"SELECT {projection} FROM hydro.river_timeseries rt")
+
+
+def _assert_whole_row_star_output(sql: str) -> None:
+    entry = "whole-row-output"
+    expected = {
+        "run_id", "basin_version_id", "river_network_version_id", "river_segment_id",
+        "variable", "unit", "quality_flag",
+    }
+    assert text_fact_columns(sql, "rt") == expected
+    assert text_fact_columns(sql, "RT") == expected
+    assert fact_table_text_identity_columns(sql, entry=entry) == expected
+    assert render_river_ts_sql(sql, "legacy", entry=entry).sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    with pytest.raises(RiverTemplateError) as raised:
+        render_river_ts_sql(sql, "narrow", entry=entry)
+    message = str(raised.value)
+    assert entry in message
+    assert "text identity column(s)" in message
+    assert all(column in message for column in expected)
+    assert "unmodelled" not in message
+
+
+@pytest.mark.parametrize("projection", ["rt.*", "(rt).*"], ids=["direct", "parenthesized"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        "SELECT rt.value, {star} FROM hydro.river_timeseries rt",
+        "SELECT DISTINCT ON (rt.run_key) {star} FROM hydro.river_timeseries rt",
+        "SELECT ALL {star} FROM hydro.river_timeseries rt",
+        "SELECT DISTINCT {star} FROM hydro.river_timeseries rt",
+        "WITH source_rows AS (SELECT {star} FROM hydro.river_timeseries rt) SELECT source_rows.* FROM source_rows",
+        "SELECT q.* FROM (SELECT {star} FROM hydro.river_timeseries rt) q",
+        "SELECT 1 WHERE EXISTS (SELECT {star} FROM hydro.river_timeseries rt)",
+    ],
+    ids=["later", "distinct-on", "all", "distinct", "cte", "derived", "exists"],
+)
+def test_whole_row_star_output_positions(template: str, projection: str) -> None:
+    _assert_whole_row_star_output(template.format(star=projection))
+
+
+@pytest.mark.parametrize(
+    "projection",
+    [
+        "rt \t. \n*",
+        "rt/* outer /* nested */ comment */. -- dot\n*",
+        '( /* inner */ "rt" -- alias\n) /* left */ . /* right */ *',
+        "( \tRT\n) .\t*",
+    ],
+    ids=["whitespace", "direct-comments", "group-comments", "group-whitespace"],
+)
+def test_whole_row_star_scanner_separators(projection: str) -> None:
+    _assert_whole_row_star_output(f"SELECT {projection} FROM hydro.river_timeseries rt")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT ((rt)).* FROM hydro.river_timeseries rt",
+        "SELECT (rt::record).* FROM hydro.river_timeseries rt",
+        "SELECT f(rt).* FROM hydro.river_timeseries rt",
+        "SELECT ROW(rt).* FROM hydro.river_timeseries rt",
+        "SELECT rt.payload.* FROM hydro.river_timeseries rt",
+        "SELECT (rt).payload.* FROM hydro.river_timeseries rt",
+        "SELECT foo(rt.*) FROM hydro.river_timeseries rt",
+        "SELECT rt.value FROM hydro.river_timeseries rt ORDER BY rt.*",
+        "SELECT rt.*, foo(rt.*) FROM hydro.river_timeseries rt",
+    ],
+    ids=["nested", "cast", "function", "row", "multipart", "group-multipart", "argument", "order", "mixed"],
+)
+@pytest.mark.parametrize("door", ["helper", "legacy", "narrow"])
+def test_whole_row_star_unsupported_refused(sql: str, door: str) -> None:
+    entry = "whole-row-unsupported"
+    # The unguarded public seam stays a matcher, including mixed exact/unsupported input.
+    expected = set(TEXT_IDENTITY_COLUMNS) if sql.startswith("SELECT rt.*,") else set()
+    assert text_fact_columns(sql, "rt") == expected
+    with pytest.raises(RiverTemplateError) as raised:
+        if door == "helper":
+            fact_table_text_identity_columns(sql, entry=entry)
+        else:
+            render_river_ts_sql(sql, door, entry=entry)
+    assert entry in str(raised.value)
+    assert "unmodelled whole-row star" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "projection,relation",
+    [
+        ("art.*", "art"), ("(rt2).*", "rt2"),
+        ("cr.*", "cr"), ("source_rows.*", "source_rows"), ("eligible.*", "eligible"),
+        ('"rt.*"', "hr"), ('"RT".*', "hr"), ('("RT").*', "hr"),
+        ('"rt""suffix".*', "hr"), ('("rt""suffix").*', "hr"),
+        ("rt.run_key, rt.variable_e, rt.unit_e, rt.quality_flag_e", "hr"),
+        ("'rt.*', E'(rt).*', rt.value /* rt.* /* (rt).* */ */ -- rt.*\n", "hr"),
+        ("f(%(rt)s).*", "hr"), ("f(value => 1::rt).*", "hr"),
+        ("f(rt => 1).*", "hr"), ("rt.func(1).*", "hr"),
+    ],
+    ids=[
+        "alias-prefix", "alias-suffix", "cr", "source-rows", "eligible",
+        "complete-quoted", "nonexact-quoted", "nonexact-group", "escaped-quoted", "escaped-group",
+        "keys-enums", "data", "placeholder", "type", "label", "function-name",
+    ],
+)
+def test_whole_row_star_nonfact_controls(projection: str, relation: str) -> None:
+    sql = f"SELECT {projection} FROM hydro.river_timeseries rt JOIN hydro.hydro_run {relation} ON true"
+    assert text_fact_columns(sql, "rt") == set()
+    assert fact_table_text_identity_columns(sql, entry="star-control") == set()
+    assert render_river_ts_sql(sql, "legacy", entry="star-control").sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    assert render_river_ts_sql(sql, "narrow", entry="star-control").sql == sql
+
+
+@pytest.mark.parametrize("door", ["helper", "legacy", "narrow"])
+def test_whole_row_star_quoted_declaration_precedence(door: str) -> None:
+    sql = 'SELECT "rt".* FROM hydro.river_timeseries AS "rt"'
+    with pytest.raises(RiverTemplateError, match="double-quoted alias"):
+        if door == "helper":
+            fact_table_text_identity_columns(sql, entry="star-quoted-declaration")
+        else:
+            render_river_ts_sql(sql, door, entry="star-quoted-declaration")
+
+
 # ---------------------------------------------------------------------------
 # Parenthesized whole-row fact-alias field selection (#2112)
 # ---------------------------------------------------------------------------

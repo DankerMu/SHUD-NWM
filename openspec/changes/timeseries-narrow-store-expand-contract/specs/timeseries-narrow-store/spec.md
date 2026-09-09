@@ -75,6 +75,12 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **WHEN** `assert_structurally_intact` receives otherwise valid SQL whose complete double-quoted identifier contains an unmatched `)` or `(` byte
 - **THEN** it accepts the statement because quoted identifier bytes are not structural grouping; a direct helper-level regression test owns this guarantee, while the traversal/scanner commutation oracle retains its separate t1/m26 responsibility and is not evidence for the structural helper's double-quote branch
 
+#### Scenario: Whole-row fact-alias star expansion cannot bypass the output contract
+- **WHEN** scanner-visible outer-query code projects an exact bare-declared fact alias as `alias.*` or `(alias).*` at the top level of a SELECT output list, with bare ASCII case folding, exact lower-case quoted references, and scanner-normalised whitespace/comments
+- **THEN** both public identity helpers report all seven `TEXT_IDENTITY_COLUMNS`, narrow rendering refuses with an entry-named text-identity error before returning SQL, and legacy rendering changes only the physical table name without expanding or rewriting the projection
+- **AND** a scanner-visible fact-alias-rooted star whose exact output-expansion grammar cannot be established is refused by the guarded helper and both render variants as unmodelled whole-row star exposure, not reported clean; non-fact relation/CTE stars, complete quoted identifier data, non-exact quoted references, literals/comments and named key/enum projections retain their existing outcomes, and quoted fact-alias declarations retain their existing refusal
+- **AND** this guards cross-store result-schema drift rather than asserting that star necessarily names a nonexistent column; comparison-position scalar-body star visibility and unaliased scalar scope remain outside this outer-output slice, while the named-field and correlated named-member contracts remain intact
+
 #### Scenario: Renderer refuses a mis-shaped marker
 - **WHEN** a template places the marker above a line that is not a single aid conjunct
 - **THEN** the renderer raises before returning SQL and the shape oracle fails naming the template
