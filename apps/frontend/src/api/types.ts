@@ -1795,7 +1795,7 @@ export interface components {
                 /** @description Available forecast lead time in hours; omitted on analysis segments. */
                 available_lead_hours?: number;
                 /** @enum {string} */
-                segment_role: "past_7_days" | "future_7_days";
+                segment_role: "past_3_days" | "future_7_days";
                 data: {
                     /** Format: date-time */
                     valid_time: string;

@@ -131,7 +131,7 @@ THEN 每个 series 元素包含：
   - `source_id`: 数据源（如 `"GFS"`, `"IFS"`）
   - `cycle_time`: 该 scenario 使用的起报时刻
   - `available_lead_hours`: 该 scenario 的最大可用预报时效（GFS=168, IFS 00/12=168, IFS 06/18=144）
-  - `segment_role`: `"past_7_days"` 或 `"future_7_days"`
+  - `segment_role`: `"past_3_days"` 或 `"future_7_days"`
 
 #### Scenario: multi-source latest 策略
 

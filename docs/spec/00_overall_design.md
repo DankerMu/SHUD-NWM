@@ -110,7 +110,7 @@ flowchart TB
 
 ### 5.1 Analysis 和 Forecast 分离
 
-系统持续运行 analysis run，用真实场或再分析 forcing 更新流域水文状态；每次 forecast run 从最近可用 `StateSnapshot` 启动。前端“过去 7 天 + 未来 7 天”的曲线由 analysis 段和 forecast 段拼接，不把二者混为同一资料来源。
+系统持续运行 analysis run，用真实场或再分析 forcing 更新流域水文状态；每次 forecast run 从最近可用 `StateSnapshot` 启动。前端“过去 3 天 + 未来 7 天”的曲线由 analysis 段和 forecast 段拼接，不把二者混为同一资料来源。
 
 ### 5.2 分 scenario 保存 GFS/IFS
 
@@ -139,7 +139,7 @@ Web/API 服务不能直接运行 SHUD。所有模型运行、forcing 生成、�
         ↓
 从上一状态继续运行 SHUD
         ↓
-输出当前状态与过去 7 天结果
+输出当前状态与历史结果（前端回看 3 天，analysis 计算区间不变）
         ↓
 保存 StateSnapshot
 ```

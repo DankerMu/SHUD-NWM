@@ -554,8 +554,7 @@ def test_no_cross_gap_invariant_holds_after_ingest(
         if declared > 1.0:
             ratio = abs(measured - declared) / declared
             assert ratio < 0.05, (
-                f"reach {row[0]}: declared={declared:.3f}m measured={measured:.3f}m "
-                f"drift={ratio:.3%} exceeds 5% bound"
+                f"reach {row[0]}: declared={declared:.3f}m measured={measured:.3f}m drift={ratio:.3%} exceeds 5% bound"
             )
 
 
@@ -867,9 +866,7 @@ _SHARED_STATION_PREFIX = "basins_pytest1669_met_station_shared_"
 
 
 def _met_station_index_names(cursor: Any) -> set[str]:
-    cursor.execute(
-        "SELECT indexname FROM pg_indexes WHERE schemaname = 'met' AND tablename = 'met_station'"
-    )
+    cursor.execute("SELECT indexname FROM pg_indexes WHERE schemaname = 'met' AND tablename = 'met_station'")
     return {row[0] for row in cursor.fetchall()}
 
 
@@ -1049,9 +1046,7 @@ def test_authority_stats_hygiene_migration_replays_without_changing_anything(
             _assert_000052_state(cursor)
             indexdef_before, _valid_before = _river_segment_id_trgm_index(cursor)
             options_before = _autovacuum_analyze_options(cursor)
-            cursor.execute(
-                "DELETE FROM public.schema_migrations WHERE version LIKE '000052%'"
-            )
+            cursor.execute("DELETE FROM public.schema_migrations WHERE version LIKE '000052%'")
 
         apply_migration(connection, MIGRATIONS_DIR / AUTHORITY_STATS_HYGIENE_MIGRATION)
 
@@ -1060,9 +1055,7 @@ def test_authority_stats_hygiene_migration_replays_without_changing_anything(
             indexdef_after, _valid_after = _river_segment_id_trgm_index(cursor)
             assert indexdef_after == indexdef_before
             assert _autovacuum_analyze_options(cursor) == options_before
-            cursor.execute(
-                "SELECT version FROM public.schema_migrations WHERE version LIKE '000052%'"
-            )
+            cursor.execute("SELECT version FROM public.schema_migrations WHERE version LIKE '000052%'")
             assert [row[0] for row in cursor.fetchall()] == [AUTHORITY_STATS_HYGIENE_MIGRATION]
     finally:
         connection.close()
@@ -1113,9 +1106,7 @@ def test_authority_stats_hygiene_migration_recovers_from_an_interrupted_concurre
 
             # State an interrupted run leaves behind, step by step:
             # after step 1 the bare-column index is parked as `_legacy` ...
-            cursor.execute(
-                "ALTER INDEX core.river_segment_id_trgm_idx RENAME TO river_segment_id_trgm_idx_legacy"
-            )
+            cursor.execute("ALTER INDEX core.river_segment_id_trgm_idx RENAME TO river_segment_id_trgm_idx_legacy")
             _seed_shared_prefix_family(cursor)
             # ... and step 2's build dies. A uniqueness violation is the
             # deterministic way to kill a concurrent build from SQL: these two
@@ -1160,9 +1151,7 @@ def test_authority_stats_hygiene_migration_recovers_from_an_interrupted_concurre
             assert indisvalid is True, indexdef
     finally:
         with connection.cursor() as cursor:
-            cursor.execute(
-                "DELETE FROM core.river_segment WHERE river_segment_id IN ('IT1468_DUP_x', 'it1468_dup_x')"
-            )
+            cursor.execute("DELETE FROM core.river_segment WHERE river_segment_id IN ('IT1468_DUP_x', 'it1468_dup_x')")
             _delete_shared_prefix_family(cursor)
         connection.close()
 
@@ -1366,4 +1355,173 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
             for schema, table in _AUTHORITY_PROBE_TABLES:
                 cursor.execute(f"DROP TABLE IF EXISTS {schema}.{table}")
             _delete_shared_prefix_family(cursor)
+        connection.close()
+
+
+def test_three_day_chunk_migration_preserves_existing_chunks_and_only_changes_new_targets(
+    throwaway_database_url: str,
+) -> None:
+    from datetime import timedelta
+
+    import psycopg2
+
+    from packages.common.migrate import split_sql_statements
+
+    tables = (
+        ("hydro", "river_timeseries"),
+        ("met", "forcing_station_timeseries"),
+        ("met", "best_available_selection"),
+    )
+    target_tables = set(tables[:2])
+    connection = psycopg2.connect(throwaway_database_url)
+    connection.autocommit = True
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
+            cursor.execute("CREATE SCHEMA hydro")
+            cursor.execute("CREATE SCHEMA met")
+            old_chunks = {}
+            for schema, table in tables:
+                name = f"{schema}.{table}"
+                cursor.execute(f"CREATE TABLE {name} (valid_time timestamptz NOT NULL, value integer NOT NULL)")
+                cursor.execute(
+                    "SELECT create_hypertable(%s, 'valid_time', chunk_time_interval => INTERVAL '7 days')",
+                    (name,),
+                )
+                cursor.execute(f"INSERT INTO {name} VALUES ('2026-01-01T00:00:00Z', 1)")
+                if (schema, table) in target_tables:
+                    cursor.execute(
+                        f"ALTER TABLE {name} SET (timescaledb.compress, timescaledb.compress_orderby = 'valid_time')"
+                    )
+                    cursor.execute("SELECT compress_chunk(show_chunks(%s))", (name,))
+                cursor.execute(
+                    """
+                    SELECT chunk_name, range_start, range_end, is_compressed
+                    FROM timescaledb_information.chunks
+                    WHERE hypertable_schema = %s AND hypertable_name = %s
+                    """,
+                    (schema, table),
+                )
+                old_chunks[(schema, table)] = cursor.fetchone()
+
+            statements = split_sql_statements(
+                (MIGRATIONS_DIR / "000058_hot_timeseries_chunk_interval_3d.sql").read_text(encoding="utf-8")
+            )
+            for _ in range(2):
+                for statement in statements:
+                    cursor.execute(statement)
+
+            for schema, table in tables:
+                name = f"{schema}.{table}"
+                cursor.execute(f"INSERT INTO {name} VALUES ('2026-04-01T00:00:00Z', 2)")
+                cursor.execute(f"SELECT value FROM {name} ORDER BY valid_time")
+                assert cursor.fetchall() == [(1,), (2,)]
+                cursor.execute(
+                    """
+                    SELECT chunk_name, range_start, range_end, is_compressed
+                    FROM timescaledb_information.chunks
+                    WHERE hypertable_schema = %s AND hypertable_name = %s
+                    ORDER BY range_start
+                    """,
+                    (schema, table),
+                )
+                old, new = cursor.fetchall()
+                assert old == old_chunks[(schema, table)]
+                expected_days = 3 if (schema, table) in target_tables else 7
+                assert new[2] - new[1] == timedelta(days=expected_days)
+                assert new[3] is False
+    finally:
+        connection.close()
+
+
+def test_real_history_window_excludes_old_points_without_shortening_forecasts(
+    throwaway_database_url: str,
+) -> None:
+    from datetime import timedelta
+
+    import psycopg2
+
+    from packages.common.forecast_store import PsycopgForecastStore
+    from tests.integration_helpers import HINDCAST_RUN_ID, insert_river_timeseries_dual_written
+
+    apply_migrations_from_zero(throwaway_database_url)
+    seed_issue_126_data(throwaway_database_url)
+    connection = psycopg2.connect(throwaway_database_url)
+    try:
+        with connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE hydro.hydro_run SET start_time=%s, end_time=%s WHERE run_id=%s",
+                    (CYCLE_TIME, CYCLE_TIME + timedelta(days=7), FORECAST_RUN_ID),
+                )
+                cursor.execute(
+                    """
+                    UPDATE hydro.hydro_run
+                    SET run_type='analysis', scenario_id='analysis_true_field', start_time=%s, end_time=%s
+                    WHERE run_id=%s
+                    """,
+                    (CYCLE_TIME - timedelta(days=7), CYCLE_TIME, HINDCAST_RUN_ID),
+                )
+                rows = [
+                    (
+                        HINDCAST_RUN_ID,
+                        BASIN_VERSION_ID,
+                        RIVER_NETWORK_VERSION_ID,
+                        "it126_seg_inside",
+                        CYCLE_TIME + delta,
+                        0,
+                        "q_down",
+                        value,
+                        "m3/s",
+                        "ok",
+                    )
+                    for delta, value in (
+                        (timedelta(days=-4), 4.0),
+                        (timedelta(days=-3), 3.0),
+                        (timedelta(hours=-1), 1.0),
+                        (timedelta(0), 0.0),
+                    )
+                ]
+                rows.extend(
+                    (
+                        FORECAST_RUN_ID,
+                        BASIN_VERSION_ID,
+                        RIVER_NETWORK_VERSION_ID,
+                        "it126_seg_inside",
+                        CYCLE_TIME + timedelta(hours=hours),
+                        hours,
+                        "q_down",
+                        value,
+                        "m3/s",
+                        "ok",
+                    )
+                    for hours, value in ((168, 700.0), (169, 701.0))
+                )
+                insert_river_timeseries_dual_written(cursor, rows)
+
+        store = PsycopgForecastStore(throwaway_database_url)
+        parameters = {
+            "basin_version_id": BASIN_VERSION_ID,
+            "segment_id": "it126_seg_inside",
+            "river_network_version_id": RIVER_NETWORK_VERSION_ID,
+            "issue_time": CYCLE_TIME.isoformat(),
+            "variables": ["q_down"],
+            "scenarios": ["GFS"],
+        }
+        response = store.forecast_series(**parameters, include_analysis=True)
+        analysis = next(segment for segment in response["segments"] if segment["segment_role"] == "past_3_days")
+        forecast = next(segment for segment in response["segments"] if segment["segment_role"] == "future_7_days")
+        assert [point["value"] for point in analysis["data"]] == [3.0, 1.0]
+        assert [point["value"] for point in forecast["data"]] == [180.0, 250.0, 700.0]
+
+        with connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE hydro.hydro_run SET run_type='hindcast', scenario_id='hindcast_era5' WHERE run_id=%s",
+                    (HINDCAST_RUN_ID,),
+                )
+        parameters["issue_time"] = "latest"
+        history = store.forecast_series(**parameters, run_types=["hindcast"])
+        assert [point[1] for series in history["series"] for point in series["points"]] == [3.0, 1.0, 0.0]
+    finally:
         connection.close()

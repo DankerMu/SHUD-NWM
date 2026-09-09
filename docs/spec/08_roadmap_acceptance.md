@@ -13,7 +13,7 @@
 
 ## 阶段 2：Analysis run 与 warm-start
 
-交付 ERA5 adapter、analysis run pipeline、StateSnapshot 管理、forecast 使用 init_state_id、前端过去 7 天 + 未来 7 天拼接。验收要求：Analysis run 能生成状态快照，forecast run 使用最近状态快照启动，曲线明确标注 analysis/forecast 分界线。
+交付 ERA5 adapter、analysis run pipeline、StateSnapshot 管理、forecast 使用 init_state_id、前端过去 3 天 + 未来 7 天拼接。验收要求：Analysis run 能生成状态快照，forecast run 使用最近状态快照启动，曲线明确标注 analysis/forecast 分界线。
 
 ## 阶段 3：Slurm 全国化
 

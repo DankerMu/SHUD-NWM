@@ -5395,7 +5395,7 @@ components:
               segment_role:
                 type: string
                 enum:
-                - past_7_days
+                - past_3_days
                 - future_7_days
               data:
                 type: array
