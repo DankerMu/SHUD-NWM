@@ -1322,11 +1322,15 @@ CONNECTION_ATTRIBUTION_TESTS: tuple[str, ...] = (
 # The route modules the unit-level guard walks from the registry, plus the
 # registry itself: each declares a module-level `_APPLICATION_NAME` and injects
 # it into its store factories.
+# #2078: apps/api/routes/forecast.py is deliberately absent — it gained an exact
+# rule (tests/test_forecast_api.py) and these suites are MERGED into that entry
+# instead, exactly like forecast_store.py / state_manager.py below: a duplicate
+# pattern splits the module's ownership across two rules
+# (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
 CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
     "apps/api/route_registry.py",
     "apps/api/routes/best_available.py",
     "apps/api/routes/data_sources.py",
-    "apps/api/routes/forecast.py",
     "apps/api/routes/models.py",
     "apps/api/routes/pipeline.py",
     "apps/api/routes/state_snapshots.py",
@@ -2065,8 +2069,25 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # no broad rule, so before this entry a mirror/window/render/cache diff
         # selected only the same-name derivation (which finds nothing: there is
         # no tests/test_mirror.py) and reached the PR lane with zero assertions.
+        # #2122: PR #2117 made scripts/node27_mvt_prewarm.py:57 import
+        # services.precip.mirror.horizon_valid_times at module level, and
+        # tests/test_node27_mvt_prewarm.py:17 imports that script at module
+        # level, so the prewarm suite is a one-hop importer suite of this tree.
+        # It is the sole holder of the clamped-first-valid-time / PNG-horizon
+        # contract, asserted by
+        # test_a_clamped_first_valid_time_is_warmed_from_that_entry_not_from_the_cycle
+        # (referenced by case name, never by line range, per openspec/changes/
+        # display-v2-national-timeline-precip-overlay/tasks.md:548), and
+        # PRECIP_STEP_HOURS feeds that grid — before this target the PR lane
+        # could not reach that oracle at all. It is NOT the only suite a step
+        # flip reds: tests/test_precip_overlay.py, already selected by this
+        # rule, discriminates on the step too (measured 31 failed at step 6).
+        # The union is spelled in place rather than appended to
+        # PRECIP_SURFACE_TESTS so the shared tuple (and with it the
+        # apps/api/routes/precip.py rule below) does not inherit the prewarm
+        # suite: a route-only diff must not pay for it.
         "services/precip/**",
-        PRECIP_SURFACE_TESTS,
+        (*PRECIP_SURFACE_TESTS, "tests/test_node27_mvt_prewarm.py"),
     ),
     PathTestRule(
         # #2010: the two public routes. `apps/api/**` below buys the three broad
@@ -2344,6 +2365,20 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_display_catalog_cache.py",),
     ),
     PathTestRule(
+        # #2078. `/api/v1/runs` response body (envelope + `total`/`total_count`
+        # duplication) is pinned only by this suite; the `apps/api/**` rule above
+        # buys the three generic API suites, none of which call `list_runs`, so a
+        # diff that changed the runs page shape reached CI green.
+        "apps/api/routes/forecast.py",
+        (
+            "tests/test_forecast_api.py",
+            # #1728's connection-attribution guards, MERGED here rather than left
+            # in CONNECTION_ATTRIBUTION_ROUTE_PATHS: this module now has an exact
+            # rule, and a duplicate pattern splits its ownership across two.
+            *CONNECTION_ATTRIBUTION_TESTS,
+        ),
+    ),
+    PathTestRule(
         "db/**",
         ("tests/test_migrations.py",),
     ),
@@ -2553,6 +2588,31 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/install_node22_scheduler_file_provider_refresh.sh",
         ("tests/test_scheduler_file_provider_refresh.py",),
     ),
+    # #2188: these two rows are systemd units, NOT `#1138` shell wrappers (that
+    # block's targets were derived by grepping tests/ for `*.sh` references;
+    # `infra/systemd/**` is a different surface, and the wrapper run resumes
+    # just below with `scripts/node27_download_once.sh`). They sit next to the
+    # wrapper/installer rows because they are the same refresh family with the
+    # same owner suite.
+    # `tests/test_scheduler_file_provider_refresh.py:3591-3637`
+    # (`test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`)
+    # `read_text`s BOTH files: on the `.service` it asserts
+    # `ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh`,
+    # `TimeoutStartSec=7200`, that `PrivateTmp=true` is ABSENT,
+    # `UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL`, and the
+    # `Before=` / `ExecCondition=` scheduler-independence pair (:3599-3611); on
+    # the `.timer` it asserts `OnCalendar=*-*-* 02:15:00 UTC`,
+    # `RandomizedDelaySec=30m` and `Persistent=false` (:3603-3604, :3633).
+    # Both are outside the `#2173` glob `infra/systemd/nhms-node27-*.service`
+    # (node-22 units), so neither row carries the sibling lane pin.
+    PathTestRule(
+        "infra/systemd/nhms-scheduler-file-provider-refresh.service",
+        ("tests/test_scheduler_file_provider_refresh.py",),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
+        ("tests/test_scheduler_file_provider_refresh.py",),
+    ),
     PathTestRule(
         "scripts/node27_download_once.sh",
         ("tests/test_node27_download_cycles.py",),
@@ -2672,11 +2732,139 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2173: the general case of the two rows above. The sibling-lane pin in
+        # `tests/test_node27_timeseries_retention.py` is a GLOB reader over
+        # exactly `infra/systemd/nhms-node27-*.service`, so the rule is aligned
+        # to the same glob instead of chasing it one path-exact row at a time --
+        # eight of ten units had no row naming the pin, six had no row at all
+        # and degraded to --collect-only. Matches accumulate (`selected.update`
+        # below, no `stop_on_match`), so every path-exact unit rule above and
+        # below keeps its own targets and the retention `.service` selection
+        # stays exactly the pin suite. A unit created later is covered without a
+        # per-unit rule. `.timer` files are outside the pin's glob and are
+        # deliberately not covered here.
+        "infra/systemd/nhms-node27-*.service",
+        ("tests/test_node27_timeseries_retention.py",),
+    ),
+    PathTestRule(
+        # #2180: the glob row above gives every unit the sibling-lane pin, but
+        # that pin asserts ONLY the `StandardError=append:…systemd.err` lane
+        # set -- it never reads this unit's directives, so before this row an
+        # autopipe-unit-only diff ran zero assertions about the unit's body.
+        # `tests/test_node27_autopipeline_preflight.py:19` resolves this exact
+        # path and `:1111-1119` asserts the `scripts/node27_autopipe_cron.sh`
+        # ExecStart, `NODE27_AUTOPIPE_BOOTSTRAP_LOG=…/bootstrap.log`, and that
+        # `infra/env/display.env` is absent (the data-plane / display-plane
+        # boundary). Matches accumulate (`selected.update`, no `stop_on_match`),
+        # so the pin suite arrives from the glob row and is deliberately not
+        # repeated here.
+        "infra/systemd/nhms-node27-autopipe.service",
+        ("tests/test_node27_autopipeline_preflight.py",),
+    ),
+    PathTestRule(
+        # #2180: `tests/test_node27_download_cycles.py:18` resolves this exact
+        # path and `:495` asserts the `scripts/node27_download_once.sh`
+        # ExecStart -- swapping the wrapper the unit runs is invisible to the
+        # lane pin. Pin suite comes from the glob row by accumulation, not
+        # repeated here.
+        "infra/systemd/nhms-node27-download.service",
+        ("tests/test_node27_download_cycles.py",),
+    ),
+    PathTestRule(
+        # #2180: `tests/test_node27_frontier_stall_alert.py:1427` resolves this
+        # exact path and `:1553-1562` asserts
+        # `Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1`,
+        # `EnvironmentFile=%h/NWM/infra/env/node27-frontier-alert.env` and
+        # `TimeoutStartSec=900` -- deleting the sentinel `Environment=` line is
+        # invisible to the lane pin. Pin suite comes from the glob row by
+        # accumulation, not repeated here.
+        "infra/systemd/nhms-node27-frontier-alert.service",
+        ("tests/test_node27_frontier_stall_alert.py",),
+    ),
+    PathTestRule(
+        # #2180: `tests/test_node27_raw_retention.py:317-322` resolves this
+        # exact path and `:325-341` asserts
+        # `ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-raw-retention-logs`,
+        # `StandardOutput=append:…/systemd.log`, and that the `ExecStartPre=`
+        # line precedes `ExecStart=` (reordering them breaks the log-dir
+        # bootstrap and the lane pin cannot see it). Pin suite comes from the
+        # glob row by accumulation, not repeated here.
+        "infra/systemd/nhms-node27-raw-retention.service",
+        ("tests/test_node27_raw_retention.py",),
+    ),
+    PathTestRule(
+        # #2180: two suites read this unit by path.
+        # `tests/test_node27_timeseries_compression.py:31` + `:1964-1976`
+        # asserts the supervisor `--enforce` invocation and its
+        # `--run-plan-path` / `--ledger-path` / `--receipt-path` /
+        # `--finalizer-state-path` / `--wall-seconds 900` options, the
+        # `ExecStopPost=` + `--finalize-only` finalizer lane and
+        # `TimeoutStartSec=920`;
+        # `tests/test_node27_timeseries_compression_supervisor.py:1233-1238`
+        # asserts the
+        # `EnvironmentFile=/home/nwm/NWM/infra/env/node27-timeseries-compression-replay.env`
+        # digest pin. Both are targets. Pin suite comes from the glob row by
+        # accumulation, not repeated here.
+        "infra/systemd/nhms-node27-timeseries-compression-replay.service",
+        (
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+        ),
+    ),
+    PathTestRule(
         # #2032: the same suite parses `OnCalendar=*-*-* 04:05:00 UTC` and
         # `Persistent=true` out of the timer, so the schedule is assertable at
         # PR time rather than at `systemctl --user list-timers`.
         "infra/systemd/nhms-node27-mvt-cache-retention.timer",
         ("tests/test_node27_mvt_cache_retention.py",),
+    ),
+    PathTestRule(
+        # #2180: same shape as the mvt-cache-retention `.timer` row above and
+        # the same zero-selection hole -- `infra/**` is not a backend python
+        # path, `_is_backend_shell_path` is scoped to `scripts/**.sh`, and the
+        # `#2173` pin glob is `*.service`, so a timer-only diff matched NOTHING
+        # and CI degraded to --collect-only. The suite really reads this file:
+        # `tests/test_node27_download_cycles.py:19` resolves the timer by path
+        # and `:496` asserts `OnUnitActiveSec=30min`, so lengthening the tick
+        # reds at PR time instead of at `systemctl --user list-timers`.
+        "infra/systemd/nhms-node27-download.timer",
+        ("tests/test_node27_download_cycles.py",),
+    ),
+    PathTestRule(
+        # #2180: two suites read this timer by path and assert its schedule --
+        # `tests/test_node27_cold_residency.py:118-119` and
+        # `tests/test_node27_timeseries_compression.py:1982-1985` both pin
+        # `OnCalendar=*-*-* 04:25:00 UTC`, and the latter also pins
+        # `Unit=nhms-node27-timeseries-compression.service`. Both are targets so
+        # the schedule cannot drift past either reader.
+        # `tests/test_node27_timeseries_compression_live_evidence.py:712-716`
+        # and `..._capture.py:134-139` only `read_bytes` this timer to copy it
+        # into a fixture and assert nothing about its content -- not targets.
+        # The `#2173` pin glob is `*.service`, so this row is the whole
+        # selection for a timer-only diff.
+        "infra/systemd/nhms-node27-timeseries-compression.timer",
+        (
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_compression.py",
+        ),
+    ),
+    PathTestRule(
+        # #2188: the display API unit runs on node-27 but is named OUTSIDE the
+        # `#2173` pin glob `infra/systemd/nhms-node27-*.service`, so it matched
+        # nothing at all (`infra/**` is not a backend python path and
+        # `_is_backend_shell_path` is scoped to `scripts/**.sh`) and a
+        # unit-only diff degraded to a zero-assertion --collect-only smoke.
+        # `tests/test_hydro_display_mvt_scaling.py:198-204`
+        # (`test_systemd_workers_receive_shared_file_cache_default`) `read_text`s
+        # this exact path and asserts the two directives that carry the public
+        # display entrypoint's cache/worker contract:
+        # `export NHMS_MVT_FILE_CACHE_DIR="${NHMS_MVT_FILE_CACHE_DIR:-/home/nwm/.cache/nhms/mvt}"`
+        # and `--workers "${NHMS_DISPLAY_WORKERS:-2}"`.
+        # Not in the `#2173` glob => this unit takes NO sibling lane pin, so
+        # `tests/test_node27_timeseries_retention.py` must NOT appear in this
+        # row's targets (the lane pin never reads this unit's body anyway).
+        "infra/systemd/nhms-display-api.service",
+        ("tests/test_hydro_display_mvt_scaling.py",),
     ),
     PathTestRule(
         "schemas/timeseries_compression_receipt.schema.json",

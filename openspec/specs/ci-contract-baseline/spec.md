@@ -868,3 +868,74 @@ A pull request that changes `config/calibration_overrides.yaml` MUST open the ba
 - **THEN** the set-equality assertion passes with seven members and the `resource-governance` negative assertion
   still holds
 
+### Requirement: every node-27 service unit change MUST reach the sibling systemd.err lane set pin
+
+`tests/test_node27_timeseries_retention.py::test_sibling_units_keep_their_systemd_err_lane` reads every `infra/systemd/nhms-node27-*.service` by glob and pins the set of units carrying a `StandardError=append:…/systemd.err` lane by set equality, so any node-27 service unit added or edited changes its input. `scripts/select_ci_tests.py` SHALL therefore carry a `PathTestRule` whose pattern is that same glob, `infra/systemd/nhms-node27-*.service`, targeting `tests/test_node27_timeseries_retention.py`, with neither `stop_on_match` nor `only_when_any_changed`, so that a diff touching any such unit — the ten units present today and any unit created later, without a per-unit rule — selects a non-empty test set containing the pin's suite instead of degrading to `--collect-only` or running only the unit's own suite. Because rule matches accumulate, the existing path-exact unit rules and their own targets SHALL be kept unchanged, the retention `.service` selection SHALL remain exactly `["tests/test_node27_timeseries_retention.py"]`, and `.timer` units SHALL NOT be covered by this rule (the pin's glob is `*.service`).
+
+#### Scenario: each existing node-27 service unit selects the lane pin
+
+- **WHEN** the changed paths are exactly one `infra/systemd/nhms-node27-*.service` file present in the tree, for each such file in turn
+- **THEN** `select_tests` emits a non-empty set containing `tests/test_node27_timeseries_retention.py`
+
+#### Scenario: a not-yet-existing node-27 service unit selects the lane pin
+
+- **WHEN** the changed paths are exactly `infra/systemd/nhms-node27-brand-new.service`, a path that does not exist in the tree
+- **THEN** `select_tests` emits a non-empty set containing `tests/test_node27_timeseries_retention.py`, and the sibling path `infra/systemd/nhms-node27-brand-new.timer` does not select that suite
+
+#### Scenario: existing per-unit selections are preserved
+
+- **WHEN** the changed paths are exactly `infra/systemd/nhms-node27-timeseries-retention.service`, or exactly `infra/systemd/nhms-node27-mvt-cache-retention.service`, or exactly `infra/systemd/nhms-node27-resource-governance.service`
+- **THEN** the retention unit still selects exactly `["tests/test_node27_timeseries_retention.py"]`, the mvt-cache-retention unit still selects both its own suite and the pin's suite, and the resource-governance unit still selects `tests/test_node27_cold_governance.py` and `tests/test_node27_resource_governance.py`
+
+### Requirement: node-27 unit files with a content-asserting owner suite MUST select that suite
+
+The sibling-lane pin selected by the `infra/systemd/nhms-node27-*.service` glob rule asserts only the `StandardError=append:…/systemd.err` lane set; it does not read a unit's `ExecStart`, `ExecStartPre`, `Environment`, `EnvironmentFile`, or timeout directives. For every node-27 unit file that has a suite reading it by path and asserting such directives, `scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` (neither `stop_on_match` nor `only_when_any_changed`) targeting that owner suite, unless that owner suite is already selected by the glob rule: `nhms-node27-autopipe.service` → `tests/test_node27_autopipeline_preflight.py`; `nhms-node27-download.service` → `tests/test_node27_download_cycles.py`; `nhms-node27-frontier-alert.service` → `tests/test_node27_frontier_stall_alert.py`; `nhms-node27-raw-retention.service` → `tests/test_node27_raw_retention.py`; `nhms-node27-timeseries-compression-replay.service` → both `tests/test_node27_timeseries_compression.py` and `tests/test_node27_timeseries_compression_supervisor.py`; `nhms-node27-download.timer` → `tests/test_node27_download_cycles.py`; `nhms-node27-timeseries-compression.timer` → both `tests/test_node27_cold_residency.py` and `tests/test_node27_timeseries_compression.py`. Because rule matches accumulate, each `.service` selection SHALL contain its owner suites and the glob rule's pin suite, each of the two `.timer` selections above SHALL contain its owner suites and SHALL NOT contain the pin suite, and the existing selections for `nhms-node27-timeseries-retention.service` (exactly the pin suite), `nhms-node27-timeseries-retention.timer`, `nhms-node27-autopipe.timer`, and `nhms-node27-mvt-cache-retention.{service,timer}` SHALL remain unchanged. Units whose only path reader is the pin suite itself, which the glob rule already selects (`nhms-node27-unit-failure-alert@.service`, asserted at `tests/test_node27_timeseries_retention.py:3589-3592`) or that have no content-asserting reader at all (`nhms-node27-frontier-alert.timer`, `nhms-node27-raw-retention.timer`) SHALL NOT receive a rule under this requirement.
+
+#### Scenario: a unit-only diff selects the owner suite and the lane pin
+
+- **WHEN** the changed paths are exactly one of `infra/systemd/nhms-node27-{autopipe,download,frontier-alert,raw-retention,timeseries-compression-replay}.service`
+- **THEN** `select_tests` emits a set containing every owner suite listed above for that unit and `tests/test_node27_timeseries_retention.py`
+
+#### Scenario: a timer-only diff selects its reader suites without the lane pin
+
+- **WHEN** the changed paths are exactly `infra/systemd/nhms-node27-download.timer` or exactly `infra/systemd/nhms-node27-timeseries-compression.timer`
+- **THEN** `select_tests` emits a non-empty set containing every owner suite listed above for that timer and not containing `tests/test_node27_timeseries_retention.py`
+
+#### Scenario: existing exact selections are preserved
+
+- **WHEN** the changed paths are exactly `infra/systemd/nhms-node27-timeseries-retention.service`, or exactly `infra/systemd/nhms-node27-timeseries-retention.timer`, or exactly `infra/systemd/nhms-node27-autopipe.timer`
+- **THEN** the retention service still selects exactly `["tests/test_node27_timeseries_retention.py"]`, the retention timer still selects exactly `["tests/test_node27_cold_residency.py", "tests/test_node27_timeseries_retention.py"]`, and the autopipe timer still selects exactly `["tests/test_node27_autopipeline_preflight.py", "tests/test_node27_mvt_prewarm.py"]`
+
+### Requirement: precip service tree changes MUST select the prewarm reader suite
+
+`scripts/node27_mvt_prewarm.py` imports `services.precip.mirror.horizon_valid_times` at module level and `tests/test_node27_mvt_prewarm.py` imports that script at module level, so the prewarm suite is a one-hop importer suite of the `services/precip/**` tree whose valid-time grid assertions discriminate on `PRECIP_STEP_HOURS`. The `services/precip/**` `PathTestRule` in `scripts/select_ci_tests.py` SHALL target `tests/test_node27_mvt_prewarm.py` in addition to the four `PRECIP_SURFACE_TESTS` suites, by widening that rule's own target tuple only (neither `stop_on_match` nor `only_when_any_changed`). The shared `PRECIP_SURFACE_TESTS` tuple and the `apps/api/routes/precip.py` rule SHALL remain unchanged, so a route-only diff SHALL NOT select the prewarm suite. `tests/test_select_ci_tests.py` SHALL pin both outcomes with explicit literal expected lists rather than by referencing `PRECIP_SURFACE_TESTS`.
+
+#### Scenario: a precip tree module diff selects the prewarm reader suite
+
+- **WHEN** the changed paths are exactly `services/precip/constants.py` or exactly `services/precip/mirror.py`
+- **THEN** `select_tests` emits exactly `["tests/test_api_contract.py", "tests/test_node27_mvt_prewarm.py", "tests/test_openapi_31_contract.py", "tests/test_openapi_drift.py", "tests/test_precip_overlay.py"]`
+
+#### Scenario: a precip route-only diff keeps its existing selection
+
+- **WHEN** the changed paths are exactly `apps/api/routes/precip.py`
+- **THEN** `select_tests` emits exactly `["tests/test_api.py", "tests/test_api_contract.py", "tests/test_monitoring_api.py", "tests/test_openapi_31_contract.py", "tests/test_openapi_drift.py", "tests/test_precip_overlay.py"]`
+
+### Requirement: display and scheduler unit files with a content-asserting owner suite MUST select that suite
+
+`infra/systemd/nhms-display-api.service`, `infra/systemd/nhms-scheduler-file-provider-refresh.service` and `infra/systemd/nhms-scheduler-file-provider-refresh.timer` each have exactly one suite that `read_text`s that path and asserts its directives, and none of them lies inside the `infra/systemd/nhms-node27-*.service` glob rule, so before this change a unit-only diff selected nothing at all and the targeted job degraded to a zero-assertion `--collect-only` smoke. `scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` (neither `stop_on_match` nor `only_when_any_changed`) for each: the display-api unit targeting `tests/test_hydro_display_mvt_scaling.py`, and both scheduler file-provider-refresh units targeting `tests/test_scheduler_file_provider_refresh.py`. Because none of the three matches the node-27 glob, none of the three selections SHALL contain `tests/test_node27_timeseries_retention.py`. The node-27 owner-table meta test SHALL decide whether a unit owes the sibling lane pin by matching that glob rather than by the `.service` suffix, so that a node-27 unit named outside the `nhms-node27-` prefix is judged correctly. `nhms-display-api.service` is not an `nhms-node27-*`-named unit and therefore lies outside the domain of "node-27 unit files with a content-asserting owner suite MUST select that suite", whose scope is the `infra/systemd/nhms-node27-*.service` glob; it is governed by this requirement instead. Units with no content-asserting reader (`nhms-compute-compose.service`, `nhms-display-compose.service`, `nhms-node27-frontier-alert.timer`, `nhms-node27-raw-retention.timer`, `nhms-scheduler-evidence-retention.timer`) SHALL NOT receive a rule under this requirement, and the four node-22 units already routed by the existing exact rules SHALL keep their current selections unchanged.
+
+#### Scenario: a display-api unit diff selects its owner suite without the node-27 lane pin
+
+- **WHEN** the changed paths are exactly `infra/systemd/nhms-display-api.service`
+- **THEN** `select_tests` emits a non-empty set containing `tests/test_hydro_display_mvt_scaling.py` and not containing `tests/test_node27_timeseries_retention.py`
+
+#### Scenario: a scheduler file-provider-refresh unit diff selects its owner suite
+
+- **WHEN** the changed paths are exactly `infra/systemd/nhms-scheduler-file-provider-refresh.service` or exactly `infra/systemd/nhms-scheduler-file-provider-refresh.timer`
+- **THEN** `select_tests` emits a non-empty set containing `tests/test_scheduler_file_provider_refresh.py` and not containing `tests/test_node27_timeseries_retention.py`
+
+#### Scenario: existing node-27 owner-table selections are preserved
+
+- **WHEN** the changed paths are exactly one of the five `infra/systemd/nhms-node27-{autopipe,download,frontier-alert,raw-retention,timeseries-compression-replay}.service` units
+- **THEN** `select_tests` still emits that unit's owner suites together with `tests/test_node27_timeseries_retention.py`, and the two node-27 `.timer` rows still emit their owner suites without it
+

@@ -317,6 +317,175 @@ def test_node27_mvt_cache_retention_unit_selects_the_sibling_lane_pin() -> None:
     assert selected, "the unit selected an empty test set (collect-only)"
 
 
+def test_every_node27_service_unit_selects_the_sibling_lane_pin() -> None:
+    """#2173 — the sibling-lane pin is a GLOB reader, so every unit it reads must select it.
+
+    ``tests/test_node27_timeseries_retention.py::test_sibling_units_keep_their_systemd_err_lane``
+    collects `infra/systemd/nhms-node27-*.service` by glob and pins the lane-carrying set by
+    equality, so any of these units changes its input. The unit list is derived from the tree
+    (not frozen here) so the rule stays aligned to the same glob the pin reads: before #2173 the
+    four path-exact rows left six units selecting NOTHING (a zero-assertion `--collect-only`
+    degrade) and two selecting only their own suite, which is the #2032 -> #2170 failure mode --
+    targeted PR CI green, master's full run red on the pin.
+    """
+    units = sorted(Path("infra/systemd").glob("nhms-node27-*.service"))
+
+    assert len(units) >= 10, f"expected at least 10 node-27 service units, found {len(units)}: {units}"
+
+    for unit in units:
+        selected = set(select_tests([unit.as_posix()], repo_root=Path(".")))
+        assert selected, f"{unit.name} selected an empty test set (collect-only)"
+        assert (
+            "tests/test_node27_timeseries_retention.py" in selected
+        ), f"{unit.name} does not select the sibling lane pin"
+
+
+def test_a_future_node27_service_unit_selects_the_sibling_lane_pin() -> None:
+    """#2173 — a unit created later is covered without anyone remembering to add a row.
+
+    The selector never stats a producer path (the rule loop is pure ``fnmatch``), so a name that
+    does not exist yet is a direct observation of the rule's SHAPE: a glob aligned to the pin's
+    own `nhms-node27-*.service`, not a fifth path-exact row. The `.timer` sibling is asserted
+    negatively because the pin's glob is `*.service` -- timers are deliberately out of this rule's
+    scope and keep whatever their own path-exact rows give them.
+    """
+    future = "infra/systemd/nhms-node27-brand-new.service"
+    assert not Path(future).exists(), f"{future} exists; pick a name that does not, or the test proves nothing"
+
+    selected = set(select_tests([future], repo_root=Path(".")))
+
+    assert selected, f"{future} selected an empty test set (collect-only)"
+    assert "tests/test_node27_timeseries_retention.py" in selected, f"{future} does not select the sibling lane pin"
+
+    assert "tests/test_node27_timeseries_retention.py" not in set(
+        select_tests(["infra/systemd/nhms-node27-brand-new.timer"], repo_root=Path("."))
+    ), "the `.service` glob leaked onto a `.timer` path"
+
+
+# #2180: the owner suite of each node-27 unit file -- the suite that really
+# `read_text`s that exact path and asserts its DIRECTIVES, not just the
+# `systemd.err` lane set the glob pin covers. Keyed by unit path so the table
+# is the readable producer -> consumer statement, same shape as the
+# resource-governance table above.
+NODE27_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
+    "infra/systemd/nhms-node27-autopipe.service": frozenset(
+        {"tests/test_node27_autopipeline_preflight.py"}
+    ),
+    "infra/systemd/nhms-node27-download.service": frozenset({"tests/test_node27_download_cycles.py"}),
+    "infra/systemd/nhms-node27-frontier-alert.service": frozenset(
+        {"tests/test_node27_frontier_stall_alert.py"}
+    ),
+    "infra/systemd/nhms-node27-raw-retention.service": frozenset({"tests/test_node27_raw_retention.py"}),
+    "infra/systemd/nhms-node27-timeseries-compression-replay.service": frozenset(
+        {
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+        }
+    ),
+    # #2188: runs on node-27 (its default cache dir is that box's
+    # `/home/nwm/.cache/nhms/mvt`) but is named outside the `nhms-node27-`
+    # prefix, so it is the first `.service` row here outside that prefix and,
+    # unlike the other `.service` rows, owes NO sibling lane pin.
+    "infra/systemd/nhms-display-api.service": frozenset({"tests/test_hydro_display_mvt_scaling.py"}),
+    "infra/systemd/nhms-node27-download.timer": frozenset({"tests/test_node27_download_cycles.py"}),
+    "infra/systemd/nhms-node27-timeseries-compression.timer": frozenset(
+        {
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_timeseries_compression.py",
+        }
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("unit", "owners"),
+    sorted(NODE27_UNIT_OWNER_SUITES.items()),
+    ids=[PurePosixPath(unit).name for unit in sorted(NODE27_UNIT_OWNER_SUITES)],
+)
+def test_node27_unit_files_select_their_owner_suites(unit: str, owners: frozenset[str]) -> None:
+    """#2180 — the sibling-lane pin is not a substitute for a unit's own suite.
+
+    ``tests/test_node27_timeseries_retention.py::test_sibling_units_keep_their_systemd_err_lane``
+    asserts only the `StandardError=append:…/systemd.err` LANE SET; it never reads a unit's
+    `ExecStart`, `ExecStartPre`, `Environment`, `EnvironmentFile` or timeout directives. The
+    suites in this table do: each one `read_text`s the exact unit path and asserts those
+    directives. Before #2180 the five `.service` units selected ONLY the glob pin and the two
+    `.timer` files selected NOTHING (a zero-assertion `--collect-only` degrade), so breaking
+    `download.service`'s `ExecStart` or deleting frontier-alert's `Environment=` line passed
+    targeted PR CI and only redded on master's full run — the #2032 -> #2170 failure mode in the
+    "own suite" dimension. Parametrized rather than looped so every unit reds independently.
+    """
+    selected = set(select_tests([unit], repo_root=Path(".")))
+
+    assert owners <= selected, f"{unit} lost its owner suite(s): {sorted(owners - selected)}"
+
+    # #2188: the predicate is the pin's OWN glob, not `.endswith(".service")`.
+    # The suffix spelling held only because every row in this table happened to
+    # carry the `nhms-node27-` prefix; `nhms-display-api.service` is the first
+    # row that is a node-27 unit WITHOUT that prefix, so it does not match the
+    # `#2173` glob, cannot get the pin, and must fall into the else branch and
+    # assert it does NOT carry the lane pin. That is a tightening, not a
+    # loosening: hanging display-api off the glob row would red here.
+    if fnmatch.fnmatch(unit, "infra/systemd/nhms-node27-*.service"):
+        # The `#2173` glob row accumulates on top of the path-exact row (no
+        # `stop_on_match`); this PR must not cost a unit its lane pin.
+        assert (
+            "tests/test_node27_timeseries_retention.py" in selected
+        ), f"{unit} does not select the sibling lane pin"
+    else:
+        # The pin's glob is `nhms-node27-*.service`; a `.timer` row -- or a
+        # node-27 unit named outside the `nhms-node27-` prefix -- must not
+        # smuggle the pin suite in through its own targets.
+        assert (
+            "tests/test_node27_timeseries_retention.py" not in selected
+        ), f"{unit} pulled in the `.service`-only sibling lane pin"
+
+
+# #2188: the node-22 sibling of the table above -- same producer -> consumer
+# statement for units that live on the compute box. Kept as its own table
+# rather than merged into a generic `SYSTEMD_UNIT_OWNER_SUITES` because the
+# node-27 table's docstring and pin branch are lane-specific. Both rows are
+# outside the `#2173` glob `infra/systemd/nhms-node27-*.service`, so neither
+# owes the sibling lane pin.
+NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
+    "infra/systemd/nhms-scheduler-file-provider-refresh.service": frozenset(
+        {"tests/test_scheduler_file_provider_refresh.py"}
+    ),
+    "infra/systemd/nhms-scheduler-file-provider-refresh.timer": frozenset(
+        {"tests/test_scheduler_file_provider_refresh.py"}
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("unit", "owners"),
+    sorted(NODE22_UNIT_OWNER_SUITES.items()),
+    ids=[PurePosixPath(unit).name for unit in sorted(NODE22_UNIT_OWNER_SUITES)],
+)
+def test_node22_unit_files_select_their_owner_suites(unit: str, owners: frozenset[str]) -> None:
+    """#2188 — the node-22 refresh units had NO rule at all, not even a pin.
+
+    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `read_text`s both files and asserts the `.service`'s wrapper `ExecStart`,
+    `TimeoutStartSec=7200`, the absence of `PrivateTmp=true` and the
+    `Before=`/`ExecCondition=` scheduler-independence pair, plus the `.timer`'s
+    `OnCalendar`/`RandomizedDelaySec`/`Persistent=false` schedule. Before #2188 a
+    unit-only diff selected NOTHING, so all of that degraded to a zero-assertion
+    `--collect-only` smoke. Parametrized rather than looped so each unit reds
+    independently, same shape as the node-27 table's meta test above.
+    """
+    selected = set(select_tests([unit], repo_root=Path(".")))
+
+    assert owners <= selected, f"{unit} lost its owner suite(s): {sorted(owners - selected)}"
+
+    # These are node-22 units: the `#2173` pin glob is
+    # `infra/systemd/nhms-node27-*.service`, so neither row may smuggle the
+    # node-27 lane pin in through its own targets.
+    assert (
+        "tests/test_node27_timeseries_retention.py" not in selected
+    ), f"{unit} pulled in the node-27 sibling lane pin"
+
+
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
     consumers = (
         "tests/test_node27_cold_tablespace_identity.py",
@@ -1124,6 +1293,73 @@ def test_select_tests_maps_autopipe_cron_wrapper_without_core_smoke_fallback() -
         "tests/test_node27_mvt_prewarm.py",
     ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
+
+
+@pytest.mark.parametrize("module", ["services/precip/constants.py", "services/precip/mirror.py"])
+def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> None:
+    """#2122 — the precip tree's one-hop importer suite must ride along.
+
+    `scripts/node27_mvt_prewarm.py:57` imports `services.precip.mirror.horizon_valid_times`
+    at module level and `tests/test_node27_mvt_prewarm.py:17` imports that script at module
+    level, so the prewarm suite reads this tree. `PRECIP_STEP_HOURS`
+    (`services/precip/constants.py`) feeds `horizon_valid_times` and thereby prewarm's
+    valid-time grid: flipping it 3 -> 6 reds
+    `test_a_clamped_first_valid_time_is_warmed_from_that_entry_not_from_the_cycle` in the
+    prewarm suite, the sole holder of the clamped-first-valid-time / PNG-horizon contract, so
+    before this target a constants-only PR could not reach that oracle in the targeted lane at
+    all. That flip also reds `tests/test_precip_overlay.py` (measured 31 failed at step 6),
+    which this rule already selected: the gap this leg closes is the missing oracle, not a
+    lane that was green.
+
+    The expected list is spelled out literally rather than built from
+    `PRECIP_SURFACE_TESTS` (#1827): an expectation derived from the shared tuple would
+    self-certify any edit to that tuple.
+    """
+    assert Path(module).exists()
+
+    assert select_tests([module], repo_root=Path(".")) == [
+        "tests/test_api_contract.py",
+        "tests/test_node27_mvt_prewarm.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+        "tests/test_precip_overlay.py",
+    ]
+
+
+def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:
+    """#2122 — the reverse guard: the tree rule's own target was widened, not the shared tuple.
+
+    `PRECIP_SURFACE_TESTS` is shared by the `services/precip/**` rule and this exact route
+    rule. Widening the shared tuple instead of the tree rule's own target would make a
+    route-only PR pay for the prewarm suite, which reads no route — so this pin must red if
+    the prewarm entry ever migrates into `PRECIP_SURFACE_TESTS`. Exact equality against a
+    literal list, for the same #1827 reason as the tree case.
+    """
+    assert Path("apps/api/routes/precip.py").exists()
+
+    assert select_tests(["apps/api/routes/precip.py"], repo_root=Path(".")) == [
+        "tests/test_api.py",
+        "tests/test_api_contract.py",
+        "tests/test_monitoring_api.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+        "tests/test_precip_overlay.py",
+    ]
+
+
+def test_precip_tree_rule_carries_no_selection_flags() -> None:
+    """#2122 — the spec delta's flag clause needs a structural pin, not an output pin.
+
+    Both flags are behaviourally inert for this rule today: no later rule matches
+    `services/precip/*.py`, so `stop_on_match=True` truncates nothing and every output
+    assertion above stays green under it. It would not stay harmless — a later rule added for
+    this tree would be silently amputated, the failure the duplicate-pattern guard warns
+    about — so the clause is pinned directly on the rule object instead.
+    """
+    rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == "services/precip/**")
+
+    assert not rule.stop_on_match
+    assert not rule.only_when_any_changed
 
 
 def test_select_tests_maps_sh_only_wrapper_change_to_its_guard_suite() -> None:

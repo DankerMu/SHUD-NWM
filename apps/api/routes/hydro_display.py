@@ -274,7 +274,14 @@ def read_cached_tile_response(session: Session, tile: TileInput) -> TileResponse
 def list_layers(
     request: Request,
     limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(
+        default=0,
+        ge=0,
+        description=(
+            "Zero-based offset into the run's layer catalog; an offset at or beyond "
+            "the catalog length yields an empty `data` page (HTTP 200)."
+        ),
+    ),
     run_id: str | None = Query(default=None),
     session: Session = Depends(get_hydro_display_session),
 ) -> dict[str, Any]:
@@ -304,9 +311,15 @@ def list_layers(
             river_network_version_id=river_network_version_id,
             national=run_id is None,
         )
-        return [layer.model_dump() for layer in layers[offset : offset + limit]]
+        return [layer.model_dump() for layer in layers]
 
-    return _ok(request, display_catalog_cached(request, f"layers:{run_id}:{limit}:{offset}", _load))
+    # 分页在缓存**之后**（#2078）：key 不含 `limit`/`offset`，所以客户端可控的无界
+    # offset 维度不再制造缓存条目；越界 offset 从缓存值切出 `[]`，不落 DB。切片结果
+    # 与从前在 loader 里切片逐字节相同。
+    # key 用 `!r` 而不是裸插值：字面量 `?run_id=None` 通过 `SAFE_TILE_IDENTIFIER_RE`，
+    # 裸插值会让它折叠进国家级 key（`layers:None`），拿到别人的目录还顺手劫持热 path。
+    catalog = display_catalog_cached(request, f"layers:{run_id!r}", _load)
+    return _ok(request, catalog[offset : offset + limit])
 
 
 @router.get("/api/v1/layers/discharge/cycles", response_model=DischargeCyclesResponse)
@@ -392,8 +405,14 @@ def list_layer_valid_times(
         request,
         display_catalog_cached(
             request,
-            f"valid-times:{layer_id}:{requested_run_id}:{source}:{cycle_key}",
+            # `!r` 隔离客户端可控的维度：字面量 `?run_id=None` 记作 `'None'`，不与
+            # 「没给 run_id」的国家级条目同 key（#2078）。`layer_id` 被
+            # `SUPPORTED_PUBLIC_LAYER_IDS` 限死，是有界维度。
+            f"valid-times:{layer_id}:{requested_run_id!r}:{source!r}:{cycle_key!r}",
             _load,
+            # 空 `valid_times`（交集外的 fail-closed cycle、无覆盖的国家级列表、非
+            # discharge 图层）不进缓存也不进热 path：`cycle` 是客户端可控的无界维度。
+            cacheable=lambda payload: bool(payload["valid_times"]),
         ),
     )
 
@@ -458,6 +477,14 @@ def hydro_mvt_tile(
     validate_identifier(variable, "variable")
     _validate_supported_hydro_variable(variable)
     validate_xyz(z, x, y)
+    # #2033, range check only -- NOT `_require_seconds_precision_instant`, which
+    # would newly 422 the in-range sub-second instants this alias has always
+    # accepted. The return is discarded on purpose: everything below keeps
+    # receiving the ORIGINAL `valid_time`, so the diff is purely additive and
+    # "zero shift for in-range instants" is checkable by inspection. Placed here
+    # because `_require_display_ready` and `_require_hydro_mvt_source_identity`
+    # are two SQL statements this used to pay before answering 500.
+    _require_representable_instant(valid_time, "valid_time")
     run = _require_display_ready(session, run_id)
     basin_version_id, river_network_version_id = _require_run_source_identity(
         run,
@@ -576,6 +603,13 @@ def hydro_national_mvt_tile(
     validate_identifier(variable, "variable")
     _validate_supported_hydro_variable(variable)
     validate_xyz(z, x, y)
+    # #2033, range check only (design D3), return discarded (design D4): the
+    # original `valid_time` is what the digest, the cache key and the tile SQL
+    # below all keep receiving. It must precede the `TileInput(...)` construction,
+    # not follow it -- the `source_version=` kwarg calls
+    # `national_discharge_source_version`, which is the one SQL round trip this
+    # route used to pay before answering 500.
+    _require_representable_instant(valid_time, "valid_time")
     tile_input = TileInput(
         layer_id=public_hydro_layer_id(variable),
         source_id=HYDRO_NATIONAL_SOURCE_ID,
@@ -1341,11 +1375,12 @@ def _require_seconds_precision_instant(value: datetime, field_name: str) -> date
     `...T20:00:00+08:00` -- are all accepted and collapse onto one instant, one
     SQL bind and one cache key.
 
-    The conversion is guarded because it can leave `datetime`'s representable
-    range: `9999-12-31T23:59:59-08:00` is well-formed RFC3339 (so the string
-    shape gate passes it) and `astimezone(UTC)` then raises `OverflowError`,
-    which would surface as an HTTP 500 on a public URL. It is a bad request, so
-    it gets the same 422 every other rejected instant gets.
+    The range check and the UTC normalization both live in
+    `_require_representable_instant`, which the two legacy tile routes call on
+    their own (they must NOT inherit the sub-second rejection above -- they have
+    always accepted an in-range `...T12:00:00.500Z`). Only the sub-second gate is
+    this function's own; everything else, including the exact success-path return
+    value, is that helper's contract.
     """
     if value.microsecond:
         raise ApiError(
@@ -1354,6 +1389,40 @@ def _require_seconds_precision_instant(value: datetime, field_name: str) -> date
             message="Tile time instants must be RFC3339 with seconds precision.",
             details={field_name: value.isoformat(), "expected_format": "YYYY-MM-DDTHH:MM:SSZ"},
         )
+    return _require_representable_instant(value, field_name)
+
+
+def _require_representable_instant(value: datetime, field_name: str) -> datetime:
+    """Normalize an instant to UTC, or 422 if that shift leaves `datetime`'s range.
+
+    Extracted from `_require_seconds_precision_instant` so ONE implementation
+    serves all three instant-taking tile routes plus `list_layer_valid_times` and
+    the two precip routes (#2033). A sibling copy per route is exactly how the
+    error body drifts.
+
+    `9999-12-31T23:59:59-08:00` and `0001-01-01T00:00:00+08:00` are well-formed
+    RFC3339, so every string-shape gate passes them, and `astimezone(UTC)` then
+    raises `OverflowError` -- an HTTP 500 on a public URL, and on the legacy
+    routes a 500 charged AFTER their SQL. They are bad requests, so they get the
+    same 422 every other rejected instant gets, before any statement runs.
+
+    THE TERNARY IS THE CONTRACT, not an implementation detail:
+
+    - the naive branch is load-bearing because `valid_time: datetime` is lax on
+      both legacy tile aliases, so a NAIVE instant is a real input class there; a
+      flat `value.astimezone(UTC)` would reinterpret it in SERVER-LOCAL time
+      (macOS local vs node-27 UTC+8) and newly 422 a naive extreme, and
+    - the return must stay UTC-NORMALIZED rather than the caller's original
+      object, because `precip.py::_require_whole_hour_instant` reads
+      `.minute`/`.second` off it and `_RFC3339_INSTANT_RE` accepts half-hour
+      offsets: `2026-09-02T20:00:00+05:30` (= 14:30 UTC) would otherwise pass the
+      whole-hour gate and be floored to hour 14 by `cycle_token`.
+
+    Raising `ApiError` here, rather than in `services/tiles/mvt.py`, is the
+    layering: the tile helper raises the domain-level `MvtTimeOutOfRangeError` and
+    knows nothing about HTTP. This guard runs BEFORE the helper is ever reached
+    with an out-of-range user instant, so no import of that error is needed.
+    """
     try:
         return value.astimezone(UTC) if value.tzinfo is not None else value.replace(tzinfo=UTC)
     except (OverflowError, ValueError) as exc:

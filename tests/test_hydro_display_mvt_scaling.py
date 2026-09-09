@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from apps.api import main
+from apps.api import display_cache, main
 from apps.api.errors import ApiError
 from apps.api.routes import hydro_display
 from scripts.node27_raw_retention import DEFAULT_RETENTION_DAYS
@@ -1303,6 +1303,13 @@ def test_national_identity_route_gives_two_identities_two_cache_keys(monkeypatch
         # i.e. an HTTP 500 from a public URL. It is a bad request, so it is 422.
         _national_identity_url("gfs", quote("9999-12-31T23:59:59-08:00", safe="")),
         _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time=quote("9999-12-31T23:59:59-08:00", safe="")),
+        # The LOWER bound in both positions too -- task 3.5 says "both extreme
+        # instants", and `datetime.min` overflows on a POSITIVE offset, which the
+        # year-9999 pair cannot reach. `quote(..., safe="")` is mandatory here:
+        # an unescaped `+08:00` decodes as a space and would test a different,
+        # shape-invalid input.
+        _national_identity_url("gfs", quote("0001-01-01T00:00:00+08:00", safe="")),
+        _national_identity_url("gfs", "2026-09-02T12:00:00Z", valid_time=quote("0001-01-01T00:00:00+08:00", safe="")),
         # `variable` is a path segment on this route too, and the route body's
         # comment claims a bad one costs no SQL. Only the SUPPORTED-set check has
         # a distinct oracle: `SUPPORTED_HYDRO_MVT_VARIABLES == ("q_down",)`, and
@@ -1623,7 +1630,7 @@ def test_layer_catalog_digests_the_identity_it_advertises(monkeypatch: Any) -> N
     monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
     # `display_catalog_cached` is a process-wide TTL cache; without this the
     # loader may never run and `recorded` would be empty for the wrong reason.
-    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
 
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: object()
@@ -1723,7 +1730,7 @@ def test_layer_catalog_falls_back_to_the_argument_free_digest_when_no_cycle_is_a
     monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
     # `display_catalog_cached` is a process-wide TTL cache; without this the
     # loader may never run and `recorded` would be empty for the wrong reason.
-    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
 
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: object()
@@ -2493,7 +2500,7 @@ def _national_catalog_app(
         hydro_display, "national_discharge_source_version", lambda _s, **_k: "national-hydro-v1"
     )
     monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
-    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
     return app
@@ -2608,7 +2615,7 @@ def test_layer_catalog_is_empty_when_no_run_is_display_ready(monkeypatch: Any) -
     """The other empty state: no ghost discharge entry when nothing is renderable at all."""
     session = _NationalDiscoverySession([])
     monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: None)
-    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
     try:
@@ -2672,7 +2679,7 @@ def test_layer_catalog_advertises_the_list_the_valid_times_endpoint_serves(monke
 
 def test_discharge_cycles_route_returns_the_intersection_in_the_pinned_spelling(monkeypatch: Any) -> None:
     session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE) + _full_coverage_rows(_PREVIOUS_CYCLE))
-    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
     try:
@@ -2697,7 +2704,7 @@ def test_discharge_cycles_route_returns_the_intersection_in_the_pinned_spelling(
 
 def test_valid_times_route_serves_the_requested_identity_in_the_pinned_spelling(monkeypatch: Any) -> None:
     session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
-    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
     try:
@@ -2725,7 +2732,7 @@ def test_valid_times_route_without_arguments_keeps_serving_the_national_list(mon
     no longer calls it -- since #2013 it always passes `source` and `cycle`.
     """
     session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
-    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
     try:
@@ -2742,9 +2749,11 @@ def test_valid_times_route_without_arguments_keeps_serving_the_national_list(mon
 
 def test_valid_times_cache_key_collapses_spellings_and_separates_identities(monkeypatch: Any) -> None:
     keys: list[str] = []
+    options: list[dict[str, Any]] = []
 
-    def _record(_request: Any, key: str, load: Any) -> Any:
+    def _record(_request: Any, key: str, load: Any, **kwargs: Any) -> Any:
         keys.append(key)
+        options.append(kwargs)
         return load()
 
     session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
@@ -2768,6 +2777,8 @@ def test_valid_times_cache_key_collapses_spellings_and_separates_identities(monk
 
     assert keys[0] == keys[1] == keys[2], keys
     assert len(set(keys)) == 3, keys
+    # 客户端可控的 `cycle` 维度必须带准入谓词（空 valid_times 不入缓存）。
+    assert all("cacheable" in option for option in options), options
 
 
 def test_cycles_cache_key_separates_the_two_sources(monkeypatch: Any) -> None:
@@ -2779,9 +2790,11 @@ def test_cycles_cache_key_separates_the_two_sources(monkeypatch: Any) -> None:
     intersection under `?source=ifs` for a whole cache window.
     """
     keys: list[str] = []
+    options: list[dict[str, Any]] = []
 
-    def _record(_request: Any, key: str, load: Any) -> Any:
+    def _record(_request: Any, key: str, load: Any, **kwargs: Any) -> Any:
         keys.append(key)
+        options.append(kwargs)
         return load()
 
     session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
@@ -2797,6 +2810,9 @@ def test_cycles_cache_key_separates_the_two_sources(monkeypatch: Any) -> None:
         app.dependency_overrides.clear()
 
     assert keys == ["discharge-cycles:gfs", "discharge-cycles:ifs"]
+    # `source` 是两值 `Literal`（有界维度），且 fail-closed 的 `cycles: []` 是正当答案：
+    # 这条路由**不**传准入谓词，否则空交集期间每次请求都要重跑那趟发现查询。
+    assert all("cacheable" not in option for option in options), options
 
 
 @pytest.mark.parametrize(
@@ -2926,7 +2942,7 @@ def test_discharge_routes_pass_ifs_through_to_the_coverage_bind(monkeypatch: Any
         for network in ("rn-a", "rn-b", "rn-c")
     )
     session = _NationalDiscoverySession(rows)
-    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load: load())
+    monkeypatch.setattr(hydro_display, "display_catalog_cached", lambda _request, _key, load, **_: load())
     app = main.create_app()
     app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
     try:
@@ -3080,3 +3096,566 @@ def test_national_coverage_statements_pin_their_shape() -> None:
     # The join-side emptiness filter: a coverage row with no segments is not a
     # candidate at all, so it cannot win its (network, cycle) partition.
     assert "AND rdc.segment_count > 0" in coverage_sql
+
+
+# --- #2078：display 角色下的目录缓存准入与 layers 后切片 -------------------------
+
+
+def _display_role_catalog_app(monkeypatch: Any, session: Any, tmp_path: Path) -> Any:
+    """真正会缓存的 `/api/v1/layers` 应用：display_readonly 角色，不替换缓存函数。
+
+    别的用例用 `main.create_app()`（DEV_MONOLITH）+ 替身缓存，那条路径上
+    `display_catalog_cached` 直通 loader，缓存 key 与准入谓词根本不被执行。
+    角色 env 显式交给 `create_app`（照 `tests/test_precip_overlay.py` 的建法），
+    这样 display 边界检查只看见这三个变量。`create_app` 起的预热线程由 conftest 的
+    autouse fixture 停掉，缓存也在每个用例之间清空。
+    """
+    object_store_root = tmp_path / "object-store"
+    object_store_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(hydro_display, "display_ready_run", lambda _session: {"run_id": "run_latest"})
+    monkeypatch.setattr(hydro_display, "_run_source_version", lambda _run: "run-source-v1")
+    monkeypatch.setattr(hydro_display, "_require_run_source_identity", lambda _run, layer_id: ("bv_a", "rnv_a"))
+    monkeypatch.setattr(hydro_display, "_river_network_source_version", lambda _s, _b: "river-source-v1")
+    monkeypatch.setattr(hydro_display, "national_river_network_source_version", lambda _s: "river-national-v1")
+    monkeypatch.setattr(hydro_display, "_mvt_live_postgis_enabled", lambda _s: False)
+    app = main.create_app(
+        {
+            "NHMS_REQUIRE_SERVICE_ROLE": "true",
+            "NHMS_SERVICE_ROLE": "display_readonly",
+            "OBJECT_STORE_ROOT": str(object_store_root),
+        }
+    )
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: session
+    return app
+
+
+def _three_layers() -> list[Any]:
+    return [
+        hydro_display.Layer(
+            layer_id=f"layer-{index}",
+            layer_name=f"Layer {index}",
+            layer_type="vector",
+            variables=[f"var-{index}"],
+            metadata={"index": index},
+        )
+        for index in range(3)
+    ]
+
+
+def test_layers_pagination_is_applied_after_the_cache(monkeypatch: Any, tmp_path: Path) -> None:
+    """三次不同分页只建一次目录，key 不含 limit/offset，越界 offset 是不落 DB 的空页。"""
+    layers = _three_layers()
+    builds: list[dict[str, Any]] = []
+
+    def _catalog(_session: Any, **kwargs: Any) -> list[Any]:
+        builds.append(kwargs)
+        return layers
+
+    monkeypatch.setattr(hydro_display, "_default_layer_catalog", _catalog)
+    app = _display_role_catalog_app(monkeypatch, _NationalDiscoverySession([]), tmp_path)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            first_page = client.get("/api/v1/layers", params={"offset": 0, "limit": 2})
+            second_page = client.get("/api/v1/layers", params={"offset": 1, "limit": 1})
+            beyond = client.get("/api/v1/layers", params={"offset": 5})
+    finally:
+        app.dependency_overrides.clear()
+
+    # 逐字节 oracle：切片必须等于「完整目录的 model_dump 列表再切片」。
+    dumped = [layer.model_dump() for layer in layers]
+    assert first_page.status_code == 200, first_page.text
+    assert first_page.json()["data"] == dumped[0:2]
+    assert second_page.status_code == 200, second_page.text
+    assert second_page.json()["data"] == dumped[1:2]
+    assert beyond.status_code == 200, beyond.text
+    assert beyond.json()["data"] == dumped[5:105] == []
+
+    assert len(builds) == 1, builds
+    assert list(display_cache._store) == ["layers:None"]
+    assert display_cache._store["layers:None"][1] == dumped
+
+
+def test_a_literal_run_id_none_does_not_fold_into_the_national_layer_cache_entry(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """`?run_id=None` 是通过标识符校验的普通字面量，不是「没给 run_id」。
+
+    改前红：key 用裸 `f"layers:{run_id}"` 插值，字面量 `None` 与国家级请求同 key ——
+    公网可以拿到国家级目录（本用例里该 run 根本不存在，应当 404），并顺手把国家级
+    条目的热 path 改写成 `/api/v1/layers?run_id=None`，让预热线程每 tick 回放它。
+    """
+    monkeypatch.setattr(hydro_display, "_default_layer_catalog", lambda _session, **_kwargs: _three_layers())
+    app = _display_role_catalog_app(monkeypatch, _NationalDiscoverySession([]), tmp_path)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            national = client.get("/api/v1/layers")
+            assert national.status_code == 200, national.text
+            assert display_cache._hot_paths["layers:None"][0] == "/api/v1/layers"
+
+            literal = client.get("/api/v1/layers", params={"run_id": "None"})
+    finally:
+        app.dependency_overrides.clear()
+
+    # `_require_display_ready` -> `_run_row` 找不到该 run：未知 run 就是 404，
+    # 而不是别人的目录。
+    assert literal.status_code == 404, literal.text
+    assert literal.json()["error"]["code"] == "RUN_NOT_FOUND"
+    # loader 抛在写缓存之前，所以这个 key 什么也没留下；国家级条目的热 path 不被劫持。
+    assert "layers:'None'" not in display_cache._store
+    assert display_cache._hot_paths["layers:None"][0] == "/api/v1/layers"
+
+
+def test_a_literal_run_id_none_does_not_fold_into_the_national_valid_times_entry(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """同一族缺陷的 valid-times 面：`?run_id=None` 不是「没给 run_id」。
+
+    改前红：key 用裸 `f"valid-times:{layer_id}:{requested_run_id}:…"`，字面量 `None`
+    折叠进国家级条目 —— 公网拿到的是国家级 valid_times（该 run 根本不存在，应当 404），
+    国家级条目的热 path 还被改写成一个必然 404 的 URL：预热回放只会抛错，条目再也
+    刷不新（refresh starvation）。
+    """
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+    app = _display_role_catalog_app(monkeypatch, session, tmp_path)
+    national_key = "valid-times:discharge:None:None:None"
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            national = client.get("/api/v1/layers/discharge/valid-times")
+            assert national.status_code == 200, national.text
+            assert national.json()["data"]["valid_times"]
+            assert display_cache._hot_paths[national_key][0] == "/api/v1/layers/discharge/valid-times"
+
+            literal = client.get("/api/v1/layers/discharge/valid-times", params={"run_id": "None"})
+    finally:
+        app.dependency_overrides.clear()
+
+    # `_require_display_ready` -> `_run_row` 找不到该 run：未知 run 就是 404。
+    assert literal.status_code == 404, literal.text
+    assert literal.json()["error"]["code"] == "RUN_NOT_FOUND"
+    assert "valid-times:discharge:'None':None:None" not in display_cache._store
+    assert display_cache._hot_paths[national_key][0] == "/api/v1/layers/discharge/valid-times"
+
+
+def test_empty_valid_times_are_not_cached_while_a_covered_cycle_is(monkeypatch: Any, tmp_path: Path) -> None:
+    """交集外的 cycle 是客户端可控的无界 key 维度：空列表照常 200，但不留缓存条目。"""
+    session = _NationalDiscoverySession(_full_coverage_rows(_CYCLE))
+    app = _display_role_catalog_app(monkeypatch, session, tmp_path)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            uncovered = client.get(
+                "/api/v1/layers/discharge/valid-times",
+                params={"source": "gfs", "cycle": "2026-09-01T00:00:00Z"},
+            )
+            covered = client.get(
+                "/api/v1/layers/discharge/valid-times",
+                params={"source": "gfs", "cycle": "2026-09-02T12:00:00Z"},
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert uncovered.status_code == 200, uncovered.text
+    assert uncovered.json()["data"]["valid_times"] == []
+    uncovered_key = "valid-times:discharge:None:'gfs':'2026-09-01T00:00:00Z'"
+    assert uncovered_key not in display_cache._store
+    assert uncovered_key not in display_cache._hot_paths
+
+    assert covered.status_code == 200, covered.text
+    covered_valid_times = covered.json()["data"]["valid_times"]
+    assert covered_valid_times
+    covered_key = "valid-times:discharge:None:'gfs':'2026-09-02T12:00:00Z'"
+    assert display_cache._store[covered_key][1]["valid_times"] == covered_valid_times
+    assert covered_key in display_cache._hot_paths
+
+
+# ---------------------------------------------------------------------------
+# #2033: a user-supplied tile instant never yields a 5xx. Appended at the END
+# for the same reason the block above says: the fixture's anchors are ordinal.
+# ---------------------------------------------------------------------------
+
+# Well-formed RFC3339 whose shift to UTC leaves `datetime.max` / `datetime.min`.
+# CPython answers `OverflowError` -- NOT `ValueError` -- so nothing on the tile
+# path caught it and both legacy routes answered 500 (measured on
+# `https://test.nwm.ac.cn`, 2026-09-08).
+_OUT_OF_UTC_RANGE_INSTANTS = ("9999-12-31T23:59:59-08:00", "0001-01-01T00:00:00+08:00")
+
+# The SAME extremes spelled NAIVE. `canonical_mvt_time` reads a naive instant as
+# UTC, so no shift happens and neither one can overflow: they must stay
+# ACCEPTED. This pair is what fails if the guard is written as
+# `value.astimezone(UTC)` unconditionally.
+_NAIVE_EXTREME_INSTANTS = ("9999-12-31T23:59:59", "0001-01-01T00:00:00")
+
+_UNREPRESENTABLE_INSTANT_MESSAGE = "Tile time instants must be representable in UTC."
+
+_LEGACY_RUN_ID = "run_a"
+
+
+def _legacy_run_url(valid_time: str = "2026-09-03T00:00:00Z") -> str:
+    """The legacy single-run alias `/api/v1/tiles/hydro/{run_id}/...`."""
+    return (
+        f"/api/v1/tiles/hydro/{_LEGACY_RUN_ID}/q_down/{valid_time}"
+        f"/{_NATIONAL_TILE_Z}/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"
+    )
+
+
+class _CountingNationalRouteSession(_NationalRouteSession):
+    """`_NationalRouteSession` plus the counter that makes `sql=0` a MEASURED claim.
+
+    `_ExplodingSession` proves "no statement ran" only by turning one into a
+    500; acceptance criterion 3 asks for the count itself, because the measured
+    pre-fix baseline was `sql=1` on this route (the `source_version=` kwarg
+    calls `national_discharge_source_version` before `valid_time=` is ever
+    formatted).
+    """
+
+    def __init__(self, digest_rows: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(digest_rows)
+        self.execute_count = 0
+
+    def execute(self, statement: Any, params: Any = None) -> _TileResult:
+        self.execute_count += 1
+        return super().execute(statement, params)
+
+
+class _LegacyRunRouteSession:
+    """Answers -- and counts -- the three statements `hydro_mvt_tile` issues.
+
+    `_run_row` (display-ready lookup), `_require_hydro_mvt_source_identity`
+    (existence probe) and the tile SQL, in that order. The pre-fix baseline on
+    this route was two statements before the 500.
+    """
+
+    _RUN_ROW = {
+        "run_id": _LEGACY_RUN_ID,
+        "status": "published",
+        "model_id": "model_a",
+        "basin_version_id": "bv_a",
+        "source_id": "gfs",
+        "cycle_time": "2026-09-02T12:00:00Z",
+        "updated_at": "2026-09-02T13:00:00Z",
+        "river_network_version_id": "rnv_a",
+    }
+
+    def __init__(self) -> None:
+        self.bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+        self.execute_count = 0
+        self.tile_params: list[dict[str, Any]] = []
+
+    def execute(self, statement: Any, params: Any = None) -> _TileResult:
+        self.execute_count += 1
+        sql = str(statement)
+        if "ST_AsMVT" in sql:
+            self.tile_params.append(dict(params or {}))
+            return _TileResult([dict(_NationalRouteSession._TILE_ROW)])
+        if "FROM hydro.hydro_run h" in sql:
+            return _TileResult([dict(self._RUN_ROW)])
+        return _TileResult([{"exists": 1}])
+
+    def get_bind(self) -> Any:
+        return self.bind
+
+
+def _legacy_route_case(route: str) -> tuple[Any, Any]:
+    """`(session, url_builder)` for one of the two legacy tile routes."""
+    if route == "national":
+        return _CountingNationalRouteSession(), _legacy_national_url
+    return _LegacyRunRouteSession(), _legacy_run_url
+
+
+@pytest.mark.parametrize("form", ["datetime", "str"])
+@pytest.mark.parametrize("instant", _OUT_OF_UTC_RANGE_INSTANTS)
+def test_canonical_mvt_time_raises_a_typed_error_outside_the_utc_range(form: str, instant: str) -> None:
+    """Task 1.2 / spec "Helper raises a typed error rather than OverflowError".
+
+    BOTH branches: the `isinstance(value, datetime)` one and the one that runs
+    after `_parse_iso_datetime`. A `str` here is not a formality -- the cache-row
+    comparison in `mvt.py::_read_cache` feeds this helper raw column values.
+    """
+    value: Any = datetime.fromisoformat(instant) if form == "datetime" else instant
+
+    with pytest.raises(mvt_module.MvtTimeOutOfRangeError) as excinfo:
+        canonical_mvt_time(value)
+
+    # The TYPE, not just "some ValueError": `ValueError` is the base class so
+    # existing callers keep working, and the subclass is what the route layer
+    # translates precisely.
+    assert type(excinfo.value) is mvt_module.MvtTimeOutOfRangeError
+    assert isinstance(excinfo.value, ValueError)
+    # Chained, never swallowed: the CPython original stays diagnosable.
+    assert isinstance(excinfo.value.__cause__, OverflowError)
+
+
+def test_canonical_mvt_time_is_unchanged_for_every_in_range_and_unparseable_value() -> None:
+    """The no-shift half of the contract: nothing about canonicalization moves."""
+    for spelling in (
+        "2026-09-03T00:00:00Z",
+        "2026-09-03T00:00:00+00:00",
+        "2026-09-03T00:00:00.000Z",
+        "2026-09-03T08:00:00+08:00",
+    ):
+        assert canonical_mvt_time(spelling) == "2026-09-03T00:00:00Z", spelling
+        assert canonical_mvt_time(datetime.fromisoformat(spelling.replace("Z", "+00:00"))) == "2026-09-03T00:00:00Z"
+
+    # Sub-second still round-trips rather than truncating (that is what makes
+    # the legacy routes' acceptance of it observable at all).
+    assert canonical_mvt_time("2026-09-03T00:00:00.500Z") == "2026-09-03T00:00:00.500000Z"
+    # Space-separated DB spelling, `None`, and text that is not an instant.
+    assert canonical_mvt_time("2026-09-03 00:00:00+00:00") == "2026-09-03T00:00:00Z"
+    assert canonical_mvt_time(None) is None
+    assert canonical_mvt_time("not-an-instant") == "not-an-instant"
+    # The naive extremes: read as UTC, no shift, so the new branch must NOT fire.
+    for naive in _NAIVE_EXTREME_INSTANTS:
+        assert canonical_mvt_time(naive) == f"{naive}Z", naive
+        assert canonical_mvt_time(datetime.fromisoformat(naive)) == f"{naive}Z", naive
+
+
+@pytest.mark.parametrize("instant", _OUT_OF_UTC_RANGE_INSTANTS)
+@pytest.mark.parametrize("route", ["national", "run"])
+def test_legacy_tile_routes_reject_an_unrepresentable_instant_before_any_sql(
+    route: str, instant: str, monkeypatch: Any, tmp_path: Any
+) -> None:
+    """Acceptance criteria 2 and 3, on the two routes that answered 500.
+
+    `execute_count == 0` is the discriminating assertion: the pre-fix national
+    route paid a `national_discharge_source_version` round trip and the
+    single-run route paid `_require_display_ready` +
+    `_require_hydro_mvt_source_identity` BEFORE raising.
+    """
+    session, url_for = _legacy_route_case(route)
+    response, _ = _request_national_identity_tile(
+        url_for(quote(instant, safe="")), session, monkeypatch, tmp_path
+    )
+
+    assert response.status_code == 422, response.text
+    error = response.json()["error"]
+    assert error["code"] == "VALIDATION_ERROR", response.text
+    # The MESSAGE too: the three tile routes share one validator precisely so
+    # they cannot drift on the error body.
+    assert error["message"] == _UNREPRESENTABLE_INSTANT_MESSAGE, response.text
+    # The whole `details` body, not just code + message: the field name is what
+    # points the client at the offending path segment, and the two legacy call
+    # sites pass it as an independent literal each. `_require_representable_instant`
+    # echoes `value.isoformat()` of the pydantic-parsed aware datetime, which
+    # round-trips the requested offset spelling verbatim.
+    assert error["details"] == {
+        "valid_time": datetime.fromisoformat(instant).isoformat(),
+        "expected_format": "YYYY-MM-DDTHH:MM:SSZ",
+    }, response.text
+    assert session.execute_count == 0
+
+
+@pytest.mark.parametrize("route", ["national", "run"])
+def test_legacy_tile_routes_keep_their_unparseable_and_in_range_verdicts(
+    route: str, monkeypatch: Any, tmp_path: Any
+) -> None:
+    """Regression either side of the new branch: FastAPI's 422 and the SQL path."""
+    session, url_for = _legacy_route_case(route)
+    response, _ = _request_national_identity_tile(url_for("not-an-instant"), session, monkeypatch, tmp_path)
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR", response.text
+    # Unchanged: pydantic rejects it before the route body, so still no SQL.
+    assert session.execute_count == 0
+
+    session, url_for = _legacy_route_case(route)
+    response, captured = _request_national_identity_tile(
+        url_for("2026-09-03T00:00:00Z"), session, monkeypatch, tmp_path
+    )
+
+    assert response.status_code == 200, response.text
+    assert session.execute_count > 0
+    assert captured[0].valid_time == "2026-09-03T00:00:00Z"
+
+
+@pytest.mark.parametrize("route", ["national", "run"])
+def test_legacy_tile_routes_keep_accepting_an_in_range_sub_second_instant(
+    route: str, monkeypatch: Any, tmp_path: Any
+) -> None:
+    """Design D3: the legacy routes get the RANGE guard, never the sub-second one.
+
+    Reusing `_require_seconds_precision_instant` here would turn this 200 into a
+    422 -- a behavior break on the very routes this change promises to leave
+    alone. This is the case that fails if someone "shares one validator" too far.
+    """
+    session, url_for = _legacy_route_case(route)
+    response, captured = _request_national_identity_tile(
+        url_for(quote("2026-09-03T00:00:00.500Z", safe="")), session, monkeypatch, tmp_path
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured[0].valid_time == "2026-09-03T00:00:00.500000Z"
+
+
+@pytest.mark.parametrize("instant", _NAIVE_EXTREME_INSTANTS)
+@pytest.mark.parametrize("route", ["national", "run"])
+def test_legacy_tile_routes_still_accept_a_naive_extreme_instant(
+    route: str, instant: str, monkeypatch: Any, tmp_path: Any
+) -> None:
+    """Task 3.11a. The naive branch of the guard is load-bearing.
+
+    `valid_time: datetime` is lax on both legacy aliases, so a naive instant is a
+    real input class. `value.replace(tzinfo=UTC)` cannot overflow; a guard
+    written as `value.astimezone(UTC)` would reinterpret it in SERVER-LOCAL time
+    and newly 422 these two -- platform-dependent, and invisible to every
+    tz-aware case above.
+
+    `== 200`, not `!= 422`: the spec requirement is "a user-supplied tile instant
+    never produces a 5xx", and `!= 422` is satisfied by the 500 it forbids. The
+    cache read that fills `captured` happens BEFORE the producer runs, so
+    `execute_count > 0` and the `captured[0]` assertion are both already
+    satisfied by then -- a producer-side exception left all three green.
+    """
+    session, url_for = _legacy_route_case(route)
+    response, captured = _request_national_identity_tile(
+        url_for(quote(instant, safe="")), session, monkeypatch, tmp_path
+    )
+
+    assert response.status_code == 200, response.text
+    assert session.execute_count > 0
+    assert captured[0].valid_time == f"{instant}Z"
+
+
+# `cache_key` digests computed by `origin/master`'s `services/tiles/mvt.py`
+# (which this branch leaves byte-identical apart from the new failure branch).
+# Recorded as literals rather than recomputed from the module under test, so the
+# assertion has an oracle outside the code it guards.
+_MASTER_NATIONAL_TILE_BASIS: dict[str, Any] = {
+    "layer_id": "discharge",
+    "source_id": "hydro-national",
+    "source_version": "hydro-national-latest-per-basin-stream-type-v3:national-hydro-digest",
+    "z": 4,
+    "x": 13,
+    "y": 6,
+    "variant_id": "variable:q_down",
+}
+_MASTER_NATIONAL_CACHE_KEY = "30470851130440a8aa8144e4a5ecb1dbe402a5020ed00467f41a9f2c4cd119ab"
+
+_MASTER_SIBLING_TILE_BASES: dict[str, dict[str, Any]] = {
+    "river-network-national": {
+        "layer_id": "river-network",
+        "source_id": "river-network-national",
+        "source_version": "river-network-national-digest",
+        "valid_time": None,
+        "z": 4,
+        "x": 13,
+        "y": 6,
+        "variant_id": "national",
+    },
+    "river-network": {
+        "layer_id": "river-network",
+        "source_id": "bv_a",
+        "source_version": "river-network-basin-digest",
+        "valid_time": None,
+        "z": 4,
+        "x": 13,
+        "y": 6,
+    },
+    "met-stations": {
+        "layer_id": "met-stations",
+        "source_id": "bv_a",
+        "source_version": "met-stations-digest",
+        "valid_time": None,
+        "z": 4,
+        "x": 13,
+        "y": 6,
+    },
+}
+_MASTER_SIBLING_CACHE_KEYS = {
+    "river-network-national": "6db92a86bbbfd96f2cbedefd292dc63fb073a8a65e6717f534dfff34033d962c",
+    "river-network": "d78922eaed1befeb60f8976ce374d5c62dda1bddd7fb8f93a09ad7ab672a2685",
+    "met-stations": "2f0b7cc7e02c6e99114b9700254c92fc7068ecbd3cc8ac93d33edf0055561d99",
+}
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["2026-09-03T00:00:00Z", "2026-09-03T00:00:00+00:00", "2026-09-03T00:00:00.000Z", "2026-09-03T08:00:00+08:00"],
+)
+def test_in_range_instant_spellings_keep_the_cache_key_master_computes(spelling: str) -> None:
+    """Published-artifact identity: the four in-range spellings still collapse onto
+    ONE digest, and that digest is the one `origin/master` produced."""
+    assert cache_key(TileInput(valid_time=spelling, **_MASTER_NATIONAL_TILE_BASIS)) == _MASTER_NATIONAL_CACHE_KEY
+
+
+@pytest.mark.parametrize("layer", sorted(_MASTER_SIBLING_TILE_BASES))
+def test_valid_time_less_sibling_layers_keep_the_cache_key_master_computes(layer: str) -> None:
+    """Task 3.8, digest half: the three `valid_time=None` layers are untouched.
+
+    `canonical_mvt_time(None)` returns before either guarded branch, so the new
+    failure path cannot be reached from them at all -- pinned rather than argued.
+    """
+    assert cache_key(TileInput(**_MASTER_SIBLING_TILE_BASES[layer])) == _MASTER_SIBLING_CACHE_KEYS[layer]
+
+
+@pytest.mark.parametrize(
+    ("layer", "url"),
+    [
+        ("river-network-national", f"/api/v1/tiles/river-network-national/{_NATIONAL_TILE_Z}"
+         f"/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"),
+        ("river-network", f"/api/v1/tiles/river-network/bv_a/{_NATIONAL_TILE_Z}"
+         f"/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"),
+        ("met-stations", f"/api/v1/tiles/met-stations/bv_a/{_NATIONAL_TILE_Z}"
+         f"/{_NATIONAL_TILE_X}/{_NATIONAL_TILE_Y}.pbf"),
+    ],
+)
+def test_valid_time_less_sibling_tile_routes_still_answer_the_same_bytes(
+    layer: str, url: str, monkeypatch: Any, tmp_path: Any
+) -> None:
+    """Task 3.8, response half: the three sibling routes take no instant at all."""
+    session = _NationalRouteSession()
+    response, captured = _request_national_identity_tile(url, session, monkeypatch, tmp_path)
+
+    assert response.status_code == 200, response.text
+    assert response.content == b"pbf-bytes"
+    assert captured[0].valid_time is None
+    assert captured[0].layer_id == ("met-stations" if layer == "met-stations" else "river-network")
+
+
+@pytest.mark.parametrize("instant", _OUT_OF_UTC_RANGE_INSTANTS)
+def test_valid_times_route_keeps_its_unrepresentable_cycle_verdict(instant: str) -> None:
+    """Task 3.9: the refactored validator is reached from a SIXTH route.
+
+    `source` AND `cycle` are both given on purpose: a `cycle`-only request is
+    rejected by `_validated_national_valid_time_selector`'s "source and cycle
+    must be given together." branch and never reaches the validator, so it has
+    zero oracle power here. The MESSAGE is asserted for the same reason -- the
+    code alone cannot tell those two 422 branches apart.
+    """
+    app = main.create_app()
+    app.dependency_overrides[hydro_display.get_hydro_display_session] = lambda: _ExplodingSession()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.get(
+                "/api/v1/layers/discharge/valid-times", params={"source": "gfs", "cycle": instant}
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 422, response.text
+    error = response.json()["error"]
+    assert error["code"] == "VALIDATION_ERROR", response.text
+    assert error["message"] == _UNREPRESENTABLE_INSTANT_MESSAGE, response.text
+
+
+def test_seconds_precision_validator_still_returns_a_utc_normalized_instant() -> None:
+    """Task 3.11 / design D4c: the RETURN VALUE is the contract, not a detail.
+
+    `precip.py::_require_whole_hour_instant` reads `.minute`/`.second` off this
+    return, and `_RFC3339_INSTANT_RE` accepts half-hour offsets. An extraction
+    that returned the caller's ORIGINAL object would let
+    `2026-09-02T20:00:00+05:30` (= 14:30 UTC) pass the whole-hour gate and be
+    floored to hour 14 by `cycle_token` -- the exact cache poisoning that gate
+    exists to prevent, and no error-path test would notice.
+    """
+    shifted = hydro_display._require_seconds_precision_instant(
+        datetime.fromisoformat("2026-09-02T20:00:00+05:30"), "cycle"
+    )
+
+    assert shifted.utcoffset() == timedelta(0)
+    assert (shifted.hour, shifted.minute) == (14, 30)
+    assert shifted == datetime(2026, 9, 2, 14, 30, tzinfo=UTC)
+
+    # The naive branch: read as UTC, never as server-local time.
+    naive = hydro_display._require_seconds_precision_instant(datetime(2026, 9, 2, 20, 0), "cycle")
+
+    assert naive == datetime(2026, 9, 2, 20, 0, tzinfo=UTC)
+    assert naive.utcoffset() == timedelta(0)

@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
 
 from apps.api import display_cache
 from apps.api.display_cache import (
@@ -19,6 +20,7 @@ from apps.api.display_cache import (
     start_display_catalog_warmer,
     stop_display_catalog_warmer,
 )
+from apps.api.routes import forecast as forecast_routes
 
 WARMER_THREAD_NAME = "display-catalog-warmer"
 # 规格字面量（openspec/changes/display-cache-warm-header-trust/specs/…/spec.md）：
@@ -33,11 +35,16 @@ def _request(
     headers: dict[str, Any] | None = None,
     scope: dict[str, Any] | None = None,
     token: str | None = None,
+    url: str | None = None,
 ) -> SimpleNamespace:
     """构造最小 request 替身。
 
     `headers`/`scope` 只在显式给出时才设置属性——「既无 `.headers` 也无 `.scope`」
     是 `_force_refresh` 必须容忍的真实形状，默认路径不能悄悄补上它们。
+
+    `url` 同理：没有 `.url` 的 request 不会被登记热 path（`_request_path` 返回 None），
+    所以任何要看 `_hot_paths` 的用例都必须显式给一个，否则断言「不在 `_hot_paths` 里」
+    是空转的。
     """
     config = SimpleNamespace(display_readonly=display_readonly, display_cache_warm_token=token)
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(runtime_config=config)))
@@ -45,6 +52,9 @@ def _request(
         request.headers = headers
     if scope is not None:
         request.scope = scope
+    if url is not None:
+        path, _, query = url.partition("?")
+        request.url = SimpleNamespace(path=path, query=query)
     return request
 
 
@@ -55,7 +65,7 @@ def _warmer_threads() -> list[threading.Thread]:
 def _seed_hot_path() -> None:
     # 时间戳取“此刻”：陈旧的 0.0 落在 DISPLAY_CATALOG_WARM_ACTIVE_WINDOW_SECONDS
     # 活跃窗口之外，预热线程会直接跳过，回放永远不发生。
-    display_cache._hot_paths["warm-guard"] = ("/api/v1/runs", time.monotonic())
+    display_cache._hot_paths["warm-guard"] = ("/api/v1/runs", time.monotonic(), 1)
 
 
 @pytest.fixture(autouse=True)
@@ -436,3 +446,383 @@ def test_stop_warmer_reports_join_timeout_without_resetting_state(monkeypatch: p
         release.set()
         assert stop_display_catalog_warmer() is True
     assert _warmer_threads() == []
+
+
+# --- #2078：准入谓词 / LRU 淘汰 / 登记时机 / 回放上界 ---------------------------
+
+
+def _junk_request(index: int) -> SimpleNamespace:
+    """一条「无界维度」的公网请求：每个 index 一个不同的 key 与不同的 path。"""
+    return _request(display_readonly=True, url=f"/api/v1/runs?basin_id=junk-{index}&limit=1")
+
+
+def test_non_cacheable_keys_neither_evict_the_legit_key_nor_become_replay_targets() -> None:
+    """300 条谓词为假的请求不能把合法 key 挤掉，也不能留下任何回放目标。
+
+    改前红：`_store_value` / `_record_hot_path` 到顶整表 `clear()`，第 256 条就把
+    刚被命中的合法 key 连同全部热 path 一起清空（node-27 实测 2 ms → 71 ms）。
+    """
+    legit = _request(display_readonly=True, url="/api/v1/runs?limit=1")
+    assert display_catalog_cached(legit, "k", lambda: {"items": [1]}) == {"items": [1]}
+    assert display_catalog_cached(legit, "k", lambda: {"items": ["miss"]}) == {"items": [1]}
+
+    calls: dict[str, int] = {}
+
+    def _empty_page(key: str) -> dict[str, list[Any]]:
+        calls[key] = calls.get(key, 0) + 1
+        return {"items": []}
+
+    for index in range(300):
+        key = f"junk-{index}"
+        value = display_catalog_cached(
+            _junk_request(index),
+            key,
+            lambda key=key: _empty_page(key),
+            cacheable=lambda page: bool(page["items"]),
+        )
+        assert value == {"items": []}
+
+    assert "k" in display_cache._store
+    assert display_cache._store["k"][1] == {"items": [1]}
+    assert display_cache._hot_paths["k"][0] == "/api/v1/runs?limit=1"
+    assert [key for key in display_cache._store if key.startswith("junk-")] == []
+    assert [key for key in display_cache._hot_paths if key.startswith("junk-")] == []
+    # 不缓存 ⇒ 每个 key 恰好跑了一次 loader，且再来一次还会再跑。
+    assert calls == {f"junk-{index}": 1 for index in range(300)}
+    display_catalog_cached(
+        _junk_request(7),
+        "junk-7",
+        lambda: _empty_page("junk-7"),
+        cacheable=lambda page: bool(page["items"]),
+    )
+    assert calls["junk-7"] == 2
+
+
+def test_a_cacheable_burst_evicts_one_entry_at_a_time_and_a_hit_saves_the_legit_key() -> None:
+    """255 + 命中 + 255：LRU 只淘汰最旧一条，被命中的 key 回到 MRU 端活下来。"""
+    legit = _request(display_readonly=True, url="/api/v1/runs?limit=1")
+    assert display_catalog_cached(legit, "k", lambda: "legit") == "legit"
+
+    for index in range(255):
+        display_catalog_cached(_junk_request(index), f"first-{index}", lambda index=index: index)
+    assert len(display_cache._store) == 256
+
+    assert display_catalog_cached(legit, "k", lambda: "recomputed") == "legit"
+
+    for index in range(255):
+        display_catalog_cached(_junk_request(1000 + index), f"second-{index}", lambda index=index: index)
+
+    assert "k" in display_cache._store
+    assert display_cache._store["k"][1] == "legit"
+    assert len(display_cache._store) == 256
+    # 最旧的一条（第一批的第一个）已被淘汰，而不是整表归零。
+    assert "first-0" not in display_cache._store
+    # 命中侧的 LRU 同样要生效：`k` 是热 path 表里最早插入的一条，命中若不把它移到
+    # MRU 端（漏 `move_to_end`），第二批的第一条就会把它挤掉。
+    assert "k" in display_cache._hot_paths
+    assert display_cache._hot_paths["k"][2] == 2
+
+
+def test_a_cacheable_burst_without_a_hit_evicts_the_legit_key_but_never_empties_the_store() -> None:
+    """LRU 的诚实边界：不被访问的合法 key 会被挤掉（一次冷 miss），但表从不为空。"""
+    legit = _request(display_readonly=True, url="/api/v1/runs?limit=1")
+    assert display_catalog_cached(legit, "k", lambda: "legit") == "legit"
+
+    for index in range(300):
+        display_catalog_cached(_junk_request(index), f"burst-{index}", lambda index=index: index)
+        # 逐步精确尺寸（`k` 是第 1 条，之后每步再插 1 条，到顶只淘汰 1 条）：
+        # `>= 1` 对整表 clear() 的实现也成立，等于没断言。
+        assert len(display_cache._store) == min(index + 2, 256), index
+
+    assert "k" not in display_cache._store
+    assert len(display_cache._store) == 256
+
+
+def test_hot_paths_record_after_the_outcome_with_a_hit_counter() -> None:
+    """登记在结果确定之后，且只对可缓存结果：miss 记 1，每次命中 +1，不可缓存永不登记。"""
+    legit = _request(display_readonly=True, url="/api/v1/runs?limit=1")
+
+    display_catalog_cached(legit, "k", lambda: {"items": [1]}, cacheable=lambda page: bool(page["items"]))
+    assert display_cache._hot_paths["k"][0] == "/api/v1/runs?limit=1"
+    assert display_cache._hot_paths["k"][2] == 1
+
+    for expected in (2, 3, 4):
+        display_catalog_cached(legit, "k", lambda: {"items": ["miss"]}, cacheable=lambda page: bool(page["items"]))
+        assert display_cache._hot_paths["k"][2] == expected
+
+    empty = _request(display_readonly=True, url="/api/v1/runs?basin_id=nobody&limit=1")
+    display_catalog_cached(empty, "empty", lambda: {"items": []}, cacheable=lambda page: bool(page["items"]))
+    assert "empty" not in display_cache._hot_paths
+    assert "empty" not in display_cache._store
+
+
+def test_hot_paths_are_lru_bounded_and_never_cleared_as_a_whole() -> None:
+    for index in range(300):
+        display_catalog_cached(_junk_request(index), f"hot-{index}", lambda index=index: index)
+        # 同上：热 path 表从空开始，第 index 步之后恰好 index+1 条（到 256 封顶）。
+        assert len(display_cache._hot_paths) == min(index + 1, 256), index
+    assert len(display_cache._hot_paths) == 256
+    assert "hot-0" not in display_cache._hot_paths
+    assert display_cache._hot_paths["hot-299"][0] == "/api/v1/runs?basin_id=junk-299&limit=1"
+
+
+def _marked_warm_scope() -> dict[str, Any]:
+    seen: list[dict[str, Any]] = []
+
+    async def _fake_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
+        del receive, send
+        seen.append(scope)
+
+    asyncio.run(display_cache._mark_warm_scope(_fake_app)({"type": "http"}, None, None))
+    return seen[0]
+
+
+def test_a_forced_refresh_never_touches_the_hot_path_table() -> None:
+    """回放只写 `_store`，不刷新 `_hot_paths`。
+
+    刷新 `last_access` 会让预热线程每 tick 给自己的目标续命，1800 s 活跃窗口永不
+    过期；刷新 `hits` 则让排序键由回放自己推高——D4 的代价模型两条都依赖它不发生。
+    """
+    legit = _request(display_readonly=True, url="/api/v1/runs?limit=1")
+    display_catalog_cached(legit, "k", lambda: {"items": [1]})
+    display_catalog_cached(legit, "k", lambda: {"items": ["miss"]})
+    before = display_cache._hot_paths["k"]
+    assert before[2] == 2
+
+    warm_request = _request(display_readonly=True, scope=_marked_warm_scope(), token=None, url="/api/v1/runs?limit=1")
+    assert display_catalog_cached(warm_request, "k", lambda: {"items": [2]}) == {"items": [2]}
+
+    assert display_cache._store["k"][1] == {"items": [2]}
+    assert display_cache._hot_paths["k"] == before
+
+
+def test_a_forced_refresh_yielding_a_non_cacheable_value_forgets_the_key() -> None:
+    """回放拿到空结果 ⇒ 忘记该 key：继续回旧值或继续把它当回放目标都是错的。"""
+    calls: list[str] = []
+    legit = _request(display_readonly=True, url="/api/v1/runs?limit=1")
+    cacheable = lambda page: bool(page["items"])  # noqa: E731 - 与路由调用点同形
+
+    assert display_catalog_cached(legit, "k", lambda: {"items": [1]}, cacheable=cacheable) == {"items": [1]}
+    assert "k" in display_cache._store
+    assert "k" in display_cache._hot_paths
+
+    warm_request = _request(display_readonly=True, scope=_marked_warm_scope(), token=None, url="/api/v1/runs?limit=1")
+    replayed = display_catalog_cached(
+        warm_request, "k", lambda: calls.append("replay") or {"items": []}, cacheable=cacheable
+    )
+
+    assert replayed == {"items": []}
+    assert "k" not in display_cache._store
+    assert "k" not in display_cache._hot_paths
+
+    fresh = display_catalog_cached(legit, "k", lambda: calls.append("plain") or {"items": [2]}, cacheable=cacheable)
+    assert fresh == {"items": [2]}
+    assert calls == ["replay", "plain"]
+
+
+def test_a_normal_request_forgets_a_stale_entry_whose_recomputation_is_not_cacheable() -> None:
+    """普通（非回放）请求走冷路径后拿到不可缓存的值，必须把旧条目从两表都摘掉。
+
+    否则超过 STALE_MAX 的旧值会一直躺在 `_store` 里（下次访问再算一次、再留一次），
+    而 `_hot_paths` 里的条目会让预热线程继续把这个已知不可缓存的 key 当回放目标。
+    """
+    display_cache._store["k"] = (time.monotonic() - 601.0, {"n": 1})
+    display_cache._hot_paths["k"] = ("/api/v1/x", time.monotonic(), 3)
+    request = _request(display_readonly=True, url="/api/v1/x")
+
+    value = display_catalog_cached(
+        request, "k", lambda: {"items": []}, cacheable=lambda _value: False
+    )
+
+    assert value == {"items": []}
+    assert "k" not in display_cache._store
+    assert "k" not in display_cache._hot_paths
+
+
+def test_non_display_role_passes_through_without_evaluating_the_predicate() -> None:
+    evaluated: list[Any] = []
+    calls: list[int] = []
+    request = _request(display_readonly=False, url="/api/v1/runs?limit=1")
+
+    for _ in range(2):
+        value = display_catalog_cached(
+            request,
+            "k",
+            lambda: calls.append(1) or {"items": []},
+            cacheable=lambda page: evaluated.append(page) or bool(page["items"]),
+        )
+        assert value == {"items": []}
+
+    assert calls == [1, 1]
+    assert evaluated == []
+    assert display_cache._store == {}
+    assert display_cache._hot_paths == {}
+
+
+def _seed_active_hot_paths() -> str:
+    """40 条活跃热 path：1 条 hits=5（last_access 最旧、且**最后**插入），39 条 hits=1。
+
+    hits=5 那条故意最旧：只按 last_access 排序的实现会把它排到最后，被前 32 条挤掉。
+    插入顺序也故意与目标顺序相反：`_hot_paths` 是 OrderedDict，先插 hits=5 的话
+    「不排序」与「按命中计数排序」得到的前 K 条恰好相同，断言就成了空转。
+    """
+    now = time.monotonic()
+    hot_path = "/api/v1/runs?limit=1"
+    for index in range(39):
+        display_cache._hot_paths[f"junk-{index}"] = (f"/api/v1/runs?basin_id=junk-{index}", now - index, 1)
+    display_cache._hot_paths["hot"] = (hot_path, now - 100.0, 5)
+    return hot_path
+
+
+def _run_one_warm_tick(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    called = threading.Event()
+    replayed: list[list[str]] = []
+
+    async def fake_replay(app: Any, targets: list[str]) -> None:
+        del app
+        replayed.append(list(targets))
+        called.set()
+
+    monkeypatch.setattr(display_cache, "_replay_targets", fake_replay)
+    monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_INTERVAL_SECONDS", 0.02)
+    thread = start_display_catalog_warmer(FastAPI())
+    assert thread is not None
+    try:
+        assert called.wait(2.0) is True
+    finally:
+        assert stop_display_catalog_warmer() is True
+    return replayed
+
+
+def test_warm_loop_replays_at_most_the_bound_hit_ranked_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """自伤上界：每 tick ≤ 32 条，命中计数高的排第一。
+
+    改前红：`_warm_loop` 把活跃窗口内**全部**热 path 交给 `_replay_targets`
+    （node-27 实测 254 条 = 9.2 s 串行 DB 工作 / tick）。
+    """
+    hot_path = _seed_active_hot_paths()
+
+    replayed = _run_one_warm_tick(monkeypatch)
+
+    assert len(replayed[0]) == display_cache.DISPLAY_CATALOG_WARM_REPLAY_MAX == 32
+    assert replayed[0][0] == hot_path
+
+
+def test_warm_loop_replay_bound_is_the_module_constant(monkeypatch: pytest.MonkeyPatch) -> None:
+    hot_path = _seed_active_hot_paths()
+    monkeypatch.setattr(display_cache, "DISPLAY_CATALOG_WARM_REPLAY_MAX", 2)
+
+    replayed = _run_one_warm_tick(monkeypatch)
+
+    assert len(replayed[0]) == 2
+    assert replayed[0][0] == hot_path
+
+
+_EMPTY_RUNS_PAGE: dict[str, Any] = {"items": [], "total_count": 0, "limit": 1, "offset": 0}
+_ONE_RUN_PAGE: dict[str, Any] = {
+    "items": [{"run_id": "run-1", "basin_id": "basin-a", "status": "published"}],
+    "total_count": 1,
+    "limit": 1,
+    "offset": 0,
+}
+
+
+def _runs_app(page: dict[str, Any]) -> tuple[FastAPI, list[dict[str, Any]]]:
+    """最小 `/api/v1/runs` 应用：display 角色 + 计数的 store 替身。"""
+    calls: list[dict[str, Any]] = []
+
+    class _CountingStore:
+        def list_runs(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            return {key: list(value) if isinstance(value, list) else value for key, value in page.items()}
+
+    app = FastAPI()
+    app.state.runtime_config = SimpleNamespace(display_readonly=True, display_cache_warm_token=None)
+    app.include_router(forecast_routes.router)
+    app.dependency_overrides[forecast_routes.get_forecast_store] = _CountingStore
+    return app, calls
+
+
+def test_an_empty_runs_page_is_served_but_never_cached() -> None:
+    app, calls = _runs_app(_EMPTY_RUNS_PAGE)
+    params = {"basin_id": "no-such-basin", "limit": 1}
+    try:
+        with TestClient(app) as client:
+            first = client.get("/api/v1/runs", params=params)
+            second = client.get("/api/v1/runs", params=params)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "ok"
+    assert first.json()["data"] == forecast_routes._paginated_payload(_EMPTY_RUNS_PAGE)
+    assert second.json()["data"] == first.json()["data"]
+    assert "runs:'no-such-basin':None:None:None:1:0" not in display_cache._store
+    assert "runs:'no-such-basin':None:None:None:1:0" not in display_cache._hot_paths
+    assert display_cache._store == {}
+    assert display_cache._hot_paths == {}
+    # 不缓存 ⇒ 第二次请求必须再落一次 store。
+    assert len(calls) == 2
+
+
+def test_a_runs_page_with_items_is_cached() -> None:
+    app, calls = _runs_app(_ONE_RUN_PAGE)
+    params = {"basin_id": "basin-a", "limit": 1}
+    try:
+        with TestClient(app) as client:
+            first = client.get("/api/v1/runs", params=params)
+            second = client.get("/api/v1/runs", params=params)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert first.status_code == 200, first.text
+    assert first.json()["data"] == forecast_routes._paginated_payload(_ONE_RUN_PAGE)
+    assert second.json()["data"] == first.json()["data"]
+    assert len(calls) == 1
+    key = "runs:'basin-a':None:None:None:1:0"
+    assert display_cache._store[key][1] == _ONE_RUN_PAGE
+    assert display_cache._hot_paths[key][0] == "/api/v1/runs?basin_id=basin-a&limit=1"
+    assert display_cache._hot_paths[key][2] == 2
+
+
+def test_a_literal_basin_id_none_does_not_fold_into_the_unfiltered_runs_entry() -> None:
+    """`?basin_id=None` 是普通字面量，不是「没给 basin_id」。
+
+    改前红：key 用裸 `f"runs:{basin_id}:…"`，字面量 `None` 与不带过滤的请求同 key ——
+    访客拿到的是全量首页而不是该 basin 的空页，热 path 还被改写成
+    `/api/v1/runs?basin_id=None`；预热线程每 tick 回放它，`list_runs(basin_id="None")`
+    返回空页、准入谓词为假，`_forget` 于是连带驱逐合法的全量条目（自伤 flush）。
+    """
+    calls: list[dict[str, Any]] = []
+
+    class _BasinFilteringStore:
+        def list_runs(self, **kwargs: Any) -> dict[str, Any]:
+            calls.append(kwargs)
+            page = _EMPTY_RUNS_PAGE if kwargs["basin_id"] == "None" else _ONE_RUN_PAGE
+            return {key: list(value) if isinstance(value, list) else value for key, value in page.items()}
+
+    app = FastAPI()
+    app.state.runtime_config = SimpleNamespace(display_readonly=True, display_cache_warm_token=None)
+    app.include_router(forecast_routes.router)
+    app.dependency_overrides[forecast_routes.get_forecast_store] = _BasinFilteringStore
+    try:
+        with TestClient(app) as client:
+            unfiltered = client.get("/api/v1/runs")
+            literal = client.get("/api/v1/runs", params={"basin_id": "None"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert unfiltered.status_code == 200, unfiltered.text
+    assert unfiltered.json()["data"] == forecast_routes._paginated_payload(_ONE_RUN_PAGE)
+    # 字面量请求必须自己落 store，拿到的是空页，不是缓存里那份全量首页。
+    assert literal.status_code == 200, literal.text
+    assert literal.json()["data"] == forecast_routes._paginated_payload(_EMPTY_RUNS_PAGE)
+    assert [call["basin_id"] for call in calls] == [None, "None"]
+
+    unfiltered_key = f"runs:None:None:None:None:{forecast_routes.DEFAULT_LIMIT}:0"
+    assert display_cache._store[unfiltered_key][1] == _ONE_RUN_PAGE
+    # 热 path 不被劫持：预热回放的仍是 `/api/v1/runs` 自己。
+    assert display_cache._hot_paths[unfiltered_key][0] == "/api/v1/runs"
+    literal_key = f"runs:'None':None:None:None:{forecast_routes.DEFAULT_LIMIT}:0"
+    assert literal_key not in display_cache._store
+    assert literal_key not in display_cache._hot_paths

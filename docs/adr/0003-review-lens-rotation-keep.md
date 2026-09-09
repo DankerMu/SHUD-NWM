@@ -3901,3 +3901,195 @@ attribute either way.
 
 Decision unchanged: **keep rotation**. Next revisit on the audit's next flag or a
 maintainer override.
+
+## 2026-09-08 revisit — PR #2161 (#2114, fixture `high`)
+
+The audit flagged DECIDABLE again with `core=225`, `rotated=269`, and `phase=53`
+over 191 multi-round merged PRs. PR #2161 adds one denominator but no
+later-round attribution signal: its only net catch came from Round 1
+correctness (the unclosed-scalar wrapper boundary), Round 2's pinned
+correctness/invariant and test-evidence/spec seats were clean, and the Phase 7
+Gap Sweep was also clean.
+
+This sample therefore cannot distinguish rotation from an already-complete fix;
+it changes none of the three catch counters. Decision unchanged: **keep
+rotation**. The cumulative rotated count still exceeds core, while the existing
+measurement caveats remain load-bearing. Next revisit on the audit's next flag
+or a maintainer override.
+
+## 2026-09-08 revisit — PR #2176 (#2078, fixture `expanded`)
+
+The audit flagged DECIDABLE again with `core=226`, `rotated=269`, and `phase=53`
+over 192 multi-round merged PRs. PR #2176 ran the same three seats in both
+rounds (correctness; test-evidence + spec-compliance; security-perf +
+integration), so it adds one denominator and one later-round catch on the
+core side: Round 2's spec-compliance checklist caught a stale PR body (head
+SHA, scenario count, test refs — docs, P2), while the three Round 1 findings
+(literal `None` key fold, unpinned LRU/hot-path assertions, receipt drift) were
+all fixed and stayed fixed. No rotated-in seat was used, so the sample says
+nothing about rotation yield either way.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, and the measurement caveats above still apply. Next
+revisit on the audit's next flag or a maintainer override.
+
+## 2026-09-08 revisit — PR #2179 (#2173, fixture `compact`)
+
+The audit flagged DECIDABLE with the counters unchanged from the PR #2176
+revisit: `core=226`, `rotated=269`, `phase=53` over 192 multi-round merged
+PRs. PR #2179 was a single-round PR (Round 1 clean under the P2-only rule with
+one CONFIRMED P2 deferred to #2180; Phase 7 clean), so it enters neither the
+multi-round denominator nor any later-round catch counter, and its round-1
+seats (correctness; test-evidence + spec-compliance) were the compact default
+mix with no rotated-in lens. The sample carries no rotation signal.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, and the measurement caveats above still apply. Next
+revisit on the audit's next flag or a maintainer override.
+
+## 2026-09-08 revisit — PR #2184 (#2158, fixture `expanded`)
+
+The audit flagged DECIDABLE with the counters unchanged from the PR #2179
+revisit: `core=226`, `rotated=269`, `phase=53` over 192 multi-round merged
+PRs. PR #2184 was a single-round PR (Round 1 clean with zero candidates across
+three seats; Phase 7 clean), so it enters neither the multi-round denominator
+nor any later-round catch counter, and its round-1 seats (correctness +
+invariant-state; test-evidence + spec-compliance; integration + security-perf)
+were the expanded default mix with no rotated-in lens. The sample carries no
+rotation signal.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, and the measurement caveats above still apply. Next
+revisit on the audit's next flag or a maintainer override.
+
+## 2026-09-08 revisit — PR #2187 (#2180, fixture `compact`)
+
+The audit flagged DECIDABLE with the counters unchanged from the PR #2184
+revisit: `core=226`, `rotated=269`, `phase=53` over 192 multi-round merged
+PRs. PR #2187 was a single-round PR (Round 1 recorded clean under the
+minor-only rule with one CONFIRMED P3 spec-text overclaim fixed by a fixture
+reword; Phase 7 clean), so it enters neither the multi-round denominator nor
+any later-round catch counter, and its round-1 seats (correctness;
+test-evidence + spec-compliance) were the compact default mix with no
+rotated-in lens. The sample carries no rotation signal.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, and the measurement caveats above still apply. Next
+revisit on the audit's next flag or a maintainer override.
+
+## 2026-09-09 revisit — PR #2192 (#2122, fixture `compact`)
+
+The audit flagged DECIDABLE with the counters unchanged from the PR #2187
+revisit: `core=226`, `rotated=269`, `phase=53` over 192 multi-round merged
+PRs. PR #2192 was a single-round PR (Round 1 recorded clean under the
+minor-only rule; four CONFIRMED findings, highest P2, all fixed in-PR; Phase 7
+clean), so it enters neither the multi-round denominator nor any later-round
+catch counter, and its round-1 seats (correctness; test-evidence +
+spec-compliance) were the compact default mix with no rotated-in lens.
+
+The sample is worth one observation even though it carries no rotation signal.
+All four catches came from the round-1 default pair, and the load split evenly
+across the seats: correctness raised the false-rationale finding and the
+inverted docstring summary, test-evidence caught the convention-violating line
+cite, and spec-compliance caught the unpinnable flag clause. The P2 was the
+same defect seen independently by both seats, which is the redundancy the
+paired-seat layout is supposed to buy at `compact`. Nothing here argues for
+rotating a different lens into round 1.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, and the measurement caveats above still apply. Next
+revisit on the audit's next flag or a maintainer override.
+
+## 2026-09-09 revisit — PR #2190 (#2033, fixture `high`)
+
+The audit flagged DECIDABLE with counters that moved for the first time since
+the PR #2184 revisit: `core=227`, `rotated=269`, `phase=53` over 193
+multi-round merged PRs (was `core=226` over 192). PR #2190 is the first
+multi-round PR to enter the denominator in four revisits, so unlike the two
+preceding samples (#2187, #2192) it carries an actual rotation signal — one,
+and it favours core.
+
+The single later-round catch (round 2, lens `test-evidence`, class
+`evidence-ledger`) came from a **pinned core seat**, not a rotated-in one, and
+it was the most consequential finding of the PR: the node-27 receipt claimed
+four routes answered 500 "tracked as #2145" while its own table showed three,
+misattributing a 413 and a 404 to an unrelated migration issue. Left standing,
+it would have had maintainers waiting forever for two layers that were never
+blocked. No rotated lens was seated in rounds 2 or 3 to compete for the catch:
+rounds 1 and 2 were both minor-only with no repeated failure class, so the
+free-slot rotation was never bought and rounds 2/3 ran the pinned core pair.
+
+That is the honest reading of this sample, and it is a point *against* the
+rotation hypothesis rather than for it — but it is one catch. The cumulative
+margin (`rotated=269` vs `core=227`) still favours rotation by 42, and this
+PR's own round 1 does not contradict it: three of its four catches came from
+round 1 where two of the four seats (`invariant-state`,
+`security-perf+integration`) were rotation-tier seats bought by the `high`
+fixture, and `invariant-state` produced one of the three independently.
+
+Decision unchanged: **keep rotation**. One core-seat later-round catch does
+not overturn a 42-catch cumulative margin, and the measurement caveats above
+still apply. Worth noting for the next revisit: the counters are now moving
+again, and if later-round core catches continue to accumulate while rotated
+stays flat, the margin is the thing to re-read rather than the per-PR story.
+
+## 2026-09-09 revisit — PR #2196 (#2188, fixture `compact`)
+
+The audit flagged DECIDABLE with the counters moved for the first time in
+several revisits: `core=227` (was 226), `rotated=269`, `phase=53` over 193
+multi-round merged PRs (was 192). The increment is not from this PR. PR #2196
+was single-round, so it enters neither the multi-round denominator nor any
+later-round catch counter; the new core catch and the new denominator come from
+PR #2190 (#2033), merged from another worktree in the same window.
+
+PR #2196's own sample is again rotation-silent: its round-1 seats
+(correctness; test-evidence + spec-compliance) were the compact default mix
+with no rotated-in lens, and its single finding was raised independently by
+both seats, at P3 from correctness and P2 from spec-compliance. The independent
+verifier then narrowed it to P3 by refuting the premise the higher rating
+rested on. That is the paired-seat layout doing what it is meant to do at
+`compact`, and it is also a reminder that seat severity is a proposal, not a
+verdict.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, though by a slightly narrower margin than at the previous
+revisit, and the measurement caveats above still apply. Next revisit on the
+audit's next flag or a maintainer override.
+
+## 2026-09-09 revisit — PR #2182 (#2141, fixture `high`)
+
+The audit again reports `core=227`, `rotated=269`, `phase=53` over 193
+multi-round merged PRs. PR #2182 completed in one comprehensive round, so it
+changes neither the multi-round denominator nor any later-round catch bucket.
+Round 1 used the complete high-fixture four-seat mix and returned zero candidate
+findings; the independent Phase 7 Gap Sweep was also clean. Therefore this PR
+adds no rotation signal in either direction.
+
+Its useful process signal sits before that metric: fixture review rejected four
+contract gaps before implementation, covering scalar-analysis ownership,
+schema-qualified left boundaries, whole-token alias containment, and actual
+balanced-close state. Those corrections are recorded in the implementation
+line's note but not counted as verifier verdicts or `gate_net_catch`, because no
+Phase 4.5 verification adjudicated them. That keeps the metric honest while
+preserving the fixture review's value in the audit trail.
+
+Decision unchanged: **keep rotation**. The cumulative rotated margin remains 42,
+the measurement caveats above still apply, and this single-round PR supplies no
+new evidence for revising the follow-up seat policy.
+
+## 2026-09-09 revisit — PR #2202 (#2082, fixture `compact`)
+
+The audit remains `core=227`, `rotated=269`, `phase=53` over 193 multi-round
+merged PRs. PR #2202 completed in one comprehensive round with the compact
+`correctness+test-evidence` seat clean and its independent Phase 7 Gap Sweep
+clean. It therefore changes neither the multi-round denominator nor any
+later-round catch bucket and adds no rotation signal.
+
+The single-round seat counters do move by one for correctness and test-evidence,
+but that is the per-lens cost/yield note, not the follow-up rotation experiment.
+This evidence-only PR also illustrates why those measures should stay separate:
+its load-bearing proof was a deliberately manual m25 mutation outside ordinary
+CI, while the comprehensive reviewer found no defect after that proof existed.
+
+Decision unchanged: **keep rotation**. The cumulative margin remains 42 and no
+new multi-round evidence justifies changing the follow-up seat policy.

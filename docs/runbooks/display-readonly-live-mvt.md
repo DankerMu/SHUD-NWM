@@ -212,6 +212,28 @@ ifs 13.26 两次实测中**较慢的那一次**（没有证据说它是 13 张�
 日后若改走 compose，必须同时加透传并把该键加进 `scripts/validate_two_node_docker_runtime.py` 的
 `DISPLAY_AUDITED_INTERPOLATION_ENV`，否则 token 声明了却进不了应用，prewarm 发着应用不认的 token 静默退化。
 
+### 准入与淘汰（issue #2078）
+
+**空结果不进缓存**：`/api/v1/runs` 的空页（自由文本 `basin_id`/`source`/`status` 或越界 `offset` 不匹配）与
+`/api/v1/layers/{layer_id}/valid-times` 的空 `valid_times`（交集外 cycle 的 fail-closed 列表）照常返回 200，
+但**不写缓存、不登记热 path**，且会把该 key 从两表移除——这些是客户端可控的无界 key 维度。
+代价是这类请求每次都真跑一次查询（实测 43–85 ms 量级，与今天的冷 miss 同量级）。
+`/api/v1/layers/discharge/cycles` 不设谓词（`source` 是 `Literal`，key 空间为 2）。
+
+**两表都是 LRU 256**：`_store` 与 `_hot_paths` 到顶只淘汰最旧一条（`popitem`），**永不整表清空**。
+改前到顶的动作是 `clear()`，公网串行注入 256 个不同 key 就能把整份缓存连同热 path 冲空
+（实测合法 key 2 ms → 71–80 ms：[`receipts/2026-09-08-issue-2078-cache-flush-measurement-node27.md`](receipts/2026-09-08-issue-2078-cache-flush-measurement-node27.md)）。
+诚实边界：一次 > 256 个**可缓存**不同 key 的突发仍会挤掉期间没被访问的合法 key，代价是它一次冷 miss。
+
+**预热回放每 tick ≤ 32 条**：`DISPLAY_CATALOG_WARM_REPLAY_MAX = 32`，取活跃窗口内按「命中计数降序、
+最近访问降序」排序的前 32 条（改前是全部热 path，实测 254 条 = 9.2 s 串行 DB 工作 / 45 s tick）。
+回放本身不登记也不刷新 `_hot_paths`，所以 1800 s 活跃窗口只由真实访问续期。
+回放拿到不可缓存的空结果时该 key 被忘记，不再是回放目标。
+
+**`/api/v1/layers` 分页在缓存之后**：key 收敛为 `layers:{run_id!r}`，缓存的是完整目录，路由再切
+`[offset : offset + limit]`。所以越界 `offset` 是不落 DB、不产生缓存条目的空页 200（契约写在 OpenAPI
+的 `offset` `description` 里，**不加** `maximum`：目录长度不是常量，安全性来自 key 不再含 offset）。
+
 ## MVT 文件缓存回收（issue #2032）
 
 `NHMS_MVT_FILE_CACHE_DIR` 从 M16 起**只写不删**：node-27 实测 5 天 4380 张 `.pbf` / 757 MB、

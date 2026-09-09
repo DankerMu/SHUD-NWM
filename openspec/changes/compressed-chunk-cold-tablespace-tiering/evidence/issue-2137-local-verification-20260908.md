@@ -377,10 +377,49 @@ The only pytest warning remained the local ecCodes 2.41.0 recommendation for
 candidate across held reads, C3 cross-document binding, C1/C2 siblings, failure
 publication and selector ownership. Its persisted verdict is CLEAN.
 
+## Round 5 and Phase 7 clean
+
+The GS-P1 semantic fix was committed at
+`3bb3e9e4adb272a0905d2aca07b37a62ae8cd216`. Round 5 was the fifth and final
+comprehensive round permitted by the hard ceiling. Its three seats —
+`invariant-state`, `test-evidence+spec-compliance` and `integration` — all
+returned clean with no candidate. The gate CLI recorded Round 5 clean against
+that exact SHA with no lock. A new-context Phase 7 Gap Sweep then independently
+re-derived task 4.0 completion and oracle integrity on the same SHA and also
+returned clean.
+
+## Phase 8 latest-master integration
+
+A fresh fetch found `origin/master` had advanced from the reviewed pinned base
+`4c79cc39c1e3522683633d8e69677c84a2ad7d56` to
+`7400c6f1a72dadd5e995803fed399ee73bf41524`. The master delta touched 58 paths;
+three overlapped the PR: `.review-gate-issues.json`, `scripts/select_ci_tests.py`
+and `tests/test_select_ci_tests.py`.
+
+The selector implementation and tests merged automatically. The sole textual
+conflict was the cross-PR review-gate memory. Structured comparison proved 257
+shared issue records byte-equivalent as parsed values, master had ten new
+closed issue records, and this branch alone had the open `2137` record. The
+resolution preserves all 267 master records unchanged and adds only `2137`,
+for 268 records total. It does not use whole-file ours/theirs replacement.
+
+Affected-tree verification before completing the merge commit:
+
+- Complete selector suite: `654 passed`.
+- C3 owner/binder plus runbook contract suites: `101 passed`.
+- Ruff and py_compile over the overlapping selector/C3 Python files: PASS.
+- Target OpenSpec strict validation, staged diff check, no-unmerged-path check
+  and exact gate-memory union assertions: PASS.
+
+This is a Phase 8 base integration, not a post-review product fix: the PR's net
+runtime semantics are unchanged relative to the new base, and the only manual
+resolution is the evidence-only gate-memory union. The final Phase 7 review is
+rerun on the merge SHA before CI/merge so combined-tree compatibility is not
+inferred from the pre-integration review.
+
 ## Pending at this record
 
-- Commit the semantic fix, run the fifth and final budgeted comprehensive review,
-  rerun Phase 7 Gap Sweep on the resulting clean SHA, and complete GitHub CI and
-  pre-merge evidence gates.
+- Complete the latest-master merge commit, rerun final review on that exact SHA,
+  and complete GitHub CI and pre-merge evidence gates.
 - Do not access node-27 before #2137 merges. Task 4.0 remains unchecked until
   that merge; live tasks 4.1-4.8 remain unexecuted.

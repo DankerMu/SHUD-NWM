@@ -107,10 +107,11 @@ def list_runs(
 ) -> dict[str, Any]:
     capped_limit = min(limit, MAX_LIMIT)
     try:
-        cache_key = (
-            f"runs:{basin_id}:{source}:{cycle_time.isoformat() if cycle_time else None}:"
-            f"{status}:{capped_limit}:{offset}"
-        )
+        # `!r` 隔离客户端可控的自由文本维度：字面量 `"None"` 记作 `'None'`，与「没给
+        # 该维度」的 `None` 不同 key，不会折叠进无过滤条目（#2078）。有界的
+        # `capped_limit`/`offset` 是 int，照旧裸插值。
+        cycle_key = cycle_time.isoformat() if cycle_time else None
+        cache_key = f"runs:{basin_id!r}:{source!r}:{cycle_key!r}:{status!r}:{capped_limit}:{offset}"
         page = display_catalog_cached(
             request,
             cache_key,
@@ -122,6 +123,9 @@ def list_runs(
                 limit=capped_limit,
                 offset=offset,
             ),
+            # 自由文本 `basin_id`/`source`/`status` 与越界 `offset` 命中的空页照常
+            # 返回 200，但不进缓存也不进热 path（#2078）：那是无界的 key 维度。
+            cacheable=lambda page: bool(page["items"]),
         )
         return _ok(request, _paginated_payload(page))
     except ForecastStoreError as error:
