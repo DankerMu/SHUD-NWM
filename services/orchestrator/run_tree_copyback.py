@@ -81,9 +81,22 @@ def copyback_run_trees(
     # `NHMS_OBJECT_STORE_COPYBACK_ROOT` as the publisher's copyback batches, so it
     # takes the same mutex over its whole promote region. Acquired after the
     # identity and overlap guards above, so the `skipped` return creates no lock
-    # file inside the object-store root. `merge_state_snapshot_index_copyback`'s
-    # provider lock is taken inside this region, never before it, so the lock
-    # order is total.
+    # file inside the object-store root.
+    #
+    # **Lock order: no nesting in either direction.** The batch mutex protects
+    # directory-tree promotes only; `merge_state_snapshot_index_copyback` takes
+    # `provider_destination_lock` with `blocking=True` and *no deadline*
+    # (`packages/common/provider_atomic.py:219-222`), so running it inside this
+    # region would make the batch mutex's own hold time unbounded and turn one
+    # stalled provider lock into head-of-line blocking for every other copyback
+    # writer under this root. It therefore runs **after** the `with` block has
+    # fully released the mutex -- and no path acquires the batch mutex while
+    # holding a provider lock, so the two never nest. This is safe because the
+    # state index is a single file already serialized by its own provider-atomic
+    # writer on a subtree disjoint from every tree this mutex protects, which is
+    # exactly the exemption the `object-store-copyback-mutual-exclusion` spec
+    # delta carries ("per-file provider-atomic copyback writers are exempt").
+    state_index_source: Path | None = None
     with _run_tree_batch_lock(target_root):
         copied: list[dict[str, Any]] = []
         referenced_trees: dict[str, dict[str, Any]] = {}
@@ -119,78 +132,96 @@ def copyback_run_trees(
         for object_key in sorted({_safe_object_file_key(key) for key in extra_object_keys or [] if str(key).strip()}):
             source = _validate_object_file(object_root / object_key, object_key=object_key)
             if object_key == STATE_INDEX_OBJECT_KEY:
-                try:
-                    state_summary = merge_state_snapshot_index_copyback(
-                        source_path=source,
-                        destination_path=target_root / object_key,
-                        reference_object_store_root=object_root,
-                        object_store_prefix=object_store_prefix,
-                        source_containment_root=object_root,
-                        destination_containment_root=target_root,
-                        authoritative_run_ids=unique_run_ids,
-                    )
-                except (ProviderAtomicError, StateManagerError) as error:
-                    # The merge classifies itself: every provider raise point past
-                    # the destination compare-and-swap carries a phase saying so,
-                    # and it reaches here under either of two carriers -- the bare
-                    # provider error (lock release, #1193) or the state-manager
-                    # error that rewraps it with the phase kept in its evidence
-                    # (the whole replace/postread/rollback family, #1364).  The
-                    # discriminator is "not provably pre-commit", the same proof
-                    # philosophy the replay tool refuses on: only an audited
-                    # pre-commit raise point shows the shared index unchanged, so
-                    # any future phase lands on the safe side by default.  The
-                    # no-phase bucket lands on the fail-closed code, which is safe
-                    # not because a missing phase proves anything but because every
-                    # no-phase `_state_index_error` raise point in the merge call
-                    # graph sits before the destination compare-and-swap (audited
-                    # in this change's design D1); a future post-CAS raise MUST
-                    # carry a phase to land in the uncertain bucket.
-                    # `provider_restored_previous` (phase postcommit) is uncertain
-                    # too: the rollback verified, but the merged bytes were
-                    # briefly visible to concurrent readers, and the operator's
-                    # next step -- check the shared entry_count -- is the same.
-                    phase = getattr(error, "phase", None)
-                    if phase is None:
-                        evidence = getattr(error, "evidence", None)
-                        if isinstance(evidence, Mapping):
-                            phase = evidence.get("phase")
-                    error_reason = getattr(error, "reason", None)
-                    if phase is not None and phase != "precommit":
-                        raise RunTreeCopybackError(
-                            "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
-                            (
-                                "State-index copyback merge may have committed; the failure arose at "
-                                f"or past the destination compare-and-swap (phase={phase})."
-                            ),
-                            {"object_key": object_key, "error": str(error), "error_reason": error_reason},
-                        ) from error
-                    raise RunTreeCopybackError(
-                        "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED",
-                        "State-index copyback merge failed closed.",
-                        {"object_key": object_key, "error": str(error), "error_reason": error_reason},
-                    ) from error
-                summary = {
-                    "file_count": 1,
-                    "byte_count": int((target_root / object_key).stat().st_size),
-                    "merge": state_summary,
-                }
-            else:
-                summary = _replace_file(source=source, target=target_root / object_key, containment_root=target_root)
+                # Deferred to after the mutex is released; see the lock-order
+                # note above. Every other extra key is a cheap `_replace_file`
+                # and stays inside, which keeps the split as small as possible.
+                state_index_source = source
+                continue
+            summary = _replace_file(source=source, target=target_root / object_key, containment_root=target_root)
             extra_objects.append({"object_key": object_key, **summary})
             total_files += 1
             total_bytes += int(summary["byte_count"])
 
-        return {
-            "status": "copied",
-            "root": str(target_root),
-            "run_ids": unique_run_ids,
-            "file_count": total_files,
-            "byte_count": total_bytes,
-            "runs": copied,
-            "referenced_trees": list(referenced_trees.values()),
-            "extra_objects": extra_objects,
+    if state_index_source is not None:
+        object_key = STATE_INDEX_OBJECT_KEY
+        try:
+            state_summary = merge_state_snapshot_index_copyback(
+                source_path=state_index_source,
+                destination_path=target_root / object_key,
+                reference_object_store_root=object_root,
+                object_store_prefix=object_store_prefix,
+                source_containment_root=object_root,
+                destination_containment_root=target_root,
+                authoritative_run_ids=unique_run_ids,
+            )
+        except (ProviderAtomicError, StateManagerError) as error:
+            # The merge classifies itself: every provider raise point past
+            # the destination compare-and-swap carries a phase saying so,
+            # and it reaches here under either of two carriers -- the bare
+            # provider error (lock release, #1193) or the state-manager
+            # error that rewraps it with the phase kept in its evidence
+            # (the whole replace/postread/rollback family, #1364).  The
+            # discriminator is "not provably pre-commit", the same proof
+            # philosophy the replay tool refuses on: only an audited
+            # pre-commit raise point shows the shared index unchanged, so
+            # any future phase lands on the safe side by default.  The
+            # no-phase bucket lands on the fail-closed code, which is safe
+            # not because a missing phase proves anything but because every
+            # no-phase `_state_index_error` raise point in the merge call
+            # graph sits before the destination compare-and-swap (audited
+            # in this change's design D1); a future post-CAS raise MUST
+            # carry a phase to land in the uncertain bucket.
+            # `provider_restored_previous` (phase postcommit) is uncertain
+            # too: the rollback verified, but the merged bytes were
+            # briefly visible to concurrent readers, and the operator's
+            # next step -- check the shared entry_count -- is the same.
+            # Unchanged by #2035's lock split: the run trees are already
+            # promoted and the batch mutex already released when this fires,
+            # exactly as they were when the merge ran inside the mutex --
+            # this lane has no batch rollback, so the observable outcome at
+            # `chain_forecast_execution.py:946` is the same either way.
+            phase = getattr(error, "phase", None)
+            if phase is None:
+                evidence = getattr(error, "evidence", None)
+                if isinstance(evidence, Mapping):
+                    phase = evidence.get("phase")
+            error_reason = getattr(error, "reason", None)
+            if phase is not None and phase != "precommit":
+                raise RunTreeCopybackError(
+                    "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
+                    (
+                        "State-index copyback merge may have committed; the failure arose at "
+                        f"or past the destination compare-and-swap (phase={phase})."
+                    ),
+                    {"object_key": object_key, "error": str(error), "error_reason": error_reason},
+                ) from error
+            raise RunTreeCopybackError(
+                "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED",
+                "State-index copyback merge failed closed.",
+                {"object_key": object_key, "error": str(error), "error_reason": error_reason},
+            ) from error
+        summary = {
+            "file_count": 1,
+            "byte_count": int((target_root / object_key).stat().st_size),
+            "merge": state_summary,
         }
+        extra_objects.append({"object_key": object_key, **summary})
+        total_files += 1
+        total_bytes += int(summary["byte_count"])
+        # The in-lock loop appended in sorted key order; keep that contract now
+        # that one key is settled out of band.
+        extra_objects.sort(key=lambda item: str(item["object_key"]))
+
+    return {
+        "status": "copied",
+        "root": str(target_root),
+        "run_ids": unique_run_ids,
+        "file_count": total_files,
+        "byte_count": total_bytes,
+        "runs": copied,
+        "referenced_trees": list(referenced_trees.values()),
+        "extra_objects": extra_objects,
+    }
 
 
 @contextmanager

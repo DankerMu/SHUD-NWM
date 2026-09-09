@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from packages.common import copyback_guard as copyback_guard_module
 from packages.common.copyback_guard import (
     COPYBACK_BATCH_LOCK_NAME,
     COPYBACK_LOCK_TIMEOUT_ENV,
@@ -269,6 +270,77 @@ def test_a_foreign_owned_lock_file_fails_closed(
     assert "effective user" in str(error_info.value)
 
 
+def test_a_foreign_uid_cannot_create_the_lock_file_in_the_first_place(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CREATE direction of the poisoning, which the euid compare alone misses.
+
+    Comparing the lock file's owner to the current euid only refuses a writer
+    that finds *someone else's* file. A foreign-uid writer that gets there first
+    creates the file, passes its own euid check and -- because the lock file is
+    never unlinked -- poisons the mutex for the real writers permanently. The
+    live root `/ghdc/data/nwm/object-store` had no lock file yet, so the first
+    post-merge writer would have set the owner for good.
+    """
+
+    root = _real_root(tmp_path)
+    foreign_uid = os.getuid() + 4242
+    monkeypatch.setattr(os, "geteuid", lambda: foreign_uid)
+
+    with pytest.raises(CopybackLockError) as error_info:
+        acquire_copyback_batch_lock(root, timeout_seconds=0.5)
+
+    message = str(error_info.value)
+    # Both uids and the path, so the operator can act without a round trip.
+    assert str(foreign_uid) in message
+    assert str(os.stat(root).st_uid) in message
+    assert COPYBACK_BATCH_LOCK_NAME in message
+    assert not isinstance(error_info.value, CopybackLockTimeout)
+    # Refused *before* creating: no orphan is left behind for anyone to clean up.
+    assert not (root / COPYBACK_BATCH_LOCK_NAME).exists()
+
+
+def test_a_lock_file_whose_owner_is_not_the_copyback_roots_owner_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root-owner mismatch, covered separately from the euid mismatch.
+
+    Here the euid check passes -- this process owns the lock file -- and the
+    refusal comes purely from the root anchor, which is the direction the
+    pre-existing-file test cannot reach.
+    """
+
+    root = _real_root(tmp_path)
+    lock_file = root / COPYBACK_BATCH_LOCK_NAME
+    lock_file.write_bytes(b"")
+    os.chmod(lock_file, 0o600)
+    foreign_root_uid = os.getuid() + 4242
+    monkeypatch.setattr(copyback_guard_module, "copyback_root_owner_uid", lambda _root: foreign_root_uid)
+
+    with pytest.raises(CopybackLockError) as error_info:
+        acquire_copyback_batch_lock(root, timeout_seconds=0.5)
+
+    message = str(error_info.value)
+    assert str(os.geteuid()) in message
+    assert str(foreign_root_uid) in message
+    assert str(lock_file) in message
+    assert not isinstance(error_info.value, CopybackLockTimeout)
+
+
+def test_an_unreadable_copyback_root_is_a_lock_error_not_a_timeout(tmp_path: Path) -> None:
+    """`copyback_root_owner_uid` fails closed on the anchor it cannot stat."""
+
+    missing = _real_root(tmp_path) / "not-created"
+
+    with pytest.raises(CopybackLockError) as error_info:
+        acquire_copyback_batch_lock(missing, timeout_seconds=0.5)
+
+    assert "copyback root owner is unavailable" in str(error_info.value)
+    assert not isinstance(error_info.value, CopybackLockTimeout)
+
+
 def test_a_restrictive_umask_does_not_make_a_writer_fail_against_its_own_lock_file(
     tmp_path: Path,
 ) -> None:
@@ -289,11 +361,19 @@ def test_a_restrictive_umask_does_not_make_a_writer_fail_against_its_own_lock_fi
 # --- production config: the deadline override --------------------------------
 
 
-def test_the_deadline_defaults_to_three_hundred_seconds() -> None:
-    assert DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS == 300.0
-    assert resolve_copyback_lock_timeout_seconds(env={}) == 300.0
-    assert resolve_copyback_lock_timeout_seconds(env={COPYBACK_LOCK_TIMEOUT_ENV: ""}) == 300.0
-    assert resolve_copyback_lock_timeout_seconds(env={COPYBACK_LOCK_TIMEOUT_ENV: "  "}) == 300.0
+def test_the_deadline_defaults_to_nine_hundred_seconds() -> None:
+    """900 s, sized against the measured hold rather than the hook's position.
+
+    2.2 GB per acquisition at 62 MB/s is ~36 s, and
+    `_stage_should_copyback_run_trees` acquires twice per cycle, so 900 s admits
+    ~24 acquisitions ~= 12 concurrent execution units against the 2 of live
+    steady state. 300 s admitted only ~4 and left a replay pass short.
+    """
+
+    assert DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS == 900.0
+    assert resolve_copyback_lock_timeout_seconds(env={}) == 900.0
+    assert resolve_copyback_lock_timeout_seconds(env={COPYBACK_LOCK_TIMEOUT_ENV: ""}) == 900.0
+    assert resolve_copyback_lock_timeout_seconds(env={COPYBACK_LOCK_TIMEOUT_ENV: "  "}) == 900.0
 
 
 def test_the_deadline_override_is_read_from_the_environment(
@@ -313,7 +393,7 @@ def test_the_deadline_override_is_read_from_the_environment(
 
 @pytest.mark.parametrize("raw", ["0", "-1", "abc", "nan", "inf"])
 def test_an_unusable_deadline_is_a_configuration_refusal_not_a_silent_default(raw: str) -> None:
-    """A mistyped deadline that quietly became 300 s is indistinguishable from none."""
+    """A mistyped deadline that quietly became 900 s is indistinguishable from none."""
 
     with pytest.raises(CopybackLockError):
         resolve_copyback_lock_timeout_seconds(env={COPYBACK_LOCK_TIMEOUT_ENV: raw})

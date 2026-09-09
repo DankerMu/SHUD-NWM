@@ -27,8 +27,9 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
         `flock` on the fixed `<copyback_root>/.nhms-copyback-batch.lock` (no env
         override), `node27_timeseries_lifecycle_lock`-style no-follow open and
         identity assertions (regular file, not a symlink, one hard link, mode
-        `0o600`, effective-uid owner, path/fd `(st_dev, st_ino)` match), bounded
-        `LOCK_EX|LOCK_NB` poll loop with a **default 300 s** deadline overridable
+        `0o600`, effective-uid owner, **copyback-root-owner uid**, path/fd
+        `(st_dev, st_ino)` match), bounded
+        `LOCK_EX|LOCK_NB` poll loop with a **default 900 s** deadline overridable
         by `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS`, never unlinks the
         lock file. **Never reentrant**: `flock` is per open-file-description, so a
         second acquisition on the same file from the same process blocks itself
@@ -37,6 +38,14 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
         (`publisher.py:1593`) or any helper it calls, because
         `forcing_copyback_backfill._copy_package` (`:744`) calls that helper
         directly while already holding the lock itself (T3).
+        The euid comparison alone only closes the **pre-existing-file** direction:
+        a foreign uid that creates the lock file first passes its own euid check
+        and, because the file is never unlinked, poisons the mutex permanently.
+        So the lock file's owner is additionally compared to the copyback root's
+        owner, the **create** branch is refused before `O_CREAT|O_EXCL` runs so no
+        orphan is left behind, and every such refusal names both uids plus the
+        lock path. It raises `CopybackLockError` (→ each lane's
+        `OBJECT_STORE_COPYBACK_LOCK_UNSAFE`), never a timeout.
         The timeout error must be **raised as each lane's own type**
         (`RunTreeCopybackError` in the run-tree lane; `PublishError` with code
         `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` in the q_down/run-products lane) —
@@ -102,7 +111,13 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
       `services/orchestrator/run_tree_copyback.copyback_run_trees` (def `:36`),
       and add a comment at `_replace_tree` (`:374-392`) recording that its guarded
       recovery branch (`:388`) always produced a spurious failure rather than data
-      loss.
+      loss. The `STATE_INDEX_OBJECT_KEY` merge runs **outside** the mutex:
+      `merge_state_snapshot_index_copyback` takes `provider_destination_lock`
+      (`provider_atomic.py:219-222`) with `blocking=True` and no deadline, so
+      nesting it would make the mutex's own *hold* time unbounded. It is the
+      per-file provider-atomic writer the spec delta already exempts; the other
+      `extra_object_keys` entries are cheap `_replace_file` copies and stay
+      inside.
 - [ ] T5 Route copyback directory creation through
       `ensure_traversable_copyback_directory` at `publisher.py:1403`, `:1625`,
       `:1630`, `:1633`, `:2305`, `:2371` and `run_tree_copyback.py:49`, `:375`,
@@ -219,9 +234,13 @@ the fixture asks for the terminal state is the one option that is not honest.
       call sits at `_after_cycle_stage_terminal:859` inside the
       `result_status == "succeeded"` branch, so the raise skips
       `update_forecast_cycle_status` (`:861`) and aborts the stage's success path.
-      The 300 s default was sized against the canonical hook's position; if this
-      lane proves to need a different budget, that is a follow-up, not a silent
-      retune.
+      The 900 s default is sized against the measured hold (2.2 GB per
+      acquisition at 62 MB/s ≈ 36 s, twice per cycle) rather than against the
+      canonical hook's position; see `design.md` "Cost accepted, deliberately".
+      A copyback timeout must stay fatal here: `resume_cycle_stage`
+      (`chain_stage_execution.py:974`) re-enters `_after_cycle_stage_terminal`
+      unconditionally, so the failure is retried on the next pass, and making it
+      non-fatal would mark the cycle succeeded over absent data.
 - [ ] E14 Lock timeout in the q_down lane raises `PublishError` and it
       **propagates out of `publish_qdown_cycle` still carrying** the
       `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code — `publisher.py:199-200` re-raises

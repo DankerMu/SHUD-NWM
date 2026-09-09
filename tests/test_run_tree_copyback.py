@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import fcntl
 import inspect
 import json
 import os
@@ -19,6 +20,7 @@ from packages.common.copyback_guard import (
     COPYBACK_BATCH_LOCK_NAME,
     COPYBACK_LOCK_TIMEOUT_ENV,
     copyback_batch_lock,
+    copyback_batch_lock_path,
 )
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.provider_atomic import ProviderPreimage, capture_provider_preimage, provider_lock_path
@@ -1617,3 +1619,146 @@ def test_replace_tree_records_why_its_own_terminal_state_was_benign() -> None:
     assert "spurious failure" in doc
     source = inspect.getsource(run_tree_copyback_module._replace_tree)
     assert "if backup.exists() and not target.exists():" in source
+
+
+def test_the_state_index_merge_runs_with_the_batch_mutex_released(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2035 A2: the unbounded provider lock must not nest inside the bounded mutex.
+
+    `merge_state_snapshot_index_copyback` takes `provider_destination_lock` with
+    `blocking=True` and no deadline. Held inside the batch mutex, that makes the
+    mutex's *hold* time unbounded -- the 900 s deadline only bounds waiters -- so
+    one stalled provider lock becomes head-of-line blocking for every other
+    copyback writer under this root. The probe below is a non-blocking `flock`
+    from a second fd in this same process: `flock` is per open file description,
+    so it fails with `BlockingIOError` while the batch mutex is held and succeeds
+    only once it has been released.
+    """
+
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id, output_text="new\n")
+    state_index = object_root / "scheduler" / "state-index" / "index-last.json"
+    make_directory_with_explicit_mode(state_index.parent)  # lock parent, #1513
+    publish_state_snapshot_index(
+        [],
+        state_index,
+        object_store_root=object_root,
+        object_store_prefix="s3://nhms",
+        generated_at=datetime(2026, 6, 27, tzinfo=UTC),
+    )
+
+    batch_lock_free_during_merge: list[bool] = []
+    real_merge = run_tree_copyback_module.merge_state_snapshot_index_copyback
+
+    def probing_merge(**kwargs: Any) -> dict[str, Any]:
+        lock_path = copyback_batch_lock_path(copyback_root)
+        assert lock_path.exists(), "the batch mutex must already have been taken by this call"
+        fd = os.open(lock_path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            batch_lock_free_during_merge.append(False)
+        else:
+            batch_lock_free_during_merge.append(True)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+        return real_merge(**kwargs)
+
+    monkeypatch.setattr(run_tree_copyback_module, "merge_state_snapshot_index_copyback", probing_merge)
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+        extra_object_keys=["scheduler/state-index/index-last.json"],
+    )
+
+    assert batch_lock_free_during_merge == [True], "the state-index merge ran inside the batch mutex"
+    assert summary is not None and summary["status"] == "copied"
+    # The merge still lands in the payload, at its sorted position.
+    assert [entry["object_key"] for entry in summary["extra_objects"]] == [
+        "scheduler/state-index/index-last.json"
+    ]
+    assert summary["extra_objects"][0]["merge"]["merged_entry_count"] == 0
+    assert (copyback_root / "scheduler" / "state-index" / "index-last.json").is_file()
+
+
+def test_a_non_state_index_extra_object_still_copies_inside_the_batch_mutex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The split is minimal: only the state-index key leaves the mutex."""
+
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+    extra = object_root / "scheduler" / "notes.json"
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_text('{"note":"x"}\n', encoding="utf-8")
+
+    held_during_replace: list[bool] = []
+    real_replace_file = run_tree_copyback_module._replace_file
+
+    def probing_replace_file(**kwargs: Any) -> dict[str, Any]:
+        fd = os.open(copyback_batch_lock_path(copyback_root), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            held_during_replace.append(True)
+        else:
+            held_during_replace.append(False)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+        return real_replace_file(**kwargs)
+
+    monkeypatch.setattr(run_tree_copyback_module, "_replace_file", probing_replace_file)
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=copyback_root,
+        run_ids=[run_id],
+        extra_object_keys=["scheduler/notes.json"],
+    )
+
+    assert held_during_replace == [True]
+    assert summary is not None
+    assert [entry["object_key"] for entry in summary["extra_objects"]] == ["scheduler/notes.json"]
+    assert (copyback_root / "scheduler" / "notes.json").read_text(encoding="utf-8") == '{"note":"x"}\n'
+
+
+def test_run_tree_copyback_unsafe_lock_file_raises_the_distinct_unsafe_code(tmp_path: Path) -> None:
+    """F4: `_run_tree_batch_lock`'s second `except` arm has its own row.
+
+    Narrowing that arm to `CopybackLockTimeout` would let a bare
+    `CopybackLockError` escape as a foreign type past
+    `chain_forecast_execution.py:953`, and every timeout test would stay green.
+    A mode-`0o644` lock file is a real tamper that raises the base class.
+    """
+
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+    copyback_root.mkdir(parents=True)
+    lock_file = copyback_root / COPYBACK_BATCH_LOCK_NAME
+    lock_file.write_bytes(b"")
+    os.chmod(lock_file, 0o644)
+
+    with pytest.raises(RunTreeCopybackError) as error_info:
+        copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=[run_id],
+        )
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_LOCK_UNSAFE"
+    assert error_info.value.code != "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
+    # No unlocked promote, and the tampered file is refused rather than repaired.
+    assert not (copyback_root / "runs").exists()
+    assert stat.S_IMODE(lock_file.stat().st_mode) == 0o644

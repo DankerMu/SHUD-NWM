@@ -958,24 +958,45 @@ def test_backfill_module_imports_only_the_standard_library_and_the_copyback_guar
     assert non_stdlib == []
 
 
+def _closure_source_files(module_name: str) -> list[Path]:
+    """Every file Python executes to import `module_name`, `__init__`s included.
+
+    Importing `packages.common.copyback_guard` runs `packages/__init__.py` and
+    `packages/common/__init__.py` first. Neither imports anything today (one is
+    a bare docstring, the other empty), which is exactly why skipping them makes
+    the assertion vacuous for the two files most likely to grow a convenience
+    re-export later.
+    """
+
+    parts = module_name.split(".")
+    paths = [REPO_ROOT.joinpath(*parts[:depth], "__init__.py") for depth in range(1, len(parts))]
+    paths.append(REPO_ROOT.joinpath(*parts[:-1], parts[-1] + ".py"))
+    return paths
+
+
 def test_the_allowed_in_tree_import_closure_is_itself_standard_library_only() -> None:
     """The allowance is only safe while nothing it pulls in needs an env build."""
 
     pending = sorted(ALLOWED_IN_TREE_IMPORTS)
     seen: set[str] = set()
+    parsed_files: set[Path] = set()
     while pending:
         module_name = pending.pop()
         if module_name in seen:
             continue
         seen.add(module_name)
-        module_path = REPO_ROOT / (module_name.replace(".", "/") + ".py")
-        assert module_path.is_file(), module_path
-        roots, modules = _module_imports(module_path)
-        assert roots.isdisjoint({"services", "workers", "apps", "tests"})
-        non_stdlib = sorted(name for name in roots if name not in sys.stdlib_module_names and name != "packages")
-        assert non_stdlib == [], f"{module_name} pulls in a third-party dependency: {non_stdlib}"
-        pending.extend(name for name in modules if name.split(".")[0] == "packages")
+        for module_path in _closure_source_files(module_name):
+            assert module_path.is_file(), module_path
+            parsed_files.add(module_path)
+            roots, modules = _module_imports(module_path)
+            assert roots.isdisjoint({"services", "workers", "apps", "tests"})
+            non_stdlib = sorted(name for name in roots if name not in sys.stdlib_module_names and name != "packages")
+            assert non_stdlib == [], f"{module_path} pulls in a third-party dependency: {non_stdlib}"
+            pending.extend(name for name in modules if name.split(".")[0] == "packages")
     assert "packages.common.safe_fs" in seen
+    # The package `__init__` files really were parsed, not silently skipped.
+    assert REPO_ROOT / "packages" / "__init__.py" in parsed_files
+    assert REPO_ROOT / "packages" / "common" / "__init__.py" in parsed_files
 
 
 def test_backfill_runs_as_a_module_in_a_subprocess(tmp_path: Path) -> None:

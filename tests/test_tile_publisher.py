@@ -3328,6 +3328,18 @@ def test_copyback_batch_rollback_never_removes_another_writers_committed_tree(
     the world". That claim only holds while no other writer can commit into the
     slot in the meantime. With a per-tree lock A would release after `prcp`, B
     would commit into it, and A's later failure on `grid` would delete B's tree.
+
+    **Two gates, because one is not enough.** The first gate (in
+    `_replace_directory_tree_for_qdown_batch`) only discriminates a per-tree lock
+    placed *inside* that helper. A per-tree lock wrapping the loop-body call site
+    (`publisher.py:1357-1362`) puts this gate's own wait inside the lock, so the
+    gate reads `[False]` and stops discriminating; what would remain is a race
+    between A's rollback -- which runs in the `except` handler, outside any
+    per-tree lock -- and B's promote. The second gate closes that: A's batch
+    rollback waits for the competitor first, so under a per-tree lock B *has*
+    committed into `prcp` before A's `backup_dir is None` branch runs and the
+    terminal `read_bytes()` assertion fails deterministically. Under the batch
+    mutex B is still blocked, so this wait simply expires.
     """
 
     writer_a, writer_b, copyback_root = _competing_publishers(Path(tmp_path))
@@ -3353,6 +3365,16 @@ def test_copyback_batch_rollback_never_removes_another_writers_committed_tree(
         competitor_ran_between_trees.append(competitor_finished.wait(timeout=2))
         return entry
 
+    real_rollback = publisher_module._rollback_qdown_copyback_batch
+    competitor_ran_before_rollback: list[bool] = []
+
+    def gated_rollback(rollback_log: Any, *, containment_root: Path) -> Any:
+        if threading.current_thread() is main_thread:
+            # Give a per-tree-locked build every chance to lose: wait for B to
+            # commit into `prcp` before running the `backup_dir is None` branch.
+            competitor_ran_before_rollback.append(competitor_finished.wait(timeout=2))
+        return real_rollback(rollback_log, containment_root=containment_root)
+
     def run_competitor() -> None:
         assert prcp_promoted.wait(timeout=10)
         result = writer_b.copyback_canonical_precip("gfs", COMPACT_TIME)
@@ -3363,12 +3385,14 @@ def test_copyback_batch_rollback_never_removes_another_writers_committed_tree(
     thread = threading.Thread(target=run_competitor)
     thread.start()
     monkeypatch.setattr(publisher_module, "_replace_directory_tree_for_qdown_batch", gated_replace_tree)
+    monkeypatch.setattr(publisher_module, "_rollback_qdown_copyback_batch", gated_rollback)
     summary_a = writer_a.copyback_canonical_precip("gfs", COMPACT_TIME)
     monkeypatch.undo()
     thread.join(timeout=30)
 
     assert not thread.is_alive()
     assert competitor_ran_between_trees == [False], "the competitor committed inside A's batch"
+    assert competitor_ran_before_rollback == [False], "the competitor committed before A's batch rollback"
     assert summary_a is not None and summary_a["status"] == "failed"
     assert summary_b[0]["status"] == "ok"
     # B reported `ok`; every byte B claims must still be there.
@@ -3452,6 +3476,108 @@ def test_canonical_copyback_lock_timeout_is_reported_through_the_summary(
     assert summary["status"] == "failed"
     assert summary["error_type"] == "CopybackLockTimeout"
     # No unlocked promote and no half-written tree.
+    assert not (copyback_root / "canonical").exists()
+
+
+def _poison_the_batch_lock_file(copyback_root: Path) -> Path:
+    """Leave a real tamper at the lock path: mode `0o644`, refused, never repaired.
+
+    A base `CopybackLockError` -- not a `CopybackLockTimeout` -- is what the
+    identity assertion raises for it, which is exactly the class each lane's
+    second `except` arm exists to map. Narrowing either arm to
+    `CopybackLockTimeout` lets a bare `CopybackLockError` escape while every
+    timeout test stays green, so this needs its own row per mapping site.
+    """
+
+    copyback_root.mkdir(parents=True, exist_ok=True)
+    lock_file = copyback_root / COPYBACK_BATCH_LOCK_NAME
+    lock_file.write_bytes(b"")
+    os.chmod(lock_file, 0o644)
+    return lock_file
+
+
+def test_qdown_copyback_unsafe_lock_file_raises_the_distinct_unsafe_code(
+    tmp_path: Any,
+) -> None:
+    """F4/`OBJECT_STORE_COPYBACK_LOCK_UNSAFE`: a tampered lock file is not a busy one."""
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    lock_file = _poison_the_batch_lock_file(copyback_root)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    run = _seed_qdown_run_without_a_database(publisher)
+
+    with pytest.raises(PublishError) as error_info:
+        publisher._copyback_qdown_products([run])
+
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_LOCK_UNSAFE"
+    assert error_info.value.error_code != "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
+    # No unlocked promote, and the tampered file is refused rather than repaired.
+    assert not (copyback_root / "runs" / "run-a").exists()
+    assert stat.S_IMODE(lock_file.stat().st_mode) == 0o644
+
+
+def test_qdown_copyback_unsafe_lock_survives_the_public_publish_entry_points_handler(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`publish_qdown_cycle:201-202` must not swallow the unsafe code either."""
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    _poison_the_batch_lock_file(copyback_root)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    run = _seed_qdown_run_without_a_database(publisher)
+    monkeypatch.setattr(publisher, "database_url", "sqlite://")
+    monkeypatch.setattr(
+        publisher,
+        "_publish_qdown_from_database",
+        lambda _session, _cycle_id: publisher._copyback_qdown_products([run]),
+    )
+
+    with pytest.raises(PublishError) as error_info:
+        publisher.publish_qdown_cycle(CYCLE_ID)
+
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_LOCK_UNSAFE"
+
+
+def test_run_products_copyback_unsafe_lock_file_raises_the_distinct_unsafe_code(
+    tmp_path: Any,
+) -> None:
+    """The sibling lane maps through the same `_copyback_batch_mutex` arms."""
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    _poison_the_batch_lock_file(copyback_root)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+
+    with pytest.raises(PublishError) as error_info:
+        publisher._copyback_run_products(["run-a"])
+
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_LOCK_UNSAFE"
+    assert not (copyback_root / "runs" / "run-a").exists()
+
+
+def test_canonical_copyback_unsafe_lock_file_is_reported_through_the_summary(
+    tmp_path: Any,
+) -> None:
+    """The canonical lane reports rather than raises, so the discriminator is `error_type`.
+
+    It does not go through `_copyback_batch_mutex`: it acquires directly inside
+    its own `try:` so the `except Exception` at `publisher.py:1301` turns the
+    refusal into a `failed` receipt. The base class must still be visible as
+    something other than a timeout.
+    """
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    _poison_the_batch_lock_file(copyback_root)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+
+    summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert summary is not None
+    assert summary["status"] == "failed"
+    assert summary["error_type"] == "CopybackLockError"
+    assert summary["error_type"] != "CopybackLockTimeout"
     assert not (copyback_root / "canonical").exists()
 
 

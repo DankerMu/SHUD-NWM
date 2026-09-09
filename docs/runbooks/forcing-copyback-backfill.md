@@ -65,18 +65,26 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
 - **路径固定、无环境变量覆盖**。锁挂在 copyback root 下，而不是 `/tmp`：systemd
   `PrivateTmp=true` 与 Slurm `job_container/tmpfs` 会给进程各自的私有 `/tmp`，两个写者会
   flock 到两个 inode，互斥静默失效。
-- 锁文件由属主以 `0o600` 创建，**从不 unlink**；持有者被 kill 时内核释放 flock，所以
-  「锁文件还在」不等于「锁还被持有」。不要手动删除它——删除会让另一个写者去锁一个新 inode。
+- 锁文件由属主以 `0o600` 创建，代码**从不 unlink**；持有者被 kill 时内核释放 flock，
+  所以「锁文件还在」不等于「锁还被持有」。
+  - **有活持有者**（`lsof <lock>` / `fuser -v <lock>` 打得出 pid）→ **不要动它**：
+    删掉会让下一个写者去锁一个新 inode，互斥当场失效。
+  - **属主不对的孤儿**（`ls -ln <lock>` 的属主 ≠ `stat -c '%u' <copyback-root>`，
+    且无进程持有）→ 必须修，否则所有写者永远 fail closed：
+    `sudo chown "$(stat -c '%u:%g' <copyback-root>)" <lock>`，或者**以它自己的属主身份**
+    `rm -f <lock>`，让下一个写者重建。
 - 互斥**覆盖整个 batch**：plan → copy → 每次 promote → commit 或 rollback 返回之后才释放。
   per-tree 粒度不够：batch rollback 中 `backup_dir is None` 的分支会删掉「此刻位于目标位置的
   东西」，那只有在期间没有别的写者提交过才等于恢复。
-- `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS`（可选，**默认 300 秒**）限制等待上限。
+- `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS`（可选，**默认 900 秒**）限制等待上限。
   竞争是**等待**而不是拒绝；超时抛出各 lane 自己的错误类型（run-tree lane 是
   `RunTreeCopybackError`，q_down lane 是带 `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code 的
   `PublishError`，canonical mirror 记 `failed` receipt 后本 cycle 继续），
   **绝不降级为无锁 promote**。空值取默认；非数字或非正数是硬性配置拒绝。
 - 所有 copyback 写者必须是同一个 uid（node-22 上是 `frd_muziyao`）。`0o600` + 属主断言让
-  跑在别的账号下的写者 fail closed，而不是静默地不加锁运行。互斥只在**单机**内成立。
+  跑在别的账号下的写者 fail closed，而不是静默地不加锁运行；属主同时比对当前 euid 与
+  copyback root 的属主，且外来 uid 在 `O_CREAT` 之前就被拒，所以锁文件不会被别的账号毒化。
+  互斥只在**单机**内成立。
 - 若某个 package 报 `category: copyback_lock_unavailable`，说明它没拿到锁（超时或锁文件被篡改），
   目标树本身完好无损，重跑即可。
 

@@ -19585,7 +19585,16 @@ def test_canonical_precip_mirror_lock_timeout_records_a_failed_receipt_and_does_
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """E11: the cycle survives with a `failed` receipt; the mirror defers a cycle."""
+    """E11: the cycle survives with a `failed` receipt -- and nothing retries the mirror.
+
+    The receipt is the whole recovery surface. `_mirror_canonical_precip` wraps
+    the publisher call in `except Exception` and the cycle proceeds past
+    `convert`, so this cycle's mirror is **not** re-attempted on any later pass;
+    it is an operator action item recovered by running
+    `scripts/canonical_precip_copyback_backfill.py`
+    (`docs/runbooks/current-production-ops.md` §5.3). Saying it "defers to the
+    next cycle" would be false and would hide a silent data gap.
+    """
 
     repository = FakeCycleRepository()
     client = FakeCycleSlurmClient()

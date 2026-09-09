@@ -45,10 +45,18 @@ from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_fol
 # two inodes and the mutex would silently do nothing.
 COPYBACK_BATCH_LOCK_NAME = ".nhms-copyback-batch.lock"
 COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
-# 300 s, not 1800 s: the canonical mirror hook runs inside the scheduler pass
-# rather than in a job of its own, and the q_down lane holds an open SQLAlchemy
-# session across the wait.
-DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS = 300.0
+# 900 s. Sized against a *measured* hold, not a guessed one: the NFS export
+# copies at ~62 MB/s (68 MB / 455 files in 1.097 s), one cycle cohort is ~2.2 GB
+# (38 run trees at 1.1 GB plus their referenced forcing subtrees at 1.1 GB), and
+# `_stage_should_copyback_run_trees` acquires TWICE per cycle (`parse` and
+# `state_save_qc`), so one execution unit holds the lock ~72 s per cycle. `flock`
+# is per open file description, so the scheduler's same-process execution-unit
+# threads contend with each other exactly as separate hosts would. 900 s covers
+# ~24 acquisitions ~= 12 concurrent execution units against the 2 of live steady
+# state, which leaves headroom for a replay/backfill pass; 300 s admitted only
+# ~4. Still a bounded, loud failure -- never a hang, and never an unlocked
+# promote. See `design.md` "Cost accepted, deliberately" for the full arithmetic.
+DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS = 900.0
 COPYBACK_DIRECTORY_MODE = 0o755
 
 _LOCK_MODE = 0o600
@@ -78,12 +86,12 @@ def resolve_copyback_lock_timeout_seconds(
     *,
     env: dict[str, str] | None = None,
 ) -> float:
-    """Explicit argument wins, then the env override, then the 300 s default.
+    """Explicit argument wins, then the env override, then the 900 s default.
 
     Read at acquire time rather than import time so an operator (and a test)
     can change it without reloading the process. A present-but-unusable value
     is a configuration refusal, never a silent fallback to the default: a
-    mistyped deadline that quietly became 300 s would be indistinguishable from
+    mistyped deadline that quietly became 900 s would be indistinguishable from
     a deadline that was never set.
     """
 
@@ -111,7 +119,28 @@ def _open_flags() -> int:
     return os.O_RDWR | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 
 
-def _require_lock_identity(path: Path, fd: int) -> None:
+def copyback_root_owner_uid(copyback_root: Path | str) -> int:
+    """The owner uid of the copyback root, the anchor every writer shares.
+
+    Its own function rather than an inline ``os.stat`` because it is the seam
+    the identity assertion is built on: comparing the lock file's owner to the
+    *current* euid alone only closes the pre-existing-file direction (a foreign
+    writer that finds someone else's lock file is refused). The **create**
+    direction is wide open -- a foreign-uid writer that gets there first creates
+    the lock file, passes its own euid check, and poisons the lock for the real
+    writers permanently, because the file is never unlinked. The root is owned by
+    the writer account by construction on the live export, so anchoring the
+    assertion to it closes both directions with one comparison.
+    """
+
+    root = Path(copyback_root).expanduser()
+    try:
+        return os.stat(root).st_uid
+    except OSError as error:
+        raise CopybackLockError(f"copyback root owner is unavailable for {root}: {error}") from error
+
+
+def _require_lock_identity(path: Path, fd: int, *, root_uid: int) -> None:
     """Re-assert that the fd and the name still describe one safe, owned file."""
 
     try:
@@ -127,6 +156,14 @@ def _require_lock_identity(path: Path, fd: int) -> None:
         raise CopybackLockError("copyback batch lock must have mode 0600")
     if info.st_uid != os.geteuid() or named.st_uid != os.geteuid():
         raise CopybackLockError("copyback batch lock must be owned by the effective user")
+    if info.st_uid != root_uid or named.st_uid != root_uid:
+        # The operator has to act on this without a second round trip, so the
+        # message names both uids and the path: a lock file owned by anyone but
+        # the copyback root's owner is a poisoned lock, not a busy one.
+        raise CopybackLockError(
+            "copyback batch lock owner uid "
+            f"{info.st_uid} does not match copyback root owner uid {root_uid} at {path}"
+        )
     if info.st_nlink != 1 or named.st_nlink != 1:
         raise CopybackLockError("copyback batch lock must have exactly one hard link")
     if (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino):
@@ -160,6 +197,7 @@ def acquire_copyback_batch_lock(
     path = copyback_batch_lock_path(copyback_root)
     if not path.is_absolute():
         raise CopybackLockError(f"copyback batch lock path must be absolute: {path}")
+    root_uid = copyback_root_owner_uid(copyback_root)
     flags = _open_flags()
     fd: int | None = None
     try:
@@ -169,6 +207,18 @@ def acquire_copyback_batch_lock(
             named = None
         if named is not None and stat.S_ISLNK(named.st_mode):
             raise CopybackLockError("copyback batch lock must not be a symlink")
+        if named is None and os.geteuid() != root_uid:
+            # Refuse *before* creating. The assertions below would catch this
+            # writer too, but only after `O_CREAT|O_EXCL` had already left a
+            # foreign-uid `0o600` file behind -- and the lock file is never
+            # unlinked, so that orphan is exactly the poisoned lock an operator
+            # then has to clean up by hand. Only the create branch: a
+            # pre-existing file still goes through the identity assertions
+            # unchanged.
+            raise CopybackLockError(
+                "refusing to create copyback batch lock as uid "
+                f"{os.geteuid()}: copyback root owner uid is {root_uid} at {path}"
+            )
         try:
             fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, _LOCK_MODE)
         except FileExistsError:
@@ -182,11 +232,11 @@ def acquire_copyback_batch_lock(
             # A *pre-existing* wrong-mode lock file keeps failing closed: it is
             # refused by the assertion below before any `fchmod` reaches it.
             os.fchmod(fd, _LOCK_MODE)
-        _require_lock_identity(path, fd)
+        _require_lock_identity(path, fd, root_uid=root_uid)
         os.fchmod(fd, _LOCK_MODE)
-        _require_lock_identity(path, fd)
+        _require_lock_identity(path, fd, root_uid=root_uid)
         _flock_until_deadline(fd, deadline=deadline, path=path)
-        _require_lock_identity(path, fd)
+        _require_lock_identity(path, fd, root_uid=root_uid)
         held = fd
         fd = None
         return held

@@ -191,17 +191,34 @@ unit → EnvironmentFile table above is the authority.
     copyback root because that is the one path every writer has already resolved,
     so a private `/tmp` (systemd `PrivateTmp=true`, Slurm `job_container/tmpfs`)
     cannot split one mutex into two inodes. The file is created `0o600`, is never
-    unlinked, and a killed holder's lock is released by the kernel.
-  - `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` (optional, **default 300**)
+    unlinked by the code, and a killed holder's lock is released by the kernel.
+  - `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` (optional, **default 900**)
     bounds how long a writer waits. Contention waits rather than refuses;
     exceeding the deadline raises a distinct loud error and never falls back to
-    an unlocked promote. Unset or empty means 300 s; a non-numeric or
+    an unlocked promote. Unset or empty means 900 s; a non-numeric or
     non-positive value is a hard configuration refusal, not a silent default.
+    900 s is sized against the measured hold: ~2.2 GB per acquisition at
+    ~62 MB/s NFS throughput is ~36 s, taken twice per cycle (`parse` and
+    `state_save_qc`), so it admits ~24 queued acquisitions ~= 12 concurrent
+    execution units against the 2 of live steady state.
   - All copyback writers must run as one uid (`frd_muziyao` on node-22): the
-    `0o600` mode plus the effective-uid ownership assertion make a writer under
-    another account fail closed instead of running unlocked. Exclusion is
-    node-local — see the non-goals in
+    `0o600` mode plus the ownership assertions make a writer under another
+    account fail closed instead of running unlocked. The lock file's owner is
+    compared both to the current euid **and** to the copyback root's owner, and
+    a foreign uid is refused before it can create the file, so the lock cannot be
+    poisoned from either direction. Exclusion is node-local — see the non-goals in
     `openspec/changes/harden-copyback-batch-mutex-and-dir-traversal/proposal.md`.
+  - **Recovering a stuck lock file.** Two cases, and only one of them is
+    touchable:
+    - a **live holder** — some process still holds the fd
+      (`lsof "$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock"` or
+      `fuser -v <path>` prints a pid) → **do not touch it**; wait, or find out why
+      that writer is stuck.
+    - an **orphan owned by the wrong uid** — `ls -ln <path>` shows an owner
+      different from `stat -c '%u' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"` and no
+      process holds it → repair it, otherwise every writer fails closed forever:
+      `sudo chown "$(stat -c '%u:%g' "$NHMS_OBJECT_STORE_COPYBACK_ROOT")" <path>`,
+      or `rm -f <path>` **as its own owner** and let the next writer recreate it.
   - `services/orchestrator/retention.py` descends only `root/<prefix>` and
     `root/runs`, never root-level files, so the lock file is invisible to it.
 - The DB-free scheduler's trusted raw authority is the canonical shared-NFS

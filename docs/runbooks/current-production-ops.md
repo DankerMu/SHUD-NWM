@@ -2229,14 +2229,48 @@ ssh -p 32099 nwm@210.77.77.27 \
    一直持有到本 batch 的 commit 或 rollback 返回。路径固定、**没有环境变量覆盖**：
    放 `/tmp` 会被 systemd `PrivateTmp=true` / Slurm `job_container/tmpfs` 的私有
    `/tmp` 拆成两个 inode，互斥静默失效。
-   - 锁文件 `0o600`、属主是写者本人、**从不 unlink**。持有者被 kill 时内核会释放
-     flock，所以「锁文件存在」≠「锁被持有」；**不要手工删除它**。
+   - 锁文件 `0o600`、属主是写者本人、代码**从不 unlink**。持有者被 kill 时内核会
+     释放 flock，所以「锁文件存在」≠「锁被持有」。
    - 等待上限由 `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` 控制，
-     **默认 300 秒**。竞争是等待不是拒绝；超时抛各 lane 自己的错误类型，
-     canonical mirror 记一条 `failed` 的 `canonical_precip_mirror` receipt 后 cycle
-     继续，**绝不降级成无锁 promote**。空值取默认，非数字/非正数是硬性配置拒绝。
+     **默认 900 秒**（按实测持锁时长定：一次 acquisition ≈ 2.2 GB / 62 MB/s ≈ 36 s，
+     每 cycle 取两次——`parse` 与 `state_save_qc`——所以 900 s 容得下约 24 次排队
+     acquisition ≈ 12 个并发执行单元，而现网稳态只有 2 个）。竞争是等待不是拒绝；
+     超时抛各 lane 自己的错误类型，canonical mirror 记一条 `failed` 的
+     `canonical_precip_mirror` receipt 后 cycle 继续，**绝不降级成无锁 promote**。
+     空值取默认，非数字/非正数是硬性配置拒绝。
    - 所有写者必须同 uid（node-22 上是 `frd_muziyao`）；别的账号会 fail closed。
+     属主断言同时比对**当前 euid** 与 **copyback root 的属主**，并且外来 uid 在
+     `O_CREAT` 之前就被拒——两个方向都堵死，锁文件不会被别的账号「毒化」。
      互斥只在单机内成立（跨主机不在本机制范围内）。
+   - **锁文件卡住时怎么处置**（只有两种情况，只有一种能动）：
+     - **有活持有者**：`lsof <lock>` 或 `fuser -v <lock>` 打得出 pid → **不要动它**，
+       等它结束或去查那个 writer 为什么卡住。
+     - **属主不对的孤儿**：`ls -ln <lock>` 的属主 ≠
+       `stat -c '%u' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"`，且没有任何进程持有 →
+       必须修，否则所有 writer 会永远 fail closed。
+       `sudo chown "$(stat -c '%u:%g' "$NHMS_OBJECT_STORE_COPYBACK_ROOT")" <lock>`，
+       或者**以它自己的属主身份** `rm -f <lock>`，让下一个 writer 重新创建。
+       ```bash
+       ssh -p 32099 frd_muziyao@210.77.77.22 \
+         'L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock;
+          ls -ln "$L"; stat -c "%u %n" /ghdc/data/nwm/object-store; fuser -v "$L" || echo "no holder"'
+       ```
+   - **`canonical_precip_mirror` 记了 `failed` receipt 怎么补**：没有任何东西会重试它。
+     `_mirror_canonical_precip` 在 `convert` 终态 hook 里把异常吞成 receipt，cycle 照常
+     往下走，失败的那个 cycle 的镜像**不会在下个 cycle 被补上**。唯一的补救是手工跑
+     backfill：
+     ```bash
+     ssh -p 32099 frd_muziyao@210.77.77.22 \
+       'cd /scratch/frd_muziyao/NWM &&
+        . infra/env/compute.scheduler-provider-refresh.env &&   # 取 OBJECT_STORE_ROOT
+        /scratch/frd_muziyao/NWM/.venv/bin/python \
+          -m scripts.canonical_precip_copyback_backfill \
+          --source-root "$OBJECT_STORE_ROOT" \
+          --copyback-root "$NHMS_OBJECT_STORE_COPYBACK_ROOT" --dry-run'
+     ```
+     `cd` 到仓库根是必须的（否则 `-m` 会 `ModuleNotFoundError` 退 1）。先看 dry-run 计划
+     （dry-run 不取锁、不写任何东西），确认无误后去掉 `--dry-run` 实跑。退出码：`0` 全成功、
+     `1` 跑完但有 `failed`、`2` 参数或 root 不可用。
    - `services/orchestrator/retention.py` 只下钻 `root/<prefix>` 与 `root/runs`，
      不枚举 root 级文件，所以这把锁对保留策略不可见。
 2. **可穿越性**。copyback 自己创建的每一级目录——**包括 copyback root 本身**——

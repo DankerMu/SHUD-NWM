@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import stat
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ from sqlalchemy.engine import Engine
 
 from packages.common import safe_fs as safe_fs_module
 from packages.common.copyback_guard import (
+    COPYBACK_BATCH_LOCK_NAME,
     COPYBACK_LOCK_TIMEOUT_ENV,
     CopybackLockTimeout,
     acquire_copyback_batch_lock,
@@ -1423,6 +1425,41 @@ def test_apply_records_a_lock_timeout_as_its_own_failure_category(
     assert report["checksum_mismatch_count"] == 0
     assert report["legacy_key_rejected_count"] == 0
     assert not (copyback_root / FORCING_KEY).exists()
+
+
+def test_apply_records_an_unsafe_lock_file_as_the_same_failure_category(
+    tmp_path: Path,
+) -> None:
+    """F4: `_classify_tree_error` must key off the base class, not the timeout.
+
+    `_classify_tree_error:902` tests `isinstance(error, CopybackLockError)`.
+    Narrowing it to `CopybackLockTimeout` would silently reroute a tampered lock
+    file into `target_unsafe` -- sending an operator to inspect a tree that is
+    entirely intact -- and the timeout row above would stay green.
+    """
+
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest = _seed_valid_candidate(tmp_path)
+    copyback_root.mkdir(parents=True, exist_ok=True)
+    lock_file = copyback_root / COPYBACK_BATCH_LOCK_NAME
+    lock_file.write_bytes(b"")
+    os.chmod(lock_file, 0o644)
+
+    report = run_backfill(
+        _base_config(
+            db_path=db_path,
+            object_store_root=object_store_root,
+            copyback_root=copyback_root,
+            apply=True,
+        )
+    )
+
+    assert report["copied_count"] == 0
+    assert report["failure_count"] == 1
+    assert report["failures"][0]["category"] == "copyback_lock_unavailable"
+    assert "0600" in report["failures"][0]["reason"]
+    assert "deadline" not in report["failures"][0]["reason"]
+    assert not (copyback_root / FORCING_KEY).exists()
+    assert stat.S_IMODE(lock_file.stat().st_mode) == 0o644
 
 
 def test_the_batch_mutex_is_never_acquired_inside_the_shared_copy_helper() -> None:

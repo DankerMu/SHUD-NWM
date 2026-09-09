@@ -42,22 +42,72 @@ So the mutex is acquired where `rollback_log` is owned and released only after
 Copy-to-temp sits inside the lock because the batch loop interleaves copy and
 promote per tree (`publisher.py:1281-1298`). Restructuring into
 copy-all-then-promote-all is a larger change with its own risk and is a non-goal.
-The throughput cost is bounded by `_COPYBACK_MAX_TOTAL_BYTES` (100 GiB,
-`publisher.py:49`) and by the fact that every contending writer is a node-22
-process on one host. One knock-on: the q_down lane runs inside the open
-SQLAlchemy `Session` at `publisher.py:197-198`, so a lock wait extends that
-session's lifetime by up to the deadline. Holding the session across the copy
-itself is pre-existing; the deadline is what bounds the new increment, and it is
-one more reason for 300 s rather than 1800 s.
+
+**Sizing the deadline.** Two facts an earlier draft of this section missed, and
+which decide the number: `flock` is per *open file description*, so the
+scheduler's execution units — threads of one process — contend with each other
+exactly as separate hosts would; and copyback runs **twice per cycle**, not once,
+because `_stage_should_copyback_run_trees`
+(`chain_forecast_execution.py:931-935`) returns True for `parse` **and** for
+`state_save_qc` when `terminal_stage == "forecast_state_save_qc"`.
+
+Measured on node-22 against the live NFS export (measured, not estimated):
+
+| Quantity | Value | Source |
+|---|---|---|
+| NFS copy throughput | **62 MB/s** | 68 MB / 455 files in 1.097 s (`cp -R` + `sync`, `forcing/gfs/2026080600/basins_lh_gl_vbasins/`) |
+| One cycle cohort | 38 run trees = 1.1 GB, + referenced forcing subtrees 1.1 GB = **2.2 GB** | `ifs/2026090300` |
+| Referenced forcing subtree | **4–68 MB**, not the 3.6–3.7 GB `forcing/<source>` tree | keys truncated to five path segments, `run_tree_copyback.py:369-370` |
+| Hold per acquisition | 2.2 GB / 62 MB/s ≈ **36 s** | one `copyback_run_trees` call covers all active basins of the cycle (`chain_forecast_execution.py:938-948`) |
+| Acquisitions per cycle | **2** | `parse` + `state_save_qc` → ~72 s of hold per execution unit per cycle |
+| Live steady-state concurrency | **N = 2** execution units | node-22's live `infra/env/compute.scheduler-dbfree.env`: `NHMS_SCHEDULER_SOURCES=gfs,IFS` × `NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE=1` (the checked-in `.example` carries the sources line at `:93`; the per-source budget is set in the live file only) |
+| First-ever copyback into a fresh root | + **73 s** | `models/` is 4.5 GB and is only reused via `_reuse_immutable_model_tree` when the target already exists (`:104`) |
+
+`NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32` bounds Slurm *array tasks*, not
+copyback contenders, and must not be cited here. The forcing-key truncation is
+what keeps the hold bounded: without it a referenced forcing tree would be
+gigabytes rather than tens of megabytes.
+
+At 36 s per acquisition, **300 s admitted only ~8 preceding acquisitions ≈ 4
+concurrent execution units** — steady state (N=2 → ~144 s worst wait) fit with
+barely 2× margin and a replay/backfill pass with 4+ units exceeded it. The
+default is therefore **900 s**, which covers ~24 acquisitions ≈ 12 execution
+units. It is still a bounded, loud failure rather than a hang.
+
+The wait itself is cheap: `_COPYBACK_MAX_TOTAL_BYTES` (100 GiB,
+`publisher.py:49`) bounds the copy, and the q_down lane's open SQLAlchemy
+`Session` (`publisher.py:197-198`) is extended by at most the deadline. Holding
+that session across the copy is pre-existing; only the wait is new.
+
+**Known limit, not fixed here.** `_flock_until_deadline` polls
+`LOCK_EX|LOCK_NB` every 10 ms and is therefore unfair: under sustained
+contention a waiter can lose every poll and be starved across passes. A ticket
+lock would fix it and is deliberately not built — the failure is loud, bounded
+and retried on the next pass, which is the wrong trade for that complexity.
+
+**Not made non-fatal.** A copyback timeout must keep failing the stage.
+`resume_cycle_stage` (`chain_stage_execution.py:974`) unconditionally re-enters
+`_after_cycle_stage_terminal`, so a failed run-tree copyback is retried on the
+next pass; downgrading it would mark the cycle succeeded and convert a loud
+recoverable failure into silent data absence.
 
 ### Lock mechanics
 
 - **Idiom**: copied from `packages/common/node27_timeseries_lifecycle_lock.py` —
   `O_RDWR|O_NOFOLLOW|O_CLOEXEC`, `O_CREAT|O_EXCL` then fall back to plain open,
   mode `0o600`, and `_require_lock_identity`-style assertions (regular file, not
-  a symlink, exactly one hard link, owned by the effective uid, path/fd
-  `(st_dev, st_ino)` identical) re-checked after `fchmod` and after the `flock`.
-  The lock file is never unlinked by this code.
+  a symlink, exactly one hard link, owned by the effective uid, **owned by the
+  copyback root's owner**, path/fd `(st_dev, st_ino)` identical) re-checked after
+  `fchmod` and after the `flock`. The lock file is never unlinked by this code.
+  The root-owner clause is not decoration: comparing the lock file's owner to the
+  *current* euid alone only closes the pre-existing-file direction. A foreign-uid
+  writer that creates the file first passes its own euid check, and because the
+  file is never unlinked it poisons the mutex for the real writers permanently.
+  The root is the shared anchor and is owned by the writer account on the live
+  export (`/ghdc/data/nwm/object-store`, `0o775 frd_muziyao:huser`), so one
+  comparison closes both directions. The create branch is additionally refused
+  *before* `O_CREAT|O_EXCL` runs, so a rejected foreign writer leaves no orphan
+  lock file behind at all.
 - **Location: `<copyback_root>/.nhms-copyback-batch.lock`, a fixed name with no
   env override.** Rejected alternatives and why:
   - *A `/tmp` path keyed by the root's `(st_dev, st_ino)`* — systemd
@@ -98,15 +148,21 @@ one more reason for 300 s rather than 1800 s.
 - **Blocking with a deadline**: contention must wait, not refuse — refusing would
   turn a race into a dropped mirror. Uses `LOCK_EX|LOCK_NB` in a bounded poll loop
   (the `packages/common/evidence_io.acquire_exclusive_flock_until` shape).
-  **Default 300 s**, overridable via
-  `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS`. Sizing evidence:
-  `_mirror_canonical_precip` (`chain_forecast_execution.py:996`) runs inside the
-  scheduler pass rather than in a job of its own, so a 30-minute wait would sit on
-  the pass — reasoning from where the hook executes, not a cited spec requirement;
-  and it wraps the whole publisher call in
-  `except Exception` (`:1046`), recording a `failed` receipt rather than failing
-  the cycle, so a timeout defers the mirror to the next cycle instead of breaking
-  one. Timeout raises a distinct loud error and never falls back to an unlocked
+  **Default 900 s**, overridable via
+  `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS`; the arithmetic behind that
+  number is in "Cost accepted, deliberately" above. It stays finite rather than
+  unbounded because `_mirror_canonical_precip`
+  (`chain_forecast_execution.py:996`) runs inside the scheduler pass rather than
+  in a job of its own, so an unbounded wait would sit on the pass — reasoning
+  from where the hook executes, not a cited spec requirement. That hook wraps the
+  whole publisher call in `except Exception` (`:1046`), so a timeout there is
+  recorded as a `failed` `canonical_precip_mirror` receipt and the cycle
+  continues past `convert`. **Nothing retries that mirror**: there is no
+  next-cycle re-attempt for the cycle that failed, so a `failed` receipt is an
+  operator action item, recovered by running
+  `scripts/canonical_precip_copyback_backfill.py` (see
+  `docs/runbooks/current-production-ops.md` §5.3). Timeout raises a distinct loud
+  error and never falls back to an unlocked
   promote — **as each lane's own error type**, because a foreign exception escapes
   two of the three callers: `_copyback_stage_run_trees` catches only
   `RunTreeCopybackError` (`chain_forecast_execution.py:953`) and runs on the
@@ -140,23 +196,44 @@ one more reason for 300 s rather than 1800 s.
   the destructive case, arises only when the target did not exist at promote
   time). Both the cycle loop (one tree per cycle) and the grid loop (one per grid
   id) therefore route through one locked mirror helper.
-- **Single uid**: the `0o600` + owner assertion means a writer under a different
-  account fails closed with a clear error instead of silently running unlocked.
-  All copyback writers are `frd_muziyao` on node-22. Recorded as a known limit.
-- **Deadlock ordering**: this lock is the outermost copyback lock.
-  `merge_state_snapshot_index_copyback`'s provider lock is taken *inside*
-  `copyback_run_trees` (`run_tree_copyback.py:107`), so the order is total and no
-  path acquires a provider lock before this one.
+- **Single uid**: the `0o600` + owner assertions mean a writer under a different
+  account fails closed with a clear error instead of silently running unlocked —
+  in **both** directions, because the owner is compared to the copyback root's
+  owner and not only to the current euid, and because the create branch is
+  refused before the file exists. Every failure names both uids and the lock
+  path, so recovery needs no second round trip. All copyback writers are
+  `frd_muziyao` on node-22. Recorded as a known limit.
+- **Deadlock ordering: the two locks never nest, in either direction.**
+  `merge_state_snapshot_index_copyback` takes `provider_destination_lock`
+  (`packages/common/provider_atomic.py:219-222`) with `blocking=True` and **no
+  deadline**. Nesting it inside the batch mutex would leave the mutex's own
+  *hold* time unbounded — the 900 s deadline bounds a waiter, not a holder —
+  so one stalled provider lock becomes head-of-line blocking that fails every
+  other copyback writer under the root. `copyback_run_trees` therefore releases
+  the batch mutex completely before it runs the state-index merge, and no path
+  acquires the batch mutex while holding a provider lock. There is no lock order
+  to get wrong because there is no nesting.
 
 ### What is deliberately outside the mutex
 
 `packages/common/state_manager.py:2194 merge_state_snapshot_index_copyback` and
-`:2405 _copyback_state_checkpoint` also write under the copyback root
-(`scheduler/state-index/`, `states/`). They stay outside because they promote no
+`:2405 _copyback_state_checkpoint` write under the copyback root
+(`scheduler/state-index/`, `states/`) and are outside the mutex on every path,
+including `copyback_run_trees`'s own `extra_object_keys` call: they promote no
 directory tree — they are per-file provider-atomic writers with their own lock,
 on a subtree disjoint from every tree this mutex protects. The mutex requirement
 is scoped to directory-tree promote-and-commit batches for exactly this reason,
-and the spec delta carries an explicit exemption scenario.
+and the spec delta carries an explicit exemption scenario. The other
+`extra_object_keys` entries are plain `_replace_file` copies and stay inside the
+mutex; the split is only as wide as the unbounded lock demands.
+
+Terminal state of the split, recorded because it is the one behaviour question it
+raises: if the merge fails, the run trees are already promoted and the mutex
+already released — exactly as they were when the merge ran inside the mutex,
+because this lane has no batch rollback (`_replace_tree` restores per tree, under
+its own guard). `RunTreeCopybackError` propagates to
+`chain_forecast_execution.py:946` unchanged, so the caller-observable outcome is
+identical.
 
 ### `run_tree_copyback`'s different terminal state
 
@@ -316,6 +393,19 @@ Regression rows:
 - Lock timeout exceeded → loud distinct error, no unlocked promote; for the
   canonical mirror the cycle still records a `failed` receipt and survives.
 - Lock file is a symlink / wrong mode / foreign owner → fail closed, no promote.
+- Lock file owned by a uid other than the copyback root's owner → fail closed
+  with both uids and the path in the message; and a foreign uid reaching a root
+  with **no** lock file yet is refused before `O_CREAT`, so no orphan is left.
+- A raised base `CopybackLockError` (not a `CopybackLockTimeout`) → each lane's
+  *unsafe* code, distinct from its timeout code: `PublishError`
+  `OBJECT_STORE_COPYBACK_LOCK_UNSAFE` in q_down/run-products,
+  `RunTreeCopybackError` `OBJECT_STORE_COPYBACK_LOCK_UNSAFE` in the run-tree
+  lane, `error_type: CopybackLockError` in the canonical receipt, and
+  `copyback_lock_unavailable` in the forcing backfill report.
+- State-index merge inside `copyback_run_trees` → runs with the batch mutex
+  provably released (a non-blocking `flock` on the lock file succeeds from a
+  second fd while the merge runs); every other `extra_object_keys` entry still
+  copies inside it.
 - Two distinct copyback roots → two lock files, no cross-blocking.
 - `umask 027` publisher canonical copyback → the copyback root, `canonical/`,
   `canonical/<S>/`, `canonical/<S>/<cycle>/`, `canonical/<S>/grid/` each land
