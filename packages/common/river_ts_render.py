@@ -1477,6 +1477,59 @@ def _lexical_subset_violation(sql: str) -> tuple[int, str] | None:
     return min(violations) if violations else None
 
 
+# These are the three complete key resolutions used by the registered unaliased
+# readers, not a catalog of columns that arbitrary inner relations might own.
+# Case folding applies only to bare identifiers; quoted identifiers stay exact.
+_UNALIASED_AUTHORITY_SCALAR = re.compile(
+    r"\s*(?i:SELECT)\s+(?:"
+    + "|".join(
+        rf'(?:(?i:{key})|"{key}")\s+(?i:FROM)\s+'
+        rf'(?:(?i:{schema})|"{schema}")\s*\.\s*(?:(?i:{table})|"{table}")\s+'
+        rf'(?i:WHERE)\s+(?:(?i:{member})|"{member}")\s*=\s*'
+        r"(?:%s|%\([A-Za-z_][A-Za-z0-9_]*\)s|:[A-Za-z_][A-Za-z0-9_]*)"
+        for key, schema, table, member in (
+            ("run_key", "hydro", "hydro_run", "run_id"),
+            ("basin_version_key", "core", "basin_version", "basin_version_id"),
+            ("river_network_version_key", "core", "river_network_version", "river_network_version_id"),
+        )
+    )
+    + r")\s*",
+    re.ASCII,
+)
+
+
+def _unaliased_scalar_has_ambiguous_identity(body: str) -> bool:
+    """Refuse value names, not attribute them to a guessed inner/outer schema.
+
+    Match authority exceptions before stripping nested bodies: an extra query
+    must not borrow a simple authority exemption. Each body's own view excludes
+    nested comparison scalars, which the shared traversal yields separately.
+    """
+    if _UNALIASED_AUTHORITY_SCALAR.fullmatch(_blank_non_code(body, keep_literal_quotes=True)):
+        return False
+    code = _blank_non_code(outer_predicates(body))
+    index = 0
+    while index < len(code):
+        if code[index] == '"':
+            end = _scan_quoted(code, index, '"')
+        else:
+            token = _bare_identifier_token_at(code, index)
+            if token is None:
+                index += 1
+                continue
+            _name, end = token
+        member = _known_parenthesized_field_at(code, index)
+        following = _parenthesized_next_significant_character(code, end)
+        if (
+            member is not None
+            and not _is_parenthesized_nonvalue_alias_token(code, index, end)
+            and not (following is not None and code[following] == ".")
+        ):
+            return True
+        index = end
+    return False
+
+
 def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     """Refuse a fact-table reference form the alias walk does not model.
 
@@ -1484,10 +1537,10 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     reaches a render or a text-identity answer unless the independent occurrence counter
     and the ``FROM`` / ``JOIN`` walk AGREE about how many times it reads the fact
     table, the counter is blind to no spelling of the table's name, and no read
-    hides where the text-identity scan cannot look. TEN checks, in this order —
+    hides where the text-identity scan cannot look. Checks run in this order —
     ``U&`` → lexical subset → unterminated belt → quoted alias → parenthesized
     field selection → functional field notation → outer whole-row star → the
-    counts → the sub-select delta → correlated scalar bodies:
+    counts → the sub-select delta → aliased or unaliased scalar bodies:
 
     #. a Unicode-escaped identifier or literal (``U&"…"`` / ``U&'…'``) anywhere
        in the code — the one syntax that can name the table with no occurrence of
@@ -1545,9 +1598,12 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
     #. a CORRELATED SCALAR BODY — a known text member, or an unsupported
        parenthesized or functional alias-rooted form, through an already-attributed
        outer fact alias inside any comparison-position scalar body (fixture
-       decisions 23 and 24). LAST, so an inner fact-table reread keeps the older
-       count-delta reason. The body walk reuses the same matcher; it does not
-       return a member set.
+       decisions 23 and 24). After the delta, so an inner fact-table reread keeps
+       the older count-delta reason. The body walk reuses the same matcher;
+       it does not return a member set;
+    #. an UNALIASED SCALAR BODY — with no attributed fact alias, an unqualified
+       known identity value is ambiguous, except in the three complete registered
+       authority key resolutions. Refuse scalar scope rather than infer a schema.
 
     Run over the comment/literal-blanked text so a quoted alias SPELLED inside a
     literal or a comment is data, not a refusal. Double-quoted spans survive that
@@ -1647,6 +1703,14 @@ def _assert_modelled_reference_forms(sql: str, entry: str) -> None:
                 raise RiverTemplateError(
                     f"{entry}: correlated outer fact-alias reference inside comparison-position "
                     "scalar subquery"
+                )
+    elif attribution.has_unaliased_reference:
+        # Normalise comments before traversal without changing the public stripper.
+        for body in _comparison_position_scalar_bodies(strip_comments(sql)):
+            if _unaliased_scalar_has_ambiguous_identity(body):
+                raise RiverTemplateError(
+                    f"{entry}: unaliased fact read with ambiguous unqualified text identity "
+                    "inside comparison-position scalar subquery — scalar-scope is not modelled"
                 )
 
 
@@ -1952,8 +2016,9 @@ def fact_table_text_identity_columns(sql: str, *, entry: str = "<template>") -> 
 
     Raises :class:`RiverTemplateError`, naming ``entry``, on a reference form the
     alias walk does not model, an unsupported parenthesized or functional
-    fact-alias field form, or unsupported outer whole-row star exposure. Exact
-    outer SELECT stars report all legacy text identity members.
+    fact-alias field form, unsupported outer whole-row star exposure, or ambiguous
+    unqualified scalar identity under an unaliased read. Exact outer SELECT stars
+    report all legacy text identity members.
     """
     _assert_modelled_reference_forms(sql, entry)
     attribution = fact_table_attribution(sql)
