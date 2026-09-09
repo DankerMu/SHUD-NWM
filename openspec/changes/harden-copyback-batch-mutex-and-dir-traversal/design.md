@@ -82,8 +82,21 @@ that session across the copy is pre-existing; only the wait is new.
 **Known limit, not fixed here.** `_flock_until_deadline` polls
 `LOCK_EX|LOCK_NB` every 10 ms and is therefore unfair: under sustained
 contention a waiter can lose every poll and be starved across passes. A ticket
-lock would fix it and is deliberately not built — the failure is loud, bounded
-and retried on the next pass, which is the wrong trade for that complexity.
+lock would fix it and is deliberately not built — the failure is loud and
+bounded, and on the run-tree lane it is retried on the next pass
+(`resume_cycle_stage`, below). It is **not** retried on the canonical-mirror
+lane, which records a `failed` receipt and moves on; see "Nothing retries that
+mirror" below. Even so, a ticket lock is the wrong trade for that complexity.
+
+**Known limit, not fixed here.** `provider_destination_lock`
+(`packages/common/provider_atomic.py:326-339`) is `blocking=True` with no
+deadline. That is pre-existing on master, but moving the state-index merge out
+of the batch mutex changes who waits on it: before, one writer at a time reached
+the merge because the rest queued on the bounded mutex; now N writers can wait
+there concurrently. `copyback_guard`'s "never a hang" promise therefore covers
+the batch mutex only — `copyback_run_trees` as a whole can still block
+indefinitely inside the merge. Bounding the provider lock is a change to a
+shared writer used by four other call graphs and is out of scope here.
 
 **Not made non-fatal.** A copyback timeout must keep failing the stage.
 `resume_cycle_stage` (`chain_stage_execution.py:974`) unconditionally re-enters
@@ -104,7 +117,10 @@ recoverable failure into silent data absence.
   writer that creates the file first passes its own euid check, and because the
   file is never unlinked it poisons the mutex for the real writers permanently.
   The root is the shared anchor and is owned by the writer account on the live
-  export (`/ghdc/data/nwm/object-store`, `0o775 frd_muziyao:huser`), so one
+  export (`/ghdc/data/nwm/object-store`, `0o775 frd_muziyao:huser`; the group is
+  gid 1078, which resolves to `huser` on node-22 and `nfsdata` on node-27 — the
+  same group under two host-local names, which is why the `getfacl` block below
+  spells it differently), so one
   comparison closes both directions. The create branch is additionally refused
   *before* `O_CREAT|O_EXCL` runs, so a rejected foreign writer leaves no orphan
   lock file behind at all.
@@ -280,7 +296,7 @@ unconditional rule is both correct and simpler. Recovering that clamped mask is
 Live `getfacl` on the shared root, which sets where B actually bites today:
 
 ```
-object-store/   no default ACL          (0775 frd_muziyao:nfsdata, other::r-x)
+object-store/   no default ACL          (0775 frd_muziyao:nfsdata = gid 1078 = huser on node-22, other::r-x)
 runs/           default:user:nwm:rwx, default:mask::rwx
 forcing/        default:user:nwm:rwx, default:mask::rwx
 states/         default:user:nwm:rwx, default:mask::rwx

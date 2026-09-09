@@ -22,7 +22,7 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
 
 ## Implementation
 
-- [ ] T1 Add `packages/common/copyback_guard.py`:
+- [x] T1 Add `packages/common/copyback_guard.py`:
       - `copyback_batch_lock(copyback_root, *, timeout_seconds=None)` — exclusive
         `flock` on the fixed `<copyback_root>/.nhms-copyback-batch.lock` (no env
         override), `node27_timeseries_lifecycle_lock`-style no-follow open and
@@ -75,7 +75,7 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
         inherited ACL; do **not** generalize that to other modes —
         `_ensure_copyback_state_parent`'s `0o775` genuinely restores `mask::rwx`
         and must not be narrowed.
-- [ ] T2 Hold `copyback_batch_lock` across the whole batch in
+- [x] T2 Hold `copyback_batch_lock` across the whole batch in
       `publisher._copyback_run_products` (def `publisher.py:721`; non-batch loop
       at `:823`), `publisher._copyback_qdown_products` (def `:873`; batch region
       `:982-1133`) and `publisher._copyback_canonical_precip` (def `:1157`; batch
@@ -94,7 +94,7 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
       (`publish_cycle:181` delegates to `publish_qdown_cycle`; only
       `tests/test_tile_publisher.py:1192`/`:1264` call it); lock it anyway so the
       two siblings cannot diverge.
-- [ ] T3 Hold the same lock in
+- [x] T3 Hold the same lock in
       `services/tile_publisher/forcing_copyback_backfill._copy_package` (def
       `:734`) **per package** — wrap the whole `rollback_log` lifetime `:742-772`,
       not just the `:744` copyback call: the lock must still be held when
@@ -107,7 +107,7 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
       mirror helper. Never once for the whole run, which would hold the lock past
       the publisher's deadline. `--dry-run` takes no lock: it provably writes
       nothing, and acquiring would create the lock file, which is a write.
-- [ ] T4 Hold the same lock in
+- [x] T4 Hold the same lock in
       `services/orchestrator/run_tree_copyback.copyback_run_trees` (def `:36`),
       and add a comment at `_replace_tree` (`:374-392`) recording that its guarded
       recovery branch (`:388`) always produced a spurious failure rather than data
@@ -118,14 +118,14 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
       per-file provider-atomic writer the spec delta already exempts; the other
       `extra_object_keys` entries are cheap `_replace_file` copies and stay
       inside.
-- [ ] T5 Route copyback directory creation through
+- [x] T5 Route copyback directory creation through
       `ensure_traversable_copyback_directory` at `publisher.py:1403`, `:1625`,
       `:1630`, `:1633`, `:2305`, `:2371` and `run_tree_copyback.py:49`, `:375`,
       `:396`. `publisher.py:1403` and `run_tree_copyback.py:49` create the
       **copyback root itself**, which is in scope: issue #2035's `umask 027`
       measurement lists `0o750 .` first, and a `0o750` root defeats traversal
       regardless of the levels below it.
-- [ ] T6 Document `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` and the fixed
+- [x] T6 Document `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` and the fixed
       lock path in `infra/env/README.md` and the copyback runbook; assert
       `packages/common/safe_fs.py`, `run_tree_copyback.py:419-440` and
       `packages/common/state_manager.py` are unmodified by this diff.
@@ -207,7 +207,7 @@ Baseline is `master` unless a row names another revision.
 | E19 (narrowing variant — the defect the row actually guards) | HEAD with each `except CopybackLockError` arm narrowed to `CopybackLockTimeout` | `packages.common.copyback_guard.CopybackLockError: copyback batch lock must have mode 0600` escapes uncaught out of all four publisher/run-tree entry points, and the forcing report reads `assert 'failed' == 'copyback_lock_unavailable'` |
 | E20 (import-closure includes package `__init__`s) | the pre-fix test body from `40cf8ed9`, with `import numpy` planted in `packages/common/__init__.py` | pre-fix test: **1 passed** (vacuous); fixed test: `AssertionError: .../packages/common/__init__.py pulls in a third-party dependency: ['numpy']`. Both the plant and the pre-fix test body were reverted immediately. |
 
-- [ ] E1 `copyback_guard` lock unit tests: two threads on one root serialize (the
+- [x] E1 `copyback_guard` lock unit tests: two threads on one root serialize (the
       second observes the first's completion); two distinct roots do not block each
       other; timeout raises the distinct error and performs no promote; a
       symlinked / `0o644` / foreign-owned lock file fails closed; a killed holder's
@@ -256,11 +256,11 @@ Baseline is `master` unless a row names another revision.
       that a mode-less `mkdir` under the same parent yields `mask::rwx`, pinning
       the `run_tree_copyback.py:440` boundary. Skip with an explicit reason on a
       platform without ACL support — never a silent pass.
-- [ ] E9 Pre-existing intermediate directory at `0o700` → left unchanged (#1513).
+- [x] E9 Pre-existing intermediate directory at `0o700` → left unchanged (#1513).
 - [ ] E10 `provider_lock_parent_unsafe` and the `filesystem-permission-determinism`
       umask regression tests stay green; `state_manager` copyback writers still
       succeed without the mutex.
-- [ ] E11 Lock timeout inside `_mirror_canonical_precip`: the cycle records a
+- [x] E11 Lock timeout inside `_mirror_canonical_precip`: the cycle records a
       `failed` `canonical_precip_mirror` receipt and does not raise.
 - [x] E13 Lock timeout in the run-tree lane raises `RunTreeCopybackError`, is
       caught by `_copyback_stage_run_trees` (`chain_forecast_execution.py:953`),
@@ -284,7 +284,7 @@ Baseline is `master` unless a row names another revision.
       `PublishError` unchanged; the point of the distinct type is that it is not
       swallowed by the `SQLAlchemyError | OSError | ValueError` arm at `:201-202`
       nor rewrapped as `OBJECT_STORE_COPYBACK_FAILED`.
-- [ ] E15 Copyback root identical to the object-store root: the lane returns
+- [x] E15 Copyback root identical to the object-store root: the lane returns
       `skipped` and **no lock file exists** anywhere under the object-store root.
 - [ ] E16 `state_manager._ensure_copyback_state_parent` still chmods `0o775` and
       still restores `mask::rwx` under an ACL'd parent — the `0o755` rule of this
@@ -299,13 +299,32 @@ Baseline is `master` unless a row names another revision.
       from the euid mismatch), and a foreign uid at a root with no lock file yet
       is refused *before* `O_CREAT` so it leaves no orphan. Every message names
       both uids and the lock path; none of them is a `CopybackLockTimeout`.
-- [x] E19 A raised base `CopybackLockError` surfaces as each lane's *unsafe* code,
-      distinct from its timeout code: q_down, run-products and the public
-      `publish_qdown_cycle` handler
-      (`PublishError`/`OBJECT_STORE_COPYBACK_LOCK_UNSAFE`), the canonical receipt
-      (`error_type: CopybackLockError`), the run-tree lane
-      (`RunTreeCopybackError`/`OBJECT_STORE_COPYBACK_LOCK_UNSAFE`) and the forcing
-      backfill (`copyback_lock_unavailable`).
+- [ ] E19 **Lane × named-behaviour coverage matrix.** Two review rounds lost the
+      same way — an enumeration done from memory missed a cell — so the
+      enumeration is now the artifact, not a prose list. Round 1 finding B3 was
+      "`LOCK_UNSAFE` × every lane untested" and its fix brief enumerated lanes by
+      hand, omitting `scripts/canonical_precip_copyback_backfill.py`; round 2
+      finding A2 is exactly that omission. Round 2 finding A1 is a cell nobody
+      enumerated at all ("held through rollback" × forcing backfill). The
+      invariant this table exists to enforce: **every (lane, named behaviour)
+      cell holds either a discriminating `tests/<file>::<test>` reference or an
+      explicit `N/A — <structural reason>`.** An empty cell is a defect, and a
+      cell whose test would stay green under the behaviour's removal is an empty
+      cell.
+
+      | lane | timeout code | unsafe code, distinct from timeout | lock held through commit | lock held through rollback | zero-write skip creates no lock file | traversal widening |
+      |---|---|---|---|---|---|---|
+      | `publisher` run-products | | | | | | |
+      | `publisher` q_down | | | | | | |
+      | `publisher` canonical mirror | | | | | | |
+      | `run_tree_copyback` | | | | | | |
+      | `forcing_copyback_backfill` | | | | | | |
+      | `scripts/canonical_precip_copyback_backfill` | | | | | | |
+
+      Fill every cell. Where a lane structurally cannot exhibit a behaviour, say
+      why in the cell (for example: a lane whose `with` lexically encloses the
+      whole `try/except` cannot release early, so "held through rollback" is
+      structural — but say so, do not leave it blank).
 - [x] E20 The import-closure assertion parses the package `__init__.py` files on
       the path to each allowed in-tree module, not just the module itself.
 - [x] E12 `grep -rn "DEBUG-" ` clean before commit; `git stash list` shows no
@@ -348,7 +367,7 @@ different uid (`frd_muziyao` on node-22) running **this branch's code** under
       → E6.
 - [ ] AC4 node-27 oracle: the display API read account actually reads bytes
       through `canonical/**`. → the AC4 receipt procedure above.
-- [ ] AC5 Fact-check recorded: `getfacl` on the copyback root and each lane.
+- [x] AC5 Fact-check recorded: `getfacl` on the copyback root and each lane.
       **Collected 2026-09-08 on node-27** — root and `canonical/`: no default ACL;
       `runs/`, `forcing/`, `states/`: `default:user:nwm:rwx`, `default:mask::rwx`.
       Recorded in `proposal.md`/`design.md`. It bounds where B bites; it does not

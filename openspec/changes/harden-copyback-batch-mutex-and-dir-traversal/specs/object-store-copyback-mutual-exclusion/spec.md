@@ -53,16 +53,29 @@ loudly with a distinct error and SHALL NOT promote any tree.
 - **AND** its guarded recovery branch — which restores its backup only when the
   target is absent, and therefore never removed a competitor's tree — MUST remain
   documented in place as a benign spurious-failure terminal state rather than a
-  lost update.
+  lost update
+- **AND** the state-snapshot index merge it performs in the same call MUST run
+  after the mutex has been released, per the per-file exemption below; its
+  presence in the call's returned summary is reporting, not a promote held open
+  across the release.
 
-#### Scenario: per-file provider-atomic copyback writers are exempt
+#### Scenario: per-file provider-atomic copyback writes are exempt
 
-- **WHEN** a copyback writer promotes no directory tree — it writes individual
-  files under a disjoint subtree of the copyback root through its own
+- **WHEN** a copyback **write** promotes no directory tree — it writes an
+  individual file under a disjoint subtree of the copyback root through its own
   provider-atomic lock, as the state-snapshot index merge and the state
   checkpoint copyback do
-- **THEN** it is outside this requirement and MUST continue to succeed without
-  holding this mutex.
+- **THEN** that write is outside this requirement and MUST proceed without
+  holding this mutex
+- **AND** when the same call also promotes directory trees, the exempt write
+  MUST run only after this mutex has been released — never nested inside it,
+  because the provider-atomic lock it takes has no deadline and nesting an
+  unbounded wait inside the bounded mutex turns one stalled writer into a
+  head-of-line stall for every other writer under the copyback root.
+
+The exemption is scoped to the write, not to the writer: a caller that promotes
+directory trees *and* performs such a write is covered by this requirement for
+its promotes and exempt for that write.
 
 #### Scenario: the mutex fails closed on an unsafe lock file
 
