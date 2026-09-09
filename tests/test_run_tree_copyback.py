@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import errno
+import inspect
 import json
 import os
+import stat
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +15,11 @@ import pytest
 from packages.common import provider_atomic as provider_atomic_module
 from packages.common import safe_fs as safe_fs_module
 from packages.common import state_manager as state_manager_module
+from packages.common.copyback_guard import (
+    COPYBACK_BATCH_LOCK_NAME,
+    COPYBACK_LOCK_TIMEOUT_ENV,
+    copyback_batch_lock,
+)
 from packages.common.object_store import LocalObjectStore, sha256_bytes
 from packages.common.provider_atomic import ProviderPreimage, capture_provider_preimage, provider_lock_path
 from packages.common.safe_fs import SafeFilesystemError, atomic_write_bytes_no_follow
@@ -1448,3 +1455,165 @@ def test_copyback_run_trees_root_identity_probe_failure_names_the_failing_operan
     assert error_info.value.message == f"{expected_operand} is unavailable for run-tree copyback."
     assert error_info.value.details[expected_detail_key] == str(target)
     assert list(copyback_root.iterdir()) == []
+
+
+# --------------------------------------------------------------------------- #
+# #2035: this lane writes under the same shared copyback root as the publisher's
+# batches, so it takes the same mutex. Its own terminal state was always benign
+# (guarded recovery -> spurious failure, no lost update), which `_replace_tree`'s
+# docstring records; it is brought under the mutex because one lock-free writer
+# on the shared root leaves the publisher's genuinely destructive window open.
+# --------------------------------------------------------------------------- #
+def test_run_tree_copyback_holds_the_shared_batch_mutex_for_its_whole_promote_region(
+    tmp_path: Path,
+) -> None:
+    """E5: serialized against a publisher batch; neither destroys the other's tree."""
+
+    from services.tile_publisher.publisher import TilePublisher
+
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+
+    # A real publisher canonical batch as the competitor, on its own source root.
+    publisher_source = tmp_path / "publisher-object-store"
+    prcp_dir = publisher_source / "canonical" / "gfs" / "2026062700" / "prcp_rate_or_amount"
+    prcp_dir.mkdir(parents=True)
+    (prcp_dir / "gfs_2026062700_prcp_rate_or_amount_f003.nc").write_bytes(b"prcp")
+    grid_dir = publisher_source / "canonical" / "gfs" / "grid" / "gfs_0p25"
+    grid_dir.mkdir(parents=True)
+    (grid_dir / "grid.json").write_bytes(b"{}")
+    publisher = TilePublisher(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=publisher_source,
+        object_store_copyback_root=copyback_root,
+    )
+    competitor_summaries: list[dict[str, Any]] = []
+
+    main_thread = threading.current_thread()
+    promoting = threading.Event()
+    competitor_finished = threading.Event()
+    competitor_ran_inside_the_region: list[bool] = []
+    competitor_errors: list[BaseException] = []
+    real_replace_tree = run_tree_copyback_module._replace_tree
+
+    def gated_replace_tree(*, source: Path, target: Path, containment_root: Path) -> dict[str, Any]:
+        summary = real_replace_tree(source=source, target=target, containment_root=containment_root)
+        if threading.current_thread() is main_thread and not promoting.is_set():
+            promoting.set()
+            competitor_ran_inside_the_region.append(competitor_finished.wait(timeout=2))
+        return summary
+
+    def run_competitor() -> None:
+        assert promoting.wait(timeout=10)
+        try:
+            result = publisher.copyback_canonical_precip("gfs", "2026062700")
+            assert result is not None
+            competitor_summaries.append(result)
+        except BaseException as error:  # pragma: no cover - asserted below
+            competitor_errors.append(error)
+        competitor_finished.set()
+
+    thread = threading.Thread(target=run_competitor)
+    thread.start()
+    original = run_tree_copyback_module._replace_tree
+    run_tree_copyback_module._replace_tree = gated_replace_tree  # type: ignore[assignment]
+    try:
+        summary = copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=[run_id],
+        )
+    finally:
+        run_tree_copyback_module._replace_tree = original  # type: ignore[assignment]
+    thread.join(timeout=30)
+
+    assert not thread.is_alive()
+    assert competitor_errors == []
+    assert competitor_ran_inside_the_region == [False], "a competitor entered the promote region"
+    assert summary is not None and summary["status"] == "copied"
+    # Serialized, and neither writer's tree was removed by the other.
+    assert competitor_summaries[0]["status"] == "ok"
+    assert (copyback_root / "runs" / run_id / "input" / "manifest.json").is_file()
+    assert (
+        copyback_root / "canonical" / "gfs" / "2026062700" / "prcp_rate_or_amount"
+        / "gfs_2026062700_prcp_rate_or_amount_f003.nc"
+    ).read_bytes() == b"prcp"
+
+
+def test_run_tree_copyback_lock_timeout_raises_this_lanes_own_error_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`chain_forecast_execution.py:953` catches only `RunTreeCopybackError`."""
+
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        with pytest.raises(RunTreeCopybackError) as error_info:
+            copyback_run_trees(
+                object_store_root=object_root,
+                copyback_root=copyback_root,
+                run_ids=[run_id],
+            )
+
+    assert error_info.value.code == "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
+    # No unlocked promote.
+    assert not (copyback_root / "runs").exists()
+
+
+def test_run_tree_copyback_skip_path_creates_no_lock_file(tmp_path: Path) -> None:
+    """E15 in this lane: the acquire sits after the identity guard."""
+
+    object_root = tmp_path / "object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+
+    summary = copyback_run_trees(
+        object_store_root=object_root,
+        copyback_root=object_root,
+        run_ids=[run_id],
+    )
+
+    assert summary is not None and summary["status"] == "skipped"
+    assert sorted(object_root.rglob(COPYBACK_BATCH_LOCK_NAME)) == []
+
+
+def test_run_tree_copyback_widens_every_level_it_creates_under_umask_027(tmp_path: Path) -> None:
+    """The copyback root itself included -- `run_tree_copyback.py:49` creates it."""
+
+    object_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    run_id = "fcst_gfs_2026062700_basins_heihe_shud"
+    _write_run(object_root, run_id)
+    assert not copyback_root.exists()
+
+    previous_umask = os.umask(0o027)
+    try:
+        summary = copyback_run_trees(
+            object_store_root=object_root,
+            copyback_root=copyback_root,
+            run_ids=[run_id],
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert summary is not None and summary["status"] == "copied"
+    for level in (copyback_root, copyback_root / "runs", copyback_root / "forcing", copyback_root / "models"):
+        assert stat.S_IMODE(level.stat().st_mode) == 0o755, level
+
+
+def test_replace_tree_records_why_its_own_terminal_state_was_benign() -> None:
+    """AC2: the guarded recovery branch must stay documented in place."""
+
+    doc = run_tree_copyback_module._replace_tree.__doc__ or ""
+    assert "#2035" in doc
+    assert "spurious failure" in doc
+    source = inspect.getsource(run_tree_copyback_module._replace_tree)
+    assert "if backup.exists() and not target.exists():" in source

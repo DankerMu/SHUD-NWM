@@ -51,6 +51,35 @@ OBJECT_STORE_PREFIX=s3://nhms
 两者不能互相嵌套，也不能配置成同一个目录。发布时的 exact-root skip 语义不适用于本工具；
 backfill 的目标是修复 shared mirror，same-root 属于配置错误。
 
+## Copyback batch mutex（#2035）
+
+所有会在 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 下 **promote 目录树** 的写者——publisher 的
+q_down / run-products / canonical-precip 三条 lane、orchestrator 的 run-tree copyback、
+本工具（每个 package）、以及 `scripts/canonical_precip_copyback_backfill.py`（每棵树）——
+在临界区开始前先取一把跨进程排他 `flock`：
+
+```
+$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
+```
+
+- **路径固定、无环境变量覆盖**。锁挂在 copyback root 下，而不是 `/tmp`：systemd
+  `PrivateTmp=true` 与 Slurm `job_container/tmpfs` 会给进程各自的私有 `/tmp`，两个写者会
+  flock 到两个 inode，互斥静默失效。
+- 锁文件由属主以 `0o600` 创建，**从不 unlink**；持有者被 kill 时内核释放 flock，所以
+  「锁文件还在」不等于「锁还被持有」。不要手动删除它——删除会让另一个写者去锁一个新 inode。
+- 互斥**覆盖整个 batch**：plan → copy → 每次 promote → commit 或 rollback 返回之后才释放。
+  per-tree 粒度不够：batch rollback 中 `backup_dir is None` 的分支会删掉「此刻位于目标位置的
+  东西」，那只有在期间没有别的写者提交过才等于恢复。
+- `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS`（可选，**默认 300 秒**）限制等待上限。
+  竞争是**等待**而不是拒绝；超时抛出各 lane 自己的错误类型（run-tree lane 是
+  `RunTreeCopybackError`，q_down lane 是带 `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code 的
+  `PublishError`，canonical mirror 记 `failed` receipt 后本 cycle 继续），
+  **绝不降级为无锁 promote**。空值取默认；非数字或非正数是硬性配置拒绝。
+- 所有 copyback 写者必须是同一个 uid（node-22 上是 `frd_muziyao`）。`0o600` + 属主断言让
+  跑在别的账号下的写者 fail closed，而不是静默地不加锁运行。互斥只在**单机**内成立。
+- 若某个 package 报 `category: copyback_lock_unavailable`，说明它没拿到锁（超时或锁文件被篡改），
+  目标树本身完好无损，重跑即可。
+
 ## Dry-Run
 
 先运行 dry-run 并保存 JSON：

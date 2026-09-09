@@ -18,8 +18,15 @@ from anywhere else the interpreter exits 1 with ``ModuleNotFoundError`` -- the
 same exit code this script uses for "completed but something failed",
 distinguishable only by the empty stdout.
 
-It therefore imports nothing from ``services`` / ``packages`` / ``workers`` and
-no third-party module. The direct
+It therefore imports no third-party module, and from the repository exactly one
+in-tree module: ``packages.common.copyback_guard`` (#2035), whose own import
+closure is the standard library plus ``packages.common.safe_fs`` -- itself
+standard library only. That one import is deliberate and is asserted
+transitively by ``tests/test_canonical_precip_copyback_backfill.py``: the mutex
+this script must share with the publisher is identified by a lock *path*, and a
+second copy of that constant here is precisely how two writers end up flocking
+two different files while believing they are serialized. Nothing else from
+``services`` / ``packages`` / ``workers`` may be imported. The direct
 consequence is that it does **not** normalize source ids: it copies the on-disk
 directory names verbatim (``gfs`` / ``IFS`` are already the storage spelling) and
 discovers ``<grid_id>`` by listing ``canonical/<S>/grid/*/``. That non-sharing of
@@ -78,6 +85,8 @@ import stat
 import sys
 from pathlib import Path
 from typing import Any
+
+from packages.common.copyback_guard import CopybackLockError, copyback_batch_lock
 
 EXIT_OK = 0
 EXIT_FAILURES = 1
@@ -416,9 +425,52 @@ def _backfill_cycle(
             }
         )
         return entry
-    result = mirror_tree(source_dir, copyback_root / relative, dry_run=dry_run)
+    result = _mirror_tree_under_batch_lock(
+        source_dir,
+        copyback_root / relative,
+        copyback_root=copyback_root,
+        dry_run=dry_run,
+    )
     entry.update({"status": "failed" if result.failed else "ok", **result.as_dict()})
     return entry
+
+
+def _mirror_tree_under_batch_lock(
+    source_dir: Path,
+    target_dir: Path,
+    *,
+    copyback_root: Path,
+    dry_run: bool,
+) -> _TreeResult:
+    """Mirror one tree while holding the shared copyback batch mutex (#2035).
+
+    Per tree, never once for the whole run: a whole-run acquisition on a long
+    backfill would hold the lock past the publisher's own 300 s deadline and turn
+    this fix into a mirror outage. The publisher's canonical batch promotes the
+    very trees this script writes into, and its rollback's ``backup_dir is None``
+    branch removes whatever now sits at the target -- so without this every file
+    this script counts as ``copied`` is removable by a concurrent publisher
+    rollback.
+
+    ``--dry-run`` takes no lock: it provably writes nothing (``_mirror_file``
+    returns before ``_ensure_target_directory``), and acquiring would create the
+    lock file under the copyback root, which is itself a write.
+
+    ``resolve_roots`` has already refused a ``--copyback-root`` that is absent,
+    is the source root, or overlaps it, so the lock's parent directory exists and
+    the zero-write refusal paths are all upstream of this acquire.
+    """
+
+    if dry_run:
+        return mirror_tree(source_dir, target_dir, dry_run=dry_run)
+    try:
+        with copyback_batch_lock(copyback_root):
+            return mirror_tree(source_dir, target_dir, dry_run=dry_run)
+    except CopybackLockError as error:
+        result = _TreeResult()
+        result.failed += 1
+        result.errors.append(f"copyback batch lock unavailable for {target_dir}: {error}")
+        return result
 
 
 def _backfill_grids(
@@ -448,7 +500,15 @@ def _backfill_grids(
     entries: list[dict[str, Any]] = []
     for grid_id in grid_ids:
         relative = Path(CANONICAL_DIR) / storage_source / GRID_DIR / grid_id
-        result = mirror_tree(source_root / relative, copyback_root / relative, dry_run=dry_run)
+        # Per grid tree, same mutex as the cycle loop (#2035): the publisher's
+        # canonical batch promotes `canonical/<S>/grid/<grid_id>/` too, so grid
+        # files this script counts as `copied` are exposed to the same rollback.
+        result = _mirror_tree_under_batch_lock(
+            source_root / relative,
+            copyback_root / relative,
+            copyback_root=copyback_root,
+            dry_run=dry_run,
+        )
         entries.append(
             {
                 "source": storage_source,

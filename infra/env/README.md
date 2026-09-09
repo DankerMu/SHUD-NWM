@@ -182,6 +182,28 @@ unit → EnvironmentFile table above is the authority.
     `OBJECT_STORE_PREFIX`, `NHMS_BASINS_ROOT` — dereferenced by the runbook
     provision/publisher shell and required by `plan-production` preflight;
     the two local roots must stay inside `NHMS_SCHEDULER_ALLOWED_ROOTS`.
+- Object-store copyback mutual exclusion (#2035). Every writer that promotes a
+  directory tree under `NHMS_OBJECT_STORE_COPYBACK_ROOT` — the publisher's
+  q_down, run-products and canonical-precipitation lanes, the orchestrator's
+  run-tree copyback, and both backfill CLIs — first takes an exclusive `flock`
+  on the fixed path `$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock`.
+  - The lock path is **fixed and has no env override**: it is anchored under the
+    copyback root because that is the one path every writer has already resolved,
+    so a private `/tmp` (systemd `PrivateTmp=true`, Slurm `job_container/tmpfs`)
+    cannot split one mutex into two inodes. The file is created `0o600`, is never
+    unlinked, and a killed holder's lock is released by the kernel.
+  - `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` (optional, **default 300**)
+    bounds how long a writer waits. Contention waits rather than refuses;
+    exceeding the deadline raises a distinct loud error and never falls back to
+    an unlocked promote. Unset or empty means 300 s; a non-numeric or
+    non-positive value is a hard configuration refusal, not a silent default.
+  - All copyback writers must run as one uid (`frd_muziyao` on node-22): the
+    `0o600` mode plus the effective-uid ownership assertion make a writer under
+    another account fail closed instead of running unlocked. Exclusion is
+    node-local — see the non-goals in
+    `openspec/changes/harden-copyback-batch-mutex-and-dir-traversal/proposal.md`.
+  - `services/orchestrator/retention.py` descends only `root/<prefix>` and
+    `root/runs`, never root-level files, so the lock file is invisible to it.
 - The DB-free scheduler's trusted raw authority is the canonical shared-NFS
   node-22 topology path. Runtime preflight requires both
   `NHMS_OBJECT_STORE_COPYBACK_ROOT` and

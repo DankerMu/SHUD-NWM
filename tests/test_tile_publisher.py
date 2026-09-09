@@ -30,6 +30,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -44,6 +46,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from packages.common import safe_fs as safe_fs_module
+from packages.common.copyback_guard import (
+    COPYBACK_BATCH_LOCK_NAME,
+    COPYBACK_LOCK_TIMEOUT_ENV,
+    copyback_batch_lock,
+)
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from services.tile_publisher import publisher as publisher_module
 from services.tile_publisher.publisher import (
@@ -3150,3 +3157,411 @@ def test_copyback_tree_key_whitelist_rejects_unsupported_shapes(tmp_path: Any, k
         _object_tree_root_path(publisher.object_store, key)
     with pytest.raises(ValueError):
         _copyback_temp_tree_key(key)
+
+
+# --------------------------------------------------------------------------- #
+# #2035: the copyback batch mutex (Weakness A) and the traversal widening
+# (Weakness B).
+#
+# Weakness A's window is `_replace_directory_tree_for_qdown_batch`'s
+# `rename-to-backup` -> `promote` gap, which has no function call inside it, so
+# the competitor is injected by wrapping `os.replace` and keying on the backup
+# name. `flock` is per open file description, so two threads that each open the
+# lock file do contend and the rows are deterministic without subprocesses.
+#
+# `os.umask` is process-global: every umask row sets and restores it in a
+# `try/finally` and this module must not be run under xdist.
+# --------------------------------------------------------------------------- #
+def _seed_canonical_precip_sized(
+    publisher: TilePublisher,
+    *,
+    body: bytes,
+    storage_source: str = "gfs",
+    cycle: str = COMPACT_TIME,
+    grid_id: str = "gfs_0p25",
+    leads: tuple[int, ...] = (3, 6),
+) -> dict[str, bytes]:
+    """Seed a canonical cycle whose payload SIZES identify the writer.
+
+    Two writers mirroring byte-identical trees would make the second one plan a
+    `trees_already_mirrored` skip, which is not the race under test: the plan
+    compares `(name, size)` pairs.
+    """
+
+    payloads: dict[str, bytes] = {}
+    prcp_key = _prcp_tree_key(storage_source, cycle)
+    for lead in leads:
+        key = f"{prcp_key}/{storage_source}_{cycle}_prcp_rate_or_amount_f{lead:03d}.nc"
+        publisher.object_store.write_bytes_atomic(key, body)
+        payloads[key] = body
+    grid_key = _grid_tree_key(storage_source, grid_id)
+    grid_payload = json.dumps({"grid_id": grid_id, "body": body.decode()}).encode("utf-8")
+    publisher.object_store.write_bytes_atomic(f"{grid_key}/grid.json", grid_payload)
+    payloads[f"{grid_key}/grid.json"] = grid_payload
+    return payloads
+
+
+def _seed_qdown_run_without_a_database(publisher: TilePublisher, run_id: str = "run-a") -> dict[str, Any]:
+    """Seed one run + its forcing package and return the run mapping the lane reads.
+
+    `_copyback_qdown_products` only reads forcing metadata off the run mapping,
+    so the q_down lane is drivable without the sqlite schema harness.
+    """
+
+    _seed_run_products(publisher, run_id)
+    output_key = f"{FORCING_KEY}/forcing.tsd.forc"
+    manifest = {"forcing_version_id": "forcing-1", "files": [{"role": "tsd_forc", "uri": output_key}]}
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    publisher.object_store.write_bytes_atomic(output_key, b"forcing-bytes\n")
+    publisher.object_store.write_bytes_atomic(f"{FORCING_KEY}/forcing_package.json", manifest_bytes)
+    checksum = sha256(manifest_bytes).hexdigest()
+    return {
+        "run_id": run_id,
+        "source_id": SOURCE_ID,
+        "cycle_time": CYCLE_TIME,
+        "basin_version_id": "basin-1",
+        "model_id": "model-1",
+        "forcing_version_id": "forcing-1",
+        "forcing_package_uri": f"{FORCING_KEY}/",
+        "forcing_checksum": checksum,
+        "forcing_lineage": {
+            "forcing_package_manifest_uri": f"{FORCING_KEY}/forcing_package.json",
+            "forcing_package_manifest_checksum": checksum,
+            "output_files": manifest["files"],
+        },
+    }
+
+
+def _competing_publishers(tmp_path: Path) -> tuple[TilePublisher, TilePublisher, Path]:
+    """Two writers with distinct source roots sharing one copyback root."""
+
+    copyback_root = tmp_path / "shared-object-store"
+    first = TilePublisher(
+        workspace_root=tmp_path / "workspace-a",
+        object_store_root=tmp_path / "object-store-a",
+        object_store_copyback_root=copyback_root,
+    )
+    second = TilePublisher(
+        workspace_root=tmp_path / "workspace-b",
+        object_store_root=tmp_path / "object-store-b",
+        object_store_copyback_root=copyback_root,
+    )
+    return first, second, copyback_root
+
+
+def test_copyback_batch_mutex_blocks_a_competitor_inside_the_backup_to_promote_window(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E2: publisher x publisher, competitor injected at `:2380`->`:2382`.
+
+    Pre-change the second writer entered that window, saw no target, promoted,
+    recorded `backup_dir=None` and reported `ok`; the first writer's promote then
+    hit `ENOTEMPTY` and `_restore_copyback_backup` `rmtree`d the competitor's
+    just-promoted tree before restoring its own stale backup. The competitor had
+    already reported success for content that no longer existed.
+    """
+
+    writer_a, writer_b, copyback_root = _competing_publishers(Path(tmp_path))
+    _seed_canonical_precip_sized(writer_a, body=b"A" * 32)
+    payloads_b = _seed_canonical_precip_sized(writer_b, body=b"B" * 64)
+
+    # Pre-race content at the destination, so writer A takes a real backup.
+    prcp_key = _prcp_tree_key("gfs", COMPACT_TIME)
+    pre_race = copyback_root / prcp_key / "pre-race.nc"
+    pre_race.parent.mkdir(parents=True)
+    pre_race.write_bytes(b"pre-race")
+
+    main_thread = threading.current_thread()
+    in_window = threading.Event()
+    competitor_finished = threading.Event()
+    competitor_ran_inside_window: list[bool] = []
+    summary_b: list[dict[str, Any]] = []
+    real_replace = os.replace
+
+    def gated_replace(src: Any, dst: Any, **kwargs: Any) -> None:
+        real_replace(src, dst, **kwargs)
+        if (
+            threading.current_thread() is main_thread
+            and ".copyback-backup." in str(dst)
+            and not in_window.is_set()
+        ):
+            in_window.set()
+            # In the fixed build the competitor is blocked on the mutex and this
+            # wait expires; pre-change it completes a whole batch in here.
+            competitor_ran_inside_window.append(competitor_finished.wait(timeout=2))
+
+    def run_competitor() -> None:
+        assert in_window.wait(timeout=10)
+        result = writer_b.copyback_canonical_precip("gfs", COMPACT_TIME)
+        assert result is not None
+        summary_b.append(result)
+        competitor_finished.set()
+
+    thread = threading.Thread(target=run_competitor)
+    thread.start()
+    monkeypatch.setattr(os, "replace", gated_replace)
+    summary_a = writer_a.copyback_canonical_precip("gfs", COMPACT_TIME)
+    monkeypatch.undo()
+    thread.join(timeout=30)
+
+    assert not thread.is_alive()
+    assert competitor_ran_inside_window == [False], "the competitor entered the promote window"
+    assert summary_a is not None and summary_a["status"] == "ok"
+    assert summary_b[0]["status"] == "ok"
+    # Both reported truthfully: the destination holds the LAST writer's complete
+    # tree, and the writer that reported `ok` for it still owns every byte.
+    for key, payload in payloads_b.items():
+        assert (copyback_root / key).read_bytes() == payload
+    assert not pre_race.exists()
+    _assert_no_copyback_residue(copyback_root)
+
+
+def test_copyback_batch_rollback_never_removes_another_writers_committed_tree(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E4, the batch-scope discriminator: a PER-TREE lock fails this row.
+
+    A promotes `prcp` into an empty slot, so its rollback entry records
+    `backup_dir=None` -- "I found nothing here, so removing what is here restores
+    the world". That claim only holds while no other writer can commit into the
+    slot in the meantime. With a per-tree lock A would release after `prcp`, B
+    would commit into it, and A's later failure on `grid` would delete B's tree.
+    """
+
+    writer_a, writer_b, copyback_root = _competing_publishers(Path(tmp_path))
+    _seed_canonical_precip_sized(writer_a, body=b"A" * 32)
+    payloads_b = _seed_canonical_precip_sized(writer_b, body=b"B" * 64)
+
+    main_thread = threading.current_thread()
+    prcp_promoted = threading.Event()
+    competitor_finished = threading.Event()
+    competitor_ran_between_trees: list[bool] = []
+    summary_b: list[dict[str, Any]] = []
+    real_replace_tree = publisher_module._replace_directory_tree_for_qdown_batch
+
+    def gated_replace_tree(temp_dir: Path, target_dir: Path, *, containment_root: Path) -> Any:
+        if threading.current_thread() is not main_thread:
+            return real_replace_tree(temp_dir, target_dir, containment_root=containment_root)
+        if target_dir.name != "prcp_rate_or_amount":
+            # A fails on the SECOND tree of its own batch, after `prcp` is committed.
+            raise OSError("injected failure on the grid tree")
+        entry = real_replace_tree(temp_dir, target_dir, containment_root=containment_root)
+        assert entry.backup_dir is None, "the prcp slot must have been empty for this row"
+        prcp_promoted.set()
+        competitor_ran_between_trees.append(competitor_finished.wait(timeout=2))
+        return entry
+
+    def run_competitor() -> None:
+        assert prcp_promoted.wait(timeout=10)
+        result = writer_b.copyback_canonical_precip("gfs", COMPACT_TIME)
+        assert result is not None
+        summary_b.append(result)
+        competitor_finished.set()
+
+    thread = threading.Thread(target=run_competitor)
+    thread.start()
+    monkeypatch.setattr(publisher_module, "_replace_directory_tree_for_qdown_batch", gated_replace_tree)
+    summary_a = writer_a.copyback_canonical_precip("gfs", COMPACT_TIME)
+    monkeypatch.undo()
+    thread.join(timeout=30)
+
+    assert not thread.is_alive()
+    assert competitor_ran_between_trees == [False], "the competitor committed inside A's batch"
+    assert summary_a is not None and summary_a["status"] == "failed"
+    assert summary_b[0]["status"] == "ok"
+    # B reported `ok`; every byte B claims must still be there.
+    for key, payload in payloads_b.items():
+        assert (copyback_root / key).read_bytes() == payload
+    _assert_no_copyback_residue(copyback_root)
+
+
+def test_qdown_copyback_lock_timeout_propagates_out_of_publish_qdown_cycle(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E14: `PublishError` with the distinct code, not swallowed and not rewrapped.
+
+    `publish_qdown_cycle:199-200` re-raises `PublishError` unchanged and only
+    absorbs `SQLAlchemyError | OSError | ValueError`; the batch handler at
+    `:1093` rewraps every non-`PublishError` as `OBJECT_STORE_COPYBACK_FAILED`,
+    which is why the acquire sits outside it.
+    """
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    run = _seed_qdown_run_without_a_database(publisher)
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        with pytest.raises(PublishError) as error_info:
+            publisher._copyback_qdown_products([run])
+
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
+    # No unlocked promote: the destination tree was never created.
+    assert not (copyback_root / "runs" / "run-a").exists()
+
+
+def test_qdown_copyback_lock_timeout_survives_the_public_publish_entry_points_handler(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `except (SQLAlchemyError, OSError, ValueError)` arm must not catch it."""
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    error = PublishError("OBJECT_STORE_COPYBACK_LOCK_TIMEOUT", "timed out")
+
+    def failing_copyback(_runs: Any) -> None:
+        raise error
+
+    monkeypatch.setattr(publisher, "_copyback_qdown_products", failing_copyback)
+    monkeypatch.setattr(publisher, "database_url", "sqlite://")
+    monkeypatch.setattr(
+        publisher,
+        "_publish_qdown_from_database",
+        lambda _session, _cycle_id: publisher._copyback_qdown_products([]),
+    )
+
+    with pytest.raises(PublishError) as error_info:
+        publisher.publish_qdown_cycle(CYCLE_ID)
+
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
+    assert error_info.value is error
+
+
+def test_canonical_copyback_lock_timeout_is_reported_through_the_summary(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The canonical lane never raises at its caller; it records `failed`."""
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert summary is not None
+    assert summary["status"] == "failed"
+    assert summary["error_type"] == "CopybackLockTimeout"
+    # No unlocked promote and no half-written tree.
+    assert not (copyback_root / "canonical").exists()
+
+
+@pytest.mark.parametrize("lane", ["canonical", "qdown", "run_products"])
+def test_a_zero_write_skip_path_creates_no_lock_file(tmp_path: Any, lane: str) -> None:
+    """E15: acquisition happens after the identity guard, not merely after the prepare."""
+
+    object_store_root = Path(tmp_path) / "object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=object_store_root)
+    run = _seed_qdown_run_without_a_database(publisher)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+
+    if lane == "canonical":
+        summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+    elif lane == "qdown":
+        summary = publisher._copyback_qdown_products([run])
+    else:
+        summary = publisher._copyback_run_products(["run-a"])
+
+    assert summary is not None
+    assert summary["status"] == "skipped"
+    assert summary["reason"] == "copyback_root_matches_object_store_root"
+    lock_files = sorted(str(path) for path in object_store_root.rglob(COPYBACK_BATCH_LOCK_NAME))
+    assert lock_files == []
+
+
+@pytest.mark.parametrize("umask_value", [0o027, 0o022, 0o002])
+def test_canonical_copyback_leaves_every_level_it_created_traversable(
+    tmp_path: Any,
+    umask_value: int,
+) -> None:
+    """E6/E7 (AC3): asserted level by level, including the run that creates the root.
+
+    `safe_fs` passes an explicit `0o755` to `os.mkdir`, which the umask masks and
+    which it deliberately never `chmod`s afterwards (#1513); under `umask 027`
+    every one of these levels used to land `0o750` and node-27's reader account
+    lost traversal of the whole chain.
+    """
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    assert not copyback_root.exists(), "this run must be what creates the root"
+
+    previous_umask = os.umask(umask_value)
+    try:
+        summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+    finally:
+        os.umask(previous_umask)
+
+    assert summary is not None and summary["status"] == "ok"
+    levels = [
+        copyback_root,
+        copyback_root / "canonical",
+        copyback_root / "canonical" / "gfs",
+        copyback_root / "canonical" / "gfs" / COMPACT_TIME,
+        copyback_root / "canonical" / "gfs" / COMPACT_TIME / "prcp_rate_or_amount",
+        copyback_root / "canonical" / "gfs" / "grid",
+        copyback_root / "canonical" / "gfs" / "grid" / "gfs_0p25",
+    ]
+    landed = {str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in levels}
+    assert landed == {str(path): "0o755" for path in levels}
+    # No created level carries a group- or other-write bit at any of the umasks.
+    assert all(stat.S_IMODE(path.stat().st_mode) & 0o022 == 0 for path in levels)
+
+
+def test_qdown_copyback_leaves_every_level_it_created_traversable_under_umask_027(
+    tmp_path: Any,
+) -> None:
+    """The same rule on the `runs/` and `forcing/` lanes, root included."""
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    run = _seed_qdown_run_without_a_database(publisher)
+    assert not copyback_root.exists()
+
+    previous_umask = os.umask(0o027)
+    try:
+        summary = publisher._copyback_qdown_products([run])
+    finally:
+        os.umask(previous_umask)
+
+    assert summary is not None and summary["status"] == "copied"
+    levels = (
+        copyback_root,
+        copyback_root / "runs",
+        copyback_root / "runs" / "run-a",
+        copyback_root / "forcing",
+        copyback_root / "forcing" / "gfs",
+        copyback_root / "forcing" / "gfs" / COMPACT_TIME,
+        copyback_root / "forcing" / "gfs" / COMPACT_TIME / "basin-1",
+    )
+    for level in levels:
+        assert stat.S_IMODE(level.stat().st_mode) == 0o755, level
+
+
+def test_a_pre_existing_copyback_level_keeps_its_restrictive_mode(tmp_path: Any) -> None:
+    """E9 in the publisher lane: #1513's "never fchmod an existing path" holds."""
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    (copyback_root / "canonical").mkdir(parents=True)
+    os.chmod(copyback_root / "canonical", 0o700)
+    os.chmod(copyback_root, 0o700)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+
+    summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert summary is not None and summary["status"] == "ok"
+    assert stat.S_IMODE(copyback_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((copyback_root / "canonical").stat().st_mode) == 0o700
+    # The levels this call DID create are still widened.
+    assert stat.S_IMODE((copyback_root / "canonical" / "gfs").stat().st_mode) == 0o755

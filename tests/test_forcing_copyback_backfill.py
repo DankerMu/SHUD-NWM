@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import subprocess
@@ -14,6 +15,12 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from packages.common import safe_fs as safe_fs_module
+from packages.common.copyback_guard import (
+    COPYBACK_LOCK_TIMEOUT_ENV,
+    CopybackLockTimeout,
+    acquire_copyback_batch_lock,
+    copyback_batch_lock,
+)
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from services.tile_publisher import forcing_copyback_backfill as backfill_module
 from services.tile_publisher.forcing_copyback_backfill import BackfillConfig, run_backfill
@@ -1341,3 +1348,93 @@ def test_backfill_lenient_pre_check_returns_silently_when_the_probe_fails(
     # The probe really ran: the silence is the handler's, not a path that
     # returned before ever reaching it.
     assert probed == [target]
+
+
+# --------------------------------------------------------------------------- #
+# #2035: this tool promotes directory trees under the same shared copyback root
+# as the publisher, so it takes the same batch mutex -- per package, held over
+# the whole `rollback_log` lifetime. `_copy_package` calls
+# `publisher._copyback_object_tree_with_rollback` directly while already holding
+# the lock, which is why `copyback_batch_lock` is never acquired inside that
+# helper (`flock` is per open file description and would deadlock).
+# --------------------------------------------------------------------------- #
+def test_apply_holds_the_batch_mutex_across_the_whole_rollback_log_lifetime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Releasing after the copy but before the commit is the E4 defect shape."""
+
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest = _seed_valid_candidate(tmp_path)
+    held_during: dict[str, bool] = {}
+    real_commit = backfill_module._commit_qdown_copyback_batch
+
+    def probing_commit(rollback_log: Any, *, containment_root: Path) -> None:
+        # A second acquisition from this process contends with the one this
+        # package already holds, so a timeout here proves the lock is still held.
+        try:
+            acquire_copyback_batch_lock(copyback_root, timeout_seconds=0.2)
+        except CopybackLockTimeout:
+            held_during["commit"] = True
+        else:  # pragma: no cover - asserted below
+            held_during["commit"] = False
+        return real_commit(rollback_log, containment_root=containment_root)
+
+    monkeypatch.setattr(backfill_module, "_commit_qdown_copyback_batch", probing_commit)
+
+    report = run_backfill(
+        _base_config(
+            db_path=db_path,
+            object_store_root=object_store_root,
+            copyback_root=copyback_root,
+            apply=True,
+        )
+    )
+
+    assert report["copied_count"] == 1
+    assert held_during == {"commit": True}
+
+
+def test_apply_records_a_lock_timeout_as_its_own_failure_category(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No unlocked promote, and no crash out of the `--apply` loop."""
+
+    _engine, db_path, object_store_root, copyback_root, _checksum, _manifest = _seed_valid_candidate(tmp_path)
+    copyback_root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        report = run_backfill(
+            _base_config(
+                db_path=db_path,
+                object_store_root=object_store_root,
+                copyback_root=copyback_root,
+                apply=True,
+            )
+        )
+
+    assert report["copied_count"] == 0
+    assert report["failure_count"] == 1
+    assert report["failures"][0]["category"] == "copyback_lock_unavailable"
+    assert "copyback batch lock" in report["failures"][0]["reason"]
+    # A lock failure adds no counted bucket: the report's counters are unchanged.
+    assert report["missing_source_count"] == 0
+    assert report["checksum_mismatch_count"] == 0
+    assert report["legacy_key_rejected_count"] == 0
+    assert not (copyback_root / FORCING_KEY).exists()
+
+
+def test_the_batch_mutex_is_never_acquired_inside_the_shared_copy_helper() -> None:
+    """T1: acquire at batch-owner level only, because `flock` is not reentrant."""
+
+    from services.tile_publisher import publisher as publisher_module
+
+    for name in (
+        "_copyback_object_tree_with_rollback",
+        "_copyback_object_tree",
+        "_copyback_collected_object_tree",
+    ):
+        source = inspect.getsource(getattr(publisher_module.TilePublisher, name))
+        assert "copyback_batch_lock" not in source, name
+        assert "acquire_copyback_batch_lock" not in source, name

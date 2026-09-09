@@ -6,6 +6,9 @@ import fcntl
 import inspect
 import json
 import os
+import shutil
+import stat
+import subprocess
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -4557,3 +4560,58 @@ def _format_time(value: datetime | None) -> str | None:
     if value is None:
         return None
     return _dt(value).isoformat().replace("+00:00", "Z")
+
+
+# --------------------------------------------------------------------------- #
+# #2035 E16: the copyback traversal widening uses `0o755`, which is mask-neutral
+# under an inherited default ACL precisely because its group bits are `r-x`.
+# That must not leak onto this lane: `_ensure_copyback_state_parent`'s `0o775`
+# is what RESTORES `mask::rwx` for the cross-uid state grant.
+# --------------------------------------------------------------------------- #
+def test_ensure_copyback_state_parent_still_chmods_0o775(tmp_path: Path) -> None:
+    root = tmp_path.resolve() / "copyback-root"
+    root.mkdir()
+    os.chmod(root, 0o700)
+    parent = root / "scheduler" / "state-index"
+
+    previous_umask = os.umask(0o027)
+    try:
+        state_manager_module._ensure_copyback_state_parent(parent, root)
+    finally:
+        os.umask(previous_umask)
+
+    for level in (root / "scheduler", parent):
+        assert stat.S_IMODE(level.stat().st_mode) == 0o775, level
+    # The containment root pre-existed, so its mode is untouched (#1513).
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    source = inspect.getsource(state_manager_module._ensure_copyback_state_parent)
+    assert "os.chmod(current, 0o775, follow_symlinks=False)" in source
+
+
+def test_ensure_copyback_state_parent_restores_mask_rwx_under_an_acl_parent(tmp_path: Path) -> None:
+    """The ACL half of E16; skipped with a reason where POSIX ACLs are absent."""
+
+    if shutil.which("setfacl") is None or shutil.which("getfacl") is None:
+        pytest.skip("POSIX ACL tooling (setfacl/getfacl) is not available on this platform")
+    root = tmp_path.resolve() / "copyback-root"
+    root.mkdir()
+    try:
+        subprocess.run(
+            ["setfacl", "-m", f"default:user:{os.getuid()}:rwx", "-m", "default:mask::rwx", str(root)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        pytest.skip(f"the filesystem backing tmp_path does not support POSIX ACLs: {error}")
+
+    parent = root / "scheduler" / "state-index"
+    state_manager_module._ensure_copyback_state_parent(parent, root)
+
+    output = subprocess.run(
+        ["getfacl", "--omit-header", str(parent)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "mask::rwx" in output

@@ -128,10 +128,18 @@ one more reason for 300 s rather than 1800 s.
   it; it only adds one more way to reach it. E13 asserts it rather than leaving it
   as a surprise.
 - **Backfill granularity**: `scripts/canonical_precip_copyback_backfill.py`
-  acquires per cycle, inside `_backfill_cycle` (def `:388`, called from `:382`),
-  not once for the whole
-  run. A whole-run acquisition on a long backfill would hold the lock past the
-  publisher's deadline and convert this fix into a mirror outage.
+  acquires **per mirrored tree**, not once for the whole run. A whole-run
+  acquisition on a long backfill would hold the lock past the publisher's
+  deadline and convert this fix into a mirror outage. Per-tree is sufficient
+  rather than merely convenient: the script mirrors file by file and has no
+  rollback of its own, so it never needs two trees to land or vanish together.
+  The guarantee it buys is the one the spec states — a file it reports as
+  `copied` survives a concurrent publisher rollback — and that holds per tree,
+  because a publisher batch that starts after the script released took its
+  backup from a target that already contained those files (`backup_dir is None`,
+  the destructive case, arises only when the target did not exist at promote
+  time). Both the cycle loop (one tree per cycle) and the grid loop (one per grid
+  id) therefore route through one locked mirror helper.
 - **Single uid**: the `0o600` + owner assertion means a writer under a different
   account fails closed with a clear error instead of silently running unlocked.
   All copyback writers are `frd_muziyao` on node-22. Recorded as a known limit.

@@ -93,9 +93,11 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
       `_rollback_qdown_copyback_batch` (`:758`) returns. Releasing at `:754` is
       exactly the E4 defect shape. Per package, because `_copy_package` runs in a
       loop at `:649`. And in `scripts/canonical_precip_copyback_backfill.py`
-      **per cycle, inside `_backfill_cycle` (def `:388`, called from `:382`)** —
-      never once for the whole run, which would hold the lock past the publisher's
-      deadline.
+      **per mirrored tree** — the cycle loop mirrors one tree per cycle, and the
+      grid loop mirrors one per grid id, so both go through a single locked
+      mirror helper. Never once for the whole run, which would hold the lock past
+      the publisher's deadline. `--dry-run` takes no lock: it provably writes
+      nothing, and acquiring would create the lock file, which is a write.
 - [ ] T4 Hold the same lock in
       `services/orchestrator/run_tree_copyback.copyback_run_trees` (def `:36`),
       and add a comment at `_replace_tree` (`:374-392`) recording that its guarded

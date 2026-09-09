@@ -2218,6 +2218,41 @@ ssh -p 32099 nwm@210.77.77.27 \
      -printf "%TY-%Tm-%Td %TH:%TM %p\n" | sort | tail -20'
 ```
 
+#### Copyback batch mutex 与目录可穿越性（#2035）
+
+写侧（node-22）与读侧（node-27）是不同 uid、同一份 NFS，因此这个 mirror 有两条硬规则：
+
+1. **互斥**。所有会在 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 下 promote 目录树的写者
+   （publisher 的 q_down / run-products / canonical-precip 三条 lane、orchestrator 的
+   run-tree copyback、以及两个 backfill CLI）都先取
+   `$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock` 上的排他 `flock`，
+   一直持有到本 batch 的 commit 或 rollback 返回。路径固定、**没有环境变量覆盖**：
+   放 `/tmp` 会被 systemd `PrivateTmp=true` / Slurm `job_container/tmpfs` 的私有
+   `/tmp` 拆成两个 inode，互斥静默失效。
+   - 锁文件 `0o600`、属主是写者本人、**从不 unlink**。持有者被 kill 时内核会释放
+     flock，所以「锁文件存在」≠「锁被持有」；**不要手工删除它**。
+   - 等待上限由 `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` 控制，
+     **默认 300 秒**。竞争是等待不是拒绝；超时抛各 lane 自己的错误类型，
+     canonical mirror 记一条 `failed` 的 `canonical_precip_mirror` receipt 后 cycle
+     继续，**绝不降级成无锁 promote**。空值取默认，非数字/非正数是硬性配置拒绝。
+   - 所有写者必须同 uid（node-22 上是 `frd_muziyao`）；别的账号会 fail closed。
+     互斥只在单机内成立（跨主机不在本机制范围内）。
+   - `services/orchestrator/retention.py` 只下钻 `root/<prefix>` 与 `root/runs`，
+     不枚举 root 级文件，所以这把锁对保留策略不可见。
+2. **可穿越性**。copyback 自己创建的每一级目录——**包括 copyback root 本身**——
+   都会被显式 `chmod 0o755`；`safe_fs` 传给 `mkdir` 的 `0o755` 会被进程 umask 收窄
+   （`umask 027` 下落成 `0o750`），而 `safe_fs` 按 #1513 的决定绝不事后 `chmod`。
+   **本调用没有创建的层级一律不动**。手工 bring-up shell 里跑 copyback 时不再需要
+   先 `umask 022`，但这条规则只覆盖 copyback 创建的层级，不修既有目录的历史模式。
+
+快速核查（node-27 读侧，用 display 账号真正读到字节才算数）：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27 \
+  'stat -c "%a %n" /home/ghdc/nwm/object-store /home/ghdc/nwm/object-store/canonical &&
+   f=$(find /home/ghdc/nwm/object-store/canonical -type f | head -1); cat "$f" | wc -c'
+```
+
 ### 5.4 Published artifacts
 
 Display products, tiles, manifests, and logs live under `published/`:

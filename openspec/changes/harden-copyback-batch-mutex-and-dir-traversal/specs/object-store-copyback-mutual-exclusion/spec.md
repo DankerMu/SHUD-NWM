@@ -37,9 +37,13 @@ loudly with a distinct error and SHALL NOT promote any tree.
 - **THEN** it MUST hold the same mutex for its own critical section
 - **AND** no file it reports as copied MAY be removed by a concurrent publisher's
   rollback
-- **AND** the cycle-by-cycle backfill MUST acquire the mutex per cycle rather
-  than once for its whole run, so a long backfill cannot starve a publisher past
-  its deadline.
+- **AND** a backfill MUST acquire the mutex per mirrored tree rather than once
+  for its whole run, so a long backfill cannot starve a publisher past its
+  deadline; per-tree is sufficient because a backfill mirrors file by file with
+  no cross-tree rollback of its own
+- **AND** a backfill mode that provably writes nothing — `--dry-run` — MUST NOT
+  acquire, because creating the lock file is itself a write under the copyback
+  root.
 
 #### Scenario: the run-tree copyback lane is covered by the same adjudication
 
@@ -64,7 +68,10 @@ loudly with a distinct error and SHALL NOT promote any tree.
 
 - **WHEN** the lock path is a symlink, is not a regular file, has more than one
   hard link, does not have mode `0o600`, or is not owned by the effective user
-- **THEN** acquisition MUST raise rather than proceed
+- **THEN** acquisition MUST raise rather than proceed, as each lane's own error
+  type and distinctly from a timeout — the q_down publish lane raises a publish
+  error carrying a copyback-lock-unsafe code, so an operator can tell a tampered
+  lock file from a busy one
 - **AND** no copyback tree MAY be promoted.
 
 #### Scenario: the mutex is anchored where every writer provably shares it

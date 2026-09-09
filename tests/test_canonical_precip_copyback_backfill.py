@@ -10,7 +10,9 @@ Contract (canonical-precip-copyback spec, Requirement 2):
 * prints a JSON summary to stdout listing every cycle with copied/skipped/failed;
 * writes by default, ``--dry-run`` creates no file and no directory;
 * exit 0 with no failure, 1 when something failed, 2 for unusable roots;
-* imports the standard library only, so node-22's frozen checkout can run it as
+* imports the standard library plus exactly one in-tree module,
+  ``packages.common.copyback_guard`` (#2035), whose own import closure is
+  standard library only, so node-22's frozen checkout can run it as
   ``<pinned python> -m scripts.canonical_precip_copyback_backfill`` without
   triggering an environment build;
 * refuses a symlinked *tree root* (``canonical/``, ``canonical/<S>/grid/``,
@@ -40,11 +42,19 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from packages.common.copyback_guard import (
+    COPYBACK_BATCH_LOCK_NAME,
+    COPYBACK_LOCK_TIMEOUT_ENV,
+    copyback_batch_lock,
+)
 from scripts import canonical_precip_copyback_backfill as backfill
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -803,7 +813,14 @@ def test_backfill_promoted_files_stay_readable_under_a_restrictive_umask(
         exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
         capsys.readouterr()
         assert exit_code == 0
-        promoted = sorted(path for path in copyback_root.rglob("*") if path.is_file())
+        # The #2035 batch mutex's lock file sits at the copyback root and is
+        # `0o600` by contract, not `0o644`: it is the script's synchronization
+        # state, not a mirrored product, and no reader account needs it.
+        lock_file = copyback_root / COPYBACK_BATCH_LOCK_NAME
+        assert stat.S_IMODE(lock_file.stat().st_mode) == 0o600
+        promoted = sorted(
+            path for path in copyback_root.rglob("*") if path.is_file() and path != lock_file
+        )
         assert len(promoted) == len(payloads)
         unreadable = [
             f"{path}: {stat.S_IMODE(path.stat().st_mode):04o}"
@@ -900,23 +917,65 @@ def test_backfill_source_root_without_canonical_tree_exits_zero(
     assert summary["totals"] == {"copied": 0, "skipped": 0, "failed": 0}
 
 
-def test_backfill_module_imports_only_the_standard_library() -> None:
-    """node-22 runs this with a pinned interpreter and a frozen environment."""
+# The one in-tree module the script may import (#2035): the copyback batch mutex
+# is identified by a lock *path*, and a second copy of that constant inside this
+# script is exactly how two writers end up flocking two different files while
+# believing they are serialized. Sharing the module is the point; the guarantee
+# node-22's frozen checkout needs -- "no environment build" -- is preserved by
+# asserting the whole closure below is otherwise standard library.
+ALLOWED_IN_TREE_IMPORTS = {"packages.common.copyback_guard"}
 
-    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"), filename=str(SCRIPT_PATH))
-    imported: set[str] = set()
+
+def _module_imports(path: Path) -> tuple[set[str], set[str]]:
+    """(top-level package names, fully-qualified `from` module names) of one file."""
+
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    roots: set[str] = set()
+    modules: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            imported.update(alias.name.split(".")[0] for alias in node.names)
+            for alias in node.names:
+                roots.add(alias.name.split(".")[0])
+                modules.add(alias.name)
         elif isinstance(node, ast.ImportFrom):
-            assert node.level == 0, "relative imports would tie the script to a package"
+            assert node.level == 0, f"relative imports would tie {path.name} to a package"
             assert node.module is not None
-            imported.add(node.module.split(".")[0])
+            roots.add(node.module.split(".")[0])
+            modules.add(node.module)
+    return roots, modules
 
-    assert imported
-    assert imported.isdisjoint({"services", "packages", "workers", "apps", "tests"})
-    non_stdlib = sorted(name for name in imported if name not in sys.stdlib_module_names)
+
+def test_backfill_module_imports_only_the_standard_library_and_the_copyback_guard() -> None:
+    """node-22 runs this with a pinned interpreter and a frozen environment."""
+
+    roots, modules = _module_imports(SCRIPT_PATH)
+
+    assert roots
+    assert roots.isdisjoint({"services", "workers", "apps", "tests"})
+    in_tree = {name for name in modules if name.split(".")[0] == "packages"}
+    assert in_tree == ALLOWED_IN_TREE_IMPORTS
+    non_stdlib = sorted(name for name in roots if name not in sys.stdlib_module_names and name != "packages")
     assert non_stdlib == []
+
+
+def test_the_allowed_in_tree_import_closure_is_itself_standard_library_only() -> None:
+    """The allowance is only safe while nothing it pulls in needs an env build."""
+
+    pending = sorted(ALLOWED_IN_TREE_IMPORTS)
+    seen: set[str] = set()
+    while pending:
+        module_name = pending.pop()
+        if module_name in seen:
+            continue
+        seen.add(module_name)
+        module_path = REPO_ROOT / (module_name.replace(".", "/") + ".py")
+        assert module_path.is_file(), module_path
+        roots, modules = _module_imports(module_path)
+        assert roots.isdisjoint({"services", "workers", "apps", "tests"})
+        non_stdlib = sorted(name for name in roots if name not in sys.stdlib_module_names and name != "packages")
+        assert non_stdlib == [], f"{module_name} pulls in a third-party dependency: {non_stdlib}"
+        pending.extend(name for name in modules if name.split(".")[0] == "packages")
+    assert "packages.common.safe_fs" in seen
 
 
 def test_backfill_runs_as_a_module_in_a_subprocess(tmp_path: Path) -> None:
@@ -989,3 +1048,175 @@ def test_backfill_empty_root_argument_exits_two(tmp_path: Path, empty: str) -> N
     ]
 
     assert backfill.main(argv) == 2
+
+
+# --------------------------------------------------------------------------- #
+# #2035: this script and the publisher write into the same copyback root. The
+# publisher's batch rollback removes a tree it promoted into an empty slot, so
+# without a shared mutex every file this script reports as `copied` is removable
+# by a concurrent publisher rollback.
+# --------------------------------------------------------------------------- #
+def test_the_backfill_takes_the_batch_mutex_per_tree_not_once_per_run(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A whole-run acquisition on a long backfill would starve the publisher.
+
+    Held per tree: the deepest observed nesting is one, and the lock is not held
+    between two trees.
+    """
+
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+    depth = 0
+    observed: list[int] = []
+    real_lock = backfill.copyback_batch_lock
+
+    @contextmanager
+    def counting_lock(root: Path, **kwargs: Any) -> Iterator[int]:
+        nonlocal depth
+        with real_lock(root, **kwargs) as fd:
+            depth += 1
+            observed.append(depth)
+            try:
+                yield fd
+            finally:
+                depth -= 1
+
+    original = backfill.copyback_batch_lock
+    backfill.copyback_batch_lock = counting_lock  # type: ignore[assignment]
+    try:
+        exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    finally:
+        backfill.copyback_batch_lock = original  # type: ignore[assignment]
+    capsys.readouterr()
+
+    assert exit_code == 0
+    # One acquisition per mirrored tree (4 cycles + 2 grids), never nested and
+    # never once for the whole run.
+    assert observed == [1] * 6
+
+
+def test_dry_run_takes_no_lock_and_creates_no_lock_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`--dry-run` is provably zero-write, and the lock file would be a write."""
+
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+
+    exit_code = backfill.main(
+        ["--source-root", str(source_root), "--copyback-root", str(copyback_root), "--dry-run"]
+    )
+    capsys.readouterr()
+
+    assert exit_code == 0
+    assert sorted(copyback_root.rglob("*")) == []
+
+
+def test_a_lock_the_backfill_cannot_take_is_a_recorded_failure_not_a_crash(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No unlocked mirror: the tree is recorded failed and nothing is written."""
+
+    source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+        summary = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 1
+    assert summary["totals"]["copied"] == 0
+    assert summary["totals"]["failed"] == 6
+    assert all("copyback batch lock unavailable" in entry["errors"][0] for entry in summary["cycles"])
+    assert all("copyback batch lock unavailable" in entry["errors"][0] for entry in summary["grids"])
+    mirrored = [path for path in copyback_root.rglob("*") if path.name != COPYBACK_BATCH_LOCK_NAME]
+    assert mirrored == []
+
+
+def test_a_publisher_rollback_cannot_remove_a_file_this_script_counted_as_copied(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E3: publisher x backfill, competitor injected in the promote window.
+
+    The publisher promotes `canonical/gfs/<cycle>/prcp_rate_or_amount` into an
+    empty slot (`backup_dir=None`), then fails on its `grid` tree. Pre-change its
+    batch rollback `rmtree`d that slot, taking with it whatever the script had
+    committed there in the meantime -- after the script had already reported the
+    files as `copied`.
+    """
+
+    from services.tile_publisher import publisher as publisher_module
+    from services.tile_publisher.publisher import TilePublisher
+
+    cycle_token = "2026090200"
+    source_root = tmp_path / "publisher-object-store"
+    script_source_root = tmp_path / "script-object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    for root in (source_root, script_source_root, copyback_root):
+        root.mkdir()
+    _seed_cycle(source_root, "gfs", cycle_token, leads=(3, 6))
+    _seed_grid(source_root, "gfs", "gfs_0p25")
+    # Different payload sizes, so the script does not plan an identical-size skip
+    # against whatever the publisher promoted first.
+    script_payloads = {
+        key: value + b"-script"
+        for key, value in {
+            **_seed_cycle(script_source_root, "gfs", cycle_token, leads=(3, 6)),
+            **_seed_grid(script_source_root, "gfs", "gfs_0p25"),
+        }.items()
+    }
+    for key, payload in script_payloads.items():
+        (script_source_root / key).write_bytes(payload)
+
+    publisher = TilePublisher(
+        workspace_root=tmp_path / "workspace",
+        object_store_root=source_root,
+        object_store_copyback_root=copyback_root,
+    )
+
+    main_thread = threading.current_thread()
+    prcp_promoted = threading.Event()
+    script_finished = threading.Event()
+    script_ran_inside_the_batch: list[bool] = []
+    script_summary: list[dict[str, Any]] = []
+    real_replace_tree = publisher_module._replace_directory_tree_for_qdown_batch
+
+    def gated_replace_tree(temp_dir: Path, target_dir: Path, *, containment_root: Path) -> Any:
+        if threading.current_thread() is not main_thread:
+            return real_replace_tree(temp_dir, target_dir, containment_root=containment_root)
+        if target_dir.name != "prcp_rate_or_amount":
+            raise OSError("injected failure on the grid tree")
+        entry = real_replace_tree(temp_dir, target_dir, containment_root=containment_root)
+        assert entry.backup_dir is None
+        prcp_promoted.set()
+        script_ran_inside_the_batch.append(script_finished.wait(timeout=2))
+        return entry
+
+    def run_script() -> None:
+        assert prcp_promoted.wait(timeout=10)
+        script_summary.append(
+            backfill.backfill(script_source_root, copyback_root, dry_run=False)
+        )
+        script_finished.set()
+
+    thread = threading.Thread(target=run_script)
+    thread.start()
+    monkeypatch.setattr(publisher_module, "_replace_directory_tree_for_qdown_batch", gated_replace_tree)
+    publisher_summary = publisher.copyback_canonical_precip("gfs", cycle_token)
+    monkeypatch.undo()
+    thread.join(timeout=30)
+    capsys.readouterr()
+
+    assert not thread.is_alive()
+    assert script_ran_inside_the_batch == [False], "the script committed inside the publisher's batch"
+    assert publisher_summary is not None and publisher_summary["status"] == "failed"
+    assert script_summary[0]["totals"]["failed"] == 0
+    assert script_summary[0]["totals"]["copied"] == len(script_payloads)
+    # Every file the script counted as copied is still there, byte for byte.
+    for key, payload in script_payloads.items():
+        assert (copyback_root / key).read_bytes() == payload

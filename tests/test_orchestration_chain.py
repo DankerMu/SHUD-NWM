@@ -21,6 +21,11 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+from packages.common.copyback_guard import (
+    COPYBACK_BATCH_LOCK_NAME,
+    COPYBACK_LOCK_TIMEOUT_ENV,
+    copyback_batch_lock,
+)
 from packages.common.object_store import LocalObjectStore
 from packages.common.safe_fs import SafeFilesystemError
 from services.artifacts import ArtifactReader, ArtifactReaderConfig
@@ -4057,8 +4062,15 @@ def test_canonical_precip_mirror_copies_a_truncated_tree_when_convert_times_out(
     # job, and the gateway still reports it running.
     assert client.cancelled_jobs == []
     assert client.jobs[result.slurm_job_id]["status"] == "running"
-    mirrored = sorted(str(path.relative_to(copyback_root)) for path in copyback_root.rglob("*") if path.is_file())
+    # The #2035 batch mutex's lock file lives at the copyback root and is not a
+    # mirrored product; every mirrored key is still exactly what the source held.
+    mirrored = sorted(
+        str(path.relative_to(copyback_root))
+        for path in copyback_root.rglob("*")
+        if path.is_file() and path.name != COPYBACK_BATCH_LOCK_NAME
+    )
     assert mirrored == sorted(payloads)
+    assert (copyback_root / COPYBACK_BATCH_LOCK_NAME).is_file()
     for key, payload in payloads.items():
         assert (copyback_root / key).read_bytes() == payload
     events = _precip_mirror_events(repository)
@@ -19561,3 +19573,80 @@ def test_file_journal_candidate_state_reverse_and_friendly_geometry_matches_db_c
         assert _state_retry_attempt(reverse_state, stage=stage) == _state_retry_attempt(
             friendly_state, stage=stage
         ), stage
+
+
+# --------------------------------------------------------------------------- #
+# #2035: the copyback batch mutex, seen from the two orchestrator hooks. The
+# deadline was sized against the canonical hook's position (inside the scheduler
+# pass, not a job of its own), so the two lanes behave differently on a timeout
+# and both behaviours are asserted rather than left as a surprise.
+# --------------------------------------------------------------------------- #
+def test_canonical_precip_mirror_lock_timeout_records_a_failed_receipt_and_does_not_raise(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """E11: the cycle survives with a `failed` receipt; the mirror defers a cycle."""
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage="forecast_state_save_qc")
+    copyback_root = tmp_path / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+    _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root),
+        storage_source="gfs",
+        cycle_token="2026050100",
+    )
+    context = _precip_context(cycle_id="gfs_2026050100")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        orchestrator._after_cycle_stage_terminal(
+            _PRECIP_CONVERT_STAGE, context, "succeeded", {"status": "succeeded"}, None
+        )
+
+    events = _precip_mirror_events(repository)
+    assert [event["status_to"] for event in events] == ["failed"]
+    mirror = events[0]["details"]["precip_mirror"]
+    assert mirror["error_type"] == "CopybackLockTimeout"
+    # No unlocked promote.
+    assert not (copyback_root / "canonical").exists()
+
+
+def test_run_tree_copyback_lock_timeout_records_a_failed_event_and_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """E13: `RunTreeCopybackError` -> the stage handler -> `OrchestratorError`.
+
+    Accepted consequence, asserted rather than hidden: the raise happens inside
+    the `result_status == "succeeded"` branch of `_after_cycle_stage_terminal`,
+    so the stage's `update_forecast_cycle_status` is skipped. That is the
+    existing contract for a run-tree copyback failure; this change only adds one
+    more way to reach it.
+    """
+
+    from services.orchestrator import chain_forecast_execution
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage="forecast_state_save_qc")
+    copyback_root = tmp_path / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+    context = _precip_context(cycle_id="gfs_2026050100", active_basins=_basins(1))
+    run_root = Path(orchestrator.config.object_store_root) / "runs" / "run_0" / "input"
+    run_root.mkdir(parents=True)
+    (run_root / "manifest.json").write_text('{"run_id":"run_0"}\n', encoding="utf-8")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        with pytest.raises(OrchestratorError) as error_info:
+            chain_forecast_execution._copyback_stage_run_trees(orchestrator, context, stage="parse")
+
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
+    event = next(event for event in repository.events if event["event_type"] == "object_store_copyback")
+    assert event["status_to"] == "failed"
+    assert event["details"]["error_code"] == "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
+    assert not (copyback_root / "runs").exists()
