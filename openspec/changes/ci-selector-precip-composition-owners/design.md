@@ -9,13 +9,14 @@
 | 方案 | 结果 |
 |---|---|
 | 新增一条 `apps/api/route_registry.py` 精确行 | **否**。技术上合法但要把该 pattern 记进 `INTENTIONAL_DUPLICATE_PATTERNS`；守卫失败信息自己给的首选处置就是 "consolidate the entries"，且与 #2078 house precedent 相反 |
-| 把 `PRECIP_SURFACE_TESTS` 加进 `CONNECTION_ATTRIBUTION_TESTS` | **否**。该常量还喂着 5 个 route 路径 + 3 个 store 路径，会给 8 个无关 owner 买 4 个降水 suite |
+| 把 `PRECIP_SURFACE_TESTS` 加进 `CONNECTION_ATTRIBUTION_TESTS` | **否**。该常量还喂着 tuple 里的 5 个 route 路径 + 3 个 store 路径，**以及另外三条独立规则**（`grep CONNECTION_ATTRIBUTION_TESTS` 可见），全部会平白买到 4 个降水 suite |
 | registry 移出 tuple，改为独立精确行、targets 合并 | **取**。house precedent 明确 |
 
-第三条正是同文件 #2078 注释记录的既有做法：`apps/api/routes/forecast.py` 因为已有精确行，
-attribution suites 被 MERGE 进那一行而非在 tuple 里重复；`forecast_store.py` / `state_manager.py`
-同理。本 change 只是把同一手法用在 registry 上——区别是 registry 的精确行由本 change 新建，
-而非并入既有行。
+第三条正是同文件 #2078 注释记录的既有做法：`apps/api/routes/forecast.py` 从 tuple 中移出，
+attribution suites 被 MERGE 进它自己的精确行而非在 tuple 里重复；`forecast_store.py` /
+`state_manager.py` 同理。本 change 把同一手法用在 registry 上，**形状完全相同**：`d0268f84`
+（#2078）在同一个 commit 里既从 tuple 删掉 `apps/api/routes/forecast.py`、又新建了它的
+path-exact 行——与本 change 对 registry 做的一模一样，不存在「并入既有行 vs 新建行」的区别。
 
 **代价**：tuple 上方注释「plus the registry itself」被证伪，必须改写。这是 #2195 round 3 的教训
 （注释与实际结构脱节），此处提前记在 tasks 里，不是可选项。

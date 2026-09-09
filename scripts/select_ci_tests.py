@@ -3499,11 +3499,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # `PrecipIndexResponse` component and rewrites the index operation onto
             # the shared `allOf: [SuccessEnvelope, {data}]` envelope that the
             # hand-maintained openapi/nhms.v1.yaml carries. Drop that call site and
-            # the runtime schema drifts from the committed document at both places;
-            # tests/test_openapi_drift.py is the only runtime/static alignment
-            # oracle (see its `test_dropping_the_precip_openapi_patch_...` mutation
-            # proof), and neither the #1704 error-logging rider above nor the three
-            # broad `apps/api/**` suites read the precipitation schema.
+            # the runtime schema drifts from the committed document at both places,
+            # and of the suites this rule selects only tests/test_openapi_drift.py
+            # reds (see its `test_dropping_the_precip_openapi_patch_...` mutation
+            # proof). That is a claim about THIS call site, not "the repo's only
+            # static/runtime oracle": tests/test_api_contract.py compares
+            # openapi/nhms.v1.yaml against `app.openapi()` too, but at no
+            # precipitation path. Neither the #1704 error-logging rider above nor the
+            # three broad `apps/api/**` suites assert on the precipitation schema, and
+            # tests/test_openapi_31_contract.py applies openapi_patching's patch
+            # functions directly — a list that omits `_patch_precip_openapi`.
             *PRECIP_SURFACE_TESTS,
         ),
     ),

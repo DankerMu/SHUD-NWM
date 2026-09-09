@@ -1412,9 +1412,11 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
     """#2098 — exact selection for the runtime-OpenAPI composition owner.
 
     `_patch_openapi_schema` calls `_patch_precip_openapi(schema)`; dropping that call
-    drifts the runtime schema from `openapi/nhms.v1.yaml`, which only
-    `tests/test_openapi_drift.py` asserts. The pre-existing error-logging rider (#1704)
-    and the three broad `apps/api/**` suites must survive the widened target tuple.
+    drifts the runtime schema from `openapi/nhms.v1.yaml`, and of the suites selected
+    here only `tests/test_openapi_drift.py` reds on it (`tests/test_api_contract.py`
+    compares static against runtime too, but at no precipitation path). The pre-existing
+    error-logging rider (#1704) and the three broad `apps/api/**` suites must survive the
+    widened target tuple.
     """
     assert Path("apps/api/main.py").exists()
 
