@@ -71,6 +71,10 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **THEN** both public helpers attribute the canonical member, legacy remains rename-only, and narrow refuses with the existing entry-named text-identity reason before returning SQL; the shared comparison-position scalar-body seam applies the same grammar without a private matcher
 - **AND** a known-member call that contains the fact alias but is outside the exact one-argument grammar — including an unclosed body whose EOF tail ends on an inner close — is refused by guarded helper and both render variants as unmodelled functional fact-alias field notation before a render-only structural error, while tight/spaced/comment-separated/quoted schema-qualified calls, other-relation and alias-superstring arguments, non-exact quoted identifiers, enum/key siblings, placeholder/type/argument-label roles and non-code bytes retain their prior outcomes
 
+#### Scenario: Structural parenthesis checks ignore complete quoted identifiers
+- **WHEN** `assert_structurally_intact` receives otherwise valid SQL whose complete double-quoted identifier contains an unmatched `)` or `(` byte
+- **THEN** it accepts the statement because quoted identifier bytes are not structural grouping; a direct helper-level regression test owns this guarantee, while the traversal/scanner commutation oracle retains its separate t1/m26 responsibility and is not evidence for the structural helper's double-quote branch
+
 #### Scenario: Renderer refuses a mis-shaped marker
 - **WHEN** a template places the marker above a line that is not a single aid conjunct
 - **THEN** the renderer raises before returning SQL and the shape oracle fails naming the template
