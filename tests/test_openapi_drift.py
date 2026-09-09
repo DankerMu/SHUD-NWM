@@ -148,11 +148,12 @@ def test_dropping_the_precip_openapi_patch_drifts_runtime_schema_from_static_yam
     `scripts/select_ci_tests.py`; that selector edge is only justified if this suite
     actually fails when the call site disappears, so both legs live here.
 
-    TWO LOCATIONS COMPARED INDIVIDUALLY, NOT WHOLE-DOCUMENT EQUALITY. The existing
-    `test_static_openapi_matches_runtime_schema` oracle compares whole documents against the
-    module-level singleton `app`; a freshly built application carries runtime-mode
-    environment differences that would make a whole-document "not equal" leg vacuously
-    green. The patch touches exactly two places, so exactly those two are asserted.
+    TWO LOCATIONS COMPARED INDIVIDUALLY, NOT WHOLE-DOCUMENT EQUALITY. The patch touches
+    exactly two places, so exactly those two are asserted: the negative leg then names the
+    drift `_patch_precip_openapi` causes, rather than passing on any unrelated
+    whole-document difference a later edit introduces. Whole-document equality is already
+    `test_static_openapi_matches_runtime_schema`'s job in this same file — it compares whole
+    documents against the module-level singleton `app`.
 
     Isolation: `create_app()` builds a fresh application (with `openapi_schema` unset) per
     call, `_patch_openapi_schema` looks `_patch_precip_openapi` up as a module-level name at

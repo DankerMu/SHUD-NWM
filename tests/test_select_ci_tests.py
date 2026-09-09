@@ -1371,7 +1371,7 @@ def test_precip_tree_rule_carries_no_selection_flags() -> None:
 # neither selected a precipitation oracle, and both selections were non-empty
 # and plausible, so the #1182 zero-assertion warning never fired.
 #
-# NAMING CONSTRAINT (task 2.6): each of the five guards below is addressable by
+# NAMING CONSTRAINT (task 2.6): each of the six guards below is addressable by
 # its own full name as a `-k` substring; no name is a prefix of another.
 #
 # The expected sets are LITERAL strings on purpose (acceptance criterion 3 /
@@ -1381,12 +1381,18 @@ def test_precip_tree_rule_carries_no_selection_flags() -> None:
 def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution() -> None:
     """#2098 — exact selection for the route-registry composition owner.
 
-    Dropping `precip_router` from `_BUSINESS_ROUTERS` turns both published
-    precipitation endpoints into 404, and `tests/test_precip_overlay.py` is the only
-    suite that asserts either one. The two connection-attribution suites and the three
+    Dropping `precip_router` from `_BUSINESS_ROUTERS` takes both published precipitation
+    endpoints out of the route table. `tests/test_precip_overlay.py` is the most direct
+    behavioural oracle; `tests/test_openapi_drift.py` (whole-document static/runtime
+    comparison) and `tests/test_openapi_31_contract.py` (its `BASELINE_NULLABLE_COUNT`
+    counts the two routes' typed 404s) red under the same cut, so the three-suite target is
+    over-justification, not under-coverage. The two connection-attribution suites and the three
     broad `apps/api/**` suites must survive the MERGE: this owner was moved OUT of
     `CONNECTION_ATTRIBUTION_ROUTE_PATHS` into its own path-exact rule, and a move that
-    forgot to carry the attribution targets over would otherwise be green.
+    forgot to carry the attribution targets over reds this pin too, but this pin only
+    reports "sets differ"; the tail of
+    `test_connection_attribution_tuple_peers_are_untouched_by_the_registry_split` is what
+    names the forgotten merge.
     """
     assert Path("apps/api/route_registry.py").exists()
 
@@ -1501,11 +1507,17 @@ def test_main_owner_loses_the_precip_suites_when_its_targets_are_stripped(
 def test_precip_composition_owner_rules_carry_neither_selection_flag() -> None:
     """#2098 — structural pin for the spec's "neither flag" clause.
 
-    Both flags are behaviourally inert for these two paths today, so every output
-    assertion above stays green under either one — but `apps/api/**` matches AFTER both
-    owner rules and its three broad API suites must still accumulate, so
-    `stop_on_match=True` would silently amputate them, and `only_when_any_changed` would
-    make the owner edge conditional on an unrelated co-changed path.
+    Both flags are behaviourally inert on these two entries today, so every output
+    assertion above stays green under either one. `apps/api/**` sits EARLIER in
+    `PATH_TEST_RULES` than both owners (they are its last two entries), so its three broad
+    API suites have already accumulated by the time either owner is reached and
+    `stop_on_match=True` there shadows nothing. `only_when_any_changed` is consulted only by
+    `_rule_activated`, which production calls solely from the `CHANGED_TEST_FILE_RULES`
+    loop — it is a dead field on any `PATH_TEST_RULES` entry (follow-up #2198).
+
+    The pin is therefore STRUCTURAL, not behavioural: it keeps a future `stop_on_match`
+    from shadowing a rule appended after these two whose pattern also matches these paths,
+    and keeps the dead field from being added where it would silently do nothing.
     """
     for pattern in ("apps/api/route_registry.py", "apps/api/main.py"):
         matching = [rule for rule in PATH_TEST_RULES if rule.pattern == pattern]
@@ -1518,10 +1530,12 @@ def test_connection_attribution_tuple_peers_are_untouched_by_the_registry_split(
     """#2098 — the MERGE-not-DROP guard for the shared attribution tuple.
 
     `apps/api/route_registry.py` was removed from `CONNECTION_ATTRIBUTION_ROUTE_PATHS`
-    and given its own rule. Without this pin, deleting the registry from the tuple while
-    forgetting to merge `CONNECTION_ATTRIBUTION_TESTS` into the new rule is entirely
-    green, and the five remaining route members silently inheriting the precipitation
-    suites (e.g. by widening the shared tuple instead) is green too.
+    and given its own rule. Deleting the registry from the tuple while forgetting to merge
+    `CONNECTION_ATTRIBUTION_TESTS` into the new rule also reds the exact-set pin above, but
+    that one only reports "sets differ"; the tail of this guard is what names the forgotten
+    merge. The other direction — the five remaining route members silently inheriting the
+    precipitation suites (e.g. by widening the shared tuple instead) — is green everywhere
+    else in this file, so this pin is its sole guard.
 
     Membership rather than exact equality: same-name derivation adds a suite to some of
     these paths (`apps/api/routes/best_available.py` picks up

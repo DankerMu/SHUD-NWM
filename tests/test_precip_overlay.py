@@ -1502,6 +1502,10 @@ def test_dropping_precip_router_from_business_routers_unregisters_both_public_ro
     mutation and is deliberately neither rebuilt nor mutated: doing so would leak across the
     whole session. Production `_BUSINESS_ROUTERS` is unchanged.
     """
+    # Both legs below are satisfied by the empty set, so the constant's size is pinned
+    # first: emptying or trimming it would leave the whole proof green and toothless.
+    assert len(_PUBLISHED_PRECIP_ROUTE_PATHS) == 2, "expected both published precip routes spelled"
+
     # Positive leg: the unmutated composition publishes both routes.
     assert _PUBLISHED_PRECIP_ROUTE_PATHS <= _registered_route_paths(main.create_app())
 

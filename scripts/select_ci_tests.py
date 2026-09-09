@@ -3470,13 +3470,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # `precip_router` into `_BUSINESS_ROUTERS`, and `register_role_aware_routes`
         # walks that tuple to `include_router` each one; drop the entry and both
         # published endpoints — /api/v1/precip/{source}/{cycle}/index and
-        # .../{valid_time}.png — leave the route table entirely. Only
-        # tests/test_precip_overlay.py asserts either route (see its
-        # `test_dropping_precip_router_...` mutation proof), and the three broad
-        # `apps/api/**` suites exercise no precip route, so before this entry a
-        # registry-only diff reached the targeted lane with a plausible five-suite
-        # selection and no precipitation oracle at all (#1182's zero-assertion
-        # warning cannot fire on a non-empty selection).
+        # .../{valid_time}.png — leave the route table entirely.
+        # tests/test_precip_overlay.py is the most direct behavioural oracle (see its
+        # `test_dropping_precip_router_...` mutation proof); the cut also reds
+        # tests/test_openapi_drift.py (its whole-document static/runtime comparison — the
+        # committed openapi/nhms.v1.yaml carries both precip paths) and
+        # tests/test_openapi_31_contract.py (its BASELINE_NULLABLE_COUNT counts the two
+        # routes' typed 404s, as that constant's own comment says). Naming all three is
+        # over-justification, not under-coverage. The three broad `apps/api/**` suites
+        # exercise no precip route, so before this entry a registry-only diff reached
+        # the targeted lane with a plausible five-suite selection and no precipitation
+        # oracle at all (#1182's zero-assertion warning cannot fire on a non-empty
+        # selection).
         # #1728's connection-attribution guards are MERGED here rather than left in
         # CONNECTION_ATTRIBUTION_ROUTE_PATHS: this module now has an exact rule, and
         # a duplicate pattern splits its ownership across two

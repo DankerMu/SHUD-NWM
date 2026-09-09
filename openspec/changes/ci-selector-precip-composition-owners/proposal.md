@@ -51,8 +51,12 @@ apps/api/route_registry.py -> CONNECTION_ATTRIBUTION_TESTS + PRECIP_SURFACE_TEST
 **`apps/api/main.py`：扩展既有 `apps/api/main.py` 精确行的 target 元组**，由 `(API_ERROR_LOGGING_TEST,)` 改为
 `(API_ERROR_LOGGING_TEST, *PRECIP_SURFACE_TESTS)`。该行已存在，直接合并，无 duplicate pattern 风险。
 
-两条边均**不加** `stop_on_match`、**不加** `only_when_any_changed`：`apps/api/**` 规则在其后仍需累加
-三个通用 API suite，任一 flag 都会破坏既有 riders。
+两条边均**不加** `stop_on_match`、**不加** `only_when_any_changed`。两个 flag 对这两条路径**当下行为惰性**：
+`apps/api/**` 是**更早**的规则，三个通用 API suite 在累加循环走到这两条 owner 行
+（当前是全表最后两条）之前就已进入选择集；而 `only_when_any_changed` 对 `PATH_TEST_RULES` **根本不生效**——
+`_rule_activated` 只在 `CHANGED_TEST_FILE_RULES` 循环里被调用（该死字段已由 follow-up #2198 跟踪）。
+因此这条 pin 是**结构性**的：防止将来在这两条之后追加规则时，一个 `stop_on_match` 把它们遮蔽掉，
+也防止有人把一个在此处静默无效的字段加上去。
 
 **不复用 `PRECIP_SURFACE_TESTS` 之外的构造**：该常量已被 `services/precip/**` 规则（另加 prewarm）与 precip 路由行共享，语义正是「降水表面 oracle 集」，两条 owner 边指向同一集合是正确的；
 但**元测试侧不得 import 它**（见下）。
@@ -86,7 +90,9 @@ mutation 测试」），不是一次性 receipt。两条都在隔离 app fixture
   未生效时同样绿。
 - `tests/test_openapi_drift.py`：monkeypatch `main._patch_precip_openapi` 为 no-op →
   新建 app 的 schema 在 `/api/v1/precip/{source}/{cycle}/index` 操作与 `PrecipIndexResponse` component
-  **两处**都与 `openapi/nhms.v1.yaml` 不一致（未 mutate 的正控腿两处都一致）。逐处比较，不做整文档相等。
+  **两处**都与 `openapi/nhms.v1.yaml` 不一致（未 mutate 的正控腿两处都一致）。逐处比较而非整文档相等，
+  是因为 patch 恰好只动这两处——反腿因此点名 `_patch_precip_openapi` 造成的漂移，而不会被任何
+  无关的整文档差异蒙混过关；整文档相等本就由同套既有的 runtime/static 对齐 oracle 覆盖。
   `_patch_openapi_schema` 读的是模块级名字，monkeypatch 模块属性即生效；
   同文件 `test_openapi_patch_owner_module_preserves_main_monkeypatch_facade` 是该 idiom 的既有 precedent。
 
