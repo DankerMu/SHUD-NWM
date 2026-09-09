@@ -4076,3 +4076,20 @@ preserving the fixture review's value in the audit trail.
 Decision unchanged: **keep rotation**. The cumulative rotated margin remains 42,
 the measurement caveats above still apply, and this single-round PR supplies no
 new evidence for revising the follow-up seat policy.
+
+## 2026-09-09 revisit — PR #2202 (#2082, fixture `compact`)
+
+The audit remains `core=227`, `rotated=269`, `phase=53` over 193 multi-round
+merged PRs. PR #2202 completed in one comprehensive round with the compact
+`correctness+test-evidence` seat clean and its independent Phase 7 Gap Sweep
+clean. It therefore changes neither the multi-round denominator nor any
+later-round catch bucket and adds no rotation signal.
+
+The single-round seat counters do move by one for correctness and test-evidence,
+but that is the per-lens cost/yield note, not the follow-up rotation experiment.
+This evidence-only PR also illustrates why those measures should stay separate:
+its load-bearing proof was a deliberately manual m25 mutation outside ordinary
+CI, while the comprehensive reviewer found no defect after that proof existed.
+
+Decision unchanged: **keep rotation**. The cumulative margin remains 42 and no
+new multi-round evidence justifies changing the follow-up seat policy.
