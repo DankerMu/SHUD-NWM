@@ -67,12 +67,19 @@ loudly with a distinct error and SHALL NOT promote any tree.
 #### Scenario: the mutex fails closed on an unsafe lock file
 
 - **WHEN** the lock path is a symlink, is not a regular file, has more than one
-  hard link, does not have mode `0o600`, or is not owned by the effective user
+  hard link, does not have mode `0o600`, is not owned by the effective user, or
+  is not owned by the same uid that owns the copyback root
 - **THEN** acquisition MUST raise rather than proceed, as each lane's own error
   type and distinctly from a timeout — the q_down publish lane raises a publish
   error carrying a copyback-lock-unsafe code, so an operator can tell a tampered
   lock file from a busy one
-- **AND** no copyback tree MAY be promoted.
+- **AND** no copyback tree MAY be promoted
+- **WHEN** the lock file does not exist yet and the effective user is not the
+  copyback root's owner
+- **THEN** acquisition MUST refuse *before* creating it, because the lock file is
+  never unlinked — creating it would leave exactly the foreign-uid orphan that
+  poisons the lock for every legitimate writer
+- **AND** no lock file MAY be left behind by the refused writer.
 
 #### Scenario: the mutex is anchored where every writer provably shares it
 

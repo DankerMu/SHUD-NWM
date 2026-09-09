@@ -2262,7 +2262,7 @@ ssh -p 32099 nwm@210.77.77.27 \
      ```bash
      ssh -p 32099 frd_muziyao@210.77.77.22 \
        'cd /scratch/frd_muziyao/NWM &&
-        . infra/env/compute.scheduler-provider-refresh.env &&   # 取 OBJECT_STORE_ROOT
+        . infra/env/compute.scheduler-dbfree.env &&   # 同时带 OBJECT_STORE_ROOT 与 NHMS_OBJECT_STORE_COPYBACK_ROOT
         /scratch/frd_muziyao/NWM/.venv/bin/python \
           -m scripts.canonical_precip_copyback_backfill \
           --source-root "$OBJECT_STORE_ROOT" \
@@ -2270,7 +2270,10 @@ ssh -p 32099 nwm@210.77.77.27 \
      ```
      `cd` 到仓库根是必须的（否则 `-m` 会 `ModuleNotFoundError` 退 1）。先看 dry-run 计划
      （dry-run 不取锁、不写任何东西），确认无误后去掉 `--dry-run` 实跑。退出码：`0` 全成功、
-     `1` 跑完但有 `failed`、`2` 参数或 root 不可用。
+     `1` 跑完但有 `failed`、`2` 参数或 root 不可用——两个 root 必须都非空（空值会被
+     `resolve_roots` 当参数错误拒绝，退 2），所以只能 source 同时带这两个变量的
+     `compute.scheduler-dbfree.env`（`compute.scheduler-provider-refresh.env` 只有
+     `OBJECT_STORE_ROOT`）。
    - `services/orchestrator/retention.py` 只下钻 `root/<prefix>` 与 `root/runs`，
      不枚举 root 级文件，所以这把锁对保留策略不可见。
 2. **可穿越性**。copyback 自己创建的每一级目录——**包括 copyback root 本身**——

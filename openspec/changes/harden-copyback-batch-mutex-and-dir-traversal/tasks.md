@@ -236,9 +236,9 @@ Baseline is `master` unless a row names another revision.
       so the gate reads `[False]` and stops discriminating; what would remain is a
       race between A's rollback (in the `except` handler, outside any per-tree
       lock) and B's promote, which is timing-dependent rather than deterministically
-      red. Close that by additionally gating A's rollback — monkeypatch
-      `_rollback_qdown_copyback_batch` to wait on the competitor first — so the
-      terminal `read_bytes()` assertion is deterministic under either placement.
+      red. Closed by additionally gating A's rollback — `_rollback_qdown_copyback_batch`
+      is monkeypatched to wait on the competitor first — so the terminal
+      `read_bytes()` assertion is deterministic under either placement.
 - [x] E5 `run_tree_copyback._replace_tree` × publisher batch: serialized; loser
       reports failure; winner's tree intact; no `rmtree` of a competitor's tree.
 - [x] E6 `umask 027` publisher canonical copyback: assert the copyback root,
