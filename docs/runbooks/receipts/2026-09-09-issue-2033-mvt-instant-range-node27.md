@@ -1,10 +1,13 @@
 # Receipt: out-of-range tile instant returns 422 before any SQL (issue #2033, PR #2190)
 
-- Date: 2026-09-09 (UTC 2026-09-09T08:53Z)
+- Date: **UTC 2026-09-09T00:53Z** (§5.1/§5.2) and **UTC 2026-09-09T01:29Z** (§5.1b supplement), taken from each
+  run's own `datetime.now(UTC)` stamp in the JSON working copies. node-27's host clock is `Asia/Shanghai (+0800)`,
+  so its file mtimes for these runs read 08:53 / 09:29 local — use the UTC values above when correlating with
+  PostgreSQL logs.
 - Host: node-27. **Two isolated detached worktrees**, one commit apart, so the comparison isolates this PR's diff:
   - head arm `/home/nwm/NWM-worktrees/issue2033-head` @ `823aa4ba5ad92a6bc427d5c3af3c71a031a8051f`. The PR head has
-    since advanced to `189b43b0d3b42b36ff37c6074d7678e0413c28a5`; that delta is **tests + docs only** —
-    `git diff 823aa4ba..189b43b0 -- services/tiles/mvt.py apps/api/routes/hydro_display.py apps/api/routes/precip.py`
+    since advanced to `97305cb9ea79766db2907d00f90ce96f432a99fc`; that delta is **tests + docs only** —
+    `git diff 823aa4ba..97305cb9 -- services/tiles/mvt.py apps/api/routes/hydro_display.py apps/api/routes/precip.py`
     is empty — so every measurement below still describes the current head.
   - base arm `/home/nwm/NWM-worktrees/issue2033-base` @ `d113edca5a30bd7ca4a07a351688c3f20ff65568` (`origin/master`, the PR's base)
   The production checkout `/home/nwm/NWM` stayed at `5a86841c` serving `nhms-display-api.service` and was **not touched**
@@ -17,8 +20,9 @@
   database. `get_hydro_display_session` is overridden with a real `Session` on an engine carrying a
   `before_cursor_execute` listener that records **every statement's text**, not merely a count — so "zero statements"
   is checkable rather than asserted. `NHMS_ENABLE_LIVE_POSTGIS_MVT=true`; `NHMS_MVT_FILE_CACHE_DIR` unset (no file
-  cache tier on either arm). Both arms ran within 12 s of each other and discovered the **same** `valid_time`
-  (`2026-09-12T22:00:00Z`) and the same display-ready `run_id`, so no cycle landed between them.
+  cache tier on either arm). The two §5.1/§5.2 arms ran **13.5 s apart** (head `00:53:36.326Z`, base
+  `00:53:49.830Z`) and discovered the **same** `valid_time` (`2026-09-12T22:00:00Z`) and the same display-ready
+  `run_id`, so no cycle landed between them.
 - Script and raw data: `/home/nwm/tmp/receipt2033/{receipt_2033.py,head.json,base.json}` plus the §5.1b supplement
   `{probe3_2033.py,probe3.head.json,probe3.base.json}` on node-27 (working copies).
 
@@ -82,8 +86,11 @@ Both rows are still valid identity evidence as they stand — status, code and S
 
 ## 5.1b Byte identity on the two routes the 5/25/12 coordinate had masked
 
-Same method, same arms, same discovered `valid_time` and `run_id`; only the tile coordinate and the
-`basin_version_id` differ. Every axis identical on both arms:
+Run **UTC 2026-09-09T01:29Z**, 36 min after §5.1, same two worktrees, unchanged. The two arms ran **4.0 s apart**
+(head `01:29:23.971Z`, base `01:29:27.935Z`) and re-ran the same discovery, landing on the same `valid_time`
+(`2026-09-12T22:00:00Z`) and the same display-ready `run_id` as §5.1 — so the freshness control holds for this session
+too, and the two sessions are mutually comparable. Only the tile coordinate and the `basin_version_id` differ.
+Every axis identical on both arms:
 
 | route | tile | bytes | md5 | `X-Tile-Cache-Key` | sql |
 |---|---|---|---|---|---|
@@ -99,8 +106,10 @@ both pass through `canonical_mvt_time` on a real instant. Its identity across th
 in-range path is unshifted — previously that rested on the master-recomputed digest literals plus inspection alone,
 because the only live tile-producing route measured (`river-network`) carries `valid_time = None`.
 
-Nine further `hydro/{run_id}` coordinates (z6 50/24, 51/24, 51/25; z7 101/50, 102/50, 103/51; z8 201/100, 203/101) return
-an empty 200 tile on both arms, and z6 50/25 returns 413 on both arms — all identical, none used as byte evidence.
+Eight further `hydro/{run_id}` coordinates (z6 50/24, 51/24, 51/25; z7 101/50, 102/50, 103/51; z8 201/100, 203/101)
+return an **empty** 200 tile on both arms, and z6 50/25 returns 413 on both arms — all identical, and **none of them is
+used as byte evidence**: an empty tile would be hollow proof. A first supplement pass at 7/100/48, 7/101/49 and 8/202/98
+was empty on both arms for the same reason and is likewise excluded.
 
 **Net: tile-byte/ETag/cache-key identity is proven on 3 of the 5 layers** (`river-network`, `hydro`, `met-stations`).
 The remaining two — `hydro-national` (both its routes) and `river-network-national` — are the genuinely #2145-blocked
