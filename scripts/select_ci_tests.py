@@ -2420,6 +2420,31 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/install_node22_scheduler_file_provider_refresh.sh",
         ("tests/test_scheduler_file_provider_refresh.py",),
     ),
+    # #2188: these two rows are systemd units, NOT `#1138` shell wrappers (that
+    # block's targets were derived by grepping tests/ for `*.sh` references;
+    # `infra/systemd/**` is a different surface, and the wrapper run resumes
+    # just below with `scripts/node27_download_once.sh`). They sit next to the
+    # wrapper/installer rows because they are the same refresh family with the
+    # same owner suite.
+    # `tests/test_scheduler_file_provider_refresh.py:3591-3637`
+    # (`test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`)
+    # `read_text`s BOTH files: on the `.service` it asserts
+    # `ExecStart=/scratch/frd_muziyao/NWM/scripts/scheduler_file_provider_refresh_once.sh`,
+    # `TimeoutStartSec=7200`, that `PrivateTmp=true` is ABSENT,
+    # `UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL`, and the
+    # `Before=` / `ExecCondition=` scheduler-independence pair (:3599-3611); on
+    # the `.timer` it asserts `OnCalendar=*-*-* 02:15:00 UTC`,
+    # `RandomizedDelaySec=30m` and `Persistent=false` (:3603-3604, :3633).
+    # Both are outside the `#2173` glob `infra/systemd/nhms-node27-*.service`
+    # (node-22 units), so neither row carries the sibling lane pin.
+    PathTestRule(
+        "infra/systemd/nhms-scheduler-file-provider-refresh.service",
+        ("tests/test_scheduler_file_provider_refresh.py",),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
+        ("tests/test_scheduler_file_provider_refresh.py",),
+    ),
     PathTestRule(
         "scripts/node27_download_once.sh",
         ("tests/test_node27_download_cycles.py",),
@@ -2654,6 +2679,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_timeseries_compression.py",
         ),
+    ),
+    PathTestRule(
+        # #2188: the display API unit runs on node-27 but is named OUTSIDE the
+        # `#2173` pin glob `infra/systemd/nhms-node27-*.service`, so it matched
+        # nothing at all (`infra/**` is not a backend python path and
+        # `_is_backend_shell_path` is scoped to `scripts/**.sh`) and a
+        # unit-only diff degraded to a zero-assertion --collect-only smoke.
+        # `tests/test_hydro_display_mvt_scaling.py:198-204`
+        # (`test_systemd_workers_receive_shared_file_cache_default`) `read_text`s
+        # this exact path and asserts the two directives that carry the public
+        # display entrypoint's cache/worker contract:
+        # `export NHMS_MVT_FILE_CACHE_DIR="${NHMS_MVT_FILE_CACHE_DIR:-/home/nwm/.cache/nhms/mvt}"`
+        # and `--workers "${NHMS_DISPLAY_WORKERS:-2}"`.
+        # Not in the `#2173` glob => this unit takes NO sibling lane pin, so
+        # `tests/test_node27_timeseries_retention.py` must NOT appear in this
+        # row's targets (the lane pin never reads this unit's body anyway).
+        "infra/systemd/nhms-display-api.service",
+        ("tests/test_hydro_display_mvt_scaling.py",),
     ),
     PathTestRule(
         "schemas/timeseries_compression_receipt.schema.json",
