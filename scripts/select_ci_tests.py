@@ -1319,16 +1319,20 @@ CONNECTION_ATTRIBUTION_TESTS: tuple[str, ...] = (
     "tests/test_node27_connection_attribution.py",
     "tests/test_node27_connection_attribution_delegated.py",
 )
-# The route modules the unit-level guard walks from the registry, plus the
-# registry itself: each declares a module-level `_APPLICATION_NAME` and injects
-# it into its store factories.
+# The route modules the unit-level guard walks from the registry: each declares
+# a module-level `_APPLICATION_NAME` and injects it into its store factories.
 # #2078: apps/api/routes/forecast.py is deliberately absent — it gained an exact
 # rule (tests/test_forecast_api.py) and these suites are MERGED into that entry
 # instead, exactly like forecast_store.py / state_manager.py below: a duplicate
 # pattern splits the module's ownership across two rules
 # (test_path_rule_duplicate_patterns_are_allowlisted_decisions).
+# #2098: apps/api/route_registry.py — the walk's root — is deliberately absent
+# for the same reason. It gained an exact rule (see the precipitation
+# composition owners near the end of PATH_TEST_RULES) and these suites are
+# MERGED into that entry. It never satisfied the `_APPLICATION_NAME` sentence
+# above either: the registry declares no such name, it only composes the
+# routers that do.
 CONNECTION_ATTRIBUTION_ROUTE_PATHS: tuple[str, ...] = (
-    "apps/api/route_registry.py",
     "apps/api/routes/best_available.py",
     "apps/api/routes/data_sources.py",
     "apps/api/routes/models.py",
@@ -1358,6 +1362,10 @@ API_ERROR_LOGGING_TEST = "tests/test_api_errors_logging.py"
 # suites are the hand-maintained-yaml and generated-frontend-types oracles the
 # routes' public shape rides on. Shared by the directory rule and the exact
 # route rule so the two cannot drift.
+# #2098: also shared by the two application-composition owner rules
+# (apps/api/route_registry.py, apps/api/main.py), for the same no-drift reason —
+# four rules now name this tuple, so an edit to it moves all four together and
+# the literal-string pins in tests/test_select_ci_tests.py are what catch it.
 PRECIP_SURFACE_TESTS: tuple[str, ...] = (
     "tests/test_precip_overlay.py",
     "tests/test_openapi_drift.py",
@@ -4094,8 +4102,51 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (API_ERROR_LOGGING_TEST,),
     ),
     PathTestRule(
+        # #2098: the route-reachability composition owner. This module imports
+        # `precip_router` into `_BUSINESS_ROUTERS`, and `register_role_aware_routes`
+        # walks that tuple to `include_router` each one; drop the entry and both
+        # published endpoints — /api/v1/precip/{source}/{cycle}/index and
+        # .../{valid_time}.png — leave the route table entirely.
+        # tests/test_precip_overlay.py is the most direct behavioural oracle (see its
+        # `test_dropping_precip_router_...` mutation proof); the cut also reds
+        # tests/test_openapi_drift.py (its whole-document static/runtime comparison — the
+        # committed openapi/nhms.v1.yaml carries both precip paths) and
+        # tests/test_openapi_31_contract.py (its BASELINE_NULLABLE_COUNT counts the two
+        # routes' typed 404s, as that constant's own comment says). Naming all three is
+        # over-justification, not under-coverage. The three broad `apps/api/**` suites
+        # exercise no precip route, so before this entry a registry-only diff reached
+        # the targeted lane with a plausible five-suite selection and no precipitation
+        # oracle at all (#1182's zero-assertion warning cannot fire on a non-empty
+        # selection).
+        # #1728's connection-attribution guards are MERGED here rather than left in
+        # CONNECTION_ATTRIBUTION_ROUTE_PATHS: this module now has an exact rule, and
+        # a duplicate pattern splits its ownership across two
+        # (test_path_rule_duplicate_patterns_are_allowlisted_decisions). Same shape
+        # #2078 used for apps/api/routes/forecast.py.
+        "apps/api/route_registry.py",
+        (*CONNECTION_ATTRIBUTION_TESTS, *PRECIP_SURFACE_TESTS),
+    ),
+    PathTestRule(
         "apps/api/main.py",
-        (API_ERROR_LOGGING_TEST,),
+        (
+            API_ERROR_LOGGING_TEST,
+            # #2098: the runtime-OpenAPI composition owner. `_patch_openapi_schema`
+            # calls `_patch_precip_openapi(schema)`, which pops the generated
+            # `PrecipIndexResponse` component and rewrites the index operation onto
+            # the shared `allOf: [SuccessEnvelope, {data}]` envelope that the
+            # hand-maintained openapi/nhms.v1.yaml carries. Drop that call site and
+            # the runtime schema drifts from the committed document at both places,
+            # and of the suites this rule selects only tests/test_openapi_drift.py
+            # reds (see its `test_dropping_the_precip_openapi_patch_...` mutation
+            # proof). That is a claim about THIS call site, not "the repo's only
+            # static/runtime oracle": tests/test_api_contract.py compares
+            # openapi/nhms.v1.yaml against `app.openapi()` too, but at no
+            # precipitation path. Neither the #1704 error-logging rider above nor the
+            # three broad `apps/api/**` suites assert on the precipitation schema, and
+            # tests/test_openapi_31_contract.py applies openapi_patching's patch
+            # functions directly — a list that omits `_patch_precip_openapi`.
+            *PRECIP_SURFACE_TESTS,
+        ),
     ),
 )
 
