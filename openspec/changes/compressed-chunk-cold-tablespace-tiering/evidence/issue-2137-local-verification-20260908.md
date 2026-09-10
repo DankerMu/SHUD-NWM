@@ -673,11 +673,31 @@ Affected-tree verification before completing this merge commit:
 - Target OpenSpec strict validation, staged diff, no-unmerged-path and exact
   272-record gate-memory assertions: PASS.
 
+The fourth master integration was committed at
+`aefbbaf1747bb30e3b1c570ff9eb443230f15b1a`. Exact-tree final local evidence:
+
+- Shipping selector: 73 entries, including the runbook contract and C3 binder;
+  `meta_guard_only=false`, `collection_smoke_required=true`.
+- Exact shipping targeted assertion row: `6678 passed, 12 skipped, 1 warning`
+  in 676.42 seconds.
+- Full-tree collection smoke: `19314 tests collected` in 10.24 seconds;
+  import/syntax evidence only.
+- Default full unit row: `19078 passed, 15 skipped, 221 deselected, 1 warning`
+  in 1690.80 seconds.
+- All 83 PR-diff Python files passed Ruff and py_compile.
+- Target OpenSpec strict validation, three metaschemas, three shipping examples,
+  seven changed JSON/JSONL documents, line-count, diff and tasks 4.0-4.8 state
+  gates: PASS.
+- Non-exempt files remain at most 1000 lines; C3 core is 1000 lines, C3 binder
+  partition 264, and runbook contract 981.
+
+The only warning remained local ecCodes 2.41.0 below its recommendation. These
+results are local exact-tree evidence, not node-27 live evidence.
+
 ## Remaining gates after this record
 
-- Complete the fourth master merge commit, regenerate and rerun exact-tree
-  selector/targeted/full verification, rerun Phase 7 on that SHA, push once,
-  and require fresh exact-SHA GitHub CI to execute assertions and pass before
-  the pre-merge hard gate.
+- Treat the commit containing this exact-tree record as evidence-only, rerun
+  Phase 7 on that commit, push once, and require fresh exact-SHA GitHub CI to
+  execute assertions and pass before the pre-merge hard gate.
 - Do not access node-27 before #2137 merges. Task 4.0 remains unchecked until
   that merge; live tasks 4.1-4.8 remain unexecuted.
