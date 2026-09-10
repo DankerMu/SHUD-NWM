@@ -262,6 +262,34 @@ TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS: tuple[str, ...] = (
     "db/**",
 )
 
+# #2185: the river-segment write-surface scan. It AST-parses every Python file
+# under the five directories it walks and pins that exactly one in-place
+# `UPDATE core.river_segment` exists in production code, that it lives in
+# workers/model_registry/basins_registry_import.py, and that it bumps
+# core.river_network_version.geometry_generation in the same transaction. A
+# second in-place rewrite added anywhere under those roots would move geometry
+# with no cache-key rotation, so every path the scan reads must route to it.
+# Routed SUPPLEMENTALLY (set union only) in the shape #1656 established: no
+# `matched`, no stop rules, no effect on the unknown-backend fallback.
+RIVER_SEGMENT_WRITE_SURFACE_TEST = "tests/test_river_segment_write_surface_scan.py"
+
+# #2185: the five roots the write-surface scan walks, mirroring its own
+# module-level PRODUCTION_DIRS binding (tests/test_river_segment_write_surface_scan.py:48)
+# mapped to `<dir>/**` globs. A selector meta-guard parses that binding out of
+# the scan's source and asserts it equals this set, so adding a sixth directory
+# to the scan without wiring it here reddens that meta-guard by name.
+# `apps/**` and `packages/**` are deliberately at full width — the scan walks
+# both directories whole. TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS above is not a
+# precedent for narrowing them: only ITS packages root is `packages/common/**`,
+# because that is the width of the scan it routes.
+RIVER_SEGMENT_WRITE_SURFACE_ROOTS: tuple[str, ...] = (
+    "apps/**",
+    "services/**",
+    "workers/**",
+    "packages/**",
+    "scripts/**",
+)
+
 # #1644: the published OpenAPI contract's assertion-level suites. `openapi/**`
 # opens the backend gate via ci.yml's paths-filter and must reach real drift/type
 # assertions, not the collect-only smoke; the runtime patch owner carries the
@@ -4325,6 +4353,18 @@ def select_tests(changed_paths: Iterable[str], *, repo_root: Path = Path(".")) -
     for path in changed:
         if path.endswith(".py") and _any_path_matches([path], TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS):
             selected.add(TIMESCALE_WRITE_GUARD_INVARIANT_TEST)
+
+    # #2185: supplemental river-segment write-surface routing, same shape as the
+    # #1656 loop above. Every Python path under the five roots the write-surface
+    # scan walks selects that scan IN ADDITION to its ordinary selection. Purely
+    # additive: no `matched`, no stop-rule participation, no effect on whether a
+    # path counts as known for the unknown-backend fallback. The root match is
+    # the only gate — the scan parses `*.py` under these roots regardless of the
+    # backend-prefix classification, so `apps/` outside `apps/api/` (not a
+    # backend prefix) is covered exactly as the scan reads it.
+    for path in changed:
+        if path.endswith(".py") and _any_path_matches([path], RIVER_SEGMENT_WRITE_SURFACE_ROOTS):
+            selected.add(RIVER_SEGMENT_WRITE_SURFACE_TEST)
 
     selected_paths = sorted(selected)
     # A selected target pointing at a deleted/renamed test file used to vanish
