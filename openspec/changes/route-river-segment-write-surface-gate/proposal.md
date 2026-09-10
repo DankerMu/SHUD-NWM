@@ -31,7 +31,7 @@ The routing shape is copied from #1656. **The derivation shape is not, and canno
 PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")
 ```
 
-whose value is a tuple of bare string constants, consumed at `:100` by `for directory in PRODUCTION_DIRS: root = REPO_ROOT / directory`. The #2185 derivation must locate that binding by target name and read its constants; reusing `_invariant_scan_roots()` or its `REPO_ROOT / "workers"` walker would find nothing.
+whose value is a tuple of bare string constants, consumed at `tests/test_river_segment_write_surface_scan.py:100` by `for directory in PRODUCTION_DIRS: root = REPO_ROOT / directory`. The #2185 derivation must locate that binding by target name and read its constants; reusing `_invariant_scan_roots()` or its `REPO_ROOT / "workers"` walker would find nothing.
 
 Locating it by walking `tree.body` for `ast.Assign`/`ast.AnnAssign` is not enough, and round 1 measured why: `PRODUCTION_DIRS += ("db",)` yields module-level node types `['Assign', 'AugAssign']` and exactly **one** binding under that collection, so the derivation returns the stale five-element tuple, which still equals the selector constant — nothing reds while the scan walks six directories. The shipped derivation therefore collects every `ast.Name` store of the identifier anywhere in the module (`ast.walk`), requires exactly one, and requires that one to be a module-level `Assign`/`AnnAssign` it can read. That also closes the module-level `if some_flag: PRODUCTION_DIRS = (...)` and `for PRODUCTION_DIRS in ...:` shapes, neither of which is a direct child of `tree.body`. A rebind producing no `ast.Name` store at all (`globals()["PRODUCTION_DIRS"] = ...`) stays out of reach, and the backstop for it is narrower than it looks: the scan's own runtime non-vacuity assertion at `tests/test_river_segment_write_surface_scan.py:123` catches such a rebind only if it executes AFTER `_LITERALS = _sql_literals()` at `tests/test_river_segment_write_surface_scan.py:110`. `:110` materializes the whole walk, so a store-less rebind above that line is walked by the scan itself and both sides of the `:123` comparison read the same rebound name — six directories on the left, six on the right, green. See `tasks.md` §6 D12.
 
@@ -50,7 +50,7 @@ The gain set and the root-membership set are the same 457 paths, so the routing 
 
 Lane cost, measured locally on this branch (`uv run pytest -q tests/test_river_segment_write_surface_scan.py --durations=0`): **4 tests, 2.06s cold / 1.90s warm**. The figures are wall-clock on a loaded developer machine and drift with load; what the Evidence Floor re-checks is the test count and an order-of-magnitude bound, not the decimals. The dominant term is the module-level `_LITERALS = _sql_literals()` AST parse of every `.py` file under the five roots, which is paid once per session regardless of how many of the four tests run. The issue quotes 1.85s; the figures above are this branch's own measurement.
 
-`packages/**` is genuinely wider than the #1656 precedent's `packages/common/**`: `packages/` also holds `packages/scheduler/` and a top-level `packages/__init__.py`. That width is correct rather than incidental — the scan walks `packages/` whole, and its own non-vacuity assertion at `:123` pins `{path.split("/")[0] for path in scanned_files} == set(PRODUCTION_DIRS)`, so a literal under `packages/scheduler/` is inside the invariant's blast radius and must be able to red the guard.
+`packages/**` is genuinely wider than the #1656 precedent's `packages/common/**`: `packages/` also holds `packages/scheduler/` and a top-level `packages/__init__.py`. That width is correct rather than incidental — the scan walks `packages/` whole, and its own non-vacuity assertion at `tests/test_river_segment_write_surface_scan.py:123` pins `{path.split("/")[0] for path in scanned_files} == set(PRODUCTION_DIRS)`, so a literal under `packages/scheduler/` is inside the invariant's blast radius and must be able to red the guard.
 
 ## 4. Must-preserve behavior
 
@@ -109,8 +109,8 @@ No expectation is loosened from equality to containment: exact-equality is the p
 
 The #2098 review loop's entire finding set was prose drifting from code. Two comments in `tests/test_select_ci_tests.py` describe guarantees this change deliberately breaks, and neither reds on its own:
 
-- `:5005-5009` — "an unknown backend Python path selects exactly the five core-smoke suites and NO meta-guard rider… so a refactor that gains a sixth target on every unknown route reds here before it silently costs ~15 s across the whole tree". This change **is** that refactor; the comment must record the new count and that the extra target is #2185's supplemental rider, along with its measured cost from §3.
-- `:5626-5631` — "the meta-guard PLUS the write-site invariant… the two targeted suites". It becomes three.
+- `tests/test_select_ci_tests.py:5005-5009` — "an unknown backend Python path selects exactly the five core-smoke suites and NO meta-guard rider… so a refactor that gains a sixth target on every unknown route reds here before it silently costs ~15 s across the whole tree". This change **is** that refactor; the comment must record the new count and that the extra target is #2185's supplemental rider, along with its measured cost from §3.
+- `tests/test_select_ci_tests.py:5626-5631` — "the meta-guard PLUS the write-site invariant… the two targeted suites". It becomes three.
 
 Provenance comments that name only `#1656` beside a rider that now has two sources (`tests/test_select_ci_tests.py:678-680`, `:5041-5042`, `:5162-5165`, and every other comment beside an expectation this change edits) must name `#2185` as well, or a reader will attribute the new element to the timescale route.
 
