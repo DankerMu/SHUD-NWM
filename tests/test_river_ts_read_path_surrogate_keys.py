@@ -911,7 +911,7 @@ def test_every_display_template_renders_free_of_text_identity_for_the_narrow_sto
     whose 404 / tile / coverage behaviour depends on the fact-table predicates,
     and this file is where a reviewer of an mvt change looks.
     """
-    narrow = render_river_ts_sql(entry.source(), "narrow", entry=entry.key)
+    narrow = render_river_ts_sql(entry.source("narrow"), "narrow", entry=entry.key)
 
     # Table-scoped, deliberately not a per-column substring sweep: these
     # statements also read `identity_stats.basin_version_id` and project
@@ -921,6 +921,6 @@ def test_every_display_template_renders_free_of_text_identity_for_the_narrow_sto
     # Non-vacuity: what is LEFT is the key/enum authority resolution, so the
     # statement still selects the same rows through the same predicates, and the
     # narrow variant really is the legacy one minus its aid blocks.
-    legacy = render_river_ts_sql(entry.source(), "legacy", entry=entry.key)
+    legacy = render_river_ts_sql(entry.source("legacy"), "legacy", entry=entry.key)
     assert "_key = " in narrow.sql or "variable_e = " in narrow.sql
     assert len(narrow.sql.split("\n")) == len(legacy.sql.split("\n")) - 2 * entry.expected_aids

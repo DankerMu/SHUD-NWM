@@ -159,9 +159,7 @@ RIVER_TABLE = "hydro.river_timeseries"
 #
 # The breakdown, so an intentional change can be re-derived rather than guessed:
 #
-# * forecast_store.py 10 = the eight segment blocks + the latest-product
-#   fallback's river scan (A9) + ``_qhh_latest_query_indexes``'s
-#   ``"table": "hydro.river_timeseries"`` index-metadata literal.
+# * forecast_store.py 3 = two raw routed sources + the index-metadata literal.
 # * publisher.py 2 = the discovery aggregate + the PublishError message naming
 #   the required table.
 # * forcing_copyback_backfill.py 1 = the correlated EXISTS probe.
@@ -181,7 +179,7 @@ RIVER_TABLE = "hydro.river_timeseries"
 # * integration_helpers.py 3 = the dual-write INSERT + the cleanup DELETE +
 #   the #1640/#1654 min/max valid_time probe that bounds that DELETE.
 RIVER_TABLE_CENSUS: dict[str, int] = {
-    "packages/common/forecast_store.py": 10,
+    "packages/common/forecast_store.py": 3,
     "services/tile_publisher/publisher.py": 2,
     "services/tile_publisher/forcing_copyback_backfill.py": 1,
     "scripts/node27_autopipeline.py": 0,
@@ -206,8 +204,8 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
 #
 # Counted on the SOURCE, which is the number #1342 deletes:
 #
-# * forecast_store.py 6 = the three-aid segment-identity FRAGMENT (written once,
-#   embedded by all eight blocks) + the latest-product fallback's three.
+# * forecast_store.py 6 = the three-aid segment source (written once,
+#   consumed by all eight blocks) + the latest-product source's three.
 # * publisher.py 1 / forcing_copyback_backfill.py 1 = the single `variable` aid
 #   each, in an ON chain and inside a correlated EXISTS respectively.
 # * parser.py 2 = the probe's and the window read's `run_id` aid. Unchanged by
@@ -278,7 +276,7 @@ _IDENTITY = {
 }
 _T0 = datetime(2026, 5, 7, tzinfo=UTC)
 _T1 = datetime(2026, 5, 14, tzinfo=UTC)
-_NO_FILTER = _ScenarioFilter("", ())
+_NO_FILTER = _ScenarioFilter("", {})
 
 
 def _source(*parts: str) -> str:
@@ -564,16 +562,16 @@ def _store() -> PsycopgForecastStore:
     return PsycopgForecastStore("postgresql://unit-test")
 
 
-def _segment_block_statements() -> dict[str, str]:
-    """The eight segment-scoped blocks, rendered by their real call sites."""
+def _segment_block_executions() -> dict[str, tuple[str, Any]]:
+    """Capture SQL and bindings from every real spanning execution owner."""
     store = _store()
-    rendered: dict[str, str] = {}
+    rendered: dict[str, tuple[str, Any]] = {}
 
     def capture(label: str, call: Any) -> None:
         cursor = _CaptureCursor()
         call(cursor)
         assert len(cursor.statements) == 1, label
-        rendered[label] = cursor.statements[0]
+        rendered[label] = cursor.executed[0]
 
     capture(
         "latest_issue_time",
@@ -627,10 +625,15 @@ def _segment_block_statements() -> dict[str, str]:
     return rendered
 
 
-def _latest_product_fallback_statement() -> str:
-    """The latest-product fallback's heavy statement (A9), rendered."""
+def _segment_block_statements() -> dict[str, str]:
+    return {label: sql for label, (sql, _params) in _segment_block_executions().items()}
+
+
+def _latest_product_fallback_execution() -> tuple[str, Any]:
+    """The known-run heavy execution, distinct from its raw renderer input."""
     header = {
         "run_id": "qhh_gfs_2026050700",
+        "timeseries_store": "legacy",
         "forcing_version_id": "forc_qhh_gfs_2026050700",
         "basin_version_id": "basins_qhh_vbasins",
         "river_network_version_id": "basins_qhh_rivnet_vbasins",
@@ -641,9 +644,13 @@ def _latest_product_fallback_statement() -> str:
     # to_regclass probe -> no coverage table -> header prefetch -> heavy CTE.
     cursor = _CaptureCursor([[{"reg": None}], [header], []])
     _store()._fetch_latest_qhh_display_candidates(cursor, basin_id="basins_qhh", source_id="GFS")
-    heavy = [statement for statement in cursor.statements if "river_sample_rows AS" in statement]
+    heavy = [(sql, params) for sql, params in cursor.executed if "river_sample_rows AS" in sql]
     assert len(heavy) == 1
     return heavy[0]
+
+
+def _latest_product_fallback_statement() -> str:
+    return _latest_product_fallback_execution()[0]
 
 
 def test_forecast_store_segment_blocks_carry_only_their_sanctioned_aids() -> None:
@@ -671,7 +678,7 @@ def test_forecast_store_segment_blocks_keep_the_measured_segment_pushdown_aid() 
     rendered = _segment_block_statements()
     assert len(rendered) == 8
     for label, sql in rendered.items():
-        assert "AND rt.river_segment_id = %s" in sql, label
+        assert "AND rt.river_segment_id = %(river_segment_id)s" in sql, label
 
 
 def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_tables() -> None:
@@ -684,7 +691,7 @@ def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_ta
         # primary key is (river_segment_id, river_network_version_id), so a bare
         # segment lookup could return more than one row and raise at runtime.
         assert "SELECT river_segment_key FROM core.river_segment" in sql, label
-        assert "AND river_network_version_id = %s" in sql, label
+        assert "AND river_network_version_id = %(river_network_version_id)s" in sql, label
         assert "rt.river_network_version_key = (" in sql, label
         assert "rt.variable_e = 'q_down'::hydro.river_variable" in sql, label
         # The run is reached by key, never by its text.
@@ -692,19 +699,10 @@ def test_forecast_store_segment_blocks_resolve_identity_through_the_authority_ta
 
 
 def test_forecast_store_segment_blocks_bind_every_placeholder_they_grew() -> None:
-    """Placeholder arithmetic, with a non-empty filter interpolated.
-
-    Switching to keys turned three text bindings into six placeholders per
-    block: the segment binds twice (key resolution, D10.7 pushdown aid) and the
-    network three times (segment resolution, own pushdown aid, own key
-    resolution). psycopg2 raises at execute time on a count mismatch, so a
-    dropped binding is a production-only crash that a text-shape assertion never
-    sees — and the scenario / identity filters append their own ``%s`` after the
-    identity block, which is where an off-by-one would actually land.
-    """
+    """Every named binding retains its identity, filter and window meaning."""
     store = _store()
-    scenarios = _ScenarioFilter(" AND h.scenario_id = ANY(%s)", (["GFS"],))
-    identity = _ScenarioFilter(" AND h.run_id = %s", ("run_a",))
+    scenarios = forecast_store._scenario_filter(["GFS"])
+    identity = forecast_store._run_identity_filter(run_id="run_a", model_id="model_a")
     calls = (
         ("latest_issue_time", lambda cursor: store._latest_issue_time(cursor, **_IDENTITY, scenario_filter=scenarios)),
         (
@@ -750,24 +748,22 @@ def test_forecast_store_segment_blocks_bind_every_placeholder_they_grew() -> Non
         cursor = _CaptureCursor()
         call(cursor)
         statement, parameters = cursor.executed[0]
-        assert len(re.findall("%s", statement)) == len(parameters), label
-        # The six identity bindings, in text order, are the caller's three
-        # values with the segment and the network repeated — not a key, and not
-        # reordered. Order is dictated by the constant: basin, then the
-        # segment-key sub-select's (segment, network), then the segment aid, the
-        # network aid, and the network's own resolution.
-        expected = (
-            _IDENTITY["basin_version_id"],
-            _IDENTITY["segment_id"],
-            _IDENTITY["river_network_version_id"],
-            _IDENTITY["segment_id"],
-            _IDENTITY["river_network_version_id"],
-            _IDENTITY["river_network_version_id"],
-        )
-        # The selected-cycles branch prepends its VALUES list: two bindings
-        # (scenario, cycle_time) per selected cycle, two cycles in this fixture.
-        offset = 4 if label == "forecast_segment_rows_selected_cycles" else 0
-        assert tuple(parameters[offset : offset + 6]) == expected, label
+        assert "%s" not in statement, label
+        assert set(re.findall(r"%\((\w+)\)s", statement)) == set(parameters), label
+        assert parameters["basin_version_id"] == "basin_v1", label
+        assert parameters["river_segment_id"] == "seg_001", label
+        assert parameters["river_network_version_id"] == "rivnet_v1", label
+        if "scenario_tokens" in parameters:
+            assert parameters["scenario_tokens"] == ["gfs"]
+            assert parameters["scenario_ids"] == ["forecast_gfs_deterministic", "gfs"]
+        if "run_id" in parameters:
+            assert parameters["run_id"] == "run_a"
+            assert parameters["model_id"] == "model_a"
+        if label == "forecast_segment_rows_selected_cycles":
+            assert parameters["selected_scenario_0"] == "a"
+            assert parameters["selected_cycle_0"] == _T0
+            assert parameters["selected_scenario_1"] == "b"
+            assert parameters["selected_cycle_1"] == _T1
 
 
 def test_forecast_store_segment_blocks_emit_unit_and_network_without_the_text_columns() -> None:

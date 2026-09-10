@@ -110,7 +110,7 @@ from packages.common.river_ts_render import (
     strip_scalar_subqueries,
     text_fact_columns,
 )
-from tests.river_ts_template_registry import FORECAST_STORE_SEGMENT_BLOCKS, REGISTRY, entry_by_key
+from tests.river_ts_template_registry import REGISTRY
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -744,7 +744,7 @@ def test_every_registered_template_renders_for_the_legacy_store(entry) -> None:
     dropped from this branch is the measured compressed-chunk collapse applied to
     exactly the rows that have not moved yet.
     """
-    template = entry.source()
+    template = entry.source("legacy")
 
     rendered = render_river_ts_sql(template, "legacy", entry=entry.key)
 
@@ -762,7 +762,7 @@ def test_every_registered_template_renders_for_the_narrow_store(entry) -> None:
     assertion; what is added here is the census-shaped part (the aid count) and
     the table-scoped emptiness the whole cleanup turns on.
     """
-    template = entry.source()
+    template = entry.source("narrow")
 
     rendered = render_river_ts_sql(template, "narrow", entry=entry.key)
 
@@ -793,15 +793,6 @@ def test_every_registered_template_renders_for_the_narrow_store(entry) -> None:
 #: off-by-one here is a psycopg2 arity error in the migration window, or worse, a
 #: silently reordered tuple that binds `valid_time` where `run_id` belonged.
 POSITIONAL_INDEX_PINS: dict[str, tuple[int, ...]] = {
-    "forecast_store:segment_identity_predicates": (3, 4),
-    "forecast_store:latest_issue_time": (3, 4),
-    "forecast_store:per_source_latest_cycles": (3, 4),
-    "forecast_store:latest_analysis_issue_time": (3, 4),
-    "forecast_store:analysis_segment_rows": (3, 4),
-    "forecast_store:forecast_segment_rows_selected_cycles": (5, 6),
-    "forecast_store:forecast_segment_rows": (3, 4),
-    "forecast_store:latest_run_type_valid_time": (3, 4),
-    "forecast_store:run_type_segment_rows": (3, 4),
     "parser:replace_chain_probe": (1,),
     "parser:replace_chain_window": (1,),
 }
@@ -813,7 +804,8 @@ def test_every_positional_entry_has_an_index_pin() -> None:
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-def test_every_registered_template_is_counted_the_same_way_twice(entry) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_every_registered_template_is_counted_the_same_way_twice(entry, store) -> None:
     """The structural walk and the name counter must agree, entry by entry.
 
     The name counter is deliberately ignorant of `FROM` / `JOIN` / aliases so it
@@ -821,15 +813,16 @@ def test_every_registered_template_is_counted_the_same_way_twice(entry) -> None:
     do over the real register — every registered template names the fact table in
     exactly the forms the walk models (round-2 H3).
     """
-    template = entry.source()
+    template = entry.source(store)
 
     assert fact_table_name_occurrences(template) == fact_table_attribution(template).reference_count, entry.key
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-def test_every_registered_templates_aid_count_matches_its_marker_count(entry) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_every_registered_templates_aid_count_matches_its_marker_count(entry, store) -> None:
     """1:1, which is the invariant the whole line-deletion scheme rests on."""
-    template = entry.source()
+    template = entry.source(store)
 
     assert template.count(PUSHDOWN_AID_MARKER) == entry.expected_aids, entry.key
     assert template.count("remove with #1342") == entry.expected_aids, (
@@ -838,34 +831,12 @@ def test_every_registered_templates_aid_count_matches_its_marker_count(entry) ->
 
 
 def test_the_rendered_aid_total_reconciles_with_the_per_file_census() -> None:
-    """Rendered 58, in source 34 — and the difference is stated, not waved at.
+    """The 12 raw templates carry the 34 source aids exactly once each.
 
-    The two numbers count different things and both are load-bearing, so they are
-    reconciled here rather than left to look like a contradiction:
-
-    * **34** is the ``grep -rn "remove with #1342"`` total over the seven
-      REGISTERED reader SOURCE files (fixture "Measured baseline"), pinned per
-      file in each file's owning oracle — ``REGISTERED_SOURCES`` plus
-      ``DISPLAY_MARKER_AID_CENSUS``, not a sweep of the tree, so an unregistered
-      reader is not in it (that is I11's discovery-set census, tasks 7.2a).
-      That is the number #1342 deletes from those files.
-    * **58** is the total over RENDERED templates, which is larger for exactly one
-      reason: ``forecast_store._SEGMENT_IDENTITY_PREDICATE_SQL`` carries three
-      aids in the source once and is embedded by all eight segment blocks, so
-      those three aids are rendered nine times (once as the fragment entry, once
-      inside each block) and appear 8 × 3 = 24 times more than they are written.
-
-    Pinned as an identity rather than as two independent constants: if a block
-    stopped embedding the fragment — the change that would silently drop its
-    segmentby pruning — the arithmetic breaks here even though both totals could
-    be individually re-pinned to something self-consistent.
+    Forecast execution coverage is separate: eight spanning callers consume
+    the shared segment source, and A9 consumes the known-run source.
     """
-    rendered_total = sum(entry.expected_aids for entry in REGISTRY)
-    fragment = entry_by_key("forecast_store:segment_identity_predicates")
-    embedding_blocks = len(FORECAST_STORE_SEGMENT_BLOCKS)
-
-    assert rendered_total == 58
-    assert rendered_total - embedding_blocks * fragment.expected_aids == 34
+    assert sum(entry.expected_aids for entry in REGISTRY) == 34
 
 
 def test_the_sanctioned_vocabulary_is_the_shared_one_not_a_private_copy() -> None:

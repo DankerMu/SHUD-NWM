@@ -24,6 +24,8 @@ from packages.common.river_ts_render import (
     sql_chains,
 )
 from tests.river_ts_template_registry import (
+    FORECAST_STORE_EXECUTIONS,
+    FORECAST_STORE_SEGMENT_BLOCKS,
     GOLDEN_BASE_SHA,
     GOLDEN_FIXTURE,
     GOLDEN_SHA256,
@@ -70,28 +72,60 @@ def test_the_golden_was_captured_at_the_change_base() -> None:
 
 
 def test_the_golden_covers_exactly_the_registered_entries() -> None:
-    """A new entry without a golden, or a golden without an entry, is red.
-
-    Without this the equivalence check is only as complete as the fixture: an
-    entry added to the register but not to the golden would simply not be
-    compared, which is the failure mode a "for every entry in the golden" loop
-    has and this one does not.
-    """
-    assert set(GOLDEN["entries"]) == {entry.key for entry in REGISTRY}
+    """Historical statements and live raw sources have distinct exact sets."""
+    siblings = {entry.key for entry in REGISTRY if not entry.key.startswith("forecast_store:")}
+    assert len(siblings) == 10
+    assert set(GOLDEN["entries"]) == siblings | {
+        *(f"forecast_store:{label}" for label in FORECAST_STORE_SEGMENT_BLOCKS),
+        "forecast_store:segment_identity_predicates",
+        "forecast_store:latest_product_fallback",
+    }
+    assert {entry.key for entry in REGISTRY} == siblings | {
+        "forecast_store:segment_rows_source",
+        "forecast_store:latest_product_river_source",
+    }
+    assert set(FORECAST_STORE_EXECUTIONS) == {
+        *FORECAST_STORE_SEGMENT_BLOCKS, "latest_product_fallback",
+    }
     assert len({entry.key for entry in REGISTRY}) == len(REGISTRY), "duplicate registry key"
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
 def test_legacy_renderer_preserves_every_current_template_predicate(entry) -> None:
-    template = entry.source()
+    template = entry.source("legacy")
 
     assert _legacy_chains(template, entry.key) == sql_chains(template)
+    if not entry.key.startswith("forecast_store:"):
+        assert _legacy_chains(template, entry.key) == tuple(
+            tuple(chain) for chain in GOLDEN["entries"][entry.key]["chains"]
+        )
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+@pytest.mark.parametrize(
+    ("key", "factory_name", "route_alias"),
+    (
+        ("forecast_store:segment_rows_source", "_segment_rows_source_template", "h"),
+        ("forecast_store:latest_product_river_source", "_latest_product_river_source_template", "cr"),
+    ),
+)
+def test_routed_registry_render_matches_actual_store_source(key, factory_name, route_alias, store) -> None:
+    from packages.common import forecast_store
+
+    entry = entry_by_key(key)
+    rendered = render_river_ts_sql(entry.source(store), store, entry=key)
+    expected = render_river_ts_sql(getattr(forecast_store, factory_name)(store), store, entry=key)
+    assert f"{route_alias}.timeseries_store = '{store}'" in rendered.sql
+    opposite = "narrow" if store == "legacy" else "legacy"
+    assert f"{route_alias}.timeseries_store = '{opposite}'" not in rendered.sql
+    assert rendered == expected
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-def test_every_registered_entry_declares_its_own_table_mentions(entry) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_every_registered_entry_declares_its_own_table_mentions(entry, store) -> None:
     """The per-entry half of registry closure (the per-file sums live in the owning oracles)."""
-    text = entry.source()
+    text = entry.source(store)
 
     assert text.count(RIVER_TABLE) == entry.mentions, entry.key
     assert (entry.mentions == 0) == (entry.kind == "fragment"), entry.key
@@ -271,7 +305,7 @@ def test_deleting_a_whole_having_line_reddens_the_golden() -> None:
     passed the equivalence oracle.
     """
     entry = entry_by_key("display_coverage:refresh")
-    template = entry.source()
+    template = entry.source("legacy")
     assert template.count(_HAVING_LINE) == 1
 
     mutated = template.replace(_HAVING_LINE, "")
@@ -291,16 +325,13 @@ def test_editing_a_distinct_on_select_list_leaves_the_golden_green() -> None:
     chain opener made the golden police a select list as if it were a predicate,
     which is a claim it cannot honestly make about the other entries.
     """
-    entry = entry_by_key("forecast_store:analysis_segment_rows")
-    template = entry.source()
+    template, _parameters = FORECAST_STORE_EXECUTIONS["analysis_segment_rows"]()
     assert "SELECT DISTINCT ON (rt.valid_time)" in template
-
     mutated = template.replace("SELECT DISTINCT ON (rt.valid_time)", "SELECT DISTINCT ON (rt.valid_time, rt.value)")
-
-    golden = tuple(tuple(chain) for chain in GOLDEN["entries"][entry.key]["chains"])
     assert mutated != template
-    assert _legacy_chains(template, entry.key) == golden
-    assert _legacy_chains(mutated, entry.key) == golden
+    # Composed statements are not renderer inputs. This remains a chain-boundary
+    # counterexample, while routing/selection owners separately pin the output.
+    assert sql_chains(mutated) == sql_chains(template)
 
 
 def test_the_golden_holds_the_measured_chain_total() -> None:
@@ -308,5 +339,5 @@ def test_the_golden_holds_the_measured_chain_total() -> None:
     assert len(GOLDEN["entries"]) == 20
     assert sum(len(entry["chains"]) for entry in GOLDEN["entries"].values()) == 215
     assert len(GOLDEN["entries"]["display_coverage:refresh"]["chains"]) == len(
-        _legacy_chains(entry_by_key("display_coverage:refresh").source(), "display_coverage:refresh")
+        _legacy_chains(entry_by_key("display_coverage:refresh").source("legacy"), "display_coverage:refresh")
     )
