@@ -579,18 +579,25 @@ def _fail_the_release(monkeypatch: pytest.MonkeyPatch, held: list[int], *, at: s
     """Inject one `OSError` into the release of the fds recorded in `held`.
 
     Selective on purpose: `copyback_guard.os` and `copyback_guard.fcntl` are the
-    global modules, so a blanket patch would break pytest's own descriptors. The
-    real call always runs first, so the fd is genuinely closed either way.
+    global modules, so a blanket patch would break pytest's own descriptors.
+
+    `at="unlock"` deliberately does **not** perform the real `LOCK_UN` before
+    raising (round-5 G2): the backstop under test is that `os.close` still runs
+    after a failed unlock and drops the flock anyway. An injection that unlocked
+    first made that scenario unreachable — the lock was already gone whether or
+    not the close ran, so the test passed with the close deleted. `at="close"`
+    does close for real, because there the fd genuinely is gone and only the
+    reporting fails.
     """
 
     real_flock = fcntl.flock
     real_close = os.close
 
     def fake_flock(fd: int, operation: int) -> None:
-        real_flock(fd, operation)
         if at == "unlock" and operation == fcntl.LOCK_UN and fd in held:
             held.remove(fd)
             raise OSError(errno.EIO, "injected unlock failure")
+        real_flock(fd, operation)
 
     def fake_close(fd: int) -> None:
         real_close(fd)
@@ -626,6 +633,12 @@ def test_a_failing_release_never_replaces_the_success_the_caller_already_compute
         fd = acquire_copyback_batch_lock(root, timeout_seconds=5)
         held.append(fd)
         release_copyback_batch_lock(fd)
+        # Round-5 G2: assert the close ran, here and not later -- fd numbers are
+        # reused, so after the next `acquire` this same number is valid again
+        # and the check would be vacuous.
+        with pytest.raises(OSError) as closed:
+            os.fstat(fd)
+        assert closed.value.errno == errno.EBADF
         # The context manager, as every other lane calls it.
         with copyback_batch_lock(root, timeout_seconds=5) as managed_fd:
             held.append(managed_fd)
@@ -633,7 +646,9 @@ def test_a_failing_release_never_replaces_the_success_the_caller_already_compute
     assert [record.levelname for record in caplog.records] == ["WARNING", "WARNING"]
     assert all(record.name == "packages.common.copyback_guard" for record in caplog.records)
     # Both steps are attempted even when the first raises, so the flock is gone
-    # and the next writer is not locked out by the failed release.
+    # and the next writer is not locked out by the failed release. With
+    # `at="unlock"` the unlock never happened, so this acquire succeeds only
+    # because the close dropped the flock.
     release_copyback_batch_lock(acquire_copyback_batch_lock(root, timeout_seconds=1))
 
 

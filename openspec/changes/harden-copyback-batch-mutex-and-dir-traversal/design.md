@@ -15,7 +15,7 @@ pre-authorized this run and asked for advisor consultation at key nodes; a
 
 **Priority escalation.** #2035 filed as p2 with an explicit upgrade trigger:
 "#2034 一旦把镜像接到真会跑的缝上 … A 立刻变成现网静默数据丢失（届时按 p1 处理）".
-#2034 and #2069 are closed; the trigger has fired. Treated as p1.
+Issues #2034 and #2069 are closed; the trigger has fired. Treated as p1.
 
 ## Weakness A: batch-scoped mutex
 
@@ -316,8 +316,8 @@ carrying `default:user:X:rwx` / `default:mask::rwx`:
 by the existing capability at
 `openspec/specs/filesystem-permission-determinism/spec.md`. So the
 widening is **mask-neutral** under an ACL and **corrective** without one, and one
-unconditional rule is both correct and simpler. Recovering that clamped mask is
-#1631's open question and an explicit non-goal here.
+unconditional rule is both correct and simpler. Recovering that clamped mask
+is #1631's open question and an explicit non-goal here.
 
 Live `getfacl` on the shared root, which sets where B actually bites today.
 **Read this on node-27**, and only on node-27 — see the NFS caveat below.
@@ -414,13 +414,14 @@ Source-of-truth identity/contract: the `_CopybackRollbackEntry` batch
 Surfaces:
 
 Line numbers drift as this branch grows, so this inventory cites symbols and
-lets the reader grep. The numbers that remain elsewhere in this document are
-governed by a rule, not by a pinned SHA: **every line citation in this change's
-fixture is re-verified against the branch head in the same commit that touches a
-cited file.** Naming a SHA here would go stale on the next commit, which is the
-exact failure this rule exists to stop. The one deliberate exception is
-`claims-audit.md`, whose row citations are pinned to the audit head and resolve
-with `git show <sha>:<path>`.
+lets the reader grep. Round 4's corrective action removed the rest: this
+change's fixture carries **no `file:line` citations at all** outside
+`claims-audit.md`, whose row citations are pinned to their section's audit
+head — §2 to `b59ffd2e`, §4 to `dbc40397` — and resolve with
+`git show <sha>:<path>`. Round-5 H3 is the price
+of getting that wrong once — a stripped range that had been carrying the scope
+of its sentence, not just its precision — so replacement text scopes by symbol
+name instead.
 
 - Producers: `publisher._copyback_run_products` (**no production caller today**;
   `publish_cycle` delegates to `publish_qdown_cycle`, and every caller is in
@@ -530,6 +531,16 @@ Regression rows:
   writer (flock is released by the kernel on process exit).
 - **Unchanged downstream consumers**: `provider_atomic` gates,
   `state_manager._ensure_copyback_state_parent`,
-  `run_tree_copyback._copy_tree_no_symlinks`, `services/orchestrator/retention.py`
-  (descends only `root/<prefix>` for the cycle-scoped prefixes and `root/runs`; it
-  never enumerates root-level files, so the lock file is invisible to it).
+  `run_tree_copyback._copy_tree_no_symlinks`.
+- **Unchanged *writer* that this change does not bring into the protocol**:
+  `services/orchestrator/retention.py`. It was listed as a consumer above until
+  the post-ceiling deferral sweep; that was wrong and is the direct cause of it
+  being missed. It descends only `root/<prefix>` for the cycle-scoped prefixes
+  and `root/runs` and never enumerates root-level files, so the lock file stays
+  invisible to it — but it `rmtree`s trees under the copyback root without
+  taking the mutex this change introduces. That is not a regression: today no
+  writer takes the mutex, so the race already exists and this change does not
+  widen it. It does make the gap structural rather than incidental — after this
+  change every promoting writer holds the lock and this deleter alone does not
+  — so it is tracked as issue #2238, which also records that the deletions are
+  live (node-22's production env enables extra roots) rather than latent.

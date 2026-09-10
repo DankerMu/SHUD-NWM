@@ -95,8 +95,21 @@ and it is why `_copy_tree_no_symlinks`'s mode-less `mkdir` must stay exactly as 
   overlap guards, so a zero-write `skipped` path creates no lock file, and the
   timeout surfaces as each lane's own error type.
 - Route copyback directory creation through
-  `ensure_traversable_copyback_directory` at every call site in `publisher.py`
-  and `run_tree_copyback.py`.
+  `ensure_traversable_copyback_directory` in every function that creates a
+  directory on the copyback promote path, with the single deliberate carve-out
+  named in the bullet below (`_copy_tree_no_symlinks`): `publisher._prepare_copyback_root`,
+  `publisher._copyback_collected_object_tree`,
+  `publisher._replace_directory_tree_no_follow`,
+  `publisher._replace_directory_tree_for_qdown_batch`,
+  `run_tree_copyback.copyback_run_trees`, `run_tree_copyback._replace_tree` and
+  `run_tree_copyback._replace_file`.
+  That is not the same as every `ensure_directory_no_follow` call in those two
+  files, and post-ceiling (round-5 H3) this bullet no longer claims it is:
+  `publisher._write_published_artifact` creates the published-artifact root,
+  which is not a copyback directory, and the two rollback-backup clone helpers
+  (`_clone_copyback_backup_tree_no_follow`,
+  `_clone_copyback_backup_entries_no_follow`) are widened in one pass by
+  `_chmod_tree_readable` after the clone completes rather than per level.
   `publisher.py` and `run_tree_copyback.py` create the copyback **root**
   itself, which is in
   scope — issue #2035's `umask 027` measurement lists `0o750 .` first.

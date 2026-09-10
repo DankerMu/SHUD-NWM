@@ -4,15 +4,28 @@
 
 A process SHALL hold one exclusive cross-process mutex, fixed per copyback root,
 for the whole of any critical section in which it promotes a directory tree under
-the shared object-store copyback root — from the first read of the copyback
-destination, through every directory-tree promotion, until its batch commit or
-batch rollback has returned. The mutex SHALL NOT be released between the
-individual tree promotions of one batch.
+the shared object-store copyback root — from the first read of the destination
+tree it promotes into whose result that promotion depends on, through every
+directory-tree promotion, until its batch commit or batch rollback has
+returned. The mutex SHALL NOT be
+released between the individual tree promotions of one batch.
 
 A lane whose planning reads only the source object store MAY perform that
 planning before acquiring: it observes nothing a competitor can change under the
-copyback root. Only planning that reads the destination — deciding what is
-already mirrored there — is inside the critical section.
+copyback root.
+
+Planning that reads the destination — deciding that a tree is already mirrored
+there and need not be promoted — MAY also be performed before acquiring, but its
+result is then advisory: a competitor may promote into, or roll back out of,
+that target between the read and the moment the lane reports on it, and on the
+skip path the lane never acquires at all, so a tree it reports as already
+present was never observed under the mutex.
+`services/tile_publisher/forcing_copyback_backfill.py` is such a lane;
+narrowing it is tracked as issue #2236 and is not in this change's scope. What
+this requirement guarantees is that every tree a lane reports as promoted was
+promoted inside the critical section, and that no promotion overlaps another
+writer's
+backup-to-promote window.
 
 A writer that cannot acquire the mutex within its configured deadline SHALL fail
 loudly with a distinct error and SHALL NOT promote any tree.

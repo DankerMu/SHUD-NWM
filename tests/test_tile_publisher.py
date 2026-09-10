@@ -3751,6 +3751,49 @@ def test_run_products_copyback_leaves_every_level_it_created_traversable_under_u
         assert stat.S_IMODE(level.stat().st_mode) == 0o755, level
 
 
+def test_run_products_copyback_holds_the_batch_mutex_across_every_tree_it_promotes(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E19, run-products lane x mutex **span** (round-5 G1).
+
+    Span was pinned lane by lane and this one was missed: run-tree in
+    `d4de6cb2`, q_down and canonical in `fe779674` (round 2), the canonical
+    backfill script in `a09f7fd0` (round-4 finding C1). Deleting this lane's
+    mutex outright already reddened two tests, so *acquisition* was pinned; an
+    acquire-then-release-then-promote build left all 164 green, so span was
+    not. This lane has no
+    `_commit_qdown_copyback_batch` to probe -- it promotes through
+    `_replace_directory_tree_no_follow` once per run and restores its own
+    backup inline -- so the probe sits at the promote itself, and two runs are
+    seeded so the "SHALL NOT be released between the individual tree
+    promotions of one batch" half is measured too, not just the first promote.
+    """
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_run_products(publisher, "run-a")
+    _seed_run_products(publisher, "run-b")
+    held_during: list[bool] = []
+    real_replace = publisher_module._replace_directory_tree_no_follow
+
+    def probing_replace(temp_dir: Path, target_dir: Path, *, containment_root: Path) -> None:
+        held_during.append(_batch_lock_is_held(copyback_root))
+        return real_replace(temp_dir, target_dir, containment_root=containment_root)
+
+    monkeypatch.setattr(publisher_module, "_replace_directory_tree_no_follow", probing_replace)
+
+    summary = publisher._copyback_run_products(["run-a", "run-b"])
+
+    assert summary is not None and summary["status"] == "copied"
+    # One promote per run, and the mutex held at both -- the second is what
+    # rules out a release between the trees of one batch.
+    assert held_during == [True, True]
+    assert (copyback_root / "runs" / "run-a").is_dir()
+    assert (copyback_root / "runs" / "run-b").is_dir()
+
+
 def test_qdown_copyback_holds_the_batch_mutex_through_commit_and_rollback(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,

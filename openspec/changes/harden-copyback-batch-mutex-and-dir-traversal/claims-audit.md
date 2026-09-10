@@ -32,7 +32,16 @@ in the declared scope with no row). The honest statement of coverage is:
 
 - every WHEN / THEN / AND clause of both spec deltas, plus this branch's changed
   lines in `openspec/changes/display-v2-national-timeline-precip-overlay/specs/canonical-precip-copyback/spec.md`
-  — complete, including the two clauses added as rows A37 and A38 in round 4
+  — complete as of `dbc40397`, including the two clauses added as rows A37 and
+  A38 in round 4. **Corrected post-ceiling (user decision, round-5 H2)**: this
+  bullet is a statement about the tree at `dbc40397`, §4's pinned head, not
+  about later heads.
+  `a09f7fd0` rewrote the mutex-scope paragraph of
+  `object-store-copyback-mutual-exclusion/spec.md` and the post-ceiling fix pass
+  rewrote it again; neither rewrite has a row here, and the file is frozen, so
+  it does not get one. Those two rewrites are adjudicated in
+  `.workplans/pr-2201/review/round5-verdicts.md` and
+  `.workplans/pr-2201/review/post-ceiling-fix-adjudication.md` instead
 - every behaviour assertion in `design.md`, `tasks.md`, `proposal.md` as those
   documents stood at `b59ffd2e`; they have since been rewritten (every
   `file:line` citation deleted), so the rows record what was checked then, not
@@ -150,7 +159,7 @@ touches a cited file); the split is deliberate.
 | 34 | `services/orchestrator/run_tree_copyback.py:229-235` — "`_copyback_stage_run_trees` (`chain_forecast_execution.py:953`) catches only `RunTreeCopybackError`, and it runs on the `parse` stage of every cycle" | reachability | `chain_forecast_execution.py:953` `except RunTreeCopybackError as error:` (exact line and exact exception type); `:857-859` `_after_cycle_stage_terminal` calls `_copyback_stage_run_trees` whenever `_stage_should_copyback_run_trees` is true, gated by `result_status == "succeeded"`; `:931-933` returns `True` unconditionally for `stage.stage == "parse"` | the catch clause at `chain_forecast_execution.py:953` catches a broader exception type, or `parse`-stage copyback is conditional on something besides a successful parse | HOLDS — exact line number and exact except-type verified by direct read |
 | 35 | `services/orchestrator/run_tree_copyback.py:452-467` (docstring) — "this function has the same lock-free `exists -> rename-to-backup -> promote` window as the publisher's `_replace_directory_tree_for_qdown_batch`" | (comparative claim) | `run_tree_copyback.py:474-477` `_replace_tree`: `_copy_tree_no_symlinks` then `if target.exists(): os.replace(target, backup)` then `os.replace(temp, target)` — three separate syscalls, no lock held *within* this function itself (it relies entirely on the caller's batch mutex, confirmed row 1) | `_replace_tree` takes its own lock internally, making the "lock-free window" description stale | HOLDS — no lock acquisition of any kind appears inside `_replace_tree`'s body; the mutual-exclusion property is supplied entirely by the enclosing `with _run_tree_batch_lock` in the caller |
 | 36 | `packages/common/copyback_guard.py:325-341` (docstring) — "The missing levels are found by probing **upward before creating anything**, not by walking `path.relative_to(containment_root).parts`: that parts list is empty when `path` *is* the root... so the root... would never be widened" | never (counterfactual) | `copyback_guard.py:353-378` the actual implementation probes `os.lstat` starting at `target` itself and walks `.parent` upward, appending to `missing` — no `.relative_to(...).parts` call anywhere in the function | the implementation actually uses `path.relative_to(containment_root).parts` as the counterfactual describes | HOLDS — read the real implementation; it is the probe-upward algorithm the docstring describes, not the counterfactual it rejects |
-| 37 | `object-store-copyback-mutual-exclusion/spec.md` — "**AND** neither writer's reported status MAY claim success for a tree that is no longer present at its target." | MUST/spec | q_down lane: any failure rolls back and re-raises before the `copied` summary is built, so the summary is never reached on a rolled-back tree; run-tree lane: the exception propagates out of the `with` and no summary is returned at all; canonical lane: `copied` is explicitly downgraded to `rolled_back` / `rollback_unknown` and the whole receipt to `failed` | a lane that returns its summary first and rolls back after — checked in all three: in every one the rollback precedes the report, and the canonical lane rewrites the per-tree status rather than leaving it stale | HOLDS. **Added in round 4 (finding D1)**: this AND-clause sat inside row A3's cited range but A3's quote stopped at the THEN and its falsifier was about lock contention, so the clause had no falsifier of its own. It archives verbatim, which is why it gets a row rather than a note |
+| 37 | `object-store-copyback-mutual-exclusion/spec.md` — "**AND** neither writer's reported status MAY claim success for a tree that is no longer present at its target." | MUST/spec | q_down lane: any failure rolls back and re-raises before the `copied` summary is built, so the summary is never reached on a rolled-back tree; run-tree lane: the exception propagates out of the `with` and no summary is returned at all; canonical lane: `copied` is explicitly downgraded to `rolled_back` / `rollback_unknown` and the whole receipt to `failed` | a lane that returns its summary first and rolls back after — **corrected post-ceiling (user decision, round-5 H1)**: the original wording said "all three" while the evidence column named three of the six lanes that take this mutex. Re-checked in all six: `publisher._copyback_qdown_products` and `publisher._copyback_run_products` both build their `"status": "copied"` dict only after the `with self._copyback_batch_mutex(...)` block exits, so a `PublishError` raised inside it means no summary is ever built; `run_tree_copyback` lets the exception propagate out of the `with` and returns nothing; the publisher's canonical lane rewrites each per-tree `copied` to `rolled_back` / `rollback_unknown`; `forcing_copyback_backfill._copy_package` runs `_rollback_qdown_copyback_batch` inside its `except` and returns `"status": "failed"` from that handler, so the `"status": "copied"` return is unreachable on a rolled-back package; `scripts/canonical_precip_copyback_backfill._mirror_tree_under_batch_lock` has no batch rollback at all (per-file `os.replace`, no backup-rename), so it has no path that reports success for a tree its own rollback removed. In every one the rollback precedes the report | HOLDS. **Added in round 4 (finding D1)**: this AND-clause sat inside row A3's cited range but A3's quote stopped at the THEN and its falsifier was about lock contention, so the clause had no falsifier of its own. It archives verbatim, which is why it gets a row rather than a note |
 | 38 | `filesystem-permission-determinism/spec.md` — the whole "the ordinary umasks are unchanged" scenario: WHEN umask is `0o022` or `0o002`, THEN each created level lands `0o755`, AND no created level carries a group- or other-write bit | MUST/spec | `copyback_guard`'s traversal helper `chmod`s every level it records as missing, unconditionally; `chmod` is not masked by umask, so the mode is exact rather than `0o755 & ~umask` | a umask that would leave a created level below `0o755` — impossible against an unconditional `chmod`; and the group/other-write half follows from the mode being exactly `0o755` | HOLDS. **Added in round 4 (finding D1)**: the scenario fell between rows A18 and A19, both of which cite neighbouring ranges, and had no row of its own |
 
 ### Half B — design, tasks, proposal, operator docs
@@ -212,6 +221,7 @@ touches a cited file); the split is deliberate.
 
 
 ## R1 — env file carries both roots (settles table-B row 45: UNPROVEN -> HOLDS)
+
 node-22 `/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env` (-rw------- frd_muziyao:huser):
     13:OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store
     15:NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
@@ -219,6 +229,7 @@ Files carrying NHMS_OBJECT_STORE_COPYBACK_ROOT: compute.host.env, compute.replay
 compute.scheduler-dbfree.env.
 
 ## R2 — no sticky bit on the copyback root (settles table-B row 46: UNPROVEN -> over-narrow)
+
 node-22:
     /ghdc      drwxr-xr-x 755 root:root
     /ghdc/data drwxrwxrwx 777 root:root
@@ -229,6 +240,7 @@ on the *directory*, so any member of gid 1078 can remove an orphan lock file reg
 owns it. The runbook's "以它自己的属主身份 rm -f" is not wrong, only narrower than required.
 
 ## R3 — the getfacl table is host-dependent (NEW finding; design.md:307-321 gives no host)
+
 Same paths, same instant, two hosts:
 
 node-27 (`/home/ghdc/nwm/...`, local ext4 `/dev/mapper/ubuntu--vg-home`), uid 1005 nwm:
@@ -247,6 +259,7 @@ node-22 (`/ghdc/data/nwm/...`, NFSv4.2 client of `ghdc:/home/ghdc`), uid 1103 fr
      "no default ACL anywhere" and would draw the opposite conclusion.
 
 ## R4 — inheritance does still happen for node-22-created trees (server-side)
+
 node-27 view of a run tree copied back by node-22 at 2026-09-10 02:09:58 +0800:
     /home/ghdc/nwm/object-store/runs/fcst_ifs_2026090900_dg_fa180301403c9833e11bfa933ffd5a27/
     drwxrwxr-x frd_muziyao:nfsdata
