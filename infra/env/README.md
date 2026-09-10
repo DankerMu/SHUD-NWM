@@ -113,10 +113,11 @@ Notes:
     `tests/test_two_node_docker_source_trust.py` is **not** in that set (it reads
     `compute.env`, not the template).
   - **On CI the authority is `scripts/select_ci_tests.py`**, where two rules match
-    `infra/env/compute.example`: the `infra/env/**` glob (`:1797-1800` →
+    `infra/env/compute.example`: the `infra/env/**` glob (`:2301-2304` →
     `tests/test_two_node_docker_runtime.py`) and the exact-path rule
-    (`:1810-1813` → `tests/test_slurm_gateway_deployment_contract.py`, the
-    constant at `:446`). The other consumer files are not selected for this path,
+    (`:2313-2316` → `tests/test_slurm_gateway_deployment_contract.py`, the
+    `SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST` constant at `:496`). The other
+    consumer files are not selected for this path,
     so a green PR here does not exercise them — run the grep set locally.
 - `compute.host.env` is untracked with no committed template. That gap is
   recorded, not fixed, by #1694.
@@ -165,6 +166,14 @@ unit → EnvironmentFile table above is the authority.
   live node-22 units those variables come from `compute.scheduler-dbfree.env`
   (tracked template `compute.scheduler-dbfree.env.example`), per the table
   above; `compute.example` carries the same key names for the compose lane only.
+  The live file is untracked, so the template is *not* evidence for its
+  contents. Read on node-22 2026-09-10 (`-rw-------` `frd_muziyao:huser`):
+  `:13 OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store`,
+  `:15 NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store` — both
+  present, which is what the canonical-precip backfill recovery command in
+  `docs/runbooks/current-production-ops.md` §5.3 depends on. Same scan: only
+  `compute.host.env`, `compute.replay.env` and `compute.scheduler-dbfree.env`
+  carry `NHMS_OBJECT_STORE_COPYBACK_ROOT`.
   `DATABASE_URL` belongs to the compose lane's `compute-api` or to an explicit
   archived rollback drill — and the live `nhms-compute-api.service` does not load
   `compute.env` at all; its only `EnvironmentFile` is the untracked
@@ -190,17 +199,34 @@ unit → EnvironmentFile table above is the authority.
   - The lock path is **fixed and has no env override**: it is anchored under the
     copyback root because that is the one path every writer has already resolved,
     so a private `/tmp` (systemd `PrivateTmp=true`, Slurm `job_container/tmpfs`)
-    cannot split one mutex into two inodes. The file is created `0o600`, is never
-    unlinked by the code, and a killed holder's lock is released by the kernel.
+    cannot split one mutex into two inodes. The file is created `0o600` and is
+    never unlinked by the code — both enforced directly (`_LOCK_MODE` in
+    `packages/common/copyback_guard.py`; no unlink call anywhere in the module).
+    "Owned by the writer itself" is *not* separately enforced: the code asserts
+    `lock owner == copyback root owner` and `current euid == lock owner`, and the
+    two coincide only because every configured writer is the same uid and a
+    foreign uid is refused before the file exists.
+  - A killed holder's lock is released by the **local** kernel at process exit,
+    so a stale file is not a stale lock. The production root is not local:
+    `/ghdc/data/nwm/object-store` on node-22 is an NFSv4.2 mount of
+    `ghdc:/home/ghdc` (measured 2026-09-10). A process death still releases at
+    exit; a **host** death does not — the server holds the lock until that
+    client's lease expires.
   - `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` (optional, **default 900**)
     bounds how long a writer waits. Contention waits rather than refuses;
     exceeding the deadline raises a distinct loud error and never falls back to
     an unlocked promote. Unset or empty means 900 s; a non-numeric or
     non-positive value is a hard configuration refusal, not a silent default.
     900 s is sized against the measured hold: ~2.2 GB per acquisition at
-    ~62 MB/s NFS throughput is ~36 s, taken twice per cycle (`parse` and
-    `state_save_qc`), so it admits ~24 queued acquisitions ~= 12 concurrent
-    execution units against the 2 of live steady state.
+    ~62 MB/s NFS throughput is ~36 s. The 900 s arithmetic assumed **two**
+    acquisitions per cycle (`parse` and `state_save_qc`, ~72 s), which admits
+    ~24 queued acquisitions ~= 12 concurrent execution units against the 2 of
+    live steady state. Re-derived 2026-09-10, the run-tree lane takes **one**
+    per cycle in both configurations — unset `NHMS_ORCHESTRATOR_TERMINAL_STAGE`
+    hits only `parse`, and `forecast_state_save_qc` (what node-22 runs) makes
+    `chain_stages.stages_through` drop `parse` from the stage list entirely, so
+    only `state_save_qc` hits. The real headroom is therefore ~2x wider than
+    those numbers; left unretuned because the error is in the safe direction.
   - All copyback writers must run as one uid (`frd_muziyao` on node-22): the
     `0o600` mode plus the ownership assertions make a writer under another
     account fail closed instead of running unlocked. The lock file's owner is
@@ -225,17 +251,30 @@ unit → EnvironmentFile table above is the authority.
       uid. That `Permission denied` *is* the foreign-owner signal; the recovery
       steps below (`ls -ln <lock>`, `stat -c '%u' <root>`) are what name the
       owner.
-  - **Recovering a stuck lock file.** Two cases, and only one of them is
+  - **Recovering a stuck lock file.** Three shapes, and only one of them is
     touchable:
     - a **live holder** — some process still holds the fd
       (`lsof "$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock"` or
       `fuser -v <path>` prints a pid) → **do not touch it**; wait, or find out why
       that writer is stuck.
+    - **owner correct, no local holder, writers still timing out** — only
+      possible on the NFS root: the holder's whole host died and the lock stands
+      until the server expires that client's lease. **Also do not touch it** —
+      unlinking splits the mutex onto a fresh inode exactly as it would with a
+      live holder. Wait out the lease, or go establish what happened to that
+      host. This is *not* an orphan; the next bullet does not apply.
     - an **orphan owned by the wrong uid** — `ls -ln <path>` shows an owner
       different from `stat -c '%u' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"` and no
       process holds it → repair it, otherwise every writer fails closed forever:
-      `sudo chown "$(stat -c '%u:%g' "$NHMS_OBJECT_STORE_COPYBACK_ROOT")" <path>`,
-      or `rm -f <path>` **as its own owner** and let the next writer recreate it.
+      `sudo chown "$(stat -c '%u:%g' "$NHMS_OBJECT_STORE_COPYBACK_ROOT")" <path>`
+      works unconditionally; `rm -f <path>` also works, and does **not** require
+      the lock file's owner — POSIX takes unlink permission from write+execute
+      on the *directory*, provided no sticky bit is set. Measured 2026-09-10 on
+      node-22: `/ghdc` 755 root:root, `/ghdc/data` 777 root:root,
+      `/ghdc/data/nwm` and `/ghdc/data/nwm/object-store` both 775
+      `frd_muziyao`(1103):`huser`(1078) — no sticky bit anywhere on the chain,
+      so any member of gid 1078 can remove it. If `ls -ld` ever shows a `t` on
+      that chain, fall back to `sudo chown`.
   - `services/orchestrator/retention.py` descends only `root/<prefix>` and
     `root/runs`, never root-level files, so the lock file is invisible to it.
 - The DB-free scheduler's trusted raw authority is the canonical shared-NFS

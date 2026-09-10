@@ -46,16 +46,34 @@ from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_fol
 COPYBACK_BATCH_LOCK_NAME = ".nhms-copyback-batch.lock"
 COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 # 900 s. Sized against a *measured* hold, not a guessed one: the NFS export
-# copies at ~62 MB/s (68 MB / 455 files in 1.097 s), one cycle cohort is ~2.2 GB
-# (38 run trees at 1.1 GB plus their referenced forcing subtrees at 1.1 GB), and
-# `_stage_should_copyback_run_trees` acquires TWICE per cycle (`parse` and
-# `state_save_qc`), so one execution unit holds the lock ~72 s per cycle. `flock`
-# is per open file description, so the scheduler's same-process execution-unit
-# threads contend with each other exactly as separate hosts would. 900 s covers
-# ~24 acquisitions ~= 12 concurrent execution units against the 2 of live steady
-# state, which leaves headroom for a replay/backfill pass; 300 s admitted only
-# ~4. Still a bounded, loud failure -- never a hang, and never an unlocked
-# promote. See `design.md` "Cost accepted, deliberately" for the full arithmetic.
+# copies at ~62 MB/s (68 MB / 455 files in 1.097 s) and one cycle cohort is
+# ~2.2 GB (38 run trees at 1.1 GB plus their referenced forcing subtrees at
+# 1.1 GB), so ONE run-tree acquisition holds the lock ~36 s.
+#
+# The 900 s figure was sized on the assumption that
+# `_stage_should_copyback_run_trees` fires TWICE per cycle (`parse` and
+# `state_save_qc`) for ~72 s of hold. Re-derived 2026-09-10: it fires ONCE per
+# cycle in BOTH configurations, so the real hold is ~36 s and the budget is
+# ~2x more conservative than the arithmetic below claims. Left as-is
+# deliberately -- the error is in the safe direction.
+#   * `terminal_stage is None`: `parse` returns True and `state_save_qc`
+#     returns False (`chain_forecast_execution.py:931-934`).
+#   * `terminal_stage == "forecast_state_save_qc"` -- the tracked
+#     `infra/env/compute.example:185` sets it, and the #2035 round-4 node-22
+#     read (2026-09-10) reports it at `:79` of the untracked
+#     `compute.scheduler-dbfree.env` and `compute.replay.env`, which is
+#     second-hand here, not a receipt this comment owns: `state_save_qc`
+#     returns True, but
+#     `chain_stages.stages_through` (`:75-79`) rebuilds the cycle's stage list
+#     as `(convert, forcing, forecast, state_save_qc)` -- `parse` is dropped,
+#     so its acquisition never happens.
+# `flock` is per open file description, so the scheduler's same-process
+# execution-unit threads contend with each other exactly as separate hosts
+# would. At the assumed ~72 s hold, 900 s covers ~24 acquisitions ~= 12
+# concurrent execution units against the 2 of live steady state, which leaves
+# headroom for a replay/backfill pass; 300 s admitted only ~4. Still a bounded,
+# loud failure -- never a hang, and never an unlocked promote. See `design.md`
+# "Cost accepted, deliberately" for the full arithmetic.
 DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS = 900.0
 COPYBACK_DIRECTORY_MODE = 0o755
 
@@ -200,6 +218,15 @@ def acquire_copyback_batch_lock(
     unlinking would let a second writer create a fresh inode and lock that
     instead. A killed holder's flock is released by the kernel on process exit,
     so a stale file is not a stale lock.
+
+    That release guarantee is the *local* kernel's, and the production copyback
+    root is not local: ``/ghdc/data/nwm/object-store`` on node-22 is an NFSv4.2
+    mount of ``ghdc:/home/ghdc`` (measured 2026-09-10). A process death there
+    still releases at exit, but a **host** death does not -- the server holds
+    the lock open until the client's lease expires, so on that root there is a
+    third state beyond "held" and "orphaned": correctly owned, no local holder,
+    and still locked. The only correct response is to wait it out; unlinking
+    splits the mutex onto a fresh inode exactly as it would with a live holder.
 
     Not reentrant. ``flock`` is per open file description, so a second
     acquisition against the same root from the same process contends with the

@@ -65,14 +65,30 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
 - **路径固定、无环境变量覆盖**。锁挂在 copyback root 下，而不是 `/tmp`：systemd
   `PrivateTmp=true` 与 Slurm `job_container/tmpfs` 会给进程各自的私有 `/tmp`，两个写者会
   flock 到两个 inode，互斥静默失效。
-- 锁文件由属主以 `0o600` 创建，代码**从不 unlink**；持有者被 kill 时内核释放 flock，
-  所以「锁文件还在」不等于「锁还被持有」。
+- 锁文件以 `0o600` 创建，代码**从不 unlink**——这两条由代码直接强制
+  （`packages/common/copyback_guard.py` 的 `_LOCK_MODE`，模块里没有任何 unlink 调用）。
+  「属主就是写者本人」则**不是独立强制的不变量，而是推论**：代码断言的是
+  「锁文件属主 == copyback root 属主」和「当前 euid == 锁文件属主」，现网所有写者恰好
+  是同一个 uid、外来 uid 又在文件创建前就被拒，两者才重合。
+- 持有者被 kill 时**本机**内核释放 flock，所以「锁文件还在」不等于「锁还被持有」。
+  但生产 copyback root 是 NFS（node-22 的 `/ghdc/data/nwm/object-store` 是
+  `ghdc:/home/ghdc` 的 NFSv4.2 挂载，2026-09-10 实测）：**进程**死立刻释放，
+  **整台主机**死不会——锁由服务端持有到租约过期。因此卡住的锁有三种形态，
+  只有一种该动：
   - **有活持有者**（`lsof <lock>` / `fuser -v <lock>` 打得出 pid）→ **不要动它**：
     删掉会让下一个写者去锁一个新 inode，互斥当场失效。
+  - **属主是对的、本机查不到持有者、写者却仍在超时** → 持锁主机整台死了，等服务端
+    租约过期。**同样不要动它**，理由与上一条相同（unlink 会拆成两个 inode）。
+    这不是「孤儿」，下一条不适用。
   - **属主不对的孤儿**（`ls -ln <lock>` 的属主 ≠ `stat -c '%u' <copyback-root>`，
     且无进程持有）→ 必须修，否则所有写者永远 fail closed：
-    `sudo chown "$(stat -c '%u:%g' <copyback-root>)" <lock>`，或者**以它自己的属主身份**
-    `rm -f <lock>`，让下一个写者重建。
+    `sudo chown "$(stat -c '%u:%g' <copyback-root>)" <lock>` 无条件可用；也可以直接
+    `rm -f <lock>` 让下一个写者重建——**删除权限来自 copyback root 目录的写+执行位，
+    不是锁文件的属主身份**（POSIX unlink 语义），前提是这条路径上没有 sticky bit。
+    2026-09-10 node-22 实测：`/ghdc` 755 root:root、`/ghdc/data` 777 root:root、
+    `/ghdc/data/nwm` 与 `/ghdc/data/nwm/object-store` 都是 775
+    `frd_muziyao`(1103):`huser`(1078)，整条链上没有 sticky bit，所以 gid 1078 的
+    任何成员都能删。若 `ls -ld` 看到 `t`，退回 `sudo chown`。
 - 互斥**覆盖整个 batch**：plan → copy → 每次 promote → commit 或 rollback 返回之后才释放。
   per-tree 粒度不够：batch rollback 中 `backup_dir is None` 的分支会删掉「此刻位于目标位置的
   东西」，那只有在期间没有别的写者提交过才等于恢复。

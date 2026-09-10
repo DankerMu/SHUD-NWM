@@ -28,7 +28,11 @@ loudly with a distinct error and SHALL NOT promote any tree.
 - **AND** the same writer later fails on a subsequent tree in the same batch
 - **THEN** the rollback MUST NOT remove a tree that a different writer committed
   after that promotion
-- **AND** the destination MUST hold exactly one writer's complete tree.
+- **AND** the destination MUST NOT be left holding a mixture of two writers'
+  trees: it holds either the competitor's complete tree, or — when no
+  competitor promoted into that target — nothing at all, because the
+  rolling-back writer removes exactly the tree it created and there was no
+  earlier tree to restore.
 
 #### Scenario: the one-off backfill writers take the same mutex
 

@@ -64,6 +64,12 @@ after creating it.
   mode-less `mkdir`
 - **THEN** that behavior is unchanged by this requirement
 - **AND** those interiors still inherit `mask::rwx` from the parent's default ACL.
+- **AND** this is a property of that writer's path, not of `runs/` interiors in
+  general: the q_down product lane reaches the same `runs/<run_id>/` key through
+  `_copyback_collected_object_tree`, which widens every interior explicitly, so
+  interiors that lane creates carry the clamped `mask::r-x` instead. Both are
+  readable by the consuming account — the clamp costs write, and that lane's
+  consumer only reads — so the divergence is recorded, not reconciled here.
 
 ## MODIFIED Requirements
 

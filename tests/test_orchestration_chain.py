@@ -19587,8 +19587,15 @@ def test_canonical_precip_mirror_lock_timeout_records_a_failed_receipt_and_does_
 ) -> None:
     """E11: the cycle survives with a `failed` receipt -- and nothing retries the mirror.
 
-    The receipt is the whole recovery surface. `_mirror_canonical_precip` wraps
-    the publisher call in `except Exception` and the cycle proceeds past
+    The receipt is the whole recovery surface. The layer that actually swallows
+    this `CopybackLockTimeout` is `_copyback_canonical_precip`'s own
+    `except Exception` (`publisher.py:1376`), which turns it into a
+    `status: "failed"` summary and RETURNS it. `_mirror_canonical_precip`'s
+    outer `except Exception` (`chain_forecast_execution.py:1046`) never sees it;
+    that net is there for what runs *outside* the publisher's own try -- the
+    `format_cycle_time` call, the `TilePublisher(...)` construction, and an
+    `OSError` from the `finally`'s `release_copyback_batch_lock`
+    (`publisher.py:1411-1413`). Either way the cycle proceeds past
     `convert`, so this cycle's mirror is **not** re-attempted on any later pass;
     it is an operator action item recovered by running
     `scripts/canonical_precip_copyback_backfill.py`
@@ -19659,3 +19666,134 @@ def test_run_tree_copyback_lock_timeout_records_a_failed_event_and_propagates(
     assert event["status_to"] == "failed"
     assert event["details"]["error_code"] == "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
     assert not (copyback_root / "runs").exists()
+
+
+# --------------------------------------------------------------------------- #
+# #2035 round-4: the RETRY CONTRAST between the two lanes. E11/E13 above stop at
+# "records a receipt" / "propagates as OrchestratorError"; neither discriminates
+# WHERE the failure lands relative to `update_forecast_cycle_status`, which is
+# the only thing that decides whether `resume_cycle_stage` re-enters the stage.
+# design.md ("Not made non-fatal") stakes a behavioural claim on that position,
+# so it gets asserted directly, once per lane.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("stage_name", "terminal_stage"),
+    [
+        # The two configurations in which `_stage_should_copyback_run_trees`
+        # is true. Exactly one fires per cycle in each: with no terminal stage
+        # only `parse` (`state_save_qc` returns False); with
+        # `forecast_state_save_qc` -- node-22's live setting -- only
+        # `state_save_qc`, because `chain_stages.stages_through` drops `parse`
+        # from the cycle's stage list. Both must leave the stage un-advanced.
+        ("parse", None),
+        ("state_save_qc", "forecast_state_save_qc"),
+    ],
+)
+def test_run_tree_copyback_lock_timeout_leaves_the_cycle_stage_unadvanced(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stage_name: str,
+    terminal_stage: str | None,
+) -> None:
+    """The run-tree timeout escapes BEFORE `update_forecast_cycle_status` -- that is the retry.
+
+    `design.md` claims a run-tree copyback timeout "is retried on the next pass
+    (`resume_cycle_stage`)". The mechanism is entirely positional:
+    `_copyback_stage_run_trees` runs inside the `result_status == "succeeded"`
+    branch of `_after_cycle_stage_terminal` and re-raises as
+    `OrchestratorError`, so the branch's own `update_forecast_cycle_status`
+    never runs, the cycle stays on this stage, and the next scheduler pass
+    re-enters it.
+
+    Asserting only "it propagates as `OrchestratorError`" (the sibling E13 test,
+    which calls `_copyback_stage_run_trees` directly) does not discriminate: a
+    variant that caught the error one frame up and advanced the stage anyway
+    would stay green there. `repository.cycle_statuses == []` is what bites.
+    """
+
+    stage = next(item for item in M3_STAGES if item.stage == stage_name)
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage=terminal_stage)
+    copyback_root = tmp_path / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+    context = _precip_context(cycle_id="gfs_2026050100", active_basins=_basins(1))
+    run_root = Path(orchestrator.config.object_store_root) / "runs" / "run_0" / "input"
+    run_root.mkdir(parents=True)
+    (run_root / "manifest.json").write_text('{"run_id":"run_0"}\n', encoding="utf-8")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        with pytest.raises(OrchestratorError) as error_info:
+            orchestrator._after_cycle_stage_terminal(
+                stage, context, "succeeded", {"status": "succeeded"}, None
+            )
+
+    assert error_info.value.error_code == "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT"
+    # The retry contract itself: the stage was never marked done, so
+    # `resume_cycle_stage` re-enters it on the next pass.
+    assert repository.cycle_statuses == []
+    assert not (copyback_root / "runs").exists()
+
+
+def test_canonical_precip_mirror_lock_timeout_still_advances_the_cycle_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The canonical mirror's timeout does NOT hold the stage back -- so nothing retries it.
+
+    Same injected failure, opposite outcome from the run-tree lane above. The
+    canonical lane swallows in TWO places, and this exception is stopped by the
+    first: `_copyback_canonical_precip`'s own `except Exception`
+    (`publisher.py:1376`) turns every failure -- `CopybackLockTimeout` included
+    -- into a `status: "failed"` summary and RETURNS it, so
+    `_mirror_canonical_precip`'s outer `except Exception`
+    (`chain_forecast_execution.py:1046`) never sees it; that outer net only
+    fires for what runs outside the publisher's try (`format_cycle_time`, the
+    `TilePublisher(...)` construction, an `OSError` from the `finally`'s
+    `release_copyback_batch_lock`). Either way control returns to
+    `_after_cycle_stage_terminal` and the `succeeded` branch advances the cycle
+    to `convert`'s success status. Once that write lands, no later pass
+    re-enters `convert`, which is exactly why the runbook's only recovery for
+    this receipt is the manual backfill CLI.
+
+    Both halves are asserted: the receipt proves the timeout really happened
+    (without it, a green here could just mean the mirror never ran), and
+    `cycle_statuses` proves the stage advanced despite it. Mutation-proved by
+    making BOTH swallows re-raise -- mutating either one alone leaves the other
+    producing the same receipt, which is itself the point.
+
+    What this test does NOT pin: *which* layer swallows. Narrow the
+    publisher-side `except Exception` so `CopybackLockTimeout` propagates up to
+    the orchestrator's net instead, and all four assertions below still hold
+    -- same `failed` receipt, same `error_type`, same advanced
+    `cycle_statuses`, same absent `canonical/` -- so this stays green. That the
+    swallow lives in the
+    publisher and not the hook is a separate contract, asserted nowhere here.
+    """
+
+    repository = FakeCycleRepository()
+    client = FakeCycleSlurmClient()
+    orchestrator = _orchestrator(tmp_path, repository, client, terminal_stage="forecast_state_save_qc")
+    copyback_root = tmp_path / "shared-object-store"
+    copyback_root.mkdir(parents=True)
+    monkeypatch.setenv("NHMS_OBJECT_STORE_COPYBACK_ROOT", str(copyback_root))
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "0.2")
+    _seed_canonical_precip_tree(
+        Path(orchestrator.config.object_store_root),
+        storage_source="gfs",
+        cycle_token="2026050100",
+    )
+    context = _precip_context(cycle_id="gfs_2026050100")
+
+    with copyback_batch_lock(copyback_root, timeout_seconds=10):
+        orchestrator._after_cycle_stage_terminal(
+            _PRECIP_CONVERT_STAGE, context, "succeeded", {"status": "succeeded"}, None
+        )
+
+    mirror = _precip_mirror_events(repository)[0]["details"]["precip_mirror"]
+    assert mirror["status"] == "failed"
+    assert mirror["error_type"] == "CopybackLockTimeout"
+    assert repository.cycle_statuses == [_PRECIP_CONVERT_STAGE.success_cycle_status]
+    assert not (copyback_root / "canonical").exists()

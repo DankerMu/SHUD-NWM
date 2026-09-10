@@ -6,12 +6,12 @@ of PR #2028 because the affected code serves the `runs/`, `forcing/` and
 `canonical/` lanes at once.
 
 **Weakness A — destructive promote race.** `_replace_directory_tree_for_qdown_batch`
-(`services/tile_publisher/publisher.py:2357`) is a lock-free three-step
-`exists → rename-to-backup → promote`: the existence check at `:2378`, the backup
-rename at `:2380`, the promote at `:2382`. A second writer entering the
-**`:2380`→`:2382` window** sees no target, takes no backup, promotes its own tree,
+(`services/tile_publisher/publisher.py:2445`) is a lock-free three-step
+`exists → rename-to-backup → promote`: the existence check at `:2466`, the backup
+rename at `:2468`, the promote at `:2470`. A second writer entering the
+**`:2468`→`:2470` window** sees no target, takes no backup, promotes its own tree,
 records `backup_dir=None`, and reports `ok`. The first writer's promote then hits
-`ENOTEMPTY`, and `_restore_copyback_backup` (`:2676`) `rmtree`s the competitor's
+`ENOTEMPTY`, and `_restore_copyback_backup` (`:2764`) `rmtree`s the competitor's
 just-promoted tree before restoring its own stale backup. Net: the destination
 silently reverts to pre-race content while one writer reports success.
 
@@ -26,8 +26,8 @@ calling `publisher.copyback_canonical_precip` at `:1045`), dispatched under
 this makes A "现网静默数据丢失（届时按 p1 处理）".
 
 A per-tree lock is **not** sufficient. `_rollback_qdown_copyback_batch`
-(`publisher.py:2416`) walks the whole batch: an entry whose `backup_dir is None`
-is undone with `rmtree_no_follow(entry.target_dir)` (`:2426`). If writer A
+(`publisher.py:2504`) walks the whole batch: an entry whose `backup_dir is None`
+is undone with `rmtree_no_follow(entry.target_dir)` (`:2514`). If writer A
 promotes `prcp` into an empty slot (`backup_dir=None`), releases a per-tree lock,
 and later fails on the `grid` tree, its batch rollback deletes whatever now sits
 at `prcp` — including a tree writer B committed in the interim. The mutex must
@@ -39,14 +39,16 @@ therefore span the entire batch: plan → copy → every promote → commit-or-r
 deliberate #1513 decision ("lets umask restrict but never widen"), and the
 `filesystem-permission-determinism` capability already states that cross-uid
 sharing "SHALL be established by the caller after creation". No caller does so for
-copyback's intermediate parents: `_chmod_tree_readable` (`publisher.py:2702`)
+copyback's intermediate parents: `_chmod_tree_readable` (`publisher.py:2790`)
 compensates only the copied tree, never `canonical/`, `canonical/<S>/`,
 `canonical/<S>/grid/`. Under `umask 027` every such level lands `0o750` and
 node-27's reader account loses traversal.
 
 Live `getfacl` on the shared root (node-27, `/home/ghdc/nwm/object-store`, the
-same NFS export as node-22's `/ghdc/data/nwm/object-store`) settles the scope the
-issue could not check remotely:
+same NFS export as node-22's `/ghdc/data/nwm/object-store`; re-collected
+2026-09-10T14:50Z) settles the scope the issue could not check remotely. It has to
+be read on node-27: the NFSv4.2 client on node-22 does not surface the server's
+POSIX ACLs and reports none at all for these paths (see `design.md`).
 
 | path | default ACL | consequence |
 |---|---|---|
@@ -61,13 +63,13 @@ the compensation is unconditional. Measured on node-27 under a parent carrying
 | creation | resulting mask |
 |---|---|
 | `os.mkdir(path, 0o755)` — what `safe_fs` does | `mask::r-x`, grant shown `#effective:r-x` |
-| mode-less `os.mkdir(path)` — `run_tree_copyback.py:440` | `mask::rwx` preserved |
+| mode-less `os.mkdir(path)` — `run_tree_copyback.py:535` | `mask::rwx` preserved |
 | the `0o755`-created directory, then `chmod 0755` | `mask::r-x` — **unchanged** |
 
 So `safe_fs`'s `mkdir` has already clamped the mask before any caller-side
 `chmod` runs; the widening is mask-neutral under an ACL and corrective without
-one. This is the same #1631 clamp that `run_tree_copyback.py:427-434` documents,
-and it is why the mode-less `mkdir` at `:440` must stay exactly as it is.
+one. This is the same #1631 clamp that `run_tree_copyback.py:522-534` documents,
+and it is why the mode-less `mkdir` at `:535` must stay exactly as it is.
 
 ## What Changes
 
@@ -83,22 +85,23 @@ and it is why the mode-less `mkdir` at `:440` must stay exactly as it is.
     and `chmod 0o755` **only** the levels this call created.
 - Hold `copyback_batch_lock` across every whole-batch directory-tree
   promote-and-commit critical section under the shared copyback root:
-  `publisher._copyback_run_products` (def `publisher.py:721`, non-batch loop at
-  `:823`), `publisher._copyback_qdown_products` (def `:873`, batch region
-  `:982-1133`), `publisher._copyback_canonical_precip` (def `:1157`, batch region
-  `:1209-1335`), `services/tile_publisher/forcing_copyback_backfill.py:744`,
+  `publisher._copyback_run_products` (def `publisher.py:765`, non-batch loop at
+  `:872`), `publisher._copyback_qdown_products` (def `:922`, batch region opened
+  at `:1042`), `publisher._copyback_canonical_precip` (def `:1217`, batch region
+  opened at `:1308`), `services/tile_publisher/forcing_copyback_backfill.py:758`,
   `scripts/canonical_precip_copyback_backfill.py` (per cycle, at `_backfill_cycle`
-  def `:388`), and `services/orchestrator/run_tree_copyback.copyback_run_trees`
-  (def `:36`). The lock is acquired after each lane's copyback-root identity and
+  def `:397`), and `services/orchestrator/run_tree_copyback.copyback_run_trees`
+  (def `:42`). The lock is acquired after each lane's copyback-root identity and
   overlap guards, so a zero-write `skipped` path creates no lock file, and the
   timeout surfaces as each lane's own error type.
 - Route copyback directory creation through
-  `ensure_traversable_copyback_directory` at `publisher.py:1403`, `:1625`,
-  `:1630`, `:1633`, `:2305`, `:2371` and `run_tree_copyback.py:49`, `:375`, `:396`.
-  The first and last of those create the copyback **root** itself, which is in
+  `ensure_traversable_copyback_directory` at `publisher.py:1485`, `:1710`,
+  `:1715`, `:1718`, `:2393`, `:2459` and `run_tree_copyback.py:57`, `:470`, `:491`.
+  `publisher.py:1485` and `run_tree_copyback.py:57` create the copyback **root**
+  itself, which is in
   scope — issue #2035's `umask 027` measurement lists `0o750 .` first.
 - Leave `run_tree_copyback.py:_copy_tree_no_symlinks`'s mode-less `mkdir`
-  (`:419-440`) exactly as it is — the deliberate #1631 ACL-mask-preserving site,
+  (`:514-535`) exactly as it is — the deliberate #1631 ACL-mask-preserving site,
   and not an `ensure_directory_no_follow` call.
 - Leave `packages/common/safe_fs.py` unchanged: the
   `filesystem-permission-determinism` capability requires the helper never to
@@ -129,7 +132,7 @@ None.
 
 - Relaxing `provider_atomic`'s `0o022` gate (#1631 forbids it).
 - Making `ensure_directory_no_follow` `chmod` an already-existing path (#1513).
-- Changing `run_tree_copyback.py:440`'s mode-less `mkdir`, or recovering the
+- Changing `run_tree_copyback.py:535`'s mode-less `mkdir`, or recovering the
   `mask::rwx` that `safe_fs`'s `mkdir` clamps (that is #1631's open question, not
   this change's).
 - Bringing per-file provider-atomic copyback writers

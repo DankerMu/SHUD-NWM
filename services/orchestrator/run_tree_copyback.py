@@ -229,9 +229,23 @@ def _run_tree_batch_lock(target_root: Path) -> Iterator[int]:
     """Hold the shared copyback batch mutex, as this lane's own error type (#2035).
 
     `_copyback_stage_run_trees` (`chain_forecast_execution.py:953`) catches only
-    `RunTreeCopybackError`, and it runs on the `parse` stage of every cycle, so a
-    foreign exception type escaping from here would be an uncaught exception on
-    the hot path. Accepted consequence, recorded rather than hidden: that handler
+    `RunTreeCopybackError`, and this lane sits on a stage the cycle reaches on
+    the hot path, so a foreign exception type escaping from here would be an
+    uncaught exception there. It fires **at most once per cycle, never twice**,
+    by two different mechanisms. With no terminal stage configured the stage list
+    keeps both `parse` and `state_save_qc`, and the gate
+    `_stage_should_copyback_run_trees` (`chain_forecast_execution.py:931-934`)
+    is what admits only `parse`. Under
+    `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc` -- what node-22
+    runs (`infra/env/compute.example:185`, `infra/env/README.md:288`) -- the gate
+    admits `state_save_qc` instead, and `stages_through`'s special case
+    (`chain_stages.py:74-79`) drops `parse` from the stage list entirely, so in
+    that configuration `parse` is not even reached. Across both configurations
+    the gate admits exactly one of the two. (A terminal of `forecast` or earlier
+    reaches neither and runs this lane zero times; "at most once" is the exact
+    claim, not "exactly once".)
+
+    Accepted consequence, recorded rather than hidden: that handler
     re-raises as `OrchestratorError` from inside the `result_status ==
     "succeeded"` branch of `_after_cycle_stage_terminal`, so a lock timeout in
     this lane skips the stage's `update_forecast_cycle_status` exactly as every
