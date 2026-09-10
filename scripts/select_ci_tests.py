@@ -1164,6 +1164,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # core half, which imports the fakes). A fakes-only edit must run
             # both, or the split leaves the publication half blind.
             *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
+            # #2224: focused origin-chunk parity imports the shared fakes at
+            # module scope, so a fakes-only edit must run it.
+            "tests/test_issue2224_origin_chunk_parity.py",
         ),
     ),
     PathTestRule(
@@ -3597,6 +3600,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_phase2.py",
             "tests/test_node27_cold_residency_runtime_identity.py",
             "tests/test_node27_cold_residency_publication.py",
+            # #2224: focused origin-chunk parity imports the movement owner,
+            # which re-exports this target-preflight surface; one-hop derivation
+            # therefore requires this suite on a target-only PR.
+            "tests/test_issue2224_origin_chunk_parity.py",
         ),
     ),
     PathTestRule(
