@@ -21,7 +21,7 @@
 - [x] 4.2 `uv run --no-sync pytest -q tests/test_issue1895_readiness_performance.py tests/test_issue1895_readiness_performance_live.py tests/test_issue1895_readiness_performance_live_cli.py tests/test_issue1895_readiness_performance_publication.py` changes from the exact clean-master baseline `23 failed, 31 passed` to all passing.
 - [x] 4.3 The shipping selector for the final diff, `tests/test_select_ci_tests.py`, `tests/test_issue1895_runbook_contract.py`, affected #1895 readiness tests, default unit suite, and collection all pass; collection alone is not assertion evidence.
 - [x] 4.4 `uv run ruff check .`, Python compilation for changed files, and `openspec validate preserve-explicit-cycle-named-bindings --strict --no-interactive` pass.
-- [ ] 4.5 Review confirms no forecast-store SQL, receipt schema, timeout, readonly, C1-C4, node-27 rollout, or protected unrelated OpenSpec change was weakened. This PR produces no node-27 live PASS; G7 live evidence remains pending #1895.
+- [x] 4.5 Review confirms no forecast-store SQL, receipt schema, timeout, readonly, C1-C4, node-27 rollout, or protected unrelated OpenSpec change was weakened. This PR produces no node-27 live PASS; G7 live evidence remains pending #1895.
 
 ## Risk pack mapping
 
