@@ -583,7 +583,7 @@ def test_valid_times_named_identity_branch_pairs_every_pushdown_aid_with_its_key
         assert "AND river_network_version_id = :river_network_version_id AND river_network_version_key =" in outer
         assert "AND variable = :variable AND variable_e =" in outer
     assert fact_table_text_identity_columns(named) == (
-        SANCTIONED_TEXT_PUSHDOWN_COLUMNS if store == "legacy" else frozenset()
+        frozenset(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) if store == "legacy" else frozenset()
     )
     for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
         assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
@@ -658,7 +658,7 @@ def test_valid_times_for_layer_capture_session_preserves_outer_limit_semantics_f
             assert arm == " ".join(rendered.split())
             assert f"h.timeseries_store = '{store}'" in arm
             assert fact_table_text_identity_columns(rendered) == (
-                (SANCTIONED_TEXT_PUSHDOWN_COLUMNS if run_id is not None else frozenset({"variable"}))
+                (frozenset(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) if run_id is not None else frozenset({"variable"}))
                 if store == "legacy" else frozenset()
             )
         for operator in ("SELECT DISTINCT", "ORDER BY", "LIMIT", "UNION ALL"):
