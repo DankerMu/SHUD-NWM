@@ -358,5 +358,3 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
         selected=selected,
         all_chunks=future_rows,
     )
-
-
