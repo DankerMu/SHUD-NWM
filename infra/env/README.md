@@ -115,7 +115,7 @@ Notes:
   - **On CI the authority is `scripts/select_ci_tests.py`**, where two rules match
     `infra/env/compute.example`: the `infra/env/**` glob (`:2301-2304` →
     `tests/test_two_node_docker_runtime.py`) and the exact-path rule
-    (`:2313-2316` → `tests/test_slurm_gateway_deployment_contract.py`, the
+    (`:2314-2317` → `tests/test_slurm_gateway_deployment_contract.py`, the
     `SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST` constant at `:496`). The other
     consumer files are not selected for this path,
     so a green PR here does not exercise them — run the grep set locally.

@@ -239,7 +239,7 @@ def _run_tree_batch_lock(target_root: Path) -> Iterator[int]:
     `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc` -- what node-22
     runs (`infra/env/compute.example:185`, `infra/env/README.md:288`) -- the gate
     admits `state_save_qc` instead, and `stages_through`'s special case
-    (`chain_stages.py:74-79`) drops `parse` from the stage list entirely, so in
+    (`chain_stages.py:75-79`) drops `parse` from the stage list entirely, so in
     that configuration `parse` is not even reached. Across both configurations
     the gate admits exactly one of the two. (A terminal of `forecast` or earlier
     reaches neither and runs this lane zero times; "at most once" is the exact

@@ -54,7 +54,7 @@ two are never both live. With `terminal_stage` unset the stage list is all of
 `M3_STAGES` (`convert, forcing, forecast, parse, state_save_qc, publish`), so
 both stages run, but the gate's own condition is false and only `parse` fires.
 Under the production `forecast_state_save_qc` the gate admits `state_save_qc`
-while `stages_through`'s special case (`chain_stages.py:74-79`) rebuilds the list
+while `stages_through`'s special case (`chain_stages.py:75-79`) rebuilds the list
 as `(convert, forcing, forecast, state_save_qc)` — `parse` is gone. With a
 terminal stage of `forecast` or earlier, neither runs and the count is zero.
 Corrected 2026-09-10; the sizing below was computed on an earlier "twice per
@@ -206,7 +206,7 @@ recoverable failure into silent data absence.
   two of the three callers: `_copyback_stage_run_trees` catches only
   `RunTreeCopybackError` (`chain_forecast_execution.py:953`) and runs at most once
   per cycle — on `parse`, or on `state_save_qc` under the production terminal
-  stage (`:931-934`, and `chain_stages.py:74-79` for why never both) — and
+  stage (`:931-934`, and `chain_stages.py:75-79` for why never both) — and
   `publish_qdown_cycle` catches only
   `PublishError | SQLAlchemyError | OSError | ValueError` (`publisher.py:207-210`).
   So: `RunTreeCopybackError` in the run-tree lane; `PublishError` with a distinct
@@ -289,9 +289,9 @@ identical.
 
 ### `run_tree_copyback`'s different terminal state
 
-`_replace_tree` (`services/orchestrator/run_tree_copyback.py:453-487`) has the
+`_replace_tree` (`services/orchestrator/run_tree_copyback.py:467-503`) has the
 same window but a guarded recovery: `if backup.exists() and not target.exists()`
-(`:483`). With a competitor's tree in place that predicate is false, so it does
+(`:497`). With a competitor's tree in place that predicate is false, so it does
 not restore and does not `rmtree` the competitor — the loser gets a spurious
 failure and no data is lost. It is brought under the same mutex anyway (it shares
 the root), and a comment records that its terminal state was always the benign
@@ -377,7 +377,7 @@ stays an optional pass-through to `safe_fs` for symlink containment only.
 
 ### Level-by-level creation
 
-Copied from `scripts/canonical_precip_copyback_backfill.py:189-225`
+Copied from `scripts/canonical_precip_copyback_backfill.py:198-225`
 (`_ensure_target_directory`) and from
 `state_manager._ensure_copyback_state_parent` (`:2464`): probe upwards for the
 missing components, then create and widen them outermost-first, one at a time.
@@ -425,8 +425,13 @@ Source-of-truth identity/contract: the `_CopybackRollbackEntry` batch
 Surfaces:
 
 Line numbers drift as this branch grows, so this inventory cites symbols and
-lets the reader grep; the numbers that remain elsewhere in this document were
-re-derived against `b59ffd2e`.
+lets the reader grep. The numbers that remain elsewhere in this document are
+governed by a rule, not by a pinned SHA: **every line citation in this change's
+fixture is re-verified against the branch head in the same commit that touches a
+cited file.** Naming a SHA here would go stale on the next commit, which is the
+exact failure this rule exists to stop. The one deliberate exception is
+`claims-audit.md`, whose row citations are pinned to the audit head and resolve
+with `git show <sha>:<path>`.
 
 - Producers: `publisher._copyback_run_products` (**no production caller today**;
   `publish_cycle` delegates to `publish_qdown_cycle`, and every caller is in

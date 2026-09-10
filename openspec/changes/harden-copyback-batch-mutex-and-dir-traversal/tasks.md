@@ -150,11 +150,11 @@ On node-27, `export TMPDIR=/home/nwm/tmp` before any pytest run (project rule).
 
 Every row below names input and expected output. Concurrency tests must be
 **deterministic** — reuse the repo's proven idiom at
-`tests/test_run_tree_copyback.py:1097-1140`: a `threading.Event` gate injected by
+`tests/test_run_tree_copyback.py:1106-1150`: a `threading.Event` gate injected by
 `monkeypatch` so the competing writer runs inside the target window, two threads,
 and joins with timeouts. `flock` is per open file description, so two threads that
 each open the lock file do contend. The umask idiom is
-`tests/test_canonical_precip_copyback_backfill.py:426-430` (save/restore). The
+`tests/test_canonical_precip_copyback_backfill.py:436-440` (save/restore). The
 per-open-file-description `flock` semantics the thread tests rely on hold on the
 local filesystem the suite runs on; on an NFS export that emulates `flock` with
 POSIX byte-range locks the granularity is per process instead. That is harmless in
@@ -219,7 +219,7 @@ Baseline is `master` unless a row names another revision.
 | E19 (canonical × held through commit — release-early variant) | HEAD with the canonical lane releasing after its last promote and before `_commit_qdown_copyback_batch` (`publisher.py:1374`) | `assert {'commit': False} == {'commit': True}` |
 | E19 (forcing × held through rollback — round-2 A1) | HEAD with the `ExitStack` at `forcing_copyback_backfill.py:758` replaced by a plain `with copyback_batch_lock(...)` inside the `try:` | `assert {'rollback': False} == {'rollback': True}` |
 | E19 (forcing × traversal widening, `umask 027`) | master | `assert {... '.../shared-object-store/forcing': '0o750', ...} == {... '0o755', ...}` |
-| E19 (script × unsafe lock, distinct from timeout — round-2 A2) | HEAD with `_mirror_tree_under_batch_lock`'s arm (`scripts/canonical_precip_copyback_backfill.py:469`) narrowed to `CopybackLockTimeout` | `packages.common.copyback_guard.CopybackLockError: copyback batch lock must have mode 0600` raised at `packages/common/copyback_guard.py:156` and escaping `backfill.main` uncaught — no JSON summary is printed at all, which is why the row asserts on stdout rather than the exit code |
+| E19 (script × unsafe lock, distinct from timeout — round-2 A2) | HEAD with `_mirror_tree_under_batch_lock`'s arm (`scripts/canonical_precip_copyback_backfill.py:469`) narrowed to `CopybackLockTimeout` | `packages.common.copyback_guard.CopybackLockError: copyback batch lock must have mode 0600` raised at `packages/common/copyback_guard.py:174` and escaping `backfill.main` uncaught — no JSON summary is printed at all, which is why the row asserts on stdout rather than the exit code |
 | E22 (run-tree lane: a lock timeout leaves the stage un-advanced — round-4 claims audit B8) | HEAD with the `_copyback_stage_run_trees` call at `chain_forecast_execution.py:857-858` wrapped in `try/except: pass` | `with pytest.raises(OrchestratorError)` → `Failed: DID NOT RAISE <class 'services.orchestrator.chain_types.OrchestratorError'>`; **2 failed** (both parametrisations), canonical test stayed green |
 | E22 (canonical lane: a lock timeout still advances the stage — same audit row) | first attempt mutated only `chain_forecast_execution.py:1046` → **3 passed, did not bite**, which is itself the evidence: `_copyback_canonical_precip`'s own `except Exception` (`publisher.py:1376`) swallows first, so the outer net never sees the timeout. Second attempt mutated **both** layers to re-raise | `packages.common.copyback_guard.CopybackLockTimeout: copyback batch lock .../.nhms-copyback-batch.lock was still held after the configured deadline`; **1 failed**, both run-tree parametrisations stayed green |
 | E20 (import-closure includes package `__init__`s) | the pre-fix test body from `40cf8ed9`, with `import numpy` planted in `packages/common/__init__.py` | pre-fix test: **1 passed** (vacuous); fixed test: `AssertionError: .../packages/common/__init__.py pulls in a third-party dependency: ['numpy']`. Both the plant and the pre-fix test body were reverted immediately. |
@@ -400,7 +400,7 @@ Baseline is `master` unless a row names another revision.
       claim true* and the fix pass went and read it: the run-tree lane acquires
       **at most once** per cycle, never twice — the gate's `state_save_qc` arm is
       conditioned on the very terminal stage that makes `stages_through` drop
-      `parse` (`chain_stages.py:74-79`), so the two are never both live — which
+      `parse` (`chain_stages.py:75-79`), so the two are never both live — which
       falsified both the sizing prose and a code comment the audit itself had
       passed. The orchestrator's first two attempts at stating *why* were also
       wrong, each corrected by the next pass reading the code; `claims-audit.md`
@@ -409,6 +409,15 @@ Baseline is `master` unless a row names another revision.
       The same pass extracted all 89 `file:line` citations in the three documents
       and opened each one: ~40 had drifted and are corrected, and `design.md`'s
       `Surfaces` inventory is now symbol-anchored so it cannot drift again.
+      The mechanism was then turned on its own corrective commit — `claims-audit.md`
+      §4 audits the ~18 behaviour sentences `2244082b` introduced, because the
+      artifact invariant above forbids the commit that created the table from
+      exempting itself. That pass found **8 more stale citations** (3 drifted
+      inside `2244082b` itself, 5 in files it never touched and had simply never
+      been re-derived) and replaced `design.md`'s pinned-SHA citation declaration
+      with a standing per-commit re-verification rule. Two §4 rows are labelled
+      HOLDS-by-protocol rather than HOLDS-by-receipt (the NFSv4 host-death lease
+      semantics), because the falsifier would require killing a production host.
 - [x] E22 **The one coverage gap the claims audit exposed** (`claims-audit.md`
       row B8): `design.md` claims a run-tree copyback lock timeout is retried on
       the next scheduler pass while the canonical-mirror lane's is not. The
