@@ -3692,6 +3692,45 @@ def test_per_basin_store_union_preserves_the_frozen_public_sql_contract() -> Non
     assert set(text(current)._bindparams) == set(text(frozen)._bindparams)
 
 
+def test_national_store_probes_preserve_the_frozen_full_sql_contract() -> None:
+    frozen = (Path(__file__).parent / "fixtures/hydro_national_mvt_pre_store_c21bacf9.sql").read_text()
+    current = postgis_tile_sql("hydro-national")
+    # Only the three already located LATERAL bodies and two candidate columns
+    # may change. Compare every byte outside them, not merely selected landmarks.
+    pattern = r"(?<=CROSS JOIN LATERAL \()(.*?)(?=\) (?:v|hit)\b)"
+    originals = re.findall(pattern, frozen, re.S)
+    routed = re.findall(pattern, current, re.S)
+    assert len(originals) == len(routed) == 3
+    for original, combined in zip(originals, routed, strict=True):
+        assert combined.count("UNION ALL") == 1
+        assert combined.count("LIMIT 1") == 1
+        assert combined.rstrip().endswith("LIMIT 1")
+        original_body = original.rsplit("LIMIT 1", 1)[0]
+        branches = combined.rsplit("LIMIT 1", 1)[0].split("\nUNION ALL\n")
+        for store, branch in zip(("legacy", "narrow"), branches, strict=True):
+            assert branch.count(f"AND lr.timeseries_store = '{store}'") == 1
+            restored = branch.replace(f"                      AND lr.timeseries_store = '{store}'\n", "")
+            if store == "legacy":
+                restored = restored.replace("hydro.river_timeseries_legacy", "hydro.river_timeseries")
+                expected = original_body
+            else:
+                assert "hydro.river_timeseries_legacy" not in branch
+                expected = re.sub(
+                    r"                      -- transitional compressed-chunk pushdown aid, remove with #1342\n"
+                    r"                      AND ts\."
+                    r"(?:run_id|river_network_version_id|river_segment_id|variable) = [^\n]+\n",
+                    "", original_body,
+                )
+            assert restored.strip() == expected.strip()
+    restored_sql = current
+    for combined, original in zip(routed, originals, strict=True):
+        restored_sql = restored_sql.replace(combined, original, 1)
+    assert restored_sql.count(", h.timeseries_store") == 2
+    assert restored_sql.replace(", h.timeseries_store", "") == frozen
+    assert current.count("ST_AsMVT(tile_rows,") == 1
+    assert set(text(current)._bindparams) == set(text(frozen)._bindparams)
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected"),
     [

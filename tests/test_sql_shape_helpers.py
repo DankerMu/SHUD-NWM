@@ -831,12 +831,12 @@ def test_every_registered_templates_aid_count_matches_its_marker_count(entry, st
 
 
 def test_the_rendered_aid_total_reconciles_with_the_per_file_census() -> None:
-    """The 12 raw templates carry the 34 source aids exactly once each.
+    """The 13 raw templates carry the 30 source aids exactly once each.
 
     Forecast execution coverage is separate: eight spanning callers consume
     the shared segment source, and A9 consumes the known-run source.
     """
-    assert sum(entry.expected_aids for entry in REGISTRY) == 34
+    assert sum(entry.expected_aids for entry in REGISTRY) == 30
 
 
 def test_the_sanctioned_vocabulary_is_the_shared_one_not_a_private_copy() -> None:

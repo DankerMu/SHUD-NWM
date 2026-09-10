@@ -192,6 +192,16 @@ def _source_cte_body(layer: str) -> str:
     return body[:-2]
 
 
+def _frozen_national_source_body() -> str:
+    frozen = (Path(__file__).parent / "fixtures/hydro_national_mvt_pre_store_c21bacf9.sql").read_bytes()
+    assert hashlib.sha256(frozen).hexdigest() == "d18c89af633838df8be0d84e3bff02df3e01d35ef21935f9bb59de0dc1f8e8b4"
+    sql = frozen.decode()
+    opener = "source_rows AS NOT MATERIALIZED ("
+    body = sql.split(opener, 1)[1].split("source_identity_stats AS (", 1)[0].rstrip()
+    assert body.endswith("),")
+    return body[:-2]
+
+
 def _hydro_source_query(cte_body: str) -> str:
     return f"""
         WITH source_rows AS (
@@ -766,7 +776,10 @@ def test_null_key_legacy_rows_are_invisible_to_the_switched_reads(
     assert switched_segments == [segment_id for segment_id, _type, _value in _SEGMENTS]
 
 
-def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded: Any) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     """One national identity, two zoom branches, one visibility answer.
 
     z>=9 reads through ``typed_values`` and z<9 through ``untyped_ranked``. The
@@ -775,7 +788,7 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded
     text predicates, it would appear at z=5 and vanish at z=9.
     """
     _url, session = seeded
-    query = _national_source_query(_source_cte_body("hydro-national"))
+    query = _national_source_query(_frozen_national_source_body())
 
     detail_x, detail_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 9)
     overview_x, overview_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 5)
@@ -789,6 +802,17 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded
         query,
         _NATIONAL_TILE_PARAMS | {"valid_time": _T0, "z": 5, "x": overview_x, "y": overview_y},
     )
+    baseline_detail, baseline_overview = detail, overview
+    _prepare_hydro_stores(session, post_expand_forecast_database, store, _LEGACY_RUN_ID)
+    query = _national_source_query(_source_cte_body("hydro-national"))
+    detail = _rows(session, query, _NATIONAL_TILE_PARAMS | {
+        "valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y,
+    })
+    overview = _rows(session, query, _NATIONAL_TILE_PARAMS | {
+        "valid_time": _T0, "z": 5, "x": overview_x, "y": overview_y,
+    })
+    assert detail == baseline_detail
+    assert overview == baseline_overview
 
     detail_segments = {row["river_segment_id"] for row in detail}
     overview_segments = {row["river_segment_id"] for row in overview}
@@ -812,7 +836,10 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded
         assert row["feature_id"] == f"{_NETWORK_ID}::{row['river_segment_id']}"
 
 
-def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(seeded: Any) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     """Per-segment payload, not just the run/network constants both legs share.
 
     Identity fields are the same string on every national row, so asserting
@@ -828,7 +855,7 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(seed
     simplifies, so only its value/identity payload is compared.
     """
     _url, session = seeded
-    query = _national_source_query(_source_cte_body("hydro-national"))
+    query = _national_source_query(_frozen_national_source_body())
 
     detail_x, detail_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 9)
     detail = _rows(
@@ -852,6 +879,17 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(seed
         )
     }
     assert len(set(authority_geometry.values())) == len(_SEGMENTS) + 1, "geometries must be distinct too"
+    baseline_detail = detail
+    baseline_later = _rows(session, query, _NATIONAL_TILE_PARAMS | {
+        "valid_time": _T1, "z": 9, "x": detail_x, "y": detail_y,
+    })
+    assert baseline_later == []
+    _prepare_hydro_stores(session, post_expand_forecast_database, store, _LEGACY_RUN_ID)
+    query = _national_source_query(_source_cte_body("hydro-national"))
+    detail = _rows(session, query, _NATIONAL_TILE_PARAMS | {
+        "valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y,
+    })
+    assert detail == baseline_detail
 
     assert len(detail) == len(_SEGMENTS)
     for row in detail:
