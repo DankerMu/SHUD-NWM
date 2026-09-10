@@ -382,6 +382,35 @@ def test_exclusive_regular_move_keeps_source_when_destination_durability_is_inde
     assert (destination_parent / "archive").read_bytes() == b"cold-bytes"
 
 
+@pytest.mark.parametrize(
+    ("umask", "default_mode"),
+    ((0o022, 0o644), (0o077, 0o600)),
+)
+def test_exclusive_write_preserves_default_umask_and_exact_explicit_mode(
+    tmp_path: Path,
+    umask: int,
+    default_mode: int,
+) -> None:
+    default_path = tmp_path / f"default-{umask:o}.json"
+    private_path = tmp_path / f"private-{umask:o}.json"
+    exact_path = tmp_path / f"exact-{umask:o}.json"
+    previous_umask = os.umask(umask)
+    try:
+        write_bytes_no_follow_exclusive(default_path, b"default\n")
+        write_bytes_no_follow_exclusive(private_path, b"private\n", mode=0o600)
+        # 0666 & ~022 is 0644. The public exact-mode contract therefore needs
+        # fchmod after the exclusive create; removing it makes this assertion red.
+        write_bytes_no_follow_exclusive(exact_path, b"exact\n", mode=0o666)
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE(default_path.stat().st_mode) == default_mode
+    assert stat.S_IMODE(private_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(exact_path.stat().st_mode) == 0o666
+    assert default_path.read_bytes() == b"default\n"
+    assert private_path.read_bytes() == b"private\n"
+    assert exact_path.read_bytes() == b"exact\n"
+
+
 def test_exclusive_write_requires_durable_parent_when_requested(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

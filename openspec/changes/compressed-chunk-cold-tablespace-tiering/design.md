@@ -220,10 +220,12 @@ freshly samples both devices; a prior group's free-space sample is never reused
 for a later rewrite. Both `NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES`
 and `NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES` are mandatory positive integer
 byte inputs with no Python, shell, or example-template default. This fixture
-does not invent a universal reserve from disposable WAL observations; #1895
-freezes measured live values in the mode-0600 environment before installing the
-unit. Exact equality is admitted, and either one-byte short case refuses before
-movement SQL.
+does not invent a universal reserve from disposable WAL observations.
+Issue #1895 derives `E` from the fresh six-group live catalog expansion census and
+uses that same byte value for both reserves: the WAL reserve is an explicitly
+conservative same-order expansion proxy, not a measured/per-group-attributed WAL
+claim and not the disposable 165736-byte LSN delta. Exact equality is admitted,
+and either one-byte short case refuses before movement SQL.
 
 Receipt publication is atomic, mode 0600, schema-validated before replacement,
 and bound to the exact head SHA, config, business watermark, lag/cutoff, cluster
@@ -318,7 +320,12 @@ root evidence file identities and freshness, parsed RAID/SMART state, backup
 inventory, capacity/rollback decision, catalog/bind/writability readback,
 mutation ownership, rollback state and stable redacted errors. An existing
 complete topology is an idempotent no-write `already_ready`; any partial or
-drifted topology is NO-GO rather than an implicit repair.
+drifted topology is NO-GO rather than an implicit repair. During an interrupted
+or failed install, the private authority drives only the installer's own
+reconciliation or rollback. A terminal `installed` receipt is published only
+after that authority is durably removed and reported closed; a later
+`already_ready` invocation is observation-only and is not an operator rollback
+entrypoint.
 
 ### D8 — Governance reports both devices without collapsing categories
 
@@ -341,47 +348,138 @@ blocker. The normal example proves two-device reconciliation; a drift example
 proves catalog/filesystem/bind disagreement remains NO-GO. Credentials, raw
 secret-bearing environment values and signed URLs never enter either receipt.
 
-### D9 — Rollout is bounded and independently reversible
+### D9 — Rollout is bounded and fails closed at shipping recovery boundaries
 
-Issue #1895 freezes exact reviewed HEAD and pre-mutation catalog/data/filesystem/API
-baselines, quiesces writers and lifecycle timers, passes D7 gates, creates the
-fresh tablespace, previews candidates, then moves one group at a time with
-post-group parity. It restores timers only after all six baseline groups and
-all active/hot exclusions are proven. It validates one natural tick and either
-a newly terminal group migration or a provable no-op, plus hot/cold SQL and
-public display behavior against #1342 thresholds.
+Issue #2137 first commits, reviews and merges the executable G0/live runbook
+contract without remote access. Only the resulting merged runbook at #1895's
+exact reviewed deployment SHA may supply the pre-target census, root-evidence
+capture, installer, one-group runner, current-receipt, stop/resume and
+close/archive commands; the historical manual container-recreation section is
+explicitly not a cold-bind entrypoint. The census calls the production
+catalog/inventory/parity owners directly and never calls the absent target
+preflight. No node-27 access starts before #2137 merge, its issue-specific fixture
+review, strict validation, contract tests and normal CI pass.
 
-Rollback moves one group back to `pg_default` through the same transactional
-primitive. Container/path deletion is forbidden while catalog references
-remain. A live failure stops further groups and follows the verified rollback;
-it never adds a production-only patch.
+Root evidence uses schema `1.0`, the exact `/bin/hostname` output, UTC RFC3339
+capture time, root:root mode `0600`, 900-second freshness, exact leaf argv
+`/usr/sbin/mdadm --detail /dev/md0`, `/usr/sbin/smartctl -H <parsed-member>` for
+each of exactly two active-sync members, and `/usr/local/sbin/nhms-backup-inventory
+--json`, exact subjects/nonempty outputs, and PGDATA-plus-sorted-external-target
+coverage including the future `nhms_cold` container path. The #1894 synthetic
+helper is forbidden; a missing production producer is NO-GO.
+
+Installer and runner device identities are intentionally distinct. Before path
+creation, `node27_cold_tablespace_host.inspect_host_path()` supplies the installer
+mount identity `major:minor:mount-id:source`; after creation,
+`compressed_chunk_cold_target.inspect_host_path()` supplies the runner descriptor
+identity `st_dev:st_ino`. They are recorded under separate names and never copied
+between installer argv and runner env. Mode is `0700`; UID/GID come only from the
+fresh canonical numeric `.Config.User`, never the historical deployment value.
+
+The read-only preflight freezes exact HEAD plus catalog/data/filesystem/API
+baselines. The six compressed groups observed on 2026-08-29 are a historical
+count only. A fresh census that does not require the absent cold target must
+resolve exactly six complete eligible source groups and bind each durable
+origin/window key, current compressed sibling, complete member digest,
+production inventory/parity, pre-compression expansion and retained-source
+bytes. A missing group, unexplained extra group or identity/count drift ends the window as NO-GO; the
+rollout never substitutes an arbitrary oldest six. Let `E` be the positive
+maximum `before_compression_total_bytes` and `S` the positive sum of the six
+retained-source group bytes. Checked, non-overflowing canonical decimal policy
+is `cold_reserve=E`, `wal_reserve=E`, `install_required=S`, and
+`rollback_headroom=2*E`. Here `wal_reserve=E` is a conservative same-order proxy
+from fresh live expansion, not a WAL measurement or attribution. The existing
+gates therefore require installer cold free >= `S + 2E`, and each group freshly
+requires cold free >= its expansion + `E` and hot free >= `E`; no disposable WAL
+number, LSN delta or historical free-space value supplies a default.
+
+Before any live mutation, the exact reviewed SHA reruns the isolated #1892 oracle
+and requires current-run complete cold movement, inverse complete-group move-back,
+parity and owned-resource cleanup, followed by live read-only compatibility. The
+accepted primitive supports `pg_default`, but the shipping production runner
+exposes only convergence to `nhms_cold`; this is the issue acceptance criterion's
+equivalent-disposable branch, not authority for ad hoc live SQL.
+
+Writers and lifecycle timers are then quiesced. The #1894 installer is the sole
+container/catalog mutation entry. If installation fails or is interrupted while
+its private authority remains live, only the same installer state machine may
+reconcile or roll back that in-progress install. A terminal `installed` receipt
+closes and removes the authority; it does not leave an operator rollback handle.
+After install, a second census must match the same six keys and preimages with no
+extra eligible group before the first movement SQL. A failure at this post-install
+boundary stops and preserves the terminally installed topology even when zero
+groups have moved. Enforce fixes `PER_TICK_BOUND=1` and does not start group N+1
+until group N's uniquely named, current-SHA, invocation-bracketed receipt proves
+complete target, parity and filesystem reconciliation. Recurring timers remain
+stopped through a controlled ingest smoke and all catalog/data/display/performance
+gates; they resume only after a written preliminary GO.
+
+Rollback/NO-GO triggers are exhaustive: head/worktree or engine drift; a missing
+or extra census key; inventory/parity/member/source-state drift; target catalog,
+bind, path, device or runtime UID/GID drift; active writer/lock; stale, malformed,
+non-root or non-PASS RAID/SMART/backup evidence; capacity failure; installer or
+private-authority failure; nonzero command exit; missing/stale/wrong-SHA/wrong-mode
+receipt; mixed/unknown/non-complete residency; filesystem reconciliation failure;
+Seq Scan or all-chunk decompression regression; #1342/API/MVT/click/publication
+failure; or natural-tick/unit failure. Any trigger stops later mutation, forbids
+ad hoc SQL and deletion of referenced topology, and keeps the 4.3 quiesced state
+until a written GO or reviewed owning-implementation response. Timer state may be
+restored after a proven pre-install no-mutation abort or after the installer itself
+publishes a completed rollback for a still-live in-progress authority. Once the
+installer publishes terminal `installed`, every later trigger preserves that
+installed topology even when no residency group has moved. After a live group has
+moved, the same stop-and-preserve rule additionally requires any future live
+move-back entrypoint to land through its owner before reversal.
+
+Every manual value is short canonical decimal and every accepted receipt is
+bound to this invocation's reviewed SHA, generated-at bracket, mode/outcome and
+exit status. This makes #1938 non-blocking without permitting a stale clean file
+to satisfy readiness. For C1/C2/C3, #1895 uses a direct current
+publication/display receipt. The C4 lane is the promoted capability delivered by
+Issue #2123 (with #2130 classification precedence), and #1895 only executes it live. C3
+binds those C4 PASS bytes and strict GFS/IFS job-log
+facts to local display identity-only reads, readonly DB exact identities,
+source-scoped registry complete-cycle counts, and the G1 valid-times frontier.
+It does not claim node-22 scheduling and is not a substitute for the generic
+producer-complete twelve-lane/full-scope aggregator. That aggregator remains
+fail-closed and may run only against its complete producer bundle; creating an
+empty directory never closes it. The evidence PR merges while the shared change
+is still strict-valid; #1895 and then #1891 close only after that merge, and
+archival is an immediate post-merge follow-up after final strict validation.
 
 ## Risk Packs
 
 Core packs considered:
 
-- Public API / CLI / script entry: selected — runner and installer operator
-  entrypoints are fail-closed and dry-run by default.
+- Public API / CLI / script entry: selected — runner, installer, census and
+  C1-C3/G8 operator entrypoints are fail-closed; #2137 must reject missing inputs
+  or wrong reviewed SHA without opening the maintenance window.
 - Config / project setup: selected — fixed tablespace/path identity, timeout
-  budgets, bounds, and systemd ordering are part of the contract.
-- File IO / path safety / overwrite: selected — bind paths, receipts, mount
-  identity, and rollback must reject symlinks/aliases/unsafe replacement.
-- Schema / columns / units / field names: selected — receipt and evidence
-  fields are shared producer/consumer contracts; row columns stay unchanged.
+  budgets, bounds, systemd ordering and complete CI selector partitions are part
+  of the contract.
+- File IO / path safety / overwrite: selected — bind paths, private receipts,
+  mount identity and rollback use bounded no-follow/no-clobber publication with
+  exact ownership/mode/link/readback/fsync checks.
+- Schema / columns / units / field names: selected — residency and C1-C3 receipt
+  schemas are shared producer/consumer contracts; row columns stay unchanged.
 - Auth / permissions / secrets: selected — tablespace DDL/root health evidence
-  requires privileged boundaries; credentials must never enter receipts.
+  requires privileged boundaries; readonly DSNs are short-lived and neither DSN
+  nor other credential material may enter receipts.
 - Concurrency / shared state / ordering: selected — relation locks, one mutex,
-  compression/decompression/retention races, and commit reconciliation.
+  compression/decompression/retention races, current-run brackets, commit
+  reconciliation and C3-after-C4-PASS publication order are enforced.
 - Resource limits / large input / discovery: selected — multi-gigabyte relation
-  moves need group/tick/time bounds and capacity preflight.
+  moves and receipt/HTTP/process inputs need group, byte, tick and time bounds.
 - Legacy compatibility / examples: selected — current compression, retention,
-  write guards, hot-chunk placement, and display reads remain compatible.
+  write guards, readonly facade exports/patch seams, hot-chunk placement and
+  display reads remain compatible; #2137 consumes rather than duplicates C4.
 - Error handling / rollback / partial outputs: selected — timeout, lock,
-  capacity, interruption, partial residency, and receipt-publish failures.
+  capacity, interruption, partial residency, stale/wrong-run/private-path state
+  and receipt-publish failures cannot yield PASS.
 - Release / packaging / dependency compatibility: selected — behavior is pinned
   specifically to PG 15.2 / TimescaleDB 2.10.2; no upgrade is allowed.
-- Documentation / migration notes: selected — ADR/runbook and production
-  rollback are merge-gating artifacts.
+- Documentation / migration notes: selected — ADR, executable G0/live runbook,
+  correct C4 command ownership and production rollback are merge-gating artifacts.
 
 Domain packs considered:
 
@@ -402,32 +500,47 @@ Domain packs considered:
 
 ## Invariant Matrix
 
-- Governing invariant: a group is reported cold only when an eligible compressed
+- Governing invariants: a group is reported cold only when an eligible compressed
   chunk's complete physical residency group is atomically and readably resident
-  in `nhms_cold`; every uncertain state blocks further mutation.
+  in `nhms_cold`; before live mutation, the entire #2137 G0 readiness chain must
+  be merged, and every uncertain evidence state must block remote access or PASS.
 - Source of truth: display business watermark + configured compression lag;
   TimescaleDB chunk/compression catalogs joined to PostgreSQL OIDs; fixed
   tablespace catalog/path/device identity; required expected and independently
-  observed numeric container runtime UID/GID; receipt schema version.
-- Producers: compression runner creates compressed chunks; #1893 residency
-  runner creates group receipts; #1929 binds those receipts and writable checks to
-  the observed numeric runtime principal; #1894 installer/governance creates
-  environment receipts; #1895 creates rollout evidence.
+  observed numeric container runtime UID/GID; receipt schema version; exact
+  reviewed SHA and current invocation bracket; promoted raw C4 receipt bytes.
+- Producers: compression runner creates compressed chunks; #1893 residency runner
+  creates group receipts; #1929 binds those receipts and writable checks to the
+  observed numeric runtime principal; #1894 installer/governance creates
+  environment receipts; #2137 provides production census and C1-C3/G8 receipt
+  owners without live execution; #2123 provides the promoted C4 producer; #1895
+  executes the merged owners and creates live rollout evidence.
 - Validators/preflight: shared group resolver/transaction primitive, runner
   selection/revalidation, one bounded Mounts+`Config.User` inspector followed by
-  exact numeric-principal writability, and installer RAID/SMART/mount/catalog/
-  backup gates.
+  exact numeric-principal writability, installer RAID/SMART/mount/catalog/backup
+  gates, #2137 census/C1-C3 binders, canonical readonly facade and complete
+  `select_ci_tests.py` acceptance partitions.
 - Storage/cache/query: origin/compressed heaps, TOAST and indexes across
-  `pg_default` and `nhms_cold`; no cache or row-schema change.
-- Public routes/entrypoints: #1893 CLI/wrapper/systemd stage and #1894 installer;
-  display API/frontend are unchanged consumers.
+  `pg_default` and `nhms_cold`; private evidence files use bounded no-follow,
+  no-clobber, exact-mode durable publication; no cache or row-schema change.
+- Public routes/entrypoints: #1893 CLI/wrapper/systemd stage, #1894 installer and
+  #2137 census/C1-C3/G8 CLIs; display API/frontend are unchanged consumers and
+  C4 remains owned by the promoted `c4-live-display-evidence` capability.
 - Frontend/downstream consumers: public river/forcing curves, MVT and ingest,
-  compression, decompression replay, retention.
-- Failure paths/rollback/stale state: lock/statement/wall timeout, target full,
-  process kill, relation deletion/decompression, catalog/path drift, mixed
-  residency, receipt publication failure, group move-back.
-- Evidence/audit/readiness: pinned isolated-cluster probe, schema-valid receipts,
-  same-time dual-device governance, exact-SHA node-27 C1-C4/cold gates.
+  compression, decompression replay, retention; C3 consumes raw C4 PASS bytes
+  only after the shipping #2123 lane completes.
+- Failure paths/rollback/stale state: missing/mismatched inputs, SHA, digest,
+  invocation bracket or POSIX identity; stale/partial/private-path evidence;
+  lock/statement/wall timeout, target full, process kill, relation deletion or
+  decompression, catalog/path drift, mixed residency and publication failure;
+  pre-mutation disposable inverse, installer-owned reconciliation/rollback only
+  while an in-progress private authority remains live, then stop-and-preserve
+  after terminal installation.
+- Evidence/audit/readiness: #2137 local fixture, schema, binder, readonly-seam and
+  selector-mutant evidence does not claim live PASS; current-run exact-SHA
+  isolated rollback probe, invocation-bracketed schema-valid receipts, same-time
+  dual-device governance, exact-SHA node-27 C1-C4/cold gates and merged rollout
+  evidence remain #1895 live obligations.
 
 Regression rows:
 
@@ -439,9 +552,22 @@ Regression rows:
   -> complete deterministic accounting, fair bounded progress, no rewrite for
   already-cold.
 - Any member missing/drifted/mixed, target missing/wrong device/unwritable/full,
-  lock/timeout/kill, or receipt publish failure -> no false success and a
-  recovery-classified receipt or safely preserved prior receipt per publication
-  stage.
+  lock/timeout/kill, or receipt publish failure -> no false success, no later
+  group or timer resume, and a current-run recovery-classified receipt or
+  preserved authoritative topology; a prior clean receipt cannot satisfy GO.
+- #2137 merged G0 chain -> production census derives durable identities and fresh
+  count without target preflight; C1-C3/G8 schemas and binders reject wrong
+  SHA/digest/bracket/identity, stale/partial/private-path evidence; C3 consumes
+  rather than reimplements the promoted #2123 C4 lane.
+- #2137 readonly extraction and CI routing -> canonical exports plus
+  `run_display_route_smoke`, `importlib` and `psycopg2` patch seams remain intact,
+  and every changed acceptance owner selects asserted tests rather than a
+  collect-only fallback.
+- Pre-merge task 4.0 -> no node-27/node-22 access and no census/probe/live receipt
+  claim; only merged task 4.0 permits the post-merge 4.1 entrypoint.
+- Fresh pre-install and post-install census -> exactly the same six durable keys,
+  complete-source preimages and inventory/parity inputs with no extra eligible
+  key, or zero movement and terminal NO-GO.
 - Cold decompression + replay + recompression -> every resulting member cold;
   retention/drop -> no orphan relation/catalog/file remains.
 - New active chunks after installation -> `pg_default`; neither hypertable has
@@ -451,21 +577,28 @@ Regression rows:
 
 Boundary-surface checklist:
 
-- Shared helper root: one group resolver/migration transaction module, owned by
-  #1893 after #1892 freezes the tested sequence.
-- Public entrypoints: one residency lifecycle lane and one installer/preflight;
-  no duplicate mutation timer.
+- Shared helper roots: one group resolver/migration transaction module, owned by
+  #1893 after #1892 freezes the tested sequence; bounded private evidence/file
+  publication primitives reused by #2137 without weakening existing consumers.
+- Public entrypoints: one residency lifecycle lane, one installer/preflight and
+  #2137 census/C1-C3/G8 acceptance CLIs; no duplicate mutation timer or C4 lane.
 - Read/write surfaces: catalog/OID resolution, relation files, tablespace paths,
-  receipt publication, no business-row rewrite.
+  private receipt publication and readonly validation; no business-row rewrite.
 - Staging/publish/rollback: database transaction + post-commit reconciliation;
-  atomic receipt; same primitive for cold/hot rollback.
-- Evidence boundaries: image/cluster identity -> probe; watermark/config/group
-  identity -> runner receipt; RAID/mount/backup identity -> install receipt;
-  exact SHA + parity/performance -> rollout receipt.
-- Stale/idempotency boundaries: selection-to-lock drift, already-cold no-op,
-  partial state recovery, receipt failure after commit, natural next tick.
-- Unchanged consumers: active ingest, compression eligibility, retention window,
-  public API/frontend/MVT, node-22/Slurm.
+  no-follow/no-clobber current-run receipts; C3 binds C4 bytes after C4 PASS;
+  disposable inverse before live mutation; installer-owned recovery only for a
+  still-live in-progress authority; quiesced stop-and-preserve after terminal
+  installation, including a zero-group post-install abort.
+- Evidence boundaries: catalog/inventory/parity -> census; display/DB/publication
+  identity -> C1-C3; promoted #2123 producer -> C4; image/cluster identity ->
+  probe; watermark/config/group identity -> runner receipt; RAID/mount/backup
+  identity -> install receipt; exact SHA + parity/performance -> rollout receipt.
+- Stale/idempotency boundaries: wrong SHA/bracket/digest/private path,
+  selection-to-lock drift, already-cold no-op, partial state recovery, receipt
+  failure after commit and natural next tick.
+- Unchanged consumers: canonical readonly imports and patch seams, existing
+  private-file consumers, active ingest, compression eligibility, retention
+  window, public API/frontend/MVT and node-22/Slurm.
 
 ## Migration Plan
 
@@ -480,10 +613,17 @@ Boundary-surface checklist:
    requires the measured numeric runtime UID/GID; one bounded inspect proves that
    pair and the bind, the same pair executes writability, and schema `1.1` records
    it while retaining read compatibility for historical `1.0` recovery evidence.
-5. #1895 performs the controlled live install/migration/rollback proof and
-   validates automatic convergence plus display/performance.
-6. Archive this shared OpenSpec change only after #1895; earlier PRs leave later
-   task groups unchecked so unimplemented behavior is never published as done.
+5. The dedicated #1895 Python/readiness child #2137 merges the executable G0 runbook,
+   census, C1-C3/G8 owners, schemas, binders, shared evidence/file primitives and
+   selector/tests without node-27 access. It consumes the C4 capability already
+   merged through #2123 and the classification clarification from #2130; it does
+   not reimplement the frontend producer or claim a live receipt.
+6. Only after that readiness child merges, #1895 performs the controlled live
+   install/migration, consumes the pre-mutation disposable inverse proof, and
+   validates installer recovery boundaries, automatic convergence, C1-C4 and
+   display/performance.
+7. Archive this shared OpenSpec change only after #1895; the readiness child leaves
+   tasks 4.1-4.8 unchecked so unexecuted live behavior is never published as done.
 
 ## Open Questions
 

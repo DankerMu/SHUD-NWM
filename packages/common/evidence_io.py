@@ -375,9 +375,12 @@ def validate_json_complexity(
     max_depth: int,
     max_nodes: int,
     max_array_items: int,
+    max_object_items: int | None = None,
 ) -> None:
-    """Bound nesting, aggregate nodes, and every array without recursion."""
+    """Bound nesting, aggregate nodes, arrays, and optionally objects without recursion."""
 
+    if max_object_items is not None and max_object_items < 1:
+        raise ValueError("object item ceiling must be positive")
     stack: list[tuple[Any, int]] = [(value, 1)]
     nodes = 0
     while stack:
@@ -388,6 +391,8 @@ def validate_json_complexity(
         if depth > max_depth:
             raise BoundedEvidenceError(f"{label} exceeds the JSON depth ceiling")
         if isinstance(current, Mapping):
+            if max_object_items is not None and len(current) > max_object_items:
+                raise BoundedEvidenceError(f"{label} exceeds the object item ceiling")
             stack.extend((item, depth + 1) for item in current.values())
         elif isinstance(current, list):
             if len(current) > max_array_items:
@@ -403,6 +408,7 @@ def read_bounded_json_no_follow(
     max_depth: int = 32,
     max_nodes: int = 100_000,
     max_array_items: int = 10_000,
+    max_object_items: int | None = None,
 ) -> tuple[bytes, Any]:
     """Read/hash/decode/parse one pinned byte sequence and bound complexity."""
 
@@ -413,6 +419,7 @@ def read_bounded_json_no_follow(
         max_depth=max_depth,
         max_nodes=max_nodes,
         max_array_items=max_array_items,
+        max_object_items=max_object_items,
     )
     return raw, value
 
@@ -425,6 +432,7 @@ def read_bounded_json_with_identity_no_follow(
     max_depth: int = 32,
     max_nodes: int = 100_000,
     max_array_items: int = 10_000,
+    max_object_items: int | None = None,
 ) -> tuple[bytes, FileIdentity, Any]:
     """Read JSON and preserve the exact descriptor identity used to parse it."""
 
@@ -439,5 +447,6 @@ def read_bounded_json_with_identity_no_follow(
         max_depth=max_depth,
         max_nodes=max_nodes,
         max_array_items=max_array_items,
+        max_object_items=max_object_items,
     )
     return raw, identity, value
