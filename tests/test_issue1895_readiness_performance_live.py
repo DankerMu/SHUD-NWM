@@ -262,7 +262,12 @@ class FakeCursor:
         self.owner.executed.append((text, params))
         self.description = None
         if str(text).lstrip().startswith("EXPLAIN"):
-            values = params if isinstance(params, (tuple, list)) else ()
+            if isinstance(params, dict):
+                values = params.values()
+            elif isinstance(params, (tuple, list)):
+                values = params
+            else:
+                values = ()
             compressed = any(str(value).startswith("2026-06") for value in values)
             chunk_name = "_hyper_1_1_chunk_cold" if compressed else "_hyper_1_1_chunk"
             self.owner.last_chunk_name = chunk_name
@@ -279,6 +284,13 @@ class FakeCursor:
             self._rows = [("nhms_display_ro", False)]
         elif "h.run_id = %s" in text and "h.model_id = %s" in text and "h.cycle_time = %s" in text:
             source = str(params[-1]).upper() if isinstance(params, tuple) else "GFS"
+            self._rows = [dict(IDENTITIES[source]["hot"])]
+        elif (
+            "h.run_id = %(run_id)s" in text
+            and "h.model_id = %(model_id)s" in text
+            and "h.cycle_time = %(issue_time)s" in text
+        ):
+            source = "IFS" if isinstance(params, dict) and "ifs" in str(params.get("run_id", "")).lower() else "GFS"
             self._rows = [dict(IDENTITIES[source]["hot"])]
         elif "h.run_id <>" in text:
             source = str(params[1]).upper() if isinstance(params, tuple) else "GFS"
@@ -444,9 +456,14 @@ def test_readonly_session_is_set_before_any_cursor_sql() -> None:
     assert set(lanes) == set(LANE_NAMES)
     assert lanes["gfs_hot"]["state"] == "hot_uncompressed_source"
     assert lanes["gfs_cold"]["state"] == "cold_compressed_target"
-    assert "h.cycle_time = %s" in lanes["gfs_hot"]["query"]["sql"]
+    assert "h.cycle_time = %(issue_time)s" in lanes["gfs_hot"]["query"]["sql"]
     assert "selected_cycles" not in lanes["gfs_hot"]["query"]["sql"]
     query = lanes["gfs_hot"]["query"]
+    assert isinstance(query["parameters"], dict)
+    assert query["parameters"]["issue_time"] == datetime(2026, 8, 1, tzinfo=UTC)
+    assert query["parameters"]["run_id"] == IDENTITIES["GFS"]["hot"]["run_id"]
+    assert query["parameters"]["model_id"] == IDENTITIES["GFS"]["hot"]["model_id"]
+    assert query["parameters"]["river_segment_id"] == "qhh_shud_riv_000042"
     probe = make_sql_probe(
         connection,
         explain_sql=query["explain_sql"],

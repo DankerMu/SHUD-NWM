@@ -801,6 +801,8 @@ ISSUE1895_READINESS_C1_C2_C3_TESTS: tuple[str, ...] = (
     "tests/test_issue1895_readiness_c3_bind.py",
 )
 
+ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST = "tests/test_issue2227_explicit_cycle_named_binding.py"
+
 ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS: tuple[str, ...] = (
     "tests/test_issue1895_readiness_performance_live.py",
     "tests/test_issue1895_readiness_performance_live_cli.py",
@@ -3085,6 +3087,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_issue1895_query.py",
         (
+            ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
             "tests/test_issue1895_readiness_performance.py",
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
             "tests/test_issue1895_readiness_performance_publication.py",
@@ -3193,6 +3196,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_issue1895_performance_live.py",
         (
+            ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
             "tests/test_issue1895_readiness_c14.py",
             "tests/test_issue1895_readiness_performance.py",
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
