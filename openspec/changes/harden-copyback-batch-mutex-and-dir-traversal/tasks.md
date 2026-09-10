@@ -307,8 +307,14 @@ Baseline is `master` unless a row names another revision.
 - [x] E18 The lock refuses a foreign uid in **both** directions: an existing lock
       file whose owner is not the copyback root's owner fails closed (separately
       from the euid mismatch), and a foreign uid at a root with no lock file yet
-      is refused *before* `O_CREAT` so it leaves no orphan. Every message names
-      both uids and the lock path; none of them is a `CopybackLockTimeout`.
+      is refused *before* `O_CREAT` so it leaves no orphan. None of them is a
+      `CopybackLockTimeout`. Message content is **not** uniform and the evidence
+      says so: the pre-`O_CREAT` refusal names both uids and the lock path, and
+      so does the ownership assertion — but a non-root writer meeting an existing
+      foreign-owned `0o600` lock file never reaches that assertion (the `O_RDWR`
+      reopen fails `EACCES` first) and gets `Permission denied` with the path
+      only. The euid-mismatch case is covered by a test that patches
+      `os.geteuid`, which is what makes that branch reachable at all.
 - [x] E19 **Lane × named-behaviour coverage matrix.** Two review rounds lost the
       same way — an enumeration done from memory missed a cell — so the
       enumeration is now the artifact, not a prose list. Round 1 finding B3 was
@@ -354,7 +360,7 @@ Baseline is `master` unless a row names another revision.
       | `scripts/canonical_precip_copyback_backfill` | `tests/test_canonical_precip_copyback_backfill.py::test_a_lock_the_backfill_cannot_take_is_a_recorded_failure_not_a_crash` | `tests/test_canonical_precip_copyback_backfill.py::test_an_unsafe_lock_file_is_a_recorded_failure_not_an_escaped_exception` — round-2 A2's cell. Same single per-tree bucket as the forcing lane, distinguished in the recorded `reason`; without the base-class arm at `:469` the error escapes `main` before the `print(json.dumps(...))` that is this script's entire report. Not asserted on the exit code: `EXIT_FAILURES = 1` (`:92`) is indistinguishable from the interpreter's uncaught-exception code (pre-existing, out of scope). | N/A — no promote batch at all: `mirror_tree` copies file by file into the target with no cross-tree commit and no rollback of its own (design.md, "Backfill granularity"). The mutex spans one whole tree, pinned by `::test_the_backfill_takes_the_batch_mutex_per_tree_not_once_per_run`. | N/A — same reason: there is no batch rollback here to outlive. This is precisely why per-tree acquisition is sufficient rather than merely convenient. | `tests/test_canonical_precip_copyback_backfill.py::test_dry_run_takes_no_lock_and_creates_no_lock_file`; the other zero-write path (copyback root == source root) is a `resolve_roots:146` usage refusal upstream of the only acquire site, pinned by `::test_backfill_overlapping_roots_exit_two` | `tests/test_canonical_precip_copyback_backfill.py::test_backfill_created_directories_stay_readable_under_a_restrictive_umask` (+ `::test_backfill_partially_created_directory_chain_stays_readable`) — this lane does **not** route through `ensure_traversable_copyback_directory`: its import closure must stay stdlib-plus-`copyback_guard` for node-22's frozen checkout, so it keeps its own `_ensure_target_directory` (`:198`), which #2008 already built to the same rule |
 
       Filled 2026-09-09. No cell needed a production change to become fillable.
-      All four `N/A` cells say the same thing — **this lane has no batch
+      All six `N/A` cells say the same thing — **this lane has no batch
       commit/rollback phase to hold the lock through** — and that is a property
       of the lane's design (per-tree settle in run-products and
       `run_tree_copyback`, file-by-file mirror in the canonical script), not of

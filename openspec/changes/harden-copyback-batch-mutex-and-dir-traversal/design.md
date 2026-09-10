@@ -216,9 +216,20 @@ recoverable failure into silent data absence.
   account fails closed with a clear error instead of silently running unlocked —
   in **both** directions, because the owner is compared to the copyback root's
   owner and not only to the current euid, and because the create branch is
-  refused before the file exists. Every failure names both uids and the lock
-  path, so recovery needs no second round trip. All copyback writers are
-  `frd_muziyao` on node-22. Recorded as a known limit.
+  refused before the file exists. All copyback writers are `frd_muziyao` on
+  node-22. Recorded as a known limit.
+  **What the operator actually sees, which is not uniform.** Only the *create*
+  direction names both uids and the path, because only there does this process
+  get to stat the situation. In the pre-existing-file direction a non-root
+  writer never reaches the ownership assertions at all: the lock file is
+  `0o600` and owned by someone else, so the `O_RDWR` reopen after
+  `O_CREAT|O_EXCL` fails `EACCES` and surfaces as `cannot acquire copyback
+  batch lock <path>: [Errno 13] Permission denied` — correct lane error type,
+  correctly distinct from a timeout, but carrying no uid. The ownership
+  assertions are reachable there only for euid 0 or under a test that patches
+  `os.geteuid`. `Permission denied` on the lock path *is* the foreign-owner
+  signal in that direction, and the runbooks say so; the recovery steps
+  (`ls -ln <lock>`, `stat -c '%u' <root>`) work regardless.
 - **Deadlock ordering: the two locks never nest, in either direction.**
   `merge_state_snapshot_index_copyback` takes `provider_destination_lock`
   (`packages/common/provider_atomic.py:219-222`) with `blocking=True` and **no
@@ -329,7 +340,16 @@ stays an optional pass-through to `safe_fs` for symlink containment only.
 Copied from `scripts/canonical_precip_copyback_backfill.py:189-225`
 (`_ensure_target_directory`) and from
 `state_manager._ensure_copyback_state_parent` (`:2464`): probe upwards for the
-missing components, then create and widen them outermost-first, one at a time. A
+missing components, then create and widen them outermost-first, one at a time.
+**One guard is deliberately not copied.** The backfill script creates each level
+with a bare `path.mkdir()` and can therefore catch `FileExistsError`
+(`scripts/canonical_precip_copyback_backfill.py:226-233`) to skip the `chmod`
+for a level it lost to a concurrent creator. `safe_fs.ensure_directory_no_follow`
+absorbs that signal (`safe_fs.py:91-93`), so this helper cannot distinguish the
+lost race and widens the level anyway. Reproducing the guard would mean giving
+up `safe_fs`'s `O_NOFOLLOW`/`dir_fd` walk, which is the whole reason to use it.
+The residue is recorded as an accepted limit in the helper docstring and in the
+`filesystem-permission-determinism` delta. A
 single `mkdir(parents=True)` followed by a widening loop leaves ancestors at the
 umask forever whenever the leaf fails, and a later run's existence probe no longer
 counts them as created.
@@ -409,9 +429,12 @@ Regression rows:
 - Lock timeout exceeded → loud distinct error, no unlocked promote; for the
   canonical mirror the cycle still records a `failed` receipt and survives.
 - Lock file is a symlink / wrong mode / foreign owner → fail closed, no promote.
-- Lock file owned by a uid other than the copyback root's owner → fail closed
-  with both uids and the path in the message; and a foreign uid reaching a root
-  with **no** lock file yet is refused before `O_CREAT`, so no orphan is left.
+- Lock file owned by a uid other than the copyback root's owner → fail closed.
+  A non-root writer gets `EACCES` on the reopen (`Permission denied`, path only,
+  no uid — see "Single uid" above); euid 0 and the patched-`geteuid` test reach
+  the ownership assertion, which names both uids and the path. A foreign uid
+  reaching a root with **no** lock file yet is refused before `O_CREAT` — that
+  branch always names both uids and the path — so no orphan is left.
 - A raised base `CopybackLockError` (not a `CopybackLockTimeout`) → each lane's
   *unsafe* code, distinct from its timeout code: `PublishError`
   `OBJECT_STORE_COPYBACK_LOCK_UNSAFE` in q_down/run-products,

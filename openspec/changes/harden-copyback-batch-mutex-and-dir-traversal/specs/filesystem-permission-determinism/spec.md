@@ -3,12 +3,26 @@
 ### Requirement: copyback intermediate directories are made traversable by their creator
 
 The object-store copyback callers SHALL make every intermediate directory they
-create beneath the copyback root traversable by the consuming account, because
-`safe_fs` deliberately lets the ambient umask restrict what it creates and never
-widens it afterwards.
+create on the path to a copyback target traversable by the consuming account,
+because `safe_fs` deliberately lets the ambient umask restrict what it creates
+and never widens it afterwards. "On the path to" is deliberate and includes
+levels *above* the copyback root: the callers that prepare the root pass no
+containment root, so a missing ancestor of the root is created by the same call,
+and an ancestor left at `0o750` defeats traversal exactly as a level below the
+root would.
 
 The widening SHALL apply only to directory levels the creating call itself
-created, and SHALL NOT change the mode of a level that already existed. The
+created, and SHALL NOT change the mode of a level that already existed at the
+time the call probed for it. "Created by this call" is decided by that probe,
+not by the `mkdir` return: `safe_fs.ensure_directory_no_follow` absorbs
+`FileExistsError`, so a level that a concurrent creator wins between the probe
+and the `mkdir` is still widened. That residue is accepted rather than fixed —
+closing it would mean either changing `safe_fs` (out of scope, see below) or
+re-probing after creation, which only narrows the window instead of removing it.
+It is bounded in practice: every directory-tree writer beneath the root holds
+the copyback batch mutex, and the only mutex-exempt writers work in disjoint
+subtrees, so the levels genuinely open to the race are the root and its
+ancestors, where `0o755` is the intended mode anyway. The
 copyback root itself is one such level whenever the call creates it: a root left
 at `0o750` defeats traversal no matter what the levels below it carry. It is
 applied unconditionally to those levels: an inherited POSIX default ACL does not
@@ -37,8 +51,12 @@ after creating it.
 #### Scenario: an already-existing intermediate directory keeps its mode
 
 - **WHEN** an intermediate directory beneath the copyback root already exists with
-  a restrictive mode
-- **THEN** the copyback caller MUST leave its mode unchanged.
+  a restrictive mode when the copyback caller probes for it
+- **THEN** the copyback caller MUST leave its mode unchanged
+- **AND** the sole exception is the accepted race in the requirement above — a
+  level created by someone else between this call's probe and its `mkdir` — which
+  MUST stay documented as an accepted limit rather than being presented as
+  compliance.
 
 #### Scenario: the run-tree interior stays ACL-mask-preserving
 
