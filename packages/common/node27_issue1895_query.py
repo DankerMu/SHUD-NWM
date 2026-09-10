@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -35,17 +37,27 @@ POINT_INSPECTION_LIMIT = 480
 UNIT_LIMIT = 32
 
 
+NativeParameters = Mapping[str, Any] | Sequence[Any]
+CapturedParameters = dict[str, Any] | tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class _CanonicalExplicitCycleIdentity:
+    issue_time: datetime
+    run_id: str
+    model_id: str
+    timeseries_segment_id: str
+
+
 class _RecordingCursor:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.calls: list[tuple[str, CapturedParameters]] = []
 
-    def execute(self, statement: str, parameters: Sequence[Any] | Mapping[str, Any] | None = None) -> None:
-        if isinstance(parameters, Mapping):
-            bound: tuple[Any, ...] = tuple(parameters.items())
-        elif parameters is None:
-            bound = ()
+    def execute(self, statement: str, parameters: NativeParameters | None = None) -> None:
+        if parameters is None:
+            bound: CapturedParameters = ()
         else:
-            bound = tuple(parameters)
+            bound = _copy_parameters(parameters, error_code="QUERY_BINDING_SHAPE")
         self.calls.append((str(statement), bound))
 
     def fetchall(self) -> list[dict[str, Any]]:
@@ -161,26 +173,281 @@ def forecast_series_url(
     return f"{origin}{path}?{query}"
 
 
+_PYFORMAT_REFERENCE_RE = re.compile(r"%\(([A-Za-z_][A-Za-z0-9_]*)\)s")
+_UNSUPPORTED_PERCENT_RE = re.compile(r"%(?!s|\([A-Za-z_][A-Za-z0-9_]*\)s)")
+_REQUIRED_NAMED_BINDINGS: tuple[tuple[str, str, str], ...] = (
+    ("h.cycle_time", "issue_time", "QUERY_IDENTITY_UNBOUND"),
+    ("h.run_id", "run_id", "QUERY_IDENTITY_UNBOUND"),
+    ("h.model_id", "model_id", "QUERY_IDENTITY_UNBOUND"),
+)
+_SEGMENT_PREDICATE_RE = re.compile(
+    r"\brt\.(?:river_segment_id|river_segment_key)\s*=\s*(?P<placeholder>%s|%\([A-Za-z_][A-Za-z0-9_]*\)s)",
+    re.IGNORECASE,
+)
+
+
+def _binding_error(message: str, *, code: str) -> Issue1895ReadinessError:
+    return Issue1895ReadinessError(message, code=code, stage="query")
+
+
+def _copy_binding_value(value: Any, *, error_code: str) -> Any:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _binding_error("curve SQL binding number is not finite", code=error_code)
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raise _binding_error("curve SQL binding contains bytes", code=error_code)
+    if isinstance(value, Mapping):
+        copied: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise _binding_error("curve SQL binding mapping key is not text", code=error_code)
+            copied[key] = _copy_binding_value(item, error_code=error_code)
+        return copied
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray, memoryview)):
+        return [_copy_binding_value(item, error_code=error_code) for item in value]
+    raise _binding_error("curve SQL binding value is unsupported", code=error_code)
+
+
+def _copy_parameters(parameters: object, *, error_code: str) -> CapturedParameters:
+    if isinstance(parameters, Mapping):
+        copied: dict[str, Any] = {}
+        for key, value in parameters.items():
+            if not isinstance(key, str):
+                raise _binding_error("curve SQL binding mapping key is not text", code=error_code)
+            copied[key] = _copy_binding_value(value, error_code=error_code)
+        return copied
+    if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray, memoryview)):
+        return tuple(_copy_binding_value(value, error_code=error_code) for value in parameters)
+    raise _binding_error("curve SQL binding container is not a mapping or sequence", code=error_code)
+
+
 def _canonical_param(value: Any) -> Any:
     if isinstance(value, datetime):
-        return iso_utc(value)
-    if isinstance(value, (bytes, bytearray)):
-        raise Issue1895ReadinessError(
-            "curve SQL binding contains bytes",
-            code="QUERY_BINDING_INVALID",
-            stage="query",
-        )
+        return {"datetime": iso_utc(value)}
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise _binding_error("curve SQL binding number is not finite", code="QUERY_BINDING_INVALID")
+        return value
     if isinstance(value, Mapping):
-        return {str(key): _canonical_param(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_canonical_param(item) for item in value]
-    return value
+        canonical: dict[str, Any] = {}
+        for key in sorted(value):
+            if not isinstance(key, str):
+                raise _binding_error("curve SQL binding mapping key is not text", code="QUERY_BINDING_INVALID")
+            canonical[key] = _canonical_param(value[key])
+        return {"mapping": canonical}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray, memoryview)):
+        return {"sequence": [_canonical_param(item) for item in value]}
+    raise _binding_error("curve SQL binding value is unsupported", code="QUERY_BINDING_INVALID")
 
 
-def query_digest(*, sql: str, parameters: Sequence[Any]) -> str:
-    payload = {"sql": " ".join(sql.split()), "parameters": [_canonical_param(item) for item in parameters]}
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+def query_digest(*, sql: str, parameters: NativeParameters) -> str:
+    copied = _copy_parameters(parameters, error_code="QUERY_BINDING_INVALID")
+    if isinstance(copied, Mapping):
+        canonical_parameters = {"mapping": {key: _canonical_param(copied[key]) for key in sorted(copied)}}
+    else:
+        canonical_parameters = {"sequence": [_canonical_param(item) for item in copied]}
+    payload = {"sql": " ".join(sql.split()), "parameters": canonical_parameters}
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_explicit_cycle_identity(
+    expected: Mapping[str, Any] | _CanonicalExplicitCycleIdentity,
+) -> _CanonicalExplicitCycleIdentity:
+    if isinstance(expected, _CanonicalExplicitCycleIdentity):
+        return expected
+    try:
+        issue_time = parse_issue_time(expected["issue_time"])
+        run_id = str(expected["run_id"] or "").strip()
+        model_id = str(expected["model_id"] or "").strip()
+        timeseries_segment_id = str(expected["timeseries_segment_id"] or "").strip()
+    except (KeyError, TypeError, ValueError):
+        raise _binding_error("canonical explicit-cycle identity is malformed", code="QUERY_IDENTITY_MISSING") from None
+    if not run_id or not model_id or not timeseries_segment_id:
+        raise _binding_error("canonical explicit-cycle identity is incomplete", code="QUERY_IDENTITY_MISSING")
+    return _CanonicalExplicitCycleIdentity(
+        issue_time=issue_time,
+        run_id=run_id,
+        model_id=model_id,
+        timeseries_segment_id=timeseries_segment_id,
+    )
+
+
+def _placeholder_style(sql: str) -> tuple[str, tuple[str, ...]]:
+    if "selected_cycles" in sql.lower() or "with selected_cycles" in sql.lower():
+        raise _binding_error(
+            "recorded SQL is the selected-cycles CTE branch, not explicit-cycle", code="QUERY_BRANCH_INVALID"
+        )
+    if _UNSUPPORTED_PERCENT_RE.search(sql) is not None:
+        raise _binding_error("recorded SQL contains unsupported placeholder syntax", code="QUERY_BINDING_SHAPE")
+    named = tuple(match.group(1) for match in _PYFORMAT_REFERENCE_RE.finditer(sql))
+    positional = sql.count("%s")
+    if named and positional:
+        raise _binding_error("recorded SQL mixes named and positional placeholders", code="QUERY_BINDING_SHAPE")
+    if named:
+        return "named", named
+    if positional:
+        return "positional", ()
+    raise _binding_error("recorded SQL has no supported placeholders", code="QUERY_BINDING_SHAPE")
+
+
+def _named_predicate_key(sql: str, predicate: str, *, identity_error: str) -> str:
+    pattern = re.compile(
+        rf"\b{re.escape(predicate)}\s*=\s*%\((?P<key>[A-Za-z_][A-Za-z0-9_]*)\)s",
+        re.IGNORECASE,
+    )
+    matches = tuple(match.group("key") for match in pattern.finditer(sql))
+    if len(matches) != 1:
+        raise _binding_error("recorded SQL does not bind one required identity predicate", code=identity_error)
+    return matches[0]
+
+
+def _positional_predicate_ordinal(sql: str, predicate: str, *, identity_error: str) -> int:
+    pattern = re.compile(rf"\b{re.escape(predicate)}\s*=\s*%s", re.IGNORECASE)
+    matches = tuple(pattern.finditer(sql))
+    if len(matches) != 1:
+        raise _binding_error("recorded SQL does not bind one required identity predicate", code=identity_error)
+    return sql[: matches[0].start()].count("%s")
+
+
+def _segment_binding(sql: str, *, style: str) -> str | int:
+    matches = tuple(_SEGMENT_PREDICATE_RE.finditer(sql))
+    if len(matches) != 1:
+        raise _binding_error(
+            "recorded SQL does not bind one timeseries segment predicate", code="QUERY_SEGMENT_UNBOUND"
+        )
+    placeholder = matches[0].group("placeholder")
+    if style == "named":
+        named = _PYFORMAT_REFERENCE_RE.fullmatch(placeholder)
+        if named is None:
+            raise _binding_error("recorded SQL mixes placeholder styles", code="QUERY_BINDING_SHAPE")
+        return named.group(1)
+    if placeholder != "%s":
+        raise _binding_error("recorded SQL mixes placeholder styles", code="QUERY_BINDING_SHAPE")
+    return sql[: matches[0].start()].count("%s")
+
+
+def _value_matches_expected(value: Any, expected: Any, *, issue_time: bool = False) -> bool:
+    if issue_time:
+        try:
+            return parse_issue_time(value) == expected
+        except Issue1895ReadinessError:
+            return False
+    return value == expected
+
+
+def _validate_named_binding(
+    sql: str,
+    parameters: Mapping[str, Any],
+    *,
+    predicate: str,
+    canonical_key: str,
+    expected_value: Any,
+    error_code: str,
+    issue_time: bool = False,
+) -> None:
+    key = _named_predicate_key(sql, predicate, identity_error=error_code)
+    if key != canonical_key:
+        raise _binding_error("recorded SQL predicate references an unexpected binding key", code=error_code)
+    if not _value_matches_expected(parameters.get(key), expected_value, issue_time=issue_time):
+        raise _binding_error("recorded SQL binding does not match canonical identity", code=error_code)
+
+
+def _validate_positional_binding(
+    sql: str,
+    parameters: Sequence[Any],
+    *,
+    predicate: str,
+    expected_value: Any,
+    error_code: str,
+    issue_time: bool = False,
+) -> None:
+    ordinal = _positional_predicate_ordinal(sql, predicate, identity_error=error_code)
+    if ordinal >= len(parameters) or not _value_matches_expected(
+        parameters[ordinal], expected_value, issue_time=issue_time
+    ):
+        raise _binding_error("recorded SQL binding does not match canonical identity", code=error_code)
+
+
+def _validate_captured_explicit_cycle_query(
+    sql: str,
+    parameters: object,
+    expected: Mapping[str, Any] | _CanonicalExplicitCycleIdentity,
+) -> CapturedParameters:
+    """Fail closed unless one captured query binds the canonical explicit-cycle identity."""
+
+    identity = _canonical_explicit_cycle_identity(expected)
+    text = str(sql)
+    style, referenced_names = _placeholder_style(text)
+    copied = _copy_parameters(parameters, error_code="QUERY_BINDING_SHAPE")
+    if style == "named":
+        if not isinstance(copied, Mapping):
+            raise _binding_error("named SQL requires a mapping", code="QUERY_BINDING_SHAPE")
+        if set(copied) != set(referenced_names):
+            raise _binding_error(
+                "named SQL mapping keys do not equal referenced placeholders", code="QUERY_BINDING_SHAPE"
+            )
+        expected_values = {
+            "h.cycle_time": (identity.issue_time, True),
+            "h.run_id": (identity.run_id, False),
+            "h.model_id": (identity.model_id, False),
+        }
+        for predicate, canonical_key, error_code in _REQUIRED_NAMED_BINDINGS:
+            expected_value, is_issue_time = expected_values[predicate]
+            _validate_named_binding(
+                text,
+                copied,
+                predicate=predicate,
+                canonical_key=canonical_key,
+                expected_value=expected_value,
+                error_code=error_code,
+                issue_time=is_issue_time,
+            )
+        segment_key = _segment_binding(text, style=style)
+        if segment_key != "river_segment_id":
+            raise _binding_error(
+                "recorded SQL predicate references an unexpected binding key",
+                code="QUERY_SEGMENT_UNBOUND",
+            )
+        if not _value_matches_expected(copied.get(segment_key), identity.timeseries_segment_id):
+            raise _binding_error("recorded SQL binding does not match canonical identity", code="QUERY_SEGMENT_UNBOUND")
+        return dict(copied)
+
+    if isinstance(copied, Mapping):
+        raise _binding_error("positional SQL requires a sequence", code="QUERY_BINDING_SHAPE")
+    placeholder_count = text.count("%s")
+    if placeholder_count != len(copied):
+        raise _binding_error("recorded SQL positional binding shape drifted", code="QUERY_BINDING_SHAPE")
+    expected_values = {
+        "h.cycle_time": (identity.issue_time, True),
+        "h.run_id": (identity.run_id, False),
+        "h.model_id": (identity.model_id, False),
+    }
+    for predicate, _canonical_key, error_code in _REQUIRED_NAMED_BINDINGS:
+        expected_value, is_issue_time = expected_values[predicate]
+        _validate_positional_binding(
+            text,
+            copied,
+            predicate=predicate,
+            expected_value=expected_value,
+            error_code=error_code,
+            issue_time=is_issue_time,
+        )
+    segment_ordinal = _segment_binding(text, style=style)
+    if not isinstance(segment_ordinal, int) or segment_ordinal >= len(copied):
+        raise _binding_error("recorded SQL binding does not match canonical identity", code="QUERY_SEGMENT_UNBOUND")
+    if not _value_matches_expected(copied[segment_ordinal], identity.timeseries_segment_id):
+        raise _binding_error("recorded SQL binding does not match canonical identity", code="QUERY_SEGMENT_UNBOUND")
+    return tuple(copied)
 
 
 def record_explicit_cycle_curve(
@@ -239,37 +506,17 @@ def record_explicit_cycle_curve(
             code="QUERY_PRIMARY_INVALID",
             stage="query",
         )
-    query_text, parameters = primary[0]
-    if "selected_cycles" in query_text or "WITH selected_cycles" in query_text:
-        raise Issue1895ReadinessError(
-            "recorded SQL is the selected-cycles CTE branch, not explicit-cycle",
-            code="QUERY_BRANCH_INVALID",
-            stage="query",
-        )
-    if "h.cycle_time = %s" not in query_text:
-        raise Issue1895ReadinessError(
-            "recorded SQL is missing the explicit cycle equality",
-            code="QUERY_BRANCH_INVALID",
-            stage="query",
-        )
-    if query_text.count("%s") != len(parameters):
-        raise Issue1895ReadinessError(
-            "recorded SQL positional binding shape drifted",
-            code="QUERY_BINDING_SHAPE",
-            stage="query",
-        )
-    if run_token not in parameters or model_token not in parameters:
-        raise Issue1895ReadinessError(
-            "recorded SQL did not bind run_id and model_id",
-            code="QUERY_IDENTITY_UNBOUND",
-            stage="query",
-        )
-    if ts_segment not in parameters:
-        raise Issue1895ReadinessError(
-            "recorded SQL did not bind the timeseries segment id",
-            code="QUERY_SEGMENT_UNBOUND",
-            stage="query",
-        )
+    query_text, captured_parameters = primary[0]
+    parameters = _validate_captured_explicit_cycle_query(
+        query_text,
+        captured_parameters,
+        _CanonicalExplicitCycleIdentity(
+            issue_time=parsed_issue,
+            run_id=run_token,
+            model_id=model_token,
+            timeseries_segment_id=ts_segment,
+        ),
+    )
     window_end = parsed_issue + timedelta(days=WINDOW_DAYS)
     return {
         "sql": query_text,

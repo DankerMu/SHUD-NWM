@@ -407,10 +407,23 @@ def load_candidate_chunk_names(
     return tuple(classified["candidate_chunk_names"])
 
 
-def execute_explain(connection: Any, *, sql: str, parameters: Sequence[Any]) -> Any:
+def _native_explain_parameters(parameters: Mapping[str, Any] | Sequence[Any]) -> dict[str, Any] | tuple[Any, ...]:
+    if isinstance(parameters, Mapping):
+        return dict(parameters)
+    if isinstance(parameters, Sequence) and not isinstance(parameters, (str, bytes, bytearray, memoryview)):
+        return tuple(parameters)
+    raise Issue1895ReadinessError(
+        "EXPLAIN parameters are not a mapping or sequence",
+        code="SQL_EXPLAIN_FAILED",
+        stage="performance",
+    )
+
+
+def execute_explain(connection: Any, *, sql: str, parameters: Mapping[str, Any] | Sequence[Any]) -> Any:
     try:
+        bound = _native_explain_parameters(parameters)
         with connection.cursor() as cursor:
-            cursor.execute(sql, tuple(parameters))
+            cursor.execute(sql, bound)
             row = cursor.fetchone()
     except Issue1895ReadinessError:
         raise
@@ -455,7 +468,7 @@ def make_sql_probe(
     connection: Any,
     *,
     explain_sql: str,
-    parameters: Sequence[Any],
+    parameters: Mapping[str, Any] | Sequence[Any],
     clock: Callable[[], float] = time.monotonic,
 ) -> Callable[[int], dict[str, Any]]:
     def probe(_index: int) -> dict[str, Any]:

@@ -4274,3 +4274,18 @@ A new human keep/cut call is deferred: this PR supplies no new later-round
 attribution and does not resolve the mixed code/evidence/prose measurement
 limitations recorded above. The existing keep decision and seat caps remain
 unchanged; issue-delivery authorization does not authorize policy narrowing.
+
+## Revisit — PR #2231 (issue #2227), 2026-09-10
+
+The post-merge audit reports 620 records (611 merged, nine terminal), while the
+rotation sample and attribution remain exactly unchanged: 199 multi-round
+merged PRs, core=237, rotated=270, phase=57, skipped=15. The three newly
+accounted merges are PR #2221 and PR #2229 (fixture-none, zero rounds) plus
+PR #2231 (one clean high-tier round, zero candidates); none can add a multi-round
+sample or a later-round catch.
+
+A new human keep/cut call is therefore deferred: the audit is repeating the
+same already-recorded sample and the mixed code/evidence/prose measurement
+limitations remain unresolved. The existing keep decision and seat caps remain
+unchanged; the authorization to deliver #2227 does not authorize review-policy
+narrowing.
