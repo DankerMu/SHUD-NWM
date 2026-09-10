@@ -3659,3 +3659,108 @@ def test_seconds_precision_validator_still_returns_a_utc_normalized_instant() ->
 
     assert naive == datetime(2026, 9, 2, 20, 0, tzinfo=UTC)
     assert naive.utcoffset() == timedelta(0)
+
+
+def test_per_basin_store_union_preserves_the_frozen_public_sql_contract() -> None:
+    frozen = (Path(__file__).parent / "fixtures/hydro_mvt_pre_store_f33441a2.sql").read_text()
+    current = postgis_tile_sql("hydro")
+    opener = "source_rows AS NOT MATERIALIZED ("
+    closer = "\n        ),\n        source_identity_stats AS ("
+    before, rest = frozen.split(opener, 1)
+    original_source, after = rest.split(closer, 1)
+    actual_before, rest = current.split(opener, 1)
+    routed_source, actual_after = rest.split(closer, 1)
+    assert actual_before == before
+    assert actual_after == after
+    branches = routed_source.split("\nUNION ALL\n")
+    assert len(branches) == 2
+    for store, branch in zip(("legacy", "narrow"), branches, strict=True):
+        assert f"AND timeseries_store = '{store}'" in branch
+        restored = branch.replace(f"                        AND timeseries_store = '{store}'\n", "")
+        if store == "legacy":
+            restored = restored.replace("hydro.river_timeseries_legacy", "hydro.river_timeseries")
+            expected = original_source
+        else:
+            assert "hydro.river_timeseries_legacy" not in branch
+            expected = re.sub(
+                r"              -- transitional compressed-chunk pushdown aid, remove with #1342\n"
+                r"              AND ts\.(?:run_id|river_network_version_id|variable) = :\w+\n",
+                "", original_source,
+            )
+        assert restored.strip() == expected.strip()
+    assert current.count("ST_AsMVT(tile_rows,") == 1
+    assert set(text(current)._bindparams) == set(text(frozen)._bindparams)
+
+
+def test_national_store_probes_preserve_the_frozen_full_sql_contract() -> None:
+    frozen = (Path(__file__).parent / "fixtures/hydro_national_mvt_pre_store_c21bacf9.sql").read_text()
+    current = postgis_tile_sql("hydro-national")
+    # Only the three already located LATERAL bodies and two candidate columns
+    # may change. Compare every byte outside them, not merely selected landmarks.
+    pattern = r"(?<=CROSS JOIN LATERAL \()(.*?)(?=\) (?:v|hit)\b)"
+    originals = re.findall(pattern, frozen, re.S)
+    routed = re.findall(pattern, current, re.S)
+    assert len(originals) == len(routed) == 3
+    for original, combined in zip(originals, routed, strict=True):
+        assert combined.count("UNION ALL") == 1
+        assert combined.count("LIMIT 1") == 1
+        assert combined.rstrip().endswith("LIMIT 1")
+        original_body = original.rsplit("LIMIT 1", 1)[0]
+        branches = combined.rsplit("LIMIT 1", 1)[0].split("\nUNION ALL\n")
+        for store, branch in zip(("legacy", "narrow"), branches, strict=True):
+            assert branch.count(f"AND lr.timeseries_store = '{store}'") == 1
+            restored = branch.replace(f"                      AND lr.timeseries_store = '{store}'\n", "")
+            if store == "legacy":
+                restored = restored.replace("hydro.river_timeseries_legacy", "hydro.river_timeseries")
+                expected = original_body
+            else:
+                assert "hydro.river_timeseries_legacy" not in branch
+                expected = re.sub(
+                    r"                      -- transitional compressed-chunk pushdown aid, remove with #1342\n"
+                    r"                      AND ts\."
+                    r"(?:run_id|river_network_version_id|river_segment_id|variable) = [^\n]+\n",
+                    "", original_body,
+                )
+            assert restored.strip() == expected.strip()
+    restored_sql = current
+    for combined, original in zip(routed, originals, strict=True):
+        restored_sql = restored_sql.replace(combined, original, 1)
+    assert restored_sql.count(", h.timeseries_store") == 2
+    assert restored_sql.replace(", h.timeseries_store", "") == frozen
+    assert current.count("ST_AsMVT(tile_rows,") == 1
+    assert set(text(current)._bindparams) == set(text(frozen)._bindparams)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({}, b"pbf-bytes"),
+        ({"tile": None, "feature_count": 0}, b""),
+        ({"source_identity_count": 0}, (424, "MVT_LIVE_POSTGIS_UNAVAILABLE")),
+        ({"invalid_property_count": 1, "invalid_properties": "value"}, (500, "MVT_TILE_CONTRACT_INVALID")),
+        ({"feature_count": 10001}, (413, "MVT_TILE_BUDGET_EXCEEDED")),
+    ],
+)
+def test_per_basin_routed_consumer_keeps_one_statement_and_first_row_outcomes(
+    monkeypatch: Any, overrides: dict[str, Any], expected: Any,
+) -> None:
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    session = _Session([{**_budget_row(6), **overrides}])
+    params = {
+        "run_id": "run_a", "basin_version_id": "bv_a", "river_network_version_id": "rn_a",
+        "variable": "q_down", "valid_time": datetime(2026, 6, 1, tzinfo=UTC),
+    }
+    if isinstance(expected, bytes):
+        assert hydro_display._fetch_postgis_tile_bytes(session, "hydro", params, z=9, x=398, y=197) == expected
+    else:
+        with pytest.raises(ApiError) as raised:
+            hydro_display._fetch_postgis_tile_bytes(session, "hydro", params, z=9, x=398, y=197)
+        assert (raised.value.status_code, raised.value.code) == expected
+    assert len(session.executions) == 1
+    sql, bound = session.executions[0]
+    assert "FROM hydro.river_timeseries_legacy ts" in sql
+    assert "FROM hydro.river_timeseries ts" in sql
+    assert "AND timeseries_store = 'legacy'" in sql
+    assert "AND timeseries_store = 'narrow'" in sql
+    assert set(text(sql)._bindparams) <= bound.keys()
+    assert all(bound[key] == value for key, value in params.items())

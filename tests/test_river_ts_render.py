@@ -4447,8 +4447,8 @@ def test_every_traversal_commutes_with_the_scanner_over_the_corpus() -> None:
     ``sql_chains`` are compared as OUTCOMES against the pre-blanked text, which
     is what their own private paren loop has to agree with.
 
-    Corpus: all 20 registered templates, both rendered variants of each, and the
-    adversarial list above. Samples outside the declared subset are excluded by
+    Corpus: all current registered templates, both raw and rendered variants for
+    each store, and the adversarial list above. Samples outside the declared subset are excluded by
     the module's own :func:`_lexical_subset_violation`, so this test says nothing
     about statements decision 18 refuses — and the count of exclusions is
     asserted to be 0 for the registry, which is the measurement decision 18 rests
@@ -4472,9 +4472,9 @@ def test_every_traversal_commutes_with_the_scanner_over_the_corpus() -> None:
             corpus.append((label, sql))
 
     assert registry_excluded == 0, (
-        "all 12 current raw templates must remain inside the declared lexical subset"
+        "all current registered templates must remain inside the declared lexical subset"
     )
-    assert len(corpus) == 4 * len(REGISTRY) == 48
+    assert len(corpus) == 4 * len(REGISTRY)
 
     adversarial_excluded = [label for label, sql in _ADVERSARIAL_CORPUS if _lexical_subset_violation(sql) is not None]
     assert adversarial_excluded == [], f"the adversarial corpus must stay inside the subset, got {adversarial_excluded}"

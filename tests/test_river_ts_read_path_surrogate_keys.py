@@ -262,6 +262,43 @@ def _lateral_probe(leg: str) -> str:
     return _slice(leg, "CROSS JOIN LATERAL (", ") v")
 
 
+def _store_probe_branches(probe: str) -> tuple[str, str]:
+    assert probe.count("UNION ALL") == 1
+    assert probe.count("LIMIT 1") == 1
+    assert probe.rstrip().endswith("LIMIT 1")
+    legacy, narrow = probe.rsplit("LIMIT 1", 1)[0].split("UNION ALL")
+    for store, branch in (("legacy", legacy), ("narrow", narrow)):
+        opposite = "narrow" if store == "legacy" else "legacy"
+        assert f"lr.timeseries_store = '{store}'" in branch
+        assert f"lr.timeseries_store = '{opposite}'" not in branch
+        table = "hydro.river_timeseries_legacy" if store == "legacy" else "hydro.river_timeseries"
+        assert f"FROM {table} ts" in branch
+        assert branch.count("FROM hydro.river_timeseries") == 1
+        assert ("hydro.river_timeseries_legacy" in branch) == (store == "legacy")
+    return legacy, narrow
+
+
+def _assert_store_probe_predicates(probe: str, expected: str, aids: set[str]) -> None:
+    legacy, narrow = _store_probe_branches(probe)
+    for store, branch in (("legacy", legacy), ("narrow", narrow)):
+        predicates = expected.removesuffix("LIMIT 1")
+        if store == "legacy":
+            predicates = predicates.replace("hydro.river_timeseries ts", "hydro.river_timeseries_legacy ts")
+        else:
+            for column in aids:
+                rhs = "seg.river_segment_id" if column == "river_segment_id" else f"lr.{column}"
+                if column == "variable":
+                    rhs = ":variable"
+                predicates = predicates.replace(f"AND ts.{column} = {rhs} ", "")
+        predicates += f"AND lr.timeseries_store = '{store}'"
+        assert predicates in outer_predicates(branch)
+        _assert_text_fact_columns(
+            branch, "ts", aids if store == "legacy" else set(), store,
+            allowed=LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
+        )
+        assert ENUM_VARIABLE_RESOLUTION in branch
+
+
 # The probe's whole conjunction, canonicalised (comments gone, whitespace
 # collapsed, the enum sub-select stripped). ONE substring, not eleven `in`
 # checks: what has to hold is that every key predicate and its transitional
@@ -304,14 +341,13 @@ NATIONAL_IDENTITY_PROBE_PREDICATES = (
     "LIMIT 1"
 )
 NATIONAL_IDENTITY_PROBE_TEXT_AIDS = {"run_id", "river_network_version_id", "variable"}
-# The four columns the inline discovery hands the probe: the two keys that
-# select the rows and the two text identities the aids bind. The pre-#1596
-# shape selected only the keys, because the fact table was reached by a
-# set-based key join with nothing to correlate.
+# The five columns the inline discovery hands the probe: two keys, the two
+# text identities the legacy aids bind, and the candidate's authoritative
+# store. Discovery remains shared rather than choosing a run per store.
 NATIONAL_IDENTITY_DISCOVERY_COLUMNS = (
     "SELECT DISTINCT ON (mi.river_network_version_id) "
     "h.run_key, rnv.river_network_version_key, "
-    "h.run_id, mi.river_network_version_id "
+    "h.run_id, mi.river_network_version_id, h.timeseries_store "
     "FROM hydro.hydro_run h"
 )
 
@@ -336,7 +372,9 @@ def test_national_tile_probes_the_fact_table_once_per_segment_through_a_lateral(
             "ON lr.river_network_version_id = seg.river_network_version_id "
             "CROSS JOIN LATERAL (" in collapsed
         ), name
-        assert NATIONAL_LATERAL_PROBE_PREDICATES in outer_predicates(_lateral_probe(leg)), name
+        _assert_store_probe_predicates(
+            _lateral_probe(leg), NATIONAL_LATERAL_PROBE_PREDICATES, NATIONAL_PROBE_TEXT_AIDS,
+        )
         # The old set-based fact join is gone, not merely supplemented.
         assert "JOIN hydro.river_timeseries" not in leg, name
         # And nothing reads the fact table outside the probe: a second, uncorrelated
@@ -373,44 +411,32 @@ def test_national_leg_projections_and_percent_rank_read_the_probe_result() -> No
     )
 
 
-def test_per_basin_hydro_layer_keeps_its_single_point_lookup_shape() -> None:
-    """The lateral remedy is national-only; the per-basin tile is untouched.
-
-    That tile binds one (run, basin, network, segment-set) identity as
-    constants and already reads the fact table through a single indexed point
-    lookup, so it never had the unestimable-cardinality join and must not grow
-    a per-segment probe here.
-    """
+def test_per_basin_hydro_layer_keeps_point_lookups_in_both_stores() -> None:
+    """Routing adds two scalar-key branches, never national per-segment probes."""
     hydro_cte = _source_cte("hydro")
 
     assert "LATERAL" not in hydro_cte
     assert "LIMIT 1" not in hydro_cte
     assert "FROM hydro.river_timeseries ts" in hydro_cte
-    assert hydro_cte.count("FROM hydro.river_timeseries") == 1
+    assert hydro_cte.count("FROM hydro.river_timeseries") == 2
+    legacy, narrow = hydro_cte.split("UNION ALL")
+    assert "FROM hydro.river_timeseries_legacy ts" in legacy
+    assert "timeseries_store = 'legacy'" in legacy
+    assert "timeseries_store = 'narrow'" in narrow
+    _assert_text_fact_columns(legacy, "ts", set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), "legacy hydro tile")
+    _assert_text_fact_columns(narrow, "ts", set(), "narrow hydro tile")
 
 
 def test_national_tile_switches_both_union_all_legs_to_keys() -> None:
     for name, leg in _national_legs():
         probe = _lateral_probe(leg)
 
-        assert "ts.run_key = lr.run_key" in probe, name
-        assert "AND ts.river_network_version_key = lr.river_network_version_key" in probe, name
-        assert "AND ts.river_segment_key = seg.river_segment_key" in probe, name
-        assert "ts.variable_e = (" in probe, name
-        assert ENUM_VARIABLE_RESOLUTION in probe, name
-        assert "ts.valid_time = :valid_time" in probe, name
-        # Identity still arrives from latest_runs rather than as a bound
-        # constant, but inside the probe the correlated `lr.` / `seg.` values
-        # are per-loop constants, so all four segmentby/orderby text columns —
-        # `river_segment_id` included — are sanctioned pushdown aids here.
-        _assert_text_fact_columns(
-            leg,
-            "ts",
-            NATIONAL_PROBE_TEXT_AIDS,
-            name,
-            allowed=LATERAL_PROBE_TEXT_PUSHDOWN_COLUMNS,
-        )
-        assert "ts.variable = :variable AND ts.variable_e =" in outer_predicates(leg), name
+        _assert_store_probe_predicates(probe, NATIONAL_LATERAL_PROBE_PREDICATES, NATIONAL_PROBE_TEXT_AIDS)
+        for branch in _store_probe_branches(probe):
+            assert (
+                "SELECT ts.basin_version_key, ts.value, ts.unit_e::text AS unit, "
+                "ts.quality_flag_e::text AS quality_flag, ts.variable_e::text AS variable, ts.valid_time"
+            ) in outer_predicates(branch)
 
     # latest_runs hands both legs the keys AND the text it will echo back out,
     # from the authority join it was already doing.
@@ -418,6 +444,7 @@ def test_national_tile_switches_both_union_all_legs_to_keys() -> None:
     latest_runs = _slice(national_cte, "WITH latest_runs AS MATERIALIZED (", "network_stream_max AS")
     assert "h.run_id, mi.river_network_version_id," in latest_runs
     assert "h.run_key, rnv.river_network_version_key" in latest_runs
+    assert "h.timeseries_store" in latest_runs
     assert "JOIN core.river_network_version rnv" in latest_runs
 
 
@@ -433,34 +460,21 @@ def test_national_null_key_visibility_cannot_split_between_the_two_zoom_branches
     """
     (_typed_name, typed), (_untyped_name, untyped) = _national_legs()
 
-    typed_columns = set(re.findall(r"\bts\.[a-z_]+", typed))
-    untyped_columns = set(re.findall(r"\bts\.[a-z_]+", untyped))
-    assert typed_columns == untyped_columns, (typed_columns ^ untyped_columns)
-    # Exact set, not "no `_id` column": the lateral probe legitimately binds
-    # text identity as a per-loop constant, so a blanket ban on text columns
-    # would be wrong here, while an exact set still catches a leg growing a
-    # predicate the other one lacks.
-    assert typed_columns == {
-        "ts.run_key",
-        "ts.river_network_version_key",
-        "ts.river_segment_key",
-        "ts.basin_version_key",
-        "ts.run_id",
-        "ts.river_network_version_id",
-        "ts.river_segment_id",
-        "ts.variable",
-        "ts.variable_e",
-        "ts.valid_time",
-        "ts.value",
-        "ts.unit_e",
-        "ts.quality_flag_e",
-    }, typed_columns
-    # The keys are the row-selection authority on both legs; the text aids are
-    # on BOTH legs or neither, since a text predicate carried on one side only
-    # can narrow away rows the other side keeps — the same visibility split by
-    # another route.
-    assert {"ts.run_key", "ts.river_network_version_key", "ts.river_segment_key"} <= typed_columns
-    assert {f"ts.{column}" for column in NATIONAL_PROBE_TEXT_AIDS} <= typed_columns
+    expected_columns = {
+        "ts.run_key", "ts.river_network_version_key", "ts.river_segment_key",
+        "ts.basin_version_key", "ts.variable_e", "ts.valid_time", "ts.value",
+        "ts.unit_e", "ts.quality_flag_e",
+    }
+    for store, typed_branch, untyped_branch in zip(
+        ("legacy", "narrow"), _store_probe_branches(_lateral_probe(typed)),
+        _store_probe_branches(_lateral_probe(untyped)), strict=True,
+    ):
+        typed_columns = set(re.findall(r"\bts\.[a-z_]+", typed_branch))
+        untyped_columns = set(re.findall(r"\bts\.[a-z_]+", untyped_branch))
+        expected = expected_columns | (
+            {f"ts.{column}" for column in NATIONAL_PROBE_TEXT_AIDS} if store == "legacy" else set()
+        )
+        assert typed_columns == untyped_columns == expected, store
 
     # The two probes are literally the same text, so no predicate can drift
     # between them at all.
@@ -492,7 +506,7 @@ def test_national_identity_probe_uses_the_same_key_shape_as_the_data_legs() -> N
     probe = _identity_stats_cte("hydro-national")
     lateral = _slice(probe, "CROSS JOIN LATERAL (", ") hit")
 
-    # Shape: inline 4-column discovery, cross-joined laterally to the probe,
+    # Shape: inline 5-column discovery, cross-joined laterally to the probe,
     # the whole thing still wrapped in the EXISTS the 0/1 semantics come from.
     assert NATIONAL_IDENTITY_DISCOVERY_COLUMNS in outer_predicates(probe)
     assert "JOIN core.river_network_version rnv" in probe
@@ -506,19 +520,13 @@ def test_national_identity_probe_uses_the_same_key_shape_as_the_data_legs() -> N
     # The whole conjunction, one substring: every key predicate and its
     # transitional text aid in the SAME `AND` chain, terminated by the `LIMIT 1`
     # fence that keeps the planner from pulling the probe back up into a join.
-    assert NATIONAL_IDENTITY_PROBE_PREDICATES in outer_predicates(lateral)
-    assert "ts.variable = :variable AND ts.variable_e =" in outer_predicates(probe)
-    assert ENUM_VARIABLE_RESOLUTION in probe
-
-    # Column census: exactly the two aids plus `variable`, checked against the
-    # narrow constant-bound ceiling rather than the legs' widened one — so an
-    # added segment aid is red twice over, at the equality and at the ceiling.
-    _assert_text_fact_columns(
-        probe,
-        "ts",
-        NATIONAL_IDENTITY_PROBE_TEXT_AIDS,
-        "national identity probe",
+    _assert_store_probe_predicates(
+        lateral, NATIONAL_IDENTITY_PROBE_PREDICATES, NATIONAL_IDENTITY_PROBE_TEXT_AIDS,
     )
+    assert probe.count("LIMIT 1") == 2
+    assert ") hit LIMIT 1 ) THEN 1 ELSE 0 END AS source_identity_count" in outer_predicates(probe)
+    for branch in _store_probe_branches(lateral):
+        assert "SELECT 1 FROM" in outer_predicates(branch)
     assert NATIONAL_IDENTITY_PROBE_TEXT_AIDS < set(NATIONAL_PROBE_TEXT_AIDS)
     assert "river_segment_id" not in probe
 
@@ -836,11 +844,9 @@ def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates()
 # Counted on the SOURCE — the number `grep -rn "remove with #1342"` gives and the
 # number #1342 deletes:
 #
-# * mvt.py 18 = the hydro layer's three + the national statement's eleven (the
-#   identity-existence probe's three, and four in each of the two data legs'
-#   correlated lateral probes) + the valid_times branches' three and one. Eleven
-#   of the eighteen are new LINES, not new predicates: #1980 split three 1:N
-#   comments (one over three aids, two over four) into one verbatim marker each.
+# * mvt.py 14 = the hydro layer's three + national identity's three and shared
+#   data source's four + the valid_times branches' three and one. The data
+#   source is authored once and reused by both zoom legs.
 # * hydro_display.py 3 / display_coverage.py 3 = run_id, river_network_version_id
 #   and variable on the existence probe and on the coverage river scan. The three
 #   in display_coverage are new marker lines over pre-existing aids that a prose
@@ -848,7 +854,7 @@ def test_hydro_map_plan_fixture_names_indexes_that_the_migration_chain_creates()
 DISPLAY_MARKER_AID_CENSUS: dict[str, int] = {
     "apps/api/routes/hydro_display.py": 3,
     "packages/common/display_coverage.py": 3,
-    "services/tiles/mvt.py": 18,
+    "services/tiles/mvt.py": 14,
 }
 
 
@@ -859,13 +865,13 @@ def test_the_display_readers_declare_their_marker_and_aid_count() -> None:
 
 
 def test_the_display_readers_carry_the_measured_marker_total() -> None:
-    """24 of the registered 34; the other ten are the cleanup oracle's.
+    """20 of the registered 30; the other ten are the cleanup oracle's.
 
-    Registered, not tree-wide: the 34 spans this census plus the cleanup
+    Registered, not tree-wide: the 30 spans this census plus the cleanup
     oracle's ``REGISTERED_SOURCES`` and nothing sweeps for an unregistered
     reader — that is the I11 discovery-set census (tasks 7.2a).
     """
-    assert sum(DISPLAY_MARKER_AID_CENSUS.values()) == 24
+    assert sum(DISPLAY_MARKER_AID_CENSUS.values()) == 20
 
 
 def test_every_display_read_site_is_registered_in_the_template_registry() -> None:
@@ -874,14 +880,15 @@ def test_every_display_read_site_is_registered_in_the_template_registry() -> Non
     These files are deliberately absent from the cleanup oracle's statement
     census, so closure is asserted here against the same counter that oracle uses
     (``_river_table_mentions``: mentions inside non-docstring string constants,
-    not raw source). Both mvt valid_times branches count, and the national tile
-    statement contributes three — the identity probe and the two lateral probes —
-    so an unregistered read site cannot hide inside an already-registered
-    statement's file.
+    not raw source). Both mvt valid_times branches count, and the national
+    sources contribute two authored mentions, with the data source reused by
+    both zoom legs. The mvt total stays exactly five.
     """
     for path, entries in _registry_entries_by_path().items():
         source = REPO_ROOT.joinpath(*path.split("/")).read_text(encoding="utf-8")
         registered = sum(entry.mentions for entry in entries)
+        if path == "services/tiles/mvt.py":
+            assert registered == 5
         assert registered + NON_TEMPLATE_MENTIONS[path] == _river_table_mentions(source), (
             f"{path}: {registered} mentions in registered templates + "
             f"{NON_TEMPLATE_MENTIONS[path]} declared non-template mentions != "

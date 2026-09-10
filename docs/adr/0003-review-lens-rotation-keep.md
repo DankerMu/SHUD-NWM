@@ -4242,3 +4242,50 @@ and seat caps remain unchanged. A new human keep/cut call is deferred: this
 PR supplies no new later-round attribution, and the mixed code/evidence/prose
 measurement limitations recorded above remain unresolved. Issue-delivery
 authorization is not authorization to narrow review policy.
+
+## Revisit — PR #2225 (issue #1982), 2026-09-10
+
+The post-merge audit reports 615 records (606 merged, nine terminal), with
+199 multi-round merged PRs and later-round attribution core=237, rotated=270,
+phase=57, skipped=15.
+
+PR #2225 added one independently confirmed first-round P1: working frozen-SQL
+CI edges lacked permanent exact-selection and unrescued-deletion regression
+owners. Two tests closed it; round 2 and the independent final gap sweep were
+clean. It therefore adds no later-round catch for or against rotation.
+
+A new human keep/cut call is deferred: this PR adds no later-round attribution
+and does not resolve the mixed code/evidence/prose measurement limitations
+recorded above. The existing keep decision and seat caps remain unchanged;
+issue-delivery authorization does not authorize a review-policy change.
+
+## Revisit — PR #2228 (issue #2206), 2026-09-10
+
+The post-merge audit reports 617 records (608 merged, nine terminal), with
+199 multi-round merged PRs and unchanged later-round attribution: core=237,
+rotated=270, phase=57, skipped=15.
+
+PR #2228 used the expanded three-seat first round and an independent final
+gap sweep; both returned no candidate findings. It adds neither a multi-round
+sample nor a later-round catch. Its initial validation repairs and final-head
+node-27 verification supplement are machine-gate work, not review net catches.
+
+A new human keep/cut call is deferred: this PR supplies no new later-round
+attribution and does not resolve the mixed code/evidence/prose measurement
+limitations recorded above. The existing keep decision and seat caps remain
+unchanged; issue-delivery authorization does not authorize policy narrowing.
+
+## Revisit — PR #2231 (issue #2227), 2026-09-10
+
+The post-merge audit reports 620 records (611 merged, nine terminal), while the
+rotation sample and attribution remain exactly unchanged: 199 multi-round
+merged PRs, core=237, rotated=270, phase=57, skipped=15. The three newly
+accounted merges are PR #2221 and PR #2229 (fixture-none, zero rounds) plus
+PR #2231 (one clean high-tier round, zero candidates); none can add a multi-round
+sample or a later-round catch.
+
+A new human keep/cut call is therefore deferred: the audit is repeating the
+same already-recorded sample and the mixed code/evidence/prose measurement
+limitations remain unresolved. The existing keep decision and seat caps remain
+unchanged; the authorization to deliver #2227 does not authorize review-policy
+narrowing.

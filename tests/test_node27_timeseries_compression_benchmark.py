@@ -4,6 +4,7 @@ import hashlib
 import json
 import stat
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -127,7 +128,11 @@ def test_blocking_driver_cleanup_cannot_extend_hard_wall() -> None:
 
 
 def _capture(
-    *, curve_reads: list[int], mvt_reads: list[int], phase: str = "after"
+    *,
+    curve_reads: list[int],
+    mvt_reads: list[int],
+    phase: str = "after",
+    curve_scenario: str = "forecast_ifs_deterministic",
 ) -> tuple[dict[str, Any], list[_FakeConnection]]:
     curve_cursor = _FakeCursor(
         result_rows=[
@@ -166,50 +171,87 @@ def _capture(
         return connections.pop(0)
 
     original = list(connections)
-    inputs = {**_inputs(), "phase": phase}
+    inputs = {**_inputs(), "phase": phase, "curve_scenario": curve_scenario}
     return benchmark.capture_benchmark_phase(**inputs, connect=connect), original
 
 
-def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connections() -> None:
-    document, connections = _capture(curve_reads=[4, 0, 0, *([0] * 7)], mvt_reads=[2, 0, 0, *([0] * 7)])
+def test_capture_refuses_non_owner_window_before_connecting() -> None:
+    inputs = {**_inputs(), "curve_end_time": datetime(2026, 7, 11, tzinfo=UTC)}
+
+    def connect(_database_url: str) -> Any:
+        pytest.fail("invalid curve window must not reach the database")
+
+    with pytest.raises(benchmark.BenchmarkCaptureError):
+        benchmark.capture_benchmark_phase(**inputs, connect=connect)
+
+
+def test_capture_refuses_empty_scenario_binding_shape_before_connecting() -> None:
+    inputs = {**_inputs(), "curve_scenario": ""}
+
+    def connect(_database_url: str) -> Any:
+        pytest.fail("incomplete curve binding shape must not reach the database")
+
+    with pytest.raises(benchmark.BenchmarkCaptureError):
+        benchmark.capture_benchmark_phase(**inputs, connect=connect)
+
+
+@pytest.mark.parametrize(
+    ("scenario", "scenario_ids", "scenario_tokens"),
+    [
+        ("forecast_ifs_deterministic", ["forecast_ifs_deterministic"], ["forecast_ifs_deterministic"]),
+        ("gfs", ["forecast_gfs_deterministic", "gfs"], ["gfs"]),
+    ],
+)
+def test_capture_uses_exact_production_queries_bindings_and_new_readonly_connections(
+    scenario: str, scenario_ids: list[str], scenario_tokens: list[str]
+) -> None:
+    document, connections = _capture(
+        curve_reads=[4, 0, 0, *([0] * 7)],
+        mvt_reads=[2, 0, 0, *([0] * 7)],
+        curve_scenario=scenario,
+    )
     curve, mvt = document["queries"]
 
     assert [query["name"] for query in document["queries"]] == ["curve", "mvt"]
     assert "FROM hydro.river_timeseries rt" in curve["query_text"]
     assert "JOIN hydro.hydro_run h" in curve["query_text"]
-    # #1442 repin: the curve statement now resolves the caller's text identity to
-    # surrogate keys in-statement, so the segment id binds twice (segment-key
-    # resolution — core.river_segment's PK is (segment, network) — plus the
-    # transitional text pushdown aid design D10.7 restored) and the network id
-    # three times (that same resolution, its own text aid, its own key
-    # resolution). Eleven placeholders, same three caller-supplied text values.
-    assert curve["query_text"].count("%s") == 11
+    assert "%s" not in curve["query_text"]
+    assert curve["query_text"].count("%(issue_time)s") == 2
     assert curve["binding"]["parameter_names"] == [
         "basin_version_id",
-        "river_segment_id",
-        "river_network_version_id",
-        "river_segment_id",
-        "river_network_version_id",
-        "river_network_version_id",
-        "issue_time",
-        "start_time",
         "end_time",
-        "source_or_scenario_tokens",
+        "issue_time",
+        "river_network_version_id",
+        "river_segment_id",
+        "scenario_ids",
         "scenario_tokens",
     ]
     assert curve["binding"]["bound_parameters"] == [
         "basin-heihe-v1",
-        "heihe_shud_riv_000001",
-        "heihe-network-v1",
-        "heihe_shud_riv_000001",
-        "heihe-network-v1",
-        "heihe-network-v1",
-        "2026-07-05T00:00:00Z",
-        "2026-07-05T00:00:00Z",
         "2026-07-12T00:00:00Z",
-        ["forecast_ifs_deterministic"],
-        ["forecast_ifs_deterministic"],
+        "2026-07-05T00:00:00Z",
+        "heihe-network-v1",
+        "heihe_shud_riv_000001",
+        scenario_ids,
+        scenario_tokens,
     ]
+    curve_executions = [
+        (statement, parameters)
+        for statement, parameters in connections[0].fake_cursor.executions
+        if "FROM hydro.river_timeseries rt" in statement
+    ]
+    assert len(curve_executions) == 11  # result query, cold, two warmups, seven measurements
+    for statement, parameters in curve_executions:
+        assert isinstance(parameters, Mapping)
+        assert parameters == {
+            "basin_version_id": "basin-heihe-v1",
+            "end_time": datetime(2026, 7, 12, tzinfo=UTC),
+            "issue_time": datetime(2026, 7, 5, tzinfo=UTC),
+            "river_network_version_id": "heihe-network-v1",
+            "river_segment_id": "heihe_shud_riv_000001",
+            "scenario_ids": scenario_ids,
+            "scenario_tokens": scenario_tokens,
+        }
     assert mvt["query_text"] == postgis_tile_sql("hydro")
     assert mvt["binding"] == benchmark._json_value(
         _postgis_tile_params(

@@ -64,7 +64,7 @@ RANGE_END = datetime(2026, 8, 8, tzinfo=UTC)
 FORECAST_SQL_MARKERS = (
     "FROM hydro.river_timeseries rt",
     "h.run_type = 'forecast'",
-    "h.cycle_time = %s",
+    "h.cycle_time = %(issue_time)s",
 )
 
 
@@ -213,9 +213,12 @@ def test_explicit_cycle_recorder_binds_run_model_and_reach_mapping() -> None:
         assert marker in sql
     assert "selected_cycles" not in sql
     assert "WITH selected_cycles" not in sql
-    assert recorded["run_id"] in recorded["parameters"]
-    assert recorded["model_id"] in recorded["parameters"]
-    assert TS_SEGMENT in recorded["parameters"]
+    parameters = recorded["parameters"]
+    assert isinstance(parameters, dict)
+    assert parameters["issue_time"] == datetime(2026, 8, 1, tzinfo=UTC)
+    assert parameters["run_id"] == recorded["run_id"]
+    assert parameters["model_id"] == recorded["model_id"]
+    assert parameters["river_segment_id"] == TS_SEGMENT
     assert recorded["api_path"] == API_PATH
     assert "variables=q_down" in recorded["api_query"]
     assert "scenarios=forecast_gfs_deterministic" in recorded["api_query"]

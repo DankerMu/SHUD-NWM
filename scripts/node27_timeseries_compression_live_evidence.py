@@ -2797,8 +2797,9 @@ def _validate_benchmarks(
                 "river_segment_id",
                 "river_network_version_id",
                 "issue_time",
-                "start_time",
                 "end_time",
+                "scenario_ids",
+                "scenario_tokens",
             }
             # The curve query filters on the surrogate keys and the enum since
             # #1442; the bindings stay text (required_parameter_names above), the
@@ -2899,13 +2900,16 @@ def _validate_benchmarks(
             )
             parameter_names = _require_list(binding["parameter_names"], "benchmark curve parameter_names")
             bound_parameters = _require_list(binding["bound_parameters"], "benchmark curve bound_parameters")
-            placeholder_count = len(re.findall(r"(?<!%)%s", str(query["query_text"])))
+            placeholder_names = set(re.findall(r"(?<!%)%\(([^)]+)\)s", str(query["query_text"])))
             if (
-                len(parameter_names) != placeholder_count
-                or len(bound_parameters) != placeholder_count
-                or not required_parameter_names <= set(parameter_names)
+                any(not isinstance(name, str) or not name for name in parameter_names)
+                or len(parameter_names) != len(bound_parameters)
+                or len(set(parameter_names)) != len(parameter_names)
+                or set(parameter_names) != placeholder_names
+                or set(parameter_names) != required_parameter_names
+                or re.search(r"(?<!%)%s", str(query["query_text"]))
             ):
-                raise EvidenceError("benchmark curve positional binding does not match %s count")
+                raise EvidenceError("benchmark curve named binding coverage differs from the query")
             if (
                 query["query_text"] != expected_query
                 or parameter_names != expected_names
@@ -2914,7 +2918,7 @@ def _validate_benchmarks(
             ):
                 raise EvidenceError("benchmark curve query/binding differs from the public production owner")
             bound = dict(zip(parameter_names, bound_parameters, strict=True))
-            request_start = _parse_utc(bound["start_time"], "benchmark curve start_time")
+            request_start = _parse_utc(bound["issue_time"], "benchmark curve issue_time")
             request_end = _parse_utc(bound["end_time"], "benchmark curve end_time")
             selected_start = _parse_utc(selected["range_start"], "selected range_start")
             selected_end = _parse_utc(selected["range_end"], "selected range_end")

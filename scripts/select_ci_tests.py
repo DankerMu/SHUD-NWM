@@ -820,6 +820,8 @@ ISSUE1895_READINESS_C1_C2_C3_TESTS: tuple[str, ...] = (
     "tests/test_issue1895_readiness_c3_bind.py",
 )
 
+ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST = "tests/test_issue2227_explicit_cycle_named_binding.py"
+
 ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS: tuple[str, ...] = (
     "tests/test_issue1895_readiness_performance_live.py",
     "tests/test_issue1895_readiness_performance_live_cli.py",
@@ -2211,6 +2213,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
+        "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql",
+        ("tests/test_hydro_display_mvt_scaling.py",),
+    ),
+    PathTestRule(
+        "tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql",
+        ("tests/test_hydro_display_mvt_scaling.py",),
+    ),
+    PathTestRule(
         "packages/common/forecast_store.py",
         (
             "tests/test_forecast_api.py",
@@ -2218,6 +2228,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
+            # The benchmark captures this owner's named bindings; live evidence
+            # independently verifies the serialized name/value pairs.
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_qhh_latest_fallback_pushdown.py",
             # #1442: this file carries nine of the zero-text-identity oracle's
             # registered statements. None of the suites above assert the
@@ -3113,6 +3127,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_issue1895_query.py",
         (
+            ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
             "tests/test_issue1895_readiness_performance.py",
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
             "tests/test_issue1895_readiness_performance_publication.py",
@@ -3221,6 +3236,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "packages/common/node27_issue1895_performance_live.py",
         (
+            ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
             "tests/test_issue1895_readiness_c14.py",
             "tests/test_issue1895_readiness_performance.py",
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
