@@ -217,16 +217,12 @@ unit → EnvironmentFile table above is the authority.
     exceeding the deadline raises a distinct loud error and never falls back to
     an unlocked promote. Unset or empty means 900 s; a non-numeric or
     non-positive value is a hard configuration refusal, not a silent default.
-    900 s is sized against the measured hold: ~2.2 GB per acquisition at
-    ~62 MB/s NFS throughput is ~36 s. The 900 s arithmetic assumed **two**
-    acquisitions per cycle (`parse` and `state_save_qc`, ~72 s), which admits
-    ~24 queued acquisitions ~= 12 concurrent execution units against the 2 of
-    live steady state. Re-derived 2026-09-10, the run-tree lane takes **one**
-    per cycle in both configurations — unset `NHMS_ORCHESTRATOR_TERMINAL_STAGE`
-    hits only `parse`, and `forecast_state_save_qc` (what node-22 runs) makes
-    `chain_stages.stages_through` drop `parse` from the stage list entirely, so
-    only `state_save_qc` hits. The real headroom is therefore ~2x wider than
-    those numbers; left unretuned because the error is in the safe direction.
+    900 s is sized against the measured hold (~2.2 GB per acquisition at
+    ~62 MB/s NFS throughput is ~36 s); how often a lane acquires and how that
+    sizes the deadline is stated once, beside
+    `DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS` in
+    `packages/common/copyback_guard.py`. That arithmetic is deliberately
+    conservative and is left unretuned.
   - All copyback writers must run as one uid (`frd_muziyao` on node-22): the
     `0o600` mode plus the ownership assertions make a writer under another
     account fail closed instead of running unlocked. The lock file's owner is

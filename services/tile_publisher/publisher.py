@@ -1029,8 +1029,8 @@ class TilePublisher:
         total_bytes = 0
 
         rollback_log: list[_CopybackRollbackEntry] = []
-        # #2035 Weakness A: the mutex spans the WHOLE batch -- plan, copy, every
-        # promote, and the commit-or-rollback -- because
+        # #2035 Weakness A: the mutex spans copy, every promote, and the
+        # commit-or-rollback -- because
         # `_rollback_qdown_copyback_batch`'s `backup_dir is None` branch removes
         # whatever now sits at the target, which is only a restore while no other
         # writer can have committed into that slot in the meantime.

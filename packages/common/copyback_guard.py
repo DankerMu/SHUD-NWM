@@ -8,8 +8,8 @@ under one copyback root has to be serialized across processes. A per-tree lock i
 provably insufficient: ``publisher._rollback_qdown_copyback_batch``'s
 ``backup_dir is None`` branch removes whatever now sits at the target, which is
 only a restore while no other writer can have committed into that slot in the
-meantime. So the mutex spans plan -> copy -> every promote -> commit-or-rollback,
-and is released only after the batch's commit or rollback has returned.
+meantime. So the mutex spans copy -> every promote -> commit-or-rollback, and is
+released only after the batch's commit or rollback has returned.
 
 **Weakness B -- traversal.** ``safe_fs.ensure_directory_no_follow`` passes an
 explicit ``0o755`` to ``os.mkdir``, which the ambient umask masks, and it
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import logging
 import os
 import stat
 import time
@@ -38,6 +39,8 @@ from pathlib import Path
 
 from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_follow
 
+_LOGGER = logging.getLogger(__name__)
+
 # Fixed name under the copyback root, with no environment override. The root is
 # the one path all six writers have already resolved by construction, so they
 # provably reach one inode; a `/tmp` path would be split by a private-`/tmp`
@@ -45,35 +48,22 @@ from packages.common.safe_fs import SafeFilesystemError, ensure_directory_no_fol
 # two inodes and the mutex would silently do nothing.
 COPYBACK_BATCH_LOCK_NAME = ".nhms-copyback-batch.lock"
 COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
-# 900 s. Sized against a *measured* hold, not a guessed one: the NFS export
-# copies at ~62 MB/s (68 MB / 455 files in 1.097 s) and one cycle cohort is
-# ~2.2 GB (38 run trees at 1.1 GB plus their referenced forcing subtrees at
-# 1.1 GB), so ONE run-tree acquisition holds the lock ~36 s.
+# 900 s, sized against a measured hold: ~2.2 GB per cycle cohort at the export's
+# ~62 MB/s is ~36 s.
 #
-# The 900 s figure was sized on the assumption that
-# `_stage_should_copyback_run_trees` fires TWICE per cycle (`parse` and
-# `state_save_qc`) for ~72 s of hold. Re-derived 2026-09-10: it fires ONCE per
-# cycle in BOTH configurations, so the real hold is ~36 s and the budget is
-# ~2x more conservative than the arithmetic below claims. Left as-is
-# deliberately -- the error is in the safe direction.
-#   * `terminal_stage is None`: `parse` returns True and `state_save_qc`
-#     returns False (`chain_forecast_execution.py:931-934`).
-#   * `terminal_stage == "forecast_state_save_qc"` -- the tracked
-#     `infra/env/compute.example:185` sets it, and the #2035 round-4 node-22
-#     read (2026-09-10) reports it at `:79` of the untracked
-#     `compute.scheduler-dbfree.env` and `compute.replay.env`, which is
-#     second-hand here, not a receipt this comment owns: `state_save_qc`
-#     returns True, but
-#     `chain_stages.stages_through` (`:75-79`) rebuilds the cycle's stage list
-#     as `(convert, forcing, forecast, state_save_qc)` -- `parse` is dropped,
-#     so its acquisition never happens.
+# The single in-code home of the acquisition-count claim behind this budget.
+# The run-tree lane acquires at most once per cycle per scheduler pass. A
+# post-acquire failure leaves the stage un-advanced, so the next pass
+# acquires again for that same cycle -- sequentially, after the first
+# was released, so it adds no concurrent waiter this budget must cover. The
+# budget was derived from two 36 s acquisitions per cycle: 900 s covers ~24
+# queued acquisitions ~= 12 concurrent execution units against the 2 of live
+# steady state. Left unretuned, conservative in the safe direction.
+#
 # `flock` is per open file description, so the scheduler's same-process
-# execution-unit threads contend with each other exactly as separate hosts
-# would. At the assumed ~72 s hold, 900 s covers ~24 acquisitions ~= 12
-# concurrent execution units against the 2 of live steady state, which leaves
-# headroom for a replay/backfill pass; 300 s admitted only ~4. Still a bounded,
-# loud failure -- never a hang, and never an unlocked promote. See `design.md`
-# "Cost accepted, deliberately" for the full arithmetic.
+# execution-unit threads contend exactly as separate hosts would. Exceeding the
+# deadline is a bounded, loud failure -- never a hang, never an unlocked
+# promote. See `design.md` "Cost accepted, deliberately".
 DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS = 900.0
 COPYBACK_DIRECTORY_MODE = 0o755
 
@@ -308,12 +298,16 @@ def _flock_until_deadline(fd: int, *, deadline: float, path: Path) -> None:
 
 
 def release_copyback_batch_lock(fd: int) -> None:
-    """Drop the flock and close the fd. The lock file is never unlinked."""
+    """Drop the flock and close the fd, both attempted and neither raising. The lock file is never unlinked."""
 
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
+    except OSError as error:
+        _LOGGER.warning("copyback batch lock unlock failed for fd %s: %s", fd, error)
+    try:
         os.close(fd)
+    except OSError as error:
+        _LOGGER.warning("copyback batch lock close failed for fd %s: %s", fd, error)
 
 
 @contextmanager

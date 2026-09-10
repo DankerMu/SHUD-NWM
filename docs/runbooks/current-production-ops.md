@@ -2239,19 +2239,10 @@ ssh -p 32099 nwm@210.77.77.27 \
      是 `ghdc:/home/ghdc` 的 **NFSv4.2** 挂载（2026-09-10 实测）。**进程**死照样
      立刻释放；**整台主机**死不会——锁由服务端一直持有到该 client 的租约过期。
    - 等待上限由 `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` 控制，
-     **默认 900 秒**（按实测持锁时长定：一次 acquisition ≈ 2.2 GB / 62 MB/s ≈ 36 s。
-     900 这个数是按「每 cycle 取两次——`parse` 与 `state_save_qc`——共 ≈ 72 s」推的：
-     72 s 下 900 s 容得下约 24 次排队 acquisition ≈ 12 个并发执行单元，而现网稳态
-     只有 2 个。**2026-09-10 复核：run-tree lane 实际每 cycle 只取一次**——
-     `NHMS_ORCHESTRATOR_TERMINAL_STAGE` 不设时只有 `parse` 命中
-     （`chain_forecast_execution.py:931-934`）；设成 `forecast_state_save_qc`
-     （node-22 的实际配置；tracked 侧见 `infra/env/compute.example:185`，
-     untracked 的 `compute.scheduler-dbfree.env` / `compute.replay.env` 据
-     2026-09-10 的 node-22 读取报告在 `:79`——那份读取不是本 runbook 自己产的
-     receipt）时 `chain_stages.stages_through` 把 stage
-     列表重建成 `(convert, forcing, forecast, state_save_qc)`，`parse` 被整个去掉，
-     只剩 `state_save_qc` 命中。所以真实余量比上面这套算术还宽约一倍——偏保守，
-     故意不回调）。竞争是等待不是拒绝；
+     **默认 900 秒**（一次 acquisition ≈ 2.2 GB / 62 MB/s ≈ 36 s；取锁次数与
+     900 s 的定法只写在 `packages/common/copyback_guard.py` 的
+     `DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS` 注释里，那套算术偏保守，故意不回调）。
+     竞争是等待不是拒绝；
      超时抛各 lane 自己的错误类型，canonical mirror 记一条 `failed` 的
      `canonical_precip_mirror` receipt 后 cycle 继续，**绝不降级成无锁 promote**。
      空值取默认，非数字/非正数是硬性配置拒绝。

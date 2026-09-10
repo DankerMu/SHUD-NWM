@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import ast
 import errno
+import fcntl
 import json
 import os
 import shutil
@@ -1119,6 +1120,54 @@ def test_the_backfill_takes_the_batch_mutex_per_tree_not_once_per_run(
     # One acquisition per mirrored tree (4 cycles + 2 grids), never nested and
     # never once for the whole run.
     assert observed == [1] * 6
+
+
+def test_the_mutex_is_still_held_while_each_tree_is_mirrored(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SPAN, not just the count: `mirror_tree` runs inside the `with`.
+
+    The sibling count test observes acquisitions and nesting depth only, so
+    "acquire, release, then mirror unlocked" survives it while leaving every
+    file this script writes exposed to a concurrent publisher rollback. Probing
+    the lock from inside `mirror_tree` is what bites: `flock` is per open file
+    description, so a second descriptor on the same path contends within this
+    one process and `LOCK_EX|LOCK_NB` must refuse.
+    """
+
+    source_root, copyback_root, payloads = _seed_two_source_store(tmp_path)
+    # A mutation that mirrors unlocked must fail fast rather than wait 900 s.
+    monkeypatch.setenv(COPYBACK_LOCK_TIMEOUT_ENV, "1")
+    real_mirror_tree = backfill.mirror_tree
+    contended: list[tuple[str, bool]] = []
+
+    def probing_mirror_tree(source_dir: Path, target_dir: Path, *, dry_run: bool) -> Any:
+        fd2 = os.open(copyback_root / COPYBACK_BATCH_LOCK_NAME, os.O_RDWR)
+        try:
+            try:
+                fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                contended.append((target_dir.name, True))
+            else:
+                fcntl.flock(fd2, fcntl.LOCK_UN)
+                contended.append((target_dir.name, False))
+        finally:
+            os.close(fd2)
+        return real_mirror_tree(source_dir, target_dir, dry_run=dry_run)
+
+    monkeypatch.setattr(backfill, "mirror_tree", probing_mirror_tree)
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    capsys.readouterr()
+
+    assert exit_code == 0
+    # Every tree, not just the first: the span is pinned for the whole run.
+    assert len(contended) == 6
+    assert [held for _name, held in contended] == [True] * 6
+    # The mirroring itself still happened inside that held lock.
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
 
 
 def test_dry_run_takes_no_lock_and_creates_no_lock_file(

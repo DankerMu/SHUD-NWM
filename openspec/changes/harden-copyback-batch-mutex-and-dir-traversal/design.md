@@ -21,8 +21,8 @@ pre-authorized this run and asked for advisor consultation at key nodes; a
 
 ### Why the lock must be batch-scoped, not per-tree
 
-`_rollback_qdown_copyback_batch` (`publisher.py:2416-2451`) is the reason. Its
-`backup_dir is None` branch calls `rmtree_no_follow(entry.target_dir)` (`:2514`) —
+`_rollback_qdown_copyback_batch` (`publisher.py`) is the reason. Its
+`backup_dir is None` branch calls `rmtree_no_follow(entry.target_dir)` —
 "I found nothing here, so removing what is here restores the world". That claim is
 only true while no other writer can commit into that slot. Sequence with a
 per-tree lock:
@@ -40,26 +40,22 @@ So the mutex is acquired where `rollback_log` is owned and released only after
 ### Cost accepted, deliberately
 
 Copy-to-temp sits inside the lock because the batch loop interleaves copy and
-promote per tree (`publisher.py:1281-1298`). Restructuring into
+promote per tree (`publisher.py`). Restructuring into
 copy-all-then-promote-all is a larger change with its own risk and is a non-goal.
 
-**Sizing the deadline.** Two facts an earlier draft of this section missed, and
-which decide the number: `flock` is per *open file description*, so the
-scheduler's execution units — threads of one process — contend with each other
-exactly as separate hosts would; and copyback runs **at most once per cycle,
-never twice**. The gate `_stage_should_copyback_run_trees`
-(`chain_forecast_execution.py:931-934`) returns True for `parse`, and for
-`state_save_qc` only when `terminal_stage == "forecast_state_save_qc"` — and the
-two are never both live. With `terminal_stage` unset the stage list is all of
-`M3_STAGES` (`convert, forcing, forecast, parse, state_save_qc, publish`), so
-both stages run, but the gate's own condition is false and only `parse` fires.
-Under the production `forecast_state_save_qc` the gate admits `state_save_qc`
-while `stages_through`'s special case (`chain_stages.py:75-79`) rebuilds the list
-as `(convert, forcing, forecast, state_save_qc)` — `parse` is gone. With a
-terminal stage of `forecast` or earlier, neither runs and the count is zero.
-Corrected 2026-09-10; the sizing below was computed on an earlier "twice per
-cycle" reading and is therefore **conservative by a factor of two**, which is why
-it is not being re-tuned.
+**Sizing the deadline.** The fact that decides the number is that `flock` is per
+*open file description*, so the scheduler's execution units — threads of one
+process — contend with each other exactly as separate hosts would.
+
+How often the run-tree lane acquires, and the qualifier that count needs, are
+stated in exactly **one** place: the comment beside
+`DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS` in `packages/common/copyback_guard.py`.
+They are deliberately not restated here. This document restating them in three
+sections, alongside two runbooks and a test docstring, is precisely how a count
+that had been corrected in five places survived, wrong, in two others across four
+review rounds — so the fix is to have one site, not seven consistent ones. The
+arithmetic below is computed on the conservative upper bound and is not re-tuned:
+erring long costs nothing here.
 
 Measured on node-22 against the live NFS export `ghdc:/home/ghdc` (nfs4.2) — measured,
 not estimated. This is a dated snapshot of a live system, not a standing invariant:
@@ -75,11 +71,10 @@ re-copied.
 |---|---|---|
 | NFS copy throughput | **62 MB/s** | 68 MB / 455 files in 1.097 s (`cp -R` + `sync`, `forcing/gfs/2026080600/basins_lh_gl_vbasins/`) |
 | One cycle cohort | 38 run trees = 1.1 GB, + referenced forcing subtrees 1.1 GB = **2.2 GB** | `ifs/2026090300` |
-| Referenced forcing subtree | **4–68 MB**, not the 3.6–3.7 GB `forcing/<source>` tree | keys truncated to five path segments, `run_tree_copyback.py:399-401` |
-| Hold per acquisition | 2.2 GB / 62 MB/s ≈ **36 s** | one `copyback_run_trees` call covers all active basins of the cycle (`chain_forecast_execution.py:938-948`) |
-| Acquisitions per cycle | **1** (the sizing below assumes 2 — see above; the error is conservative) | only one of `parse` / `state_save_qc` is ever admitted by the gate, so ≈ 36 s of hold per execution unit per cycle, not the ~72 s the deadline was sized against |
-| Live steady-state concurrency | **N = 2** execution units | node-22's live `infra/env/compute.scheduler-dbfree.env`: `NHMS_SCHEDULER_SOURCES=gfs,IFS` × `NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE=1` (the checked-in `.example` carries the sources line at `:93`; the per-source budget is set in the live file only) |
-| First-ever copyback into a fresh root | + **73 s** | `models/` is 4.5 GB and is only reused via `_reuse_immutable_model_tree` when the target already exists (`:118`) |
+| Referenced forcing subtree | **4–68 MB**, not the 3.6–3.7 GB `forcing/<source>` tree | keys truncated to five path segments, `run_tree_copyback.py` |
+| Hold per acquisition | 2.2 GB / 62 MB/s ≈ **36 s** | one `copyback_run_trees` call covers all active basins of the cycle (`chain_forecast_execution.py`) |
+| Live steady-state concurrency | **N = 2** execution units | node-22's live `infra/env/compute.scheduler-dbfree.env`: `NHMS_SCHEDULER_SOURCES=gfs,IFS` × `NHMS_SCHEDULER_MAX_CYCLES_PER_SOURCE=1` (the checked-in `.example` carries the sources line; the per-source budget is set in the live file only) |
+| First-ever copyback into a fresh root | + **73 s** | `models/` is 4.5 GB and is only reused via `_reuse_immutable_model_tree` when the target already exists |
 
 `NHMS_SCHEDULER_SLURM_ARRAY_CONCURRENCY_BOUND=32` bounds Slurm *array tasks*, not
 copyback contenders, and must not be cited here. The forcing-key truncation is
@@ -90,16 +85,13 @@ At 36 s per acquisition, **300 s admitted only ~8 preceding acquisitions ≈ 4
 concurrent execution units** — steady state (N=2 → ~144 s worst wait) fit with
 barely 2× margin and a replay/backfill pass with 4+ units exceeded it. The
 default is therefore **900 s**, which covers ~24 acquisitions ≈ 12 execution
-units. It is still a bounded, loud failure rather than a hang. Those two
-per-unit figures both assume the two-acquisitions-per-cycle reading corrected
-above; at the real one acquisition per cycle the same 900 s covers ~24 execution
-units and the N=2 worst wait is ~72 s, not ~144 s. The deadline is left where it
-is: erring long costs nothing here, and re-tuning it would invalidate the
-measured basis for no operational gain.
+units. It is still a bounded, loud failure rather than a hang. The deadline is
+left where it is: re-tuning it would invalidate the measured basis for no
+operational gain.
 
 The wait itself is cheap: `_COPYBACK_MAX_TOTAL_BYTES` (100 GiB,
-`publisher.py:57`) bounds the copy, and the q_down lane's open SQLAlchemy
-`Session` (`publisher.py:205`) is extended by at most the deadline. Holding
+`publisher.py`) bounds the copy, and the q_down lane's open SQLAlchemy
+`Session` (`publisher.py`) is extended by at most the deadline. Holding
 that session across the copy is pre-existing; only the wait is new.
 
 **Known limit, not fixed here.** `_flock_until_deadline` polls
@@ -112,7 +104,7 @@ lane, which records a `failed` receipt and moves on; see "Nothing retries that
 mirror" below. Even so, a ticket lock is the wrong trade for that complexity.
 
 **Known limit, not fixed here.** `provider_destination_lock`
-(`packages/common/provider_atomic.py:326-339`) is `blocking=True` with no
+(`packages/common/provider_atomic.py`) is `blocking=True` with no
 deadline. That is pre-existing on master, but moving the state-index merge out
 of the batch mutex changes who waits on it: before, one writer at a time reached
 the merge because the rest queued on the bounded mutex; now N writers can wait
@@ -122,7 +114,7 @@ indefinitely inside the merge. Bounding the provider lock is a change to a
 shared writer used by four other call graphs and is out of scope here.
 
 **Not made non-fatal.** A copyback timeout must keep failing the stage.
-`resume_cycle_stage` (`chain_stage_execution.py:974`) unconditionally re-enters
+`resume_cycle_stage` (`chain_stage_execution.py`) unconditionally re-enters
 `_after_cycle_stage_terminal`, so a failed run-tree copyback is retried on the
 next pass; downgrading it would mark the cycle succeeded and convert a loud
 recoverable failure into silent data absence.
@@ -153,7 +145,7 @@ recoverable failure into silent data absence.
     `PrivateTmp=true` and Slurm `job_container/tmpfs` each give a process a
     private `/tmp`. Two writers under different namespaces would `flock` two
     different inodes and the mutex would silently do nothing, which is the exact
-    failure shape this change exists to remove. (`infra/systemd/nhms-scheduler-file-provider-refresh.service:16-17`
+    failure shape this change exists to remove. (`infra/systemd/nhms-scheduler-file-provider-refresh.service`
     shows the repo already reasons about `PrivateTmp` for a copyback-adjacent
     unit.) A `/tmp` reaper or reboot removing a long-idle lock file has the same
     effect.
@@ -173,15 +165,14 @@ recoverable failure into silent data absence.
   only contention this change claims to prevent. Cross-host exclusion is a
   recorded non-goal.
 - **Bootstrap ordering**: prepare/verify the copyback root
-  (`publisher._prepare_copyback_root` `:1466`, `run_tree_copyback.py:57`) → run the
+  (`publisher._prepare_copyback_root`, and `run_tree_copyback`'s equivalent) → run the
   root's **identity and overlap guards** → open the lock file under it → acquire →
   plan → copy → promote → commit/rollback → release.
   The guards must precede the lock, not just the root preparation. All three lanes
   return `skipped` when the copyback root resolves to the object-store root itself
-  (`publisher.py:1293-1294`, the same identity check in `_copyback_qdown_products`
-  noted at `:970`, `run_tree_copyback.py:64-70`), and `_prepare_copyback_root`
-  deliberately only *verifies* in that case (`:1479`, under the branch at
-  `:1478`). Acquiring before the guards
+  (`publisher.py`, the same identity check in `_copyback_qdown_products`
+  noted in each lane's `same_root` skip), and `_prepare_copyback_root`
+  deliberately only *verifies* in that case. Acquiring before the guards
   would create a lock file inside the production object-store root on a path that
   writes nothing.
 - **Blocking with a deadline**: contention must wait, not refuse — refusing would
@@ -191,10 +182,10 @@ recoverable failure into silent data absence.
   `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS`; the arithmetic behind that
   number is in "Cost accepted, deliberately" above. It stays finite rather than
   unbounded because `_mirror_canonical_precip`
-  (`chain_forecast_execution.py:996`) runs inside the scheduler pass rather than
+  (`chain_forecast_execution.py`) runs inside the scheduler pass rather than
   in a job of its own, so an unbounded wait would sit on the pass — reasoning
   from where the hook executes, not a cited spec requirement. That hook wraps the
-  whole publisher call in `except Exception` (`:1046`), so a timeout there is
+  whole publisher call in `except Exception`, so a timeout there is
   recorded as a `failed` `canonical_precip_mirror` receipt and the cycle
   continues past `convert`. **Nothing retries that mirror**: there is no
   next-cycle re-attempt for the cycle that failed, so a `failed` receipt is an
@@ -204,23 +195,21 @@ recoverable failure into silent data absence.
   error and never falls back to an unlocked
   promote — **as each lane's own error type**, because a foreign exception escapes
   two of the three callers: `_copyback_stage_run_trees` catches only
-  `RunTreeCopybackError` (`chain_forecast_execution.py:953`) and runs at most once
-  per cycle — on `parse`, or on `state_save_qc` under the production terminal
-  stage (`:931-934`, and `chain_stages.py:75-79` for why never both) — and
+  `RunTreeCopybackError` (`chain_forecast_execution.py`), and
   `publish_qdown_cycle` catches only
-  `PublishError | SQLAlchemyError | OSError | ValueError` (`publisher.py:207-210`).
+  `PublishError | SQLAlchemyError | OSError | ValueError` (`publisher.py`).
   So: `RunTreeCopybackError` in the run-tree lane; `PublishError` with a distinct
   `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code in the q_down/run-products lane; and in
   the canonical lane the acquire sits inside `_copyback_canonical_precip`'s own
-  `try:` (`publisher.py:1275`), so its `except Exception` at `:1376` catches
+  `try:`, so its `except Exception` catches
   first and returns the `failed` summary; `_mirror_canonical_precip`'s
-  `except Exception` (`chain_forecast_execution.py:1046`) is the outer net, not
+  `except Exception` (`chain_forecast_execution.py`) is the outer net, not
   the handler that fires. Same observable receipt either way.
   One asymmetry is deliberate and recorded: the run-tree lane's timeout does *not*
   degrade to a receipt. `_copyback_stage_run_trees` re-raises as
-  `_chain.OrchestratorError` (`:971`) from inside the
-  `result_status == "succeeded"` branch of `_after_cycle_stage_terminal` (`:859`),
-  so the stage's `update_forecast_cycle_status` (`:862`) is skipped. That is the
+  `_chain.OrchestratorError` from inside the
+  `result_status == "succeeded"` branch of `_after_cycle_stage_terminal`,
+  so the stage's `update_forecast_cycle_status` is skipped. That is the
   existing contract for a run-tree copyback failure and this change does not widen
   it; it only adds one more way to reach it. E13 asserts it rather than leaving it
   as a surprise.
@@ -257,7 +246,7 @@ recoverable failure into silent data absence.
   (`ls -ln <lock>`, `stat -c '%u' <root>`) work regardless.
 - **Deadlock ordering: the two locks never nest, in either direction.**
   `merge_state_snapshot_index_copyback` takes `provider_destination_lock`
-  (`packages/common/provider_atomic.py:326-341`) with `blocking=True` and **no
+  (`packages/common/provider_atomic.py`) with `blocking=True` and **no
   deadline**. Nesting it inside the batch mutex would leave the mutex's own
   *hold* time unbounded — the 900 s deadline bounds a waiter, not a holder —
   so one stalled provider lock becomes head-of-line blocking that fails every
@@ -268,8 +257,8 @@ recoverable failure into silent data absence.
 
 ### What is deliberately outside the mutex
 
-`packages/common/state_manager.py:2194 merge_state_snapshot_index_copyback` and
-`:2405 _copyback_state_checkpoint` write under the copyback root
+`packages/common/state_manager.py merge_state_snapshot_index_copyback` and
+`_copyback_state_checkpoint` write under the copyback root
 (`scheduler/state-index/`, `states/`) and are outside the mutex on every path,
 including `copyback_run_trees`'s own `extra_object_keys` call: they promote no
 directory tree — they are per-file provider-atomic writers with their own lock,
@@ -284,14 +273,14 @@ raises: if the merge fails, the run trees are already promoted and the mutex
 already released — exactly as they were when the merge ran inside the mutex,
 because this lane has no batch rollback (`_replace_tree` restores per tree, under
 its own guard). `RunTreeCopybackError` propagates to
-`chain_forecast_execution.py:946` unchanged, so the caller-observable outcome is
+`chain_forecast_execution.py` unchanged, so the caller-observable outcome is
 identical.
 
 ### `run_tree_copyback`'s different terminal state
 
-`_replace_tree` (`services/orchestrator/run_tree_copyback.py:467-503`) has the
+`_replace_tree` (`services/orchestrator/run_tree_copyback.py`) has the
 same window but a guarded recovery: `if backup.exists() and not target.exists()`
-(`:497`). With a competitor's tree in place that predicate is false, so it does
+there. With a competitor's tree in place that predicate is false, so it does
 not restore and does not `rmtree` the competitor — the loser gets a spurious
 failure and no data is lost. It is brought under the same mutex anyway (it shares
 the root), and a comment records that its terminal state was always the benign
@@ -319,13 +308,13 @@ carrying `default:user:X:rwx` / `default:mask::rwx`:
 | creation | resulting mask |
 |---|---|
 | `os.mkdir(path, 0o755)` — what `safe_fs` does | `mask::r-x`, grant `#effective:r-x` |
-| mode-less `os.mkdir(path)` — `run_tree_copyback.py:535` | `mask::rwx` preserved |
+| mode-less `os.mkdir(path)` — `run_tree_copyback.py` | `mask::rwx` preserved |
 | the `0o755`-created directory, then `chmod 0755` | `mask::r-x` — **unchanged** |
 
 `safe_fs`'s explicit mode has already performed the clamp before any caller-side
-`chmod` runs — stated verbatim by the repo at `run_tree_copyback.py:522-534` and
+`chmod` runs — stated verbatim by the repo at `run_tree_copyback.py` and
 by the existing capability at
-`openspec/specs/filesystem-permission-determinism/spec.md:99-103`. So the
+`openspec/specs/filesystem-permission-determinism/spec.md`. So the
 widening is **mask-neutral** under an ACL and **corrective** without one, and one
 unconditional rule is both correct and simpler. Recovering that clamped mask is
 #1631's open question and an explicit non-goal here.
@@ -365,27 +354,27 @@ path" holds verbatim.
 
 **The copyback root itself is in scope.** Issue #2035's own `umask 027`
 measurement lists `0o750 .` — the root — first, and a `0o750` root defeats
-traversal regardless of what sits below it. `publisher.py:1485` and
-`run_tree_copyback.py:57` are the two sites that create it, and they pass no
+traversal regardless of what sits below it. `publisher.py` and
+`run_tree_copyback.py` are the two sites that create it, and they pass no
 `containment_root`. The helper must therefore determine "levels this call created"
 by probing upward for missing components **before** creating them (the
 `canonical_precip_copyback_backfill._ensure_target_directory` idiom), not by
 walking `relative.parts` against a containment root: `_ensure_copyback_state_parent`
-(`state_manager.py:2472`) uses the latter, and its parts list is empty when the
+(`state_manager.py`) uses the latter, and its parts list is empty when the
 path *is* the root — a silent no-op that would never widen it. `containment_root`
 stays an optional pass-through to `safe_fs` for symlink containment only.
 
 ### Level-by-level creation
 
-Copied from `scripts/canonical_precip_copyback_backfill.py:198-225`
+Copied from `scripts/canonical_precip_copyback_backfill.py`
 (`_ensure_target_directory`) and from
-`state_manager._ensure_copyback_state_parent` (`:2464`): probe upwards for the
+`state_manager._ensure_copyback_state_parent`: probe upwards for the
 missing components, then create and widen them outermost-first, one at a time.
 **One guard is deliberately not copied.** The backfill script creates each level
 with a bare `path.mkdir()` and can therefore catch `FileExistsError`
-(`scripts/canonical_precip_copyback_backfill.py:226-233`) to skip the `chmod`
+(`scripts/canonical_precip_copyback_backfill.py`) to skip the `chmod`
 for a level it lost to a concurrent creator. `safe_fs.ensure_directory_no_follow`
-absorbs that signal (`safe_fs.py:91-93`), so this helper cannot distinguish the
+absorbs that signal (`safe_fs.py`), so this helper cannot distinguish the
 lost race and widens the level anyway. Reproducing the guard would mean giving
 up `safe_fs`'s `O_NOFOLLOW`/`dir_fd` walk, which is the whole reason to use it.
 The residue is recorded as an accepted limit in the helper docstring and in the
@@ -447,9 +436,9 @@ with `git show <sha>:<path>`.
 - Storage/cache/query: `LocalObjectStore` under the copyback root; node-27
   display API read path over the same NFS export
 - Public routes/entrypoints: `publisher.publish_qdown_cycle`;
-  `services/orchestrator/chain_forecast_execution.py:996 _mirror_canonical_precip`
-  and its `:1045 publisher.copyback_canonical_precip` call;
-  `services/orchestrator/cli.py:113`; both backfill CLIs
+  `services/orchestrator/chain_forecast_execution.py _mirror_canonical_precip`
+  and its `publisher.copyback_canonical_precip` call;
+  `services/orchestrator/cli.py`; both backfill CLIs
 - Frontend/downstream consumers: node-27 display API reading `canonical/**` as a
   different uid
 - Failure paths/rollback/stale state: `publisher._replace_directory_tree_for_qdown_batch`,
@@ -459,11 +448,11 @@ with `git show <sha>:<path>`.
   `run_tree_copyback._replace_tree`
 - Evidence/audit/readiness: copyback summary payloads (`status`, `trees[].status`,
   `file_count`); the `canonical_precip_mirror` pipeline event
-  (`chain_forecast_execution.py:1061`); node-27 traversal receipt
+  (`chain_forecast_execution.py`); node-27 traversal receipt
 
 Regression rows:
 
-- publisher batch × publisher batch, competitor injected in the `:2468`→`:2470`
+- publisher batch × publisher batch, competitor injected in the rename-to-backup → promote
   window → the second writer blocks until the first batch commits; both report
   truthfully; neither tree is destroyed.
 - publisher batch × `canonical_precip_copyback_backfill` → the script blocks on
@@ -500,8 +489,8 @@ Regression rows:
 - Copyback root created from scratch under `umask 027` → the root itself is
   `0o755`, not `0o750`.
 - Lock timeout in the run-tree lane → `RunTreeCopybackError`, caught by
-  `chain_forecast_execution.py:953`; in the q_down lane → `PublishError` with the
-  copyback-lock-timeout code, caught by `publisher.py:207-210`.
+  `chain_forecast_execution.py`; in the q_down lane → `PublishError` with the
+  copyback-lock-timeout code, caught by `publisher.py`.
 - Copyback root identical to the object-store root → lane returns `skipped`, no
   lock file is created anywhere under the object-store root.
 - `umask 002` (node-27) and `umask 022` (node-22) → unchanged `0o755`; no
@@ -512,11 +501,11 @@ Regression rows:
 - Pre-existing intermediate directory at a restrictive mode → left alone (#1513
   "never fchmod an existing path").
 - Unchanged sibling consumer: `run_tree_copyback._copy_tree_no_symlinks`'s
-  mode-less `mkdir` (`:535`) still creates `mask::rwx` interiors.
+  mode-less `mkdir` still creates `mask::rwx` interiors.
 - Unchanged sibling consumer: `provider_atomic` lock-parent gate still refuses a
   `0o022` parent; `provider_lock_parent_unsafe` tests stay green.
 - Unchanged sibling consumer: `state_manager` per-file copyback writers
-  (`:2194`, `:2405`) still succeed without this mutex.
+  still succeed without this mutex.
 
 ## Boundary-surface checklist
 
@@ -526,7 +515,7 @@ Regression rows:
   unchanged), `packages/common/evidence_io.py` (deadline-poll shape, unchanged),
   `packages/common/state_manager.py` (unchanged, explicitly exempt).
 - **Public entrypoints**: `publish_qdown_cycle`, `copyback_run_trees`,
-  `services/orchestrator/cli.py:113`, both backfill CLIs.
+  `services/orchestrator/cli.py`, both backfill CLIs.
 - **Read surfaces**: node-27 display API over `canonical/**`;
   `apps/api/routes/precip.py`.
 - **Write/delete/overwrite surfaces**: every `os.replace` / `rmtree_no_follow` in

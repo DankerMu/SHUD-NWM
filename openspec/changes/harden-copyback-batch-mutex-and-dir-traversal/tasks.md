@@ -35,8 +35,8 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
         second acquisition on the same file from the same process blocks itself
         until the deadline. Acquire at batch-owner level only; `copyback_batch_lock`
         must never be called from inside `_copyback_object_tree_with_rollback`
-        (`publisher.py:1675`) or any helper it calls, because
-        `forcing_copyback_backfill._copy_package` (`:761`) calls that helper
+        (`publisher.py`) or any helper it calls, because
+        `forcing_copyback_backfill._copy_package` calls that helper
         directly while already holding the lock itself (T3).
         The euid comparison alone only closes the **pre-existing-file** direction:
         a foreign uid that creates the lock file first passes its own euid check
@@ -51,13 +51,14 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
         The timeout error must be **raised as each lane's own type**
         (`RunTreeCopybackError` in the run-tree lane; `PublishError` with code
         `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` in the q_down/run-products lane) —
-        `chain_forecast_execution.py:953` catches only `RunTreeCopybackError` and
-        `publisher.py:207-210` only `PublishError | SQLAlchemyError | OSError |
+        `chain_forecast_execution.py` catches only `RunTreeCopybackError` and
+        `publisher.py` only `PublishError | SQLAlchemyError | OSError |
         ValueError`, so a foreign type escapes both. **Ordering: prepare the root →
         run its identity/overlap guards → open the lock → acquire**; a lane that
         returns `skipped` because the copyback root is the object-store root
-        (canonical `publisher.py:1293-1294`, q_down `:970`, run-products
-        `:812`, run-tree `run_tree_copyback.py:64-70`) must create no lock
+        (the `same_root` skip in each of `publisher._copyback_canonical_precip`,
+        `_copyback_qdown_products` and `_copyback_run_products`, and in
+        `run_tree_copyback`) must create no lock
         file at all.
       - `ensure_traversable_copyback_directory(path, *, containment_root=None)` —
         level-by-level create through `safe_fs.ensure_directory_no_follow`,
@@ -66,71 +67,69 @@ config, spanning the `runs/`, `forcing/` and `canonical/` lanes).
         `design.md` "Why the widening is unconditional"). Determine "levels this
         call created" by probing upward for missing components **before** creating
         them (the `canonical_precip_copyback_backfill._ensure_target_directory`
-        idiom, `:198-233`), **not** by walking `relative.parts` against a
-        containment root as `state_manager._ensure_copyback_state_parent:2472`
+        idiom), **not** by walking `relative.parts` against a
+        containment root as `state_manager._ensure_copyback_state_parent`
         does — that parts list is empty when the path *is* the root, a silent
         no-op. `containment_root` is optional and passes through to `safe_fs` for
         symlink containment only, so the two root-creating sites
-        (`publisher.py:1485`, `run_tree_copyback.py:57`) work without one. Use
-        `os.chmod(..., follow_symlinks=False)`, as `state_manager.py:2481` does.
+        (`publisher.py`, `run_tree_copyback.py`) work without one. Use
+        `os.chmod(..., follow_symlinks=False)`, as `state_manager.py` does.
         Note that `0o755`'s `r-x` group bits make this mask-neutral under an
         inherited ACL; do **not** generalize that to other modes —
         `_ensure_copyback_state_parent`'s `0o775` genuinely restores `mask::rwx`
         and must not be narrowed.
 - [x] T2 Hold `copyback_batch_lock` across the whole batch in
-      `publisher._copyback_run_products` (def `publisher.py:765`; non-batch loop
-      at `:872`), `publisher._copyback_qdown_products` (def `:922`; batch region
-      opened by `with self._copyback_batch_mutex(...)` at `:1042`) and
-      `publisher._copyback_canonical_precip` (def `:1217`; batch region opened by
-      `acquire_copyback_batch_lock` at `:1308`) — acquired after the copyback root's identity/overlap
+      `publisher._copyback_run_products` (a non-batch loop),
+      `publisher._copyback_qdown_products` (batch region opened by
+      `with self._copyback_batch_mutex(...)`) and
+      `publisher._copyback_canonical_precip` (batch region opened by
+      `acquire_copyback_batch_lock`) — acquired after the copyback root's identity/overlap
       guards and before planning, released only after commit or rollback returns.
       **Placement relative to each lane's `except Exception`**: in
-      `_copyback_qdown_products` the root guards already sit before the batch
-      `try:` at `:1043`, so acquire there too — *outside* that try, because its
-      handler (`:1153`) rewraps any non-`PublishError` as
+      `_copyback_qdown_products` the root guards already sit before the batch's own `try:`, so acquire there too — *outside* that try, because its
+      handler rewraps any non-`PublishError` as
       `OBJECT_STORE_COPYBACK_FAILED` and would erase the distinct timeout code. In
-      `_copyback_canonical_precip` the guards are *inside* the `try:` at `:1275`,
-      so the acquire is inside it as well; its handler (`:1376`) returns the
+      `_copyback_canonical_precip` the guards are *inside* its `try:`,
+      so the acquire is inside it as well; its `except Exception` handler returns the
       `failed` receipt carrying `error_type`, and `rollback_log` is still empty on
       a timeout so no rollback runs. `_copyback_run_products` has no production
       caller today
-      (`publish_cycle:181` delegates to `publish_qdown_cycle`; only
-      only `tests/test_tile_publisher.py` calls it, at six sites); lock it anyway so the
+      (`publish_cycle` delegates to `publish_qdown_cycle`; only
+      `tests/test_tile_publisher.py` calls it, at six sites); lock it anyway so the
       two siblings cannot diverge.
 - [x] T3 Hold the same lock in
-      `services/tile_publisher/forcing_copyback_backfill._copy_package` (def
-      `:736`) **per package** — wrap the whole `rollback_log` lifetime `:758-776`,
-      not just the `:761` copyback call: the lock must still be held when
-      `_commit_qdown_copyback_batch` (`:772`) or, on the `except` path,
-      `_rollback_qdown_copyback_batch` (`:775`) returns. Releasing before them is
+      `services/tile_publisher/forcing_copyback_backfill._copy_package`
+      **per package** — wrap the whole `rollback_log` lifetime, not just the
+      `_copyback_object_tree_with_rollback` call: the lock must still be held when
+      `_commit_qdown_copyback_batch` or, on the `except` path,
+      `_rollback_qdown_copyback_batch` returns. Releasing before them is
       exactly the E4 defect shape. Per package, because `_copy_package` runs in a
-      loop at `:651`. And in `scripts/canonical_precip_copyback_backfill.py`
+      loop that calls it. And in `scripts/canonical_precip_copyback_backfill.py`
       **per mirrored tree** — the cycle loop mirrors one tree per cycle, and the
       grid loop mirrors one per grid id, so both go through a single locked
       mirror helper. Never once for the whole run, which would hold the lock past
       the publisher's deadline. `--dry-run` takes no lock: it provably writes
       nothing, and acquiring would create the lock file, which is a write.
 - [x] T4 Hold the same lock in
-      `services/orchestrator/run_tree_copyback.copyback_run_trees` (def `:42`),
-      and add a comment at `_replace_tree` (`:453-487`) recording that its guarded
-      recovery branch (`:483`) always produced a spurious failure rather than data
+      `services/orchestrator/run_tree_copyback.copyback_run_trees`,
+      and add a comment at `_replace_tree` recording that its guarded
+      recovery branch always produced a spurious failure rather than data
       loss. The `STATE_INDEX_OBJECT_KEY` merge runs **outside** the mutex:
       `merge_state_snapshot_index_copyback` takes `provider_destination_lock`
-      (`provider_atomic.py:326-341`) with `blocking=True` and no deadline, so
+      (`provider_atomic.py`) with `blocking=True` and no deadline, so
       nesting it would make the mutex's own *hold* time unbounded. It is the
       per-file provider-atomic writer the spec delta already exempts; the other
       `extra_object_keys` entries are cheap `_replace_file` copies and stay
       inside.
 - [x] T5 Route copyback directory creation through
-      `ensure_traversable_copyback_directory` at `publisher.py:1485`, `:1710`,
-      `:1715`, `:1718`, `:2393`, `:2459` and `run_tree_copyback.py:57`, `:470`,
-      `:491`. `publisher.py:1485` and `run_tree_copyback.py:57` create the
+      `ensure_traversable_copyback_directory` at every call site in `publisher.py`
+      and `run_tree_copyback.py`. `publisher.py` and `run_tree_copyback.py` create the
       **copyback root itself**, which is in scope: issue #2035's `umask 027`
       measurement lists `0o750 .` first, and a `0o750` root defeats traversal
       regardless of the levels below it.
 - [x] T6 Document `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` and the fixed
       lock path in `infra/env/README.md` and the copyback runbook; assert
-      `packages/common/safe_fs.py`, `run_tree_copyback.py:514-535` and
+      `packages/common/safe_fs.py`, `run_tree_copyback.py` and
       `packages/common/state_manager.py` are unmodified by this diff.
 
 ## Verification matrix
@@ -150,11 +149,11 @@ On node-27, `export TMPDIR=/home/nwm/tmp` before any pytest run (project rule).
 
 Every row below names input and expected output. Concurrency tests must be
 **deterministic** — reuse the repo's proven idiom at
-`tests/test_run_tree_copyback.py:1106-1150`: a `threading.Event` gate injected by
+`tests/test_run_tree_copyback.py`: a `threading.Event` gate injected by
 `monkeypatch` so the competing writer runs inside the target window, two threads,
 and joins with timeouts. `flock` is per open file description, so two threads that
 each open the lock file do contend. The umask idiom is
-`tests/test_canonical_precip_copyback_backfill.py:436-440` (save/restore). The
+`tests/test_canonical_precip_copyback_backfill.py` (save/restore). The
 per-open-file-description `flock` semantics the thread tests rely on hold on the
 local filesystem the suite runs on; on an NFS export that emulates `flock` with
 POSIX byte-range locks the granularity is per process instead. That is harmless in
@@ -166,7 +165,7 @@ master and is imported at module level by two test files, so removing it would
 make every row fail with `ImportError` and prove nothing).
 **Two things this rule demands that a gate-assertion failure does not give.**
 First, the rule is unconditional: E5, E6, E13 and E14 go red non-vacuously under
-that harness — E6 because `safe_fs.py:91`'s `os.mkdir(part, 0o755, dir_fd=fd)`
+that harness — E6 because `safe_fs.py`'s `os.mkdir(part, 0o755, dir_fd=fd)`
 is umask-masked and the assertion is an exact `0o755` compare; E13/E14 because
 pre-change no lane acquires, so the `pytest.raises` never fires; E5 because
 `run_tree_copyback` had no lock — so each must have its failing assertion
@@ -183,7 +182,8 @@ these rows to claim only what the gate proves. Reporting "red-proof exists" whil
 the fixture asks for the terminal state is the one option that is not honest.
 
 ### Red-proof record (local, macOS / Python 3.11.14; rows E1-E20 run
-2026-09-09, the two E22 rows 2026-09-10)
+2026-09-09, the two E22 rows 2026-09-10, E23 and E24 2026-09-10 after the
+round-4 retro)
 
 Harness: the changed source files are replaced in place with
 `git show <rev>:<path> > <path>` and restored with `git checkout HEAD -- <path>`
@@ -198,10 +198,10 @@ Baseline is `master` unless a row names another revision.
 | E3 (gate) | master | `assert script_ran_inside_the_batch == [False], "the script committed inside the publisher's batch"` → `assert [True] == [False]` |
 | E3 (terminal, gate bypassed) | master | `script_summary[0]["totals"]["failed"] == 0` passes, then `(copyback_root / key).read_bytes()` → `FileNotFoundError: .../gfs_2026090200_prcp_rate_or_amount_f003.nc` |
 | E4 (gate 1) | master | `assert competitor_ran_between_trees == [False], "the competitor committed inside A's batch"` → `assert [True] == [False]` |
-| E4 (gate 2, the extended discriminator) | HEAD with the canonical lane's batch acquire replaced by a per-tree acquire around `publisher.py:1734-1738` | `assert competitor_ran_before_rollback == [False], "the competitor committed before A's batch rollback"` → `assert [True] == [False]`; gate 1 reads `[False]` under that placement, which is exactly why gate 2 exists |
+| E4 (gate 2, the extended discriminator) | HEAD with the canonical lane's batch acquire replaced by a per-tree acquire around `publisher.py` | `assert competitor_ran_before_rollback == [False], "the competitor committed before A's batch rollback"` → `assert [True] == [False]`; gate 1 reads `[False]` under that placement, which is exactly why gate 2 exists |
 | E4 (terminal, both gates bypassed) | same per-tree build | `(copyback_root / key).read_bytes()` → `FileNotFoundError: .../gfs_2024060112_prcp_rate_or_amount_f003.nc` — A's batch rollback deleted B's committed tree |
 | E5 | master | `assert competitor_ran_inside_the_region == [False], "a competitor entered the promote region"` → `assert [True] == [False]` (the assertion has since been widened to one sample per promote — see the round-3 row below, which is the form now in the file) |
-| E5 (round 3: every promote, not just the first) | `df747077` with the referenced-tree loop (`run_tree_copyback.py:112-131`) moved outside `with _run_tree_batch_lock(target_root):` | pre-change test body (single-sample gate): **1 passed** — vacuously green, because the gate fired only on the first promote, which is still inside the mutex, and the two writers' key spaces are disjoint (`runs/`+`forcing/`+`models/` vs `canonical/`) so no terminal assertion notices either. Widened test: `AssertionError: a competitor entered the promote region` / `assert [False, True, True] == [False, False, False]` / `At index 1 diff: True != False`. Production restored with `git checkout -- services/orchestrator/run_tree_copyback.py`; the widened test is green (6.33s) on the unmutated tree. |
+| E5 (round 3: every promote, not just the first) | `df747077` with the referenced-tree loop (`run_tree_copyback.py`) moved outside `with _run_tree_batch_lock(target_root):` | pre-change test body (single-sample gate): **1 passed** — vacuously green, because the gate fired only on the first promote, which is still inside the mutex, and the two writers' key spaces are disjoint (`runs/`+`forcing/`+`models/` vs `canonical/`) so no terminal assertion notices either. Widened test: `AssertionError: a competitor entered the promote region` / `assert [False, True, True] == [False, False, False]` / `At index 1 diff: True != False`. Production restored with `git checkout -- services/orchestrator/run_tree_copyback.py`; the widened test is green (6.33s) on the unmutated tree. |
 | E6 (`umask 027`) | master | `assert landed == {str(path): "0o755" for path in levels}` → `.../shared-object-store/canonical: '0o750' != '0o755'` (and the same for `canonical/gfs`) |
 | E7 (`umask 022`, `umask 002`) | master | **green pre-change, by construction** — the masked `mkdir` already lands `0o755` at those umasks. Recorded as a no-regression row with no red proof, not as a discriminator. |
 | E13 | master | `with pytest.raises(OrchestratorError)` → `Failed: DID NOT RAISE <class 'services.orchestrator.chain_types.OrchestratorError'>` |
@@ -216,20 +216,22 @@ Baseline is `master` unless a row names another revision.
 | E19 (q_down × held through commit **and** rollback) | master | the probe cannot even open a lock file: `FileNotFoundError: [Errno 2] No such file or directory: '.../shared-object-store/.nhms-copyback-batch.lock'` — pre-change no lane acquires |
 | E19 (q_down × held through commit/rollback — the release-early variant, the defect the row actually guards) | HEAD with `_copyback_batch_mutex` calling `release_copyback_batch_lock(fd)` before its `yield` | `assert {'commit': False, 'rollback': False} == {'commit': True, 'rollback': True}` |
 | E19 (canonical × held through commit) | master | same absent-lock-file `FileNotFoundError`, surfacing through the lane's own summary as `assert ... and 'failed' == 'ok'` |
-| E19 (canonical × held through commit — release-early variant) | HEAD with the canonical lane releasing after its last promote and before `_commit_qdown_copyback_batch` (`publisher.py:1374`) | `assert {'commit': False} == {'commit': True}` |
-| E19 (forcing × held through rollback — round-2 A1) | HEAD with the `ExitStack` at `forcing_copyback_backfill.py:758` replaced by a plain `with copyback_batch_lock(...)` inside the `try:` | `assert {'rollback': False} == {'rollback': True}` |
+| E19 (canonical × held through commit — release-early variant) | HEAD with the canonical lane releasing after its last promote and before `_commit_qdown_copyback_batch` (`publisher.py`) | `assert {'commit': False} == {'commit': True}` |
+| E19 (forcing × held through rollback — round-2 A1) | HEAD with the `ExitStack` at `forcing_copyback_backfill.py` replaced by a plain `with copyback_batch_lock(...)` inside the `try:` | `assert {'rollback': False} == {'rollback': True}` |
 | E19 (forcing × traversal widening, `umask 027`) | master | `assert {... '.../shared-object-store/forcing': '0o750', ...} == {... '0o755', ...}` |
-| E19 (script × unsafe lock, distinct from timeout — round-2 A2) | HEAD with `_mirror_tree_under_batch_lock`'s arm (`scripts/canonical_precip_copyback_backfill.py:469`) narrowed to `CopybackLockTimeout` | `packages.common.copyback_guard.CopybackLockError: copyback batch lock must have mode 0600` raised at `packages/common/copyback_guard.py:174` and escaping `backfill.main` uncaught — no JSON summary is printed at all, which is why the row asserts on stdout rather than the exit code |
-| E22 (run-tree lane: a lock timeout leaves the stage un-advanced — round-4 claims audit B8) | HEAD with the `_copyback_stage_run_trees` call at `chain_forecast_execution.py:857-858` wrapped in `try/except: pass` | `with pytest.raises(OrchestratorError)` → `Failed: DID NOT RAISE <class 'services.orchestrator.chain_types.OrchestratorError'>`; **2 failed** (both parametrisations), canonical test stayed green |
-| E22 (canonical lane: a lock timeout still advances the stage — same audit row) | first attempt mutated only `chain_forecast_execution.py:1046` → **3 passed, did not bite**, which is itself the evidence: `_copyback_canonical_precip`'s own `except Exception` (`publisher.py:1376`) swallows first, so the outer net never sees the timeout. Second attempt mutated **both** layers to re-raise | `packages.common.copyback_guard.CopybackLockTimeout: copyback batch lock .../.nhms-copyback-batch.lock was still held after the configured deadline`; **1 failed**, both run-tree parametrisations stayed green |
+| E19 (script × unsafe lock, distinct from timeout — round-2 A2) | HEAD with `_mirror_tree_under_batch_lock`'s arm (`scripts/canonical_precip_copyback_backfill.py`) narrowed to `CopybackLockTimeout` | `packages.common.copyback_guard.CopybackLockError: copyback batch lock must have mode 0600` raised at `packages/common/copyback_guard.py` and escaping `backfill.main` uncaught — no JSON summary is printed at all, which is why the row asserts on stdout rather than the exit code |
+| E22 (run-tree lane: a lock timeout leaves the stage un-advanced — round-4 claims audit B8) | HEAD with the `_copyback_stage_run_trees` call at `chain_forecast_execution.py` wrapped in `try/except: pass` | `with pytest.raises(OrchestratorError)` → `Failed: DID NOT RAISE <class 'services.orchestrator.chain_types.OrchestratorError'>`; **2 failed** (both parametrisations), canonical test stayed green |
+| E22 (canonical lane: a lock timeout still advances the stage — same audit row) | first attempt mutated only `chain_forecast_execution.py` → **3 passed, did not bite**, which is itself the evidence: `_copyback_canonical_precip`'s own `except Exception` (`publisher.py`) swallows first, so the outer net never sees the timeout. Second attempt mutated **both** layers to re-raise | `packages.common.copyback_guard.CopybackLockTimeout: copyback batch lock .../.nhms-copyback-batch.lock was still held after the configured deadline`; **1 failed**, both run-tree parametrisations stayed green |
 | E20 (import-closure includes package `__init__`s) | the pre-fix test body from `40cf8ed9`, with `import numpy` planted in `packages/common/__init__.py` | pre-fix test: **1 passed** (vacuous); fixed test: `AssertionError: .../packages/common/__init__.py pulls in a third-party dependency: ['numpy']`. Both the plant and the pre-fix test body were reverted immediately. |
+| E23 (a failing lock release must not replace the outcome the caller already computed — round-4 findings E1/E3) | HEAD before the fix, with `fcntl.flock(LOCK_UN)` and `os.close` each injected to raise `OSError` in turn | `OSError: [Errno 5] injected unlock failure` at `release_copyback_batch_lock`'s unlock, and `injected close failure` at its close, escaping both the success path and an in-flight exception; **4 failed** across the two injection points × the two paths. Green after the fix, and the same tests assert the lock really was released (a later `acquire` with a 1 s deadline succeeds), so the fix is not "swallow and leak" |
+| E24 (script lane: the mirror runs *inside* the mutex, not merely one acquisition per tree — round-4 finding C1) | HEAD with `_mirror_tree_under_batch_lock` mutated to acquire, release immediately, then mirror outside the lock | `assert [False, False, False, False, False, False] == [True] * 6` — **1 failed, 42 passed**: the new test is the only one of the 43 in the file that the mutation reddens, which is the finding restated as a receipt. Mutation reverted, then **43 passed** |
 
 - [x] E1 `copyback_guard` lock unit tests: two threads on one root serialize (the
       second observes the first's completion); two distinct roots do not block each
       other; timeout raises the distinct error and performs no promote; a
       symlinked / `0o644` / foreign-owned lock file fails closed; a killed holder's
       lock is released by the kernel and the next writer proceeds.
-- [x] E2 publisher × publisher race: competitor injected in the `:2468`→`:2470`
+- [x] E2 publisher × publisher race: competitor injected in the rename-to-backup → promote
       window. **Red proof (pre-change), as actually observed**: the *competitor*
       (B) completes a whole batch inside the window and reports `ok`, the first
       writer (A) then hits `ENOTEMPTY` and its `_restore_copyback_backup`
@@ -249,7 +251,7 @@ Baseline is `master` unless a row names another revision.
       `_replace_directory_tree_for_qdown_batch`, i.e. released when that call
       returns, which is the narrowing `design.md`'s four-step counterexample
       describes. A per-tree lock wrapping the loop-body call site
-      (`publisher.py:1734-1738`) instead puts the gate's own wait inside the lock,
+      (`publisher.py`) instead puts the gate's own wait inside the lock,
       so the gate reads `[False]` and stops discriminating; what would remain is a
       race between A's rollback (in the `except` handler, outside any per-tree
       lock) and B's promote, which is timing-dependent rather than deterministically
@@ -271,7 +273,7 @@ Baseline is `master` unless a row names another revision.
       **both before and after** the widening — i.e. the caller-side `chmod` changes
       nothing, because `safe_fs`'s `mkdir` already clamped it. Assert separately
       that a mode-less `mkdir` under the same parent yields `mask::rwx`, pinning
-      the `run_tree_copyback.py:535` boundary. Skip with an explicit reason on a
+      the `run_tree_copyback.py` boundary. Skip with an explicit reason on a
       platform without ACL support — never a silent pass.
 - [x] E9 Pre-existing intermediate directory at `0o700` → left unchanged (#1513).
 - [ ] E10 `provider_lock_parent_unsafe` and the `filesystem-permission-determinism`
@@ -280,26 +282,27 @@ Baseline is `master` unless a row names another revision.
 - [x] E11 Lock timeout inside `_mirror_canonical_precip`: the cycle records a
       `failed` `canonical_precip_mirror` receipt and does not raise.
 - [x] E13 Lock timeout in the run-tree lane raises `RunTreeCopybackError`, is
-      caught by `_copyback_stage_run_trees` (`chain_forecast_execution.py:953`),
+      caught by `_copyback_stage_run_trees` (`chain_forecast_execution.py`),
       records an `object_store_copyback` / `failed` pipeline event, and then
-      **propagates as `_chain.OrchestratorError`** (`:971`). Assert the event and
+      **propagates as `_chain.OrchestratorError`**. Assert the event and
       the propagated type — not "no exception escapes". Accepted consequence,
       recorded here because it is the one lane where a timeout is not free: the
-      call sits at `_after_cycle_stage_terminal:859` inside the
+      call sits at `_after_cycle_stage_terminal` inside the
       `result_status == "succeeded"` branch, so the raise skips
-      `update_forecast_cycle_status` (`:862`) and aborts the stage's success path.
-      The 900 s default is sized against the measured hold (2.2 GB per
-      acquisition at 62 MB/s ≈ 36 s, twice per cycle) rather than against the
-      canonical hook's position; see `design.md` "Cost accepted, deliberately".
+      `update_forecast_cycle_status` and aborts the stage's success path.
+      The 900 s default is sized against the measured hold, not against the
+      canonical hook's position; the acquisition count and its qualifier live
+      only at `DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS`, and the arithmetic is in
+      `design.md` "Cost accepted, deliberately".
       A copyback timeout must stay fatal here: `resume_cycle_stage`
-      (`chain_stage_execution.py:974`) re-enters `_after_cycle_stage_terminal`
+      (`chain_stage_execution.py`) re-enters `_after_cycle_stage_terminal`
       unconditionally, so the failure is retried on the next pass, and making it
       non-fatal would mark the cycle succeeded over absent data.
 - [x] E14 Lock timeout in the q_down lane raises `PublishError` and it
       **propagates out of `publish_qdown_cycle` still carrying** the
-      `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code — `publisher.py:199-200` re-raises
+      `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code — `publisher.py` re-raises
       `PublishError` unchanged; the point of the distinct type is that it is not
-      swallowed by the `SQLAlchemyError | OSError | ValueError` arm at `:209-210`
+      swallowed by the `SQLAlchemyError | OSError | ValueError` arm in `publish_qdown_cycle`
       nor rewrapped as `OBJECT_STORE_COPYBACK_FAILED`.
 - [x] E15 Copyback root identical to the object-store root: the lane returns
       `skipped` and **no lock file exists** anywhere under the object-store root.
@@ -359,12 +362,12 @@ Baseline is `master` unless a row names another revision.
 
       | lane | timeout code | unsafe code, distinct from timeout | lock held through commit | lock held through rollback | zero-write skip creates no lock file | traversal widening |
       |---|---|---|---|---|---|---|
-      | `publisher` run-products | `tests/test_tile_publisher.py::test_run_products_copyback_lock_timeout_raises_the_distinct_timeout_code` | `tests/test_tile_publisher.py::test_run_products_copyback_unsafe_lock_file_raises_the_distinct_unsafe_code` | N/A — this lane has no batch commit phase: it passes `rollback_log=None` (`publisher.py:876` → `_copyback_object_tree`, `:1663`), so each promote settles on its own. | N/A — same reason: no batch rollback exists to hold the lock through. `_replace_directory_tree_no_follow` restores its own backup inline, inside the same `with`. | `tests/test_tile_publisher.py::test_a_zero_write_skip_path_creates_no_lock_file[run_products]` | `tests/test_tile_publisher.py::test_run_products_copyback_leaves_every_level_it_created_traversable_under_umask_027` |
+      | `publisher` run-products | `tests/test_tile_publisher.py::test_run_products_copyback_lock_timeout_raises_the_distinct_timeout_code` | `tests/test_tile_publisher.py::test_run_products_copyback_unsafe_lock_file_raises_the_distinct_unsafe_code` | N/A — this lane has no batch commit phase: it passes `rollback_log=None` (`publisher.py` → `_copyback_object_tree`), so each promote settles on its own. | N/A — same reason: no batch rollback exists to hold the lock through. `_replace_directory_tree_no_follow` restores its own backup inline, inside the same `with`. | `tests/test_tile_publisher.py::test_a_zero_write_skip_path_creates_no_lock_file[run_products]` | `tests/test_tile_publisher.py::test_run_products_copyback_leaves_every_level_it_created_traversable_under_umask_027` |
       | `publisher` q_down | `tests/test_tile_publisher.py::test_qdown_copyback_lock_timeout_propagates_out_of_publish_qdown_cycle` (+ `::test_qdown_copyback_lock_timeout_survives_the_public_publish_entry_points_handler`) | `tests/test_tile_publisher.py::test_qdown_copyback_unsafe_lock_file_raises_the_distinct_unsafe_code` (+ `::test_qdown_copyback_unsafe_lock_survives_the_public_publish_entry_points_handler`) | `tests/test_tile_publisher.py::test_qdown_copyback_holds_the_batch_mutex_through_commit_and_rollback` | `tests/test_tile_publisher.py::test_qdown_copyback_holds_the_batch_mutex_through_commit_and_rollback` (one run drives both: the probing commit fails, so the same call also enters the `except` handler's rollback) | `tests/test_tile_publisher.py::test_a_zero_write_skip_path_creates_no_lock_file[qdown]` | `tests/test_tile_publisher.py::test_qdown_copyback_leaves_every_level_it_created_traversable_under_umask_027` |
       | `publisher` canonical mirror | `tests/test_tile_publisher.py::test_canonical_copyback_lock_timeout_is_reported_through_the_summary` (+ `tests/test_orchestration_chain.py::test_canonical_precip_mirror_lock_timeout_records_a_failed_receipt_and_does_not_raise`) | `tests/test_tile_publisher.py::test_canonical_copyback_unsafe_lock_file_is_reported_through_the_summary` | `tests/test_tile_publisher.py::test_canonical_copyback_holds_the_batch_mutex_through_its_commit` | `tests/test_tile_publisher.py::test_copyback_batch_rollback_never_removes_another_writers_committed_tree` — gate 2 (`competitor_ran_before_rollback`) waits for the competitor *inside* A's rollback, so a build that released before the rollback lets B commit and the terminal `read_bytes()` fails | `tests/test_tile_publisher.py::test_a_zero_write_skip_path_creates_no_lock_file[canonical]` | `tests/test_tile_publisher.py::test_canonical_copyback_leaves_every_level_it_created_traversable` |
-      | `run_tree_copyback` | `tests/test_run_tree_copyback.py::test_run_tree_copyback_lock_timeout_raises_this_lanes_own_error_type` (+ `tests/test_orchestration_chain.py::test_run_tree_copyback_lock_timeout_records_a_failed_event_and_propagates`) | `tests/test_run_tree_copyback.py::test_run_tree_copyback_unsafe_lock_file_raises_the_distinct_unsafe_code` | N/A — no batch commit phase: `_replace_tree` promotes and settles one tree at a time. That **every** promote — the run tree at `:108` plus both referenced trees from the loop at `:112-131`, three in that fixture — is inside the region is pinned by `tests/test_run_tree_copyback.py::test_run_tree_copyback_holds_the_shared_batch_mutex_for_its_whole_promote_region`, which takes one blocking sample per main-thread promote and asserts `[False, False, False]` (round-3 C1/TE-2: the earlier single-sample gate probed only the first promote and stayed green with the referenced-tree loop moved out of the mutex); the one thing deliberately outside is the state-index merge, pinned in both directions by `::test_the_state_index_merge_runs_with_the_batch_mutex_released` and `::test_a_non_state_index_extra_object_still_copies_inside_the_batch_mutex`. | N/A — no batch rollback: `_replace_tree`'s guarded per-tree restore (`run_tree_copyback.py:483`, commented in place per T4/AC2) runs inside the same `with _run_tree_batch_lock(...)`, and its terminal state is a benign spurious failure rather than a lost update. | `tests/test_run_tree_copyback.py::test_run_tree_copyback_skip_path_creates_no_lock_file` | `tests/test_run_tree_copyback.py::test_run_tree_copyback_widens_every_level_it_creates_under_umask_027` |
-      | `forcing_copyback_backfill` | `tests/test_forcing_copyback_backfill.py::test_apply_records_a_lock_timeout_as_its_own_failure_category` | `tests/test_forcing_copyback_backfill.py::test_apply_records_an_unsafe_lock_file_as_the_same_failure_category` — one `copyback_lock_unavailable` bucket **by design** (both verdicts mean "the target tree is intact, rerun once the contender is gone"), so the discriminator is the recorded `reason`: `0600` present and `deadline` absent. That is what a narrowing of `_classify_tree_error:898` to `CopybackLockTimeout` flips. | `tests/test_forcing_copyback_backfill.py::test_apply_holds_the_batch_mutex_across_the_whole_rollback_log_lifetime` | `tests/test_forcing_copyback_backfill.py::test_apply_holds_the_batch_mutex_while_the_rollback_runs` — round-2 A1's cell; the `ExitStack` at `forcing_copyback_backfill.py:758` exists only so the lock outlives `_rollback_qdown_copyback_batch`, and nothing asserted it | `tests/test_forcing_copyback_backfill.py::test_cli_rejects_copyback_root_equal_object_store_root_without_already_present` (both `args` params) — the identity refusal is upstream of the only acquire site (`_copy_package:760`) | `tests/test_forcing_copyback_backfill.py::test_apply_leaves_every_level_it_created_traversable_under_umask_027` |
-      | `scripts/canonical_precip_copyback_backfill` | `tests/test_canonical_precip_copyback_backfill.py::test_a_lock_the_backfill_cannot_take_is_a_recorded_failure_not_a_crash` | `tests/test_canonical_precip_copyback_backfill.py::test_an_unsafe_lock_file_is_a_recorded_failure_not_an_escaped_exception` — round-2 A2's cell. Same single per-tree bucket as the forcing lane, distinguished in the recorded `reason`; without the base-class arm at `:469` the error escapes `main` before the `print(json.dumps(...))` that is this script's entire report. Not asserted on the exit code: `EXIT_FAILURES = 1` (`:92`) is indistinguishable from the interpreter's uncaught-exception code (pre-existing, out of scope). | N/A — no promote batch at all: `mirror_tree` copies file by file into the target with no cross-tree commit and no rollback of its own (design.md, "Backfill granularity"). The mutex spans one whole tree, pinned by `::test_the_backfill_takes_the_batch_mutex_per_tree_not_once_per_run`. | N/A — same reason: there is no batch rollback here to outlive. This is precisely why per-tree acquisition is sufficient rather than merely convenient. | `tests/test_canonical_precip_copyback_backfill.py::test_dry_run_takes_no_lock_and_creates_no_lock_file`; the other zero-write path (copyback root == source root) is a `resolve_roots:146` usage refusal upstream of the only acquire site, pinned by `::test_backfill_overlapping_roots_exit_two` | `tests/test_canonical_precip_copyback_backfill.py::test_backfill_created_directories_stay_readable_under_a_restrictive_umask` (+ `::test_backfill_partially_created_directory_chain_stays_readable`) — this lane does **not** route through `ensure_traversable_copyback_directory`: its import closure must stay stdlib-plus-`copyback_guard` for node-22's frozen checkout, so it keeps its own `_ensure_target_directory` (`:198`), which #2008 already built to the same rule |
+      | `run_tree_copyback` | `tests/test_run_tree_copyback.py::test_run_tree_copyback_lock_timeout_raises_this_lanes_own_error_type` (+ `tests/test_orchestration_chain.py::test_run_tree_copyback_lock_timeout_records_a_failed_event_and_propagates`) | `tests/test_run_tree_copyback.py::test_run_tree_copyback_unsafe_lock_file_raises_the_distinct_unsafe_code` | N/A — no batch commit phase: `_replace_tree` promotes and settles one tree at a time. That **every** promote — the run tree plus both referenced trees from the loop that follows it, three in that fixture — is inside the region is pinned by `tests/test_run_tree_copyback.py::test_run_tree_copyback_holds_the_shared_batch_mutex_for_its_whole_promote_region`, which takes one blocking sample per main-thread promote and asserts `[False, False, False]` (round-3 C1/TE-2: the earlier single-sample gate probed only the first promote and stayed green with the referenced-tree loop moved out of the mutex); the one thing deliberately outside is the state-index merge, pinned in both directions by `::test_the_state_index_merge_runs_with_the_batch_mutex_released` and `::test_a_non_state_index_extra_object_still_copies_inside_the_batch_mutex`. | N/A — no batch rollback: `_replace_tree`'s guarded per-tree restore (`run_tree_copyback.py`, commented in place per T4/AC2) runs inside the same `with _run_tree_batch_lock(...)`, and its terminal state is a benign spurious failure rather than a lost update. | `tests/test_run_tree_copyback.py::test_run_tree_copyback_skip_path_creates_no_lock_file` | `tests/test_run_tree_copyback.py::test_run_tree_copyback_widens_every_level_it_creates_under_umask_027` |
+      | `forcing_copyback_backfill` | `tests/test_forcing_copyback_backfill.py::test_apply_records_a_lock_timeout_as_its_own_failure_category` | `tests/test_forcing_copyback_backfill.py::test_apply_records_an_unsafe_lock_file_as_the_same_failure_category` — one `copyback_lock_unavailable` bucket **by design** (both verdicts mean "the target tree is intact, rerun once the contender is gone"), so the discriminator is the recorded `reason`: `0600` present and `deadline` absent. That is what a narrowing of `_classify_tree_error` to `CopybackLockTimeout` flips. | `tests/test_forcing_copyback_backfill.py::test_apply_holds_the_batch_mutex_across_the_whole_rollback_log_lifetime` | `tests/test_forcing_copyback_backfill.py::test_apply_holds_the_batch_mutex_while_the_rollback_runs` — round-2 A1's cell; the `ExitStack` at `forcing_copyback_backfill.py` exists only so the lock outlives `_rollback_qdown_copyback_batch`, and nothing asserted it | `tests/test_forcing_copyback_backfill.py::test_cli_rejects_copyback_root_equal_object_store_root_without_already_present` (both `args` params) — the identity refusal is upstream of the only acquire site (`_copy_package`) | `tests/test_forcing_copyback_backfill.py::test_apply_leaves_every_level_it_created_traversable_under_umask_027` |
+      | `scripts/canonical_precip_copyback_backfill` | `tests/test_canonical_precip_copyback_backfill.py::test_a_lock_the_backfill_cannot_take_is_a_recorded_failure_not_a_crash` | `tests/test_canonical_precip_copyback_backfill.py::test_an_unsafe_lock_file_is_a_recorded_failure_not_an_escaped_exception` — round-2 A2's cell. Same single per-tree bucket as the forcing lane, distinguished in the recorded `reason`; without the base-class `except CopybackLockError` arm the error escapes `main` before the `print(json.dumps(...))` that is this script's entire report. Not asserted on the exit code: `EXIT_FAILURES = 1` is indistinguishable from the interpreter's uncaught-exception code (pre-existing, out of scope). | N/A — no promote batch at all: `mirror_tree` copies file by file into the target with no cross-tree commit and no rollback of its own (design.md, "Backfill granularity"). Span and granularity are separate claims and now have separate tests: the span — the mirror actually runs *inside* the `with` — is pinned by `::test_the_mutex_is_still_held_while_each_tree_is_mirrored`, which opens a second fd on the lock path from inside `mirror_tree` and asserts `BlockingIOError` for every tree; the granularity — one acquisition per tree, not one per run — stays with `::test_the_backfill_takes_the_batch_mutex_per_tree_not_once_per_run`. **Round-4 finding C1**: this cell previously cited the granularity test for the span, and a release-before-mirror mutation survived all 42 other tests in the file, leaving this lane's `MUST hold the same mutex for its own critical section` with no test at all. The new test is the only one in the file that fails under that mutation. | N/A — same reason: there is no batch rollback here to outlive. This is precisely why per-tree acquisition is sufficient rather than merely convenient. | `tests/test_canonical_precip_copyback_backfill.py::test_dry_run_takes_no_lock_and_creates_no_lock_file`; the other zero-write path (copyback root == source root) is a `resolve_roots` usage refusal upstream of the only acquire site, pinned by `::test_backfill_overlapping_roots_exit_two` | `tests/test_canonical_precip_copyback_backfill.py::test_backfill_created_directories_stay_readable_under_a_restrictive_umask` (+ `::test_backfill_partially_created_directory_chain_stays_readable`) — this lane does **not** route through `ensure_traversable_copyback_directory`: its import closure must stay stdlib-plus-`copyback_guard` for node-22's frozen checkout, so it keeps its own `_ensure_target_directory`, which #2008 already built to the same rule |
 
       Filled 2026-09-09. No cell needed a production change to become fillable.
       All six `N/A` cells say the same thing — **this lane has no batch
@@ -392,39 +395,30 @@ Baseline is `master` unless a row names another revision.
       row, and each row records **the falsifier that was constructed and
       checked**, never a happy-path confirmation. Invariant for the artifact:
       *a row whose "falsifier constructed" cell is empty, or says "none" without
-      a structural reason, is an unchecked row; a claim absent from the table is
-      an unaudited claim.* 85 rows at `b59ffd2e`: 1 FALSE, 8 UNPROVEN, 76
-      HOLDS at audit time; adjudicating them against production ended at **3
-      FALSE, 1 over-narrow, 81 HOLDS**, all fixed in this same head. Two of the
-      three FALSEs surfaced only because every row records *which code makes the
-      claim true* and the fix pass went and read it: the run-tree lane acquires
-      **at most once** per cycle, never twice — the gate's `state_save_qc` arm is
-      conditioned on the very terminal stage that makes `stages_through` drop
-      `parse` (`chain_stages.py:75-79`), so the two are never both live — which
-      falsified both the sizing prose and a code comment the audit itself had
-      passed. The orchestrator's first two attempts at stating *why* were also
-      wrong, each corrected by the next pass reading the code; `claims-audit.md`
-      R5 keeps that sequence visible rather than presenting only the answer.
-      Dispositions, receipts and the full rows are in `claims-audit.md`.
-      The same pass extracted all 89 `file:line` citations in the three documents
-      and opened each one: ~40 had drifted and are corrected, and `design.md`'s
-      `Surfaces` inventory is now symbol-anchored so it cannot drift again.
-      The mechanism was then turned on its own corrective commit — `claims-audit.md`
-      §4 audits the ~18 behaviour sentences `2244082b` introduced, because the
-      artifact invariant above forbids the commit that created the table from
-      exempting itself. That pass found **8 more stale citations** (3 drifted
-      inside `2244082b` itself, 5 in files it never touched and had simply never
-      been re-derived) and replaced `design.md`'s pinned-SHA citation declaration
-      with a standing per-commit re-verification rule. Two §4 rows are labelled
-      HOLDS-by-protocol rather than HOLDS-by-receipt (the NFSv4 host-death lease
-      semantics), because the falsifier would require killing a production host.
+      a structural reason, is an unchecked row.* Row counts, dispositions and
+      receipts are in `claims-audit.md`, which is a **frozen review record**: it
+      is not re-derived here, and it is not extended for later commits.
+
+      **Round 4 judged this mechanism insufficient, and the record says so.**
+      Auditing prose by adding prose grew the failing surface: the corrective
+      commit added ~480 lines and the next round's verified-finding count went
+      5 → 12, including 30 stale `file:line` citations and two spec clauses the
+      audit's own declared scope covered but its rows did not. The round-4 retro
+      (`.workplans/pr-2201/review/review-failure-retro-round4.md`) therefore
+      replaced the mechanism with substrate reduction rather than a fifth
+      section: **every `file:line` citation is deleted from `design.md`,
+      `tasks.md` and `proposal.md`** — symbol references only, verified by a grep
+      that must return nothing rather than by a checker (the checker that ran in
+      round 4 missed the bare `:NNN` form it was never tested against) —
+      and the acquisition-count claim, previously restated at seven sites, now
+      exists at one.
 - [x] E22 **The one coverage gap the claims audit exposed** (`claims-audit.md`
       row B8): `design.md` claims a run-tree copyback lock timeout is retried on
       the next scheduler pass while the canonical-mirror lane's is not. The
       mechanism is real and traced — the run-tree failure propagates out of
       `_after_cycle_stage_terminal` before `update_forecast_cycle_status`
-      (`chain_forecast_execution.py:859-862`) so the stage stays un-advanced,
-      while the canonical lane's own `except Exception` (`:1046`) swallows into a
+      (`chain_forecast_execution.py`) so the stage stays un-advanced,
+      while the canonical lane's own `except Exception` swallows into a
       `failed` receipt and the stage advances — but no test asserted the
       contrast; E13 stopped at "propagates as `OrchestratorError`". A
       discriminating test per lane at that seam, with a double-sided red proof
@@ -433,7 +427,7 @@ Baseline is `master` unless a row names another revision.
       both stage configurations — with the two-sided proof above. The canonical
       side needed a **two-layer** mutation, and the single-layer attempt that
       stayed green is kept in the record: it is the discovery that
-      `publisher.py:1376` swallows first and the orchestrator hook's
+      `publisher.py` swallows first and the orchestrator hook's
       `except Exception` never sees a copyback timeout at all.
 - [x] E12 `grep -rn "DEBUG-" ` clean before commit; `git stash list` shows no
       leftover `red-proof` entry — this pass created no stash entry at all: the
@@ -467,7 +461,7 @@ different uid (`frd_muziyao` on node-22) running **this branch's code** under
       (publisher × publisher, publisher × backfill script) and neither terminal
       state has a writer reporting `ok`/`copied` for content another writer's
       rollback removed. → E2, E3, E4.
-- [ ] AC2 `run_tree_copyback.py:453 _replace_tree` is covered by the same
+- [ ] AC2 `run_tree_copyback.py _replace_tree` is covered by the same
       adjudication: brought under the mutex **and** commented with why its own
       terminal state was benign. → T4, E5.
 - [ ] AC3 Under `umask 027` a full publisher-side copyback leaves every level it
@@ -481,17 +475,17 @@ different uid (`frd_muziyao` on node-22) running **this branch's code** under
       Recorded in `proposal.md`/`design.md`. It bounds where B bites; it does not
       gate the fix, which is unconditional.
 - [ ] AC6 No #1513 regression (`provider_lock_parent_unsafe` green at node-27's
-      default umask) and no #1631 regression (`run_tree_copyback.py:535`'s
+      default umask) and no #1631 regression (`run_tree_copyback.py`'s
       `mask::rwx` preservation pinned by E8). → E8, E10, T6.
 
 ## Non-goals
 
 - Relaxing `provider_atomic`'s `0o022` gate.
 - `chmod`-ing an already-existing path in `safe_fs`.
-- Changing `run_tree_copyback.py:535`'s mode-less `mkdir`, or recovering the
+- Changing `run_tree_copyback.py`'s mode-less `mkdir`, or recovering the
   `mask::rwx` that `safe_fs`'s `mkdir` clamps (#1631's open question).
-- Bringing `state_manager`'s per-file copyback writers (`:2194`, `:2405`) under
-  this mutex, or narrowing `_ensure_copyback_state_parent`'s `0o775` (`:2481`) to
+- Bringing `state_manager`'s per-file copyback writers under
+  this mutex, or narrowing `_ensure_copyback_state_parent`'s `0o775` to
   the `0o755` this change uses — that `0o775` is what restores `mask::rwx` on the
   state lane.
 - Copy-all-then-promote-all batch restructuring.

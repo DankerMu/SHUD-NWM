@@ -4,9 +4,15 @@
 
 A process SHALL hold one exclusive cross-process mutex, fixed per copyback root,
 for the whole of any critical section in which it promotes a directory tree under
-the shared object-store copyback root — from planning, through every
-directory-tree promotion, until its batch commit or batch rollback has returned. The mutex SHALL NOT be released between the individual tree
-promotions of one batch.
+the shared object-store copyback root — from the first read of the copyback
+destination, through every directory-tree promotion, until its batch commit or
+batch rollback has returned. The mutex SHALL NOT be released between the
+individual tree promotions of one batch.
+
+A lane whose planning reads only the source object store MAY perform that
+planning before acquiring: it observes nothing a competitor can change under the
+copyback root. Only planning that reads the destination — deciding what is
+already mirrored there — is inside the critical section.
 
 A writer that cannot acquire the mutex within its configured deadline SHALL fail
 loudly with a distinct error and SHALL NOT promote any tree.

@@ -19680,11 +19680,11 @@ def test_run_tree_copyback_lock_timeout_records_a_failed_event_and_propagates(
     ("stage_name", "terminal_stage"),
     [
         # The two configurations in which `_stage_should_copyback_run_trees`
-        # is true. Exactly one fires per cycle in each: with no terminal stage
-        # only `parse` (`state_save_qc` returns False); with
-        # `forecast_state_save_qc` -- node-22's live setting -- only
-        # `state_save_qc`, because `chain_stages.stages_through` drops `parse`
-        # from the cycle's stage list. Both must leave the stage un-advanced.
+        # is true: with no terminal stage only `parse` (`state_save_qc` returns
+        # False); with `forecast_state_save_qc` -- node-22's live setting --
+        # only `state_save_qc`, because `chain_stages.stages_through` drops
+        # `parse` from the cycle's stage list. Both must leave the stage
+        # un-advanced.
         ("parse", None),
         ("state_save_qc", "forecast_state_save_qc"),
     ],

@@ -176,9 +176,9 @@ def copyback_run_trees(
             # briefly visible to concurrent readers, and the operator's
             # next step -- check the shared entry_count -- is the same.
             # Unchanged by #2035's lock split: the run trees are already
-            # promoted and the batch mutex already released when this fires,
-            # exactly as they were when the merge ran inside the mutex --
-            # this lane has no batch rollback, so the observable outcome at
+            # promoted when this fires, as they were when the merge ran inside
+            # the mutex -- only the mutex differs (held then, released now),
+            # and this lane has no batch rollback, so the observable outcome at
             # `chain_forecast_execution.py:946` is the same either way.
             phase = getattr(error, "phase", None)
             if phase is None:
@@ -231,19 +231,9 @@ def _run_tree_batch_lock(target_root: Path) -> Iterator[int]:
     `_copyback_stage_run_trees` (`chain_forecast_execution.py:953`) catches only
     `RunTreeCopybackError`, and this lane sits on a stage the cycle reaches on
     the hot path, so a foreign exception type escaping from here would be an
-    uncaught exception there. It fires **at most once per cycle, never twice**,
-    by two different mechanisms. With no terminal stage configured the stage list
-    keeps both `parse` and `state_save_qc`, and the gate
-    `_stage_should_copyback_run_trees` (`chain_forecast_execution.py:931-934`)
-    is what admits only `parse`. Under
-    `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc` -- what node-22
-    runs (`infra/env/compute.example:185`, `infra/env/README.md:288`) -- the gate
-    admits `state_save_qc` instead, and `stages_through`'s special case
-    (`chain_stages.py:75-79`) drops `parse` from the stage list entirely, so in
-    that configuration `parse` is not even reached. Across both configurations
-    the gate admits exactly one of the two. (A terminal of `forecast` or earlier
-    reaches neither and runs this lane zero times; "at most once" is the exact
-    claim, not "exactly once".)
+    uncaught exception there. How often this lane acquires, and how that sizes
+    the deadline, is stated once beside
+    `copyback_guard.DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS`.
 
     Accepted consequence, recorded rather than hidden: that handler
     re-raises as `OrchestratorError` from inside the `result_status ==

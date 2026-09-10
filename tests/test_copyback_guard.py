@@ -22,6 +22,9 @@ what makes the concurrency rows deterministic without subprocesses.
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import logging
 import os
 import shutil
 import stat
@@ -383,10 +386,8 @@ def test_a_restrictive_umask_does_not_make_a_writer_fail_against_its_own_lock_fi
 def test_the_deadline_defaults_to_nine_hundred_seconds() -> None:
     """900 s, sized against the measured hold rather than the hook's position.
 
-    2.2 GB per acquisition at 62 MB/s is ~36 s, and
-    `_stage_should_copyback_run_trees` acquires twice per cycle, so 900 s admits
-    ~24 acquisitions ~= 12 concurrent execution units against the 2 of live
-    steady state. 300 s admitted only ~4 and left a replay pass short.
+    2.2 GB per acquisition at 62 MB/s is ~36 s; the acquisition count the budget
+    was derived from is stated beside the constant itself.
     """
 
     assert DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS == 900.0
@@ -568,6 +569,99 @@ def test_the_raw_acquire_release_pair_round_trips(tmp_path: Path) -> None:
 
     with copyback_batch_lock(root, timeout_seconds=5):
         pass
+
+
+class _ReleaseSentinel(Exception):
+    """The caller's own in-flight failure, deliberately not an `OSError`."""
+
+
+def _fail_the_release(monkeypatch: pytest.MonkeyPatch, held: list[int], *, at: str) -> None:
+    """Inject one `OSError` into the release of the fds recorded in `held`.
+
+    Selective on purpose: `copyback_guard.os` and `copyback_guard.fcntl` are the
+    global modules, so a blanket patch would break pytest's own descriptors. The
+    real call always runs first, so the fd is genuinely closed either way.
+    """
+
+    real_flock = fcntl.flock
+    real_close = os.close
+
+    def fake_flock(fd: int, operation: int) -> None:
+        real_flock(fd, operation)
+        if at == "unlock" and operation == fcntl.LOCK_UN and fd in held:
+            held.remove(fd)
+            raise OSError(errno.EIO, "injected unlock failure")
+
+    def fake_close(fd: int) -> None:
+        real_close(fd)
+        if at == "close" and fd in held:
+            held.remove(fd)
+            raise OSError(errno.EIO, "injected close failure")
+
+    monkeypatch.setattr(copyback_guard_module.fcntl, "flock", fake_flock)
+    monkeypatch.setattr(copyback_guard_module.os, "close", fake_close)
+
+
+@pytest.mark.parametrize("at", ["unlock", "close"])
+def test_a_failing_release_never_replaces_the_success_the_caller_already_computed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    at: str,
+) -> None:
+    """Releasing the lock must not be able to turn a completed batch into a failure.
+
+    `publisher._copyback_canonical_precip` releases in a `finally`, and Python
+    runs that after the return value is computed, so a raise there replaces the
+    `status: "ok"` summary of an already-committed publish with an `OSError` that
+    `publish_qdown_cycle` reports as `QDOWN_PUBLISH_FAILED`.
+    """
+
+    root = _real_root(tmp_path)
+    held: list[int] = []
+    _fail_the_release(monkeypatch, held, at=at)
+
+    with caplog.at_level(logging.WARNING, logger="packages.common.copyback_guard"):
+        # The raw pair, as the canonical-precip lane calls it.
+        fd = acquire_copyback_batch_lock(root, timeout_seconds=5)
+        held.append(fd)
+        release_copyback_batch_lock(fd)
+        # The context manager, as every other lane calls it.
+        with copyback_batch_lock(root, timeout_seconds=5) as managed_fd:
+            held.append(managed_fd)
+
+    assert [record.levelname for record in caplog.records] == ["WARNING", "WARNING"]
+    assert all(record.name == "packages.common.copyback_guard" for record in caplog.records)
+    # Both steps are attempted even when the first raises, so the flock is gone
+    # and the next writer is not locked out by the failed release.
+    release_copyback_batch_lock(acquire_copyback_batch_lock(root, timeout_seconds=1))
+
+
+@pytest.mark.parametrize("at", ["unlock", "close"])
+def test_a_failing_release_does_not_displace_the_callers_in_flight_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    at: str,
+) -> None:
+    """A release `OSError` would bypass every `except` arm the lanes actually have.
+
+    An `OSError` substituted for the in-flight failure is not a
+    `RunTreeCopybackError`, so it escapes `run_tree_copyback`'s two `except`
+    arms and reaches `chain_forecast_execution`'s `except RunTreeCopybackError`
+    as a foreign type.
+    """
+
+    root = _real_root(tmp_path)
+    held: list[int] = []
+    _fail_the_release(monkeypatch, held, at=at)
+
+    with pytest.raises(_ReleaseSentinel) as excinfo:
+        with copyback_batch_lock(root, timeout_seconds=5) as fd:
+            held.append(fd)
+            raise _ReleaseSentinel("the caller's own failure")
+
+    assert excinfo.type is _ReleaseSentinel
+    assert str(excinfo.value) == "the caller's own failure"
 
 
 # --- E8: the POSIX default-ACL boundary (#1631) ------------------------------
