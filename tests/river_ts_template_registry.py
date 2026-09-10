@@ -27,7 +27,7 @@ Executed forecast statements
 ---------------------------
 
 ``FORECAST_STORE_EXECUTIONS`` captures all eight spanning segment queries plus
-the known-run latest-product fallback, separately from the 12 raw ``REGISTRY``
+the known-run latest-product fallback, separately from the 13 raw ``REGISTRY``
 inputs. A composed store union is never passed wholesale to the narrow renderer.
 The capture harness remains in ``tests/test_river_ts_text_identity_cleanup.py``.
 Imports stay inside callables because the owning test modules import this
@@ -347,13 +347,16 @@ def _hydro_source(store: str) -> str:
     return _hydro_source_template(store)
 
 
-def _tile_sql(layer: str) -> Callable[[str], str]:
-    def source(_store: str) -> str:
-        from services.tiles.mvt import postgis_tile_sql
+def _hydro_national_identity_source(store: str) -> str:
+    from services.tiles.mvt import _hydro_national_identity_source_template
 
-        return postgis_tile_sql(layer)
+    return _hydro_national_identity_source_template(store)
 
-    return source
+
+def _hydro_national_data_source(store: str) -> str:
+    from services.tiles.mvt import _hydro_national_data_source_template
+
+    return _hydro_national_data_source_template(store)
 
 
 def _valid_times_branch(index: int) -> Callable[[str], str]:
@@ -389,15 +392,22 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         source=_hydro_source,
     ),
     TemplateEntry(
-        # One statement, three fact-table reads: the identity-existence probe and
-        # the two national legs' correlated lateral probes.
-        key="mvt:postgis_tile_sql_hydro_national",
+        key="mvt:hydro_national_identity_source",
         path="services/tiles/mvt.py",
         kind="statement",
         params="named",
-        expected_aids=11,
-        mentions=3,
-        source=_tile_sql("hydro-national"),
+        expected_aids=3,
+        mentions=1,
+        source=_hydro_national_identity_source,
+    ),
+    TemplateEntry(
+        key="mvt:hydro_national_data_source",
+        path="services/tiles/mvt.py",
+        kind="statement",
+        params="named",
+        expected_aids=4,
+        mentions=1,
+        source=_hydro_national_data_source,
     ),
     TemplateEntry(
         key="mvt:valid_times_named_identity",
@@ -476,6 +486,8 @@ ROUTED_SOURCE_KEYS = frozenset({
     "forecast_store:segment_rows_source",
     "forecast_store:latest_product_river_source",
     "mvt:postgis_tile_sql_hydro",
+    "mvt:hydro_national_identity_source",
+    "mvt:hydro_national_data_source",
 })
 
 #: Every production file the register covers, path-sorted (the block order).

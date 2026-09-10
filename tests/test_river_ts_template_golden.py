@@ -75,15 +75,23 @@ def test_the_golden_was_captured_at_the_change_base() -> None:
 def test_the_golden_covers_exactly_the_registered_entries() -> None:
     """Historical statements and live raw sources have distinct exact sets."""
     siblings = {entry.key for entry in REGISTRY} - ROUTED_SOURCE_KEYS
-    assert len(siblings) == 9
+    assert len(siblings) == 8
     assert set(GOLDEN["entries"]) == siblings | {
         "mvt:postgis_tile_sql_hydro",
+        "mvt:postgis_tile_sql_hydro_national",
         *(f"forecast_store:{label}" for label in FORECAST_STORE_SEGMENT_BLOCKS),
         "forecast_store:segment_identity_predicates",
         "forecast_store:latest_product_fallback",
     }
     assert {entry.key for entry in REGISTRY} == siblings | ROUTED_SOURCE_KEYS
-    assert len(REGISTRY) == 12
+    assert len(REGISTRY) == 13
+    assert ROUTED_SOURCE_KEYS == {
+        "forecast_store:segment_rows_source",
+        "forecast_store:latest_product_river_source",
+        "mvt:postgis_tile_sql_hydro",
+        "mvt:hydro_national_identity_source",
+        "mvt:hydro_national_data_source",
+    }
     assert len(GOLDEN["entries"]) == 20
     assert set(FORECAST_STORE_EXECUTIONS) == {
         *FORECAST_STORE_SEGMENT_BLOCKS, "latest_product_fallback",
@@ -137,6 +145,28 @@ def test_hydro_routed_registry_matches_the_authored_source(store) -> None:
     assert f"timeseries_store = '{opposite}'" not in rendered
     assert ("hydro.river_timeseries_legacy" in rendered) == (store == "legacy")
     assert "UNION ALL" not in rendered
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+@pytest.mark.parametrize("probe,aids", (("identity", 3), ("data", 4)))
+def test_national_routed_registry_matches_the_authored_source(store, probe, aids) -> None:
+    from services.tiles import mvt
+
+    entry = entry_by_key(f"mvt:hydro_national_{probe}_source")
+    factory = getattr(mvt, f"_hydro_national_{probe}_source_template")
+    raw = entry.source(store)
+    assert raw == factory(store)
+    assert raw.count(RIVER_TABLE) == 1
+    assert raw.count("transitional compressed-chunk pushdown aid, remove with #1342") == aids
+    rendered = render_river_ts_sql(raw, store).sql
+    opposite = "narrow" if store == "legacy" else "legacy"
+    assert f"lr.timeseries_store = '{store}'" in rendered
+    assert f"lr.timeseries_store = '{opposite}'" not in rendered
+    assert ("hydro.river_timeseries_legacy" in rendered) == (store == "legacy")
+    assert "UNION ALL" not in rendered
+    assert "LIMIT" not in rendered
+    with pytest.raises(ValueError, match="Unsupported river timeseries store"):
+        factory("legacy' OR true --")
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)

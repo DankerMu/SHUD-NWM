@@ -107,6 +107,7 @@ jobs:
               - 'tests/conftest.py'
               - 'tests/integration_helpers.py'
               - 'tests/fixtures/hydro_mvt_pre_store_f33441a2.sql'
+              - 'tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql'
               - 'tests/*integration*.py'
               - 'tests/**/*integration*.py'
               # #1913: the registry-import monolith is seven partitioned suites plus one
