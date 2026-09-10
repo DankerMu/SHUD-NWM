@@ -1175,6 +1175,26 @@ def test_the_template_golden_rule_is_globbed_on_the_capture_sha() -> None:
     )
 
 
+def test_select_tests_routes_the_frozen_hydro_sql_fixture_to_its_shape_owner() -> None:
+    selected = select_tests(["tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"], repo_root=Path("."))
+
+    assert selected == ["tests/test_hydro_display_mvt_scaling.py"]
+
+
+def test_frozen_hydro_sql_database_edge_deletion_is_unrescued() -> None:
+    target = "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"
+    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+
+    assert target in patterns, "a frozen-SQL-only diff must open the database lane through its exact literal"
+    # Delete the dedicated literal from the parsed database filter, not other lanes.
+    # Every surviving pattern must be checked: a broad fixture glob could rescue it.
+    remaining = patterns.copy()
+    remaining.remove(target)
+    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
+        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
+    )
+
+
 def test_select_tests_maps_the_other_two_read_path_surfaces_to_their_shape_pins() -> None:
     """The #1341 switch touches three production files; all three must select the pins.
 
