@@ -185,7 +185,7 @@ Seams under test:
 
 ## 4. #1895 — Controlled node-27 rollout and closure
 
-- [ ] 4.0 Merge child #2137 before any node-27 access. That atomic child owns the
+- [x] 4.0 Merge child #2137 before any node-27 access. That atomic child owns the
   executable G0 runbook contract; production pre-target census and C1-C3/G8
   Python owners and CLIs; C1-C3 schemas/examples/binders; bounded private receipt
   and file-publication primitives; the canonical readonly-validator
