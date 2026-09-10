@@ -4225,3 +4225,20 @@ core=235, rotated=270, phase=53, skipped=15. PR #2218 was another single clean
 round with zero candidates. As with PR #2215, defer a new human keep/cut call:
 there is no new multi-round evidence to resolve the recorded measurement
 limitations. The existing keep decision and seat policy remain unchanged.
+
+## Revisit — PR #2220 (issue #1981), 2026-09-10
+
+The post-merge audit reports 613 records (604 merged, nine terminal), with
+198 multi-round merged PRs and later-round attribution core=237, rotated=270,
+phase=57, skipped=15. These cumulative counters also include the independently
+merged PR #2144; their change from the previous revisit is not attributed to
+PR #2220 alone.
+
+PR #2220 contributed two independently confirmed first-round P1 findings
+(candidate-result schema parity and production CI selection). Its second
+comprehensive round and independent final sweep were clean, so it adds no
+later-round catch for or against lens rotation. The existing keep decision
+and seat caps remain unchanged. A new human keep/cut call is deferred: this
+PR supplies no new later-round attribution, and the mixed code/evidence/prose
+measurement limitations recorded above remain unresolved. Issue-delivery
+authorization is not authorization to narrow review policy.
