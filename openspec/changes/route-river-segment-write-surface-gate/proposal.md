@@ -24,14 +24,16 @@ The gate is therefore live, not latent: a PR that adds `UPDATE core.river_segmen
 
 `tests/test_select_ci_tests.py` gains meta-guards that derive the required root set from the scan's own source, so adding a sixth directory to the scan without wiring it here reddens by name.
 
-The routing shape is copied from #1656. **The derivation shape is not, and cannot be.** The timescale suite exposes a `_scan_roots()` FunctionDef whose final `return` is a tuple of `REPO_ROOT / <part>` `ast.BinOp`/`ast.Div` chains, and the #1656 meta-test's `_invariant_scan_roots()` walks exactly that node shape. The river-segment scan exposes a module-level binding instead:
+The routing shape is copied from #1656. **The derivation shape is not, and cannot be.** The timescale suite exposes a `_scan_roots()` FunctionDef whose final `return` is a tuple of `REPO_ROOT / "workers"` `ast.BinOp`/`ast.Div` chains, and the #1656 meta-test's `_invariant_scan_roots()` walks exactly that node shape. The river-segment scan exposes a module-level binding instead:
 
 ```python
 # tests/test_river_segment_write_surface_scan.py:48
 PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")
 ```
 
-whose value is a tuple of bare string constants, consumed at `:100` by `for directory in PRODUCTION_DIRS: root = REPO_ROOT / directory`. The #2185 derivation must locate that binding by target name and read its constants; reusing `_invariant_scan_roots()` or its `REPO_ROOT / <part>` walker would find nothing.
+whose value is a tuple of bare string constants, consumed at `:100` by `for directory in PRODUCTION_DIRS: root = REPO_ROOT / directory`. The #2185 derivation must locate that binding by target name and read its constants; reusing `_invariant_scan_roots()` or its `REPO_ROOT / "workers"` walker would find nothing.
+
+Locating it by walking `tree.body` for `ast.Assign`/`ast.AnnAssign` is not enough, and round 1 measured why: `PRODUCTION_DIRS += ("db",)` yields module-level node types `['Assign', 'AugAssign']` and exactly **one** binding under that collection, so the derivation returns the stale five-element tuple, which still equals the selector constant — nothing reds while the scan walks six directories. The shipped derivation therefore collects every `ast.Name` store of the identifier anywhere in the module (`ast.walk`), requires exactly one, and requires that one to be a module-level `Assign`/`AnnAssign` it can read. That also closes the module-level `if some_flag: PRODUCTION_DIRS = (...)` and `for PRODUCTION_DIRS in ...:` shapes, neither of which is a direct child of `tree.body`. A rebind producing no `ast.Name` store at all (`globals()["PRODUCTION_DIRS"] = ...`) stays out of reach; the backstop for it is the scan's own runtime non-vacuity assertion at `tests/test_river_segment_write_surface_scan.py:123`.
 
 ## 3. Measured blast radius and cost
 
@@ -71,7 +73,7 @@ apps/__init__.py    base: []    candidate: ['tests/test_river_segment_write_surf
 
 The flip is deliberate and is the direction the pin's own record anticipates. `tests/test_select_ci_tests.py:5417-5428` states the seven params are "pins, NOT endorsements", with "the remaining classes belong to a future route-A/B (selector-widening or empty-selection-fails) decision". This change is that selector-widening for one of them, so it also modifies the archived requirement that pinned the class — see the `MODIFIED Requirements` block in the spec delta. Adding only new requirements while leaving `openspec/specs/ci-contract-baseline/spec.md:188-197` asserting an empty selection for this class would leave the permanent spec self-contradictory, and `openspec validate --strict` would not catch it: it checks structure, not cross-requirement consistency.
 
-The trade is stated rather than buried, with its actual mechanism. Before: such a path selected nothing, `count=0`, so `.github/workflows/ci.yml:389-390` ran the whole-tree collect-only zero-assertion smoke with a loud warning annotation. After: `count=1`, so `ci.yml:354` takes the targeted branch and runs one suite carrying four real assertions, and the collect-only smoke does not run. Neither carve-out re-arms it: `meta_guard_only` is false (the one element is not the selector meta-guard suite), and `collection_smoke_required` is false both before and after, because neither the selector source nor its suite is in such a diff. Measured on both selectors:
+The trade is stated rather than buried, with its actual mechanism. Before: such a path selected nothing, `count=0`, so `.github/workflows/ci.yml:389-390` ran the whole-tree collect-only zero-assertion smoke with a loud warning annotation. After: `count=1`, so `ci.yml:354` takes the targeted branch and runs one suite carrying four real tests, and the collect-only smoke does not run. Neither carve-out re-arms it: `meta_guard_only` is false (the one element is not the selector meta-guard suite), and `collection_smoke_required` is false both before and after, because neither the selector source nor its suite is in such a diff. Measured on both selectors:
 
 ```
 base  apps/__init__.py  count=0  meta_guard_only=false  collection_smoke_required=false
@@ -88,7 +90,7 @@ The absorption is **not** uniform, and the fixture says so because an implemente
 
 | shape | count | absorption |
 |---|---|---|
-| `select_tests(...) == <exact list/set>` | 28 | add `tests/test_river_segment_write_surface_scan.py` to the expected set |
+| `select_tests(...) == an exact list or set` | 28 | add `tests/test_river_segment_write_surface_scan.py` to the expected set |
 | `assert fields["count"] == "2"` (`tests/test_select_ci_tests.py:5634`) | 1 | change the count string to `"3"`; the redrun diff is literally `- 2 / + 3` |
 | the `py-under-apps-frontend` empty-selection pin (`tests/test_select_ci_tests.py:5457`) | 1 | move the param out and replace it with a positive assertion |
 
@@ -137,4 +139,9 @@ Not selected: `security-perf` — the change adds 4 tests / ~2s to backend Pytho
 
 ## 8. Deviations
 
-None yet.
+Full text, with the measurements behind each, is in `tasks.md` §6 (D1–D11). Summary:
+
+- **D1–D5 (implementation, at `776cbec5`)**: 2.9's placement anchors moved; 3.1's "28 exact-set expectations" was low by two because a fourth assertion shape at `tests/test_select_ci_tests.py:701` was not classified by the AST pass; 2.5's negative probe had to be a literal because the obvious derivation yields a probe that legitimately selects the scan; the verifier's 4.7 clause was re-scoped by AST after a leftmost-match false pass; the verifier's 4.11 clause gained comment/whitespace normalization.
+- **D6–D7 (round-1 fix pass, spec shape)**: the delta's first ADDED requirement became a MODIFIED extension of the archived `Tree-scanning invariant suites MUST follow every scanned source root`, and three further archived requirements are now MODIFIED. A mechanical sweep of every scenario in every archived spec found 11 selection-shaped scenarios naming a gaining path; 4 use `emits exactly` and were falsified, all under `openspec/specs/ci-contract-baseline/spec.md:909` and `:958`. `:637` needed no change — its scenario already carries the "unless another requirement explicitly adds a supplemental oracle" clause.
+- **D8 (round-1 fix pass, dropped scenario)**: the `MODIFIED` block for `Empty targeted-test selection MUST be loudly self-identifying` had silently dropped `#### Scenario: selector-development PRs fire the flag honestly`, because the authoring brief said the archived requirement spans `:139-215` when it spans `:139-225`. Restored verbatim, and Evidence Floor clause 4.16 now checks scenario carry-over mechanically for every MODIFIED requirement.
+- **D9–D11 (round-1 fix pass, content)**: the derivation's binding collection was widened as described in §2; the narrowed empty-selection class sentence was wrong in both directions (`db/**` `.py` is not empty; `.agents/**` was missing from the enumeration) and both are corrected with a new pinning scenario; and the hardcoded "four executed assertions" was removed from the permanent spec.

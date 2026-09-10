@@ -10539,22 +10539,53 @@ def test_write_surface_scan_literal_anchors_to_the_selector_constant() -> None:
 
 # The write-surface scan's roots, read from the scan's OWN module-level
 # PRODUCTION_DIRS binding (the authority) rather than frozen a second time.
-# Derivation shape: collect EVERY module-level binding of that name -- both
-# `ast.Assign` and `ast.AnnAssign`, since the house style annotates such
-# constants -- require exactly one, and read its tuple/list of string constants.
+# Derivation shape, in two stages. First collect EVERY `ast.Name` store of that
+# name ANYWHERE in the module -- plain assignment, annotated assignment (the
+# house style annotates such constants), augmented assignment, `for` target,
+# `with ... as`, walrus and comprehension targets all produce one, at any
+# nesting depth -- and require exactly one. Then require that one store to be a
+# module-level `ast.Assign`/`ast.AnnAssign`, and read its tuple/list of string
+# constants. (The scan's own `for directory in PRODUCTION_DIRS` is a Load, not
+# a Store, so it does not count: the tracked scan has exactly one store.)
 #
-# Collecting every binding and requiring exactly one is load-bearing, not
+# Collecting every store and requiring exactly one is load-bearing, not
 # defensive: a first-match read would return the stale five-element tuple under
 # a legal rewrite such as `PRODUCTION_DIRS = PRODUCTION_DIRS + ("db",)`, that
 # tuple still equals the selector constant, so nothing would red while the scan
 # actually walked six directories. The scan's own non-vacuity assertion cannot
 # catch that either -- at runtime its binding and its scanned set still agree.
+# Walking the whole module rather than `tree.body` is what reaches the rebinds
+# a body-only scan never descends into -- `PRODUCTION_DIRS += ("db",)`, an
+# `if <cond>:` rebind, `for PRODUCTION_DIRS in ...:` -- each of which is the
+# same silent staleness in a different spelling.
+#
+# Residual limit, recorded rather than papered over: a rebind that produces no
+# `ast.Name` store at all -- `globals()["PRODUCTION_DIRS"] = ...`,
+# `setattr(sys.modules[__name__], "PRODUCTION_DIRS", ...)` -- is out of this
+# derivation's reach. The backstop for that shape is the scan's OWN runtime
+# non-vacuity assertion at
+# tests/test_river_segment_write_surface_scan.py:123, which compares the set of
+# scanned top-level directories against `set(PRODUCTION_DIRS)` -- and it is a
+# backstop only for a rebind placed AFTER `_LITERALS = _sql_literals()` runs at
+# that module's :110. One placed above it is walked by the scan itself, leaving
+# binding and scanned set in agreement exactly as noted above, and nothing
+# catches it.
 #
 # This is NOT the shape _invariant_scan_roots() uses above: that suite exposes a
 # `_scan_roots` FunctionDef returning `REPO_ROOT / <part>` BinOp chains, and its
 # walker would find nothing here. Only the ROUTING shape is shared with #1656.
 def _write_surface_scan_dirs(path: str = WRITE_SURFACE_SCAN_PATH) -> tuple[str, ...]:
     tree = _parse_tracked(path)
+    stores = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "PRODUCTION_DIRS" and isinstance(node.ctx, ast.Store)
+    ]
+    assert len(stores) == 1, (
+        f"{path}: expected exactly one store of PRODUCTION_DIRS anywhere in the module, got "
+        f"{len(stores)} at lines {sorted(node.lineno for node in stores)}"
+    )
+
     bindings: list[ast.expr | None] = []
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -10566,7 +10597,10 @@ def _write_surface_scan_dirs(path: str = WRITE_SURFACE_SCAN_PATH) -> tuple[str, 
         if any(isinstance(target, ast.Name) and target.id == "PRODUCTION_DIRS" for target in targets):
             bindings.append(node.value)
 
-    assert len(bindings) == 1, f"{path}: expected exactly one module-level PRODUCTION_DIRS binding, got {len(bindings)}"
+    assert len(bindings) == 1, (
+        f"{path}: the single PRODUCTION_DIRS store is not a module-level assignment the "
+        f"derivation can read (module-level Assign/AnnAssign bindings found: {len(bindings)})"
+    )
     value = bindings[0]
     shape = ast.dump(value) if value is not None else "an annotation with no value"
     assert isinstance(value, ast.Tuple | ast.List), (
@@ -10782,18 +10816,71 @@ def test_write_surface_derivation_rejects_a_double_production_dirs_binding(
         _write_surface_scan_dirs()
 
 
+def test_write_surface_derivation_rejects_nonlinear_rebinds_of_production_dirs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2185 derivation robustness: three rebind shapes the shipped
+    # `tree.body`-only derivation walked straight past. `PRODUCTION_DIRS +=
+    # (...)` is an AugAssign; an `if <cond>:` rebind lives inside the `If`
+    # node's body; a `for PRODUCTION_DIRS in ...:` target lives inside the
+    # `For` node. None of the three is a module-level `Assign`/`AnnAssign`, so
+    # the derivation kept returning the stale five-element tuple -- which still
+    # equals the selector constant, so nothing red -- while the scan really
+    # walked six directories. Each fixture gets its own directory so the parses
+    # cannot share a `_parse_tracked` key.
+    for case, source in (
+        (
+            "augmented",
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\n'
+            'PRODUCTION_DIRS += ("db",)\n',
+        ),
+        (
+            "conditional",
+            "import os\n\n"
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\n'
+            'if os.environ.get("NHMS_X"):\n'
+            '    PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts", "db")\n',
+        ),
+        (
+            "loop-rebind",
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\n'
+            'for PRODUCTION_DIRS in [("db",)]:\n'
+            "    pass\n",
+        ),
+    ):
+        monkeypatch.chdir(_write_scan_fixture(tmp_path / case, source))
+        with pytest.raises(AssertionError, match="PRODUCTION_DIRS"):
+            _write_surface_scan_dirs()
+
+
 def test_write_surface_derivation_rejects_an_unreadable_production_dirs_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # #2185 derivation robustness: a binding the derivation cannot read must
     # fail loudly naming PRODUCTION_DIRS, never return an empty root set that
-    # would make every later assertion vacuously true. Two shapes: a computed
-    # value, and no module-level binding of that name at all. Each fixture gets
-    # its own directory so the two parses cannot share a `_parse_tracked` key.
+    # would make every later assertion vacuously true. Four shapes: a computed
+    # value; no module-level binding of that name at all; and two where the
+    # module's ONLY `ast.Name` store of PRODUCTION_DIRS is not a module-level
+    # `Assign`/`AnnAssign` -- a lone `+=` (AugAssign) and a lone rebind nested
+    # in an `if` body. Those last two are the single-store shapes: the
+    # store-count guard sees exactly one store and passes them through, so the
+    # module-level-binding guard is the ONLY thing standing between them and an
+    # `IndexError` on the empty binding list. Without these two cases that
+    # guard could be deleted with every test in this suite still green. Each
+    # fixture gets its own directory so the parses cannot share a
+    # `_parse_tracked` key.
     for case, source in (
         ("computed", 'PRODUCTION_DIRS = tuple(sorted({"apps", "services"}))\n'),
         ("absent", 'SCANNED_DIRS = ("apps", "services")\n'),
+        ("lone-augmented", 'PRODUCTION_DIRS += ("db",)\n'),
+        (
+            "lone-nested",
+            "import os\n\n"
+            'if os.environ.get("NHMS_X"):\n'
+            '    PRODUCTION_DIRS = ("apps", "services")\n',
+        ),
     ):
         monkeypatch.chdir(_write_scan_fixture(tmp_path / case, source))
         with pytest.raises(AssertionError, match="PRODUCTION_DIRS"):
