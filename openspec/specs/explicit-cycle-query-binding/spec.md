@@ -36,4 +36,3 @@ The repair SHALL NOT change the four-lane set, query window, warmup plus twenty 
 #### Scenario: Existing downstream consumers accept the repaired record
 - **WHEN** a valid named shipping record flows through lane binding, freeze/re-observation, SQL sampling, receipt validation, and publication tests
 - **THEN** existing evidence fields and comparisons remain valid, all local contract tests pass, and no local result is labeled as node-27 live PASS
-
