@@ -4280,8 +4280,8 @@ unchanged; issue-delivery authorization does not authorize policy narrowing.
 The post-merge audit reports 620 records (611 merged, nine terminal), while the
 rotation sample and attribution remain exactly unchanged: 199 multi-round
 merged PRs, core=237, rotated=270, phase=57, skipped=15. The three newly
-accounted merges are PR #2221 and PR #2229 (fixture-none, zero rounds) plus PR
-#2231 (one clean high-tier round, zero candidates); none can add a multi-round
+accounted merges are PR #2221 and PR #2229 (fixture-none, zero rounds) plus
+PR #2231 (one clean high-tier round, zero candidates); none can add a multi-round
 sample or a later-round catch.
 
 A new human keep/cut call is therefore deferred: the audit is repeating the
