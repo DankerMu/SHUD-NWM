@@ -75,10 +75,12 @@ def test_the_golden_was_captured_at_the_change_base() -> None:
 def test_the_golden_covers_exactly_the_registered_entries() -> None:
     """Historical statements and live raw sources have distinct exact sets."""
     siblings = {entry.key for entry in REGISTRY} - ROUTED_SOURCE_KEYS
-    assert len(siblings) == 8
+    assert len(siblings) == 6
     assert set(GOLDEN["entries"]) == siblings | {
         "mvt:postgis_tile_sql_hydro",
         "mvt:postgis_tile_sql_hydro_national",
+        "mvt:valid_times_named_identity",
+        "mvt:valid_times_any_identity",
         *(f"forecast_store:{label}" for label in FORECAST_STORE_SEGMENT_BLOCKS),
         "forecast_store:segment_identity_predicates",
         "forecast_store:latest_product_fallback",
@@ -91,6 +93,8 @@ def test_the_golden_covers_exactly_the_registered_entries() -> None:
         "mvt:postgis_tile_sql_hydro",
         "mvt:hydro_national_identity_source",
         "mvt:hydro_national_data_source",
+        "mvt:valid_times_named_identity",
+        "mvt:valid_times_any_identity",
     }
     assert len(GOLDEN["entries"]) == 20
     assert set(FORECAST_STORE_EXECUTIONS) == {

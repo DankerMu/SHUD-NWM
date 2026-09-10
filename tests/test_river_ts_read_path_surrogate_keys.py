@@ -44,14 +44,22 @@ correlated values are per-loop constants, so they additionally carry
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from packages.common import display_coverage
 from packages.common.river_ts_render import fact_table_text_identity_columns, render_river_ts_sql
 from services.production_closure.scale_validation import QUERY_TARGETS
-from services.tiles.mvt import _mvt_tile_order_by, postgis_tile_sql
+from services.tiles.mvt import (
+    _mvt_tile_order_by,
+    _valid_times_any_source_template,
+    _valid_times_named_source_template,
+    postgis_tile_sql,
+    valid_times_for_layer,
+)
 from tests.river_ts_template_registry import NON_TEMPLATE_MENTIONS, REGISTRY, assert_marker_census
 from tests.test_river_ts_text_identity_cleanup import _river_table_mentions
 from tests.test_sql_shape_helpers import (
@@ -60,7 +68,6 @@ from tests.test_sql_shape_helpers import (
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     outer_predicates,
     sql_from_python,
-    sql_literals,
 )
 from tests.test_sql_shape_helpers import assert_text_fact_columns as _assert_text_fact_columns
 
@@ -221,13 +228,14 @@ def test_variable_predicates_are_enum_range_matches_not_casts_on_every_switched_
         "hydro tile": _source_cte("hydro"),
         "national tile": _source_cte("hydro-national"),
         "national identity probe": _identity_stats_cte("hydro-national"),
-        # Tail anchor is the NEXT function, not `_valid_time_discovery` (which
-        # is defined further down): the wider slice over-spans into
-        # `national_discharge_valid_times` and `_coverage_datetime`, so a cast
-        # smuggled into either would be attributed to `valid_times_for_layer`
-        # here. Same anchor as `_valid_times_branch_sql` below and as
-        # tests/test_migrations.py.
-        "valid_times": _slice(MVT_SOURCE, "def valid_times_for_layer", "def national_discharge_valid_times"),
+        **{
+            f"valid_times {form} {store}": render_river_ts_sql(factory(store), store).sql
+            for form, factory in (
+                ("named", _valid_times_named_source_template),
+                ("any", _valid_times_any_source_template),
+            )
+            for store in ("legacy", "narrow")
+        },
         "existence probe": _slice(
             HYDRO_DISPLAY_SOURCE,
             "def _require_hydro_mvt_source_identity",
@@ -559,71 +567,110 @@ def test_national_output_and_ordering_stay_on_restored_text_expressions() -> Non
 # ---------------------------------------------------------------------------
 
 
-def _valid_times_branch_sql() -> tuple[str, str]:
-    """The named-identity and no-identity SQL of ``valid_times_for_layer``.
-
-    Extracted through Python's parser, not by slicing text: the function's
-    prose comments contain apostrophes, and a raw SQL tokenizer run over them
-    silently swallows the queries (see the oracle module's self-tests).
-    """
-    valid_times = _slice(MVT_SOURCE, "def valid_times_for_layer", "def national_discharge_valid_times")
-    literals = sql_literals(valid_times)
-    assert len(literals) == 2, literals
-    named, no_named = literals
-    return named, no_named
-
-
-def test_valid_times_named_identity_branch_pairs_every_pushdown_aid_with_its_key() -> None:
-    """The #1378 shape: strict key prefix of 000051, plus the transitional aids.
-
-    This is the exact query node-27 measured flipping to a 598,280-cost full
-    decompression when it ran on keys alone, so the pairing is pinned here on
-    the unqualified spelling the single-table query uses.
-    """
-    named, _no_named = _valid_times_branch_sql()
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_valid_times_named_identity_branch_pairs_every_pushdown_aid_with_its_key(store: str) -> None:
+    """The four-column discovery-index prefix survives each physical store."""
+    named = render_river_ts_sql(_valid_times_named_source_template(store), store).sql
     outer = outer_predicates(named)
-
-    # #1980 re-pin: the aid moved off the `WHERE` line onto its own `AND` line
-    # under its marker, so the `WHERE` line now carries the KEY predicate and
-    # the aid follows it. The pairing these substrings exist to pin — aid and
-    # counterpart in one conjunction, separated by exactly one `AND` — is
-    # unchanged; only which of the two comes first is. Conjunct order within one
-    # AND-chain is what the golden oracle
-    # (tests/test_river_ts_template_golden.py) explicitly does NOT preserve, and
-    # what it does preserve is asserted there for every registered template.
-    assert "WHERE run_key = AND run_id = :run_id" in outer
-    assert "AND river_network_version_id = :river_network_version_id AND river_network_version_key =" in outer
-    assert "AND variable = :variable AND variable_e =" in outer
-    # basin_version_id has no sanctioned text partner: key only.
-    assert "AND basin_version_key = AND" in outer
-    assert "ORDER BY valid_time DESC" in outer
+    assert "SELECT h.run_key FROM hydro.hydro_run h" in named
+    assert f"WHERE h.run_id = :run_id AND h.timeseries_store = '{store}'" in named
+    assert "WHERE run_key =" in outer
+    assert "AND basin_version_key =" in outer
+    assert "AND river_network_version_key =" in outer
+    assert "AND variable_e =" in outer
+    if store == "legacy":
+        assert "WHERE run_key = AND run_id = :run_id" in outer
+        assert "AND river_network_version_id = :river_network_version_id AND river_network_version_key =" in outer
+        assert "AND variable = :variable AND variable_e =" in outer
+    assert fact_table_text_identity_columns(named) == (
+        frozenset(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) if store == "legacy" else frozenset()
+    )
     for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
         assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
 
 
-def test_valid_times_no_named_identity_branch_also_filters_the_enum_column() -> None:
-    """The unnamed branch has no production caller, but it is inside the boundary.
-
-    Leaving it on ``variable = :variable`` alone would violate the delta's
-    "keys are the row-selection authority" wording and would silently start
-    returning NULL-key rows that the named branch excludes.
-    """
-    _named, no_named = _valid_times_branch_sql()
-    outer = outer_predicates(no_named)
-
-    assert "WHERE variable_e = (" in no_named
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_valid_times_no_named_identity_branch_also_filters_the_enum_column(store: str) -> None:
+    """Any identity has run-key/store authority, never user identity filters."""
+    no_named = render_river_ts_sql(_valid_times_any_source_template(store), store).sql
+    assert "WHERE ts.variable_e = (" in no_named
     assert ENUM_VARIABLE_RESOLUTION in no_named
-    # Whole-query equality: this branch is short enough to pin exactly, which
-    # is the strongest form of "no predicate crept in".
+    assert "WHERE e::text = :variable" in no_named
+    outer = outer_predicates(no_named)
+    table = "hydro.river_timeseries_legacy" if store == "legacy" else "hydro.river_timeseries"
+    aid = "AND ts.variable = :variable " if store == "legacy" else ""
     assert outer == (
-        "SELECT DISTINCT valid_time FROM hydro.river_timeseries "
-        "WHERE variable_e = AND variable = :variable "
-        "ORDER BY valid_time DESC LIMIT :limit"
+        f"SELECT ts.valid_time FROM {table} ts WHERE ts.variable_e = "
+        f"{aid}AND EXISTS ( SELECT 1 FROM hydro.hydro_run h "
+        f"WHERE h.run_key = ts.run_key AND h.timeseries_store = '{store}' )"
     )
-    # No identity predicate at all on this branch, text or key — it is the
-    # "any run" discovery shape and must not grow one by accident.
-    for column in ("run_id", "run_key", *FORBIDDEN_TEXT_FACT_COLUMNS):
+    assert fact_table_text_identity_columns(no_named) == (
+        frozenset({"variable"}) if store == "legacy" else frozenset()
+    )
+    for column in (
+        "run_id", "basin_version_key", "river_network_version_key",
+        "river_network_version_id", "status", "active", "run_display_coverage",
+        *FORBIDDEN_TEXT_FACT_COLUMNS,
+    ):
         assert re.search(rf"\b{column}\b", outer) is None, column
+
+
+def test_valid_times_for_layer_capture_session_preserves_outer_limit_semantics_for_named_and_any_identity() -> None:
+    class _Session:
+        def __init__(self) -> None:
+            self.executions: list[tuple[str, dict[str, Any]]] = []
+
+        def execute(self, statement: Any, params: dict[str, Any]) -> _Session:
+            self.executions.append((str(statement), params))
+            return self
+
+        def mappings(self) -> _Session:
+            return self
+
+        def all(self) -> list[dict[str, datetime]]:
+            return [
+                {"valid_time": datetime(2026, 6, 1, hour, tzinfo=UTC)}
+                for hour in (2, 1, 0)
+            ]
+
+    for run_id, factory in (
+        ("selected-run", _valid_times_named_source_template),
+        (None, _valid_times_any_source_template),
+    ):
+        session = _Session()
+        discovery = valid_times_for_layer(
+            session, "discharge", run_id=run_id,
+            basin_version_id="selected-basin", river_network_version_id="selected-network", limit=2,
+        )
+        assert len(session.executions) == 1
+        sql, params = session.executions[0]
+        normalized = " ".join(sql.split())
+        prefix = "SELECT DISTINCT valid_time FROM ( "
+        suffix = " ) source_rows ORDER BY valid_time DESC LIMIT :limit"
+        assert normalized.startswith(prefix)
+        assert normalized.endswith(suffix)
+        arms = normalized[len(prefix):-len(suffix)].split(" UNION ALL ")
+        assert len(arms) == 2
+        for arm, store in zip(arms, ("legacy", "narrow"), strict=True):
+            raw = factory(store)
+            assert re.search(r"\b(?:DISTINCT|ORDER|LIMIT|UNION)\b", raw) is None
+            rendered = render_river_ts_sql(raw, store).sql
+            assert arm == " ".join(rendered.split())
+            assert f"h.timeseries_store = '{store}'" in arm
+            assert fact_table_text_identity_columns(rendered) == (
+                (frozenset(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) if run_id is not None else frozenset({"variable"}))
+                if store == "legacy" else frozenset()
+            )
+        for operator in ("SELECT DISTINCT", "ORDER BY", "LIMIT", "UNION ALL"):
+            assert normalized.count(operator) == 1
+        assert params == {
+            "run_id": run_id, "basin_version_id": "selected-basin",
+            "river_network_version_id": "selected-network", "variable": "q_down", "limit": 3,
+        }
+        assert discovery.valid_times == ["2026-06-01T01:00:00Z", "2026-06-01T02:00:00Z"]
+        assert discovery.limit == 2
+        assert discovery.observed_count == 3
+        assert discovery.truncated is True
 
 
 def test_existence_probe_switches_to_keys_without_touching_its_404_contract() -> None:

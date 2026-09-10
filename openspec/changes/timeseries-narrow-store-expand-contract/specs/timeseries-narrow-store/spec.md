@@ -128,6 +128,11 @@ Every reader of the river fact table SHALL keep one store-parameterized SQL temp
 #### Scenario: Limited discovery applies its semantic operators once
 - **WHEN** either valid-time discovery branch may read runs from both stores
 - **THEN** its legacy and narrow fact-row branches are unioned below one outer `DISTINCT valid_time`, descending order and `LIMIT :limit`, so `sample_limit + 1` and caller-side truncation are unchanged
+- **AND** named branches bind the requested run and store in their run-key authority lookup, while any-identity branches associate each fact run key with the matching store without adding user identity or coverage filters; safe enum lookup and empty unknown-identity/enum behavior remain unchanged
+
+#### Scenario: Discovery retains newest samples before returning ascending values
+- **WHEN** either named or any-identity `valid_times_for_layer` call uses sample_limit two and its captured SQL returns three distinct instants T2, T1, T0 in descending order
+- **THEN** the query binds limit three, the response retains T1 and T2 in ascending order, observed_count is three and truncated is true; sorting the whole sample before truncating is not equivalent
 
 #### Scenario: Coverage unions only its river fact-row CTE
 - **WHEN** display coverage refresh scans candidate runs from both stores

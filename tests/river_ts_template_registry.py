@@ -8,8 +8,8 @@ makes the oracles exhaustive rather than anecdotal:
 * every entry is rendered for BOTH stores by the shape oracles, so a template
   that cannot survive the narrow rendering is red in the PR that writes it, not
   in the migration window;
-* the frozen I1 golden retains its 20 historical keys. Nine unchanged entries
-  still compare against current raw inputs; the three routed sources have
+* the frozen I1 golden retains its 20 historical keys. Six unchanged entries
+  still compare against current raw inputs; the seven routed sources have
   separate routing and executed-query semantic owners;
 * **registry closure** — for every production file, the canonical-table mentions
   of that file's entries plus its declared non-template mentions must equal the
@@ -359,26 +359,16 @@ def _hydro_national_data_source(store: str) -> str:
     return _hydro_national_data_source_template(store)
 
 
-def _valid_times_branch(index: int) -> Callable[[str], str]:
-    """One of ``valid_times_for_layer``'s two branches (fixture decision 1).
+def _valid_times_named_source(store: str) -> str:
+    from services.tiles.mvt import _valid_times_named_source_template
 
-    The function selects between them with an inline conditional, so they are two
-    registered templates: the named-identity branch carries three aids, the
-    no-identity branch one, and a store-rendering that only ever saw the first
-    would leave the second unproven.
-    """
+    return _valid_times_named_source_template(store)
 
-    def source(_store: str) -> str:
-        from tests.test_sql_shape_helpers import sql_literals
 
-        mvt_source = (REPO_ROOT / "services" / "tiles" / "mvt.py").read_text(encoding="utf-8")
-        start = mvt_source.index("def valid_times_for_layer")
-        end = mvt_source.index("def national_discharge_valid_times", start)
-        literals = sql_literals(mvt_source[start:end])
-        assert len(literals) == 2, literals
-        return literals[index]
+def _valid_times_any_source(store: str) -> str:
+    from services.tiles.mvt import _valid_times_any_source_template
 
-    return source
+    return _valid_times_any_source_template(store)
 
 
 MVT_ENTRIES: tuple[TemplateEntry, ...] = (
@@ -416,7 +406,7 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         params="named",
         expected_aids=3,
         mentions=1,
-        source=_valid_times_branch(0),
+        source=_valid_times_named_source,
     ),
     TemplateEntry(
         key="mvt:valid_times_any_identity",
@@ -425,7 +415,7 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         params="named",
         expected_aids=1,
         mentions=1,
-        source=_valid_times_branch(1),
+        source=_valid_times_any_source,
     ),
 )
 
@@ -488,6 +478,8 @@ ROUTED_SOURCE_KEYS = frozenset({
     "mvt:postgis_tile_sql_hydro",
     "mvt:hydro_national_identity_source",
     "mvt:hydro_national_data_source",
+    "mvt:valid_times_named_identity",
+    "mvt:valid_times_any_identity",
 })
 
 #: Every production file the register covers, path-sorted (the block order).
