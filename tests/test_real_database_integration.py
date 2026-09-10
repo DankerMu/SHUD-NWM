@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -214,14 +214,14 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
 
 def test_real_schema_api_and_postgis_spatial_smoke(
     throwaway_database_url: str,
-    post_expand_forecast_database: Callable[[Sequence[str]], None],
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     apply_migrations_from_zero(throwaway_database_url)
     object_root = tmp_path / "object-store"
     seed_issue_126_data(throwaway_database_url, object_root=object_root)
-    post_expand_forecast_database(())
+    post_expand_forecast_database({})
     set_integration_env(throwaway_database_url, object_root, monkeypatch)
     pipeline_routes._engine.cache_clear()
 
@@ -1443,14 +1443,15 @@ def test_three_day_chunk_migration_preserves_existing_chunks_and_only_changes_ne
 
 
 @pytest.mark.parametrize(
-    "narrow_run_ids",
-    [(), (FORECAST_RUN_ID,), (HINDCAST_RUN_ID,), (FORECAST_RUN_ID, HINDCAST_RUN_ID)],
+    "store_overrides",
+    [{}, {FORECAST_RUN_ID: "narrow"}, {HINDCAST_RUN_ID: "narrow"},
+     {FORECAST_RUN_ID: "narrow", HINDCAST_RUN_ID: "narrow"}],
     ids=["legacy", "narrow-forecast", "narrow-history", "narrow"],
 )
 def test_real_history_window_excludes_old_points_without_shortening_forecasts(
     throwaway_database_url: str,
-    post_expand_forecast_database: Callable[[Sequence[str]], None],
-    narrow_run_ids: Sequence[str],
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+    store_overrides: Mapping[str, str],
 ) -> None:
     from datetime import timedelta
 
@@ -1517,7 +1518,7 @@ def test_real_history_window_excludes_old_points_without_shortening_forecasts(
         # All text-era seed writes finish before this test-only transition.
         # Opposite-store points differ in time and value; all four assignments
         # must preserve the same literal public history/forecast window results.
-        post_expand_forecast_database(narrow_run_ids)
+        post_expand_forecast_database(store_overrides)
 
         store = PsycopgForecastStore(throwaway_database_url)
         parameters = {

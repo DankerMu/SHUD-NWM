@@ -3145,11 +3145,56 @@ def _mutated_benchmark_bundle(tmp_path: Path, mutate: Any) -> dict[str, Any]:
     return bundle
 
 
-def test_curve_binding_count_must_match_positional_placeholders(tmp_path: Path) -> None:
-    bundle = _mutated_benchmark_bundle(
-        tmp_path, lambda benchmark: benchmark["queries"][0]["binding"]["bound_parameters"].pop()
-    )
-    with pytest.raises(evidence.EvidenceError, match="positional binding"):
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "missing",
+        "extra",
+        "duplicate",
+        "misnamed",
+        "value-drift",
+        "short-values",
+        "non-string",
+        "empty",
+        "order",
+        "positional",
+    ],
+)
+def test_curve_binding_requires_exact_named_owner_values(tmp_path: Path, tamper: str) -> None:
+    bundle = _bundle(tmp_path)
+    terminal = evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
+    assert terminal["verdict"] == "PASS_TASK_4_5"
+    document = _read_ref(bundle["benchmarks"]["evidence"])
+    query = document["queries"][0]
+    names = query["binding"]["parameter_names"]
+    values = query["binding"]["bound_parameters"]
+    if tamper == "missing":
+        names.pop()
+        values.pop()
+    elif tamper == "extra":
+        names.append("unused")
+        values.append("unused")
+    elif tamper == "duplicate":
+        names.append(names[0])
+        values.append(values[0])
+    elif tamper == "misnamed":
+        names[names.index("issue_time")] = "start_time"
+    elif tamper == "value-drift":
+        values[names.index("scenario_ids")] = ["different-scenario"]
+    elif tamper == "short-values":
+        values.pop()
+    elif tamper == "non-string":
+        names[0] = []
+    elif tamper == "empty":
+        names[0] = ""
+    elif tamper == "order":
+        names.reverse()
+        values.reverse()
+    else:
+        query["query_text"] = query["query_text"].replace("%(issue_time)s", "%s")
+        query["query_sha256"] = hashlib.sha256(query["query_text"].encode()).hexdigest()
+    bundle["benchmarks"]["evidence"] = _json_ref(tmp_path, "named-binding-tamper.json", document)
+    with pytest.raises(evidence.EvidenceError):
         evidence.verify_bundle(bundle, receipt_schema=RECEIPT_SCHEMA, verifier_head_sha=VERIFIER_HEAD)
 
 

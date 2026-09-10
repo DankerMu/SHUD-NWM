@@ -8,9 +8,9 @@ makes the oracles exhaustive rather than anecdotal:
 * every entry is rendered for BOTH stores by the shape oracles, so a template
   that cannot survive the narrow rendering is red in the PR that writes it, not
   in the migration window;
-* the frozen I1 golden retains its 20 historical keys. Its ten non-forecast
-  entries still compare against current raw inputs; I2's two new forecast raw
-  sources have separate routing and nine executed-query semantic owners;
+* the frozen I1 golden retains its 20 historical keys. Nine unchanged entries
+  still compare against current raw inputs; the three routed sources have
+  separate routing and executed-query semantic owners;
 * **registry closure** — for every production file, the canonical-table mentions
   of that file's entries plus its declared non-template mentions must equal the
   file's census. An unregistered read site is therefore red, which is the only
@@ -341,6 +341,12 @@ PUBLISHER_ENTRIES: tuple[TemplateEntry, ...] = (
 # ---------------------------------------------------------------------------
 
 
+def _hydro_source(store: str) -> str:
+    from services.tiles.mvt import _hydro_source_template
+
+    return _hydro_source_template(store)
+
+
 def _tile_sql(layer: str) -> Callable[[str], str]:
     def source(_store: str) -> str:
         from services.tiles.mvt import postgis_tile_sql
@@ -380,7 +386,7 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
         params="named",
         expected_aids=3,
         mentions=1,
-        source=_tile_sql("hydro"),
+        source=_hydro_source,
     ),
     TemplateEntry(
         # One statement, three fact-table reads: the identity-existence probe and
@@ -465,6 +471,12 @@ REGISTRY: tuple[TemplateEntry, ...] = (
     *MVT_ENTRIES,
     *PARSER_ENTRIES,
 )
+
+ROUTED_SOURCE_KEYS = frozenset({
+    "forecast_store:segment_rows_source",
+    "forecast_store:latest_product_river_source",
+    "mvt:postgis_tile_sql_hydro",
+})
 
 #: Every production file the register covers, path-sorted (the block order).
 REGISTERED_TEMPLATE_PATHS: tuple[str, ...] = tuple(dict.fromkeys(entry.path for entry in REGISTRY))

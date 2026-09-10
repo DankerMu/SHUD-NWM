@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
 import sys
 import threading
@@ -147,10 +148,12 @@ def _bounded_connection_cleanup(deadline: _Deadline, *connections: Any) -> None:
 
 class _RecordingCursor:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.calls: list[tuple[str, Mapping[str, Any]]] = []
 
-    def execute(self, statement: str, parameters: Sequence[Any]) -> None:
-        self.calls.append((statement, tuple(parameters)))
+    def execute(self, statement: str, parameters: Mapping[str, Any]) -> None:
+        if not isinstance(parameters, Mapping):
+            raise BenchmarkCaptureError("production curve SQL requires named bindings")
+        self.calls.append((statement, dict(parameters)))
 
     def fetchall(self) -> list[dict[str, Any]]:
         return []
@@ -261,30 +264,24 @@ def _curve_query_and_binding(
     if len(primary) != 1:
         raise BenchmarkCaptureError("production curve path did not yield exactly one primary SQL call")
     query_text, parameters = primary[0]
-    # #1442: the curve query resolves the caller's text identity to surrogate
-    # keys inside the statement, so the segment id binds twice (segment-key
-    # resolution plus the transitional text pushdown aid design D10.7 restored)
-    # and the network id three times — once for the segment-key resolution
-    # (core.river_segment's primary key is (segment, network)), once as its own
-    # transitional text aid, once for its own key resolution. The values are
-    # still exactly the three text identities the caller supplied; only the
-    # placeholder count moved.
-    names = [
-        "basin_version_id",
-        "river_segment_id",
-        "river_network_version_id",
-        "river_segment_id",
-        "river_network_version_id",
-        "river_network_version_id",
-        "issue_time",
-        "start_time",
-        "end_time",
-        "source_or_scenario_tokens",
-        "scenario_tokens",
-    ]
-    if query_text.count("%s") != len(parameters) or len(names) != len(parameters):
-        raise BenchmarkCaptureError("production curve SQL positional binding shape changed")
-    return query_text, names, parameters
+    placeholder_names = set(re.findall(r"(?<!%)%\(([^)]+)\)s", query_text))
+    if (
+        re.search(r"(?<!%)%s", query_text)
+        or placeholder_names != {
+            "basin_version_id",
+            "end_time",
+            "issue_time",
+            "river_network_version_id",
+            "river_segment_id",
+            "scenario_ids",
+            "scenario_tokens",
+        }
+        or any(not isinstance(name, str) or not name for name in parameters)
+        or placeholder_names != set(parameters)
+    ):
+        raise BenchmarkCaptureError("production curve SQL named binding coverage changed")
+    names = sorted(parameters)
+    return query_text, names, tuple(parameters[name] for name in names)
 
 
 def _named_to_pyformat(statement: str) -> str:
@@ -706,7 +703,7 @@ def capture_benchmark_phase(
                     connect=connect,
                     database_url=database_url,
                     statement=curve_query,
-                    parameters=curve_parameters,
+                    parameters=dict(zip(parameter_names, curve_parameters, strict=True)),
                     result_kind="curve",
                     deadline=deadline,
                 ),

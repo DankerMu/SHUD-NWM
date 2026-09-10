@@ -992,6 +992,8 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_qhh_latest_fallback_pushdown.py",
             # #1442 added the zero-text-identity oracle for this file's nine
             # registered statements.
@@ -1013,6 +1015,18 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
         }
     )
     assert set(CORE_SMOKE_TESTS) <= set(selected)
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["packages/common/forecast_store.py", "services/tiles/mvt.py", "apps/api/routes/hydro_display.py"],
+)
+def test_benchmark_production_owners_select_both_binding_consumers(source: str) -> None:
+    selected = set(select_tests([source], repo_root=Path(".")))
+    assert {
+        "tests/test_node27_timeseries_compression_benchmark.py",
+        "tests/test_node27_timeseries_compression_live_evidence.py",
+    } <= selected
 
 
 def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
@@ -1158,6 +1172,26 @@ def test_the_template_golden_rule_is_globbed_on_the_capture_sha() -> None:
     """A re-capture at a new base renames the file; the route must survive it."""
     assert select_tests(["tests/fixtures/river_ts_templates_deadbee1.json"], repo_root=Path(".")) == select_tests(
         ["tests/fixtures/river_ts_templates_51f9d273.json"], repo_root=Path(".")
+    )
+
+
+def test_select_tests_routes_the_frozen_hydro_sql_fixture_to_its_shape_owner() -> None:
+    selected = select_tests(["tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"], repo_root=Path("."))
+
+    assert selected == ["tests/test_hydro_display_mvt_scaling.py"]
+
+
+def test_frozen_hydro_sql_database_edge_deletion_is_unrescued() -> None:
+    target = "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"
+    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+
+    assert target in patterns, "a frozen-SQL-only diff must open the database lane through its exact literal"
+    # Delete the dedicated literal from the parsed database filter, not other lanes.
+    # Every surviving pattern must be checked: a broad fixture glob could rescue it.
+    remaining = patterns.copy()
+    remaining.remove(target)
+    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
+        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
     )
 
 

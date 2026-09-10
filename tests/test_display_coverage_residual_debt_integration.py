@@ -33,7 +33,7 @@ Scope: what only a real database can answer.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -347,7 +347,7 @@ def _candidates(store: PsycopgForecastStore) -> list[dict[str, Any]]:
 def test_forced_fallback_binds_named_parameters_and_matches_the_fast_path(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
-    post_expand_forecast_database: Callable[[Sequence[str]], None],
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _prepared_database(throwaway_database_url)
     connection = _connect(throwaway_database_url)
@@ -358,7 +358,7 @@ def test_forced_fallback_binds_named_parameters_and_matches_the_fast_path(
     store = PsycopgForecastStore(throwaway_database_url)
 
     fast_rows = _candidates(store)
-    post_expand_forecast_database(())
+    post_expand_forecast_database({})
     monkeypatch.setattr(forecast_store, "_run_display_coverage_available", lambda _cursor: False)
     fallback_rows = _candidates(store)
 
@@ -542,10 +542,10 @@ def _legacy_parameters(source_id: str) -> tuple[Any, ...]:
 
 def _parity_pair(
     store: PsycopgForecastStore,
-    prepare_post_expand: Callable[[Sequence[str]], None],
+    prepare_post_expand: Callable[[Mapping[str, str]], None],
     *,
     source_id: str = SOURCE_ID,
-    narrow_run_ids: Sequence[str] = (),
+    store_overrides: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Compare frozen pre-expand and routed post-expand logical snapshots.
 
@@ -561,7 +561,7 @@ def _parity_pair(
     """
     with store._transaction() as cursor:
         legacy_rows = store._fetch_all(cursor, _LEGACY_FALLBACK_SQL, _legacy_parameters(source_id))
-    prepare_post_expand(narrow_run_ids)
+    prepare_post_expand(store_overrides if store_overrides is not None else {})
     with store._transaction() as cursor:
         new_rows = store._fetch_latest_qhh_display_candidates(
             cursor,
@@ -750,7 +750,7 @@ def _insert_null_forcing_run(connection: Any) -> str:
 def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candidate(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
-    post_expand_forecast_database: Callable[[Sequence[str]], None],
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
     store_kind: str,
 ) -> None:
     """The spec's "Result parity" scenario, against its literal baseline.
@@ -769,7 +769,7 @@ def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candid
     new_rows, legacy_rows = _parity_pair(
         PsycopgForecastStore(throwaway_database_url),
         post_expand_forecast_database,
-        narrow_run_ids=(FORECAST_RUN_ID,) if store_kind == "narrow" else (),
+        store_overrides={FORECAST_RUN_ID: "narrow"} if store_kind == "narrow" else {},
     )
 
     # Non-vacuity first: "equal" must not mean "both empty" or "both all-NULL".
@@ -796,7 +796,7 @@ def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candid
 def test_forced_fallback_matches_frozen_statement_with_null_forcing_version_candidate(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
-    post_expand_forecast_database: Callable[[Sequence[str]], None],
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """The `scan_forcing_version_id IS NULL` branch of the pushdown guards.
 
@@ -834,7 +834,7 @@ def test_forced_fallback_matches_frozen_statement_with_null_forcing_version_cand
     new_rows, legacy_rows = _parity_pair(
         PsycopgForecastStore(throwaway_database_url),
         post_expand_forecast_database,
-        narrow_run_ids=(null_forcing_run_id,),
+        store_overrides={null_forcing_run_id: "narrow"},
     )
 
     assert len(new_rows) == 1
@@ -851,7 +851,7 @@ def test_forced_fallback_matches_frozen_statement_with_null_forcing_version_cand
 def test_forced_fallback_matches_frozen_statement_on_empty_candidate_set(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
-    post_expand_forecast_database: Callable[[Sequence[str]], None],
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """No candidate: the pushdown short-circuits, the frozen text scans. Both empty.
 
@@ -875,7 +875,7 @@ def test_forced_fallback_matches_frozen_statement_on_empty_candidate_set(
 def test_parity_oracle_is_independent_of_the_production_candidate_sql(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
-    post_expand_forecast_database: Callable[[Sequence[str]], None],
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """Negative control: break production, parity MUST fail.
 
@@ -913,7 +913,7 @@ def test_parity_oracle_is_independent_of_the_production_candidate_sql(
 @pytest.mark.parametrize("newest_store", ["legacy", "narrow"])
 def test_public_forecast_selects_latest_and_pinned_runs_across_physical_stores(
     throwaway_database_url: str,
-    post_expand_forecast_database: Callable[[Sequence[str]], None],
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
     newest_store: str,
 ) -> None:
     _prepared_database(throwaway_database_url)
@@ -922,7 +922,7 @@ def test_public_forecast_selects_latest_and_pinned_runs_across_physical_stores(
         newest_run_id = _insert_null_forcing_run(connection)
     finally:
         connection.close()
-    post_expand_forecast_database((newest_run_id,) if newest_store == "narrow" else (FORECAST_RUN_ID,))
+    post_expand_forecast_database({newest_run_id if newest_store == "narrow" else FORECAST_RUN_ID: "narrow"})
     store = PsycopgForecastStore(throwaway_database_url)
     parameters = {
         "basin_version_id": BASIN_VERSION_ID,

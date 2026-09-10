@@ -105,6 +105,16 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **THEN** its actual timeseries_store selects exactly one rendered river_sample_rows source on the same transaction snapshot, while station coverage, strict identity, scan scalars and response fields remain unchanged; missing/null/unknown store is refused before heavy SQL, and an empty header still short-circuits
 - **AND** no constant legacy or missing-column fallback is introduced; this reader code is activated only with the I7 expand migration
 
+#### Scenario: Per-basin hydro MVT aggregates routed source rows once
+- **WHEN** a per-basin hydro tile is requested for a legacy or narrow run
+- **THEN** each source branch binds its store literal inside the existing run-key authority lookup and reads only its matching physical table with the same twelve output columns and named parameters; the two fact-row sources are unioned inside source_rows, below one unchanged MVT aggregate, statistics, geometry, ordering and budget pipeline
+- **AND** the consumer still receives one result row, with unchanged decoded feature properties/geometry and existing empty, invalid-property and over-budget outcomes; no store argument is added to the API
+
+#### Scenario: Benchmark consumers preserve current reader named bindings
+- **WHEN** the public curve owner emits named SQL parameters for benchmark capture
+- **THEN** capture preserves the actual parameter Mapping, records canonical unique name/value pairs in the existing receipt fields, and passes a Mapping to the database driver; repeated placeholders reuse one recorded value rather than restoring positional aliases
+- **AND** the verifier rejects missing, extra, duplicate, misnamed or value-drifted bindings while retaining exact production-query/source checks, the issue_time lower bound, the seven-day request and existing strict selected-chunk overlap guards; no other store lifecycle or production activation work is implied
+
 #### Scenario: Limited discovery applies its semantic operators once
 - **WHEN** either valid-time discovery branch may read runs from both stores
 - **THEN** its legacy and narrow fact-row branches are unioned below one outer `DISTINCT valid_time`, descending order and `LIMIT :limit`, so `sample_limit + 1` and caller-side truncation are unchanged
@@ -121,6 +131,7 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 #### Scenario: Reader transition activates with expand, not before
 - **WHEN** wave-2 reader changes have merged but the I7 maintenance-window deployment and expand migration have not run
 - **THEN** those transition statements are not deployed or executed against the pre-expand catalog; I7 deploys them together with the route column and `_legacy` table name
+- **AND** explicitly authorized verification may prepare a post-expand catalog in a fresh per-test disposable database, preserving frozen pre-transition comparisons and original assertions; unmigrated sibling tests keep their pre-expand isolation, and this is not production deployment, Timescale-plan or live-receipt evidence
 
 #### Scenario: Smoke reset clears both stores
 - **WHEN** `scripts/reset_qhh_smoke_db.py` deletes a legacy run
