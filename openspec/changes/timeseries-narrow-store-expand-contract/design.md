@@ -86,6 +86,8 @@ DDL 顺序（迁移 header 记账项）：`CREATE TABLE`（PK + 两 FK 内联）
 
    I3a/#1982 最小消费协议补修（2026-09-10 用户裁决）：MVT 选测暴露 #1981 具名 curve SQL 与 benchmark capture/live verifier 旧 `%s` 位置绑定协议的断点。允许同 PR 补齐这两个消费方的 capture、既有 name/value 数组序列化和严格具名验证；实际 psycopg 执行必须传 Mapping。仅这一绑定切换提前纳入 #1982，不提前实现 #1984 的其他 store 分支、计划门或生产操作。详见 `fixtures/I3a-1982.md` 的高风险证据生产/消费不变量。
 
+   I3b/#2206 执行口径：identity 与 data 是两种不同投影的 raw fact-row shape；data 模板只写一份，由两个 zoom probe 复用。原 national 整句不再作为 renderer 输入，live registry 改为两个真实 raw source（总数 12→13），历史二十项 golden 不重写。三个 combined LATERAL 各保留一次 probe LIMIT，identity EXISTS 的外层 LIMIT 与 0/1 结果不动。仅实际 tile 测试 opt in；含 baseline tile 后追加 rival/coverage 的 #2031 用例保留明确的冻结 SQL 基线阶段，最终请求才执行当前 routed SQL，详见 `fixtures/I3b-2206.md`。不引入生产 fallback 或为未迁移 coverage 增加 SQL 改写 wrapper。
+
 非模板面（同批处理）：`services/tile_publisher/publisher.py` 的 `_has_table` 前置在过渡期接受两个名字；`services/tile_publisher/forcing_copyback_backfill.py:314` 的 `required_columns` 按 store 分支（legacy 保 `variable`，narrow 只留键/枚举）；（`scripts/node27_autopipeline.py:1443-1451` 统计守卫的 IN-list 属 D7/任务 3.1，不在本批非模板面内）；`scripts/reset_qhh_smoke_db.py`、`scripts/summarize_qhh_smoke_results.py` 按 store 渲染（reset 对 legacy run 同时清 legacy 表）；`services/production_closure/scale_validation.py` 与 `scripts/node27_timeseries_compression_live_evidence.py` 的计划形状钉子按 store 分支。
 
 ### D6 legacy 重解析：fail-closed，走既有 decline 账本、tick rc=0、永久
