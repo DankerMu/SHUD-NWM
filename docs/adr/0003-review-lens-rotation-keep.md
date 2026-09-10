@@ -4289,3 +4289,20 @@ same already-recorded sample and the mixed code/evidence/prose measurement
 limitations remain unresolved. The existing keep decision and seat caps remain
 unchanged; the authorization to deliver #2227 does not authorize review-policy
 narrowing.
+
+## Revisit — PR #2233 (issue #2207), 2026-09-10
+
+The post-merge audit reports 621 records (612 merged, nine terminal) and
+200 multi-round merged PRs. Later-round attribution is unchanged:
+core=237, rotated=270, phase=57, skipped=15.
+
+PR #2233 contributes one two-round compact sample with zero candidates.
+Its second round rechecked an upstream integration after an append-only log
+conflict, not a finding-driven fix. Both rounds retained correctness+test-evidence
+and integration; the independent final review was clean. Provider-connectivity
+failures produced no verdict and are neither rounds nor review catches.
+
+A new human keep/cut call is deferred: this adds no later-round catch and does
+not resolve the mixed code/evidence/prose measurement limitations. The existing
+keep decision and seat caps remain unchanged; issue-delivery authorization does
+not authorize policy narrowing.
