@@ -156,10 +156,16 @@ def _require_lock_identity(path: Path, fd: int, *, root_uid: int) -> None:
         raise CopybackLockError("copyback batch lock must have mode 0600")
     euid = os.geteuid()
     if info.st_uid != euid or named.st_uid != euid:
-        # The first branch a real foreign-uid writer hits -- the lock file
-        # already exists and is owned by the root's owner -- so it is the first
-        # scene of a poisoning investigation and must name the same three facts
-        # the root-owner branch below does: both uids and the lock path.
+        # Reachable in the pre-existing-file direction only for euid 0 or under
+        # a test that patches `os.geteuid`: a non-root writer meeting a `0o600`
+        # lock file owned by someone else never gets here, because the
+        # `O_RDWR|O_NOFOLLOW` reopen after `O_CREAT|O_EXCL` fails `EACCES` first
+        # and surfaces through the generic `except OSError` below as
+        # `cannot acquire copyback batch lock <path>: [Errno 13] Permission
+        # denied` -- path, no uid. That `Permission denied` on the lock path is
+        # the real-world foreign-owner signal there, and the runbooks say so.
+        # When this branch *is* reached it still names all three facts the
+        # root-owner branch below does: both uids and the lock path.
         raise CopybackLockError(
             "copyback batch lock must be owned by the effective user: "
             f"effective uid {euid} does not own lock file uid {info.st_uid} at {path}"

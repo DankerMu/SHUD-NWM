@@ -2246,8 +2246,14 @@ ssh -p 32099 nwm@210.77.77.27 \
      条件是 **uid 相等**，不是「写者能写这个 root」：一个属主是别的账号、靠组位开放写
      的 root（例如容器 uid 在补充组里）会被**拒绝，而不是共享**——锁文件的属主锚定在
      root 的属主上。核查：`stat -c '%u %a %n' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"`
-     与写者的 `id -u` 对比；不相等则每次 copyback 都 fail closed，报错里会同时给出
-     两个 uid 和锁文件路径。
+     与写者的 `id -u` 对比；不相等则每次 copyback 都 fail closed。报错有两种形态，
+     都不是 timeout：
+     - **锁文件还不存在**、写者又不是 root 的属主 → 在创建之前就拒绝，报错里同时
+       给出两个 uid 和锁文件路径；
+     - **锁文件已存在且属主是别人** → `cannot acquire copyback batch lock <path>:
+       [Errno 13] Permission denied`，只有路径、没有 uid。这个 `Permission denied`
+       本身就是「属主不对」的信号；属主由下面的 `ls -ln <lock>` /
+       `stat -c '%u' <root>` 查出来。
    - **锁文件卡住时怎么处置**（只有两种情况，只有一种能动）：
      - **有活持有者**：`lsof <lock>` 或 `fuser -v <lock>` 打得出 pid → **不要动它**，
        等它结束或去查那个 writer 为什么卡住。

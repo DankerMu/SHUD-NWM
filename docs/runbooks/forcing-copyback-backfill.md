@@ -89,7 +89,11 @@ $NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock
   **uid 相等**，不是「写者能写这个 root」：属主是别的账号、只靠组位开放写的 root
   （例如容器 uid 在补充组里）会被**拒绝，而不是共享**——锁文件的属主锚定在 root 的属主上。
   核查 `stat -c '%u %a %n' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"` 与写者 `id -u` 是否相等；
-  不相等则每个 package 都会记 `copyback_lock_unavailable`，报错里同时给出两个 uid 和锁文件路径。
+  不相等则每个 package 都会记 `copyback_lock_unavailable`。报错有两种形态：锁文件还不存在时，
+  在创建之前就拒绝，同时给出两个 uid 和锁文件路径；锁文件已存在且属主是别人时，报的是
+  `cannot acquire copyback batch lock <path>: [Errno 13] Permission denied`——只有路径、没有 uid，
+  这个 `Permission denied` 本身就是属主不对的信号，属主用 `ls -ln <lock>` 与
+  `stat -c '%u' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"` 查。
 - 若某个 package 报 `category: copyback_lock_unavailable`，说明它没拿到锁（超时或锁文件被篡改），
   目标树本身完好无损，重跑即可。
 

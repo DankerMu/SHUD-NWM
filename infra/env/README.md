@@ -215,8 +215,16 @@ unit → EnvironmentFile table above is the authority.
     supplementary group, for example) is **refused, not shared**, because the
     lock file's owner is anchored to the root's owner. Check with
     `stat -c '%u %a %n' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"` and compare against
-    the writer's `id -u`; a mismatch fails every copyback closed with a message
-    naming both uids and the lock path.
+    the writer's `id -u`; a mismatch fails every copyback closed. The message
+    has two shapes, and neither is a timeout:
+    - **no lock file yet** and the writer is not the root's owner → refused
+      before the file is created, and the message names both uids and the lock
+      path;
+    - **lock file already there and owned by someone else** → `cannot acquire
+      copyback batch lock <path>: [Errno 13] Permission denied`, path only, no
+      uid. That `Permission denied` *is* the foreign-owner signal; the recovery
+      steps below (`ls -ln <lock>`, `stat -c '%u' <root>`) are what name the
+      owner.
   - **Recovering a stuck lock file.** Two cases, and only one of them is
     touchable:
     - a **live holder** — some process still holds the fd

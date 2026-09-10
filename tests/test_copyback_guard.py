@@ -259,12 +259,15 @@ def test_a_foreign_owned_lock_file_fails_closed(
 ) -> None:
     """A writer under another account fails closed instead of running unlocked.
 
-    This is the branch a real foreign-uid writer hits *first*: the lock file
-    already exists and is owned by the copyback root's owner, so the euid
-    compare refuses before the root-owner compare below is ever reached. It is
-    therefore the first scene of a poisoning investigation, and `design.md`
-    ("Single uid") promises every ownership refusal names both uids and the lock
-    path so recovery needs no second round trip.
+    The lock file already exists and is owned by the copyback root's owner, so
+    the euid compare refuses before the root-owner compare below is ever
+    reached. That compare is reachable in this direction only for euid 0 or --
+    as here -- under a patched `os.geteuid`: a real non-root writer meeting a
+    `0o600` file owned by someone else fails `EACCES` on the `O_RDWR` reopen and
+    gets `Permission denied` with the lock path and no uid, which is that
+    direction's foreign-owner signal (`design.md`, "Single uid"). What this test
+    pins is the branch's *message contract* where it is reachable: both uids and
+    the lock path, so recovery needs no second round trip.
     """
 
     root = _real_root(tmp_path)

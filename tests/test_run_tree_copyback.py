@@ -1502,7 +1502,15 @@ def test_run_tree_copyback_holds_the_shared_batch_mutex_for_its_whole_promote_re
 
     def gated_replace_tree(*, source: Path, target: Path, containment_root: Path) -> dict[str, Any]:
         summary = real_replace_tree(source=source, target=target, containment_root=containment_root)
-        if threading.current_thread() is main_thread and not promoting.is_set():
+        if threading.current_thread() is main_thread:
+            # One sample per main-thread promote, not just the first: this
+            # fixture drives three of them (the run tree at
+            # `run_tree_copyback.py:108`, then the referenced `forcing/` and
+            # `models/` trees inside the loop at `:112-131`), and gating only
+            # the first leaves the whole referenced-tree loop free to move out
+            # of the mutex region without any test noticing. Every sample must
+            # actually wait -- an unwaited `is_set()` probe reads False simply
+            # because the competitor has not woken from its flock poll yet.
             promoting.set()
             competitor_ran_inside_the_region.append(competitor_finished.wait(timeout=2))
         return summary
@@ -1533,7 +1541,12 @@ def test_run_tree_copyback_holds_the_shared_batch_mutex_for_its_whole_promote_re
 
     assert not thread.is_alive()
     assert competitor_errors == []
-    assert competitor_ran_inside_the_region == [False], "a competitor entered the promote region"
+    # Three samples, all False: the count pins that every promote was probed
+    # (drop one and the list shortens), the values pin that the mutex was held
+    # across all of them rather than only across the first.
+    assert competitor_ran_inside_the_region == [False, False, False], (
+        "a competitor entered the promote region"
+    )
     assert summary is not None and summary["status"] == "copied"
     # Serialized, and neither writer's tree was removed by the other.
     assert competitor_summaries[0]["status"] == "ok"
