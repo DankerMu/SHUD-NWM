@@ -3084,6 +3084,17 @@
           "rounds": 2
         }
       ]
+    },
+    "1982": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2225,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
     }
   }
 }
