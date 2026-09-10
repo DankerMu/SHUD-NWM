@@ -990,6 +990,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
         {
             *CORE_SMOKE_TESTS,
             "tests/test_forecast_api.py",
+            "tests/test_forecast_store_routing.py",
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",

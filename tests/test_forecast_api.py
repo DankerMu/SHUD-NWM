@@ -2736,7 +2736,9 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "FROM met.forcing_station_timeseries" not in candidate_cte
     assert "FROM hydro.river_timeseries" not in candidate_cte
     station_cte = statement[statement.index("station_sample_rows AS") : statement.index("river_sample_rows AS")]
-    hydro_cte = statement[statement.index("river_sample_rows AS") : statement.index("SELECT\n                cr.*")]
+    hydro_cte = statement[
+        statement.index("river_sample_rows AS") : statement.index("SELECT\n                cr.run_id,")
+    ]
     assert "JOIN candidate_runs cr" in statement
     assert "fst.basin_version_id = cr.basin_version_id" in station_cte
     assert "LOWER(fst.source_id) = LOWER(cr.source_id)" in station_cte

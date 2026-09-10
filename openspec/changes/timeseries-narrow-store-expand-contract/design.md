@@ -82,6 +82,8 @@ DDL 顺序（迁移 header 记账项）：`CREATE TABLE`（PK + 两 FK 内联）
 
 这些 wave-2 reader PR 可先合入代码，但**不得在 I7 expand 之前单独部署或执行 transition SQL**：pre-expand catalog 尚无 `timeseries_store` 与 `_legacy` 表。I7 维护窗口把累计 reader 代码与改名/路由列迁移一并部署；真实混合-store PostgreSQL 与 EXPLAIN 由 I7/I8 负责，wave-2 PR 只证明 caller-owned 形状和既有外部行为。
 
+   I2/#1981 测试边界补充（2026-09-10 用户裁决）：允许每测试独立创建/销毁的 CI 数据库准备真实 post-expand 两表与 store 列，以运行既有 reader integration assertions 和 store 区分性用例；冻结 pre-expand SQL 在同一逻辑数据快照的测试转换前执行。此授权不改变生产 schema、不提前开始 #1986、不替代 node-27 的 Timescale/EXPLAIN/live receipt。上述“不得执行 transition SQL”仍约束生产激活，不禁止显式隔离测试 fixture。
+
 非模板面（同批处理）：`services/tile_publisher/publisher.py` 的 `_has_table` 前置在过渡期接受两个名字；`services/tile_publisher/forcing_copyback_backfill.py:314` 的 `required_columns` 按 store 分支（legacy 保 `variable`，narrow 只留键/枚举）；（`scripts/node27_autopipeline.py:1443-1451` 统计守卫的 IN-list 属 D7/任务 3.1，不在本批非模板面内）；`scripts/reset_qhh_smoke_db.py`、`scripts/summarize_qhh_smoke_results.py` 按 store 渲染（reset 对 legacy run 同时清 legacy 表）；`services/production_closure/scale_validation.py` 与 `scripts/node27_timeseries_compression_live_evidence.py` 的计划形状钉子按 store 分支。
 
 ### D6 legacy 重解析：fail-closed，走既有 decline 账本、tick rc=0、永久

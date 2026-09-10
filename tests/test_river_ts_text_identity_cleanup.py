@@ -176,8 +176,12 @@ RIVER_TABLE = "hydro.river_timeseries"
 # * seed_demo.py 5 = the seed INSERT + two verification counts + the two
 #   human-readable count LABELS.
 # * parser.py 4 = probe, window, DELETE, INSERT.
-# * integration_helpers.py 3 = the dual-write INSERT + the cleanup DELETE +
-#   the #1640/#1654 min/max valid_time probe that bounds that DELETE.
+# * integration_helpers.py 8 = the original three (dual-write INSERT, cleanup
+#   DELETE, #1640/#1654 min/max valid_time probe) + five post-expand fixture
+#   mentions: schema rename, narrow CREATE, narrow INSERT, legacy copy source,
+#   legacy decoy UPDATE. The two DDL mentions are schema setup, not renderer
+#   input templates; real-DB forecast tests own the physical schema behavior.
+#   The copy/decoy SQL has its scoped key/enum owner below.
 RIVER_TABLE_CENSUS: dict[str, int] = {
     "packages/common/forecast_store.py": 3,
     "services/tile_publisher/publisher.py": 2,
@@ -187,7 +191,7 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "scripts/reset_qhh_smoke_db.py": 1,
     "db/seeds/seed_demo.py": 5,
     "workers/output_parser/parser.py": 4,
-    "tests/integration_helpers.py": 3,
+    "tests/integration_helpers.py": 8,
     # river_ts_render.py 2 = RIVER_TABLE and RIVER_TABLE_LEGACY. Two, not one,
     # because `_river_table_mentions` matches a PREFIX of the name (the `_legacy`
     # literal opens with the canonical one), not a whole identifier. Any third
@@ -1326,6 +1330,36 @@ def test_integration_helpers_delete_targets_the_run_key() -> None:
     assert len(probes) == 1
     assert "WHERE run_key IN (" in probes[0]
     _assert_no_text_identity_predicate(probes[0], "integration_helpers cleanup probe", resolves_keys_inline=True)
+
+
+def test_integration_helpers_post_expand_copy_and_decoys_use_keys_and_enums() -> None:
+    statements = _sql_constants(
+        module=("tests", "integration_helpers.py"),
+        function="post_expand_forecast_database",
+        needle="INSERT INTO hydro.river_timeseries",
+    )
+    assert len(statements) == 1
+    sql = re.sub(r"\s+", " ", statements[0]).strip()
+    copy, decoy, trailing = sql.split(";")
+    assert not trailing.strip()
+    assert "FROM hydro.river_timeseries_legacy rt JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in copy
+    assert "UPDATE hydro.river_timeseries_legacy rt" in decoy
+    assert "WHERE h.run_key = rt.run_key AND h.timeseries_store = 'narrow'" in decoy
+    for label, statement in (("fixture narrow copy", copy), ("fixture legacy decoy", decoy)):
+        _assert_no_text_identity_predicate(statement, label)
+        assert_text_fact_columns(statement, "rt", set(), label)
+    columns = re.search(r"INSERT INTO hydro\.river_timeseries\s*\(([^)]*)\)", copy)
+    assert columns is not None
+    assert {column.strip() for column in columns.group(1).split(",")} == {
+        "run_key", "basin_version_key", "river_network_version_key", "river_segment_key",
+        "valid_time", "lead_time_hours", "variable_e", "value", "unit_e", "quality_flag_e", "created_at",
+    }
+    assert "rt.*" not in copy
+    # Opposite-store time/value decoys make a wrong route observable; real-DB
+    # forecast tests own the resulting rows rather than duplicating DDL here.
+    assert "rt.valid_time + CASE WHEN h.timeseries_store = 'legacy'" in copy
+    assert "rt.value + CASE WHEN h.timeseries_store = 'legacy'" in copy
+    assert "SET value = rt.value + 10000, valid_time = rt.valid_time + INTERVAL '30 minutes'" in decoy
 
 
 # ---------------------------------------------------------------------------

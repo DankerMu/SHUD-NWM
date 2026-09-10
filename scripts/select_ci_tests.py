@@ -1126,10 +1126,10 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # templates. Every SQL-shape oracle in the group derives its coverage
         # FROM it — which templates exist, how many aids each carries, how many
         # times each file names the fact table — so an edit here silently changes
-        # what four suites assert without touching any of them. Its file-level
-        # importers are exactly the group, so the group is the consumer set.
+        # what four suites assert without touching any of them. The forecast
+        # store-routing suite also imports the register and must run on changes.
         "tests/river_ts_template_registry.py",
-        SQL_SHAPE_ORACLE_TESTS,
+        (*SQL_SHAPE_ORACLE_TESTS, "tests/test_forecast_store_routing.py"),
     ),
     PathTestRule(
         # #1913: the registry-import helper owns the former monolith's 19 support
@@ -2014,6 +2014,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "packages/common/forecast_store.py",
         (
             "tests/test_forecast_api.py",
+            "tests/test_forecast_store_routing.py",
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
