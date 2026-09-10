@@ -50,6 +50,7 @@ from scripts.select_ci_tests import (
     ISSUE1895_READINESS_C1_C2_C3_TESTS,
     ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
     ISSUE1895_READINESS_STORAGE_TESTS,
+    ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
@@ -12585,6 +12586,59 @@ def test_issue1895_performance_live_owner_selects_live_and_contract() -> None:
             "tests/test_issue1895_runbook_contract.py",
         ):
             assert suite in selected, f"{owner} selection lost {suite}"
+
+
+ISSUE2227_EXPLICIT_CYCLE_OWNER_TARGETS: dict[str, tuple[str, ...]] = {
+    "packages/common/node27_issue1895_query.py": (
+        ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
+        "tests/test_issue1895_readiness_performance.py",
+        *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+        "tests/test_issue1895_readiness_performance_publication.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "packages/common/node27_issue1895_performance_live.py": (
+        ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_readiness_performance.py",
+        *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+        "tests/test_issue1895_readiness_performance_publication.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+}
+
+
+def test_issue2227_explicit_cycle_owners_select_the_exact_focused_binding_contract() -> None:
+    for owner, expected in ISSUE2227_EXPLICIT_CYCLE_OWNER_TARGETS.items():
+        matching = [rule for rule in PATH_TEST_RULES if rule.pattern == owner]
+        assert len(matching) == 1, owner
+        assert matching[0].tests == expected, owner
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert set(expected) <= selected, owner
+
+
+def test_issue2227_explicit_cycle_each_owner_target_removal_reds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    for owner, expected in ISSUE2227_EXPLICIT_CYCLE_OWNER_TARGETS.items():
+        rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == owner)
+        assert ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST in rule.tests, owner
+        patched = tuple(
+            replace(
+                candidate,
+                tests=tuple(
+                    target for target in candidate.tests if target != ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST
+                ),
+            )
+            if candidate.pattern == owner
+            else candidate
+            for candidate in PATH_TEST_RULES
+        )
+        monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST not in selected, owner
+        assert set(expected[1:]) <= selected, owner
 
 
 def test_issue1895_performance_live_owner_rule_reds_when_removed(
