@@ -4032,3 +4032,260 @@ not overturn a 42-catch cumulative margin, and the measurement caveats above
 still apply. Worth noting for the next revisit: the counters are now moving
 again, and if later-round core catches continue to accumulate while rotated
 stays flat, the margin is the thing to re-read rather than the per-PR story.
+
+## 2026-09-09 revisit — PR #2196 (#2188, fixture `compact`)
+
+The audit flagged DECIDABLE with the counters moved for the first time in
+several revisits: `core=227` (was 226), `rotated=269`, `phase=53` over 193
+multi-round merged PRs (was 192). The increment is not from this PR. PR #2196
+was single-round, so it enters neither the multi-round denominator nor any
+later-round catch counter; the new core catch and the new denominator come from
+PR #2190 (#2033), merged from another worktree in the same window.
+
+PR #2196's own sample is again rotation-silent: its round-1 seats
+(correctness; test-evidence + spec-compliance) were the compact default mix
+with no rotated-in lens, and its single finding was raised independently by
+both seats, at P3 from correctness and P2 from spec-compliance. The independent
+verifier then narrowed it to P3 by refuting the premise the higher rating
+rested on. That is the paired-seat layout doing what it is meant to do at
+`compact`, and it is also a reminder that seat severity is a proposal, not a
+verdict.
+
+Decision unchanged: **keep rotation**. Rotated catches still exceed core
+catches cumulatively, though by a slightly narrower margin than at the previous
+revisit, and the measurement caveats above still apply. Next revisit on the
+audit's next flag or a maintainer override.
+
+## 2026-09-09 revisit — PR #2182 (#2141, fixture `high`)
+
+The audit again reports `core=227`, `rotated=269`, `phase=53` over 193
+multi-round merged PRs. PR #2182 completed in one comprehensive round, so it
+changes neither the multi-round denominator nor any later-round catch bucket.
+Round 1 used the complete high-fixture four-seat mix and returned zero candidate
+findings; the independent Phase 7 Gap Sweep was also clean. Therefore this PR
+adds no rotation signal in either direction.
+
+Its useful process signal sits before that metric: fixture review rejected four
+contract gaps before implementation, covering scalar-analysis ownership,
+schema-qualified left boundaries, whole-token alias containment, and actual
+balanced-close state. Those corrections are recorded in the implementation
+line's note but not counted as verifier verdicts or `gate_net_catch`, because no
+Phase 4.5 verification adjudicated them. That keeps the metric honest while
+preserving the fixture review's value in the audit trail.
+
+Decision unchanged: **keep rotation**. The cumulative rotated margin remains 42,
+the measurement caveats above still apply, and this single-round PR supplies no
+new evidence for revising the follow-up seat policy.
+
+## 2026-09-09 revisit — PR #2202 (#2082, fixture `compact`)
+
+The audit remains `core=227`, `rotated=269`, `phase=53` over 193 multi-round
+merged PRs. PR #2202 completed in one comprehensive round with the compact
+`correctness+test-evidence` seat clean and its independent Phase 7 Gap Sweep
+clean. It therefore changes neither the multi-round denominator nor any
+later-round catch bucket and adds no rotation signal.
+
+The single-round seat counters do move by one for correctness and test-evidence,
+but that is the per-lens cost/yield note, not the follow-up rotation experiment.
+This evidence-only PR also illustrates why those measures should stay separate:
+its load-bearing proof was a deliberately manual m25 mutation outside ordinary
+CI, while the comprehensive reviewer found no defect after that proof existed.
+
+Decision unchanged: **keep rotation**. The cumulative margin remains 42 and no
+new multi-round evidence justifies changing the follow-up seat policy.
+
+## 2026-09-09 revisit — PR #2199 (#2195, fixture `compact`)
+
+The audit moves to `core=230`, `rotated=270`, `phase=53` over 194 multi-round
+merged PRs. PR #2199 is the increment: +1 to the denominator, +3 core and +1
+rotated in the later-round buckets. The cumulative rotated margin narrows from
+42 to 40.
+
+This PR is worth reading as evidence because it is the first in this series
+where the rotated-in seat and the core seats caught the *same* defect. Its round
+2 seated `correctness`, `test-evidence+spec-compliance` and the rotated-in
+`invariant-state`, and all three independently found the P1: a guard added by
+the round-1 fix pass carried a name that made the change's own
+`-k "refresh_env"` single-test selector collect two tests. Triple redundancy on
+one finding is a cost signal against rotation at this fixture level, not for it
+— the rotated seat's unique contribution that round was a pair of P2 fixture
+inconsistencies, and its most useful output was arguably the measured
+*non-findings* (comment-length distribution, assertion-style counts, absence of
+duplication) that stopped three plausible style objections from being raised.
+
+Against that, the rotation experiment's premise held elsewhere: round 1's two
+verified coverage gaps both came from the `test-evidence` checklist, which is
+the seat the rotation policy exists to keep seating. Both were genuine — two
+independent verifiers confirmed them as coverage gaps rather than wording, one
+of them refuting its own reviewer's stated rationale while upholding the
+finding.
+
+The caveat this PR adds to the whole series: five of its eight catches were
+record-accuracy defects introduced by the fix for the previous round, not
+defects in the code under review, which was unchanged from round 1 and never
+found defective. Attributing those to a lens flatters every seat that sat a
+later round. A rotation metric that counts them cannot distinguish "this seat
+found a real defect" from "this seat found the orchestrator's bookkeeping
+error". That is a measurement limitation of `gate_net_catch` and the later-round
+buckets alike, and it argues for reading the margin as softer than its integer
+suggests.
+
+Decision unchanged: **keep rotation**. The margin is still positive at 40 and
+one PR with a triple-caught P1 does not overturn the policy. Flagged for the
+next revisit: if later-round catches keep concentrating in orchestrator
+record-accuracy rather than code defects, the rotation question is being
+measured on the wrong quantity and the metric should be split before the
+policy is revised.
+
+## Revisit — PR #2205 (issue #2098), 2026-09-09
+
+Counters: 195 multi-round merged PRs; later-round catches core=234, rotated=270,
+phase=53, skipped=15. Margin 40 → **36**. This PR contributed four core catches
+and zero rotated ones.
+
+The previous revisit flagged a condition for reopening the question: "if
+later-round catches keep concentrating in orchestrator record-accuracy rather
+than code defects, the rotation question is being measured on the wrong
+quantity." That condition did not merely recur here — it was the entire PR.
+Fourteen verified findings across three comprehensive rounds and a two-stage
+final review, and **not one landed in the rules, selections, or assertions**.
+Twelve sandboxed mutants showed no production-side regression escapes the new
+tests, and a whole-repo differential over 3585 tracked non-test paths found
+exactly two changed selections, both gain-only. The code was correct from its
+first commit and never found otherwise. Every defect was prose asserting
+something false about the code.
+
+Two facts here bear directly on the policy rather than on the metric.
+
+First, rounds 2 and 3 deliberately re-seated round 1's own lenses — no rotation
+at all — and round 2 still returned four verified defects. Those count as
+"core" and are why the margin narrowed. But they were not found because the
+lens was core; they were found because **the text under review had changed
+since round 1 looked at it**. The rotation metric buckets by lens identity and
+cannot see that. It therefore credits or debits rotation for an effect that is
+actually about artifact freshness. This is a second measurement defect,
+independent of the record-accuracy one already flagged, and it cuts the same
+way: the margin is softer than its integer suggests.
+
+Second, round 2's entire finding set was round 1's corrections applied
+incompletely — fixed in one file, left standing in another — and the final
+review then found two more overbroad superlatives plus a fabricated distinction
+from the precedent commit. No seat plan addresses that failure mode. It is not
+a lens-coverage problem; it is a problem of prose and code drifting apart
+across a repository where comments carry load-bearing rationale. Rotating
+lenses neither causes nor cures it.
+
+Decision unchanged: **keep rotation**. The margin remains positive and no
+evidence here shows rotation costing anything. But the flagged condition has now
+been met twice running, and the metric has acquired a second known distortion.
+Recommendation for whoever next revisits: do not revise the policy on the
+current numbers in either direction. Split `gate_net_catch` and the later-round
+buckets to distinguish (a) defects in code under review, (b) orchestrator
+record-accuracy defects, and (c) prose-versus-code drift, and re-derive the
+margin from (a) alone. On this PR, (a) is zero and the other two account for all
+fourteen — a decomposition the current single number cannot express.
+
+## Revisit — PR #2209 (issue #1980), 2026-09-09
+
+Counters: 196 multi-round merged PRs; later-round catches core=235, rotated=270,
+phase=53, skipped=15. Margin 36 → **35**. PR #2209 contributed one later-round
+core catch and no rotated or phase catch.
+
+That catch was not a defect in the OpenSpec change. Round 2 found that the PR
+body named a nonexistent 40-character commit ID which shared only the first
+eight characters with the real frozen head. The production diff in this PR was
+empty by design, and the only other verified finding was a round-1 gap in the
+future evidence contract. Round 3 was clean after both evidence defects were
+fixed. This is another sample of the measurement problem recorded in the
+previous two revisits: the current core/rotated buckets attribute evidence and
+record-accuracy defects as though they measured reviewer coverage of code.
+
+Decision unchanged: **keep rotation**. The rotated margin remains positive, but
+its integer value is not a sound basis for changing the seat policy until the
+three defect classes named above are separated. This revisit therefore records
+the required human decision without treating PR-body bookkeeping as evidence
+against rotation.
+
+## Revisit — PR #2215 (issue #2115), 2026-09-09
+
+The post-merge audit reports 196 multi-round PRs, with later-round catches
+core=235, rotated=270, phase=53 and skipped=15, unchanged from the preceding
+revisit. PR #2215 had one clean comprehensive round and no candidate findings,
+so it contributes no evidence about follow-up-round rotation.
+
+A new keep/cut decision is deferred: this single-round sample cannot resolve
+the measurement limitations already recorded above, and the user authorized
+issue delivery/merge rather than a review-policy change. The existing recorded
+keep decision remains in force; no reviewer seat or gate is narrowed.
+
+## Revisit — PR #2218 (issue #2148), 2026-09-09
+
+The audit reports 196 multi-round PRs and unchanged later-round attribution:
+core=235, rotated=270, phase=53, skipped=15. PR #2218 was another single clean
+round with zero candidates. As with PR #2215, defer a new human keep/cut call:
+there is no new multi-round evidence to resolve the recorded measurement
+limitations. The existing keep decision and seat policy remain unchanged.
+
+## Revisit — PR #2220 (issue #1981), 2026-09-10
+
+The post-merge audit reports 613 records (604 merged, nine terminal), with
+198 multi-round merged PRs and later-round attribution core=237, rotated=270,
+phase=57, skipped=15. These cumulative counters also include the independently
+merged PR #2144; their change from the previous revisit is not attributed to
+PR #2220 alone.
+
+PR #2220 contributed two independently confirmed first-round P1 findings
+(candidate-result schema parity and production CI selection). Its second
+comprehensive round and independent final sweep were clean, so it adds no
+later-round catch for or against lens rotation. The existing keep decision
+and seat caps remain unchanged. A new human keep/cut call is deferred: this
+PR supplies no new later-round attribution, and the mixed code/evidence/prose
+measurement limitations recorded above remain unresolved. Issue-delivery
+authorization is not authorization to narrow review policy.
+
+## Revisit — PR #2225 (issue #1982), 2026-09-10
+
+The post-merge audit reports 615 records (606 merged, nine terminal), with
+199 multi-round merged PRs and later-round attribution core=237, rotated=270,
+phase=57, skipped=15.
+
+PR #2225 added one independently confirmed first-round P1: working frozen-SQL
+CI edges lacked permanent exact-selection and unrescued-deletion regression
+owners. Two tests closed it; round 2 and the independent final gap sweep were
+clean. It therefore adds no later-round catch for or against rotation.
+
+A new human keep/cut call is deferred: this PR adds no later-round attribution
+and does not resolve the mixed code/evidence/prose measurement limitations
+recorded above. The existing keep decision and seat caps remain unchanged;
+issue-delivery authorization does not authorize a review-policy change.
+
+## Revisit — PR #2228 (issue #2206), 2026-09-10
+
+The post-merge audit reports 617 records (608 merged, nine terminal), with
+199 multi-round merged PRs and unchanged later-round attribution: core=237,
+rotated=270, phase=57, skipped=15.
+
+PR #2228 used the expanded three-seat first round and an independent final
+gap sweep; both returned no candidate findings. It adds neither a multi-round
+sample nor a later-round catch. Its initial validation repairs and final-head
+node-27 verification supplement are machine-gate work, not review net catches.
+
+A new human keep/cut call is deferred: this PR supplies no new later-round
+attribution and does not resolve the mixed code/evidence/prose measurement
+limitations recorded above. The existing keep decision and seat caps remain
+unchanged; issue-delivery authorization does not authorize policy narrowing.
+
+## Revisit — PR #2231 (issue #2227), 2026-09-10
+
+The post-merge audit reports 620 records (611 merged, nine terminal), while the
+rotation sample and attribution remain exactly unchanged: 199 multi-round
+merged PRs, core=237, rotated=270, phase=57, skipped=15. The three newly
+accounted merges are PR #2221 and PR #2229 (fixture-none, zero rounds) plus
+PR #2231 (one clean high-tier round, zero candidates); none can add a multi-round
+sample or a later-round catch.
+
+A new human keep/cut call is therefore deferred: the audit is repeating the
+same already-recorded sample and the mixed code/evidence/prose measurement
+limitations remain unresolved. The existing keep decision and seat caps remain
+unchanged; the authorization to deliver #2227 does not authorize review-policy
+narrowing.

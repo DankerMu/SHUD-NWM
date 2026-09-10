@@ -21,8 +21,9 @@ Scope: what only a real database can answer.
   bumping writer IS seen is asserted;
 * the #1413 pushdown fallback returns the same rows as the single-statement
   fallback it replaced (#1414). The baseline is the frozen pre-#1413 text in
-  ``tests/fixtures/legacy_qhh_fallback_pre_1413.sql``, executed on the SAME
-  snapshot as the production fallback, and compared row-by-row in order on the
+  ``tests/fixtures/legacy_qhh_fallback_pre_1413.sql``, captured before the
+  disposable database transitions to post-expand physical stores. The routed
+  facts preserve that logical snapshot. Rows are compared in order on the
   projected column set: the three #1442 surrogate-key columns are popped off the
   production rows and the popped set is ASSERTED, so a future extra column
   reddens the comparison instead of widening it. Comparing against the fast path
@@ -32,6 +33,7 @@ Scope: what only a real database can answer.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -60,6 +62,9 @@ from tests.integration_helpers import (
     apply_migrations_from_zero,
     insert_river_timeseries_dual_written,
     seed_issue_126_data,
+)
+from tests.integration_helpers import (
+    post_expand_forecast_database as post_expand_forecast_database,
 )
 
 pytestmark = pytest.mark.integration
@@ -342,6 +347,7 @@ def _candidates(store: PsycopgForecastStore) -> list[dict[str, Any]]:
 def test_forced_fallback_binds_named_parameters_and_matches_the_fast_path(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _prepared_database(throwaway_database_url)
     connection = _connect(throwaway_database_url)
@@ -352,6 +358,7 @@ def test_forced_fallback_binds_named_parameters_and_matches_the_fast_path(
     store = PsycopgForecastStore(throwaway_database_url)
 
     fast_rows = _candidates(store)
+    post_expand_forecast_database({})
     monkeypatch.setattr(forecast_store, "_run_display_coverage_available", lambda _cursor: False)
     fallback_rows = _candidates(store)
 
@@ -496,10 +503,7 @@ def test_out_of_band_write_without_updated_at_bump_backstop_visibility(
         observations = [_stale_run_ids(connection, [FORECAST_RUN_ID]) for _ in range(2)]
         assert observations[0] == observations[1]
         out_of_band_visible = bool(observations[0])
-        print(
-            "receipt[#1120 out-of-band write without updated_at bump]: "
-            f"backstop_sees_run={out_of_band_visible}"
-        )
+        print(f"receipt[#1120 out-of-band write without updated_at bump]: backstop_sees_run={out_of_band_visible}")
         # The contract the cron backstop comment now states: a writer that
         # mutates run data must bump updated_at, and then it IS seen.
         _execute(
@@ -538,14 +542,17 @@ def _legacy_parameters(source_id: str) -> tuple[Any, ...]:
 
 def _parity_pair(
     store: PsycopgForecastStore,
+    prepare_post_expand: Callable[[Mapping[str, str]], None],
     *,
     source_id: str = SOURCE_ID,
+    store_overrides: Mapping[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Run both fallbacks on ONE snapshot and return (production, frozen) rows.
+    """Compare frozen pre-expand and routed post-expand logical snapshots.
 
-    Both statements execute inside a single `store._transaction()` (REPEATABLE
-    READ, readonly), so a concurrent writer cannot make the two sides disagree
-    for reasons that have nothing to do with the SQL.
+    Capture the frozen result after all seed mutations, close its readonly
+    transaction, then transition this test's private database. There are no
+    concurrent writers; the fixture preserves authoritative facts and changes
+    only opposite-store decoys. No frozen SQL runs against the narrow catalog.
 
     The production rows are projected onto the frozen text's column set by
     popping `_NEW_ONLY_COLUMNS` and asserting the popped set, then the column
@@ -553,12 +560,14 @@ def _parity_pair(
     `==`-comparable.
     """
     with store._transaction() as cursor:
+        legacy_rows = store._fetch_all(cursor, _LEGACY_FALLBACK_SQL, _legacy_parameters(source_id))
+    prepare_post_expand(store_overrides if store_overrides is not None else {})
+    with store._transaction() as cursor:
         new_rows = store._fetch_latest_qhh_display_candidates(
             cursor,
             basin_id=BASIN_ID,
             source_id=source_id,
         )
-        legacy_rows = store._fetch_all(cursor, _LEGACY_FALLBACK_SQL, _legacy_parameters(source_id))
 
     for row in new_rows:
         popped = {key for key in _NEW_ONLY_COLUMNS if row.pop(key, _MISSING) is not _MISSING}
@@ -737,9 +746,12 @@ def _insert_null_forcing_run(connection: Any) -> str:
     return _NULL_FORCING_RUN_ID
 
 
+@pytest.mark.parametrize("store_kind", ["legacy", "narrow"])
 def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candidate(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+    store_kind: str,
 ) -> None:
     """The spec's "Result parity" scenario, against its literal baseline.
 
@@ -754,7 +766,11 @@ def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candid
         connection.close()
 
     monkeypatch.setattr(forecast_store, "_run_display_coverage_available", lambda _cursor: False)
-    new_rows, legacy_rows = _parity_pair(PsycopgForecastStore(throwaway_database_url))
+    new_rows, legacy_rows = _parity_pair(
+        PsycopgForecastStore(throwaway_database_url),
+        post_expand_forecast_database,
+        store_overrides={FORECAST_RUN_ID: "narrow"} if store_kind == "narrow" else {},
+    )
 
     # Non-vacuity first: "equal" must not mean "both empty" or "both all-NULL".
     assert len(new_rows) == 1
@@ -767,10 +783,20 @@ def test_forced_fallback_matches_frozen_pre_pushdown_statement_on_covered_candid
 
     assert new_rows == legacy_rows
 
+    # Exercise A9 at its public boundary too: reading the opposite store's
+    # half-hour decoys loses the common horizon and cannot return this product.
+    product = PsycopgForecastStore(throwaway_database_url).latest_qhh_display_product("GFS", basin_id=BASIN_ID)
+    assert product["run_id"] == FORECAST_RUN_ID
+    assert product["segment_count"] == 2
+    assert product["quality"]["river_sample_count"] == 4
+    assert product["river_valid_time_start"] == "2026-05-03T01:00:00Z"
+    assert product["river_valid_time_end"] == "2026-05-03T02:00:00Z"
+
 
 def test_forced_fallback_matches_frozen_statement_with_null_forcing_version_candidate(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """The `scan_forcing_version_id IS NULL` branch of the pushdown guards.
 
@@ -805,7 +831,11 @@ def test_forced_fallback_matches_frozen_statement_with_null_forcing_version_cand
         connection.close()
 
     monkeypatch.setattr(forecast_store, "_run_display_coverage_available", lambda _cursor: False)
-    new_rows, legacy_rows = _parity_pair(PsycopgForecastStore(throwaway_database_url))
+    new_rows, legacy_rows = _parity_pair(
+        PsycopgForecastStore(throwaway_database_url),
+        post_expand_forecast_database,
+        store_overrides={null_forcing_run_id: "narrow"},
+    )
 
     assert len(new_rows) == 1
     assert new_rows[0]["run_id"] == null_forcing_run_id
@@ -821,6 +851,7 @@ def test_forced_fallback_matches_frozen_statement_with_null_forcing_version_cand
 def test_forced_fallback_matches_frozen_statement_on_empty_candidate_set(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """No candidate: the pushdown short-circuits, the frozen text scans. Both empty.
 
@@ -833,6 +864,7 @@ def test_forced_fallback_matches_frozen_statement_on_empty_candidate_set(
     monkeypatch.setattr(forecast_store, "_run_display_coverage_available", lambda _cursor: False)
     new_rows, legacy_rows = _parity_pair(
         PsycopgForecastStore(throwaway_database_url),
+        post_expand_forecast_database,
         source_id="no_such_source",
     )
 
@@ -843,6 +875,7 @@ def test_forced_fallback_matches_frozen_statement_on_empty_candidate_set(
 def test_parity_oracle_is_independent_of_the_production_candidate_sql(
     throwaway_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     """Negative control: break production, parity MUST fail.
 
@@ -867,7 +900,7 @@ def test_parity_oracle_is_independent_of_the_production_candidate_sql(
     monkeypatch.setattr(forecast_store, "_QHH_LATEST_CANDIDATE_RUNS_SQL", mutant)
     monkeypatch.setattr(forecast_store, "_run_display_coverage_available", lambda _cursor: False)
 
-    new_rows, legacy_rows = _parity_pair(PsycopgForecastStore(throwaway_database_url))
+    new_rows, legacy_rows = _parity_pair(PsycopgForecastStore(throwaway_database_url), post_expand_forecast_database)
 
     # The frozen side is untouched by the monkeypatch — it is a file, not the
     # module's SQL — so it still sees the covered candidate.
@@ -875,3 +908,39 @@ def test_parity_oracle_is_independent_of_the_production_candidate_sql(
     assert new_rows != legacy_rows
     if new_rows:
         assert new_rows[0]["display_end_time"] != legacy_rows[0]["display_end_time"]
+
+
+@pytest.mark.parametrize("newest_store", ["legacy", "narrow"])
+def test_public_forecast_selects_latest_and_pinned_runs_across_physical_stores(
+    throwaway_database_url: str,
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+    newest_store: str,
+) -> None:
+    _prepared_database(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        newest_run_id = _insert_null_forcing_run(connection)
+    finally:
+        connection.close()
+    post_expand_forecast_database({newest_run_id if newest_store == "narrow" else FORECAST_RUN_ID: "narrow"})
+    store = PsycopgForecastStore(throwaway_database_url)
+    parameters = {
+        "basin_version_id": BASIN_VERSION_ID,
+        "segment_id": f"{ISSUE_126_PREFIX}_seg_inside",
+        "river_network_version_id": RIVER_NETWORK_VERSION_ID,
+        "issue_time": "latest",
+        "variables": ["q_down"],
+        "scenarios": ["GFS"],
+    }
+
+    latest = store.forecast_series(**parameters)
+    assert latest["issue_time"] == "2026-05-03T06:00:00Z"
+    assert [point[1] for series in latest["series"] for point in series["points"]] == [101.0, 102.0]
+
+    pinned = store.forecast_series(**parameters, run_id=FORECAST_RUN_ID, model_id=MODEL_ID)
+    assert pinned["issue_time"] == "2026-05-03T00:00:00Z"
+    assert [point[1] for series in pinned["series"] for point in series["points"]] == [180.0, 250.0]
+
+    parameters["issue_time"] = "2026-05-03T00:00:00Z"
+    explicit_cycle = store.forecast_series(**parameters)
+    assert explicit_cycle == pinned

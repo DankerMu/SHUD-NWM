@@ -1,48 +1,14 @@
-"""The equivalence oracle for #1980's template normalisation.
+"""Renderer predicate preservation and provenance of the frozen #1980 capture.
 
-Task 1.1 rewrites the layout of every river read template: aids move off
-``WHERE`` lines onto their own ``AND`` line, mvt's three 1:N markers become
-eleven 1:1 ones, display_coverage's prose paragraph becomes per-aid markers, and
-two ``OR (…)`` disjunctions are re-bracketed. That is a lot of hand editing on
-SQL nobody can execute in a unit test, and the claim being made about it is
-"zero behaviour change".
+The fixture records the original template-normalisation audit at ``51f9d273``.
+Its bytes remain immutable historical evidence, not a requirement that future
+production SQL retain old bugs. Current templates may change intentionally;
+the renderer must preserve their predicates while changing physical tables.
+Real database tests cover query behavior, including the enum cast required by
+the three-day history paths in ``test_real_database_integration.py``.
 
-This file is the machine-checkable form of that claim. Before any template was
-touched, every registered entry's text was captured at base ``51f9d273`` and
-committed as ``tests/fixtures/river_ts_templates_51f9d273.json`` in the canonical
-chain form (:func:`packages.common.river_ts_render.sql_chains`). The oracle then
-asserts that the LEGACY variant — the post-normalisation template with the table
-name substituted back — reproduces the golden chains exactly.
-
-What that does and does not allow
----------------------------------
-
-The chain form is invariant under exactly the three things the normalisation is
-permitted to change and nothing else:
-
-* whitespace / indentation — collapsed;
-* comment placement, including the markers themselves — removed;
-* the ORDER of conjuncts within one AND-chain — each chain is a sorted multiset,
-  which is what licenses "the ``WHERE`` line takes the next key conjunct".
-
-What it covers is the CONJUNCT MULTISET OF EVERY PREDICATE CHAIN, and inside
-that scope everything is red: a dropped or added conjunct, a changed parameter
-name, a changed comparison operator, a predicate that moved between chains (a
-lateral body's conjunct hoisted to the outer ``WHERE`` changes two chains), a
-re-bracketed disjunction that actually changes the truth table (the ``OR (…)``
-body is its own chain), a join that lost an ``ON`` conjunct. The counter-examples
-at the bottom prove each of those bites, because a golden that cannot be made red
-would certify the edit rather than check it.
-
-What it does NOT cover — stated because an over-claimed oracle is worse than a
-narrow one (review #1996, C11): the SELECT list, ``FROM``/``JOIN`` targets and
-aliases, ``LIMIT`` / ``ORDER BY`` / ``GROUP BY``, CTE names. Those are outside a
-predicate chain, so mutating them is GREEN here. #1980 changes none of them —
-every changed line in the production diff is a ``WHERE`` / ``AND`` / ``OR (``
-conjunct line — and the sibling pins that do cover them are elsewhere
-(``tests/test_river_ts_read_path_surrogate_keys.py`` embeds ``LIMIT 1`` in its
-pinned substrings, ``tests/test_hydro_display_mvt_scaling.py`` pins ``JOIN
-core.river_segment rs``).
+Chain comparison covers WHERE/ON/HAVING predicates, not SELECT lists, table
+targets or ordering. The counter-examples below keep those limits explicit.
 """
 
 from __future__ import annotations
@@ -58,12 +24,15 @@ from packages.common.river_ts_render import (
     sql_chains,
 )
 from tests.river_ts_template_registry import (
+    FORECAST_STORE_EXECUTIONS,
+    FORECAST_STORE_SEGMENT_BLOCKS,
     GOLDEN_BASE_SHA,
     GOLDEN_FIXTURE,
     GOLDEN_SHA256,
     NON_TEMPLATE_MENTIONS,
     REGISTERED_TEMPLATE_PATHS,
     REGISTRY,
+    ROUTED_SOURCE_KEYS,
     entry_by_key,
     golden_sha256,
 )
@@ -104,38 +73,111 @@ def test_the_golden_was_captured_at_the_change_base() -> None:
 
 
 def test_the_golden_covers_exactly_the_registered_entries() -> None:
-    """A new entry without a golden, or a golden without an entry, is red.
-
-    Without this the equivalence check is only as complete as the fixture: an
-    entry added to the register but not to the golden would simply not be
-    compared, which is the failure mode a "for every entry in the golden" loop
-    has and this one does not.
-    """
-    assert set(GOLDEN["entries"]) == {entry.key for entry in REGISTRY}
+    """Historical statements and live raw sources have distinct exact sets."""
+    siblings = {entry.key for entry in REGISTRY} - ROUTED_SOURCE_KEYS
+    assert len(siblings) == 6
+    assert set(GOLDEN["entries"]) == siblings | {
+        "mvt:postgis_tile_sql_hydro",
+        "mvt:postgis_tile_sql_hydro_national",
+        "mvt:valid_times_named_identity",
+        "mvt:valid_times_any_identity",
+        *(f"forecast_store:{label}" for label in FORECAST_STORE_SEGMENT_BLOCKS),
+        "forecast_store:segment_identity_predicates",
+        "forecast_store:latest_product_fallback",
+    }
+    assert {entry.key for entry in REGISTRY} == siblings | ROUTED_SOURCE_KEYS
+    assert len(REGISTRY) == 13
+    assert ROUTED_SOURCE_KEYS == {
+        "forecast_store:segment_rows_source",
+        "forecast_store:latest_product_river_source",
+        "mvt:postgis_tile_sql_hydro",
+        "mvt:hydro_national_identity_source",
+        "mvt:hydro_national_data_source",
+        "mvt:valid_times_named_identity",
+        "mvt:valid_times_any_identity",
+    }
+    assert len(GOLDEN["entries"]) == 20
+    assert set(FORECAST_STORE_EXECUTIONS) == {
+        *FORECAST_STORE_SEGMENT_BLOCKS, "latest_product_fallback",
+    }
     assert len({entry.key for entry in REGISTRY}) == len(REGISTRY), "duplicate registry key"
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-def test_every_registered_legacy_variant_reproduces_the_golden_chains(entry) -> None:
-    golden = GOLDEN["entries"][entry.key]
-    assert golden["path"] == entry.path
-    assert golden["kind"] == entry.kind
-    assert golden["params"] == entry.params
+def test_legacy_renderer_preserves_every_current_template_predicate(entry) -> None:
+    template = entry.source("legacy")
 
-    chains = _legacy_chains(entry.source(), entry.key)
+    assert _legacy_chains(template, entry.key) == sql_chains(template)
+    if entry.key not in ROUTED_SOURCE_KEYS:
+        assert _legacy_chains(template, entry.key) == tuple(
+            tuple(chain) for chain in GOLDEN["entries"][entry.key]["chains"]
+        )
 
-    expected = tuple(tuple(chain) for chain in golden["chains"])
-    assert len(chains) == len(expected), (
-        f"{entry.key}: {len(chains)} chains after normalisation, {len(expected)} at {GOLDEN_BASE_SHA}"
-    )
-    for index, (actual_chain, expected_chain) in enumerate(zip(chains, expected, strict=True)):
-        assert actual_chain == expected_chain, f"{entry.key}: chain {index} changed"
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+@pytest.mark.parametrize(
+    ("key", "factory_name", "route_alias"),
+    (
+        ("forecast_store:segment_rows_source", "_segment_rows_source_template", "h"),
+        ("forecast_store:latest_product_river_source", "_latest_product_river_source_template", "cr"),
+    ),
+)
+def test_routed_registry_render_matches_actual_store_source(key, factory_name, route_alias, store) -> None:
+    from packages.common import forecast_store
+
+    entry = entry_by_key(key)
+    rendered = render_river_ts_sql(entry.source(store), store, entry=key)
+    expected = render_river_ts_sql(getattr(forecast_store, factory_name)(store), store, entry=key)
+    assert f"{route_alias}.timeseries_store = '{store}'" in rendered.sql
+    opposite = "narrow" if store == "legacy" else "legacy"
+    assert f"{route_alias}.timeseries_store = '{opposite}'" not in rendered.sql
+    assert rendered == expected
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_hydro_routed_registry_matches_the_authored_source(store) -> None:
+    from services.tiles import mvt
+
+    entry = entry_by_key("mvt:postgis_tile_sql_hydro")
+    raw = entry.source(store)
+    assert raw == mvt._hydro_source_template(store)
+    assert raw.count(RIVER_TABLE) == 1
+    assert raw.count("transitional compressed-chunk pushdown aid, remove with #1342") == 3
+    rendered = render_river_ts_sql(raw, store).sql
+    opposite = "narrow" if store == "legacy" else "legacy"
+    assert f"timeseries_store = '{store}'" in rendered
+    assert f"timeseries_store = '{opposite}'" not in rendered
+    assert ("hydro.river_timeseries_legacy" in rendered) == (store == "legacy")
+    assert "UNION ALL" not in rendered
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+@pytest.mark.parametrize("probe,aids", (("identity", 3), ("data", 4)))
+def test_national_routed_registry_matches_the_authored_source(store, probe, aids) -> None:
+    from services.tiles import mvt
+
+    entry = entry_by_key(f"mvt:hydro_national_{probe}_source")
+    factory = getattr(mvt, f"_hydro_national_{probe}_source_template")
+    raw = entry.source(store)
+    assert raw == factory(store)
+    assert raw.count(RIVER_TABLE) == 1
+    assert raw.count("transitional compressed-chunk pushdown aid, remove with #1342") == aids
+    rendered = render_river_ts_sql(raw, store).sql
+    opposite = "narrow" if store == "legacy" else "legacy"
+    assert f"lr.timeseries_store = '{store}'" in rendered
+    assert f"lr.timeseries_store = '{opposite}'" not in rendered
+    assert ("hydro.river_timeseries_legacy" in rendered) == (store == "legacy")
+    assert "UNION ALL" not in rendered
+    assert "LIMIT" not in rendered
+    with pytest.raises(ValueError, match="Unsupported river timeseries store"):
+        factory("legacy' OR true --")
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-def test_every_registered_entry_declares_its_own_table_mentions(entry) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_every_registered_entry_declares_its_own_table_mentions(entry, store) -> None:
     """The per-entry half of registry closure (the per-file sums live in the owning oracles)."""
-    text = entry.source()
+    text = entry.source(store)
 
     assert text.count(RIVER_TABLE) == entry.mentions, entry.key
     assert (entry.mentions == 0) == (entry.kind == "fragment"), entry.key
@@ -230,9 +272,7 @@ def test_moving_a_conjunct_out_of_a_join_into_the_where_changes_the_chains() -> 
     not allowed to move a predicate between chains either way. Chains are
     therefore compared positionally, each as its own multiset.
     """
-    mutated = _SPECIMEN.replace(
-        "     AND rs.river_network_version_id = :river_network_version_id\n", ""
-    ).replace(
+    mutated = _SPECIMEN.replace("     AND rs.river_network_version_id = :river_network_version_id\n", "").replace(
         "      AND ts.valid_time = :valid_time\n",
         "      AND ts.valid_time = :valid_time\n      AND rs.river_network_version_id = :river_network_version_id\n",
     )
@@ -317,7 +357,7 @@ def test_deleting_a_whole_having_line_reddens_the_golden() -> None:
     passed the equivalence oracle.
     """
     entry = entry_by_key("display_coverage:refresh")
-    template = entry.source()
+    template = entry.source("legacy")
     assert template.count(_HAVING_LINE) == 1
 
     mutated = template.replace(_HAVING_LINE, "")
@@ -337,16 +377,13 @@ def test_editing_a_distinct_on_select_list_leaves_the_golden_green() -> None:
     chain opener made the golden police a select list as if it were a predicate,
     which is a claim it cannot honestly make about the other entries.
     """
-    entry = entry_by_key("forecast_store:analysis_segment_rows")
-    template = entry.source()
+    template, _parameters = FORECAST_STORE_EXECUTIONS["analysis_segment_rows"]()
     assert "SELECT DISTINCT ON (rt.valid_time)" in template
-
     mutated = template.replace("SELECT DISTINCT ON (rt.valid_time)", "SELECT DISTINCT ON (rt.valid_time, rt.value)")
-
-    golden = tuple(tuple(chain) for chain in GOLDEN["entries"][entry.key]["chains"])
     assert mutated != template
-    assert _legacy_chains(template, entry.key) == golden
-    assert _legacy_chains(mutated, entry.key) == golden
+    # Composed statements are not renderer inputs. This remains a chain-boundary
+    # counterexample, while routing/selection owners separately pin the output.
+    assert sql_chains(mutated) == sql_chains(template)
 
 
 def test_the_golden_holds_the_measured_chain_total() -> None:
@@ -354,5 +391,5 @@ def test_the_golden_holds_the_measured_chain_total() -> None:
     assert len(GOLDEN["entries"]) == 20
     assert sum(len(entry["chains"]) for entry in GOLDEN["entries"].values()) == 215
     assert len(GOLDEN["entries"]["display_coverage:refresh"]["chains"]) == len(
-        _legacy_chains(entry_by_key("display_coverage:refresh").source(), "display_coverage:refresh")
+        _legacy_chains(entry_by_key("display_coverage:refresh").source("legacy"), "display_coverage:refresh")
     )

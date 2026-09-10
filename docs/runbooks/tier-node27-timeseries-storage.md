@@ -60,6 +60,27 @@ even if the host date is later.
 - Architecture record: `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
 - Display carve-out: `docs/adr/0001-display-timeseries-carveout.md`
 
+## Three-day chunk geometry (#2210; requires migration rollout)
+
+Migration `000058_hot_timeseries_chunk_interval_3d.sql` sets the interval for
+**new** chunks of `hydro.river_timeseries` and `met.forcing_station_timeseries`
+to 3 days. It does not change `met.best_available_selection`, existing chunk
+ranges, stored rows, compression settings, or DB retention. Applying it twice
+is safe; it does not split or rewrite existing 7-day chunks or reclaim their
+space.
+
+The matching display change limits historical lookback to 3 days while future
+forecasts remain 7 days / 168 hours. Display lookback is not data retention:
+existing history is not deleted. Compression lag remains operator-configured;
+the node-27 observation on 2026-09-09 was `172800` seconds (2 days), unchanged
+by this migration.
+
+Do not infer deployed chunk geometry from the migration file. Check
+`timescaledb_information.dimensions` and `timescaledb_information.chunks`
+after the approved rollout: mixed old 7-day and new 3-day chunks are expected.
+Rollback can restore a 7-day interval for future chunk creation, but it does
+not resize the 3-day chunks already created.
+
 ## Recorded exception (2026-08-06): historical `ghdc` (retired; do not recreate)
 
 This section is immutable history plus current policy. Runnable
@@ -172,6 +193,2250 @@ NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 an
 
 这不是 #1895 live rollout 授权，也不声明 node-27 remote PASS。若 sudo 与 exact-image root fallback 均不可用，
 测试必须在 Docker mutation 前给出可行动 skip/fail；不能用 `expected_uid=os.getuid()` 或任意 identity override 替代。
+
+## #1895 controlled live rollout (node-27 cold residency)
+
+This section is the **only** authorized procedure for creating the `nhms_cold`
+bind/tablespace and moving the first production compressed chunk group. It is
+written to be executed in order at one reviewed SHA, with no invented values and
+no placeholders. Nothing here is a template to adapt: every gate has a command,
+an observable field, and a stop condition.
+
+> **STOP — the gate order is load-bearing.** G0…G8 run inside one maintenance
+> window and each gate's artifact is consumed by the next. No node-27 command
+> from G1 onward runs before G0 is proven, and G6 cannot issue movement SQL
+> unless G3 and G5 both produced current-run artifacts bound to the same SHA. A
+> failed gate ends the window: fix in a PR and restart at G0 on a new reviewed
+> SHA. The general/manual container-recreation procedure in **§4.3.3** and the
+> generic `node-27-database-container-operations` recreate recipe are
+> **forbidden** entrypoints for this cold bind — they appear *elsewhere* in
+> this file, and "elsewhere" does not mean "less binding". Only
+> `scripts/node27_cold_tablespace_install.py` (G5) may create, mutate, or roll
+> back the cold bind, the `nhms-db` container, or the tablespace catalog.
+>
+> **STOP — rollback is fixed by the shipping installer state machine, and only
+> three states exist.** (1) An install that failed or was interrupted while the
+> private recovery authority is still live: the *next invocation of the exact
+> same installer command* starts with `reconcile()`, which owns the rollback —
+> never any operator SQL, `docker`, path, or catalog action, and never a
+> rollback CLI (there is none). (2) A terminal `installed` receipt: the
+> installer already closed and durably removed that authority, so nothing is
+> left to roll back — a later invocation is observation-only
+> (`already_ready`). (3) **Every** trigger after a terminal install, including
+> a post-install pre-movement failure with **zero groups moved**, stops later
+> work and **preserves** the installed topology; there is no `groups_moved`
+> field in the installer receipt, no rolled-back-at-zero operation, and no
+> live move-back entrypoint.
+
+| Gate | Name | Blocks the next gate until proven |
+|------|------|-----------------------------------|
+| G0 | reviewed-SHA readiness | Local gates pass and this runbook is merged; no node-27 access before that |
+| G1 | pre-target read-only census | Exactly the required complete all-source groups plus a canonical-decimal capacity policy |
+| G2 | production root evidence | Root-owned schema-`1.0` mdadm/SMART/backup envelopes pass the unchanged production parsers |
+| G3 | exact-SHA isolated oracle | Current-run `--mode isolated-cluster` PASS with complete cold move, inverse move-back, parity, cleanup |
+| G4 | writer drain and env | Every writer/timer quiesced, locks free, mode-0600 env, budget preflight |
+| G5 | #1894 installer | Dry-run then one `--enforce` install; identity, catalog, bind and readback proven |
+| G6 | one group at a time | Per-group current-run receipt passes every readback before the next group |
+| G7 | quiesced verification | Hot placement, ingest smoke, real-DB pytest, C1-C4, plans, #1342, valid-times, GFS/IFS |
+| G8 | preliminary GO, natural tick, closure | Written GO, one natural serialized tick, evidence merge, close, archive |
+
+### Rollout conventions
+
+- `$CHECKOUT` is `/home/nwm/NWM` on node-27 and every command runs from it.
+- Every repository Python entrypoint runs through
+  `uv run --no-sync python scripts/<entry>.py`; every inline observation helper
+  runs through the pinned absolute interpreter
+  `/home/nwm/NWM/.venv/bin/python`. There is no bare `python`/`python3`, no
+  `sudo`-invoked repo Python, and no `uv run` without `--no-sync` anywhere in
+  this section — `--no-sync` is what keeps an operator shell from rebuilding the
+  shared environment mid-window (the node-22 interpreter rule in `CLAUDE.md` is
+  the same hazard). The `.venv` path is also the exact interpreter a systemd
+  `ExecStart` uses, so observation and execution bind the same code.
+- **A historical receipt is never evidence for a 4.x observation, and file
+  existence alone never satisfies one.** Every accepted artifact must come from
+  *this* invocation and match the six checks below. `$BRACKET_FILE` is written by
+  the fence that produces the artifact: line 1 is its UTC start, line 2 its UTC
+  end, line 3 its exit code. The current-run binder is one inline Python that
+  asserts, for the exact invocation's artifact: mode `0600`; `generated_at`
+  inside `[start, end]`; freshness `<= 900` seconds; `head_sha` equals the
+  reviewed SHA; real `mode`/`outcome` values (per schema); and every value is a
+  short canonical decimal. A missing, stale, wrong-SHA, out-of-bracket,
+  wrong-mode, wrong-outcome, or non-zero-exit artifact is a NO-GO row of the
+  trigger table. This is also why #1938 is a non-blocking parser follow-up for
+  this rollout: every operator-supplied value here is a short canonical decimal,
+  and every GO binds the current run's receipt, head, bracket, mode, outcome and
+  exit status instead of relying on a pre-existing clean file or a dirty
+  worktree.
+- **One maintenance shell owns G0…G8.** Execute the fenced blocks in their
+  printed order in that same shell; `$RUN_ROOT`, `$RUN_STAMP`, `$REVIEWED_SHA`,
+  `$UNITS_ENABLE_STATE`, `TIMER_BEFORE`, `SERVICE_BEFORE`, and the G8 `W8_PATH`
+  are deliberately carried across fences. Never paste an individual downstream
+  fence into a fresh shell.
+- **Never print a DSN**, never `set -x` in a fence that carries one, never
+  commit or paste an artifact containing credentials, and never `git stash pop`
+  on node-27. Generated evidence lives under
+  `/home/nwm/NWM/.nhms-issue1895-live/<run>`: the tree is mode `0700` and every
+  artifact `0600`. Root-owned storage evidence lives in a private **root-owned**
+  directory and is handed to the installer by pathname, read by descriptor.
+  Evidence is never `source`d by a shell and never embedded in a shell variable.
+- **The historical six is not identity.** Six compressed groups were observed
+  on 2026-08-29; that is a preflight expectation only. G1 must resolve exactly
+  six **complete eligible all-source groups from the live catalog**. "Six" is
+  never satisfied by taking the oldest six of a larger set, by dropping a
+  drifted group, or by reusing the 2026-08-29 keys.
+
+### G0 — Readiness at the reviewed SHA (no remote access)
+
+The reviewed SHA must already contain, as merged content and not a local
+overlay: issue #1892 (`scripts/probe_compressed_chunk_cold_tablespace.py`),
+issue #1893 (`scripts/node27_cold_residency.py`,
+`packages/common/compressed_chunk_cold_*`), issue #1929 (numeric runtime
+identity in `packages/common/compressed_chunk_cold_target.py`), issue #1894
+(`scripts/node27_cold_tablespace_install.py`,
+`packages/common/node27_cold_tablespace_*`), issue #1970 (river-click oracle),
+issue #2123 (the promoted C4 producer/validator/private publisher/binder),
+issue #2130 (C4 input-classification precedence), and issue #2137 (this executable G0
+runbook plus census/C1-C3/G8 owners, schemas, binders and acceptance routing).
+Issue #2137 merges this content without remote access; it consumes rather than
+reimplements C4.
+
+**Step 1 — local readiness only (nothing on node-27 runs yet).** This runs on
+the machine that owns the PR; it must not be confused with the node-27 session
+in Step 2. Every command here is local, and none of them opens an SSH session:
+
+```bash
+set -euo pipefail
+cd "$CHECKOUT"
+test -z "$(git status --porcelain)"                            # tracked + untracked
+openspec validate compressed-chunk-cold-tablespace-tiering --strict --no-interactive
+uv run --no-sync ruff check .
+REVIEWED_SHA="$(git rev-parse HEAD)"
+printf 'REVIEWED_SHA=%s\n' "$REVIEWED_SHA"
+```
+
+The local readiness gate is the merge of this runbook's PR: it must pass the
+issue-specific read-only fixture review, strict OpenSpec validation, this
+section's contract tests, and normal CI. **No node-27 SSH, census, probe, or
+install runs before that PR is merged** and before `REVIEWED_SHA` names its
+merge commit. Re-run Step 1 inside the window with the same commands before
+Step 2: the SHA node-27 lands on must equal the reviewed SHA exactly.
+
+**Step 2 — one node-27 session, task 4.1+ only after #2137 merges and Step 1
+proves green.** This step is forbidden while #2137 is under review; the child
+must not execute this SSH fence. The `ssh` command is **not** a place to paste
+the rest of the gate; the fence below is the whole
+session entry, and the remote script is fed through a **quoted heredoc** so the
+local shell cannot expand or execute any part of it. The reviewed SHA crosses
+the boundary as an environment assignment in ssh's first remote argument — the
+remote shell applies it before `bash -s`, and the heredoc body itself stays
+literal. Nothing in the heredoc body runs locally:
+
+```bash
+set -euo pipefail
+export REVIEWED_SHA
+ssh -p 32099 nwm@210.77.77.27 "REVIEWED_SHA=$REVIEWED_SHA" bash -s <<'REMOTE'
+set -euo pipefail
+cd /home/nwm/NWM
+test -z "$(git status --porcelain)"
+git fetch origin
+git merge-base --is-ancestor HEAD origin/master || {
+  echo "NO-GO: HEAD is not an ancestor of origin/master" >&2; exit 1; }
+git pull --ff-only origin master
+test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
+test -z "$(git status --porcelain)"
+uv run --no-sync python -c 'import psycopg2'
+REMOTE
+```
+
+The heredoc body is executed by `bash -s` **on node-27**, so a missing local
+`REVIEWED_SHA` fails the empty-string comparison instead of letting the fence
+pass locally. `git pull --ff-only` is the only permitted sync form; if it aborts
+on an untracked collision, apply the repository's ff-only sync discipline (diff
+against `origin/master`, back up outside the tree, then clear the collision) and
+re-run Step 2. Never auto-`git stash pop`, never delete a gitignored evidence
+directory, and never `checkout`/`reset` to force a SHA. **Any G0 failure stops
+the window before it opens**: no census, probe, or install until the reviewed SHA
+is reachable, clean, and running the merged runbook.
+
+### G1 — Pre-target read-only census (no `nhms_cold` preflight)
+
+The #1893 runner cannot serve as the census: its tick binds every observation to
+the production target preflight (#1929), which refuses while `nhms_cold` is
+absent. `scripts/node27_cold_residency_census.py` is the pre-target branch of the
+same contract: it calls the shipped production owners
+`ranked_candidates_from_execute`, `derive_bound_inventories`,
+`collect_residency_group`, `compute_window_parity`,
+`compression_before_bytes`, `retained_source_bytes` directly, uses the real
+display watermark (`packages/common/display_watermark.py`) and the configured
+compression lag, and is read-only by construction — one connection goes through
+the driver's native `set_session(readonly=True, autocommit=False)` **before any
+cursor SQL** (psycopg2 freezes the transaction read-write/read-only character at
+`BEGIN` time, so a later `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY`
+would only change the *next* transaction and leave the observation transaction
+read-write), with a verified `transaction_read_only` flag, the shipped bounded
+per-hypertable catalog scan plus the shared catalog byte ceiling, a bounded
+window scan, and single aggregate parity rows. It never calls target preflight,
+never reads `Config.User`, and never issues movement SQL. This is why the census
+may run **before** the target exists.
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+REPO_ROOT="/home/nwm/NWM"
+umask 077
+RUN_STAMP="$(/usr/bin/date -u +%Y%m%dT%H%M%SZ)"
+RUN_ROOT="/home/nwm/NWM/.nhms-issue1895-live/$RUN_STAMP"
+mkdir -p "$RUN_ROOT/census" "$RUN_ROOT/evidence" "$RUN_ROOT/receipts" "$RUN_ROOT/env"
+chmod 700 "$RUN_ROOT" "$RUN_ROOT/census" "$RUN_ROOT/evidence" "$RUN_ROOT/receipts" "$RUN_ROOT/env"
+test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
+CENSUS_ARTIFACT="$RUN_ROOT/census/pre-target-$RUN_STAMP.json"
+CENSUS_BRACKET="$RUN_ROOT/census/pre-target-$RUN_STAMP.bracket"
+REQUIRE_COUNT=6
+export CENSUS_ARTIFACT
+set -a
+. /home/nwm/NWM/infra/env/node27-timeseries-compression.env   # DATABASE_URL + configured lag
+set +a
+_start="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+uv run --no-sync python scripts/node27_cold_residency_census.py \
+  --require-count "$REQUIRE_COUNT" \
+  --output "$CENSUS_ARTIFACT" || rc=$?
+_end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$CENSUS_BRACKET"
+test "$rc" -eq 0
+export CENSUS_BRACKET
+```
+
+Exit `0` means `verdict=GO`; `1` means the census published a truthful `NO-GO`
+artifact and the window is over; `2` is a config/HEAD/connection refusal with no
+artifact. The census masks the DSN into `database_url_masked`, sets
+`application_name=nhms-ts-cold-census` (inside `config`), and refuses a dirty or
+unobservable worktree, so no artifact can claim a SHA that was never reviewed.
+
+Prove the frozen preimage before anything else consumes it. The binder reads the
+real artifact fields: `application_name`/`session_read_only` are **inside**
+`config`, the verdict is `artifact["verdict"]` (never a `mode`/`outcome` on the
+census), and every capacity value is a checked canonical decimal:
+
+```bash
+set -euo pipefail
+test "$(stat -c '%a' "$CENSUS_ARTIFACT")" = "600"
+/home/nwm/NWM/.venv/bin/python - "$CENSUS_ARTIFACT" "$REVIEWED_SHA" "$REQUIRE_COUNT" "$CENSUS_BRACKET" <<'PY'
+import re, sys
+from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
+path, head, required, bracket = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+_raw, artifact, _facts = read_held_private_json(Path(path), label="G1 census", stage="census")
+bracket_text = read_held_private_text(Path(bracket), label="G1 census bracket", stage="census")
+start, end, _rc = [line.strip() for line in bracket_text.splitlines() if line.strip()]
+def _utc(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+decimal = re.compile(r"^(?:0|[1-9][0-9]*)$")
+generated = _utc(artifact["generated_at"])
+assert artifact["artifact"] == "nhms-node27-cold-residency-census"
+assert artifact["artifact_version"] == "1.0"
+assert artifact["verdict"] == "GO", artifact["blockers"]
+assert artifact["head_sha"] == head
+assert artifact["config"]["application_name"] == "nhms-ts-cold-census"
+assert artifact["config"]["session_read_only"] is True
+assert _utc(start) <= generated <= _utc(end)
+assert artifact["cluster"]["server_version"].startswith("15.2")
+assert artifact["cluster"]["timescaledb_version"] == "2.10.2"
+assert len(artifact["group_keys"]) == required == artifact["resolved_group_count"]
+assert len(set(artifact["group_keys"])) == required, "duplicate census key"
+assert artifact["residency_counts"] == {"all_source": required}, artifact["residency_counts"]
+for group in artifact["groups"]:
+    assert group["residency"] == "all_source" and group["is_compressed"] is True
+    assert group["compressed"] is not None, "no current compressed sibling"
+    assert group["member_count"] == len(group["members"]) > 0 and group["parity"] is not None
+    assert group["member_digest"] and group["group_digest"] and group["inventory_digest"]
+    assert group["before_compression_total_bytes"] > 0 and group["retained_source_bytes"] > 0
+    assert {member["tablespace"] for member in group["members"]} == {"pg_default"}
+policy = artifact["capacity_policy"]
+assert policy["status"] == "resolved"
+for key in ("E", "S", "cold_reserve_bytes", "wal_reserve_bytes", "install_required_bytes",
+            "rollback_headroom_bytes", "installer_required_cold_free_bytes"):
+    assert decimal.match(policy[key]) and policy[key] == str(int(policy[key])), key
+assert policy["E"] == str(max(int(value) for value in policy["expansion_values"]))
+assert policy["S"] == str(sum(int(value) for value in policy["retained_values"]))
+assert policy["rollback_headroom_bytes"] == str(2 * int(policy["E"]))
+assert policy["installer_required_cold_free_bytes"] == str(int(policy["S"]) + 2 * int(policy["E"]))
+assert int(policy["wal_reserve_bytes"]) == int(policy["cold_reserve_bytes"]) == int(policy["E"])
+for hot in artifact["hot_active_groups"]:
+    assert hot["origin_tablespace"] == "pg_default", hot
+print("census OK:", artifact["census_digest"])
+PY
+```
+
+Freeze the policy and the digest into a mode-0600 file that G4/G5 read (the
+assignment form also makes them available to the current shell). The write is an
+**exclusive no-clobber private write**: `O_CREAT|O_EXCL` with mode `0600` from
+the first byte, so a stale or racing file can never be replaced but only
+refused, and the file never exists in a wider mode at any instant:
+
+```bash
+set -euo pipefail
+POLICY_FILE="$RUN_ROOT/env/capacity-policy-$RUN_STAMP.env"
+export CENSUS_ARTIFACT POLICY_FILE
+/home/nwm/NWM/.venv/bin/python <<'PY'
+import os, re
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json
+census_path = Path(os.environ["CENSUS_ARTIFACT"])
+_raw, artifact, _facts = read_held_private_json(census_path, label="G1 census", stage="census")
+policy = artifact["capacity_policy"]
+assert artifact["verdict"] == "GO"
+decimal = re.compile(r"^(?:0|[1-9][0-9]*)$")
+digest_re = re.compile(r"^[0-9a-f]{64}$")
+values = {
+    "E": policy["E"],
+    "S": policy["S"],
+    "COLD_RESERVE": policy["cold_reserve_bytes"],
+    "WAL_RESERVE": policy["wal_reserve_bytes"],
+    "INSTALL_REQUIRED": policy["install_required_bytes"],
+    "ROLLBACK_HEADROOM": policy["rollback_headroom_bytes"],
+}
+for name, value in values.items():
+    assert decimal.match(value), name
+digest = artifact["census_digest"]
+assert digest_re.fullmatch(digest), "CENSUS_DIGEST"
+payload = "".join(f"{name}={value}\n" for name, value in values.items()) + f"CENSUS_DIGEST={digest}\n"
+target = os.environ["POLICY_FILE"]
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+fd = os.open(target, flags, 0o600)
+try:
+    os.fchmod(fd, 0o600)
+    view = memoryview(payload.encode("utf-8"))
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+test "$(stat -c '%a' "$POLICY_FILE")" = "600"
+set -a
+. "$POLICY_FILE"
+set +a
+test "$COLD_RESERVE" = "$E" && test "$WAL_RESERVE" = "$E"
+test "$INSTALL_REQUIRED" = "$S"
+test "${#E}" -le 20 && test "${#S}" -le 20
+```
+
+Immediately capture the **pre-mutation** public valid-times baseline, because a
+baseline taken after migration cannot prove non-regression. This is the *only*
+place the baseline may be captured: if the public API is not reachable here,
+the window is NO-GO — never defer it to G7:
+
+```bash
+set -euo pipefail
+VALID_TIMES_URL="http://127.0.0.1:8080/api/v1/layers/discharge/valid-times"
+BASELINE_FILE="$RUN_ROOT/census/valid-times-baseline.json"
+BASELINE_BRACKET="$RUN_ROOT/census/valid-times-baseline.bracket"
+_start="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+/usr/bin/curl -fsS --max-time 30 "$VALID_TIMES_URL" > "$BASELINE_FILE" || rc=$?
+_end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$BASELINE_BRACKET"
+test "$rc" -eq 0
+chmod 600 "$BASELINE_FILE" "$BASELINE_BRACKET"
+/home/nwm/NWM/.venv/bin/python - "$BASELINE_FILE" "$BASELINE_BRACKET" <<'PY'
+import sys
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
+path, bracket = sys.argv[1], sys.argv[2]
+_raw, document, _facts = read_held_private_json(Path(path), label="G1 valid-times baseline", stage="census")
+bracket_text = read_held_private_text(Path(bracket), label="G1 valid-times baseline bracket", stage="census")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
+assert len(lines) == 3 and lines[2] == "0", lines
+assert document["request_id"] and document["status"] == "ok", document
+data = document["data"]
+assert data["valid_times"] and data["observed_count"] > 0, data
+assert len(data["valid_times"]) == len(data["items"]) == data["observed_count"], data
+assert all(isinstance(item, str) and item for item in data["valid_times"]), data
+print("valid-times baseline count:", data["observed_count"])
+PY
+```
+
+The baseline capture window is bracketed and mode `0600`; G7 compares the
+post-migration response against this file only (the `valid_times` are business
+forecast times and are never compared to capture wall time), and a capture
+failure here is a trigger row, not a G7 problem to paper over.
+
+#### Capacity policy — what each number is, and what it is not
+
+| Symbol | Value | Consumed by |
+|--------|-------|-------------|
+| `E` | checked positive `max(before_compression_total_bytes)` over the census groups | cold reserve, WAL reserve, rollback headroom |
+| `S` | checked positive `sum(retained_source_bytes)` over the census groups | installer install requirement |
+| `COLD_RESERVE` | `E` | `NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES` |
+| `WAL_RESERVE` | `E` | `NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES` |
+| `INSTALL_REQUIRED` | `S` | installer `--install-required-bytes` |
+| `ROLLBACK_HEADROOM` | `2*E` | installer `--rollback-headroom-bytes` |
+
+All four are short canonical decimal byte strings produced by checked
+arithmetic: the census refuses on a negative, zero, out-of-range, or
+overflowing value rather than rounding, truncating, or defaulting, and each is
+recomputed from **fresh live expansion in this window** — never a probe,
+historical, or disposable observation. Runtime decision per group, from free
+bytes sampled immediately before that group: cold free is at least that group's
+expansion plus `E`, and hot free is at least `E`. Installer decision: cold free
+is at least `S + 2E`.
+
+`WAL_RESERVE=E` is an **intentionally conservative same-order proxy derived from
+fresh live expansion**. It is not a measured WAL figure, not a per-group WAL
+attribution, not an LSN calculation, and never the disposable `165736`-byte
+observation recorded by the #1892 probe. Quoting it as a WAL measurement is a
+documentation defect; shrinking it because "the WAL was smaller" is a trigger row.
+
+### G2 — Production root evidence (never the synthetic helper)
+
+The installer consumes descriptor-bound, root-owned JSON envelopes. **This is the
+production contract, not the #1894 disposable oracle:
+`scripts/node27_cold_tablespace_root_evidence_setup.py` is disposable-only and
+MUST NOT be invoked for a live install** — it refuses production path prefixes
+and synthesizes mdadm/SMART/backup payloads. A missing
+`/usr/local/sbin/nhms-backup-inventory` producer is NO-GO; there is no
+hand-written substitute and no operator-authored coverage claim.
+
+| Envelope field | Required value |
+|----------------|----------------|
+| `schema_version` | `1.0` |
+| `hostname` | exactly the `/bin/hostname` output also passed as `--evidence-hostname` |
+| `captured_at` | UTC RFC3339, age <= `900` seconds at installer validation |
+| owner / mode | `root:root` (uid `0`) / `0600`, regular, no-follow, descriptor-pinned |
+| mdadm argv / subject | `/usr/sbin/mdadm --detail /dev/md0` / `array_device=/dev/md0` |
+| SMART argv / subject | `/usr/sbin/smartctl -H <DEVICE>` for **each of exactly the two** parsed active-sync members / `device=<DEVICE>` |
+| backup argv | `/usr/local/sbin/nhms-backup-inventory --json` |
+| backup subject | `pgdata=/home/nwm/nhms-pgdata`, `external_pg_tblspc_targets` = sorted catalog-derived targets plus the cold container path |
+| `covered_paths` | producer's own verbatim list, proven by the shipping parser to include PGDATA, every sorted external `pg_tblspc` target, and `/home/postgres/pgdata/tablespaces/nhms_cold` |
+| `output` | nonempty verbatim producer output for every envelope |
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+EVID_ROOT=/home/nwm/.nhms-issue1895-evidence
+/bin/sudo -n /usr/bin/install -d -m 700 -o root -g root "$EVID_ROOT"
+STAGE="$RUN_ROOT/evidence/stage"
+mkdir -p "$STAGE"; chmod 700 "$STAGE"
+for PRODUCER in /usr/sbin/mdadm /usr/sbin/smartctl /usr/local/sbin/nhms-backup-inventory; do
+  test -x "$PRODUCER" || { echo "NO-GO: production evidence producer $PRODUCER is absent" >&2; exit 1; }
+done
+CAPTURED_AT="$(/usr/bin/date -u +%FT%TZ)"
+HOST_NAME="$(/bin/hostname)"
+test -n "$HOST_NAME"
+ARRAY_DEVICE=/dev/md0
+PGDATA_HOST=/home/nwm/nhms-pgdata
+COLD_HOST_PATH=/data/GHDC/nhms-cold-tablespace
+COLD_CONTAINER_PATH=/home/postgres/pgdata/tablespaces/nhms_cold
+
+/bin/sudo -n /usr/sbin/mdadm --detail "$ARRAY_DEVICE" > "$STAGE/mdadm.raw"
+test -s "$STAGE/mdadm.raw"
+MD0_MEMBERS="$(/usr/bin/awk '/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]+[0-9]+[[:space:]]/ && $NF ~ "^/dev/" { print $NF }' "$STAGE/mdadm.raw" | /usr/bin/sort -u)"
+test "$(printf '%s\n' "$MD0_MEMBERS" | /usr/bin/wc -l)" -eq 2
+for DEVICE in $MD0_MEMBERS; do
+  /bin/sudo -n /usr/sbin/smartctl -H "$DEVICE" > "$STAGE/smart.$(/usr/bin/basename "$DEVICE").raw"
+  test -s "$STAGE/smart.$(/usr/bin/basename "$DEVICE").raw"
+done
+/bin/sudo -n /usr/local/sbin/nhms-backup-inventory --json > "$STAGE/backup.json"
+test -s "$STAGE/backup.json"
+```
+
+Capture the **fresh live** external `pg_tblspc` targets now (never reuse the G1
+artifact's list as the current catalog) and build the schema-`1.0` envelopes.
+The `output` value is the producer file's **verbatim text** (mdadm/SMART raw
+output and the backup producer's exact JSON text — never a json round-trip), and
+`covered_paths` is the producer's **own verbatim list** checked for the required
+members with no union:
+
+```bash
+set -euo pipefail
+EXTERNAL_RC=0
+/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -F'|' -P pager=off -c \
+  "SELECT spcname, pg_tablespace_location(oid) AS location FROM pg_tablespace WHERE pg_tablespace_location(oid) <> '' ORDER BY location, spcname" \
+  > "$STAGE/external-targets.txt" || EXTERNAL_RC=$?
+test "$EXTERNAL_RC" -eq 0 || { echo "NO-GO: external tablespace query failed" >&2; exit 1; }
+export STAGE CAPTURED_AT HOST_NAME ARRAY_DEVICE PGDATA_HOST COLD_CONTAINER_PATH
+/home/nwm/NWM/.venv/bin/python <<'PY'
+import json, os
+stage = os.environ["STAGE"]
+mdadm_output = open(f"{stage}/mdadm.raw", encoding="utf-8").read()
+members = []
+for line in mdadm_output.splitlines():
+    fields = line.split()
+    if len(fields) >= 6 and all(item.isdigit() for item in fields[:4]) and fields[-1].startswith("/dev/"):
+        assert "active sync" in " ".join(fields[4:-1]).lower(), f"member {fields[-1]} is not active sync"
+        members.append(fields[-1])
+assert sorted(members) == sorted(set(members)) and len(members) == 2, members
+external_rows = []
+for line in open(f"{stage}/external-targets.txt", encoding="utf-8"):
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    name, separator, location = line.partition("|")
+    assert separator and location.startswith("/"), line
+    external_rows.append({"spcname": name, "location": location})
+targets = sorted({row["location"] for row in external_rows} | {os.environ["COLD_CONTAINER_PATH"]})
+backup_text = open(f"{stage}/backup.json", encoding="utf-8").read()
+backup_document = json.loads(backup_text)
+covered = list(backup_document["covered_paths"])
+missing = [item for item in (os.environ["PGDATA_HOST"], *targets) if item not in covered]
+assert not missing, f"producer did not cover: {missing}"
+envelopes = {
+    "mdadm": {
+        "argv": ["/usr/sbin/mdadm", "--detail", os.environ["ARRAY_DEVICE"]],
+        "subject": {"array_device": os.environ["ARRAY_DEVICE"], "members": sorted(members)},
+        "output": mdadm_output,
+    },
+    "backup": {
+        "argv": ["/usr/local/sbin/nhms-backup-inventory", "--json"],
+        "subject": {"pgdata": os.environ["PGDATA_HOST"], "external_pg_tblspc_targets": targets},
+        "output": backup_text,
+        "covered_paths": covered,
+    },
+}
+for device in members:
+    token = device.rsplit("/", 1)[-1]
+    envelopes[f"smart.{token}"] = {
+        "argv": ["/usr/sbin/smartctl", "-H", device],
+        "subject": {"device": device},
+        "output": open(f"{stage}/smart.{token}.raw", encoding="utf-8").read(),
+    }
+for name, item in envelopes.items():
+    assert item["output"].strip(), f"empty output for {name}"
+    document = {
+        "schema_version": "1.0",
+        "captured_at": os.environ["CAPTURED_AT"],
+        "hostname": os.environ["HOST_NAME"],
+        "command": {"argv": item["argv"]},
+        "subject": item["subject"],
+        "output": item["output"],
+    }
+    if "covered_paths" in item:
+        document["covered_paths"] = item["covered_paths"]
+    with open(f"{stage}/{name}.json", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, sort_keys=True) + "\n")
+    os.chmod(f"{stage}/{name}.json", 0o600)
+PY
+```
+
+The envelope builder above is **not** a coverage claim and **not** the parser:
+the shipping parsers are the only authority, and they are invoked below on the
+**installed root-owned** files. Install each staged envelope root-owned and mode
+`0600`:
+
+```bash
+set -euo pipefail
+export MD0_MEMBERS
+for NAME in mdadm backup $(for DEVICE in $MD0_MEMBERS; do printf 'smart.%s ' "$(/usr/bin/basename "$DEVICE")"; done); do
+  /bin/sudo -n /usr/bin/install -m 600 -o root -g root "$STAGE/$NAME.json" "$EVID_ROOT/$RUN_STAMP-$NAME.json"
+  test "$(stat -c '%u:%g' "$EVID_ROOT/$RUN_STAMP-$NAME.json")" = "0:0"
+  test "$(stat -c '%a' "$EVID_ROOT/$RUN_STAMP-$NAME.json")" = "600"
+done
+MDADM_EVIDENCE="$EVID_ROOT/$RUN_STAMP-mdadm.json"
+BACKUP_EVIDENCE="$EVID_ROOT/$RUN_STAMP-backup.json"
+SMART_A_DEVICE="$(printf '%s\n' "$MD0_MEMBERS" | /usr/bin/sed -n 1p)"
+SMART_B_DEVICE="$(printf '%s\n' "$MD0_MEMBERS" | /usr/bin/sed -n 2p)"
+SMART_A="$EVID_ROOT/$RUN_STAMP-smart.$(/usr/bin/basename "$SMART_A_DEVICE").json"
+SMART_B="$EVID_ROOT/$RUN_STAMP-smart.$(/usr/bin/basename "$SMART_B_DEVICE").json"
+```
+
+Now run the **unchanged shipping parsers** against those descriptor-bound files
+through the real `EvidencePolicy`, so the same checks the installer will run
+(owner/mode/argv/subject/hostname/freshness/coverage) are proven now and the
+parser is genuinely executed — not merely named in prose:
+
+```bash
+set -euo pipefail
+export MDADM_EVIDENCE BACKUP_EVIDENCE SMART_A_DEVICE SMART_B_DEVICE SMART_A SMART_B HOST_NAME CAPTURED_AT ARRAY_DEVICE PGDATA_HOST COLD_CONTAINER_PATH STAGE
+/home/nwm/NWM/.venv/bin/python <<'PY'
+import json, os
+from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_cold_tablespace_evidence import (
+    EvidencePolicy,
+    parse_backup_inventory,
+    parse_mdadm_evidence,
+    parse_smart_evidence,
+)
+stage = os.environ["STAGE"]
+external = sorted(
+    {line.split("|", 1)[1].strip() for line in open(f"{stage}/external-targets.txt", encoding="utf-8") if "|" in line}
+)
+targets = tuple(sorted(set(external) | {os.environ["COLD_CONTAINER_PATH"]}))
+mdadm = Path(os.environ["MDADM_EVIDENCE"])
+backup = Path(os.environ["BACKUP_EVIDENCE"])
+smart_a = Path(os.environ["SMART_A"])
+smart_b = Path(os.environ["SMART_B"])
+policy = EvidencePolicy(
+    expected_hostname=os.environ["HOST_NAME"],
+    array_device=os.environ["ARRAY_DEVICE"],
+    max_age_seconds=900,
+    expected_uid=0,
+    approved_modes=(0o600,),
+    mdadm_argv=("/usr/sbin/mdadm", "--detail", os.environ["ARRAY_DEVICE"]),
+    smartctl_prefix=("/usr/sbin/smartctl",),
+    backup_argv=("/usr/local/sbin/nhms-backup-inventory", "--json"),
+    expected_pgdata=os.environ["PGDATA_HOST"],
+)
+now = datetime.now(UTC)
+raid = parse_mdadm_evidence(mdadm, policy=policy, now=now)
+assert raid.healthy, raid.blockers
+assert raid.members and len(raid.members) == 2, raid.members
+assert raid.state in {"clean", "active", "active idle"}, raid.state
+smart_a_obs = parse_smart_evidence(smart_a, device=os.environ["SMART_A_DEVICE"], policy=policy, now=now)
+smart_b_obs = parse_smart_evidence(smart_b, device=os.environ["SMART_B_DEVICE"], policy=policy, now=now)
+assert smart_a_obs.status == "PASS" and smart_b_obs.status == "PASS", (smart_a_obs.blockers, smart_b_obs.blockers)
+backup_obs = parse_backup_inventory(backup, policy=policy, external_targets=targets, now=now)
+assert backup_obs.complete, backup_obs.blockers
+assert {os.environ["PGDATA_HOST"], *targets} <= set(backup_obs.covered_paths), backup_obs.missing_targets
+print("root evidence passed:", raid.state, backup_obs.covered_paths)
+PY
+```
+
+Envelope age is enforced by `captured_at` inside the installer, not by file
+mtime, so G5 must **run this entire G2 subsection again** against a fresh
+`$RUN_STAMP` capture (a second `EVID_ROOT` name) immediately before enforce —
+never reuse the G2 files for enforce. 900 seconds covers capture-to-install, not
+capture-to-rollback. If the backup producer is absent, exits non-zero, or its
+`covered_paths` cannot include PGDATA plus every external target, stop — that is
+the spec's PGDATA-only backup blocker and the installer refuses identically.
+`parse_mdadm_evidence`, `parse_smart_evidence` and `parse_backup_inventory`
+(executed above through the real `EvidencePolicy` on the root-owned installed
+files) are the sole authority that re-checks owner/mode/argv/subject/hostname/
+freshness from their own descriptors; the runbook never re-implements that
+check, and `covered_paths` is never unioned with or replaced by a runbook list.
+
+### G3 — Exact-SHA isolated oracle before any live mutation
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
+test -z "$(git status --porcelain)"
+ORACLE_REPORT="$RUN_ROOT/receipts/isolated-oracle-$RUN_STAMP.json"
+ORACLE_BRACKET="$RUN_ROOT/receipts/isolated-oracle-$RUN_STAMP.bracket"
+PROBE_NAME="$(/home/nwm/NWM/.venv/bin/python -c 'from packages.common.node27_issue1895_probe import owned_probe_name, owned_probe_token; print(owned_probe_name(owned_probe_token()))')"
+printf '%s' "$PROBE_NAME" | /usr/bin/grep -Eqx '^nhms-1892-probe-[0-9a-f]{8,32}$'
+PROBE_PORT=55492
+/usr/bin/docker inspect "$PROBE_NAME" >/dev/null 2>&1 && { echo "NO-GO: probe container name already exists" >&2; exit 1; }
+PROBE_ROOT="/home/nwm/.nhms-1892-probe/$PROBE_NAME"
+test ! -e "$PROBE_ROOT"
+( exec 9<>"/dev/tcp/127.0.0.1/$PROBE_PORT" ) 2>/dev/null && { echo "NO-GO: probe port $PROBE_PORT is live" >&2; exit 1; }
+_start="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+uv run --no-sync python scripts/probe_compressed_chunk_cold_tablespace.py \
+  --mode isolated-cluster \
+  --container-name "$PROBE_NAME" \
+  --host-port "$PROBE_PORT" \
+  --work-root "$PROBE_ROOT" \
+  --output "$ORACLE_REPORT" || rc=$?
+_end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$ORACLE_BRACKET"
+test "$rc" -eq 0
+/home/nwm/NWM/.venv/bin/python - "$ORACLE_REPORT" "$ORACLE_BRACKET" "$PROBE_NAME" "$PROBE_ROOT" <<'PY'
+import sys
+from pathlib import Path
+from packages.common.compressed_chunk_cold_probe.report import parse_probe_report
+from packages.common.compressed_chunk_cold_probe.types import OWNED_NAME_RE, PROBE_NAME_PREFIX
+from packages.common.compressed_chunk_cold_residency import ACCEPTED_SEQUENCE_NAME
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
+from packages.common.node27_issue1895_probe import assert_report_within_command_bracket, parse_bracket_instant
+path, bracket, probe_name, probe_root = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+bracket_text = read_held_private_text(Path(bracket), label="G3 oracle bracket", stage="probe")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
+assert len(lines) == 3 and lines[2] == "0", lines
+assert OWNED_NAME_RE.fullmatch(probe_name), probe_name
+assert Path(probe_root).name == probe_name and PROBE_NAME_PREFIX in Path(probe_root).name
+_raw, payload, facts = read_held_private_json(Path(path), label="G3 oracle report", stage="probe")
+report = parse_probe_report(payload)
+assert report["status"] == "passed"
+assert report["sequence"]["accepted"] == ACCEPTED_SEQUENCE_NAME
+lifecycle = report["lifecycle"]
+assert lifecycle["committed_move"]["reconciliation"] == "complete_target"
+assert lifecycle["move_back"]["reconciliation"] == "complete_target"
+assert lifecycle["move_back_residency"] == "all_source"
+assert lifecycle["parity_unchanged_until_replay"] is True
+cleanup = report["cleanup"]
+assert cleanup["container_absent"] is True
+assert cleanup["work_root_absent"] is True
+assert cleanup["identity_bound"] is True
+assert_report_within_command_bracket(
+    report_mtime=facts["st_mtime_ns"] / 1_000_000_000,
+    start=parse_bracket_instant(lines[0]),
+    end=parse_bracket_instant(lines[1]),
+)
+print("oracle PASS:", report["status"])
+PY
+test "$PROBE_NAME" = "$(printf '%s' "$PROBE_NAME")"
+/usr/bin/docker inspect "$PROBE_NAME" >/dev/null 2>&1 && { echo "NO-GO: probe container still exists" >&2; exit 1; }
+test ! -e "$PROBE_ROOT"
+```
+
+The probe owns its isolation: it refuses the live container name `nhms-db`, live
+PGDATA, and port `55432`; pins the image id/ref and PG 15.2 / TimescaleDB 2.10.2;
+creates its own PGDATA and hot/cold paths under the owned work root; and removes
+only resources it created. `$PROBE_NAME`, `$PROBE_PORT` and `$PROBE_ROOT` are this
+window's owned, unique, non-production identities — never reuse a probe or
+install name, port, or root from another issue's window. The owner name must
+match `^nhms-1892-probe-[0-9a-f]{8,32}$` (the shipping `OWNED_NAME_RE`), the work
+root must contain the probe prefix, and the port must be confirmed free before
+the run. PASS is decided by the shipping `parse_probe_report` predicate (the same
+owner the probe tests use), which machine-checks every required row, the accepted
+sequence, and owned cleanup; the runbook never re-implements that predicate and
+never invents `rows[].name` or non-existent cleanup keys. The probe report has no
+`generated_at`/`head` fields, so the current-run binding here is the bracket
+`rc=0` plus the report mtime after the command start marker and at or before
+the post-command bracket close — never the bracket-file mtime (that file is
+written after the report) and never an invented receipt field. The work-root
+*basename* is the owned probe name (`PROBE_NAME_PREFIX` + hex token), not a
+timestamp sitting under a prefixed parent. Cleanup is checked **only for this run's exact names**: `docker
+inspect "$PROBE_NAME"` must fail and `test ! -e "$PROBE_ROOT"` must pass; no
+prefix `grep` over all containers or global work-root listing is used. **The
+historical #1892 receipt cannot satisfy this gate.**
+
+Then re-check the engine and group contract inputs against the live cluster,
+read-only, every command machine-asserted:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+ENGINE_SQL="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT current_setting('server_version'), (SELECT extversion FROM pg_extension WHERE extname='timescaledb')")"
+uv run --no-sync python scripts/node27_issue1895_engine.py --row "$ENGINE_SQL"
+rc=0
+uv run --no-sync python scripts/node27_external_contract_snapshot.py --check || rc=$?
+test "$rc" -eq 0 || { echo "NO-GO: external contract snapshot --check exit $rc (3=drift, 4=misalignment, 5=probe failure)" >&2; exit 1; }
+set -a
+. /home/nwm/NWM/infra/env/node27-timeseries-compression.env
+set +a
+: "${NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS:?configured compression lag is required}"
+CUTOFF_COUNT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT count(*) FROM timescaledb_information.chunks WHERE is_compressed AND range_end <= (SELECT max(cycle_time) FROM hydro.hydro_run WHERE run_type='forecast' AND status IN ('succeeded','parsed','published')) - interval '1 second' * ${NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS}")"
+test "$CUTOFF_COUNT" = "$REQUIRE_COUNT" || { echo "NO-GO: cutoff count $CUTOFF_COUNT != $REQUIRE_COUNT" >&2; exit 1; }
+TARGET_ABSENT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT spcname FROM pg_tablespace WHERE spcname='nhms_cold'")"
+test -z "$TARGET_ABSENT" || { echo "NO-GO: nhms_cold already exists" >&2; exit 1; }
+ATTACHED="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT tablespace_name FROM _timescaledb_catalog.tablespace")"
+test -z "$ATTACHED" || { echo "NO-GO: a tablespace is already attached" >&2; exit 1; }
+```
+
+The count statement must equal `REQUIRE_COUNT` and its interval must be the same
+configured lag the census used — the cutoff is shared, not recomputed from wall
+time. `node27_external_contract_snapshot.py --check` must exit `0` (exit `3` is
+drift, `4` fixture misalignment, `5` probe-execution failure — all NO-GO for this
+window, never a patch bump). `_timescaledb_catalog.tablespace` carries
+`tablespace_name` (never `tablespace`). If `nhms_cold` already exists at this
+point, that is partial topology: stop, do not install over it.
+
+### G4 — Drain writers, then assemble the cold env
+
+Stop the six writer service/timer units plus the governance and replay lanes that
+would otherwise fire during the container outage or write an eligible compressed
+group. This is a drain, not an uninstall: the units stay quiesced until the
+written preliminary GO in G8, or until a **pre-install no-mutation abort** — or
+until the installer's own `reconcile()` produces a terminal rollback receipt —
+authorizes restoration. After terminal `installed` there is **no** zero-group
+installer rollback.
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+UNITS_ENABLE_STATE="$RUN_ROOT/env/timer-enablement-$RUN_STAMP.txt"
+for UNIT in nhms-node27-autopipe.timer nhms-node27-timeseries-compression.timer \
+            nhms-node27-timeseries-retention.timer nhms-node27-resource-governance.timer \
+            nhms-node27-timeseries-compression-replay.service; do
+  printf '%s %s\n' "$UNIT" "$(/usr/bin/systemctl --user show "$UNIT" -p UnitFileState --value 2>/dev/null || echo unknown)"
+done > "$UNITS_ENABLE_STATE"
+chmod 600 "$UNITS_ENABLE_STATE"
+systemctl --user stop \
+  nhms-node27-autopipe.service nhms-node27-autopipe.timer \
+  nhms-node27-timeseries-compression.service nhms-node27-timeseries-compression.timer \
+  nhms-node27-timeseries-retention.service nhms-node27-timeseries-retention.timer \
+  nhms-node27-resource-governance.service nhms-node27-resource-governance.timer \
+  nhms-node27-timeseries-compression-replay.service
+for UNIT in nhms-node27-autopipe.service nhms-node27-autopipe.timer \
+            nhms-node27-timeseries-compression.service nhms-node27-timeseries-compression.timer \
+            nhms-node27-timeseries-retention.service nhms-node27-timeseries-retention.timer \
+            nhms-node27-resource-governance.service nhms-node27-resource-governance.timer \
+            nhms-node27-timeseries-compression-replay.service; do
+  /usr/bin/systemctl --user show "$UNIT" -p UnitFileState -p ActiveState -p SubState -p Result
+done > "$RUN_ROOT/receipts/quiescence-$RUN_STAMP.txt"
+test "$(stat -c '%a' "$RUN_ROOT/receipts/quiescence-$RUN_STAMP.txt")" = "600"
+/usr/bin/grep -c '^ActiveState=inactive$' "$RUN_ROOT/receipts/quiescence-$RUN_STAMP.txt" | /usr/bin/grep -qx 9
+/usr/bin/grep -Ec '^SubState=(dead|waiting)$' "$RUN_ROOT/receipts/quiescence-$RUN_STAMP.txt" | /usr/bin/grep -qx 9
+/usr/bin/grep -Ec '^Result=(success|n/a)$' "$RUN_ROOT/receipts/quiescence-$RUN_STAMP.txt" | /usr/bin/grep -qx 9
+FAILED_UNITS="$(/usr/bin/systemctl --user --failed --no-legend)"
+test -z "$(printf '%s\n' "$FAILED_UNITS" | /usr/bin/grep -E 'nhms-node27')"
+for UNIT in nhms-node27-autopipe.service nhms-node27-autopipe.timer \
+            nhms-node27-timeseries-compression.service nhms-node27-timeseries-compression.timer \
+            nhms-node27-timeseries-retention.service nhms-node27-timeseries-retention.timer \
+            nhms-node27-resource-governance.service nhms-node27-resource-governance.timer \
+            nhms-node27-timeseries-compression-replay.service; do
+  MAIN_PID="$(/usr/bin/systemctl --user show "$UNIT" -p MainPID --value)"
+  test "$MAIN_PID" = "0" || { echo "NO-GO: $UNIT still has MainPID $MAIN_PID" >&2; exit 1; }
+done
+for LANE_LOCK in /tmp/autopipe.cron.lock /tmp/nhms-node27-timeseries-lifecycle.lock \
+                 /tmp/nhms-node27-timeseries-cold-residency.lock; do
+  if [ -e "$LANE_LOCK" ]; then
+    /usr/bin/fuser -s "$LANE_LOCK" && { echo "NO-GO: $LANE_LOCK is held" >&2; exit 1; }
+  fi
+done
+```
+
+The six units above are exactly what the installer's own quiescence gate checks
+(`systemctl --user show <unit> -p ActiveState -p SubState -p Result` for
+`nhms-node27-autopipe.{service,timer}`,
+`nhms-node27-timeseries-compression.{service,timer}`,
+`nhms-node27-timeseries-retention.{service,timer}`: `ActiveState=inactive`,
+`SubState` in `dead`/`waiting`, `Result` in `success`/`n/a` — the installer owns
+this exact list in `WRITER_TIMER_UNITS`). Every stopped unit's
+`UnitFileState`/`ActiveState`/`SubState`/`Result` is recorded — never
+`is-enabled || echo masked` — because G8 restores by `UnitFileState`, not
+inference. `$UNITS_ENABLE_STATE` is the only record of what to restore in G8 —
+not memory, not the unit files. The governance timer is stopped because it audits
+both filesystems at the 04:10 window and `nhms_cold` capacity must not be sampled
+mid-install; the replay lane is stopped because it is a no-timer oneshot that
+would otherwise be a second mutation entrypoint. Autopipe is stopped because it
+can write new rows into a chunk window the movement is about to lock; the
+lifecycle lock is the overlap backstop for everything else.
+
+Then assemble the mode-0600 cold env from the existing private source, without
+printing it, and observe the runtime identity through the shipping owner:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+test -f infra/env/node27-cold-residency.env \
+  || /usr/bin/install -m 600 infra/env/node27-cold-residency.example infra/env/node27-cold-residency.env
+test "$(stat -c '%a' infra/env/node27-cold-residency.env)" = "600"
+/usr/bin/grep -q '^DATABASE_URL=postgresql://' infra/env/node27-cold-residency.env
+INSPECT_FORMAT='{"Mounts":{{json .Mounts}},"User":{{json .Config.User}}}'
+/usr/bin/docker inspect --format "$INSPECT_FORMAT" nhms-db > "$RUN_ROOT/env/runtime-projection.json"
+chmod 600 "$RUN_ROOT/env/runtime-projection.json"
+export RUNTIME_PROJECTION="$RUN_ROOT/env/runtime-projection.json"
+RUNNER_UID_GID="$(/home/nwm/NWM/.venv/bin/python - "$RUNTIME_PROJECTION" <<'PY'
+import sys
+from pathlib import Path
+from packages.common.compressed_chunk_cold_target import parse_container_exec_user
+from packages.common.node27_issue1895_private_receipt import read_held_private_json
+_raw, projection, _facts = read_held_private_json(Path(sys.argv[1]), label="G4 runtime projection", stage="env")
+identity = parse_container_exec_user(projection["User"])
+print(f"{identity.uid} {identity.gid}")
+PY
+)"
+RUNTIME_UID="${RUNNER_UID_GID%% *}"
+RUNTIME_GID="${RUNNER_UID_GID##* }"
+test -n "$RUNTIME_UID" && test -n "$RUNTIME_GID"
+export RUNTIME_UID RUNTIME_GID
+```
+
+`Config.User` is parsed **only** by the shipping
+`parse_container_exec_user` on the exact `INSPECT_FORMAT` projection (the
+committed constant `{"Mounts":{{json .Mounts}},"User":{{json .Config.User}}}`),
+never by a hand-written grep, never by a bare `{{.Config.User}}` inspect, and
+never by a historical pair (§4.3.3's `1005:1005` is history, not identity). A
+name, a UID-only pair, root, or an out-of-range component refuses inside the
+shipping parser before any output reaches a variable. The projection file is
+mode-0600 and carries the `Mounts` field too, so the pair that authorizes the
+writability probe is the pair the container was serving the bind with. This
+inspection is deliberately **not** the full target inspector: no cold-bind or
+`test -w` requirement is applied before the install has created the target.
+
+Fill exactly these keys in `infra/env/node27-cold-residency.env` — edit it in
+place, never re-copy the example over the deployed file, and never echo the file:
+
+| Key | Value in this window |
+|-----|----------------------|
+| `DATABASE_URL` | unchanged from the existing private writer-role source: never re-typed, printed, or copied into any artifact |
+| `NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES` | `$COLD_RESERVE` (= `E`) |
+| `NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES` | `$WAL_RESERVE` (= `E`) |
+| `NODE27_COLD_RESIDENCY_PER_TICK_BOUND` | `1` |
+| `NODE27_COLD_RESIDENCY_CONTAINER_EXEC_UID` | `$RUNTIME_UID`, freshly observed |
+| `NODE27_COLD_RESIDENCY_CONTAINER_EXEC_GID` | `$RUNTIME_GID`, freshly observed |
+| `NODE27_COLD_RESIDENCY_RECEIPT_PATH` | overridden per invocation in G6; the file value stays the lane default |
+| `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY` | **unset** until after G5; then `RUNNER_DEVICE_IDENTITY` only |
+
+Neither reserve, the bound, the UID/GID pair, nor the device identity has a
+Python, wrapper, or example-template default. The installer's `--recovery-path`
+authority file is authored only by the installer itself, mode 0600, inside
+`$RUN_ROOT/env`.
+
+Fill the reserve/bound/UID/GID keys with the checked-in rewrite owner
+`scripts/node27_issue1895_env_rewrite.py`. That owner preserves comments, blank
+lines, commented/unassigned optional keys, and unrelated assignments; copies
+`DATABASE_URL` byte-for-byte (never printed); refuses duplicates and a
+pre-assigned device identity; and publishes through a mode-0600 no-clobber
+atomic replace:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+uv run --no-sync python scripts/node27_issue1895_env_rewrite.py \
+  --path /home/nwm/NWM/infra/env/node27-cold-residency.env \
+  --cold-reserve-bytes "$COLD_RESERVE" \
+  --wal-reserve-bytes "$WAL_RESERVE" \
+  --per-tick-bound 1 \
+  --container-exec-uid "$RUNTIME_UID" \
+  --container-exec-gid "$RUNTIME_GID"
+test "$(stat -c '%a' infra/env/node27-cold-residency.env)" = "600"
+set -a
+. infra/env/node27-cold-residency.env
+set +a
+test "$NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES" = "$COLD_RESERVE"
+test "$NODE27_COLD_RESIDENCY_WAL_RESERVE_BYTES" = "$WAL_RESERVE"
+test "$NODE27_COLD_RESIDENCY_PER_TICK_BOUND" = "1"
+test -z "${NODE27_COLD_RESIDENCY_DEVICE_IDENTITY:-}"
+```
+
+`set -a; . file; set +a` is the only way the DSN leaves the private file — it
+never passes through argv, `ps`, `set -x`, a log, or an artifact. The device
+identity key stays unassigned here because the path does not exist yet; G5 fills
+it **after** the install, from the runner-lane observer only.
+
+Verify the sequential budget before anything can launch:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+rc=0
+uv run --no-sync python scripts/node27_timeseries_budget_preflight.py \
+  --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env \
+  --cold-env /home/nwm/NWM/infra/env/node27-cold-residency.env --check || rc=$?
+test "$rc" -eq 0 || { echo "NO-GO: sequential budget preflight --check exit $rc" >&2; exit 1; }
+uv run --no-sync python scripts/node27_timeseries_budget_preflight.py \
+  --compression-env /home/nwm/NWM/infra/env/node27-timeseries-compression.env \
+  --cold-env /home/nwm/NWM/infra/env/node27-cold-residency.env \
+  --lane cold --format assembly > "$RUN_ROOT/receipts/budget-$RUN_STAMP.txt" || { echo "NO-GO: assembly output failed" >&2; exit 1; }
+chmod 600 "$RUN_ROOT/receipts/budget-$RUN_STAMP.txt"
+/usr/bin/grep -qx '3900,3901,7842,3600000,3600000,4' "$RUN_ROOT/receipts/budget-$RUN_STAMP.txt" || {
+  echo "NO-GO: assembly line drifted" >&2; exit 1; }
+/usr/bin/grep -qx 'TimeoutStartSec=7842' /usr/lib/systemd/user/nhms-node27-timeseries-compression.service || {
+  echo "NO-GO: installed TimeoutStartSec drifted" >&2; exit 1; }
+```
+
+The assembly line is `compression_wall,cold_wall,service_wall,compression_statement_ms,cold_statement_ms,compression_bound`;
+it must match the installed `TimeoutStartSec` declaration. A larger catch-up
+window requires the matching drop-in installed **first** — the preflight
+validates declarations and cannot introspect `TimeoutStartSec`.
+
+### G5 — Install through the #1894 installer (the sole mutation entrypoint)
+
+> **FORBIDDEN PATH.** The historical §4.3.3 "Recreating the `nhms-db` container
+> (mount-critical)" recipe, the bare `docker run` block inside it, and the
+> generic `node-27-database-container-operations` recreate procedure are **not**
+> entrypoints for this cold bind, this install, or any rollback of it. They prove
+> no container-config equivalence, they carry `ghdc` residue mounts, they
+> snapshot no private recovery authority, and they bind no evidence, capacity,
+> identity, or no-attach gate. Do not copy, adapt, or "hand-verify" them here:
+> using them for the cold bind is a fatal trigger row, not a shortcut. The
+> historical recipe remains in this file for unrelated container recreation;
+> it is never a cold-bind entrypoint.
+
+Observe the two device identities. They are deliberately different fields, taken
+at different times, by different owners, and are never copied into each other:
+
+| Name | Owner function | Format | Observed | Feeds |
+|------|----------------|--------|----------|-------|
+| `INSTALLER_DEVICE_IDENTITY` | `packages.common.node27_cold_tablespace_host.inspect_host_path()` | `major:minor:mount-id:source` | before install, absent production child | installer `--expected-device-identity` only |
+| `RUNNER_DEVICE_IDENTITY` | `packages.common.compressed_chunk_cold_target.inspect_host_path()` | `st_dev:st_ino` | only after the path exists | `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY` only |
+
+They may legitimately differ; assigning one field to the other is a drift NO-GO.
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+test ! -e /data/GHDC/nhms-cold-tablespace || { echo "NO-GO: pre-install child exists" >&2; exit 1; }
+INSTALLER_DEVICE_IDENTITY="$(uv run --no-sync python scripts/node27_cold_identity_observe.py installer | /usr/bin/awk '{print $2}')"
+printf '%s' "$INSTALLER_DEVICE_IDENTITY" | /usr/bin/grep -Eqx '^[0-9]+:[0-9]+:[0-9]+:.+$' || {
+  echo "NO-GO: installer identity format is wrong" >&2; exit 1; }
+export INSTALLER_DEVICE_IDENTITY
+RUNNER_DEVICE_IDENTITY=""    # observable only after the installer creates the path
+```
+
+The observation runs the shipped observer, not a shell re-implementation, in a
+disposable process with no database or Docker socket: mount and inode are only
+meaningful on the Linux `/proc/self/mountinfo` the installer itself parses, and
+the observer needs no credentials. It asserts the absent child: an `exists=True`
+result means topology already exists, which is a partial-topology NO-GO rather
+than something to install over. There is **no `docker run` in this section**: the
+observer runs on the host against the same mountinfo the installer parses, so it
+cannot diverge from the installer's own observation.
+
+Build the installer argv once as an array, so dry-run and enforce are provably
+the same procedure:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+set -a
+. /home/nwm/NWM/infra/env/node27-cold-residency.env      # DATABASE_URL, never echoed
+set +a
+INSTALL_ARGS=(
+  --head-sha "$REVIEWED_SHA"
+  --expected-uid "$RUNTIME_UID"
+  --expected-gid "$RUNTIME_GID"
+  --expected-mode 0700
+  --expected-device-identity "$INSTALLER_DEVICE_IDENTITY"
+  --install-required-bytes "$INSTALL_REQUIRED"
+  --rollback-headroom-bytes "$ROLLBACK_HEADROOM"
+  --evidence-hostname "$HOST_NAME"
+  --array-device "$ARRAY_DEVICE"
+  --evidence-max-age-seconds 900
+  --evidence-owner-uid 0
+  --evidence-approved-mode 0600
+  --pgdata-path "$PGDATA_HOST"
+  --mdadm-bin /usr/sbin/mdadm
+  --smartctl-bin /usr/sbin/smartctl
+  --backup-inventory-bin /usr/local/sbin/nhms-backup-inventory
+  --mdadm-evidence "$MDADM_EVIDENCE"
+  --smart-evidence "$SMART_A_DEVICE=$SMART_A"
+  --smart-evidence "$SMART_B_DEVICE=$SMART_B"
+  --backup-evidence "$BACKUP_EVIDENCE"
+)
+DRY_RECEIPT="$RUN_ROOT/receipts/installer-dryrun-$RUN_STAMP.json"
+_start="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+uv run --no-sync python scripts/node27_cold_tablespace_install.py \
+  --receipt-path "$DRY_RECEIPT" \
+  --recovery-path "$RUN_ROOT/env/installer-recovery-dryrun-$RUN_STAMP.private" \
+  "${INSTALL_ARGS[@]}" || rc=$?
+_end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$DRY_RECEIPT.bracket"
+test "$rc" -eq 0 || { echo "NO-GO: installer dry-run exit $rc" >&2; exit 1; }
+stat -c '%a' "$DRY_RECEIPT" | /usr/bin/grep -qx 600
+/home/nwm/NWM/.venv/bin/python - "$DRY_RECEIPT" "$REVIEWED_SHA" "$DRY_RECEIPT.bracket" <<'PY'
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
+path, head, bracket = sys.argv[1], sys.argv[2], sys.argv[3]
+bracket_text = read_held_private_text(Path(bracket), label="G5 installer bracket", stage="census")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
+assert len(lines) == 3 and lines[2] == "0", lines
+start_str, end_str = lines[0], lines[1]
+def _utc(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+_raw, document, _facts = read_held_private_json(Path(path), label="G5 installer receipt", stage="census")
+generated = _utc(document["generated_at"])
+assert document["schema_version"] == "1.0"
+assert document["mode"] == "dry-run" and document["outcome"] == "dry_run"
+assert document["state"] == "preflight"
+assert document["head_sha"] == head
+assert _utc(start_str) <= generated <= _utc(end_str) and (datetime.now(UTC) - generated).total_seconds() <= 900
+assert document["identity"]["kind"] == "production"
+assert document["identity"]["container_name"] == "nhms-db"
+assert document["identity"]["host_path"] == "/data/GHDC/nhms-cold-tablespace"
+assert document["identity"]["container_path"] == "/home/postgres/pgdata/tablespaces/nhms_cold"
+assert document["identity"]["tablespace"] == "nhms_cold"
+assert document["path"]["device_identity"] is None, document["path"]["device_identity"]
+assert document["path"]["exists"] is False, document["path"]
+assert document["evidence"]["health"]["healthy"] is True, document["evidence"]["health"]["blockers"]
+assert document["evidence"]["backup"]["complete"] is True, document["evidence"]["backup"]["missing_targets"]
+assert document["evidence"]["capacity"]["approved"] is True, document["evidence"]["capacity"]["blockers"]
+assert document["readback"]["hypertable_attached"] is False
+assert document["readback"]["new_chunk_tablespace"] == "pg_default"
+assert document["authority"]["state"] == "closed" and document["authority"]["path_present"] is False
+assert not document["blockers"], document["blockers"]
+PY
+```
+
+The dry-run outcome must be `dry_run` (a complete matching topology reports
+`already_ready` instead, which means the cold bind already exists — stop, this
+window has no authority to adopt it). `no_go` stops the window. The receipt
+binder above reads only real installer-schema fields: `mode`/`outcome`/`state`,
+`identity`, `path` (which carries **`device_identity: null` when the path is
+absent** — never a `host_path[:0]` tautology), `evidence.health/backup/capacity`,
+`readback` and `authority` — there is no `groups_moved` anywhere in the
+installer receipt, and no `--database-url` appears in any argv here: the DSN
+stays in the sourced private env.
+
+Then, in the same window, **re-capture G2 root evidence** (fresh capture, unique
+`-2` paths, `<= 900` seconds old — never reuse the G2 files) and run exactly one
+`--enforce` invocation with the same argv plus `--enforce`. The DSN is only ever
+sourced from the private env; it is never passed as `--database-url`:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+EVID_STAMP2="$(/usr/bin/date -u +%Y%m%dT%H%M%SZ)"
+STAGE2="$RUN_ROOT/evidence/stage-$EVID_STAMP2"
+mkdir -p "$STAGE2"; chmod 700 "$STAGE2"
+for PRODUCER in /usr/sbin/mdadm /usr/sbin/smartctl /usr/local/sbin/nhms-backup-inventory; do
+  test -x "$PRODUCER" || { echo "NO-GO: production evidence producer $PRODUCER is absent" >&2; exit 1; }
+done
+CAPTURED_AT2="$(/usr/bin/date -u +%FT%TZ)"
+/bin/sudo -n /usr/sbin/mdadm --detail "$ARRAY_DEVICE" > "$STAGE2/mdadm.raw"
+test -s "$STAGE2/mdadm.raw"
+/bin/sudo -n /usr/sbin/smartctl -H "$SMART_A_DEVICE" > "$STAGE2/smart.$(/usr/bin/basename "$SMART_A_DEVICE").raw"
+test -s "$STAGE2/smart.$(/usr/bin/basename "$SMART_A_DEVICE").raw"
+/bin/sudo -n /usr/sbin/smartctl -H "$SMART_B_DEVICE" > "$STAGE2/smart.$(/usr/bin/basename "$SMART_B_DEVICE").raw"
+test -s "$STAGE2/smart.$(/usr/bin/basename "$SMART_B_DEVICE").raw"
+/bin/sudo -n /usr/local/sbin/nhms-backup-inventory --json > "$STAGE2/backup.json"
+test -s "$STAGE2/backup.json"
+EXTERNAL_RC2=0
+/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -F'|' -P pager=off -c \
+  "SELECT spcname, pg_tablespace_location(oid) AS location FROM pg_tablespace WHERE pg_tablespace_location(oid) <> '' ORDER BY location, spcname" \
+  > "$STAGE2/external-targets.txt" || EXTERNAL_RC2=$?
+test "$EXTERNAL_RC2" -eq 0 || { echo "NO-GO: external tablespace query failed" >&2; exit 1; }
+export STAGE2 CAPTURED_AT2 HOST_NAME ARRAY_DEVICE PGDATA_HOST COLD_CONTAINER_PATH
+/home/nwm/NWM/.venv/bin/python <<'PY'
+import json, os
+stage = os.environ["STAGE2"]
+mdadm_output = open(f"{stage}/mdadm.raw", encoding="utf-8").read()
+members = []
+for line in mdadm_output.splitlines():
+    fields = line.split()
+    if len(fields) >= 6 and all(item.isdigit() for item in fields[:4]) and fields[-1].startswith("/dev/"):
+        assert "active sync" in " ".join(fields[4:-1]).lower(), f"member {fields[-1]} is not active sync"
+        members.append(fields[-1])
+assert sorted(members) == sorted(set(members)) and len(members) == 2, members
+external = sorted(
+    {line.split("|", 1)[1].strip() for line in open(f"{stage}/external-targets.txt", encoding="utf-8") if "|" in line}
+)
+targets = sorted(set(external) | {os.environ["COLD_CONTAINER_PATH"]})
+backup_text = open(f"{stage}/backup.json", encoding="utf-8").read()
+backup_document = json.loads(backup_text)
+covered = list(backup_document["covered_paths"])
+missing = [item for item in (os.environ["PGDATA_HOST"], *targets) if item not in covered]
+assert not missing, f"producer did not cover: {missing}"
+envelopes = {
+    "mdadm": {
+        "argv": ["/usr/sbin/mdadm", "--detail", os.environ["ARRAY_DEVICE"]],
+        "subject": {"array_device": os.environ["ARRAY_DEVICE"], "members": sorted(members)},
+        "output": mdadm_output,
+    },
+    "backup": {
+        "argv": ["/usr/local/sbin/nhms-backup-inventory", "--json"],
+        "subject": {"pgdata": os.environ["PGDATA_HOST"], "external_pg_tblspc_targets": targets},
+        "output": backup_text,
+        "covered_paths": covered,
+    },
+}
+for device in members:
+    token = device.rsplit("/", 1)[-1]
+    envelopes[f"smart.{token}"] = {
+        "argv": ["/usr/sbin/smartctl", "-H", device],
+        "subject": {"device": device},
+        "output": open(f"{stage}/smart.{token}.raw", encoding="utf-8").read(),
+    }
+for name, item in envelopes.items():
+    assert item["output"].strip(), f"empty output for {name}"
+    document = {
+        "schema_version": "1.0",
+        "captured_at": os.environ["CAPTURED_AT2"],
+        "hostname": os.environ["HOST_NAME"],
+        "command": {"argv": item["argv"]},
+        "subject": item["subject"],
+        "output": item["output"],
+    }
+    if "covered_paths" in item:
+        document["covered_paths"] = item["covered_paths"]
+    with open(f"{stage}/{name}.json", "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(document, sort_keys=True) + "\n")
+    os.chmod(f"{stage}/{name}.json", 0o600)
+PY
+/bin/sudo -n /usr/bin/install -m 600 -o root -g root "$STAGE2/mdadm.json" "$EVID_ROOT/$EVID_STAMP2-mdadm.json"
+/bin/sudo -n /usr/bin/install -m 600 -o root -g root "$STAGE2/backup.json" "$EVID_ROOT/$EVID_STAMP2-backup.json"
+for DEVICE in "$SMART_A_DEVICE" "$SMART_B_DEVICE"; do
+  /bin/sudo -n /usr/bin/install -m 600 -o root -g root \
+    "$STAGE2/smart.$(/usr/bin/basename "$DEVICE").json" \
+    "$EVID_ROOT/$EVID_STAMP2-smart.$(/usr/bin/basename "$DEVICE").json"
+done
+export MDADM_EVIDENCE="$EVID_ROOT/$EVID_STAMP2-mdadm.json"
+export BACKUP_EVIDENCE="$EVID_ROOT/$EVID_STAMP2-backup.json"
+export SMART_A="$EVID_ROOT/$EVID_STAMP2-smart.$(/usr/bin/basename "$SMART_A_DEVICE").json"
+export SMART_B="$EVID_ROOT/$EVID_STAMP2-smart.$(/usr/bin/basename "$SMART_B_DEVICE").json"
+for F in "$MDADM_EVIDENCE" "$BACKUP_EVIDENCE" "$SMART_A" "$SMART_B"; do
+  test "$(stat -c '%u:%g %a' "$F")" = "0:0 600" || { echo "NO-GO: evidence ownership/mode drifted: $F" >&2; exit 1; }
+done
+export STAGE="$STAGE2"
+export CAPTURED_AT="$CAPTURED_AT2"
+```
+
+**This re-capture must run its parser check again exactly as G2 does** (same
+`EvidencePolicy` fence) before the enforce below:
+
+```bash
+set -euo pipefail
+export MDADM_EVIDENCE BACKUP_EVIDENCE SMART_A_DEVICE SMART_B_DEVICE SMART_A SMART_B HOST_NAME CAPTURED_AT2 ARRAY_DEVICE PGDATA_HOST COLD_CONTAINER_PATH STAGE
+/home/nwm/NWM/.venv/bin/python <<'PY'
+import json, os
+from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_cold_tablespace_evidence import (
+    EvidencePolicy,
+    parse_backup_inventory,
+    parse_mdadm_evidence,
+    parse_smart_evidence,
+)
+stage = os.environ["STAGE"]
+external = sorted(
+    {line.split("|", 1)[1].strip() for line in open(f"{stage}/external-targets.txt", encoding="utf-8") if "|" in line}
+)
+targets = tuple(sorted(set(external) | {os.environ["COLD_CONTAINER_PATH"]}))
+policy = EvidencePolicy(
+    expected_hostname=os.environ["HOST_NAME"],
+    array_device=os.environ["ARRAY_DEVICE"],
+    max_age_seconds=900,
+    expected_uid=0,
+    approved_modes=(0o600,),
+    mdadm_argv=("/usr/sbin/mdadm", "--detail", os.environ["ARRAY_DEVICE"]),
+    smartctl_prefix=("/usr/sbin/smartctl",),
+    backup_argv=("/usr/local/sbin/nhms-backup-inventory", "--json"),
+    expected_pgdata=os.environ["PGDATA_HOST"],
+)
+now = datetime.now(UTC)
+raid = parse_mdadm_evidence(Path(os.environ["MDADM_EVIDENCE"]), policy=policy, now=now)
+assert raid.healthy and len(raid.members) == 2, raid.blockers
+assert parse_smart_evidence(Path(os.environ["SMART_A"]), device=os.environ["SMART_A_DEVICE"], policy=policy, now=now).status == "PASS"
+assert parse_smart_evidence(Path(os.environ["SMART_B"]), device=os.environ["SMART_B_DEVICE"], policy=policy, now=now).status == "PASS"
+backup_obs = parse_backup_inventory(Path(os.environ["BACKUP_EVIDENCE"]), policy=policy, external_targets=targets, now=now)
+assert backup_obs.complete and {os.environ["PGDATA_HOST"], *targets} <= set(backup_obs.covered_paths), backup_obs.missing_targets
+print("G5 root evidence passed")
+PY
+```
+
+Then the single enforce invocation — INSTALL_ARGS is rebuilt here so it carries
+the fresh `-2` evidence paths (never the dry-run paths):
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+ENFORCE_RECEIPT="$RUN_ROOT/receipts/installer-enforce-$RUN_STAMP.json"
+ENFORCE_AUTHORITY="$RUN_ROOT/env/installer-recovery-enforce-$RUN_STAMP.private"
+INSTALL_ARGS=(
+  --head-sha "$REVIEWED_SHA"
+  --expected-uid "$RUNTIME_UID"
+  --expected-gid "$RUNTIME_GID"
+  --expected-mode 0700
+  --expected-device-identity "$INSTALLER_DEVICE_IDENTITY"
+  --install-required-bytes "$INSTALL_REQUIRED"
+  --rollback-headroom-bytes "$ROLLBACK_HEADROOM"
+  --evidence-hostname "$HOST_NAME"
+  --array-device "$ARRAY_DEVICE"
+  --evidence-max-age-seconds 900
+  --evidence-owner-uid 0
+  --evidence-approved-mode 0600
+  --pgdata-path "$PGDATA_HOST"
+  --mdadm-bin /usr/sbin/mdadm
+  --smartctl-bin /usr/sbin/smartctl
+  --backup-inventory-bin /usr/local/sbin/nhms-backup-inventory
+  --mdadm-evidence "$MDADM_EVIDENCE"
+  --smart-evidence "$SMART_A_DEVICE=$SMART_A"
+  --smart-evidence "$SMART_B_DEVICE=$SMART_B"
+  --backup-evidence "$BACKUP_EVIDENCE"
+)
+START_TIME="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+uv run --no-sync python scripts/node27_cold_tablespace_install.py \
+  --enforce \
+  --receipt-path "$ENFORCE_RECEIPT" \
+  --recovery-path "$ENFORCE_AUTHORITY" \
+  "${INSTALL_ARGS[@]}" || rc=$?
+_end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+printf '%s\n%s\n%s\n' "$START_TIME" "$_end" "$rc" > "$ENFORCE_RECEIPT.bracket"
+test "$rc" -eq 0 || { echo "NO-GO: installer enforce exit $rc" >&2; exit 1; }
+stat -c '%a' "$ENFORCE_RECEIPT" | /usr/bin/grep -qx 600
+if [ -e "$ENFORCE_AUTHORITY" ]; then
+  stat -c '%a' "$ENFORCE_AUTHORITY" | /usr/bin/grep -qx 600 || { echo "NO-GO: authority mode not 0600" >&2; exit 1; }
+fi
+test ! -e "$ENFORCE_AUTHORITY" || { echo "NO-GO: terminal installed must have removed the authority" >&2; exit 1; }
+/home/nwm/NWM/.venv/bin/python - "$ENFORCE_RECEIPT" "$REVIEWED_SHA" "$ENFORCE_RECEIPT.bracket" <<'PY'
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
+path, head, bracket = sys.argv[1], sys.argv[2], sys.argv[3]
+bracket_text = read_held_private_text(Path(bracket), label="G5 enforce bracket", stage="census")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
+assert len(lines) == 3 and lines[2] == "0", lines
+def _utc(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+_raw, document, _facts = read_held_private_json(Path(path), label="G5 enforce receipt", stage="census")
+generated = _utc(document["generated_at"])
+assert document["mode"] == "enforce" and document["outcome"] == "installed"
+assert document["state"] == "installed"
+assert document["head_sha"] == head
+assert _utc(lines[0]) <= generated <= _utc(lines[1]) and (datetime.now(UTC) - generated).total_seconds() <= 900
+assert document["ownership"]["catalog_created"] is True
+assert document["ownership"]["installer_container_created"] is True
+assert document["ownership"]["recovery_authority"] is False
+assert document["authority"]["state"] == "closed" and document["authority"]["path_present"] is False
+assert document["rollback"]["attempted"] is False
+assert document["readback"]["approved"] is True, document["readback"]
+assert document["readback"]["catalog_location"] == "/home/postgres/pgdata/tablespaces/nhms_cold"
+assert document["readback"]["container_bind"] == "/data/GHDC/nhms-cold-tablespace"
+assert document["readback"]["container_writable"] is True
+assert document["readback"]["hypertable_attached"] is False
+assert document["readback"]["new_chunk_tablespace"] == "pg_default"
+PY
+```
+
+A terminal `installed` receipt is the **end of rollback**: the installer already
+closed and durably removed the recovery authority (verified by the `test ! -e`
+above), so there is no `groups_moved=0` rollback option later. Any trigger after
+this — including a post-install pre-movement failure with zero groups moved —
+stops later work and preserves the installed topology.
+
+Independently prove the topology the receipt claims — every "must print 0" is a
+machine assertion, never a comment:
+
+```bash
+set -euo pipefail
+MOUNT_CHECK="$(/usr/bin/docker inspect nhms-db --format '{{json .Mounts}}')"
+printf '%s\n' "$MOUNT_CHECK" | /usr/bin/grep -q '"Source":"/data/GHDC/nhms-cold-tablespace"' || {
+  echo "NO-GO: cold bind missing from live mounts" >&2; exit 1; }
+COLD_TBLSPC="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT spcname || '|' || pg_tablespace_location(oid) FROM pg_tablespace WHERE spcname='nhms_cold'")"
+printf '%s\n' "$COLD_TBLSPC" | /usr/bin/grep -Eqx 'nhms_cold\|/home/postgres/pgdata/tablespaces/nhms_cold' || {
+  echo "NO-GO: catalog location mismatch: $COLD_TBLSPC" >&2; exit 1; }
+ATTACHED_COUNT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT count(*) FROM _timescaledb_catalog.tablespace")"
+test "$ATTACHED_COUNT" = "0" || { echo "NO-GO: $ATTACHED_COUNT tablespace attachments" >&2; exit 1; }
+DEFAULT_PLACEMENT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT bool_and(reltablespace = 0) FROM pg_class WHERE relname IN ('river_timeseries','forcing_station_timeseries')")"
+test "$DEFAULT_PLACEMENT" = "t" || { echo "NO-GO: business hypertable default placement drifted" >&2; exit 1; }
+test "$(stat -c '%u:%g %a' /data/GHDC/nhms-cold-tablespace)" = "$RUNTIME_UID:$RUNTIME_GID 700" || {
+  echo "NO-GO: host path owner/mode drifted" >&2; exit 1; }
+RUNNER_DEVICE_IDENTITY="$(uv run --no-sync python scripts/node27_cold_identity_observe.py runner | /usr/bin/awk '{print $2}')"
+printf '%s' "$RUNNER_DEVICE_IDENTITY" | /usr/bin/grep -Eqx '^[0-9]+:[0-9]+$' || {
+  echo "NO-GO: runner identity format is wrong" >&2; exit 1; }
+test "$RUNNER_DEVICE_IDENTITY" != "$INSTALLER_DEVICE_IDENTITY" || {
+  echo "NO-GO: runner and installer identities are identical" >&2; exit 1; }
+export RUNNER_DEVICE_IDENTITY
+/usr/bin/docker exec nhms-db test -w /home/postgres/pgdata/tablespaces/nhms_cold || {
+  echo "NO-GO: cold container path is not writable" >&2; exit 1; }
+```
+
+Then write the runner-side identity and the live cold lag into the env
+file through the same lossless rewrite owner G4 used. Comments, blanks,
+commented optional keys, unrelated assignments and `DATABASE_URL` bytes stay;
+`NODE27_COLD_RESIDENCY_DEVICE_IDENTITY` and
+`NODE27_COLD_RESIDENCY_LAG_SECONDS` are inserted once. The lag is the already
+sourced live `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` (read the box, never
+the committed template or a systemd child fallback). Never a `sed` comment
+swap or assignment-only rebuild:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+set -a
+. /home/nwm/NWM/infra/env/node27-timeseries-compression.env
+set +a
+: "${NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS:?configured compression lag is required}"
+uv run --no-sync python scripts/node27_issue1895_env_rewrite.py \
+  --path /home/nwm/NWM/infra/env/node27-cold-residency.env \
+  --stage g5 \
+  --device-identity "$RUNNER_DEVICE_IDENTITY" \
+  --lag-seconds "$NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"
+test "$(stat -c '%a' infra/env/node27-cold-residency.env)" = "600"
+set -a
+. infra/env/node27-cold-residency.env
+set +a
+test "$NODE27_COLD_RESIDENCY_DEVICE_IDENTITY" = "$RUNNER_DEVICE_IDENTITY"
+test "$NODE27_COLD_RESIDENCY_LAG_SECONDS" = "$NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"
+```
+
+Re-census before the first movement SQL — full binder (head/time/bracket/rc/E/S/
+keys/digests), key-map comparison (never `zip` order), and machine `test = 0` for
+cold-resident relations:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+PRE_MOVEMENT_CENSUS="$RUN_ROOT/census/pre-movement-$RUN_STAMP.json"
+export CENSUS_ARTIFACT="$PRE_MOVEMENT_CENSUS"
+PRE_MOVEMENT_BRACKET="$RUN_ROOT/census/pre-movement-$RUN_STAMP.bracket"
+export CENSUS_BRACKET="$PRE_MOVEMENT_BRACKET"
+_start="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+uv run --no-sync python scripts/node27_cold_residency_census.py \
+  --require-count "$REQUIRE_COUNT" \
+  --output "$PRE_MOVEMENT_CENSUS" || rc=$?
+_end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$PRE_MOVEMENT_BRACKET"
+test "$rc" -eq 0 || { echo "NO-GO: pre-movement census exit $rc" >&2; exit 1; }
+COLD_REL_COUNT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_tablespace t ON t.oid=c.reltablespace WHERE t.spcname='nhms_cold'")"
+test "$COLD_REL_COUNT" = "0" || { echo "NO-GO: $COLD_REL_COUNT cold-resident relations before movement" >&2; exit 1; }
+export ORIGINAL_CENSUS="$RUN_ROOT/census/pre-target-$RUN_STAMP.json"
+uv run --no-sync python scripts/node27_issue1895_census_bind.py \
+  --current "$PRE_MOVEMENT_CENSUS" \
+  --original "$ORIGINAL_CENSUS" \
+  --digest "$CENSUS_DIGEST" \
+  --bracket "$PRE_MOVEMENT_BRACKET" \
+  --reviewed-sha "$REVIEWED_SHA"
+```
+
+Same six durable keys, same complete-source preimages, same inventory/parity and
+capacity inputs, no unexplained extra eligible group, and zero cold-resident
+relations — or movement stays at zero and the window is NO-GO.
+
+**Rollback points after this moment are fixed.** Before this gate, an install
+that failed or was interrupted while its private authority is live must be
+handled by re-running the *exact same installer invocation* so shipping
+`reconcile()` performs the rollback — no operator SQL, Docker, path, or catalog
+action, and no rollback CLI (none exists), accepting only a terminal rollback
+receipt. From the terminal `installed` receipt onward, including this
+pre-movement census failing with zero groups moved, there is **no installer
+rollback**: stop, preserve the installed topology (catalog/bind/path/device
+referenced objects stay), keep writers/timers quiesced, and route the response to
+the owning implementation issue. After the first group moves (G6) the same rule
+applies, with no live move-back either.
+
+### G6 — One group at a time
+
+Preview first. The runner is dry-run by default, and the preview must show
+**exactly one** selected group — the first remaining census key in ranked order —
+with zero mutations. `selected_keys <=` is too weak: with `PER_TICK_BOUND=1` the
+selection must be exactly one and equal to the census's first not-yet-cold key. A
+`no_op` outcome or empty `selected` at this stage is NO-GO, because every census
+key was all-source at G5. The runner's `--receipt-path` is the per-invocation
+override; the env file value stays the lane default and is never edited for this.
+The CLI is invoked **after** `set -a; .` of the cold env (or through the shipped
+wrapper), never bare without that private env:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+set -a
+. /home/nwm/NWM/infra/env/node27-cold-residency.env
+set +a
+PREVIEW_RECEIPT="$RUN_ROOT/receipts/cold-dryrun-$RUN_STAMP.json"
+PREVIEW_BRACKET="$RUN_ROOT/receipts/cold-dryrun-$RUN_STAMP.bracket"
+export NODE27_COLD_RESIDENCY_RECEIPT_PATH="$PREVIEW_RECEIPT"
+_start="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+uv run --no-sync python scripts/node27_cold_residency.py --receipt-path "$PREVIEW_RECEIPT" || rc=$?
+_end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$PREVIEW_BRACKET"
+test "$rc" -eq 0 || { echo "NO-GO: cold preview exit $rc" >&2; exit 1; }
+/home/nwm/NWM/.venv/bin/python - "$PREVIEW_RECEIPT" "$ORIGINAL_CENSUS" "$PREVIEW_BRACKET" "$REVIEWED_SHA" <<'PY'
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
+receipt_path, census_path, bracket, head = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+_raw, receipt, _facts = read_held_private_json(Path(receipt_path), label="G6 preview receipt", stage="receipt")
+_craw, census, _cfacts = read_held_private_json(Path(census_path), label="G6 preview census", stage="receipt")
+bracket_text = read_held_private_text(Path(bracket), label="G6 preview bracket", stage="receipt")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
+assert len(lines) == 3 and lines[2] == "0", lines
+def _utc(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+assert receipt["schema_version"] == "1.1"
+assert receipt["mode"] == "dry-run"
+assert receipt["outcome"] == "clean", ("preview no_op/empty is NO-GO", receipt["outcome"])
+assert receipt["per_tick_bound"] == 1
+assert receipt["head_sha"] == head
+assert _utc(lines[0]) <= _utc(receipt["generated_at"]) <= _utc(lines[1])
+assert (datetime.now(UTC) - _utc(receipt["generated_at"])).total_seconds() <= 900
+assert receipt["config_observed"] is True
+assert receipt["target"]["observed"] is True
+assert receipt["target"]["device_identity"] and receipt["target"]["container_exec_uid"]
+assert receipt["inventory"]["observed"] is True
+from packages.common.node27_issue1895_receipt import assert_sequential_tick_receipt, unique_migrated_observation, durable_key
+planned = assert_sequential_tick_receipt(receipt, ordered_keys=census["group_keys"], call_index=1, migrate_outcome="planned")
+key = durable_key(planned["durable"])
+assert key == census["group_keys"][0], (key, census["group_keys"][0])
+assert planned["shell_sql_executed"] is False
+print("preview OK:", key)
+PY
+```
+
+Then, for **each** census key, exactly one `--enforce` invocation with a
+**unique** receipt path — never a shared path, and never group N+1 before group
+N's current-run receipt passes every gate. `PER_TICK_BOUND=1` means one tick
+mutates at most one group; the rollout still issues one invocation per group
+rather than trusting a tick to interleave. The loop reads keys with process
+substitution and `while IFS= read -r GROUP` (never word-splitting through `for`
+over a `$(...)` expansion), asserts the receipt's durable key equals `$GROUP`,
+and checks the exact intent sidecar path `${RECEIPT%/*}/.${RECEIPT##*/}.intent`:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+set -a
+. /home/nwm/NWM/infra/env/node27-cold-residency.env
+set +a
+GROUP_INDEX=0
+FILESYSTEM_LOG="$RUN_ROOT/receipts/filespace-$RUN_STAMP.txt"
+: > "$FILESYSTEM_LOG"
+chmod 600 "$FILESYSTEM_LOG"
+while IFS= read -r GROUP; do
+  GROUP_INDEX=$(( GROUP_INDEX + 1 ))
+  STAMP="$(/usr/bin/date -u +%Y%m%dT%H%M%SZ)"
+  RECEIPT="$RUN_ROOT/receipts/cold-enforce-$GROUP_INDEX-of-$REQUIRE_COUNT-$STAMP.json"
+  BRACKET="$RECEIPT.bracket"
+  export NODE27_COLD_RESIDENCY_RECEIPT_PATH="$RECEIPT"
+  START_FREE="$(/usr/bin/df -B1 --output=avail /home /data/GHDC | /usr/bin/awk 'NR>1{printf "%s ", $1} END{print ""}')"
+  _start="$(/usr/bin/date -u +%FT%T.%N%:z)"
+  rc=0
+  uv run --no-sync python scripts/node27_cold_residency.py --enforce \
+    --receipt-path "$RECEIPT" || rc=$?
+  _end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+  printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$BRACKET"
+  test "$rc" -eq 0 || { echo "NO-GO: group run exit $rc" >&2; exit 1; }
+  stat -c '%a' "$RECEIPT" | /usr/bin/grep -qx 600
+  INTENT="${RECEIPT%/*}/.${RECEIPT##*/}.intent"
+  test ! -e "$INTENT" || { echo "NO-GO: intent sidecar still present: $INTENT" >&2; exit 1; }
+  END_FREE="$(/usr/bin/df -B1 --output=avail /home /data/GHDC | /usr/bin/awk 'NR>1{printf "%s ", $1} END{print ""}')"
+  HOT_BEFORE="$(printf '%s\n' $START_FREE | /usr/bin/awk 'NR==1{print}')"
+  COLD_BEFORE="$(printf '%s\n' $START_FREE | /usr/bin/awk 'NR==2{print}')"
+  HOT_AFTER="$(printf '%s\n' $END_FREE | /usr/bin/awk 'NR==1{print}')"
+  COLD_AFTER="$(printf '%s\n' $END_FREE | /usr/bin/awk 'NR==2{print}')"
+  uv run --no-sync python scripts/node27_issue1895_fs_reconcile.py \
+    --receipt "$RECEIPT" \
+    --hot-avail-before "$HOT_BEFORE" \
+    --hot-avail-after "$HOT_AFTER" \
+    --cold-avail-before "$COLD_BEFORE" \
+    --cold-avail-after "$COLD_AFTER" \
+    > "$RUN_ROOT/receipts/filespace-$GROUP_INDEX.json"
+  chmod 600 "$RUN_ROOT/receipts/filespace-$GROUP_INDEX.json"
+  printf 'group=%s before=%s after=%s\n' "$GROUP" "$START_FREE" "$END_FREE" >> "$FILESYSTEM_LOG"
+  uv run --no-sync python scripts/node27_issue1895_sequential_receipt.py \
+    --receipt "$RECEIPT" --census "$ORIGINAL_CENSUS" --call-index "$GROUP_INDEX" --migrate-outcome migrated
+  /home/nwm/NWM/.venv/bin/python - "$RECEIPT" "$BRACKET" "$REVIEWED_SHA" "$ORIGINAL_CENSUS" "$GROUP" "$E" <<'PY'
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
+from packages.common.node27_issue1895_receipt import unique_migrated_observation, durable_key
+path, bracket, head, census_path, expected_key, e_value = sys.argv[1:7]
+bracket_text = read_held_private_text(Path(bracket), label="G6 receipt bracket", stage="receipt")
+lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
+assert len(lines) == 3 and lines[2] == "0", lines
+def _utc(value):
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+_raw, receipt, _facts = read_held_private_json(Path(path), label="G6 receipt", stage="receipt")
+_craw, census, _cfacts = read_held_private_json(Path(census_path), label="G6 census", stage="receipt")
+generated = _utc(receipt["generated_at"])
+assert receipt["schema_version"] == "1.1"
+assert receipt["mode"] == "enforce" and receipt["outcome"] == "clean"
+assert receipt["state"] == "complete_target"
+assert receipt["head_sha"] == head
+assert _utc(lines[0]) <= generated <= _utc(lines[1]) and (datetime.now(UTC) - generated).total_seconds() <= 900
+assert receipt["per_tick_bound"] == 1 and receipt["config_observed"] is True
+observation = unique_migrated_observation(receipt)
+assert observation["reconciliation"] == "complete_target"
+assert observation["shell_sql_executed"] is True
+assert observation["before"]["residency"] == "all_source"
+assert observation["after"]["residency"] == "already_target"
+assert {member["tablespace"] for member in observation["after"]["members"]} == {"nhms_cold"}
+assert observation["before_parity"] == observation["after_parity"]
+capacity = observation["capacity"]
+assert capacity["approved"] is True, capacity["blockers"]
+assert int(capacity["cold_reserve_bytes"]) == int(e_value) == int(capacity["wal_reserve_bytes"])
+assert capacity["cold_free_bytes"] >= capacity["required_cold_bytes"]
+assert capacity["hot_free_bytes"] >= capacity["required_hot_bytes"]
+key = durable_key(observation["durable"])
+assert key == expected_key, (key, expected_key)
+matches = [group for group in census["groups"] if group["key"] == key]
+assert len(matches) == 1, key
+bound = matches[0]
+assert observation["before"]["members"] == bound["members"], "census member preimage drifted"
+assert observation["before_parity"] == bound["parity"], "census parity preimage drifted"
+assert capacity["before_compression_total_bytes"] == bound["before_compression_total_bytes"]
+assert capacity["retained_source_bytes"] == bound["retained_source_bytes"]
+assert receipt["target"]["device_identity"] and receipt["target"]["container_exec_uid"]
+print("group OK:", key)
+PY
+done < <(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, census, _facts = read_held_private_json(Path(sys.argv[1]), label="G6 census keys", stage="receipt"); print("\n".join(census["group_keys"]))' "$ORIGINAL_CENSUS")
+test "$GROUP_INDEX" -eq "$REQUIRE_COUNT"
+```
+
+`df` output above is the **secondary** reconciliation input. The machine
+owner `scripts/node27_issue1895_fs_reconcile.py` ties hot-space reclamation
+and cold-space growth to the exact moved relation/index member bytes, with
+filesystem allocation granularity and concurrent noise as the only allowed
+tolerance. A reversed, missing, or out-of-budget delta is a trigger row
+(stop, preserve, owning issue) even when both devices got bigger. The
+**primary** proof remains each receipt's `capacity` fields (fresh cold/hot
+free samples, required equations, member byte accounting).
+A lingering intent sidecar next to a receipt means the tick is unfinished: do not
+issue the next group; re-run the same invocation shape so startup fresh-reconciles
+and terminally publishes the recovery receipt, and stop if that reconciliation
+reports mixed or unknown. The intent sidecar lives at
+`{receipt_dir}/.{receipt_name}.intent` (`intent_path_for` in
+`packages/common/compressed_chunk_cold_receipt.py`); the check above spells the
+shipping name exactly — never `$RECEIPT.with_name.intent` and never a guessed
+path.
+
+**The shipping runner has no move-back.**
+
+**The shipping runner has no move-back.** `scripts/node27_cold_residency.py`
+exposes no `--target`, no `--rollback`, and no inverse mode; the accepted
+primitive's `pg_default` inverse exists only in the disposable #1892 oracle. Any
+trigger after movement means: stop issuing later groups, no ad hoc SQL, no
+production-only patch, keep every writer/timer/service quiesced, preserve the
+catalog/bind/path/device topology, and route the response to the owning
+implementation issue for a reviewed live move-back entrypoint.
+
+### G7 — Verification while the timers stay stopped
+
+Recurring timers remain stopped throughout G7. First prove nothing active was
+swept into cold storage — both counts machine-asserted as `0`:
+
+```bash
+set -euo pipefail
+ACTIVE_IN_COLD="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT count(*) FROM timescaledb_information.chunks ch JOIN pg_namespace n ON n.nspname=ch.chunk_schema JOIN pg_class c ON c.relnamespace=n.oid AND c.relname=ch.chunk_name JOIN pg_tablespace t ON t.oid=c.reltablespace WHERE t.spcname='nhms_cold' AND ch.is_compressed=false")"
+test "$ACTIVE_IN_COLD" = "0" || { echo "NO-GO: $ACTIVE_IN_COLD active chunks in cold tablespace" >&2; exit 1; }
+NOT_DEFAULT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
+  "SELECT count(*) FROM timescaledb_information.chunks ch JOIN pg_namespace n ON n.nspname=ch.chunk_schema JOIN pg_class c ON c.relnamespace=n.oid AND c.relname=ch.chunk_name LEFT JOIN pg_tablespace t ON t.oid=c.reltablespace WHERE ch.is_compressed=false AND COALESCE(t.spcname,'pg_default') <> 'pg_default'")"
+test "$NOT_DEFAULT" = "0" || { echo "NO-GO: $NOT_DEFAULT active chunks not in pg_default" >&2; exit 1; }
+```
+
+Then one bounded controlled ingest smoke, immediately re-quiesced. The autopipe
+CLI's `--limit` (checked against `scripts/node27_autopipeline.py`) is the bounded
+smoke; `--sources gfs,ifs` defaults are not changed:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+set -a
+. /home/nwm/NWM/infra/env/node27-ingest.env
+set +a
+SMOKE_LOG="$RUN_ROOT/receipts/ingest-smoke-$RUN_STAMP.log"
+SMOKE_BRACKET="$RUN_ROOT/receipts/ingest-smoke-$RUN_STAMP.bracket"
+_start="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+uv run --no-sync python scripts/node27_autopipeline.py --limit 1 > "$SMOKE_LOG" 2>&1 || rc=$?
+_end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$SMOKE_BRACKET"
+test "$rc" -eq 0 || { echo "NO-GO: controlled ingest smoke exit $rc" >&2; exit 1; }
+systemctl --user stop nhms-node27-autopipe.service nhms-node27-autopipe.timer
+/usr/bin/systemctl --user show nhms-node27-autopipe.service nhms-node27-autopipe.timer \
+  -p ActiveState -p SubState -p Result > "$RUN_ROOT/receipts/autopipe-requiesced-$RUN_STAMP.txt"
+/usr/bin/grep -c '^ActiveState=inactive$' "$RUN_ROOT/receipts/autopipe-requiesced-$RUN_STAMP.txt" | /usr/bin/grep -qx 2
+FAILED_UNITS="$(/usr/bin/systemctl --user --failed --no-legend)"
+test -z "$(printf '%s\n' "$FAILED_UNITS" | /usr/bin/grep -E 'nhms-node27')"
+```
+
+Then the node-27 oracle set, each with its own current-run output under
+`$RUN_ROOT/receipts/`:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+rc=0
+uv run --no-sync pytest -q -m 'integration and timescaledb_210' \
+  tests/test_compressed_chunk_cold_runtime_integration.py \
+  > "$RUN_ROOT/receipts/realdb-cold-$RUN_STAMP.log" 2>&1 || rc=$?
+test "$rc" -eq 0 || { echo "NO-GO: real-DB cold integration pytest exit $rc" >&2; exit 1; }
+rc=0
+uv run --no-sync pytest -q tests/test_node27_cold_residency_runtime_identity.py \
+  tests/test_node27_cold_residency_publication.py tests/test_node27_cold_tablespace_cli.py \
+  tests/test_node27_cold_residency_census.py > "$RUN_ROOT/receipts/realdb-lanes-$RUN_STAMP.log" 2>&1 || rc=$?
+test "$rc" -eq 0 || { echo "NO-GO: real-DB lane pytest exit $rc" >&2; exit 1; }
+rc=0
+uv run --no-sync python scripts/validate_two_node_docker_runtime.py static \
+  > "$RUN_ROOT/receipts/two-node-static-$RUN_STAMP.log" 2>&1 || rc=$?
+test "$rc" -eq 0 || { echo "NO-GO: two-node static runtime validation exit $rc" >&2; exit 1; }
+```
+
+C1: start the display API with the repository wrapper.  The wrapper alone sources
+`infra/env/display.env`; the C1 observer independently reads only the port assignment
+without sourcing or exporting the file, never puts a DSN in argv or a receipt, resolves
+the exact systemd MainPID and both cgroup bindings, and proves the full readonly runtime
+configuration plus the exact Slurm 404.  The start log is not evidence; only the unique
+private exact-SHA receipt and PASS-only binder are C1 evidence. It uses the fixed
+local `http://127.0.0.1:` plus the parsed canonical port origin and the
+`nhms-display-api.service` systemd MainPID/cgroup; never `pgrep -f`. The owner publishes
+an euid-owned private mode-0600 nlink-1 receipt
+beneath the prechecked mode-0700 `$RUN_ROOT/receipts` parent.
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+C1_RECEIPT="$RUN_ROOT/receipts/c1-display-runtime-$RUN_STAMP.json"
+test ! -e "$C1_RECEIPT"
+C1_CMD_START="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+scripts/ops/start-display-api.sh | /usr/bin/tee "$RUN_ROOT/receipts/display-start-$RUN_STAMP.log" || rc=$?
+test "$rc" -eq 0 || { echo "NO-GO: display start wrapper exit $rc" >&2; exit 1; }
+rc=0
+uv run --no-sync python scripts/node27_issue1895_display_runtime.py \
+  --display-env /home/nwm/NWM/infra/env/display.env \
+  --receipt-path "$C1_RECEIPT" \
+  --head-sha "$REVIEWED_SHA" --reviewed-sha "$REVIEWED_SHA" || rc=$?
+C1_CMD_END="$(/usr/bin/date -u +%FT%T.%N%:z)"
+test "$rc" -eq 0 || { echo "NO-GO: C1 display runtime owner exit $rc" >&2; exit 1; }
+uv run --no-sync check-jsonschema --schemafile schemas/node27_issue1895_c1_display_runtime_receipt.schema.json "$C1_RECEIPT"
+C1_PORT="$(uv run --no-sync python -c 'from pathlib import Path; from packages.common.node27_issue1895_display_runtime import read_display_port; print(read_display_port(Path("/home/nwm/NWM/infra/env/display.env"))[0])')"
+uv run --no-sync python scripts/node27_issue1895_display_runtime_bind.py \
+  --receipt "$C1_RECEIPT" --reviewed-sha "$REVIEWED_SHA" --port "$C1_PORT" \
+  --cmd-start "$C1_CMD_START" --cmd-end "$C1_CMD_END"
+```
+
+C2 (denied-write matrix) is the canonical existing validator, not a second
+simulated matrix.  It receives a private DSN only in its short command scope.
+The evidence root is a unique child of the validator's already approved repository
+`artifacts/` root; `RUN_ROOT/receipts` is deliberately not used.  Both ambient DSN
+keys are unset before bind, then removed even if validation fails.  A canonical
+PASS summary plus all three authoritative siblings is accepted into a separate
+exact-SHA C2 receipt; log text never decides PASS/BLOCKED.
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+unset NHMS_DISPLAY_READONLY_DATABASE_URL NHMS_READONLY_DB_VALIDATION_DATABASE_URL
+RC_DSN_FILE="$RUN_ROOT/env/readonly-dsn-$RUN_STAMP.env"
+test ! -e "$RC_DSN_FILE"
+test "$(stat -c '%u' "$(dirname "$RC_DSN_FILE")")" = "$(id -u)"
+test "$(stat -c '%a' "$(dirname "$RC_DSN_FILE")")" = "700"
+uv run --no-sync python scripts/node27_issue1895_bind_readonly_dsn.py \
+  --display-env /home/nwm/NWM/infra/env/display.env --rc-dsn-file "$RC_DSN_FILE"
+test "$(stat -c '%u' "$RC_DSN_FILE")" = "$(id -u)"
+test "$(stat -c '%a' "$RC_DSN_FILE")" = "600"
+test "$(stat -c '%h' "$RC_DSN_FILE")" = "1"
+RC_EVIDENCE_ROOT="$(mktemp -d "$REPO_ROOT/artifacts/.nhms-issue1895-readonly-XXXXXX")"
+chmod 0700 "$RC_EVIDENCE_ROOT"
+test "$(stat -c '%u' "$RC_EVIDENCE_ROOT")" = "$(id -u)"
+test "$(stat -c '%a' "$RC_EVIDENCE_ROOT")" = "700"
+RC_RUN_ID="issue1895-readonly-$RUN_STAMP"
+RC_GFS_RUN_ID="$RC_RUN_ID-gfs"
+RC_IFS_RUN_ID="$RC_RUN_ID-ifs"
+C2_RECEIPT="$RUN_ROOT/receipts/c2-readonly-boundary-$RUN_STAMP.json"
+test ! -e "$C2_RECEIPT"
+C2_CMD_START="$(/usr/bin/date -u +%FT%T.%N%:z)"
+set +e
+(
+  set -a; . "$RC_DSN_FILE"; set +a
+  for SOURCE in GFS IFS; do
+    case "$SOURCE" in
+      GFS) SOURCE_RUN_ID="$RC_GFS_RUN_ID" ;;
+      IFS) SOURCE_RUN_ID="$RC_IFS_RUN_ID" ;;
+      *) echo "NO-GO: closed C2 source set drifted" >&2; exit 1 ;;
+    esac
+    NHMS_READONLY_DB_VALIDATION_SOURCE="$SOURCE" \
+      NHMS_READONLY_DB_VALIDATION_EVIDENCE_RUN_ID="$SOURCE_RUN_ID" \
+      uv run --no-sync python scripts/validate_readonly_db_boundary.py \
+        --evidence-root "$RC_EVIDENCE_ROOT" --run-id "$SOURCE_RUN_ID" || exit $?
+  done
+  uv run --no-sync python scripts/validate_readonly_db_boundary.py \
+    --evidence-root "$RC_EVIDENCE_ROOT" --run-id "$RC_RUN_ID" \
+    --merge-source-dir "$RC_EVIDENCE_ROOT/$RC_GFS_RUN_ID/db/readonly-db-boundary" \
+    --merge-source-dir "$RC_EVIDENCE_ROOT/$RC_IFS_RUN_ID/db/readonly-db-boundary" \
+    --merge-declared-source GFS --merge-declared-source IFS
+)
+RC_VALIDATOR_EXIT=$?
+unset NHMS_DISPLAY_READONLY_DATABASE_URL NHMS_READONLY_DB_VALIDATION_DATABASE_URL
+set -e
+test "$RC_VALIDATOR_EXIT" -eq 0 || { echo "NO-GO: canonical readonly validator exit $RC_VALIDATOR_EXIT" >&2; exit 1; }
+uv run --no-sync python scripts/node27_issue1895_readonly_accept.py \
+  --evidence-root "$RC_EVIDENCE_ROOT" --run-id "$RC_RUN_ID" --receipt-path "$C2_RECEIPT" \
+  --head-sha "$REVIEWED_SHA" --reviewed-sha "$REVIEWED_SHA"
+C2_CMD_END="$(/usr/bin/date -u +%FT%T.%N%:z)"
+uv run --no-sync check-jsonschema --schemafile schemas/node27_issue1895_c2_readonly_boundary_receipt.schema.json "$C2_RECEIPT"
+uv run --no-sync python scripts/node27_issue1895_readonly_accept_bind.py \
+  --receipt "$C2_RECEIPT" --evidence-root "$RC_EVIDENCE_ROOT" --run-id "$RC_RUN_ID" \
+  --reviewed-sha "$REVIEWED_SHA" --cmd-start "$C2_CMD_START" --cmd-end "$C2_CMD_END"
+```
+
+C3 is a direct, machine-bound current publication/display receipt for this #1895
+invocation, not a generic twelve-lane aggregation.  The generic full-scope
+aggregator remains fail-closed and may run only against a producer-complete bundle;
+an empty directory can never satisfy it and is intentionally absent from G7.  C4
+(browser e2e on `/` and `/ops`) still runs first and remains its own dedicated
+receipt lane.  The direct C3 owner then binds its PASS receipt to C4's exact bytes,
+C4's strict GFS/IFS job-log facts, current loopback API identities, readonly DB
+rows, source-scoped registry completeness, and the G1 valid-times baseline.  This
+proves the current published display chain without claiming node-22 scheduling or
+a generic twelve-lane bundle.  This rollout waives nothing in C1-C4.  The dedicated
+C4 display receipt lane and independent #1970 river-click P95 lane are executable fences below. The legacy
+monitoring lane is not a C4 substitute. C4 invokes the five-key lane with the
+current frontend/API origins and current C4 basin/segment pins, then accepts
+only its current-run PASS receipt through schema and PASS-only binder. Draft
+2020-12 schema validation covers the representable receipt structure and
+formats; the PASS-only semantic validator and binder additionally enforce the
+cross-field requirement that the GFS and IFS `ops.*.job_id` values differ. It
+never sets `VITE_AUTH_ROLE` or `VITE_ENABLE_ROLE_OVERRIDE`. Mocked regression is
+explicitly NOT a live receipt; missing URLs make a lane BLOCKED, never PASS.
+Plan and latency gates, one cold and one hot window:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+FRONTEND_ORIGIN="${PLAYWRIGHT_LIVE_BASE_URL:?current frontend origin is required}"
+API_ORIGIN="${PLAYWRIGHT_LIVE_API_BASE_URL:?current API origin is required}"
+C4_DIR=$(mktemp -d "$RUN_ROOT/receipts/c4-display-XXXXXX")
+chmod 0700 "$C4_DIR"
+test "$(stat -c '%u' "$C4_DIR")" = "$(id -u)"
+test "$(stat -c '%a' "$C4_DIR")" = "700"
+C4_RECEIPT="$C4_DIR/nhms-frontend-c4-live-evidence-$(/usr/bin/date -u +%Y%m%dT%H%M%SZ).json"
+C4_CMD_START=$(/usr/bin/date -u +%s)
+test ! -e "$C4_RECEIPT"
+cd "$REPO_ROOT" || { echo "BLOCKED: REPO_ROOT unreachable"; exit 1; }
+set +e
+PLAYWRIGHT_LIVE_BASE_URL="$FRONTEND_ORIGIN" \
+PLAYWRIGHT_LIVE_API_BASE_URL="$API_ORIGIN" \
+PLAYWRIGHT_LIVE_C4_BASIN_ID="${PLAYWRIGHT_LIVE_C4_BASIN_ID:?current C4 basin pin is required}" \
+PLAYWRIGHT_LIVE_C4_SEGMENT_ID="${PLAYWRIGHT_LIVE_C4_SEGMENT_ID:?current C4 segment pin is required}" \
+PLAYWRIGHT_LIVE_C4_RECEIPT_PATH="$C4_RECEIPT" \
+corepack pnpm@10.11.0 --dir "$REPO_ROOT/apps/frontend" run test:e2e:live-c4-display
+C4_CMD_EXIT=$?; set -e
+C4_CMD_END=$(/usr/bin/date -u +%s)
+test "$C4_CMD_EXIT" = "0"
+test -f "$C4_RECEIPT" && test ! -L "$C4_RECEIPT"
+test "$(stat -c '%u' "$C4_RECEIPT")" = "$(id -u)"
+test "$(stat -c '%a' "$(dirname "$C4_RECEIPT")")" = "700"
+test "$(stat -c '%u' "$(dirname "$C4_RECEIPT")")" = "$(id -u)"
+test "$C4_CMD_START" -le "$(stat -c '%Y' "$C4_RECEIPT")"
+test "$(stat -c '%Y' "$C4_RECEIPT")" -le "$C4_CMD_END"
+test "$(stat -c '%s' "$C4_RECEIPT")" -gt 0
+test "$(stat -c '%s' "$C4_RECEIPT")" -le 262144
+test "$(stat -c '%a' "$C4_RECEIPT")" = "600"
+test "$(stat -c '%h' "$C4_RECEIPT")" = "1"
+uv run --no-sync check-jsonschema --schemafile schemas/frontend_c4_live_evidence.schema.json "$C4_RECEIPT"
+node "$REPO_ROOT/apps/frontend/scripts/c4-receipt-binder.mjs" \
+  --receipt "$C4_RECEIPT" \
+  --frontend-origin "$FRONTEND_ORIGIN" \
+  --api-origin "$API_ORIGIN" \
+  --basin-id "$PLAYWRIGHT_LIVE_C4_BASIN_ID" \
+  --segment-id "$PLAYWRIGHT_LIVE_C4_SEGMENT_ID" \
+  --cmd-start "$C4_CMD_START" --cmd-end "$C4_CMD_END"
+RIVER_DIR=$(mktemp -d "$RUN_ROOT/receipts/river-click-XXXXXX")
+chmod 0700 "$RIVER_DIR"
+test "$(stat -c '%u' "$RIVER_DIR")" = "$(id -u)"
+test "$(stat -c '%a' "$RIVER_DIR")" = "700"
+RECEIPT="$RIVER_DIR/nhms-frontend-river-click-live-evidence-$(/usr/bin/date -u +%Y%m%dT%H%M%SZ).json"
+CMD_START=$(/usr/bin/date -u +%s)
+test ! -e "$RECEIPT"
+cd "$REPO_ROOT" || { echo "BLOCKED: REPO_ROOT unreachable"; exit 1; }
+set +e
+PLAYWRIGHT_LIVE_BASE_URL="$FRONTEND_ORIGIN" \
+PLAYWRIGHT_LIVE_API_BASE_URL="$API_ORIGIN" \
+PLAYWRIGHT_LIVE_RIVER_BASIN_ID="${PLAYWRIGHT_LIVE_RIVER_BASIN_ID-}" \
+PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID="${PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID-}" \
+PLAYWRIGHT_LIVE_RIVER_CLICK_RECEIPT_PATH="$RECEIPT" \
+corepack pnpm@10.11.0 --dir "$REPO_ROOT/apps/frontend" run test:e2e:live-river-click
+CMD_EXIT=$?; set -e
+CMD_END=$(/usr/bin/date -u +%s)
+test "$CMD_EXIT" = "0"
+test -f "$RECEIPT" && test ! -L "$RECEIPT"
+test "$(stat -c '%u' "$RECEIPT")" = "$(id -u)"
+test "$(stat -c '%a' "$(dirname "$RECEIPT")")" = "700"
+test "$(stat -c '%u' "$(dirname "$RECEIPT")")" = "$(id -u)"
+test "$CMD_START" -le "$(stat -c '%Y' "$RECEIPT")"
+test "$(stat -c '%Y' "$RECEIPT")" -le "$CMD_END"
+test "$(stat -c '%s' "$RECEIPT")" -gt 0
+test "$(stat -c '%s' "$RECEIPT")" -le 262144
+test "$(stat -c '%a' "$RECEIPT")" = "600"
+test "$(stat -c '%h' "$RECEIPT")" = "1"
+uv run --no-sync check-jsonschema --schemafile schemas/frontend_river_click_live_evidence.schema.json "$RECEIPT"
+node "$REPO_ROOT/apps/frontend/scripts/river-click-receipt-binder.mjs" \
+  --receipt "$RECEIPT" \
+  --frontend-origin "$PLAYWRIGHT_LIVE_BASE_URL" \
+  --api-origin "$PLAYWRIGHT_LIVE_API_BASE_URL" \
+  --basin-id "$PLAYWRIGHT_LIVE_RIVER_BASIN_ID" \
+  --segment-id "$PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID" \
+  --cmd-start "$CMD_START" --cmd-end "$CMD_END"
+```
+
+The #1342 SQL/API oracle is the checked-in owner. It measures the shipping
+M11 `forecast_series()` explicit-cycle path for four product lanes
+(GFS-hot, IFS-hot, GFS-cold, IFS-cold). Seq Scan on the relevant fact
+path remains banned. Normal `DecompressChunk` of the query's own
+compressed candidate is allowed. Shared Hit+Read is the root Plan
+query-level total — never grepping `Shared Read Buffers:` text and never
+summing parent plus child counters. The browser gate is the merged #1970
+1+20 lane and is strict `p95_ms < 2000` via its PASS-only binder.
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+PERF_RECEIPT="$RUN_ROOT/receipts/performance-$RUN_STAMP.json"
+PERF_COMMIT="$PERF_RECEIPT.commit"
+PERF_BRACKET="$RUN_ROOT/receipts/performance-$RUN_STAMP.bracket"
+test ! -e "$PERF_RECEIPT"
+test ! -e "$PERF_COMMIT"
+test ! -e "$PERF_BRACKET"
+test "$(stat -c '%a' "$(dirname "$PERF_RECEIPT")")" = "700"
+BASIN_ID="${PLAYWRIGHT_LIVE_RIVER_BASIN_ID:?river basin pin is required}"
+SEGMENT_ID="${PLAYWRIGHT_LIVE_RIVER_SEGMENT_ID:?river segment pin is required}"
+_start="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+(
+  set -a; . "$RC_DSN_FILE"; set +a
+  uv run --no-sync python scripts/node27_issue1895_performance_oracle.py \
+    --display-env /home/nwm/NWM/infra/env/display.env \
+    --receipt-path "$PERF_RECEIPT" \
+    --basin-id "$BASIN_ID" \
+    --segment-id "$SEGMENT_ID" \
+    --head-sha "$REVIEWED_SHA" \
+    --reviewed-sha "$REVIEWED_SHA"
+) || rc=$?
+unset NHMS_DISPLAY_READONLY_DATABASE_URL NHMS_READONLY_DB_VALIDATION_DATABASE_URL
+_end="$(/usr/bin/date -u +%FT%T.%N%:z)"
+printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$PERF_BRACKET"
+test "$rc" -eq 0 || { echo "NO-GO: performance oracle exit $rc" >&2; exit 1; }
+test -f "$PERF_RECEIPT" && test ! -L "$PERF_RECEIPT"
+test -f "$PERF_COMMIT" && test ! -L "$PERF_COMMIT"
+test "$(stat -c '%u' "$PERF_RECEIPT")" = "$(id -u)"
+test "$(stat -c '%a' "$PERF_RECEIPT")" = "600"
+test "$(stat -c '%h' "$PERF_RECEIPT")" = "1"
+test "$(stat -c '%u' "$PERF_COMMIT")" = "$(id -u)"
+test "$(stat -c '%a' "$PERF_COMMIT")" = "600"
+test "$(stat -c '%h' "$PERF_COMMIT")" = "1"
+uv run --no-sync python scripts/node27_issue1895_performance_bind.py \
+  --receipt "$PERF_RECEIPT" \
+  --commit "$PERF_COMMIT" \
+  --reviewed-sha "$REVIEWED_SHA" \
+  --basin-id "$BASIN_ID" \
+  --segment-id "$SEGMENT_ID" \
+  --bracket "$PERF_BRACKET"
+```
+
+Normal `DecompressChunk` of the query's own compressed candidate is
+allowed. The invalid all-chunk decompression fail is deleted. Seq Scan
+on the relevant fact path, out-of-window chunks, empty curves, filter
+ratio > 10, shared buffers > 5000, missing segment-bound access, and
+unrelated decompressed/touched chunks remain closed failures. The G7
+binder accepts only a current-run receipt plus exclusive commit marker.
+
+The #1342 performance owner above has completed before C3. C3 then performs the
+only current identity-only API, parameterized readonly SQL, registry complete-cycle
+and valid-times reads for this G7. It never reads series bodies or headers, never
+uses Docker superuser `psql`, and rejects partial, mixed, or historical cycles.
+`valid-times-baseline.json` is the G1-captured pre-mutation response under
+`$RUN_ROOT/census/` (never `$RUN_ROOT/receipts/`, which does not exist for it).
+
+C3 runs only after the C4 and performance PASS binders above. Restore the private
+C2 DSN only for this one readonly owner command, then immediately unset it; it is
+never exported to browser or later commands. The owner and binder use only the
+checked-in node-27 scheduler registry authority
+`/home/ghdc/nwm/object-store/scheduler/registry/manifest-last.json`; neither CLI
+accepts an override, symlink, or private mirror. Its schema, self-checksum,
+calendar-valid `generated_at`, descriptor facts, and bytes are bound into C3 and
+re-read by the binder; registry mtime is not a freshness oracle.
+`PLAYWRIGHT_LIVE_C4_BASIN_ID` is the C3 basin pin, so C3 cannot derive its expected
+set from rows it is validating.
+
+```bash
+set -euo pipefail
+cd "$REPO_ROOT"
+C3_RECEIPT="$RUN_ROOT/receipts/c3-current-publication-display-$RUN_STAMP.json"
+test ! -e "$C3_RECEIPT"
+C3_CMD_START="$(/usr/bin/date -u +%FT%T.%N%:z)"
+rc=0
+(
+  set -a; . "$RC_DSN_FILE"; set +a
+  uv run --no-sync python scripts/node27_issue1895_publication_current.py \
+    --display-env /home/nwm/NWM/infra/env/display.env \
+    --basin-id "$PLAYWRIGHT_LIVE_C4_BASIN_ID" \
+    --baseline-valid-times "$RUN_ROOT/census/valid-times-baseline.json" \
+    --c4-receipt "$C4_RECEIPT" --receipt-path "$C3_RECEIPT" \
+    --head-sha "$REVIEWED_SHA" --reviewed-sha "$REVIEWED_SHA"
+) || rc=$?
+unset NHMS_DISPLAY_READONLY_DATABASE_URL NHMS_READONLY_DB_VALIDATION_DATABASE_URL
+C3_CMD_END="$(/usr/bin/date -u +%FT%T.%N%:z)"
+test "$rc" -eq 0 || { echo "NO-GO: C3 current publication owner exit $rc" >&2; exit 1; }
+uv run --no-sync check-jsonschema --schemafile schemas/node27_issue1895_c3_current_publication_display_receipt.schema.json "$C3_RECEIPT"
+uv run --no-sync python scripts/node27_issue1895_publication_current_bind.py \
+  --receipt "$C3_RECEIPT" --reviewed-sha "$REVIEWED_SHA" \
+  --basin-id "$PLAYWRIGHT_LIVE_C4_BASIN_ID" --c4-receipt "$C4_RECEIPT" \
+  --cmd-start "$C3_CMD_START" --cmd-end "$C3_CMD_END"
+```
+
+Any G7 failure is a trigger row: stop, keep everything quiesced, preserve
+topology. The river-click `p95_ms < 2000` gate is the merged #1970 lane and
+its PASS-only binder above; it is not faked by a curl/plan proxy and is not
+satisfied by the legacy monitoring lane.
+
+### G8 — Preliminary GO, natural tick, evidence, closure
+
+Restoring timer enablement requires a **written** preliminary GO recorded in this
+issue's thread by the issuing authority — a chat ack, a green local run, or the
+operator's own judgement is not it. Then restore exactly what G4 recorded, in the
+same order it was taken. **Never use `enable --now` to force a tick**: the natural
+tick must be produced by the timer's own `OnCalendar`, not by the operator.
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+test -f "$UNITS_ENABLE_STATE" || { echo "NO-GO: UNITS_ENABLE_STATE missing (G4 never created it)" >&2; exit 1; }
+set -a
+. /home/nwm/NWM/infra/env/node27-cold-residency.env
+set +a
+: "${NODE27_COLD_RESIDENCY_LAG_SECONDS:?cold lag is required}"
+PRE_NATURAL="$RUN_ROOT/census/pre-natural-$RUN_STAMP.json"
+W8_PATH="$RUN_ROOT/census/w8-$RUN_STAMP.json"
+test ! -e "$PRE_NATURAL"
+# PRE_NATURAL proves durable catalog sets before timer restoration. It is not a
+# receipt horizon and never supplies the receipt's expected watermark/cutoff.
+uv run --no-sync python scripts/node27_issue1895_post_target_observe.py \
+  --baseline "$ORIGINAL_CENSUS" --output "$PRE_NATURAL" --reviewed-sha "$REVIEWED_SHA" \
+  --lag-seconds "$NODE27_COLD_RESIDENCY_LAG_SECONDS" --display-env /home/nwm/NWM/infra/env/display.env
+chmod 600 "$PRE_NATURAL"
+TIMER_BEFORE="$(/usr/bin/systemctl --user show nhms-node27-timeseries-compression.timer -p LastTriggerUSec --value)"
+SERVICE_BEFORE="$(/usr/bin/systemctl --user show nhms-node27-timeseries-compression.service -p ExecMainStartTimestamp --value)"
+while read -r UNIT STATE; do
+  case "$STATE" in
+    enabled)
+      /usr/bin/systemctl --user enable "$UNIT"
+      case "$UNIT" in
+        *.timer) /usr/bin/systemctl --user start "$UNIT" ;;  # re-arm the stopped timer in this session; start on a timer never runs the oneshot
+        *) echo "NO-GO: enabled $UNIT is not a timer; starting a service would fabricate a tick" >&2; exit 1 ;;
+      esac ;;
+    static) : ;;                                       # static service: no [Install], cannot be enabled — never enable --now, never start
+    masked|unknown) echo "NO-GO: unexpected enablement state $STATE for $UNIT" >&2; exit 1 ;;
+    disabled) : ;;                                     # stays disabled; record only
+    *) echo "NO-GO: unexpected enablement state $STATE for $UNIT" >&2; exit 1 ;;
+  esac
+done < "$UNITS_ENABLE_STATE"
+/usr/bin/systemctl --user is-enabled nhms-node27-timeseries-compression.timer | /usr/bin/grep -qx enabled
+/usr/bin/systemctl --user is-active nhms-node27-timeseries-compression.timer | /usr/bin/grep -qx active
+```
+
+The timer/service baseline (`LastTriggerUSec` / `ExecMainStartTimestamp`) is
+captured **before** re-enabling or starting any timer so a `Persistent=true`
+catch-up can be observed as the natural tick. Comparing post-state to that
+baseline after `systemctl start` is the only legal order.
+
+The loop restores **only** the G4-recorded `UnitFileState`. An `enabled` unit is
+always a `.timer` here (every recorded service is `static`, with no `[Install]`
+section) and needs **both** `enable` (persist the symlink) and `start` (re-arm it
+in this live session — G4 `stop`ped the timer, and `enable` alone leaves a
+stopped timer stopped until the user manager restarts, so the natural tick could
+never fire). `start` on a *timer* arms it without executing the oneshot; the tick
+still comes from the timer's own `OnCalendar` (or systemd's persisted catch-up
+for the missed 04:25 slot, allowed because `Persistent=true`). The nested
+`*.timer)` guard is fail-closed: an enabled non-timer unit is NO-GO rather than
+an operator-started service. `enable --now` and `start` on a *oneshot service*
+remain banned — both would fabricate a tick the operator forced. `static` service
+stays **unregistered** (it cannot be enabled; starting it would fabricate a
+tick), `disabled` stays disabled, and `masked`/`unknown` is NO-GO. The
+post-restore `is-enabled/is-active` checks prove the timer is armed and will fire
+on its own; no oneshot service was started by the operator.
+
+Observe at least one natural serialized tick of the 04:25 UTC compression oneshot
+(compression first, cold residency as its second sequential `ExecStart`) and
+require either a newly terminal group's automatic convergence or a
+catalog-proven truthful no-op. Evidence is `LastTriggerUSec` (timer) +
+`ExecMainStartTimestamp`/`ExecMainExitTimestamp` (service) — **not** `sleep 1`
+or `inotifywait`; the poll sleep only waits, the fields are the proof:
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+NATURAL_RECEIPT=/home/nwm/NWM/artifacts/receipts/node27_timeseries_cold_residency.json
+: "${TIMER_BEFORE:?timer baseline must be captured before systemctl start}"
+: "${SERVICE_BEFORE:?service baseline must be captured before systemctl start}"
+_waited=0
+while [ "$_waited" -lt 9000 ]; do
+  /usr/bin/sleep 5
+  _waited=$(( _waited + 5 ))
+  TIMER_AFTER="$(/usr/bin/systemctl --user show nhms-node27-timeseries-compression.timer -p LastTriggerUSec --value)"
+  SERVICE_NOW="$(/usr/bin/systemctl --user show nhms-node27-timeseries-compression.service -p ExecMainStartTimestamp --value)"
+  if [ "$TIMER_AFTER" != "$TIMER_BEFORE" ] && [ "$SERVICE_NOW" != "$SERVICE_BEFORE" ]; then
+    break
+  fi
+done
+test "$TIMER_AFTER" != "$TIMER_BEFORE" || { echo "NO-GO: timer never fired" >&2; exit 1; }
+test "$SERVICE_NOW" != "$SERVICE_BEFORE" || { echo "NO-GO: service never started" >&2; exit 1; }
+SERVICE_START="$SERVICE_NOW"
+_waited=0
+RESULT=""
+while [ "$_waited" -lt 9000 ]; do
+  /usr/bin/sleep 5
+  _waited=$(( _waited + 5 ))
+  SERVICE_RESULT="$(/usr/bin/systemctl --user show nhms-node27-timeseries-compression.service -p Result --value)"
+  SERVICE_ACTIVE="$(/usr/bin/systemctl --user show nhms-node27-timeseries-compression.service -p ActiveState --value)"
+  if [ "$SERVICE_ACTIVE" = "inactive" ]; then
+    RESULT="$SERVICE_RESULT"
+    break
+  fi
+done
+test -n "$RESULT" || { echo "NO-GO: service did not reach a terminal state" >&2; exit 1; }
+test "$RESULT" = "success" || { echo "NO-GO: service Result=$RESULT" >&2; exit 1; }
+SERVICE_EXIT="$(/usr/bin/systemctl --user show nhms-node27-timeseries-compression.service -p ExecMainExitTimestamp --value)"
+test -n "$SERVICE_EXIT" || { echo "NO-GO: service exit timestamp is missing" >&2; exit 1; }
+stat -c '%a' "$NATURAL_RECEIPT" | /usr/bin/grep -qx 600
+FAILED_UNITS="$(/usr/bin/systemctl --user --failed --no-legend)"
+test -z "$(printf '%s\n' "$FAILED_UNITS" | /usr/bin/grep -E 'nhms-node27')" || {
+  echo "NO-GO: issue-owned failed unit" >&2; exit 1; }
+TIMER_SHOW="$RUN_ROOT/receipts/timer-show-$RUN_STAMP.txt"
+SERVICE_SHOW="$RUN_ROOT/receipts/service-show-$RUN_STAMP.txt"
+SYSTEMD_FACTS="$RUN_ROOT/receipts/systemd-facts-$RUN_STAMP.json"
+test ! -e "$TIMER_SHOW"
+test ! -e "$SERVICE_SHOW"
+test ! -e "$RUN_ROOT/receipts/systemd-facts-$RUN_STAMP.json"
+/usr/bin/systemctl --user show nhms-node27-timeseries-compression.timer \
+  -p Id -p Unit -p FragmentPath > "$TIMER_SHOW"
+/usr/bin/systemctl --user show nhms-node27-timeseries-compression.service \
+  -p Id -p FragmentPath -p ExecStart -p InvocationID -p ExecMainStartTimestamp -p ExecMainExitTimestamp -p Result \
+  > "$SERVICE_SHOW"
+chmod 600 "$TIMER_SHOW" "$SERVICE_SHOW"
+uv run --no-sync python scripts/node27_issue1895_systemd_facts.py \
+  --timer-show "$TIMER_SHOW" --service-show "$SERVICE_SHOW" --output "$SYSTEMD_FACTS"
+test -f "$SYSTEMD_FACTS" && test ! -L "$SYSTEMD_FACTS"
+test "$(stat -c '%u' "$SYSTEMD_FACTS")" = "$(id -u)"
+test "$(stat -c '%a' "$SYSTEMD_FACTS")" = "600"
+test "$(stat -c '%h' "$SYSTEMD_FACTS")" = "1"
+# W8/C8 is the post-tick external independent horizon: after G7 and the natural
+# service's LastTrigger/ExecMainStart/Result=success/ExecMainExit proof, never G1
+# and never receipt self-report. An advance in the narrow post-tick observation
+# window fails exact comparison rather than widening the horizon.
+test ! -e "$W8_PATH"
+uv run --no-sync python scripts/node27_issue1895_watermark.py \
+  --output "$W8_PATH" --lag-seconds "$NODE27_COLD_RESIDENCY_LAG_SECONDS" \
+  --display-env /home/nwm/NWM/infra/env/display.env
+test -f "$W8_PATH" && test ! -L "$W8_PATH"
+test "$(stat -c '%u' "$W8_PATH")" = "$(id -u)"
+test "$(stat -c '%a' "$W8_PATH")" = "600"
+test "$(stat -c '%h' "$W8_PATH")" = "1"
+NATURAL_RECEIPT="$NATURAL_RECEIPT" \
+  TIMER_AFTER="$TIMER_AFTER" SERVICE_START="$SERVICE_START" SERVICE_EXIT="$SERVICE_EXIT" \
+  REVIEWED_SHA="$REVIEWED_SHA" W8_PATH="$W8_PATH" \
+  /home/nwm/NWM/.venv/bin/python <<'PY'
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+from packages.common.node27_issue1895_private_receipt import read_held_private_json
+from packages.common.node27_issue1895_timer import assert_natural_receipt_identity
+from packages.common.node27_issue1895_watermark import assert_independent_receipt_horizon
+_raw, receipt, _facts = read_held_private_json(Path(os.environ["NATURAL_RECEIPT"]), label="G8 natural receipt", stage="timer", require_private_parent=False)
+_hraw, horizon, _hfacts = read_held_private_json(Path(os.environ["W8_PATH"]), label="G8 watermark", stage="timer")
+def _utc(value):
+    value = value.strip()
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = datetime.strptime(value, "%a %Y-%m-%d %H:%M:%S %Z")
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+assert receipt["mode"] == "enforce" and receipt["outcome"] in {"clean", "no_op"}
+assert receipt["schema_version"] == "1.1" and receipt["config_observed"] is True
+assert receipt["head_sha"] == os.environ["REVIEWED_SHA"]
+assert (datetime.now(UTC) - _utc(receipt["generated_at"])).total_seconds() <= 900
+assert _utc(os.environ["SERVICE_START"]) <= _utc(receipt["generated_at"]) <= _utc(os.environ["SERVICE_EXIT"])
+assert_natural_receipt_identity(
+    receipt,
+    reviewed_sha=os.environ["REVIEWED_SHA"],
+    expected_cutoff=horizon["cutoff"],
+    expected_watermark=horizon["watermark"],
+    invoked_unit="nhms-node27-timeseries-compression.service",
+)
+assert_independent_receipt_horizon(
+    receipt,
+    expected_watermark=horizon["watermark"],
+    expected_cutoff=horizon["cutoff"],
+    expected_lag_seconds=horizon["lag_seconds"],
+)
+PY
+```
+
+Capture a pre-natural post-target observation before restoring timers, then a
+post-natural observation after the tick. `W8`/`C8` is the **post-tick external
+independent horizon**: it is captured after the G7 natural service has proven
+`LastTriggerUSec`, `ExecMainStartTimestamp`, `Result=success`, and
+`ExecMainExitTimestamp`, from the real display watermark plus the exact cold-env
+lag. It is not G1, is not captured before restore, and is never derived from a
+receipt's self-report. The post-target observer independently reads the baseline
+six durable keys and current complete-source/complete-target sets. Compressed
+sibling OIDs are mutable and are not compared to G1.
+
+```bash
+set -euo pipefail
+cd /home/nwm/NWM
+set -a
+. /home/nwm/NWM/infra/env/node27-cold-residency.env
+set +a
+: "${NODE27_COLD_RESIDENCY_LAG_SECONDS:?cold lag is required}"
+POST_NATURAL="$RUN_ROOT/census/post-natural-$RUN_STAMP.json"
+test ! -e "$POST_NATURAL"
+uv run --no-sync python scripts/node27_issue1895_post_target_observe.py \
+  --baseline "$ORIGINAL_CENSUS" --output "$POST_NATURAL" --reviewed-sha "$REVIEWED_SHA" \
+  --lag-seconds "$NODE27_COLD_RESIDENCY_LAG_SECONDS" --display-env /home/nwm/NWM/infra/env/display.env
+chmod 600 "$POST_NATURAL"
+NEWLY="$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; from packages.common.node27_issue1895_post_target import newly_terminal_keys; _pr, pre, _pf = read_held_private_json(Path(sys.argv[1]), label="G8 pre-natural", stage="post-target"); _po, post, _of = read_held_private_json(Path(sys.argv[2]), label="G8 post-natural", stage="post-target"); print("\n".join(newly_terminal_keys(pre_target_keys=pre["complete_target_keys"], post_target_keys=post["complete_target_keys"])))' "$PRE_NATURAL" "$POST_NATURAL")"
+REMAINING="$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, post, _facts = read_held_private_json(Path(sys.argv[1]), label="G8 post-natural remaining", stage="post-target"); print("\n".join(post["complete_source_keys"]))' "$POST_NATURAL")"
+uv run --no-sync python scripts/node27_issue1895_group_reconcile.py \
+  --baseline "$ORIGINAL_CENSUS" \
+  --observed "$POST_NATURAL" \
+  --receipt "$NATURAL_RECEIPT" \
+  --reviewed-sha "$REVIEWED_SHA" \
+  --expected-cutoff "$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, horizon, _facts = read_held_private_json(Path(sys.argv[1]), label="G8 watermark cutoff", stage="timer"); print(horizon["cutoff"])' "$W8_PATH")" \
+  --expected-watermark "$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, horizon, _facts = read_held_private_json(Path(sys.argv[1]), label="G8 watermark watermark", stage="timer"); print(horizon["watermark"])' "$W8_PATH")" \
+  --invoked-unit nhms-node27-timeseries-compression.service \
+  --remaining-all-source-keys "$REMAINING" \
+  --newly-terminal-key "$NEWLY"
+```
+
+Broad `count(*)` over remaining hot compressed chunks is not acceptable: newly
+terminal keys come from independent pre/post complete-target durable-set
+difference, and remaining complete-source keys come from the post observation.
+A natural no-op is legal only with an empty newly-terminal set, empty remaining
+complete-source set, and shipping selected already_cold / empty deferred
+semantics. A newly terminal eligible group, if one exists, must be the exact
+migrated identity. `persist_baseline_groups` / `assert_exact_cold_groups`
+compare durable keys only. `MOVED_GROUPS -ge REQUIRE_COUNT` is forbidden.
+
+If the tick produced no receipt at all, or a `partial`, `recovery`,
+`refused_lock`, or `in_progress` outcome, or any issue-owned failed unit, return
+to the G4 quiesced state — do not continue and do not patch production. The poll
+sleepe above only waits; `LastTriggerUSec` moving, `ExecMainStartTimestamp`
+changing from the before value, a terminal `Result=success`, and the
+bracketed receipt are the proof — never `sleep 1`/`inotifywait` pretending.
+
+Closure order, in this exact sequence:
+
+1. Post the schema-valid current-run live receipts (G1 census, G2 evidence
+   identities, G3 oracle, G4 quiescence and budget, G5 installer plus
+   pre-movement census, every G6 group receipt, G7 verification, G8 natural tick)
+   and the final GO/NO-GO naming every deviation and every fired trigger.
+2. Open the evidence PR, pass its gates, and **merge it while the shared OpenSpec
+   change is still strict-valid**: re-run
+   `openspec validate compressed-chunk-cold-tablespace-tiering --strict --no-interactive`
+   on the merge commit.
+3. Only then close #1895, and update/close #1891.
+4. Archive the shared change in the immediate validated post-merge follow-up,
+   after its own final strict validation gate. Archiving before the evidence
+   merge would publish unimplemented behavior as done.
+
+#### #1895 stop / NO-GO trigger table
+
+Every row has the same default action — **stop, keep all writers, timers and
+lanes quiesced, preserve the topology, issue no later group and no timer
+restoration, capture the current-run evidence, route a reviewed
+owning-implementation response.** Only the two rows marked otherwise differ.
+
+| Trigger | Detected by | Action |
+|---------|-------------|--------|
+| HEAD, worktree, or engine drift from `REVIEWED_SHA` / PG 15.2 / TimescaleDB 2.10.2 / pinned image | G0 re-check, `git status --porcelain`, `git rev-parse HEAD`, live `server_version`/`extversion`, `scripts/node27_external_contract_snapshot.py --check` | Stop; NO-GO; owning issue |
+| Missing or extra census key: count != `REQUIRE_COUNT`, digest change, new eligible group | G1 and G5 `census_digest`, `group_keys` set equality | Stop; terminal NO-GO; never a subset |
+| Inventory, parity, member, or source-preimage drift between the censuses | G5 pre-movement comparison; G6 receipt-vs-census binding | Stop; zero movement SQL |
+| Target catalog, bind, host path, device identity, or runtime UID/GID drift | G5 receipt `readback`, `inspect_host_path()` re-observation, the exact `INSPECT_FORMAT` projection + `parse_container_exec_user`, G6 receipt `target` | Before a terminal `installed`: never operator rollback; if a live authority exists, re-run the exact same installer invocation so shipping `reconcile()` owns it. After terminal `installed`: stop; preserve; owning issue |
+| Active writer, contended lifecycle/lane lock, unresolved intent sidecar | `systemctl --user show` MainPID/cgroup, `fuser`, receipt `outcome=refused_lock`, intent sidecar present | Stop; keep quiesced; reconcile intent first |
+| RAID degraded/rebuilding/recovering/reshape/missing/spare/unknown; SMART not PASS on either member; backup missing PGDATA or an external target; capacity below `S + 2E` or below a per-group requirement | G2 envelopes, installer `evidence.health` / `evidence.backup` / `evidence.capacity`, G6 `capacity` | Stop; root-evidence or capacity NO-GO |
+| Installer command failure, missing or drifted private recovery authority, non-root/non-0600 evidence, expired envelope | installer exit code, receipt `outcome=no_go`/`error`, `authority` presence/mode, `stat` on both paths | Authority live and no terminal receipt: re-run the same installer invocation for `reconcile()`-owned rollback; after a terminal receipt: stop; preserve; owning issue |
+| Any command in this section exits non-zero | captured `rc` inside each bracket file | Stop; never re-run blind |
+| Stale, missing, wrong-SHA, out-of-bracket, wrong-mode, wrong-outcome, or wrong-exit receipt | current-run binder in "Rollout conventions" | Stop; that group is not accepted; no later group |
+| Mixed, unknown, or non-complete residency after movement | G6 `reconciliation`/`residency`, fresh `collect_residency_group` re-observation | Stop; preserve topology; owning issue (no move-back exists) |
+| Filesystem reconciliation failure (free-space delta vs relation bytes, governance residual collapse) | G6 `scripts/node27_issue1895_fs_reconcile.py` vs receipt members; governance receipt blockers | Stop; governance NO-GO |
+| Seq Scan or all-chunk decompression regression in a hot or cold plan | G7 `EXPLAIN (ANALYZE, BUFFERS)` scans | Stop; no preliminary GO |
+| #1342 breach: buffers > 5000, SQL P95 > 300 ms, local API P95 > 500 ms, river-click P95 >= 2 s | G7 measured plan and latency values | Stop; no preliminary GO |
+| MVT, river-click, publication, valid-times empty/regression, or GFS/IFS count shortfall | G7 API probes and catalog counts | Stop; display regression |
+| Natural tick failure, post-tick external horizon mismatch, or an issue-owned failed unit | G8 `systemctl --user --failed`, natural receipt outcome, `assert_natural_receipt_identity` / `assert_independent_receipt_horizon` | Return to the G4 quiesced state; owning issue |
+
+#### Rollback points
+
+| Point | Legal rollback |
+|-------|----------------|
+| Before any mutation (G0–G4) | no-op: `$UNITS_ENABLE_STATE` does not exist yet and must not be referenced; close the window as NO-GO |
+| After the writer drain (end of G4) | restore exactly the units recorded in `$UNITS_ENABLE_STATE` (enable plus `start` on each recorded `.timer`, never `enable --now`, never start a `.service`) |
+| After env/unit assembly, before install (end of G4) | as above, plus leave `infra/env/node27-cold-residency.env` at its pre-window content (the reserve/UID keys added here authorize nothing until G5 and G6 bind them) |
+| Install in progress with a **live** private authority (failed/interrupted) | **no operator action at all**: re-run the exact same installer invocation (same `--enforce` argv, same `--recovery-path`); shipping `reconcile()` owns the rollback. Accept only a terminal rollback receipt; there is no rollback CLI |
+| Terminal `installed` (G5 onward, including a post-install pre-movement failure with zero groups moved) | stop and preserve: authority is closed/removed, no installer rollback, no path/catalog/bind deletion, writers stay quiesced, owning implementation issue |
+| After any group moved (G6 onward) | stop and preserve: no installer rollback, no move-back entrypoint, no deletion of any referenced path/catalog/bind, writers stay quiesced |
 
 ## Timer cadence order (UTC)
 
@@ -305,6 +2570,13 @@ active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
 
 ### Per-tick capacity (live state 2026-08-14, decided in #1237)
+
+The measurements and 2-chunks/week arithmetic below are historical evidence
+for 7-day chunk geometry, not a capacity guarantee after #2210. Once both
+tables produce 3-day chunks, their steady arrival is approximately
+`2 × 7 / 3` chunks/week, with transitional chunk boundaries possible. Recheck
+per-chunk duration, whole-tick timeout and peak disk headroom on the new mix;
+do not change lag or per-tick bounds solely from the smaller interval.
 
 `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` caps how many chunks one timer
 tick compresses. **The decided value is 4** — a capacity target derived from

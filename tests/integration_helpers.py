@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import psycopg2
+import pytest
 from psycopg2.extras import Json, RealDictCursor, execute_values
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -50,6 +51,85 @@ def apply_migrations_from_zero(database_url: str) -> None:
                 apply_migration(connection, migration_file)
     finally:
         connection.close()
+
+
+@pytest.fixture()
+def post_expand_forecast_database(
+    throwaway_database_url: str,
+) -> Callable[[Mapping[str, str]], None]:
+    """Opt-in reader schema, only in conftest's per-test disposable database.
+
+    Call once AFTER migrations, seed mutations, frozen SQL and coverage refresh.
+    Those pre-expand consumers still require the wide canonical table. Nothing
+    changes in apply_migrations_from_zero or in tests not requesting this fixture.
+
+    D3's route column and D4's physical columns/PK/FKs are the reader contract.
+    This is not an I7 migration rehearsal: lifecycle policies, compression,
+    ownership and deployment/idempotency remain outside this fixture's scope.
+    The renamed wide table is physical; the new canonical table has no text aids.
+    Routed facts retain the original logical snapshot. Opposite-store facts have
+    different times AND values, so a missing/wrong route cannot pass by reading
+    identical mirrored data.
+    """
+
+    def prepare(store_overrides: Mapping[str, str]) -> None:
+        with psycopg_connection(throwaway_database_url) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    ALTER TABLE hydro.hydro_run
+                        ADD COLUMN timeseries_store TEXT NOT NULL DEFAULT 'narrow'
+                        CHECK (timeseries_store IN ('legacy', 'narrow'));
+                    UPDATE hydro.hydro_run SET timeseries_store = 'legacy'
+                    WHERE parsed_at IS NOT NULL OR status IN ('parsed', 'published');
+                    ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_legacy;
+                    CREATE TABLE hydro.river_timeseries (
+                        run_key INTEGER NOT NULL REFERENCES hydro.hydro_run(run_key),
+                        basin_version_key INTEGER NOT NULL,
+                        river_network_version_key INTEGER NOT NULL,
+                        river_segment_key INTEGER NOT NULL REFERENCES core.river_segment(river_segment_key),
+                        valid_time TIMESTAMPTZ NOT NULL,
+                        lead_time_hours INTEGER,
+                        variable_e hydro.river_variable NOT NULL,
+                        value DOUBLE PRECISION NOT NULL,
+                        unit_e hydro.river_unit NOT NULL,
+                        quality_flag_e hydro.river_quality_flag NOT NULL,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                        CONSTRAINT forecast_fixture_narrow_pkey
+                            PRIMARY KEY (run_key, river_segment_key, variable_e, valid_time)
+                    );
+                    """
+                )
+                for run_id, store in store_overrides.items():
+                    cursor.execute(
+                        "UPDATE hydro.hydro_run SET timeseries_store = %s WHERE run_id = %s",
+                        (store, run_id),
+                    )
+                    assert cursor.rowcount == 1
+                # Copy before poisoning: only a run's authoritative store keeps
+                # its pre-transition facts. Non-authoritative rows are decoys.
+                cursor.execute(
+                    """
+                    INSERT INTO hydro.river_timeseries (
+                        run_key, basin_version_key, river_network_version_key, river_segment_key,
+                        valid_time, lead_time_hours, variable_e, value, unit_e, quality_flag_e, created_at
+                    )
+                    SELECT rt.run_key, rt.basin_version_key, rt.river_network_version_key, rt.river_segment_key,
+                           rt.valid_time + CASE WHEN h.timeseries_store = 'legacy'
+                                               THEN INTERVAL '30 minutes' ELSE INTERVAL '0' END,
+                           rt.lead_time_hours, rt.variable_e,
+                           rt.value + CASE WHEN h.timeseries_store = 'legacy' THEN 10000 ELSE 0 END,
+                           rt.unit_e, rt.quality_flag_e, rt.created_at
+                    FROM hydro.river_timeseries_legacy rt
+                    JOIN hydro.hydro_run h ON h.run_key = rt.run_key;
+                    UPDATE hydro.river_timeseries_legacy rt
+                    SET value = rt.value + 10000, valid_time = rt.valid_time + INTERVAL '30 minutes'
+                    FROM hydro.hydro_run h
+                    WHERE h.run_key = rt.run_key AND h.timeseries_store = 'narrow';
+                    """
+                )
+
+    return prepare
 
 
 def sqlalchemy_engine(database_url: str) -> Engine:

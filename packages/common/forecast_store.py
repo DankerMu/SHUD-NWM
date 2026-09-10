@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import os
-import textwrap
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from packages.common.river_ts_render import render_river_ts_sql
 
 MVP_STATION_VARIABLES = ("PRCP", "TEMP", "RH", "wind", "Rn", "Press")
 DEFAULT_STATION_SERIES_LIMIT = 500
@@ -16,139 +17,131 @@ QHH_LATEST_SEARCH_LIMIT = 1
 QHH_LATEST_CANDIDATE_LIMIT = QHH_LATEST_SEARCH_LIMIT
 QHH_LATEST_CONTEXT_LIMIT = 10
 QHH_LATEST_EXPECTED_HORIZON_HOURS = 168
+ANALYSIS_LOOKBACK_DAYS = 3
 QHH_LATEST_SUPPORTED_SOURCES = ("GFS", "IFS")
 QHH_LATEST_READY_RUN_STATUSES = ("succeeded", "parsed", "published")
 QHH_LATEST_REFLECTED_VALUE_LIMIT = 64
 QHH_LATEST_STRICT_IDENTITY_FIELDS = ("source", "run_id", "cycle_time", "model_id")
 
 
-# ---------------------------------------------------------------------------
-# The (basin, segment, network, variable) identity predicate shared by the eight
-# segment-scoped ``hydro.river_timeseries`` reads of ``forecast_series`` (#1442).
-#
-# All eight bind the same three text identities as constants and filter the same
-# way, so they render from ONE constant: eight hand-copied six-placeholder
-# blocks is exactly the drift a surrogate-key migration cannot afford, and the
-# positional parameter tuple is built by ``_segment_identity_params`` so text and
-# bindings can only move together.
-#
-# Shape (issue #1341 idiom, migration 000050/000051):
-#
-# * the caller's text identity is resolved to keys by authority-table scalar
-#   sub-selects the planner hoists into InitPlans. An unknown identity makes a
-#   sub-select NULL, so the predicate matches nothing — the same empty result the
-#   text predicate produced, never an error.
-# * the segment resolution binds the NETWORK as well: ``core.river_segment``'s
-#   primary key is (river_segment_id, river_network_version_id), so a bare
-#   segment-id lookup can return more than one row and would raise 21000.
-# * ``river_segment_id``, ``river_network_version_id`` and ``variable``
-#   additionally survive as transitional TEXT conjuncts, because compression
-#   still keys compressed chunks on the TEXT columns (000047) and TimescaleDB
-#   2.10.2 cannot push an integer-key predicate through that. The two mechanics
-#   are NOT the same and the distinction matters when #1342 removes them:
-#   ``river_network_version_id`` and ``river_segment_id`` are SEGMENTBY columns
-#   (000047: segmentby run_id, river_network_version_id, river_segment_id), so
-#   their predicates prune whole compressed batches; ``variable`` is an ORDERBY
-#   column (000047: orderby variable, valid_time), so it buys per-batch min/max
-#   metadata exclusion rather than segmentby pruning — the same wording
-#   ``services/tile_publisher/publisher.py`` uses for its lone ``variable`` aid.
-#   Each is AND-ed with its key/enum counterpart, so it only ever narrows, and
-#   all three are removed with the text columns in #1342.
-# * ``river_segment_id`` is here by the E4(ii) live-plan adjudication (design
-#   D10.7), not by the original "zero every segment predicate" draft. It buys
-#   exactly ONE thing, on the COMPRESSED leg: segmentby pruning on 000047's
-#   third column. Without it that leg decompresses the whole network — 32660
-#   batches, Rows Removed 3,292,128, 18549ms; with it, 40 batches, 4032, 1085ms.
-#   It qualifies as a sanctioned aid because these blocks bind it as a LITERAL
-#   (never as a text fact join) and it is compression-reachable.
-# * What the aid does NOT do (an earlier draft of this comment claimed it did,
-#   and a second reading of the receipts disproved it): it gives the
-#   UNCOMPRESSED leg nothing. Both plans there carry byte-identical Index Cond
-#   and Rows Removed with and without the predicate — the difference measured
-#   there was I/O caching, not planning. That leg runs on 000051's key index
-#   plus a heap filter either way; the text-shaped
-#   ``river_ts_segment_time_idx`` still exists, but the planner does not choose
-#   it.
-# * The recorded, ACCEPTED residual of the whole switch, from the quiet-database
-#   shipped-SQL receipts (node-27 ``/home/nwm/nwm-1442-e4/final/``, warm second
-#   run of each; they supersede every contended earlier figure, including the
-#   "203ms/259ms steady state" an earlier draft of this comment quoted):
-#   uncompressed leg 6.2ms -> 226ms with buffer touches 387 -> 15,439;
-#   compressed leg 3.0ms -> 1085ms. The old compressed number is not something
-#   the aid can recover: the text PK nested loop got run-level segmentby pruning
-#   from its loop parameter, and a keyed join cannot, because a text fact join
-#   is forbidden outright. Both residuals are accepted for the display endpoints
-#   at these absolute values; the cure is not a text predicate but #1342's
-#   key-form successor index ``(river_segment_key, variable_e, valid_time
-#   DESC)`` plus a compression-layout re-cut.
-# * ``basin_version_id`` still gets NO text conjunct: it is neither a segmentby
-#   column nor an index prefix here, so it would buy nothing and only widen the
-#   text surface #1342 has to remove.
-# * ``run_id`` gets none either — these queries never bind a run as a constant,
-#   they reach it through the ``hydro_run`` join, and a text fact join is
-#   forbidden (a join equality is not pushdown material anyway).
-# ---------------------------------------------------------------------------
-_SEGMENT_IDENTITY_PREDICATE_SQL = """\
-rt.basin_version_key = (
+# These spanning reads route each fact through its authoritative run, before
+# the caller's single ranking/window/aggregation layer. Activate only with I7.
+_SEGMENT_ROWS_SOURCE_SQL = """
+SELECT rt.run_key, rt.river_network_version_key, rt.valid_time, rt.value, rt.unit_e
+FROM hydro.river_timeseries rt
+JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+WHERE {store_predicate}
+  AND rt.basin_version_key = (
       SELECT basin_version_key FROM core.basin_version
-      WHERE basin_version_id = %s
+      WHERE basin_version_id = %(basin_version_id)s
   )
   AND rt.river_segment_key = (
       SELECT river_segment_key FROM core.river_segment
-      WHERE river_segment_id = %s
-        AND river_network_version_id = %s
+      WHERE river_segment_id = %(river_segment_id)s
+        AND river_network_version_id = %(river_network_version_id)s
   )
   -- transitional compressed-chunk pushdown aid, remove with #1342
-  AND rt.river_segment_id = %s
+  AND rt.river_segment_id = %(river_segment_id)s
   -- transitional compressed-chunk pushdown aid, remove with #1342
-  AND rt.river_network_version_id = %s
+  AND rt.river_network_version_id = %(river_network_version_id)s
   AND rt.river_network_version_key = (
       SELECT river_network_version_key FROM core.river_network_version
-      WHERE river_network_version_id = %s
+      WHERE river_network_version_id = %(river_network_version_id)s
   )
   -- transitional compressed-chunk pushdown aid, remove with #1342
   AND rt.variable = 'q_down'
-  AND rt.variable_e = 'q_down'::hydro.river_variable"""
+  AND rt.variable_e = 'q_down'::hydro.river_variable
+"""
 
 
-def _segment_identity_predicates(indent: int) -> str:
-    """``_SEGMENT_IDENTITY_PREDICATE_SQL`` re-indented for its embedding query.
+def _segment_rows_source_template(store: str) -> str:
+    if store == "legacy":
+        return _SEGMENT_ROWS_SOURCE_SQL.format(store_predicate="h.timeseries_store = 'legacy'")
+    if store == "narrow":
+        return _SEGMENT_ROWS_SOURCE_SQL.format(store_predicate="h.timeseries_store = 'narrow'")
+    raise ValueError(f"Invalid river timeseries store: {store!r}")
 
-    Rendered right after a literal ``WHERE ``, so the first line keeps the
-    caller's own indentation and every continuation line gets ``indent`` spaces.
-    """
-    return textwrap.indent(_SEGMENT_IDENTITY_PREDICATE_SQL, " " * indent).lstrip()
 
-
-# The two embedding depths in use: six blocks sit directly in a method body, the
-# selected-cycles forecast block one level deeper inside its own WITH.
-_SEGMENT_IDENTITY_PREDICATES = _segment_identity_predicates(14)
-_SEGMENT_IDENTITY_PREDICATES_NESTED = _segment_identity_predicates(18)
+def _segment_rows_source_sql() -> str:
+    legacy = render_river_ts_sql(_segment_rows_source_template("legacy"), "legacy").sql
+    narrow = render_river_ts_sql(_segment_rows_source_template("narrow"), "narrow").sql
+    return f"({legacy}\nUNION ALL\n{narrow})"
 
 
 def _segment_identity_params(
     basin_version_id: str,
     segment_id: str,
     river_network_version_id: str,
-) -> tuple[str, ...]:
-    """Positional bindings for ``_SEGMENT_IDENTITY_PREDICATE_SQL``, in text order.
+) -> dict[str, Any]:
+    return {
+        "basin_version_id": basin_version_id,
+        "river_segment_id": segment_id,
+        "river_network_version_id": river_network_version_id,
+    }
 
-    Six placeholders, three values: the segment is bound twice (key resolution,
-    transitional text aid) and the network three times (segment resolution,
-    transitional text aid, own resolution). The order below is the order the
-    placeholders appear in the constant — basin, segment and network inside the
-    segment-key sub-select, then the segment aid, the network aid, and the
-    network's own resolution. Kept adjacent to the SQL it feeds so a predicate
-    edit that forgets a binding is a one-file change.
-    """
-    return (
-        basin_version_id,
-        segment_id,
-        river_network_version_id,
-        segment_id,
-        river_network_version_id,
-        river_network_version_id,
-    )
+
+_LATEST_PRODUCT_RIVER_SOURCE_SQL = """
+                SELECT
+                    rt.run_key,
+                    rt.basin_version_key,
+                    rt.river_network_version_key,
+                    rt.river_segment_key,
+                    cr.expected_segment_count,
+                    rt.valid_time,
+                    rt.lead_time_hours
+                FROM hydro.river_timeseries rt
+                JOIN candidate_runs cr
+                  ON cr.run_key = rt.run_key
+                 AND cr.basin_version_key = rt.basin_version_key
+                 AND cr.river_network_version_key = rt.river_network_version_key
+                WHERE {store_predicate}
+                  AND rt.variable_e = 'q_down'::hydro.river_variable
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND rt.variable = 'q_down'
+                  AND rt.valid_time >= cr.display_start_time
+                  AND rt.valid_time <= cr.display_end_time
+                  AND (%(scan_run_id)s IS NULL
+                       OR (
+                           -- transitional compressed-chunk pushdown aid, remove with #1342
+                           rt.run_id = %(scan_run_id)s AND
+                           rt.run_key = (SELECT run_key FROM hydro.hydro_run
+                                         WHERE run_id = %(scan_run_id)s)))
+                  AND (%(scan_basin_version_id)s IS NULL
+                       OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
+                                                  WHERE basin_version_id = %(scan_basin_version_id)s))
+                  AND (%(scan_river_network_version_id)s IS NULL
+                       OR (
+                           -- transitional compressed-chunk pushdown aid, remove with #1342
+                           rt.river_network_version_id = %(scan_river_network_version_id)s AND
+                           rt.river_network_version_key = (SELECT river_network_version_key
+                                                           FROM core.river_network_version
+                                                           WHERE river_network_version_id
+                                                                 = %(scan_river_network_version_id)s)))
+                  AND (%(scan_display_start)s IS NULL
+                       OR rt.valid_time >= %(scan_display_start)s)
+                  AND (%(scan_display_end)s IS NULL
+                       OR rt.valid_time <= %(scan_display_end)s)
+"""
+
+
+def _latest_product_river_source_template(store: str) -> str:
+    if store == "legacy":
+        return _LATEST_PRODUCT_RIVER_SOURCE_SQL.format(store_predicate="cr.timeseries_store = 'legacy'")
+    if store == "narrow":
+        return _LATEST_PRODUCT_RIVER_SOURCE_SQL.format(store_predicate="cr.timeseries_store = 'narrow'")
+    raise ValueError(f"Invalid river timeseries store: {store!r}")
+
+
+def _qhh_latest_timeseries_store(header: Mapping[str, Any]) -> str:
+    store = header.get("timeseries_store")
+    if store not in ("legacy", "narrow"):
+        raise ForecastStoreError(
+            status_code=500,
+            code="TIMESERIES_STORE_INVALID",
+            message="The candidate run has an invalid river timeseries store route.",
+            details={"run_id": header.get("run_id")},
+        )
+    return store
 
 
 class ForecastStoreError(RuntimeError):
@@ -251,6 +244,7 @@ def _station_variable_filter_tokens(values: Sequence[str] | str | None) -> list[
 _QHH_LATEST_CANDIDATE_RUNS_SQL = """
                 SELECT
                     h.run_id,
+                    h.timeseries_store,
                     h.run_type,
                     h.scenario_id,
                     h.model_id,
@@ -567,18 +561,17 @@ class PsycopgForecastStore:
             cursor,
             f"""
             SELECT h.cycle_time
-            FROM hydro.river_timeseries rt
+            FROM {_segment_rows_source_sql()} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
-            WHERE {_SEGMENT_IDENTITY_PREDICATES}
-              AND h.cycle_time IS NOT NULL
+            WHERE h.cycle_time IS NOT NULL
               {scenario_filter.sql}
             ORDER BY h.cycle_time DESC
             LIMIT 1
             """,
-            (
-                *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
-                *scenario_filter.params,
-            ),
+            {
+                **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                **scenario_filter.params,
+            },
         )
         return _ensure_utc(row["cycle_time"]) if row is not None else None
 
@@ -598,21 +591,20 @@ class PsycopgForecastStore:
             SELECT
                 h.scenario_id,
                 MAX(h.cycle_time) AS cycle_time
-            FROM hydro.river_timeseries rt
+            FROM {_segment_rows_source_sql()} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
-            WHERE {_SEGMENT_IDENTITY_PREDICATES}
-              AND h.run_type = 'forecast'
+            WHERE h.run_type = 'forecast'
               AND h.cycle_time IS NOT NULL
               {scenario_filter.sql}
               {identity_filter.sql}
             GROUP BY h.scenario_id
             ORDER BY h.scenario_id
             """,
-            (
-                *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
-                *scenario_filter.params,
-                *identity_filter.params,
-            ),
+            {
+                **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                **scenario_filter.params,
+                **identity_filter.params,
+            },
         )
         return {
             str(row["scenario_id"]): _ensure_utc(row["cycle_time"])
@@ -632,10 +624,9 @@ class PsycopgForecastStore:
             cursor,
             f"""
             SELECT h.end_time
-            FROM hydro.river_timeseries rt
+            FROM {_segment_rows_source_sql()} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
-            WHERE {_SEGMENT_IDENTITY_PREDICATES}
-              AND h.scenario_id = 'analysis_true_field'
+            WHERE h.scenario_id = 'analysis_true_field'
               AND h.end_time IS NOT NULL
             ORDER BY h.end_time DESC, h.created_at DESC
             LIMIT 1
@@ -666,19 +657,18 @@ class PsycopgForecastStore:
                 rt.valid_time,
                 rt.value,
                 rt.unit_e::text AS unit
-            FROM hydro.river_timeseries rt
+            FROM {_segment_rows_source_sql()} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
-            WHERE {_SEGMENT_IDENTITY_PREDICATES}
-              AND h.scenario_id = 'analysis_true_field'
-              AND rt.valid_time >= %s
-              AND rt.valid_time < %s
+            WHERE h.scenario_id = 'analysis_true_field'
+              AND rt.valid_time >= %(start_time)s
+              AND rt.valid_time < %(end_time)s
             ORDER BY rt.valid_time, h.end_time DESC, h.created_at DESC
             """,
-                (
-                    *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
-                    start_time,
-                    end_time,
-                ),
+                {
+                    **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                    "start_time": start_time,
+                    "end_time": end_time,
+                },
             ),
         )
 
@@ -698,10 +688,14 @@ class PsycopgForecastStore:
         if cycle_times_by_scenario is not None:
             if not cycle_times_by_scenario:
                 return []
-            selected_cycle_values = ", ".join(["(%s, %s::timestamptz)"] * len(cycle_times_by_scenario))
-            selected_cycle_params: list[Any] = []
-            for scenario_id, cycle_time in cycle_times_by_scenario.items():
-                selected_cycle_params.extend([scenario_id, _ensure_utc(cycle_time)])
+            selected_cycle_values = ", ".join(
+                f"(%(selected_scenario_{index})s, %(selected_cycle_{index})s::timestamptz)"
+                for index in range(len(cycle_times_by_scenario))
+            )
+            selected_cycle_params: dict[str, Any] = {}
+            for index, scenario_id in enumerate(sorted(cycle_times_by_scenario)):
+                selected_cycle_params[f"selected_scenario_{index}"] = scenario_id
+                selected_cycle_params[f"selected_cycle_{index}"] = _ensure_utc(cycle_times_by_scenario[scenario_id])
             return self._attach_forcing_lineage(
                 cursor,
                 self._fetch_all(
@@ -721,27 +715,26 @@ class PsycopgForecastStore:
                     rt.valid_time,
                     rt.value,
                     rt.unit_e::text AS unit
-                FROM hydro.river_timeseries rt
+                FROM {_segment_rows_source_sql()} rt
                 JOIN hydro.hydro_run h ON h.run_key = rt.run_key
                 JOIN core.river_network_version rnv
                   ON rnv.river_network_version_key = rt.river_network_version_key
                 JOIN selected_cycles sc
                   ON sc.scenario_id = h.scenario_id
                  AND sc.cycle_time = h.cycle_time
-                WHERE {_SEGMENT_IDENTITY_PREDICATES_NESTED}
-                  AND h.run_type = 'forecast'
+                WHERE h.run_type = 'forecast'
                   AND rt.valid_time >= h.cycle_time
                   AND rt.valid_time <= h.cycle_time + INTERVAL '7 days'
                   {scenario_filter.sql}
                   {identity_filter.sql}
                 ORDER BY h.scenario_id, rt.valid_time
                 """,
-                    (
-                        *selected_cycle_params,
-                        *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
-                        *scenario_filter.params,
-                        *identity_filter.params,
-                    ),
+                    {
+                        **selected_cycle_params,
+                        **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                        **scenario_filter.params,
+                        **identity_filter.params,
+                    },
                 ),
             )
 
@@ -762,27 +755,25 @@ class PsycopgForecastStore:
                 rt.valid_time,
                 rt.value,
                 rt.unit_e::text AS unit
-            FROM hydro.river_timeseries rt
+            FROM {_segment_rows_source_sql()} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
             JOIN core.river_network_version rnv
               ON rnv.river_network_version_key = rt.river_network_version_key
-            WHERE {_SEGMENT_IDENTITY_PREDICATES}
-              AND h.run_type = 'forecast'
-              AND h.cycle_time = %s
-              AND rt.valid_time >= %s
-              AND rt.valid_time <= %s
+            WHERE h.run_type = 'forecast'
+              AND h.cycle_time = %(issue_time)s
+              AND rt.valid_time >= %(issue_time)s
+              AND rt.valid_time <= %(end_time)s
               {scenario_filter.sql}
               {identity_filter.sql}
             ORDER BY h.scenario_id, rt.valid_time
             """,
-                (
-                    *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
-                    issue_time,
-                    issue_time,
-                    forecast_end,
-                    *scenario_filter.params,
-                    *identity_filter.params,
-                ),
+                {
+                    **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                    "issue_time": issue_time,
+                    "end_time": forecast_end,
+                    **scenario_filter.params,
+                    **identity_filter.params,
+                },
             ),
         )
 
@@ -799,15 +790,14 @@ class PsycopgForecastStore:
             cursor,
             f"""
             SELECT MAX(rt.valid_time) AS valid_time
-            FROM hydro.river_timeseries rt
+            FROM {_segment_rows_source_sql()} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
-            WHERE {_SEGMENT_IDENTITY_PREDICATES}
-              AND LOWER(h.run_type) = ANY(%s)
+            WHERE LOWER(h.run_type::text) = ANY(%(run_types)s)
             """,
-            (
-                *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
-                list(run_types),
-            ),
+            {
+                **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                "run_types": list(run_types),
+            },
         )
         return _ensure_utc(row["valid_time"]) if row is not None and row.get("valid_time") is not None else None
 
@@ -821,7 +811,7 @@ class PsycopgForecastStore:
         run_types: Sequence[str],
         end_time: datetime,
     ) -> list[dict[str, Any]]:
-        start_time = end_time - timedelta(days=7)
+        start_time = end_time - timedelta(days=ANALYSIS_LOOKBACK_DAYS)
         return self._attach_forcing_lineage(
             cursor,
             self._fetch_all(
@@ -838,22 +828,21 @@ class PsycopgForecastStore:
                 rt.valid_time,
                 rt.value,
                 rt.unit_e::text AS unit
-            FROM hydro.river_timeseries rt
+            FROM {_segment_rows_source_sql()} rt
             JOIN hydro.hydro_run h ON h.run_key = rt.run_key
             JOIN core.river_network_version rnv
               ON rnv.river_network_version_key = rt.river_network_version_key
-            WHERE {_SEGMENT_IDENTITY_PREDICATES}
-              AND LOWER(h.run_type) = ANY(%s)
-              AND rt.valid_time >= %s
-              AND rt.valid_time <= %s
+            WHERE LOWER(h.run_type::text) = ANY(%(run_types)s)
+              AND rt.valid_time >= %(start_time)s
+              AND rt.valid_time <= %(end_time)s
             ORDER BY h.scenario_id, rt.valid_time
             """,
-                (
-                    *_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
-                    list(run_types),
-                    start_time,
-                    end_time,
-                ),
+                {
+                    **_segment_identity_params(basin_version_id, segment_id, river_network_version_id),
+                    "run_types": list(run_types),
+                    "start_time": start_time,
+                    "end_time": end_time,
+                },
             ),
         )
 
@@ -1078,10 +1067,7 @@ class PsycopgForecastStore:
         normalized_search = search.strip() if search is not None else ""
         if normalized_search:
             like_pattern = f"%{_escape_like(normalized_search)}%"
-            clauses.append(
-                "(ms.station_id ILIKE %s ESCAPE '\\' "
-                "OR COALESCE(ms.station_name, '') ILIKE %s ESCAPE '\\')"
-            )
+            clauses.append("(ms.station_id ILIKE %s ESCAPE '\\' OR COALESCE(ms.station_name, '') ILIKE %s ESCAPE '\\')")
             params.extend([like_pattern, like_pattern])
             filters_applied["search"] = normalized_search
 
@@ -1306,9 +1292,7 @@ class PsycopgForecastStore:
         context_evaluations = evaluations[:QHH_LATEST_CONTEXT_LIMIT]
         reasons = _qhh_latest_context_reasons(context_evaluations)
         if not reasons:
-            reasons.append(
-                _qhh_latest_no_candidates_reason(basin_id=basin_id, source_id=source_id, identity=identity)
-            )
+            reasons.append(_qhh_latest_no_candidates_reason(basin_id=basin_id, source_id=source_id, identity=identity))
         details: dict[str, Any] = {
             "source_id": source_id,
             "basin_id": basin_id,
@@ -1358,9 +1342,7 @@ class PsycopgForecastStore:
                 details={"source_id": source_id, "basin_id": basin_id, "status": "unavailable"},
             )
         available_issue_times = [
-            _format_time(_datetime_value(row.get("cycle_time")))
-            for row in rows
-            if row.get("cycle_time") is not None
+            _format_time(_datetime_value(row.get("cycle_time"))) for row in rows if row.get("cycle_time") is not None
         ]
         target = rows[0]
         if requested_cycle is not None:
@@ -1368,9 +1350,7 @@ class PsycopgForecastStore:
                 (row for row in rows if _datetime_value(row.get("cycle_time")) == requested_cycle),
                 rows[0],
             )
-        return _qhh_identity_product(
-            target, basin_id=basin_id, available_issue_times=available_issue_times
-        )
+        return _qhh_identity_product(target, basin_id=basin_id, available_issue_times=available_issue_times)
 
     def _fetch_latest_qhh_identity_candidates(
         self,
@@ -1505,6 +1485,7 @@ class PsycopgForecastStore:
             WITH candidate_runs AS ({header_candidate_runs_sql}            )
             SELECT
                 run_id,
+                timeseries_store,
                 forcing_version_id,
                 basin_version_id,
                 river_network_version_id,
@@ -1518,6 +1499,7 @@ class PsycopgForecastStore:
         if not headers:
             return []
         header = headers[0]
+        store = _qhh_latest_timeseries_store(header)
         parameters.update(
             scan_run_id=header["run_id"],
             scan_forcing_version_id=header["forcing_version_id"],
@@ -1531,6 +1513,7 @@ class PsycopgForecastStore:
             identity_sql=identity_sql_named,
             pin_scan_run_id=True,
         )
+        river_source_sql = render_river_ts_sql(_latest_product_river_source_template(store), store).sql
         return self._fetch_all(
             cursor,
             f"""
@@ -1881,45 +1864,7 @@ class PsycopgForecastStore:
             -- candidate_runs is key-only, because a text join equality is not
             -- pushdown material and a text fact join is forbidden.
             river_sample_rows AS (
-                SELECT
-                    rt.run_key,
-                    rt.basin_version_key,
-                    rt.river_network_version_key,
-                    rt.river_segment_key,
-                    cr.expected_segment_count,
-                    rt.valid_time,
-                    rt.lead_time_hours
-                FROM hydro.river_timeseries rt
-                JOIN candidate_runs cr
-                  ON cr.run_key = rt.run_key
-                 AND cr.basin_version_key = rt.basin_version_key
-                 AND cr.river_network_version_key = rt.river_network_version_key
-                WHERE rt.variable_e = 'q_down'::hydro.river_variable
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND rt.variable = 'q_down'
-                  AND rt.valid_time >= cr.display_start_time
-                  AND rt.valid_time <= cr.display_end_time
-                  AND (%(scan_run_id)s IS NULL
-                       OR (
-                           -- transitional compressed-chunk pushdown aid, remove with #1342
-                           rt.run_id = %(scan_run_id)s AND
-                           rt.run_key = (SELECT run_key FROM hydro.hydro_run
-                                         WHERE run_id = %(scan_run_id)s)))
-                  AND (%(scan_basin_version_id)s IS NULL
-                       OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
-                                                  WHERE basin_version_id = %(scan_basin_version_id)s))
-                  AND (%(scan_river_network_version_id)s IS NULL
-                       OR (
-                           -- transitional compressed-chunk pushdown aid, remove with #1342
-                           rt.river_network_version_id = %(scan_river_network_version_id)s AND
-                           rt.river_network_version_key = (SELECT river_network_version_key
-                                                           FROM core.river_network_version
-                                                           WHERE river_network_version_id
-                                                                 = %(scan_river_network_version_id)s)))
-                  AND (%(scan_display_start)s IS NULL
-                       OR rt.valid_time >= %(scan_display_start)s)
-                  AND (%(scan_display_end)s IS NULL
-                       OR rt.valid_time <= %(scan_display_end)s)
+                {river_source_sql}
             ),
             river_identity_coverage AS (
                 SELECT
@@ -1994,7 +1939,37 @@ class PsycopgForecastStore:
                   ON rollup_network.river_network_version_key = rollup.river_network_version_key
             )
             SELECT
-                cr.*,
+                cr.run_id,
+                cr.run_type,
+                cr.scenario_id,
+                cr.model_id,
+                cr.basin_version_id,
+                cr.forcing_version_id,
+                cr.source_id,
+                cr.cycle_time,
+                cr.run_start_time,
+                cr.run_end_time,
+                cr.status,
+                cr.run_created_at,
+                cr.run_updated_at,
+                cr.river_network_version_id,
+                cr.model_basin_version_id,
+                cr.basin_id,
+                cr.river_network_basin_version_id,
+                cr.run_key,
+                cr.basin_version_key,
+                cr.river_network_version_key,
+                cr.expected_segment_count,
+                cr.fv_forcing_version_id,
+                cr.forcing_model_id,
+                cr.forcing_source_id,
+                cr.forcing_cycle_time,
+                cr.forcing_start_time,
+                cr.forcing_end_time,
+                cr.expected_station_count,
+                cr.forcing_checksum,
+                cr.display_start_time,
+                cr.display_end_time,
                 COALESCE(sc.station_count, 0) AS station_count,
                 COALESCE(sc.station_sample_count, 0) AS station_sample_count,
                 sc.run_id AS station_run_id,
@@ -2331,8 +2306,7 @@ class PsycopgForecastStore:
                 status_code=422,
                 code="MISSING_REQUIRED_FILTER",
                 message=(
-                    "forcing_version_id or model_id, source_id, and cycle_time are required "
-                    "for station series queries."
+                    "forcing_version_id or model_id, source_id, and cycle_time are required for station series queries."
                 ),
                 details={
                     "required_alternatives": [
@@ -2602,7 +2576,9 @@ class PsycopgForecastStore:
             (forcing_version_id, valid_time_start, valid_time_end, list(variables)),
         )
 
-    def _fetch_optional(self, cursor: Any, statement: str, parameters: Sequence[Any]) -> dict[str, Any] | None:
+    def _fetch_optional(
+        self, cursor: Any, statement: str, parameters: Sequence[Any] | Mapping[str, Any]
+    ) -> dict[str, Any] | None:
         rows = self._fetch_all(cursor, statement, parameters)
         return rows[0] if rows else None
 
@@ -2645,7 +2621,7 @@ class PsycopgForecastStore:
 @dataclass(frozen=True)
 class _ScenarioFilter:
     sql: str
-    params: tuple[Any, ...]
+    params: Mapping[str, Any]
 
 
 class _PsycopgTransaction:
@@ -2667,9 +2643,7 @@ class _PsycopgTransaction:
             ) from error
 
         self.psycopg2 = psycopg2
-        self.connection = psycopg2.connect(
-            self.database_url, **_attribution_connect_kwargs(self.application_name)
-        )
+        self.connection = psycopg2.connect(self.database_url, **_attribution_connect_kwargs(self.application_name))
         self.connection.set_session(isolation_level="REPEATABLE READ", readonly=True, autocommit=False)
         register_default_json(conn_or_curs=self.connection)
         register_default_jsonb(conn_or_curs=self.connection)
@@ -2697,33 +2671,32 @@ class _PsycopgTransaction:
 def _scenario_filter(scenarios: Sequence[str]) -> _ScenarioFilter:
     tokens = _normalized_tokens(scenarios)
     if not tokens:
-        return _ScenarioFilter("", ())
+        return _ScenarioFilter("", {})
 
-    source_ids = tuple(tokens)
     scenario_ids = set(tokens)
     for token in tokens:
         if not token.startswith("forecast_"):
             scenario_ids.add(f"forecast_{token}_deterministic")
     return _ScenarioFilter(
-        "AND (LOWER(h.source_id) = ANY(%s) OR LOWER(h.scenario_id) = ANY(%s))",
-        (list(source_ids), sorted(scenario_ids)),
+        "AND (LOWER(h.source_id) = ANY(%(scenario_tokens)s) OR LOWER(h.scenario_id) = ANY(%(scenario_ids)s))",
+        {"scenario_tokens": tokens, "scenario_ids": sorted(scenario_ids)},
     )
 
 
 def _run_identity_filter(*, run_id: str | None, model_id: str | None) -> _ScenarioFilter:
     clauses: list[str] = []
-    params: list[str] = []
+    params: dict[str, Any] = {}
     normalized_run_id = str(run_id or "").strip()
     normalized_model_id = str(model_id or "").strip()
     if normalized_run_id:
-        clauses.append("h.run_id = %s")
-        params.append(normalized_run_id)
+        clauses.append("h.run_id = %(run_id)s")
+        params["run_id"] = normalized_run_id
     if normalized_model_id:
-        clauses.append("h.model_id = %s")
-        params.append(normalized_model_id)
+        clauses.append("h.model_id = %(model_id)s")
+        params["model_id"] = normalized_model_id
     if not clauses:
-        return _ScenarioFilter("", ())
-    return _ScenarioFilter("AND " + " AND ".join(clauses), tuple(params))
+        return _ScenarioFilter("", {})
+    return _ScenarioFilter("AND " + " AND ".join(clauses), params)
 
 
 def _run_type_tokens(run_types: Sequence[str] | None) -> list[str]:
@@ -3090,9 +3063,7 @@ def _qhh_identity_product(
     source_id = _display_source_id(str(row.get("source_id") or ""))
     cycle_time = _datetime_value(row.get("cycle_time"))
     available_start_time, available_end_time = _qhh_latest_available_window(row)
-    horizon_hours = _qhh_latest_horizon_hours(
-        row, cycle_time=cycle_time, available_end_time=available_end_time
-    )
+    horizon_hours = _qhh_latest_horizon_hours(row, cycle_time=cycle_time, available_end_time=available_end_time)
     expected_horizon_hours = QHH_LATEST_EXPECTED_HORIZON_HOURS
     shorter_horizon = horizon_hours is not None and horizon_hours < expected_horizon_hours
     return {
@@ -3643,7 +3614,7 @@ def _bounded_reflected_value(value: Any) -> str:
     text = str(value or "")
     if len(text) <= QHH_LATEST_REFLECTED_VALUE_LIMIT:
         return text
-    return f"{text[:QHH_LATEST_REFLECTED_VALUE_LIMIT - 3]}..."
+    return f"{text[: QHH_LATEST_REFLECTED_VALUE_LIMIT - 3]}..."
 
 
 def _latest_datetime(*values: datetime | None) -> datetime | None:
@@ -3977,7 +3948,7 @@ def _run_display_coverage_available(cursor: Any) -> bool:
 
 def analysis_window_for_issue_time(issue_time: datetime) -> tuple[datetime, datetime]:
     end_time = _ensure_utc(issue_time)
-    return end_time - timedelta(days=7), end_time
+    return end_time - timedelta(days=ANALYSIS_LOOKBACK_DAYS), end_time
 
 
 def _latest_cycle_time(cycle_times_by_scenario: Mapping[str, datetime]) -> datetime | None:
@@ -4193,7 +4164,9 @@ def _station_forcing_readiness_response(
     effective_expected_station_count = (
         expected_station_count
         if expected_station_count is not None
-        else declared_station_count if declared_station_count > 0 else None
+        else declared_station_count
+        if declared_station_count > 0
+        else None
     )
     missing_reasons: list[dict[str, Any]] = []
     coverage: list[dict[str, Any]] = []
@@ -4344,7 +4317,7 @@ def _spliced_response_from_rows(
                 "scenario": "analysis_true_field",
                 "scenario_id": "analysis_true_field",
                 "source": _source_label(analysis_rows[0]),
-                "segment_role": "past_7_days",
+                "segment_role": "past_3_days",
                 "data": analysis_data,
             }
         )

@@ -211,7 +211,7 @@ GFS 周期发现 → 下载 → canonical → forcing → SHUD forecast
 
 ## 阶段 2：Analysis Run 与 Warm-start
 
-**目标**：Analysis run 生成 StateSnapshot，Forecast 使用 init_state_id warm-start，前端拼接过去 7 天 + 未来 7 天。
+**目标**：Analysis run 生成 StateSnapshot，Forecast 使用 init_state_id warm-start，前端拼接过去 3 天 + 未来 7 天。
 
 ### 必读文档
 
@@ -233,7 +233,7 @@ GFS 周期发现 → 下载 → canonical → forcing → SHUD forecast
 | M2-2 | Analysis run pipeline：ERA5 forcing → SHUD analysis → StateSnapshot |
 | M2-3 | State manager：StateSnapshot 存储、查询最近可用、usable_flag 管理 |
 | M2-4 | Forecast warm-start：init_state_id → init_state_uri → SHUD 启动 |
-| M2-5 | 前端曲线拼接：analysis_true_field（过去 7 天）+ forecast（未来 7 天） |
+| M2-5 | 前端曲线拼接：analysis_true_field（过去 3 天）+ forecast（未来 7 天） |
 | M2-6 | best_available_selection 表写入与查询 |
 
 ---

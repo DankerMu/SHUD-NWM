@@ -38,7 +38,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from apps.api import main
+from apps.api import main, route_registry
 from apps.api.routes import hydro_display
 from apps.api.routes import precip as precip_routes
 from services.precip import (
@@ -1462,6 +1462,67 @@ def test_precip_routes_take_no_database_dependency() -> None:
     # Positive control: both routes were actually inspected, so the assertion
     # above is an observation rather than an empty loop.
     assert matched == 2, f"expected both precip routes to be registered, matched {matched}"
+
+
+# The two published precipitation endpoints, spelled once for the reachability
+# mutation proof below.
+_PUBLISHED_PRECIP_ROUTE_PATHS = frozenset(
+    {
+        "/api/v1/precip/{source}/{cycle}/index",
+        "/api/v1/precip/{source}/{cycle}/{valid_time}.png",
+    }
+)
+
+
+def _registered_route_paths(api: Any) -> set[str]:
+    return {path for route in api.routes if (path := getattr(route, "path", None)) is not None}
+
+
+def test_dropping_precip_router_from_business_routers_unregisters_both_public_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2098 — constructive proof that this suite reds when the reachability edge breaks.
+
+    `apps/api/route_registry.py` is a composition owner: it imports `precip_router` into
+    `_BUSINESS_ROUTERS` and `register_role_aware_routes` walks that tuple to
+    `include_router` each entry. That module is why the two published endpoints exist at
+    all, and it is now routed to this suite by `scripts/select_ci_tests.py`; that selector
+    edge is only justified if this suite actually fails when the edge is cut, so both legs
+    live here.
+
+    ROUTE-TABLE MEMBERSHIP, NOT HTTP 404. A 404 on these paths is also produced by the SPA
+    fallback in `apps/api/startup_wiring.py` for any unmatched `api/`-prefixed path, and by
+    the precipitation routes themselves for a cycle that is not mirrored — so a 404
+    assertion stays green under a monkeypatch that never took effect, i.e. it is vacuous.
+
+    Isolation: `create_app()` builds a fresh application per call and reads
+    `_BUSINESS_ROUTERS` at registration time, and `monkeypatch` restores the module
+    attribute at teardown. The module-level singleton `main.app` (which
+    `test_precip_routes_take_no_database_dependency` above inspects) is out of range of this
+    mutation and is deliberately neither rebuilt nor mutated: doing so would leak across the
+    whole session. Production `_BUSINESS_ROUTERS` is unchanged.
+    """
+    # Both legs below are satisfied by the empty set, so the constant's size is pinned
+    # first: emptying or trimming it would leave the whole proof green and toothless.
+    assert len(_PUBLISHED_PRECIP_ROUTE_PATHS) == 2, "expected both published precip routes spelled"
+
+    # Positive leg: the unmutated composition publishes both routes.
+    assert _PUBLISHED_PRECIP_ROUTE_PATHS <= _registered_route_paths(main.create_app())
+
+    survivors = tuple(
+        router for router in route_registry._BUSINESS_ROUTERS if router is not precip_routes.router
+    )
+    # The mutation must actually remove something: if `precip_router` were renamed or
+    # re-exported such that the identity check missed it, the negative leg below would be a
+    # no-op and pass for the wrong reason.
+    assert len(survivors) == len(route_registry._BUSINESS_ROUTERS) - 1, (
+        "precip_router was not the object removed from _BUSINESS_ROUTERS; the mutation is a no-op"
+    )
+    monkeypatch.setattr(route_registry, "_BUSINESS_ROUTERS", survivors)
+
+    # Negative leg: with the edge cut, neither route reaches the table.
+    orphaned = _PUBLISHED_PRECIP_ROUTE_PATHS & _registered_route_paths(main.create_app())
+    assert not orphaned, f"precip routes survived removal of precip_router: {sorted(orphaned)}"
 
 
 # --------------------------------------------------------------------------

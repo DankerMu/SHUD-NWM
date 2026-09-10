@@ -8,7 +8,7 @@ TBD - created by archiving change m2-analysis-warm-start. Update Purpose after a
 
 #### Scenario: Full spliced response
 - **WHEN** 请求 GET /api/v1/basin-versions/{bv}/river-segments/{seg}/forecast-series?issue_time=latest&include_analysis=true
-- **THEN** 返回 series 数组包含两个条目：scenario_id='analysis_true_field'（过去 7 天）和 scenario_id='forecast_gfs_deterministic'（未来 7 天），每条含 points: [[timestamp, value], ...]。scenario_id 通过 JOIN hydro_run 获取，不直接存储在 river_timeseries 中
+- **THEN** 返回 series 数组包含两个条目：scenario_id='analysis_true_field'（过去 3 天）和 scenario_id='forecast_gfs_deterministic'（未来 7 天），每条含 points: [[timestamp, value], ...]。scenario_id 通过 JOIN hydro_run 获取，不直接存储在 river_timeseries 中
 
 #### Scenario: Analysis only response
 - **WHEN** forecast run 尚未完成但 analysis 数据可用，请求 include_analysis=true
@@ -25,12 +25,12 @@ TBD - created by archiving change m2-analysis-warm-start. Update Purpose after a
 ### Requirement: Analysis Time Range Calculation
 系统 SHALL 自动计算 analysis 段的时间范围。
 
-#### Scenario: Standard 7-day analysis window
+#### Scenario: Standard 3-day analysis window
 - **WHEN** issue_time = 2026-04-30T00:00:00Z
-- **THEN** analysis 查询 river_timeseries JOIN hydro_run（hr.scenario_id='analysis_true_field'），valid_time BETWEEN '2026-04-23T00:00:00Z' AND '2026-04-30T00:00:00Z'（含边界）
+- **THEN** analysis 查询 river_timeseries JOIN hydro_run（hr.scenario_id='analysis_true_field'），valid_time >= '2026-04-27T00:00:00Z' AND valid_time < '2026-04-30T00:00:00Z'（起点含边界，终点开区间）
 
-#### Scenario: Analysis data shorter than 7 days
-- **WHEN** analysis 数据不足 7 天（如刚开始运行 analysis run）
+#### Scenario: Analysis data shorter than 3 days
+- **WHEN** analysis 数据不足 3 天（如刚开始运行 analysis run）
 - **THEN** 返回实际可用天数的数据，不补零
 
 #### Scenario: Boundary point deduplication

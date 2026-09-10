@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NHMS #1895 C1 display runtime receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact", "schema_version", "status", "head_sha", "reviewed_sha", "started_at", "ended_at", "generated_at", "display_env", "port", "origin", "unit", "main_pid", "control_group_sha256", "checks"],
+  "properties": {
+    "artifact": {"const": "nhms-issue1895-c1-display-runtime"},
+    "schema_version": {"const": "1.0"},
+    "status": {"const": "PASS"},
+    "head_sha": {"$ref": "#/$defs/sha"},
+    "reviewed_sha": {"$ref": "#/$defs/sha"},
+    "started_at": {"$ref": "#/$defs/time"},
+    "ended_at": {"$ref": "#/$defs/time"},
+    "generated_at": {"$ref": "#/$defs/time"},
+    "display_env": {"const": "infra/env/display.env"},
+    "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+    "origin": {"type": "string", "pattern": "^http://127\\.0\\.0\\.1:[1-9][0-9]{0,4}$"},
+    "unit": {"const": "nhms-display-api.service"},
+    "main_pid": {"type": "integer", "minimum": 1},
+    "control_group_sha256": {"$ref": "#/$defs/digest"},
+    "checks": {
+      "type": "object", "additionalProperties": false,
+      "required": ["systemd_active", "main_pid_cgroup_bound", "health_status", "health_status_ok", "runtime_status", "runtime_exact", "slurm_health_status"],
+      "properties": {
+        "systemd_active": {"const": true}, "main_pid_cgroup_bound": {"const": true},
+        "health_status": {"type": "integer", "minimum": 200, "maximum": 299}, "health_status_ok": {"const": true},
+        "runtime_status": {"type": "integer", "minimum": 200, "maximum": 299}, "runtime_exact": {"const": true},
+        "slurm_health_status": {"const": 404}
+      }
+    }
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "time": {"type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"}
+  }
+}

@@ -140,7 +140,7 @@ function inferSource(scenario: string, source?: string) {
 }
 
 function isAnalysisSegment(scenario: string, role?: string) {
-  return role === 'past_7_days' || isAnalysisScenario(scenario)
+  return role === 'past_3_days' || isAnalysisScenario(scenario)
 }
 
 function seriesColor(isAnalysis: boolean, scenario: string, source?: string) {

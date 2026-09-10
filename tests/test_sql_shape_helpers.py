@@ -110,7 +110,7 @@ from packages.common.river_ts_render import (
     strip_scalar_subqueries,
     text_fact_columns,
 )
-from tests.river_ts_template_registry import FORECAST_STORE_SEGMENT_BLOCKS, REGISTRY, entry_by_key
+from tests.river_ts_template_registry import REGISTRY
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -136,9 +136,8 @@ _LOOKS_LIKE_SQL = re.compile(r"\bSELECT\b", re.IGNORECASE)
 def sql_literals(python_source: str) -> tuple[str, ...]:
     """The SQL string constants of a Python source fragment, in source order.
 
-    Two switched surfaces (``valid_times_for_layer`` and
-    ``_require_hydro_mvt_source_identity``) build their SQL inline, so their
-    pins can only start from a source slice. Running the SQL tokenizer over
+    Inline SQL surfaces such as ``_require_hydro_mvt_source_identity`` start
+    their pins from a source slice. Running the SQL tokenizer over
     raw Python is NOT safe: a ``'`` in a prose comment ("the caller's text")
     opens a string scan that swallows the query, and a ``\"\"\"`` delimiter
     reads as an empty string followed by an unterminated one, so the whole SQL
@@ -146,10 +145,9 @@ def sql_literals(python_source: str) -> tuple[str, ...]:
     failure mode again. Python's own parser is the only correct way to find
     where the SQL starts and stops, so use it.
 
-    Source order matters because ``valid_times_for_layer`` selects between its
-    named-identity and no-identity SQL with an inline conditional, and the two
-    branches must be pinned separately. ``ast.walk`` is breadth-first, so the
-    positions are sorted explicitly rather than trusted.
+    Source order matters when an inline conditional selects SQL branches.
+    ``ast.walk`` is breadth-first, so positions are sorted explicitly rather
+    than trusted.
     """
     tree = ast.parse(textwrap.dedent(python_source))
     found = [
@@ -436,12 +434,10 @@ def test_sql_from_python_skips_non_sql_constants() -> None:
 
 
 def test_sql_literals_keeps_conditional_expression_branches_in_source_order() -> None:
-    """``valid_times_for_layer`` picks its SQL with an inline ``if``/``else``.
+    """Conditional SQL branches retain their authored order.
 
-    The two branches are pinned separately, so which literal is which has to be
-    positional. ``ast.walk`` visits an ``IfExp`` breadth-first (body, test,
-    orelse) and would happen to agree here; sorting by position is what makes
-    that not a coincidence.
+    ``ast.walk`` visits an ``IfExp`` breadth-first (body, test, orelse) and
+    would happen to agree here; sorting by position makes that deliberate.
     """
     source = (
         "def f(named):\n"
@@ -490,6 +486,15 @@ def test_text_fact_columns_reports_only_the_alias_it_is_asked_about() -> None:
 
     assert text_fact_columns(sql, "ts") == {"run_id"}
     assert text_fact_columns(sql, "cr") == set()
+
+
+@pytest.mark.parametrize("projection", ["rt.*", "(rt).*"], ids=["direct", "parenthesized"])
+def test_text_fact_columns_reports_whole_row_output_exposure(projection: str) -> None:
+    sql = f"SELECT {projection} FROM hydro.river_timeseries rt"
+    assert text_fact_columns(sql, "rt") == {
+        "run_id", "basin_version_id", "river_network_version_id", "river_segment_id",
+        "variable", "unit", "quality_flag",
+    }
 
 
 def test_text_fact_columns_does_not_confuse_a_text_column_with_its_enum_twin() -> None:
@@ -682,7 +687,7 @@ def test_production_tile_sql_keeps_its_fact_predicates_after_stripping() -> None
 
 
 def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> None:
-    """Same end-to-end guard for the two surfaces whose SQL is inline in Python.
+    """Inline source extraction and routed raw producers must remain non-vacuous.
 
     Their pins start from a source slice, so vacuity here would be invisible:
     if extraction returned nothing, every "text predicate is gone" assertion
@@ -690,13 +695,10 @@ def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> No
     """
     from pathlib import Path
 
+    from services.tiles.mvt import _valid_times_any_source_template, _valid_times_named_source_template
+
     repo_root = Path(__file__).resolve().parents[1]
     surfaces = {
-        "valid_times_for_layer": (
-            repo_root / "services" / "tiles" / "mvt.py",
-            "def valid_times_for_layer",
-            "def _valid_time_discovery",
-        ),
         "existence probe": (
             repo_root / "apps" / "api" / "routes" / "hydro_display.py",
             "def _require_hydro_mvt_source_identity",
@@ -713,6 +715,20 @@ def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> No
         assert "FROM hydro.river_timeseries" in stripped, name
         assert "SELECT run_key FROM hydro.hydro_run" not in stripped, name
         assert "enum_range" not in stripped, name
+
+    for factory in (_valid_times_named_source_template, _valid_times_any_source_template):
+        for store in ("legacy", "narrow"):
+            sql = factory(store)
+            assert "FROM hydro.river_timeseries" in sql
+            stripped = strip_scalar_subqueries(sql)
+            assert "FROM hydro.river_timeseries" in stripped
+            assert "SELECT h.run_key FROM hydro.hydro_run" not in stripped
+            assert "enum_range" not in stripped
+            assert (
+                "WHERE run_key ="
+                if factory is _valid_times_named_source_template
+                else "WHERE ts.variable_e ="
+            ) in stripped
 
 
 # ---------------------------------------------------------------------------
@@ -735,7 +751,7 @@ def test_every_registered_template_renders_for_the_legacy_store(entry) -> None:
     dropped from this branch is the measured compressed-chunk collapse applied to
     exactly the rows that have not moved yet.
     """
-    template = entry.source()
+    template = entry.source("legacy")
 
     rendered = render_river_ts_sql(template, "legacy", entry=entry.key)
 
@@ -753,7 +769,7 @@ def test_every_registered_template_renders_for_the_narrow_store(entry) -> None:
     assertion; what is added here is the census-shaped part (the aid count) and
     the table-scoped emptiness the whole cleanup turns on.
     """
-    template = entry.source()
+    template = entry.source("narrow")
 
     rendered = render_river_ts_sql(template, "narrow", entry=entry.key)
 
@@ -784,15 +800,6 @@ def test_every_registered_template_renders_for_the_narrow_store(entry) -> None:
 #: off-by-one here is a psycopg2 arity error in the migration window, or worse, a
 #: silently reordered tuple that binds `valid_time` where `run_id` belonged.
 POSITIONAL_INDEX_PINS: dict[str, tuple[int, ...]] = {
-    "forecast_store:segment_identity_predicates": (3, 4),
-    "forecast_store:latest_issue_time": (3, 4),
-    "forecast_store:per_source_latest_cycles": (3, 4),
-    "forecast_store:latest_analysis_issue_time": (3, 4),
-    "forecast_store:analysis_segment_rows": (3, 4),
-    "forecast_store:forecast_segment_rows_selected_cycles": (5, 6),
-    "forecast_store:forecast_segment_rows": (3, 4),
-    "forecast_store:latest_run_type_valid_time": (3, 4),
-    "forecast_store:run_type_segment_rows": (3, 4),
     "parser:replace_chain_probe": (1,),
     "parser:replace_chain_window": (1,),
 }
@@ -804,7 +811,8 @@ def test_every_positional_entry_has_an_index_pin() -> None:
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-def test_every_registered_template_is_counted_the_same_way_twice(entry) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_every_registered_template_is_counted_the_same_way_twice(entry, store) -> None:
     """The structural walk and the name counter must agree, entry by entry.
 
     The name counter is deliberately ignorant of `FROM` / `JOIN` / aliases so it
@@ -812,15 +820,16 @@ def test_every_registered_template_is_counted_the_same_way_twice(entry) -> None:
     do over the real register — every registered template names the fact table in
     exactly the forms the walk models (round-2 H3).
     """
-    template = entry.source()
+    template = entry.source(store)
 
     assert fact_table_name_occurrences(template) == fact_table_attribution(template).reference_count, entry.key
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-def test_every_registered_templates_aid_count_matches_its_marker_count(entry) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_every_registered_templates_aid_count_matches_its_marker_count(entry, store) -> None:
     """1:1, which is the invariant the whole line-deletion scheme rests on."""
-    template = entry.source()
+    template = entry.source(store)
 
     assert template.count(PUSHDOWN_AID_MARKER) == entry.expected_aids, entry.key
     assert template.count("remove with #1342") == entry.expected_aids, (
@@ -829,34 +838,12 @@ def test_every_registered_templates_aid_count_matches_its_marker_count(entry) ->
 
 
 def test_the_rendered_aid_total_reconciles_with_the_per_file_census() -> None:
-    """Rendered 58, in source 34 — and the difference is stated, not waved at.
+    """The 13 raw templates carry the 30 source aids exactly once each.
 
-    The two numbers count different things and both are load-bearing, so they are
-    reconciled here rather than left to look like a contradiction:
-
-    * **34** is the ``grep -rn "remove with #1342"`` total over the seven
-      REGISTERED reader SOURCE files (fixture "Measured baseline"), pinned per
-      file in each file's owning oracle — ``REGISTERED_SOURCES`` plus
-      ``DISPLAY_MARKER_AID_CENSUS``, not a sweep of the tree, so an unregistered
-      reader is not in it (that is I11's discovery-set census, tasks 7.2a).
-      That is the number #1342 deletes from those files.
-    * **58** is the total over RENDERED templates, which is larger for exactly one
-      reason: ``forecast_store._SEGMENT_IDENTITY_PREDICATE_SQL`` carries three
-      aids in the source once and is embedded by all eight segment blocks, so
-      those three aids are rendered nine times (once as the fragment entry, once
-      inside each block) and appear 8 × 3 = 24 times more than they are written.
-
-    Pinned as an identity rather than as two independent constants: if a block
-    stopped embedding the fragment — the change that would silently drop its
-    segmentby pruning — the arithmetic breaks here even though both totals could
-    be individually re-pinned to something self-consistent.
+    Forecast execution coverage is separate: eight spanning callers consume
+    the shared segment source, and A9 consumes the known-run source.
     """
-    rendered_total = sum(entry.expected_aids for entry in REGISTRY)
-    fragment = entry_by_key("forecast_store:segment_identity_predicates")
-    embedding_blocks = len(FORECAST_STORE_SEGMENT_BLOCKS)
-
-    assert rendered_total == 58
-    assert rendered_total - embedding_blocks * fragment.expected_aids == 34
+    assert sum(entry.expected_aids for entry in REGISTRY) == 30
 
 
 def test_the_sanctioned_vocabulary_is_the_shared_one_not_a_private_copy() -> None:
@@ -877,3 +864,19 @@ def test_the_sanctioned_vocabulary_is_the_shared_one_not_a_private_copy() -> Non
         "TEXT_AID_COUNTERPARTS",
     ):
         assert f"\n{name}" not in source, f"{name} was re-declared here instead of imported"
+
+
+@pytest.mark.parametrize("member", ("variable", "VARIABLE", '"variable"'))
+def test_unaliased_scalar_scope_is_refused_without_outer_attribution(member: str) -> None:
+    sql = (
+        "SELECT value FROM hydro.river_timeseries WHERE run_key = "
+        "(SELECT hr.run_key FROM hydro.hydro_run hr WHERE hr.run_id = :r "
+        f"AND {member} = :v LIMIT 1)"
+    )
+    assert text_fact_columns(sql, "rt") == set()
+    assert outer_predicates(sql) == "SELECT value FROM hydro.river_timeseries WHERE run_key ="
+    with pytest.raises(river_ts_render.RiverTemplateError) as caught:
+        fact_table_text_identity_columns(sql, entry="shape-unaliased-scalar")
+    assert "shape-unaliased-scalar" in str(caught.value)
+    assert "unqualified" in str(caught.value)
+    assert "scalar-scope" in str(caught.value)

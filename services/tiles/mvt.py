@@ -19,6 +19,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from packages.common.river_ts_render import render_river_ts_sql
+
 # Stdlib-only constants module (no numpy / netCDF4 pulled in by this import).
 from services.precip.constants import (
     PALETTE_VERSION,
@@ -595,6 +597,158 @@ def encode_mvt_layer(layer_name: str, features: list[Mapping[str, Any]], *, exte
     return _field_message(3, bytes(layer_payload))
 
 
+def _hydro_source_template(store: str) -> str:
+    if store not in {"legacy", "narrow"}:
+        raise ValueError(f"Unsupported river timeseries store: {store}")
+    return f"""
+            SELECT ((:river_network_version_id)::text || '::' || rs.river_segment_id) AS feature_id,
+                   rs.river_segment_id AS segment_id,
+                   rs.river_segment_id,
+                   (:river_network_version_id)::text AS river_network_version_id,
+                   (:basin_version_id)::text AS basin_version_id,
+                   ts.value, ts.unit_e::text AS unit,
+                   ts.quality_flag_e::text AS quality_flag,
+                   (:run_id)::text AS run_id, ts.variable_e::text AS variable,
+                   to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
+                   rs.geom
+            FROM hydro.river_timeseries ts
+            JOIN core.river_segment rs
+              ON rs.river_segment_key = ts.river_segment_key
+            WHERE ts.run_key = (
+                      SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
+                        AND timeseries_store = '{store}'
+                  )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND ts.run_id = :run_id
+              AND ts.basin_version_key = (
+                      SELECT basin_version_key FROM core.basin_version
+                      WHERE basin_version_id = :basin_version_id
+                  )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND ts.river_network_version_id = :river_network_version_id
+              AND ts.river_network_version_key = (
+                      SELECT river_network_version_key FROM core.river_network_version
+                      WHERE river_network_version_id = :river_network_version_id
+                  )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND ts.variable = :variable
+              AND ts.variable_e = (
+                      SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                      WHERE e::text = :variable
+                  )
+              AND ts.valid_time = :valid_time
+        """
+
+
+def _hydro_national_identity_source_template(store: str) -> str:
+    if store not in {"legacy", "narrow"}:
+        raise ValueError(f"Unsupported river timeseries store: {store}")
+    return f"""
+                    SELECT 1
+                    FROM hydro.river_timeseries ts
+                    WHERE ts.run_key = lr.run_key
+                      AND ts.river_network_version_key = lr.river_network_version_key
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
+                      AND ts.run_id = lr.run_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
+                      AND ts.river_network_version_id = lr.river_network_version_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
+                      AND ts.variable = :variable
+                      AND ts.variable_e = (
+                              SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                              WHERE e::text = :variable
+                          )
+                      AND ts.valid_time = :valid_time
+                      AND lr.timeseries_store = '{store}'
+    """
+
+
+def _hydro_national_data_source_template(store: str) -> str:
+    if store not in {"legacy", "narrow"}:
+        raise ValueError(f"Unsupported river timeseries store: {store}")
+    return f"""
+                    SELECT ts.basin_version_key,
+                           ts.value,
+                           ts.unit_e::text AS unit,
+                           ts.quality_flag_e::text AS quality_flag,
+                           ts.variable_e::text AS variable,
+                           ts.valid_time
+                    FROM hydro.river_timeseries ts
+                    WHERE ts.run_key = lr.run_key
+                      AND ts.river_network_version_key = lr.river_network_version_key
+                      AND ts.river_segment_key = seg.river_segment_key
+                      -- These four aids do double duty: 000047's segmentby
+                      -- pruning AND the text primary key's per-loop lookup.
+                      -- The nuance lives here, in prose, because the removal
+                      -- marker below is byte-frozen (#1342 deletes by that
+                      -- exact line) and carries one aid each.
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
+                      AND ts.run_id = lr.run_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
+                      AND ts.river_network_version_id = lr.river_network_version_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
+                      AND ts.river_segment_id = seg.river_segment_id
+                      -- transitional compressed-chunk pushdown aid, remove with #1342
+                      AND ts.variable = :variable
+                      AND ts.variable_e = (
+                              SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                              WHERE e::text = :variable
+                          )
+                      AND ts.valid_time = :valid_time
+                      AND lr.timeseries_store = '{store}'
+    """
+
+
+def _valid_times_named_source_template(store: str) -> str:
+    if store not in {"legacy", "narrow"}:
+        raise ValueError(f"Unsupported river timeseries store: {store}")
+    return f"""
+                SELECT valid_time
+                FROM hydro.river_timeseries
+                WHERE run_key = (
+                          SELECT h.run_key FROM hydro.hydro_run h
+                          WHERE h.run_id = :run_id AND h.timeseries_store = '{store}'
+                      )
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND run_id = :run_id
+                  AND basin_version_key = (
+                          SELECT basin_version_key FROM core.basin_version
+                          WHERE basin_version_id = :basin_version_id
+                      )
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND river_network_version_id = :river_network_version_id
+                  AND river_network_version_key = (
+                          SELECT river_network_version_key FROM core.river_network_version
+                          WHERE river_network_version_id = :river_network_version_id
+                      )
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND variable = :variable
+                  AND variable_e = (
+                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                          WHERE e::text = :variable
+                      )
+    """
+
+
+def _valid_times_any_source_template(store: str) -> str:
+    if store not in {"legacy", "narrow"}:
+        raise ValueError(f"Unsupported river timeseries store: {store}")
+    return f"""
+                SELECT ts.valid_time
+                FROM hydro.river_timeseries ts
+                WHERE ts.variable_e = (
+                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                          WHERE e::text = :variable
+                      )
+                  -- transitional compressed-chunk pushdown aid, remove with #1342
+                  AND ts.variable = :variable
+                  AND EXISTS (
+                          SELECT 1 FROM hydro.hydro_run h
+                          WHERE h.run_key = ts.run_key AND h.timeseries_store = '{store}'
+                      )
+    """
+
+
 def postgis_tile_sql(layer: str) -> str:
     layer_name = _source_layer_id(layer)
     source_identity_stats_sql = (
@@ -753,43 +907,9 @@ def postgis_tile_sql(layer: str) -> str:
         # NOT in the sanctioned set, and no text column may join the fact
         # table. All of these come out with the text columns in #1342, where a
         # missed one fails loudly because the column is gone.
-        source_cte = """
-            SELECT ((:river_network_version_id)::text || '::' || rs.river_segment_id) AS feature_id,
-                   rs.river_segment_id AS segment_id,
-                   rs.river_segment_id,
-                   (:river_network_version_id)::text AS river_network_version_id,
-                   (:basin_version_id)::text AS basin_version_id,
-                   ts.value, ts.unit_e::text AS unit,
-                   ts.quality_flag_e::text AS quality_flag,
-                   (:run_id)::text AS run_id, ts.variable_e::text AS variable,
-                   to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
-                   rs.geom
-            FROM hydro.river_timeseries ts
-            JOIN core.river_segment rs
-              ON rs.river_segment_key = ts.river_segment_key
-            WHERE ts.run_key = (
-                      SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
-                  )
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND ts.run_id = :run_id
-              AND ts.basin_version_key = (
-                      SELECT basin_version_key FROM core.basin_version
-                      WHERE basin_version_id = :basin_version_id
-                  )
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND ts.river_network_version_id = :river_network_version_id
-              AND ts.river_network_version_key = (
-                      SELECT river_network_version_key FROM core.river_network_version
-                      WHERE river_network_version_id = :river_network_version_id
-                  )
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND ts.variable = :variable
-              AND ts.variable_e = (
-                      SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                      WHERE e::text = :variable
-                  )
-              AND ts.valid_time = :valid_time
-        """
+        legacy = render_river_ts_sql(_hydro_source_template("legacy"), "legacy").sql
+        narrow = render_river_ts_sql(_hydro_source_template("narrow"), "narrow").sql
+        source_cte = f"{legacy}\nUNION ALL\n{narrow}"
     elif layer == "hydro-national":
         # National overview: render q_down for every basin by joining each river
         # network's latest display-ready run. Identity (run/network) is chosen by
@@ -886,18 +1006,24 @@ def postgis_tile_sql(layer: str) -> str:
         #     shared `latest_runs` CTE: that CTE is nested inside the
         #     `source_rows` sub-query's own WITH, so it is not in scope for this
         #     sibling CTE. It is the same display-coverage gating, widened from
-        #     two columns to four so the LATERAL has text to bind.
+        #     two columns to four for the legacy aids, plus the candidate store.
         #   * The probe MUST keep touching the fact table. `run_display_coverage`
         #     windows are a MIN/MAX over complete instants, not a per-instant
         #     bitmap, so answering existence from the window alone would turn an
         #     interior gap's 424 into an empty-tile 200.
-        source_identity_stats_sql = """
+        legacy = render_river_ts_sql(_hydro_national_identity_source_template("legacy"), "legacy").sql
+        narrow = render_river_ts_sql(_hydro_national_identity_source_template("narrow"), "narrow").sql
+        identity_source = f"{legacy}\nUNION ALL\n{narrow}"
+        legacy = render_river_ts_sql(_hydro_national_data_source_template("legacy"), "legacy").sql
+        narrow = render_river_ts_sql(_hydro_national_data_source_template("narrow"), "narrow").sql
+        data_source = f"{legacy}\nUNION ALL\n{narrow}"
+        source_identity_stats_sql = f"""
             SELECT CASE WHEN EXISTS (
                 SELECT 1
                 FROM (
                     SELECT DISTINCT ON (mi.river_network_version_id)
                            h.run_key, rnv.river_network_version_key,
-                           h.run_id, mi.river_network_version_id
+                           h.run_id, mi.river_network_version_id, h.timeseries_store
                     FROM hydro.hydro_run h
                     JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
                     JOIN core.river_network_version rnv
@@ -918,31 +1044,17 @@ def postgis_tile_sql(layer: str) -> str:
                     ORDER BY mi.river_network_version_id, h.cycle_time DESC, h.run_id DESC
                 ) lr
                 CROSS JOIN LATERAL (
-                    SELECT 1
-                    FROM hydro.river_timeseries ts
-                    WHERE ts.run_key = lr.run_key
-                      AND ts.river_network_version_key = lr.river_network_version_key
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.run_id = lr.run_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.river_network_version_id = lr.river_network_version_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.variable = :variable
-                      AND ts.variable_e = (
-                              SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                              WHERE e::text = :variable
-                          )
-                      AND ts.valid_time = :valid_time
+                    {identity_source}
                     LIMIT 1
                 ) hit
                 LIMIT 1
             ) THEN 1 ELSE 0 END AS source_identity_count
         """
-        source_cte = """
+        source_cte = f"""
             WITH latest_runs AS MATERIALIZED (
                 SELECT DISTINCT ON (mi.river_network_version_id)
                        h.run_id, mi.river_network_version_id,
-                       h.run_key, rnv.river_network_version_key
+                       h.run_key, rnv.river_network_version_key, h.timeseries_store
                 FROM hydro.hydro_run h
                 JOIN core.model_instance mi ON mi.basin_version_id = h.basin_version_id
                 JOIN core.river_network_version rnv
@@ -1049,34 +1161,7 @@ def postgis_tile_sql(layer: str) -> str:
                 JOIN latest_runs lr
                   ON lr.river_network_version_id = seg.river_network_version_id
                 CROSS JOIN LATERAL (
-                    SELECT ts.basin_version_key,
-                           ts.value,
-                           ts.unit_e::text AS unit,
-                           ts.quality_flag_e::text AS quality_flag,
-                           ts.variable_e::text AS variable,
-                           ts.valid_time
-                    FROM hydro.river_timeseries ts
-                    WHERE ts.run_key = lr.run_key
-                      AND ts.river_network_version_key = lr.river_network_version_key
-                      AND ts.river_segment_key = seg.river_segment_key
-                      -- These four aids do double duty: 000047's segmentby
-                      -- pruning AND the text primary key's per-loop lookup.
-                      -- The nuance lives here, in prose, because the removal
-                      -- marker below is byte-frozen (#1342 deletes by that
-                      -- exact line) and carries one aid each.
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.run_id = lr.run_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.river_network_version_id = lr.river_network_version_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.river_segment_id = seg.river_segment_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.variable = :variable
-                      AND ts.variable_e = (
-                              SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                              WHERE e::text = :variable
-                          )
-                      AND ts.valid_time = :valid_time
+                    {data_source}
                     LIMIT 1
                 ) v
                 WHERE (:z >= 9 OR seg.stream_type IS NOT NULL)
@@ -1103,34 +1188,7 @@ def postgis_tile_sql(layer: str) -> str:
                 JOIN latest_runs lr
                   ON lr.river_network_version_id = seg.river_network_version_id
                 CROSS JOIN LATERAL (
-                    SELECT ts.basin_version_key,
-                           ts.value,
-                           ts.unit_e::text AS unit,
-                           ts.quality_flag_e::text AS quality_flag,
-                           ts.variable_e::text AS variable,
-                           ts.valid_time
-                    FROM hydro.river_timeseries ts
-                    WHERE ts.run_key = lr.run_key
-                      AND ts.river_network_version_key = lr.river_network_version_key
-                      AND ts.river_segment_key = seg.river_segment_key
-                      -- These four aids do double duty: 000047's segmentby
-                      -- pruning AND the text primary key's per-loop lookup.
-                      -- The nuance lives here, in prose, because the removal
-                      -- marker below is byte-frozen (#1342 deletes by that
-                      -- exact line) and carries one aid each.
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.run_id = lr.run_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.river_network_version_id = lr.river_network_version_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.river_segment_id = seg.river_segment_id
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND ts.variable = :variable
-                      AND ts.variable_e = (
-                              SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                              WHERE e::text = :variable
-                          )
-                      AND ts.valid_time = :valid_time
+                    {data_source}
                     LIMIT 1
                 ) v
                 WHERE :z < 9
@@ -1938,51 +1996,22 @@ def valid_times_for_layer(
         # is recorded in issue #1378. Unknown identity resolves to NULL and the
         # branch returns no rows, exactly as the text predicates did.
         # The `run_id` / `river_network_version_id` / `variable` text conjuncts
-        # below are the transitional compressed-chunk pushdown aids (#1341);
+        # in the raw source are transitional compressed-chunk pushdown aids (#1341);
         # this is the shape node-27 measured collapsing to a 598,280-cost full
         # decompression on chunk 51 without them. They go with #1342.
-        sql = (
-            """
-                SELECT DISTINCT valid_time
-                FROM hydro.river_timeseries
-                WHERE run_key = (
-                          SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
-                      )
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND run_id = :run_id
-                  AND basin_version_key = (
-                          SELECT basin_version_key FROM core.basin_version
-                          WHERE basin_version_id = :basin_version_id
-                      )
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND river_network_version_id = :river_network_version_id
-                  AND river_network_version_key = (
-                          SELECT river_network_version_key FROM core.river_network_version
-                          WHERE river_network_version_id = :river_network_version_id
-                      )
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND variable = :variable
-                  AND variable_e = (
-                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                          WHERE e::text = :variable
-                      )
-                ORDER BY valid_time DESC
-                LIMIT :limit
-            """
-            if run_id is not None
-            else """
-                SELECT DISTINCT valid_time
-                FROM hydro.river_timeseries
-                WHERE variable_e = (
-                          SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                          WHERE e::text = :variable
-                      )
-                  -- transitional compressed-chunk pushdown aid, remove with #1342
-                  AND variable = :variable
-                ORDER BY valid_time DESC
-                LIMIT :limit
-            """
-        )
+        source_template = _valid_times_named_source_template if run_id is not None else _valid_times_any_source_template
+        legacy_source = render_river_ts_sql(source_template("legacy"), "legacy").sql
+        narrow_source = render_river_ts_sql(source_template("narrow"), "narrow").sql
+        sql = f"""
+            SELECT DISTINCT valid_time
+            FROM (
+                {legacy_source}
+                UNION ALL
+                {narrow_source}
+            ) source_rows
+            ORDER BY valid_time DESC
+            LIMIT :limit
+        """
         rows = (
             session.execute(text(sql), {**selected_identity_params, "variable": variable})
             .mappings()

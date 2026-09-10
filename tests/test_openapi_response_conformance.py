@@ -194,7 +194,7 @@ class _SplicedForecastStore:
                     "scenario": "analysis_true_field",
                     "scenario_id": "analysis_true_field",
                     "source": "ERA5",
-                    "segment_role": "past_7_days",
+                    "segment_role": "past_3_days",
                     "data": [{"valid_time": "2026-05-14T00:00:00Z", "value": 10.0}],
                 },
                 {
@@ -722,9 +722,7 @@ CASE_IDS = tuple(case.route_id for case in ROUTE_CASES)
 MUTATION_CASES: tuple[tuple[RouteCase, Mutation], ...] = tuple(
     (case, mutation) for case in ROUTE_CASES for mutation in (case.mutation, *case.extra_mutations)
 )
-MUTATION_IDS = tuple(
-    f"{case.route_id} :: {mutation.component}.{mutation.field}" for case, mutation in MUTATION_CASES
-)
+MUTATION_IDS = tuple(f"{case.route_id} :: {mutation.component}.{mutation.field}" for case, mutation in MUTATION_CASES)
 
 
 # --------------------------------------------------------------------------- #
@@ -829,9 +827,7 @@ def test_route_200_schema_is_a_valid_2020_12_schema(case: RouteCase) -> None:
 
 
 @pytest.mark.parametrize("case", ROUTE_CASES, ids=CASE_IDS)
-def test_real_response_body_validates_against_declared_schema(
-    case: RouteCase, route_responses: dict[str, Any]
-) -> None:
+def test_real_response_body_validates_against_declared_schema(case: RouteCase, route_responses: dict[str, Any]) -> None:
     body = route_responses[case.route_id]
     for pointer in case.non_empty:
         assert _walk(body, pointer), f"{case.route_id}: {'/'.join(map(str, pointer))} must be non-empty"
@@ -853,11 +849,7 @@ def test_mutated_response_body_is_rejected_by_referenced_component(
     assert errors, f"{case.route_id}: mutation of {mutation.component}.{mutation.field} was accepted"
 
     expected_schema = mutation.expected_schema()
-    matching = [
-        error
-        for error in errors
-        if error.validator == mutation.validator and error.schema == expected_schema
-    ]
+    matching = [error for error in errors if error.validator == mutation.validator and error.schema == expected_schema]
     assert matching, [(error.validator, error.message) for error in errors]
     if mutation.kind == "required":
         assert any(mutation.field in error.message for error in matching)

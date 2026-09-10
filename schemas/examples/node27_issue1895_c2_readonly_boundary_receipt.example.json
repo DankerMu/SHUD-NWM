@@ -1,0 +1,19 @@
+{
+  "artifact": "nhms-issue1895-c2-readonly-boundary",
+  "schema_version": "1.0",
+  "status": "PASS",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "reviewed_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "run_id": "issue1895-readonly-20260906",
+  "started_at": "2026-09-06T12:00:00Z",
+  "ended_at": "2026-09-06T12:00:01Z",
+  "generated_at": "2026-09-06T12:00:01Z",
+  "canonical_summary": {"st_dev": 1, "st_ino": 2, "st_uid": 1000, "st_mode": 384, "st_nlink": 1, "st_size": 100, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+  "authoritative_files": {
+    "summary.json": {"st_dev": 1, "st_ino": 2, "st_uid": 1000, "st_mode": 384, "st_nlink": 1, "st_size": 100, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    "role.json": {"st_dev": 1, "st_ino": 3, "st_uid": 1000, "st_mode": 384, "st_nlink": 1, "st_size": 100, "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
+    "route_smoke.json": {"st_dev": 1, "st_ino": 4, "st_uid": 1000, "st_mode": 384, "st_nlink": 1, "st_size": 100, "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+    "permission_probes.json": {"st_dev": 1, "st_ino": 5, "st_uid": 1000, "st_mode": 384, "st_nlink": 1, "st_size": 100, "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}
+  },
+  "checks": {"summary_live_schema": true, "summary_pass": true, "summary_live_provenance": true, "summary_full_gfs_ifs_scope": {"merged_source_evidence": true, "declared_sources": ["GFS", "IFS"], "reduced_scope": false, "source_bundle_count": 2, "source_artifact_sources": [["GFS"], ["IFS"]], "display_identity_sources": ["GFS", "IFS"]}, "summary_run_id": true, "readonly_role": true, "siblings_match": true}
+}

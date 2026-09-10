@@ -506,8 +506,8 @@ belongs — a commit cannot name itself. The load-bearing lines:
 
 | Row | Where | Result |
 |---|---|---|
-| Backend targeted | node-27 `/home/nwm/tmp/issue2035-wt`, `TMPDIR=/home/nwm/tmp` | **364 passed, 0 skipped**. The same row on macOS is 361 passed / 3 skipped — the three ACL tests that skip there ran here |
-| #1513 / #1631 no-regression | node-27, default umask `0002` | **6 passed** (macOS: 5 passed, 1 skipped) |
+| Backend targeted | node-27 `/home/nwm/tmp/issue2035-wt`, `TMPDIR=/home/nwm/tmp` | **366 passed, 0 skipped**. The same row on macOS is 363 passed / 3 skipped — the three ACL tests that skip there ran here |
+| #1513 / #1631 no-regression | node-27, default umask `0002` | **8 passed** (macOS: 7 passed, 1 skipped) |
 | E8 | `test_the_0o755_widening_is_mask_neutral_under_an_inherited_default_acl`, `test_a_mode_less_mkdir_under_the_same_parent_keeps_mask_rwx`, `test_a_0o775_widening_still_restores_mask_rwx` | all passed on ext4 — the mask boundary measured, not skipped |
 | E16 | `test_ensure_copyback_state_parent_still_chmods_0o775`, `test_ensure_copyback_state_parent_restores_mask_rwx_under_an_acl_parent` | both passed; `state_manager.py` is zero-diff against the merge-base, so this is a no-leak assertion |
 | AC6 | `test_run_tree_copyback_widens_every_level_it_creates_under_umask_027` | 1 passed. This is the row that closes the glibc `fchmodat(AT_SYMLINK_NOFOLLOW)` risk the correctness seat raised: macOS never exercises it |

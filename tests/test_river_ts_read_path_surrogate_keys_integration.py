@@ -44,10 +44,14 @@ Scope: the questions a text-substring pin cannot answer.
 
 from __future__ import annotations
 
+import hashlib
 import math
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+import mapbox_vector_tile
 import psycopg2
 import pytest
 from psycopg2.extras import RealDictCursor
@@ -55,13 +59,27 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from apps.api.errors import ApiError
+from apps.api.routes import hydro_display
 from apps.api.routes.hydro_display import _require_hydro_mvt_source_identity
 from packages.common.display_coverage import (
     DisplayCoverageRefreshRefused,
     refresh_run_display_coverage,
 )
-from services.tiles.mvt import postgis_tile_sql, valid_times_for_layer
-from tests.integration_helpers import apply_migrations_from_zero, sqlalchemy_engine
+from packages.common.river_ts_render import render_river_ts_sql
+from services.tiles.mvt import (
+    _valid_times_any_source_template,
+    _valid_times_named_source_template,
+    postgis_tile_sql,
+    valid_times_for_layer,
+)
+from tests.integration_helpers import (
+    apply_migrations_from_zero,
+    insert_river_timeseries_dual_written,
+    sqlalchemy_engine,
+)
+from tests.integration_helpers import (
+    post_expand_forecast_database as post_expand_forecast_database,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -181,6 +199,16 @@ def _source_cte_body(layer: str) -> str:
     end = sql.index("source_identity_stats AS (", start)
     body = sql[start:end].rstrip()
     assert body.endswith("),"), body[-80:]
+    return body[:-2]
+
+
+def _frozen_national_source_body() -> str:
+    frozen = (Path(__file__).parent / "fixtures/hydro_national_mvt_pre_store_c21bacf9.sql").read_bytes()
+    assert hashlib.sha256(frozen).hexdigest() == "d18c89af633838df8be0d84e3bff02df3e01d35ef21935f9bb59de0dc1f8e8b4"
+    sql = frozen.decode()
+    opener = "source_rows AS NOT MATERIALIZED ("
+    body = sql.split(opener, 1)[1].split("source_identity_stats AS (", 1)[0].rstrip()
+    assert body.endswith("),")
     return body[:-2]
 
 
@@ -434,12 +462,44 @@ def _identity_params(run_id: str, valid_time: datetime = _T0, variable: str = _V
 # ---------------------------------------------------------------------------
 
 
-def test_hydro_tile_source_rows_are_field_identical_to_the_text_era_query(seeded: Any) -> None:
+def _prepare_hydro_stores(
+    session: Session,
+    prepare: Callable[[Mapping[str, str]], None],
+    store: str,
+    run_id: str = _KEYED_RUN_ID,
+) -> None:
+    # Release all baseline reads before the separate connection renames tables.
+    session.rollback()
+    opposite_run = _LEGACY_RUN_ID if run_id == _KEYED_RUN_ID else _KEYED_RUN_ID
+    prepare({
+        run_id: store,
+        opposite_run: "narrow" if store == "legacy" else "legacy",
+        _ALL_LEGACY_RUN_ID: "legacy",
+    })
+    # Only this exact-time MVT oracle restores decoy times. Forecast's shared
+    # poison remains unchanged, and NULL-key historical rows are never updated.
+    for table, authoritative_store in (
+        ("river_timeseries", "legacy"),
+        ("river_timeseries_legacy", "narrow"),
+    ):
+        session.execute(text(
+            f"UPDATE hydro.{table} ts SET valid_time = ts.valid_time - INTERVAL '30 minutes' "
+            "FROM hydro.hydro_run h WHERE h.run_key = ts.run_key "
+            "AND h.timeseries_store = :store"
+        ), {"store": authoritative_store})
+    session.commit()
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_hydro_tile_source_rows_are_field_identical_to_the_text_era_query(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     _url, session = seeded
     params = _identity_params(_KEYED_RUN_ID)
 
-    switched = _rows(session, _hydro_source_query(_source_cte_body("hydro")), params)
     oracle = _rows(session, _hydro_source_query(_TEXT_ERA_HYDRO_SOURCE_CTE), params)
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    switched = _rows(session, _hydro_source_query(_source_cte_body("hydro")), params)
 
     assert len(oracle) == len(_SEGMENTS), "seed must produce rows for the oracle to be meaningful"
     assert switched == oracle
@@ -455,7 +515,119 @@ def test_hydro_tile_source_rows_are_field_identical_to_the_text_era_query(seeded
     assert {row["basin_version_id"] for row in switched} == {_BASIN_VERSION_ID}
 
 
-def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_query(seeded: Any) -> None:
+# Frozen at f33441a2dafd910375aab087f61257327055611c, never regenerated.
+_FROZEN_HYDRO_SQL = Path(__file__).parent / "fixtures/hydro_mvt_pre_store_f33441a2.sql"
+_FROZEN_HYDRO_SHA256 = "bf284b1f7d6532d5f45a26b490b8f23093b303c962a1adf524292557b169fd68"
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_hydro_store_union_preserves_one_mvt_result_and_decoded_payload(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+    store: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _url, session = seeded
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    assert _tile_xy(100.0, 38.0, 9) == (398, 197)
+    params = _identity_params(_KEYED_RUN_ID, _T0)
+    bind = hydro_display._postgis_tile_params(params, z=9, x=398, y=197, layer="hydro")
+    frozen = _FROZEN_HYDRO_SQL.read_bytes()
+    assert hashlib.sha256(frozen).hexdigest() == _FROZEN_HYDRO_SHA256
+    baseline = _rows(session, frozen.decode(), bind)
+    assert len(baseline) == 1
+    decoded = mapbox_vector_tile.decode(bytes(baseline[0]["tile"]))
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    for physical_store, table in (("legacy", "river_timeseries_legacy"), ("narrow", "river_timeseries")):
+        facts = _rows(session,
+            f"SELECT ts.value FROM hydro.{table} ts "
+            "WHERE ts.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id) "
+            "AND ts.valid_time = :valid_time ORDER BY ts.value", params)
+        assert [row["value"] for row in facts] == (
+            [10, 20, 30] if physical_store == store else [10010, 10020, 10030]
+        )
+    columns = _rows(session,
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'hydro' AND table_name = 'river_timeseries'", {})
+    assert not {"run_id", "river_network_version_id", "river_segment_id", "variable"} & {
+        row["column_name"] for row in columns
+    }
+    result = _rows(session, postgis_tile_sql("hydro"), bind)
+    assert len(result) == 1
+    assert {key: value for key, value in result[0].items() if key != "tile"} == {
+        key: value for key, value in baseline[0].items() if key != "tile"
+    }
+    actual = mapbox_vector_tile.decode(bytes(result[0]["tile"]))
+    assert actual == decoded
+    features = actual["hydro"]["features"]
+    assert [feature["properties"]["segment_id"] for feature in features] == ["seg-a", "seg-b", "seg-c"]
+    assert [feature["properties"]["value"] for feature in features] == [30, 20, 10]
+    for feature, segment in zip(features, ("seg-a", "seg-b", "seg-c"), strict=True):
+        assert feature["properties"] == {
+            "feature_id": f"{_NETWORK_ID}::{segment}", "segment_id": segment,
+            "river_segment_id": segment, "river_network_version_id": _NETWORK_ID,
+            "basin_version_id": _BASIN_VERSION_ID, "value": {"seg-a": 30, "seg-b": 20, "seg-c": 10}[segment],
+            "unit": "m3/s", "quality_flag": "ok", "run_id": _KEYED_RUN_ID,
+            "variable": "q_down", "valid_time": "2026-06-01T00:00:00Z",
+        }
+        assert feature["geometry"]["type"] == "LineString"
+    consumed = hydro_display._fetch_postgis_tile_bytes(session, "hydro", params, z=9, x=398, y=197)
+    assert consumed == bytes(result[0]["tile"])
+    assert mapbox_vector_tile.decode(consumed) == decoded
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+@pytest.mark.parametrize("case", ("unknown", "oov", "off-tile", "non-finite", "budget"))
+def test_hydro_routed_real_consumer_preserves_failure_and_empty_outcomes(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+    store: str, case: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _url, session = seeded
+    monkeypatch.setenv("NHMS_ENABLE_LIVE_POSTGIS_MVT", "true")
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    params = _identity_params(_KEYED_RUN_ID)
+    x, y = (0, 0) if case == "off-tile" else (398, 197)
+    if case == "unknown":
+        params["run_id"] = "run-does-not-exist"
+    elif case == "oov":
+        params["variable"] = "not_a_river_variable"
+    elif case == "non-finite":
+        table = "river_timeseries_legacy" if store == "legacy" else "river_timeseries"
+        session.execute(text(
+            f"UPDATE hydro.{table} ts SET value = 'NaN'::double precision "
+            "FROM core.river_segment rs WHERE rs.river_segment_key = ts.river_segment_key "
+            "AND rs.river_segment_id = 'seg-a' AND ts.valid_time = :valid_time "
+            "AND ts.run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id)"
+        ), params)
+    elif case == "budget":
+        monkeypatch.setattr(hydro_display, "MVT_MAX_FEATURES", 2)
+    bind = hydro_display._postgis_tile_params(params, z=9, x=x, y=y, layer="hydro")
+    result = _rows(session, postgis_tile_sql("hydro"), bind)
+    assert len(result) == 1
+    row = result[0]
+    if case == "off-tile":
+        assert row["source_identity_count"] == 1
+        assert row["feature_count"] == 0
+        assert hydro_display._fetch_postgis_tile_bytes(session, "hydro", params, z=9, x=x, y=y) == b""
+        return
+    if case in {"unknown", "oov"}:
+        assert row["source_identity_count"] == 0
+        expected = (424, "MVT_LIVE_POSTGIS_UNAVAILABLE")
+    elif case == "non-finite":
+        assert row["invalid_property_count"] == 1
+        assert row["invalid_properties"] == "value"
+        expected = (500, "MVT_TILE_CONTRACT_INVALID")
+    else:
+        assert bind["feature_limit"] == 2
+        assert row["feature_count"] == 3
+        expected = (413, "MVT_TILE_BUDGET_EXCEEDED")
+    with pytest.raises(ApiError) as raised:
+        hydro_display._fetch_postgis_tile_bytes(session, "hydro", params, z=9, x=x, y=y)
+    assert (raised.value.status_code, raised.value.code) == expected
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_query(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     _url, session = seeded
     params = {
         "run_id": _KEYED_RUN_ID,
@@ -466,6 +638,12 @@ def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_qu
     }
 
     oracle = [row["valid_time"] for row in _rows(session, _TEXT_ERA_VALID_TIMES_SQL, params)]
+    session.rollback()
+    post_expand_forecast_database({
+        _KEYED_RUN_ID: store,
+        _LEGACY_RUN_ID: "narrow" if store == "legacy" else "legacy",
+        _ALL_LEGACY_RUN_ID: "legacy",
+    })
     switched = valid_times_for_layer(
         session,
         "discharge",
@@ -482,6 +660,79 @@ def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_qu
         value.astimezone(UTC).isoformat().replace("+00:00", "Z") for value in oracle
     )
     assert switched.valid_times == ["2026-06-01T00:00:00Z", "2026-06-01T01:00:00Z"]
+    active_raw = render_river_ts_sql(_valid_times_named_source_template(store), store).sql
+    assert {row["valid_time"] for row in _rows(session, active_raw, params)} == {_T0, _T1}
+    assert _rows(session, active_raw, params | {"variable": "not_a_river_variable"}) == []
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_any_identity_valid_times_combine_stores_before_distinct_and_limit(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
+    url, session = seeded
+    t3 = _T0 + timedelta(hours=3)
+    t4 = _T0 + timedelta(hours=4)
+    session.rollback()
+    with psycopg2.connect(url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE hydro.hydro_run SET end_time = %s WHERE run_id IN (%s, %s)",
+                (t4, _KEYED_RUN_ID, _LEGACY_RUN_ID),
+            )
+            assert cursor.rowcount == 2
+            insert_river_timeseries_dual_written(cursor, [
+                (
+                    run_id, _BASIN_VERSION_ID, _NETWORK_ID, _SEGMENTS[0][0],
+                    valid_time, hour, _VARIABLE, _SEGMENTS[0][2], "m3/s", "ok",
+                )
+                for run_id, valid_time, hour in (
+                    (_KEYED_RUN_ID, t4, 4),
+                    (_LEGACY_RUN_ID, t3, 3),
+                    (_LEGACY_RUN_ID, t4, 4),
+                )
+            ])
+    session.rollback()
+    opposite = "narrow" if store == "legacy" else "legacy"
+    post_expand_forecast_database({
+        _KEYED_RUN_ID: store,
+        _LEGACY_RUN_ID: opposite,
+        _ALL_LEGACY_RUN_ID: "legacy",
+    })
+
+    # Read both physical sides independently: wrong-store copies must exist
+    # and stay half an hour away, so DISTINCT cannot hide missing authority.
+    for run_id, authoritative_store, expected in (
+        (_KEYED_RUN_ID, store, {_T0, _T1, t4}),
+        (_LEGACY_RUN_ID, opposite, {_T0, t3, t4}),
+    ):
+        for physical_store, table in (
+            ("legacy", "river_timeseries_legacy"), ("narrow", "river_timeseries"),
+        ):
+            actual = {
+                row["valid_time"] for row in _rows(
+                    session,
+                    f"SELECT ts.valid_time FROM hydro.{table} ts "
+                    "JOIN hydro.hydro_run h ON h.run_key = ts.run_key "
+                    "WHERE h.run_id = :run_id",
+                    {"run_id": run_id},
+                )
+            }
+            assert actual == (
+                expected if physical_store == authoritative_store
+                else {value + timedelta(minutes=30) for value in expected}
+            )
+
+    discovery = valid_times_for_layer(session, "discharge", limit=3)
+    assert discovery.valid_times == [
+        "2026-06-01T01:00:00Z", "2026-06-01T03:00:00Z", "2026-06-01T04:00:00Z",
+    ]
+    assert discovery.limit == 3
+    assert discovery.observed_count == 4
+    assert discovery.truncated is True
+    for active_store, expected in ((store, {_T0, _T1, t4}), (opposite, {_T0, t3, t4})):
+        active_raw = render_river_ts_sql(_valid_times_any_source_template(active_store), active_store).sql
+        assert {row["valid_time"] for row in _rows(session, active_raw, {"variable": _VARIABLE})} == expected
+        assert _rows(session, active_raw, {"variable": "not_a_river_variable"}) == []
 
 
 def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(seeded: Any) -> None:
@@ -521,13 +772,13 @@ def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(se
 # ---------------------------------------------------------------------------
 
 
-def test_unknown_identity_and_out_of_vocabulary_variable_return_empty_not_error(seeded: Any) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_unknown_identity_and_out_of_vocabulary_variable_return_empty_not_error(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     _url, session = seeded
-    query = _hydro_source_query(_source_cte_body("hydro"))
 
-    assert _rows(session, query, _identity_params("run-does-not-exist")) == []
-    assert _rows(session, query, _identity_params(_KEYED_RUN_ID, variable="not_a_river_variable")) == []
-
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
     assert (
         valid_times_for_layer(
             session,
@@ -538,6 +789,10 @@ def test_unknown_identity_and_out_of_vocabulary_variable_return_empty_not_error(
         ).valid_times
         == []
     )
+    query = _hydro_source_query(_source_cte_body("hydro"))
+
+    assert _rows(session, query, _identity_params("run-does-not-exist")) == []
+    assert _rows(session, query, _identity_params(_KEYED_RUN_ID, variable="not_a_river_variable")) == []
 
 
 def test_the_rejected_enum_cast_really_would_have_raised_on_that_literal(seeded: Any) -> None:
@@ -569,28 +824,19 @@ def test_the_rejected_enum_cast_really_would_have_raised_on_that_literal(seeded:
 # ---------------------------------------------------------------------------
 
 
-def test_null_key_legacy_rows_are_invisible_to_the_switched_reads(seeded: Any) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_null_key_legacy_rows_are_invisible_to_the_switched_reads(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     """Excluded by design, with the text oracle proving the rows are really there."""
     _url, session = seeded
     params = _identity_params(_LEGACY_RUN_ID)
 
-    switched = _rows(session, _hydro_source_query(_source_cte_body("hydro")), params)
     oracle = _rows(session, _hydro_source_query(_TEXT_ERA_HYDRO_SOURCE_CTE), params)
 
-    switched_segments = [row["river_segment_id"] for row in switched]
-    oracle_segments = [row["river_segment_id"] for row in oracle]
-    assert set(oracle_segments) - set(switched_segments) == {_LEGACY_SEGMENT[0]}
-    assert switched_segments == [segment_id for segment_id, _type, _value in _SEGMENTS]
 
     # Same exclusion at the valid-time discovery surface: the legacy-only hour
     # exists in the table and is not advertised.
-    discovery = valid_times_for_layer(
-        session,
-        "discharge",
-        run_id=_LEGACY_RUN_ID,
-        basin_version_id=_BASIN_VERSION_ID,
-        river_network_version_id=_NETWORK_ID,
-    )
     text_era_times = [
         row["valid_time"]
         for row in _rows(
@@ -606,10 +852,26 @@ def test_null_key_legacy_rows_are_invisible_to_the_switched_reads(seeded: Any) -
         )
     ]
     assert text_era_times == [_LEGACY_ONLY_TIME, _T0]
+    _prepare_hydro_stores(session, post_expand_forecast_database, store, _LEGACY_RUN_ID)
+    discovery = valid_times_for_layer(
+        session,
+        "discharge",
+        run_id=_LEGACY_RUN_ID,
+        basin_version_id=_BASIN_VERSION_ID,
+        river_network_version_id=_NETWORK_ID,
+    )
     assert discovery.valid_times == ["2026-06-01T00:00:00Z"]
+    switched = _rows(session, _hydro_source_query(_source_cte_body("hydro")), params)
+    switched_segments = [row["river_segment_id"] for row in switched]
+    oracle_segments = [row["river_segment_id"] for row in oracle]
+    assert set(oracle_segments) - set(switched_segments) == {_LEGACY_SEGMENT[0]}
+    assert switched_segments == [segment_id for segment_id, _type, _value in _SEGMENTS]
 
 
-def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded: Any) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     """One national identity, two zoom branches, one visibility answer.
 
     z>=9 reads through ``typed_values`` and z<9 through ``untyped_ranked``. The
@@ -618,7 +880,7 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded
     text predicates, it would appear at z=5 and vanish at z=9.
     """
     _url, session = seeded
-    query = _national_source_query(_source_cte_body("hydro-national"))
+    query = _national_source_query(_frozen_national_source_body())
 
     detail_x, detail_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 9)
     overview_x, overview_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 5)
@@ -632,6 +894,17 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded
         query,
         _NATIONAL_TILE_PARAMS | {"valid_time": _T0, "z": 5, "x": overview_x, "y": overview_y},
     )
+    baseline_detail, baseline_overview = detail, overview
+    _prepare_hydro_stores(session, post_expand_forecast_database, store, _LEGACY_RUN_ID)
+    query = _national_source_query(_source_cte_body("hydro-national"))
+    detail = _rows(session, query, _NATIONAL_TILE_PARAMS | {
+        "valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y,
+    })
+    overview = _rows(session, query, _NATIONAL_TILE_PARAMS | {
+        "valid_time": _T0, "z": 5, "x": overview_x, "y": overview_y,
+    })
+    assert detail == baseline_detail
+    assert overview == baseline_overview
 
     detail_segments = {row["river_segment_id"] for row in detail}
     overview_segments = {row["river_segment_id"] for row in overview}
@@ -655,7 +928,10 @@ def test_national_legs_agree_on_null_key_visibility_across_the_zoom_split(seeded
         assert row["feature_id"] == f"{_NETWORK_ID}::{row['river_segment_id']}"
 
 
-def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(seeded: Any) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     """Per-segment payload, not just the run/network constants both legs share.
 
     Identity fields are the same string on every national row, so asserting
@@ -671,7 +947,7 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(seed
     simplifies, so only its value/identity payload is compared.
     """
     _url, session = seeded
-    query = _national_source_query(_source_cte_body("hydro-national"))
+    query = _national_source_query(_frozen_national_source_body())
 
     detail_x, detail_y = _tile_xy(_SEGMENT_LON, _SEGMENT_LAT, 9)
     detail = _rows(
@@ -695,6 +971,17 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(seed
         )
     }
     assert len(set(authority_geometry.values())) == len(_SEGMENTS) + 1, "geometries must be distinct too"
+    baseline_detail = detail
+    baseline_later = _rows(session, query, _NATIONAL_TILE_PARAMS | {
+        "valid_time": _T1, "z": 9, "x": detail_x, "y": detail_y,
+    })
+    assert baseline_later == []
+    _prepare_hydro_stores(session, post_expand_forecast_database, store, _LEGACY_RUN_ID)
+    query = _national_source_query(_source_cte_body("hydro-national"))
+    detail = _rows(session, query, _NATIONAL_TILE_PARAMS | {
+        "valid_time": _T0, "z": 9, "x": detail_x, "y": detail_y,
+    })
+    assert detail == baseline_detail
 
     assert len(detail) == len(_SEGMENTS)
     for row in detail:

@@ -12,7 +12,7 @@
 | 方向 | 内容 |
 |---|---|
 | 上游 | Forcing Producer、上一期 StateSnapshot、Model Registry。 |
-| 下游 | Forecast Run、前端过去 7 天 analysis 曲线。 |
+| 下游 | Forecast Run、前端过去 3 天 analysis 曲线。 |
 | 主要数据表/存储 | `hydro.hydro_run`, `hydro.state_snapshot`, `hydro.river_timeseries`, `met.forcing_version` |
 
 ## 3. 职责边界
@@ -83,7 +83,7 @@ UNKNOWN_ERROR
 
 - 每个 active model 至少维护一个最新 StateSnapshot。
 - StateSnapshot valid_time 不晚于 forecast cycle_time。
-- analysis 结果可返回过去 7 天曲线。
+- analysis 结果可返回过去 3 天曲线。
 - 状态过旧时 forecast run 明确标记 degraded。
 
 ## 10. 与其它模块的契约

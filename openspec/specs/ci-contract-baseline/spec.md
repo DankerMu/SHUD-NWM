@@ -920,3 +920,80 @@ The sibling-lane pin selected by the `infra/systemd/nhms-node27-*.service` glob 
 - **WHEN** the changed paths are exactly `apps/api/routes/precip.py`
 - **THEN** `select_tests` emits exactly `["tests/test_api.py", "tests/test_api_contract.py", "tests/test_monitoring_api.py", "tests/test_openapi_31_contract.py", "tests/test_openapi_drift.py", "tests/test_precip_overlay.py"]`
 
+### Requirement: display and scheduler unit files with a content-asserting owner suite MUST select that suite
+
+`infra/systemd/nhms-display-api.service`, `infra/systemd/nhms-scheduler-file-provider-refresh.service` and `infra/systemd/nhms-scheduler-file-provider-refresh.timer` each have exactly one suite that `read_text`s that path and asserts its directives, and none of them lies inside the `infra/systemd/nhms-node27-*.service` glob rule, so before this change a unit-only diff selected nothing at all and the targeted job degraded to a zero-assertion `--collect-only` smoke. `scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` (neither `stop_on_match` nor `only_when_any_changed`) for each: the display-api unit targeting `tests/test_hydro_display_mvt_scaling.py`, and both scheduler file-provider-refresh units targeting `tests/test_scheduler_file_provider_refresh.py`. Because none of the three matches the node-27 glob, none of the three selections SHALL contain `tests/test_node27_timeseries_retention.py`. The node-27 owner-table meta test SHALL decide whether a unit owes the sibling lane pin by matching that glob rather than by the `.service` suffix, so that a node-27 unit named outside the `nhms-node27-` prefix is judged correctly. `nhms-display-api.service` is not an `nhms-node27-*`-named unit and therefore lies outside the domain of "node-27 unit files with a content-asserting owner suite MUST select that suite", whose scope is the `infra/systemd/nhms-node27-*.service` glob; it is governed by this requirement instead. Units with no content-asserting reader (`nhms-compute-compose.service`, `nhms-display-compose.service`, `nhms-node27-frontier-alert.timer`, `nhms-node27-raw-retention.timer`, `nhms-scheduler-evidence-retention.timer`) SHALL NOT receive a rule under this requirement, and the four node-22 units already routed by the existing exact rules SHALL keep their current selections unchanged.
+
+#### Scenario: a display-api unit diff selects its owner suite without the node-27 lane pin
+
+- **WHEN** the changed paths are exactly `infra/systemd/nhms-display-api.service`
+- **THEN** `select_tests` emits a non-empty set containing `tests/test_hydro_display_mvt_scaling.py` and not containing `tests/test_node27_timeseries_retention.py`
+
+#### Scenario: a scheduler file-provider-refresh unit diff selects its owner suite
+
+- **WHEN** the changed paths are exactly `infra/systemd/nhms-scheduler-file-provider-refresh.service` or exactly `infra/systemd/nhms-scheduler-file-provider-refresh.timer`
+- **THEN** `select_tests` emits a non-empty set containing `tests/test_scheduler_file_provider_refresh.py` and not containing `tests/test_node27_timeseries_retention.py`
+
+#### Scenario: existing node-27 owner-table selections are preserved
+
+- **WHEN** the changed paths are exactly one of the five `infra/systemd/nhms-node27-{autopipe,download,frontier-alert,raw-retention,timeseries-compression-replay}.service` units
+- **THEN** `select_tests` still emits that unit's owner suites together with `tests/test_node27_timeseries_retention.py`, and the two node-27 `.timer` rows still emit their owner suites without it
+
+### Requirement: the scheduler refresh env template MUST select its content-asserting owner suite
+
+`tests/test_scheduler_file_provider_refresh.py` reads `infra/env/compute.scheduler-provider-refresh.env.example` by path and asserts its content: that `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true` is present, and that none of `DATABASE_URL=`, `PIPELINE_DATABASE_URL=`, `PGHOST=` or `PGPORT=` appears. Before this change the only rule matching that path was the `infra/env/**` rule, whose single target does not read the file, so a template-only diff reached the targeted lane with no reader of the changed file executed — and because that selection is non-empty, the zero-assertion CI warning did not fire either. `scripts/select_ci_tests.py` SHALL carry a path-exact `PathTestRule` (neither `stop_on_match` nor `only_when_any_changed`) for that template targeting `tests/test_scheduler_file_provider_refresh.py`. Because rule matches accumulate and the `infra/env/**` rule stays in place, the template's selection SHALL be exactly that owner suite together with `tests/test_two_node_docker_runtime.py`, and `tests/test_select_ci_tests.py` SHALL pin it as an exact set rather than by membership. The rule SHALL NOT be added to the `#1684` rollout-producer group, whose target is the static deployment contract suite and which does not read this template. The selections of the other thirteen `infra/env/*.example` templates SHALL remain unchanged.
+
+#### Scenario: a refresh env template diff selects its owner suite
+
+- **WHEN** the changed paths are exactly `infra/env/compute.scheduler-provider-refresh.env.example`
+- **THEN** `select_tests` emits exactly `["tests/test_scheduler_file_provider_refresh.py", "tests/test_two_node_docker_runtime.py"]`
+
+#### Scenario: sibling env templates keep their existing selections
+
+- **WHEN** the changed paths are exactly `infra/env/compute.example`, or exactly `infra/env/compute.scheduler-dbfree.env.example`
+- **THEN** each selection is exactly `["tests/test_slurm_gateway_deployment_contract.py", "tests/test_two_node_docker_runtime.py"]`
+- **WHEN** the changed paths are exactly `infra/env/display.example`
+- **THEN** the selection is exactly `["tests/test_two_node_docker_runtime.py"]`
+
+### Requirement: the precipitation application-composition owners MUST select the precipitation surface oracles
+
+`apps/api/route_registry.py` imports `precip_router` and lists it in `_BUSINESS_ROUTERS`, which `register_role_aware_routes` walks to register every business router; dropping that entry turns both published precipitation endpoints — `/api/v1/precip/{source}/{cycle}/index` and `/api/v1/precip/{source}/{cycle}/{valid_time}.png` — into 404. `apps/api/main.py` calls `_patch_precip_openapi(schema)` inside `_patch_openapi_schema`; dropping that call makes the runtime schema drift from the committed `openapi/nhms.v1.yaml`. Before this change neither owner selected `tests/test_precip_overlay.py` or `tests/test_openapi_drift.py`: the registry selected only the two connection-attribution suites plus the three broad `apps/api/**` suites, and `main.py` only the API error-logging suite plus those same three. Both selections were non-empty and plausible, so the zero-assertion CI warning did not fire and a composition-owner-only diff reached the targeted lane with no precipitation oracle executed. Both owners SHALL therefore reach the precipitation surface oracles, on the terms fixed below.
+
+`scripts/select_ci_tests.py` SHALL route both composition owners to the full set of precipitation surface suites — `tests/test_precip_overlay.py`, `tests/test_openapi_drift.py`, `tests/test_openapi_31_contract.py` and `tests/test_api_contract.py` — while preserving each owner's existing riders: the registry SHALL keep both connection-attribution suites and `main.py` SHALL keep `tests/test_api_errors_logging.py`, and both SHALL keep the three broad `apps/api/**` suites. Because a duplicate pattern splits a module's ownership across two rules, `apps/api/route_registry.py` SHALL be removed from the shared connection-attribution path tuple and given a single path-exact rule whose targets merge both suite sets, exactly as `apps/api/routes/forecast.py` was handled; the comment above that tuple SHALL be corrected so it no longer claims the registry is a member. Neither owner rule SHALL carry `stop_on_match` or `only_when_any_changed`. Both flags are inert for these two entries today: `apps/api/**` is an earlier rule whose three suites have already accumulated by the time these trailing entries are reached, and `only_when_any_changed` is consulted only in the `CHANGED_TEST_FILE_RULES` loop, never for `PATH_TEST_RULES`. The pin is therefore structural rather than behavioural — it keeps a future `stop_on_match` from shadowing a rule appended after these two whose pattern also matches these paths, and keeps a field that would silently do nothing from being added here. The selections of the five route paths remaining in that tuple, of the three store paths in the sibling connection-attribution store tuple, and of `apps/api/routes/precip.py`, `services/precip/cache.py`, `apps/api/openapi_patching.py` and `apps/api/errors.py`, SHALL remain unchanged.
+
+`tests/test_select_ci_tests.py` SHALL pin each owner's selection as an exact set written as literal test-file strings, and SHALL NOT derive the expectation from the production `PRECIP_SURFACE_TESTS` or `CONNECTION_ATTRIBUTION_TESTS` constants, so that an edit to either constant cannot move production and expectation together. It SHALL additionally carry, per owner, a reverse-missing assertion that `tests/test_precip_overlay.py`, `tests/test_openapi_drift.py` and `tests/test_openapi_31_contract.py` disappear when that owner's precipitation targets are removed. The fourth routed suite, `tests/test_api_contract.py`, is deliberately excluded from that assertion: it is also a rider of the broad `apps/api/**` rule, so it survives the removal and an assertion naming all four would fail. The anti-self-certification constraint is that every element of an expected set is a literal string and no value is read back from `scripts/select_ci_tests` — including `PATH_TEST_RULES` and single-suite constants such as `API_ERROR_LOGGING_TEST`; reading `PATH_TEST_RULES` solely to construct the monkeypatched mutant for a reverse-missing assertion is permitted.
+
+#### Scenario: a route-registry diff selects the precipitation oracles and keeps its attribution riders
+
+- **WHEN** the changed paths are exactly `apps/api/route_registry.py`
+- **THEN** `select_tests` emits exactly `["tests/test_api.py", "tests/test_api_contract.py", "tests/test_monitoring_api.py", "tests/test_node27_connection_attribution.py", "tests/test_node27_connection_attribution_delegated.py", "tests/test_openapi_31_contract.py", "tests/test_openapi_drift.py", "tests/test_precip_overlay.py"]`
+
+#### Scenario: a main.py diff selects the precipitation oracles and keeps its error-logging rider
+
+- **WHEN** the changed paths are exactly `apps/api/main.py`
+- **THEN** `select_tests` emits exactly `["tests/test_api.py", "tests/test_api_contract.py", "tests/test_api_errors_logging.py", "tests/test_monitoring_api.py", "tests/test_openapi_31_contract.py", "tests/test_openapi_drift.py", "tests/test_precip_overlay.py"]`
+
+#### Scenario: the shared attribution path tuple keeps its other members unchanged
+
+- **WHEN** the changed paths are exactly any one of `apps/api/routes/best_available.py`, `apps/api/routes/data_sources.py`, `apps/api/routes/models.py`, `apps/api/routes/pipeline.py` or `apps/api/routes/state_snapshots.py`
+- **THEN** the selection still contains both connection-attribution suites and contains none of `tests/test_precip_overlay.py`, `tests/test_openapi_drift.py` or `tests/test_openapi_31_contract.py` (`tests/test_api_contract.py` is excluded because the broad `apps/api/**` rule supplies it to every path under `apps/api/`)
+
+#### Scenario: neither owner rule carries a selection flag
+
+- **WHEN** the `PATH_TEST_RULES` entries for `apps/api/route_registry.py` and `apps/api/main.py` are inspected
+- **THEN** each has `stop_on_match` false and `only_when_any_changed` empty
+
+### Requirement: the precipitation composition edges MUST be backed by constructive mutation proofs
+
+A selector edge that pulls a suite into the lane is only justified if that suite actually fails when the edge it guards is broken, so each of the two precipitation composition edges SHALL carry a constructive mutation proof. Both mutations SHALL be exercised inside isolated app fixtures that leave production routing and OpenAPI behavior unchanged: `create_app()` builds a fresh application per call and `monkeypatch` restores the mutated module attribute at test teardown.
+
+#### Scenario: removing precip_router from the business routers reds the published precipitation routes
+
+- **WHEN** an application is built with `main.create_app()` with `route_registry._BUSINESS_ROUTERS` unmodified, and a second one is built with that tuple replaced by the same tuple minus `precip_router`
+- **THEN** the first application's route table contains both `/api/v1/precip/{source}/{cycle}/index` and `/api/v1/precip/{source}/{cycle}/{valid_time}.png`, and the second application's route table contains neither. Route-table membership is asserted rather than an HTTP 404, because a 404 on those paths is also produced by the SPA fallback for any unmatched `api/`-prefixed path and by the precipitation routes themselves for a cycle that is not mirrored, so a 404 assertion would stay green under a monkeypatch that never took effect. The module-level singleton `main.app` is out of range of either monkeypatch and SHALL NOT be rebuilt or mutated.
+
+#### Scenario: removing the precipitation OpenAPI patch reds the runtime/static alignment oracle
+
+- **WHEN** an application is built with `main.create_app()` with `main._patch_precip_openapi` unmodified, and a second one is built with it replaced by a no-op
+- **THEN** the first application's schema agrees with the committed `openapi/nhms.v1.yaml` at both the `/api/v1/precip/{source}/{cycle}/index` operation and the absence of a `PrecipIndexResponse` component schema, and the second application's schema disagrees at both — the patch pops `PrecipIndexResponse` and rewrites that operation's response, and the static YAML carries no `PrecipIndexResponse`. The two locations are compared individually rather than by whole-document equality: the patch touches exactly those two places, so the negative leg names the drift `_patch_precip_openapi` causes instead of passing on any unrelated whole-document difference. Whole-document equality is separately covered by the pre-existing runtime/static alignment oracle in the same suite.
+

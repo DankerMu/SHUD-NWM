@@ -134,8 +134,12 @@ def write_bytes_no_follow_exclusive(
     *,
     containment_root: Path | None = None,
     require_durable_create: bool = False,
+    mode: int | None = None,
 ) -> Path:
     """Create a file without following symlinked parents or targets, failing if it exists.
+
+    The omitted mode keeps normal ``open(2)`` 0666-and-umask semantics. An
+    explicit mode is exact after creation, for private receipt owners.
 
     ``require_durable_create`` is for transaction reservations and manifests:
     after the exclusive create succeeds, parent fsync or parent-identity failure
@@ -143,14 +147,18 @@ def write_bytes_no_follow_exclusive(
     durable fact.
     """
 
+    if mode is not None and (not isinstance(mode, int) or isinstance(mode, bool) or not 0 <= mode <= 0o777):
+        raise ValueError("exclusive publication mode must be a file permission mask")
     target = _expand_path(path)
     parent_fd, parent_path = _open_parent_dir(target, containment_root=containment_root, create=True)
     file_fd: int | None = None
     created = False
     try:
         _verify_fd_matches_path(parent_fd, parent_path)
-        file_fd = os.open(target.name, _FILE_FLAGS, 0o666, dir_fd=parent_fd)
+        file_fd = os.open(target.name, _FILE_FLAGS, 0o666 if mode is None else mode, dir_fd=parent_fd)
         created = True
+        if mode is not None:
+            os.fchmod(file_fd, mode)
         view = memoryview(content)
         while view:
             written = os.write(file_fd, view)

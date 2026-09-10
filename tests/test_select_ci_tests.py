@@ -47,12 +47,17 @@ from scripts.select_ci_tests import (
     FILE_JOURNAL_READ_STATE_TESTS,
     FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
     FORCED_RESUBMIT_SURFACE_TESTS,
+    ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+    ISSUE1895_READINESS_STORAGE_TESTS,
+    ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
     NODE22_ENTRYPOINT_INVARIANT_TEST,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
     PATH_TEST_RULES,
     QHH_CYCLE_SBATCH,
     QHH_DIAGNOSTIC_README,
+    READONLY_DB_VALIDATION_TESTS,
     RELEASED_RESERVATION_RECOVERY_TESTS,
     SCHEDULER_IMPORTER_TESTS,
     SELECTOR_META_GUARD_TEST,
@@ -271,13 +276,11 @@ def test_node27_retention_service_row_selects_exactly_the_retention_suite() -> N
     `.timer` sibling is asserted alongside it so the difference itself is the
     pinned fact, not an accident of two independent rows.
     """
-    assert select_tests(
-        ["infra/systemd/nhms-node27-timeseries-retention.service"], repo_root=Path(".")
-    ) == ["tests/test_node27_timeseries_retention.py"]
+    assert select_tests(["infra/systemd/nhms-node27-timeseries-retention.service"], repo_root=Path(".")) == [
+        "tests/test_node27_timeseries_retention.py"
+    ]
 
-    assert select_tests(
-        ["infra/systemd/nhms-node27-timeseries-retention.timer"], repo_root=Path(".")
-    ) == [
+    assert select_tests(["infra/systemd/nhms-node27-timeseries-retention.timer"], repo_root=Path(".")) == [
         "tests/test_node27_cold_residency.py",
         "tests/test_node27_timeseries_retention.py",
     ]
@@ -380,6 +383,11 @@ NODE27_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
             "tests/test_node27_timeseries_compression_supervisor.py",
         }
     ),
+    # #2188: runs on node-27 (its default cache dir is that box's
+    # `/home/nwm/.cache/nhms/mvt`) but is named outside the `nhms-node27-`
+    # prefix, so it is the first `.service` row here outside that prefix and,
+    # unlike the other `.service` rows, owes NO sibling lane pin.
+    "infra/systemd/nhms-display-api.service": frozenset({"tests/test_hydro_display_mvt_scaling.py"}),
     "infra/systemd/nhms-node27-download.timer": frozenset({"tests/test_node27_download_cycles.py"}),
     "infra/systemd/nhms-node27-timeseries-compression.timer": frozenset(
         {
@@ -412,18 +420,71 @@ def test_node27_unit_files_select_their_owner_suites(unit: str, owners: frozense
 
     assert owners <= selected, f"{unit} lost its owner suite(s): {sorted(owners - selected)}"
 
-    if unit.endswith(".service"):
+    # #2188: the predicate is the pin's OWN glob, not `.endswith(".service")`.
+    # The suffix spelling held only because every row in this table happened to
+    # carry the `nhms-node27-` prefix; `nhms-display-api.service` is the first
+    # row that is a node-27 unit WITHOUT that prefix, so it does not match the
+    # `#2173` glob, cannot get the pin, and must fall into the else branch and
+    # assert it does NOT carry the lane pin. That is a tightening, not a
+    # loosening: hanging display-api off the glob row would red here.
+    if fnmatch.fnmatch(unit, "infra/systemd/nhms-node27-*.service"):
         # The `#2173` glob row accumulates on top of the path-exact row (no
         # `stop_on_match`); this PR must not cost a unit its lane pin.
         assert (
             "tests/test_node27_timeseries_retention.py" in selected
         ), f"{unit} does not select the sibling lane pin"
     else:
-        # The pin's glob is `nhms-node27-*.service`; a `.timer` row must not
+        # The pin's glob is `nhms-node27-*.service`; a `.timer` row -- or a
+        # node-27 unit named outside the `nhms-node27-` prefix -- must not
         # smuggle the pin suite in through its own targets.
         assert (
             "tests/test_node27_timeseries_retention.py" not in selected
         ), f"{unit} pulled in the `.service`-only sibling lane pin"
+
+
+# #2188: the node-22 sibling of the table above -- same producer -> consumer
+# statement for units that live on the compute box. Kept as its own table
+# rather than merged into a generic `SYSTEMD_UNIT_OWNER_SUITES` because the
+# node-27 table's docstring and pin branch are lane-specific. Both rows are
+# outside the `#2173` glob `infra/systemd/nhms-node27-*.service`, so neither
+# owes the sibling lane pin.
+NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
+    "infra/systemd/nhms-scheduler-file-provider-refresh.service": frozenset(
+        {"tests/test_scheduler_file_provider_refresh.py"}
+    ),
+    "infra/systemd/nhms-scheduler-file-provider-refresh.timer": frozenset(
+        {"tests/test_scheduler_file_provider_refresh.py"}
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("unit", "owners"),
+    sorted(NODE22_UNIT_OWNER_SUITES.items()),
+    ids=[PurePosixPath(unit).name for unit in sorted(NODE22_UNIT_OWNER_SUITES)],
+)
+def test_node22_unit_files_select_their_owner_suites(unit: str, owners: frozenset[str]) -> None:
+    """#2188 — the node-22 refresh units had NO rule at all, not even a pin.
+
+    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `read_text`s both files and asserts the `.service`'s wrapper `ExecStart`,
+    `TimeoutStartSec=7200`, the absence of `PrivateTmp=true` and the
+    `Before=`/`ExecCondition=` scheduler-independence pair, plus the `.timer`'s
+    `OnCalendar`/`RandomizedDelaySec`/`Persistent=false` schedule. Before #2188 a
+    unit-only diff selected NOTHING, so all of that degraded to a zero-assertion
+    `--collect-only` smoke. Parametrized rather than looped so each unit reds
+    independently, same shape as the node-27 table's meta test above.
+    """
+    selected = set(select_tests([unit], repo_root=Path(".")))
+
+    assert owners <= selected, f"{unit} lost its owner suite(s): {sorted(owners - selected)}"
+
+    # These are node-22 units: the `#2173` pin glob is
+    # `infra/systemd/nhms-node27-*.service`, so neither row may smuggle the
+    # node-27 lane pin in through its own targets.
+    assert (
+        "tests/test_node27_timeseries_retention.py" not in selected
+    ), f"{unit} pulled in the node-27 sibling lane pin"
 
 
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
@@ -586,9 +647,7 @@ def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture()
     # below shares it). The redirect intent is unchanged: the whole
     # tests/test_forcing_producer.py never comes back. The write-site invariant
     # joins because direct_grid_contract.py lives under workers/** (#1656).
-    assert selected == sorted(
-        {*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS, INVARIANT_SUITE_PATH}
-    )
+    assert selected == sorted({*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS, INVARIANT_SUITE_PATH})
     assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
     assert all(
         target.startswith("tests/test_forcing_producer.py::test_direct_grid_contract_")
@@ -620,9 +679,7 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
     # Still bounded, just by a bigger constant: the compact e2e fixture plus the
     # five #1455 importer suites (all seconds-scale), plus the write-site
     # invariant (workers/** root, #1656) — and no core-smoke blowout.
-    assert selected == sorted(
-        {*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS, INVARIANT_SUITE_PATH}
-    )
+    assert selected == sorted({*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS, INVARIANT_SUITE_PATH})
     assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 1
     assert "tests/test_forcing_producer.py" not in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -932,9 +989,12 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
         {
             *CORE_SMOKE_TESTS,
             "tests/test_forecast_api.py",
+            "tests/test_forecast_store_routing.py",
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_qhh_latest_fallback_pushdown.py",
             # #1442 added the zero-text-identity oracle for this file's nine
             # registered statements.
@@ -956,6 +1016,18 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
         }
     )
     assert set(CORE_SMOKE_TESTS) <= set(selected)
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["packages/common/forecast_store.py", "services/tiles/mvt.py", "apps/api/routes/hydro_display.py"],
+)
+def test_benchmark_production_owners_select_both_binding_consumers(source: str) -> None:
+    selected = set(select_tests([source], repo_root=Path(".")))
+    assert {
+        "tests/test_node27_timeseries_compression_benchmark.py",
+        "tests/test_node27_timeseries_compression_live_evidence.py",
+    } <= selected
 
 
 def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
@@ -1101,6 +1173,42 @@ def test_the_template_golden_rule_is_globbed_on_the_capture_sha() -> None:
     """A re-capture at a new base renames the file; the route must survive it."""
     assert select_tests(["tests/fixtures/river_ts_templates_deadbee1.json"], repo_root=Path(".")) == select_tests(
         ["tests/fixtures/river_ts_templates_51f9d273.json"], repo_root=Path(".")
+    )
+
+
+def test_select_tests_routes_the_frozen_hydro_sql_fixture_to_its_shape_owner() -> None:
+    selected = select_tests(["tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"], repo_root=Path("."))
+
+    assert selected == ["tests/test_hydro_display_mvt_scaling.py"]
+
+
+def test_frozen_hydro_sql_database_edge_deletion_is_unrescued() -> None:
+    target = "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"
+    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+
+    assert target in patterns, "a frozen-SQL-only diff must open the database lane through its exact literal"
+    # Delete the dedicated literal from the parsed database filter, not other lanes.
+    # Every surviving pattern must be checked: a broad fixture glob could rescue it.
+    remaining = patterns.copy()
+    remaining.remove(target)
+    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
+        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
+    )
+
+
+def test_select_tests_routes_the_frozen_national_sql_fixture_to_its_shape_owner() -> None:
+    selected = select_tests(["tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql"], repo_root=Path("."))
+    assert selected == ["tests/test_hydro_display_mvt_scaling.py"]
+
+
+def test_frozen_national_sql_database_edge_deletion_is_unrescued() -> None:
+    target = "tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql"
+    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+    assert target in patterns
+    remaining = patterns.copy()
+    remaining.remove(target)
+    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
+        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
     )
 
 
@@ -1306,14 +1414,218 @@ def test_precip_tree_rule_carries_no_selection_flags() -> None:
     assert not rule.only_when_any_changed
 
 
+# #2098: the two precipitation application-composition owners. `apps/api/
+# route_registry.py` puts `precip_router` into `_BUSINESS_ROUTERS` (route
+# reachability) and `apps/api/main.py` calls `_patch_precip_openapi(schema)`
+# inside `_patch_openapi_schema` (runtime OpenAPI shape). Before this issue
+# neither selected a precipitation oracle, and both selections were non-empty
+# and plausible, so the #1182 zero-assertion warning never fired.
+#
+# NAMING CONSTRAINT (task 2.6): each of the six guards below is addressable by
+# its own full name as a `-k` substring; no name is a prefix of another.
+#
+# The expected sets are LITERAL strings on purpose (acceptance criterion 3 /
+# #1827): deriving them from `PRECIP_SURFACE_TESTS`, `CONNECTION_ATTRIBUTION_TESTS`
+# or `API_ERROR_LOGGING_TEST` would move production and expectation together and
+# the pin could never red.
+def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution() -> None:
+    """#2098 — exact selection for the route-registry composition owner.
+
+    Dropping `precip_router` from `_BUSINESS_ROUTERS` takes both published precipitation
+    endpoints out of the route table. `tests/test_precip_overlay.py` is the most direct
+    behavioural oracle; `tests/test_openapi_drift.py` (whole-document static/runtime
+    comparison) and `tests/test_openapi_31_contract.py` (its `BASELINE_NULLABLE_COUNT`
+    counts the two routes' typed 404s) red under the same cut, so the three-suite target is
+    over-justification, not under-coverage. The two connection-attribution suites and the three
+    broad `apps/api/**` suites must survive the MERGE: this owner was moved OUT of
+    `CONNECTION_ATTRIBUTION_ROUTE_PATHS` into its own path-exact rule, and a move that
+    forgot to carry the attribution targets over reds this pin too, but this pin only
+    reports "sets differ"; the tail of
+    `test_connection_attribution_tuple_peers_are_untouched_by_the_registry_split` is what
+    names the forgotten merge.
+    """
+    assert Path("apps/api/route_registry.py").exists()
+
+    assert select_tests(["apps/api/route_registry.py"], repo_root=Path(".")) == [
+        "tests/test_api.py",
+        "tests/test_api_contract.py",
+        "tests/test_monitoring_api.py",
+        "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+        "tests/test_precip_overlay.py",
+    ]
+
+
+def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None:
+    """#2098 — exact selection for the runtime-OpenAPI composition owner.
+
+    `_patch_openapi_schema` calls `_patch_precip_openapi(schema)`; dropping that call
+    drifts the runtime schema from `openapi/nhms.v1.yaml`, and of the suites selected
+    here only `tests/test_openapi_drift.py` reds on it (`tests/test_api_contract.py`
+    compares static against runtime too, but at no precipitation path). The pre-existing
+    error-logging rider (#1704) and the three broad `apps/api/**` suites must survive the
+    widened target tuple.
+    """
+    assert Path("apps/api/main.py").exists()
+
+    assert select_tests(["apps/api/main.py"], repo_root=Path(".")) == [
+        "tests/test_api.py",
+        "tests/test_api_contract.py",
+        "tests/test_api_errors_logging.py",
+        "tests/test_monitoring_api.py",
+        "tests/test_openapi_31_contract.py",
+        "tests/test_openapi_drift.py",
+        "tests/test_precip_overlay.py",
+    ]
+
+
+# The three suites a composition owner reaches ONLY through its own #2098 rule.
+# `tests/test_api_contract.py` is deliberately not here: it is also a rider of the
+# broad `apps/api/**` rule, so it survives the mutant and naming it would red the
+# reverse-missing pins outright.
+_PRECIP_ONLY_VIA_OWNER_RULE = (
+    "tests/test_precip_overlay.py",
+    "tests/test_openapi_drift.py",
+    "tests/test_openapi_31_contract.py",
+)
+
+
+def _owner_rules_without_precip_targets(owner_pattern: str) -> tuple[PathTestRule, ...]:
+    """The live rule table with one owner's precipitation targets stripped.
+
+    Reading `PATH_TEST_RULES` here builds the MUTANT, never the expectation — the
+    expectation stays the literal `_PRECIP_ONLY_VIA_OWNER_RULE`, so the anti-self-
+    certification constraint holds (spec: "reading `PATH_TEST_RULES` solely to construct
+    the monkeypatched mutant ... is permitted").
+    """
+    stripped = set(_PRECIP_ONLY_VIA_OWNER_RULE) | {"tests/test_api_contract.py"}
+    mutant = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(target for target in rule.tests if target not in stripped),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == owner_pattern
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert len(mutant) == len(PATH_TEST_RULES)
+    assert sum(rule.pattern == owner_pattern for rule in mutant) == 1, (
+        f"{owner_pattern}: expected exactly one owner rule to mutate"
+    )
+    return mutant
+
+
+def test_route_registry_owner_loses_the_precip_suites_when_its_targets_are_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2098 — reverse-missing leg for the registry owner.
+
+    The exact-set pin above only reports "sets differ"; this one names the failure:
+    the three precipitation suites reach this path through nothing but the registry's
+    own rule, so stripping that rule's precipitation targets must make them vanish.
+    """
+    mutant = _owner_rules_without_precip_targets("apps/api/route_registry.py")
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", mutant)
+
+    selected = set(select_tests(["apps/api/route_registry.py"], repo_root=Path(".")))
+
+    for suite in _PRECIP_ONLY_VIA_OWNER_RULE:
+        assert suite not in selected, (
+            f"{suite} still selected for apps/api/route_registry.py without the owner rule's "
+            f"precip targets (got {sorted(selected)})"
+        )
+
+
+def test_main_owner_loses_the_precip_suites_when_its_targets_are_stripped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2098 — reverse-missing leg for the main.py owner. Same shape as the registry leg."""
+    mutant = _owner_rules_without_precip_targets("apps/api/main.py")
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", mutant)
+
+    selected = set(select_tests(["apps/api/main.py"], repo_root=Path(".")))
+
+    for suite in _PRECIP_ONLY_VIA_OWNER_RULE:
+        assert suite not in selected, (
+            f"{suite} still selected for apps/api/main.py without the owner rule's precip "
+            f"targets (got {sorted(selected)})"
+        )
+
+
+def test_precip_composition_owner_rules_carry_neither_selection_flag() -> None:
+    """#2098 — structural pin for the spec's "neither flag" clause.
+
+    Both flags are behaviourally inert on these two entries today, so every output
+    assertion above stays green under either one. `apps/api/**` sits EARLIER in
+    `PATH_TEST_RULES` than both owners (they are its last two entries), so its three broad
+    API suites have already accumulated by the time either owner is reached and
+    `stop_on_match=True` there shadows nothing. `only_when_any_changed` is consulted only by
+    `_rule_activated`, which production calls solely from the `CHANGED_TEST_FILE_RULES`
+    loop — it is a dead field on any `PATH_TEST_RULES` entry (follow-up #2198).
+
+    The pin is therefore STRUCTURAL, not behavioural: it keeps a future `stop_on_match`
+    from shadowing a rule appended after these two whose pattern also matches these paths,
+    and keeps the dead field from being added where it would silently do nothing.
+    """
+    for pattern in ("apps/api/route_registry.py", "apps/api/main.py"):
+        matching = [rule for rule in PATH_TEST_RULES if rule.pattern == pattern]
+        assert len(matching) == 1, f"{pattern}: expected exactly one rule, got {len(matching)}"
+        assert not matching[0].stop_on_match, pattern
+        assert not matching[0].only_when_any_changed, pattern
+
+
+def test_connection_attribution_tuple_peers_are_untouched_by_the_registry_split() -> None:
+    """#2098 — the MERGE-not-DROP guard for the shared attribution tuple.
+
+    `apps/api/route_registry.py` was removed from `CONNECTION_ATTRIBUTION_ROUTE_PATHS`
+    and given its own rule. Deleting the registry from the tuple while forgetting to merge
+    `CONNECTION_ATTRIBUTION_TESTS` into the new rule also reds the exact-set pin above, but
+    that one only reports "sets differ"; the tail of this guard is what names the forgotten
+    merge. The other direction — the five remaining route members silently inheriting the
+    precipitation suites (e.g. by widening the shared tuple instead) — is green everywhere
+    else in this file, so this pin is its sole guard.
+
+    Membership rather than exact equality: same-name derivation adds a suite to some of
+    these paths (`apps/api/routes/best_available.py` picks up
+    `tests/test_best_available.py`), which is not what this guard is about.
+    """
+    peers = (
+        "apps/api/routes/best_available.py",
+        "apps/api/routes/data_sources.py",
+        "apps/api/routes/models.py",
+        "apps/api/routes/pipeline.py",
+        "apps/api/routes/state_snapshots.py",
+    )
+    attribution_suites = {
+        "tests/test_node27_connection_attribution.py",
+        "tests/test_node27_connection_attribution_delegated.py",
+    }
+    for peer in peers:
+        assert Path(peer).exists()
+        selected = set(select_tests([peer], repo_root=Path(".")))
+        assert attribution_suites <= selected, (
+            f"{peer}: lost an attribution suite (got {sorted(selected)})"
+        )
+        leaked = set(_PRECIP_ONLY_VIA_OWNER_RULE) & selected
+        assert not leaked, f"{peer}: inherited precip suites {sorted(leaked)}"
+
+    registry_selected = set(select_tests(["apps/api/route_registry.py"], repo_root=Path(".")))
+    assert attribution_suites <= registry_selected, (
+        "the registry's own rule dropped the attribution suites instead of merging them "
+        f"(got {sorted(registry_selected)})"
+    )
+
+
 def test_select_tests_maps_sh_only_wrapper_change_to_its_guard_suite() -> None:
     # #1138: an sh-only change set must select the wrapper's guard suite (this
     # used to return [] and CI degraded to --collect-only with zero assertions).
     assert Path("scripts/scheduler_file_provider_refresh_once.sh").exists()
 
-    selected = select_tests(
-        ["scripts/scheduler_file_provider_refresh_once.sh"], repo_root=Path(".")
-    )
+    selected = select_tests(["scripts/scheduler_file_provider_refresh_once.sh"], repo_root=Path("."))
 
     assert "tests/test_scheduler_file_provider_refresh.py" in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -1419,7 +1731,13 @@ def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
     selected = select_tests(["scripts/validate_readonly_db_boundary.py"], repo_root=Path("."))
 
     # #1656: scripts/** is a scanned invariant root.
-    assert selected == ["tests/test_readonly_db_validation.py", INVARIANT_SUITE_PATH]
+    assert selected == sorted(
+        [
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            *READONLY_DB_VALIDATION_TESTS,
+            INVARIANT_SUITE_PATH,
+        ]
+    )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -1567,9 +1885,7 @@ def test_environment_producer_reds_when_its_rule_is_removed(
     }
     for producer, owner in owners.items():
         selected = select_tests([producer], repo_root=Path("."))
-        assert owner not in selected, (
-            f"mutant table without {producer}'s rule still selects {owner}"
-        )
+        assert owner not in selected, f"mutant table without {producer}'s rule still selects {owner}"
 
 
 def test_qhh_cycle_shell_keeps_its_existing_targets_with_the_authority_owner() -> None:
@@ -1692,8 +2008,10 @@ def test_calibration_declaration_backend_filter_entry_is_block_scoped() -> None:
     assert literal in _backend_filter_block(workflow), "declaration path missing from ci.yml backend filter"
 
     entries = _filter_entries(_backend_filter_block(workflow))
-    assert not any(fnmatch.fnmatch(CALIBRATION_OVERRIDES_PATH, pattern) and pattern != CALIBRATION_OVERRIDES_PATH
-                   for pattern in entries), "backend filter must not use a broad config glob"
+    assert not any(
+        fnmatch.fnmatch(CALIBRATION_OVERRIDES_PATH, pattern) and pattern != CALIBRATION_OVERRIDES_PATH
+        for pattern in entries
+    ), "backend filter must not use a broad config glob"
 
 
 def test_calibration_declaration_backend_filter_entry_reds_when_removed_or_moved() -> None:
@@ -1802,11 +2120,7 @@ def test_object_store_validation_owner_routes_to_the_facade_contract_oracle(
     mutated_rules = tuple(
         PathTestRule(
             rule.pattern,
-            tuple(
-                target
-                for target in rule.tests
-                if target != OBJECT_STORE_VALIDATION_FACADE_CONTRACT_TEST
-            ),
+            tuple(target for target in rule.tests if target != OBJECT_STORE_VALIDATION_FACADE_CONTRACT_TEST),
             rule.stop_on_match,
             rule.only_when_any_changed,
         )
@@ -1862,6 +2176,156 @@ def test_rollout_owner_producer_rules_red_when_removed(
         assert SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST not in selected, (
             f"mutant table without {producer}'s rule still selects deployment contract"
         )
+
+
+# NAMING CONSTRAINT: only the exact-set pin immediately below may carry
+# `refresh_env` in its test name. This change's Evidence Floor runs
+# `pytest -q tests/test_select_ci_tests.py -k "refresh_env"` as a SINGLE-test
+# selector for that pin, so any sibling name containing the substring breaks it.
+# The other #2195 guards therefore spell themselves
+# `test_scheduler_provider_refresh_template_*`.
+REFRESH_ENV_TEMPLATE = "infra/env/compute.scheduler-provider-refresh.env.example"
+
+
+def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> None:
+    """#2195: the refresh env template must select the suite that reads it.
+
+    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `read_text`s this template and asserts its content: `NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true`
+    present, and none of `DATABASE_URL=` / `PIPELINE_DATABASE_URL=` / `PGHOST=` / `PGPORT=`
+    present. Before the #2195 rule the template matched only the `infra/env/**` rule, whose
+    sole target `tests/test_two_node_docker_runtime.py` never opens this file — a non-empty
+    selection with ZERO readers, so the #1182 zero-assertion warning stayed silent too.
+
+    Pinned as an EXACT set, not membership: `infra/env/**` is untouched and rule matches
+    accumulate (`selected.update(rule.tests)`), so the correct result is a 2-set, not the
+    owner suite alone. `tests/test_node27_write_roles.py` also reads this template (its
+    `_env_templates()` globs `infra/env/*.example`) and stays unselected by design — that leg
+    is out of scope for #2195.
+    """
+    assert set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))) == {
+        "tests/test_scheduler_file_provider_refresh.py",
+        "tests/test_two_node_docker_runtime.py",
+    }
+
+
+def test_scheduler_provider_refresh_template_rule_red_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2195 red leg: dropping the template's path-exact rule drops its owner suite.
+
+    Same idiom as the #1684 red leg above — the length assertion is what proves the
+    mutant really removed a row.
+    """
+    from scripts import select_ci_tests
+
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != REFRESH_ENV_TEMPLATE)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))
+    assert "tests/test_scheduler_file_provider_refresh.py" not in selected, (
+        "mutant table without the refresh env template rule still selects its owner suite"
+    )
+
+
+def test_scheduler_provider_refresh_template_rule_carries_no_selection_flags() -> None:
+    """#2195: the spec delta's "neither flag" clause needs a structural pin of its own.
+
+    Both flags are behaviourally inert on this path today, so the exact-set pin above cannot
+    catch them: `infra/env/**` already matched earlier and no rule after this row matches the
+    template, so `stop_on_match=True` truncates nothing and the 2-set stays green under it.
+    Without this test the clause is simply unenforced -- and it would not stay harmless, since
+    a stray `stop_on_match` here would silently shadow every later rule for any future pattern
+    that also matches this template.
+    """
+    rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == REFRESH_ENV_TEMPLATE)
+
+    assert not rule.stop_on_match
+    assert not rule.only_when_any_changed
+
+
+@pytest.mark.parametrize(
+    "template, expected",
+    [
+        pytest.param(
+            "infra/env/compute.example",
+            [SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_two_node_docker_runtime.py"],
+            id="compute-example",
+        ),
+        pytest.param(
+            "infra/env/compute.scheduler-dbfree.env.example",
+            [SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_two_node_docker_runtime.py"],
+            id="compute-scheduler-dbfree",
+        ),
+        pytest.param(
+            "infra/env/display.example",
+            ["tests/test_two_node_docker_runtime.py"],
+            id="display-example",
+        ),
+    ],
+)
+def test_sibling_env_templates_keep_their_pinned_selections(template: str, expected: list[str]) -> None:
+    """#2195: these are the sibling selections the spec delta's second scenario pins.
+
+    The delta says the other `infra/env/*.example` templates keep their existing
+    selections, but the pre-existing references to `infra/env/compute.example` in this
+    suite (the two #1684 rollout-producer rows and the combined-PR leg) are membership
+    assertions only. Without this test the delta archives an unenforced requirement:
+    rewriting the existing `infra/env/compute.example` rule's targets turns that
+    template's 2-set into a 3-set with every other guard staying green.
+
+    The `display.example` row is the one that catches a narrowed `infra/env/**` — under
+    `infra/env/compute*` that template matches no rule at all and collapses to an EMPTY
+    selection, i.e. the zero-assertion `--collect-only` degradation #2195 exists to
+    prevent, while the #2195 exact-set pin above stays green because its own path-exact
+    row still matches. Hence exact list equality against `select_tests`'s sorted output,
+    not a subset — same reason as
+    `test_node27_autopipe_timer_row_selects_both_of_its_readers`.
+
+    The `exists()` leg keeps a renamed template redding here instead of silently
+    passing on a path nothing produces.
+    """
+    assert Path(template).exists()
+
+    assert select_tests([template], repo_root=Path(".")) == expected
+
+
+def test_scheduler_provider_refresh_template_rule_is_justified_by_a_literal_reader() -> None:
+    """#2195: tie the new rule to the reader that justifies it, derived not asserted.
+
+    The rule's whole warrant is that
+    `tests/test_scheduler_file_provider_refresh.py::test_systemd_refresh_contract_is_db_free_daily_and_scheduler_independent`
+    `read_text`s this template. If that line went away the rule would become decorative
+    and every other test here would stay green — a non-empty selection with zero readers
+    and no zero-assertion warning, which is the exact #2195 failure mode re-armed.
+
+    CATCHES: the reader's `read_text` line being deleted, and the reading function moving
+    to a different suite while this suite still exists — in both cases the derived
+    consumer set loses this suite and the membership assertion reds. The index skips
+    file-level-gated suites, so a file-level gate landing on the reader also reds here,
+    correctly: a gated reader would not run in the PR lane either.
+
+    DOES NOT COVER, deliberately: the reader suite being deleted or renamed. The
+    stale-target leg of `test_every_pinned_node_id_resolves_to_an_existing_test_function`
+    already reds for that, so a third guard here would be redundant — do not add one.
+
+    MEMBERSHIP, not subset. `derived <= selected` is vacuously green when the reader is
+    deleted, because the derived set becomes empty; measured on a reader-stripped copy,
+    membership reds and the subset form stays green. The subset line below is kept only
+    as a supplementary edge — it catches a NEW literal reader appearing without being
+    routed — and must not replace the membership assertion.
+    """
+    consumers = _literal_path_consumer_index(targets=[REFRESH_ENV_TEMPLATE]).get(REFRESH_ENV_TEMPLATE, set())
+
+    assert "tests/test_scheduler_file_provider_refresh.py" in consumers, (
+        f"nothing reads {REFRESH_ENV_TEMPLATE} by literal path any more, so its "
+        f"path-exact rule is decorative (derived consumers: {sorted(consumers)})"
+    )
+
+    assert consumers <= set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))), (
+        "a literal reader of the refresh env template is not routed by the rule table"
+    )
 
 
 def test_combined_pr_selection_includes_all_focused_auth_suites() -> None:
@@ -1923,9 +2387,7 @@ def test_shared_auth_owner_rules_red_when_removed(
     }
     for producer, focused in expected_missing.items():
         selected = select_tests([producer], repo_root=Path("."))
-        assert focused not in selected, (
-            f"mutant table without {producer}'s rule still selects {focused}"
-        )
+        assert focused not in selected, f"mutant table without {producer}'s rule still selects {focused}"
 
 
 def test_journal_retention_systemd_units_select_invariant_and_retention_contracts() -> None:
@@ -2044,8 +2506,7 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
         literal = f"              - '{path}'\n"
         assert literal not in _backend_filter_block(workflow), f"{path} must not be an exact backend filter entry"
     assert not any(
-        fnmatch.fnmatch("docs/x.md", pattern)
-        for pattern in _filter_entries(_backend_filter_block(workflow))
+        fnmatch.fnmatch("docs/x.md", pattern) for pattern in _filter_entries(_backend_filter_block(workflow))
     )
 
 
@@ -2520,8 +2981,10 @@ def _collision_missing_imports(
     importer-closure guards use — no second parser. ``imported`` is the seam for
     constructed red evidence (default: the real suite's top-level imports).
     """
-    resolve = imported if imported is not None else lambda suite: _top_level_imported_module_names(
-        suite, _parse_tracked(suite)
+    resolve = (
+        imported
+        if imported is not None
+        else lambda suite: _top_level_imported_module_names(suite, _parse_tracked(suite))
     )
     missing: list[str] = []
     for stem, sources in collisions.items():
@@ -2609,9 +3072,7 @@ def test_same_name_source_routes_schedule_the_collision_guard_in_the_pr_lane(
     # The shared suite imports ONLY the first source module; the second source's
     # import edge is absent, which is exactly what the collision contract must
     # name.
-    (tmp_path / suite).write_text(
-        f"from {_dotted_module_name(first)} import MARKER\n", encoding="utf-8"
-    )
+    (tmp_path / suite).write_text(f"from {_dotted_module_name(first)} import MARKER\n", encoding="utf-8")
     # A dummy meta-guard target so _test_target_exists preserves the rider.
     (tmp_path / SELECTOR_META_GUARD_TEST).write_text("def test_probe(): pass\n", encoding="utf-8")
 
@@ -3039,6 +3500,7 @@ def test_conftest_auto_skip_derivation_reads_membership_tests_and_fails_loudly()
     with pytest.raises(AssertionError, match="derived no auto-skipped markers"):
         _conftest_auto_skip_markers(rewritten)
 
+
 # (module source path, dotted module, a known member of the derived importer
 # set). The third element is the anti-vacuity floor: a derivation that breaks
 # into silence — bad pathspec, AST regression, marker filter gone wide — must
@@ -3247,9 +3709,7 @@ def test_one_hop_extension_reaches_suites_no_direct_importer_scan_can_see() -> N
 
     assert REAL_BACKEND_ONE_HOP_MEMBER not in _non_gated_top_level_importer_tests(module)
     assert REAL_BACKEND_ONE_HOP_MEMBER in _one_hop_importer_tests(module)
-    assert REAL_BACKEND_ONE_HOP_MEMBER in select_tests(
-        ["services/slurm_gateway/real_backend.py"], repo_root=Path(".")
-    )
+    assert REAL_BACKEND_ONE_HOP_MEMBER in select_tests(["services/slurm_gateway/real_backend.py"], repo_root=Path("."))
 
 
 def test_guarded_module_rules_cover_their_non_gated_importer_closure() -> None:
@@ -3292,9 +3752,7 @@ def test_gated_display_coverage_importer_is_excluded_from_the_guarded_closure() 
     assert Path(DISPLAY_COVERAGE_GATED_IMPORTER).is_file()
     tree = _parse_tracked(DISPLAY_COVERAGE_GATED_IMPORTER)
 
-    assert "packages.common.display_coverage" in _top_level_imported_module_names(
-        DISPLAY_COVERAGE_GATED_IMPORTER, tree
-    )
+    assert "packages.common.display_coverage" in _top_level_imported_module_names(DISPLAY_COVERAGE_GATED_IMPORTER, tree)
     assert _file_level_gating_markers(tree) == {"integration"}
     assert DISPLAY_COVERAGE_GATED_IMPORTER not in _non_gated_top_level_importer_tests(
         "packages.common.display_coverage"
@@ -3485,13 +3943,10 @@ def test_changed_suite_selects_its_direct_non_gated_module_scope_importers(
 
     selected = set(select_tests([owner], repo_root=Path(".")))
 
-    assert selected == expected, (
-        f"{owner}: expected {len(expected)} targets, got {len(selected)}"
-        + (
-            f"; missing {sorted(expected - selected)}"
-            if expected - selected
-            else f"; unexpected {sorted(selected - expected)}"
-        )
+    assert selected == expected, f"{owner}: expected {len(expected)} targets, got {len(selected)}" + (
+        f"; missing {sorted(expected - selected)}"
+        if expected - selected
+        else f"; unexpected {sorted(selected - expected)}"
     )
 
 
@@ -3570,9 +4025,7 @@ def test_suite_importer_closure_is_derived_from_repo_root_not_cwd(
     owner = tmp_path / "tests" / "test_owner.py"
     owner.parent.mkdir(parents=True)
     owner.write_text("HELPER = 1\n", encoding="utf-8")
-    (tmp_path / "tests" / "test_importer_a.py").write_text(
-        "from tests.test_owner import HELPER\n", encoding="utf-8"
-    )
+    (tmp_path / "tests" / "test_importer_a.py").write_text("from tests.test_owner import HELPER\n", encoding="utf-8")
     (tmp_path / "tests" / "test_importer_b.py").write_text(
         "def test_b():\n    from tests.test_owner import HELPER\n    assert HELPER\n",
         encoding="utf-8",
@@ -3623,12 +4076,8 @@ def test_suite_importer_closure_is_direct_only_no_transitive(
     owner = tmp_path / "tests" / "test_owner.py"
     owner.parent.mkdir(parents=True)
     owner.write_text("HELPER = 1\n", encoding="utf-8")
-    (tmp_path / "tests" / "test_chain.py").write_text(
-        "from tests.test_owner import HELPER\n", encoding="utf-8"
-    )
-    (tmp_path / "tests" / "test_leaf.py").write_text(
-        "from tests.test_chain import HELPER\n", encoding="utf-8"
-    )
+    (tmp_path / "tests" / "test_chain.py").write_text("from tests.test_owner import HELPER\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_leaf.py").write_text("from tests.test_chain import HELPER\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
     selected = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
@@ -3660,9 +4109,7 @@ def test_suite_importer_closure_excludes_file_level_gated_importers(
         "@pytest.mark.integration\ndef test_marked():\n    assert HELPER\n",
         encoding="utf-8",
     )
-    (tmp_path / "tests" / "test_plain.py").write_text(
-        "from tests.test_owner import HELPER\n", encoding="utf-8"
-    )
+    (tmp_path / "tests" / "test_plain.py").write_text("from tests.test_owner import HELPER\n", encoding="utf-8")
 
     selected = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
 
@@ -3680,9 +4127,7 @@ def test_suite_importer_closure_ignores_nested_suite_paths(tmp_path: Path) -> No
     owner = tmp_path / "tests" / "pkg" / "test_owner.py"
     owner.parent.mkdir(parents=True)
     owner.write_text("HELPER = 1\n", encoding="utf-8")
-    (tmp_path / "tests" / "test_importer.py").write_text(
-        "from tests.pkg.test_owner import HELPER\n", encoding="utf-8"
-    )
+    (tmp_path / "tests" / "test_importer.py").write_text("from tests.pkg.test_owner import HELPER\n", encoding="utf-8")
 
     selected = select_tests(["tests/pkg/test_owner.py"], repo_root=tmp_path)
 
@@ -3753,10 +4198,13 @@ def test_suite_importer_closure_recursive_domain_sees_nested_suite_edges(
     # `_parse_tracked` resolves relative paths against the process cwd, so the
     # fixture tree must be cwd for the derivation to read it.
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("tests.test_select_ci_tests._tracked_python_files", lambda pathspec: [
-        "tests/pkg/test_owner.py",
-        "tests/pkg/nested/test_importer.py",
-    ])
+    monkeypatch.setattr(
+        "tests.test_select_ci_tests._tracked_python_files",
+        lambda pathspec: [
+            "tests/pkg/test_owner.py",
+            "tests/pkg/nested/test_importer.py",
+        ],
+    )
 
     required = _non_gated_top_level_importer_tests("tests.pkg.test_owner")
     assert required == {"tests/pkg/nested/test_importer.py"}
@@ -3828,11 +4276,7 @@ def test_changed_test_rule_activation_predicate_matches_production() -> None:
     owner = "tests/test_orchestration_chain.py"
     surface = "services/orchestrator/chain_types.py"
 
-    conditional = [
-        rule
-        for rule in CHANGED_TEST_FILE_RULES
-        if rule.pattern == owner and rule.only_when_any_changed
-    ]
+    conditional = [rule for rule in CHANGED_TEST_FILE_RULES if rule.pattern == owner and rule.only_when_any_changed]
     assert conditional, "expected at least one conditional rule for the chain owner"
 
     # Standalone: every conditional rule is inert (surface absent).
@@ -3841,20 +4285,17 @@ def test_changed_test_rule_activation_predicate_matches_production() -> None:
     # computation, per rule — chain_types.py activates the manifest rule but
     # not the file-journal rule, so `all(...)` would be the wrong claim.
     for rule in conditional:
-        matching_surface = any(
-            fnmatch.fnmatch(surface, pattern) for pattern in rule.only_when_any_changed
-        )
+        matching_surface = any(fnmatch.fnmatch(surface, pattern) for pattern in rule.only_when_any_changed)
         assert _prod_module._rule_activated(rule, owner, [owner, surface]) is matching_surface, (
             f"rule surface={rule.only_when_any_changed} activated "
             f"{_prod_module._rule_activated(rule, owner, [owner, surface])} but surface-match says {matching_surface}"
         )
-    assert any(
-        fnmatch.fnmatch(surface, pattern) for rule in conditional for pattern in rule.only_when_any_changed
-    ), "the surface used above must genuinely match at least one rule's only_when_any_changed patterns"
+    assert any(fnmatch.fnmatch(surface, pattern) for rule in conditional for pattern in rule.only_when_any_changed), (
+        "the surface used above must genuinely match at least one rule's only_when_any_changed patterns"
+    )
     # Non-matching surface: still inert.
     assert not any(
-        _prod_module._rule_activated(rule, owner, [owner, "services/orchestrator/other.py"])
-        for rule in conditional
+        _prod_module._rule_activated(rule, owner, [owner, "services/orchestrator/other.py"]) for rule in conditional
     )
 
     unconditional = [
@@ -4028,13 +4469,9 @@ def _suite_importer_closure_offenders(
             return importer_index.get(_dotted_module_name(owner), set())
     else:
         required_for = derived
-    select_for = (
-        (lambda owner: set(select_tests([owner], repo_root=Path(".")))) if select is None else select
-    )
+    select_for = (lambda owner: set(select_tests([owner], repo_root=Path(".")))) if select is None else select
     redirected_for = (
-        (lambda owner: bool(_changed_test_rule_redirects_for(owner, [owner])))
-        if redirects is None
-        else redirects
+        (lambda owner: bool(_changed_test_rule_redirects_for(owner, [owner]))) if redirects is None else redirects
     )
 
     offenders: list[str] = []
@@ -4123,9 +4560,7 @@ def test_synthetic_tree_new_module_scope_edge_changes_selection(
     before = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
     assert before == {"tests/test_owner.py", "tests/test_existing_importer.py"}
 
-    (tmp_path / "tests" / "test_new_importer.py").write_text(
-        "import tests.test_owner\n", encoding="utf-8"
-    )
+    (tmp_path / "tests" / "test_new_importer.py").write_text("import tests.test_owner\n", encoding="utf-8")
 
     after = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
     assert after == {"tests/test_owner.py", "tests/test_existing_importer.py", "tests/test_new_importer.py"}
@@ -4166,9 +4601,7 @@ def test_suite_importer_closure_reuses_parse_work_across_calls(
     owner = tmp_path / "tests" / "test_owner.py"
     owner.parent.mkdir(parents=True)
     owner.write_text("HELPER = 1\n", encoding="utf-8")
-    (tmp_path / "tests" / "test_importer.py").write_text(
-        "from tests.test_owner import HELPER\n", encoding="utf-8"
-    )
+    (tmp_path / "tests" / "test_importer.py").write_text("from tests.test_owner import HELPER\n", encoding="utf-8")
 
     monkeypatch.setattr(_prod, "_SUITE_IMPORTER_PARSE_STATS", {"parses": 0})
 
@@ -4178,9 +4611,7 @@ def test_suite_importer_closure_reuses_parse_work_across_calls(
 
     second = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
     assert second == first
-    assert _prod._SUITE_IMPORTER_PARSE_STATS["parses"] == parses_first, (
-        "unchanged tree re-parsed suites across calls"
-    )
+    assert _prod._SUITE_IMPORTER_PARSE_STATS["parses"] == parses_first, "unchanged tree re-parsed suites across calls"
 
 
 def test_suite_importer_closure_rewrite_to_module_scope_edge_is_observed(
@@ -4210,9 +4641,7 @@ def test_suite_importer_closure_rewrite_to_module_scope_edge_is_observed(
     _bump_stat(importer)
 
     after = set(select_tests(["tests/test_owner.py"], repo_root=tmp_path))
-    assert "tests/test_importer.py" in after, (
-        "rewrite to a module-scope edge was not discovered (stale cache?)"
-    )
+    assert "tests/test_importer.py" in after, "rewrite to a module-scope edge was not discovered (stale cache?)"
 
 
 def test_suite_importer_closure_not_parsed_for_redirect_selection(
@@ -4256,9 +4685,7 @@ def test_suite_importer_closure_malformed_only_fails_when_needed(
     # Production-only: no suite tree parse, no failure — the selection completes
     # (all rule targets are dropped as missing under this root; the point is the
     # malformed suite is never read, so the builder must never be called).
-    monkeypatch.setattr(
-        _prod, "_build_suite_importer_index", lambda _root: (_ for _ in ()).throw(AssertionError())
-    )
+    monkeypatch.setattr(_prod, "_build_suite_importer_index", lambda _root: (_ for _ in ()).throw(AssertionError()))
     assert select_tests(["services/slurm_gateway/gateway.py"], repo_root=tmp_path) == []
 
     # Ordinary changed suite: the closure is needed, the malformed suite is
@@ -4630,9 +5057,7 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
 
     # The known path lives under workers/**, so #1656 adds the write-site
     # invariant suite to the union too.
-    assert sorted(
-        set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH}
-    ) == selected
+    assert sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH}) == selected
 
 
 def test_fallback_rider_mutant_reds_the_exact_no_suite_fallback_pin(
@@ -4697,7 +5122,11 @@ def test_selector_state_matrix_rows_3_4_5_same_name_class_and_provenance(
     assert not Path(f"tests/test_{PurePosixPath(explicit).stem}.py").exists()
     explicit_sel = set(select_tests([explicit], repo_root=Path(".")))
     # #1656: scripts/** is a scanned invariant root.
-    assert explicit_sel == {"tests/test_readonly_db_validation.py", INVARIANT_SUITE_PATH}
+    assert explicit_sel == {
+        *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        *READONLY_DB_VALIDATION_TESTS,
+        INVARIANT_SUITE_PATH,
+    }
 
     # (b) Same-name class: ordinary suite (row 3) and a same-name suite that IS
     # a CORE_SMOKE member (row 4) both route; provenance — accepted derived —
@@ -4802,9 +5231,10 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
     # known lives under workers/** and auth_policy under packages/common/**,
     # so both #1656 invariant roots add the write-site suite (deduplicated).
     # #1684 EVID-01: auth_policy's focused matrix suite joins the accumulation.
-    assert sorted(
-        set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, AUTH_POLICY_TEST}
-    ) == selected
+    assert (
+        sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, AUTH_POLICY_TEST})
+        == selected
+    )
 
 
 def test_select_tests_ignores_docs_only_changes() -> None:
@@ -4904,9 +5334,7 @@ def test_config_or_lock_route_reds_when_a_required_leg_is_removed(
 
     selected = select_tests([changed_path], repo_root=Path("."))
 
-    assert not _route_contract(selected), (
-        f"{changed_path} route survived removing {removed_target}: {sorted(selected)}"
-    )
+    assert not _route_contract(selected), f"{changed_path} route survived removing {removed_target}: {sorted(selected)}"
 
 
 INTENTIONAL_DUPLICATE_PATTERNS = frozenset({"services/orchestrator/scheduler.py"})
@@ -4963,13 +5391,7 @@ def test_duplicate_pattern_guard_flags_an_unmerged_sibling_collision() -> None:
 def _unconditional_duplicate_rules(rules: Sequence[PathTestRule]) -> list[str]:
     """Duplicated patterns whose entries are not all `only_when_any_changed`."""
     duplicates = _duplicated_rule_patterns(rules)
-    return sorted(
-        {
-            rule.pattern
-            for rule in rules
-            if rule.pattern in duplicates and not rule.only_when_any_changed
-        }
-    )
+    return sorted({rule.pattern for rule in rules if rule.pattern in duplicates and not rule.only_when_any_changed})
 
 
 def test_changed_test_rule_duplicates_stay_out_of_the_guard_domain() -> None:
@@ -5165,11 +5587,7 @@ def _github_output_fields(tmp_path: Path, changed: Sequence[str], *, repo_root: 
         )
         == 0
     )
-    return dict(
-        line.split("=", 1)
-        for line in output_file.read_text(encoding="utf-8").splitlines()
-        if "=" in line
-    )
+    return dict(line.split("=", 1) for line in output_file.read_text(encoding="utf-8").splitlines() if "=" in line)
 
 
 def test_github_output_flags_the_deleted_test_file_meta_guard_collapse(tmp_path: Path) -> None:
@@ -5388,71 +5806,76 @@ TARGETED_GATE_IF_BLOCK = "needs.changes.outputs.backend == 'true' && github.even
 # this canonical fixture (or the finite test-owned variants below), never the
 # extracted workflow scalar.
 # ---------------------------------------------------------------------------
-AUDITED_TARGETED_RUN = "\n".join([
-    'if [ "${{ steps.targeted.outputs.count }}" != "0" ]; then',
-    '  python -c \'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); ' +
-    'print("Targeted test files:"); [print(f"  {test}") for test in tests]; subprocess.run(["pytest", ' +
-    '"-q", *tests], check=True)\'',
-    '  if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then',
-    '    if [ "${{ steps.targeted.outputs.meta_guard_only }}" = "true" ]; then',
-    '      echo "Selection collapsed to the selector meta-guard — also running collect-only smoke ' +
-    '(import/syntax across suite)"',
-    '      echo "::warning title=Unit Tests selection collapsed to the selector ' +
-    'meta-guard::select_ci_tests.py mapped this diff to tests/test_select_ci_tests.py alone (deleted ' +
-    'test file, tests/ support module, or a selector-development diff); that suite ran its assertions ' +
-    'and the full-tree collect-only smoke ran in addition (issue #1454)"',
-    '      {',
-    '        echo "## Unit Tests: selection collapsed to the selector meta-guard"',
-    '        echo ""',
-    '        echo "select_ci_tests.py mapped this PR diff to tests/test_select_ci_tests.py alone."',
-    '        echo "That suite ran its assertions; the full-tree collect-only smoke (import/syntax"',
-    '        echo "check across the whole suite) ran in addition, because a diff of this shape can"',
-    '        echo "break cross-test imports that the targeted run never touches."',
-    '      } >> "$GITHUB_STEP_SUMMARY"',
-    '    else',
-    '      echo "Selector-development diff — also running collect-only smoke (import/syntax across ' +
-    'suite)"',
-    '      echo "::warning title=Unit Tests selector-development diff::select_ci_tests.py or its suite ' +
-    'changed; the targeted selection ran its assertions and the full-tree collect-only smoke ran in ' +
-    'addition (issue #1454)"',
-    '      {',
-    '        echo "## Unit Tests: selector-development diff"',
-    '        echo ""',
-    '        echo "select_ci_tests.py or tests/test_select_ci_tests.py changed; the targeted selection"',
-    '        echo "ran its assertions and the full-tree collect-only smoke (import/syntax check across"',
-    '        echo "the whole suite) ran in addition, because a diff of this shape can break cross-test"',
-    '        echo "imports that the targeted run never touches."',
-    '      } >> "$GITHUB_STEP_SUMMARY"',
-    '    fi',
-    '    # Redirect, never pipe: see the count == 0 branch below.',
-    '    if pytest tests/ -q --collect-only > collect-only.log 2>&1; then',
-    '      tail -n 5 collect-only.log',
-    '    else',
-    '      cat collect-only.log',
-    '      exit 1',
-    '    fi',
-    '  fi',
-    'else',
-    '  echo "No backend test files selected — running collect-only smoke (import/syntax across suite)"',
-    '  echo "::warning title=Unit Tests executed 0 assertions::select_ci_tests.py mapped no test files ' +
-    'for this diff; collect-only smoke verifies imports/syntax only (issue #1182)"',
-    '  {',
-    '    echo "## Unit Tests: collect-only smoke (0 assertions executed)"',
-    '    echo ""',
-    '    echo "select_ci_tests.py selected no backend test files for this PR diff."',
-    '    echo "The suite was only collected (import/syntax check); no test assertions ran."',
-    '  } >> "$GITHUB_STEP_SUMMARY"',
-    '  # Redirect, never pipe: `bash -e` runs without pipefail, so piping',
-    "  # pytest into tail would report the tail's exit code and turn a",
-    '  # collection failure green. Collection output is ~12k lines.',
-    '  if pytest tests/ -q --collect-only > collect-only.log 2>&1; then',
-    '    tail -n 5 collect-only.log',
-    '  else',
-    '    cat collect-only.log',
-    '    exit 1',
-    '  fi',
-    'fi',
-]) + "\n"
+AUDITED_TARGETED_RUN = (
+    "\n".join(
+        [
+            'if [ "${{ steps.targeted.outputs.count }}" != "0" ]; then',
+            '  python -c \'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); '
+            + 'print("Targeted test files:"); [print(f"  {test}") for test in tests]; subprocess.run(["pytest", '
+            + '"-q", *tests], check=True)\'',
+            '  if [ "${{ steps.targeted.outputs.collection_smoke_required }}" = "true" ]; then',
+            '    if [ "${{ steps.targeted.outputs.meta_guard_only }}" = "true" ]; then',
+            '      echo "Selection collapsed to the selector meta-guard — also running collect-only smoke '
+            + '(import/syntax across suite)"',
+            '      echo "::warning title=Unit Tests selection collapsed to the selector '
+            + "meta-guard::select_ci_tests.py mapped this diff to tests/test_select_ci_tests.py alone (deleted "
+            + "test file, tests/ support module, or a selector-development diff); that suite ran its assertions "
+            + 'and the full-tree collect-only smoke ran in addition (issue #1454)"',
+            "      {",
+            '        echo "## Unit Tests: selection collapsed to the selector meta-guard"',
+            '        echo ""',
+            '        echo "select_ci_tests.py mapped this PR diff to tests/test_select_ci_tests.py alone."',
+            '        echo "That suite ran its assertions; the full-tree collect-only smoke (import/syntax"',
+            '        echo "check across the whole suite) ran in addition, because a diff of this shape can"',
+            '        echo "break cross-test imports that the targeted run never touches."',
+            '      } >> "$GITHUB_STEP_SUMMARY"',
+            "    else",
+            '      echo "Selector-development diff — also running collect-only smoke (import/syntax across '
+            + 'suite)"',
+            '      echo "::warning title=Unit Tests selector-development diff::select_ci_tests.py or its suite '
+            + "changed; the targeted selection ran its assertions and the full-tree collect-only smoke ran in "
+            + 'addition (issue #1454)"',
+            "      {",
+            '        echo "## Unit Tests: selector-development diff"',
+            '        echo ""',
+            '        echo "select_ci_tests.py or tests/test_select_ci_tests.py changed; the targeted selection"',
+            '        echo "ran its assertions and the full-tree collect-only smoke (import/syntax check across"',
+            '        echo "the whole suite) ran in addition, because a diff of this shape can break cross-test"',
+            '        echo "imports that the targeted run never touches."',
+            '      } >> "$GITHUB_STEP_SUMMARY"',
+            "    fi",
+            "    # Redirect, never pipe: see the count == 0 branch below.",
+            "    if pytest tests/ -q --collect-only > collect-only.log 2>&1; then",
+            "      tail -n 5 collect-only.log",
+            "    else",
+            "      cat collect-only.log",
+            "      exit 1",
+            "    fi",
+            "  fi",
+            "else",
+            '  echo "No backend test files selected — running collect-only smoke (import/syntax across suite)"',
+            '  echo "::warning title=Unit Tests executed 0 assertions::select_ci_tests.py mapped no test files '
+            + 'for this diff; collect-only smoke verifies imports/syntax only (issue #1182)"',
+            "  {",
+            '    echo "## Unit Tests: collect-only smoke (0 assertions executed)"',
+            '    echo ""',
+            '    echo "select_ci_tests.py selected no backend test files for this PR diff."',
+            '    echo "The suite was only collected (import/syntax check); no test assertions ran."',
+            '  } >> "$GITHUB_STEP_SUMMARY"',
+            "  # Redirect, never pipe: `bash -e` runs without pipefail, so piping",
+            "  # pytest into tail would report the tail's exit code and turn a",
+            "  # collection failure green. Collection output is ~12k lines.",
+            "  if pytest tests/ -q --collect-only > collect-only.log 2>&1; then",
+            "    tail -n 5 collect-only.log",
+            "  else",
+            "    cat collect-only.log",
+            "    exit 1",
+            "  fi",
+            "fi",
+        ]
+    )
+    + "\n"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -5579,11 +6002,9 @@ _TRUSTED_COLLECTION_VARIANTS: dict[str, Callable[[str], str]] = {
         "if pytest tests/ -q --collect-only > collect-only.log 2>&1; then\n"
         "      tail -n 5 collect-only.log\n"
         "    else\n"
-        "      "
-        + "python -c 'import json, os, subprocess; tests = json.loads(os.environ[\"TARGETED_TESTS_JSON\"]); "
+        "      " + 'python -c \'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); '
         'print("Targeted test files:"); [print(f"  {test}") for test in tests]; '
-        'subprocess.run(["pytest", "-q", *tests], check=True)\''
-        + "\n"
+        'subprocess.run(["pytest", "-q", *tests], check=True)\'' + "\n"
         "      cat collect-only.log\n"
         "      exit 1\n"
         "    fi",
@@ -5603,13 +6024,66 @@ _TRUSTED_COLLECTION_VARIANTS: dict[str, Callable[[str], str]] = {
     # executable; must be command-not-found (status 127) in the closed PATH.
     "ambient_command": lambda run: "if true; then\n  unique_ambient_marker_xyz\nfi",
     # Controlled descendant cleanup on TIMEOUT — starts a background child,
-    # records its PID, then stays alive forever so the probe times out and the
-    # new process group (including the child) must be killed.
+    # closes its PID record, then publishes readiness before its long sleep.
+    # The process group (including the child) must be killed on timeout.
     "descendant_timeout": lambda run: (
-        "python -c 'import subprocess, os; "
-        'p = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"]); '
-        'open(os.environ["CI_PROBE_DESCENDANT_PID"],"w").write(str(p.pid))\'\n'
-        "python -c 'import time; time.sleep(300)'\n"
+        "python - <<'PY'\n"
+        "import os\n"
+        "import subprocess\n"
+        "import time\n"
+        'child = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"])\n'
+        'with open(os.environ["CI_PROBE_DESCENDANT_PID"], "w", encoding="utf-8") as pid_file:\n'
+        "    pid_file.write(str(child.pid))\n"
+        'ready_path = os.environ["CI_PROBE_DESCENDANT_READY"]\n'
+        'with open(ready_path + ".tmp", "w", encoding="utf-8") as ready_file:\n'
+        '    ready_file.write("ready")\n'
+        'os.replace(ready_path + ".tmp", ready_path)\n'
+        "time.sleep(300)\n"
+        "PY\n"
+    ),
+    # The deterministic readiness-clock regression delays the sentinel longer
+    # than its caller's business timeout. The delay is before readiness; the
+    # long sleep is only entered after both context-managed files are closed.
+    "descendant_delayed_ready_timeout": lambda run: (
+        "python - <<'PY'\n"
+        "import os\n"
+        "import subprocess\n"
+        "import time\n"
+        'child = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"])\n'
+        'with open(os.environ["CI_PROBE_DESCENDANT_PID"], "w", encoding="utf-8") as pid_file:\n'
+        "    pid_file.write(str(child.pid))\n"
+        "time.sleep(0.25)\n"
+        'ready_path = os.environ["CI_PROBE_DESCENDANT_READY"]\n'
+        'with open(ready_path + ".tmp", "w", encoding="utf-8") as ready_file:\n'
+        '    ready_file.write("ready")\n'
+        'os.replace(ready_path + ".tmp", ready_path)\n'
+        "time.sleep(300)\n"
+        "PY\n"
+    ),
+    # The child record is published but the ready sentinel never is, so the
+    # finite startup-deadline path must clean the whole process group.
+    "descendant_never_ready": lambda run: (
+        "python - <<'PY'\n"
+        "import os\n"
+        "import subprocess\n"
+        "import time\n"
+        'child = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"])\n'
+        'with open(os.environ["CI_PROBE_DESCENDANT_PID"], "w", encoding="utf-8") as pid_file:\n'
+        "    pid_file.write(str(child.pid))\n"
+        "time.sleep(300)\n"
+        "PY\n"
+    ),
+    # A parent that exits after recording its child but before readiness must
+    # produce a startup failure, then still have its process group cleaned.
+    "descendant_premature_exit": lambda run: (
+        "python - <<'PY'\n"
+        "import os\n"
+        "import subprocess\n"
+        'child = subprocess.Popen(["python", "-c", "import time; time.sleep(300)"])\n'
+        'with open(os.environ["CI_PROBE_DESCENDANT_PID"], "w", encoding="utf-8") as pid_file:\n'
+        "    pid_file.write(str(child.pid))\n"
+        "PY\n"
+        "exit 0\n"
     ),
     # Controlled descendant cleanup on SUCCESS — starts a background child with
     # its stdio detached (so the probe's pipe EOF resolves when the parent
@@ -5628,7 +6102,7 @@ _TRUSTED_COLLECTION_VARIANTS: dict[str, Callable[[str], str]] = {
 def _reorder_trusted_variant(run: str) -> str:
     """A2 trusted variant: comment the targeted line and move it after the branch."""
     python_line = (
-        "  python -c 'import json, os, subprocess; tests = json.loads(os.environ[\"TARGETED_TESTS_JSON\"]); "
+        '  python -c \'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); '
         'print("Targeted test files:"); [print(f"  {test}") for test in tests]; '
         'subprocess.run(["pytest", "-q", *tests], check=True)\''
     )
@@ -5637,6 +6111,7 @@ def _reorder_trusted_variant(run: str) -> str:
     commented = run.replace(python_line, "# " + python_line.strip(), 1)
     insert_at = commented.index("\n  else\n", branch_start)
     return commented[:insert_at] + "\n" + python_line + commented[insert_at:]
+
 
 # The stub's unique full-tree-collection failure sentinel. The scoped failure
 # path must `cat collect-only.log` so this sentinel lands in the captured step
@@ -5647,6 +6122,31 @@ COLLECTION_FAILURE_SENTINEL = "collect-only failure sentinel"
 # so the child's closed PATH cannot break the launcher). Also the shebang for
 # the stub executables, so they never depend on an ambient PATH lookup.
 _PROBE_BASH = "/bin/bash"
+
+# Only these closed, test-owned fixtures have an explicit descendant readiness
+# protocol. Keeping the set narrow ensures no workflow-derived payload can ask
+# the probe to wait on an arbitrary file or execute an arbitrary startup shape.
+_PROBE_READY_VARIANTS = frozenset(
+    {
+        "descendant_timeout",
+        "descendant_delayed_ready_timeout",
+        "descendant_never_ready",
+        "descendant_premature_exit",
+    }
+)
+
+# A fixture startup budget is deliberately independent of the caller's business
+# timeout: the latter begins only after a readiness sentinel exists. Polling is
+# short and bounded; no thread, async loop, or external dependency is needed.
+_PROBE_STARTUP_TIMEOUT = 5.0
+_PROBE_READY_POLL_INTERVAL = 0.01
+
+# Stable status/message for a trusted readiness fixture that exits before ready
+# or exceeds its finite startup budget. This remains distinct from business
+# timeout 124 and bounded-drain cleanup failure 125.
+_PROBE_STARTUP_FAILURE_STATUS = 126
+_PROBE_STARTUP_DEADLINE_MESSAGE = "probe startup failed: descendant readiness deadline expired"
+_PROBE_STARTUP_EXIT_MESSAGE = "probe startup failed: process exited before descendant readiness"
 
 # Bounded post-timeout drain (Phase 6.2 P1 round-2): every `communicate` call
 # after a timeout must carry a SHORT FINITE timeout so a child that ignores
@@ -5672,8 +6172,7 @@ _COLLECTION_SELECTOR_DEV_LABEL = (
     "Selector-development diff — also running collect-only smoke (import/syntax across suite)"
 )
 _COLLECTION_META_GUARD_LABEL = (
-    "Selection collapsed to the selector meta-guard — also running collect-only smoke "
-    "(import/syntax across suite)"
+    "Selection collapsed to the selector meta-guard — also running collect-only smoke (import/syntax across suite)"
 )
 
 
@@ -5707,7 +6206,7 @@ def _probe_events_from_file(events_file: Path) -> list[tuple[str, tuple[str, ...
         if line == "collect-only failure":
             events.append(("collect-only failure", ()))
         elif line.startswith("pytest argv:"):
-            events.append(("pytest", tuple(line[len("pytest argv:"):].strip().split())))
+            events.append(("pytest", tuple(line[len("pytest argv:") :].strip().split())))
     return events
 
 
@@ -5729,6 +6228,29 @@ def _probe_descendant_pid_gone(pid: int, *, deadline: float) -> bool:
             return False
         time.sleep(0.05)
     return False
+
+
+def _wait_for_probe_ready(
+    proc: subprocess.Popen,
+    ready_file: Path,
+    *,
+    deadline: float,
+) -> str | None:
+    """Wait boundedly for a trusted fixture readiness sentinel.
+
+    Returns ``None`` only after the sentinel exists. A parent exit or finite
+    deadline expiry returns its stable observable message; the caller owns the
+    shared process-group cleanup so startup failure uses the same bounded drain
+    mechanism as a business timeout.
+    """
+    while True:
+        if ready_file.is_file():
+            return None
+        if proc.poll() is not None:
+            return _PROBE_STARTUP_EXIT_MESSAGE
+        if time.monotonic() >= deadline:
+            return _PROBE_STARTUP_DEADLINE_MESSAGE
+        time.sleep(_PROBE_READY_POLL_INTERVAL)
 
 
 def _run_probe_script(
@@ -5759,17 +6281,22 @@ def _run_probe_script(
     failure sentinel), ``cat`` and ``tail`` (safe single-argument readers).
     Bash runs with GitHub's failure policy (``-e -o pipefail``).
 
-    The child runs in a NEW PROCESS GROUP (``start_new_session=True``). On
-    timeout the ENTIRE group is killed (immediately with SIGKILL — the trusted
-    test-owned fixtures need no graceful shutdown) and drained with a SHORT
-    FINITE ``_PROBE_DRAIN_TIMEOUT``; if a drain still cannot finish after a
-    second group kill plus a direct-child fallback, the probe returns a stable
-    named cleanup-failure status (``_PROBE_CLEANUP_FAILURE_STATUS``) instead of
-    blocking forever. A ``finally`` path kills any remaining group descendants
-    on success, error, AND timeout, so a background child can never outlive the
-    probe. Only ``ProcessLookupError`` (group already gone) is ignored; no other
-    cleanup failure is masked. The parent test runner's process group is never
-    touched.
+    The child runs in a NEW PROCESS GROUP (``start_new_session=True``). The
+    closed descendant-readiness fixtures first receive a separate finite startup
+    budget; their caller business timeout begins only after the atomically
+    published readiness sentinel exists. Premature exit or startup-deadline
+    expiry returns the named status ``_PROBE_STARTUP_FAILURE_STATUS`` (126),
+    after the same bounded group cleanup. A business timeout still returns 124.
+    On either timeout the ENTIRE group is killed (immediately with SIGKILL — the
+    trusted test-owned fixtures need no graceful shutdown) and drained with a
+    SHORT FINITE ``_PROBE_DRAIN_TIMEOUT``; if a drain still cannot finish after
+    a second group kill plus a direct-child fallback, the probe returns stable
+    cleanup-failure status ``_PROBE_CLEANUP_FAILURE_STATUS`` (125) instead of
+    blocking forever. The bounded helper owns group cleanup on startup failure
+    and timeout; the outer ``finally`` cleans success and other non-delegated
+    exits, so a background child can never outlive the probe. Only
+    ``ProcessLookupError`` (group already gone) is ignored; no other cleanup
+    failure is masked. The parent test runner's process group is never touched.
     """
     if trusted_variant not in _TRUSTED_COLLECTION_VARIANTS:
         raise ValueError(f"unknown trusted collection variant: {trusted_variant}")
@@ -5777,18 +6304,14 @@ def _run_probe_script(
     runnable = _substitute_collection_expressions(runnable, count, smoke, meta)
 
     fail_collect = (
-        f'  echo "{COLLECTION_FAILURE_SENTINEL}"\n'
-        '  echo "collect-only failure" >> "$CI_PROBE_EVENTS"\n'
-        "  exit 1\n"
+        f'  echo "{COLLECTION_FAILURE_SENTINEL}"\n  echo "collect-only failure" >> "$CI_PROBE_EVENTS"\n  exit 1\n'
     )
     stub = (
         "#!/bin/bash\n"
-        "echo \"pytest argv: $*\" >> \"$CI_PROBE_EVENTS\"\n"
-        "if [[ \"$*\" == *\"--collect-only\"* ]]; then\n"
+        'echo "pytest argv: $*" >> "$CI_PROBE_EVENTS"\n'
+        'if [[ "$*" == *"--collect-only"* ]]; then\n'
         '  echo "collect-only run"\n'
-        '  echo "= 0 tests collected in 0.00s ="\n'
-        + (fail_collect if collect_fails else "  exit 0\n")
-        + "fi\n"
+        '  echo "= 0 tests collected in 0.00s ="\n' + (fail_collect if collect_fails else "  exit 0\n") + "fi\n"
         'echo "targeted run"\n'
         'echo "1 passed in 0.01s"\n'
         "exit 0\n"
@@ -5827,12 +6350,14 @@ def _run_probe_script(
     events_file = tmp / "events"
     summary_file = tmp / "summary.md"
     descendant_pid_file = tmp / "descendant.pid"
+    descendant_ready_file = tmp / "descendant.ready"
     script = tmp / "probe.sh"
     script.write_text(runnable, encoding="utf-8")
     env = {
         "PATH": str(tmp / "bin"),
         "CI_PROBE_EVENTS": str(events_file),
         "CI_PROBE_DESCENDANT_PID": str(descendant_pid_file),
+        "CI_PROBE_DESCENDANT_READY": str(descendant_ready_file),
         "GITHUB_STEP_SUMMARY": str(summary_file),
         "TARGETED_TESTS_JSON": '["tests/test_a.py"]',
     }
@@ -5845,26 +6370,53 @@ def _run_probe_script(
         start_new_session=True,
     )
     status = 0
+    stdout: bytes | str | None = b""
+    stderr: bytes | str | None = b""
+    group_cleanup_taken_over = False
     try:
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-            status = proc.returncode
-        except subprocess.TimeoutExpired:
-            # Kill the ENTIRE new process group and drain with a bounded,
-            # finite timeout on EVERY drain call. A child that ignores
-            # termination can never block the probe: after a second group kill
-            # plus a direct-child kill fallback, an undrainable group returns a
-            # stable named cleanup-failure status (never an unbounded wait).
-            stdout, stderr, status = _kill_probe_group_and_drain(proc, timeout=timeout)
+        startup_message = None
+        if trusted_variant in _PROBE_READY_VARIANTS:
+            startup_message = _wait_for_probe_ready(
+                proc,
+                descendant_ready_file,
+                deadline=time.monotonic() + _PROBE_STARTUP_TIMEOUT,
+            )
+        if startup_message is not None:
+            # Startup failure uses the exact same whole-group bounded cleanup as
+            # a business timeout, but returns a distinct observable status and
+            # message so callers never confuse it with status 124 or 125.
+            group_cleanup_taken_over = True
+            stdout, stderr, cleanup_status = _kill_probe_group_and_drain(proc, timeout=timeout)
+            status = (
+                _PROBE_CLEANUP_FAILURE_STATUS
+                if cleanup_status == _PROBE_CLEANUP_FAILURE_STATUS
+                else _PROBE_STARTUP_FAILURE_STATUS
+            )
+            stderr = _probe_decode(stderr) + startup_message + "\n"
+        else:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+                status = proc.returncode
+            except subprocess.TimeoutExpired:
+                # Kill the ENTIRE new process group and drain with a bounded,
+                # finite timeout on EVERY drain call. A child that ignores
+                # termination can never block the probe: after a second group
+                # kill plus a direct-child kill fallback, an undrainable group
+                # returns a stable named cleanup-failure status (never an
+                # unbounded wait).
+                group_cleanup_taken_over = True
+                stdout, stderr, status = _kill_probe_group_and_drain(proc, timeout=timeout)
     finally:
-        # On EVERY exit (success, error, timeout) terminate any background
-        # descendants still alive in the new process group. Ignore only
+        # On every path that did not delegate group cleanup to the bounded
+        # helper, terminate remaining background descendants. Once delegated,
+        # a stale numeric PGID must never be signalled again. Ignore only
         # ProcessLookupError (the group is already gone); do not silently mask
         # other cleanup failures.
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        if not group_cleanup_taken_over:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     events = _probe_events_from_file(events_file)
     summary = summary_file.read_text(encoding="utf-8") if summary_file.is_file() else ""
     return events, _probe_decode(stdout), _probe_decode(stderr), summary, status
@@ -5900,6 +6452,7 @@ def _kill_probe_group_and_drain(
 
     The caller's ``finally`` still SIGKILLs the group on every exit.
     """
+
     def _bounded_communicate() -> tuple[bytes | str | None, bytes | str | None] | None:
         # Bounded drain: never pass timeout=None.
         return proc.communicate(timeout=_PROBE_DRAIN_TIMEOUT)
@@ -5940,8 +6493,9 @@ def _probe_collection_consumer(
 
     Thin wrapper over ``_run_probe_script`` in a fresh temporary working
     directory. Accepts only a trusted variant NAME. Output is always ``str``
-    (bytes decoded with replacement); a timeout is a status-124 result, never a
-    crash. See ``_run_probe_script``.
+    (bytes decoded with replacement); a business timeout is status 124 and a
+    trusted fixture startup failure is status 126, never a crash. See
+    ``_run_probe_script``.
     """
     with tempfile.TemporaryDirectory() as td:
         return _run_probe_script(
@@ -6001,9 +6555,7 @@ def _run_scalar_violations(trusted_variant: str) -> list[str]:
         # All three known expressions must exist for substitution; a variant
         # that drops or renames one cannot run the branch on the canonical
         # condition.
-        violations.append(
-            f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`"
-        )
+        violations.append(f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`")
         return violations
 
     def probe(count: str, smoke: str, meta: str, *, collect_fails: bool):
@@ -6018,37 +6570,29 @@ def _run_scalar_violations(trusted_variant: str) -> list[str]:
     c0_events, _, _, _, c0_status = probe("1", "false", "false", collect_fails=False)
     c0_pytest = pytest_events(c0_events)
     if c0_pytest != (TARGETED_ARGV,) or c0_status != 0:
-        violations.append(
-            f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`"
-        )
+        violations.append(f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`")
 
     # C1 — smoke=true, meta=false, success.
-    c1_events, c1_output, c1_stderr, c1_summary, c1_status = probe(
-        "1", "true", "false", collect_fails=False
-    )
+    c1_events, c1_output, c1_stderr, c1_summary, c1_status = probe("1", "true", "false", collect_fails=False)
     c1_pytest = pytest_events(c1_events)
     c1_combined = c1_output + "\n" + c1_stderr + "\n" + c1_summary
 
     # C2 — smoke=true, meta=true, success.
-    c2_events, c2_output, c2_stderr, c2_summary, c2_status = probe(
-        "1", "true", "true", collect_fails=False
-    )
+    c2_events, c2_output, c2_stderr, c2_summary, c2_status = probe("1", "true", "true", collect_fails=False)
     c2_pytest = pytest_events(c2_events)
     c2_combined = c2_output + "\n" + c2_stderr + "\n" + c2_summary
 
     # A5 — C3 must fail closed: emitted log AND nonzero status. Probed here so
     # the A1 gate check below can require C3 to collect.
-    c3_events, c3_output, c3_stderr, c3_summary, c3_status = probe(
-        "1", "true", "false", collect_fails=True
-    )
+    c3_events, c3_output, c3_stderr, c3_summary, c3_status = probe("1", "true", "false", collect_fails=True)
     c3_pytest = pytest_events(c3_events)
     c3_combined = c3_output + "\n" + c3_stderr + "\n" + c3_summary
 
-    # A timeout (124) OR an undrainable cleanup failure (125) means the probe
-    # did not complete; both are stable named violations, never an unbounded
-    # wait or a crash.
+    # A business timeout (124), startup failure (126), or undrainable cleanup
+    # failure (125) means the probe did not complete; each is a stable named
+    # violation, never an unbounded wait or a crash.
     if any(
-        status == 124 or status == _PROBE_CLEANUP_FAILURE_STATUS
+        status in (124, _PROBE_CLEANUP_FAILURE_STATUS, _PROBE_STARTUP_FAILURE_STATUS)
         for status in (c0_status, c1_status, c2_status, c3_status)
     ):
         violations.append("collection-consumer probe must complete")
@@ -6057,9 +6601,7 @@ def _run_scalar_violations(trusted_variant: str) -> list[str]:
     # while C1/C3 MUST. A comment/dead/always-true/inverted condition cannot
     # run the branch on `collection_smoke_required == true`.
     if c1_pytest != (TARGETED_ARGV, COLLECT_ARGV) or c3_pytest != (TARGETED_ARGV, COLLECT_ARGV):
-        violations.append(
-            f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`"
-        )
+        violations.append(f"collection branch must run on `{COLLECTION_SMOKE_KEY} == true`")
 
     # A2 — ordering/exactness: the EXACT sequence targeted-then-collect in C1,
     # C2 and C3. Any extra/missing/reordered pytest execution is a violation.
@@ -6071,11 +6613,7 @@ def _run_scalar_violations(trusted_variant: str) -> list[str]:
         violations.append("targeted pytest must run before the collection-smoke branch")
 
     # A3 — the exact full-tree collect invocation must execute in C1 and C2.
-    if (
-        COLLECT_ARGV not in c1_pytest
-        or COLLECT_ARGV not in c2_pytest
-        or COLLECT_ARGV not in c3_pytest
-    ):
+    if COLLECT_ARGV not in c1_pytest or COLLECT_ARGV not in c2_pytest or COLLECT_ARGV not in c3_pytest:
         violations.append("collection branch must run `pytest tests/ -q --collect-only` inside it")
 
     # A4 — C1/C2 combined stdout+stderr+summary must not claim zero assertions.
@@ -6134,13 +6672,9 @@ def _targeted_step_and_job(workflow_text: str) -> tuple[dict | None, dict | None
         return None, None, ["targeted job must declare a steps list"]
     named = [s for s in steps if isinstance(s, dict) and s.get("name") == TARGETED_COMMAND_STEP_NAME]
     if not named:
-        return None, None, [
-            f"targeted job must have a step named `{TARGETED_COMMAND_STEP_NAME}` with a run command"
-        ]
+        return None, None, [f"targeted job must have a step named `{TARGETED_COMMAND_STEP_NAME}` with a run command"]
     if len(named) > 1:
-        return None, None, [
-            f"targeted job must have exactly one step named `{TARGETED_COMMAND_STEP_NAME}`"
-        ]
+        return None, None, [f"targeted job must have exactly one step named `{TARGETED_COMMAND_STEP_NAME}`"]
     return named[0], job, []
 
 
@@ -6185,10 +6719,7 @@ def _targeted_metadata_violations(workflow_text: str) -> list[str]:
     if not isinstance(gate, str):
         violations.append("unit-test-targeted job must declare an `if` event gate block")
     elif _normalize_ws(gate) != _normalize_ws(TARGETED_GATE_IF_BLOCK):
-        violations.append(
-            "unit-test-targeted job gate must be exactly "
-            "backend == 'true' && pull_request"
-        )
+        violations.append("unit-test-targeted job gate must be exactly backend == 'true' && pull_request")
 
     if job.get("runs-on") != TARGETED_RUNS_ON:
         violations.append("unit-test-targeted job must run on ubuntu-latest")
@@ -6197,14 +6728,11 @@ def _targeted_metadata_violations(workflow_text: str) -> list[str]:
 
     run = step.get("run")
     if not isinstance(run, str) or not run.strip():
-        violations.append(
-            f"targeted job step `{TARGETED_COMMAND_STEP_NAME}` must carry a non-empty run command"
-        )
+        violations.append(f"targeted job step `{TARGETED_COMMAND_STEP_NAME}` must carry a non-empty run command")
 
     if step.get("env") != TARGETED_STEP_ENV_EXPECTED:
         violations.append(
-            "targeted step env must be exactly "
-            "{TARGETED_TESTS_JSON: ${{ steps.targeted.outputs.tests_json }}}"
+            "targeted step env must be exactly {TARGETED_TESTS_JSON: ${{ steps.targeted.outputs.tests_json }}}"
         )
 
     if step.get("if") is not None:
@@ -6212,13 +6740,9 @@ def _targeted_metadata_violations(workflow_text: str) -> list[str]:
 
     for scope, value in (("step", step.get("continue-on-error")), ("job", job.get("continue-on-error"))):
         if value is True:
-            violations.append(
-                f"targeted {scope} `continue-on-error` must not be enabled"
-            )
+            violations.append(f"targeted {scope} `continue-on-error` must not be enabled")
         elif value is not None and value is not False:
-            violations.append(
-                f"targeted {scope} `continue-on-error` must be absent or exactly false"
-            )
+            violations.append(f"targeted {scope} `continue-on-error` must be absent or exactly false")
 
     if step.get("shell") is not None:
         violations.append("targeted step must not override the default shell")
@@ -6275,9 +6799,7 @@ def _targeted_identity_violations(workflow_text: str) -> list[str]:
     return []
 
 
-def _collection_consumer_violations(
-    workflow_text: str, *, trusted_variant: str = "live"
-) -> list[str]:
+def _collection_consumer_violations(workflow_text: str, *, trusted_variant: str = "live") -> list[str]:
     """Positive oracle owning ALL FIVE load-bearing predicates (row A).
 
     Accepts the FULL workflow source text and validates:
@@ -6348,9 +6870,7 @@ def test_collection_consumer_reds_when_the_condition_key_is_renamed() -> None:
     # trusted variant reports the exact A1 condition violation.
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
     targeted_job, _ = _job_block_and_collection(_targeted_job_block(workflow))
-    renamed_marker = COLLECTION_SMOKE_MARKER.replace(
-        "collection_smoke_required", "renamed_smoke_required"
-    )
+    renamed_marker = COLLECTION_SMOKE_MARKER.replace("collection_smoke_required", "renamed_smoke_required")
     mutated_block = targeted_job.replace(COLLECTION_SMOKE_MARKER, renamed_marker)
     assert "renamed_smoke_required" in mutated_block
     assert COLLECTION_SMOKE_MARKER not in mutated_block
@@ -6360,12 +6880,8 @@ def test_collection_consumer_reds_when_the_condition_key_is_renamed() -> None:
     # helper reports the exact A1 condition violation.
     violations = _collection_consumer_violations(mutated_workflow, trusted_variant="condition_dead")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
-    assert f"{COLLECTION_SMOKE_KEY} == true" in joined, (
-        f"expected a named A1 condition violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
+    assert f"{COLLECTION_SMOKE_KEY} == true" in joined, f"expected a named A1 condition violation, got {violations}"
 
 
 def test_collection_consumer_reds_when_the_condition_true_sense_is_inverted() -> None:
@@ -6384,12 +6900,8 @@ def test_collection_consumer_reds_when_the_condition_true_sense_is_inverted() ->
     # collect predicate is violated and named as the A1 condition violation.
     violations = _collection_consumer_violations(mutated_workflow, trusted_variant="condition_dead")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
-    assert f"{COLLECTION_SMOKE_KEY} == true" in joined, (
-        f"expected a named A1 condition violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
+    assert f"{COLLECTION_SMOKE_KEY} == true" in joined, f"expected a named A1 condition violation, got {violations}"
 
 
 def test_collection_consumer_reds_when_the_collection_branch_moves_before_targeted_pytest() -> None:
@@ -6411,9 +6923,7 @@ def test_collection_consumer_reds_when_the_collection_branch_moves_before_target
     assert targeted_job.count(complete_branch) == 1, "outer branch not uniquely locatable"
 
     python_line = next(
-        line
-        for line in targeted_job.splitlines()
-        if 'subprocess.run(["pytest", "-q", *tests], check=True)' in line
+        line for line in targeted_job.splitlines() if 'subprocess.run(["pytest", "-q", *tests], check=True)' in line
     )
     assert targeted_job.count(python_line + "\n") == 1, "targeted python line not uniquely locatable"
 
@@ -6423,17 +6933,14 @@ def test_collection_consumer_reds_when_the_collection_branch_moves_before_target
     branch_idx = without.find(complete_branch)
     assert branch_idx != -1, "complete outer branch vanished after removing the targeted line"
     mutated = (
-        without[: branch_idx + len(complete_branch)]
-        + "\n"
-        + python_line
-        + without[branch_idx + len(complete_branch) :]
+        without[: branch_idx + len(complete_branch)] + "\n" + python_line + without[branch_idx + len(complete_branch) :]
     )
     # Sanity: both units appear exactly once and their order is reversed.
     assert mutated.count(complete_branch) == 1
     assert mutated.count(python_line) == 1
-    assert mutated.find(complete_branch) < mutated.find(
-        'subprocess.run(["pytest", "-q", *tests], check=True)'
-    ), "collection branch must now run before the targeted pytest line"
+    assert mutated.find(complete_branch) < mutated.find('subprocess.run(["pytest", "-q", *tests], check=True)'), (
+        "collection branch must now run before the targeted pytest line"
+    )
 
     # Valid YAML sanity: the mutated full workflow parses and the named step
     # still carries a run scalar.
@@ -6441,9 +6948,7 @@ def test_collection_consumer_reds_when_the_collection_branch_moves_before_target
     mutated_workflow = full_workflow.replace(targeted_job, mutated)
     parsed = yaml.safe_load(mutated_workflow)
     mutated_job = parsed["jobs"]["unit-test-targeted"]
-    run_scalar = next(
-        step["run"] for step in mutated_job["steps"] if step.get("name") == "Run targeted tests"
-    )
+    run_scalar = next(step["run"] for step in mutated_job["steps"] if step.get("name") == "Run targeted tests")
     # Valid shell sanity: `bash -n` accepts the run scalar (GitHub expressions
     # included) with exit 0. No temp file: the script is fed via stdin.
     completed = subprocess.run(["bash", "-n"], input=run_scalar, text=True, capture_output=True)
@@ -6451,9 +6956,7 @@ def test_collection_consumer_reds_when_the_collection_branch_moves_before_target
 
     violations = _collection_consumer_violations(mutated_workflow, trusted_variant="reorder")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "before the collection-smoke branch" in joined, f"expected a named A2 violation, got {violations}"
 
 
@@ -6474,9 +6977,7 @@ def test_collection_consumer_reds_when_the_scoped_collect_command_is_removed() -
 
     violations = _collection_consumer_violations(mutated_workflow, trusted_variant="no_op_collect")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "pytest tests/ -q --collect-only" in joined, f"expected a named A3 violation, got {violations}"
 
 
@@ -6501,9 +7002,7 @@ def test_collection_consumer_reds_when_zero_assertions_wording_is_injected_scope
     # predicate must name the A4 violation through the SAME helper.
     violations = _collection_consumer_violations(mutated_workflow, trusted_variant="zero_assertions_stdout")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "zero assertions" in joined, f"expected a named A4 violation, got {violations}"
 
 
@@ -6533,9 +7032,7 @@ def test_collection_consumer_reds_when_the_scoped_exit_one_is_deleted() -> None:
     # scalar still carries the count==0 sibling's `exit 1`.
     violations = _collection_consumer_violations(mutated_workflow, trusted_variant="dead_exit")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "exit nonzero" in joined, f"expected a named A5 violation, got {violations}"
 
 
@@ -6547,9 +7044,7 @@ def _splice_targeted_job_block(workflow: str, targeted_job: str, mutated_job: st
     the source is preserved byte-identically. ``mutated_job`` is the output of
     ``yaml.dump`` for the block mapping ``{"unit-test-targeted": {...}}``.
     """
-    indented = "".join(
-        ("  " + line if line else line) + "\n" for line in mutated_job.splitlines()
-    ).rstrip("\n")
+    indented = "".join(("  " + line if line else line) + "\n" for line in mutated_job.splitlines()).rstrip("\n")
     if not mutated_job.endswith("\n"):
         indented += "\n"
     indented_job = "\n  unit-test-targeted:" + indented[len("  unit-test-targeted:") :]
@@ -6561,16 +7056,14 @@ def _splice_targeted_job_block(workflow: str, targeted_job: str, mutated_job: st
     assert not re.search(r"(?m)^true:\n", mutated_workflow), "PyYAML re-rendered `on:` as `true:`"
     outside_start = mutated_workflow.index("\n  unit-test-targeted:")
     outside_end = mutated_workflow.index("\n  frontend-build:", outside_start)
-    assert workflow.replace(targeted_job, "") == (
-        mutated_workflow[:outside_start] + mutated_workflow[outside_end:]
-    ), "workflow outside the targeted job changed"
+    assert workflow.replace(targeted_job, "") == (mutated_workflow[:outside_start] + mutated_workflow[outside_end:]), (
+        "workflow outside the targeted job changed"
+    )
 
     # Sanity: the mutant is full-workflow YAML with the named step present.
     reparsed = yaml.safe_load(mutated_workflow)
     assert "unit-test-targeted" in reparsed["jobs"]
-    assert "Run targeted tests" in [
-        step.get("name") for step in reparsed["jobs"]["unit-test-targeted"]["steps"]
-    ]
+    assert "Run targeted tests" in [step.get("name") for step in reparsed["jobs"]["unit-test-targeted"]["steps"]]
     return mutated_workflow
 
 
@@ -6589,9 +7082,7 @@ def _semantic_mutant_job(mutate_run: Callable[[str], str]) -> str:
     targeted_job = _targeted_job_block(workflow)
     parsed = yaml.safe_load(targeted_job)
     run = next(
-        step["run"]
-        for step in parsed["unit-test-targeted"]["steps"]
-        if step.get("name") == "Run targeted tests"
+        step["run"] for step in parsed["unit-test-targeted"]["steps"] if step.get("name") == "Run targeted tests"
     )
     mutated_run = mutate_run(run)
     for step in parsed["unit-test-targeted"]["steps"]:
@@ -6655,9 +7146,7 @@ def test_collection_consumer_semantic_mutant_reds_on_comment_and_dead_condition(
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="condition_dead")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert f"{COLLECTION_SMOKE_KEY} == true" in joined, f"expected a named A1 violation, got {violations}"
 
 
@@ -6675,9 +7164,7 @@ def test_collection_consumer_semantic_mutant_reds_on_always_true_condition() -> 
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="condition_always_true")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert f"{COLLECTION_SMOKE_KEY} == true" in joined, f"expected a named A1 violation, got {violations}"
 
 
@@ -6688,7 +7175,7 @@ def test_collection_consumer_semantic_mutant_reds_on_commented_targeted_with_reo
     # SAME full helper reports the identity violation AND the exact A2 ordering
     # violation via the finite `reorder` trusted variant.
     python_line = (
-        "  python -c 'import json, os, subprocess; tests = json.loads(os.environ[\"TARGETED_TESTS_JSON\"]); "
+        '  python -c \'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); '
         'print("Targeted test files:"); [print(f"  {test}") for test in tests]; '
         'subprocess.run(["pytest", "-q", *tests], check=True)\''
     )
@@ -6703,9 +7190,7 @@ def test_collection_consumer_semantic_mutant_reds_on_commented_targeted_with_reo
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="reorder")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "targeted pytest must run before the collection-smoke branch" in joined, (
         f"expected a named A2 violation, got {violations}"
     )
@@ -6724,9 +7209,7 @@ def test_collection_consumer_semantic_mutant_reds_on_comment_only_collect() -> N
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="no_op_collect")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "pytest tests/ -q --collect-only" in joined, f"expected a named A3 violation, got {violations}"
 
 
@@ -6744,9 +7227,7 @@ def test_collection_consumer_semantic_mutant_reds_on_concatenated_zero_assertion
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="zero_assertions_stdout")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "zero assertions" in joined, f"expected a named A4 violation, got {violations}"
 
 
@@ -6776,9 +7257,7 @@ def test_collection_consumer_semantic_mutant_reds_on_dead_unreachable_exit() -> 
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="dead_exit")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "exit nonzero" in joined, f"expected a named A5 violation, got {violations}"
 
 
@@ -6801,9 +7280,7 @@ def test_collection_consumer_semantic_mutant_reds_on_missing_collect_log_emissio
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="missing_log")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "must emit the collected log" in joined, f"expected a named A5 log-emission violation, got {violations}"
 
 
@@ -6832,9 +7309,7 @@ def test_collection_consumer_semantic_mutant_reds_on_forced_success_path_failure
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="forced_success_failure")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "exit zero" in joined, f"expected a named success-status violation, got {violations}"
 
 
@@ -6856,9 +7331,7 @@ def test_collection_consumer_semantic_mutant_reds_on_meta_true_early_success() -
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="meta_early_exit")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "pytest tests/ -q --collect-only" in joined, f"expected a named C2 collect violation, got {violations}"
 
 
@@ -6869,7 +7342,7 @@ def test_collection_consumer_semantic_mutant_reds_on_extra_targeted_in_collect_f
     # it with a named exact-execution violation via the `c3_extra_targeted`
     # trusted variant (plus the identity violation).
     python_line = (
-        "  python -c 'import json, os, subprocess; tests = json.loads(os.environ[\"TARGETED_TESTS_JSON\"]); "
+        '  python -c \'import json, os, subprocess; tests = json.loads(os.environ["TARGETED_TESTS_JSON"]); '
         'print("Targeted test files:"); [print(f"  {test}") for test in tests]; '
         'subprocess.run(["pytest", "-q", *tests], check=True)\''
     )
@@ -6889,9 +7362,7 @@ def test_collection_consumer_semantic_mutant_reds_on_extra_targeted_in_collect_f
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="c3_extra_targeted")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "before the collection-smoke branch" in joined, (
         f"expected a named exact-execution violation, got {violations}"
     )
@@ -6914,9 +7385,7 @@ def test_collection_consumer_semantic_mutant_reds_on_zero_assertions_in_summary(
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="zero_assertions_summary")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "zero assertions" in joined, f"expected a named A4 violation, got {violations}"
 
 
@@ -6934,9 +7403,7 @@ def test_collection_consumer_semantic_mutant_reds_on_selector_label_replaced() -
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="selector_label_replaced")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "selector-development collection label must be emitted" in joined, (
         f"expected a named selector-label violation, got {violations}"
     )
@@ -6958,9 +7425,7 @@ def test_collection_consumer_semantic_mutant_reds_on_meta_label_replaced() -> No
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="meta_label_replaced")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "meta-guard collection label must be emitted" in joined, (
         f"expected a named meta-label violation, got {violations}"
     )
@@ -7001,9 +7466,7 @@ def test_collection_consumer_zero_assertions_on_stderr() -> None:
     mutated = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated, trusted_variant="zero_assertions_stderr")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert "zero assertions" in joined, f"expected a named A4 violation, got {violations}"
 
 
@@ -7047,9 +7510,7 @@ def test_collection_consumer_probe_timeout_is_a_stable_named_violation(
             calls.append(1)
             observed_timeouts.append(timeout)
             if len(calls) <= 2:
-                raise subprocess.TimeoutExpired(
-                    cmd="probe", timeout=timeout, output=b"partial", stderr=b"err"
-                )
+                raise subprocess.TimeoutExpired(cmd="probe", timeout=timeout, output=b"partial", stderr=b"err")
             # Third call (post-double-drain) returns the partial output.
             return b"partial", b"err"
 
@@ -7061,9 +7522,7 @@ def test_collection_consumer_probe_timeout_is_a_stable_named_violation(
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
     violations = _collection_consumer_violations(workflow, trusted_variant="live")
     joined = "\n".join(violations)
-    assert "collection-consumer probe must complete" in joined, (
-        f"expected a named timeout violation, got {violations}"
-    )
+    assert "collection-consumer probe must complete" in joined, f"expected a named timeout violation, got {violations}"
 
     # The live variant runs FOUR probes (C0-C3); each may reach the bounded
     # drain path. Every communicate call — initial bounded run AND all
@@ -7100,9 +7559,7 @@ def test_probe_undrainable_group_returns_stable_cleanup_failure(
         def communicate(self, timeout=None):
             calls.append(1)
             assert timeout is not None, "unbounded communicate() observed"
-            raise subprocess.TimeoutExpired(
-                cmd="probe", timeout=timeout, output=b"partial", stderr=b"err"
-            )
+            raise subprocess.TimeoutExpired(cmd="probe", timeout=timeout, output=b"partial", stderr=b"err")
 
         def kill(self) -> None:
             return None
@@ -7138,7 +7595,7 @@ def test_semantic_mutant_builder_preserves_full_workflow_identity() -> None:
     head = workflow[: workflow.index("\n  unit-test-targeted:")]
     tail_start = workflow.index("\n  frontend-build:")
     assert mutated_workflow.startswith(head)
-    assert mutated_workflow[mutated_workflow.index("\n  frontend-build:"):] == workflow[tail_start:]
+    assert mutated_workflow[mutated_workflow.index("\n  frontend-build:") :] == workflow[tail_start:]
     targeted_job = _targeted_job_block(workflow)
     assert workflow.replace(targeted_job, "") == mutated_workflow.replace(_targeted_job_block(mutated_workflow), "")
 
@@ -7155,21 +7612,21 @@ def test_semantic_mutant_builder_preserves_full_workflow_identity() -> None:
     ("mutate_job", "expected"),
     [
         (
-            lambda m: next(
-                s
-                for s in m["steps"]
-                if s.get("name") == TARGETED_COMMAND_STEP_NAME
-            ).update({"if": "${{ false }}"})
-            or None,
+            lambda m: (
+                next(s for s in m["steps"] if s.get("name") == TARGETED_COMMAND_STEP_NAME).update(
+                    {"if": "${{ false }}"}
+                )
+                or None
+            ),
             "targeted step must not carry a conditional `if`",
         ),
         (
-            lambda m: next(
-                s
-                for s in m["steps"]
-                if s.get("name") == TARGETED_COMMAND_STEP_NAME
-            ).update({"continue-on-error": True})
-            or None,
+            lambda m: (
+                next(s for s in m["steps"] if s.get("name") == TARGETED_COMMAND_STEP_NAME).update(
+                    {"continue-on-error": True}
+                )
+                or None
+            ),
             "targeted step `continue-on-error` must not be enabled",
         ),
         (
@@ -7177,30 +7634,28 @@ def test_semantic_mutant_builder_preserves_full_workflow_identity() -> None:
             "targeted job `continue-on-error` must not be enabled",
         ),
         (
-            lambda m: next(
-                s
-                for s in m["steps"]
-                if s.get("name") == TARGETED_COMMAND_STEP_NAME
-            ).update({"env": {"TARGETED_TESTS_JSON": "${{ steps.targeted.outputs.tests_json }}", "EXTRA": "1"}})
-            or None,
+            lambda m: (
+                next(s for s in m["steps"] if s.get("name") == TARGETED_COMMAND_STEP_NAME).update(
+                    {"env": {"TARGETED_TESTS_JSON": "${{ steps.targeted.outputs.tests_json }}", "EXTRA": "1"}}
+                )
+                or None
+            ),
             "targeted step env must be exactly",
         ),
         (
-            lambda m: next(
-                s
-                for s in m["steps"]
-                if s.get("name") == TARGETED_COMMAND_STEP_NAME
-            ).update({"shell": "bash"})
-            or None,
+            lambda m: (
+                next(s for s in m["steps"] if s.get("name") == TARGETED_COMMAND_STEP_NAME).update({"shell": "bash"})
+                or None
+            ),
             "targeted step must not override the default shell",
         ),
         (
-            lambda m: next(
-                s
-                for s in m["steps"]
-                if s.get("name") == TARGETED_COMMAND_STEP_NAME
-            ).update({"working-directory": "sub/dir"})
-            or None,
+            lambda m: (
+                next(s for s in m["steps"] if s.get("name") == TARGETED_COMMAND_STEP_NAME).update(
+                    {"working-directory": "sub/dir"}
+                )
+                or None
+            ),
             "targeted step must not override the default working-directory",
         ),
         (
@@ -7309,8 +7764,8 @@ def test_targeted_workflow_level_metadata_mutants_produce_named_violations(
     "payload_template",
     [
         'python -c \'open("{marker}","w").write("pwned")\'',
-        '/bin/touch {marker}',
-        '"$BASH" -c \'echo pwned > {marker}\'',
+        "/bin/touch {marker}",
+        "\"$BASH\" -c 'echo pwned > {marker}'",
         "eval 'echo pwned > {marker}'",
         "source <(echo 'echo pwned > {marker}')",
         "cat <(echo pwned > {marker})",
@@ -7326,9 +7781,7 @@ def test_targeted_workflow_level_metadata_mutants_produce_named_violations(
         "redirection_marker",
     ],
 )
-def test_payload_mutant_identity_violation_and_marker_absent(
-    tmp_path: Path, payload_template: str
-) -> None:
+def test_payload_mutant_identity_violation_and_marker_absent(tmp_path: Path, payload_template: str) -> None:
     # Round-3 depth redesign (task 2.10): a workflow whose `Run targeted tests`
     # run scalar carries arbitrary PR-editable payload must produce the named
     # audited-identity violation and MUST NOT execute its payload. The marker
@@ -7343,9 +7796,7 @@ def test_payload_mutant_identity_violation_and_marker_absent(
     mutated_workflow = _semantic_mutant_job(mutate)
     violations = _collection_consumer_violations(mutated_workflow, trusted_variant="live")
     joined = "\n".join(violations)
-    assert "must match the audited identity" in joined, (
-        f"expected a named identity violation, got {violations}"
-    )
+    assert "must match the audited identity" in joined, f"expected a named identity violation, got {violations}"
     assert not marker.exists(), "mutated workflow payload executed"
 
 
@@ -7366,9 +7817,238 @@ def test_unknown_trusted_variant_rejected_without_execution(tmp_path: Path) -> N
 # E — controlled descendant cleanup (Phase 6.2 P1 / task 2.10): a trusted
 # fixture spawns a background child and records its PID; the probe runs in a
 # new process group and must kill all descendants on timeout AND on success.
-# No network/DB/real tests are involved; a short deterministic timeout and a
-# bounded polling proof are used, and no orphan may survive.
+# Descendant timeout fixtures publish an atomic readiness sentinel only after
+# their PID record is closed, so the business timeout starts from an observable
+# fixture-ready state. No network/DB/real tests are involved; short bounded
+# polling proves no orphan may survive.
 # ---------------------------------------------------------------------------
+def _run_fake_probe_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    trusted_variant: str,
+    startup_exited: bool,
+    communicate_outcomes: tuple[tuple[bytes, bytes] | subprocess.TimeoutExpired, ...],
+    allowed_group_kills: int,
+) -> tuple[
+    tuple[list[tuple[str, tuple[str, ...]]], str, str, str, int],
+    list[tuple[int, int]],
+    list[int],
+]:
+    """Run a closed trusted variant through a fake process and signal boundary.
+
+    The fake never launches the generated script or a descendant. Its finite
+    outcome sequence models the initial communicate plus any helper drains;
+    accepting only the expected number of group kills turns a stale final PGID
+    retry into deterministic ``PermissionError`` rather than a real signal.
+    """
+    group_kills: list[tuple[int, int]] = []
+    child_kills: list[int] = []
+    outcomes = iter(communicate_outcomes)
+
+    class FakePopen:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        @property
+        def pid(self) -> int:
+            return 999_999
+
+        @property
+        def returncode(self) -> int:
+            return 0
+
+        def poll(self) -> int | None:
+            return 0 if startup_exited else None
+
+        def communicate(self, timeout: float | None = None) -> tuple[bytes, bytes]:
+            outcome = next(outcomes)
+            if isinstance(outcome, subprocess.TimeoutExpired):
+                raise outcome
+            return outcome
+
+        def kill(self) -> None:
+            child_kills.append(self.pid)
+
+    def record_group_kill(pgid: int, sig: int) -> None:
+        group_kills.append((pgid, sig))
+        if len(group_kills) > allowed_group_kills:
+            raise PermissionError("unexpected stale probe process-group kill")
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(os, "killpg", record_group_kill)
+    result = _run_probe_script(
+        trusted_variant,
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=0.01,
+    )
+    return result, group_kills, child_kills
+
+
+def _fake_probe_timeout() -> subprocess.TimeoutExpired:
+    return subprocess.TimeoutExpired(cmd="probe", timeout=0.01, output=b"partial", stderr=b"err")
+
+
+def test_probe_timeout_handoff_prevents_stale_final_group_kill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The helper owns the one group kill after the business timeout. A duplicate
+    # final kill raises PermissionError in this fake, exactly as a stale numeric
+    # PGID must remain visible rather than being silently ignored.
+    result, group_kills, child_kills = _run_fake_probe_cleanup(
+        monkeypatch,
+        tmp_path,
+        trusted_variant="live",
+        startup_exited=False,
+        communicate_outcomes=(_fake_probe_timeout(), (b"timeout-out", b"timeout-err")),
+        allowed_group_kills=1,
+    )
+
+    assert result[-1] == 124
+    assert group_kills == [(999_999, signal.SIGKILL)]
+    assert child_kills == []
+
+
+def test_probe_startup_failure_handoff_prevents_stale_final_group_kill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # The closed readiness fixture's fake parent exits before publishing ready,
+    # so startup cleanup—not the business-timeout path—takes over group cleanup.
+    result, group_kills, child_kills = _run_fake_probe_cleanup(
+        monkeypatch,
+        tmp_path,
+        trusted_variant="descendant_premature_exit",
+        startup_exited=True,
+        communicate_outcomes=((b"startup-out", b"startup-err"),),
+        allowed_group_kills=1,
+    )
+
+    assert result[-1] == 126
+    assert group_kills == [(999_999, signal.SIGKILL)]
+    assert child_kills == []
+
+
+def test_probe_drain_failure_handoff_prevents_third_group_kill(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Initial timeout plus two bounded drain timeouts requires exactly the two
+    # helper group kills and one direct-child fallback; no stale final retry may
+    # occur after the stable cleanup-failure status is chosen.
+    result, group_kills, child_kills = _run_fake_probe_cleanup(
+        monkeypatch,
+        tmp_path,
+        trusted_variant="live",
+        startup_exited=False,
+        communicate_outcomes=(_fake_probe_timeout(), _fake_probe_timeout(), _fake_probe_timeout()),
+        allowed_group_kills=2,
+    )
+
+    assert result[-1] == 125
+    assert group_kills == [(999_999, signal.SIGKILL), (999_999, signal.SIGKILL)]
+    assert child_kills == [999_999]
+
+
+def test_probe_success_keeps_final_group_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # No helper takes over after ordinary completion, so the unconditional-final
+    # cleanup behavior remains responsible for its one group kill.
+    result, group_kills, child_kills = _run_fake_probe_cleanup(
+        monkeypatch,
+        tmp_path,
+        trusted_variant="live",
+        startup_exited=False,
+        communicate_outcomes=((b"success-out", b"success-err"),),
+        allowed_group_kills=1,
+    )
+
+    assert result[-1] == 0
+    assert group_kills == [(999_999, signal.SIGKILL)]
+    assert child_kills == []
+
+
+def test_probe_starts_business_timeout_after_descendant_readiness(tmp_path: Path) -> None:
+    # The trusted fixture waits 0.25s BEFORE publishing readiness, deliberately
+    # longer than this 0.05s business timeout. A probe that starts communicate()
+    # immediately returns 124 before the sentinel exists; a correct probe starts
+    # that clock only after ready and therefore returns 124 with a closed PID
+    # record and ready sentinel available for the cleanup proof.
+    events, stdout, stderr, summary, status = _run_probe_script(
+        "descendant_delayed_ready_timeout",
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=0.05,
+    )
+    assert status == 124, f"expected a business timeout status, got {status} (stderr={stderr!r})"
+    ready_file = tmp_path / "descendant.ready"
+    assert ready_file.read_text(encoding="utf-8") == "ready", "business timeout started before fixture readiness"
+    pid_file = tmp_path / "descendant.pid"
+    assert pid_file.is_file(), "ready fixture did not record its child PID"
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    assert _probe_descendant_pid_gone(pid, deadline=time.monotonic() + 5.0), (
+        f"descendant {pid} survived cleanup after readiness-gated business timeout"
+    )
+
+
+def test_probe_startup_deadline_is_distinct_and_cleans_descendants(tmp_path: Path) -> None:
+    # The trusted fixture never publishes readiness after closing its child PID.
+    # A 0.01s business timeout must not produce 124 during startup: the actual
+    # separate finite startup deadline must return named status 126 and clean
+    # the whole group.
+    events, stdout, stderr, summary, status = _run_probe_script(
+        "descendant_never_ready",
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=0.01,
+    )
+    assert status == 126, f"expected startup-deadline status 126, got {status} (stderr={stderr!r})"
+    assert stderr == "probe startup failed: descendant readiness deadline expired\n"
+    pid_file = tmp_path / "descendant.pid"
+    assert pid_file.is_file(), "never-ready fixture did not record its child PID"
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    assert _probe_descendant_pid_gone(pid, deadline=time.monotonic() + 5.0), (
+        f"descendant {pid} survived startup-deadline process-group cleanup"
+    )
+
+
+def test_probe_premature_startup_exit_is_named_and_cleans_descendants(tmp_path: Path) -> None:
+    # This fixture publishes the closed child PID then exits before readiness.
+    # The readiness wait must observe the parent exit without consuming the
+    # business timeout, return the distinct named 126 status, and kill the
+    # inherited-pipe descendant rather than leaving an orphan behind.
+    events, stdout, stderr, summary, status = _run_probe_script(
+        "descendant_premature_exit",
+        count="1",
+        smoke="true",
+        meta="false",
+        collect_fails=False,
+        tmp=tmp_path,
+        timeout=0.5,
+    )
+    assert status == 126, f"expected premature-startup status 126, got {status} (stderr={stderr!r})"
+    assert stderr == "probe startup failed: process exited before descendant readiness\n"
+    pid_file = tmp_path / "descendant.pid"
+    assert pid_file.is_file(), "premature-exit fixture did not record its child PID"
+    pid = int(pid_file.read_text(encoding="utf-8").strip())
+    assert _probe_descendant_pid_gone(pid, deadline=time.monotonic() + 5.0), (
+        f"descendant {pid} survived premature-startup process-group cleanup"
+    )
+
+
 def test_probe_cleans_descendants_on_timeout(tmp_path: Path) -> None:
     # The `descendant_timeout` trusted variant starts a Python background child
     # (recording its PID) and then sleeps forever. The bounded probe times out,
@@ -7384,6 +8064,8 @@ def test_probe_cleans_descendants_on_timeout(tmp_path: Path) -> None:
         timeout=2.0,
     )
     assert status == 124, f"expected a timeout status, got {status} (stderr={stderr!r})"
+    ready_file = tmp_path / "descendant.ready"
+    assert ready_file.read_text(encoding="utf-8") == "ready", "descendant timeout started before fixture readiness"
     pid_file = tmp_path / "descendant.pid"
     assert pid_file.is_file(), "descendant fixture did not record its child PID"
     pid = int(pid_file.read_text(encoding="utf-8").strip())
@@ -7470,11 +8152,7 @@ def test_ci_concurrency_reds_on_a_second_top_level_block() -> None:
     # (YAML duplicate — last-wins, or a parse failure) must red the guard rather
     # than the pin silently reading the first, correct block.
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
-    duplicated = workflow + (
-        "\nconcurrency:\n"
-        "  group: ci-duplicate\n"
-        "  cancel-in-progress: true\n"
-    )
+    duplicated = workflow + ("\nconcurrency:\n  group: ci-duplicate\n  cancel-in-progress: true\n")
 
     with pytest.raises(AssertionError, match="exactly 1 top-level `concurrency:` block, found 2"):
         _ci_concurrency_pin_offenders(duplicated)
@@ -7563,9 +8241,7 @@ def test_ci_changed_files_authority_reds_when_a_leg_is_removed() -> None:
     assert removed_output != workflow
     assert "all_files: ${{ steps.filter.outputs.all_files }}" not in _changes_job_block(removed_output)
 
-    removed_env = workflow.replace(
-        "          CHANGED_FILES_JSON: ${{ needs.changes.outputs.all_files }}\n", ""
-    )
+    removed_env = workflow.replace("          CHANGED_FILES_JSON: ${{ needs.changes.outputs.all_files }}\n", "")
     assert removed_env != workflow
     assert "CHANGED_FILES_JSON: ${{ needs.changes.outputs.all_files }}" not in _targeted_selection_step(removed_env)
 
@@ -7588,12 +8264,7 @@ def test_ci_concurrency_ignores_job_level_indented_concurrency_blocks() -> None:
     # 0. An indented `concurrency:` under a job is a different (job-scoped)
     # policy and must not be miscounted as a duplicate of the top-level block.
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
-    with_a_job_level_block = workflow + (
-        "  probe-job:\n"
-        "    concurrency:\n"
-        "      group: job-scoped\n"
-        "    run: true\n"
-    )
+    with_a_job_level_block = workflow + ("  probe-job:\n    concurrency:\n      group: job-scoped\n    run: true\n")
 
     assert not _ci_concurrency_pin_offenders(with_a_job_level_block)
 
@@ -7672,10 +8343,7 @@ def test_ci_concurrency_reds_on_inverted_branch_group() -> None:
     # The other precedence inversion: `github.run_id` guards the branch, so
     # non-PR runs pick the PR number. Keeps every token again.
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
-    inverted = (
-        "ci-${{ github.workflow }}-"
-        "${{ github.run_id && github.event.pull_request.number || github.run_id }}"
-    )
+    inverted = "ci-${{ github.workflow }}-${{ github.run_id && github.event.pull_request.number || github.run_id }}"
 
     assert EXACT_CI_CONCURRENCY_GROUP in workflow
     mutated = workflow.replace(EXACT_CI_CONCURRENCY_GROUP, inverted)
@@ -8100,8 +8768,7 @@ def _importer_equivalence_sample() -> tuple[list[str], list[str]]:
     """
     support = [_dotted_module_name(path) for path in _tracked_tests_support_modules()]
     production = [
-        _dotted_module_name(path)
-        for path in _directory_rule_audit_modules()[:EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE]
+        _dotted_module_name(path) for path in _directory_rule_audit_modules()[:EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE]
     ]
     return support, production
 
@@ -8128,8 +8795,7 @@ def test_importer_index_equals_the_per_module_authority_helper() -> None:
     sample = support + production
     routed = {_dotted_module_name(rule.pattern) for rule in SUPPORT_MODULE_TEST_RULES}
     assert routed <= set(support), (
-        "support half no longer covers every module the routing table routes, missing "
-        f"{sorted(routed - set(support))}"
+        f"support half no longer covers every module the routing table routes, missing {sorted(routed - set(support))}"
     )
     assert len(production) == EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE, (
         f"production half is {production}, expected {EQUIVALENCE_PIN_PRODUCTION_SAMPLE_SIZE} modules "
@@ -8642,9 +9308,7 @@ def test_basins_publication_partitions_are_collectible_and_the_helper_is_not() -
     assert not is_test_suite_path(BASINS_PACKAGE_HELPERS_PATH)
     helper_tree = _parse_tracked(BASINS_PACKAGE_HELPERS_PATH)
     assert not [
-        node.name
-        for node in helper_tree.body
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+        node.name for node in helper_tree.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
     ], "the Basins publication helper defines a test_* callable"
 
 
@@ -8755,9 +9419,7 @@ def test_basins_publication_owner_rule_preserves_its_pre_existing_targets() -> N
         "tests/test_qhh_production_bootstrap.py",
         "tests/test_qhh_scripts_static.py",
     )
-    rule = next(
-        rule for rule in PATH_TEST_RULES if rule.pattern == BASINS_PUBLICATION_MODEL_REGISTRY_PATTERN
-    )
+    rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == BASINS_PUBLICATION_MODEL_REGISTRY_PATTERN)
 
     assert set(pre_existing) <= set(rule.tests), sorted(set(pre_existing) - set(rule.tests))
     assert set(BASINS_PACKAGE_PUBLICATION_TESTS) <= set(rule.tests)
@@ -9096,9 +9758,7 @@ def _derived_support_module_importers(modules: Sequence[str]) -> dict[str, set[s
     """
     index = _non_gated_top_level_importer_index()
     consumers = _literal_path_consumer_index()
-    return {
-        module: index.get(_dotted_module_name(module), set()) | consumers.get(module, set()) for module in modules
-    }
+    return {module: index.get(_dotted_module_name(module), set()) | consumers.get(module, set()) for module in modules}
 
 
 def _zero_consumer_support_modules() -> list[str]:
@@ -9126,9 +9786,7 @@ def _zero_consumer_collapse_params() -> list[object]:
         return [
             pytest.param(
                 "",
-                marks=pytest.mark.skip(
-                    reason="zero-consumer domain is empty — collapse-route guard needs re-decision"
-                ),
+                marks=pytest.mark.skip(reason="zero-consumer domain is empty — collapse-route guard needs re-decision"),
                 id="<no-zero-consumer-support-module>",
             )
         ]
@@ -9334,14 +9992,11 @@ def _ci_concurrency_pin_offenders(workflow: str) -> list[str]:
     group_lines = [line.strip() for line in block.splitlines() if line.strip().startswith("group: ")]
     if group_lines != [f"group: {EXACT_CI_CONCURRENCY_GROUP}"]:
         offenders.append(
-            "top-level concurrency must define exactly one group line equal to "
-            f"'group: {EXACT_CI_CONCURRENCY_GROUP}'"
+            f"top-level concurrency must define exactly one group line equal to 'group: {EXACT_CI_CONCURRENCY_GROUP}'"
         )
     if "github.ref" in block:
         offenders.append("top-level concurrency re-introduced the shared github.ref fallback group")
-    cancel_lines = [
-        line.strip() for line in block.splitlines() if line.strip().startswith("cancel-in-progress: ")
-    ]
+    cancel_lines = [line.strip() for line in block.splitlines() if line.strip().startswith("cancel-in-progress: ")]
     if cancel_lines != [EXACT_CI_CONCURRENCY_CANCEL]:
         offenders.append(
             "top-level concurrency must define exactly one cancel-in-progress line equal to "
@@ -9628,11 +10283,7 @@ def test_invariant_suite_literal_anchors_to_the_selector_constant() -> None:
 def _invariant_scan_roots() -> list[str]:
     tree = _parse_tracked("tests/test_timescale_write_guard_wire_site_invariant.py")
     fn = next(
-        (
-            node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name == "_scan_roots"
-        ),
+        (node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_scan_roots"),
         None,
     )
     assert fn is not None, "invariant suite no longer defines _scan_roots"
@@ -9663,9 +10314,7 @@ def _invariant_scan_root_globs() -> set[str]:
     A root whose relative mapping is not a backend prefix (db) still matches —
     the supplemental route is deliberately not gated on backend classification.
     """
-    return {
-        f"{root}/**" for root in _invariant_scan_roots()
-    }
+    return {f"{root}/**" for root in _invariant_scan_roots()}
 
 
 def test_supplemental_invariant_roots_derive_from_the_invariant_scan() -> None:
@@ -9798,11 +10447,7 @@ def _shared_baseline_violations(
     constant is missing ``tests/test_production_scheduler.py`` yields a named
     violation through this SAME helper.
     """
-    return [
-        f"{source}: shared baseline lost {target}"
-        for target in contract
-        if target not in selected
-    ]
+    return [f"{source}: shared baseline lost {target}" for target in contract if target not in selected]
 
 
 def test_select_tests_maps_compressed_chunk_cold_probe_support_to_focused_probe_suite() -> None:
@@ -9899,9 +10544,7 @@ def test_mapping_builder_modules_select_all_package_suites() -> None:
     assert len(suites) == 8, f"expected eight mapping-builder suites, got {sorted(suites)}"
     assert MAPPING_BUILDER_MODULE_SAMPLE, "mapping-builder module sample empty"
 
-    rule_targets = {
-        rule.tests for rule in PATH_TEST_RULES if rule.pattern == "workers/mapping_builder/**"
-    }
+    rule_targets = {rule.tests for rule in PATH_TEST_RULES if rule.pattern == "workers/mapping_builder/**"}
     assert len(rule_targets) == 1, "expected exactly one workers/mapping_builder/** rule"
     assert set(next(iter(rule_targets))) == suites, (
         "mapping-builder rule targets drifted from the tracked suite set: "
@@ -9924,9 +10567,7 @@ def test_mapping_builder_rule_does_not_carry_state_clone_suites() -> None:
     # `edge-consumer` (they have independent owning surfaces); carrying them
     # here would violate the issue's explicit exclusion of tests/test_state_clone.py.
     # The three state-clone suites are all absent from the rule's targets.
-    mapping_builder_rule = next(
-        rule for rule in PATH_TEST_RULES if rule.pattern == "workers/mapping_builder/**"
-    )
+    mapping_builder_rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == "workers/mapping_builder/**")
     state_clone_suites = {
         "tests/test_state_clone.py",
         "tests/test_state_clone_cutover_hook.py",
@@ -9960,10 +10601,7 @@ def _mapping_builder_suite_violations(
     helper.
     """
     expected = _tracked_mapping_builder_suites() if expected is None else expected
-    return [
-        f"{module}: missing mapping-builder suite {suite}"
-        for suite in sorted(expected - selected)
-    ]
+    return [f"{module}: missing mapping-builder suite {suite}" for suite in sorted(expected - selected)]
 
 
 def test_mapping_builder_rule_reds_when_a_suite_is_dropped(
@@ -10025,17 +10663,13 @@ def test_state_clone_shared_fixtures_select_all_their_consumers() -> None:
     # AND the baseline-cutover CLI suite (which imports `_write_package`, the
     # calibration constants and `_IC_V1`/`_PARA_V1`); the CLI helpers are
     # consumed by exactly the two recalibration CLI modules.
-    package = select_tests(
-        ["tests/state_clone_recalibration_fixtures.py"], repo_root=Path(".")
-    )
+    package = select_tests(["tests/state_clone_recalibration_fixtures.py"], repo_root=Path("."))
     assert "tests/test_state_clone_recalibration.py" in package
     assert "tests/test_state_clone_recalibration_cli.py" in package
     assert "tests/test_state_clone_recalibration_cli_validation.py" in package
     assert "tests/test_state_clone_baseline_cutover_cli.py" in package
 
-    cli_helpers = select_tests(
-        ["tests/state_clone_recalibration_cli_fixtures.py"], repo_root=Path(".")
-    )
+    cli_helpers = select_tests(["tests/state_clone_recalibration_cli_fixtures.py"], repo_root=Path("."))
     assert "tests/test_state_clone_recalibration_cli.py" in cli_helpers
     assert "tests/test_state_clone_recalibration_cli_validation.py" in cli_helpers
     # The CLI helpers are recalibration-only: the baseline suite builds its own
@@ -10183,9 +10817,7 @@ def _database_registry_violations(patterns: Sequence[str]) -> list[str]:
     registered |= _expand_tracked_members(INTEGRATION_TRIGGER_ROOT_GLOBS)
     registered |= set(INTEGRATION_TRIGGER_EXTRA_SOURCES)
     assert registered, "integration-source registry empty"
-    return sorted(
-        source for source in registered if not any(fnmatch.fnmatch(source, pattern) for pattern in patterns)
-    )
+    return sorted(source for source in registered if not any(fnmatch.fnmatch(source, pattern) for pattern in patterns))
 
 
 def test_database_filter_covers_the_finite_integration_registry() -> None:
@@ -10261,9 +10893,9 @@ def _real_db_marker_expression_violations(expression: object) -> list[str]:
         scanner = Scanner(expression)
     except (SyntaxError, pytest.UsageError):
         return ["real-db marker selection expression must be valid pytest syntax"]
-    identifiers = (
-        {scanner.current.value} if scanner.current.type is TokenType.IDENT else set()
-    ) | {token.value for token in scanner.tokens if token.type is TokenType.IDENT}
+    identifiers = ({scanner.current.value} if scanner.current.type is TokenType.IDENT else set()) | {
+        token.value for token in scanner.tokens if token.type is TokenType.IDENT
+    }
     required_identifiers = {REAL_DB_GENERIC_INTEGRATION_MARKER, REAL_DB_NODE27_ONLY_MARKER}
     unexpected_identifiers = identifiers - required_identifiers
 
@@ -10305,22 +10937,13 @@ def _real_db_marker_expression_violations(expression: object) -> list[str]:
 def _real_db_suite_command_violations(command: object) -> list[str]:
     """Return violations for the closed suite-root argv and its marker expression."""
     if not isinstance(command, str):
-        return [
-            f"real-db suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}` "
-            "with no extra options or paths"
-        ]
+        return [f"real-db suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}` with no extra options or paths"]
     try:
         argv = shlex.split(command)
     except ValueError:
-        return [
-            f"real-db suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}` "
-            "with no extra options or paths"
-        ]
+        return [f"real-db suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}` with no extra options or paths"]
     if len(argv) != 5 or tuple(argv[:4]) != REAL_DB_SUITE_COMMAND_PREFIX:
-        return [
-            f"real-db suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}` "
-            "with no extra options or paths"
-        ]
+        return [f"real-db suite command must be exactly `{REAL_DB_SUITE_COMMAND_SHAPE}` with no extra options or paths"]
     return _real_db_marker_expression_violations(argv[4])
 
 
@@ -10423,8 +11046,7 @@ def _real_db_job_contract_violations(workflow_text: str) -> list[str]:
         violations.append("real-db job must declare an `if` event gate block")
     elif _normalize_ws(gate) != _normalize_ws(REAL_DB_GATE_IF_BLOCK):
         violations.append(
-            "real-db job gate must be exactly workflow_dispatch OR "
-            "(database == 'true' AND (push OR non-draft PR))"
+            "real-db job gate must be exactly workflow_dispatch OR (database == 'true' AND (push OR non-draft PR))"
         )
 
     if job_data.get("runs-on") != TARGETED_RUNS_ON:
@@ -10470,9 +11092,7 @@ def _real_db_job_contract_violations(workflow_text: str) -> list[str]:
     else:
         dsn_value = env_map[REAL_DB_DEDICATED_DSN_ENV]
         if not isinstance(dsn_value, str) or not dsn_value.strip():
-            violations.append(
-                f"real-db job dedicated {REAL_DB_DEDICATED_DSN_ENV} must have a non-empty value"
-            )
+            violations.append(f"real-db job dedicated {REAL_DB_DEDICATED_DSN_ENV} must have a non-empty value")
 
     # Workflow-level env must be absent/empty so BASH_ENV/PYTHONPATH/PATH cannot
     # change the audited integration context.
@@ -10519,21 +11139,15 @@ def _real_db_named_step_violations(job_data: dict, parsed: dict | None = None) -
 
     steps = job_data.get("steps")
     if not isinstance(steps, list):
-        violations.append(
-            f"real-db job must have a step named `{REAL_DB_COMMAND_STEP_NAME}` with a run command"
-        )
+        violations.append(f"real-db job must have a step named `{REAL_DB_COMMAND_STEP_NAME}` with a run command")
         return violations
 
     named = [step for step in steps if isinstance(step, dict) and step.get("name") == REAL_DB_COMMAND_STEP_NAME]
     if not named:
-        violations.append(
-            f"real-db job must have a step named `{REAL_DB_COMMAND_STEP_NAME}` with a run command"
-        )
+        violations.append(f"real-db job must have a step named `{REAL_DB_COMMAND_STEP_NAME}` with a run command")
         return violations
     if len(named) > 1:
-        violations.append(
-            f"real-db job must have exactly one step named `{REAL_DB_COMMAND_STEP_NAME}`"
-        )
+        violations.append(f"real-db job must have exactly one step named `{REAL_DB_COMMAND_STEP_NAME}`")
         return violations
     step = named[0]
 
@@ -10571,16 +11185,12 @@ def _real_db_named_step_violations(job_data: dict, parsed: dict | None = None) -
 
     for scope, value in (("step", step.get("continue-on-error")), ("job", job_data.get("continue-on-error"))):
         if value is True:
-            violations.append(
-                f"real-db integration {scope} `continue-on-error` must not be enabled"
-            )
+            violations.append(f"real-db integration {scope} `continue-on-error` must not be enabled")
         elif value is not None and value is not False:
             # Strings (including expressions) and other non-boolean values
             # cannot be proven false; only absent or exactly boolean false is
             # acceptable.
-            violations.append(
-                f"real-db integration {scope} `continue-on-error` must be absent or exactly false"
-            )
+            violations.append(f"real-db integration {scope} `continue-on-error` must be absent or exactly false")
 
     return violations
 
@@ -10617,9 +11227,7 @@ def test_real_db_job_contract_reds_when_the_dedicated_dsn_is_deleted() -> None:
 
     violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
-    assert REAL_DB_DEDICATED_DSN_ENV in joined, (
-        f"expected a named dedicated-DSN violation, got {violations}"
-    )
+    assert REAL_DB_DEDICATED_DSN_ENV in joined, f"expected a named dedicated-DSN violation, got {violations}"
 
 
 def test_real_db_job_contract_reds_when_the_dedicated_dsn_value_is_blank() -> None:
@@ -10631,15 +11239,13 @@ def test_real_db_job_contract_reds_when_the_dedicated_dsn_value_is_blank() -> No
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
     job = _real_db_job_block(workflow)
     line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_DEDICATED_DSN_ENV + ":"))
-    blank = f"      {REAL_DB_DEDICATED_DSN_ENV}: \"\""
+    blank = f'      {REAL_DB_DEDICATED_DSN_ENV}: ""'
     mutated = workflow.replace(line, blank)
     assert f'{REAL_DB_DEDICATED_DSN_ENV}: ""' in _real_db_job_block(mutated)
 
     violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
-    assert REAL_DB_DEDICATED_DSN_ENV in joined, (
-        f"expected a named dedicated-DSN violation, got {violations}"
-    )
+    assert REAL_DB_DEDICATED_DSN_ENV in joined, f"expected a named dedicated-DSN violation, got {violations}"
 
 
 def test_real_db_job_contract_reds_when_the_master_push_leg_is_removed() -> None:
@@ -10693,9 +11299,7 @@ def test_real_db_job_contract_reds_when_needs_changes_is_removed() -> None:
     # Independent scope proof: the full workflow still contains every original
     # `needs: changes` line (count unchanged), and constructing the scoped
     # workflow from the mutated job yields exactly one fewer overall.
-    original_needs_count = sum(
-        1 for line in workflow.splitlines() if line.strip() == "needs: changes"
-    )
+    original_needs_count = sum(1 for line in workflow.splitlines() if line.strip() == "needs: changes")
     assert workflow.count("    needs: changes\n") == original_needs_count
     scoped_workflow = workflow.replace(job, mutated_job, 1)
     assert scoped_workflow.count("    needs: changes\n") == original_needs_count - 1
@@ -10736,9 +11340,7 @@ def test_real_db_job_contract_reds_when_the_dedicated_dsn_is_relocated_to_servic
 
     violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
-    assert REAL_DB_DEDICATED_DSN_ENV in joined, (
-        f"expected a named dedicated-DSN violation, got {violations}"
-    )
+    assert REAL_DB_DEDICATED_DSN_ENV in joined, f"expected a named dedicated-DSN violation, got {violations}"
 
 
 def test_real_db_job_contract_reds_when_the_dedicated_dsn_value_is_whitespace() -> None:
@@ -10749,14 +11351,12 @@ def test_real_db_job_contract_reds_when_the_dedicated_dsn_value_is_whitespace() 
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
     job = _real_db_job_block(workflow)
     line = next(line for line in job.splitlines() if line.strip().startswith(REAL_DB_DEDICATED_DSN_ENV + ":"))
-    mutated = workflow.replace(line, f"      {REAL_DB_DEDICATED_DSN_ENV}: \" \"")
+    mutated = workflow.replace(line, f'      {REAL_DB_DEDICATED_DSN_ENV}: " "')
     assert f'{REAL_DB_DEDICATED_DSN_ENV}: " "' in _real_db_job_block(mutated)
 
     violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
-    assert REAL_DB_DEDICATED_DSN_ENV in joined, (
-        f"expected a named dedicated-DSN violation, got {violations}"
-    )
+    assert REAL_DB_DEDICATED_DSN_ENV in joined, f"expected a named dedicated-DSN violation, got {violations}"
 
 
 def test_real_db_job_contract_reds_when_the_opt_in_flag_is_relocated_to_service_env() -> None:
@@ -10779,9 +11379,7 @@ def test_real_db_job_contract_reds_when_the_opt_in_flag_is_relocated_to_service_
 
     violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
-    assert REAL_DB_OPT_IN_ENV in joined, (
-        f"expected a named opt-in violation, got {violations}"
-    )
+    assert REAL_DB_OPT_IN_ENV in joined, f"expected a named opt-in violation, got {violations}"
 
 
 def test_real_db_job_contract_reds_on_a_literal_quoted_opt_in(
@@ -10852,11 +11450,7 @@ def test_real_db_job_contract_reds_when_the_named_step_is_renamed() -> None:
     # Parse-scope sanity: valid YAML, no step named as required, command intact.
     parsed = yaml.safe_load(mutated)["jobs"]["real-db-integration"]
     assert REAL_DB_COMMAND_STEP_NAME not in [s.get("name") for s in parsed["steps"]]
-    assert any(
-        _real_db_suite_command_violations(s.get("run")) == []
-        for s in parsed["steps"]
-        if isinstance(s, dict)
-    )
+    assert any(_real_db_suite_command_violations(s.get("run")) == [] for s in parsed["steps"] if isinstance(s, dict))
 
     violations = _real_db_job_contract_violations(mutated)
     joined = "\n".join(violations)
@@ -10956,9 +11550,7 @@ def _splice_real_db_job_block(workflow: str, job: str, mutated_job: str) -> str:
     is the output of ``yaml.dump`` for the block mapping
     ``{"real-db-integration": {...}}``.
     """
-    indented = "".join(
-        ("  " + line if line else line) + "\n" for line in mutated_job.splitlines()
-    ).rstrip("\n")
+    indented = "".join(("  " + line if line else line) + "\n" for line in mutated_job.splitlines()).rstrip("\n")
     if not mutated_job.endswith("\n"):
         indented += "\n"
     indented_job = "\n  real-db-integration:" + indented[len("  real-db-integration:") :]
@@ -10987,9 +11579,7 @@ def _mutated_real_db_workflow(workflow: str, mutate: Callable[[dict], None]) -> 
 
 
 def _real_db_named_step(mapping: dict) -> dict:
-    return next(
-        step for step in mapping["steps"] if step.get("name") == REAL_DB_COMMAND_STEP_NAME
-    )
+    return next(step for step in mapping["steps"] if step.get("name") == REAL_DB_COMMAND_STEP_NAME)
 
 
 @pytest.mark.parametrize(
@@ -11032,17 +11622,19 @@ def _real_db_named_step(mapping: dict) -> dict:
             "job defaults.run must not override the default working-directory",
         ),
         (
-            lambda m: m.update(
-                {
-                    "env": {
-                        "DATABASE_URL": "x",
-                        "NHMS_RUN_INTEGRATION": "1",
-                        "NHMS_INTEGRATION_DATABASE_URL": "y",
-                        "PYTHONPATH": "/tmp/x",
+            lambda m: (
+                m.update(
+                    {
+                        "env": {
+                            "DATABASE_URL": "x",
+                            "NHMS_RUN_INTEGRATION": "1",
+                            "NHMS_INTEGRATION_DATABASE_URL": "y",
+                            "PYTHONPATH": "/tmp/x",
+                        }
                     }
-                }
-            )
-            or None,
+                )
+                or None
+            ),
             "job env must be exactly",
         ),
         (
@@ -11179,11 +11771,7 @@ def test_workflow_path_matches_backend_and_database_filters() -> None:
 
 
 def _filter_entries(block: str) -> list[str]:
-    return [
-        line.strip()[3:-1]
-        for line in block.splitlines()
-        if line.strip().startswith("- '")
-    ]
+    return [line.strip()[3:-1] for line in block.splitlines() if line.strip().startswith("- '")]
 
 
 def test_supplemental_invariant_derivation_fails_loudly_on_an_unknown_shape(
@@ -11211,10 +11799,7 @@ def test_supplemental_invariant_derivation_fails_loudly_on_an_unknown_shape(
     probe_dir = tmp_path / "tests"
     probe_dir.mkdir(parents=True)
     (probe_dir / "test_timescale_write_guard_wire_site_invariant.py").write_text(
-        "from pathlib import Path\n"
-        "REPO_ROOT = Path('.')\n"
-        "def _scan_roots():\n"
-        "    return [REPO_ROOT / 'workers']\n",
+        "from pathlib import Path\nREPO_ROOT = Path('.')\ndef _scan_roots():\n    return [REPO_ROOT / 'workers']\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -11503,6 +12088,882 @@ def test_cold_residency_identity_producer_selects_its_contract_suites(
         assert (Path(".") / suite).is_file(), f"{producer}: routes to a missing suite {suite}"
 
 
+# #1895 task 4.0 second leg: the two new read-only CLIs and the runbook contract.
+# Each CLI is an explicit producer->consumer rule because the same-name
+# derivation would select only the CLI's own suite; the related production owner
+# suites and the runbook contract are the closure the fixture names. The runbook
+# rule selects the contract suite; the contract suite's own change is a
+# CHANGED_TEST_FILE_RULES redirect back onto the owners.
+ISSUE1895_CLI_CONSUMER_MAP: dict[str, tuple[str, ...]] = {
+    "scripts/node27_cold_residency_census.py": (
+        # #1895 task 4.0 structural split (1,000-line guard): the census suite is
+        # two modules. A CLI change must run BOTH halves, not just the core one
+        # a bare same-name derivation would reach.
+        "tests/test_node27_cold_residency_census.py",
+        "tests/test_node27_cold_residency_census_publication.py",
+        "tests/test_compressed_chunk_cold_runtime.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_cold_identity_observe.py": (
+        "tests/test_node27_cold_identity_observe.py",
+        "tests/test_node27_cold_tablespace_host.py",
+        "tests/test_compressed_chunk_cold_target.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_env_rewrite.py": (
+        "tests/test_issue1895_readiness_env.py",
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_performance_oracle.py": (
+        "tests/test_issue1895_readiness_performance.py",
+        *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+        "tests/test_issue1895_readiness_performance_publication.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_performance_bind.py": (
+        "tests/test_issue1895_readiness_performance.py",
+        *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+        "tests/test_issue1895_readiness_performance_publication.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_bind_readonly_dsn.py": (
+        *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_display_runtime.py": (
+        *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_display_runtime_bind.py": (
+        *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_readonly_accept.py": (
+        *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_runbook_contract.py",
+        *READONLY_DB_VALIDATION_TESTS,
+    ),
+    "scripts/node27_issue1895_readonly_accept_bind.py": (
+        *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_publication_current.py": (
+        *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        "tests/test_issue1895_readiness_c14.py",
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_publication_current_bind.py": (
+        *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_fs_reconcile.py": (
+        "tests/test_issue1895_readiness_c14.py",
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_group_reconcile.py": (
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_readiness_gates.py",
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_engine.py": (
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_census_bind.py": (
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_sequential_receipt.py": (
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_post_target_observe.py": (
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_publication_prove.py": (
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_watermark.py": (
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "scripts/node27_issue1895_systemd_facts.py": (
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+}
+
+
+def test_issue1895_cli_producers_select_their_focused_contract_suites() -> None:
+    for producer, required in ISSUE1895_CLI_CONSUMER_MAP.items():
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        missing = sorted(set(required) - selected)
+        assert not missing, f"{producer}: #1895 contract suites not selected {missing}"
+        for suite in required:
+            assert (Path(".") / suite).is_file(), f"{producer}: routes to a missing suite {suite}"
+        # The two CLIs must never drag core-smoke fallback: each is known-routed.
+        smoke = sorted(set(CORE_SMOKE_TESTS) & selected)
+        assert not smoke, f"{producer}: unowned core smoke {smoke}"
+
+
+def test_issue1895_cli_producer_rules_red_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    producer_patterns = set(ISSUE1895_CLI_CONSUMER_MAP)
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in producer_patterns)
+    assert len(mutant) == len(PATH_TEST_RULES) - len(producer_patterns)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for producer, required in ISSUE1895_CLI_CONSUMER_MAP.items():
+        selected = select_tests([producer], repo_root=Path("."))
+        assert "tests/test_issue1895_runbook_contract.py" not in selected, (
+            f"mutant table without {producer}'s rule still selects the runbook contract"
+        )
+
+
+def test_issue1895_runbook_selects_the_live_rollout_contract() -> None:
+    selected = set(select_tests(["docs/runbooks/tier-node27-timeseries-storage.md"], repo_root=Path(".")))
+    assert "tests/test_issue1895_runbook_contract.py" in selected
+    assert "tests/test_issue1895_readiness_performance_live.py" in selected
+    # The runbook's broader sequential/cold-residency owners stay intact.
+    for suite in (
+        "tests/test_node27_timeseries_sequential_budget.py",
+        "tests/test_node27_cold_residency_runtime_identity.py",
+        "tests/test_node27_cold_residency.py",
+    ):
+        assert suite in selected, f"runbook selection lost {suite}"
+
+
+@pytest.mark.parametrize(
+    "owner",
+    (
+        "tests/test_issue1895_runbook_contract.py",
+        "tests/test_issue1895_readiness_gates.py",
+        "tests/test_issue1895_readiness_c3_bind.py",
+    ),
+)
+def test_issue1895_contract_change_redirects_to_the_owners(owner: str) -> None:
+    from scripts.select_ci_tests import ISSUE1895_RUNBOOK_CONTRACT_TESTS
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected == set(ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
+
+
+def test_issue1895_gates_redirect_reds_when_rule_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    owner = "tests/test_issue1895_readiness_gates.py"
+    mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
+    assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected != set(select_ci_tests.ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
+    assert "tests/test_node27_cold_residency_census.py" not in selected
+
+
+def test_issue1895_c3_bind_redirect_reds_when_rule_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+    from scripts.select_ci_tests import ISSUE1895_RUNBOOK_CONTRACT_TESTS
+
+    owner = "tests/test_issue1895_readiness_c3_bind.py"
+    census = "tests/test_node27_cold_residency_census.py"
+    matching = [rule for rule in CHANGED_TEST_FILE_RULES if rule.pattern == owner]
+    assert len(matching) == 1, f"expected exactly one CHANGED_TEST_FILE_RULES entry for {owner}"
+    assert matching[0].stop_on_match is True
+    assert matching[0].tests == ISSUE1895_RUNBOOK_CONTRACT_TESTS
+    assert census in matching[0].tests
+    mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
+    assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected != set(ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
+    assert census not in selected
+    assert SELECTOR_META_GUARD_TEST in selected
+
+
+def test_issue1895_runbook_contract_redirect_reds_when_owner_leg_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+    from scripts.select_ci_tests import PathTestRule
+
+    owner = "tests/test_issue1895_runbook_contract.py"
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(t for t in rule.tests if t != "tests/test_node27_cold_residency_census.py"),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        if rule.pattern == owner
+        else rule
+        for rule in select_ci_tests.CHANGED_TEST_FILE_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", patched)
+
+    selected = select_tests([owner], repo_root=Path("."))
+    assert "tests/test_node27_cold_residency_census.py" not in selected
+
+
+def test_canonical_readonly_validator_selects_the_c2_acceptance_contract() -> None:
+    producers = (
+        "services/production_closure/readonly_db_validation.py",
+        "scripts/validate_readonly_db_boundary.py",
+    )
+    for producer in producers:
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert "tests/test_readonly_db_validation.py" in selected
+        assert "tests/test_issue1895_readiness_c1_c2_c3.py" in selected
+
+
+def test_canonical_readonly_validator_rule_reds_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    producer = "services/production_closure/readonly_db_validation.py"
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != producer)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+    selected = set(select_tests([producer], repo_root=Path(".")))
+    assert "tests/test_issue1895_readiness_c1_c2_c3.py" not in selected
+
+
+def test_readonly_validator_cli_rule_reds_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    producer = "scripts/validate_readonly_db_boundary.py"
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != producer)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+    assert "tests/test_issue1895_readiness_c1_c2_c3.py" not in select_tests([producer], repo_root=Path("."))
+
+
+def test_issue1895_evidence_io_selects_only_its_c1_c3_consumer_plus_additive_riders() -> None:
+    producer = "packages/common/evidence_io.py"
+    selected = set(select_tests([producer], repo_root=Path(".")))
+
+    assert selected == {
+        *CORE_SMOKE_TESTS,
+        TIMESCALE_WRITE_GUARD_INVARIANT_TEST,
+        *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    }
+    matching = [rule for rule in PATH_TEST_RULES if rule.pattern == producer]
+    assert len(matching) == 1
+    assert matching[0].stop_on_match is False
+    rule_index = PATH_TEST_RULES.index(matching[0])
+    assert not any(
+        fnmatch.fnmatch(producer, rule.pattern) and rule.stop_on_match
+        for rule in PATH_TEST_RULES[:rule_index]
+    )
+
+
+def test_issue1895_evidence_io_rule_reds_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    producer = "packages/common/evidence_io.py"
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != producer)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = set(select_tests([producer], repo_root=Path(".")))
+    assert "tests/test_issue1895_readiness_c1_c2_c3.py" not in selected
+    assert set(CORE_SMOKE_TESTS) <= selected
+    assert TIMESCALE_WRITE_GUARD_INVARIANT_TEST in selected
+
+
+def test_issue1895_c3_registry_manifest_primitives_select_their_consumer_contract() -> None:
+    # Scheduler file-provider primitives are imported by the split C3 suite and
+    # the leftover C1/C2 helper module. publication.py does not import those
+    # MAX_* constants; its own rule still selects the shared helper partition
+    # plus storage/c14 consumers, not as a C3-primitive owner.
+    expected = {
+        "packages/common/node27_issue1895_publication.py": {
+            "tests/test_issue1895_readiness_c1_c2_c3.py",
+        },
+        "services/orchestrator/scheduler_file_providers.py": set(ISSUE1895_READINESS_C1_C2_C3_TESTS),
+    }
+    for producer, required in expected.items():
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        missing = sorted(required - selected)
+        assert not missing, f"{producer}: C3 consumer contract not selected {missing}"
+
+
+def test_issue1895_c3_registry_manifest_rule_reds_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    expected = {
+        "packages/common/node27_issue1895_publication.py": {
+            "tests/test_issue1895_readiness_c1_c2_c3.py",
+        },
+        "services/orchestrator/scheduler_file_providers.py": set(ISSUE1895_READINESS_C1_C2_C3_TESTS),
+    }
+    monkeypatch.setattr(
+        select_ci_tests,
+        "PATH_TEST_RULES",
+        tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in expected),
+    )
+    for producer, required in expected.items():
+        leaked = sorted(required & set(select_tests([producer], repo_root=Path("."))))
+        assert not leaked, f"{producer}: C3 consumer contract still selected after rule removal {leaked}"
+
+
+def test_issue1895_c3_bind_partition_is_owned_by_publication_current_and_binder_cli() -> None:
+    partition = "tests/test_issue1895_readiness_c3_bind.py"
+    assert partition in ISSUE1895_READINESS_C1_C2_C3_TESTS
+    for owner in (
+        "packages/common/node27_issue1895_publication_current.py",
+        "scripts/node27_issue1895_publication_current_bind.py",
+    ):
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert partition in selected, f"{owner} isolated selection omitted {partition}"
+
+
+@pytest.mark.parametrize(
+    "owner",
+    (
+        "packages/common/node27_issue1895_publication_current.py",
+        "scripts/node27_issue1895_publication_current_bind.py",
+    ),
+)
+def test_issue1895_c3_bind_partition_reds_when_only_that_path_target_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+) -> None:
+    partition = "tests/test_issue1895_readiness_c3_bind.py"
+    retained = "tests/test_issue1895_readiness_c3.py"
+    selected = _issue1895_select_without_owner_targets(monkeypatch, owner, (partition,))
+    assert partition not in selected, f"{owner}: partial PATH removal still selected {partition}"
+    assert retained in selected, f"{owner}: partial PATH removal dropped retained C3 owner {retained}"
+
+
+def test_issue1895_b2b_owner_selects_receipt_contract_and_canonical_readonly_suite() -> None:
+    owners = (
+        "packages/common/node27_issue1895_private_receipt.py",
+        "packages/common/node27_issue1895_display_runtime.py",
+        "packages/common/node27_issue1895_readonly_accept.py",
+        "packages/common/node27_issue1895_publication_current.py",
+    )
+    for owner in owners:
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert "tests/test_issue1895_readiness_c1_c2_c3.py" in selected
+        assert "tests/test_issue1895_runbook_contract.py" in selected
+    readonly_selected = set(select_tests(["packages/common/node27_issue1895_readonly_accept.py"], repo_root=Path(".")))
+    assert "tests/test_readonly_db_validation.py" in readonly_selected
+
+
+def test_issue1895_b2b_examples_select_their_receipt_contract() -> None:
+    examples = {
+        "schemas/examples/node27_issue1895_c1_display_runtime_receipt.example.json",
+        "schemas/examples/node27_issue1895_c2_readonly_boundary_receipt.example.json",
+        "schemas/examples/node27_issue1895_c3_current_publication_display_receipt.example.json",
+    }
+    for path in examples:
+        selected = set(select_tests([path], repo_root=Path(".")))
+        assert set(ISSUE1895_READINESS_C1_C2_C3_TESTS) <= selected
+        assert "tests/test_issue1895_readiness_c3.py" in selected
+
+
+def test_issue1895_b2b_example_rules_red_when_collectively_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    examples = {
+        "schemas/examples/node27_issue1895_c1_display_runtime_receipt.example.json",
+        "schemas/examples/node27_issue1895_c2_readonly_boundary_receipt.example.json",
+        "schemas/examples/node27_issue1895_c3_current_publication_display_receipt.example.json",
+    }
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in examples)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+    for path in examples:
+        selected = set(select_tests([path], repo_root=Path(".")))
+        assert "tests/test_issue1895_readiness_c1_c2_c3.py" not in selected
+        assert "tests/test_issue1895_readiness_c3.py" not in selected
+
+
+def test_issue1895_b2b_schemas_select_their_receipt_contracts() -> None:
+    schemas = {
+        "schemas/node27_issue1895_c1_display_runtime_receipt.schema.json": {
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS
+        },
+        "schemas/node27_issue1895_c2_readonly_boundary_receipt.schema.json": {
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            *READONLY_DB_VALIDATION_TESTS,
+        },
+        "schemas/node27_issue1895_c3_current_publication_display_receipt.schema.json": {
+            *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+        },
+    }
+    for path, expected in schemas.items():
+        assert expected <= set(select_tests([path], repo_root=Path(".")))
+
+
+def test_issue1895_b2b_owner_rule_reds_when_removed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scripts import select_ci_tests
+
+    owner = "packages/common/node27_issue1895_readonly_accept.py"
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != owner)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert "tests/test_issue1895_readiness_c1_c2_c3.py" not in selected
+    assert "tests/test_readonly_db_validation.py" not in selected
+
+
+def test_issue1895_storage_package_rules_select_their_contracts() -> None:
+    owners = {
+        "packages/common/node27_issue1895_census_bind.py": {"tests/test_issue1895_readiness_storage.py"},
+        "packages/common/node27_issue1895_engine.py": {"tests/test_issue1895_readiness_storage.py"},
+        "packages/common/node27_issue1895_env.py": {"tests/test_issue1895_readiness_env.py"},
+        "packages/common/node27_issue1895_fs.py": {"tests/test_issue1895_readiness_storage.py"},
+        "packages/common/node27_issue1895_post_target.py": {"tests/test_issue1895_readiness_storage.py"},
+        "packages/common/node27_issue1895_publication.py": {"tests/test_issue1895_readiness_storage.py"},
+        "packages/common/node27_issue1895_receipt.py": {"tests/test_issue1895_readiness_storage.py"},
+        "packages/common/node27_issue1895_timer.py": {"tests/test_issue1895_readiness_storage.py"},
+        "packages/common/node27_issue1895_types.py": {"tests/test_issue1895_readiness_storage.py"},
+        "packages/common/node27_issue1895_watermark.py": {"tests/test_issue1895_readiness_storage.py"},
+    }
+    for owner, expected in owners.items():
+        assert expected <= set(select_tests([owner], repo_root=Path("."))), owner
+
+
+def test_issue1895_storage_package_rules_red_when_collectively_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    owners = {
+        "packages/common/node27_issue1895_census_bind.py",
+        "packages/common/node27_issue1895_engine.py",
+        "packages/common/node27_issue1895_env.py",
+        "packages/common/node27_issue1895_fs.py",
+        "packages/common/node27_issue1895_post_target.py",
+        "packages/common/node27_issue1895_publication.py",
+        "packages/common/node27_issue1895_receipt.py",
+        "packages/common/node27_issue1895_timer.py",
+        "packages/common/node27_issue1895_types.py",
+        "packages/common/node27_issue1895_watermark.py",
+    }
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern not in owners)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+    for owner in owners:
+        assert "tests/test_issue1895_readiness_storage.py" not in select_tests([owner], repo_root=Path(".")), owner
+
+
+def test_issue1895_performance_live_owner_selects_live_and_contract() -> None:
+    owners = (
+        "packages/common/node27_issue1895_performance_live.py",
+        "packages/common/node27_issue1895_query.py",
+        "packages/common/node27_issue1895_lanes.py",
+        "packages/common/node27_issue1895_performance.py",
+        "packages/common/node27_issue1895_catalog.py",
+        "packages/common/node27_issue1895_identity.py",
+        "packages/common/node27_issue1895_commit.py",
+        "packages/common/node27_issue1895_receipt_validate.py",
+        "packages/common/node27_issue1895_http.py",
+    )
+    for owner in owners:
+        assert Path(owner).is_file()
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        for suite in (
+            "tests/test_issue1895_readiness_performance.py",
+            *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+            "tests/test_issue1895_readiness_performance_publication.py",
+            "tests/test_issue1895_runbook_contract.py",
+        ):
+            assert suite in selected, f"{owner} selection lost {suite}"
+
+
+ISSUE2227_EXPLICIT_CYCLE_OWNER_TARGETS: dict[str, tuple[str, ...]] = {
+    "packages/common/node27_issue1895_query.py": (
+        ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
+        "tests/test_issue1895_readiness_performance.py",
+        *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+        "tests/test_issue1895_readiness_performance_publication.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+    "packages/common/node27_issue1895_performance_live.py": (
+        ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST,
+        "tests/test_issue1895_readiness_c14.py",
+        "tests/test_issue1895_readiness_performance.py",
+        *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+        "tests/test_issue1895_readiness_performance_publication.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ),
+}
+
+
+def test_issue2227_explicit_cycle_owners_select_the_exact_focused_binding_contract() -> None:
+    for owner, expected in ISSUE2227_EXPLICIT_CYCLE_OWNER_TARGETS.items():
+        matching = [rule for rule in PATH_TEST_RULES if rule.pattern == owner]
+        assert len(matching) == 1, owner
+        assert matching[0].tests == expected, owner
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert set(expected) <= selected, owner
+
+
+def test_issue2227_explicit_cycle_each_owner_target_removal_reds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    for owner, expected in ISSUE2227_EXPLICIT_CYCLE_OWNER_TARGETS.items():
+        rule = next(rule for rule in PATH_TEST_RULES if rule.pattern == owner)
+        assert ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST in rule.tests, owner
+        patched = tuple(
+            replace(
+                candidate,
+                tests=tuple(
+                    target for target in candidate.tests if target != ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST
+                ),
+            )
+            if candidate.pattern == owner
+            else candidate
+            for candidate in PATH_TEST_RULES
+        )
+        monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST not in selected, owner
+        assert set(expected[1:]) <= selected, owner
+
+
+def test_issue1895_performance_live_owner_rule_reds_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    owners = (
+        "packages/common/node27_issue1895_performance_live.py",
+        "packages/common/node27_issue1895_query.py",
+        "packages/common/node27_issue1895_lanes.py",
+        "packages/common/node27_issue1895_catalog.py",
+        "packages/common/node27_issue1895_identity.py",
+        "packages/common/node27_issue1895_commit.py",
+        "packages/common/node27_issue1895_receipt_validate.py",
+        "packages/common/node27_issue1895_http.py",
+    )
+    for owner in owners:
+        mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != owner)
+        assert len(mutant) == len(PATH_TEST_RULES) - 1
+        monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        assert "tests/test_issue1895_runbook_contract.py" not in selected, (
+            f"mutant table without {owner} still selects the runbook contract"
+        )
+        assert "tests/test_issue1895_readiness_performance.py" not in selected, (
+            f"mutant table without {owner} still selects the non-importer performance suite"
+        )
+
+
+ISSUE1895_COMMIT_OWNER = "packages/common/node27_issue1895_commit.py"
+ISSUE1895_WATERMARK_OWNER = "packages/common/node27_issue1895_watermark.py"
+ISSUE1895_LANES_OWNER = "packages/common/node27_issue1895_lanes.py"
+ISSUE1895_PERFORMANCE_LIVE_OWNER = "packages/common/node27_issue1895_performance_live.py"
+ISSUE1895_BRINGUP_CHECKLIST = "docs/runbooks/node-27-bringup-checklist.md"
+ISSUE1895_PERFORMANCE_CONTRACT_TESTS: tuple[str, ...] = (
+    "tests/test_issue1895_readiness_performance.py",
+    *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
+    "tests/test_issue1895_readiness_performance_publication.py",
+    "tests/test_issue1895_runbook_contract.py",
+)
+ISSUE1895_COMMIT_REQUIRED_TESTS: tuple[str, ...] = (
+    *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    *ISSUE1895_PERFORMANCE_CONTRACT_TESTS,
+)
+ISSUE1895_WATERMARK_REQUIRED_TESTS: tuple[str, ...] = (
+    *ISSUE1895_READINESS_STORAGE_TESTS,
+    "tests/test_issue1895_runbook_contract.py",
+)
+ISSUE1895_LANES_REQUIRED_TESTS: tuple[str, ...] = (
+    *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    *ISSUE1895_PERFORMANCE_CONTRACT_TESTS,
+)
+ISSUE1895_PERFORMANCE_LIVE_REQUIRED_TESTS: tuple[str, ...] = (
+    "tests/test_issue1895_readiness_c14.py",
+    *ISSUE1895_PERFORMANCE_CONTRACT_TESTS,
+)
+ISSUE1895_CHECKLIST_REQUIRED_TESTS: tuple[str, ...] = (
+    *ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    "tests/test_issue1895_readiness_c14.py",
+    "tests/test_issue1895_runbook_contract.py",
+)
+
+
+def _issue1895_path_rule(pattern: str) -> PathTestRule:
+    matching = [rule for rule in PATH_TEST_RULES if rule.pattern == pattern]
+    assert len(matching) == 1, f"expected exactly one PATH rule for {pattern}, got {len(matching)}"
+    return matching[0]
+
+
+def _issue1895_missing_partitions(
+    owner: str,
+    required: Sequence[str],
+    selected: Iterable[str] | None = None,
+) -> list[str]:
+    chosen = set(select_tests([owner], repo_root=Path("."))) if selected is None else set(selected)
+    return [f"{owner}: missing behavior-owning partition {suite}" for suite in required if suite not in chosen]
+
+
+def _issue1895_select_without_owner_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+    drop: Sequence[str],
+) -> set[str]:
+    from scripts import select_ci_tests
+
+    rule = _issue1895_path_rule(owner)
+    drop_set = set(drop)
+    for suite in drop:
+        assert suite in rule.tests, f"{owner} PATH rule is missing {suite}; partial removal cannot prove ownership"
+    mutant = replace(rule, tests=tuple(target for target in rule.tests if target not in drop_set))
+    monkeypatch.setattr(
+        select_ci_tests,
+        "PATH_TEST_RULES",
+        tuple(mutant if existing.pattern == owner else existing for existing in PATH_TEST_RULES),
+    )
+    return set(select_tests([owner], repo_root=Path(".")))
+
+
+def test_issue1895_commit_owner_selects_c1_c3_held_reader_and_performance_partitions() -> None:
+    missing = _issue1895_missing_partitions(ISSUE1895_COMMIT_OWNER, ISSUE1895_COMMIT_REQUIRED_TESTS)
+    assert not missing, "commit.py lost C1-C3 held-reader or performance partitions:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_commit_owner_rule_reds_when_only_c1_c3_tuple_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = _issue1895_select_without_owner_targets(
+        monkeypatch,
+        ISSUE1895_COMMIT_OWNER,
+        ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    )
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_COMMIT_OWNER,
+        ISSUE1895_COMMIT_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any("test_issue1895_readiness_c1_c2_c3.py" in item for item in missing), missing
+    assert any("test_issue1895_readiness_c3.py" in item for item in missing), missing
+    assert set(ISSUE1895_PERFORMANCE_CONTRACT_TESTS) <= selected
+
+
+def test_issue1895_watermark_owner_selects_both_storage_halves_and_runbook() -> None:
+    missing = _issue1895_missing_partitions(ISSUE1895_WATERMARK_OWNER, ISSUE1895_WATERMARK_REQUIRED_TESTS)
+    assert not missing, "watermark.py isolated selection lost a storage half or runbook:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_watermark_owner_rule_reds_when_only_storage_publication_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = "tests/test_issue1895_readiness_storage_publication.py"
+    selected = _issue1895_select_without_owner_targets(monkeypatch, ISSUE1895_WATERMARK_OWNER, (publication,))
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_WATERMARK_OWNER,
+        ISSUE1895_WATERMARK_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any(publication in item for item in missing), missing
+    assert "tests/test_issue1895_readiness_storage.py" in selected
+    assert "tests/test_issue1895_runbook_contract.py" in selected
+
+
+def test_issue1895_lanes_owner_selects_c1_c3_identity_sql_and_performance_partitions() -> None:
+    missing = _issue1895_missing_partitions(ISSUE1895_LANES_OWNER, ISSUE1895_LANES_REQUIRED_TESTS)
+    assert not missing, "lanes.py lost C1-C3 identity SQL or performance partitions:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_lanes_owner_rule_reds_when_only_c1_c3_tuple_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = _issue1895_select_without_owner_targets(
+        monkeypatch,
+        ISSUE1895_LANES_OWNER,
+        ISSUE1895_READINESS_C1_C2_C3_TESTS,
+    )
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_LANES_OWNER,
+        ISSUE1895_LANES_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any("test_issue1895_readiness_c3.py" in item for item in missing), missing
+    assert set(ISSUE1895_PERFORMANCE_CONTRACT_TESTS) <= selected
+
+
+def test_issue1895_performance_live_owner_selects_c14_live_dsn_and_performance_partitions() -> None:
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_PERFORMANCE_LIVE_OWNER,
+        ISSUE1895_PERFORMANCE_LIVE_REQUIRED_TESTS,
+    )
+    assert not missing, "performance_live.py lost c14 live DSN or performance partitions:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_performance_live_owner_rule_reds_when_only_c14_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c14 = "tests/test_issue1895_readiness_c14.py"
+    selected = _issue1895_select_without_owner_targets(
+        monkeypatch,
+        ISSUE1895_PERFORMANCE_LIVE_OWNER,
+        (c14,),
+    )
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_PERFORMANCE_LIVE_OWNER,
+        ISSUE1895_PERFORMANCE_LIVE_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any(c14 in item for item in missing), missing
+    assert set(ISSUE1895_PERFORMANCE_CONTRACT_TESTS) <= selected
+
+
+def test_issue1895_bringup_checklist_selects_runbook_contract_reader() -> None:
+    missing = _issue1895_missing_partitions(ISSUE1895_BRINGUP_CHECKLIST, ISSUE1895_CHECKLIST_REQUIRED_TESTS)
+    assert not missing, "bringup checklist lost its runbook-contract reader:\n  " + "\n  ".join(missing)
+
+
+def test_issue1895_bringup_checklist_rule_reds_when_only_runbook_contract_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runbook = "tests/test_issue1895_runbook_contract.py"
+    selected = _issue1895_select_without_owner_targets(
+        monkeypatch,
+        ISSUE1895_BRINGUP_CHECKLIST,
+        (runbook,),
+    )
+    missing = _issue1895_missing_partitions(
+        ISSUE1895_BRINGUP_CHECKLIST,
+        ISSUE1895_CHECKLIST_REQUIRED_TESTS,
+        selected=selected,
+    )
+    assert any(runbook in item for item in missing), missing
+    assert set(ISSUE1895_READINESS_C1_C2_C3_TESTS) <= selected
+    assert "tests/test_issue1895_readiness_c14.py" in selected
+
+
+def test_issue1895_census_policy_owner_selects_both_census_halves_and_contract() -> None:
+    # #1895 task 4.0 structural split: the shared capacity-policy module has no
+    # same-name suite, so without its own PATH rule a policy-only change would
+    # select only the #1744 shared-library smoke baseline (zero capacity
+    # assertions). The rule must reach BOTH census halves plus the runtime owner
+    # and the runbook contract. Membership, not equality: #1744 adds the
+    # core-smoke baseline for packages/common/** and #1656 adds the invariant.
+    policy = "packages/common/node27_cold_residency_census_policy.py"
+    assert Path(policy).is_file()
+    selected = set(select_tests([policy], repo_root=Path(".")))
+    for suite in (
+        "tests/test_node27_cold_residency_census.py",
+        "tests/test_node27_cold_residency_census_publication.py",
+        "tests/test_compressed_chunk_cold_runtime.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ):
+        assert suite in selected, f"policy owner selection lost {suite}"
+    # The shared baseline is retained by policy (#1744) — this is not fallback leakage.
+    assert set(CORE_SMOKE_TESTS) <= set(selected)
+
+
+def test_issue1895_census_policy_owner_rule_reds_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    policy = "packages/common/node27_cold_residency_census_policy.py"
+    mutant = tuple(rule for rule in PATH_TEST_RULES if rule.pattern != policy)
+    assert len(mutant) == len(PATH_TEST_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    selected = set(select_tests([policy], repo_root=Path(".")))
+    assert "tests/test_node27_cold_residency_census_publication.py" not in selected, (
+        "mutant table without the policy rule still selects the publication suite"
+    )
+    assert "tests/test_issue1895_runbook_contract.py" not in selected, (
+        "mutant table without the policy rule still selects the runbook contract"
+    )
+
+
+def test_issue1895_census_core_suite_change_redirects_to_runbook_and_closure() -> None:
+    owner = "tests/test_node27_cold_residency_census.py"
+    redirect_targets = _changed_test_rule_redirects_for(owner, [owner])
+    assert redirect_targets, "census core suite must be an unconditional redirect"
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected == redirect_targets | {SELECTOR_META_GUARD_TEST}
+    for suite in (
+        owner,
+        "tests/test_node27_cold_residency_census_publication.py",
+        "tests/test_compressed_chunk_cold_runtime.py",
+        "tests/test_issue1895_runbook_contract.py",
+        *ISSUE1895_READINESS_STORAGE_TESTS,
+    ):
+        assert suite in selected, f"census-core redirect lost {suite}"
+
+
+def test_issue1895_census_core_redirect_reds_when_rule_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    owner = "tests/test_node27_cold_residency_census.py"
+    mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
+    assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert "tests/test_issue1895_runbook_contract.py" not in selected, (
+        "mutant table without the census-core redirect still runs the runbook contract"
+    )
+
+
+def test_issue1895_census_publication_suite_change_redirects_to_the_whole_census_closure() -> None:
+    # #1895 task 4.0 structural split: the publication half physically moved out
+    # of the census core. A test-only change to it is a CHANGED_TEST_FILE_RULES
+    # redirect (like the runbook contract and sql-shape oracle) so the PR lane
+    # runs BOTH census halves plus the producer/contract closure instead of the
+    # ordinary self-selection + importer closure (which would run only the
+    # publication module itself and its own importers).
+    owner = "tests/test_node27_cold_residency_census_publication.py"
+    redirect_targets = _changed_test_rule_redirects_for(owner, [owner])
+    assert redirect_targets, "publication suite must be an unconditional redirect"
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected == redirect_targets | {SELECTOR_META_GUARD_TEST}
+    for suite in (
+        "tests/test_node27_cold_residency_census.py",
+        owner,
+        "tests/test_compressed_chunk_cold_runtime.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ):
+        assert suite in selected, f"publication-suite redirect lost {suite}"
+
+
+def test_issue1895_census_publication_redirect_reds_when_rule_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    owner = "tests/test_node27_cold_residency_census_publication.py"
+    mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
+    assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert "tests/test_node27_cold_residency_census.py" not in selected, (
+        "mutant table without the redirect still runs the core census suite"
+    )
+    assert "tests/test_issue1895_runbook_contract.py" not in selected, (
+        "mutant table without the redirect still runs the runbook contract"
+    )
+
+
 def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
     # #1564 Round 2 selector gap: the shared demote fixture gained a NEW consumer
     # through a local (function-scope) import in tests/test_orchestration_chain.py,
@@ -11513,9 +12974,7 @@ def test_demote_helper_rule_selects_public_chain_consumer_exactly() -> None:
     # regression. This exact-set anchor makes the five-consumer contract
     # load-bearing: it must equal the four split suites + the public chain suite
     # + the meta-guard, nothing more and nothing less.
-    selected = set(
-        select_tests(["tests/orchestrator_demote_reserved_job_helpers.py"], repo_root=Path("."))
-    )
+    selected = set(select_tests(["tests/orchestrator_demote_reserved_job_helpers.py"], repo_root=Path(".")))
     assert selected == {
         "tests/test_orchestrator_demote_cli_security.py",
         "tests/test_orchestrator_demote_core_cas.py",
@@ -11546,9 +13005,7 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
     # #1850: the two accepted-submit-identity suites are derived importers of
     # the gateway helper and join the exact selection with it; the support
     # module itself and the 1870-test scheduler suite stay out.
-    selected_helpers = set(
-        select_tests(["tests/gateway_reconcile_helpers.py"], repo_root=Path("."))
-    )
+    selected_helpers = set(select_tests(["tests/gateway_reconcile_helpers.py"], repo_root=Path(".")))
     assert selected_helpers == {
         partition
         for partition in GATEWAY_RECONCILE_PARTITIONS
@@ -11569,9 +13026,7 @@ def test_gateway_reconcile_helper_rules_select_their_partitions_exactly() -> Non
         "tests/test_orchestration_chain.py",
     } | {SELECTOR_META_GUARD_TEST}
 
-    selected_writer = set(
-        select_tests(["tests/gateway_reconcile_writer_helpers.py"], repo_root=Path("."))
-    )
+    selected_writer = set(select_tests(["tests/gateway_reconcile_writer_helpers.py"], repo_root=Path(".")))
     assert selected_writer == {
         "tests/test_gateway_reconcile_idempotency_barrier.py",
         "tests/test_gateway_reconcile_writer_launch.py",
@@ -11683,9 +13138,7 @@ _TREE_GENERIC_MUTATOR_CALLS = frozenset({"setattr", "delattr"})
 # is exactly these eight. The dunder mutators are covered by the other rules —
 # `+=` is an AugAssign (rule i), `[0]=` / `[:]=` / `del [0]` are Store/Del
 # subscripts (rule ii).
-_TREE_MUTATING_LIST_METHODS = frozenset(
-    {"append", "extend", "insert", "remove", "pop", "clear", "sort", "reverse"}
-)
+_TREE_MUTATING_LIST_METHODS = frozenset({"append", "extend", "insert", "remove", "pop", "clear", "sort", "reverse"})
 
 
 def _base_name(base: ast.expr) -> str | None:
@@ -11867,11 +13320,7 @@ def test_tree_mutation_offenders_passes_the_legal_lookalikes() -> None:
     # over a Name base (`_PARSE_CACHE[key] = tree`), and append-family calls on
     # a local list. All three read like the barred idioms and none mutates a
     # shared tree.
-    source = (
-        "monkeypatch.setattr(target, value)\n"
-        "cache[key] = tree\n"
-        "offenders.append(offender)\n"
-    )
+    source = "monkeypatch.setattr(target, value)\ncache[key] = tree\noffenders.append(offender)\n"
 
     assert _tree_mutation_offenders(ast.parse(source)) == []
 
@@ -12197,11 +13646,7 @@ def _qhh_pytest(*arguments: str) -> subprocess.CompletedProcess[str]:
 def _qhh_collected_nodeids(paths: Sequence[str], *extra: str) -> list[str]:
     completed = _qhh_pytest("--collect-only", *paths, *extra)
     assert completed.returncode in (0, 5), completed.stdout + completed.stderr
-    return [
-        line.strip()
-        for line in completed.stdout.splitlines()
-        if line.startswith("tests/") and "::" in line
-    ]
+    return [line.strip() for line in completed.stdout.splitlines() if line.startswith("tests/") and "::" in line]
 
 
 def _qhh_suffixes(nodeids: Sequence[str]) -> list[str]:
@@ -12244,9 +13689,7 @@ def _qhh_declares_monkeypatch_fixture(node: ast.FunctionDef) -> bool:
     patcher in this function; a local object that merely happens to be named
     ``monkeypatch`` is NOT a patcher.
     """
-    return "monkeypatch" in {
-        arg.arg for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
-    }
+    return "monkeypatch" in {arg.arg for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]}
 
 
 def _qhh_monkeypatch_patchers(node: ast.FunctionDef) -> set[str]:
@@ -12475,9 +13918,7 @@ def _qhh_owned_git_env() -> dict[str, str]:
     }
 
 
-def _qhh_owned_git(
-    *arguments: str, repo_root: Path, check: bool = True
-) -> subprocess.CompletedProcess[str]:
+def _qhh_owned_git(*arguments: str, repo_root: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run `git` inside a #1948-OWNED temporary repository, hermetically.
 
     Only temporary repositories this partition suite creates may use this seam.
@@ -12536,8 +13977,7 @@ def _qhh_assert_baseline_source_anchor(captured: dict[str, Any]) -> None:
         f"{QHH_PARTITION_BASELINE_SOURCE_SHA256}"
     )
     assert hashlib.sha256(_qhh_baseline_blob(captured["path"])).hexdigest() == captured["sha256"], (
-        "the baseline blob at the pinned commit no longer hashes to the oracle's recorded "
-        "source SHA"
+        "the baseline blob at the pinned commit no longer hashes to the oracle's recorded source SHA"
     )
 
 
@@ -12874,16 +14314,12 @@ def test_qhh_partition_monkeypatch_extractor_proves_all_four_cases_pure_ast() ->
         "setattr(qhh_bootstrap.os, 'scandir')",
     ]
     arbitrary = ast.parse(
-        "def f(monkeypatch: pytest.MonkeyPatch) -> None:\n"
-        "    obj.setattr('plain', 1)\n"
-        "    obj.setenv('no', '1')\n"
+        "def f(monkeypatch: pytest.MonkeyPatch) -> None:\n    obj.setattr('plain', 1)\n    obj.setenv('no', '1')\n"
     ).body[0]
     assert _qhh_monkeypatch_patchers(arbitrary) == {"monkeypatch"}
     assert _qhh_monkeypatch_targets(arbitrary) == []
     no_fixture = ast.parse(
-        "def f() -> None:\n"
-        "    monkeypatch = FakePatcher()\n"
-        "    monkeypatch.setattr(qhh_bootstrap, 'local', 1)\n"
+        "def f() -> None:\n    monkeypatch = FakePatcher()\n    monkeypatch.setattr(qhh_bootstrap, 'local', 1)\n"
     ).body[0]
     assert _qhh_monkeypatch_patchers(no_fixture) == set()
     assert _qhh_monkeypatch_targets(no_fixture) == []
@@ -12909,13 +14345,9 @@ def test_qhh_partition_scheduler_owner_imports_the_fixture_symbol_directly() -> 
 
     imported = _qhh_imported_helper_names(scheduler_owner)
 
-    assert QHH_PARTITION_FIXTURE_SYMBOL in imported, (
-        f"{scheduler_owner} must import the fixture symbol at module scope"
-    )
+    assert QHH_PARTITION_FIXTURE_SYMBOL in imported, f"{scheduler_owner} must import the fixture symbol at module scope"
     assert QHH_PARTITION_FIXTURE_SYMBOL in set(oracle["helper_rows"])
-    requesters = {
-        name for name, row in oracle["rows"].items() if QHH_PARTITION_FIXTURE_SYMBOL in str(row["args"])
-    }
+    requesters = {name for name, row in oracle["rows"].items() if QHH_PARTITION_FIXTURE_SYMBOL in str(row["args"])}
     assert requesters and len(requesters) == 3, sorted(requesters)
     definitions = {
         node.name: node
@@ -12967,9 +14399,7 @@ def test_qhh_partition_helper_route_selects_exactly_the_three_consumers() -> Non
     derived = _non_gated_top_level_importer_tests(_dotted_module_name(helper))
 
     assert set(rule.tests) == expected, sorted(set(rule.tests) ^ expected)
-    assert selected == expected | {SELECTOR_META_GUARD_TEST}, sorted(
-        selected ^ (expected | {SELECTOR_META_GUARD_TEST})
-    )
+    assert selected == expected | {SELECTOR_META_GUARD_TEST}, sorted(selected ^ (expected | {SELECTOR_META_GUARD_TEST}))
     # The importer closure is derived from the tracked tree, never read off the rule table.
     assert derived == expected, f"derived importer closure drifted: {sorted(derived ^ expected)}"
 
@@ -13092,9 +14522,7 @@ def test_qhh_partition_owner_rule_permits_an_unrelated_future_target(
 
     baseline_rule = _qhh_owner_rule_tests_at_baseline()
     selected = set(select_tests([QHH_PARTITION_OWNER_PROBE], repo_root=Path(".")))
-    future_rule = next(
-        rule for rule in patched if rule.pattern == _qhh_partition_oracle()["selector"]["owner_route"]
-    )
+    future_rule = next(rule for rule in patched if rule.pattern == _qhh_partition_oracle()["selector"]["owner_route"])
 
     assert set(_qhh_partitions()) <= selected
     _qhh_owner_rule_contract(future_rule, baseline_rule)
@@ -13211,8 +14639,7 @@ def _qhh_database_contract(observed: Sequence[str], baseline_patterns: Sequence[
     corpus_patterns = {pattern for pattern in observed if "qhh_production_bootstrap" in PurePosixPath(pattern).name}
     assert corpus_patterns == {partitions[2], helper}, sorted(corpus_patterns)
     assert observed_set & set(partitions) == {partitions[2]}, (
-        f"the scheduler owner must be the only partition literal: "
-        f"{sorted(observed_set & set(partitions))}"
+        f"the scheduler owner must be the only partition literal: {sorted(observed_set & set(partitions))}"
     )
     assert helper in observed_set, "the DB-support helper must be an exact database trigger"
     assert partitions[0] not in observed, "the retained owner owns no integration node"
@@ -13328,9 +14755,7 @@ def test_qhh_partition_bug008_command_still_executes_exactly_eight_nodes() -> No
     assert per_file[retained] == 5 == expected["qhh_bootstrap_partition_A"]
     assert per_file[QHH_PARTITION_REGISTRY_MONOLITH_PATH] == 2 == expected["registry_owner"]
     assert per_file[QHH_PARTITION_BUG008_SCHEDULER_PATH] == 1 == expected["production_scheduler_owner"]
-    frozen_retained = sorted(
-        suffix for suffix in oracle["owner_nodes"][retained] if "output_segment_count" in suffix
-    )
+    frozen_retained = sorted(suffix for suffix in oracle["owner_nodes"][retained] if "output_segment_count" in suffix)
     observed_retained = sorted(_qhh_suffixes([node for node in nodes if node.startswith(f"{retained}::")]))
     # Zero-collection false green is the failure mode: the command would still exit 0 if the
     # five QHH cases moved out of the retained historical path, so they are pinned by id.
@@ -13373,9 +14798,7 @@ def _qhh_git_paths(*arguments: str, repo_root: Path | None = None) -> set[str]:
     if repo_root is not None:
         completed = _qhh_owned_git(*arguments, repo_root=repo_root)
     else:
-        completed = subprocess.run(
-            ["git", *arguments], cwd=None, capture_output=True, text=True, check=True
-        )
+        completed = subprocess.run(["git", *arguments], cwd=None, capture_output=True, text=True, check=True)
     return {line.strip() for line in completed.stdout.splitlines() if line.strip()}
 
 
@@ -13402,9 +14825,7 @@ def _qhh_current_change_set(repo_root: Path | None = None) -> tuple[str, ...]:
         )
         base_rc, base_out = base.returncode, base.stdout
     if base_rc == 0 and base_out.strip():
-        changed.update(
-            _qhh_git_paths("diff", "--name-only", base_out.strip(), "HEAD", repo_root=repo_root)
-        )
+        changed.update(_qhh_git_paths("diff", "--name-only", base_out.strip(), "HEAD", repo_root=repo_root))
     changed.update(_qhh_git_paths("diff", "--cached", "--name-only", repo_root=repo_root))
     changed.update(_qhh_git_paths("diff", "--name-only", repo_root=repo_root))
     for pathspec in ("tests", "scripts", "docs", ".github", "openspec"):
@@ -13440,8 +14861,7 @@ def _qhh_scope_offenders(changed: Iterable[str]) -> tuple[tuple[str, ...], tuple
     write_set = sorted(
         path
         for path in changed
-        if path not in QHH_PARTITION_ALLOWED_PATHS
-        and not path.startswith(QHH_PARTITION_ALLOWED_PREFIXES)
+        if path not in QHH_PARTITION_ALLOWED_PATHS and not path.startswith(QHH_PARTITION_ALLOWED_PREFIXES)
     )
     structural = sorted(
         path
@@ -13613,17 +15033,13 @@ def test_qhh_partition_scope_change_set_excludes_upstream_before_merge_base(
     (tmp_path / "workers").mkdir()
     (tmp_path / "workers/upstream.py").write_text("base\n", encoding="utf-8")
     (tmp_path / ".large-file-guard.json").write_text("base\n", encoding="utf-8")
-    _qhh_scope_commit(
-        tmp_path, f"{fixture}/design.md", "workers/upstream.py", ".large-file-guard.json", message="base"
-    )
+    _qhh_scope_commit(tmp_path, f"{fixture}/design.md", "workers/upstream.py", ".large-file-guard.json", message="base")
     _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=tmp_path)
     # Master moves on with upstream paths BEFORE the feature branch point (#1945 shape: un-
     # related legit work lands after the old branch point, before this branch rebases).
     (tmp_path / "workers/upstream.py").write_text("upstream change\n", encoding="utf-8")
     (tmp_path / ".large-file-guard.json").write_text("upstream guard\n", encoding="utf-8")
-    _qhh_scope_commit(
-        tmp_path, "workers/upstream.py", ".large-file-guard.json", message="upstream"
-    )
+    _qhh_scope_commit(tmp_path, "workers/upstream.py", ".large-file-guard.json", message="upstream")
     _qhh_owned_git("update-ref", "refs/remotes/origin/master", "HEAD", repo_root=tmp_path)
     # Feature = origin/master tip + one issue commit (the post-rebase shape).
     _qhh_owned_git("checkout", "-q", "-b", "feature", repo_root=tmp_path)
@@ -13944,8 +15360,9 @@ def test_qhh_partition_keeps_the_structural_guard_contract_and_out_of_the_change
     assert hashlib.sha256(_qhh_guard_provenance_blob(guard_path)).hexdigest() == oracle["guard"]["sha256"], (
         "the guard blob at the guard-provenance baseline commit no longer matches the frozen digest"
     )
-    assert hashlib.sha256(_qhh_blob_at(QHH_PARTITION_SOURCE_BASELINE_SHA, guard_path)).hexdigest() != (
-        oracle["guard"]["sha256"]
+    assert (
+        hashlib.sha256(_qhh_blob_at(QHH_PARTITION_SOURCE_BASELINE_SHA, guard_path)).hexdigest()
+        != (oracle["guard"]["sha256"])
     ), "the source-baseline guard blob must differ from the frozen provenance digest"
     changed = _qhh_partition_scope_change_set()
     if changed is not None:
@@ -13994,7 +15411,7 @@ def test_qhh_partition_current_commands_name_the_real_owner_and_collect_nodes() 
             f"the replaced command now collects nodes; this guard's premise is stale: {stale}"
         )
     for paths, marker, occurrences in QHH_PARTITION_DOC_COMMANDS:
-        command = f"uv run pytest -q {' '.join(paths)} -k \"{marker}\""
+        command = f'uv run pytest -q {" ".join(paths)} -k "{marker}"'
         # The exact command must sit at every current intended location of the inventory
         # (the compatibility row AND its guard-hook metadata entry), never just once.
         assert unwrapped.count(command) == occurrences, (
@@ -14018,9 +15435,7 @@ def test_qhh_partition_current_commands_name_the_real_owner_and_collect_nodes() 
     # Every current command that names the retained partition must name the whole corpus:
     # #1948 replaced a single monolith with three owners, and a doc that still lists one is
     # a recipe for running a third of the suite and calling it green.
-    whole_corpus = [
-        line for line in unwrapped.splitlines() if "uv run pytest" in line and _qhh_partitions()[0] in line
-    ]
+    whole_corpus = [line for line in unwrapped.splitlines() if "uv run pytest" in line and _qhh_partitions()[0] in line]
     assert whole_corpus, "no current command lists the retained bootstrap owner"
     for line in whole_corpus:
         for owner in _qhh_partitions():
