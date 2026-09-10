@@ -60,6 +60,27 @@ even if the host date is later.
 - Architecture record: `docs/adr/0002-node27-timeseries-hot-cold-tiering.md`
 - Display carve-out: `docs/adr/0001-display-timeseries-carveout.md`
 
+## Three-day chunk geometry (#2210; requires migration rollout)
+
+Migration `000058_hot_timeseries_chunk_interval_3d.sql` sets the interval for
+**new** chunks of `hydro.river_timeseries` and `met.forcing_station_timeseries`
+to 3 days. It does not change `met.best_available_selection`, existing chunk
+ranges, stored rows, compression settings, or DB retention. Applying it twice
+is safe; it does not split or rewrite existing 7-day chunks or reclaim their
+space.
+
+The matching display change limits historical lookback to 3 days while future
+forecasts remain 7 days / 168 hours. Display lookback is not data retention:
+existing history is not deleted. Compression lag remains operator-configured;
+the node-27 observation on 2026-09-09 was `172800` seconds (2 days), unchanged
+by this migration.
+
+Do not infer deployed chunk geometry from the migration file. Check
+`timescaledb_information.dimensions` and `timescaledb_information.chunks`
+after the approved rollout: mixed old 7-day and new 3-day chunks are expected.
+Rollback can restore a 7-day interval for future chunk creation, but it does
+not resize the 3-day chunks already created.
+
 ## Recorded exception (2026-08-06): historical `ghdc` (retired; do not recreate)
 
 This section is immutable history plus current policy. Runnable
@@ -2549,6 +2570,13 @@ active write-target chunk. This section covers the fail-closed write guard
 and the manual decompress procedure that pairs with it.
 
 ### Per-tick capacity (live state 2026-08-14, decided in #1237)
+
+The measurements and 2-chunks/week arithmetic below are historical evidence
+for 7-day chunk geometry, not a capacity guarantee after #2210. Once both
+tables produce 3-day chunks, their steady arrival is approximately
+`2 × 7 / 3` chunks/week, with transitional chunk boundaries possible. Recheck
+per-chunk duration, whole-tick timeout and peak disk headroom on the new mix;
+do not change lag or per-tick bounds solely from the smaller interval.
 
 `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` caps how many chunks one timer
 tick compresses. **The decided value is 4** — a capacity target derived from

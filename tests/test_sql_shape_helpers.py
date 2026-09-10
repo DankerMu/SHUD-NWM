@@ -492,6 +492,15 @@ def test_text_fact_columns_reports_only_the_alias_it_is_asked_about() -> None:
     assert text_fact_columns(sql, "cr") == set()
 
 
+@pytest.mark.parametrize("projection", ["rt.*", "(rt).*"], ids=["direct", "parenthesized"])
+def test_text_fact_columns_reports_whole_row_output_exposure(projection: str) -> None:
+    sql = f"SELECT {projection} FROM hydro.river_timeseries rt"
+    assert text_fact_columns(sql, "rt") == {
+        "run_id", "basin_version_id", "river_network_version_id", "river_segment_id",
+        "variable", "unit", "quality_flag",
+    }
+
+
 def test_text_fact_columns_does_not_confuse_a_text_column_with_its_enum_twin() -> None:
     sql = "WHERE ts.variable_e = 'q_down' AND ts.unit_e = 'm3/s' AND ts.quality_flag_e = 'ok'"
 
@@ -877,3 +886,19 @@ def test_the_sanctioned_vocabulary_is_the_shared_one_not_a_private_copy() -> Non
         "TEXT_AID_COUNTERPARTS",
     ):
         assert f"\n{name}" not in source, f"{name} was re-declared here instead of imported"
+
+
+@pytest.mark.parametrize("member", ("variable", "VARIABLE", '"variable"'))
+def test_unaliased_scalar_scope_is_refused_without_outer_attribution(member: str) -> None:
+    sql = (
+        "SELECT value FROM hydro.river_timeseries WHERE run_key = "
+        "(SELECT hr.run_key FROM hydro.hydro_run hr WHERE hr.run_id = :r "
+        f"AND {member} = :v LIMIT 1)"
+    )
+    assert text_fact_columns(sql, "rt") == set()
+    assert outer_predicates(sql) == "SELECT value FROM hydro.river_timeseries WHERE run_key ="
+    with pytest.raises(river_ts_render.RiverTemplateError) as caught:
+        fact_table_text_identity_columns(sql, entry="shape-unaliased-scalar")
+    assert "shape-unaliased-scalar" in str(caught.value)
+    assert "unqualified" in str(caught.value)
+    assert "scalar-scope" in str(caught.value)

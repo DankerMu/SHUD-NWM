@@ -1522,6 +1522,133 @@ def test_a_spaced_table_name_qualifier_remains_fail_closed() -> None:
             render_river_ts_sql(sql, store, entry=entry)
 
 
+# Whole-row SELECT output exposure (#2115), independent of named-member grammar.
+@pytest.mark.parametrize(
+    "projection",
+    ["rt.*", "(rt).*", "RT.*", "(RT).*", '"rt".*', '("rt").*'],
+    ids=["direct", "parenthesized", "upper", "upper-group", "quoted", "quoted-group"],
+)
+def test_whole_row_star_exact_output_contract(projection: str) -> None:
+    _assert_whole_row_star_output(f"SELECT {projection} FROM hydro.river_timeseries rt")
+
+
+def _assert_whole_row_star_output(sql: str) -> None:
+    entry = "whole-row-output"
+    expected = {
+        "run_id", "basin_version_id", "river_network_version_id", "river_segment_id",
+        "variable", "unit", "quality_flag",
+    }
+    assert text_fact_columns(sql, "rt") == expected
+    assert text_fact_columns(sql, "RT") == expected
+    assert fact_table_text_identity_columns(sql, entry=entry) == expected
+    assert render_river_ts_sql(sql, "legacy", entry=entry).sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    with pytest.raises(RiverTemplateError) as raised:
+        render_river_ts_sql(sql, "narrow", entry=entry)
+    message = str(raised.value)
+    assert entry in message
+    assert "text identity column(s)" in message
+    assert all(column in message for column in expected)
+    assert "unmodelled" not in message
+
+
+@pytest.mark.parametrize("projection", ["rt.*", "(rt).*"], ids=["direct", "parenthesized"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        "SELECT rt.value, {star} FROM hydro.river_timeseries rt",
+        "SELECT DISTINCT ON (rt.run_key) {star} FROM hydro.river_timeseries rt",
+        "SELECT ALL {star} FROM hydro.river_timeseries rt",
+        "SELECT DISTINCT {star} FROM hydro.river_timeseries rt",
+        "WITH source_rows AS (SELECT {star} FROM hydro.river_timeseries rt) SELECT source_rows.* FROM source_rows",
+        "SELECT q.* FROM (SELECT {star} FROM hydro.river_timeseries rt) q",
+        "SELECT 1 WHERE EXISTS (SELECT {star} FROM hydro.river_timeseries rt)",
+    ],
+    ids=["later", "distinct-on", "all", "distinct", "cte", "derived", "exists"],
+)
+def test_whole_row_star_output_positions(template: str, projection: str) -> None:
+    _assert_whole_row_star_output(template.format(star=projection))
+
+
+@pytest.mark.parametrize(
+    "projection",
+    [
+        "rt \t. \n*",
+        "rt/* outer /* nested */ comment */. -- dot\n*",
+        '( /* inner */ "rt" -- alias\n) /* left */ . /* right */ *',
+        "( \tRT\n) .\t*",
+    ],
+    ids=["whitespace", "direct-comments", "group-comments", "group-whitespace"],
+)
+def test_whole_row_star_scanner_separators(projection: str) -> None:
+    _assert_whole_row_star_output(f"SELECT {projection} FROM hydro.river_timeseries rt")
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT ((rt)).* FROM hydro.river_timeseries rt",
+        "SELECT (rt::record).* FROM hydro.river_timeseries rt",
+        "SELECT f(rt).* FROM hydro.river_timeseries rt",
+        "SELECT ROW(rt).* FROM hydro.river_timeseries rt",
+        "SELECT rt.payload.* FROM hydro.river_timeseries rt",
+        "SELECT (rt).payload.* FROM hydro.river_timeseries rt",
+        "SELECT foo(rt.*) FROM hydro.river_timeseries rt",
+        "SELECT rt.value FROM hydro.river_timeseries rt ORDER BY rt.*",
+        "SELECT rt.*, foo(rt.*) FROM hydro.river_timeseries rt",
+    ],
+    ids=["nested", "cast", "function", "row", "multipart", "group-multipart", "argument", "order", "mixed"],
+)
+@pytest.mark.parametrize("door", ["helper", "legacy", "narrow"])
+def test_whole_row_star_unsupported_refused(sql: str, door: str) -> None:
+    entry = "whole-row-unsupported"
+    # The unguarded public seam stays a matcher, including mixed exact/unsupported input.
+    expected = set(TEXT_IDENTITY_COLUMNS) if sql.startswith("SELECT rt.*,") else set()
+    assert text_fact_columns(sql, "rt") == expected
+    with pytest.raises(RiverTemplateError) as raised:
+        if door == "helper":
+            fact_table_text_identity_columns(sql, entry=entry)
+        else:
+            render_river_ts_sql(sql, door, entry=entry)
+    assert entry in str(raised.value)
+    assert "unmodelled whole-row star" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "projection,relation",
+    [
+        ("art.*", "art"), ("(rt2).*", "rt2"),
+        ("cr.*", "cr"), ("source_rows.*", "source_rows"), ("eligible.*", "eligible"),
+        ('"rt.*"', "hr"), ('"RT".*', "hr"), ('("RT").*', "hr"),
+        ('"rt""suffix".*', "hr"), ('("rt""suffix").*', "hr"),
+        ("rt.run_key, rt.variable_e, rt.unit_e, rt.quality_flag_e", "hr"),
+        ("'rt.*', E'(rt).*', rt.value /* rt.* /* (rt).* */ */ -- rt.*\n", "hr"),
+        ("f(%(rt)s).*", "hr"), ("f(value => 1::rt).*", "hr"),
+        ("f(rt => 1).*", "hr"), ("rt.func(1).*", "hr"),
+    ],
+    ids=[
+        "alias-prefix", "alias-suffix", "cr", "source-rows", "eligible",
+        "complete-quoted", "nonexact-quoted", "nonexact-group", "escaped-quoted", "escaped-group",
+        "keys-enums", "data", "placeholder", "type", "label", "function-name",
+    ],
+)
+def test_whole_row_star_nonfact_controls(projection: str, relation: str) -> None:
+    sql = f"SELECT {projection} FROM hydro.river_timeseries rt JOIN hydro.hydro_run {relation} ON true"
+    assert text_fact_columns(sql, "rt") == set()
+    assert fact_table_text_identity_columns(sql, entry="star-control") == set()
+    assert render_river_ts_sql(sql, "legacy", entry="star-control").sql == sql.replace(RIVER_TABLE, RIVER_TABLE_LEGACY)
+    assert render_river_ts_sql(sql, "narrow", entry="star-control").sql == sql
+
+
+@pytest.mark.parametrize("door", ["helper", "legacy", "narrow"])
+def test_whole_row_star_quoted_declaration_precedence(door: str) -> None:
+    sql = 'SELECT "rt".* FROM hydro.river_timeseries AS "rt"'
+    with pytest.raises(RiverTemplateError, match="double-quoted alias"):
+        if door == "helper":
+            fact_table_text_identity_columns(sql, entry="star-quoted-declaration")
+        else:
+            render_river_ts_sql(sql, door, entry="star-quoted-declaration")
+
+
 # ---------------------------------------------------------------------------
 # Parenthesized whole-row fact-alias field selection (#2112)
 # ---------------------------------------------------------------------------
@@ -2919,12 +3046,12 @@ def test_correlated_scalar_authority_other_enum_and_data_controls_remain_clean(
         ("exact-quoted", '"variable"'),
     ],
 )
-def test_correlated_scalar_unaliased_unqualified_names_remain_routed_to_issue_2148(
+def test_unaliased_scalar_previously_routed_names_fail_closed(
     label: str,
     reference: str,
 ) -> None:
-    """Routed, not claimed safe: unaliased outer fact + unqualified scalar-body names."""
-    entry = f"correlated-scalar-routed-2148-{label}"
+    """The former #2148 deferral now refuses ambiguous scalar scope."""
+    entry = f"unaliased-scalar-2148-{label}"
     sql = (
         "SELECT value\n"
         "FROM hydro.river_timeseries\n"
@@ -2940,7 +3067,8 @@ def test_correlated_scalar_unaliased_unqualified_names_remain_routed_to_issue_21
     attribution = fact_table_attribution(sql)
     assert attribution.aliases == frozenset()
     assert attribution.has_unaliased_reference is True
-    _assert_correlated_scalar_clean(sql, entry=entry)
+    for door in ("helper", "legacy", "narrow"):
+        _assert_unaliased_scalar_refusal(sql, entry=entry, door=door)
 
 
 @pytest.mark.parametrize(
@@ -4872,3 +5000,161 @@ def test_the_structural_check_reads_code_not_string_literals() -> None:
     """
     assert_structurally_intact("SELECT 'a = 1 AND ;' AS note FROM x WHERE a = 1", "<test>")
     assert_structurally_intact("SELECT rt.tag FROM x rt WHERE rt.tag = 'LIMIT 1 AND b'", "<test>")
+
+
+# Unaliased comparison-scalar scope (#2148). Expected members and authority
+# triples are fixture literals, independent of the implementation's matchers.
+_UNALIASED_SCALAR_MEMBERS = (
+    "run_id", "river_network_version_id", "variable", "basin_version_id",
+    "river_segment_id", "unit", "quality_flag",
+)
+_UNALIASED_SCALAR_PREFIX = "SELECT value FROM hydro.river_timeseries WHERE run_key = "
+_UNALIASED_SCALAR_BODIES = {
+    "extra-predicate": "SELECT run_key FROM hydro.hydro_run WHERE run_id = :r AND variable = :v",
+    "changed-key": "SELECT other_key FROM hydro.hydro_run WHERE run_id = :r",
+    "changed-relation": "SELECT run_key FROM other.hydro_run WHERE run_id = :r",
+    "extra-projection": "SELECT run_key, 1 FROM hydro.hydro_run WHERE run_id = :r",
+    "extra-alias": "SELECT run_key FROM hydro.hydro_run hr WHERE run_id = :r",
+    "extra-join": "SELECT run_key FROM hydro.hydro_run JOIN other o ON true WHERE run_id = :r",
+    "expression": "SELECT max(run_key) FROM hydro.hydro_run WHERE run_id = :r",
+    "inner-select": "SELECT variable FROM hydro.hydro_run WHERE run_id = :r LIMIT 1",
+    "derived": "SELECT k FROM (SELECT 1 AS variable, 2 AS k) x WHERE variable = :v LIMIT 1",
+    "nested-only": (
+        "SELECT max(hr.run_key) FROM hydro.hydro_run hr WHERE hr.run_key = "
+        "(SELECT max(h2.run_key) FROM hydro.hydro_run h2 WHERE h2.run_id = :r AND variable = :v)"
+    ),
+}
+_UNALIASED_SCALAR_LATER_SQL = (
+    _UNALIASED_SCALAR_PREFIX
+    + "(SELECT max(hr.run_key) FROM hydro.hydro_run hr WHERE hr.run_id = :r) "
+    "AND basin_version_key = (SELECT max(b.basin_version_key) FROM core.basin_version b "
+    "WHERE b.basin_version_id = :b AND variable = :v)"
+)
+
+
+def _unaliased_scalar_door(sql: str, entry: str, door: str) -> object:
+    if door == "helper":
+        return fact_table_text_identity_columns(sql, entry=entry)
+    return render_river_ts_sql(sql, door, entry=entry).sql
+
+
+def _assert_unaliased_scalar_refusal(sql: str, *, entry: str, door: str) -> None:
+    assert text_fact_columns(sql, "rt") == set()
+    with pytest.raises(RiverTemplateError) as caught:
+        _unaliased_scalar_door(sql, entry, door)
+    assert entry in str(caught.value)
+    assert "unaliased" in str(caught.value)
+    assert "unqualified" in str(caught.value)
+    assert "scalar-scope" in str(caught.value)
+
+
+@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("spelling", ("lower", "upper", "quoted"))
+@pytest.mark.parametrize("member", _UNALIASED_SCALAR_MEMBERS)
+def test_unaliased_scalar_members_refuse(member: str, spelling: str, door: str) -> None:
+    reference = member.upper() if spelling == "upper" else f'"{member}"' if spelling == "quoted" else member
+    sql = _UNALIASED_SCALAR_PREFIX + (
+        f"(SELECT hr.run_key FROM hydro.hydro_run hr WHERE hr.run_id = :r AND {reference} = :v LIMIT 1)"
+    )
+    assert outer_predicates(sql) == _UNALIASED_SCALAR_PREFIX.strip()
+    _assert_unaliased_scalar_refusal(sql, entry=f"unaliased-{member}-{spelling}", door=door)
+
+
+@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("label", tuple(_UNALIASED_SCALAR_BODIES) + ("later-independent",))
+def test_unaliased_scalar_namespace_and_authority_changes_refuse(label: str, door: str) -> None:
+    sql = (
+        _UNALIASED_SCALAR_LATER_SQL if label == "later-independent"
+        else _UNALIASED_SCALAR_PREFIX + "(" + _UNALIASED_SCALAR_BODIES[label] + ")"
+    )
+    assert "variable" not in outer_predicates(sql)
+    _assert_unaliased_scalar_refusal(sql, entry=f"unaliased-{label}", door=door)
+
+
+@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("operator", ("=", "<>", "!=", "<=", ">=", "<", ">"))
+def test_unaliased_scalar_comparison_and_scanner_forms_refuse(operator: str, door: str) -> None:
+    sql = (
+        f"SELECT value FROM hydro.river_timeseries WHERE run_key {operator} /* gap */ "
+        "(SELECT hr.run_key FROM hydro.hydro_run hr WHERE hr.run_id = :r "
+        "AND /* nested /* comment */ gap */ \"variable\"\t<> :v LIMIT 1)"
+    )
+    _assert_unaliased_scalar_refusal(sql, entry="unaliased-operator", door=door)
+
+
+@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize("bind", ("%s", "%(run_id)s", ":variable"))
+@pytest.mark.parametrize("spelling", ("lower", "upper", "quoted", "comments"))
+@pytest.mark.parametrize(
+    ("key", "schema", "table", "member"),
+    (
+        ("run_key", "hydro", "hydro_run", "run_id"),
+        ("basin_version_key", "core", "basin_version", "basin_version_id"),
+        ("river_network_version_key", "core", "river_network_version", "river_network_version_id"),
+    ),
+)
+def test_unaliased_scalar_exact_authority_remains_clean(
+    key: str, schema: str, table: str, member: str, spelling: str, bind: str, door: str,
+) -> None:
+    names = (key, schema, table, member)
+    if spelling == "upper":
+        names = tuple(name.upper() for name in names)
+    elif spelling == "quoted":
+        names = tuple(f'"{name}"' for name in names)
+    key, schema, table, member = names
+    body = f"SELECT {key} FROM {schema}.{table} WHERE {member} = {bind}"
+    if spelling == "comments":
+        body = body.replace(" ", " /* gap */\r\n").replace(".", " /* dot */ . ")
+    sql = _UNALIASED_SCALAR_PREFIX + "(" + body + ")"
+    expected = set() if door == "helper" else sql.replace(
+        "hydro.river_timeseries", "hydro.river_timeseries_legacy" if door == "legacy" else "hydro.river_timeseries",
+    )
+    assert _unaliased_scalar_door(sql, "unaliased-authority", door) == expected
+
+
+@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize(
+    "expression",
+    (
+        "hr.variable", 'hr /* gap */ . /* gap */ "variable"', "HR . VARIABLE",
+        "variable_e", "unit_e", "quality_flag_e", "run_key", "variable_suffix",
+        '"VARIABLE"', '"hr.variable"', "'variable = :v'", "E'variable'",
+        ":variable", "%(variable)s", "CAST(1 AS variable)", "1::variable",
+        "f(variable => 1)", "f(variable := 1)",
+        "1 /* variable = :v */", "1 -- variable = :v\n",
+    ),
+)
+def test_unaliased_scalar_qualified_data_and_roles_remain_clean(expression: str, door: str) -> None:
+    sql = _UNALIASED_SCALAR_PREFIX + (
+        f"(SELECT {expression} FROM hydro.hydro_run hr WHERE hr.run_id = :r LIMIT 1)"
+    )
+    expected = set() if door == "helper" else sql.replace(
+        "hydro.river_timeseries", "hydro.river_timeseries_legacy" if door == "legacy" else "hydro.river_timeseries",
+    )
+    assert _unaliased_scalar_door(sql, "unaliased-role-control", door) == expected
+
+
+@pytest.mark.parametrize("door", ("helper", "legacy", "narrow"))
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    (
+        ("SELECT value FROM hydro.river_timeseries WHERE variable = :v", "sub-select"),
+        ("SELECT variable FROM hydro.hydro_run WHERE hr.run_id = $1", "lexical subset"),
+    ),
+)
+def test_unaliased_scalar_older_refusals_keep_precedence(body: str, reason: str, door: str) -> None:
+    with pytest.raises(RiverTemplateError) as caught:
+        _unaliased_scalar_door(_UNALIASED_SCALAR_PREFIX + "(" + body + ")", "unaliased-precedence", door)
+    assert "unaliased-precedence" in str(caught.value)
+    assert reason in str(caught.value)
+    assert "scalar-scope" not in str(caught.value)
+
+
+def test_unaliased_scalar_outer_fallback_remains_attributed() -> None:
+    sql = "SELECT value FROM hydro.river_timeseries WHERE variable = :v"
+    assert fact_table_text_identity_columns(sql, entry="unaliased-outer") == {"variable"}
+    assert render_river_ts_sql(sql, "legacy", entry="unaliased-outer").sql == sql.replace(
+        "hydro.river_timeseries", "hydro.river_timeseries_legacy",
+    )
+    with pytest.raises(RiverTemplateError, match="text identity"):
+        render_river_ts_sql(sql, "narrow", entry="unaliased-outer")

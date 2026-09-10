@@ -250,7 +250,7 @@ Level 3：仅有短波辐射，用经验公式近似
 ```text
 past_segment:
   scenario = analysis_true_field
-  time_range = [issue_time - 7d, issue_time]
+  time_range = [issue_time - 3d, issue_time)
 
 future_segment_gfs:
   scenario = forecast_gfs_deterministic

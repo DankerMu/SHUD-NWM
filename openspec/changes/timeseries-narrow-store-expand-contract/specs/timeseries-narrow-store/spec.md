@@ -40,9 +40,9 @@ The parser's replace chain SHALL DELETE and INSERT only against `hydro.river_tim
 - **WHEN** a recompute targets a run whose `timeseries_store` is `legacy`
 - **THEN** the parser raises `LegacyStoreWriteRefused`, no DELETE statement is executed, the tick exits 0 with a `legacy_store_refused` decline row, and a later product regeneration for the same run does not reopen the decline
 
-### Requirement: Read paths SHALL be rendered from normalised templates into a per-store variant and unioned across stores
+### Requirement: Read paths SHALL render routed per-store variants and compose spanning fact rows locally
 
-Every reader of the river fact table SHALL keep one SQL template whose transitional aids are normalised: each aid is one conjunct on its own line, immediately preceded by exactly one line carrying the verbatim marker `-- transitional compressed-chunk pushdown aid, remove with #1342`, never a marker on a `WHERE` or other keyword line, and never one marker for several aids. The shared renderer SHALL produce the `legacy` variant (table `hydro.river_timeseries_legacy`, otherwise verbatim) and the `narrow` variant (table `hydro.river_timeseries`; every marker line and the aid line immediately following it removed; the renderer MUST fail closed when the following line is not an aid), then assert the result parses, references no text identity column, and keeps every key/enum predicate of the legacy variant. A query that may span runs of both stores SHALL be built as `UNION ALL` of the two variants, each branch restricted by `hydro_run.timeseries_store`; the union is composed inside each reader's own statement (caller-side, tasks.md 1.4 Stage 5 re-entry), not by a shared text-level combinator. External response payloads MUST be field-identical between stores for the same run shape. Non-template consumers (`_has_table` prechecks, copyback `required_columns`, statistics-guard hypertable lists, QHH smoke reset/summary scripts, plan-shape fixtures) SHALL branch on store or accept both names during the transition.
+Every reader of the river fact table SHALL keep one SQL template whose transitional aids are normalised: each aid is one conjunct on its own line, immediately preceded by exactly one line carrying the verbatim marker `-- transitional compressed-chunk pushdown aid, remove with #1342`, never a marker on a `WHERE` or other keyword line, and never one marker for several aids. The shared renderer SHALL produce the `legacy` variant (table `hydro.river_timeseries_legacy`, otherwise verbatim) and the `narrow` variant (table `hydro.river_timeseries`; every marker line and the aid line immediately following it removed; the renderer MUST fail closed when the following line is not an aid), then assert the result parses, references no text identity column, and keeps every key/enum predicate of the legacy variant. A caller that already holds one run's `timeseries_store` SHALL render and execute exactly that one variant. A query that may span runs of both stores SHALL build an occurrence-local `UNION ALL` of the two rendered **fact-row subrelations**, each branch restricted by `hydro_run.timeseries_store`; the union MUST sit before any outer aggregate, `DISTINCT`, ordering, truncation, response-decision layer or data-modifying statement and MUST NOT combine two complete statements. The per-basin MVT source relation, each national LATERAL probe, both valid-time source relations and display coverage's `river_sample_rows` CTE own those combinations; MVT binds store inside its existing `hydro_run` authority scope rather than threading API metadata across module ownership, while the hydro-display identity probe already owns its run metadata and uses that known route's single variant. This composition is caller-side (tasks.md 1.4 Stage 5 re-entry), never a shared text-level combinator. Branches reuse the same named parameters, project the same columns in the same order, and touch only their matching physical table. External response payloads MUST be field-identical between stores for the same run shape. The wave-2 reader code MUST NOT be deployed or executed against the pre-expand catalog, where neither the route column nor the renamed legacy table exists; I7 activates it together with the expand migration. Non-template consumers (`_has_table` prechecks, copyback `required_columns`, statistics-guard hypertable lists, QHH smoke reset/summary scripts, plan-shape fixtures) SHALL branch on store or accept both names during the transition.
 
 #### Scenario: Normalised templates are semantically identical to the pre-change statements
 - **WHEN** the normalisation lands and the census and shape pins are re-pinned
@@ -75,13 +75,42 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **WHEN** `assert_structurally_intact` receives otherwise valid SQL whose complete double-quoted identifier contains an unmatched `)` or `(` byte
 - **THEN** it accepts the statement because quoted identifier bytes are not structural grouping; a direct helper-level regression test owns this guarantee, while the traversal/scanner commutation oracle retains its separate t1/m26 responsibility and is not evidence for the structural helper's double-quote branch
 
+#### Scenario: Whole-row fact-alias star expansion cannot bypass the output contract
+- **WHEN** scanner-visible outer-query code projects an exact bare-declared fact alias as `alias.*` or `(alias).*` at the top level of a SELECT output list, with bare ASCII case folding, exact lower-case quoted references, and scanner-normalised whitespace/comments
+- **THEN** both public identity helpers report all seven `TEXT_IDENTITY_COLUMNS`, narrow rendering refuses with an entry-named text-identity error before returning SQL, and legacy rendering changes only the physical table name without expanding or rewriting the projection
+- **AND** a scanner-visible fact-alias-rooted star whose exact output-expansion grammar cannot be established is refused by the guarded helper and both render variants as unmodelled whole-row star exposure, not reported clean; non-fact relation/CTE stars, complete quoted identifier data, non-exact quoted references, literals/comments and named key/enum projections retain their existing outcomes, and quoted fact-alias declarations retain their existing refusal
+- **AND** this guards cross-store result-schema drift rather than asserting that star necessarily names a nonexistent column; comparison-position scalar-body star visibility and unaliased scalar scope remain outside this outer-output slice, while the named-field and correlated named-member contracts remain intact
+
+#### Scenario: Unaliased fact reads cannot hide ambiguous unqualified scalar identity
+- **WHEN** a surrounding fact read is unaliased with no attributed fact alias, and any comparison-position scalar body contains a bare-folded or exact lower-case quoted unqualified text-identity candidate not proven safe by the existing finite authority key-resolution shape
+- **THEN** guarded `fact_table_text_identity_columns` and both render stores refuse before returning a clean set or SQL, with an entry-named unaliased/unqualified scalar-scope reason; the renderer does not guess whether an inner relation or the outer fact owns the name
+- **AND** qualified non-fact references and the existing run/basin/network authority key-resolution shapes remain accepted, outer unaliased comparisons keep existing attribution, and alias-scoped `text_fact_columns` plus `outer_predicates` remain unchanged
+- **AND** bare-folded and exact quoted candidates across all seven identity members, nested/later scalar bodies and ambiguous inner SELECT/derived namespaces are covered; literal/comment data, non-exact quoted names and key/enum tokens are not fact attribution, and aliased/scalar named-member, whole-row-star and structural sibling contracts are preserved
+
 #### Scenario: Renderer refuses a mis-shaped marker
 - **WHEN** a template places the marker above a line that is not a single aid conjunct
 - **THEN** the renderer raises before returning SQL and the shape oracle fails naming the template
 
+#### Scenario: A caller that owns run metadata executes one routed variant
+- **WHEN** the hydro-display MVT source-identity probe receives a run whose metadata names one store
+- **THEN** it renders and executes only that store's variant, retains one `SELECT 1 ... LIMIT 1` result decision, and preserves the existing not-found response contract without a statement-level union
+
+#### Scenario: Limited discovery applies its semantic operators once
+- **WHEN** either valid-time discovery branch may read runs from both stores
+- **THEN** its legacy and narrow fact-row branches are unioned below one outer `DISTINCT valid_time`, descending order and `LIMIT :limit`, so `sample_limit + 1` and caller-side truncation are unchanged
+
+#### Scenario: Coverage unions only its river fact-row CTE
+- **WHEN** display coverage refresh scans candidate runs from both stores
+- **THEN** `candidate_runs` carries each run's route, `river_sample_rows` unions one matching branch per store, and the station legs, river aggregation, overwrite guard and single `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` remain outside and unchanged
+
 #### Scenario: Mixed-store discovery returns both
-- **WHEN** a national-tile or coverage query runs against a real database holding one `legacy` and one `narrow` published run
-- **THEN** both runs appear in the result and `EXPLAIN` shows each branch touching only its own table
+- **WHEN** a national-tile, coverage, or named/any-identity valid-time discovery query runs against a real database holding one `legacy` and one `narrow` published run
+- **THEN** both runs appear in the national-tile and coverage result, the enclosing aggregate/result/DML layer executes once, and `EXPLAIN` shows each fact branch touching only its matching table
+- **AND** separate named-identity requests for the legacy and narrow run each return only that routed run's `valid_time`, while one any-identity request includes `valid_time` values contributed by both stores in its fact-row union before one outer `DISTINCT valid_time ORDER BY valid_time DESC LIMIT :limit`; each form's `EXPLAIN` shows every fact branch references only its matching physical table and the non-matching named branch produces no rows
+
+#### Scenario: Reader transition activates with expand, not before
+- **WHEN** wave-2 reader changes have merged but the I7 maintenance-window deployment and expand migration have not run
+- **THEN** those transition statements are not deployed or executed against the pre-expand catalog; I7 deploys them together with the route column and `_legacy` table name
 
 #### Scenario: Smoke reset clears both stores
 - **WHEN** `scripts/reset_qhh_smoke_db.py` deletes a legacy run

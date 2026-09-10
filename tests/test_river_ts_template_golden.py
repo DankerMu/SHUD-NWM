@@ -1,48 +1,14 @@
-"""The equivalence oracle for #1980's template normalisation.
+"""Renderer predicate preservation and provenance of the frozen #1980 capture.
 
-Task 1.1 rewrites the layout of every river read template: aids move off
-``WHERE`` lines onto their own ``AND`` line, mvt's three 1:N markers become
-eleven 1:1 ones, display_coverage's prose paragraph becomes per-aid markers, and
-two ``OR (…)`` disjunctions are re-bracketed. That is a lot of hand editing on
-SQL nobody can execute in a unit test, and the claim being made about it is
-"zero behaviour change".
+The fixture records the original template-normalisation audit at ``51f9d273``.
+Its bytes remain immutable historical evidence, not a requirement that future
+production SQL retain old bugs. Current templates may change intentionally;
+the renderer must preserve their predicates while changing physical tables.
+Real database tests cover query behavior, including the enum cast required by
+the three-day history paths in ``test_real_database_integration.py``.
 
-This file is the machine-checkable form of that claim. Before any template was
-touched, every registered entry's text was captured at base ``51f9d273`` and
-committed as ``tests/fixtures/river_ts_templates_51f9d273.json`` in the canonical
-chain form (:func:`packages.common.river_ts_render.sql_chains`). The oracle then
-asserts that the LEGACY variant — the post-normalisation template with the table
-name substituted back — reproduces the golden chains exactly.
-
-What that does and does not allow
----------------------------------
-
-The chain form is invariant under exactly the three things the normalisation is
-permitted to change and nothing else:
-
-* whitespace / indentation — collapsed;
-* comment placement, including the markers themselves — removed;
-* the ORDER of conjuncts within one AND-chain — each chain is a sorted multiset,
-  which is what licenses "the ``WHERE`` line takes the next key conjunct".
-
-What it covers is the CONJUNCT MULTISET OF EVERY PREDICATE CHAIN, and inside
-that scope everything is red: a dropped or added conjunct, a changed parameter
-name, a changed comparison operator, a predicate that moved between chains (a
-lateral body's conjunct hoisted to the outer ``WHERE`` changes two chains), a
-re-bracketed disjunction that actually changes the truth table (the ``OR (…)``
-body is its own chain), a join that lost an ``ON`` conjunct. The counter-examples
-at the bottom prove each of those bites, because a golden that cannot be made red
-would certify the edit rather than check it.
-
-What it does NOT cover — stated because an over-claimed oracle is worse than a
-narrow one (review #1996, C11): the SELECT list, ``FROM``/``JOIN`` targets and
-aliases, ``LIMIT`` / ``ORDER BY`` / ``GROUP BY``, CTE names. Those are outside a
-predicate chain, so mutating them is GREEN here. #1980 changes none of them —
-every changed line in the production diff is a ``WHERE`` / ``AND`` / ``OR (``
-conjunct line — and the sibling pins that do cover them are elsewhere
-(``tests/test_river_ts_read_path_surrogate_keys.py`` embeds ``LIMIT 1`` in its
-pinned substrings, ``tests/test_hydro_display_mvt_scaling.py`` pins ``JOIN
-core.river_segment rs``).
+Chain comparison covers WHERE/ON/HAVING predicates, not SELECT lists, table
+targets or ordering. The counter-examples below keep those limits explicit.
 """
 
 from __future__ import annotations
@@ -116,20 +82,10 @@ def test_the_golden_covers_exactly_the_registered_entries() -> None:
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
-def test_every_registered_legacy_variant_reproduces_the_golden_chains(entry) -> None:
-    golden = GOLDEN["entries"][entry.key]
-    assert golden["path"] == entry.path
-    assert golden["kind"] == entry.kind
-    assert golden["params"] == entry.params
+def test_legacy_renderer_preserves_every_current_template_predicate(entry) -> None:
+    template = entry.source()
 
-    chains = _legacy_chains(entry.source(), entry.key)
-
-    expected = tuple(tuple(chain) for chain in golden["chains"])
-    assert len(chains) == len(expected), (
-        f"{entry.key}: {len(chains)} chains after normalisation, {len(expected)} at {GOLDEN_BASE_SHA}"
-    )
-    for index, (actual_chain, expected_chain) in enumerate(zip(chains, expected, strict=True)):
-        assert actual_chain == expected_chain, f"{entry.key}: chain {index} changed"
+    assert _legacy_chains(template, entry.key) == sql_chains(template)
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)
@@ -230,9 +186,7 @@ def test_moving_a_conjunct_out_of_a_join_into_the_where_changes_the_chains() -> 
     not allowed to move a predicate between chains either way. Chains are
     therefore compared positionally, each as its own multiset.
     """
-    mutated = _SPECIMEN.replace(
-        "     AND rs.river_network_version_id = :river_network_version_id\n", ""
-    ).replace(
+    mutated = _SPECIMEN.replace("     AND rs.river_network_version_id = :river_network_version_id\n", "").replace(
         "      AND ts.valid_time = :valid_time\n",
         "      AND ts.valid_time = :valid_time\n      AND rs.river_network_version_id = :river_network_version_id\n",
     )

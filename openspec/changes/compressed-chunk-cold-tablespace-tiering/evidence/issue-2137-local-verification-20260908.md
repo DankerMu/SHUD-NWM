@@ -641,10 +641,43 @@ The remaining local warning is the unchanged ecCodes 2.41.0 recommendation for
 2.42.0. The second CI warning was runner-environment output, not another test
 failure. No remote node, live DB or live receipt was accessed.
 
+## Fourth master advance: runbook and gate-memory integration
+
+The launcher repair was committed at
+`6eaa6fd695bd4ea2c3cbe40bedd89b272fd3907b`. Before its final review/push,
+`origin/master` advanced again to
+`86fb4293f449058feb51f4f1ff5f40a775bb5d11`. Its 39-path delta overlapped this
+PR at two paths: the review-gate memory and the shared timeseries-storage
+runbook. The apparent one-path result from a shell `comm` command was rejected;
+a Python set comparison against the explicit merge base correctly found both.
+
+The runbook merged automatically. Master adds the #2210 three-day chunk-
+geometry notice near the current policy and clarifies that historical
+compression-capacity arithmetic assumed seven-day chunks. These additions sit
+outside the bounded `## #1895 controlled live rollout` section and do not alter
+G0-G8 commands. The #1895 section still spans its own heading through the timer-
+cadence heading without inserted gates.
+
+Gate memory required a fourth append-point resolution. Current master has 271
+records, including new closed `2115` and `2148` records and an appended merged
+PR #2209 entry on the existing `1980` record. The resolution takes all current
+master values as authoritative and adds only this branch's open `2137` record,
+for 272 records. It does not preserve an older branch copy of `1980` and does
+not use whole-file ours/theirs replacement.
+
+Affected-tree verification before completing this merge commit:
+
+- Runbook contract suite: `62 passed`.
+- Shipping selector for the merged runbook: 19 assertion-bearing owner suites.
+- Complete merged runbook owner closure: `700 passed` in 21.44 seconds.
+- Target OpenSpec strict validation, staged diff, no-unmerged-path and exact
+  272-record gate-memory assertions: PASS.
+
 ## Remaining gates after this record
 
-- Treat the commit containing this launcher repair and evidence as `ci-only`,
-  rerun Phase 7 on its exact SHA, push once, and require fresh exact-SHA GitHub
-  CI to execute assertions and pass before the pre-merge hard gate.
+- Complete the fourth master merge commit, regenerate and rerun exact-tree
+  selector/targeted/full verification, rerun Phase 7 on that SHA, push once,
+  and require fresh exact-SHA GitHub CI to execute assertions and pass before
+  the pre-merge hard gate.
 - Do not access node-27 before #2137 merges. Task 4.0 remains unchecked until
   that merge; live tasks 4.1-4.8 remain unexecuted.

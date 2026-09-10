@@ -392,6 +392,7 @@ def _model_operation_preflight_schema() -> dict:
     """:source: ``_build_model_operation_preflight`` (model_registry.py:3034-3091),
     optionally rewritten by ``_apply_idempotent_rollback_preflight``
     (model_registry.py:3784), which only replaces existing keys."""
+
     def evidence_list() -> dict:
         # A fresh dict per call: PyYAML emits anchors/aliases for shared object
         # identity, which would make the regenerated spec unreadable.
@@ -662,7 +663,7 @@ def _spliced_forecast_response_schema() -> dict:
                             "type": "integer",
                             "description": "Available forecast lead time in hours; omitted on analysis segments.",
                         },
-                        "segment_role": {"type": "string", "enum": ["past_7_days", "future_7_days"]},
+                        "segment_role": {"type": "string", "enum": ["past_3_days", "future_7_days"]},
                         "data": {
                             "type": "array",
                             "items": {

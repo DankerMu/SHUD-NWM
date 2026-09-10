@@ -1492,7 +1492,7 @@ function normalizeForecastSeries(forecast: ApiForecastPayload | null | undefined
         source,
         scenarioId,
         role: segment.segment_role,
-        isAnalysis: segment.segment_role === 'past_7_days' || scenarioId.includes('analysis'),
+        isAnalysis: segment.segment_role === 'past_3_days' || scenarioId.includes('analysis'),
       }))
     })
   }
@@ -1507,7 +1507,7 @@ function normalizeForecastSeries(forecast: ApiForecastPayload | null | undefined
         source,
         scenarioId: segment.scenario_id,
         role: segment.segment_role,
-        isAnalysis: segment.segment_role === 'past_7_days' || segment.scenario_id.includes('analysis'),
+        isAnalysis: segment.segment_role === 'past_3_days' || segment.scenario_id.includes('analysis'),
       }))
   })
 }
