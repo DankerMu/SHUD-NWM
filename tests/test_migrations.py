@@ -2,10 +2,11 @@ import re
 from pathlib import Path
 
 from packages.common.migrate import split_sql_statements
+from packages.common.river_ts_render import render_river_ts_sql
+from services.tiles.mvt import _valid_times_any_source_template, _valid_times_named_source_template
 from tests.test_sql_shape_helpers import (
     FORBIDDEN_TEXT_FACT_COLUMNS,
     outer_predicates,
-    sql_literals,
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "migrations"
@@ -385,13 +386,6 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
     """
     migration = dict(_migration_sql())[SURROGATE_KEY_READ_INDEX_MIGRATION]
     text_migration = dict(_migration_sql())["000021_latest_ready_run_discovery_idx.sql"]
-    mvt_source = (Path(__file__).resolve().parents[1] / "services" / "tiles" / "mvt.py").read_text(
-        encoding="utf-8"
-    )
-    valid_time_source = mvt_source[
-        mvt_source.index("def valid_times_for_layer") : mvt_source.index("def national_discharge_valid_times")
-    ]
-    named_branch_sql, no_named_branch_sql = sql_literals(valid_time_source)
     hydro_columns = _index_columns_by_name(
         migration,
         "river_ts_selected_identity_key_valid_time_idx",
@@ -418,62 +412,48 @@ def test_selected_run_valid_time_discovery_migration_matches_strict_identity_pre
         "valid_time DESC",
     )
 
-    for expected in (
-        # #1980: `run_key` is now the WHERE-line conjunct and `run_id` the marked
-        # aid under it, so the key resolution opens the chain.
-        "WHERE run_key = (",
-        "SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id",
-        "AND basin_version_key = (",
-        "SELECT basin_version_key FROM core.basin_version",
-        "WHERE basin_version_id = :basin_version_id",
-        "AND river_network_version_key = (",
-        "SELECT river_network_version_key FROM core.river_network_version",
-        "WHERE river_network_version_id = :river_network_version_id",
-        "variable_e = (",
-        "SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e",
-        "WHERE e::text = :variable",
-        "ORDER BY valid_time DESC",
-    ):
-        assert expected in named_branch_sql, expected
+    for store in ("legacy", "narrow"):
+        named_branch_sql = render_river_ts_sql(_valid_times_named_source_template(store), store).sql
+        no_named_branch_sql = render_river_ts_sql(_valid_times_any_source_template(store), store).sql
+        for expected in (
+            "WHERE run_key = (",
+            "SELECT h.run_key FROM hydro.hydro_run h",
+            f"WHERE h.run_id = :run_id AND h.timeseries_store = '{store}'",
+            "AND basin_version_key = (",
+            "SELECT basin_version_key FROM core.basin_version",
+            "WHERE basin_version_id = :basin_version_id",
+            "AND river_network_version_key = (",
+            "SELECT river_network_version_key FROM core.river_network_version",
+            "WHERE river_network_version_id = :river_network_version_id",
+            "variable_e = (",
+            "SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e",
+            "WHERE e::text = :variable",
+        ):
+            assert expected in named_branch_sql, expected
 
-    # The whole outer query, spelled out. Equality rather than a list of `in`
-    # checks: it pins the four key columns in the index's own order, pins each
-    # sanctioned text aid as ADJACENT to its counterpart (a pair split across
-    # the query stops being a self-evident no-op), and is red the moment any
-    # other predicate — text or key — appears.
-    # #1980 re-pin: `run_id` is now the marked aid on its own `AND` line under
-    # the `WHERE` line's key predicate, so the first two conjuncts swap. The
-    # index-order claim this equality makes is about the KEY columns, which are
-    # unmoved; conjunct order inside one AND-chain is the one thing #1980's
-    # golden oracle deliberately does not preserve.
-    assert outer_predicates(named_branch_sql) == (
-        "SELECT DISTINCT valid_time FROM hydro.river_timeseries "
-        "WHERE run_key = AND run_id = :run_id "
-        "AND basin_version_key = "
-        "AND river_network_version_id = :river_network_version_id AND river_network_version_key = "
-        "AND variable = :variable AND variable_e = "
-        "ORDER BY valid_time DESC LIMIT :limit"
-    )
+        # Raw arms preserve the strict key prefix; the callable capture owns
+        # the single DISTINCT/order/limit above their union.
+        table = "hydro.river_timeseries_legacy" if store == "legacy" else "hydro.river_timeseries"
+        run_aid = "AND run_id = :run_id " if store == "legacy" else ""
+        network_aid = "AND river_network_version_id = :river_network_version_id " if store == "legacy" else ""
+        variable_aid = "AND variable = :variable " if store == "legacy" else ""
+        assert outer_predicates(named_branch_sql) == (
+            f"SELECT valid_time FROM {table} WHERE run_key = {run_aid}"
+            f"AND basin_version_key = {network_aid}AND river_network_version_key = "
+            f"{variable_aid}AND variable_e ="
+        )
 
-    # Negative pin (never delete, only re-point): the text columns that
-    # compression does NOT let us push down stay off the fact table entirely,
-    # in either branch, and neither branch keeps the old IS-NULL-or-equals
-    # text guards.
-    #
-    # Word-boundary matching, not bare substrings: these two branches are
-    # single-table queries with no alias to qualify on, and `unit` /
-    # `quality_flag` are prefixes of the legitimate `unit_e` /
-    # `quality_flag_e`. A bare `in` check would false-red the moment either
-    # enum column is projected here, and would false-red on correct post-#1342
-    # code for the same reason.
-    for branch in (named_branch_sql, no_named_branch_sql):
-        outer = outer_predicates(branch)
-        for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
-            assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
-    assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in valid_time_source
-    assert "(:river_network_version_id IS NULL OR river_network_version_id = :river_network_version_id)" not in (
-        valid_time_source
-    )
+        # Check each rendered fact arm independently, not an aggregate source
+        # region where an authority lookup could mask a forbidden fact column.
+        for branch in (named_branch_sql, no_named_branch_sql):
+            outer = outer_predicates(branch)
+            for forbidden in FORBIDDEN_TEXT_FACT_COLUMNS:
+                assert re.search(rf"\b{forbidden}\b", outer) is None, forbidden
+            assert "(:basin_version_id IS NULL OR basin_version_id = :basin_version_id)" not in branch
+            assert (
+                "(:river_network_version_id IS NULL OR "
+                "river_network_version_id = :river_network_version_id)"
+            ) not in branch
 
 
 def test_surrogate_key_read_index_migration_adds_one_plain_index_and_drops_nothing() -> None:

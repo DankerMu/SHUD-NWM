@@ -53,6 +53,8 @@
 
   **Suggested fixture level:** compact - one callable with two branches and a limit-sensitive ordering contract.
 
+  **Execution fixture:** compact (`fixtures/I3c-2207.md`), retaining the suggested level: one timestamp-discovery callable and one outer semantic layer, without tile-generation or production state changes. Raw named authority is explicitly qualified; any authority is a correlated EXISTS. Static extraction/index oracles migrate to real raw sources with exact census preserved. Dedicated discovery fixtures keep shifted decoy times; coupled MVT cases still transition once and retain their original assertions. Parent verifies the complete mapped backend matrices on node-27; no production activation or compressed-plan evidence is claimed.
+
   **Minimal mergeable slice:** atomic: both branches are selected by the same callable and must share one outer distinct/order/limit contract.
 - [ ] 2.3a (I4a, #1983) `apps/api/routes/hydro_display.py`: carry `timeseries_store` through the existing run metadata seam and render the MVT source-identity probe for that one known store; do not union its `SELECT 1 ... LIMIT 1`. Preserve `.first()`, validation-before-SQL, and `MVT_SOURCE_IDENTITY_NOT_FOUND` 404 behavior. Verify: SQL shape/registry/golden oracles plus MVT scaling/API contract tests through one API verification path.
 
