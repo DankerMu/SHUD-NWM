@@ -4242,3 +4242,19 @@ and seat caps remain unchanged. A new human keep/cut call is deferred: this
 PR supplies no new later-round attribution, and the mixed code/evidence/prose
 measurement limitations recorded above remain unresolved. Issue-delivery
 authorization is not authorization to narrow review policy.
+
+## Revisit — PR #2225 (issue #1982), 2026-09-10
+
+The post-merge audit reports 615 records (606 merged, nine terminal), with
+199 multi-round merged PRs and later-round attribution core=237, rotated=270,
+phase=57, skipped=15.
+
+PR #2225 added one independently confirmed first-round P1: working frozen-SQL
+CI edges lacked permanent exact-selection and unrescued-deletion regression
+owners. Two tests closed it; round 2 and the independent final gap sweep were
+clean. It therefore adds no later-round catch for or against rotation.
+
+A new human keep/cut call is deferred: this PR adds no later-round attribution
+and does not resolve the mixed code/evidence/prose measurement limitations
+recorded above. The existing keep decision and seat caps remain unchanged;
+issue-delivery authorization does not authorize a review-policy change.
