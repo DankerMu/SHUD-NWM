@@ -121,6 +121,32 @@ class CatalogChunk:
     range_end: datetime
     is_compressed: bool
 
+    def __post_init__(self) -> None:
+        sibling = (self.compressed_oid, self.compressed_schema, self.compressed_name)
+        if isinstance(self.is_compressed, bool) and self.is_compressed:
+            if any(value is None for value in sibling):
+                raise ColdResidencyError("compressed sibling identity is required for compressed chunk")
+            if (
+                isinstance(self.compressed_oid, bool)
+                or not isinstance(self.compressed_oid, int)
+                or self.compressed_oid <= 0
+            ):
+                raise ColdResidencyError("compressed sibling OID must be a positive integer")
+            if not isinstance(self.compressed_schema, str) or not self.compressed_schema.strip():
+                raise ColdResidencyError("compressed sibling schema must be non-empty")
+            if not isinstance(self.compressed_name, str) or not self.compressed_name.strip():
+                raise ColdResidencyError("compressed sibling name must be non-empty")
+            if self.compressed_oid == self.origin_oid:
+                raise ColdResidencyError("compressed sibling OID aliases the origin")
+            if (self.compressed_schema, self.compressed_name) == (self.origin_schema, self.origin_name):
+                raise ColdResidencyError("compressed sibling identity aliases the origin")
+            return
+        if isinstance(self.is_compressed, bool) and not self.is_compressed:
+            if any(value is not None for value in sibling):
+                raise ColdResidencyError("uncompressed chunk must not have compressed sibling identity")
+            return
+        raise ColdResidencyError("is_compressed must be boolean")
+
 
 @dataclass(frozen=True)
 class ResidencyMember:

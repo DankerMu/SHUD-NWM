@@ -241,8 +241,8 @@ def test_dry_run_records_already_cold_without_consuming_bound(tmp_path: Path, mo
         origin_name="_hyper_1_2_chunk",
         compressed_oid=21,
         compressed_name="compress_21",
-        range_start=CUTOFF,
-        range_end=CUTOFF + timedelta(days=0),
+        range_start=CUTOFF - timedelta(days=7),
+        range_end=CUTOFF,
     )
     connection.load_group(cold, complete_relations(origin_space="nhms_cold"))
     connection.load_group(

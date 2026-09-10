@@ -188,7 +188,7 @@ def chunk(
         origin_name=origin_name,
         compressed_oid=compressed_oid,
         compressed_schema=None if compressed_oid is None else "_timescaledb_internal",
-        compressed_name=compressed_name,
+        compressed_name=None if compressed_oid is None else compressed_name,
         range_start=range_start,
         range_end=range_end,
         is_compressed=is_compressed,
@@ -283,11 +283,13 @@ def parity_aggregate(
     row_count: int = 2,
     checksum_xor: int = 1,
     checksum_sum: int = 3,
+    origin_oid_matches: bool = True,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "row_count": row_count,
         "checksum_xor": checksum_xor,
         "checksum_sum": checksum_sum,
+        "origin_oid_matches": origin_oid_matches,
     }
     for index, _column in enumerate(inventory.columns):
         row[f"nn_{index}"] = row_count
@@ -515,7 +517,7 @@ class FakeConnection:
             return [{"tablespace_name": item} for item in names], ["tablespace_name"]
         if "hashtextextended" in text or "checksum_xor" in text:
             if not self.parity_rows:
-                return [], ["row_count", "checksum_xor", "checksum_sum"]
+                return [], ["row_count", "checksum_xor", "checksum_sum", "origin_oid_matches"]
             return self.parity_rows, list(self.parity_rows[0].keys())
         if (
             text.startswith("LOCK TABLE")

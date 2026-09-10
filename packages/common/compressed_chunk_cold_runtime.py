@@ -185,12 +185,7 @@ def _parity_for(
     chunk: CatalogChunk,
 ) -> WindowParity:
     inventory = inventories.for_hypertable(chunk.hypertable_schema, chunk.hypertable_name)
-    return compute_window_parity(
-        execute,
-        inventory,
-        range_start=chunk.range_start,
-        range_end=chunk.range_end,
-    )
+    return compute_window_parity(execute, inventory, chunk)
 
 
 def _member_identity(group: ResidencyGroup) -> tuple[tuple[int, str, str, str, str, int | None, int | None, str], ...]:
@@ -262,7 +257,15 @@ def _revalidate_locked(
     current = _reload_chunk(execute, selected)
     if any(
         getattr(current, field) != getattr(selected, field)
-        for field in ("origin_oid", "range_start", "range_end", "hypertable_schema", "hypertable_name")
+        for field in (
+            "origin_oid",
+            "origin_schema",
+            "origin_name",
+            "range_start",
+            "range_end",
+            "hypertable_schema",
+            "hypertable_name",
+        )
     ):
         raise ColdRuntimeError("durable identity drifted under lock", error_class="selection_race", stage="revalidate")
     eligibility = classify_eligibility(
@@ -868,6 +871,8 @@ def reconcile_named_group(
         )
         if (
             after.origin_oid != origin_oid
+            or after.origin_schema != origin_schema
+            or after.origin_name != origin_name
             or after.range_start != range_start
             or after.range_end != range_end
         ):

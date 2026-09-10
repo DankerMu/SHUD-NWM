@@ -112,12 +112,7 @@ def observe_named_group(
             stage="post-target",
         )
     inventory = inventories.for_hypertable(chunk.hypertable_schema, chunk.hypertable_name)
-    parity = compute_window_parity(
-        execute,
-        inventory,
-        range_start=chunk.range_start,
-        range_end=chunk.range_end,
-    ).as_dict()
+    parity = compute_window_parity(execute, inventory, chunk).as_dict()
     if expected_parity is not None and json_ready(parity) != json_ready(dict(expected_parity)):
         raise Issue1895ReadinessError(
             "business-window parity changed",

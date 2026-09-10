@@ -53,6 +53,7 @@ from scripts.select_ci_tests import (
     NODE22_ENTRYPOINT_INVARIANT_TEST,
     ORCHESTRATOR_CLI_IMPORTER_TESTS,
     ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
+    ORIGIN_CHUNK_PARITY_TESTS,
     PATH_TEST_RULES,
     QHH_CYCLE_SBATCH,
     QHH_DIAGNOSTIC_README,
@@ -12183,9 +12184,62 @@ def test_issue1895_cli_producer_rules_red_when_removed(monkeypatch: pytest.Monke
         )
 
 
+ORIGIN_CHUNK_PARITY_OWNERS = (
+    "packages/common/compressed_chunk_cold_runtime_catalog.py",
+    "packages/common/compressed_chunk_cold_runtime.py",
+    "scripts/node27_cold_residency_census.py",
+    "packages/common/node27_issue1895_post_target.py",
+    "docs/runbooks/tier-node27-timeseries-storage.md",
+)
+ORIGIN_CHUNK_PARITY_PARTITIONS = (
+    "tests/test_compressed_chunk_cold_runtime.py",
+    "tests/test_compressed_chunk_cold_runtime_proof.py",
+    "tests/test_node27_cold_residency.py",
+    "tests/test_node27_cold_residency_phase2.py",
+    "tests/test_node27_cold_residency_census.py",
+    "tests/test_compressed_chunk_cold_runtime_integration.py",
+    "tests/test_issue1895_readiness_storage.py",
+    "tests/test_issue1895_runbook_contract.py",
+    "tests/test_issue2224_origin_chunk_parity.py",
+    "tests/test_issue2224_origin_parity_integration.py",
+    "tests/test_issue2224_origin_parity_runbook_contract.py",
+)
+
+
+def test_origin_chunk_parity_owners_preserve_existing_legs_and_select_new_partitions() -> None:
+    assert set(ORIGIN_CHUNK_PARITY_TESTS) == set(ORIGIN_CHUNK_PARITY_PARTITIONS)
+    for owner in ORIGIN_CHUNK_PARITY_OWNERS:
+        selected = set(select_tests([owner], repo_root=Path(".")))
+        missing = sorted(set(ORIGIN_CHUNK_PARITY_PARTITIONS) - selected)
+        assert not missing, f"{owner}: origin-chunk parity partitions missing {missing}"
+
+
+@pytest.mark.parametrize("removed", ORIGIN_CHUNK_PARITY_PARTITIONS)
+def test_origin_chunk_parity_catalog_route_reds_when_any_partition_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    removed: str,
+) -> None:
+    from scripts import select_ci_tests
+
+    owner = "packages/common/compressed_chunk_cold_runtime_catalog.py"
+    matching = [rule for rule in PATH_TEST_RULES if rule.pattern == owner]
+    assert len(matching) == 1 and removed in matching[0].tests
+    mutant = tuple(
+        replace(rule, tests=tuple(test for test in rule.tests if test != removed))
+        if rule.pattern == owner
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert removed not in selected
+    assert set(ORIGIN_CHUNK_PARITY_PARTITIONS) - {removed} <= selected
+
+
 def test_issue1895_runbook_selects_the_live_rollout_contract() -> None:
     selected = set(select_tests(["docs/runbooks/tier-node27-timeseries-storage.md"], repo_root=Path(".")))
     assert "tests/test_issue1895_runbook_contract.py" in selected
+    assert "tests/test_issue2224_origin_parity_runbook_contract.py" in selected
     assert "tests/test_issue1895_readiness_performance_live.py" in selected
     # The runbook's broader sequential/cold-residency owners stay intact.
     for suite in (

@@ -17,7 +17,11 @@ drift. The 2.10.2 experiment therefore runs in a separate disposable cluster
 using the exact node-27 image identity; the live cluster is read-only during
 Issue #1892.
 
-Fixture level: expanded. Repair intensity: high. Project profile: NHMS.
+Fixture level: high. Repair intensity: high. Project profile: NHMS. The
+original expanded scope escalates to high for #2224 because a production G1
+observation exposed that D4's older target-window wording admitted a parent-
+hypertable scan; this interpretation correction affects every production parity
+caller and requires a real TimescaleDB result-and-plan oracle before live retry.
 
 ## Goals / Non-Goals
 
@@ -117,10 +121,22 @@ requirement.
 The production owner is `packages/common/compressed_chunk_cold_runtime.py`, not
 the CLI wrapper or any `compressed_chunk_cold_probe` module. It consumes the
 pure contract frozen by Issue #1892 and owns relation discovery, stable OID lock
-order,
-in-transaction revalidation, the D3 sequence, and parity over the durable origin
-chunk's half-open time range. Before the first candidate mutation in every run,
-it queries both allowlisted live hypertables for every non-dropped user column
+order, in-transaction revalidation, the D3 sequence, and parity read through the
+exact physical relation named by the durable origin chunk identity, with that
+chunk's half-open time range retained as a second identity fence. The production
+parity builder/owner requires origin schema and name as non-optional, no-default
+input derived from the currently resolved `CatalogChunk`; the owning call also
+binds origin OID and window. Missing or empty identity, the allowlisted parent,
+the current compressed sibling, or any OID/schema/name/window mismatch fails
+closed rather than selecting another relation. The parity query MUST
+NOT read from the parent hypertable and trust planner pruning to find the target,
+fall back to the parent when origin identity is absent, or hash the compressed
+internal sibling's encoded columns as business rows. On TimescaleDB 2.10.2, the
+accepted origin-relation query shape must be proven against a compressed chunk to
+return transparent business rows while accessing no sibling chunk; `ONLY` is not
+accepted unless that same oracle proves it preserves transparent decompression.
+Before the first candidate mutation in every run, it queries both allowlisted
+live hypertables for every non-dropped user column
 in physical `attnum` order, validates from the Timescale catalog that `valid_time` is the sole open time
 dimension and that its PostgreSQL type is `timestamptz`, and binds the complete name/type/nullability/
 generation inventory plus its digest to the run. Its generated parity query
@@ -139,9 +155,13 @@ production runtime MUST NOT import the fixture helper or accept an unvalidated
 caller-supplied column list. After stable heap locks, the runtime re-derives both
 inventories and the target-window parity on the moving transaction, compares
 them with the preflight descriptors/digests/parity, and only then issues the
-first movement SQL. The parity SELECT holds the hypertable read lock through
-commit. Any inventory, statement, or proof failure aborts before success and,
-when it precedes mutation, before the first movement SQL.
+first movement SQL. The parity SELECT holds the selected origin relation's read lock through commit.
+Any inventory, origin-identity, statement, or proof failure aborts before success
+and, when it precedes mutation, before the first movement SQL. G1 census,
+production runtime preflight, locked revalidation, recompression, post-commit
+readback and reconciliation, and #1895 post-target named-group observation all
+route through this same mandatory origin-qualified owner. The probe-private
+four-column fixture helper remains independent and is not widened into production.
 Connection loss/process kill is reconciled by a fresh catalog read keyed by the durable origin
 identity/window: complete source, complete target, mixed, or unknown;
 mixed/unknown is a recovery blocker, never success. A rolled-back source result
@@ -469,7 +489,10 @@ Core packs considered:
   compression/decompression/retention races, current-run brackets, commit
   reconciliation and C3-after-C4-PASS publication order are enforced.
 - Resource limits / large input / discovery: selected — multi-gigabyte relation
-  moves and receipt/HTTP/process inputs need group, byte, tick and time bounds.
+  moves and receipt/HTTP/process inputs need group, byte, tick and time bounds;
+  #2224 corrects the live-discovered parent-hypertable parity scan while retaining
+  the census `3600000` ms and runtime `3600s` finite ceilings rather than masking
+  the defect with an unbounded or enlarged timeout.
 - Legacy compatibility / examples: selected — current compression, retention,
   write guards, readonly facade exports/patch seams, hot-chunk placement and
   display reads remain compatible; #2137 consumes rather than duplicates C4.
@@ -479,7 +502,9 @@ Core packs considered:
 - Release / packaging / dependency compatibility: selected — behavior is pinned
   specifically to PG 15.2 / TimescaleDB 2.10.2; no upgrade is allowed.
 - Documentation / migration notes: selected — ADR, executable G0/live runbook,
-  correct C4 command ownership and production rollback are merge-gating artifacts.
+  correct C4 command ownership and production rollback are merge-gating artifacts;
+  #2224 must add the G0/G1 STOP that invalidates the failed `a8db554d` window and
+  requires a fresh exact-SHA window after the origin-parity repair merges.
 
 Domain packs considered:
 
@@ -489,7 +514,10 @@ Domain packs considered:
 - SHUD numerical runtime / conservation / NaN: not selected — no solver or
   numerical transformation.
 - PostGIS / TimescaleDB domain behavior: selected — compressed relation/catalog,
-  chunk lifecycle, tablespaces, `drop_chunks`, and 2.10.2 locks are central.
+  chunk lifecycle, tablespaces, `drop_chunks`, and 2.10.2 locks are central;
+  #2224 resolves the D4 interpretation divergence by requiring transparent
+  business-row parity from the exact physical origin and a real result-plus-plan
+  proof that no same-hypertable sibling is accessed.
 - Slurm production lifecycle / mock-vs-real parity: not selected — node-22 and
   Slurm are untouched.
 - External hydro-met providers / snapshot reproducibility: not selected — no
@@ -503,9 +531,12 @@ Domain packs considered:
 - Governing invariants: a group is reported cold only when an eligible compressed
   chunk's complete physical residency group is atomically and readably resident
   in `nhms_cold`; before live mutation, the entire #2137 G0 readiness chain must
-  be merged, and every uncertain evidence state must block remote access or PASS.
+  be merged, and after the failed first G1, #2224 must also merge before any retry;
+  every uncertain evidence state must block remote access or PASS.
 - Source of truth: display business watermark + configured compression lag;
-  TimescaleDB chunk/compression catalogs joined to PostgreSQL OIDs; fixed
+  TimescaleDB chunk/compression catalogs joined to PostgreSQL OIDs, with the
+  mandatory current durable origin OID/schema/name/window selecting the physical
+  parity relation and parent inventory selecting only business columns; fixed
   tablespace catalog/path/device identity; required expected and independently
   observed numeric container runtime UID/GID; receipt schema version; exact
   reviewed SHA and current invocation bracket; promoted raw C4 receipt bytes.
@@ -521,8 +552,11 @@ Domain packs considered:
   gates, #2137 census/C1-C3 binders, canonical readonly facade and complete
   `select_ci_tests.py` acceptance partitions.
 - Storage/cache/query: origin/compressed heaps, TOAST and indexes across
-  `pg_default` and `nhms_cold`; private evidence files use bounded no-follow,
-  no-clobber, exact-mode durable publication; no cache or row-schema change.
+  `pg_default` and `nhms_cold`; parity selects transparent business rows from the
+  exact durable origin relation, never the parent hypertable or encoded compressed
+  sibling, while retaining a finite timeout and half-open identity fence; private
+  evidence files use bounded no-follow, no-clobber, exact-mode durable publication;
+  no cache or row-schema change.
 - Public routes/entrypoints: #1893 CLI/wrapper/systemd stage, #1894 installer and
   #2137 census/C1-C3/G8 CLIs; display API/frontend are unchanged consumers and
   C4 remains owned by the promoted `c4-live-display-evidence` capability.
@@ -530,14 +564,18 @@ Domain packs considered:
   compression, decompression replay, retention; C3 consumes raw C4 PASS bytes
   only after the shipping #2123 lane completes.
 - Failure paths/rollback/stale state: missing/mismatched inputs, SHA, digest,
-  invocation bracket or POSIX identity; stale/partial/private-path evidence;
+  invocation bracket, POSIX identity or durable origin relation; parent/sibling
+  substitution and OID/schema/name/window drift have no fallback; stale/partial/
+  private-path evidence;
   lock/statement/wall timeout, target full, process kill, relation deletion or
   decompression, catalog/path drift, mixed residency and publication failure;
   pre-mutation disposable inverse, installer-owned reconciliation/rollback only
   while an in-progress private authority remains live, then stop-and-preserve
   after terminal installation.
 - Evidence/audit/readiness: #2137 local fixture, schema, binder, readonly-seam and
-  selector-mutant evidence does not claim live PASS; current-run exact-SHA
+  selector-mutant evidence does not claim live PASS; #2224 unit SQL shape cannot
+  substitute for its isolated PG 15.2 / TimescaleDB 2.10.2 result-and-plan proof,
+  and neither can substitute for a fresh production G1 after merge; current-run exact-SHA
   isolated rollback probe, invocation-bracketed schema-valid receipts, same-time
   dual-device governance, exact-SHA node-27 C1-C4/cold gates and merged rollout
   evidence remain #1895 live obligations.
@@ -565,6 +603,11 @@ Regression rows:
   collect-only fallback.
 - Pre-merge task 4.0 -> no node-27/node-22 access and no census/probe/live receipt
   claim; only merged task 4.0 permits the post-merge 4.1 entrypoint.
+- #2224 origin-parity repair -> every production caller requires the current
+  durable origin identity, executes one business-row aggregate from that physical
+  origin with no parent/compressed-sibling fallback, and under isolated 2.10.2
+  large-sibling data produces target-sensitive, sibling-independent results plus
+  a plan naming no sibling; finite production timeouts remain unchanged.
 - Fresh pre-install and post-install census -> exactly the same six durable keys,
   complete-source preimages and inventory/parity inputs with no extra eligible
   key, or zero movement and terminal NO-GO.
@@ -582,8 +625,9 @@ Boundary-surface checklist:
   publication primitives reused by #2137 without weakening existing consumers.
 - Public entrypoints: one residency lifecycle lane, one installer/preflight and
   #2137 census/C1-C3/G8 acceptance CLIs; no duplicate mutation timer or C4 lane.
-- Read/write surfaces: catalog/OID resolution, relation files, tablespace paths,
-  private receipt publication and readonly validation; no business-row rewrite.
+- Read/write surfaces: catalog/OID resolution, mandatory origin-qualified parity
+  reads in census/runtime/post-target, relation files, tablespace paths, private
+  receipt publication and readonly validation; no business-row rewrite.
 - Staging/publish/rollback: database transaction + post-commit reconciliation;
   no-follow/no-clobber current-run receipts; C3 binds C4 bytes after C4 PASS;
   disposable inverse before live mutation; installer-owned recovery only for a
@@ -618,15 +662,23 @@ Boundary-surface checklist:
    selector/tests without node-27 access. It consumes the C4 capability already
    merged through #2123 and the classification clarification from #2130; it does
    not reimplement the frontend producer or claim a live receipt.
-6. Only after that readiness child merges, #1895 performs the controlled live
-   install/migration, consumes the pre-mutation disposable inverse proof, and
-   validates installer recovery boundaries, automatic convergence, C1-C4 and
-   display/performance.
-7. Archive this shared OpenSpec change only after #1895; the readiness child leaves
+6. The first #1895 G1 observation ended NO-GO before census publication because
+   parent-hypertable parity reached its finite statement timeout. Child #2224
+   closes that interpretation gap, updates the executable G0/G1 STOP, and merges
+   mandatory origin-qualified production parity plus its isolated 2.10.2 oracle.
+7. Only after #2224 merges, #1895 starts a fresh window from G0 at the new exact
+   reviewed SHA, performs the controlled live install/migration, consumes the
+   pre-mutation disposable inverse proof, and validates installer recovery
+   boundaries, automatic convergence, C1-C4 and display/performance.
+8. Archive this shared OpenSpec change only after #1895; the readiness child leaves
    tasks 4.1-4.8 unchecked so unexecuted live behavior is never published as done.
 
 ## Open Questions
 
+- #2224 has no product-choice blocker. Whether direct origin or `ONLY` origin is
+  the accepted SQL form is deliberately decided by the isolated TimescaleDB 2.10.2
+  result-and-plan oracle: the form must preserve transparent compressed business
+  rows and exclude sibling chunks. The fixture does not preselect an unproven form.
 - None for #1929. Node-27's current numeric runtime identity is measured as
   `1005:1005`, but the fixture does not hard-code that deployment value: #1895
   must re-observe it and place the same explicit pair in the mode-0600 environment.
