@@ -95,6 +95,16 @@ Every reader of the river fact table SHALL keep one SQL template whose transitio
 - **WHEN** the hydro-display MVT source-identity probe receives a run whose metadata names one store
 - **THEN** it renders and executes only that store's variant, retains one `SELECT 1 ... LIMIT 1` result decision, and preserves the existing not-found response contract without a statement-level union
 
+#### Scenario: Forecast segment discovery combines routed facts below its semantic operators
+- **WHEN** any of the eight forecast-store segment queries may see runs from both stores
+- **THEN** each fact-source branch is rendered for and bound to its authoritative run store, legacy aids remain only in legacy, common projections and named parameters are shared, and the single outer latest-cycle, maximum-time, distinct winner, window and ordering logic operates on the combined rows without duplicated aggregates or limits
+- **AND** equivalent data in either store yields field-identical forecast/analysis/hindcast responses and unchanged lineage; a selected scenario/cycle is not mistaken for a unique run's store
+
+#### Scenario: Latest-product fallback routes its pinned run from real header metadata
+- **WHEN** the existing latest-product fallback header identifies one candidate run
+- **THEN** its actual timeseries_store selects exactly one rendered river_sample_rows source on the same transaction snapshot, while station coverage, strict identity, scan scalars and response fields remain unchanged; missing/null/unknown store is refused before heavy SQL, and an empty header still short-circuits
+- **AND** no constant legacy or missing-column fallback is introduced; this reader code is activated only with the I7 expand migration
+
 #### Scenario: Limited discovery applies its semantic operators once
 - **WHEN** either valid-time discovery branch may read runs from both stores
 - **THEN** its legacy and narrow fact-row branches are unioned below one outer `DISTINCT valid_time`, descending order and `LIMIT :limit`, so `sample_limit + 1` and caller-side truncation are unchanged

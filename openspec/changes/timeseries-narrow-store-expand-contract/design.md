@@ -68,6 +68,8 @@ DDL 顺序（迁移 header 记账项）：`CREATE TABLE`（PK + 两 FK 内联）
 
    #2148 / task 1.14 在纯未别名 outer fact read 下，独立检查每个 comparison-scalar body 的未限定 identity 候选；不能证明 inner-vs-outer 归属时，guarded helper 与两个 store 以 unaliased/scalar-scope 原因拒绝，不猜测或返回 fact-member 集合。三个已注册的 run/basin/network authority key-resolution **整句形状**继续放行，不能用任意表的列清单替代该有限模型；qualified inner member、outer fallback、`outer_predicates` 与 alias helper 保持原责任。具体完整正反例与每-body mutation owner 见 fixture #2148 addendum。
 
+   I2/#1981 用户裁决（2026-09-09）：不保留旧 issue 的恒 legacy 占位 lookup。八个 segment query 默认跨 run，按每行 authoritative `hydro_run.timeseries_store` 在 caller-local fact source 内限 store 并组合，outer MAX/DISTINCT/ORDER/LIMIT 只执行一次；A9 由已有单-run header 读取实际 store，只渲染该 run 的 river source。细化契约与 raw-template registry/oracle cutover 见 `fixtures/I2-1981.md`。这不是 pre-expand fallback；与其他 wave-2 reader 相同，I7 前不部署或执行。
+
 3. **Caller-owned 路由与局部 UNION（task 1.4 Stage 5 re-entry）**：渲染器只接收一段事实行模板和一个 store；caller 决定是按已知 run 的路由只渲染一个变体，还是把两个变体组合成局部 `UNION ALL`。组合对象必须是本入口的事实行子关系，不能是包含聚合、`DISTINCT`/`ORDER BY`/`LIMIT`、HTTP 结果判定或 DML 的整句。两个分支复用同一组具名参数（不加 store 后缀），投影列名、类型和顺序一致；legacy 分支只读 `hydro.river_timeseries_legacy` 并保留 aid，narrow 分支只读 `hydro.river_timeseries` 且没有事实表 text 身份列。每个 occurrence-scoped 模板都由调用模块拥有并进入 registry/census；仓内不得新增 `render_union_all` 或任何无 caller 的 SQL binder/walker。
 
 | caller-owned entry | 路由与组合位置 | 必须保留的外层语义 |
@@ -79,6 +81,8 @@ DDL 顺序（迁移 header 记账项）：`CREATE TABLE`（PK + 两 FK 内联）
 | `display_coverage:refresh` | `candidate_runs` 投影 `h.timeseries_store`；只有 `river_sample_rows` CTE 是 legacy/narrow 两支 union，每支按 `cr.timeseries_store` 限定 | station CTE、后续 river 聚合、`INSERT ... ON CONFLICT DO UPDATE ... RETURNING` 及 overwrite guard 不动；禁止对整句 DML union |
 
 这些 wave-2 reader PR 可先合入代码，但**不得在 I7 expand 之前单独部署或执行 transition SQL**：pre-expand catalog 尚无 `timeseries_store` 与 `_legacy` 表。I7 维护窗口把累计 reader 代码与改名/路由列迁移一并部署；真实混合-store PostgreSQL 与 EXPLAIN 由 I7/I8 负责，wave-2 PR 只证明 caller-owned 形状和既有外部行为。
+
+   I2/#1981 测试边界补充（2026-09-10 用户裁决）：允许每测试独立创建/销毁的 CI 数据库准备真实 post-expand 两表与 store 列，以运行既有 reader integration assertions 和 store 区分性用例；冻结 pre-expand SQL 在同一逻辑数据快照的测试转换前执行。此授权不改变生产 schema、不提前开始 #1986、不替代 node-27 的 Timescale/EXPLAIN/live receipt。上述“不得执行 transition SQL”仍约束生产激活，不禁止显式隔离测试 fixture。
 
 非模板面（同批处理）：`services/tile_publisher/publisher.py` 的 `_has_table` 前置在过渡期接受两个名字；`services/tile_publisher/forcing_copyback_backfill.py:314` 的 `required_columns` 按 store 分支（legacy 保 `variable`，narrow 只留键/枚举）；（`scripts/node27_autopipeline.py:1443-1451` 统计守卫的 IN-list 属 D7/任务 3.1，不在本批非模板面内）；`scripts/reset_qhh_smoke_db.py`、`scripts/summarize_qhh_smoke_results.py` 按 store 渲染（reset 对 legacy run 同时清 legacy 表）；`services/production_closure/scale_validation.py` 与 `scripts/node27_timeseries_compression_live_evidence.py` 的计划形状钉子按 store 分支。
 

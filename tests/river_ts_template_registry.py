@@ -1,4 +1,4 @@
-"""The register of river fact-table READ templates, one entry per statement (#1980).
+"""The register of renderer-input river fact-row templates (#1980, #1981).
 
 ``packages/common/river_ts_render.py`` takes SQL text and has no registry of its
 own — deliberately: a production helper that knew about every call site would
@@ -8,9 +8,9 @@ makes the oracles exhaustive rather than anecdotal:
 * every entry is rendered for BOTH stores by the shape oracles, so a template
   that cannot survive the narrow rendering is red in the PR that writes it, not
   in the migration window;
-* the golden equivalence oracle (``tests/fixtures/river_ts_templates_51f9d273.json``)
-  compares every entry's legacy variant against its base-SHA form, which is what
-  makes #1980's layout normalisation provably behaviour-free;
+* the frozen I1 golden retains its 20 historical keys. Its ten non-forecast
+  entries still compare against current raw inputs; I2's two new forecast raw
+  sources have separate routing and nine executed-query semantic owners;
 * **registry closure** — for every production file, the canonical-table mentions
   of that file's entries plus its declared non-template mentions must equal the
   file's census. An unregistered read site is therefore red, which is the only
@@ -23,16 +23,15 @@ One block per reader module, in stable file order (path-sorted). Wave 2 of the
 epic (#1981–#1984) appends whole blocks; keeping the blocks separate and ordered
 is what lets four PRs touch this file without colliding on one tuple.
 
-Assembled statements
---------------------
+Executed forecast statements
+---------------------------
 
-Six of forecast_store's entries only exist at runtime: the segment blocks
-interpolate a scenario / identity filter, and the latest-product fallback's heavy
-CTE is only built after a header prefetch. Those come through the capture-cursor
-harness that already exists in ``tests/test_river_ts_text_identity_cleanup.py``
-rather than through a second copy of it. The imports are INSIDE the callables on
-purpose: the shape-oracle modules import this register at module level, and a
-top-level import of a ``test_*`` module here would close that loop into a cycle.
+``FORECAST_STORE_EXECUTIONS`` captures all eight spanning segment queries plus
+the known-run latest-product fallback, separately from the 12 raw ``REGISTRY``
+inputs. A composed store union is never passed wholesale to the narrow renderer.
+The capture harness remains in ``tests/test_river_ts_text_identity_cleanup.py``.
+Imports stay inside callables because the owning test modules import this
+register at module level.
 """
 
 from __future__ import annotations
@@ -86,10 +85,7 @@ class TemplateEntry:
     """One registered river read template.
 
     ``kind``
-        ``statement`` renders on its own; ``fragment`` is a WHERE-chain body
-        embedded by a caller (``forecast_store._SEGMENT_IDENTITY_PREDICATE_SQL``),
-        so it names no table — the rename is a no-op on it and the structural
-        check applies to the fragment alone.
+        ``statement`` is a raw renderer input, never composed executed SQL.
     ``params``
         ``positional`` (``%s``) or ``named`` (``%(name)s`` / ``:name``).
     ``expected_aids``
@@ -98,6 +94,10 @@ class TemplateEntry:
     ``mentions``
         canonical-table occurrences in the entry's own text, which the closure
         check sums per file.
+    ``source(store)``
+        Raw input for that store, including caller-owned routing literals.
+        Unrouted siblings return the same authored input for either store.
+        The store is required: there is no implicit legacy input for a narrow render.
     """
 
     key: str
@@ -106,7 +106,7 @@ class TemplateEntry:
     params: str
     expected_aids: int
     mentions: int
-    source: Callable[[], str]
+    source: Callable[[str], str]
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +146,7 @@ def _sql_constant(module: tuple[str, ...], function: str, needle: str, index: in
 # ---------------------------------------------------------------------------
 
 
-def _hydro_display_identity_probe() -> str:
+def _hydro_display_identity_probe(_store: str) -> str:
     return _sql_constant(
         ("apps", "api", "routes", "hydro_display.py"),
         "_require_hydro_mvt_source_identity",
@@ -172,7 +172,7 @@ HYDRO_DISPLAY_ENTRIES: tuple[TemplateEntry, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _display_coverage_refresh() -> str:
+def _display_coverage_refresh(_store: str) -> str:
     from packages.common import display_coverage
 
     return display_coverage._REFRESH_SQL
@@ -209,59 +209,58 @@ FORECAST_STORE_SEGMENT_BLOCKS: tuple[str, ...] = (
 )
 
 
-def _segment_identity_fragment() -> str:
+def _segment_rows_source(store: str) -> str:
     from packages.common import forecast_store
 
-    return forecast_store._SEGMENT_IDENTITY_PREDICATE_SQL
+    return forecast_store._segment_rows_source_template(store)
 
 
-def _segment_block(label: str) -> Callable[[], str]:
-    def source() -> str:
-        from tests.test_river_ts_text_identity_cleanup import _segment_block_statements
+def _latest_product_river_source(store: str) -> str:
+    from packages.common import forecast_store
 
-        rendered = _segment_block_statements()
-        assert label in rendered, f"forecast_store segment block {label} is no longer rendered"
-        return rendered[label]
-
-    return source
+    return forecast_store._latest_product_river_source_template(store)
 
 
-def _latest_product_fallback() -> str:
-    from tests.test_river_ts_text_identity_cleanup import _latest_product_fallback_statement
+def _segment_execution(label: str) -> Callable:
+    def capture():
+        from tests.test_river_ts_text_identity_cleanup import _segment_block_executions
 
-    return _latest_product_fallback_statement()
+        return _segment_block_executions()[label]
+
+    return capture
+
+
+def _latest_product_execution():
+    from tests.test_river_ts_text_identity_cleanup import _latest_product_fallback_execution
+
+    return _latest_product_fallback_execution()
+
+
+# Executed statements are deliberately NOT renderer inputs.
+FORECAST_STORE_EXECUTIONS = {
+    **{label: _segment_execution(label) for label in FORECAST_STORE_SEGMENT_BLOCKS},
+    "latest_product_fallback": _latest_product_execution,
+}
 
 
 FORECAST_STORE_ENTRIES: tuple[TemplateEntry, ...] = (
     TemplateEntry(
-        key="forecast_store:segment_identity_predicates",
-        path="packages/common/forecast_store.py",
-        kind="fragment",
-        params="positional",
-        expected_aids=3,
-        mentions=0,
-        source=_segment_identity_fragment,
-    ),
-    *(
-        TemplateEntry(
-            key=f"forecast_store:{label}",
-            path="packages/common/forecast_store.py",
-            kind="statement",
-            params="positional",
-            expected_aids=3,
-            mentions=1,
-            source=_segment_block(label),
-        )
-        for label in FORECAST_STORE_SEGMENT_BLOCKS
-    ),
-    TemplateEntry(
-        key="forecast_store:latest_product_fallback",
+        key="forecast_store:segment_rows_source",
         path="packages/common/forecast_store.py",
         kind="statement",
         params="named",
         expected_aids=3,
         mentions=1,
-        source=_latest_product_fallback,
+        source=_segment_rows_source,
+    ),
+    TemplateEntry(
+        key="forecast_store:latest_product_river_source",
+        path="packages/common/forecast_store.py",
+        kind="statement",
+        params="named",
+        expected_aids=3,
+        mentions=1,
+        source=_latest_product_river_source,
     ),
 )
 
@@ -271,7 +270,7 @@ FORECAST_STORE_ENTRIES: tuple[TemplateEntry, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _copyback_discovery() -> str:
+def _copyback_discovery(_store: str) -> str:
     from services.tile_publisher import forcing_copyback_backfill
 
     return forcing_copyback_backfill._DISCOVER_BACKFILL_RUNS_SQL
@@ -295,7 +294,7 @@ COPYBACK_ENTRIES: tuple[TemplateEntry, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _publisher_discovery() -> str:
+def _publisher_discovery(_store: str) -> str:
     """The q_down discovery aggregate, PostgreSQL dialect.
 
     Registered once, not once per dialect: both dialects come out of the SAME
@@ -342,8 +341,8 @@ PUBLISHER_ENTRIES: tuple[TemplateEntry, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _tile_sql(layer: str) -> Callable[[], str]:
-    def source() -> str:
+def _tile_sql(layer: str) -> Callable[[str], str]:
+    def source(_store: str) -> str:
         from services.tiles.mvt import postgis_tile_sql
 
         return postgis_tile_sql(layer)
@@ -351,7 +350,7 @@ def _tile_sql(layer: str) -> Callable[[], str]:
     return source
 
 
-def _valid_times_branch(index: int) -> Callable[[], str]:
+def _valid_times_branch(index: int) -> Callable[[str], str]:
     """One of ``valid_times_for_layer``'s two branches (fixture decision 1).
 
     The function selects between them with an inline conditional, so they are two
@@ -360,7 +359,7 @@ def _valid_times_branch(index: int) -> Callable[[], str]:
     would leave the second unproven.
     """
 
-    def source() -> str:
+    def source(_store: str) -> str:
         from tests.test_sql_shape_helpers import sql_literals
 
         mvt_source = (REPO_ROOT / "services" / "tiles" / "mvt.py").read_text(encoding="utf-8")
@@ -421,8 +420,8 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _parser_read(index: int) -> Callable[[], str]:
-    def source() -> str:
+def _parser_read(index: int) -> Callable[[str], str]:
+    def source(_store: str) -> str:
         from tests.test_river_ts_text_identity_cleanup import _sql_constants
 
         return _sql_constants(
@@ -486,9 +485,8 @@ def entry_by_key(key: str) -> TemplateEntry:
 # forcing_copyback_backfill and parser; the surrogate-keys oracle owns mvt,
 # hydro_display and display_coverage), so exactly one test reddens per file.
 #
-# Counted on the SOURCE FILE, not on rendered templates: `grep -rn "remove with
-# #1342"` is the number #1342 deletes, and `forecast_store`'s three-aid fragment
-# is written once and rendered nine times.
+# Counted on the SOURCE FILE, not on executed statements. Forecast's two raw
+# sources each carry three aids; the segment source has eight execution owners.
 # ---------------------------------------------------------------------------
 
 

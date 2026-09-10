@@ -552,7 +552,10 @@ def test_qhh_latest_display_product_migration_matches_candidate_and_window_queri
             "def _fetch_latest_qhh_display_candidates_fast"
         )
     ]
-    query_source = candidate_source + fallback_source
+    # I2 moved only the river scan into its authored raw-source template.
+    from packages.common.forecast_store import _latest_product_river_source_template
+
+    query_source = candidate_source + fallback_source + _latest_product_river_source_template("legacy")
     context_source = store_source[
         store_source.index("def _fetch_latest_qhh_display_unavailable_context") : store_source.index(
             "def _fetch_station_for_series"

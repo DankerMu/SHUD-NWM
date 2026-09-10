@@ -616,6 +616,7 @@ class SqlCaptureCursor:
         return [
             {
                 "run_id": row.get("run_id"),
+                "timeseries_store": row.get("timeseries_store"),
                 "forcing_version_id": row.get("forcing_version_id"),
                 "basin_version_id": row.get("basin_version_id"),
                 "river_network_version_id": row.get("river_network_version_id"),
@@ -1088,10 +1089,11 @@ def test_forecast_series_duplicate_segment_filters_forecast_analysis_and_latest_
     ]
     statements = [statement for statement, _parameters in store.cursor.executions]
     assert statements[1].count("rs.river_network_version_id = %s") == 1
-    assert all(
-        "rt.river_network_version_id = %s" in statement for statement in (statements[2], statements[3], statements[4])
-    )
-    assert all("rnv_selected" in parameters for _statement, parameters in store.cursor.executions[1:5])
+    facts = [(sql, params) for sql, params in store.cursor.executions if "UNION ALL" in sql]
+    assert len(facts) == 3
+    for sql, params in facts:
+        assert "rt.river_network_version_id = %(river_network_version_id)s" in sql
+        assert params["river_network_version_id"] == "rnv_selected"
 
 
 def test_forecast_series_explicit_issue_time_interpolates_scenario_filter() -> None:
@@ -1128,10 +1130,10 @@ def test_forecast_series_explicit_issue_time_interpolates_scenario_filter() -> N
     statement, parameters = store.cursor.executions[2]
     assert response["series"][0]["scenario_id"] == "forecast_gfs_deterministic"
     assert "{scenario_filter.sql}" not in statement
-    assert "LOWER(h.source_id) = ANY(%s)" in statement
-    assert statement.count("%s") == len(parameters)
-    assert parameters[-2] == ["gfs", "ifs"]
-    assert set(parameters[-1]) >= {"forecast_gfs_deterministic", "forecast_ifs_deterministic"}
+    assert "LOWER(h.source_id) = ANY(%(scenario_tokens)s)" in statement
+    assert "%s" not in statement
+    assert parameters["scenario_tokens"] == ["gfs", "ifs"]
+    assert parameters["scenario_ids"] == ["forecast_gfs_deterministic", "forecast_ifs_deterministic", "gfs", "ifs"]
 
 
 def test_forecast_series_duplicate_segment_filters_hindcast_latest_and_rows_by_selected_network() -> None:
@@ -1170,10 +1172,11 @@ def test_forecast_series_duplicate_segment_filters_hindcast_latest_and_rows_by_s
     )
 
     assert response["series"][0]["scenario_id"] == "hindcast_replay"
-    statements = [statement for statement, _parameters in store.cursor.executions]
-    assert "rt.river_network_version_id = %s" in statements[2]
-    assert "rt.river_network_version_id = %s" in statements[3]
-    assert all("rnv_selected" in parameters for _statement, parameters in store.cursor.executions[1:4])
+    facts = [(sql, params) for sql, params in store.cursor.executions if "UNION ALL" in sql]
+    assert len(facts) == 2
+    for sql, params in facts:
+        assert "rt.river_network_version_id = %(river_network_version_id)s" in sql
+        assert params["river_network_version_id"] == "rnv_selected"
 
 
 def test_station_series_explicit_forcing_version_groups_rows_and_truncates_per_variable() -> None:
@@ -2733,7 +2736,9 @@ def test_latest_qhh_display_product_candidate_discovery_sql_is_bounded_before_ti
     assert "FROM met.forcing_station_timeseries" not in candidate_cte
     assert "FROM hydro.river_timeseries" not in candidate_cte
     station_cte = statement[statement.index("station_sample_rows AS") : statement.index("river_sample_rows AS")]
-    hydro_cte = statement[statement.index("river_sample_rows AS") : statement.index("SELECT\n                cr.*")]
+    hydro_cte = statement[
+        statement.index("river_sample_rows AS") : statement.index("SELECT\n                cr.run_id,")
+    ]
     assert "JOIN candidate_runs cr" in statement
     assert "fst.basin_version_id = cr.basin_version_id" in station_cte
     assert "LOWER(fst.source_id) = LOWER(cr.source_id)" in station_cte
@@ -3479,6 +3484,7 @@ def _qhh_candidate_row(
         selected_station_display_end_time = None
     return {
         "run_id": run_id,
+        "timeseries_store": "legacy",
         "run_type": run_type,
         "scenario_id": scenario_id,
         "model_id": model_id,
@@ -3627,8 +3633,8 @@ def test_forecast_series_validates_reach_id_but_queries_timeseries_with_shud_riv
     ts_executions = [(statement, params) for statement, params in executions if "hydro.river_timeseries" in statement]
     assert len(ts_executions) >= 2
     for statement, params in ts_executions:
-        assert shud_riv_id in params, statement
-        assert reach_id not in params, statement
+        assert params["river_segment_id"] == shud_riv_id, statement
+        assert reach_id not in params.values(), statement
 
 
 def test_forecast_series_strict_identity_excludes_sibling_run_for_same_cycle() -> None:
@@ -3674,7 +3680,8 @@ def test_forecast_series_strict_identity_excludes_sibling_run_for_same_cycle() -
     )
 
     statement, params = store.cursor.executions[2]
-    assert "h.run_id = %s" in statement
-    assert "h.model_id = %s" in statement
-    assert params[-2:] == (selected_run_id, selected_model_id)
+    assert "h.run_id = %(run_id)s" in statement
+    assert "h.model_id = %(model_id)s" in statement
+    assert params["run_id"] == selected_run_id
+    assert params["model_id"] == selected_model_id
     assert response["series"][0]["points"] == [[_timestamp_ms(issue_time), 164.045]]

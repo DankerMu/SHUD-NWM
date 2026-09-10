@@ -509,7 +509,7 @@ def test_the_scanner_agrees_with_a_reference_lexer_or_refuses() -> None:
 
 
 def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None:
-    """The deterministic sibling: the twenty real templates, and both renders of each.
+    """The deterministic sibling: the twelve raw templates, and both renders of each.
 
     The fuzz above samples a construct space; this asserts the thing decision 18
     is actually paid for — that the production read templates are all INSIDE the
@@ -518,9 +518,10 @@ def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None
     """
     compared = 0
     for entry in REGISTRY:
-        source = entry.source()
-        texts = [(entry.key, source)]
+        texts = []
         for store in ("legacy", "narrow"):
+            source = entry.source(store)
+            texts.append((f"{entry.key}:{store}:raw", source))
             try:
                 texts.append((f"{entry.key}:{store}", render_river_ts_sql(source, store, entry=entry.key).sql))
             except RiverTemplateError as error:  # pragma: no cover - a refusing entry is a red elsewhere
@@ -530,7 +531,7 @@ def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None
             assert non_code_spans(sql) == reference_non_code_spans(sql), f"{label} lexes differently from §4.1"
             compared += 1
 
-    assert compared == 3 * len(REGISTRY) == 60
+    assert compared == 4 * len(REGISTRY) == 48
 
 
 @pytest.mark.parametrize(

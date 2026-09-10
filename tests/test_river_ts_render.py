@@ -4457,9 +4457,10 @@ def test_every_traversal_commutes_with_the_scanner_over_the_corpus() -> None:
     corpus: list[tuple[str, str]] = []
     registry_excluded = 0
     for entry in REGISTRY:
-        source = entry.source()
-        variants = [(entry.key, source)]
+        variants = []
         for store in ("legacy", "narrow"):
+            source = entry.source(store)
+            variants.append((f"{entry.key}:{store}:raw", source))
             try:
                 variants.append((f"{entry.key}:{store}", render_river_ts_sql(source, store, entry=entry.key).sql))
             except RiverTemplateError as error:  # pragma: no cover - a registry entry that refuses is a red elsewhere
@@ -4471,9 +4472,9 @@ def test_every_traversal_commutes_with_the_scanner_over_the_corpus() -> None:
             corpus.append((label, sql))
 
     assert registry_excluded == 0, (
-        "decision 18 rests on 0/20 registered templates using `$` or a non-ASCII byte in code"
+        "all 12 current raw templates must remain inside the declared lexical subset"
     )
-    assert len(corpus) == 3 * len(REGISTRY) == 60
+    assert len(corpus) == 4 * len(REGISTRY) == 48
 
     adversarial_excluded = [label for label, sql in _ADVERSARIAL_CORPUS if _lexical_subset_violation(sql) is not None]
     assert adversarial_excluded == [], f"the adversarial corpus must stay inside the subset, got {adversarial_excluded}"

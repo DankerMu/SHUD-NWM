@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ from tests.integration_helpers import (
     CYCLE_ID,
     CYCLE_TIME,
     FORECAST_RUN_ID,
+    HINDCAST_RUN_ID,
     MODEL_ID,
     RIVER_NETWORK_VERSION_ID,
     SOURCE_ID,
@@ -24,6 +26,9 @@ from tests.integration_helpers import (
     seed_issue_126_data,
     set_integration_env,
     sqlalchemy_engine,
+)
+from tests.integration_helpers import (
+    post_expand_forecast_database as post_expand_forecast_database,
 )
 
 pytestmark = pytest.mark.integration
@@ -208,14 +213,16 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
 
 
 def test_real_schema_api_and_postgis_spatial_smoke(
-    integration_database_url: str,
+    throwaway_database_url: str,
+    post_expand_forecast_database: Callable[[Sequence[str]], None],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    apply_migrations_from_zero(integration_database_url)
+    apply_migrations_from_zero(throwaway_database_url)
     object_root = tmp_path / "object-store"
-    seed_issue_126_data(integration_database_url, object_root=object_root)
-    set_integration_env(integration_database_url, object_root, monkeypatch)
+    seed_issue_126_data(throwaway_database_url, object_root=object_root)
+    post_expand_forecast_database(())
+    set_integration_env(throwaway_database_url, object_root, monkeypatch)
     pipeline_routes._engine.cache_clear()
 
     with TestClient(app) as client:
@@ -264,6 +271,7 @@ def test_real_schema_api_and_postgis_spatial_smoke(
     }
     assert forecast.json()["segment_id"] == "it126_seg_inside"
     assert forecast.json()["series"][0]["variable"] == "q_down"
+    assert [point[1] for point in forecast.json()["series"][0]["points"]] == [180.0, 250.0]
     assert status.json()["data"]["current_state"] == "complete"
     assert {stage["stage"] for stage in stages.json()["data"]} >= {"download", "forecast"}
     assert jobs.json()["data"]["items"][0]["slurm_job_id"] == "8101"
@@ -1434,15 +1442,22 @@ def test_three_day_chunk_migration_preserves_existing_chunks_and_only_changes_ne
         connection.close()
 
 
+@pytest.mark.parametrize(
+    "narrow_run_ids",
+    [(), (FORECAST_RUN_ID,), (HINDCAST_RUN_ID,), (FORECAST_RUN_ID, HINDCAST_RUN_ID)],
+    ids=["legacy", "narrow-forecast", "narrow-history", "narrow"],
+)
 def test_real_history_window_excludes_old_points_without_shortening_forecasts(
     throwaway_database_url: str,
+    post_expand_forecast_database: Callable[[Sequence[str]], None],
+    narrow_run_ids: Sequence[str],
 ) -> None:
     from datetime import timedelta
 
     import psycopg2
 
     from packages.common.forecast_store import PsycopgForecastStore
-    from tests.integration_helpers import HINDCAST_RUN_ID, insert_river_timeseries_dual_written
+    from tests.integration_helpers import insert_river_timeseries_dual_written
 
     apply_migrations_from_zero(throwaway_database_url)
     seed_issue_126_data(throwaway_database_url)
@@ -1498,6 +1513,11 @@ def test_real_history_window_excludes_old_points_without_shortening_forecasts(
                     for hours, value in ((168, 700.0), (169, 701.0))
                 )
                 insert_river_timeseries_dual_written(cursor, rows)
+
+        # All text-era seed writes finish before this test-only transition.
+        # Opposite-store points differ in time and value; all four assignments
+        # must preserve the same literal public history/forecast window results.
+        post_expand_forecast_database(narrow_run_ids)
 
         store = PsycopgForecastStore(throwaway_database_url)
         parameters = {

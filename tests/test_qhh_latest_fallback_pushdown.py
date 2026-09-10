@@ -42,6 +42,7 @@ _POSITIONAL_PLACEHOLDER = re.compile(r"%s")
 
 _HEADER_ROW = {
     "run_id": "qhh_gfs_2026050700",
+    "timeseries_store": "legacy",
     "forcing_version_id": "forc_qhh_gfs_2026050700",
     "basin_version_id": "basins_qhh_vbasins",
     "river_network_version_id": "basins_qhh_rivnet_vbasins",
