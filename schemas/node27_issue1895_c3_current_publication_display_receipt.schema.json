@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NHMS #1895 C3 direct current publication and display receipt",
+  "type": "object", "additionalProperties": false,
+  "required": ["artifact", "schema_version", "status", "head_sha", "reviewed_sha", "started_at", "ended_at", "generated_at", "origin", "basin_id", "registry_sha256", "registry_facts", "registry_generated_at", "baseline_sha256", "frontier", "sources", "c4_receipt", "checks"],
+  "properties": {
+    "artifact": {"const": "nhms-issue1895-c3-current-publication-display"}, "schema_version": {"const": "1.0"}, "status": {"const": "PASS"},
+    "head_sha": {"$ref": "#/$defs/sha"}, "reviewed_sha": {"$ref": "#/$defs/sha"},
+    "started_at": {"$ref": "#/$defs/time"}, "ended_at": {"$ref": "#/$defs/time"}, "generated_at": {"$ref": "#/$defs/time"},
+    "origin": {"type": "string", "pattern": "^http://127\\.0\\.0\\.1:[1-9][0-9]{0,4}$"}, "basin_id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,96}$"},
+    "registry_sha256": {"$ref": "#/$defs/digest"}, "registry_facts": {"$ref": "#/$defs/registry_facts"}, "registry_generated_at": {"$ref": "#/$defs/time"}, "baseline_sha256": {"$ref": "#/$defs/digest"},
+    "frontier": {"type": "object", "additionalProperties": false, "required": ["status", "current_count", "baseline_count", "non_regressed"], "properties": {"status": {"type": "integer", "minimum": 200, "maximum": 299}, "current_count": {"type": "integer", "minimum": 1}, "baseline_count": {"type": "integer", "minimum": 1}, "non_regressed": {"const": true}}},
+    "sources": {"type": "object", "additionalProperties": false, "required": ["GFS", "IFS"], "properties": {"GFS": {"$ref": "#/$defs/source"}, "IFS": {"$ref": "#/$defs/source"}}},
+    "c4_receipt": {"$ref": "#/$defs/file_facts"},
+    "checks": {"type": "object", "additionalProperties": false, "required": ["readonly_session", "api_db_exact_identity", "registry_complete_cycle", "valid_times_nonempty_nonregressed", "c4_pass_control_zero", "c4_api_db_identity", "c4_ops_logs"], "properties": {"readonly_session": {"const": true}, "api_db_exact_identity": {"const": true}, "registry_complete_cycle": {"const": true}, "valid_times_nonempty_nonregressed": {"const": true}, "c4_pass_control_zero": {"const": true}, "c4_api_db_identity": {"const": true}, "c4_ops_logs": {"const": true}}}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "time": {"type": "string", "format": "date-time", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"},
+    "identity": {"type": "object", "additionalProperties": false, "required": ["run_id", "model_id", "basin_id", "basin_version_id", "river_network_version_id", "source_id", "cycle_time", "scenario"], "properties": {"run_id": {"type": "string", "minLength": 1}, "model_id": {"type": "string", "minLength": 1}, "basin_id": {"type": "string", "minLength": 1}, "basin_version_id": {"type": "string", "minLength": 1}, "river_network_version_id": {"type": "string", "minLength": 1}, "source_id": {"enum": ["GFS", "IFS"]}, "cycle_time": {"$ref": "#/$defs/time"}, "scenario": {"enum": ["forecast_gfs_deterministic", "forecast_ifs_deterministic"]}}},
+    "source": {"type": "object", "additionalProperties": false, "required": ["identity", "expected_count", "observed_count", "c4_job_id", "c4_logs_status"], "properties": {"identity": {"$ref": "#/$defs/identity"}, "expected_count": {"type": "integer", "minimum": 1}, "observed_count": {"type": "integer", "minimum": 1}, "c4_job_id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,256}$"}, "c4_logs_status": {"type": "integer", "minimum": 200, "maximum": 299}}},
+    "file_facts": {"type": "object", "additionalProperties": false, "required": ["st_dev", "st_ino", "st_uid", "st_mode", "st_nlink", "st_size", "sha256"], "properties": {"st_dev": {"type": "integer", "minimum": 0}, "st_ino": {"type": "integer", "minimum": 0}, "st_uid": {"type": "integer", "minimum": 0}, "st_mode": {"const": 384}, "st_nlink": {"const": 1}, "st_size": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/digest"}}},
+    "registry_facts": {"type": "object", "additionalProperties": false, "required": ["st_dev", "st_ino", "st_uid", "st_mode", "st_nlink", "st_size", "sha256"], "properties": {"st_dev": {"type": "integer", "minimum": 0}, "st_ino": {"type": "integer", "minimum": 0}, "st_uid": {"type": "integer", "minimum": 0}, "st_mode": {"type": "integer", "minimum": 0, "maximum": 511}, "st_nlink": {"type": "integer", "minimum": 1}, "st_size": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/digest"}}}
+  }
+}

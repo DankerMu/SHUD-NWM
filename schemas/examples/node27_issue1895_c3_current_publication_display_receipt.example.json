@@ -1,0 +1,23 @@
+{
+  "artifact": "nhms-issue1895-c3-current-publication-display",
+  "schema_version": "1.0",
+  "status": "PASS",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "reviewed_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "started_at": "2026-09-06T12:00:00Z",
+  "ended_at": "2026-09-06T12:00:01Z",
+  "generated_at": "2026-09-06T12:00:01Z",
+  "origin": "http://127.0.0.1:8080",
+  "basin_id": "basins_qhh",
+  "registry_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "registry_facts": {"st_dev": 1, "st_ino": 6, "st_uid": 1000, "st_mode": 384, "st_nlink": 1, "st_size": 100, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+  "registry_generated_at": "2026-09-06T11:00:00Z",
+  "baseline_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "frontier": {"status": 200, "current_count": 2, "baseline_count": 1, "non_regressed": true},
+  "sources": {
+    "GFS": {"identity": {"run_id": "gfs-run", "model_id": "basins_qhh_shud", "basin_id": "basins_qhh", "basin_version_id": "bv-1", "river_network_version_id": "rv-1", "source_id": "GFS", "cycle_time": "2026-09-06T00:00:00Z", "scenario": "forecast_gfs_deterministic"}, "expected_count": 1, "observed_count": 1, "c4_job_id": "job-gfs", "c4_logs_status": 200},
+    "IFS": {"identity": {"run_id": "ifs-run", "model_id": "basins_qhh_shud", "basin_id": "basins_qhh", "basin_version_id": "bv-1", "river_network_version_id": "rv-1", "source_id": "IFS", "cycle_time": "2026-09-06T12:00:00Z", "scenario": "forecast_ifs_deterministic"}, "expected_count": 1, "observed_count": 1, "c4_job_id": "job-ifs", "c4_logs_status": 200}
+  },
+  "c4_receipt": {"st_dev": 1, "st_ino": 2, "st_uid": 1000, "st_mode": 384, "st_nlink": 1, "st_size": 100, "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+  "checks": {"readonly_session": true, "api_db_exact_identity": true, "registry_complete_cycle": true, "valid_times_nonempty_nonregressed": true, "c4_pass_control_zero": true, "c4_api_db_identity": true, "c4_ops_logs": true}
+}

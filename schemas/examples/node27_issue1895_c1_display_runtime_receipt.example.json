@@ -1,0 +1,25 @@
+{
+  "artifact": "nhms-issue1895-c1-display-runtime",
+  "schema_version": "1.0",
+  "status": "PASS",
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "reviewed_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "started_at": "2026-09-06T12:00:00Z",
+  "ended_at": "2026-09-06T12:00:01Z",
+  "generated_at": "2026-09-06T12:00:01Z",
+  "display_env": "infra/env/display.env",
+  "port": 8080,
+  "origin": "http://127.0.0.1:8080",
+  "unit": "nhms-display-api.service",
+  "main_pid": 1234,
+  "control_group_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "checks": {
+    "systemd_active": true,
+    "main_pid_cgroup_bound": true,
+    "health_status": 200,
+    "health_status_ok": true,
+    "runtime_status": 200,
+    "runtime_exact": true,
+    "slurm_health_status": 404
+  }
+}
