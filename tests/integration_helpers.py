@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,7 +56,7 @@ def apply_migrations_from_zero(database_url: str) -> None:
 @pytest.fixture()
 def post_expand_forecast_database(
     throwaway_database_url: str,
-) -> Callable[[Sequence[str]], None]:
+) -> Callable[[Mapping[str, str]], None]:
     """Opt-in reader schema, only in conftest's per-test disposable database.
 
     Call once AFTER migrations, seed mutations, frozen SQL and coverage refresh.
@@ -72,7 +72,7 @@ def post_expand_forecast_database(
     identical mirrored data.
     """
 
-    def prepare(narrow_run_ids: Sequence[str] = ()) -> None:
+    def prepare(store_overrides: Mapping[str, str]) -> None:
         with psycopg_connection(throwaway_database_url) as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
@@ -100,12 +100,12 @@ def post_expand_forecast_database(
                     );
                     """
                 )
-                if narrow_run_ids:
+                for run_id, store in store_overrides.items():
                     cursor.execute(
-                        "UPDATE hydro.hydro_run SET timeseries_store = 'narrow' WHERE run_id = ANY(%s)",
-                        (list(narrow_run_ids),),
+                        "UPDATE hydro.hydro_run SET timeseries_store = %s WHERE run_id = %s",
+                        (store, run_id),
                     )
-                    assert cursor.rowcount == len(set(narrow_run_ids))
+                    assert cursor.rowcount == 1
                 # Copy before poisoning: only a run's authoritative store keeps
                 # its pre-transition facts. Non-authoritative rows are decoys.
                 cursor.execute(

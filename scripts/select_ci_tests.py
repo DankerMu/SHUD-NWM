@@ -2176,6 +2176,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
+        "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql",
+        ("tests/test_hydro_display_mvt_scaling.py",),
+    ),
+    PathTestRule(
         "packages/common/forecast_store.py",
         (
             "tests/test_forecast_api.py",
@@ -2183,6 +2187,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
+            # The benchmark captures this owner's named bindings; live evidence
+            # independently verifies the serialized name/value pairs.
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_qhh_latest_fallback_pushdown.py",
             # #1442: this file carries nine of the zero-text-identity oracle's
             # registered statements. None of the suites above assert the

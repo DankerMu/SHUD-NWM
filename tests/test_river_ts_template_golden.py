@@ -32,6 +32,7 @@ from tests.river_ts_template_registry import (
     NON_TEMPLATE_MENTIONS,
     REGISTERED_TEMPLATE_PATHS,
     REGISTRY,
+    ROUTED_SOURCE_KEYS,
     entry_by_key,
     golden_sha256,
 )
@@ -73,17 +74,17 @@ def test_the_golden_was_captured_at_the_change_base() -> None:
 
 def test_the_golden_covers_exactly_the_registered_entries() -> None:
     """Historical statements and live raw sources have distinct exact sets."""
-    siblings = {entry.key for entry in REGISTRY if not entry.key.startswith("forecast_store:")}
-    assert len(siblings) == 10
+    siblings = {entry.key for entry in REGISTRY} - ROUTED_SOURCE_KEYS
+    assert len(siblings) == 9
     assert set(GOLDEN["entries"]) == siblings | {
+        "mvt:postgis_tile_sql_hydro",
         *(f"forecast_store:{label}" for label in FORECAST_STORE_SEGMENT_BLOCKS),
         "forecast_store:segment_identity_predicates",
         "forecast_store:latest_product_fallback",
     }
-    assert {entry.key for entry in REGISTRY} == siblings | {
-        "forecast_store:segment_rows_source",
-        "forecast_store:latest_product_river_source",
-    }
+    assert {entry.key for entry in REGISTRY} == siblings | ROUTED_SOURCE_KEYS
+    assert len(REGISTRY) == 12
+    assert len(GOLDEN["entries"]) == 20
     assert set(FORECAST_STORE_EXECUTIONS) == {
         *FORECAST_STORE_SEGMENT_BLOCKS, "latest_product_fallback",
     }
@@ -95,7 +96,7 @@ def test_legacy_renderer_preserves_every_current_template_predicate(entry) -> No
     template = entry.source("legacy")
 
     assert _legacy_chains(template, entry.key) == sql_chains(template)
-    if not entry.key.startswith("forecast_store:"):
+    if entry.key not in ROUTED_SOURCE_KEYS:
         assert _legacy_chains(template, entry.key) == tuple(
             tuple(chain) for chain in GOLDEN["entries"][entry.key]["chains"]
         )
@@ -119,6 +120,23 @@ def test_routed_registry_render_matches_actual_store_source(key, factory_name, r
     opposite = "narrow" if store == "legacy" else "legacy"
     assert f"{route_alias}.timeseries_store = '{opposite}'" not in rendered.sql
     assert rendered == expected
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_hydro_routed_registry_matches_the_authored_source(store) -> None:
+    from services.tiles import mvt
+
+    entry = entry_by_key("mvt:postgis_tile_sql_hydro")
+    raw = entry.source(store)
+    assert raw == mvt._hydro_source_template(store)
+    assert raw.count(RIVER_TABLE) == 1
+    assert raw.count("transitional compressed-chunk pushdown aid, remove with #1342") == 3
+    rendered = render_river_ts_sql(raw, store).sql
+    opposite = "narrow" if store == "legacy" else "legacy"
+    assert f"timeseries_store = '{store}'" in rendered
+    assert f"timeseries_store = '{opposite}'" not in rendered
+    assert ("hydro.river_timeseries_legacy" in rendered) == (store == "legacy")
+    assert "UNION ALL" not in rendered
 
 
 @pytest.mark.parametrize("entry", REGISTRY, ids=lambda entry: entry.key)

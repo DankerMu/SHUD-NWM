@@ -373,20 +373,20 @@ def test_national_leg_projections_and_percent_rank_read_the_probe_result() -> No
     )
 
 
-def test_per_basin_hydro_layer_keeps_its_single_point_lookup_shape() -> None:
-    """The lateral remedy is national-only; the per-basin tile is untouched.
-
-    That tile binds one (run, basin, network, segment-set) identity as
-    constants and already reads the fact table through a single indexed point
-    lookup, so it never had the unestimable-cardinality join and must not grow
-    a per-segment probe here.
-    """
+def test_per_basin_hydro_layer_keeps_point_lookups_in_both_stores() -> None:
+    """Routing adds two scalar-key branches, never national per-segment probes."""
     hydro_cte = _source_cte("hydro")
 
     assert "LATERAL" not in hydro_cte
     assert "LIMIT 1" not in hydro_cte
     assert "FROM hydro.river_timeseries ts" in hydro_cte
-    assert hydro_cte.count("FROM hydro.river_timeseries") == 1
+    assert hydro_cte.count("FROM hydro.river_timeseries") == 2
+    legacy, narrow = hydro_cte.split("UNION ALL")
+    assert "FROM hydro.river_timeseries_legacy ts" in legacy
+    assert "timeseries_store = 'legacy'" in legacy
+    assert "timeseries_store = 'narrow'" in narrow
+    _assert_text_fact_columns(legacy, "ts", set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), "legacy hydro tile")
+    _assert_text_fact_columns(narrow, "ts", set(), "narrow hydro tile")
 
 
 def test_national_tile_switches_both_union_all_legs_to_keys() -> None:

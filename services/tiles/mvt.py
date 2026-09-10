@@ -19,6 +19,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from packages.common.river_ts_render import render_river_ts_sql
+
 # Stdlib-only constants module (no numpy / netCDF4 pulled in by this import).
 from services.precip.constants import (
     PALETTE_VERSION,
@@ -595,6 +597,49 @@ def encode_mvt_layer(layer_name: str, features: list[Mapping[str, Any]], *, exte
     return _field_message(3, bytes(layer_payload))
 
 
+def _hydro_source_template(store: str) -> str:
+    if store not in {"legacy", "narrow"}:
+        raise ValueError(f"Unsupported river timeseries store: {store}")
+    return f"""
+            SELECT ((:river_network_version_id)::text || '::' || rs.river_segment_id) AS feature_id,
+                   rs.river_segment_id AS segment_id,
+                   rs.river_segment_id,
+                   (:river_network_version_id)::text AS river_network_version_id,
+                   (:basin_version_id)::text AS basin_version_id,
+                   ts.value, ts.unit_e::text AS unit,
+                   ts.quality_flag_e::text AS quality_flag,
+                   (:run_id)::text AS run_id, ts.variable_e::text AS variable,
+                   to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
+                   rs.geom
+            FROM hydro.river_timeseries ts
+            JOIN core.river_segment rs
+              ON rs.river_segment_key = ts.river_segment_key
+            WHERE ts.run_key = (
+                      SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
+                        AND timeseries_store = '{store}'
+                  )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND ts.run_id = :run_id
+              AND ts.basin_version_key = (
+                      SELECT basin_version_key FROM core.basin_version
+                      WHERE basin_version_id = :basin_version_id
+                  )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND ts.river_network_version_id = :river_network_version_id
+              AND ts.river_network_version_key = (
+                      SELECT river_network_version_key FROM core.river_network_version
+                      WHERE river_network_version_id = :river_network_version_id
+                  )
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND ts.variable = :variable
+              AND ts.variable_e = (
+                      SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
+                      WHERE e::text = :variable
+                  )
+              AND ts.valid_time = :valid_time
+        """
+
+
 def postgis_tile_sql(layer: str) -> str:
     layer_name = _source_layer_id(layer)
     source_identity_stats_sql = (
@@ -753,43 +798,9 @@ def postgis_tile_sql(layer: str) -> str:
         # NOT in the sanctioned set, and no text column may join the fact
         # table. All of these come out with the text columns in #1342, where a
         # missed one fails loudly because the column is gone.
-        source_cte = """
-            SELECT ((:river_network_version_id)::text || '::' || rs.river_segment_id) AS feature_id,
-                   rs.river_segment_id AS segment_id,
-                   rs.river_segment_id,
-                   (:river_network_version_id)::text AS river_network_version_id,
-                   (:basin_version_id)::text AS basin_version_id,
-                   ts.value, ts.unit_e::text AS unit,
-                   ts.quality_flag_e::text AS quality_flag,
-                   (:run_id)::text AS run_id, ts.variable_e::text AS variable,
-                   to_char(ts.valid_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS valid_time,
-                   rs.geom
-            FROM hydro.river_timeseries ts
-            JOIN core.river_segment rs
-              ON rs.river_segment_key = ts.river_segment_key
-            WHERE ts.run_key = (
-                      SELECT run_key FROM hydro.hydro_run WHERE run_id = :run_id
-                  )
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND ts.run_id = :run_id
-              AND ts.basin_version_key = (
-                      SELECT basin_version_key FROM core.basin_version
-                      WHERE basin_version_id = :basin_version_id
-                  )
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND ts.river_network_version_id = :river_network_version_id
-              AND ts.river_network_version_key = (
-                      SELECT river_network_version_key FROM core.river_network_version
-                      WHERE river_network_version_id = :river_network_version_id
-                  )
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND ts.variable = :variable
-              AND ts.variable_e = (
-                      SELECT e FROM unnest(enum_range(NULL::hydro.river_variable)) e
-                      WHERE e::text = :variable
-                  )
-              AND ts.valid_time = :valid_time
-        """
+        legacy = render_river_ts_sql(_hydro_source_template("legacy"), "legacy").sql
+        narrow = render_river_ts_sql(_hydro_source_template("narrow"), "narrow").sql
+        source_cte = f"{legacy}\nUNION ALL\n{narrow}"
     elif layer == "hydro-national":
         # National overview: render q_down for every basin by joining each river
         # network's latest display-ready run. Identity (run/network) is chosen by

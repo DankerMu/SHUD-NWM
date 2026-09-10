@@ -992,6 +992,8 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_list_search_contract.py",
             "tests/test_migrations.py",
             "tests/test_model_registry_list_basins.py",
+            "tests/test_node27_timeseries_compression_benchmark.py",
+            "tests/test_node27_timeseries_compression_live_evidence.py",
             "tests/test_qhh_latest_fallback_pushdown.py",
             # #1442 added the zero-text-identity oracle for this file's nine
             # registered statements.
@@ -1013,6 +1015,18 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
         }
     )
     assert set(CORE_SMOKE_TESTS) <= set(selected)
+
+
+@pytest.mark.parametrize(
+    "source",
+    ["packages/common/forecast_store.py", "services/tiles/mvt.py", "apps/api/routes/hydro_display.py"],
+)
+def test_benchmark_production_owners_select_both_binding_consumers(source: str) -> None:
+    selected = set(select_tests([source], repo_root=Path(".")))
+    assert {
+        "tests/test_node27_timeseries_compression_benchmark.py",
+        "tests/test_node27_timeseries_compression_live_evidence.py",
+    } <= selected
 
 
 def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
