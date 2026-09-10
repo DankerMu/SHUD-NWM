@@ -2208,6 +2208,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_hydro_display_mvt_scaling.py",),
     ),
     PathTestRule(
+        "tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql",
+        ("tests/test_hydro_display_mvt_scaling.py",),
+    ),
+    PathTestRule(
         "packages/common/forecast_store.py",
         (
             "tests/test_forecast_api.py",

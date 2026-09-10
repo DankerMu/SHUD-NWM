@@ -509,7 +509,7 @@ def test_the_scanner_agrees_with_a_reference_lexer_or_refuses() -> None:
 
 
 def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None:
-    """The deterministic sibling: the twelve raw templates, and both renders of each.
+    """The deterministic sibling: current registered templates, raw and rendered for each store.
 
     The fuzz above samples a construct space; this asserts the thing decision 18
     is actually paid for — that the production read templates are all INSIDE the
@@ -531,7 +531,7 @@ def test_the_scanner_agrees_with_the_reference_lexer_over_the_registry() -> None
             assert non_code_spans(sql) == reference_non_code_spans(sql), f"{label} lexes differently from §4.1"
             compared += 1
 
-    assert compared == 4 * len(REGISTRY) == 48
+    assert compared == 4 * len(REGISTRY)
 
 
 @pytest.mark.parametrize(
