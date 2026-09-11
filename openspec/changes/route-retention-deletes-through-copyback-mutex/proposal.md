@@ -66,6 +66,15 @@ criterion is therefore already satisfied upstream; this change owes the code.
   bounds it. Comment-only; no guard behaviour changes.
 - No behavioural change on `dry_run`: `run_retention` returns before the
   deletion loop, so zero acquisitions happen by construction.
+- `.large-file-guard.json` gains `services/orchestrator/retention.py` and
+  `tests/test_retention_copyback_mutex.py`. The local commit hook's 1000-line
+  threshold blocked a commit that only *removes* a line from the first. Both
+  files are hand-written, so this is a deliberate widening rather than a
+  technicality; it follows the list's existing shape, where most of
+  `services/orchestrator` and every sibling copyback test suite are already
+  excluded, several of them far larger. Splitting either file is a behavioural
+  change outside this change's boundary. The consumer is a local agent hook,
+  not a CI merge gate.
 
 ## Capabilities
 

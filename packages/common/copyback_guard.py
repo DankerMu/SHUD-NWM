@@ -60,7 +60,7 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 # queued acquisitions ~= 12 concurrent execution units against the 2 of live
 # steady state. Left unretuned, conservative in the safe direction.
 #
-# Retention (#2238) is the second acquirer, and the first that is not a writer:
+# Retention (#2238) is the first acquirer on this lock that is not a writer:
 # it acquires once per run tree it removes on the copyback root -- 48-54 per
 # pass on the measured node-22 config, not once per cycle. That count does not
 # multiply the ~24 queued acquisitions above, because *within one pass* those

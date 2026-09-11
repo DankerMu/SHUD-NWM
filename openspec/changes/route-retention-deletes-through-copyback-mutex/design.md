@@ -4,14 +4,18 @@
 
 Code is named by symbol (`retention._delete_entry`,
 `copyback_guard.resolve_copyback_lock_timeout_seconds`), never by line number.
-Historical measurements are plain numbers, never citations. The invariant is one
-grep over this change's documents:
+Historical measurements are plain numbers, never citations. The convention is
+enforced by one grep over this change's documents, which must return nothing:
 
 ```
-grep -rnE '[`A-Za-z_)]:[0-9]+' openspec/changes/route-retention-deletes-through-copyback-mutex
+grep -rnE '[`A-Za-z_)]:[0-9]+|(#L|::|:L)[0-9]+|line [0-9]+|第 ?[0-9]+ ?行' openspec/changes/route-retention-deletes-through-copyback-mutex
 ```
 
-must return nothing. A line number that cannot be written cannot drift.
+What that buys is bounded, and the bound is worth stating: the pattern excludes
+the citation spellings a writer here would reach for, not every spelling that
+exists. The claim is therefore "no line-number citation is present, in any form
+this pattern covers" — not "a line number cannot be written", which would be the
+same self-certifying shape this change exists to remove.
 
 ## D1 — the premise was re-measured, not inherited
 
@@ -221,9 +225,16 @@ compacted receipt is a void run of the probe, not a failed one.
 
 ## D9 — the pass-level lock-wait budget
 
-Per-tree acquisition bounds how long any one promote can be blocked by
-retention. It does not bound the reverse. With the guard's 900 s default and the
-measured 48-54 copyback removals per pass, a holder that outlasts every one of
+Per-tree acquisition keeps each hold to one tree's removal rather than a whole
+sweep. It does **not** bound the wait a promoting writer may see: that writer
+can still queue behind however many consecutive single-tree holds the sweep
+takes, and nothing bounds a single hold either —
+`safe_fs.remove_tree_allow_symlinks` takes no deadline. The spec delta says so
+in as many words, and Known limits repeats it. What follows is about the other
+direction: retention's own aggregate wait across one pass.
+
+With the guard's 900 s default and the measured 48-54 copyback removals per
+pass, a holder that outlasts every one of
 those individual deadlines stalls one pass for up to about 13.5 h, which exceeds
 the 12 h pass cadence. That figure is an arithmetic bound on the existing
 default, not a report: neither stuck state below has been observed here.

@@ -127,10 +127,14 @@ PRIMARY_ROOT_NOT_ABSOLUTE_REASON = "primary_root_not_absolute"
 ROOT_OVERLAP_REASON = "root_overlap"
 
 # Total time ONE pass may spend *acquiring* the copyback batch mutex, across
-# every removal on the copyback root (#2238 / design D9). Per-tree deadlines
-# bound how long one promote can be blocked by retention; they do not bound the
-# reverse. With the guard's own 900 s default and the measured 48-54 copyback
-# removals per pass, a holder that outlasts EVERY INDIVIDUAL 900 s deadline --
+# every removal on the copyback root (#2238 / design D9). Per-tree acquisition
+# keeps each hold to ONE tree's removal rather than a whole sweep; it does NOT
+# bound the wait a promoting writer may see, which can still queue behind
+# however many consecutive single-tree holds that sweep takes (the spec delta
+# says so in as many words). What this budget bounds is the other direction:
+# retention's own aggregate wait across one pass. With the guard's own 900 s
+# default and the measured 48-54 copyback removals per pass, a holder that
+# outlasts EVERY INDIVIDUAL 900 s deadline --
 # a live process wedged on the lock, not a wait that ends by itself -- would
 # stall one pass for ~13.5 h, past the 12-hourly cadence. Only the acquisition
 # is charged against this budget, never the removal itself, so a large
@@ -891,7 +895,8 @@ def run_retention(
     already going to sweep and can never widen the deletion surface: a blank,
     unset, relative or overlap-rejected value selects nothing, and so does a
     copyback root that resolves onto the primary object store. ``None`` -- the
-    default, and every non-db-free deployment -- leaves the pass
+    default, and what any caller that does not set
+    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` passes -- leaves the pass
     byte-identical to its pre-#2238 behaviour.
 
     ``copyback_lock_wait_budget_seconds`` bounds the time ONE pass may spend

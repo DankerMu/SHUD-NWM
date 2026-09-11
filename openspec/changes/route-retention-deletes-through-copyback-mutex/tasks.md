@@ -9,11 +9,15 @@ hosts, inside `services/orchestrator` — an expanded trigger in
 `openspec/project-profile.md`. Repair intensity: **expanded**.
 
 Reference convention: code is named by symbol, never by line number (design.md
-"Reference convention"). The invariant is one grep, and it must return nothing:
+"Reference convention"). One grep enforces it, and it must return nothing:
 
 ```
-grep -rnE '[`A-Za-z_)]:[0-9]+' openspec/changes/route-retention-deletes-through-copyback-mutex
+grep -rnE '[`A-Za-z_)]:[0-9]+|(#L|::|:L)[0-9]+|line [0-9]+|第 ?[0-9]+ ?行' openspec/changes/route-retention-deletes-through-copyback-mutex
 ```
+
+It covers the citation spellings a writer here would reach for, not every
+spelling that exists; design.md states that bound rather than claiming the
+stronger thing.
 
 ## Risk pack selection
 
@@ -101,16 +105,35 @@ through EF-16 are local and mandatory; EF-17 is post-merge ops and is a recorded
 known limit, not a merge blocker. Contended cases drive the guard's own
 per-acquisition timeout override down to sub-second so the suite stays fast.
 
-**Every clause below was mutation-checked, not read for the presence of an
-assertion.** The record is `evidence/mutation-sweep.md` in this change
-directory: 18 mutants built independently by a review seat, each deleting or
-inverting the behaviour a clause names, each redding the clause that names it,
-plus 42 suite runs under 28-way CPU oversubscription with no flake. Two caveats
-are recorded there rather than smoothed over — EF-5 and EF-6's overlap leg
-survive a *single* mutation of the membership check because `_delete_entry`'s
-`containment_root` nesting makes it a redundant second line of defence (a double
-mutant reds both), and EF-14 admits no removal mutation at all, for the reason
-its own entry gives.
+**No clause below rests on reading a test for the presence of an assertion.**
+The record is `evidence/mutation-sweep.md` in this change directory, and it
+carries two sweeps: 18 mutants built independently by a review seat at
+`3854b596`, of which 17 red the clause that names them and one survives; and 27
+mutants re-measured at this change's head, which found no over-claimed clause.
+Both sweeps re-ran the suite under CPU oversubscription with no flake.
+
+Four legs are backed structurally rather than by a mutation. Each is named here
+rather than folded into the headline:
+
+- EF-14 admits no removal mutation at all: `retention.py` never references
+  `COPYBACK_BATCH_LOCK_NAME`, and the planner's walk excludes the root-level
+  lock file by construction, so there is no line whose deletion admits it.
+- EF-6's **relative** leg is excluded the same way — `_sanitize_root_candidate`
+  returns `None` before membership is consulted, so no lock site exists to
+  mutate.
+- EF-5 and EF-6's **overlap** leg are different: they survive a *single*
+  mutation of the membership check, because `_delete_entry`'s
+  `containment_root` nesting makes that check a redundant second line of
+  defence. The double mutant that also adds a pass-level acquire reds both.
+  That is the one survivor among the 18.
+- EF-11's third case pins a guarantee added *after* the `3854b596` sweep, so no
+  row of that sweep targets it. The mutant that discriminates it — charging
+  acquire and hold as a single span — was built and measured at this head
+  instead, and reds exactly that one test.
+
+EF-4 and EF-12's `extra_roots_enabled=False` parameter are covered, but were not
+named in the sweep table's non-exhaustive "incl." lists; both were re-measured
+at this head and the covering mutants are recorded there.
 
 - [x] **EF-1 — the copyback lane locks.** A retention pass that removes a tree
       under the copyback root acquires the mutex for that removal: a test holds
