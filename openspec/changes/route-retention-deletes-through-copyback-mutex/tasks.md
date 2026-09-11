@@ -114,6 +114,24 @@ through EF-16 are local and mandatory; EF-17 is post-merge ops and is a recorded
 known limit, not a merge blocker. Contended cases drive the guard's own
 per-acquisition timeout override down to sub-second so the suite stays fast.
 
+**Every clause below was mutation-checked, not read for the presence of an
+assertion.** Round 3 found two clauses (EF-11's total-wait bound, and T3's
+"release in a `finally`") that a reader would have called covered and that no
+mutation of `services/orchestrator/retention.py` could red; the Review Failure
+Retro's corrective action was to stop trusting inspection. 22 mutants were run
+across EF-1..EF-16 — each one deletes or inverts the behaviour a clause names,
+and each one reds the clause that names it. Two honest caveats, recorded rather
+than smoothed over:
+
+- EF-5 and EF-6's overlap leg survive a *single* mutation of
+  `_resolve_copyback_lock_root`'s membership check, because `_delete_entry`'s
+  `containment_root` nesting makes that check a redundant second line of
+  defence: in the primary-identity configuration the entry's root is not in
+  `extra_roots`, so the unlocked `shutil.rmtree` arm is taken before the lock
+  could matter. A double mutant that also adds a pass-level acquire reds both.
+  Defence in depth, not an over-claimed clause.
+- EF-14 has no removal mutation at all; see its own entry for why.
+
 - [x] **EF-1 — the copyback lane locks.** A retention pass that removes a tree
       under the copyback root acquires the mutex for that removal: a test holds
       the lock from another thread and asserts the removal does not proceed
@@ -178,6 +196,13 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
       `.nhms-copyback-batch.lock` present at the copyback root (and at the
       workspace and primary roots), no pass selects it into `planned`,
       `deleted`, `failed` or `skipped`, on any root.
+      Alone among these clauses EF-14 has **no removal mutation**, and that is a
+      structural exclusion rather than a coverage gap: `retention.py` never
+      references `COPYBACK_BATCH_LOCK_NAME` at all, and the planner enumerates
+      only the directory entries under `runs_root = root / RUNS_PREFIX`
+      (`retention.py:432-438`), so the root-level lock file is outside the walk
+      by construction. There is no line whose deletion admits it. The case is
+      kept as a regression guard against a future widening of the enumeration.
 - [x] **EF-15 — both call sites name the copyback root.** The scheduler pass
       and the `cleanup` CLI each pass the copyback root into `run_retention`,
       asserted at the call site rather than inferred: this is the single place
@@ -282,9 +307,10 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
   export's **server**, so `flock` there is local ext4 too (`design.md` D11), and
   node-22 — the only client — is pre-maintenance-window. The third state
   `copyback_guard.py:212-219` documents (correctly owned, no local holder, still
-  locked) is therefore not reproducible in the suite; it is one of the two
-  reasons the pass budget exists, and the budget itself is tested with an
-  ordinary local holder.
+  locked) is therefore not reproducible in the suite. That state is where the
+  budget imposes its known **cost** — 300 s may be shorter than the lease, and
+  the pass then defers rather than loses the reclamation — not a reason it
+  exists; the budget itself is tested with an ordinary local holder.
 - `packages/common/copyback_guard.py` is named by **no** rule in
   `scripts/select_ci_tests.py`. It is not unrouted — same-name derivation and
   the `packages/**` supplemental routes still select nine suites for it,
@@ -324,6 +350,28 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
   `remove_tree_allow_symlinks` a deadline, which is a change to shared
   filesystem-safety code and to every one of its callers — out of this issue's
   boundary. Routed as a tracked issue at Phase 8.
+- `resolve_copyback_lock_timeout_seconds` validates its **explicit-argument**
+  branch less than its environment branch: `copyback_guard.py:139-142` rejects
+  only `value <= 0`, while the env branch at `:150` also rejects `NaN` and
+  `inf`. Measured in round 3 with a watchdog: `acquire_copyback_batch_lock(root,
+  timeout_seconds=float("inf"))` and `...=float("nan")` against a held lock both
+  ran past 8 s and had to be killed, contradicting the guard's own "never a
+  hang" docstring at `:200-203`. Pre-existing and behaviourally untouched here;
+  this change is the first production caller on that branch but passes only the
+  `300.0` module constant, and `copyback_lock_wait_budget_seconds` is a test
+  seam. Out of scope by the issue's boundary; routed as a tracked issue at
+  Phase 8.
+- A diff touching only `services/orchestrator/scheduler_runtime.py` does not
+  select this suite: `select_ci_tests` returns 22 files for it, none of them a
+  retention partition (measured round 3), so EF-15's scheduler-side leg
+  (`tests/test_retention_copyback_mutex.py`, the scheduler call-site case) is
+  not routed to the PR that could break it. The pins in
+  `tests/test_select_ci_tests.py` claim only the `retention.py`, `cli.py`,
+  `__init__.py` and `tests/retention_test_helpers.py` legs, so nothing is
+  over-claimed — and `tests/test_retention_extra_roots.py` has the same gap
+  against the `runs_only_roots=` wiring it guards, which makes this the retention
+  corpus's existing shape rather than a regression this change introduces. The
+  full-suite master run catches it post-merge. Routed at Phase 8.
 - Issue #2238's sixth acceptance criterion (correct #2035's "Unchanged
   downstream consumers" wording for `retention.py`) is **already satisfied at
   base `6fdb2015`** by that change's own post-ceiling sweep

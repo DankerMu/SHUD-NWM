@@ -267,11 +267,12 @@ receipt is a void run of the probe, not a failed one.
 Per-tree acquisition bounds how long any one promote can be blocked by
 retention. It does not bound the reverse: how long retention can be blocked in
 total. With the guard's 900 s default and the measured 48-54 copyback removals
-per pass, a single stuck holder stalls one pass for up to about 13.5 h, which
-exceeds the 12 h pass cadence. The stuck case is not hypothetical —
-`copyback_guard.py:212-219` documents the NFS state in which the lock is
-correctly owned, has no local holder, and is still held until the server's lease
-expires, and says the only correct response is to wait it out.
+per pass, a holder that outlasts every one of those individual deadlines stalls
+one pass for up to about 13.5 h, which exceeds the 12 h pass cadence. That
+figure needs a holder wedged indefinitely — it is not what the finite NFS
+lease-expiry hold produces, and the two are kept apart in the first bullet
+below. Neither state has been observed in production here; the figure is an
+arithmetic bound on the existing 900 s default, not a report.
 
 So the pass carries one budget for **acquisition wait only**, defaulting to
 300 s and overridable by keyword for tests. Each removal is given what is left of
@@ -349,8 +350,12 @@ local Mac cannot. An earlier draft asserted it would not, a round-2 review
 asserted it would (on the grounds that node-27 mounts the same NFSv4.2 export),
 and **both were wrong about the topology**. Measured read-only on 2026-09-11:
 
-- `hostname` on node-27 is `ghdc`. It is the NFS **server**, not a client of
-  one. `/home/ghdc/nwm` there is local ext4 on `/dev/mapper/ubuntu--vg-home`
+- `hostname` on node-27 is `ghdc`, and it is the **server** of this export:
+  `/etc/exports` publishes `/home/ghdc` and `nfsd` is running. (It is also a
+  client of unrelated mounts — `stor:` serves it `/data/SpatialData` and
+  `/data/ForcingData` over NFSv3 — which is why the claim is scoped to this
+  export rather than to the host.) `/home/ghdc/nwm` is local ext4 on
+  `/dev/mapper/ubuntu--vg-home`
   (`stat -f` reports `ext2/ext3`), and node-22 mounts exactly that directory as
   `/ghdc/data/nwm` — which is what `copyback_guard.py:212-219`'s
   "NFSv4.2 mount of `ghdc:/home/ghdc`" names.

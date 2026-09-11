@@ -5,8 +5,10 @@ adds: a process that removes a directory tree under the **shared** object-store
 copyback root holds that root's batch mutex for the whole of the removal, once
 per removed tree; the run-workspace root and the primary object store are not
 locked; an unavailable mutex is one recorded ``failed`` entry and never an
-aborted pass; one pass-level wait budget bounds a stalled sweep; a pass that
-removes nothing acquires nothing; and the mutex changes timing, never selection.
+aborted pass; a removal that RAISES inside the held mutex still frees it; one
+pass-level wait budget bounds a stalled sweep -- charged by every acquisition,
+including one that succeeds after waiting; a pass that removes nothing acquires
+nothing; and the mutex changes timing, never selection.
 
 Its own file rather than an extension of ``tests/test_retention_extra_roots.py``
 (747 lines, the #1405/#1318/#1617 root-admission contract): this is the deleter
@@ -45,6 +47,7 @@ from packages.common.copyback_guard import (
     acquire_copyback_batch_lock,
     release_copyback_batch_lock,
 )
+from packages.common.safe_fs import SafeFilesystemError
 from services.orchestrator import cli
 from services.orchestrator import retention as retention_module
 from services.orchestrator.retention import (
@@ -577,11 +580,93 @@ def test_ef10_an_unsafe_lock_file_is_a_recorded_failure_and_the_trees_survive(
 
 
 # ---------------------------------------------------------------------------
+# T3 -- the release is in a ``finally``: a removal that RAISES inside the held
+# mutex still frees it. Not a hypothetical: `remove_tree_allow_symlinks` is
+# called with `missing_ok=False`, and this change's own Known limits keep the
+# plan-to-delete window open and name a second, unlocked deleter on the same
+# tree -- so `safe_fs` re-raising `FileNotFoundError` (or wrapping any other
+# `OSError` into `SafeFilesystemError`) inside the held window is reachable.
+# Without the `finally` the fd leaks and this process holds the cross-process
+# mutex until exit, blocking every #2035 writer -- the exact failure this change
+# exists to prevent, and silent, because `failed[]` drives no metric.
+#
+# Asserted structurally on all three halves: the failure is recorded, the NEXT
+# tree still gets removed (which a leaked fd makes impossible, since `flock` is
+# per open file description and the pass would contend with itself), and a
+# competing acquisition succeeds immediately once the pass returns.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        lambda target: SafeFilesystemError(f"synthetic removal refusal for {target}", kind="io"),
+        lambda target: OSError(f"synthetic removal refusal for {target}"),
+    ],
+    ids=["safe-filesystem-error", "os-error"],
+)
+def test_a_removal_that_raises_inside_the_mutex_still_releases_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_error: Any,
+) -> None:
+    store = _real_dir(tmp_path, "object-store")
+    copyback = _real_dir(tmp_path, "copyback")
+    keys = {_seed_run_workspace(copyback, NOW - timedelta(days=days)) for days in (40, 50)}
+    assert len(keys) == 2
+
+    removals: list[str] = []
+    real_remove = retention_module.remove_tree_allow_symlinks
+
+    def failing_first_remove(parent: Path, name: str, **kwargs: Any) -> Any:
+        target = Path(parent) / name
+        removals.append(str(target))
+        if len(removals) == 1:
+            raise make_error(target)
+        return real_remove(parent, name, **kwargs)
+
+    monkeypatch.setattr(retention_module, "remove_tree_allow_symlinks", failing_first_remove)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=DELETING_CONFIG,
+        runs_only_roots=(copyback,),
+        copyback_root=copyback,
+        # Small on purpose: a build whose release is not in a `finally` makes
+        # the second tree wait out this budget against the leaked fd instead of
+        # acquiring, so the case stays fast when it reds.
+        copyback_lock_wait_budget_seconds=2.0,
+    )
+
+    # Plan order is not this test's business: derive both keys from what ran.
+    assert len(removals) == 2
+    first_key = str(Path(removals[0]).relative_to(copyback))
+    second_key = str(Path(removals[1]).relative_to(copyback))
+    assert {first_key, second_key} == keys
+
+    # (a) the raising tree is one recorded failure carrying its error ...
+    errors = _errors_for(result.failed, copyback)
+    assert set(errors) == {first_key}
+    assert "synthetic removal refusal" in errors[first_key]
+    assert (copyback / first_key / "output/out.nc").exists()
+    # (b) ... and the tree after it is still removed, which a leaked fd -- held
+    # by this same process -- would turn into a self-inflicted lock timeout.
+    assert _entries_for(result.deleted, copyback) == {second_key}
+    assert not (copyback / second_key).exists()
+    assert result.freed_bytes == sum(int(entry["size_bytes"]) for entry in result.deleted)
+    # (c) the mutex is free the moment the pass returns. No `try`: a raise here
+    # IS the failure, and it is structural -- no message text is read.
+    freed = acquire_copyback_batch_lock(copyback, timeout_seconds=0.2)
+    release_copyback_batch_lock(freed)
+
+
+# ---------------------------------------------------------------------------
 # EF-11 -- the pass-level wait budget bounds a stalled sweep: per-tree deadlines
 # alone multiply by the tree count, and a sweep that outlasts its own 12-hourly
 # cadence is an outage of its own.
 # ---------------------------------------------------------------------------
-def test_ef11_the_pass_level_wait_budget_bounds_a_stalled_sweep(tmp_path: Path) -> None:
+def test_ef11_the_pass_level_wait_budget_bounds_a_stalled_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     store = _real_dir(tmp_path, "object-store")
     workspace = _real_dir(tmp_path, "workspace")
     copyback = _real_dir(tmp_path, "copyback")
@@ -591,6 +676,20 @@ def test_ef11_the_pass_level_wait_budget_bounds_a_stalled_sweep(tmp_path: Path) 
     }
     assert len(copyback_keys) == 6
     workspace_key = _seed_run_workspace(workspace, NOW - timedelta(days=70))
+
+    # The refusal, pinned structurally: six planned trees, exactly ONE
+    # acquisition. Deleting the `remaining_seconds <= 0` guard leaves the five
+    # unattempted entries each calling `acquire_copyback_batch_lock` (with a
+    # spent, negative deadline), which the message assertions below catch only
+    # through the word "budget" and `elapsed` does not catch at all.
+    acquisitions: list[float] = []
+    real_acquire = retention_module.acquire_copyback_batch_lock
+
+    def counting_acquire(root: Path, **kwargs: Any) -> int:
+        acquisitions.append(float(kwargs["timeout_seconds"]))
+        return real_acquire(root, **kwargs)
+
+    monkeypatch.setattr(retention_module, "acquire_copyback_batch_lock", counting_acquire)
 
     holder_fd = acquire_copyback_batch_lock(copyback, timeout_seconds=10)
     started = time.monotonic()
@@ -607,8 +706,11 @@ def test_ef11_the_pass_level_wait_budget_bounds_a_stalled_sweep(tmp_path: Path) 
         elapsed = time.monotonic() - started
         release_copyback_batch_lock(holder_fd)
 
-    # Six per-tree deadlines would be >= 3.0 s; one pass budget is 0.5 s.
+    # Six per-tree deadlines would be >= 3.0 s; one pass budget is 0.5 s. This
+    # is the clause's own wall-clock phrase read directly; the acquisition count
+    # below is what makes the refusal itself non-optional.
     assert elapsed < 2.0
+    assert len(acquisitions) == 1
     errors = _errors_for(result.failed, copyback)
     assert set(errors) == copyback_keys
     # The first entry spent the budget waiting; the other five were never
@@ -622,6 +724,85 @@ def test_ef11_the_pass_level_wait_budget_bounds_a_stalled_sweep(tmp_path: Path) 
     # The pass still returns normally and the other roots are unaffected.
     assert _entries_for(result.deleted, workspace) == {workspace_key}
     assert _entries_for(result.deleted, store) == set()
+
+
+# ---------------------------------------------------------------------------
+# EF-11, second half -- "regardless of how many copyback entries were planned".
+# The case above has exactly ONE acquisition, so it cannot see how the budget is
+# spent; two mutants survive it. Passing `budget_seconds` instead of
+# `remaining_seconds` to every acquire bounds the pass at N x budget, and
+# charging the budget only when the acquisition RAISED charges a
+# successful-after-waiting acquisition zero, so N trees can each wait a full
+# budget -- unbounded in the tree count, which is exactly the clause's text.
+#
+# What discriminates is a wait that SUCCEEDS after consuming part of the budget:
+# a holder released mid-wait, then a second acquisition whose deadline must be
+# `budget - consumed`. Asserted on the `timeout_seconds` the pass actually
+# passes -- the decision is made before the call, so this reads the arithmetic
+# and not a race.
+# ---------------------------------------------------------------------------
+def test_ef11_a_wait_that_succeeds_is_charged_against_the_pass_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _real_dir(tmp_path, "object-store")
+    copyback = _real_dir(tmp_path, "copyback")
+    keys = {_seed_run_workspace(copyback, NOW - timedelta(days=days)) for days in (40, 50)}
+    assert len(keys) == 2
+    budget = 5.0
+    hold_seconds = 0.3
+
+    deadlines: list[float] = []
+    waits: list[float] = []
+    acquiring = threading.Event()
+    real_acquire = retention_module.acquire_copyback_batch_lock
+
+    def measuring_acquire(root: Path, **kwargs: Any) -> int:
+        deadlines.append(float(kwargs["timeout_seconds"]))
+        started = time.monotonic()
+        acquiring.set()  # after `started`, so the measured wait >= the hold
+        try:
+            return real_acquire(root, **kwargs)
+        finally:
+            waits.append(time.monotonic() - started)
+
+    monkeypatch.setattr(retention_module, "acquire_copyback_batch_lock", measuring_acquire)
+
+    holder_fd = acquire_copyback_batch_lock(copyback, timeout_seconds=10)
+    released = threading.Event()
+
+    def release_mid_wait() -> None:
+        if acquiring.wait(timeout=10):
+            time.sleep(hold_seconds)
+        release_copyback_batch_lock(holder_fd)
+        released.set()
+
+    releaser = threading.Thread(target=release_mid_wait)
+    releaser.start()
+    try:
+        result = run_retention(
+            object_store_root=store,
+            now=NOW,
+            config=DELETING_CONFIG,
+            runs_only_roots=(copyback,),
+            copyback_root=copyback,
+            copyback_lock_wait_budget_seconds=budget,
+        )
+    finally:
+        releaser.join(timeout=30)
+    assert released.is_set()
+
+    # The fixture is only worth anything if the first acquisition really waited
+    # and both trees really went: a release that never fired would otherwise
+    # leave this green on two refusals.
+    assert result.failed == []
+    assert _entries_for(result.deleted, copyback) == keys
+    assert len(deadlines) == 2
+    assert waits[0] >= hold_seconds
+    # First: the whole budget. Second: the budget minus what the first spent --
+    # strictly smaller by at least the hold, and equal to the measured wait.
+    assert deadlines[0] == budget
+    assert deadlines[1] <= budget - hold_seconds
+    assert deadlines[1] == pytest.approx(budget - waits[0], abs=0.1)
 
 
 # ---------------------------------------------------------------------------

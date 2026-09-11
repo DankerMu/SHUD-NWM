@@ -18,11 +18,15 @@ The obligation is scoped to the **copyback** root. A run-workspace root that is
 not shared SHALL NOT be locked — creating a lock file there buys no mutual
 exclusion and adds a fail-closed ownership check to a lane that has no second
 party. Nor SHALL a root be locked in the configuration where the copyback root
-and the process's own primary object store are the same directory: there every
-copyback writer refuses that configuration before it acquires — some by
-returning a skip, some by raising — precisely because the two roots are the
-same, so no writer ever holds the mutex and there is no second party to
-exclude.
+and the process's own primary object store are the same directory; that root's
+aged run trees SHALL still be removed there, unlocked.
+
+Why that second carve-out is safe rather than merely convenient is a property of
+the **writers**, not of the deleter this requirement binds, so it is recorded
+with them and not asserted here. One writer establishes it only from
+operator-supplied arguments rather than from the process's own object-store
+root, which is exactly why this requirement does not rest on a universal claim
+about all of them.
 
 One implementation is known to violate this requirement and is not brought into
 compliance by the change that adds it: `scripts/node27_raw_retention.py` removes
@@ -68,9 +72,7 @@ it: see the non-guarantee scenario below.
   shared one
 - **AND** a configuration in which the copyback root and the primary object
   store resolve to the same directory MUST still remove that root's aged run
-  trees and MUST NOT lock them, because in that configuration no copyback
-  writer ever acquires — each refuses the configuration first, by skip or by
-  error — so no second party exists.
+  trees and MUST NOT lock them.
 
 #### Scenario: the mutex is acquired per removed tree
 

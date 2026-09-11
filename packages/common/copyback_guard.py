@@ -67,12 +67,17 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 # acquisitions are strictly sequential (one removal's release precedes the next
 # one's acquire, `retention._remove_tree_under_copyback_mutex`), so one
 # retention pass contributes at most ONE concurrent waiter no matter how many
-# trees it removes. The retention LANE can contribute two: `run_retention` has
-# two production entry points -- `scheduler_runtime._run_retention` inside the
+# trees it removes. How many waiters the retention LANE contributes is a count
+# per concurrent `run_retention`, and nothing bounds that count: there are two
+# production entry points -- `scheduler_runtime._run_retention` inside the
 # scheduler pass, and `cli._run_cleanup` behind the operator `cleanup` command,
-# which takes no scheduler lease and no cross-process guard of its own -- so an
-# operator cleanup overlapping a scheduler pass queues two retention waiters on
-# this lock. Its holds are `rmtree`s, not copies, and each pass carries its own
+# which takes no scheduler lease and no cross-process guard of its own, so
+# nothing serialises two operator cleanups against each other or against the
+# pass. TWO is therefore an ASSUMPTION, not a ceiling: assuming at most one
+# concurrent operator cleanup, an overlap with a scheduler pass queues two
+# retention waiters on this lock, and every further concurrent cleanup adds one
+# more. The ~24 figure above is spent against that assumption and is conditional
+# on it. Its holds are `rmtree`s, not copies, and each pass carries its own
 # pass-level wait budget (`retention.DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS`,
 # 300 s) that caps the total time that sweep can queue behind this deadline.
 #
