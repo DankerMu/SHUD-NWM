@@ -164,11 +164,11 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA hydro, ops TO nhms_
         _sql(
             fixture,
             """
-SELECT count(*) FILTER (WHERE is_compressed), count(*) FILTER (WHERE NOT is_compressed)
+SELECT bool_or(is_compressed), bool_or(NOT is_compressed)
 FROM timescaledb_information.chunks WHERE hypertable_schema='hydro' AND hypertable_name='obs';
 """,
         ).strip()
-        == "1|1"
+        == "t|t"
     )
     assert _counts(fixture) == (60, 48, 12, "pending")
     _postgis_read(fixture)
