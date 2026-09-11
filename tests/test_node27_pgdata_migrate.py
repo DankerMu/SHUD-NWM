@@ -1042,13 +1042,17 @@ def test_primary_environment_symlink_refuses_before_fencing(tmp_path: Path, monk
     assert not host.fence_path(service).exists()
 
 
-@pytest.mark.parametrize("invalid", ("missing-source", "escaped-environment"))
+@pytest.mark.parametrize("invalid", ("missing-source", "escaped-environment", "duplicate-assignment", "wrong-source"))
 def test_primary_environment_unproved_input_refuses_before_fencing(tmp_path: Path, monkeypatch, invalid: str) -> None:
     host, state, service, timer, path = _primary_env_fixture(tmp_path, monkeypatch)
     if invalid == "missing-source":
         path.write_text("AUDIT_SETTING=original\n")
-    else:
+    elif invalid == "escaped-environment":
         host.units[service]["Environment"] += r' EXTRA="line\nvalue"'
+    elif invalid == "duplicate-assignment":
+        host.units[service]["Environment"] += " NODE27_UNIT_FLAG=changed"
+    else:
+        path.write_text(path.read_text().replace(DEFAULTS["source_pgdata"], DEFAULTS["target_pgdata"]))
     with pytest.raises(MigrationError):
         host.units_snapshot(state["config"])
     assert host.units[timer]["ActiveState"] == "active"
