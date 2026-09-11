@@ -4477,3 +4477,11 @@ later-round catches core=261、rotated=270、phase=57、skipped=15。
 
 记录 deferral：keep/cut 仍待维护者的人类策略决策；本 issue 的 merge 预授权不含
 审核策略调整授权。现行 keep 与座位上限不变，不改写历史不可归因记录。
+
+### Revisit 2026-09-11（post PR #2256 / issue #2240）
+
+追加后实测631行、621 merged、10 terminal；206个多轮样本，
+later-round catches core=261、rotated=270、phase=57、skipped=15。
+本单第一轮确认一个测试缺口，第二轮关闭且无新增发现，不增加后轮catch。
+记录deferral：keep/cut仍待维护者决策；本次迁移及恢复授权不包含审核策略调整。
+维持现行keep与座位上限，不改写历史记录。
