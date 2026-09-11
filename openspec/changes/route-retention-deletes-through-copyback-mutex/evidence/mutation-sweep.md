@@ -29,8 +29,7 @@ The suite is not byte-identical to `3854b596`: one test was added after sweeps A
 and B (`test_ef11_a_long_uncontended_hold_is_not_charged_against_the_pass_budget`,
 EF-11's third case) and the EF-5 banner comment was rewritten. Sweep B's
 baseline count is therefore one test short of the head, and sweep B's failure
-sets were not re-measured at `3854b596`'s frame. Sweep C closes that by
-re-measuring at the head.
+sets were never re-measured at the head. Sweep C closes that.
 
 ## Sweep A — implementer, at `3854b596`
 
@@ -85,8 +84,12 @@ re-established by sweep C.
 
 ## Sweep C — round-1 test-evidence reviewer, at this change's head, independent
 
-27 mutants, in-memory as above, against a 25-test suite (`git status` clean
-afterwards). An identity mutant was run first to validate the harness.
+27 mutants, in-memory as above, counted against the 25-test mutex suite unless
+a row says otherwise (`git status` clean afterwards). The 27 comprise 18
+rebuilds of sweep B's targets, 8 mutants new to sweep C, and the `< 0`
+survivor below. The zero-write row in the table is a rebuild of sweep B's, not
+a ninth new mutant; the identity and negative-control runs that validated the
+harness are not counted.
 
 **25 red. Two survive, both accounted for:**
 
@@ -94,8 +97,21 @@ afterwards). An identity mutant was run first to validate the harness.
   The double mutant that also adds a pass-level acquire reds EF-5 and
   EF-6-overlap. Redundant second line of defence, not an uncovered clause.
 - widening the budget refusal from `remaining_seconds <= 0` to `< 0` — an
-  **equivalent mutant**: the budget is decremented by a strictly positive
-  monotonic difference on every charge, so exactly `0.0` is unreachable.
+  **undetected survivor, not an equivalent mutant**. An earlier draft of this
+  line called it equivalent, reasoning that the budget is decremented by a
+  strictly positive difference so exactly `0.0` is unreachable. That covers the
+  decrement path and misses the seed: `run_retention` starts
+  `remaining_seconds` at `float(copyback_lock_wait_budget_seconds)`, so a
+  caller passing `0.0` is at exactly `0.0` before any charge. Measured on one
+  fixture at that seed, the real code records the budget-exhausted error and
+  the mutant records `copyback batch lock timeout must be positive` — raised
+  inside `copyback_guard.resolve_copyback_lock_timeout_seconds`, so the mutant
+  reaches the acquire the module's own contract says it must not. The
+  divergence is confined to that seed: at `0.4` both builds behave identically,
+  and in both the tree survives and lands in `failed[]`. No production caller
+  passes the keyword, the default is 300 s, and the lowest value any test uses
+  is `0.4`, so nothing shipped reaches it. Recorded rather than closed with a
+  test, which would be scope this change does not own.
 
 **No EF clause was found over-claimed.** Rows worth recording individually:
 
@@ -108,10 +124,11 @@ afterwards). An identity mutant was run first to validate the harness.
 | zero-write acquire hung on the early-return path only | 2 failed — exactly EF-12's dry-run and disabled params |
 | per-entry budget instead of pass-level | 2 failed — EF-11's first and second cases |
 | swallow `CopybackLockError` silently (no `failed[]` entry) | 4 failed, incl. EF-9, EF-10 |
-| count failed entries into `freed_bytes` | 4 failed, incl. EF-9, EF-10 |
-| drop the suite from the `cli.py` stop rule | 6 failed, incl. the at-site ordering pin — EF-16's CLI leg |
+| count failed entries into `freed_bytes` | 4 failed in this suite, incl. EF-9, EF-10 (6 across the four-file batch) |
+| drop the suite from the `cli.py` stop rule | 6 failed **in `tests/test_select_ci_tests.py`**, outside this sweep's suite, incl. the at-site ordering pin — EF-16's CLI leg |
 
-EF-4 is redded by three of these; EF-12's `extra_roots_enabled=False` parameter
+EF-4 is redded by two of the rows above (four mutants across the full sweep);
+EF-12's `extra_roots_enabled=False` parameter
 is redded by the membership double mutant. Neither is named in sweep B's
 non-exhaustive "incl." lists, which is why `tasks.md` now records where their
 coverage comes from.
@@ -136,6 +153,24 @@ Sweep B separately recorded 42 runs under 28-way oversubscription, also green.
 
 The last two rows are the Known limits this change records, confirmed rather
 than asserted.
+
+## Independent re-measurement of this record
+
+Sweep C first reached this file as a transcription of one reviewer's report,
+which made its numbers second-hand to the document. A second reviewer, in a
+later round and without access to the first, rebuilt all 27 mutants in-memory at
+this head from the target descriptions above and re-ran the campaign. It
+reproduced the headline (25 red, 2 survive), the sole-carrier result for EF-11's
+third case, all six rows of the routing table, every Frame claim, and the four
+structural legs `tasks.md` names. It also validated its harness in both
+directions — an identity mutant reproducing the four-file baseline exactly, and
+a negative control failing at collection when its pattern was absent.
+
+Three discrepancies came out of that re-measurement, and all three are corrected
+above: the `< 0` survivor's "equivalent mutant" label, the EF-4 count, and the
+composition of the 27. A fourth was raised and rejected on the record's own
+terms: the latency margin was re-measured under 28 burners against the recorded
+40, which is a different load condition, not a failed reproduction.
 
 ## What a reader can check
 

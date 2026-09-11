@@ -895,8 +895,8 @@ def run_retention(
     already going to sweep and can never widen the deletion surface: a blank,
     unset, relative or overlap-rejected value selects nothing, and so does a
     copyback root that resolves onto the primary object store. ``None`` -- the
-    default, and what any caller that does not set
-    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` passes -- leaves the pass
+    default, and what both production call sites pass when
+    ``NHMS_OBJECT_STORE_COPYBACK_ROOT`` is unset -- leaves the pass
     byte-identical to its pre-#2238 behaviour.
 
     ``copyback_lock_wait_budget_seconds`` bounds the time ONE pass may spend

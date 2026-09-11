@@ -11,11 +11,15 @@ enforced by one grep over this change's documents, which must return nothing:
 grep -rnE '[`A-Za-z_)]:[0-9]+|(#L|::|:L)[0-9]+|line [0-9]+|第 ?[0-9]+ ?行' openspec/changes/route-retention-deletes-through-copyback-mutex
 ```
 
-What that buys is bounded, and the bound is worth stating: the pattern excludes
-the citation spellings a writer here would reach for, not every spelling that
-exists. The claim is therefore "no line-number citation is present, in any form
-this pattern covers" — not "a line number cannot be written", which would be the
-same self-certifying shape this change exists to remove.
+What that buys is bounded, and the bound is named rather than gestured at. The
+pattern covers `sym:n`, `#L`, `::`, `:L` and singular lower-case `line N`. It
+does **not** catch `第 29/42 行` (the tail cannot span the `/` — and that is the
+spelling issue #2238's own body uses), `lines 40-52` (plural), or `Line 42`
+(`grep -E` is case-sensitive); it would also fire on an ordinary URL carrying a
+port, though none appears here. So the claim is "no line-number citation is
+present, in any form this pattern covers" — not "a line number cannot be
+written", which would be the self-certifying shape this change exists to
+remove.
 
 ## D1 — the premise was re-measured, not inherited
 
@@ -97,8 +101,12 @@ clause rather than assumed:
   deployment, where the whole lane is absent (EF-7).
 - A copyback root that `_resolve_runs_only_roots` dropped for a relative shape,
   or that lost an overlap adjudication to a *different additional* root, is not
-  in `result.extra_roots`: nothing is deleted or locked there, because the root
-  was never swept (EF-6).
+  in `result.extra_roots`: the copyback lane neither locks it nor removes
+  anything under it (EF-6). That is what membership buys, and it is all it
+  buys. Overlap rejection fires precisely when the two roots' potential target
+  trees intersect, so in that geometry the *winning* root's own `runs/` sweep
+  can still reach the rejected path, unlocked — pre-existing #1617 shape,
+  neither created nor widened here.
 - A copyback root that resolves to the **same path as the primary object store**
   is dropped from `result.extra_roots` by the resolved-path dedup against the
   primary, recording no `skipped` entry. `plan_retention` still collects `runs/`
@@ -122,8 +130,9 @@ clause rather than assumed:
 
 ## D4 — what the mutex does and does not guarantee
 
-It closes the interleavings that reach **inside** another process's
-promote-and-commit critical section, which are the damaging ones:
+It closes interleavings that reach **inside** another process's
+promote-and-commit critical section, which are the damaging ones. Two of them,
+offered as instances rather than as an exhaustive list:
 
 - Retention `rmtree`-walking one run directory under the root's `runs/` while
   `run_tree_copyback._replace_tree` renames that same inode to its `.backup`
@@ -228,10 +237,10 @@ compacted receipt is a void run of the probe, not a failed one.
 Per-tree acquisition keeps each hold to one tree's removal rather than a whole
 sweep. It does **not** bound the wait a promoting writer may see: that writer
 can still queue behind however many consecutive single-tree holds the sweep
-takes, and nothing bounds a single hold either —
-`safe_fs.remove_tree_allow_symlinks` takes no deadline. The spec delta says so
-in as many words, and Known limits repeats it. What follows is about the other
-direction: retention's own aggregate wait across one pass.
+takes. The spec delta says exactly that. Nothing bounds a single hold either —
+`safe_fs.remove_tree_allow_symlinks` takes no deadline — which is recorded in
+Known limits, not in the spec. What follows is about the other direction:
+retention's own aggregate wait across one pass.
 
 With the guard's 900 s default and the measured 48-54 copyback removals per
 pass, a holder that outlasts every one of
