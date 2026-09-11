@@ -594,34 +594,35 @@ def test_cluster_traversal_refuses_unsafe_interior(tmp_path: Path, monkeypatch, 
     interior = tree / "base"
     interior.mkdir()
     sentinel = _private(interior / "relation", "retained relation bytes")
-    if unsafe == "symlink":
-        (interior / "external").symlink_to(sentinel)
-    elif unsafe == "fifo":
-        os.mkfifo(interior / "external")
-    else:
-        real_scandir = os.scandir
+    with monkeypatch.context() as patch:
+        if unsafe == "symlink":
+            (interior / "external").symlink_to(sentinel)
+        elif unsafe == "fifo":
+            os.mkfifo(interior / "external")
+        else:
+            real_scandir = os.scandir
 
-        class Entries:
-            def __init__(self, fd):
-                self.entries = real_scandir(fd)
+            class Entries:
+                def __init__(self, fd):
+                    self.entries = real_scandir(fd)
 
-            def __enter__(self):
-                for entry in self.entries:
-                    info = entry.stat(follow_symlinks=False)
-                    if entry.name == "relation":
-                        yield SimpleNamespace(
-                            name=entry.name,
-                            stat=lambda **kwargs: SimpleNamespace(st_dev=info.st_dev + 1, st_mode=info.st_mode),
-                        )
-                    else:
-                        yield entry
+                def __enter__(self):
+                    for entry in self.entries:
+                        info = entry.stat(follow_symlinks=False)
+                        if entry.name == "relation":
+                            yield SimpleNamespace(
+                                name=entry.name,
+                                stat=lambda **kwargs: SimpleNamespace(st_dev=info.st_dev + 1, st_mode=info.st_mode),
+                            )
+                        else:
+                            yield entry
 
-            def __exit__(self, *args):
-                self.entries.close()
+                def __exit__(self, *args):
+                    self.entries.close()
 
-        monkeypatch.setattr(os, "scandir", Entries)
-    with pytest.raises(MigrationError):
-        covered_tree(tree)
+            patch.setattr(os, "scandir", Entries)
+        with pytest.raises(MigrationError):
+            covered_tree(tree)
     assert sentinel.read_text() == "retained relation bytes"
 
 
