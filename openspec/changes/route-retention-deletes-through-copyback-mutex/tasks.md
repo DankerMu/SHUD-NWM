@@ -27,7 +27,7 @@ the ones it misses rather than claiming the stronger thing.
 | file/path IO safety | **selected** | The guarded call is a no-follow `rmtree` under a shared root. |
 | production config | **selected** | Which root gets locked is decided by two env-fed call sites; node-22's live config is the reason this is not latent. |
 | evidence chain | **selected** | A lock failure must land in the pass receipt's `failed[]`, not collapse the receipt. |
-| shared helper behavior | **selected** | Reversed after the fixture review. `copyback_guard`'s budget comment is the single in-code home of the acquisition-count claim behind the 900 s default and derives it from "at most once per cycle per scheduler pass". This change adds a per-tree acquirer, so that claim stops being true and the comment is updated (T6). The helper's behaviour is unchanged; its documented invariant is not. |
+| shared helper behavior | **selected** | Reversed after the fixture review. `copyback_guard`'s budget comment is the single in-code home of the acquisition-count claim behind the 900 s default and derives it from "at most once per cycle per scheduler pass". This change adds a per-tree acquirer and the comment is updated (T6). |
 | permissions/auth boundary | **selected** | Reversed after the fixture review. This change is the first to put a lane **whose purpose is deletion** under `copyback_guard._require_lock_identity`'s root-owner uid fail-closed check; a mismatch would turn every copyback-root removal into a `failed[]` entry and silently stop reclaiming that root. Measured clear on node-22 (design.md D1) rather than assumed. |
 | data schema / migration | not selected | No DB schema, payload schema, or migration touched. |
 | frontend contract | not selected | No `apps/frontend`, OpenAPI, or display surface. |
@@ -101,18 +101,19 @@ the ones it misses rather than claiming the stronger thing.
 
 Each clause is a machine-checkable statement about the final branch tree. EF-1
 through EF-16 are local and mandatory; EF-17 is post-merge ops and is a recorded
-known limit, not a merge blocker. Contended cases drive the guard's own
-per-acquisition timeout override down to sub-second so the suite stays fast.
+known limit, not a merge blocker. Contended cases set
+`copyback_lock_wait_budget_seconds` to sub-second values so the suite stays
+fast.
 
 **No clause below rests on reading a test for the presence of an assertion.**
 The record is `evidence/mutation-sweep.md` in this change directory, and it
-carries two sweeps: 18 mutants built independently by a review seat at
-`3854b596`, of which 17 red the clause that names them and one survives; and 27
-mutants re-measured at this change's head, which found no over-claimed clause.
-Both sweeps re-ran the suite under CPU oversubscription with no flake.
+carries two evidentiary sweeps: 18 mutants built independently by a review seat
+at `3854b596`, one of which survives; and 27 mutants re-measured at `4fe059f7`,
+which found no over-claimed clause. Both sweeps re-ran the suite under CPU
+oversubscription with no flake.
 
-Four legs are not redded by any single mutant of sweep B's 18. Each is named
-here rather than folded into the headline:
+Five legs are not redded by any single-edit mutant of sweep B's 18. Each is
+named here rather than folded into the headline:
 
 - EF-14 admits no removal mutation at all: `retention.py` never references
   `COPYBACK_BATCH_LOCK_NAME`, and the planner's walk excludes the root-level
@@ -129,11 +130,11 @@ here rather than folded into the headline:
   came later is the clause and its test. No row of that sweep targets it, which
   means that sweep had a real gap — a mutant charging acquire and hold as a
   single span would have survived it with nothing to red. That mutant was built
-  and measured at this head instead, and reds exactly that one test.
+  and measured at `4fe059f7` instead, and reds exactly that one test.
 
 EF-4 and EF-12's `extra_roots_enabled=False` parameter are covered, but were not
 named in the sweep table's non-exhaustive "incl." lists; both were re-measured
-at this head and the covering mutants are recorded there.
+at `4fe059f7` and the covering mutants are recorded there.
 
 - [x] **EF-1 — the copyback lane locks.** A retention pass that removes a tree
       under the copyback root acquires the mutex for that removal: a test holds
@@ -202,10 +203,9 @@ at this head and the covering mutants are recorded there.
       `deleted`, `failed` or `skipped`, on any root.
       Alone among these clauses EF-14 has **no removal mutation**, and that is a
       structural exclusion rather than a coverage gap: `retention.py` never
-      references `COPYBACK_BATCH_LOCK_NAME` at all, and the planner enumerates
-      only the directory entries under `runs_root = root / RUNS_PREFIX`, so the
-      root-level lock file is outside the walk by construction. There is no line
-      whose deletion admits it. The case is kept as a regression guard against a
+      references `COPYBACK_BATCH_LOCK_NAME` at all, and neither planner enumerates
+      root-level entries (design.md D6 states where each walk starts). There is
+      no line whose deletion admits it. The case is kept as a regression guard against a
       future widening of the enumeration.
 - [x] **EF-15 — both call sites name the copyback root.** The scheduler pass
       and the `cleanup` CLI each pass the copyback root into `run_retention`,

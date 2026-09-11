@@ -21,7 +21,7 @@ present, in any form this pattern covers" — not "a line number cannot be
 written", which would be the self-certifying shape this change exists to
 remove.
 
-## D1 — the premise was re-measured, not inherited
+## D1 — the deployment premise was re-measured, not inherited
 
 Issue #2238 states the production facts; this change re-collected them
 independently on node-22 on 2026-09-11, read-only, before any code was written.
@@ -242,7 +242,7 @@ takes. The spec delta says exactly that. Nothing bounds a single hold either —
 Known limits, not in the spec. What follows is about the other direction:
 retention's own aggregate wait across one pass.
 
-With the guard's 900 s default and the measured 48-54 copyback removals per
+With the guard's 900 s default and the 48-54 copyback removals per
 pass, a holder that outlasts every one of
 those individual deadlines stalls one pass for up to about 13.5 h, which exceeds
 the 12 h pass cadence. That figure is an arithmetic bound on the existing

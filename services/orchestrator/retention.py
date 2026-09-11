@@ -133,7 +133,7 @@ ROOT_OVERLAP_REASON = "root_overlap"
 # however many consecutive single-tree holds that sweep takes (the spec delta
 # says so in as many words). What this budget bounds is the other direction:
 # retention's own aggregate wait across one pass. With the guard's own 900 s
-# default and the measured 48-54 copyback removals per pass, a holder that
+# default and the 48-54 copyback removals per pass, a holder that
 # outlasts EVERY INDIVIDUAL 900 s deadline --
 # a live process wedged on the lock, not a wait that ends by itself -- would
 # stall one pass for ~13.5 h, past the 12-hourly cadence. Only the acquisition
@@ -965,9 +965,10 @@ def _resolve_copyback_lock_root(
     this function, and it is not asserted here: one of them decides it from
     operator-supplied arguments rather than from any object-store root it reads.
 
-    Rejections are deliberately NOT recorded in ``skipped``: the same value was
-    already adjudicated (and recorded, when loud) by
-    :func:`_resolve_runs_only_roots`, and a second entry would duplicate it.
+    Rejections are deliberately NOT recorded in ``skipped``: when the
+    extra-roots gate forwarded this value, :func:`_resolve_runs_only_roots`
+    already adjudicated (and recorded, when loud) it, and a second entry would
+    duplicate it.
     """
     _raw, resolved, _rejected = _sanitize_root_candidate(
         copyback_root,

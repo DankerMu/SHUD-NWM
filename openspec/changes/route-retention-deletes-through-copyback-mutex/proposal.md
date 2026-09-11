@@ -70,9 +70,8 @@ criterion is therefore already satisfied upstream; this change owes the code.
   `tests/test_retention_copyback_mutex.py`. The local commit hook's 1000-line
   threshold blocked a commit that only *removes* a line from the first. Both
   files are hand-written, so this is a deliberate widening, and the list's shape
-  is measured rather than characterised: of the 24 tracked
-  `services/orchestrator` modules over the threshold, 12 are excluded and 12 are
-  not; the five sibling copyback test suites that exceed it are all excluded.
+  is measured rather than characterised: the four sibling copyback test suites
+  that exceed the threshold were already excluded before this change.
   The repo's recorded direction on this list is the opposite of widening — issue
   #1872 split `scheduler_config.py` and `tests/test_retention.py` below the
   threshold and revoked their exclusions, and

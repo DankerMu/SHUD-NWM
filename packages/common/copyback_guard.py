@@ -62,7 +62,7 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 #
 # Retention (#2238) is the first acquirer on this lock that is not a writer:
 # it acquires once per run tree it removes on the copyback root -- 48-54 per
-# pass on the measured node-22 config, not once per cycle. That count does not
+# pass on the node-22 config, not once per cycle. That count does not
 # multiply the ~24 queued acquisitions above, because *within one pass* those
 # acquisitions are strictly sequential (one removal's release precedes the next
 # one's acquire, `retention._remove_tree_under_copyback_mutex`), so one

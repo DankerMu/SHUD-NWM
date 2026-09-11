@@ -8,7 +8,8 @@ gitignored-versus-in-tree, not recorded-versus-unrecorded.
 
 ## Frame
 
-Sweeps A and B ran at commit `3854b596`. Sweep C ran at this change's head.
+Sweeps A and B ran at commit `3854b596`. Sweep C ran at `4fe059f7`, this
+change's round-1 head.
 
 Every mutant that alters removal behaviour targets
 `services/orchestrator/retention.py`, and that module is AST-identical between
@@ -22,14 +23,14 @@ reconstructable for its own reason:
   `git diff --stat 3854b596 <head>` at all;
 - the broad-rule row targets `scripts/select_ci_tests.py` and
   `tests/test_select_ci_tests.py`, which changed comment-only over that range
-  (test-count comments, `21 tests in 3.04s` → `25 tests in 5.27s`). The rule's
-  member list is unchanged, so the mutant applies as written.
+  (test-count comments). The rule's member list is unchanged, so the mutant
+  applies as written.
 
 The suite is not byte-identical to `3854b596`: one test was added after sweeps A
 and B (`test_ef11_a_long_uncontended_hold_is_not_charged_against_the_pass_budget`,
 EF-11's third case) and the EF-5 banner comment was rewritten. Sweep B's
 baseline count is therefore one test short of the head, and sweep B's failure
-sets were never re-measured at the head. Sweep C closes that.
+sets were never re-measured at `4fe059f7`. Sweep C closes that.
 
 ## Sweep A — implementer, at `3854b596`
 
@@ -43,7 +44,7 @@ repository. It is recorded here as an unverifiable claim, not as evidence.
 source-mutation pytest plugin (no repository file modified). Baseline at that
 SHA for the four-file batch `tests/test_retention_copyback_mutex.py`,
 `tests/test_copyback_guard.py`, `tests/test_retention_extra_roots.py`,
-`tests/test_retention.py`: 117 passed / 3 skipped. (The same four at the head
+`tests/test_retention.py`: 117 passed / 3 skipped. (The same four at `4fe059f7`
 are 118 passed / 3 skipped — exactly the one added test.)
 
 | mutant (target) | result vs baseline |
@@ -74,15 +75,17 @@ admits several inequivalent source edits:
 - "hold the lock across the whole pass" — caching the fd on the budget and
   reusing it across trees gives 6 failed; acquiring at pass start and releasing
   at pass end gives 9. Never 2, even after subtracting the one test added since.
+  Both failure sets include
+  `test_ef8_each_copyback_tree_gets_its_own_acquire_and_release`.
 - "the mutex changes selection" — this names the negation of an EF *clause*, not
   a source edit. The natural reading (skip entries on the copyback root) gives
-  16 failed.
+  16 failed, including `test_ef13_the_mutex_changes_timing_never_selection`.
 
 For these two rows the recorded counts stand as unverifiable, the same status as
 sweep A. What they claim — that EF-8 and EF-13 are backed — is independently
 re-established by sweep C.
 
-## Sweep C — round-1 test-evidence reviewer, at this change's head, independent
+## Sweep C — round-1 test-evidence reviewer, at `4fe059f7`, independent
 
 27 mutants, in-memory as above, counted against the 25-test mutex suite unless
 a row says otherwise (`git status` clean afterwards). The 27 comprise 18
@@ -160,14 +163,15 @@ than asserted.
 Sweep C first reached this file as a transcription of one reviewer's report,
 which made its numbers second-hand to the document. A second reviewer, in a
 later round and without access to the first, rebuilt all 27 mutants in-memory at
-this head from the target descriptions above and re-ran the campaign. It
+`4fe059f7` from the target descriptions above and re-ran the campaign. It
 reproduced the headline (25 red, 2 survive), the sole-carrier result for EF-11's
-third case, all six rows of the routing table, the Frame's five factual
+third case, all six rows of the routing table, five of the Frame's factual
 claims (the two absent files, the comment-only selector drift, the AST identity,
-the one added test, and the baseline offset that follows from it), and the four
-legs `tasks.md` names as unredded by any single sweep-B mutant. It also validated its harness in both
-directions — an identity mutant reproducing the four-file baseline exactly, and
-a negative control failing at collection when its pattern was absent.
+the one added test, and the baseline offset that follows from it), and the five
+legs `tasks.md` names as unredded by any single-edit sweep-B mutant. It also
+validated its harness in both directions — an identity mutant reproducing the
+four-file baseline exactly, and a negative control failing at collection when
+its pattern was absent.
 
 Three discrepancies came out of that re-measurement, and all three are corrected
 above: the `< 0` survivor's "equivalent mutant" label, the EF-4 count, and the
@@ -177,7 +181,7 @@ terms: the latency margin was re-measured under 28 burners against the recorded
 
 ## What a reader can check
 
-Sweep C is reconstructable at the head as written. Sweep B's mutants are
+Sweep C is reconstructable at `4fe059f7` as written. Sweep B's mutants are
 reconstructable from the target column except for the two rows marked above.
 Sweep A's are not. Where `tasks.md` states that the floor is mutation-backed,
 sweep C is the current evidence and sweep B the corroborating earlier one.
