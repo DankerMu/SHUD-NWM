@@ -352,7 +352,7 @@ def command(self, argv, **kwargs):
     partial = fault == "partial-copy" and "cp -a /source/. /destination/;" in argv[-1]
     if partial:
         argv[-1] = argv[-1].replace("cp -a /source/. /destination/;",
-                                   "mkdir /destination/partial; echo partial > /destination/partial/note;")
+                                   "cp -a /source/PG_VERSION /destination/;")
     result = original(self, argv, **kwargs)
     path = workspace / "state.json"
     state = json.loads(path.read_text()) if path.exists() else {}
@@ -413,11 +413,11 @@ def _activate(fixture: dict) -> None:
         _sql(
             fixture,
             """
-SELECT count(*) FILTER (WHERE is_compressed), count(*) FILTER (WHERE NOT is_compressed)
+SELECT bool_or(is_compressed), bool_or(NOT is_compressed)
 FROM timescaledb_information.chunks WHERE hypertable_schema='hydro' AND hypertable_name='obs';
 """,
         ).strip()
-        == "1|1"
+        == "t|t"
     )
     with pytest.raises(psycopg2.OperationalError, match="pg_hba.conf rejects connection"):
         with closing(_connection(fixture, writer=True)):
@@ -483,9 +483,11 @@ def test_disposable_cli_refuses_live_identity_without_lookup(oracle: dict) -> No
 def test_partial_copy_is_retained_and_cannot_activate(oracle: dict) -> None:
     _cli(oracle, "prepare")
     _cli(oracle, "copy", fault="partial-copy", expect=71)
-    assert (oracle["target"] / "partial" / "note").read_text().strip() == "partial"
+    partial = oracle["target"] / "PG_VERSION"
+    expected = (oracle["source"] / "PG_VERSION").read_bytes()
+    assert partial.read_bytes() == expected
     _cli(oracle, "activate", expect=2)
     _cli(oracle, "copy", expect=2)
-    assert oracle["source"].exists() and oracle["target"].exists()
+    assert partial.read_bytes() == expected
     _cli(oracle, "rollback")
     assert _counts(oracle) == (60, 48, 12, "pending")
