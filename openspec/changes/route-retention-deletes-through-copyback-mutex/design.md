@@ -2,10 +2,12 @@
 
 ## Reference frame
 
-Line citations to code this change does **not** add name the line at the branch
-base, `6fdb2015` (master at the time this fixture was written). Citations to
-code this change adds name the line in the branch tree. Historical
-measurements are written as plain numbers, never as `path:line` citations.
+One frame, with symbol anchors: every `path:line` here names a line in this
+branch's final tree and carries the symbol it points into
+(`retention._collect_run_targets:415-463`, not a bare `retention._collect_run_targets:415-463`).
+Historical measurements are written as plain numbers, never as citations. The
+two-frame rule this replaces, and why it could not work for files this change
+edits, is recorded in `tasks.md`'s own reference-frame note.
 
 ## D1 — the premise was re-measured, not inherited
 
@@ -36,16 +38,16 @@ Two preconditions were measured on the same visit, because a review challenged
 both and neither is decidable from the tree:
 
 - **Lock ownership.** `copyback_guard` fails closed unless the lock file's owner
-  matches the copyback root's owner (`copyback_guard.py:181-188`), so a
+  matches the copyback root's owner (`copyback_guard._require_lock_identity:213-221`), so a
   mismatched account would turn *every* copyback-root removal into a `failed[]`
   entry and silently stop reclaiming that root. Measured:
   `/ghdc/data/nwm/object-store` is owned by uid 1103 (`frd_muziyao`), and the
   scheduler unit runs as uid 1103. They match, and no lock file exists there yet.
 - **Scheduler lease.** The pass lease TTL is 3600 s
-  (`services/orchestrator/scheduler.py:297`), but it is renewed by a daemon
+  (`scheduler.module:297`), but it is renewed by a daemon
   thread started before retention runs and stopped after it
-  (`scheduler_runtime.py:740-741`, `:1505`; `_LeaseHeartbeat` at
-  `services/orchestrator/scheduler_lease.py:86-118`, interval `ttl // 3`). A
+  (`scheduler_runtime.run_once:740-741`, `:1505`; `_LeaseHeartbeat` at
+  `scheduler_lease._LeaseHeartbeat:86-118`, interval `ttl // 3`). A
   blocking acquisition in the main thread therefore does **not** consume the
   lease. The bound this change needs is on pass *duration*, not on the lease —
   see D9.
@@ -57,17 +59,20 @@ removed afterwards. Nothing was written under any object-store or workspace root
 
 ## D2 — where the lock goes, and why per tree
 
-`run_retention` (`services/orchestrator/retention.py:795-849`) plans first and
-then loops over `result.planned` (`retention.py:841-848`), calling
-`_delete_entry` (`retention.py:852-888`) once per entry. `_delete_entry` is the single removal
+`run_retention` (`retention.run_retention:855-940`) plans first and
+then loops over `result.planned` (`retention._CopybackLockBudget:838-852`), calling
+`_delete_entry` (`retention._delete_entry:978-1032`) once per entry. `_delete_entry` is the single removal
 site for every root, so the mutex goes there and nowhere else.
 
 Per tree, not per pass. A whole-pass hold would span `plan_retention`'s
 `_dir_size` rglob over every candidate on an NFS mount, and the mutex's budget
-is derived for a promote-sized critical section — `copyback_guard.py:52-67`
+is derived for a promote-sized critical section — `copyback_guard.module:54`
 reasons about ~36 s per acquisition and ~24 queued waiters inside the 900 s
-default (`DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS`, `copyback_guard.py:67`). A
-retention pass's wall-clock would eat that budget and starve every publisher.
+default (`DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS`, `copyback_guard.module:54`). A
+whole-pass hold would therefore be charged against a deadline sized for a
+promote, not for a sweep. How much of it a real pass would consume is not
+measured here, and the argument does not need it: per-tree holds make the
+question moot.
 Per-tree is also what the capability already requires of the backfill writers,
 for the same starvation reason.
 
@@ -78,10 +83,10 @@ the held window is one `remove_tree_allow_symlinks`.
 
 `run_retention` today receives `runs_only_roots` as an untagged positional
 tuple holding `WORKSPACE_ROOT` then the copyback root at both call sites
-(`services/orchestrator/cli.py:196-199`,
-`services/orchestrator/scheduler_runtime.py:2106-2109`). `_delete_entry` gets
+(`cli._run_cleanup:196-199`,
+`scheduler_runtime._run_retention:2106-2109`). `_delete_entry` gets
 only `containment_root`, which is set for **both** additional roots
-(`retention.py:841-848`), so it cannot tell the shared root from the workspace
+(`retention._CopybackLockBudget:838-852`), so it cannot tell the shared root from the workspace
 root.
 
 A new keyword-only `copyback_root` parameter on `run_retention` names it. Both
@@ -90,7 +95,7 @@ inside `runs_only_roots`.
 
 Matching is done on the **resolved** root string, against `result.extra_roots`,
 which is where `_resolve_runs_only_roots`
-(`retention.py:473-550`, called from `plan_retention` at `retention.py:693`) has already put the sanitised, `expanduser().resolve()`d,
+(`retention._resolve_runs_only_roots:515-592`, called from `plan_retention` at `retention.plan_retention:735`) has already put the sanitised, `expanduser().resolve()`d,
 de-duplicated, overlap-adjudicated roots. Consequences that fall out for free
 and are asserted rather than assumed:
 
@@ -104,33 +109,30 @@ and are asserted rather than assumed:
 - A copyback root that resolves to the **same path as the primary object store**
   is a different case, and D3's first draft got it wrong. It is dropped from
   `result.extra_roots` silently by the resolved-path dedup against the primary at
-  `retention.py:535-536`
-  (`admitted` seeds with the primary at `retention.py:513-514`, and the drop
+  `retention._resolve_runs_only_roots:515-592`
+  (`admitted` seeds with the primary at `retention._resolve_runs_only_roots:515-592`, and the drop
   records no `skipped` entry), yet `plan_retention` still collects `runs/` there
-  through the primary arm (`retention.py:725`), and those entries take the
+  through the primary arm (`retention.plan_retention:735`), and those entries take the
   unlocked `shutil.rmtree` branch. Not locking them is nevertheless correct, for
   a reason that has nothing to do with the deletion surface: in that
-  configuration **no copyback writer ever acquires**. Six writer lanes reach
-  this mutex through five acquire call sites (the two publisher run/q_down lanes
-  share one helper), and every one of them adjudicates the same-root
-  configuration *before* its acquire:
+  configuration the entry is not a member of `result.extra_roots`, and a root
+  that is not a member is not locked. That is the whole rule this function
+  applies, and it is the only thing asserted here.
 
-  | lane | acquire | same-root refusal |
-  |---|---|---|
-  | `publisher._copyback_run_products` | `:871` → `_copyback_batch_mutex` `:747` | skip `:827-835` |
-  | `publisher._copyback_qdown_products` | `:1042` → same helper | skip `:982-995` |
-  | `publisher._copyback_canonical_precip` | `:1308` | skip `:1293-1294` |
-  | `run_tree_copyback.copyback_run_trees` | `:247` | skip `:64-77` |
-  | `tile_publisher.forcing_copyback_backfill` | `:760` | raises `BackfillError("COPYBACK_ROOT_SAME_AS_OBJECT_STORE_ROOT")`, `:421` → `:510-519` |
-  | `scripts/canonical_precip_copyback_backfill.py` | `:467` | raises `BackfillUsageError`, `resolve_roots` `:146-147` |
+  Whether a writer could nonetheless hold this mutex on a root that is also some
+  process's primary object store is a property of the **writers**, not of the
+  deleter. Four earlier drafts of this bullet answered it with an enumeration of
+  the six writer lanes and a universal — "no writer ever acquires there" — and
+  that universal was wrong: one lane,
+  `scripts/canonical_precip_copyback_backfill.py`, decides the same-root case by
+  comparing two operator-supplied arguments and reads no object-store root at
+  all, so its refusal is a property of how it was invoked. The enumeration is
+  deleted rather than re-qualified, because re-qualifying it is what rounds 2, 3
+  and 4 each tried. **Issue #2252 owns the writer-side question**, and it has to
+  settle a prior one first: node-27 is the NFS server for this export and
+  node-22 its client, so whether a server-local `flock` excludes a client-side
+  one is not established anywhere in this repository.
 
-  Four skip, two raise; none holds the mutex, so there is no second party to
-  exclude. The last row is an identity refusal only because that script's
-  `--source-root` *is* the production object-store root by its own argument
-  contract (`:123`), so `--source-root == --copyback-root` is exactly this
-  configuration. Acquiring would only put a lock file on what is, here, the
-  primary object store — a root with plenty of other writers, none of which take
-  *this* mutex.
 - `WORKSPACE_ROOT` and the copyback root resolving to the same path is the
   #1318 silent dedup: one admitted root, which *is* the copyback root, and it is
   locked.
@@ -144,12 +146,12 @@ commit critical section, which are the damaging ones:
 
 - Retention `rmtree`-walking one run directory under the root's `runs/` while
   `run_tree_copyback._replace_tree`
-  (`services/orchestrator/run_tree_copyback.py:457-491`) renames that same
+  (`run_tree_copyback._replace_tree:457-491`) renames that same
   inode to its `.backup` name. Without the mutex retention keeps deleting
   through the rename and destroys the writer's rollback material; if the
   writer's promote then fails, it restores from a half-deleted backup.
 - Retention deleting between the writer's `os.replace(target, backup)` and its
-  `os.replace(temp, target)` (`run_tree_copyback.py:479-481`), which today costs a spurious `result.failed`
+  `os.replace(temp, target)` (`run_tree_copyback._replace_tree:457-491`), which today costs a spurious `result.failed`
   ENOENT entry.
 
 It does **not** close the plan-to-delete window. Retention plans a tree as aged
@@ -174,8 +176,8 @@ defect, and it is stated rather than fixed.
 `CopybackLockError` and `CopybackLockTimeout` are `RuntimeError` subclasses
 (`packages/common/copyback_guard.py:74,78`), not `OSError`. `_delete_entry`'s
 current `except (OSError, SafeFilesystemError)` would not catch them, and its
-own docstring (`retention.py:867-871`) already explains what escaping costs:
-`scheduler_runtime.py:2111-2112` collapses the pass receipt to
+own docstring (`retention._delete_entry:978-1032`) already explains what escaping costs:
+`scheduler_runtime._run_retention:2106-2109` collapses the pass receipt to
 `{"status": "error"}`, and the `cleanup` CLI wraps nothing, so the sweep aborts
 mid-pass. Both violate this module's "failures never abort the pass" contract.
 
@@ -190,15 +192,15 @@ go into `result.deleted` and does not add to `freed_bytes`.
 ## D6 — the lock file is not in retention's deletion surface
 
 `acquire_copyback_batch_lock` creates the fixed-name lock file directly under
-the copyback root (`copyback_guard.py:86-89`) and never unlinks it. Retention
+the copyback root (`copyback_guard.module:54`) and never unlinks it. Retention
 cannot select it: additional roots enumerate only the directories one level
-under the root's own `runs/` via `_collect_run_targets` (`retention.py:373-421`)
-and `_iter_dirs` (`retention.py:424-429`), which keeps directories only, and the
+under the root's own `runs/` via `_collect_run_targets` (`retention._collect_run_targets:415-463`)
+and `_iter_dirs` (`retention._iter_dirs:466-471`), which keeps directories only, and the
 primary root enumerates the three cycle-scoped prefixes two levels down
-(`retention.py:317`, `CYCLE_SCOPED_PREFIXES` at `retention.py:57`) **and** its
+(`retention._collect_cycle_targets:351-374`, `CYCLE_SCOPED_PREFIXES` at `retention.module:71`) **and** its
 own `runs/` one level down, because `plan_retention` calls both
 `_collect_cycle_targets` and `_collect_run_targets` on the primary root
-(`retention.py:724-725`). No root-level file is ever
+(`retention.plan_retention:735`). No root-level file is ever
 enumerated on either path. This is the same fact #2035's claims audit recorded
 as HOLDS; it is re-asserted here by test rather than inherited as prose.
 
@@ -215,7 +217,8 @@ exists. `ADDED` with a name distinct from #2035's therefore applies correctly in
 wholesale-replacement semantics `MODIFIED` carries.
 
 No edit is made to the #2035 change directory, and none is owed. Its
-`design.md:535-546` already reclassifies `retention.py` from consumer to
+`design.md:535-546` (the bullet opening "Unchanged *writer* that this change
+does not bring into the protocol") already reclassifies `retention.py` from consumer to
 "Unchanged **writer** that this change does not bring into the protocol", says
 outright that the consumer listing "was wrong and is the direct cause of it
 being missed", and routes the gap to #2238. Issue #2238's sixth acceptance
@@ -289,12 +292,12 @@ Two deliberate choices:
   than waved at. An earlier draft of this bullet justified the choice by saying
   the guard's existing `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` already
   answers every operational question the new knob would. **That was false.**
-  `resolve_copyback_lock_timeout_seconds` (`copyback_guard.py:92-123`) reads the
+  `resolve_copyback_lock_timeout_seconds` (`copyback_guard.resolve_copyback_lock_timeout_seconds:124-155`) reads the
   environment only when the caller passes no explicit timeout, and this lane
   always passes one — the remaining pass budget. All five other production
-  acquire sites (`publisher.py:747`, `:1308`, `run_tree_copyback.py:247`,
-  `forcing_copyback_backfill.py:760`,
-  `scripts/canonical_precip_copyback_backfill.py:467`; D3 maps them to the six
+  acquire sites (`publisher.TilePublisher._copyback_batch_mutex:747`, `:1308`, `run_tree_copyback._run_tree_batch_lock:247`,
+  `forcing_copyback_backfill._copy_package:760`,
+  `canonical_precip_copyback_backfill._mirror_tree_under_batch_lock:467`; D3 maps them to the six
   writer lanes) pass none and do honour the override; retention is the one that
   does not.
 
@@ -327,7 +330,7 @@ measured in D1 renews it throughout. The constraint is pass duration against a
 
 The spec requirement is written as an obligation on any process removing a
 directory tree under the shared copyback root, because that is the invariant the
-capability needs. `scripts/node27_raw_retention.py:553` is a second such remover,
+capability needs. `node27_raw_retention.run_retention:553` is a second such remover,
 on node-27, on the same NFS export, and it is out of scope by issue #2238's own
 boundary. The requirement therefore carries an explicit clause naming it as a
 known-violating implementation with its own tracking — issue #2252 — exactly as
@@ -357,7 +360,7 @@ and **both were wrong about the topology**. Measured read-only on 2026-09-11:
   export rather than to the host.) `/home/ghdc/nwm` is local ext4 on
   `/dev/mapper/ubuntu--vg-home`
   (`stat -f` reports `ext2/ext3`), and node-22 mounts exactly that directory as
-  `/ghdc/data/nwm` — which is what `copyback_guard.py:212-219`'s
+  `/ghdc/data/nwm` — which is what `copyback_guard.acquire_copyback_batch_lock:244-251`'s
   "NFSv4.2 mount of `ghdc:/home/ghdc`" names.
 - `/home/nwm/tmp`, the `TMPDIR` the repo's node-27 pytest discipline mandates,
   is on the same local ext4 volume.

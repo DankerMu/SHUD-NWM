@@ -806,6 +806,80 @@ def test_ef11_a_wait_that_succeeds_is_charged_against_the_pass_budget(
 
 
 # ---------------------------------------------------------------------------
+# EF-11, third case -- the other side of the same arithmetic: the budget charges
+# the ACQUISITION, never the hold (design D9, and the
+# `_remove_tree_under_copyback_mutex` docstring: "a large uncontended tree
+# cannot consume the budget"). Both cases above measure only contended waits, so
+# a build that wraps acquire AND removal in one `try`/`finally` and charges the
+# whole span once at the end survives them: on the timeout path it still charges
+# the wait, so EF-11's refusal count holds.
+#
+# What discriminates is a removal whose hold OUTLASTS the whole budget while
+# nothing contends the mutex. Charging the hold would then spend the budget on
+# the first tree and refuse the second as exhausted; charging the acquisition
+# only leaves the second tree the full budget and removes it. The sleep is on
+# the first `remove_tree_allow_symlinks` call by counter, so plan order is not
+# this test's business.
+# ---------------------------------------------------------------------------
+def test_ef11_a_long_uncontended_hold_is_not_charged_against_the_pass_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _real_dir(tmp_path, "object-store")
+    copyback = _real_dir(tmp_path, "copyback")
+    keys = {_seed_run_workspace(copyback, NOW - timedelta(days=days)) for days in (40, 50)}
+    assert len(keys) == 2
+    budget = 0.4
+    hold_seconds = 0.6  # deliberately > budget: charging it exhausts the pass
+
+    deadlines: list[float] = []
+    removals: list[str] = []
+    real_acquire = retention_module.acquire_copyback_batch_lock
+    real_remove = retention_module.remove_tree_allow_symlinks
+
+    def measuring_acquire(root: Path, **kwargs: Any) -> int:
+        deadlines.append(float(kwargs["timeout_seconds"]))
+        return real_acquire(root, **kwargs)
+
+    def slow_first_remove(parent: Path, name: str, **kwargs: Any) -> Any:
+        removals.append(str(Path(parent) / name))
+        if len(removals) == 1:
+            time.sleep(hold_seconds)
+        return real_remove(parent, name, **kwargs)
+
+    monkeypatch.setattr(retention_module, "acquire_copyback_batch_lock", measuring_acquire)
+    monkeypatch.setattr(retention_module, "remove_tree_allow_symlinks", slow_first_remove)
+
+    result = run_retention(
+        object_store_root=store,
+        now=NOW,
+        config=DELETING_CONFIG,
+        runs_only_roots=(copyback,),
+        copyback_root=copyback,
+        copyback_lock_wait_budget_seconds=budget,
+    )
+
+    # (a) fixture integrity: the slow removal really ran, on a copyback tree.
+    assert removals
+    assert str(Path(removals[0]).relative_to(copyback)) in keys
+    # (b) the second tree was still attempted -- charging the hold spends the
+    # whole budget on the first tree, so there is no second deadline at all ...
+    assert len(deadlines) == 2
+    assert len(removals) == 2
+    assert deadlines[0] == budget
+    # ... and it was handed the budget back essentially whole. The tolerance is
+    # far tighter than the hold, so only an uncharged hold can satisfy it; it
+    # rests on an uncontended acquisition costing near zero, which is the same
+    # assumption the charged-wait case above already asserts against (`abs=0.1`
+    # on a deadline it derives from the measured wait alone).
+    assert deadlines[1] == pytest.approx(budget, abs=0.15)
+    # (c) and the tree is deleted rather than recorded as budget-exhausted.
+    assert result.failed == []
+    assert _entries_for(result.deleted, copyback) == keys
+    for key in keys:
+        assert not (copyback / key).exists()
+
+
+# ---------------------------------------------------------------------------
 # EF-12 -- a pass that provably removes nothing acquires nothing: creating the
 # lock file is itself a write on the shared root.
 # ---------------------------------------------------------------------------

@@ -883,7 +883,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # `uv run pytest -q` in PR-lane conditions), and to 46 in #1581 (the
     # hydro-status parity lock: 5 tests in 0.23s, DB-free — it reads the
     # migrations as text and the status sets as objects), and to 47 in #2238
-    # (the copyback-mutex retention partition: 21 tests in 3.04s, DB-free — no
+    # (the copyback-mutex retention partition: 25 tests in 5.27s, DB-free — no
     # DB markers and no psycopg, green with no database up). Those running
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the

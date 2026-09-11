@@ -21,13 +21,6 @@ party. Nor SHALL a root be locked in the configuration where the copyback root
 and the process's own primary object store are the same directory; that root's
 aged run trees SHALL still be removed there, unlocked.
 
-Why that second carve-out is safe rather than merely convenient is a property of
-the **writers**, not of the deleter this requirement binds, so it is recorded
-with them and not asserted here. One writer establishes it only from
-operator-supplied arguments rather than from the process's own object-store
-root, which is exactly why this requirement does not rest on a universal claim
-about all of them.
-
 One implementation is known to violate this requirement and is not brought into
 compliance by the change that adds it: `scripts/node27_raw_retention.py` removes
 directory trees without taking the mutex, on node-27, under the very directory

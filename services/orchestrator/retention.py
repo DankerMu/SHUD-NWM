@@ -890,14 +890,8 @@ def run_retention(
     overlap-adjudicated set -- so it can only ever *select* a root the pass was
     already going to sweep and can never widen the deletion surface: a blank,
     unset, relative or overlap-rejected value selects nothing, and so does a
-    copyback root that resolves onto the primary object store (there every
-    copyback writer refuses that configuration before acquiring -- four lanes
-    return a ``copyback_root_matches_object_store_root`` skip and two raise
-    instead, ``tile_publisher.forcing_copyback_backfill`` with
-    ``COPYBACK_ROOT_SAME_AS_OBJECT_STORE_ROOT`` and
-    ``scripts/canonical_precip_copyback_backfill.py`` with a usage error -- so
-    no writer acquires and there is no second party to exclude). ``None`` --
-    the default, and every non-db-free deployment -- leaves the pass
+    copyback root that resolves onto the primary object store. ``None`` -- the
+    default, and every non-db-free deployment -- leaves the pass
     byte-identical to its pre-#2238 behaviour.
 
     ``copyback_lock_wait_budget_seconds`` bounds the time ONE pass may spend
@@ -954,18 +948,18 @@ def _resolve_copyback_lock_root(
 
     Sanitised through the same helper every root goes through, then required to
     be a member of ``result.extra_roots``. Membership -- not string equality
-    against the configured value -- is what makes the primary-identity
-    configuration correct: there the copyback root resolves onto the primary
-    object store, is dropped from the additional roots by the resolved-path
-    dedup against the primary in :func:`_resolve_runs_only_roots`, and its
-    ``runs/`` entries are swept through the primary arm's unlocked
-    ``shutil.rmtree``. Locking them would put a lock file on a root where this
-    process is the only party that ever takes this MUTEX -- the root is the
-    primary object store, with every other writer that implies -- because every
-    copyback writer refuses that configuration before acquiring: four lanes
-    return a ``copyback_root_matches_object_store_root`` skip, and
-    ``tile_publisher.forcing_copyback_backfill`` and
-    ``scripts/canonical_precip_copyback_backfill.py`` raise instead.
+    against the configured value -- is what decides the primary-identity
+    configuration: there the copyback root resolves onto the primary object
+    store, is dropped from the additional roots by the resolved-path dedup
+    against the primary in :func:`_resolve_runs_only_roots`, and its ``runs/``
+    entries are swept through the primary arm's unlocked ``shutil.rmtree``.
+    Not a member, so not locked -- that is the whole rule here.
+
+    Whether a writer could nonetheless hold this mutex on a root that is also
+    some process's primary object store is a property of the WRITERS, not of
+    this function, and it is not asserted here: one of them decides it from
+    operator-supplied arguments rather than from any object-store root it reads.
+    Issue #2252 owns that question.
 
     Rejections are deliberately NOT recorded in ``skipped``: the same value was
     already adjudicated (and recorded, when loud) by

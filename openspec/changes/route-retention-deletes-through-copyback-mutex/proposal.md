@@ -7,13 +7,16 @@ copyback mutex that #2035 (PR #2201) established on that same root.
 `grep -c copyback_batch_lock services/orchestrator/retention.py` is `0`; the
 three mentions of copyback in that file (`:23`, `:489`, `:670`) are comments.
 Both callers pass `NHMS_OBJECT_STORE_COPYBACK_ROOT` in as an additional
-runs-only root — `services/orchestrator/cli.py:196-199` and
-`services/orchestrator/scheduler_runtime.py:2106-2109` both forward
+runs-only root — `cli._run_cleanup:196-199` and
+`scheduler_runtime._run_retention:2106-2109` both forward
 the pair `WORKSPACE_ROOT` then the copyback root — and `_collect_run_targets`
-(`retention.py:373-421`) enumerates exactly the per-run directories one level
+(`retention._collect_run_targets:415-463`) enumerates exactly the per-run directories one level
 under each swept root's `runs/`, which is the same path family
-`run_tree_copyback._run_key` (`run_tree_copyback.py:263-270`) promotes into. Retention is the only destructive operator in the scheduler pass
-and the only one outside the protocol.
+`run_tree_copyback._run_key` (`run_tree_copyback._run_key:263-270`) promotes into. Within the scheduler pass, retention is the destructive
+operator that stands outside the protocol. It is not the only unlocked deleter
+on that root — `node27_raw_retention.run_retention:553` is a second one, on
+node-27, outside the pass; the spec requirement records it and issue #2252
+owns it.
 
 This is not latent, and the premise was re-measured on node-22 for this change
 rather than taken from the issue (2026-09-11, read-only, through the pinned
@@ -69,7 +72,7 @@ this change owes the code, not that edit.
   acquire. Without it a holder that outlasts every individual 900 s deadline
   turns one 12-hourly pass into up to N × 900 s, and the measured N is already
   48-54. That needs a holder wedged indefinitely, not the finite NFS
-  lease-expiry state `copyback_guard.py:212-219` documents — `design.md` D9
+  lease-expiry state `copyback_guard.acquire_copyback_batch_lock:244-251` documents — `design.md` D9
   keeps the two apart, because the budget's cost differs between them.
 - The new suite is wired into `scripts/select_ci_tests.py` so a change to
   `services/orchestrator/retention.py`, `cli.py` or `__init__.py` selects it in
@@ -79,13 +82,13 @@ this change owes the code, not that edit.
   `tests/test_select_ci_tests.py` grows by one, which is that pin's own
   documented update protocol ("Growing the rule means consciously editing this
   list and recording the new lane wall-clock").
-- `copyback_guard.py:54-67`'s budget comment names itself the single in-code home
+- `copyback_guard.module:54`'s budget comment names itself the single in-code home
   of the acquisition-count claim behind the 900 s default, and derives it from
   "at most once per cycle per scheduler pass". This change adds a per-tree
   acquirer, so that comment is updated to carry the new count and the retention
   budget that bounds it. It is a comment-only edit; no guard behaviour changes.
 - No behavioral change on `dry_run`: `run_retention` returns before the deletion
-  loop (`retention.py:839-840`), so zero acquisitions happen by construction.
+  loop (`retention._CopybackLockBudget:838-852`), so zero acquisitions happen by construction.
 
 ## Capabilities
 

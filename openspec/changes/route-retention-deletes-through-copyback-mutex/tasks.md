@@ -8,9 +8,34 @@ subject is a destructive `rmtree` lane on a production NFS export shared by two
 hosts, inside `services/orchestrator` — an expanded trigger in
 `openspec/project-profile.md`. Repair intensity: **expanded**.
 
-Reference frame for every `path:line` in this change's documents: pre-existing
-code is cited at the branch base `6fdb2015`; code this change adds is cited in
-the branch tree. Historical measurements are plain numbers, never citations.
+Reference frame for every `path:line` in this change's documents — **one frame,
+with symbol anchors**. Every citation names a line in this branch's final tree,
+whether or not this change added that line, and carries the symbol it points
+into: `copyback_guard.resolve_copyback_lock_timeout_seconds:124-155`, not a bare
+`copyback_guard.resolve_copyback_lock_timeout_seconds:124-155`. Historical measurements stay plain numbers, never
+citations.
+
+This replaces a two-frame rule (pre-existing code at base `6fdb2015`, added code
+in the branch tree) that rounds 2, 3 and 4 each shipped broken citations under.
+The rule was unworkable for the files this change itself edits: the comment
+block added to `packages/common/copyback_guard.py` sits *above* most of what the
+documents cite there, so every base line below it drifts by a fixed amount that
+is invisible to a reader, and the same function ended up cited under the base
+frame in one section and the branch frame in another. A reader could not tell
+from a citation which frame it used. The symbol anchor is what makes the
+remaining drift recoverable: if a later edit moves a line, the name still finds
+it, and a citation that never named the right symbol — round 4 found two — is
+exposed when the anchor is written rather than three rounds later.
+
+Both halves are mechanically checked, not read: `.workplans/pr-2245/review/check_citations.py`
+parses every anchor in these four documents and fails if the named symbol does
+not enclose the cited lines, or if a bare `path:line` appears at all. It found
+one wrong range in the very edit that introduced this note. A second scratch
+pass flagged sentences asserting an absolute with nothing in the same sentence
+that settles it; its precision is low — it merges bullets and reads ordinary
+prose uses of "every" as claims — so its output was triaged by hand rather than
+applied, and three sentences were changed as a result. That triage is a
+judgement call and is recorded as one.
 
 ## Risk pack selection
 
@@ -21,8 +46,8 @@ the branch tree. Historical measurements are plain numbers, never citations.
 | file/path IO safety | **selected** | The guarded call is a no-follow `rmtree` under a shared root. |
 | production config | **selected** | Which root gets locked is decided by two env-fed call sites; node-22's live config is the reason this is not latent. |
 | evidence chain | **selected** | A lock failure must land in the pass receipt's `failed[]`, not collapse the receipt. |
-| shared helper behavior | **selected** | Reversed after the fixture review. `copyback_guard.py:54-67` names itself the single in-code home of the acquisition-count claim behind the 900 s budget and derives it from "at most once per cycle per scheduler pass". This change adds a per-tree acquirer, so that claim stops being true and the comment is updated (T6). The helper's behaviour is unchanged; its documented invariant is not. |
-| permissions/auth boundary | **selected** | Reversed after the fixture review. This change is the first to put a lane **whose purpose is deletion** under `copyback_guard.py:181-188`'s root-owner uid fail-closed check — the copyback writers already remove backup trees inside the mutex, but as a step of a promotion, not as the lane's product; a mismatch would turn every copyback-root removal into a `failed[]` entry and silently stop reclaiming that root. Measured clear on node-22 (`design.md` D1) rather than assumed. |
+| shared helper behavior | **selected** | Reversed after the fixture review. `copyback_guard.module:54` names itself the single in-code home of the acquisition-count claim behind the 900 s budget and derives it from "at most once per cycle per scheduler pass". This change adds a per-tree acquirer, so that claim stops being true and the comment is updated (T6). The helper's behaviour is unchanged; its documented invariant is not. |
+| permissions/auth boundary | **selected** | Reversed after the fixture review. This change is the first to put a lane **whose purpose is deletion** under `copyback_guard._require_lock_identity:213-221`'s root-owner uid fail-closed check — the copyback writers already remove backup trees inside the mutex, but as a step of a promotion, not as the lane's product; a mismatch would turn every copyback-root removal into a `failed[]` entry and silently stop reclaiming that root. Measured clear on node-22 (`design.md` D1) rather than assumed. |
 | data schema / migration | not selected | No DB schema, payload schema, or migration touched. |
 | frontend contract | not selected | No `apps/frontend`, OpenAPI, or display surface. |
 | numerical/scientific | not selected | No GRIB/NetCDF/CRS/unit logic. |
@@ -63,7 +88,7 @@ the branch tree. Historical measurements are plain numbers, never citations.
       `services/orchestrator/cli.py` (`os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT")`)
       and `services/orchestrator/scheduler_runtime.py`
       (`self.config.object_store_copyback_root`).
-- [x] T6 Update the budget comment at `packages/common/copyback_guard.py:54-67`
+- [x] T6 Update the budget comment at `copyback_guard.module:54`
       so its acquisition-count derivation names retention's per-tree acquirer and
       the pass budget that bounds it. Comment only — no guard behaviour changes,
       and `tests/test_copyback_guard.py` must stay green untouched.
@@ -118,10 +143,14 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
 assertion.** Round 3 found two clauses (EF-11's total-wait bound, and T3's
 "release in a `finally`") that a reader would have called covered and that no
 mutation of `services/orchestrator/retention.py` could red; the Review Failure
-Retro's corrective action was to stop trusting inspection. 22 mutants were run
-across EF-1..EF-16 — each one deletes or inverts the behaviour a clause names,
-and each one reds the clause that names it. Two honest caveats, recorded rather
-than smoothed over:
+Retro's corrective action was to stop trusting inspection. What backs the floor
+is an archived, reconstructable sweep — `.workplans/pr-2245/review/round-4-mutation-sweep.md`
+— and not this sentence: 18 mutants, built independently by the round-4
+test-evidence seat, each deleting or inverting the behaviour a clause names,
+each redding the clause that names it, plus 42 suite runs under 28-way CPU
+oversubscription with no flake. An earlier 22-mutant sweep is recorded there too
+and is explicitly marked unverifiable, because its enumeration was not kept.
+Two caveats, recorded rather than smoothed over:
 
 - EF-5 and EF-6's overlap leg survive a *single* mutation of
   `_resolve_copyback_lock_root`'s membership check, because `_delete_entry`'s
@@ -200,7 +229,7 @@ than smoothed over:
       structural exclusion rather than a coverage gap: `retention.py` never
       references `COPYBACK_BATCH_LOCK_NAME` at all, and the planner enumerates
       only the directory entries under `runs_root = root / RUNS_PREFIX`
-      (`retention.py:432-438`), so the root-level lock file is outside the walk
+      (`retention._collect_run_targets:415-463`), so the root-level lock file is outside the walk
       by construction. There is no line whose deletion admits it. The case is
       kept as a regression guard against a future widening of the enumeration.
 - [x] **EF-15 — both call sites name the copyback root.** The scheduler pass
@@ -214,7 +243,10 @@ than smoothed over:
       `tests/test_retention_copyback_mutex.py` for that module. Asserted as
       routing, not as "the gate is green": the gate can be satisfied by an
       exclusion token — and two of its token classes, `runtime-budget` and
-      `fn-gated`, have no machine check at all — which would leave the oracle
+      `fn-gated`, have no machine check at all
+      (`test_select_ci_tests._disposition_offenders:9014-9056` checks only an
+      invalid token, an underived gap, a stale exclusion, an orphan
+      `edge-consumer` and a dead `redirect`) — which would leave the oracle
       unrouted while every test stayed green.
       The three legs are not asserted the same way, and the difference is
       recorded rather than glossed:
@@ -277,7 +309,7 @@ than smoothed over:
   Stated in the spec as an explicit non-guarantee (`design.md` D4) and routed as
   a tracked follow-up at Phase 8, not silently absorbed.
 - `freed_bytes` remains a planning-time estimate, measured outside the mutex.
-- `scripts/node27_raw_retention.py:553` is the second unlocked deleter on the
+- `node27_raw_retention.run_retention:553` is the second unlocked deleter on the
   same directory tree — measured: node-27's
   `NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store` is what
   node-22 mounts as `/ghdc/data/nwm/object-store`, and its per-cycle `canonical`
@@ -306,7 +338,7 @@ than smoothed over:
   client. No available host closes that gap for this branch: node-27 is the
   export's **server**, so `flock` there is local ext4 too (`design.md` D11), and
   node-22 — the only client — is pre-maintenance-window. The third state
-  `copyback_guard.py:212-219` documents (correctly owned, no local holder, still
+  `copyback_guard.acquire_copyback_batch_lock:244-251` documents (correctly owned, no local holder, still
   locked) is therefore not reproducible in the suite. That state is where the
   budget imposes its known **cost** — 300 s may be shorter than the lease, and
   the pass then defers rather than loses the reclamation — not a reason it
@@ -336,9 +368,13 @@ than smoothed over:
   `cleanup` CLI, which takes no scheduler lease and no cross-process guard of
   its own — so an operator cleanup overlapping a scheduled pass queues two
   retention waiters on this lock. Each carries its own independent 300 s budget.
-  Recorded in `copyback_guard.py`'s budget comment and accepted: two waiters is
-  still inside the ~24 that comment's budget derivation covers, so it changes
-  the count it must carry, not the conclusion. No issue filed, deliberately.
+  **Two is an assumption, not a ceiling** — that is what the guard's budget
+  comment says, and this bullet used to contradict it: nothing serialises two
+  concurrent operator cleanups, so every further one adds another waiter. The
+  ~24-queued-acquisition figure the guard's derivation rests on is therefore
+  conditional on at most one concurrent cleanup, and nothing enforces that.
+  Filed as a tracked issue at Phase 8 with the other residuals — the earlier
+  decision not to file rested on the ceiling reading, which no longer stands.
 - The budget bounds waiting, never holding. Only acquisition elapsed is charged,
   so an uncontended pass takes an unbounded number of holds (the removal loop
   has no cap) while charging ~0, and no single hold is bounded either —
@@ -351,7 +387,7 @@ than smoothed over:
   filesystem-safety code and to every one of its callers — out of this issue's
   boundary. Routed as a tracked issue at Phase 8.
 - `resolve_copyback_lock_timeout_seconds` validates its **explicit-argument**
-  branch less than its environment branch: `copyback_guard.py:139-142` rejects
+  branch less than its environment branch: `copyback_guard.resolve_copyback_lock_timeout_seconds:124-155` rejects
   only `value <= 0`, while the env branch at `:150` also rejects `NaN` and
   `inf`. Measured in round 3 with a watchdog: `acquire_copyback_batch_lock(root,
   timeout_seconds=float("inf"))` and `...=float("nan")` against a held lock both
