@@ -90,6 +90,8 @@ DDL 顺序（迁移 header 记账项）：`CREATE TABLE`（PK + 两 FK 内联）
 
    I3c/#2207 执行口径：两种 valid-time raw source 只投影时间，在一个 caller-owned outer distinct/order/limit 下组合。named 的 run authority 使用显式 `h.run_key`/`h.run_id`/`h.timeseries_store`，避免为多合取 lookup 放宽既有 unaliased scalar-scope fail-closed；any 使用 `ts.run_key` 到 `h.run_key` 的 correlated EXISTS。Python 先截取 SQL 降序结果中的最新 N 项，再把保留项升序返回。仅 discovery 专用测试保留相反 store 的 +30min poison，不能套用会还原时间的 MVT helper 掩盖路由错误。两条 registry key 保留，13 live /7 routed /6 historical-comparable，历史 golden 与五层 tile SQL 不变。详见 `fixtures/I3c-2207.md`；生产 I7/I8 边界不变。
 
+   I4a/#1983 执行口径：已知 run 的 `_run_row` 增加实际 `timeseries_store` 投影，现有 route 把它传给 probe；probe 在 fact SQL 前严格校验并只调用一次 renderer，不增加 union、factory 或二次 metadata lookup。原 raw probe literal 保持逐字不变，仍可直接与历史 golden 比较；registry 的七个 store-qualified raw sources 与六个 historical-comparable inputs 计数不变，不把 runtime 已调用 renderer 混同为 raw 谓词发生变化。request 输入验证仍在任何 SQL 前，readiness 与 source-identity 错误仍先于 store 错误；非法/缺失 route 使用既有 `TIMESERIES_STORE_INVALID` 500 约定。独立 post-expand 测试保留错 store 的时间偏移，生产边界不变；详见 `fixtures/I4a-1983.md`。
+
 非模板面（同批处理）：`services/tile_publisher/publisher.py` 的 `_has_table` 前置在过渡期接受两个名字；`services/tile_publisher/forcing_copyback_backfill.py:314` 的 `required_columns` 按 store 分支（legacy 保 `variable`，narrow 只留键/枚举）；（`scripts/node27_autopipeline.py:1443-1451` 统计守卫的 IN-list 属 D7/任务 3.1，不在本批非模板面内）；`scripts/reset_qhh_smoke_db.py`、`scripts/summarize_qhh_smoke_results.py` 按 store 渲染（reset 对 legacy run 同时清 legacy 表）；`services/production_closure/scale_validation.py` 与 `scripts/node27_timeseries_compression_live_evidence.py` 的计划形状钉子按 store 分支。
 
 ### D6 legacy 重解析：fail-closed，走既有 decline 账本、tick rc=0、永久

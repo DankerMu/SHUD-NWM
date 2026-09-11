@@ -65,6 +65,9 @@
   **Suggested fixture level:** compact - one known-run probe and one API contract path.
 
   **Minimal mergeable slice:** atomic: one callable, one fact read and one route lookup.
+
+  **Execution fixture:** `fixtures/I4a-1983.md`. Keep the probe raw literal and all thirteen registry raw inputs unchanged; only the metadata projection and selected-store execution change. Preserve request-validation-before-any-SQL and readiness/identity precedence; validate the metadata route before the fact probe, with typed `TIMESERIES_STORE_INVALID` for missing/unknown store. Verify both-store call/HTTP behavior and the existing real-DB probe owner in explicitly authorized per-test post-expand catalogs; production transition/EXPLAIN remains I7/I8.
+
 - [ ] 2.3b (I4b, #2208) `packages/common/display_coverage.py` river leg only: project `timeseries_store` from `candidate_runs` and compose the two rendered fact-row branches only inside `river_sample_rows`; leave station CTEs, key aggregation/reconstruction, overwrite guard and outer `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` unchanged. Verify: SQL shape/registry/golden oracles plus `tests/test_display_coverage*`, parallel refresh and CLI tests through one coverage-refresh verification path.
 
   **Suggested fixture level:** compact - one module and one coverage-refresh path; DML boundary and forcing station leg are explicit invariants.
