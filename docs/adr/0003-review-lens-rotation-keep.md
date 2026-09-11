@@ -4493,3 +4493,11 @@ later-round catches core=261、rotated=270、phase=57、skipped=15。
 本单 compact 一轮两席、零候选、独立终审零发现，不增加多轮样本或后轮 catch。
 记录 deferral：keep/cut 仍待维护者决策；本次 reader 合并授权不含审核策略调整。
 现行 keep 与座位上限不变。
+
+### Revisit 2026-09-11（post PR #2269 / issue #1984）
+
+追加后实测 635 行、625 merged、10 terminal；206 个多轮样本，
+later-round catches core=261、rotated=270、phase=57、skipped=15。
+本单 compact 一轮两席、零候选、独立终审零发现，不增加多轮样本或后轮 catch。
+记录 deferral：keep/cut 仍待维护者决策；本次非模板面合并授权不含审核策略调整。
+现行 keep 与座位上限不变。
