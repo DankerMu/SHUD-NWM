@@ -4462,3 +4462,18 @@ later-round catches core=259、rotated=270、phase=57、skipped=15。
 PR #2253 是一轮三席综合审核、零候选，独立终审零发现；不增加多轮样本或后轮catch。
 记录deferral：keep/cut仍待维护者的人类策略决策，本次独立bug修复授权不含策略调整。
 现行keep及座位上限不变；不据零边际catch缩减后续审核，也不改写历史不可归因记录。
+
+### Revisit 2026-09-11（post PR #2245 descoped / PR #2257 merged，issue #2238）
+
+追加两条后实测：630 行、620 merged、10 terminal；205 个多轮 merged PR，
+later-round catches core=261、rotated=270、phase=57、skipped=15。
+
+本次样本对轮换是**反向证据，且不足以据此翻案**：PR #2257 的 round 4 由三轮硬门
+后的 depth retro 买下，唯一未用席位是 `security-perf`，而该轮 diff 是纯散文
+（`retention.py` 在该区间 AST 相同），性能/安全席位咬不动它，故**明确记录偏离、
+不买轮换**，只跑 `test-evidence`+`integration`。该轮两条 CONFIRMED（R4-a/R4-b）
+都落在 round-1 已有的 core 席位上 —— 这是 core+2、rotated+0 的来源。
+一次因 diff 形态而无可轮换席位的后轮，不能当作轮换收益下降的证据。
+
+记录 deferral：keep/cut 仍待维护者的人类策略决策；本 issue 的 merge 预授权不含
+审核策略调整授权。现行 keep 与座位上限不变，不改写历史不可归因记录。
