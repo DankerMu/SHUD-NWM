@@ -570,23 +570,10 @@ class Migration:
         self.save()
         host.command([DOCKER, "update", "--restart=no", state["original_id"]])
         require(self.original(stopped=False).restart_policy == ("no", 0), "original restart was not disabled")
+        # Wait outside the container: its shutdown kills an exec'ed pg_ctl waiter.
+        # An unlimited daemon grace period prevents escalation to SIGKILL.
         host.command(
-            [
-                DOCKER,
-                "exec",
-                "--user",
-                numeric,
-                state["original_id"],
-                "pg_ctl",
-                "-D",
-                PGDATA,
-                "-m",
-                "fast",
-                "-w",
-                "-t",
-                "120",
-                "stop",
-            ],
+            [DOCKER, "stop", "--signal", "SIGINT", "--timeout", "-1", state["original_id"]],
             timeout=150,
         )
         deadline = time.monotonic() + 30
