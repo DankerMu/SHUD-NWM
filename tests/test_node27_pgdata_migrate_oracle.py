@@ -612,7 +612,7 @@ def test_marked_stopped_candidate_recovery_is_owned_and_forward_only(oracle: dic
     elif unsafe == "candidate-name":
         _run([DOCKER, "rename", candidate["Id"], oracle["name"] + "-unexpected"])
     elif unsafe == "candidate-config":
-        _run([DOCKER, "update", "--memory", "256m", candidate["Id"]])
+        _run([DOCKER, "update", "--memory", "256m", "--memory-swap", "512m", candidate["Id"]])
     _cli(oracle, "rollback", expect=2)
     _cli(oracle, "release", fault="candidate-id" if unsafe == "candidate-id" else None, expect=2 if unsafe else 0)
     after = json.loads((oracle["workspace"] / "state.json").read_text())

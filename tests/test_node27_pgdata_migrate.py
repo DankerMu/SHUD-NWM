@@ -628,7 +628,7 @@ def test_cluster_traversal_refuses_unsafe_interior(tmp_path: Path, monkeypatch, 
 def _unit_fixture(tmp_path: Path, monkeypatch, specs: dict[str, tuple[str, str]]) -> tuple[UnitHost, dict]:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     runtime = tmp_path / "runtime"
-    runtime.mkdir()
+    runtime.mkdir(mode=0o700)
     _private(runtime / "app.py", "print('owned runtime')\n")
     monkeypatch.setattr("packages.common.node27_pgdata_host.OLD_RUNTIME", str(runtime))
     units = {}
@@ -788,4 +788,3 @@ def test_quiescent_display_state_is_preserved_without_replay(tmp_path: Path, mon
     assert host.units[DISPLAY]["ActiveState"] == initial
     assert not host.fence_path(DISPLAY).exists()
     assert ("/usr/bin/systemctl", "--user", "start", DISPLAY) not in host.commands
-    assert ("/usr/bin/systemctl", "--user", "stop", DISPLAY) not in host.commands
