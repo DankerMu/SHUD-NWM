@@ -12,7 +12,7 @@ import pytest
 
 from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
 from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
-from packages.common.node27_pgdata_host import DISPLAY, FENCE, Host, MigrationError, covered_tree, path_identity
+from packages.common.node27_pgdata_host import DISPLAY, FENCE, UNITS, Host, MigrationError, covered_tree, path_identity
 from packages.common.node27_pgdata_migrate import DEFAULTS, Migration
 from scripts.node27_pgdata_migrate import main
 
@@ -453,7 +453,7 @@ class UnitHost(FakeHost):
             return super().command(argv, **kwargs)
         name = argv[3]
         value = dict(self.units.get(name, {"LoadState": "not-found", "ActiveState": "inactive"}))
-        if name in self.units:
+        if name in self.units and name in UNITS:
             fence = self.fence_path(name)
             if fence.exists():
                 value["DropInPaths"] = (value.get("DropInPaths", "") + " " + str(fence)).strip()
@@ -695,6 +695,11 @@ def test_unknown_persistent_writer_stays_fenced_without_being_killed(tmp_path: P
     writer = "nhms-node27-download.service"
     host, state = _unit_fixture(tmp_path, monkeypatch, {writer: ("active", "simple")})
     state["units"] = host.units_snapshot(state["config"])
+    # If an unsupported daemon exits during a wait, it is still not an admitted
+    # oneshot. A drain timeout must not mask loss of the writer-kind refusal.
+    monkeypatch.setattr(
+        "packages.common.node27_pgdata_host.time.sleep", lambda _: host.units[writer].update(ActiveState="inactive")
+    )
     with pytest.raises(MigrationError):
         host.install_fences(state)
     assert host.fence_path(writer).exists()

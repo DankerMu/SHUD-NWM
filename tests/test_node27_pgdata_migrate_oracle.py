@@ -395,6 +395,8 @@ def command(self, argv, **kwargs):
             and args[1:3] == ["update", "--restart=unless-stopped"] and args[-1] == candidate)
         or (fault == "prepare-stop" and state.get("stage") == "prepare_intent"
             and args[1:3] == ["stop", "--signal"] and args[-1] == source)
+        or (fault == "prepare-policy" and state.get("stage") == "prepare_intent"
+            and args[1:3] == ["update", "--restart=no"] and args[-1] == source)
         or partial
     )
     if hit:
@@ -542,7 +544,8 @@ def test_prepare_interruption_rolls_back_in_fresh_process(oracle: dict) -> None:
 
 @pytest.mark.parametrize("refusal", ("prepare-replay", "source-override", "target-override"))
 def test_prepared_identity_cannot_be_replayed_or_redirected(oracle: dict, refusal: str) -> None:
-    _cli(oracle, "prepare")
+    preparing = refusal == "prepare-replay"
+    _cli(oracle, "prepare", fault="prepare-policy" if preparing else None, expect=71 if preparing else 0)
     state_bytes = (oracle["workspace"] / "state.json").read_bytes()
     redirected = oracle["root"] / "redirected"
     if refusal == "prepare-replay":
@@ -552,7 +555,7 @@ def test_prepared_identity_cannot_be_replayed_or_redirected(oracle: dict, refusa
         _cli(oracle, "copy", expect=2, extra=(flag, str(redirected)))
     assert (oracle["workspace"] / "state.json").read_bytes() == state_bytes
     assert not oracle["target"].exists() and not redirected.exists()
-    assert not _inspect(oracle["name"])["State"]["Running"]
+    assert _inspect(oracle["name"])["State"]["Running"] is preparing
     _cli(oracle, "rollback")
     assert _counts(oracle) == (60, 48, 12, "pending")
 
