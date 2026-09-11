@@ -4457,8 +4457,8 @@ later-round catches core=259、rotated=270、phase=57、skipped=15。
 
 ### Revisit 2026-09-11（post PR #2253 / issue #1356）
 
-追加本单后实测627行、618 merged、9 terminal；203个多轮样本，
-later-round catches core=258、rotated=270、phase=57、skipped=15。
+合入上游 #2250 记录后重新实测628行、619 merged、9 terminal；204个多轮样本，
+later-round catches core=259、rotated=270、phase=57、skipped=15。
 PR #2253 是一轮三席综合审核、零候选，独立终审零发现；不增加多轮样本或后轮catch。
 记录deferral：keep/cut仍待维护者的人类策略决策，本次独立bug修复授权不含策略调整。
 现行keep及座位上限不变；不据零边际catch缩减后续审核，也不改写历史不可归因记录。
