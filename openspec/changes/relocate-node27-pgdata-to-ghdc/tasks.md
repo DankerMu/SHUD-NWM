@@ -16,7 +16,7 @@ Fixture approval: `PgdataFixture` approved after the second bounded repair; B1-B
 
 - [x] 3.1 Run local lint, strict OpenSpec validation and actual read-only CLI smoke.
 - [x] 3.2 Run node-27 focused tests and exact-image disposable copy/rebind/rollback/write-boundary proof; preserve production unchanged.
-- [ ] 3.3 Complete independent high-risk review/verifier, final review, CI and PR evidence. Leave merge and production rollout human-gated.
+- [x] 3.3 Complete independent high-risk review/verifier, final review, CI and PR evidence. Leave merge and production rollout human-gated.
 
 ## Risk triage
 
@@ -45,8 +45,9 @@ Verification recorded before review:
 - No production prepare/copy/rebind or root provisioning was performed. User-owned capacity hold and OLD runtime pins remain; live workload/backup gates remain outside this PR.
 - Round 1 repairs verified at `376a1eb1`: eight selected node-27 test files, including the exact-image oracle, **896 passed** in 518.04s. The original `c1c86a34` production code loaded only in memory fails six new behavioral cases (8 controls pass); no remote product files were replaced.
 - Negative-proof sensitivity: 15 narrowly scoped fault variants fail the corresponding tests. Removing only prepare's entry check remains blocked by the independent durable operation-authority check; removing that specific pair is caught by the interrupted-prepare replay test. Cold-lane and unknown-writer fixtures were unmasked rather than pinning failure wording.
-- CI at `376a1eb1` passes Markdown Lint, targeted Unit Tests and report-only governance checks; skipped jobs are not claimed as full-suite or live DB evidence. Follow-up review/final delivery task 3.3 remains open.
+- CI at `376a1eb1` passes Markdown Lint, targeted Unit Tests and report-only governance checks; skipped jobs are not claimed as full-suite or live DB evidence. The later `32d336a8` CI run also succeeds, including the added failed-timer regression.
 - Post-proof production observation still shows the original container/bind/image/runtime and held autopipe/download timers. The OLD runtime directory is currently 0775 and needs a separately approved permission prerequisite resolution; no chmod or production admission PASS is claimed.
+- Review completion: round 3 is clean at `32d336a8a02afa3387d653b61b3bf28f9080ebfe`; the independent final Gap Sweep is clean at the same source head. The added failed-timer test is red under its narrow timer-stop mutant and green in the 31-pass relocation module. [Review and verification evidence](https://github.com/DankerMu/SHUD-NWM/pull/2250#issuecomment-5631328660) is published; merge, production cutover and hold removal remain separately human-gated.
 
 ## Explicit non-goals
 
