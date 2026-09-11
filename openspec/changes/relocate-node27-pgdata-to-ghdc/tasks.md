@@ -1,7 +1,9 @@
 ## 1. Contract
 
-- [ ] 1.1 Review this expanded fixture and invariant matrix; validate OpenSpec strictly.
-- [ ] 1.2 Freeze the CLI/state/ownership and disposable-oracle seams before implementation.
+- [x] 1.1 Review this expanded fixture and invariant matrix; validate OpenSpec strictly.
+- [x] 1.2 Freeze the CLI/state/ownership and disposable-oracle seams before implementation.
+
+Fixture approval: `PgdataFixture` approved after the second bounded repair; B1-B4 closed. Implementation seams are the public CLI actions and durable `writes_released` boundary, existing container serializer contract, and existing `cold_governance_sample` output shape. Shared flags are `--action`, `--workspace`, `--source-container`, `--source-pgdata`, `--target-pgdata`, `--reserve-bytes`, `--mdadm-evidence`, repeated `--smart-evidence DEVICE=PATH`, `--enforce`, and isolated-oracle `--disposable-root`. Post-prepare actions use frozen workspace identity and refuse conflicting overrides. Core owns CLI/state/copy/serializer/tests; Placement owns governance attribution/tests and runbook/ADR; Main owns this fixture and integration.
 
 ## 2. Implementation
 
@@ -32,6 +34,7 @@ Public CLI actions and their observable source/container/unit effects; exact sha
 - Local `uv run ruff check` for changed Python and CLI default/help execution; backend pytest only on node-27.
 - Node-27 tests: new relocation behavioral tests, affected container/governance tests and the disposable oracle. Export `TMPDIR=/home/nwm/tmp` before pytest and inspect `/`, `/home`, `/data/GHDC` capacity first. Code travels local commit -> GitHub -> isolated exact-SHA remote checkout; never edit product code remotely or replace the active checkout/runtime.
 - Exact-image isolated proof: warm+compressed rows/metadata/roles preserved; default planning no mutation; dirty/partial/unsafe copy refusal; correct numeric ownership; verified bind-only activation; original restoration before release; stale rollback refusal after release; interrupted state cannot turn into success; no live identity admitted by a fixture. Existing cold-installer paths remain unchanged.
+- Fixture repair B1-B3: reject activate/release from invalid predecessors; simulate a fresh process after stop/rename and lost ephemeral flock while durable unit fences/source Docker ID remain authoritative; read succeeds but a real ingest credential cannot connect/write even with explicit read-write intent before release; restore the exact original HBA only after the durable marker, and preserve stale-rollback refusal across a partial release.
 - Governance: new target PGDATA counted once on its observed root; old `/home` sample remains correct; unknown attribution is not fabricated.
 - Record commands, SHA and real output. Disposable proof is not live C1-C4/HDD performance or production relocation. Later rollout retains SQL1+20 P95<=300ms/buffers<=5000, API1+20 P95<=500ms, browser1+20 P95<2s, unchanged content and controlled-ingest/natural-tick gates. No silent SLO relaxation.
 
