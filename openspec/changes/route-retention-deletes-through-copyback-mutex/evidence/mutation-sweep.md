@@ -73,13 +73,14 @@ are 118 passed / 3 skipped — exactly the one added test.)
 admits several inequivalent source edits:
 
 - "hold the lock across the whole pass" — caching the fd on the budget and
-  reusing it across trees gives 6 failed; acquiring at pass start and releasing
-  at pass end gives 9. Never 2, even after subtracting the one test added since.
-  Both failure sets include
+  reusing it across trees gives 6 failed in the mutex suite; acquiring at pass
+  start and releasing at pass end gives 9. Never 2, even after subtracting
+  the one test added since. Both failure sets include
   `test_ef8_each_copyback_tree_gets_its_own_acquire_and_release`.
 - "the mutex changes selection" — this names the negation of an EF *clause*, not
   a source edit. The natural reading (skip entries on the copyback root) gives
-  16 failed, including `test_ef13_the_mutex_changes_timing_never_selection`.
+  16 failed in the mutex suite, including
+  `test_ef13_the_mutex_changes_timing_never_selection`.
 
 For these two rows the recorded counts stand as unverifiable, the same status as
 sweep A. What they claim — that EF-8 and EF-13 are backed — is independently
@@ -162,9 +163,9 @@ than asserted.
 
 Sweep C first reached this file as a transcription of one reviewer's report,
 which made its numbers second-hand to the document. A second reviewer, in a
-later round and without access to the first, rebuilt all 27 mutants in-memory at
-`4fe059f7` from the target descriptions above and re-ran the campaign. It
-reproduced the headline (25 red, 2 survive), the sole-carrier result for EF-11's
+later round and without access to the first, rebuilt all 27 mutants in-memory
+from the target descriptions above and re-ran the campaign. It reproduced the
+headline (25 red, 2 survive), the sole-carrier result for EF-11's
 third case, all six rows of the routing table, five of the Frame's factual
 claims (the two absent files, the comment-only selector drift, the AST identity,
 the one added test, and the baseline offset that follows from it), and the five

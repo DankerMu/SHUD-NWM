@@ -101,9 +101,7 @@ the ones it misses rather than claiming the stronger thing.
 
 Each clause is a machine-checkable statement about the final branch tree. EF-1
 through EF-16 are local and mandatory; EF-17 is post-merge ops and is a recorded
-known limit, not a merge blocker. Contended cases set
-`copyback_lock_wait_budget_seconds` to sub-second values so the suite stays
-fast.
+known limit, not a merge blocker.
 
 **No clause below rests on reading a test for the presence of an assertion.**
 The record is `evidence/mutation-sweep.md` in this change directory, and it
