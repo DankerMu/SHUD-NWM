@@ -327,12 +327,11 @@ def test_ef4_the_deduplicated_root_is_locked(
 
 # ---------------------------------------------------------------------------
 # EF-5 -- the copyback root resolving onto the primary object store: still
-# swept (through the primary arm), deliberately not locked, because in that
-# configuration every copyback writer refuses before acquiring -- four lanes
-# return a `copyback_root_matches_object_store_root` skip and two raise
-# (`tile_publisher.forcing_copyback_backfill`,
-# `scripts/canonical_precip_copyback_backfill.py`) -- so no second party to
-# this mutex exists.
+# swept (through the primary arm), deliberately not locked. The rule is
+# membership: in that configuration the resolved-path dedup against the
+# primary drops the root from `result.extra_roots`, and a root that is not a
+# member is not locked. Whether any writer could nonetheless hold this mutex
+# on such a root is a property of the writers, and it is not settled here.
 # ---------------------------------------------------------------------------
 def test_ef5_a_copyback_root_that_is_the_primary_object_store_is_swept_but_not_locked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

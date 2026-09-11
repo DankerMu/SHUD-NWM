@@ -959,7 +959,6 @@ def _resolve_copyback_lock_root(
     some process's primary object store is a property of the WRITERS, not of
     this function, and it is not asserted here: one of them decides it from
     operator-supplied arguments rather than from any object-store root it reads.
-    Issue #2252 owns that question.
 
     Rejections are deliberately NOT recorded in ``skipped``: the same value was
     already adjudicated (and recorded, when loud) by
