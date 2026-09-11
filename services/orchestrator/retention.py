@@ -130,20 +130,28 @@ ROOT_OVERLAP_REASON = "root_overlap"
 # every removal on the copyback root (#2238 / design D9). Per-tree deadlines
 # bound how long one promote can be blocked by retention; they do not bound the
 # reverse. With the guard's own 900 s default and the measured 48-54 copyback
-# removals per pass, a single stuck holder -- the NFS state in which the lock is
-# correctly owned, has no local holder and stays held until the server lease
-# expires -- would stall one pass for ~13.5 h, past the 12-hourly cadence. Only
-# the acquisition is charged against this budget, never the removal itself, so a
-# large uncontended tree cannot consume it. A module constant plus a keyword
-# override for tests, deliberately NOT an environment variable -- and NOT
-# because the guard's NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS covers it:
+# removals per pass, a holder that outlasts EVERY INDIVIDUAL 900 s deadline --
+# a live process wedged on the lock, not a wait that ends by itself -- would
+# stall one pass for ~13.5 h, past the 12-hourly cadence. Only the acquisition
+# is charged against this budget, never the removal itself, so a large
+# uncontended tree cannot consume it. A module constant plus a keyword override
+# for tests, deliberately NOT an environment variable -- and NOT because the
+# guard's NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS covers it:
 # `copyback_guard.resolve_copyback_lock_timeout_seconds` reads that variable
 # only when the caller passes no explicit timeout, and this lane always passes
 # one (the remaining budget), so retention is the one production acquirer the
-# override cannot reach. The choice stands anyway: in the state this budget
-# exists for -- a holder that will not release until the NFS server lease
-# expires -- no deadline an operator can set reclaims anything, and a longer one
-# only stalls the pass further.
+# override cannot reach.
+#
+# That untunability is an accepted limit, not a proof, and the two stuck states
+# are not the same. Against a holder that never releases at all, no deadline an
+# operator could set reclaims anything and a longer one only stalls the pass
+# further. Against the NFS state the guard describes -- correctly owned, no
+# local holder, held until the server lease expires -- the wait is FINITE and
+# waiting it out is the response `copyback_guard` itself prescribes, so 300 s
+# may simply be shorter than that lease. The pass then records the blocked
+# trees as `failed` (the first waited out the budget, the rest refused before
+# acquiring), removes nothing on that root, and the next pass retries: deferred
+# reclamation, not lost reclamation. That is the cost taken here.
 DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS = 300.0
 
 
@@ -830,10 +838,13 @@ def _target_payload(target: RetentionTarget) -> dict[str, Any]:
 class _CopybackLockBudget:
     """The copyback root under the mutex, plus one pass's remaining wait budget.
 
-    One instance per pass, shared by every copyback-root removal and mutated by
-    each of them: the budget is a *pass*-level bound, so the acquisitions have
-    to charge against the same counter (design D9). ``root`` travels with it
-    because the removal and the acquisition must name the same resolved root.
+    One instance per pass, shared by every copyback-root removal and charged by
+    each acquisition attempt one of them makes: the budget is a *pass*-level
+    bound, so those attempts have to draw on the same counter (design D9). Once
+    it is spent the remaining entries are refused before acquiring, so they
+    leave the counter untouched rather than driving it further negative.
+    ``root`` travels with it because the removal and the acquisition must name
+    the same resolved root.
     """
 
     root: Path
@@ -880,9 +891,14 @@ def run_retention(
     already going to sweep and can never widen the deletion surface: a blank,
     unset, relative or overlap-rejected value selects nothing, and so does a
     copyback root that resolves onto the primary object store (there every
-    copyback writer skips before acquiring, so there is no second party to
-    exclude). ``None`` -- the default, and every non-db-free deployment --
-    leaves the pass byte-identical to its pre-#2238 behaviour.
+    copyback writer refuses that configuration before acquiring -- four lanes
+    return a ``copyback_root_matches_object_store_root`` skip and two raise
+    instead, ``tile_publisher.forcing_copyback_backfill`` with
+    ``COPYBACK_ROOT_SAME_AS_OBJECT_STORE_ROOT`` and
+    ``scripts/canonical_precip_copyback_backfill.py`` with a usage error -- so
+    no writer acquires and there is no second party to exclude). ``None`` --
+    the default, and every non-db-free deployment -- leaves the pass
+    byte-identical to its pre-#2238 behaviour.
 
     ``copyback_lock_wait_budget_seconds`` bounds the time ONE pass may spend
     acquiring that mutex in total (design D9); it exists for tests, and
@@ -940,11 +956,16 @@ def _resolve_copyback_lock_root(
     be a member of ``result.extra_roots``. Membership -- not string equality
     against the configured value -- is what makes the primary-identity
     configuration correct: there the copyback root resolves onto the primary
-    object store, is dropped from the additional roots by the identity test in
-    :func:`_resolve_runs_only_roots`, and its ``runs/`` entries are swept through
-    the primary arm's unlocked ``shutil.rmtree``. Locking them would create a
-    lock file on a root whose only user is this process, because every copyback
-    writer returns ``copyback_root_matches_object_store_root`` before acquiring.
+    object store, is dropped from the additional roots by the resolved-path
+    dedup against the primary in :func:`_resolve_runs_only_roots`, and its
+    ``runs/`` entries are swept through the primary arm's unlocked
+    ``shutil.rmtree``. Locking them would put a lock file on a root where this
+    process is the only party that ever takes this MUTEX -- the root is the
+    primary object store, with every other writer that implies -- because every
+    copyback writer refuses that configuration before acquiring: four lanes
+    return a ``copyback_root_matches_object_store_root`` skip, and
+    ``tile_publisher.forcing_copyback_backfill`` and
+    ``scripts/canonical_precip_copyback_backfill.py`` raise instead.
 
     Rejections are deliberately NOT recorded in ``skipped``: the same value was
     already adjudicated (and recorded, when loud) by

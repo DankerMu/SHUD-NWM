@@ -930,9 +930,15 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         "tests/test_retention.py",
-        # #1872 (+#2238): the five retention partitions ride the broad
-        # orchestrator directory rule together, so each partition and the
-        # independent frontier suite are pinned here.
+        # #1872 (+#2238 EF-16, `services/orchestrator/__init__.py` leg): the five
+        # retention partitions ride the broad orchestrator directory rule
+        # together, so each partition and the independent frontier suite are
+        # pinned here. This literal is an equality pin on the selector's output,
+        # which is why the __init__.py leg is allowed to rest on it and on
+        # nothing else: measured, deleting the copyback-mutex suite from the
+        # broad rule reds this assertion (retry.py's selection loses it, and no
+        # importer derivation re-supplies it there), and no disposition token can
+        # mask that -- `select_ci_tests` never reads the exclusion table.
         "tests/test_retention_copyback_mutex.py",
         "tests/test_retention_extra_roots.py",
         "tests/test_retention_frontier.py",
@@ -9253,9 +9259,9 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
         "services/orchestrator/retention.py",
         (
             "tests/test_retention.py",
-            # #2238's partition joins the floor row: the pin below only counts as
-            # "the positive floor above proves each partition IS selected" if the
-            # floor actually names it.
+            # #2238 EF-16 (retention.py leg): the partition joins the floor row,
+            # because the pin below only counts as "the positive floor above
+            # proves each partition IS selected" if the floor actually names it.
             "tests/test_retention_copyback_mutex.py",
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_frontier.py",
@@ -9306,7 +9312,9 @@ RETENTION_FRONTIER_PARTITION = "tests/test_retention_frontier.py"
 # the rule stays green via derivation — which is correct, not a gap). The
 # copyback-mutex partition's other routes — the `cli.py` stop rule and the
 # `tests/retention_test_helpers.py` importer derivation — are ones a
-# `retention.py`-only change never reaches, so it fractures here too.
+# `retention.py`-only change never reaches, so it fractures here too. That
+# membership is the per-partition fracture pin #2238 EF-16 names for the
+# `retention.py` leg.
 RETENTION_RULE_ONLY_PARTITIONS: tuple[str, ...] = (
     "tests/test_retention_copyback_mutex.py",
     "tests/test_retention_extra_roots.py",
@@ -9663,14 +9671,22 @@ def test_basins_publication_helper_route_selects_exactly_eight_consumers_plus_th
 STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("services/orchestrator/chain.py", CHAIN_IMPORTER_TESTS),
     ("services/orchestrator/scheduler.py", SCHEDULER_IMPORTER_TESTS),
-    # #2238: the cli.py entry carries the shared constant PLUS the at-site
-    # addition, because `select_ci_tests` extends this rule with the
-    # copyback-mutex suite at the rule site rather than by editing
+    # #2238 EF-16 (cli.py leg): the cli.py entry carries the shared constant
+    # PLUS the at-site addition, because `select_ci_tests` extends this rule
+    # with the copyback-mutex suite at the rule site rather than by editing
     # ORCHESTRATOR_CLI_IMPORTER_TESTS (that constant is also spliced into
     # FILE_JOURNAL_READ_STATE_PATH_PATTERNS[4], whose selection must not move).
-    # Pinning the constant alone left the at-site addition unpinned: deleting it
-    # from the rule kept the whole selector suite green while leaving the
-    # requirement oracle permanently unrouted for cli.py-only PRs.
+    # Pinning the constant alone left the at-site addition unpinned. Measured,
+    # with the at-site target deleted from the rule and this entry back at its
+    # constant-only form: every route and selection pin in this file stayed
+    # green, and the only reds were the directory-rule disposition audit plus
+    # the four guards that derive from its gap set -- all five naming the one
+    # pair `services/orchestrator/cli.py -> tests/test_retention_copyback_mutex.py`.
+    # And that audit is satisfiable by a token: adding a single `runtime-budget`
+    # exclusion for that pair put the file back to all-green with the route
+    # still gone. One token away from losing the requirement oracle for
+    # cli.py-only PRs with nothing but a dispositionable gap objecting -- which
+    # is what this pin exists to prevent.
     (
         "services/orchestrator/cli.py",
         (*ORCHESTRATOR_CLI_IMPORTER_TESTS, "tests/test_retention_copyback_mutex.py"),

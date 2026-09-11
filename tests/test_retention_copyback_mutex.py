@@ -15,10 +15,13 @@ side of a cross-process protocol, not another root-admission rule.
 Every root here is built under ``tmp_path.resolve()``. ``safe_fs`` walks with
 ``O_NOFOLLOW`` and macOS's ``tmp_path`` sits under ``/var -> private/var``, so a
 symlinked ancestor would make the removal itself refuse (the
-``tests/test_copyback_guard.py`` ``_real_root`` idiom). Contended cases drive
-the acquisition deadline down to sub-second through the pass budget, so the
-suite stays fast; ``flock`` is per open file description, so a holder in this
-same process contends with the pass exactly as a separate host would.
+``tests/test_copyback_guard.py`` ``_real_root`` idiom). The cases that must
+TIME OUT drive the acquisition deadline sub-second through the pass budget, and
+the probes that ask "is it held right now?" carry a 0.2 s deadline of their own,
+so the suite stays fast; the contended cases that must SUCCEED keep a roomy
+budget and wait for a real release instead. ``flock`` is per open file
+description, so a holder in this same process contends with the pass exactly as
+a separate host would.
 """
 
 from __future__ import annotations
@@ -322,8 +325,11 @@ def test_ef4_the_deduplicated_root_is_locked(
 # ---------------------------------------------------------------------------
 # EF-5 -- the copyback root resolving onto the primary object store: still
 # swept (through the primary arm), deliberately not locked, because in that
-# configuration every copyback writer skips before acquiring and no second
-# party exists.
+# configuration every copyback writer refuses before acquiring -- four lanes
+# return a `copyback_root_matches_object_store_root` skip and two raise
+# (`tile_publisher.forcing_copyback_backfill`,
+# `scripts/canonical_precip_copyback_backfill.py`) -- so no second party to
+# this mutex exists.
 # ---------------------------------------------------------------------------
 def test_ef5_a_copyback_root_that_is_the_primary_object_store_is_swept_but_not_locked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -341,7 +347,8 @@ def test_ef5_a_copyback_root_that_is_the_primary_object_store_is_swept_but_not_l
         copyback_lock_wait_budget_seconds=30.0,
     )
 
-    # Dropped from the additional roots by the identity test, yet still swept.
+    # Dropped from the additional roots by the resolved-path dedup against the
+    # primary, yet still swept.
     assert result.extra_roots == []
     assert _entries_for(result.deleted, store) == {key}
     assert not (store / key).exists()
@@ -557,8 +564,10 @@ def test_ef10_an_unsafe_lock_file_is_a_recorded_failure_and_the_trees_survive(
 
     errors = _errors_for(result.failed, copyback)
     assert set(errors) == copyback_keys
-    # A non-timeout `CopybackLockError`, and it consumed no wait budget: every
-    # entry on the root was attempted and refused for the same reason.
+    # A non-timeout `CopybackLockError`: it fails the identity assertion before
+    # any blocking poll, so it charges the budget only its own near-zero
+    # elapsed and never a deadline's wait. Every entry on the root was
+    # therefore attempted, and refused for the same reason.
     assert all("0600" in error for error in errors.values())
     assert _entries_for(result.deleted, copyback) == set()
     for key in copyback_keys:
@@ -730,8 +739,16 @@ def test_ef13_the_mutex_changes_timing_never_selection(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# EF-14 -- the lock file is never itself a removal candidate. The mutex is
-# permanently poisoned if it is removed and recreated under a live holder.
+# EF-14 -- the lock file is never itself a removal candidate. Unlinking it
+# under a live holder splits the mutex: that holder keeps its flock on the
+# now-detached inode while the next acquirer creates a fresh file and locks
+# that, so the two run unserialised for the rest of that hold. A party that had
+# already opened the old inode is refused loudly rather than admitted
+# (`_require_lock_identity` runs after the flock and sees the path/fd drift),
+# and the root converges on the new file once the stale holder exits -- so the
+# damage is a window of no mutual exclusion the length of one hold, not a
+# permanent poisoning. A window is enough: that is precisely the interval this
+# whole change exists to serialise.
 # ---------------------------------------------------------------------------
 def test_ef14_the_lock_file_is_never_a_removal_candidate(tmp_path: Path) -> None:
     store = _real_dir(tmp_path, "object-store")

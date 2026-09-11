@@ -22,7 +22,7 @@ the branch tree. Historical measurements are plain numbers, never citations.
 | production config | **selected** | Which root gets locked is decided by two env-fed call sites; node-22's live config is the reason this is not latent. |
 | evidence chain | **selected** | A lock failure must land in the pass receipt's `failed[]`, not collapse the receipt. |
 | shared helper behavior | **selected** | Reversed after the fixture review. `copyback_guard.py:54-67` names itself the single in-code home of the acquisition-count claim behind the 900 s budget and derives it from "at most once per cycle per scheduler pass". This change adds a per-tree acquirer, so that claim stops being true and the comment is updated (T6). The helper's behaviour is unchanged; its documented invariant is not. |
-| permissions/auth boundary | **selected** | Reversed after the fixture review. This change is the first to put a **deletion** lane under `copyback_guard.py:181-188`'s root-owner uid fail-closed check; a mismatch would turn every copyback-root removal into a `failed[]` entry and silently stop reclaiming that root. Measured clear on node-22 (`design.md` D1) rather than assumed. |
+| permissions/auth boundary | **selected** | Reversed after the fixture review. This change is the first to put a lane **whose purpose is deletion** under `copyback_guard.py:181-188`'s root-owner uid fail-closed check — the copyback writers already remove backup trees inside the mutex, but as a step of a promotion, not as the lane's product; a mismatch would turn every copyback-root removal into a `failed[]` entry and silently stop reclaiming that root. Measured clear on node-22 (`design.md` D1) rather than assumed. |
 | data schema / migration | not selected | No DB schema, payload schema, or migration touched. |
 | frontend contract | not selected | No `apps/frontend`, OpenAPI, or display surface. |
 | numerical/scientific | not selected | No GRIB/NetCDF/CRS/unit logic. |
@@ -35,8 +35,10 @@ the branch tree. Historical measurements are plain numbers, never citations.
       against `result.extra_roots` — the sanitised, resolved, de-duplicated,
       overlap-adjudicated set `_resolve_runs_only_roots` produced — so a blank,
       unset, relative, or overlap-rejected value selects nothing and the
-      parameter cannot widen the deletion surface. Default `None` keeps every
-      existing caller and test byte-identical.
+      parameter cannot widen the deletion surface. Default `None` leaves the
+      pass byte-identical to its pre-#2238 behaviour for any caller that does
+      not pass it — every existing test, and every caller except the two this
+      change updates in T5.
 - [x] T2 `_delete_entry` gains a keyword-only flag (or equivalent) saying this
       entry's root is the copyback root, and when it is set, wraps **only** the
       `remove_tree_allow_symlinks` call in the copyback batch mutex, acquired on
@@ -99,6 +101,12 @@ the branch tree. Historical measurements are plain numbers, never citations.
       criterion — reached ONLY through the owner rule — not assumed. Both pins
       end up covering more, never less. This is the same "an audit a new suite
       silently invalidated" failure the file's own #1452 note describes.
+      What each buys is stated rather than implied: the fracture pin is the one
+      that can red, because it asserts the partition is reached *only* through
+      the owner rule. Extending the floor row catches nothing the broad rule's
+      equality literal does not already catch — it keeps the corpus inventory
+      honest, so the next reader of that row is not told there are four
+      retention partitions when there are five.
 ## Evidence Floor
 
 Each clause is a machine-checkable statement about the final branch tree. EF-1
@@ -191,10 +199,21 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
       is removed; `__init__.py` has no assertion naming it, and rides the broad
       `services/orchestrator/**` rule's frozen exact-output literal instead.
       That is accepted as equivalent for this leg specifically because the
-      literal is an equality pin: deleting the suite from the broad rule reds it
-      no matter what exclusion token is added, so the leg is not
-      exclusion-bypassable. It would not be accepted for `cli.py`, whose route
-      is a stop rule the broad literal never exercises.
+      literal is an equality pin **on the selector's own output**, and
+      `select_ci_tests` never reads the disposition/exclusion table at all:
+      measured, deleting the suite from the broad rule's member list reds that
+      assertion, and no exclusion token can mask it. It would not be accepted
+      for `cli.py`, whose route is a stop rule the broad literal never
+      exercises.
+      The counterfactual behind this clause was run rather than argued: removing
+      the route entirely reds **five** tests, not one, and all five are the
+      disposition-audit family
+      (`test_directory_rule_importer_gaps_are_dispositioned` and its three
+      guard-of-the-guard tests, plus
+      `test_mapping_builder_joins_the_directory_audit_without_new_gaps`). A
+      single `runtime-budget` token restores all five to green with the route
+      still gone — which is precisely why EF-16 asserts routing directly instead
+      of resting on a green gate.
 - [ ] **EF-17 — node-22 deployment receipt (post-merge, known limit).** Two
       halves, because the first half alone proves nothing about this change:
       1. *Non-regression, labelled as such.* After master is deployed to
@@ -213,6 +232,13 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
          presence does **not** substitute: the same deploy brings #2035's
          writers, which acquire the identical file on the identical root earlier
          in the pass (`design.md` D8).
+      Two conditions on running the probe, both from `design.md` D8. It blocks
+      every #2035 copyback writer on that root for the window it holds the lock,
+      not only retention, so it is run when no promotion is owed and never
+      during a live forecast cycle. And it reads per-entry `error` text, which
+      `scheduler_evidence_payload._compact_retention` (`:767-802`) replaces with
+      `*_count` scalars under `pre_write_size_pressure` — a compacted receipt is
+      a void run of the probe, not a failed one.
       node-22's active checkout is pre-maintenance-window (3.12 venv, no
       `uv sync`, no bare `uv run`), and `packages/common/copyback_guard.py` does
       not exist there yet, so neither half can be produced from this branch and
@@ -227,24 +253,38 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
   a tracked follow-up at Phase 8, not silently absorbed.
 - `freed_bytes` remains a planning-time estimate, measured outside the mutex.
 - `scripts/node27_raw_retention.py:553` is the second unlocked deleter on the
-  same NFS export. Out of scope by the issue's boundary; the spec requirement
-  names it as a known-violating implementation rather than narrowing itself to
-  stay true by construction (`design.md` D10).
+  same directory tree — measured: node-27's
+  `NODE27_RAW_RETENTION_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store` is what
+  node-22 mounts as `/ghdc/data/nwm/object-store`, and its per-cycle `canonical`
+  lane is the keyspace the canonical-precip writers promote into. Out
+  of scope by the issue's boundary; the spec requirement names it as a
+  known-violating implementation rather than narrowing itself to stay true by
+  construction (`design.md` D10). **Filed as issue #2252**, which leads with the
+  question this change could not settle: node-27 is the NFS *server*, so its
+  `flock` is local-ext4 and node-22's is client-side, and whether those exclude
+  each other has to be measured before that script simply calls the same
+  acquire.
 - Retention's copyback acquisition deadline is **not operator-tunable in
   production**. `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` reaches every
   other acquirer but not this one, because the guard reads the environment only
   when the caller passes no explicit timeout and this lane always passes the
-  remaining pass budget (`design.md` D9). Accepted rather than fixed: in the
-  state the budget exists for — a holder that will not release until an NFS
-  server lease expires — no deadline an operator can set reclaims anything, and
-  a longer one only stalls the pass further. Recorded here so the next person to
-  reach for that variable learns it from the fixture rather than from a pass
-  that ignores them.
-- Lock semantics are exercised locally on APFS/ext4, not on the production
-  NFSv4.2 export. The third state `copyback_guard.py:212-219` documents
-  (correctly owned, no local holder, still locked) is not reproducible in the
-  suite; it is the reason the pass budget exists, and the budget itself is
-  tested with an ordinary local holder.
+  remaining pass budget (`design.md` D9). Accepted rather than fixed, and the
+  two stuck states are kept apart: against a live hung holder no deadline
+  reclaims anything; against the finite NFS lease-expiry hold a longer deadline
+  would ride it out, and this change does not know that lease — the export's
+  server-side setting was not read — so 300 s may simply be shorter than it.
+  What the budget does then is deferred reclamation, not lost reclamation: the
+  blocked trees land in `failed[]` and the next pass retries. Recorded here so
+  the next person to reach for that variable learns it from the fixture rather
+  than from a pass that ignores them.
+- Lock semantics are exercised on a local filesystem, never through an NFSv4.2
+  client. No available host closes that gap for this branch: node-27 is the
+  export's **server**, so `flock` there is local ext4 too (`design.md` D11), and
+  node-22 — the only client — is pre-maintenance-window. The third state
+  `copyback_guard.py:212-219` documents (correctly owned, no local holder, still
+  locked) is therefore not reproducible in the suite; it is one of the two
+  reasons the pass budget exists, and the budget itself is tested with an
+  ordinary local holder.
 - `packages/common/copyback_guard.py` is named by **no** rule in
   `scripts/select_ci_tests.py`. It is not unrouted — same-name derivation and
   the `packages/**` supplemental routes still select nine suites for it,
@@ -255,6 +295,35 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
   `packages/common` is outside `DIRECTORY_RULE_AUDIT_PATHS`, so the gate does
   not demand a rule. Pre-existing from #2035, found while wiring T9, out of
   scope here; routed as a tracked issue at Phase 8.
+- A persistently contended copyback root reclaims **nothing**, quietly. Every
+  entry lands in `result.failed` with the lock error, the pass reports
+  `completed`, and nothing downstream distinguishes "failed to acquire on every
+  tree" from "had nothing to delete": `failed[]` drives no metric and no alert,
+  and `scheduler_evidence_payload._compact_retention` (`:767-802`) replaces the
+  list with a `failed_count` scalar under size pressure, erasing the error text
+  entirely. The disk fills at retention's normal rate while the receipt looks
+  healthy. Pre-existing shape (`failed[]` has never had an operator signal),
+  newly reachable through the mutex; routed as a tracked issue at Phase 8, with
+  the rest of this change's deferred findings.
+- The retention **lane** can contribute two waiters, not one. `run_retention`
+  has two production entry points — the scheduler pass and the operator
+  `cleanup` CLI, which takes no scheduler lease and no cross-process guard of
+  its own — so an operator cleanup overlapping a scheduled pass queues two
+  retention waiters on this lock. Each carries its own independent 300 s budget.
+  Recorded in `copyback_guard.py`'s budget comment and accepted: two waiters is
+  still inside the ~24 that comment's budget derivation covers, so it changes
+  the count it must carry, not the conclusion. No issue filed, deliberately.
+- The budget bounds waiting, never holding. Only acquisition elapsed is charged,
+  so an uncontended pass takes an unbounded number of holds (the removal loop
+  has no cap) while charging ~0, and no single hold is bounded either —
+  `safe_fs.remove_tree_allow_symlinks` takes no deadline. What protects a writer
+  is the measured shape (one waiter per pass, short `rmtree` holds), which is
+  scale-dependent rather than structural: a retention pass growing well past
+  today's 48-54 trees is a real way for a writer to exhaust its own 900 s
+  deadline. Not fixed here: bounding a hold means giving
+  `remove_tree_allow_symlinks` a deadline, which is a change to shared
+  filesystem-safety code and to every one of its callers — out of this issue's
+  boundary. Routed as a tracked issue at Phase 8.
 - Issue #2238's sixth acceptance criterion (correct #2035's "Unchanged
   downstream consumers" wording for `retention.py`) is **already satisfied at
   base `6fdb2015`** by that change's own post-ceiling sweep

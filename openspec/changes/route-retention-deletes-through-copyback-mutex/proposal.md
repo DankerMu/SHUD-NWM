@@ -49,8 +49,13 @@ this change owes the code, not that edit.
   pass the same value they already pass inside `runs_only_roots`, so the root
   that needs the mutex is named instead of being inferred from an untagged
   positional tuple.
-- `_delete_entry` acquires `packages.common.copyback_guard.copyback_batch_lock`
-  **per tree**, and only for entries whose root is the resolved copyback root.
+- `_delete_entry` takes the mutex **per tree**, and only for entries whose root
+  is the resolved copyback root. It calls
+  `packages.common.copyback_guard.acquire_copyback_batch_lock` /
+  `release_copyback_batch_lock` directly rather than the `copyback_batch_lock`
+  context manager, because the elapsed acquisition time has to be measured
+  between those two calls to be charged against the pass budget (`design.md`
+  D9); the release is in a `finally`.
   The `WORKSPACE_ROOT` lane and the primary object-store root keep their current
   unlocked deletion path.
 - `CopybackLockError` (and therefore `CopybackLockTimeout`) joins
@@ -61,10 +66,11 @@ this change owes the code, not that edit.
 - One pass-level lock-wait budget bounds the total time a sweep can spend
   blocked. Each acquisition is given whatever is left of it; once it is spent,
   the remaining copyback entries are recorded as failures without attempting to
-  acquire. Without it a stuck holder — the NFS third state
-  `copyback_guard.py:212-219` documents, correctly owned with no local holder
-  and still locked — turns one 12-hourly pass into up to N × 900 s, and the
-  measured N is already 48-54.
+  acquire. Without it a holder that outlasts every individual 900 s deadline
+  turns one 12-hourly pass into up to N × 900 s, and the measured N is already
+  48-54. That needs a holder wedged indefinitely, not the finite NFS
+  lease-expiry state `copyback_guard.py:212-219` documents — `design.md` D9
+  keeps the two apart, because the budget's cost differs between them.
 - The new suite is wired into `scripts/select_ci_tests.py` so a change to
   `services/orchestrator/retention.py`, `cli.py` or `__init__.py` selects it in
   the targeted PR lane. Without that wiring the CI gate's own directory-rule

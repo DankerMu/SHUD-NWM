@@ -63,22 +63,29 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 # Retention (#2238) is the second acquirer, and the first that is not a writer:
 # it acquires once per run tree it removes on the copyback root -- 48-54 per
 # pass on the measured node-22 config, not once per cycle. That count does not
-# multiply the ~24 queued acquisitions above, because those acquisitions are
-# strictly sequential (one removal's release precedes the next one's acquire,
-# `retention._remove_tree_under_copyback_mutex`), so the retention lane
-# contributes at most ONE concurrent waiter no matter how many trees a pass
-# removes. Its holds are `rmtree`s, not copies, and it carries its own
+# multiply the ~24 queued acquisitions above, because *within one pass* those
+# acquisitions are strictly sequential (one removal's release precedes the next
+# one's acquire, `retention._remove_tree_under_copyback_mutex`), so one
+# retention pass contributes at most ONE concurrent waiter no matter how many
+# trees it removes. The retention LANE can contribute two: `run_retention` has
+# two production entry points -- `scheduler_runtime._run_retention` inside the
+# scheduler pass, and `cli._run_cleanup` behind the operator `cleanup` command,
+# which takes no scheduler lease and no cross-process guard of its own -- so an
+# operator cleanup overlapping a scheduler pass queues two retention waiters on
+# this lock. Its holds are `rmtree`s, not copies, and each pass carries its own
 # pass-level wait budget (`retention.DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS`,
-# 300 s) that caps the total time a sweep can queue behind this deadline.
+# 300 s) that caps the total time that sweep can queue behind this deadline.
 #
-# What protects a writer here is that shape -- one concurrent waiter, short
-# `rmtree` holds -- and NOT that budget: the budget charges acquisition elapsed
-# only, never hold time, so an uncontended pass takes an unbounded number of
-# holds (its removal loop has no cap) while charging ~0 against it. Nothing
-# bounds a single hold either: `safe_fs.remove_tree_allow_symlinks` takes no
-# deadline. The protection is therefore scale-dependent -- on how big and how
-# many the removed trees are -- not structural, so a retention pass growing past
-# today's measured shape is a real way for a writer to exhaust this deadline.
+# What protects a writer here is that shape -- at most one waiter per retention
+# pass, short `rmtree` holds -- and NOT that budget: the budget charges
+# acquisition elapsed only, never hold time, so an uncontended pass takes an
+# unbounded number of holds (its removal loop has no cap) while charging ~0
+# against it. Nothing bounds a single hold either:
+# `safe_fs.remove_tree_allow_symlinks` takes no deadline (its keywords are
+# `containment_root` and `missing_ok`). The protection is therefore
+# scale-dependent -- on how big and how many the removed trees are -- not
+# structural, so a retention pass growing past today's measured shape is a real
+# way for a writer to exhaust this deadline.
 #
 # `flock` is per open file description, so the scheduler's same-process
 # execution-unit threads contend exactly as separate hosts would. Exceeding the

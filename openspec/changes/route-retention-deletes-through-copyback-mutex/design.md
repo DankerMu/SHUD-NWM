@@ -64,7 +64,7 @@ site for every root, so the mutex goes there and nowhere else.
 
 Per tree, not per pass. A whole-pass hold would span `plan_retention`'s
 `_dir_size` rglob over every candidate on an NFS mount, and the mutex's budget
-is derived for a promote-sized critical section — `copyback_guard.py:55-67`
+is derived for a promote-sized critical section — `copyback_guard.py:52-67`
 reasons about ~36 s per acquisition and ~24 queued waiters inside the 900 s
 default (`DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS`, `copyback_guard.py:67`). A
 retention pass's wall-clock would eat that budget and starve every publisher.
@@ -103,19 +103,34 @@ and are asserted rather than assumed:
   root is likewise absent and unswept.
 - A copyback root that resolves to the **same path as the primary object store**
   is a different case, and D3's first draft got it wrong. It is dropped from
-  `result.extra_roots` silently by the identity test at `retention.py:535-536`
+  `result.extra_roots` silently by the resolved-path dedup against the primary at
+  `retention.py:535-536`
   (`admitted` seeds with the primary at `retention.py:513-514`, and the drop
   records no `skipped` entry), yet `plan_retention` still collects `runs/` there
   through the primary arm (`retention.py:725`), and those entries take the
   unlocked `shutil.rmtree` branch. Not locking them is nevertheless correct, for
   a reason that has nothing to do with the deletion surface: in that
-  configuration **no copyback writer exists at all**.
-  `run_tree_copyback.copyback_run_trees` returns
-  `status="skipped", reason="copyback_root_matches_object_store_root"`
-  (`services/orchestrator/run_tree_copyback.py:64-77`) before it ever acquires,
-  and the publisher lanes carry the same `same_root` skip. There is no second
-  party to exclude, and acquiring would create a lock file on a root whose only
-  user is this process.
+  configuration **no copyback writer ever acquires**. Six writer lanes reach
+  this mutex through five acquire call sites (the two publisher run/q_down lanes
+  share one helper), and every one of them adjudicates the same-root
+  configuration *before* its acquire:
+
+  | lane | acquire | same-root refusal |
+  |---|---|---|
+  | `publisher._copyback_run_products` | `:871` → `_copyback_batch_mutex` `:747` | skip `:827-835` |
+  | `publisher._copyback_qdown_products` | `:1042` → same helper | skip `:982-995` |
+  | `publisher._copyback_canonical_precip` | `:1308` | skip `:1293-1294` |
+  | `run_tree_copyback.copyback_run_trees` | `:247` | skip `:64-77` |
+  | `tile_publisher.forcing_copyback_backfill` | `:760` | raises `BackfillError("COPYBACK_ROOT_SAME_AS_OBJECT_STORE_ROOT")`, `:421` → `:510-519` |
+  | `scripts/canonical_precip_copyback_backfill.py` | `:467` | raises `BackfillUsageError`, `resolve_roots` `:146-147` |
+
+  Four skip, two raise; none holds the mutex, so there is no second party to
+  exclude. The last row is an identity refusal only because that script's
+  `--source-root` *is* the production object-store root by its own argument
+  contract (`:123`), so `--source-root == --copyback-root` is exactly this
+  configuration. Acquiring would only put a lock file on what is, here, the
+  primary object store — a root with plenty of other writers, none of which take
+  *this* mutex.
 - `WORKSPACE_ROOT` and the copyback root resolving to the same path is the
   #1318 silent dedup: one admitted root, which *is* the copyback root, and it is
   locked.
@@ -235,19 +250,17 @@ primary roots still land in `deleted[]`. A mutex-less build deletes straight
 through a held lock, so that observation separates the two builds. EF-17 now
 carries both halves: the non-regression check, labelled as such, and the probe.
 
-## D11 — verification routed locally, and why that is a divergence
-
-`CLAUDE.md`'s oracle table routes "后端单测/集成" to node-27 as a whole row. This
-change verifies locally instead, and that is a recorded divergence rather than an
-oversight. The change has no DB surface, no display surface and no API surface:
-every assertion is a filesystem or exception-handling fact about `flock` and
-`rmtree`, which node-27 would exercise no more faithfully than the local
-machine — and node-27 is not where this code runs. The node it runs on is
-node-22, which is where the deployment receipt is owed (EF-17) and which is
-pre-maintenance-window, so it cannot produce that receipt from this branch. The
-divergence is therefore "the oracle for this change is node-22, post-deploy, not
-node-27", and the cost is recorded in Known limits: `flock` semantics are
-exercised on local APFS/ext4, not on the production NFSv4.2 export.
+The probe has two costs that belong here rather than in a footnote. It is
+**intrusive**: holding the lock from a second process across a pass blocks every
+#2035 copyback writer on that root for the same window, not just retention, so
+it is run in a window where no promotion is owed and not during a live forecast
+cycle. And its observable is **erasable**: the failure entries the probe reads
+carry their `error` text only in an uncompacted receipt —
+`scheduler_evidence_payload._compact_retention` (`:767-802`) replaces
+`planned`/`deleted`/`skipped`/`failed` with `*_count` scalars under
+`pre_write_size_pressure`, which drops the per-entry error text the probe is
+looking for. The receipt is therefore read for the lists, and a compacted
+receipt is a void run of the probe, not a failed one.
 
 ## D9 — the pass-level lock-wait budget
 
@@ -275,17 +288,31 @@ Two deliberate choices:
   than waved at. An earlier draft of this bullet justified the choice by saying
   the guard's existing `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` already
   answers every operational question the new knob would. **That was false.**
-  `resolve_copyback_lock_timeout_seconds` (`copyback_guard.py:102-119`) reads the
+  `resolve_copyback_lock_timeout_seconds` (`copyback_guard.py:92-123`) reads the
   environment only when the caller passes no explicit timeout, and this lane
-  always passes one — the remaining pass budget. Every other production acquirer
-  (`publisher.py:747`, `:1308`, `run_tree_copyback.py:247`,
-  `forcing_copyback_backfill.py:760`) passes none and does honour the override;
-  retention is the one that does not. The choice stands anyway: the state this
-  budget exists for is a holder that will not release until an NFS server lease
-  expires, and no deadline an operator can set reclaims anything in that state —
-  a longer deadline only stalls the pass further. So the budget is a module
-  constant plus a test-only keyword, and the absence of a production knob is
-  recorded in Known limits instead of being explained away.
+  always passes one — the remaining pass budget. All five other production
+  acquire sites (`publisher.py:747`, `:1308`, `run_tree_copyback.py:247`,
+  `forcing_copyback_backfill.py:760`,
+  `scripts/canonical_precip_copyback_backfill.py:467`; D3 maps them to the six
+  writer lanes) pass none and do honour the override; retention is the one that
+  does not.
+
+  The choice stands anyway, but the earlier draft's reason for it was wrong too.
+  Two different stuck states hide behind "a holder that does not release". A
+  live hung holder is **unbounded**: no deadline an operator sets reclaims
+  anything there, and a longer one only stalls the pass further. The NFS
+  lease-expiry hold is **finite** — the server does drop it, and waiting it out
+  is the response `copyback_guard` itself prescribes — so 300 s may simply be
+  shorter than that lease. This change does not know that lease: the export's
+  server-side setting was not read, and guessing it would be the same class of
+  error this fixture keeps correcting. What the budget does in that case is
+  stated instead of sized: the first blocked tree waits out the budget, the rest
+  are refused before acquiring, all of them land in `failed[]`, and the next
+  pass retries — deferred reclamation, not lost reclamation. The 13.5 h figure
+  above needs the *first* state, not this one: 48-54 acquisitions only
+  accumulate 900 s each if every one of them times out. So the budget is a
+  module constant plus a test-only keyword, and the absence of a production knob
+  is recorded in Known limits instead of being explained away.
 - **`acquire_copyback_batch_lock` / `release_copyback_batch_lock` directly**,
   not the `copyback_batch_lock` context manager, because the elapsed acquisition
   time has to be measured between those two calls to be charged. The release is
@@ -302,8 +329,45 @@ directory tree under the shared copyback root, because that is the invariant the
 capability needs. `scripts/node27_raw_retention.py:553` is a second such remover,
 on node-27, on the same NFS export, and it is out of scope by issue #2238's own
 boundary. The requirement therefore carries an explicit clause naming it as a
-known-violating implementation with its own tracking, exactly as #2035's
-requirement does for the `forcing_copyback_backfill` skip path and #2236. The
+known-violating implementation with its own tracking — issue #2252 — exactly as
+#2035's requirement does for the `forcing_copyback_backfill` skip path and
+#2236. The
 alternative — narrowing the obligation to "the scheduler pass's retention" — was
 rejected: it would make the spec true by construction and leave the real gap
 unrecorded.
+
+## D11 — verification routed locally, and why that is a divergence
+
+`CLAUDE.md`'s oracle table routes "后端单测/集成" to node-27 as a whole row. This
+change verifies locally instead, and that is a recorded divergence rather than an
+oversight. The change has no DB, display or API surface, so the reason that row
+exists — a real Postgres and a real display API — does not apply here.
+
+That much was never in dispute. What was, and what had to be measured, is
+whether node-27 would exercise `flock` on the *production* filesystem where the
+local Mac cannot. An earlier draft asserted it would not, a round-2 review
+asserted it would (on the grounds that node-27 mounts the same NFSv4.2 export),
+and **both were wrong about the topology**. Measured read-only on 2026-09-11:
+
+- `hostname` on node-27 is `ghdc`. It is the NFS **server**, not a client of
+  one. `/home/ghdc/nwm` there is local ext4 on `/dev/mapper/ubuntu--vg-home`
+  (`stat -f` reports `ext2/ext3`), and node-22 mounts exactly that directory as
+  `/ghdc/data/nwm` — which is what `copyback_guard.py:212-219`'s
+  "NFSv4.2 mount of `ghdc:/home/ghdc`" names.
+- `/home/nwm/tmp`, the `TMPDIR` the repo's node-27 pytest discipline mandates,
+  is on the same local ext4 volume.
+
+So node-27 has no NFS-client side to exercise: a suite run there takes `flock`
+on local ext4, the local Mac takes it on local APFS, and neither reaches the
+client semantics that make this mutex interesting. The only host that sees them
+is node-22, which is where the deployment receipt is owed (EF-17) and which is
+pre-maintenance-window, so it cannot produce that receipt from this branch.
+
+The divergence is therefore "the oracle for this change is node-22, post-deploy,
+not node-27", and the cost — `flock` exercised on a local filesystem, not
+through an NFSv4.2 client, until that receipt is taken — is recorded in Known
+limits rather than argued away. The same measurement is why issue #2252 leads
+with an interoperability question rather than with a patch: node-27's own
+deleter would be taking a server-local lock against node-22's client-side one,
+and whether those two exclude each other is not something this change
+established.

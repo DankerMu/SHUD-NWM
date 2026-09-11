@@ -19,15 +19,20 @@ not shared SHALL NOT be locked — creating a lock file there buys no mutual
 exclusion and adds a fail-closed ownership check to a lane that has no second
 party. Nor SHALL a root be locked in the configuration where the copyback root
 and the process's own primary object store are the same directory: there every
-copyback writer skips before acquiring, precisely because the two roots are the
-same, so there is no second party to exclude.
+copyback writer refuses that configuration before it acquires — some by
+returning a skip, some by raising — precisely because the two roots are the
+same, so no writer ever holds the mutex and there is no second party to
+exclude.
 
 One implementation is known to violate this requirement and is not brought into
 compliance by the change that adds it: `scripts/node27_raw_retention.py` removes
-directory trees on node-27 under the same shared export without taking the
-mutex. It is recorded here rather than excluded by narrowing the requirement to
-the scheduler's own retention pass, which would make the requirement true by
-construction and leave the gap unrecorded; closing it is tracked separately.
+directory trees without taking the mutex, on node-27, under the very directory
+node-22 mounts as the shared copyback root. It is recorded here rather than
+excluded by narrowing the requirement to the scheduler's own retention pass,
+which would make the requirement true by construction and leave the gap
+unrecorded. It is tracked by issue #2252, which must first settle whether a
+lock taken on the NFS server's local filesystem excludes one taken by an NFS
+client at all.
 
 Failure to acquire SHALL be recorded as that pass's own per-entry failure and
 SHALL NOT abort the pass or propagate out of the removal, because the mutex's
@@ -63,8 +68,9 @@ it: see the non-guarantee scenario below.
   shared one
 - **AND** a configuration in which the copyback root and the primary object
   store resolve to the same directory MUST still remove that root's aged run
-  trees and MUST NOT lock them, because in that configuration every copyback
-  writer returns a skip before acquiring and no second party exists.
+  trees and MUST NOT lock them, because in that configuration no copyback
+  writer ever acquires — each refuses the configuration first, by skip or by
+  error — so no second party exists.
 
 #### Scenario: the mutex is acquired per removed tree
 
@@ -72,8 +78,10 @@ it: see the non-guarantee scenario below.
 - **THEN** there MUST be N acquisitions and N releases, each spanning only its
   own removal
 - **AND** the mutex MUST NOT be held across the pass's planning walk or across
-  the gap between two removals, so a long sweep cannot starve a promoting
-  writer past its deadline.
+  the gap between two removals, so the sweep's hold time is bounded by one
+  tree's removal rather than by the whole pass. This bounds each hold, not the
+  wait a writer may see: a writer can still queue behind however many
+  consecutive single-tree holds the sweep takes.
 
 #### Scenario: the total time a sweep spends waiting is bounded
 
@@ -117,8 +125,12 @@ it: see the non-guarantee scenario below.
   removal predicate under the lock
 - **AND** the removal predicate — which trees are selected, the retention
   window, the frontier bound, the published-artifact protection — MUST be
-  identical with and without the mutex, so the mutex cannot be the reason a tree
-  survives or dies
+  identical with and without the mutex: nothing is re-adjudicated under the
+  lock, and no tree becomes eligible because the lock was taken
+- **AND** the mutex MAY nonetheless be the reason an eligible tree is still on
+  disk after a pass — a failed acquisition or an exhausted wait budget records
+  that entry as a failure and leaves the tree for the next pass — which is a
+  recorded failure of one removal, not a different predicate
 - **AND** the size attributed to a removed tree MAY have been measured before
   the mutex was acquired, so the freed-bytes total is an accounting estimate,
   not a post-removal measurement.
@@ -127,9 +139,14 @@ it: see the non-guarantee scenario below.
 
 - **WHEN** the lock file sits at its fixed name directly under the copyback root
 - **THEN** no retention enumeration MAY select it, on the copyback root or on
-  any other root: the additional-root enumeration descends only into the
-  `runs/` directory and keeps directories only, and the primary enumeration
-  descends only into the cycle-scoped prefixes
+  any other root: every enumeration descends into `runs/` or into a
+  cycle-scoped prefix before it collects anything — the primary root is walked
+  by both — and each level keeps directory entries only, so no walk both
+  reaches a regular file sitting directly under the root and admits it
 - **AND** this MUST be enforced by test rather than left as an inherited
-  argument, because the mutex is permanently poisoned if a lock file is removed
-  and recreated as a fresh inode under a live holder.
+  argument, because removing the lock file under a live holder splits the mutex:
+  that holder keeps its `flock` on the detached inode while the next acquirer
+  creates and locks a fresh file, so the two run unserialised for the rest of
+  that hold. The root converges again once the stale holder exits, so the damage
+  is a window rather than a permanent poisoning — and a window of exactly the
+  interval this requirement exists to serialise.
