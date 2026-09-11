@@ -189,7 +189,7 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                         and retry_pipeline_job_id is None
                         and self._cycle_download_success_missing_raw_manifest(stage, context, existing_job)
                     ):
-                        retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_job)
+                        retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_jobs)
                     if (
                         existing_job is not None
                         and retry_pipeline_job_id is None
@@ -198,7 +198,7 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                             refreshed_upstream_finished_at=refreshed_upstream_finished_at,
                         )
                     ):
-                        retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_job)
+                        retry_pipeline_job_id = self._retry_cycle_stage_job_id(context, stage, existing_jobs)
                     if (
                         existing_job is not None
                         and retry_pipeline_job_id is None
@@ -223,7 +223,7 @@ def _run_cycle_chain(self, context: CycleOrchestrationContext) -> PipelineResult
                                 str(existing_job["job_id"])
                                 if _operator_verified_absence_recovery(existing_job)
                                 else (
-                                    self._retry_cycle_stage_job_id(context, stage, existing_job)
+                                    self._retry_cycle_stage_job_id(context, stage, existing_jobs)
                                     if str(existing_job.get("status")) in TERMINAL_JOB_STATUSES
                                     else str(existing_job["job_id"])
                                 )

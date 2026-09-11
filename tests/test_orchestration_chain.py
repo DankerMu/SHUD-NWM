@@ -10956,13 +10956,16 @@ def test_file_journal_single_member_forecast_explicit_rejection_is_model_less_af
 
 
 @pytest.mark.parametrize("source_id", ["gfs", "IFS"])
+@pytest.mark.parametrize("retry_interleaving", ["natural", "deterministic"])
 def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
     tmp_path: Path,
     source_id: str,
+    retry_interleaving: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from concurrent.futures import ThreadPoolExecutor
     from datetime import timedelta
-    from threading import Lock
+    from threading import Barrier, Event, Lock
 
     from services.orchestrator.file_orchestration_journal import FileOrchestrationJournalRepository
     from services.orchestrator.reconcile import CommentAccountingResult, reconcile_reserved_unbound_jobs
@@ -11035,30 +11038,13 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
         outcomes = list(pool.map(run_public_cycle, range(2)))
 
     attempt_two_repo = FileOrchestrationJournalRepository(root)
-    # #1356: the first-round count is the flaky assertion — carry the cycle's
-    # rows so a red run names the job_id that took the extra submission
-    # instead of only reporting the count.
-    assert client.forecast_attempts == 2, [
-        (
-            row["job_id"],
-            row["idempotency_key"],
-            row["status"],
-            row["submission_attempt"],
-            row.get("reconciliation_decision"),
-        )
-        for row in attempt_two_repo.query_pipeline_jobs_by_cycle(f"{source_segment}_{cycle}")
-    ]
-    attempt_two = attempt_two_repo.query_reserved_unbound_jobs()[0]
-    assert attempt_two.submission_attempt == 2, [
-        (
-            row["job_id"],
-            row["idempotency_key"],
-            row["status"],
-            row["submission_attempt"],
-            row.get("reconciliation_decision"),
-        )
-        for row in attempt_two_repo.query_pipeline_jobs_by_cycle(f"{source_segment}_{cycle}")
-    ]
+    # Keep complete per-round rows available to failure-reporting plugins.
+    attempt_two_rows = attempt_two_repo.query_pipeline_jobs_by_cycle(f"{source_segment}_{cycle}")
+    assert client.forecast_attempts == 2, attempt_two_rows
+    attempt_two_masters = attempt_two_repo.query_reserved_unbound_jobs()
+    assert len(attempt_two_masters) == 1, attempt_two_rows
+    attempt_two = attempt_two_masters[0]
+    assert attempt_two.submission_attempt == 2, attempt_two_rows
     assert attempt_two.submit_outcome == "submit_result_ambiguous"
     assert (
         attempt_two.reconciliation_source,
@@ -11075,17 +11061,68 @@ def test_file_journal_post_window_concurrent_public_cycles_submit_one_retry(
         grace=timedelta(0),
     )[0].action == "absence_retry_permitted"
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        second_outcomes = list(pool.map(run_public_cycle, range(2)))
+    with monkeypatch.context() as retry_patch:
+        if retry_interleaving == "deterministic":
+            snapshots_ready = Barrier(2, timeout=30)
+            attempt_three_reserved = Event()
+            snapshot_lock = Lock()
+            retry_snapshots: list[Sequence[Mapping[str, Any]]] = []
+            retry_job_id = ForecastOrchestrator._retry_cycle_stage_job_id
+            reserve_stage = ForecastOrchestrator._reserve_cycle_stage
+
+            def delayed_retry_job_id(
+                orchestrator: ForecastOrchestrator,
+                context: CycleOrchestrationContext,
+                stage: StageDefinition,
+                existing_jobs: Sequence[Mapping[str, Any]],
+            ) -> str:
+                # Both public passes must reach ID calculation with the old
+                # permitted attempt before either can compute or reserve.
+                with snapshot_lock:
+                    retry_snapshots.append(existing_jobs)
+                assert stage.stage == "forecast"
+                parents = [row for row in existing_jobs if row["job_id"] == attempt_two.job_id]
+                assert len(parents) == 1, existing_jobs
+                assert parents[0]["submission_attempt"] == 2, existing_jobs
+                assert parents[0]["reconciliation_decision"] == "absence_retry_permitted", existing_jobs
+                assert parents[0]["status"] == "reservation_lost", existing_jobs
+                if snapshots_ready.wait() == 1:
+                    assert attempt_three_reserved.wait(timeout=30), "attempt 3 reservation did not commit"
+                # Call the installed implementation unchanged, including when
+                # the parent restores the baseline method for the red proof.
+                return retry_job_id(orchestrator, context, stage, existing_jobs)
+
+            def observed_reserve_stage(
+                orchestrator: ForecastOrchestrator,
+                stage: StageDefinition,
+                context: CycleOrchestrationContext,
+                pipeline_job_id: str,
+                idempotency_key: str,
+            ) -> Any:
+                reservation = reserve_stage(orchestrator, stage, context, pipeline_job_id, idempotency_key)
+                if reservation is not None and reservation.created and reservation.submission_attempt == 3:
+                    attempt_three_reserved.set()
+                return reservation
+
+            retry_patch.setattr(ForecastOrchestrator, "_retry_cycle_stage_job_id", delayed_retry_job_id)
+            retry_patch.setattr(ForecastOrchestrator, "_reserve_cycle_stage", observed_reserve_stage)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            second_outcomes = list(pool.map(run_public_cycle, range(2)))
+        if retry_interleaving == "deterministic":
+            assert len(retry_snapshots) == 2, retry_snapshots
+            assert attempt_three_reserved.is_set()
 
     attempt_three_repo = FileOrchestrationJournalRepository(root)
-    attempt_three = attempt_three_repo.query_reserved_unbound_jobs()[0]
-    assert attempt_three.submission_attempt == 3
+    attempt_three_rows = attempt_three_repo.query_pipeline_jobs_by_cycle(f"{source_segment}_{cycle}")
+    attempt_three_masters = attempt_three_repo.query_reserved_unbound_jobs()
+    assert len(attempt_three_masters) == 1, (attempt_two_rows, attempt_three_rows)
+    attempt_three = attempt_three_masters[0]
+    assert attempt_three.submission_attempt == 3, (attempt_two_rows, attempt_three_rows)
     assert {
         (attempt_three_repo._hydro_run_for(str(basin["run_id"])) or {}).get("submission_attempt")
         for basin in basins
     } == {3}
-    assert client.forecast_attempts == 3
+    assert client.forecast_attempts == 3, (attempt_two_rows, attempt_three_rows)
     assert sum(
         submission["stage"] == "forecast" for submission in client.submissions
     ) == 2

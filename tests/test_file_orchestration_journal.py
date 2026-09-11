@@ -16561,7 +16561,7 @@ def test_operator_attested_release_lets_an_ordinary_pass_submit(tmp_path: Path) 
     # dead row forever.
     assert orchestrator._terminal_stage_needs_manual_retry(context, existing_job) is True
 
-    pipeline_job_id = orchestrator._retry_cycle_stage_job_id(context, stage, existing_job)
+    pipeline_job_id = orchestrator._retry_cycle_stage_job_id(context, stage, existing_jobs)
     assert pipeline_job_id == f"{job_id}_retry_1"
 
     orchestrator._submit_and_wait_cycle_stage(stage, context, pipeline_job_id=pipeline_job_id)
@@ -17624,7 +17624,7 @@ def test_operator_cli_recovery_lets_an_ordinary_pass_submit(tmp_path: Path, caps
     assert orchestrator._job_needs_submission(existing_job) is False
     assert orchestrator._terminal_stage_needs_manual_retry(context, existing_job) is True
 
-    pipeline_job_id = orchestrator._retry_cycle_stage_job_id(context, stage, existing_job)
+    pipeline_job_id = orchestrator._retry_cycle_stage_job_id(context, stage, existing_jobs)
     assert pipeline_job_id == f"{job_id}_retry_1"
 
     orchestrator._submit_and_wait_cycle_stage(stage, context, pipeline_job_id=pipeline_job_id)
