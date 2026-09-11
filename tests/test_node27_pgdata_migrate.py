@@ -794,3 +794,14 @@ def test_quiescent_display_state_is_preserved_without_replay(tmp_path: Path, mon
     assert host.units[DISPLAY]["ActiveState"] == initial
     assert not host.fence_path(DISPLAY).exists()
     assert ("/usr/bin/systemctl", "--user", "start", DISPLAY) not in host.commands
+
+
+def test_failed_timer_state_is_preserved_without_replay(tmp_path: Path, monkeypatch) -> None:
+    timer = "nhms-node27-autopipe.timer"
+    host, state = _unit_fixture(tmp_path, monkeypatch, {timer: ("failed", "")})
+    state["units"] = host.units_snapshot(state["config"])
+    host.install_fences(state)
+    assert host.units[timer]["ActiveState"] == "failed"
+    host.restore_units(state)
+    assert host.units[timer]["ActiveState"] == "failed"
+    assert not host.fence_path(timer).exists()
