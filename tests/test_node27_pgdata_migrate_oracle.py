@@ -342,17 +342,36 @@ def oracle(tmp_path: Path):
 
 FAULT_DRIVER = """import json, os, sys
 from pathlib import Path
-from packages.common.node27_pgdata_host import Host
+from packages.common.node27_pgdata_host import Host, MigrationError
 from scripts.node27_pgdata_migrate import main
 original = Host.command
 fault = os.environ["ORACLE_FAULT"]
 workspace = Path(sys.argv[sys.argv.index("--workspace") + 1])
+root = workspace.parent
+assert root.name.startswith("nhms-pgdata-oracle-") and workspace.name == "workspace"
+assert "--disposable-root" not in sys.argv or Path(sys.argv[sys.argv.index("--disposable-root") + 1]) == root
+original_health = Host.health
+def health(self, config):
+    assert Path(config["disposable_root"]) == root
+    if fault == "copy-health-unavailable":
+        raise MigrationError("owned fixture health observation unavailable")
+    return original_health(self, config)
+Host.health = health
+original_display_ready = Host.display_ready
+def display_ready(self, state):
+    assert Path(state["config"]["disposable_root"]) == root
+    if fault == "display-unavailable":
+        raise MigrationError("owned fixture display observation unavailable")
+    return original_display_ready(self, state)
+Host.display_ready = display_ready
 def command(self, argv, **kwargs):
     argv = list(argv)
     partial = fault == "partial-copy" and "cp -a /source/. /destination/;" in argv[-1]
     if partial:
         argv[-1] = argv[-1].replace("cp -a /source/. /destination/;",
                                    "cp -a /source/PG_VERSION /destination/;")
+    if fault == "completed-copy-mismatch" and "cp -a /source/. /destination/;" in argv[-1]:
+        argv[-1] += "; printf corrupted > /destination/oracle-copy-sentinel; sync -f /destination"
     result = original(self, argv, **kwargs)
     path = workspace / "state.json"
     state = json.loads(path.read_text()) if path.exists() else {}
@@ -360,6 +379,13 @@ def command(self, argv, **kwargs):
     candidate = state.get("candidate_id")
     source = state.get("original_id")
     rollback = state.get("stage") == "rollback_intent"
+    if state:
+        assert Path(state["config"]["disposable_root"]) == root
+        if fault == "candidate-id" and args[1:4] == ["inspect", "--type", "container"] and args[-1] == candidate:
+            from types import SimpleNamespace
+            observed = json.loads(result.stdout)
+            observed[0]["Id"] = "b" * 64
+            return SimpleNamespace(returncode=0, stdout=json.dumps(observed), stderr="")
     hit = (
         (fault == "candidate-rename" and rollback and args[1:3] == ["rename", candidate])
         or (fault == "original-policy" and rollback and args[1:3] == ["update", "--restart=unless-stopped"]
@@ -367,6 +393,8 @@ def command(self, argv, **kwargs):
         or (fault == "original-start" and rollback and args[1:3] == ["start", source])
         or (fault == "candidate-policy" and state.get("writes_released")
             and args[1:3] == ["update", "--restart=unless-stopped"] and args[-1] == candidate)
+        or (fault == "prepare-stop" and state.get("stage") == "prepare_intent"
+            and args[1:3] == ["stop", "--signal"] and args[-1] == source)
         or partial
     )
     if hit:
@@ -435,6 +463,12 @@ def test_plan_preserves_running_cluster_without_journal(oracle: dict) -> None:
 def test_fresh_process_rollback_recovers_journaled_side_effect(oracle: dict, fault: str) -> None:
     _activate(oracle)
     _cli(oracle, "rollback", fault=fault, expect=71)
+    if fault == "original-policy":
+        interrupted = json.loads((oracle["workspace"] / "state.json").read_text())
+        original = _inspect(interrupted["original_id"])
+        assert _owned(original, oracle["root"], oracle["token"], interrupted["operation"])
+        if not original["State"]["Running"]:
+            _run([DOCKER, "start", original["Id"]])
     _cli(oracle, "rollback")
     state = json.loads((oracle["workspace"] / "state.json").read_text())
     assert state["stage"] == "rolled_back" and not state["writes_released"]
@@ -491,3 +525,122 @@ def test_partial_copy_is_retained_and_cannot_activate(oracle: dict) -> None:
     assert partial.read_bytes() == expected
     _cli(oracle, "rollback")
     assert _counts(oracle) == (60, 48, 12, "pending")
+
+
+def test_prepare_interruption_rolls_back_in_fresh_process(oracle: dict) -> None:
+    _cli(oracle, "prepare", fault="prepare-stop", expect=71)
+    state = json.loads((oracle["workspace"] / "state.json").read_text())
+    assert state["stage"] == "prepare_intent" and not state["writes_released"]
+    assert not _inspect(state["original_id"])["State"]["Running"]
+    assert not oracle["target"].exists()
+    _cli(oracle, "rollback")
+    assert _inspect(oracle["name"])["Id"] == state["original_id"]
+    assert _inspect(oracle["name"])["HostConfig"]["RestartPolicy"]["Name"] == "unless-stopped"
+    assert _counts(oracle) == (60, 48, 12, "pending")
+    _write(oracle)
+
+
+@pytest.mark.parametrize("refusal", ("prepare-replay", "source-override", "target-override"))
+def test_prepared_identity_cannot_be_replayed_or_redirected(oracle: dict, refusal: str) -> None:
+    _cli(oracle, "prepare")
+    state_bytes = (oracle["workspace"] / "state.json").read_bytes()
+    redirected = oracle["root"] / "redirected"
+    if refusal == "prepare-replay":
+        _cli(oracle, "prepare", expect=2)
+    else:
+        flag = "--source-pgdata" if refusal == "source-override" else "--target-pgdata"
+        _cli(oracle, "copy", expect=2, extra=(flag, str(redirected)))
+    assert (oracle["workspace"] / "state.json").read_bytes() == state_bytes
+    assert not oracle["target"].exists() and not redirected.exists()
+    assert not _inspect(oracle["name"])["State"]["Running"]
+    _cli(oracle, "rollback")
+    assert _counts(oracle) == (60, 48, 12, "pending")
+
+
+def test_stopped_source_drift_refuses_before_target_creation(oracle: dict) -> None:
+    sentinel = _private(oracle["source"] / "oracle-source-sentinel", "before")
+    _cli(oracle, "prepare")
+    before = sentinel.stat()
+    sentinel.write_text("after")
+    _cli(oracle, "copy", expect=2)
+    assert not oracle["target"].exists()
+    assert json.loads((oracle["workspace"] / "state.json").read_text())["stage"] == "prepared"
+    assert sentinel.read_text() == "after"
+    sentinel.write_text("before")
+    os.utime(sentinel, ns=(before.st_atime_ns, before.st_mtime_ns))
+    _cli(oracle, "rollback")
+    assert _counts(oracle) == (60, 48, 12, "pending")
+
+
+def test_completed_copy_hash_mismatch_never_becomes_activatable(oracle: dict) -> None:
+    sentinel = _private(oracle["source"] / "oracle-copy-sentinel", "original")
+    _cli(oracle, "prepare")
+    _cli(oracle, "copy", fault="completed-copy-mismatch", expect=2)
+    assert (oracle["target"] / "oracle-copy-sentinel").read_text() == "corrupted"
+    assert (oracle["target"] / "PG_VERSION").read_bytes() == (oracle["source"] / "PG_VERSION").read_bytes()
+    assert json.loads((oracle["workspace"] / "state.json").read_text())["stage"] == "copy_intent"
+    _cli(oracle, "activate", expect=2)
+    assert sentinel.read_text() == "original"
+    _cli(oracle, "rollback")
+    assert _counts(oracle) == (60, 48, 12, "pending")
+
+
+def test_copy_rechecks_health_after_successful_prepare(oracle: dict) -> None:
+    _cli(oracle, "prepare")
+    _cli(oracle, "copy", fault="copy-health-unavailable", expect=2)
+    assert not oracle["target"].exists()
+    assert json.loads((oracle["workspace"] / "state.json").read_text())["stage"] == "prepared"
+    _cli(oracle, "activate", expect=2)
+    _cli(oracle, "rollback")
+    assert _counts(oracle) == (60, 48, 12, "pending")
+
+
+@pytest.mark.parametrize("unsafe", (None, "live-original", "candidate-id", "candidate-name", "candidate-config"))
+def test_marked_stopped_candidate_recovery_is_owned_and_forward_only(oracle: dict, unsafe: str | None) -> None:
+    _activate(oracle)
+    _cli(oracle, "release", fault="candidate-policy", expect=71)
+    state = json.loads((oracle["workspace"] / "state.json").read_text())
+    assert state["writes_released"] and state["stage"] == "release_intent"
+    candidate = _inspect(state["candidate_id"])
+    original = _inspect(state["original_id"])
+    assert _owned(candidate, oracle["root"], oracle["token"], state["operation"])
+    assert _owned(original, oracle["root"], oracle["token"], state["operation"])
+    _run([DOCKER, "stop", "--signal", "SIGINT", "--timeout", "-1", candidate["Id"]])
+    _run([DOCKER, "update", "--restart=no", candidate["Id"]])
+    if unsafe == "live-original":
+        _run([DOCKER, "start", original["Id"]])
+    elif unsafe == "candidate-name":
+        _run([DOCKER, "rename", candidate["Id"], oracle["name"] + "-unexpected"])
+    elif unsafe == "candidate-config":
+        _run([DOCKER, "update", "--memory", "256m", candidate["Id"]])
+    _cli(oracle, "rollback", expect=2)
+    _cli(oracle, "release", fault="candidate-id" if unsafe == "candidate-id" else None, expect=2 if unsafe else 0)
+    after = json.loads((oracle["workspace"] / "state.json").read_text())
+    assert after["writes_released"]
+    if unsafe:
+        assert after["stage"] == "release_intent"
+        assert not _inspect(candidate["Id"])["State"]["Running"]
+    else:
+        assert after["stage"] == "released"
+        assert _inspect(oracle["name"])["Id"] == candidate["Id"]
+        assert not _inspect(original["Id"])["State"]["Running"]
+        _write(oracle)
+
+
+@pytest.mark.parametrize("action", ("activate", "release"))
+def test_display_readiness_failure_prevents_terminal_receipt(oracle: dict, action: str) -> None:
+    _cli(oracle, "prepare")
+    _cli(oracle, "copy")
+    if action == "release":
+        _cli(oracle, "activate")
+    _cli(oracle, action, fault="display-unavailable", expect=2)
+    state = json.loads((oracle["workspace"] / "state.json").read_text())
+    assert state["stage"] == ("activate_intent" if action == "activate" else "release_intent")
+    assert state["writes_released"] is (action == "release")
+    assert _counts(oracle) == (60, 48, 12, "pending")
+    if action == "release":
+        _cli(oracle, "rollback", expect=2)
+        _cli(oracle, "release")
+    else:
+        _cli(oracle, "rollback")
+    _write(oracle)

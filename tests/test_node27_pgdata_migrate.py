@@ -12,7 +12,7 @@ import pytest
 
 from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
 from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
-from packages.common.node27_pgdata_host import FENCE, Host, MigrationError, path_identity
+from packages.common.node27_pgdata_host import DISPLAY, FENCE, Host, MigrationError, covered_tree, path_identity
 from packages.common.node27_pgdata_migrate import DEFAULTS, Migration
 from scripts.node27_pgdata_migrate import main
 
@@ -97,6 +97,11 @@ class FakeHost(Host):
         self.filesystem_type = filesystem
         self.commands: list[tuple[str, ...]] = []
         self.helpers: list[str] = []
+
+    def durable_workspace(self, path: Path) -> list[int]:
+        # Synthetic journal IO is independent of pytest's physical /tmp placement.
+        # Production path policy is exercised explicitly below, not overridden globally.
+        return path_identity(path)
 
     def command(self, argv, *, timeout: int = 30, allow_failure: bool = False, max_bytes: int = 1024 * 1024):
         argv = tuple(argv)
@@ -341,13 +346,22 @@ def test_cold_bind_is_refused_as_relocation_identity(tmp_path: Path) -> None:
         _validate_paths(workspace, config, inspect)
 
 
-def test_ephemeral_workspace_is_refused(tmp_path: Path) -> None:
-    host = FakeHost({"nhms-db": _inspect()}, filesystem="tmpfs")
-    with pytest.raises(MigrationError, match="ephemeral"):
-        host.durable_workspace(Path("/tmp/nhms-pgdata-ops"))
+def test_ephemeral_workspace_is_refused() -> None:
+    host = FakeHost({})
+    with pytest.raises(MigrationError):
+        Host.durable_workspace(host, Path("/tmp/nhms-pgdata-ops"))
+    assert host.commands == []
+
+
+def test_tmpfs_workspace_is_refused_on_durable_lexical_path(tmp_path: Path, monkeypatch) -> None:
     workspace = _workspace(tmp_path)
-    with pytest.raises(MigrationError, match="durable"):
-        host.durable_workspace(workspace)
+    modeled = Path("/owned-durable-fixture/workspace")
+    real_identity = path_identity(workspace)
+    monkeypatch.setattr("packages.common.node27_pgdata_host.path_identity", lambda path: real_identity)
+    host = FakeHost({}, filesystem="tmpfs")
+    with pytest.raises(MigrationError):
+        Host.durable_workspace(host, modeled)
+    assert host.commands[0][3] == str(modeled)
 
 
 def test_writes_released_cannot_revert(tmp_path: Path) -> None:
@@ -386,8 +400,10 @@ def _nullcontext():
     return nullcontext()
 
 
-def test_cli_sanitizes_unreadable_and_malformed_private_state(tmp_path: Path, capsys) -> None:
+def test_cli_sanitizes_unreadable_and_malformed_private_state(tmp_path: Path, capsys, monkeypatch) -> None:
     workspace = _workspace(tmp_path)
+    host = FakeHost({})
+    monkeypatch.setattr("scripts.node27_pgdata_migrate.Migration", lambda path: Migration(path, host=host))
     _private(workspace / "state.json", '{"password":"secret-dsn"')
     assert main(["--workspace", str(workspace), "--action", "prepare", "--enforce"]) == 2
     result = capsys.readouterr()
@@ -569,3 +585,207 @@ def test_governance_target_exception_does_not_unbind_other_caller_configuration(
     state.update(stage="release_intent", writes_released=True)
     UnitHost(units).restore_units(state)
     assert not host.fence_path(name).exists()
+
+
+@pytest.mark.parametrize("unsafe", ("symlink", "fifo", "device-crossing"))
+def test_cluster_traversal_refuses_unsafe_interior(tmp_path: Path, monkeypatch, unsafe: str) -> None:
+    tree = tmp_path / "cluster"
+    tree.mkdir()
+    interior = tree / "base"
+    interior.mkdir()
+    sentinel = _private(interior / "relation", "retained relation bytes")
+    if unsafe == "symlink":
+        (interior / "external").symlink_to(sentinel)
+    elif unsafe == "fifo":
+        os.mkfifo(interior / "external")
+    else:
+        real_scandir = os.scandir
+
+        class Entries:
+            def __init__(self, fd):
+                self.entries = real_scandir(fd)
+
+            def __enter__(self):
+                for entry in self.entries:
+                    info = entry.stat(follow_symlinks=False)
+                    if entry.name == "relation":
+                        yield SimpleNamespace(
+                            name=entry.name,
+                            stat=lambda **kwargs: SimpleNamespace(st_dev=info.st_dev + 1, st_mode=info.st_mode),
+                        )
+                    else:
+                        yield entry
+
+            def __exit__(self, *args):
+                self.entries.close()
+
+        monkeypatch.setattr(os, "scandir", Entries)
+    with pytest.raises(MigrationError):
+        covered_tree(tree)
+    assert sentinel.read_text() == "retained relation bytes"
+
+
+def _unit_fixture(tmp_path: Path, monkeypatch, specs: dict[str, tuple[str, str]]) -> tuple[UnitHost, dict]:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    _private(runtime / "app.py", "print('owned runtime')\n")
+    monkeypatch.setattr("packages.common.node27_pgdata_host.OLD_RUNTIME", str(runtime))
+    units = {}
+    for name, (active, kind) in specs.items():
+        units[name] = {
+            "LoadState": "loaded",
+            "ActiveState": active,
+            "SubState": "running",
+            "UnitFileState": "enabled" if name.endswith(".timer") else "static",
+            "Type": kind,
+            "FragmentPath": str(_private(tmp_path / name, "[Unit]\nDescription=fixture\n")),
+            "DropInPaths": "",
+            "EnvironmentFiles": "",
+            "WorkingDirectory": str(runtime) if name == DISPLAY else "",
+            "ExecStart": f"{runtime}/app.py --port 55495" if name == DISPLAY else "",
+        }
+
+    class RuntimeHost(UnitHost):
+        def command(self, argv, **kwargs):
+            if list(argv[:3]) == ["/usr/bin/git", "-C", str(runtime)]:
+                return SimpleNamespace(
+                    returncode=0, stderr="", stdout="a" * 40 if argv[3] == "rev-parse" else "app.py\x00"
+                )
+            return super().command(argv, **kwargs)
+
+    host = RuntimeHost(units)
+    state = {
+        "workspace": str(_workspace(tmp_path)),
+        "operation": "92" * 16,
+        "stage": "prepared",
+        "writes_released": False,
+        "config": {**DEFAULTS, "drain_timeout": 10},
+        "display_unfenced": False,
+    }
+    return host, state
+
+
+@pytest.mark.parametrize("active", ("activating", "deactivating"))
+def test_unstable_display_is_refused_before_fencing(tmp_path: Path, monkeypatch, active: str) -> None:
+    host, state = _unit_fixture(tmp_path, monkeypatch, {DISPLAY: (active, "simple")})
+    with pytest.raises(MigrationError):
+        state["units"] = host.units_snapshot(state["config"])
+    assert host.units[DISPLAY]["ActiveState"] == active
+    assert not host.fence_path(DISPLAY).exists()
+    assert host.commands == []
+
+
+@pytest.mark.parametrize(("active", "enabled"), (("active", "static"), ("inactive", "enabled")))
+def test_cold_lane_refuses_admission(tmp_path: Path, monkeypatch, active: str, enabled: str) -> None:
+    host, state = _unit_fixture(tmp_path, monkeypatch, {})
+    host.units["nhms-node27-cold-residency.service"] = {
+        "LoadState": "loaded",
+        "ActiveState": active,
+        "UnitFileState": enabled,
+    }
+    with pytest.raises(MigrationError):
+        host.units_snapshot(state["config"])
+    assert host.commands == []
+    assert not (tmp_path / ".config").exists()
+
+
+def test_unknown_persistent_writer_stays_fenced_without_being_killed(tmp_path: Path, monkeypatch) -> None:
+    writer = "nhms-node27-download.service"
+    host, state = _unit_fixture(tmp_path, monkeypatch, {writer: ("active", "simple")})
+    state["units"] = host.units_snapshot(state["config"])
+    with pytest.raises(MigrationError):
+        host.install_fences(state)
+    assert host.fence_path(writer).exists()
+    assert host.units[writer]["ActiveState"] == "active"
+    assert ("/usr/bin/systemctl", "--user", "stop", writer) not in host.commands
+
+
+@pytest.mark.parametrize("initial", ("active", "activating"))
+def test_display_only_lift_preserves_writers_and_drained_oneshot_is_not_replayed(
+    tmp_path: Path, monkeypatch, initial: str
+) -> None:
+    writer, timer = "nhms-node27-download.service", "nhms-node27-download.timer"
+    host, state = _unit_fixture(
+        tmp_path,
+        monkeypatch,
+        {DISPLAY: ("active", "simple"), writer: (initial, "oneshot"), timer: ("active", "")},
+    )
+    state["units"] = host.units_snapshot(state["config"])
+    # Model the running job completing naturally at the clock/IO boundary.
+    monkeypatch.setattr(
+        "packages.common.node27_pgdata_host.time.sleep", lambda _: host.units[writer].update(ActiveState="inactive")
+    )
+    host.install_fences(state)
+    assert host.units[writer]["ActiveState"] == "inactive"
+    assert ("/usr/bin/systemctl", "--user", "stop", writer) not in host.commands
+    state["display_unfenced"] = True
+    host.restore_units(state, display_only=True)
+    assert not host.fence_path(DISPLAY).exists()
+    assert host.units[DISPLAY]["ActiveState"] == "active"
+    assert host.fence_path(writer).exists() and host.fence_path(timer).exists()
+    assert host.units[timer]["ActiveState"] == "inactive"
+    host.restore_units(state)
+    assert host.units[timer]["ActiveState"] == "active"
+    assert host.units[writer]["ActiveState"] == "inactive"
+    assert ("/usr/bin/systemctl", "--user", "start", writer) not in host.commands
+
+
+def test_nonpinned_image_refuses_before_preparation_mutation(tmp_path: Path) -> None:
+    root = tmp_path / ("nhms-pgdata-oracle-" + "93" * 16)
+    root.mkdir(mode=0o700)
+    source, workspace = root / "source", root / "workspace"
+    source.mkdir(mode=0o700)
+    workspace.mkdir(mode=0o700)
+    name = root.name + "-db"
+    raw = _inspect(name=name, source=str(source), port="55494")
+    raw["Image"] = raw["Config"]["Image"] = "sha256:" + "b" * 64
+    host = FakeHost({name: raw})
+    with pytest.raises(MigrationError):
+        Migration(workspace, host=host).run(
+            "prepare",
+            enforce=True,
+            overrides={
+                "source_container": name,
+                "source_pgdata": str(source),
+                "target_pgdata": str(root / "target"),
+                "disposable_root": str(root),
+                "reserve_bytes": 1,
+            },
+        )
+    assert not (workspace / "state.json").exists()
+    assert not (root / "target").exists()
+    assert raw["State"]["Running"]
+    assert all(command[1] == "inspect" for command in host.commands)
+
+
+def test_active_display_requires_healthy_endpoint_while_business_fences_hold(tmp_path: Path, monkeypatch) -> None:
+    timer = "nhms-node27-download.timer"
+    host, state = _unit_fixture(tmp_path, monkeypatch, {DISPLAY: ("active", "simple"), timer: ("active", "")})
+    state["units"] = host.units_snapshot(state["config"])
+    host.install_fences(state)
+    state["display_unfenced"] = True
+    host.restore_units(state, display_only=True)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("fixture endpoint unavailable")
+
+    monkeypatch.setattr("packages.common.node27_pgdata_host.urlopen", unavailable)
+    clock = iter((0, 121))
+    monkeypatch.setattr("packages.common.node27_pgdata_host.time.monotonic", lambda: next(clock))
+    with pytest.raises(MigrationError):
+        host.display_ready(state)
+    assert host.fence_path(timer).exists()
+    assert host.units[timer]["ActiveState"] == "inactive"
+
+
+@pytest.mark.parametrize("initial", ("inactive", "failed"))
+def test_quiescent_display_state_is_preserved_without_replay(tmp_path: Path, monkeypatch, initial: str) -> None:
+    host, state = _unit_fixture(tmp_path, monkeypatch, {DISPLAY: (initial, "simple")})
+    state["units"] = host.units_snapshot(state["config"])
+    host.install_fences(state)
+    host.restore_units(state)
+    assert host.units[DISPLAY]["ActiveState"] == initial
+    assert not host.fence_path(DISPLAY).exists()
+    assert ("/usr/bin/systemctl", "--user", "start", DISPLAY) not in host.commands
+    assert ("/usr/bin/systemctl", "--user", "stop", DISPLAY) not in host.commands

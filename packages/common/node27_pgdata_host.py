@@ -431,7 +431,13 @@ class Host:
                 continue
             require(value.get("LoadState") in {"loaded", "masked"}, "unit is not safely observable")
             require(
-                value.get("ActiveState") in {"active", "inactive", "failed", "activating"},
+                value.get("ActiveState") in {"active", "inactive", "failed"}
+                or (
+                    value.get("ActiveState") == "activating"
+                    and name.endswith(".service")
+                    and name != DISPLAY
+                    and value.get("Type") == "oneshot"
+                ),
                 "unit is transitioning unexpectedly",
             )
             require(not self.fence_path(name).exists(), "preexisting migration fence requires recovery")
@@ -515,7 +521,8 @@ class Host:
         self.command(["/usr/bin/systemctl", "--user", "daemon-reload"])
         for name, frozen in state["units"].items():
             if not frozen.get("absent") and name.endswith(".timer"):
-                self.command(["/usr/bin/systemctl", "--user", "stop", name])
+                if self.unit(name).get("ActiveState") in {"active", "activating", "deactivating"}:
+                    self.command(["/usr/bin/systemctl", "--user", "stop", name])
         deadline = time.monotonic() + state["config"]["drain_timeout"]
         while True:
             pending = []
@@ -531,7 +538,10 @@ class Host:
             require(time.monotonic() < deadline, "writer drain timed out; services were not killed")
             time.sleep(1)
         if state["units"] and not state["units"][DISPLAY].get("absent"):
-            self.command(["/usr/bin/systemctl", "--user", "stop", DISPLAY])
+            # Leave failed/inactive units alone; stopping a failed unit can clear
+            # its failure state even though there is no daemon left to fence.
+            if self.unit(DISPLAY).get("ActiveState") in {"active", "activating", "deactivating"}:
+                self.command(["/usr/bin/systemctl", "--user", "stop", DISPLAY])
         self.verify_units(state, required_fences=True)
 
     def release_callers_ready(self, state: dict[str, Any]) -> None:

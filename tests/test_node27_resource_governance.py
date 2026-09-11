@@ -118,28 +118,21 @@ def test_disk_usage_reports_reserved_bytes_and_identity_arithmetic(monkeypatch: 
     assert observed["total_bytes"] == observed["used_bytes"] + observed["free_bytes"] + observed["reserved_bytes"]
 
 
-def test_cold_governance_sample_refuses_unavailable_disk_or_du_without_fabricating_zero() -> None:
-    filesystem = {
-        "filesystems": {
-            "home": {"path": "/home", "status": "unavailable"},
-            "cold": {
-                "path": "/data/GHDC",
-                "status": "ok",
-                "total_bytes": 1000,
-                "free_bytes": 200,
-                "used_bytes": 700,
-                "reserved_bytes": 100,
-                "device_identity": "8:12",
-            },
-        },
-        "path_sizes": {
-            "pgdata_root": {"status": "missing"},
-            "object_store_root": {"path": "/home/ghdc/nwm", "status": "unavailable"},
-        },
-    }
-    home = governance._cold_governance_sample(filesystem, {}, path="/home", observed_at="2026-08-31T12:00:00Z")
-    assert home.get("status") == "unavailable"
-    assert home.get("blockers")
+@pytest.mark.parametrize(
+    ("field", "value"), (("status", "unavailable"), ("device_identity", None), ("free_bytes", None))
+)
+def test_cold_governance_sample_refuses_independently_unhealthy_home(field: str, value: object) -> None:
+    filesystem = _ok_cold_filesystem()
+    filesystem["path_sizes"]["pgdata_root"].update(path="/data/GHDC/nhms-pgdata", device_identity="8:12")
+    filesystem["path_sizes"]["object_store_root"].update(path="/data/GHDC/object-store")
+    filesystem["filesystems"]["home"][field] = value
+    home = governance._cold_governance_sample(
+        filesystem,
+        {"status": "ok", "cold_relation_by_tablespace": []},
+        path="/home",
+        observed_at="2026-08-31T12:00:00Z",
+    )
+    assert home["status"] == "unavailable"
     assert home.get("total_bytes") is None
     assert home.get("used_bytes") is None
     assert home.get("free_bytes") is None

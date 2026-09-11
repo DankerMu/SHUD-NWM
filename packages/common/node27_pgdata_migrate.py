@@ -728,7 +728,7 @@ class Migration:
         value = self.host.helper(state, f"base64 -w0 /source/{relative}", target=True)
         return base64.b64decode(value, validate=True)
 
-    def set_hba(self, *, restore: bool) -> None:
+    def hba_evidence(self) -> tuple[bytes, bytes, bytes]:
         state = self.state
         original = private_read(self.workspace / "original-hba")
         overlay = private_read(self.workspace / "fenced-hba")
@@ -737,8 +737,13 @@ class Migration:
             "private HBA evidence drifted",
         )
         current = self.hba_bytes()
-        expected = original if restore else overlay
         require(current in (original, overlay), "HBA is neither original nor operation-owned; recovery required")
+        return original, overlay, current
+
+    def set_hba(self, *, restore: bool) -> None:
+        state = self.state
+        original, overlay, current = self.hba_evidence()
+        expected = original if restore else overlay
         require(not restore or state["writes_released"], "HBA restoration requires durable write-release marker")
         if current == expected:
             return
@@ -840,6 +845,7 @@ class Migration:
         state["display_unfenced"] = True
         self.save()  # Intent allows recovery to reconcile either display-fence state.
         self.host.restore_units(state, display_only=True)
+        self.host.display_ready(state)
         self.readonly_proof()
         self.save("activated_readonly")
 
@@ -894,12 +900,14 @@ class Migration:
         restart, retries = normalize_raw_inspect(state["original"]).restart_policy
         restart = f"on-failure:{retries}" if restart == "on-failure" else restart or "no"
         state["original_policy_restore_intent"] = True
+        # Restoring an automatic restart policy can start the original after a
+        # reboot, even if we never reach the explicit start below. Authorize that
+        # owned liveness transition only after the candidate is stopped/renamed.
+        state["original_start_intent"] = True
         self.save()
         if original.restart_policy != normalize_raw_inspect(state["original"]).restart_policy:
             self.host.command([DOCKER, "update", "--restart=" + restart, state["original_id"]])
         if not original.running:
-            state["original_start_intent"] = True
-            self.save()
             self.host.command([DOCKER, "start", state["original_id"]])
         restored = self.original(stopped=False, rollback=True)
         require(
@@ -930,12 +938,43 @@ class Migration:
         state = self.state
         self.common(fences=not state["writes_released"])
         self.original()
-        self.candidate()
+        candidate = self.candidate(running=None if state["writes_released"] else True)
         if not state["writes_released"]:
             self.readonly_proof()
             self.host.release_callers_ready(state)
             state["writes_released"] = True
             self.save("release_intent")  # Sole durable stale-snapshot boundary.
+        self.hba_evidence()
+        if not candidate.running:
+            state["candidate_start_intent"] = True
+            self.save()
+            self.host.command([DOCKER, "start", state["candidate_id"]])
+        # Writes may already have committed after the marker. Establish current
+        # identity/read readiness, not the obsolete no-writer predecessor proof.
+        deadline = time.monotonic() + 120
+        while True:
+            try:
+                self.original()
+                self.candidate()
+                self.hba_evidence()
+                catalog = _catalog(self.host, state, candidate=True)
+                require(
+                    catalog["system_id"] == state["control"]
+                    and catalog["roles"] == state["catalog"]["roles"]
+                    and catalog["hba"] == state["catalog"]["hba"],
+                    "candidate catalog identity drifted",
+                )
+                self.host.read_proof(state)
+                errors = self.host.admin(
+                    state,
+                    "SELECT json_build_object('errors',count(*)) FROM pg_hba_file_rules WHERE error IS NOT NULL",
+                    candidate=True,
+                )
+                require(errors["errors"] == 0, "candidate HBA contains invalid rules")
+                break
+            except (MigrationError, psycopg2.OperationalError):
+                require(time.monotonic() < deadline, "candidate readiness failed; release must continue forward")
+                time.sleep(1)
         # A marked retry accepts original OR owned HBA, but never a third state.
         self.set_hba(restore=True)
         value = self.host.admin(state, "SELECT to_json(pg_reload_conf())", candidate=True)
@@ -946,5 +985,7 @@ class Migration:
         self.save()
         if self.candidate().restart_policy != normalize_raw_inspect(state["original"]).restart_policy:
             self.host.command([DOCKER, "update", "--restart=" + restart, state["candidate_id"]])
+        self.host.restore_units(state, display_only=True)
+        self.host.display_ready(state)
         self.host.restore_units(state)
         self.save("released")

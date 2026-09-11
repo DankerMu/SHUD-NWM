@@ -212,7 +212,7 @@ The actual application remains OLD `5a86841c` at
 must never become the application runtime, change an image, run migrations,
 or replace the existing `60` runtime-pin dropins.
 
-#1891/#1895 explicitly exclude **entire PGDATA**. Their cold rollout below
+Issues #1891/#1895 explicitly exclude **entire PGDATA**. Their cold rollout below
 does not authorize this procedure. Do not execute its G0–G8 installation/move
 sequence for #2240, add a cold bind, enable cold residency, or revive the
 retired archive. Re-admitting the historically failed RAID requires fresh
@@ -443,6 +443,11 @@ resource-governance, timeseries-compression and timeseries-retention, plus
 compression-replay service and display. Missing units stay absent; unknown
 writers or incompatible cold residency refuse. A timeout/interruption is not
 permission to replay prepare or kill a writer and declare a clean copy.
+An activating/deactivating display service is not a stable restoration
+baseline: preparation refuses it before mutation. Let the display transition
+settle, then obtain a fresh plan; do not reset an existing failure or treat a
+starting display as intentionally inactive. Running oneshots still drain
+normally and are not replayed.
 
 ```bash
 "${MIGRATE[@]}" --workspace "$WORKSPACE" --action copy --enforce
@@ -524,9 +529,13 @@ If release crashes after that marker, stale rollback remains forbidden even
 when no write completion can be confirmed. Re-run only `release` with the same
 workspace after inspection; it revalidates candidate identity, owned name/
 restart-policy transitions, HBA and remaining fences and continues forward,
-not through an obsolete read-only proof. Establish current database and display
-readiness before restoring writers; readiness failure leaves the remaining
-writer fences in place and requires forward recovery, never stale rollback.
+not through an obsolete read-only proof. If reboot left the marked candidate
+stopped with restart disabled, release may journal and start only that exact
+owned candidate after proving the original remains stopped and restart-disabled.
+Never manually start the retained original after the marker. Establish current
+database and display readiness before restoring writers; readiness failure
+leaves the remaining writer fences in place and requires forward recovery,
+never stale rollback.
 
 After release, perform controlled ingest through the **OLD runtime** only
 after the foreign hold owner separately authorizes that workload, then repeat
