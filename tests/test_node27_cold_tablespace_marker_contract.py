@@ -9,6 +9,8 @@ from tests import conftest
 
 _ROOT = Path(__file__).resolve().parents[1]
 _ORACLE_TEST = _ROOT / "tests/test_node27_cold_tablespace_integration.py"
+_RUNTIME_INTEGRATION_TEST = _ROOT / "tests/test_compressed_chunk_cold_runtime_integration.py"
+_DEDICATED_MARKERS = {"integration", "timescaledb_210", "node27_docker"}
 
 
 def _marked_functions(tree: ast.Module) -> dict[str, set[str]]:
@@ -42,7 +44,7 @@ def test_real_oracle_has_all_three_opt_in_markers_but_local_identity_tests_remai
     )
 
     for name in real_names:
-        assert {"integration", "timescaledb_210", "node27_docker"}.issubset(marked[name])
+        assert _DEDICATED_MARKERS.issubset(marked[name])
     interrupted_name = "test_real_interrupted_replacement_recovers_without_install_replay"
     interrupted = next(
         node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == interrupted_name
@@ -59,6 +61,21 @@ def test_real_oracle_has_all_three_opt_in_markers_but_local_identity_tests_remai
         item.value for item in parametrized.args[1].elts if isinstance(item, ast.Constant)
     ) == ("stop", "rename", "run")
     assert marked["test_disposable_oracle_defaults_to_1892_pin_and_separate_identity"] == set()
+
+
+def test_runtime_integration_has_dedicated_markers_only_on_docker_oracle() -> None:
+    tree = ast.parse(
+        _RUNTIME_INTEGRATION_TEST.read_text(encoding="utf-8"),
+        filename=str(_RUNTIME_INTEGRATION_TEST),
+    )
+    marked = _marked_functions(tree)
+    real_name = "test_isolated_cluster_production_runtime_not_probe_executor"
+    local_name = "test_integration_refuses_live_cluster_identity"
+
+    assert _DEDICATED_MARKERS.issubset(marked[real_name])
+    assert "node27_docker" not in marked[local_name]
+    dedicated = [name for name, marks in marked.items() if _DEDICATED_MARKERS.issubset(marks)]
+    assert dedicated == [real_name]
 
 
 def test_real_oracle_collects_five_opt_in_nodes() -> None:

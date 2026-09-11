@@ -12287,6 +12287,34 @@ def test_origin_chunk_parity_catalog_route_reds_when_any_partition_is_removed(
     assert set(ORIGIN_CHUNK_PARITY_PARTITIONS) - {removed} <= selected
 
 
+def test_runtime_integration_test_only_change_selects_marker_contract_exactly() -> None:
+    owner = "tests/test_compressed_chunk_cold_runtime_integration.py"
+    marker = "tests/test_node27_cold_tablespace_marker_contract.py"
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert selected == {owner, marker, SELECTOR_META_GUARD_TEST}
+
+
+def test_runtime_integration_marker_contract_redirect_reds_when_rule_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import select_ci_tests
+
+    owner = "tests/test_compressed_chunk_cold_runtime_integration.py"
+    marker = "tests/test_node27_cold_tablespace_marker_contract.py"
+    matching = [rule for rule in CHANGED_TEST_FILE_RULES if rule.pattern == owner]
+    assert len(matching) == 1, f"expected exactly one CHANGED_TEST_FILE_RULES entry for {owner}"
+    assert matching[0].stop_on_match is True
+    assert matching[0].tests == (owner, marker)
+    mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
+    assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
+    monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
+
+    selected = set(select_tests([owner], repo_root=Path(".")))
+    assert marker not in selected
+    assert owner in selected
+    assert SELECTOR_META_GUARD_TEST in selected
+
+
 def test_issue1895_runbook_selects_the_live_rollout_contract() -> None:
     selected = set(select_tests(["docs/runbooks/tier-node27-timeseries-storage.md"], repo_root=Path(".")))
     assert "tests/test_issue1895_runbook_contract.py" in selected

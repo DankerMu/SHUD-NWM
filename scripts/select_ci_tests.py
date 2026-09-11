@@ -886,6 +886,18 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # A test-only change to the isolated-cluster runtime integration can drop
+        # `node27_docker` while ordinary CI still skips the Docker body. Redirect
+        # to the AST marker contract that pins the triple marker, replacing
+        # ordinary self-selection (which would omit the contract).
+        "tests/test_compressed_chunk_cold_runtime_integration.py",
+        (
+            "tests/test_compressed_chunk_cold_runtime_integration.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
         "tests/test_issue1895_readiness_c1_c2_c3.py",
         ISSUE1895_RUNBOOK_CONTRACT_TESTS,
         stop_on_match=True,

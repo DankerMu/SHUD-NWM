@@ -47,6 +47,7 @@ def test_integration_refuses_live_cluster_identity() -> None:
 
 @pytest.mark.integration
 @pytest.mark.timescaledb_210
+@pytest.mark.node27_docker
 def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
     pytest.importorskip("psycopg2")
     if not Path("/.dockerenv").exists() and not Path("/var/run/docker.sock").exists():
