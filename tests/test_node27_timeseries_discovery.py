@@ -10,6 +10,7 @@ from packages.common.node27_timeseries_discovery import (
 )
 from scripts import node27_timeseries_compression_capture as capture
 from scripts import node27_timeseries_compression_live_evidence as evidence
+from scripts import node27_timeseries_compression_supervisor as supervisor
 
 CANONICAL = (("hydro", "river_timeseries"), ("met", "forcing_station_timeseries"))
 
@@ -49,6 +50,15 @@ def test_capture_runtime_sql_uses_shared_discovery_and_keeps_frozen_allowlists()
     assert RUNTIME_HYPERTABLES_SQL in capture._CATALOG_BODY_SQL
     assert RUNTIME_HYPERTABLES_SQL in capture._selection_sql("selection_pre")
     assert RUNTIME_HYPERTABLES_SQL in capture._sizes_sql("sizes_pre")
+    assert RUNTIME_HYPERTABLES_SQL in supervisor._CHECKPOINT_CATALOG_SQL
+    assert "UNION ALL" in RUNTIME_HYPERTABLES_SQL
+    for sql in (
+        capture._CATALOG_BODY_SQL,
+        capture._selection_sql("selection_pre"),
+        capture._sizes_sql("sizes_pre"),
+        supervisor._CHECKPOINT_CATALOG_SQL,
+    ):
+        assert "UNION ALL" in sql
     assert capture.HYPERTABLE_KEYS == SUPERVISED_HYPERTABLES == evidence.HYPERTABLE_KEYS
     assert evidence.EXPECTED_LAG_SECONDS == 604800
     assert evidence.EXPECTED_BOUND == 1

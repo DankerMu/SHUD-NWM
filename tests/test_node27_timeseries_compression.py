@@ -1801,6 +1801,11 @@ def test_chunk_query_does_not_scan_detail_hypertables() -> None:
         if "hydro.river_timeseries" in line or "met.forcing_station_timeseries" in line:
             # Must be inside the tuple filter (as string literals with quotes).
             assert "'" in line, f"detail hypertable referenced outside string literal: {line!r}"
+    from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
+
+    assert RUNTIME_HYPERTABLES_SQL in query
+    assert "UNION ALL" in RUNTIME_HYPERTABLES_SQL
+    assert "UNION ALL" in query
 
 
 # ---------------------------------------------------------------------------

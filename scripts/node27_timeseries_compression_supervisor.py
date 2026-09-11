@@ -88,6 +88,21 @@ MAX_LEDGER_BYTES = 16 * 1024**2
 MAX_STREAM_BYTES = 8 * 1024**2
 MAX_CATALOG_ROWS = 50_000
 MAX_CATALOG_BYTES = 16 * 1024**2
+_CHECKPOINT_CATALOG_SQL = (
+    "SELECT json_build_object("
+    "'hypertables',(SELECT json_object_agg(format('%s.%s',hypertable_schema,hypertable_name),compression_enabled) "
+    "FROM timescaledb_information.hypertables WHERE (hypertable_schema,hypertable_name) IN "
+    f"({RUNTIME_HYPERTABLES_SQL})),"
+    "'compression_settings',(SELECT COALESCE(json_agg(row_to_json(s) ORDER BY hypertable_schema,hypertable_name,"
+    "segmentby_column_index NULLS LAST,orderby_column_index NULLS LAST),'[]'::json) FROM "
+    "timescaledb_information.compression_settings s WHERE (hypertable_schema,hypertable_name) IN "
+    f"({RUNTIME_HYPERTABLES_SQL})),"
+    "'policy_jobs',(SELECT COALESCE(json_agg(row_to_json(j)),'[]'::json) FROM "
+    "timescaledb_information.jobs j WHERE proc_name='policy_compression' AND "
+    "(hypertable_schema,hypertable_name) IN "
+    f"({RUNTIME_HYPERTABLES_SQL})))"
+)
+
 MAX_CANDIDATES = 10_000
 DEFAULT_WALL_SECONDS = 900.0
 FINALIZER_LOCK_TIMEOUT_SECONDS = 5.0
@@ -1311,20 +1326,7 @@ def capture_checkpoint(
         "SELECT json_build_object('conflicts',COALESCE(json_agg(l ORDER BY pid),'[]'::json)) "
         "FROM (SELECT pid,locktype,mode,granted FROM pg_locks WHERE NOT granted) l"
     )
-    catalog_sql = (
-        "SELECT json_build_object("
-        "'hypertables',(SELECT json_object_agg(format('%s.%s',hypertable_schema,hypertable_name),compression_enabled) "
-        "FROM timescaledb_information.hypertables WHERE (hypertable_schema,hypertable_name) IN "
-        f"({RUNTIME_HYPERTABLES_SQL})),"
-        "'compression_settings',(SELECT COALESCE(json_agg(row_to_json(s) ORDER BY hypertable_schema,hypertable_name,"
-        "segmentby_column_index NULLS LAST,orderby_column_index NULLS LAST),'[]'::json) FROM "
-        "timescaledb_information.compression_settings s WHERE (hypertable_schema,hypertable_name) IN "
-        f"({RUNTIME_HYPERTABLES_SQL})),"
-        "'policy_jobs',(SELECT COALESCE(json_agg(row_to_json(j)),'[]'::json) FROM "
-        "timescaledb_information.jobs j WHERE proc_name='policy_compression' AND "
-        "(hypertable_schema,hypertable_name) IN "
-        f"({RUNTIME_HYPERTABLES_SQL})))"
-    )
+    catalog_sql = _CHECKPOINT_CATALOG_SQL
     psql_prefix = [
         _host_bin("psql"),
         "--dbname",

@@ -3,6 +3,7 @@
 import json
 import subprocess
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import psycopg2
@@ -160,3 +161,42 @@ def test_working_set_query_is_catalog_only(observations):
     assert "pg_total_relation_size" in sql
     for forbidden in ("FROM hydro.", "FROM met.", "pg_class", "pg_tables", "_timescaledb_catalog"):
         assert forbidden not in sql
+
+
+def test_governance_example_ships_the_compression_lag():
+    text = (Path(__file__).resolve().parents[1] / "infra/env/node27-resource-governance.example").read_text()
+    assert "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800" in text
+    assert "same lag as the compression lane; do not invent a second lag" in text.lower()
+
+
+def test_missing_compression_lag_does_not_report_working_set_unavailable(
+    observations, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.delenv("NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS", raising=False)
+    path = tmp_path / "audit.json"
+    rc = governance.main(_argv(tmp_path, path))
+    receipt = json.loads(path.read_text())
+    working = receipt["working_set"]
+    assert working["projection_status"] == "ok"
+    assert working["next_compressible_at"] == "2026-09-03T00:00:00+00:00"
+    assert "WORKING_SET_UNAVAILABLE" not in governance._critical_codes(receipt)
+    assert rc == 0
+    assert "RESOURCE_GOVERNANCE_CRITICAL:" not in capsys.readouterr().err
+
+
+def test_catalog_connect_failure_reports_working_set_unavailable(
+    observations, tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        psycopg2,
+        "connect",
+        lambda *args, **kwargs: (_ for _ in ()).throw(psycopg2.OperationalError("refused")),
+    )
+    path = tmp_path / "audit.json"
+    rc = governance.main(_argv(tmp_path, path))
+    receipt = json.loads(path.read_text())
+    assert receipt["working_set"]["projection_status"] == "catalog_unavailable"
+    assert "WORKING_SET_UNAVAILABLE" in governance._critical_codes(receipt)
+    assert rc == 1
+    assert "RESOURCE_GOVERNANCE_CRITICAL:WORKING_SET_UNAVAILABLE" in capsys.readouterr().err
+

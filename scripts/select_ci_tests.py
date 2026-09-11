@@ -2422,6 +2422,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression_supervisor.py",
             "tests/test_node27_timeseries_decompression_replay.py",
             "tests/test_node27_timeseries_lifecycle_lock.py",
+            "tests/test_node27_timeseries_discovery.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
     ),
     PathTestRule(
@@ -2778,6 +2780,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "scripts/node27_timeseries_compression_supervisor.py",
+        ("tests/test_node27_lifecycle_contract.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_compression_capture.py",
+        ("tests/test_node27_timeseries_discovery.py",),
+    ),
+    PathTestRule(
         "scripts/node27_cold_residency.py",
         (
             "tests/test_node27_cold_residency.py",
@@ -3006,6 +3016,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
     ),
     PathTestRule(
@@ -3013,7 +3024,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
+    ),
+    PathTestRule(
+        "schemas/timeseries_retention_receipt.schema.json",
+        ("tests/test_node27_lifecycle_contract.py",),
     ),
     PathTestRule(
         # #2032: the `infra/env/node27-*.example` glob above only buys

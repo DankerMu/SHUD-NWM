@@ -16,6 +16,11 @@ from typing import Any, Mapping, Sequence
 from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
 from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
 
+COMPRESSION_LAG_SECONDS_ENV = "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"
+# Same lag as the compression lane (infra/env/node27-timeseries-compression.example).
+# Do not invent a second lag.
+COMPRESSION_LAG_DEFAULT_SECONDS = 172800
+
 WORKING_SET_SQL = f"""
 SELECT COALESCE(sum(pg_total_relation_size(
            format('%I.%I', chunk_schema, chunk_name)::regclass))
@@ -28,6 +33,18 @@ SELECT COALESCE(sum(pg_total_relation_size(
 FROM timescaledb_information.chunks
 WHERE (hypertable_schema, hypertable_name) IN ({RUNTIME_HYPERTABLES_SQL})
 """
+
+
+def compression_lag_seconds(env: Mapping[str, str] | None = None) -> int:
+    """Prefer the compression-lane env, then the documented compression default."""
+    values = os.environ if env is None else env
+    raw = values.get(COMPRESSION_LAG_SECONDS_ENV)
+    if raw is None or raw == "":
+        return COMPRESSION_LAG_DEFAULT_SECONDS
+    lag = int(raw)
+    if lag < 1:
+        raise ValueError("lag must be positive")
+    return lag
 
 
 def collect_working_set(database_url: str | None, home_free_bytes: int | None) -> dict[str, Any]:
@@ -45,9 +62,7 @@ def collect_working_set(database_url: str | None, home_free_bytes: int | None) -
         import psycopg2
         import psycopg2.extras
 
-        lag = int(os.environ["NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"])
-        if lag < 1:
-            raise ValueError("lag must be positive")
+        lag = compression_lag_seconds()
         connection = psycopg2.connect(
             database_url, connect_timeout=5, cursor_factory=psycopg2.extras.RealDictCursor
         )
