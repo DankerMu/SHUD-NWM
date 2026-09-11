@@ -2652,9 +2652,11 @@ def test_copyback_canonical_precip_write_error_does_not_raise(
     original_write = type(publisher.object_store).write_bytes_atomic
 
     def fail_canonical_write(self: Any, key_or_uri: str, content: bytes) -> str:
-        # Scoped to the mirror's own destination tree: a global failure would
-        # also break the seeding writes on the production root and this test
-        # would prove the wrong thing.
+        # The seeding above ran before this patch and the mirror's only
+        # `write_bytes_atomic` calls are its own `canonical/` temp-tree writes on
+        # the copyback root, so both clauses exclude nothing as this test stands.
+        # They are kept to match the sibling injection helpers and to stay honest
+        # if a second root or a non-`canonical/` write ever appears here.
         if self.root == copyback_root.resolve() and "canonical/" in key_or_uri:
             raise OSError("disk gone")
         return original_write(self, key_or_uri, content)
