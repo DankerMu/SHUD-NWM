@@ -4414,3 +4414,24 @@ was written with no review seat on it, which is precisely the drift the entry
 argues is better caught by machine than by another reviewer. Also corrected:
 PR #2232's revisit is the entry immediately above, not three above. The keep
 decision and the audit figures are unchanged; only the explanation was wrong.
+
+### Revisit 2026-09-11（post PR #2247 / issue #2068）
+
+审计样本 **202 个多轮 merged PR，later-round catches core=258 vs rotated=270**
+（phase=57，skipped=15）——与上一条（PR #2232 之后）**逐字相同**。本 PR 边际为
+**core +0 / rotated +0**，样本量也未动：#2247 是 `rounds=1`，单轮 PR 不进多轮样本，
+在轮换问题上结构性地不产生任何证据。
+
+Decision: **keep**，不变。理由不是新数据支持轮换，而是没有新数据——
+自主 default-keep 规则在零边际证据下不改策略。座位上限不变。
+
+值得记一笔的是本单证据的形状，它与上一条的观察同向，且不是轮换结论：
+#2247 跨 3 轮 fixture 复审、2 个 review 座位、2 个 verifier 批次与 1 次终审，
+**落在生产 diff 上的发现为零**——11 项 fixture 发现与 8 项 review/Phase-7 catch
+**全部**是散文对树、或账本对树的偏差，其中 4 条是编排者自己写下的假句：一条踩了
+entropy 硬门的 Evidence Floor 措辞、一条指错 rollback 分支的偏离理由、一条声称
+账本已记录而实际未记录的 commit message、一条实现改指时重写却写错的测试注释。
+这与上一条「反复出现的缺陷不是漏掉代码行为，而是叙述漂移」是同一读数；
+本单额外提供的一点是：**叙述漂移的作者是编排者本人时，再加审查座位也拦不住**——
+拦住这四条的分别是 fixture 复审、verifier、终审，都是**独立于作者**的读者，
+而不是更多同类座位。这是对 Evidence Floor 机械化覆盖的观察，不是轮换决定。
