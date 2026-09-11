@@ -4501,3 +4501,15 @@ later-round catches core=261、rotated=270、phase=57、skipped=15。
 本单 compact 一轮两席、零候选、独立终审零发现，不增加多轮样本或后轮 catch。
 记录 deferral：keep/cut 仍待维护者决策；本次非模板面合并授权不含审核策略调整。
 现行 keep 与座位上限不变。
+
+### Revisit 2026-09-11（post PR #2271 / issue #1985）
+
+追加后实测 636 行、626 merged、10 terminal；207 个多轮样本，
+later-round catches core=262、rotated=270、phase=57、skipped=15。
+本单 expanded 两轮：round 1 四条 FIX_NOW 均在 pinned core；round 2 因上一轮
+major 保留 integration 席，产出一条 P2（I6R2-C-1）记笔记不延期（core +1）。
+Phase 7 local-repair 抓到 capture freeze 未重钉，计入 phase 桶，不是轮换。
+后轮 catch 不构成轮换收益证据。
+记录 deferral：keep/cut 仍待维护者决策；本次 I6 合并授权不含审核策略调整。
+现行 keep 与座位上限不变。
+
