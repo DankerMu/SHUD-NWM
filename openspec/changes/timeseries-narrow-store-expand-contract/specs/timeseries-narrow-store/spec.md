@@ -94,6 +94,12 @@ Every reader of the river fact table SHALL keep one store-parameterized SQL temp
 #### Scenario: A caller that owns run metadata executes one routed variant
 - **WHEN** the hydro-display MVT source-identity probe receives a run whose metadata names one store
 - **THEN** it renders and executes only that store's variant, retains one `SELECT 1 ... LIMIT 1` result decision, and preserves the existing not-found response contract without a statement-level union
+- **AND** the original probe's raw SQL, five named binds, key/enum authority predicates, `.first()` and legacy aids remain unchanged; request validation precedes all SQL, and existing readiness/source-identity failures keep their precedence
+
+#### Scenario: A known-run probe refuses invalid routing before fact SQL
+- **WHEN** ready run metadata with a valid source identity supplies a missing, null or unknown `timeseries_store`
+- **THEN** the probe raises `TIMESERIES_STORE_INVALID` with status 500 before any fact probe or tile SQL, without a default store, coercion, extra lookup or union
+- **AND** the metadata SELECT carries the actual route while unchanged sibling metadata consumers and public route parameters retain their contracts
 
 #### Scenario: Forecast segment discovery combines routed facts below its semantic operators
 - **WHEN** any of the eight forecast-store segment queries may see runs from both stores

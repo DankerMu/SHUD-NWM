@@ -735,8 +735,40 @@ def test_any_identity_valid_times_combine_stores_before_distinct_and_limit(
         assert _rows(session, active_raw, {"variable": "not_a_river_variable"}) == []
 
 
-def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(seeded: Any) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     _url, session = seeded
+    session.rollback()
+    opposite = "narrow" if store == "legacy" else "legacy"
+    post_expand_forecast_database({
+        _KEYED_RUN_ID: store,
+        _LEGACY_RUN_ID: opposite,
+        _ALL_LEGACY_RUN_ID: "legacy",
+    })
+    metadata = hydro_display._run_row(session, _KEYED_RUN_ID)
+    assert metadata.get("timeseries_store") == store
+    mapped_store = metadata["timeseries_store"]
+
+    # Keep the helper's +30 minute wrong-store facts: an opposite-store probe
+    # must miss the requested instant rather than accidentally accepting it.
+    for physical_store, table in (
+        ("legacy", "river_timeseries_legacy"), ("narrow", "river_timeseries"),
+    ):
+        times = {
+            row["valid_time"] for row in _rows(
+                session,
+                f"SELECT ts.valid_time FROM hydro.{table} ts "
+                "JOIN hydro.hydro_run h ON h.run_key = ts.run_key "
+                "WHERE h.run_id = :run_id",
+                {"run_id": _KEYED_RUN_ID},
+            )
+        }
+        assert times == (
+            {_T0, _T1} if physical_store == store
+            else {_T0 + timedelta(minutes=30), _T1 + timedelta(minutes=30)}
+        )
 
     _require_hydro_mvt_source_identity(
         session,
@@ -745,6 +777,7 @@ def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(se
         valid_time=_T0,
         basin_version_id=_BASIN_VERSION_ID,
         river_network_version_id=_NETWORK_ID,
+        timeseries_store=mapped_store,
     )
 
     for unknown in (
@@ -759,12 +792,21 @@ def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(se
             "valid_time": _T0,
             "basin_version_id": _BASIN_VERSION_ID,
             "river_network_version_id": _NETWORK_ID,
+            "timeseries_store": mapped_store,
             **unknown,
         }
         with pytest.raises(ApiError) as raised:
             _require_hydro_mvt_source_identity(session, **arguments)
         assert raised.value.status_code == 404, unknown
         assert raised.value.code == "MVT_SOURCE_IDENTITY_NOT_FOUND"
+        assert raised.value.details == {
+            "layer_id": "discharge" if arguments["variable"] == _VARIABLE else "hydro:not_a_river_variable",
+            "run_id": arguments["run_id"],
+            "variable": arguments["variable"],
+            "valid_time": "2026-06-01T00:00:00Z",
+            "basin_version_id": arguments["basin_version_id"],
+            "river_network_version_id": arguments["river_network_version_id"],
+        }
 
 
 # ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ from sqlalchemy import text
 from apps.api import display_cache, main
 from apps.api.errors import ApiError
 from apps.api.routes import hydro_display
+from packages.common.river_ts_render import render_river_ts_sql
 from scripts.node27_raw_retention import DEFAULT_RETENTION_DAYS
 from services.tiles import mvt as mvt_module
 from services.tiles.mvt import (
@@ -34,11 +35,13 @@ from services.tiles.mvt import (
     national_river_network_source_version,
     postgis_tile_sql,
 )
+from tests.river_ts_template_registry import entry_by_key
 
 
 class _Rows:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self._rows = rows
+        self.first_count = 0
 
     def mappings(self) -> _Rows:
         return self
@@ -47,6 +50,7 @@ class _Rows:
         return self._rows
 
     def first(self) -> dict[str, Any] | None:
+        self.first_count += 1
         return self._rows[0] if self._rows else None
 
 
@@ -56,11 +60,14 @@ class _Session:
         self.sql = ""
         self.executions: list[tuple[str, Any]] = []
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect))
+        self.results: list[_Rows] = []
 
     def execute(self, statement: Any, _params: Any = None) -> _Rows:
         self.sql = str(statement)
         self.executions.append((self.sql, _params))
-        return _Rows(self.rows)
+        result = _Rows(self.rows)
+        self.results.append(result)
+        return result
 
     def get_bind(self) -> Any:
         return self.bind
@@ -3333,16 +3340,19 @@ class _LegacyRunRouteSession:
         "cycle_time": "2026-09-02T12:00:00Z",
         "updated_at": "2026-09-02T13:00:00Z",
         "river_network_version_id": "rnv_a",
+        "timeseries_store": "legacy",
     }
 
     def __init__(self) -> None:
         self.bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
         self.execute_count = 0
         self.tile_params: list[dict[str, Any]] = []
+        self.executions: list[tuple[str, Any]] = []
 
     def execute(self, statement: Any, params: Any = None) -> _TileResult:
         self.execute_count += 1
         sql = str(statement)
+        self.executions.append((sql, params))
         if "ST_AsMVT" in sql:
             self.tile_params.append(dict(params or {}))
             return _TileResult([dict(_NationalRouteSession._TILE_ROW)])
@@ -3352,6 +3362,137 @@ class _LegacyRunRouteSession:
 
     def get_bind(self) -> Any:
         return self.bind
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+@pytest.mark.parametrize("found", (True, False), ids=("found", "not-found"))
+def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, found: bool) -> None:
+    session = _Session([{"exists": 1}] if found else [])
+    arguments = {
+        "run_id": _LEGACY_RUN_ID,
+        "variable": "q_down",
+        "valid_time": datetime(2026, 9, 3, tzinfo=UTC),
+        "basin_version_id": "bv_a",
+        "river_network_version_id": "rnv_a",
+    }
+    if found:
+        hydro_display._require_hydro_mvt_source_identity(session, **arguments, timeseries_store=store)
+    else:
+        with pytest.raises(ApiError) as raised:
+            hydro_display._require_hydro_mvt_source_identity(session, **arguments, timeseries_store=store)
+        assert raised.value.status_code == 404
+        assert raised.value.code == "MVT_SOURCE_IDENTITY_NOT_FOUND"
+        assert raised.value.details == {
+            **arguments,
+            "layer_id": "discharge",
+            "valid_time": "2026-09-03T00:00:00Z",
+        }
+
+    assert len(session.executions) == 1
+    sql, params = session.executions[0]
+    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source(store)
+    assert sql == render_river_ts_sql(raw, store, entry="hydro_display:mvt_source_identity_probe").sql
+    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", sql) == [
+        "river_timeseries_legacy" if store == "legacy" else "river_timeseries"
+    ]
+    assert "UNION" not in sql.upper()
+    assert len(re.findall(r"\bLIMIT\s+1\b", sql, re.IGNORECASE)) == 1
+    assert params == arguments
+    assert set(re.findall(r"(?<!:):([a-z_]+)", sql)) == set(arguments)
+    assert session.results[0].first_count == 1
+    for column in ("run_key", "basin_version_key", "river_network_version_key", "variable_e"):
+        assert re.search(rf"\b{column}\s*=\s*\(", sql)
+    assert "unnest(enum_range(NULL::hydro.river_variable))" in sql
+    assert "AND valid_time = :valid_time" in sql
+    for column in ("run_id", "river_network_version_id", "variable"):
+        assert bool(re.search(rf"\bAND {column} = :{column}\b", sql)) is (store == "legacy")
+    assert sql.count("transitional compressed-chunk pushdown aid") == (3 if store == "legacy" else 0)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    ({"timeseries_store": None}, {"timeseries_store": "unknown"}, {"timeseries_store": ["legacy"]}),
+    ids=("missing-or-null", "unknown", "non-string"),
+)
+def test_hydro_mvt_probe_rejects_invalid_store_before_sql(metadata: dict[str, Any]) -> None:
+    session = _Session([])
+    with pytest.raises(ApiError) as raised:
+        hydro_display._require_hydro_mvt_source_identity(
+            session,
+            run_id=_LEGACY_RUN_ID,
+            variable="q_down",
+            valid_time=datetime(2026, 9, 3, tzinfo=UTC),
+            basin_version_id="bv_a",
+            river_network_version_id="rnv_a",
+            timeseries_store=metadata.get("timeseries_store"),
+        )
+    assert raised.value.status_code == 500
+    assert raised.value.code == "TIMESERIES_STORE_INVALID"
+    assert raised.value.details == {"run_id": _LEGACY_RUN_ID}
+    assert session.executions == []
+
+
+@pytest.mark.parametrize(
+    "metadata, status, code",
+    (
+        pytest.param({"status": "running"}, 409, "DISPLAY_PRODUCT_NOT_READY", id="not-ready-missing"),
+        pytest.param(
+            {"status": "running", "timeseries_store": "unknown"},
+            409, "DISPLAY_PRODUCT_NOT_READY", id="not-ready-invalid",
+        ),
+        pytest.param(
+            {"basin_version_id": None}, 404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-basin-missing",
+        ),
+        pytest.param(
+            {"river_network_version_id": None, "timeseries_store": "unknown"},
+            404, "MVT_SOURCE_IDENTITY_NOT_FOUND", id="no-network-invalid",
+        ),
+        pytest.param({}, 500, "TIMESERIES_STORE_INVALID", id="ready-missing"),
+        pytest.param({"timeseries_store": None}, 500, "TIMESERIES_STORE_INVALID", id="ready-null"),
+        pytest.param({"timeseries_store": "unknown"}, 500, "TIMESERIES_STORE_INVALID", id="ready-invalid"),
+        pytest.param({"timeseries_store": "legacy"}, 200, None, id="ready-legacy"),
+        pytest.param({"timeseries_store": "narrow"}, 200, None, id="ready-narrow"),
+    ),
+)
+def test_hydro_mvt_route_preserves_store_error_precedence_and_sql_order(
+    metadata: dict[str, Any], status: int, code: str | None, monkeypatch: Any, tmp_path: Path,
+) -> None:
+    session = _LegacyRunRouteSession()
+    session._RUN_ROW = {key: value for key, value in session._RUN_ROW.items() if key != "timeseries_store"}
+    session._RUN_ROW.update(metadata)
+    response, captured = _request_national_identity_tile(_legacy_run_url(), session, monkeypatch, tmp_path)
+
+    assert response.status_code == status, response.text
+    assert session.execute_count == (3 if status == 200 else 1)
+    assert len(session.executions) == session.execute_count
+    metadata_sql, metadata_params = session.executions[0]
+    assert "FROM hydro.hydro_run h" in metadata_sql
+    assert metadata_params == {"run_id": _LEGACY_RUN_ID}
+    if status != 200:
+        assert response.json()["error"]["code"] == code
+        if status == 500:
+            assert response.json()["error"]["details"] == {"run_id": _LEGACY_RUN_ID}
+        assert captured == []
+        assert session.tile_params == []
+        return
+
+    store = metadata["timeseries_store"]
+    probe_sql, probe_params = session.executions[1]
+    raw = entry_by_key("hydro_display:mvt_source_identity_probe").source(store)
+    assert probe_sql == render_river_ts_sql(raw, store, entry="hydro_display:mvt_source_identity_probe").sql
+    assert re.findall(r"\bFROM\s+hydro\.(river_timeseries\w*)\b", probe_sql) == [
+        "river_timeseries_legacy" if store == "legacy" else "river_timeseries"
+    ]
+    assert probe_params == {
+        "run_id": _LEGACY_RUN_ID,
+        "variable": "q_down",
+        "valid_time": datetime(2026, 9, 3, tzinfo=UTC),
+        "basin_version_id": "bv_a",
+        "river_network_version_id": "rnv_a",
+    }
+    assert "ST_AsMVT" in session.executions[2][0]
+    assert response.headers["content-type"] == "application/x-protobuf"
+    assert response.headers["x-tile-layer-id"] == "discharge"
 
 
 def _legacy_route_case(route: str) -> tuple[Any, Any]:

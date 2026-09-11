@@ -9,8 +9,8 @@ makes the oracles exhaustive rather than anecdotal:
   that cannot survive the narrow rendering is red in the PR that writes it, not
   in the migration window;
 * the frozen I1 golden retains its 20 historical keys. Six unchanged entries
-  still compare against current raw inputs; the seven routed sources have
-  separate routing and executed-query semantic owners;
+  still compare against current raw inputs; the seven store-qualified raw
+  sources have separate routing and executed-query semantic owners;
 * **registry closure** — for every production file, the canonical-table mentions
   of that file's entries plus its declared non-template mentions must equal the
   file's census. An unregistered read site is therefore red, which is the only
@@ -96,7 +96,7 @@ class TemplateEntry:
         check sums per file.
     ``source(store)``
         Raw input for that store, including caller-owned routing literals.
-        Unrouted siblings return the same authored input for either store.
+        A store-independent raw input is the same authored SQL for either store.
         The store is required: there is no implicit legacy input for a narrow render.
     """
 
@@ -472,6 +472,9 @@ REGISTRY: tuple[TemplateEntry, ...] = (
     *PARSER_ENTRIES,
 )
 
+#: Changed store-qualified raw sources, not the set of renderer callers.
+#: The MVT identity probe executes through the renderer but keeps its unchanged,
+#: store-independent raw input and therefore remains historical-comparable.
 ROUTED_SOURCE_KEYS = frozenset({
     "forecast_store:segment_rows_source",
     "forecast_store:latest_product_river_source",
