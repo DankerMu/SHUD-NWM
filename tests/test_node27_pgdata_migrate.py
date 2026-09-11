@@ -14,6 +14,7 @@ from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
 from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
 from packages.common.node27_pgdata_host import DISPLAY, FENCE, UNITS, Host, MigrationError, covered_tree, path_identity
 from packages.common.node27_pgdata_migrate import DEFAULTS, Migration
+from packages.common.safe_fs import SafeFilesystemError
 from scripts.node27_pgdata_migrate import main
 
 
@@ -458,6 +459,137 @@ class UnitHost(FakeHost):
             if fence.exists():
                 value["DropInPaths"] = (value.get("DropInPaths", "") + " " + str(fence)).strip()
         return SimpleNamespace(returncode=0, stdout="\n".join(f"{k}={v}" for k, v in value.items()), stderr="")
+
+
+@pytest.fixture
+def runtime_checkout(tmp_path: Path) -> Path:
+    runtime = tmp_path.resolve() / "runtime"
+    runtime.mkdir(mode=0o700)
+    (runtime / ".gitignore").write_text(".venv/\n")
+    (runtime / "app.py").write_text("print('approved runtime')\n")
+    host = Host()
+    host.command(["/usr/bin/git", "init", str(runtime)])
+    host.command(["/usr/bin/git", "-C", str(runtime), "add", ".gitignore", "app.py"])
+    host.command(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(runtime),
+            "-c",
+            "user.name=Runtime Fixture",
+            "-c",
+            "user.email=runtime@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-m",
+            "Approved runtime",
+        ]
+    )
+    return runtime
+
+
+def test_runtime_virtualenv_link_preserves_code_identity(runtime_checkout: Path) -> None:
+    host = Host()
+    plain = host.runtime_identity(runtime_checkout)
+    assert "virtualenv_link" not in plain
+    target = runtime_checkout.parent / "shared-venv"
+    target.mkdir()
+    target.chmod(0o775)
+    (runtime_checkout / ".venv").symlink_to(target, target_is_directory=True)
+    admitted = host.runtime_identity(runtime_checkout)
+    assert "virtualenv_link" in admitted
+    assert admitted["head"] == plain["head"]
+    assert admitted["tree_digest"] == plain["tree_digest"]
+    assert target.stat().st_mode & 0o777 == 0o775
+
+    # Package activity is not a new package-integrity or timestamp contract.
+    (target / "installed-package").write_text("package contents\n")
+    os.utime(target, ns=(1_000_000_000, 1_000_000_000))
+    assert host.runtime_identity(runtime_checkout) == admitted
+
+    (runtime_checkout / "app.py").write_text("print('changed runtime')\n")
+    changed = host.runtime_identity(runtime_checkout)
+    assert changed["tree_digest"] != admitted["tree_digest"]
+    assert changed["virtualenv_link"] == admitted["virtualenv_link"]
+    (runtime_checkout / "untracked.py").write_text("print('local runtime code')\n")
+    assert host.runtime_identity(runtime_checkout)["tree_digest"] != changed["tree_digest"]
+
+
+@pytest.mark.parametrize("drift", ("retarget", "replace-link", "replace-target", "target-mode"))
+def test_runtime_virtualenv_drift_refuses_unit_verification(runtime_checkout: Path, monkeypatch, drift: str) -> None:
+    monkeypatch.setattr(Path, "home", lambda: runtime_checkout.parent)
+    target = runtime_checkout.parent / "shared-venv"
+    target.mkdir(mode=0o775)
+    target.chmod(0o775)
+    link = runtime_checkout / ".venv"
+    link.symlink_to(target, target_is_directory=True)
+    name = "nhms-node27-download.service"
+
+    class GitUnitHost(UnitHost):
+        def command(self, argv, **kwargs):
+            if argv[0] == "/usr/bin/git":
+                return Host.command(self, argv, **kwargs)
+            return super().command(argv, **kwargs)
+
+    host = GitUnitHost(
+        {
+            name: {
+                "LoadState": "loaded",
+                "ActiveState": "inactive",
+                "UnitFileState": "static",
+                "Type": "oneshot",
+                "WorkingDirectory": str(runtime_checkout),
+                "ExecStart": f"{runtime_checkout}/.venv/bin/python app.py",
+                "EnvironmentFiles": "",
+                "FragmentPath": "",
+                "DropInPaths": "",
+            }
+        }
+    )
+    state = {"config": DEFAULTS, "units": host.units_snapshot(DEFAULTS)}
+    frozen = state["units"][name]["runtime"]
+    host.verify_units(state)
+    if drift in {"retarget", "replace-link"}:
+        # Keep the old inode alive so replacement cannot reuse it.
+        link.rename(runtime_checkout.parent / "old-venv-link")
+        if drift == "retarget":
+            target = runtime_checkout.parent / "other-venv"
+            target.mkdir()
+        link.symlink_to(target, target_is_directory=True)
+    elif drift == "replace-target":
+        target.rename(runtime_checkout.parent / "old-venv-directory")
+        target.mkdir()
+    else:
+        target.chmod(0o700)
+    changed = host.runtime_identity(runtime_checkout)
+    assert changed["tree_digest"] == frozen["tree_digest"]
+    assert changed["virtualenv_link"] != frozen["virtualenv_link"]
+    with pytest.raises(MigrationError):
+        host.verify_units(state)
+
+
+@pytest.mark.parametrize("unsafe", ("ordinary-code", "tracked-venv", "dangling-venv", "file-venv", "indirect-venv"))
+def test_runtime_identity_refuses_non_environment_symlinks(runtime_checkout: Path, unsafe: str) -> None:
+    target = runtime_checkout.parent / "external"
+    if unsafe in {"ordinary-code", "file-venv"}:
+        target.write_text("external bytes\n")
+    elif unsafe in {"tracked-venv", "indirect-venv"}:
+        target.mkdir()
+    if unsafe == "indirect-venv":
+        (target / "env").mkdir()
+        alias = runtime_checkout.parent / "external-alias"
+        alias.symlink_to(target, target_is_directory=True)
+        target = alias / "env"
+    link = runtime_checkout / ("linked.py" if unsafe == "ordinary-code" else ".venv")
+    link.symlink_to(target)
+    host = Host()
+    if unsafe == "tracked-venv":
+        host.command(["/usr/bin/git", "-C", str(runtime_checkout), "add", "--force", ".venv"])
+    with pytest.raises((MigrationError, SafeFilesystemError, OSError)):
+        host.runtime_identity(runtime_checkout)
 
 
 def test_persistent_fence_preserves_optional_foreign_hold_and_original_timer_state(tmp_path: Path, monkeypatch):

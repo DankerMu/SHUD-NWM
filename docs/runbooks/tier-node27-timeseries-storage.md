@@ -219,6 +219,18 @@ without changing application code/version or runtime pins. This PR does not
 chmod the runtime or replace it with a tooling checkout; do not assume current
 runtime admission is already green.
 
+The deployed OLD checkout also has an untracked `.venv` directory symlink to
+the shared environment. Runtime fingerprinting records that conventional
+environment link's literal destination, no-follow link identity and direct
+target-directory identity separately from application files. Retargeting or
+replacing the link/target, or changing target owner/mode, invalidates the frozen
+identity. Tracked `.venv` links, ordinary code symlinks, dangling/file targets
+and indirect target-path symlinks still refuse. Do not remove the live environment,
+change Git excludes to hide it, or disable filesystem checks to clear admission.
+This is environment-location identity, not an installed-package integrity claim;
+package contents remain outside the fingerprint as for an ignored `.venv/`
+directory. Do not install or rebuild the shared environment during the window.
+
 Issues #1891/#1895 explicitly exclude **entire PGDATA**. Their cold rollout below
 does not authorize this procedure. Do not execute its G0–G8 installation/move
 sequence for #2240, add a cold bind, enable cold residency, or revive the
