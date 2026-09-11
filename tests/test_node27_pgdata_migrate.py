@@ -1040,3 +1040,17 @@ def test_primary_environment_symlink_refuses_before_fencing(tmp_path: Path, monk
     assert host.units[timer]["ActiveState"] == "active"
     assert not host.fence_path(timer).exists()
     assert not host.fence_path(service).exists()
+
+
+@pytest.mark.parametrize("invalid", ("missing-source", "escaped-environment"))
+def test_primary_environment_unproved_input_refuses_before_fencing(tmp_path: Path, monkeypatch, invalid: str) -> None:
+    host, state, service, timer, path = _primary_env_fixture(tmp_path, monkeypatch)
+    if invalid == "missing-source":
+        path.write_text("AUDIT_SETTING=original\n")
+    else:
+        host.units[service]["Environment"] += r' EXTRA="line\nvalue"'
+    with pytest.raises(MigrationError):
+        host.units_snapshot(state["config"])
+    assert host.units[timer]["ActiveState"] == "active"
+    assert not host.fence_path(timer).exists()
+    assert not host.fence_path(service).exists()

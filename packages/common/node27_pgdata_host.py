@@ -94,6 +94,9 @@ def path_identity(path: Path) -> list[int]:
 
 
 def _unit_environment(value: str | None) -> dict[str, str]:
+    # systemctl may C-escape values; shlex is lossless only for the unescaped
+    # quoted assignments used by these units. Refuse rather than conflate them.
+    require("\\" not in (value or ""), "escaped unit environment is unsupported")
     try:
         assignments = shlex.split(value or "")
     except ValueError:
@@ -581,6 +584,10 @@ class Host:
                 "runtime": runtime,
                 "environment": self.environment_files(value),
             }
+        governance = result.get("nhms-node27-resource-governance.service", {})
+        if governance and not governance.get("absent"):
+            settings = [item["pgdata"] for item in governance["environment"].values() if item["pgdata"] is not None]
+            require(settings == [config["source_pgdata"]], "governance original PGDATA setting is unproved")
         return result
 
     def fence_path(self, name: str) -> Path:
