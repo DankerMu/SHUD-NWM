@@ -134,6 +134,7 @@ def du_bytes(path: Path) -> dict[str, Any]:
                 "status": "ok",
                 "bytes": bytes_value,
                 "pretty": bytes_pretty(bytes_value),
+                "device_identity": filesystem_identity(resolved),
             }
     fallback = run_command(["du", "-sk", str(resolved)])
     if fallback["status"] == "ok" and fallback.get("stdout"):
@@ -148,6 +149,7 @@ def du_bytes(path: Path) -> dict[str, Any]:
                 "status": "ok",
                 "bytes": bytes_value,
                 "pretty": bytes_pretty(bytes_value),
+                "device_identity": filesystem_identity(resolved),
             }
     return {
         "path": str(resolved),
@@ -457,11 +459,20 @@ def cold_governance_sample(
     object_store_value = path_sizes.get("object_store_root")
     object_store = object_store_value if isinstance(object_store_value, Mapping) else {}
     pgdata_bytes = 0
-    if path == "/home":
-        if pgdata.get("status") != "ok" or observation_int(pgdata.get("bytes")) is None:
-            blockers.append("PGDATA du observation is unavailable")
-        else:
-            pgdata_bytes = int(pgdata["bytes"])
+    pgdata_identity = pgdata.get("device_identity")
+    placements = [
+        root
+        for label, root in (("home", "/home"), ("cold", "/data/GHDC"))
+        if isinstance(filesystems.get(label), Mapping)
+        and filesystems[label].get("status") == "ok"
+        and filesystems[label].get("device_identity") == pgdata_identity
+    ]
+    if pgdata.get("status") != "ok" or observation_int(pgdata.get("bytes")) is None:
+        blockers.append("PGDATA du observation is unavailable")
+    elif not isinstance(pgdata_identity, str) or not pgdata_identity or len(placements) != 1:
+        blockers.append("PGDATA filesystem placement is unavailable or ambiguous")
+    elif placements[0] == path:
+        pgdata_bytes = int(pgdata["bytes"])
     object_store_path = str(object_store.get("path") or "")
     if object_store_path.startswith("/home/"):
         object_store_on = "/home"

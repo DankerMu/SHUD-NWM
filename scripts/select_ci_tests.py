@@ -3861,6 +3861,40 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # not by same-stem test filename.  These rows attach their direct public
     # contracts while the shared-library baseline remains additive below.
     PathTestRule(
+        "packages/common/node27_pgdata_host.py",
+        (
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_migrate.py",
+        (
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "scripts/node27_pgdata_migrate.py",
+        (
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_pgdata_migrate.py",
+        ("tests/test_node27_pgdata_migrate.py",),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_pgdata_migrate_oracle.py",
+        ("tests/test_node27_pgdata_migrate_oracle.py",),
+        stop_on_match=True,
+    ),
+    PathTestRule(
         "packages/common/node27_cold_tablespace_identity.py",
         (
             "tests/test_node27_cold_tablespace_identity.py",

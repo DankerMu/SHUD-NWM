@@ -194,6 +194,314 @@ NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 an
 这不是 #1895 live rollout 授权，也不声明 node-27 remote PASS。若 sudo 与 exact-image root fallback 均不可用，
 测试必须在 Docker mutation 前给出可行动 skip/fail；不能用 `expected_uid=os.getuid()` 或任意 identity override 替代。
 
+## #2240 whole-PGDATA relocation (tooling; separate human-gated cutover)
+
+**No live placement change or production PASS is claimed here.** The current
+source is `/home/nwm/nhms-pgdata`, bound to `/home/postgres/pgdata/data` in
+`nhms-db`. The observed resolved image is
+`sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e`
+(PostgreSQL 15.2 / TimescaleDB 2.10.2). Image `postgres` was observed as
+1000:1000; freshly measure the production numeric owner, do not assume it.
+The actual application remains OLD `5a86841c` at
+`/home/nwm/NWM-reslice-original-5a86841c`. An isolated new-tooling checkout
+must never become the application runtime, change an image, run migrations,
+or replace the existing `60` runtime-pin dropins.
+
+#1891/#1895 explicitly exclude **entire PGDATA**. Their cold rollout below
+does not authorize this procedure. Do not execute its G0–G8 installation/move
+sequence for #2240, add a cold bind, enable cold residency, or revive the
+retired archive. Re-admitting the historically failed RAID requires fresh
+hardware evidence even though it is currently mounted.
+
+### A. Review and isolated proof, before a production window
+
+Local changes travel through a reviewed commit on GitHub to a separate
+exact-SHA checkout on node-27. Never edit product code remotely or switch the
+active checkout. Main records the SHA, commands, exit status and real output.
+PR merge requires human approval; merge itself is not cutover approval.
+On node-27 first inspect `df -h / /home /data/GHDC`, create/inspect
+`/home/nwm/tmp`, and export `TMPDIR=/home/nwm/tmp` before pytest. Do not fill `/`.
+From the isolated checkout (not the OLD application), run:
+
+```bash
+export TMPDIR=/home/nwm/tmp
+export PATH="$HOME/.local/bin:$PATH"
+export UV_PROJECT_ENVIRONMENT=/home/nwm/NWM/.venv
+export PYTHONPATH="$(pwd -P)"
+uv run --no-sync python scripts/node27_pgdata_migrate.py --help
+uv run --no-sync pytest -q tests/test_node27_resource_governance.py tests/test_node27_cold_governance.py tests/test_node27_cold_tablespace_container.py tests/test_node27_pgdata_*.py
+NHMS_RUN_NODE27_DOCKER=1 uv run --no-sync pytest -q \
+  -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_pgdata_*.py
+```
+
+The opt-in is `NHMS_RUN_NODE27_DOCKER=1`, not a production permission flag.
+The oracle must use unique owned containers/paths and ephemeral nonproduction
+ports, the exact native image and measured numeric ownership. `--disposable-root`
+is only for that isolated oracle, never for production admission. Hardware in
+that mode is not applicable, **not RAID PASS**. Prove full warm/compressed
+rows, roles and metadata; no-mutation plan; partial/dirty/tampered-copy refusal;
+bind-only activation; fresh-process restoration after interruption; real
+business-credential rejection despite explicit read-write intent; and refusal
+of stale rollback after durable release, including partial release. An image
+primitive experiment alone is not CLI/state/oracle proof. No isolated result
+proves live C1–C4, HDD latency, ingest, or backup/disposal readiness.
+
+### B. Later approved window: fresh admission and baseline
+
+The separately signed window must name the exact tooling SHA, source, new
+target, private durable workspace, capacity/reserve policy, backup/recovery
+evidence and responsible operator. The full-copy outage has **no promised
+duration**: the image has no rsync. Offline `cp -a` preserves numeric owner,
+mode and hardlinks; `sync -f` plus deterministic streamed GNU tar/SHA256
+verification covers the entire stopped tree. There is no online precopy,
+logical export/reload, or index rebuild.
+
+The user-owned **CAPACITY HOLD is not migration-owned**:
+`/home/nwm/.local/state/nhms-pgdata-pr-2240-capacity-hold/state.json` is its
+authority. Autopipe/download service+timer have
+`91-nhms-pgdata-pr-2240-capacity-hold.conf` and are inactive.
+`resume-approved` must remain absent. Display is active on OLD; the other
+five timers were active. Freeze the freshly observed state, not a desired
+all-active state. Never remove this hold, its files or the `60` pins during
+prepare, rollback, release, test cleanup or PR completion. Controlled ingest
+and a natural tick remain blocked until the hold owner separately authorizes
+them; inability to complete those gates is **pending**, not acceptance.
+
+Use a private maintenance shell without `set -x`. Supply values from the
+approved window, not example budgets; all DSNs and raw inspect stay private.
+Create a fresh, canonical, no-symlink, operator-owned mode-0700 workspace on
+durable disk before CLI admission, never `/tmp`, `/run` or tmpfs. Do not reuse
+an existing directory for a new window or overwrite its evidence. The lifecycle lock
+`/tmp/nhms-node27-timeseries-lifecycle.lock` is exclusion, not the journal.
+
+```bash
+set -euo pipefail
+set -o noclobber
+umask 077
+export TMPDIR=/home/nwm/tmp
+export PATH="$HOME/.local/bin:$PATH"
+export UV_PROJECT_ENVIRONMENT=/home/nwm/NWM/.venv
+read -r -p 'Approved isolated tooling checkout: ' TOOLING
+read -r -p 'Approved durable workspace (absolute): ' WORKSPACE
+read -r -p 'Approved new target (absolute): ' TARGET
+read -r -p 'Measured reserve bytes: ' RESERVE
+read -r -p 'Private reader DSN file: ' READER_DSN_FILE
+read -r -p 'Private writer DSN file: ' WRITER_DSN_FILE
+read -r -p 'Fresh root mdadm envelope: ' MDADM
+read -r -p 'First observed active member device: ' MEMBER_A
+read -r -p 'Its fresh root SMART envelope: ' SMART_A
+read -r -p 'Second observed active member device: ' MEMBER_B
+read -r -p 'Its fresh root SMART envelope: ' SMART_B
+test "$TOOLING" != /home/nwm/NWM-reslice-original-5a86841c
+test "$TOOLING" != /home/nwm/NWM
+cd "$TOOLING"
+export PYTHONPATH="$(pwd -P)"
+export WORKSPACE
+uv run --no-sync python - <<'PY'
+import os
+from pathlib import Path
+import stat
+
+path = Path(os.environ["WORKSPACE"])
+assert path.is_absolute() and str(path) == os.environ["WORKSPACE"]
+assert path == path.resolve(strict=False), "workspace or parent is a symlink/noncanonical"
+assert not path.exists() and not path.is_symlink(), "new window requires a fresh workspace"
+parent = path.parent.stat()
+assert parent.st_uid == os.getuid() and not stat.S_IMODE(parent.st_mode) & 0o022
+path.mkdir(mode=0o700)
+info = path.lstat()
+assert stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+assert stat.S_IMODE(info.st_mode) == 0o700
+PY
+findmnt -T "$WORKSPACE"
+df -h / /home /data/GHDC
+test ! -e /home/nwm/.local/state/nhms-pgdata-pr-2240-capacity-hold/resume-approved
+docker inspect nhms-db > "$WORKSPACE/source-inspect.json"
+systemctl --user show 'nhms-node27-*.service' 'nhms-node27-*.timer' nhms-display-api.service \
+  -p Id -p ActiveState -p SubState -p UnitFileState -p FragmentPath -p DropInPaths \
+  > "$WORKSPACE/units-before.txt"
+docker exec nhms-db stat -c '%u:%g %a' /home/postgres/pgdata/data \
+  > "$WORKSPACE/ownership-before.txt"
+docker exec nhms-db psql -X -U nhms -d nhms -Atc \
+  "SELECT spcname, pg_tablespace_location(oid) FROM pg_tablespace ORDER BY spcname" \
+  > "$WORKSPACE/tablespaces-before.txt"
+```
+
+Fresh root evidence uses existing schema `1.0` envelopes: `captured_at` UTC,
+actual hostname, `command: {"argv": [...]}`, `subject`, and raw `output`.
+Commands must be `/usr/sbin/mdadm --detail /dev/md0` (subject
+`{"array_device":"/dev/md0"}`) and `/usr/sbin/smartctl -H DEVICE`
+(subject `{"device":"DEVICE"}`) for each of the **two parsed active members**.
+Capture using root execution and hand off root-owned regular no-follow files,
+mode 0600 or approved reader-group 0640, in a protected directory. Reuse the
+G2 envelope format below, **not its cold-install or backup coverage claims**.
+The relocation parser's maximum age is 24 hours; this procedure requires a
+fresh capture for the window and renewed evidence if it expires. A root
+operator must supply it if `sudo -n` is unavailable (as currently observed);
+never convert that lack of capability into PASS, use a synthetic production
+envelope, or substitute `/proc/mdstat [UU]`. Degraded/rebuilding/unknown
+health ends the window.
+
+Independently establish backup completeness, age, recoverability and failure
+domain before prepare. Record the backup identifier and restore-drill evidence
+privately. The CLI hardware flags do **not** assert backup readiness. A copy on
+the same RAID is not an independent backup. Recheck all `pg_tblspc`, WAL and
+configuration paths: only `pg_default`/`pg_global` were observed previously;
+any uncovered external dependency requires refusal, not an improvised copy.
+Require enough target free space for the entire measured source plus the
+approved reserve, while retaining the old directory. No recursive `du` of
+shared `/data/GHDC`, no counting the old bytes as already freed.
+
+Capture baseline business content and identical representative SQL/API/browser
+requests before stopping anything: latest-product identity/coverage, GFS and IFS
+forcing, river click/valid-times, compression/catalog/roles/migration metadata.
+Use the existing read-only C1–C4 workload definitions below, but preserve the
+OLD runtime and actual deployed endpoints; do not run their cold movement or
+runtime installation steps. Record one warm-up plus 20 measurements per same
+query/request/click, plans/buffers, timestamps and content digests. SQL P95
+must be <=300 ms and buffers <=5000; local API P95 <=500 ms; browser click
+P95 <2 s. Missing real-browser capability is a pending gate, not an API proxy.
+
+### C. Manually advance the closed state machine
+
+From that maintenance shell build the initial command once:
+
+```bash
+MIGRATE=(uv run --no-sync python scripts/node27_pgdata_migrate.py)
+ADMISSION=(--workspace "$WORKSPACE" --source-container nhms-db \
+  --source-pgdata /home/nwm/nhms-pgdata --target-pgdata "$TARGET" \
+  --reserve-bytes "$RESERVE" --mdadm-evidence "$MDADM" \
+  --smart-evidence "$MEMBER_A=$SMART_A" --smart-evidence "$MEMBER_B=$SMART_B" \
+  --database nhms --admin-role nhms \
+  --reader-dsn-file "$READER_DSN_FILE" --writer-dsn-file "$WRITER_DSN_FILE" \
+  --drain-timeout 900)
+"${MIGRATE[@]}" "${ADMISSION[@]}"
+```
+
+Default `plan` is read-only; inspect blockers and observations, never infer
+approval from a previous receipt. DSN files must be owner-private mode 0600;
+each contains one raw PostgreSQL DSN (URI or libpq connection string), not a
+shell `.env` assignment, JSON, or an exported `DATABASE_URL=` line. Bind the
+single local host, port, database, user and password explicitly; never source
+these files. The production maintenance **database role is `nhms`**, distinct
+from the image's OS user `postgres` and its measured numeric UID/GID;
+use real `nhms_display_ro` and `nhms_ingest_rw` credentials, not administrator
+credentials masquerading as a writer. Their endpoint/role is frozen and
+authenticated against the source before shutdown. Resolve every blocker and
+obtain the window's human GO before the first mutation:
+
+```bash
+"${MIGRATE[@]}" "${ADMISSION[@]}" --action prepare --enforce
+"${MIGRATE[@]}" --workspace "$WORKSPACE" --action plan
+```
+
+Only a completed `prepared` permits `copy`. Prepare journals intent before
+side effects, freezes original Docker **ID**, config/image/path/restart
+identity and actual units, disables original auto-restart, persistently
+fences writers, drains in-flight work and cleanly stops PostgreSQL. It covers
+service/timer pairs for autopipe, download, frontier-alert, raw-retention,
+resource-governance, timeseries-compression and timeseries-retention, plus
+compression-replay service and display. Missing units stay absent; unknown
+writers or incompatible cold residency refuse. A timeout/interruption is not
+permission to replay prepare or kill a writer and declare a clean copy.
+
+```bash
+"${MIGRATE[@]}" --workspace "$WORKSPACE" --action copy --enforce
+"${MIGRATE[@]}" --workspace "$WORKSPACE" --action plan
+```
+
+Require `copy_verified` and unchanged source/target identities before:
+
+```bash
+"${MIGRATE[@]}" --workspace "$WORKSPACE" --action activate --enforce
+"${MIGRATE[@]}" --workspace "$WORKSPACE" --action plan
+```
+
+Post-prepare actions derive frozen configuration from private `state.json`;
+conflicting overrides refuse. A partial copy stays preserved, never silently
+retried or deleted. Activation changes only the permanent PGDATA host bind;
+the two unrelated binds, effective configuration, ports, resources and resolved
+image remain. The original container stays stopped and retained by recorded ID.
+Temporary copied-HBA rules reject every business LOGIN except verified display
+TCP reads, retain original authentication rules, and allow only trusted local
+maintenance admin. Original HBA bytes and the owned replacement digest remain
+private. The original cluster's HBA is never edited.
+
+Require `activated_readonly`, actual display SELECT success and an actual
+ingest-credential connection/write rejection, including `BEGIN READ WRITE`;
+a `default_transaction_read_only` GUC or SELECT alone is not proof. No accepted
+business write is allowed before release. Only the display fence may lift;
+all business fences stay. Repeat the identical baseline SQL/API/browser/content
+checks now. No image/app/schema upgrade to “fix” a failed SLO.
+
+### D. Pre-release rollback, release, and current-data recovery
+
+Before `writes_released`, any failed gate or incomplete prepare/copy/activation
+uses the **same workspace**:
+
+```bash
+"${MIGRATE[@]}" --workspace "$WORKSPACE" --action plan
+"${MIGRATE[@]}" --workspace "$WORKSPACE" --action rollback --enforce
+```
+
+Rollback re-observes frozen Docker IDs/config/path identities and durable fence
+ownership, restores the exact original container/restart policy and original
+scheduling/daemon state, and retains both directories. A name match, lost flock
+or reboot is not ownership. Unknown candidates/config/fences report recovery
+required; never `docker rm` by name or hand-edit the state to force success.
+Confirm `rolled_back`, original bind/config, reads and original unit states.
+Do not replay a formerly active completed oneshot. Restore governance's original
+PGDATA env value if it was changed; foreign capacity hold and pins remain.
+
+Before releasing, change **only** the deployed governance env's
+`NODE27_GOVERNANCE_PGDATA_ROOT` to the exact verified target, preserving its
+private mode and OLD runtime configuration. Do not install the new checkout's
+units. The template deliberately remains `/home/nwm/nhms-pgdata`.
+Current PGDATA must be charged once to its observed filesystem; retained old
+bytes are `/home` residual use, not live PGDATA. Unknown device attribution
+must report unavailable, never zero. This does not activate the cold lane.
+
+Release requires a separate explicit human write GO after all pre-write
+checks; it is **irreversible with respect to the old snapshot**:
+
+```bash
+"${MIGRATE[@]}" --workspace "$WORKSPACE" --action release --enforce
+"${MIGRATE[@]}" --workspace "$WORKSPACE" --action plan
+```
+
+The tool durably sets monotonic `state.json.writes_released=true` **before**
+restoring exact original candidate HBA/reloading or lifting writer fences.
+Do not manually remove HBA rules, run controlled ingest or start writers first.
+If release crashes after that marker, stale rollback remains forbidden even
+when no write completion can be confirmed. Re-run only `release` with the same
+workspace after inspection; it revalidates candidate/HBA/remaining fences and
+continues forward, not through an obsolete read-only proof.
+
+After release, perform controlled ingest through the **OLD runtime** only
+after the foreign hold owner separately authorizes that workload, then repeat
+business-content/SLO checks and observe one natural serialized tick. Do not
+copy #1895's `cd /home/nwm/NWM` ingest command blindly; use the actual pinned
+runtime and deployed private ingest env. The hold is not automatically lifted
+by successful release. Until these gates are complete, label live acceptance
+pending and retain the maintenance evidence, not a fabricated final GO.
+
+On any post-release failure, preserve the target/current data, journal and
+both containers/directories; fence new business work using a separately owned
+incident hold and diagnose without allowing two primaries. Repair the current
+database/storage or recover from a fresh consistent current backup/copy to
+healthy capacity (including all required WAL and dependencies). A planned
+switch to another device must copy the **current clean-stopped cluster** or
+restore accepted current backup/WAL under a new reviewed recovery procedure.
+Never point the bind back at the old pre-release directory, even if “no writes
+were expected.” The relocation CLI is not a post-write data-loss waiver.
+
+Retain the old directory and stopped original after acceptance. This CLI never
+deletes either. Disposal is a later, separately authorized operation only after
+an independent backup/restore proof outside the same failure domain and a fresh
+reference/ownership check proving the directory is no longer any running or
+stopped container's required data. PR completion cannot authorize disposal,
+remove the foreign capacity hold, or claim production placement changed.
+
 ## #1895 controlled live rollout (node-27 cold residency)
 
 This section is the **only** authorized procedure for creating the `nhms_cold`

@@ -16,6 +16,7 @@ from packages.common.node27_cold_tablespace_container import (
     diff_container_config,
     normalize_raw_inspect,
     rollback_plan,
+    serialize_container_argv,
 )
 
 
@@ -95,6 +96,18 @@ def test_recreate_argv_preserves_exact_supported_nondefault_configuration_and_ad
     assert argv[-2:] == (PINNED_IMAGE_ID, "postgres")
     assert PINNED_IMAGE_REF not in argv
     assert not any("/bin/sh" in item or "$(" in item for item in argv)
+
+
+def test_pure_serializer_does_not_add_cold_bind_and_can_hide_environment() -> None:
+    snapshot = normalize_raw_inspect(_inspect())
+    argv = serialize_container_argv(snapshot, name="owned-db", environment_file="/private/env", create_only=True)
+    assert argv[:4] == ("/usr/bin/docker", "create", "--name", "owned-db")
+    assert COLD_BIND not in argv
+    assert "POSTGRES_PASSWORD=ultra-secret" not in argv
+    assert ("--env-file", "/private/env") == tuple(argv[argv.index("--env-file") : argv.index("--env-file") + 2])
+    guarded = build_recreate_argv(snapshot, replacement_name="nhms-db")
+    assert COLD_BIND in guarded
+    assert "POSTGRES_PASSWORD=ultra-secret" in guarded
 
 
 def test_normalized_public_snapshot_excludes_secret_values_but_private_snapshot_keeps_reconstructible_env() -> None:
