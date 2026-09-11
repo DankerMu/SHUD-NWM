@@ -4440,7 +4440,7 @@ entropy 硬门的 Evidence Floor 措辞、一条指错 rollback 分支的偏离�
 
 追加 #2246 后实测：626 行、617 merged、9 terminal；203 个多轮 merged PR，
 later-round catches core=258、rotated=270、phase=57、skipped=15。
-#2246 两轮均零候选；第二轮覆盖上游合入，不是 finding-driven 修复。
+PR #2246 两轮均零候选；第二轮覆盖上游合入，不是 finding-driven 修复。
 本单只增加一个多轮样本，不增加 later-round catch。
 
 记录 deferral：轮换 keep/cut 仍待维护者的人类决策；本次 issue 合并授权不包含
