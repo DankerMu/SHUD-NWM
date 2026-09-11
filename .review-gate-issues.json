@@ -3163,6 +3163,17 @@
           "rounds": 1
         }
       ]
+    },
+    "1983": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2246,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
     }
   }
 }

@@ -4435,3 +4435,14 @@ entropy 硬门的 Evidence Floor 措辞、一条指错 rollback 分支的偏离�
 本单额外提供的一点是：**叙述漂移的作者是编排者本人时，再加审查座位也拦不住**——
 拦住这四条的分别是 fixture 复审、verifier、终审，都是**独立于作者**的读者，
 而不是更多同类座位。这是对 Evidence Floor 机械化覆盖的观察，不是轮换决定。
+
+### Revisit 2026-09-11（post PR #2246 / issue #1983）
+
+追加 #2246 后实测：626 行、617 merged、9 terminal；203 个多轮 merged PR，
+later-round catches core=258、rotated=270、phase=57、skipped=15。
+PR #2246 两轮均零候选；第二轮覆盖上游合入，不是 finding-driven 修复。
+本单只增加一个多轮样本，不增加 later-round catch。
+
+记录 deferral：轮换 keep/cut 仍待维护者的人类决策；本次 issue 合并授权不包含
+策略调整授权，且新增样本无边际 catch，不能据此改座位或上限。现行 keep 不变。
+不重写历史 off-vocabulary 或不可归因记录；上述数字来自本次审计而非历史段落。
