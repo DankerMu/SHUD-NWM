@@ -59,21 +59,23 @@ _FROZEN_RECOVERY_PREFLIGHT_SQL = (
     "AND c.chunk_schema = '_timescaledb_internal' AND c.chunk_name = '_hyper_3_7_chunk'"
 )
 
-# Verbatim copy of the catalog_post SQL as it stood before #1244 replaced its six
-# hand-written chunk-identity literals with an interpolation of the derived
-# ``RECOVERY_TARGET`` mapping, extracted from the pre-change module by AST and
-# pinned together with its digest so this oracle never re-derives what it checks.
-# Same zero-change standard as the recovery-preflight freeze above: this SQL runs
-# on the node-27 primary during the live capture.
+# Verbatim copy of the catalog_post SQL after #1985 rewrote ``_CATALOG_BODY_SQL``
+# from the two-key EXISTS form to ``json_object_agg`` over ``RUNTIME_HYPERTABLES_SQL``.
+# Extracted from the post-change module (same AST-provenance discipline as the
+# #1244 freeze) and pinned with its digest so this oracle never re-derives what
+# it checks. Same zero-change standard as the recovery-preflight freeze above:
+# this SQL runs on the node-27 primary during the live capture.
 _FROZEN_CATALOG_POST_SQL = (
     "/* capture:catalog_post */ SELECT json_build_object("
     "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
     "'catalog', (SELECT json_build_object("
-    "'hypertables', json_build_object("
-    "'hydro.river_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
-    "WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries' AND compression_enabled),"
-    "'met.forcing_station_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
-    "WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' AND compression_enabled)),"
+    "'hypertables', (SELECT json_object_agg(format('%s.%s',hypertable_schema,hypertable_name),compression_enabled) "
+    "FROM timescaledb_information.hypertables WHERE (hypertable_schema,hypertable_name) IN "
+    "(SELECT schema,name FROM (VALUES ('hydro','river_timeseries'),"
+    "('met','forcing_station_timeseries')) AS canonical(schema,name) "
+    "UNION ALL SELECT hypertable_schema,hypertable_name FROM timescaledb_information.hypertables "
+    "WHERE (hypertable_schema,hypertable_name) IN "
+    "(('hydro','river_timeseries_legacy'),('met','forcing_station_timeseries_legacy')))),"
     "'compression_settings', COALESCE((SELECT json_agg(row_to_json(s)) FROM "
     "timescaledb_information.compression_settings s), '[]'::json),"
     "'policy_jobs', COALESCE((SELECT json_agg(row_to_json(j)) FROM timescaledb_information.jobs j "
@@ -83,7 +85,7 @@ _FROZEN_CATALOG_POST_SQL = (
     "'chunk_schema','_timescaledb_internal','chunk_name','_hyper_3_7_chunk',"
     "'range_start','2026-05-28T00:00:00Z','range_end','2026-06-04T00:00:00Z')))"
 )
-_FROZEN_CATALOG_POST_SQL_SHA256 = "c68db1f99df431bf3f5baeb3d6f73eae03d63d440abae2f0c08729535f43567e"
+_FROZEN_CATALOG_POST_SQL_SHA256 = "5cba2f3c70dffbc06460368f9087c936ce52261eec51b5104bdbedbeed8bcbaa"
 
 _DB_IDENTITY = {
     "dbname": "nhms",
@@ -382,7 +384,7 @@ def test_capture_recovery_preflight_sql_is_byte_identical_to_the_frozen_literal(
 
 
 def test_capture_catalog_post_sql_is_byte_identical_to_the_frozen_literal() -> None:
-    """The derived catalog_post SQL did not move a byte (#1244).
+    """The derived catalog_post SQL did not move a byte (#1985 re-pin of #1244).
 
     Honest scope of the marker assertions: the test psql stub matches by
     substring containment over the joined argv (see the supervisor suite's stub
