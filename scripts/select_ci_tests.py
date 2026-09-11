@@ -1287,9 +1287,14 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # FROM it — which templates exist, how many aids each carries, how many
         # times each file names the fact table — so an edit here silently changes
         # what four suites assert without touching any of them. The forecast
-        # store-routing suite also imports the register and must run on changes.
+        # store-routing and hydro-display MVT suites also import the register
+        # and must run on changes.
         "tests/river_ts_template_registry.py",
-        (*SQL_SHAPE_ORACLE_TESTS, "tests/test_forecast_store_routing.py"),
+        (
+            *SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forecast_store_routing.py",
+            "tests/test_hydro_display_mvt_scaling.py",
+        ),
     ),
     PathTestRule(
         # #1913: the registry-import helper owns the former monolith's 19 support

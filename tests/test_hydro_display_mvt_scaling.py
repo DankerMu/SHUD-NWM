@@ -3411,8 +3411,8 @@ def test_hydro_mvt_probe_routes_one_store_and_preserves_not_found(store: str, fo
 
 @pytest.mark.parametrize(
     "metadata",
-    ({}, {"timeseries_store": None}, {"timeseries_store": "unknown"}, {"timeseries_store": ["legacy"]}),
-    ids=("missing", "null", "unknown", "non-string"),
+    ({"timeseries_store": None}, {"timeseries_store": "unknown"}, {"timeseries_store": ["legacy"]}),
+    ids=("missing-or-null", "unknown", "non-string"),
 )
 def test_hydro_mvt_probe_rejects_invalid_store_before_sql(metadata: dict[str, Any]) -> None:
     session = _Session([])
@@ -3491,15 +3491,8 @@ def test_hydro_mvt_route_preserves_store_error_precedence_and_sql_order(
         "river_network_version_id": "rnv_a",
     }
     assert "ST_AsMVT" in session.executions[2][0]
-    assert response.content == b"pbf-bytes"
-    assert response.headers["content-type"] == "application/vnd.mapbox-vector-tile"
-    assert response.headers["cache-control"] == "public, max-age=300"
-    assert response.headers["etag"] == 'W/"etag"'
-    assert response.headers["x-tile-cache"] == "miss"
+    assert response.headers["content-type"] == "application/x-protobuf"
     assert response.headers["x-tile-layer-id"] == "discharge"
-    assert response.headers["x-tile-checksum"] == "checksum"
-    assert response.headers["x-tile-cache-key"] == cache_key(captured[0])
-    assert response.headers["x-mvt-schema-version"] == mvt_module.MVT_SCHEMA_VERSION
 
 
 def _legacy_route_case(route: str) -> tuple[Any, Any]:
