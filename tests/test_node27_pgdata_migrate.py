@@ -937,3 +937,46 @@ def test_failed_timer_state_is_preserved_without_replay(tmp_path: Path, monkeypa
     host.restore_units(state)
     assert host.units[timer]["ActiveState"] == "failed"
     assert not host.fence_path(timer).exists()
+
+
+def _native_exec_start(command: str, *, completed: bool = False) -> str:
+    result = (
+        "start_time=[Fri 2026-09-11 07:23:52 CST] ; stop_time=[Fri 2026-09-11 22:54:23 CST]"
+        " ; pid=1018640 ; code=exited ; status=0"
+        if completed
+        else "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0"
+    )
+    return f"{{ path=/bin/bash ; argv[]=/bin/bash -lc {command} ; ignore_errors=no ; {result} }}"
+
+
+def test_native_execstart_completion_allows_owned_service_restoration(tmp_path: Path, monkeypatch) -> None:
+    host, state = _unit_fixture(tmp_path, monkeypatch, {DISPLAY: ("active", "simple")})
+    command = host.units[DISPLAY]["ExecStart"] + ' ; echo " ; start_time=[literal]"'
+    host.units[DISPLAY]["ExecStart"] = _native_exec_start(command)
+    state["units"] = host.units_snapshot(state["config"])
+    host.install_fences(state)
+    host.units[DISPLAY]["ExecStart"] = _native_exec_start(command, completed=True)
+    host.restore_units(state)
+    assert host.units[DISPLAY]["ActiveState"] == "active"
+    assert not host.fence_path(DISPLAY).exists()
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    (("path=/bin/bash", "path=/bin/sh"), ("--port 55495", "--port 55496"), ("ignore_errors=no", "ignore_errors=yes")),
+)
+def test_native_execstart_configuration_drift_keeps_service_fenced(
+    tmp_path: Path, monkeypatch, old: str, new: str
+) -> None:
+    host, state = _unit_fixture(tmp_path, monkeypatch, {DISPLAY: ("active", "simple")})
+    command = host.units[DISPLAY]["ExecStart"]
+    host.units[DISPLAY]["ExecStart"] = _native_exec_start(command)
+    state["units"] = host.units_snapshot(state["config"])
+    host.install_fences(state)
+    changed = _native_exec_start(command, completed=True)
+    assert old in changed
+    host.units[DISPLAY]["ExecStart"] = changed.replace(old, new, 1)
+    with pytest.raises(MigrationError):
+        host.restore_units(state)
+    assert host.units[DISPLAY]["ActiveState"] == "inactive"
+    assert host.fence_path(DISPLAY).exists()

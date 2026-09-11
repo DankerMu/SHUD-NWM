@@ -92,6 +92,24 @@ def path_identity(path: Path) -> list[int]:
         os.close(fd)
 
 
+def _exec_start_configuration(value: str | None) -> str | None:
+    """Keep native command configuration, excluding its trailing execution result."""
+    if not value or not value.startswith("{ path="):
+        return value
+    prefix, separator, result = value.rpartition(" ; start_time=")
+    require(
+        separator
+        and re.fullmatch(
+            r"\[[^\]\n]*\] ; stop_time=\[[^\]\n]*\] ; pid=[0-9]+ ; code=[^;{}\n]+ ; status=[^;{}\n]+ }",
+            result,
+        )
+        and "} ; { path=" not in prefix
+        and "} { path=" not in prefix,
+        "unsupported native ExecStart serialization",
+    )
+    return prefix + " }"
+
+
 def _runtime_virtualenv_link(root: Path, host: Host) -> dict[str, Any] | None:
     """Observe only the conventional environment link, never its package tree."""
 
@@ -515,6 +533,7 @@ class Host:
                 "unit is transitioning unexpectedly",
             )
             require(not self.fence_path(name).exists(), "preexisting migration fence requires recovery")
+            _exec_start_configuration(value.get("ExecStart"))
             if name == DISPLAY or name == "nhms-node27-autopipe.service":
                 require(
                     value.get("WorkingDirectory") == OLD_RUNTIME and OLD_RUNTIME in value.get("ExecStart", ""),
@@ -553,8 +572,13 @@ class Host:
                 require(current.get("LoadState") == "not-found", "previously absent unit appeared")
                 continue
             require(self.unit_files(current) == frozen["files"], "foreign runtime/unit dropins changed")
-            for key in ("WorkingDirectory", "ExecStart", "EnvironmentFiles"):
+            for key in ("WorkingDirectory", "EnvironmentFiles"):
                 require(current.get(key) == frozen["observed"].get(key), "effective caller configuration changed")
+            require(
+                _exec_start_configuration(current.get("ExecStart"))
+                == _exec_start_configuration(frozen["observed"].get("ExecStart")),
+                "effective caller command changed",
+            )
             if frozen.get("runtime") is not None:
                 root = current["WorkingDirectory"]
                 if root not in runtimes:

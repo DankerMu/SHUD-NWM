@@ -468,6 +468,15 @@ settle, then obtain a fresh plan; do not reset an existing failure or treat a
 starting display as intentionally inactive. Running oneshots still drain
 normally and are not replayed.
 
+The native `systemctl show ExecStart` value also contains execution timestamps,
+PID and exit results. These observations change when an owned service stops or
+completes; they are not command configuration. The journal retains the raw
+observation, while configuration verification compares the executable, complete
+argument text and `ignore_errors` prefix without the trailing native execution
+result. Unit/dropin bytes, environment files and runtime identity remain checked.
+Interrupted preparation uses the same journal for rollback; never rewrite its
+frozen observations to make a raw status comparison pass.
+
 ```bash
 "${MIGRATE[@]}" --workspace "$WORKSPACE" --action copy --enforce
 "${MIGRATE[@]}" --workspace "$WORKSPACE" --action plan
