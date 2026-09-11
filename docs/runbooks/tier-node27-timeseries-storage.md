@@ -477,6 +477,20 @@ result. Unit/dropin bytes, environment files and runtime identity remain checked
 Interrupted preparation uses the same journal for rollback; never rewrite its
 frozen observations to make a raw status comparison pass.
 
+For the fixed `nhms-node27-*.service` wrappers, an explicitly configured
+`NODE27_<UNIT_STEM>_ENV_FILE` is also a primary environment dependency.
+Capture its private bytes through the same no-follow reader as `EnvironmentFile`
+and literal shell-source paths; observe rather than source or inject it.
+Freeze the effective unit `Environment` assignments and compare their values
+independently of display ordering. The optional secondary cold-lane env reference
+is not a substitute for the wrapper's primary file. Governance's primary file
+must carry the explicit original PGDATA setting before preparation so the
+existing narrow target-only update can be verified before writer restoration.
+Do not retrofit missing observations into an active older journal: complete its
+supported recovery first, then create a new workspace with the corrected observer.
+Native C-escaped or duplicate assignments are unsupported and refuse rather
+than being decoded ambiguously; ordinary quoted paths with spaces are supported.
+
 ```bash
 "${MIGRATE[@]}" --workspace "$WORKSPACE" --action copy --enforce
 "${MIGRATE[@]}" --workspace "$WORKSPACE" --action plan

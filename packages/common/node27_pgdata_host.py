@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import socket
 import stat
 import time
@@ -90,6 +91,25 @@ def path_identity(path: Path) -> list[int]:
         return [value.st_dev, value.st_ino, value.st_uid, value.st_gid, stat.S_IMODE(value.st_mode)]
     finally:
         os.close(fd)
+
+
+def _unit_environment(value: str | None) -> dict[str, str]:
+    # systemctl may C-escape values; shlex is lossless only for the unescaped
+    # quoted assignments used by these units. Refuse rather than conflate them.
+    require("\\" not in (value or ""), "escaped unit environment is unsupported")
+    try:
+        assignments = shlex.split(value or "")
+    except ValueError:
+        raise MigrationError("unit environment serialization is invalid") from None
+    result = {}
+    for assignment in assignments:
+        name, separator, content = assignment.partition("=")
+        require(
+            separator and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) and name not in result,
+            "unit environment assignment is ambiguous",
+        )
+        result[name] = content
+    return result
 
 
 def _exec_start_configuration(value: str | None) -> str | None:
@@ -456,6 +476,7 @@ class Host:
 
     def unit(self, name: str) -> dict[str, str]:
         properties = (
+            "Id",
             "LoadState",
             "ActiveState",
             "SubState",
@@ -466,6 +487,7 @@ class Host:
             "FragmentPath",
             "DropInPaths",
             "EnvironmentFiles",
+            "Environment",
         )
         result = self.command(["/usr/bin/systemctl", "--user", "show", name, "--property=" + ",".join(properties)])
         return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
@@ -483,8 +505,17 @@ class Host:
         matches = re.findall(r"(\S+) \(ignore_errors=(?:yes|no)\)", text)
         sourced = re.findall(r"(?:\.\s+|source\s+)(/[^\s;'\"]+)", value.get("ExecStart", ""))
         require(not text or matches, "environment file list is not representable")
+        primary = []
+        unit = value.get("Id", "")
+        if unit in UNITS and unit.startswith("nhms-node27-") and unit.endswith(".service"):
+            stem = unit.removeprefix("nhms-node27-").removesuffix(".service")
+            key = f"NODE27_{stem.upper().replace('-', '_')}_ENV_FILE"
+            environment = _unit_environment(value.get("Environment"))
+            if key in environment:
+                require(environment[key], "primary caller environment file is empty")
+                primary.append(environment[key])
         result = {}
-        for name in dict.fromkeys([*matches, *sourced]):
+        for name in dict.fromkeys([*matches, *sourced, *primary]):
             path = Path(name)
             require(path.is_absolute(), "environment file is not absolute")
             data = read_bytes_durable_no_follow(path, max_bytes=256 * 1024)
@@ -534,6 +565,7 @@ class Host:
             )
             require(not self.fence_path(name).exists(), "preexisting migration fence requires recovery")
             _exec_start_configuration(value.get("ExecStart"))
+            _unit_environment(value.get("Environment"))
             if name == DISPLAY or name == "nhms-node27-autopipe.service":
                 require(
                     value.get("WorkingDirectory") == OLD_RUNTIME and OLD_RUNTIME in value.get("ExecStart", ""),
@@ -552,6 +584,10 @@ class Host:
                 "runtime": runtime,
                 "environment": self.environment_files(value),
             }
+        governance = result.get("nhms-node27-resource-governance.service", {})
+        if governance and not governance.get("absent"):
+            settings = [item["pgdata"] for item in governance["environment"].values() if item["pgdata"] is not None]
+            require(settings == [config["source_pgdata"]], "governance original PGDATA setting is unproved")
         return result
 
     def fence_path(self, name: str) -> Path:
@@ -572,12 +608,17 @@ class Host:
                 require(current.get("LoadState") == "not-found", "previously absent unit appeared")
                 continue
             require(self.unit_files(current) == frozen["files"], "foreign runtime/unit dropins changed")
-            for key in ("WorkingDirectory", "EnvironmentFiles"):
+            for key in ("Id", "WorkingDirectory", "EnvironmentFiles"):
                 require(current.get(key) == frozen["observed"].get(key), "effective caller configuration changed")
             require(
                 _exec_start_configuration(current.get("ExecStart"))
                 == _exec_start_configuration(frozen["observed"].get("ExecStart")),
                 "effective caller command changed",
+            )
+            require(
+                _unit_environment(current.get("Environment"))
+                == _unit_environment(frozen["observed"].get("Environment")),
+                "effective caller environment changed",
             )
             if frozen.get("runtime") is not None:
                 root = current["WorkingDirectory"]
