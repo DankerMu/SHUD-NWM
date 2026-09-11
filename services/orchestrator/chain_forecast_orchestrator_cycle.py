@@ -185,11 +185,11 @@ class ForecastOrchestratorCycleMixin:
         self,
         context: _chain.CycleOrchestrationContext,
         stage: _chain.StageDefinition,
-        _existing_job: _chain.Mapping[str, _chain.Any],
+        existing_jobs: _chain.Sequence[_chain.Mapping[str, _chain.Any]],
     ) -> str:
         base_job_id = _chain._pipeline_job_id(context.run_id, stage.stage)
         attempt = context.retry_attempt or _chain._next_retry_attempt_for_stage(
-            self._query_pipeline_jobs_for_cycle_context(context), base_job_id=base_job_id, stage=stage
+            existing_jobs, base_job_id=base_job_id, stage=stage
         )
         if attempt <= 0:
             attempt = 1
