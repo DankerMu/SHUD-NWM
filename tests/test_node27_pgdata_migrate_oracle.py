@@ -97,15 +97,31 @@ def _sql(fixture: dict, sql: str, *, database: str = "nhms", role: str = "nhms")
     ).stdout
 
 
-def _wait_sql(fixture: dict, *, database: str = "nhms", role: str = "nhms") -> None:
+def _wait_sql(fixture: dict) -> None:
+    # The entrypoint's temporary init server accepts Unix sockets but not TCP.
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         try:
-            if _sql(fixture, "SELECT 1", database=database, role=role).strip() == "1":
-                return
-        except RuntimeError:
-            time.sleep(0.5)
-    raise RuntimeError("disposable SQL startup failed")
+            with (
+                closing(
+                    psycopg2.connect(
+                        host="127.0.0.1",
+                        port=fixture["port"],
+                        dbname="postgres",
+                        user="postgres",
+                        password="admin-secret",
+                        connect_timeout=2,
+                    )
+                ) as connection,
+                connection.cursor() as cursor,
+            ):
+                cursor.execute("SELECT 1")
+                if cursor.fetchone() == (1,):
+                    return
+        except psycopg2.OperationalError:
+            pass
+        time.sleep(0.5)
+    raise RuntimeError("disposable TCP SQL startup failed")
 
 
 def _bootstrap(fixture: dict) -> None:
@@ -285,9 +301,17 @@ def oracle(tmp_path: Path):
                 "postgres",
                 "-c",
                 "shared_preload_libraries=timescaledb",
+                "-c",
+                "shared_buffers=32MB",
+                "-c",
+                "work_mem=4MB",
+                "-c",
+                "maintenance_work_mem=32MB",
+                "-c",
+                "max_connections=20",
             ]
         )
-        _wait_sql(fixture, database="postgres", role="postgres")
+        _wait_sql(fixture)
         _bootstrap(fixture)
         for kind, role, password in (
             ("reader", "nhms_display_ro", "reader-secret"),
@@ -309,6 +333,8 @@ def oracle(tmp_path: Path):
                 )
                 logs.append(result.stdout + result.stderr)
         _private(tmp_path / (root.name + "-failure.log"), "\n".join(logs))
+        # Pytest's failed-only tmp retention can remove setup-error directories.
+        print("\n".join(logs))
         raise
     finally:
         _cleanup(root, token, workspace)
