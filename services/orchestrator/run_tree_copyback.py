@@ -6,15 +6,21 @@ import re
 import shutil
 import stat
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 from urllib.parse import urlparse
 
+from packages.common.copyback_guard import (
+    CopybackLockError,
+    CopybackLockTimeout,
+    copyback_batch_lock,
+    ensure_traversable_copyback_directory,
+)
 from packages.common.provider_atomic import ProviderAtomicError
 from packages.common.safe_fs import (
     SafeFilesystemError,
     directory_identity_no_follow,
-    ensure_directory_no_follow,
     rmtree_no_follow,
 )
 from packages.common.state_manager import StateManagerError, merge_state_snapshot_index_copyback
@@ -46,7 +52,9 @@ def copyback_run_trees(
 
     unique_run_ids = sorted({str(run_id).strip() for run_id in run_ids if str(run_id).strip()})
     object_root = _existing_directory(Path(object_store_root), "object_store_root")
-    target_root = ensure_directory_no_follow(Path(copyback_root)).resolve()
+    # #2035 Weakness B: this creates the copyback ROOT itself, and a `0o750` root
+    # defeats traversal regardless of the levels below it.
+    target_root = ensure_traversable_copyback_directory(Path(copyback_root)).resolve()
 
     # Sameness is filesystem identity, not the resolved path string: an aliased
     # root (bind mount, second mount point of one export) resolves to a
@@ -69,101 +77,140 @@ def copyback_run_trees(
             {"object_store_root": str(object_root), "copyback_root": str(target_root)},
         )
 
-    copied: list[dict[str, Any]] = []
-    referenced_trees: dict[str, dict[str, Any]] = {}
-    extra_objects: list[dict[str, Any]] = []
-    total_files = 0
-    total_bytes = 0
-    for run_id in unique_run_ids:
-        source = _validate_run_tree(object_root / _run_key(run_id), run_id=run_id)
-        summary = _replace_tree(source=source, target=target_root / _run_key(run_id), containment_root=target_root)
-        copied.append({"run_id": run_id, "object_key": _run_key(run_id), **summary})
-        total_files += int(summary["file_count"])
-        total_bytes += int(summary["byte_count"])
-        for object_key in _referenced_object_tree_keys(source):
-            if object_key in referenced_trees:
+    # #2035 Weakness A: this lane writes under the same shared
+    # `NHMS_OBJECT_STORE_COPYBACK_ROOT` as the publisher's copyback batches, so it
+    # takes the same mutex over its whole promote region. Acquired after the
+    # identity and overlap guards above, so the `skipped` return creates no lock
+    # file inside the object-store root.
+    #
+    # **Lock order: no nesting in either direction.** The batch mutex protects
+    # directory-tree promotes only; `merge_state_snapshot_index_copyback` takes
+    # `provider_destination_lock` with `blocking=True` and *no deadline*
+    # (`packages/common/provider_atomic.py:219-222`), so running it inside this
+    # region would make the batch mutex's own hold time unbounded and turn one
+    # stalled provider lock into head-of-line blocking for every other copyback
+    # writer under this root. It therefore runs **after** the `with` block has
+    # fully released the mutex -- and no path acquires the batch mutex while
+    # holding a provider lock, so the two never nest. This is safe because the
+    # state index is a single file already serialized by its own provider-atomic
+    # writer on a subtree disjoint from every tree this mutex protects, which is
+    # exactly the exemption the `object-store-copyback-mutual-exclusion` spec
+    # delta carries ("per-file provider-atomic copyback writers are exempt").
+    state_index_source: Path | None = None
+    with _run_tree_batch_lock(target_root):
+        copied: list[dict[str, Any]] = []
+        referenced_trees: dict[str, dict[str, Any]] = {}
+        extra_objects: list[dict[str, Any]] = []
+        total_files = 0
+        total_bytes = 0
+        for run_id in unique_run_ids:
+            source = _validate_run_tree(object_root / _run_key(run_id), run_id=run_id)
+            summary = _replace_tree(source=source, target=target_root / _run_key(run_id), containment_root=target_root)
+            copied.append({"run_id": run_id, "object_key": _run_key(run_id), **summary})
+            total_files += int(summary["file_count"])
+            total_bytes += int(summary["byte_count"])
+            for object_key in _referenced_object_tree_keys(source):
+                if object_key in referenced_trees:
+                    continue
+                ref_source = _validate_object_tree(object_root / object_key, object_key=object_key)
+                ref_target = target_root / object_key
+                if object_key.startswith("models/") and ref_target.exists():
+                    ref_summary = _reuse_immutable_model_tree(
+                        source=ref_source,
+                        target=ref_target,
+                        object_key=object_key,
+                    )
+                else:
+                    ref_summary = _replace_tree(
+                        source=ref_source,
+                        target=ref_target,
+                        containment_root=target_root,
+                    )
+                referenced_trees[object_key] = {"object_key": object_key, **ref_summary}
+                total_files += int(ref_summary["file_count"])
+                total_bytes += int(ref_summary["byte_count"])
+        for object_key in sorted({_safe_object_file_key(key) for key in extra_object_keys or [] if str(key).strip()}):
+            source = _validate_object_file(object_root / object_key, object_key=object_key)
+            if object_key == STATE_INDEX_OBJECT_KEY:
+                # Deferred to after the mutex is released; see the lock-order
+                # note above. Every other extra key is a cheap `_replace_file`
+                # and stays inside, which keeps the split as small as possible.
+                state_index_source = source
                 continue
-            ref_source = _validate_object_tree(object_root / object_key, object_key=object_key)
-            ref_target = target_root / object_key
-            if object_key.startswith("models/") and ref_target.exists():
-                ref_summary = _reuse_immutable_model_tree(
-                    source=ref_source,
-                    target=ref_target,
-                    object_key=object_key,
-                )
-            else:
-                ref_summary = _replace_tree(
-                    source=ref_source,
-                    target=ref_target,
-                    containment_root=target_root,
-                )
-            referenced_trees[object_key] = {"object_key": object_key, **ref_summary}
-            total_files += int(ref_summary["file_count"])
-            total_bytes += int(ref_summary["byte_count"])
-    for object_key in sorted({_safe_object_file_key(key) for key in extra_object_keys or [] if str(key).strip()}):
-        source = _validate_object_file(object_root / object_key, object_key=object_key)
-        if object_key == STATE_INDEX_OBJECT_KEY:
-            try:
-                state_summary = merge_state_snapshot_index_copyback(
-                    source_path=source,
-                    destination_path=target_root / object_key,
-                    reference_object_store_root=object_root,
-                    object_store_prefix=object_store_prefix,
-                    source_containment_root=object_root,
-                    destination_containment_root=target_root,
-                    authoritative_run_ids=unique_run_ids,
-                )
-            except (ProviderAtomicError, StateManagerError) as error:
-                # The merge classifies itself: every provider raise point past
-                # the destination compare-and-swap carries a phase saying so,
-                # and it reaches here under either of two carriers -- the bare
-                # provider error (lock release, #1193) or the state-manager
-                # error that rewraps it with the phase kept in its evidence
-                # (the whole replace/postread/rollback family, #1364).  The
-                # discriminator is "not provably pre-commit", the same proof
-                # philosophy the replay tool refuses on: only an audited
-                # pre-commit raise point shows the shared index unchanged, so
-                # any future phase lands on the safe side by default.  The
-                # no-phase bucket lands on the fail-closed code, which is safe
-                # not because a missing phase proves anything but because every
-                # no-phase `_state_index_error` raise point in the merge call
-                # graph sits before the destination compare-and-swap (audited
-                # in this change's design D1); a future post-CAS raise MUST
-                # carry a phase to land in the uncertain bucket.
-                # `provider_restored_previous` (phase postcommit) is uncertain
-                # too: the rollback verified, but the merged bytes were
-                # briefly visible to concurrent readers, and the operator's
-                # next step -- check the shared entry_count -- is the same.
-                phase = getattr(error, "phase", None)
-                if phase is None:
-                    evidence = getattr(error, "evidence", None)
-                    if isinstance(evidence, Mapping):
-                        phase = evidence.get("phase")
-                error_reason = getattr(error, "reason", None)
-                if phase is not None and phase != "precommit":
-                    raise RunTreeCopybackError(
-                        "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
-                        (
-                            "State-index copyback merge may have committed; the failure arose at "
-                            f"or past the destination compare-and-swap (phase={phase})."
-                        ),
-                        {"object_key": object_key, "error": str(error), "error_reason": error_reason},
-                    ) from error
+            summary = _replace_file(source=source, target=target_root / object_key, containment_root=target_root)
+            extra_objects.append({"object_key": object_key, **summary})
+            total_files += 1
+            total_bytes += int(summary["byte_count"])
+
+    if state_index_source is not None:
+        object_key = STATE_INDEX_OBJECT_KEY
+        try:
+            state_summary = merge_state_snapshot_index_copyback(
+                source_path=state_index_source,
+                destination_path=target_root / object_key,
+                reference_object_store_root=object_root,
+                object_store_prefix=object_store_prefix,
+                source_containment_root=object_root,
+                destination_containment_root=target_root,
+                authoritative_run_ids=unique_run_ids,
+            )
+        except (ProviderAtomicError, StateManagerError) as error:
+            # The merge classifies itself: every provider raise point past
+            # the destination compare-and-swap carries a phase saying so,
+            # and it reaches here under either of two carriers -- the bare
+            # provider error (lock release, #1193) or the state-manager
+            # error that rewraps it with the phase kept in its evidence
+            # (the whole replace/postread/rollback family, #1364).  The
+            # discriminator is "not provably pre-commit", the same proof
+            # philosophy the replay tool refuses on: only an audited
+            # pre-commit raise point shows the shared index unchanged, so
+            # any future phase lands on the safe side by default.  The
+            # no-phase bucket lands on the fail-closed code, which is safe
+            # not because a missing phase proves anything but because every
+            # no-phase `_state_index_error` raise point in the merge call
+            # graph sits before the destination compare-and-swap (audited
+            # in this change's design D1); a future post-CAS raise MUST
+            # carry a phase to land in the uncertain bucket.
+            # `provider_restored_previous` (phase postcommit) is uncertain
+            # too: the rollback verified, but the merged bytes were
+            # briefly visible to concurrent readers, and the operator's
+            # next step -- check the shared entry_count -- is the same.
+            # Unchanged by #2035's lock split: the run trees are already
+            # promoted when this fires, as they were when the merge ran inside
+            # the mutex -- only the mutex differs (held then, released now),
+            # and this lane has no batch rollback, so the observable outcome at
+            # `chain_forecast_execution.py:946` is the same either way.
+            phase = getattr(error, "phase", None)
+            if phase is None:
+                evidence = getattr(error, "evidence", None)
+                if isinstance(evidence, Mapping):
+                    phase = evidence.get("phase")
+            error_reason = getattr(error, "reason", None)
+            if phase is not None and phase != "precommit":
                 raise RunTreeCopybackError(
-                    "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED",
-                    "State-index copyback merge failed closed.",
+                    "OBJECT_STORE_COPYBACK_STATE_INDEX_COMMIT_UNCERTAIN",
+                    (
+                        "State-index copyback merge may have committed; the failure arose at "
+                        f"or past the destination compare-and-swap (phase={phase})."
+                    ),
                     {"object_key": object_key, "error": str(error), "error_reason": error_reason},
                 ) from error
-            summary = {
-                "file_count": 1,
-                "byte_count": int((target_root / object_key).stat().st_size),
-                "merge": state_summary,
-            }
-        else:
-            summary = _replace_file(source=source, target=target_root / object_key, containment_root=target_root)
+            raise RunTreeCopybackError(
+                "OBJECT_STORE_COPYBACK_STATE_INDEX_FAILED",
+                "State-index copyback merge failed closed.",
+                {"object_key": object_key, "error": str(error), "error_reason": error_reason},
+            ) from error
+        summary = {
+            "file_count": 1,
+            "byte_count": int((target_root / object_key).stat().st_size),
+            "merge": state_summary,
+        }
         extra_objects.append({"object_key": object_key, **summary})
         total_files += 1
         total_bytes += int(summary["byte_count"])
+        # The in-lock loop appended in sorted key order; keep that contract now
+        # that one key is settled out of band.
+        extra_objects.sort(key=lambda item: str(item["object_key"]))
 
     return {
         "status": "copied",
@@ -175,6 +222,42 @@ def copyback_run_trees(
         "referenced_trees": list(referenced_trees.values()),
         "extra_objects": extra_objects,
     }
+
+
+@contextmanager
+def _run_tree_batch_lock(target_root: Path) -> Iterator[int]:
+    """Hold the shared copyback batch mutex, as this lane's own error type (#2035).
+
+    `_copyback_stage_run_trees` (`chain_forecast_execution.py:953`) catches only
+    `RunTreeCopybackError`, and this lane sits on a stage the cycle reaches on
+    the hot path, so a foreign exception type escaping from here would be an
+    uncaught exception there. How often this lane acquires, and how that sizes
+    the deadline, is stated once beside
+    `copyback_guard.DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS`.
+
+    Accepted consequence, recorded rather than hidden: that handler
+    re-raises as `OrchestratorError` from inside the `result_status ==
+    "succeeded"` branch of `_after_cycle_stage_terminal`, so a lock timeout in
+    this lane skips the stage's `update_forecast_cycle_status` exactly as every
+    other run-tree copyback failure already does. This change adds one more way
+    to reach that existing contract; it does not widen it.
+    """
+
+    try:
+        with copyback_batch_lock(target_root) as fd:
+            yield fd
+    except CopybackLockTimeout as error:
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT",
+            "Timed out waiting for the object-store copyback batch lock.",
+            {"copyback_root": str(target_root), "error": str(error)},
+        ) from error
+    except CopybackLockError as error:
+        raise RunTreeCopybackError(
+            "OBJECT_STORE_COPYBACK_LOCK_UNSAFE",
+            "Object-store copyback batch lock is unsafe or unavailable.",
+            {"copyback_root": str(target_root), "error": str(error)},
+        ) from error
 
 
 def _run_key(run_id: str) -> str:
@@ -372,7 +455,23 @@ def _reuse_immutable_model_tree(*, source: Path, target: Path, object_key: str) 
 
 
 def _replace_tree(*, source: Path, target: Path, containment_root: Path) -> dict[str, Any]:
-    parent = ensure_directory_no_follow(target.parent, containment_root=containment_root)
+    """Promote one run tree, under the caller's batch mutex.
+
+    #2035 record, so a future reader does not go hunting for a lost update that
+    never existed here: this function has the same lock-free
+    `exists -> rename-to-backup -> promote` window as the publisher's
+    `_replace_directory_tree_for_qdown_batch`, but its recovery is guarded --
+    `if backup.exists() and not target.exists()` below. With a competitor's tree
+    already in place that predicate is false, so it neither restores its own
+    stale backup over the competitor nor `rmtree`s the competitor's tree. Its
+    terminal state was always the benign one: the loser got a spurious failure
+    and no data was lost. It is brought under `copyback_batch_lock` anyway
+    (`copyback_run_trees`), because it writes under the same shared copyback
+    root and one lock-free writer there would leave the publisher's genuinely
+    destructive window open regardless.
+    """
+
+    parent = ensure_traversable_copyback_directory(target.parent, containment_root=containment_root)
     temp = parent / f".{target.name}.copyback-{uuid.uuid4().hex}.tmp"
     backup = parent / f".{target.name}.copyback-{uuid.uuid4().hex}.backup"
     try:
@@ -393,7 +492,7 @@ def _replace_tree(*, source: Path, target: Path, containment_root: Path) -> dict
 
 
 def _replace_file(*, source: Path, target: Path, containment_root: Path) -> dict[str, Any]:
-    parent = ensure_directory_no_follow(target.parent, containment_root=containment_root)
+    parent = ensure_traversable_copyback_directory(target.parent, containment_root=containment_root)
     temp = parent / f".{target.name}.copyback-{uuid.uuid4().hex}.tmp"
     backup = parent / f".{target.name}.copyback-{uuid.uuid4().hex}.backup"
     info = source.stat()

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -13,6 +14,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from packages.common.copyback_guard import CopybackLockError, copyback_batch_lock
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
 from packages.common.safe_fs import (
@@ -740,34 +742,49 @@ def _copy_package(
     copyback_root: Path,
 ) -> dict[str, Any]:
     rollback_log: list[_CopybackRollbackEntry] = []
-    try:
-        summary = publisher._copyback_object_tree_with_rollback(
-            object_key,
-            target_store,
-            validate_source_tree=lambda source_tree: publisher._validate_forcing_source_tree_for_refs(
-                refs, source_tree, publisher.object_store
-            ),
-            validate_target_tree=lambda target_tree: publisher._validate_forcing_source_tree_for_refs(
-                refs, target_tree, target_store
-            ),
-            rollback_log=rollback_log,
-        )
-        _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
-    except Exception as error:
+    # #2035 Weakness A: the mutex is held per package, over the WHOLE
+    # `rollback_log` lifetime -- releasing it after the copy but before the
+    # commit or the rollback is exactly the defect shape this change removes.
+    # `ExitStack` rather than a plain `with`, because the lock must still be held
+    # when the `except` handler's `_rollback_qdown_copyback_batch` returns, and a
+    # `with` inside the `try` would have released it first. It is entered inside
+    # the `try` so a lock failure is recorded as a failed package like every other
+    # copy failure, instead of aborting the whole `--apply` run; `rollback_log` is
+    # still empty then, so the rollback is a no-op.
+    #
+    # Never inside `publisher._copyback_object_tree_with_rollback`: `flock` is per
+    # open file description, so an acquisition down there would deadlock against
+    # this one until the deadline.
+    with ExitStack() as lock_stack:
         try:
-            _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
-        except SafeFilesystemError as rollback_error:
+            lock_stack.enter_context(copyback_batch_lock(copyback_root))
+            summary = publisher._copyback_object_tree_with_rollback(
+                object_key,
+                target_store,
+                validate_source_tree=lambda source_tree: publisher._validate_forcing_source_tree_for_refs(
+                    refs, source_tree, publisher.object_store
+                ),
+                validate_target_tree=lambda target_tree: publisher._validate_forcing_source_tree_for_refs(
+                    refs, target_tree, target_store
+                ),
+                rollback_log=rollback_log,
+            )
+            _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+        except Exception as error:
+            try:
+                _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+            except SafeFilesystemError as rollback_error:
+                return {
+                    "status": "failed",
+                    "reason": f"{error}; rollback failed: {rollback_error}",
+                    "category": _classify_tree_error(error, context="target"),
+                }
+            original = error.original_error if isinstance(error, _ForcingPackageValidationError) else error
             return {
                 "status": "failed",
-                "reason": f"{error}; rollback failed: {rollback_error}",
-                "category": _classify_tree_error(error, context="target"),
+                "reason": str(original),
+                "category": _classify_tree_error(original, context="target"),
             }
-        original = error.original_error if isinstance(error, _ForcingPackageValidationError) else error
-        return {
-            "status": "failed",
-            "reason": str(original),
-            "category": _classify_tree_error(original, context="target"),
-        }
     return {"status": "copied", **summary}
 
 
@@ -857,7 +874,12 @@ def _record_failure(
 
 
 def _normalized_failure_category(category: str) -> str:
-    if category in {"missing_source", "checksum_mismatch", "legacy_key_rejected"}:
+    # `copyback_lock_unavailable` (#2035) survives normalization for the same
+    # reason the other three do: it changes what an operator should do next.
+    # The package was never written and its target tree is intact, so the fix is
+    # to rerun once the contending writer has finished -- not to inspect a tree.
+    # It adds no counter, so the report's counted buckets are unchanged.
+    if category in {"missing_source", "checksum_mismatch", "legacy_key_rejected", "copyback_lock_unavailable"}:
         return category
     return "failed"
 
@@ -873,6 +895,11 @@ def _classify_metadata_error(
 
 
 def _classify_tree_error(error: BaseException, *, context: str) -> str:
+    if isinstance(error, CopybackLockError):
+        # Its own bucket (#2035): a lock wait or a tampered lock file says
+        # nothing about the target tree, so folding it into `target_unsafe`
+        # would send an operator to inspect a tree that is entirely intact.
+        return "copyback_lock_unavailable"
     message = str(error).lower()
     if "checksum" in message and ("mismatch" in message or "does not match" in message or "differs" in message):
         return "checksum_mismatch"
