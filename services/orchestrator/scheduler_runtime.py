@@ -2107,6 +2107,11 @@ def _run_retention(
                 os.getenv("WORKSPACE_ROOT"),
                 self.config.object_store_copyback_root,
             ),
+            # The same value again, named this time (#2238): `runs_only_roots`
+            # is positional and untagged, so retention cannot otherwise tell the
+            # shared copyback root -- the one whose removals must hold the
+            # copyback batch mutex -- from the run-workspace root beside it.
+            copyback_root=self.config.object_store_copyback_root,
         )
     except Exception as error:  # noqa: BLE001 - cleanup must never abort scheduling
         return {"status": "error", "enabled": True, "error": str(error)}
