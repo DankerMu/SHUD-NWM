@@ -4485,3 +4485,11 @@ later-round catches core=261、rotated=270、phase=57、skipped=15。
 本单第一轮确认一个测试缺口，第二轮关闭且无新增发现，不增加后轮catch。
 记录deferral：keep/cut仍待维护者决策；本次迁移及恢复授权不包含审核策略调整。
 维持现行keep与座位上限，不改写历史记录。
+
+### Revisit 2026-09-11（post PR #2264 / issue #2208）
+
+追加后实测 634 行、624 merged、10 terminal；206 个多轮样本，
+later-round catches core=261、rotated=270、phase=57、skipped=15。
+本单 compact 一轮两席、零候选、独立终审零发现，不增加多轮样本或后轮 catch。
+记录 deferral：keep/cut 仍待维护者决策；本次 reader 合并授权不含审核策略调整。
+现行 keep 与座位上限不变。
