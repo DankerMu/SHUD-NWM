@@ -464,7 +464,7 @@ class UnitHost(FakeHost):
 @pytest.fixture
 def runtime_checkout(tmp_path: Path) -> Path:
     runtime = tmp_path.resolve() / "runtime"
-    runtime.mkdir()
+    runtime.mkdir(mode=0o700)
     (runtime / ".gitignore").write_text(".venv/\n")
     (runtime / "app.py").write_text("print('approved runtime')\n")
     host = Host()
