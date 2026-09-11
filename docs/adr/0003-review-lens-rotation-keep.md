@@ -4306,3 +4306,47 @@ A new human keep/cut call is deferred: this adds no later-round catch and does
 not resolve the mixed code/evidence/prose measurement limitations. The existing
 keep decision and seat caps remain unchanged; issue-delivery authorization does
 not authorize policy narrowing.
+
+## Revisit — PR #2232 (issue #2185), 2026-09-10
+
+The post-merge audit reports 622 records (613 merged, nine terminal) and
+201 multi-round merged PRs. Later-round attribution moves by three:
+core=240, rotated=270, phase=57, skipped=15.
+
+PR #2232 contributes a two-round compact sample with nine verified findings and
+five further Phase 7 catches, and it is an unusually sharp data point for the
+rotation question because of where those fourteen landed: **none of them touched
+the routing**. The change under review was a constant pair and one supplemental
+set-union loop. Every catch, in both rounds and across eight final-review passes,
+was spec-vs-tree or prose-vs-tree — a `MODIFIED` block silently deleting an
+archived scenario, four archived `emits exactly` scenarios left falsified, a
+derivation that did not do what its own SHALL said, a class definition wrong in
+both directions, and then a tail of defects introduced by the fix passes
+themselves.
+
+That distribution argues against reading `core=240 rotated=270` as evidence that
+rotated-in lenses are earning their seats on code. For this PR the rotated seats
+and the retained seats found the same KIND of thing, because the reviewable
+surface was almost entirely accountability artifacts. The seat mix was not the
+variable that mattered.
+
+What did matter is recorded here because it bears on the next seat-plan
+revision: five of the fourteen catches were converted into Evidence Floor clauses
+during the run — 4.16 (every archived scenario under a `MODIFIED` requirement
+survives the delta, since openspec replaces wholesale and `--strict` cannot see
+the loss), 4.17 (every `emits exactly` list re-measured against the live
+selector, plus a sweep of all archived specs for scenarios the change falsifies),
+4.18 (the respelled empty-selection class exhaustive in both directions), 4.12b
+(a citation still holds the content its sentence claims) and 4.12c (bare `:NNN`
+and directory-less citations resolve). Each of the five independently re-found by
+machine what a human had found by hand, and 4.12c found four citation defects no
+reviewer had. On this evidence the cheaper lever for this failure class is a
+mechanical fixture check, not another reviewer seat — but that is an observation
+about clause coverage, not a rotation decision, and it does not generalize from
+one PR.
+
+A new human keep/cut call is deferred. This sample cannot separate lens value
+from surface composition: it had almost no code surface to review, so it tells us
+little about which lenses find code defects. The existing keep decision and seat
+caps remain unchanged; issue-delivery authorization does not authorize policy
+narrowing.
