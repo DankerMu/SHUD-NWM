@@ -182,7 +182,9 @@ def test_nondefault_healthcheck_or_multi_argument_entrypoint_blocks_exact_recrea
 
 def test_known_docker_defaults_are_inert_but_custom_nondefault_fields_still_block_recreation() -> None:
     raw = _inspect()
-    raw["Config"].update({"Hostname": "a" * 12, "ExposedPorts": {"5432/tcp": {}}})
+    raw["Config"].update(
+        {"Hostname": "a" * 12, "ExposedPorts": {"5432/tcp": {}}, "AttachStdout": True, "AttachStderr": True}
+    )
     raw["HostConfig"].update(
         {
             "CgroupnsMode": "private",
@@ -192,10 +194,14 @@ def test_known_docker_defaults_are_inert_but_custom_nondefault_fields_still_bloc
             "LogConfig": {"Type": "json-file", "Config": {}},
         }
     )
-    assert normalize_raw_inspect(raw).name == "nhms-db"
+    assert normalize_raw_inspect(raw).config_digest == normalize_raw_inspect(_inspect()).config_digest
 
     with pytest.raises(ContainerContractError, match="unsupported"):
         normalize_raw_inspect(_inspect(include_unsupported=True))
+    interactive = _inspect()
+    interactive["Config"]["AttachStdin"] = True
+    with pytest.raises(ContainerContractError, match="unsupported"):
+        normalize_raw_inspect(interactive)
 
 
 def test_malformed_or_oversized_or_nonobject_raw_inspect_is_rejected_as_inert_data() -> None:

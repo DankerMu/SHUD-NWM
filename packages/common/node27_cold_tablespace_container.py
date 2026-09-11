@@ -219,6 +219,11 @@ def _known_default_config(key: str, item: object) -> bool:
         return isinstance(item, Mapping) and all(
             isinstance(port, str) and isinstance(value, Mapping) and not value for port, value in item.items()
         )
+    if key in {"AttachStdout", "AttachStderr"}:
+        # `docker create` defaults these to true, unlike detached `docker run`.
+        # They govern CLI stream attachment, not daemon logging or process IO.
+        # Interactive stdin/TTY settings remain outside this inert-default set.
+        return type(item) is bool
     return key in {"ArgsEscaped", "Shell"} and item in (False, None)
 
 
