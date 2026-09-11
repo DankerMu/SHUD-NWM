@@ -110,8 +110,9 @@ harness are not counted.
   divergence is confined to that seed: at `0.4` both builds behave identically,
   and in both the tree survives and lands in `failed[]`. No production caller
   passes the keyword, the default is 300 s, and the lowest value any test uses
-  is `0.4`, so nothing shipped reaches it. Recorded rather than closed with a
-  test, which would be scope this change does not own.
+  is `0.4`, so nothing shipped reaches it. No test is added: the keyword is a
+  test seam with no production caller, and a test at that seed would pin
+  behaviour no shipped path can reach.
 
 **No EF clause was found over-claimed.** Rows worth recording individually:
 
@@ -161,8 +162,10 @@ which made its numbers second-hand to the document. A second reviewer, in a
 later round and without access to the first, rebuilt all 27 mutants in-memory at
 this head from the target descriptions above and re-ran the campaign. It
 reproduced the headline (25 red, 2 survive), the sole-carrier result for EF-11's
-third case, all six rows of the routing table, every Frame claim, and the four
-structural legs `tasks.md` names. It also validated its harness in both
+third case, all six rows of the routing table, the Frame's five factual
+claims (the two absent files, the comment-only selector drift, the AST identity,
+the one added test, and the baseline offset that follows from it), and the four
+legs `tasks.md` names as unredded by any single sweep-B mutant. It also validated its harness in both
 directions — an identity mutant reproducing the four-file baseline exactly, and
 a negative control failing at collection when its pattern was absent.
 
