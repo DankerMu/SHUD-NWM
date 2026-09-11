@@ -1243,6 +1243,39 @@ def test_the_template_golden_rule_is_globbed_on_the_capture_sha() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
+        "tests/river_ts_template_registry.py",
+    ],
+)
+def test_select_tests_routes_frozen_coverage_inputs_to_their_unit_owners(target: str) -> None:
+    selected = set(select_tests([target], repo_root=Path(".")))
+    assert {
+        "tests/test_display_coverage_refresh.py",
+        "tests/test_river_ts_template_golden.py",
+    } <= selected
+    assert "tests/test_mvt_national_identity_probe_integration.py" not in selected
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
+        "tests/river_ts_template_registry.py",
+    ],
+)
+def test_frozen_coverage_database_edge_deletion_is_unrescued(target: str) -> None:
+    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+    assert target in patterns, f"{target}: an isolated change must open the database lane"
+    remaining = patterns.copy()
+    remaining.remove(target)
+    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
+        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
+    )
+
+
 def test_select_tests_routes_the_frozen_hydro_sql_fixture_to_its_shape_owner() -> None:
     selected = select_tests(["tests/fixtures/hydro_mvt_pre_store_f33441a2.sql"], repo_root=Path("."))
 
@@ -9775,9 +9808,9 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/test_mapping_builder_algorithm.py",
     ),
     ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
-    # I1 #1980: the river read-template register. Four suites import it at module
-    # scope; the golden equivalence oracle is the anchor because it is the one
-    # whose whole content is derived from the register.
+    # I1 #1980: the river read-template register. The golden equivalence
+    # oracle anchors the raw corpus; #2208 also imports its frozen coverage
+    # loader in the capture owner and national historical fixture preparation.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),
     ("tests/river_identity_backfill_fakes.py", "tests/test_node27_river_identity_backfill.py"),
     (

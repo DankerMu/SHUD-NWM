@@ -1323,6 +1323,9 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # what four suites assert without touching any of them. The forecast
         # store-routing and hydro-display MVT suites also import the register
         # and must run on changes.
+        # #2208: the national probe's file-level integration gate makes it a
+        # database-lane consumer, not a unit target. ci.yml routes this support
+        # path there; retain only the non-gated importers here.
         "tests/river_ts_template_registry.py",
         (
             *SQL_SHAPE_ORACLE_TESTS,
@@ -2243,6 +2246,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # new base is routed the same way.
         "tests/fixtures/river_ts_templates_*.json",
         SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
+        # #2208: these are the non-gated frozen-coverage owners. The national
+        # integration consumer runs through this fixture's database edge in ci.yml.
+        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
+        (
+            "tests/test_display_coverage_refresh.py",
+            "tests/test_river_ts_template_golden.py",
+        ),
     ),
     PathTestRule(
         "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql",

@@ -63,6 +63,7 @@ from apps.api.routes import hydro_display
 from apps.api.routes.hydro_display import _require_hydro_mvt_source_identity
 from packages.common.display_coverage import (
     DisplayCoverageRefreshRefused,
+    _refresh,
     refresh_run_display_coverage,
 )
 from packages.common.river_ts_render import render_river_ts_sql
@@ -1050,33 +1051,59 @@ def test_national_rows_carry_the_right_measurement_and_geometry_per_segment(
 # ---------------------------------------------------------------------------
 
 
-def test_display_coverage_river_rollup_counts_keyed_rows_and_skips_null_key_rows(seeded: Any) -> None:
-    url, _session = seeded
-    connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
-    try:
-        assert refresh_run_display_coverage(connection, _KEYED_RUN_ID) is True
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+@pytest.mark.parametrize("all_runs", (False, True), ids=("named", "all-runs"))
+def test_display_coverage_river_rollup_counts_keyed_rows_and_skips_null_key_rows(
+    seeded: Any,
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+    store: str,
+    all_runs: bool,
+) -> None:
+    url, session = seeded
+    session.rollback()
+    # The national seed gives the second run a later cycle for route selection.
+    # Coverage needs its original T0 facts inside the candidate window as well.
+    with psycopg2.connect(url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                """
-                SELECT segment_count, river_sample_count,
-                       river_valid_time_start, river_valid_time_end,
-                       min_lead_time_hours, max_lead_time_hours
-                FROM hydro.run_display_coverage WHERE run_id = %s
-                """,
-                (_KEYED_RUN_ID,),
+                "UPDATE hydro.hydro_run SET cycle_time = %s WHERE run_id = %s",
+                (_T0, _LEGACY_RUN_ID),
             )
-            coverage = dict(cursor.fetchone())
+            assert cursor.rowcount == 1
+    post_expand_forecast_database({
+        _KEYED_RUN_ID: store,
+        _LEGACY_RUN_ID: "narrow" if store == "legacy" else "legacy",
+        _ALL_LEGACY_RUN_ID: "legacy",
+    })
+    connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
+    try:
+        protected = _assert_all_legacy_preconditions(connection)
+        if all_runs:
+            outcome = _refresh(connection, None)
+            assert set(outcome.refreshed) == {_KEYED_RUN_ID, _LEGACY_RUN_ID}
+            assert outcome.refused == []
+            connection.commit()
+        else:
+            assert refresh_run_display_coverage(connection, _KEYED_RUN_ID) is True
+        expected = {
+            _KEYED_RUN_ID: {
+                "segment_count": 3, "river_sample_count": 6,
+                "river_valid_time_start": _T0, "river_valid_time_end": _T1,
+                "min_lead_time_hours": 0, "max_lead_time_hours": 1,
+            },
+        }
+        if all_runs:
+            expected[_LEGACY_RUN_ID] = {
+                "segment_count": 3, "river_sample_count": 3,
+                "river_valid_time_start": _T0, "river_valid_time_end": _T0,
+                "min_lead_time_hours": 0, "max_lead_time_hours": 0,
+            }
+        for run_id, fields in expected.items():
+            actual = _coverage(connection, run_id)
+            assert {key: actual[key] for key in fields} == fields
+        assert _coverage(connection, _ALL_LEGACY_RUN_ID) == protected
     finally:
         connection.close()
-
-    # Independent expectation from the seed: three segments x two hours, a
-    # complete segment rectangle at both hours (rnv.segment_count is 3).
-    assert coverage["segment_count"] == len(_SEGMENTS)
-    assert coverage["river_sample_count"] == len(_SEGMENTS) * 2
-    assert coverage["river_valid_time_start"] == _T0
-    assert coverage["river_valid_time_end"] == _T1
-    assert coverage["min_lead_time_hours"] == 0
-    assert coverage["max_lead_time_hours"] == 1
 
 
 _COVERAGE_COLUMNS_SQL = """
@@ -1120,7 +1147,7 @@ def _assert_all_legacy_preconditions(connection: Any) -> dict[str, Any]:
         cursor.execute(
             """
             SELECT COUNT(*) AS n, COUNT(run_key) AS keyed
-            FROM hydro.river_timeseries WHERE run_id = %s
+            FROM hydro.river_timeseries_legacy WHERE run_id = %s
             """,
             (_ALL_LEGACY_RUN_ID,),
         )
@@ -1129,7 +1156,9 @@ def _assert_all_legacy_preconditions(connection: Any) -> dict[str, Any]:
     return before
 
 
-def test_refreshing_coverage_for_an_all_null_key_run_is_refused_not_zeroed(seeded: Any) -> None:
+def test_refreshing_coverage_for_an_all_null_key_run_is_refused_not_zeroed(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
     """#1446: the guard holds on a real database, against the real hazard shape.
 
     Re-scanning a run whose rows are all pre-#1340 does not merely fail to find
@@ -1144,6 +1173,8 @@ def test_refreshing_coverage_for_an_all_null_key_run_is_refused_not_zeroed(seede
     evaluate SQL.
     """
     url, _session = seeded
+    _session.rollback()
+    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         before = _assert_all_legacy_preconditions(connection)
@@ -1161,9 +1192,13 @@ def test_refreshing_coverage_for_an_all_null_key_run_is_refused_not_zeroed(seede
         connection.close()
 
 
-def test_forced_refresh_of_an_all_null_key_run_performs_the_zeroing(seeded: Any) -> None:
+def test_forced_refresh_of_an_all_null_key_run_performs_the_zeroing(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
     """The escape hatch still works — and is the ONLY way to zero the row."""
     url, _session = seeded
+    _session.rollback()
+    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         before = _assert_all_legacy_preconditions(connection)
@@ -1177,7 +1212,9 @@ def test_forced_refresh_of_an_all_null_key_run_performs_the_zeroing(seeded: Any)
         connection.close()
 
 
-def test_an_existing_zero_row_is_still_rewritten_by_an_empty_scan(seeded: Any) -> None:
+def test_an_existing_zero_row_is_still_rewritten_by_an_empty_scan(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
     """The guard's third disjunct: a row that already reads 0 is not protected.
 
     Chained after the force, because that is exactly the state that matters —
@@ -1185,6 +1222,8 @@ def test_an_existing_zero_row_is_still_rewritten_by_an_empty_scan(seeded: Any) -
     bumping its ``refreshed_at`` so it stops being reported stale forever.
     """
     url, _session = seeded
+    _session.rollback()
+    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         assert refresh_run_display_coverage(connection, _ALL_LEGACY_RUN_ID, force=True) is True
@@ -1201,7 +1240,9 @@ def test_an_existing_zero_row_is_still_rewritten_by_an_empty_scan(seeded: Any) -
         connection.close()
 
 
-def test_first_refresh_with_no_existing_row_writes_zero(seeded: Any) -> None:
+def test_first_refresh_with_no_existing_row_writes_zero(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
     """A first refresh is an INSERT and never reaches the DO UPDATE guard.
 
     The guard must not make an empty run unmaterializable: without a stored
@@ -1209,6 +1250,8 @@ def test_first_refresh_with_no_existing_row_writes_zero(seeded: Any) -> None:
     before #1446.
     """
     url, _session = seeded
+    _session.rollback()
+    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         with connection.cursor() as cursor:
@@ -1227,7 +1270,9 @@ def test_first_refresh_with_no_existing_row_writes_zero(seeded: Any) -> None:
         connection.close()
 
 
-def test_keyed_run_refresh_is_never_refused(seeded: Any) -> None:
+def test_keyed_run_refresh_is_never_refused(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
     """Non-vacuity for the guard: a run whose scan finds segments is unaffected.
 
     Refreshed twice in a row — the second call is the one that would trip a
@@ -1235,6 +1280,8 @@ def test_keyed_run_refresh_is_never_refused(seeded: Any) -> None:
     scan is empty".
     """
     url, _session = seeded
+    _session.rollback()
+    post_expand_forecast_database({_ALL_LEGACY_RUN_ID: "legacy"})
     connection = psycopg2.connect(url, cursor_factory=RealDictCursor)
     try:
         assert refresh_run_display_coverage(connection, _KEYED_RUN_ID) is True

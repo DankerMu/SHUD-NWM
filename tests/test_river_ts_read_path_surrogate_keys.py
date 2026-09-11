@@ -735,7 +735,7 @@ def test_coverage_river_scan_groups_by_keys_and_reconstructs_text_at_the_rollup(
     assert "AND cr.basin_version_key = rt.basin_version_key" in sql
     assert "AND cr.river_network_version_key = rt.river_network_version_key" in sql
     assert (
-        "WHERE rt.variable_e = 'q_down'::hydro.river_variable\n"
+        "AND rt.variable_e = 'q_down'::hydro.river_variable\n"
         "              -- transitional compressed-chunk pushdown aid, remove with #1342\n"
         "              AND rt.variable = 'q_down'"
     ) in sql
@@ -760,7 +760,8 @@ def test_coverage_river_scan_groups_by_keys_and_reconstructs_text_at_the_rollup(
     _assert_text_fact_columns(sql, "rt", set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS), "coverage river scan")
 
 
-def test_coverage_river_scan_pairs_its_pushdown_aids_and_joins_on_keys_only() -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_coverage_river_scan_pairs_its_pushdown_aids_and_joins_on_keys_only(store: str) -> None:
     """The coverage scan's aids are constants; its join to candidate_runs is not.
 
     A ``cr.run_id = rt.run_id`` join equality looks like the same thing but is
@@ -768,9 +769,10 @@ def test_coverage_river_scan_pairs_its_pushdown_aids_and_joins_on_keys_only() ->
     text fact join the delta forbids. The pushdown value here comes from the
     ``scan_*`` constants, so the aids live inside those guards.
     """
-    outer = outer_predicates(display_coverage._REFRESH_SQL)
+    outer = outer_predicates(display_coverage._river_sample_rows_template(store))
 
-    assert "WHERE rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'" in outer
+    assert f"WHERE cr.timeseries_store = '{store}'" in outer
+    assert "AND rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'" in outer
     assert "( rt.run_id = %(scan_run_id)s AND rt.run_key = )" in outer
     assert (
         "( rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = )"

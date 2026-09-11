@@ -35,6 +35,7 @@ from tests.river_ts_template_registry import (
     ROUTED_SOURCE_KEYS,
     entry_by_key,
     golden_sha256,
+    historical_display_coverage_sql,
 )
 
 GOLDEN = json.loads(GOLDEN_FIXTURE.read_text(encoding="utf-8"))
@@ -75,8 +76,9 @@ def test_the_golden_was_captured_at_the_change_base() -> None:
 def test_the_golden_covers_exactly_the_registered_entries() -> None:
     """Historical statements and live raw sources have distinct exact sets."""
     siblings = {entry.key for entry in REGISTRY} - ROUTED_SOURCE_KEYS
-    assert len(siblings) == 6
+    assert len(siblings) == 5
     assert set(GOLDEN["entries"]) == siblings | {
+        "display_coverage:refresh",
         "mvt:postgis_tile_sql_hydro",
         "mvt:postgis_tile_sql_hydro_national",
         "mvt:valid_times_named_identity",
@@ -88,6 +90,7 @@ def test_the_golden_covers_exactly_the_registered_entries() -> None:
     assert {entry.key for entry in REGISTRY} == siblings | ROUTED_SOURCE_KEYS
     assert len(REGISTRY) == 13
     assert ROUTED_SOURCE_KEYS == {
+        "display_coverage:refresh",
         "forecast_store:segment_rows_source",
         "forecast_store:latest_product_river_source",
         "mvt:postgis_tile_sql_hydro",
@@ -357,7 +360,7 @@ def test_deleting_a_whole_having_line_reddens_the_golden() -> None:
     passed the equivalence oracle.
     """
     entry = entry_by_key("display_coverage:refresh")
-    template = entry.source("legacy")
+    template = historical_display_coverage_sql()
     assert template.count(_HAVING_LINE) == 1
 
     mutated = template.replace(_HAVING_LINE, "")
@@ -391,5 +394,5 @@ def test_the_golden_holds_the_measured_chain_total() -> None:
     assert len(GOLDEN["entries"]) == 20
     assert sum(len(entry["chains"]) for entry in GOLDEN["entries"].values()) == 215
     assert len(GOLDEN["entries"]["display_coverage:refresh"]["chains"]) == len(
-        _legacy_chains(entry_by_key("display_coverage:refresh").source("legacy"), "display_coverage:refresh")
+        _legacy_chains(historical_display_coverage_sql(), "display_coverage:refresh")
     )

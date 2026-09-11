@@ -1,73 +1,5 @@
-"""Materialize per-run display coverage (all basins) into ``hydro.run_display_coverage``.
 
-The latest-product readiness path derives, per candidate run, a set of coverage
-values (station/segment counts, station/river valid-time windows, the
-per-variable jsonb array) via a deep stack of CTEs over
-``met.forcing_station_timeseries`` and ``hydro.river_timeseries``. Those values
-are fixed for a finished run, so recomputing them on every request is pure
-waste.
-
-This module recomputes them once with the *identical* CTE arithmetic lifted
-verbatim from ``PsycopgForecastStore._fetch_latest_qhh_display_candidates`` and
-stores the result. ``forecast_store`` then reads them back through a cheap
-``run_id`` JOIN (see its availability branch). Because the same SQL produces the
-materialized values, the cheap path is a byte-for-byte stand-in for the CTE
-path — verified by the parity test.
-
-Issue #1341 introduced one deliberate divergence from that verbatim copy: the
-river leg here filters and groups ``hydro.river_timeseries`` by the integer
-surrogate keys (this module is inside the display boundary), while
-``forecast_store``'s fallback copy stays on the text identity columns (it is
-outside the boundary and its static index evidence is pinned by
-``tests/test_forecast_api.py``). The two produce the same numbers for every row
-that carries surrogate keys — which is every row the dual write has produced
-since #1340 — and differ only on legacy NULL-key rows, which the key form
-excludes by design until the text columns retire in #1342.
-
-Refresh is scoped to one ``run_id`` (or all parsed/finished QHH forecast runs).
-It never touches node-22; it runs against whichever DB ``DATABASE_URL`` points
-at (node-27 local).
-"""
-
-from __future__ import annotations
-
-import concurrent.futures
-import os
-from typing import Any, Callable, NamedTuple
-
-import psycopg2
-from psycopg2.extras import RealDictCursor
-
-from packages.common.forecast_store import (
-    MVP_STATION_VARIABLES,
-    QHH_LATEST_EXPECTED_HORIZON_HOURS,
-)
-from packages.common.river_ts_render import render_river_ts_sql
-
-# ---------------------------------------------------------------------------
-# Coverage CTE chain — lifted verbatim from the candidate query's CTEs
-# (candidate_runs .. hydro_coverage). The ONLY deltas vs the request-time query:
-#   * candidate_runs has no source filter / no strict-identity / no LIMIT and no
-#     product-specific join; it is optionally narrowed to a single run via
-#     %(run_id)s.
-#   * horizon / station-variable params are named (%(horizon)s, %(variables)s,
-#     %(variable_count)s) instead of positional.
-#   * the final projection emits the coverage columns keyed by run_id for upsert.
-#   * station_sample_rows / river_sample_rows carry NULL-guarded %(scan_*)s
-#     pushdown predicates. The planner cannot push the candidate_runs CTE-join
-#     equalities into the hypertable scans, so without them every per-run
-#     refresh seq-scans BOTH hypertables end to end (measured 633s for one run
-#     at 180M forcing + 730M river rows). ``_refresh`` prefetches the single
-#     run's scalar identity/window and binds it here, enabling chunk exclusion
-#     and the existing (forcing_version_id, basin_version_id, lower(source_id),
-#     variable, valid_time) index on the station side and, since issue #1341,
-#     000051's (run_key, basin_version_key, river_network_version_key,
-#     variable_e, valid_time DESC) index on the river side. The values are
-#     exactly the join equalities for that run, so the result set is identical;
-#     with NULL bindings the guards fold away and the query is unchanged.
-# Keeping the arithmetic identical is what guarantees parity with the CTE path.
-# ---------------------------------------------------------------------------
-_CANDIDATE_RUNS_SQL = """
+        WITH candidate_runs AS (
             SELECT
                 h.run_id,
                 h.model_id,
@@ -81,7 +13,6 @@ _CANDIDATE_RUNS_SQL = """
                 -- the keys cost no extra join; the river scan below joins on
                 -- them instead of on the repeated text identity columns.
                 h.run_key,
-                h.timeseries_store,
                 bv.basin_version_key,
                 rnv.river_network_version_key,
                 COALESCE(
@@ -118,87 +49,7 @@ _CANDIDATE_RUNS_SQL = """
               AND h.status IN ('succeeded', 'parsed', 'published')
               AND h.cycle_time IS NOT NULL
               AND (%(run_id)s IS NULL OR h.run_id = %(run_id)s)
-"""
-
-_SCAN_HEADER_SQL = (
-    "WITH candidate_runs AS ("
-    + _CANDIDATE_RUNS_SQL
-    + """        )
-        SELECT
-            run_id,
-            forcing_version_id,
-            basin_version_id,
-            river_network_version_id,
-            LOWER(source_id) AS source_id_lower,
-            display_start_time,
-            display_end_time
-        FROM candidate_runs
-"""
-)
-
-_RIVER_SAMPLE_ROWS_SQL = """
-            SELECT
-                rt.run_key,
-                rt.basin_version_key,
-                rt.river_network_version_key,
-                rt.river_segment_key,
-                cr.expected_segment_count,
-                rt.valid_time,
-                rt.lead_time_hours
-            FROM hydro.river_timeseries rt
-            JOIN candidate_runs cr
-              ON cr.run_key = rt.run_key
-             AND cr.basin_version_key = rt.basin_version_key
-             AND cr.river_network_version_key = rt.river_network_version_key
-            WHERE {store_predicate}
-              AND rt.variable_e = 'q_down'::hydro.river_variable
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND rt.variable = 'q_down'
-              AND rt.valid_time >= cr.display_start_time
-              AND rt.valid_time <= cr.display_end_time
-              AND (%(scan_run_id)s IS NULL
-                   OR (
-                       -- transitional compressed-chunk pushdown aid, remove with #1342
-                       rt.run_id = %(scan_run_id)s AND
-                       rt.run_key = (SELECT run_key FROM hydro.hydro_run
-                                     WHERE run_id = %(scan_run_id)s)))
-              AND (%(scan_basin_version_id)s IS NULL
-                   OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
-                                              WHERE basin_version_id = %(scan_basin_version_id)s))
-              AND (%(scan_river_network_version_id)s IS NULL
-                   OR (
-                       -- transitional compressed-chunk pushdown aid, remove with #1342
-                       rt.river_network_version_id = %(scan_river_network_version_id)s AND
-                       rt.river_network_version_key = (SELECT river_network_version_key
-                                                       FROM core.river_network_version
-                                                       WHERE river_network_version_id
-                                                             = %(scan_river_network_version_id)s)))
-              AND (%(scan_display_start)s IS NULL
-                   OR rt.valid_time >= %(scan_display_start)s)
-              AND (%(scan_display_end)s IS NULL
-                   OR rt.valid_time <= %(scan_display_end)s)
-"""
-
-
-def _river_sample_rows_template(store: str) -> str:
-    if store == "legacy":
-        return _RIVER_SAMPLE_ROWS_SQL.format(store_predicate="cr.timeseries_store = 'legacy'")
-    if store == "narrow":
-        return _RIVER_SAMPLE_ROWS_SQL.format(store_predicate="cr.timeseries_store = 'narrow'")
-    raise ValueError(f"Invalid river timeseries store: {store!r}")
-
-
-_RIVER_SAMPLE_ROWS_UNION_SQL = "\nUNION ALL\n".join(
-    render_river_ts_sql(_river_sample_rows_template(store), store).sql
-    for store in ("legacy", "narrow")
-)
-
-
-_COVERAGE_CTES = (
-    """
-        WITH candidate_runs AS ("""
-    + _CANDIDATE_RUNS_SQL
-    + """        ),
+        ),
         station_sample_rows AS (
             SELECT
                 cr.run_id,
@@ -450,9 +301,46 @@ _COVERAGE_CTES = (
         -- join to candidate_runs is key-only, because a text join equality is
         -- not pushdown material and a text fact join is forbidden.
         river_sample_rows AS (
-"""
-    + _RIVER_SAMPLE_ROWS_UNION_SQL
-    + """        ),
+            SELECT
+                rt.run_key,
+                rt.basin_version_key,
+                rt.river_network_version_key,
+                rt.river_segment_key,
+                cr.expected_segment_count,
+                rt.valid_time,
+                rt.lead_time_hours
+            FROM hydro.river_timeseries rt
+            JOIN candidate_runs cr
+              ON cr.run_key = rt.run_key
+             AND cr.basin_version_key = rt.basin_version_key
+             AND cr.river_network_version_key = rt.river_network_version_key
+            WHERE rt.variable_e = 'q_down'::hydro.river_variable
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND rt.variable = 'q_down'
+              AND rt.valid_time >= cr.display_start_time
+              AND rt.valid_time <= cr.display_end_time
+              AND (%(scan_run_id)s IS NULL
+                   OR (
+                       -- transitional compressed-chunk pushdown aid, remove with #1342
+                       rt.run_id = %(scan_run_id)s AND
+                       rt.run_key = (SELECT run_key FROM hydro.hydro_run
+                                     WHERE run_id = %(scan_run_id)s)))
+              AND (%(scan_basin_version_id)s IS NULL
+                   OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
+                                              WHERE basin_version_id = %(scan_basin_version_id)s))
+              AND (%(scan_river_network_version_id)s IS NULL
+                   OR (
+                       -- transitional compressed-chunk pushdown aid, remove with #1342
+                       rt.river_network_version_id = %(scan_river_network_version_id)s AND
+                       rt.river_network_version_key = (SELECT river_network_version_key
+                                                       FROM core.river_network_version
+                                                       WHERE river_network_version_id
+                                                             = %(scan_river_network_version_id)s)))
+              AND (%(scan_display_start)s IS NULL
+                   OR rt.valid_time >= %(scan_display_start)s)
+              AND (%(scan_display_end)s IS NULL
+                   OR rt.valid_time <= %(scan_display_end)s)
+        ),
         river_identity_coverage AS (
             SELECT
                 run_key, basin_version_key, river_network_version_key, river_segment_key,
@@ -555,36 +443,7 @@ _COVERAGE_CTES = (
              AND hc.basin_version_id = cr.basin_version_id
              AND hc.river_network_version_id = cr.river_network_version_id
         )
-"""
-)
 
-# Issue #1446 — the overwrite guard lives in the upsert's own conditional
-# `DO UPDATE ... WHERE`, not in a caller-side read-then-write:
-#
-#   * the scan count is not observable before the write (it is produced by the
-#     same statement), so a read-before/rollback dance would need an extra
-#     statement on every run AND still race a concurrent refresh;
-#   * putting it here means every path — single run, batch worker, the all-runs
-#     form `_refresh(conn, None)` — inherits the protection for free.
-#
-# A populated row (`segment_count > 0`) whose fresh scan comes back empty is
-# skipped atomically and therefore absent from `RETURNING run_id`; the caller
-# turns that absence into a refusal. First refreshes (no row) are inserts and
-# never reach the clause, and an existing row that already reads 0 is rewritten
-# as before. `force` is the explicit zeroing escape hatch.
-#
-# The skip is whole-row: the `DO UPDATE` sets all 16 columns, so a refused row
-# keeps its station-side values and its `refreshed_at` too. Accepted, not
-# overlooked — the protected cohort is finished pre-cutover runs whose station
-# inputs no longer change, and the freeze ends when the #1408 identity backfill
-# restores their surrogate keys and the next refresh succeeds. The standing
-# cost is bounded by staleness: because a refused row keeps its old
-# `refreshed_at`, the cron `--all --skip-fresh` loop rescans the run every tick
-# only while `refreshed_at < hydro_run.updated_at` -- a refused run whose row is
-# already fresh is not rescanned at all.
-_REFRESH_SQL = (
-    _COVERAGE_CTES
-    + """
         INSERT INTO hydro.run_display_coverage (
             run_id, station_count, station_sample_count, station_source_id,
             station_display_start_time, station_display_end_time,
@@ -621,315 +480,4 @@ _REFRESH_SQL = (
            OR EXCLUDED.segment_count > 0
            OR hydro.run_display_coverage.segment_count = 0
         RETURNING run_id
-    """
-)
-
-
-def run_display_coverage_available(cursor: Any) -> bool:
-    """Whether ``hydro.run_display_coverage`` exists (cheap-path gate)."""
-    cursor.execute("SELECT to_regclass('hydro.run_display_coverage') AS reg")
-    row = cursor.fetchone()
-    value = row["reg"] if isinstance(row, dict) else row[0]
-    return value is not None
-
-
-# Per-run refresh statement timeout (ms). Small legacy/QHH runs finish in a few
-# seconds, but production direct-grid basins can contain millions of river rows
-# and legitimately exceed the former 90-second bound. Keep the query bounded,
-# while allowing operators to tune it without code edits for larger basins.
-_REFRESH_STATEMENT_TIMEOUT_ENV = "NHMS_DISPLAY_COVERAGE_REFRESH_STATEMENT_TIMEOUT_MS"
-_DEFAULT_REFRESH_STATEMENT_TIMEOUT_MS = 900_000
-_MIN_REFRESH_STATEMENT_TIMEOUT_MS = 90_000
-_MAX_REFRESH_STATEMENT_TIMEOUT_MS = 3_600_000
-
-
-def _refresh_statement_timeout_ms() -> int:
-    raw = os.getenv(_REFRESH_STATEMENT_TIMEOUT_ENV, "").strip()
-    if not raw:
-        return _DEFAULT_REFRESH_STATEMENT_TIMEOUT_MS
-    try:
-        value = int(raw)
-    except ValueError:
-        return _DEFAULT_REFRESH_STATEMENT_TIMEOUT_MS
-    if not _MIN_REFRESH_STATEMENT_TIMEOUT_MS <= value <= _MAX_REFRESH_STATEMENT_TIMEOUT_MS:
-        return _DEFAULT_REFRESH_STATEMENT_TIMEOUT_MS
-    return value
-
-
-_SCAN_PARAM_KEYS = (
-    "scan_run_id",
-    "scan_forcing_version_id",
-    "scan_basin_version_id",
-    "scan_river_network_version_id",
-    "scan_source_id_lower",
-    "scan_display_start",
-    "scan_display_end",
-)
-
-
-class RefreshOutcome(NamedTuple):
-    """What one ``_refresh`` call did, per run id.
-
-    ``refreshed`` are the run ids the upsert returned; ``refused`` are the run
-    ids that *reached* the upsert and were skipped by its guard clause (#1446).
-    The distinction is exact rather than heuristic: the ``coverage`` CTE selects
-    ``FROM candidate_runs`` with LEFT JOINs, so every candidate produces exactly
-    one upsert row, and "was a candidate but is absent from ``RETURNING``" can
-    only mean the ``WHERE`` skipped it.
-
-    A run that was never a candidate (no header row) appears in neither list —
-    it is the pre-existing "no coverage row" outcome, not a refusal.
-    """
-
-    refreshed: list[str]
-    refused: list[str]
-
-
-class DisplayCoverageRefreshRefused(RuntimeError):
-    """A single-run refresh would have zeroed a populated coverage row (#1446).
-
-    Carries the run id and the segment count still stored, so the caller can
-    report the refusal without re-querying. Raised only after the transaction
-    has been rolled back; nothing was written.
-    """
-
-    def __init__(self, run_id: str, existing_segment_count: int, advice: str) -> None:
-        super().__init__(
-            f"refusing to zero display coverage for {run_id}: "
-            f"the stored row has segment_count={existing_segment_count} and the fresh "
-            f"scan found none. {advice}"
-        )
-        self.run_id = run_id
-        self.existing_segment_count = existing_segment_count
-        self.advice = advice
-
-
-_REFUSAL_ADVICE = (
-    "The empty scan is the observation, not the diagnosis: most likely the run's "
-    "hydro.river_timeseries rows still carry NULL surrogate keys (pre-#1340), and the "
-    "identity back-fill (#1408) heals that on its own; the next refresh then succeeds "
-    "with real counts. Rows that were legitimately removed (retention, a re-parse) "
-    "produce exactly the same refusal. To materialize the empty scan deliberately, "
-    "rerun with --run-id <run> --force."
-)
-
-_EXISTING_SEGMENT_COUNT_SQL = """
-    SELECT segment_count
-    FROM hydro.run_display_coverage
-    WHERE run_id = %(run_id)s
-"""
-
-
-def _refresh(connection: Any, run_id: str | None, *, force: bool = False) -> RefreshOutcome:
-    params: dict[str, Any] = {
-        "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
-        # Per-run refresh: run_id uniquely identifies the run and its basin, so
-        # no basin filter is needed (basin-agnostic — works for any basin).
-        "basin_id": None,
-        "run_id": run_id,
-        "variables": list(MVP_STATION_VARIABLES),
-        "variable_count": len(MVP_STATION_VARIABLES),
-        # #1446: bypasses the upsert's overwrite guard when the caller asks for
-        # the zeroing explicitly. bool() so a truthy string can never reach the
-        # driver as a non-boolean literal.
-        "force": bool(force),
-    }
-    params.update(dict.fromkeys(_SCAN_PARAM_KEYS))
-    candidates: list[str] = []
-    with connection.cursor(cursor_factory=RealDictCursor) as cursor:
-        cursor.execute("SET LOCAL statement_timeout = %s", (_refresh_statement_timeout_ms(),))
-        if run_id is not None:
-            # Prefetch the run's scalar identity/window and bind it as pushdown
-            # predicates — without this the planner seq-scans both hypertables
-            # (see the _COVERAGE_CTES header comment). No header row means the
-            # run is not coverage-eligible: skip the heavy query entirely.
-            cursor.execute(_SCAN_HEADER_SQL, params)
-            headers = cursor.fetchall()
-            if not headers:
-                return RefreshOutcome([], [])
-            candidates = [h["run_id"] for h in headers]
-            header = headers[0]
-            params.update(
-                scan_run_id=header["run_id"],
-                scan_forcing_version_id=header["forcing_version_id"],
-                scan_basin_version_id=header["basin_version_id"],
-                scan_river_network_version_id=header["river_network_version_id"],
-                scan_source_id_lower=header["source_id_lower"],
-                scan_display_start=header["display_start_time"],
-                scan_display_end=header["display_end_time"],
-            )
-        cursor.execute(_REFRESH_SQL, params)
-        rows = cursor.fetchall()
-    refreshed = [r["run_id"] for r in rows]
-    # The all-runs form runs no header query, so it has no candidate set: it
-    # PROTECTS (guarded rows are simply not returned) but cannot CLASSIFY.
-    # Refusal accounting exists only where the run id is known.
-    refused = [run for run in candidates if run not in refreshed]
-    return RefreshOutcome(refreshed, refused)
-
-
-def _existing_segment_count(connection: Any, run_id: str) -> int:
-    """The `segment_count` a refused run still has stored (for the message)."""
-    with connection.cursor(cursor_factory=RealDictCursor) as cursor:
-        cursor.execute(_EXISTING_SEGMENT_COUNT_SQL, {"run_id": run_id})
-        row = cursor.fetchone()
-    return 0 if row is None else int(row["segment_count"])
-
-
-def refresh_run_display_coverage(connection: Any, run_id: str, *, force: bool = False) -> bool:
-    """Recompute and upsert coverage for one run. Returns True if a row resulted.
-
-    A finished forecast run (any basin) always yields a coverage row (counts may
-    be 0 if its forcing/river data is absent); a non-eligible run yields none.
-
-    Raises ``DisplayCoverageRefreshRefused`` (#1446) when the run reached the
-    upsert and the guard skipped it — i.e. the fresh scan found no segments but
-    the stored row is populated. Nothing is written and the transaction is
-    rolled back before the raise. ``force=True`` performs the zeroing instead.
-    """
-    outcome = _refresh(connection, run_id, force=force)
-    if run_id in outcome.refused:
-        existing = _existing_segment_count(connection, run_id)
-        connection.rollback()
-        raise DisplayCoverageRefreshRefused(run_id, existing, _REFUSAL_ADVICE)
-    connection.commit()
-    return run_id in outcome.refreshed
-
-
-def _eligible_run_ids(connection: Any) -> list[str]:
-    """Every parsed/finished forecast run across all basins (coverage is
-    basin-agnostic; ``--all`` backfills every displayable basin)."""
-    with connection.cursor(cursor_factory=RealDictCursor) as cursor:
-        cursor.execute(
-            """
-            SELECT h.run_id
-            FROM hydro.hydro_run h
-            WHERE h.run_type = 'forecast'
-              AND h.status IN ('succeeded', 'parsed', 'published')
-              AND h.cycle_time IS NOT NULL
-            ORDER BY h.cycle_time DESC, h.run_id DESC
-            """,
-        )
-        return [r["run_id"] for r in cursor.fetchall()]
-
-
-def refresh_all_run_display_coverage(
-    connection: Any,
-    *,
-    dsn: str,
-    skip_fresh: bool = False,
-    on_progress: Any = None,
-    workers: int = 1,
-    connect: Callable[..., Any] | None = None,
-    force: bool = False,
-) -> dict[str, int]:
-    """Recompute coverage for every parsed/finished forecast run (all basins).
-
-    Done one run at a time, each on its OWN short-lived connection (opened from
-    ``dsn``). Per-run scoping keeps each refresh cheap (the single-run
-    ``candidate_runs`` narrows before the station/river CTEs fan out; a single
-    all-runs SQL lets them explode cartesian-style and is pathologically slow).
-    Dedicated connections mean a killed driver or a timed-out run releases the
-    table lock immediately instead of leaving an orphan holding it.
-
-    ``dsn`` is passed explicitly (not read from ``connection.dsn``, which
-    psycopg2 strips the password from). A per-run failure (e.g. statement
-    timeout) is recorded and skipped so one bad run never aborts the batch. With
-    ``skip_fresh`` only runs whose coverage is missing or older than the run's
-    ``updated_at`` are recomputed (resumable).
-
-    Returns ``{"refreshed", "skipped", "failed", "refused"}`` counts. ``refused``
-    (#1446) is a run the upsert's overwrite guard skipped because its fresh scan
-    was empty while its stored row is populated — distinct from ``failed`` (the
-    refresh raised) and from ``skipped`` (the run was never a candidate). A
-    refusal never aborts the batch and leaves the run's stored ``refreshed_at``
-    untouched, so a ``skip_fresh`` tick rescans it only for as long as it is
-    already stale (``refreshed_at < hydro_run.updated_at``) — a refused run
-    whose row is fresh is not rescanned. ``force=True`` performs the zeroing.
-
-    ``connect`` (#1714) lets the calling component inject its own attributed
-    ``psycopg2.connect`` so the per-run worker connections carry that
-    component's ``fallback_application_name`` in ``pg_stat_activity`` — these
-    are the long-running backends an operator is most likely to see and cancel.
-    Left unset it resolves ``psycopg2.connect`` at call time, so every existing
-    caller keeps today's behaviour byte for byte.
-    """
-    run_ids = _eligible_run_ids(connection)
-    if skip_fresh:
-        # Compute the stale set ONCE (a single LEFT JOIN), not per element.
-        stale = _stale_run_ids(connection, run_ids)
-        run_ids = [r for r in run_ids if r in stale]
-
-    if workers < 1 or workers > 8:
-        raise ValueError("coverage workers must be between 1 and 8")
-
-    # Resolved at call time, never bound in the signature default: tests (and
-    # any future shim) patch ``display_coverage.psycopg2.connect`` on the module
-    # object, and an import-time default would silently bypass that patch.
-    open_connection = connect if connect is not None else psycopg2.connect
-
-    def refresh_one(run_id: str) -> tuple[str, str]:
-        # connect() is inside the try so a connection failure counts as a failed
-        # run and the batch continues — one bad run never aborts the whole batch.
-        conn = None
-        try:
-            conn = open_connection(dsn)
-            outcome = _refresh(conn, run_id, force=force)
-            # #1446: a guard refusal is inspected straight off the outcome, not
-            # via an exception round-trip, and is classified BEFORE (and
-            # independently of) the generic failure arm below. Nothing was
-            # written, so the commit is a no-op that just closes the
-            # transaction cleanly.
-            if run_id in outcome.refused:
-                conn.commit()
-                return run_id, "refused"
-            conn.commit()
-            return run_id, "refreshed" if run_id in outcome.refreshed else "no-row"
-        except Exception as exc:  # noqa: BLE001 - isolate one run's failure
-            if conn is not None:
-                conn.rollback()
-            return run_id, f"FAILED: {type(exc).__name__}"
-        finally:
-            if conn is not None:
-                conn.close()
-
-    if workers == 1:
-        results = [refresh_one(run_id) for run_id in run_ids]
-    else:
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=workers,
-            thread_name_prefix="coverage-refresh",
-        ) as executor:
-            results = list(executor.map(refresh_one, run_ids))
-
-    refreshed = skipped = failed = refused = 0
-    for run_id, status in results:
-        if status == "refreshed":
-            refreshed += 1
-        elif status == "no-row":
-            skipped += 1
-        elif status == "refused":
-            refused += 1
-        else:
-            failed += 1
-        if on_progress is not None:
-            on_progress(run_id, status)
-    return {"refreshed": refreshed, "skipped": skipped, "failed": failed, "refused": refused}
-
-
-def _stale_run_ids(connection: Any, run_ids: list[str]) -> set[str]:
-    """Runs whose coverage is missing or older than hydro_run.updated_at."""
-    if not run_ids:
-        return set()
-    with connection.cursor(cursor_factory=RealDictCursor) as cursor:
-        cursor.execute(
-            """
-            SELECT h.run_id
-            FROM hydro.hydro_run h
-            LEFT JOIN hydro.run_display_coverage cov ON cov.run_id = h.run_id
-            WHERE h.run_id = ANY(%(run_ids)s)
-              AND (cov.run_id IS NULL OR cov.refreshed_at < h.updated_at)
-            """,
-            {"run_ids": run_ids},
-        )
-        return {r["run_id"] for r in cursor.fetchall()}
+    

@@ -75,7 +75,7 @@ _LEGACY_PUBLISH_SQL = """
     UPDATE hydro.hydro_run h
     SET status = 'published', updated_at = now()
     WHERE h.status = 'parsed'
-      AND EXISTS (SELECT 1 FROM hydro.river_timeseries rt WHERE rt.run_id = h.run_id)
+      AND EXISTS (SELECT 1 FROM hydro.river_timeseries_legacy rt WHERE rt.run_id = h.run_id)
 """
 
 # The #1414 parity oracle: the authoritative latest-QHH fallback EXACTLY as it
@@ -350,6 +350,7 @@ def test_forced_fallback_binds_named_parameters_and_matches_the_fast_path(
     post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _prepared_database(throwaway_database_url)
+    post_expand_forecast_database({})
     connection = _connect(throwaway_database_url)
     try:
         assert refresh_run_display_coverage(connection, FORECAST_RUN_ID) is True
@@ -358,7 +359,6 @@ def test_forced_fallback_binds_named_parameters_and_matches_the_fast_path(
     store = PsycopgForecastStore(throwaway_database_url)
 
     fast_rows = _candidates(store)
-    post_expand_forecast_database({})
     monkeypatch.setattr(forecast_store, "_run_display_coverage_available", lambda _cursor: False)
     fallback_rows = _candidates(store)
 
@@ -367,8 +367,12 @@ def test_forced_fallback_binds_named_parameters_and_matches_the_fast_path(
     assert fallback_rows[0]["segment_count"] > 0
 
 
-def test_status_only_publish_keeps_ingest_refreshed_coverage_fresh(throwaway_database_url: str) -> None:
+def test_status_only_publish_keeps_ingest_refreshed_coverage_fresh(
+    throwaway_database_url: str,
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+) -> None:
     _prepared_database(throwaway_database_url)
+    post_expand_forecast_database({})
     connection = _connect(throwaway_database_url)
     try:
         assert refresh_run_display_coverage(connection, FORECAST_RUN_ID) is True
@@ -465,38 +469,38 @@ def test_publish_predicate_publishes_completed_parses_and_nothing_else(
 
 def test_out_of_band_write_without_updated_at_bump_backstop_visibility(
     throwaway_database_url: str,
+    post_expand_forecast_database: Callable[[Mapping[str, str]], None],
 ) -> None:
     _prepared_database(throwaway_database_url)
+    post_expand_forecast_database({})
     connection = _connect(throwaway_database_url)
     try:
         assert refresh_run_display_coverage(connection, FORECAST_RUN_ID) is True
         assert autopipe._publish_display_runs(throwaway_database_url) == 1
 
-        # Dual-write shape, like every other river_timeseries row this fixture
-        # writes. What is being measured is whether a data write that does not
-        # bump `updated_at` is visible to the staleness backstop — the row's
-        # column shape is incidental to that, but seeding the pre-#1340 shape
-        # here would leave the fixture writing rows production no longer
-        # writes, which is precisely the drift that broke the parity test
-        # above.
+        # Explicit fixture write to this parsed run's authoritative legacy
+        # table. Do not use the pre-expand dual writer against the narrow table.
         with connection.cursor() as cursor:
-            insert_river_timeseries_dual_written(
-                cursor,
-                [
-                    (
-                        FORECAST_RUN_ID,
-                        BASIN_VERSION_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        f"{ISSUE_126_PREFIX}_seg_inside",
-                        VALID_TIME_2 + timedelta(hours=1),
-                        3,
-                        "q_down",
-                        275.0,
-                        "m3/s",
-                        "ok",
-                    ),
-                ],
+            cursor.execute(
+                """
+                INSERT INTO hydro.river_timeseries_legacy (
+                    run_id, basin_version_id, river_network_version_id, river_segment_id,
+                    valid_time, lead_time_hours, variable, value, unit, quality_flag,
+                    run_key, basin_version_key, river_network_version_key, river_segment_key,
+                    variable_e, unit_e, quality_flag_e)
+                SELECT rt.run_id, rt.basin_version_id, rt.river_network_version_id, rt.river_segment_id,
+                       %s, 3, rt.variable, 275.0, rt.unit, rt.quality_flag,
+                       rt.run_key, rt.basin_version_key, rt.river_network_version_key, rt.river_segment_key,
+                       rt.variable_e, rt.unit_e, rt.quality_flag_e
+                FROM hydro.river_timeseries_legacy rt
+                JOIN hydro.hydro_run h ON h.run_key = rt.run_key
+                WHERE h.run_id = %s AND h.timeseries_store = 'legacy'
+                  AND rt.river_segment_id = %s AND rt.valid_time = %s AND rt.variable = 'q_down'
+                """,
+                (VALID_TIME_2 + timedelta(hours=1), FORECAST_RUN_ID,
+                 f"{ISSUE_126_PREFIX}_seg_inside", VALID_TIME_2),
             )
+            assert cursor.rowcount == 1
 
         # Recorded observation (receipt input, no pass threshold): repeat the
         # measurement so the result is known to be deterministic rather than racy.
