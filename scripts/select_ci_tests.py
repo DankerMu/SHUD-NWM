@@ -1189,7 +1189,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # #2238's copyback-mutex partition joined that set: it imports
         # EXTRA_CONFIG/NOW/_seed_cycle/_pass_scheduler from here at top level,
         # so it is a derived importer like the other four, not a rider.
-        # 21 tests in 2.94s.
+        # 21 tests in 3.04s.
         "tests/retention_test_helpers.py",
         (
             "tests/test_retention.py",
@@ -1504,13 +1504,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # ORCHESTRATOR_CLI_IMPORTER_TESTS is also spliced into pattern[4]
         # (scheduler_journal_archive.py), which the copyback-mutex suite does not
         # import and whose selection must not move. cli.py is stop-rule owned, so
-        # the broad `services/orchestrator/**` list that carries the other five
-        # retention partitions is unreachable here — this is where the sixth
+        # the broad `services/orchestrator/**` list that carries the other four
+        # retention partitions (and the independent frontier suite, which is not
+        # a partition) is unreachable here — this is where the fifth
         # partition's importer gap closes. The suite drives `cli._run_cleanup`,
         # the out-of-pass entrypoint that reads NHMS_OBJECT_STORE_COPYBACK_ROOT
         # from the environment and thereby decides which roots the deleter locks,
         # so an env-read or root-assembly edit here must run it. DB-free, 21
-        # tests in 2.94s, hence a rule rather than a rule-gap exclusion.
+        # tests in 3.04s, hence a rule rather than a rule-gap exclusion.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[8],
         (
             *FILE_JOURNAL_READ_STATE_TESTS,
@@ -1823,14 +1824,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1872: the retention corpus is physically partitioned; the
             # production owner rule must select every collectible partition so
             # a retention change never blinds targeted CI to moved cases.
-            # #2238 added the sixth partition. It is the requirement oracle for
-            # retention.py's copyback-mutex lane (one batch-lock acquisition per
-            # removed tree under the shared copyback root, a pass-level wait
-            # budget, `failed` rather than abort on contention), and it
+            # #2238 added the fifth partition — the sixth retention suite,
+            # counting #1872's independent frontier suite, which is not itself
+            # a partition. It is the requirement oracle for retention.py's
+            # copyback-mutex lane (one batch-lock acquisition per removed tree
+            # under the shared copyback root, a pass-level wait budget,
+            # `failed` rather than abort on contention), and it
             # top-level-imports `services.orchestrator` itself, so BOTH
             # directory members' importer gaps close here — cli.py's third one is
             # stop-rule owned and rides THAT site, per this rule's #1455 note
-            # above. DB-free, local, 21 tests in 2.94s, so a rule rather than a
+            # above. DB-free, local, 21 tests in 3.04s, so a rule rather than a
             # rule-gap exclusion.
             "tests/test_retention_copyback_mutex.py",
             "tests/test_retention_extra_roots.py",

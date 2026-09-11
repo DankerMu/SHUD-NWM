@@ -762,8 +762,9 @@ def test_ef14_the_lock_file_is_never_a_removal_candidate(tmp_path: Path) -> None
 
 
 # ---------------------------------------------------------------------------
-# T5 -- both call sites name the copyback root. Neither has an EF clause, and
-# the wiring is the only place a deployed pass can lose the mutex entirely.
+# EF-15 -- both call sites name the copyback root. Asserted at the call site
+# rather than inferred: the wiring is the only place a deployed pass can lose
+# the mutex entirely without any test on the retention module itself noticing.
 # ---------------------------------------------------------------------------
 def test_the_scheduler_pass_names_the_copyback_root_for_the_mutex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

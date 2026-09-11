@@ -175,20 +175,48 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
       asserted at the call site rather than inferred: this is the single place
       where the whole mutex can be lost in deployment without any test on the
       retention module itself noticing.
-- [x] **EF-16 — the targeted lane routes to the new suite.** With a changed
-      file list of exactly `services/orchestrator/retention.py`, and again for
-      `cli.py` and for `__init__.py`, `select_tests` returns a list containing
-      `tests/test_retention_copyback_mutex.py`. Asserted as routing, not as
-      "the gate is green": the gate can be satisfied by an exclusion token,
-      which would leave the oracle unrouted.
-- [ ] **EF-17 — node-22 deployment receipt (post-merge, known limit).** After
-      master is deployed to `/scratch/frd_muziyao/NWM`, one scheduler pass whose
-      `deleted[]` contains `/ghdc/data/nwm/object-store` entries, with
-      `retention.status=completed` and the copyback-root count not regressed to
-      zero. node-22's active checkout is pre-maintenance-window (3.12 venv, no
+- [x] **EF-16 — the targeted lane routes to the new suite.** For each of
+      `services/orchestrator/retention.py`, `cli.py` and `__init__.py`, a test
+      reds if `select_tests` stops returning
+      `tests/test_retention_copyback_mutex.py` for that module. Asserted as
+      routing, not as "the gate is green": the gate can be satisfied by an
+      exclusion token — and two of its token classes, `runtime-budget` and
+      `fn-gated`, have no machine check at all — which would leave the oracle
+      unrouted while every test stayed green.
+      The three legs are not asserted the same way, and the difference is
+      recorded rather than glossed:
+      `retention.py` has a direct assertion on a changed-file list of exactly
+      that module, plus the per-partition fracture pin; `cli.py` has a direct
+      at-site assertion added in round 1, proven to red when the at-site target
+      is removed; `__init__.py` has no assertion naming it, and rides the broad
+      `services/orchestrator/**` rule's frozen exact-output literal instead.
+      That is accepted as equivalent for this leg specifically because the
+      literal is an equality pin: deleting the suite from the broad rule reds it
+      no matter what exclusion token is added, so the leg is not
+      exclusion-bypassable. It would not be accepted for `cli.py`, whose route
+      is a stop rule the broad literal never exercises.
+- [ ] **EF-17 — node-22 deployment receipt (post-merge, known limit).** Two
+      halves, because the first half alone proves nothing about this change:
+      1. *Non-regression, labelled as such.* After master is deployed to
+         `/scratch/frd_muziyao/NWM`, one scheduler pass whose `deleted[]`
+         contains `/ghdc/data/nwm/object-store` entries, with
+         `retention.status=completed` and the copyback-root count not regressed
+         to zero. A build with the mutex removed satisfies all three criteria
+         byte for byte — the mutex-less build running on node-22 today already
+         does — so this half is a regression guard, not evidence of acquisition.
+      2. *The discriminating probe.* Hold the copyback root's batch lock from a
+         second process across one pass, and require that pass's copyback-root
+         entries to appear in `failed[]` carrying the lock error while the
+         workspace-root and primary-root entries still appear in `deleted[]`. A
+         mutex-less build deletes straight through a held lock, so this is the
+         observation that separates the two builds. The lock file's mere
+         presence does **not** substitute: the same deploy brings #2035's
+         writers, which acquire the identical file on the identical root earlier
+         in the pass (`design.md` D8).
+      node-22's active checkout is pre-maintenance-window (3.12 venv, no
       `uv sync`, no bare `uv run`), and `packages/common/copyback_guard.py` does
-      not exist there yet, so this cannot be produced from this branch and is
-      not a merge clause. Routed as a tracked issue at Phase 8.
+      not exist there yet, so neither half can be produced from this branch and
+      EF-17 is not a merge clause. Routed as a tracked issue at Phase 8.
 
 ## Known limits
 
@@ -202,6 +230,16 @@ per-acquisition timeout override down to sub-second so the suite stays fast.
   same NFS export. Out of scope by the issue's boundary; the spec requirement
   names it as a known-violating implementation rather than narrowing itself to
   stay true by construction (`design.md` D10).
+- Retention's copyback acquisition deadline is **not operator-tunable in
+  production**. `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` reaches every
+  other acquirer but not this one, because the guard reads the environment only
+  when the caller passes no explicit timeout and this lane always passes the
+  remaining pass budget (`design.md` D9). Accepted rather than fixed: in the
+  state the budget exists for — a holder that will not release until an NFS
+  server lease expires — no deadline an operator can set reclaims anything, and
+  a longer one only stalls the pass further. Recorded here so the next person to
+  reach for that variable learns it from the fixture rather than from a pass
+  that ignores them.
 - Lock semantics are exercised locally on APFS/ext4, not on the production
   NFSv4.2 export. The third state `copyback_guard.py:212-219` documents
   (correctly owned, no local holder, still locked) is not reproducible in the

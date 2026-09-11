@@ -126,19 +126,24 @@ PRIMARY_ROOT_NOT_ABSOLUTE_REASON = "primary_root_not_absolute"
 # accepted winner.
 ROOT_OVERLAP_REASON = "root_overlap"
 
-# Total time ONE pass may spend *waiting* for the copyback batch mutex, across
+# Total time ONE pass may spend *acquiring* the copyback batch mutex, across
 # every removal on the copyback root (#2238 / design D9). Per-tree deadlines
 # bound how long one promote can be blocked by retention; they do not bound the
 # reverse. With the guard's own 900 s default and the measured 48-54 copyback
 # removals per pass, a single stuck holder -- the NFS state in which the lock is
 # correctly owned, has no local holder and stays held until the server lease
 # expires -- would stall one pass for ~13.5 h, past the 12-hourly cadence. Only
-# the wait is charged against this budget, never the removal itself, so a large
-# uncontended tree cannot consume it. A module constant plus a keyword override
-# for tests, deliberately NOT an environment variable: the guard's existing
-# per-acquisition env override already answers every operational question this
-# would, and a knob nobody is asked to turn is production-config surface for its
-# own sake.
+# the acquisition is charged against this budget, never the removal itself, so a
+# large uncontended tree cannot consume it. A module constant plus a keyword
+# override for tests, deliberately NOT an environment variable -- and NOT
+# because the guard's NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS covers it:
+# `copyback_guard.resolve_copyback_lock_timeout_seconds` reads that variable
+# only when the caller passes no explicit timeout, and this lane always passes
+# one (the remaining budget), so retention is the one production acquirer the
+# override cannot reach. The choice stands anyway: in the state this budget
+# exists for -- a holder that will not release until the NFS server lease
+# expires -- no deadline an operator can set reclaims anything, and a longer one
+# only stalls the pass further.
 DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS = 300.0
 
 
@@ -880,7 +885,7 @@ def run_retention(
     leaves the pass byte-identical to its pre-#2238 behaviour.
 
     ``copyback_lock_wait_budget_seconds`` bounds the time ONE pass may spend
-    waiting for that mutex in total (design D9); it exists for tests, and
+    acquiring that mutex in total (design D9); it exists for tests, and
     production uses the module default.
     """
     resolved = config or RetentionConfig.from_env()
@@ -1026,11 +1031,15 @@ def _remove_tree_under_copyback_mutex(
     promoting writers whose acquisition budget this mutex is sized for.
 
     ``acquire``/``release`` rather than the ``copyback_batch_lock`` context
-    manager, because the *wait* has to be measured separately from the hold to
-    be charged against the pass budget, and the context manager exposes no seam
-    between the two. Only the wait is charged, so a large uncontended tree
-    cannot consume the budget. An exhausted budget refuses **before** acquiring:
-    the remaining entries on this root must not each add another deadline's wait.
+    manager, because the *acquisition* has to be measured separately from the
+    hold to be charged against the pass budget, and the context manager exposes
+    no seam between the two. The charged span is the whole
+    ``acquire_copyback_batch_lock`` call -- the guard's own identity syscalls as
+    well as the blocking poll -- but it closes before the removal begins, so
+    only the acquisition is charged, never the removal, and a large uncontended
+    tree cannot consume the budget. An exhausted budget refuses **before**
+    acquiring: the remaining entries on this root must not each add another
+    deadline's wait.
     """
     if copyback_lock.remaining_seconds <= 0:
         raise CopybackLockError(

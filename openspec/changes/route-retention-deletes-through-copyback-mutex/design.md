@@ -218,6 +218,37 @@ oracle for this change; node-22 is where the *deployment* receipt will be taken,
 and that is post-merge ops, recorded as a known limit and routed, not claimed
 here (see `tasks.md` Evidence Floor EF-17).
 
+That clause needed sharpening, and the reason is worth recording because the
+obvious sharpening does not work. As first written, EF-17 asked only that a
+post-deploy pass still delete under the copyback root and still report
+`completed` — criteria a build with the mutex deleted satisfies byte for byte,
+and which D1's own measurements show the *current* mutex-less node-22 build
+already satisfying. The tempting fix is to require the batch lock file to appear
+under the copyback root, since the guard creates it and never unlinks it. That
+is not attributable: the deploy that brings retention's acquirer to node-22 is
+the same deploy that brings #2035's **writers**, and copyback promotion runs
+earlier in the pass than retention, so the file's presence only proves that some
+participant in the protocol ran. What discriminates is a contended probe — hold
+the lock from a second process across one pass and require the copyback root's
+entries to land in `failed[]` with the lock error while the workspace and
+primary roots still land in `deleted[]`. A mutex-less build deletes straight
+through a held lock, so that observation separates the two builds. EF-17 now
+carries both halves: the non-regression check, labelled as such, and the probe.
+
+## D11 — verification routed locally, and why that is a divergence
+
+`CLAUDE.md`'s oracle table routes "后端单测/集成" to node-27 as a whole row. This
+change verifies locally instead, and that is a recorded divergence rather than an
+oversight. The change has no DB surface, no display surface and no API surface:
+every assertion is a filesystem or exception-handling fact about `flock` and
+`rmtree`, which node-27 would exercise no more faithfully than the local
+machine — and node-27 is not where this code runs. The node it runs on is
+node-22, which is where the deployment receipt is owed (EF-17) and which is
+pre-maintenance-window, so it cannot produce that receipt from this branch. The
+divergence is therefore "the oracle for this change is node-22, post-deploy, not
+node-27", and the cost is recorded in Known limits: `flock` semantics are
+exercised on local APFS/ext4, not on the production NFSv4.2 export.
+
 ## D9 — the pass-level lock-wait budget
 
 Per-tree acquisition bounds how long any one promote can be blocked by
@@ -232,15 +263,29 @@ expires, and says the only correct response is to wait it out.
 So the pass carries one budget for **acquisition wait only**, defaulting to
 300 s and overridable by keyword for tests. Each removal is given what is left of
 it as its `timeout_seconds`; when nothing is left, the entry is recorded as a
-failure without an acquisition attempt. Only the wait is charged, not the removal
-itself, so a large uncontended tree cannot consume the budget.
+failure without an acquisition attempt. Only the acquisition is charged, never
+the removal — the `rmtree` runs after the charge is closed — so a large
+uncontended tree cannot consume the budget. "Acquisition", not "wait": the
+charged span covers the guard's own identity syscalls as well as the blocking
+poll, which is the honest description of what the clock measures.
 
 Two deliberate choices:
 
-- **No new environment variable.** The budget is a module constant plus a keyword
-  argument. There is no operational question it answers that the guard's existing
-  per-acquisition env override does not, and a knob nobody is asked to turn is
-  production-config surface for its own sake.
+- **No new environment variable**, and the consequence stated plainly rather
+  than waved at. An earlier draft of this bullet justified the choice by saying
+  the guard's existing `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` already
+  answers every operational question the new knob would. **That was false.**
+  `resolve_copyback_lock_timeout_seconds` (`copyback_guard.py:102-119`) reads the
+  environment only when the caller passes no explicit timeout, and this lane
+  always passes one — the remaining pass budget. Every other production acquirer
+  (`publisher.py:747`, `:1308`, `run_tree_copyback.py:247`,
+  `forcing_copyback_backfill.py:760`) passes none and does honour the override;
+  retention is the one that does not. The choice stands anyway: the state this
+  budget exists for is a holder that will not release until an NFS server lease
+  expires, and no deadline an operator can set reclaims anything in that state —
+  a longer deadline only stalls the pass further. So the budget is a module
+  constant plus a test-only keyword, and the absence of a production knob is
+  recorded in Known limits instead of being explained away.
 - **`acquire_copyback_batch_lock` / `release_copyback_batch_lock` directly**,
   not the `copyback_batch_lock` context manager, because the elapsed acquisition
   time has to be measured between those two calls to be charged. The release is

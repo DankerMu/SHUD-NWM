@@ -883,7 +883,7 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # `uv run pytest -q` in PR-lane conditions), and to 46 in #1581 (the
     # hydro-status parity lock: 5 tests in 0.23s, DB-free — it reads the
     # migrations as text and the status sets as objects), and to 47 in #2238
-    # (the copyback-mutex retention partition: 21 tests in 2.95s, DB-free — no
+    # (the copyback-mutex retention partition: 21 tests in 3.04s, DB-free — no
     # DB markers and no psycopg, green with no database up). Those running
     # counts track the RULE's target count and had already drifted one low
     # before #1581 (the rule held 45 targets while this comment said 44), so the
@@ -9253,6 +9253,10 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
         "services/orchestrator/retention.py",
         (
             "tests/test_retention.py",
+            # #2238's partition joins the floor row: the pin below only counts as
+            # "the positive floor above proves each partition IS selected" if the
+            # floor actually names it.
+            "tests/test_retention_copyback_mutex.py",
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_frontier.py",
             "tests/test_retention_pipeline_frontier.py",
@@ -9659,7 +9663,18 @@ def test_basins_publication_helper_route_selects_exactly_eight_consumers_plus_th
 STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("services/orchestrator/chain.py", CHAIN_IMPORTER_TESTS),
     ("services/orchestrator/scheduler.py", SCHEDULER_IMPORTER_TESTS),
-    ("services/orchestrator/cli.py", ORCHESTRATOR_CLI_IMPORTER_TESTS),
+    # #2238: the cli.py entry carries the shared constant PLUS the at-site
+    # addition, because `select_ci_tests` extends this rule with the
+    # copyback-mutex suite at the rule site rather than by editing
+    # ORCHESTRATOR_CLI_IMPORTER_TESTS (that constant is also spliced into
+    # FILE_JOURNAL_READ_STATE_PATH_PATTERNS[4], whose selection must not move).
+    # Pinning the constant alone left the at-site addition unpinned: deleting it
+    # from the rule kept the whole selector suite green while leaving the
+    # requirement oracle permanently unrouted for cli.py-only PRs.
+    (
+        "services/orchestrator/cli.py",
+        (*ORCHESTRATOR_CLI_IMPORTER_TESTS, "tests/test_retention_copyback_mutex.py"),
+    ),
     ("services/orchestrator/file_orchestration_journal.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
     ("workers/forcing_producer/direct_grid_contract.py", DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
 )

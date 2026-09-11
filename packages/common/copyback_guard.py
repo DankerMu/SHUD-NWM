@@ -69,8 +69,16 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 # contributes at most ONE concurrent waiter no matter how many trees a pass
 # removes. Its holds are `rmtree`s, not copies, and it carries its own
 # pass-level wait budget (`retention.DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS`,
-# 300 s) that caps the total time a sweep can queue behind this deadline --
-# which is why a retention pass cannot be the reason a writer exhausts it.
+# 300 s) that caps the total time a sweep can queue behind this deadline.
+#
+# What protects a writer here is that shape -- one concurrent waiter, short
+# `rmtree` holds -- and NOT that budget: the budget charges acquisition elapsed
+# only, never hold time, so an uncontended pass takes an unbounded number of
+# holds (its removal loop has no cap) while charging ~0 against it. Nothing
+# bounds a single hold either: `safe_fs.remove_tree_allow_symlinks` takes no
+# deadline. The protection is therefore scale-dependent -- on how big and how
+# many the removed trees are -- not structural, so a retention pass growing past
+# today's measured shape is a real way for a writer to exhaust this deadline.
 #
 # `flock` is per open file description, so the scheduler's same-process
 # execution-unit threads contend exactly as separate hosts would. Exceeding the
