@@ -4350,3 +4350,49 @@ from surface composition: it had almost no code surface to review, so it tells u
 little about which lenses find code defects. The existing keep decision and seat
 caps remain unchanged; issue-delivery authorization does not authorize policy
 narrowing.
+
+## Revisit — PR #2201 (issue #2035), 2026-09-10
+
+The post-merge audit reports 623 records (614 merged, nine terminal) and 202
+multi-round merged PRs. Later-round attribution moves by eighteen, all on one
+side: core=258, rotated=270, phase=57, skipped=15. The rotated share of
+later-round catches falls from 52.9% to 51.1%.
+
+**That movement is a seat-plan artifact, not a finding about lenses.** PR #2201
+ran the full five rounds. Rotated seats — `invariant-state`,
+`security-perf+integration` — were seated only in round 1. Rounds 3, 4 and 5 ran
+pinned core-only (`test-evidence`, `spec-compliance`, `correctness`). Every one
+of the eighteen attributable catches therefore *had* to be core; no rotated lens
+held a later-round seat in which it could have caught anything. A sample that
+never seats a lens cannot be evidence that the lens does not earn its seat. The
+counter moved because of who was in the room, not because of what was found.
+
+Two further limits on this line. Rounds 1–3 contributed 20 of the ledger's 38
+verified findings (9/6/5) but are counted without attribution: their verifier
+tables were not persisted and per-lens attribution is unrecoverable
+(`rounds1-3-verdicts-reconstructed.md`). And the PR did not close on a clean
+round — it hit the five-round ceiling still not clean and merged on an explicit
+user decision, with two recorded skip blocks. A ceiling line is a datum about
+issue sizing, not about lens value.
+
+What the sample does say is about failure *class*. The eighteen split
+doc-truthfulness 7, spec-hygiene 6, test-coverage 3, exception-path 2 — thirteen
+of eighteen are the fixture's prose disagreeing with the tree, and the single
+`major` is one of them. That is the same distribution PR #2232's revisit
+recorded three entries above, on a completely different code surface, and it
+points the same way: the recurring defect is not missed code behaviour, it is
+narrative drift, and narrative drift is checkable by machine. The sharpest
+evidence here is the post-ceiling fix pass itself. It was adjudicated by three
+independent `verifier` batches specifically to substitute for the review round
+the ceiling forbade — and those three found **four more false sentences the fix
+pass had just written**, including a test docstring attributing a fix to the
+wrong commit, an arithmetically impossible test count, and a SHA pin that made a
+previously-true vague sentence false. Adding reviewer seats has not stopped this
+class in five rounds; a mechanical fixture check plausibly would. That is an
+observation about Evidence Floor clause coverage, consistent with #2232's, and
+it is not a rotation decision.
+
+Decision: **keep**, unchanged. 258 vs 270 is not "catches concentrate in core",
+and this sample contributes nothing either way on the rotation question because
+it never tested it. Seat caps unchanged. Issue-delivery authorization does not
+authorize policy narrowing.
