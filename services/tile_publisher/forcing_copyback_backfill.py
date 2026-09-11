@@ -281,11 +281,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _require_backfill_schema(session: Session) -> None:
+    has_legacy = _has_table(session, "hydro", "river_timeseries_legacy")
     required_tables = (
         ("hydro", "hydro_run"),
         ("hydro", "river_timeseries"),
         ("met", "forcing_version"),
     )
+    if has_legacy:
+        required_tables += (("hydro", "river_timeseries_legacy"),)
     missing_tables = [
         f"{schema}.{table_name}"
         for schema, table_name in required_tables
@@ -298,10 +301,9 @@ def _require_backfill_schema(session: Session) -> None:
             details={"missing_tables": missing_tables},
         )
 
-    # Kept in lockstep with _DISCOVER_BACKFILL_RUNS_SQL: exactly the columns that
-    # statement references per relation (#1442). rt.run_id left the statement
-    # when the correlated probe moved to rt.run_key = h.run_key, and rt.variable
-    # stays only as the transitional pushdown aid (removed with #1342).
+    # Pre-expand discovery still needs the variable pushdown aid. Expanded
+    # catalogs retain that text contract on _legacy, not the narrow canonical.
+    # Discovery routing itself remains a separate cutover.
     required_columns = {
         ("hydro", "hydro_run"): {
             "run_id",
@@ -321,6 +323,9 @@ def _require_backfill_schema(session: Session) -> None:
             "lineage_json",
         },
     }
+    if has_legacy:
+        required_columns[("hydro", "river_timeseries")].remove("variable")
+        required_columns[("hydro", "river_timeseries_legacy")] = {"run_key", "variable", "variable_e", "value"}
     missing_columns: dict[str, list[str]] = {}
     for (schema, table_name), columns in required_columns.items():
         existing = _table_columns(session, schema, table_name)

@@ -342,6 +342,7 @@ def test_db_discovery_filters_eligible_qdown_runs_and_counts_joined_forcing_vers
 
 def test_discovery_sql_drives_from_hydro_run_with_correlated_qdown_exists() -> None:
     sql = backfill_module._DISCOVER_BACKFILL_RUNS_SQL
+    assert sha256(sql.encode()).hexdigest() == "3f1037b6ad3be99fb448a1c6252eab893d2219cc880d254e0c9a0df377130116"
 
     assert "FROM hydro.hydro_run h" in sql
     assert "EXISTS (" in sql
@@ -365,6 +366,7 @@ def test_discovery_sql_drives_from_hydro_run_with_correlated_qdown_exists() -> N
     [
         ("river_timeseries", "run_key"),
         ("river_timeseries", "variable_e"),
+        ("river_timeseries", "variable"),
         ("hydro_run", "run_key"),
     ],
 )
@@ -399,6 +401,35 @@ def test_backfill_schema_guard_names_the_missing_identity_column(
 
     assert excinfo.value.error_code == "BACKFILL_SCHEMA_MISSING"
     assert excinfo.value.details == {"missing_columns": {f"hydro.{table_name}": [column]}}
+
+
+@pytest.mark.parametrize("missing", [None, "legacy_variable", "canonical"])
+def test_backfill_expanded_catalog_guard(tmp_path: Path, missing: str | None) -> None:
+    from sqlalchemy.orm import Session
+
+    engine, db_path = _init_db(tmp_path)
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE river_timeseries_legacy AS SELECT * FROM river_timeseries"))
+        connection.execute(text("ALTER TABLE river_timeseries DROP COLUMN variable"))
+        if missing == "legacy_variable":
+            connection.execute(text("ALTER TABLE river_timeseries_legacy DROP COLUMN variable"))
+        elif missing == "canonical":
+            connection.execute(text("DROP TABLE river_timeseries"))
+    with Session(engine) as session:
+        session.execute(text("ATTACH DATABASE :path AS hydro"), {"path": str(db_path)})
+        session.execute(text("ATTACH DATABASE :path AS met"), {"path": str(db_path)})
+        if missing is None:
+            backfill_module._require_backfill_schema(session)
+        else:
+            with pytest.raises(backfill_module.BackfillError) as excinfo:
+                backfill_module._require_backfill_schema(session)
+            assert excinfo.value.error_code == "BACKFILL_SCHEMA_MISSING"
+            if missing == "legacy_variable":
+                assert excinfo.value.details == {
+                    "missing_columns": {"hydro.river_timeseries_legacy": ["variable"]}
+                }
+            else:
+                assert excinfo.value.details == {"missing_tables": ["hydro.river_timeseries"]}
 
 
 def test_cli_dry_run_emits_json_and_writes_nothing(tmp_path: Path) -> None:

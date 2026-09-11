@@ -198,6 +198,17 @@ QUERY_TARGETS = {
 }
 
 
+# Explicit-store fixture for the I7 catalog; production validation keeps the
+# pre-expand QUERY_TARGETS default until activation.
+HYDRO_MAP_PLAN_LINES_BY_STORE = {
+    "legacy": QUERY_TARGETS["hydro_map"]["plan_lines"],
+    "narrow": (
+        "Index Scan using river_ts_segment_time_key_idx on hydro.river_timeseries",
+        "  Index Cond: (river_segment_key = ... AND variable_e = ... AND valid_time = ...)",
+    ),
+}
+
+
 class ProductionScaleValidationError(RuntimeError):
     def __init__(self, error_code: str, message: str) -> None:
         super().__init__(message)

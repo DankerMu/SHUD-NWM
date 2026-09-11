@@ -31,6 +31,10 @@ def main() -> int:
             (MODEL_ID, "qhh_%_smoke"),
             "run_id",
         )
+        river_runs = _river_run_groups(cur, run_ids)
+        if river_runs is None:
+            print(json.dumps({"status": "error", "error_code": "INVALID_TIMESERIES_STORE"}))
+            return 1
         forcing_ids = _list_values(
             cur,
             """
@@ -50,8 +54,16 @@ def main() -> int:
             deleted,
             "hydro.river_timeseries",
             "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))",
-            (run_ids,),
+            (river_runs["canonical"],),
         )
+        if river_runs["legacy"]:
+            _delete(
+                cur,
+                deleted,
+                "hydro.river_timeseries_legacy",
+                "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))",
+                (river_runs["legacy"],),
+            )
         _delete(cur, deleted, "hydro.state_snapshot", "model_id = %s OR run_id = ANY(%s)", (MODEL_ID, run_ids))
         _delete(cur, deleted, "ops.qc_result", _qc_where(), (MODEL_ID, run_ids, forcing_ids, "qhh_%_smoke"))
         _delete(cur, deleted, "ops.pipeline_job", "run_id = ANY(%s)", (run_ids,))
@@ -127,6 +139,32 @@ def main() -> int:
     )
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return 0
+
+
+def _river_run_groups(cur: Any, run_ids: list[str]) -> dict[str, list[str]] | None:
+    cur.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'hydro' AND table_name = 'hydro_run'
+              AND column_name = 'timeseries_store'
+        ) AS has_store
+        """
+    )
+    if not cur.fetchone()["has_store"]:
+        return {"canonical": run_ids, "legacy": []}
+    cur.execute(
+        "SELECT run_id, timeseries_store FROM hydro.hydro_run WHERE run_id = ANY(%s)",
+        (run_ids,),
+    )
+    stores = {row["run_id"]: row["timeseries_store"] for row in cur.fetchall()}
+    groups: dict[str, list[str]] = {"canonical": [], "legacy": []}
+    for run_id in run_ids:
+        store = stores.get(run_id)
+        if store not in ("legacy", "narrow"):
+            return None
+        groups["legacy" if store == "legacy" else "canonical"].append(run_id)
+    return groups
 
 
 def _load_ids(cur: Any) -> dict[str, str]:

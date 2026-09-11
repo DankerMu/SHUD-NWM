@@ -26,6 +26,22 @@ def main() -> int:
         )
         run = dict(cur.fetchone() or {})
         cur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'hydro' AND table_name = 'hydro_run'
+                  AND column_name = 'timeseries_store'
+            ) AS has_store
+            """
+        )
+        store = None
+        if cur.fetchone()["has_store"]:
+            cur.execute("SELECT timeseries_store FROM hydro.hydro_run WHERE run_id = %s", (run_id,))
+            store = (cur.fetchone() or {}).get("timeseries_store")
+            if store not in ("legacy", "narrow"):
+                print(json.dumps({"status": "error", "error_code": "INVALID_TIMESERIES_STORE"}))
+                return 1
+        cur.execute(
             # #1442: counted and filtered on the surrogate keys. The smoke
             # database has no compressed chunks, so no transitional text
             # pushdown aid applies here.
@@ -38,6 +54,16 @@ def main() -> int:
                    max(value) AS max_m3s,
                    avg(value) AS avg_m3s
             FROM hydro.river_timeseries
+            WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)
+            """ if store != "legacy" else """
+            SELECT count(*) AS rows,
+                   count(DISTINCT river_segment_key) AS segment_count,
+                   min(valid_time) AS first_valid_time,
+                   max(valid_time) AS last_valid_time,
+                   min(value) AS min_m3s,
+                   max(value) AS max_m3s,
+                   avg(value) AS avg_m3s
+            FROM hydro.river_timeseries_legacy
             WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)
             """,
             (run_id,),

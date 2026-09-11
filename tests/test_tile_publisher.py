@@ -43,6 +43,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -1931,6 +1932,23 @@ def test_publish_qdown_missing_hydro_run_table_raises_schema_missing(tmp_path: A
             publisher._publish_qdown_from_database(session, CYCLE_ID)
 
     assert excinfo.value.error_code == "DELIVERY_SCHEMA_MISSING"
+
+
+@pytest.mark.parametrize("legacy_present", [False, True])
+def test_publish_qdown_river_catalog_window(tmp_path: Any, legacy_present: bool) -> None:
+    publisher = _publisher(tmp_path)
+    with _store() as session:
+        if legacy_present:
+            session.execute(text("ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_legacy"))
+            # This private seam exposes the driver error; the public entrypoint
+            # wraps it as QDOWN_PUBLISH_FAILED. Discovery routing is I7.
+            with pytest.raises(OperationalError, match="no such table: hydro.river_timeseries"):
+                publisher._publish_qdown_from_database(session, CYCLE_ID)
+        else:
+            session.execute(text("DROP TABLE hydro.river_timeseries"))
+            with pytest.raises(PublishError) as excinfo:
+                publisher._publish_qdown_from_database(session, CYCLE_ID)
+            assert excinfo.value.error_code == "DELIVERY_SCHEMA_MISSING"
 
 
 # --------------------------------------------------------------------------- #
