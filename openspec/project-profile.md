@@ -12,6 +12,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Model workers: `model_registry`, `shud_runtime`, `output_parser`, `flood_frequency`
 - Shared model state: `packages/common`, `nhms-state`
 - Domain engines: `SHUD/`, `rSHUD/`, `AutoSHUD/`, `shud`
+- Node-27 deployment: database container, physical PGDATA placement, user-service maintenance fences
 
 ## Contracts
 
@@ -35,6 +36,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - Manifest/QC evidence bound to the producing run and provider snapshot
 - Published artifact identity across DB rows, object URIs, and frontend display
 - SHUD required-file content integrity before package source identity/publication: bounded verified reads and zero partial object-store output
+- Whole-cluster physical relocation: clean stop, complete-copy proof, exact container rebind, and stale rollback after write release
 
 ## Typical evidence
 
@@ -65,6 +67,7 @@ Active profile for `codex-codeagent-workflow`. It supplements
 - JSON Schema/examples -> CI `check-jsonschema` metaschema/example loop -> every example validates against its named schema.
 - OpenSpec -> `openspec validate <change> --strict --no-interactive` -> strict-valid change.
 - DB migration/Timescale behavior -> node-27 real-DB pytest/catalog query -> committed live receipt or captured query output.
+- Physical PGDATA tooling -> exact-image disposable node-27 copy/rebind/rollback oracle; actual production hardware/performance and cutover remain separately authorized live gates
 - Display/API/frontend -> node-27 live receipt + frontend test/build -> C1-C4 receipt and passing build.
 - Slurm/SHUD scheduling -> node-22 runtime receipt -> terminal Slurm/SHUD evidence; only when scheduling/runtime changes.
 
