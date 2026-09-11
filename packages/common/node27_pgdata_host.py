@@ -92,6 +92,80 @@ def path_identity(path: Path) -> list[int]:
         os.close(fd)
 
 
+def _runtime_virtualenv_link(root: Path, host: Host) -> dict[str, Any] | None:
+    """Observe only the conventional environment link, never its package tree."""
+
+    def link_identity(info: os.stat_result) -> list[int]:
+        return [
+            info.st_dev,
+            info.st_ino,
+            info.st_uid,
+            info.st_gid,
+            info.st_mode,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ]
+
+    def directory_identity(info: os.stat_result) -> list[int]:
+        return [info.st_dev, info.st_ino, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)]
+
+    parent_fd = open_directory_no_follow(root)
+    try:
+        parent = os.fstat(parent_fd)
+        try:
+            before = os.stat(".venv", dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISLNK(before.st_mode):
+            return None
+        require(
+            not host.command(["/usr/bin/git", "-C", str(root), "ls-files", "--cached", "-z", "--", ".venv"]).stdout,
+            "runtime virtualenv link must be untracked",
+        )
+        destination = os.readlink(".venv", dir_fd=parent_fd)
+        target = Path(destination)
+        require(
+            destination and ".." not in target.parts and target.anchor in {"", "/"},
+            "unsupported runtime virtualenv link destination",
+        )
+        if not target.is_absolute():
+            target = root / target
+        # A direct directory destination is supported; no additional links in
+        # its ancestry are followed. Virtualenv permissions are not secret-file
+        # permissions, and its live directory timestamps are not stable identity.
+        target_fd = open_directory_no_follow(target)
+        try:
+            target_identity = directory_identity(os.fstat(target_fd))
+            require(
+                os.readlink(".venv", dir_fd=parent_fd) == destination
+                and link_identity(os.stat(".venv", dir_fd=parent_fd, follow_symlinks=False)) == link_identity(before),
+                "runtime virtualenv link changed during capture",
+            )
+            check_fd = open_directory_no_follow(target)
+            try:
+                require(
+                    directory_identity(os.fstat(check_fd)) == target_identity
+                    and directory_identity(os.fstat(target_fd)) == target_identity,
+                    "runtime virtualenv target changed during capture",
+                )
+            finally:
+                os.close(check_fd)
+            require(
+                directory_identity_no_follow(root) == (parent.st_dev, parent.st_ino),
+                "runtime virtualenv parent changed during capture",
+            )
+            return {
+                "link": link_identity(before),
+                "destination": destination,
+                "target_directory": target_identity,
+            }
+        finally:
+            os.close(target_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def covered_tree(path: Path) -> None:
     """Stream directory entries, refusing links, mount crossings and special files.
 
@@ -577,6 +651,7 @@ class Host:
 
     def runtime_identity(self, root: Path) -> dict[str, Any]:
         identity = path_identity(root)
+        virtualenv_link = _runtime_virtualenv_link(root, self)
         head = self.command(["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD"]).stdout.strip()
         require(re.fullmatch(r"[0-9a-f]{40}", head), "runtime Git identity is unavailable")
         paths = self.command(
@@ -588,9 +663,22 @@ class Host:
                 continue
             path = root / name
             require(path.is_relative_to(root) and ".." not in Path(name).parts, "unsafe runtime path")
+            if name == ".venv" and virtualenv_link is not None:
+                continue
             files[name] = digest(read_bytes_durable_no_follow(path, max_bytes=64 * 1024 * 1024))
         require(files, "runtime tracked code is absent")
-        return {"directory": identity, "head": head, "tree_digest": digest(json.dumps(files, sort_keys=True).encode())}
+        require(
+            _runtime_virtualenv_link(root, self) == virtualenv_link and path_identity(root) == identity,
+            "runtime virtualenv or directory changed during capture",
+        )
+        result = {
+            "directory": identity,
+            "head": head,
+            "tree_digest": digest(json.dumps(files, sort_keys=True).encode()),
+        }
+        if virtualenv_link is not None:
+            result["virtualenv_link"] = virtualenv_link
+        return result
 
     def display_ready(self, state: dict[str, Any]) -> None:
         frozen = state["units"].get(DISPLAY, {})
