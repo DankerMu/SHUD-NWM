@@ -4358,14 +4358,16 @@ multi-round merged PRs. Later-round attribution moves by eighteen, all on one
 side: core=258, rotated=270, phase=57, skipped=15. The rotated share of
 later-round catches falls from 52.9% to 51.1%.
 
-**That movement is a seat-plan artifact, not a finding about lenses.** PR #2201
-ran the full five rounds. Rotated seats — `invariant-state`,
-`security-perf+integration` — were seated only in round 1. Rounds 3, 4 and 5 ran
-pinned core-only (`test-evidence`, `spec-compliance`, `correctness`). Every one
-of the eighteen attributable catches therefore *had* to be core; no rotated lens
-held a later-round seat in which it could have caught anything. A sample that
-never seats a lens cannot be evidence that the lens does not earn its seat. The
-counter moved because of who was in the room, not because of what was found.
+**That movement is an arithmetic certainty, not a finding about lenses.**
+`loop_log_audit.core_lens_set` defines this PR's core set as the union of its
+own round-1 seats, split on `+`. PR #2201's round 1 ran at the
+`broad-expanded` cap of four seats and covered **all six lenses**
+(`correctness`, `invariant-state`, `test-evidence+spec-compliance`,
+`security-perf+integration`). There is therefore no rotated-in lens for this PR
+at all: every later-round catch it could possibly have produced scores as core,
+whatever the later rounds seated and whatever they found. The eighteen went to
+core by construction. The counter moved because of how this PR's round 1 was
+seated, not because of what any round found.
 
 Two further limits on this line. Rounds 1–3 contributed 20 of the ledger's 38
 verified findings (9/6/5) but are counted without attribution: their verifier
@@ -4379,8 +4381,8 @@ What the sample does say is about failure *class*. The eighteen split
 doc-truthfulness 7, spec-hygiene 6, test-coverage 3, exception-path 2 — thirteen
 of eighteen are the fixture's prose disagreeing with the tree, and the single
 `major` is one of them. That is the same distribution PR #2232's revisit
-recorded three entries above, on a completely different code surface, and it
-points the same way: the recurring defect is not missed code behaviour, it is
+recorded in the entry immediately above, on a completely different code
+surface, and it points the same way: the recurring defect is not missed code behaviour, it is
 narrative drift, and narrative drift is checkable by machine. The sharpest
 evidence here is the post-ceiling fix pass itself. It was adjudicated by three
 independent `verifier` batches specifically to substitute for the review round
@@ -4394,5 +4396,21 @@ it is not a rotation decision.
 
 Decision: **keep**, unchanged. 258 vs 270 is not "catches concentrate in core",
 and this sample contributes nothing either way on the rotation question because
-it never tested it. Seat caps unchanged. Issue-delivery authorization does not
-authorize policy narrowing.
+a full-coverage round 1 makes it structurally incapable of producing a rotated
+catch. Seat caps unchanged. Issue-delivery authorization does not authorize
+policy narrowing.
+
+### Correction, same day, before the next issue
+
+The two paragraphs above were corrected within the hour, and the defect is
+worth recording because it is the exact class the entry itself is about. As
+first merged (`7d1fca33`) the entry said rotated seats "were seated only in
+round 1" and named `invariant-state` and `security-perf+integration` as
+rotated. Both halves are false. `invariant-state` also sat in round 2 — the
+loop line's own `round_lenses[1]` says so — and, more fundamentally, a lens
+seated in round 1 *is* core under `core_lens_set`, so neither lens was ever
+rotated for this PR. The original sentence reached the ledger because the entry
+was written with no review seat on it, which is precisely the drift the entry
+argues is better caught by machine than by another reviewer. Also corrected:
+PR #2232's revisit is the entry immediately above, not three above. The keep
+decision and the audit figures are unchanged; only the explanation was wrong.
