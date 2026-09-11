@@ -712,15 +712,15 @@ def test_every_critical_recommendation_gets_its_own_line(
     receipt = _receipt_with(
         _recommendation("critical", "ROOT_FREE_BELOW_CRITICAL"),
         _recommendation("warning", "TEMP_BYTES_ABOVE_WARNING"),
-        _recommendation("critical", "DATABASE_SIZE_ABOVE_CRITICAL"),
+        _recommendation("critical", "PROJECTED_PEAK_EXCEEDS_HOME_FREE"),
     )
 
     rc, _out, err = _run_main(monkeypatch, capsys, receipt, summary_path)
 
     assert rc == 1
-    assert err.splitlines() == [
+    assert [line for line in err.splitlines() if line.startswith(_CRITICAL_ANCHOR)] == [
         f"{_CRITICAL_ANCHOR}ROOT_FREE_BELOW_CRITICAL",
-        f"{_CRITICAL_ANCHOR}DATABASE_SIZE_ABOVE_CRITICAL",
+        f"{_CRITICAL_ANCHOR}PROJECTED_PEAK_EXCEEDS_HOME_FREE",
     ]
 
 

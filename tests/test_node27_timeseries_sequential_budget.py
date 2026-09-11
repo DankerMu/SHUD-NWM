@@ -433,6 +433,7 @@ def test_partial_assembly_and_direct_nondefault_sibling_declaration_fail_closed(
                 "tests/test_node27_timeseries_sequential_budget.py",
                 "tests/test_node27_timeseries_sequential_runner_config.py",
                 "tests/test_node27_timeseries_sequential_wrappers.py",
+                "tests/test_node27_lifecycle_contract.py",
             },
         ),
         (
@@ -452,6 +453,7 @@ def test_partial_assembly_and_direct_nondefault_sibling_declaration_fail_closed(
                 "tests/test_node27_timeseries_sequential_budget.py",
                 "tests/test_node27_timeseries_sequential_runner_config.py",
                 "tests/test_node27_timeseries_sequential_wrappers.py",
+                "tests/test_node27_lifecycle_contract.py",
             },
         ),
         (

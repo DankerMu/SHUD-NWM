@@ -70,6 +70,7 @@ from urllib.parse import urlsplit
 import jsonschema
 
 from packages.common.display_watermark import fetch_display_watermark
+from packages.common.node27_timeseries_discovery import CANONICAL_HYPERTABLES, RUNTIME_HYPERTABLES_SQL
 from packages.common.node27_timeseries_lifecycle_lock import (
     LifecycleLockError,
     acquire_timeseries_lifecycle_lock,
@@ -165,9 +166,7 @@ _DEFAULT_LOCK_TIMEOUT_MS = 240_000
 # `state_snapshot`, QC/lineage) MUST NEVER appear here. Structural
 # guarantee: `drop_chunks` only accepts hypertables, and the two hypertables
 # below are the ONLY targets.
-TARGET_HYPERTABLES: frozenset[tuple[str, str]] = frozenset(
-    {("hydro", "river_timeseries"), ("met", "forcing_station_timeseries")}
-)
+TARGET_HYPERTABLES = frozenset(CANONICAL_HYPERTABLES)
 
 # H6 wire-format codes — byte-identical across:
 # * this module (``WIRE_CODES`` frozenset),
@@ -588,13 +587,12 @@ DropChunk = Callable[["RetentionConfig", ChunkRow], None]
 # from compression's strict `<`: a chunk with `range_end == cutoff` has all
 # row times strictly less than cutoff and therefore satisfies "entire range
 # older than window" per spec §Window and mechanism.
-_CHUNK_QUERY = """
+_CHUNK_QUERY = f"""
 SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name,
        range_start, range_end, is_compressed
 FROM timescaledb_information.chunks
 WHERE (hypertable_schema, hypertable_name) IN (
-    ('hydro', 'river_timeseries'),
-    ('met', 'forcing_station_timeseries')
+    {RUNTIME_HYPERTABLES_SQL}
 )
   AND range_end <= %s
 ORDER BY hypertable_schema, hypertable_name, range_end ASC
@@ -1121,7 +1119,7 @@ def run_retention(
     reference_time = (reference_time or now).astimezone(UTC)
 
     def _build(outcome: str, **kwargs: Any) -> dict[str, Any]:
-        return build_receipt(
+        receipt = build_receipt(
             outcome,
             now,
             reference_time=reference_time,
@@ -1129,6 +1127,9 @@ def run_retention(
             archive_gate=config.archive_gate,
             **kwargs,
         )
+        if legacy_chunks:
+            receipt["legacy_chunks"] = legacy_chunks
+        return receipt
 
     # Phase 1: enumerate eligible chunks.
     # There is no archive coverage object any more and therefore no
@@ -1137,6 +1138,10 @@ def run_retention(
     # any other (runbook §8.5).
     cutoff = reference_time - timedelta(days=config.window_days)
     eligible = fetch_chunks(config, cutoff)
+    legacy_chunks: dict[str, int] = {}
+    for chunk in eligible:
+        if chunk.hypertable_name.endswith("_legacy"):
+            legacy_chunks[chunk.hypertable_key] = legacy_chunks.get(chunk.hypertable_key, 0) + 1
 
     # Phase 2: apply H3 per-tick bound.
     selected = list(eligible[: config.per_tick_bound])

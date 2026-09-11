@@ -5,6 +5,13 @@
   "additionalProperties": false,
   "required": ["schema_version", "generated_at", "mode", "outcome", "archive_gate"],
   "properties": {
+    "legacy_chunks": {
+      "type": "object",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^(hydro\\.river_timeseries_legacy|met\\.forcing_station_timeseries_legacy)$": {"type": "integer", "minimum": 0}
+      }
+    },
     "schema_version": {"const": "1.1"},
     "generated_at": {"type": "string", "format": "date-time"},
     "reference_time": {"type": "string", "format": "date-time"},

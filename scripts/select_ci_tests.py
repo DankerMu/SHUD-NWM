@@ -2753,6 +2753,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "packages/common/node27_timeseries_discovery.py",
+        (
+            "tests/test_node27_timeseries_discovery.py",
+            "tests/test_node27_lifecycle_contract.py",
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+            "tests/test_node27_timeseries_retention.py",
+        ),
+    ),
+    PathTestRule(
         "scripts/node27_timeseries_compression.py",
         (
             "tests/test_node27_timeseries_compression.py",
@@ -2764,6 +2774,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1774: this lane runs as a non-superuser; a superuser-gated
             # READ added here would fail SILENTLY.
             "tests/test_node27_write_roles.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
     ),
     PathTestRule(
@@ -3020,6 +3031,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_sequential_budget.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
             "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
     ),
     PathTestRule(
@@ -3041,6 +3053,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_sequential_budget.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
             "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_lifecycle_contract.py",
             # #1895 task 4.0 second leg: the live-rollout section is the review
             # gate for the two new read-only CLIs and the installer/runner
             # contracts it binds; a section-only PR must run its contract suite
@@ -4149,6 +4162,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     # The governance runtime consumes the installer evidence boundary.  Its own
@@ -4158,6 +4172,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(
@@ -4165,6 +4180,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(
@@ -4172,6 +4188,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(
@@ -4186,6 +4203,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(

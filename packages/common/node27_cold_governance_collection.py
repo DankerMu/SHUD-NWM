@@ -9,8 +9,73 @@ from __future__ import annotations
 
 import os
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
+from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
+
+WORKING_SET_SQL = f"""
+SELECT COALESCE(sum(pg_total_relation_size(
+           format('%I.%I', chunk_schema, chunk_name)::regclass))
+           FILTER (WHERE NOT is_compressed), 0) AS uncompressed_bytes,
+       COALESCE(sum(pg_total_relation_size(
+           format('%I.%I', chunk_schema, chunk_name)::regclass))
+           FILTER (WHERE range_start >= CURRENT_TIMESTAMP - interval '7 days'
+                     AND range_start < CURRENT_TIMESTAMP), 0) / 7.0 AS daily_ingest_bytes,
+       min(range_end) FILTER (WHERE NOT is_compressed) AS oldest_uncompressed_range_end
+FROM timescaledb_information.chunks
+WHERE (hypertable_schema, hypertable_name) IN ({RUNTIME_HYPERTABLES_SQL})
+"""
+
+
+def collect_working_set(database_url: str | None, home_free_bytes: int | None) -> dict[str, Any]:
+    """Observe chunk sizes without scanning facts; never persist database errors."""
+    sample: dict[str, Any] = {
+        "uncompressed_bytes": None,
+        "daily_ingest_bytes": None,
+        "next_compressible_at": None,
+        "home_free_bytes": home_free_bytes,
+        "watermark": None,
+        "projection_status": "catalog_unavailable",
+    }
+    connection = None
+    try:
+        import psycopg2
+        import psycopg2.extras
+
+        lag = int(os.environ["NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"])
+        if lag < 1:
+            raise ValueError("lag must be positive")
+        connection = psycopg2.connect(
+            database_url, connect_timeout=5, cursor_factory=psycopg2.extras.RealDictCursor
+        )
+        connection.set_session(readonly=True, autocommit=False)
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL statement_timeout = '20s'")
+            cursor.execute(WORKING_SET_SQL)
+            row = cursor.fetchone()
+        sample["uncompressed_bytes"] = int(row["uncompressed_bytes"])
+        sample["daily_ingest_bytes"] = float(row["daily_ingest_bytes"])
+        oldest_end = row["oldest_uncompressed_range_end"]
+        if oldest_end is None:
+            sample["projection_status"] = "no_uncompressed_chunk"
+            return sample
+        sample["next_compressible_at"] = (oldest_end + timedelta(seconds=lag)).isoformat()
+    except Exception:
+        return sample
+    finally:
+        if connection is not None:
+            connection.close()
+    try:
+        sample["watermark"] = fetch_display_watermark(database_url).isoformat()
+    except DisplayWatermarkError:
+        sample["projection_status"] = "watermark_unavailable"
+    else:
+        sample["projection_status"] = "ok"
+    return sample
+
 
 DEFAULT_REPO_RELATIVE_SIZE_TARGETS = (
     "data",
@@ -205,11 +270,11 @@ def collect_postgres(database_url: str | None) -> dict[str, Any]:
         import psycopg2
         import psycopg2.extras
     except Exception as error:  # pragma: no cover - environment dependent
-        return {"status": "blocked", "reason": "psycopg2_unavailable", "error": str(error)}
+        return {"status": "blocked", "reason": "psycopg2_unavailable", "error": type(error).__name__}
     try:
         connection = psycopg2.connect(database_url, cursor_factory=psycopg2.extras.RealDictCursor)
     except Exception as error:
-        return {"status": "blocked", "reason": "connection_failed", "error": str(error)}
+        return {"status": "blocked", "reason": "connection_failed", "error": type(error).__name__}
     result: dict[str, Any] = {"status": "ok"}
     try:
         connection.autocommit = True
@@ -398,9 +463,9 @@ def collect_postgres(database_url: str | None) -> dict[str, Any]:
                     """,
                 )
             except Exception as error:
-                result["timescale_status"] = {"status": "blocked", "error": str(error)}
+                result["timescale_status"] = {"status": "blocked", "error": type(error).__name__}
     except Exception as error:
-        result = {"status": "blocked", "reason": "query_failed", "error": str(error)}
+        result = {"status": "blocked", "reason": "query_failed", "error": type(error).__name__}
     finally:
         connection.close()
     return result

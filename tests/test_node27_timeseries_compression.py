@@ -1675,11 +1675,15 @@ def test_env_template_literals_survive_the_catch_up_invariant(tmp_path: Path) ->
             "WRAPPER_WALL_SECONDS",
             "SYSTEMD_WALL_SECONDS",
             "PER_TICK_BOUND",
+            "LAG_SECONDS",
         )
     }
     config = compression.config_from_args(_args(), _base_env(tmp_path, override=override))
     assert config.compress_timeout_ms == int(override["NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS"])
     assert config.per_tick_bound == int(override["NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND"])
+    assert config.lag_seconds == 172800
+    assert config.per_tick_bound == 4
+    assert "one chunk width" not in text
 
 
 # ---------------------------------------------------------------------------

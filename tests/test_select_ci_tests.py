@@ -194,29 +194,36 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         "packages/common/node27_cold_governance.py": {
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         },
         "packages/common/node27_cold_governance_collection.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "packages/common/node27_cold_governance_cli.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "packages/common/node27_cold_governance_history.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "packages/common/node27_cold_governance_runtime.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "scripts/node27_resource_governance.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "schemas/node27_cold_governance_receipt.schema.json": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
         },
         "schemas/examples/node27_cold_governance_receipt.example.json": {
             "tests/test_node27_cold_governance.py",
@@ -238,6 +245,7 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         "infra/env/node27-resource-governance.example": {
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         },
         "infra/systemd/nhms-node27-resource-governance.service": {
             "tests/test_node27_cold_governance.py",
@@ -254,9 +262,14 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         # #1647: the compression runner owns one half of the byte-identity
         # pin between `_CHUNK_IDENT_RE` and the autopipeline
         # `_STATS_GUARD_IDENT_RE`; the assertion lives in the bounds suite.
+        "packages/common/node27_timeseries_discovery.py": {
+            "tests/test_node27_timeseries_discovery.py",
+            "tests/test_node27_lifecycle_contract.py",
+        },
         "scripts/node27_timeseries_compression.py": {
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_autopipeline_connection_bounds.py",
+            "tests/test_node27_lifecycle_contract.py",
         },
     }
 

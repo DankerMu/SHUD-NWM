@@ -3,7 +3,7 @@
 
 Task 4.2 of the ``tier-node27-timeseries-storage`` OpenSpec change
 (issue #851). Selects terminal chunks — those whose ``range_end`` is older
-than a configurable lag (default 7 days, one chunk width) — on the two
+than a configurable lag (default 2 days) — on the two
 detail hypertables ``hydro.river_timeseries`` and
 ``met.forcing_station_timeseries`` and calls ``compress_chunk`` on at most
 ``per_tick_bound`` of them per invocation. Never writes to the active
@@ -41,6 +41,10 @@ from packages.common.evidence_io import (
     inspect_bounded_file_no_follow,
     normalized_absolute_path,
 )
+from packages.common.node27_timeseries_discovery import (
+    CANONICAL_HYPERTABLES,
+    RUNTIME_HYPERTABLES_SQL,
+)
 from packages.common.node27_timeseries_lifecycle_lock import (
     LifecycleLockError,
     acquire_timeseries_lifecycle_lock,
@@ -68,10 +72,7 @@ PUBLISH_LOCK_TIMEOUT_SECONDS = 5.0
 # The two detail hypertables gated by D3. Ordering here is the tie-break in
 # chunk selection and per-table totals — do not reorder without matching the
 # schema example.
-HYPERTABLES: tuple[tuple[str, str], ...] = (
-    ("hydro", "river_timeseries"),
-    ("met", "forcing_station_timeseries"),
-)
+HYPERTABLES = CANONICAL_HYPERTABLES
 
 # Statement timeouts. Chunk-catalog lookups against
 # ``timescaledb_information.chunks`` are catalog-only (no hypertable row
@@ -423,13 +424,12 @@ def acquire_lock(path: Path) -> int | None:
 # is_compressed = false is an explicit stale-state guard so re-running the
 # runner over an already-compressed chunk is a no-op (see design "Workflow
 # Fixture: Issue #851" boundary-surface checklist).
-_CHUNK_QUERY = """
+_CHUNK_QUERY = f"""
 SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name,
        range_start, range_end, is_compressed
 FROM timescaledb_information.chunks
 WHERE (hypertable_schema, hypertable_name) IN (
-    ('hydro', 'river_timeseries'),
-    ('met', 'forcing_station_timeseries')
+    {RUNTIME_HYPERTABLES_SQL}
 )
   AND is_compressed = false
 ORDER BY hypertable_schema, hypertable_name, range_end ASC
@@ -769,6 +769,8 @@ def build_receipt(
         per_tick_bound=config.per_tick_bound,
     )
     totals = _blank_totals()
+    for chunk in chunks:
+        totals.setdefault(chunk.hypertable_key, {"before_bytes": 0, "after_bytes": 0, "chunks_compressed": 0})
     # Track whether any per-table totals became meaningfully aware of
     # ``after_bytes``. If nothing was compressed we keep the dry-run
     # convention of ``after_bytes = null`` (schema allows it).

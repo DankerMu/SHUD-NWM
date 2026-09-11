@@ -2941,8 +2941,8 @@ against the committed `.example` templates as of 2026-08-01:
   it. See §4 "Per-tick capacity (live state 2026-08-14, decided in #1237)".
 - **Compression chunk-selection lag.**
   `NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS` reads `172800` (2 days) on the
-  box (re-confirmed 2026-08-14) while the committed template ships `604800`
-  (7 days). This gap is a **recorded decision, not drift**: the 2026-08-07
+  box (re-confirmed 2026-08-14). The template now also ships `172800` under
+  #1985; its former `604800` (7 days) gap was a **recorded decision, not drift**:
   short-lag regime taken after the md0 outage left `/home` carrying the whole
   uncompressed steady state alone (backup `*.bak-lag7d-20260807`; rollback
   condition = md0 recovery restoring a separate device for large chunks). The
@@ -2987,6 +2987,28 @@ tables produce 3-day chunks, their steady arrival is approximately
 `2 × 7 / 3` chunks/week, with transitional chunk boundaries possible. Recheck
 per-chunk duration, whole-tick timeout and peak disk headroom on the new mix;
 do not change lag or per-tick bounds solely from the smaller interval.
+
+**One-day narrow-store transition (#1985, design D7; not a new live measurement).**
+After expand, each canonical table supplies one terminal chunk/day: throughput
+is **2/day < bound 4 × one daily tick**. Four narrow one-day chunks at about
+7.5 minutes each take about 30 minutes, inside the unchanged **65-minute
+whole-tick wall**, with room for the historical non-compress residual below.
+The second constraint still matters: the design's worst mixed tick includes
+one legacy 7-day chunk of 508 GB, about `508 × 6 s ≈ 51 min`, plus narrow
+one-day chunks. Even two narrow chunks add about 15 minutes before overhead,
+already exceeding 65 minutes; one adds about 7.5 minutes, leaving only about
+6.5 minutes (the historical residual alone was about 380 seconds). That is
+not a safe four-chunk catch-up recipe.
+
+Therefore **compress the legacy backlog first under bound 1**, before expand,
+using the controlled §4.5 procedure. After rename, legacy siblings are a
+**write-frozen finite backlog**, never steady arrivals. The 2026-08-14 pair
+(1836 seconds), approximately 6.0 s/GB and 380-second residual below remain
+historical 7-day evidence, not measurements of the new geometry.
+Re-derive both constraints after a chunk-interval change, retention-window
+change, or timer disablement (which can build backlog). With that pre-expand
+drain, the **daily timer remains sufficient; no cadence change** is required.
+This is a template/runbook change only: it does not rewrite live node-27 env.
 
 `NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND` caps how many chunks one timer
 tick compresses. **The decided value is 4** — a capacity target derived from
