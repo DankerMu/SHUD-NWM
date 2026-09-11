@@ -7,15 +7,15 @@ Fixture approval: `PgdataFixture` approved after the second bounded repair; B1-B
 
 ## 2. Implementation
 
-- [ ] 2.1 Implement explicit plan/prepare/copy/activate/rollback/release with safe persistent state, fencing and exact topology checks.
+- [x] 2.1 Implement explicit plan/prepare/copy/activate/rollback/release with safe persistent state, fencing and exact topology checks.
 - [x] 2.2 Reuse existing container/evidence/filesystem primitives and prove full offline copy before rebind, without changing cold-installer semantics.
 - [x] 2.3 Correct governance PGDATA attribution and document rollout configuration without changing the currently deployed default.
-- [ ] 2.4 Add targeted behavioral regressions and the isolated node-27 physical-copy/rollback oracle.
+- [x] 2.4 Add targeted behavioral regressions and the isolated node-27 physical-copy/rollback oracle.
 
 ## 3. Verification and delivery
 
 - [x] 3.1 Run local lint, strict OpenSpec validation and actual read-only CLI smoke.
-- [ ] 3.2 Run node-27 focused tests and exact-image disposable copy/rebind/rollback/write-boundary proof; preserve production unchanged.
+- [x] 3.2 Run node-27 focused tests and exact-image disposable copy/rebind/rollback/write-boundary proof; preserve production unchanged.
 - [ ] 3.3 Complete independent high-risk review/verifier, final review, CI and PR evidence. Leave merge and production rollout human-gated.
 
 ## Risk triage
@@ -43,7 +43,10 @@ Verification recorded before review:
 - `7b315abf`: node-27 relocation unit + exact-image CLI oracle + shared container/installer/recovery suites, **122 passed** in 121.21s. Includes real warm/compressed reads, writer rejection, three fresh-process rollback interruptions, partial release with committed business write, and retained partial copy.
 - Local strict OpenSpec and changed-Python Ruff checks passed. Actual default CLI on Mac returned `mutation=false`, reported unavailable host tooling as a blocker, and created no workspace; the node-27 oracle separately exercised planning against a running disposable database.
 - No production prepare/copy/rebind or root provisioning was performed. User-owned capacity hold and OLD runtime pins remain; live workload/backup gates remain outside this PR.
-- Round 1 independently confirmed marked-release reboot recovery, unstable display capture, and negative-proof gaps. Tasks 2.1, 2.4 and 3.2 are reopened for those repairs; the historical passing commands above retain only their stated scope. Initial CI is red on MD018 and four unit-fixture `/tmp` portability cases; no CI completion is claimed.
+- Round 1 repairs verified at `376a1eb1`: eight selected node-27 test files, including the exact-image oracle, **896 passed** in 518.04s. The original `c1c86a34` production code loaded only in memory fails six new behavioral cases (8 controls pass); no remote product files were replaced.
+- Negative-proof sensitivity: 15 narrowly scoped fault variants fail the corresponding tests. Removing only prepare's entry check remains blocked by the independent durable operation-authority check; removing that specific pair is caught by the interrupted-prepare replay test. Cold-lane and unknown-writer fixtures were unmasked rather than pinning failure wording.
+- CI at `376a1eb1` passes Markdown Lint, targeted Unit Tests and report-only governance checks; skipped jobs are not claimed as full-suite or live DB evidence. Follow-up review/final delivery task 3.3 remains open.
+- Post-proof production observation still shows the original container/bind/image/runtime and held autopipe/download timers. The OLD runtime directory is currently 0775 and needs a separately approved permission prerequisite resolution; no chmod or production admission PASS is claimed.
 
 ## Explicit non-goals
 

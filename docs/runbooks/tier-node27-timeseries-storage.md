@@ -211,6 +211,13 @@ The actual application remains OLD `5a86841c` at
 `/home/nwm/NWM-reslice-original-5a86841c`. An isolated new-tooling checkout
 must never become the application runtime, change an image, run migrations,
 or replace the existing `60` runtime-pin dropins.
+The 2026-09-11 read-only check also found this OLD runtime directory at mode
+0775, owned by 1005:1005. That does not satisfy the tooling's runtime-directory
+admission rule prohibiting group/other write access. A later approved window
+must have the owner inspect shared use and resolve this permission prerequisite
+without changing application code/version or runtime pins. This PR does not
+chmod the runtime or replace it with a tooling checkout; do not assume current
+runtime admission is already green.
 
 Issues #1891/#1895 explicitly exclude **entire PGDATA**. Their cold rollout below
 does not authorize this procedure. Do not execute its G0–G8 installation/move
