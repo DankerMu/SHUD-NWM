@@ -55,6 +55,7 @@ from packages.common.node27_container_contract import (
     recurring_unit_idle_failure,
     validated_probe_target,
 )
+from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL, discover_hypertables
 from packages.common.safe_fs import atomic_write_bytes_no_follow
 
 SCHEMA_VERSION = "3.0"
@@ -87,6 +88,21 @@ MAX_LEDGER_BYTES = 16 * 1024**2
 MAX_STREAM_BYTES = 8 * 1024**2
 MAX_CATALOG_ROWS = 50_000
 MAX_CATALOG_BYTES = 16 * 1024**2
+_CHECKPOINT_CATALOG_SQL = (
+    "SELECT json_build_object("
+    "'hypertables',(SELECT json_object_agg(format('%s.%s',hypertable_schema,hypertable_name),compression_enabled) "
+    "FROM timescaledb_information.hypertables WHERE (hypertable_schema,hypertable_name) IN "
+    f"({RUNTIME_HYPERTABLES_SQL})),"
+    "'compression_settings',(SELECT COALESCE(json_agg(row_to_json(s) ORDER BY hypertable_schema,hypertable_name,"
+    "segmentby_column_index NULLS LAST,orderby_column_index NULLS LAST),'[]'::json) FROM "
+    "timescaledb_information.compression_settings s WHERE (hypertable_schema,hypertable_name) IN "
+    f"({RUNTIME_HYPERTABLES_SQL})),"
+    "'policy_jobs',(SELECT COALESCE(json_agg(row_to_json(j)),'[]'::json) FROM "
+    "timescaledb_information.jobs j WHERE proc_name='policy_compression' AND "
+    "(hypertable_schema,hypertable_name) IN "
+    f"({RUNTIME_HYPERTABLES_SQL})))"
+)
+
 MAX_CANDIDATES = 10_000
 DEFAULT_WALL_SECONDS = 900.0
 FINALIZER_LOCK_TIMEOUT_SECONDS = 5.0
@@ -1310,20 +1326,7 @@ def capture_checkpoint(
         "SELECT json_build_object('conflicts',COALESCE(json_agg(l ORDER BY pid),'[]'::json)) "
         "FROM (SELECT pid,locktype,mode,granted FROM pg_locks WHERE NOT granted) l"
     )
-    catalog_sql = (
-        "SELECT json_build_object("
-        "'hypertables',(SELECT json_object_agg(format('%s.%s',hypertable_schema,hypertable_name),compression_enabled) "
-        "FROM timescaledb_information.hypertables WHERE (hypertable_schema,hypertable_name) IN "
-        "(('hydro','river_timeseries'),('met','forcing_station_timeseries'))),"
-        "'compression_settings',(SELECT COALESCE(json_agg(row_to_json(s) ORDER BY hypertable_schema,hypertable_name,"
-        "segmentby_column_index NULLS LAST,orderby_column_index NULLS LAST),'[]'::json) FROM "
-        "timescaledb_information.compression_settings s WHERE (hypertable_schema,hypertable_name) IN "
-        "(('hydro','river_timeseries'),('met','forcing_station_timeseries'))),"
-        "'policy_jobs',(SELECT COALESCE(json_agg(row_to_json(j)),'[]'::json) FROM "
-        "timescaledb_information.jobs j WHERE proc_name='policy_compression' AND "
-        "(hypertable_schema,hypertable_name) IN "
-        "(('hydro','river_timeseries'),('met','forcing_station_timeseries'))))"
-    )
+    catalog_sql = _CHECKPOINT_CATALOG_SQL
     psql_prefix = [
         _host_bin("psql"),
         "--dbname",
@@ -1715,10 +1718,11 @@ def disarm_finalizer_state(state_path: Path, *, run_id: str) -> None:
 def validate_current_d3(catalog: Mapping[str, Any]) -> None:
     """Accept exact current D3 state; reject disabled, missing or drifted state."""
 
-    expected_hypertables = {
-        "hydro.river_timeseries": True,
-        "met.forcing_station_timeseries": True,
-    }
+    observed = catalog.get("hypertables")
+    if not isinstance(observed, Mapping):
+        raise SupervisorError("catalog hypertables unavailable")
+    pairs = discover_hypertables(tuple(key.split(".", 1)) for key in observed)
+    expected_hypertables = {f"{schema}.{name}": True for schema, name in pairs}
     if catalog.get("hypertables") != expected_hypertables or catalog.get("policy_jobs") != []:
         raise SupervisorError("catalog is not exact current D3 state")
     rows = catalog.get("compression_settings")
@@ -1733,6 +1737,25 @@ def validate_current_d3(catalog: Mapping[str, Any]) -> None:
         ("met", "forcing_station_timeseries", "variable", None, 1, True, False),
         ("met", "forcing_station_timeseries", "valid_time", None, 2, True, False),
     ]
+    text_rows = expected
+    expected = []
+    for schema, name in sorted(pairs):
+        canonical = name.removesuffix("_legacy")
+        if name.endswith("_legacy") or (schema, f"{name}_legacy") not in pairs:
+            expected.extend(
+                (schema, name, *row[2:]) for row in text_rows if row[:2] == (schema, canonical)
+            )
+        else:
+            segments = (
+                ("run_key", "river_segment_key") if schema == "hydro" else ("forcing_version_key", "station_key")
+            )
+            expected.extend(
+                (schema, name, column, index, None, None, None) for index, column in enumerate(segments, 1)
+            )
+            expected.extend(
+                (schema, name, column, None, index, True, False)
+                for index, column in enumerate(("variable_e", "valid_time"), 1)
+            )
     fields = (
         "hypertable_schema",
         "hypertable_name",

@@ -1016,8 +1016,12 @@ def test_stats_guard_candidate_query_pins_the_selection_contract() -> None:
     # compressed-chunk name would zero the relstats TimescaleDB preserves at
     # compression time — see runbook §4.7 陷阱 and the change's design D3.
     assert "is_compressed = false" in sql
-    assert "('hydro', 'river_timeseries')" in sql
-    assert "('met', 'forcing_station_timeseries')" in sql
+    from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL, render_hypertable_pairs
+
+    assert render_hypertable_pairs((("hydro", "river_timeseries"), ("met", "forcing_station_timeseries"))) in sql
+    assert RUNTIME_HYPERTABLES_SQL in sql
+    assert "UNION ALL" in RUNTIME_HYPERTABLES_SQL
+    assert "UNION ALL" in sql
     # "First 3" only means "the 3 driftiest" while the ordering holds.
     assert "ORDER BY s.n_mod_since_analyze DESC" in sql
 

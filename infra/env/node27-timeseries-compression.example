@@ -16,23 +16,18 @@ NODE27_TIMESERIES_COMPRESSION_REPO_ROOT=/home/nwm/NWM
 # it cannot `COPY ... FROM PROGRAM`. Never put the superuser `nhms` here.
 DATABASE_URL=postgresql://nhms_ingest_rw:REPLACE_ME_PW@127.0.0.1:55432/nhms
 # The runner uses this connection read-only first to resolve the display
-# business-time watermark, then applies the 7-day lag to that watermark.
+# business-time watermark, then applies the two-day lag to that watermark.
 
-# Chunk-selection lag in seconds. Default 604800 = 7 days (one chunk width).
+# Chunk-selection lag in seconds. 172800 = 2 days.
 # Chunks whose range_end is younger than the display-watermark cutoff are skipped.
-NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=604800
+NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
 
-# Maximum number of chunks compressed per timer tick. Not an arbitrary
-# default: 4 is the capacity target decided in issue #1237 and derived from
-# measured node-27 inputs under a DUAL constraint — throughput (bound x 1
-# tick/day vs the steady 2 terminal chunks/week) AND the whole-tick wrapper
-# wall below. It is a throughput ceiling, NOT the number of river-size chunks
-# one tick can actually redeem: 4 is the throughput target for the NORMAL
-# one-pair week only. The per-tick hint further below (=1) governs whenever
-# more than one river-size chunk could be eligible in a single tick — in that
-# state the hint OVERRIDES this value. Derivation, measured inputs and the
-# conditions that invalidate it (the backlog condition included): runbook
-# section 4 "Per-tick capacity" invalidation list and section 4.5,
+# Maximum chunks per tick: one-day canonical chunks arrive at 2/day, below
+# bound 4. Four narrow chunks at approximately 7.5 min each fit the 65 min
+# wrapper wall. Legacy siblings are a write-frozen finite backlog, not arrivals.
+# Compress that backlog first under bound 1 before expand: a legacy 7-day
+# chunk can take approximately 51 min and cannot safely share the ordinary
+# four-chunk tick. See runbook section 4 "Per-tick capacity" and section 4.5,
 # docs/runbooks/tier-node27-timeseries-storage.md.
 NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND=4
 

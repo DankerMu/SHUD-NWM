@@ -418,9 +418,14 @@ def test_target_hypertables_do_not_include_metadata_tables() -> None:
 
 def test_chunk_query_targets_only_d3_hypertables() -> None:
     query = retention._CHUNK_QUERY
+    from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL, render_hypertable_pairs
+
+    query = retention._CHUNK_QUERY
     assert "hydro.river_timeseries" not in query  # only as tuple filter with quotes
-    assert "'hydro', 'river_timeseries'" in query
-    assert "'met', 'forcing_station_timeseries'" in query
+    assert render_hypertable_pairs((("hydro", "river_timeseries"), ("met", "forcing_station_timeseries"))) in query
+    assert RUNTIME_HYPERTABLES_SQL in query
+    assert "UNION ALL" in RUNTIME_HYPERTABLES_SQL
+    assert "UNION ALL" in query
     assert "hydro_run" not in query
     assert "forcing_version" not in query
 

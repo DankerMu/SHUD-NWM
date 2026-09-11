@@ -83,7 +83,7 @@
   **Completed checkpoint evidence:** PR #2264 merged at `df480aa776aef5b9e6b51d15b76310e03c9e9c06` (reviewed head `8c28a9d6eb2c8776e998b03ecec0a16575ae585a`). node-27 private Python 3.11.15: 5011 pure + 80 realDB passed, 0 skipped. Capture unrendered/wrong-store mutants each 2 assertion-only failures then restore; DB opposite-store mutant 4 assertion-only failures then restore. Compact Round 1 (`correctness+test-evidence`, `integration`) and independent final review were clean. CI Unit Tests / SQL Migration Dry Run / Markdown Lint succeeded. Shared change stays active; no production activation.
 
 
-- [ ] 2.4 (I5, #1984) Non-template surfaces: `services/tile_publisher/publisher.py` `_has_table` accepts both names during the transition; `services/tile_publisher/forcing_copyback_backfill.py` `required_columns` branches on store; `scripts/reset_qhh_smoke_db.py` and `scripts/summarize_qhh_smoke_results.py` render per store (reset clears the legacy table for legacy runs); `services/production_closure/scale_validation.py` `QUERY_TARGETS` and `scripts/node27_timeseries_compression_live_evidence.py` plan-shape fixtures branch on store (the autopipeline statistics guard is 3.1's, not this task's). Verify: targeted tests for each surface with legacy present/absent.
+- [x] 2.4 (I5, #1984) Non-template surfaces: `services/tile_publisher/publisher.py` `_has_table` accepts both names during the transition; `services/tile_publisher/forcing_copyback_backfill.py` `required_columns` branches on store; `scripts/reset_qhh_smoke_db.py` and `scripts/summarize_qhh_smoke_results.py` render per store (reset clears the legacy table for legacy runs); `services/production_closure/scale_validation.py` `QUERY_TARGETS` and `scripts/node27_timeseries_compression_live_evidence.py` plan-shape fixtures branch on store (the autopipeline statistics guard is 3.1's, not this task's). Verify: targeted tests for each surface with legacy present/absent.
 
   **Suggested fixture level:** compact - branch logic is mechanical; risk is each surface's legacy-absent path. Agreed; five surfaces are review load, not an expanded trigger.
 
@@ -91,58 +91,72 @@
 
   **Execution fixture:** `fixtures/I5-1984.md` (compact). Catalog-only store detection; pre-expand behavior byte-identical; publisher accepts canonical or `_legacy`; copyback columns follow catalog shape while discovery SQL stays unchanged; QHH reset/summarize target the run's physical table; plan nails keep the current default and add an explicit-store narrow sibling. Parent validates locally; disposable post-expand catalogs are authorized only when sqlite cannot express the catalog probe. Production mixed-store/EXPLAIN/deployment remain I7/I8.
 
-  Fixture level: compact
-  Change surface:
-  - `services/tile_publisher/publisher.py` q_down river presence check
-  - `services/tile_publisher/forcing_copyback_backfill.py` `required_tables` / `required_columns`
-  - `scripts/reset_qhh_smoke_db.py`, `scripts/summarize_qhh_smoke_results.py`
-  - `services/production_closure/scale_validation.py` `QUERY_TARGETS["hydro_map"]`
-  - `scripts/node27_timeseries_compression_live_evidence.py` curve/MVT `required_query_tokens`
-  Must preserve:
-  - Pre-expand table names, column sets, SQL, plan lines and `DELIVERY_SCHEMA_MISSING` / `BACKFILL_SCHEMA_MISSING` codes
-  - `_DISCOVER_BACKFILL_RUNS_SQL` and `_qdown_discovery_sql` bytes
-  - QHH census 1 mention / 0 aids on the pre-expand path; forcing deletes unchanged
-  - Default hydro_map plan still names migration-created indexes
-  Must add/change:
-  - Publisher succeeds if canonical or `_legacy` exists
-  - Copyback drops canonical `variable` only when `_legacy` is present
-  - QHH reset/summarize route by `timeseries_store` when the column exists
-  - Explicit-store narrow plan/token siblings named from spec indexes
-  Seams under test:
-  - Publisher neither / canonical-only / `_legacy`-only / both
-  - Copyback state-1 missing `variable` vs state-2 canonical-without-`variable`
-  - QHH state-1 SQL, state-2 per-store table, mixed reset isolation, invalid store
-  - Default vs narrow plan nails; live-evidence token sets; forcing tokens unchanged
-  Risk packs:
-  - Public API / CLI / script entry: selected - QHH scripts, copyback CLI, publisher preflight
-  - Config / project setup: not selected - no env template or setup change
-  - File IO / path safety / overwrite: selected - QHH `RUN_ROOT` writes stay inside the existing env root
-  - Schema / columns / units / field names: selected - river column sets and plan index names
-  - Auth / permissions / secrets: not selected - receipts must not contain DSN; no auth change
-  - Concurrency / shared state / ordering: not selected - no new shared mutable protocol
-  - Resource limits / large input / discovery: not selected - no new discovery bound
-  - Legacy compatibility / examples: selected - pre-expand catalog remains byte-identical
-  - Error handling / rollback / partial outputs: selected - existing schema-missing codes; invalid store fail-closed
-  - Release / packaging / dependency compatibility: not selected - no new dependency
-  - Documentation / migration notes: selected - activation remains I7; fixture records the split default
-  - Domain time-series identity/window: selected - river table/column names only
-  - PostgreSQL query behavior: not selected - no production EXPLAIN; disposable catalogs only if sqlite cannot express the probe
-  - Geospatial/CRS, SHUD/numerics, Slurm, provider ingestion: not selected
-  Required evidence:
-  - Publisher: canonical-only publishes; `_legacy`-only no longer schema-missing; neither present still `DELIVERY_SCHEMA_MISSING`
-  - Copyback: state-1 drop `variable` still `BACKFILL_SCHEMA_MISSING`; state-2 canonical without `variable` accepted; `_legacy` without `variable` missing; discovery SQL hash unchanged
-  - QHH: state-1 SQL/table names unchanged; legacy run hits `_legacy` only; narrow run hits canonical without `variable`; invalid store zero river mutation
-  - Plan nails: default hydro_map still migration-created; narrow sibling spec-named; live-evidence tokens per store; forcing tokens unchanged
-  Non-goals:
-  - Autopipeline statistics IN-list (3.1); decline ledger (4.4); parser writes (4.3); publisher/copyback discovery SQL routing; forcing renderer (I11); expand DDL (I7); production activation
+  **Completed checkpoint evidence:** PR #2269 merged at `5b5361dfca76bda8ae9283f3302432e5cef3b293` (reviewed head `2fe89f60f2030cc25a08c39d6a9b2f5fc6589635`). Local targeted pytest 1072 passed / 0 skip; ruff and strict OpenSpec passed; compact Round 1 (`correctness+test-evidence`, `integration`) and independent final review were clean. CI Unit Tests succeeded. Shared change stays active; no production activation.
+
 
 
 ## 3. Lifecycle lanes and governance (I6 — deploy before the expand migration)
 
-- [ ] 3.1 Hypertable discovery ("canonical + existing `_legacy` sibling") shared by `scripts/node27_timeseries_compression.py`, `scripts/node27_timeseries_retention.py`, `scripts/node27_timeseries_compression_supervisor.py` (`validate_current_d3` asserts per table by catalog state, not by name: a canonical table **with** a `_legacy` sibling is asserted key-shaped and its sibling text-shaped; a canonical table **without** a sibling keeps its current text-shaped expectation — so river flips only at I7's expand and forcing only at I12's, and no expectation is flipped ahead of its migration; the capture tool's `HYPERTABLE_KEYS` follows the same three-state rule), `scripts/node27_timeseries_compression_capture.py` (`HYPERTABLE_KEYS` and its five hard-coded uses) and the autopipeline statistics guard. Verify: unit tests with legacy present and absent for each tool.
-- [ ] 3.2 Receipt schemas: `schemas/timeseries_compression_receipt.schema.json` `per_table_totals` → `patternProperties` (canonical keys required, `_legacy` optional); `schemas/timeseries_retention_receipt.schema.json` adds `legacy_chunks`; committed historical receipts stay valid. Verify: schema tests for both shapes.
-- [ ] 3.3 Per-tick derivation for one-day chunks: `infra/env/node27-timeseries-compression.example` keeps `PER_TICK_BOUND=4` with the re-derived comment, sets `LAG_SECONDS=172800`, deletes the "one chunk width" comment; runbook derivation section states both constraints with the legacy sibling as a finite backlog, the measured worst mixed tick, the pre-expand "compress the legacy backlog first under bound 1" recipe, the invalidation conditions and the cadence conclusion; template pin test updated (benchmark script's 168 h curve window is NOT touched). Verify: template pin test.
-- [ ] 3.4 Governance: `packages/common/node27_cold_governance_collection.py` collects `uncompressed_bytes`, `daily_ingest_bytes`, `next_compressible_at`, `home_free_bytes`, `projection_status` (catalog-only, watermark via the compression runner's fetcher); `scripts/node27_resource_governance.py` computes `projected_peak_bytes` in days, emits `PROJECTED_PEAK_EXCEEDS_HOME_FREE` / `WORKING_SET_ABOVE_WARNING` / `WATERMARK_UNAVAILABLE`, demotes `DATABASE_SIZE_ABOVE_*` to info, adds CLI flags for margin and warning threshold; `schemas/node27_cold_governance_receipt.schema.json` and the OnFailure alert body updated. Verify: `tests/test_node27_resource_governance.py` scenarios fits / does-not-fit / no-uncompressed / watermark-unavailable / info-only; catalog-only SQL guard test.
+- [x] 3.1 Hypertable discovery ("canonical + existing `_legacy` sibling") shared by `scripts/node27_timeseries_compression.py`, `scripts/node27_timeseries_retention.py`, `scripts/node27_timeseries_compression_supervisor.py` (`validate_current_d3` asserts per table by catalog state, not by name: a canonical table **with** a `_legacy` sibling is asserted key-shaped and its sibling text-shaped; a canonical table **without** a sibling keeps its current text-shaped expectation — so river flips only at I7's expand and forcing only at I12's, and no expectation is flipped ahead of its migration; the capture tool's `HYPERTABLE_KEYS` follows the same three-state rule), `scripts/node27_timeseries_compression_capture.py` (`HYPERTABLE_KEYS` and its five hard-coded uses), and `scripts/node27_autopipeline.py` (the statistics-guard IN-list). Verify: unit tests for the present/absent `_legacy` matrix, including a leftover ordinary `_legacy` table that is not a hypertable, and that after DROP the set converges with no leftover name.
+- [x] 3.2 Receipt schemas: `schemas/timeseries_compression_receipt.schema.json` `per_table_totals` → `patternProperties` (canonical keys required, `_legacy` optional); `schemas/timeseries_retention_receipt.schema.json` adds `legacy_chunks`; committed historical receipts stay valid. Verify: schema tests for both shapes.
+- [x] 3.3 Per-tick derivation for one-day chunks: `infra/env/node27-timeseries-compression.example` keeps `PER_TICK_BOUND=4` with the re-derived comment, sets `LAG_SECONDS=172800`, deletes the "one chunk width" comment; runbook derivation section states both constraints with the legacy sibling as a finite backlog, the measured worst mixed tick, the pre-expand "compress the legacy backlog first under bound 1" recipe, the invalidation conditions and the cadence conclusion; template pin test updated (benchmark script's 168 h curve window is NOT touched). Verify: template pin test.
+- [x] 3.4 Governance: `packages/common/node27_cold_governance_collection.py` collects `uncompressed_bytes`, `daily_ingest_bytes`, `next_compressible_at`, `home_free_bytes`, `projection_status` (catalog-only, watermark via the compression runner's fetcher); `scripts/node27_resource_governance.py` computes `projected_peak_bytes` in days, emits `PROJECTED_PEAK_EXCEEDS_HOME_FREE` / `WORKING_SET_ABOVE_WARNING` / `WATERMARK_UNAVAILABLE`, demotes `DATABASE_SIZE_ABOVE_*` to info, adds CLI flags for margin and warning threshold; `schemas/node27_cold_governance_receipt.schema.json` and the OnFailure alert body updated. Verify: `tests/test_node27_resource_governance.py` scenarios fits / does-not-fit / no-uncompressed / watermark-unavailable / info-only; catalog-only SQL; DSN never in the receipt.
+
+  **Suggested fixture level:** expanded - receipt schema compatibility, supervisor D3 pinning, and OnFailure critical-exit semantics. Agreed; not raised to high because there is no new public API, DDL, or expand migration.
+
+  **Minimal mergeable slice:** first cut is discovery + receipt schema + template/runbook pin (3.1–3.3); governance (3.4) is the second cut if that surface inflates the PR. Default is one PR covering 3.1–3.4.
+
+  **Execution fixture:** `fixtures/I6-1985.md` (expanded). Catalog oracle is `timescaledb_information.hypertables` only. Pre-expand D3/text-shaped expectations stay byte-identical. River sibling must not flip forcing expectations. Live-evidence `HYPERTABLE_KEYS` and `EXPECTED_LAG_SECONDS=604800` stay frozen archival constants. Merge gate is local tests; a real node-27 tick is I8. Production systemd/env install is not authorized.
+
+  Fixture level: expanded
+  Change surface:
+  - shared hypertable discovery helper consumed by compression, retention, supervisor D3, capture runtime keys, autopipeline statistics IN-list
+  - `schemas/timeseries_compression_receipt.schema.json` `per_table_totals` and `schemas/timeseries_retention_receipt.schema.json` `legacy_chunks`
+  - `infra/env/node27-timeseries-compression.example` lag/comment pin and runbook §4 restatement
+  - `packages/common/node27_cold_governance_collection.py` and `scripts/node27_resource_governance.py` working-set fields
+  Must preserve:
+  - Pre-expand two-key set, text-shaped D3 rows, and autopipeline IN-list
+  - Historical compression/retention receipts without `_legacy` / `legacy_chunks`
+  - `critical ⇒ exit 1` and `RESOURCE_GOVERNANCE_CRITICAL:` for codes that remain critical
+  - Live-evidence frozen `HYPERTABLE_KEYS` / `EXPECTED_LAG_SECONDS=604800` / `EXPECTED_BOUND=1`
+  - `SUPERVISED_HYPERTABLES` canonical pair; benchmark 168 h window; timeout walls
+  Must add/change:
+  - `_legacy` hypertable included only when present in `timescaledb_information.hypertables`
+  - Optional `_legacy` keys in compression `per_table_totals`; optional retention `legacy_chunks`
+  - Template lag 172800 and one-day capacity comment; governance peak/working-set recommendations; `DATABASE_SIZE_ABOVE_*` info-only
+  Seams under test:
+  - Discovery present/absent/non-hypertable-ignored/no-early-flip
+  - Supervisor D3 three-state accept/reject
+  - Schema example-valid / missing-canonical-invalid / `_legacy`-optional
+  - Template assignment pins
+  - Governance fits / does-not-fit / raised-margin flip / working-set warning flag / no-uncompressed / watermark-unavailable / info-only / catalog-only SQL
+
+  Risk packs:
+  - Public API / CLI / script entry: selected - compression/retention/governance CLIs and autopipeline guard
+  - Config / project setup: selected - env template lag/bound comments
+  - File IO / path safety / overwrite: not selected - no new roots; receipts stay on existing paths
+  - Schema / columns / units / field names: selected - receipt JSON Schema widening
+  - Auth / permissions / secrets: selected - DSN must not appear in governance receipts
+  - Concurrency / shared state / ordering: not selected - no new shared mutable protocol
+  - Resource limits / large input / discovery: selected - catalog-only hypertable discovery and chunk-size aggregation
+  - Legacy compatibility / examples: selected - historical receipts and pre-expand D3
+  - Error handling / rollback / partial outputs: selected - critical-exit and OnFailure body
+  - Release / packaging / dependency compatibility: not selected - no new dependency
+  - Documentation / migration notes: selected - runbook §4 restatement; production install is I8
+  - Domain time-series identity/window: selected - hypertable names and lag
+  - PostgreSQL query behavior: selected - catalog-only SQL guard
+  - Geospatial/CRS, SHUD/numerics, Slurm, provider ingestion: not selected
+  Required evidence:
+  - No-sibling discovery equals today's two canonical pairs
+  - River-only sibling flips river D3 and not forcing
+  - Example compression receipt still validates; `_legacy` key accepted; missing canonical rejected
+  - Retention historical receipt still validates; `legacy_chunks` optional
+  - Template `PER_TICK_BOUND=4` and `LAG_SECONDS=172800`; comment has no "one chunk width"
+  - Governance spec numeric fits/does-not-fit; raised safety-margin flag flips fits to critical; working-set flag emits warning only; no-uncompressed; watermark-unavailable; database-size info-only; catalog-only SQL
+
+  Non-goals:
+  - I7 expand DDL; I8 live tick; I12 forcing expand; decline ledger; cold-residency; live-evidence frozen allowlists; production systemd/env install
+
 
 ## 4. Expand migration and parser (I7 — one issue, one PR)
 

@@ -55,6 +55,9 @@ NODE27_RESOURCE_GOVERNANCE_LOG_ROOT=/home/nwm/node27-resource-governance-logs
 # the audit path; do not use this env for ingest or cleanup writes.
 DATABASE_URL=postgresql://nhms_display_ro:REPLACE_ME@127.0.0.1:5432/nhms
 
+# Same lag as the compression lane; do not invent a second lag.
+NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS=172800
+
 # Archive-lane observability was removed in #1370: the archive lane is
 # permanently retired (ADR 0002 Revision 2026-08-11), so the audit no longer
 # reports an archive root or free-space bands, and NHMS_ARCHIVE_ROOT /

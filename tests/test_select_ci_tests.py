@@ -194,29 +194,36 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         "packages/common/node27_cold_governance.py": {
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         },
         "packages/common/node27_cold_governance_collection.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "packages/common/node27_cold_governance_cli.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "packages/common/node27_cold_governance_history.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "packages/common/node27_cold_governance_runtime.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "scripts/node27_resource_governance.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "schemas/node27_cold_governance_receipt.schema.json": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
         },
         "schemas/examples/node27_cold_governance_receipt.example.json": {
             "tests/test_node27_cold_governance.py",
@@ -238,6 +245,7 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         "infra/env/node27-resource-governance.example": {
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         },
         "infra/systemd/nhms-node27-resource-governance.service": {
             "tests/test_node27_cold_governance.py",
@@ -254,15 +262,70 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         # #1647: the compression runner owns one half of the byte-identity
         # pin between `_CHUNK_IDENT_RE` and the autopipeline
         # `_STATS_GUARD_IDENT_RE`; the assertion lives in the bounds suite.
+        "packages/common/node27_timeseries_discovery.py": {
+            "tests/test_node27_timeseries_discovery.py",
+            "tests/test_node27_lifecycle_contract.py",
+        },
         "scripts/node27_timeseries_compression.py": {
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_autopipeline_connection_bounds.py",
+            "tests/test_node27_lifecycle_contract.py",
+        },
+        "scripts/node27_timeseries_compression_supervisor.py": {
+            "tests/test_node27_lifecycle_contract.py",
+        },
+        "scripts/node27_timeseries_compression_capture.py": {
+            "tests/test_node27_timeseries_discovery.py",
+        },
+        "schemas/timeseries_compression_receipt.schema.json": {
+            "tests/test_node27_lifecycle_contract.py",
+        },
+        "schemas/examples/timeseries_compression_receipt.example.json": {
+            "tests/test_node27_lifecycle_contract.py",
+        },
+        "schemas/timeseries_retention_receipt.schema.json": {
+            "tests/test_node27_lifecycle_contract.py",
         },
     }
 
     for producer, consumers in expected.items():
         selected = set(select_tests([producer], repo_root=Path(".")))
         assert consumers <= selected, f"{producer} lost focused consumers: {sorted(consumers - selected)}"
+
+
+_LIFECYCLE_OWNER_EDGES: tuple[tuple[str, str], ...] = (
+    ("scripts/node27_timeseries_compression_supervisor.py", "tests/test_node27_lifecycle_contract.py"),
+    ("schemas/timeseries_compression_receipt.schema.json", "tests/test_node27_lifecycle_contract.py"),
+    ("schemas/examples/timeseries_compression_receipt.example.json", "tests/test_node27_lifecycle_contract.py"),
+    ("schemas/timeseries_retention_receipt.schema.json", "tests/test_node27_lifecycle_contract.py"),
+    ("scripts/node27_timeseries_compression_capture.py", "tests/test_node27_timeseries_discovery.py"),
+)
+
+
+@pytest.mark.parametrize(("producer", "owner"), _LIFECYCLE_OWNER_EDGES)
+def test_lifecycle_producer_selects_its_owner_suite(producer: str, owner: str) -> None:
+    selected = set(select_tests([producer], repo_root=Path(".")))
+    assert owner in selected, f"{producer} did not select {owner}"
+
+
+@pytest.mark.parametrize(("producer", "owner"), _LIFECYCLE_OWNER_EDGES)
+def test_lifecycle_owner_edge_reds_when_removed(
+    monkeypatch: pytest.MonkeyPatch, producer: str, owner: str
+) -> None:
+    from scripts import select_ci_tests
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(target for target in rule.tests if not (rule.pattern == producer and target == owner)),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        for rule in PATH_TEST_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+    selected = set(select_tests([producer], repo_root=Path(".")))
+    assert owner not in selected, f"{producer} still selected {owner} after the edge was removed"
 
 
 def test_select_tests_routes_node27_pgdata_relocation_producers_to_focused_consumers() -> None:

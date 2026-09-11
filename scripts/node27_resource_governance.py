@@ -36,6 +36,7 @@ from packages.common.node27_cold_governance_collection import (
 from packages.common.node27_cold_governance_collection import (
     collect_filesystem,
     collect_postgres,
+    collect_working_set,
 )
 from packages.common.node27_cold_governance_collection import (
     run_command as _run_command,
@@ -70,6 +71,8 @@ class AuditThresholds:
     home_free_warn_bytes: int = 300 * GIB
     database_warn_bytes: int = 300 * GIB
     database_critical_bytes: int = 500 * GIB
+    safety_margin_bytes: int = 100 * GIB
+    working_set_warn_bytes: int = 400 * GIB
     index_ratio_warn: float = 2.0
     index_ratio_critical: float = 4.0
     temp_bytes_warn: int = 50 * GIB
@@ -198,6 +201,46 @@ def _cold_runtime_config(config: AuditConfig) -> ColdGovernanceRuntimeConfig:
 
 def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) -> list[dict[str, Any]]:
     recommendations: list[dict[str, Any]] = []
+    working_set = receipt.get("working_set", {})
+    status = working_set.get("projection_status")
+    if status in {"watermark_unavailable", "catalog_unavailable"}:
+        recommendations.append(
+            {
+                "severity": "critical",
+                "area": "postgres",
+                "code": "WATERMARK_UNAVAILABLE" if status == "watermark_unavailable" else "WORKING_SET_UNAVAILABLE",
+                "evidence": dict(working_set),
+                "action": "Restore working-set catalog and display watermark observations before assessing capacity.",
+            }
+        )
+    uncompressed = working_set.get("uncompressed_bytes")
+    if isinstance(uncompressed, int | float) and uncompressed > thresholds.working_set_warn_bytes:
+        recommendations.append(
+            {
+                "severity": "warning",
+                "area": "postgres",
+                "code": "WORKING_SET_ABOVE_WARNING",
+                "evidence": dict(working_set),
+                "action": "Review the uncompressed working set and compression cadence.",
+            }
+        )
+    peak = working_set.get("projected_peak_bytes")
+    home_free = working_set.get("home_free_bytes")
+    if (
+        status == "ok"
+        and isinstance(peak, int | float)
+        and isinstance(home_free, int | float)
+        and peak > home_free - thresholds.safety_margin_bytes
+    ):
+        recommendations.append(
+            {
+                "severity": "critical",
+                "area": "postgres",
+                "code": "PROJECTED_PEAK_EXCEEDS_HOME_FREE",
+                "evidence": {**working_set, "safety_margin_bytes": thresholds.safety_margin_bytes},
+                "action": "Restore compression capacity before the projected working-set peak exhausts home.",
+            }
+        )
     fs = receipt.get("filesystem", {})
     root = (fs.get("filesystems") or {}).get("root", {})
     root_free = root.get("free_bytes")
@@ -240,10 +283,10 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
         db_bytes = _first_database_size(postgres)
         if db_bytes is not None:
             if db_bytes >= thresholds.database_critical_bytes:
-                severity = "critical"
+                severity = "info"
                 code = "DATABASE_SIZE_ABOVE_CRITICAL"
             elif db_bytes >= thresholds.database_warn_bytes:
-                severity = "warning"
+                severity = "info"
                 code = "DATABASE_SIZE_ABOVE_WARNING"
             else:
                 severity = None
@@ -350,6 +393,24 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
     filesystem = collect_filesystem(config)
     postgres = collect_postgres(config.database_url)
     systemd = collect_systemd(config.services)
+    working_set = collect_working_set(
+        config.database_url,
+        (filesystem.get("filesystems") or {}).get("home", {}).get("free_bytes"),
+    )
+    uncompressed = working_set["uncompressed_bytes"]
+    working_set["projected_peak_bytes"] = None
+    if working_set["projection_status"] == "no_uncompressed_chunk":
+        working_set["projected_peak_bytes"] = uncompressed
+    elif working_set["projection_status"] == "ok":
+        days = max(
+            0.0,
+            (
+                datetime.fromisoformat(working_set["next_compressible_at"])
+                - datetime.fromisoformat(working_set["watermark"])
+            ).total_seconds()
+            / 86400,
+        )
+        working_set["projected_peak_bytes"] = uncompressed + working_set["daily_ingest_bytes"] * days
     receipt: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "status": "completed",
@@ -364,6 +425,7 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
         "filesystem": filesystem,
         "postgres": postgres,
         "systemd": systemd,
+        "working_set": working_set,
         "safety": {
             "database_url_redacted": bool(config.database_url),
             "destructive_actions_enabled": False,
@@ -394,6 +456,7 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
             cold=_cold_governance_sample(filesystem, postgres, path="/data/GHDC", observed_at=receipt["finished_at"]),
             evidence=evidence,
         )
+        cold_receipt["working_set"] = working_set
         write_cold_governance_receipt(config.cold_governance_receipt_path, cold_receipt, cold_schema)
         receipt["cold_tablespace_governance"] = {
             "outcome": cold_receipt["outcome"],
@@ -495,6 +558,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=lambda raw: _positive_bytes(raw, label="database-critical-bytes"),
         default=AuditThresholds.database_critical_bytes,
     )
+    parser.add_argument(
+        "--safety-margin-bytes",
+        type=lambda raw: _nonnegative_bytes(raw, label="safety-margin-bytes"),
+        default=AuditThresholds.safety_margin_bytes,
+    )
+    parser.add_argument(
+        "--working-set-warn-bytes",
+        type=lambda raw: _nonnegative_bytes(raw, label="working-set-warn-bytes"),
+        default=AuditThresholds.working_set_warn_bytes,
+    )
     parser.add_argument("--quiet", action="store_true", help="Do not print the full receipt to stdout.")
     parser.add_argument("--pretty", action="store_true")
     return parser
@@ -508,6 +581,8 @@ def config_from_args(args: argparse.Namespace) -> AuditConfig:
         home_free_warn_bytes=args.home_free_warn_bytes,
         database_warn_bytes=args.database_warn_bytes,
         database_critical_bytes=args.database_critical_bytes,
+        safety_margin_bytes=args.safety_margin_bytes,
+        working_set_warn_bytes=args.working_set_warn_bytes,
     )
     pgdata_root = Path(args.pgdata_root).expanduser() if args.pgdata_root else None
     summary_path = Path(args.summary_path).expanduser() if args.summary_path else None
@@ -590,6 +665,21 @@ def main(argv: list[str] | None = None) -> int:
     critical_codes = _critical_codes(receipt)
     for code in critical_codes:
         print(f"{CRITICAL_DIAGNOSTIC_PREFIX}{code}", file=sys.stderr)
+        if code == "PROJECTED_PEAK_EXCEEDS_HOME_FREE":
+            working_set = receipt.get("working_set", {})
+            print(
+                "working-set peak: "
+                + " ".join(
+                    f"{name}={working_set.get(name)}"
+                    for name in (
+                        "projected_peak_bytes",
+                        "home_free_bytes",
+                        "next_compressible_at",
+                        "uncompressed_bytes",
+                    )
+                ),
+                file=sys.stderr,
+            )
     return 1 if critical_codes else 0
 
 
