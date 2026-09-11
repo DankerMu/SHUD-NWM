@@ -8,7 +8,11 @@ import json
 import sys
 from pathlib import Path
 
+import psycopg2
+
 from packages.common.node27_pgdata_migrate import Migration, MigrationError
+from packages.common.node27_timeseries_lifecycle_lock import LifecycleLockContended, LifecycleLockError
+from packages.common.safe_fs import SafeFilesystemError
 
 
 def _path(value: str) -> str:
@@ -74,6 +78,9 @@ def main(argv: list[str] | None = None) -> int:
         result = Migration(Path(args.workspace)).run(args.action, enforce=args.enforce, overrides=overrides)
     except MigrationError as error:
         print(json.dumps({"ok": False, "error": str(error)}, sort_keys=True), file=sys.stderr)
+        return 2
+    except (OSError, ValueError, psycopg2.Error, SafeFilesystemError, LifecycleLockError, LifecycleLockContended):
+        print(json.dumps({"ok": False, "error": "migration input or IO unavailable; state retained"}), file=sys.stderr)
         return 2
     print(json.dumps({"ok": True, **result}, sort_keys=True))
     return 0

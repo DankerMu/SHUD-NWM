@@ -14,9 +14,12 @@ import shutil
 import stat
 import time
 import uuid
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+
+import psycopg2
 
 from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
 from packages.common.node27_cold_tablespace_container import normalize_raw_inspect, serialize_container_argv
@@ -33,13 +36,13 @@ from packages.common.node27_pgdata_host import (
     require,
 )
 from packages.common.node27_timeseries_lifecycle_lock import timeseries_lifecycle_lock
-from packages.common.safe_fs import open_directory_no_follow, stat_no_follow
+from packages.common.safe_fs import SafeFilesystemError, open_directory_no_follow, stat_no_follow
 
 DEFAULTS = {
     "source_container": "nhms-db",
     "source_pgdata": "/home/nwm/nhms-pgdata",
-    "target_pgdata": "/data/GHDC/nhms-pgdata",
-    "reserve_bytes": 100 * 1024**3,
+    "target_pgdata": "/data/GHDC/nhms-primary/pgdata",
+    "reserve_bytes": None,
     "database": "nhms",
     "admin_role": "nhms",
     "drain_timeout": 900,
@@ -76,10 +79,45 @@ def _config(overrides: dict[str, Any], frozen: dict[str, Any] | None = None) -> 
             continue
         require(frozen is None or value == frozen[key], "option conflicts with frozen workspace identity")
         result[key] = value
+    require(
+        all(
+            isinstance(result[key], str) and result[key]
+            for key in ("source_container", "source_pgdata", "target_pgdata", "database", "admin_role")
+        )
+        and all(
+            result[key] is None or isinstance(result[key], str)
+            for key in ("reader_dsn_file", "writer_dsn_file", "mdadm_evidence", "disposable_root")
+        )
+        and (result["reserve_bytes"] is None or type(result["reserve_bytes"]) is int)
+        and type(result["drain_timeout"]) is int
+        and isinstance(result["smart_evidence"], dict)
+        and all(isinstance(key, str) and isinstance(value, str) for key, value in result["smart_evidence"].items()),
+        "migration option shape is invalid",
+    )
     return result
 
 
+def _disposable_identity(workspace: Path, config: dict[str, Any]) -> Path | None:
+    if not config.get("disposable_root"):
+        return None
+    root = Path(config["disposable_root"])
+    require(
+        root.is_absolute() and re.fullmatch(r"nhms-pgdata-oracle-[0-9a-f]{32}", root.name),
+        "disposable root is not uniquely owned",
+    )
+    require(config["source_container"] == root.name + "-db", "disposable production identity refused")
+    for path in (workspace, Path(config["source_pgdata"]), Path(config["target_pgdata"])):
+        require(
+            path.is_relative_to(root) and path != root and ".." not in path.parts,
+            "disposable paths escape owned root",
+        )
+    identity = path_identity(root)
+    require(identity[2] == os.getuid() and identity[4] == 0o700, "disposable root ownership is unsafe")
+    return root
+
+
 def _validate_paths(workspace: Path, config: dict[str, Any], raw: dict[str, Any]) -> None:
+    _disposable_identity(workspace, config)
     source, target = (Path(config[key]) for key in ("source_pgdata", "target_pgdata"))
     for path in (workspace, source, target):
         require(
@@ -221,26 +259,43 @@ def _credentials(config: dict[str, Any], snapshot) -> dict[str, Any]:
 def _catalog(host: Host, state: dict[str, Any], *, candidate: bool = False) -> dict[str, Any]:
     reader = state["credentials"]["reader"]["user"]
     # Names have passed the bounded identifier grammar; no SQL comes from files.
-    sql = f"""SELECT json_build_object(
+    sql = f"""WITH reachable AS (
+      SELECT oid FROM pg_roles WHERE rolname='{reader}' OR pg_has_role('{reader}',oid,'MEMBER')
+    ) SELECT json_build_object(
       'system_id', (SELECT system_identifier::text FROM pg_control_system()),
       'data', current_setting('data_directory'), 'hba', current_setting('hba_file'),
       'config', current_setting('config_file'), 'ident', current_setting('ident_file'),
-      'config_sources', (SELECT coalesce(json_agg(DISTINCT sourcefile) FILTER (WHERE sourcefile IS NOT NULL), '[]') FROM pg_file_settings),
+      'config_sources', (SELECT coalesce(json_agg(DISTINCT sourcefile)
+        FILTER (WHERE sourcefile IS NOT NULL), '[]') FROM pg_file_settings),
       'tablespaces', (SELECT json_agg(spcname ORDER BY spcname) FROM pg_tablespace),
       'roles', (SELECT json_agg(rolname ORDER BY rolname) FROM pg_roles WHERE rolcanlogin),
       'admin', (SELECT rolsuper FROM pg_roles WHERE rolname=current_user),
       'reader_unsafe', (
         EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role('{reader}',r.oid,'MEMBER')
           AND (r.rolsuper OR r.rolcreatedb OR r.rolcreaterole OR r.rolreplication OR r.rolbypassrls))
-        OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        OR EXISTS (SELECT 1 FROM reachable r CROSS JOIN pg_class c
+          JOIN pg_namespace n ON n.oid=c.relnamespace
           WHERE n.nspname NOT LIKE 'pg_temp_%' AND c.relkind IN ('r','p','v','m','f')
-          AND (has_table_privilege('{reader}',c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
-            OR has_any_column_privilege('{reader}',c.oid,'INSERT,UPDATE')))
-        OR EXISTS (SELECT 1 FROM pg_namespace WHERE has_schema_privilege('{reader}',oid,'CREATE'))
-        OR EXISTS (SELECT 1 FROM pg_database WHERE has_database_privilege('{reader}',oid,'CREATE'))
-        OR EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-          WHERE p.prosecdef AND n.nspname NOT IN ('pg_catalog','information_schema')
-          AND has_function_privilege('{reader}',p.oid,'EXECUTE'))
+          AND (has_table_privilege(r.oid,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER')
+            OR has_any_column_privilege(r.oid,c.oid,'INSERT,UPDATE'))
+          AND NOT (c.oid='pg_catalog.pg_settings'::regclass AND c.relkind='v'
+            AND EXISTS (SELECT 1 FROM pg_roles owner WHERE owner.oid=c.relowner AND owner.rolsuper)
+            AND NOT has_table_privilege(r.oid,c.oid,'INSERT,DELETE,TRUNCATE,TRIGGER')
+            AND NOT has_any_column_privilege(r.oid,c.oid,'INSERT')))
+        OR EXISTS (SELECT 1 FROM reachable r CROSS JOIN pg_namespace n
+          WHERE has_schema_privilege(r.oid,n.oid,'CREATE'))
+        OR EXISTS (SELECT 1 FROM reachable r CROSS JOIN pg_database d
+          WHERE has_database_privilege(r.oid,d.oid,'CREATE'))
+        OR EXISTS (SELECT 1 FROM reachable r CROSS JOIN pg_proc p
+          WHERE p.prosecdef AND has_function_privilege(r.oid,p.oid,'EXECUTE')
+          AND NOT (p.provolatile IN ('s','i')
+            AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='c')
+            AND p.probin='$libdir/postgis-3'
+            AND EXISTS (SELECT 1 FROM pg_depend d JOIN pg_extension e ON e.oid=d.refobjid
+              JOIN pg_roles owner ON owner.oid=e.extowner
+              WHERE d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e'
+                AND d.refclassid='pg_extension'::regclass AND e.extname='postgis'
+                AND e.extversion='3.3.2' AND owner.rolsuper AND p.proowner=e.extowner)))
       ),
       'sessions', (SELECT coalesce(json_agg(usename), '[]') FROM pg_stat_activity
         WHERE backend_type='client backend' AND pid<>pg_backend_pid()),
@@ -309,12 +364,27 @@ class Migration:
         self.host = host or Host()
         self.state: dict[str, Any] | None = None
 
-    def load(self) -> dict[str, Any] | None:
-        self.host.durable_workspace(self.workspace)
+    def workspace_identity(self, config: dict[str, Any]) -> list[int]:
+        if _disposable_identity(self.workspace, config) is None:
+            return self.host.durable_workspace(self.workspace)
+        identity = path_identity(self.workspace)
+        require(identity[2] == os.getuid() and identity[4] == 0o700, "disposable workspace is not private")
+        return identity
+
+    def load(self, overrides: dict[str, Any] | None = None) -> dict[str, Any] | None:
         path = self.workspace / "state.json"
         if not path.exists() and not path.is_symlink():
+            self.workspace_identity(_config(overrides or {}))
             return None
         value = json.loads(private_read(path, 4 * 1024 * 1024))
+        require(
+            isinstance(value, dict)
+            and isinstance(value.get("config"), dict)
+            and set(value["config"]) == set(DEFAULTS)
+            and isinstance(value.get("stage"), str)
+            and isinstance(value.get("operation"), str),
+            "private state shape is invalid",
+        )
         require(
             value.get("schema_version") == 1
             and value.get("stage") in STATES
@@ -322,7 +392,8 @@ class Migration:
             and value.get("workspace") == str(self.workspace),
             "private state contract is invalid",
         )
-        require(value["workspace_identity"] == path_identity(self.workspace), "workspace identity drifted")
+        self.workspace_identity(_config(overrides or {}, value["config"]))
+        require(value.get("workspace_identity") == path_identity(self.workspace), "workspace identity drifted")
         require(re.fullmatch(r"[0-9a-f]{32}", value.get("operation", "")), "operation identity is invalid")
         self.state = value
         return value
@@ -344,8 +415,9 @@ class Migration:
     def plan(self, overrides: dict[str, Any]) -> dict[str, Any]:
         # No lifecycle lock, workspace creation, helper container, unit mutation,
         # SQL connection or journal write occurs on the default path.
-        state = self.load() if self.workspace.exists() else None
+        state = self.load(overrides) if self.workspace.exists() else None
         config = _config(overrides, None if state is None else state["config"])
+        _disposable_identity(self.workspace, config)
         observations: dict[str, Any] = {
             "action": "plan",
             "mutation": False,
@@ -361,7 +433,7 @@ class Migration:
             if state is None:
                 _validate_paths(self.workspace, config, raw)
                 if self.workspace.exists():
-                    self.host.durable_workspace(self.workspace)
+                    self.workspace_identity(config)
                 self.host.units_snapshot(config)
             observations["health"] = self.host.health(config)
             observations["target_free_bytes"] = shutil.disk_usage(Path(config["target_pgdata"]).parent).free
@@ -369,7 +441,7 @@ class Migration:
                 config.get("reader_dsn_file") and config.get("writer_dsn_file"),
                 "private business connection files are required for prepare",
             )
-        except Exception as error:
+        except (MigrationError, OSError, ValueError, SafeFilesystemError, psycopg2.Error) as error:
             observations["blockers"].append(
                 str(error) if isinstance(error, MigrationError) else "observation unavailable; no mutation performed"
             )
@@ -383,8 +455,13 @@ class Migration:
             return self.plan(overrides)
         require(action in {"prepare", "copy", "activate", "rollback", "release"}, "unknown action")
         require(enforce, "mutating action requires --enforce")
-        with timeseries_lifecycle_lock():
-            state = self.load()
+        initial = self.load(overrides)
+        initial_config = _config(overrides, None if initial is None else initial["config"])
+        root = _disposable_identity(self.workspace, initial_config)
+        lock = timeseries_lifecycle_lock() if root is None else timeseries_lifecycle_lock(root / "lifecycle.lock")
+        with lock:
+            state = self.load(overrides)
+            require(state == initial, "operation state changed before lifecycle lock")
             config = _config(overrides, None if state is None else state["config"])
             if action == "prepare":
                 require(state is None, "prepare requires a new workspace; interrupted intent cannot replay")
@@ -431,6 +508,7 @@ class Migration:
         # Exact observed PG process account, not an image-user convention.
         numeric = host.command([DOCKER, "exec", raw["Id"], "stat", "-c", "%u:%g", PGDATA]).stdout.strip()
         require(re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", numeric), "numeric PostgreSQL ownership is unproved")
+        require(snapshot.user == numeric, "Docker runtime account differs from PGDATA ownership")
         identity = path_identity(source)
         require(numeric == f"{identity[2]}:{identity[3]}", "host/container numeric ownership differs")
         state = {
@@ -439,7 +517,7 @@ class Migration:
             "writes_released": False,
             "operation": uuid.uuid4().hex,
             "workspace": str(self.workspace),
-            "workspace_identity": host.durable_workspace(self.workspace),
+            "workspace_identity": self.workspace_identity(config),
             "config": config,
             "original": raw,
             "original_id": raw["Id"],
@@ -450,7 +528,7 @@ class Migration:
             "target_parent_identity": path_identity(target.parent),
             "credentials": _credentials(config, snapshot),
             "units": host.units_snapshot(config),
-            "foreign_hold": host.foreign_hold(config),
+            "host_identity": host.identity(),
             "health": host.health(config),
             "candidate_id": None,
             "display_unfenced": False,
@@ -460,7 +538,7 @@ class Migration:
         catalog = _catalog(host, state)
         # Authenticate the actual writer before the stop so an arbitrary bad
         # password cannot masquerade as the later admission rejection proof.
-        with host.connection(state, "writer") as connection:
+        with closing(host.connection(state, "writer")) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT current_user, current_database()")
                 require(
@@ -483,14 +561,15 @@ class Migration:
         self.state = state
         self.save()  # All admission precedes the first fence/stop side effect.
         host.install_fences(state)
-        require(host.foreign_hold(config) == state["foreign_hold"], "foreign capacity hold changed")
         # Freeze LOGIN inventory in this final quiescent *running* read phase.
         state["catalog"] = _catalog(host, state)
         _no_writers(state, state["catalog"])
         state["baseline"] = host.read_proof(state)
         self.save()
+        state["original_restart_disable_intent"] = True
+        self.save()
         host.command([DOCKER, "update", "--restart=no", state["original_id"]])
-        self.original(stopped=False)
+        require(self.original(stopped=False).restart_policy == ("no", 0), "original restart was not disabled")
         host.command(
             [
                 DOCKER,
@@ -526,14 +605,23 @@ class Migration:
         raw = self.host.inspect(state["original_id"])
         snapshot = normalize_raw_inspect(raw)
         original = normalize_raw_inspect(state["original"])
-        allowed = {replace(original, restart_policy=("no", 0)).config_digest}
-        if rollback:
+        allowed = set()
+        if state.get("original_restart_disable_intent"):
+            allowed.add(replace(original, restart_policy=("no", 0)).config_digest)
+        if state["stage"] == "prepare_intent" or (
+            rollback and state["stage"] == "rollback_intent" and state.get("original_policy_restore_intent")
+        ):
             allowed.add(original.config_digest)
         require(
             snapshot.container_id == state["original_id"] and snapshot.config_digest in allowed,
             "original Docker ID/configuration drifted; recovery required",
         )
-        require(snapshot.name in {original.name, state["backup_name"]}, "original name is outside recorded identities")
+        names = {original.name}
+        if state.get("original_rename_intent"):
+            names.add(state["backup_name"])
+        if state.get("candidate_id") and not state.get("original_restore_name_intent"):
+            names = {state["backup_name"]}
+        require(snapshot.name in names, "original name is outside recorded identities")
         require(not stopped or snapshot.running is False, "frozen source is running")
         require(
             path_identity(Path(state["config"]["source_pgdata"])) == state["source_identity"],
@@ -544,7 +632,11 @@ class Migration:
     def common(self, *, fences: bool = True) -> None:
         state = self.state
         self.host.verify_units(state, required_fences=fences)
-        require(self.host.foreign_hold(state["config"]) == state["foreign_hold"], "foreign capacity hold changed")
+        require(self.host.identity() == state["host_identity"], "host observation changed")
+        require(
+            _credentials(state["config"], normalize_raw_inspect(state["original"])) == state["credentials"],
+            "business credential files changed",
+        )
         require(
             path_identity(Path(state["config"]["target_pgdata"]).parent) == state["target_parent_identity"],
             "target parent identity drifted",
@@ -554,9 +646,9 @@ class Migration:
         ).stdout.strip()
         require(not helpers, "operation helper still running; preserve state and wait for recovery")
 
-    def source_proof(self) -> None:
+    def source_proof(self, *, rollback: bool = False) -> None:
         state = self.state
-        self.original()
+        self.original(rollback=rollback)
         require(self.host.control(state) == state["control"], "stopped control identity changed")
         require(self.host.fingerprint(state) == state["source_tree"], "stopped source tree changed")
 
@@ -622,10 +714,18 @@ class Migration:
         raw = self.host.inspect(state["candidate_id"])
         snapshot = normalize_raw_inspect(raw)
         expected = self.expected_candidate()
+        names = {expected.name}
+        policies = {expected.config_digest}
+        if state["stage"] == "rollback_intent" and state.get("rejected_name"):
+            names.add(state["rejected_name"])
+        if state["stage"] == "release_intent" and state.get("candidate_policy_restore_intent"):
+            policies.add(
+                replace(expected, restart_policy=normalize_raw_inspect(state["original"]).restart_policy).config_digest
+            )
         require(
             snapshot.container_id == state["candidate_id"]
-            and snapshot.name == expected.name
-            and snapshot.config_digest == expected.config_digest,
+            and snapshot.name in names
+            and snapshot.config_digest in policies,
             "candidate Docker ID/configuration differs",
         )
         require(running is None or snapshot.running == running, "candidate running state differs")
@@ -725,6 +825,8 @@ class Migration:
         atomic_private(self.workspace / "container.env", ("\n".join(original.environment) + "\n").encode())
         self.save("activate_intent")
         self.set_hba(restore=False)
+        state["original_rename_intent"] = True
+        self.save()
         self.host.command([DOCKER, "rename", state["original_id"], state["backup_name"]])
         self.original()
         require(self.host.inspect(original.name, absent_ok=True) is None, "candidate name is occupied; not owned")
@@ -745,7 +847,7 @@ class Migration:
             try:
                 self.readonly_proof()
                 break
-            except MigrationError:
+            except (MigrationError, psycopg2.OperationalError):
                 require(time.monotonic() < deadline, "candidate readiness failed; pre-write rollback remains available")
                 time.sleep(1)
         state["display_unfenced"] = True
@@ -766,10 +868,15 @@ class Migration:
                 "unrecorded candidate is preserved; manual recovery required",
             )
         if state.get("candidate_id"):
-            self.candidate(running=None)
-            require(original.running is False, "two-primary risk; original unexpectedly running")
-        if state.get("control") and not original.running:
-            self.source_proof()
+            candidate = self.candidate(running=None)
+            require(not (original.running and candidate.running), "two-primary risk")
+            require(
+                not original.running or state.get("original_start_intent"),
+                "original unexpectedly running",
+            )
+        if state.get("control") and not original.running and not state.get("original_start_intent"):
+            self.source_proof(rollback=True)
+        state["original_policy_restore_intent"] = True
         self.save("rollback_intent")
         if state.get("candidate_id"):
             # Re-fence display before stopping an owned candidate; business units
@@ -777,7 +884,6 @@ class Migration:
             state["display_unfenced"] = False
             self.save()
             self.host.install_fences(state)
-            self.host.command([DOCKER, "update", "--restart=no", state["candidate_id"]])
             candidate_raw = self.host.inspect(state["candidate_id"])
             if candidate_raw["State"]["Running"]:
                 self.host.command(
@@ -786,25 +892,50 @@ class Migration:
             # Preserve the stopped candidate container too; rename rather than
             # remove it. This makes interrupted rollback forward-reconcilable.
             rejected_name = state["config"]["source_container"] + "-pgdata-rejected-" + state["operation"]
-            self.host.command([DOCKER, "rename", state["candidate_id"], rejected_name])
             state["rejected_name"] = rejected_name
             self.save()
+            if self.candidate(running=False).name != rejected_name:
+                self.host.command([DOCKER, "rename", state["candidate_id"], rejected_name])
         if original.name != state["config"]["source_container"]:
             require(
                 self.host.inspect(state["config"]["source_container"], absent_ok=True) is None,
                 "original name occupied after candidate stop",
             )
+            state["original_restore_name_intent"] = True
+            self.save()
             self.host.command([DOCKER, "rename", state["original_id"], state["config"]["source_container"]])
         restart, retries = normalize_raw_inspect(state["original"]).restart_policy
         restart = f"on-failure:{retries}" if restart == "on-failure" else restart or "no"
-        self.host.command([DOCKER, "update", "--restart=" + restart, state["original_id"]])
+        state["original_policy_restore_intent"] = True
+        self.save()
+        if original.restart_policy != normalize_raw_inspect(state["original"]).restart_policy:
+            self.host.command([DOCKER, "update", "--restart=" + restart, state["original_id"]])
         if not original.running:
+            state["original_start_intent"] = True
+            self.save()
             self.host.command([DOCKER, "start", state["original_id"]])
         restored = self.original(stopped=False, rollback=True)
         require(
             restored.running and restored.config_digest == state["original_config_digest"],
             "exact original restoration failed",
         )
+        deadline = time.monotonic() + 120
+        while True:
+            try:
+                catalog = _catalog(self.host, state)
+                require(
+                    catalog["system_id"] == state["catalog"]["system_id"],
+                    "restored database identity differs",
+                )
+                self.host.read_proof(state)
+                break
+            except (MigrationError, psycopg2.OperationalError):
+                require(time.monotonic() < deadline, "original database readiness failed; writers remain fenced")
+                time.sleep(1)
+        state["display_unfenced"] = True
+        self.save()
+        self.host.restore_units(state, display_only=True)
+        self.host.display_ready(state)
         self.host.restore_units(state)
         self.save("rolled_back")
 
@@ -815,6 +946,7 @@ class Migration:
         self.candidate()
         if not state["writes_released"]:
             self.readonly_proof()
+            self.host.release_callers_ready(state)
             state["writes_released"] = True
             self.save("release_intent")  # Sole durable stale-snapshot boundary.
         # A marked retry accepts original OR owned HBA, but never a third state.
@@ -823,6 +955,9 @@ class Migration:
         require(value is True, "candidate HBA reload failed; release must continue forward")
         restart, retries = normalize_raw_inspect(state["original"]).restart_policy
         restart = f"on-failure:{retries}" if restart == "on-failure" else restart or "no"
-        self.host.command([DOCKER, "update", "--restart=" + restart, state["candidate_id"]])
+        state["candidate_policy_restore_intent"] = True
+        self.save()
+        if self.candidate().restart_policy != normalize_raw_inspect(state["original"]).restart_policy:
+            self.host.command([DOCKER, "update", "--restart=" + restart, state["candidate_id"]])
         self.host.restore_units(state)
         self.save("released")

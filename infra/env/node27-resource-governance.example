@@ -10,7 +10,14 @@ NODE27_GOVERNANCE_OBJECT_STORE_ROOT=/home/ghdc/nwm/object-store
 NODE27_GOVERNANCE_PGDATA_ROOT=/home/nwm/nhms-pgdata
 # Keep this deployed /home default until the separately approved #2240 cutover.
 # After verified activation, set the deployed governance env to the exact frozen
-# target (normally /data/GHDC/nhms-pgdata); restore this value on pre-write rollback.
+# target (normally /data/GHDC/nhms-primary/pgdata); restore this value on pre-write rollback.
+# The current RAID root is root-owned 0:0 mode 0755. A separately approved root
+# operator must provision only a fresh private mode-0700 /data/GHDC/nhms-primary
+# parent with freshly measured migration-operator ownership, leaving pgdata absent.
+# Refuse/review any preexisting parent; never install-d/chown over an unknown path,
+# chown the RAID root or bind that entire root RW. No production setup is authorized.
+# Other approved explicit targets remain valid under the same strict parent checks.
+# First prepare needs an explicit positive measured/approved reserve, not a default budget.
 # Samples use observed device identity, not the path prefix. Retained old PGDATA
 # is residual filesystem use, not a second current cluster. This enables neither
 # the retired archive lane nor the independent nhms_cold installer/residency lane.

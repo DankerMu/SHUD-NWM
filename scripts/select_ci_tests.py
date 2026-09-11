@@ -3920,6 +3920,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_tablespace_install.py",
             "tests/test_node27_cold_tablespace_recovery_contract.py",
             "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
         ),
     ),
     PathTestRule(

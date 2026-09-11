@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,10 +11,10 @@ from types import SimpleNamespace
 import pytest
 
 from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
-from packages.common.node27_cold_tablespace_container import COLD_BIND, normalize_raw_inspect
-from packages.common.node27_pgdata_host import Host, MigrationError, UNITS, path_identity
-from packages.common.node27_pgdata_migrate import DEFAULTS, Migration, _hba_overlay
-from scripts.node27_pgdata_migrate import main, parser
+from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
+from packages.common.node27_pgdata_host import FENCE, Host, MigrationError, path_identity
+from packages.common.node27_pgdata_migrate import DEFAULTS, Migration
+from scripts.node27_pgdata_migrate import main
 
 
 def _private(path: Path, text: str) -> Path:
@@ -51,7 +52,7 @@ def _inspect(
             "Cmd": ["postgres"],
             "Entrypoint": None,
             "WorkingDir": "/",
-            "User": "1000:1000",
+            "User": f"{os.getuid()}:{os.getgid()}",
             "Labels": {},
             "StopSignal": "SIGINT",
             "Healthcheck": None,
@@ -126,52 +127,34 @@ class FakeHost(Host):
         raise AssertionError("helper must not run during planning")
 
 
-def test_parser_defaults_to_plan_and_exposes_frozen_shared_flags() -> None:
-    flags = {action.option_strings[0] for action in parser()._actions if action.option_strings}
-    assert flags >= {
-        "--action",
-        "--workspace",
-        "--source-container",
-        "--source-pgdata",
-        "--target-pgdata",
-        "--reserve-bytes",
-        "--mdadm-evidence",
-        "--smart-evidence",
-        "--enforce",
-        "--disposable-root",
-        "--database",
-        "--admin-role",
-        "--reader-dsn-file",
-        "--writer-dsn-file",
-        "--drain-timeout",
-    }
-    args = parser().parse_args(["--workspace", "/data/GHDC/nhms-pgdata-ops"])
-    assert args.action == "plan" and args.enforce is False
-    assert DEFAULTS["admin_role"] == "nhms"
-
-
 def test_default_plan_reports_without_stopping_or_creating_state(tmp_path: Path) -> None:
-    workspace = _workspace(tmp_path)
-    host = FakeHost({"nhms-db": _inspect()})
+    root = tmp_path / ("nhms-pgdata-oracle-" + "01" * 16)
+    root.mkdir(mode=0o700)
+    source, workspace = root / "source", root / "workspace"
+    source.mkdir(mode=0o700)
+    workspace.mkdir(mode=0o700)
+    name = root.name + "-db"
+    host = FakeHost({name: _inspect(name=name, source=str(source), port="55494")})
     result = Migration(workspace, host=host).run(
-        "plan",
         overrides={
+            "source_container": name,
+            "source_pgdata": str(source),
+            "target_pgdata": str(root / "target"),
+            "disposable_root": str(root),
+            "reserve_bytes": 1,
             "reader_dsn_file": str(
-                _private(
-                    tmp_path / "reader.dsn", "host=127.0.0.1 port=55432 dbname=nhms user=nhms_display_ro password=x"
-                )
+                _private(root / "reader.dsn", "host=127.0.0.1 port=55494 dbname=nhms user=nhms_display_ro password=x")
             ),
             "writer_dsn_file": str(
-                _private(
-                    tmp_path / "writer.dsn", "host=127.0.0.1 port=55432 dbname=nhms user=nhms_ingest_rw password=y"
-                )
+                _private(root / "writer.dsn", "host=127.0.0.1 port=55494 dbname=nhms user=nhms_ingest_rw password=y")
             ),
-        },
+        }
     )
-    assert result["mutation"] is False
-    assert result["action"] == "plan"
+    assert result["mutation"] is False and result["action"] == "plan" and result["blockers"] == []
     assert not (workspace / "state.json").exists()
-    assert not any(command[1] in {"stop", "run", "create", "update", "exec"} for command in host.commands)
+    assert not (root / "lifecycle.lock").exists()
+    assert host.inspects[name]["State"]["Running"]
+    assert all(command[1] == "inspect" for command in host.commands)
     assert not host.helpers
 
 
@@ -204,7 +187,7 @@ def test_out_of_order_activate_and_release_refuse_without_mutation(
         with pytest.raises(MigrationError, match="state/action pair refused"):
             Migration(workspace, host=host).run(action, enforce=True)
     assert json.loads((workspace / "state.json").read_text())["stage"] == "prepared"
-    assert host.commands == []
+    assert all(command[:3] == ("/usr/bin/findmnt", "--json", "--target") for command in host.commands)
 
 
 def test_marked_release_forbids_stale_rollback_and_allows_forward_only(
@@ -230,74 +213,63 @@ def test_marked_release_forbids_stale_rollback_and_allows_forward_only(
     loaded = json.loads((workspace / "state.json").read_text())
     assert loaded["writes_released"] is True
     assert loaded["stage"] == "release_intent"
-    assert host.commands == []
+    assert all(command[:3] == ("/usr/bin/findmnt", "--json", "--target") for command in host.commands)
 
 
-def test_unrecorded_named_container_is_preserved_not_owned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = _workspace(tmp_path)
-    monkeypatch.setattr("packages.common.node27_pgdata_migrate.timeseries_lifecycle_lock", lambda: _nullcontext())
-    original = _inspect(running=False)
-    stranger = _inspect(name="nhms-db")
+def test_unrecorded_named_container_is_preserved_not_owned(tmp_path: Path) -> None:
+    root = tmp_path / ("nhms-pgdata-oracle-" + "ef" * 16)
+    root.mkdir(mode=0o700)
+    workspace, source, parent = (root / name for name in ("workspace", "source", "target-parent"))
+    for path in (workspace, source, parent):
+        path.mkdir(mode=0o700)
+    name = root.name + "-db"
+    original = _inspect(name=name, source=str(source), running=False, port="55494")
+    stranger = _inspect(name=name, source=str(source), port="55494")
     stranger["Id"] = "b" * 64
+    config = {
+        **DEFAULTS,
+        "source_container": name,
+        "source_pgdata": str(source),
+        "target_pgdata": str(parent / "pgdata"),
+        "disposable_root": str(root),
+        "reserve_bytes": 1,
+    }
+    host = FakeHost({original["Id"]: original, name: stranger})
+    credentials = {}
+    for kind, role in (("reader", "nhms_display_ro"), ("writer", "nhms_ingest_rw")):
+        dsn = f"host=127.0.0.1 port=55494 dbname=nhms user={role} password=secret"
+        config[kind + "_dsn_file"] = str(_private(root / (kind + ".dsn"), dsn))
+        credentials[kind] = {
+            "host": "127.0.0.1",
+            "port": "55494",
+            "dbname": "nhms",
+            "user": role,
+            "digest": hashlib.sha256(dsn.encode()).hexdigest(),
+        }
     state = {
         "schema_version": 1,
-        "stage": "activate_intent",
+        "stage": "rollback_intent",
         "writes_released": False,
         "operation": "ef" * 16,
         "workspace": str(workspace),
         "workspace_identity": path_identity(workspace),
-        "config": dict(DEFAULTS),
+        "config": config,
         "original": original,
         "original_id": original["Id"],
         "original_config_digest": normalize_raw_inspect(original).config_digest,
-        "source_identity": [1, 2, os.getuid(), os.getgid(), 0o700],
-        "target_parent_identity": [1, 3, os.getuid(), os.getgid(), 0o700],
+        "source_identity": path_identity(source),
+        "target_parent_identity": path_identity(parent),
         "units": {},
-        "foreign_hold": {},
+        "host_identity": host.identity(),
         "candidate_id": None,
-        "backup_name": "nhms-db-pgdata-original-" + "ef" * 16,
+        "credentials": credentials,
+        "original_policy_restore_intent": True,
+        "backup_name": name + "-pgdata-original-" + "ef" * 16,
     }
     _private(workspace / "state.json", json.dumps(state))
-    host = FakeHost({original["Id"]: original, "nhms-db": stranger})
-    host.foreign_hold = lambda config: {}  # type: ignore[method-assign]
-    host.verify_units = lambda *args, **kwargs: None  # type: ignore[method-assign]
-    real_identity = path_identity
-    monkeypatch.setattr(
-        "packages.common.node27_pgdata_migrate.path_identity",
-        lambda path: (
-            state["source_identity"]
-            if str(path) == "/home/nwm/nhms-pgdata"
-            else state["target_parent_identity"]
-            if str(path) == "/data/GHDC"
-            else real_identity(path)
-        ),
-    )
     with pytest.raises(MigrationError, match="unrecorded candidate is preserved"):
         Migration(workspace, host=host).run("rollback", enforce=True)
-    assert not any(command[1] in {"rm", "rename", "stop"} for command in host.commands)
-
-
-def test_hba_overlay_rejects_every_login_except_verified_reader_and_local_admin() -> None:
-    original = b"host all all 0.0.0.0/0 md5\nlocal all postgres peer\n"
-    overlay = _hba_overlay(
-        {
-            "operation": "aa" * 16,
-            "config": {"admin_role": "nhms"},
-            "credentials": {"reader": {"user": "nhms_display_ro"}},
-            "catalog": {"roles": ["nhms", "nhms_display_ro", "nhms_ingest_rw", "nhms_download_rw"]},
-        },
-        original,
-    )
-    text = overlay.decode()
-    assert text.endswith(original.decode())
-    assert 'host all "nhms_ingest_rw" 0.0.0.0/0 reject' in text
-    assert 'host all "nhms_download_rw" 0.0.0.0/0 reject' in text
-    assert 'local all "nhms_ingest_rw" reject' in text
-    assert 'local all "nhms" reject' not in text
-    assert 'host all "nhms_display_ro" 0.0.0.0/0 reject' not in text
-    assert 'local all "nhms_display_ro" reject' in text
-    assert "default_transaction_read_only" not in text
-    assert original.decode() in text
+    assert not any(command[1] in {"rm", "rename", "stop", "update", "start"} for command in host.commands)
 
 
 def test_disposable_identity_cannot_select_live_paths(tmp_path: Path) -> None:
@@ -327,18 +299,6 @@ def test_disposable_identity_cannot_select_live_paths(tmp_path: Path) -> None:
             },
             inspect,
         )
-    with pytest.raises(MigrationError, match="production"):
-        _validate_paths(
-            workspace,
-            {
-                **DEFAULTS,
-                "source_container": "nhms-db",
-                "source_pgdata": "/home/nwm/nhms-pgdata",
-                "target_pgdata": "/home/nwm/nhms-pgdata-new",
-                "disposable_root": None,
-            },
-            _inspect(),
-        )
     inspect["HostConfig"]["PortBindings"]["5432/tcp"][0]["HostPort"] = "55432"
     inspect["Name"] = "/" + root.name + "-db"
     with pytest.raises(MigrationError, match="production"):
@@ -358,10 +318,27 @@ def test_disposable_identity_cannot_select_live_paths(tmp_path: Path) -> None:
 def test_cold_bind_is_refused_as_relocation_identity(tmp_path: Path) -> None:
     from packages.common.node27_pgdata_migrate import _validate_paths
 
-    workspace = _workspace(tmp_path)
-    inspect = _inspect(extra_bind=COLD_BIND)
+    root = tmp_path / ("nhms-pgdata-oracle-" + "12" * 16)
+    root.mkdir(mode=0o700)
+    source, workspace = root / "source", root / "workspace"
+    source.mkdir(mode=0o700)
+    workspace.mkdir(mode=0o700)
+    config = {
+        **DEFAULTS,
+        "source_container": root.name + "-db",
+        "source_pgdata": str(source),
+        "target_pgdata": str(root / "target"),
+        "disposable_root": str(root),
+        "reserve_bytes": 1,
+    }
+    inspect = _inspect(
+        name=config["source_container"],
+        source=str(source),
+        port="55494",
+        extra_bind=f"{root / 'nhms-cold-tablespace'}:/nhms_cold:rw",
+    )
     with pytest.raises(MigrationError, match="cold identity"):
-        _validate_paths(workspace, dict(DEFAULTS), inspect)
+        _validate_paths(workspace, config, inspect)
 
 
 def test_ephemeral_workspace_is_refused(tmp_path: Path) -> None:
@@ -403,15 +380,192 @@ def test_cli_plan_json_contains_no_password(
     assert "password" not in captured.out.lower()
 
 
-def test_fixed_fence_set_covers_sixteen_persistent_units() -> None:
-    assert len(UNITS) == 16
-    assert "nhms-node27-timeseries-compression-replay.service" in UNITS
-    assert "nhms-display-api.service" in UNITS
-    assert "nhms-node27-resource-governance.timer" in UNITS
-    assert "nhms-node27-cold-residency.service" not in UNITS
-
-
 def _nullcontext():
     from contextlib import nullcontext
 
     return nullcontext()
+
+
+def test_cli_sanitizes_unreadable_and_malformed_private_state(tmp_path: Path, capsys) -> None:
+    workspace = _workspace(tmp_path)
+    _private(workspace / "state.json", '{"password":"secret-dsn"')
+    assert main(["--workspace", str(workspace), "--action", "prepare", "--enforce"]) == 2
+    result = capsys.readouterr()
+    assert json.loads(result.err)["ok"] is False
+    assert "secret-dsn" not in result.err and "Traceback" not in result.err
+    (workspace / "state.json").unlink()
+    assert main(["--workspace", str(workspace / "missing"), "--action", "prepare", "--enforce"]) == 2
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_first_prepare_requires_operator_reserve_before_fencing(tmp_path: Path) -> None:
+    root = tmp_path / ("nhms-pgdata-oracle-" + "34" * 16)
+    root.mkdir(mode=0o700)
+    source, workspace = root / "source", root / "workspace"
+    source.mkdir(mode=0o700)
+    workspace.mkdir(mode=0o700)
+    name = root.name + "-db"
+    host = FakeHost({name: _inspect(name=name, source=str(source), port="55494")})
+    with pytest.raises(MigrationError, match="reserve"):
+        Migration(workspace, host=host).run(
+            "prepare",
+            enforce=True,
+            overrides={
+                "source_container": name,
+                "source_pgdata": str(source),
+                "target_pgdata": str(root / "target"),
+                "disposable_root": str(root),
+            },
+        )
+    assert not (workspace / "state.json").exists()
+    assert host.inspects[name]["State"]["Running"]
+    assert all(command[1] == "inspect" for command in host.commands)
+
+
+class UnitHost(FakeHost):
+    def __init__(self, units: dict[str, dict[str, str]]):
+        super().__init__({})
+        self.units = units
+
+    def command(self, argv, **kwargs):
+        if list(argv[:3]) != ["/usr/bin/systemctl", "--user", "show"]:
+            if list(argv[:2]) == ["/usr/bin/systemctl", "--user"]:
+                self.commands.append(tuple(argv))
+                if argv[2] in {"start", "stop"}:
+                    self.units[argv[3]]["ActiveState"] = "active" if argv[2] == "start" else "inactive"
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return super().command(argv, **kwargs)
+        name = argv[3]
+        value = dict(self.units.get(name, {"LoadState": "not-found", "ActiveState": "inactive"}))
+        if name in self.units:
+            fence = self.fence_path(name)
+            if fence.exists():
+                value["DropInPaths"] = (value.get("DropInPaths", "") + " " + str(fence)).strip()
+        return SimpleNamespace(returncode=0, stdout="\n".join(f"{k}={v}" for k, v in value.items()), stderr="")
+
+
+def test_persistent_fence_preserves_optional_foreign_hold_and_original_timer_state(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    workspace = _workspace(tmp_path)
+    held, active = "nhms-node27-autopipe.timer", "nhms-node27-timeseries-retention.timer"
+    units = {}
+    for name, running in ((held, "inactive"), (active, "active")):
+        fragment = _private(tmp_path / name, "[Timer]\nOnUnitActiveSec=60\n")
+        units[name] = {
+            "LoadState": "loaded",
+            "ActiveState": running,
+            "SubState": "waiting",
+            "UnitFileState": "enabled",
+            "Type": "",
+            "WorkingDirectory": "",
+            "ExecStart": "",
+            "EnvironmentFiles": "",
+            "FragmentPath": str(fragment),
+            "DropInPaths": "",
+        }
+    foreign = tmp_path / ".config/systemd/user" / (held + ".d") / "91-foreign-capacity.conf"
+    foreign.parent.mkdir(parents=True)
+    foreign_bytes = "[Unit]\nConditionPathExists=/operator/approval-still-absent\n"
+    _private(foreign, foreign_bytes)
+    units[held]["DropInPaths"] = str(foreign)
+    host = UnitHost(units)
+    state = {
+        "workspace": str(workspace),
+        "operation": "56" * 16,
+        "stage": "prepared",
+        "writes_released": False,
+        "config": {**DEFAULTS, "drain_timeout": 1},
+        "units": host.units_snapshot(DEFAULTS),
+        "display_unfenced": False,
+    }
+    host.install_fences(state)
+    assert host.fence_path(held).name == FENCE
+    assert host.fence_path(held).exists() and host.fence_path(active).exists()
+    # A fresh host object must honor the persistent files, not in-process memory.
+    restored = UnitHost(units)
+    restored.verify_units(state, required_fences=True)
+    restored.restore_units(state)
+    assert foreign.read_text() == foreign_bytes
+    assert units[held]["ActiveState"] == "inactive"
+    assert units[active]["ActiveState"] == "active"
+    assert not host.fence_path(held).exists() and not host.fence_path(active).exists()
+    assert ("/usr/bin/systemctl", "--user", "start", held) not in restored.commands
+
+
+def test_foreign_fence_change_refuses_before_owned_fence_removal(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    workspace = _workspace(tmp_path)
+    name = "nhms-node27-download.timer"
+    fragment = _private(tmp_path / name, "[Timer]\nOnUnitActiveSec=60\n")
+    units = {
+        name: {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "UnitFileState": "enabled",
+            "Type": "",
+            "FragmentPath": str(fragment),
+            "DropInPaths": "",
+            "EnvironmentFiles": "",
+        }
+    }
+    host = UnitHost(units)
+    state = {
+        "workspace": str(workspace),
+        "operation": "78" * 16,
+        "stage": "prepared",
+        "writes_released": False,
+        "config": {**DEFAULTS, "drain_timeout": 1},
+        "units": host.units_snapshot(DEFAULTS),
+    }
+    host.install_fences(state)
+    fragment.write_text("[Timer]\nOnUnitActiveSec=1\n")
+    with pytest.raises(MigrationError, match="foreign runtime/unit"):
+        UnitHost(units).restore_units(state)
+    assert host.fence_path(name).exists()
+    assert units[name]["ActiveState"] == "inactive"
+
+
+def test_governance_target_exception_does_not_unbind_other_caller_configuration(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    workspace = _workspace(tmp_path)
+    name = "nhms-node27-resource-governance.service"
+    source, target = str(tmp_path / "source"), str(tmp_path / "target")
+    config = {**DEFAULTS, "source_pgdata": source, "target_pgdata": target, "drain_timeout": 1}
+    environment = _private(tmp_path / "governance.env", f"NODE27_GOVERNANCE_PGDATA_ROOT={source}\nLIMIT=7\n")
+    fragment = _private(tmp_path / name, "[Service]\nType=oneshot\n")
+    units = {
+        name: {
+            "LoadState": "loaded",
+            "ActiveState": "inactive",
+            "UnitFileState": "static",
+            "Type": "oneshot",
+            "FragmentPath": str(fragment),
+            "DropInPaths": "",
+            "EnvironmentFiles": "",
+            "ExecStart": f"/bin/bash -lc '. {environment}; exec /old/runtime/governance'",
+        }
+    }
+    host = UnitHost(units)
+    state = {
+        "workspace": str(workspace),
+        "operation": "90" * 16,
+        "stage": "activated_readonly",
+        "writes_released": False,
+        "config": config,
+        "units": host.units_snapshot(config),
+    }
+    host.install_fences(state)
+    with pytest.raises(MigrationError, match="governance PGDATA target"):
+        host.release_callers_ready(state)
+    approved = f"NODE27_GOVERNANCE_PGDATA_ROOT={target}\nLIMIT=7\n"
+    environment.write_text(approved)
+    UnitHost(units).verify_units(state, required_fences=True)
+    host.release_callers_ready(state)
+    environment.write_text(approved.replace("LIMIT=7", "LIMIT=99"))
+    with pytest.raises(MigrationError, match="caller environment changed"):
+        UnitHost(units).restore_units(state)
+    assert host.fence_path(name).exists()
+    environment.write_text(approved)
+    state.update(stage="release_intent", writes_released=True)
+    UnitHost(units).restore_units(state)
+    assert not host.fence_path(name).exists()

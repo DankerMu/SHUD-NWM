@@ -200,8 +200,13 @@ NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 an
 source is `/home/nwm/nhms-pgdata`, bound to `/home/postgres/pgdata/data` in
 `nhms-db`. The observed resolved image is
 `sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e`
-(PostgreSQL 15.2 / TimescaleDB 2.10.2). Image `postgres` was observed as
-1000:1000; freshly measure the production numeric owner, do not assume it.
+(PostgreSQL 15.2 / TimescaleDB 2.10.2). The actual hostname observed for this
+window is `ghdc` (node-27 is the deployment label). Production Docker
+`Config.User` and PGDATA owner were both **1005:1005**, with PGDATA mode 0700;
+the operator UID was 1005. The image's OS `postgres` account is **1000:1000**,
+not the production runtime identity. Re-measure all identities for a new
+window; neither pair is a permanent default. The database administrator is
+`nhms`, not the image OS account.
 The actual application remains OLD `5a86841c` at
 `/home/nwm/NWM-reslice-original-5a86841c`. An isolated new-tooling checkout
 must never become the application runtime, change an image, run migrations,
@@ -246,6 +251,14 @@ of stale rollback after durable release, including partial release. An image
 primitive experiment alone is not CLI/state/oracle proof. No isolated result
 proves live C1–C4, HDD latency, ingest, or backup/disposal readiness.
 
+Initial verification is not final evidence: the first suite reported 782 passed
+and 3 failed, and the exact-image oracle failed at startup. In particular,
+image UID 1000 cannot initialize a fresh UID-1005-owned mode-0700 bind;
+the oracle must run as the measured operator/runtime identity rather than
+changing production ownership to the image account. Repairs require new
+recorded verification; no PASS or rollout authorization follows from these
+initial results.
+
 ### B. Later approved window: fresh admission and baseline
 
 The separately signed window must name the exact tooling SHA, source, new
@@ -267,6 +280,25 @@ prepare, rollback, release, test cleanup or PR completion. Controlled ingest
 and a natural tick remain blocked until the hold owner separately authorizes
 them; inability to complete those gates is **pending**, not acceptance.
 
+This hold is current operator-owned state, not a permanent CLI prerequisite.
+If a later window has a different separately authorized hold state, freeze
+that fresh state rather than manufacturing this historical hold.
+
+The recommended future target is **`/data/GHDC/nhms-primary/pgdata`**.
+Currently `/data/GHDC` itself is root-owned `0:0`, mode 0755, so it is not an
+admissible operator-owned immediate parent. Before a separately approved
+window, a separately authorized root operator must provision **only the fresh
+private parent `/data/GHDC/nhms-primary`**, mode 0700, owned by the freshly
+measured migration operator UID/GID. The `pgdata` child must remain absent
+for CLI creation. Root must first prove the parent path absent (including
+symlinks); any preexisting path requires refusal and separate ownership/use
+review, not adoption or repair by this procedure. Do not run `install -d` or
+`chown` over an unknown existing directory, chown the RAID root, bind the
+whole RAID root read-write, or add automatic root setup to the CLI. **Do not
+provision production now.** The CLI's strict operator-owned immediate-parent
+rule remains unchanged. An explicitly approved other target remains valid
+when it satisfies the same path, owner, device and capacity admission rules.
+
 Use a private maintenance shell without `set -x`. Supply values from the
 approved window, not example budgets; all DSNs and raw inspect stay private.
 Create a fresh, canonical, no-symlink, operator-owned mode-0700 workspace on
@@ -284,7 +316,7 @@ export UV_PROJECT_ENVIRONMENT=/home/nwm/NWM/.venv
 read -r -p 'Approved isolated tooling checkout: ' TOOLING
 read -r -p 'Approved durable workspace (absolute): ' WORKSPACE
 read -r -p 'Approved new target (absolute): ' TARGET
-read -r -p 'Measured reserve bytes: ' RESERVE
+read -r -p 'Explicitly approved positive reserve bytes: ' RESERVE
 read -r -p 'Private reader DSN file: ' READER_DSN_FILE
 read -r -p 'Private writer DSN file: ' WRITER_DSN_FILE
 read -r -p 'Fresh root mdadm envelope: ' MDADM
@@ -328,7 +360,8 @@ docker exec nhms-db psql -X -U nhms -d nhms -Atc \
 ```
 
 Fresh root evidence uses existing schema `1.0` envelopes: `captured_at` UTC,
-actual hostname, `command: {"argv": [...]}`, `subject`, and raw `output`.
+actual hostname (currently `ghdc`, not the deployment label `node-27`),
+`command: {"argv": [...]}`, `subject`, and raw `output`.
 Commands must be `/usr/sbin/mdadm --detail /dev/md0` (subject
 `{"array_device":"/dev/md0"}`) and `/usr/sbin/smartctl -H DEVICE`
 (subject `{"device":"DEVICE"}`) for each of the **two parsed active members**.
@@ -348,9 +381,11 @@ privately. The CLI hardware flags do **not** assert backup readiness. A copy on
 the same RAID is not an independent backup. Recheck all `pg_tblspc`, WAL and
 configuration paths: only `pg_default`/`pg_global` were observed previously;
 any uncovered external dependency requires refusal, not an improvised copy.
-Require enough target free space for the entire measured source plus the
-approved reserve, while retaining the old directory. No recursive `du` of
-shared `/data/GHDC`, no counting the old bytes as already freed.
+Require enough target free space for the entire measured source plus an
+**explicitly approved positive reserve** on the first prepare, while retaining
+the old directory. Missing or zero reserve is not approval; no example or
+invented 100 GiB budget substitutes for a measured, approved value. No recursive
+`du` of shared `/data/GHDC`, no counting the old bytes as already freed.
 
 Capture baseline business content and identical representative SQL/API/browser
 requests before stopping anything: latest-product identity/coverage, GFS and IFS
@@ -395,6 +430,18 @@ obtain the window's human GO before the first mutation:
 "${MIGRATE[@]}" --workspace "$WORKSPACE" --action plan
 ```
 
+Read-only admission distinguishes business-write capabilities from proven
+trusted platform facilities. The observed `pg_catalog.pg_settings` view UPDATE
+allows public session GUC changes, not application-table writes. The three
+observed executable SECURITY DEFINER routines are stock extension-owned
+PostGIS 3.3.2 C STABLE estimated-spatial-extent overloads from
+`$libdir/postgis-3`, with installed comments identifying that purpose.
+Do not revoke legitimate platform rights to make the proof pass. Equally,
+neither a familiar function name nor an extension label alone justifies
+waiving unsafe or unknown SECURITY DEFINER capabilities: their provenance and
+read-only purpose must be established, and application writes, privileged
+membership, schema/database CREATE or unproved capabilities still refuse.
+
 Only a completed `prepared` permits `copy`. Prepare journals intent before
 side effects, freezes original Docker **ID**, config/image/path/restart
 identity and actual units, disables original auto-restart, persistently
@@ -437,7 +484,10 @@ checks now. No image/app/schema upgrade to “fix” a failed SLO.
 ### D. Pre-release rollback, release, and current-data recovery
 
 Before `writes_released`, any failed gate or incomplete prepare/copy/activation
-uses the **same workspace**:
+uses the **same workspace**. If the governance PGDATA env value was already
+changed to the target, restore its exact original value and original file bytes
+before invoking rollback; rollback requires the original environment before
+it can complete. Do not alter other configuration or the foreign hold:
 
 ```bash
 "${MIGRATE[@]}" --workspace "$WORKSPACE" --action plan
@@ -446,12 +496,18 @@ uses the **same workspace**:
 
 Rollback re-observes frozen Docker IDs/config/path identities and durable fence
 ownership, restores the exact original container/restart policy and original
-scheduling/daemon state, and retains both directories. A name match, lost flock
-or reboot is not ownership. Unknown candidates/config/fences report recovery
-required; never `docker rm` by name or hand-edit the state to force success.
+scheduling/daemon state, and retains both directories. On interruption during
+the operation's own container rename or restart-policy transition, inspect
+`plan` and continue `rollback` in the same workspace: the recorded original
+ID and journaled transition, not a stale pre-transition name/config snapshot,
+identify recoverable owned state. A name match, lost flock or reboot is not
+ownership. Unknown candidates/config/fences report recovery required; never
+`docker rm` by name or hand-edit the state to force success. Original database
+readiness and display readiness must be established before writers resume;
+an issued start command or running container alone is insufficient.
 Confirm `rolled_back`, original bind/config, reads and original unit states.
-Do not replay a formerly active completed oneshot. Restore governance's original
-PGDATA env value if it was changed; foreign capacity hold and pins remain.
+Do not replay a formerly active completed oneshot. Foreign capacity hold and
+pins remain.
 
 Before releasing, change **only** the deployed governance env's
 `NODE27_GOVERNANCE_PGDATA_ROOT` to the exact verified target, preserving its
@@ -474,8 +530,11 @@ restoring exact original candidate HBA/reloading or lifting writer fences.
 Do not manually remove HBA rules, run controlled ingest or start writers first.
 If release crashes after that marker, stale rollback remains forbidden even
 when no write completion can be confirmed. Re-run only `release` with the same
-workspace after inspection; it revalidates candidate/HBA/remaining fences and
-continues forward, not through an obsolete read-only proof.
+workspace after inspection; it revalidates candidate identity, owned name/
+restart-policy transitions, HBA and remaining fences and continues forward,
+not through an obsolete read-only proof. Establish current database and display
+readiness before restoring writers; readiness failure leaves the remaining
+writer fences in place and requires forward recovery, never stale rollback.
 
 After release, perform controlled ingest through the **OLD runtime** only
 after the foreign hold owner separately authorizes that workload, then repeat

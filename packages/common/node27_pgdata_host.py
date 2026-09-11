@@ -9,10 +9,14 @@ import re
 import socket
 import stat
 import time
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import urlopen
 
+from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
 from packages.common.compressed_chunk_cold_target import run_bounded_command
 from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
 from packages.common.node27_cold_tablespace_evidence import EvidencePolicy, verify_root_storage_evidence
@@ -130,7 +134,7 @@ class Host:
     ):
         try:
             result = run_bounded_command(argv, timeout=timeout, max_bytes=max_bytes)
-        except Exception:
+        except (ColdRuntimeError, OSError):
             raise MigrationError("host command unavailable, timed out or exceeded output bound") from None
         require(allow_failure or result.returncode == 0, "host command failed; recovery may be required")
         return result
@@ -324,7 +328,7 @@ class Host:
         )
 
     def read_proof(self, state: dict[str, Any]) -> dict[str, Any]:
-        with self.connection(state, "reader") as connection:
+        with closing(self.connection(state, "reader")) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT current_user, current_database(), pg_is_in_recovery()")
                 role, database, recovery = cursor.fetchone()
@@ -353,8 +357,10 @@ class Host:
                 cursor.execute("BEGIN READ WRITE")
             raise MigrationError("business writer connected through the admission fence")
         finally:
-            connection.rollback()
-            connection.close()
+            try:
+                connection.rollback()
+            finally:
+                connection.close()
 
     def unit(self, name: str) -> dict[str, str]:
         properties = (
@@ -380,10 +386,35 @@ class Host:
             if path and Path(path).name != FENCE
         }
 
+    def environment_files(self, value: dict[str, str]) -> dict[str, dict[str, Any]]:
+        text = value.get("EnvironmentFiles", "")
+        matches = re.findall(r"(\S+) \(ignore_errors=(?:yes|no)\)", text)
+        sourced = re.findall(r"(?:\.\s+|source\s+)(/[^\s;'\"]+)", value.get("ExecStart", ""))
+        require(not text or matches, "environment file list is not representable")
+        result = {}
+        for name in dict.fromkeys([*matches, *sourced]):
+            path = Path(name)
+            require(path.is_absolute(), "environment file is not absolute")
+            data = read_bytes_durable_no_follow(path, max_bytes=256 * 1024)
+            info = stat_no_follow(path)
+            require(
+                info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o600,
+                "caller environment file must be private",
+            )
+            lines = data.splitlines(keepends=True)
+            keys = [i for i, line in enumerate(lines) if line.startswith(b"NODE27_GOVERNANCE_PGDATA_ROOT=")]
+            require(len(keys) <= 1, "ambiguous governance PGDATA setting")
+            setting = None
+            if keys:
+                index = keys[0]
+                setting = lines[index].split(b"=", 1)[1].strip().decode()
+                lines[index] = b"NODE27_GOVERNANCE_PGDATA_ROOT=<bound>\n"
+            result[name] = {"digest": digest(data), "stable": digest(b"".join(lines)), "pgdata": setting}
+        return result
+
     def units_snapshot(self, config: dict[str, Any]) -> dict[str, Any]:
         if config.get("disposable_root"):
             return {}
-        require(socket.gethostname().split(".")[0] == "node27", "production mode requires node27")
         for kind in ("service", "timer"):
             cold = self.unit("nhms-node27-cold-residency." + kind)
             require(
@@ -392,6 +423,7 @@ class Host:
                 "incompatible cold-residency lane is active/enabled",
             )
         result = {}
+        runtimes = {}
         for name in UNITS:
             value = self.unit(name)
             if value.get("LoadState") == "not-found":
@@ -408,7 +440,19 @@ class Host:
                     value.get("WorkingDirectory") == OLD_RUNTIME and OLD_RUNTIME in value.get("ExecStart", ""),
                     "actual application runtime is not the approved old checkout",
                 )
-            result[name] = {"observed": value, "files": self.unit_files(value)}
+            root = value.get("WorkingDirectory", "")
+            runtime = None
+            if root:
+                require(Path(root).is_absolute(), "caller runtime directory is not absolute")
+                if root not in runtimes:
+                    runtimes[root] = self.runtime_identity(Path(root))
+                runtime = runtimes[root]
+            result[name] = {
+                "observed": value,
+                "files": self.unit_files(value),
+                "runtime": runtime,
+                "environment": self.environment_files(value),
+            }
         return result
 
     def fence_path(self, name: str) -> Path:
@@ -422,12 +466,37 @@ class Host:
         return f"[Unit]\nConditionPathExists={path}\n".encode()
 
     def verify_units(self, state: dict[str, Any], *, required_fences: bool = False) -> None:
+        runtimes = {}
         for name, frozen in state["units"].items():
             current = self.unit(name)
             if frozen.get("absent"):
                 require(current.get("LoadState") == "not-found", "previously absent unit appeared")
                 continue
             require(self.unit_files(current) == frozen["files"], "foreign runtime/unit dropins changed")
+            for key in ("WorkingDirectory", "ExecStart", "EnvironmentFiles"):
+                require(current.get(key) == frozen["observed"].get(key), "effective caller configuration changed")
+            if frozen.get("runtime") is not None:
+                root = current["WorkingDirectory"]
+                if root not in runtimes:
+                    runtimes[root] = self.runtime_identity(Path(root))
+                require(
+                    runtimes[root] == frozen["runtime"],
+                    "actual runtime Git/code identity changed",
+                )
+            environment = self.environment_files(current)
+            require(environment.keys() == frozen["environment"].keys(), "caller environment paths changed")
+            for path, before in frozen["environment"].items():
+                after = environment[path]
+                if after == before:
+                    continue
+                require(
+                    name == "nhms-node27-resource-governance.service"
+                    and before["pgdata"] == state["config"]["source_pgdata"]
+                    and after["pgdata"] == state["config"]["target_pgdata"]
+                    and after["stable"] == before["stable"]
+                    and state["stage"] in {"activated_readonly", "release_intent"},
+                    "caller environment changed outside the governance PGDATA exception",
+                )
             require(
                 current.get("UnitFileState") == frozen["observed"].get("UnitFileState"),
                 "unit enablement changed outside relocation",
@@ -465,8 +534,17 @@ class Host:
             self.command(["/usr/bin/systemctl", "--user", "stop", DISPLAY])
         self.verify_units(state, required_fences=True)
 
+    def release_callers_ready(self, state: dict[str, Any]) -> None:
+        governance = state["units"].get("nhms-node27-resource-governance.service", {})
+        if governance and not governance.get("absent"):
+            current = self.environment_files(self.unit("nhms-node27-resource-governance.service"))
+            settings = [item["pgdata"] for item in current.values() if item["pgdata"] is not None]
+            require(settings == [state["config"]["target_pgdata"]], "governance PGDATA target is not updated")
+
     def restore_units(self, state: dict[str, Any], *, display_only: bool = False) -> None:
         self.verify_units(state)
+        if state["writes_released"] and not display_only:
+            self.release_callers_ready(state)
         for name, frozen in state["units"].items():
             if frozen.get("absent") or (display_only and name != DISPLAY):
                 continue
@@ -484,20 +562,57 @@ class Host:
             if value.get("ActiveState") == "active" and (name.endswith(".timer") or value.get("Type") != "oneshot"):
                 self.command(["/usr/bin/systemctl", "--user", "start", name])
 
-    def foreign_hold(self, config: dict[str, Any]) -> dict[str, str]:
-        if config.get("disposable_root"):
-            return {}
-        root = Path.home() / ".local/state/nhms-pgdata-pr-2240-capacity-hold"
-        require(
-            not (root / "resume-approved").exists() and not (root / "resume-approved").is_symlink(),
-            "capacity-hold resume marker must remain absent",
-        )
-        data = read_bytes_durable_no_follow(root / "state.json", max_bytes=256 * 1024)
-        result = {"authority": digest(data)}
-        for lane in ("autopipe", "download"):
-            for kind in ("service", "timer"):
-                name = f"nhms-node27-{lane}.{kind}"
-                require(self.unit(name).get("ActiveState") == "inactive", "capacity-held unit is not inactive")
-                path = self.fence_path(name).with_name("91-nhms-pgdata-pr-2240-capacity-hold.conf")
-                result[name] = digest(read_bytes_durable_no_follow(path, max_bytes=65536))
-        return result
+    def identity(self) -> dict[str, Any]:
+        return {"hostname": socket.gethostname(), "operator_uid": os.getuid(), "operator_gid": os.getgid()}
+
+    def runtime_identity(self, root: Path) -> dict[str, Any]:
+        identity = path_identity(root)
+        head = self.command(["/usr/bin/git", "-C", str(root), "rev-parse", "HEAD"]).stdout.strip()
+        require(re.fullmatch(r"[0-9a-f]{40}", head), "runtime Git identity is unavailable")
+        paths = self.command(
+            ["/usr/bin/git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"]
+        ).stdout.split("\x00")
+        files = {}
+        for name in paths:
+            if not name:
+                continue
+            path = root / name
+            require(path.is_relative_to(root) and ".." not in Path(name).parts, "unsafe runtime path")
+            files[name] = digest(read_bytes_durable_no_follow(path, max_bytes=64 * 1024 * 1024))
+        require(files, "runtime tracked code is absent")
+        return {"directory": identity, "head": head, "tree_digest": digest(json.dumps(files, sort_keys=True).encode())}
+
+    def display_ready(self, state: dict[str, Any]) -> None:
+        frozen = state["units"].get(DISPLAY, {})
+        if frozen.get("absent") or not frozen:
+            return
+        if frozen["observed"].get("ActiveState") != "active":
+            return
+        command = frozen["observed"].get("ExecStart", "")
+        match = re.search(r"NHMS_DISPLAY_API_PORT:-([0-9]+)|--port\s+([0-9]+)", command)
+        port = next((group for group in match.groups() if group), None) if match else None
+        for name in frozen["environment"]:
+            data = read_bytes_durable_no_follow(Path(name), max_bytes=256 * 1024).decode()
+            for line in data.splitlines():
+                if line.startswith("NHMS_DISPLAY_API_PORT="):
+                    port = line.partition("=")[2].strip().strip("'\"")
+        require(port and port.isdigit() and 1 <= int(port) <= 65535, "display readiness endpoint is unproved")
+        deadline = time.monotonic() + 120
+        while True:
+            healthy = False
+            if self.unit(DISPLAY).get("ActiveState") == "active":
+                try:
+                    with urlopen(f"http://127.0.0.1:{port}/health", timeout=10) as response:
+                        body = json.loads(response.read(65536))
+                        healthy = (
+                            response.status == 200
+                            and isinstance(body, dict)
+                            and body.get("status") == "ok"
+                            and body.get("service") == "nhms-api"
+                        )
+                except (OSError, URLError, ValueError):
+                    pass
+            if healthy:
+                return
+            require(time.monotonic() < deadline, "restored display readiness failed; writers remain fenced")
+            time.sleep(1)
