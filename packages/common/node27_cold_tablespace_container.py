@@ -219,6 +219,11 @@ def _known_default_config(key: str, item: object) -> bool:
         return isinstance(item, Mapping) and all(
             isinstance(port, str) and isinstance(value, Mapping) and not value for port, value in item.items()
         )
+    if key in {"AttachStdout", "AttachStderr"}:
+        # `docker create` defaults these to true, unlike detached `docker run`.
+        # They govern CLI stream attachment, not daemon logging or process IO.
+        # Interactive stdin/TTY settings remain outside this inert-default set.
+        return type(item) is bool
     return key in {"ArgsEscaped", "Shell"} and item in (False, None)
 
 
@@ -531,7 +536,29 @@ def build_recreate_argv(
     expected_name = identity.container_name
     if replacement_name is not None and replacement_name != expected_name:
         raise ContainerContractError("replacement container name differs from the immutable identity contract")
-    argv = [identity.docker_bin, "run", "-d", "--name", expected_name]
+    return serialize_container_argv(
+        snapshot.with_cold_bind(identity=identity), name=expected_name, docker_bin=identity.docker_bin
+    )
+
+
+def serialize_container_argv(
+    snapshot: ContainerSnapshot,
+    *,
+    name: str,
+    docker_bin: str = "/usr/bin/docker",
+    environment_file: str | None = None,
+    create_only: bool = False,
+) -> tuple[str, ...]:
+    """Serialize exactly the supplied snapshot; callers own admission and binds.
+
+    Unlike the guarded cold wrapper this pure serializer adds no deployment
+    identity or mount. A private env file avoids exposing credentials in argv.
+    """
+
+    argv = [docker_bin, "create" if create_only else "run"]
+    if not create_only:
+        argv.append("-d")
+    argv.extend(("--name", name))
     if snapshot.user:
         _docker_option(argv, "--user", snapshot.user)
     if snapshot.working_dir != "/":
@@ -577,9 +604,12 @@ def build_recreate_argv(
             _docker_option(argv, "-p", f"{host}:{port}:{key.split('/', 1)[0]}")
     for name, value in snapshot.labels:
         _docker_option(argv, "--label", f"{name}={value}")
-    for value in snapshot.environment:
-        _docker_option(argv, "--env", value)
-    for value in (*snapshot.binds, *(item for item in (identity.cold_bind,) if item not in snapshot.binds)):
+    if environment_file is not None:
+        _docker_option(argv, "--env-file", environment_file)
+    else:
+        for value in snapshot.environment:
+            _docker_option(argv, "--env", value)
+    for value in snapshot.binds:
         _docker_option(argv, "--volume", value)
     for value in snapshot.volumes_from:
         _docker_option(argv, "--volumes-from", value)

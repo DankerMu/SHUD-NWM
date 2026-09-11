@@ -704,3 +704,82 @@ into the origin's tablespace. Replay stays there. Recompression placement
 is engine-defined and must be measured; if any member lands hot, the same
 serialized tick converges the group or reports mixed/recovery. `drop_chunks`
 must leave no origin/compressed/index/TOAST catalog or files.
+
+## Amendment (2026-09-10): whole-PGDATA relocation capability, not live placement
+
+Issue #2240 adds a separately authorized alternative to selective compressed-chunk
+residency: cleanly stop the existing PostgreSQL cluster, copy its complete physical
+PGDATA to a separately approved target (recommended
+`/data/GHDC/nhms-primary/pgdata`), verify bytes and filesystem metadata, and replace
+only its host PGDATA bind. The same resolved PostgreSQL 15.2 / TimescaleDB 2.10.2
+image, SQL/schema, roles, unrelated binds and application runtime remain. The
+observed application is OLD `5a86841c` at
+`/home/nwm/NWM-reslice-original-5a86841c`; running new maintenance tooling from an
+isolated checkout does not authorize deployment of that checkout.
+
+This amendment accepts the **tooling capability and alternative**, not RAID
+re-admission or production cutover. The recorded live PGDATA remains
+`/home/nwm/nhms-pgdata`. #1891 and #1895 explicitly exclude entire PGDATA;
+neither is authorization for this new route. Their selective cold installation
+and residency lane stays inactive under this topology. Historical accepted facts
+above remain historical; archive retirement after the double-disk failure is
+unchanged. No `ghdc` resurrection, archive mover, cold bind or chunk rewrite is
+part of #2240.
+
+The 2026-09-10 observation identifies actual hostname `ghdc`, operator UID 1005,
+production Docker `Config.User` and PGDATA owner `1005:1005`, PGDATA mode 0700,
+and database administrator `nhms`. Image OS `postgres` is separately `1000:1000`;
+it is not the runtime owner. New windows must measure these facts afresh.
+The RAID root `/data/GHDC` is root-owned `0:0` mode 0755. The recommended target
+therefore requires a separately approved root operator to provision only an
+absent, private mode-0700 `/data/GHDC/nhms-primary` parent with freshly measured
+operator ownership; its `pgdata` child remains absent for CLI creation.
+Preexisting paths require refusal and separate review, never blind `install -d`
+or `chown`. Whole-RAID ownership changes, broad read-write root binds and
+automatic root setup are excluded. The strict operator-owned immediate-parent
+rule remains; other explicitly approved safe targets remain valid. This
+amendment authorizes no production provisioning.
+
+The exact native image has no rsync. Full offline `cp -a`, filesystem flush and
+streamed deterministic whole-tree verification deliberately trade longer
+downtime for a simpler consistency boundary than online precopy. There is no
+promised duration, logical reload or index rebuild. Fresh root-bound mdadm and
+both-member SMART evidence, complete backup/recovery readiness, measured numeric
+ownership, stopped-clean control state and an explicitly approved positive
+capacity reserve on first prepare are required; no missing/zero or invented
+100 GiB budget constitutes approval. Historical `[UU]`, old receipts and
+unavailable sudo are not PASS. Uncovered
+external tablespaces/WAL/configuration refuse this PGDATA-only operation.
+
+Persistent operation-owned fences and the original Docker ID/private durable
+journal survive process loss. Activation temporarily rejects real business
+writers at database admission while permitting verified display reads; a
+changeable read-only default is insufficient. Proven trusted platform
+session-setting views and extension-owned estimated-extent facilities are not
+business-write permissions; this distinction does not waive unsafe or unknown
+SECURITY DEFINER capabilities or require revoking legitimate platform rights.
+Before release, rollback restores the exact retained original container and
+scheduling without deleting either directory. Recovery recognizes journaled
+operation-owned name/restart-policy transitions by Docker identity and requires
+database/display readiness before writers resume.
+`state.json.writes_released` is persisted before HBA restoration or
+any business writer resumes. After this monotonic boundary, including interrupted
+release, recovery is forward-only and must use current consistent data, never the
+stale old directory. Old-copy disposal needs separate human authorization and an
+independently accepted backup outside the same failure domain.
+
+Governance retains its public sample keys and `/home` configuration default.
+An approved rollout changes `NODE27_GOVERNANCE_PGDATA_ROOT`; current PGDATA is
+charged exactly once to its observed device, with unknown/ambiguous placement
+reported unavailable. The retained old directory remains residual use; no shared
+RAID-root walk is added. The user-owned capacity hold and `60` runtime-pin
+dropins are not migration-owned and must survive rollback, release and PR closure.
+The observed foreign hold is not a permanent CLI prerequisite: later windows
+freeze freshly authorized state rather than creating a historical hold.
+
+Merge and later production cutover are separate human gates. Exact-image
+disposable verification proves mechanics only, not production HDD performance:
+unchanged business content, SQL1+20 P95 <=300 ms / buffers <=5000, API1+20
+P95 <=500 ms, browser1+20 P95 <2 s, controlled ingest and a natural serialized
+tick remain required. The executable maintenance and phase-specific recovery
+procedure is in the runbook's **#2240 whole-PGDATA relocation** section.
