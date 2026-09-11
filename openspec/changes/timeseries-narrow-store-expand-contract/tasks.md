@@ -77,6 +77,9 @@
   **Suggested fixture level:** compact - one module and one coverage-refresh path; DML boundary and forcing station leg are explicit invariants.
 
   **Minimal mergeable slice:** atomic: the single river CTE carries both store branches and feeds one unchanged upsert.
+
+  **Execution fixture:** `fixtures/I4b-2208.md` (compact) owns immutable station/rollup/upsert boundaries, named/all-runs capture and disposable-DB behavior, raw-registry cutover and frozen pre-transition fixture preparation. Parent validates on node27; production mixed-store/EXPLAIN and deployment remain I7/I8, not this pre-expand slice.
+
 - [ ] 2.4 (I5) Non-template surfaces: `services/tile_publisher/publisher.py` `_has_table` accepts both names during the transition; `services/tile_publisher/forcing_copyback_backfill.py` `required_columns` branches on store; `scripts/reset_qhh_smoke_db.py` and `scripts/summarize_qhh_smoke_results.py` render per store (reset clears the legacy table for legacy runs); `services/production_closure/scale_validation.py` `QUERY_TARGETS` and `scripts/node27_timeseries_compression_live_evidence.py` plan-shape fixtures branch on store (the autopipeline statistics guard is 3.1's, not this task's). Verify: targeted tests for each surface with legacy present/absent.
 
 ## 3. Lifecycle lanes and governance (I6 — deploy before the expand migration)

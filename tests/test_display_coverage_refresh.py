@@ -22,11 +22,13 @@ bypasses.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import pytest
 
 from packages.common import display_coverage
+from tests.river_ts_template_registry import historical_display_coverage_sql
 from tests.test_sql_shape_helpers import (
     SANCTIONED_TEXT_PUSHDOWN_COLUMNS,
     outer_predicates,
@@ -117,6 +119,67 @@ def _executed_sqls(connection: _Connection) -> list[str]:
     return [sql for sql, _params in connection.cursor_obj.executed]
 
 
+def _assert_executed_store_union(sql: str, params: dict[str, Any]) -> None:
+    """Check the actual cursor DML, never render a composed statement."""
+    historical = historical_display_coverage_sql()
+    assert sql.count("        river_sample_rows AS (\n") == 1
+    assert sql.count("        ),\n        river_identity_coverage AS (") == 1
+    before, river = sql.split("        river_sample_rows AS (\n")
+    body, after = river.split("        ),\n        river_identity_coverage AS (", 1)
+    old_before, old_river = historical.split("        river_sample_rows AS (\n")
+    old_body, old_after = old_river.split("        ),\n        river_identity_coverage AS (", 1)
+    assert before.replace("                h.timeseries_store,\n", "") == old_before
+    assert "                h.timeseries_store,\n" in before
+    assert after == old_after  # rollup, reconstruction, station-independent DML guard
+    assert sql.count("UNION ALL") == body.count("UNION ALL") == 1
+    assert sql.count("INSERT INTO hydro.run_display_coverage") == 1
+    assert sql.count("ON CONFLICT") == sql.count("RETURNING run_id") == 1
+    assert set(re.findall(r"%\(([^)]*)\)s", sql)) == set(params)
+    for branch, store, table in zip(
+        body.split("UNION ALL"),
+        ("legacy", "narrow"),
+        ("hydro.river_timeseries_legacy", "hydro.river_timeseries"),
+        strict=True,
+    ):
+        projection, rest = branch.strip().split("FROM", 1)
+        assert projection.split() == (
+            "SELECT rt.run_key, rt.basin_version_key, rt.river_network_version_key, "
+            "rt.river_segment_key, cr.expected_segment_count, rt.valid_time, rt.lead_time_hours"
+        ).split()
+        assert re.findall(r"\bhydro\.river_timeseries(?:_legacy)?\b", rest) == [table]
+        assert re.findall(r"cr\.timeseries_store = '([^']+)'", rest) == [store]
+        assert set(re.findall(r"%\(([^)]*)\)s", branch)) == {
+            "scan_run_id", "scan_basin_version_id", "scan_river_network_version_id",
+            "scan_display_start", "scan_display_end",
+        }
+        for key in (
+            "scan_run_id", "scan_basin_version_id", "scan_river_network_version_id",
+            "scan_display_start", "scan_display_end",
+        ):
+            assert f"(%({key})s IS NULL" in branch
+        outer = outer_predicates(branch)
+        assert "rt.valid_time >= cr.display_start_time" in outer
+        assert "rt.valid_time <= cr.display_end_time" in outer
+        assert "rt.variable_e = 'q_down'::hydro.river_variable" in outer
+        assert text_fact_columns(branch, "rt") == (
+            set(SANCTIONED_TEXT_PUSHDOWN_COLUMNS) if store == "legacy" else set()
+        )
+        assert (
+            "JOIN candidate_runs cr ON cr.run_key = rt.run_key "
+            "AND cr.basin_version_key = rt.basin_version_key "
+            "AND cr.river_network_version_key = rt.river_network_version_key"
+        ) in outer
+        assert "OR rt.basin_version_key = )" in outer
+        assert "OR rt.valid_time >= %(scan_display_start)s)" in outer
+        assert "OR rt.valid_time <= %(scan_display_end)s)" in outer
+        if store == "legacy":
+            restored = branch.replace(table, "hydro.river_timeseries").replace(
+                "WHERE cr.timeseries_store = 'legacy'\n              AND rt.variable_e",
+                "WHERE rt.variable_e",
+            )
+            assert restored.strip() == old_body.strip()
+
+
 def test_eligible_run_binds_header_values_as_scan_pushdown() -> None:
     connection = _Connection([_HEADER_ROW])
 
@@ -127,6 +190,11 @@ def test_eligible_run_binds_header_values_as_scan_pushdown() -> None:
     assert display_coverage._SCAN_HEADER_SQL in sqls
     assert display_coverage._REFRESH_SQL in sqls
     _sql, params = connection.cursor_obj.executed[-1]
+    assert _sql is display_coverage._REFRESH_SQL
+    _assert_executed_store_union(_sql, params)
+    assert sqls.index(display_coverage._SCAN_HEADER_SQL) < sqls.index(_sql)
+    assert sqls.count(display_coverage._REFRESH_SQL) == 1
+    assert len(sqls) == 3  # timeout, seven-column header, one upsert
     assert params["scan_run_id"] == "run-1"
     assert params["scan_forcing_version_id"] == "fv-1"
     assert params["scan_basin_version_id"] == "bv-1"
@@ -157,6 +225,10 @@ def test_all_runs_mode_disables_pushdown() -> None:
     sqls = _executed_sqls(connection)
     assert display_coverage._SCAN_HEADER_SQL not in sqls
     _sql, params = connection.cursor_obj.executed[-1]
+    assert _sql is display_coverage._REFRESH_SQL
+    _assert_executed_store_union(_sql, params)
+    assert sqls.count(display_coverage._REFRESH_SQL) == 1
+    assert len(sqls) == 2  # timeout and one upsert, no route-bearing prefetch
     for key in display_coverage._SCAN_PARAM_KEYS:
         assert params[key] is None
     assert params["force"] is False
@@ -303,7 +375,7 @@ def test_pushdown_predicates_present_in_both_sample_ctes() -> None:
     # marked `AND` line, and the two guards' aids moved inside `OR (` with the
     # marker above them (hence the space after the bracket once comments are
     # stripped). Same conjunctions, same truth table, same fold-away on NULL.
-    assert "WHERE rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'" in outer
+    assert "AND rt.variable_e = 'q_down'::hydro.river_variable AND rt.variable = 'q_down'" in outer
     assert "( rt.run_id = %(scan_run_id)s AND rt.run_key = )" in outer
     assert (
         "( rt.river_network_version_id = %(scan_river_network_version_id)s AND rt.river_network_version_key = )"

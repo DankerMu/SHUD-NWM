@@ -1322,6 +1322,7 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             *SQL_SHAPE_ORACLE_TESTS,
             "tests/test_forecast_store_routing.py",
             "tests/test_hydro_display_mvt_scaling.py",
+            "tests/test_mvt_national_identity_probe_integration.py",
         ),
     ),
     PathTestRule(
@@ -2209,6 +2210,14 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # new base is routed the same way.
         "tests/fixtures/river_ts_templates_*.json",
         SQL_SHAPE_ORACLE_TESTS,
+    ),
+    PathTestRule(
+        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
+        (
+            "tests/test_display_coverage_refresh.py",
+            "tests/test_river_ts_template_golden.py",
+            "tests/test_mvt_national_identity_probe_integration.py",
+        ),
     ),
     PathTestRule(
         "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql",
