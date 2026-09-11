@@ -136,9 +136,8 @@ _LOOKS_LIKE_SQL = re.compile(r"\bSELECT\b", re.IGNORECASE)
 def sql_literals(python_source: str) -> tuple[str, ...]:
     """The SQL string constants of a Python source fragment, in source order.
 
-    Two switched surfaces (``valid_times_for_layer`` and
-    ``_require_hydro_mvt_source_identity``) build their SQL inline, so their
-    pins can only start from a source slice. Running the SQL tokenizer over
+    Inline SQL surfaces such as ``_require_hydro_mvt_source_identity`` start
+    their pins from a source slice. Running the SQL tokenizer over
     raw Python is NOT safe: a ``'`` in a prose comment ("the caller's text")
     opens a string scan that swallows the query, and a ``\"\"\"`` delimiter
     reads as an empty string followed by an unterminated one, so the whole SQL
@@ -146,10 +145,9 @@ def sql_literals(python_source: str) -> tuple[str, ...]:
     failure mode again. Python's own parser is the only correct way to find
     where the SQL starts and stops, so use it.
 
-    Source order matters because ``valid_times_for_layer`` selects between its
-    named-identity and no-identity SQL with an inline conditional, and the two
-    branches must be pinned separately. ``ast.walk`` is breadth-first, so the
-    positions are sorted explicitly rather than trusted.
+    Source order matters when an inline conditional selects SQL branches.
+    ``ast.walk`` is breadth-first, so positions are sorted explicitly rather
+    than trusted.
     """
     tree = ast.parse(textwrap.dedent(python_source))
     found = [
@@ -436,12 +434,10 @@ def test_sql_from_python_skips_non_sql_constants() -> None:
 
 
 def test_sql_literals_keeps_conditional_expression_branches_in_source_order() -> None:
-    """``valid_times_for_layer`` picks its SQL with an inline ``if``/``else``.
+    """Conditional SQL branches retain their authored order.
 
-    The two branches are pinned separately, so which literal is which has to be
-    positional. ``ast.walk`` visits an ``IfExp`` breadth-first (body, test,
-    orelse) and would happen to agree here; sorting by position is what makes
-    that not a coincidence.
+    ``ast.walk`` visits an ``IfExp`` breadth-first (body, test, orelse) and
+    would happen to agree here; sorting by position makes that deliberate.
     """
     source = (
         "def f(named):\n"
@@ -691,7 +687,7 @@ def test_production_tile_sql_keeps_its_fact_predicates_after_stripping() -> None
 
 
 def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> None:
-    """Same end-to-end guard for the two surfaces whose SQL is inline in Python.
+    """Inline source extraction and routed raw producers must remain non-vacuous.
 
     Their pins start from a source slice, so vacuity here would be invisible:
     if extraction returned nothing, every "text predicate is gone" assertion
@@ -699,13 +695,10 @@ def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> No
     """
     from pathlib import Path
 
+    from services.tiles.mvt import _valid_times_any_source_template, _valid_times_named_source_template
+
     repo_root = Path(__file__).resolve().parents[1]
     surfaces = {
-        "valid_times_for_layer": (
-            repo_root / "services" / "tiles" / "mvt.py",
-            "def valid_times_for_layer",
-            "def _valid_time_discovery",
-        ),
         "existence probe": (
             repo_root / "apps" / "api" / "routes" / "hydro_display.py",
             "def _require_hydro_mvt_source_identity",
@@ -722,6 +715,20 @@ def test_python_source_surfaces_reduce_to_real_sql_before_their_pins_run() -> No
         assert "FROM hydro.river_timeseries" in stripped, name
         assert "SELECT run_key FROM hydro.hydro_run" not in stripped, name
         assert "enum_range" not in stripped, name
+
+    for factory in (_valid_times_named_source_template, _valid_times_any_source_template):
+        for store in ("legacy", "narrow"):
+            sql = factory(store)
+            assert "FROM hydro.river_timeseries" in sql
+            stripped = strip_scalar_subqueries(sql)
+            assert "FROM hydro.river_timeseries" in stripped
+            assert "SELECT h.run_key FROM hydro.hydro_run" not in stripped
+            assert "enum_range" not in stripped
+            assert (
+                "WHERE run_key ="
+                if factory is _valid_times_named_source_template
+                else "WHERE ts.variable_e ="
+            ) in stripped
 
 
 # ---------------------------------------------------------------------------

@@ -88,6 +88,8 @@ DDL 顺序（迁移 header 记账项）：`CREATE TABLE`（PK + 两 FK 内联）
 
    I3b/#2206 执行口径：identity 与 data 是两种不同投影的 raw fact-row shape；data 模板只写一份，由两个 zoom probe 复用。原 national 整句不再作为 renderer 输入，live registry 改为两个真实 raw source（总数 12→13），历史二十项 golden 不重写。三个 combined LATERAL 各保留一次 probe LIMIT，identity EXISTS 的外层 LIMIT 与 0/1 结果不动。仅实际 tile 测试 opt in；含 baseline tile 后追加 rival/coverage 的 #2031 用例保留明确的冻结 SQL 基线阶段，最终请求才执行当前 routed SQL，详见 `fixtures/I3b-2206.md`。不引入生产 fallback 或为未迁移 coverage 增加 SQL 改写 wrapper。
 
+   I3c/#2207 执行口径：两种 valid-time raw source 只投影时间，在一个 caller-owned outer distinct/order/limit 下组合。named 的 run authority 使用显式 `h.run_key`/`h.run_id`/`h.timeseries_store`，避免为多合取 lookup 放宽既有 unaliased scalar-scope fail-closed；any 使用 `ts.run_key` 到 `h.run_key` 的 correlated EXISTS。Python 先截取 SQL 降序结果中的最新 N 项，再把保留项升序返回。仅 discovery 专用测试保留相反 store 的 +30min poison，不能套用会还原时间的 MVT helper 掩盖路由错误。两条 registry key 保留，13 live /7 routed /6 historical-comparable，历史 golden 与五层 tile SQL 不变。详见 `fixtures/I3c-2207.md`；生产 I7/I8 边界不变。
+
 非模板面（同批处理）：`services/tile_publisher/publisher.py` 的 `_has_table` 前置在过渡期接受两个名字；`services/tile_publisher/forcing_copyback_backfill.py:314` 的 `required_columns` 按 store 分支（legacy 保 `variable`，narrow 只留键/枚举）；（`scripts/node27_autopipeline.py:1443-1451` 统计守卫的 IN-list 属 D7/任务 3.1，不在本批非模板面内）；`scripts/reset_qhh_smoke_db.py`、`scripts/summarize_qhh_smoke_results.py` 按 store 渲染（reset 对 legacy run 同时清 legacy 表）；`services/production_closure/scale_validation.py` 与 `scripts/node27_timeseries_compression_live_evidence.py` 的计划形状钉子按 store 分支。
 
 ### D6 legacy 重解析：fail-closed，走既有 decline 账本、tick rc=0、永久

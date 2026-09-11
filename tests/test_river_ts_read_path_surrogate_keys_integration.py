@@ -65,8 +65,18 @@ from packages.common.display_coverage import (
     DisplayCoverageRefreshRefused,
     refresh_run_display_coverage,
 )
-from services.tiles.mvt import postgis_tile_sql, valid_times_for_layer
-from tests.integration_helpers import apply_migrations_from_zero, sqlalchemy_engine
+from packages.common.river_ts_render import render_river_ts_sql
+from services.tiles.mvt import (
+    _valid_times_any_source_template,
+    _valid_times_named_source_template,
+    postgis_tile_sql,
+    valid_times_for_layer,
+)
+from tests.integration_helpers import (
+    apply_migrations_from_zero,
+    insert_river_timeseries_dual_written,
+    sqlalchemy_engine,
+)
 from tests.integration_helpers import (
     post_expand_forecast_database as post_expand_forecast_database,
 )
@@ -614,7 +624,10 @@ def test_hydro_routed_real_consumer_preserves_failure_and_empty_outcomes(
     assert (raised.value.status_code, raised.value.code) == expected
 
 
-def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_query(seeded: Any) -> None:
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_query(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
     _url, session = seeded
     params = {
         "run_id": _KEYED_RUN_ID,
@@ -625,6 +638,12 @@ def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_qu
     }
 
     oracle = [row["valid_time"] for row in _rows(session, _TEXT_ERA_VALID_TIMES_SQL, params)]
+    session.rollback()
+    post_expand_forecast_database({
+        _KEYED_RUN_ID: store,
+        _LEGACY_RUN_ID: "narrow" if store == "legacy" else "legacy",
+        _ALL_LEGACY_RUN_ID: "legacy",
+    })
     switched = valid_times_for_layer(
         session,
         "discharge",
@@ -641,6 +660,79 @@ def test_valid_times_named_identity_branch_is_field_identical_to_the_text_era_qu
         value.astimezone(UTC).isoformat().replace("+00:00", "Z") for value in oracle
     )
     assert switched.valid_times == ["2026-06-01T00:00:00Z", "2026-06-01T01:00:00Z"]
+    active_raw = render_river_ts_sql(_valid_times_named_source_template(store), store).sql
+    assert {row["valid_time"] for row in _rows(session, active_raw, params)} == {_T0, _T1}
+    assert _rows(session, active_raw, params | {"variable": "not_a_river_variable"}) == []
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_any_identity_valid_times_combine_stores_before_distinct_and_limit(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
+    url, session = seeded
+    t3 = _T0 + timedelta(hours=3)
+    t4 = _T0 + timedelta(hours=4)
+    session.rollback()
+    with psycopg2.connect(url) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE hydro.hydro_run SET end_time = %s WHERE run_id IN (%s, %s)",
+                (t4, _KEYED_RUN_ID, _LEGACY_RUN_ID),
+            )
+            assert cursor.rowcount == 2
+            insert_river_timeseries_dual_written(cursor, [
+                (
+                    run_id, _BASIN_VERSION_ID, _NETWORK_ID, _SEGMENTS[0][0],
+                    valid_time, hour, _VARIABLE, _SEGMENTS[0][2], "m3/s", "ok",
+                )
+                for run_id, valid_time, hour in (
+                    (_KEYED_RUN_ID, t4, 4),
+                    (_LEGACY_RUN_ID, t3, 3),
+                    (_LEGACY_RUN_ID, t4, 4),
+                )
+            ])
+    session.rollback()
+    opposite = "narrow" if store == "legacy" else "legacy"
+    post_expand_forecast_database({
+        _KEYED_RUN_ID: store,
+        _LEGACY_RUN_ID: opposite,
+        _ALL_LEGACY_RUN_ID: "legacy",
+    })
+
+    # Read both physical sides independently: wrong-store copies must exist
+    # and stay half an hour away, so DISTINCT cannot hide missing authority.
+    for run_id, authoritative_store, expected in (
+        (_KEYED_RUN_ID, store, {_T0, _T1, t4}),
+        (_LEGACY_RUN_ID, opposite, {_T0, t3, t4}),
+    ):
+        for physical_store, table in (
+            ("legacy", "river_timeseries_legacy"), ("narrow", "river_timeseries"),
+        ):
+            actual = {
+                row["valid_time"] for row in _rows(
+                    session,
+                    f"SELECT ts.valid_time FROM hydro.{table} ts "
+                    "JOIN hydro.hydro_run h ON h.run_key = ts.run_key "
+                    "WHERE h.run_id = :run_id",
+                    {"run_id": run_id},
+                )
+            }
+            assert actual == (
+                expected if physical_store == authoritative_store
+                else {value + timedelta(minutes=30) for value in expected}
+            )
+
+    discovery = valid_times_for_layer(session, "discharge", limit=3)
+    assert discovery.valid_times == [
+        "2026-06-01T01:00:00Z", "2026-06-01T03:00:00Z", "2026-06-01T04:00:00Z",
+    ]
+    assert discovery.limit == 3
+    assert discovery.observed_count == 4
+    assert discovery.truncated is True
+    for active_store, expected in ((store, {_T0, _T1, t4}), (opposite, {_T0, t3, t4})):
+        active_raw = render_river_ts_sql(_valid_times_any_source_template(active_store), active_store).sql
+        assert {row["valid_time"] for row in _rows(session, active_raw, {"variable": _VARIABLE})} == expected
+        assert _rows(session, active_raw, {"variable": "not_a_river_variable"}) == []
 
 
 def test_existence_probe_accepts_the_seeded_identity_and_404s_on_unknown_ones(seeded: Any) -> None:
@@ -686,6 +778,7 @@ def test_unknown_identity_and_out_of_vocabulary_variable_return_empty_not_error(
 ) -> None:
     _url, session = seeded
 
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
     assert (
         valid_times_for_layer(
             session,
@@ -696,7 +789,6 @@ def test_unknown_identity_and_out_of_vocabulary_variable_return_empty_not_error(
         ).valid_times
         == []
     )
-    _prepare_hydro_stores(session, post_expand_forecast_database, store)
     query = _hydro_source_query(_source_cte_body("hydro"))
 
     assert _rows(session, query, _identity_params("run-does-not-exist")) == []
@@ -745,13 +837,6 @@ def test_null_key_legacy_rows_are_invisible_to_the_switched_reads(
 
     # Same exclusion at the valid-time discovery surface: the legacy-only hour
     # exists in the table and is not advertised.
-    discovery = valid_times_for_layer(
-        session,
-        "discharge",
-        run_id=_LEGACY_RUN_ID,
-        basin_version_id=_BASIN_VERSION_ID,
-        river_network_version_id=_NETWORK_ID,
-    )
     text_era_times = [
         row["valid_time"]
         for row in _rows(
@@ -767,8 +852,15 @@ def test_null_key_legacy_rows_are_invisible_to_the_switched_reads(
         )
     ]
     assert text_era_times == [_LEGACY_ONLY_TIME, _T0]
-    assert discovery.valid_times == ["2026-06-01T00:00:00Z"]
     _prepare_hydro_stores(session, post_expand_forecast_database, store, _LEGACY_RUN_ID)
+    discovery = valid_times_for_layer(
+        session,
+        "discharge",
+        run_id=_LEGACY_RUN_ID,
+        basin_version_id=_BASIN_VERSION_ID,
+        river_network_version_id=_NETWORK_ID,
+    )
+    assert discovery.valid_times == ["2026-06-01T00:00:00Z"]
     switched = _rows(session, _hydro_source_query(_source_cte_body("hydro")), params)
     switched_segments = [row["river_segment_id"] for row in switched]
     oracle_segments = [row["river_segment_id"] for row in oracle]

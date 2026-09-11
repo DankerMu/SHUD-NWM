@@ -113,10 +113,11 @@ Notes:
     `tests/test_two_node_docker_source_trust.py` is **not** in that set (it reads
     `compute.env`, not the template).
   - **On CI the authority is `scripts/select_ci_tests.py`**, where two rules match
-    `infra/env/compute.example`: the `infra/env/**` glob (`:1797-1800` →
+    `infra/env/compute.example`: the `infra/env/**` glob (`:2301-2304` →
     `tests/test_two_node_docker_runtime.py`) and the exact-path rule
-    (`:1810-1813` → `tests/test_slurm_gateway_deployment_contract.py`, the
-    constant at `:446`). The other consumer files are not selected for this path,
+    (`:2314-2317` → `tests/test_slurm_gateway_deployment_contract.py`, the
+    `SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST` constant at `:496`). The other
+    consumer files are not selected for this path,
     so a green PR here does not exercise them — run the grep set locally.
 - `compute.host.env` is untracked with no committed template. That gap is
   recorded, not fixed, by #1694.
@@ -165,6 +166,14 @@ unit → EnvironmentFile table above is the authority.
   live node-22 units those variables come from `compute.scheduler-dbfree.env`
   (tracked template `compute.scheduler-dbfree.env.example`), per the table
   above; `compute.example` carries the same key names for the compose lane only.
+  The live file is untracked, so the template is *not* evidence for its
+  contents. Read on node-22 2026-09-10 (`-rw-------` `frd_muziyao:huser`):
+  `:13 OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store`,
+  `:15 NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store` — both
+  present, which is what the canonical-precip backfill recovery command in
+  `docs/runbooks/current-production-ops.md` §5.3 depends on. Same scan: only
+  `compute.host.env`, `compute.replay.env` and `compute.scheduler-dbfree.env`
+  carry `NHMS_OBJECT_STORE_COPYBACK_ROOT`.
   `DATABASE_URL` belongs to the compose lane's `compute-api` or to an explicit
   archived rollback drill — and the live `nhms-compute-api.service` does not load
   `compute.env` at all; its only `EnvironmentFile` is the untracked
@@ -182,6 +191,88 @@ unit → EnvironmentFile table above is the authority.
     `OBJECT_STORE_PREFIX`, `NHMS_BASINS_ROOT` — dereferenced by the runbook
     provision/publisher shell and required by `plan-production` preflight;
     the two local roots must stay inside `NHMS_SCHEDULER_ALLOWED_ROOTS`.
+- Object-store copyback mutual exclusion (#2035). Every writer that promotes a
+  directory tree under `NHMS_OBJECT_STORE_COPYBACK_ROOT` — the publisher's
+  q_down, run-products and canonical-precipitation lanes, the orchestrator's
+  run-tree copyback, and both backfill CLIs — first takes an exclusive `flock`
+  on the fixed path `$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock`.
+  - The lock path is **fixed and has no env override**: it is anchored under the
+    copyback root because that is the one path every writer has already resolved,
+    so a private `/tmp` (systemd `PrivateTmp=true`, Slurm `job_container/tmpfs`)
+    cannot split one mutex into two inodes. The file is created `0o600` and is
+    never unlinked by the code — both enforced directly (`_LOCK_MODE` in
+    `packages/common/copyback_guard.py`; no unlink call anywhere in the module).
+    "Owned by the writer itself" is *not* separately enforced: the code asserts
+    `lock owner == copyback root owner` and `current euid == lock owner`, and the
+    two coincide only because every configured writer is the same uid and a
+    foreign uid is refused before the file exists.
+  - A killed holder's lock is released by the **local** kernel at process exit,
+    so a stale file is not a stale lock. The production root is not local:
+    `/ghdc/data/nwm/object-store` on node-22 is an NFSv4.2 mount of
+    `ghdc:/home/ghdc` (measured 2026-09-10). A process death still releases at
+    exit; a **host** death does not — the server holds the lock until that
+    client's lease expires.
+  - `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` (optional, **default 900**)
+    bounds how long a writer waits. Contention waits rather than refuses;
+    exceeding the deadline raises a distinct loud error and never falls back to
+    an unlocked promote. Unset or empty means 900 s; a non-numeric or
+    non-positive value is a hard configuration refusal, not a silent default.
+    900 s is sized against the measured hold (~2.2 GB per acquisition at
+    ~62 MB/s NFS throughput is ~36 s); how often a lane acquires and how that
+    sizes the deadline is stated once, beside
+    `DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS` in
+    `packages/common/copyback_guard.py`. That arithmetic is deliberately
+    conservative and is left unretuned.
+  - All copyback writers must run as one uid (`frd_muziyao` on node-22): the
+    `0o600` mode plus the ownership assertions make a writer under another
+    account fail closed instead of running unlocked. The lock file's owner is
+    compared both to the current euid **and** to the copyback root's owner, and
+    a foreign uid is refused before it can create the file, so the lock cannot be
+    poisoned from either direction. Exclusion is node-local — see the non-goals in
+    `openspec/changes/harden-copyback-batch-mutex-and-dir-traversal/proposal.md`.
+  - **`NHMS_OBJECT_STORE_COPYBACK_ROOT` MUST be owned by the single writer uid**
+    — the account the publisher, orchestrator and both backfill CLIs run as. The
+    requirement is *equality of uid*, not "the writer can write the root": a
+    group-writable root owned by another account (a container uid in a
+    supplementary group, for example) is **refused, not shared**, because the
+    lock file's owner is anchored to the root's owner. Check with
+    `stat -c '%u %a %n' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"` and compare against
+    the writer's `id -u`; a mismatch fails every copyback closed. The message
+    has two shapes, and neither is a timeout:
+    - **no lock file yet** and the writer is not the root's owner → refused
+      before the file is created, and the message names both uids and the lock
+      path;
+    - **lock file already there and owned by someone else** → `cannot acquire
+      copyback batch lock <path>: [Errno 13] Permission denied`, path only, no
+      uid. That `Permission denied` *is* the foreign-owner signal; the recovery
+      steps below (`ls -ln <lock>`, `stat -c '%u' <root>`) are what name the
+      owner.
+  - **Recovering a stuck lock file.** Three shapes, and only one of them is
+    touchable:
+    - a **live holder** — some process still holds the fd
+      (`lsof "$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock"` or
+      `fuser -v <path>` prints a pid) → **do not touch it**; wait, or find out why
+      that writer is stuck.
+    - **owner correct, no local holder, writers still timing out** — only
+      possible on the NFS root: the holder's whole host died and the lock stands
+      until the server expires that client's lease. **Also do not touch it** —
+      unlinking splits the mutex onto a fresh inode exactly as it would with a
+      live holder. Wait out the lease, or go establish what happened to that
+      host. This is *not* an orphan; the next bullet does not apply.
+    - an **orphan owned by the wrong uid** — `ls -ln <path>` shows an owner
+      different from `stat -c '%u' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"` and no
+      process holds it → repair it, otherwise every writer fails closed forever:
+      `sudo chown "$(stat -c '%u:%g' "$NHMS_OBJECT_STORE_COPYBACK_ROOT")" <path>`
+      works unconditionally; `rm -f <path>` also works, and does **not** require
+      the lock file's owner — POSIX takes unlink permission from write+execute
+      on the *directory*, provided no sticky bit is set. Measured 2026-09-10 on
+      node-22: `/ghdc` 755 root:root, `/ghdc/data` 777 root:root,
+      `/ghdc/data/nwm` and `/ghdc/data/nwm/object-store` both 775
+      `frd_muziyao`(1103):`huser`(1078) — no sticky bit anywhere on the chain,
+      so any member of gid 1078 can remove it. If `ls -ld` ever shows a `t` on
+      that chain, fall back to `sudo chown`.
+  - `services/orchestrator/retention.py` descends only `root/<prefix>` and
+    `root/runs`, never root-level files, so the lock file is invisible to it.
 - The DB-free scheduler's trusted raw authority is the canonical shared-NFS
   node-22 topology path. Runtime preflight requires both
   `NHMS_OBJECT_STORE_COPYBACK_ROOT` and

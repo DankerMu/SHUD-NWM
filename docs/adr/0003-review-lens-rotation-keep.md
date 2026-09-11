@@ -4289,3 +4289,128 @@ same already-recorded sample and the mixed code/evidence/prose measurement
 limitations remain unresolved. The existing keep decision and seat caps remain
 unchanged; the authorization to deliver #2227 does not authorize review-policy
 narrowing.
+
+## Revisit — PR #2233 (issue #2207), 2026-09-10
+
+The post-merge audit reports 621 records (612 merged, nine terminal) and
+200 multi-round merged PRs. Later-round attribution is unchanged:
+core=237, rotated=270, phase=57, skipped=15.
+
+PR #2233 contributes one two-round compact sample with zero candidates.
+Its second round rechecked an upstream integration after an append-only log
+conflict, not a finding-driven fix. Both rounds retained correctness+test-evidence
+and integration; the independent final review was clean. Provider-connectivity
+failures produced no verdict and are neither rounds nor review catches.
+
+A new human keep/cut call is deferred: this adds no later-round catch and does
+not resolve the mixed code/evidence/prose measurement limitations. The existing
+keep decision and seat caps remain unchanged; issue-delivery authorization does
+not authorize policy narrowing.
+
+## Revisit — PR #2232 (issue #2185), 2026-09-10
+
+The post-merge audit reports 622 records (613 merged, nine terminal) and
+201 multi-round merged PRs. Later-round attribution moves by three:
+core=240, rotated=270, phase=57, skipped=15.
+
+PR #2232 contributes a two-round compact sample with nine verified findings and
+five further Phase 7 catches, and it is an unusually sharp data point for the
+rotation question because of where those fourteen landed: **none of them touched
+the routing**. The change under review was a constant pair and one supplemental
+set-union loop. Every catch, in both rounds and across eight final-review passes,
+was spec-vs-tree or prose-vs-tree — a `MODIFIED` block silently deleting an
+archived scenario, four archived `emits exactly` scenarios left falsified, a
+derivation that did not do what its own SHALL said, a class definition wrong in
+both directions, and then a tail of defects introduced by the fix passes
+themselves.
+
+That distribution argues against reading `core=240 rotated=270` as evidence that
+rotated-in lenses are earning their seats on code. For this PR the rotated seats
+and the retained seats found the same KIND of thing, because the reviewable
+surface was almost entirely accountability artifacts. The seat mix was not the
+variable that mattered.
+
+What did matter is recorded here because it bears on the next seat-plan
+revision: five of the fourteen catches were converted into Evidence Floor clauses
+during the run — 4.16 (every archived scenario under a `MODIFIED` requirement
+survives the delta, since openspec replaces wholesale and `--strict` cannot see
+the loss), 4.17 (every `emits exactly` list re-measured against the live
+selector, plus a sweep of all archived specs for scenarios the change falsifies),
+4.18 (the respelled empty-selection class exhaustive in both directions), 4.12b
+(a citation still holds the content its sentence claims) and 4.12c (bare `:NNN`
+and directory-less citations resolve). Each of the five independently re-found by
+machine what a human had found by hand, and 4.12c found four citation defects no
+reviewer had. On this evidence the cheaper lever for this failure class is a
+mechanical fixture check, not another reviewer seat — but that is an observation
+about clause coverage, not a rotation decision, and it does not generalize from
+one PR.
+
+A new human keep/cut call is deferred. This sample cannot separate lens value
+from surface composition: it had almost no code surface to review, so it tells us
+little about which lenses find code defects. The existing keep decision and seat
+caps remain unchanged; issue-delivery authorization does not authorize policy
+narrowing.
+
+## Revisit — PR #2201 (issue #2035), 2026-09-10
+
+The post-merge audit reports 623 records (614 merged, nine terminal) and 202
+multi-round merged PRs. Later-round attribution moves by eighteen, all on one
+side: core=258, rotated=270, phase=57, skipped=15. The rotated share of
+later-round catches falls from 52.9% to 51.1%.
+
+**That movement is an arithmetic certainty, not a finding about lenses.**
+`loop_log_audit.core_lens_set` defines this PR's core set as the union of its
+own round-1 seats, split on `+`. PR #2201's round 1 ran at the
+`broad-expanded` cap of four seats and covered **all six lenses**
+(`correctness`, `invariant-state`, `test-evidence+spec-compliance`,
+`security-perf+integration`). There is therefore no rotated-in lens for this PR
+at all: every later-round catch it could possibly have produced scores as core,
+whatever the later rounds seated and whatever they found. The eighteen went to
+core by construction. The counter moved because of how this PR's round 1 was
+seated, not because of what any round found.
+
+Two further limits on this line. Rounds 1–3 contributed 20 of the ledger's 38
+verified findings (9/6/5) but are counted without attribution: their verifier
+tables were not persisted and per-lens attribution is unrecoverable
+(`rounds1-3-verdicts-reconstructed.md`). And the PR did not close on a clean
+round — it hit the five-round ceiling still not clean and merged on an explicit
+user decision, with two recorded skip blocks. A ceiling line is a datum about
+issue sizing, not about lens value.
+
+What the sample does say is about failure *class*. The eighteen split
+doc-truthfulness 7, spec-hygiene 6, test-coverage 3, exception-path 2 — thirteen
+of eighteen are the fixture's prose disagreeing with the tree, and the single
+`major` is one of them. That is the same distribution PR #2232's revisit
+recorded in the entry immediately above, on a completely different code
+surface, and it points the same way: the recurring defect is not missed code behaviour, it is
+narrative drift, and narrative drift is checkable by machine. The sharpest
+evidence here is the post-ceiling fix pass itself. It was adjudicated by three
+independent `verifier` batches specifically to substitute for the review round
+the ceiling forbade — and those three found **four more false sentences the fix
+pass had just written**, including a test docstring attributing a fix to the
+wrong commit, an arithmetically impossible test count, and a SHA pin that made a
+previously-true vague sentence false. Adding reviewer seats has not stopped this
+class in five rounds; a mechanical fixture check plausibly would. That is an
+observation about Evidence Floor clause coverage, consistent with #2232's, and
+it is not a rotation decision.
+
+Decision: **keep**, unchanged. 258 vs 270 is not "catches concentrate in core",
+and this sample contributes nothing either way on the rotation question because
+a full-coverage round 1 makes it structurally incapable of producing a rotated
+catch. Seat caps unchanged. Issue-delivery authorization does not authorize
+policy narrowing.
+
+### Correction, same day, before the next issue
+
+The two paragraphs above were corrected within the hour, and the defect is
+worth recording because it is the exact class the entry itself is about. As
+first merged (`7d1fca33`) the entry said rotated seats "were seated only in
+round 1" and named `invariant-state` and `security-perf+integration` as
+rotated. Both halves are false. `invariant-state` also sat in round 2 — the
+loop line's own `round_lenses[1]` says so — and, more fundamentally, a lens
+seated in round 1 *is* core under `core_lens_set`, so neither lens was ever
+rotated for this PR. The original sentence reached the ledger because the entry
+was written with no review seat on it, which is precisely the drift the entry
+argues is better caught by machine than by another reviewer. Also corrected:
+PR #2232's revisit is the entry immediately above, not three above. The keep
+decision and the audit figures are unchanged; only the explanation was wrong.

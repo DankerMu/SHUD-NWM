@@ -7,7 +7,8 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -18,6 +19,13 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from packages.common.copyback_guard import (
+    CopybackLockError,
+    CopybackLockTimeout,
+    acquire_copyback_batch_lock,
+    ensure_traversable_copyback_directory,
+    release_copyback_batch_lock,
+)
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
 from packages.common.safe_fs import (
@@ -718,6 +726,42 @@ class TilePublisher:
                 {"artifact_key": key},
             ) from error
 
+    @contextmanager
+    def _copyback_batch_mutex(self, copyback_root: Path, *, object_store_root: Path) -> Iterator[int]:
+        """Hold the copyback root's cross-process batch mutex, as a ``PublishError`` lane (#2035).
+
+        ``publish_qdown_cycle`` re-raises ``PublishError`` unchanged and only
+        absorbs ``SQLAlchemyError | OSError | ValueError`` (`:207-210`), so a
+        raw ``CopybackLockError`` escaping from here would leave the publish
+        entry point with an uncaught foreign exception type. The timeout keeps
+        its own code so it is distinguishable from every ordinary copyback
+        failure and is never rewrapped as ``OBJECT_STORE_COPYBACK_FAILED``.
+
+        Enter this only *after* the copyback root's identity and overlap guards
+        have run -- a lane that returns ``skipped`` must create no lock file --
+        and leave it only after the batch's commit or rollback has returned.
+        """
+
+        details = {"copyback_root": str(copyback_root), "object_store_root": str(object_store_root)}
+        try:
+            fd = acquire_copyback_batch_lock(copyback_root)
+        except CopybackLockTimeout as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_LOCK_TIMEOUT",
+                "Timed out waiting for the object-store copyback batch lock.",
+                {**details, "error": str(error)},
+            ) from error
+        except CopybackLockError as error:
+            raise PublishError(
+                "OBJECT_STORE_COPYBACK_LOCK_UNSAFE",
+                "Object-store copyback batch lock is unsafe or unavailable.",
+                {**details, "error": str(error)},
+            ) from error
+        try:
+            yield fd
+        finally:
+            release_copyback_batch_lock(fd)
+
     def _copyback_run_products(self, run_ids: list[str]) -> dict[str, Any] | None:
         """Mirror complete run products to a shared object-store root.
 
@@ -820,46 +864,51 @@ class TilePublisher:
         copied_runs: list[dict[str, Any]] = []
         total_files = 0
         total_bytes = 0
-        for run_id in unique_run_ids:
-            run_key: str | None = None
-            try:
-                run_key = _run_product_key(run_id)
-                summary = self._copyback_object_tree(
-                    run_key,
-                    copyback_store,
-                    validate_source_tree=lambda source_tree, run_id=run_id: self._validate_copyback_source_tree(
-                        run_id, source_tree
-                    ),
-                )
-            except FileNotFoundError as error:
-                raise PublishError(
-                    "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
-                    "Run products are missing from the object-store staging root.",
-                    _copyback_error_details(
-                        run_id=run_id,
-                        object_key=run_key,
-                        copyback_root=copyback_root,
-                        object_store_root=object_store_root,
-                        error=error,
-                    ),
-                ) from error
-            except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
-                raise PublishError(
-                    "OBJECT_STORE_COPYBACK_FAILED",
-                    "Failed to copy run products to the shared object-store root.",
-                    _copyback_error_details(
-                        run_id=run_id,
-                        object_key=run_key,
-                        copyback_root=copyback_root,
-                        object_store_root=object_store_root,
-                        error=error,
-                    ),
-                ) from error
-            if run_key is None:
-                raise AssertionError("run_key must be set after successful copyback.")
-            copied_runs.append({"run_id": run_id, "object_key": run_key, **summary})
-            total_files += int(summary["file_count"])
-            total_bytes += int(summary["byte_count"])
+        # #2035 Weakness A: this sibling has no production caller today, but it
+        # runs the same promote against the same shared root as
+        # `_copyback_qdown_products`, so it takes the same mutex -- the two must
+        # not be allowed to diverge.
+        with self._copyback_batch_mutex(copyback_root, object_store_root=object_store_root):
+            for run_id in unique_run_ids:
+                run_key: str | None = None
+                try:
+                    run_key = _run_product_key(run_id)
+                    summary = self._copyback_object_tree(
+                        run_key,
+                        copyback_store,
+                        validate_source_tree=lambda source_tree, run_id=run_id: self._validate_copyback_source_tree(
+                            run_id, source_tree
+                        ),
+                    )
+                except FileNotFoundError as error:
+                    raise PublishError(
+                        "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
+                        "Run products are missing from the object-store staging root.",
+                        _copyback_error_details(
+                            run_id=run_id,
+                            object_key=run_key,
+                            copyback_root=copyback_root,
+                            object_store_root=object_store_root,
+                            error=error,
+                        ),
+                    ) from error
+                except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+                    raise PublishError(
+                        "OBJECT_STORE_COPYBACK_FAILED",
+                        "Failed to copy run products to the shared object-store root.",
+                        _copyback_error_details(
+                            run_id=run_id,
+                            object_key=run_key,
+                            copyback_root=copyback_root,
+                            object_store_root=object_store_root,
+                            error=error,
+                        ),
+                    ) from error
+                if run_key is None:
+                    raise AssertionError("run_key must be set after successful copyback.")
+                copied_runs.append({"run_id": run_id, "object_key": run_key, **summary})
+                total_files += int(summary["file_count"])
+                total_bytes += int(summary["byte_count"])
 
         return {
             "status": "copied",
@@ -980,67 +1029,88 @@ class TilePublisher:
         total_bytes = 0
 
         rollback_log: list[_CopybackRollbackEntry] = []
-        try:
-            for run_id in unique_run_ids:
-                run_key = _run_product_key(run_id)
-                try:
-                    summary = self._copyback_object_tree_with_rollback(
-                        run_key,
-                        copyback_store,
-                        validate_source_tree=lambda source_tree, run_id=run_id: self._validate_copyback_source_tree(
-                            run_id, source_tree
-                        ),
-                        rollback_log=rollback_log,
-                    )
-                except FileNotFoundError as error:
-                    raise PublishError(
-                        "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
-                        "Run products are missing from the object-store staging root.",
-                        _copyback_error_details(
-                            run_id=run_id,
-                            object_key=run_key,
-                            copyback_root=copyback_root,
-                            object_store_root=object_store_root,
-                            error=error,
-                        ),
-                    ) from error
-                except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
-                    raise PublishError(
-                        "OBJECT_STORE_COPYBACK_FAILED",
-                        "Failed to copy run products to the shared object-store root.",
-                        _copyback_error_details(
-                            run_id=run_id,
-                            object_key=run_key,
-                            copyback_root=copyback_root,
-                            object_store_root=object_store_root,
-                            error=error,
-                        ),
-                    ) from error
-                copied_runs.append({"run_id": run_id, "object_key": run_key, **summary})
-                total_files += int(summary["file_count"])
-                total_bytes += int(summary["byte_count"])
-
-            for object_key, refs in _forcing_refs_by_key(forcing_refs).items():
-                ref = refs[0]
-                try:
-                    summary = self._copyback_object_tree_with_rollback(
-                        object_key,
-                        copyback_store,
-                        validate_source_tree=lambda source_tree, refs=refs: self._validate_forcing_source_tree_for_refs(
-                            refs, source_tree, self.object_store
-                        ),
-                        validate_target_tree=lambda target_tree, refs=refs: self._validate_forcing_source_tree_for_refs(
-                            refs, target_tree, copyback_store
-                        ),
-                        rollback_log=rollback_log,
-                    )
-                except _ForcingPackageValidationError as error:
-                    ref = error.ref
-                    original_error = error.original_error
-                    if isinstance(original_error, FileNotFoundError):
+        # #2035 Weakness A: the mutex spans copy, every promote, and the
+        # commit-or-rollback -- because
+        # `_rollback_qdown_copyback_batch`'s `backup_dir is None` branch removes
+        # whatever now sits at the target, which is only a restore while no other
+        # writer can have committed into that slot in the meantime.
+        #
+        # Acquired OUTSIDE the batch `try:` below on purpose: that handler rewraps
+        # any non-`PublishError` as `OBJECT_STORE_COPYBACK_FAILED`, which would
+        # erase the distinct `OBJECT_STORE_COPYBACK_LOCK_TIMEOUT` code the publish
+        # entry point needs in order not to confuse a lock wait with a copy failure.
+        with self._copyback_batch_mutex(copyback_root, object_store_root=object_store_root):
+            try:
+                for run_id in unique_run_ids:
+                    run_key = _run_product_key(run_id)
+                    try:
+                        summary = self._copyback_object_tree_with_rollback(
+                            run_key,
+                            copyback_store,
+                            validate_source_tree=lambda source_tree, run_id=run_id: self._validate_copyback_source_tree(
+                                run_id, source_tree
+                            ),
+                            rollback_log=rollback_log,
+                        )
+                    except FileNotFoundError as error:
                         raise PublishError(
                             "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
-                            "Forcing package is missing from the object-store staging root.",
+                            "Run products are missing from the object-store staging root.",
+                            _copyback_error_details(
+                                run_id=run_id,
+                                object_key=run_key,
+                                copyback_root=copyback_root,
+                                object_store_root=object_store_root,
+                                error=error,
+                            ),
+                        ) from error
+                    except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+                        raise PublishError(
+                            "OBJECT_STORE_COPYBACK_FAILED",
+                            "Failed to copy run products to the shared object-store root.",
+                            _copyback_error_details(
+                                run_id=run_id,
+                                object_key=run_key,
+                                copyback_root=copyback_root,
+                                object_store_root=object_store_root,
+                                error=error,
+                            ),
+                        ) from error
+                    copied_runs.append({"run_id": run_id, "object_key": run_key, **summary})
+                    total_files += int(summary["file_count"])
+                    total_bytes += int(summary["byte_count"])
+
+                for object_key, refs in _forcing_refs_by_key(forcing_refs).items():
+                    ref = refs[0]
+                    try:
+                        summary = self._copyback_object_tree_with_rollback(
+                            object_key,
+                            copyback_store,
+                            validate_source_tree=lambda source_tree, refs=refs: (
+                                self._validate_forcing_source_tree_for_refs(refs, source_tree, self.object_store)
+                            ),
+                            validate_target_tree=lambda target_tree, refs=refs: (
+                                self._validate_forcing_source_tree_for_refs(refs, target_tree, copyback_store)
+                            ),
+                            rollback_log=rollback_log,
+                        )
+                    except _ForcingPackageValidationError as error:
+                        ref = error.ref
+                        original_error = error.original_error
+                        if isinstance(original_error, FileNotFoundError):
+                            raise PublishError(
+                                "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
+                                "Forcing package is missing from the object-store staging root.",
+                                _forcing_copyback_error_details(
+                                    ref,
+                                    copyback_root=copyback_root,
+                                    object_store_root=object_store_root,
+                                    error=original_error,
+                                ),
+                            ) from original_error
+                        raise PublishError(
+                            "OBJECT_STORE_COPYBACK_FAILED",
+                            "Failed to copy forcing package to the shared object-store root.",
                             _forcing_copyback_error_details(
                                 ref,
                                 copyback_root=copyback_root,
@@ -1048,89 +1118,79 @@ class TilePublisher:
                                 error=original_error,
                             ),
                         ) from original_error
-                    raise PublishError(
-                        "OBJECT_STORE_COPYBACK_FAILED",
-                        "Failed to copy forcing package to the shared object-store root.",
-                        _forcing_copyback_error_details(
-                            ref,
-                            copyback_root=copyback_root,
-                            object_store_root=object_store_root,
-                            error=original_error,
-                        ),
-                    ) from original_error
-                except FileNotFoundError as error:
-                    raise PublishError(
-                        "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
-                        "Forcing package is missing from the object-store staging root.",
-                        _forcing_copyback_error_details(
-                            ref,
-                            copyback_root=copyback_root,
-                            object_store_root=object_store_root,
-                            error=error,
-                        ),
-                    ) from error
-                except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
-                    raise PublishError(
-                        "OBJECT_STORE_COPYBACK_FAILED",
-                        "Failed to copy forcing package to the shared object-store root.",
-                        _forcing_copyback_error_details(
-                            ref,
-                            copyback_root=copyback_root,
-                            object_store_root=object_store_root,
-                            error=error,
-                        ),
-                    ) from error
-                copied_forcing.append(
-                    {
-                        "object_key": object_key,
-                        "run_ids": _run_ids_for_forcing_key(self.object_store, object_key, runs),
-                        "forcing_version_ids": _forcing_version_ids_for_key(self.object_store, object_key, runs),
-                        **summary,
-                    }
-                )
-                total_files += int(summary["file_count"])
-                total_bytes += int(summary["byte_count"])
-        except Exception as error:
-            try:
-                _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
-            except SafeFilesystemError as rollback_error:
-                if isinstance(error, PublishError):
-                    error.details["rollback_error"] = str(rollback_error)
-                    error.details["rollback_error_type"] = type(rollback_error).__name__
-                else:
-                    raise PublishError(
-                        "OBJECT_STORE_COPYBACK_FAILED",
-                        "Failed to roll back q_down copyback after an unexpected copyback error.",
+                    except FileNotFoundError as error:
+                        raise PublishError(
+                            "OBJECT_STORE_COPYBACK_SOURCE_MISSING",
+                            "Forcing package is missing from the object-store staging root.",
+                            _forcing_copyback_error_details(
+                                ref,
+                                copyback_root=copyback_root,
+                                object_store_root=object_store_root,
+                                error=error,
+                            ),
+                        ) from error
+                    except (ObjectStoreError, OSError, SafeFilesystemError, ValueError) as error:
+                        raise PublishError(
+                            "OBJECT_STORE_COPYBACK_FAILED",
+                            "Failed to copy forcing package to the shared object-store root.",
+                            _forcing_copyback_error_details(
+                                ref,
+                                copyback_root=copyback_root,
+                                object_store_root=object_store_root,
+                                error=error,
+                            ),
+                        ) from error
+                    copied_forcing.append(
                         {
-                            "copyback_root": str(copyback_root),
-                            "object_store_root": str(object_store_root),
-                            "error": str(error),
-                            "error_type": type(error).__name__,
-                            "rollback_error": str(rollback_error),
-                            "rollback_error_type": type(rollback_error).__name__,
-                        },
-                    ) from rollback_error
-            raise
+                            "object_key": object_key,
+                            "run_ids": _run_ids_for_forcing_key(self.object_store, object_key, runs),
+                            "forcing_version_ids": _forcing_version_ids_for_key(self.object_store, object_key, runs),
+                            **summary,
+                        }
+                    )
+                    total_files += int(summary["file_count"])
+                    total_bytes += int(summary["byte_count"])
+            except Exception as error:
+                try:
+                    _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+                except SafeFilesystemError as rollback_error:
+                    if isinstance(error, PublishError):
+                        error.details["rollback_error"] = str(rollback_error)
+                        error.details["rollback_error_type"] = type(rollback_error).__name__
+                    else:
+                        raise PublishError(
+                            "OBJECT_STORE_COPYBACK_FAILED",
+                            "Failed to roll back q_down copyback after an unexpected copyback error.",
+                            {
+                                "copyback_root": str(copyback_root),
+                                "object_store_root": str(object_store_root),
+                                "error": str(error),
+                                "error_type": type(error).__name__,
+                                "rollback_error": str(rollback_error),
+                                "rollback_error_type": type(rollback_error).__name__,
+                            },
+                        ) from rollback_error
+                raise
 
-        try:
-            _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
-        except SafeFilesystemError as error:
-            details: dict[str, Any] = {
-                "copyback_root": str(copyback_root),
-                "object_store_root": str(object_store_root),
-                "error": str(error),
-                "error_type": type(error).__name__,
-            }
             try:
-                _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
-            except SafeFilesystemError as rollback_error:
-                details["rollback_error"] = str(rollback_error)
-                details["rollback_error_type"] = type(rollback_error).__name__
-            raise PublishError(
-                "OBJECT_STORE_COPYBACK_FAILED",
-                "Failed to finalize q_down copyback batch.",
-                details,
-            ) from error
+                _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+            except SafeFilesystemError as error:
+                details: dict[str, Any] = {
+                    "copyback_root": str(copyback_root),
+                    "object_store_root": str(object_store_root),
+                    "error": str(error),
+                    "error_type": type(error).__name__,
+                }
+                try:
+                    _rollback_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+                except SafeFilesystemError as rollback_error:
+                    details["rollback_error"] = str(rollback_error)
+                    details["rollback_error_type"] = type(rollback_error).__name__
+                raise PublishError(
+                    "OBJECT_STORE_COPYBACK_FAILED",
+                    "Failed to finalize q_down copyback batch.",
+                    details,
+                ) from error
 
         summary: dict[str, Any] = {
             "status": "copied",
@@ -1206,6 +1266,12 @@ class TilePublisher:
         trees: list[dict[str, Any]] = []
         rollback_log: list[_CopybackRollbackEntry] = []
         copyback_root: Path | None = None
+        # #2035 Weakness A. Held explicitly rather than through a `with`, because
+        # the mutex must still be held when this method's own `except Exception`
+        # handler below has finished rolling the batch back: `finally` runs after
+        # that handler computes its return value, a `with` inside the `try` would
+        # have released the lock before the rollback started.
+        lock_fd: int | None = None
         try:
             storage_source = normalize_source_id(source)
             cycle_dir = str(cycle).strip()
@@ -1231,6 +1297,15 @@ class TilePublisher:
                     "Object-store copyback root must not overlap OBJECT_STORE_ROOT: "
                     f"{copyback_root} / {object_store_root}"
                 )
+            # After the identity and overlap guards, so the `skipped` return
+            # above creates no lock file inside the object-store root, and
+            # before planning, so a competitor's about-to-be-rolled-back tree
+            # can never be mistaken for `trees_already_mirrored`. Unlike the
+            # q_down lane this raises `CopybackLockTimeout` as itself: this
+            # method reports every failure through its summary, and turning the
+            # timeout into a `PublishError` here would copy exactly the shape
+            # its docstring says would be a bug.
+            lock_fd = acquire_copyback_batch_lock(copyback_root)
             copyback_store = LocalObjectStore(
                 copyback_root,
                 object_store_prefix=self.object_store.object_store_prefix,
@@ -1333,6 +1408,9 @@ class TilePublisher:
                 "error": str(error),
                 "error_type": type(error).__name__,
             }
+        finally:
+            if lock_fd is not None:
+                release_copyback_batch_lock(lock_fd)
 
     def _discover_canonical_grid_keys(self, storage_source: str) -> list[str]:
         """List `canonical/<S>/grid/*/` on the source root, never importing the converter."""
@@ -1400,7 +1478,11 @@ class TilePublisher:
             if copyback_root_raw == object_store_root_raw:
                 verified_copyback_root = verify_directory_no_follow(copyback_root_raw)
             else:
-                verified_copyback_root = ensure_directory_no_follow(copyback_root_raw)
+                # #2035 Weakness B: this branch creates the copyback ROOT, and a
+                # `0o750` root defeats traversal no matter what the levels below
+                # it carry -- issue #2035's `umask 027` measurement lists `0o750 .`
+                # first. No containment root: there is nothing above it to contain.
+                verified_copyback_root = ensure_traversable_copyback_directory(copyback_root_raw)
             copyback_root = verified_copyback_root.resolve()
         except (OSError, SafeFilesystemError) as error:
             raise PublishError(
@@ -1622,15 +1704,21 @@ class TilePublisher:
         target_dir = _object_tree_root_path(target_store, key)
         temp_key = _copyback_temp_tree_key(key)
         temp_dir = _object_tree_root_path(target_store, temp_key)
-        ensure_directory_no_follow(target_dir.parent, containment_root=target_store.root)
+        # #2035 Weakness B: `canonical/`, `canonical/<S>/`, `canonical/<S>/<cycle>/`
+        # and `canonical/<S>/grid/` are all created here, and `_chmod_tree_readable`
+        # below only reaches inside the copied tree.
+        ensure_traversable_copyback_directory(target_dir.parent, containment_root=target_store.root)
 
         byte_count = 0
         file_count = len(source_tree.files)
         try:
-            ensure_directory_no_follow(temp_dir, containment_root=target_store.root)
+            ensure_traversable_copyback_directory(temp_dir, containment_root=target_store.root)
             for directory_key in source_tree.directories:
                 temp_directory_key = _copyback_temp_key(directory_key, source_key=key, temp_key=temp_key)
-                ensure_directory_no_follow(target_store.root / temp_directory_key, containment_root=target_store.root)
+                ensure_traversable_copyback_directory(
+                    target_store.root / temp_directory_key,
+                    containment_root=target_store.root,
+                )
             for file_key in source_tree.files:
                 content = self.object_store.read_bytes_limited(file_key, max_bytes=_COPYBACK_MAX_FILE_BYTES)
                 byte_count += len(content)
@@ -2302,7 +2390,7 @@ def _replace_directory_tree_no_follow(temp_dir: Path, target_dir: Path, *, conta
     if temp_dir.parent != target_dir.parent:
         raise SafeFilesystemError("Copyback temporary and target directories must be siblings.")
     verify_directory_no_follow(temp_dir)
-    ensure_directory_no_follow(target_dir.parent, containment_root=containment_root)
+    ensure_traversable_copyback_directory(target_dir.parent, containment_root=containment_root)
     backup_name = f".{target_dir.name}.copyback-backup.{uuid.uuid4().hex}"
     target_backed_up = False
     promoted = False
@@ -2368,7 +2456,7 @@ def _replace_directory_tree_for_qdown_batch(
     if temp_dir.parent != target_dir.parent:
         raise SafeFilesystemError("Copyback temporary and target directories must be siblings.")
     verify_directory_no_follow(temp_dir)
-    ensure_directory_no_follow(target_dir.parent, containment_root=containment_root)
+    ensure_traversable_copyback_directory(target_dir.parent, containment_root=containment_root)
     backup_name = f".{target_dir.name}.copyback-backup.{uuid.uuid4().hex}"
     backup_dir = target_dir.parent / backup_name
     target_backed_up = False

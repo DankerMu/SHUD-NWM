@@ -552,6 +552,7 @@ def test_select_tests_maps_openapi_patch_owner_to_drift_plus_api_consumers() -> 
         "tests/test_monitoring_api.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
+        WRITE_SURFACE_SCAN_PATH,
         "tests/test_slurm_gateway_openapi_security.py",
     ]
     # tests/test_api.py is both a core-smoke member and a legitimate API
@@ -623,12 +624,14 @@ def test_select_tests_maps_runtime_changes_to_runtime_contract_tests() -> None:
     # #1455's narrow `workers/shud_runtime/runtime.py` rule: every one is a
     # non-gated top-level importer of runtime.py that no rule reached before.
     # The write-site invariant joins because runtime.py lives under workers/**
-    # (#1656 supplemental routing).
+    # (#1656 supplemental routing), and the river-segment write-surface scan
+    # joins by the same root (#2185).
     selected = select_tests(["workers/shud_runtime/runtime.py"], repo_root=Path("."))
 
     assert selected == [
         "tests/test_direct_grid_e2e.py",
         "tests/test_e2e.py",
+        WRITE_SURFACE_SCAN_PATH,
         "tests/test_runtime_ic_header.py",
         "tests/test_runtime_mode.py",
         "tests/test_shud_runtime.py",
@@ -647,8 +650,16 @@ def test_select_tests_maps_direct_grid_producer_surface_to_compact_e2e_fixture()
     # DIRECT_GRID_SURFACE_TESTS itself must not move — the openspec-change rule
     # below shares it). The redirect intent is unchanged: the whole
     # tests/test_forcing_producer.py never comes back. The write-site invariant
-    # joins because direct_grid_contract.py lives under workers/** (#1656).
-    assert selected == sorted({*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS, INVARIANT_SUITE_PATH})
+    # joins because direct_grid_contract.py lives under workers/** (#1656), and
+    # the river-segment write-surface scan joins by the same root (#2185).
+    assert selected == sorted(
+        {
+            *DIRECT_GRID_SURFACE_TESTS,
+            *DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+        }
+    )
     assert list(DIRECT_GRID_E2E_TESTS) == ["tests/test_direct_grid_e2e.py"]
     assert all(
         target.startswith("tests/test_forcing_producer.py::test_direct_grid_contract_")
@@ -679,9 +690,18 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
 
     # Still bounded, just by a bigger constant: the compact e2e fixture plus the
     # five #1455 importer suites (all seconds-scale), plus the write-site
-    # invariant (workers/** root, #1656) — and no core-smoke blowout.
-    assert selected == sorted({*DIRECT_GRID_SURFACE_TESTS, *DIRECT_GRID_CONTRACT_IMPORTER_TESTS, INVARIANT_SUITE_PATH})
-    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 1
+    # invariant (workers/** root, #1656) and the river-segment write-surface
+    # scan (same root, #2185) — and no core-smoke blowout.
+    assert selected == sorted(
+        {
+            *DIRECT_GRID_SURFACE_TESTS,
+            *DIRECT_GRID_CONTRACT_IMPORTER_TESTS,
+            INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
+        }
+    )
+    # The trailing `+ 2` is the two supplemental riders: #1656 and #2185.
+    assert len(selected) == 1 + len(DIRECT_GRID_CONTRACT_TESTS) + len(DIRECT_GRID_CONTRACT_IMPORTER_TESTS) + 2
     assert "tests/test_forcing_producer.py" not in selected
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
@@ -689,7 +709,9 @@ def test_select_tests_keeps_issue_548_direct_grid_change_set_bounded() -> None:
 def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() -> None:
     selected = select_tests(["services/orchestrator/chain_types.py"], repo_root=Path("."))
 
-    assert selected == sorted(ORCHESTRATOR_MANIFEST_SURFACE_TESTS)
+    # services/** is a river-segment write-surface root (#2185), so the scan
+    # rides along with the redirect targets.
+    assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, WRITE_SURFACE_SCAN_PATH})
     assert "tests/test_orchestration_chain.py" not in selected
     assert "tests/test_orchestrator.py" not in selected
     assert "tests/test_scheduler_backfill.py" not in selected
@@ -699,8 +721,13 @@ def test_select_tests_maps_orchestrator_chain_types_to_manifest_surface_nodes() 
 def test_select_tests_maps_orchestrator_manifest_surface_without_whole_slow_suites() -> None:
     selected = select_tests(["services/orchestrator/chain_manifests.py"], repo_root=Path("."))
 
-    assert selected == sorted(ORCHESTRATOR_MANIFEST_SURFACE_TESTS)
-    assert all("::" in test_path for test_path in selected)
+    # services/** is a river-segment write-surface root (#2185), so the scan
+    # rides along with the redirect targets.
+    assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, WRITE_SURFACE_SCAN_PATH})
+    # The REDIRECT targets are still focused node ids — that is what keeps the
+    # whole slow suites out. #2185's supplemental rider is a whole file by
+    # construction and is excluded here by name, not by loosening the check.
+    assert all("::" in test_path for test_path in selected if test_path != WRITE_SURFACE_SCAN_PATH)
 
 
 def test_select_tests_maps_scheduler_facade_to_manifest_and_file_journal_surfaces() -> None:
@@ -776,6 +803,7 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
             INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
         }
     )
     assert "tests/test_orchestration_chain.py" in selected
@@ -812,7 +840,9 @@ def test_select_tests_maps_known_slow_manifest_test_file_changes_with_surface_ch
 
     # Focused nodes plus the selector meta-guards (#1254). The redirect intent —
     # never the whole slow suite — survives: the meta-guard suite costs ~6s.
-    assert selected == sorted({*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_select_ci_tests.py"})
+    assert selected == sorted(
+        {*ORCHESTRATOR_MANIFEST_SURFACE_TESTS, "tests/test_select_ci_tests.py", WRITE_SURFACE_SCAN_PATH}
+    )
     assert "tests/test_orchestration_chain.py" not in selected
 
 
@@ -856,10 +886,11 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # migrations as text and the status sets as objects). Those running counts
     # track the RULE's target count and had already drifted one low before #1581
     # (the rule held 45 targets while this comment said 44), so the literal
-    # below — not the arithmetic above — is the authority: it holds 47 entries,
-    # the rule's 46 targets plus the meta-guard rider
-    # `tests/test_select_ci_tests.py`, which arrives by the same-name route
-    # rather than from the rule. The literal stays FROZEN here:
+    # below — not the arithmetic above — is the authority: it now lists 48
+    # targets, the rule's 46 plus two riders that arrive from OUTSIDE the rule
+    # — `tests/test_select_ci_tests.py` by the same-name route, and #2185's
+    # river-segment write-surface scan by the services/** supplemental route.
+    # The literal stays FROZEN here:
     # reading it back from the rule under test would make the size
     # dimension self-referential, and size is exactly what matters on the widest
     # PR class in the tree. Growing the rule means consciously editing this list
@@ -907,6 +938,9 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_retention_root_admission.py",
         "tests/test_retry.py",
         "tests/test_retry_cancel_consistency.py",
+        # #2185: services/** is a river-segment write-surface root, so the scan
+        # rides every source under it — a supplemental rider, not a rule target.
+        WRITE_SURFACE_SCAN_PATH,
         "tests/test_run_identity.py",
         "tests/test_run_tree_copyback.py",
         "tests/test_scheduler_backfill.py",
@@ -954,7 +988,9 @@ def test_released_reservation_recovery_module_selects_its_exact_suites() -> None
         repo_root=Path("."),
     )
 
-    assert selected == sorted(RELEASED_RESERVATION_RECOVERY_TESTS)
+    # #2185: services/** is a river-segment write-surface root, so the scan is
+    # part of the pinned set; the broad-orchestrator fallback still may not be.
+    assert selected == sorted({*RELEASED_RESERVATION_RECOVERY_TESTS, WRITE_SURFACE_SCAN_PATH})
     assert "tests/test_state_clone.py" not in selected
     assert "tests/test_select_ci_tests.py" not in selected
 
@@ -1014,6 +1050,7 @@ def test_select_tests_maps_forecast_store_without_core_smoke_fallback() -> None:
             "tests/test_node27_connection_attribution.py",
             "tests/test_node27_connection_attribution_delegated.py",
             INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
         }
     )
     assert set(CORE_SMOKE_TESTS) <= set(selected)
@@ -1092,6 +1129,10 @@ def test_select_tests_maps_mvt_tiles_without_core_smoke_fallback() -> None:
         "tests/test_precip_overlay.py",
         # I1 #1980, same group as the coverage-refresh entry above.
         "tests/test_qhh_latest_fallback_pushdown.py",
+        # #2185: services/** is a river-segment write-surface root, so the scan
+        # rides this rule too. mvt.py itself is read-only and carries no write
+        # literal; the routing is by root, not by an at-site entry.
+        WRITE_SURFACE_SCAN_PATH,
         # Issue #1341 added the surrogate-key / transitional-pushdown shape
         # pins for this exact file.
         "tests/test_river_ts_read_path_surrogate_keys.py",
@@ -1282,6 +1323,8 @@ def test_select_tests_maps_autopipeline_script_without_core_smoke_fallback() -> 
         # writer role to OWN the relations, so the write-role guards must run
         # when this script changes.
         "tests/test_node27_write_roles.py",
+        # #2185: scripts/** is a river-segment write-surface root.
+        WRITE_SURFACE_SCAN_PATH,
         # #1442/#1789: the publish criterion is a registered oracle
         # statement; the ingest criterion's fact-table-free shape is pinned
         # by the same file.
@@ -1376,6 +1419,8 @@ def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> Non
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         "tests/test_precip_overlay.py",
+        # #2185: services/** is a river-segment write-surface root.
+        WRITE_SURFACE_SCAN_PATH,
     ]
 
 
@@ -1397,6 +1442,8 @@ def test_precip_route_rule_stays_without_the_prewarm_suite() -> None:
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         "tests/test_precip_overlay.py",
+        # #2185: apps/** is a river-segment write-surface root.
+        WRITE_SURFACE_SCAN_PATH,
     ]
 
 
@@ -1456,6 +1503,8 @@ def test_route_registry_owner_selects_the_precip_surface_and_keeps_attribution()
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         "tests/test_precip_overlay.py",
+        # #2185: apps/** is a river-segment write-surface root.
+        WRITE_SURFACE_SCAN_PATH,
     ]
 
 
@@ -1479,6 +1528,8 @@ def test_main_owner_selects_the_precip_surface_and_keeps_error_logging() -> None
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         "tests/test_precip_overlay.py",
+        # #2185: apps/** is a river-segment write-surface root.
+        WRITE_SURFACE_SCAN_PATH,
     ]
 
 
@@ -1694,9 +1745,9 @@ def test_select_tests_maps_governance_entropy_scripts_without_core_smoke_fallbac
         repo_root=Path("."),
     )
 
-    # #1656: scripts/** is a scanned invariant root, so the invariant suite
-    # joins the entropy-rule target.
-    assert selected == ["tests/test_entropy_audit_script.py", INVARIANT_SUITE_PATH]
+    # #1656 and #2185: scripts/** is a root of both supplemental scans, so both
+    # suites join the entropy-rule target.
+    assert selected == ["tests/test_entropy_audit_script.py", WRITE_SURFACE_SCAN_PATH, INVARIANT_SUITE_PATH]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
@@ -1731,12 +1782,13 @@ def test_select_tests_keeps_core_smoke_fallback_for_script_without_same_name_sui
 def test_select_tests_keeps_explicit_differently_named_script_rule() -> None:
     selected = select_tests(["scripts/validate_readonly_db_boundary.py"], repo_root=Path("."))
 
-    # #1656: scripts/** is a scanned invariant root.
+    # #1656 and #2185: scripts/** is a root of both supplemental scans.
     assert selected == sorted(
         [
             *ISSUE1895_READINESS_C1_C2_C3_TESTS,
             *READONLY_DB_VALIDATION_TESTS,
             INVARIANT_SUITE_PATH,
+            WRITE_SURFACE_SCAN_PATH,
         ]
     )
     assert not set(CORE_SMOKE_TESTS) & set(selected)
@@ -2653,8 +2705,11 @@ def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
     # SET union, mirroring the caller's deduplicating semantics: the derived
     # target must not replace the explicit ones, and an explicit rule that later
     # also names it must not false-red the pin. The selector meta-guard joins
-    # every same-name source route, so it is part of the union here.
-    assert selected == sorted({*matching[0].tests, same_name_target, SELECTOR_META_GUARD_TEST})
+    # every same-name source route, so it is part of the union here; #2185's
+    # write-surface scan joins because apps/** is one of its roots.
+    assert selected == sorted(
+        {*matching[0].tests, same_name_target, SELECTOR_META_GUARD_TEST, WRITE_SURFACE_SCAN_PATH}
+    )
 
 
 # The `git ls-files` pathspecs for the same-name derivation are derived from the
@@ -4248,7 +4303,9 @@ def test_conditional_redirect_owner_focused_when_surface_present() -> None:
     assert redirect_targets, "conditional rule did not activate with its surface present"
 
     selected = set(select_tests([owner, surface], repo_root=Path(".")))
-    assert selected == redirect_targets | {SELECTOR_META_GUARD_TEST}
+    # The surface lives under services/**, a #2185 write-surface root, so the
+    # scan rides along; the redirect itself is what this pins.
+    assert selected == redirect_targets | {SELECTOR_META_GUARD_TEST, WRITE_SURFACE_SCAN_PATH}
     assert owner not in selected
 
 
@@ -5020,14 +5077,20 @@ def test_meta_guard_target_is_dropped_with_a_warning_under_a_root_without_it(
 
 
 def test_select_tests_falls_back_to_core_smoke_for_unknown_backend_python_path() -> None:
-    # Byte-exact no-suite fallback compatibility (CAND-R2-02): an unknown
-    # backend Python path selects exactly the five core-smoke suites and NO
-    # meta-guard rider. D6 deliberately adds the rider only to same-name
-    # routes, so a refactor that gains a sixth target on every unknown route
-    # reds here before it silently costs ~15 s across the whole tree.
+    # No-suite fallback compatibility (CAND-R2-02): an unknown backend Python
+    # path selects the five core-smoke suites plus one supplemental rider,
+    # #2185's river-segment write-surface scan (services/** is one of its five
+    # roots) — six targets — and still no selector meta-guard rider, because D6
+    # adds that one only to same-name routes. The pin stays exact equality, so
+    # a SEVENTH target on every unknown route reds here before it silently
+    # costs lane time across the whole tree. That was the point of the ~15 s
+    # projection this comment used to carry; #2185's actual price is now
+    # measured rather than projected — `uv run pytest -q
+    # tests/test_river_segment_write_surface_scan.py` is 4 tests in about 2 s,
+    # dominated by a module-level AST parse paid once per session.
     selected = select_tests(["services/new_surface/new_module.py"], repo_root=Path("."))
 
-    assert selected == sorted(CORE_SMOKE_TESTS)
+    assert selected == sorted({*CORE_SMOKE_TESTS, WRITE_SURFACE_SCAN_PATH})
     assert SELECTOR_META_GUARD_TEST not in selected
 
 
@@ -5056,9 +5119,16 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
 
     selected = select_tests([known, "services/new_surface/new_module.py"], repo_root=Path("."))
 
-    # The known path lives under workers/**, so #1656 adds the write-site
-    # invariant suite to the union too.
-    assert sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH}) == selected
+    # The known path lives under workers/**, a root of both supplemental
+    # scans, so #1656's write-site invariant and #2185's river-segment
+    # write-surface scan both join the union too.
+    assert (
+        sorted(
+            set(CORE_SMOKE_TESTS)
+            | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH}
+        )
+        == selected
+    )
 
 
 def test_fallback_rider_mutant_reds_the_exact_no_suite_fallback_pin(
@@ -5122,11 +5192,12 @@ def test_selector_state_matrix_rows_3_4_5_same_name_class_and_provenance(
     explicit = "scripts/validate_readonly_db_boundary.py"
     assert not Path(f"tests/test_{PurePosixPath(explicit).stem}.py").exists()
     explicit_sel = set(select_tests([explicit], repo_root=Path(".")))
-    # #1656: scripts/** is a scanned invariant root.
+    # #1656 and #2185: scripts/** is a root of both supplemental scans.
     assert explicit_sel == {
         *ISSUE1895_READINESS_C1_C2_C3_TESTS,
         *READONLY_DB_VALIDATION_TESTS,
         INVARIANT_SUITE_PATH,
+        WRITE_SURFACE_SCAN_PATH,
     }
 
     # (b) Same-name class: ordinary suite (row 3) and a same-name suite that IS
@@ -5164,7 +5235,12 @@ def test_selector_state_matrix_row_5b_explicit_plus_same_name_union() -> None:
 
     selected = set(select_tests([path], repo_root=Path(".")))
 
-    assert selected == _effective_explicit_targets(path) | {same_name_target, SELECTOR_META_GUARD_TEST}
+    # #2185: apps/** is a write-surface root, so the scan joins the union too.
+    assert selected == _effective_explicit_targets(path) | {
+        same_name_target,
+        SELECTOR_META_GUARD_TEST,
+        WRITE_SURFACE_SCAN_PATH,
+    }
 
 
 def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
@@ -5177,11 +5253,13 @@ def test_selector_state_matrix_rows_6_7_no_suite_fallback_and_missing_targets(
     # target. Missing meta-guard target under a temporary root is dropped with
     # a warning (row 7), not special-cased.
     no_suite = select_tests(["packages/common/auth_policy.py"], repo_root=Path("."))
-    # #1744 path B + #1656: packages/common/** retains the core-smoke baseline
-    # BY POLICY and routes the write-site invariant — no meta-guard rider (D6
-    # unchanged). #1684 EVID-01: the shared policy owner now also selects its
-    # dedicated focused matrix suite.
-    assert sorted(no_suite) == sorted({*CORE_SMOKE_TESTS, INVARIANT_SUITE_PATH, AUTH_POLICY_TEST})
+    # #1744 path B + #1656 + #2185: packages/common/** retains the core-smoke
+    # baseline BY POLICY and routes both supplemental scans — no meta-guard
+    # rider (D6 unchanged). #1684 EVID-01: the shared policy owner now also
+    # selects its dedicated focused matrix suite.
+    assert sorted(no_suite) == sorted(
+        {*CORE_SMOKE_TESTS, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH, AUTH_POLICY_TEST}
+    )
     assert SELECTOR_META_GUARD_TEST not in no_suite
 
     test_path = tmp_path / "tests" / "test_example.py"
@@ -5230,10 +5308,20 @@ def test_selector_state_matrix_row_11_multiple_changed_paths_accumulate() -> Non
     assert suite in selected
     assert SELECTOR_META_GUARD_TEST in selected
     # known lives under workers/** and auth_policy under packages/common/**,
-    # so both #1656 invariant roots add the write-site suite (deduplicated).
+    # so both #1656 invariant roots add the write-site suite (deduplicated),
+    # and both paths sit under #2185 write-surface roots, which adds the scan.
     # #1684 EVID-01: auth_policy's focused matrix suite joins the accumulation.
     assert (
-        sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, AUTH_POLICY_TEST})
+        sorted(
+            set(CORE_SMOKE_TESTS)
+            | {
+                suite,
+                SELECTOR_META_GUARD_TEST,
+                INVARIANT_SUITE_PATH,
+                WRITE_SURFACE_SCAN_PATH,
+                AUTH_POLICY_TEST,
+            }
+        )
         == selected
     )
 
@@ -5432,18 +5520,20 @@ def test_changed_test_rule_exemption_reds_on_an_unconditional_duplicate() -> Non
     assert not _unconditional_duplicate_rules(benign)
 
 
-# The first six inputs below sit inside ci.yml's `backend` paths-filter (so the
-# "Unit Tests" gate opens) yet map to no test file, leaving the job in its
-# collect-only, zero-assertion branch. Those six PIN that route-C contract —
-# empty selection is allowed, but ci.yml now labels it loudly (warning
+# Each of the six inputs below matches one of ci.yml's `backend` paths-filter
+# patterns (`schemas/**`, `infra/**`, `**/*.py`, `packages/**`, `tests/**`), so
+# the "Unit Tests" gate opens, yet each maps to no test file, leaving the job
+# in its collect-only, zero-assertion branch. All six PIN that route-C contract
+# — empty selection is allowed, but ci.yml now labels it loudly (warning
 # annotation + step summary) instead of reporting an informationless green.
-# The seventh, `scripts/run_x.sh`, matches NO `backend` pattern, so the Unit
-# Tests job never starts for it at all; that param pins selector emptiness
-# only and says nothing about the collect-only branch. All seven are pins, NOT
-# endorsements: the `scripts/**/*.sh` class is #1138's layer to flip, the
-# remaining classes belong to a future route-A/B (selector-widening or
-# empty-selection-fails) decision. Flipping any of them must change a visible
-# assertion here.
+# They are pins, NOT endorsements: each class belongs to a future route-A/B
+# (selector-widening or empty-selection-fails) decision. Flipping any of them
+# must change a visible assertion here.
+# The `py-under-apps-frontend` param left this list in #2185, which is exactly
+# such a route-A widening: `apps/**` is one of the river-segment write-surface
+# scan's roots, so every `.py` under `apps/` outside `apps/api/` now selects
+# that one suite. `test_select_tests_routes_apps_outside_api_to_the_write_surface_scan`
+# below is the positive pin that replaced it.
 # Note the classes that are NOT here any more: a PR deleting a `tests/test_*.py`
 # and a PR touching only an UNROUTED `tests/` support module (the recorded
 # carve-outs, or one deriving no importer suites) both leave a one-element
@@ -5462,7 +5552,6 @@ def test_changed_test_rule_exemption_reds_on_an_unconditional_duplicate() -> Non
         pytest.param("schemas/x.schema.json", id="schemas"),
         pytest.param("infra/nginx/site.conf", id="unmapped-infra"),
         pytest.param("openspec/tools/x.py", id="py-outside-backend-prefixes"),
-        pytest.param("apps/frontend/scripts/gen.py", id="py-under-apps-frontend"),
         pytest.param("packages/common/sql/x.sql", id="non-py-under-backend-prefix"),
         pytest.param("tests/fixtures/sample.json", id="non-py-under-tests"),
         # scripts/**/*.sh left this list in #1138: the ci.yml backend filter
@@ -5474,6 +5563,33 @@ def test_changed_test_rule_exemption_reds_on_an_unconditional_duplicate() -> Non
 )
 def test_select_tests_pins_known_empty_selection_classes(changed_path: str) -> None:
     assert select_tests([changed_path], repo_root=Path(".")) == []
+
+
+def test_select_tests_routes_apps_outside_api_to_the_write_surface_scan() -> None:
+    # #2185's one semantic flip, and the positive replacement for the removed
+    # `py-under-apps-frontend` param above. `BACKEND_PYTHON_SOURCE_PREFIXES`
+    # covers `apps/api/` only, so a `.py` elsewhere under `apps/` used to select
+    # nothing; it is inside the write-surface scan's roots, so it now selects
+    # exactly that suite. Both a TRACKED member of the class and a
+    # future-shaped one are pinned, and neither may reappear among the
+    # empty-selection params.
+    tracked = "apps/__init__.py"
+    future = "apps/frontend/scripts/gen.py"
+    assert Path(tracked).is_file()
+    assert not Path(future).exists()
+    assert not tracked.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
+    assert not future.startswith(BACKEND_PYTHON_SOURCE_PREFIXES)
+
+    for path in (tracked, future):
+        assert select_tests([path], repo_root=Path(".")) == [WRITE_SURFACE_SCAN_PATH], path
+
+    pinned_empty = {
+        param.values[0]
+        for mark in test_select_tests_pins_known_empty_selection_classes.pytestmark
+        if mark.name == "parametrize"
+        for param in mark.args[1]
+    }
+    assert not pinned_empty & {tracked, future}, sorted(pinned_empty)
 
 
 def test_select_tests_warns_when_a_rule_target_no_longer_exists(
@@ -5641,16 +5757,18 @@ def test_github_output_flags_selector_development_diffs_honestly(tmp_path: Path)
 
 
 def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Path) -> None:
-    # #1656: scripts/select_ci_tests.py lives under scripts/**, a scanned
-    # invariant root, so a selector-source diff selects the meta-guard PLUS the
-    # write-site invariant — NOT the meta-guard collapse. The collection signal
-    # is still true by PROVENANCE (the selector source itself changed), so the
-    # workflow runs the full-tree collect smoke in addition to the two targeted
-    # suites — the round-1 cand-01 fix.
+    # #1656 and #2185: scripts/select_ci_tests.py lives under scripts/**, which
+    # is a root of both supplemental scans, so a selector-source diff selects
+    # the meta-guard PLUS the write-site invariant PLUS the river-segment
+    # write-surface scan — three targets, NOT the meta-guard collapse. The
+    # collection signal is still true by PROVENANCE (the selector source itself
+    # changed), so the workflow runs the full-tree collect smoke in addition to
+    # those three — the round-1 cand-01 fix.
     fields = _github_output_fields(tmp_path, ["scripts/select_ci_tests.py"], repo_root=Path("."))
 
-    assert fields["count"] == "2"
+    assert fields["count"] == "3"
     assert "tests/test_timescale_write_guard_wire_site_invariant.py" in fields["tests"]
+    assert WRITE_SURFACE_SCAN_PATH in fields["tests"]
     assert fields["meta_guard_only"] == "false"
     assert fields["collection_smoke_required"] == "true"
 
@@ -10401,6 +10519,405 @@ def test_supplemental_invariant_routing_reds_when_a_root_is_dropped(
 
     violations = _supplemental_roots_violations(reduced, probe="scripts/brand_new_thing.py")
     assert any("scripts/**" in v for v in violations), f"expected a named scripts/** violation, got {violations}"
+# --------------------------------------------------------------------------
+# #2185 river-segment write-surface routing meta-guards
+# --------------------------------------------------------------------------
+
+# The write-surface scan's repo-relative path, spelled locally for the same
+# reason INVARIANT_SUITE_PATH above is: this module must still import against
+# PRE-change selector source, where the production constant does not exist yet.
+# It is also the path _write_surface_scan_dirs() parses, and it is deliberately
+# RELATIVE — the fixture-copy tests below work by chdir'ing into a tmp_path that
+# holds a repo-shaped copy, which an absolute or REPO_ROOT-joined default would
+# silently bypass. An anchor test keeps the literal in sync with the constant.
+WRITE_SURFACE_SCAN_PATH = "tests/test_river_segment_write_surface_scan.py"
+
+
+def _write_surface_roots() -> tuple[str, ...]:
+    """The selector's write-surface root globs, read lazily from the source.
+
+    Lazy (function-level import) so pre-change-source red runs can still
+    exercise the routing tests without the constant existing.
+    """
+    from scripts.select_ci_tests import RIVER_SEGMENT_WRITE_SURFACE_ROOTS
+
+    return RIVER_SEGMENT_WRITE_SURFACE_ROOTS
+
+
+def test_write_surface_scan_literal_anchors_to_the_selector_constant() -> None:
+    # The local WRITE_SURFACE_SCAN_PATH literal and the production constant must
+    # agree, and the suite must exist on disk — otherwise `select_tests` would
+    # drop the target as missing and every routing assertion below would be
+    # asserting against a suite that never runs.
+    from scripts.select_ci_tests import RIVER_SEGMENT_WRITE_SURFACE_TEST
+
+    assert WRITE_SURFACE_SCAN_PATH == RIVER_SEGMENT_WRITE_SURFACE_TEST
+    assert Path(WRITE_SURFACE_SCAN_PATH).is_file()
+
+
+# The write-surface scan's roots, read from the scan's OWN module-level
+# PRODUCTION_DIRS binding (the authority) rather than frozen a second time.
+# Derivation shape, in two stages. First collect EVERY `ast.Name` store of that
+# name ANYWHERE in the module -- plain assignment, annotated assignment (the
+# house style annotates such constants), augmented assignment, `for` target,
+# `with ... as`, walrus and comprehension targets all produce one, at any
+# nesting depth -- and require exactly one. Then require that one store to be a
+# module-level `ast.Assign`/`ast.AnnAssign`, and read its tuple/list of string
+# constants. (The scan's own `for directory in PRODUCTION_DIRS` is a Load, not
+# a Store, so it does not count: the tracked scan has exactly one store.)
+#
+# Collecting every store and requiring exactly one is load-bearing, not
+# defensive: a first-match read would return the stale five-element tuple under
+# a legal rewrite such as `PRODUCTION_DIRS = PRODUCTION_DIRS + ("db",)`, that
+# tuple still equals the selector constant, so nothing would red while the scan
+# actually walked six directories. The scan's own non-vacuity assertion cannot
+# catch that either -- at runtime its binding and its scanned set still agree.
+# Walking the whole module rather than `tree.body` is what reaches the rebinds
+# a body-only scan never descends into -- `PRODUCTION_DIRS += ("db",)`, an
+# `if <cond>:` rebind, `for PRODUCTION_DIRS in ...:` -- each of which is the
+# same silent staleness in a different spelling.
+#
+# Residual limit, recorded rather than papered over: a rebind that produces no
+# `ast.Name` store at all -- `globals()["PRODUCTION_DIRS"] = ...`,
+# `setattr(sys.modules[__name__], "PRODUCTION_DIRS", ...)` -- is out of this
+# derivation's reach. The backstop for that shape is the scan's OWN runtime
+# non-vacuity assertion at
+# tests/test_river_segment_write_surface_scan.py:123, which compares the set of
+# scanned top-level directories against `set(PRODUCTION_DIRS)` -- and it is a
+# backstop only for a rebind placed AFTER `_LITERALS = _sql_literals()` runs at
+# that module's :110. One placed above it is walked by the scan itself, leaving
+# binding and scanned set in agreement exactly as noted above, and nothing
+# catches it.
+#
+# This is NOT the shape _invariant_scan_roots() uses above: that suite exposes a
+# `_scan_roots` FunctionDef returning `REPO_ROOT / <part>` BinOp chains, and its
+# walker would find nothing here. Only the ROUTING shape is shared with #1656.
+def _write_surface_scan_dirs(path: str = WRITE_SURFACE_SCAN_PATH) -> tuple[str, ...]:
+    tree = _parse_tracked(path)
+    stores = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "PRODUCTION_DIRS" and isinstance(node.ctx, ast.Store)
+    ]
+    assert len(stores) == 1, (
+        f"{path}: expected exactly one store of PRODUCTION_DIRS anywhere in the module, got "
+        f"{len(stores)} at lines {sorted(node.lineno for node in stores)}"
+    )
+
+    bindings: list[ast.expr | None] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(target, ast.Name) and target.id == "PRODUCTION_DIRS" for target in targets):
+            bindings.append(node.value)
+
+    assert len(bindings) == 1, (
+        f"{path}: the single PRODUCTION_DIRS store is not a module-level assignment the "
+        f"derivation can read (module-level Assign/AnnAssign bindings found: {len(bindings)})"
+    )
+    value = bindings[0]
+    shape = ast.dump(value) if value is not None else "an annotation with no value"
+    assert isinstance(value, ast.Tuple | ast.List), (
+        f"{path}: PRODUCTION_DIRS must be bound to a tuple/list literal, got {shape}"
+    )
+    dirs: list[str] = []
+    for element in value.elts:
+        assert isinstance(element, ast.Constant) and isinstance(element.value, str), (
+            f"{path}: PRODUCTION_DIRS holds a non-string element: {ast.dump(element)!r}"
+        )
+        dirs.append(element.value)
+    assert dirs, f"{path}: PRODUCTION_DIRS derivation returned no directories"
+    return tuple(dirs)
+
+
+def _write_surface_root_globs() -> set[str]:
+    """The scan's PRODUCTION_DIRS mapped to the glob spelling the selector uses.
+
+    The scan walks `REPO_ROOT / <directory>` recursively; the selector matches
+    repo-relative fnmatch globs, where `*` also matches `/`. So `packages` and
+    `apps` map to `packages/**` and `apps/**` at FULL width -- wider than the
+    sibling TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS' `packages/common/**`, and
+    deliberately so: this scan parses every `.py` under those directories.
+    """
+    return {f"{directory}/**" for directory in _write_surface_scan_dirs()}
+
+
+def _write_surface_future_probes() -> dict[str, str]:
+    """A future-shaped probe path per scanned directory, keyed by directory.
+
+    Derived rather than written out, so a sixth directory added to the scan's
+    PRODUCTION_DIRS grows a probe here instead of going untested.
+    """
+    return {directory: f"{directory}/brand_new_thing.py" for directory in _write_surface_scan_dirs()}
+
+
+def _assert_write_surface_roots_match(roots: Sequence[str]) -> None:
+    """Assert ``roots`` equals the globs derived from the scan's own source.
+
+    Names the offending roots in both directions, so adding a directory to the
+    scan without wiring it into the selector reds by that root's name.
+    """
+    expected = _write_surface_root_globs()
+    missing = sorted(expected - set(roots))
+    unexpected = sorted(set(roots) - expected)
+    assert not missing and not unexpected, (
+        f"{WRITE_SURFACE_SCAN_PATH}: the selector's roots and the scan's PRODUCTION_DIRS "
+        f"disagree -- missing {missing}, unexpected {unexpected}"
+    )
+
+
+def test_write_surface_roots_derive_from_the_scan_production_dirs() -> None:
+    # #2185: the five supplemental roots must equal the scan's own
+    # PRODUCTION_DIRS set (as globs), never a second frozen list.
+    _assert_write_surface_roots_match(_write_surface_roots())
+
+
+def _write_surface_roots_violations(roots: Sequence[str], *, probe: str) -> list[str]:
+    """Positive oracle: missing write-surface root coverage, naming the root.
+
+    ``roots`` are the root globs under test; the expected set is the INDEPENDENT
+    ``_write_surface_root_globs()`` derived from the scan's own PRODUCTION_DIRS
+    -- never the monkeypatched production constant. Returns a violation naming
+    each expected root absent from ``roots``, plus (if ``probe`` matches none of
+    ``roots``) a violation naming the probe. Live state yields an empty list; a
+    mutant that drops ``scripts/**`` yields a named violation through this SAME
+    helper. Every message embeds the suite path as a formatted value, so the red
+    names the suite without relying on pytest's assertion rewriting.
+    """
+    expected = _write_surface_root_globs()
+    violations: list[str] = []
+    if not any(fnmatch.fnmatch(probe, root) for root in roots):
+        violations.append(f"probe {probe} is covered by no root routing {WRITE_SURFACE_SCAN_PATH}")
+    for root in sorted(expected - set(roots)):
+        violations.append(f"root {root} is missing from the routing of {WRITE_SURFACE_SCAN_PATH}")
+    return violations
+
+
+def test_write_surface_routing_is_set_union_over_every_derived_root() -> None:
+    # #2185: the three known write-surface modules, plus a FUTURE-shaped probe
+    # DERIVED from the scan's own PRODUCTION_DIRS (one per scanned directory),
+    # all select the scan in addition to their ordinary selection. The scan
+    # names the first two by literal (its BACKFILL_MODULE and UPSERT_MODULE
+    # bindings); packages/common/model_registry.py is the shared registry module
+    # the issue's own grep evidence adds, and it is named here rather than
+    # derived because the scan does not single it out.
+    named = (
+        "workers/model_registry/basins_registry_import.py",
+        "workers/model_registry/qhh_production_bootstrap.py",
+        "packages/common/model_registry.py",
+    )
+    for module in named:
+        assert Path(module).is_file(), (
+            f"named write-surface module missing: {module} -- the probe for {WRITE_SURFACE_SCAN_PATH} is stale"
+        )
+        selected = set(select_tests([module], repo_root=Path(".")))
+        assert WRITE_SURFACE_SCAN_PATH in selected, f"{module}: does not select {WRITE_SURFACE_SCAN_PATH}"
+
+    for directory, probe in sorted(_write_surface_future_probes().items()):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert WRITE_SURFACE_SCAN_PATH in selected, (
+            f"{probe} (scanned directory {directory!r}): does not select {WRITE_SURFACE_SCAN_PATH}"
+        )
+
+    # Negatives. `apps/frontend/src/main.ts` is under a scanned root but is not
+    # Python; `openspec/tools/x.py` is Python outside every scanned root.
+    for probe in ("apps/frontend/src/main.ts", "openspec/tools/x.py"):
+        selected = set(select_tests([probe], repo_root=Path(".")))
+        assert WRITE_SURFACE_SCAN_PATH not in selected, f"{probe}: must not select {WRITE_SURFACE_SCAN_PATH}"
+
+    # `db/**` is spelled as a LITERAL, not derived. The obvious derivation
+    # `set(TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS) - _write_surface_root_globs()`
+    # is a plain string difference and also yields `packages/common/**`, whose
+    # probe DOES select the scan (it is under `packages/**`) -- so a derived
+    # negative probe would red. Derivation buys coverage on the POSITIVE side
+    # only. db/** must keep the sibling #1656 route and refuse this one.
+    db_selected = set(select_tests(["db/brand_new_thing.py"], repo_root=Path(".")))
+    assert WRITE_SURFACE_SCAN_PATH not in db_selected, (
+        f"db/brand_new_thing.py: db/ is not a scanned directory, it must not select {WRITE_SURFACE_SCAN_PATH}"
+    )
+    assert INVARIANT_SUITE_PATH in db_selected, (
+        f"db/brand_new_thing.py lost the sibling #1656 route while refusing {WRITE_SURFACE_SCAN_PATH}"
+    )
+
+    # Live state: the same positive oracle the mutant test uses reports nothing.
+    live_violations = _write_surface_roots_violations(_write_surface_roots(), probe="scripts/brand_new_thing.py")
+    assert not live_violations, f"live routing of {WRITE_SURFACE_SCAN_PATH} has violations: {live_violations}"
+
+
+def test_write_surface_routing_reds_when_a_root_is_dropped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2185 mutant, in two legs. Leg (a): the SAME positive oracle the live test
+    # uses reports the dropped root by name. Leg (b): dropping the root from the
+    # CONSTANT changes what select_tests returns -- which is what makes the
+    # constant the live routing authority rather than a description of it. An
+    # implementation that spells the roots inline in the routing loop passes
+    # leg (a) and fails leg (b). Constructed via monkeypatch on the selector
+    # module; tracked source untouched.
+    from scripts import select_ci_tests
+
+    live = _write_surface_roots()
+    assert "scripts/**" in live
+    reduced = tuple(root for root in live if root != "scripts/**")
+    monkeypatch.setattr(select_ci_tests, "RIVER_SEGMENT_WRITE_SURFACE_ROOTS", reduced)
+
+    violations = _write_surface_roots_violations(reduced, probe="scripts/brand_new_thing.py")
+    assert any("scripts/**" in v for v in violations), f"expected a named scripts/** violation, got {violations}"
+
+    dropped = set(select_tests(["scripts/brand_new_thing.py"], repo_root=Path(".")))
+    assert WRITE_SURFACE_SCAN_PATH not in dropped, (
+        f"dropping scripts/** from RIVER_SEGMENT_WRITE_SURFACE_ROOTS left "
+        f"{WRITE_SURFACE_SCAN_PATH} selected: the routing loop reads inlined roots, not the constant"
+    )
+    retained = set(select_tests(["workers/brand_new_thing.py"], repo_root=Path(".")))
+    assert WRITE_SURFACE_SCAN_PATH in retained, (
+        f"dropping scripts/** also stopped a RETAINED root from selecting {WRITE_SURFACE_SCAN_PATH}"
+    )
+
+
+def _write_scan_fixture(root: Path, source: str) -> Path:
+    """Write a repo-shaped COPY of the scan under ``root`` and return ``root``.
+
+    `_parse_tracked` keys its cache on the RESOLVED path, so a copy under a
+    tmp_path is a distinct key from the tracked file: the fixture-copy tests
+    below never read, write or invalidate the tracked scan.
+    """
+    target = root / WRITE_SURFACE_SCAN_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(source, encoding="utf-8")
+    return root
+
+
+def test_write_surface_derivation_grows_with_a_sixth_scanned_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2185 derivation robustness: a scan copy naming a SIXTH directory must
+    # grow the derived root set and the derived probe set, and must red the
+    # equality assertion against the unchanged selector constant, by name.
+    live = _write_surface_roots()
+    monkeypatch.chdir(
+        _write_scan_fixture(
+            tmp_path,
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts", "db")\n',
+        )
+    )
+
+    assert _write_surface_scan_dirs() == ("apps", "services", "workers", "packages", "scripts", "db")
+    assert "db/**" in _write_surface_root_globs()
+    assert _write_surface_future_probes()["db"] == "db/brand_new_thing.py"
+    with pytest.raises(AssertionError, match=r"missing \['db/\*\*'\]"):
+        _assert_write_surface_roots_match(live)
+
+
+def test_write_surface_derivation_rejects_a_double_production_dirs_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2185 derivation robustness: a second module-level binding is exactly the
+    # rewrite a first-match read would swallow -- it would return the stale
+    # five-element tuple, which still equals the selector constant, while the
+    # scan walked six directories. The derivation must refuse to guess.
+    monkeypatch.chdir(
+        _write_scan_fixture(
+            tmp_path,
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\n'
+            'PRODUCTION_DIRS = PRODUCTION_DIRS + ("db",)\n',
+        )
+    )
+
+    with pytest.raises(AssertionError, match="PRODUCTION_DIRS"):
+        _write_surface_scan_dirs()
+
+
+def test_write_surface_derivation_rejects_nonlinear_rebinds_of_production_dirs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2185 derivation robustness: three rebind shapes the shipped
+    # `tree.body`-only derivation walked straight past. `PRODUCTION_DIRS +=
+    # (...)` is an AugAssign; an `if <cond>:` rebind lives inside the `If`
+    # node's body; a `for PRODUCTION_DIRS in ...:` target lives inside the
+    # `For` node. None of the three is a module-level `Assign`/`AnnAssign`, so
+    # the derivation kept returning the stale five-element tuple -- which still
+    # equals the selector constant, so nothing red -- while the scan really
+    # walked six directories. Each fixture gets its own directory so the parses
+    # cannot share a `_parse_tracked` key.
+    for case, source in (
+        (
+            "augmented",
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\n'
+            'PRODUCTION_DIRS += ("db",)\n',
+        ),
+        (
+            "conditional",
+            "import os\n\n"
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\n'
+            'if os.environ.get("NHMS_X"):\n'
+            '    PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts", "db")\n',
+        ),
+        (
+            "loop-rebind",
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\n'
+            'for PRODUCTION_DIRS in [("db",)]:\n'
+            "    pass\n",
+        ),
+    ):
+        monkeypatch.chdir(_write_scan_fixture(tmp_path / case, source))
+        with pytest.raises(AssertionError, match="PRODUCTION_DIRS"):
+            _write_surface_scan_dirs()
+
+
+def test_write_surface_derivation_rejects_an_unreadable_production_dirs_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2185 derivation robustness: a binding the derivation cannot read must
+    # fail loudly naming PRODUCTION_DIRS, never return an empty root set that
+    # would make every later assertion vacuously true. Four shapes: a computed
+    # value; no module-level binding of that name at all; and two where the
+    # module's ONLY `ast.Name` store of PRODUCTION_DIRS is not a module-level
+    # `Assign`/`AnnAssign` -- a lone `+=` (AugAssign) and a lone rebind nested
+    # in an `if` body. Those last two are the single-store shapes: the
+    # store-count guard sees exactly one store and passes them through, so the
+    # module-level-binding guard is the ONLY thing standing between them and an
+    # `IndexError` on the empty binding list. Without these two cases that
+    # guard could be deleted with every test in this suite still green. Each
+    # fixture gets its own directory so the parses cannot share a
+    # `_parse_tracked` key.
+    for case, source in (
+        ("computed", 'PRODUCTION_DIRS = tuple(sorted({"apps", "services"}))\n'),
+        ("absent", 'SCANNED_DIRS = ("apps", "services")\n'),
+        ("lone-augmented", 'PRODUCTION_DIRS += ("db",)\n'),
+        (
+            "lone-nested",
+            "import os\n\n"
+            'if os.environ.get("NHMS_X"):\n'
+            '    PRODUCTION_DIRS = ("apps", "services")\n',
+        ),
+    ):
+        monkeypatch.chdir(_write_scan_fixture(tmp_path / case, source))
+        with pytest.raises(AssertionError, match="PRODUCTION_DIRS"):
+            _write_surface_scan_dirs()
+
+
+def test_write_surface_flip_pins_the_apps_class_at_the_github_output_layer(tmp_path: Path) -> None:
+    # #2185's one semantic flip, pinned where its cost actually lands. Before
+    # this change `apps/__init__.py` selected nothing, so ci.yml's `count == 0`
+    # branch ran the zero-assertion full-tree collect-only smoke. It now selects
+    # exactly the scan, so the targeted branch runs instead. Neither carve-out
+    # re-arms the smoke: the one element is not the selector meta-guard suite,
+    # and neither the selector source nor its suite is in such a diff.
+    fields = _github_output_fields(tmp_path, ["apps/__init__.py"], repo_root=Path("."))
+
+    assert fields["count"] == "1"
+    assert fields["tests"] == WRITE_SURFACE_SCAN_PATH
+    assert fields["meta_guard_only"] == "false"
+    assert fields["collection_smoke_required"] == "false"
 
 
 # The #1744 shared-library additivity authority: `packages/common/**` must
@@ -12443,6 +12960,7 @@ def test_issue1895_evidence_io_selects_only_its_c1_c3_consumer_plus_additive_rid
     assert selected == {
         *CORE_SMOKE_TESTS,
         TIMESCALE_WRITE_GUARD_INVARIANT_TEST,
+        WRITE_SURFACE_SCAN_PATH,
         *ISSUE1895_READINESS_C1_C2_C3_TESTS,
     }
     matching = [rule for rule in PATH_TEST_RULES if rule.pattern == producer]
