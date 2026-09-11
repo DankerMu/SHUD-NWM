@@ -1180,15 +1180,20 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
-        # The #1872 retention partition's shared constants/helpers. The four
-        # collectible retention partitions import it at module scope (a design
-        # requirement: selector importer derivation must see the dependency), so
-        # a fixture edit breaks all four during PR-lane collection. They are the
-        # derived importer set; the meta-guard rider covers the tree-derived
-        # guards this very routing can invalidate.
+        # The #1872 retention partition's shared constants/helpers. The five
+        # collectible retention partitions that import it do so at module scope
+        # (a design requirement: selector importer derivation must see the
+        # dependency), so a fixture edit breaks all five during PR-lane
+        # collection. They are the derived importer set; the meta-guard rider
+        # covers the tree-derived guards this very routing can invalidate.
+        # #2238's copyback-mutex partition joined that set: it imports
+        # EXTRA_CONFIG/NOW/_seed_cycle/_pass_scheduler from here at top level,
+        # so it is a derived importer like the other four, not a rider.
+        # 21 tests in 2.94s.
         "tests/retention_test_helpers.py",
         (
             "tests/test_retention.py",
+            "tests/test_retention_copyback_mutex.py",
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_pipeline_frontier.py",
             "tests/test_retention_root_admission.py",
@@ -1495,8 +1500,23 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # Extended AT THE RULE SITE (#2238), not by editing the shared constant:
+        # ORCHESTRATOR_CLI_IMPORTER_TESTS is also spliced into pattern[4]
+        # (scheduler_journal_archive.py), which the copyback-mutex suite does not
+        # import and whose selection must not move. cli.py is stop-rule owned, so
+        # the broad `services/orchestrator/**` list that carries the other five
+        # retention partitions is unreachable here — this is where the sixth
+        # partition's importer gap closes. The suite drives `cli._run_cleanup`,
+        # the out-of-pass entrypoint that reads NHMS_OBJECT_STORE_COPYBACK_ROOT
+        # from the environment and thereby decides which roots the deleter locks,
+        # so an env-read or root-assembly edit here must run it. DB-free, 21
+        # tests in 2.94s, hence a rule rather than a rule-gap exclusion.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[8],
-        (*FILE_JOURNAL_READ_STATE_TESTS, *ORCHESTRATOR_CLI_IMPORTER_TESTS),
+        (
+            *FILE_JOURNAL_READ_STATE_TESTS,
+            *ORCHESTRATOR_CLI_IMPORTER_TESTS,
+            "tests/test_retention_copyback_mutex.py",
+        ),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1803,6 +1823,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1872: the retention corpus is physically partitioned; the
             # production owner rule must select every collectible partition so
             # a retention change never blinds targeted CI to moved cases.
+            # #2238 added the sixth partition. It is the requirement oracle for
+            # retention.py's copyback-mutex lane (one batch-lock acquisition per
+            # removed tree under the shared copyback root, a pass-level wait
+            # budget, `failed` rather than abort on contention), and it
+            # top-level-imports `services.orchestrator` itself, so BOTH
+            # directory members' importer gaps close here — cli.py's third one is
+            # stop-rule owned and rides THAT site, per this rule's #1455 note
+            # above. DB-free, local, 21 tests in 2.94s, so a rule rather than a
+            # rule-gap exclusion.
+            "tests/test_retention_copyback_mutex.py",
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_frontier.py",
             "tests/test_retention_pipeline_frontier.py",

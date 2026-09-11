@@ -34,18 +34,32 @@ Safety posture (never-break-userspace):
   admitted. A symlinked ``runs/`` root stays refused, while a selected
   additional-root run workspace is removed by unlinking its descendant
   symlinks without following them (issue #1615).
+- Removals on the **shared** object-store copyback root are taken under that
+  root's cross-process batch mutex (issue #2238), one acquisition per removed
+  tree and never across the planning walk, so a removal cannot land inside a
+  copyback writer's rename-to-backup-then-promote window. Which root that is
+  comes from the caller's ``copyback_root``; the workspace root and the primary
+  object store are not locked. A mutex failure is recorded like every other
+  deletion failure and never aborts the pass, and one pass-level wait budget
+  bounds how long a stuck holder can stall a sweep.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from packages.common.copyback_guard import (
+    CopybackLockError,
+    acquire_copyback_batch_lock,
+    release_copyback_batch_lock,
+)
 from packages.common.safe_fs import SafeFilesystemError, remove_tree_allow_symlinks
 from services.orchestrator.run_identity import parse_run_cycle
 
@@ -111,6 +125,21 @@ PRIMARY_ROOT_NOT_ABSOLUTE_REASON = "primary_root_not_absolute"
 # rejects a root. The loser is recorded with ``conflicting_root`` naming the
 # accepted winner.
 ROOT_OVERLAP_REASON = "root_overlap"
+
+# Total time ONE pass may spend *waiting* for the copyback batch mutex, across
+# every removal on the copyback root (#2238 / design D9). Per-tree deadlines
+# bound how long one promote can be blocked by retention; they do not bound the
+# reverse. With the guard's own 900 s default and the measured 48-54 copyback
+# removals per pass, a single stuck holder -- the NFS state in which the lock is
+# correctly owned, has no local holder and stays held until the server lease
+# expires -- would stall one pass for ~13.5 h, past the 12-hourly cadence. Only
+# the wait is charged against this budget, never the removal itself, so a large
+# uncontended tree cannot consume it. A module constant plus a keyword override
+# for tests, deliberately NOT an environment variable: the guard's existing
+# per-acquisition env override already answers every operational question this
+# would, and a knob nobody is asked to turn is production-config surface for its
+# own sake.
+DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS = 300.0
 
 
 @dataclass
@@ -792,6 +821,21 @@ def _target_payload(target: RetentionTarget) -> dict[str, Any]:
     }
 
 
+@dataclass
+class _CopybackLockBudget:
+    """The copyback root under the mutex, plus one pass's remaining wait budget.
+
+    One instance per pass, shared by every copyback-root removal and mutated by
+    each of them: the budget is a *pass*-level bound, so the acquisitions have
+    to charge against the same counter (design D9). ``root`` travels with it
+    because the removal and the acquisition must name the same resolved root.
+    """
+
+    root: Path
+    budget_seconds: float
+    remaining_seconds: float
+
+
 def run_retention(
     *,
     object_store_root: Path | str | None,
@@ -801,6 +845,8 @@ def run_retention(
     active_lower_bound: datetime | None = None,
     active_lower_bound_source: str | None = None,
     runs_only_roots: Sequence[Path | str | None] = (),
+    copyback_root: Path | str | None = None,
+    copyback_lock_wait_budget_seconds: float = DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS,
 ) -> RetentionResult:
     """Plan and (when enabled and not dry-run) execute retention cleanup.
 
@@ -817,6 +863,25 @@ def run_retention(
     for key to the pre-#1318 plan. The additional-root window
     (``config.extra_roots_retention_days``) is independent of the object-store
     window and is reported in the receipt either way.
+
+    ``copyback_root`` names which of the additional roots is the **shared**
+    object-store copyback root (#2238), so removals there are taken under the
+    same cross-process mutex the copyback writers hold
+    (``packages.common.copyback_guard``). ``runs_only_roots`` is an untagged
+    positional sequence, so the shared root cannot be told from a run-workspace
+    root without being named. The value is matched against
+    ``result.extra_roots`` -- the sanitised, resolved, de-duplicated,
+    overlap-adjudicated set -- so it can only ever *select* a root the pass was
+    already going to sweep and can never widen the deletion surface: a blank,
+    unset, relative or overlap-rejected value selects nothing, and so does a
+    copyback root that resolves onto the primary object store (there every
+    copyback writer skips before acquiring, so there is no second party to
+    exclude). ``None`` -- the default, and every non-db-free deployment --
+    leaves the pass byte-identical to its pre-#2238 behaviour.
+
+    ``copyback_lock_wait_budget_seconds`` bounds the time ONE pass may spend
+    waiting for that mutex in total (design D9); it exists for tests, and
+    production uses the module default.
     """
     resolved = config or RetentionConfig.from_env()
     now_utc = now.astimezone(UTC)
@@ -839,14 +904,55 @@ def run_retention(
     if not resolved.enabled or resolved.dry_run:
         return result
     extra_roots = set(result.extra_roots)
+    locked_root = _resolve_copyback_lock_root(copyback_root, extra_roots)
+    budget = (
+        None
+        if locked_root is None
+        else _CopybackLockBudget(
+            root=locked_root,
+            budget_seconds=float(copyback_lock_wait_budget_seconds),
+            remaining_seconds=float(copyback_lock_wait_budget_seconds),
+        )
+    )
     for entry in result.planned:
         root = entry.get("root")
         _delete_entry(
             entry,
             result,
             containment_root=Path(root) if root in extra_roots else None,
+            copyback_lock=budget if budget is not None and root == str(budget.root) else None,
         )
     return result
+
+
+def _resolve_copyback_lock_root(
+    copyback_root: Path | str | None,
+    extra_roots: set[str],
+) -> Path | None:
+    """The resolved copyback root when this pass actually sweeps it, else None.
+
+    Sanitised through the same helper every root goes through, then required to
+    be a member of ``result.extra_roots``. Membership -- not string equality
+    against the configured value -- is what makes the primary-identity
+    configuration correct: there the copyback root resolves onto the primary
+    object store, is dropped from the additional roots by the identity test in
+    :func:`_resolve_runs_only_roots`, and its ``runs/`` entries are swept through
+    the primary arm's unlocked ``shutil.rmtree``. Locking them would create a
+    lock file on a root whose only user is this process, because every copyback
+    writer returns ``copyback_root_matches_object_store_root`` before acquiring.
+
+    Rejections are deliberately NOT recorded in ``skipped``: the same value was
+    already adjudicated (and recorded, when loud) by
+    :func:`_resolve_runs_only_roots`, and a second entry would duplicate it.
+    """
+    _raw, resolved, _rejected = _sanitize_root_candidate(
+        copyback_root,
+        reason_blank=None,
+        reason_not_absolute=EXTRA_ROOT_NOT_ABSOLUTE_REASON,
+    )
+    if resolved is None or str(resolved) not in extra_roots:
+        return None
+    return resolved
 
 
 def _delete_entry(
@@ -854,6 +960,7 @@ def _delete_entry(
     result: RetentionResult,
     *,
     containment_root: Path | None = None,
+    copyback_lock: _CopybackLockBudget | None = None,
 ) -> None:
     """Remove one planned entry, recording failure instead of raising.
 
@@ -864,25 +971,86 @@ def _delete_entry(
     link instead of refusing the whole tree. The object-store root keeps the
     historical ``shutil.rmtree``; changing it is out of this change's scope.
 
-    ``SafeFilesystemError`` is a ``RuntimeError``, **not** an ``OSError``, so it
-    must be named explicitly here: letting it escape would collapse the pass
-    receipt to ``{"status": "error"}`` (scheduler_runtime) and abort the
-    ``cleanup`` CLI mid-sweep (cli.py wraps nothing), both violating this
-    module's "failures never abort the pass" contract.
+    ``copyback_lock`` is set only for entries on the **shared** copyback root
+    (#2238): that removal, and only that removal, is taken under the copyback
+    batch mutex, so it cannot land inside another process's
+    rename-to-backup-then-promote window and destroy that writer's rollback
+    material. It is nested inside the ``containment_root`` branch by
+    construction, so the primary root's ``shutil.rmtree`` can never be locked.
+
+    ``SafeFilesystemError`` and ``CopybackLockError`` (hence its
+    ``CopybackLockTimeout`` subclass) are ``RuntimeError``s, **not**
+    ``OSError``s, so both must be named explicitly here: letting either escape
+    would collapse the pass receipt to ``{"status": "error"}``
+    (scheduler_runtime) and abort the ``cleanup`` CLI mid-sweep (cli.py wraps
+    nothing), both violating this module's "failures never abort the pass"
+    contract. An unavailable mutex is therefore one ``failed`` entry carrying
+    the error text -- never a removal, and never an interrupted sweep.
     """
     path = Path(entry["path"])
     try:
         if containment_root is not None:
-            remove_tree_allow_symlinks(
-                path.parent,
-                path.name,
-                containment_root=containment_root,
-                missing_ok=False,
-            )
+            if copyback_lock is not None:
+                _remove_tree_under_copyback_mutex(
+                    path,
+                    containment_root=containment_root,
+                    copyback_lock=copyback_lock,
+                )
+            else:
+                remove_tree_allow_symlinks(
+                    path.parent,
+                    path.name,
+                    containment_root=containment_root,
+                    missing_ok=False,
+                )
         else:
             shutil.rmtree(path)
-    except (OSError, SafeFilesystemError) as error:
+    except (OSError, SafeFilesystemError, CopybackLockError) as error:
         result.failed.append({**entry, "error": str(error)})
         return
     result.deleted.append(entry)
     result.freed_bytes += int(entry.get("size_bytes", 0))
+
+
+def _remove_tree_under_copyback_mutex(
+    path: Path,
+    *,
+    containment_root: Path,
+    copyback_lock: _CopybackLockBudget,
+) -> None:
+    """Hold the copyback batch mutex for exactly one tree removal (design D2/D9).
+
+    Acquire immediately before the removal and release immediately after, so the
+    held window is one ``remove_tree_allow_symlinks`` and never the pass's
+    planning walk -- which sizes every candidate over NFS and would starve the
+    promoting writers whose acquisition budget this mutex is sized for.
+
+    ``acquire``/``release`` rather than the ``copyback_batch_lock`` context
+    manager, because the *wait* has to be measured separately from the hold to
+    be charged against the pass budget, and the context manager exposes no seam
+    between the two. Only the wait is charged, so a large uncontended tree
+    cannot consume the budget. An exhausted budget refuses **before** acquiring:
+    the remaining entries on this root must not each add another deadline's wait.
+    """
+    if copyback_lock.remaining_seconds <= 0:
+        raise CopybackLockError(
+            f"copyback batch lock wait budget of {copyback_lock.budget_seconds}s "
+            f"is exhausted for this retention pass; {path} was not removed"
+        )
+    started = time.monotonic()
+    try:
+        fd = acquire_copyback_batch_lock(
+            copyback_lock.root,
+            timeout_seconds=copyback_lock.remaining_seconds,
+        )
+    finally:
+        copyback_lock.remaining_seconds -= time.monotonic() - started
+    try:
+        remove_tree_allow_symlinks(
+            path.parent,
+            path.name,
+            containment_root=containment_root,
+            missing_ok=False,
+        )
+    finally:
+        release_copyback_batch_lock(fd)

@@ -60,6 +60,18 @@ COPYBACK_LOCK_TIMEOUT_ENV = "NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS"
 # queued acquisitions ~= 12 concurrent execution units against the 2 of live
 # steady state. Left unretuned, conservative in the safe direction.
 #
+# Retention (#2238) is the second acquirer, and the first that is not a writer:
+# it acquires once per run tree it removes on the copyback root -- 48-54 per
+# pass on the measured node-22 config, not once per cycle. That count does not
+# multiply the ~24 queued acquisitions above, because those acquisitions are
+# strictly sequential (one removal's release precedes the next one's acquire,
+# `retention._remove_tree_under_copyback_mutex`), so the retention lane
+# contributes at most ONE concurrent waiter no matter how many trees a pass
+# removes. Its holds are `rmtree`s, not copies, and it carries its own
+# pass-level wait budget (`retention.DEFAULT_COPYBACK_LOCK_WAIT_BUDGET_SECONDS`,
+# 300 s) that caps the total time a sweep can queue behind this deadline --
+# which is why a retention pass cannot be the reason a writer exhausts it.
+#
 # `flock` is per open file description, so the scheduler's same-process
 # execution-unit threads contend exactly as separate hosts would. Exceeding the
 # deadline is a bounded, loud failure -- never a hang, never an unlocked
