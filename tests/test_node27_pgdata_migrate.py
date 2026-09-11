@@ -571,13 +571,18 @@ def test_runtime_virtualenv_drift_refuses_unit_verification(runtime_checkout: Pa
         host.verify_units(state)
 
 
-@pytest.mark.parametrize("unsafe", ("ordinary-code", "tracked-venv", "dangling-venv", "file-venv"))
+@pytest.mark.parametrize("unsafe", ("ordinary-code", "tracked-venv", "dangling-venv", "file-venv", "indirect-venv"))
 def test_runtime_identity_refuses_non_environment_symlinks(runtime_checkout: Path, unsafe: str) -> None:
     target = runtime_checkout.parent / "external"
     if unsafe in {"ordinary-code", "file-venv"}:
         target.write_text("external bytes\n")
-    elif unsafe == "tracked-venv":
+    elif unsafe in {"tracked-venv", "indirect-venv"}:
         target.mkdir()
+    if unsafe == "indirect-venv":
+        (target / "env").mkdir()
+        alias = runtime_checkout.parent / "external-alias"
+        alias.symlink_to(target, target_is_directory=True)
+        target = alias / "env"
     link = runtime_checkout / ("linked.py" if unsafe == "ordinary-code" else ".venv")
     link.symlink_to(target)
     host = Host()
