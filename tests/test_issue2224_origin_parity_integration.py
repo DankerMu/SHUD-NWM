@@ -67,7 +67,7 @@ def _assert_plan_reads_only_selected_origin(
     selected: Any,
     all_chunks: list[Any],
 ) -> None:
-    plan_rows = execute("EXPLAIN (FORMAT JSON) " + sql, (selected.range_start, selected.range_end))
+    plan_rows = execute("EXPLAIN (VERBOSE, FORMAT JSON) " + sql, (selected.range_start, selected.range_end))
     relation_nodes = _explain_relations(plan_rows)
     selected_origin = (selected.origin_schema, selected.origin_name)
     selected_compressed = (
@@ -107,6 +107,60 @@ def test_optional_only_observation_does_not_propagate_errors_or_empty_results() 
         "status": "rejected",
         "row_count": 0,
     }
+
+
+def test_plan_proof_uses_verbose_explain_and_rejects_unqualified_timescale_2102_nodes() -> None:
+    selected = SimpleNamespace(
+        origin_oid=10,
+        origin_schema="_timescaledb_internal",
+        origin_name="selected_origin",
+        compressed_schema="_timescaledb_internal",
+        compressed_name="selected_compressed",
+        hypertable_schema="hydro",
+        hypertable_name="river_timeseries",
+        range_start=_CUTOFF - timedelta(days=7),
+        range_end=_CUTOFF,
+    )
+    non_verbose_plan = [
+        {
+            "QUERY PLAN": [
+                {
+                    "Plan": {
+                        "Node Type": "Custom Scan",
+                        "Custom Plan Provider": "DecompressChunk",
+                        "Relation Name": "selected_origin",
+                        "Plans": [
+                            {
+                                "Node Type": "Seq Scan",
+                                "Relation Name": "selected_compressed",
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+    ]
+    calls: list[tuple[str, tuple[object, object]]] = []
+
+    def execute(statement: str, parameters: tuple[object, object]) -> list[dict[str, object]]:
+        calls.append((statement, parameters))
+        return non_verbose_plan
+
+    with pytest.raises(AssertionError, match=r"plan has no selected relation: set\(\)"):
+        _assert_plan_reads_only_selected_origin(
+            execute,
+            sql="SELECT 1",
+            selected=selected,
+            all_chunks=[selected],
+        )
+
+    assert _explain_relations(non_verbose_plan) == set()
+    assert calls == [
+        (
+            "EXPLAIN (VERBOSE, FORMAT JSON) SELECT 1",
+            (selected.range_start, selected.range_end),
+        )
+    ]
 
 
 def test_plan_proof_rejects_an_unknown_relation_not_returned_by_all_chunks() -> None:
