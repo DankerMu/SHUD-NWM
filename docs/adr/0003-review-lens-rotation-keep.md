@@ -4425,8 +4425,8 @@ decision and the audit figures are unchanged; only the explanation was wrong.
 Decision: **keep**，不变。理由不是新数据支持轮换，而是没有新数据——
 自主 default-keep 规则在零边际证据下不改策略。座位上限不变。
 
-值得记一笔的是本单证据的形状，它与上一条的观察同向，且不是轮换结论：
-#2247 跨 3 轮 fixture 复审、2 个 review 座位、2 个 verifier 批次与 1 次终审，
+值得记一笔的是本单证据的形状，它与上一条的观察同向，且不是轮换结论：本单
+跨 3 轮 fixture 复审、2 个 review 座位、2 个 verifier 批次与 1 次终审，
 **落在生产 diff 上的发现为零**——11 项 fixture 发现与 8 项 review/Phase-7 catch
 **全部**是散文对树、或账本对树的偏差，其中 4 条是编排者自己写下的假句：一条踩了
 entropy 硬门的 Evidence Floor 措辞、一条指错 rollback 分支的偏离理由、一条声称
