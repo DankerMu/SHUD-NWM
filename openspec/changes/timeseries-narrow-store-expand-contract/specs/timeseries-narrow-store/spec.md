@@ -158,6 +158,19 @@ Every reader of the river fact table SHALL keep one store-parameterized SQL temp
 - **WHEN** `scripts/reset_qhh_smoke_db.py` deletes a legacy run
 - **THEN** its rows are removed from `hydro.river_timeseries_legacy` and the run's summary from `scripts/summarize_qhh_smoke_results.py` reads the same store
 
+### Requirement: Non-template river surfaces SHALL branch on catalog state without rewriting discovery SQL
+
+Publisher q_down preflight, copyback column guards, QHH reset/summarize and the hydro_map/live-evidence plan nails SHALL detect store from the catalog only. A pre-expand catalog (no `timeseries_store` column, no `river_timeseries_legacy`) MUST keep today's table names, column sets, SQL, plan lines and error codes. After expand, publisher preflight SHALL accept canonical `hydro.river_timeseries` or `hydro.river_timeseries_legacy`; copyback `required_columns` SHALL drop `variable` on the narrow canonical table and keep it on `_legacy` while `_DISCOVER_BACKFILL_RUNS_SQL` stays unchanged; QHH reset SHALL delete a legacy run from `_legacy` and a narrow run from the canonical table, and summarize SHALL read that same table without fact-table `variable` on the narrow path; plan nails SHALL keep the current hydro_map/live-evidence tokens as the pre-expand default and expose an explicit-store narrow sibling named from the spec indexes. No surface MAY sniff a process environment for store, default a missing post-expand store value, or route publisher/copyback discovery SQL in this task.
+
+#### Scenario: Pre-expand catalogs keep current non-template behavior
+- **WHEN** the catalog has no `hydro.hydro_run.timeseries_store` column and no `hydro.river_timeseries_legacy`
+- **THEN** publisher still requires canonical `hydro.river_timeseries`, copyback still requires `{run_key, variable, variable_e, value}` on that table, QHH reset/summarize still target `hydro.river_timeseries`, and the default hydro_map plan plus live-evidence query tokens remain the current key-and-aid set
+
+#### Scenario: Post-expand catalogs accept the legacy sibling and drop canonical `variable`
+- **WHEN** a disposable post-expand catalog has both physical river tables and `timeseries_store` on `hydro.hydro_run`
+- **THEN** publisher preflight succeeds if either river table exists and fails only when both are absent; copyback accepts a canonical table without `variable` and still requires `variable` on `_legacy`; QHH reset of a `legacy` run deletes `_legacy` rows only and summarize of that run reads `_legacy`; QHH reset of a `narrow` run deletes canonical rows only and summarize of that run reads canonical rows without fact-table `variable`; an unknown store value fails closed before any river DELETE or SELECT
+
+
 ### Requirement: Per-segment curve access SHALL be index- or segmentby-pruned on both chunk states, and every disappearing index SHALL pass the hygiene evidence gate
 
 For the largest registered river network (SHJ-NJ pin) and one small network, the per-segment forecast-series SQL SHALL show `river_segment_key` in an `Index Cond` on narrow uncompressed chunks and in segmentby batch pruning on narrow compressed chunks, with `Rows Removed by Filter / rows returned ≤ 10`, `shared hit ≤ 5000`, SQL warm P95 ≤ 300 ms over at least five warm samples, and the node-27 local single-source `forecast-series` warm P95 ≤ 500 ms. Because the narrow table omits `river_timeseries_valid_time_idx`, the identity-existence probe's interior-gap miss branch SHALL be measured before (legacy) and after (narrow) with `EXPLAIN (ANALYZE, BUFFERS)` and every coverage loss enumerated, as `timeseries-index-hygiene` requires.

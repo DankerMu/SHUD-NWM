@@ -2641,16 +2641,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1442 (group E). Both qhh smoke scripts own a registered
         # river_timeseries statement and had no rule at all, so they fell
         # through to the core-smoke fallback — which imports neither and asserts
-        # nothing about their SQL. One narrow rule each, one target each: the
-        # cleanup oracle is the suite that pins these files' SQL shapes. The
+        # nothing about their SQL. The cleanup oracle pins SQL shapes and the
+        # QHH owner now exercises catalog-driven reset/summary entrypoints.
         # wire-site invariant suite also scans them, but is not PR-selected for
         # scripts/** — see issue #1656.
         "scripts/summarize_qhh_smoke_results.py",
-        ("tests/test_river_ts_text_identity_cleanup.py",),
+        ("tests/test_river_ts_text_identity_cleanup.py", "tests/test_qhh_scripts_static.py"),
     ),
     PathTestRule(
         "scripts/reset_qhh_smoke_db.py",
-        ("tests/test_river_ts_text_identity_cleanup.py",),
+        ("tests/test_river_ts_text_identity_cleanup.py", "tests/test_qhh_scripts_static.py"),
     ),
     PathTestRule(
         # No same-name tests/test_node27_autopipeline.py exists, so without this

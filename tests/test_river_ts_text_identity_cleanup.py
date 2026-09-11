@@ -170,9 +170,9 @@ RIVER_TABLE = "hydro.river_timeseries"
 #   records that a parse finished, and run_key is not a segmentby column, so the
 #   probe cost a Seq Scan of every compressed chunk per tick. Any return to a
 #   non-zero count means a fact-table read came back to the tick.
-# * summarize_qhh_smoke_results.py 1 / reset_qhh_smoke_db.py 1 = one statement
-#   each; the reset one is the table NAME passed to its ``_delete`` helper,
-#   which is why the census counts bare mentions and not just SQL-shaped ones.
+# * summarize_qhh_smoke_results.py 2 / reset_qhh_smoke_db.py 2 = canonical
+#   and legacy branches; PREFIX matching includes the _legacy table name.
+#   Reset passes each table NAME to its ``_delete`` helper.
 # * seed_demo.py 5 = the seed INSERT + two verification counts + the two
 #   human-readable count LABELS.
 # * parser.py 4 = probe, window, DELETE, INSERT.
@@ -187,8 +187,8 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "services/tile_publisher/publisher.py": 2,
     "services/tile_publisher/forcing_copyback_backfill.py": 1,
     "scripts/node27_autopipeline.py": 0,
-    "scripts/summarize_qhh_smoke_results.py": 1,
-    "scripts/reset_qhh_smoke_db.py": 1,
+    "scripts/summarize_qhh_smoke_results.py": 2,
+    "scripts/reset_qhh_smoke_db.py": 2,
     "db/seeds/seed_demo.py": 5,
     "workers/output_parser/parser.py": 4,
     "tests/integration_helpers.py": 8,
@@ -1270,8 +1270,11 @@ def test_smoke_summary_counts_segments_and_filters_by_key() -> None:
         function="main",
         needle="hydro.river_timeseries",
     )
-    assert len(statements) == 1
-    sql = statements[0]
+    canonical = [sql for sql in statements if "hydro.river_timeseries_legacy" not in sql]
+    legacy = [sql for sql in statements if "hydro.river_timeseries_legacy" in sql]
+    assert len(canonical) == len(legacy) == 1
+    sql = canonical[0]
+    _assert_no_text_identity_predicate(legacy[0], "legacy summary", resolves_keys_inline=True)
 
     assert "count(DISTINCT river_segment_key) AS segment_count" in sql
     assert "WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)" in sql
@@ -1304,10 +1307,10 @@ def test_reset_smoke_db_delete_fragment_targets_the_run_key() -> None:
         needle="FROM hydro.hydro_run",
     )
     river_fragments = [fragment for fragment in fragments if fragment.startswith("run_key")]
-    assert len(river_fragments) == 1
-
-    assert river_fragments[0] == "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))"
-    _assert_no_text_identity_predicate(river_fragments[0], "reset fragment", resolves_keys_inline=True)
+    assert len(river_fragments) == 2
+    for fragment in river_fragments:
+        assert fragment == "run_key IN (SELECT run_key FROM hydro.hydro_run WHERE run_id = ANY(%s))"
+        _assert_no_text_identity_predicate(fragment, "reset fragment", resolves_keys_inline=True)
 
 
 def test_integration_helpers_delete_targets_the_run_key() -> None:

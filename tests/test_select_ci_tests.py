@@ -1868,6 +1868,12 @@ QHH_CYCLE_SCRIPT = "scripts/run_qhh_cycle.sh"
 QHH_CONTINUOUS_SCRIPT = "scripts/run_qhh_continuous.py"
 QHH_BACKEND_SMOKE_SCRIPT = "scripts/run_qhh_backend_smoke.sh"
 QHH_STATIC_TEST = "tests/test_qhh_scripts_static.py"
+
+
+@pytest.mark.parametrize("script", ["reset_qhh_smoke_db", "summarize_qhh_smoke_results"])
+def test_qhh_catalog_script_selects_runtime_owner(script: str) -> None:
+    assert QHH_STATIC_TEST in select_tests([f"scripts/{script}.py"], repo_root=Path("."))
+
 QHH_ENTRYPOINT_AUTHORITY_TEST = "tests/test_qhh_entrypoint_authority_invariant.py"
 PYTHON_ENV_TRUTH_TEST = "tests/test_python_environment_truth.py"
 TWO_NODE_DOCKER_ENV_TEST = "tests/test_two_node_docker_runbook_environment_invariant.py"

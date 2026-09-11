@@ -72,7 +72,7 @@
 
   **Preservation and deviations:** all thirteen raw inputs in both stores, five tile SQL strings, historical golden and forty-two other route-module functions remain identical. Direct invalid-store execution is zero SQL; API readiness/identity/store errors are one metadata SQL and success is three ordered statements. Initial new-test MIME expectation was corrected to the existing `application/x-protobuf`; mock-echo/duplicate-None assertions were removed without reducing routing/precedence coverage, and the newly required registry→MVT-scaling importer edge was added to its existing selector rule. Ruff, strict OpenSpec and preservation smoke pass. Production transition/deployment/EXPLAIN remains I7/I8.
 
-- [ ] 2.3b (I4b, #2208) `packages/common/display_coverage.py` river leg only: project `timeseries_store` from `candidate_runs` and compose the two rendered fact-row branches only inside `river_sample_rows`; leave station CTEs, key aggregation/reconstruction, overwrite guard and outer `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` unchanged. Verify: SQL shape/registry/golden oracles plus `tests/test_display_coverage*`, parallel refresh and CLI tests through one coverage-refresh verification path.
+- [x] 2.3b (I4b, #2208) `packages/common/display_coverage.py` river leg only: project `timeseries_store` from `candidate_runs` and compose the two rendered fact-row branches only inside `river_sample_rows`; leave station CTEs, key aggregation/reconstruction, overwrite guard and outer `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` unchanged. Verify: SQL shape/registry/golden oracles plus `tests/test_display_coverage*`, parallel refresh and CLI tests through one coverage-refresh verification path.
 
   **Suggested fixture level:** compact - one module and one coverage-refresh path; DML boundary and forcing station leg are explicit invariants.
 
@@ -80,7 +80,62 @@
 
   **Execution fixture:** `fixtures/I4b-2208.md` (compact) owns immutable station/rollup/upsert boundaries, named/all-runs capture and disposable-DB behavior, raw-registry cutover and frozen pre-transition fixture preparation. Parent validates on node27; production mixed-store/EXPLAIN and deployment remain I7/I8, not this pre-expand slice.
 
-- [ ] 2.4 (I5) Non-template surfaces: `services/tile_publisher/publisher.py` `_has_table` accepts both names during the transition; `services/tile_publisher/forcing_copyback_backfill.py` `required_columns` branches on store; `scripts/reset_qhh_smoke_db.py` and `scripts/summarize_qhh_smoke_results.py` render per store (reset clears the legacy table for legacy runs); `services/production_closure/scale_validation.py` `QUERY_TARGETS` and `scripts/node27_timeseries_compression_live_evidence.py` plan-shape fixtures branch on store (the autopipeline statistics guard is 3.1's, not this task's). Verify: targeted tests for each surface with legacy present/absent.
+  **Completed checkpoint evidence:** PR #2264 merged at `df480aa776aef5b9e6b51d15b76310e03c9e9c06` (reviewed head `8c28a9d6eb2c8776e998b03ecec0a16575ae585a`). node-27 private Python 3.11.15: 5011 pure + 80 realDB passed, 0 skipped. Capture unrendered/wrong-store mutants each 2 assertion-only failures then restore; DB opposite-store mutant 4 assertion-only failures then restore. Compact Round 1 (`correctness+test-evidence`, `integration`) and independent final review were clean. CI Unit Tests / SQL Migration Dry Run / Markdown Lint succeeded. Shared change stays active; no production activation.
+
+
+- [ ] 2.4 (I5, #1984) Non-template surfaces: `services/tile_publisher/publisher.py` `_has_table` accepts both names during the transition; `services/tile_publisher/forcing_copyback_backfill.py` `required_columns` branches on store; `scripts/reset_qhh_smoke_db.py` and `scripts/summarize_qhh_smoke_results.py` render per store (reset clears the legacy table for legacy runs); `services/production_closure/scale_validation.py` `QUERY_TARGETS` and `scripts/node27_timeseries_compression_live_evidence.py` plan-shape fixtures branch on store (the autopipeline statistics guard is 3.1's, not this task's). Verify: targeted tests for each surface with legacy present/absent.
+
+  **Suggested fixture level:** compact - branch logic is mechanical; risk is each surface's legacy-absent path. Agreed; five surfaces are review load, not an expanded trigger.
+
+  **Minimal mergeable slice:** first cut is publisher `_has_table` + copyback `required_columns` (same `services/tile_publisher/` owner). Smoke scripts and plan nails are the second cut if the QHH real-PG harness irreconcilably inflates the PR.
+
+  **Execution fixture:** `fixtures/I5-1984.md` (compact). Catalog-only store detection; pre-expand behavior byte-identical; publisher accepts canonical or `_legacy`; copyback columns follow catalog shape while discovery SQL stays unchanged; QHH reset/summarize target the run's physical table; plan nails keep the current default and add an explicit-store narrow sibling. Parent validates locally; disposable post-expand catalogs are authorized only when sqlite cannot express the catalog probe. Production mixed-store/EXPLAIN/deployment remain I7/I8.
+
+  Fixture level: compact
+  Change surface:
+  - `services/tile_publisher/publisher.py` q_down river presence check
+  - `services/tile_publisher/forcing_copyback_backfill.py` `required_tables` / `required_columns`
+  - `scripts/reset_qhh_smoke_db.py`, `scripts/summarize_qhh_smoke_results.py`
+  - `services/production_closure/scale_validation.py` `QUERY_TARGETS["hydro_map"]`
+  - `scripts/node27_timeseries_compression_live_evidence.py` curve/MVT `required_query_tokens`
+  Must preserve:
+  - Pre-expand table names, column sets, SQL, plan lines and `DELIVERY_SCHEMA_MISSING` / `BACKFILL_SCHEMA_MISSING` codes
+  - `_DISCOVER_BACKFILL_RUNS_SQL` and `_qdown_discovery_sql` bytes
+  - QHH census 1 mention / 0 aids on the pre-expand path; forcing deletes unchanged
+  - Default hydro_map plan still names migration-created indexes
+  Must add/change:
+  - Publisher succeeds if canonical or `_legacy` exists
+  - Copyback drops canonical `variable` only when `_legacy` is present
+  - QHH reset/summarize route by `timeseries_store` when the column exists
+  - Explicit-store narrow plan/token siblings named from spec indexes
+  Seams under test:
+  - Publisher neither / canonical-only / `_legacy`-only / both
+  - Copyback state-1 missing `variable` vs state-2 canonical-without-`variable`
+  - QHH state-1 SQL, state-2 per-store table, mixed reset isolation, invalid store
+  - Default vs narrow plan nails; live-evidence token sets; forcing tokens unchanged
+  Risk packs:
+  - Public API / CLI / script entry: selected - QHH scripts, copyback CLI, publisher preflight
+  - Config / project setup: not selected - no env template or setup change
+  - File IO / path safety / overwrite: selected - QHH `RUN_ROOT` writes stay inside the existing env root
+  - Schema / columns / units / field names: selected - river column sets and plan index names
+  - Auth / permissions / secrets: not selected - receipts must not contain DSN; no auth change
+  - Concurrency / shared state / ordering: not selected - no new shared mutable protocol
+  - Resource limits / large input / discovery: not selected - no new discovery bound
+  - Legacy compatibility / examples: selected - pre-expand catalog remains byte-identical
+  - Error handling / rollback / partial outputs: selected - existing schema-missing codes; invalid store fail-closed
+  - Release / packaging / dependency compatibility: not selected - no new dependency
+  - Documentation / migration notes: selected - activation remains I7; fixture records the split default
+  - Domain time-series identity/window: selected - river table/column names only
+  - PostgreSQL query behavior: not selected - no production EXPLAIN; disposable catalogs only if sqlite cannot express the probe
+  - Geospatial/CRS, SHUD/numerics, Slurm, provider ingestion: not selected
+  Required evidence:
+  - Publisher: canonical-only publishes; `_legacy`-only no longer schema-missing; neither present still `DELIVERY_SCHEMA_MISSING`
+  - Copyback: state-1 drop `variable` still `BACKFILL_SCHEMA_MISSING`; state-2 canonical without `variable` accepted; `_legacy` without `variable` missing; discovery SQL hash unchanged
+  - QHH: state-1 SQL/table names unchanged; legacy run hits `_legacy` only; narrow run hits canonical without `variable`; invalid store zero river mutation
+  - Plan nails: default hydro_map still migration-created; narrow sibling spec-named; live-evidence tokens per store; forcing tokens unchanged
+  Non-goals:
+  - Autopipeline statistics IN-list (3.1); decline ledger (4.4); parser writes (4.3); publisher/copyback discovery SQL routing; forcing renderer (I11); expand DDL (I7); production activation
+
 
 ## 3. Lifecycle lanes and governance (I6 — deploy before the expand migration)
 

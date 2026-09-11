@@ -212,7 +212,7 @@ class TilePublisher:
     def _publish_qdown_from_database(self, session: Session, cycle_id: str) -> PublishResult:
         if not _has_table(session, "hydro", "hydro_run"):
             raise PublishError("DELIVERY_SCHEMA_MISSING", "hydro.hydro_run is required for q_down publication.")
-        if not _has_table(session, "hydro", "river_timeseries"):
+        if not _has_qdown_river_table(session):
             raise PublishError(
                 "DELIVERY_SCHEMA_MISSING",
                 "hydro.river_timeseries is required for q_down publication.",
@@ -3096,6 +3096,12 @@ def _cycle_filter(cycle_id: str) -> dict[str, Any] | None:
 
 def _has_table(session: Session, schema: str, table_name: str) -> bool:
     return inspect(session.connection()).has_table(table_name, schema=schema)
+
+
+def _has_qdown_river_table(session: Session) -> bool:
+    return _has_table(session, "hydro", "river_timeseries") or _has_table(
+        session, "hydro", "river_timeseries_legacy"
+    )
 
 
 def _has_optional_table(session: Session, schema: str, table_name: str) -> bool:
