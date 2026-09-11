@@ -4454,3 +4454,11 @@ later-round catches core=259、rotated=270、phase=57、skipped=15。
 本单第二轮新增一个 test-evidence catch；后续两轮未引入新透镜，不能据此判断轮换收益。
 记录 deferral：keep/cut 仍待维护者决策，本次生产迁移授权不包含审核策略调整；
 维持现行 keep，不改座位或上限，不重写历史记录。
+
+### Revisit 2026-09-11（post PR #2253 / issue #1356）
+
+合入上游 #2250 记录后重新实测628行、619 merged、9 terminal；204个多轮样本，
+later-round catches core=259、rotated=270、phase=57、skipped=15。
+PR #2253 是一轮三席综合审核、零候选，独立终审零发现；不增加多轮样本或后轮catch。
+记录deferral：keep/cut仍待维护者的人类策略决策，本次独立bug修复授权不含策略调整。
+现行keep及座位上限不变；不据零边际catch缩减后续审核，也不改写历史不可归因记录。
