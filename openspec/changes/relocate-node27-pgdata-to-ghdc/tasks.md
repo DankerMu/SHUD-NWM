@@ -7,15 +7,15 @@ Fixture approval: `PgdataFixture` approved after the second bounded repair; B1-B
 
 ## 2. Implementation
 
-- [ ] 2.1 Implement explicit plan/prepare/copy/activate/rollback/release with safe persistent state, fencing and exact topology checks.
-- [ ] 2.2 Reuse existing container/evidence/filesystem primitives and prove full offline copy before rebind, without changing cold-installer semantics.
-- [ ] 2.3 Correct governance PGDATA attribution and document rollout configuration without changing the currently deployed default.
-- [ ] 2.4 Add targeted behavioral regressions and the isolated node-27 physical-copy/rollback oracle.
+- [x] 2.1 Implement explicit plan/prepare/copy/activate/rollback/release with safe persistent state, fencing and exact topology checks.
+- [x] 2.2 Reuse existing container/evidence/filesystem primitives and prove full offline copy before rebind, without changing cold-installer semantics.
+- [x] 2.3 Correct governance PGDATA attribution and document rollout configuration without changing the currently deployed default.
+- [x] 2.4 Add targeted behavioral regressions and the isolated node-27 physical-copy/rollback oracle.
 
 ## 3. Verification and delivery
 
-- [ ] 3.1 Run local lint, strict OpenSpec validation and actual read-only CLI smoke.
-- [ ] 3.2 Run node-27 focused tests and exact-image disposable copy/rebind/rollback/write-boundary proof; preserve production unchanged.
+- [x] 3.1 Run local lint, strict OpenSpec validation and actual read-only CLI smoke.
+- [x] 3.2 Run node-27 focused tests and exact-image disposable copy/rebind/rollback/write-boundary proof; preserve production unchanged.
 - [ ] 3.3 Complete independent high-risk review/verifier, final review, CI and PR evidence. Leave merge and production rollout human-gated.
 
 ## Risk triage
@@ -37,6 +37,12 @@ Public CLI actions and their observable source/container/unit effects; exact sha
 - Fixture repair B1-B3: reject activate/release from invalid predecessors; simulate a fresh process after stop/rename and lost ephemeral flock while durable unit fences/source Docker ID remain authoritative; read succeeds but a real ingest credential cannot connect/write even with explicit read-write intent before release; restore the exact original HBA only after the durable marker, and preserve stale-rollback refusal across a partial release.
 - Governance: new target PGDATA counted once on its observed root; old `/home` sample remains correct; unknown attribution is not fabricated.
 - Record commands, SHA and real output. Disposable proof is not live C1-C4/HDD performance or production relocation. Later rollout retains SQL1+20 P95<=300ms/buffers<=5000, API1+20 P95<=500ms, browser1+20 P95<2s, unchanged content and controlled-ingest/natural-tick gates. No silent SLO relaxation.
+
+Verification recorded before review:
+- `898ae126`: node-27 relocation/container/installer/recovery/governance/CI-selector suite, **856 passed** in 220.46s.
+- `7b315abf`: node-27 relocation unit + exact-image CLI oracle + shared container/installer/recovery suites, **122 passed** in 121.21s. Includes real warm/compressed reads, writer rejection, three fresh-process rollback interruptions, partial release with committed business write, and retained partial copy.
+- Local strict OpenSpec and changed-Python Ruff checks passed. Actual default CLI on Mac returned `mutation=false`, reported unavailable host tooling as a blocker, and created no workspace; the node-27 oracle separately exercised planning against a running disposable database.
+- No production prepare/copy/rebind or root provisioning was performed. User-owned capacity hold and OLD runtime pins remain; live workload/backup gates remain outside this PR.
 
 ## Explicit non-goals
 

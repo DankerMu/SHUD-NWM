@@ -251,14 +251,6 @@ of stale rollback after durable release, including partial release. An image
 primitive experiment alone is not CLI/state/oracle proof. No isolated result
 proves live C1–C4, HDD latency, ingest, or backup/disposal readiness.
 
-Initial verification is not final evidence: the first suite reported 782 passed
-and 3 failed, and the exact-image oracle failed at startup. In particular,
-image UID 1000 cannot initialize a fresh UID-1005-owned mode-0700 bind;
-the oracle must run as the measured operator/runtime identity rather than
-changing production ownership to the image account. Repairs require new
-recorded verification; no PASS or rollout authorization follows from these
-initial results.
-
 ### B. Later approved window: fresh admission and baseline
 
 The separately signed window must name the exact tooling SHA, source, new
