@@ -2218,6 +2218,132 @@ ssh -p 32099 nwm@210.77.77.27 \
      -printf "%TY-%Tm-%Td %TH:%TM %p\n" | sort | tail -20'
 ```
 
+#### Copyback batch mutex 与目录可穿越性（#2035）
+
+写侧（node-22）与读侧（node-27）是不同 uid、同一份 NFS，因此这个 mirror 有两条硬规则：
+
+1. **互斥**。所有会在 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 下 promote 目录树的写者
+   （publisher 的 q_down / run-products / canonical-precip 三条 lane、orchestrator 的
+   run-tree copyback、以及两个 backfill CLI）都先取
+   `$NHMS_OBJECT_STORE_COPYBACK_ROOT/.nhms-copyback-batch.lock` 上的排他 `flock`，
+   一直持有到本 batch 的 commit 或 rollback 返回。路径固定、**没有环境变量覆盖**：
+   放 `/tmp` 会被 systemd `PrivateTmp=true` / Slurm `job_container/tmpfs` 的私有
+   `/tmp` 拆成两个 inode，互斥静默失效。
+   - 锁文件 `0o600`、代码**从不 unlink**——这两条由代码直接强制
+     （`packages/common/copyback_guard.py` 的 `_LOCK_MODE`，以及整个模块里没有
+     任何 unlink 调用）。**「属主是写者本人」不是独立强制的不变量，而是推论**：
+     代码断言的是「锁文件属主 == copyback root 属主」和「当前 euid == 锁文件属主」，
+     现网所有写者恰好是同一个 uid，外来 uid 又在文件创建之前就被拒，两者才重合。
+   - 持有者被 kill 时**本机**内核会释放 flock，所以「锁文件存在」≠「锁被持有」。
+     但生产 copyback root 不在本机盘上：node-22 的 `/ghdc/data/nwm/object-store`
+     是 `ghdc:/home/ghdc` 的 **NFSv4.2** 挂载（2026-09-10 实测）。**进程**死照样
+     立刻释放；**整台主机**死不会——锁由服务端一直持有到该 client 的租约过期。
+   - 等待上限由 `NHMS_OBJECT_STORE_COPYBACK_LOCK_TIMEOUT_SECONDS` 控制，
+     **默认 900 秒**（一次 acquisition ≈ 2.2 GB / 62 MB/s ≈ 36 s；取锁次数与
+     900 s 的定法只写在 `packages/common/copyback_guard.py` 的
+     `DEFAULT_COPYBACK_LOCK_TIMEOUT_SECONDS` 注释里，那套算术偏保守，故意不回调）。
+     竞争是等待不是拒绝；
+     超时抛各 lane 自己的错误类型，canonical mirror 记一条 `failed` 的
+     `canonical_precip_mirror` receipt 后 cycle 继续，**绝不降级成无锁 promote**。
+     空值取默认，非数字/非正数是硬性配置拒绝。
+   - 所有写者必须同 uid（node-22 上是 `frd_muziyao`）；别的账号会 fail closed。
+     属主断言同时比对**当前 euid** 与 **copyback root 的属主**，并且外来 uid 在
+     `O_CREAT` 之前就被拒——两个方向都堵死，锁文件不会被别的账号「毒化」。
+     互斥只在单机内成立（跨主机不在本机制范围内）。
+   - **`NHMS_OBJECT_STORE_COPYBACK_ROOT` 必须由那个唯一的写者 uid 属主持有。**
+     条件是 **uid 相等**，不是「写者能写这个 root」：一个属主是别的账号、靠组位开放写
+     的 root（例如容器 uid 在补充组里）会被**拒绝，而不是共享**——锁文件的属主锚定在
+     root 的属主上。核查：`stat -c '%u %a %n' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"`
+     与写者的 `id -u` 对比；不相等则每次 copyback 都 fail closed。报错有两种形态，
+     都不是 timeout：
+     - **锁文件还不存在**、写者又不是 root 的属主 → 在创建之前就拒绝，报错里同时
+       给出两个 uid 和锁文件路径；
+     - **锁文件已存在且属主是别人** → `cannot acquire copyback batch lock <path>:
+       [Errno 13] Permission denied`，只有路径、没有 uid。这个 `Permission denied`
+       本身就是「属主不对」的信号；属主由下面的 `ls -ln <lock>` /
+       `stat -c '%u' <root>` 查出来。
+   - **锁文件卡住时怎么处置**（三种形态，只有一种该动）：
+     - **有活持有者**：`lsof <lock>` 或 `fuser -v <lock>` 打得出 pid → **不要动它**，
+       等它结束或去查那个 writer 为什么卡住。
+     - **属主是对的、本机查不到持有者、写者却仍然超时**：只会在 NFS root 上出现，
+       说明持锁的那台主机整个死了，锁要等服务端租约过期才释放。**同样不要动它**：
+       unlink 会让下一个 writer 去锁一个新 inode，互斥当场失效。等租约过期，或者
+       先去确认那台写者主机的状态——这不是「孤儿」，下面那条不适用。
+     - **属主不对的孤儿**：`ls -ln <lock>` 的属主 ≠
+       `stat -c '%u' "$NHMS_OBJECT_STORE_COPYBACK_ROOT"`，且没有任何进程持有 →
+       必须修，否则所有 writer 会永远 fail closed。
+       `sudo chown "$(stat -c '%u:%g' "$NHMS_OBJECT_STORE_COPYBACK_ROOT")" <lock>`
+       是无条件可用的一条；也可以直接 `rm -f <lock>` 让下一个 writer 重建——
+       **删除权限来自 copyback root 目录的写+执行位，不是锁文件的属主身份**
+       （POSIX unlink 语义），前提是这条路径上没有 sticky bit。2026-09-10 node-22
+       实测：`/ghdc` 755 root:root、`/ghdc/data` 777 root:root、`/ghdc/data/nwm`
+       与 `/ghdc/data/nwm/object-store` 都是 775 `frd_muziyao`(1103):`huser`(1078)，
+       整条链上**没有 sticky bit**，所以 gid 1078 的任何成员都能删，不必去找锁文件
+       属主的凭据。若哪天 `ls -ld` 在这条链上看到 `t`，就退回 `sudo chown`。
+
+       ```bash
+       ssh -p 32099 frd_muziyao@210.77.77.22 \
+         'L=/ghdc/data/nwm/object-store/.nhms-copyback-batch.lock;
+          ls -ln "$L"; stat -c "%u %n" /ghdc/data/nwm/object-store; fuser -v "$L" || echo "no holder"'
+       ```
+
+   - **`canonical_precip_mirror` 记了 `failed` receipt 怎么补**：没有任何东西会重试它。
+     吞异常的是 `_copyback_canonical_precip` 自己的 `except Exception`
+     （`publisher.py:1376`）：它不抛，直接返回一份 `status: "failed"` 的 summary，
+     `convert` 终态 hook 只是把这份 summary 写成 receipt，cycle 照常往下走。
+     hook 自己的 `except Exception`（`chain_forecast_execution.py:1046`）根本
+     见不到 copyback 失败——它兜的是 publisher 那个 `try:`（`publisher.py:1275`）
+     **之外**抛出的东西：`format_cycle_time`、`TilePublisher(...)` 构造，以及
+     `finally` 里 `release_copyback_batch_lock` 抛的 `OSError`
+     （`publisher.py:1411-1413` → `packages/common/copyback_guard.py:310-316`），
+     最后这个正是该 `try:` 自己的 `except` 抓不到的（`finally` 在它算完返回值之后才跑）。
+     失败的那个 cycle 的镜像**不会在下个 cycle 被补上**。唯一的补救是手工跑
+     backfill：
+
+     ```bash
+     ssh -p 32099 frd_muziyao@210.77.77.22 \
+       'cd /scratch/frd_muziyao/NWM &&
+        . infra/env/compute.scheduler-dbfree.env &&   # 同时带 OBJECT_STORE_ROOT 与 NHMS_OBJECT_STORE_COPYBACK_ROOT（见下方实测 receipt）
+        /scratch/frd_muziyao/NWM/.venv/bin/python \
+          -m scripts.canonical_precip_copyback_backfill \
+          --source-root "$OBJECT_STORE_ROOT" \
+          --copyback-root "$NHMS_OBJECT_STORE_COPYBACK_ROOT" --dry-run'
+     ```
+
+     `cd` 到仓库根是必须的（否则 `-m` 会 `ModuleNotFoundError` 退 1）。先看 dry-run 计划
+     （dry-run 不取锁、不写任何东西），确认无误后去掉 `--dry-run` 实跑。退出码：`0` 全成功、
+     `1` 跑完但有 `failed`、`2` 参数或 root 不可用——两个 root 必须都非空（空值会被
+     `resolve_roots` 当参数错误拒绝，退 2），所以只能 source 同时带这两个变量的
+     `compute.scheduler-dbfree.env`（`compute.scheduler-provider-refresh.env` 只有
+     `OBJECT_STORE_ROOT`）。
+
+     该文件不在版本管理里，所以**不能拿 `.example` 当证据**。2026-09-10 在 node-22
+     实读 `/scratch/frd_muziyao/NWM/infra/env/compute.scheduler-dbfree.env`
+     （`-rw-------` `frd_muziyao:huser`）确认两个变量都在：
+
+     ```
+     13:OBJECT_STORE_ROOT=/scratch/frd_muziyao/nhms-prod/object-store
+     15:NHMS_OBJECT_STORE_COPYBACK_ROOT=/ghdc/data/nwm/object-store
+     ```
+
+     同日全量扫描：带 `NHMS_OBJECT_STORE_COPYBACK_ROOT` 的活文件只有
+     `compute.host.env`、`compute.replay.env`、`compute.scheduler-dbfree.env` 三个。
+   - `services/orchestrator/retention.py` 只下钻 `root/<prefix>` 与 `root/runs`，
+     不枚举 root 级文件，所以这把锁对保留策略不可见。
+2. **可穿越性**。copyback 自己创建的每一级目录——**包括 copyback root 本身**——
+   都会被显式 `chmod 0o755`；`safe_fs` 传给 `mkdir` 的 `0o755` 会被进程 umask 收窄
+   （`umask 027` 下落成 `0o750`），而 `safe_fs` 按 #1513 的决定绝不事后 `chmod`。
+   **本调用没有创建的层级一律不动**。手工 bring-up shell 里跑 copyback 时不再需要
+   先 `umask 022`，但这条规则只覆盖 copyback 创建的层级，不修既有目录的历史模式。
+
+快速核查（node-27 读侧，用 display 账号真正读到字节才算数）：
+
+```bash
+ssh -p 32099 nwm@210.77.77.27 \
+  'stat -c "%a %n" /home/ghdc/nwm/object-store /home/ghdc/nwm/object-store/canonical &&
+   f=$(find /home/ghdc/nwm/object-store/canonical -type f | head -1); cat "$f" | wc -c'
+```
+
 ### 5.4 Published artifacts
 
 Display products, tiles, manifests, and logs live under `published/`:
