@@ -980,3 +980,63 @@ def test_native_execstart_configuration_drift_keeps_service_fenced(
         host.restore_units(state)
     assert host.units[DISPLAY]["ActiveState"] == "inactive"
     assert host.fence_path(DISPLAY).exists()
+
+
+def _primary_env_fixture(tmp_path: Path, monkeypatch):
+    service = "nhms-node27-resource-governance.service"
+    timer = "nhms-node27-resource-governance.timer"
+    host, state = _unit_fixture(tmp_path, monkeypatch, {service: ("inactive", "oneshot"), timer: ("active", "")})
+    path = _private(
+        tmp_path / "primary config.env",
+        f"NODE27_GOVERNANCE_PGDATA_ROOT={DEFAULTS['source_pgdata']}\nAUDIT_SETTING=original\n",
+    )
+    host.units[service]["Id"] = service
+    host.units[service]["Environment"] = f'"NODE27_RESOURCE_GOVERNANCE_ENV_FILE={path}" NODE27_UNIT_FLAG=original'
+    return host, state, service, timer, path
+
+
+def test_primary_environment_allows_bound_governance_release(tmp_path: Path, monkeypatch) -> None:
+    host, state, service, timer, path = _primary_env_fixture(tmp_path, monkeypatch)
+    state["units"] = host.units_snapshot(state["config"])
+    host.install_fences(state)
+    path.write_text(path.read_text().replace(DEFAULTS["source_pgdata"], DEFAULTS["target_pgdata"]))
+    host.units[service]["Environment"] = f'NODE27_UNIT_FLAG=original "NODE27_RESOURCE_GOVERNANCE_ENV_FILE={path}"'
+    state["stage"] = "release_intent"
+    state["writes_released"] = True
+    host.restore_units(state)
+    assert host.units[timer]["ActiveState"] == "active"
+    assert not host.fence_path(timer).exists()
+    assert not host.fence_path(service).exists()
+
+
+@pytest.mark.parametrize("drift", ("file-bytes", "binding", "unit-environment"))
+def test_primary_environment_drift_keeps_callers_fenced(tmp_path: Path, monkeypatch, drift: str) -> None:
+    host, state, service, timer, path = _primary_env_fixture(tmp_path, monkeypatch)
+    state["units"] = host.units_snapshot(state["config"])
+    host.install_fences(state)
+    if drift == "file-bytes":
+        path.write_text(path.read_text().replace("AUDIT_SETTING=original", "AUDIT_SETTING=changed"))
+    elif drift == "binding":
+        replacement = _private(tmp_path / "replacement.env", path.read_text())
+        host.units[service]["Environment"] = host.units[service]["Environment"].replace(str(path), str(replacement))
+    else:
+        host.units[service]["Environment"] = host.units[service]["Environment"].replace(
+            "NODE27_UNIT_FLAG=original", "NODE27_UNIT_FLAG=changed"
+        )
+    with pytest.raises(MigrationError):
+        host.restore_units(state)
+    assert host.units[timer]["ActiveState"] == "inactive"
+    assert host.fence_path(timer).exists()
+    assert host.fence_path(service).exists()
+
+
+def test_primary_environment_symlink_refuses_before_fencing(tmp_path: Path, monkeypatch) -> None:
+    host, state, service, timer, path = _primary_env_fixture(tmp_path, monkeypatch)
+    alias = tmp_path / "alias.env"
+    alias.symlink_to(path)
+    host.units[service]["Environment"] = host.units[service]["Environment"].replace(str(path), str(alias))
+    with pytest.raises(SafeFilesystemError):
+        host.units_snapshot(state["config"])
+    assert host.units[timer]["ActiveState"] == "active"
+    assert not host.fence_path(timer).exists()
+    assert not host.fence_path(service).exists()
