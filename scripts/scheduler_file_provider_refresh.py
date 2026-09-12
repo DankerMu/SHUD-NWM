@@ -981,10 +981,27 @@ def refresh_scheduler_file_providers(config: RefreshConfig, *, dry_run: bool) ->
                 ),
             ]
             if config.worker_registry_uri is not None:
+                # #1926: under dry_run the mirror publisher never runs, so
+                # `worker_registry_result` is still None and the shared
+                # `_provider_evidence` coalescing chain would bottom its
+                # `entry_count` out at 0 -- which `_validate_receipt`'s
+                # registry/mirror equality check then rejects as
+                # `receipt_provider_invalid`, folded by the caller to
+                # `primary_receipt_failed`.  The mirror is a byte-copy of the
+                # canonical registry, so its prospective count IS the
+                # registry's: take it from the registry evidence just built,
+                # never from the before-image and never from a literal.  The
+                # `not dry_run` lane keeps passing the real publisher result
+                # unchanged, including the postcommit sha equality check below.
+                worker_registry_evidence: Any = (
+                    {"entry_count": provider_evidence[0]["entry_count"]}
+                    if dry_run
+                    else worker_registry_result
+                )
                 worker_evidence = _provider_evidence(
                     "registry_worker_mirror",
                     {**(worker_registry_preimage or ProviderPreimage(False)).to_dict(), **worker_registry_before},
-                    worker_registry_result,
+                    worker_registry_evidence,
                 )
                 provider_evidence.append(worker_evidence)
                 if not dry_run and worker_evidence["after_sha256"] != provider_evidence[0]["after_sha256"]:
