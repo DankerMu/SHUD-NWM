@@ -243,7 +243,12 @@ def test_the_completeness_criterion_reads_no_fact_row_for_a_published_run(
     per-cycle handoff storm this criterion was rewritten to end.
     """
     connection, root, _store = published_run
-    _execute(connection, "DELETE FROM hydro.river_timeseries WHERE run_id = %s", (_RUN_ID,))
+    _execute(
+        connection,
+        "DELETE FROM hydro.river_timeseries "
+        "WHERE run_key = (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s)",
+        (_RUN_ID,),
+    )
     _execute(connection, "UPDATE hydro.hydro_run SET parsed_at = now() WHERE run_id = %s", (_RUN_ID,))
 
     assert autopipe._already_ingested_runs(
