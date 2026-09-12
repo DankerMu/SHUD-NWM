@@ -4541,3 +4541,14 @@ Phase 0.5 fixture review 三轮只读（spec-compliance+test-evidence）属 fixt
 本单不增加后轮 catch，不能据此推断轮换收益。
 记录 deferral：keep/cut 仍待维护者决策；本次目标 1 合并授权不含审核策略调整。
 现行 keep 与座位上限不变。
+
+### Revisit 2026-09-12（post PR #2288 / issue #2273）
+
+追加后实测 644 行、634 merged、10 terminal；209 个多轮样本，
+later-round catches core=269、rotated=270、phase=57、skipped=15。
+本单 high 一轮四席，无运行时阻塞发现；TE-2 的 ADR 检查缺口已补证据，计一个证据 catch。
+TE-1 为未来模板一致性的 PLAUSIBLE P2 note，非 blocking，不计 net catch；
+按 workflow 0.35 不另开 P2 修复轮次。最终头独立 gap sweep approve，CI green。
+本单不增加后轮样本，不能据此调整轮换；keep/cut 决策仍待维护者，
+记录 deferral：本次修复与合并授权不含审查策略调整。现行 keep、座位上限不变。
+共享 timeseries OpenSpec 保持 active，#1987 实机窗口与后续 epic tasks 未借此完成。
