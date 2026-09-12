@@ -4,8 +4,10 @@
 
 - Parent rollout: #1895; Epic: #1891.
 - Branch: `feat/issue-2224-origin-chunk-parity`.
-- Base master SHA: `a854b137c0e70b7ace2358b432f4c81a8c7d92a9`.
-- Implementation plus oracle-fix SHA:
+- Current included master SHA: `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb`.
+- Current round-1 closure candidate SHA:
+  `b63e7b75f557de40e2d45a1476e95cda50ecb489`.
+- Historical implementation plus first oracle-fix SHA:
   `27d4faeab9718f0a0f343d392f04871ed1d46808`.
 - Effective fixture and repair intensity: `high`.
 
@@ -161,9 +163,52 @@ requires selected parity and plan to stay unchanged. `_assert_shipping_role_orig
 creates NOSUPERUSER ingest/display roles, proves `current_user` and `rolsuper=false`,
 runs production exact-origin parity and structured plan as those roles, re-reads a
 recompression-created sibling, and keeps display INSERT/UPDATE/DDL at SQLSTATE
-42501. Local or disposable PASS is still not a production G1 PASS.
+42501. It models the shipping contract through hypertable ownership and application
+schema/table grants; it does not grant either role access to Timescale internal
+schemas or relations.
 
-After both the failed and passing runs, no owned disposable container, work root,
+## Round-1 closure oracle (2026-09-12)
+
+The first round-1 exact-SHA run at
+`91d419af6ab21510a92809b844bb3fe72a77eaad` executed both new proofs and then
+failed the existing repeated-convergence assertion:
+
+```text
+1 failed, 1 deselected
+assert again.outcome == "already_cold"
+observed: blocked
+```
+
+The failure exposed an over-strict first-reload guard, not an ACL or parity-proof
+failure: a successful recompression legitimately changes the compressed sibling,
+and a later direct replay can hold the old `CatalogChunk` while the durable origin
+OID/schema/name/window remains unchanged and the fresh group is already wholly on
+the target. The repair keeps every durable-origin drift fail-closed and permits a
+new sibling only for this no-persisted-preimage, complete-target, no-write replay.
+Source/mixed groups, durable drift, locked revalidation and persisted-intent replay
+still refuse the change.
+
+After that repair, exact SHA
+`b63e7b75f557de40e2d45a1476e95cda50ecb489` passed the same node-27 disposable
+command:
+
+```text
+oracle_candidate=b63e7b75f557de40e2d45a1476e95cda50ecb489
+python=3.11.15 candidate_import=PASS
+1 passed, 1 deselected in 9.75s
+identity_rc=0 pytest_rc=0 cleanup_rc=0
+oracle_cleanup=PASS
+production_checkout_unchanged=PASS
+production_container_running=PASS
+```
+
+This PASS includes the selected compressed-target value-sensitivity proof, the
+7200-row sibling-independence proof, structured exact-relation plans, both
+shipping-shaped non-superuser read paths, readonly deny-write, recompression-created
+sibling access, rollback/migration/recompression, idempotent replay and receipt
+generation. Local or disposable PASS is still not a production G1 PASS.
+
+After every failed and passing run, no owned disposable container, work root,
 temporary checkout or 55496 listener remained. No production database connection,
 census, installer, production relation movement or service/timer change occurred.
 No credential, DSN, signed URL or private environment value is included here.
