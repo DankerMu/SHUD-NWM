@@ -108,20 +108,31 @@ exhaustion, and no combination is unclassified.
 
 | order | verdict | condition | exit |
 |---|---|---|---|
-| 1 | `probe_failed` | the systemd query could not be executed or returned an error; or the refresh receipt is missing / unreadable / schema-invalid; or `ActiveState != active` while `InactiveEnterTimestamp` is empty or unparseable, leaving the dwell arithmetic undefined | non-zero |
-| 2 | `manifest_expired` | manifest age >= 168 h — the consumer is already fail-closed | non-zero |
+| 1 | `probe_failed` | the systemd query could not be executed or returned an error; or `ActiveState != active` while `InactiveEnterTimestamp` is empty or unparseable, leaving the dwell arithmetic undefined | non-zero |
+| 2 | `manifest_expired` | manifest age is **resolved** (D3b) and >= 168 h — the consumer is already fail-closed | non-zero |
 | 3 | `timer_stopped` | `ActiveState != active` **and** `now - InactiveEnterTimestamp` exceeds the stopped-dwell (D3a) | non-zero |
 | 4 | `timer_not_enabled` | `UnitFileState` is anything other than `enabled` (`disabled`, `linked`, `masked`, `static`, `not-found`) | non-zero |
 | 5 | `timer_not_scheduled` | timer is `active` but `NextElapseUSecRealtime` is empty, or `NEXT` is further out than the next-dwell threshold | non-zero |
-| 6 | `manifest_stale` | manifest age >= the manifest-age threshold (and < 168 h). Both manifest comparisons are at-or-over, never strictly-greater, so an age exactly equal to a threshold is already a finding | non-zero |
-| 7 | `ok` | none of the above | 0 |
+| 6 | `manifest_stale` | manifest age is **resolved** and >= the manifest-age threshold (and < 168 h). Both manifest comparisons are at-or-over, never strictly-greater, so an age exactly equal to a threshold is already a finding | non-zero |
+| 7 | `manifest_unavailable` | no manifest age could be resolved from `latest.json` **or** from any receipt scanned in the bounded history fallback (D3b) | non-zero |
+| 8 | `ok` | none of the above | 0 |
 
-Three ordering choices carry weight:
+Four ordering choices carry weight:
 
-- `probe_failed` is first so missing evidence can never fall through to healthy.
-  It also absorbs the one input on which the dwell arithmetic is undefined
-  (`inactive` with no parseable `InactiveEnterTimestamp`): fail closed rather
-  than guess.
+- `probe_failed` is first so unreadable **systemd** evidence can never fall
+  through to healthy. It also absorbs the one input on which the dwell
+  arithmetic is undefined (`inactive` with no parseable
+  `InactiveEnterTimestamp`): fail closed rather than guess. It deliberately no
+  longer absorbs an unresolvable manifest — see the next bullet and D3b.
+- `manifest_unavailable` sits **last before `ok`**, not first. An unresolvable
+  manifest says nothing about the timer, and grading it at precedence 1 masked
+  every timer verdict beneath it: one failed rehearsal receipt would hide a
+  genuinely stopped timer behind a generic `probe_failed` for as long as that
+  receipt stayed newest. The two evidence sources are independent, so they fail
+  independently — systemd unreadable is still precedence 1, manifest
+  unresolvable is its own non-zero verdict, and the timer signals grade normally
+  in between. Rows 2 and 6 are skipped, not defaulted, when the age is
+  unresolved: an absent number is never compared against a threshold.
 - `manifest_expired` outranks every timer verdict because it is the more severe
   fact — the consumer is already blocked — regardless of why the timer is idle.
 - `timer_stopped` does **not** carry an `enabled` predicate, and
@@ -149,9 +160,11 @@ be strictly under 168.
 
 The manifest signal is computed and recorded independently of the systemd
 signals, so the receipt still carries `manifest_age_hours` when systemd is
-unreadable (and the systemd fields when the receipt is unreadable). That is a
-statement about the **receipt's** completeness, not about the verdict: an
-unreadable evidence source always grades `probe_failed` per row 1.
+unreadable (and the systemd fields when the receipt is unreadable). Because the
+two sources are graded independently as well as recorded independently, each one
+has its own fail-closed verdict: unreadable systemd grades `probe_failed` (row
+1), an unresolvable manifest grades `manifest_unavailable` (row 7), and neither
+can mask the other's signal. No evidence failure of either kind reaches `ok`.
 
 ### D3a: `timer_stopped` needs a dwell, or routine operations become the alarm
 
@@ -172,6 +185,55 @@ maximal legitimate window plus slack stays quiet, while the 08-28 episode (six
 days stopped) trips on the very first tick past the dwell. Inside the dwell the
 lane is graded on its remaining signals; it is not silently `ok` if the manifest
 is also stale.
+
+### D3b: the manifest age is resolved with a bounded history fallback
+
+The manifest signal's source of record is the refresh runner's receipt — the
+`registry` provider's `after_generated_at`, located by name and never by index.
+The original design read exactly one file, the configured `latest.json`, and
+treated any failure to extract that field as `probe_failed` at precedence 1.
+That is wrong in a way the live lane reaches routinely: `latest.json` is
+overwritten by **every** run, including a run that fails before it assembles a
+provider list (the empty-`providers` terminal receipt of R17b is exactly this
+shape). One such run leaves the probe unable to read a manifest age until the
+next successful refresh — up to ~24 h on the daily cadence — and at precedence 1
+that generic verdict masked `timer_stopped` and `timer_not_enabled` for the whole
+window. The probe would have alarmed, but with the wrong fact, and the green
+facade this change exists to close would have been replaced by a noisy one.
+
+Resolution order, first success wins:
+
+1. The configured `latest.json`.
+2. The sibling `history/` directory of that file. The runner writes every
+   receipt there as `refresh_<YYYYmmddTHHMMSSZ>_<uuid12>.json`
+   (`scripts/scheduler_file_provider_refresh.py:1628`), so the fixed-width UTC
+   prefix makes a **lexical descending sort chronological** — no timestamp
+   parsing is needed to order the candidates, and no `mtime` is trusted.
+   Candidates are filtered to that filename shape, the directory listing is
+   capped at 200 entries, and at most the 10 newest are opened. Each read is
+   bounded and `O_NOFOLLOW` exactly as `latest.json` is.
+3. If neither yields a parseable `registry.after_generated_at`, the age is
+   unresolved and the verdict is `manifest_unavailable` (row 7).
+
+The fallback deliberately does **not** gate on the receipt's `outcome`. A
+receipt that carries a parseable `registry.after_generated_at` is reporting a
+manifest that really was published at that instant, whatever the run's terminal
+outcome was; a receipt that does not carry one is skipped whatever its outcome
+says. One predicate, applied uniformly, rather than a second vocabulary to keep
+in sync with the runner's. `dry_run` receipts are ordinary candidates for the
+same reason: a dry run leaves `after_generated_at` equal to the pre-image, which
+is the current manifest's real generation time.
+
+The receipt records which source answered, as a closed three-shape field
+`manifest_source`: `latest`, `history:<filename>`, or `unavailable`. That is the
+difference between "the lane is fine and `latest.json` is merely a failed
+rehearsal" and "nothing has published in a week", and it is the field an
+operator reads first when the verdict is `manifest_unavailable`.
+
+Scanning history costs at most 10 bounded reads of a directory the runner already
+caps, on a probe that runs hourly. It buys the thing the fallback exists for: a
+failed rehearsal no longer produces an alarm at all, because the previous
+successful receipt still answers the question.
 
 ### D4: The probe is structurally incapable of mutation, and runs from anywhere
 
@@ -196,10 +258,67 @@ its own bounded, no-follow, size-capped receipt read rather than importing
 
 CLI surface, fixed here so it is not invented during implementation:
 `node22_refresh_timer_health.py [--unit NAME] [--refresh-receipt PATH]
-[--health-receipt-root PATH] [--now ISO8601] [--json]`. Every flag has an env
-default; `--now` exists so tests can pin the clock; `--json` writes the verdict
-document to stdout in addition to the receipt. Exit status is the contract:
-0 for `ok`, non-zero otherwise.
+[--health-receipt-root PATH] [--now ISO8601] [--json]`. `--json` writes the
+verdict document to stdout in addition to the receipt. Exit status is the
+contract: 0 for `ok`, non-zero otherwise.
+
+Every flag has an env default **except `--now`**, which is CLI-only and has no
+environment seam at all. `--now` pins the clock, so an env default for it is a
+false-green vector: a `NHMS_REFRESH_HEALTH_NOW` inherited into the probe unit's
+environment — from a stray user-manager variable or a hand-edited drop-in —
+would make the probe grade a pinned past instant and report `ok` with exit 0 on
+the exact geometry this change exists to catch, silently and forever. Deleting
+the seam is strictly better than unsetting it in the unit file: an
+`UnsetEnvironment=` entry is a defence that has to be maintained in lockstep with
+the flag list and that also interacts with drop-in `Environment=` lines, whereas
+a flag that reads no environment cannot be poisoned by any environment. The
+thresholds and paths keep their env defaults — they are the operator's
+documented drop-in tuning surface.
+
+Be precise about what that buys, because the tempting stronger claim is false.
+The env surface splits into four kinds, and only the first two are hardened:
+
+- **The clock** — removed outright. No env seam exists.
+- **The thresholds** (`MAX_NEXT_DWELL_HOURS`, `MAX_MANIFEST_AGE_HOURS`,
+  `STOPPED_DWELL_HOURS`) — bounded at config time, each asserted strictly under
+  168. They move *where* the alarm line sits, within a range that cannot reach
+  the consumer's own fail-closed cliff, and an out-of-range value is refused
+  before any evidence is collected rather than grading `ok`.
+- **The target selectors** (`UNIT`, `REFRESH_RECEIPT`, `RECEIPT_ROOT`,
+  `SYSTEMCTL`) — **unbounded, and a poisoned value can absolutely produce `ok`**:
+  point `UNIT` at a healthy unrelated timer, or `SYSTEMCTL` at a script that
+  prints a healthy fixture, and the probe faithfully grades what it was pointed
+  at. These are not a defence and must not be described as one.
+- **The output switch** (`JSON`) — selects whether the verdict document is also
+  printed to stdout. It reaches neither the grading nor the target, and is listed
+  only so the classification is exhaustive rather than silently incomplete.
+
+The reason that is acceptable, where the clock seam was not, is the trust level.
+The selectors say *what to inspect and with what tool*; they do not change how
+collected signals are graded. Anyone able to set the probe unit's environment
+already runs as the same UID that owns the probe script, its unit file, and the
+timer itself — they can simply edit the probe. So the selectors sit at the same
+trust level as the code, and hardening them buys nothing real. The clock was
+different in kind: it changed the *grading* of honestly-collected evidence, and
+it had a plausible accident path — an inherited or copy-pasted variable — that
+required no attacker at all. The invariant this change actually holds is
+therefore about grading, not about targeting: **no probe-specific environment
+variable can make the probe misgrade the signals it did collect.**
+
+One implicit input is a named exception, recorded rather than claimed away:
+**`TZ`**. systemd renders most timestamp properties in the host's local zone, so
+the probe must interpret a zone token, and it resolves a non-UTC token against
+the running process's own zone. A `TZ` that differs from the emitting user
+manager's would shift every parsed instant uniformly and could move a dwell
+across a threshold — genuinely a misgrading of collected evidence. It is
+accepted, not defended, for three reasons: the probe and the systemd that
+emitted the token are the same host and the same user manager, so they share a
+zone by construction; there is no reliable way to make systemd emit a uniform
+zone, since `--timestamp=utc` was measured to convert only some properties (R8c);
+and `TZ` is a stdlib-wide input, not a surface this probe invents. What the
+change does owe is determinism, and R8c supplies it: the parse is pinned against
+hardcoded strings in both a UTC and a non-UTC zone, so the behaviour is asserted
+rather than incidental.
 
 ### D5: Dry-run mirror count comes from the prospective set, never a constant
 
@@ -308,19 +427,26 @@ Regression rows:
 | R2b | probe, `UnitFileState=disabled` (installer `--install` / `--rollback` terminal state), any `ActiveState` within dwell | `timer_not_enabled`, exit non-zero — never `ok` |
 | R3 | probe, enabled + inactive but inactive **less** than stopped-dwell (live #1104 window) | not `timer_stopped`; graded on remaining signals; `ok` only if manifest is also fresh |
 | R4 | probe, timer active, `NextElapseUSecRealtime` empty | `timer_not_scheduled`, exit non-zero |
+| R4b | probe, timer active, `NextElapseUSecRealtime` **present but unparseable** | `timer_not_scheduled`, exit non-zero — a distinct branch from R4's empty value, asserted separately |
 | R5 | probe, timer active, `NEXT` beyond the next-dwell threshold | `timer_not_scheduled`, exit non-zero |
 | R6 | probe, manifest age between the manifest-age threshold and 168 h | `manifest_stale`, exit non-zero |
 | R7 | probe, manifest age >= 168 h | `manifest_expired`, exit non-zero (distinct from R6) |
 | R7b | probe, timer stopped past dwell **and** manifest also stale | `manifest_expired` if >= 168 h, else `timer_stopped` — first-match-wins order is asserted, not left to the implementer |
 | R8 | probe, `systemctl` missing or exiting non-zero | `probe_failed`, exit non-zero, never `ok` |
 | R8b | probe, `ActiveState=inactive` with empty or unparseable `InactiveEnterTimestamp` | `probe_failed`, exit non-zero — dwell arithmetic undefined, fail closed |
-| R9 | probe, refresh receipt missing / unreadable / schema-invalid | `probe_failed`, exit non-zero, never `ok` |
-| R10 | config with either freshness threshold >= 168 | rejected at config time, non-zero |
+| R8c | timestamp parser, a literal `systemctl show` string carrying a **non-local** zone abbreviation, asserted without relying on the test host's own zone | parsed per the zone token, not per `.astimezone()` of the runner; `UTC`/`GMT`/`Z` read as UTC, any other token read as the emitting host's local zone. `systemctl --timestamp=utc` is **not** adopted: measured on node-22 (systemd 255) it converts `InactiveEnterTimestamp` but leaves `NextElapseUSecRealtime` in local time, so it yields a mixed-zone surface rather than a uniform one |
+| R9 | probe, `latest.json` missing / unreadable / schema-invalid / carrying no `registry` provider, **and** a newer-than-threshold history receipt resolves the age | the manifest age is taken from history; `manifest_source` is `history:<filename>`; the timer signals grade normally and a healthy lane grades `ok`, exit 0 |
+| R9b | probe, `latest.json` unresolvable **and** the timer is genuinely stopped past the dwell | `timer_stopped`, exit non-zero — never masked by a manifest-evidence verdict (the A1 regression) |
+| R9c | probe, `latest.json` unresolvable **and** no history candidate resolves an age | `manifest_unavailable`, exit non-zero, never `ok`; `manifest_source` is `unavailable` |
+| R9d | probe, history fallback bounds | directory listing capped at 200 entries and at most 10 candidates opened; each read bounded and `O_NOFOLLOW`; only `refresh_<UTC>_<uuid>.json` names considered; candidates ordered by lexical descending filename, never by `mtime` |
+| R10 | config with either freshness threshold >= 168, **or** a stopped-dwell outside its own asserted bounds | rejected at config time, non-zero — all three tunables are bounded, not two |
 | R11 | probe source scanned for `start\|stop\|enable\|disable\|restart\|daemon-reload` | zero hits |
+| R11b | probe env surface, enumerated | every environment variable the probe reads is classified into exactly one of the four kinds in D4 — removed (the clock), bounded-and-fail-closed (the three thresholds), target selector (`UNIT`, `REFRESH_RECEIPT`, `RECEIPT_ROOT`, `SYSTEMCTL`), or output switch (`JSON`). The asserted invariant is the grading one: **no probe-specific env variable can make the probe misgrade the signals it did collect** — the clock has no env seam, and every threshold is refused out of range before evidence is collected. Target selectors are explicitly *not* claimed to be a defence; they sit at the same UID and trust level as the probe script itself. `TZ` is the one named exception, accepted and recorded in D4 rather than defended, with R8c pinning the parse so the behaviour is deterministic. Each variable is exercised through its env path, not only through its flag |
 | R12 | probe run against the fake `systemctl`, every invocation recorded | only `show` and `list-timers` subcommands ever invoked |
 | R13 | probe source scanned for non-stdlib imports | zero hits (self-contained, D4) |
-| R14 | probe receipt written | parent dir private, file mode 0600, bounded size, required fields present, no env values other than the integer thresholds and unit name |
-| R15 | installer `--install` / `--enable` / `--rollback` | `nhms-compute-scheduler.timer` **and** `.service` enabled/active states byte-equal before and after; refresh timer/service states likewise unchanged |
+| R14 | probe receipt written | parent dir private, file mode 0600, bounded size, required fields present, no env values other than the integer thresholds and unit name. The field set is closed and includes `manifest_source`, whose value is exactly one of `latest`, `history:<filename>`, `unavailable` |
+| R14b | probe receipt write fails (short write, or an error mid-write) | fails closed with a non-zero exit **and** the previous good receipt is left intact — never truncated, never destroyed; the verdict and any evidence errors are printed to the journal before the process exits, since D2 makes the journal the alert channel |
+| R15 | installer `--install` / `--enable` / `--rollback` | the protected units are unchanged across the run, compared per unit **type**: for the two **timers** (`nhms-compute-scheduler.timer`, the refresh timer) both `UnitFileState` and `is-active` must be byte-equal before and after; for the two timer-driven **oneshot services** (`nhms-compute-scheduler.service`, the refresh service) only `UnitFileState` is compared. A oneshot's `is-active` legitimately flips on its own cadence — the compute scheduler every 5 minutes, the refresh service inside its 02:15-04:15Z window — so comparing it would make the assertion fire on a unit nobody touched, and an installer that aborts and rolls back on that false positive turns arming into a retry loop. `UnitFileState` is what "unchanged" means for a unit whose activity is driven by its timer |
 | R16 | dry-run, direct-grid + worker mirror, N models | `outcome=dry_run`, `reason=dry_run_complete`, `phase=complete`; registry and mirror `entry_count` both N |
 | R17 | dry-run boundaries: single model and N models | counts agree at 1 and at N; no literal 76 anywhere in the assertion |
 | R17b | dry-run over an **empty** model set, both paths | fails closed with `provider_invalid` — direct-grid at `:896-898`, non-direct-grid at `:961-962` (empty readiness). The runner catches the `RefreshError` and persists a terminal `outcome=failed` / `reason=provider_invalid` receipt with an empty `providers` list, which is correct: what is unreachable is a **successful zero-count `dry_run` receipt**, and neither guard may be relaxed to make one reachable |

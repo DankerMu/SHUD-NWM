@@ -7,10 +7,13 @@ file-provider refresh lane that records the timer's unit-file state, active
 state, next-elapse time, and the published manifest's age as four independent
 signals, grades them into exactly one verdict, writes a bounded receipt, and
 exits non-zero for every verdict other than healthy. The verdicts SHALL be
-evaluated in a fixed precedence order — unreadable evidence, then expired
-manifest, then stopped timer, then not-enabled timer, then unscheduled timer,
-then stale manifest — with the first matching condition winning and the healthy
-verdict reachable only when no other condition matches. The probe SHALL NOT
+evaluated in a fixed precedence order — unreadable systemd evidence, then
+expired manifest, then stopped timer, then not-enabled timer, then unscheduled
+timer, then stale manifest, then unresolvable manifest — with the first matching
+condition winning and the healthy verdict reachable only when no other condition
+matches. An unresolvable manifest age SHALL NOT mask any timer verdict, and the
+two manifest-age comparisons SHALL be skipped rather than defaulted when no age
+could be resolved. The probe SHALL NOT
 enable, disable, start, stop, restart, or reload any systemd unit, and SHALL NOT
 write any file under the provider store.
 
@@ -66,11 +69,43 @@ write any file under the provider store.
 #### Scenario: The probe fails closed
 
 - **WHEN** the systemd query cannot be executed or returns an error, or the
-  refresh receipt is missing, unreadable, or invalid, or the timer is not active
-  while reporting no parseable time at which it became inactive — leaving the
-  stopped-dwell comparison undefined
+  timer is not active while reporting no parseable time at which it became
+  inactive — leaving the stopped-dwell comparison undefined
 - **THEN** the probe returns a non-healthy verdict and a non-zero exit status
 - **AND** the healthy verdict is never produced as a fallback for missing evidence
+
+#### Scenario: A failed refresh receipt does not mask a dead timer
+
+- **WHEN** the latest refresh receipt cannot yield a published manifest's
+  generation time — it is missing, unreadable, schema-invalid, or carries no
+  registry provider, which is the shape a refresh run that fails before it
+  assembles its provider list leaves behind — and the refresh timer is in a
+  state that would otherwise grade as stopped or not enabled
+- **THEN** the probe returns the timer verdict, not an evidence verdict, so the
+  actionable fact is the one reported
+- **AND** the manifest-age comparisons are skipped rather than treated as
+  satisfied or violated
+
+#### Scenario: The manifest age falls back to receipt history
+
+- **WHEN** the latest refresh receipt cannot yield a generation time, but an
+  earlier receipt in the runner's bounded history directory can
+- **THEN** the probe resolves the manifest age from the most recent such
+  receipt, ordered by the fixed-width UTC timestamp their filenames carry
+- **AND** the receipt records which source answered, distinguishing the latest
+  receipt, a named history receipt, and no available source
+- **AND** the scan is bounded in both the number of directory entries considered
+  and the number of receipts opened, and each read refuses symlinks and is size-limited
+
+#### Scenario: No resolvable manifest age is its own verdict
+
+- **WHEN** neither the latest refresh receipt nor any receipt in the bounded
+  history scan yields a published manifest's generation time, and no
+  higher-precedence condition matches
+- **THEN** the probe returns a distinct unresolvable-manifest verdict and a
+  non-zero exit status
+- **AND** the healthy verdict is not reachable, and the recorded source is the
+  no-source value
 
 #### Scenario: The compute scheduler units are untouched
 

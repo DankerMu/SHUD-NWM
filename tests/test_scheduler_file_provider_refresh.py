@@ -1731,9 +1731,31 @@ def test_dry_run_over_empty_direct_grid_model_set_stays_fail_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config, _paths = _direct_grid_mirror_fixture(tmp_path, monkeypatch, models=[])
+    # Anchor the assertion to `:896-898` specifically. `:961-962` (empty
+    # readiness) produces a receipt of the IDENTICAL shape, so without this spy
+    # deleting the direct-grid guard would still pass this test: the run would
+    # simply fail one gate later, for a different reason, and nothing would
+    # notice. `precommit_provider_generation` is the very next statement after
+    # the guard and its FIRST act is `_registry_precommit_gate`, so "the gate
+    # was never invoked" is exactly "the guard at `:897` raised".
+    # (`precommit_provider_generation` itself is a closure local to
+    # `refresh_scheduler_file_providers`, so it cannot be patched directly;
+    # `_registry_precommit_gate` is the module-level name it reaches through.)
+    precommit_calls: list[tuple[object, ...]] = []
+    real_gate = refresh._registry_precommit_gate
+
+    def spy(*args: object, **kwargs: object) -> object:
+        precommit_calls.append(args)
+        return real_gate(*args, **kwargs)
+
+    monkeypatch.setattr(refresh, "_registry_precommit_gate", spy)
 
     receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
 
+    assert precommit_calls == [], (
+        "the direct-grid empty-set guard did not raise: execution reached the "
+        "precommit call below it, so this receipt proves a LATER gate, not `:897`"
+    )
     assert receipt["outcome"] == "failed", receipt
     assert receipt["reason"] == "provider_invalid", receipt
     assert receipt["providers"] == []
@@ -4072,6 +4094,101 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
             not line.startswith(("enable ", "disable ", "start ", "stop ", "daemon-reload"))
             for line in fake_trace.read_text().splitlines()
         )
+
+
+def _reload_failing_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
+    """A fake systemctl whose `daemon-reload` always fails.
+
+    Everything else answers the installer's read-only queries with the
+    all-quiet defaults and records the full argv, so the ERR trap's progress is
+    readable off the trace.
+    """
+    trace = tmp_path / "reload-fail-trace.log"
+    script = tmp_path / "systemctl-reload-fails"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> {trace}\n'
+        "shift\n"  # drop --user
+        "case \"$1\" in\n"
+        "  daemon-reload) exit 1 ;;\n"
+        "  is-enabled) printf \"disabled\\n\" ;;\n"
+        "  is-active) printf \"inactive\\n\" ;;\n"
+        "esac\n"
+        "exit 0\n"
+    )
+    script.chmod(0o755)
+    return script, trace
+
+
+def test_a_failing_daemon_reload_inside_the_install_trap_does_not_truncate_the_rollback(
+    tmp_path: Path,
+) -> None:
+    """`rollback_files` IS the `--install` ERR trap body (installer `:162`).
+
+    `set -E` made that trap live for the first time -- without it an ERR trap
+    set at top level is not inherited by function bodies, so a failing
+    `assert_scheduler_unchanged` exited 1 with no rollback at all.  Now that it
+    runs, `rollback_files`' final `daemon-reload` executes INSIDE the trap:
+    unguarded, a failing reload aborts the trap before `restore_refresh_state`
+    and `assert_scheduler_unchanged` ever run, which is a PARTIAL rollback --
+    strictly worse than the dead trap it replaced.
+
+    Assert the trap's downstream side effects, not the exit status: `set -e`
+    exits non-zero either way, so the exit code proves nothing here.
+    """
+    bash = _require_modern_bash()
+    root = Path(__file__).resolve().parents[1]
+    repo = tmp_path / "repo"
+    units = repo / "infra/systemd"
+    env_dir = repo / "infra/env"
+    units.mkdir(parents=True)
+    env_dir.mkdir(parents=True)
+    for name in (
+        "nhms-scheduler-file-provider-refresh.service",
+        "nhms-scheduler-file-provider-refresh.timer",
+    ):
+        shutil.copy2(root / "infra/systemd" / name, units / name)
+    env_file = env_dir / "compute.scheduler-provider-refresh.env"
+    env_file.write_text("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true\n")
+    env_file.chmod(0o600)
+    unit_dir = tmp_path / "units"
+    state_root = tmp_path / "install-state"
+    fake_systemctl, trace = _reload_failing_fake_systemctl(tmp_path)
+    environment = {
+        **os.environ,
+        "NHMS_SCHEDULER_REFRESH_REPO": str(repo),
+        "NHMS_SCHEDULER_REFRESH_UNIT_DIR": str(unit_dir),
+        "NHMS_SCHEDULER_REFRESH_INSTALL_STATE_ROOT": str(state_root),
+        "NHMS_SCHEDULER_REFRESH_SYSTEMCTL": str(fake_systemctl),
+    }
+
+    completed = subprocess.run(
+        [bash, str(root / "scripts/install_node22_scheduler_file_provider_refresh.sh"), "--install"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    lines = trace.read_text().splitlines()
+    reloads = [index for index, line in enumerate(lines) if line == "--user daemon-reload"]
+    # Two: the one that trips the trap, and the one inside `rollback_files`.
+    assert len(reloads) == 2, lines
+    tail = lines[reloads[-1] + 1 :]
+    assert "--user disable nhms-scheduler-file-provider-refresh.timer" in tail, (
+        "the failing daemon-reload aborted the ERR trap: `restore_refresh_state` "
+        f"never ran, so the rollback was partial. trace tail: {tail}"
+    )
+    assert "--user is-enabled nhms-compute-scheduler.timer" in tail, (
+        "the ERR trap never reached `assert_scheduler_unchanged`, so nothing "
+        f"re-checked the protected scheduler after the abort. trace tail: {tail}"
+    )
+    for unit in (
+        "nhms-scheduler-file-provider-refresh.service",
+        "nhms-scheduler-file-provider-refresh.timer",
+    ):
+        assert not (unit_dir / unit).exists(), f"{unit} was left installed"
 
 
 def _bash_major_version(executable: str) -> int | None:

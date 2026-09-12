@@ -1224,9 +1224,9 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
 | `is-enabled` | `systemctl --user is-enabled nhms-scheduler-file-provider-refresh.timer` | `enabled` | `disabled` / `masked` / `static` / `not-found`——重启或 reload 后不会自己回来 |
 | `is-active` | `systemctl --user is-active nhms-scheduler-file-provider-refresh.timer` | `active`（`SubState=waiting`） | `inactive` / `failed`——**不管 `is-enabled` 是什么**，都没有 tick 会发生 |
 | `list-timers` 的 `NEXT` | `systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --no-pager` | 具体时刻，且在 36 小时以内 | `-`（等价 `status` 里的 `Trigger: n/a`），或远得离谱 |
-| manifest 年龄 | 见下方 `jq` 命令（含 `|`，无法放进表格单元格） | 距今 < 120 小时 | ≥ 120 小时是预警，≥ 168 小时 consumer 已经 fail closed |
+| manifest 年龄 | 见下方 `jq` 命令（含管道符，无法放进表格单元格） | 距今 < 120 小时 | ≥ 120 小时是预警，≥ 168 小时 consumer 已经 fail closed；`jq` 压根解不出（receipt 缺失/坏掉/`providers` 为空）**同样是不合格**——探针会先回退到 `history/`，两路都解不出才报 `manifest_unavailable`，看探针 receipt 的 `manifest_source` 字段定位 |
 
-第四列的取值命令（表格单元格里的 `\|` 转义会被 `jq` 当成语法错误，所以单独成块）：
+第四列的取值命令（表格单元格里的转义反斜杠会被 `jq` 当成语法错误，所以单独成块）：
 
 ```bash
 jq -r '.providers[] | select(.name == "registry") | .after_generated_at' \
@@ -1258,15 +1258,22 @@ calendar event **不会**在重新 `start` 时补跑，所以既没有失败日�
 
 | 序 | verdict | 含义 |
 | --- | --- | --- |
-| 1 | `probe_failed` | systemd 查不动/报错，或 refresh receipt 缺失/读不出/schema 不符，或 `ActiveState != active` 但 `InactiveEnterTimestamp` 为空/不可解析（dwell 算术无定义）。证据缺失绝不落到健康 |
+| 1 | `probe_failed` | **systemd** 查不动/报错，或 `ActiveState != active` 但 `InactiveEnterTimestamp` 为空/不可解析（dwell 算术无定义）。只管 systemd 这一路证据——manifest 读不出**不**走这条 |
 | 2 | `manifest_expired` | manifest 年龄 ≥ 168 小时——consumer 已经 fail closed，比任何 timer 事实都严重 |
 | 3 | `timer_stopped` | `ActiveState != active` 且已停超过 stopped-dwell。不带 `enabled` 谓词：`disabled` 且停着同样报这条 |
 | 4 | `timer_not_enabled` | `UnitFileState` 不是 `enabled`。此刻恰好 active 也算——它熬不过一次 reload 或重启 |
 | 5 | `timer_not_scheduled` | timer `active`，但 `NextElapseUSecRealtime` 为空，或比 next-dwell 还远 |
 | 6 | `manifest_stale` | manifest 年龄 ≥ manifest-age 阈值（且 < 168）。两个 manifest 比较都是"等于即命中" |
-| 7 | `ok` | 以上都不命中 |
+| 7 | `manifest_unavailable` | `latest.json` 与 history 回退都解不出 manifest 年龄。**排在 `ok` 之前、所有 timer 判决之后**：解不出的 manifest 不能说明 timer 的任何事，所以不许遮住 `timer_stopped`/`timer_not_enabled`；但它仍是缺失的证据，所以也到不了 `ok` |
+| 8 | `ok` | 以上都不命中 |
 
-三个阈值均可用 env 覆盖，两个 freshness 阈值在 config 阶段硬断言严格小于 168：
+两路证据**独立定级**：systemd 读不动是第 1 条，manifest 解不出是第 7 条，互不遮蔽。
+年龄解不出时第 2、6 两条 manifest 比较是**跳过**，不是按 0 或按无穷大代入。
+
+三个阈值均可用 env 覆盖，**三个都**在 config 阶段硬断言严格小于 168——
+freshness 阈值 ≥ 168 永远赶不在 consumer fail closed 之前报，
+stopped-dwell ≥ 168 则意味着 timer 可以在 consumer 的整个预算里一直死着而不报
+`timer_stopped`，都是同一个绿色门面：
 
 - `NHMS_REFRESH_HEALTH_MAX_NEXT_DWELL_HOURS`（默认 36）
 - `NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS`（默认 120）
@@ -1291,8 +1298,22 @@ dwell 之内不是"静默放行"——其余信号照常定级，manifest 同时
 
 Receipt 落在 `/scratch/frd_muziyao/nhms-prod/workspace/refresh-timer-health/receipts/latest.json`，
 目录 0700、文件 0600，字段是封闭集合（`schema_version`、`generated_at`、`verdict`、
-四个原始信号加 `sub_state`/`last_trigger`、`manifest_age_hours`、三个阈值、被检查的 unit 名）——
-**不回显任何路径或其它 env 值**。
+四个原始信号加 `sub_state`/`last_trigger`、`manifest_age_hours`、`manifest_source`、
+三个阈值、被检查的 unit 名）——**不回显任何路径或其它 env 值**。
+
+`manifest_source` 是三形状的封闭值，记录到底是哪一路证据回答了 manifest 年龄：
+
+| 值 | 含义 |
+| --- | --- |
+| `latest` | 配置的 `latest.json` 直接解出了 `registry.after_generated_at` |
+| `history:<文件名>` | `latest.json` 解不出，由 `history/` 里这份 receipt 回答（只是文件名，不是路径） |
+| `unavailable` | 两路都解不出，对应 `manifest_unavailable` 判决 |
+
+判决是 `manifest_unavailable` 时，这个字段是第一个要看的。
+
+写 receipt 本身是 **write-temp + fsync + `os.replace`**：写失败既不会静默截断，
+也不会把上一份好 receipt 搞没。写不下去时进程非零退出，而 verdict 与证据错误
+在尝试写之前就已经进了 journal——journal 就是告警通道，receipt 写不成不能顺手把判决吃掉。
 
 **本条告警只在 node-22 本机**：不合格判决让
 `nhms-node22-refresh-timer-health.service` 进入 `failed`
@@ -1301,13 +1322,36 @@ Receipt 落在 `/scratch/frd_muziyao/nhms-prod/workspace/refresh-timer-health/re
 不是遗漏：它把"168 小时悬崖前完全不可见"换成了"任何上机的人几小时内可发现"，
 off-host 路由是另一条有自己认证与投递面的告警链路，另案处理。
 
-一个必须知道的后果：refresh 的 `latest.json` 若是 `failed`/refusal receipt，
-其 `providers` 为空数组，探针读不到 manifest 年龄，会每小时报一次 `probe_failed`。
-这是 fail-closed 的正确行为——处置是让 refresh 重新跑出一份成功 receipt，
-不是调探针。
+**manifest 年龄的取数顺序（有界 history 回退）**：refresh 的 `latest.json` 被**每一次**
+运行覆写，包括在拼出 provider 列表之前就失败、`providers` 为空数组的那种。
+所以探针先读 `latest.json`，读不出就回退到它旁边的 `history/`：
 
-安装与回滚（只动探针自己的两个 unit；脚本在每个动作前后断言
-`nhms-compute-scheduler.{timer,service}` 与两个 refresh unit 的 enabled/active 完全未变）：
+- 只考虑 runner 自己的文件名形状 `refresh_<YYYYmmddTHHMMSSZ>_<uuid12>.json`；
+- 因为前缀是定宽 UTC 时间戳，**按文件名倒序**就是时间倒序——不解析时间戳，
+  也**不信 `mtime`**（`mtime` 是文件系统的属性，不是运行的属性，rsync/恢复都会改它）；
+- 目录列举封顶 200 条（runner 自己的 `MAX_HISTORY = 32` 远在其下），最多打开最新的 10 份，
+  每份照样 `O_NOFOLLOW` + 尺寸封顶；
+- **不看 receipt 的 `outcome`**：带得出 `registry.after_generated_at` 就是候选，
+  `dry_run` receipt 也是普通候选（dry run 里该字段就等于当前 manifest 的真实生成时间）。
+
+效果：一次失败的演练不再产生告警，上一份成功 receipt 还能回答；
+而两路都解不出时才报 `manifest_unavailable`（`manifest_source=unavailable`）。
+处置是让 refresh 重新跑出一份成功 receipt，不是调探针。
+注意这条判决排在所有 timer 判决**之后**：以前它在第 1 位，一份失败 receipt
+能把真正停掉的 timer 遮一整天。
+
+安装与回滚（只动探针自己的两个 unit）。脚本在每个动作前后断言四个受保护 unit
+未变，但**按 unit 类型分别比**：
+
+| unit | 比什么 | 为什么 |
+| --- | --- | --- |
+| `nhms-compute-scheduler.timer`、`nhms-scheduler-file-provider-refresh.timer` | `UnitFileState` **和** `is-active` | timer 的两个字段在安装期间都该是静止的 |
+| `nhms-compute-scheduler.service`、`nhms-scheduler-file-provider-refresh.service` | 只比 `UnitFileState` | 这两个是 timer 驱动的 oneshot，`is-active` 本就会自己翻（compute scheduler 每 5 分钟一次，refresh 在 02:15-04:15Z 窗口内）。比它会在没人动过的 unit 上误报，而误报会触发 abort + 回退，把 arming 变成重试循环 |
+
+两个 installer（探针的和 refresh 自己的）都照这个口径。脚本都用 `set -Eeuo pipefail`：
+没有 `-E`，顶层的 ERR trap 不会被函数体继承，断言在函数里挂掉时脚本只会
+退 1 而 trap 根本不跑，回退等于不存在。
+
 
 ```bash
 scripts/install_node22_refresh_timer_health.sh --install    # 落 unit 文件，保持停用

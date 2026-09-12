@@ -2581,9 +2581,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # the env examples would otherwise select only the two-node runtime suite;
     # each is an exact additive rule so the runbook/env contract reddens on the
     # PR that rewrites the wiring.
+    # #2075 widened this row by one: `tests/test_env_templates.py` reads THIS
+    # runbook by path (`test_the_runbook_states_the_same_pinned_terminal_stage`
+    # asserts the pinned `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc`
+    # and `NHMS_REQUIRE_FORECAST_WARM_START=true` appear in it), so the
+    # README/runbook/template mutual-consistency guard must run on a
+    # runbook-only PR -- otherwise the drift that produced #2075 can re-enter
+    # through the document that is supposed to pin the value.
     PathTestRule(
         "docs/runbooks/current-production-ops.md",
-        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py"),
     ),
     PathTestRule(
         "infra/env/compute.example",
@@ -2744,9 +2751,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # `RandomizedDelaySec=30m` and `Persistent=false` (:3603-3604, :3633).
     # Both are outside the `#2173` glob `infra/systemd/nhms-node27-*.service`
     # (node-22 units), so neither row carries the sibling lane pin.
+    # #2146 widened this row by one: `tests/test_node22_refresh_timer_health.py`
+    # `read_text`s THIS unit too and asserts the probe unit's
+    # `UnsetEnvironment=` line is byte-equal to this one's -- node-22 is
+    # permanently DB-free and the probe must clear the same libpq selector set.
+    # Editing this service's selector list without editing the probe's would
+    # red that assertion, so the probe suite is a literal reader of this path.
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.service",
-        ("tests/test_scheduler_file_provider_refresh.py",),
+        (
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_node22_refresh_timer_health.py",
+        ),
     ),
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.timer",

@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -66,8 +67,13 @@ ENV_UNIT = "NHMS_REFRESH_HEALTH_UNIT"
 ENV_SYSTEMCTL = "NHMS_REFRESH_HEALTH_SYSTEMCTL"
 ENV_REFRESH_RECEIPT = "NHMS_REFRESH_HEALTH_REFRESH_RECEIPT"
 ENV_HEALTH_RECEIPT_ROOT = "NHMS_REFRESH_HEALTH_RECEIPT_ROOT"
-ENV_NOW = "NHMS_REFRESH_HEALTH_NOW"
 ENV_JSON = "NHMS_REFRESH_HEALTH_JSON"
+# There is deliberately NO env name for the clock: `--now` is CLI-only
+# (design D4).  An inherited or dropped-in value would pin the probe to a
+# past instant and grade the exact geometry this file exists to catch as
+# `ok`/exit 0, silently and forever.  A flag that reads no environment
+# cannot be poisoned by any environment, which is strictly better than an
+# `UnsetEnvironment=` list that has to be maintained in lockstep.
 ENV_MAX_NEXT_DWELL_HOURS = "NHMS_REFRESH_HEALTH_MAX_NEXT_DWELL_HOURS"
 ENV_MAX_MANIFEST_AGE_HOURS = "NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS"
 ENV_STOPPED_DWELL_HOURS = "NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS"
@@ -88,6 +94,20 @@ MAX_HEALTH_RECEIPT_BYTES = 8192
 MAX_SIGNAL_LENGTH = 256
 SYSTEMCTL_TIMEOUT_SECONDS = 30
 
+# Bounded history fallback (design D3b).  The refresh runner writes every
+# receipt to a `history/` sibling of `latest.json` as
+# `refresh_<YYYYmmddTHHMMSSZ>_<uuid12>.json`
+# (`scripts/scheduler_file_provider_refresh.py:611`), so the fixed-width UTC
+# prefix makes a lexical DESCENDING sort chronological -- no timestamp is
+# parsed and no `mtime` is trusted.  The runner caps that directory at
+# `MAX_HISTORY = 32`; the 200-entry listing cap is the probe's own
+# independent bound, comfortably above it, so an hourly watchdog can never
+# be made to walk an unbounded directory.
+HISTORY_DIRECTORY_NAME = "history"
+HISTORY_RECEIPT_NAME = re.compile(r"\Arefresh_\d{8}T\d{6}Z_[0-9a-f]{12}\.json\Z")
+MAX_HISTORY_ENTRIES_LISTED = 200
+MAX_HISTORY_CANDIDATES_OPENED = 10
+
 # systemd prints these for a timestamp it does not have.
 EMPTY_TIMESTAMPS = frozenset({"", "-", "n/a", "0"})
 
@@ -98,6 +118,15 @@ VERDICT_TIMER_STOPPED = "timer_stopped"
 VERDICT_TIMER_NOT_ENABLED = "timer_not_enabled"
 VERDICT_TIMER_NOT_SCHEDULED = "timer_not_scheduled"
 VERDICT_MANIFEST_STALE = "manifest_stale"
+VERDICT_MANIFEST_UNAVAILABLE = "manifest_unavailable"
+
+# Closed set for the receipt's `manifest_source` (design D3b): which of the
+# two evidence sources actually answered.  That is the difference between
+# "the lane is fine and `latest.json` is merely a failed rehearsal" and
+# "nothing has published in a week".
+MANIFEST_SOURCE_LATEST = "latest"
+MANIFEST_SOURCE_UNAVAILABLE = "unavailable"
+MANIFEST_SOURCE_HISTORY_PREFIX = "history:"
 
 
 class ConfigError(Exception):
@@ -143,9 +172,13 @@ def _positive_int(name: str, raw: str) -> int:
 def load_thresholds(env: dict[str, str] | None = None) -> Thresholds:
     """Resolve the three thresholds from the environment and validate them.
 
-    Both freshness thresholds must sit strictly under the consumer's 168-hour
-    bound: a threshold at or above it can never fire before the consumer has
-    already fail-closed, which is the whole gap this probe exists to close.
+    All THREE tunables must sit strictly under the consumer's 168-hour bound,
+    not just the two freshness ones.  A freshness threshold at or above it can
+    never fire before the consumer has already fail-closed; and a stopped-dwell
+    at or above it means a timer can sit dead for the consumer's entire budget
+    without ever grading `timer_stopped` -- the same green facade, reachable
+    through a drop-in.  Bounded at config time, so a bad value is a refusal
+    rather than a verdict.
     """
     source = os.environ if env is None else env
     thresholds = Thresholds(
@@ -165,6 +198,7 @@ def load_thresholds(env: dict[str, str] | None = None) -> Thresholds:
     for name, value in (
         (ENV_MAX_NEXT_DWELL_HOURS, thresholds.max_next_dwell_hours),
         (ENV_MAX_MANIFEST_AGE_HOURS, thresholds.max_manifest_age_hours),
+        (ENV_STOPPED_DWELL_HOURS, thresholds.stopped_dwell_hours),
     ):
         if value >= CONSUMER_MAX_MANIFEST_AGE_HOURS:
             raise ConfigError(
@@ -238,23 +272,32 @@ def _run_systemctl(systemctl: str, arguments: list[str]) -> str:
     return completed.stdout
 
 
-def collect_systemd_signals(*, systemctl: str, unit: str) -> dict[str, str]:
-    """Return the six raw ``systemctl show`` properties for ``unit``.
-
-    ``list-timers`` is queried as well, per the change's read surface: it is the
-    operator-facing rendering of the same schedule, and a timer subsystem that
-    cannot answer it is unreadable evidence.  Its text is not graded --- the
-    verdict's next-elapse signal is ``NextElapseUSecRealtime`` from ``show`` ---
-    and it is deliberately kept out of the receipt, whose field set is closed.
-    """
+def read_show_properties(*, systemctl: str, unit: str) -> dict[str, str]:
+    """Return the six raw ``systemctl show`` properties for ``unit``."""
     output = _run_systemctl(systemctl, ["show", unit, "-p", ",".join(SHOW_PROPERTIES)])
     properties: dict[str, str] = {name: "" for name in SHOW_PROPERTIES}
     for line in output.splitlines():
         key, separator, value = line.partition("=")
         if separator and key in properties:
             properties[key] = value.strip()
-    _run_systemctl(systemctl, ["list-timers", unit])
     return properties
+
+
+def query_timer_listing(*, systemctl: str, unit: str) -> None:
+    """Query ``list-timers``, the operator-facing rendering of the schedule.
+
+    It is part of the change's declared read surface and a timer subsystem that
+    cannot answer it is unreadable evidence, so a failure here still grades
+    ``probe_failed``.  But it is NOT graded on its own text --- the verdict's
+    next-elapse signal is ``NextElapseUSecRealtime`` from ``show`` --- and it is
+    deliberately kept out of the receipt, whose field set is closed.
+
+    It is called separately from ``read_show_properties`` on purpose: ``show``
+    must have already returned its properties to the caller, so that a failure
+    of this NON-GRADED call cannot blank the receipt's systemd fields.  The
+    operator still needs the four signals that WERE readable.
+    """
+    _run_systemctl(systemctl, ["list-timers", unit])
 
 
 # ---------------------------------------------------------------------------
@@ -284,12 +327,21 @@ def read_bounded_no_follow(path: Path, *, max_bytes: int) -> bytes:
 
 
 def read_manifest_generated_at(path: Path) -> datetime:
-    """Return the published manifest's ``generated_at`` from the refresh receipt.
+    """Return the published manifest's ``generated_at`` from a refresh receipt.
 
     The value of record is the canonical registry provider's
     ``after_generated_at`` --- the provider is located by name, never by index,
     so a receipt whose provider list is shaped differently fails closed instead
     of reading the wrong row.
+
+    Applied uniformly to ``latest.json`` and to every history candidate: one
+    predicate, so there is no second vocabulary to keep in sync with the
+    runner's.  In particular the receipt's ``outcome`` is deliberately NOT
+    consulted --- a receipt carrying a parseable ``after_generated_at`` reports
+    a manifest that really was published at that instant, whatever the run's
+    terminal outcome was, and a ``dry_run`` receipt is an ordinary candidate
+    because a dry run leaves the field equal to the current manifest's real
+    generation time.
     """
     try:
         content = read_bounded_no_follow(path, max_bytes=MAX_REFRESH_RECEIPT_BYTES)
@@ -324,6 +376,64 @@ def read_manifest_generated_at(path: Path) -> datetime:
     raise ProbeEvidenceError("refresh receipt carries no registry provider")
 
 
+def history_candidate_names(directory: Path) -> list[str]:
+    """Return the newest history filenames worth opening, newest first.
+
+    Ordering is a lexical DESCENDING sort of the filename, which is
+    chronological because the runner's name carries a fixed-width UTC prefix.
+    No timestamp is parsed and no ``mtime`` is trusted: ``mtime`` is a property
+    of the filesystem, not of the run, and a restore or an rsync rewrites it.
+    """
+    try:
+        scanner = os.scandir(directory)
+    except OSError:
+        return []
+    names: list[str] = []
+    try:
+        for entry in scanner:
+            names.append(entry.name)
+            if len(names) >= MAX_HISTORY_ENTRIES_LISTED:
+                break
+    except OSError:
+        return []
+    finally:
+        scanner.close()
+    shaped = sorted(
+        (name for name in names if HISTORY_RECEIPT_NAME.match(name)), reverse=True
+    )
+    return shaped[:MAX_HISTORY_CANDIDATES_OPENED]
+
+
+def resolve_manifest_generated_at(path: Path) -> tuple[datetime | None, str, list[str]]:
+    """Resolve the manifest's generation instant, first success wins (D3b).
+
+    Order: the configured ``latest.json``, then the ``history/`` sibling of that
+    file.  ``latest.json`` is overwritten by EVERY run, including one that fails
+    before it assembles a provider list, so a single failed rehearsal must not
+    leave the probe blind for a whole daily cadence.
+
+    Returns ``(instant or None, manifest_source, evidence errors)``.  The errors
+    are for the journal only --- they are deliberately NOT folded into the
+    systemd evidence error, because an unresolvable manifest is its own verdict
+    at precedence 7 and must never mask a timer verdict.
+    """
+    errors: list[str] = []
+    try:
+        return read_manifest_generated_at(path), MANIFEST_SOURCE_LATEST, errors
+    except (ProbeEvidenceError, OSError) as error:
+        errors.append(f"{MANIFEST_SOURCE_LATEST}: {error}")
+
+    history = path.parent / HISTORY_DIRECTORY_NAME
+    for name in history_candidate_names(history):
+        try:
+            generated_at = read_manifest_generated_at(history / name)
+        except (ProbeEvidenceError, OSError) as error:
+            errors.append(f"{MANIFEST_SOURCE_HISTORY_PREFIX}{name}: {error}")
+            continue
+        return generated_at, f"{MANIFEST_SOURCE_HISTORY_PREFIX}{name}", errors
+    return None, MANIFEST_SOURCE_UNAVAILABLE, errors
+
+
 # ---------------------------------------------------------------------------
 # Grading
 # ---------------------------------------------------------------------------
@@ -335,16 +445,23 @@ def grade(
     properties: dict[str, str],
     manifest_age_hours: float | None,
     thresholds: Thresholds,
-    evidence_error: str | None,
+    systemd_error: str | None,
 ) -> str:
     """Return exactly one verdict, first match wins.
 
     The order is fixed by decision D3 and is what makes the grading total:
     ``ok`` is a pure ``else`` reached only by falling through every failing
     condition, never by matching a positive predicate of its own.
+
+    The two evidence sources are independent, so they fail independently:
+    unreadable **systemd** is precedence 1, an unresolvable **manifest** is its
+    own verdict at precedence 7, and the timer signals grade normally in
+    between.  ``systemd_error`` therefore carries the systemd evidence failure
+    ONLY --- passing a manifest failure in here is the A1 regression, because
+    at precedence 1 it masks every timer verdict beneath it.
     """
-    # 1. Missing or undefined evidence can never fall through to healthy.
-    if evidence_error is not None or manifest_age_hours is None:
+    # 1. Unreadable systemd evidence can never fall through to healthy.
+    if systemd_error is not None:
         return VERDICT_PROBE_FAILED
 
     active_state = properties.get("ActiveState", "")
@@ -362,7 +479,9 @@ def grade(
         became_inactive = None
 
     # 2. The consumer is already fail-closed; that outranks every timer verdict.
-    if manifest_age_hours >= CONSUMER_MAX_MANIFEST_AGE_HOURS:
+    #    Skipped, never defaulted, when no age resolved: an absent number is
+    #    never compared against a threshold.
+    if manifest_age_hours is not None and manifest_age_hours >= CONSUMER_MAX_MANIFEST_AGE_HOURS:
         return VERDICT_MANIFEST_EXPIRED
 
     # 3. Idle past the dwell.  No `enabled` predicate here on purpose: a
@@ -391,9 +510,17 @@ def grade(
 
     # 6. Manifest freshness, graded independently of every systemd signal.
     #    At-or-over, never strictly-greater: an age exactly equal to the
-    #    threshold is already a finding.
-    if manifest_age_hours >= thresholds.max_manifest_age_hours:
+    #    threshold is already a finding.  Skipped, not defaulted, when no age
+    #    resolved.
+    if manifest_age_hours is not None and manifest_age_hours >= thresholds.max_manifest_age_hours:
         return VERDICT_MANIFEST_STALE
+
+    # 7. Neither `latest.json` nor the bounded history scan could answer.  Last
+    #    before `ok`, not first: an unresolvable manifest says nothing about the
+    #    timer, so it must not mask a timer verdict -- but it is still evidence
+    #    the probe does not have, so it never reaches `ok` either.
+    if manifest_age_hours is None:
+        return VERDICT_MANIFEST_UNAVAILABLE
 
     return VERDICT_OK
 
@@ -414,6 +541,7 @@ def build_receipt(
     verdict: str,
     properties: dict[str, str],
     manifest_age_hours: float | None,
+    manifest_source: str,
     thresholds: Thresholds,
 ) -> dict[str, Any]:
     """Assemble the verdict document.
@@ -421,6 +549,8 @@ def build_receipt(
     The field set is closed on purpose: the raw signals, the three integer
     thresholds and the inspected unit name.  No path, no other environment
     value, nothing that would turn an ops receipt into a configuration leak.
+    ``manifest_source`` is a BASENAME at most (`history:<filename>`), never a
+    path, for the same reason.
     """
     return {
         "schema_version": RECEIPT_SCHEMA_VERSION,
@@ -434,6 +564,7 @@ def build_receipt(
         "next_elapse": _clip(properties.get("NextElapseUSecRealtime", "")),
         "last_trigger": _clip(properties.get("LastTriggerUSec", "")),
         "manifest_age_hours": manifest_age_hours,
+        "manifest_source": _clip(manifest_source),
         "max_next_dwell_hours": thresholds.max_next_dwell_hours,
         "max_manifest_age_hours": thresholds.max_manifest_age_hours,
         "stopped_dwell_hours": thresholds.stopped_dwell_hours,
@@ -461,23 +592,71 @@ def make_private_directory(path: Path) -> None:
             raise
 
 
+def _write_all(descriptor: int, content: bytes) -> None:
+    """Write every byte or fail closed.
+
+    ``os.write`` is allowed to write fewer bytes than it was given.  A single
+    unchecked call therefore truncates the receipt silently, which on a
+    watchdog produces a shorter lie instead of a visible failure.
+    """
+    offset = 0
+    while offset < len(content):
+        written = os.write(descriptor, content[offset:])
+        if written <= 0:
+            raise ProbeEvidenceError(
+                f"probe receipt write made no progress at byte {offset} of {len(content)}"
+            )
+        offset += written
+
+
 def write_receipt(root: Path, receipt: dict[str, Any]) -> Path:
-    """Write the receipt 0600 under a 0700 root, refusing a symlinked target."""
+    """Write the receipt 0600 under a 0700 root, durably and non-destructively.
+
+    Write-temp, ``fsync``, then ``os.replace``: a failed or partial write must
+    neither truncate the receipt nor destroy the previous good one, because on
+    this lane the previous receipt is the only durable evidence there is.
+    ``latest.json`` is ``lstat``-checked first --- ``os.replace`` would happily
+    overwrite a symlink placed there, and that path must be refused, not
+    followed.
+    """
     make_private_directory(root)
     content = (json.dumps(receipt, sort_keys=True) + "\n").encode()
     if len(content) > MAX_HEALTH_RECEIPT_BYTES:
         raise ProbeEvidenceError(f"probe receipt exceeds {MAX_HEALTH_RECEIPT_BYTES} bytes")
     target = root / "latest.json"
+    try:
+        status = os.lstat(target)
+    except FileNotFoundError:
+        pass
+    else:
+        if not stat.S_ISREG(status.st_mode):
+            raise ProbeEvidenceError(f"probe receipt target is not a regular file: {target}")
+    staged = root / f"latest.json.{os.getpid()}.partial"
     descriptor = os.open(
-        target,
+        staged,
         os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
         0o600,
     )
     try:
         os.fchmod(descriptor, 0o600)
-        os.write(descriptor, content)
-    finally:
+        _write_all(descriptor, content)
+        os.fsync(descriptor)
+    except BaseException:
         os.close(descriptor)
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        raise
+    os.close(descriptor)
+    try:
+        os.replace(staged, target)
+    except BaseException:
+        try:
+            os.unlink(staged)
+        except OSError:
+            pass
+        raise
     return target
 
 
@@ -511,8 +690,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--now",
-        default=os.environ.get(ENV_NOW) or "",
-        help=f"pin the clock to an ISO-8601 instant with a timezone (env {ENV_NOW})",
+        default="",
+        help=(
+            "pin the clock to an ISO-8601 instant with a timezone. CLI-only "
+            "with NO environment default, by design: a pinned past instant "
+            "would grade a stopped timer as healthy, so this input must be "
+            "impossible to inherit"
+        ),
     )
     parser.add_argument(
         "--json",
@@ -543,32 +727,40 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     systemctl = os.environ.get(ENV_SYSTEMCTL) or DEFAULT_SYSTEMCTL
-    evidence_errors: list[str] = []
+    systemd_errors: list[str] = []
 
+    # `show` first, and its result is held before `list-timers` is attempted:
+    # a failure of that NON-GRADED call must not blank the receipt's systemd
+    # fields.
     properties: dict[str, str] = {name: "" for name in SHOW_PROPERTIES}
     try:
-        properties = collect_systemd_signals(systemctl=systemctl, unit=arguments.unit)
+        properties = read_show_properties(systemctl=systemctl, unit=arguments.unit)
     except ProbeEvidenceError as error:
-        evidence_errors.append(str(error))
+        systemd_errors.append(str(error))
+    try:
+        query_timer_listing(systemctl=systemctl, unit=arguments.unit)
+    except ProbeEvidenceError as error:
+        systemd_errors.append(str(error))
 
     # The manifest signal is computed independently of the systemd signals, so
     # the receipt still carries an age when systemd is unreadable and still
-    # carries the systemd fields when the receipt is unreadable.  That is a
-    # statement about the receipt's completeness only: an unreadable source
-    # always grades `probe_failed`.
+    # carries the systemd fields when the receipt is unreadable.  The two also
+    # GRADE independently: unreadable systemd is `probe_failed` (row 1), an
+    # unresolvable manifest is `manifest_unavailable` (row 7), and neither can
+    # mask the other's signal.
     manifest_age_hours: float | None = None
-    try:
-        generated_at = read_manifest_generated_at(Path(arguments.refresh_receipt))
+    generated_at, manifest_source, manifest_errors = resolve_manifest_generated_at(
+        Path(arguments.refresh_receipt)
+    )
+    if generated_at is not None:
         manifest_age_hours = round((now - generated_at).total_seconds() / 3600.0, 4)
-    except (ProbeEvidenceError, OSError) as error:
-        evidence_errors.append(str(error))
 
     verdict = grade(
         now=now,
         properties=properties,
         manifest_age_hours=manifest_age_hours,
         thresholds=thresholds,
-        evidence_error="; ".join(evidence_errors) if evidence_errors else None,
+        systemd_error="; ".join(systemd_errors) if systemd_errors else None,
     )
     receipt = build_receipt(
         now=now,
@@ -576,8 +768,19 @@ def main(argv: list[str] | None = None) -> int:
         verdict=verdict,
         properties=properties,
         manifest_age_hours=manifest_age_hours,
+        manifest_source=manifest_source,
         thresholds=thresholds,
     )
+
+    # D2 makes the journal the alert channel, so the verdict and every evidence
+    # error go to it BEFORE the receipt is attempted.  A receipt failure must
+    # not also swallow the verdict.
+    # Manifest errors are journalled even when history answered: "`latest.json`
+    # was a failed rehearsal" is a fact the operator wants, and it is precisely
+    # the fact that used to be reported as `probe_failed`.
+    for message in systemd_errors + manifest_errors:
+        print(f"node22-refresh-timer-health: {message}", file=sys.stderr)
+    print(f"node22-refresh-timer-health: verdict={verdict}", file=sys.stderr)
 
     try:
         write_receipt(Path(arguments.health_receipt_root), receipt)
@@ -589,12 +792,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.json:
         print(json.dumps(receipt, sort_keys=True))
-    if verdict != VERDICT_OK:
-        for message in evidence_errors:
-            print(f"node22-refresh-timer-health: {message}", file=sys.stderr)
-        print(f"node22-refresh-timer-health: verdict={verdict}", file=sys.stderr)
-        return 1
-    return 0
+    return 0 if verdict == VERDICT_OK else 1
 
 
 if __name__ == "__main__":

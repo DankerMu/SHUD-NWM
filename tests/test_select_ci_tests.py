@@ -531,8 +531,14 @@ def test_node27_unit_files_select_their_owner_suites(unit: str, owners: frozense
 # outside the `#2173` glob `infra/systemd/nhms-node27-*.service`, so neither
 # owes the sibling lane pin.
 NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
+    # #2146: the `.service` gained a SECOND literal reader --
+    # `tests/test_node22_refresh_timer_health.py` asserts the probe unit's
+    # `UnsetEnvironment=` line is byte-equal to this one's.
     "infra/systemd/nhms-scheduler-file-provider-refresh.service": frozenset(
-        {"tests/test_scheduler_file_provider_refresh.py"}
+        {
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_node22_refresh_timer_health.py",
+        }
     ),
     "infra/systemd/nhms-scheduler-file-provider-refresh.timer": frozenset(
         {"tests/test_scheduler_file_provider_refresh.py"}
@@ -2682,8 +2688,13 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
         "docs/runbooks/failed-basin-retry.md",
     ):
         assert select_tests([path], repo_root=Path(".")) == [], f"{path} must stay selector-empty"
+    # #2075 widened this EXACT set by one: `tests/test_env_templates.py` is a
+    # literal reader of this runbook (it asserts the pinned terminal stage
+    # appears there), so a runbook-only PR must run the README/runbook/template
+    # consistency guard as well as the deployment contract.
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
-        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST
+        "tests/test_env_templates.py",
+        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
 
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
@@ -5469,7 +5480,8 @@ def test_select_tests_ignores_docs_only_changes() -> None:
     # so a runbook-only change now selects that focused suite; other `docs/**`
     # changes still select nothing.
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
-        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST
+        "tests/test_env_templates.py",
+        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
     assert select_tests(["docs/runbooks/other-runbook.md"], repo_root=Path(".")) == []
 
@@ -5917,8 +5929,10 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # module-scope importers plus the accumulated meta-guard.
         ("tests/test_orchestration_chain.py", "4"),
         # #1684 EVID-05/F: the gateway rollout runbook is an exact rollout
-        # owner selecting exactly one focused suite — still non-collapsed.
-        ("docs/runbooks/current-production-ops.md", "1"),
+        # owner selecting focused suites — still non-collapsed. #2075 added a
+        # second reader (`tests/test_env_templates.py` asserts the pinned
+        # terminal stage appears in this runbook), so the count is 2.
+        ("docs/runbooks/current-production-ops.md", "2"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the

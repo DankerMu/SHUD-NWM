@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# `-E` is load-bearing: without it an ERR trap set at top level is NOT inherited
+# by function bodies, so `assert_scheduler_unchanged` failing inside a function
+# exits 1 without ever running the trap that is supposed to restore state.
+# Verified empirically; do not drop it.
+set -Eeuo pipefail
 
 repo=${NHMS_SCHEDULER_REFRESH_REPO:-/scratch/frd_muziyao/NWM}
 unit_dir=${NHMS_SCHEDULER_REFRESH_UNIT_DIR:-$HOME/.config/systemd/user}
@@ -42,10 +46,30 @@ unit_state() {
   printf '%s\t%s\n' "${enabled:-not-found}" "${active:-inactive}"
 }
 
+# The compute scheduler's `.service` is a TIMER-DRIVEN ONESHOT: it activates on
+# its own cadence (every 5 minutes) and goes inactive again, so its `is-active`
+# is not a property this installer can hold still.  Comparing it would abort on
+# a unit nobody touched, and an installer that rolls back on that false positive
+# turns arming into a retry loop.  `UnitFileState` is what "unchanged" means for
+# such a unit; the `.timer` above it is still compared on both fields.
+# (Design matrix R15 -- the same split the probe installer applies.)
+unit_file_state() {
+  local unit=$1
+  local enabled
+  enabled=$($systemctl_bin --user is-enabled "$unit" 2>/dev/null || true)
+  printf '%s\n' "${enabled:-not-found}"
+}
+
+scheduler_state() {
+  printf '%s%s' \
+    "$(unit_state nhms-compute-scheduler.timer)" \
+    "$(unit_file_state nhms-compute-scheduler.service)"
+}
+
 assert_scheduler_unchanged() {
   local before after
   before=$(<"$state_root/scheduler.before")
-  after="$(unit_state nhms-compute-scheduler.timer)$(unit_state nhms-compute-scheduler.service)"
+  after="$(scheduler_state)"
   [[ "$before" == "$after" ]]
 }
 
@@ -110,7 +134,12 @@ rollback_files() {
       rm -f "$unit_dir/$unit"
     fi
   done
-  $systemctl_bin --user daemon-reload
+  # `|| true`: this runs inside the `--install` ERR trap body, and a failing
+  # daemon-reload must not abort the trap before it reaches
+  # `restore_refresh_state` and `assert_scheduler_unchanged` -- a partial
+  # rollback is worse than none.  Same guard as the probe installer's
+  # `remove_probe_units`.
+  $systemctl_bin --user daemon-reload || true
 }
 
 assert_refresh_service_inactive
@@ -123,9 +152,7 @@ if [[ "$action" == --install ]]; then
     exit 2
   fi
   [[ $(grep -Ec '^NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true$' "$env_file") -eq 1 ]]
-  printf '%s%s' \
-    "$(unit_state nhms-compute-scheduler.timer)" \
-    "$(unit_state nhms-compute-scheduler.service)" > "$state_root/scheduler.before"
+  scheduler_state > "$state_root/scheduler.before"
   {
     unit_state "$timer"
     unit_state "$service"
