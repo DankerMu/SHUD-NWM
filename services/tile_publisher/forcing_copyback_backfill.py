@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from packages.common.copyback_guard import CopybackLockError, copyback_batch_lock
 from packages.common.object_store import LocalObjectStore, ObjectStoreError
 from packages.common.redaction import redact_payload
+from packages.common.river_ts_render import render_river_ts_sql
 from packages.common.safe_fs import (
     SafeFilesystemError,
     directory_identity_no_follow,
@@ -51,7 +52,28 @@ _COUNT_FIELDS = (
     "copied_count",
     "failure_count",
 )
-_DISCOVER_BACKFILL_RUNS_SQL = """
+def _backfill_discovery_source_template(store: str) -> str:
+    if store not in {"legacy", "narrow"}:
+        raise ValueError(f"Unsupported river timeseries store: {store}")
+    return f"""
+        SELECT rt.run_key
+        FROM hydro.river_timeseries rt
+        JOIN hydro.hydro_run authority ON authority.run_key = rt.run_key
+        WHERE authority.timeseries_store = '{store}'
+          -- 000047's ORDERBY batch filter, not a segmentby index pushdown.
+          -- transitional compressed-chunk pushdown aid, remove with #1342
+          AND rt.variable = 'q_down'
+          AND rt.variable_e = 'q_down'
+          AND rt.value IS NOT NULL
+    """
+
+
+_BACKFILL_FACT_SOURCE = "\nUNION ALL\n".join(
+    render_river_ts_sql(_backfill_discovery_source_template(store), store).sql
+    for store in ("legacy", "narrow")
+)
+
+_DISCOVER_BACKFILL_RUNS_SQL = f"""
     SELECT
            h.run_id,
            h.status,
@@ -68,34 +90,11 @@ _DISCOVER_BACKFILL_RUNS_SQL = """
     LEFT JOIN met.forcing_version fv
       ON fv.forcing_version_id = h.forcing_version_id
     WHERE h.status IN ('succeeded', 'parsed', 'published')
-      -- #1442: the run's identity arrives through the correlated hydro_run row,
-      -- so the probe correlates on the surrogate key. Correlating on the text
-      -- run identity instead would be a text fact join — forbidden, and not
-      -- pushdown material either, since a join equality is not a constant.
+      -- Route the fact probes below EXISTS; retain one candidate per run.
       AND EXISTS (
           SELECT 1
-          FROM hydro.river_timeseries rt
+          FROM ({_BACKFILL_FACT_SOURCE}) rt
           WHERE rt.run_key = h.run_key
-            -- What this aid is, precisely (#1778): an ORDERBY-level batch
-            -- filter, not a segmentby index pushdown. Migration 000047 compresses
-            -- this hypertable with segmentby `run_id, river_network_version_id,
-            -- river_segment_id` and orderby `variable, valid_time`, so
-            -- `variable` reaches the planner only as per-batch min/max metadata:
-            -- it lets whole compressed batches be skipped before decompression,
-            -- and it can do nothing about which segments are opened. Do not read
-            -- it as an index-level pushdown or cite it as one elsewhere. Note
-            -- for #1342: the aid goes away with the column, and what would give
-            -- this probe a real segment-level access path is that issue's
-            -- successor index plus a compression-layout re-cut, not this line.
-            -- transitional compressed-chunk pushdown aid, remove with #1342
-            AND rt.variable = 'q_down'
-            -- Deliberately no explicit enum cast on the literal: this statement
-            -- is also parsed by the sqlite harness in
-            -- tests/test_forcing_copyback_backfill.py, and PostgreSQL coerces
-            -- the unknown-typed literal to the enum anyway, so the predicate is
-            -- equally sargable without one.
-            AND rt.variable_e = 'q_down'
-            AND rt.value IS NOT NULL
       )
     ORDER BY h.run_id
 """
@@ -281,14 +280,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _require_backfill_schema(session: Session) -> None:
-    has_legacy = _has_table(session, "hydro", "river_timeseries_legacy")
     required_tables = (
         ("hydro", "hydro_run"),
         ("hydro", "river_timeseries"),
+        ("hydro", "river_timeseries_legacy"),
         ("met", "forcing_version"),
     )
-    if has_legacy:
-        required_tables += (("hydro", "river_timeseries_legacy"),)
     missing_tables = [
         f"{schema}.{table_name}"
         for schema, table_name in required_tables
@@ -301,13 +298,13 @@ def _require_backfill_schema(session: Session) -> None:
             details={"missing_tables": missing_tables},
         )
 
-    # Pre-expand discovery still needs the variable pushdown aid. Expanded
-    # catalogs retain that text contract on _legacy, not the narrow canonical.
-    # Discovery routing itself remains a separate cutover.
+    # Expand is the activation boundary: each physical branch has its own
+    # column contract, and hydro_run owns routing.
     required_columns = {
         ("hydro", "hydro_run"): {
             "run_id",
             "run_key",
+            "timeseries_store",
             "status",
             "model_id",
             "basin_version_id",
@@ -315,7 +312,8 @@ def _require_backfill_schema(session: Session) -> None:
             "source_id",
             "cycle_time",
         },
-        ("hydro", "river_timeseries"): {"run_key", "variable", "variable_e", "value"},
+        ("hydro", "river_timeseries"): {"run_key", "variable_e", "value"},
+        ("hydro", "river_timeseries_legacy"): {"run_key", "variable", "variable_e", "value"},
         ("met", "forcing_version"): {
             "forcing_version_id",
             "forcing_package_uri",
@@ -323,9 +321,6 @@ def _require_backfill_schema(session: Session) -> None:
             "lineage_json",
         },
     }
-    if has_legacy:
-        required_columns[("hydro", "river_timeseries")].remove("variable")
-        required_columns[("hydro", "river_timeseries_legacy")] = {"run_key", "variable", "variable_e", "value"}
     missing_columns: dict[str, list[str]] = {}
     for (schema, table_name), columns in required_columns.items():
         existing = _table_columns(session, schema, table_name)

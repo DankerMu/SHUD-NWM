@@ -161,6 +161,15 @@ def test_seed_river_timeseries_insert_writes_narrow_columns() -> None:
     # dual-written too.
     variants = {(row[7], row[8], row[9]) for row in rows}
     assert variants == {("q_down", "m3/s", "ok"), ("y_stage", "m", "ok")}
+    expected = _expected_river_seed_samples(after_met=False)
+    observed = {
+        (row[3], row[6], row[7], row[1]): (row[0], row[2], row[8], row[9])
+        for row in rows
+    }
+    assert observed == {
+        (cursor.run_keys[run], cursor.segment_keys[segment], variable, lead): value
+        for (run, segment, variable, lead), value in expected.items()
+    }
 
 
 def test_seed_reads_authority_keys_with_select_not_returning() -> None:
@@ -186,3 +195,40 @@ def test_seed_fails_loudly_when_an_authority_key_is_missing() -> None:
 
     assert segments[-1] in str(exc_info.value)
     assert "000050" in str(exc_info.value)
+
+
+def _expected_river_seed_samples(*, after_met: bool) -> dict[tuple[Any, ...], tuple[Any, ...]]:
+    """Independent demo-value oracle; never calls the seed builders/key mapper."""
+    import math
+    from datetime import UTC, datetime, timedelta
+
+    rng = random.Random(42)
+    if after_met:
+        # Five stations, six forcing variables, 168 hours. Precip alone draws
+        # a second variate when wet; all other forcing fields draw exactly one.
+        for _station in range(5):
+            for variable in seed_demo.FORCING_VARIABLES:
+                for _hour in range(168):
+                    draw = rng.random()
+                    if variable == "precip" and draw >= 0.7:
+                        rng.random()
+    expected = {}
+    for run, hour, horizon, offset in (
+        (seed_demo.RUN_ID, 0, 168, 0),
+        (seed_demo.IFS_RUN_ID, 0, 168, -20),
+        (seed_demo.IFS_06Z_RUN_ID, 6, 144, -25),
+    ):
+        for segment in range(1, 16):
+            for variable, unit in (("q_down", "m3/s"), ("y_stage", "m")):
+                for lead in range(horizon):
+                    discharge = max(80, (650 + 95 * segment + offset) * (
+                        1 + 0.18 * math.sin(math.tau * (lead % 24) / 24)
+                        + 0.28 * math.sin(math.tau * lead / horizon)
+                    ) + rng.uniform(-55, 85))
+                    value = (discharge if variable == "q_down" else
+                             max(0.5, 1.8 + segment * 0.18 + discharge / 900 + rng.uniform(-0.15, 0.2)))
+                    expected[(run, f"{seed_demo.RIVER_NETWORK_VERSION_ID}_riv_{segment:04d}", variable, lead)] = (
+                        datetime(2026, 5, 1, hour, tzinfo=UTC) + timedelta(hours=lead),
+                        round(value, 3), unit, "ok",
+                    )
+    return expected

@@ -87,6 +87,7 @@ class _DeclineStore:
         self.rows: list[dict[str, Any]] = []
         self.write_error: BaseException | None = None
         self.count_calls = 0
+        self.stores: dict[str, str] = {}
 
     def record(
         self,
@@ -101,8 +102,14 @@ class _DeclineStore:
         if self.write_error is not None:
             raise self.write_error
         key = (run_id, init_state_id, product_mtime)
-        if key in {(row["run_id"], row["init_state_id"], row["product_mtime"]) for row in self.rows}:
-            return  # ON CONFLICT DO NOTHING
+        store = self.stores.setdefault(run_id, "legacy" if reason_code == "legacy_store_refused" else "narrow")
+        if reason_code == "legacy_store_refused" and store != "legacy":
+            raise RuntimeError("Legacy refusal is stale for narrow run")
+        for row in self.rows:
+            if key == (row["run_id"], row["init_state_id"], row["product_mtime"]):
+                if store != "legacy" or row["reason_code"] != "legacy_store_refused":
+                    row.update(reason_code=reason_code, detail=detail)
+                return
         self.rows.append(
             {
                 "run_id": run_id,

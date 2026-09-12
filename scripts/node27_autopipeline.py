@@ -963,24 +963,41 @@ def _record_recompute_decline(
 
     Deliberately raises on any failure: the caller keeps ``outcome="failed"``
     when this does not commit, so a run is never treated as accounted for on a
-    row that does not exist. A legacy refusal supersedes an exact-key decline,
-    never the reverse, so concurrent workers cannot erase permanence.
+    row that does not exist. Legacy permanence lasts only while the authority
+    is legacy; narrow reentry must replace an inert legacy record at the same key.
     """
     conn = _connect(database_url)
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
+                    "SELECT timeseries_store FROM hydro.hydro_run WHERE run_id=%s FOR SHARE",
+                    (run_id,),
+                )
+                authority = cur.fetchone()
+                if authority is None:
+                    raise RuntimeError(f"Cannot record decline without run authority: {run_id}")
+                store = authority[0]
+                if reason_code == "legacy_store_refused" and store != "legacy":
+                    raise RuntimeError(f"Legacy refusal is stale for narrow run: {run_id}")
+                cur.execute(
                     """
                     INSERT INTO ops.ingest_recompute_decline
                         (run_id, init_state_id, product_mtime, reason_code, detail)
                     VALUES (%s, %s, %s, %s, %s)
                     ON CONFLICT (run_id, init_state_id, product_mtime) DO UPDATE
-                    SET reason_code = EXCLUDED.reason_code, detail = EXCLUDED.detail
-                    WHERE EXCLUDED.reason_code = 'legacy_store_refused'
+                    SET reason_code = CASE
+                          WHEN %s = 'legacy' AND ops.ingest_recompute_decline.reason_code = 'legacy_store_refused'
+                          THEN ops.ingest_recompute_decline.reason_code ELSE EXCLUDED.reason_code END,
+                        detail = CASE
+                          WHEN %s = 'legacy' AND ops.ingest_recompute_decline.reason_code = 'legacy_store_refused'
+                          THEN ops.ingest_recompute_decline.detail ELSE EXCLUDED.detail END
+                    RETURNING reason_code
                     """,
-                    (run_id, init_state_id, product_mtime, reason_code, detail),
+                    (run_id, init_state_id, product_mtime, reason_code, detail, store, store),
                 )
+                if cur.fetchone() is None:
+                    raise RuntimeError(f"Decline record was not written: {run_id}")
     finally:
         conn.close()
 

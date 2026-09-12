@@ -9348,7 +9348,18 @@ def test_disposition_guard_reds_when_a_redirect_no_longer_reaches_the_suite() ->
 # persistence.py; test_reconcile_sacct_parse.py for reconcile.py, which is the
 # suite the #1486 one-hop closure already ties to reconcile.py).
 POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("services/tile_publisher/publisher.py", ("tests/test_cli_publish_qdown.py",)),
+    (
+        "services/tile_publisher/publisher.py",
+        ("tests/test_cli_publish_qdown.py", "tests/test_river_ts_read_path_surrogate_keys_integration.py"),
+    ),
+    (
+        "services/tile_publisher/forcing_copyback_backfill.py",
+        ("tests/test_forcing_copyback_backfill.py", "tests/test_river_ts_read_path_surrogate_keys_integration.py"),
+    ),
+    (
+        "db/seeds/seed_demo.py",
+        ("tests/test_seed.py", "tests/test_river_ts_dual_write_integration.py"),
+    ),
     (
         "workers/output_parser/cli.py",
         ("tests/test_output_parser_cli.py", "tests/test_output_parser_dual_write.py"),

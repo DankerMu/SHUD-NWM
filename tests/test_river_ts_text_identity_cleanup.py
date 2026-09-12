@@ -160,9 +160,8 @@ RIVER_TABLE = "hydro.river_timeseries"
 # The breakdown, so an intentional change can be re-derived rather than guessed:
 #
 # * forecast_store.py 3 = two raw routed sources + the index-metadata literal.
-# * publisher.py 2 = the discovery aggregate + the PublishError message naming
-#   the required table.
-# * forcing_copyback_backfill.py 1 = the correlated EXISTS probe.
+# * publisher.py 2 = routed fact source + the PublishError table name.
+# * forcing_copyback_backfill.py 1 = routed fact source below EXISTS.
 # * node27_autopipeline.py 0 = neither per-tick criterion reads the fact table
 #   any more. #1789 deleted the ingest criterion's join (the parse timestamp it
 #   derived now lives on hydro_run.parsed_at) and #1779 deleted the publish
@@ -207,8 +206,8 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
 #
 # * forecast_store.py 6 = the three-aid segment source (written once,
 #   consumed by all eight blocks) + the latest-product source's three.
-# * publisher.py 1 / forcing_copyback_backfill.py 1 = the single `variable` aid
-#   each, in an ON chain and inside a correlated EXISTS respectively.
+# * publisher.py 1 / forcing_copyback_backfill.py 1 = one raw-source variable
+#   aid apiece, retained only in the rendered legacy branch.
 # * parser.py 0: narrow compression segmentby starts with run_key.
 # * the remaining registered files carry no aid at all, and 0 is asserted rather
 #   than skipped: an aid appearing in the autopipeline tick or a seed helper is
@@ -921,9 +920,8 @@ def test_publisher_discovery_aggregates_enums_and_restores_the_network_text() ->
 def test_publisher_where_clause_fragments_name_no_text_identity_column() -> None:
     """Bare-fragment face: ``_discover_qdown_runs``'s own ``where_clauses`` list.
 
-    The fragments are joined onto one line, so this is also where a stray ``--``
-    marker would comment out every clause after it — hence the aid lives in the
-    ON clause and this list stays text-free.
+    The fragments are joined onto one line. The #1342 marker belongs in the
+    raw fact source; this outer fragment list stays text-free.
     """
     fragments = _sql_constants(
         module=("services", "tile_publisher", "publisher.py"),

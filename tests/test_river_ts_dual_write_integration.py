@@ -613,3 +613,212 @@ def test_legacy_decline_reopens_only_after_authority_becomes_narrow(
     finally:
         connection.rollback()
         connection.close()
+
+
+def test_expand_classifies_preexisting_authority_without_overrides(throwaway_database_url: str) -> None:
+    from packages.common.migrate import MIGRATIONS_DIR
+
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE hydro.hydro_run SET status='running', parsed_at=now() WHERE run_id=%s", (_RUN_ID,))
+            cursor.execute("""
+                INSERT INTO hydro.hydro_run
+                    (run_id, run_type, model_id, basin_version_id, start_time, end_time, status, run_manifest_uri)
+                SELECT v.run_id, 'forecast', 'm1', 'bv1', %s, %s, v.status, 's3://manifest'
+                FROM (VALUES ('published_only', 'published'), ('running_only', 'running')) v(run_id, status)
+            """, (_START_TIME, _START_TIME + timedelta(hours=3)))
+        expected = [
+            {"run_id": "published_only", "timeseries_store": "legacy"},
+            {"run_id": "run_dual_write", "timeseries_store": "legacy"},
+            {"run_id": "running_only", "timeseries_store": "narrow"},
+        ]
+        apply_migrations_from_zero(throwaway_database_url)
+        for _ in range(2):
+            assert _rows(connection, "SELECT run_id, timeseries_store FROM hydro.hydro_run ORDER BY run_id") == expected
+            with connection.cursor() as cursor:
+                cursor.execute((MIGRATIONS_DIR / "000059_river_timeseries_narrow_expand.sql").read_text())
+    finally:
+        connection.close()
+
+
+@pytest.mark.timescaledb_210
+def test_expand_preserves_preexisting_compressed_legacy_catalog(throwaway_database_url: str) -> None:
+    from tests.integration_helpers import insert_river_timeseries_dual_written
+
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
+        with connection.cursor() as cursor:
+            insert_river_timeseries_dual_written(cursor, [
+                (_RUN_ID, "bv1", "rnv1", "seg-1", _START_TIME, 0, "q_down", 7.0, "m3/s", "ok"),
+            ])
+            cursor.execute("SELECT compress_chunk(c) FROM show_chunks('hydro.river_timeseries') c")
+
+        def snapshot(table: str) -> dict[str, Any]:
+            return {
+                "relation": _rows(
+                    connection, "SELECT oid, relowner FROM pg_class WHERE oid=%s::regclass", (f"hydro.{table}",),
+                ),
+                "indexes": _rows(
+                    connection, "SELECT indexrelid FROM pg_index WHERE indrelid=%s::regclass ORDER BY indexrelid",
+                    (f"hydro.{table}",),
+                ),
+                "chunks": _rows(
+                    connection, "SELECT chunk_schema, chunk_name, is_compressed FROM timescaledb_information.chunks "
+                    "WHERE hypertable_schema='hydro' AND hypertable_name=%s ORDER BY chunk_name", (table,),
+                ),
+                "settings": _rows(
+                    connection, "SELECT attname, segmentby_column_index, orderby_column_index, "
+                    "orderby_asc, orderby_nullsfirst "
+                    "FROM timescaledb_information.compression_settings WHERE hypertable_schema='hydro' "
+                    "AND hypertable_name=%s ORDER BY attname", (table,),
+                ),
+            }
+
+        before = snapshot("river_timeseries")
+        assert before["chunks"] and all(row["is_compressed"] for row in before["chunks"])
+        apply_migrations_from_zero(throwaway_database_url)
+        assert snapshot("river_timeseries_legacy") == before
+        assert _scalar(
+            connection, "SELECT pg_get_userbyid(relowner) FROM pg_class "
+            "WHERE oid='hydro.river_timeseries'::regclass",
+        ) == "nhms_ingest_rw"
+        assert _rows(
+            connection, "SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema='hydro' "
+            "AND table_name='river_timeseries' ORDER BY ordinal_position",
+        ) == [
+            {"column_name": name, "udt_name": kind} for name, kind in (
+                ("run_key", "int4"), ("basin_version_key", "int4"), ("river_network_version_key", "int4"),
+                ("river_segment_key", "int4"), ("valid_time", "timestamptz"), ("lead_time_hours", "int4"),
+                ("variable_e", "river_variable"), ("value", "float8"), ("unit_e", "river_unit"),
+                ("quality_flag_e", "river_quality_flag"), ("created_at", "timestamptz"),
+            )
+        ]
+        assert snapshot("river_timeseries")["settings"] == [
+            dict(attname=name, segmentby_column_index=segment, orderby_column_index=order,
+                 orderby_asc=asc, orderby_nullsfirst=nulls)
+            for name, segment, order, asc, nulls in (
+                ("river_segment_key", 2, None, None, None), ("run_key", 1, None, None, None),
+                ("valid_time", None, 2, True, False), ("variable_e", None, 1, True, False),
+            )
+        ]
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("column", ["variable_e", "unit_e", "quality_flag_e"])
+def test_out_of_vocabulary_enum_literal_rejects_entire_narrow_write(parsed_run: Any, column: str) -> None:
+    connection, _ = parsed_run
+    before = _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY river_segment_key, valid_time")
+    with connection.cursor() as cursor:
+        with pytest.raises(psycopg2.errors.InvalidTextRepresentation):
+            cursor.execute(f"""
+                INSERT INTO hydro.river_timeseries
+                    (run_key, basin_version_key, river_network_version_key, river_segment_key,
+                     valid_time, variable_e, value, unit_e, quality_flag_e)
+                VALUES (4001,5001,6001,7001,%s,'q_down',9,'m3/s','ok'),
+                       (4001,5001,6001,7001,%s,
+                        {'%s' if column == 'variable_e' else "'q_down'"},
+                        10, {'%s' if column == 'unit_e' else "'m3/s'"},
+                        {'%s' if column == 'quality_flag_e' else "'ok'"})
+            """, (_START_TIME + timedelta(days=20), _START_TIME + timedelta(days=21), "outside_vocabulary"))
+    assert _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY river_segment_key, valid_time") == before
+
+
+@pytest.mark.parametrize("first", ["legacy_store_refused", "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"])
+def test_real_decline_conflict_polarity_and_narrow_reentry(
+    throwaway_database_url: str, tmp_path: Path, first: str,
+) -> None:
+    from scripts.node27_autopipeline import (
+        _already_ingested_runs,
+        _decline_key,
+        _declined_runs,
+        _record_recompute_decline,
+    )
+
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = psycopg2.connect(throwaway_database_url)
+    try:
+        _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='legacy' WHERE run_id=%s", (_RUN_ID,))
+        connection.commit()
+        product = tmp_path / "runs" / _RUN_ID / "output" / "fixture.rivqdown"
+        product.parent.mkdir(parents=True)
+        product.write_text("1,2\n")
+        key = _decline_key(tmp_path, _RUN_ID)
+        assert key is not None
+        compressed = "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"
+
+        def record(reason: str) -> None:
+            _record_recompute_decline(throwaway_database_url, run_id=_RUN_ID,
+                                      init_state_id=key[0], product_mtime=key[1], reason_code=reason, detail=reason)
+
+        record(first)
+        record(compressed if first == "legacy_store_refused" else "legacy_store_refused")
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT reason_code FROM ops.ingest_recompute_decline WHERE run_id=%s", (_RUN_ID,))
+            assert cursor.fetchone() == ("legacy_store_refused",)
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == {_RUN_ID}
+            cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='narrow' WHERE run_id=%s", (_RUN_ID,))
+        connection.commit()
+        with connection.cursor() as cursor:
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == set()
+        connection.commit()
+        record(compressed)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT reason_code FROM ops.ingest_recompute_decline WHERE run_id=%s", (_RUN_ID,))
+            assert cursor.fetchone() == (compressed,)
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == {_RUN_ID}
+        assert _already_ingested_runs(throwaway_database_url, [_RUN_ID], object_store_root=tmp_path) == {_RUN_ID}
+        connection.commit()
+        with pytest.raises(RuntimeError, match="stale"):
+            record("legacy_store_refused")
+        import os
+        os.utime(product, (key[1] + 10, key[1] + 10))
+        with connection.cursor() as cursor:
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == set()
+    finally:
+        connection.close()
+
+
+def test_seed_database_roundtrips_exact_river_authorities_postexpand(throwaway_database_url: str) -> None:
+    from db.seeds import seed_demo
+    from tests.test_seed import _expected_river_seed_samples
+
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = psycopg2.connect(throwaway_database_url)
+    try:
+        # Distinct identity domains make even cross-column key swaps visible.
+        with connection.cursor() as cursor:
+            for table, column, start in _IDENTITY_RESTARTS:
+                cursor.execute(f"ALTER TABLE {table} ALTER COLUMN {column} RESTART WITH {start}")
+        seed_demo.seed_database(connection)
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT h.run_id, rs.river_segment_id, rt.variable_e, rt.lead_time_hours,
+                       rt.valid_time, rt.value, rt.unit_e, rt.quality_flag_e,
+                       bv.basin_version_id, rnv.river_network_version_id,
+                       h.basin_version_id, rs.river_network_version_id, h.timeseries_store
+                FROM hydro.river_timeseries rt
+                JOIN hydro.hydro_run h USING (run_key)
+                JOIN core.river_segment rs USING (river_segment_key)
+                JOIN core.basin_version bv ON bv.basin_version_key=rt.basin_version_key
+                JOIN core.river_network_version rnv ON rnv.river_network_version_key=rt.river_network_version_key
+            """)
+            rows = cursor.fetchall()
+            expected = _expected_river_seed_samples(after_met=True)
+            assert len(rows) == len(expected)
+            assert {row[:4]: row[4:8] for row in rows} == expected
+            assert {row[8:] for row in rows} == {
+                (seed_demo.BASIN_VERSION_ID, seed_demo.RIVER_NETWORK_VERSION_ID,
+                 seed_demo.BASIN_VERSION_ID, seed_demo.RIVER_NETWORK_VERSION_ID, "narrow")
+            }
+            assert {(row[2], row[6]) for row in rows} == {("q_down", "m3/s"), ("y_stage", "m")}
+    finally:
+        connection.rollback()
+        connection.close()

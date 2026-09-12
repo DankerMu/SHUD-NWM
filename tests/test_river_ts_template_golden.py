@@ -77,8 +77,10 @@ def test_the_golden_was_captured_at_the_change_base() -> None:
 def test_the_golden_covers_exactly_the_registered_entries() -> None:
     """Historical statements and live raw sources have distinct exact sets."""
     siblings = {entry.key for entry in REGISTRY} - ROUTED_SOURCE_KEYS - PARSER_NARROW_WRITER_KEYS
-    assert len(siblings) == 3
+    assert len(siblings) == 1
     assert set(GOLDEN["entries"]) == siblings | {
+        "publisher:qdown_discovery",
+        "forcing_copyback_backfill:discover_backfill_runs",
         "display_coverage:refresh",
         "mvt:postgis_tile_sql_hydro",
         "mvt:postgis_tile_sql_hydro_national",
@@ -93,6 +95,8 @@ def test_the_golden_covers_exactly_the_registered_entries() -> None:
     assert {entry.key for entry in REGISTRY} == siblings | ROUTED_SOURCE_KEYS | PARSER_NARROW_WRITER_KEYS
     assert len(REGISTRY) == 13
     assert ROUTED_SOURCE_KEYS == {
+        "publisher:qdown_discovery",
+        "forcing_copyback_backfill:discover_backfill_runs",
         "display_coverage:refresh",
         "forecast_store:segment_rows_source",
         "forecast_store:latest_product_river_source",

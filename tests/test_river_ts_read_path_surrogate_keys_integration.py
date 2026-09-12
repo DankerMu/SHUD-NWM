@@ -1477,3 +1477,114 @@ def test_named_nonmatching_store_branch_explains_and_returns_zero(
             assert cursor.fetchone()[0][0]["Plan"]["Actual Rows"] == 0
             cursor.execute(bound)
             assert cursor.fetchall() == []
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+@pytest.mark.parametrize("branch", ["national_identity", "national_data", "coverage", "named", "any"])
+def test_each_discovery_fact_branch_explains_only_its_store_and_rejects_decoys(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+    store: str, branch: str,
+) -> None:
+    from packages.common import display_coverage
+    from services.tiles import mvt
+
+    url, session = seeded
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    params = _identity_params(_KEYED_RUN_ID)
+    if branch == "coverage":
+        raw = display_coverage._river_sample_rows_template(store)
+        source = render_river_ts_sql(raw, store).sql
+        assert source in display_coverage._REFRESH_SQL
+        sql = "WITH candidate_runs AS (" + display_coverage._CANDIDATE_RUNS_SQL + ") " + source
+        _, params = _coverage_oracle_statement()
+        params = params | {"run_id": _KEYED_RUN_ID}
+    elif branch.startswith("national"):
+        factory = (mvt._hydro_national_identity_source_template if branch == "national_identity"
+                   else mvt._hydro_national_data_source_template)
+        source = render_river_ts_sql(factory(store), store).sql
+        assert source in postgis_tile_sql("hydro-national")
+        sql = """
+            SELECT facts.* FROM (
+                SELECT h.run_id, h.run_key, h.timeseries_store,
+                       rnv.river_network_version_key, rnv.river_network_version_id
+                FROM hydro.hydro_run h JOIN core.model_instance mi USING (model_id)
+                JOIN core.river_network_version rnv USING (river_network_version_id)
+                WHERE h.run_id=:run_id
+            ) lr JOIN core.river_segment seg USING (river_network_version_id)
+            CROSS JOIN LATERAL (
+        """ + source + ") facts"
+    else:
+        factory = _valid_times_named_source_template if branch == "named" else _valid_times_any_source_template
+        sql = render_river_ts_sql(factory(store), store).sql
+        caller, _ = _capture_valid_times_statement(session, named=branch == "named")
+        assert sql in caller
+
+    def relations(node: dict[str, Any]) -> set[str]:
+        names = {node["Relation Name"]} if "Relation Name" in node else set()
+        for child in node.get("Plans", []):
+            names |= relations(child)
+        return names
+
+    session.rollback()
+    with psycopg2.connect(url) as connection:
+        with connection.cursor() as cursor:
+            physical = {}
+            for target in ("legacy", "narrow"):
+                table = "river_timeseries_legacy" if target == "legacy" else "river_timeseries"
+                cursor.execute("SELECT chunk_name FROM timescaledb_information.chunks "
+                               "WHERE hypertable_schema='hydro' AND hypertable_name=%s", (table,))
+                physical[target] = {table, *(row[0] for row in cursor.fetchall())}
+                cursor.execute(f"SELECT count(*) FROM hydro.{table} WHERE run_key="
+                               "(SELECT run_key FROM hydro.hydro_run WHERE run_id=%s)", (_KEYED_RUN_ID,))
+                assert cursor.fetchone()[0] > 0
+            bound = _bound_oracle_sql(cursor, sql, params)
+            opposite = "narrow" if store == "legacy" else "legacy"
+            for authority in (store, opposite):
+                # No fact deletion: both physical stores retain the real decoys.
+                cursor.execute("UPDATE hydro.hydro_run SET timeseries_store=%s", (authority,))
+                cursor.execute("EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) " + bound)
+                plan = cursor.fetchone()[0][0]["Plan"]
+                scanned = relations(plan)
+                assert not scanned & physical[opposite], (branch, plan)
+                if authority == store:
+                    assert scanned & physical[store], (branch, plan)
+                    assert plan["Actual Rows"] > 0
+                else:
+                    assert plan["Actual Rows"] == 0
+                cursor.execute(bound)
+                rows = cursor.fetchall()
+                assert bool(rows) == (authority == store)
+        connection.rollback()
+
+
+def test_actual_publisher_and_copyback_discover_only_authoritative_facts(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], tmp_path: Path,
+) -> None:
+    from services.tile_publisher.forcing_copyback_backfill import discover_backfill_runs
+    from services.tile_publisher.publisher import TilePublisher
+
+    url, session = seeded
+    _prepare_hydro_stores(session, post_expand_forecast_database, "legacy")
+    session.execute(text("UPDATE hydro.hydro_run SET source_id='gfs'"))
+    session.commit()
+    expected = {_KEYED_RUN_ID, _LEGACY_RUN_ID}
+    publisher = TilePublisher(workspace_root=tmp_path, object_store_root=tmp_path / "objects")
+    cycles = [row["cycle"] for row in _rows(session,
+        "SELECT DISTINCT lower(source_id) || '_' || to_char(cycle_time, 'YYYYMMDDHH') AS cycle "
+        "FROM hydro.hydro_run", {})]
+
+    def discover_publisher() -> list[dict[str, Any]]:
+        return [row for cycle in cycles for row in publisher._discover_qdown_runs(session, cycle)]
+
+    publisher_rows = discover_publisher()
+    assert {row["run_id"] for row in publisher_rows} == expected
+    assert {row["run_id"] for row in discover_backfill_runs(session)} == expected
+    session.rollback()
+    with psycopg2.connect(url) as connection:
+        with connection.cursor() as cursor:
+            # Delete authoritative facts only. Opposite-store poison stays.
+            for table, store in (("river_timeseries_legacy", "legacy"), ("river_timeseries", "narrow")):
+                cursor.execute(f"DELETE FROM hydro.{table} r USING hydro.hydro_run h "
+                               "WHERE h.run_key=r.run_key AND h.timeseries_store=%s", (store,))
+    assert discover_publisher() == []
+    assert discover_backfill_runs(session) == []
