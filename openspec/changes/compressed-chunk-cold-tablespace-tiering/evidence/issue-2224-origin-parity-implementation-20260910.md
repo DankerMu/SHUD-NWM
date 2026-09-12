@@ -7,8 +7,8 @@
 - Current included master SHA: `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb`.
 - Final code/test candidate SHA:
   `3358ee63cfe0fd7e11269bf08638b7d1fbaf236f`.
-- Last accepted node-27 disposable-oracle SHA before final local review:
-  `b63e7b75f557de40e2d45a1476e95cda50ecb489`.
+- Final code-bearing node-27 disposable-oracle SHA:
+  `f7a6c162c0c1ecc3d1737ac3fe3f4fdf667b1e79`.
 - Historical implementation plus first oracle-fix SHA:
   `27d4faeab9718f0a0f343d392f04871ed1d46808`.
 - Effective fixture and repair intensity: `high`.
@@ -269,7 +269,24 @@ git diff --check:           PASS
 ```
 
 The sole warning is the pre-existing ecCodes recommendation already described
-above. The final code/test SHA has not yet been accepted by a new node-27 disposable
-run; `b63e7b75f557de40e2d45a1476e95cda50ecb489` remains the last real-engine
-PASS until that exact-head rerun succeeds. Neither result is a production G1 PASS,
-and task 4.0A remains unchecked until #2224 merges.
+above. After committing and pushing the Phase 2 evidence, the exact code-bearing
+head `f7a6c162c0c1ecc3d1737ac3fe3f4fdf667b1e79` passed the node-27 disposable
+oracle again:
+
+```text
+oracle_candidate=f7a6c162c0c1ecc3d1737ac3fe3f4fdf667b1e79
+python=3.11.15 candidate_import=PASS
+1 passed, 1 deselected in 9.70s
+identity_rc=0 pytest_rc=0 cleanup_rc=0
+oracle_cleanup=PASS
+production_checkout_unchanged=PASS
+production_container_running=PASS
+```
+
+The rerun exercised the same shipping-role, selected compressed-target, sibling-
+independence, exact-plan, rollback, migration, recompression, idempotency and
+receipt path after the local race-receipt repair. The production checkout stayed at
+`a8db554d6402bec642e9a05627eae64b2b79aec3`; no production database connection,
+census, installer, relation movement or timer/service change occurred. A later
+commit that only records this result does not change the tested code tree. This is
+still not a production G1 PASS, and task 4.0A remains unchecked until #2224 merges.
