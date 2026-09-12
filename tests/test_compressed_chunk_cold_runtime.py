@@ -46,6 +46,7 @@ from tests.cold_residency_fakes import (
     river_columns,
     target_observation,
 )
+from tests.cold_residency_identity_mutants import apply_first_reload_replacement, first_reload_mutation_sql
 
 
 def _connect(connection: FakeConnection):
@@ -324,6 +325,25 @@ def test_mixed_group_is_blocked_not_migrated() -> None:
     assert observation.reconciliation == "mixed"
 
 
+def test_inspect_fresh_decompression_is_unknown_with_current_members() -> None:
+    connection, selected = _loaded(FakeConnection())
+    apply_first_reload_replacement(connection, selected, "is_compressed")
+    observation = inspect_residency_group(
+        connect=_connect(connection),
+        chunk=selected,
+        inventories=bound_inventories(),
+    )
+    assert observation.outcome == "blocked"
+    assert observation.reconciliation == "unknown"
+    assert observation.error_class == "unknown"
+    assert observation.shell_sql_executed is False
+    assert observation.before.members
+    assert observation.before.origin_oid == selected.origin_oid
+    assert observation.before.is_compressed is False
+    assert observation.before.compressed_oid is None
+    assert first_reload_mutation_sql(connection) == []
+
+
 def test_normal_migrate_uses_shell_first_and_fresh_observer() -> None:
     connection, item = _loaded(FakeConnection())
     observation = migrate_residency_group(
@@ -597,18 +617,19 @@ def test_max_members_is_enforced() -> None:
 
 def test_reconcile_named_group_unknown_when_origin_disappears() -> None:
     connection = FakeConnection()
-    observation = reconcile_named_group(
-        connect=_connect(connection),
-        inventories=bound_inventories(),
-        hypertable_schema="hydro",
-        hypertable_name="river_timeseries",
-        origin_schema="_timescaledb_internal",
-        origin_name="_hyper_1_1_chunk",
-        range_start=RANGE_START,
-        range_end=CUTOFF,
-        origin_oid=10,
-    )
-    assert observation.reconciliation == "unknown"
+    with pytest.raises(ColdRuntimeError) as raised:
+        reconcile_named_group(
+            connect=_connect(connection),
+            inventories=bound_inventories(),
+            hypertable_schema="hydro",
+            hypertable_name="river_timeseries",
+            origin_schema="_timescaledb_internal",
+            origin_name="_hyper_1_1_chunk",
+            range_start=RANGE_START,
+            range_end=CUTOFF,
+            origin_oid=10,
+        )
+    assert raised.value.error_class == "relation_disappeared"
 
 
 def test_locked_inventory_drift_refuses_before_set_tablespace() -> None:

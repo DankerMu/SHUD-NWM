@@ -670,17 +670,41 @@ def test_run_tick_refuses_first_reload_oid_replacement_before_any_success_or_mov
         connect=_connect_factory(connection),
         fetch_watermark=lambda: _NOW,
     )
-    selected_items = list(receipt.get("selected") or [])
-    outcomes = {item.get("outcome") for item in selected_items}
-    plan_kinds = {item.get("plan_kind") for item in selected_items}
-    error_classes = {
-        (item.get("error") or {}).get("class")
-        for item in selected_items
-        if isinstance(item.get("error"), dict)
-    }
-    if receipt.get("error"):
-        error_classes.add(receipt["error"].get("class"))
-    assert "selection_race" in error_classes
-    assert outcomes.isdisjoint({"planned", "already_cold", "migrated"})
-    assert plan_kinds.isdisjoint({"migrate", "already_cold"})
+    validated = validate_receipt(receipt)
+    assert validated["mode"] == "dry-run"
+    assert validated["outcome"] == "failed"
+    assert validated["state"] == "unknown"
+    assert validated["error"]["class"] == "selection_race"
+    assert validated["selected"] == []
     assert first_reload_mutation_sql(connection) == []
+    assert not any("pg_relation_size" in sql for sql, _params in connection.executed)
+    assert not config.receipt_path.exists()
+    assert not intent_path_for(config.receipt_path).exists()
+
+
+def test_run_tick_enforce_publishes_first_reload_oid_replacement_failure(tmp_path: Path) -> None:
+    env = _base_env(tmp_path)
+    config = _ready(runner.config_from_args(_args(enforce=True), env))
+    connection = FakeConnection()
+    selected = chunk()
+    connection.load_group(selected, complete_relations())
+    apply_first_reload_replacement(connection, selected, "origin_oid")
+    receipt = runner.run_tick(
+        config,
+        now_utc=_NOW,
+        head_sha="a" * 40,
+        connect=_connect_factory(connection),
+        fetch_watermark=lambda: _NOW,
+    )
+    published = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    validated = validate_receipt(published)
+    assert receipt == published == validated
+    assert validated["mode"] == "enforce"
+    assert validated["outcome"] == "failed"
+    assert validated["state"] == "unknown"
+    assert validated["error"]["class"] == "selection_race"
+    assert validated["selected"] == []
+    assert validated.get("recovery") is None
+    assert not intent_path_for(config.receipt_path).exists()
+    assert first_reload_mutation_sql(connection) == []
+    assert not any("pg_relation_size" in sql for sql, _params in connection.executed)

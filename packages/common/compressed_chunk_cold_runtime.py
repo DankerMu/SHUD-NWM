@@ -13,6 +13,7 @@ site keeps working with no wrapper and no duplicated logic.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -177,13 +178,13 @@ _DURABLE_IDENTITY_FIELDS = (
     "origin_name",
     "range_start",
     "range_end",
-    "is_compressed",
 )
 _SIBLING_IDENTITY_FIELDS = (
     "compressed_oid",
     "compressed_schema",
     "compressed_name",
 )
+_COMPRESSION_STATE_FIELDS = ("is_compressed", *_SIBLING_IDENTITY_FIELDS)
 
 
 def _reload_chunk(execute: Callable[..., list[Mapping[str, Any]]], chunk: CatalogChunk) -> CatalogChunk:
@@ -206,13 +207,13 @@ def _require_durable_identity(selected: CatalogChunk, current: CatalogChunk, *, 
         )
 
 
-def _sibling_identity_drifted(selected: CatalogChunk, current: CatalogChunk) -> bool:
-    return any(getattr(current, field) != getattr(selected, field) for field in _SIBLING_IDENTITY_FIELDS)
+def _compression_state_drifted(selected: CatalogChunk, current: CatalogChunk) -> bool:
+    return any(getattr(current, field) != getattr(selected, field) for field in _COMPRESSION_STATE_FIELDS)
 
 
 def _require_selected_identity(selected: CatalogChunk, current: CatalogChunk, *, stage: str) -> None:
     _require_durable_identity(selected, current, stage=stage)
-    if _sibling_identity_drifted(selected, current):
+    if _compression_state_drifted(selected, current):
         raise ColdRuntimeError(
             "selected compressed sibling identity drifted on reload",
             error_class="selection_race",
@@ -230,10 +231,26 @@ def _reject_unsafe_sibling_drift(
     statement_timeout: str,
     allow_complete_target_replay: bool,
 ) -> ShellFirstPlan | None:
-    if not _sibling_identity_drifted(selected, current):
+    if not _compression_state_drifted(selected, current):
         return None
     plan = build_shell_first_plan(group, lock_timeout=lock_timeout, statement_timeout=statement_timeout)
-    if allow_complete_target_replay and plan.kind == "already_cold":
+    still_compressed = bool(current.is_compressed and current.compressed_oid is not None)
+    if allow_complete_target_replay and still_compressed and plan.kind == "already_cold":
+        return plan
+    if not still_compressed:
+        if plan.kind in {"already_cold", "migrate"}:
+            return replace(
+                plan,
+                kind="blocked",
+                phases=(),
+                lock_sql=(),
+                shell_move_sql=(),
+                decompress_sql=None,
+                compress_sql=None,
+                lock_oids=(),
+                shell_move_oids=(),
+                reason="compressed relation is missing",
+            )
         return plan
     raise ColdRuntimeError(
         "selected compressed sibling identity drifted on reload",
@@ -242,39 +259,28 @@ def _reject_unsafe_sibling_drift(
     )
 
 
-def _placeholder_group(chunk: CatalogChunk, *, reason: str) -> ResidencyGroup:
-    return ResidencyGroup(
-        hypertable_schema=chunk.hypertable_schema,
-        hypertable_name=chunk.hypertable_name,
-        origin_oid=chunk.origin_oid,
-        origin_schema=chunk.origin_schema,
-        origin_name=chunk.origin_name,
-        compressed_oid=chunk.compressed_oid,
-        compressed_schema=chunk.compressed_schema,
-        compressed_name=chunk.compressed_name,
-        range_start=chunk.range_start,
-        range_end=chunk.range_end,
-        is_compressed=chunk.is_compressed,
-        members=(),
-        blocker=reason,
-    )
-
-
-def _selection_race_observation(
-    chunk: CatalogChunk,
+def _same_durable_selection_race_observation(
+    group: ResidencyGroup | None,
     error: ColdRuntimeError,
     *,
     started: float,
     clock: Callable[[], float],
 ) -> MoveObservation:
-    dummy = _placeholder_group(chunk, reason=str(error))
+    """Emit a blocked observation for a same-durable compression/sibling race.
+
+    Callers must already have bound the selected origin identity and collected
+    the fresh current group. An empty group is not evidence and is re-raised.
+    """
+
+    if group is None or not group.members:
+        raise error
     return _observation(
         outcome="blocked",
         reconciliation="unknown",
         plan_kind="blocked",
         shell_sql_executed=False,
-        before=dummy,
-        after=dummy,
+        before=group,
+        after=group,
         before_parity=None,
         after_parity=None,
         error_class="selection_race",
@@ -461,9 +467,9 @@ def inspect_residency_group(
     try:
         execute = _binder(observer)
         current = _reload_chunk(execute, chunk)
+        _require_durable_identity(chunk, current, stage="inspect")
+        before = collect_residency_group(execute, current)
         try:
-            _require_durable_identity(chunk, current, stage="inspect")
-            before = collect_residency_group(execute, current)
             _require_complete_group(before, max_members=runtime.max_members)
             sibling_plan = _reject_unsafe_sibling_drift(
                 chunk,
@@ -477,7 +483,12 @@ def inspect_residency_group(
         except ColdRuntimeError as error:
             if error.error_class != "selection_race":
                 raise
-            return _selection_race_observation(chunk, error, started=started, clock=runtime.clock)
+            return _same_durable_selection_race_observation(
+                before,
+                error,
+                started=started,
+                clock=runtime.clock,
+            )
         before_parity = _parity_for(execute, inventories, current)
         plan = sibling_plan or build_shell_first_plan(
             before,
@@ -653,7 +664,12 @@ def migrate_residency_group(
             )
     except ColdRuntimeError as error:
         if error.error_class == "selection_race" and expected_before is None:
-            return _selection_race_observation(chunk, error, started=started, clock=runtime.clock)
+            return _same_durable_selection_race_observation(
+                before,
+                error,
+                started=started,
+                clock=runtime.clock,
+            )
         if expected_before is None:
             raise
         dummy = expected_before
@@ -939,27 +955,14 @@ def reconcile_named_group(
             _require_complete_group(after, max_members=config.max_members)
             after_parity = _parity_for(execute, inventories, chunk)
         except ColdRuntimeError as error:
-            dummy = before or ResidencyGroup(
-                hypertable_schema=hypertable_schema,
-                hypertable_name=hypertable_name,
-                origin_oid=origin_oid,
-                origin_schema=origin_schema,
-                origin_name=origin_name,
-                compressed_oid=None,
-                compressed_schema=None,
-                compressed_name=None,
-                range_start=range_start,
-                range_end=range_end,
-                is_compressed=False,
-                members=(),
-                blocker=str(error),
-            )
+            if before is None or not before.members:
+                raise
             return _observation(
                 outcome="unknown",
                 reconciliation="unknown",
                 plan_kind="blocked",
                 shell_sql_executed=False,
-                before=dummy,
+                before=before,
                 after=None,
                 before_parity=before_parity,
                 after_parity=None,

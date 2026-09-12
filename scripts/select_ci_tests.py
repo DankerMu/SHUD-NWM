@@ -1210,12 +1210,13 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
-        # #2224 Stage-1 identity mutants. Three non-gated suites import this
+        # #2224 Stage-1 identity mutants. Four non-gated suites import this
         # helper at module scope; without an explicit support-module rule a
         # helper-only edit collapses to the meta-guard and skips the inspect/
         # tick/AST contracts that consume it.
         "tests/cold_residency_identity_mutants.py",
         (
+            "tests/test_compressed_chunk_cold_runtime.py",
             "tests/test_issue2224_origin_chunk_parity.py",
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_tablespace_marker_contract.py",

@@ -37,7 +37,6 @@ from tests.cold_residency_fakes import (
     target_observation,
 )
 from tests.cold_residency_identity_mutants import (
-    FIRST_RELOAD_DRIFT_CASES,
     apply_first_reload_replacement,
     first_reload_mutation_sql,
 )
@@ -450,47 +449,58 @@ def test_reconcile_origin_name_drift_is_unknown() -> None:
     assert observation.reconciliation == "unknown"
 
 
+def _origin_heap_oid(group) -> int:
+    return next(member.oid for member in group.members if member.kind == "origin_heap")
+
+
+def _assert_no_group_or_mutation(connection: FakeConnection) -> None:
+    assert first_reload_mutation_sql(connection) == []
+    assert not any("pg_relation_size" in sql for sql, _params in connection.executed)
+
+
 def _assert_selection_race_before_mutation(observation, connection: FakeConnection) -> None:
     assert observation.error_class == "selection_race"
     assert observation.shell_sql_executed is False
     assert observation.outcome not in {"planned", "already_cold", "migrated"}
+    assert observation.before.members
+    assert _origin_heap_oid(observation.before) == observation.before.origin_oid
     executed = first_reload_mutation_sql(connection)
     assert not executed, executed
 
 
-@pytest.mark.parametrize("kind", FIRST_RELOAD_DRIFT_CASES)
+@pytest.mark.parametrize("kind", ("origin_oid", "range_start", "range_end"))
 def test_inspect_refuses_first_reload_identity_replacement_before_group_or_parity(kind: str) -> None:
     connection, selected = _loaded(FakeConnection())
     apply_first_reload_replacement(connection, selected, kind)
-    observation = inspect_residency_group(
-        connect=_connect(connection),
-        chunk=selected,
-        inventories=bound_inventories(),
-    )
-    _assert_selection_race_before_mutation(observation, connection)
-    assert observation.before.origin_oid == selected.origin_oid
-    assert observation.before.range_start == selected.range_start
-    assert observation.before.range_end == selected.range_end
-    assert observation.before.compressed_oid == selected.compressed_oid
+    with pytest.raises(ColdRuntimeError) as raised:
+        inspect_residency_group(
+            connect=_connect(connection),
+            chunk=selected,
+            inventories=bound_inventories(),
+        )
+    assert raised.value.error_class == "selection_race"
+    _assert_no_group_or_mutation(connection)
 
 
-@pytest.mark.parametrize("kind", FIRST_RELOAD_DRIFT_CASES)
+@pytest.mark.parametrize("kind", ("origin_oid", "range_start", "range_end"))
 def test_migrate_refuses_first_reload_identity_replacement_before_movement(kind: str) -> None:
     connection, selected = _loaded(FakeConnection())
     apply_first_reload_replacement(connection, selected, kind)
-    observation = migrate_residency_group(
-        connect=_connect(connection),
-        chunk=selected,
-        inventories=bound_inventories(),
-        watermark=WATERMARK,
-        lag_seconds=LAG,
-        cold_free_bytes=10_000,
-        hot_free_bytes=10_000,
-        cold_reserve_bytes=100,
-        wal_reserve_bytes=1,
-        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
-    )
-    _assert_selection_race_before_mutation(observation, connection)
+    with pytest.raises(ColdRuntimeError) as raised:
+        migrate_residency_group(
+            connect=_connect(connection),
+            chunk=selected,
+            inventories=bound_inventories(),
+            watermark=WATERMARK,
+            lag_seconds=LAG,
+            cold_free_bytes=10_000,
+            hot_free_bytes=10_000,
+            cold_reserve_bytes=100,
+            wal_reserve_bytes=1,
+            config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        )
+    assert raised.value.error_class == "selection_race"
+    _assert_no_group_or_mutation(connection)
 
 
 def _migrate(connection: FakeConnection, selected: CatalogChunk, **overrides: Any):
@@ -559,19 +569,49 @@ def test_same_durable_new_sibling_complete_target_with_expected_before_is_select
     _assert_selection_race_before_mutation(observation, connection)
 
 
-@pytest.mark.parametrize("kind", ("origin_oid", "range_start", "range_end", "is_compressed"))
+@pytest.mark.parametrize("kind", ("origin_oid", "range_start", "range_end"))
 def test_durable_identity_drift_on_complete_target_never_uses_sibling_exception(kind: str) -> None:
     connection, selected = _loaded(FakeConnection())
     connection.load_group(selected, complete_relations(origin_space="nhms_cold"))
     apply_first_reload_replacement(connection, selected, kind, origin_space="nhms_cold")
+    with pytest.raises(ColdRuntimeError) as inspect_error:
+        inspect_residency_group(
+            connect=_connect(connection),
+            chunk=selected,
+            inventories=bound_inventories(),
+        )
+    assert inspect_error.value.error_class == "selection_race"
+    _assert_no_group_or_mutation(connection)
+    with pytest.raises(ColdRuntimeError) as migrate_error:
+        _migrate(connection, selected)
+    assert migrate_error.value.error_class == "selection_race"
+    _assert_no_group_or_mutation(connection)
+
+
+def test_complete_target_decompression_is_unknown_not_already_cold() -> None:
+    connection, selected = _loaded(FakeConnection())
+    connection.load_group(selected, complete_relations(origin_space="nhms_cold"))
+    apply_first_reload_replacement(connection, selected, "is_compressed", origin_space="nhms_cold")
     inspect = inspect_residency_group(
         connect=_connect(connection),
         chunk=selected,
         inventories=bound_inventories(),
     )
-    _assert_selection_race_before_mutation(inspect, connection)
+    assert inspect.outcome == "blocked"
+    assert inspect.reconciliation == "unknown"
+    assert inspect.error_class == "unknown"
+    assert inspect.shell_sql_executed is False
+    assert inspect.before.members
+    assert inspect.before.origin_oid == selected.origin_oid
+    assert inspect.before.is_compressed is False
+    assert first_reload_mutation_sql(connection) == []
     observation = _migrate(connection, selected)
-    _assert_selection_race_before_mutation(observation, connection)
+    assert observation.outcome == "blocked"
+    assert observation.reconciliation == "unknown"
+    assert observation.error_class == "unknown"
+    assert observation.shell_sql_executed is False
+    assert observation.before.members
+    assert first_reload_mutation_sql(connection) == []
 
 
 def test_receipt_validation_refuses_outer_durable_oid_mismatch_with_before_snapshot() -> None:
