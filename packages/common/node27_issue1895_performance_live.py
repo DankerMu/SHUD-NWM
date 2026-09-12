@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from packages.common.compressed_chunk_cold_runtime_catalog import derive_bound_inventories
 from packages.common.node27_issue1895_catalog import observe_intersecting_groups
 from packages.common.node27_issue1895_commit import (
     publish_performance_artifacts,
@@ -373,6 +374,7 @@ def _observe_classified(
         kwargs["collect_group"] = collect_group
     classified = observe_intersecting_groups(
         _binder(connection),
+        inventories=derive_bound_inventories(_binder(connection)),
         window_start=window_start,
         window_end=window_end,
         kind=kind,
@@ -514,9 +516,7 @@ def fetch_local_api(
         stage="performance",
     )
     try:
-        status, body, payload = read_bounded_json_body(
-            response, body_limit=body_limit, stage="performance"
-        )
+        status, body, payload = read_bounded_json_body(response, body_limit=body_limit, stage="performance")
         validated = validate_river_series_response(
             payload,
             segment_id=segment_id,
@@ -591,9 +591,7 @@ def fetch_identity_only_product(
         stage="identity",
     )
     try:
-        _status, _body, payload = read_bounded_json_body(
-            response, body_limit=body_limit, stage="identity"
-        )
+        _status, _body, payload = read_bounded_json_body(response, body_limit=body_limit, stage="identity")
         return validate_identity_only_product(payload, source=source, basin_id=basin_id)
     finally:
         close_response(response)

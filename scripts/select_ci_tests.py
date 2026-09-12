@@ -922,6 +922,7 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_compressed_chunk_cold_runtime_integration.py",
             "tests/test_node27_cold_tablespace_marker_contract.py",
+            "tests/test_issue2290_cold_parent_admission.py",
         ),
         stop_on_match=True,
     ),
@@ -1207,6 +1208,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # #2224: focused origin-chunk parity imports the shared fakes at
             # module scope, so a fakes-only edit must run it.
             "tests/test_issue2224_origin_chunk_parity.py",
+            "tests/test_issue2290_cold_parent_admission.py",
+            "tests/test_issue1895_readiness_performance_live.py",
         ),
     ),
     PathTestRule(
@@ -1482,6 +1485,20 @@ PRECIP_SURFACE_TESTS: tuple[str, ...] = (
 
 
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_runtime_catalog.py", ("tests/test_issue2290_cold_parent_admission.py",)
+    ),
+    PathTestRule(
+        "packages/common/compressed_chunk_cold_runtime.py", ("tests/test_issue2290_cold_parent_admission.py",)
+    ),
+    PathTestRule("packages/common/compressed_chunk_cold_tick.py", ("tests/test_issue2290_cold_parent_admission.py",)),
+    PathTestRule("packages/common/node27_issue1895_catalog.py", ("tests/test_issue2290_cold_parent_admission.py",)),
+    PathTestRule(
+        "packages/common/node27_issue1895_performance_live.py", ("tests/test_issue2290_cold_parent_admission.py",)
+    ),
+    PathTestRule("packages/common/node27_issue1895_post_target.py", ("tests/test_issue2290_cold_parent_admission.py",)),
+    PathTestRule("scripts/node27_cold_residency_census.py", ("tests/test_issue2290_cold_parent_admission.py",)),
+    PathTestRule("docs/runbooks/tier-node27-timeseries-storage.md", ("tests/test_issue2290_cold_parent_admission.py",)),
     PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[0],
         ORCHESTRATOR_MANIFEST_SURFACE_TESTS,

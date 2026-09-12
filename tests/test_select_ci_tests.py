@@ -310,9 +310,7 @@ def test_lifecycle_producer_selects_its_owner_suite(producer: str, owner: str) -
 
 
 @pytest.mark.parametrize(("producer", "owner"), _LIFECYCLE_OWNER_EDGES)
-def test_lifecycle_owner_edge_reds_when_removed(
-    monkeypatch: pytest.MonkeyPatch, producer: str, owner: str
-) -> None:
+def test_lifecycle_owner_edge_reds_when_removed(monkeypatch: pytest.MonkeyPatch, producer: str, owner: str) -> None:
     from scripts import select_ci_tests
 
     patched = tuple(
@@ -1938,6 +1936,7 @@ QHH_STATIC_TEST = "tests/test_qhh_scripts_static.py"
 def test_qhh_catalog_script_selects_runtime_owner(script: str) -> None:
     assert QHH_STATIC_TEST in select_tests([f"scripts/{script}.py"], repo_root=Path("."))
 
+
 QHH_ENTRYPOINT_AUTHORITY_TEST = "tests/test_qhh_entrypoint_authority_invariant.py"
 PYTHON_ENV_TRUTH_TEST = "tests/test_python_environment_truth.py"
 TWO_NODE_DOCKER_ENV_TEST = "tests/test_two_node_docker_runbook_environment_invariant.py"
@@ -2833,9 +2832,7 @@ def test_select_tests_unions_explicit_rule_and_same_name_derivation() -> None:
     # also names it must not false-red the pin. The selector meta-guard joins
     # every same-name source route, so it is part of the union here; #2185's
     # write-surface scan joins because apps/** is one of its roots.
-    assert selected == sorted(
-        {*matching[0].tests, same_name_target, SELECTOR_META_GUARD_TEST, WRITE_SURFACE_SCAN_PATH}
-    )
+    assert selected == sorted({*matching[0].tests, same_name_target, SELECTOR_META_GUARD_TEST, WRITE_SURFACE_SCAN_PATH})
 
 
 # The `git ls-files` pathspecs for the same-name derivation are derived from the
@@ -5249,10 +5246,7 @@ def test_mixed_known_and_unknown_paths_union_rider_with_fallback_smoke() -> None
     # scans, so #1656's write-site invariant and #2185's river-segment
     # write-surface scan both join the union too.
     assert (
-        sorted(
-            set(CORE_SMOKE_TESTS)
-            | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH}
-        )
+        sorted(set(CORE_SMOKE_TESTS) | {suite, SELECTOR_META_GUARD_TEST, INVARIANT_SUITE_PATH, WRITE_SURFACE_SCAN_PATH})
         == selected
     )
 
@@ -9425,8 +9419,10 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
     ("module_path", "suite"),
     (
         ("services/tile_publisher/publisher.py", "tests/test_river_ts_read_path_surrogate_keys_integration.py"),
-        ("services/tile_publisher/forcing_copyback_backfill.py",
-         "tests/test_river_ts_read_path_surrogate_keys_integration.py"),
+        (
+            "services/tile_publisher/forcing_copyback_backfill.py",
+            "tests/test_river_ts_read_path_surrogate_keys_integration.py",
+        ),
         ("db/seeds/seed_demo.py", "tests/test_river_ts_dual_write_integration.py"),
     ),
 )
@@ -10709,6 +10705,8 @@ def test_supplemental_invariant_routing_reds_when_a_root_is_dropped(
 
     violations = _supplemental_roots_violations(reduced, probe="scripts/brand_new_thing.py")
     assert any("scripts/**" in v for v in violations), f"expected a named scripts/** violation, got {violations}"
+
+
 # --------------------------------------------------------------------------
 # #2185 river-segment write-surface routing meta-guards
 # --------------------------------------------------------------------------
@@ -11040,8 +11038,7 @@ def test_write_surface_derivation_rejects_nonlinear_rebinds_of_production_dirs(
     for case, source in (
         (
             "augmented",
-            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\n'
-            'PRODUCTION_DIRS += ("db",)\n',
+            'PRODUCTION_DIRS = ("apps", "services", "workers", "packages", "scripts")\nPRODUCTION_DIRS += ("db",)\n',
         ),
         (
             "conditional",
@@ -11085,9 +11082,7 @@ def test_write_surface_derivation_rejects_an_unreadable_production_dirs_binding(
         ("lone-augmented", 'PRODUCTION_DIRS += ("db",)\n'),
         (
             "lone-nested",
-            "import os\n\n"
-            'if os.environ.get("NHMS_X"):\n'
-            '    PRODUCTION_DIRS = ("apps", "services")\n',
+            'import os\n\nif os.environ.get("NHMS_X"):\n    PRODUCTION_DIRS = ("apps", "services")\n',
         ),
     ):
         monkeypatch.chdir(_write_scan_fixture(tmp_path / case, source))
@@ -13011,9 +13006,7 @@ def _mutant_without_partition(owner: str, removed: str) -> tuple[PathTestRule, .
     assert matching, f"{owner}: no PATH_TEST_RULES route"
     assert any(removed in rule.tests for rule in matching), f"{owner}: matched route does not own {removed}"
     return tuple(
-        replace(rule, tests=tuple(test for test in rule.tests if test != removed))
-        if rule.pattern == owner
-        else rule
+        replace(rule, tests=tuple(test for test in rule.tests if test != removed)) if rule.pattern == owner else rule
         for rule in PATH_TEST_RULES
     )
 
@@ -13025,11 +13018,7 @@ def _same_name_partition(owner: str) -> str | None:
 
 @pytest.mark.parametrize(
     ("owner", "removed"),
-    [
-        (owner, removed)
-        for owner in ORIGIN_CHUNK_PARITY_OWNERS
-        for removed in ORIGIN_CHUNK_PARITY_PARTITIONS
-    ]
+    [(owner, removed) for owner in ORIGIN_CHUNK_PARITY_OWNERS for removed in ORIGIN_CHUNK_PARITY_PARTITIONS]
     + [
         ("packages/common/compressed_chunk_cold_receipt.py", removed)
         for removed in sorted(
@@ -13054,9 +13043,7 @@ def test_origin_chunk_parity_owner_route_reds_when_any_partition_is_removed(
         monkeypatch.setattr(select_ci_tests, "_same_name_backend_python_test", lambda _path: None)
     selected = set(select_tests([owner], repo_root=Path(".")))
     assert removed not in selected, f"{owner}: coincidental union still selected {removed}"
-    remaining = (set(ORIGIN_CHUNK_PARITY_PARTITIONS) | ORIGIN_CHUNK_PARITY_OWNER_LEGS.get(owner, set())) - {
-        removed
-    }
+    remaining = (set(ORIGIN_CHUNK_PARITY_PARTITIONS) | ORIGIN_CHUNK_PARITY_OWNER_LEGS.get(owner, set())) - {removed}
     if same_name == removed:
         # Disabling same-name derivation also removes its derived meta-guard rider.
         # The unmutated owner assertion above still requires that guard.
@@ -13069,7 +13056,7 @@ def test_runtime_integration_test_only_change_selects_marker_contract_exactly() 
     owner = "tests/test_compressed_chunk_cold_runtime_integration.py"
     marker = "tests/test_node27_cold_tablespace_marker_contract.py"
     selected = set(select_tests([owner], repo_root=Path(".")))
-    assert selected == {owner, marker, SELECTOR_META_GUARD_TEST}
+    assert selected == {owner, marker, SELECTOR_META_GUARD_TEST, "tests/test_issue2290_cold_parent_admission.py"}
 
 
 def test_runtime_integration_marker_contract_redirect_reds_when_rule_removed(
@@ -17607,3 +17594,62 @@ def test_registry_partition_live_commands_name_all_seven_suites() -> None:
     assert oracle["bug008_command"] == ("uv run pytest -q tests/test_basins_registry_import.py -k output_segment_count")
     # The retained-core BUG-008 command is still a live, correct recipe: it collects and
     # passes exactly the two frozen cases (proven in the execution-semantics row above).
+
+
+PHYSICAL_PARENT_ADMISSION_OWNERS = (
+    "packages/common/compressed_chunk_cold_runtime_catalog.py",
+    "packages/common/compressed_chunk_cold_runtime.py",
+    "packages/common/compressed_chunk_cold_tick.py",
+    "packages/common/node27_issue1895_catalog.py",
+    "packages/common/node27_issue1895_performance_live.py",
+    "packages/common/node27_issue1895_post_target.py",
+    "scripts/node27_cold_residency_census.py",
+    "tests/cold_residency_fakes.py",
+    "tests/test_compressed_chunk_cold_runtime_integration.py",
+    "docs/runbooks/tier-node27-timeseries-storage.md",
+)
+
+
+@pytest.mark.parametrize("owner", PHYSICAL_PARENT_ADMISSION_OWNERS)
+def test_physical_parent_admission_owner_route_has_independent_removal_proof(monkeypatch, owner):
+    from scripts import select_ci_tests
+
+    suite = "tests/test_issue2290_cold_parent_admission.py"
+    before = set(select_tests([owner], repo_root=Path(".")))
+    assert suite in before
+    rules_name = (
+        "SUPPORT_MODULE_TEST_RULES"
+        if owner == "tests/cold_residency_fakes.py"
+        else "CHANGED_TEST_FILE_RULES"
+        if owner.startswith("tests/")
+        else "PATH_TEST_RULES"
+    )
+    rules = getattr(select_ci_tests, rules_name)
+    assert any(rule.pattern == owner and suite in rule.tests for rule in rules)
+    mutant = tuple(
+        replace(rule, tests=tuple(test for test in rule.tests if test != suite)) if rule.pattern == owner else rule
+        for rule in rules
+    )
+    monkeypatch.setattr(select_ci_tests, rules_name, mutant)
+    after = set(select_tests([owner], repo_root=Path(".")))
+    assert suite not in after
+    assert before - {suite} <= after
+
+
+def test_physical_parent_fake_performance_route_has_independent_removal_proof(monkeypatch):
+    from scripts import select_ci_tests
+
+    owner = "tests/cold_residency_fakes.py"
+    suite = "tests/test_issue1895_readiness_performance_live.py"
+    before = set(select_tests([owner], repo_root=Path(".")))
+    assert suite in before
+    rules = select_ci_tests.SUPPORT_MODULE_TEST_RULES
+    assert any(rule.pattern == owner and suite in rule.tests for rule in rules)
+    mutant = tuple(
+        replace(rule, tests=tuple(test for test in rule.tests if test != suite)) if rule.pattern == owner else rule
+        for rule in rules
+    )
+    monkeypatch.setattr(select_ci_tests, "SUPPORT_MODULE_TEST_RULES", mutant)
+    after = set(select_tests([owner], repo_root=Path(".")))
+    assert suite not in after
+    assert before - {suite} <= after

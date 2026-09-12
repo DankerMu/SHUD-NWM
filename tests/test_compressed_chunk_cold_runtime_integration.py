@@ -90,6 +90,7 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
         try:
             bootstrap_extension(connection)
             _bootstrap_production_shaped_schema(connection)
+            _assert_physical_parent_admission(connection)
             inventories = derive_bound_inventories(lambda sql, params=None: _execute(connection, sql, params))
             from tests.test_issue2224_origin_parity_integration import (
                 _assert_origin_parity_discriminator,
@@ -108,6 +109,7 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
 
             river_chunks = load_eligible_chunks(
                 lambda sql, params=None: _execute(connection, sql, params),
+                inventory=inventories.river,
                 schema="hydro",
                 name="river_timeseries",
                 cutoff=_CUTOFF,
@@ -207,9 +209,7 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
                 assert stat.S_ISREG(os.lstat(intent_path).st_mode)
                 assert stat.S_IMODE(os.lstat(intent_path).st_mode) == 0o600
                 forcing_items = [
-                    item
-                    for item in intent["selected"]
-                    if item.get("durable", {}).get("hypertable_schema") == "met"
+                    item for item in intent["selected"] if item.get("durable", {}).get("hypertable_schema") == "met"
                 ]
                 assert forcing_items
                 forcing = forcing_items[0]
@@ -272,23 +272,30 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
             validate_receipt(tick_receipt)
             assert tick_receipt["outcome"] == "clean"
             forcing_final = [
-                item
-                for item in tick_receipt["selected"]
-                if item.get("durable", {}).get("hypertable_schema") == "met"
+                item for item in tick_receipt["selected"] if item.get("durable", {}).get("hypertable_schema") == "met"
             ]
             assert forcing_final
             assert forcing_final[0]["outcome"] == "migrated"
             assert forcing_final[0]["reconciliation"] == "complete_target"
             river_selected = [
-                item
-                for item in tick_receipt["selected"]
-                if item.get("durable", {}).get("hypertable_schema") == "hydro"
+                item for item in tick_receipt["selected"] if item.get("durable", {}).get("hypertable_schema") == "hydro"
             ]
             if river_selected:
                 assert river_selected[0]["outcome"] == "already_cold"
             assert forcing_final, "already-cold river must not consume the mutation bound"
             validate_receipt(json.loads((work / "receipt.json").read_text(encoding="utf-8")))
             assert sidecar_status(work / ".receipt.json.intent") == "absent"
+            assert _execute(
+                connection, "SELECT count(*) AS n, sum(value) AS total FROM hydro.river_timeseries_legacy"
+            ) == [{"n": 7248, "total": 14496.0}]
+            assert _execute(
+                connection,
+                """SELECT count(*) AS n, bool_and(is_compressed) AS compressed
+                FROM timescaledb_information.chunks
+                WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries_legacy'""",
+            ) == [{"n": 3, "compressed": True}]
+            _execute(connection, "DROP TABLE hydro.river_timeseries_legacy")
+            assert derive_bound_inventories(lambda sql, params=None: _execute(connection, sql, params)) == inventories
         finally:
             connection.close()
     finally:
@@ -500,7 +507,7 @@ def _bootstrap_production_shaped_schema(connection: object) -> None:
             run_id, basin_version_id, river_network_version_id, river_segment_id,
             valid_time, variable, value, unit
         )
-        SELECT 'sibling', 'b', 'n', 's', %s + (g * interval '1 minute'), 'q_down', 2.0, 'm3/s'
+        SELECT 'sibling', 'b', 'n', 's', %s + (g * interval '1 second'), 'q_down', 2.0, 'm3/s'
         FROM generate_series(0, 7199) g
         """,
         (sibling_start,),
@@ -539,3 +546,82 @@ def _bootstrap_production_shaped_schema(connection: object) -> None:
         "SELECT compress_chunk(show_chunks('met.forcing_station_timeseries', older_than => %s))",
         (older,),
     )
+
+
+def _assert_physical_parent_admission(connection: Any) -> None:
+    from packages.common.compressed_chunk_cold_runtime_catalog import (
+        ColdRuntimeError,
+        derive_hypertable_inventory,
+        load_catalog_chunk,
+        ranked_candidates_from_execute,
+    )
+
+    def execute(sql, params=None):
+        return _execute(connection, sql, params)
+
+    with pytest.raises(ColdRuntimeError, match="narrow"):
+        derive_bound_inventories(execute)
+    execute("ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_legacy")
+    create = """
+        CREATE TABLE hydro.river_timeseries (
+            run_key INTEGER NOT NULL, basin_version_key INTEGER NOT NULL,
+            river_network_version_key INTEGER NOT NULL, river_segment_key INTEGER NOT NULL,
+            valid_time TIMESTAMPTZ NOT NULL, lead_time_hours INTEGER,
+            variable_e hydro.river_variable NOT NULL, value DOUBLE PRECISION NOT NULL,
+            unit_e hydro.river_unit NOT NULL, quality_flag_e hydro.river_quality_flag NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (run_key, river_segment_key, variable_e, valid_time)
+        )
+    """
+    execute(create)
+    execute("SELECT create_hypertable('hydro.river_timeseries', 'valid_time', chunk_time_interval => interval '1 day')")
+    execute("""ALTER TABLE hydro.river_timeseries SET (
+        timescaledb.compress = true, timescaledb.compress_segmentby = 'run_key, river_segment_key',
+        timescaledb.compress_orderby = 'variable_e, valid_time')""")
+    execute("""INSERT INTO hydro.river_timeseries
+        SELECT CASE run_id WHEN 'selected' THEN 1 WHEN 'sibling' THEN 2 ELSE 3 END,
+               1, 1, 1, valid_time, lead_time_hours, variable::hydro.river_variable, value,
+               unit::hydro.river_unit, quality_flag::hydro.river_quality_flag, created_at
+        FROM hydro.river_timeseries_legacy""")
+    execute("SELECT compress_chunk(show_chunks('hydro.river_timeseries'))")
+    inventories = derive_bound_inventories(execute)
+    candidates = ranked_candidates_from_execute(
+        execute,
+        inventories=inventories,
+        cutoff=_CUTOFF + timedelta(days=21),
+        per_table_limit=8,
+        max_catalog_bytes=16 * 1024**2,
+    )
+    assert {item[3] for item in candidates} == {"river_timeseries", "forcing_station_timeseries"}
+    river = [item[-1] for item in candidates if item[2] == "hydro"]
+    assert len(river) == 3
+    assert all(item.range_end - item.range_start == timedelta(days=1) for item in river)
+    legacy = execute("""SELECT chunk_schema, chunk_name, is_compressed FROM timescaledb_information.chunks
+        WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries_legacy'""")
+    assert len(legacy) == 3 and all(row["is_compressed"] for row in legacy)
+    assert not {(row["chunk_schema"], row["chunk_name"]) for row in legacy} & {
+        (item.origin_schema, item.origin_name) for item in river
+    }
+    with pytest.raises(ColdRuntimeError):
+        derive_hypertable_inventory(execute, "hydro", "river_timeseries_legacy")
+    execute("ALTER TABLE hydro.river_timeseries_legacy RENAME TO river_timeseries_archived")
+    assert derive_bound_inventories(execute) == inventories
+    execute("ALTER TABLE hydro.river_timeseries_archived RENAME TO river_timeseries_legacy")
+    execute("ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_saved")
+    execute(create)
+    execute("SELECT create_hypertable('hydro.river_timeseries', 'valid_time', chunk_time_interval => interval '1 day')")
+    replacement = derive_bound_inventories(execute)
+    assert replacement.river.columns == inventories.river.columns
+    assert replacement.river.digest != inventories.river.digest
+    with pytest.raises(ColdRuntimeError, match="drift"):
+        load_catalog_chunk(
+            execute,
+            inventory=inventories.river,
+            hypertable_schema="hydro",
+            hypertable_name="river_timeseries",
+            origin_schema=river[0].origin_schema,
+            origin_name=river[0].origin_name,
+        )
+    execute("DROP TABLE hydro.river_timeseries")
+    execute("ALTER TABLE hydro.river_timeseries_saved RENAME TO river_timeseries")
+    assert derive_bound_inventories(execute) == inventories

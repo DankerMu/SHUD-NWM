@@ -63,10 +63,7 @@ def _binder(connection: Any) -> Execute:
                 return []
             names = [item[0] for item in cursor.description]
             rows = cursor.fetchall()
-        return [
-            dict(row) if isinstance(row, Mapping) else dict(zip(names, row, strict=False))
-            for row in rows
-        ]
+        return [dict(row) if isinstance(row, Mapping) else dict(zip(names, row, strict=False)) for row in rows]
 
     return execute
 
@@ -155,6 +152,7 @@ def observe_named_group(
     identity = durable_from_mapping(durable)
     chunk = load_catalog_chunk(
         execute,
+        inventory=inventories.for_hypertable(str(identity["hypertable_schema"]), str(identity["hypertable_name"])),
         hypertable_schema=str(identity["hypertable_schema"]),
         hypertable_name=str(identity["hypertable_name"]),
         origin_schema=str(identity["origin_schema"]),
@@ -218,6 +216,7 @@ def classify_current_candidates(
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     ranked = ranked_candidates_from_execute(
         execute,
+        inventories=inventories,
         cutoff=cutoff,
         per_table_limit=per_table_limit,
         max_catalog_bytes=max_catalog_bytes,

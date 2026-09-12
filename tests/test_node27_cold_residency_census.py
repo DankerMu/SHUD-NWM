@@ -215,7 +215,7 @@ def test_observer_owner_return_structures() -> None:
     inventories = observer.inventories()
     assert isinstance(inventories, BoundInventories)
     assert inventories.for_hypertable("hydro", "river_timeseries") is not None
-    ranked = observer.candidates(cutoff=_CUTOFF, per_table_limit=2)
+    ranked = observer.candidates(inventories=inventories, cutoff=_CUTOFF, per_table_limit=2)
     assert len(ranked) == 1
     rank, range_end, schema, name, oid, candidate = ranked[0]
     assert rank == 0 and range_end == _CUTOFF and schema == "hydro" and name == "river_timeseries"
@@ -235,9 +235,7 @@ def test_observer_owner_return_structures() -> None:
 
 
 @pytest.mark.parametrize("hydro_count,met_count", [(6, 0), (3, 3), (4, 2), (0, 6)])
-def test_exact_required_count_go_across_distributions(
-    tmp_path: Path, hydro_count: int, met_count: int
-) -> None:
+def test_exact_required_count_go_across_distributions(tmp_path: Path, hydro_count: int, met_count: int) -> None:
     connection = CensusConnection()
     for index in range(hydro_count):
         _load(connection, index, schema="hydro", before=1000 + index)
@@ -256,9 +254,7 @@ def test_exact_required_count_go_across_distributions(
     expected_e = max([*(1000 + index for index in range(hydro_count)), *(2000 + index for index in range(met_count))])
     assert policy["E"] == str(expected_e)
     assert policy["wal_reserve_bytes"] == policy["E"]
-    assert policy["installer_required_cold_free_bytes"] == str(
-        int(policy["S"]) + 2 * int(policy["E"])
-    )
+    assert policy["installer_required_cold_free_bytes"] == str(int(policy["S"]) + 2 * int(policy["E"]))
     assert artifact["blockers"] == []
     assert artifact["config"]["session_read_only"] is True
 
@@ -363,9 +359,7 @@ def test_uncompressed_candidate_is_no_go(tmp_path: Path) -> None:
     item = _chunk_item(0, is_compressed=False, compressed_oid=None)
     connection.load_group(
         item,
-        (
-            rel(item.origin_oid, item.origin_schema, item.origin_name, "r", "pg_default", 8192),
-        ),
+        (rel(item.origin_oid, item.origin_schema, item.origin_name, "r", "pg_default", 8192),),
     )
     connection.compression_bytes[item.origin_name] = 1000
     _assert_no_go_with_blocker(tmp_path / "census.json", connection, "is not compressed")
@@ -529,9 +523,10 @@ def test_doubled_rollback_overflow_is_no_go(tmp_path: Path) -> None:
 
 def test_lag_source_key_resolution() -> None:
     assert census.lag_source_key({"NODE27_COLD_RESIDENCY_LAG_SECONDS": "1"}) == "NODE27_COLD_RESIDENCY_LAG_SECONDS"
-    assert census.lag_source_key(
-        {"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "1"}
-    ) == "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"
+    assert (
+        census.lag_source_key({"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "1"})
+        == "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"
+    )
     assert census.lag_source_key({"UNRELATED": "1"}) == "configured-compression-contract-default"
     assert census.lag_seconds_from_env({"NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "172800"}) == 172800
     assert census.lag_seconds_from_env({}) == 604800
@@ -579,9 +574,7 @@ def test_engine_drift_is_fail_closed(tmp_path: Path, capsys: pytest.CaptureFixtu
     assert '"class": "engine_identity"' in capsys.readouterr().err
 
 
-def test_read_only_verification_failure_is_fail_closed(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_read_only_verification_failure_is_fail_closed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     connection = CensusConnection()
     _load(connection, 0)
     connection.read_only_setting = "off"

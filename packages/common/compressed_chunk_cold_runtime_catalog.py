@@ -63,11 +63,13 @@ SELECT a.attnum,
        a.attnotnull,
        a.attidentity,
        a.attgenerated,
-       t.typtype
+       t.typtype, c.oid AS parent_oid, ht.id AS hypertable_id
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_type t ON t.oid = a.atttypid
+JOIN _timescaledb_catalog.hypertable ht
+  ON ht.schema_name = n.nspname AND ht.table_name = c.relname
 WHERE n.nspname = %s AND c.relname = %s
   AND a.attnum > 0 AND NOT a.attisdropped
 ORDER BY a.attnum
@@ -80,9 +82,14 @@ ORDER BY dimension_number
 """
 CHUNK_WINDOW_SQL = """
 SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name,
-       range_start, range_end, is_compressed
-FROM timescaledb_information.chunks
+       range_start, range_end, is_compressed, p.oid AS parent_oid, ht.id AS hypertable_id
+FROM timescaledb_information.chunks v
+JOIN _timescaledb_catalog.chunk ch ON ch.schema_name = v.chunk_schema AND ch.table_name = v.chunk_name
+JOIN _timescaledb_catalog.hypertable ht ON ht.id = ch.hypertable_id
+JOIN pg_namespace pn ON pn.nspname = ht.schema_name
+JOIN pg_class p ON p.relnamespace = pn.oid AND p.relname = ht.table_name
 WHERE hypertable_schema = %s AND hypertable_name = %s
+  AND p.oid = %s AND ht.id = %s AND NOT ch.dropped
   AND is_compressed = true
   AND range_end <= %s
 ORDER BY range_end ASC, chunk_schema ASC, chunk_name ASC
@@ -90,9 +97,14 @@ LIMIT %s
 """
 CHUNK_BY_ORIGIN_SQL = """
 SELECT hypertable_schema, hypertable_name, chunk_schema, chunk_name,
-       range_start, range_end, is_compressed
-FROM timescaledb_information.chunks
+       range_start, range_end, is_compressed, p.oid AS parent_oid, ht.id AS hypertable_id
+FROM timescaledb_information.chunks v
+JOIN _timescaledb_catalog.chunk ch ON ch.schema_name = v.chunk_schema AND ch.table_name = v.chunk_name
+JOIN _timescaledb_catalog.hypertable ht ON ht.id = ch.hypertable_id
+JOIN pg_namespace pn ON pn.nspname = ht.schema_name
+JOIN pg_class p ON p.relnamespace = pn.oid AND p.relname = ht.table_name
 WHERE hypertable_schema = %s AND hypertable_name = %s
+  AND p.oid = %s AND ht.id = %s AND NOT ch.dropped
   AND chunk_schema = %s AND chunk_name = %s
 """
 COMPRESSION_STATS_SQL = """
@@ -183,6 +195,12 @@ class HypertableInventory:
     name: str
     columns: tuple[ColumnDescriptor, ...]
     digest: str
+    parent_oid: int
+    hypertable_id: int
+
+    def __post_init__(self) -> None:
+        if any(type(value) is not int or value <= 0 for value in (self.parent_oid, self.hypertable_id)):
+            raise ColdRuntimeError("invalid parent identity", error_class="inventory_drift", stage="inventory")
 
 
 @dataclass(frozen=True)
@@ -361,7 +379,7 @@ def _aware(value: Any, *, label: str) -> datetime:
     return value.astimezone(UTC)
 
 
-def _inventory_digest(columns: Sequence[ColumnDescriptor]) -> str:
+def _inventory_digest(columns: Sequence[ColumnDescriptor], parent_oid: int, hypertable_id: int) -> str:
     payload = [
         {
             "attnum": column.attnum,
@@ -373,7 +391,11 @@ def _inventory_digest(columns: Sequence[ColumnDescriptor]) -> str:
         }
         for column in columns
     ]
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(
+        {"parent_oid": parent_oid, "hypertable_id": hypertable_id, "columns": payload},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -424,9 +446,9 @@ def _validate_window_parity_origin(inventory: HypertableInventory, chunk: Catalo
             error_class="parity",
             stage="parity",
         )
-    if (
-        chunk.compressed_oid is not None
-        and (chunk.origin_schema, chunk.origin_name) == (chunk.compressed_schema, chunk.compressed_name)
+    if chunk.compressed_oid is not None and (chunk.origin_schema, chunk.origin_name) == (
+        chunk.compressed_schema,
+        chunk.compressed_name,
     ):
         raise ColdRuntimeError(
             "parity origin cannot be the current compressed sibling",
@@ -517,6 +539,8 @@ def compute_window_parity(
 
 
 def derive_hypertable_inventory(execute: Execute, schema: str, name: str) -> HypertableInventory:
+    if (schema, name) not in ALLOWED_HYPERTABLES:
+        raise ColdRuntimeError("hypertable is not allowlisted", error_class="inventory_drift", stage="inventory")
     rows = execute(COLUMN_INVENTORY_SQL, (schema, name))
     if not rows:
         raise ColdRuntimeError(
@@ -525,6 +549,14 @@ def derive_hypertable_inventory(execute: Execute, schema: str, name: str) -> Hyp
             stage="inventory",
         )
     columns: list[ColumnDescriptor] = []
+    parent_oid = rows[0].get("parent_oid")
+    hypertable_id = rows[0].get("hypertable_id")
+    for row in rows:
+        identity = (row.get("parent_oid"), row.get("hypertable_id"))
+        if any(type(value) is not int or value <= 0 for value in identity) or identity != (parent_oid, hypertable_id):
+            raise ColdRuntimeError(
+                "parent identity missing, invalid or contradictory", error_class="inventory_drift", stage="inventory"
+            )
     seen_names: set[str] = set()
     previous_attnum = 0
     for row in rows:
@@ -568,11 +600,46 @@ def derive_hypertable_inventory(execute: Execute, schema: str, name: str) -> Hyp
             error_class="inventory_drift",
             stage="inventory",
         )
+    if (schema, name) == ("hydro", "river_timeseries"):
+        expected = {
+            "run_key": ("integer", True),
+            "basin_version_key": ("integer", True),
+            "river_network_version_key": ("integer", True),
+            "river_segment_key": ("integer", True),
+            "valid_time": ("timestamp with time zone", True),
+            "lead_time_hours": ("integer", False),
+            "variable_e": ("hydro.river_variable", True),
+            "value": ("double precision", True),
+            "unit_e": ("hydro.river_unit", True),
+            "quality_flag_e": ("hydro.river_quality_flag", True),
+            "created_at": ("timestamp with time zone", True),
+        }
+        actual = {column.name: (column.type_name, column.not_null) for column in columns}
+        legacy = {
+            "run_id",
+            "basin_version_id",
+            "river_network_version_id",
+            "river_segment_id",
+            "variable",
+            "unit",
+            "quality_flag",
+        }
+        enums = {row["attname"] for row in rows if row["typtype"] == "e"}
+        if (
+            legacy.intersection(actual)
+            or any(actual.get(key) != value for key, value in expected.items())
+            or not {"variable_e", "unit_e", "quality_flag_e"} <= enums
+        ):
+            raise ColdRuntimeError(
+                "canonical river is not the supported narrow parent", error_class="inventory_drift", stage="inventory"
+            )
     return HypertableInventory(
         schema=schema,
         name=name,
         columns=tuple(columns),
-        digest=_inventory_digest(columns),
+        digest=_inventory_digest(columns, parent_oid, hypertable_id),
+        parent_oid=parent_oid,
+        hypertable_id=hypertable_id,
     )
 
 
@@ -619,21 +686,51 @@ def _relation_oid(execute: Execute, schema: str, name: str) -> int | None:
     return int(next(iter(rows[0].values())))
 
 
+def require_inventory(execute: Execute, inventory: HypertableInventory, schema: str, name: str) -> None:
+    if (inventory.schema, inventory.name) != (schema, name):
+        raise ColdRuntimeError("parent inventory mismatch", error_class="inventory_drift", stage="catalog")
+    if derive_hypertable_inventory(execute, schema, name) != inventory:
+        raise ColdRuntimeError("parent inventory drifted", error_class="inventory_drift", stage="catalog")
+
+
+def _require_row_parent(row: Mapping[str, Any], inventory: HypertableInventory) -> None:
+    identity = (row.get("parent_oid"), row.get("hypertable_id"))
+    if (
+        any(type(value) is not int or value <= 0 for value in identity)
+        or identity != (inventory.parent_oid, inventory.hypertable_id)
+        or (row.get("hypertable_schema"), row.get("hypertable_name")) != (inventory.schema, inventory.name)
+    ):
+        raise ColdRuntimeError("chunk parent identity mismatch", error_class="inventory_drift", stage="catalog")
+
+
 def load_catalog_chunk(
     execute: Execute,
     *,
+    inventory: HypertableInventory,
     hypertable_schema: str,
     hypertable_name: str,
     origin_schema: str,
     origin_name: str,
 ) -> CatalogChunk:
-    rows = execute(CHUNK_BY_ORIGIN_SQL, (hypertable_schema, hypertable_name, origin_schema, origin_name))
+    require_inventory(execute, inventory, hypertable_schema, hypertable_name)
+    rows = execute(
+        CHUNK_BY_ORIGIN_SQL,
+        (
+            hypertable_schema,
+            hypertable_name,
+            inventory.parent_oid,
+            inventory.hypertable_id,
+            origin_schema,
+            origin_name,
+        ),
+    )
     if len(rows) != 1:
         raise ColdRuntimeError(
             f"origin chunk {origin_schema}.{origin_name} missing or ambiguous",
             error_class="relation_disappeared",
             stage="catalog",
         )
+    _require_row_parent(rows[0], inventory)
     return _row_to_chunk(execute, rows[0])
 
 
@@ -744,6 +841,7 @@ def collect_residency_group(execute: Execute, chunk: CatalogChunk) -> ResidencyG
 def load_eligible_chunks(
     execute: Execute,
     *,
+    inventory: HypertableInventory,
     schema: str,
     name: str,
     cutoff: datetime,
@@ -756,7 +854,18 @@ def load_eligible_chunks(
             error_class="ineligible_hypertable",
             stage="selection",
         )
-    rows = execute(CHUNK_WINDOW_SQL, (schema, name, cutoff, limit + 1))
+    require_inventory(execute, inventory, schema, name)
+    rows = execute(
+        CHUNK_WINDOW_SQL,
+        (
+            schema,
+            name,
+            inventory.parent_oid,
+            inventory.hypertable_id,
+            cutoff,
+            limit + 1,
+        ),
+    )
     if len(rows) > limit:
         raise ColdRuntimeError(
             "catalog discovery exceeds the row/candidate ceiling",
@@ -766,6 +875,7 @@ def load_eligible_chunks(
     captured = 2
     chunks: list[CatalogChunk] = []
     for row in rows:
+        _require_row_parent(row, inventory)
         captured += len(json.dumps(json_ready(dict(row)), sort_keys=True, separators=(",", ":")).encode())
         if captured > max_bytes:
             raise ColdRuntimeError("catalog discovery exceeds the byte ceiling", error_class="bound", stage="catalog")
@@ -887,6 +997,7 @@ def lock_allowlisted_parents(execute: Execute) -> tuple[str, ...]:
 def ranked_candidates_from_execute(
     execute: Execute,
     *,
+    inventories: BoundInventories,
     cutoff: datetime,
     per_table_limit: int,
     max_catalog_bytes: int,
@@ -895,6 +1006,7 @@ def ranked_candidates_from_execute(
     for schema, name in (("hydro", "river_timeseries"), ("met", "forcing_station_timeseries")):
         chunks = load_eligible_chunks(
             execute,
+            inventory=inventories.for_hypertable(schema, name),
             schema=schema,
             name=name,
             cutoff=cutoff,
