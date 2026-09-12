@@ -4522,3 +4522,13 @@ later-round catches core=269、rotated=270、phase=57、skipped=15。
 记录 deferral：keep/cut 仍待维护者决策；本次 epic 实现与合并授权不含审核策略调整。
 现行 keep 与座位上限不变，共享 timeseries OpenSpec 继续 active。
 
+
+### Revisit 2026-09-12（post PR #2286 / issue #2162 目标 1）
+
+追加后实测 642 行、632 merged、10 terminal；209 个多轮样本，
+later-round catches core=269、rotated=270、phase=57、skipped=15。
+本单 fixture tier `none`（零代码，node-27 运维窗口 + receipt），无 Phase 4 轮次；
+Phase 0.5 fixture review 三轮只读（spec-compliance+test-evidence）属 fixture 审查，不计入多轮样本。
+本单不增加后轮 catch，不能据此推断轮换收益。
+记录 deferral：keep/cut 仍待维护者决策；本次目标 1 合并授权不含审核策略调整。
+现行 keep 与座位上限不变。
