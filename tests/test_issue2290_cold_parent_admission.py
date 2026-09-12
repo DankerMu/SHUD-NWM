@@ -22,6 +22,14 @@ def narrow_rows():
         ("quality_flag_e", "hydro.river_quality_flag", True, "e"),
         ("created_at", "timestamp with time zone", True, "b"),
     )
+    types = {
+        "integer": ("pg_catalog", "int4"),
+        "timestamp with time zone": ("pg_catalog", "timestamptz"),
+        "double precision": ("pg_catalog", "float8"),
+        "hydro.river_variable": ("hydro", "river_variable"),
+        "hydro.river_unit": ("hydro", "river_unit"),
+        "hydro.river_quality_flag": ("hydro", "river_quality_flag"),
+    }
     return [
         dict(
             attnum=index,
@@ -31,6 +39,8 @@ def narrow_rows():
             attidentity="",
             attgenerated="",
             typtype=typtype,
+            type_schema=types[kind][0],
+            type_base_name=types[kind][1],
             parent_oid=2001,
             hypertable_id=17,
         )
@@ -279,5 +289,31 @@ def test_incomplete_or_ambiguous_narrow_observation_refuses(mutation):
         rows[6]["typtype"] = "b"
     else:
         rows[0]["attnotnull"] = False
+    with pytest.raises(ColdRuntimeError):
+        derive(rows)
+
+
+def test_enum_admission_uses_catalog_identity_not_visible_spelling():
+    rows = narrow_rows()
+    for row in rows:
+        if row["typtype"] == "e":
+            row["type_name"] = row["type_base_name"]
+    inventory = derive(rows)
+    assert (inventory.parent_oid, inventory.hypertable_id) == (2001, 17)
+    assert next(column for column in inventory.columns if column.name == "variable_e").type_name == "river_variable"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("type_schema", "wrong"),
+        ("type_schema", None),
+        ("type_base_name", "wrong"),
+        ("type_base_name", None),
+    ],
+)
+def test_enum_admission_refuses_false_or_missing_catalog_identity(field, value):
+    rows = narrow_rows()
+    rows[6][field] = value
     with pytest.raises(ColdRuntimeError):
         derive(rows)

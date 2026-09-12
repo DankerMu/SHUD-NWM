@@ -17674,3 +17674,42 @@ def test_physical_parent_fake_performance_route_has_independent_removal_proof(mo
     assert after == before - {suite}
     assert set(original.tests) - {suite} <= after
     assert SELECTOR_META_GUARD_TEST in before & after
+
+
+@pytest.mark.parametrize(
+    ("owner", "suite"),
+    [
+        ("packages/common/compressed_chunk_cold_runtime_catalog.py", "tests/test_issue2290_cold_parent_admission.py"),
+        ("packages/common/compressed_chunk_cold_runtime_catalog.py", "tests/test_issue1895_readiness_storage.py"),
+        (
+            "packages/common/compressed_chunk_cold_runtime_catalog.py",
+            "tests/test_issue1895_readiness_performance_live_cli.py",
+        ),
+        ("packages/common/node27_issue1895_post_target.py", "tests/test_issue1895_readiness_storage.py"),
+        (
+            "packages/common/node27_issue1895_performance_live.py",
+            "tests/test_issue1895_readiness_performance_live_cli.py",
+        ),
+        ("tests/cold_residency_fakes.py", "tests/test_issue1895_readiness_storage.py"),
+        ("tests/cold_residency_fakes.py", "tests/test_issue1895_readiness_performance_live_cli.py"),
+    ],
+)
+def test_admission_readiness_owner_asserting_suite_removal_preserves_other_legs(monkeypatch, owner, suite):
+    from scripts import select_ci_tests
+
+    rules_name = "SUPPORT_MODULE_TEST_RULES" if owner.startswith("tests/") else "PATH_TEST_RULES"
+    rules = getattr(select_ci_tests, rules_name)
+    matching = [rule for rule in rules if rule.pattern == owner]
+    assert len(matching) == 1
+    original = matching[0]
+    assert suite in original.tests
+    before = set(select_tests([owner], repo_root=Path(".")))
+    assert set(original.tests) <= before
+    mutant = tuple(
+        replace(rule, tests=tuple(target for target in rule.tests if target != suite))
+        if rule.pattern == owner
+        else rule
+        for rule in rules
+    )
+    monkeypatch.setattr(select_ci_tests, rules_name, mutant)
+    assert set(select_tests([owner], repo_root=Path("."))) == before - {suite}

@@ -395,8 +395,20 @@ class FakeConnection:
             schema, name = params
             inventory = self.inventories.for_hypertable(schema, name)
             rows = []
+            types = {
+                "integer": ("pg_catalog", "int4", "b"),
+                "text": ("pg_catalog", "text", "b"),
+                "double precision": ("pg_catalog", "float8", "b"),
+                "timestamp with time zone": ("pg_catalog", "timestamptz", "b"),
+                "json": ("pg_catalog", "json", "b"),
+                "bytea": ("pg_catalog", "bytea", "b"),
+                "boolean": ("pg_catalog", "bool", "b"),
+                "hydro.river_variable": ("hydro", "river_variable", "e"),
+                "hydro.river_unit": ("hydro", "river_unit", "e"),
+                "hydro.river_quality_flag": ("hydro", "river_quality_flag", "e"),
+            }
             for column in inventory.columns:
-                typtype = "e" if column.type_name.startswith("hydro.") else "b"
+                type_schema, type_base_name, typtype = types[column.type_name]
                 rows.append(
                     {
                         "attnum": column.attnum,
@@ -406,6 +418,8 @@ class FakeConnection:
                         "attidentity": column.identity,
                         "attgenerated": column.generated,
                         "typtype": typtype,
+                        "type_schema": type_schema,
+                        "type_base_name": type_base_name,
                         "parent_oid": self.parent_oids[(schema, name)],
                         "hypertable_id": inventory.hypertable_id,
                     }
@@ -418,6 +432,8 @@ class FakeConnection:
                 "attidentity",
                 "attgenerated",
                 "typtype",
+                "type_schema",
+                "type_base_name",
                 "parent_oid",
                 "hypertable_id",
             ]

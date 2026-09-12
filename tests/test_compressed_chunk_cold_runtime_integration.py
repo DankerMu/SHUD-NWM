@@ -596,6 +596,28 @@ def _assert_physical_parent_admission(connection: Any) -> None:
     river = [item[-1] for item in candidates if item[2] == "hydro"]
     assert len(river) == 3
     assert all(item.range_end - item.range_start == timedelta(days=1) for item in river)
+    original_search_path = execute("SHOW search_path")[0]["search_path"]
+    try:
+        execute("SET search_path TO hydro, public")
+        visible = derive_bound_inventories(execute)
+        assert (visible.river.parent_oid, visible.river.hypertable_id) == (
+            inventories.river.parent_oid,
+            inventories.river.hypertable_id,
+        )
+        assert next(column for column in visible.river.columns if column.name == "variable_e").type_name == (
+            "river_variable"
+        )
+        visible_candidates = ranked_candidates_from_execute(
+            execute,
+            inventories=visible,
+            cutoff=_CUTOFF + timedelta(days=21),
+            per_table_limit=8,
+            max_catalog_bytes=16 * 1024**2,
+        )
+        assert {item[-1].origin_oid for item in visible_candidates} == {item[-1].origin_oid for item in candidates}
+    finally:
+        execute("SELECT set_config('search_path', %s, false)", (original_search_path,))
+    assert execute("SHOW search_path")[0]["search_path"] == original_search_path
     legacy = execute("""SELECT chunk_schema, chunk_name, is_compressed FROM timescaledb_information.chunks
         WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries_legacy'""")
     assert len(legacy) == 3 and all(row["is_compressed"] for row in legacy)

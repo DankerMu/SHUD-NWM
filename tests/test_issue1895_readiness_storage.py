@@ -1279,3 +1279,54 @@ def test_fs_reconcile_cli_refuses_symlink_and_parent_0755_receipt_before_approva
     os.chmod(private, 0o700)
     assert fs_reconcile_cli.main(argv) == 0
     assert called["n"] == 1
+
+
+@pytest.mark.parametrize("state", ["wide", "parent_drift"])
+def test_post_target_cli_refuses_actual_cold_admission_without_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+) -> None:
+    from packages.common import node27_issue1895_post_target as owner
+    from tests.cold_residency_fakes import FakeConnection
+
+    connection = FakeConnection()
+    original = connection.dispatch
+
+    def dispatch(sql, params):
+        rows, names = original(sql, params)
+        if "FROM pg_attribute" in sql:
+            if state == "wide" and params == ("hydro", "river_timeseries"):
+                rows.append(dict(rows[0], attnum=99, attname="run_id", type_name="text", typtype="b"))
+            elif state == "parent_drift" and params == ("met", "forcing_station_timeseries"):
+                connection.parent_oids[("hydro", "river_timeseries")] += 1
+        return rows, names
+
+    connection.dispatch = dispatch
+    baseline = _write_private_json(
+        _private_dir(tmp_path / "input") / "baseline.json",
+        {"groups": _baseline_groups_with_parity(_valid_window_parity())},
+    )
+    output = _private_dir(tmp_path / "output") / "observed.json"
+    monkeypatch.setattr(post_target_observe_cli, "resolve_readonly_dsn", lambda **_kwargs: "readonly-dsn")
+    monkeypatch.setattr(owner, "open_readonly_connection", lambda _dsn: connection)
+    monkeypatch.setattr(owner, "fetch_display_watermark", lambda *_args, **_kwargs: datetime(2026, 9, 1, tzinfo=UTC))
+    rc = post_target_observe_cli.main(
+        [
+            "--baseline",
+            str(baseline),
+            "--output",
+            str(output),
+            "--reviewed-sha",
+            SHA,
+            "--lag-seconds",
+            "604800",
+        ]
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("POST_TARGET_CATALOG_FAILED:")
+    assert "Traceback" not in captured.err
+    assert list(output.parent.iterdir()) == []
+    assert connection.closed
