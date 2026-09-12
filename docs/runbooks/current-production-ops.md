@@ -1270,14 +1270,24 @@ calendar event **不会**在重新 `start` 时补跑，所以既没有失败日�
 两路证据**独立定级**：systemd 读不动是第 1 条，manifest 解不出是第 7 条，互不遮蔽。
 年龄解不出时第 2、6 两条 manifest 比较是**跳过**，不是按 0 或按无穷大代入。
 
-三个阈值均可用 env 覆盖，**三个都**在 config 阶段硬断言严格小于 168——
-freshness 阈值 ≥ 168 永远赶不在 consumer fail closed 之前报，
-stopped-dwell ≥ 168 则意味着 timer 可以在 consumer 的整个预算里一直死着而不报
-`timer_stopped`，都是同一个绿色门面：
+三个阈值均可用 env 覆盖，**三个都**在 config 阶段做区间检查。口径是"留够余量"，
+不是"小于 168"：`< 168` 曾经收下 167——只给 consumer 的 168 小时预算留 0.6% 当预警。
+实测 `STOPPED_DWELL_HOURS=167` 配 `MAX_MANIFEST_AGE_HOURS=167`，能把 08-28 那副几何
+判成 `ok`、退出 0，整整 166 小时。现在的规则是：
 
-- `NHMS_REFRESH_HEALTH_MAX_NEXT_DWELL_HOURS`（默认 36）
-- `NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS`（默认 120）
-- `NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS`（默认 6）
+- 三个阈值一律只收 `1..144` 小时——即在 consumer 的 168 小时硬界之下至少留 **24 小时**
+  余量。24 小时是一个完整的 refresh cadence：报警必须在"还来得及跑完一次计划内
+  refresh"之前响，否则报了也救不回来。
+- `STOPPED_DWELL_HOURS` 再额外封顶 **24 小时**（一个 cadence）。timer 空转超过自己的
+  周期就已经漏掉了一个 tick，不管那个手工发布窗口本来是为什么开的。
+
+越界值在**采集任何证据之前**就被拒（退出 2，不写 receipt），不会变成一个判决。
+
+| env | 默认 | 上限 |
+| --- | --- | --- |
+| `NHMS_REFRESH_HEALTH_MAX_NEXT_DWELL_HOURS` | 36 | 144 |
+| `NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS` | 120 | 144 |
+| `NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS` | 6 | 24 |
 
 service unit **故意不带 `EnvironmentFile=`**：默认值就是 node-22 的生产值，多一个
 未入库的 env 文件就多一条能悄悄放松告警阈值的路径。真要改阈值，用 drop-in 并把
@@ -1297,9 +1307,13 @@ stopped-dwell 存在的原因就是上面 #1104 那个 stop/start 窗口：窗�
 dwell 之内不是"静默放行"——其余信号照常定级，manifest 同时 stale 一样非零。
 
 Receipt 落在 `/scratch/frd_muziyao/nhms-prod/workspace/refresh-timer-health/receipts/latest.json`，
-目录 0700、文件 0600，字段是封闭集合（`schema_version`、`generated_at`、`verdict`、
-四个原始信号加 `sub_state`/`last_trigger`、`manifest_age_hours`、`manifest_source`、
-三个阈值、被检查的 unit 名）——**不回显任何路径或其它 env 值**。
+目录 0700、文件 0600。字段是**封闭集合**，逐个列在下面——有测试拿 `build_receipt` 的
+实际输出对着这份清单核，多一个字段或少一个字段都会红。**不回显任何路径或其它 env 值**：
+
+`schema_version`、`generated_at`、`verdict`、`unit`、`unit_file_state`、`active_state`、
+`sub_state`、`inactive_enter_timestamp`、`next_elapse`、`last_trigger`、
+`manifest_age_hours`、`manifest_source`、`max_next_dwell_hours`、
+`max_manifest_age_hours`、`stopped_dwell_hours`。
 
 `manifest_source` 是三形状的封闭值，记录到底是哪一路证据回答了 manifest 年龄：
 
@@ -1359,6 +1373,26 @@ scripts/install_node22_refresh_timer_health.sh --enable     # 装载 hourly time
 systemctl --user list-timers nhms-node22-refresh-timer-health.timer --no-pager
 scripts/install_node22_refresh_timer_health.sh --rollback   # 撤回 unit 文件
 ```
+
+##### 探针自己的稳态核对（watchdog 不看自己）
+
+探针只报"它跑了并且发现了什么"，报不了"它压根没跑"：timer 停在 `enabled` + `inactive`
+永远不会进 `failed`，`systemctl --user list-units --failed` 干干净净，最后一份 receipt
+永远读作 `verdict: "ok"`。`Persistent=true` **不**管这个——它只在 timer **转为 active**
+（开机，或显式 `start`）时补跑漏掉的 tick，对一直停着的 timer 毫无作用。也就是说，
+把 08-28 那个动作往上做一层（停掉探针 timer 而不重启），整条 lane 会悄悄退回改动前的
+盲区，而所有表面依然全绿。
+
+所以探针 timer 用和上面 refresh timer 完全一样的口径单独核对，两列都不合格即失败：
+
+| 列 | 命令 | 合格 | 不合格的样子 |
+| --- | --- | --- | --- |
+| `list-timers` 的 `NEXT` | `systemctl --user list-timers nhms-node22-refresh-timer-health.timer --no-pager` | 具体时刻（hourly + 最多 5 分钟 jitter） | `-`——探针自己停了，从此不再产生任何判决 |
+| 探针 receipt 的 `generated_at` | `jq -r .generated_at /scratch/frd_muziyao/nhms-prod/workspace/refresh-timer-health/receipts/latest.json` | 距今 < 2 小时（hourly cadence 的两倍） | 更旧——不管 `verdict` 字段写的是什么，那都是一份过期的判决 |
+
+这条递归**没有**在代码里关掉：能关掉它的观察者必须不是 node-22 上的 user timer，
+那是本次改动明确不做的 off-host 路由。本节欠的是把这件事说清楚，
+外加一条运维能自己跑的检查命令。
 
 预合并的只读验证不要在 `/scratch/frd_muziyao/NWM` 里 checkout 本分支——那棵树是
 scheduler 与 refresh oneshot 的活执行根。把探针单文件 stage 到 checkout 之外，

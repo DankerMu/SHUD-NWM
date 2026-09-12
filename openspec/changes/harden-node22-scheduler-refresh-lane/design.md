@@ -154,9 +154,27 @@ Four ordering choices carry weight:
 Defaults, all overridable by env: next-dwell 36 h
 (`NHMS_REFRESH_HEALTH_MAX_NEXT_DWELL_HOURS`), manifest age 120 h
 (`NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS`), stopped-dwell 6 h
-(`NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS`). The two freshness thresholds sit far
-enough below 168 h to leave operator margin, and are asserted at config time to
-be strictly under 168.
+(`NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS`).
+
+The bound on these was originally written as "strictly under 168", with the
+prose claiming they "sit far enough below 168 h to leave operator margin". Those
+are not the same statement, and only the prose one is useful: `167` passed the
+literal check while leaving 0.6% of the consumer's budget as warning. Measured,
+`STOPPED_DWELL_HOURS=167` with `MAX_MANIFEST_AGE_HOURS=167` grades the 2026-08-28
+geometry — `enabled` + `inactive` for six days, manifest stale — as `ok`, exit 0,
+for 166 hours. The margin is now enforced rather than described:
+
+- Every threshold must leave at least **24 h** of margin below the consumer's
+  168 h bound, so the accepted range is `1..144`. Twenty-four hours is one full
+  refresh cadence: the alarm must fire with at least one whole scheduled refresh
+  still able to land before the consumer fail-closes.
+- `STOPPED_DWELL_HOURS` is additionally capped at **24 h**, one cadence. A timer
+  idle longer than its own period has already missed a tick, whatever the
+  operator's publisher window was for.
+
+The shipped defaults (36 / 120 / 6) sit well inside both rules. An out-of-range
+value is refused before any evidence is collected, so a bad threshold fails
+closed rather than grading `ok`.
 
 The manifest signal is computed and recorded independently of the systemd
 signals, so the receipt still carries `manifest_age_hours` when systemd is
@@ -206,7 +224,7 @@ Resolution order, first success wins:
 1. The configured `latest.json`.
 2. The sibling `history/` directory of that file. The runner writes every
    receipt there as `refresh_<YYYYmmddTHHMMSSZ>_<uuid12>.json`
-   (`scripts/scheduler_file_provider_refresh.py:1628`), so the fixed-width UTC
+   (`scripts/scheduler_file_provider_refresh.py:611`), so the fixed-width UTC
    prefix makes a **lexical descending sort chronological** — no timestamp
    parsing is needed to order the candidates, and no `mtime` is trusted.
    Candidates are filtered to that filename shape, the directory listing is
@@ -280,10 +298,11 @@ The env surface splits into four kinds, and only the first two are hardened:
 
 - **The clock** — removed outright. No env seam exists.
 - **The thresholds** (`MAX_NEXT_DWELL_HOURS`, `MAX_MANIFEST_AGE_HOURS`,
-  `STOPPED_DWELL_HOURS`) — bounded at config time, each asserted strictly under
-  168. They move *where* the alarm line sits, within a range that cannot reach
-  the consumer's own fail-closed cliff, and an out-of-range value is refused
-  before any evidence is collected rather than grading `ok`.
+  `STOPPED_DWELL_HOURS`) — range-checked at config time to `1..144`, with
+  `STOPPED_DWELL_HOURS` additionally capped at 24 h (D3). They move *where* the
+  alarm line sits, within a range that always leaves at least one full refresh
+  cadence before the consumer's own fail-closed cliff, and an out-of-range value
+  is refused before any evidence is collected rather than grading `ok`.
 - **The target selectors** (`UNIT`, `REFRESH_RECEIPT`, `RECEIPT_ROOT`,
   `SYSTEMCTL`) — **unbounded, and a poisoned value can absolutely produce `ok`**:
   point `UNIT` at a healthy unrelated timer, or `SYSTEMCTL` at a script that
@@ -436,17 +455,20 @@ Regression rows:
 | R8b | probe, `ActiveState=inactive` with empty or unparseable `InactiveEnterTimestamp` | `probe_failed`, exit non-zero — dwell arithmetic undefined, fail closed |
 | R8c | timestamp parser, a literal `systemctl show` string carrying a **non-local** zone abbreviation, asserted without relying on the test host's own zone | parsed per the zone token, not per `.astimezone()` of the runner; `UTC`/`GMT`/`Z` read as UTC, any other token read as the emitting host's local zone. `systemctl --timestamp=utc` is **not** adopted: measured on node-22 (systemd 255) it converts `InactiveEnterTimestamp` but leaves `NextElapseUSecRealtime` in local time, so it yields a mixed-zone surface rather than a uniform one |
 | R9 | probe, `latest.json` missing / unreadable / schema-invalid / carrying no `registry` provider, **and** a newer-than-threshold history receipt resolves the age | the manifest age is taken from history; `manifest_source` is `history:<filename>`; the timer signals grade normally and a healthy lane grades `ok`, exit 0 |
-| R9b | probe, `latest.json` unresolvable **and** the timer is genuinely stopped past the dwell | `timer_stopped`, exit non-zero — never masked by a manifest-evidence verdict (the A1 regression) |
+| R9b | probe, `latest.json` unresolvable, crossed with **each** of the three timer verdicts | the timer verdict wins every time — `timer_stopped`, `timer_not_enabled`, and `timer_not_scheduled` (active with empty or unparseable `NextElapseUSecRealtime`) — never masked by a manifest-evidence verdict. All three arms are asserted: the spec says "SHALL NOT mask **any** timer verdict", and pinning two of three let the precedence-7 arm be hoisted above `timer_not_scheduled` with the suite still green |
 | R9c | probe, `latest.json` unresolvable **and** no history candidate resolves an age | `manifest_unavailable`, exit non-zero, never `ok`; `manifest_source` is `unavailable` |
 | R9d | probe, history fallback bounds | directory listing capped at 200 entries and at most 10 candidates opened; each read bounded and `O_NOFOLLOW`; only `refresh_<UTC>_<uuid>.json` names considered; candidates ordered by lexical descending filename, never by `mtime` |
-| R10 | config with either freshness threshold >= 168, **or** a stopped-dwell outside its own asserted bounds | rejected at config time, non-zero — all three tunables are bounded, not two |
+| R10 | config thresholds outside their enforced range | rejected at config time, non-zero, before any evidence is collected. Enforced range is `1..144` for all three (>= 24 h of margin below the consumer's 168 h bound), with `STOPPED_DWELL_HOURS` additionally capped at 24 h. Asserted at the boundaries: 144 accepted, 145 refused; stopped-dwell 24 accepted, 25 refused; and the previously-accepted 167 refused |
+| R10b | no in-range threshold combination grades a dead lane `ok` past one cadence | property test over the accepted threshold ranges: for the 2026-08-28 geometry (`enabled` + `inactive`, manifest stale), no accepted combination yields `ok` once idle exceeds 24 h. This is the executable form of the margin claim — the prose version held for the defaults only |
 | R11 | probe source scanned for `start\|stop\|enable\|disable\|restart\|daemon-reload` | zero hits |
+| R11c | the probe timer's own liveness is checkable, and no unit comment claims otherwise | `Persistent=` on the probe timer compensates a missed tick only when the timer transitions to active (boot, or an explicit `start`); it does nothing for a timer left `enabled` + `inactive`, which is the 2026-08-28 geometry. Any unit comment implying the probe catches itself up is removed. The steady-state check is documented for the probe timer exactly as it is for the refresh timer: `list-timers` `NEXT` is not `-`, and the probe receipt's `generated_at` is recent |
 | R11b | probe env surface, enumerated | every environment variable the probe reads is classified into exactly one of the four kinds in D4 — removed (the clock), bounded-and-fail-closed (the three thresholds), target selector (`UNIT`, `REFRESH_RECEIPT`, `RECEIPT_ROOT`, `SYSTEMCTL`), or output switch (`JSON`). The asserted invariant is the grading one: **no probe-specific env variable can make the probe misgrade the signals it did collect** — the clock has no env seam, and every threshold is refused out of range before evidence is collected. Target selectors are explicitly *not* claimed to be a defence; they sit at the same UID and trust level as the probe script itself. `TZ` is the one named exception, accepted and recorded in D4 rather than defended, with R8c pinning the parse so the behaviour is deterministic. Each variable is exercised through its env path, not only through its flag |
 | R12 | probe run against the fake `systemctl`, every invocation recorded | only `show` and `list-timers` subcommands ever invoked |
 | R13 | probe source scanned for non-stdlib imports | zero hits (self-contained, D4) |
 | R14 | probe receipt written | parent dir private, file mode 0600, bounded size, required fields present, no env values other than the integer thresholds and unit name. The field set is closed and includes `manifest_source`, whose value is exactly one of `latest`, `history:<filename>`, `unavailable` |
 | R14b | probe receipt write fails (short write, or an error mid-write) | fails closed with a non-zero exit **and** the previous good receipt is left intact — never truncated, never destroyed; the verdict and any evidence errors are printed to the journal before the process exits, since D2 makes the journal the alert channel |
-| R15 | installer `--install` / `--enable` / `--rollback` | the protected units are unchanged across the run, compared per unit **type**: for the two **timers** (`nhms-compute-scheduler.timer`, the refresh timer) both `UnitFileState` and `is-active` must be byte-equal before and after; for the two timer-driven **oneshot services** (`nhms-compute-scheduler.service`, the refresh service) only `UnitFileState` is compared. A oneshot's `is-active` legitimately flips on its own cadence — the compute scheduler every 5 minutes, the refresh service inside its 02:15-04:15Z window — so comparing it would make the assertion fire on a unit nobody touched, and an installer that aborts and rolls back on that false positive turns arming into a retry loop. `UnitFileState` is what "unchanged" means for a unit whose activity is driven by its timer |
+| R15 | installer `--install` / `--enable` / `--rollback` | the protected units are unchanged across the run, compared per unit **type**: for the two **timers** both `UnitFileState` and `is-active` byte-equal before and after; for the two timer-driven **oneshot services** only `UnitFileState`, since a oneshot's `is-active` legitimately flips on its own cadence (the compute scheduler every 5 minutes, the refresh service inside its 02:15-04:15Z window) and comparing it would abort on a unit nobody touched. Proven behaviourally on **both** installers by a divergent second read that must abort the run and back it out — a source grep is not evidence, because reverting the call sites while leaving the helper functions in place as dead code keeps every grep matching |
+| R15b | the protected-state baseline is captured per invocation, never read across invocations | `scheduler.before` / `protected.before` are written at the start of **every** action (`--install`, `--enable`, `--rollback`), so the assertion means "this invocation changed nothing" — exactly what R15 claims — and no on-disk format is ever a contract between two versions of the installer. Evidence: a test seeding a stale, differently-shaped baseline must leave `--enable` exiting 0 with the timer still armed, and `--rollback` exiting 0 with its status line printed. Nothing restores *from* this file; `refresh.before` is the restore data and keeps its existence precondition |
 | R16 | dry-run, direct-grid + worker mirror, N models | `outcome=dry_run`, `reason=dry_run_complete`, `phase=complete`; registry and mirror `entry_count` both N |
 | R17 | dry-run boundaries: single model and N models | counts agree at 1 and at N; no literal 76 anywhere in the assertion |
 | R17b | dry-run over an **empty** model set, both paths | fails closed with `provider_invalid` — direct-grid at `:896-898`, non-direct-grid at `:961-962` (empty readiness). The runner catches the `RefreshError` and persists a terminal `outcome=failed` / `reason=provider_invalid` receipt with an empty `providers` list, which is correct: what is unreachable is a **successful zero-count `dry_run` receipt**, and neither guard may be relaxed to make one reachable |
@@ -478,6 +500,23 @@ Regression rows:
 
 ## Risks / Trade-offs
 
+**The watchdog is itself unwatched, and that is a real limit of D2, not a
+detail.** D2 makes the alert of record a failed node-22 user unit plus a local
+receipt. That channel reports a probe that *ran and found something*. It reports
+nothing about a probe that never ran: a timer left `enabled` + `inactive` never
+enters `failed`, `list-units --failed` stays clean, and the last receipt keeps
+reading `verdict: "ok"` indefinitely. The originating incident began exactly
+this way — a timer stopped during a manual-publisher window and not restarted —
+so the same operator action that produced the 2026-08-28 outage, applied one
+level up to the probe timer, silently returns the lane to the pre-change blind
+spot while every surface still looks healthy. `Persistent=` does not cover this;
+it only replays a missed tick when the timer transitions to active. The change
+does not close this recursion in code — doing so needs a watcher that is not
+itself a node-22 user timer, which is the off-host routing this change
+explicitly does not attempt. What it owes instead is honesty and a check an
+operator can run: the recursion is recorded here, and the probe timer gets the
+same documented steady-state row the refresh timer has (R11c).
+
 - **The alert does not leave node-22.** A `failed` user unit plus a 0600 local
   receipt is only an alert to whoever looks at that host, and nothing polls
   node-22's failed units today. This is accepted, not mitigated (D2): the change
@@ -487,10 +526,12 @@ Regression rows:
 - The probe cadence adds ticks on a production compute node. Bounded: hourly,
   stdlib-only, two read-only `systemctl` calls and one small JSON read, with a
   short `TimeoutStartSec` so a wedged probe becomes visible instead of hanging.
-- Thresholds are judgement calls. All three are env-overridable; the two
-  freshness thresholds are asserted to stay strictly under 168 h. The 6 h
-  stopped-dwell trades detection latency for silence during legitimate #1104
-  windows — a real trade, bounded at 6 h against a 168 h budget.
+- Thresholds are judgement calls. All three are env-overridable and all three
+  are range-checked to `1..144`, with the stopped-dwell additionally capped at
+  24 h, so every accepted configuration leaves at least one full refresh cadence
+  before the 168 h cliff. The 6 h default stopped-dwell trades detection latency
+  for silence during legitimate #1104 windows — a real trade, bounded at 6 h
+  against a 168 h budget.
 - The probe duplicates a small bounded-read helper rather than importing
   `packages/common/safe_fs.py`. Deliberate (D4): a watchdog that only runs from
   inside the checkout it watches cannot produce pre-merge live evidence without

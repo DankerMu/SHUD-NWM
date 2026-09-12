@@ -14,6 +14,7 @@ import ast
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -624,6 +625,191 @@ def test_r10_defaults_are_the_documented_thresholds() -> None:
     assert thresholds.stopped_dwell_hours == 6
 
 
+def test_r10_the_threshold_ceilings_are_derived_from_the_consumer_bound() -> None:
+    """The two ceilings have ONE source each, and the tests below read them.
+
+    `MAX_THRESHOLD_HOURS` is not an independent number to be kept in sync by
+    hand: it is the consumer's bound minus one refresh cadence, and the
+    stopped-dwell ceiling IS one cadence.  Asserting the arithmetic here is what
+    lets every boundary test below quote the constants instead of literals.
+    """
+    assert probe.REFRESH_CADENCE_HOURS == 24
+    assert (
+        probe.MAX_THRESHOLD_HOURS
+        == probe.CONSUMER_MAX_MANIFEST_AGE_HOURS - probe.REFRESH_CADENCE_HOURS
+    )
+    assert probe.MAX_STOPPED_DWELL_HOURS == probe.REFRESH_CADENCE_HOURS
+    # The shipped defaults must sit inside both rules, or the unit ships refused.
+    defaults = probe.load_thresholds({})
+    assert defaults.max_next_dwell_hours <= probe.MAX_THRESHOLD_HOURS
+    assert defaults.max_manifest_age_hours <= probe.MAX_THRESHOLD_HOURS
+    assert defaults.stopped_dwell_hours <= probe.MAX_STOPPED_DWELL_HOURS
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [probe.ENV_MAX_NEXT_DWELL_HOURS, probe.ENV_MAX_MANIFEST_AGE_HOURS],
+)
+def test_r10_a_freshness_threshold_accepts_the_ceiling_and_refuses_one_over(
+    env_name: str,
+) -> None:
+    """The boundary, quoted from the constant rather than from a literal."""
+    accepted = probe.load_thresholds({env_name: str(probe.MAX_THRESHOLD_HOURS)})
+
+    assert (
+        getattr(
+            accepted,
+            {
+                probe.ENV_MAX_NEXT_DWELL_HOURS: "max_next_dwell_hours",
+                probe.ENV_MAX_MANIFEST_AGE_HOURS: "max_manifest_age_hours",
+            }[env_name],
+        )
+        == probe.MAX_THRESHOLD_HOURS
+    )
+    with pytest.raises(probe.ConfigError):
+        probe.load_thresholds({env_name: str(probe.MAX_THRESHOLD_HOURS + 1)})
+
+
+def test_r10_the_stopped_dwell_accepts_one_cadence_and_refuses_one_over() -> None:
+    """The stopped-dwell's own ceiling is tighter than the shared one.
+
+    A timer idle for longer than its own period has already missed a tick, so
+    `MAX_STOPPED_DWELL_HOURS` refuses values the two freshness thresholds
+    accept -- which is why this boundary is asserted separately.
+    """
+    accepted = probe.load_thresholds(
+        {probe.ENV_STOPPED_DWELL_HOURS: str(probe.MAX_STOPPED_DWELL_HOURS)}
+    )
+
+    assert accepted.stopped_dwell_hours == probe.MAX_STOPPED_DWELL_HOURS
+    with pytest.raises(probe.ConfigError):
+        probe.load_thresholds(
+            {probe.ENV_STOPPED_DWELL_HOURS: str(probe.MAX_STOPPED_DWELL_HOURS + 1)}
+        )
+    # And the tighter ceiling is genuinely tighter: a value the freshness
+    # thresholds accept is refused here.
+    assert probe.MAX_STOPPED_DWELL_HOURS < probe.MAX_THRESHOLD_HOURS
+    with pytest.raises(probe.ConfigError):
+        probe.load_thresholds(
+            {probe.ENV_STOPPED_DWELL_HOURS: str(probe.MAX_THRESHOLD_HOURS)}
+        )
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        probe.ENV_MAX_NEXT_DWELL_HOURS,
+        probe.ENV_MAX_MANIFEST_AGE_HOURS,
+        probe.ENV_STOPPED_DWELL_HOURS,
+    ],
+)
+def test_r10_every_threshold_refuses_the_shared_ceiling_plus_one(env_name: str) -> None:
+    with pytest.raises(probe.ConfigError):
+        probe.load_thresholds({env_name: str(probe.MAX_THRESHOLD_HOURS + 1)})
+
+
+@pytest.mark.parametrize(
+    "env_name",
+    [
+        probe.ENV_MAX_NEXT_DWELL_HOURS,
+        probe.ENV_MAX_MANIFEST_AGE_HOURS,
+        probe.ENV_STOPPED_DWELL_HOURS,
+    ],
+)
+def test_r10_the_previously_accepted_167_is_now_refused(env_name: str) -> None:
+    """The measured defect, pinned as a literal because 167 is the regression.
+
+    `167` passed the old `< 168` check while leaving 0.6% of the consumer's
+    budget as warning: `STOPPED_DWELL_HOURS=167` with
+    `MAX_MANIFEST_AGE_HOURS=167` graded the 2026-08-28 geometry `ok`/exit 0 for
+    166 hours.  This literal must stay a literal -- a constant-derived
+    expression would move with the constant it is meant to fence.
+    """
+    with pytest.raises(probe.ConfigError):
+        probe.load_thresholds({env_name: "167"})
+
+
+@pytest.mark.parametrize(
+    ("env_name", "ceiling"),
+    [
+        (probe.ENV_MAX_NEXT_DWELL_HOURS, probe.MAX_THRESHOLD_HOURS),
+        (probe.ENV_MAX_MANIFEST_AGE_HOURS, probe.MAX_THRESHOLD_HOURS),
+        (probe.ENV_STOPPED_DWELL_HOURS, probe.MAX_STOPPED_DWELL_HOURS),
+    ],
+)
+def test_r10_a_refused_threshold_writes_no_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, env_name: str, ceiling: int
+) -> None:
+    """A refusal happens BEFORE any evidence is collected, so no receipt lands.
+
+    A receipt written by a refused configuration would be a document with a
+    verdict field and no verdict behind it.
+    """
+    status, root, _log = _run(
+        tmp_path, monkeypatch, thresholds={env_name: str(ceiling + 1)}
+    )
+
+    assert status != 0
+    assert not (root / "latest.json").exists()
+
+
+# R10b -- the margin claim, executable.  The prose version ("far enough below
+# 168 h to leave operator margin") held for the shipped defaults only; this
+# sweeps the whole ACCEPTED range and asserts the claim for every combination
+# an operator can actually configure.
+DEAD_LANE_IDLE_HOURS = (24.5, 48.0, 100.0, 167.5)
+
+
+def test_r10b_no_accepted_threshold_combination_grades_a_dead_lane_ok() -> None:
+    """The 2026-08-28 geometry: `enabled` + `inactive`, manifest ageing with it.
+
+    For every combination `load_thresholds` ACCEPTS, a lane idle past one
+    refresh cadence must grade non-`ok`.  Under the old `< 168` rule this fails
+    outright: stopped-dwell 36 with manifest-age 120 grades a 24.5-hour-dead
+    lane `ok`, which is the hole the cadence cap closes.
+    """
+    freshness_values = sorted(
+        {1, 2, 36, 120, probe.MAX_THRESHOLD_HOURS - 1, probe.MAX_THRESHOLD_HOURS}
+    )
+    dwell_values = list(range(1, probe.MAX_STOPPED_DWELL_HOURS + 1))
+    checked = 0
+    for idle_hours in DEAD_LANE_IDLE_HOURS:
+        properties = _properties(
+            unit_file_state="enabled",
+            active_state="inactive",
+            sub_state="dead",
+            inactive_enter=_systemd_timestamp(NOW - timedelta(hours=idle_hours)),
+            next_elapse="",
+        )
+        for next_dwell in freshness_values:
+            for manifest_age_threshold in freshness_values:
+                for stopped_dwell in dwell_values:
+                    thresholds = probe.load_thresholds(
+                        {
+                            probe.ENV_MAX_NEXT_DWELL_HOURS: str(next_dwell),
+                            probe.ENV_MAX_MANIFEST_AGE_HOURS: str(manifest_age_threshold),
+                            probe.ENV_STOPPED_DWELL_HOURS: str(stopped_dwell),
+                        }
+                    )
+                    verdict = probe.grade(
+                        now=NOW,
+                        properties=properties,
+                        # The manifest stopped ageing when the timer did.
+                        manifest_age_hours=idle_hours,
+                        thresholds=thresholds,
+                        systemd_error=None,
+                    )
+                    checked += 1
+                    assert verdict != probe.VERDICT_OK, (
+                        f"idle {idle_hours} h graded ok at next_dwell={next_dwell}, "
+                        f"manifest_age={manifest_age_threshold}, "
+                        f"stopped_dwell={stopped_dwell}"
+                    )
+    assert checked == len(DEAD_LANE_IDLE_HOURS) * len(freshness_values) ** 2 * len(
+        dwell_values
+    )
+
+
 def test_a_pinned_clock_must_carry_a_timezone(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1112,6 +1298,135 @@ def test_probe_units_declare_the_documented_shape() -> None:
 
 
 # ---------------------------------------------------------------------------
+# R11c -- the watchdog's own liveness, and the comment that used to lie about it
+# ---------------------------------------------------------------------------
+
+RUNBOOK = (
+    Path(__file__).resolve().parents[1] / "docs" / "runbooks" / "current-production-ops.md"
+)
+PROBE_TIMER_UNIT = (
+    Path(__file__).resolve().parents[1]
+    / "infra"
+    / "systemd"
+    / "nhms-node22-refresh-timer-health.timer"
+)
+
+
+def _probe_runbook_section() -> str:
+    """The probe's own section of the runbook, sliced by its headings."""
+    text = RUNBOOK.read_text()
+    start = text.index("##### refresh timer 健康探针")
+    end = text.index("#### 3.1.4", start)
+    return text[start:end]
+
+
+def test_r11c_the_probe_timer_claims_no_self_catch_up() -> None:
+    """`Persistent=` does NOT catch up a timer left `enabled` + `inactive`.
+
+    It replays a missed tick only when the timer transitions to active -- boot,
+    or an explicit `start`.  The unit used to comment that "a missed probe tick
+    is caught up", which is the watchdog telling the operator it covers the one
+    geometry it demonstrably does not.  A comment is what an operator reads
+    when deciding whether the probe needs its own check, so a false one here is
+    worse than none.
+    """
+    unit = PROBE_TIMER_UNIT.read_text()
+    comments = "\n".join(
+        line for line in unit.splitlines() if line.lstrip().startswith("#")
+    )
+
+    assert "Persistent=true" in unit
+    for claim in (
+        "a missed probe tick is caught up",
+        "catches itself up",
+        "catch itself up",
+    ):
+        assert claim not in comments, f"the unit still claims self-catch-up: {claim!r}"
+    # The real precondition has to be stated where the directive is, or the
+    # next reader re-derives the wrong one.
+    assert "boot" in comments
+    assert "`enabled` + `inactive`" in comments
+
+
+def test_r11c_the_runbook_carries_the_probe_timers_own_steady_state_row() -> None:
+    """The probe timer gets the same steady-state check the refresh timer has.
+
+    Reading `list-units --failed` reports a probe that ran and found something;
+    it reports nothing about a probe that never ran.  These two columns are the
+    only in-repo answer to "is the watchdog alive", so they are pinned to the
+    unit name and the receipt path the probe actually writes.
+    """
+    section = _probe_runbook_section()
+
+    assert (
+        "systemctl --user list-timers nhms-node22-refresh-timer-health.timer --no-pager"
+        in section
+    )
+    assert "generated_at" in section
+    assert f"{probe.DEFAULT_HEALTH_RECEIPT_ROOT}/latest.json" in section
+    # Mirrors the refresh timer's own table: `NEXT` must not be `-`.
+    assert "`list-timers` 的 `NEXT`" in section
+
+
+def test_r11c_the_runbook_states_the_probe_sections_verdicts_thresholds_and_fields() -> None:
+    """P2: the runbook is the operator's copy of the probe's closed sets.
+
+    Every verdict name, every threshold default AND ceiling, every receipt
+    field and the receipt root are read from the MODULE and looked for in the
+    section -- so renaming a verdict, retuning a default, adding a receipt field
+    or moving the receipt root reds here instead of leaving an operator reading
+    a document about a different program.
+    """
+    section = _probe_runbook_section()
+
+    verdicts = {
+        value
+        for name, value in vars(probe).items()
+        if name.startswith("VERDICT_") and isinstance(value, str)
+    }
+    assert len(verdicts) == 8
+    for verdict in verdicts:
+        assert f"`{verdict}`" in section, f"verdict {verdict} is undocumented"
+
+    for env_name, default, ceiling in (
+        (
+            probe.ENV_MAX_NEXT_DWELL_HOURS,
+            probe.DEFAULT_MAX_NEXT_DWELL_HOURS,
+            probe.MAX_THRESHOLD_HOURS,
+        ),
+        (
+            probe.ENV_MAX_MANIFEST_AGE_HOURS,
+            probe.DEFAULT_MAX_MANIFEST_AGE_HOURS,
+            probe.MAX_THRESHOLD_HOURS,
+        ),
+        (
+            probe.ENV_STOPPED_DWELL_HOURS,
+            probe.DEFAULT_STOPPED_DWELL_HOURS,
+            probe.MAX_STOPPED_DWELL_HOURS,
+        ),
+    ):
+        assert f"| `{env_name}` | {default} | {ceiling} |" in section, (
+            f"{env_name} is not documented at default={default}, ceiling={ceiling}"
+        )
+
+    # The receipt's field set, taken from a real `build_receipt` call rather
+    # than restated: a new field with no runbook line reds here.
+    receipt = probe.build_receipt(
+        now=NOW,
+        unit=UNIT,
+        verdict=probe.VERDICT_OK,
+        properties=_properties(),
+        manifest_age_hours=5.0,
+        manifest_source=probe.MANIFEST_SOURCE_LATEST,
+        thresholds=probe.load_thresholds({}),
+    )
+    for field in receipt:
+        assert f"`{field}`" in section, f"receipt field {field} is undocumented"
+
+    assert probe.DEFAULT_HEALTH_RECEIPT_ROOT in section
+
+
+# ---------------------------------------------------------------------------
 # B1 / R11b -- the clock has no environment seam at all
 # ---------------------------------------------------------------------------
 
@@ -1126,6 +1441,122 @@ def test_b1_the_probe_reads_no_environment_variable_for_its_clock() -> None:
     """
     assert not hasattr(probe, "ENV_NOW")
     assert "NHMS_REFRESH_HEALTH_NOW" not in PROBE_SOURCE.read_text()
+
+
+# The complete environment surface, enumerated HERE rather than derived from
+# the module, so the test below is double-sided: one half reads what the source
+# actually looks up, the other reads what the module declares, and this literal
+# table is the third party both are compared against.  Deriving `known` from
+# `vars(probe)` alone would be single-sided -- adding `ENV_CLOCK` and reading it
+# would satisfy it.
+PROBE_ENV_SURFACE = {
+    "ENV_UNIT": "NHMS_REFRESH_HEALTH_UNIT",
+    "ENV_SYSTEMCTL": "NHMS_REFRESH_HEALTH_SYSTEMCTL",
+    "ENV_REFRESH_RECEIPT": "NHMS_REFRESH_HEALTH_REFRESH_RECEIPT",
+    "ENV_HEALTH_RECEIPT_ROOT": "NHMS_REFRESH_HEALTH_RECEIPT_ROOT",
+    "ENV_JSON": "NHMS_REFRESH_HEALTH_JSON",
+    "ENV_MAX_NEXT_DWELL_HOURS": "NHMS_REFRESH_HEALTH_MAX_NEXT_DWELL_HOURS",
+    "ENV_MAX_MANIFEST_AGE_HOURS": "NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS",
+    "ENV_STOPPED_DWELL_HOURS": "NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS",
+}
+
+
+def _environment_keys_read_by(source: str) -> set[str]:
+    """Every environment key the probe's source actually looks up.
+
+    Walks `os.environ[...]`, `os.environ.get(...)`, `os.getenv(...)` **and any
+    name bound from `os.environ`** -- `load_thresholds` reads its three
+    thresholds through the local alias `source = os.environ if env is None else
+    env`, so a walk that only knows the literal `os.environ` spelling finds
+    five of eight and would call an unlisted threshold seam clean.
+
+    Keys are `ast.Name` nodes, not string literals, so each is resolved back
+    through the module's own constant -- which is the point: the source and the
+    declared surface have to agree.
+    """
+    tree = ast.parse(source)
+
+    def _is_os_environ(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == "environ"
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+        )
+
+    aliases: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(_is_os_environ(child) for child in ast.walk(node.value)):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                aliases.add(target.id)
+
+    def _is_environ_source(node: ast.AST) -> bool:
+        return _is_os_environ(node) or (isinstance(node, ast.Name) and node.id in aliases)
+
+    key_nodes: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and _is_environ_source(node.value):
+            key_nodes.append(node.slice)
+        elif isinstance(node, ast.Call):
+            function = node.func
+            if (
+                isinstance(function, ast.Attribute)
+                and function.attr == "get"
+                and _is_environ_source(function.value)
+                and node.args
+            ):
+                key_nodes.append(node.args[0])
+            elif (
+                isinstance(function, ast.Attribute)
+                and function.attr == "getenv"
+                and isinstance(function.value, ast.Name)
+                and function.value.id == "os"
+                and node.args
+            ):
+                key_nodes.append(node.args[0])
+
+    keys: set[str] = set()
+    for key in key_nodes:
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            keys.add(key.value)
+        elif isinstance(key, ast.Name):
+            resolved = getattr(probe, key.id, None)
+            assert isinstance(resolved, str), (
+                f"the probe reads the environment through `{key.id}`, which is not "
+                "a module-level string constant -- the surface cannot be enumerated"
+            )
+            keys.add(resolved)
+        else:
+            raise AssertionError(
+                f"unresolvable environment key expression at line {key.lineno}: "
+                f"{ast.dump(key)}"
+            )
+    return keys
+
+
+def test_r11b_the_probe_reads_exactly_the_enumerated_environment_surface() -> None:
+    """B1's real claim: not "no `ENV_NOW`", but "nothing beyond these eight".
+
+    The previous clock test asserted `not hasattr(probe, "ENV_NOW")` plus three
+    guessed names, so adding `ENV_CLOCK = "NHMS_PROBE_AT"` and honouring it
+    passed everything.  This reads BOTH sides -- what the source looks up, and
+    what the module declares -- against one enumerated table, so a ninth seam
+    reds here whatever it is called.
+    """
+    read = _environment_keys_read_by(PROBE_SOURCE.read_text())
+    declared = {name for name in vars(probe) if name.startswith("ENV_")}
+
+    assert read == set(PROBE_ENV_SURFACE.values())
+    assert declared == set(PROBE_ENV_SURFACE)
+    for name, value in PROBE_ENV_SURFACE.items():
+        assert getattr(probe, name) == value
+    # Every declared constant is also actually read: a dead `ENV_*` constant is
+    # a seam someone will wire up later without touching this table.
+    assert {getattr(probe, name) for name in declared} == read
 
 
 @pytest.mark.parametrize(
@@ -1359,7 +1790,9 @@ def test_r10_a_stopped_dwell_at_or_over_the_consumer_bound_is_rejected(value: st
 
     A stopped-dwell at or beyond 168 h means a stopped timer can never be
     reported inside the consumer's whole freshness budget -- the green facade
-    this change exists to close, reachable through a drop-in.
+    this change exists to close, reachable through a drop-in.  These values are
+    refused a fortiori now that the ceiling is one refresh cadence; the case is
+    kept because the consumer-bound values are the measured regression.
     """
     with pytest.raises(probe.ConfigError):
         probe.load_thresholds({probe.ENV_STOPPED_DWELL_HOURS: value})
@@ -1554,6 +1987,42 @@ def test_r9b_an_unresolvable_latest_never_masks_a_disabled_timer(
     assert _verdict(root) == "timer_not_enabled"
 
 
+@pytest.mark.parametrize(
+    "next_elapse",
+    ["", "n/a", "not-a-timestamp"],
+    ids=["empty", "systemd-absent", "unparseable"],
+)
+def test_r9b_an_unresolvable_latest_never_masks_an_unscheduled_timer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, next_elapse: str
+) -> None:
+    """The THIRD timer arm, and the one the other two did not cover.
+
+    The spec says the manifest arm "SHALL NOT mask ANY timer verdict", but only
+    `timer_stopped` and `timer_not_enabled` were pinned under an unresolvable
+    `latest.json`.  Verified: with just those two present, hoisting the
+    precedence-7 `manifest_unavailable` arm ABOVE the `timer_not_scheduled`
+    check leaves the whole suite green -- an `active` timer that will never
+    tick again would have been reported as a missing receipt.
+    """
+    latest = _unresolvable_latest(tmp_path, "empty_providers")
+    # No `history/` sibling at all: nothing can resolve an age, so precedence 7
+    # is genuinely armed and is what this test proves does NOT win.
+    assert not (latest.parent / "history").exists()
+
+    status, root, _log = _run(
+        tmp_path,
+        monkeypatch,
+        receipt=latest,
+        properties=_properties(active_state="active", next_elapse=next_elapse),
+    )
+    payload = json.loads((root / "latest.json").read_text())
+
+    assert status != 0
+    assert payload["verdict"] == "timer_not_scheduled"
+    assert payload["manifest_source"] == "unavailable"
+    assert payload["manifest_age_hours"] is None
+
+
 def test_r9c_no_history_directory_at_all_is_manifest_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1733,7 +2202,18 @@ def test_r9d_ordering_is_lexical_by_filename_and_never_by_mtime(
 
 def test_the_history_filename_shape_matches_the_runner_that_writes_it() -> None:
     """Pins the probe's filter to the runner's own name, so a rename on either
-    side reds here instead of silently emptying the fallback."""
+    side reds here instead of silently emptying the fallback.
+
+    Also pins the receipt SCHEMA VERSION the probe demands (audit F7).  The
+    probe rejects any receipt whose `schema_version` differs, uniformly across
+    `latest.json` AND every history candidate, so a runner schema bump with no
+    pin here silently kills the whole manifest arm and leaves the probe at a
+    permanent `manifest_unavailable`.  D4 forbids the PROBE importing repo
+    packages; it says nothing about this test, so the comparison is against the
+    runner's live constant rather than a restated literal.
+    """
+    from scripts import scheduler_file_provider_refresh as runner_module
+
     runner = (
         Path(__file__).resolve().parents[1] / "scripts" / "scheduler_file_provider_refresh.py"
     ).read_text()
@@ -1742,6 +2222,70 @@ def test_the_history_filename_shape_matches_the_runner_that_writes_it() -> None:
         "run_id = f\"refresh_{started.strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex[:12]}\""
         in runner
     )
+    assert probe.REFRESH_RECEIPT_SCHEMA_VERSION == runner_module.SCHEMA_VERSION
+
+
+def test_the_consumer_bound_is_the_consumers_own_constant() -> None:
+    """Audit F5: `CONSUMER_MAX_MANIFEST_AGE_HOURS` is a COPY, and until now the
+    only thing joining the copy to the original was a comment.
+
+    If the consumer's bound drops, the probe keeps grading against 168 and
+    reports `ok` for a manifest the consumer has already fail-closed on -- the
+    precise failure this probe exists to make impossible, reintroduced one
+    level up.  D4 forbids the probe importing repo packages; the test is not
+    the probe, so it reads both sides directly.
+    """
+    from services.orchestrator import scheduler_file_providers
+
+    assert (
+        probe.CONSUMER_MAX_MANIFEST_AGE_HOURS
+        == scheduler_file_providers.DEFAULT_MAX_MANIFEST_AGE_HOURS
+    )
+    # And the derived ceilings move with it, so the margin rule cannot be left
+    # describing a bound that no longer exists.
+    assert (
+        probe.MAX_THRESHOLD_HOURS
+        == scheduler_file_providers.DEFAULT_MAX_MANIFEST_AGE_HOURS
+        - probe.REFRESH_CADENCE_HOURS
+    )
+
+
+def test_the_production_path_defaults_match_every_file_that_states_them() -> None:
+    """Audit P2: the probe's two production paths are restated in four other
+    places, and nothing read both sides.
+
+    `DEFAULT_HEALTH_RECEIPT_ROOT` is where the probe writes and where its
+    installer creates a 0700 directory; `DEFAULT_REFRESH_RECEIPT` is the file
+    the probe reads and the file the refresh installer validates.  A drift on
+    either makes the probe watch a path nothing writes -- `manifest_unavailable`
+    forever, or a receipt root the installer never made private.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    probe_installer = (repo / "scripts" / "install_node22_refresh_timer_health.sh").read_text()
+    refresh_installer = (
+        repo / "scripts" / "install_node22_scheduler_file_provider_refresh.sh"
+    ).read_text()
+    runbook = (repo / "docs" / "runbooks" / "current-production-ops.md").read_text()
+    env_example = (
+        repo / "infra" / "env" / "compute.scheduler-provider-refresh.env.example"
+    ).read_text()
+
+    assert (
+        f"receipt_root=${{{probe.ENV_HEALTH_RECEIPT_ROOT}:-{probe.DEFAULT_HEALTH_RECEIPT_ROOT}}}"
+        in probe_installer
+    )
+    assert probe.DEFAULT_HEALTH_RECEIPT_ROOT in runbook
+    assert (
+        f"receipt=${{NHMS_SCHEDULER_REFRESH_RECEIPT:-{probe.DEFAULT_REFRESH_RECEIPT}}}"
+        in refresh_installer
+    )
+    # The runner's env template names the RECEIPT ROOT; the probe reads
+    # `latest.json` inside it, so the pin is the parent, not the file.
+    assert (
+        "NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT="
+        f"{Path(probe.DEFAULT_REFRESH_RECEIPT).parent}" in env_example
+    )
+    assert Path(probe.DEFAULT_REFRESH_RECEIPT).name == "latest.json"
     assert probe.HISTORY_RECEIPT_NAME.match("refresh_20260912T103558Z_0123456789ab.json")
     assert not probe.HISTORY_RECEIPT_NAME.match("refresh_20260912T103558Z_0123456789ab.json.bak")
     assert not probe.HISTORY_RECEIPT_NAME.match("latest.json")
@@ -2005,6 +2549,218 @@ def test_r15_both_installers_compare_the_protected_units_per_unit_type() -> None
 
 
 # ---------------------------------------------------------------------------
+# R15 -- the SIBLING installer's half, behaviourally
+# ---------------------------------------------------------------------------
+
+# The test above is a source grep, and a source grep is not evidence for this
+# row: reverting the two call sites to the old inline form while leaving
+# `scheduler_state`/`unit_file_state` in place as dead code keeps every one of
+# those assertions matching and the whole suite green (verified end to end).
+# What follows drives the refresh installer itself, the same way the probe
+# installer's R15 regression drives that one, and asserts the run's SIDE
+# EFFECTS -- `set -e` exits non-zero whether or not the trap ever ran.
+
+SIBLING_INSTALLER = (
+    Path(__file__).resolve().parents[1]
+    / "scripts"
+    / "install_node22_scheduler_file_provider_refresh.sh"
+)
+REFRESH_UNITS = (
+    "nhms-scheduler-file-provider-refresh.service",
+    "nhms-scheduler-file-provider-refresh.timer",
+)
+SCHEDULER_TIMER = "nhms-compute-scheduler.timer"
+SCHEDULER_SERVICE = "nhms-compute-scheduler.service"
+
+
+def _sibling_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
+    """The refresh installer's counterpart of `_installer_fake_systemctl`.
+
+    The refresh units carry real state (so `assert_refresh_service_inactive`
+    and the arming sequence are observable), while the two compute-scheduler
+    units answer from a per-``<unit>.<query>`` counter -- which is what lets
+    ``NHMS_FAKE_DIVERGE`` make the SECOND read of one of them disagree with the
+    first.  That is precisely the "the protected units moved under us" shape
+    `assert_scheduler_unchanged` exists to catch.
+    """
+    log = tmp_path / "sibling-systemctl.log"
+    state = tmp_path / "sibling-state"
+    state.mkdir(exist_ok=True)
+    script = tmp_path / "sibling-fake-systemctl"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> {log}\n'
+        f"state={state}\n"
+        "shift\n"  # drop --user
+        "verb=$1\n"
+        "shift\n"
+        "now=no\n"
+        "unit=\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        "    --now) now=yes ;;\n"
+        "    -*) ;;\n"
+        "    *) unit=$arg ;;\n"
+        "  esac\n"
+        "done\n"
+        'key=$(printf "%s" "$unit" | tr -c "a-zA-Z0-9._-" "_")\n'
+        'case "$unit" in\n'
+        "  nhms-scheduler-file-provider-refresh.*)\n"
+        '    enabled=$(cat "$state/$key.own-enabled" 2>/dev/null || printf disabled)\n'
+        '    active=$(cat "$state/$key.own-active" 2>/dev/null || printf inactive)\n'
+        '    case "$verb" in\n'
+        '      enable) enabled=enabled; [ "$now" = yes ] && active=active ;;\n'
+        '      disable) enabled=disabled; [ "$now" = yes ] && active=inactive ;;\n'
+        "      start) active=active ;;\n"
+        "      stop) active=inactive ;;\n"
+        "    esac\n"
+        '    printf "%s" "$enabled" > "$state/$key.own-enabled"\n'
+        '    printf "%s" "$active" > "$state/$key.own-active"\n'
+        '    case "$verb" in\n'
+        '      is-enabled) printf "%s\\n" "$enabled" ;;\n'
+        '      is-active) printf "%s\\n" "$active" ;;\n'
+        "    esac\n"
+        "    exit 0 ;;\n"
+        "esac\n"
+        'case "$verb" in\n'
+        "  is-enabled|is-active) ;;\n"
+        "  *) exit 0 ;;\n"
+        "esac\n"
+        "value=enabled\n"
+        'if [ "$verb" = is-active ]; then value=active; fi\n'
+        'counter=$(printf "%s" "$unit.$verb" | tr -c "a-zA-Z0-9._-" "_")\n'
+        'count=$(cat "$state/$counter.count" 2>/dev/null || printf 0)\n'
+        "count=$((count + 1))\n"
+        'printf "%s" "$count" > "$state/$counter.count"\n'
+        'if [ "$unit.$verb" = "${NHMS_FAKE_DIVERGE:-}" ] && [ "$count" -ge 2 ]; then\n'
+        "  value=${NHMS_FAKE_DIVERGE_VALUE:-}\n"
+        "fi\n"
+        'printf "%s\\n" "$value"\n'
+        "exit 0\n"
+    )
+    script.chmod(0o755)
+    return script, log
+
+
+def _run_sibling_installer(
+    tmp_path: Path,
+    action: str,
+    *,
+    diverge: str = "",
+    diverge_value: str = "",
+) -> tuple[subprocess.CompletedProcess[str], Path]:
+    repo = tmp_path / "sibling-repo"
+    if not repo.exists():
+        source = Path(__file__).resolve().parents[1] / "infra" / "systemd"
+        (repo / "infra" / "systemd").mkdir(parents=True)
+        (repo / "infra" / "env").mkdir(parents=True)
+        for name in REFRESH_UNITS:
+            shutil.copy2(source / name, repo / "infra" / "systemd" / name)
+        env_file = repo / "infra" / "env" / "compute.scheduler-provider-refresh.env"
+        env_file.write_text("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true\n")
+        env_file.chmod(0o600)
+    script, log = _sibling_fake_systemctl(tmp_path)
+    # Divergence is scoped to ONE invocation, as in the probe harness: the
+    # counters reset so the baseline read is call 1 and the assertion's re-read
+    # is call 2, which is the real mid-run flip being modelled.
+    for counter in (tmp_path / "sibling-state").iterdir():
+        if counter.name.endswith(".count"):
+            counter.unlink()
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "NHMS_SCHEDULER_REFRESH_REPO": str(repo),
+            "NHMS_SCHEDULER_REFRESH_UNIT_DIR": str(tmp_path / "sibling-units"),
+            "NHMS_SCHEDULER_REFRESH_INSTALL_STATE_ROOT": str(tmp_path / "sibling-install-state"),
+            "NHMS_SCHEDULER_REFRESH_SYSTEMCTL": str(script),
+            "NHMS_FAKE_DIVERGE": diverge,
+            "NHMS_FAKE_DIVERGE_VALUE": diverge_value,
+        }
+    )
+    completed = subprocess.run(
+        ["bash", str(SIBLING_INSTALLER), action],
+        capture_output=True,
+        text=True,
+        env=environment,
+        check=False,
+    )
+    return completed, log
+
+
+@pytest.mark.parametrize(
+    ("query", "divergent"),
+    [("is-enabled", "disabled"), ("is-active", "inactive")],
+)
+def test_r15_a_divergent_scheduler_timer_read_aborts_the_sibling_install(
+    tmp_path: Path, query: str, divergent: str
+) -> None:
+    """For the compute scheduler's TIMER both fields are compared, and the
+    refresh installer's own assertion must bite exactly like the probe's.
+
+    The side effect is the evidence: the ERR trap has to remove the refresh
+    units it just laid down.  A dropped `-E` reds here and nowhere else --
+    `assert_scheduler_unchanged` fails inside a FUNCTION body, which is the
+    path an uninherited top-level trap never covers.
+    """
+    completed, _log = _run_sibling_installer(
+        tmp_path,
+        "--install",
+        diverge=f"{SCHEDULER_TIMER}.{query}",
+        diverge_value=divergent,
+    )
+
+    assert completed.returncode != 0
+    for unit in REFRESH_UNITS:
+        assert not (tmp_path / "sibling-units" / unit).exists(), (
+            f"the ERR trap never ran: {unit} was left installed"
+        )
+
+
+def test_r15_a_divergent_scheduler_service_unit_file_state_aborts_the_sibling_install(
+    tmp_path: Path,
+) -> None:
+    """`UnitFileState` IS compared for the compute scheduler's oneshot service
+    -- it is what "unchanged" means for a unit whose activity its timer drives.
+    """
+    completed, _log = _run_sibling_installer(
+        tmp_path,
+        "--install",
+        diverge=f"{SCHEDULER_SERVICE}.is-enabled",
+        diverge_value="disabled",
+    )
+
+    assert completed.returncode != 0
+    for unit in REFRESH_UNITS:
+        assert not (tmp_path / "sibling-units" / unit).exists()
+
+
+def test_r15_the_scheduler_oneshot_flipping_active_does_not_fire_the_sibling_assertion(
+    tmp_path: Path,
+) -> None:
+    """The paired negative case.
+
+    `nhms-compute-scheduler.service` activates every five minutes on its own
+    cadence, so its `is-active` is not a property any installer can hold still.
+    The installer must therefore never read it -- and this test is what makes
+    that load-bearing: comparing the oneshot on `is-active` would take a second
+    read, the divergence would fire, and an installer that aborts and rolls
+    back on a unit nobody touched turns arming into a retry loop.
+    """
+    completed, log = _run_sibling_installer(
+        tmp_path,
+        "--install",
+        diverge=f"{SCHEDULER_SERVICE}.is-active",
+        diverge_value="inactive",
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["scheduler_unchanged"] is True
+    for unit in REFRESH_UNITS:
+        assert (tmp_path / "sibling-units" / unit).exists()
+    assert f"--user is-active {SCHEDULER_SERVICE}" not in log.read_text()
+
+
+# ---------------------------------------------------------------------------
 # R11b -- each tunable is EFFECTIVE through its env path, not merely rejectable
 # ---------------------------------------------------------------------------
 
@@ -2043,7 +2799,8 @@ def test_r11b_the_stopped_dwell_threshold_is_effective_through_its_env_path(
     """Idle 3 h: inside the 6 h default dwell, past a 2 h one.
 
     Note the direction: a SHORTER dwell makes the probe noisier, never quieter.
-    A longer one is bounded under 168 h at config time.
+    A longer one is capped at one refresh cadence (`MAX_STOPPED_DWELL_HOURS`,
+    24 h) at config time -- not at the consumer bound.
     """
     properties = _properties(
         active_state="inactive",

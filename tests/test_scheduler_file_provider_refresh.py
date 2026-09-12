@@ -4096,12 +4096,26 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
         )
 
 
-def _reload_failing_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
+def _reload_failing_fake_systemctl(
+    tmp_path: Path,
+    *,
+    is_enabled: str = "disabled",
+    failing_enable_unit: str = "",
+) -> tuple[Path, Path]:
     """A fake systemctl whose `daemon-reload` always fails.
 
     Everything else answers the installer's read-only queries with the
     all-quiet defaults and records the full argv, so the ERR trap's progress is
     readable off the trace.
+
+    Two knobs, both defaulting to the original behaviour so the caller above is
+    untouched:
+
+    * ``is_enabled`` — what every `is-enabled` query answers.  `enabled` is what
+      drives `restore_unit_state` down its `enable` arm instead of its
+      `disable` arm, which is the arm that carries no `|| true`.
+    * ``failing_enable_unit`` — make `enable <unit>` fail, modelling a systemd
+      that refuses to re-enable a unit while the ERR trap is restoring it.
     """
     trace = tmp_path / "reload-fail-trace.log"
     script = tmp_path / "systemctl-reload-fails"
@@ -4109,15 +4123,49 @@ def _reload_failing_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
         "#!/bin/sh\n"
         f'printf "%s\\n" "$*" >> {trace}\n'
         "shift\n"  # drop --user
-        "case \"$1\" in\n"
+        "verb=$1\n"
+        "shift\n"
+        "unit=\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        "    -*) ;;\n"
+        "    *) unit=$arg ;;\n"
+        "  esac\n"
+        "done\n"
+        'case "$verb" in\n'
         "  daemon-reload) exit 1 ;;\n"
-        "  is-enabled) printf \"disabled\\n\" ;;\n"
-        "  is-active) printf \"inactive\\n\" ;;\n"
+        f'  is-enabled) printf "{is_enabled}\\n" ;;\n'
+        '  is-active) printf "inactive\\n" ;;\n'
+        f'  enable) [ -n "{failing_enable_unit}" ] && '
+        f'[ "$unit" = "{failing_enable_unit}" ] && exit 9 ;;\n'
         "esac\n"
         "exit 0\n"
     )
     script.chmod(0o755)
     return script, trace
+
+
+def _refresh_installer_repo(tmp_path: Path) -> Path:
+    """The minimum `$repo` this installer will accept.
+
+    Only `--install` reads the env file, but every action `cmp -s`es the two
+    units against it, so both are always present.
+    """
+    repo = tmp_path / "repo"
+    root = Path(__file__).resolve().parents[1]
+    units = repo / "infra/systemd"
+    env_dir = repo / "infra/env"
+    units.mkdir(parents=True)
+    env_dir.mkdir(parents=True)
+    for name in (
+        "nhms-scheduler-file-provider-refresh.service",
+        "nhms-scheduler-file-provider-refresh.timer",
+    ):
+        shutil.copy2(root / "infra/systemd" / name, units / name)
+    env_file = env_dir / "compute.scheduler-provider-refresh.env"
+    env_file.write_text("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true\n")
+    env_file.chmod(0o600)
+    return repo
 
 
 def test_a_failing_daemon_reload_inside_the_install_trap_does_not_truncate_the_rollback(
@@ -4189,6 +4237,291 @@ def test_a_failing_daemon_reload_inside_the_install_trap_does_not_truncate_the_r
         "nhms-scheduler-file-provider-refresh.timer",
     ):
         assert not (unit_dir / unit).exists(), f"{unit} was left installed"
+
+
+def test_a_failing_enable_inside_the_install_trap_does_not_truncate_the_restore(
+    tmp_path: Path,
+) -> None:
+    """`restore_unit_state`'s `enable`/`start` arms carried no `|| true`.
+
+    Under `set -Eeuo pipefail` a failing command in a TRAP BODY terminates the
+    trap.  `restore_refresh_state` restores the timer first and the service
+    second, so a failing `enable <timer>` left the service unrestored AND
+    skipped `assert_scheduler_unchanged` entirely: the installer's own rollback
+    manufactures the `enabled` + `inactive` geometry this PR exists to detect,
+    with nothing left asserting the compute scheduler survived the run.
+
+    Same truncation as `rollback_files`' `daemon-reload || true` one function
+    above, and the probe installer's `restore_probe_timer` already guards all
+    four verbs.  Asserting the trap's downstream side effects, not the exit
+    status: `set -e` exits non-zero either way.
+    """
+    bash = _require_modern_bash()
+    root = Path(__file__).resolve().parents[1]
+    repo = _refresh_installer_repo(tmp_path)
+    timer = "nhms-scheduler-file-provider-refresh.timer"
+    service = "nhms-scheduler-file-provider-refresh.service"
+    # `enabled` sends `restore_unit_state` down its `enable` arm; the failing
+    # `enable` is then the first command of the restore that can abort it.
+    fake_systemctl, trace = _reload_failing_fake_systemctl(
+        tmp_path, is_enabled="enabled", failing_enable_unit=timer
+    )
+    environment = {
+        **os.environ,
+        "NHMS_SCHEDULER_REFRESH_REPO": str(repo),
+        "NHMS_SCHEDULER_REFRESH_UNIT_DIR": str(tmp_path / "units"),
+        "NHMS_SCHEDULER_REFRESH_INSTALL_STATE_ROOT": str(tmp_path / "install-state"),
+        "NHMS_SCHEDULER_REFRESH_SYSTEMCTL": str(fake_systemctl),
+    }
+
+    completed = subprocess.run(
+        [bash, str(root / "scripts/install_node22_scheduler_file_provider_refresh.sh"), "--install"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    lines = trace.read_text().splitlines()
+    failed_enables = [
+        index for index, line in enumerate(lines) if line == f"--user enable {timer}"
+    ]
+    assert failed_enables, (
+        f"the ERR trap never reached `restore_unit_state \"$timer\"`. trace: {lines}"
+    )
+    tail = lines[failed_enables[-1] + 1 :]
+    assert f"--user enable {service}" in tail, (
+        "the failing `enable` aborted the ERR trap before "
+        f"`restore_unit_state \"$service\"` ran, so the refresh service was left "
+        f"unrestored. trace tail: {tail}"
+    )
+    assert "--user is-enabled nhms-compute-scheduler.timer" in tail, (
+        "the ERR trap never reached `assert_scheduler_unchanged`, so nothing "
+        f"re-checked the protected scheduler after the abort. trace tail: {tail}"
+    )
+
+
+def _stateful_fake_systemctl(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A fake systemctl that remembers per-unit state and records every argv.
+
+    Enough state for the R15b lifecycle assertions: `enable --now` really arms
+    the timer, so "the timer is still armed after `--enable`" is an observation
+    rather than a restatement of the exit code.
+    """
+    trace = tmp_path / "state-trace.log"
+    state = tmp_path / "fake-unit-state"
+    state.mkdir()
+    script = tmp_path / "systemctl-stateful"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> {trace}\n'
+        f"state={state}\n"
+        "shift\n"  # drop --user
+        "verb=$1\n"
+        "shift\n"
+        "now=no\n"
+        "unit=\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        "    --now) now=yes ;;\n"
+        "    -*) ;;\n"
+        "    *) unit=$arg ;;\n"
+        "  esac\n"
+        "done\n"
+        'key=$(printf "%s" "$unit" | tr -c "a-zA-Z0-9._-" "_")\n'
+        'enabled=$(cat "$state/$key.enabled" 2>/dev/null || printf disabled)\n'
+        'active=$(cat "$state/$key.active" 2>/dev/null || printf inactive)\n'
+        'case "$verb" in\n'
+        '  enable) enabled=enabled; [ "$now" = yes ] && active=active ;;\n'
+        '  disable) enabled=disabled; [ "$now" = yes ] && active=inactive ;;\n'
+        "  start) active=active ;;\n"
+        "  stop) active=inactive ;;\n"
+        "esac\n"
+        'if [ -n "$unit" ]; then\n'
+        '  printf "%s" "$enabled" > "$state/$key.enabled"\n'
+        '  printf "%s" "$active" > "$state/$key.active"\n'
+        "fi\n"
+        'case "$verb" in\n'
+        '  is-enabled) printf "%s\\n" "$enabled" ;;\n'
+        '  is-active) printf "%s\\n" "$active" ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    script.chmod(0o755)
+    return script, trace, state
+
+
+def _unit_state(state: Path, unit: str) -> tuple[str, str]:
+    enabled = state / f"{unit}.enabled"
+    active = state / f"{unit}.active"
+    return (
+        enabled.read_text() if enabled.exists() else "disabled",
+        active.read_text() if active.exists() else "inactive",
+    )
+
+
+def _live_scheduler_baseline(state: Path) -> str:
+    """What `scheduler_state` must produce for the fake's current state.
+
+    Mirrors the installer's own composition: `unit_state` for the scheduler
+    TIMER (both fields, tab-separated) and `unit_file_state` for its oneshot
+    SERVICE (`UnitFileState` only).  `scheduler_state` joins them with
+    `printf '%s%s'` over two command substitutions, and command substitution
+    strips trailing newlines -- so the on-disk baseline is the two records run
+    together with no separator between them.
+    """
+    timer_enabled, timer_active = _unit_state(state, "nhms-compute-scheduler.timer")
+    service_enabled, _ = _unit_state(state, "nhms-compute-scheduler.service")
+    return f"{timer_enabled}\t{timer_active}{service_enabled}"
+
+
+# The shape `scheduler.before` had before this PR: four tab-separated fields on
+# one line, because the oneshot service was compared on `is-active` too.  A
+# node-22 file written by the last `--install` still carries it.
+STALE_SCHEDULER_BASELINE = "enabled\tinactive\tdisabled\tinactive\n"
+
+MUTATING_VERBS = ("enable", "disable", "start", "stop", "restart", "daemon-reload")
+
+
+def _refresh_installer_environment(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
+    repo = _refresh_installer_repo(tmp_path)
+    script, trace, state = _stateful_fake_systemctl(tmp_path)
+    # `--enable` validates the current receipt through the runner; the receipt
+    # contract is exercised by its own tests, so here it is a boundary stub.
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    state_root = tmp_path / "install-state"
+    environment = {
+        **os.environ,
+        "NHMS_SCHEDULER_REFRESH_REPO": str(repo),
+        "NHMS_SCHEDULER_REFRESH_UNIT_DIR": str(tmp_path / "units"),
+        "NHMS_SCHEDULER_REFRESH_INSTALL_STATE_ROOT": str(state_root),
+        "NHMS_SCHEDULER_REFRESH_SYSTEMCTL": str(script),
+        "NHMS_SCHEDULER_REFRESH_PYTHON": str(fake_python),
+        "NHMS_SCHEDULER_REFRESH_RECEIPT": str(tmp_path / "latest.json"),
+    }
+    return state_root, trace, state, environment
+
+
+def _run_refresh_installer(
+    action: str, environment: dict[str, str], trace: Path
+) -> subprocess.CompletedProcess[str]:
+    trace.write_text("")
+    return subprocess.run(
+        [
+            _require_modern_bash(),
+            str(
+                Path(__file__).resolve().parents[1]
+                / "scripts/install_node22_scheduler_file_provider_refresh.sh"
+            ),
+            action,
+        ],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize("action", ["--enable", "--rollback"])
+def test_r15b_a_stale_differently_shaped_baseline_does_not_break_a_standalone_action(
+    tmp_path: Path, action: str
+) -> None:
+    """`scheduler.before` must never be a contract between two invocations.
+
+    It is written by `--install` and read by `--enable` and `--rollback`, which
+    the runbook documents as standalone commands.  This PR changed the file's
+    format (4 fields -> 3), and node-22 carries a pre-change file written before
+    the 2026-09-08 recovery — so the next bare `--enable` there mismatches on
+    pure FORMAT drift, with no unit having moved.  Because this PR also made the
+    ERR trap live, `enable_failure_restore` then reverts the timer to its
+    pre-invocation state: in the documented recovery scenario, the dead state
+    the operator was fixing.
+
+    The fix is to capture the baseline per invocation, so the assertion always
+    means "this invocation changed nothing" — which is what R15 claims.
+    """
+    state_root, trace, state, environment = _refresh_installer_environment(tmp_path)
+    installed = _run_refresh_installer("--install", environment, trace)
+    assert installed.returncode == 0, installed.stderr
+    baseline = state_root / "scheduler.before"
+    baseline.write_text(STALE_SCHEDULER_BASELINE)
+
+    completed = _run_refresh_installer(action, environment, trace)
+
+    assert completed.returncode == 0, (
+        f"{action} failed on a stale baseline alone: {completed.stderr}"
+    )
+    assert json.loads(completed.stdout)["scheduler_unchanged"] is True
+    if action == "--enable":
+        assert json.loads(completed.stdout)["status"] == "enabled_active"
+        assert _unit_state(state, "nhms-scheduler-file-provider-refresh.timer") == (
+            "enabled",
+            "active",
+        )
+    else:
+        assert json.loads(completed.stdout)["status"] == "rolled_back"
+    assert baseline.read_text() != STALE_SCHEDULER_BASELINE
+    assert baseline.read_text() == _live_scheduler_baseline(state)
+
+
+@pytest.mark.parametrize("action", ["--install", "--enable", "--rollback"])
+def test_r15b_every_action_rewrites_the_protected_baseline_before_acting(
+    tmp_path: Path, action: str
+) -> None:
+    """Captured BEFORE the first mutation, or it is not a baseline at all.
+
+    Reading the trace rather than the file: a baseline written after the run
+    mutated something would still compare equal to the post-run state, so only
+    the ORDER distinguishes a real capture from a rubber stamp.
+    """
+    state_root, trace, state, environment = _refresh_installer_environment(tmp_path)
+    if action != "--install":
+        assert _run_refresh_installer("--install", environment, trace).returncode == 0
+    state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (state_root / "scheduler.before").write_text(STALE_SCHEDULER_BASELINE)
+
+    completed = _run_refresh_installer(action, environment, trace)
+
+    assert completed.returncode == 0, completed.stderr
+    lines = trace.read_text().splitlines()
+    baseline_reads = [
+        index
+        for index, line in enumerate(lines)
+        if line == "--user is-enabled nhms-compute-scheduler.timer"
+    ]
+    mutations = [
+        index
+        for index, line in enumerate(lines)
+        if len(line.split()) >= 2 and line.split()[1] in MUTATING_VERBS
+    ]
+    assert baseline_reads, f"{action} never captured a baseline. trace: {lines}"
+    if mutations:
+        assert baseline_reads[0] < mutations[0], (
+            f"{action} mutated a unit before capturing its baseline. trace: {lines}"
+        )
+    assert (state_root / "scheduler.before").read_text() == _live_scheduler_baseline(state)
+
+
+def test_r15b_rollback_still_requires_the_restore_data_it_actually_reads(
+    tmp_path: Path,
+) -> None:
+    """`refresh.before` keeps its existence precondition; `scheduler.before`
+    does not need one, because nothing ever restores FROM it.
+
+    `refresh.before` is the restore data — `restore_refresh_state` reads it —
+    so a `--rollback` without it would disable the timer and then have nothing
+    to put back.
+    """
+    state_root, trace, _state, environment = _refresh_installer_environment(tmp_path)
+    assert _run_refresh_installer("--install", environment, trace).returncode == 0
+    (state_root / "refresh.before").unlink()
+
+    completed = _run_refresh_installer("--rollback", environment, trace)
+
+    assert completed.returncode != 0
 
 
 def _bash_major_version(executable: str) -> int | None:

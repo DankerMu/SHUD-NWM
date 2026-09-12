@@ -546,6 +546,72 @@ NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
 }
 
 
+# #2146 round 2 — the two UNROUTED reader edges, both on paths inside that
+# PR's own diff. `tests/test_node22_refresh_timer_health.py` `read_text`s the
+# refresh installer (per-unit-type comparison, `set -Eeuo pipefail`) and runs
+# it as a subprocess against a fake systemctl, and it both `read_text`s and
+# imports the refresh runner (the `run_id` filename shape its history fallback
+# filters on, and `SCHEMA_VERSION` against the probe's copy). Neither path
+# routed to it, so dropping `-E` — or bumping the runner's receipt schema —
+# merged green on a PR that touched only that file.
+NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
+    "scripts/install_node22_scheduler_file_provider_refresh.sh": frozenset(
+        {
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_node22_refresh_timer_health.py",
+        }
+    ),
+    "scripts/scheduler_file_provider_refresh.py": frozenset(
+        {
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_node22_refresh_timer_health.py",
+        }
+    ),
+    # The probe copies this module's `DEFAULT_MAX_MANIFEST_AGE_HOURS` (D4 keeps
+    # the probe stdlib-only) and derives both threshold ceilings from it.
+    "services/orchestrator/scheduler_file_providers.py": frozenset(
+        {"tests/test_node22_refresh_timer_health.py"}
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "readers"),
+    sorted(NODE22_REFRESH_READER_EDGES.items()),
+    ids=[PurePosixPath(source).name for source in sorted(NODE22_REFRESH_READER_EDGES)],
+)
+def test_node22_refresh_reader_edges_select_every_suite_that_reads_them(
+    source: str, readers: frozenset[str]
+) -> None:
+    selected = set(select_tests([source], repo_root=Path(".")))
+
+    assert readers <= selected, f"{source} lost a reader: {sorted(readers - selected)}"
+
+
+def test_node22_refresh_reader_edge_rules_red_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The complement leg: without the rules, the probe suite is not selected.
+
+    A pin that only asserts presence cannot tell a real rule from a rider that
+    happens to pull the suite in for another reason, so this drops exactly the
+    three rows and asserts the edge goes away with them.
+    """
+    from scripts import select_ci_tests
+
+    mutant = tuple(
+        rule for rule in PATH_TEST_RULES if rule.pattern not in NODE22_REFRESH_READER_EDGES
+    )
+    assert len(mutant) == len(PATH_TEST_RULES) - len(NODE22_REFRESH_READER_EDGES)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for source in NODE22_REFRESH_READER_EDGES:
+        selected = select_tests([source], repo_root=Path("."))
+        assert "tests/test_node22_refresh_timer_health.py" not in selected, (
+            f"{source} still reaches the probe suite without its rule"
+        )
+
+
 @pytest.mark.parametrize(
     ("unit", "owners"),
     sorted(NODE22_UNIT_OWNER_SUITES.items()),
@@ -2692,8 +2758,12 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
     # literal reader of this runbook (it asserts the pinned terminal stage
     # appears there), so a runbook-only PR must run the README/runbook/template
     # consistency guard as well as the deployment contract.
+    # #2146 round 2 widened it by one more: the probe suite reads this runbook's
+    # probe section and pins every verdict name, each threshold's default AND
+    # ceiling, the receipt field set and the probe timer's steady-state row.
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
         "tests/test_env_templates.py",
+        "tests/test_node22_refresh_timer_health.py",
         SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
 
@@ -5481,6 +5551,8 @@ def test_select_tests_ignores_docs_only_changes() -> None:
     # changes still select nothing.
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
         "tests/test_env_templates.py",
+        # #2146 round 2: third literal reader -- the node-22 probe suite.
+        "tests/test_node22_refresh_timer_health.py",
         SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
     assert select_tests(["docs/runbooks/other-runbook.md"], repo_root=Path(".")) == []
@@ -5931,8 +6003,10 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # #1684 EVID-05/F: the gateway rollout runbook is an exact rollout
         # owner selecting focused suites — still non-collapsed. #2075 added a
         # second reader (`tests/test_env_templates.py` asserts the pinned
-        # terminal stage appears in this runbook), so the count is 2.
-        ("docs/runbooks/current-production-ops.md", "2"),
+        # terminal stage appears in this runbook) and #2146 round 2 a third
+        # (`tests/test_node22_refresh_timer_health.py` pins the probe section's
+        # verdicts, thresholds and receipt fields), so the count is 3.
+        ("docs/runbooks/current-production-ops.md", "3"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the

@@ -54,6 +54,24 @@ REFRESH_RECEIPT_SCHEMA_VERSION = "nhms.scheduler.file_provider_refresh_receipt.v
 # changes it; it only grades against it and keeps its own thresholds under it.
 CONSUMER_MAX_MANIFEST_AGE_HOURS = 168
 
+# One full refresh cadence: the lane publishes daily at 02:15Z, so 24 hours is
+# the smallest interval in which a scheduled refresh can still land.
+REFRESH_CADENCE_HOURS = 24
+
+# The accepted upper bound for every threshold (design D3).  "Strictly under
+# 168" was the old rule and it is not the rule anyone meant: it accepted 167,
+# leaving 0.6% of the consumer's budget as warning, and measured, a
+# stopped-dwell of 167 with a manifest-age threshold of 167 grades the
+# 2026-08-28 geometry `ok`/exit 0 for 166 hours.  Every threshold must instead
+# leave at least one whole cadence of margin below the consumer's bound, so
+# the alarm always fires while a scheduled refresh can still save the lane.
+MAX_THRESHOLD_HOURS = CONSUMER_MAX_MANIFEST_AGE_HOURS - REFRESH_CADENCE_HOURS
+
+# The stopped-dwell is capped harder still, at one cadence: a timer idle for
+# longer than its own period has already missed a tick, whatever the
+# operator's manual-publisher window was for.
+MAX_STOPPED_DWELL_HOURS = REFRESH_CADENCE_HOURS
+
 DEFAULT_UNIT = "nhms-scheduler-file-provider-refresh.timer"
 DEFAULT_SYSTEMCTL = "/usr/bin/systemctl"
 DEFAULT_REFRESH_RECEIPT = "/scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json"
@@ -172,13 +190,18 @@ def _positive_int(name: str, raw: str) -> int:
 def load_thresholds(env: dict[str, str] | None = None) -> Thresholds:
     """Resolve the three thresholds from the environment and validate them.
 
-    All THREE tunables must sit strictly under the consumer's 168-hour bound,
-    not just the two freshness ones.  A freshness threshold at or above it can
-    never fire before the consumer has already fail-closed; and a stopped-dwell
-    at or above it means a timer can sit dead for the consumer's entire budget
-    without ever grading `timer_stopped` -- the same green facade, reachable
-    through a drop-in.  Bounded at config time, so a bad value is a refusal
-    rather than a verdict.
+    All THREE tunables are range-checked, not just the two freshness ones, and
+    the range is a MARGIN rule rather than a bare `< 168`: every threshold must
+    sit in ``1..MAX_THRESHOLD_HOURS``, leaving at least one whole refresh
+    cadence below the consumer's bound.  A bare `< 168` accepted 167, which is
+    an alarm that can only fire after the lane is already beyond saving --
+    measured, a stopped-dwell of 167 with a manifest-age threshold of 167
+    grades the 2026-08-28 geometry `ok` for 166 hours.  The stopped-dwell is
+    additionally capped at ``MAX_STOPPED_DWELL_HOURS``: a timer idle longer
+    than its own period has already missed a tick.
+
+    Bounded at config time, before any evidence is collected, so a bad value is
+    a refusal rather than a verdict.
     """
     source = os.environ if env is None else env
     thresholds = Thresholds(
@@ -200,11 +223,17 @@ def load_thresholds(env: dict[str, str] | None = None) -> Thresholds:
         (ENV_MAX_MANIFEST_AGE_HOURS, thresholds.max_manifest_age_hours),
         (ENV_STOPPED_DWELL_HOURS, thresholds.stopped_dwell_hours),
     ):
-        if value >= CONSUMER_MAX_MANIFEST_AGE_HOURS:
+        if value > MAX_THRESHOLD_HOURS:
             raise ConfigError(
-                f"{name}={value} must be strictly under the consumer bound "
-                f"of {CONSUMER_MAX_MANIFEST_AGE_HOURS} hours"
+                f"{name}={value} must be at most {MAX_THRESHOLD_HOURS} hours, "
+                f"leaving {REFRESH_CADENCE_HOURS} hours of margin below the "
+                f"consumer bound of {CONSUMER_MAX_MANIFEST_AGE_HOURS} hours"
             )
+    if thresholds.stopped_dwell_hours > MAX_STOPPED_DWELL_HOURS:
+        raise ConfigError(
+            f"{ENV_STOPPED_DWELL_HOURS}={thresholds.stopped_dwell_hours} must be "
+            f"at most {MAX_STOPPED_DWELL_HOURS} hours, one refresh cadence"
+        )
     return thresholds
 
 

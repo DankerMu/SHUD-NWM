@@ -63,8 +63,12 @@ write any file under the provider store.
 - **THEN** the probe returns the `manifest_stale` verdict and a non-zero exit status
 - **AND** when that age reaches or exceeds 168 hours the probe returns the
   distinct `manifest_expired` verdict
-- **AND** both thresholds are strictly less than 168 hours, and a configuration
-  that violates that is rejected
+- **AND** every configurable threshold is range-checked so that it always leaves
+  at least one full refresh cadence of margin below the consumer's 168-hour
+  bound, and the stopped-dwell is additionally capped at one cadence; a
+  configuration outside those ranges is rejected before any evidence is
+  collected, and no accepted combination of thresholds grades a lane healthy
+  once it has been idle for longer than one cadence
 
 #### Scenario: The probe fails closed
 
@@ -110,8 +114,17 @@ write any file under the provider store.
 #### Scenario: The compute scheduler units are untouched
 
 - **WHEN** the probe or its installer runs in any mode
-- **THEN** the enabled and active states of `nhms-compute-scheduler.timer` and
-  `nhms-compute-scheduler.service` are identical before and after the run
+- **THEN** the compute scheduler's timer is identical before and after the run in
+  both its unit-file state and its active state
+- **AND** the compute scheduler's service — a oneshot activated by that timer on
+  its own cadence, and therefore not a unit whose active state any installer can
+  hold still — is identical before and after the run in its unit-file state
+- **AND** the comparison is performed per unit type for this reason, so that a
+  oneshot activating on schedule mid-run is never mistaken for an installer
+  having touched it
+- **AND** the installer's protected-state baseline is captured at the start of
+  every invocation, so the comparison always describes that one invocation and
+  no on-disk baseline is ever interpreted across versions of the installer
 
 ### Requirement: The tracked DB-free scheduler env template carries every key the documentation declares mandatory
 

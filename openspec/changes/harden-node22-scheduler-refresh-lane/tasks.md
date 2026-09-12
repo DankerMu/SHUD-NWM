@@ -85,9 +85,13 @@ Evidence floor:
       comparisons are **skipped** rather than defaulted when no age resolved.
       Thresholds from env: `NHMS_REFRESH_HEALTH_MAX_NEXT_DWELL_HOURS` (36),
       `NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS` (120),
-      `NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS` (6). Reject at config time any freshness
-      threshold >= 168, and bound the stopped-dwell at config time too — all three
-      tunables are bounded, not two.
+      `NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS` (6). All three are range-checked at
+      config time, before any evidence is collected: the accepted range is `1..144`
+      (>= 24 h of margin below the consumer's 168 h bound — one full refresh cadence),
+      and `STOPPED_DWELL_HOURS` is additionally capped at 24 h. A bare `< 168` check is
+      NOT sufficient and is the defect this replaces: it accepted 167, which graded a
+      six-day-dead lane `ok` for 166 hours. Express the bounds as named module constants
+      and have the tests assert against those constants, so the numbers have one source.
 - [x] 1.3 Apply the `timer_stopped` dwell (design D3a): grade `timer_stopped` only when
       `now - InactiveEnterTimestamp` exceeds the stopped-dwell, so a live #1104
       manual-publisher window does not alarm. Inside the dwell, continue grading the
@@ -112,7 +116,7 @@ Evidence floor:
 - [x] 1.8 Resolve the manifest age with the bounded history fallback (design D3b):
       the configured `latest.json` first, then the sibling `history/` directory of that
       file, whose entries the runner names `refresh_<YYYYmmddTHHMMSSZ>_<uuid12>.json`
-      (`scripts/scheduler_file_provider_refresh.py:1628`) — the fixed-width UTC prefix
+      (`scripts/scheduler_file_provider_refresh.py:611`) — the fixed-width UTC prefix
       makes a lexical **descending** sort chronological, so no timestamp is parsed and no
       `mtime` is trusted. Filter to that filename shape, cap the directory listing at 200
       entries, open at most the 10 newest, and bound each read `O_NOFOLLOW` exactly as
@@ -205,17 +209,20 @@ Evidence floor:
 | R8b undefined dwell | unit test, `inactive` with empty `InactiveEnterTimestamp` -> `probe_failed` |
 | R8c timestamp zone handling | unit test over hardcoded `systemctl show` strings — a `UTC` token and a non-local abbreviation — asserted without depending on the test host's own zone |
 | R9 latest unresolvable, history answers | unit tests over the four unresolvable shapes (missing file, malformed JSON, schema-invalid payload, empty `providers`) each paired with a usable history receipt -> age from history, `manifest_source=history:<file>`, healthy lane grades `ok` exit 0 |
-| R9b history fallback does not mask the timer | unit test: `latest.json` unresolvable **and** `enabled`+`inactive` past the dwell -> `timer_stopped`, not an evidence verdict. This is the A1 regression and must fail if the manifest arm is moved back above the timer arms |
+| R9b history fallback does not mask any timer verdict | three unit tests, one per timer verdict, each with an unresolvable `latest.json` and no usable history: `enabled`+`inactive` past the dwell -> `timer_stopped`; `UnitFileState` not `enabled` -> `timer_not_enabled`; `active` with empty (and separately, unparseable) `NextElapseUSecRealtime` -> `timer_not_scheduled`. Verified that with only the first two present, hoisting the precedence-7 arm above `timer_not_scheduled` leaves the suite green — so the third is load-bearing, not symmetry |
 | R9c `manifest_unavailable` | unit tests: no history directory; history present but every candidate unresolvable -> `manifest_unavailable`, non-zero, `manifest_source=unavailable`, never `ok` |
 | R9d fallback bounds | unit tests: a history directory of >200 entries is not fully listed; at most 10 candidates are opened (spy on the read); off-shape filenames are skipped; a symlinked candidate is refused; ordering is by descending filename with `mtime` deliberately set to contradict it |
-| R10 threshold bound | unit test, freshness threshold 168 and 200 both rejected at config time; stopped-dwell outside its bounds likewise rejected |
+| R10 threshold range | unit tests at the boundaries: for each **freshness** threshold 144 accepted / 145 refused; for the stopped-dwell 24 accepted / 25 refused (its cap is one cadence, so it never reaches 144); 145 refused for all three; 167 refused as a literal, since it was accepted before this fix; a refused value writes no receipt |
+| R10b no in-range combination greens a dead lane | property test sweeping the accepted ranges against the 2026-08-28 geometry, asserting no accepted threshold combination yields `ok` once idle exceeds one cadence |
 | R11 no mutation verbs | source-scan test over the probe file, zero hits |
+| R11c probe timer liveness is checkable | unit-file assertion that no comment claims the probe catches itself up after a missed tick, plus a runbook steady-state row for the probe timer (`NEXT` is not `-`, receipt `generated_at` recent) mirroring the refresh timer's existing table |
 | R11b env surface enumerated | implementer reports the table (every env var the probe reads x removed / unit-tunable / bounded / exercised through the env path); a test asserts the clock has no env seam, and a test drives the production shape — env defaults set, **no CLI flags** — asserting the resolved unit, receipt path and clock |
 | R12 only read subcommands | fake systemctl records every invocation; test asserts the set is a subset of `{show, list-timers}` |
 | R13 stdlib only | source-scan test of the probe's import statements against `sys.stdlib_module_names` |
 | R14 receipt shape and mode | unit test: parent dir mode, file mode 0600, required fields present (incl. `manifest_source` from its closed set), size bounded, no env values beyond thresholds and unit name |
 | R14b durable receipt write | unit tests: `os.write` monkeypatched to a short write -> fails closed, non-zero; a write failure leaves the previous receipt byte-identical; the verdict is on stdout/journal before the failure exit |
-| R15 installer leaves units untouched | installer's own before/after assertion, per unit type (both fields for the two timers, `UnitFileState` only for the two timer-driven oneshots); a regression test drives the installer fake to return a **divergent** second read and asserts the assertion actually bites and aborts; a second case flips only a oneshot's `is-active` and asserts it does **not** fire; plus the node-22 live receipt recording all four states before and after |
+| R15 installer leaves units untouched | each installer's own before/after assertion, per unit type; for **both** installers a regression test drives the fake to a divergent second read of a protected unit and asserts the run aborts and is backed out (side effects, not exit code); a paired negative case flips only a oneshot's `is-active` and asserts it does **not** fire. A source grep does not count as evidence for this row — reverting the call sites while leaving the helpers as dead code keeps every grep green |
+| R15b baseline captured per invocation | unit tests: seed a stale, differently-shaped `scheduler.before`, then assert `--enable` exits 0 with the timer still armed and `--rollback` exits 0 printing its status line; assert every action rewrites the baseline before acting; assert `--rollback` still requires `refresh.before`, which is the actual restore data |
 | R16 dry-run counts agree, N models | pytest over a multi-model fixture; assertion derives N from the fixture, no literal 76 |
 | R17 dry-run boundaries | pytest: 1 model and N models, counts derived from the fixture |
 | R17b empty set stays fail-closed | pytest: empty model set fails closed with `provider_invalid` on both the direct-grid (`:896-898`) and non-direct-grid (`:961-962`) paths, yielding a terminal `outcome=failed` receipt with no providers — never a successful zero-count `dry_run` receipt |

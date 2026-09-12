@@ -2588,9 +2588,19 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # README/runbook/template mutual-consistency guard must run on a
     # runbook-only PR -- otherwise the drift that produced #2075 can re-enter
     # through the document that is supposed to pin the value.
+    # #2146 round 2 widened this row by one again: the probe suite `read_text`s
+    # this runbook and asserts its probe section states every `VERDICT_*` name,
+    # each threshold's default AND ceiling, the receipt field set taken from a
+    # real `build_receipt` call, the receipt root, and the probe timer's own
+    # steady-state row. Without this entry that guard never runs on the PR that
+    # edits the document it guards.
     PathTestRule(
         "docs/runbooks/current-production-ops.md",
-        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py"),
+        (
+            SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
+            "tests/test_env_templates.py",
+            "tests/test_node22_refresh_timer_health.py",
+        ),
     ),
     PathTestRule(
         "infra/env/compute.example",
@@ -2730,9 +2740,33 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/scheduler_file_provider_refresh_once.sh",
         ("tests/test_scheduler_file_provider_refresh.py",),
     ),
+    # #2146 round 2 widened this row by one, and added the runner row below it.
+    # `tests/test_node22_refresh_timer_health.py` `read_text`s this installer
+    # (it asserts the per-unit-type comparison and `set -Eeuo pipefail`) AND
+    # runs it as a subprocess against a fake systemctl, driving a divergent
+    # second read of `nhms-compute-scheduler.timer`/`.service` and asserting
+    # the run aborts and is backed out. Before this entry, dropping `-E` on an
+    # installer-only PR selected only the refresh suite and merged green.
     PathTestRule(
         "scripts/install_node22_scheduler_file_provider_refresh.sh",
-        ("tests/test_scheduler_file_provider_refresh.py",),
+        (
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_node22_refresh_timer_health.py",
+        ),
+    ),
+    # #2146 round 2: the refresh RUNNER had no explicit row -- only the
+    # same-name derivation, which cannot know about a second reader. The probe
+    # suite `read_text`s it for the `run_id` filename shape its history
+    # fallback filters on, and imports it to pin `SCHEMA_VERSION` against the
+    # probe's `REFRESH_RECEIPT_SCHEMA_VERSION`: the probe rejects any receipt
+    # whose `schema_version` differs, so an unpinned runner schema bump would
+    # kill the whole manifest arm silently.
+    PathTestRule(
+        "scripts/scheduler_file_provider_refresh.py",
+        (
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_node22_refresh_timer_health.py",
+        ),
     ),
     # #2188: these two rows are systemd units, NOT `#1138` shell wrappers (that
     # block's targets were derived by grepping tests/ for `*.sh` references;
@@ -3332,9 +3366,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # test_issue1895_readiness_c3.py, while the shared C1/C2 helpers remain in
     # test_issue1895_readiness_c1_c2_c3.py; a change here must run both
     # partitions. This exact owner has no same-name suite.
+    # #2146 round 2 widened this row by one: the node-22 refresh-timer probe
+    # duplicates `DEFAULT_MAX_MANIFEST_AGE_HOURS` as its own
+    # `CONSUMER_MAX_MANIFEST_AGE_HOURS` (D4 forbids the probe importing repo
+    # packages), and derives both threshold ceilings from it. The probe suite
+    # asserts the two constants are equal, so a drop in the consumer's bound
+    # must run it -- otherwise the probe keeps grading `ok` for a manifest the
+    # consumer has already fail-closed on.
     PathTestRule(
         "services/orchestrator/scheduler_file_providers.py",
-        ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        (*ISSUE1895_READINESS_C1_C2_C3_TESTS, "tests/test_node22_refresh_timer_health.py"),
     ),
     PathTestRule(
         "packages/common/node27_issue1895_commit.py",

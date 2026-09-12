@@ -4,8 +4,15 @@ Description=Hourly health probe for the NHMS node-22 file-provider refresh lane
 [Timer]
 OnCalendar=hourly
 RandomizedDelaySec=5m
-# Unlike the refresh timer itself, a missed probe tick is caught up: the whole
-# point is that a gap in observation must not read as health.
+# `Persistent=` replays a tick missed while the timer was NOT LOADED -- across
+# a boot, or before an explicit `start`.  It does nothing at all for a timer
+# left `enabled` + `inactive`, which is the 2026-08-28 geometry this probe
+# exists to detect: such a timer never transitions to active, so there is no
+# moment at which the missed tick is replayed.  Nothing here revives a stopped
+# probe, and no comment may suggest otherwise.  The probe's own liveness is an
+# operator check instead, documented as a steady-state row in
+# `docs/runbooks/current-production-ops.md`: `list-timers` NEXT is not `-`,
+# and the probe receipt's `generated_at` is recent.
 Persistent=true
 Unit=nhms-node22-refresh-timer-health.service
 
