@@ -1,5 +1,6 @@
 """Exercise CLI projection using only PostgreSQL/OS boundary substitutes."""
 
+import errno
 import json
 import os
 import subprocess
@@ -88,9 +89,12 @@ def observations(monkeypatch, tmp_path):
     directory_stat = tmp_path.stat()
 
     def stat(path, *args, **kwargs):
+        # Keep lstat identity real for no-follow receipt publication.
+        if not kwargs.get("follow_symlinks", True):
+            return real_stat(path, *args, **kwargs)
         if str(path) in {"/", "/home", "/data/GHDC", state["target_path"]}:
             if str(path) == state["target_path"] and state["target_failure"] == "missing":
-                raise FileNotFoundError("password=os-secret")
+                raise FileNotFoundError(errno.ENOENT, "password=os-secret", str(path))
             return directory_stat
         return real_stat(path, *args, **kwargs)
 
