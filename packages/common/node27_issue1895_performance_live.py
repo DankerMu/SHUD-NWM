@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from packages.common.compressed_chunk_cold_runtime_catalog import derive_bound_inventories
+from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError, derive_bound_inventories
 from packages.common.node27_issue1895_catalog import observe_intersecting_groups
 from packages.common.node27_issue1895_commit import (
     publish_performance_artifacts,
@@ -372,9 +372,17 @@ def _observe_classified(
         kwargs["load_chunk"] = load_chunk
     if collect_group is not None:
         kwargs["collect_group"] = collect_group
+    try:
+        inventories = derive_bound_inventories(_binder(connection))
+    except ColdRuntimeError:
+        raise Issue1895ReadinessError(
+            "intersecting chunk discovery failed",
+            code="LANE_CATALOG_FAILED",
+            stage="catalog",
+        ) from None
     classified = observe_intersecting_groups(
         _binder(connection),
-        inventories=derive_bound_inventories(_binder(connection)),
+        inventories=inventories,
         window_start=window_start,
         window_end=window_end,
         kind=kind,

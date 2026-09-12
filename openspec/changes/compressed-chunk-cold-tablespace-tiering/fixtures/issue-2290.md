@@ -32,6 +32,15 @@ narrow. Supported extra user columns remain included in inventory/parity, not
 silently discarded. Canonical forcing is identity-bound without requiring its
 future expand. No external deployment ledger permission is introduced.
 
+Round1 clarification: the narrow enum predicate uses same-row catalog type
+namespace/name, not `format_type` display qualification. The same physical narrow
+parent must admit and support bound selection under both default and hydro-visible
+`search_path`. Restore the session setting after the isolated proof. Existing
+descriptor/digest/parity rendering stays unchanged; cross-session canonicalization
+is a separate pre-existing concern, not an identical-digest requirement here.
+Readiness adapters translate known cold admission errors to their stable CLI
+refusal before publication; unrelated programming errors must still propagate.
+
 Non-goals: cardinality/default-six cutover and G3 count alignment (#2291);
 production G0-G8, production DB/active checkout access, services/timers/install;
 any other issue; migration/lifecycle/retention/lag changes; C4/display/API changes;

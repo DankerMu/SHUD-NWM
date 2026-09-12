@@ -15,6 +15,7 @@ from packages.common.compressed_chunk_cold_residency import (
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import (
     BoundInventories,
+    ColdRuntimeError,
     collect_residency_group,
     compute_window_parity,
     derive_bound_inventories,
@@ -377,6 +378,12 @@ def run_post_target_observation(
         )
         publish_post_target(output_path, document)
         return document
+    except ColdRuntimeError:
+        raise Issue1895ReadinessError(
+            "post-target catalog observation failed",
+            code="POST_TARGET_CATALOG_FAILED",
+            stage="post-target",
+        ) from None
     finally:
         if owned is not None:
             close_observer_connection(owned)

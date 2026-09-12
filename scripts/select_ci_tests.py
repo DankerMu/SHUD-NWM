@@ -1210,6 +1210,8 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_issue2224_origin_chunk_parity.py",
             "tests/test_issue2290_cold_parent_admission.py",
             "tests/test_issue1895_readiness_performance_live.py",
+            "tests/test_issue1895_readiness_storage.py",
+            "tests/test_issue1895_readiness_performance_live_cli.py",
         ),
     ),
     PathTestRule(
@@ -3757,7 +3759,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/compressed_chunk_cold_runtime_catalog.py",
-        (*ORIGIN_CHUNK_PARITY_TESTS, "tests/test_issue2290_cold_parent_admission.py"),
+        (
+            *ORIGIN_CHUNK_PARITY_TESTS,
+            "tests/test_issue2290_cold_parent_admission.py",
+            "tests/test_issue1895_readiness_performance_live_cli.py",
+        ),
     ),
     PathTestRule(
         "packages/common/compressed_chunk_cold_receipt.py",

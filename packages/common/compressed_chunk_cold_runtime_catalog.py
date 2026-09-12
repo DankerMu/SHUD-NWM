@@ -63,11 +63,13 @@ SELECT a.attnum,
        a.attnotnull,
        a.attidentity,
        a.attgenerated,
-       t.typtype, c.oid AS parent_oid, ht.id AS hypertable_id
+       t.typtype, tn.nspname AS type_schema, t.typname AS type_base_name,
+       c.oid AS parent_oid, ht.id AS hypertable_id
 FROM pg_attribute a
 JOIN pg_class c ON c.oid = a.attrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 JOIN pg_type t ON t.oid = a.atttypid
+JOIN pg_namespace tn ON tn.oid = t.typnamespace
 JOIN _timescaledb_catalog.hypertable ht
   ON ht.schema_name = n.nspname AND ht.table_name = c.relname
 WHERE n.nspname = %s AND c.relname = %s
@@ -608,10 +610,7 @@ def derive_hypertable_inventory(execute: Execute, schema: str, name: str) -> Hyp
             "river_segment_key": ("integer", True),
             "valid_time": ("timestamp with time zone", True),
             "lead_time_hours": ("integer", False),
-            "variable_e": ("hydro.river_variable", True),
             "value": ("double precision", True),
-            "unit_e": ("hydro.river_unit", True),
-            "quality_flag_e": ("hydro.river_quality_flag", True),
             "created_at": ("timestamp with time zone", True),
         }
         actual = {column.name: (column.type_name, column.not_null) for column in columns}
@@ -624,11 +623,19 @@ def derive_hypertable_inventory(execute: Execute, schema: str, name: str) -> Hyp
             "unit",
             "quality_flag",
         }
-        enums = {row["attname"] for row in rows if row["typtype"] == "e"}
+        expected_enums = {
+            "variable_e": ("hydro", "river_variable", "e", True),
+            "unit_e": ("hydro", "river_unit", "e", True),
+            "quality_flag_e": ("hydro", "river_quality_flag", "e", True),
+        }
+        enums = {
+            row["attname"]: (row.get("type_schema"), row.get("type_base_name"), row["typtype"], row["attnotnull"])
+            for row in rows
+        }
         if (
             legacy.intersection(actual)
             or any(actual.get(key) != value for key, value in expected.items())
-            or not {"variable_e", "unit_e", "quality_flag_e"} <= enums
+            or any(enums.get(key) != value for key, value in expected_enums.items())
         ):
             raise ColdRuntimeError(
                 "canonical river is not the supported narrow parent", error_class="inventory_drift", stage="inventory"

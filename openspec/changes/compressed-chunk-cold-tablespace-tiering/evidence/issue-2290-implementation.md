@@ -72,3 +72,43 @@ relaxing production eligibility or asserting a different message. Compression
 eligibility is unchanged, as required by #2290; message wording is not its
 acceptance contract. Corrected-head results belong in the final PR evidence,
 not a retrospective claim that this checkpoint passed.
+
+## Round1 independent review
+
+Four seats reviewed `e1d786fff123e8616d5aadb68e0bd95bc886881d`.
+Independent verification retained two P1 repair inputs: new cold admission errors
+escaping the performance/post-target CLI refusal adapters (CONFIRMED, contract),
+and qualified enum display-name comparison rejecting a valid hydro-visible
+session (PLAUSIBLE, compatibility). The ledger records round1 not-clean, gate none.
+Mutation/false-GO safety was not the reported failure.
+
+The correction boundary is stable readiness-adapter translation of known
+`ColdRuntimeError` while retaining programming-error propagation, and same-row
+catalog namespace/type-name predicates for enum admission. Existing
+`ColumnDescriptor`, `format_type` rendering, digest material, wire payload and
+origin parity remain unchanged. The compatibility verifier explicitly corrected
+its conflicting proof clause: test physical identity and bound admission under
+each uniform search path, not identical digests across different search paths.
+The latter is a separate pre-existing evidence-presentation concern.
+
+Raw reports, verdicts, clarification and invariant surface inventory are retained
+under `.workplans/issue-2290/review/`. Static review verdicts are not executed red
+proof; new CLI/engine assertions must be run against the pre-fix implementation
+before final corrected-head validation is accepted.
+
+Tests-only checkpoint `294cb7402f1f2d4db701ff4787afb6e130c18370` kept the
+e1d786f production source and ran after its full baseline exited. New enum/CLI
+cases returned 9 failed / 99 deselected (1.53s); the pinned engine returned
+1 failed / 1 deselected (4.30s). The engine reached the hydro-visible derivation
+inside `_assert_physical_parent_admission` and refused the valid narrow parent.
+The CLI cases exposed raw domain errors, and incorrect/missing catalog enum
+metadata was accepted by the old predicate. These are behavioral red results,
+not import/collection failures. Raw logs: `node27/review-red-focused.log` and
+`node27/review-red-isolated.log` under the issue workplan.
+
+The pre-repair e1d786f full run separately passed 19690 tests, skipped 330 and
+reported one optional ecCodes-loading warning (3359.63s). It is a baseline, not
+proof of the later source repair. The pre-existing mixed-session
+digest/payload/parity presentation issue is tracked separately as
+[#2293](https://github.com/DankerMu/SHUD-NWM/issues/2293), directly under #1895/#1891;
+this PR does not perform a partial canonicalization or claim live reproduction.
