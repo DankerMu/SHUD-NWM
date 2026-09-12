@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# `-E` is load-bearing: without it an ERR trap set at top level is NOT inherited
+# by function bodies, so `assert_scheduler_unchanged` failing inside a function
+# exits 1 without ever running the trap that is supposed to restore state.
+# Verified empirically; do not drop it.
+set -Eeuo pipefail
 
 repo=${NHMS_SCHEDULER_REFRESH_REPO:-/scratch/frd_muziyao/NWM}
 unit_dir=${NHMS_SCHEDULER_REFRESH_UNIT_DIR:-$HOME/.config/systemd/user}
@@ -42,25 +46,53 @@ unit_state() {
   printf '%s\t%s\n' "${enabled:-not-found}" "${active:-inactive}"
 }
 
+# The compute scheduler's `.service` is a TIMER-DRIVEN ONESHOT: it activates on
+# its own cadence (every 5 minutes) and goes inactive again, so its `is-active`
+# is not a property this installer can hold still.  Comparing it would abort on
+# a unit nobody touched, and an installer that rolls back on that false positive
+# turns arming into a retry loop.  `UnitFileState` is what "unchanged" means for
+# such a unit; the `.timer` above it is still compared on both fields.
+# (Design matrix R15 -- the same split the probe installer applies.)
+unit_file_state() {
+  local unit=$1
+  local enabled
+  enabled=$($systemctl_bin --user is-enabled "$unit" 2>/dev/null || true)
+  printf '%s\n' "${enabled:-not-found}"
+}
+
+scheduler_state() {
+  printf '%s%s' \
+    "$(unit_state nhms-compute-scheduler.timer)" \
+    "$(unit_file_state nhms-compute-scheduler.service)"
+}
+
 assert_scheduler_unchanged() {
   local before after
   before=$(<"$state_root/scheduler.before")
-  after="$(unit_state nhms-compute-scheduler.timer)$(unit_state nhms-compute-scheduler.service)"
+  after="$(scheduler_state)"
   [[ "$before" == "$after" ]]
 }
 
+# Every verb is `|| true`, not just the two that always were.  This function
+# runs inside ERR trap bodies, and under `set -Eeuo pipefail` a failing command
+# in a trap body TERMINATES the trap: an unguarded `enable` that fails left the
+# service unrestored and skipped `assert_scheduler_unchanged` entirely, so the
+# installer's own rollback manufactured the `enabled`/`inactive` geometry this
+# lane exists to detect with nothing asserting the compute scheduler survived.
+# Same guard as `rollback_files`' `daemon-reload`, and the probe installer's
+# `restore_probe_timer` already guards all four verbs.
 restore_unit_state() {
   local unit=$1
   local state=$2
   local enabled active
   IFS=$'\t' read -r enabled active <<< "$state"
   if [[ "$enabled" == enabled ]]; then
-    $systemctl_bin --user enable "$unit"
+    $systemctl_bin --user enable "$unit" >/dev/null 2>&1 || true
   else
     $systemctl_bin --user disable "$unit" >/dev/null 2>&1 || true
   fi
   if [[ "$active" == active ]]; then
-    $systemctl_bin --user start "$unit"
+    $systemctl_bin --user start "$unit" >/dev/null 2>&1 || true
   else
     $systemctl_bin --user stop "$unit" >/dev/null 2>&1 || true
   fi
@@ -110,10 +142,26 @@ rollback_files() {
       rm -f "$unit_dir/$unit"
     fi
   done
-  $systemctl_bin --user daemon-reload
+  # `|| true`: this runs inside the `--install` ERR trap body, and a failing
+  # daemon-reload must not abort the trap before it reaches
+  # `restore_refresh_state` and `assert_scheduler_unchanged` -- a partial
+  # rollback is worse than none.  Same guard as the probe installer's
+  # `remove_probe_units`.
+  $systemctl_bin --user daemon-reload || true
 }
 
 assert_refresh_service_inactive
+
+# The protected-state baseline is captured PER INVOCATION, before this action
+# touches anything, so `assert_scheduler_unchanged` always means "this
+# invocation changed nothing".  It used to be written by `--install` only and
+# read by `--enable` and `--rollback`, which the runbook documents as
+# standalone commands -- so an on-disk file became a contract between two
+# versions of this script, and this change's own reshaping of it (4 fields ->
+# 3) would make the next bare `--enable` abort on pure format drift with no
+# unit having moved.  Nothing ever restores FROM this file; `refresh.before`
+# below is the restore data and keeps its own existence precondition.
+scheduler_state > "$state_root/scheduler.before"
 
 if [[ "$action" == --install ]]; then
   env_file="$repo/infra/env/compute.scheduler-provider-refresh.env"
@@ -123,9 +171,6 @@ if [[ "$action" == --install ]]; then
     exit 2
   fi
   [[ $(grep -Ec '^NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true$' "$env_file") -eq 1 ]]
-  printf '%s%s' \
-    "$(unit_state nhms-compute-scheduler.timer)" \
-    "$(unit_state nhms-compute-scheduler.service)" > "$state_root/scheduler.before"
   {
     unit_state "$timer"
     unit_state "$service"
@@ -164,7 +209,7 @@ elif [[ "$action" == --enable ]]; then
   trap - ERR
   printf '{"status":"enabled_active","scheduler_unchanged":true}\n'
 else
-  [[ -f "$state_root/scheduler.before" && -f "$state_root/refresh.before" ]]
+  [[ -f "$state_root/refresh.before" ]]
   rollback_files
   restore_refresh_state
   assert_scheduler_unchanged

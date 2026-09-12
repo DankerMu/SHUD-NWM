@@ -1602,6 +1602,236 @@ def test_refresh_dry_run_rejects_existing_worker_registry_generation_mismatch(
     assert receipt["reason"] == "provider_invalid"
 
 
+def _direct_grid_mirror_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    models: list[dict[str, object]],
+) -> tuple[refresh.RefreshConfig, dict[str, Path]]:
+    """#1926: the live node-22 shape — direct-grid authority plus a worker
+    registry mirror that is a byte-copy of the canonical registry.
+
+    Real bytes land on both destinations and the REAL preimage capture is
+    restored over ``_stub_provider_pipeline``'s ``exists=False`` sentinel, so
+    the dry-run canonical/mirror digest guard (`:743-744`) compares real
+    digests instead of two ``None``s.
+    """
+    config = replace(
+        _config(tmp_path),
+        worker_registry_uri=str(tmp_path / "objects/scheduler/worker-registry/manifest-last.json"),
+    )
+    content = _valid_previous_manifest(models)
+    registry = Path(config.registry_uri)
+    worker = Path(config.worker_registry_uri)
+    write_provider_destination(registry, content)
+    make_directory_with_explicit_mode(worker.parent)  # lock parent, #1513
+    write_provider_destination(worker, content)
+    _stub_provider_pipeline(monkeypatch)
+    monkeypatch.setattr(
+        refresh, "capture_scheduler_provider_preimage", capture_scheduler_provider_preimage
+    )
+    monkeypatch.setattr(
+        refresh,
+        "publish_all_basin_scheduler_registry",
+        lambda **kwargs: pytest.fail("direct-grid dry-run must not republish Basins IDW rows"),
+    )
+    monkeypatch.delenv(refresh.CUTOVER_DECLARATION_ENV, raising=False)
+    monkeypatch.setenv("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID", "true")
+    return config, {"registry": registry, "registry_worker_mirror": worker}
+
+
+def _provider_snapshot(paths: dict[str, Path]) -> dict[str, tuple[bytes, dict[str, Any]]]:
+    return {
+        name: (
+            path.read_bytes(),
+            capture_scheduler_provider_preimage(str(path)).to_dict(),
+        )
+        for name, path in paths.items()
+    }
+
+
+# R16 / R17: counts agree at the 1-model boundary and at a multi-model set.
+# The expected value is derived from the fixture's own model list, never a
+# literal count.
+@pytest.mark.parametrize("model_count", [1, 7])
+def test_dry_run_worker_mirror_entry_count_equals_prospective_registry_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_count: int
+) -> None:
+    """#1926: under direct-grid authority with a worker mirror configured, a
+    dry-run must report the mirror with the SAME prospective model count as the
+    canonical registry, so `_validate_receipt`'s registry/mirror `entry_count`
+    equality holds and the run produces a self-valid `outcome=dry_run` receipt
+    instead of dying as `primary_receipt_failed`.
+    """
+    models = [_registry_row(f"dg-{index}", f"{index:064d}") for index in range(model_count)]
+    config, paths = _direct_grid_mirror_fixture(tmp_path, monkeypatch, models=models)
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert receipt["outcome"] == "dry_run", receipt
+    assert receipt["reason"] == "dry_run_complete", receipt
+    assert receipt["phase"] == "complete", receipt
+    assert [provider["name"] for provider in receipt["providers"]] == [
+        "registry",
+        "registry_worker_mirror",
+        "readiness",
+        "state",
+    ]
+    registry_provider, mirror_provider = receipt["providers"][0], receipt["providers"][1]
+    assert registry_provider["entry_count"] == len(models)
+    assert mirror_provider["entry_count"] == registry_provider["entry_count"]
+    # The dry-run mirror is still a pure before-image on every byte field.
+    assert mirror_provider["after_sha256"] == mirror_provider["before_sha256"]
+    assert registry_provider["after_sha256"] == mirror_provider["after_sha256"]
+
+
+# R18: a dry-run mutates no provider byte and no provider stat tuple.
+def test_dry_run_with_worker_mirror_leaves_every_provider_byte_and_preimage_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = [_registry_row(f"dg-{index}", f"{index:064d}") for index in range(4)]
+    config, paths = _direct_grid_mirror_fixture(tmp_path, monkeypatch, models=models)
+    readiness = Path(config.readiness_uri)
+    state = Path(config.state_uri)
+    before = _provider_snapshot(paths)
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert receipt["outcome"] == "dry_run", receipt
+    assert _provider_snapshot(paths) == before
+    # Readiness and state were absent going in; a dry-run must not create them.
+    assert not readiness.exists()
+    assert not state.exists()
+
+
+# R19: the successful dry-run receipt is persisted on both channels and the
+# run's emergency reservation is released rather than left as a 0-byte slot.
+def test_dry_run_with_worker_mirror_persists_receipt_and_releases_reservation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = [_registry_row(f"dg-{index}", f"{index:064d}") for index in range(3)]
+    config, _paths = _direct_grid_mirror_fixture(tmp_path, monkeypatch, models=models)
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert receipt["outcome"] == "dry_run", receipt
+    latest = json.loads((config.receipt_root / "latest.json").read_text())
+    assert latest == receipt
+    history = config.receipt_root / "history" / f"{receipt['run_id']}.json"
+    assert json.loads(history.read_text()) == receipt
+    assert list(config.emergency_root.iterdir()) == []
+    # The persisted receipt passes the same validator `--enable` runs.
+    assert refresh._validate_receipt(latest) == latest
+
+
+# R17b (direct-grid path, `:896-898`): an empty prospective model set fails
+# closed BEFORE any terminal dry-run receipt exists.  A zero-count `dry_run`
+# receipt is unreachable by design and MUST NOT be made reachable.
+def test_dry_run_over_empty_direct_grid_model_set_stays_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _paths = _direct_grid_mirror_fixture(tmp_path, monkeypatch, models=[])
+    # Anchor the assertion to `:896-898` specifically. `:961-962` (empty
+    # readiness) produces a receipt of the IDENTICAL shape, so without this spy
+    # deleting the direct-grid guard would still pass this test: the run would
+    # simply fail one gate later, for a different reason, and nothing would
+    # notice. `precommit_provider_generation` is the very next statement after
+    # the guard and its FIRST act is `_registry_precommit_gate`, so "the gate
+    # was never invoked" is exactly "the guard at `:897` raised".
+    # (`precommit_provider_generation` itself is a closure local to
+    # `refresh_scheduler_file_providers`, so it cannot be patched directly;
+    # `_registry_precommit_gate` is the module-level name it reaches through.)
+    precommit_calls: list[tuple[object, ...]] = []
+    real_gate = refresh._registry_precommit_gate
+
+    def spy(*args: object, **kwargs: object) -> object:
+        precommit_calls.append(args)
+        return real_gate(*args, **kwargs)
+
+    monkeypatch.setattr(refresh, "_registry_precommit_gate", spy)
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert precommit_calls == [], (
+        "the direct-grid empty-set guard did not raise: execution reached the "
+        "precommit call below it, so this receipt proves a LATER gate, not `:897`"
+    )
+    assert receipt["outcome"] == "failed", receipt
+    assert receipt["reason"] == "provider_invalid", receipt
+    assert receipt["providers"] == []
+    latest = json.loads((config.receipt_root / "latest.json").read_text())
+    assert latest["outcome"] == "failed"
+    assert latest["reason"] == "provider_invalid"
+
+
+# R17b (non-direct-grid path, `:961-962`): empty readiness entries fail closed
+# on the same terms.
+def test_dry_run_over_empty_readiness_entries_stays_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = [_registry_row(f"dg-{index}", f"{index:064d}") for index in range(2)]
+    config, _paths = _direct_grid_mirror_fixture(tmp_path, monkeypatch, models=models)
+    monkeypatch.delenv("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID", raising=False)
+    registry_models = [
+        {"model_id": str(row["model_id"]), "basin_id": str(row["basin_id"])} for row in models
+    ]
+    # `readiness_entries` is initialised to `[]` at `:787` and only ever
+    # assigned inside `precommit_provider_generation`, so a publisher stub that
+    # skips `precommit_validator` would trip `:961` merely because the
+    # derivation never ran -- passing for the wrong reason and proving nothing
+    # about an empty derivation result.  Drive the real callback with a
+    # NON-empty prospective set, then let the derivation itself come back empty.
+    derivation_calls: list[int] = []
+
+    def publish_registry(**kwargs: object) -> dict[str, object]:
+        workspace = Path(str(kwargs["work_dir"]))
+        workspace.mkdir(parents=True, exist_ok=True)
+        kwargs["precommit_validator"](workspace, [], registry_models)
+        return {"selected_model_count": len(registry_models), "registry": None, "packages": []}
+
+    def empty_readiness(*args: object, **kwargs: object):
+        del args, kwargs
+        derivation_calls.append(1)
+        return [], {"status": "ready", "entry_count": 0}
+
+    monkeypatch.setattr(refresh, "publish_all_basin_scheduler_registry", publish_registry)
+    monkeypatch.setattr(refresh, "derive_catalog_bound_readiness_entries", empty_readiness)
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert derivation_calls == [1], "the derivation must actually run for this test to bite"
+    assert receipt["outcome"] == "failed", receipt
+    assert receipt["reason"] == "provider_invalid", receipt
+    assert receipt["providers"] == []
+    latest = json.loads((config.receipt_root / "latest.json").read_text())
+    assert latest["outcome"] == "failed"
+
+
+# R21: a dry-run that fails after the precommit gate keeps its own reason and
+# is explicitly not folded to `primary_receipt_failed`.
+def test_dry_run_failure_after_the_gate_is_not_folded_to_primary_receipt_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    models = [_registry_row(f"dg-{index}", f"{index:064d}") for index in range(2)]
+    config, _paths = _direct_grid_mirror_fixture(tmp_path, monkeypatch, models=models)
+
+    def failing_readiness_derivation(*args: object, **kwargs: object):
+        del args, kwargs
+        raise refresh.RefreshError("provider_preimage_changed")
+
+    monkeypatch.setattr(
+        refresh, "derive_catalog_bound_readiness_entries", failing_readiness_derivation
+    )
+
+    receipt = refresh.refresh_scheduler_file_providers(config, dry_run=True)
+
+    assert receipt["outcome"] == "failed", receipt
+    assert receipt["reason"] == "provider_preimage_changed", receipt
+    assert receipt["reason"] != "primary_receipt_failed"
+    latest = json.loads((config.receipt_root / "latest.json").read_text())
+    assert latest["reason"] == "provider_preimage_changed"
+
+
 def test_worker_registry_restore_uses_committed_preimage_and_restores_exact_bytes(tmp_path: Path) -> None:
     config = replace(
         _config(tmp_path),
@@ -3864,6 +4094,434 @@ def test_installer_enable_lifecycle_and_failure_restore_with_fake_systemctl(tmp_
             not line.startswith(("enable ", "disable ", "start ", "stop ", "daemon-reload"))
             for line in fake_trace.read_text().splitlines()
         )
+
+
+def _reload_failing_fake_systemctl(
+    tmp_path: Path,
+    *,
+    is_enabled: str = "disabled",
+    failing_enable_unit: str = "",
+) -> tuple[Path, Path]:
+    """A fake systemctl whose `daemon-reload` always fails.
+
+    Everything else answers the installer's read-only queries with the
+    all-quiet defaults and records the full argv, so the ERR trap's progress is
+    readable off the trace.
+
+    Two knobs, both defaulting to the original behaviour so the caller above is
+    untouched:
+
+    * ``is_enabled`` — what every `is-enabled` query answers.  `enabled` is what
+      drives `restore_unit_state` down its `enable` arm instead of its
+      `disable` arm, which is the arm that carries no `|| true`.
+    * ``failing_enable_unit`` — make `enable <unit>` fail, modelling a systemd
+      that refuses to re-enable a unit while the ERR trap is restoring it.
+    """
+    trace = tmp_path / "reload-fail-trace.log"
+    script = tmp_path / "systemctl-reload-fails"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> {trace}\n'
+        "shift\n"  # drop --user
+        "verb=$1\n"
+        "shift\n"
+        "unit=\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        "    -*) ;;\n"
+        "    *) unit=$arg ;;\n"
+        "  esac\n"
+        "done\n"
+        'case "$verb" in\n'
+        "  daemon-reload) exit 1 ;;\n"
+        f'  is-enabled) printf "{is_enabled}\\n" ;;\n'
+        '  is-active) printf "inactive\\n" ;;\n'
+        f'  enable) [ -n "{failing_enable_unit}" ] && '
+        f'[ "$unit" = "{failing_enable_unit}" ] && exit 9 ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    script.chmod(0o755)
+    return script, trace
+
+
+def _refresh_installer_repo(tmp_path: Path) -> Path:
+    """The minimum `$repo` this installer will accept.
+
+    Only `--install` reads the env file, but every action `cmp -s`es the two
+    units against it, so both are always present.
+    """
+    repo = tmp_path / "repo"
+    root = Path(__file__).resolve().parents[1]
+    units = repo / "infra/systemd"
+    env_dir = repo / "infra/env"
+    units.mkdir(parents=True)
+    env_dir.mkdir(parents=True)
+    for name in (
+        "nhms-scheduler-file-provider-refresh.service",
+        "nhms-scheduler-file-provider-refresh.timer",
+    ):
+        shutil.copy2(root / "infra/systemd" / name, units / name)
+    env_file = env_dir / "compute.scheduler-provider-refresh.env"
+    env_file.write_text("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true\n")
+    env_file.chmod(0o600)
+    return repo
+
+
+def test_a_failing_daemon_reload_inside_the_install_trap_does_not_truncate_the_rollback(
+    tmp_path: Path,
+) -> None:
+    """`rollback_files` IS the `--install` ERR trap body (installer `:162`).
+
+    `set -E` made that trap live for the first time -- without it an ERR trap
+    set at top level is not inherited by function bodies, so a failing
+    `assert_scheduler_unchanged` exited 1 with no rollback at all.  Now that it
+    runs, `rollback_files`' final `daemon-reload` executes INSIDE the trap:
+    unguarded, a failing reload aborts the trap before `restore_refresh_state`
+    and `assert_scheduler_unchanged` ever run, which is a PARTIAL rollback --
+    strictly worse than the dead trap it replaced.
+
+    Assert the trap's downstream side effects, not the exit status: `set -e`
+    exits non-zero either way, so the exit code proves nothing here.
+    """
+    bash = _require_modern_bash()
+    root = Path(__file__).resolve().parents[1]
+    repo = tmp_path / "repo"
+    units = repo / "infra/systemd"
+    env_dir = repo / "infra/env"
+    units.mkdir(parents=True)
+    env_dir.mkdir(parents=True)
+    for name in (
+        "nhms-scheduler-file-provider-refresh.service",
+        "nhms-scheduler-file-provider-refresh.timer",
+    ):
+        shutil.copy2(root / "infra/systemd" / name, units / name)
+    env_file = env_dir / "compute.scheduler-provider-refresh.env"
+    env_file.write_text("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true\n")
+    env_file.chmod(0o600)
+    unit_dir = tmp_path / "units"
+    state_root = tmp_path / "install-state"
+    fake_systemctl, trace = _reload_failing_fake_systemctl(tmp_path)
+    environment = {
+        **os.environ,
+        "NHMS_SCHEDULER_REFRESH_REPO": str(repo),
+        "NHMS_SCHEDULER_REFRESH_UNIT_DIR": str(unit_dir),
+        "NHMS_SCHEDULER_REFRESH_INSTALL_STATE_ROOT": str(state_root),
+        "NHMS_SCHEDULER_REFRESH_SYSTEMCTL": str(fake_systemctl),
+    }
+
+    completed = subprocess.run(
+        [bash, str(root / "scripts/install_node22_scheduler_file_provider_refresh.sh"), "--install"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    lines = trace.read_text().splitlines()
+    reloads = [index for index, line in enumerate(lines) if line == "--user daemon-reload"]
+    # Two: the one that trips the trap, and the one inside `rollback_files`.
+    assert len(reloads) == 2, lines
+    tail = lines[reloads[-1] + 1 :]
+    assert "--user disable nhms-scheduler-file-provider-refresh.timer" in tail, (
+        "the failing daemon-reload aborted the ERR trap: `restore_refresh_state` "
+        f"never ran, so the rollback was partial. trace tail: {tail}"
+    )
+    assert "--user is-enabled nhms-compute-scheduler.timer" in tail, (
+        "the ERR trap never reached `assert_scheduler_unchanged`, so nothing "
+        f"re-checked the protected scheduler after the abort. trace tail: {tail}"
+    )
+    for unit in (
+        "nhms-scheduler-file-provider-refresh.service",
+        "nhms-scheduler-file-provider-refresh.timer",
+    ):
+        assert not (unit_dir / unit).exists(), f"{unit} was left installed"
+
+
+def test_a_failing_enable_inside_the_install_trap_does_not_truncate_the_restore(
+    tmp_path: Path,
+) -> None:
+    """`restore_unit_state`'s `enable`/`start` arms carried no `|| true`.
+
+    Under `set -Eeuo pipefail` a failing command in a TRAP BODY terminates the
+    trap.  `restore_refresh_state` restores the timer first and the service
+    second, so a failing `enable <timer>` left the service unrestored AND
+    skipped `assert_scheduler_unchanged` entirely: the installer's own rollback
+    manufactures the `enabled` + `inactive` geometry this PR exists to detect,
+    with nothing left asserting the compute scheduler survived the run.
+
+    Same truncation as `rollback_files`' `daemon-reload || true` one function
+    above, and the probe installer's `restore_probe_timer` already guards all
+    four verbs.  Asserting the trap's downstream side effects, not the exit
+    status: `set -e` exits non-zero either way.
+    """
+    bash = _require_modern_bash()
+    root = Path(__file__).resolve().parents[1]
+    repo = _refresh_installer_repo(tmp_path)
+    timer = "nhms-scheduler-file-provider-refresh.timer"
+    service = "nhms-scheduler-file-provider-refresh.service"
+    # `enabled` sends `restore_unit_state` down its `enable` arm; the failing
+    # `enable` is then the first command of the restore that can abort it.
+    fake_systemctl, trace = _reload_failing_fake_systemctl(
+        tmp_path, is_enabled="enabled", failing_enable_unit=timer
+    )
+    environment = {
+        **os.environ,
+        "NHMS_SCHEDULER_REFRESH_REPO": str(repo),
+        "NHMS_SCHEDULER_REFRESH_UNIT_DIR": str(tmp_path / "units"),
+        "NHMS_SCHEDULER_REFRESH_INSTALL_STATE_ROOT": str(tmp_path / "install-state"),
+        "NHMS_SCHEDULER_REFRESH_SYSTEMCTL": str(fake_systemctl),
+    }
+
+    completed = subprocess.run(
+        [bash, str(root / "scripts/install_node22_scheduler_file_provider_refresh.sh"), "--install"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    lines = trace.read_text().splitlines()
+    failed_enables = [
+        index for index, line in enumerate(lines) if line == f"--user enable {timer}"
+    ]
+    assert failed_enables, (
+        f"the ERR trap never reached `restore_unit_state \"$timer\"`. trace: {lines}"
+    )
+    tail = lines[failed_enables[-1] + 1 :]
+    assert f"--user enable {service}" in tail, (
+        "the failing `enable` aborted the ERR trap before "
+        f"`restore_unit_state \"$service\"` ran, so the refresh service was left "
+        f"unrestored. trace tail: {tail}"
+    )
+    assert "--user is-enabled nhms-compute-scheduler.timer" in tail, (
+        "the ERR trap never reached `assert_scheduler_unchanged`, so nothing "
+        f"re-checked the protected scheduler after the abort. trace tail: {tail}"
+    )
+
+
+def _stateful_fake_systemctl(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A fake systemctl that remembers per-unit state and records every argv.
+
+    Enough state for the R15b lifecycle assertions: `enable --now` really arms
+    the timer, so "the timer is still armed after `--enable`" is an observation
+    rather than a restatement of the exit code.
+    """
+    trace = tmp_path / "state-trace.log"
+    state = tmp_path / "fake-unit-state"
+    state.mkdir()
+    script = tmp_path / "systemctl-stateful"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> {trace}\n'
+        f"state={state}\n"
+        "shift\n"  # drop --user
+        "verb=$1\n"
+        "shift\n"
+        "now=no\n"
+        "unit=\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        "    --now) now=yes ;;\n"
+        "    -*) ;;\n"
+        "    *) unit=$arg ;;\n"
+        "  esac\n"
+        "done\n"
+        'key=$(printf "%s" "$unit" | tr -c "a-zA-Z0-9._-" "_")\n'
+        'enabled=$(cat "$state/$key.enabled" 2>/dev/null || printf disabled)\n'
+        'active=$(cat "$state/$key.active" 2>/dev/null || printf inactive)\n'
+        'case "$verb" in\n'
+        '  enable) enabled=enabled; [ "$now" = yes ] && active=active ;;\n'
+        '  disable) enabled=disabled; [ "$now" = yes ] && active=inactive ;;\n'
+        "  start) active=active ;;\n"
+        "  stop) active=inactive ;;\n"
+        "esac\n"
+        'if [ -n "$unit" ]; then\n'
+        '  printf "%s" "$enabled" > "$state/$key.enabled"\n'
+        '  printf "%s" "$active" > "$state/$key.active"\n'
+        "fi\n"
+        'case "$verb" in\n'
+        '  is-enabled) printf "%s\\n" "$enabled" ;;\n'
+        '  is-active) printf "%s\\n" "$active" ;;\n'
+        "esac\n"
+        "exit 0\n"
+    )
+    script.chmod(0o755)
+    return script, trace, state
+
+
+def _unit_state(state: Path, unit: str) -> tuple[str, str]:
+    enabled = state / f"{unit}.enabled"
+    active = state / f"{unit}.active"
+    return (
+        enabled.read_text() if enabled.exists() else "disabled",
+        active.read_text() if active.exists() else "inactive",
+    )
+
+
+def _live_scheduler_baseline(state: Path) -> str:
+    """What `scheduler_state` must produce for the fake's current state.
+
+    Mirrors the installer's own composition: `unit_state` for the scheduler
+    TIMER (both fields, tab-separated) and `unit_file_state` for its oneshot
+    SERVICE (`UnitFileState` only).  `scheduler_state` joins them with
+    `printf '%s%s'` over two command substitutions, and command substitution
+    strips trailing newlines -- so the on-disk baseline is the two records run
+    together with no separator between them.
+    """
+    timer_enabled, timer_active = _unit_state(state, "nhms-compute-scheduler.timer")
+    service_enabled, _ = _unit_state(state, "nhms-compute-scheduler.service")
+    return f"{timer_enabled}\t{timer_active}{service_enabled}"
+
+
+# The shape `scheduler.before` had before this PR: four tab-separated fields on
+# one line, because the oneshot service was compared on `is-active` too.  A
+# node-22 file written by the last `--install` still carries it.
+STALE_SCHEDULER_BASELINE = "enabled\tinactive\tdisabled\tinactive\n"
+
+MUTATING_VERBS = ("enable", "disable", "start", "stop", "restart", "daemon-reload")
+
+
+def _refresh_installer_environment(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
+    repo = _refresh_installer_repo(tmp_path)
+    script, trace, state = _stateful_fake_systemctl(tmp_path)
+    # `--enable` validates the current receipt through the runner; the receipt
+    # contract is exercised by its own tests, so here it is a boundary stub.
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text("#!/bin/sh\nexit 0\n")
+    fake_python.chmod(0o755)
+    state_root = tmp_path / "install-state"
+    environment = {
+        **os.environ,
+        "NHMS_SCHEDULER_REFRESH_REPO": str(repo),
+        "NHMS_SCHEDULER_REFRESH_UNIT_DIR": str(tmp_path / "units"),
+        "NHMS_SCHEDULER_REFRESH_INSTALL_STATE_ROOT": str(state_root),
+        "NHMS_SCHEDULER_REFRESH_SYSTEMCTL": str(script),
+        "NHMS_SCHEDULER_REFRESH_PYTHON": str(fake_python),
+        "NHMS_SCHEDULER_REFRESH_RECEIPT": str(tmp_path / "latest.json"),
+    }
+    return state_root, trace, state, environment
+
+
+def _run_refresh_installer(
+    action: str, environment: dict[str, str], trace: Path
+) -> subprocess.CompletedProcess[str]:
+    trace.write_text("")
+    return subprocess.run(
+        [
+            _require_modern_bash(),
+            str(
+                Path(__file__).resolve().parents[1]
+                / "scripts/install_node22_scheduler_file_provider_refresh.sh"
+            ),
+            action,
+        ],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize("action", ["--enable", "--rollback"])
+def test_r15b_a_stale_differently_shaped_baseline_does_not_break_a_standalone_action(
+    tmp_path: Path, action: str
+) -> None:
+    """`scheduler.before` must never be a contract between two invocations.
+
+    It is written by `--install` and read by `--enable` and `--rollback`, which
+    the runbook documents as standalone commands.  This PR changed the file's
+    format (4 fields -> 3), and node-22 carries a pre-change file written before
+    the 2026-09-08 recovery — so the next bare `--enable` there mismatches on
+    pure FORMAT drift, with no unit having moved.  Because this PR also made the
+    ERR trap live, `enable_failure_restore` then reverts the timer to its
+    pre-invocation state: in the documented recovery scenario, the dead state
+    the operator was fixing.
+
+    The fix is to capture the baseline per invocation, so the assertion always
+    means "this invocation changed nothing" — which is what R15 claims.
+    """
+    state_root, trace, state, environment = _refresh_installer_environment(tmp_path)
+    installed = _run_refresh_installer("--install", environment, trace)
+    assert installed.returncode == 0, installed.stderr
+    baseline = state_root / "scheduler.before"
+    baseline.write_text(STALE_SCHEDULER_BASELINE)
+
+    completed = _run_refresh_installer(action, environment, trace)
+
+    assert completed.returncode == 0, (
+        f"{action} failed on a stale baseline alone: {completed.stderr}"
+    )
+    assert json.loads(completed.stdout)["scheduler_unchanged"] is True
+    if action == "--enable":
+        assert json.loads(completed.stdout)["status"] == "enabled_active"
+        assert _unit_state(state, "nhms-scheduler-file-provider-refresh.timer") == (
+            "enabled",
+            "active",
+        )
+    else:
+        assert json.loads(completed.stdout)["status"] == "rolled_back"
+    assert baseline.read_text() != STALE_SCHEDULER_BASELINE
+    assert baseline.read_text() == _live_scheduler_baseline(state)
+
+
+@pytest.mark.parametrize("action", ["--install", "--enable", "--rollback"])
+def test_r15b_every_action_rewrites_the_protected_baseline_before_acting(
+    tmp_path: Path, action: str
+) -> None:
+    """Captured BEFORE the first mutation, or it is not a baseline at all.
+
+    Reading the trace rather than the file: a baseline written after the run
+    mutated something would still compare equal to the post-run state, so only
+    the ORDER distinguishes a real capture from a rubber stamp.
+    """
+    state_root, trace, state, environment = _refresh_installer_environment(tmp_path)
+    if action != "--install":
+        assert _run_refresh_installer("--install", environment, trace).returncode == 0
+    state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    (state_root / "scheduler.before").write_text(STALE_SCHEDULER_BASELINE)
+
+    completed = _run_refresh_installer(action, environment, trace)
+
+    assert completed.returncode == 0, completed.stderr
+    lines = trace.read_text().splitlines()
+    baseline_reads = [
+        index
+        for index, line in enumerate(lines)
+        if line == "--user is-enabled nhms-compute-scheduler.timer"
+    ]
+    mutations = [
+        index
+        for index, line in enumerate(lines)
+        if len(line.split()) >= 2 and line.split()[1] in MUTATING_VERBS
+    ]
+    assert baseline_reads, f"{action} never captured a baseline. trace: {lines}"
+    if mutations:
+        assert baseline_reads[0] < mutations[0], (
+            f"{action} mutated a unit before capturing its baseline. trace: {lines}"
+        )
+    assert (state_root / "scheduler.before").read_text() == _live_scheduler_baseline(state)
+
+
+def test_r15b_rollback_still_requires_the_restore_data_it_actually_reads(
+    tmp_path: Path,
+) -> None:
+    """`refresh.before` keeps its existence precondition; `scheduler.before`
+    does not need one, because nothing ever restores FROM it.
+
+    `refresh.before` is the restore data — `restore_refresh_state` reads it —
+    so a `--rollback` without it would disable the timer and then have nothing
+    to put back.
+    """
+    state_root, trace, _state, environment = _refresh_installer_environment(tmp_path)
+    assert _run_refresh_installer("--install", environment, trace).returncode == 0
+    (state_root / "refresh.before").unlink()
+
+    completed = _run_refresh_installer("--rollback", environment, trace)
+
+    assert completed.returncode != 0
 
 
 def _bash_major_version(executable: str) -> int | None:

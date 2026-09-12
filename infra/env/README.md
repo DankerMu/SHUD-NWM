@@ -289,6 +289,76 @@ unit → EnvironmentFile table above is the authority.
   backfill bootstrap, set `NHMS_FORECAST_WARM_START_REQUIRED_FROM` to the first
   cycle that must be warm-started; earlier cycles may cold-start only to seed
   DB-free state for that boundary.
+
+#### Required keys for the node-22 DB-free scheduler lane (machine-readable)
+
+The prose above and in the bullets before it states this lane's required set as
+"the union of two layers" — wording that never says "must set" for most of it,
+and that vagueness is what produced issue #2075 (a rebuilt node missing
+`NHMS_ORCHESTRATOR_TERMINAL_STAGE` runs the chain into `publish` and fails
+`DATABASE_URL_MISSING` every cycle). The authority is therefore the block
+below, not the prose. `tests/test_env_templates.py` parses it and asserts
+`compute.scheduler-dbfree.env.example` satisfies every entry — key present, and
+**value equal** where a value is pinned. Add a key here and the guard enforces
+it on the next test run; do not restate a mandate in prose alone.
+
+<!-- nhms-required-keys: compute.scheduler-dbfree -->
+
+```text
+# Required environment keys for infra/env/compute.scheduler-dbfree.env,
+# whose single tracked source is compute.scheduler-dbfree.env.example.
+#
+#   KEY=value   the key must be present AND carry exactly this value
+#   KEY         the key must be present; the value is site-specific
+#
+# DB-free contract gate and file-backed selectors: every scheduler backend
+# selector is pinned to `file` and the DB-free gate to `true`.
+NHMS_SCHEDULER_DB_FREE_REQUIRED=true
+NHMS_SCHEDULER_LOCK_BACKEND=file
+NHMS_SCHEDULER_STATE_BACKEND=file
+NHMS_SCHEDULER_REGISTRY_BACKEND=file
+NHMS_SCHEDULER_CANONICAL_READINESS_BACKEND=file
+NHMS_SCHEDULER_JOURNAL_BACKEND=file
+NHMS_SCHEDULER_STATE_INDEX_BACKEND=file
+
+# Provider path variables (site-specific absolute paths).
+NHMS_SCHEDULER_REGISTRY_MANIFEST
+NHMS_SCHEDULER_CANONICAL_READINESS_INDEX
+NHMS_SCHEDULER_JOURNAL_ROOT
+NHMS_SCHEDULER_STATE_INDEX
+
+# Scheduler no-flag business validation requires these roots and the
+# approved-root policy.
+NHMS_SCHEDULER_LOCK_ROOT
+NHMS_SCHEDULER_EVIDENCE_ROOT
+NHMS_SCHEDULER_RUNTIME_ROOT
+NHMS_SCHEDULER_TEMP_ROOT
+NHMS_SCHEDULER_ALLOWED_ROOTS
+NHMS_SCHEDULER_SOURCES
+
+# Trusted shared-NFS raw-manifest authority: runtime preflight requires both
+# to resolve to the same fixed node-22 topology path.
+NHMS_OBJECT_STORE_COPYBACK_ROOT
+NHMS_SCHEDULER_NFS_RAW_MANIFEST_ROOT
+
+# Pipeline runtime roots dereferenced by the runbook provision/publisher shell
+# and required by `plan-production` preflight.
+WORKSPACE_ROOT
+OBJECT_STORE_ROOT
+OBJECT_STORE_PREFIX
+NHMS_BASINS_ROOT
+
+# Canonical registry authority: the consumer environment stays `true`; only a
+# one-off baseline staging command sets it false.
+NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true
+
+# Orchestrator chain terminal stage (#2075). node-22 is DB-free, so the chain
+# must stop before parse/publish. `forecast` is NOT an acceptable value.
+NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc
+NHMS_REQUIRE_FORECAST_WARM_START=true
+```
+
+<!-- /nhms-required-keys -->
 - Production scheduler model selection is registry-driven. Keep
   `NHMS_SCHEDULER_MODEL_IDS` and `NHMS_SCHEDULER_BASIN_IDS` empty for normal
   operations; publish the full Basins file registry with
