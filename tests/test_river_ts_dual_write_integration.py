@@ -627,7 +627,7 @@ def test_expand_classifies_preexisting_authority_without_overrides(throwaway_dat
             cursor.execute("""
                 INSERT INTO hydro.hydro_run
                     (run_id, run_type, model_id, basin_version_id, start_time, end_time, status, run_manifest_uri)
-                SELECT v.run_id, 'forecast', 'm1', 'bv1', %s, %s, v.status, 's3://manifest'
+                SELECT v.run_id, 'forecast', 'm1', 'bv1', %s, %s, v.status::hydro.run_status, 's3://manifest'
                 FROM (VALUES ('published_only', 'published'), ('running_only', 'running')) v(run_id, status)
             """, (_START_TIME, _START_TIME + timedelta(hours=3)))
         expected = [

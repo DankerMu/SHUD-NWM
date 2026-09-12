@@ -1565,6 +1565,11 @@ def test_actual_publisher_and_copyback_discover_only_authoritative_facts(
 
     url, session = seeded
     _prepare_hydro_stores(session, post_expand_forecast_database, "legacy")
+    session.execute(text("""
+        INSERT INTO met.data_source (source_id, source_name, source_type, status, adapter_name)
+        VALUES ('gfs', 'GFS integration source', 'forecast', 'enabled', 'gfs')
+        ON CONFLICT (source_id) DO NOTHING
+    """))
     session.execute(text("UPDATE hydro.hydro_run SET source_id='gfs'"))
     session.commit()
     expected = {_KEYED_RUN_ID, _LEGACY_RUN_ID}

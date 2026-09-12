@@ -92,6 +92,8 @@ jobs:
               - 'packages/common/model_registry.py'
               - 'packages/common/grid_registry_store.py'
               - 'services/tiles/mvt.py'
+              - 'services/tile_publisher/publisher.py'
+              - 'services/tile_publisher/forcing_copyback_backfill.py'
               - 'apps/api/main.py'
               - 'apps/api/routes/hydro_display.py'
               - 'scripts/node27_autopipeline.py'
