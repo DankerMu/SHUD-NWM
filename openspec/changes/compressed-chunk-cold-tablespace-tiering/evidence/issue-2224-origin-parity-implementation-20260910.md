@@ -336,3 +336,14 @@ evidence are required in the PR evidence bundle before merge. This committed
 record captures the observed red proof and corrective contract, not a prospective
 PASS. Task 4.0A remains unchecked until merge; production tasks 4.1-4.8 remain
 unexecuted and the shared change remains active.
+
+The first post-fix owner-matrix run at
+`99870404945a9bbe37432335935b12d46dbf04e7` returned
+`2 failed, 80 passed, 718 deselected in 14.17s`. Both failures came from the
+test's deliberate same-name-fallback removal: disabling
+`_same_name_backend_python_test` also removes the meta-guard added by that same
+derivation branch, but the broadened remaining-leg assertion still expected it.
+The test-only correction excludes that derived meta-guard solely under this
+explicit injection. The unmutated owner assertion still requires every existing
+leg; all parity removal cases and receipt legacy-leg cases remain unchanged.
+No selector rule or production contract is weakened to satisfy the mutant.

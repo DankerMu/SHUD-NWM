@@ -13057,6 +13057,10 @@ def test_origin_chunk_parity_owner_route_reds_when_any_partition_is_removed(
     remaining = (set(ORIGIN_CHUNK_PARITY_PARTITIONS) | ORIGIN_CHUNK_PARITY_OWNER_LEGS.get(owner, set())) - {
         removed
     }
+    if same_name == removed:
+        # Disabling same-name derivation also removes its derived meta-guard rider.
+        # The unmutated owner assertion above still requires that guard.
+        remaining.discard(SELECTOR_META_GUARD_TEST)
     missing_remaining = sorted(remaining - selected)
     assert not missing_remaining, f"{owner}: remaining partitions vanished {missing_remaining}"
 
