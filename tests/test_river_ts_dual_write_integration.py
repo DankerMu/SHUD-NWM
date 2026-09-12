@@ -537,9 +537,12 @@ def test_new_run_targeting_the_compressed_chunk_still_fails_the_guard_closed(
     ), "the guard must fail the batch closed, leaving no rows behind"
 
 
+@pytest.mark.parametrize("failure", ["induced", "missing_owner"])
 def test_expand_failure_rolls_back_and_replay_preserves_narrow_parse(
-    throwaway_database_url: str, tmp_path: Path,
+    throwaway_database_url: str, tmp_path: Path, failure: str,
 ) -> None:
+    from uuid import uuid4
+
     from packages.common.migrate import MIGRATIONS_DIR, split_sql_statements
 
     apply_migrations_from_zero(throwaway_database_url, through="000058")
@@ -549,11 +552,23 @@ def test_expand_failure_rolls_back_and_replay_preserves_narrow_parse(
         _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
         before_oid = _scalar(connection, "SELECT 'hydro.river_timeseries'::regclass::oid")
         # Fail after rename/create/indexes, not before expand begins.
+        if failure == "missing_owner":
+            # Never drop or mutate a shared cluster role. Change only this
+            # disposable migration's owner target to a verified absent name.
+            owner = f"i7_absent_{uuid4().hex}"
+            assert _scalar(connection, "SELECT count(*) FROM pg_roles WHERE rolname=%s", (owner,)) == 0
+            replacement = f"ALTER TABLE hydro.river_timeseries OWNER TO {owner};"
+            expected_error = psycopg2.errors.UndefinedObject
+            expected_message = f'role "{owner}" does not exist'
+        else:
+            replacement = "RAISE EXCEPTION 'induced expand failure';"
+            expected_error = psycopg2.errors.RaiseException
+            expected_message = "induced expand failure"
         broken = sql.replace(
             "ALTER TABLE hydro.river_timeseries OWNER TO nhms_ingest_rw;",
-            "RAISE EXCEPTION 'induced expand failure';",
+            replacement,
         )
-        with pytest.raises(psycopg2.Error, match="induced expand failure"):
+        with pytest.raises(expected_error, match=expected_message):
             with connection.cursor() as cursor:
                 for statement in split_sql_statements(broken):
                     cursor.execute(statement)

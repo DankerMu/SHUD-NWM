@@ -1286,6 +1286,9 @@ def test_matching_decline_record_suppresses_a_published_and_a_succeeded_run(
         # Only the published run gets fact rows: a 'succeeded' run has never
         # been parsed, so it has none, and that is the point.
         _seed_run_facts(connection, "declined-published", normalized=True)
+        # Seed the historical wide facts, then exercise production post-expand
+        # decline routing with the real legacy/narrow authority installed.
+        apply_migrations_from_zero(throwaway_database_url)
 
         published_mtime = _write_recomputed_product(tmp_path, "declined-published", "state-a")
         succeeded_mtime = _write_recomputed_product(tmp_path, "declined-succeeded", "state-a")
@@ -1324,6 +1327,7 @@ def test_a_newer_product_reopens_a_declined_run(throwaway_database_url: str, tmp
         _seed_authority(connection)
         _seed_run(connection, "reopened-published", status="published", init_state_id="state-a")
         _seed_run_facts(connection, "reopened-published", normalized=True)
+        apply_migrations_from_zero(throwaway_database_url)
 
         declined_mtime = _write_recomputed_product(tmp_path, "reopened-published", "state-a")
         _record_decline(connection, "reopened-published", "state-a", declined_mtime)
