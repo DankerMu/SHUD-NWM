@@ -23,15 +23,19 @@ node-27 实测（2026-09-12，只读）：
 列不在时 `UndefinedColumn` 让整个 import 事务回滚。
 
 但写侧**当前同样被那条 pin 挡着，不是活风险**——这是执行窗口里用一手证据推翻的先前判断，记在此处而非悄悄改掉：
-同一个 drop-in `60-reslice-pin-original-5a86841c.conf` **也覆盖 `nhms-node27-autopipe.service`**
-（实测 `systemctl --user show ... -p DropInPaths` 只有这一条；其 `ExecStart=` 先清空再指向
+`nhms-node27-autopipe.service` **也有一个自己的 `60-reslice-pin-original-5a86841c.conf`**
+（实测 `systemctl --user show ... -p DropInPaths` 对该 unit 只有这一条；其 `ExecStart=` 先清空再指向
 `/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_autopipe_cron.sh`，并设
 `PYTHONPATH` / `NODE27_AUTOPIPE_REPO` / `NODE27_AUTOPIPE_ENV_FILE` 全部指向该固定树），
 而该树的 `workers/model_registry/basins_registry_import.py` 里 `geometry_generation` **一次都不出现**
 （活动树出现 1 次）。2026-09-12 18:42 CST 在跑的那个 tick，进程命令行实测就是
 `/home/nwm/NWM-reslice-original-5a86841c/.venv/bin/python .../scripts/node27_autopipeline.py`。
 
-所以读写两侧由**同一条 pin** 同时围栏；#2162 撤 pin 的那一刻两侧一起变活。
+所以读写两侧由**同一套 pin** 同时围栏；#2162 撤 pin 的那一刻两侧一起变活。
+（更正：全机实测共 **8 个**同名但互相独立的 `60-reslice-pin-original-5a86841c.conf`，
+分属 display-api / autopipe / download / raw-retention / timeseries-retention /
+timeseries-compression / resource-governance / frontier-alert 八个 unit 的 `.d/` 目录；
+初稿把它们写成了「同一个 drop-in」。解钉是 8 个文件的动作，不是 1 个。）
 这不改变本单的动作（先把迁移施加上，让 #2162 撤 pin 时两侧都有列可读可写），
 只是把「写侧已经在流血」修正为「写侧和读侧一样，是 #2162 撤 pin 后立刻流血」。
 
@@ -78,7 +82,9 @@ issue step 2 要求「差集若不是仅一个新文件则停下并按 #2048 对
 ## Non-Goals
 
 - 不改任何代码、不改 #2031 的 digest 语义。
-- **不动 `60-reslice-pin-original-5a86841c.conf`（它同时钉住 display 与 autopipe 两个 unit）、
+- **不动那 8 个 `60-reslice-pin-original-5a86841c.conf`（display-api / autopipe / download /
+  raw-retention / timeseries-retention / timeseries-compression / resource-governance /
+  frontier-alert 各一个）、
   不重启 `:8080` 生产 display、不 `git pull`**——
   活动树在 `hotfix/node27-rollback-pre-2073` 且无 upstream，把它恢复到 master 并解钉重启是 **#2162** 的窗口。
   在钉着旧树（无该列）的服务上重启，对本单的 oracle 零信息量。

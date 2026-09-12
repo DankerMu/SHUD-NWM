@@ -22,12 +22,24 @@
 | `yd-*` timer（独立实例 `:55434`） | 全程保持运行 | — |
 | `scripts/backfill_hydro_run_parsed_at.py` 回填 | 未执行 | #1789 |
 
-**同一条 drop-in 也钉住了 autopipe**：`systemctl --user show nhms-node27-autopipe.service -p DropInPaths`
-只列出这一条，其 `ExecStart=` 先清空再指向 `/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_autopipe_cron.sh`，
+**autopipe 也被同样的 pin 钉住**：`systemctl --user show nhms-node27-autopipe.service -p DropInPaths`
+只列出一条 `nhms-node27-autopipe.service.d/60-reslice-pin-original-5a86841c.conf`，其 `ExecStart=` 先清空再指向
+`/home/nwm/NWM-reslice-original-5a86841c/scripts/node27_autopipe_cron.sh`，
 `PYTHONPATH` / `NODE27_AUTOPIPE_REPO` / `NODE27_AUTOPIPE_ENV_FILE` 同样指向该固定树；窗口期在跑的 tick 进程命令行实测为
 `/home/nwm/NWM-reslice-original-5a86841c/.venv/bin/python .../scripts/node27_autopipeline.py`。
 该树的 `workers/model_registry/basins_registry_import.py` 中 `geometry_generation` 出现 **0** 次。
-即读写两侧由**同一条 pin** 同时围栏，#2162 撤 pin 时两侧一起变活——本单先把列建好，正是为那一刻。
+即读写两侧由**同一套 pin** 同时围栏，#2162 撤 pin 时两侧一起变活——本单先把列建好，正是为那一刻。
+
+> **更正（2026-09-12，本节初稿之后实测）**：本节初稿写作「同一条 drop-in 也钉住了 autopipe」，
+> 那是把 display 与 autopipe 各自的 drop-in 误当成了同一个文件。实测
+> `find /home/nwm/.config/systemd/user -name '60-reslice-pin*'` 返回 **8 个同名但互相独立的文件**
+> （均为 2026-09-11 07:11），分别位于以下 8 个 unit 的 `.d/` 目录：
+> `nhms-display-api`、`nhms-node27-autopipe`、`nhms-node27-download`、`nhms-node27-raw-retention`、
+> `nhms-node27-timeseries-retention`、`nhms-node27-timeseries-compression`、
+> `nhms-node27-resource-governance`、`nhms-node27-frontier-alert`。
+> 每个文件把该 unit 的 `WorkingDirectory` / `ExecStart` 改指向同一份冻结副本，机制相同、文件相互独立。
+> 这个差别有操作意义：**只删 display 那一个文件，另外 7 个 unit 仍跑冻结副本**，
+> 解钉是 8 个文件的动作，不是 1 个。本单的结论（读写两侧被同样的 pin 同时围栏）不受影响。
 
 `services/tiles/mvt.py` 中 `rnv.geometry_generation` 的出现次数（`git show <sha>:...`）：
 `d113edca` 3 · `fc21a19e` 3 · `a8db554d` 3 · **`5a86841c` 0**。生产此刻不 500 的唯一原因就在最后一列。
