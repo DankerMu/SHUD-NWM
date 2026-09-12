@@ -652,6 +652,15 @@ an observable field, and a stop condition.
 > merged SHA. Production parity reads the mandatory current durable origin
 > relation; it never reads the parent hypertable or current compressed sibling,
 > and its finite timeout remains unchanged.
+>
+> **STOP — #2290 and #2291 must both be merged before a fresh G0.** Cold
+> admission requires the canonical post-expand narrow river parent; wide river,
+> including wide tables carrying surrogate keys, and every legacy parent are
+> excluded. Canonical forcing retains its current shape. A narrow river remains
+> valid when legacy is absent. Capture fresh census, parity, intent and readiness
+> artifacts at the same reviewed revision and physical parent identity; never
+> reuse pre-expand or cross-revision artifacts. With #2291 pending, the existing
+> count contract below is unchanged and production rollout remains HOLD.
 
 | Gate | Name | Blocks the next gate until proven |
 |------|------|-----------------------------------|
@@ -725,6 +734,8 @@ runbook plus census/C1-C3/G8 owners, schemas, binders and acceptance routing),
 and issue #2224 (mandatory durable-origin production parity). Issue #2137
 merges this content without remote access; it consumes rather than reimplements
 C4. #2224 must also be merged before any retry of G1.
+Both #2290 (physical-parent admission) and #2291 (reviewed-count preparation)
+must also be merged before starting a fresh G0; neither authorizes a live window.
 
 **Step 1 — local readiness only (nothing on node-27 runs yet).** This runs on
 the machine that owns the PR; it must not be confused with the node-27 session

@@ -187,9 +187,14 @@ _SIBLING_IDENTITY_FIELDS = (
 _COMPRESSION_STATE_FIELDS = ("is_compressed", *_SIBLING_IDENTITY_FIELDS)
 
 
-def _reload_chunk(execute: Callable[..., list[Mapping[str, Any]]], chunk: CatalogChunk) -> CatalogChunk:
+def _reload_chunk(
+    execute: Callable[..., list[Mapping[str, Any]]],
+    chunk: CatalogChunk,
+    inventories: BoundInventories,
+) -> CatalogChunk:
     return load_catalog_chunk(
         execute,
+        inventory=inventories.for_hypertable(chunk.hypertable_schema, chunk.hypertable_name),
         hypertable_schema=chunk.hypertable_schema,
         hypertable_name=chunk.hypertable_name,
         origin_schema=chunk.origin_schema,
@@ -365,7 +370,7 @@ def _revalidate_locked(
     lag_seconds: int,
     max_members: int,
 ) -> tuple[CatalogChunk, ResidencyGroup, WindowParity]:
-    current = _reload_chunk(execute, selected)
+    current = _reload_chunk(execute, selected, inventories)
     _require_selected_identity(selected, current, stage="revalidate")
     eligibility = classify_eligibility(
         hypertable_schema=current.hypertable_schema,
@@ -407,7 +412,7 @@ def _fresh_observer(
     try:
         execute = _binder(fresh)
         try:
-            after_chunk = _reload_chunk(execute, chunk)
+            after_chunk = _reload_chunk(execute, chunk, inventories)
             after = collect_residency_group(execute, after_chunk)
         except ColdRuntimeError:
             return {"after": None, "after_parity": None, "reconciliation": "unknown"}
@@ -466,7 +471,7 @@ def inspect_residency_group(
     observer = connect()
     try:
         execute = _binder(observer)
-        current = _reload_chunk(execute, chunk)
+        current = _reload_chunk(execute, chunk, inventories)
         _require_durable_identity(chunk, current, stage="inspect")
         before = collect_residency_group(execute, current)
         try:
@@ -574,7 +579,7 @@ def migrate_residency_group(
         execute = _binder(observer)
         server, timescale = engine_versions(execute)
         assert_engine_versions(server, timescale)
-        current = _reload_chunk(execute, chunk)
+        current = _reload_chunk(execute, chunk, inventories)
         _require_durable_identity(chunk, current, stage="preflight")
         before = collect_residency_group(execute, current)
         _require_complete_group(before, max_members=runtime.max_members)
@@ -774,7 +779,7 @@ def _run_shell_first(
         timer.start("decompress_ms")
         if plan.decompress_sql:
             execute(plan.decompress_sql)
-        expanded_chunk = _reload_chunk(execute, locked_chunk)
+        expanded_chunk = _reload_chunk(execute, locked_chunk, inventories)
         expanded = collect_residency_group(execute, expanded_chunk)
         timer.stop()
         intermediate["after_decompress"] = snapshot_group(expanded)
@@ -789,7 +794,7 @@ def _run_shell_first(
         timer.start("recompress_ms")
         if plan.compress_sql:
             execute(plan.compress_sql)
-        complete_chunk = _reload_chunk(execute, locked_chunk)
+        complete_chunk = _reload_chunk(execute, locked_chunk, inventories)
         complete = collect_residency_group(execute, complete_chunk)
         _require_complete_group(complete, max_members=runtime.max_members)
         if not recompressed_group_is_complete(complete):
@@ -946,6 +951,7 @@ def reconcile_named_group(
         try:
             chunk = load_catalog_chunk(
                 execute,
+                inventory=inventories.for_hypertable(hypertable_schema, hypertable_name),
                 hypertable_schema=hypertable_schema,
                 hypertable_name=hypertable_name,
                 origin_schema=origin_schema,
@@ -1022,6 +1028,7 @@ def reconcile_named_group(
 def ranked_candidates(
     connect: Connect,
     *,
+    inventories: BoundInventories,
     cutoff: datetime,
     per_table_limit: int,
     max_catalog_bytes: int,
@@ -1032,6 +1039,7 @@ def ranked_candidates(
     try:
         return ranked_candidates_from_execute(
             _binder(connection),
+            inventories=inventories,
             cutoff=cutoff,
             per_table_limit=per_table_limit,
             max_catalog_bytes=max_catalog_bytes,

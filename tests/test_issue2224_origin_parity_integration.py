@@ -79,10 +79,7 @@ def _assert_plan_reads_only_selected_origin(
     allowed = {selected_origin}
     if selected_compressed is not None:
         allowed.add(selected_compressed)
-    forbidden = {
-        (chunk.hypertable_schema, chunk.hypertable_name)
-        for chunk in all_chunks
-    }
+    forbidden = {(chunk.hypertable_schema, chunk.hypertable_name) for chunk in all_chunks}
     for chunk in all_chunks:
         if chunk.origin_oid == selected.origin_oid:
             continue
@@ -94,9 +91,10 @@ def _assert_plan_reads_only_selected_origin(
     assert relation_nodes <= allowed, f"plan reads unrelated relation nodes: {relation_nodes - allowed}"
 
 
-def _reload_origin(execute: Any, chunk: Any) -> Any:
+def _reload_origin(execute: Any, chunk: Any, inventory: Any) -> Any:
     return load_catalog_chunk(
         execute,
+        inventory=inventory,
         hypertable_schema=chunk.hypertable_schema,
         hypertable_name=chunk.hypertable_name,
         origin_schema=chunk.origin_schema,
@@ -104,27 +102,29 @@ def _reload_origin(execute: Any, chunk: Any) -> Any:
     )
 
 
-def _decompress_update_recompress(execute: Any, chunk: Any, sql: str, params: tuple[object, ...]) -> Any:
+def _decompress_update_recompress(
+    execute: Any, chunk: Any, sql: str, params: tuple[object, ...], inventory: Any
+) -> Any:
     origin = quote_literal(f"{chunk.origin_schema}.{chunk.origin_name}")
     execute(f"SELECT decompress_chunk({origin}::regclass)")
     execute(sql, params)
     execute(f"SELECT compress_chunk({origin}::regclass)")
-    current = _reload_origin(execute, chunk)
+    current = _reload_origin(execute, chunk, inventory)
     assert current.is_compressed is True
     assert current.compressed_oid is not None
     return current
 
 
-def _first_row_time(execute: Any, run_id: str, value: float) -> object:
+def _first_row_time(execute: Any, run_key: int, value: float) -> object:
     rows = execute(
         """
         SELECT valid_time
         FROM hydro.river_timeseries
-        WHERE run_id = %s AND value = %s
+        WHERE run_key = %s AND value = %s
         ORDER BY valid_time
         LIMIT 1
         """,
-        (run_id, value),
+        (run_key, value),
     )
     assert len(rows) == 1
     return rows[0]["valid_time"]
@@ -139,30 +139,31 @@ def _assert_selected_compressed_target_sensitivity(
     all_chunks: Any,
 ) -> None:
     inventory = inventories.for_hypertable(selected.hypertable_schema, selected.hypertable_name)
-    selected = _reload_origin(execute, selected)
-    sibling = _reload_origin(execute, sibling)
+    selected = _reload_origin(execute, selected, inventory)
+    sibling = _reload_origin(execute, sibling, inventory)
     assert selected.is_compressed is True
     assert sibling.is_compressed is True
     before = compute_window_parity(execute, inventory, selected).as_dict()
     assert before["row_count"] == 24
     direct_sql = window_parity_sql(inventory, selected)
-    selected_time = _first_row_time(execute, "selected", 1.0)
+    selected_time = _first_row_time(execute, 1, 1.0)
     selected = _decompress_update_recompress(
         execute,
         selected,
         """
         UPDATE hydro.river_timeseries
         SET value = 1.5
-        WHERE run_id = 'selected'
-          AND basin_version_id = 'b'
-          AND river_network_version_id = 'n'
-          AND river_segment_id = 's'
+        WHERE run_key = 1
+          AND basin_version_key = 1
+          AND river_network_version_key = 1
+          AND river_segment_key = 1
           AND valid_time = %s
-          AND variable = 'q_down'
+          AND variable_e = 'q_down'
           AND value = 1.0
-          AND unit = 'm3/s'
+          AND unit_e = 'm3/s'
         """,
         (selected_time,),
+        inventory,
     )
     after = compute_window_parity(execute, inventory, selected).as_dict()
     assert after["row_count"] == before["row_count"]
@@ -174,36 +175,38 @@ def _assert_selected_compressed_target_sensitivity(
         """
         UPDATE hydro.river_timeseries
         SET value = 1.0
-        WHERE run_id = 'selected'
-          AND basin_version_id = 'b'
-          AND river_network_version_id = 'n'
-          AND river_segment_id = 's'
+        WHERE run_key = 1
+          AND basin_version_key = 1
+          AND river_network_version_key = 1
+          AND river_segment_key = 1
           AND valid_time = %s
-          AND variable = 'q_down'
+          AND variable_e = 'q_down'
           AND value = 1.5
-          AND unit = 'm3/s'
+          AND unit_e = 'm3/s'
         """,
         (selected_time,),
+        inventory,
     )
     restored = compute_window_parity(execute, inventory, selected).as_dict()
     assert restored == before
-    sibling_time = _first_row_time(execute, "sibling", 2.0)
+    sibling_time = _first_row_time(execute, 2, 2.0)
     sibling = _decompress_update_recompress(
         execute,
         sibling,
         """
         UPDATE hydro.river_timeseries
         SET value = 2.5
-        WHERE run_id = 'sibling'
-          AND basin_version_id = 'b'
-          AND river_network_version_id = 'n'
-          AND river_segment_id = 's'
+        WHERE run_key = 2
+          AND basin_version_key = 1
+          AND river_network_version_key = 1
+          AND river_segment_key = 1
           AND valid_time = %s
-          AND variable = 'q_down'
+          AND variable_e = 'q_down'
           AND value = 2.0
-          AND unit = 'm3/s'
+          AND unit_e = 'm3/s'
         """,
         (sibling_time,),
+        inventory,
     )
     assert sibling.is_compressed is True
     assert compute_window_parity(execute, inventory, selected).as_dict() == before
@@ -216,9 +219,7 @@ def _assert_selected_compressed_target_sensitivity(
 
 
 def _assert_role_identity(execute: Any, role: str) -> None:
-    rows = execute(
-        "SELECT current_user AS current_user, rolsuper FROM pg_roles WHERE rolname = current_user"
-    )
+    rows = execute("SELECT current_user AS current_user, rolsuper FROM pg_roles WHERE rolname = current_user")
     assert len(rows) == 1
     assert rows[0]["current_user"] == role
     assert rows[0]["rolsuper"] is False
@@ -233,13 +234,13 @@ def _assert_display_deny_write(execute: Any) -> None:
     statements = (
         """
         INSERT INTO hydro.river_timeseries (
-            run_id, basin_version_id, river_network_version_id, river_segment_id,
-            valid_time, variable, value, unit
-        ) VALUES ('deny', 'b', 'n', 's', TIMESTAMPTZ '2026-06-27 00:00:00+00', 'q_down', 0.0, 'm3/s')
+            run_key, basin_version_key, river_network_version_key, river_segment_key,
+            valid_time, variable_e, value, unit_e, quality_flag_e
+        ) VALUES (9, 1, 1, 1, TIMESTAMPTZ '2026-06-27 00:00:00+00', 'q_down', 0.0, 'm3/s', 'ok')
         """,
         (
             "UPDATE hydro.river_timeseries SET value = 0.0 "
-            "WHERE run_id = 'selected' AND valid_time = TIMESTAMPTZ '2026-06-27 00:00:00+00'"
+            "WHERE run_key = 1 AND valid_time = TIMESTAMPTZ '2026-06-27 00:00:00+00'"
         ),
         "ALTER TABLE hydro.river_timeseries ADD COLUMN shipping_denied boolean",
     )
@@ -260,18 +261,19 @@ def _assert_shipping_role_origin_parity(inventories: Any, execute: Any) -> None:
     for schema in ("hydro", "met"):
         execute(f"GRANT USAGE ON SCHEMA {quote_ident(schema)} TO nhms_ingest_rw, nhms_display_ro")
         execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA {quote_ident(schema)} TO nhms_ingest_rw, nhms_display_ro")
-        execute(
-            f"GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {quote_ident(schema)} TO nhms_ingest_rw"
-        )
+        execute(f"GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {quote_ident(schema)} TO nhms_ingest_rw")
     candidates = load_eligible_chunks(
         execute,
+        inventory=inventories.river,
         schema="hydro",
         name="river_timeseries",
         cutoff=_CUTOFF + timedelta(days=21),
         limit=8,
         max_bytes=16 * 1024**2,
     )
-    selected = _reload_origin(execute, sorted(candidates, key=lambda item: (item.range_start, item.origin_oid))[0])
+    selected = _reload_origin(
+        execute, sorted(candidates, key=lambda item: (item.range_start, item.origin_oid))[0], inventories.river
+    )
     inventory = inventories.for_hypertable(selected.hypertable_schema, selected.hypertable_name)
     original_compressed = (selected.compressed_oid, selected.compressed_schema, selected.compressed_name)
     expected = compute_window_parity(execute, inventory, selected).as_dict()
@@ -290,6 +292,7 @@ def _assert_shipping_role_origin_parity(inventories: Any, execute: Any) -> None:
         return [
             load_catalog_chunk(
                 execute,
+                inventory=inventories.river,
                 hypertable_schema="hydro",
                 hypertable_name="river_timeseries",
                 origin_schema=str(row["chunk_schema"]),
@@ -302,7 +305,7 @@ def _assert_shipping_role_origin_parity(inventories: Any, execute: Any) -> None:
         execute(f"SET ROLE {quote_ident(role)}")
         try:
             _assert_role_identity(execute, role)
-            current = _reload_origin(execute, selected)
+            current = _reload_origin(execute, selected, inventory)
             assert compute_window_parity(execute, inventory, current).as_dict() == expected
             _assert_plan_reads_only_selected_origin(
                 execute,
@@ -318,7 +321,7 @@ def _assert_shipping_role_origin_parity(inventories: Any, execute: Any) -> None:
     origin = quote_literal(f"{selected.origin_schema}.{selected.origin_name}")
     execute(f"SELECT decompress_chunk({origin}::regclass)")
     execute(f"SELECT compress_chunk({origin}::regclass)")
-    recompressed = _reload_origin(execute, selected)
+    recompressed = _reload_origin(execute, selected, inventory)
     assert recompressed.is_compressed is True
     assert (
         recompressed.compressed_oid,
@@ -331,7 +334,7 @@ def _assert_shipping_role_origin_parity(inventories: Any, execute: Any) -> None:
         execute(f"SET ROLE {quote_ident(role)}")
         try:
             _assert_role_identity(execute, role)
-            current = _reload_origin(execute, recompressed)
+            current = _reload_origin(execute, recompressed, inventory)
             assert compute_window_parity(execute, inventory, current).as_dict() == expected_after
             assert current.compressed_oid == recompressed.compressed_oid
         finally:
@@ -521,6 +524,7 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
 
     candidates = load_eligible_chunks(
         execute,
+        inventory=inventories.river,
         schema="hydro",
         name="river_timeseries",
         cutoff=_CUTOFF + timedelta(days=21),
@@ -531,6 +535,7 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
     selected, sibling, variant = sorted(candidates, key=lambda item: (item.range_start, item.origin_oid))[:3]
     selected = load_catalog_chunk(
         execute,
+        inventory=inventories.river,
         hypertable_schema=selected.hypertable_schema,
         hypertable_name=selected.hypertable_name,
         origin_schema=selected.origin_schema,
@@ -538,6 +543,7 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
     )
     sibling = load_catalog_chunk(
         execute,
+        inventory=inventories.river,
         hypertable_schema=sibling.hypertable_schema,
         hypertable_name=sibling.hypertable_name,
         origin_schema=sibling.origin_schema,
@@ -545,11 +551,13 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
     )
     variant = load_catalog_chunk(
         execute,
+        inventory=inventories.river,
         hypertable_schema=variant.hypertable_schema,
         hypertable_name=variant.hypertable_name,
         origin_schema=variant.origin_schema,
         origin_name=variant.origin_name,
     )
+
     def all_hydro_chunks() -> list[Any]:
         rows = execute(
             """
@@ -563,6 +571,7 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
         return [
             load_catalog_chunk(
                 execute,
+                inventory=inventories.river,
                 hypertable_schema="hydro",
                 hypertable_name="river_timeseries",
                 origin_schema=str(row["chunk_schema"]),
@@ -617,7 +626,7 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
         sibling=sibling,
         all_chunks=all_hydro_chunks,
     )
-    selected = _reload_origin(execute, selected)
+    selected = _reload_origin(execute, selected, inventory)
     production_before = compute_window_parity(execute, inventory, selected).as_dict()
     # These two discriminators are intentionally separate: changing a target
     # row must change that target's checksum, while a future sibling must not
@@ -626,10 +635,10 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
     execute(
         """
         INSERT INTO hydro.river_timeseries (
-            run_id, basin_version_id, river_network_version_id, river_segment_id,
-            valid_time, variable, value, unit
+            run_key, basin_version_key, river_network_version_key, river_segment_key,
+            valid_time, variable_e, value, unit_e, quality_flag_e
         )
-        SELECT 'future-sibling', 'b', 'n', 's', %s + (g * interval '1 hour'), 'q_down', 9.0, 'm3/s'
+        SELECT 4, 1, 1, 1, %s + (g * interval '1 hour'), 'q_down', 9.0, 'm3/s', 'ok'
         FROM generate_series(0, 23) AS g
         """,
         (future_start,),
@@ -644,14 +653,14 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
         """
         UPDATE hydro.river_timeseries
         SET value = 10.0
-        WHERE run_id = 'future-sibling'
-          AND basin_version_id = 'b'
-          AND river_network_version_id = 'n'
-          AND river_segment_id = 's'
+        WHERE run_key = 4
+          AND basin_version_key = 1
+          AND river_network_version_key = 1
+          AND river_segment_key = 1
           AND valid_time = %s
-          AND variable = 'q_down'
+          AND variable_e = 'q_down'
           AND value = 9.0
-          AND unit = 'm3/s'
+          AND unit_e = 'm3/s'
         """,
         (future_start,),
     )

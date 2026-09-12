@@ -74,24 +74,17 @@ def target_observation(**overrides: Any) -> dict[str, Any]:
 
 def river_columns() -> tuple[ColumnDescriptor, ...]:
     names = (
-        "run_id",
-        "basin_version_id",
-        "river_network_version_id",
-        "river_segment_id",
+        "run_key",
+        "basin_version_key",
+        "river_network_version_key",
+        "river_segment_key",
         "valid_time",
         "lead_time_hours",
-        "variable",
-        "value",
-        "unit",
-        "quality_flag",
-        "created_at",
-        "run_key",
-        "river_network_version_key",
-        "basin_version_key",
-        "river_segment_key",
         "variable_e",
+        "value",
         "unit_e",
         "quality_flag_e",
+        "created_at",
     )
     types = {
         "valid_time": "timestamp with time zone",
@@ -106,16 +99,7 @@ def river_columns() -> tuple[ColumnDescriptor, ...]:
         "unit_e": "hydro.river_unit",
         "quality_flag_e": "hydro.river_quality_flag",
     }
-    nullable = {
-        "lead_time_hours",
-        "run_key",
-        "river_network_version_key",
-        "basin_version_key",
-        "river_segment_key",
-        "variable_e",
-        "unit_e",
-        "quality_flag_e",
-    }
+    nullable = {"lead_time_hours"}
     return tuple(
         ColumnDescriptor(
             attnum=attnum,
@@ -158,7 +142,18 @@ def forcing_columns() -> tuple[ColumnDescriptor, ...]:
 
 
 def inventory_for(schema: str, name: str, columns: Sequence[ColumnDescriptor]) -> HypertableInventory:
-    return HypertableInventory(schema=schema, name=name, columns=tuple(columns), digest=_inventory_digest(columns))
+    parent_oid, hypertable_id = {
+        ("hydro", "river_timeseries"): (2001, 17),
+        ("met", "forcing_station_timeseries"): (1001, 29),
+    }[(schema, name)]
+    return HypertableInventory(
+        schema=schema,
+        name=name,
+        columns=tuple(columns),
+        digest=_inventory_digest(columns, parent_oid, hypertable_id),
+        parent_oid=parent_oid,
+        hypertable_id=hypertable_id,
+    )
 
 
 def bound_inventories() -> BoundInventories:
@@ -400,8 +395,20 @@ class FakeConnection:
             schema, name = params
             inventory = self.inventories.for_hypertable(schema, name)
             rows = []
+            types = {
+                "integer": ("pg_catalog", "int4", "b"),
+                "text": ("pg_catalog", "text", "b"),
+                "double precision": ("pg_catalog", "float8", "b"),
+                "timestamp with time zone": ("pg_catalog", "timestamptz", "b"),
+                "json": ("pg_catalog", "json", "b"),
+                "bytea": ("pg_catalog", "bytea", "b"),
+                "boolean": ("pg_catalog", "bool", "b"),
+                "hydro.river_variable": ("hydro", "river_variable", "e"),
+                "hydro.river_unit": ("hydro", "river_unit", "e"),
+                "hydro.river_quality_flag": ("hydro", "river_quality_flag", "e"),
+            }
             for column in inventory.columns:
-                typtype = "e" if column.type_name.startswith("hydro.") else "b"
+                type_schema, type_base_name, typtype = types[column.type_name]
                 rows.append(
                     {
                         "attnum": column.attnum,
@@ -411,9 +418,25 @@ class FakeConnection:
                         "attidentity": column.identity,
                         "attgenerated": column.generated,
                         "typtype": typtype,
+                        "type_schema": type_schema,
+                        "type_base_name": type_base_name,
+                        "parent_oid": self.parent_oids[(schema, name)],
+                        "hypertable_id": inventory.hypertable_id,
                     }
                 )
-            return rows, ["attnum", "attname", "type_name", "attnotnull", "attidentity", "attgenerated", "typtype"]
+            return rows, [
+                "attnum",
+                "attname",
+                "type_name",
+                "attnotnull",
+                "attidentity",
+                "attgenerated",
+                "typtype",
+                "type_schema",
+                "type_base_name",
+                "parent_oid",
+                "hypertable_id",
+            ]
         if "pg_class c" in text and "c.relname = %s" in text and "ANY" not in text:
             schema, name = params
             parent_oid = self.parent_oids.get((schema, name))
@@ -471,11 +494,19 @@ class FakeConnection:
                 ["column_name", "column_type", "dimension_type"],
             )
         if "timescaledb_information.chunks" in text and "range_end <=" in text:
-            schema, name, cutoff, limit = params
+            schema, name, parent_oid, hypertable_id, cutoff, limit = params
+            inventory = self.inventories.for_hypertable(schema, name)
+            if (parent_oid, hypertable_id) != (self.parent_oids[(schema, name)], inventory.hypertable_id):
+                return [], []
             rows = []
             for item in sorted(self.chunks.values(), key=lambda value: (value.range_end, value.origin_oid)):
-                if item.hypertable_schema == schema and item.hypertable_name == name and item.range_end <= cutoff:
-                    rows.append(_chunk_row(item))
+                if (
+                    item.hypertable_schema == schema
+                    and item.hypertable_name == name
+                    and item.range_end <= cutoff
+                    and item.is_compressed
+                ):
+                    rows.append(dict(_chunk_row(item), parent_oid=parent_oid, hypertable_id=hypertable_id))
             names = [
                 "hypertable_schema",
                 "hypertable_name",
@@ -484,6 +515,8 @@ class FakeConnection:
                 "range_start",
                 "range_end",
                 "is_compressed",
+                "parent_oid",
+                "hypertable_id",
             ]
             return rows[: int(limit)], names
         if "timescaledb_information.chunks" in text:
@@ -494,7 +527,10 @@ class FakeConnection:
                 self.relations.clear()
                 self.origin_oids.clear()
                 self.load_group(replacement, relations)
-            schema, name, origin_schema, origin_name = params
+            schema, name, parent_oid, hypertable_id, origin_schema, origin_name = params
+            inventory = self.inventories.for_hypertable(schema, name)
+            if (parent_oid, hypertable_id) != (self.parent_oids[(schema, name)], inventory.hypertable_id):
+                return [], []
             for item in self.chunks.values():
                 if (
                     item.hypertable_schema == schema
@@ -502,7 +538,7 @@ class FakeConnection:
                     and item.origin_schema == origin_schema
                     and item.origin_name == origin_name
                 ):
-                    row = _chunk_row(item)
+                    row = dict(_chunk_row(item), parent_oid=parent_oid, hypertable_id=hypertable_id)
                     return [row], list(row.keys())
             return [], ["hypertable_schema"]
         if "chunk_compression_stats" in text:

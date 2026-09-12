@@ -495,6 +495,7 @@ def run_tick(
 
     ranked = ranked_candidates(
         connect,
+        inventories=inventories,
         cutoff=cutoff,
         per_table_limit=max_catalog_rows,
         max_catalog_bytes=max_catalog_bytes,
@@ -736,9 +737,7 @@ def run_tick(
                 later_chunk,
                 rank=later_rank,
                 before=snapshot_group(later_inspect.before),
-                before_parity=(
-                    None if later_inspect.before_parity is None else later_inspect.before_parity.as_dict()
-                ),
+                before_parity=(None if later_inspect.before_parity is None else later_inspect.before_parity.as_dict()),
                 capacity=later_capacity.as_dict(),
             )
             if later_inspect.timing is not None:

@@ -171,7 +171,7 @@ def test_window_parity_aggregate_binds_quoted_origin_oid_in_its_one_execution() 
     sql, params = calls[0]
     assert params == (RANGE_START, CUTOFF)
     assert 'FROM "odd""origin"."chunk\'name"' in sql
-    assert "to_regclass('\"odd\"\"origin\".\"chunk''name\"')::oid = 10::oid AS origin_oid_matches" in sql
+    assert 'to_regclass(\'"odd""origin"."chunk\'\'name"\')::oid = 10::oid AS origin_oid_matches' in sql
     assert "valid_time >= %s AND valid_time < %s" in sql
 
 
@@ -252,6 +252,7 @@ def test_catalog_load_refuses_compressed_chunk_without_resolved_sibling(
     with pytest.raises(ColdRuntimeError, match="compressed sibling identity"):
         load_catalog_chunk(
             lambda sql, params=None: connection.dispatch(sql, params)[0],
+            inventory=connection.inventories.for_hypertable(item.hypertable_schema, item.hypertable_name),
             hypertable_schema=item.hypertable_schema,
             hypertable_name=item.hypertable_name,
             origin_schema=item.origin_schema,
@@ -264,9 +265,14 @@ def test_catalog_load_refuses_compressed_sibling_name_without_resolved_oid() -> 
     original = connection.dispatch
 
     def dispatch(sql: str, params: Any = None):
-        if "pg_class c" in sql and "c.relname = %s" in sql and params == (
-            item.compressed_schema,
-            item.compressed_name,
+        if (
+            "pg_class c" in sql
+            and "c.relname = %s" in sql
+            and params
+            == (
+                item.compressed_schema,
+                item.compressed_name,
+            )
         ):
             return [], ["oid"]
         return original(sql, params)
@@ -277,6 +283,7 @@ def test_catalog_load_refuses_compressed_sibling_name_without_resolved_oid() -> 
     with pytest.raises(ColdRuntimeError, match="compressed sibling identity"):
         load_catalog_chunk(
             lambda sql, params=None: connection.dispatch(sql, params)[0],
+            inventory=connection.inventories.for_hypertable(item.hypertable_schema, item.hypertable_name),
             hypertable_schema=item.hypertable_schema,
             hypertable_name=item.hypertable_name,
             origin_schema=item.origin_schema,
@@ -616,8 +623,7 @@ def test_complete_target_decompression_is_unknown_not_already_cold() -> None:
 
 def test_receipt_validation_refuses_outer_durable_oid_mismatch_with_before_snapshot() -> None:
     example_path = (
-        Path(__file__).resolve().parents[1]
-        / "schemas/examples/timeseries_cold_residency_receipt.intent.example.json"
+        Path(__file__).resolve().parents[1] / "schemas/examples/timeseries_cold_residency_receipt.intent.example.json"
     )
     payload = json.loads(example_path.read_text(encoding="utf-8"))
     selected = payload["selected"][0]

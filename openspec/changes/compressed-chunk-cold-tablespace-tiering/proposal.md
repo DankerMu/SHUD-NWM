@@ -1,10 +1,10 @@
 ## Why
 
-Node-27 currently keeps both active rows and terminal compressed TimescaleDB
-chunks on `/home`, while the recovered `/data/GHDC` RAID has ample capacity.
-The retired archive lane cannot simply be restored: a narrower DB-only tier
-must prove that the actual compressed relations and every index move together,
-not merely the near-empty origin chunk shell.
+The initial cold-tier proposal addressed active rows and terminal compressed
+TimescaleDB chunks sharing hot placement. Current devices and capacity require
+fresh deployment evidence; historical placement or chunk counts are not admission
+authority. A DB-only tier must prove that the actual compressed relations and
+every index move together, not merely the near-empty origin chunk shell.
 
 ## What Changes
 
@@ -23,6 +23,11 @@ not merely the near-empty origin chunk shell.
   salvage, or rebuild lanes retired by #1309/#1370.
 - Forbid attaching the cold tablespace to either business hypertable, moving
   active/uncompressed chunks, or moving PGDATA, WAL, or object-store data.
+- Bind cold eligibility to physical parent identities and the narrow river schema
+  through child #2290; exclude legacy stores and invalidate stale name-reuse
+  evidence without changing receipt wire schemas. Child #2291 then carries an
+  explicitly reviewed bounded count through all cold rollout gates. Both children
+  and separate external readiness must precede any new production G0.
 
 ## Capabilities
 
@@ -71,5 +76,10 @@ not merely the near-empty origin chunk shell.
   later trigger preserves the installed topology. After movement, reversal also
   waits for a reviewed live move-back entrypoint from its owning implementation
   issue.
+- #2290: physical-parent admission, all catalog/runtime/census/post-target callers,
+  distinct wide/narrow fixtures, identity-bound inventory digests and isolated
+  rename/replacement proof; detailed fixture in `fixtures/issue-2290.md`.
+- #2291: dependent reviewed-count/baseline cutover and G3 population alignment,
+  without per-tick/time-budget expansion or production execution.
 - No row-schema migration, public API change, TimescaleDB/PostgreSQL upgrade,
   node-22 scheduling change, or archive-lane restoration.

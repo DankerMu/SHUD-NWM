@@ -93,9 +93,7 @@ def test_production_runtime_does_not_import_probe_modules() -> None:
         source = "\n".join(
             line
             for line in Path(module.__file__).read_text(encoding="utf-8").splitlines()
-            if not line.lstrip().startswith("#")
-            and '"""' not in line
-            and "never imports" not in line
+            if not line.lstrip().startswith("#") and '"""' not in line and "never imports" not in line
         )
         assert "import packages.common.compressed_chunk_cold_probe" not in source
         assert "from packages.common.compressed_chunk_cold_probe" not in source
@@ -133,6 +131,8 @@ def test_unsupported_column_fails_closed() -> None:
                     "attidentity": "",
                     "attgenerated": "",
                     "typtype": "b",
+                    "parent_oid": rows[0]["parent_oid"],
+                    "hypertable_id": rows[0]["hypertable_id"],
                 }
             )
         return rows, names
@@ -172,7 +172,7 @@ def test_window_parity_sql_covers_exact_durable_origin_every_column_and_half_ope
     assert "valid_time >= %s AND valid_time < %s" in sql
     assert 'FROM "_timescaledb_internal"."_hyper_1_1_chunk"' in sql
     assert 'FROM "hydro"."river_timeseries"' not in sql
-    assert 'compress_hyper_2_2_chunk' not in sql
+    assert "compress_hyper_2_2_chunk" not in sql
     for column in inventory.columns:
         assert f'"{column.name}"' in sql
 
@@ -358,7 +358,7 @@ def test_normal_migrate_uses_shell_first_and_fresh_observer() -> None:
         wal_reserve_bytes=1,
         config=_runtime(
             inspect_target=lambda: target_observation(device_identity=""),
-        )
+        ),
     )
     assert observation.outcome == "migrated"
     assert observation.reconciliation == "complete_target"
@@ -388,9 +388,10 @@ def test_normal_migrate_uses_shell_first_and_fresh_observer() -> None:
 
 def test_production_met_before_hydro_parent_oids_lock_ascending() -> None:
     connection, item = _loaded(FakeConnection())
-    assert connection.parent_oids[("met", "forcing_station_timeseries")] < connection.parent_oids[
-        ("hydro", "river_timeseries")
-    ]
+    assert (
+        connection.parent_oids[("met", "forcing_station_timeseries")]
+        < connection.parent_oids[("hydro", "river_timeseries")]
+    )
     observation = migrate_residency_group(
         connect=_connect(connection),
         chunk=item,
@@ -417,7 +418,7 @@ def test_hydro_oid_before_met_still_locks_by_actual_oid() -> None:
     observation = migrate_residency_group(
         connect=_connect(connection),
         chunk=item,
-        inventories=bound_inventories(),
+        inventories=derive_bound_inventories(lambda sql, params=None: connection.dispatch(sql, params)[0]),
         watermark=WATERMARK,
         lag_seconds=LAG,
         cold_free_bytes=10_000,
@@ -445,7 +446,7 @@ def test_capacity_one_byte_short_refuses_before_movement_sql() -> None:
         wal_reserve_bytes=1,
         config=_runtime(
             inspect_target=lambda: target_observation(device_identity=""),
-        )
+        ),
     )
     assert observation.outcome == "refused"
     assert observation.shell_sql_executed is False
@@ -470,7 +471,7 @@ def test_statement_timeout_rolls_back() -> None:
         wal_reserve_bytes=1,
         config=_runtime(
             inspect_target=lambda: target_observation(device_identity=""),
-        )
+        ),
     )
     assert observation.error_class == "statement_timeout"
     assert connection.rolled_back is True
@@ -494,7 +495,7 @@ def test_lock_timeout_does_not_claim_shell_sql_executed() -> None:
         wal_reserve_bytes=1,
         config=_runtime(
             inspect_target=lambda: target_observation(device_identity=""),
-        )
+        ),
     )
     assert observation.error_class == "lock_timeout"
     assert observation.shell_sql_executed is False
@@ -519,7 +520,7 @@ def test_relation_disappearance_is_classified() -> None:
         wal_reserve_bytes=1,
         config=_runtime(
             inspect_target=lambda: target_observation(device_identity=""),
-        )
+        ),
     )
     assert observation.error_class == "relation_disappeared"
 
@@ -592,6 +593,7 @@ def test_ranked_candidates_interleave_by_per_hypertable_rank() -> None:
     )
     ranked = ranked_candidates(
         _connect(connection),
+        inventories=connection.inventories,
         cutoff=CUTOFF + timedelta(days=7),
         per_table_limit=10,
         max_catalog_bytes=10_000_000,
@@ -651,6 +653,8 @@ def test_locked_inventory_drift_refuses_before_set_tablespace() -> None:
                     "attidentity": "",
                     "attgenerated": "",
                     "typtype": "b",
+                    "parent_oid": rows[0]["parent_oid"],
+                    "hypertable_id": rows[0]["hypertable_id"],
                 }
             ]
         return rows, names
@@ -929,6 +933,8 @@ def test_post_commit_inventory_drift_is_unknown_not_complete_target() -> None:
                     "attidentity": "",
                     "attgenerated": "",
                     "typtype": "b",
+                    "parent_oid": rows[0]["parent_oid"],
+                    "hypertable_id": rows[0]["hypertable_id"],
                 }
                 rows = [*rows, extra]
             return rows, names

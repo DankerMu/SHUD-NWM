@@ -15,6 +15,7 @@ from packages.common.compressed_chunk_cold_residency import (
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import (
     BoundInventories,
+    ColdRuntimeError,
     collect_residency_group,
     compute_window_parity,
     derive_bound_inventories,
@@ -63,10 +64,7 @@ def _binder(connection: Any) -> Execute:
                 return []
             names = [item[0] for item in cursor.description]
             rows = cursor.fetchall()
-        return [
-            dict(row) if isinstance(row, Mapping) else dict(zip(names, row, strict=False))
-            for row in rows
-        ]
+        return [dict(row) if isinstance(row, Mapping) else dict(zip(names, row, strict=False)) for row in rows]
 
     return execute
 
@@ -155,6 +153,7 @@ def observe_named_group(
     identity = durable_from_mapping(durable)
     chunk = load_catalog_chunk(
         execute,
+        inventory=inventories.for_hypertable(str(identity["hypertable_schema"]), str(identity["hypertable_name"])),
         hypertable_schema=str(identity["hypertable_schema"]),
         hypertable_name=str(identity["hypertable_name"]),
         origin_schema=str(identity["origin_schema"]),
@@ -218,6 +217,7 @@ def classify_current_candidates(
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     ranked = ranked_candidates_from_execute(
         execute,
+        inventories=inventories,
         cutoff=cutoff,
         per_table_limit=per_table_limit,
         max_catalog_bytes=max_catalog_bytes,
@@ -378,6 +378,12 @@ def run_post_target_observation(
         )
         publish_post_target(output_path, document)
         return document
+    except ColdRuntimeError:
+        raise Issue1895ReadinessError(
+            "post-target catalog observation failed",
+            code="POST_TARGET_CATALOG_FAILED",
+            stage="post-target",
+        ) from None
     finally:
         if owned is not None:
             close_observer_connection(owned)
