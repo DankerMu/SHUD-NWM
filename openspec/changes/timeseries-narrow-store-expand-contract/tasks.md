@@ -157,6 +157,24 @@
   Non-goals:
   - I7 expand DDL; I8 live tick; I12 forcing expand; decline ledger; cold-residency; live-evidence frozen allowlists; production systemd/env install
 
+- [ ] 3.5 (#2273, authorized I8 prerequisite) Replace the current home-bound working-set
+  comparator with direct configured-PGDATA path/device/available-byte evidence, preserving
+  historical receipt meaning and catalog-only projection. Historical task 3.4 records the
+  original I6 delivery; amended D8 and `fixtures/I6b-2273.md` govern this correction.
+  - [ ] 3.5.1 Opposite home/target headroom and exact equality exercise actual CLI verdicts.
+  - [ ] 3.5.2 Old default and same-device aliases remain correct without double charging.
+  - [ ] 3.5.3 Missing/conflicting target and unavailable existing du fail closed, including empty working set.
+  - [ ] 3.5.4 Current destination fields, historical schema 1.0 reading and closed-shape validation agree.
+  - [ ] 3.5.5 New stderr/OnFailure fields and secret-bearing failures preserve DSN safety.
+  - [ ] 3.5.6 Current runbooks/env and regenerated root instructions reflect actual host target/container bind.
+  - [ ] 3.5.7 Authorized node-27 read-only CLI receipt proves actual destination binding without changing production pins.
+
+  **Evidence floor:** fixture review and strict OpenSpec; pre-fix red regression; focused
+  node-27 working-set/resource/cold-governance/history/schema/OnFailure tests; generated
+  instruction/environment oracles; changed-file Ruff, Markdown and exact-head CLI receipt.
+  Expanded/high; all runtime/schema/tests have one owner, docs/source-generation a disjoint owner.
+  No river migration/reader/parser changes, cold activation or node-22 mutation.
+
 
 ## 4. Expand migration and parser (I7 — one issue, one PR)
 
