@@ -1,0 +1,59 @@
+{
+  "scope": "Task5.1 disposable rollback rehearsal; NOT live rollout/capacity/performance",
+  "status": "PASS",
+  "old_sha": "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+  "new_runtime_sha": "3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb",
+  "image_id": "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e",
+  "container": "nwm-i8-1987-oracle",
+  "isolation": "fresh container label nhms.i8.disposable=true; no volumes or bind mounts; only127.0.0.1:32769, dedicated i8_1987_rehearsal database; separateold/newclones and privatevenv",
+  "creation_command": "docker run --rm --name nwm-i8-1987-oracle --label nhms.i8.disposable=true -p127.0.0.1:32769:5432 -e POSTGRES_USER -e POSTGRES_PASSWORD -e POSTGRES_DB sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e",
+  "invocation": "uv run --project /home/nwm/tmp/i8-1987/new python /home/nwm/tmp/i8-1987/rehearse_river_rollback.py --old-repo /home/nwm/tmp/i8-1987/old --new-repo /home/nwm/tmp/i8-1987/new --new-sha 3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb --container nwm-i8-1987-oracle --production-image-id sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e --receipt /home/nwm/tmp/i8-1987/rollback-attempt1.json --artifacts /home/nwm/tmp/i8-1987/shud-artifacts-attempt1",
+  "credentials": "Only process environment; excluded from receipt and invocation. Bootstrap postgres is not scenario DB.",
+  "exit_code": 0,
+  "stderr_empty": true,
+  "rows": [
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:55.084660+00:00",
+      "row": "R1",
+      "result": "PASS"
+    },
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:55.416432+00:00",
+      "row": "R2",
+      "result": "PASS"
+    },
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:55.987988+00:00",
+      "row": "R5",
+      "result": "PASS",
+      "refusal": "REPARSE_PROOF_MISSING",
+      "retained_oid": 22786
+    },
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:57.015382+00:00",
+      "row": "R3",
+      "result": "PASS"
+    },
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:57.737139+00:00",
+      "row": "R4",
+      "result": "PASS"
+    }
+  ],
+  "files": {
+    "transcript.jsonl": "286f47d2ac17d6df59781456951df13033c23d66c03f51470126962714b7c48e",
+    "rehearse_river_rollback.py.txt": "162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2",
+    "receipt.json": "9a17c27c4c4f1de45a636df09b1e42ea7a20b82378eca64132293cbc971da30f"
+  },
+  "limits": [
+    "No production mutation/window authorization",
+    "No full-cycle/performance/lifecycle/browser/C1-C4 evidence; those remain task5.2",
+    "Fixture sample4segments3hours; not production scale",
+    "Archive driver text is exact executed evidence, not supported production tooling"
+  ]
+}

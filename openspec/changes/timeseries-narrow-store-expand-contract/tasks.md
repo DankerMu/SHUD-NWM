@@ -173,8 +173,18 @@
 
 ## 5. River rollout on node-27 (I8)
 
-- [ ] 5.1 Runbook: maintenance-window checklist in the pinned order (timers stop → API/parser stop → `git pull --ff-only` → `migrate.py` → start → timers start), the pre-expand legacy-backlog compression recipe, the D12 reverse sequence with the allowed intermediate state, and the "transitional cold tier does not cover `_legacy`" note. Verify: rollback rehearsal on a throwaway cluster recorded.
+- [x] 5.1 Runbook: maintenance-window checklist in the pinned order (timers stop → API/parser stop → `git pull --ff-only` → `migrate.py` → start → timers start), the pre-expand legacy-backlog compression recipe, the D12 reverse sequence with the allowed intermediate state, and the "transitional cold tier does not cover `_legacy`" note. Verify: rollback rehearsal on a throwaway cluster recorded.
 - [ ] 5.2 Execute and post the receipt: per-statement wall time; first narrow chunk size after one full cycle; curve EXPLAIN gate for SHJ-NJ and a small network on narrow uncompressed, narrow compressed and legacy (bounds: `river_segment_key` in Index Cond / segmentby pruning, `Rows Removed / returned ≤ 10`, `shared hit ≤ 5000`, SQL warm P95 ≤ 300 ms over ≥ 5 samples, local single-source `forecast-series` warm P95 ≤ 500 ms); identity-existence probe miss branch before/after with coverage-loss list; registry counts (active/runnable/selected/excluded); one compression tick and one retention tick covering both tables; governance receipt with the working-set fields; `/` clicks on SHJ-NJ, one medium and one small network with screenshots; display deny-write receipt (checklist C1–C4); `/ops` reachable; the regression criterion recorded.
+
+  **Execution split:** `fixtures/I8-1987.md` (expanded/high). First PR is task 5.1;
+  second PR is task 5.2 after the separately authorized live window. Keep #1987 open.
+  **5.1 evidence:** `receipts/2026-09-12-i8-rollback/` records actual OLD parser/reader
+  `5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c` and NEW runtime
+  `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb` on node-27's exact production-image
+  disposable database. R1-R5 all pass: old parse/read, new narrow parse/replay,
+  D12 reverse, missing-reparse DROP refusal, old reparse of both runs, safe DROP,
+  unchanged forcing catalog and retained-ledger skip. No production mutation;
+  runtime pin/hold authorization and #2273 destination headroom remain live gates.
 
 ## 6. River contract (I9 — entry gate: fourteen archived daily receipts + `legacy_chunks = 0`)
 

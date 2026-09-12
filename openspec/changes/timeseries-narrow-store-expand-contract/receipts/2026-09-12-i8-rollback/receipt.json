@@ -1,0 +1,3883 @@
+{
+  "status": "PASS",
+  "scope": "disposable R1-R5, not production",
+  "events": [
+    {
+      "event": "setup",
+      "at": "2026-09-12T13:09:52.776587+00:00",
+      "old_sha": "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+      "new_sha": "3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb",
+      "image": "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e",
+      "container_id": "3c1ed72e452ac7af698b339e8cb11de362fd307baabfb96f6740e7a5e2d6245d",
+      "mounts": [],
+      "database": "i8_1987_rehearsal",
+      "port": "32769",
+      "python": "3.11.15 (main, May 10 2026, 19:28:18) [Clang 22.1.3 ]",
+      "psycopg2": "2.9.12 (dt dec pq3 ext lo64)",
+      "driver_sha256": "162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2",
+      "migrations": [
+        {
+          "name": "000001_extensions.sql",
+          "sha256": "322e80aa88f04e5a827dd800891cfb07ae5bff00ca448e8c1c8d1ff5d2d58f10"
+        },
+        {
+          "name": "000002_schemas.sql",
+          "sha256": "86cd49575f3820217332bbc26927996958978ffe633467943a93d0a6cf7c1308"
+        },
+        {
+          "name": "000003_enums.sql",
+          "sha256": "112f8bf31620c54a847e008ab96b5e3f854ffcf727251b35ea6a1b98b351a35f"
+        },
+        {
+          "name": "000004_core.sql",
+          "sha256": "3b62449880efcc01c208f44934158fcdfef9f0cc861954a329eb38403b2f6608"
+        },
+        {
+          "name": "000005_met.sql",
+          "sha256": "b39eb0f0e7c8dacf73b5c0439b515b1eb3227d964e69569e2260e916a1e41b8f"
+        },
+        {
+          "name": "000006_hydro.sql",
+          "sha256": "bd1179933946bdba32ec9447ab0175c90762982656b004cc08e6651bf6ae0466"
+        },
+        {
+          "name": "000008_map.sql",
+          "sha256": "e3e0ea93d0e66520e10590c64bd520fce8dd8ca4c61526bd935667dc2a866731"
+        },
+        {
+          "name": "000009_ops.sql",
+          "sha256": "b35e50cd539ec4512321012cecc0f89afa46fbcb4167185260faf77ea41d2f2d"
+        },
+        {
+          "name": "000010_indexes.sql",
+          "sha256": "748789c6a5167a12733821763da8b3c19f39d9993032894c2f78b5b0ed80ab5a"
+        },
+        {
+          "name": "000011_pipeline_job_model_id.sql",
+          "sha256": "e5ed90521a24b1740c2a20a3e607633dd55784d1e1b8207b231b0dcec2c5ef29"
+        },
+        {
+          "name": "000012_pipeline_job_array_task.sql",
+          "sha256": "272cec586b98baa7ec2951c640be8872d0d920f8d01e0e94a14df5e9abe62fa7"
+        },
+        {
+          "name": "000013_enum_remediation.sql",
+          "sha256": "3337e341de66a9dcfce1cfc96c26c5421c3de0270dba560225b88ab35f019aae"
+        },
+        {
+          "name": "000014_best_available_lineage.sql",
+          "sha256": "7e27f207b8a0b435e83fdf5167d1ee858cce62032687931c9b69817e02a8c601"
+        },
+        {
+          "name": "000016_river_segment_pagination_indexes.sql",
+          "sha256": "46188ff374c98c8888e860e9f724918e67c3c0b2c2e81a394d3c78af225f10b4"
+        },
+        {
+          "name": "000018_tile_cache_m16_contract.sql",
+          "sha256": "05aa29aba8b5639ab6756eef33f0c3b85e81c4ab9511529272671678724c6ca1"
+        },
+        {
+          "name": "000019_hydro_mvt_identity_lookup_idx.sql",
+          "sha256": "6c9a3628af192fbdc77aba378b25cc6823c35351a542c90bd3cc5f93ba5b5ebb"
+        },
+        {
+          "name": "000021_latest_ready_run_discovery_idx.sql",
+          "sha256": "691f7ae24bceb92c4c156d6f6433b9afcbece53bb08026e53ba36c0015e1594d"
+        },
+        {
+          "name": "000022_model_asset_lifecycle.sql",
+          "sha256": "a1425ab621f14218cde219177d5359cd196f7b5cb2f0e90a0458c7d2bd8578c8"
+        },
+        {
+          "name": "000023_interp_weight_grid_signature.sql",
+          "sha256": "acaae113bbc33a239098a8f22e557397b0ab6a00612382260a941324a4ba82d4"
+        },
+        {
+          "name": "000024_qhh_latest_display_product_indexes.sql",
+          "sha256": "9f875f6a223d538194560dd1b5b199d97f93da20ccc32f63111e1e5e46a0ada4"
+        },
+        {
+          "name": "000025_active_manual_retry_guard.sql",
+          "sha256": "07915192aa82ab708f61edd046b935e93e915c9b5ed4bc7ddec42f29c4a87618"
+        },
+        {
+          "name": "000026_ops_strict_identity_indexes.sql",
+          "sha256": "5a74c257ef0b28f32a57cd96ac546c7c480598d5c110eacae3ba31b2a38f93f2"
+        },
+        {
+          "name": "000027_cycle_status_canonical_incomplete.sql",
+          "sha256": "00de1ba2d93e4a25e745061323ac6d4d0c7cd66031917e649551731db19460b2"
+        },
+        {
+          "name": "000028_state_lineage.sql",
+          "sha256": "2174ab03f69a08817e9f61bbd82c24337f52a1887f60965657b1eaca9ee9c1e9"
+        },
+        {
+          "name": "000029_pipeline_reservation.sql",
+          "sha256": "031a1ef059972c7d62359b73efd6ab3f7477c3d0ce897233cf929b8467c61a8c"
+        },
+        {
+          "name": "000030_qhh_latest_display_parsed_status_index.sql",
+          "sha256": "45d7a33ee83c5b3cbdbda0558080f572b104281afd69b7b1395c142f5bec02dd"
+        },
+        {
+          "name": "000031_search_discovery_performance.sql",
+          "sha256": "b12d4cc191a29a064f753a74ef99e0351c5d4172832f97dee7b7068796afdf73"
+        },
+        {
+          "name": "000032_source_specific_state_snapshot.sql",
+          "sha256": "59670dea49a0b47ca3a45413e2b379eb8c6bc2d1d0847ae1e0805a55badb182c"
+        },
+        {
+          "name": "000033_station_mvt_active_source_index.sql",
+          "sha256": "41c64f48c6534c657a5cd919fe7b95b4946a3ee4d3b1152bbc0f6e2f3e344924"
+        },
+        {
+          "name": "000035_qhh_display_coverage_materialization.sql",
+          "sha256": "26accbf75dbd3fff0a4692fe28ff4c3c06859cec87b07200b87c60cd83c214a0"
+        },
+        {
+          "name": "000037_river_segment_multilinestring.sql",
+          "sha256": "27ed4ae7df9ebffd135eaa4161d44c15524cc96cc7e725d28f2e60c1e34d8cb2"
+        },
+        {
+          "name": "000038_direct_grid_interp_weight_constraints.sql",
+          "sha256": "ed4577b3ac866edb01c07b5713ff3c94ddbbbac7ad4043e56a7afbfb27389fcd"
+        },
+        {
+          "name": "000039_crosswalk_external_identity.sql",
+          "sha256": "6970ffaa9e545c092d250d57fdfec3eebe005bae0f4c2cb02879820136fff20b"
+        },
+        {
+          "name": "000040_display_ready_succeeded_status_index.sql",
+          "sha256": "fce4b67b9ecbf0688a75e1d53e5d0a282d66253a1444b1e513cb9ddeee482d8d"
+        },
+        {
+          "name": "000041_drop_redundant_river_qhh_latest_window_idx.sql",
+          "sha256": "1953ec4595566d49fb62f11ce8ae240e6ec8df02e6df7de940453c6f1c353de9"
+        },
+        {
+          "name": "000042_drop_redundant_river_selected_identity_lookup_idx.sql",
+          "sha256": "2fe706af656e4e628ff69c7553c87c58e9b807031f624db3cea84242efb8a59f"
+        },
+        {
+          "name": "000043_canonical_grid_snapshot.sql",
+          "sha256": "9a79aafa375f55dca3f8598e2e88142b2d69f525b0694fa8ccea21d1c1812fc3"
+        },
+        {
+          "name": "000044_canonical_grid_snapshot_identity_unique.sql",
+          "sha256": "e0f6ae4ba289303918b4fb0bc58d852a997f08248618ed81bad2e36360278ac2"
+        },
+        {
+          "name": "000045_hydro_run_type_hindcast.sql",
+          "sha256": "8b4b4b4bc7383c9bd87ff145ce25279fbdb892dc24c094ac6e3cbcb70a171816"
+        },
+        {
+          "name": "000046_state_snapshot_clone_provenance.sql",
+          "sha256": "90230ab122e3b06ba179966037c0ec2d75516f5a376511a05ec0fde76b6516ae"
+        },
+        {
+          "name": "000047_hypertable_compression_settings.sql",
+          "sha256": "b75ba800e4f72656ba6fe177e790a2696debed2f34111ed33e257504139d5869"
+        },
+        {
+          "name": "000048_river_segment_stream_type.sql",
+          "sha256": "6c60248d4527fcf840fdd7772200a51184bf72a10796c89507968143b195e9e2"
+        },
+        {
+          "name": "000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql",
+          "sha256": "a64e4c1b44258e1e2ad4bb5ada1dcd930ee4e34fcbfc00139057cd8b5a0ebff4"
+        },
+        {
+          "name": "000050_river_identity_normalization.sql",
+          "sha256": "5ee15a37ef09a3a80ac7dfdca6901f130ded0b5d218b4fe8cf45ca62cd3e26d5"
+        },
+        {
+          "name": "000051_river_ts_surrogate_key_read_index.sql",
+          "sha256": "26744230302f0625b80f72e20edf39b3698aa5a860aebc53c787ad892fe706db"
+        },
+        {
+          "name": "000052_authority_stats_hygiene_trgm_expression_index.sql",
+          "sha256": "303854353c5e45c70d873d913d23de20a8f0bcece9423be72506b284302f0054"
+        },
+        {
+          "name": "000053_state_snapshot_clone_gate_kind.sql",
+          "sha256": "82e7f5d7efcc1c2cb39b2ef9512b0b2265d1e07170118d68a96261f3ddcaa6eb"
+        },
+        {
+          "name": "000054_met_station_trgm_expression_index.sql",
+          "sha256": "fc6b8f8a5f59b5b1dabeee4b9295fdf330943fc1abf456eef3dd90fedd5cbb73"
+        },
+        {
+          "name": "000055_ops_ingest_recompute_decline.sql",
+          "sha256": "3952a89fb9cb66c8ef7300569f219391ea6b97c1588f249aec1bceccba460d57"
+        },
+        {
+          "name": "000056_hydro_run_parsed_at.sql",
+          "sha256": "f1e3a03c2d8b78aa0439fd898a16af6492602a347eb2034d867457ae72afe9d2"
+        },
+        {
+          "name": "000057_river_network_version_geometry_generation.sql",
+          "sha256": "3fe3038a83f22e4bb2feef9b28baa5914259d97b7d151578c2047515d2a90d81"
+        },
+        {
+          "name": "000058_hot_timeseries_chunk_interval_3d.sql",
+          "sha256": "2d5f7ced2c031457d2f8caf2c2652f8774b849a6f63911e08ab3f796c90b56c8"
+        },
+        {
+          "name": "000059_river_timeseries_narrow_expand.sql",
+          "sha256": "237dbf2cca717548b7cd840cc5976c8175fd8ddd32fa28c7e24d4f93ff6919bb"
+        }
+      ]
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:52.798517+00:00",
+      "statement": "SELECT current_database()",
+      "params": null,
+      "rows": [
+        [
+          "i8_1987_rehearsal"
+        ]
+      ],
+      "seconds": 0.005247202003374696
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:52.798999+00:00",
+      "statement": "SELECT to_regnamespace('hydro'), to_regclass('public.schema_migrations')",
+      "params": null,
+      "rows": [
+        [
+          null,
+          null
+        ]
+      ],
+      "seconds": 0.0004225990269333124
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:52.799271+00:00",
+      "statement": "SELECT version()",
+      "params": null,
+      "rows": [
+        [
+          "PostgreSQL 15.2 (Ubuntu 15.2-1.pgdg22.04+1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 11.3.0-1ubuntu1~22.04) 11.3.0, 64-bit"
+        ]
+      ],
+      "seconds": 0.00022946600802242756
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:54.320966+00:00",
+      "statement": "SELECT extname, extversion FROM pg_extension ORDER BY extname",
+      "params": null,
+      "rows": [
+        [
+          "pg_trgm",
+          "1.6"
+        ],
+        [
+          "pgcrypto",
+          "1.3"
+        ],
+        [
+          "plpgsql",
+          "1.0"
+        ],
+        [
+          "postgis",
+          "3.3.2"
+        ],
+        [
+          "timescaledb",
+          "2.10.2"
+        ],
+        [
+          "timescaledb_toolkit",
+          "1.16.0"
+        ]
+      ],
+      "seconds": 0.003344797994941473
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:54.327197+00:00",
+      "statement": "DO $roles$\nDECLARE\n  v_role text;\nBEGIN\n  FOREACH v_role IN ARRAY ARRAY['nhms_ingest_rw', 'nhms_download_rw'] LOOP\n    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = v_role) THEN\n      EXECUTE format(\n        'CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',\n        v_role);\n      RAISE NOTICE 'created role %', v_role;\n    ELSE\n      EXECUTE format(\n        'ALTER ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',\n        v_role);\n      RAISE NOTICE 'role % already existed; flags reasserted', v_role;\n    END IF;\n  END LOOP;\nEND\n$roles$;",
+      "params": null,
+      "rows": [],
+      "seconds": 0.005566261010244489
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:54.328548+00:00",
+      "statement": "GRANT USAGE ON SCHEMA hydro, core TO nhms_ingest_rw",
+      "params": null,
+      "rows": [],
+      "seconds": 0.001252866117283702
+    },
+    {
+      "event": "shud_artifact",
+      "at": "2026-09-12T13:09:54.477583+00:00",
+      "sha256": "4f3cb86f83202458301a9397a7c48412d982e09e14f3933f4276072af43a2a83",
+      "text": "time,seg-1,seg-2,seg-3,seg-4\n2026-06-01T00:00:00Z,86400,172800,259200,345600\n2026-06-01T01:00:00Z,172800,345600,518400,691200\n2026-06-01T02:00:00Z,259200,518400,777600,1036800\n"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:54.478518+00:00",
+      "statement": "SELECT oid, reloptions, relowner FROM pg_class WHERE oid='met.forcing_station_timeseries'::regclass",
+      "params": null,
+      "rows": [
+        [
+          22233,
+          null,
+          10
+        ]
+      ],
+      "seconds": 0.0008195920381695032
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:54.479253+00:00",
+      "statement": "SELECT attnum, attname, atttypid, attnotnull FROM pg_attribute WHERE attrelid='met.forcing_station_timeseries'::regclass AND attnum>0 ORDER BY attnum",
+      "params": null,
+      "rows": [
+        [
+          1,
+          "forcing_version_id",
+          25,
+          true
+        ],
+        [
+          2,
+          "basin_version_id",
+          25,
+          true
+        ],
+        [
+          3,
+          "station_id",
+          25,
+          true
+        ],
+        [
+          4,
+          "valid_time",
+          1184,
+          true
+        ],
+        [
+          5,
+          "source_id",
+          25,
+          true
+        ],
+        [
+          6,
+          "variable",
+          25,
+          true
+        ],
+        [
+          7,
+          "value",
+          701,
+          true
+        ],
+        [
+          8,
+          "unit",
+          25,
+          true
+        ],
+        [
+          9,
+          "native_resolution",
+          25,
+          false
+        ],
+        [
+          10,
+          "quality_flag",
+          25,
+          true
+        ]
+      ],
+      "seconds": 0.0006465730257332325
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:54.482406+00:00",
+      "statement": "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='met' AND tablename='forcing_station_timeseries' ORDER BY indexname",
+      "params": null,
+      "rows": [
+        [
+          "forcing_station_timeseries_pkey",
+          "CREATE UNIQUE INDEX forcing_station_timeseries_pkey ON met.forcing_station_timeseries USING btree (forcing_version_id, station_id, variable, valid_time)"
+        ],
+        [
+          "forcing_station_timeseries_qhh_latest_window_idx",
+          "CREATE INDEX forcing_station_timeseries_qhh_latest_window_idx ON met.forcing_station_timeseries USING btree (forcing_version_id, basin_version_id, lower(source_id), variable, valid_time DESC, station_id)"
+        ],
+        [
+          "forcing_station_timeseries_valid_time_idx",
+          "CREATE INDEX forcing_station_timeseries_valid_time_idx ON met.forcing_station_timeseries USING btree (valid_time DESC)"
+        ]
+      ],
+      "seconds": 0.003054535947740078
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:54.483681+00:00",
+      "statement": "SELECT * FROM timescaledb_information.compression_settings WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' ORDER BY attname",
+      "params": null,
+      "rows": [
+        [
+          "met",
+          "forcing_station_timeseries",
+          "forcing_version_id",
+          1,
+          null,
+          null,
+          null
+        ],
+        [
+          "met",
+          "forcing_station_timeseries",
+          "station_id",
+          2,
+          null,
+          null,
+          null
+        ],
+        [
+          "met",
+          "forcing_station_timeseries",
+          "valid_time",
+          null,
+          2,
+          true,
+          false
+        ],
+        [
+          "met",
+          "forcing_station_timeseries",
+          "variable",
+          null,
+          1,
+          true,
+          false
+        ]
+      ],
+      "seconds": 0.0011988088954240084
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:54.484975+00:00",
+      "statement": "SELECT * FROM timescaledb_information.dimensions WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' ORDER BY dimension_number",
+      "params": null,
+      "rows": [
+        [
+          "met",
+          "forcing_station_timeseries",
+          1,
+          "valid_time",
+          "timestamp with time zone",
+          "Time",
+          "3 days, 0:00:00",
+          null,
+          null,
+          null
+        ]
+      ],
+      "seconds": 0.0012167589738965034
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:54.803078+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "parse",
+        "--run",
+        "run_dual_write",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"at\": \"2026-09-12T13:09:54.784399+00:00\", \"event\": \"actual_parse\", \"parser\": \"/home/nwm/tmp/i8-1987/old/workers/output_parser/parser.py\", \"rows\": 12, \"run\": \"run_dual_write\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:55.079718+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "read",
+        "--run",
+        "run_dual_write",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"absent\": false, \"at\": \"2026-09-12T13:09:55.050730+00:00\", \"event\": \"actual_read\", \"responses\": [{\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-1\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 1.0], [1780275600000, 2.0], [1780279200000, 3.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-2\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 2.0], [1780275600000, 4.0], [1780279200000, 6.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-3\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 3.0], [1780275600000, 6.0], [1780279200000, 9.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-4\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 4.0], [1780275600000, 8.0], [1780279200000, 12.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}], \"run\": \"run_dual_write\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.082885+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "run_dual_write"
+      ],
+      "rows": [
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.00300938100554049
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.084058+00:00",
+      "statement": "SELECT run_id,basin_version_id,river_network_version_id,river_segment_id,valid_time,lead_time_hours,variable,value,unit,quality_flag FROM hydro.river_timeseries WHERE run_id=%s ORDER BY valid_time,river_segment_id",
+      "params": [
+        "run_dual_write"
+      ],
+      "rows": [
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-1",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-2",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-3",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-4",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-1",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-2",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-3",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-4",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-1",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-2",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-3",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-4",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0008901718538254499
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.084584+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries"
+      ],
+      "rows": [
+        [
+          22317
+        ]
+      ],
+      "seconds": 0.00028172810561954975
+    },
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:55.084660+00:00",
+      "row": "R1",
+      "result": "PASS"
+    },
+    {
+      "event": "expand_runner",
+      "at": "2026-09-12T13:09:55.114625+00:00",
+      "file": "000059_river_timeseries_narrow_expand.sql",
+      "single_statement_wall_seconds": 0.026955484179779887
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.114973+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries"
+      ],
+      "rows": [
+        [
+          22786
+        ]
+      ],
+      "seconds": 0.000266453018411994
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.115281+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries_legacy"
+      ],
+      "rows": [
+        [
+          22317
+        ]
+      ],
+      "seconds": 0.00023236009292304516
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.116226+00:00",
+      "statement": "INSERT INTO hydro.hydro_run (run_id,run_type,scenario_id,model_id,basin_version_id,cycle_time,start_time,end_time,status,run_manifest_uri,output_uri) VALUES (%s,'forecast','sc','m1','bv1',%s,%s,%s,'succeeded','s3://m',%s)",
+      "params": [
+        "i8_narrow_run",
+        "2026-06-01 00:00:00+00:00",
+        "2026-06-01 00:00:00+00:00",
+        "2026-06-01 03:00:00+00:00",
+        "s3://nhms/runs/i8_narrow_run/output/"
+      ],
+      "rows": [],
+      "seconds": 0.0008663870394229889
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:55.403037+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/new",
+        "--sha",
+        "3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb",
+        "--action",
+        "parse",
+        "--run",
+        "i8_narrow_run",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/new",
+      "pythonpath": "/home/nwm/tmp/i8-1987/new",
+      "output": "{\"at\": \"2026-09-12T13:09:55.373238+00:00\", \"event\": \"actual_parse\", \"parser\": \"/home/nwm/tmp/i8-1987/new/workers/output_parser/parser.py\", \"rows\": 12, \"run\": \"i8_narrow_run\", \"sha\": \"3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb\"}\n"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.414000+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "i8_narrow_run"
+      ],
+      "rows": [
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0015400238335132599
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.415245+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries_legacy t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "run_dual_write"
+      ],
+      "rows": [
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0010433450806885958
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.415726+00:00",
+      "statement": "SELECT run_id,timeseries_store FROM hydro.hydro_run ORDER BY run_key",
+      "params": null,
+      "rows": [
+        [
+          "run_dual_write",
+          "legacy"
+        ],
+        [
+          "i8_narrow_run",
+          "narrow"
+        ]
+      ],
+      "seconds": 0.0003342321142554283
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.416200+00:00",
+      "statement": "SELECT version,applied_at FROM public.schema_migrations ORDER BY version",
+      "params": null,
+      "rows": [
+        [
+          "000001_extensions.sql",
+          "2026-09-12 13:09:53.319605+00:00"
+        ],
+        [
+          "000002_schemas.sql",
+          "2026-09-12 13:09:53.322276+00:00"
+        ],
+        [
+          "000003_enums.sql",
+          "2026-09-12 13:09:53.325837+00:00"
+        ],
+        [
+          "000004_core.sql",
+          "2026-09-12 13:09:53.353095+00:00"
+        ],
+        [
+          "000005_met.sql",
+          "2026-09-12 13:09:53.391631+00:00"
+        ],
+        [
+          "000006_hydro.sql",
+          "2026-09-12 13:09:53.406492+00:00"
+        ],
+        [
+          "000008_map.sql",
+          "2026-09-12 13:09:53.415768+00:00"
+        ],
+        [
+          "000009_ops.sql",
+          "2026-09-12 13:09:53.435766+00:00"
+        ],
+        [
+          "000010_indexes.sql",
+          "2026-09-12 13:09:53.440004+00:00"
+        ],
+        [
+          "000011_pipeline_job_model_id.sql",
+          "2026-09-12 13:09:53.442414+00:00"
+        ],
+        [
+          "000012_pipeline_job_array_task.sql",
+          "2026-09-12 13:09:53.444937+00:00"
+        ],
+        [
+          "000013_enum_remediation.sql",
+          "2026-09-12 13:09:53.446564+00:00"
+        ],
+        [
+          "000014_best_available_lineage.sql",
+          "2026-09-12 13:09:53.488339+00:00"
+        ],
+        [
+          "000016_river_segment_pagination_indexes.sql",
+          "2026-09-12 13:09:53.491768+00:00"
+        ],
+        [
+          "000018_tile_cache_m16_contract.sql",
+          "2026-09-12 13:09:53.502157+00:00"
+        ],
+        [
+          "000019_hydro_mvt_identity_lookup_idx.sql",
+          "2026-09-12 13:09:53.504173+00:00"
+        ],
+        [
+          "000021_latest_ready_run_discovery_idx.sql",
+          "2026-09-12 13:09:53.509018+00:00"
+        ],
+        [
+          "000022_model_asset_lifecycle.sql",
+          "2026-09-12 13:09:53.516268+00:00"
+        ],
+        [
+          "000023_interp_weight_grid_signature.sql",
+          "2026-09-12 13:09:53.517508+00:00"
+        ],
+        [
+          "000024_qhh_latest_display_product_indexes.sql",
+          "2026-09-12 13:09:53.525366+00:00"
+        ],
+        [
+          "000025_active_manual_retry_guard.sql",
+          "2026-09-12 13:09:53.529572+00:00"
+        ],
+        [
+          "000026_ops_strict_identity_indexes.sql",
+          "2026-09-12 13:09:53.531551+00:00"
+        ],
+        [
+          "000027_cycle_status_canonical_incomplete.sql",
+          "2026-09-12 13:09:53.532883+00:00"
+        ],
+        [
+          "000028_state_lineage.sql",
+          "2026-09-12 13:09:53.537149+00:00"
+        ],
+        [
+          "000029_pipeline_reservation.sql",
+          "2026-09-12 13:09:53.540663+00:00"
+        ],
+        [
+          "000030_qhh_latest_display_parsed_status_index.sql",
+          "2026-09-12 13:09:53.543488+00:00"
+        ],
+        [
+          "000031_search_discovery_performance.sql",
+          "2026-09-12 13:09:53.655268+00:00"
+        ],
+        [
+          "000032_source_specific_state_snapshot.sql",
+          "2026-09-12 13:09:53.682696+00:00"
+        ],
+        [
+          "000033_station_mvt_active_source_index.sql",
+          "2026-09-12 13:09:53.685296+00:00"
+        ],
+        [
+          "000035_qhh_display_coverage_materialization.sql",
+          "2026-09-12 13:09:53.691763+00:00"
+        ],
+        [
+          "000037_river_segment_multilinestring.sql",
+          "2026-09-12 13:09:53.757562+00:00"
+        ],
+        [
+          "000038_direct_grid_interp_weight_constraints.sql",
+          "2026-09-12 13:09:53.762793+00:00"
+        ],
+        [
+          "000039_crosswalk_external_identity.sql",
+          "2026-09-12 13:09:53.791391+00:00"
+        ],
+        [
+          "000040_display_ready_succeeded_status_index.sql",
+          "2026-09-12 13:09:53.796202+00:00"
+        ],
+        [
+          "000041_drop_redundant_river_qhh_latest_window_idx.sql",
+          "2026-09-12 13:09:53.820709+00:00"
+        ],
+        [
+          "000042_drop_redundant_river_selected_identity_lookup_idx.sql",
+          "2026-09-12 13:09:53.845768+00:00"
+        ],
+        [
+          "000043_canonical_grid_snapshot.sql",
+          "2026-09-12 13:09:53.869118+00:00"
+        ],
+        [
+          "000044_canonical_grid_snapshot_identity_unique.sql",
+          "2026-09-12 13:09:53.871715+00:00"
+        ],
+        [
+          "000045_hydro_run_type_hindcast.sql",
+          "2026-09-12 13:09:53.873259+00:00"
+        ],
+        [
+          "000046_state_snapshot_clone_provenance.sql",
+          "2026-09-12 13:09:53.876149+00:00"
+        ],
+        [
+          "000047_hypertable_compression_settings.sql",
+          "2026-09-12 13:09:53.894862+00:00"
+        ],
+        [
+          "000048_river_segment_stream_type.sql",
+          "2026-09-12 13:09:53.953133+00:00"
+        ],
+        [
+          "000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql",
+          "2026-09-12 13:09:53.981493+00:00"
+        ],
+        [
+          "000050_river_identity_normalization.sql",
+          "2026-09-12 13:09:54.232691+00:00"
+        ],
+        [
+          "000051_river_ts_surrogate_key_read_index.sql",
+          "2026-09-12 13:09:54.238173+00:00"
+        ],
+        [
+          "000052_authority_stats_hygiene_trgm_expression_index.sql",
+          "2026-09-12 13:09:54.274868+00:00"
+        ],
+        [
+          "000053_state_snapshot_clone_gate_kind.sql",
+          "2026-09-12 13:09:54.277109+00:00"
+        ],
+        [
+          "000054_met_station_trgm_expression_index.sql",
+          "2026-09-12 13:09:54.306636+00:00"
+        ],
+        [
+          "000055_ops_ingest_recompute_decline.sql",
+          "2026-09-12 13:09:54.311157+00:00"
+        ],
+        [
+          "000056_hydro_run_parsed_at.sql",
+          "2026-09-12 13:09:54.313026+00:00"
+        ],
+        [
+          "000057_river_network_version_geometry_generation.sql",
+          "2026-09-12 13:09:54.315462+00:00"
+        ],
+        [
+          "000058_hot_timeseries_chunk_interval_3d.sql",
+          "2026-09-12 13:09:54.317217+00:00"
+        ],
+        [
+          "000059_river_timeseries_narrow_expand.sql",
+          "2026-09-12 13:09:55.114119+00:00"
+        ]
+      ],
+      "seconds": 0.00042574387043714523
+    },
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:55.416432+00:00",
+      "row": "R2",
+      "result": "PASS"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.416666+00:00",
+      "statement": "BEGIN",
+      "params": null,
+      "rows": [],
+      "seconds": 0.00020809401758015156
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.417041+00:00",
+      "statement": "ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_narrow_rollback",
+      "params": null,
+      "rows": [],
+      "seconds": 0.0003385359887033701
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.417380+00:00",
+      "statement": "ALTER TABLE hydro.river_timeseries_legacy RENAME TO river_timeseries",
+      "params": null,
+      "rows": [],
+      "seconds": 0.00030585797503590584
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.417725+00:00",
+      "statement": "COMMIT",
+      "params": null,
+      "rows": [],
+      "seconds": 0.00031407689675688744
+    },
+    {
+      "event": "code_selection",
+      "at": "2026-09-12T13:09:55.417771+00:00",
+      "sha": "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+      "next_parser_and_reader": "fresh old subprocess only"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.418340+00:00",
+      "statement": "UPDATE hydro.hydro_run SET timeseries_store='legacy'",
+      "params": null,
+      "rows": [],
+      "seconds": 0.0005469829775393009
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.418592+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries"
+      ],
+      "rows": [
+        [
+          22317
+        ]
+      ],
+      "seconds": 0.00021806382574141026
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.418832+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries_narrow_rollback"
+      ],
+      "rows": [
+        [
+          22786
+        ]
+      ],
+      "seconds": 0.00020073610357940197
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:55.680975+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "read",
+        "--run",
+        "run_dual_write",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"absent\": false, \"at\": \"2026-09-12T13:09:55.662021+00:00\", \"event\": \"actual_read\", \"responses\": [{\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-1\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 1.0], [1780275600000, 2.0], [1780279200000, 3.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-2\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 2.0], [1780275600000, 4.0], [1780279200000, 6.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-3\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 3.0], [1780275600000, 6.0], [1780279200000, 9.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-4\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 4.0], [1780275600000, 8.0], [1780279200000, 12.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}], \"run\": \"run_dual_write\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:55.978692+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "read",
+        "--run",
+        "i8_narrow_run",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1",
+        "--absent"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"absent\": true, \"at\": \"2026-09-12T13:09:55.948807+00:00\", \"event\": \"actual_read\", \"responses\": [{\"code\": \"RUN_NOT_PUBLISHED\", \"segment_id\": \"seg-1\", \"status\": 404}, {\"code\": \"RUN_NOT_PUBLISHED\", \"segment_id\": \"seg-2\", \"status\": 404}, {\"code\": \"RUN_NOT_PUBLISHED\", \"segment_id\": \"seg-3\", \"status\": 404}, {\"code\": \"RUN_NOT_PUBLISHED\", \"segment_id\": \"seg-4\", \"status\": 404}], \"run\": \"i8_narrow_run\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.980435+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "i8_narrow_run"
+      ],
+      "rows": [],
+      "seconds": 0.0015845689922571182
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.981723+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries_narrow_rollback t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "i8_narrow_run"
+      ],
+      "rows": [
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0011919999960809946
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.982557+00:00",
+      "statement": "LOCK TABLE hydro.river_timeseries, hydro.river_timeseries_narrow_rollback IN ACCESS EXCLUSIVE MODE",
+      "params": null,
+      "rows": [],
+      "seconds": 0.000504025025293231
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.982966+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries_narrow_rollback"
+      ],
+      "rows": [
+        [
+          22786
+        ]
+      ],
+      "seconds": 0.0003296558279544115
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.984231+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "run_dual_write"
+      ],
+      "rows": [
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.001184938009828329
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.985531+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "i8_narrow_run"
+      ],
+      "rows": [],
+      "seconds": 0.0010614839848130941
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.986286+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries_narrow_rollback"
+      ],
+      "rows": [
+        [
+          22786
+        ]
+      ],
+      "seconds": 0.00033461092971265316
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:55.987803+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries_narrow_rollback t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "i8_narrow_run"
+      ],
+      "rows": [
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0014371799770742655
+    },
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:55.987988+00:00",
+      "row": "R5",
+      "result": "PASS",
+      "refusal": "REPARSE_PROOF_MISSING",
+      "retained_oid": 22786
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:56.219885+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "parse",
+        "--run",
+        "run_dual_write",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"at\": \"2026-09-12T13:09:56.202417+00:00\", \"event\": \"actual_parse\", \"parser\": \"/home/nwm/tmp/i8-1987/old/workers/output_parser/parser.py\", \"rows\": 12, \"run\": \"run_dual_write\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:56.483272+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "read",
+        "--run",
+        "run_dual_write",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"absent\": false, \"at\": \"2026-09-12T13:09:56.464366+00:00\", \"event\": \"actual_read\", \"responses\": [{\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-1\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 1.0], [1780275600000, 2.0], [1780279200000, 3.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-2\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 2.0], [1780275600000, 4.0], [1780279200000, 6.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-3\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 3.0], [1780275600000, 6.0], [1780279200000, 9.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-4\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 4.0], [1780275600000, 8.0], [1780279200000, 12.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}], \"run\": \"run_dual_write\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:56.485245+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "run_dual_write"
+      ],
+      "rows": [
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0018627459648996592
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:56.723335+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "parse",
+        "--run",
+        "i8_narrow_run",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"at\": \"2026-09-12T13:09:56.704254+00:00\", \"event\": \"actual_parse\", \"parser\": \"/home/nwm/tmp/i8-1987/old/workers/output_parser/parser.py\", \"rows\": 12, \"run\": \"i8_narrow_run\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:57.012926+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "read",
+        "--run",
+        "i8_narrow_run",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"absent\": false, \"at\": \"2026-09-12T13:09:56.984814+00:00\", \"event\": \"actual_read\", \"responses\": [{\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-1\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 1.0], [1780275600000, 2.0], [1780279200000, 3.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-2\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 2.0], [1780275600000, 4.0], [1780279200000, 6.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-3\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 3.0], [1780275600000, 6.0], [1780279200000, 9.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-4\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 4.0], [1780275600000, 8.0], [1780279200000, 12.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}], \"run\": \"i8_narrow_run\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.015042+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "i8_narrow_run"
+      ],
+      "rows": [
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0019617800135165453
+    },
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:57.015382+00:00",
+      "row": "R3",
+      "result": "PASS"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.015997+00:00",
+      "statement": "LOCK TABLE hydro.river_timeseries, hydro.river_timeseries_narrow_rollback IN ACCESS EXCLUSIVE MODE",
+      "params": null,
+      "rows": [],
+      "seconds": 0.0005558759439736605
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.016401+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries_narrow_rollback"
+      ],
+      "rows": [
+        [
+          22786
+        ]
+      ],
+      "seconds": 0.00033190101385116577
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.017634+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "run_dual_write"
+      ],
+      "rows": [
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4001,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0011583920568227768
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.019078+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "i8_narrow_run"
+      ],
+      "rows": [
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0011423618998378515
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.020166+00:00",
+      "statement": "SELECT run_id,basin_version_id,river_network_version_id,river_segment_id,valid_time,lead_time_hours,variable,value,unit,quality_flag FROM hydro.river_timeseries WHERE run_id=%s ORDER BY valid_time,river_segment_id",
+      "params": [
+        "run_dual_write"
+      ],
+      "rows": [
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-1",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-2",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-3",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-4",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-1",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-2",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-3",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-4",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-1",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-2",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-3",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "run_dual_write",
+          "bv1",
+          "rnv1",
+          "seg-4",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0008517338428646326
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.021204+00:00",
+      "statement": "SELECT run_id,basin_version_id,river_network_version_id,river_segment_id,valid_time,lead_time_hours,variable,value,unit,quality_flag FROM hydro.river_timeseries WHERE run_id=%s ORDER BY valid_time,river_segment_id",
+      "params": [
+        "i8_narrow_run"
+      ],
+      "rows": [
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-1",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-2",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-3",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-4",
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-1",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-2",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-3",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-4",
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-1",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-2",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-3",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          "i8_narrow_run",
+          "bv1",
+          "rnv1",
+          "seg-4",
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.000805877149105072
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.022052+00:00",
+      "statement": "SELECT count(*) FROM hydro.river_timeseries_narrow_rollback",
+      "params": null,
+      "rows": [
+        [
+          12
+        ]
+      ],
+      "seconds": 0.0006185078527778387
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.023294+00:00",
+      "statement": "SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.river_timeseries_narrow_rollback t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key",
+      "params": [
+        "i8_narrow_run"
+      ],
+      "rows": [
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          1.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 00:00:00+00:00",
+          0,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          2.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          4.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 01:00:00+00:00",
+          1,
+          "q_down",
+          8.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7001,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          3.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7002,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          6.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7003,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          9.0,
+          "m3/s",
+          "ok"
+        ],
+        [
+          4002,
+          5001,
+          6001,
+          7004,
+          "2026-06-01 02:00:00+00:00",
+          2,
+          "q_down",
+          12.0,
+          "m3/s",
+          "ok"
+        ]
+      ],
+      "seconds": 0.0011519601102918386
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.032601+00:00",
+      "statement": "DROP TABLE hydro.river_timeseries_narrow_rollback",
+      "params": null,
+      "rows": [],
+      "seconds": 0.00911656697280705
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:57.415869+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "read",
+        "--run",
+        "run_dual_write",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"absent\": false, \"at\": \"2026-09-12T13:09:57.386118+00:00\", \"event\": \"actual_read\", \"responses\": [{\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-1\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 1.0], [1780275600000, 2.0], [1780279200000, 3.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-2\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 2.0], [1780275600000, 4.0], [1780279200000, 6.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-3\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 3.0], [1780275600000, 6.0], [1780279200000, 9.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-4\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 4.0], [1780275600000, 8.0], [1780279200000, 12.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}], \"run\": \"run_dual_write\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "subprocess",
+      "at": "2026-09-12T13:09:57.687812+00:00",
+      "command": [
+        "/home/nwm/tmp/i8-1987/new/.venv/bin/python3",
+        "/home/nwm/tmp/i8-1987/rehearse_river_rollback.py",
+        "--worker",
+        "--repo",
+        "/home/nwm/tmp/i8-1987/old",
+        "--sha",
+        "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c",
+        "--action",
+        "read",
+        "--run",
+        "i8_narrow_run",
+        "--artifacts",
+        "/home/nwm/tmp/i8-1987/shud-artifacts-attempt1"
+      ],
+      "cwd": "/home/nwm/tmp/i8-1987/old",
+      "pythonpath": "/home/nwm/tmp/i8-1987/old",
+      "output": "{\"absent\": false, \"at\": \"2026-09-12T13:09:57.669982+00:00\", \"event\": \"actual_read\", \"responses\": [{\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-1\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 1.0], [1780275600000, 2.0], [1780279200000, 3.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-2\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 2.0], [1780275600000, 4.0], [1780279200000, 6.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-3\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 3.0], [1780275600000, 6.0], [1780279200000, 9.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}, {\"issue_time\": \"2026-06-01T00:00:00Z\", \"segment_id\": \"seg-4\", \"series\": [{\"available_lead_hours\": 3, \"cycle_time\": \"2026-06-01T00:00:00Z\", \"points\": [[1780272000000, 4.0], [1780275600000, 8.0], [1780279200000, 12.0]], \"scenario_id\": \"sc\", \"segment_role\": \"future_7_days\", \"variable\": \"q_down\"}], \"unit\": \"m3/s\"}], \"run\": \"i8_narrow_run\", \"sha\": \"5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c\"}\n"
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.688547+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries_legacy"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ],
+      "seconds": 0.0005854680202901363
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.688884+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries_narrow_rollback"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ],
+      "seconds": 0.0002495669759809971
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.689319+00:00",
+      "statement": "SELECT oid, reloptions, relowner FROM pg_class WHERE oid='met.forcing_station_timeseries'::regclass",
+      "params": null,
+      "rows": [
+        [
+          22233,
+          null,
+          10
+        ]
+      ],
+      "seconds": 0.00036116200499236584
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.689781+00:00",
+      "statement": "SELECT attnum, attname, atttypid, attnotnull FROM pg_attribute WHERE attrelid='met.forcing_station_timeseries'::regclass AND attnum>0 ORDER BY attnum",
+      "params": null,
+      "rows": [
+        [
+          1,
+          "forcing_version_id",
+          25,
+          true
+        ],
+        [
+          2,
+          "basin_version_id",
+          25,
+          true
+        ],
+        [
+          3,
+          "station_id",
+          25,
+          true
+        ],
+        [
+          4,
+          "valid_time",
+          1184,
+          true
+        ],
+        [
+          5,
+          "source_id",
+          25,
+          true
+        ],
+        [
+          6,
+          "variable",
+          25,
+          true
+        ],
+        [
+          7,
+          "value",
+          701,
+          true
+        ],
+        [
+          8,
+          "unit",
+          25,
+          true
+        ],
+        [
+          9,
+          "native_resolution",
+          25,
+          false
+        ],
+        [
+          10,
+          "quality_flag",
+          25,
+          true
+        ]
+      ],
+      "seconds": 0.0003929540980607271
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.691292+00:00",
+      "statement": "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='met' AND tablename='forcing_station_timeseries' ORDER BY indexname",
+      "params": null,
+      "rows": [
+        [
+          "forcing_station_timeseries_pkey",
+          "CREATE UNIQUE INDEX forcing_station_timeseries_pkey ON met.forcing_station_timeseries USING btree (forcing_version_id, station_id, variable, valid_time)"
+        ],
+        [
+          "forcing_station_timeseries_qhh_latest_window_idx",
+          "CREATE INDEX forcing_station_timeseries_qhh_latest_window_idx ON met.forcing_station_timeseries USING btree (forcing_version_id, basin_version_id, lower(source_id), variable, valid_time DESC, station_id)"
+        ],
+        [
+          "forcing_station_timeseries_valid_time_idx",
+          "CREATE INDEX forcing_station_timeseries_valid_time_idx ON met.forcing_station_timeseries USING btree (valid_time DESC)"
+        ]
+      ],
+      "seconds": 0.00142121990211308
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.691934+00:00",
+      "statement": "SELECT * FROM timescaledb_information.compression_settings WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' ORDER BY attname",
+      "params": null,
+      "rows": [
+        [
+          "met",
+          "forcing_station_timeseries",
+          "forcing_version_id",
+          1,
+          null,
+          null,
+          null
+        ],
+        [
+          "met",
+          "forcing_station_timeseries",
+          "station_id",
+          2,
+          null,
+          null,
+          null
+        ],
+        [
+          "met",
+          "forcing_station_timeseries",
+          "valid_time",
+          null,
+          2,
+          true,
+          false
+        ],
+        [
+          "met",
+          "forcing_station_timeseries",
+          "variable",
+          null,
+          1,
+          true,
+          false
+        ]
+      ],
+      "seconds": 0.000570313073694706
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.692593+00:00",
+      "statement": "SELECT * FROM timescaledb_information.dimensions WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' ORDER BY dimension_number",
+      "params": null,
+      "rows": [
+        [
+          "met",
+          "forcing_station_timeseries",
+          1,
+          "valid_time",
+          "timestamp with time zone",
+          "Time",
+          "3 days, 0:00:00",
+          null,
+          null,
+          null
+        ]
+      ],
+      "seconds": 0.0005889518652111292
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.735506+00:00",
+      "statement": "SELECT version,applied_at FROM public.schema_migrations ORDER BY version",
+      "params": null,
+      "rows": [
+        [
+          "000001_extensions.sql",
+          "2026-09-12 13:09:53.319605+00:00"
+        ],
+        [
+          "000002_schemas.sql",
+          "2026-09-12 13:09:53.322276+00:00"
+        ],
+        [
+          "000003_enums.sql",
+          "2026-09-12 13:09:53.325837+00:00"
+        ],
+        [
+          "000004_core.sql",
+          "2026-09-12 13:09:53.353095+00:00"
+        ],
+        [
+          "000005_met.sql",
+          "2026-09-12 13:09:53.391631+00:00"
+        ],
+        [
+          "000006_hydro.sql",
+          "2026-09-12 13:09:53.406492+00:00"
+        ],
+        [
+          "000008_map.sql",
+          "2026-09-12 13:09:53.415768+00:00"
+        ],
+        [
+          "000009_ops.sql",
+          "2026-09-12 13:09:53.435766+00:00"
+        ],
+        [
+          "000010_indexes.sql",
+          "2026-09-12 13:09:53.440004+00:00"
+        ],
+        [
+          "000011_pipeline_job_model_id.sql",
+          "2026-09-12 13:09:53.442414+00:00"
+        ],
+        [
+          "000012_pipeline_job_array_task.sql",
+          "2026-09-12 13:09:53.444937+00:00"
+        ],
+        [
+          "000013_enum_remediation.sql",
+          "2026-09-12 13:09:53.446564+00:00"
+        ],
+        [
+          "000014_best_available_lineage.sql",
+          "2026-09-12 13:09:53.488339+00:00"
+        ],
+        [
+          "000016_river_segment_pagination_indexes.sql",
+          "2026-09-12 13:09:53.491768+00:00"
+        ],
+        [
+          "000018_tile_cache_m16_contract.sql",
+          "2026-09-12 13:09:53.502157+00:00"
+        ],
+        [
+          "000019_hydro_mvt_identity_lookup_idx.sql",
+          "2026-09-12 13:09:53.504173+00:00"
+        ],
+        [
+          "000021_latest_ready_run_discovery_idx.sql",
+          "2026-09-12 13:09:53.509018+00:00"
+        ],
+        [
+          "000022_model_asset_lifecycle.sql",
+          "2026-09-12 13:09:53.516268+00:00"
+        ],
+        [
+          "000023_interp_weight_grid_signature.sql",
+          "2026-09-12 13:09:53.517508+00:00"
+        ],
+        [
+          "000024_qhh_latest_display_product_indexes.sql",
+          "2026-09-12 13:09:53.525366+00:00"
+        ],
+        [
+          "000025_active_manual_retry_guard.sql",
+          "2026-09-12 13:09:53.529572+00:00"
+        ],
+        [
+          "000026_ops_strict_identity_indexes.sql",
+          "2026-09-12 13:09:53.531551+00:00"
+        ],
+        [
+          "000027_cycle_status_canonical_incomplete.sql",
+          "2026-09-12 13:09:53.532883+00:00"
+        ],
+        [
+          "000028_state_lineage.sql",
+          "2026-09-12 13:09:53.537149+00:00"
+        ],
+        [
+          "000029_pipeline_reservation.sql",
+          "2026-09-12 13:09:53.540663+00:00"
+        ],
+        [
+          "000030_qhh_latest_display_parsed_status_index.sql",
+          "2026-09-12 13:09:53.543488+00:00"
+        ],
+        [
+          "000031_search_discovery_performance.sql",
+          "2026-09-12 13:09:53.655268+00:00"
+        ],
+        [
+          "000032_source_specific_state_snapshot.sql",
+          "2026-09-12 13:09:53.682696+00:00"
+        ],
+        [
+          "000033_station_mvt_active_source_index.sql",
+          "2026-09-12 13:09:53.685296+00:00"
+        ],
+        [
+          "000035_qhh_display_coverage_materialization.sql",
+          "2026-09-12 13:09:53.691763+00:00"
+        ],
+        [
+          "000037_river_segment_multilinestring.sql",
+          "2026-09-12 13:09:53.757562+00:00"
+        ],
+        [
+          "000038_direct_grid_interp_weight_constraints.sql",
+          "2026-09-12 13:09:53.762793+00:00"
+        ],
+        [
+          "000039_crosswalk_external_identity.sql",
+          "2026-09-12 13:09:53.791391+00:00"
+        ],
+        [
+          "000040_display_ready_succeeded_status_index.sql",
+          "2026-09-12 13:09:53.796202+00:00"
+        ],
+        [
+          "000041_drop_redundant_river_qhh_latest_window_idx.sql",
+          "2026-09-12 13:09:53.820709+00:00"
+        ],
+        [
+          "000042_drop_redundant_river_selected_identity_lookup_idx.sql",
+          "2026-09-12 13:09:53.845768+00:00"
+        ],
+        [
+          "000043_canonical_grid_snapshot.sql",
+          "2026-09-12 13:09:53.869118+00:00"
+        ],
+        [
+          "000044_canonical_grid_snapshot_identity_unique.sql",
+          "2026-09-12 13:09:53.871715+00:00"
+        ],
+        [
+          "000045_hydro_run_type_hindcast.sql",
+          "2026-09-12 13:09:53.873259+00:00"
+        ],
+        [
+          "000046_state_snapshot_clone_provenance.sql",
+          "2026-09-12 13:09:53.876149+00:00"
+        ],
+        [
+          "000047_hypertable_compression_settings.sql",
+          "2026-09-12 13:09:53.894862+00:00"
+        ],
+        [
+          "000048_river_segment_stream_type.sql",
+          "2026-09-12 13:09:53.953133+00:00"
+        ],
+        [
+          "000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql",
+          "2026-09-12 13:09:53.981493+00:00"
+        ],
+        [
+          "000050_river_identity_normalization.sql",
+          "2026-09-12 13:09:54.232691+00:00"
+        ],
+        [
+          "000051_river_ts_surrogate_key_read_index.sql",
+          "2026-09-12 13:09:54.238173+00:00"
+        ],
+        [
+          "000052_authority_stats_hygiene_trgm_expression_index.sql",
+          "2026-09-12 13:09:54.274868+00:00"
+        ],
+        [
+          "000053_state_snapshot_clone_gate_kind.sql",
+          "2026-09-12 13:09:54.277109+00:00"
+        ],
+        [
+          "000054_met_station_trgm_expression_index.sql",
+          "2026-09-12 13:09:54.306636+00:00"
+        ],
+        [
+          "000055_ops_ingest_recompute_decline.sql",
+          "2026-09-12 13:09:54.311157+00:00"
+        ],
+        [
+          "000056_hydro_run_parsed_at.sql",
+          "2026-09-12 13:09:54.313026+00:00"
+        ],
+        [
+          "000057_river_network_version_geometry_generation.sql",
+          "2026-09-12 13:09:54.315462+00:00"
+        ],
+        [
+          "000058_hot_timeseries_chunk_interval_3d.sql",
+          "2026-09-12 13:09:54.317217+00:00"
+        ],
+        [
+          "000059_river_timeseries_narrow_expand.sql",
+          "2026-09-12 13:09:55.114119+00:00"
+        ]
+      ],
+      "seconds": 0.0004742150194942951
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.736185+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries"
+      ],
+      "rows": [
+        [
+          22317
+        ]
+      ],
+      "seconds": 0.0002541181165724993
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.736488+00:00",
+      "statement": "SELECT to_regclass(%s)::oid",
+      "params": [
+        "hydro.river_timeseries_legacy"
+      ],
+      "rows": [
+        [
+          null
+        ]
+      ],
+      "seconds": 0.0002308229450136423
+    },
+    {
+      "event": "sql",
+      "at": "2026-09-12T13:09:57.737011+00:00",
+      "statement": "SELECT run_id,timeseries_store FROM hydro.hydro_run ORDER BY run_key",
+      "params": null,
+      "rows": [
+        [
+          "run_dual_write",
+          "legacy"
+        ],
+        [
+          "i8_narrow_run",
+          "legacy"
+        ]
+      ],
+      "seconds": 0.000460062175989151
+    },
+    {
+      "event": "normal_migrate",
+      "at": "2026-09-12T13:09:57.737080+00:00",
+      "output": "Skipped migration: 000001_extensions.sql\nSkipped migration: 000002_schemas.sql\nSkipped migration: 000003_enums.sql\nSkipped migration: 000004_core.sql\nSkipped migration: 000005_met.sql\nSkipped migration: 000006_hydro.sql\nSkipped migration: 000008_map.sql\nSkipped migration: 000009_ops.sql\nSkipped migration: 000010_indexes.sql\nSkipped migration: 000011_pipeline_job_model_id.sql\nSkipped migration: 000012_pipeline_job_array_task.sql\nSkipped migration: 000013_enum_remediation.sql\nSkipped migration: 000014_best_available_lineage.sql\nSkipped migration: 000016_river_segment_pagination_indexes.sql\nSkipped migration: 000018_tile_cache_m16_contract.sql\nSkipped migration: 000019_hydro_mvt_identity_lookup_idx.sql\nSkipped migration: 000021_latest_ready_run_discovery_idx.sql\nSkipped migration: 000022_model_asset_lifecycle.sql\nSkipped migration: 000023_interp_weight_grid_signature.sql\nSkipped migration: 000024_qhh_latest_display_product_indexes.sql\nSkipped migration: 000025_active_manual_retry_guard.sql\nSkipped migration: 000026_ops_strict_identity_indexes.sql\nSkipped migration: 000027_cycle_status_canonical_incomplete.sql\nSkipped migration: 000028_state_lineage.sql\nSkipped migration: 000029_pipeline_reservation.sql\nSkipped migration: 000030_qhh_latest_display_parsed_status_index.sql\nSkipped migration: 000031_search_discovery_performance.sql\nSkipped migration: 000032_source_specific_state_snapshot.sql\nSkipped migration: 000033_station_mvt_active_source_index.sql\nSkipped migration: 000035_qhh_display_coverage_materialization.sql\nSkipped migration: 000037_river_segment_multilinestring.sql\nSkipped migration: 000038_direct_grid_interp_weight_constraints.sql\nSkipped migration: 000039_crosswalk_external_identity.sql\nSkipped migration: 000040_display_ready_succeeded_status_index.sql\nSkipped migration: 000041_drop_redundant_river_qhh_latest_window_idx.sql\nSkipped migration: 000042_drop_redundant_river_selected_identity_lookup_idx.sql\nSkipped migration: 000043_canonical_grid_snapshot.sql\nSkipped migration: 000044_canonical_grid_snapshot_identity_unique.sql\nSkipped migration: 000045_hydro_run_type_hindcast.sql\nSkipped migration: 000046_state_snapshot_clone_provenance.sql\nSkipped migration: 000047_hypertable_compression_settings.sql\nSkipped migration: 000048_river_segment_stream_type.sql\nSkipped migration: 000049_drop_redundant_river_mvt_identity_and_valid_time_discovery_idx.sql\nSkipped migration: 000050_river_identity_normalization.sql\nSkipped migration: 000051_river_ts_surrogate_key_read_index.sql\nSkipped migration: 000052_authority_stats_hygiene_trgm_expression_index.sql\nSkipped migration: 000053_state_snapshot_clone_gate_kind.sql\nSkipped migration: 000054_met_station_trgm_expression_index.sql\nSkipped migration: 000055_ops_ingest_recompute_decline.sql\nSkipped migration: 000056_hydro_run_parsed_at.sql\nSkipped migration: 000057_river_network_version_geometry_generation.sql\nSkipped migration: 000058_hot_timeseries_chunk_interval_3d.sql\nSkipped migration: 000059_river_timeseries_narrow_expand.sql\nMigrations complete: 0 applied, 53 skipped, 53 total.\n",
+      "reexpanded": false
+    },
+    {
+      "event": "assertion",
+      "at": "2026-09-12T13:09:57.737139+00:00",
+      "row": "R4",
+      "result": "PASS"
+    }
+  ]
+}

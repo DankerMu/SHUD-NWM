@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+"""Disposable I8 scenario, not pytest. See tier runbook §4.10 for provisioning.
+
+Credentials are accepted ONLY as I8_REHEARSAL_DSN. Never print exception text:
+libpq and parser exceptions may contain credentials. All subprocess output is
+captured, sanitized, then included in the parent-inspected JSONL transcript.
+"""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import hashlib
+import io
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+from datetime import UTC, datetime, timedelta
+
+OLD_SHA = "5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c"
+EXPAND = "000059_river_timeseries_narrow_expand.sql"
+RUNS = ("run_dual_write", "i8_narrow_run")
+START = datetime(2026, 6, 1, tzinfo=UTC)
+EVENTS = []
+
+
+def require(condition, code):
+    if not condition:
+        raise RuntimeError(code)
+
+
+def emit(event, **data):
+    row = dict(event=event, at=datetime.now(UTC).isoformat(), **data)
+    EVENTS.append(row)
+    print(json.dumps(row, default=str, sort_keys=True), flush=True)
+
+
+def command(argv, *, cwd=None, env=None):
+    result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=300)
+    if result.returncode and "--worker" in argv:
+        # Only our structured worker records, never arbitrary stderr.
+        for line in result.stdout.splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("event") == "failure":
+                emit("worker_failure", **{k: record[k] for k in ("error_type", "sqlstate", "check") if k in record})
+    require(result.returncode == 0, "SUBPROCESS_FAILED")
+    return result.stdout
+
+
+def dsn_guard():
+    from psycopg2.extensions import parse_dsn
+    dsn = os.environ["I8_REHEARSAL_DSN"]
+    parsed = parse_dsn(dsn)
+    require(set(parsed) <= {"host", "port", "dbname", "user", "password", "sslmode"}, "DSN_OPTIONS_REFUSED")
+    require(parsed.get("host") == "127.0.0.1", "LOOPBACK_REQUIRED")
+    require(re.fullmatch(r"i8_1987_[a-z0-9_]+", parsed.get("dbname", "")), "DEDICATED_DB_REQUIRED")
+    require(parsed.get("port", "5432") != "5432", "DEDICATED_PORT_REQUIRED")
+    # Explicit values supersede any inherited libpq defaults.
+    for key in list(os.environ):
+        if key.startswith("PG"):
+            del os.environ[key]
+    os.environ["DATABASE_URL"] = dsn
+    os.environ["PGOPTIONS"] = "-c lock_timeout=5s -c statement_timeout=120s"
+    return dsn, parsed
+
+
+def sql(connection, statement, params=None):
+    started = time.monotonic()
+    with connection.cursor() as cursor:
+        cursor.execute(statement, params)
+        rows = cursor.fetchall() if cursor.description else []
+    emit("sql", statement=statement, params=params, rows=rows, seconds=time.monotonic()-started)
+    return rows
+
+
+def worker(args):
+    # Script resides outside both package roots; replace search root BEFORE any
+    # project imports. A fresh interpreter is used for every parse/read.
+    repo = Path(args.repo).resolve()
+    sys.path.insert(0, str(repo))
+    require(Path.cwd().resolve() == repo, "WORKER_CWD_MISMATCH")
+    dsn, _ = dsn_guard()
+    from workers.output_parser import parser as parser_module
+    from packages.common import forecast_store
+    require(Path(parser_module.__file__).resolve().is_relative_to(repo), "PARSER_SOURCE_MISMATCH")
+    require(Path(forecast_store.__file__).resolve().is_relative_to(repo), "READER_SOURCE_MISMATCH")
+    require(command(["git", "rev-parse", "HEAD"], cwd=repo).strip() == args.sha, "WORKER_SHA_MISMATCH")
+    if args.action == "parse":
+        root = Path(args.artifacts)
+        parser = parser_module.OutputParser(
+            config=parser_module.OutputParserConfig(object_store_root=root, object_store_prefix="s3://nhms", batch_size=64),
+            repository=parser_module.PsycopgOutputParserRepository(database_url=dsn),
+        )
+        result = parser.parse_run(args.run)
+        require(result.rows_written == 12 and result.qc_passed and result.status == "parsed", "PARSE_RESULT_MISMATCH")
+        emit("actual_parse", sha=args.sha, run=args.run, rows=result.rows_written, parser=str(parser_module.__file__))
+    else:
+        responses = []
+        for segment in range(1, 5):
+            try:
+                response = forecast_store.PsycopgForecastStore(dsn).forecast_series(
+                    basin_version_id="bv1", segment_id=f"seg-{segment}", river_network_version_id="rnv1",
+                    issue_time="2026-06-01T00:00:00Z", variables=["q_down"], scenarios=["sc"],
+                    run_id=args.run, model_id="m1",
+                )
+            except forecast_store.ForecastStoreError as error:
+                require(args.absent and error.status_code == 404 and error.code == "RUN_NOT_PUBLISHED", "UNEXPECTED_READER_REFUSAL")
+                responses.append(dict(segment_id=f"seg-{segment}", code=error.code, status=error.status_code))
+                continue
+            require(not args.absent, "NARROW_RUN_VISIBLE_TO_OLD_READER")
+            expected = [[int((START + timedelta(hours=h)).timestamp()*1000), float((h+1)*segment)] for h in range(3)]
+            points = [point for series in response["series"] for point in series["points"]]
+            require(points == expected, "OLD_READER_VALUES_MISMATCH")
+            require(response["segment_id"] == f"seg-{segment}" and response["unit"] == "m3/s", "OLD_READER_IDENTITY_MISMATCH")
+            responses.append(response)
+        emit("actual_read", sha=args.sha, run=args.run, absent=args.absent, responses=responses)
+
+
+def main(args):
+    import psycopg2
+    dsn, identity = dsn_guard()
+    old, new = Path(args.old_repo).resolve(), Path(args.new_repo).resolve()
+    require(old != new, "SEPARATE_CLONES_REQUIRED")
+    for repo, sha in ((old, OLD_SHA), (new, args.new_sha)):
+        require(command(["git", "rev-parse", "HEAD"], cwd=repo).strip() == sha, "SOURCE_SHA_MISMATCH")
+        require(not command(["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo).strip(), "TRACKED_SOURCE_DIRTY")
+    require(re.fullmatch(r"nwm-i8-1987-[a-z0-9-]+", args.container), "DEDICATED_CONTAINER_REQUIRED")
+    container = json.loads(command(["docker", "inspect", args.container]))[0]
+    require(container["Image"] == args.production_image_id, "EXACT_IMAGE_REQUIRED")
+    require(container["Config"].get("Labels", {}).get("nhms.i8.disposable") == "true", "DISPOSABLE_LABEL_REQUIRED")
+    require(container["State"]["Running"] and container["HostConfig"]["NetworkMode"] != "host", "ISOLATION_REQUIRED")
+    require(all(m["Type"] == "volume" for m in container["Mounts"]), "BIND_MOUNTS_REFUSED")
+    bindings = container["NetworkSettings"]["Ports"].get("5432/tcp")
+    require(bindings == [{"HostIp": "127.0.0.1", "HostPort": identity["port"]}], "PORT_IDENTITY_MISMATCH")
+    sys.path.insert(0, str(new))
+    from packages.common.migrate import MIGRATIONS_DIR, apply_migration, main as migrate_main, split_sql_statements
+    from tests.integration_helpers import apply_migrations_from_zero
+    from tests.test_river_ts_dual_write_integration import _seed_authority, _write_rivqdown
+    files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    require(files[-1].name == EXPAND, "UNEXPECTED_MIGRATIONS")
+    digest = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    emit("setup", old_sha=OLD_SHA, new_sha=args.new_sha, image=container["Image"],
+         container_id=container["Id"], mounts=container["Mounts"], database=identity["dbname"],
+         port=identity["port"], python=sys.version, psycopg2=psycopg2.__version__, driver_sha256=digest,
+         migrations=[dict(name=p.name, sha256=hashlib.sha256(p.read_bytes()).hexdigest()) for p in files])
+    connection = psycopg2.connect(dsn)
+    connection.autocommit = True
+    require(sql(connection, "SELECT current_database()") == [(identity["dbname"],)], "DATABASE_IDENTITY_MISMATCH")
+    require(sql(connection, "SELECT to_regnamespace('hydro'), to_regclass('public.schema_migrations')") == [(None, None)], "EMPTY_DATABASE_REQUIRED")
+    sql(connection, "SELECT version()")
+    apply_migrations_from_zero(dsn, through="000058")
+    sql(connection, "SELECT extname, extversion FROM pg_extension ORDER BY extname")
+    roles = (MIGRATIONS_DIR.parent / "roles/node27_write_roles.sql").read_text()
+    sql(connection, "DO $roles$" + roles.split("DO $roles$", 1)[1].split("$roles$;", 1)[0] + "$roles$;")
+    sql(connection, "GRANT USAGE ON SCHEMA hydro, core TO nhms_ingest_rw")
+    root = Path(args.artifacts).resolve()
+    root.mkdir(parents=True, exist_ok=False)
+    _seed_authority(connection, output_uri=f"s3://nhms/runs/{RUNS[0]}/output/")
+    _write_rivqdown(root)
+    artifact = root / f"runs/{RUNS[0]}/output/demo.rivqdown"
+    other = root / f"runs/{RUNS[1]}/output/demo.rivqdown"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(artifact.read_bytes())
+    emit("shud_artifact", sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(), text=artifact.read_text())
+
+    def invoke(action, run, *, narrow=False, absent=False):
+        repo, sha = (new, args.new_sha) if narrow else (old, OLD_SHA)
+        argv = [sys.executable, str(Path(__file__).resolve()), "--worker", "--repo", str(repo),
+                "--sha", sha, "--action", action, "--run", run, "--artifacts", str(root)]
+        if absent:
+            argv.append("--absent")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PG") and k not in {"PYTHONPATH", "PYTHONHOME", "DATABASE_URL"}}
+        env["PYTHONPATH"] = str(repo)
+        env["PYTHONNOUSERSITE"] = "1"
+        output = command(argv, cwd=repo, env=env)
+        emit("subprocess", command=argv, cwd=str(repo), pythonpath=str(repo), output=output)
+
+    def oid(name):
+        return sql(connection, "SELECT to_regclass(%s)::oid", ("hydro." + name,))[0][0]
+
+    def facts(table, run):
+        require(table in {"river_timeseries", "river_timeseries_legacy", "river_timeseries_narrow_rollback"}, "TABLE_REFUSED")
+        return sql(connection, f"SELECT t.run_key, t.basin_version_key, t.river_network_version_key, t.river_segment_key, t.valid_time, t.lead_time_hours, t.variable_e::text, t.value, t.unit_e::text, t.quality_flag_e::text FROM hydro.{table} t JOIN hydro.hydro_run h ON h.run_key=t.run_key WHERE h.run_id=%s ORDER BY t.valid_time,t.river_segment_key", (run,))
+
+    def expected(run):
+        key = 4001 if run == RUNS[0] else 4002
+        return [(key, 5001, 6001, 7000+s, START+timedelta(hours=h), h, "q_down", float((h+1)*s), "m3/s", "ok") for h in range(3) for s in range(1, 5)]
+
+    def text_proven(run):
+        rows = sql(connection, "SELECT run_id,basin_version_id,river_network_version_id,river_segment_id,valid_time,lead_time_hours,variable,value,unit,quality_flag FROM hydro.river_timeseries WHERE run_id=%s ORDER BY valid_time,river_segment_id", (run,))
+        return rows == [(run, "bv1", "rnv1", f"seg-{s}", START+timedelta(hours=h), h, "q_down", float((h+1)*s), "m3/s", "ok") for h in range(3) for s in range(1, 5)]
+
+    def forcing():
+        return [sql(connection, statement) for statement in (
+            "SELECT oid, reloptions, relowner FROM pg_class WHERE oid='met.forcing_station_timeseries'::regclass",
+            "SELECT attnum, attname, atttypid, attnotnull FROM pg_attribute WHERE attrelid='met.forcing_station_timeseries'::regclass AND attnum>0 ORDER BY attnum",
+            "SELECT indexname,indexdef FROM pg_indexes WHERE schemaname='met' AND tablename='forcing_station_timeseries' ORDER BY indexname",
+            "SELECT * FROM timescaledb_information.compression_settings WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' ORDER BY attname",
+            "SELECT * FROM timescaledb_information.dimensions WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' ORDER BY dimension_number",
+        )]
+
+    baseline_forcing = forcing()
+    invoke("parse", RUNS[0])
+    invoke("read", RUNS[0])
+    require(facts("river_timeseries", RUNS[0]) == expected(RUNS[0]), "R1_FACTS")
+    require(text_proven(RUNS[0]), "R1_TEXT_IDENTITIES")
+    legacy_oid = oid("river_timeseries")
+    emit("assertion", row="R1", result="PASS")
+    migration = MIGRATIONS_DIR / EXPAND
+    require(len(split_sql_statements(migration.read_text())) == 1, "EXPAND_NOT_SINGLE_STATEMENT")
+    started = time.monotonic()
+    apply_migration(connection, migration)
+    emit("expand_runner", file=EXPAND, single_statement_wall_seconds=time.monotonic()-started)
+    narrow_oid = oid("river_timeseries")
+    require(oid("river_timeseries_legacy") == legacy_oid and narrow_oid != legacy_oid, "EXPAND_OIDS")
+    sql(connection, "INSERT INTO hydro.hydro_run (run_id,run_type,scenario_id,model_id,basin_version_id,cycle_time,start_time,end_time,status,run_manifest_uri,output_uri) VALUES (%s,'forecast','sc','m1','bv1',%s,%s,%s,'succeeded','s3://m',%s)", (RUNS[1], START, START, START+timedelta(hours=3), f"s3://nhms/runs/{RUNS[1]}/output/"))
+    invoke("parse", RUNS[1], narrow=True)
+    # Deliberate raw replay via the same splitter/runner exercises the migration
+    # guard, not merely the ledger's skip path.
+    apply_migration(connection, migration)
+    require(facts("river_timeseries", RUNS[1]) == expected(RUNS[1]), "R2_NARROW_FACTS")
+    require(facts("river_timeseries_legacy", RUNS[0]) == expected(RUNS[0]), "R2_LEGACY_PRESERVED")
+    require(sql(connection, "SELECT run_id,timeseries_store FROM hydro.hydro_run ORDER BY run_key") == [(RUNS[0], "legacy"), (RUNS[1], "narrow")], "R2_ROUTES")
+    ledger = sql(connection, "SELECT version,applied_at FROM public.schema_migrations ORDER BY version")
+    emit("assertion", row="R2", result="PASS")
+    # No services exist in this isolated scenario; all parser children exited.
+    sql(connection, "BEGIN")
+    sql(connection, "ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_narrow_rollback")
+    sql(connection, "ALTER TABLE hydro.river_timeseries_legacy RENAME TO river_timeseries")
+    sql(connection, "COMMIT")
+    emit("code_selection", sha=OLD_SHA, next_parser_and_reader="fresh old subprocess only")
+    sql(connection, "UPDATE hydro.hydro_run SET timeseries_store='legacy'")
+    require(oid("river_timeseries") == legacy_oid and oid("river_timeseries_narrow_rollback") == narrow_oid, "REVERSE_OIDS")
+    invoke("read", RUNS[0])
+    invoke("read", RUNS[1], absent=True)
+    require(facts("river_timeseries", RUNS[1]) == [], "NARROW_VISIBLE_BEFORE_REPARSE")
+    retained = facts("river_timeseries_narrow_rollback", RUNS[1])
+    require(retained == expected(RUNS[1]), "RETAINED_FACTS_MISMATCH")
+
+    def guarded_drop():
+        # Check under locks in the SAME transaction as DROP, not an echoed
+        # proof counter. Refusal exits before DDL and rolls back all locks.
+        connection.autocommit = False
+        try:
+            sql(connection, "LOCK TABLE hydro.river_timeseries, hydro.river_timeseries_narrow_rollback IN ACCESS EXCLUSIVE MODE")
+            require(oid("river_timeseries_narrow_rollback") == narrow_oid, "DROP_OID_MISMATCH")
+            require(all(facts("river_timeseries", run) == expected(run) for run in RUNS), "REPARSE_PROOF_MISSING")
+            require(all(text_proven(run) for run in RUNS), "REPARSE_TEXT_PROOF_MISSING")
+            require(sql(connection, "SELECT count(*) FROM hydro.river_timeseries_narrow_rollback") == [(12,)], "UNEXPECTED_RETAINED_RUNS")
+            require(facts("river_timeseries_narrow_rollback", RUNS[1]) == retained, "RETAINED_FACTS_CHANGED")
+            sql(connection, "DROP TABLE hydro.river_timeseries_narrow_rollback")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.autocommit = True
+
+    try:
+        guarded_drop()
+    except RuntimeError as error:
+        require(str(error) == "REPARSE_PROOF_MISSING", "WRONG_NEGATIVE_FAILURE")
+    else:
+        raise RuntimeError("UNSAFE_DROP_SUCCEEDED")
+    require(oid("river_timeseries_narrow_rollback") == narrow_oid and facts("river_timeseries_narrow_rollback", RUNS[1]) == retained, "R5_DATA_LOST")
+    emit("assertion", row="R5", result="PASS", refusal="REPARSE_PROOF_MISSING", retained_oid=narrow_oid)
+    for run in RUNS:
+        invoke("parse", run)
+        invoke("read", run)
+        require(facts("river_timeseries", run) == expected(run), "R3_REPARSE_FACTS")
+    emit("assertion", row="R3", result="PASS")
+    guarded_drop()
+    for run in RUNS:
+        invoke("read", run)
+    require(oid("river_timeseries_legacy") is None and oid("river_timeseries_narrow_rollback") is None, "ROLLBACK_SIBLING_REMAINS")
+    require(forcing() == baseline_forcing, "FORCING_CATALOG_CHANGED")
+    capture = io.StringIO()
+    with contextlib.redirect_stdout(capture):
+        migrate_main()
+    require(f"Skipped migration: {EXPAND}" in capture.getvalue() and "Applied migration:" not in capture.getvalue(), "LEDGER_SKIP_FAILED")
+    require(sql(connection, "SELECT version,applied_at FROM public.schema_migrations ORDER BY version") == ledger, "LEDGER_CHANGED")
+    require(oid("river_timeseries") == legacy_oid and oid("river_timeseries_legacy") is None, "NORMAL_MIGRATE_REEXPANDED")
+    require(sql(connection, "SELECT run_id,timeseries_store FROM hydro.hydro_run ORDER BY run_key") == [(r, "legacy") for r in RUNS], "FINAL_ROUTES")
+    emit("normal_migrate", output=capture.getvalue(), reexpanded=False)
+    emit("assertion", row="R4", result="PASS")
+    connection.close()
+
+
+def arguments():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    for name in ("old-repo", "new-repo", "new-sha", "container", "production-image-id", "receipt", "artifacts", "repo", "sha", "action", "run"):
+        parser.add_argument("--"+name)
+    parser.add_argument("--absent", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    required = ("repo", "sha", "action", "run", "artifacts") if args.worker else ("old_repo", "new_repo", "new_sha", "container", "production_image_id", "receipt", "artifacts")
+    for name in required:
+        if not getattr(args, name):
+            parser.error("missing --"+name.replace("_", "-"))
+    return args
+
+
+if __name__ == "__main__":
+    args = arguments()
+    logging.disable(logging.CRITICAL)
+    # Exclusive output prevents a failed rerun overwriting an accepted receipt.
+    receipt = None if args.worker else open(args.receipt, "x", encoding="utf-8")
+    status = "FAIL"
+    try:
+        worker(args) if args.worker else main(args)
+        status = "PASS"
+    except BaseException as error:
+        # Deliberately omit error text/traceback; preserve safe SQLSTATE/type.
+        check = str(error) if type(error) is RuntimeError and re.fullmatch(r"[A-Z][A-Z0-9_]+", str(error)) else None
+        emit("failure", error_type=type(error).__name__, sqlstate=getattr(error, "pgcode", None), check=check)
+    finally:
+        if receipt:
+            json.dump(dict(status=status, scope="disposable R1-R5, not production", events=EVENTS), receipt, indent=2, default=str)
+            receipt.write("\n")
+            receipt.close()
+    sys.exit(0 if status == "PASS" else 1)
