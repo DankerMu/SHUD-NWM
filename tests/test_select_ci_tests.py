@@ -12949,6 +12949,7 @@ ORIGIN_CHUNK_PARITY_OWNERS = (
     "packages/common/node27_issue1895_post_target.py",
     "docs/runbooks/tier-node27-timeseries-storage.md",
     "packages/common/compressed_chunk_cold_residency.py",
+    "packages/common/compressed_chunk_cold_receipt.py",
 )
 
 ORIGIN_CHUNK_PARITY_OWNER_LEGS = {
@@ -12965,6 +12966,14 @@ ORIGIN_CHUNK_PARITY_OWNER_LEGS = {
         "tests/test_node27_write_roles.py",
         "tests/test_compressed_chunk_cold_residency.py",
         "tests/test_select_ci_tests.py",
+    },
+    "packages/common/compressed_chunk_cold_receipt.py": {
+        "tests/test_node27_cold_residency.py",
+        "tests/test_node27_cold_residency_publication.py",
+        "tests/test_node27_cold_residency_phase2.py",
+        "tests/test_node27_cold_residency_runtime_identity.py",
+        "tests/test_node27_cold_residency_schema_compat.py",
+        "tests/test_timeseries_storage_schemas.py",
     },
 }
 ORIGIN_CHUNK_PARITY_PARTITIONS = (
@@ -13014,8 +13023,21 @@ def _same_name_partition(owner: str) -> str | None:
     return candidate if candidate in ORIGIN_CHUNK_PARITY_PARTITIONS else None
 
 
-@pytest.mark.parametrize("owner", ORIGIN_CHUNK_PARITY_OWNERS)
-@pytest.mark.parametrize("removed", ORIGIN_CHUNK_PARITY_PARTITIONS)
+@pytest.mark.parametrize(
+    ("owner", "removed"),
+    [
+        (owner, removed)
+        for owner in ORIGIN_CHUNK_PARITY_OWNERS
+        for removed in ORIGIN_CHUNK_PARITY_PARTITIONS
+    ]
+    + [
+        ("packages/common/compressed_chunk_cold_receipt.py", removed)
+        for removed in sorted(
+            ORIGIN_CHUNK_PARITY_OWNER_LEGS["packages/common/compressed_chunk_cold_receipt.py"]
+            - set(ORIGIN_CHUNK_PARITY_PARTITIONS)
+        )
+    ],
+)
 def test_origin_chunk_parity_owner_route_reds_when_any_partition_is_removed(
     monkeypatch: pytest.MonkeyPatch,
     owner: str,
@@ -13032,7 +13054,9 @@ def test_origin_chunk_parity_owner_route_reds_when_any_partition_is_removed(
         monkeypatch.setattr(select_ci_tests, "_same_name_backend_python_test", lambda _path: None)
     selected = set(select_tests([owner], repo_root=Path(".")))
     assert removed not in selected, f"{owner}: coincidental union still selected {removed}"
-    remaining = set(ORIGIN_CHUNK_PARITY_PARTITIONS) - {removed}
+    remaining = (set(ORIGIN_CHUNK_PARITY_PARTITIONS) | ORIGIN_CHUNK_PARITY_OWNER_LEGS.get(owner, set())) - {
+        removed
+    }
     missing_remaining = sorted(remaining - selected)
     assert not missing_remaining, f"{owner}: remaining partitions vanished {missing_remaining}"
 
