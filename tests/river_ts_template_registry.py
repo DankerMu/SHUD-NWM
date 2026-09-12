@@ -8,9 +8,9 @@ makes the oracles exhaustive rather than anecdotal:
 * every entry is rendered for BOTH stores by the shape oracles, so a template
   that cannot survive the narrow rendering is red in the PR that writes it, not
   in the migration window;
-* the frozen I1 golden retains its 20 historical keys. Five unchanged entries
-  still compare against current raw inputs; the eight store-qualified raw
-  sources have separate routing and executed-query semantic owners;
+* the frozen I1 golden retains its 20 historical keys. Three unchanged entries
+  still compare against current raw inputs; eight store-qualified raw sources
+  and two narrow-only writer reads have separate semantic owners;
 * **registry closure** — for every production file, the canonical-table mentions
   of that file's entries plus its declared non-template mentions must equal the
   file's census. An unregistered read site is therefore red, which is the only
@@ -430,8 +430,8 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# workers/output_parser/parser.py (read statements only; the DELETE and the
-# dual-write INSERT are write surfaces and belong to I7)
+# workers/output_parser/parser.py (narrow-only read statements; DELETE and
+# INSERT remain non-template write surfaces owned by I7)
 # ---------------------------------------------------------------------------
 
 
@@ -455,7 +455,7 @@ PARSER_ENTRIES: tuple[TemplateEntry, ...] = (
         path="workers/output_parser/parser.py",
         kind="statement",
         params="positional",
-        expected_aids=1,
+        expected_aids=0,
         mentions=1,
         source=_parser_read(0),
     ),
@@ -464,11 +464,23 @@ PARSER_ENTRIES: tuple[TemplateEntry, ...] = (
         path="workers/output_parser/parser.py",
         kind="statement",
         params="positional",
-        expected_aids=1,
+        expected_aids=0,
         mentions=1,
         source=_parser_read(1),
     ),
 )
+
+#: I7 task 4.3 deliberately removes the historical run_id aids and their
+#: positional bindings from the narrow-only writer. These are not routed
+#: reader sources: production executes them directly against canonical narrow.
+#: The frozen golden and hash stay untouched. Key/window and census owners:
+#: test_river_ts_text_identity_cleanup.py; executed compressed-key/replay owners:
+#: test_river_ts_dual_write_integration.py. Both-store renderer sweeps remain
+#: grammar/predicate checks, not a claim that the writer reads legacy storage.
+PARSER_NARROW_WRITER_KEYS = frozenset({
+    "parser:replace_chain_probe",
+    "parser:replace_chain_window",
+})
 
 
 REGISTRY: tuple[TemplateEntry, ...] = (
