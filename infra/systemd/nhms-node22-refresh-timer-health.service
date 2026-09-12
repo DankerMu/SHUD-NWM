@@ -1,0 +1,28 @@
+[Unit]
+Description=NHMS node-22 file-provider refresh timer health probe (read-only)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/scratch/frd_muziyao/NWM
+Environment=PATH=/scratch/frd_muziyao/NWM/.venv/bin:/usr/local/bin:/usr/bin:/bin
+UnsetEnvironment=DATABASE_URL PIPELINE_DATABASE_URL PGAPPNAME PGCHANNELBINDING PGCLIENTENCODING PGCONNECT_TIMEOUT PGDATABASE PGDATESTYLE PGGEQO PGGSSDELEGATION PGGSSENCMODE PGGSSLIB PGHOST PGHOSTADDR PGKRBSRVNAME PGLOADBALANCEHOSTS PGLOCALEDIR PGMAXPROTOCOLVERSION PGMINPROTOCOLVERSION PGOPTIONS PGPASSFILE PGPASSWORD PGPORT PGREQUIREAUTH PGREQUIREPEER PGREQUIRESSL PGSERVICE PGSERVICEFILE PGSSLCERT PGSSLCERTMODE PGSSLCOMPRESSION PGSSLCRL PGSSLCRLDIR PGSSLKEY PGSSLMAXPROTOCOLVERSION PGSSLMINPROTOCOLVERSION PGSSLMODE PGSSLNEGOTIATION PGSSLROOTCERT PGSSLSNI PGSSL_CERT_FILE PGSSL_KEY_FILE PGSSL_ROOT_CERT_FILE PGSYSCONFDIR PGTARGETSESSIONATTRS PGTZ PGUSER
+# The three thresholds and the unit/receipt paths are env-overridable, but
+# this unit ships NO EnvironmentFile on purpose: the shipped defaults are the
+# node-22 production values, and an env file would be one more untracked
+# surface that can silently relax an alert threshold. To retune, drop in
+#   ~/.config/systemd/user/nhms-node22-refresh-timer-health.service.d/10-thresholds.conf
+# with `[Service]` + `Environment=NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS=...`,
+# and record the drop-in in the runbook -- a threshold nobody can see is a
+# threshold nobody can audit.
+ExecStart=/scratch/frd_muziyao/NWM/.venv/bin/python /scratch/frd_muziyao/NWM/scripts/node22_refresh_timer_health.py
+StandardOutput=journal
+StandardError=journal
+# Same node-22 namespace constraint the refresh unit documents: user-systemd
+# makes the filesystem root inaccessible inside a PrivateTmp mount namespace,
+# and the probe's no-follow receipt read opens an absolute path. So no
+# PrivateTmp here either; privacy is carried by UMask plus the mode-0700
+# receipt root the probe creates for itself.
+UMask=0077
+# A wedged watchdog must become visible rather than hang: the probe does two
+# bounded read-only systemctl queries and one small JSON read.
+TimeoutStartSec=120

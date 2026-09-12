@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly health probe for the NHMS node-22 file-provider refresh lane
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+# Unlike the refresh timer itself, a missed probe tick is caught up: the whole
+# point is that a gap in observation must not read as health.
+Persistent=true
+Unit=nhms-node22-refresh-timer-health.service
+
+[Install]
+WantedBy=default.target
