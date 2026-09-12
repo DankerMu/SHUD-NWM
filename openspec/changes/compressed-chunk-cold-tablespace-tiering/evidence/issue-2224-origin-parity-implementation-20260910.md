@@ -5,7 +5,9 @@
 - Parent rollout: #1895; Epic: #1891.
 - Branch: `feat/issue-2224-origin-chunk-parity`.
 - Current included master SHA: `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb`.
-- Current round-1 closure candidate SHA:
+- Final code/test candidate SHA:
+  `3358ee63cfe0fd7e11269bf08638b7d1fbaf236f`.
+- Last accepted node-27 disposable-oracle SHA before final local review:
   `b63e7b75f557de40e2d45a1476e95cda50ecb489`.
 - Historical implementation plus first oracle-fix SHA:
   `27d4faeab9718f0a0f343d392f04871ed1d46808`.
@@ -212,3 +214,62 @@ After every failed and passing run, no owned disposable container, work root,
 temporary checkout or 55496 listener remained. No production database connection,
 census, installer, production relation movement or service/timer change occurred.
 No credential, DSN, signed URL or private environment value is included here.
+
+## Final-head local Phase 2 closure (2026-09-12)
+
+The first 49-target shipping-selected run after recording the disposable result
+found a local receipt regression rather than accepting the preceding oracle as
+sufficient:
+
+```text
+5 failed, 4621 passed, 4 skipped in 521.43s
+```
+
+All five failures shared one cause. A fresh decompression between selection and
+first reload changed `is_compressed` and removed the compressed sibling while the
+durable origin identity remained stable. The round-1 guard initially treated that
+state as a durable `selection_race`, then emitted a `ResidencyGroup` placeholder
+with `members=[]`; current schema 1.1 correctly rejects every group snapshot with
+no physical member. This was a Phase 2 catch, not a reviewer catch.
+
+The repair at `3358ee63cfe0fd7e11269bf08638b7d1fbaf236f` separates durable
+origin identity from mutable compression/sibling state. First reload again follows
+the strict order reload -> durable-origin equality -> group discovery: OID/name or
+window drift raises `selection_race` before group/parity/capacity/intent/movement.
+`run_tick` converts only that exact pre-mutation error into a schema-valid top-level
+failed receipt with `state=unknown`, `selected=[]`, no intent and no fabricated
+group. With stable durable identity, a fresh decompression is classified from its
+real current non-empty member group as `unknown`; a source/mixed replacement
+sibling remains a blocked race; and only a still-compressed complete-target group
+without persisted preimage can replay as `already_cold`. Locked and persisted-
+intent comparisons remain strict. Reconciliation without a real before group now
+raises for the existing runner tombstone path instead of publishing an empty
+snapshot. The schema's `members.minItems=1` constraint is unchanged.
+
+That repair introduced a fourth module-level importer of
+`tests/cold_residency_identity_mutants.py`; the selector's tracked-tree closure guard
+failed once and the explicit support-module route was extended additively. Its full
+suite then passed `785 passed in 288.22s`.
+
+Verification against the exact committed code/test tree at
+`3358ee63cfe0fd7e11269bf08638b7d1fbaf236f`:
+
+```text
+changed paths:             30
+shipping-selected targets: 49
+shipping-selected suite:   4626 passed, 4 skipped
+focused race closure:      155 passed
+full collection:           19603 tests collected
+full default pytest:       19603 passed, 329 skipped, 1 warning in 1745.16s
+OpenSpec strict:            PASS
+uv run ruff check .:        PASS
+changed Python Ruff:        PASS
+changed Python py_compile:  PASS
+git diff --check:           PASS
+```
+
+The sole warning is the pre-existing ecCodes recommendation already described
+above. The final code/test SHA has not yet been accepted by a new node-27 disposable
+run; `b63e7b75f557de40e2d45a1476e95cda50ecb489` remains the last real-engine
+PASS until that exact-head rerun succeeds. Neither result is a production G1 PASS,
+and task 4.0A remains unchecked until #2224 merges.
