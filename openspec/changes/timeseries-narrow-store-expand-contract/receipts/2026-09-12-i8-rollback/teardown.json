@@ -1,0 +1,9 @@
+{
+  "scope": "only parent-created disposable I8 resources",
+  "container": "nwm-i8-1987-oracle",
+  "container_removed_by_docker_run_rm": true,
+  "removed_directory": "/home/nwm/tmp/i8-1987",
+  "temporary_local_driver_removed": true,
+  "exact_driver_retained_as_evidence": "rehearse_river_rollback.py.txt",
+  "production_unchanged": true
+}

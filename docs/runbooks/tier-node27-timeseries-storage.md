@@ -5417,6 +5417,361 @@ acceptance.**
   exists, parent identity drift, fsync/link/unlink/readback uncertainty) is
   terminal failure and never overwrites an older artifact.
 
+### 4.10 River narrow expand: fenced window and D12 reverse (#1987)
+
+**Task 5.1 procedure; task 5.2 live receipt is pending.** This section does not
+authorize a production window, release a CAPACITY HOLD, or certify production
+PASS. Parent execution on node-27 passed all five disposable R1–R5 rows at NEW
+SHA `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb`; production 5.2 remains pending.
+The [rehearsal receipt](../../openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/receipt.json),
+raw transcript, manifest and exact driver are archived together in
+`receipts/2026-09-12-i8-rollback/` under the shared change. Keep #1987 and 5.2
+open; do not archive the shared OpenSpec change.
+Scope is river expand `000059_river_timeseries_narrow_expand.sql`, not forcing
+expand or river contract. Governing references are design D7/D11/D12 and fixture
+`openspec/changes/timeseries-narrow-store-expand-contract/fixtures/I8-1987.md`.
+
+#### 4.10.1 GO record and pre-expand backlog
+
+Before mutation record the named window owner, DBA, runtime/pin owner, capacity
+hold owner, approved start/end/abort times, frozen OLD SHA
+`5a86841c5496f56b6c2e6d725f6ecbecb9d49f2c`, and the exact reviewed NEW SHA.
+The #2162 clean-tree/branch restore and cumulative master rollout need an
+explicit decision, including the effective API **and autopipe** pin disposition.
+Approval to merge is not window GO. Preserve foreign `60`/`90`/`91` drop-ins and
+CAPACITY HOLD unless their owners explicitly authorize a particular change.
+No node-22 mutation or shared environment rebuild is part of this procedure.
+
+Re-inventory, do not infer live state from historical receipts:
+
+- Record `git status --porcelain`, branch, upstream and full HEAD of
+  `/home/nwm/NWM` and every effective runtime directory. The 2026-09-12
+  observation was a clean `hotfix/node27-rollback-pre-2073` tree at a8db554d,
+  with API and autopipe actually pinned to
+  `/home/nwm/NWM-reslice-original-5a86841c` by
+  `60-reslice-pin-original-5a86841c.conf`. A pull of the first tree does not
+  update the second.
+- Capture `systemctl --user cat` and `show` (`FragmentPath`, `DropInPaths`,
+  `WorkingDirectory`, `ExecStart`, `MainPID`, `ControlGroup`, `UnitFileState`,
+  `ActiveState`, `SubState`, `Result`) for display API, autopipe, compression,
+  retention, resource governance and compression replay. Privately inspect the
+  effective `PYTHONPATH`, `NODE27_AUTOPIPE_REPO` and wrapper env sources; redact
+  secrets from the public record. Save exact env/drop-in bytes, modes/digests,
+  enablement/mask state and hold state, not just a list of enabled timers.
+- Record tested backup/restore location, original SHUD artifacts and all run
+  identities needed for old reparse. Verify canonical text table OID, chunk
+  ranges/bytes/compression and ledger through 000058. Contract already applied,
+  missing original artifacts, an unexpected sibling, or incomplete backup is
+  NO-GO. Archive baseline curve SQL/API and identity-probe miss plans before
+  expand, with tool SHA and request identities.
+- Current PGDATA is `/data/GHDC/nhms-primary/pgdata`, bound at
+  `/home/postgres/pgdata/data`. #2273's `/home` free-byte comparator cannot
+  certify that destination. Require an approved destination-capacity proof and
+  disposition of #2273; a governance PASS using `/home` is not headroom GO.
+
+Before expand, drain eligible legacy backlog using **§4.5's bound-1 override
+lifecycle**, not cold move or compression replay. Enumerate actual chunk
+range_end, bytes, watermark and lag; migration 000058 changed new chunks to
+three days but did not reslice old chunks. Remeasure representative eligible
+chunks of the current geometry; the seven-day 508 GB / 51-minute example is
+not a current timeout estimate. For the selected bound-1 tick prove both
+per-chunk statement budget and whole-tick wall budget, including the separate
+cold-residency ExecStart leg and systemd TimeoutStartSec (the existing two-lane
+budget preflight owns this check). Capture each physical compression result.
+Future range_end/lag-ineligible chunks remain an explicit finite backlog.
+Restore the exact prior env/drop-in and unit states through §4.5 on completion
+or abort; never overwrite a foreign fence with the example env template.
+
+#### 4.10.2 Stop, drain, restore, migrate, validate, start — in that order
+
+Run under a private receipt directory with `umask 077`, `set -euo pipefail`.
+Define `REPO`, `NEW_SHA` and the owner-approved restore branch in the signed
+window record, not by copying today's master HEAD. Use the existing G4
+quiescence inventory/lock checks, but stop **timers first**, then services.
+The required display unit is `nhms-display-api.service`, not a node27-prefixed
+alias. Set `REPLAY_DISPOSITION` from the signed inventory: `required` if the
+compression replay unit is installed, or `absent-approved` only if its absence
+and absence of detached replay processes were explicitly reviewed. This is
+not permission to omit a missing required API/writer/timer. Other optional
+units require the same inventory-derived explicit disposition before adapting
+the list; missing required units or unknown LoadState always abort.
+
+```bash
+timers=(nhms-node27-autopipe.timer nhms-node27-timeseries-compression.timer
+  nhms-node27-timeseries-retention.timer nhms-node27-resource-governance.timer)
+services=(nhms-display-api.service nhms-node27-autopipe.service
+  nhms-node27-timeseries-compression.service nhms-node27-timeseries-retention.service
+  nhms-node27-resource-governance.service)
+case "$REPLAY_DISPOSITION" in
+  required) services+=(nhms-node27-timeseries-compression-replay.service) ;;
+  absent-approved)
+    test "$(systemctl --user show nhms-node27-timeseries-compression-replay.service -p LoadState --value)" = not-found ;;
+  *) exit 1 ;;
+esac
+for unit in "${timers[@]}" "${services[@]}"; do
+  test "$(systemctl --user show "$unit" -p LoadState --value)" = loaded
+done
+systemctl --user stop "${timers[@]}"
+systemctl --user stop "${services[@]}"
+for unit in "${timers[@]}" "${services[@]}"; do
+  test "$(systemctl --user show "$unit" -p LoadState --value)" = loaded
+  test "$(systemctl --user show "$unit" -p ActiveState --value)" = inactive
+  substate="$(systemctl --user show "$unit" -p SubState --value)"
+  result="$(systemctl --user show "$unit" -p Result --value)"
+  case "$unit" in
+    *.timer)
+      case "$substate" in dead|waiting) ;; *) exit 1;; esac
+      case "$result" in ''|success|n/a) ;; *) exit 1;; esac ;;
+    *.service)
+      test "$substate" = dead
+      case "$result" in success|n/a) ;; *) exit 1;; esac
+      test "$(systemctl --user show "$unit" -p MainPID --value)" = 0 ;;
+    *) exit 1 ;;
+  esac
+done
+```
+
+Record each exact state; a missing unit/property is not a success. Never
+substring-match `active` (it matches `inactive`), and never use a drain glob
+that silently omits a writer. The empty Result case is only for a loaded timer
+with no Result property; all services must report success or n/a. Timers do
+not expose MainPID, so PID and empty-cgroup checks apply only to services.
+Verify empty service cgroups, no detached parser/lifecycle processes, no held
+`/tmp/autopipe.cron.lock`, `/tmp/nhms-node27-timeseries-lifecycle.lock` or
+`/tmp/nhms-node27-timeseries-cold-residency.lock` (G4), and inspect
+`pg_stat_activity`/`pg_locks` as the authorized DBA for this database, including
+idle-in-transaction sessions. Do not terminate unrelated sessions blindly.
+An active holder, unknown attribution, failed unit or partial drain is NO-GO:
+remain stopped and resolve with the owner.
+
+Keep ingress fenced until validated restart. Record outage start/end,
+listener absence, unsuccessful direct API probes and public ingress/access-log
+evidence: **no requests served between rename and restart**. A proxy may serve
+a maintenance response, never data from an old worker. API stop alone does not
+prove absence of another listener.
+
+Only after drain: require a clean tracked tree and a reviewed disposition for
+untracked files (retain the old `.venv`; never automatic stash/pop). A hotfix
+without upstream cannot be pulled. Execute the owner-approved branch restore
+first, without reset/force, then:
+
+```bash
+git -C "$REPO" diff --quiet
+git -C "$REPO" diff --cached --quiet
+git -C "$REPO" switch "$APPROVED_RESTORE_BRANCH"
+git -C "$REPO" pull --ff-only
+test "$(git -C "$REPO" rev-parse HEAD)" = "$NEW_SHA"
+```
+
+Any divergence or SHA mismatch aborts while stopped. Resolve effective pin
+changes only as approved, capture their diff and `daemon-reload` while fenced.
+Verify resolved API/autopipe `WorkingDirectory`, wrapper `ExecStart`,
+`PYTHONPATH` and `NODE27_AUTOPIPE_REPO` all select the reviewed tree before
+starting anything.
+
+DBA runs §9.6 pre-write role audit, provisions `nhms_ingest_rw` before 000059
+(migration explicitly transfers ownership to it), and records role membership
+and owner. No PUBLIC fallback. Enumerate the **actual pending filenames**:
+compare sorted `db/migrations/*.sql` with
+`SELECT version FROM public.schema_migrations ORDER BY version`.
+Require exactly `000059_river_timeseries_narrow_expand.sql`; missing ledger
+history or any other pending file needs a separate approved migration plan.
+Do not run accumulated master migrations blindly or invent a migration total.
+
+With credentials bound privately in `DATABASE_URL` and the working directory
+set to the reviewed repo, invoke the existing runner through the verified
+active environment with `uv run --no-sync --project "$REPO" python`.
+`--no-sync` forbids a dependency sync/rebuild during the production window;
+verify that environment's interpreter and module roots before the window.
+
+```bash
+date -u +%FT%TZ
+PGOPTIONS='-c lock_timeout=5s -c statement_timeout=120s' \
+  uv run --no-sync --project "$REPO" python -m packages.common.migrate
+date -u +%FT%TZ
+```
+
+Capture exit code and monotonic elapsed time as well as UTC brackets. 000059
+is **one top-level DO statement**: report its single-statement wall time (and
+runner overhead separately if measured), not fictional internal DDL timings.
+Lock/statement timeout leaves the window stopped. Inspect ledger and physical
+catalog before a separately authorized retry; the runner autocommits per
+statement and earlier pending files are not an all-files transaction.
+
+Before serving: confirm old canonical OID is now `_legacy`, new canonical OID
+differs, canonical has key/enum-only fact shape and one-day dimension, expected
+three indexes, key-form compression settings and owner `nhms_ingest_rw`.
+Confirm `_legacy` facts/settings unchanged, parsed/published history routed
+legacy, unparsed/new authority default narrow. Run §9.6 provisioning and strict
+audit again after migration. Verify real representative narrow parse/read and
+legacy routed read under the fence; no old parser may write the narrow table.
+After approved API/autopipe service start, capture actual PID/cgroup and
+`/proc/<pid>/cwd`, safe command-line/module root and full source SHA for **both**
+processes (for a oneshot autopipe capture its execution receipt while alive).
+A checkout HEAD alone is not runtime proof. Reopen ingress only after these
+code/schema/read checks. Then restore only the originally active, authorized
+timers **last**, preserving enablement/mask/hold states. Persistent timers can
+fire immediately; never `enable --now` the whole family by default.
+
+#### 4.10.3 D12 reverse, before contract only
+
+Repeat the same stop/drain and ingress fence. Preserve the narrow run identity
+list, fact values/keys/windows, original SHUD artifact digests and both OIDs.
+Refuse if `_narrow_rollback` already exists or either expected source is absent.
+Within a bounded-lock transaction, the exact D12 rename pair is:
+
+```sql
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '120s';
+ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_narrow_rollback;
+ALTER TABLE hydro.river_timeseries_legacy RENAME TO river_timeseries;
+COMMIT;
+```
+
+The target after `RENAME TO` is unqualified PostgreSQL syntax; both tables stay
+in `hydro`. While still stopped deploy/select the frozen pre-change OLD code
+for API **and** parser, then execute
+`UPDATE hydro.hydro_run SET timeseries_store = 'legacy';`.
+Verify restored canonical OID/text shape, old effective runtime roots and
+roles before starting old code. **Allowed intermediate state: legacy route
+with retained narrow rows.** Old code reads only canonical text; prior
+narrow-only runs are absent until reparsed. Existing legacy runs remain
+readable/reparseable. Record this visibility loss explicitly, not as successful
+data recovery. Start services only after validation and timers last.
+
+Reparse each affected run from its original SHUD artifacts with the **actual
+old parser**, never INSERT SELECT from retained narrow rows as a substitute.
+Prove exact run/network/basin/segment keys, text identities, valid-time window,
+variable/unit/QC and expected values, plus old public reader responses for
+both original legacy and former narrow runs. Missing artifacts/proof means
+STOP: retain `_narrow_rollback`. Under a fresh fence, lock both tables, verify
+the owned rollback OID and complete reparse evidence in the DROP transaction,
+then and only then `DROP TABLE hydro.river_timeseries_narrow_rollback;`.
+Never CASCADE and never drop the only copy. Verify both old reads and unchanged
+forcing catalog/settings after DROP. The disposable driver exercises a real
+missing-reparse refusal before this successful path (R5).
+
+D12 retains `hydro_run.timeseries_store` **and** the 000059 ledger row. Ordinary
+`packages.common.migrate` skips it; that is not re-expansion. A run created
+during rollback can inherit default `narrow` even while old code writes text.
+An approved explicit reattempt must inventory/classify rollback-window parse
+facts correctly, prove recovery, clear only the owned rollback table, and
+review how expand will be deliberately re-executed with the retained route
+column. No automatic ledger deletion, implicit reclassification or unreviewed
+recovery shortcut. Contract removes this rollback option.
+
+**Transitional cold tier does not cover `_legacy`.** The canonical-only cold
+allowlist is unchanged; discovery by compression/retention is not cold-move
+eligibility.
+
+#### 4.10.4 Disposable rehearsal setup and invocation (not a live receipt)
+
+Parent/operator provisions two disposable clones on node-27: OLD at the full
+pin above, NEW at the recorded reviewed SHA containing exactly migrations
+through 000059. Use a private Python 3.11 venv with the NEW lockfile dependencies
+(`uv sync --python 3.11` in that disposable clone); do not rebuild the shared
+production env. The driver imports integration fixture helpers but does not
+invoke pytest. No production SHUD dataset is needed: the existing
+`_seed_authority`/`_write_rivqdown` fixture produces four output segments, three
+hours and deterministic discharge values 1–12 m3/s after real unit conversion.
+The second run uses the same sample bytes with a distinct authoritative run
+key. Both OLD and NEW accept this fixture contract without source patches.
+
+The archived NEW SHA `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb` intentionally
+predates this docs-only PR; it pins the runtime code exercised, not the later
+documentation commit. After temporary `.workplans/issue-1987/` driver cleanup,
+reproduce from the checked-in exact archive, not a missing temporary source.
+On node-27, set `DOCS_REPO` to the checkout containing this receipt archive,
+then copy and verify the executable bytes before invocation:
+
+```bash
+cp "$DOCS_REPO/openspec/changes/timeseries-narrow-store-expand-contract/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt" \
+  /home/nwm/tmp/i8-1987/rehearse_river_rollback.py
+printf '%s  %s\n' \
+  162ce696b9ee50fb2075e9ea79a849cf31d77eb1d5ce00035c9eea8f8affbcb2 \
+  /home/nwm/tmp/i8-1987/rehearse_river_rollback.py | sha256sum --check -
+REHEARSAL_NEW_SHA=3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb
+```
+
+This archived `.py.txt` is rehearsal evidence, not an installed runtime
+script. Python invocation below does not require executable file permissions.
+
+Create a dedicated fresh container named `nwm-i8-1987-*`, label
+`nhms.i8.disposable=true`, from the exact production **image ID**, with only
+fresh private anonymous Docker volumes (no bind/live mounts), bridge networking
+and `127.0.0.1:<non-5432-port>:5432`. Do not reuse a volume from another
+container. Parent independently archives image comparison, isolated mount
+ownership and container creation command; driver checks image, label, mounts
+and port mapping without printing container environment. Provision a new empty
+database named `i8_1987_<unique_suffix>` and disposable superuser credentials
+(historical migrations need extensions/role bootstrap). `postgres` is only
+the provisioning database, never the scenario DSN. Stop any other connections
+to the disposable DB; no runtime services attach to it.
+
+Bind `I8_REHEARSAL_DSN` privately in the process environment: explicit
+`host=127.0.0.1`, port, dedicated dbname, user/password only (optional sslmode).
+No service files, socket endpoints, hostaddr overrides or production DSNs.
+Do not shell-trace secrets. The driver rechecks this policy in every old/new
+worker and supplies fresh `PYTHONPATH`/cwd, avoiding module-cache collision:
+
+```bash
+TMPDIR=/home/nwm/tmp uv run --project /home/nwm/tmp/i8-1987/new python \
+  /home/nwm/tmp/i8-1987/rehearse_river_rollback.py \
+  --old-repo /home/nwm/tmp/i8-1987/old \
+  --new-repo /home/nwm/tmp/i8-1987/new \
+  --new-sha "$REHEARSAL_NEW_SHA" \
+  --container nwm-i8-1987-oracle \
+  --production-image-id "$PRODUCTION_IMAGE_ID" \
+  --receipt "$RECEIPT_ROOT/rollback.json" \
+  --artifacts "$RECEIPT_ROOT/shud-artifacts"
+```
+
+Receipt file and artifact directory must not already exist. Capture stdout as
+the raw JSONL transcript; inspect it independently. Receipt contains source and
+script/migration/artifact digests, version/image evidence, actual subprocess
+commands, SQL elapsed times, OIDs, identities, expected-value assertions,
+R1–R5 results and ordinary-migrate skip output. Errors omit libpq exception
+text/credentials. A nonzero exit or missing row is failure, never a partial
+PASS. Archive the exact temporary driver, digest, invocation, transcript and
+structured receipt under the change's `receipts/` before removing the temporary
+driver and only the owned disposable resources. The parent-observed R1–R5
+PASS above is disposable evidence only; no production execution/PASS is claimed.
+
+#### 4.10.5 Task 5.2 live evidence and abort gates
+
+Acquire and archive the following against the actual runtime SHA, window and
+request pins. Disposable R1–R5 is rollback correctness, not capacity/performance:
+
+| Evidence | Acquisition / limit |
+|---|---|
+| Migration | Pending filenames, owner/audit, bounded one-statement wall time, ledger, OIDs, no-serving interval and effective API/autopipe source proof above. |
+| First narrow chunk | After one complete daily cycle, `chunks_detailed_size('hydro.river_timeseries')`, ranges, full-cycle run provenance and bytes. A just-created empty chunk is not this measurement. |
+| Two network pins × three storage states | SHJ-NJ plus one small network; frozen basin/network/run/model/segment/scenario/cycle/window. Measure narrow uncompressed, physically narrow compressed, and legacy, with shipped curve SQL and local single-source forecast-series API. |
+| D11 bounds | At least five warm SQL samples: P95 ≤300 ms; API warm P95 ≤500 ms. Segment key in Index Cond or segmentby pruning, Rows Removed by Filter / returned ≤10, shared hit ≤5000. Archive actual EXPLAIN (ANALYZE, BUFFERS), request/result identity and sample distribution. |
+| Probe losses | Before/after identity-existence **miss** branch and QHH fallback CTE EXPLAIN, including hydro_display and both tile stats probes; enumerate coverage losses from omitted indexes. Single-table predicate proxies are not real-query latency proof. |
+| Registry | Authoritative scheduler pass artifact/SHA/time: active, runnable, selected, excluded and exclusion provenance. Read the node-22 evidence; no node-22 mutation. A node-27 count guess is not the registry. |
+| Lifecycle | One real compression and retention tick enumerating canonical and `_legacy`, per-table candidates/results and legacy_chunks; actual live env/budget pins. Enumeration with zero eligible new chunks is **not** physically compressing a new narrow chunk or proving compressed-state performance. |
+| Working set | Actual governance receipt with uncompressed_bytes, daily_ingest_bytes, next_compressible_at, watermark/projection_status and projected_peak_bytes. #2273's `/home` comparator remains invalid for destination capacity; separately approved destination proof is mandatory. |
+| Display | `/` SHJ-NJ, one medium and one small network: GFS/IFS curves, no identity cross-talk, three archived screenshots; `/ops` reachable; existing bringup C1–C4 deny-write/runtime/publication evidence. Single-basin screenshot-free C4 alone does not satisfy three-basin evidence. |
+
+The existing #1895 performance oracle has pre-expand segment-binding/name and
+canonical chunk-discovery assumptions; the compression benchmark/live-evidence
+lineage also has legacy SQL/name/token assumptions. Do not label their refusal
+or an old run as new narrow evidence. Require a reviewed store-aware executor
+or separately reviewed exact-query manual acquisition, including both network
+pins, before closing these gates. This docs slice does not repair those tools.
+Live lag and range_end may delay the first eligible one-day narrow chunk by
+days; schedule the compressed-state leg later, never force production
+compression just to fill the receipt. River-only expand does not imply forcing
+is already narrow.
+
+**Any fact Seq Scan or order-of-magnitude query-shape regression blocks
+contract.** Missing evidence leaves 5.2 open. Browser click P95 belongs to
+issue #1970 (§4.9), separate from these SQL/API bounds. **Fourteen real daily receipts
+plus zero legacy chunks belongs only to #1988**; neither an in-window tick nor
+a disposable empty legacy table satisfies that gate.
+
 ## 8. Gated DB retention (`timeseries-db-retention`)
 
 The retention runner
