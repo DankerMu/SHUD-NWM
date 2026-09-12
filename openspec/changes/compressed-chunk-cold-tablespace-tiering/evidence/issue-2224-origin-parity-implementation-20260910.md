@@ -5,9 +5,9 @@
 - Parent rollout: #1895; Epic: #1891.
 - Branch: `feat/issue-2224-origin-chunk-parity`.
 - Current included master SHA: `3f4d5f9ee275cb12afb1b8eb8dd0919e3bd7e7fb`.
-- Final code/test candidate SHA:
+- Recorded pre-round-2 code/test candidate SHA:
   `3358ee63cfe0fd7e11269bf08638b7d1fbaf236f`.
-- Final code-bearing node-27 disposable-oracle SHA:
+- Recorded pre-round-2 code-bearing node-27 disposable-oracle SHA:
   `f7a6c162c0c1ecc3d1737ac3fe3f4fdf667b1e79`.
 - Historical implementation plus first oracle-fix SHA:
   `27d4faeab9718f0a0f343d392f04871ed1d46808`.
@@ -290,3 +290,49 @@ receipt path after the local race-receipt repair. The production checkout stayed
 census, installer, relation movement or timer/service change occurred. A later
 commit that only records this result does not change the tested code tree. This is
 still not a production G1 PASS, and task 4.0A remains unchecked until #2224 merges.
+
+## Round-2 receipt-owner selector closure
+
+At reviewed head `d7666cb6a4e9da6e999556e63f4a0373d2be7ea7`, three independent
+reviewer seats checked the round-1 fix and full PR scope. One new P1 candidate
+was independently CONFIRMED/FIX_NOW: the receipt owner gained the
+outer-durable/before-snapshot equality guard, but its targeted-CI rule omitted
+the only suite asserting a mismatched identity. The previous round's selector
+ownership invariant therefore required another class-level closure. The round
+counter and both depth retros are retained; no production behavior or oracle is
+weakened to clear the finding.
+
+The repair adds the existing `ORIGIN_CHUNK_PARITY_TESTS` closure to the receipt
+owner's exact rule, preserving its six prior suites. The existing owner/removal
+matrix now includes receipt and its four additional nonoverlapping legacy test
+legs. All production acceptance owners were mapped to their asserting suites and
+explicit routes; the change does not alter runtime parity, receipt schema,
+permissions, movement, compression, retention or production rollout.
+
+Tests-first proof ran on node-27 at tests-only commit
+`3a66bd9321769a3f858061b9d5984fddf31ed45f`, fetched through a temporary GitHub
+verification branch into a session-owned checkout. The selector source was still
+unfixed:
+
+```text
+uv run --no-sync pytest -q tests/test_select_ci_tests.py \
+  -k 'origin_chunk_parity_owners_preserve_existing_legs_and_select_new_partitions or (origin_chunk_parity_owner_route_reds_when_any_partition_is_removed and compressed_chunk_cold_receipt)'
+16 failed, 784 deselected in 22.19s
+```
+
+The failures name the receipt owner's missing parity partitions and route legs.
+No backend tests ran on the Mac in this closure. The node-27 checkout uses the
+existing Python 3.11 environment without sync, no production/integration DSNs,
+and an owned `TMPDIR` below `/home/nwm/tmp`.
+
+An earlier validation-checkout setup used a shallow fetch and failed ten existing
+selector provenance checks because historical git objects were absent. Fetching
+full history, without changing source or tests, made the same ten failures pass
+(`10 passed, 775 deselected in 13.38s`). That harness failure is not product
+evidence and does not justify weakening provenance assertions.
+
+Final-candidate green suites, disposable oracle, round-3 review and final merge
+evidence are required in the PR evidence bundle before merge. This committed
+record captures the observed red proof and corrective contract, not a prospective
+PASS. Task 4.0A remains unchecked until merge; production tasks 4.1-4.8 remain
+unexecuted and the shared change remains active.

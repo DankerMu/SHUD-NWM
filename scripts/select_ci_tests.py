@@ -3760,6 +3760,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_runtime_identity.py",
             "tests/test_node27_cold_residency_schema_compat.py",
             "tests/test_timeseries_storage_schemas.py",
+            *ORIGIN_CHUNK_PARITY_TESTS,
         ),
     ),
     PathTestRule(
