@@ -539,7 +539,7 @@ def national_tile(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Any:
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     _seed(throwaway_database_url)
     object_root = tmp_path / "object-store"
     set_integration_env(throwaway_database_url, object_root, monkeypatch)

@@ -156,7 +156,7 @@ def _connect(database_url: str) -> Any:
 
 
 def _prepared_database(database_url: str) -> None:
-    apply_migrations_from_zero(database_url)
+    apply_migrations_from_zero(database_url, through="000058")
     seed_issue_126_data(database_url)
 
 

@@ -431,7 +431,8 @@ def _seed(database_url: str) -> None:
 
 @pytest.fixture()
 def seeded(throwaway_database_url: str) -> Any:
-    apply_migrations_from_zero(throwaway_database_url)
+    # Frozen text-era reader goldens need the historical catalog before expand.
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     _seed(throwaway_database_url)
     engine = sqlalchemy_engine(throwaway_database_url)
     with Session(engine) as session:
@@ -1294,3 +1295,303 @@ def test_keyed_run_refresh_is_never_refused(
         assert second["refreshed_at"] > first["refreshed_at"]
     finally:
         connection.close()
+
+
+def _capture_valid_times_statement(session: Session, *, named: bool) -> tuple[str, dict[str, Any]]:
+    """Observe the real caller at its database boundary, still executing it."""
+    statements: list[tuple[str, dict[str, Any]]] = []
+
+    class RecordingSession:
+        def execute(self, statement: Any, parameters: dict[str, Any]) -> Any:
+            statements.append((str(statement), parameters))
+            return session.execute(statement, parameters)
+
+    identity = (
+        dict(run_id=_KEYED_RUN_ID, basin_version_id=_BASIN_VERSION_ID,
+             river_network_version_id=_NETWORK_ID) if named else {}
+    )
+    valid_times_for_layer(RecordingSession(), "discharge", **identity)
+    assert len(statements) == 1
+    return statements[0]
+
+
+def _bound_oracle_sql(cursor: Any, sql: str, parameters: Any) -> str:
+    """Use the production driver/compiler bind dialect, not a SQL rewriter."""
+    from sqlalchemy.dialects import postgresql
+
+    if isinstance(parameters, tuple) or "%(" in sql:
+        return cursor.mogrify(sql, parameters).decode()
+    compiled = text(sql).compile(dialect=postgresql.dialect())
+    return cursor.mogrify(str(compiled), {
+        name: parameters[name] for name in compiled.params
+    }).decode()
+
+
+def _coverage_oracle_statement() -> tuple[str, dict[str, Any]]:
+    from packages.common import display_coverage
+
+    parameters = {
+        "horizon": display_coverage.QHH_LATEST_EXPECTED_HORIZON_HOURS,
+        "basin_id": None, "run_id": None,
+        "variables": list(display_coverage.MVP_STATION_VARIABLES),
+        "variable_count": len(display_coverage.MVP_STATION_VARIABLES),
+        "force": False,
+        **dict.fromkeys(display_coverage._SCAN_PARAM_KEYS),
+    }
+    return display_coverage._REFRESH_SQL, parameters
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_complete_registry_prepares_against_expanded_catalog(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
+    """PREPARE every live registry source in its actual caller's SQL context."""
+    import re
+
+    from tests.river_ts_template_registry import REGISTRY
+    from tests.test_river_ts_text_identity_cleanup import _latest_product_fallback_execution
+
+    url, session = seeded
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    national_params = hydro_display._postgis_tile_params(
+        _identity_params(_KEYED_RUN_ID) | _NATIONAL_TILE_PARAMS,
+        z=9, x=398, y=197, layer="hydro-national",
+    )
+    contexts = {
+        "display_coverage:refresh": _coverage_oracle_statement(),
+        "forecast_store:latest_product_river_source": _latest_product_fallback_execution(store),
+        "mvt:hydro_national_identity_source": (postgis_tile_sql("hydro-national"), national_params),
+        "mvt:hydro_national_data_source": (postgis_tile_sql("hydro-national"), national_params),
+    }
+    # All remaining entries are complete standalone SELECTs; none gets a
+    # synthetic candidate_runs/lr/seg alias or a hand-written replacement query.
+    standalone = {
+        "hydro_display:mvt_source_identity_probe",
+        "forecast_store:segment_rows_source",
+        "forcing_copyback_backfill:discover_backfill_runs",
+        "publisher:qdown_discovery",
+        "mvt:postgis_tile_sql_hydro",
+        "mvt:valid_times_named_identity",
+        "mvt:valid_times_any_identity",
+        "parser:replace_chain_probe",
+        "parser:replace_chain_window",
+    }
+    assert {entry.key for entry in REGISTRY} == set(contexts) | standalone
+    params = _identity_params(_KEYED_RUN_ID) | {
+        "river_segment_id": _SEGMENTS[0][0], "source_id": "gfs",
+        "limit": 100, "basin_id": _BASIN_ID,
+    }
+    with psycopg2.connect(url) as connection:
+        with connection.cursor() as cursor:
+            for index, entry in enumerate(REGISTRY):
+                rendered = render_river_ts_sql(entry.source(store), store, entry=entry.key).sql
+                if entry.key in contexts:
+                    sql, parameters = contexts[entry.key]
+                    assert " ".join(rendered.split()) in " ".join(sql.split()), entry.key
+                else:
+                    sql = rendered
+                    if entry.params == "positional":
+                        cursor.execute(
+                            "SELECT h.run_key, rnv.river_network_version_key "
+                            "FROM hydro.hydro_run h JOIN core.model_instance mi USING (model_id) "
+                            "JOIN core.river_network_version rnv USING (river_network_version_id) "
+                            "WHERE h.run_id=%s", (_KEYED_RUN_ID,),
+                        )
+                        run_key, network_key = cursor.fetchone()
+                        parameters = (run_key, network_key, _VARIABLE)
+                    else:
+                        names = set(re.findall(r"%\((\w+)\)s|(?<!:):(\w+)", sql))
+                        parameters = {left or right: None for left, right in names} | params
+                prepared = f"i7_registry_{index}"
+                bound = _bound_oracle_sql(cursor, sql, parameters)
+                cursor.execute(f"PREPARE {prepared} AS {bound}")
+                cursor.execute("SELECT statement FROM pg_prepared_statements WHERE name=%s", (prepared,))
+                assert cursor.fetchone()[0] == f"PREPARE {prepared} AS {bound}", entry.key
+                cursor.execute(f"DEALLOCATE {prepared}")
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_mixed_store_caller_plans_include_both_physical_stores(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
+    """EXPLAIN actual national, refresh, named and any-identity statements."""
+    url, session = seeded
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    national_params = hydro_display._postgis_tile_params(
+        _identity_params(_KEYED_RUN_ID) | _NATIONAL_TILE_PARAMS,
+        z=9, x=398, y=197, layer="hydro-national",
+    )
+    statements = {
+        "national": (postgis_tile_sql("hydro-national"), national_params),
+        "coverage": _coverage_oracle_statement(),
+        "named": _capture_valid_times_statement(session, named=True),
+        "any": _capture_valid_times_statement(session, named=False),
+    }
+
+    def relations(node: dict[str, Any]) -> set[str]:
+        found = {node["Relation Name"]} if "Relation Name" in node else set()
+        for child in node.get("Plans", []):
+            found.update(relations(child))
+        return found
+
+    with psycopg2.connect(url) as connection:
+        with connection.cursor() as cursor:
+            physical = {}
+            for table in ("river_timeseries_legacy", "river_timeseries"):
+                cursor.execute(
+                    "SELECT chunk_name FROM timescaledb_information.chunks "
+                    "WHERE hypertable_schema='hydro' AND hypertable_name=%s", (table,),
+                )
+                chunks = {row[0] for row in cursor.fetchall()}
+                assert chunks, table
+                physical[table] = chunks | {table}
+            for label, (sql, parameters) in statements.items():
+                cursor.execute("EXPLAIN (VERBOSE, FORMAT JSON) " + _bound_oracle_sql(cursor, sql, parameters))
+                plan = cursor.fetchone()[0][0]["Plan"]
+                scanned = relations(plan)
+                for table, names in physical.items():
+                    assert scanned & names, (label, table, plan)
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+def test_named_nonmatching_store_branch_explains_and_returns_zero(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], store: str,
+) -> None:
+    url, session = seeded
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    opposite = "narrow" if store == "legacy" else "legacy"
+    params = _identity_params(_KEYED_RUN_ID)
+    with psycopg2.connect(url) as connection:
+        with connection.cursor() as cursor:
+            # The named identity has real decoy facts in the opposite table;
+            # only the run's store authority makes this branch empty.
+            table = "river_timeseries_legacy" if opposite == "legacy" else "river_timeseries"
+            cursor.execute(
+                f"SELECT count(*) FROM hydro.{table} WHERE run_key = "
+                "(SELECT run_key FROM hydro.hydro_run WHERE run_id=%s)", (_KEYED_RUN_ID,),
+            )
+            assert cursor.fetchone()[0] == len(_SEGMENTS) * 2
+            sql = render_river_ts_sql(_valid_times_named_source_template(opposite), opposite).sql
+            bound = _bound_oracle_sql(cursor, sql, params)
+            cursor.execute("EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) " + bound)
+            assert cursor.fetchone()[0][0]["Plan"]["Actual Rows"] == 0
+            cursor.execute(bound)
+            assert cursor.fetchall() == []
+
+
+@pytest.mark.parametrize("store", ("legacy", "narrow"))
+@pytest.mark.parametrize("branch", ["national_identity", "national_data", "coverage", "named", "any"])
+def test_each_discovery_fact_branch_explains_only_its_store_and_rejects_decoys(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None],
+    store: str, branch: str,
+) -> None:
+    from packages.common import display_coverage
+    from services.tiles import mvt
+
+    url, session = seeded
+    _prepare_hydro_stores(session, post_expand_forecast_database, store)
+    params = _identity_params(_KEYED_RUN_ID)
+    if branch == "coverage":
+        raw = display_coverage._river_sample_rows_template(store)
+        source = render_river_ts_sql(raw, store).sql
+        assert source in display_coverage._REFRESH_SQL
+        sql = "WITH candidate_runs AS (" + display_coverage._CANDIDATE_RUNS_SQL + ") " + source
+        _, params = _coverage_oracle_statement()
+        params = params | {"run_id": _KEYED_RUN_ID}
+    elif branch.startswith("national"):
+        factory = (mvt._hydro_national_identity_source_template if branch == "national_identity"
+                   else mvt._hydro_national_data_source_template)
+        source = render_river_ts_sql(factory(store), store).sql
+        assert source in postgis_tile_sql("hydro-national")
+        sql = """
+            SELECT facts.* FROM (
+                SELECT h.run_id, h.run_key, h.timeseries_store,
+                       rnv.river_network_version_key, rnv.river_network_version_id
+                FROM hydro.hydro_run h JOIN core.model_instance mi USING (model_id)
+                JOIN core.river_network_version rnv USING (river_network_version_id)
+                WHERE h.run_id=:run_id
+            ) lr JOIN core.river_segment seg USING (river_network_version_id)
+            CROSS JOIN LATERAL (
+        """ + source + ") facts"
+    else:
+        factory = _valid_times_named_source_template if branch == "named" else _valid_times_any_source_template
+        sql = render_river_ts_sql(factory(store), store).sql
+        caller, _ = _capture_valid_times_statement(session, named=branch == "named")
+        assert sql in caller
+
+    def relations(node: dict[str, Any]) -> set[str]:
+        names = {node["Relation Name"]} if "Relation Name" in node else set()
+        for child in node.get("Plans", []):
+            names |= relations(child)
+        return names
+
+    session.rollback()
+    with psycopg2.connect(url) as connection:
+        with connection.cursor() as cursor:
+            physical = {}
+            for target in ("legacy", "narrow"):
+                table = "river_timeseries_legacy" if target == "legacy" else "river_timeseries"
+                cursor.execute("SELECT chunk_name FROM timescaledb_information.chunks "
+                               "WHERE hypertable_schema='hydro' AND hypertable_name=%s", (table,))
+                physical[target] = {table, *(row[0] for row in cursor.fetchall())}
+                cursor.execute(f"SELECT count(*) FROM hydro.{table} WHERE run_key="
+                               "(SELECT run_key FROM hydro.hydro_run WHERE run_id=%s)", (_KEYED_RUN_ID,))
+                assert cursor.fetchone()[0] > 0
+            bound = _bound_oracle_sql(cursor, sql, params)
+            opposite = "narrow" if store == "legacy" else "legacy"
+            for authority in (store, opposite):
+                # No fact deletion: both physical stores retain the real decoys.
+                cursor.execute("UPDATE hydro.hydro_run SET timeseries_store=%s", (authority,))
+                cursor.execute("EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON) " + bound)
+                plan = cursor.fetchone()[0][0]["Plan"]
+                scanned = relations(plan)
+                assert not scanned & physical[opposite], (branch, plan)
+                if authority == store:
+                    assert scanned & physical[store], (branch, plan)
+                    assert plan["Actual Rows"] > 0
+                else:
+                    assert plan["Actual Rows"] == 0
+                cursor.execute(bound)
+                rows = cursor.fetchall()
+                assert bool(rows) == (authority == store)
+        connection.rollback()
+
+
+def test_actual_publisher_and_copyback_discover_only_authoritative_facts(
+    seeded: Any, post_expand_forecast_database: Callable[[Mapping[str, str]], None], tmp_path: Path,
+) -> None:
+    from services.tile_publisher.forcing_copyback_backfill import discover_backfill_runs
+    from services.tile_publisher.publisher import TilePublisher
+    from workers.data_adapters.base import cycle_id_for
+
+    url, session = seeded
+    _prepare_hydro_stores(session, post_expand_forecast_database, "legacy")
+    session.execute(text("""
+        INSERT INTO met.data_source (source_id, source_name, source_type, status, adapter_name)
+        VALUES ('gfs', 'GFS integration source', 'forecast', 'enabled', 'gfs')
+        ON CONFLICT (source_id) DO NOTHING
+    """))
+    session.execute(text("UPDATE hydro.hydro_run SET source_id='gfs'"))
+    session.commit()
+    expected = {_KEYED_RUN_ID, _LEGACY_RUN_ID}
+    publisher = TilePublisher(workspace_root=tmp_path, object_store_root=tmp_path / "objects")
+    cycles = [
+        cycle_id_for(row["source_id"], row["cycle_time"])
+        for row in _rows(session, "SELECT DISTINCT source_id, cycle_time FROM hydro.hydro_run", {})
+    ]
+
+    def discover_publisher() -> list[dict[str, Any]]:
+        return [row for cycle in cycles for row in publisher._discover_qdown_runs(session, cycle)]
+
+    publisher_rows = discover_publisher()
+    assert {row["run_id"] for row in publisher_rows} == expected
+    assert {row["run_id"] for row in discover_backfill_runs(session)} == expected
+    session.rollback()
+    with psycopg2.connect(url) as connection:
+        with connection.cursor() as cursor:
+            # Delete authoritative facts only. Opposite-store poison stays.
+            for table, store in (("river_timeseries_legacy", "legacy"), ("river_timeseries", "narrow")):
+                cursor.execute(f"DELETE FROM hydro.{table} r USING hydro.hydro_run h "
+                               "WHERE h.run_key=r.run_key AND h.timeseries_store=%s", (store,))
+    assert discover_publisher() == []
+    assert discover_backfill_runs(session) == []

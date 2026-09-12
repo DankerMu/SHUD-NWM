@@ -1,28 +1,7 @@
-"""Real-database integration tests for the river_timeseries dual write (#1340).
-
-Run with the repo's standard opt-in against a throwaway database:
-
-    NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=... uv run pytest -q \
-        tests/test_river_ts_dual_write_integration.py
-
-``throwaway_database_url`` (tests/conftest.py) creates and drops a
-uniquely-named database per TEST, so nothing here can touch a live one.
-
-Scope: what only a real database can answer — that the seven surrogate columns
-actually land non-NULL, that the ``ON CONFLICT DO UPDATE`` mirror fires on a
-drifted row (design D3: production DELETE-replaces first, so this branch is
-reached by replaying the INSERT without the preceding DELETE), that the #1339
-equality audit sees zero new divergence, that the backfill runner still counts
-only legacy sentinel rows, that the seed's ``y_stage``/``m`` branch — the
-only writer of those enum values — round-trips through the enum columns, and
-(#1681) that the replace chain's two unbounded READ statements reach a real
-compressed chunk through an index instead of decompress-scanning it.
-"""
+"""Disposable-database coverage of narrow writes and compressed-key access."""
 
 from __future__ import annotations
 
-import json
-import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -34,14 +13,7 @@ from psycopg2.extras import RealDictCursor
 from packages.common.object_store import LocalObjectStore
 from packages.common.timescale_write_guard import CompressedChunkWriteError
 from tests.integration_helpers import apply_migrations_from_zero
-
-# The probe SQL under test is read out of production source by the zero-text
-# oracle's AST reader (#1442). Importing it here — rather than transcribing the
-# statement — is what keeps the EXPLAIN below pinned to the shipped text: a
-# hand-copied SQL string would stay green after the aid was deleted from
-# parser.py, which is the whole regression (#1681).
 from tests.test_river_ts_text_identity_cleanup import (
-    PUSHDOWN_AID_MARKER,
     _parser_river_statements,
 )
 from workers.output_parser.parser import (
@@ -90,8 +62,6 @@ def _rows(connection: Any, sql: str, params: Any = None) -> list[dict[str, Any]]
         return [dict(row) for row in cursor.fetchall()]
 
 
-def _verify(connection: Any) -> dict[str, Any]:
-    return _rows(connection, "SELECT * FROM hydro.verify_river_identity_normalization()")[0]
 
 
 def _segment_id(index: int) -> str:
@@ -199,393 +169,90 @@ def parsed_run(throwaway_database_url: str, tmp_path: Path) -> Any:
     apply_migrations_from_zero(throwaway_database_url)
     connection = _connect(throwaway_database_url)
     _seed_authority(connection, output_uri=f"{_OBJECT_STORE_PREFIX}/runs/{_RUN_ID}/output/")
-    before = _verify(connection)
     result = _parse(throwaway_database_url, tmp_path / "object-store")
     try:
-        yield connection, before, result
+        yield connection, result
     finally:
         connection.close()
 
 
-# ---------------------------------------------------------------------------
-# Scenario: new rows carry a complete, consistent surrogate identity
-# ---------------------------------------------------------------------------
-
-
-def test_parsed_rows_have_all_seven_surrogate_columns_populated(parsed_run: Any) -> None:
-    connection, _before, result = parsed_run
-    assert result.rows_written == _SEGMENTS * _HOURS
-
-    total = _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s", (_RUN_ID,))
-    assert total == _SEGMENTS * _HOURS
-
-    for column in NORMALIZED_COLUMNS:
-        assert (
-            _scalar(
-                connection,
-                f"SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s AND {column} IS NULL",
-                (_RUN_ID,),
-            )
-            == 0
-        ), f"{column} must be populated by the dual write"
-
-
-def test_surrogate_keys_match_the_authority_rows_and_enums_match_the_text(parsed_run: Any) -> None:
-    connection, _before, _result = parsed_run
-
-    # Premise of the comparison below: the four keys differ from each other on
-    # every written row, so swapping any two of them would be caught.
-    for row in _rows(
-        connection,
-        """
-        SELECT DISTINCT run_key, basin_version_key, river_network_version_key, river_segment_key
-        FROM hydro.river_timeseries WHERE run_id = %s
-        """,
-        (_RUN_ID,),
-    ):
-        assert len(set(row.values())) == 4, f"fixture keys must be pairwise distinct, got {row}"
-
-    mismatched = _scalar(
-        connection,
-        """
-        SELECT count(*)
-        FROM hydro.river_timeseries t
-        JOIN hydro.hydro_run h ON h.run_id = t.run_id
-        JOIN core.basin_version bv ON bv.basin_version_id = t.basin_version_id
-        JOIN core.river_network_version rnv
-          ON rnv.river_network_version_id = t.river_network_version_id
-        JOIN core.river_segment rs
-          ON rs.river_segment_id = t.river_segment_id
-         AND rs.river_network_version_id = t.river_network_version_id
-        WHERE t.run_id = %s
-          AND (t.run_key IS DISTINCT FROM h.run_key
-            OR t.basin_version_key IS DISTINCT FROM bv.basin_version_key
-            OR t.river_network_version_key IS DISTINCT FROM rnv.river_network_version_key
-            OR t.river_segment_key IS DISTINCT FROM rs.river_segment_key
-            OR t.variable_e::text IS DISTINCT FROM t.variable
-            OR t.unit_e::text IS DISTINCT FROM t.unit
-            OR t.quality_flag_e::text IS DISTINCT FROM t.quality_flag)
-        """,
-        (_RUN_ID,),
-    )
-    assert mismatched == 0
-
-
-def test_equality_audit_counters_do_not_move_when_new_rows_land(parsed_run: Any) -> None:
-    connection, before, _result = parsed_run
-    after = _verify(connection)
-
-    assert after["rows_total"] == before["rows_total"] + _SEGMENTS * _HOURS
-    for column in NORMALIZED_COLUMNS:
-        assert after[f"null_{column}"] - before[f"null_{column}"] == 0
-    assert after["equality_audit_divergent"] - before["equality_audit_divergent"] == 0
-
-
-def test_reparse_is_idempotent_and_keeps_the_surrogate_columns_filled(
-    parsed_run: Any, throwaway_database_url: str, tmp_path: Path
-) -> None:
-    """The production path DELETE-replaces, so a re-parse must not leave any
-    NULL-key leftovers behind."""
-    connection, _before, _result = parsed_run
-    _parse(throwaway_database_url, tmp_path / "object-store-2")
-
-    assert _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries") == _SEGMENTS * _HOURS
-    assert _verify(connection)["null_run_key"] == 0
-
-
-# ---------------------------------------------------------------------------
-# Scenario: conflict updates cannot re-introduce text<->surrogate drift
-# ---------------------------------------------------------------------------
-
-
 _REPLAY_INSERT = """
     INSERT INTO hydro.river_timeseries (
-        run_id, basin_version_id, river_network_version_id, river_segment_id,
-        valid_time, lead_time_hours, variable, value, unit, quality_flag,
+        valid_time, lead_time_hours, value,
         run_key, river_network_version_key, basin_version_key, river_segment_key,
         variable_e, unit_e, quality_flag_e
     )
-    VALUES (%(run_id)s, %(basin_version_id)s, %(river_network_version_id)s, %(river_segment_id)s,
-            %(valid_time)s, %(lead_time_hours)s, %(variable)s, %(value)s, %(unit)s, %(quality_flag)s,
+    VALUES (%(valid_time)s, %(lead_time_hours)s, %(value)s,
             %(run_key)s, %(river_network_version_key)s, %(basin_version_key)s, %(river_segment_key)s,
-            %(variable)s, %(unit)s, %(quality_flag)s)
-    ON CONFLICT (run_id, river_network_version_id, river_segment_id, variable, valid_time)
+            %(variable_e)s, %(unit_e)s, %(quality_flag_e)s)
+    ON CONFLICT (run_key, river_segment_key, variable_e, valid_time)
     DO UPDATE SET
-        basin_version_id = EXCLUDED.basin_version_id,
         lead_time_hours = EXCLUDED.lead_time_hours,
         value = EXCLUDED.value,
-        unit = EXCLUDED.unit,
-        quality_flag = EXCLUDED.quality_flag,
-        run_key = EXCLUDED.run_key,
         river_network_version_key = EXCLUDED.river_network_version_key,
         basin_version_key = EXCLUDED.basin_version_key,
-        river_segment_key = EXCLUDED.river_segment_key,
-        variable_e = EXCLUDED.variable_e,
         unit_e = EXCLUDED.unit_e,
         quality_flag_e = EXCLUDED.quality_flag_e
 """
 
 
-def test_conflict_update_mirrors_the_text_refresh_into_the_surrogate_columns(parsed_run: Any) -> None:
-    """Replay the writer's INSERT without the preceding DELETE, against a row
-    whose refreshable text columns have drifted away from their surrogates."""
-    connection, _before, _result = parsed_run
-
-    # A second basin_version so basin_version_id/key can genuinely change.
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            INSERT INTO core.basin_version
-                (basin_version_id, basin_id, version_label, geom, active_flag)
-            VALUES ('bv2', 'b1', 'v2',
-                    ST_SetSRID(ST_GeomFromText('MULTIPOLYGON(((0 0,0 1,1 1,0 0)))'), 4490), false)
-            ON CONFLICT DO NOTHING
-            """
-        )
-    bv2_key = _scalar(
-        connection, "SELECT basin_version_key FROM core.basin_version WHERE basin_version_id = 'bv2'"
-    )
-
-    target = _rows(
-        connection,
-        """
-        SELECT * FROM hydro.river_timeseries
-        WHERE run_id = %s ORDER BY valid_time, river_segment_id LIMIT 1
-        """,
-        (_RUN_ID,),
-    )[0]
-
-    # Pre-drift the existing row: text says bv2/qc_warning, surrogates still
-    # say bv1/ok. This is exactly the drift 000050:244-247 predicted.
-    with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            UPDATE hydro.river_timeseries
-            SET basin_version_id = 'bv2', quality_flag = 'qc_warning'
-            WHERE run_id = %(run_id)s AND river_network_version_id = %(river_network_version_id)s
-              AND river_segment_id = %(river_segment_id)s AND variable = %(variable)s
-              AND valid_time = %(valid_time)s
-            """,
-            target,
-        )
-    assert _verify(connection)["equality_audit_divergent"] >= 1
-
-    replay = dict(target)
-    replay.update(
-        {
-            "basin_version_id": "bv2",
-            "basin_version_key": bv2_key,
-            "quality_flag": "qc_warning",
-            "value": float(target["value"]) + 42.0,
-        }
-    )
-    with connection.cursor() as cursor:
-        cursor.execute(_REPLAY_INSERT, replay)
-
-    updated = _rows(
-        connection,
-        """
-        SELECT * FROM hydro.river_timeseries
-        WHERE run_id = %(run_id)s AND river_network_version_id = %(river_network_version_id)s
-          AND river_segment_id = %(river_segment_id)s AND variable = %(variable)s
-          AND valid_time = %(valid_time)s
-        """,
-        target,
-    )
-    assert len(updated) == 1, "the replay must UPDATE the existing row, not insert a second one"
-    row = updated[0]
-
-    # Refreshed text columns and their surrogate mirrors moved together.
-    assert row["basin_version_id"] == "bv2"
-    assert row["basin_version_key"] == bv2_key
-    assert row["quality_flag"] == "qc_warning"
-    assert row["quality_flag_e"] == "qc_warning"
-    assert row["unit"] == target["unit"]
-    assert row["unit_e"] == target["unit"]
-    assert float(row["value"]) == pytest.approx(float(target["value"]) + 42.0)
-
-    # Identity columns unchanged on both sides.
-    for column in ("run_id", "river_network_version_id", "river_segment_id", "variable", "valid_time"):
-        assert row[column] == target[column]
-    for column in ("run_key", "river_network_version_key", "river_segment_key"):
-        assert row[column] == target[column]
-    assert row["variable_e"] == target["variable_e"]
-
-    # And the audit is clean again: the mirror closed the drift.
-    assert _verify(connection)["equality_audit_divergent"] == 0
-
-
-def test_out_of_vocabulary_enum_literal_fails_the_statement_closed(parsed_run: Any) -> None:
-    """A literal outside the enum's value set is rejected by the column type —
-    the closed-world property the writer relies on instead of app-side maps."""
-    connection, _before, _result = parsed_run
-    target = _rows(
-        connection,
-        "SELECT * FROM hydro.river_timeseries WHERE run_id = %s ORDER BY valid_time LIMIT 1",
-        (_RUN_ID,),
-    )[0]
-    replay = dict(target)
-    replay.update({"unit": "m3 s-1", "valid_time": target["valid_time"] + timedelta(hours=99)})
-
-    with pytest.raises(psycopg2.errors.InvalidTextRepresentation):
-        with connection.cursor() as cursor:
-            cursor.execute(_REPLAY_INSERT, replay)
-
-    assert _scalar(
-        connection,
-        "SELECT count(*) FROM hydro.river_timeseries WHERE valid_time = %s",
-        (replay["valid_time"],),
-    ) == 0
-
-
-# ---------------------------------------------------------------------------
-# Scenario: dual write coexists with the #1339 backfill lane
-# ---------------------------------------------------------------------------
-
-
-def _run_backfill(database_url: str, tmp_path: Path) -> dict[str, Any]:
-    from scripts import node27_river_identity_backfill as backfill
-
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    env = {
-        "DATABASE_URL": database_url,
-        "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS": "1",
-        "NODE27_RIVER_IDENTITY_BACKFILL_RECEIPT_PATH": str(tmp_path / "receipt.json"),
-        "NODE27_RIVER_IDENTITY_BACKFILL_LOCK_PATH": str(tmp_path / "runner.lock"),
-        "NODE27_RIVER_IDENTITY_BACKFILL_BATCH_PAGES": "4",
-        "NODE27_RIVER_IDENTITY_BACKFILL_BATCH_SLEEP_MS": "0",
-    }
-    previous = {key: os.environ.get(key) for key in env}
-    os.environ.update(env)
-    try:
-        backfill.main(["--enforce"], now_utc=datetime.now(UTC) + timedelta(days=3650))
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-    return json.loads((tmp_path / "receipt.json").read_text(encoding="utf-8"))
-
-
-def test_backfill_runner_only_claims_legacy_sentinel_rows(
+def test_parse_and_replay_write_only_narrow_facts(
     parsed_run: Any, throwaway_database_url: str, tmp_path: Path
 ) -> None:
-    """Dual-written rows are not sentinel candidates; only pre-#1340 rows are,
-    and the runner leaves the dual-written surrogates byte-identical."""
-    connection, _before, _result = parsed_run
-    legacy_time = _START_TIME + timedelta(days=1)
+    connection, result = parsed_run
+    assert result.rows_written == 12
+    facts = _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY valid_time, river_segment_key")
+    assert len(facts) == 12
+    assert facts[0]["value"] == 1.0
+    assert (facts[0]["run_key"], facts[0]["basin_version_key"],
+            facts[0]["river_network_version_key"], facts[0]["river_segment_key"]) == (4001, 5001, 6001, 7001)
+    assert _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries_legacy") == 0
+    _parse(throwaway_database_url, tmp_path / "replay")
+    assert _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries") == 12
+    assert _scalar(connection, "SELECT timeseries_store FROM hydro.hydro_run WHERE run_id = %s",
+                   (_RUN_ID,)) == "narrow"
+    target = dict(facts[0], value=42.0, lead_time_hours=None, quality_flag_e="qc_warning")
     with connection.cursor() as cursor:
-        cursor.execute(
-            """
-            INSERT INTO hydro.river_timeseries
-                (run_id, basin_version_id, river_network_version_id, river_segment_id,
-                 valid_time, variable, value, unit, quality_flag)
-            SELECT %s, 'bv1', 'rnv1', 'seg-' || s, %s::timestamptz + (h * INTERVAL '1 hour'),
-                   'q_down', 1.0, 'm3/s', 'ok'
-            FROM generate_series(1, %s) s, generate_series(0, %s) h
-            """,
-            (_RUN_ID, legacy_time, _SEGMENTS, _HOURS - 1),
-        )
-    legacy_rows = _SEGMENTS * _HOURS
-    assert _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_key IS NULL") == legacy_rows
-
-    dual_written_before = _rows(
-        connection,
-        """
-        SELECT valid_time, river_segment_id, run_key, river_network_version_key,
-               basin_version_key, river_segment_key, variable_e, unit_e, quality_flag_e
-        FROM hydro.river_timeseries WHERE run_key IS NOT NULL
-        ORDER BY valid_time, river_segment_id
-        """,
-    )
-
-    receipt = _run_backfill(throwaway_database_url, tmp_path / "backfill")
-
-    assert receipt["totals"]["candidate_rows"] == legacy_rows
-    assert receipt["totals"]["updated_rows"] == legacy_rows
-    assert receipt["totals"]["pending_rows"] == 0
-
-    dual_written_after = _rows(
-        connection,
-        """
-        SELECT valid_time, river_segment_id, run_key, river_network_version_key,
-               basin_version_key, river_segment_key, variable_e, unit_e, quality_flag_e
-        FROM hydro.river_timeseries WHERE run_key IS NOT NULL
-          AND valid_time < %s
-        ORDER BY valid_time, river_segment_id
-        """,
-        (legacy_time,),
-    )
-    assert dual_written_after == dual_written_before
-    assert _verify(connection)["equality_audit_divergent"] == 0
+        cursor.execute(_REPLAY_INSERT, target)
+    updated = _rows(connection, "SELECT value, lead_time_hours, quality_flag_e FROM hydro.river_timeseries "
+                    "ORDER BY valid_time, river_segment_key")[0]
+    assert updated == {"value": 42.0, "lead_time_hours": None, "quality_flag_e": "qc_warning"}
+    assert _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries") == 12
 
 
-# ---------------------------------------------------------------------------
-# Scenario: the seed writer's y_stage / m branch
-# ---------------------------------------------------------------------------
+def test_legacy_refusal_preserves_facts_and_parse_timestamp(
+    parsed_run: Any, throwaway_database_url: str, tmp_path: Path
+) -> None:
+    from workers.output_parser.parser import LegacyStoreWriteRefused
+
+    connection, _result = parsed_run
+    before = _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY valid_time, river_segment_key")
+    stamp = _scalar(connection, "SELECT parsed_at FROM hydro.hydro_run WHERE run_id = %s", (_RUN_ID,))
+    with connection.cursor() as cursor:
+        cursor.execute("UPDATE hydro.hydro_run SET timeseries_store = 'legacy' WHERE run_id = %s", (_RUN_ID,))
+    with pytest.raises(LegacyStoreWriteRefused):
+        _parse(throwaway_database_url, tmp_path / "refused")
+    assert _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY valid_time, river_segment_key") == before
+    assert _scalar(connection, "SELECT parsed_at FROM hydro.hydro_run WHERE run_id = %s", (_RUN_ID,)) == stamp
 
 
-def test_seed_demo_dual_writes_the_y_stage_branch(throwaway_database_url: str) -> None:
-    from db.seeds.seed_demo import seed_database
+def test_expand_replay_does_not_reclassify_a_new_parse(parsed_run: Any) -> None:
+    from packages.common.migrate import MIGRATIONS_DIR
 
-    apply_migrations_from_zero(throwaway_database_url)
-    seed_connection = psycopg2.connect(throwaway_database_url)
-    seed_connection.autocommit = True
-    try:
-        seed_database(seed_connection)
-    finally:
-        seed_connection.close()
-
-    connection = _connect(throwaway_database_url)
-    try:
-        assert _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries WHERE variable = 'y_stage'") > 0
-        for column in NORMALIZED_COLUMNS:
-            assert (
-                _scalar(connection, f"SELECT count(*) FROM hydro.river_timeseries WHERE {column} IS NULL") == 0
-            ), f"seed left {column} NULL"
-
-        assert _scalar(
-            connection,
-            """
-            SELECT count(*) FROM hydro.river_timeseries
-            WHERE variable_e::text IS DISTINCT FROM variable
-               OR unit_e::text IS DISTINCT FROM unit
-               OR quality_flag_e::text IS DISTINCT FROM quality_flag
-            """,
-        ) == 0
-        assert _scalar(
-            connection,
-            """
-            SELECT count(*) FROM hydro.river_timeseries t
-            JOIN core.river_segment rs
-              ON rs.river_segment_id = t.river_segment_id
-             AND rs.river_network_version_id = t.river_network_version_id
-            WHERE t.river_segment_key IS DISTINCT FROM rs.river_segment_key
-            """,
-        ) == 0
-        assert _verify(connection)["equality_audit_divergent"] == 0
-    finally:
-        connection.close()
+    connection, _result = parsed_run
+    migration = (MIGRATIONS_DIR / "000059_river_timeseries_narrow_expand.sql").read_text()
+    with connection.cursor() as cursor:
+        cursor.execute(migration)
+        cursor.execute(migration)
+    assert _scalar(connection, "SELECT timeseries_store FROM hydro.hydro_run WHERE run_id = %s",
+                   (_RUN_ID,)) == "narrow"
+    assert _scalar(connection, "SELECT count(*) FROM hydro.river_timeseries") == 12
+    assert _scalar(connection, "SELECT count(*) FROM pg_indexes WHERE schemaname = 'hydro' "
+                   "AND tablename = 'river_timeseries'") == 3
+    assert _scalar(connection, "SELECT time_interval FROM timescaledb_information.dimensions "
+                   "WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries'") == timedelta(days=1)
 
 
-# ---------------------------------------------------------------------------
-# Scenario: the replace chain's two READ statements against compressed chunks
-# ---------------------------------------------------------------------------
-#
-# #1442 made probe / window read / DELETE key-only. That was safe for the
-# DELETE (valid_time bounded, and the compressed-chunk guard runs first) and
-# not for the two reads: neither is valid_time bounded — their job is to find
-# this key's rows OUTSIDE the incoming window — so their plan always reaches
-# compressed chunks, where `run_key` is not a segmentby column and has no
-# access path at all. On node-27 a key-only probe for a NEW run therefore
-# decompress-scanned every compressed chunk and hit the 60 s statement_timeout,
-# and no forecast was ingested (#1681). #1681 restores a bound `run_id` aid on
-# those two statements only.
-#
-# These tests need a real TimescaleDB with real compressed chunks, so they
-# carry `timescaledb_210` like the sibling compression tests in
-# tests/test_river_identity_normalization_integration.py.
 
 _AID_OLD_RUN_ID = "run_probe_aid_old"
 _AID_NEW_RUN_ID = "run_probe_aid_new"
@@ -644,13 +311,11 @@ def _seed_compressed_history_and_new_run(connection: Any) -> dict[str, Any]:
         cursor.execute(
             """
             INSERT INTO hydro.river_timeseries (
-                run_id, basin_version_id, river_network_version_id, river_segment_id,
-                valid_time, lead_time_hours, variable, value, unit, quality_flag,
+                valid_time, lead_time_hours, value,
                 run_key, river_network_version_key, basin_version_key, river_segment_key,
                 variable_e, unit_e, quality_flag_e
             )
-            SELECT %s, 'bv1', 'rnv1', rs.river_segment_id,
-                   %s::timestamptz + (h * INTERVAL '1 hour'), h, 'q_down', 1.0, 'm3/s', 'ok',
+            SELECT %s::timestamptz + (h * INTERVAL '1 hour'), h, 1.0,
                    (SELECT run_key FROM hydro.hydro_run WHERE run_id = %s),
                    (SELECT river_network_version_key FROM core.river_network_version
                      WHERE river_network_version_id = 'rnv1'),
@@ -659,7 +324,7 @@ def _seed_compressed_history_and_new_run(connection: Any) -> dict[str, Any]:
             FROM core.river_segment rs, generate_series(0, %s) h
             WHERE rs.river_network_version_id = 'rnv1'
             """,
-            (_AID_OLD_RUN_ID, _START_TIME, _AID_OLD_RUN_ID, _HOURS - 1),
+            (_START_TIME, _AID_OLD_RUN_ID, _HOURS - 1),
         )
         cursor.execute(
             """
@@ -700,8 +365,8 @@ def _seed_compressed_history_and_new_run(connection: Any) -> dict[str, Any]:
     assert (
         _scalar(
             connection,
-            "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s",
-            (_AID_NEW_RUN_ID,),
+            "SELECT count(*) FROM hydro.river_timeseries WHERE run_key = %s",
+            (new_run_key,),
         )
         == 0
     ), "fixture premise: the new run starts with zero fact rows"
@@ -765,48 +430,14 @@ def _new_run_identity(context: dict[str, Any]) -> RunIdentityKeys:
 
 
 @pytest.mark.timescaledb_210
-def test_probe_uses_the_compressed_segmentby_index_and_seq_scans_without_the_aid(
+def test_probe_uses_the_compressed_run_key_index(
     compressed_history: Any, throwaway_database_url: str
 ) -> None:
-    """The #1681 claim, proved on a real compressed chunk — with its own control.
-
-    The probe SQL is EXTRACTED from production source (the same AST reader the
-    zero-text oracle uses) rather than transcribed: a hand-copied statement
-    would keep passing after someone deleted the aid from parser.py, which is
-    the only regression this test exists to catch.
-
-    ``enable_seqscan = off`` because the discriminator here is *which access
-    paths exist*, not which one is cheaper. This rig's compressed chunk is a
-    single page, so the cost model can legitimately prefer a sequential scan
-    even when the segmentby index is available, and a cost-based assertion
-    would prove nothing about the production plan. With sequential scans
-    penalized, "index is usable" and "index is not usable" separate cleanly:
-    Postgres only builds an index path when a clause matches the index, and it
-    keeps the sole Seq Scan path when none does.
-
-    The negative control replaces a one-off manual red. Deleting the two aid
-    lines from the extracted SQL and re-EXPLAINing in the same transaction
-    re-proves, on every run, that the assertion above is about the aid and not
-    about some unrelated property of the plan — a pin that cannot rot the way a
-    receipt pasted into a PR body can.
-
-    Both statements run in ONE transaction on a NON-autocommit connection:
-    ``SET LOCAL`` is a no-op under autocommit (which this module's ``_connect``
-    turns on), which would silently disarm the whole discriminator.
-    """
+    """The unbounded probe reaches compressed history by its run_key segment."""
     _connection, context = compressed_history
     probe = _parser_river_statements()[0]
 
-    # The control: the marker line and the aid line, and nothing else.
-    probe_lines = probe.splitlines()
-    control_lines = [
-        line
-        for line in probe_lines
-        if PUSHDOWN_AID_MARKER not in line and line.strip() != "AND run_id = %s"
-    ]
-    assert len(probe_lines) - len(control_lines) == 2, "control must drop exactly the marker and the aid"
-    control = "\n".join(control_lines)
-    assert probe.count("%s") == 4 and control.count("%s") == 3
+    assert probe.count("%s") == 3
 
     keys = (context["new_run_key"], context["river_network_version_key"], "q_down")
     # NOT this module's ``_connect``: that one sets autocommit, under which
@@ -815,18 +446,15 @@ def test_probe_uses_the_compressed_segmentby_index_and_seq_scans_without_the_aid
     try:
         with plain.cursor() as cursor:
             cursor.execute("SET LOCAL enable_seqscan = off")
-            plan = _plan_text(cursor, probe, (keys[0], context["new_run_id"], keys[1], keys[2]))
-            control_plan = _plan_text(cursor, control, keys)
+            plan = _plan_text(cursor, probe, keys)
         plain.rollback()
     finally:
         plain.close()
 
     assert "Index Scan using compress_hyper_" in plan, plan
-    assert any("run_id =" in line for line in _index_cond_lines(plan)), plan
+    assert any("run_key =" in line for line in _index_cond_lines(plan)), plan
     assert "Seq Scan on compress_hyper" not in plan, plan
 
-    assert "Seq Scan on compress_hyper" in control_plan, control_plan
-    assert not any("run_id =" in line for line in _index_cond_lines(control_plan)), control_plan
 
 
 @pytest.mark.timescaledb_210
@@ -851,7 +479,8 @@ def test_new_run_writes_past_a_compressed_chunk_and_replays_idempotently(
         segment_keys=context["segment_keys"],
     )
     written = _scalar(
-        connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s", (_AID_NEW_RUN_ID,)
+        connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_key = %s",
+        (context["new_run_key"],),
     )
     assert written == len(rows)
 
@@ -863,13 +492,15 @@ def test_new_run_writes_past_a_compressed_chunk_and_replays_idempotently(
     )
     assert (
         _scalar(
-            connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s", (_AID_NEW_RUN_ID,)
+            connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_key = %s",
+            (context["new_run_key"],),
         )
         == len(rows)
     ), "replaying the same window must replace, not duplicate"
     # The old run's compressed history is untouched by either pass.
     assert _scalar(
-        connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s", (_AID_OLD_RUN_ID,)
+        connection, "SELECT count(*) FROM hydro.river_timeseries "
+        "JOIN hydro.hydro_run USING (run_key) WHERE run_id = %s", (_AID_OLD_RUN_ID,),
     ) == _SEGMENTS * _HOURS
 
 
@@ -899,7 +530,296 @@ def test_new_run_targeting_the_compressed_chunk_still_fails_the_guard_closed(
     assert "hydro.river_timeseries" in str(exc_info.value)
     assert (
         _scalar(
-            connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_id = %s", (_AID_NEW_RUN_ID,)
+            connection, "SELECT count(*) FROM hydro.river_timeseries WHERE run_key = %s",
+            (context["new_run_key"],),
         )
         == 0
     ), "the guard must fail the batch closed, leaving no rows behind"
+
+
+@pytest.mark.parametrize("failure", ["induced", "missing_owner"])
+def test_expand_failure_rolls_back_and_replay_preserves_narrow_parse(
+    throwaway_database_url: str, tmp_path: Path, failure: str,
+) -> None:
+    from uuid import uuid4
+
+    from packages.common.migrate import MIGRATIONS_DIR, split_sql_statements
+
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
+    sql = (MIGRATIONS_DIR / "000059_river_timeseries_narrow_expand.sql").read_text()
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
+        before_oid = _scalar(connection, "SELECT 'hydro.river_timeseries'::regclass::oid")
+        # Fail after rename/create/indexes, not before expand begins.
+        if failure == "missing_owner":
+            # Never drop or mutate a shared cluster role. Change only this
+            # disposable migration's owner target to a verified absent name.
+            owner = f"i7_absent_{uuid4().hex}"
+            assert _scalar(connection, "SELECT count(*) FROM pg_roles WHERE rolname=%s", (owner,)) == 0
+            replacement = f"ALTER TABLE hydro.river_timeseries OWNER TO {owner};"
+            expected_error = psycopg2.errors.UndefinedObject
+            expected_message = f'role "{owner}" does not exist'
+        else:
+            replacement = "RAISE EXCEPTION 'induced expand failure';"
+            expected_error = psycopg2.errors.RaiseException
+            expected_message = "induced expand failure"
+        broken = sql.replace(
+            "ALTER TABLE hydro.river_timeseries OWNER TO nhms_ingest_rw;",
+            replacement,
+        )
+        with pytest.raises(expected_error, match=expected_message):
+            with connection.cursor() as cursor:
+                for statement in split_sql_statements(broken):
+                    cursor.execute(statement)
+        assert _scalar(connection, "SELECT 'hydro.river_timeseries'::regclass::oid") == before_oid
+        assert _scalar(connection, "SELECT to_regclass('hydro.river_timeseries_legacy')") is None
+        assert _scalar(connection, "SELECT count(*) FROM information_schema.columns "
+                       "WHERE table_schema='hydro' AND table_name='hydro_run' "
+                       "AND column_name='timeseries_store'") == 0
+        apply_migrations_from_zero(throwaway_database_url)
+        _parse(throwaway_database_url, tmp_path)
+        facts = _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY river_segment_key, valid_time")
+        assert len(facts) == _SEGMENTS * _HOURS
+        with connection.cursor() as cursor:
+            for statement in split_sql_statements(sql):
+                cursor.execute(statement)
+        assert _scalar(connection, "SELECT timeseries_store FROM hydro.hydro_run WHERE run_id=%s",
+                       (_RUN_ID,)) == "narrow"
+        assert _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY river_segment_key, valid_time") == facts
+    finally:
+        connection.close()
+
+
+def test_legacy_decline_reopens_only_after_authority_becomes_narrow(
+    throwaway_database_url: str,
+) -> None:
+    from scripts.node27_autopipeline import _declined_runs
+
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = psycopg2.connect(throwaway_database_url)
+    try:
+        _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='legacy' WHERE run_id=%s", (_RUN_ID,))
+            cursor.execute(
+                "INSERT INTO ops.ingest_recompute_decline "
+                "(run_id, init_state_id, product_mtime, reason_code, detail) "
+                "VALUES (%s, '', 1, 'legacy_store_refused', 'fixture')", (_RUN_ID,),
+            )
+            assert _declined_runs(cursor, [_RUN_ID], None) == {_RUN_ID}
+            cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='narrow' WHERE run_id=%s", (_RUN_ID,))
+            assert _declined_runs(cursor, [_RUN_ID], None) == set()
+    finally:
+        connection.rollback()
+        connection.close()
+
+
+def test_expand_classifies_preexisting_authority_without_overrides(throwaway_database_url: str) -> None:
+    from packages.common.migrate import MIGRATIONS_DIR
+
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE hydro.hydro_run SET status='running', parsed_at=now() WHERE run_id=%s", (_RUN_ID,))
+            cursor.execute("""
+                INSERT INTO hydro.hydro_run
+                    (run_id, run_type, scenario_id, model_id, basin_version_id,
+                     start_time, end_time, status, run_manifest_uri)
+                SELECT v.run_id, 'forecast', 'sc', 'm1', 'bv1', %s, %s, v.status::hydro.run_status, 's3://manifest'
+                FROM (VALUES ('published_only', 'published'), ('running_only', 'running')) v(run_id, status)
+            """, (_START_TIME, _START_TIME + timedelta(hours=3)))
+        expected = [
+            {"run_id": "published_only", "timeseries_store": "legacy"},
+            {"run_id": "run_dual_write", "timeseries_store": "legacy"},
+            {"run_id": "running_only", "timeseries_store": "narrow"},
+        ]
+        apply_migrations_from_zero(throwaway_database_url)
+        for _ in range(2):
+            assert _rows(connection, "SELECT run_id, timeseries_store FROM hydro.hydro_run ORDER BY run_id") == expected
+            with connection.cursor() as cursor:
+                cursor.execute((MIGRATIONS_DIR / "000059_river_timeseries_narrow_expand.sql").read_text())
+    finally:
+        connection.close()
+
+
+@pytest.mark.timescaledb_210
+def test_expand_preserves_preexisting_compressed_legacy_catalog(throwaway_database_url: str) -> None:
+    from tests.integration_helpers import insert_river_timeseries_dual_written
+
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
+    connection = _connect(throwaway_database_url)
+    try:
+        _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
+        with connection.cursor() as cursor:
+            insert_river_timeseries_dual_written(cursor, [
+                (_RUN_ID, "bv1", "rnv1", "seg-1", _START_TIME, 0, "q_down", 7.0, "m3/s", "ok"),
+            ])
+            cursor.execute("SELECT compress_chunk(c) FROM show_chunks('hydro.river_timeseries') c")
+
+        def snapshot(table: str) -> dict[str, Any]:
+            return {
+                "relation": _rows(
+                    connection, "SELECT oid, relowner FROM pg_class WHERE oid=%s::regclass", (f"hydro.{table}",),
+                ),
+                "indexes": _rows(
+                    connection, "SELECT indexrelid FROM pg_index WHERE indrelid=%s::regclass ORDER BY indexrelid",
+                    (f"hydro.{table}",),
+                ),
+                "chunks": _rows(
+                    connection, "SELECT chunk_schema, chunk_name, is_compressed FROM timescaledb_information.chunks "
+                    "WHERE hypertable_schema='hydro' AND hypertable_name=%s ORDER BY chunk_name", (table,),
+                ),
+                "settings": _rows(
+                    connection, "SELECT attname, segmentby_column_index, orderby_column_index, "
+                    "orderby_asc, orderby_nullsfirst "
+                    "FROM timescaledb_information.compression_settings WHERE hypertable_schema='hydro' "
+                    "AND hypertable_name=%s ORDER BY attname", (table,),
+                ),
+            }
+
+        before = snapshot("river_timeseries")
+        assert before["chunks"] and all(row["is_compressed"] for row in before["chunks"])
+        apply_migrations_from_zero(throwaway_database_url)
+        assert snapshot("river_timeseries_legacy") == before
+        assert _scalar(
+            connection, "SELECT pg_get_userbyid(relowner) FROM pg_class "
+            "WHERE oid='hydro.river_timeseries'::regclass",
+        ) == "nhms_ingest_rw"
+        assert _rows(
+            connection, "SELECT column_name, udt_name FROM information_schema.columns WHERE table_schema='hydro' "
+            "AND table_name='river_timeseries' ORDER BY ordinal_position",
+        ) == [
+            {"column_name": name, "udt_name": kind} for name, kind in (
+                ("run_key", "int4"), ("basin_version_key", "int4"), ("river_network_version_key", "int4"),
+                ("river_segment_key", "int4"), ("valid_time", "timestamptz"), ("lead_time_hours", "int4"),
+                ("variable_e", "river_variable"), ("value", "float8"), ("unit_e", "river_unit"),
+                ("quality_flag_e", "river_quality_flag"), ("created_at", "timestamptz"),
+            )
+        ]
+        assert snapshot("river_timeseries")["settings"] == [
+            dict(attname=name, segmentby_column_index=segment, orderby_column_index=order,
+                 orderby_asc=asc, orderby_nullsfirst=nulls)
+            for name, segment, order, asc, nulls in (
+                ("river_segment_key", 2, None, None, None), ("run_key", 1, None, None, None),
+                ("valid_time", None, 2, True, False), ("variable_e", None, 1, True, False),
+            )
+        ]
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("column", ["variable_e", "unit_e", "quality_flag_e"])
+def test_out_of_vocabulary_enum_literal_rejects_entire_narrow_write(parsed_run: Any, column: str) -> None:
+    connection, _ = parsed_run
+    before = _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY river_segment_key, valid_time")
+    with connection.cursor() as cursor:
+        with pytest.raises(psycopg2.errors.InvalidTextRepresentation):
+            cursor.execute(f"""
+                INSERT INTO hydro.river_timeseries
+                    (run_key, basin_version_key, river_network_version_key, river_segment_key,
+                     valid_time, variable_e, value, unit_e, quality_flag_e)
+                VALUES (4001,5001,6001,7001,%s,'q_down',9,'m3/s','ok'),
+                       (4001,5001,6001,7001,%s,
+                        {'%s' if column == 'variable_e' else "'q_down'"},
+                        10, {'%s' if column == 'unit_e' else "'m3/s'"},
+                        {'%s' if column == 'quality_flag_e' else "'ok'"})
+            """, (_START_TIME + timedelta(days=20), _START_TIME + timedelta(days=21), "outside_vocabulary"))
+    assert _rows(connection, "SELECT * FROM hydro.river_timeseries ORDER BY river_segment_key, valid_time") == before
+
+
+@pytest.mark.parametrize("first", ["legacy_store_refused", "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"])
+def test_real_decline_conflict_polarity_and_narrow_reentry(
+    throwaway_database_url: str, tmp_path: Path, first: str,
+) -> None:
+    from scripts.node27_autopipeline import (
+        _already_ingested_runs,
+        _decline_key,
+        _declined_runs,
+        _record_recompute_decline,
+    )
+
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = psycopg2.connect(throwaway_database_url)
+    try:
+        _seed_authority(connection, output_uri="s3://nhms/runs/run_dual_write/output")
+        with connection.cursor() as cursor:
+            cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='legacy' WHERE run_id=%s", (_RUN_ID,))
+        connection.commit()
+        product = tmp_path / "runs" / _RUN_ID / "output" / "fixture.rivqdown"
+        product.parent.mkdir(parents=True)
+        product.write_text("1,2\n")
+        key = _decline_key(tmp_path, _RUN_ID)
+        assert key is not None
+        compressed = "HANDOFF_APPLY_COMPRESSED_CHUNK_BLOCKED"
+
+        def record(reason: str) -> None:
+            _record_recompute_decline(throwaway_database_url, run_id=_RUN_ID,
+                                      init_state_id=key[0], product_mtime=key[1], reason_code=reason, detail=reason)
+
+        record(first)
+        record(compressed if first == "legacy_store_refused" else "legacy_store_refused")
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT reason_code FROM ops.ingest_recompute_decline WHERE run_id=%s", (_RUN_ID,))
+            assert cursor.fetchone() == ("legacy_store_refused",)
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == {_RUN_ID}
+            cursor.execute("UPDATE hydro.hydro_run SET timeseries_store='narrow' WHERE run_id=%s", (_RUN_ID,))
+        connection.commit()
+        with connection.cursor() as cursor:
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == set()
+        connection.commit()
+        record(compressed)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT reason_code FROM ops.ingest_recompute_decline WHERE run_id=%s", (_RUN_ID,))
+            assert cursor.fetchone() == (compressed,)
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == {_RUN_ID}
+        assert _already_ingested_runs(throwaway_database_url, [_RUN_ID], object_store_root=tmp_path) == {_RUN_ID}
+        connection.commit()
+        with pytest.raises(RuntimeError, match="stale"):
+            record("legacy_store_refused")
+        import os
+        os.utime(product, (key[1] + 10, key[1] + 10))
+        with connection.cursor() as cursor:
+            assert _declined_runs(cursor, [_RUN_ID], tmp_path) == set()
+    finally:
+        connection.close()
+
+
+def test_seed_database_roundtrips_exact_river_authorities_postexpand(throwaway_database_url: str) -> None:
+    from db.seeds import seed_demo
+    from tests.test_seed import _expected_river_seed_samples
+
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = psycopg2.connect(throwaway_database_url)
+    try:
+        # Distinct identity domains make even cross-column key swaps visible.
+        with connection.cursor() as cursor:
+            for table, column, start in _IDENTITY_RESTARTS:
+                cursor.execute(f"ALTER TABLE {table} ALTER COLUMN {column} RESTART WITH {start}")
+        seed_demo.seed_database(connection)
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT h.run_id, rs.river_segment_id, rt.variable_e, rt.lead_time_hours,
+                       rt.valid_time, rt.value, rt.unit_e, rt.quality_flag_e,
+                       bv.basin_version_id, rnv.river_network_version_id,
+                       h.basin_version_id, rs.river_network_version_id, h.timeseries_store
+                FROM hydro.river_timeseries rt
+                JOIN hydro.hydro_run h USING (run_key)
+                JOIN core.river_segment rs USING (river_segment_key)
+                JOIN core.basin_version bv ON bv.basin_version_key=rt.basin_version_key
+                JOIN core.river_network_version rnv ON rnv.river_network_version_key=rt.river_network_version_key
+            """)
+            rows = cursor.fetchall()
+            expected = _expected_river_seed_samples(after_met=True)
+            assert len(rows) == len(expected)
+            assert {row[:4]: row[4:8] for row in rows} == expected
+            assert {row[8:] for row in rows} == {
+                (seed_demo.BASIN_VERSION_ID, seed_demo.RIVER_NETWORK_VERSION_ID,
+                 seed_demo.BASIN_VERSION_ID, seed_demo.RIVER_NETWORK_VERSION_ID, "narrow")
+            }
+            assert {(row[2], row[6]) for row in rows} == {("q_down", "m3/s"), ("y_stage", "m")}
+    finally:
+        connection.rollback()
+        connection.close()

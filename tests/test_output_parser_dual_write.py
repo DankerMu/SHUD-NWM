@@ -1,15 +1,4 @@
-"""Unit coverage for the river_timeseries surrogate-key dual write (#1340).
-
-The production writer (``PsycopgOutputParserRepository``) must populate the
-seven normalized columns added by migration 000050 in the SAME INSERT that
-writes the legacy text columns, resolve the four keys from the two load
-queries it already runs (zero extra round-trips), and fail the whole batch
-closed when a key cannot be resolved.
-
-Everything here is asserted against the statements the repository actually
-hands to psycopg2 — a fake connection records them in order — so the shape
-claims are mechanical, not narrative.
-"""
+"""Narrow writer contract at the psycopg boundary."""
 
 from __future__ import annotations
 
@@ -36,16 +25,9 @@ BASIN_VERSION_KEY = 9003
 SEGMENT_KEYS: dict[str, int | None] = {"seg_0": 101, "seg_1": 102, "seg_2": 103}
 
 EXPECTED_INSERT_COLUMNS = [
-    "run_id",
-    "basin_version_id",
-    "river_network_version_id",
-    "river_segment_id",
     "valid_time",
     "lead_time_hours",
-    "variable",
     "value",
-    "unit",
-    "quality_flag",
     "run_key",
     "river_network_version_key",
     "basin_version_key",
@@ -55,39 +37,10 @@ EXPECTED_INSERT_COLUMNS = [
     "quality_flag_e",
 ]
 
-# Text columns the pre-#1340 statement refreshed. Byte-for-byte unchanged: the
-# rollback-safety guarantee is that the text write is untouched.
-EXPECTED_TEXT_SET_COLUMNS = {
-    "basin_version_id",
-    "lead_time_hours",
-    "value",
-    "unit",
-    "quality_flag",
+EXPECTED_SET_COLUMNS = {
+    "lead_time_hours", "value", "basin_version_key",
+    "river_network_version_key", "unit_e", "quality_flag_e",
 }
-# Mirror rule (design D3): every refreshed text column that HAS a surrogate
-# counterpart gets it re-set too. Since #1442 (design D10.3) the SET list also
-# refreshes the identity keys/enum that have no refreshed text counterpart —
-# a no-op for key-converged rows, and the only way a replay can still heal a
-# NULL-key sentinel row now that the pre-INSERT DELETE is keyed.
-EXPECTED_SURROGATE_SET_COLUMNS = {
-    "basin_version_key",
-    "unit_e",
-    "quality_flag_e",
-    "run_key",
-    "river_network_version_key",
-    "river_segment_key",
-    "variable_e",
-}
-# The text identity columns of the conflict target stay unwritten on both the
-# INSERT-conflict and the replay path: re-assigning a conflict-target column is
-# either a no-op or a lie about which row was matched.
-EXPECTED_NEVER_SET_COLUMNS = (
-    "run_id",
-    "river_network_version_id",
-    "river_segment_id",
-    "variable",
-    "valid_time",
-)
 
 
 def _t(hour: int) -> datetime:
@@ -182,6 +135,8 @@ class _FakeConnection:
         for needle, columns, rows in self.responses:
             if needle.lower() in normalized:
                 return columns, rows
+        if normalized.startswith("select timeseries_store"):
+            return ["timeseries_store"], [("narrow",)]
         return None, []
 
     def cursor(self) -> _FakeCursor:
@@ -260,7 +215,7 @@ def _upsert(
 # ---------------------------------------------------------------------------
 
 
-def test_insert_column_list_appends_the_seven_normalized_columns(
+def test_insert_column_list_is_narrow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _patch_execute_values(monkeypatch)
@@ -270,7 +225,7 @@ def test_insert_column_list_appends_the_seven_normalized_columns(
     assert _insert_columns(statement) == EXPECTED_INSERT_COLUMNS
 
 
-def test_every_value_row_has_arity_17_with_keys_and_same_sourced_enum_values(
+def test_every_value_row_has_narrow_keys_and_enum_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each enum column carries the row's own text value (design D2). The batch
@@ -286,7 +241,7 @@ def test_every_value_row_has_arity_17_with_keys_and_same_sourced_enum_values(
     observed_quality_flags: set[str] = set()
 
     for row, value_row in zip(rows, value_rows, strict=True):
-        assert len(value_row) == 17
+        assert len(value_row) == 10
         field = dict(zip(columns, value_row, strict=True))
 
         assert field["run_key"] == RUN_KEY
@@ -299,37 +254,22 @@ def test_every_value_row_has_arity_17_with_keys_and_same_sourced_enum_values(
         assert field["unit_e"] == row.unit
         assert field["quality_flag_e"] == row.quality_flag
         assert (field["variable_e"], field["unit_e"]) == ("q_down", "m3/s")
-        # Same in-process object, not merely equal. Weak evidence on its own
-        # (interned literals compare identical anyway) — it only documents that
-        # the writer forwards the value rather than re-deriving it.
-        assert field["variable_e"] is field["variable"]
-        assert field["unit_e"] is field["unit"]
-        assert field["quality_flag_e"] is field["quality_flag"]
         observed_quality_flags.add(field["quality_flag_e"])
 
     assert observed_quality_flags == set(QUALITY_FLAGS), "both enum members must be exercised in one batch"
 
 
-def test_text_columns_of_each_value_row_are_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Rollback safety: the first ten values are the pre-#1340 tuple, in order."""
-    calls = _patch_execute_values(monkeypatch)
-    rows = _rows()
-    _upsert(_FakeConnection(), rows)
+def test_legacy_run_is_refused_before_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from workers.output_parser.parser import LegacyStoreWriteRefused
 
-    _statement, value_rows = calls[0]
-    for row, value_row in zip(rows, value_rows, strict=True):
-        assert value_row[:10] == (
-            row.run_id,
-            row.basin_version_id,
-            row.river_network_version_id,
-            row.river_segment_id,
-            row.valid_time,
-            row.lead_time_hours,
-            row.variable,
-            row.value,
-            row.unit,
-            row.quality_flag,
-        )
+    calls = _patch_execute_values(monkeypatch)
+    connection = _FakeConnection([
+        ("select timeseries_store", ["timeseries_store"], [("legacy",)]),
+    ])
+    with pytest.raises(LegacyStoreWriteRefused):
+        _upsert(connection, _rows())
+    assert calls == []
+    assert not any("DELETE" in sql for sql, _ in connection.executions)
 
 
 def test_on_conflict_set_mirrors_every_refreshable_and_identity_surrogate_column(
@@ -341,17 +281,11 @@ def test_on_conflict_set_mirrors_every_refreshable_and_identity_surrogate_column
     statement, _value_rows = calls[0]
     assignments = _do_update_assignments(statement)
 
-    assert set(assignments) == EXPECTED_TEXT_SET_COLUMNS | EXPECTED_SURROGATE_SET_COLUMNS
+    assert set(assignments) == EXPECTED_SET_COLUMNS
     for column in assignments:
         assert assignments[column] == f"EXCLUDED.{column}"
 
-    # Text conflict-target identity is re-set on neither side; its surrogate
-    # counterparts are (design D10.3 — replay heals a NULL-key sentinel row).
-    assert "ON CONFLICT (run_id, river_network_version_id, river_segment_id, variable, valid_time)" in statement
-    for identity_column in EXPECTED_NEVER_SET_COLUMNS:
-        assert identity_column not in assignments
-    for surrogate_column in ("run_key", "river_network_version_key", "river_segment_key", "variable_e"):
-        assert assignments[surrogate_column] == f"EXCLUDED.{surrogate_column}"
+    assert _conflict_target(statement) == ["run_key", "river_segment_key", "variable_e", "valid_time"]
 
 
 def test_integration_replay_statement_stays_equivalent_to_the_production_insert(
@@ -525,33 +459,6 @@ def test_empty_batch_still_short_circuits_before_the_key_check() -> None:
     assert connection.executions == []
 
 
-# ---------------------------------------------------------------------------
-# The dual write adds no statement: guard -> DELETE -> INSERT, unchanged
-# ---------------------------------------------------------------------------
-
-
-def test_statement_sequence_is_unchanged_and_adds_no_key_resolution_query(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _patch_execute_values(monkeypatch)
-    connection = _FakeConnection()
-    _upsert(connection, _rows())
-
-    shapes = [" ".join(statement.split()) for statement, _params in connection.executions]
-    assert [_classify(shape) for shape in shapes] == [
-        "existence_probe",
-        "guard_set_local",
-        "guard_chunks",
-        "guard_reset",
-        "delete",
-        "insert",
-    ]
-    # Keys come from the load queries; the write path must not resolve them.
-    for shape in shapes:
-        assert "core.river_segment" not in shape
-        assert "core.basin_version" not in shape
-        assert "core.river_network_version" not in shape
-        assert "hydro.hydro_run" not in shape
 
 
 def test_unbound_repository_self_delegates_with_the_keys_untouched(
@@ -665,7 +572,10 @@ def test_mark_run_parsed_stamps_parsed_at_unconditionally_before_the_status_gate
 
     stamp, stamp_params = connection.executions[0]
     normalized_stamp = " ".join(stamp.split())
-    assert normalized_stamp == "UPDATE hydro.hydro_run SET parsed_at = now() WHERE run_id = %s"
+    assert normalized_stamp == (
+        "UPDATE hydro.hydro_run SET parsed_at = now(), timeseries_store = 'narrow' "
+        "WHERE run_id = %s AND timeseries_store = 'narrow'"
+    )
     assert stamp_params == ("run_a",)
     # The whole point (design D2): no status predicate. PARSE_READY_RUN_STATUSES
     # excludes 'published', and re-parsing a published run is exactly the
@@ -729,3 +639,28 @@ def test_unbound_mark_run_parsed_puts_both_writes_in_one_transaction(
 
     assert len(connection.executions) == 2
     assert connection.commits == 0, "the transaction() context owns the commit, not _fetch_all"
+
+
+@pytest.mark.parametrize("entrypoint", ["_click_main", "_argparse_main"])
+@pytest.mark.parametrize("command", ["parse", "shud-output"])
+def test_legacy_refusal_has_a_dedicated_cli_exit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    entrypoint: str, command: str,
+) -> None:
+    from workers.output_parser import cli
+    from workers.output_parser.parser import LegacyStoreWriteRefused
+
+    # Object-store/DB failures are covered separately; inject the typed outcome
+    # at the command boundary to exercise both CLI implementations.
+    def refused(_run_id: str) -> Any:
+        raise LegacyStoreWriteRefused("legacy run")
+
+    monkeypatch.setattr(cli, "_parse", refused)
+    if entrypoint == "_click_main":
+        with pytest.raises(SystemExit) as exc:
+            getattr(cli, entrypoint)([command, "--run-id", "run_a"])
+        code = exc.value.code
+    else:
+        code = getattr(cli, entrypoint)([command, "--run-id", "run_a"])
+    assert code == 3
+    assert "OUTPUT_PARSE_LEGACY_STORE_REFUSED" in capsys.readouterr().err

@@ -2000,6 +2000,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # selector's own duplicate-pattern guard forbids a second
             # PATH_TEST_RULES entry for an already-owned module.)
             *SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_river_ts_read_path_surrogate_keys_integration.py",
         ),
     ),
     PathTestRule(
@@ -2494,7 +2495,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # CI green. Narrow pattern on purpose: no other file under db/seeds/ is
         # in the register.
         "db/seeds/seed_demo.py",
-        ("tests/test_river_ts_text_identity_cleanup.py",),
+        (
+            "tests/test_river_ts_text_identity_cleanup.py",
+            "tests/test_seed.py",
+            "tests/test_river_ts_dual_write_integration.py",
+        ),
     ),
     # #1774 node-27 write-path least-privilege roles. `db/**` above only buys
     # tests/test_migrations.py, which never reads the role SQL; the runner is a

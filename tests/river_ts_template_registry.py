@@ -8,9 +8,9 @@ makes the oracles exhaustive rather than anecdotal:
 * every entry is rendered for BOTH stores by the shape oracles, so a template
   that cannot survive the narrow rendering is red in the PR that writes it, not
   in the migration window;
-* the frozen I1 golden retains its 20 historical keys. Five unchanged entries
-  still compare against current raw inputs; the eight store-qualified raw
-  sources have separate routing and executed-query semantic owners;
+* the frozen I1 golden retains its 20 historical keys. Three unchanged entries
+  still compare against current raw inputs; eight store-qualified raw sources
+  and two narrow-only writer reads have separate semantic owners;
 * **registry closure** — for every production file, the canonical-table mentions
   of that file's entries plus its declared non-template mentions must equal the
   file's census. An unregistered read site is therefore red, which is the only
@@ -279,10 +279,10 @@ FORECAST_STORE_ENTRIES: tuple[TemplateEntry, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _copyback_discovery(_store: str) -> str:
+def _copyback_discovery(store: str) -> str:
     from services.tile_publisher import forcing_copyback_backfill
 
-    return forcing_copyback_backfill._DISCOVER_BACKFILL_RUNS_SQL
+    return forcing_copyback_backfill._backfill_discovery_source_template(store)
 
 
 COPYBACK_ENTRIES: tuple[TemplateEntry, ...] = (
@@ -303,33 +303,10 @@ COPYBACK_ENTRIES: tuple[TemplateEntry, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _publisher_discovery(_store: str) -> str:
-    """The q_down discovery aggregate, PostgreSQL dialect.
-
-    Registered once, not once per dialect: both dialects come out of the SAME
-    f-string and differ only in the interpolated aggregate expressions, so the
-    aid block — the thing this register exists to render per store — is shared.
-    Registering both would also double the file's mention count and break the
-    closure equality for no added coverage; the sqlite dialect's own shape stays
-    pinned by the cleanup oracle's parametrised test.
-    """
+def _publisher_discovery(store: str) -> str:
     from services.tile_publisher import publisher
 
-    return publisher._qdown_discovery_sql(
-        is_sqlite=False,
-        optional={"select": "h.run_manifest_uri, h.output_uri,", "group": ", h.run_manifest_uri"},
-        forcing={
-            "select": "fv.forcing_version_id AS forcing_row_forcing_version_id,",
-            "join": "LEFT JOIN met.forcing_version fv ON fv.forcing_version_id = h.forcing_version_id",
-            "group": ", fv.forcing_version_id",
-        },
-        where_clauses=[
-            "h.run_type = 'forecast'",
-            "h.status IN ('succeeded', 'parsed', 'published')",
-            "r.variable_e = 'q_down'",
-            "lower(h.source_id) = :source_id",
-        ],
-    )
+    return publisher._qdown_discovery_source_template(store)
 
 
 PUBLISHER_ENTRIES: tuple[TemplateEntry, ...] = (
@@ -430,8 +407,8 @@ MVT_ENTRIES: tuple[TemplateEntry, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# workers/output_parser/parser.py (read statements only; the DELETE and the
-# dual-write INSERT are write surfaces and belong to I7)
+# workers/output_parser/parser.py (narrow-only read statements; DELETE and
+# INSERT remain non-template write surfaces owned by I7)
 # ---------------------------------------------------------------------------
 
 
@@ -455,7 +432,7 @@ PARSER_ENTRIES: tuple[TemplateEntry, ...] = (
         path="workers/output_parser/parser.py",
         kind="statement",
         params="positional",
-        expected_aids=1,
+        expected_aids=0,
         mentions=1,
         source=_parser_read(0),
     ),
@@ -464,11 +441,23 @@ PARSER_ENTRIES: tuple[TemplateEntry, ...] = (
         path="workers/output_parser/parser.py",
         kind="statement",
         params="positional",
-        expected_aids=1,
+        expected_aids=0,
         mentions=1,
         source=_parser_read(1),
     ),
 )
+
+#: I7 task 4.3 deliberately removes the historical run_id aids and their
+#: positional bindings from the narrow-only writer. These are not routed
+#: reader sources: production executes them directly against canonical narrow.
+#: The frozen golden and hash stay untouched. Key/window and census owners:
+#: test_river_ts_text_identity_cleanup.py; executed compressed-key/replay owners:
+#: test_river_ts_dual_write_integration.py. Both-store renderer sweeps remain
+#: grammar/predicate checks, not a claim that the writer reads legacy storage.
+PARSER_NARROW_WRITER_KEYS = frozenset({
+    "parser:replace_chain_probe",
+    "parser:replace_chain_window",
+})
 
 
 REGISTRY: tuple[TemplateEntry, ...] = (
@@ -485,6 +474,8 @@ REGISTRY: tuple[TemplateEntry, ...] = (
 #: The MVT identity probe executes through the renderer but keeps its unchanged,
 #: store-independent raw input and therefore remains historical-comparable.
 ROUTED_SOURCE_KEYS = frozenset({
+    "publisher:qdown_discovery",
+    "forcing_copyback_backfill:discover_backfill_runs",
     "display_coverage:refresh",
     "forecast_store:segment_rows_source",
     "forecast_store:latest_product_river_source",

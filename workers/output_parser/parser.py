@@ -37,6 +37,11 @@ DEFAULT_DB_STATEMENT_TIMEOUT_MS = 60_000
 IDENTITY_KEY_MISSING_ERROR_CODE = "OUTPUT_PARSE_IDENTITY_KEY_MISSING"
 PARSE_READY_RUN_STATUSES = ("succeeded", "parsed", "failed")
 FAILABLE_RUN_STATUSES = ("created", "staged", "submitted", "running", "succeeded", "parsed")
+LEGACY_STORE_REFUSED_EXIT_CODE = 3
+
+
+class LegacyStoreWriteRefused(RuntimeError):
+    """A legacy run cannot be replaced by the narrow writer."""
 
 
 def _result_value(row: Any, key: str, index: int) -> Any:
@@ -263,6 +268,9 @@ class OutputParser:
                 qc_passed=qc_record.passed,
                 max_value_m3s=qc_record.checks_json["range_check"].get("max_value"),
             )
+        except LegacyStoreWriteRefused:
+            # A routing refusal must not mutate the legacy run's terminal state.
+            raise
         except OutputParsingError as error:
             self._mark_run_failed_preserving_error(context.run_id, error.error_code, error.message)
             raise
@@ -680,35 +688,6 @@ def _replacement_key_bindings(
     return (run_key, river_network_version_key, replacement_key[2])
 
 
-def _replacement_read_bindings(
-    replacement_key: tuple[str, str, str],
-    run_key: int,
-    river_network_version_key: int,
-) -> tuple[int, str, int, str]:
-    """Bindings for the two READ statements of one replacement group (#1681).
-
-    Same keys as :func:`_replacement_key_bindings` plus the transitional
-    ``run_id`` pushdown aid, and the tuple order mirrors the SQL conjunction
-    order exactly — ``run_key``, then the aid that sits immediately under it,
-    then the network key, then the variable. Keeping the two orders identical is
-    what makes the aid readable as "redundant with the conjunct above it" rather
-    than as a fourth independent filter.
-
-    The aid is a no-op filter for rows this repo writes: run_id<->run_key is
-    bijective through ``hydro.hydro_run`` (run_id PK, run_key IDENTITY UNIQUE)
-    and every writer pairs them (the INSERT below from one ``HydroRunContext``;
-    #1339's backfill via ``run_key = hr.run_key ... WHERE hr.run_id =
-    t.run_id``) — a writer-enforced invariant, not a schema constraint:
-    ``run_key`` has no FK (000050:216-224) and the run_id<->run_key pairing has no audit leg —
-    000050's equality audit (:290-298) covers only text<->surrogate drift — so the aid's
-    soundness rests on the writer invariant alone. Remove it with #1342 and its marker line.
-    """
-    return (
-        run_key,
-        replacement_key[0],
-        river_network_version_key,
-        replacement_key[2],
-    )
 
 
 def _resolved_segment_keys(
@@ -889,6 +868,16 @@ class PsycopgOutputParserRepository:
                     segment_keys=segment_keys,
                 )
             return
+        with self._connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT timeseries_store FROM hydro.hydro_run WHERE run_key = %s FOR UPDATE",
+                (run_key,),
+            )
+            store = _result_value(cursor.fetchone(), "timeseries_store", 0)
+            if store == "legacy":
+                raise LegacyStoreWriteRefused(f"Run {rows[0].run_id} belongs to the legacy store")
+            if store != "narrow":
+                raise OutputParsingError("DATABASE_ROW_MISSING", "Narrow run identity is missing")
         incoming_windows: dict[tuple[str, str, str], tuple[datetime, datetime]] = {}
         for replacement_key in replacement_keys:
             key_times = [
@@ -900,60 +889,17 @@ class PsycopgOutputParserRepository:
         replacement_windows: dict[tuple[str, str, str], tuple[datetime, datetime]] = {}
         for replacement_key in replacement_keys:
             with self._connection.cursor() as cursor:
-                # Existence probe first. A bare min/max with these filters makes
-                # the planner walk valid_time_idx backward per chunk hunting for
-                # the first matching row — for a NEW run (0 rows) that is a full
-                # index scan of every chunk. The MATERIALIZED fence on the
-                # fallback blocks the same min/max transform, so the window read
-                # keeps its own index descent and touches only this key's rows.
-                #
-                # Which index (#1442, corrected by #1681): NOT the pkey any
-                # more. The pkey is (run_id, river_network_version_id,
-                # river_segment_id, variable, valid_time) (000006:56) and its
-                # leading column is unbound by the KEY predicates alone. The two
-                # statements have two legs, and they descend different indexes:
-                #
-                # * UNCOMPRESSED chunks — 000051's
-                #   river_ts_selected_identity_key_valid_time_idx (run_key,
-                #   basin_version_key, river_network_version_key, variable_e,
-                #   valid_time DESC): `run_key` is the bound leading column, and
-                #   the other two bound keys apply as index filters past the
-                #   unbound basin_version_key. #1342 must keep that index (or an
-                #   equivalent run_key-leading one) when it drops the text
-                #   columns; the mitigation above is only as good as the descent.
-                # * COMPRESSED chunks — no key access path exists at all. 000047
-                #   segments by (run_id, river_network_version_id,
-                #   river_segment_id), so the compressed chunks' only index
-                #   leads with the TEXT run_id and `run_key` cannot be pushed
-                #   into it. Neither read is valid_time bounded (that is their
-                #   job: find this key's rows OUTSIDE the incoming window), so
-                #   chunk exclusion cannot spare them either, and a key-only
-                #   probe for a NEW run has to decompress-scan every compressed
-                #   chunk to prove "no rows" — node-27 receipt 2026-08-21: every
-                #   run of the 2026082012 cycles hit the 60 s statement_timeout
-                #   and no forecast was ingested (#1681).
-                #
-                # Hence the bound `run_id` aid below: it reaches the segmentby
-                # index on compress_hyper_*, and it filters nothing (run_id and
-                # run_key are bijective and dual-written from this same batch
-                # context), so the result set — and therefore the replacement
-                # window handed to the guard — is unchanged. It is transitional:
-                # #1342 deletes the marker line and the aid line together, and
-                # must give the compressed layout a key-form segmentby first.
-                # The DELETE below deliberately does NOT carry it: it is
-                # valid_time bounded and runs only after the guard proved its
-                # target chunks uncompressed, so 000051's index is enough.
+                # Probe before min/max; the fence prevents a global time-index
+                # walk for absent runs. Both storage layouts now lead by run_key.
                 cursor.execute(
                     """
                     SELECT 1 FROM hydro.river_timeseries
                     WHERE run_key = %s
-                      -- transitional compressed-chunk pushdown aid, remove with #1342
-                      AND run_id = %s
                       AND river_network_version_key = %s
                       AND variable_e = %s
                     LIMIT 1
                     """,
-                    _replacement_read_bindings(replacement_key, run_key, river_network_version_key),
+                    _replacement_key_bindings(replacement_key, run_key, river_network_version_key),
                 )
                 if cursor.fetchone() is None:
                     existing_window = (None, None)
@@ -964,8 +910,6 @@ class PsycopgOutputParserRepository:
                             SELECT valid_time
                             FROM hydro.river_timeseries
                             WHERE run_key = %s
-                              -- transitional compressed-chunk pushdown aid, remove with #1342
-                              AND run_id = %s
                               AND river_network_version_key = %s
                               AND variable_e = %s
                         )
@@ -973,7 +917,7 @@ class PsycopgOutputParserRepository:
                                MAX(valid_time) AS valid_time_max
                         FROM existing
                         """,
-                        _replacement_read_bindings(replacement_key, run_key, river_network_version_key),
+                        _replacement_key_bindings(replacement_key, run_key, river_network_version_key),
                     )
                     existing_window = cursor.fetchone()
             incoming_min, incoming_max = incoming_windows[replacement_key]
@@ -1012,24 +956,13 @@ class PsycopgOutputParserRepository:
             )
         value_rows = [
             (
-                row.run_id,
-                row.basin_version_id,
-                row.river_network_version_id,
-                row.river_segment_id,
                 row.valid_time,
                 row.lead_time_hours,
-                row.variable,
                 row.value,
-                row.unit,
-                row.quality_flag,
                 run_key,
                 river_network_version_key,
                 basin_version_key,
                 segment_key,
-                # Same in-process value as the text column above; the enum
-                # column type coerces it server-side, so text<->enum drift is
-                # unrepresentable here and an out-of-vocabulary literal fails
-                # the transaction closed (design D2).
                 row.variable,
                 row.unit,
                 row.quality_flag,
@@ -1039,16 +972,9 @@ class PsycopgOutputParserRepository:
         self._execute_values(
             """
             INSERT INTO hydro.river_timeseries (
-                run_id,
-                basin_version_id,
-                river_network_version_id,
-                river_segment_id,
                 valid_time,
                 lead_time_hours,
-                variable,
                 value,
-                unit,
-                quality_flag,
                 run_key,
                 river_network_version_key,
                 basin_version_key,
@@ -1058,28 +984,12 @@ class PsycopgOutputParserRepository:
                 quality_flag_e
             )
             VALUES %s
-            -- The conflict-update assignments below also refresh the identity
-            -- key/enum columns (#1442). For a key-converged row that is a no-op:
-            -- the excluded tuple carries exactly the keys the conflict target
-            -- resolved from. It restores the "replay heals" property the text
-            -- link used to give for free -- the keyed DELETE above only reaches
-            -- rows whose keys are already populated, so a NULL-key sentinel row
-            -- left by a pre-000050 write would otherwise survive replay
-            -- untouched. Keep the assignment list itself comment-free: the
-            -- shape tests parse it by splitting on commas
-            -- (tests/test_output_parser_dual_write.py).
-            ON CONFLICT (run_id, river_network_version_id, river_segment_id, variable, valid_time)
+            ON CONFLICT (run_key, river_segment_key, variable_e, valid_time)
             DO UPDATE SET
-                basin_version_id = EXCLUDED.basin_version_id,
                 lead_time_hours = EXCLUDED.lead_time_hours,
                 value = EXCLUDED.value,
-                unit = EXCLUDED.unit,
-                quality_flag = EXCLUDED.quality_flag,
-                run_key = EXCLUDED.run_key,
                 river_network_version_key = EXCLUDED.river_network_version_key,
                 basin_version_key = EXCLUDED.basin_version_key,
-                river_segment_key = EXCLUDED.river_segment_key,
-                variable_e = EXCLUDED.variable_e,
                 unit_e = EXCLUDED.unit_e,
                 quality_flag_e = EXCLUDED.quality_flag_e
             """,
@@ -1202,8 +1112,8 @@ class PsycopgOutputParserRepository:
         self._fetch_all(
             """
             UPDATE hydro.hydro_run
-            SET parsed_at = now()
-            WHERE run_id = %s
+            SET parsed_at = now(), timeseries_store = 'narrow'
+            WHERE run_id = %s AND timeseries_store = 'narrow'
             """,
             (run_id,),
         )

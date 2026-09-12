@@ -87,6 +87,7 @@ class _DeclineStore:
         self.rows: list[dict[str, Any]] = []
         self.write_error: BaseException | None = None
         self.count_calls = 0
+        self.stores: dict[str, str] = {}
 
     def record(
         self,
@@ -101,8 +102,14 @@ class _DeclineStore:
         if self.write_error is not None:
             raise self.write_error
         key = (run_id, init_state_id, product_mtime)
-        if key in {(row["run_id"], row["init_state_id"], row["product_mtime"]) for row in self.rows}:
-            return  # ON CONFLICT DO NOTHING
+        store = self.stores.setdefault(run_id, "legacy" if reason_code == "legacy_store_refused" else "narrow")
+        if reason_code == "legacy_store_refused" and store != "legacy":
+            raise RuntimeError("Legacy refusal is stale for narrow run")
+        for row in self.rows:
+            if key == (row["run_id"], row["init_state_id"], row["product_mtime"]):
+                if store != "legacy" or row["reason_code"] != "legacy_store_refused":
+                    row.update(reason_code=reason_code, detail=detail)
+                return
         self.rows.append(
             {
                 "run_id": run_id,
@@ -1821,7 +1828,7 @@ class _IngestedRunsConnection:
     def __init__(
         self,
         *,
-        decline_rows: list[tuple[str, str, float]],
+        decline_rows: list[tuple[str, str, float, str]],
         completeness_rows: list[tuple[Any, ...]] | None = None,
         decline_error: BaseException | None = None,
         savepoint_error: BaseException | None = None,
@@ -1876,7 +1883,7 @@ def test_matching_decline_record_suppresses_the_run_and_reads_only_its_products(
         _set_initial_state(object_store_root, run_id, "state-a")
     mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
 
-    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", mtime)])
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", mtime, BLOCKED)])
     monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
     reads = _count_object_store_reads(monkeypatch)
 
@@ -1909,7 +1916,7 @@ def test_unmatched_decline_key_reopens_the_run(
     _set_initial_state(object_store_root, RUN_A, "state-a")
     mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
 
-    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, recorded_state, mtime + mtime_delta)])
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, recorded_state, mtime + mtime_delta, BLOCKED)])
     monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
 
     assert (
@@ -1933,7 +1940,7 @@ def test_any_of_a_runs_decline_records_may_match(
     mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
 
     conn = _IngestedRunsConnection(
-        decline_rows=[(RUN_A, "state-a", mtime - 90.0), (RUN_A, "state-a", mtime)]
+        decline_rows=[(RUN_A, "state-a", mtime - 90.0, BLOCKED), (RUN_A, "state-a", mtime, BLOCKED)]
     )
     monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
 
@@ -1951,7 +1958,7 @@ def test_decline_record_is_inert_without_an_object_store_side(
 
     object_store_root = tmp_path / "object-store"
     _write_run(object_store_root, RUN_A)
-    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", 1.0)])
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", 1.0, BLOCKED)])
     monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
 
     assert autopipe._already_ingested_runs(NODE27_DATABASE_URL, [RUN_A], object_store_root=None) == set()
@@ -2068,7 +2075,7 @@ def _tick_with_real_read_side(
     else:
         # The decline was written by an EARLIER tick: the row stands before this
         # one starts, on both the read surface and the count surface.
-        conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", mtime)])
+        conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "state-a", mtime, BLOCKED)])
         store.rows.append(
             {
                 "run_id": RUN_A,
@@ -2153,7 +2160,7 @@ def test_declined_runs_degrades_when_the_savepoint_itself_fails(
     mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
 
     conn = _IngestedRunsConnection(
-        decline_rows=[(RUN_A, "state-a", mtime)],
+        decline_rows=[(RUN_A, "state-a", mtime, BLOCKED)],
         savepoint_error=psycopg2.errors.DiskFull("could not extend file"),
     )
     cur = conn.cursor()
@@ -2233,7 +2240,7 @@ def test_blocked_run_without_init_evidence_is_declined_then_suppressed_next_tick
     # side that recorded something unreadable cannot be papered over here.
     conn_two = _IngestedRunsConnection(
         decline_rows=[
-            (row["run_id"], row["init_state_id"], row["product_mtime"]) for row in store.rows
+            (row["run_id"], row["init_state_id"], row["product_mtime"], row["reason_code"]) for row in store.rows
         ]
     )
     monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn_two)
@@ -2268,7 +2275,7 @@ def test_empty_init_state_key_suppresses_a_run_with_no_manifest_at_all(
     mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
     assert mtime is not None
 
-    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "", mtime)])
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "", mtime, BLOCKED)])
     monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
 
     assert autopipe._already_ingested_runs(
@@ -2291,7 +2298,7 @@ def test_decline_on_the_empty_init_sentinel_reopens_once_a_manifest_appears(
     # component -- `_set_initial_state` rewrites the manifest and moves mtime.
     mtime = autopipe._run_product_mtime(object_store_root, RUN_A)
 
-    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "", mtime)])
+    conn = _IngestedRunsConnection(decline_rows=[(RUN_A, "", mtime, BLOCKED)])
     monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: conn)
 
     assert (
@@ -2661,3 +2668,51 @@ def test_cancelled_decline_record_keeps_the_run_failing_with_its_forcing_stage(
     assert store.rows == []
     assert summary["declines_active"] == 0
     assert published_calls == []
+
+
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_legacy_parse_refusal_declines_only_after_ledger_commit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str], write_fails: bool,
+) -> None:
+    store = _DeclineStore()
+    if write_fails:
+        store.write_error = RuntimeError("ledger unavailable")
+
+    def command(argv: list[str], _env: dict[str, str]) -> tuple[int, str, str]:
+        if "workers.output_parser.cli" in argv:
+            return 3, "", "OUTPUT_PARSE_LEGACY_STORE_REFUSED: legacy run"
+        return 0, "{}", ""
+
+    root, calls, _published = _prepare_autopipe(
+        monkeypatch, tmp_path, runs={RUN_A: True},
+        decline_store=store, command_handler=command,
+    )
+    rc, summary = _run_main(capsys, root)
+    assert rc == (1 if write_fails else 0)
+    assert summary["runs"]["details"][0]["outcome"] == ("failed" if write_fails else "declined")
+    assert summary["runs"]["details"][0]["reason_code"] == "legacy_store_refused"
+    assert _command_kinds(calls) == ["register", "parse"]
+    assert NODE27_DATABASE_URL not in json.dumps(summary)
+    if write_fails:
+        assert store.rows == []
+    else:
+        assert store.rows[0]["reason_code"] == "legacy_store_refused"
+        assert summary["runs"]["declined_runs"] == [
+            {"run_id": RUN_A, "reason_code": "legacy_store_refused"},
+        ]
+
+
+def test_legacy_decline_suppresses_newer_products_without_reading_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    root = tmp_path / "objects"
+    _write_run(root, RUN_A)
+    _set_initial_state(root, RUN_A, "new-state")
+    connection = _IngestedRunsConnection(
+        decline_rows=[(RUN_A, "old-state", 1.0, "legacy_store_refused")],
+    )
+    monkeypatch.setattr(autopipe, "_connect", lambda *_args, **_kwargs: connection)
+    reads = _count_object_store_reads(monkeypatch)
+    assert autopipe._already_ingested_runs(NODE27_DATABASE_URL, [RUN_A], object_store_root=root) == {RUN_A}
+    assert reads == []

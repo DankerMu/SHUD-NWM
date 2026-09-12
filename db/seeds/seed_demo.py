@@ -767,16 +767,9 @@ def seed_hydro(cursor: Any, execute_values: Any, rng: random.Random) -> None:
         cursor,
         """
         INSERT INTO hydro.river_timeseries (
-            run_id,
-            basin_version_id,
-            river_network_version_id,
-            river_segment_id,
             valid_time,
             lead_time_hours,
-            variable,
             value,
-            unit,
-            quality_flag,
             run_key,
             river_network_version_key,
             basin_version_key,
@@ -846,13 +839,8 @@ def _build_river_timeseries_rows(
             for lead_time_hours, valid_time in enumerate(hourly_times(start_time, forecast_hours)):
                 rows.append(
                     (
-                        run_id,
-                        BASIN_VERSION_ID,
-                        RIVER_NETWORK_VERSION_ID,
-                        segment.river_segment_id,
                         valid_time,
                         lead_time_hours,
-                        variable,
                         river_value(
                             rng,
                             segment.segment_order,
@@ -861,14 +849,10 @@ def _build_river_timeseries_rows(
                             forecast_hours=forecast_hours,
                             flow_offset=flow_offset,
                         ),
-                        unit,
-                        quality_flag,
                         run_key,
                         river_network_version_key,
                         basin_version_key,
                         segment_key,
-                        # Same in-process values as the text columns above; the
-                        # enum column types coerce them server-side.
                         variable,
                         unit,
                         quality_flag,

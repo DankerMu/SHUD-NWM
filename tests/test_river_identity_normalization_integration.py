@@ -170,10 +170,20 @@ def _forget_migration(database_url: str, version: str) -> None:
 
 @pytest.fixture()
 def migrated(throwaway_database_url: str) -> Any:
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     yield connection
     connection.close()
+
+
+@pytest.fixture()
+def expanded(throwaway_database_url: str) -> Any:
+    apply_migrations_from_zero(throwaway_database_url)
+    connection = _connect(throwaway_database_url)
+    try:
+        yield connection
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------------------------
@@ -191,9 +201,9 @@ def test_migration_chain_replays_idempotently_and_creates_each_object_once(
     running zero statements. Forgetting the ledger entry for 000050 is what
     makes the replay real.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     _forget_migration(throwaway_database_url, _MIGRATION_000050)
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         assert _scalar(
@@ -257,14 +267,11 @@ def test_seven_fact_columns_have_no_stored_default_so_no_rewrite_happened(migrat
         assert row["attnotnull"] is False, f"{name} must stay nullable until cutover"
 
 
-# The one index the migration chain is allowed to put on the normalized fact
-# columns, and its exact column tuple. Kept next to the test that enforces it so
-# a future migration cannot quietly widen the allowance by editing only the
-# assertion. Ordering is the index's own (`indkey`) order; the `valid_time DESC`
-# direction is pinned separately, against the migration text, in
-# tests/test_migrations.py.
+# Post-expand canonical indexes. Legacy text indexes remain on the renamed table.
 EXPECTED_NORMALIZED_COLUMN_INDEXES = {
-    "river_ts_selected_identity_key_valid_time_idx": [
+    "river_timeseries_narrow_pkey": ["run_key", "river_segment_key", "variable_e", "valid_time"],
+    "river_ts_segment_time_key_idx": ["river_segment_key", "variable_e", "valid_time"],
+    "river_ts_run_discovery_key_idx": [
         "run_key",
         "basin_version_key",
         "river_network_version_key",
@@ -274,35 +281,10 @@ EXPECTED_NORMALIZED_COLUMN_INDEXES = {
 }
 
 
-def test_exactly_one_discovery_index_and_no_foreign_key_on_the_new_columns(migrated: Any) -> None:
-    """FK half: still zero. Index half: re-pinned from zero to exactly one.
-
-    Pin evolution — this assertion has been correct twice and means different
-    things each time:
-
-    * **#1339 era (zero-index).** 000050 added the seven columns and
-      deliberately added no index at all; its header (000050:79-84) defers the
-      whole index design to the read-path switch. "No index touches these
-      columns" was the mechanically checkable form of that deferral.
-    * **#1341 era (exactly-one-index), current.** 000051 delivers the deferred
-      design: one integer discovery index on ``(run_key, basin_version_key,
-      river_network_version_key, variable_e, valid_time DESC)``. A count of
-      zero is now the failure, so the pin moves to an exact enumeration rather
-      than being deleted — the property worth protecting was never "no
-      indexes", it was "no index nobody designed".
-    * **#1342 will revisit.** Dropping the text columns retires the retained
-      text indexes and may add or reshape key-side ones; whoever does that
-      updates ``EXPECTED_NORMALIZED_COLUMN_INDEXES`` and this note, and the
-      diff shows the decision.
-
-    The FK half is unchanged and must stay zero for a different reason: a
-    foreign key on ``basin_version_key`` would make the cutover's compression
-    ALTER fail outright, because TimescaleDB 2.10 requires FK columns to be
-    covered by segmentby and ``basin_version_key`` is not in the target
-    segmentby.
-    """
+def test_canonical_narrow_indexes_and_segmentby_foreign_keys(expanded: Any) -> None:
+    """Exactly three indexes and two inline FKs; no basin/network FK."""
     assert _scalar(
-        migrated,
+        expanded,
         """
         SELECT count(*) FROM pg_constraint con, pg_attribute a
         WHERE con.conrelid = 'hydro.river_timeseries'::regclass AND con.contype = 'f'
@@ -310,14 +292,14 @@ def test_exactly_one_discovery_index_and_no_foreign_key_on_the_new_columns(migra
           AND a.attname = ANY(%s)
         """,
         (list(NORMALIZED_COLUMNS),),
-    ) == 0
+    ) == 2
 
     # Every index on the parent hypertable that references at least one
     # normalized column, with its full column list. `indrelid = ...regclass`
     # keeps per-chunk indexes out; `HAVING bool_or(...)` is what restricts the
     # result to indexes this pin is about, while `array_agg` still reports the
     # index's other columns so a tuple change is visible.
-    with migrated.cursor() as cursor:
+    with expanded.cursor() as cursor:
         cursor.execute(
             """
             SELECT ic.relname AS index_name,
@@ -439,7 +421,7 @@ def test_backfill_fills_every_row_and_a_second_pass_changes_nothing(
     shared lag criterion; otherwise the toy data (dated 2026-01-01) would be
     processed or skipped depending on when the suite runs.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -477,7 +459,7 @@ def test_backfill_resumes_after_interruption_with_the_cursor_discarded(
     UPDATE idempotent. The second invocation writes to a different receipt
     path, so it genuinely starts with no cursor at all.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -518,7 +500,7 @@ def test_a_budget_capped_backfill_makes_progress_on_every_invocation(
     first batch's worth of rows — reporting ``clean``/``deferred``/exit 0 the
     whole time.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -559,7 +541,7 @@ def test_a_budget_capped_backfill_makes_progress_on_every_invocation(
 def test_backfill_stops_fail_closed_and_names_the_unresolvable_rows(
     throwaway_database_url: str, tmp_path: Any
 ) -> None:
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -607,7 +589,7 @@ def test_cutover_refuses_while_any_chunk_is_compressed(
 ) -> None:
     """Oracle: node-27 throwaway (TimescaleDB 2.10.2). CI's pg15-latest does
     not prove this."""
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -645,7 +627,7 @@ def test_cutover_with_a_null_left_raises_and_changes_absolutely_nothing(
     already changed by the time VALIDATE raises — compression still enabled,
     the text foreign key still present, the old primary key still in place.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -686,7 +668,7 @@ def test_cutover_positive_path_then_compression_round_trip_preserves_every_row(
     throwaway_database_url: str,
 ) -> None:
     """Oracle: node-27 throwaway. Mirrors probe log step d-6 end to end."""
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -749,7 +731,7 @@ def test_cutover_positive_path_then_compression_round_trip_preserves_every_row(
 def test_backfill_skips_a_compressed_chunk_and_lists_it_in_the_receipt(
     throwaway_database_url: str, tmp_path: Any
 ) -> None:
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -951,7 +933,7 @@ def test_already_ingested_counts_a_published_run_with_null_key_rows_in_a_compres
     it — so every tick re-sent its per-cycle forcing handoff into a compressed
     `met` chunk and was correctly rejected, 544 times per tick.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -994,7 +976,7 @@ def test_already_ingested_excludes_a_parsed_run_whose_only_rows_are_null_key(
     invisible to the old join and unaggregatable by the backfill alike, so
     ``_seed_run_facts(normalized=False)`` deliberately leaves `parsed_at` NULL.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -1034,7 +1016,7 @@ def test_already_ingested_counts_a_parsed_run_on_its_parse_timestamp_alone(
     `tests/test_hydro_run_parsed_at_integration.py::test_a_parsed_run_without_a_parse_timestamp_stays_incomplete`
     and is deliberately not duplicated here.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -1077,7 +1059,7 @@ def test_already_ingested_counts_a_published_run_with_no_fact_rows_at_all(
     have re-run the whole handoff for a run whose chunks retention dropped on
     purpose. 'published' is the authority fact that the data was there.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -1115,7 +1097,7 @@ def test_already_ingested_recompute_detection_on_a_legacy_run_is_init_state_only
     retention) and deliberate — `hydro_run.updated_at` is not an acceptable
     stand-in for a parse timestamp, since every tick's register upsert bumps it.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -1174,7 +1156,7 @@ def test_already_ingested_recompute_detection_compares_product_mtime_to_parsed_a
     and the first assertion below (products rewritten AFTER the parse must not be
     skipped) fails.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -1295,7 +1277,7 @@ def test_matching_decline_record_suppresses_a_published_and_a_succeeded_run(
     completeness statement's result at all — which is exactly why the
     suppression cannot live inside `_ingested_run_is_current`.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
@@ -1304,6 +1286,9 @@ def test_matching_decline_record_suppresses_a_published_and_a_succeeded_run(
         # Only the published run gets fact rows: a 'succeeded' run has never
         # been parsed, so it has none, and that is the point.
         _seed_run_facts(connection, "declined-published", normalized=True)
+        # Seed the historical wide facts, then exercise production post-expand
+        # decline routing with the real legacy/narrow authority installed.
+        apply_migrations_from_zero(throwaway_database_url)
 
         published_mtime = _write_recomputed_product(tmp_path, "declined-published", "state-a")
         succeeded_mtime = _write_recomputed_product(tmp_path, "declined-succeeded", "state-a")
@@ -1336,12 +1321,13 @@ def test_a_newer_product_reopens_a_declined_run(throwaway_database_url: str, tmp
     decline table; a terminal state that could not be reopened by new evidence
     would be a permanent data hole.
     """
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     connection = _connect(throwaway_database_url)
     try:
         _seed_authority(connection)
         _seed_run(connection, "reopened-published", status="published", init_state_id="state-a")
         _seed_run_facts(connection, "reopened-published", normalized=True)
+        apply_migrations_from_zero(throwaway_database_url)
 
         declined_mtime = _write_recomputed_product(tmp_path, "reopened-published", "state-a")
         _record_decline(connection, "reopened-published", "state-a", declined_mtime)

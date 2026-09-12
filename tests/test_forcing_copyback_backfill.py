@@ -58,6 +58,7 @@ def _init_db(tmp_path: Path) -> tuple[Engine, Path]:
                 CREATE TABLE hydro_run (
                     run_id TEXT PRIMARY KEY,
                     run_key INTEGER,
+                    timeseries_store TEXT NOT NULL DEFAULT 'narrow',
                     status TEXT NOT NULL,
                     model_id TEXT,
                     basin_version_id TEXT,
@@ -75,7 +76,7 @@ def _init_db(tmp_path: Path) -> tuple[Engine, Path]:
                 -- probe correlates on the key and filters on the enum since
                 -- #1442 (sqlite has no enum type, so variable_e is TEXT holding
                 -- the same label).
-                CREATE TABLE river_timeseries (
+                CREATE TABLE river_timeseries_legacy (
                     run_id TEXT NOT NULL,
                     run_key INTEGER,
                     river_segment_id TEXT NOT NULL,
@@ -87,6 +88,11 @@ def _init_db(tmp_path: Path) -> tuple[Engine, Path]:
                 """
             )
         )
+        connection.execute(text("""
+            CREATE TABLE river_timeseries (
+                run_key INTEGER, valid_time DATETIME, variable_e TEXT, value REAL
+            )
+        """))
         connection.execute(
             text(
                 """
@@ -143,9 +149,9 @@ def _insert_run(
             text(
                 """
                 INSERT INTO river_timeseries (
-                    run_id, run_key, river_segment_id, valid_time, variable, variable_e, value
+                    run_key, valid_time, variable_e, value
                 ) VALUES (
-                    :run_id, :run_key, 'seg-1', :valid_time, :variable, :variable, :value
+                    :run_key, :valid_time, :variable, :value
                 )
                 """
             ),
@@ -342,14 +348,11 @@ def test_db_discovery_filters_eligible_qdown_runs_and_counts_joined_forcing_vers
 
 def test_discovery_sql_drives_from_hydro_run_with_correlated_qdown_exists() -> None:
     sql = backfill_module._DISCOVER_BACKFILL_RUNS_SQL
-    assert sha256(sql.encode()).hexdigest() == "3f1037b6ad3be99fb448a1c6252eab893d2219cc880d254e0c9a0df377130116"
 
     assert "FROM hydro.hydro_run h" in sql
     assert "EXISTS (" in sql
-    # #1442: correlated on the surrogate key. `variable` keeps its transitional
-    # text conjunct (a literal that still reaches the compressed segmentby)
-    # alongside the enum predicate; `run_id` gets none, because it arrives by
-    # join and a text fact join is forbidden.
+    # Correlation stays key-only. Only the legacy branch retains the text
+    # ORDERBY batch filter; the canonical narrow branch needs only the enum.
     assert "rt.run_key = h.run_key" in sql
     assert "rt.run_id = h.run_id" not in sql
     assert "rt.variable = 'q_down'" in sql
@@ -366,8 +369,9 @@ def test_discovery_sql_drives_from_hydro_run_with_correlated_qdown_exists() -> N
     [
         ("river_timeseries", "run_key"),
         ("river_timeseries", "variable_e"),
-        ("river_timeseries", "variable"),
+        ("river_timeseries_legacy", "variable"),
         ("hydro_run", "run_key"),
+        ("hydro_run", "timeseries_store"),
     ],
 )
 def test_backfill_schema_guard_names_the_missing_identity_column(
@@ -409,8 +413,6 @@ def test_backfill_expanded_catalog_guard(tmp_path: Path, missing: str | None) ->
 
     engine, db_path = _init_db(tmp_path)
     with engine.begin() as connection:
-        connection.execute(text("CREATE TABLE river_timeseries_legacy AS SELECT * FROM river_timeseries"))
-        connection.execute(text("ALTER TABLE river_timeseries DROP COLUMN variable"))
         if missing == "legacy_variable":
             connection.execute(text("ALTER TABLE river_timeseries_legacy DROP COLUMN variable"))
         elif missing == "canonical":

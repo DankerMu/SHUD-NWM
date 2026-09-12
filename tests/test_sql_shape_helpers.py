@@ -794,14 +794,13 @@ def test_every_registered_template_renders_for_the_narrow_store(entry) -> None:
 
 
 #: The removed positional-placeholder indices of every positional entry, spelled
-#: out. Measured at 515a3947 and pinned as literals on purpose: a formula
-#: computed from the same render it checks agrees with whatever that render says
-#: (round-2 H7-a), and these indices are the caller's parameter tuple — an
-#: off-by-one here is a psycopg2 arity error in the migration window, or worse, a
-#: silently reordered tuple that binds `valid_time` where `run_id` belonged.
+#: out. I7 removed the parser's historical run_id aid and its binding, so both
+#: live narrow-only entries now remove nothing. Computing the pins from the same
+#: render would agree with any result (round-2 H7-a); an incorrect index is an
+#: arity error or a silently reordered caller tuple in the migration window.
 POSITIONAL_INDEX_PINS: dict[str, tuple[int, ...]] = {
-    "parser:replace_chain_probe": (1,),
-    "parser:replace_chain_window": (1,),
+    "parser:replace_chain_probe": (),
+    "parser:replace_chain_window": (),
 }
 
 
@@ -838,12 +837,12 @@ def test_every_registered_templates_aid_count_matches_its_marker_count(entry, st
 
 
 def test_the_rendered_aid_total_reconciles_with_the_per_file_census() -> None:
-    """The 13 raw templates carry the 30 source aids exactly once each.
+    """The 13 raw templates carry 28 aids after I7 removes the two writer aids.
 
     Forecast execution coverage is separate: eight spanning callers consume
     the shared segment source, and A9 consumes the known-run source.
     """
-    assert sum(entry.expected_aids for entry in REGISTRY) == 30
+    assert sum(entry.expected_aids for entry in REGISTRY) == 28
 
 
 def test_the_sanctioned_vocabulary_is_the_shared_one_not_a_private_copy() -> None:

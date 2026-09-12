@@ -43,7 +43,6 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -89,21 +88,15 @@ def _attach_schemas(engine: Engine) -> None:
 
 
 def _create_hydro_tables(connection: Any) -> None:
-    # F8: river_timeseries carries the real composite primary key and hydro_run
-    # run_manifest_uri is NOT NULL to match the production schema fidelity.
-    #
-    # #1442: both tables also carry migration 000050's surrogate keys and enum
-    # twins, and the network authority table exists, because the discovery
-    # aggregate now filters/groups on the keys and restores the network text by
-    # joining the authority. sqlite has no enum type, so `*_e` are TEXT columns
-    # holding the same labels 000050's enums do (the labels are byte-equal to the
-    # text values by construction, migration 000050:126-152).
+    # Expanded catalog: the historical text-shaped table stays separate from
+    # the canonical key/enum shape. SQLite represents enum values as TEXT.
     connection.execute(
         text(
             """
             CREATE TABLE hydro.hydro_run (
                 run_id TEXT PRIMARY KEY,
                 run_key INTEGER,
+                timeseries_store TEXT NOT NULL DEFAULT 'narrow',
                 run_type TEXT NOT NULL,
                 scenario_id TEXT,
                 model_id TEXT,
@@ -123,7 +116,7 @@ def _create_hydro_tables(connection: Any) -> None:
     connection.execute(
         text(
             """
-            CREATE TABLE hydro.river_timeseries (
+            CREATE TABLE hydro.river_timeseries_legacy (
                 run_id TEXT NOT NULL,
                 basin_version_id TEXT,
                 river_network_version_id TEXT NOT NULL,
@@ -145,6 +138,16 @@ def _create_hydro_tables(connection: Any) -> None:
             """
         )
     )
+    connection.execute(text("""
+        CREATE TABLE hydro.river_timeseries (
+            run_key INTEGER NOT NULL, basin_version_key INTEGER NOT NULL,
+            river_network_version_key INTEGER NOT NULL, river_segment_key INTEGER NOT NULL,
+            valid_time DATETIME NOT NULL, lead_time_hours INTEGER,
+            variable_e TEXT NOT NULL, value REAL NOT NULL,
+            unit_e TEXT NOT NULL, quality_flag_e TEXT NOT NULL,
+            PRIMARY KEY (run_key, river_segment_key, variable_e, valid_time)
+        )
+    """))
     connection.execute(
         text(
             """
@@ -346,13 +349,11 @@ def _insert_run(
             text(
                 """
                 INSERT INTO hydro.river_timeseries (
-                    run_id, basin_version_id, river_network_version_id,
-                    river_segment_id, valid_time, variable, value, unit, quality_flag,
+                    valid_time, value,
                     run_key, basin_version_key, river_network_version_key, river_segment_key,
                     variable_e, unit_e, quality_flag_e
                 ) VALUES (
-                    :run_id, :basin_version_id, :river_network_version_id,
-                    :segment, :valid_time, 'q_down', :value, 'm3/s', 'ok',
+                    :valid_time, :value,
                     :run_key, :basin_version_key, :river_network_version_key, :river_segment_key,
                     'q_down', 'm3/s', 'ok'
                 )
@@ -1938,17 +1939,12 @@ def test_publish_qdown_missing_hydro_run_table_raises_schema_missing(tmp_path: A
 def test_publish_qdown_river_catalog_window(tmp_path: Any, legacy_present: bool) -> None:
     publisher = _publisher(tmp_path)
     with _store() as session:
-        if legacy_present:
-            session.execute(text("ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_legacy"))
-            # This private seam exposes the driver error; the public entrypoint
-            # wraps it as QDOWN_PUBLISH_FAILED. Discovery routing is I7.
-            with pytest.raises(OperationalError, match="no such table: hydro.river_timeseries"):
-                publisher._publish_qdown_from_database(session, CYCLE_ID)
-        else:
-            session.execute(text("DROP TABLE hydro.river_timeseries"))
-            with pytest.raises(PublishError) as excinfo:
-                publisher._publish_qdown_from_database(session, CYCLE_ID)
-            assert excinfo.value.error_code == "DELIVERY_SCHEMA_MISSING"
+        session.execute(text("DROP TABLE hydro.river_timeseries"))
+        if not legacy_present:
+            session.execute(text("DROP TABLE hydro.river_timeseries_legacy"))
+        with pytest.raises(PublishError) as excinfo:
+            publisher._publish_qdown_from_database(session, CYCLE_ID)
+        assert excinfo.value.error_code == "DELIVERY_SCHEMA_MISSING"
 
 
 # --------------------------------------------------------------------------- #

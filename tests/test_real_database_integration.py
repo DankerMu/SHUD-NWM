@@ -130,7 +130,7 @@ def test_real_postgres_postgis_timescale_migrations_from_zero_are_idempotent(
             assert {
                 "basin_version_geom_gix",
                 "river_segment_geom_gix",
-                "river_ts_segment_time_idx",
+                "river_ts_segment_time_key_idx",
                 "pipeline_job_slurm_job_idx",
                 "pipeline_job_array_task_idx",
                 "river_segment_network_order_idx",
@@ -1071,8 +1071,10 @@ def test_authority_stats_hygiene_migration_replays_without_changing_anything(
 
 def _delete_shared_prefix_family(cursor: Any) -> None:
     """Undo ``_seed_shared_prefix_family`` for callers that cannot roll back."""
-
-    cursor.execute("DELETE FROM hydro.river_timeseries WHERE river_network_version_id = 'it1468_rnv_v1'")
+    cursor.execute("DELETE FROM hydro.river_timeseries rt USING core.river_segment rs "
+                   "WHERE rs.river_segment_key = rt.river_segment_key "
+                   "AND rs.river_network_version_id = 'it1468_rnv_v1'")
+    cursor.execute("DELETE FROM hydro.river_timeseries_legacy WHERE river_network_version_id = 'it1468_rnv_v1'")
     cursor.execute("DELETE FROM core.river_segment WHERE river_network_version_id = 'it1468_rnv_v1'")
     cursor.execute("DELETE FROM core.river_network_version WHERE river_network_version_id = 'it1468_rnv_v1'")
     cursor.execute("DELETE FROM core.basin_version WHERE basin_version_id = 'it1468_basin_v1'")
@@ -1197,8 +1199,8 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
 
     After that the only thing separating them is the candidate query's own
     clauses: `core`/`met` are in the schema tuple and must be analyzed,
-    `public` is not, and the hypertable chunk (`_timescaledb_internal`) stays
-    out under the schema tuple.
+    `public` is not, and a purpose-built `met.it1468_ts` hypertable is excluded
+    only by `NOT EXISTS`.
 
     The hypertable ROOT needs one more step. ANALYZE leaves an inheritance
     parent's `relpages` at 0 (it measures the root's own heap, which is empty --
@@ -1240,33 +1242,26 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
                 cursor.execute(f"ANALYZE {schema}.{table}")
                 cursor.execute("SELECT pg_stat_reset_single_table_counters(%s::regclass)", (f"{schema}.{table}",))
 
-            # The hypertable needs its FK parents before it can hold a row, and
-            # a chunk has to exist for the exclusion to be about anything.
-            _seed_shared_prefix_family(cursor)
-            # Deliberately the TEXT-era shape (surrogate keys left NULL): no
-            # reader is involved here, the rows exist only to materialize a
-            # chunk with pages in it.
             cursor.execute(
-                """
-                INSERT INTO hydro.river_timeseries (
-                    run_id, basin_version_id, river_network_version_id, river_segment_id,
-                    valid_time, lead_time_hours, variable, value, unit, quality_flag
-                )
-                SELECT 'it1468_run', 'it1468_basin_v1', 'it1468_rnv_v1', %s,
-                       TIMESTAMPTZ '2026-05-03 00:00:00+00' + (g || ' hours')::interval,
-                       g, 'q_down', g::double precision, 'm3 s-1', 'ok'
-                FROM generate_series(1, 48) AS g
-                """,
-                (f"{_SHARED_ID_PREFIX}0000",),
+                "CREATE TABLE met.it1468_ts (valid_time TIMESTAMPTZ NOT NULL, value DOUBLE PRECISION) "
+                "WITH (autovacuum_enabled = false)"
             )
-            cursor.execute("ANALYZE hydro.river_timeseries")
-            cursor.execute("SELECT pg_stat_reset_single_table_counters('hydro.river_timeseries'::regclass)")
+            cursor.execute(
+                "SELECT create_hypertable('met.it1468_ts', 'valid_time', "
+                "chunk_time_interval => interval '1 day')"
+            )
+            cursor.execute(
+                "INSERT INTO met.it1468_ts SELECT TIMESTAMPTZ '2026-05-03 00:00:00+00' + (g || ' hours')::interval, g "
+                "FROM generate_series(1, 48) g"
+            )
+            cursor.execute("ANALYZE met.it1468_ts")
+            cursor.execute("SELECT pg_stat_reset_single_table_counters('met.it1468_ts'::regclass)")
             cursor.execute(
                 """
                 SELECT chunk_schema, chunk_name,
                        pg_stat_reset_single_table_counters(format('%I.%I', chunk_schema, chunk_name)::regclass)
                 FROM timescaledb_information.chunks
-                WHERE hypertable_schema = 'hydro' AND hypertable_name = 'river_timeseries'
+                WHERE hypertable_schema = 'met' AND hypertable_name = 'it1468_ts'
                 """
             )
             chunks = [f"{row[0]}.{row[1]}" for row in cursor.fetchall()]
@@ -1282,10 +1277,10 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
             # throwaway database, dropped in `finally`, superuser autocommit
             # connection, nothing else reads this number. It MUST come after the
             # ANALYZE above, which would otherwise overwrite it back to 0.
-            cursor.execute("SELECT relpages FROM pg_class WHERE oid = 'hydro.river_timeseries'::regclass")
+            cursor.execute("SELECT relpages FROM pg_class WHERE oid = 'met.it1468_ts'::regclass")
             (root_relpages_after_analyze,) = cursor.fetchone()
             if root_relpages_after_analyze == 0:
-                cursor.execute("UPDATE pg_class SET relpages = 1 WHERE oid = 'hydro.river_timeseries'::regclass")
+                cursor.execute("UPDATE pg_class SET relpages = 1 WHERE oid = 'met.it1468_ts'::regclass")
 
             # Setup proof for the root: every predicate of the candidate query
             # is now satisfied EXCEPT the one under test. Without this the
@@ -1295,7 +1290,7 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
                 SELECT c.relpages, c.relkind, s.schemaname, s.last_analyze, s.last_autoanalyze
                 FROM pg_stat_user_tables s
                 JOIN pg_class c ON c.oid = s.relid
-                WHERE s.relid = 'hydro.river_timeseries'::regclass
+                WHERE s.relid = 'met.it1468_ts'::regclass
                 """
             )
             root_row = cursor.fetchone()
@@ -1306,7 +1301,7 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
                 "the root is not candidate-shaped and the NOT EXISTS clause would prove nothing"
             )
             assert root_relkind == "r", root_relkind
-            assert root_schema == "hydro", root_schema
+            assert root_schema == "met", root_schema
             assert root_last is None and root_last_auto is None, root_row
 
             # One textual difference, one database state: whatever the mutant
@@ -1321,9 +1316,9 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
             shipped_candidates = {f"{row[0]}.{row[1]}" for row in cursor.fetchall()}
             cursor.execute(mutant_sql)
             mutant_candidates = {f"{row[0]}.{row[1]}" for row in cursor.fetchall()}
-            assert "hydro.river_timeseries" not in shipped_candidates, shipped_candidates
-            assert "hydro.river_timeseries" in mutant_candidates, mutant_candidates
-            assert mutant_candidates - shipped_candidates == {"hydro.river_timeseries"}, (
+            assert "met.it1468_ts" not in shipped_candidates, shipped_candidates
+            assert "met.it1468_ts" in mutant_candidates, mutant_candidates
+            assert mutant_candidates - shipped_candidates == {"met.it1468_ts"}, (
                 shipped_candidates,
                 mutant_candidates,
             )
@@ -1338,7 +1333,7 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
             assert analyzed[table]["last_analyze"] is not None, analyzed[table]
         # Selection is exact, not merely inclusive: no migration seeds rows, so
         # every other core/met table is empty (relpages = 0) and only the
-        # fixture relations above can qualify. `hydro.river_timeseries` is the
+        # fixture relations above can qualify. `met.it1468_ts` is the
         # one exception -- its relpages was forged above -- which makes this
         # line a second, independent killer of a deleted `NOT EXISTS`: without
         # the clause the guard would ANALYZE the root and this list would grow.
@@ -1348,7 +1343,7 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
         touched = set(analyzed) | set(summary["deferred"])
         assert not [name for name in touched if name.startswith("public.")], summary
         assert not [name for name in touched if name.startswith("_timescaledb_internal.")], summary
-        assert "hydro.river_timeseries" not in touched, summary
+        assert "met.it1468_ts" not in touched, summary
         assert not touched & set(chunks), summary
         assert summary["deferred"] == [], summary
 
@@ -1362,7 +1357,7 @@ def test_stats_guard_repair_leg_analyzes_plain_authority_tables_and_skips_hypert
         with connection.cursor() as cursor:
             for schema, table in _AUTHORITY_PROBE_TABLES:
                 cursor.execute(f"DROP TABLE IF EXISTS {schema}.{table}")
-            _delete_shared_prefix_family(cursor)
+            cursor.execute("DROP TABLE IF EXISTS met.it1468_ts")
         connection.close()
 
 
@@ -1460,7 +1455,7 @@ def test_real_history_window_excludes_old_points_without_shortening_forecasts(
     from packages.common.forecast_store import PsycopgForecastStore
     from tests.integration_helpers import insert_river_timeseries_dual_written
 
-    apply_migrations_from_zero(throwaway_database_url)
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     seed_issue_126_data(throwaway_database_url)
     connection = psycopg2.connect(throwaway_database_url)
     try:

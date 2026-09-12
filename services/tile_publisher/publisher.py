@@ -352,10 +352,8 @@ class TilePublisher:
         if "forcing_version_id" not in forcing_columns:
             forcing_table_available = False
             forcing_columns = set()
-        # The variable filter is the enum column (#1442). Its transitional TEXT
-        # twin lives in the JOIN's ON clause, where the marker comment can sit on
-        # its own line — these fragments are joined onto ONE line, so a `--`
-        # comment here would swallow every clause after it.
+        # Both physical branches filter the enum and bind run-store authority
+        # before aggregation; only the legacy branch retains its text batch aid.
         where_clauses = [
             "h.run_type = 'forecast'" if "run_type" in hydro_columns else "1 = 1",
             "h.status IN ('succeeded', 'parsed', 'published')",
@@ -2999,6 +2997,21 @@ def _quality_flags(value: Any) -> list[str]:
     return [str(value)]
 
 
+def _qdown_discovery_source_template(store: str) -> str:
+    if store not in {"legacy", "narrow"}:
+        raise ValueError(f"Unsupported river timeseries store: {store}")
+    return f"""
+        SELECT r.run_key, r.river_network_version_key, r.river_segment_key,
+               r.value, r.valid_time, r.unit_e, r.quality_flag_e, r.variable_e
+        FROM hydro.river_timeseries r
+        JOIN hydro.hydro_run authority ON authority.run_key = r.run_key
+        WHERE authority.timeseries_store = '{store}'
+          -- transitional compressed-chunk pushdown aid, remove with #1342
+          AND r.variable = 'q_down'
+          AND r.variable_e = 'q_down'
+    """
+
+
 def _qdown_discovery_sql(
     *,
     is_sqlite: bool,
@@ -3006,37 +3019,13 @@ def _qdown_discovery_sql(
     forcing: Mapping[str, str],
     where_clauses: Sequence[str],
 ) -> str:
-    """Render the q_down publish-discovery aggregate for one dialect.
+    """Aggregate only authoritative facts, routing below the shared GROUP BY."""
+    from packages.common.river_ts_render import render_river_ts_sql
 
-    A pure function rather than an inline f-string so both legs are assertable
-    without a database: the cleanup oracle (#1442) renders each dialect and
-    checks the fact-table predicate shape, and the sqlite leg is additionally
-    exercised end to end by ``tests/test_tile_publisher.py``.
-
-    Identity handling (#1442, migration 000050/000051):
-
-    * the fact table is reached by ``r.run_key = h.run_key`` — key-only. The
-      run's identity arrives through the ``hydro_run`` join here, and a text
-      join equality is both unpushable and forbidden by the delta.
-    * ``r.variable`` survives as the one sanctioned transitional pushdown aid
-      (it is a literal, and compressed chunks are still ordered by the text
-      column), AND-ed with ``r.variable_e`` so it can only narrow. It goes with
-      the text columns in #1342.
-    * segment identity is counted on the KEYS. PostgreSQL counts the row tuple;
-      sqlite rejects ``COUNT(DISTINCT (a, b))`` ("row value misused") so its leg
-      concatenates the two integers, which cannot collide the way the old
-      ``network_id || '::' || segment_id`` text concatenation could.
-      Semantics note: the old text concatenation dropped a row whose either side
-      was NULL, the tuple form counts ``(NULL, NULL)`` as one. That difference
-      is unreachable while the seven keys are written all-or-nothing per row
-      (dual-write and backfill both write whole rows), which the node-27
-      preflight receipt re-verifies before this ships.
-    * unit / quality_flag aggregate the ENUM columns; on PostgreSQL they are
-      cast back to text, so the aggregated string is byte-identical.
-    * ``river_network_version_id`` is grouped by its KEY and restored from
-      ``core.river_network_version``, so the ``layer_id`` assembled downstream
-      (``q_down_{run_id}_{network}``) is unchanged.
-    """
+    sources = "\nUNION ALL\n".join(
+        render_river_ts_sql(_qdown_discovery_source_template(store), store).sql
+        for store in ("legacy", "narrow")
+    )
     if is_sqlite:
         segment_count = "COUNT(DISTINCT r.river_network_version_key || ':' || r.river_segment_key)"
         agg_unit = "GROUP_CONCAT(DISTINCT r.unit_e)"
@@ -3058,11 +3047,7 @@ def _qdown_discovery_sql(
                        {agg_unit} AS units,
                        {agg_quality} AS quality_flags
                 FROM hydro.hydro_run h
-                JOIN hydro.river_timeseries r
-                  ON r.run_key = h.run_key
-                 -- transitional compressed-chunk pushdown aid, remove with #1342
-                 AND r.variable = 'q_down'
-                 AND r.variable_e = 'q_down'
+                JOIN ({sources}) r ON r.run_key = h.run_key
                 JOIN core.river_network_version rnv
                   ON rnv.river_network_version_key = r.river_network_version_key
                 {forcing['join']}
@@ -3099,7 +3084,7 @@ def _has_table(session: Session, schema: str, table_name: str) -> bool:
 
 
 def _has_qdown_river_table(session: Session) -> bool:
-    return _has_table(session, "hydro", "river_timeseries") or _has_table(
+    return _has_table(session, "hydro", "river_timeseries") and _has_table(
         session, "hydro", "river_timeseries_legacy"
     )
 
