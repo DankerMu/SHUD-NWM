@@ -1562,6 +1562,7 @@ def test_actual_publisher_and_copyback_discover_only_authoritative_facts(
 ) -> None:
     from services.tile_publisher.forcing_copyback_backfill import discover_backfill_runs
     from services.tile_publisher.publisher import TilePublisher
+    from workers.data_adapters.base import cycle_id_for
 
     url, session = seeded
     _prepare_hydro_stores(session, post_expand_forecast_database, "legacy")
@@ -1574,9 +1575,10 @@ def test_actual_publisher_and_copyback_discover_only_authoritative_facts(
     session.commit()
     expected = {_KEYED_RUN_ID, _LEGACY_RUN_ID}
     publisher = TilePublisher(workspace_root=tmp_path, object_store_root=tmp_path / "objects")
-    cycles = [row["cycle"] for row in _rows(session,
-        "SELECT DISTINCT lower(source_id) || '_' || to_char(cycle_time, 'YYYYMMDDHH') AS cycle "
-        "FROM hydro.hydro_run", {})]
+    cycles = [
+        cycle_id_for(row["source_id"], row["cycle_time"])
+        for row in _rows(session, "SELECT DISTINCT source_id, cycle_time FROM hydro.hydro_run", {})
+    ]
 
     def discover_publisher() -> list[dict[str, Any]]:
         return [row for cycle in cycles for row in publisher._discover_qdown_runs(session, cycle)]
