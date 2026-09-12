@@ -169,6 +169,21 @@ def load_inventories(connection: Any) -> BoundInventories:
     return derive_bound_inventories(_binder(connection))
 
 
+_SELECTED_IDENTITY_FIELDS = (
+    "hypertable_schema",
+    "hypertable_name",
+    "origin_oid",
+    "origin_schema",
+    "origin_name",
+    "range_start",
+    "range_end",
+    "is_compressed",
+    "compressed_oid",
+    "compressed_schema",
+    "compressed_name",
+)
+
+
 def _reload_chunk(execute: Callable[..., list[Mapping[str, Any]]], chunk: CatalogChunk) -> CatalogChunk:
     return load_catalog_chunk(
         execute,
@@ -176,6 +191,58 @@ def _reload_chunk(execute: Callable[..., list[Mapping[str, Any]]], chunk: Catalo
         hypertable_name=chunk.hypertable_name,
         origin_schema=chunk.origin_schema,
         origin_name=chunk.origin_name,
+    )
+
+
+def _require_selected_identity(selected: CatalogChunk, current: CatalogChunk, *, stage: str) -> None:
+    drifted = [field for field in _SELECTED_IDENTITY_FIELDS if getattr(current, field) != getattr(selected, field)]
+    if drifted:
+        raise ColdRuntimeError(
+            "selected durable origin identity drifted on reload",
+            error_class="selection_race",
+            stage=stage,
+        )
+
+
+def _placeholder_group(chunk: CatalogChunk, *, reason: str) -> ResidencyGroup:
+    return ResidencyGroup(
+        hypertable_schema=chunk.hypertable_schema,
+        hypertable_name=chunk.hypertable_name,
+        origin_oid=chunk.origin_oid,
+        origin_schema=chunk.origin_schema,
+        origin_name=chunk.origin_name,
+        compressed_oid=chunk.compressed_oid,
+        compressed_schema=chunk.compressed_schema,
+        compressed_name=chunk.compressed_name,
+        range_start=chunk.range_start,
+        range_end=chunk.range_end,
+        is_compressed=chunk.is_compressed,
+        members=(),
+        blocker=reason,
+    )
+
+
+def _selection_race_observation(
+    chunk: CatalogChunk,
+    error: ColdRuntimeError,
+    *,
+    started: float,
+    clock: Callable[[], float],
+) -> MoveObservation:
+    dummy = _placeholder_group(chunk, reason=str(error))
+    return _observation(
+        outcome="blocked",
+        reconciliation="unknown",
+        plan_kind="blocked",
+        shell_sql_executed=False,
+        before=dummy,
+        after=dummy,
+        before_parity=None,
+        after_parity=None,
+        error_class="selection_race",
+        stage=error.stage,
+        reason=str(error),
+        timing=inspect_timing_payload(started, clock()),
     )
 
 
@@ -255,19 +322,7 @@ def _revalidate_locked(
     max_members: int,
 ) -> tuple[CatalogChunk, ResidencyGroup, WindowParity]:
     current = _reload_chunk(execute, selected)
-    if any(
-        getattr(current, field) != getattr(selected, field)
-        for field in (
-            "origin_oid",
-            "origin_schema",
-            "origin_name",
-            "range_start",
-            "range_end",
-            "hypertable_schema",
-            "hypertable_name",
-        )
-    ):
-        raise ColdRuntimeError("durable identity drifted under lock", error_class="selection_race", stage="revalidate")
+    _require_selected_identity(selected, current, stage="revalidate")
     eligibility = classify_eligibility(
         hypertable_schema=current.hypertable_schema,
         hypertable_name=current.hypertable_name,
@@ -368,6 +423,12 @@ def inspect_residency_group(
     try:
         execute = _binder(observer)
         current = _reload_chunk(execute, chunk)
+        try:
+            _require_selected_identity(chunk, current, stage="inspect")
+        except ColdRuntimeError as error:
+            if error.error_class != "selection_race":
+                raise
+            return _selection_race_observation(chunk, error, started=started, clock=runtime.clock)
         before = collect_residency_group(execute, current)
         _require_complete_group(before, max_members=runtime.max_members)
         before_parity = _parity_for(execute, inventories, current)
@@ -456,6 +517,7 @@ def migrate_residency_group(
         server, timescale = engine_versions(execute)
         assert_engine_versions(server, timescale)
         current = _reload_chunk(execute, chunk)
+        _require_selected_identity(chunk, current, stage="preflight")
         before = collect_residency_group(execute, current)
         _require_complete_group(before, max_members=runtime.max_members)
         before_parity = _parity_for(execute, inventories, current)
@@ -534,6 +596,8 @@ def migrate_residency_group(
                 timing=inspect_timing,
             )
     except ColdRuntimeError as error:
+        if error.error_class == "selection_race" and before is None:
+            return _selection_race_observation(chunk, error, started=started, clock=runtime.clock)
         if expected_before is None:
             raise
         dummy = expected_before

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from packages.common.compressed_chunk_cold_receipt import validate_receipt
 from packages.common.compressed_chunk_cold_residency import CatalogChunk, ColdResidencyError
 from packages.common.compressed_chunk_cold_runtime import (
     RuntimeConfig,
@@ -32,6 +35,11 @@ from tests.cold_residency_fakes import (
     expected_exec_identity,
     parity_aggregate,
     target_observation,
+)
+from tests.cold_residency_identity_mutants import (
+    FIRST_RELOAD_DRIFT_CASES,
+    apply_first_reload_replacement,
+    first_reload_mutation_sql,
 )
 
 _MISSING = object()
@@ -387,6 +395,27 @@ def test_locked_origin_name_drift_refuses_before_set_tablespace() -> None:
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
 
 
+def test_migrate_non_selection_preflight_error_still_raises_when_expected_before_is_absent() -> None:
+    connection, item = _loaded(FakeConnection())
+    connection.tablespace_location = "/wrong"
+    with pytest.raises(ColdRuntimeError, match="identity mismatch") as raised:
+        migrate_residency_group(
+            connect=_connect(connection),
+            chunk=item,
+            inventories=bound_inventories(),
+            watermark=WATERMARK,
+            lag_seconds=LAG,
+            cold_free_bytes=10_000,
+            hot_free_bytes=10_000,
+            cold_reserve_bytes=100,
+            wal_reserve_bytes=1,
+            expected_before=None,
+            config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        )
+    assert raised.value.error_class == "target_identity"
+    assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
+
+
 def test_reconcile_origin_name_drift_is_unknown() -> None:
     connection, item = _loaded(FakeConnection())
     inspect = inspect_residency_group(connect=_connect(connection), chunk=item, inventories=bound_inventories())
@@ -419,3 +448,62 @@ def test_reconcile_origin_name_drift_is_unknown() -> None:
         before_parity=inspect.before_parity,
     )
     assert observation.reconciliation == "unknown"
+
+
+def _assert_selection_race_before_mutation(observation, connection: FakeConnection) -> None:
+    assert observation.error_class == "selection_race"
+    assert observation.shell_sql_executed is False
+    assert observation.outcome not in {"planned", "already_cold", "migrated"}
+    executed = first_reload_mutation_sql(connection)
+    assert not executed, executed
+
+
+@pytest.mark.parametrize("kind", FIRST_RELOAD_DRIFT_CASES)
+def test_inspect_refuses_first_reload_identity_replacement_before_group_or_parity(kind: str) -> None:
+    connection, selected = _loaded(FakeConnection())
+    apply_first_reload_replacement(connection, selected, kind)
+    observation = inspect_residency_group(
+        connect=_connect(connection),
+        chunk=selected,
+        inventories=bound_inventories(),
+    )
+    _assert_selection_race_before_mutation(observation, connection)
+    assert observation.before.origin_oid == selected.origin_oid
+    assert observation.before.range_start == selected.range_start
+    assert observation.before.range_end == selected.range_end
+    assert observation.before.compressed_oid == selected.compressed_oid
+
+
+@pytest.mark.parametrize("kind", FIRST_RELOAD_DRIFT_CASES)
+def test_migrate_refuses_first_reload_identity_replacement_before_movement(kind: str) -> None:
+    connection, selected = _loaded(FakeConnection())
+    apply_first_reload_replacement(connection, selected, kind)
+    observation = migrate_residency_group(
+        connect=_connect(connection),
+        chunk=selected,
+        inventories=bound_inventories(),
+        watermark=WATERMARK,
+        lag_seconds=LAG,
+        cold_free_bytes=10_000,
+        hot_free_bytes=10_000,
+        cold_reserve_bytes=100,
+        wal_reserve_bytes=1,
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
+    )
+    _assert_selection_race_before_mutation(observation, connection)
+
+
+def test_receipt_validation_refuses_outer_durable_oid_mismatch_with_before_snapshot() -> None:
+    example_path = (
+        Path(__file__).resolve().parents[1]
+        / "schemas/examples/timeseries_cold_residency_receipt.intent.example.json"
+    )
+    payload = json.loads(example_path.read_text(encoding="utf-8"))
+    selected = payload["selected"][0]
+    before_durable = selected["before"]["durable"]
+    assert selected["durable"]["origin_oid"] != 11
+    assert before_durable["origin_oid"] == selected["durable"]["origin_oid"]
+    before_durable["origin_oid"] = 11
+    assert selected["durable"]["origin_oid"] != before_durable["origin_oid"]
+    with pytest.raises(Exception, match="durable|before|identity"):
+        validate_receipt(payload)

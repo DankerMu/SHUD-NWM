@@ -91,9 +91,16 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
             bootstrap_extension(connection)
             _bootstrap_production_shaped_schema(connection)
             inventories = derive_bound_inventories(lambda sql, params=None: _execute(connection, sql, params))
-            from tests.test_issue2224_origin_parity_integration import _assert_origin_parity_discriminator
+            from tests.test_issue2224_origin_parity_integration import (
+                _assert_origin_parity_discriminator,
+                _assert_shipping_role_origin_parity,
+            )
 
             _assert_origin_parity_discriminator(
+                inventories,
+                lambda sql, params=None: _execute(connection, sql, params),
+            )
+            _assert_shipping_role_origin_parity(
                 inventories,
                 lambda sql, params=None: _execute(connection, sql, params),
             )

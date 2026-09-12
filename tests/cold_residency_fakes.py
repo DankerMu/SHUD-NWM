@@ -365,6 +365,7 @@ class FakeConnection:
         }
         self.after_decompress_hook: Any = None
         self.after_recompress_hook: Any = None
+        self.pending_reload: tuple[CatalogChunk, tuple[CatalogRelation, ...]] | None = None
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
@@ -486,6 +487,13 @@ class FakeConnection:
             ]
             return rows[: int(limit)], names
         if "timescaledb_information.chunks" in text:
+            if self.pending_reload is not None:
+                replacement, relations = self.pending_reload
+                self.pending_reload = None
+                self.chunks.clear()
+                self.relations.clear()
+                self.origin_oids.clear()
+                self.load_group(replacement, relations)
             schema, name, origin_schema, origin_name = params
             for item in self.chunks.values():
                 if (

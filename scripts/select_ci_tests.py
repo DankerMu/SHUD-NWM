@@ -2554,7 +2554,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/compressed_chunk_cold_residency.py",
-        ("tests/test_node27_write_roles.py",),
+        (
+            "tests/test_node27_write_roles.py",
+            *ORIGIN_CHUNK_PARITY_TESTS,
+        ),
     ),
     PathTestRule(
         "infra/compose.compute.yml",

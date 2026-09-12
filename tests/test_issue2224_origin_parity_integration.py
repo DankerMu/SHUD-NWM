@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from packages.common.compressed_chunk_cold_residency import quote_ident, quote_literal
 from packages.common.compressed_chunk_cold_runtime_catalog import (
     compute_window_parity,
     load_catalog_chunk,
@@ -91,6 +92,250 @@ def _assert_plan_reads_only_selected_origin(
     assert relation_nodes & allowed, f"plan has no selected relation: {relation_nodes}"
     assert not relation_nodes & forbidden, f"plan reads forbidden relations: {relation_nodes & forbidden}"
     assert relation_nodes <= allowed, f"plan reads unrelated relation nodes: {relation_nodes - allowed}"
+
+
+def _reload_origin(execute: Any, chunk: Any) -> Any:
+    return load_catalog_chunk(
+        execute,
+        hypertable_schema=chunk.hypertable_schema,
+        hypertable_name=chunk.hypertable_name,
+        origin_schema=chunk.origin_schema,
+        origin_name=chunk.origin_name,
+    )
+
+
+def _decompress_update_recompress(execute: Any, chunk: Any, sql: str, params: tuple[object, ...]) -> Any:
+    origin = quote_literal(f"{chunk.origin_schema}.{chunk.origin_name}")
+    execute(f"SELECT decompress_chunk({origin}::regclass)")
+    execute(sql, params)
+    execute(f"SELECT compress_chunk({origin}::regclass)")
+    current = _reload_origin(execute, chunk)
+    assert current.is_compressed is True
+    assert current.compressed_oid is not None
+    return current
+
+
+def _first_row_time(execute: Any, run_id: str, value: float) -> object:
+    rows = execute(
+        """
+        SELECT valid_time
+        FROM hydro.river_timeseries
+        WHERE run_id = %s AND value = %s
+        ORDER BY valid_time
+        LIMIT 1
+        """,
+        (run_id, value),
+    )
+    assert len(rows) == 1
+    return rows[0]["valid_time"]
+
+
+def _assert_selected_compressed_target_sensitivity(
+    inventories: Any,
+    execute: Any,
+    *,
+    selected: Any,
+    sibling: Any,
+    all_chunks: Any,
+) -> None:
+    inventory = inventories.for_hypertable(selected.hypertable_schema, selected.hypertable_name)
+    selected = _reload_origin(execute, selected)
+    sibling = _reload_origin(execute, sibling)
+    assert selected.is_compressed is True
+    assert sibling.is_compressed is True
+    before = compute_window_parity(execute, inventory, selected).as_dict()
+    assert before["row_count"] == 24
+    direct_sql = window_parity_sql(inventory, selected)
+    selected_time = _first_row_time(execute, "selected", 1.0)
+    selected = _decompress_update_recompress(
+        execute,
+        selected,
+        """
+        UPDATE hydro.river_timeseries
+        SET value = 1.5
+        WHERE run_id = 'selected'
+          AND basin_version_id = 'b'
+          AND river_network_version_id = 'n'
+          AND river_segment_id = 's'
+          AND valid_time = %s
+          AND variable = 'q_down'
+          AND value = 1.0
+          AND unit = 'm3/s'
+        """,
+        (selected_time,),
+    )
+    after = compute_window_parity(execute, inventory, selected).as_dict()
+    assert after["row_count"] == before["row_count"]
+    assert after["non_null_counts"] == before["non_null_counts"]
+    assert after["checksum"] != before["checksum"]
+    selected = _decompress_update_recompress(
+        execute,
+        selected,
+        """
+        UPDATE hydro.river_timeseries
+        SET value = 1.0
+        WHERE run_id = 'selected'
+          AND basin_version_id = 'b'
+          AND river_network_version_id = 'n'
+          AND river_segment_id = 's'
+          AND valid_time = %s
+          AND variable = 'q_down'
+          AND value = 1.5
+          AND unit = 'm3/s'
+        """,
+        (selected_time,),
+    )
+    restored = compute_window_parity(execute, inventory, selected).as_dict()
+    assert restored == before
+    sibling_time = _first_row_time(execute, "sibling", 2.0)
+    sibling = _decompress_update_recompress(
+        execute,
+        sibling,
+        """
+        UPDATE hydro.river_timeseries
+        SET value = 2.5
+        WHERE run_id = 'sibling'
+          AND basin_version_id = 'b'
+          AND river_network_version_id = 'n'
+          AND river_segment_id = 's'
+          AND valid_time = %s
+          AND variable = 'q_down'
+          AND value = 2.0
+          AND unit = 'm3/s'
+        """,
+        (sibling_time,),
+    )
+    assert sibling.is_compressed is True
+    assert compute_window_parity(execute, inventory, selected).as_dict() == before
+    _assert_plan_reads_only_selected_origin(
+        execute,
+        sql=direct_sql,
+        selected=selected,
+        all_chunks=all_chunks(),
+    )
+
+
+def _assert_role_identity(execute: Any, role: str) -> None:
+    rows = execute(
+        "SELECT current_user AS current_user, rolsuper FROM pg_roles WHERE rolname = current_user"
+    )
+    assert len(rows) == 1
+    assert rows[0]["current_user"] == role
+    assert rows[0]["rolsuper"] is False
+
+
+def _sqlstate(error: BaseException) -> str | None:
+    value = getattr(error, "pgcode", None)
+    return str(value) if value else None
+
+
+def _assert_display_deny_write(execute: Any) -> None:
+    statements = (
+        """
+        INSERT INTO hydro.river_timeseries (
+            run_id, basin_version_id, river_network_version_id, river_segment_id,
+            valid_time, variable, value, unit
+        ) VALUES ('deny', 'b', 'n', 's', TIMESTAMPTZ '2026-06-27 00:00:00+00', 'q_down', 0.0, 'm3/s')
+        """,
+        (
+            "UPDATE hydro.river_timeseries SET value = 0.0 "
+            "WHERE run_id = 'selected' AND valid_time = TIMESTAMPTZ '2026-06-27 00:00:00+00'"
+        ),
+        "ALTER TABLE hydro.river_timeseries ADD COLUMN shipping_denied boolean",
+    )
+    for sql in statements:
+        try:
+            execute(sql)
+        except Exception as error:
+            assert _sqlstate(error) == "42501", error
+        else:
+            raise AssertionError(f"display role was allowed to execute {sql.strip()}")
+
+
+def _assert_shipping_role_origin_parity(inventories: Any, execute: Any) -> None:
+    execute("CREATE ROLE nhms_ingest_rw NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOLOGIN")
+    execute("CREATE ROLE nhms_display_ro NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOLOGIN")
+    execute("ALTER TABLE hydro.river_timeseries OWNER TO nhms_ingest_rw")
+    execute("ALTER TABLE met.forcing_station_timeseries OWNER TO nhms_ingest_rw")
+    for schema in ("hydro", "met"):
+        execute(f"GRANT USAGE ON SCHEMA {quote_ident(schema)} TO nhms_ingest_rw, nhms_display_ro")
+        execute(f"GRANT SELECT ON ALL TABLES IN SCHEMA {quote_ident(schema)} TO nhms_ingest_rw, nhms_display_ro")
+        execute(
+            f"GRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {quote_ident(schema)} TO nhms_ingest_rw"
+        )
+    candidates = load_eligible_chunks(
+        execute,
+        schema="hydro",
+        name="river_timeseries",
+        cutoff=_CUTOFF + timedelta(days=21),
+        limit=8,
+        max_bytes=16 * 1024**2,
+    )
+    selected = _reload_origin(execute, sorted(candidates, key=lambda item: (item.range_start, item.origin_oid))[0])
+    inventory = inventories.for_hypertable(selected.hypertable_schema, selected.hypertable_name)
+    original_compressed = (selected.compressed_oid, selected.compressed_schema, selected.compressed_name)
+    expected = compute_window_parity(execute, inventory, selected).as_dict()
+    direct_sql = window_parity_sql(inventory, selected)
+
+    def all_hydro_chunks() -> list[Any]:
+        rows = execute(
+            """
+            SELECT chunk_schema, chunk_name
+            FROM timescaledb_information.chunks
+            WHERE hypertable_schema = %s AND hypertable_name = %s
+            ORDER BY chunk_schema, chunk_name
+            """,
+            ("hydro", "river_timeseries"),
+        )
+        return [
+            load_catalog_chunk(
+                execute,
+                hypertable_schema="hydro",
+                hypertable_name="river_timeseries",
+                origin_schema=str(row["chunk_schema"]),
+                origin_name=str(row["chunk_name"]),
+            )
+            for row in rows
+        ]
+
+    for role in ("nhms_ingest_rw", "nhms_display_ro"):
+        execute(f"SET ROLE {quote_ident(role)}")
+        try:
+            _assert_role_identity(execute, role)
+            current = _reload_origin(execute, selected)
+            assert compute_window_parity(execute, inventory, current).as_dict() == expected
+            _assert_plan_reads_only_selected_origin(
+                execute,
+                sql=direct_sql,
+                selected=current,
+                all_chunks=all_hydro_chunks(),
+            )
+            if role == "nhms_display_ro":
+                _assert_display_deny_write(execute)
+        finally:
+            execute("RESET ROLE")
+
+    origin = quote_literal(f"{selected.origin_schema}.{selected.origin_name}")
+    execute(f"SELECT decompress_chunk({origin}::regclass)")
+    execute(f"SELECT compress_chunk({origin}::regclass)")
+    recompressed = _reload_origin(execute, selected)
+    assert recompressed.is_compressed is True
+    assert (
+        recompressed.compressed_oid,
+        recompressed.compressed_schema,
+        recompressed.compressed_name,
+    ) != original_compressed
+    expected_after = compute_window_parity(execute, inventory, recompressed).as_dict()
+    assert expected_after["row_count"] == expected["row_count"]
+    for role in ("nhms_ingest_rw", "nhms_display_ro"):
+        execute(f"SET ROLE {quote_ident(role)}")
+        try:
+            _assert_role_identity(execute, role)
+            current = _reload_origin(execute, recompressed)
+            assert compute_window_parity(execute, inventory, current).as_dict() == expected_after
+            assert current.compressed_oid == recompressed.compressed_oid
+        finally:
+            execute("RESET ROLE")
 
 
 def test_optional_only_observation_does_not_propagate_errors_or_empty_results() -> None:
@@ -365,6 +610,15 @@ def _assert_origin_parity_discriminator(inventories: Any, execute: Any) -> None:
         selected=selected,
         all_chunks=all_hydro_chunks(),
     )
+    _assert_selected_compressed_target_sensitivity(
+        inventories,
+        execute,
+        selected=selected,
+        sibling=sibling,
+        all_chunks=all_hydro_chunks,
+    )
+    selected = _reload_origin(execute, selected)
+    production_before = compute_window_parity(execute, inventory, selected).as_dict()
     # These two discriminators are intentionally separate: changing a target
     # row must change that target's checksum, while a future sibling must not
     # affect the selected compressed target or its direct-origin plan.

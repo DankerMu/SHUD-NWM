@@ -20,6 +20,7 @@ from tests.cold_residency_fakes import (
     required_exec_env,
     target_observation,
 )
+from tests.cold_residency_identity_mutants import apply_first_reload_replacement, first_reload_mutation_sql
 
 _ROOT = Path(__file__).resolve().parents[1]
 _NOW = datetime(2026, 7, 11, 12, tzinfo=UTC)
@@ -651,3 +652,35 @@ def test_four_hot_groups_bound_two_dry_run_observes_all(tmp_path: Path) -> None:
     assert {item["rank"] for item in deferred} == {1}
     assert all(item["reason"] == "per_tick_bound" for item in deferred)
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
+
+
+def test_run_tick_refuses_first_reload_oid_replacement_before_any_success_or_movement(
+    tmp_path: Path,
+) -> None:
+    env = _base_env(tmp_path)
+    config = _ready(runner.config_from_args(_args(), env))
+    connection = FakeConnection()
+    selected = chunk()
+    connection.load_group(selected, complete_relations())
+    apply_first_reload_replacement(connection, selected, "origin_oid")
+    receipt = runner.run_tick(
+        config,
+        now_utc=_NOW,
+        head_sha="a" * 40,
+        connect=_connect_factory(connection),
+        fetch_watermark=lambda: _NOW,
+    )
+    selected_items = list(receipt.get("selected") or [])
+    outcomes = {item.get("outcome") for item in selected_items}
+    plan_kinds = {item.get("plan_kind") for item in selected_items}
+    error_classes = {
+        (item.get("error") or {}).get("class")
+        for item in selected_items
+        if isinstance(item.get("error"), dict)
+    }
+    if receipt.get("error"):
+        error_classes.add(receipt["error"].get("class"))
+    assert "selection_race" in error_classes
+    assert outcomes.isdisjoint({"planned", "already_cold", "migrated"})
+    assert plan_kinds.isdisjoint({"migrate", "already_cold"})
+    assert first_reload_mutation_sql(connection) == []

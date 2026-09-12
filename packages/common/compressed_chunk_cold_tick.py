@@ -519,7 +519,7 @@ def run_tick(
         if observation.plan_kind != "migrate":
             if observation.reconciliation in {"mixed", "unknown"}:
                 blocking_error = stable_error(
-                    error_class=observation.reconciliation,
+                    error_class=observation.error_class or observation.reconciliation,
                     stage=observation.stage or "plan",
                     reason=observation.reason or observation.reconciliation,
                 )

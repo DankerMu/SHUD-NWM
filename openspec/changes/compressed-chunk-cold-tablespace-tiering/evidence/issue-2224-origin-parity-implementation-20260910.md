@@ -143,12 +143,25 @@ production_checkout_unchanged=PASS
 production_container_running=PASS
 ```
 
-The executed test proves the production-shaped inventory and exact-origin parity
-against compressed chunks, including selected 24-row data, a 7200-row sibling,
-an equal-shape checksum discriminator, target-sensitive mutation, structured
-schema-qualified plan identity, optional `ONLY` observation, rollback parity,
-complete target migration/recompression, changed compressed-sibling identity,
-repeat convergence, and a bounded receipt-producing tick.
+The earlier isolated run at `27d4faeab9718f0a0f343d392f04871ed1d46808` proved
+selected 24-row origin data, a 7200-row sibling, schema-qualified plan identity,
+optional `ONLY` observation, rollback parity, complete target migration and a
+changed compressed sibling after recompression. It did **not** prove selected
+compressed-target value sensitivity: the only UPDATE targeted an uncompressed
+future chunk, and the equal-shape checksum comparison used a different window.
+It also connected as `postgres` and did not exercise shipping-equivalent
+`nhms_ingest_rw` / `nhms_display_ro` principals.
+
+The round-1 invariant closure adds those missing proofs to the same three-marker
+disposable oracle: `_assert_selected_compressed_target_sensitivity` observes the
+selected origin while compressed, changes one business value through a
+decompress-update-recompress setup, and requires equal row/non-null counts with a
+changed checksum; it then mutates one row of the 7200-row compressed sibling and
+requires selected parity and plan to stay unchanged. `_assert_shipping_role_origin_parity`
+creates NOSUPERUSER ingest/display roles, proves `current_user` and `rolsuper=false`,
+runs production exact-origin parity and structured plan as those roles, re-reads a
+recompression-created sibling, and keeps display INSERT/UPDATE/DDL at SQLSTATE
+42501. Local or disposable PASS is still not a production G1 PASS.
 
 After both the failed and passing runs, no owned disposable container, work root,
 temporary checkout or 55496 listener remained. No production database connection,

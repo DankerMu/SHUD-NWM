@@ -23,6 +23,7 @@ from packages.common.node27_issue1895_fs import reconcile_moved_group_filesystem
 from packages.common.node27_issue1895_post_target import (
     newly_terminal_keys,
     observe_named_group,
+    observe_post_target,
     run_post_target_observation,
 )
 from packages.common.node27_issue1895_receipt import (
@@ -78,6 +79,8 @@ def _durable(index: int) -> dict:
     return _group(f"k{index}", index)["durable"]
 
 KEYS = tuple(durable_key(_durable(index)) for index in range(1, 7))
+_MISSING = object()
+
 
 G4_UPDATES = {
     "NODE27_COLD_RESIDENCY_COLD_RESERVE_BYTES": "4096",
@@ -673,7 +676,10 @@ def test_post_target_observer_accepts_mutable_sibling_when_complete(monkeypatch:
     def fake_collect(*_args: object, **_kwargs: object) -> ResidencyGroup:
         return group
 
-    def fake_parity(*_args: object, **_kwargs: object) -> WindowParity:
+    captured: list[tuple[object, object, object]] = []
+
+    def fake_parity(execute: object, inventory: object, loaded: object) -> WindowParity:
+        captured.append((execute, inventory, loaded))
         return WindowParity(
             row_count=1,
             non_null_counts=(),
@@ -683,17 +689,305 @@ def test_post_target_observer_accepts_mutable_sibling_when_complete(monkeypatch:
             range_end=end,
         )
 
+    execute = object()
     monkeypatch.setattr("packages.common.node27_issue1895_post_target.load_catalog_chunk", fake_load)
     monkeypatch.setattr("packages.common.node27_issue1895_post_target.collect_residency_group", fake_collect)
     monkeypatch.setattr("packages.common.node27_issue1895_post_target.compute_window_parity", fake_parity)
     observed = observe_named_group(
-        lambda *_a, **_k: [],
+        execute,
         durable=durable,
         inventories=inventories,
         expected_parity=expected_parity,
     )
     assert observed["complete_target"] is True
     assert observed["compressed"]["oid"] == 99
+    assert captured == [(execute, inventory, chunk)]
+
+
+_POST_TARGET_PARITY_CODES = {
+    "POST_TARGET_PARITY_MISSING",
+    "POST_TARGET_PARITY_INVALID",
+    "POST_TARGET_PARITY_DRIFT",
+}
+
+
+def _valid_window_parity() -> dict:
+    return {
+        "row_count": 1,
+        "non_null_counts": {"run_id": 1},
+        "checksum": "x",
+        "inventory_digest": "inv",
+        "range_start": "2026-01-01T00:00:00Z",
+        "range_end": "2026-01-08T00:00:00Z",
+    }
+
+
+def _baseline_groups_with_parity(parity: object) -> list[dict]:
+    groups = [_group(key, index) for index, key in enumerate(KEYS, start=1)]
+    for group in groups:
+        if parity is _MISSING:
+            group.pop("parity", None)
+        else:
+            group["parity"] = parity
+    return groups
+
+
+def _named_group_result(durable: dict, parity: dict) -> dict:
+    return {
+        "key": durable_key(durable),
+        "durable": durable,
+        "residency": "already_target",
+        "compressed": {"oid": durable["origin_oid"] + 1000},
+        "members": [],
+        "parity": parity,
+        "inventory_digest": "inv",
+        "complete_target": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("parity", "code"),
+    (
+        (_MISSING, "POST_TARGET_PARITY_MISSING"),
+        (None, "POST_TARGET_PARITY_MISSING"),
+        ("not-an-object", "POST_TARGET_PARITY_INVALID"),
+        ([], "POST_TARGET_PARITY_INVALID"),
+        ({"row_count": 1, "checksum": "x"}, "POST_TARGET_PARITY_INVALID"),
+        ({**_valid_window_parity(), "row_count": "1"}, "POST_TARGET_PARITY_INVALID"),
+        ({**_valid_window_parity(), "non_null_counts": ["run_id"]}, "POST_TARGET_PARITY_INVALID"),
+        ({**_valid_window_parity(), "extra": "not-a-window-field"}, "POST_TARGET_PARITY_INVALID"),
+        ({**_valid_window_parity(), "non_null_counts": {"run_id": 2}}, "POST_TARGET_PARITY_INVALID"),
+        ({**_valid_window_parity(), "checksum": "changed"}, "POST_TARGET_PARITY_DRIFT"),
+    ),
+    ids=(
+        "missing",
+        "null",
+        "string",
+        "list",
+        "missing-required-field",
+        "wrong-scalar-type",
+        "wrong-container-type",
+        "extra-field",
+        "non-null-count-exceeds-row-count",
+        "exact-mismatch",
+    ),
+)
+def test_post_target_malformed_or_mismatched_baseline_parity_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    parity: object,
+    code: str,
+) -> None:
+    private = _private_dir(tmp_path / "private")
+    baseline_groups = _baseline_groups_with_parity(parity)
+    baseline = _write_private_json(private / "baseline.json", {"groups": baseline_groups})
+    output = private / "observed.json"
+    current = _valid_window_parity() | {"checksum": "current"}
+    named_calls: list[object] = []
+
+    def fake_named(_execute: object, *, durable: dict, inventories: object, expected_parity: object = None) -> dict:
+        named_calls.append(expected_parity)
+        if expected_parity is not None and expected_parity != current:
+            raise Issue1895ReadinessError(
+                "business-window parity changed",
+                code="POST_TARGET_PARITY_DRIFT",
+                stage="post-target",
+            )
+        return _named_group_result(dict(durable), current)
+
+    monkeypatch.setattr("packages.common.node27_issue1895_post_target.observe_named_group", fake_named)
+    monkeypatch.setattr(
+        "packages.common.node27_issue1895_post_target.derive_bound_inventories",
+        lambda _execute: BoundInventories(
+            river=HypertableInventory("hydro", "river_timeseries", (), "inv"),
+            forcing=HypertableInventory("met", "forcing_station_timeseries", (), "inv"),
+            digest="inv",
+        ),
+    )
+    monkeypatch.setattr(
+        "packages.common.node27_issue1895_post_target.classify_current_candidates",
+        lambda *_args, **_kwargs: ((), tuple(KEYS)),
+    )
+    with pytest.raises(Issue1895ReadinessError) as refused:
+        observe_post_target(
+            baseline_groups=baseline_groups,
+            execute=lambda *_args, **_kwargs: [],
+            cutoff=datetime(2026, 1, 8, tzinfo=UTC),
+            watermark=datetime(2026, 1, 15, tzinfo=UTC),
+            lag_seconds=604800,
+            reviewed_sha=SHA,
+        )
+    assert refused.value.code == code
+    assert refused.value.code in _POST_TARGET_PARITY_CODES
+    if code in {"POST_TARGET_PARITY_MISSING", "POST_TARGET_PARITY_INVALID"}:
+        assert named_calls == []
+    with pytest.raises(Issue1895ReadinessError) as published:
+        run_post_target_observation(
+            baseline_path=baseline,
+            output_path=output,
+            reviewed_sha=SHA,
+            lag_seconds=604800,
+            execute=lambda *_args, **_kwargs: [],
+            watermark=datetime(2026, 1, 15, tzinfo=UTC),
+            dsn="postgresql://nhms_display_ro@127.0.0.1/nhms",
+        )
+    assert published.value.code == code
+    assert not output.exists()
+
+
+def test_post_target_exact_equality_parity_is_accepted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    private = _private_dir(tmp_path / "private")
+    parity = _valid_window_parity()
+    baseline_groups = _baseline_groups_with_parity(parity)
+    baseline = _write_private_json(private / "baseline.json", {"groups": baseline_groups})
+    output = private / "observed.json"
+    forwarded: list[object] = []
+
+    def fake_named(_execute: object, *, durable: dict, inventories: object, expected_parity: object = None) -> dict:
+        forwarded.append(expected_parity)
+        assert expected_parity == parity
+        return _named_group_result(dict(durable), parity)
+
+    monkeypatch.setattr("packages.common.node27_issue1895_post_target.observe_named_group", fake_named)
+    monkeypatch.setattr(
+        "packages.common.node27_issue1895_post_target.derive_bound_inventories",
+        lambda _execute: BoundInventories(
+            river=HypertableInventory("hydro", "river_timeseries", (), "inv"),
+            forcing=HypertableInventory("met", "forcing_station_timeseries", (), "inv"),
+            digest="inv",
+        ),
+    )
+    monkeypatch.setattr(
+        "packages.common.node27_issue1895_post_target.classify_current_candidates",
+        lambda *_args, **_kwargs: ((), tuple(KEYS)),
+    )
+    observed = observe_post_target(
+        baseline_groups=baseline_groups,
+        execute=lambda *_args, **_kwargs: [],
+        cutoff=datetime(2026, 1, 8, tzinfo=UTC),
+        watermark=datetime(2026, 1, 15, tzinfo=UTC),
+        lag_seconds=604800,
+        reviewed_sha=SHA,
+    )
+    assert all(item["complete_target"] is True for item in observed["groups"])
+    assert None not in forwarded
+    published = run_post_target_observation(
+        baseline_path=baseline,
+        output_path=output,
+        reviewed_sha=SHA,
+        lag_seconds=604800,
+        execute=lambda *_args, **_kwargs: [],
+        watermark=datetime(2026, 1, 15, tzinfo=UTC),
+        dsn="postgresql://nhms_display_ro@127.0.0.1/nhms",
+    )
+    assert output.exists()
+    assert published["groups"][0]["parity"] == parity
+
+
+def test_post_target_caller_mutants_red_when_chunk_is_omitted_or_not_loaded_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    end = datetime(2026, 1, 8, tzinfo=UTC)
+    durable = {
+        "hypertable_schema": "hydro",
+        "hypertable_name": "river_timeseries",
+        "origin_schema": "_timescaledb_internal",
+        "origin_name": "origin_1",
+        "origin_oid": 1,
+        "range_start": "2026-01-01T00:00:00Z",
+        "range_end": "2026-01-08T00:00:00Z",
+    }
+    members = (
+        ResidencyMember("origin_heap", 1, "_timescaledb_internal", "origin_1", "r", "nhms_cold", 10, None, 3),
+        ResidencyMember("compressed_heap", 99, "_timescaledb_internal", "comp_new", "r", "nhms_cold", 4, None, 5),
+        ResidencyMember("index", 2, "_timescaledb_internal", "idx", "i", "nhms_cold", 1, 1, None),
+        ResidencyMember("toast_heap", 3, "_timescaledb_internal", "toast", "t", "nhms_cold", 1, 1, None),
+        ResidencyMember("toast_index", 4, "_timescaledb_internal", "toast_idx", "i", "nhms_cold", 1, 3, None),
+        ResidencyMember("toast_heap", 5, "_timescaledb_internal", "ctoast", "t", "nhms_cold", 1, 99, None),
+        ResidencyMember("toast_index", 6, "_timescaledb_internal", "ctoast_idx", "i", "nhms_cold", 1, 5, None),
+    )
+    group = ResidencyGroup(
+        "hydro",
+        "river_timeseries",
+        1,
+        "_timescaledb_internal",
+        "origin_1",
+        99,
+        "_timescaledb_internal",
+        "comp_new",
+        start,
+        end,
+        True,
+        members,
+    )
+    loaded = CatalogChunk(
+        "hydro",
+        "river_timeseries",
+        1,
+        "_timescaledb_internal",
+        "origin_1",
+        99,
+        "_timescaledb_internal",
+        "comp_new",
+        start,
+        end,
+        True,
+    )
+    ranking = CatalogChunk(
+        "hydro",
+        "river_timeseries",
+        7,
+        "_timescaledb_internal",
+        "origin_7",
+        108,
+        "_timescaledb_internal",
+        "comp_rank",
+        start,
+        end,
+        True,
+    )
+    inventory = HypertableInventory(schema="hydro", name="river_timeseries", columns=(), digest="inv")
+    inventories = BoundInventories(river=inventory, forcing=inventory, digest="inv")
+    execute = object()
+    expected_parity = {
+        "row_count": 1,
+        "non_null_counts": {},
+        "checksum": "x",
+        "inventory_digest": "inv",
+        "range_start": "2026-01-01T00:00:00Z",
+        "range_end": "2026-01-08T00:00:00Z",
+    }
+
+    def fake_load(*_args: object, **_kwargs: object) -> CatalogChunk:
+        return loaded
+
+    def fake_collect(*_args: object, **_kwargs: object) -> ResidencyGroup:
+        return group
+
+    monkeypatch.setattr("packages.common.node27_issue1895_post_target.load_catalog_chunk", fake_load)
+    monkeypatch.setattr("packages.common.node27_issue1895_post_target.collect_residency_group", fake_collect)
+
+    def omitted(execute_arg: object, inventory_arg: object) -> WindowParity:
+        del execute_arg, inventory_arg
+        return WindowParity(1, (), "x", "inv", start, end)
+
+    monkeypatch.setattr("packages.common.node27_issue1895_post_target.compute_window_parity", omitted)
+    with pytest.raises(TypeError):
+        observe_named_group(execute, durable=durable, inventories=inventories, expected_parity=expected_parity)
+
+    captured: list[object] = []
+
+    def wrong_chunk(execute_arg: object, inventory_arg: object, loaded_chunk: object) -> WindowParity:
+        del execute_arg, inventory_arg
+        captured.append(loaded_chunk)
+        return WindowParity(1, (), "x", "inv", start, end)
+
+    monkeypatch.setattr("packages.common.node27_issue1895_post_target.compute_window_parity", wrong_chunk)
+    observe_named_group(execute, durable=durable, inventories=inventories, expected_parity=expected_parity)
+    assert captured == [loaded]
+    assert captured[0] is not ranking
+    assert getattr(captured[0], "origin_oid") == 1
 
 
 def test_w8_publication_is_exclusive_private_and_preserves_existing_bytes(

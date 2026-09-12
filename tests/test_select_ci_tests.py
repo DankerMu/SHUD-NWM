@@ -12758,7 +12758,25 @@ ORIGIN_CHUNK_PARITY_OWNERS = (
     "scripts/node27_cold_residency_census.py",
     "packages/common/node27_issue1895_post_target.py",
     "docs/runbooks/tier-node27-timeseries-storage.md",
+    "packages/common/compressed_chunk_cold_residency.py",
 )
+
+ORIGIN_CHUNK_PARITY_OWNER_LEGS = {
+    "packages/common/compressed_chunk_cold_runtime.py": {
+        "tests/test_node27_write_roles.py",
+        "tests/test_compressed_chunk_cold_runtime.py",
+        "tests/test_select_ci_tests.py",
+    },
+    "scripts/node27_cold_residency_census.py": {
+        "tests/test_node27_cold_residency_census.py",
+        "tests/test_select_ci_tests.py",
+    },
+    "packages/common/compressed_chunk_cold_residency.py": {
+        "tests/test_node27_write_roles.py",
+        "tests/test_compressed_chunk_cold_residency.py",
+        "tests/test_select_ci_tests.py",
+    },
+}
 ORIGIN_CHUNK_PARITY_PARTITIONS = (
     "tests/test_compressed_chunk_cold_runtime.py",
     "tests/test_compressed_chunk_cold_runtime_proof.py",
@@ -12780,28 +12798,53 @@ def test_origin_chunk_parity_owners_preserve_existing_legs_and_select_new_partit
         selected = set(select_tests([owner], repo_root=Path(".")))
         missing = sorted(set(ORIGIN_CHUNK_PARITY_PARTITIONS) - selected)
         assert not missing, f"{owner}: origin-chunk parity partitions missing {missing}"
+        expected_legs = ORIGIN_CHUNK_PARITY_OWNER_LEGS.get(owner, set())
+        lost = sorted(expected_legs - selected)
+        assert not lost, f"{owner}: existing same-name/write-role/importer legs missing {lost}"
 
 
-@pytest.mark.parametrize("removed", ORIGIN_CHUNK_PARITY_PARTITIONS)
-def test_origin_chunk_parity_catalog_route_reds_when_any_partition_is_removed(
-    monkeypatch: pytest.MonkeyPatch,
-    removed: str,
-) -> None:
-    from scripts import select_ci_tests
+def _owner_route_rules(owner: str) -> list[PathTestRule]:
+    return [rule for rule in PATH_TEST_RULES if rule.pattern == owner]
 
-    owner = "packages/common/compressed_chunk_cold_runtime_catalog.py"
-    matching = [rule for rule in PATH_TEST_RULES if rule.pattern == owner]
-    assert len(matching) == 1 and removed in matching[0].tests
-    mutant = tuple(
+
+def _mutant_without_partition(owner: str, removed: str) -> tuple[PathTestRule, ...]:
+    matching = _owner_route_rules(owner)
+    assert matching, f"{owner}: no PATH_TEST_RULES route"
+    assert any(removed in rule.tests for rule in matching), f"{owner}: matched route does not own {removed}"
+    return tuple(
         replace(rule, tests=tuple(test for test in rule.tests if test != removed))
         if rule.pattern == owner
         else rule
         for rule in PATH_TEST_RULES
     )
+
+
+def _same_name_partition(owner: str) -> str | None:
+    candidate = f"tests/test_{Path(owner).stem}.py"
+    return candidate if candidate in ORIGIN_CHUNK_PARITY_PARTITIONS else None
+
+
+@pytest.mark.parametrize("owner", ORIGIN_CHUNK_PARITY_OWNERS)
+@pytest.mark.parametrize("removed", ORIGIN_CHUNK_PARITY_PARTITIONS)
+def test_origin_chunk_parity_owner_route_reds_when_any_partition_is_removed(
+    monkeypatch: pytest.MonkeyPatch,
+    owner: str,
+    removed: str,
+) -> None:
+    from scripts import select_ci_tests
+
+    matching = _owner_route_rules(owner)
+    assert matching, f"{owner}: expected an explicit PATH_TEST_RULES route"
+    same_name = _same_name_partition(owner)
+    mutant = _mutant_without_partition(owner, removed)
     monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+    if same_name == removed:
+        monkeypatch.setattr(select_ci_tests, "_same_name_backend_python_test", lambda _path: None)
     selected = set(select_tests([owner], repo_root=Path(".")))
-    assert removed not in selected
-    assert set(ORIGIN_CHUNK_PARITY_PARTITIONS) - {removed} <= selected
+    assert removed not in selected, f"{owner}: coincidental union still selected {removed}"
+    remaining = set(ORIGIN_CHUNK_PARITY_PARTITIONS) - {removed}
+    missing_remaining = sorted(remaining - selected)
+    assert not missing_remaining, f"{owner}: remaining partitions vanished {missing_remaining}"
 
 
 def test_runtime_integration_test_only_change_selects_marker_contract_exactly() -> None:
