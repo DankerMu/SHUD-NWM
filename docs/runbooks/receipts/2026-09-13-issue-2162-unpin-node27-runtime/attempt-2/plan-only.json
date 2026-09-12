@@ -1,0 +1,25 @@
+{
+  "cache_root": "/home/nwm/.cache/nhms/mvt",
+  "counts": {
+    "deleted": 0,
+    "failed": 0,
+    "planned": 0,
+    "skipped": 0
+  },
+  "cutoff": "2026-08-29T16:52:07Z",
+  "deleted": [],
+  "enabled": true,
+  "execution_mode": "plan_only",
+  "failed": [],
+  "finished_at": "2026-09-12T16:52:07Z",
+  "freed_bytes": 0,
+  "plan_only": true,
+  "planned": [],
+  "precip_root_untouched": "/home/nwm/.cache/nhms/mvt/precip",
+  "reference_time": "2026-09-12T16:52:07Z",
+  "retention_days": 14,
+  "schema_version": "nhms.node27_mvt_cache_retention.production.v1",
+  "skipped": [],
+  "started_at": "2026-09-12T16:52:07Z",
+  "status": "completed"
+}
