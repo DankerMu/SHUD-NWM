@@ -354,7 +354,7 @@ def test_already_target_residency_is_no_go(tmp_path: Path) -> None:
     _assert_no_go_with_blocker(tmp_path / "census.json", connection, "already cold")
 
 
-def test_uncompressed_candidate_is_no_go(tmp_path: Path) -> None:
+def test_uncompressed_only_population_cannot_satisfy_required_count(tmp_path: Path) -> None:
     connection = CensusConnection()
     item = _chunk_item(0, is_compressed=False, compressed_oid=None)
     connection.load_group(
@@ -362,7 +362,13 @@ def test_uncompressed_candidate_is_no_go(tmp_path: Path) -> None:
         (rel(item.origin_oid, item.origin_schema, item.origin_name, "r", "pg_default", 8192),),
     )
     connection.compression_bytes[item.origin_name] = 1000
-    _assert_no_go_with_blocker(tmp_path / "census.json", connection, "is not compressed")
+    code, target = _main(census, tmp_path, connection, require_count="1")
+    assert code == 1
+    artifact = json.loads(target.read_text(encoding="utf-8"))
+    assert artifact["verdict"] == "NO-GO"
+    assert artifact["required_group_count"] == 1
+    assert artifact["groups"] == []
+    assert artifact["resolved_group_count"] == 0
 
 
 def test_compressed_candidate_with_missing_sibling_is_no_go(tmp_path: Path) -> None:

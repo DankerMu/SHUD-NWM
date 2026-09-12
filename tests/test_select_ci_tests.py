@@ -13069,13 +13069,14 @@ def test_runtime_integration_marker_contract_redirect_reds_when_rule_removed(
     matching = [rule for rule in CHANGED_TEST_FILE_RULES if rule.pattern == owner]
     assert len(matching) == 1, f"expected exactly one CHANGED_TEST_FILE_RULES entry for {owner}"
     assert matching[0].stop_on_match is True
-    assert matching[0].tests == (owner, marker)
+    assert matching[0].tests == (owner, marker, "tests/test_issue2290_cold_parent_admission.py")
     mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
     assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
     monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
 
     selected = set(select_tests([owner], repo_root=Path(".")))
     assert marker not in selected
+    assert "tests/test_issue2290_cold_parent_admission.py" not in selected
     assert owner in selected
     assert SELECTOR_META_GUARD_TEST in selected
 
@@ -13448,6 +13449,7 @@ ISSUE2227_EXPLICIT_CYCLE_OWNER_TARGETS: dict[str, tuple[str, ...]] = {
         *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
         "tests/test_issue1895_readiness_performance_publication.py",
         "tests/test_issue1895_runbook_contract.py",
+        "tests/test_issue2290_cold_parent_admission.py",
     ),
 }
 
@@ -17625,15 +17627,26 @@ def test_physical_parent_admission_owner_route_has_independent_removal_proof(mon
         else "PATH_TEST_RULES"
     )
     rules = getattr(select_ci_tests, rules_name)
-    assert any(rule.pattern == owner and suite in rule.tests for rule in rules)
+    matching = [rule for rule in rules if rule.pattern == owner]
+    assert len(matching) == 1, f"{owner}: expected one explicit {rules_name} route"
+    original = matching[0]
+    assert original.tests.count(suite) == 1
+    assert original.stop_on_match is (rules_name == "CHANGED_TEST_FILE_RULES")
+    assert not original.only_when_any_changed
+    assert set(original.tests) <= before
     mutant = tuple(
         replace(rule, tests=tuple(test for test in rule.tests if test != suite)) if rule.pattern == owner else rule
         for rule in rules
     )
     monkeypatch.setattr(select_ci_tests, rules_name, mutant)
+    changed = [rule for rule in mutant if rule.pattern == owner]
+    assert changed == [replace(original, tests=tuple(test for test in original.tests if test != suite))]
     after = set(select_tests([owner], repo_root=Path(".")))
     assert suite not in after
-    assert before - {suite} <= after
+    assert after == before - {suite}
+    assert set(original.tests) - {suite} <= after
+    if owner.startswith("tests/"):
+        assert SELECTOR_META_GUARD_TEST in before & after
 
 
 def test_physical_parent_fake_performance_route_has_independent_removal_proof(monkeypatch):
@@ -17644,7 +17657,13 @@ def test_physical_parent_fake_performance_route_has_independent_removal_proof(mo
     before = set(select_tests([owner], repo_root=Path(".")))
     assert suite in before
     rules = select_ci_tests.SUPPORT_MODULE_TEST_RULES
-    assert any(rule.pattern == owner and suite in rule.tests for rule in rules)
+    matching = [rule for rule in rules if rule.pattern == owner]
+    assert len(matching) == 1
+    original = matching[0]
+    assert original.tests.count(suite) == 1
+    assert not original.stop_on_match
+    assert not original.only_when_any_changed
+    assert set(original.tests) <= before
     mutant = tuple(
         replace(rule, tests=tuple(test for test in rule.tests if test != suite)) if rule.pattern == owner else rule
         for rule in rules
@@ -17652,4 +17671,6 @@ def test_physical_parent_fake_performance_route_has_independent_removal_proof(mo
     monkeypatch.setattr(select_ci_tests, "SUPPORT_MODULE_TEST_RULES", mutant)
     after = set(select_tests([owner], repo_root=Path(".")))
     assert suite not in after
-    assert before - {suite} <= after
+    assert after == before - {suite}
+    assert set(original.tests) - {suite} <= after
+    assert SELECTOR_META_GUARD_TEST in before & after

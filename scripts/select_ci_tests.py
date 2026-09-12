@@ -1486,20 +1486,6 @@ PRECIP_SURFACE_TESTS: tuple[str, ...] = (
 
 PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
-        "packages/common/compressed_chunk_cold_runtime_catalog.py", ("tests/test_issue2290_cold_parent_admission.py",)
-    ),
-    PathTestRule(
-        "packages/common/compressed_chunk_cold_runtime.py", ("tests/test_issue2290_cold_parent_admission.py",)
-    ),
-    PathTestRule("packages/common/compressed_chunk_cold_tick.py", ("tests/test_issue2290_cold_parent_admission.py",)),
-    PathTestRule("packages/common/node27_issue1895_catalog.py", ("tests/test_issue2290_cold_parent_admission.py",)),
-    PathTestRule(
-        "packages/common/node27_issue1895_performance_live.py", ("tests/test_issue2290_cold_parent_admission.py",)
-    ),
-    PathTestRule("packages/common/node27_issue1895_post_target.py", ("tests/test_issue2290_cold_parent_admission.py",)),
-    PathTestRule("scripts/node27_cold_residency_census.py", ("tests/test_issue2290_cold_parent_admission.py",)),
-    PathTestRule("docs/runbooks/tier-node27-timeseries-storage.md", ("tests/test_issue2290_cold_parent_admission.py",)),
-    PathTestRule(
         ORCHESTRATOR_MANIFEST_SURFACE_PATH_PATTERNS[0],
         ORCHESTRATOR_MANIFEST_SURFACE_TESTS,
         stop_on_match=True,
@@ -3165,6 +3151,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # instead of falling to collect-only.
             "tests/test_issue1895_runbook_contract.py",
             *ISSUE1895_READINESS_TESTS,
+            "tests/test_issue2290_cold_parent_admission.py",
         ),
     ),
     PathTestRule(
@@ -3312,6 +3299,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
             "tests/test_issue1895_readiness_performance_publication.py",
             "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2290_cold_parent_admission.py",
         ),
     ),
     PathTestRule(
@@ -3403,6 +3391,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *ISSUE1895_READINESS_PERFORMANCE_LIVE_TESTS,
             "tests/test_issue1895_readiness_performance_publication.py",
             "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2290_cold_parent_admission.py",
         ),
     ),
     PathTestRule(
@@ -3499,7 +3488,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/node27_issue1895_post_target.py",
-        ORIGIN_CHUNK_PARITY_TESTS,
+        (*ORIGIN_CHUNK_PARITY_TESTS, "tests/test_issue2290_cold_parent_admission.py"),
     ),
     PathTestRule(
         "packages/common/node27_issue1895_watermark.py",
@@ -3610,6 +3599,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
             "tests/test_issue1895_readiness_storage.py",
             *ORIGIN_CHUNK_PARITY_TESTS,
+            "tests/test_issue2290_cold_parent_admission.py",
         ),
     ),
     PathTestRule(
@@ -3734,6 +3724,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # READ added here would fail SILENTLY.
             "tests/test_node27_write_roles.py",
             *ORIGIN_CHUNK_PARITY_TESTS,
+            "tests/test_issue2290_cold_parent_admission.py",
         ),
     ),
     PathTestRule(
@@ -3766,7 +3757,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/compressed_chunk_cold_runtime_catalog.py",
-        ORIGIN_CHUNK_PARITY_TESTS,
+        (*ORIGIN_CHUNK_PARITY_TESTS, "tests/test_issue2290_cold_parent_admission.py"),
     ),
     PathTestRule(
         "packages/common/compressed_chunk_cold_receipt.py",
@@ -3805,6 +3796,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1774: this lane runs as a non-superuser; a superuser-gated
             # READ added here would fail SILENTLY.
             "tests/test_node27_write_roles.py",
+            "tests/test_issue2290_cold_parent_admission.py",
         ),
     ),
     PathTestRule(

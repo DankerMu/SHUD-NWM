@@ -49,3 +49,26 @@ consumer surface, not a new display/API feature. No migration/grant/lifecycle or
 count-contract change was included. Local Ruff passed after formatting; node27
 final-head green/engine/regression evidence and cross-review results are published
 in the PR evidence bundle when executed, not inferred from this red record.
+
+## Phase2 regression checkpoint
+
+At implementation checkpoint `725f838360f88442d0875d121d3dac552ab4eff7`, the
+owned node27 environment observed 35 focused passes and one pinned engine pass
+(one deselected). The selected regression then reported 9 failed, 4682 passed,
+5 skipped; default full pytest did not run because the driver stopped there.
+Raw output is retained in `.workplans/issue-2290/node27/targeted-red.log`.
+
+Eight failures exposed duplicated exact-owner CI rules or stale target-set
+expectations. The correction must consolidate admission coverage into existing
+rules, not whitelist duplicate ownership, and preserve every previous target
+through independent removal proofs. This is machine-discovered Phase2 repair,
+not a comprehensive review round.
+
+The remaining census case already produced NO-GO with zero eligible groups:
+the updated fake follows production compressed-candidate filtering, while the
+old test required an obsolete blocker phrase. Replace the wording-only oracle
+with the observable uncompressed-only/positive-required-count boundary, without
+relaxing production eligibility or asserting a different message. Compression
+eligibility is unchanged, as required by #2290; message wording is not its
+acceptance contract. Corrected-head results belong in the final PR evidence,
+not a retrospective claim that this checkpoint passed.
