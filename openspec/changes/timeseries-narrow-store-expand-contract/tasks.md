@@ -166,6 +166,11 @@
 - [ ] 4.4 `scripts/node27_autopipeline.py`: map `LegacyStoreWriteRefused` to an `ops.ingest_recompute_decline` row with reason `legacy_store_refused`, tick `rc = 0`, permanent (not reopened by `product_mtime`); receipt schema updated. Verify: unit test for decline persistence and non-reopen.
 - [ ] 4.5 Fixtures: `db/seeds/seed_demo.py`, `tests/integration_helpers.py` insert helpers and their twenty consumers, `tests/test_river_ts_dual_write_integration.py` (delete or re-pin as narrow-write integration). Verify: real-DB pytest on node-27 (expand idempotent twice; legacy chunks keep state; `time_interval = 1 day` on the canonical hypertable; parsed runs `legacy`, running runs `narrow`; first parse after expand lands narrow; mixed-store national-tile and coverage queries retain both-store result semantics by returning both runs; separate named-identity valid-times requests for the legacy and narrow run each return only that routed run's `valid_time`, while one any-identity request includes `valid_time` values from both stores before its single outer `DISTINCT valid_time ORDER BY valid_time DESC LIMIT :limit`; `EXPLAIN` for national-tile, coverage, and both valid-times forms proves every legacy/narrow fact branch references only its matching physical table and the non-matching named branch produces no rows).
 
+  **Suggested fixture level:** expanded; high repair intensity for schema rename, writer switch and rollback.
+  **Minimal mergeable slice:** migration and parser write path ship atomically in one PR.
+  **Execution fixture:** `fixtures/I7-1986.md`. Verification uses disposable node-27 databases, never production `nhms`. Production activation requires the coordinated maintenance window; rollout evidence belongs to #1987.
+
+
 ## 5. River rollout on node-27 (I8)
 
 - [ ] 5.1 Runbook: maintenance-window checklist in the pinned order (timers stop → API/parser stop → `git pull --ff-only` → `migrate.py` → start → timers start), the pre-expand legacy-backlog compression recipe, the D12 reverse sequence with the allowed intermediate state, and the "transitional cold tier does not cover `_legacy`" note. Verify: rollback rehearsal on a throwaway cluster recorded.

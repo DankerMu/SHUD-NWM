@@ -176,11 +176,8 @@ RIVER_TABLE = "hydro.river_timeseries"
 # * seed_demo.py 5 = the seed INSERT + two verification counts + the two
 #   human-readable count LABELS.
 # * parser.py 4 = probe, window, DELETE, INSERT.
-# * integration_helpers.py 8 = the original three (dual-write INSERT, cleanup
-#   DELETE, #1640/#1654 min/max valid_time probe) + five post-expand fixture
-#   mentions: schema rename, narrow CREATE, narrow INSERT, legacy copy source,
-#   legacy decoy UPDATE. The two DDL mentions are schema setup, not renderer
-#   input templates; real-DB forecast tests own the physical schema behavior.
+# * integration_helpers.py 9 = narrow INSERT, cleanup DELETE/window,
+#   two mixed-store INSERT/source pairs + two decoy UPDATEs.
 #   The copy/decoy SQL has its scoped key/enum owner below.
 RIVER_TABLE_CENSUS: dict[str, int] = {
     "packages/common/forecast_store.py": 3,
@@ -191,7 +188,7 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
     "scripts/reset_qhh_smoke_db.py": 2,
     "db/seeds/seed_demo.py": 5,
     "workers/output_parser/parser.py": 4,
-    "tests/integration_helpers.py": 8,
+    "tests/integration_helpers.py": 9,
     # river_ts_render.py 2 = RIVER_TABLE and RIVER_TABLE_LEGACY. Two, not one,
     # because `_river_table_mentions` matches a PREFIX of the name (the `_legacy`
     # literal opens with the canonical one), not a whole identifier. Any third
@@ -212,9 +209,7 @@ RIVER_TABLE_CENSUS: dict[str, int] = {
 #   consumed by all eight blocks) + the latest-product source's three.
 # * publisher.py 1 / forcing_copyback_backfill.py 1 = the single `variable` aid
 #   each, in an ON chain and inside a correlated EXISTS respectively.
-# * parser.py 2 = the probe's and the window read's `run_id` aid. Unchanged by
-#   #1980: both already sat one aid per marker on the line below it, which is why
-#   a parser diff in this PR would be a deviation.
+# * parser.py 0: narrow compression segmentby starts with run_key.
 # * the remaining registered files carry no aid at all, and 0 is asserted rather
 #   than skipped: an aid appearing in the autopipeline tick or a seed helper is
 #   exactly the regression the zero says will not happen.
@@ -226,7 +221,7 @@ MARKER_AID_CENSUS: dict[str, int] = {
     "scripts/summarize_qhh_smoke_results.py": 0,
     "scripts/reset_qhh_smoke_db.py": 0,
     "db/seeds/seed_demo.py": 0,
-    "workers/output_parser/parser.py": 2,
+    "workers/output_parser/parser.py": 0,
     "tests/integration_helpers.py": 0,
     "packages/common/river_ts_render.py": 0,
 }
@@ -1133,78 +1128,14 @@ def test_parser_replace_chain_has_exactly_three_read_statements_plus_the_insert(
     assert statements[3].strip().startswith("INSERT INTO hydro.river_timeseries")
 
 
-# The three-line shape the probe and the window read must both carry (#1681):
-# the key predicate, the removal marker, then the aid — so the aid is separated
-# from `run_key` by exactly one AND and the marker is on the line immediately
-# above the line #1342 has to delete. Whitespace between lines is free; the
-# ORDER is not.
-_PARSER_AID_ADJACENCY = re.compile(
-    rf"WHERE run_key = %s[ \t]*\n[ \t]*{re.escape(PUSHDOWN_AID_MARKER)}[ \t]*\n[ \t]*AND run_id = %s"
-)
-# Text identity columns the read statements must STILL have no predicate on:
-# every text identity column other than the sanctioned `run_id` aid, which is
-# asserted positively above. DERIVED from the shared register rather than
-# listed, so this test keeps the same coverage
-# `_assert_no_text_identity_predicate` gave these statements before #1681 split
-# `run_id` out of it, and a column added to 000050's text set is covered here
-# the day it is classified. (A hand-written list dropped `unit` and
-# `quality_flag` — the two columns the pre-#1681 check did cover.)
-_PARSER_READ_FORBIDDEN_TEXT_COLUMNS: tuple[str, ...] = tuple(
-    column for column in TEXT_IDENTITY_COLUMNS if column != "run_id"
-)
-
-
-def test_parser_probe_and_window_locate_rows_by_key_with_one_marked_run_id_aid() -> None:
-    """Probe + window read: key predicates plus the sanctioned `run_id` aid (#1681).
-
-    #1442 left these two statements key-only on the reasoning that
-    ``check_batch_targets_uncompressed`` guarantees the target chunk is
-    uncompressed. That argument holds for the DELETE (which is valid_time
-    bounded) and NOT for these two: they carry no valid_time constraint by
-    design — their whole job is to find this key's rows OUTSIDE the incoming
-    window — so their plan necessarily reaches compressed chunks, where
-    ``run_key`` is not a segmentby column and has no access path at all. The
-    retained ``run_id`` is a bound parameter that reaches 000047's segmentby
-    index, i.e. exactly the "literal/bound parameter AND the plan can reach a
-    compressed chunk" condition this file's header sanctions.
-
-    Asserted as a bare-column surface (these statements give the fact table no
-    alias, so the shared alias machinery has nothing to qualify on):
-
-    * the aid is conjoined with its counterpart AND carries an adjacent marker,
-      pinned in one cross-line regex — the bare-column equivalent of
-      ``assert_aid_is_conjoined_with_its_counterpart`` plus
-      ``_assert_aids_are_marked``;
-    * exactly one ``run_id`` occurrence and exactly one marker, so a second,
-      unconjoined predicate on the same column cannot hide behind the first;
-    * every text identity column OTHER than the sanctioned `run_id` aid is
-      still predicate-free — the whole set 000050 defines, minus that one aid.
-    """
+def test_parser_probe_and_window_locate_rows_by_key_without_text_aids() -> None:
     probe, window, _delete, _insert = _parser_river_statements()
-
-    # Self-check on the derivation: the forbidden set is the complete text
-    # identity register minus the single sanctioned aid. Pinned here so the
-    # tuple above cannot silently shrink back to a partial hand-written list
-    # (which is how `unit` and `quality_flag` fell out of this test's reach).
-    assert set(_PARSER_READ_FORBIDDEN_TEXT_COLUMNS) == set(TEXT_IDENTITY_COLUMNS) - {"run_id"}
-
     for label, sql in (("probe", probe), ("window", window)):
         assert "WHERE run_key = %s" in sql, label
         assert "AND river_network_version_key = %s" in sql, label
         assert "AND variable_e = %s" in sql, label
-        assert _PARSER_AID_ADJACENCY.search(sql) is not None, (
-            f"parser {label}: expected `WHERE run_key = %s` / {PUSHDOWN_AID_MARKER!r} / "
-            f"`AND run_id = %s` on three consecutive lines, got:\n{sql}"
-        )
-        assert len(re.findall(r"(?<![.\w])run_id\b", sql)) == 1, (
-            f"parser {label}: `run_id` must appear exactly once — the marked aid"
-        )
-        assert sql.count(PUSHDOWN_AID_MARKER) == 1, f"parser {label}: exactly one removal marker"
-        for column in _PARSER_READ_FORBIDDEN_TEXT_COLUMNS:
-            match = _text_identity_predicate(sql, column)
-            assert match is None, f"parser {label}: text identity predicate on {column} -> {match.group(0)!r}"
-    # The MATERIALIZED fence stays: without it the planner turns the window read
-    # back into a per-chunk min/max walk.
+        assert PUSHDOWN_AID_MARKER not in sql
+        _assert_no_text_identity_predicate(sql, label)
     assert "WITH existing AS MATERIALIZED" in window
 
 
@@ -1230,29 +1161,15 @@ def test_parser_delete_locates_rows_by_key_with_no_aid() -> None:
     assert "AND valid_time <= %s" in delete
 
 
-def test_parser_dual_write_insert_still_writes_both_representations() -> None:
-    """The replace chain switched; the INSERT must NOT — #1340's dual write stands.
-
-    If this ever goes red because the text columns were dropped from the INSERT,
-    the rows stop being readable by anything still on text and #1342's ordering
-    has been violated from the write side.
-
-    Asserted against the INSERT's column-list PARENTHETICAL, not against the
-    statement text (#1442 round-2, F4). A bare ``"run_id" in insert`` is
-    satisfied by the ``ON CONFLICT (run_id, ...)`` clause further down, so the
-    text columns could be deleted from the write list — the very regression this
-    test names — while every one of these assertions stayed green.
-    """
+def test_parser_insert_writes_only_narrow_columns() -> None:
+    """Canonical storage has no text identity columns after expand."""
     insert = _parser_river_statements()[3]
     match = re.search(r"INSERT INTO hydro\.river_timeseries\s*\((?P<columns>[^)]*)\)\s*VALUES", insert, re.S)
     assert match is not None, insert
     columns = [column.strip() for column in match.group("columns").split(",") if column.strip()]
 
-    # Non-vacuity: the parenthetical really is the write list, not the conflict
-    # target (which names five columns, all of them also here).
-    assert len(columns) == 17, columns
-    for column in ("run_id", "basin_version_id", "river_network_version_id", "river_segment_id"):
-        assert column in columns, column
+    assert len(columns) == 10, columns
+    assert not set(columns) & set(TEXT_IDENTITY_COLUMNS)
     for column in ("run_key", "basin_version_key", "river_network_version_key", "river_segment_key"):
         assert column in columns, column
     for column in ("variable_e", "unit_e", "quality_flag_e"):
@@ -1339,30 +1256,17 @@ def test_integration_helpers_post_expand_copy_and_decoys_use_keys_and_enums() ->
     statements = _sql_constants(
         module=("tests", "integration_helpers.py"),
         function="post_expand_forecast_database",
-        needle="INSERT INTO hydro.river_timeseries",
+        needle="hydro.river_timeseries",
     )
-    assert len(statements) == 1
-    sql = re.sub(r"\s+", " ", statements[0]).strip()
-    copy, decoy, trailing = sql.split(";")
-    assert not trailing.strip()
-    assert "FROM hydro.river_timeseries_legacy rt JOIN hydro.hydro_run h ON h.run_key = rt.run_key" in copy
-    assert "UPDATE hydro.river_timeseries_legacy rt" in decoy
-    assert "WHERE h.run_key = rt.run_key AND h.timeseries_store = 'narrow'" in decoy
-    for label, statement in (("fixture narrow copy", copy), ("fixture legacy decoy", decoy)):
-        _assert_no_text_identity_predicate(statement, label)
-        assert_text_fact_columns(statement, "rt", set(), label)
-    columns = re.search(r"INSERT INTO hydro\.river_timeseries\s*\(([^)]*)\)", copy)
-    assert columns is not None
-    assert {column.strip() for column in columns.group(1).split(",")} == {
-        "run_key", "basin_version_key", "river_network_version_key", "river_segment_key",
-        "valid_time", "lead_time_hours", "variable_e", "value", "unit_e", "quality_flag_e", "created_at",
-    }
-    assert "rt.*" not in copy
-    # Opposite-store time/value decoys make a wrong route observable; real-DB
-    # forecast tests own the resulting rows rather than duplicating DDL here.
-    assert "rt.valid_time + CASE WHEN h.timeseries_store = 'legacy'" in copy
-    assert "rt.value + CASE WHEN h.timeseries_store = 'legacy'" in copy
-    assert "SET value = rt.value + 10000, valid_time = rt.valid_time + INTERVAL '30 minutes'" in decoy
+    assert len(statements) == 3
+    narrow_copy, copy, decoys = statements
+    assert "FROM hydro.river_timeseries_legacy" in narrow_copy
+    assert "INSERT INTO hydro.river_timeseries_legacy" in copy
+    assert "FROM hydro.river_timeseries rt" in copy
+    assert "RENAME" not in copy
+    assert_text_fact_columns(copy, "rt", set(), "fixture narrow source")
+    for store in ("legacy", "narrow"):
+        assert f"h.timeseries_store = '{store}'" in decoys
 
 
 # ---------------------------------------------------------------------------
@@ -1685,13 +1589,9 @@ def test_every_registered_file_declares_its_marker_and_aid_count() -> None:
         assert_marker_census(path, expected, non_aid_tag_lines=NON_AID_MARKER_TAG_LINES.get(path, 0))
 
 
-def test_this_registers_marker_total_is_the_measured_ten() -> None:
-    """The register's share of the registered 34, stated as a number.
-
-    A per-file dict can be edited one line at a time without anyone noticing the
-    total moved; the issue's baseline is a total.
-    """
-    assert sum(MARKER_AID_CENSUS.values()) == 10
+def test_this_registers_marker_total_is_the_measured_eight() -> None:
+    """The two parser aids retired with narrow segmentby; eight reader aids remain."""
+    assert sum(MARKER_AID_CENSUS.values()) == 8
 
 
 def test_every_registered_read_template_is_registered_in_the_template_registry() -> None:

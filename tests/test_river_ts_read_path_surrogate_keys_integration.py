@@ -431,7 +431,8 @@ def _seed(database_url: str) -> None:
 
 @pytest.fixture()
 def seeded(throwaway_database_url: str) -> Any:
-    apply_migrations_from_zero(throwaway_database_url)
+    # Frozen text-era reader goldens need the historical catalog before expand.
+    apply_migrations_from_zero(throwaway_database_url, through="000058")
     _seed(throwaway_database_url)
     engine = sqlalchemy_engine(throwaway_database_url)
     with Session(engine) as session:
