@@ -628,11 +628,11 @@ def _segment_block_statements() -> dict[str, str]:
     return {label: sql for label, (sql, _params) in _segment_block_executions().items()}
 
 
-def _latest_product_fallback_execution() -> tuple[str, Any]:
+def _latest_product_fallback_execution(store: str = "legacy") -> tuple[str, Any]:
     """The known-run heavy execution, distinct from its raw renderer input."""
     header = {
         "run_id": "qhh_gfs_2026050700",
-        "timeseries_store": "legacy",
+        "timeseries_store": store,
         "forcing_version_id": "forc_qhh_gfs_2026050700",
         "basin_version_id": "basins_qhh_vbasins",
         "river_network_version_id": "basins_qhh_rivnet_vbasins",
