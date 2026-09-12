@@ -42,6 +42,7 @@ from packages.common.node27_cold_governance_collection import (
     run_command as _run_command,
 )
 from packages.common.node27_cold_governance_runtime import ColdGovernanceRuntimeConfig, cold_governance_evidence
+from packages.common.redaction import redact_payload
 
 SCHEMA_VERSION = "nhms.node27_resource_governance.audit.v1"
 
@@ -203,6 +204,44 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
     recommendations: list[dict[str, Any]] = []
     working_set = receipt.get("working_set", {})
     status = working_set.get("projection_status")
+    binding = working_set.get("working_set_filesystem") or {}
+    available = working_set.get("working_set_free_bytes")
+    capacity_valid = (
+        binding.get("status") == "ok"
+        and bool(binding.get("path"))
+        and bool(binding.get("device_identity"))
+        and binding.get("blockers") == []
+        and isinstance(available, int)
+        and not isinstance(available, bool)
+        and available >= 0
+    )
+    if not capacity_valid:
+        recommendations.append(
+            {
+                "severity": "critical",
+                "area": "filesystem",
+                "code": "WORKING_SET_FILESYSTEM_UNAVAILABLE",
+                "evidence": dict(working_set),
+                "action": "Restore configured PGDATA filesystem capacity and device observations.",
+            }
+        )
+    usage = ((receipt.get("filesystem") or {}).get("path_sizes") or {}).get("pgdata_root", {})
+    usage_bytes = usage.get("bytes")
+    if (
+        usage.get("status") != "ok"
+        or not isinstance(usage_bytes, int)
+        or isinstance(usage_bytes, bool)
+        or usage_bytes < 0
+    ):
+        recommendations.append(
+            {
+                "severity": "critical",
+                "area": "filesystem",
+                "code": "PGDATA_USAGE_UNAVAILABLE",
+                "evidence": dict(usage),
+                "action": "Restore the existing configured PGDATA usage audit.",
+            }
+        )
     if status in {"watermark_unavailable", "catalog_unavailable"}:
         recommendations.append(
             {
@@ -225,20 +264,19 @@ def _recommendations(receipt: Mapping[str, Any], thresholds: AuditThresholds) ->
             }
         )
     peak = working_set.get("projected_peak_bytes")
-    home_free = working_set.get("home_free_bytes")
     if (
         status == "ok"
         and isinstance(peak, int | float)
-        and isinstance(home_free, int | float)
-        and peak > home_free - thresholds.safety_margin_bytes
+        and capacity_valid
+        and peak > available - thresholds.safety_margin_bytes
     ):
         recommendations.append(
             {
                 "severity": "critical",
                 "area": "postgres",
-                "code": "PROJECTED_PEAK_EXCEEDS_HOME_FREE",
+                "code": "PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE",
                 "evidence": {**working_set, "safety_margin_bytes": thresholds.safety_margin_bytes},
-                "action": "Restore compression capacity before the projected working-set peak exhausts home.",
+                "action": "Restore compression capacity before the projected peak exhausts the PGDATA filesystem.",
             }
         )
     fs = receipt.get("filesystem", {})
@@ -395,7 +433,7 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
     systemd = collect_systemd(config.services)
     working_set = collect_working_set(
         config.database_url,
-        (filesystem.get("filesystems") or {}).get("home", {}).get("free_bytes"),
+        filesystem,
     )
     uncompressed = working_set["uncompressed_bytes"]
     working_set["projected_peak_bytes"] = None
@@ -438,9 +476,7 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
     receipt["recommendations"] = _recommendations(receipt, config.thresholds)
     if config.cold_governance_receipt_path is not None:
         audit_reference = datetime.now(UTC)
-        evidence = cold_governance_evidence(
-            _cold_runtime_config(config), postgres, observed_at=audit_reference
-        )
+        evidence = cold_governance_evidence(_cold_runtime_config(config), postgres, observed_at=audit_reference)
         cold_receipt, cold_schema = build_cold_governance_receipt(
             config=GovernanceConfig(
                 receipt_path=config.cold_governance_receipt_path,
@@ -456,13 +492,13 @@ def build_receipt(config: AuditConfig) -> dict[str, Any]:
             cold=_cold_governance_sample(filesystem, postgres, path="/data/GHDC", observed_at=receipt["finished_at"]),
             evidence=evidence,
         )
-        cold_receipt["working_set"] = working_set
+        cold_receipt["working_set"] = redact_payload(working_set)
         write_cold_governance_receipt(config.cold_governance_receipt_path, cold_receipt, cold_schema)
         receipt["cold_tablespace_governance"] = {
             "outcome": cold_receipt["outcome"],
             "receipt_path": str(config.cold_governance_receipt_path),
         }
-    return receipt
+    return redact_payload(receipt)
 
 
 def _write_summary(path: Path, payload: Mapping[str, Any]) -> None:
@@ -470,7 +506,10 @@ def _write_summary(path: Path, payload: Mapping[str, Any]) -> None:
         raise ValueError(f"summary path must be absolute: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n", encoding="utf-8")
+    temporary.write_text(
+        json.dumps(redact_payload(payload), indent=2, sort_keys=True, default=_json_default) + "\n",
+        encoding="utf-8",
+    )
     temporary.replace(path)
 
 
@@ -665,7 +704,11 @@ def main(argv: list[str] | None = None) -> int:
     critical_codes = _critical_codes(receipt)
     for code in critical_codes:
         print(f"{CRITICAL_DIAGNOSTIC_PREFIX}{code}", file=sys.stderr)
-        if code == "PROJECTED_PEAK_EXCEEDS_HOME_FREE":
+        if code in {
+            "PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE",
+            "WORKING_SET_FILESYSTEM_UNAVAILABLE",
+            "PGDATA_USAGE_UNAVAILABLE",
+        }:
             working_set = receipt.get("working_set", {})
             print(
                 "working-set peak: "
@@ -673,11 +716,15 @@ def main(argv: list[str] | None = None) -> int:
                     f"{name}={working_set.get(name)}"
                     for name in (
                         "projected_peak_bytes",
-                        "home_free_bytes",
+                        "working_set_free_bytes",
                         "next_compressible_at",
                         "uncompressed_bytes",
                     )
                 ),
+                file=sys.stderr,
+            )
+            print(
+                "working-set filesystem: " + json.dumps(working_set.get("working_set_filesystem", {}), sort_keys=True),
                 file=sys.stderr,
             )
     return 1 if critical_codes else 0

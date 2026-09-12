@@ -86,7 +86,7 @@ docker exec -i -e PGOPTIONS='-c max_parallel_maintenance_workers=0' nhms-db \
 
 ## 4. 容器重建
 
-PGDATA 是 **bind mount**（`/home/nwm/nhms-pgdata`），所以重建容器不动数据。
+PGDATA 是 **bind mount**（宿主 `/data/GHDC/nhms-primary/pgdata` → 容器 `/home/postgres/pgdata/data`），所以重建容器不动数据；保留的 `/home/nwm/nhms-pgdata` 不是当前 cluster。工作集容量须绑定配置目标的实际设备与可用字节，不能借用 `/home`；此修正不启用冷层。
 重建前先按 §1 干净停机，并把旧容器 `docker rename` 留作回滚参照而不是直接 `rm`。
 
 **镜像用 ID 而不是 tag。** `timescale/timescaledb-ha:pg15-latest` 是移动标签，
@@ -152,7 +152,7 @@ attach `nhms_cold`，新 chunk 仍在 `pg_default`。不得 attach tablespace，
 此 oracle 不是 live install 命令；它只创建带 `nhms-1894-tablespace-` 前缀的唯一
 container/prior 名、由内核临时分配的非 `55432` loopback port，及一个唯一临时 work root。它在任何 Docker、
 filesystem 或 DB 操作前拒绝 `nhms-db`、`nhms-db-before`、`/data/GHDC`、
-`/home/nwm/NWM`、`/home/nwm/nhms-pgdata`、活动 checkout 和全部 #1892 前缀。真实测试唯一命令是：
+`/home/nwm/NWM`、当前 PGDATA `/data/GHDC/nhms-primary/pgdata`、保留旧副本 `/home/nwm/nhms-pgdata`、活动 checkout 和全部 #1892 前缀。真实测试唯一命令是：
 
 ```bash
 NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_cold_tablespace_integration.py
