@@ -2589,13 +2589,21 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "infra/env/compute.example",
         (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
     ),
+    # #2075: `tests/test_env_templates.py` reads BOTH of the next two files by
+    # path -- it parses the `nhms-required-keys: compute.scheduler-dbfree`
+    # block out of `infra/env/README.md` and asserts the template satisfies
+    # every entry, key and pinned value. Without these two targets a
+    # template-only or README-only PR selected a non-empty set that held ZERO
+    # readers of the changed file (the #2195 shape), so the guard that exists
+    # to catch the missing `NHMS_ORCHESTRATOR_TERMINAL_STAGE` would not have
+    # run on the PR that removed it.
     PathTestRule(
         "infra/env/compute.scheduler-dbfree.env.example",
-        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py"),
     ),
     PathTestRule(
         "infra/env/README.md",
-        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,),
+        (SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_env_templates.py"),
     ),
     # #2195: this template's owner suite reads it BY PATH and asserts its
     # content -- `tests/test_scheduler_file_provider_refresh.py`'s
@@ -2743,6 +2751,27 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.timer",
         ("tests/test_scheduler_file_provider_refresh.py",),
+    ),
+    # #2146: the refresh-lane health probe's installer and its two units.
+    # `tests/test_node22_refresh_timer_health.py` reads all three by path --
+    # it `read_text`s both units (`Type=oneshot`, `TimeoutStartSec=`, no
+    # `PrivateTmp` directive, the `ExecStart` script path, the
+    # `UnsetEnvironment=` line byte-equal to the refresh service's,
+    # `OnCalendar=hourly`, `Persistent=true`) and it runs the installer as a
+    # subprocess against a fake systemctl, asserting the four protected units
+    # are only ever read. The probe's own `scripts/node22_refresh_timer_health.py`
+    # needs no row -- the same-name rule already routes it.
+    PathTestRule(
+        "scripts/install_node22_refresh_timer_health.sh",
+        ("tests/test_node22_refresh_timer_health.py",),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-node22-refresh-timer-health.service",
+        ("tests/test_node22_refresh_timer_health.py",),
+    ),
+    PathTestRule(
+        "infra/systemd/nhms-node22-refresh-timer-health.timer",
+        ("tests/test_node22_refresh_timer_health.py",),
     ),
     PathTestRule(
         "scripts/node27_download_once.sh",

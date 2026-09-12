@@ -2433,7 +2433,19 @@ def test_scheduler_provider_refresh_template_rule_carries_no_selection_flags() -
         ),
         pytest.param(
             "infra/env/compute.scheduler-dbfree.env.example",
-            [SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_two_node_docker_runtime.py"],
+            # #2075 widened this row by one, on the same reader-completeness
+            # ground #2195 established: `tests/test_env_templates.py` parses the
+            # `nhms-required-keys` block out of `infra/env/README.md` and
+            # asserts THIS template satisfies every entry, key and pinned value.
+            # It is a literal reader of the changed path, so a template-only PR
+            # must run it -- the previous 2-set was non-empty yet held no reader
+            # of this file, which is how the missing
+            # `NHMS_ORCHESTRATOR_TERMINAL_STAGE` reached a rebuilt node.
+            [
+                "tests/test_env_templates.py",
+                SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
+                "tests/test_two_node_docker_runtime.py",
+            ],
             id="compute-scheduler-dbfree",
         ),
         pytest.param(
