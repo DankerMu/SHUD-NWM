@@ -80,6 +80,9 @@ class _RecordingCursor:
     def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
         self.connection.executions.append((statement, tuple(parameters)))
         normalized = statement.lower().strip()
+        if "select timeseries_store" in normalized:
+            self._last_fetchone = ("narrow",)
+            return
         if _CHUNKS_QUERY_MARKER in normalized:
             self._last_fetchone = self._compressed_chunk_answer(tuple(parameters))
             return
@@ -417,12 +420,12 @@ def test_output_parser_replacement_window_includes_existing_rows_before_guard(
     # network key, variable). The aid is the batch's own run_id — the same value
     # the DELETE's run_key resolves to — so it narrows nothing; the DELETE
     # asserted above deliberately stays three keys plus the window.
-    assert probe_call[1] == (7, "run_a", 8, "q_down")
-    assert window_call[1] == (7, "run_a", 8, "q_down")
+    assert probe_call[1] == (7, 8, "q_down")
+    assert window_call[1] == (7, 8, "q_down")
     assert "WHERE run_key = %s" in probe_call[0]
     assert "WHERE run_key = %s" in window_call[0]
     for statement in (probe_call[0], window_call[0]):
-        assert "AND run_id = %s" in statement
+        assert "AND run_id = %s" not in statement
 
 
 # ---------------------------------------------------------------------------

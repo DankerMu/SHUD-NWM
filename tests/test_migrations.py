@@ -276,15 +276,9 @@ DROPPED_RIVER_TIMESERIES_INDEXES = (
     "hydro.river_timeseries_valid_time_discovery_idx",
 )
 RETAINED_RIVER_TIMESERIES_INDEXES = (
-    "river_timeseries_pkey",
-    "river_ts_segment_time_idx",
-    "river_timeseries_valid_time_idx",
-    "river_timeseries_mvt_selected_identity_valid_time_discovery_idx",
-    # 000051 (issue #1341): the integer discovery index that serves the switched
-    # display-boundary reads. It joins the keep-list on day one — nothing may
-    # drop it, and the text indexes above stay for rollback and for the
-    # out-of-boundary text readers until #1342 retires them.
-    "river_ts_selected_identity_key_valid_time_idx",
+    "river_timeseries_narrow_pkey",
+    "river_ts_segment_time_key_idx",
+    "river_ts_run_discovery_key_idx",
 )
 SURROGATE_KEY_READ_INDEX_MIGRATION = "000051_river_ts_surrogate_key_read_index.sql"
 
@@ -1487,3 +1481,41 @@ def _split_index_columns(columns_sql: str) -> list[str]:
     if current:
         columns.append("".join(current))
     return columns
+
+
+def test_river_expand_pins_canonical_narrow_contract_and_order() -> None:
+    import hashlib
+
+    assert hashlib.sha256(
+        (MIGRATIONS_DIR / "000047_hypertable_compression_settings.sql").read_bytes()
+    ).hexdigest() == "b75ba800e4f72656ba6fe177e790a2696debed2f34111ed33e257504139d5869"
+    migration = (MIGRATIONS_DIR / "000059_river_timeseries_narrow_expand.sql").read_text()
+    executable = "\n".join(line for line in migration.splitlines() if not line.strip().startswith("--"))
+    ordered = [
+        "RENAME TO river_timeseries_legacy",
+        "CREATE TABLE IF NOT EXISTS hydro.river_timeseries",
+        "PERFORM create_hypertable",
+        "CREATE INDEX IF NOT EXISTS river_ts_segment_time_key_idx",
+        "CREATE INDEX IF NOT EXISTS river_ts_run_discovery_key_idx",
+        "ALTER TABLE hydro.river_timeseries SET",
+        "ALTER TABLE hydro.river_timeseries OWNER TO nhms_ingest_rw",
+        "ALTER TABLE hydro.hydro_run ADD COLUMN timeseries_store",
+        "UPDATE hydro.hydro_run SET timeseries_store = 'legacy'",
+    ]
+    positions = [executable.index(fragment) for fragment in ordered]
+    assert positions == sorted(positions)
+    table = executable[positions[1]:positions[2]]
+    for column in ("run_id", "basin_version_id", "river_network_version_id", "river_segment_id",
+                   "variable", "unit", "quality_flag"):
+        assert not re.search(rf"\b{column}\b", table)
+    assert "PRIMARY KEY (run_key, river_segment_key, variable_e, valid_time)" in table
+    assert table.count("REFERENCES") == 2
+    assert "chunk_time_interval => interval '1 day'" in executable
+    assert "create_default_indexes => false" in executable
+    assert "compress_segmentby = 'run_key, river_segment_key'" in executable
+    assert "compress_orderby = 'variable_e, valid_time'" in executable
+    assert "WHERE parsed_at IS NOT NULL OR status IN ('parsed', 'published')" in executable
+    assert "DEFAULT 'narrow'" in executable
+    assert "CHECK (timeseries_store IN ('legacy', 'narrow'))" in executable
+    assert "No chunk is decompressed" in migration
+    assert "000047 is not re-run" in migration

@@ -30,6 +30,7 @@ from tests.river_ts_template_registry import (
     GOLDEN_FIXTURE,
     GOLDEN_SHA256,
     NON_TEMPLATE_MENTIONS,
+    PARSER_NARROW_WRITER_KEYS,
     REGISTERED_TEMPLATE_PATHS,
     REGISTRY,
     ROUTED_SOURCE_KEYS,
@@ -75,21 +76,27 @@ def test_the_golden_was_captured_at_the_change_base() -> None:
 
 def test_the_golden_covers_exactly_the_registered_entries() -> None:
     """Historical statements and live raw sources have distinct exact sets."""
-    siblings = {entry.key for entry in REGISTRY} - ROUTED_SOURCE_KEYS
-    assert len(siblings) == 5
+    siblings = {entry.key for entry in REGISTRY} - ROUTED_SOURCE_KEYS - PARSER_NARROW_WRITER_KEYS
+    assert len(siblings) == 1
     assert set(GOLDEN["entries"]) == siblings | {
+        "publisher:qdown_discovery",
+        "forcing_copyback_backfill:discover_backfill_runs",
         "display_coverage:refresh",
         "mvt:postgis_tile_sql_hydro",
         "mvt:postgis_tile_sql_hydro_national",
         "mvt:valid_times_named_identity",
         "mvt:valid_times_any_identity",
+        "parser:replace_chain_probe",
+        "parser:replace_chain_window",
         *(f"forecast_store:{label}" for label in FORECAST_STORE_SEGMENT_BLOCKS),
         "forecast_store:segment_identity_predicates",
         "forecast_store:latest_product_fallback",
     }
-    assert {entry.key for entry in REGISTRY} == siblings | ROUTED_SOURCE_KEYS
+    assert {entry.key for entry in REGISTRY} == siblings | ROUTED_SOURCE_KEYS | PARSER_NARROW_WRITER_KEYS
     assert len(REGISTRY) == 13
     assert ROUTED_SOURCE_KEYS == {
+        "publisher:qdown_discovery",
+        "forcing_copyback_backfill:discover_backfill_runs",
         "display_coverage:refresh",
         "forecast_store:segment_rows_source",
         "forecast_store:latest_product_river_source",
@@ -98,6 +105,10 @@ def test_the_golden_covers_exactly_the_registered_entries() -> None:
         "mvt:hydro_national_data_source",
         "mvt:valid_times_named_identity",
         "mvt:valid_times_any_identity",
+    }
+    assert PARSER_NARROW_WRITER_KEYS == {
+        "parser:replace_chain_probe",
+        "parser:replace_chain_window",
     }
     assert len(GOLDEN["entries"]) == 20
     assert set(FORECAST_STORE_EXECUTIONS) == {
@@ -111,9 +122,18 @@ def test_legacy_renderer_preserves_every_current_template_predicate(entry) -> No
     template = entry.source("legacy")
 
     assert _legacy_chains(template, entry.key) == sql_chains(template)
-    if entry.key not in ROUTED_SOURCE_KEYS:
+    if entry.key not in ROUTED_SOURCE_KEYS | PARSER_NARROW_WRITER_KEYS:
         assert _legacy_chains(template, entry.key) == tuple(
             tuple(chain) for chain in GOLDEN["entries"][entry.key]["chains"]
+        )
+    elif entry.key in PARSER_NARROW_WRITER_KEYS:
+        # Declared delta is exactly one obsolete run_id aid, not permission
+        # to discard any other historical key/window predicate.
+        historical = GOLDEN["entries"][entry.key]["chains"]
+        assert sum(chain.count("run_id = %s") for chain in historical) == 1
+        assert sql_chains(template) == tuple(
+            tuple(predicate for predicate in chain if predicate != "run_id = %s")
+            for chain in historical
         )
 
 

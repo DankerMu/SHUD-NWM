@@ -9349,7 +9349,18 @@ def test_disposition_guard_reds_when_a_redirect_no_longer_reaches_the_suite() ->
 # persistence.py; test_reconcile_sacct_parse.py for reconcile.py, which is the
 # suite the #1486 one-hop closure already ties to reconcile.py).
 POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("services/tile_publisher/publisher.py", ("tests/test_cli_publish_qdown.py",)),
+    (
+        "services/tile_publisher/publisher.py",
+        ("tests/test_cli_publish_qdown.py",),
+    ),
+    (
+        "services/tile_publisher/forcing_copyback_backfill.py",
+        ("tests/test_forcing_copyback_backfill.py",),
+    ),
+    (
+        "db/seeds/seed_demo.py",
+        ("tests/test_seed.py",),
+    ),
     (
         "workers/output_parser/cli.py",
         ("tests/test_output_parser_cli.py", "tests/test_output_parser_dual_write.py"),
@@ -9408,6 +9419,25 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
 
     missing = sorted(set(required) - selected)
     assert not missing, f"{module_path}: rules stopped selecting audit-floor suites {missing}"
+
+
+@pytest.mark.parametrize(
+    ("module_path", "suite"),
+    (
+        ("services/tile_publisher/publisher.py", "tests/test_river_ts_read_path_surrogate_keys_integration.py"),
+        ("services/tile_publisher/forcing_copyback_backfill.py",
+         "tests/test_river_ts_read_path_surrogate_keys_integration.py"),
+        ("db/seeds/seed_demo.py", "tests/test_river_ts_dual_write_integration.py"),
+    ),
+)
+def test_river_expand_sources_open_the_database_lane(module_path: str, suite: str) -> None:
+    # These suites are intentionally integration-gated, not ordinary PR-floor
+    # coverage. Their producer-only diffs must open the real database job.
+    assert _file_level_gating_markers(_parse_tracked(suite)) == {"integration"}
+    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+    for path in (module_path, suite):
+        assert any(fnmatch.fnmatch(path, pattern) for pattern in patterns), path
+    assert suite in select_tests([module_path], repo_root=Path("."))
 
 
 # #1872 (+#2238): the five retention partitions ride the broad

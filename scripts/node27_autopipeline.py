@@ -71,6 +71,7 @@ from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
 from packages.common.redaction import redact_payload, redact_text
 from workers.model_registry.basins_discovery import discover_basins_inventory
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin
+from workers.output_parser.parser import LEGACY_STORE_REFUSED_EXIT_CODE
 
 PY = sys.executable
 # fcst_<source>_<cycle10>_basins_<basin>_shud  (basin may contain underscores).
@@ -962,22 +963,41 @@ def _record_recompute_decline(
 
     Deliberately raises on any failure: the caller keeps ``outcome="failed"``
     when this does not commit, so a run is never treated as accounted for on a
-    row that does not exist. ``ON CONFLICT DO NOTHING`` makes the write
-    idempotent across concurrent workers within a tick and across tick replays.
+    row that does not exist. Legacy permanence lasts only while the authority
+    is legacy; narrow reentry must replace an inert legacy record at the same key.
     """
     conn = _connect(database_url)
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
+                    "SELECT timeseries_store FROM hydro.hydro_run WHERE run_id=%s FOR SHARE",
+                    (run_id,),
+                )
+                authority = cur.fetchone()
+                if authority is None:
+                    raise RuntimeError(f"Cannot record decline without run authority: {run_id}")
+                store = authority[0]
+                if reason_code == "legacy_store_refused" and store != "legacy":
+                    raise RuntimeError(f"Legacy refusal is stale for narrow run: {run_id}")
+                cur.execute(
                     """
                     INSERT INTO ops.ingest_recompute_decline
                         (run_id, init_state_id, product_mtime, reason_code, detail)
                     VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (run_id, init_state_id, product_mtime) DO UPDATE
+                    SET reason_code = CASE
+                          WHEN %s = 'legacy' AND ops.ingest_recompute_decline.reason_code = 'legacy_store_refused'
+                          THEN ops.ingest_recompute_decline.reason_code ELSE EXCLUDED.reason_code END,
+                        detail = CASE
+                          WHEN %s = 'legacy' AND ops.ingest_recompute_decline.reason_code = 'legacy_store_refused'
+                          THEN ops.ingest_recompute_decline.detail ELSE EXCLUDED.detail END
+                    RETURNING reason_code
                     """,
-                    (run_id, init_state_id, product_mtime, reason_code, detail),
+                    (run_id, init_state_id, product_mtime, reason_code, detail, store, store),
                 )
+                if cur.fetchone() is None:
+                    raise RuntimeError(f"Decline record was not written: {run_id}")
     finally:
         conn.close()
 
@@ -1013,25 +1033,8 @@ def _declined_runs(
     run_ids: list[str],
     object_store_root: Path | None,
 ) -> set[str]:
-    """Runs whose CURRENT product evidence exactly matches a decline record (#1781).
-
-    One batched query, then object-store reads for the runs that came back only
-    -- the stat/read cost scales with the number of decline records, not with
-    the pending population.
-
-    The match is exact on all three key components, and a run may carry SEVERAL
-    records (the table accumulates: each newly-blocked regeneration adds one).
-    Matching against ANY of a run's records is what makes the float-equality
-    failure mode self-healing -- a mismatched read costs one more blocked tick,
-    which writes another row, and never degrades into the permanent loop.
-
-    ``object_store_root=None`` means there is no evidence side at all, so
-    nothing is suppressed: the fail-closed rule of design D3 on the read side.
-    Within that rule, the key itself comes from `_decline_key` -- the SAME
-    helper the write side uses, so `''` (known to have no manifest, design D11)
-    matches here instead of being skipped as missing evidence.
-    """
-    if object_store_root is None or not run_ids:
+    """Suppress legacy refusals until narrow; other declines match current evidence."""
+    if not run_ids:
         return set()
     # Savepoint, not a bare try/except (#1781): this cursor shares the caller's
     # non-autocommit transaction with the completeness query that follows, so a
@@ -1053,9 +1056,12 @@ def _declined_runs(
         established = True
         cur.execute(
             """
-            SELECT run_id, init_state_id, product_mtime
-            FROM ops.ingest_recompute_decline
-            WHERE run_id = ANY(%s)
+            SELECT d.run_id, d.init_state_id, d.product_mtime, d.reason_code
+            FROM ops.ingest_recompute_decline d
+            LEFT JOIN hydro.hydro_run h ON h.run_id = d.run_id
+            WHERE d.run_id = ANY(%s)
+              AND (d.reason_code <> 'legacy_store_refused'
+                   OR h.timeseries_store IS DISTINCT FROM 'narrow')
             """,
             (run_ids,),
         )
@@ -1068,10 +1074,15 @@ def _declined_runs(
     cur.execute(f"RELEASE SAVEPOINT {DECLINE_READ_SAVEPOINT_NAME}")
 
     recorded: dict[str, set[tuple[str, float]]] = {}
-    for row in rows:
-        recorded.setdefault(str(row[0]), set()).add((str(row[1]), float(row[2])))
-
     declined: set[str] = set()
+    for row in rows:
+        if row[3] == "legacy_store_refused":
+            declined.add(str(row[0]))
+        else:
+            recorded.setdefault(str(row[0]), set()).add((str(row[1]), float(row[2])))
+
+    if object_store_root is None:
+        return declined
     for run_id, keys in recorded.items():
         key = _decline_key(object_store_root, run_id)
         if key is None:
@@ -2058,6 +2069,7 @@ def _decline_blocked_recompute(
     object_store_root: Path,
     database_url: str,
     detail: str | None,
+    reason_code: str = REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
 ) -> str:
     """Terminate a compressed-chunk-blocked recompute, or keep failing (#1781).
 
@@ -2081,7 +2093,7 @@ def _decline_blocked_recompute(
             run_id=run_id,
             init_state_id=init_state_id,
             product_mtime=product_mtime,
-            reason_code=REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+            reason_code=reason_code,
             detail=redact_text(detail) if detail else None,
         )
     except Exception:  # noqa: BLE001 - any write failure must fall back to retrying
@@ -2153,6 +2165,23 @@ def _process_run(
 
     parse = [PY, "-m", "workers.output_parser.cli", "parse", "--run-id", run_id]
     rc, out, err = _run(parse, env)
+    if rc == LEGACY_STORE_REFUSED_EXIT_CODE:
+        error = redact_text((err or out)[-500:])
+        return {
+            "run_id": run_id,
+            "outcome": _decline_blocked_recompute(
+                run_id,
+                object_store_root=object_store_root,
+                database_url=database_url,
+                detail=error,
+                reason_code="legacy_store_refused",
+            ),
+            "stage": "parse",
+            "rc": rc,
+            "error": error,
+            "reason_code": "legacy_store_refused",
+            "forcing_stage": forcing_stage,
+        }
     if rc != 0:
         return {
             "run_id": run_id,
@@ -2636,7 +2665,7 @@ def main(argv: list[str] | None = None) -> int:
             "declined_runs": [
                 {
                     "run_id": r["run_id"],
-                    "reason_code": REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
+                    "reason_code": r.get("reason_code", REASON_APPLY_COMPRESSED_CHUNK_BLOCKED),
                 }
                 for r in by("declined")
             ],
