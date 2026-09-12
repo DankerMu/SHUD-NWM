@@ -513,3 +513,32 @@ def test_performance_cli_refuses_actual_cold_admission_without_publication(
     assert "Traceback" not in captured.err
     assert list(parent.iterdir()) == []
     assert connection.closed
+
+
+def test_performance_cli_propagates_admission_programming_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from packages.common import node27_issue1895_performance_live as owner
+
+    parent = tmp_path / "run"
+    parent.mkdir(mode=0o700)
+    target = parent / "performance.json"
+    env_file = _private_display_env(tmp_path / "display.env")
+    connection = FakeConnection()
+
+    def programming_error(_execute):
+        raise RuntimeError("admission programming sentinel")
+
+    monkeypatch.setattr(owner, "derive_bound_inventories", programming_error)
+    with pytest.raises(RuntimeError, match="admission programming sentinel"):
+        oracle.main(
+            _argv(target, display_origin=ORIGIN) + ["--display-env", str(env_file)],
+            connect=lambda _dsn: connection,
+            opener=FakeOpener(),
+            load_chunk=_fake_load_chunk,
+            collect_group=_fake_collect_group,
+            environ={"NHMS_DISPLAY_API_PORT": "8080"},
+        )
+    assert connection.closed
+    assert list(parent.iterdir()) == []

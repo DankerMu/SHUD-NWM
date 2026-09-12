@@ -112,3 +112,10 @@ proof of the later source repair. The pre-existing mixed-session
 digest/payload/parity presentation issue is tracked separately as
 [#2293](https://github.com/DankerMu/SHUD-NWM/issues/2293), directly under #1895/#1891;
 this PR does not perform a partial canonicalization or claim live reproduction.
+
+The pre-round2 invariant audit additionally strengthened programming-error proof:
+the prior post-target test replaced the entire adapter and therefore bypassed its
+new catch. It now reaches the real adapter with an inner programming error;
+the equivalent performance CLI case reaches the real derivation boundary.
+Both require propagation, owned-connection cleanup and no artifacts. This is
+test-only preservation evidence, not another product change or claimed red case.

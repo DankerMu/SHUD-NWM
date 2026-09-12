@@ -1095,25 +1095,38 @@ def test_post_target_observer_propagates_programming_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from packages.common import node27_issue1895_post_target as owner
+    from tests.cold_residency_fakes import FakeConnection
+
+    connection = FakeConnection()
+    baseline = _write_private_json(
+        _private_dir(tmp_path / "input") / "baseline.json",
+        {"groups": _baseline_groups_with_parity(_valid_window_parity())},
+    )
+    output = _private_dir(tmp_path / "output") / "post.json"
     monkeypatch.setattr(post_target_observe_cli, "resolve_readonly_dsn", lambda **_kwargs: "readonly-dsn")
 
     def programming_error(**_kwargs: object) -> None:
         raise RuntimeError("programming sentinel")
 
-    monkeypatch.setattr(post_target_observe_cli, "run_post_target_observation", programming_error)
+    monkeypatch.setattr(owner, "open_readonly_connection", lambda _dsn: connection)
+    monkeypatch.setattr(owner, "fetch_display_watermark", lambda *_args, **_kwargs: datetime(2026, 9, 1, tzinfo=UTC))
+    monkeypatch.setattr(owner, "observe_post_target", programming_error)
     with pytest.raises(RuntimeError, match="programming sentinel"):
         post_target_observe_cli.main(
             [
                 "--baseline",
-                str(tmp_path / "baseline.json"),
+                str(baseline),
                 "--output",
-                str(tmp_path / "post.json"),
+                str(output),
                 "--reviewed-sha",
                 SHA,
                 "--lag-seconds",
                 "172800",
             ]
         )
+    assert connection.closed
+    assert list(output.parent.iterdir()) == []
 
 
 def test_w8_cli_closes_display_watermark_failures_without_secret_or_traceback(
