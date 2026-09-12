@@ -4513,3 +4513,12 @@ Phase 7 local-repair 抓到 capture freeze 未重钉，计入 phase 桶，不是
 记录 deferral：keep/cut 仍待维护者决策；本次 I6 合并授权不含审核策略调整。
 现行 keep 与座位上限不变。
 
+### Revisit 2026-09-12（post PR #2274 / issue #1986）
+
+追加后实测 639 行、629 merged、10 terminal；209 个多轮样本，
+later-round catches core=269、rotated=270、phase=57、skipped=15。
+本单 high 两轮：首轮八项独立确认发现已修复，第二轮三席及最终 gap sweep 无新发现。
+本单不增加后轮 catch，不能据此推断轮换收益。
+记录 deferral：keep/cut 仍待维护者决策；本次 epic 实现与合并授权不含审核策略调整。
+现行 keep 与座位上限不变，共享 timeseries OpenSpec 继续 active。
+
