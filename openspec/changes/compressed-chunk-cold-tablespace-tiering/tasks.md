@@ -208,7 +208,7 @@ Seams under test:
   This child performs no SSH, census, probe, install, movement, live C1-C4 or
   timer work; it does not close #1895/#1891, archive this change, or check any of
   4.1-4.8.
-- [ ] 4.0A Merge child #2224 before retrying G1. The first node-27 G1 invocation
+- [x] 4.0A Merge child #2224 before retrying G1. The first node-27 G1 invocation
   at reviewed SHA `a8db554d6402bec642e9a05627eae64b2b79aec3` ended NO-GO after
   the parent-hypertable parity aggregate reached the finite 3600-second statement
   timeout; it published no census, policy or valid-times baseline, and G2-G8 did
