@@ -197,6 +197,11 @@ def _run_cleanup(*, retention_days: int | None, dry_run: bool) -> dict[str, obje
             os.getenv("WORKSPACE_ROOT"),
             os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT"),
         ),
+        # The same value again, named this time (#2238): `runs_only_roots` is
+        # positional and untagged, so retention cannot otherwise tell the shared
+        # copyback root -- the one whose removals must hold the copyback batch
+        # mutex -- from the run-workspace root beside it.
+        copyback_root=os.getenv("NHMS_OBJECT_STORE_COPYBACK_ROOT"),
     )
     payload = result.to_dict()
     if frontier.status == "ok":

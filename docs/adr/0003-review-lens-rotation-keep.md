@@ -4414,3 +4414,102 @@ was written with no review seat on it, which is precisely the drift the entry
 argues is better caught by machine than by another reviewer. Also corrected:
 PR #2232's revisit is the entry immediately above, not three above. The keep
 decision and the audit figures are unchanged; only the explanation was wrong.
+
+### Revisit 2026-09-11（post PR #2247 / issue #2068）
+
+审计样本 **202 个多轮 merged PR，later-round catches core=258 vs rotated=270**
+（phase=57，skipped=15）——与上一条（PR #2232 之后）**逐字相同**。本 PR 边际为
+**core +0 / rotated +0**，样本量也未动：#2247 是 `rounds=1`，单轮 PR 不进多轮样本，
+在轮换问题上结构性地不产生任何证据。
+
+Decision: **keep**，不变。理由不是新数据支持轮换，而是没有新数据——
+自主 default-keep 规则在零边际证据下不改策略。座位上限不变。
+
+值得记一笔的是本单证据的形状，它与上一条的观察同向，且不是轮换结论：本单
+跨 3 轮 fixture 复审、2 个 review 座位、2 个 verifier 批次与 1 次终审，
+**落在生产 diff 上的发现为零**——11 项 fixture 发现与 8 项 review/Phase-7 catch
+**全部**是散文对树、或账本对树的偏差，其中 4 条是编排者自己写下的假句：一条踩了
+entropy 硬门的 Evidence Floor 措辞、一条指错 rollback 分支的偏离理由、一条声称
+账本已记录而实际未记录的 commit message、一条实现改指时重写却写错的测试注释。
+这与上一条「反复出现的缺陷不是漏掉代码行为，而是叙述漂移」是同一读数；
+本单额外提供的一点是：**叙述漂移的作者是编排者本人时，再加审查座位也拦不住**——
+拦住这四条的分别是 fixture 复审、verifier、终审，都是**独立于作者**的读者，
+而不是更多同类座位。这是对 Evidence Floor 机械化覆盖的观察，不是轮换决定。
+
+### Revisit 2026-09-11（post PR #2246 / issue #1983）
+
+追加 #2246 后实测：626 行、617 merged、9 terminal；203 个多轮 merged PR，
+later-round catches core=258、rotated=270、phase=57、skipped=15。
+PR #2246 两轮均零候选；第二轮覆盖上游合入，不是 finding-driven 修复。
+本单只增加一个多轮样本，不增加 later-round catch。
+
+记录 deferral：轮换 keep/cut 仍待维护者的人类决策；本次 issue 合并授权不包含
+策略调整授权，且新增样本无边际 catch，不能据此改座位或上限。现行 keep 不变。
+不重写历史 off-vocabulary 或不可归因记录；上述数字来自本次审计而非历史段落。
+
+### Revisit 2026-09-11（post PR #2250 / issue #2240）
+
+追加 #2250 后实测：627 行、618 merged、9 terminal；204 个多轮 merged PR，
+later-round catches core=259、rotated=270、phase=57、skipped=15。
+本单第二轮新增一个 test-evidence catch；后续两轮未引入新透镜，不能据此判断轮换收益。
+记录 deferral：keep/cut 仍待维护者决策，本次生产迁移授权不包含审核策略调整；
+维持现行 keep，不改座位或上限，不重写历史记录。
+
+### Revisit 2026-09-11（post PR #2253 / issue #1356）
+
+合入上游 #2250 记录后重新实测628行、619 merged、9 terminal；204个多轮样本，
+later-round catches core=259、rotated=270、phase=57、skipped=15。
+PR #2253 是一轮三席综合审核、零候选，独立终审零发现；不增加多轮样本或后轮catch。
+记录deferral：keep/cut仍待维护者的人类策略决策，本次独立bug修复授权不含策略调整。
+现行keep及座位上限不变；不据零边际catch缩减后续审核，也不改写历史不可归因记录。
+
+### Revisit 2026-09-11（post PR #2245 descoped / PR #2257 merged，issue #2238）
+
+追加两条后实测：630 行、620 merged、10 terminal；205 个多轮 merged PR，
+later-round catches core=261、rotated=270、phase=57、skipped=15。
+
+本次样本对轮换是**反向证据，且不足以据此翻案**：PR #2257 的 round 4 由三轮硬门
+后的 depth retro 买下，唯一未用席位是 `security-perf`，而该轮 diff 是纯散文
+（`retention.py` 在该区间 AST 相同），性能/安全席位咬不动它，故**明确记录偏离、
+不买轮换**，只跑 `test-evidence`+`integration`。该轮两条 CONFIRMED（R4-a/R4-b）
+都落在 round-1 已有的 core 席位上 —— 这是 core+2、rotated+0 的来源。
+一次因 diff 形态而无可轮换席位的后轮，不能当作轮换收益下降的证据。
+
+记录 deferral：keep/cut 仍待维护者的人类策略决策；本 issue 的 merge 预授权不含
+审核策略调整授权。现行 keep 与座位上限不变，不改写历史不可归因记录。
+
+### Revisit 2026-09-11（post PR #2256 / issue #2240）
+
+追加后实测631行、621 merged、10 terminal；206个多轮样本，
+later-round catches core=261、rotated=270、phase=57、skipped=15。
+本单第一轮确认一个测试缺口，第二轮关闭且无新增发现，不增加后轮catch。
+记录deferral：keep/cut仍待维护者决策；本次迁移及恢复授权不包含审核策略调整。
+维持现行keep与座位上限，不改写历史记录。
+
+### Revisit 2026-09-11（post PR #2264 / issue #2208）
+
+追加后实测 634 行、624 merged、10 terminal；206 个多轮样本，
+later-round catches core=261、rotated=270、phase=57、skipped=15。
+本单 compact 一轮两席、零候选、独立终审零发现，不增加多轮样本或后轮 catch。
+记录 deferral：keep/cut 仍待维护者决策；本次 reader 合并授权不含审核策略调整。
+现行 keep 与座位上限不变。
+
+### Revisit 2026-09-11（post PR #2269 / issue #1984）
+
+追加后实测 635 行、625 merged、10 terminal；206 个多轮样本，
+later-round catches core=261、rotated=270、phase=57、skipped=15。
+本单 compact 一轮两席、零候选、独立终审零发现，不增加多轮样本或后轮 catch。
+记录 deferral：keep/cut 仍待维护者决策；本次非模板面合并授权不含审核策略调整。
+现行 keep 与座位上限不变。
+
+### Revisit 2026-09-11（post PR #2271 / issue #1985）
+
+追加后实测 636 行、626 merged、10 terminal；207 个多轮样本，
+later-round catches core=262、rotated=270、phase=57、skipped=15。
+本单 expanded 两轮：round 1 四条 FIX_NOW 均在 pinned core；round 2 因上一轮
+major 保留 integration 席，产出一条 P2（I6R2-C-1）记笔记不延期（core +1）。
+Phase 7 local-repair 抓到 capture freeze 未重钉，计入 phase 桶，不是轮换。
+后轮 catch 不构成轮换收益证据。
+记录 deferral：keep/cut 仍待维护者决策；本次 I6 合并授权不含审核策略调整。
+现行 keep 与座位上限不变。
+

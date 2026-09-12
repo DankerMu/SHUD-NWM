@@ -1210,6 +1210,18 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2224 Stage-1 identity mutants. Three non-gated suites import this
+        # helper at module scope; without an explicit support-module rule a
+        # helper-only edit collapses to the meta-guard and skips the inspect/
+        # tick/AST contracts that consume it.
+        "tests/cold_residency_identity_mutants.py",
+        (
+            "tests/test_issue2224_origin_chunk_parity.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+        ),
+    ),
+    PathTestRule(
         # A mock SHUD CLI nothing imports: workers/shud_runtime/runtime.py runs it
         # as `[sys.executable, <path>, *args]`, so the consumption edge is the
         # exact literal `"tests/mock_shud_omp.py"` in the consumer's source, not
@@ -1230,15 +1242,21 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
-        # The #1872 retention partition's shared constants/helpers. The four
-        # collectible retention partitions import it at module scope (a design
-        # requirement: selector importer derivation must see the dependency), so
-        # a fixture edit breaks all four during PR-lane collection. They are the
-        # derived importer set; the meta-guard rider covers the tree-derived
-        # guards this very routing can invalidate.
+        # The #1872 retention partition's shared constants/helpers. The five
+        # collectible retention partitions that import it do so at module scope
+        # (a design requirement: selector importer derivation must see the
+        # dependency), so a fixture edit breaks all five during PR-lane
+        # collection. They are the derived importer set; the meta-guard rider
+        # covers the tree-derived guards this very routing can invalidate.
+        # #2238's copyback-mutex partition joined that set: it imports
+        # EXTRA_CONFIG/NOW/_seed_cycle/_pass_scheduler from here at top level,
+        # so it is a derived importer like the other four, not a rider.
+        # 25 tests in 5.27s (median of three `uv run pytest -q
+        # tests/test_retention_copyback_mutex.py` runs: 5.27/5.24/5.30s).
         "tests/retention_test_helpers.py",
         (
             "tests/test_retention.py",
+            "tests/test_retention_copyback_mutex.py",
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_pipeline_frontier.py",
             "tests/test_retention_root_admission.py",
@@ -1365,9 +1383,17 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
         # FROM it — which templates exist, how many aids each carries, how many
         # times each file names the fact table — so an edit here silently changes
         # what four suites assert without touching any of them. The forecast
-        # store-routing suite also imports the register and must run on changes.
+        # store-routing and hydro-display MVT suites also import the register
+        # and must run on changes.
+        # #2208: the national probe's file-level integration gate makes it a
+        # database-lane consumer, not a unit target. ci.yml routes this support
+        # path there; retain only the non-gated importers here.
         "tests/river_ts_template_registry.py",
-        (*SQL_SHAPE_ORACLE_TESTS, "tests/test_forecast_store_routing.py"),
+        (
+            *SQL_SHAPE_ORACLE_TESTS,
+            "tests/test_forecast_store_routing.py",
+            "tests/test_hydro_display_mvt_scaling.py",
+        ),
     ),
     PathTestRule(
         # #1913: the registry-import helper owns the former monolith's 19 support
@@ -1545,8 +1571,24 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # Extended AT THE RULE SITE (#2238), not by editing the shared constant:
+        # ORCHESTRATOR_CLI_IMPORTER_TESTS is also spliced into pattern[4]
+        # (scheduler_journal_archive.py), which the copyback-mutex suite does not
+        # import and whose selection must not move. cli.py is stop-rule owned, so
+        # the broad `services/orchestrator/**` list that carries the other four
+        # retention partitions (and the independent frontier suite, which is not
+        # a partition) is unreachable here — this is where the fifth
+        # partition's importer gap closes. The suite drives `cli._run_cleanup`,
+        # the out-of-pass entrypoint that reads NHMS_OBJECT_STORE_COPYBACK_ROOT
+        # from the environment and thereby decides which roots the deleter locks,
+        # so an env-read or root-assembly edit here must run it. DB-free, 25
+        # tests in 5.27s, hence a rule rather than a rule-gap exclusion.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[8],
-        (*FILE_JOURNAL_READ_STATE_TESTS, *ORCHESTRATOR_CLI_IMPORTER_TESTS),
+        (
+            *FILE_JOURNAL_READ_STATE_TESTS,
+            *ORCHESTRATOR_CLI_IMPORTER_TESTS,
+            "tests/test_retention_copyback_mutex.py",
+        ),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1853,6 +1895,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1872: the retention corpus is physically partitioned; the
             # production owner rule must select every collectible partition so
             # a retention change never blinds targeted CI to moved cases.
+            # #2238 added the fifth partition — the sixth retention suite,
+            # counting #1872's independent frontier suite, which is not itself
+            # a partition. It is the requirement oracle for retention.py's
+            # copyback-mutex lane (one batch-lock acquisition per removed tree
+            # under the shared copyback root, a pass-level wait budget,
+            # `failed` rather than abort on contention), and it
+            # top-level-imports `services.orchestrator` itself, so BOTH
+            # directory members' importer gaps close here — cli.py's third one is
+            # stop-rule owned and rides THAT site, per this rule's #1455 note
+            # above. DB-free, local, 25 tests in 5.27s, so a rule rather than a
+            # rule-gap exclusion.
+            "tests/test_retention_copyback_mutex.py",
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_frontier.py",
             "tests/test_retention_pipeline_frontier.py",
@@ -2256,6 +2310,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         SQL_SHAPE_ORACLE_TESTS,
     ),
     PathTestRule(
+        # #2208: these are the non-gated frozen-coverage owners. The national
+        # integration consumer runs through this fixture's database edge in ci.yml.
+        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
+        (
+            "tests/test_display_coverage_refresh.py",
+            "tests/test_river_ts_template_golden.py",
+        ),
+    ),
+    PathTestRule(
         "tests/fixtures/hydro_mvt_pre_store_f33441a2.sql",
         ("tests/test_hydro_display_mvt_scaling.py",),
     ),
@@ -2421,6 +2484,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_compression_supervisor.py",
             "tests/test_node27_timeseries_decompression_replay.py",
             "tests/test_node27_timeseries_lifecycle_lock.py",
+            "tests/test_node27_timeseries_discovery.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
     ),
     PathTestRule(
@@ -2643,16 +2708,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # #1442 (group E). Both qhh smoke scripts own a registered
         # river_timeseries statement and had no rule at all, so they fell
         # through to the core-smoke fallback — which imports neither and asserts
-        # nothing about their SQL. One narrow rule each, one target each: the
-        # cleanup oracle is the suite that pins these files' SQL shapes. The
+        # nothing about their SQL. The cleanup oracle pins SQL shapes and the
+        # QHH owner now exercises catalog-driven reset/summary entrypoints.
         # wire-site invariant suite also scans them, but is not PR-selected for
         # scripts/** — see issue #1656.
         "scripts/summarize_qhh_smoke_results.py",
-        ("tests/test_river_ts_text_identity_cleanup.py",),
+        ("tests/test_river_ts_text_identity_cleanup.py", "tests/test_qhh_scripts_static.py"),
     ),
     PathTestRule(
         "scripts/reset_qhh_smoke_db.py",
-        ("tests/test_river_ts_text_identity_cleanup.py",),
+        ("tests/test_river_ts_text_identity_cleanup.py", "tests/test_qhh_scripts_static.py"),
     ),
     PathTestRule(
         # No same-name tests/test_node27_autopipeline.py exists, so without this
@@ -2755,6 +2820,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        "packages/common/node27_timeseries_discovery.py",
+        (
+            "tests/test_node27_timeseries_discovery.py",
+            "tests/test_node27_lifecycle_contract.py",
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_timeseries_compression_supervisor.py",
+            "tests/test_node27_timeseries_retention.py",
+        ),
+    ),
+    PathTestRule(
         "scripts/node27_timeseries_compression.py",
         (
             "tests/test_node27_timeseries_compression.py",
@@ -2766,7 +2841,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1774: this lane runs as a non-superuser; a superuser-gated
             # READ added here would fail SILENTLY.
             "tests/test_node27_write_roles.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_compression_supervisor.py",
+        ("tests/test_node27_lifecycle_contract.py",),
+    ),
+    PathTestRule(
+        "scripts/node27_timeseries_compression_capture.py",
+        ("tests/test_node27_timeseries_discovery.py",),
     ),
     PathTestRule(
         "scripts/node27_cold_residency.py",
@@ -2997,6 +3081,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_compression_live_evidence.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
     ),
     PathTestRule(
@@ -3004,7 +3089,12 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
+    ),
+    PathTestRule(
+        "schemas/timeseries_retention_receipt.schema.json",
+        ("tests/test_node27_lifecycle_contract.py",),
     ),
     PathTestRule(
         # #2032: the `infra/env/node27-*.example` glob above only buys
@@ -3022,6 +3112,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_sequential_budget.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
             "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_lifecycle_contract.py",
         ),
     ),
     PathTestRule(
@@ -3044,6 +3135,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_timeseries_sequential_budget.py",
             "tests/test_node27_timeseries_sequential_runner_config.py",
             "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_lifecycle_contract.py",
             # #1895 task 4.0 second leg: the live-rollout section is the review
             # gate for the two new read-only CLIs and the installer/runner
             # contracts it binds; a section-only PR must run its contract suite
@@ -3948,6 +4040,40 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # not by same-stem test filename.  These rows attach their direct public
     # contracts while the shared-library baseline remains additive below.
     PathTestRule(
+        "packages/common/node27_pgdata_host.py",
+        (
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "packages/common/node27_pgdata_migrate.py",
+        (
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "scripts/node27_pgdata_migrate.py",
+        (
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_pgdata_migrate.py",
+        ("tests/test_node27_pgdata_migrate.py",),
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_pgdata_migrate_oracle.py",
+        ("tests/test_node27_pgdata_migrate_oracle.py",),
+        stop_on_match=True,
+    ),
+    PathTestRule(
         "packages/common/node27_cold_tablespace_identity.py",
         (
             "tests/test_node27_cold_tablespace_identity.py",
@@ -3973,6 +4099,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_tablespace_install.py",
             "tests/test_node27_cold_tablespace_recovery_contract.py",
             "tests/test_node27_cold_tablespace_integration.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
         ),
     ),
     PathTestRule(
@@ -4121,6 +4249,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     # The governance runtime consumes the installer evidence boundary.  Its own
@@ -4130,6 +4259,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(
@@ -4137,6 +4267,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(
@@ -4144,6 +4275,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(
@@ -4158,6 +4290,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         ),
     ),
     PathTestRule(

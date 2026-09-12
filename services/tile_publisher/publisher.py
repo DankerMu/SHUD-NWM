@@ -212,7 +212,7 @@ class TilePublisher:
     def _publish_qdown_from_database(self, session: Session, cycle_id: str) -> PublishResult:
         if not _has_table(session, "hydro", "hydro_run"):
             raise PublishError("DELIVERY_SCHEMA_MISSING", "hydro.hydro_run is required for q_down publication.")
-        if not _has_table(session, "hydro", "river_timeseries"):
+        if not _has_qdown_river_table(session):
             raise PublishError(
                 "DELIVERY_SCHEMA_MISSING",
                 "hydro.river_timeseries is required for q_down publication.",
@@ -309,16 +309,6 @@ class TilePublisher:
 
         layers.sort(key=lambda layer: str(layer["layer_id"]))
         artifacts.sort(key=lambda artifact: str(artifact["artifact_id"]))
-        # I7 (#2008 / design.md D6): the canonical precipitation mirror is the
-        # last step before lineage assembly -- q_down copyback, artifact writes
-        # and DB registration have all already succeeded, so nothing this step
-        # does may change the publish outcome.
-        cycle_lineage = _cycle_filter(cycle_id)
-        precip_mirror_summary = (
-            self._copyback_canonical_precip(cycle_lineage["source_id"], cycle_lineage["compact_time"])
-            if cycle_lineage is not None
-            else None
-        )
         lineage = {
             "cycle_id": cycle_id,
             "published_basins": len(source_run_ids),
@@ -332,8 +322,6 @@ class TilePublisher:
         }
         if copyback_summary is not None:
             lineage["object_store_copyback"] = copyback_summary
-        if precip_mirror_summary is not None:
-            lineage["precip_mirror"] = precip_mirror_summary
         return PublishResult(
             cycle_id=cycle_id,
             status="published",
@@ -1217,26 +1205,24 @@ class TilePublisher:
     def _copyback_canonical_precip(self, source: str, cycle: str) -> dict[str, Any] | None:
         """Mirror the canonical precipitation products for one cycle (#2008, D6).
 
-        ``source`` is any spelling ``normalize_source_id`` accepts -- the q_down
-        publish path passes the token ``_cycle_filter`` splits out of the cycle
-        id, the orchestrator's ``convert``-terminal seam passes the already
-        normalized ``context.source_id`` -- and ``cycle`` is the cycle's
+        ``source`` is any spelling ``normalize_source_id`` accepts -- the
+        orchestrator's ``convert``-terminal seam passes the already normalized
+        ``context.source_id`` -- and ``cycle`` is the cycle's
         ``%Y%m%d%H`` token; the mirror keyspace is
         ``canonical/<storage_source>/<cycle>/prcp_rate_or_amount/`` plus every
         ``canonical/<storage_source>/grid/<grid_id>/`` directory discovered on the
         source root (design.md D3). ``<grid_id>`` is *listed*, never imported from
         ``workers.canonical_converter``.
 
-        This step MUST NOT fail, block or roll back its caller -- the q_down
-        publish or the orchestrator's ``convert``-terminal hook -- for any reason.
-        Every failure -- absent source, unsafe entry name, symlink, tree limit,
+        This step MUST NOT fail, block or roll back its caller -- the
+        orchestrator's ``convert``-terminal hook -- for any reason. Every
+        failure -- absent source, unsafe entry name, symlink, tree limit,
         mid-copy ``OSError``, ``SafeFilesystemError``, even a failed rollback --
-        is swallowed and reported through the returned summary, which each
-        caller records under ``precip_mirror`` at its own outlet: publish
-        lineage, or the ``canonical_precip_mirror`` pipeline_event's
-        ``details``. The sibling ``_copyback_qdown_products`` converts these same
-        exceptions into ``PublishError`` and raises; copying that shape here
-        would be a bug.
+        is swallowed and reported through the returned summary, which the
+        caller records under ``precip_mirror`` at its own outlet: the
+        ``canonical_precip_mirror`` pipeline_event's ``details``. The sibling
+        ``_copyback_qdown_products`` converts these same exceptions into
+        ``PublishError`` and raises; copying that shape here would be a bug.
 
         Idempotency is tree-granular: the reused copy helper always rebuilds a
         temp tree and promotes it with a single ``os.replace``, so a tree whose
@@ -3110,6 +3096,12 @@ def _cycle_filter(cycle_id: str) -> dict[str, Any] | None:
 
 def _has_table(session: Session, schema: str, table_name: str) -> bool:
     return inspect(session.connection()).has_table(table_name, schema=schema)
+
+
+def _has_qdown_river_table(session: Session) -> bool:
+    return _has_table(session, "hydro", "river_timeseries") or _has_table(
+        session, "hydro", "river_timeseries_legacy"
+    )
 
 
 def _has_optional_table(session: Session, schema: str, table_name: str) -> bool:

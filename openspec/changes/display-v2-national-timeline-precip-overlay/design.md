@@ -98,6 +98,7 @@
 - `national_discharge_cycles` / `national_discharge_valid_times(source, cycle)` 用 fake session rows（现有 valid-times 测试风格）——交集 fail-closed、3h 步长、非矩形覆盖一次覆盖。
 - `services/precip` 三个纯函数 `resolve_window` / `accumulate_24h` / `render_png` + `TestClient` 路由用 tmp 镜像目录——一个 seam 覆盖跨周期取片、GFS 无 f000、窗口不完整 404、PNG 头/尺寸/调色板。
 - 发布 copyback 用 tmp roots（`tests/test_tile_publisher.py` 风格）——镜像成功、幂等跳过、缺文件不阻塞发布。
+  - **Superseded by #2068（2026-09-10）**：该缝已改指公开入口 `TilePublisher.copyback_canonical_precip`——publish 路径里的镜像调用点已移除，这批用例不再跑 publish，「缺文件不阻塞发布」读作「缺文件时返回 `failed` summary 而不抛出」。以 `tasks.md` 的 `### #2068` 节及其 Invariant Matrix delta 为准（共享 change 纪律：原文保留不原地改写）。
 - 前端 vitest：`queryState` 往返（`source/cycle/precip=0`）、`buildM11RegisteredOverlay` 用 per-cycle 列表、timeline view model 默认 lead=0、`SiteHeader` 标题——纯函数与组件浅渲染，不起 MapLibre。
 
 ## Risks / Trade-offs

@@ -166,6 +166,20 @@
     }
   },
   "properties": {
+    "working_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uncompressed_bytes", "daily_ingest_bytes", "next_compressible_at", "home_free_bytes", "projection_status", "projected_peak_bytes"],
+      "properties": {
+        "uncompressed_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "daily_ingest_bytes": {"type": ["number", "null"], "minimum": 0},
+        "next_compressible_at": {"type": ["string", "null"], "format": "date-time"},
+        "home_free_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "watermark": {"type": ["string", "null"], "format": "date-time"},
+        "projection_status": {"enum": ["ok", "no_uncompressed_chunk", "watermark_unavailable", "catalog_unavailable"]},
+        "projected_peak_bytes": {"type": ["number", "null"], "minimum": 0}
+      }
+    },
     "schema_version": {"const": "1.0"},
     "generated_at": {"type": "string", "format": "date-time"},
     "head_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},

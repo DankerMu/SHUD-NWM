@@ -42,6 +42,7 @@ from packages.common.forecast_store import (
     MVP_STATION_VARIABLES,
     QHH_LATEST_EXPECTED_HORIZON_HOURS,
 )
+from packages.common.river_ts_render import render_river_ts_sql
 
 # ---------------------------------------------------------------------------
 # Coverage CTE chain — lifted verbatim from the candidate query's CTEs
@@ -80,6 +81,7 @@ _CANDIDATE_RUNS_SQL = """
                 -- the keys cost no extra join; the river scan below joins on
                 -- them instead of on the repeated text identity columns.
                 h.run_key,
+                h.timeseries_store,
                 bv.basin_version_key,
                 rnv.river_network_version_key,
                 COALESCE(
@@ -133,6 +135,64 @@ _SCAN_HEADER_SQL = (
         FROM candidate_runs
 """
 )
+
+_RIVER_SAMPLE_ROWS_SQL = """
+            SELECT
+                rt.run_key,
+                rt.basin_version_key,
+                rt.river_network_version_key,
+                rt.river_segment_key,
+                cr.expected_segment_count,
+                rt.valid_time,
+                rt.lead_time_hours
+            FROM hydro.river_timeseries rt
+            JOIN candidate_runs cr
+              ON cr.run_key = rt.run_key
+             AND cr.basin_version_key = rt.basin_version_key
+             AND cr.river_network_version_key = rt.river_network_version_key
+            WHERE {store_predicate}
+              AND rt.variable_e = 'q_down'::hydro.river_variable
+              -- transitional compressed-chunk pushdown aid, remove with #1342
+              AND rt.variable = 'q_down'
+              AND rt.valid_time >= cr.display_start_time
+              AND rt.valid_time <= cr.display_end_time
+              AND (%(scan_run_id)s IS NULL
+                   OR (
+                       -- transitional compressed-chunk pushdown aid, remove with #1342
+                       rt.run_id = %(scan_run_id)s AND
+                       rt.run_key = (SELECT run_key FROM hydro.hydro_run
+                                     WHERE run_id = %(scan_run_id)s)))
+              AND (%(scan_basin_version_id)s IS NULL
+                   OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
+                                              WHERE basin_version_id = %(scan_basin_version_id)s))
+              AND (%(scan_river_network_version_id)s IS NULL
+                   OR (
+                       -- transitional compressed-chunk pushdown aid, remove with #1342
+                       rt.river_network_version_id = %(scan_river_network_version_id)s AND
+                       rt.river_network_version_key = (SELECT river_network_version_key
+                                                       FROM core.river_network_version
+                                                       WHERE river_network_version_id
+                                                             = %(scan_river_network_version_id)s)))
+              AND (%(scan_display_start)s IS NULL
+                   OR rt.valid_time >= %(scan_display_start)s)
+              AND (%(scan_display_end)s IS NULL
+                   OR rt.valid_time <= %(scan_display_end)s)
+"""
+
+
+def _river_sample_rows_template(store: str) -> str:
+    if store == "legacy":
+        return _RIVER_SAMPLE_ROWS_SQL.format(store_predicate="cr.timeseries_store = 'legacy'")
+    if store == "narrow":
+        return _RIVER_SAMPLE_ROWS_SQL.format(store_predicate="cr.timeseries_store = 'narrow'")
+    raise ValueError(f"Invalid river timeseries store: {store!r}")
+
+
+_RIVER_SAMPLE_ROWS_UNION_SQL = "\nUNION ALL\n".join(
+    render_river_ts_sql(_river_sample_rows_template(store), store).sql
+    for store in ("legacy", "narrow")
+)
+
 
 _COVERAGE_CTES = (
     """
@@ -390,46 +450,9 @@ _COVERAGE_CTES = (
         -- join to candidate_runs is key-only, because a text join equality is
         -- not pushdown material and a text fact join is forbidden.
         river_sample_rows AS (
-            SELECT
-                rt.run_key,
-                rt.basin_version_key,
-                rt.river_network_version_key,
-                rt.river_segment_key,
-                cr.expected_segment_count,
-                rt.valid_time,
-                rt.lead_time_hours
-            FROM hydro.river_timeseries rt
-            JOIN candidate_runs cr
-              ON cr.run_key = rt.run_key
-             AND cr.basin_version_key = rt.basin_version_key
-             AND cr.river_network_version_key = rt.river_network_version_key
-            WHERE rt.variable_e = 'q_down'::hydro.river_variable
-              -- transitional compressed-chunk pushdown aid, remove with #1342
-              AND rt.variable = 'q_down'
-              AND rt.valid_time >= cr.display_start_time
-              AND rt.valid_time <= cr.display_end_time
-              AND (%(scan_run_id)s IS NULL
-                   OR (
-                       -- transitional compressed-chunk pushdown aid, remove with #1342
-                       rt.run_id = %(scan_run_id)s AND
-                       rt.run_key = (SELECT run_key FROM hydro.hydro_run
-                                     WHERE run_id = %(scan_run_id)s)))
-              AND (%(scan_basin_version_id)s IS NULL
-                   OR rt.basin_version_key = (SELECT basin_version_key FROM core.basin_version
-                                              WHERE basin_version_id = %(scan_basin_version_id)s))
-              AND (%(scan_river_network_version_id)s IS NULL
-                   OR (
-                       -- transitional compressed-chunk pushdown aid, remove with #1342
-                       rt.river_network_version_id = %(scan_river_network_version_id)s AND
-                       rt.river_network_version_key = (SELECT river_network_version_key
-                                                       FROM core.river_network_version
-                                                       WHERE river_network_version_id
-                                                             = %(scan_river_network_version_id)s)))
-              AND (%(scan_display_start)s IS NULL
-                   OR rt.valid_time >= %(scan_display_start)s)
-              AND (%(scan_display_end)s IS NULL
-                   OR rt.valid_time <= %(scan_display_end)s)
-        ),
+"""
+    + _RIVER_SAMPLE_ROWS_UNION_SQL
+    + """        ),
         river_identity_coverage AS (
             SELECT
                 run_key, basin_version_key, river_network_version_key, river_segment_key,

@@ -33,6 +33,20 @@ from scripts import node27_timeseries_compression_plan_author as plan_author
 from scripts import node27_timeseries_compression_supervisor as supervisor
 from services.tiles.mvt import postgis_tile_sql
 
+
+def test_curve_store_token_contract() -> None:
+    common = {
+        "FROM hydro.river_timeseries", "JOIN hydro.hydro_run", "rt.basin_version_key",
+        "rt.river_segment_key", "rt.river_network_version_key", "rt.variable_e",
+        "h.run_type = 'forecast'", "h.cycle_time", "rt.valid_time",
+    }
+    assert evidence._curve_required_query_tokens("narrow") == common
+    assert evidence._curve_required_query_tokens() == common | {
+        "rt.river_segment_id", "rt.river_network_version_id", "rt.variable = 'q_down'",
+    }
+    with pytest.raises(evidence.EvidenceError):
+        evidence._curve_required_query_tokens("unknown")
+
 ROOT = Path(__file__).resolve().parents[1]
 # Captured before the autouse `_descriptor_bound_git_blobs` fixture replaces the
 # module attribute, so the real Git-backed producer can be exercised directly.

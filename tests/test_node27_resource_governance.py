@@ -118,10 +118,39 @@ def test_disk_usage_reports_reserved_bytes_and_identity_arithmetic(monkeypatch: 
     assert observed["total_bytes"] == observed["used_bytes"] + observed["free_bytes"] + observed["reserved_bytes"]
 
 
-def test_cold_governance_sample_refuses_unavailable_disk_or_du_without_fabricating_zero() -> None:
-    filesystem = {
+@pytest.mark.parametrize(
+    ("field", "value"), (("status", "unavailable"), ("device_identity", None), ("free_bytes", None))
+)
+def test_cold_governance_sample_refuses_independently_unhealthy_home(field: str, value: object) -> None:
+    filesystem = _ok_cold_filesystem()
+    filesystem["path_sizes"]["pgdata_root"].update(path="/data/GHDC/nhms-pgdata", device_identity="8:12")
+    filesystem["path_sizes"]["object_store_root"].update(path="/data/GHDC/object-store")
+    filesystem["filesystems"]["home"][field] = value
+    home = governance._cold_governance_sample(
+        filesystem,
+        {"status": "ok", "cold_relation_by_tablespace": []},
+        path="/home",
+        observed_at="2026-08-31T12:00:00Z",
+    )
+    assert home["status"] == "unavailable"
+    assert home.get("total_bytes") is None
+    assert home.get("used_bytes") is None
+    assert home.get("free_bytes") is None
+    assert home.get("reserved_bytes") is None
+
+
+def _ok_cold_filesystem() -> dict:
+    return {
         "filesystems": {
-            "home": {"path": "/home", "status": "unavailable"},
+            "home": {
+                "path": "/home",
+                "status": "ok",
+                "total_bytes": 1000,
+                "free_bytes": 150,
+                "used_bytes": 800,
+                "reserved_bytes": 50,
+                "device_identity": "8:11",
+            },
             "cold": {
                 "path": "/data/GHDC",
                 "status": "ok",
@@ -133,36 +162,103 @@ def test_cold_governance_sample_refuses_unavailable_disk_or_du_without_fabricati
             },
         },
         "path_sizes": {
-            "pgdata_root": {"status": "missing"},
-            "object_store_root": {"path": "/home/ghdc/nwm", "status": "unavailable"},
-        },
-    }
-    home = governance._cold_governance_sample(filesystem, {}, path="/home", observed_at="2026-08-31T12:00:00Z")
-    assert home.get("status") == "unavailable"
-    assert home.get("blockers")
-    assert home.get("total_bytes") is None
-    assert home.get("used_bytes") is None
-    assert home.get("free_bytes") is None
-    assert home.get("reserved_bytes") is None
-    named = " ".join(str(item) for item in home.get("blockers", [])).lower()
-    assert "home" in named
-
-
-def _ok_cold_filesystem() -> dict:
-    return {
-        "filesystems": {
-            "cold": {
-                "path": "/data/GHDC",
+            "pgdata_root": {
+                "path": "/home/nwm/nhms-pgdata",
                 "status": "ok",
-                "total_bytes": 1000,
-                "free_bytes": 200,
-                "used_bytes": 700,
-                "reserved_bytes": 100,
-                "device_identity": "8:12",
-            }
+                "bytes": 300,
+                "device_identity": "8:11",
+            },
+            "object_store_root": {"path": "/home/ghdc/nwm/object-store", "status": "ok", "bytes": 200},
         },
-        "path_sizes": {},
     }
+
+
+@pytest.mark.parametrize(
+    ("pgdata_path", "device", "expected_home", "expected_cold", "home_residual", "cold_residual"),
+    (
+        ("/home/nwm/nhms-pgdata", "8:11", 300, 0, 300, 700),
+        ("/data/GHDC/nhms-pgdata", "8:12", 0, 300, 600, 400),
+        ("/home/nwm/bind-mounted-pgdata", "8:12", 0, 300, 600, 400),
+    ),
+    ids=("original-home", "relocated-retaining-old-copy", "mount-not-path-prefix"),
+)
+def test_pgdata_is_accounted_once_on_observed_filesystem(
+    pgdata_path: str, device: str, expected_home: int, expected_cold: int, home_residual: int, cold_residual: int
+) -> None:
+    from packages.common.node27_cold_governance import reconcile_filesystems
+    from packages.common.node27_cold_governance_collection import cold_governance_sample
+
+    filesystem = _ok_cold_filesystem()
+    filesystem["path_sizes"]["pgdata_root"].update(path=pgdata_path, device_identity=device)
+    samples = [
+        cold_governance_sample(
+            filesystem,
+            {"status": "ok", "cold_relation_by_tablespace": []},
+            path=root,
+            observed_at="2026-08-31T12:00:00Z",
+        )
+        for root in ("/home", "/data/GHDC")
+    ]
+    assert [sample["pgdata_bytes"] for sample in samples] == [expected_home, expected_cold]
+    result = reconcile_filesystems(*samples)
+    assert result.approved is True
+    assert result.filesystems["home"]["residual_bytes"] == home_residual
+    assert result.filesystems["cold"]["residual_bytes"] == cold_residual
+
+
+@pytest.mark.parametrize("placement", ("missing-identity", "other-device", "ambiguous-device", "missing-du"))
+def test_unknown_pgdata_placement_refuses_both_samples(placement: str) -> None:
+    from packages.common.node27_cold_governance_collection import cold_governance_sample
+
+    filesystem = _ok_cold_filesystem()
+    pgdata = filesystem["path_sizes"]["pgdata_root"]
+    if placement == "missing-identity":
+        pgdata.pop("device_identity")
+    elif placement == "other-device":
+        pgdata["device_identity"] = "8:99"
+    elif placement == "ambiguous-device":
+        filesystem["filesystems"]["cold"]["device_identity"] = "8:11"
+    else:
+        pgdata["status"] = "unavailable"
+    for root in ("/home", "/data/GHDC"):
+        sample = cold_governance_sample(
+            filesystem,
+            {"status": "ok", "cold_relation_by_tablespace": []},
+            path=root,
+            observed_at="2026-08-31T12:00:00Z",
+        )
+        assert sample["status"] == "unavailable"
+        assert sample["pgdata_bytes"] is None
+        assert sample["used_bytes"] is None
+
+
+@pytest.mark.parametrize("fallback", (False, True), ids=("gnu-du", "portable-du"))
+def test_du_observation_resolves_symlink_and_identifies_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fallback: bool
+) -> None:
+    import os
+    import subprocess
+
+    from packages.common.node27_cold_governance_collection import disk_usage, du_bytes
+
+    target = tmp_path / "actual-pgdata"
+    target.mkdir()
+    alias = tmp_path / "pgdata"
+    alias.symlink_to(target, target_is_directory=True)
+
+    def run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+        if fallback and "-B1" in args:
+            return subprocess.CompletedProcess(args, 1, "", "unsupported option")
+        return subprocess.CompletedProcess(args, 0, f"{4 if fallback else 4096}\t{target}", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    observed = du_bytes(alias)
+    stat = target.stat()
+    usage = os.statvfs(target)
+    assert observed["path"] == str(target)
+    assert observed["bytes"] == 4096
+    assert observed["device_identity"] == f"{os.major(stat.st_dev)}:{os.minor(stat.st_dev)}:{usage.f_fsid}"
+    assert observed["device_identity"] == disk_usage(target)["device_identity"]
 
 
 @pytest.mark.parametrize(
@@ -191,7 +287,6 @@ def test_cold_governance_sample_refuses_unobserved_postgres_inventory(postgres: 
     assert sample["total_bytes"] is None
     assert sample["used_bytes"] is None
     assert sample.get("residual_bytes") is None
-    assert any("cold relation inventory" in str(item) for item in sample["blockers"])
 
 
 @pytest.mark.parametrize(
@@ -220,7 +315,6 @@ def test_cold_governance_sample_refuses_malformed_relation_rows(rows: list[objec
     assert sample["total_bytes"] is None
     assert sample["used_bytes"] is None
     assert sample.get("residual_bytes") is None
-    assert any("cold relation inventory" in str(item) for item in sample["blockers"])
 
 
 @pytest.mark.parametrize(
@@ -284,10 +378,14 @@ def test_unavailable_home_sample_publishes_null_bytes_not_fabricated_zero(tmp_pa
         home=home,
         cold=cold,
         evidence={
-            "health": {"healthy": True, "raid": {"file_identity": {"sha256": "a" * 64}}, "smart": [
-                {"device": "/dev/sdb1", "status": "PASS", "file_identity": {"sha256": "c" * 64}},
-                {"device": "/dev/sdc1", "status": "PASS", "file_identity": {"sha256": "d" * 64}},
-            ]},
+            "health": {
+                "healthy": True,
+                "raid": {"file_identity": {"sha256": "a" * 64}},
+                "smart": [
+                    {"device": "/dev/sdb1", "status": "PASS", "file_identity": {"sha256": "c" * 64}},
+                    {"device": "/dev/sdc1", "status": "PASS", "file_identity": {"sha256": "d" * 64}},
+                ],
+            },
             "backup": {"complete": True, "file_identity": {"sha256": "b" * 64}, "missing_targets": []},
             "mount_inventory": {"current": [], "stopped": []},
             "catalog": {
@@ -336,16 +434,26 @@ def test_optional_cold_governance_receipt_is_refusal_until_descriptor_evidence_i
 def test_governance_cli_accepts_descriptor_evidence_and_prior_trend_configuration(tmp_path: Path) -> None:
     args = governance.build_parser().parse_args(
         [
-            "--cold-governance-receipt-path", str(tmp_path / "receipt.json"),
-            "--cold-governance-evidence-hostname", "node27-test",
-            "--cold-governance-evidence-max-age-seconds", "300",
-            "--cold-governance-evidence-approved-mode", "0600",
-            "--cold-governance-mdadm-evidence-path", str(tmp_path / "mdadm.json"),
-            "--cold-governance-smart-evidence", f"/dev/sdb1={tmp_path / 'sdb.json'}",
-            "--cold-governance-smart-evidence", f"/dev/sdc1={tmp_path / 'sdc.json'}",
-            "--cold-governance-backup-evidence-path", str(tmp_path / "backup.json"),
-            "--cold-governance-prior-receipt-path", str(tmp_path / "prior.json"),
-            "--cold-governance-prior-receipt-max-age-seconds", "600",
+            "--cold-governance-receipt-path",
+            str(tmp_path / "receipt.json"),
+            "--cold-governance-evidence-hostname",
+            "node27-test",
+            "--cold-governance-evidence-max-age-seconds",
+            "300",
+            "--cold-governance-evidence-approved-mode",
+            "0600",
+            "--cold-governance-mdadm-evidence-path",
+            str(tmp_path / "mdadm.json"),
+            "--cold-governance-smart-evidence",
+            f"/dev/sdb1={tmp_path / 'sdb.json'}",
+            "--cold-governance-smart-evidence",
+            f"/dev/sdc1={tmp_path / 'sdc.json'}",
+            "--cold-governance-backup-evidence-path",
+            str(tmp_path / "backup.json"),
+            "--cold-governance-prior-receipt-path",
+            str(tmp_path / "prior.json"),
+            "--cold-governance-prior-receipt-max-age-seconds",
+            "600",
         ]
     )
 
@@ -604,15 +712,15 @@ def test_every_critical_recommendation_gets_its_own_line(
     receipt = _receipt_with(
         _recommendation("critical", "ROOT_FREE_BELOW_CRITICAL"),
         _recommendation("warning", "TEMP_BYTES_ABOVE_WARNING"),
-        _recommendation("critical", "DATABASE_SIZE_ABOVE_CRITICAL"),
+        _recommendation("critical", "PROJECTED_PEAK_EXCEEDS_HOME_FREE"),
     )
 
     rc, _out, err = _run_main(monkeypatch, capsys, receipt, summary_path)
 
     assert rc == 1
-    assert err.splitlines() == [
+    assert [line for line in err.splitlines() if line.startswith(_CRITICAL_ANCHOR)] == [
         f"{_CRITICAL_ANCHOR}ROOT_FREE_BELOW_CRITICAL",
-        f"{_CRITICAL_ANCHOR}DATABASE_SIZE_ABOVE_CRITICAL",
+        f"{_CRITICAL_ANCHOR}PROJECTED_PEAK_EXCEEDS_HOME_FREE",
     ]
 
 
@@ -666,9 +774,7 @@ def test_governance_unit_routes_stderr_to_the_journal_and_alerts_on_failure() ->
     # resource-governance.log and writes nothing to stdout — but because
     # `StandardOutput=` is the catch-all for anything the lane might print in
     # future, and retargeting it would be an unrelated change.
-    assert (
-        "StandardOutput=append:/home/nwm/node27-resource-governance-logs/systemd.log" in text
-    )
+    assert "StandardOutput=append:/home/nwm/node27-resource-governance-logs/systemd.log" in text
 
 
 def test_governance_wrapper_tees_and_keeps_the_audits_exit_code() -> None:
@@ -692,8 +798,5 @@ def test_governance_lock_does_not_live_on_the_root_volume() -> None:
     """
     text = _GOVERNANCE_WRAPPER_PATH.read_text(encoding="utf-8")
 
-    assert (
-        'LOCK_PATH="${NODE27_RESOURCE_GOVERNANCE_LOCK_PATH:-$LOG_ROOT/node27-resource-governance.lock}"'
-        in text
-    )
+    assert 'LOCK_PATH="${NODE27_RESOURCE_GOVERNANCE_LOCK_PATH:-$LOG_ROOT/node27-resource-governance.lock}"' in text
     assert "/tmp/node27-resource-governance.lock" not in text

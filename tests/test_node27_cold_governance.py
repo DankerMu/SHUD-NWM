@@ -93,7 +93,7 @@ def test_zero_reserve_sample_remains_healthy() -> None:
     assert result.filesystems["home"]["reserved_bytes"] == 0
 
 
-def test_two_device_residual_is_arithmetic_without_shared_root_scan() -> None:
+def test_two_device_residual_is_used_bytes_minus_known_categories() -> None:
     result = reconcile_filesystems(
         _sample(path="/home", used=800, pgdata=300, cold=0, object_store=200),
         _sample(path="/data/GHDC", used=700, pgdata=0, cold=400, object_store=0),
@@ -102,7 +102,6 @@ def test_two_device_residual_is_arithmetic_without_shared_root_scan() -> None:
     assert result.approved is True
     assert result.filesystems["home"]["residual_bytes"] == 300
     assert result.filesystems["cold"]["residual_bytes"] == 300
-    assert "recursive" not in json.dumps(result.filesystems).lower()
 
 
 def test_negative_or_overlapping_accounting_is_blocking_not_clamped() -> None:
@@ -171,9 +170,7 @@ def test_governance_history_baseline_trend_stale_and_identity_drift_are_bounded(
         config=prior_config,
         started_at="2026-08-31T11:59:00Z",
         finished_at="2026-08-31T11:59:05Z",
-        home=_sample(
-            path="/home", used=700, pgdata=300, cold=0, object_store=200, observed_at="2026-08-31T11:59:01Z"
-        ),
+        home=_sample(path="/home", used=700, pgdata=300, cold=0, object_store=200, observed_at="2026-08-31T11:59:01Z"),
         cold=_sample(
             path="/data/GHDC", used=600, pgdata=0, cold=400, object_store=0, observed_at="2026-08-31T11:59:02Z"
         ),
@@ -250,10 +247,7 @@ def test_shipping_schema_rejects_healthy_ok_filesystem_with_null_identity_and_by
         )
     )
     example = (
-        Path(__file__).resolve().parents[1]
-        / "schemas"
-        / "examples"
-        / "node27_cold_governance_receipt.example.json"
+        Path(__file__).resolve().parents[1] / "schemas" / "examples" / "node27_cold_governance_receipt.example.json"
     )
     mutant = json.loads(example.read_text(encoding="utf-8"))
     mutant["filesystems"]["home"].update(

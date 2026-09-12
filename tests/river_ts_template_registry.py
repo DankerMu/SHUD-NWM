@@ -8,9 +8,9 @@ makes the oracles exhaustive rather than anecdotal:
 * every entry is rendered for BOTH stores by the shape oracles, so a template
   that cannot survive the narrow rendering is red in the PR that writes it, not
   in the migration window;
-* the frozen I1 golden retains its 20 historical keys. Six unchanged entries
-  still compare against current raw inputs; the seven routed sources have
-  separate routing and executed-query semantic owners;
+* the frozen I1 golden retains its 20 historical keys. Five unchanged entries
+  still compare against current raw inputs; the eight store-qualified raw
+  sources have separate routing and executed-query semantic owners;
 * **registry closure** — for every production file, the canonical-table mentions
   of that file's entries plus its declared non-template mentions must equal the
   file's census. An unregistered read site is therefore red, which is the only
@@ -80,6 +80,15 @@ def golden_sha256() -> str:
     return hashlib.sha256(GOLDEN_FIXTURE.read_bytes()).hexdigest()
 
 
+def historical_display_coverage_sql() -> str:
+    """Immutable pre-store DML: historical oracle and pre-transition seed only."""
+    data = (REPO_ROOT / "tests/fixtures/display_coverage_pre_store_b7cdce63.sql").read_bytes()
+    assert hashlib.sha256(data).hexdigest() == (
+        "17283e0277c6b8d2047ffa8aacc36e2b4bab4bb67063e9a15d44668f25490952"
+    ), "pre-store display coverage snapshot changed"
+    return data.decode("utf-8")
+
+
 @dataclass(frozen=True)
 class TemplateEntry:
     """One registered river read template.
@@ -96,7 +105,7 @@ class TemplateEntry:
         check sums per file.
     ``source(store)``
         Raw input for that store, including caller-owned routing literals.
-        Unrouted siblings return the same authored input for either store.
+        A store-independent raw input is the same authored SQL for either store.
         The store is required: there is no implicit legacy input for a narrow render.
     """
 
@@ -172,10 +181,10 @@ HYDRO_DISPLAY_ENTRIES: tuple[TemplateEntry, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _display_coverage_refresh(_store: str) -> str:
+def _display_coverage_refresh(store: str) -> str:
     from packages.common import display_coverage
 
-    return display_coverage._REFRESH_SQL
+    return display_coverage._river_sample_rows_template(store)
 
 
 DISPLAY_COVERAGE_ENTRIES: tuple[TemplateEntry, ...] = (
@@ -472,7 +481,11 @@ REGISTRY: tuple[TemplateEntry, ...] = (
     *PARSER_ENTRIES,
 )
 
+#: Changed store-qualified raw sources, not the set of renderer callers.
+#: The MVT identity probe executes through the renderer but keeps its unchanged,
+#: store-independent raw input and therefore remains historical-comparable.
 ROUTED_SOURCE_KEYS = frozenset({
+    "display_coverage:refresh",
     "forecast_store:segment_rows_source",
     "forecast_store:latest_product_river_source",
     "mvt:postgis_tile_sql_hydro",

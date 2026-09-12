@@ -3753,3 +3753,13 @@ def test_run_capture_step_refuses_an_escaping_capture_dump_binding_before_any_sp
     assert not marker.exists()
     assert not output.exists()
     assert ledger_path.read_text() == ""
+
+
+def test_checkpoint_catalog_sql_consumes_runtime_hypertables() -> None:
+    from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
+
+    sql = supervisor._CHECKPOINT_CATALOG_SQL
+    assert RUNTIME_HYPERTABLES_SQL in sql
+    assert "UNION ALL" in RUNTIME_HYPERTABLES_SQL
+    assert "UNION ALL" in sql
+

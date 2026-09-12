@@ -33,8 +33,8 @@ Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_hydro_
 
 ## 4. Canonical precipitation copyback (canonical-precip-copyback)
 
-- [x] 4.1 `services/tile_publisher/publisher.py`：q_down copyback 后新增 `_copyback_canonical_precip(source, cycle)`——镜像 `canonical/<source>/<cycle>/prcp_rate_or_amount/*.nc` + `canonical/<source>/grid/<grid_id>/grid.json`，复用 `_copyback_object_tree_with_rollback`，同大小跳过，缺源记 lineage `precip_mirror: failed` 不抛出。
-- [x] 4.2 `tests/test_tile_publisher.py`：tmp roots 覆盖成功镜像、幂等 skipped、缺源不阻塞发布。
+- [x] 4.1 `services/tile_publisher/publisher.py`：q_down copyback 后新增 `_copyback_canonical_precip(source, cycle)`——镜像 `canonical/<source>/<cycle>/prcp_rate_or_amount/*.nc` + `canonical/<source>/grid/<grid_id>/grid.json`，复用 `_copyback_object_tree_with_rollback`，同大小跳过，缺源记 lineage `precip_mirror: failed` 不抛出。（**#2068 supersession**：该调用点已从 `_publish_qdown_from_database` 移除，`lineage["precip_mirror"]` 不再存在；唯一 producer 是公开入口 `copyback_canonical_precip`。以 `### #2068` 节及其 delta 为准。）
+- [x] 4.2 `tests/test_tile_publisher.py`：tmp roots 覆盖成功镜像、幂等 skipped、缺源不阻塞发布。（**#2068 supersession**：这些用例已改指到公开入口，「不阻塞发布」改读作「不抛出」。以 `### #2068` 节及其 delta 为准。）
 - [x] 4.3 `scripts/canonical_precip_copyback_backfill.py`（仅标准库）：`--source-root/--copyback-root/--dry-run`，JSON 汇总，退出码 0/1/2；单测落在**新文件** `tests/test_canonical_precip_copyback_backfill.py`（tmp 目录），含一条 subprocess `-m scripts.canonical_precip_copyback_backfill` 用例与一条 import-仅标准库 的静态断言。
 - [x] 4.4 `scripts/node27_raw_retention.py`：目标集合扩到 `canonical/<storage_source>/<cycle_token>` 与 `NHMS_MVT_FILE_CACHE_DIR/precip/<storage_source>/<cycle_token>`，同一 cutoff（`display_watermark − retention_days`），`canonical/<source>/grid/` 永不剪；配置里的 source 是小写 `gfs,ifs`，canonical/缓存目录用 `normalize_source_id` 映射（`ifs`→`IFS`），不得直接拼小写；更新其测试，覆盖「剪掉的周期再请求 PNG 得 404 `PRECIP_CYCLE_NOT_MIRRORED` 而不是缓存命中」与 `IFS` 大小写映射。
 - [x] 4.5 node-22 执行回填：`cd /scratch/frd_muziyao/NWM && /scratch/frd_muziyao/NWM/.venv/bin/python -m scripts.canonical_precip_copyback_backfill --source-root /scratch/frd_muziyao/nhms-prod/object-store --copyback-root $NHMS_OBJECT_STORE_COPYBACK_ROOT`（禁止 `uv sync` / 裸 `uv run`）；node-27 `ls /home/ghdc/nwm/object-store/canonical/{gfs,IFS}` + `df -h /home` 写 receipt。
@@ -43,6 +43,8 @@ Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_hydro_
 Evidence Floor：本地 `uv run ruff check .` + `uv run pytest tests/test_tile_publisher.py tests/test_canonical_precip_copyback_backfill.py tests/test_node27_raw_retention.py -q`；node-22 回填 JSON 汇总 + node-27 目录清单与 `df -h /home` receipt。
 
 ### Invariant Matrix（4.1–4.3，issue #2008 补充；高强度 repair 要求）
+
+> 本矩阵的若干行已被 `### Invariant Matrix delta（4.17–4.22，issue #2068）` 退役或改写（lineage 键位置、publish 插入点、`publish` 仍 `published` 的断言形式、被引用的测试名）；以该 delta 为准。
 
 Governing invariant: 降水镜像永不改变 q_down 发布的成败与其 copyback 产物；每棵被镜像的目标树要么与源树同名同字节，要么保持原样（**本步 rollback 自身抛错时除外**：此时目标树状态不可知，可能两者皆非——`_restore_copyback_backup` 先 `rmtree` 后 `os.replace`，中间失败会让目标树在曾有内容之后变成不存在，见 spec.md 的 rollback-raised 场景）；**在本步 rollback 未抛错（lineage 无 `rollback_error`）时**绝不留半成品或 temp 残留——rollback 自身抛错时可能留下 `.copyback-backup.<hex>`（restore 在 `rmtree` 与 `os.replace` 之间失败必然留一个），此时以 `rollback_error` + 全部 `rollback_unknown` 如实上报；任何失败只体现为 lineage `precip_mirror`，绝不外泄异常。
 
@@ -105,7 +107,7 @@ Boundary-surface checklist（4.1–4.3）:
 
 ### #2034 修正镜像挂载点（DB-free seam）
 
-- [x] 4.7 `services/tile_publisher/publisher.py`：把 `_copyback_canonical_precip` 暴露为公开方法（返回 summary），并在 summary 里补 `missing_object_key`（相对 object key，无前导 `/`，过得了回执脱敏）。**保留** `_publish_qdown_from_database` 里的既有调用点——移除它是安全的（无任何 profile 依赖，见 fixture review P2-7），但会连带重写21 个走 q_down 路径的测试（19 个 `test_publish_qdown_canonical_precip_*` 加 2 个同路径异名，742 行）并让 4.1–4.3 的矩阵整体失效，与本 issue「挪一个调用 + 加一个回执出口」的规模不相称；单独立单跟进。因此 4.1–4.3 的 publish 路径矩阵在本 PR 后仍然为真。
+- [x] 4.7 `services/tile_publisher/publisher.py`：把 `_copyback_canonical_precip` 暴露为公开方法（返回 summary），并在 summary 里补 `missing_object_key`（相对 object key，无前导 `/`，过得了回执脱敏）。**保留** `_publish_qdown_from_database` 里的既有调用点——移除它是安全的（无任何 profile 依赖，见 fixture review P2-7），但会连带重写21 个走 q_down 路径的测试（19 个 `test_publish_qdown_canonical_precip_*` 加 2 个同路径异名，742 行）并让 4.1–4.3 的矩阵整体失效，与本 issue「挪一个调用 + 加一个回执出口」的规模不相称；单独立单跟进。因此 4.1–4.3 的 publish 路径矩阵在本 PR 后仍然为真。（**#2068 supersession**：该调用点已由 #2068 移除，4.1–4.3 的 publish 路径矩阵自此不再为真；以 `### #2068` 节及其 delta 为准。）
 - [x] 4.8 `services/orchestrator/chain_forecast_execution.py`：在 `_after_cycle_stage_terminal` 的 `reconcile_unverified` 早退之后、状态分派之前触发镜像，条件为终态 `forecast_state_save_qc` 且 stage 为 `state_save_qc`；`succeeded` 与 `partially_failed` 都触发；不看 `active_basins`；任何异常吞掉。身份用 `context.source_id` + `format_cycle_time(context.cycle_time)`。
 - [x] 4.9 回执：`insert_pipeline_event(entity_type="forecast_cycle", event_type="canonical_precip_mirror", ...)`，`details` 带 `precip_mirror` payload，周期键名为 `cycle`。
 - [x] 4.10 契约同步：spec Requirement 1 已改（本 PR）；`docs/runbooks/two-node-deployment-overview.md:150` 把 stale 的 `publish-qdown` 归属改为当前 DB-free 终态契约；runbook 给出回执判读入口——journal 会按 `MAX_FILE_JOURNAL_CYCLE_SEGMENTS` 轮转出 `<cycle>.<n>.jsonl`，故 `jq` 示例必须 glob `<cycle>*.jsonl`，选择器为 `.payload.details.precip_mirror`（journal 记录把整个事件包在 `payload` 键下，事件自身的 `details` 嵌套与 journal 信封是两层，都要走）。
@@ -182,6 +184,71 @@ Boundary-surface checklist（4.1–4.3）:
 - 墙钟暴露面**扩大**（相对旧门）：镜像同步执行，卡住时挡的不再是链尾一次状态写，而是该周期后续全部 stage 与所在 scheduler pass -> #2070 的 blast radius 由本单扩大，需回写该 issue
 
 Evidence Floor（#2069）：本地 `uv run pytest tests/test_orchestration_chain.py -q` + `uv run ruff check .` + `openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive`；node-27 跑 `tests/test_orchestration_chain.py`（`mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp`）。node-22 实机 receipt 不在本单——4.11 / #2016 的「新周期镜像」触发点按本单口径读作 convert。
+
+
+### #2068 移除 publisher q_down 里的死镜像调用点（wave 1 收尾清理）
+
+风险分级（Phase 0.5）:
+- Issue type: tech-debt cleanup · Blast radius: low（生产行为零变化：被删的调用点在生产拓扑上不可达）· Fixture level: **compact**（issue 为手写单，无上游 `Suggested fixture level`；代码 delta 极小、不新增契约/路径构造/env，`design.md` 按 compact 豁免，复用本 change 既有 spec delta）
+- 为何不升 expanded：命中 profile 的触发词（`IFS`、`forcing`）只在**命名空间**层面出现；本单不改镜像实现、payload 形状、keyspace、归一规则或 env 围栏，只删一个不可达调用点并把其测试改指到公开入口。
+- Repair intensity: **high**（改动落在 publish/rollback 证据面上，且 742 行测试改指的真实风险是「失败策略不变量的覆盖被静默降级」。高强度要求的 Invariant Matrix 与 boundary checklist 由本节 delta 承载）
+- 风险包：selected = 「Test evidence / coverage」（20 条改指 + 第 21 条按 4.20 原样保留，覆盖不得净减，逐条列出承接关系）、「Error handling / rollback / partial outputs」（swallow-all、`rollback_unknown`、symlink 拒绝、限额等失败策略必须逐条保留断言）、「Documentation / migration notes」（docstring + spec Requirement 1 的遗留段落 + 本文件矩阵同批改）、「Legacy compatibility」（`PublishResult.lineage` 去掉一个键，需证明零消费者）；not selected = File IO / path safety（镜像实现与路径构造一字不改，只删调用点）、Public API / CLI（`publish_qdown_display` 签名与返回类型不变）、Concurrency / shared state（无）、Config / setup（无新 env）、Schema / units（payload 形状不变）、Auth / secrets（无）、Resource limits（copy 上限不动）、Release / packaging（无依赖变更）。
+
+前置条件（issue #2068「三条全部成立才可动手」）—— 开工前逐条核对，全部成立:
+1. 4.11 node-22 live receipt：`docs/runbooks/receipts/2026-09-06-precip-copyback-backfill.md` §6.1，周期 `2026090512` 两源各一条 `canonical_precip_mirror` 且 `status == "ok"`，NFS 目录 56/53 个 `.nc`。
+2. #2016 回填与 keep 水位 receipt：同一 receipt §2–§3（NFS `canonical/{gfs,IFS}` 各 26 周期 + `grid.json`）。
+3. #2010 读侧 keyspace 一致性：`docs/runbooks/receipts/2026-09-06-issue-2010-precip-raster-node27.md:19-20`，node-27 实机把**新缝镜像落地的** `2026090512` 列入 index 并渲染 PNG（`:65-68`）。**口径**：该 receipt `:15` 的判别器显示该周期 index 在生产 :8080 为 404、在被验证的 :8090 实例为 200——404 的成因是 I8 路由当时尚未部署到 :8080，不是周期未镜像；本前置条件要的是「读侧消费的就是新缝的同一 keyspace」，:8090 的 200 已经证实。
+
+- [x] 4.17 `services/tile_publisher/publisher.py` 删除死调用点（**行号以 master 实测为准，issue 正文引用的是 PR #2067 head `7df7705e` 的旧行号，已漂移**）：`:312-315` 的 I7 注释、`:316-321` 的 `cycle_lineage = _cycle_filter(cycle_id)` + `precip_mirror_summary = ...` 三元、`:335-336` 的 `lineage["precip_mirror"] = precip_mirror_summary`。`_cycle_filter`（定义 `:3092`）**保留**——`:347` 是第二个调用者。`_publish_qdown_from_database` 的其余流程（q_down copyback、artifact 写入、DB 注册、`lineage["object_store_copyback"]`）一字不动。
+- [x] 4.18 `services/tile_publisher/publisher.py:1217` `_copyback_canonical_precip` docstring 改写为对**唯一剩余调用者**为真：删除 `source` 参数说明里的「q_down publish path passes the token `_cycle_filter` splits out」分句、失败语义段里的「the q_down publish or」与回执出口段里的「publish lineage, or」。保留对兄弟 `_copyback_qdown_products`（抛 `PublishError`）的对照句——那是实现事实，不是调用者语境。`copyback_canonical_precip`（`:1206`）的 docstring 已对新缝为真，不改。
+- [x] 4.19 `tests/test_tile_publisher.py` 21 条经 q_down 路径覆盖该调用点的测试中的 **20 条**（**`:2285-3017`**，master 实测；issue 正文的 `:2277-3018` 是 PR #2067 head 的旧行号，`:2277` 会误把 helper `_file_mtimes` 卷进来，`:3018+` 已是 #2034 段落 banner）改指到公开入口 `TilePublisher.copyback_canonical_precip(source, cycle)`。**第 21 条 `test_publish_qdown_without_copyback_root_records_no_precip_mirror`（`:2989`）不在改指范围内**——按 4.20 原样保留；连同 4.20 新增的移除 oracle，publish 路径最终保留 2 条用例，模板为 **`:3027`** 起既有的 6 条 `test_copyback_canonical_precip_*`（`:3027/3045/3052/3068/3083/3095`；issue 写的 `:3019` 落在第 21 条测试内部）（无需注入 `database_url`，fixture 相应简化）。逐条要求：
+  - 断言源从 `result.lineage["precip_mirror"]` 改为公开入口的返回 summary；`does_not_block_publish` 家族改名为不再自称 publish 语境（不变量变成「返回 `failed` summary 而**不抛出**」，必须显式断言不抛），其余命名家族 `test_publish_qdown_canonical_precip_*` 统一改到 `test_copyback_canonical_precip_*` 命名空间且不得与既有 6 条重名。
+  - **覆盖不得净减**：`redact_payload` 断言**三处，不是一处**：`:2321`（`ok` 形状）、`:2663`（`failed` 形状，带 `error`/`error_type`、无 `missing_path`）、`:2876`（rollback 形状，带 `rollback_error`/`rollback_error_type` 与 `trees[].status`）。公开入口返回的是**未脱敏**的 raw summary，三条 `"[redacted]" not in json.dumps(...)` 在改指后全部变成恒真的空断言——绿而无 oracle，正是本节禁止的覆盖蒸发。三个 payload 的键集互不相交，留一条盖不住另两条；新出口侧（`tests/test_orchestration_chain.py:3837`/`:3659`）只覆盖了 `ok` 形状与一个合成 `RuntimeError` 失败，从未覆盖真实的 `SafeFilesystemError` 与 rollback 形状。**逐形状**保留等价断言：对返回 summary 显式 `redact_payload(...)` 后再断言（该文件当前未 import，需 `from packages.common.redaction import redact_payload`）；做不到则在 `偏离记录` 里逐形状说明取舍。
+  - **兄弟面不受扰动**的隐式不变量不得蒸发：原 21 条中的 **16** 条跑 `_assert_qdown_copyback_intact(copyback_root)`（实测调用行 `:2323/2399/2421/2459/2486/2513/2538/2572/2641/2666/2705/2741/2804/2838/2877/2948`；镜像绝不碰 copyback 根下的 `runs/` 兄弟树）。至少保留一条改指后的测试，预置 `runs/` 兄弟树并在镜像后断言其逐字节不变；做不到则在 PR `偏离记录` 里明写这条覆盖损失。
+  - 孤儿 helper 处置：改指后逐个 `grep` 复核调用者，**只有确实零调用者才删**。三个最容易被误删的：`_publish_with_canonical_precip`（`:2264`）仍被 4.20 的移除 oracle 使用；`_assert_qdown_copyback_intact`（`:2252`）被上一条的兄弟面断言使用；`_file_mtimes`（`:2277`）被幂等/局部替换用例使用（见下一条），三者**都不得删**。
+  - **幂等的「不重写」不变量必须随之改指**：`_file_mtimes` 的两处调用（`:2334/2346` 断言二次镜像 `skipped` 时 `canonical` 树 mtime 全等——这是「skipped 真的没写盘」的唯一执行断言；`:2362/2375` 断言局部替换时未变的 grid 树 mtime 不变）在公开入口下逐条保留。丢了它们，`status == "skipped"` 就只是自述而无 oracle。
+  - 同步改写 `tests/test_tile_publisher.py:2200-2207` 的段落 banner：现文「The mirror is the last step of a q_down publish and must never change that publish's outcome: every failure is swallowed into `lineage["precip_mirror"]`」两句在本单后均为假，改为公开入口语境（唯一调用者 + summary 出口）。keyspace 两行（`:2205-2206`）为真，保留。
+  - **不可改指的场景必须报告，不得静默删除**。已实测：这 20 条的注入面全部是类级 `monkeypatch.setattr`（`:2613/2686/2766`）、`chmod`（`:2727/2732`）或 seed，**没有一条**绑在 publish 调用本身上（函数内唯一的 `with` 在 helper `_publish_with_canonical_precip` 里，是 DB 会话不是注入面），因此 **20 条全部可等价改指**——例如 `test_publish_qdown_canonical_precip_object_store_error_does_not_block_publish`（`:2712`，`chmod 0o000` + `try/finally`）把中间那行换成 `publisher.copyback_canonical_precip("gfs", COMPACT_TIME)` 即可。兜底选项仅在实测证明不可复现时动用：(a) 把注入面下移到 `_copyback_canonical_precip` 内部的同一失败点并保留断言，或 (b) 在 PR `偏离记录` 里逐条写明「哪条场景、为何不可复现、覆盖损失是什么」并附实测证据。**删掉了事**不是选项。
+  - 报告改指前/改后的实测条数（`grep -c`），不沿用 issue 正文的估计。
+- [x] 4.20 移除 oracle（**红证据**，本单唯一能证明「调用点确实没了」的测试）：**新增**一条用例（建议名 `test_publish_qdown_does_not_mirror_canonical_precip`）——配置了 copyback root **且**已 seed 降水源产物时，走 q_down publish 仍然 `status == "published"`，但 `"precip_mirror" not in result.lineage` **且** copyback 根下不出现任何 `canonical/` 目录。该用例必须在改前源码上跑红、改后跑绿，红证据随实现报告提交。
+  既有 `test_publish_qdown_without_copyback_root_records_no_precip_mirror`（**`:2989`**）**原样保留、不得反转**：它的第二条断言 `"object_store_copyback" not in result.lineage`（`:2998`）是全文件唯一一处「未配 copyback root 时 q_down lineage 也不带 copyback 键」的覆盖，反转成「已配 root」会把它整条删掉。只更新该用例中 `"precip_mirror" not in result.lineage` 一行的注释语境（移除后恒真，不再由「未配 root」这一前提承担）。
+- [x] 4.21 契约同步（同批）：`specs/canonical-precip-copyback/spec.md` 的「The legacy q_down call site is **not** removed by this requirement…」整段（`:16`）在本单后整体为假 —— 改写为「该调用点已由 #2068 移除，`_copyback_canonical_precip` 的唯一调用者是 `copyback_canonical_precip`，`PublishResult.lineage` 不再含 `precip_mirror`」。**这是相对 issue 正文「Requirement 1 不需要再改」的偏离**（issue 只核对了 Requirement 1 的触发面已改为 DB-free 终态，漏了同一 Requirement 里这段描述旧调用点的遗留文字），记入 PR `偏离记录`。`tests/test_entropy_audit_script.py` **`:5105-5115`** 的 carve-out 是**旧** Requirement 1 的冻结快照、明文不跟踪该文件（`:5093-5104` 注释），**不改**；但改动后须跑 `tests/test_entropy_audit_script.py` 确认 entropy 硬门不被新措辞误判（#2029 前例：同一文件的措辞曾被 rollback 谓词误拦）。
+- [x] 4.22 本文件同步（已由编排者随 fixture 落地，实现者只需复核不冲突）：`### Invariant Matrix（4.1–4.3…）` 标题追加一行指针，指向下面的 #2068 delta；delta 逐条退役/改写被移除面证伪的行；并按 #2069 / 4.16 的 supersession 约定（追加指针、不原地改写已勾选的历史条目）在 4.1 与 4.2 各追加一行指针——两条的自述（「缺源记 lineage `precip_mirror: failed`」「缺源不阻塞发布」）在本单后为假。
+
+### Invariant Matrix delta（4.17–4.22，issue #2068）
+
+本节**取代**上面 #2008 Invariant Matrix（4.1–4.3）中被调用点移除证伪的行（沿用 #2069 的做法：原文保留为历史记录，不原地改写）。
+
+Governing invariant（改写后）：降水镜像永不改变**其调用方主流程**的成败与产物——移除后唯一调用方是 `TilePublisher.copyback_canonical_precip`，其上游是 orchestrator 的 convert 终态 hook；「每棵被镜像的目标树要么与源树同名同字节，要么保持原样（本步 rollback 自身抛错时除外）」与「rollback 未抛错时绝不留半成品或 temp 残留」两条**逐字保留**，只是承载它们的断言从 publish lineage 迁到公开入口返回的 summary。
+
+退役/改写的行：
+- ~~lineage 键位置：`PublishResult.lineage["precip_mirror"]`（顶层，与 `object_store_copyback` 平级）~~ -> **失效**：`PublishResult.lineage` 不再含 `precip_mirror` 键。唯一回执出口是 `canonical_precip_mirror` pipeline_event 的 `details.precip_mirror`（spec Requirement 1，#2034/#2069 已落地）。
+- ~~Producers: `publisher.py::_copyback_canonical_precip`（插入点：DB 注册 `session.commit()` 之后、构造 lineage dict 之前）~~ -> **改写**：Producers 为 `publisher.py::copyback_canonical_precip`（公开入口，不碰 session/engine）加 `scripts/canonical_precip_copyback_backfill.py`；publish 路径**不再是** producer，`_publish_qdown_from_database` 内无任何镜像插入点。
+- ~~「任何失败只体现为 lineage `precip_mirror`，绝不外泄异常」~~ -> **改写**：「任何失败只体现为公开入口返回的 summary（由调用方写进自己的回执出口），绝不外泄异常」。吞异常的范围一字不变。
+- ~~Evidence/audit/readiness: `lineage.precip_mirror`——…~~ -> **改写**：同一份 payload 形状契约完全不变，只是读取位置从 `lineage.precip_mirror` 变成公开入口返回值 / `pipeline_event.details.precip_mirror`。`ok`/`skipped`/`failed` 的字段互斥规则、`trees[]` 的 `action`/`status` 五值语义、`rollback_unknown` 收敛规则**全部保留**，其断言由改指后的测试承载。
+- ~~`NHMS_OBJECT_STORE_COPYBACK_ROOT` 未配置 -> 不尝试镜像，lineage 无 `precip_mirror` 键（锁住绝大多数既有 publish 用例不受影响）~~ -> **改写**：未配置时公开入口返回 `None`（既有 `test_copyback_canonical_precip_public_method_returns_none_without_a_copyback_root` 已钉）。「既有 publish 用例不受影响」由下面的移除 oracle 行以更强的形式承接。
+- ~~`publisher` 侧：`storage_source = normalize_source_id(_cycle_filter(cycle_id)["source_id"])`、`cycle_token = _cycle_filter(...)["compact_time"]`~~ -> **改写**：身份不再从 `cycle_id` 反解（`_cycle_filter` 那两个取值随调用点一起删）。公开入口对调用方传入的 `source` 走 `normalize_source_id`，cycle token 直接取调用方传入值并由 `_CANONICAL_CYCLE_DIR_RE` 校验（`publisher.py:1276-1281`）——与 spec Requirement 1 的「Neither MAY be recovered from `context.cycle_id`, which lowercases the source」一致。半句「`<grid_id>` 列目录得到，不得 import `workers.canonical_converter`」**保留**。
+- ~~Public routes/entrypoints: 无（`publish_qdown_display` 是唯一入口；回填脚本 CLI 为运维入口）~~ -> **改写**：publisher 侧唯一入口是 `TilePublisher.copyback_canonical_precip`（公开方法，无 HTTP 路由）；`publish_qdown_display` 不再是镜像入口。
+- ~~Failure paths/…：`rollback` 自身失败也只写进 lineage~~ -> **改写**：写进公开入口返回的 summary（`rollback_error`/`rollback_error_type` + 全部 `rollback_unknown`），由调用方落到自己的回执出口。
+- ~~源含 56 个 `.nc` + 1 个 `grid.json`，**q_down copyback 成功** -> 目标出现同名同字节文件，`precip_mirror.status == "ok"` 且 `file_count == 57`~~ -> **改写**：触发条件改为「公开入口被调用且源齐备」，期望输出（同名同字节、`status == "ok"`、`file_count == 57`）不变。
+- 上面 Regression rows 中每一条写作「`publish` 仍返回 `status == "published"`」的行 -> **改写**为「公开入口**不抛出**并返回对应 summary」；每一条括注 `test_publish_qdown_canonical_precip_*` 的测试名 -> 改指后的 `test_copyback_canonical_precip_*` 名。失败策略（symlink 拒绝、不安全目录名、限额、中途 `OSError`、**源文件不可读时 `error_type == "ObjectStoreError"` 而非 `OSError`** 的区分（`:2712`，全文件唯一）、rollback 干净/抛错、混合 batch、IFS 大小写、同根 skip、计划阶段 stat 与 copy 实测计数分离）**以及幂等语义**（二次镜像 `skipped` 时 `_file_mtimes` 全等的「不重写」断言、局部替换时未变的 grid 树 mtime 不变）**逐条保留**，一条都不得因改指而消失。
+
+新增行：
+- q_down publish（配置了 copyback root、源降水产物齐备）-> `PublishResult.status == "published"` 且 `"precip_mirror" not in result.lineage`，copyback 根下**不出现** `canonical/` 目录（移除 oracle，4.20）
+- `grep -n "_copyback_canonical_precip" services/tile_publisher/publisher.py` -> 恰两行：定义与 `copyback_canonical_precip` 内的委托调用
+- 未改动兄弟面：`_copyback_run_products` / `_copyback_qdown_products` 及其 `runs/`、`forcing/` copyback 的既有用例全绿，语义与错误码不变；`_cycle_filter` 仍被 `:347` 调用且行为不变
+- 新缝回归：`tests/test_orchestration_chain.py` 的 convert 终态镜像用例保持全绿（镜像行为对新缝零变化）
+
+Boundary-surface checklist（4.17–4.22）:
+- 共享 helper 根：`_copyback_object_tree_with_rollback`、`_collect_copyback_source_tree`、`_object_tree_root_path`、`_copyback_temp_tree_key`、rollback batch 族**一字不改**（与 `runs/`/`forcing/` 共用）
+- 公开入口：`TilePublisher.copyback_canonical_precip` 签名、返回类型与 summary 形状不变；`publish_qdown_display` 签名与返回类型不变，只是 lineage 少一个可选键
+- 写入/覆盖面：本单不新增、不修改任何写路径；删除的是一个调用点
+- 证据边界：唯一回执出口收敛为 pipeline_event；publish lineage 不再是镜像的证据出口
+- 未改动下游消费者：全仓无生产代码读 `PublishResult.lineage["precip_mirror"]`（实现前需 `grep` 复核并在报告中给出输出）
+
+Evidence Floor（#2068）：本地 `uv run ruff check .` + `uv run pytest tests/test_tile_publisher.py tests/test_orchestration_chain.py tests/test_entropy_audit_script.py -q` + `openspec validate display-v2-national-timeline-precip-overlay --strict --no-interactive`；4.20 移除 oracle 的红证据（改前源码上跑红的输出）；`grep -n "_copyback_canonical_precip" services/tile_publisher/publisher.py` 与 `grep -rn "precip_mirror" --include='*.py'`（排除 tests/）的输出作为「零消费者」证据。node-27 定向 pytest（`CLAUDE.md` 验证 oracle 路由把「后端单测」无条件路由到 node-27，兄弟 `Evidence Floor（#2069）` 同此）：在**一次性 worktree** 上跑（**不得**在 `/home/nwm/NWM` 活动树上 checkout PR 分支——该树正被 retention timer 与 display API 使用，见 #2011 Evidence Floor）：`cd /home/nwm/NWM && git fetch origin && git worktree add /home/nwm/tmp/wt-2068 origin/feat/issue-2068-remove-dead-qdown-precip-mirror-call-site && cd /home/nwm/tmp/wt-2068 && mkdir -p /home/nwm/tmp && export TMPDIR=/home/nwm/tmp && export PATH=$HOME/.local/bin:$PATH && uv run pytest tests/test_tile_publisher.py tests/test_orchestration_chain.py -q`，跑完 `git worktree remove /home/nwm/tmp/wt-2068`——**不是形式主义**：改指后的 742 行里有 symlink 拒绝、`O_NOFOLLOW` 与 `IFS` 大小写目录名断言，本地 macOS 大小写不敏感文件系统上的绿是弱证据（`tests/test_tile_publisher.py:2983-2985` 自己记着这条）。**无需 display live receipt**：本单不触碰 display 面，生产行为零变化。
+
+计算面 receipt：不需要（前置条件的实机证据已由 #2016/#2010 的既有 receipt 提供，本单不改 Slurm、SHUD 或调度任何面）。
 
 ## 5. Precipitation raster service (precipitation-raster-overlay, backend)
 

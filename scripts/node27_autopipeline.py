@@ -67,6 +67,7 @@ from packages.common.forcing_domain_handoff_apply import (
     REASON_APPLY_COMPRESSED_CHUNK_BLOCKED,
     apply_forcing_domain_handoff_path,
 )
+from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
 from packages.common.redaction import redact_payload, redact_text
 from workers.model_registry.basins_discovery import discover_basins_inventory
 from workers.model_registry.basins_radiation_template import repair_missing_tsd_rl_for_basin
@@ -1440,15 +1441,14 @@ def _publish_display_runs(database_url: str) -> int:
         conn.close()
 
 
-_STATS_GUARD_CANDIDATES_SQL = """
+_STATS_GUARD_CANDIDATES_SQL = f"""
 SELECT c.chunk_schema, c.chunk_name, s.n_mod_since_analyze, s.last_analyze
 FROM timescaledb_information.chunks c
 JOIN pg_stat_user_tables s
   ON s.schemaname = c.chunk_schema
  AND s.relname = c.chunk_name
 WHERE (c.hypertable_schema, c.hypertable_name) IN (
-    ('hydro', 'river_timeseries'),
-    ('met', 'forcing_station_timeseries')
+    {RUNTIME_HYPERTABLES_SQL}
 )
   AND c.is_compressed = false
   AND s.n_mod_since_analyze >= %s

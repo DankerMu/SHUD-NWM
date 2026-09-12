@@ -94,6 +94,12 @@ Every reader of the river fact table SHALL keep one store-parameterized SQL temp
 #### Scenario: A caller that owns run metadata executes one routed variant
 - **WHEN** the hydro-display MVT source-identity probe receives a run whose metadata names one store
 - **THEN** it renders and executes only that store's variant, retains one `SELECT 1 ... LIMIT 1` result decision, and preserves the existing not-found response contract without a statement-level union
+- **AND** the original probe's raw SQL, five named binds, key/enum authority predicates, `.first()` and legacy aids remain unchanged; request validation precedes all SQL, and existing readiness/source-identity failures keep their precedence
+
+#### Scenario: A known-run probe refuses invalid routing before fact SQL
+- **WHEN** ready run metadata with a valid source identity supplies a missing, null or unknown `timeseries_store`
+- **THEN** the probe raises `TIMESERIES_STORE_INVALID` with status 500 before any fact probe or tile SQL, without a default store, coercion, extra lookup or union
+- **AND** the metadata SELECT carries the actual route while unchanged sibling metadata consumers and public route parameters retain their contracts
 
 #### Scenario: Forecast segment discovery combines routed facts below its semantic operators
 - **WHEN** any of the eight forecast-store segment queries may see runs from both stores
@@ -151,6 +157,19 @@ Every reader of the river fact table SHALL keep one store-parameterized SQL temp
 #### Scenario: Smoke reset clears both stores
 - **WHEN** `scripts/reset_qhh_smoke_db.py` deletes a legacy run
 - **THEN** its rows are removed from `hydro.river_timeseries_legacy` and the run's summary from `scripts/summarize_qhh_smoke_results.py` reads the same store
+
+### Requirement: Non-template river surfaces SHALL branch on catalog state without rewriting discovery SQL
+
+Publisher q_down preflight, copyback column guards, QHH reset/summarize and the hydro_map/live-evidence plan nails SHALL detect store from the catalog only. A pre-expand catalog (no `timeseries_store` column, no `river_timeseries_legacy`) MUST keep today's table names, column sets, SQL, plan lines and error codes. After expand, publisher preflight SHALL accept canonical `hydro.river_timeseries` or `hydro.river_timeseries_legacy`; copyback `required_columns` SHALL drop `variable` on the narrow canonical table and keep it on `_legacy` while `_DISCOVER_BACKFILL_RUNS_SQL` stays unchanged; QHH reset SHALL delete a legacy run from `_legacy` and a narrow run from the canonical table, and summarize SHALL read that same table without fact-table `variable` on the narrow path; plan nails SHALL keep the current hydro_map/live-evidence tokens as the pre-expand default and expose an explicit-store narrow sibling named from the spec indexes. No surface MAY sniff a process environment for store, default a missing post-expand store value, or route publisher/copyback discovery SQL in this task.
+
+#### Scenario: Pre-expand catalogs keep current non-template behavior
+- **WHEN** the catalog has no `hydro.hydro_run.timeseries_store` column and no `hydro.river_timeseries_legacy`
+- **THEN** publisher still requires canonical `hydro.river_timeseries`, copyback still requires `{run_key, variable, variable_e, value}` on that table, QHH reset/summarize still target `hydro.river_timeseries`, and the default hydro_map plan plus live-evidence query tokens remain the current key-and-aid set
+
+#### Scenario: Post-expand catalogs accept the legacy sibling and drop canonical `variable`
+- **WHEN** a disposable post-expand catalog has both physical river tables and `timeseries_store` on `hydro.hydro_run`
+- **THEN** publisher preflight succeeds if either river table exists and fails only when both are absent; copyback accepts a canonical table without `variable` and still requires `variable` on `_legacy`; QHH reset of a `legacy` run deletes `_legacy` rows only and summarize of that run reads `_legacy`; QHH reset of a `narrow` run deletes canonical rows only and summarize of that run reads canonical rows without fact-table `variable`; an unknown store value fails closed before any river DELETE or SELECT
+
 
 ### Requirement: Per-segment curve access SHALL be index- or segmentby-pruned on both chunk states, and every disappearing index SHALL pass the hygiene evidence gate
 

@@ -2759,6 +2759,25 @@ def _validate_phase(
     }
 
 
+def _curve_required_query_tokens(store: str = "legacy") -> set[str]:
+    if store not in ("legacy", "narrow"):
+        raise EvidenceError("unsupported timeseries store")
+    tokens = {
+        "FROM hydro.river_timeseries",
+        "JOIN hydro.hydro_run",
+        "rt.basin_version_key",
+        "rt.river_segment_key",
+        "rt.river_network_version_key",
+        "rt.variable_e",
+        "h.run_type = 'forecast'",
+        "h.cycle_time",
+        "rt.valid_time",
+    }
+    if store == "legacy":
+        tokens.update({"rt.river_segment_id", "rt.river_network_version_id", "rt.variable = 'q_down'"})
+    return tokens
+
+
 def _validate_benchmarks(
     raw: Any,
     selected: Mapping[str, Any],
@@ -2810,20 +2829,7 @@ def _validate_benchmarks(
             # them would be measuring a different (collapsed) plan than
             # production runs, which is exactly what design D10.7's node-27
             # EXPLAIN receipts measured when the segment aid went missing.
-            required_query_tokens = {
-                "FROM hydro.river_timeseries",
-                "JOIN hydro.hydro_run",
-                "rt.basin_version_key",
-                "rt.river_segment_key",
-                "rt.river_network_version_key",
-                "rt.river_segment_id",
-                "rt.river_network_version_id",
-                "rt.variable = 'q_down'",
-                "rt.variable_e",
-                "h.run_type = 'forecast'",
-                "h.cycle_time",
-                "rt.valid_time",
-            }
+            required_query_tokens = _curve_required_query_tokens()
         else:
             source_paths = ["services/tiles/mvt.py", "apps/api/routes/hydro_display.py"]
             required_parameter_keys = {

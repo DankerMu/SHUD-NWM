@@ -195,29 +195,36 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         "packages/common/node27_cold_governance.py": {
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         },
         "packages/common/node27_cold_governance_collection.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "packages/common/node27_cold_governance_cli.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "packages/common/node27_cold_governance_history.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "packages/common/node27_cold_governance_runtime.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "scripts/node27_resource_governance.py": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
             "tests/test_node27_resource_governance.py",
         },
         "schemas/node27_cold_governance_receipt.schema.json": {
             "tests/test_node27_cold_governance.py",
+            "tests/test_node27_working_set.py",
         },
         "schemas/examples/node27_cold_governance_receipt.example.json": {
             "tests/test_node27_cold_governance.py",
@@ -239,6 +246,7 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         "infra/env/node27-resource-governance.example": {
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
         },
         "infra/systemd/nhms-node27-resource-governance.service": {
             "tests/test_node27_cold_governance.py",
@@ -255,12 +263,92 @@ def test_select_tests_routes_node27_cold_tablespace_producers_to_focused_consume
         # #1647: the compression runner owns one half of the byte-identity
         # pin between `_CHUNK_IDENT_RE` and the autopipeline
         # `_STATS_GUARD_IDENT_RE`; the assertion lives in the bounds suite.
+        "packages/common/node27_timeseries_discovery.py": {
+            "tests/test_node27_timeseries_discovery.py",
+            "tests/test_node27_lifecycle_contract.py",
+        },
         "scripts/node27_timeseries_compression.py": {
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_autopipeline_connection_bounds.py",
+            "tests/test_node27_lifecycle_contract.py",
+        },
+        "scripts/node27_timeseries_compression_supervisor.py": {
+            "tests/test_node27_lifecycle_contract.py",
+        },
+        "scripts/node27_timeseries_compression_capture.py": {
+            "tests/test_node27_timeseries_discovery.py",
+        },
+        "schemas/timeseries_compression_receipt.schema.json": {
+            "tests/test_node27_lifecycle_contract.py",
+        },
+        "schemas/examples/timeseries_compression_receipt.example.json": {
+            "tests/test_node27_lifecycle_contract.py",
+        },
+        "schemas/timeseries_retention_receipt.schema.json": {
+            "tests/test_node27_lifecycle_contract.py",
         },
     }
 
+    for producer, consumers in expected.items():
+        selected = set(select_tests([producer], repo_root=Path(".")))
+        assert consumers <= selected, f"{producer} lost focused consumers: {sorted(consumers - selected)}"
+
+
+_LIFECYCLE_OWNER_EDGES: tuple[tuple[str, str], ...] = (
+    ("scripts/node27_timeseries_compression_supervisor.py", "tests/test_node27_lifecycle_contract.py"),
+    ("schemas/timeseries_compression_receipt.schema.json", "tests/test_node27_lifecycle_contract.py"),
+    ("schemas/examples/timeseries_compression_receipt.example.json", "tests/test_node27_lifecycle_contract.py"),
+    ("schemas/timeseries_retention_receipt.schema.json", "tests/test_node27_lifecycle_contract.py"),
+    ("scripts/node27_timeseries_compression_capture.py", "tests/test_node27_timeseries_discovery.py"),
+)
+
+
+@pytest.mark.parametrize(("producer", "owner"), _LIFECYCLE_OWNER_EDGES)
+def test_lifecycle_producer_selects_its_owner_suite(producer: str, owner: str) -> None:
+    selected = set(select_tests([producer], repo_root=Path(".")))
+    assert owner in selected, f"{producer} did not select {owner}"
+
+
+@pytest.mark.parametrize(("producer", "owner"), _LIFECYCLE_OWNER_EDGES)
+def test_lifecycle_owner_edge_reds_when_removed(
+    monkeypatch: pytest.MonkeyPatch, producer: str, owner: str
+) -> None:
+    from scripts import select_ci_tests
+
+    patched = tuple(
+        PathTestRule(
+            rule.pattern,
+            tuple(target for target in rule.tests if not (rule.pattern == producer and target == owner)),
+            rule.stop_on_match,
+            rule.only_when_any_changed,
+        )
+        for rule in PATH_TEST_RULES
+    )
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", patched)
+    selected = set(select_tests([producer], repo_root=Path(".")))
+    assert owner not in selected, f"{producer} still selected {owner} after the edge was removed"
+
+
+def test_select_tests_routes_node27_pgdata_relocation_producers_to_focused_consumers() -> None:
+    expected = {
+        "packages/common/node27_pgdata_host.py": {
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        },
+        "packages/common/node27_pgdata_migrate.py": {
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        },
+        "scripts/node27_pgdata_migrate.py": {
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        },
+        "packages/common/node27_cold_tablespace_container.py": {
+            "tests/test_node27_cold_tablespace_container.py",
+            "tests/test_node27_pgdata_migrate.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+        },
+    }
     for producer, consumers in expected.items():
         selected = set(select_tests([producer], repo_root=Path(".")))
         assert consumers <= selected, f"{producer} lost focused consumers: {sorted(consumers - selected)}"
@@ -337,9 +425,9 @@ def test_every_node27_service_unit_selects_the_sibling_lane_pin() -> None:
     for unit in units:
         selected = set(select_tests([unit.as_posix()], repo_root=Path(".")))
         assert selected, f"{unit.name} selected an empty test set (collect-only)"
-        assert (
-            "tests/test_node27_timeseries_retention.py" in selected
-        ), f"{unit.name} does not select the sibling lane pin"
+        assert "tests/test_node27_timeseries_retention.py" in selected, (
+            f"{unit.name} does not select the sibling lane pin"
+        )
 
 
 def test_a_future_node27_service_unit_selects_the_sibling_lane_pin() -> None:
@@ -370,13 +458,9 @@ def test_a_future_node27_service_unit_selects_the_sibling_lane_pin() -> None:
 # is the readable producer -> consumer statement, same shape as the
 # resource-governance table above.
 NODE27_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
-    "infra/systemd/nhms-node27-autopipe.service": frozenset(
-        {"tests/test_node27_autopipeline_preflight.py"}
-    ),
+    "infra/systemd/nhms-node27-autopipe.service": frozenset({"tests/test_node27_autopipeline_preflight.py"}),
     "infra/systemd/nhms-node27-download.service": frozenset({"tests/test_node27_download_cycles.py"}),
-    "infra/systemd/nhms-node27-frontier-alert.service": frozenset(
-        {"tests/test_node27_frontier_stall_alert.py"}
-    ),
+    "infra/systemd/nhms-node27-frontier-alert.service": frozenset({"tests/test_node27_frontier_stall_alert.py"}),
     "infra/systemd/nhms-node27-raw-retention.service": frozenset({"tests/test_node27_raw_retention.py"}),
     "infra/systemd/nhms-node27-timeseries-compression-replay.service": frozenset(
         {
@@ -431,16 +515,14 @@ def test_node27_unit_files_select_their_owner_suites(unit: str, owners: frozense
     if fnmatch.fnmatch(unit, "infra/systemd/nhms-node27-*.service"):
         # The `#2173` glob row accumulates on top of the path-exact row (no
         # `stop_on_match`); this PR must not cost a unit its lane pin.
-        assert (
-            "tests/test_node27_timeseries_retention.py" in selected
-        ), f"{unit} does not select the sibling lane pin"
+        assert "tests/test_node27_timeseries_retention.py" in selected, f"{unit} does not select the sibling lane pin"
     else:
         # The pin's glob is `nhms-node27-*.service`; a `.timer` row -- or a
         # node-27 unit named outside the `nhms-node27-` prefix -- must not
         # smuggle the pin suite in through its own targets.
-        assert (
-            "tests/test_node27_timeseries_retention.py" not in selected
-        ), f"{unit} pulled in the `.service`-only sibling lane pin"
+        assert "tests/test_node27_timeseries_retention.py" not in selected, (
+            f"{unit} pulled in the `.service`-only sibling lane pin"
+        )
 
 
 # #2188: the node-22 sibling of the table above -- same producer -> consumer
@@ -483,9 +565,7 @@ def test_node22_unit_files_select_their_owner_suites(unit: str, owners: frozense
     # These are node-22 units: the `#2173` pin glob is
     # `infra/systemd/nhms-node27-*.service`, so neither row may smuggle the
     # node-27 lane pin in through its own targets.
-    assert (
-        "tests/test_node27_timeseries_retention.py" not in selected
-    ), f"{unit} pulled in the node-27 sibling lane pin"
+    assert "tests/test_node27_timeseries_retention.py" not in selected, f"{unit} pulled in the node-27 sibling lane pin"
 
 
 def test_select_tests_keeps_new_node27_cold_tablespace_consumers_self_selecting() -> None:
@@ -883,11 +963,13 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
     # census suites: 50 tests in 1.50s together, measured with
     # `uv run pytest -q` in PR-lane conditions), and to 46 in #1581 (the
     # hydro-status parity lock: 5 tests in 0.23s, DB-free — it reads the
-    # migrations as text and the status sets as objects). Those running counts
-    # track the RULE's target count and had already drifted one low before #1581
-    # (the rule held 45 targets while this comment said 44), so the literal
-    # below — not the arithmetic above — is the authority: it now lists 48
-    # targets, the rule's 46 plus two riders that arrive from OUTSIDE the rule
+    # migrations as text and the status sets as objects), and to 47 in #2238
+    # (the copyback-mutex retention partition: 25 tests in 5.27s, DB-free — no
+    # DB markers and no psycopg, green with no database up). Those running
+    # counts track the RULE's target count and had already drifted one low
+    # before #1581 (the rule held 45 targets while this comment said 44), so the
+    # literal below — not the arithmetic above — is the authority: it now lists
+    # 49 targets, the rule's 47 plus two riders that arrive from OUTSIDE the rule
     # — `tests/test_select_ci_tests.py` by the same-name route, and #2185's
     # river-segment write-surface scan by the services/** supplemental route.
     # The literal stays FROZEN here:
@@ -929,9 +1011,16 @@ def test_select_tests_keeps_broad_orchestrator_fallback_for_other_orchestrator_c
         "tests/test_reconcile_sacct_parse.py",
         "tests/test_replay_lineage.py",
         "tests/test_retention.py",
-        # #1872: the four retention partitions ride the broad orchestrator
-        # directory rule together, so each partition and the independent
-        # frontier suite are pinned here.
+        # #1872 (+#2238 EF-16, `services/orchestrator/__init__.py` leg): the five
+        # retention partitions ride the broad orchestrator directory rule
+        # together, so each partition and the independent frontier suite are
+        # pinned here. This literal is an equality pin on the selector's output,
+        # which is why the __init__.py leg is allowed to rest on it and on
+        # nothing else: measured, deleting the copyback-mutex suite from the
+        # broad rule reds this assertion (retry.py's selection loses it, and no
+        # importer derivation re-supplies it there), and no disposition token can
+        # mask that -- `select_ci_tests` never reads the exclusion table.
+        "tests/test_retention_copyback_mutex.py",
         "tests/test_retention_extra_roots.py",
         "tests/test_retention_frontier.py",
         "tests/test_retention_pipeline_frontier.py",
@@ -1215,6 +1304,39 @@ def test_the_template_golden_rule_is_globbed_on_the_capture_sha() -> None:
     """A re-capture at a new base renames the file; the route must survive it."""
     assert select_tests(["tests/fixtures/river_ts_templates_deadbee1.json"], repo_root=Path(".")) == select_tests(
         ["tests/fixtures/river_ts_templates_51f9d273.json"], repo_root=Path(".")
+    )
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
+        "tests/river_ts_template_registry.py",
+    ],
+)
+def test_select_tests_routes_frozen_coverage_inputs_to_their_unit_owners(target: str) -> None:
+    selected = set(select_tests([target], repo_root=Path(".")))
+    assert {
+        "tests/test_display_coverage_refresh.py",
+        "tests/test_river_ts_template_golden.py",
+    } <= selected
+    assert "tests/test_mvt_national_identity_probe_integration.py" not in selected
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "tests/fixtures/display_coverage_pre_store_b7cdce63.sql",
+        "tests/river_ts_template_registry.py",
+    ],
+)
+def test_frozen_coverage_database_edge_deletion_is_unrescued(target: str) -> None:
+    patterns = _database_filter_patterns(Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8"))
+    assert target in patterns, f"{target}: an isolated change must open the database lane"
+    remaining = patterns.copy()
+    remaining.remove(target)
+    assert not [pattern for pattern in remaining if fnmatch.fnmatch(target, pattern)], (
+        f"{target} is rescued by a surviving database pattern after its exact edge was deleted"
     )
 
 
@@ -1659,9 +1781,7 @@ def test_connection_attribution_tuple_peers_are_untouched_by_the_registry_split(
     for peer in peers:
         assert Path(peer).exists()
         selected = set(select_tests([peer], repo_root=Path(".")))
-        assert attribution_suites <= selected, (
-            f"{peer}: lost an attribution suite (got {sorted(selected)})"
-        )
+        assert attribution_suites <= selected, f"{peer}: lost an attribution suite (got {sorted(selected)})"
         leaked = set(_PRECIP_ONLY_VIA_OWNER_RULE) & selected
         assert not leaked, f"{peer}: inherited precip suites {sorted(leaked)}"
 
@@ -1812,6 +1932,12 @@ QHH_CYCLE_SCRIPT = "scripts/run_qhh_cycle.sh"
 QHH_CONTINUOUS_SCRIPT = "scripts/run_qhh_continuous.py"
 QHH_BACKEND_SMOKE_SCRIPT = "scripts/run_qhh_backend_smoke.sh"
 QHH_STATIC_TEST = "tests/test_qhh_scripts_static.py"
+
+
+@pytest.mark.parametrize("script", ["reset_qhh_smoke_db", "summarize_qhh_smoke_results"])
+def test_qhh_catalog_script_selects_runtime_owner(script: str) -> None:
+    assert QHH_STATIC_TEST in select_tests([f"scripts/{script}.py"], repo_root=Path("."))
+
 QHH_ENTRYPOINT_AUTHORITY_TEST = "tests/test_qhh_entrypoint_authority_invariant.py"
 PYTHON_ENV_TRUTH_TEST = "tests/test_python_environment_truth.py"
 TWO_NODE_DOCKER_ENV_TEST = "tests/test_two_node_docker_runbook_environment_invariant.py"
@@ -9251,6 +9377,10 @@ POSITIVE_SELECTION_FLOOR: tuple[tuple[str, tuple[str, ...]], ...] = (
         "services/orchestrator/retention.py",
         (
             "tests/test_retention.py",
+            # #2238 EF-16 (retention.py leg): the partition joins the floor row,
+            # because the pin below only counts as "the positive floor above
+            # proves each partition IS selected" if the floor actually names it.
+            "tests/test_retention_copyback_mutex.py",
             "tests/test_retention_extra_roots.py",
             "tests/test_retention_frontier.py",
             "tests/test_retention_pipeline_frontier.py",
@@ -9280,23 +9410,31 @@ def test_directory_rule_disposition_selects_the_audit_floor(module_path: str, re
     assert not missing, f"{module_path}: rules stopped selecting audit-floor suites {missing}"
 
 
-# #1872: the four retention partitions ride the broad `services/orchestrator/**`
-# directory rule together with the independent frontier suite. The positive
-# floor above only proves each partition IS selected; this pin names all four
-# partitions and proves each is reached by the production owner route for a
-# `services/orchestrator/retention.py` change.
+# #1872 (+#2238): the five retention partitions ride the broad
+# `services/orchestrator/**` directory rule together with the independent
+# frontier suite. The positive floor above only proves each partition IS
+# selected; this pin names all five partitions and proves each is reached by the
+# production owner route for a `services/orchestrator/retention.py` change.
 RETENTION_PARTITIONS: tuple[str, ...] = (
     "tests/test_retention.py",
+    "tests/test_retention_copyback_mutex.py",
     "tests/test_retention_extra_roots.py",
     "tests/test_retention_pipeline_frontier.py",
     "tests/test_retention_root_admission.py",
 )
 RETENTION_FRONTIER_PARTITION = "tests/test_retention_frontier.py"
-# The three moved partitions are reached ONLY through the owner rule: the
-# retained same-name core also arrives via same-name suite derivation, so it is
-# not a fracture pin for the rule literal (removing it from the rule stays
-# green via derivation — which is correct, not a gap).
+# Four partitions — #1872's three moved ones plus #2238's copyback-mutex
+# partition, which was born outside the monolith — are reached ONLY through the
+# owner rule: the retained same-name core also arrives via same-name suite
+# derivation, so it is not a fracture pin for the rule literal (removing it from
+# the rule stays green via derivation — which is correct, not a gap). The
+# copyback-mutex partition's other routes — the `cli.py` stop rule and the
+# `tests/retention_test_helpers.py` importer derivation — are ones a
+# `retention.py`-only change never reaches, so it fractures here too. That
+# membership is the per-partition fracture pin #2238 EF-16 names for the
+# `retention.py` leg.
 RETENTION_RULE_ONLY_PARTITIONS: tuple[str, ...] = (
+    "tests/test_retention_copyback_mutex.py",
     "tests/test_retention_extra_roots.py",
     "tests/test_retention_pipeline_frontier.py",
     "tests/test_retention_root_admission.py",
@@ -9326,7 +9464,8 @@ def test_retention_owner_reds_when_a_partition_is_removed(
     monkeypatch: pytest.MonkeyPatch,
     removed: str,
 ) -> None:
-    # The fracture pin: every moved partition is load-bearing in the owner rule.
+    # The fracture pin: every rule-only partition is load-bearing in the owner
+    # rule.
     # Removing ONE partition target from the `services/orchestrator/**` rule
     # must drop it from the production retention selection, so a partition that
     # silently falls out of the route reds here instead of in the post-merge
@@ -9458,21 +9597,18 @@ def test_basins_package_helper_mapping_transition_is_the_exact_merge_base_replac
     ).stdout
     current = Path(helper).read_text(encoding="utf-8")
     old_loop_members = '        "sp.riv",\n        "sp.rivseg",\n'
-    mesh_write = (
-        '    (input_dir / f"{input_name}.sp.mesh").write_text('
-        '"484\\t8\\nID\\tNode1\\n", encoding="utf-8")\n'
-    )
+    mesh_write = '    (input_dir / f"{input_name}.sp.mesh").write_text("484\\t8\\nID\\tNode1\\n", encoding="utf-8")\n'
     riv_write = (
         '    (input_dir / f"{input_name}.sp.riv").write_text(\n'
         '        "1 6\\nIndex Down Type Slope Length BC\\n1 0 0 0.01 100 0\\n",\n'
         '        encoding="utf-8",\n'
-        '    )\n'
+        "    )\n"
     )
     rivseg_write = (
         '    (input_dir / f"{input_name}.sp.rivseg").write_text(\n'
         '        "1 4\\nIndex iRiv iEle Length\\n1 1 1 100\\n",\n'
         '        encoding="utf-8",\n'
-        '    )\n'
+        "    )\n"
     )
     mapping_writes = riv_write + rivseg_write
 
@@ -9650,7 +9786,26 @@ def test_basins_publication_helper_route_selects_exactly_eight_consumers_plus_th
 STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("services/orchestrator/chain.py", CHAIN_IMPORTER_TESTS),
     ("services/orchestrator/scheduler.py", SCHEDULER_IMPORTER_TESTS),
-    ("services/orchestrator/cli.py", ORCHESTRATOR_CLI_IMPORTER_TESTS),
+    # #2238 EF-16 (cli.py leg): the cli.py entry carries the shared constant
+    # PLUS the at-site addition, because `select_ci_tests` extends this rule
+    # with the copyback-mutex suite at the rule site rather than by editing
+    # ORCHESTRATOR_CLI_IMPORTER_TESTS (that constant is also spliced into
+    # FILE_JOURNAL_READ_STATE_PATH_PATTERNS[4], whose selection must not move).
+    # Pinning the constant alone left the at-site addition unpinned. Measured,
+    # with the at-site target deleted from the rule and this entry back at its
+    # constant-only form: every route and selection pin in this file stayed
+    # green, and the only reds were the directory-rule disposition audit plus
+    # the four guards that derive from its gap set -- all five naming the one
+    # pair `services/orchestrator/cli.py -> tests/test_retention_copyback_mutex.py`.
+    # And that audit is satisfiable by a token: adding a single `runtime-budget`
+    # exclusion for that pair put the file back to all-green with the route
+    # still gone. One token away from losing the requirement oracle for
+    # cli.py-only PRs with nothing but a dispositionable gap objecting -- which
+    # is what this pin exists to prevent.
+    (
+        "services/orchestrator/cli.py",
+        (*ORCHESTRATOR_CLI_IMPORTER_TESTS, "tests/test_retention_copyback_mutex.py"),
+    ),
     ("services/orchestrator/file_orchestration_journal.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
     ("workers/forcing_producer/direct_grid_contract.py", DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
 )
@@ -9723,9 +9878,9 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/test_mapping_builder_algorithm.py",
     ),
     ("tests/slurm_template_helpers.py", "tests/test_production_slurm_validation.py"),
-    # I1 #1980: the river read-template register. Four suites import it at module
-    # scope; the golden equivalence oracle is the anchor because it is the one
-    # whose whole content is derived from the register.
+    # I1 #1980: the river read-template register. The golden equivalence
+    # oracle anchors the raw corpus; #2208 also imports its frozen coverage
+    # loader in the capture owner and national historical fixture preparation.
     ("tests/river_ts_template_registry.py", "tests/test_river_ts_template_golden.py"),
     ("tests/river_identity_backfill_fakes.py", "tests/test_node27_river_identity_backfill.py"),
     (
@@ -9743,12 +9898,17 @@ SUPPORT_MODULE_ROUTING_ANCHORS: tuple[tuple[str, str], ...] = (
         "tests/test_scheduler_backfill.py",
     ),
     ("tests/provider_mode_helpers.py", "tests/test_production_scheduler.py"),
-    # #1872: the retention partitions' shared helper is imported at module scope
-    # by all four collectible partitions; any of them is a valid derivation
-    # anchor, pinned on the core suite (which is also the same-name owner).
+    # #1872 (+#2238): the retention partitions' shared helper is imported at
+    # module scope by all five collectible partitions; any of them is a valid
+    # derivation anchor, pinned on the core suite (which is also the same-name
+    # owner).
     ("tests/retention_test_helpers.py", "tests/test_retention.py"),
     ("tests/__init__.py", "tests/test_integration_gate.py"),
     ("tests/cold_residency_fakes.py", "tests/test_node27_cold_residency.py"),
+    (
+        "tests/cold_residency_identity_mutants.py",
+        "tests/test_issue2224_origin_chunk_parity.py",
+    ),
     # The literal-path half (#1498): this pair exists only because
     # test_shud_runtime.py carries the exact string "tests/mock_shud_omp.py" and
     # runs it as a subprocess. It imports nothing from the module, so a
@@ -13011,8 +13171,7 @@ def test_issue1895_evidence_io_selects_only_its_c1_c3_consumer_plus_additive_rid
     assert matching[0].stop_on_match is False
     rule_index = PATH_TEST_RULES.index(matching[0])
     assert not any(
-        fnmatch.fnmatch(producer, rule.pattern) and rule.stop_on_match
-        for rule in PATH_TEST_RULES[:rule_index]
+        fnmatch.fnmatch(producer, rule.pattern) and rule.stop_on_match for rule in PATH_TEST_RULES[:rule_index]
     )
 
 
@@ -13140,9 +13299,7 @@ def test_issue1895_b2b_example_rules_red_when_collectively_removed(monkeypatch: 
 
 def test_issue1895_b2b_schemas_select_their_receipt_contracts() -> None:
     schemas = {
-        "schemas/node27_issue1895_c1_display_runtime_receipt.schema.json": {
-            *ISSUE1895_READINESS_C1_C2_C3_TESTS
-        },
+        "schemas/node27_issue1895_c1_display_runtime_receipt.schema.json": {*ISSUE1895_READINESS_C1_C2_C3_TESTS},
         "schemas/node27_issue1895_c2_readonly_boundary_receipt.schema.json": {
             *ISSUE1895_READINESS_C1_C2_C3_TESTS,
             *READONLY_DB_VALIDATION_TESTS,
@@ -15920,9 +16077,7 @@ def test_qhh_partition_registry_helper_transition_is_exactly_two_import_retarget
     after = Path(_qhh_helper()).read_text(encoding="utf-8")
 
     assert before != after, "the transition must actually have happened in this tree"
-    assert "tests.test_basins_registry_import" not in after, (
-        "D still imports the retained collectible registry core"
-    )
+    assert "tests.test_basins_registry_import" not in after, "D still imports the retained collectible registry core"
     assert "from tests.basins_registry_import_helpers import _write_registry_fixture" in after
     assert "from tests.basins_registry_import_helpers import _package_manifest_for_model" in after
     # Rebuild the after-text from the before-blob by string substitution alone: if any
@@ -16140,7 +16295,6 @@ def _qhh_imports_module(path: str, module: str) -> bool:
     )
 
 
-
 # ---------------------------------------------------------------------------
 # Issue #1913 — Basins registry-import partition guards.
 #
@@ -16177,9 +16331,7 @@ REGISTRY_PARTITION_BASELINE_SOURCE_SHA256 = "c61c61f6e905ee951b9e5fb1c7566722367
 REGISTRY_PARTITION_CONTRACT_SHA256 = "42803dd59276621d559bf6719b4c31cccc64ad751ed0f46105c373ba7b17c60c"
 # The original #1913 helper aggregate is independent pre-transition provenance.
 # It remains a literal rather than being replaced by the current oracle digest.
-REGISTRY_PARTITION_PRE_1903_HELPER_SOURCE_DIGEST = (
-    "90973ba3e2ad0b30e5803be4a77aaffe155bb4141771eb60d452c3b6fed1b7ea"
-)
+REGISTRY_PARTITION_PRE_1903_HELPER_SOURCE_DIGEST = "90973ba3e2ad0b30e5803be4a77aaffe155bb4141771eb60d452c3b6fed1b7ea"
 REGISTRY_PARTITION_FROZEN_DIGESTS: dict[str, str] = {
     "suffix": "ba89c8cb7520a24aab19195dc0a724ecbf4034675d2bd38fba8b9e04aff6c5c8",
     "integration_suffix": "2531bdef5d481f1024fafe0d5fe36ae7aabb47c478746ceb3286952bccefd73c",
@@ -16282,11 +16434,7 @@ def _registry_members(path: str) -> dict[str, tuple[str, str]]:
             name = _qhh_member_name(node)
         if name is None:
             continue
-        start = (
-            _qhh_definition_start(node, lines)
-            if isinstance(node, (ast.FunctionDef, ast.ClassDef))
-            else node.lineno
-        )
+        start = _qhh_definition_start(node, lines) if isinstance(node, (ast.FunctionDef, ast.ClassDef)) else node.lineno
         fragment = "\n".join(lines[start - 1 : node.end_lineno]) + "\n"
         out[name] = (
             hashlib.sha256(fragment.encode()).hexdigest(),
@@ -16410,9 +16558,7 @@ def _registry_bind_guard_identity(oracle: dict[str, Any]) -> tuple[str, str, str
 
 
 def test_registry_partition_oracle_is_tracked_and_anchored() -> None:
-    tracked_fixtures = [
-        line for line in _qhh_git_stdout("ls-files", "--", "tests/fixtures").splitlines() if line
-    ]
+    tracked_fixtures = [line for line in _qhh_git_stdout("ls-files", "--", "tests/fixtures").splitlines() if line]
 
     assert REGISTRY_PARTITION_ORACLE_PATH in tracked_fixtures, (
         f"{REGISTRY_PARTITION_ORACLE_PATH} is not version-controlled"
@@ -16481,16 +16627,15 @@ def test_registry_helper_mapping_transition_is_exactly_the_allowed_merge_base_ch
     before_members = _registry_members_from_text(before, REGISTRY_PARTITION_HELPER)
     current_members = _registry_members(REGISTRY_PARTITION_HELPER)
     assert set(before_members) == set(current_members)
-    assert {
-        name for name in current_members if current_members[name] != before_members[name]
-    } == {"_make_valid_model"}
+    assert {name for name in current_members if current_members[name] != before_members[name]} == {"_make_valid_model"}
     assert transition["base_source_sha256"] == before_members["_make_valid_model"][0]
     assert transition["base_ast_sha256"] == before_members["_make_valid_model"][1]
     assert transition["current_source_sha256"] == current_members["_make_valid_model"][0]
     assert transition["current_ast_sha256"] == current_members["_make_valid_model"][1]
-    assert _registry_digest_lines(
-        [f"{name}:{row[0]}" for name, row in sorted(before_members.items())]
-    ) == REGISTRY_PARTITION_PRE_1903_HELPER_SOURCE_DIGEST
+    assert (
+        _registry_digest_lines([f"{name}:{row[0]}" for name, row in sorted(before_members.items())])
+        == REGISTRY_PARTITION_PRE_1903_HELPER_SOURCE_DIGEST
+    )
     assert "sp_rivseg_rows" not in before
     assert "sp_rivseg_rows" in current
 
@@ -16527,9 +16672,7 @@ def test_registry_helper_transition_rejects_self_consistent_unrelated_member_mut
 
 
 def test_registry_helper_transition_rejects_an_actual_unrelated_member_mutation() -> None:
-    before = _qhh_blob_at("27dc6aab5a0772c5489b04049eb483a660cf60d8", REGISTRY_PARTITION_HELPER).decode(
-        "utf-8"
-    )
+    before = _qhh_blob_at("27dc6aab5a0772c5489b04049eb483a660cf60d8", REGISTRY_PARTITION_HELPER).decode("utf-8")
     mutated = before.replace(
         '"unknown"',
         '"unexpected"',
@@ -16539,13 +16682,13 @@ def test_registry_helper_transition_rejects_an_actual_unrelated_member_mutation(
     mutated_members = _registry_members_from_text(mutated, REGISTRY_PARTITION_HELPER)
 
     assert set(mutated_members) == set(before_members)
-    assert {
-        name for name in mutated_members if mutated_members[name] != before_members[name]
-    } == {"_PUBLIC_IMPORT_UNKNOWN_TARGET_ID"}
+    assert {name for name in mutated_members if mutated_members[name] != before_members[name]} == {
+        "_PUBLIC_IMPORT_UNKNOWN_TARGET_ID"
+    }
     with pytest.raises(AssertionError):
-        assert {
-            name for name in mutated_members if mutated_members[name] != before_members[name]
-        } == {"_make_valid_model"}
+        assert {name for name in mutated_members if mutated_members[name] != before_members[name]} == {
+            "_make_valid_model"
+        }
 
 
 def test_registry_partition_oracle_shape_is_the_frozen_contract_authority() -> None:
@@ -16594,9 +16737,7 @@ def test_registry_partition_oracle_shape_is_the_frozen_contract_authority() -> N
     }
     assert oracle["integration_by_owner"] == {
         owner: sorted(
-            suffix
-            for suffix in oracle["integration_suffixes"]
-            if suffix in set(oracle["owner_nodes"][owner])
+            suffix for suffix in oracle["integration_suffixes"] if suffix in set(oracle["owner_nodes"][owner])
         )
         for owner in (
             "tests/test_basins_registry_import_auth.py",
@@ -16610,9 +16751,7 @@ def test_registry_partition_oracle_shape_is_the_frozen_contract_authority() -> N
         "tests/test_basins_registry_import_qhh.py": 7,
     }
     assert oracle["owner_nodes"] == {
-        owner: sorted(
-            suffix for suffix in oracle["node_suffixes"] if rows[suffix.split("[", 1)[0]][0] == owner
-        )
+        owner: sorted(suffix for suffix in oracle["node_suffixes"] if rows[suffix.split("[", 1)[0]][0] == owner)
         for owner in partitions
     }
     assert all(
@@ -16623,9 +16762,7 @@ def test_registry_partition_oracle_shape_is_the_frozen_contract_authority() -> N
     for key, frozen in REGISTRY_PARTITION_FROZEN_DIGESTS.items():
         assert oracle["digests"][key] == frozen, key
     assert oracle["digests"]["suffix"] == _registry_digest_lines(sorted(oracle["node_suffixes"]))
-    assert oracle["digests"]["integration_suffix"] == _registry_digest_lines(
-        sorted(oracle["integration_suffixes"])
-    )
+    assert oracle["digests"]["integration_suffix"] == _registry_digest_lines(sorted(oracle["integration_suffixes"]))
     assert oracle["digests"]["definition"] == _registry_digest_lines(
         [f"{name}:{row[1]}" for name, row in sorted(rows.items())]
     )
@@ -16635,9 +16772,7 @@ def test_registry_partition_oracle_shape_is_the_frozen_contract_authority() -> N
     assert oracle["digests"]["owner_map"] == _registry_digest_lines(
         [f"{name}:{row[0]}" for name, row in sorted(rows.items())]
     )
-    assert oracle["digests"]["helper_inventory"] == _registry_digest_lines(
-        sorted(oracle["helper"]["rows"])
-    )
+    assert oracle["digests"]["helper_inventory"] == _registry_digest_lines(sorted(oracle["helper"]["rows"]))
     assert oracle["digests"]["helper_source"] == _registry_digest_lines(
         [f"{name}:{row[1]}" for name, row in sorted(oracle["helper"]["rows"].items())]
     )
@@ -16662,11 +16797,7 @@ def test_registry_partition_tracked_tree_is_exactly_seven_suites_one_helper() ->
 
     assert partitions <= tracked, sorted(partitions - tracked)
     assert helper in tracked
-    corpus = {
-        path
-        for path in tracked
-        if PurePosixPath(path).name.startswith("test_basins_registry_import")
-    }
+    corpus = {path for path in tracked if PurePosixPath(path).name.startswith("test_basins_registry_import")}
     assert corpus == partitions, sorted(corpus ^ partitions)
     assert all(is_test_suite_path(path) for path in partitions)
     assert not is_test_suite_path(helper)
@@ -16735,13 +16866,13 @@ def test_registry_partition_definitions_are_byte_and_ast_identical_to_the_baseli
             observed_by_name[node.name] = owner
 
     assert set(observed_by_name) == set(rows), (
-        f"missing={sorted(set(rows) - set(observed_by_name))} "
-        f"extra={sorted(set(observed_by_name) - set(rows))}"
+        f"missing={sorted(set(rows) - set(observed_by_name))} extra={sorted(set(observed_by_name) - set(rows))}"
     )
     assert len(observed_by_name) == 94
-    assert _registry_digest_lines(
-        [f"{name}:{observed_by_name[name]}" for name in sorted(observed_by_name)]
-    ) == oracle["digests"]["owner_map"]
+    assert (
+        _registry_digest_lines([f"{name}:{observed_by_name[name]}" for name in sorted(observed_by_name)])
+        == oracle["digests"]["owner_map"]
+    )
 
 
 def test_registry_partition_helper_owns_all_twenty_four_members_identically() -> None:
@@ -16766,9 +16897,7 @@ def test_registry_partition_helper_owns_all_twenty_four_members_identically() ->
 
 
 def test_registry_partition_helper_defines_no_test_and_collects_zero_nodes() -> None:
-    assert not [
-        name for name in _registry_members(REGISTRY_PARTITION_HELPER) if name.startswith("test_")
-    ]
+    assert not [name for name in _registry_members(REGISTRY_PARTITION_HELPER) if name.startswith("test_")]
     assert not is_test_suite_path(REGISTRY_PARTITION_HELPER)
     completed = _registry_pytest("--collect-only", REGISTRY_PARTITION_HELPER)
     assert completed.returncode == 5, completed.stdout + completed.stderr
@@ -16785,9 +16914,7 @@ def test_registry_partition_execution_semantics_match_the_frozen_baseline() -> N
     assert _qhh_counts(default.stdout) == "78 passed, 18 skipped", default.stdout
     non_integration = _registry_pytest("-m", "not integration", *partitions)
     assert non_integration.returncode == 0, non_integration.stdout
-    assert _qhh_counts(non_integration.stdout) == "78 passed, 1 skipped, 17 deselected", (
-        non_integration.stdout
-    )
+    assert _qhh_counts(non_integration.stdout) == "78 passed, 1 skipped, 17 deselected", non_integration.stdout
     integration_only = _registry_pytest("-m", "integration", *partitions)
     assert integration_only.returncode == 0, integration_only.stdout
     assert _qhh_counts(integration_only.stdout) == "17 skipped, 79 deselected", integration_only.stdout
@@ -16824,8 +16951,7 @@ def test_registry_partition_direct_importers_derive_from_tracked_asts() -> None:
     derived = _non_gated_top_level_importer_tests(REGISTRY_PARTITION_HELPER_MODULE)
 
     assert derived == expected, (
-        "registry helper direct importer set drifted: "
-        f"derived={sorted(derived)} expected={sorted(expected)}"
+        f"registry helper direct importer set drifted: derived={sorted(derived)} expected={sorted(expected)}"
     )
     assert len(derived) == 8
     assert expected <= set(BASINS_REGISTRY_IMPORT_HELPERS_CONSUMER_TESTS)
@@ -16840,11 +16966,7 @@ def test_registry_partition_support_bridge_is_exactly_one_qhh_helper_edge() -> N
 
     assert support == "tests/qhh_production_bootstrap_helpers.py"
     support_tree = ast.parse(Path(support).read_text(encoding="utf-8"), filename=support)
-    module_level = {
-        node.module
-        for node in support_tree.body
-        if isinstance(node, ast.ImportFrom) and node.level == 0
-    }
+    module_level = {node.module for node in support_tree.body if isinstance(node, ast.ImportFrom) and node.level == 0}
     assert helper_module in module_level, "D lost its module-scope registry-helper import"
     # The second D edge is the function-local `_package_manifest_for_model` import inside
     # `_refresh_inventory_and_manifest` — the one controlled fingerprint transition. D is a
@@ -16856,9 +16978,7 @@ def test_registry_partition_support_bridge_is_exactly_one_qhh_helper_edge() -> N
     ]
     assert len(all_helper_imports) == 2, "D must carry exactly its two retargeted imports"
     imported_names = {alias.name for node in all_helper_imports for alias in node.names}
-    assert imported_names == {"_write_registry_fixture", "_package_manifest_for_model"}, (
-        sorted(imported_names)
-    )
+    assert imported_names == {"_write_registry_fixture", "_package_manifest_for_model"}, sorted(imported_names)
     # No tracked suite outside the derived direct eight may import the registry helper,
     # and the three QHH partitions must import D rather than the registry helper.
     d_module = "tests.qhh_production_bootstrap_helpers"
@@ -16906,9 +17026,7 @@ def test_registry_partition_selector_tuple_is_the_sorted_seven_owner_authority()
     # The tuple must equal the tracked corpus, not a hand-frozen subset: an eighth suite
     # reddens here by derivation (same shape as `_tracked_mapping_builder_suites`).
     tracked = {
-        path
-        for path in _tracked_test_suites()
-        if PurePosixPath(path).name.startswith("test_basins_registry_import")
+        path for path in _tracked_test_suites() if PurePosixPath(path).name.startswith("test_basins_registry_import")
     }
     assert tracked == set(BASINS_REGISTRY_IMPORT_TESTS), sorted(tracked ^ set(BASINS_REGISTRY_IMPORT_TESTS))
 
@@ -16958,9 +17076,7 @@ def test_registry_partition_owner_route_selects_all_seven_with_a_non_same_name_p
     # a stale rule entry whose file left the tree, and an eighth partition with no rule
     # entry all redden here.
     tracked_registry = {
-        path
-        for path in _tracked_test_suites()
-        if "test_basins_registry_import" in PurePosixPath(path).name
+        path for path in _tracked_test_suites() if "test_basins_registry_import" in PurePosixPath(path).name
     }
     assert set(rule.tests) & tracked_registry == set(BASINS_REGISTRY_IMPORT_TESTS)
 
@@ -17039,9 +17155,7 @@ def test_registry_partition_helper_route_selects_exactly_the_eleven_consumers() 
 
     selected = set(select_tests([REGISTRY_PARTITION_HELPER], repo_root=Path(".")))
 
-    assert selected == expected | {SELECTOR_META_GUARD_TEST}, (
-        sorted(selected ^ (expected | {SELECTOR_META_GUARD_TEST}))
-    )
+    assert selected == expected | {SELECTOR_META_GUARD_TEST}, sorted(selected ^ (expected | {SELECTOR_META_GUARD_TEST}))
     rule = next(rule for rule in SUPPORT_MODULE_TEST_RULES if rule.pattern == REGISTRY_PARTITION_HELPER)
     assert sorted(rule.tests) == sorted(expected)
     assert SELECTOR_META_GUARD_TEST not in rule.tests
@@ -17176,10 +17290,7 @@ def test_registry_partition_all_eight_outputs_stay_below_the_structural_limit() 
         observed = len(Path(path).read_bytes().splitlines())
         assert observed < REGISTRY_PARTITION_STRUCTURAL_LIMIT, f"{path} is {observed} lines"
     # The oracle itself is a tracked artifact of this change and must stay under the cap too.
-    assert (
-        len(Path(REGISTRY_PARTITION_ORACLE_PATH).read_bytes().splitlines())
-        < REGISTRY_PARTITION_STRUCTURAL_LIMIT
-    )
+    assert len(Path(REGISTRY_PARTITION_ORACLE_PATH).read_bytes().splitlines()) < REGISTRY_PARTITION_STRUCTURAL_LIMIT
     assert oracle["structural"]["line_limit"] == REGISTRY_PARTITION_STRUCTURAL_LIMIT
 
 
@@ -17222,9 +17333,9 @@ def _registry_hook_excludes_path(path: str, pattern: str) -> bool:
 def _registry_assert_hook_default_exclude_literals() -> None:
     """Keep the mirrored DEFAULT_EXCLUDE list honest against the hook source."""
     hook = Path(REGISTRY_PARTITION_GUARD_HOOK_PATH).read_text(encoding="utf-8")
-    expected = "DEFAULT_EXCLUDE = [\n" + "".join(
-        f'    "{item}",\n' for item in REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE
-    ) + "]"
+    expected = (
+        "DEFAULT_EXCLUDE = [\n" + "".join(f'    "{item}",\n' for item in REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE) + "]"
+    )
     assert expected in hook, (
         f"{REGISTRY_PARTITION_GUARD_HOOK_PATH} DEFAULT_EXCLUDE drifted from "
         f"{list(REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE)}"
@@ -17237,21 +17348,14 @@ def _registry_effective_guard_exclusions(guard: dict[str, Any]) -> tuple[str, ..
     return tuple(list(guard.get("exclude", [])) + list(REGISTRY_PARTITION_GUARD_DEFAULT_EXCLUDE))
 
 
-def _registry_exclusion_matches(
-    paths: Sequence[str], exclusions: Sequence[str]
-) -> tuple[tuple[str, str], ...]:
+def _registry_exclusion_matches(paths: Sequence[str], exclusions: Sequence[str]) -> tuple[tuple[str, str], ...]:
     """``(path, pattern)`` pairs the hook would exclude from ``paths``."""
     return tuple(
-        (path, pattern)
-        for path in paths
-        for pattern in exclusions
-        if _registry_hook_excludes_path(path, pattern)
+        (path, pattern) for path in paths for pattern in exclusions if _registry_hook_excludes_path(path, pattern)
     )
 
 
-def _registry_assert_no_registry_guard_exclusions(
-    paths: Sequence[str], exclusions: Sequence[str]
-) -> None:
+def _registry_assert_no_registry_guard_exclusions(paths: Sequence[str], exclusions: Sequence[str]) -> None:
     offenders = _registry_exclusion_matches(paths, exclusions)
     assert not offenders, f"hook-equivalent registry exclusion: {list(offenders)}"
 
@@ -17442,8 +17546,6 @@ def test_registry_partition_live_commands_name_all_seven_suites() -> None:
     validation = Path("docs/VALIDATION.md").read_text(encoding="utf-8")
     smoke = validation.split("NHMS_RUN_REAL_BASINS_IMPORT=1", 1)[1].split("```", 1)[0]
     assert "tests/test_basins_registry_import_db.py" in smoke, smoke
-    assert oracle["bug008_command"] == (
-        "uv run pytest -q tests/test_basins_registry_import.py -k output_segment_count"
-    )
+    assert oracle["bug008_command"] == ("uv run pytest -q tests/test_basins_registry_import.py -k output_segment_count")
     # The retained-core BUG-008 command is still a live, correct recipe: it collects and
     # passes exactly the two frozen cases (proven in the execution-semantics row above).

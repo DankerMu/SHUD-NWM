@@ -28,6 +28,19 @@ The compression runner, the retention runner, the compression supervisor's curre
 - **WHEN** the legacy table has been dropped
 - **THEN** a tick, the supervisor validation and the statistics guard run cleanly with no reference to the legacy name, and the retention receipt omits `legacy_chunks`
 
+#### Scenario: Pre-expand catalogs keep current text-shaped D3 expectations
+- **WHEN** `timescaledb_information.hypertables` lists only the two canonical names
+- **THEN** compression/retention/supervisor/capture/autopipeline consume exactly those two keys, supervisor `validate_current_d3` accepts today's text-shaped `compression_settings` rows, and no `_legacy` name appears in the rendered set
+
+#### Scenario: A sibling that is not a hypertable is ignored
+- **WHEN** `hydro.river_timeseries_legacy` exists as an ordinary table but not in `timescaledb_information.hypertables`
+- **THEN** the discovered set still contains only the two canonical hypertables
+
+#### Scenario: River sibling does not flip forcing expectations
+- **WHEN** only `hydro.river_timeseries_legacy` exists as a hypertable
+- **THEN** river canonical expectations become key-shaped and the sibling stays text-shaped, while `met.forcing_station_timeseries` keeps today's text-shaped settings
+
+
 ### Requirement: Rollback before the contract SHALL be an executable reverse sequence with a recorded intermediate state
 
 While the legacy table exists, the runbook SHALL provide the reverse sequence: stop timers and the API/parser units → `ALTER TABLE hydro.river_timeseries RENAME TO hydro.river_timeseries_narrow_rollback` → `ALTER TABLE hydro.river_timeseries_legacy RENAME TO hydro.river_timeseries` → deploy the pre-change code → `UPDATE hydro.hydro_run SET timeseries_store = 'legacy'` → start. The state "store is `legacy` while narrow rows for that run still exist in the renamed narrow table" is an allowed rollback state: those rows are invisible to every read path and are removed by dropping the renamed narrow table before any new expand attempt.

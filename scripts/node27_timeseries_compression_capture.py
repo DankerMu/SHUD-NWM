@@ -41,6 +41,7 @@ from typing import Any
 
 from packages.common import node27_container_contract as contract
 from packages.common.evidence_io import reject_secret_material
+from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
 
 # The host contract values the verifier pins by exact equality; they are node-27
 # facts, not test-varying inputs, so the producer emits them verbatim.
@@ -632,11 +633,9 @@ RECOVERY_PREFLIGHT_SQL = (
 
 _CATALOG_BODY_SQL = (
     "(SELECT json_build_object("
-    "'hypertables', json_build_object("
-    "'hydro.river_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
-    "WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries' AND compression_enabled),"
-    "'met.forcing_station_timeseries', EXISTS (SELECT 1 FROM timescaledb_information.hypertables "
-    "WHERE hypertable_schema='met' AND hypertable_name='forcing_station_timeseries' AND compression_enabled)),"
+    "'hypertables', (SELECT json_object_agg(format('%s.%s',hypertable_schema,hypertable_name),compression_enabled) "
+    "FROM timescaledb_information.hypertables WHERE (hypertable_schema,hypertable_name) IN "
+    f"({RUNTIME_HYPERTABLES_SQL})),"
     "'compression_settings', COALESCE((SELECT json_agg(row_to_json(s)) FROM "
     "timescaledb_information.compression_settings s), '[]'::json),"
     "'policy_jobs', COALESCE((SELECT json_agg(row_to_json(j)) FROM timescaledb_information.jobs j "
@@ -693,7 +692,7 @@ def _selection_sql(kind: str) -> str:
         "'before_bytes', pg_total_relation_size(format('%I.%I', ch.chunk_schema, ch.chunk_name)::regclass)) AS c "
         "FROM timescaledb_information.chunks ch, obs o2 "
         "WHERE (ch.hypertable_schema, ch.hypertable_name) IN "
-        "(('hydro','river_timeseries'),('met','forcing_station_timeseries')) "
+        f"({RUNTIME_HYPERTABLES_SQL}) "
         "AND ch.is_compressed = false AND ch.range_end < (o2.observed_at - interval '604800 seconds')) sub), "
         "'[]'::json)) FROM obs o"
     )
@@ -705,30 +704,30 @@ def _sizes_sql(kind: str) -> str:
     return (
         f"/* capture:{kind} */ SELECT json_build_object("
         "'captured_at', to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'),"
-        "'tables', json_build_object("
-        "'hydro.river_timeseries', " + _table_size_sql("hydro", "river_timeseries") + ","
-        "'met.forcing_station_timeseries', " + _table_size_sql("met", "forcing_station_timeseries") + "))"
+        "'tables', (SELECT json_object_agg(format('%s.%s',h.schema,h.name), "
+        + _table_size_sql()
+        + f") FROM ({RUNTIME_HYPERTABLES_SQL}) h))"
     )
 
 
-def _table_size_sql(schema: str, table: str) -> str:
-    fqtn = f"'{schema}.{table}'"
+def _table_size_sql() -> str:
+    fqtn = "format('%I.%I',h.schema,h.name)"
     return (
         "json_build_object("
         f"'hypertable_size', hypertable_size({fqtn}::regclass)::bigint,"
         f"'parent_relation_size', pg_total_relation_size({fqtn}::regclass)::bigint,"
         "'compressed_chunks', (SELECT count(*)::int FROM timescaledb_information.chunks "
-        f"WHERE hypertable_schema='{schema}' AND hypertable_name='{table}' AND is_compressed),"
+        "WHERE hypertable_schema=h.schema AND hypertable_name=h.name AND is_compressed),"
         "'uncompressed_chunks', (SELECT count(*)::int FROM timescaledb_information.chunks "
-        f"WHERE hypertable_schema='{schema}' AND hypertable_name='{table}' AND NOT is_compressed),"
+        "WHERE hypertable_schema=h.schema AND hypertable_name=h.name AND NOT is_compressed),"
         "'compressed_relations', COALESCE((SELECT json_agg(json_build_object("
         "'origin_chunk_schema', oc.schema_name, 'origin_chunk_name', oc.table_name,"
         "'schema', cc.schema_name, 'name', cc.table_name,"
         "'bytes', pg_total_relation_size(format('%I.%I', cc.schema_name, cc.table_name)::regclass)::bigint)) "
         "FROM _timescaledb_catalog.chunk oc "
         "JOIN _timescaledb_catalog.chunk cc ON oc.compressed_chunk_id = cc.id "
-        "JOIN _timescaledb_catalog.hypertable h ON oc.hypertable_id = h.id "
-        f"WHERE h.schema_name='{schema}' AND h.table_name='{table}'), '[]'::json))"
+        "JOIN _timescaledb_catalog.hypertable ht ON oc.hypertable_id = ht.id "
+        "WHERE ht.schema_name=h.schema AND ht.table_name=h.name), '[]'::json))"
     )
 
 

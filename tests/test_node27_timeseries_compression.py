@@ -1675,11 +1675,15 @@ def test_env_template_literals_survive_the_catch_up_invariant(tmp_path: Path) ->
             "WRAPPER_WALL_SECONDS",
             "SYSTEMD_WALL_SECONDS",
             "PER_TICK_BOUND",
+            "LAG_SECONDS",
         )
     }
     config = compression.config_from_args(_args(), _base_env(tmp_path, override=override))
     assert config.compress_timeout_ms == int(override["NODE27_TIMESERIES_COMPRESSION_COMPRESS_TIMEOUT_MS"])
     assert config.per_tick_bound == int(override["NODE27_TIMESERIES_COMPRESSION_PER_TICK_BOUND"])
+    assert config.lag_seconds == 172800
+    assert config.per_tick_bound == 4
+    assert "one chunk width" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -1797,6 +1801,11 @@ def test_chunk_query_does_not_scan_detail_hypertables() -> None:
         if "hydro.river_timeseries" in line or "met.forcing_station_timeseries" in line:
             # Must be inside the tuple filter (as string literals with quotes).
             assert "'" in line, f"detail hypertable referenced outside string literal: {line!r}"
+    from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
+
+    assert RUNTIME_HYPERTABLES_SQL in query
+    assert "UNION ALL" in RUNTIME_HYPERTABLES_SQL
+    assert "UNION ALL" in query
 
 
 # ---------------------------------------------------------------------------

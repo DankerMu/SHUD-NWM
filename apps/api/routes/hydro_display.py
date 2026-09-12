@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 from apps.api.display_cache import display_catalog_cached
 from apps.api.errors import ApiError
 from apps.api.routes.pipeline import _ok
+from packages.common.river_ts_render import render_river_ts_sql
 from services.tiles.mvt import (
     MVT_BUFFER,
     MVT_EXTENT,
@@ -497,6 +498,7 @@ def hydro_mvt_tile(
         valid_time=valid_time,
         basin_version_id=basin_version_id,
         river_network_version_id=river_network_version_id,
+        timeseries_store=run.get("timeseries_store"),
     )
     tile_input = TileInput(
         layer_id=public_hydro_layer_id(variable),
@@ -1060,7 +1062,15 @@ def _require_hydro_mvt_source_identity(
     valid_time: datetime,
     basin_version_id: str,
     river_network_version_id: str,
+    timeseries_store: str | None,
 ) -> None:
+    if timeseries_store not in ("legacy", "narrow"):
+        raise ApiError(
+            status_code=500,
+            code="TIMESERIES_STORE_INVALID",
+            message="The candidate run has an invalid river timeseries store route.",
+            details={"run_id": run_id},
+        )
     # Issue #1341: the existence probe filters on the integer surrogate keys /
     # enum column served by migration 000051, resolving the caller's text
     # identity through the authority tables inside the query. An unknown
@@ -1076,7 +1086,8 @@ def _require_hydro_mvt_source_identity(
     # with the text columns in #1342.
     row = session.execute(
         text(
-            """
+            render_river_ts_sql(
+                """
             SELECT 1
             FROM hydro.river_timeseries
             WHERE run_key = (
@@ -1102,7 +1113,10 @@ def _require_hydro_mvt_source_identity(
                   )
               AND valid_time = :valid_time
             LIMIT 1
-            """
+            """,
+                timeseries_store,
+                entry="hydro_display:mvt_source_identity_probe",
+            ).sql
         ),
         {
             "run_id": run_id,
@@ -1185,7 +1199,7 @@ def _run_row(session: Session, run_id: str) -> dict[str, Any]:
         text(
             """
             SELECT h.run_id, h.status, h.model_id, h.basin_version_id, h.source_id, h.cycle_time,
-                   h.updated_at, mi.river_network_version_id
+                   h.updated_at, mi.river_network_version_id, h.timeseries_store
             FROM hydro.hydro_run h
             LEFT JOIN core.model_instance mi ON mi.model_id = h.model_id
             WHERE h.run_id = :run_id

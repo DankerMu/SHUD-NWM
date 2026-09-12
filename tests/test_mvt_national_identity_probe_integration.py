@@ -63,7 +63,7 @@ from sqlalchemy.orm import Session
 
 from apps.api.main import app
 from apps.api.routes import hydro_display
-from packages.common.display_coverage import refresh_run_display_coverage
+from packages.common.forecast_store import MVP_STATION_VARIABLES, QHH_LATEST_EXPECTED_HORIZON_HOURS
 from services.tiles.mvt import (
     MVT_MEDIA_TYPE,
     national_discharge_source_version,
@@ -79,6 +79,7 @@ from tests.integration_helpers import (
 from tests.integration_helpers import (
     post_expand_forecast_database as post_expand_forecast_database,
 )
+from tests.river_ts_template_registry import historical_display_coverage_sql
 from workers.model_registry.basins_registry_import import _backfill_output_segment_geometry
 
 pytestmark = pytest.mark.integration
@@ -494,9 +495,30 @@ def _seed_rival_display_ready_run(
 
 
 def _refresh_coverage(database_url: str, run_id: str = _RUN_ID) -> None:
+    """Historical fixture preparation before each test selects its store mapping."""
     connection = psycopg2.connect(database_url, cursor_factory=RealDictCursor)
     try:
-        assert refresh_run_display_coverage(connection, run_id) is True
+        with connection.cursor() as cursor:
+            cursor.execute(
+                historical_display_coverage_sql(),
+                {
+                    "horizon": QHH_LATEST_EXPECTED_HORIZON_HOURS,
+                    "basin_id": None,
+                    "run_id": run_id,
+                    "variables": list(MVP_STATION_VARIABLES),
+                    "variable_count": len(MVP_STATION_VARIABLES),
+                    "force": False,
+                    "scan_run_id": None,
+                    "scan_forcing_version_id": None,
+                    "scan_basin_version_id": None,
+                    "scan_river_network_version_id": None,
+                    "scan_source_id_lower": None,
+                    "scan_display_start": None,
+                    "scan_display_end": None,
+                },
+            )
+            assert [dict(row) for row in cursor.fetchall()] == [{"run_id": run_id}]
+        connection.commit()
     finally:
         connection.close()
 
