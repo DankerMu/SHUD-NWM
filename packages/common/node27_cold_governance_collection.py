@@ -15,6 +15,7 @@ from typing import Any, Mapping, Sequence
 
 from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
 from packages.common.node27_timeseries_discovery import RUNTIME_HYPERTABLES_SQL
+from packages.common.redaction import redact_payload
 
 COMPRESSION_LAG_SECONDS_ENV = "NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS"
 # Same lag as the compression lane (infra/env/node27-timeseries-compression.example).
@@ -47,13 +48,39 @@ def compression_lag_seconds(env: Mapping[str, str] | None = None) -> int:
     return lag
 
 
-def collect_working_set(database_url: str | None, home_free_bytes: int | None) -> dict[str, Any]:
+def collect_working_set(database_url: str | None, filesystem: Mapping[str, Any]) -> dict[str, Any]:
     """Observe chunk sizes without scanning facts; never persist database errors."""
+    target = (filesystem.get("filesystems") or {}).get("pgdata_root_fs", {})
+    usage = (filesystem.get("path_sizes") or {}).get("pgdata_root", {})
+    path = target.get("path")
+    identity = target.get("device_identity")
+    free = observation_int(target.get("free_bytes"))
+    blockers = []
+    if target.get("status") != "ok" or not isinstance(path, str) or not path:
+        blockers.append("PGDATA_FILESYSTEM_UNAVAILABLE")
+    if not isinstance(identity, str) or not identity:
+        blockers.append("PGDATA_DEVICE_IDENTITY_UNAVAILABLE")
+    if free is None:
+        blockers.append("PGDATA_AVAILABLE_BYTES_UNAVAILABLE")
+    binding_status = "unavailable" if blockers else "ok"
+    usage_identity = usage.get("device_identity")
+    if binding_status == "ok" and usage_identity and usage_identity != identity:
+        binding_status = "ambiguous"
+        blockers.append("PGDATA_DEVICE_IDENTITY_CONFLICT")
+    binding = redact_payload(
+        {
+            "path": path,
+            "device_identity": identity,
+            "status": binding_status,
+            "blockers": blockers,
+        }
+    )
     sample: dict[str, Any] = {
         "uncompressed_bytes": None,
         "daily_ingest_bytes": None,
         "next_compressible_at": None,
-        "home_free_bytes": home_free_bytes,
+        "working_set_free_bytes": free if binding_status == "ok" else None,
+        "working_set_filesystem": binding,
         "watermark": None,
         "projection_status": "catalog_unavailable",
     }
@@ -63,9 +90,7 @@ def collect_working_set(database_url: str | None, home_free_bytes: int | None) -
         import psycopg2.extras
 
         lag = compression_lag_seconds()
-        connection = psycopg2.connect(
-            database_url, connect_timeout=5, cursor_factory=psycopg2.extras.RealDictCursor
-        )
+        connection = psycopg2.connect(database_url, connect_timeout=5, cursor_factory=psycopg2.extras.RealDictCursor)
         connection.set_session(readonly=True, autocommit=False)
         with connection.cursor() as cursor:
             cursor.execute("SET LOCAL statement_timeout = '20s'")
@@ -143,6 +168,8 @@ def filesystem_identity(path: Path) -> str | None:
         usage = os.statvfs(path)
     except OSError:
         return None
+    if getattr(info, "st_dev", None) is None or getattr(usage, "f_fsid", None) is None:
+        return None
     return f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}:{usage.f_fsid}"
 
 
@@ -153,8 +180,10 @@ def disk_usage(path: Path) -> dict[str, Any]:
     try:
         usage = os.statvfs(resolved)
         info = resolved.stat()
-    except OSError as error:
-        return {"path": str(resolved), "status": "unavailable", "error": str(error)}
+    except OSError:
+        return {"path": str(resolved), "status": "unavailable", "error": "statvfs_or_stat_failed"}
+    if getattr(info, "st_dev", None) is None or getattr(usage, "f_fsid", None) is None:
+        return {"path": str(resolved), "status": "unavailable", "error": "device_identity_unavailable"}
     total = usage.f_blocks * usage.f_frsize
     free = usage.f_bavail * usage.f_frsize
     used = (usage.f_blocks - usage.f_bfree) * usage.f_frsize
@@ -234,7 +263,7 @@ def du_bytes(path: Path) -> dict[str, Any]:
     return {
         "path": str(resolved),
         "status": "unavailable",
-        "error": fallback.get("stderr") or first.get("stderr") or "du_failed",
+        "error": "du_failed",
     }
 
 
@@ -251,6 +280,7 @@ def collect_filesystem(config: Any) -> dict[str, Any]:
         "object_store_root": du_bytes(config.object_store_root),
     }
     if config.pgdata_root is not None:
+        filesystems["pgdata_root_fs"] = disk_usage(config.pgdata_root)
         path_sizes["pgdata_root"] = du_bytes(config.pgdata_root)
         path_sizes["pg_wal"] = du_bytes(config.pgdata_root / "pg_wal")
     for relative in DEFAULT_REPO_RELATIVE_SIZE_TARGETS:

@@ -2090,28 +2090,33 @@ ownership 由幂等脚本 `scripts/node27_provision_write_roles.sh`
 `nhms` 所有、其 ANALYZE 会被静默跳过；完整口径与切换/回滚流程见
 `docs/runbooks/tier-node27-timeseries-storage.md` §9。
 
-数据库文件自 2026-08-06 起分布在**两块设备**上。容器 `nhms-db` 由裸
-`docker run` 创建（无 compose、无 systemd unit），三个 bind mount 缺一不可：
+当前宿主 PGDATA 已迁至 `/data/GHDC/nhms-primary/pgdata`，容器路径不变。
+容器 `nhms-db` 由裸 `docker run` 创建（无 compose、无 systemd unit）。
+以下区分当前 bind 与历史 `ghdc` 残留；若该历史 catalog/relations 仍在，必须保留其 bind，
+不能据此重建退役车道或启用 `nhms_cold`：
 
 | 宿主机路径 | 容器路径 | 设备 | 内容 |
 |---|---|---|---|
-| `/home/nwm/nhms-pgdata` | `/home/postgres/pgdata/data` | `/dev/mapper/ubuntu--vg-home`（1.7 TB，与 object store 共卷） | 主 `pg_default` 表空间 |
-| `/data/GHDC/nwm-archive/nhms-tablespace` | `/home/postgres/pgdata/tablespaces/ghdc` | `/dev/md0`（15 TB，**同时承载归档根 `/data/GHDC/nwm-archive`**） | 表空间 `ghdc`：`river_timeseries` 的 `_hyper_3_10`/`_hyper_3_14`、`forcing_station_timeseries` 的 `_hyper_1_12`/`_hyper_1_13` 及其全部索引，约 502 GB |
-| `/home/nwm/nhms-evidence` | `/var/lib/postgresql/evidence` | 同 1.7 TB 卷 | evidence 输出 |
+| `/data/GHDC/nhms-primary/pgdata` | `/home/postgres/pgdata/data` | 配置目标实测 `device_identity`（不按路径前缀猜测） | 当前主 `pg_default` 表空间 |
+| `/data/GHDC/nwm-archive/nhms-tablespace` | `/home/postgres/pgdata/tablespaces/ghdc` | 历史记录 `/dev/md0`；如仍有残留须现场确认 | 历史 `ghdc` overflow 残留，不是新冷层 |
+| `/home/nwm/nhms-evidence` | `/var/lib/postgresql/evidence` | 宿主 `/home` 实测设备（独立于 PGDATA 容量证据） | evidence 输出 |
 
-注意第二行：DB 数据与归档层现在**共用文件系统**，这是对 2026-07-26
-"归档 FS 不得承载 pgdata" 边界的一次**有记录的例外**（成因、代价与承受条件见
-`docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment (2026-08-06)"）。
-运维含义：mover ↔ retention 死锁已随归档车道退役消失（#1370），但它的余量
-告警也一并消失——DB 在 `ghdc` 上的增长现在**无人观测**，只能靠下面的手工核查。
+2026-08-06 的 `ghdc` overflow 与归档根共卷是**历史例外**，成因与当时条件见
+`docs/adr/0002-node27-timeseries-hot-cold-tiering.md` "Amendment (2026-08-06)"。
+归档车道已随 #1370 永久退役；历史表空间/归档统计偏差见 #1290，不把当时的
+约 502 GB 当作当前体量，也不把 retained old PGDATA 当作第二个 current cluster。
 
-容量核查必须**三个挂载点都看**：`df -h / /home /data/GHDC`，而且必须**手工**看：
-归档车道已随 #1370 永久退役（ADR 0002 Revision 2026-08-11），治理 receipt
-不再有 `archive_root` 块，也不再读 `NHMS_ARCHIVE_FREE_SPACE_{WARN,REFUSE}_BYTES`
-——`/dev/md0` 现在**完全没有**自动余量观测。receipt 仍在的 `pgdata_root` 只 `du`
-`/home/nwm/nhms-pgdata`，DB 体量**少报**迁走的字节。归档层体量单独量：
-`du -s --exclude=nhms-tablespace /data/GHDC/nwm-archive`（表空间在归档根下面，
-不排除会多报约 502 GB）。历史口径偏差记在 issue #1290。
+容量核查仍须三个挂载点都看：`df -h / /home /data/GHDC`，并用 `psql` 实测。
+Issue #2273 修正后的源码对配置 PGDATA 直接观察 available bytes（`statvfs.f_bavail`）
+与设备身份，复用既有 `pgdata_root` 的 `du`；当前 receipt 的
+`working_set_free_bytes` 和 `working_set_filesystem`（`path`、`device_identity`、
+`status`、`blockers`）才是目标容量证据，独立 `/home` telemetry 不是比较输入。
+目标 unavailable/ambiguous 必须产生 `WORKING_SET_FILESYSTEM_UNAVAILABLE` critical，
+即使工作集为空也不能跳过；既有 `du` 不可用独立产生 `PGDATA_USAGE_UNAVAILABLE`。
+目标峰值超过可用字节减 safety margin 时使用
+`PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE`，恰好相等可容纳。不更改 lag 或阈值。
+这是源码/模板契约修正，**不表示旧 pinned runtime 已部署修正或服务健康**；
+I8 前须取得批准的 #2273 目标容量 receipt，不能用旧 `/home` PASS 代替。
 
 重建 `nhms-db` 容器的流程见
 `docs/runbooks/tier-node27-timeseries-storage.md` §4.3.3；**不要**拿

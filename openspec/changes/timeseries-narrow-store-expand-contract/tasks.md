@@ -157,6 +157,34 @@
   Non-goals:
   - I7 expand DDL; I8 live tick; I12 forcing expand; decline ledger; cold-residency; live-evidence frozen allowlists; production systemd/env install
 
+- [x] 3.5 (#2273, authorized I8 prerequisite) Replace the current home-bound working-set
+  comparator with direct configured-PGDATA path/device/available-byte evidence, preserving
+  historical receipt meaning and catalog-only projection. Historical task 3.4 records the
+  original I6 delivery; amended D8 and `fixtures/I6b-2273.md` govern this correction.
+  - [x] 3.5.1 Opposite home/target headroom and exact equality exercise actual CLI verdicts.
+  - [x] 3.5.2 Old default and same-device aliases remain correct without double charging.
+  - [x] 3.5.3 Missing/conflicting target and unavailable existing du fail closed, including empty working set.
+  - [x] 3.5.4 Current destination fields, historical schema 1.0 reading and closed-shape validation agree.
+  - [x] 3.5.5 New stderr/OnFailure fields and secret-bearing failures preserve DSN safety.
+  - [x] 3.5.6 Current runbooks/env and regenerated root instructions reflect actual host target/container bind.
+  - [x] 3.5.7 Authorized node-27 read-only CLI receipt proves actual destination binding without changing production pins.
+
+  **Evidence floor:** fixture review and strict OpenSpec; pre-fix red regression; focused
+  node-27 working-set/resource/cold-governance/history/schema/OnFailure tests; generated
+  instruction/environment oracles; changed-file Ruff, Markdown and exact-head CLI receipt.
+  Expanded/high; all runtime/schema/tests have one owner, docs/source-generation a disjoint owner.
+  No river migration/reader/parser changes, cold activation or node-22 mutation.
+  **Evidence:** two opposite-headroom CLI return-code assertions fail on the pre-fix source;
+  corrected five-file node-27 matrix passes 144 tests at `5d8dcc52a5dd7c8d33c65fa71a833cf381e480bc`.
+  After root prose regeneration, both instruction/environment files pass 46 tests at
+  `f15ef6790d28bddfa67774646e4446034ca1ad5c`. That same runtime checkpoint runs the real
+  governance CLI as `nhms_display_ro` with transaction_read_only on: exit 0, no criticals,
+  bound to `/data/GHDC/nhms-primary/pgdata`, device `9:0:7539273700150526131`.
+  `receipts/issue-2273-capacity/live-receipt.json` contains the exact capacity subset and raw
+  audit hash; full workload details stay private. Peak ≈1161.64 GiB versus target available
+  ≈12199.04 GiB, margin 100 GiB. The old home comparison would falsely exceed its margin.
+  No production unit/pin or schema mutation; #2162 was completed by another session.
+
 
 ## 4. Expand migration and parser (I7 — one issue, one PR)
 

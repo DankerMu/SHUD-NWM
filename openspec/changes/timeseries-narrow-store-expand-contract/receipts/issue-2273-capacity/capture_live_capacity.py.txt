@@ -1,0 +1,192 @@
+"""One-off #2273 read-only verification; credentials only from the inherited environment."""
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+import jsonschema
+import psycopg2
+from psycopg2.extensions import make_dsn, parse_dsn
+
+
+def require(condition, code):
+    if not condition:
+        raise RuntimeError(code)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--sha", required=True)
+    parser.add_argument("--output", required=True)
+    args = parser.parse_args()
+    repo = Path(args.repo).resolve()
+    require(repo.parent == Path("/home/nwm/tmp") and repo.name.startswith("issue-2273-"), "PRIVATE_CHECKOUT_REQUIRED")
+    require(Path(args.repo) == repo and not (repo / ".venv").is_symlink(), "SHARED_ENVIRONMENT_REFUSED")
+    root = Path(args.output)
+    require(root.parent == Path("/home/nwm/tmp") and root.name.startswith("issue-2273-live-"), "OUTPUT_SCOPE")
+    require(root.parent.resolve() == root.parent, "OUTPUT_PARENT_SYMLINK")
+    os.umask(0o077)
+    root.mkdir(mode=0o700, exist_ok=False)
+    source_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    require(source_sha == args.sha, "SOURCE_SHA")
+    require(
+        not subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=repo, text=True
+        ).strip(),
+        "SOURCE_DIRTY",
+    )
+    raw_dsn = os.environ["DATABASE_URL"]
+    identity = parse_dsn(raw_dsn)
+    require(identity.get("host") in {"127.0.0.1", "localhost"}, "LOCAL_DATABASE_REQUIRED")
+    require(identity.get("port") == "55432" and identity.get("dbname") == "nhms", "PRIMARY_IDENTITY_REQUIRED")
+    guarded = make_dsn(
+        raw_dsn,
+        options="-c default_transaction_read_only=on -c statement_timeout=20000 -c lock_timeout=5000",
+        application_name="issue-2273-readonly",
+    )
+    os.environ["DATABASE_URL"] = guarded
+    os.environ["PYTHONPATH"] = str(repo)
+    os.environ.pop("PYTHONHOME", None)
+    for name in list(os.environ):
+        if name.startswith("NODE27_COLD_GOVERNANCE_"):
+            del os.environ[name]
+    connection = psycopg2.connect(guarded, connect_timeout=5)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT current_database(), current_user, current_setting('transaction_read_only')")
+            db, user, readonly = cursor.fetchone()
+            require(db == "nhms" and readonly == "on", "READONLY_SESSION_REQUIRED")
+    finally:
+        connection.close()
+    target = Path("/data/GHDC/nhms-primary/pgdata").resolve(strict=True)
+    before_stat, before_vfs = target.stat(), os.statvfs(target)
+    observed_identity = f"{os.major(before_stat.st_dev)}:{os.minor(before_stat.st_dev)}:{before_vfs.f_fsid}"
+    before = {
+        "at": datetime.now(UTC).isoformat(),
+        "path": str(target),
+        "device_identity": observed_identity,
+        "free_bytes": before_vfs.f_bavail * before_vfs.f_frsize,
+    }
+    sys.path.insert(0, str(repo))
+    from packages.common import node27_cold_governance_collection as collection
+    from scripts import node27_resource_governance as governance
+
+    require(
+        Path(governance.__file__).resolve().is_relative_to(repo)
+        and Path(collection.__file__).resolve().is_relative_to(repo),
+        "MODULE_SOURCE",
+    )
+    argv = [
+        "--repo-root",
+        "/home/nwm/NWM",
+        "--pgdata-root",
+        str(target),
+        "--summary-path",
+        str(root / "private-audit.json"),
+        "--quiet",
+    ]
+    config = governance.config_from_args(governance.build_parser().parse_args(argv))
+    command = [sys.executable, str(repo / "scripts/node27_resource_governance.py"), *argv]
+    print("CAPACITY_AUDIT_START", flush=True)
+    result = subprocess.run(command, cwd=repo, env=os.environ.copy(), capture_output=True, timeout=900)
+    (root / "private-stdout.txt").write_bytes(result.stdout)
+    (root / "private-stderr.txt").write_bytes(result.stderr)
+    require(result.returncode in {0, 1}, "CLI_EXECUTION_FAILED")
+    raw_receipt = (root / "private-audit.json").read_bytes()
+    audit = json.loads(raw_receipt)
+    ws = audit["working_set"]
+    schema = json.loads((repo / "schemas/node27_cold_governance_receipt.schema.json").read_text())
+    jsonschema.validate(ws, schema["properties"]["working_set"])
+    binding = ws["working_set_filesystem"]
+    require(binding["status"] == "ok" and binding["blockers"] == [], "TARGET_BINDING_UNAVAILABLE")
+    require(
+        binding["path"] == str(target) and binding["device_identity"] == observed_identity, "TARGET_BINDING_MISMATCH"
+    )
+    require(
+        ws["working_set_free_bytes"] == audit["filesystem"]["filesystems"]["pgdata_root_fs"]["free_bytes"],
+        "CAPACITY_INPUT_MISMATCH",
+    )
+    require(ws["projection_status"] in {"ok", "no_uncompressed_chunk"}, "PROJECTION_UNAVAILABLE")
+    codes = governance._critical_codes(audit)
+    require(
+        "PGDATA_USAGE_UNAVAILABLE" not in codes and "WORKING_SET_FILESYSTEM_UNAVAILABLE" not in codes,
+        "REQUIRED_OBSERVATION_UNAVAILABLE",
+    )
+    expected_critical = (
+        ws["projection_status"] == "ok"
+        and ws["projected_peak_bytes"] > ws["working_set_free_bytes"] - config.thresholds.safety_margin_bytes
+    )
+    require(("PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE" in codes) == expected_critical, "COMPARATOR_MISMATCH")
+    require(result.returncode == (1 if codes else 0), "CRITICAL_EXIT_MISMATCH")
+    after_stat, after_vfs = target.stat(), os.statvfs(target)
+    after_identity = f"{os.major(after_stat.st_dev)}:{os.minor(after_stat.st_dev)}:{after_vfs.f_fsid}"
+    require(after_identity == observed_identity, "TARGET_CHANGED_DURING_AUDIT")
+    runtime_files = [
+        "packages/common/node27_cold_governance_collection.py",
+        "scripts/node27_resource_governance.py",
+        "schemas/node27_cold_governance_receipt.schema.json",
+    ]
+    proof = {
+        "scope": "Live CLI capacity proof only; no deployment or overall-health claim",
+        "status": "PASS",
+        "runtime_sha": source_sha,
+        "command": command,
+        "database_guard": {
+            "database": db,
+            "role": user,
+            "transaction_read_only": readonly,
+            "statement_timeout_ms": 20000,
+            "lock_timeout_ms": 5000,
+        },
+        "before": before,
+        "after": {
+            "at": datetime.now(UTC).isoformat(),
+            "path": str(target),
+            "device_identity": after_identity,
+            "free_bytes": after_vfs.f_bavail * after_vfs.f_frsize,
+        },
+        "audit_started_at": audit["started_at"],
+        "audit_finished_at": audit["finished_at"],
+        "audit_status": audit["status"],
+        "cli_exit_code": result.returncode,
+        "working_set": ws,
+        "safety_margin_bytes": config.thresholds.safety_margin_bytes,
+        "destination_peak_critical": expected_critical,
+        "all_critical_codes": codes,
+        "filesystem_samples": {
+            key: audit["filesystem"]["filesystems"][key] for key in ["home", "cold", "pgdata_root_fs"]
+        },
+        "pgdata_usage": audit["filesystem"]["path_sizes"]["pgdata_root"],
+        "raw_audit_sha256": hashlib.sha256(raw_receipt).hexdigest(),
+        "raw_audit_policy": "Full audit retained privately; public proof contains only actual CLI capacity fields.",
+        "source_sha256": {name: hashlib.sha256((repo / name).read_bytes()).hexdigest() for name in runtime_files},
+        "capture_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "mutations": "Only private evidence files; no units/pins/schema/roles/data changed",
+    }
+    (root / "public-proof.json").write_text(json.dumps(proof, indent=2) + "\n")
+    print(
+        json.dumps(
+            {
+                "status": "PASS",
+                "proof": str(root / "public-proof.json"),
+                "cli_exit_code": result.returncode,
+                "critical_codes": codes,
+            }
+        ),
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as error:
+        code = str(error) if type(error) is RuntimeError and str(error).replace("_", "").isupper() else None
+        print(json.dumps({"status": "BLOCKED", "error_type": type(error).__name__, "check": code}), flush=True)
+        sys.exit(2)

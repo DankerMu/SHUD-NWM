@@ -167,6 +167,8 @@
   },
   "properties": {
     "working_set": {
+      "oneOf": [
+        {
       "type": "object",
       "additionalProperties": false,
       "required": ["uncompressed_bytes", "daily_ingest_bytes", "next_compressible_at", "home_free_bytes", "projection_status", "projected_peak_bytes"],
@@ -179,6 +181,56 @@
         "projection_status": {"enum": ["ok", "no_uncompressed_chunk", "watermark_unavailable", "catalog_unavailable"]},
         "projected_peak_bytes": {"type": ["number", "null"], "minimum": 0}
       }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["uncompressed_bytes", "daily_ingest_bytes", "next_compressible_at", "working_set_free_bytes", "working_set_filesystem", "projection_status", "projected_peak_bytes"],
+          "properties": {
+            "uncompressed_bytes": {"type": ["integer", "null"], "minimum": 0},
+            "daily_ingest_bytes": {"type": ["number", "null"], "minimum": 0},
+            "next_compressible_at": {"type": ["string", "null"], "format": "date-time"},
+            "working_set_free_bytes": {"type": ["integer", "null"], "minimum": 0},
+            "watermark": {"type": ["string", "null"], "format": "date-time"},
+            "projection_status": {"enum": ["ok", "no_uncompressed_chunk", "watermark_unavailable", "catalog_unavailable"]},
+            "projected_peak_bytes": {"type": ["number", "null"], "minimum": 0},
+            "working_set_filesystem": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "device_identity", "status", "blockers"],
+              "properties": {
+                "path": {"type": ["string", "null"], "minLength": 1},
+                "device_identity": {"type": ["string", "null"], "minLength": 1},
+                "status": {"enum": ["ok", "unavailable", "ambiguous"]},
+                "blockers": {
+                  "type": "array",
+                  "maxItems": 4,
+                  "uniqueItems": true,
+                  "items": {"enum": ["PGDATA_FILESYSTEM_UNAVAILABLE", "PGDATA_DEVICE_IDENTITY_UNAVAILABLE", "PGDATA_AVAILABLE_BYTES_UNAVAILABLE", "PGDATA_DEVICE_IDENTITY_CONFLICT"]}
+                }
+              },
+              "allOf": [
+                {
+                  "if": {"properties": {"status": {"enum": ["ok", "ambiguous"]}}},
+                  "then": {"properties": {"path": {"type": "string"}, "device_identity": {"type": "string"}}}
+                },
+                {
+                  "if": {"properties": {"status": {"const": "ok"}}},
+                  "then": {"properties": {"blockers": {"maxItems": 0}}},
+                  "else": {"properties": {"blockers": {"minItems": 1}}}
+                }
+              ]
+            }
+          },
+          "allOf": [
+            {
+              "if": {"properties": {"working_set_filesystem": {"properties": {"status": {"const": "ok"}}}}},
+              "then": {"properties": {"working_set_free_bytes": {"type": "integer"}}},
+              "else": {"properties": {"working_set_free_bytes": {"type": "null"}}}
+            }
+          ]
+        }
+      ]
     },
     "schema_version": {"const": "1.0"},
     "generated_at": {"type": "string", "format": "date-time"},

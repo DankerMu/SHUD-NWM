@@ -88,7 +88,7 @@ This section is immutable history plus current policy. Runnable
 removed; git history preserves them. Do not recreate `ghdc`.
 
 **Current live fact:** hot storage is `pg_default` on
-`/home/nwm/nhms-pgdata` (container `/home/postgres/pgdata/data`).
+`/data/GHDC/nhms-primary/pgdata` (host; container bind `/home/postgres/pgdata/data`).
 Issues #1894/#1895 own any later `nhms_cold` install/migration. A PGDATA-only
 backup is incomplete once any `pg_tblspc` target exists.
 
@@ -175,7 +175,7 @@ and binds optional prior receipt trend by no-follow mode-0600 identity.
 
 Issue #1894 的 Docker oracle 只可在 node-27 的 disposable root 执行，绝不允许 live
 `nhms-db`、`nhms-db-before`、55432、`/data/GHDC`、`/home/nwm/NWM` 或
-`/home/nwm/nhms-pgdata`。先确认该 root/container/prior/port 都是唯一的 #1894 ownership
+`/data/GHDC/nhms-primary/pgdata` 或保留旧副本 `/home/nwm/nhms-pgdata`。先确认该 root/container/prior/port 都是唯一的 #1894 ownership
 identity（port 由内核临时分配，且永不为 55432）。先从 exact-SHA image 量测默认 `postgres`
 uid/gid，不得以 `999` 或 `1000` 代替该量测；该对只是 image identity evidence。synthetic container `--user`、
 host PGDATA 与 cold path owner 必须等于已证明的 host observer effective uid/gid，且 exact image 必须能以该
@@ -196,9 +196,11 @@ NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 an
 
 ## #2240 whole-PGDATA relocation (tooling; separate human-gated cutover)
 
-**No live placement change or production PASS is claimed here.** The current
-source is `/home/nwm/nhms-pgdata`, bound to `/home/postgres/pgdata/data` in
-`nhms-db`. The observed resolved image is
+**Historical #2240 activation context, not a new migration instruction.** The
+then-source was `/home/nwm/nhms-pgdata`, bound to `/home/postgres/pgdata/data` in
+`nhms-db`; the user-confirmed current host target is `/data/GHDC/nhms-primary/pgdata`.
+Do not repeat the relocation. This source correction claims neither deployment
+of #2273 nor production PASS. The image observed for that migration was
 `sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e`
 (PostgreSQL 15.2 / TimescaleDB 2.10.2). The actual hostname observed for this
 window is `ghdc` (node-27 is the deployment label). Production Docker
@@ -295,10 +297,11 @@ This hold is current operator-owned state, not a permanent CLI prerequisite.
 If a later window has a different separately authorized hold state, freeze
 that fresh state rather than manufacturing this historical hold.
 
-The recommended future target is **`/data/GHDC/nhms-primary/pgdata`**.
-Currently `/data/GHDC` itself is root-owned `0:0`, mode 0755, so it is not an
-admissible operator-owned immediate parent. Before a separately approved
-window, a separately authorized root operator must provision **only the fresh
+The now-current target is **`/data/GHDC/nhms-primary/pgdata`**.
+The following records the #2240 fresh-target provisioning rules, not work to
+repeat on the migrated target: `/data/GHDC` was root-owned `0:0`, mode 0755,
+not an admissible operator-owned immediate parent. Before that separately approved
+window, a separately authorized root operator had to provision **only the fresh
 private parent `/data/GHDC/nhms-primary`**, mode 0700, owned by the freshly
 measured migration operator UID/GID. The `pgdata` child must remain absent
 for CLI creation. Root must first prove the parent path absent (including
@@ -548,10 +551,13 @@ Confirm `rolled_back`, original bind/config, reads and original unit states.
 Do not replay a formerly active completed oneshot. Foreign capacity hold and
 pins remain.
 
-Before releasing, change **only** the deployed governance env's
-`NODE27_GOVERNANCE_PGDATA_ROOT` to the exact verified target, preserving its
-private mode and OLD runtime configuration. Do not install the new checkout's
-units. The template deliberately remains `/home/nwm/nhms-pgdata`.
+The deployed governance env must name the exact verified current target in
+`NODE27_GOVERNANCE_PGDATA_ROOT`; inspect that value without printing private env
+contents. The template now names `/data/GHDC/nhms-primary/pgdata`, but changing
+source/template does not change the deployed env or OLD pinned comparator.
+Preserve private mode and runtime pins; do not install the new checkout's units.
+Restore the original env value only as part of the corresponding pre-write
+PGDATA rollback, never while the migrated target remains the live cluster.
 Current PGDATA must be charged once to its observed filesystem; retained old
 bytes are `/home` residual use, not live PGDATA. Unknown device attribution
 must report unavailable, never zero. This does not activate the cold lane.
@@ -1010,6 +1016,13 @@ MUST NOT be invoked for a live install** — it refuses production path prefixes
 and synthesizes mdadm/SMART/backup payloads. A missing
 `/usr/local/sbin/nhms-backup-inventory` producer is NO-GO; there is no
 hand-written substitute and no operator-authored coverage claim.
+
+The cold lane remains inactive. The frozen G2 example below still uses its
+pre-relocation `/home/nwm/nhms-pgdata` input; it is not current PGDATA evidence
+and must not be run as a migrated-production recipe. Any later cold-install
+window must separately reconcile its target/backup contract with live host
+`/data/GHDC/nhms-primary/pgdata`; #2273 changes neither that installer nor its
+activation authority.
 
 | Envelope field | Required value |
 |----------------|----------------|
@@ -4158,7 +4171,7 @@ The #1891 successor bind (`nhms_cold`) is added only by #1894.
 
 | Host | Container |
 |---|---|
-| `/home/nwm/nhms-pgdata` | `/home/postgres/pgdata/data` |
+| `/data/GHDC/nhms-primary/pgdata` | `/home/postgres/pgdata/data` |
 | `/home/nwm/nhms-evidence` | `/var/lib/postgresql/evidence` |
 | `/data/GHDC/nwm-archive/nhms-tablespace` | `/home/postgres/pgdata/tablespaces/ghdc` |
 
@@ -4261,7 +4274,7 @@ tag is gone/cold — and then expect and record the benign `_ref`-only drift.
      --user 1005:1005 \
      --env-file "$ENVFILE" \
      -p 55432:5432 \
-     -v /home/nwm/nhms-pgdata:/home/postgres/pgdata/data \
+     -v /data/GHDC/nhms-primary/pgdata:/home/postgres/pgdata/data \
      -v /home/nwm/nhms-evidence:/var/lib/postgresql/evidence \
      -v /data/GHDC/nwm-archive/nhms-tablespace:/home/postgres/pgdata/tablespaces/ghdc \
      timescale/timescaledb-ha:pg15-latest postgres
@@ -5465,9 +5478,16 @@ Re-inventory, do not infer live state from historical receipts:
   NO-GO. Archive baseline curve SQL/API and identity-probe miss plans before
   expand, with tool SHA and request identities.
 - Current PGDATA is `/data/GHDC/nhms-primary/pgdata`, bound at
-  `/home/postgres/pgdata/data`. #2273's `/home` free-byte comparator cannot
-  certify that destination. Require an approved destination-capacity proof and
-  disposition of #2273; a governance PASS using `/home` is not headroom GO.
+  `/home/postgres/pgdata/data`. #2273 is the prerequisite source/contract repair:
+  corrected source binds capacity to that configured target, but the old
+  deployed pinned runtime still cannot certify it with its `/home` comparator.
+  Require the approved #2273 exact-head read-only receipt with resolved target,
+  device identity, available bytes, projected peak and comparison outcome before
+  I8; a source merge or old `/home` governance PASS is not headroom GO.
+  Collect that proof from an isolated checkout/private env without switching
+  production services or pins. Other criticals may keep the audit non-healthy.
+  The eight independent `60` pins and unapproved foreign holds remain intact;
+  #2280's missing route column belongs to I8's atomic window, not this repair.
 
 Before expand, drain eligible legacy backlog using **§4.5's bound-1 override
 lifecycle**, not cold move or compression replay. Enumerate actual chunk
@@ -6852,36 +6872,53 @@ before a receipt exists.
      df -h / /home
      ```
 
-     `/home` is the pgdata + object-store volume, so this moves the residue
-     onto the volume the retention runner's own ENOSPC reasoning is about; the
-     bound that makes it safe is the retention policy above, not the volume's
-     size.
+     `/home` carries temporary-test residue and other residual filesystem use,
+     not the current host PGDATA at `/data/GHDC/nhms-primary/pgdata`. The bound
+     that makes temporary retention safe is the policy above, not volume size.
 
-     **`/home` free space has no critical tier.** The resource-governance
-     audit gives that mount a warning threshold only —
-     `home_free_warn_bytes` (default 300 GiB) ->
-     `HOME_FREE_BELOW_WARNING`, `scripts/node27_resource_governance.py:70`
-     (threshold), `:227` (comparison), `:232` (the code literal)
-     — and there is no `home_free_critical_bytes` at all. The exit-1 /
-     `OnFailure=` mail lane has two triggers, in this order: the receipt's
-     `status` is not `completed` (`:584-585`), or the receipt carries at least
-     one `severity: critical` recommendation (`:590-593`, `:556`
-     `_critical_codes`). The first is a defensive guard today — `build_receipt`
-     hard-codes `"status": "completed"` (`:355`) and nothing downgrades it — so
-     in practice a critical recommendation is the only thing that reddens a
-     completed audit. (A rejected config never gets that far: the config parse
-     is `:571-576` and the `return 2` is `:577`, which also trips
-     `OnFailure=`.) A `warning` changes neither `status` nor the critical
-     list, so it trips nothing. The three codes that can be critical today are
-     `ROOT_FREE_BELOW_CRITICAL` (`:210`), `DATABASE_SIZE_ABOVE_CRITICAL`
-     (`:244`, 500 GiB of `nhms`) and `HYPERTABLE_INDEX_RATIO_HIGH` (`:318`,
-     severity assigned at `:309`).
-     So a free-space shortfall on the volume that actually holds pgdata and
-     the object store can never page anyone: it only appears as a `warning`
-     line in a receipt someone reads. The database-size proxy is the closest
-     thing to a critical for this volume, and it says nothing about the object
-     store sharing it. Reading the newest `resource-governance-*.json` by hand
-     therefore stays a step of the bringup checklist, not an optional one.
+     **Separate `/home` telemetry from PGDATA working-set capacity.**
+     In `scripts/node27_resource_governance.py`, `AuditThresholds.home_free_warn_bytes`
+     still drives `HOME_FREE_BELOW_WARNING`; this independent warning does not
+     become a critical or provide destination headroom. #2273 corrected source
+     uses `working_set_free_bytes` and `working_set_filesystem` with resolved
+     `path`, `device_identity`, `status` (`ok`, `unavailable`, `ambiguous`) and
+     bounded `blockers`. It observes configured PGDATA directly using
+     `statvfs.f_bavail`; no path-prefix/label selection or `/home` fallback.
+     Same-device aliases are safe; conflicting target/PGDATA-usage identities
+     are ambiguous. The existing PGDATA `du` is reused, not scanned twice.
+
+     `_recommendations` compares projected peak against
+     `working_set_free_bytes - safety_margin_bytes` and emits
+     `PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE` only when greater; equality fits.
+     Missing/unreadable/ambiguous target evidence emits
+     `WORKING_SET_FILESYSTEM_UNAVAILABLE` critical even with an empty working
+     set. Unavailable existing `du` independently emits `PGDATA_USAGE_UNAVAILABLE`.
+     Projection/catalog/watermark status is separate from capacity validity:
+     `WATERMARK_UNAVAILABLE` and `WORKING_SET_UNAVAILABLE` remain criticals,
+     as do `ROOT_FREE_BELOW_CRITICAL` and `HYPERTABLE_INDEX_RATIO_HIGH`.
+     Database-size recommendations remain `info`, not a critical proxy for
+     destination capacity. Peak formula, lag (172800 seconds) and thresholds
+     are unchanged.
+
+     `build_receipt`, `_critical_codes` and `main` own the audit/exit contract:
+     non-completed audit or any critical produces exit 1; rejected config exits
+     2. Warnings alone do not trigger it. Critical stderr retains
+     `RESOURCE_GOVERNANCE_CRITICAL:<code>` and carries destination path/device,
+     available bytes, projected peak, working-set bytes and next-compressible
+     time without DSN/password/raw secret-bearing exception text. The existing
+     `node27_resource_governance_once.sh` tee/PIPESTATUS route and
+     `nhms-node27-resource-governance.service` `OnFailure=` chain into
+     `node27_unit_failure_alert_once.sh` preserve the journal evidence.
+
+     The main audit identifier remains `nhms.node27_resource_governance.audit.v1`.
+     Cold receipt schema 1.0/history reading still accepts no-working-set
+     receipts and the historical closed `home_free_bytes` shape; current
+     producers use only the new closed destination shape, never a hybrid or
+     writer alias. Historical home evidence cannot certify current capacity.
+     This describes corrected source, **not deployment of #2273 or service
+     health**: until the authorized window, old pinned runtime is distinct.
+     Read the newest receipt and require §4.10's exact-target proof before I8;
+     do not release foreign holds/pins or enable cold storage for this repair.
 
    **Never** put `--basetemp` in shared config (`pyproject.toml`, CI): it
    clears its target on every run and would apply to the Mac and to CI too.
