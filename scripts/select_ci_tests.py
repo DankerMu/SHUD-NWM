@@ -814,7 +814,26 @@ NODE27_COLD_RESIDENCY_CENSUS_TESTS: tuple[str, ...] = (
 NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS: tuple[str, ...] = (
     *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
     "tests/test_compressed_chunk_cold_runtime.py",
+    "tests/test_compressed_chunk_cold_runtime_integration.py",
     "tests/test_issue1895_runbook_contract.py",
+)
+
+# #2224: production parity is one closure across the catalog SQL owner, the
+# movement owner, the read-only G1 census, post-target observer and G0/G1
+# runbook fence. The integration suite is intentionally present even where its
+# disposable Docker guard skips: routing owns collection and the node-27 oracle.
+ORIGIN_CHUNK_PARITY_TESTS: tuple[str, ...] = (
+    "tests/test_compressed_chunk_cold_runtime.py",
+    "tests/test_compressed_chunk_cold_runtime_proof.py",
+    "tests/test_node27_cold_residency.py",
+    "tests/test_node27_cold_residency_phase2.py",
+    "tests/test_node27_cold_residency_census.py",
+    "tests/test_compressed_chunk_cold_runtime_integration.py",
+    "tests/test_issue1895_readiness_storage.py",
+    "tests/test_issue1895_runbook_contract.py",
+    "tests/test_issue2224_origin_chunk_parity.py",
+    "tests/test_issue2224_origin_parity_integration.py",
+    "tests/test_issue2224_origin_parity_runbook_contract.py",
 )
 
 READONLY_DB_VALIDATION_TESTS: tuple[str, ...] = (
@@ -864,6 +883,7 @@ ISSUE1895_RUNBOOK_CONTRACT_TESTS: tuple[str, ...] = (
     "tests/test_node27_cold_residency_runtime_identity.py",
     "tests/test_probe_compressed_chunk_cold_tablespace.py",
     "tests/test_timeseries_storage_schemas.py",
+    "tests/test_issue2224_origin_parity_runbook_contract.py",
     *ISSUE1895_READINESS_TESTS,
 )
 
@@ -876,6 +896,33 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "tests/test_issue1895_runbook_contract.py",
         ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue2224_origin_parity_runbook_contract.py",
+        ISSUE1895_RUNBOOK_CONTRACT_TESTS + ORIGIN_CHUNK_PARITY_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue2224_origin_chunk_parity.py",
+        ORIGIN_CHUNK_PARITY_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_issue2224_origin_parity_integration.py",
+        ORIGIN_CHUNK_PARITY_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        # A test-only change to the isolated-cluster runtime integration can drop
+        # `node27_docker` while ordinary CI still skips the Docker body. Redirect
+        # to the AST marker contract that pins the triple marker, replacing
+        # ordinary self-selection (which would omit the contract).
+        "tests/test_compressed_chunk_cold_runtime_integration.py",
+        (
+            "tests/test_compressed_chunk_cold_runtime_integration.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+        ),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1157,6 +1204,22 @@ SUPPORT_MODULE_TEST_RULES: tuple[PathTestRule, ...] = (
             # core half, which imports the fakes). A fakes-only edit must run
             # both, or the split leaves the publication half blind.
             *NODE27_COLD_RESIDENCY_CENSUS_TESTS,
+            # #2224: focused origin-chunk parity imports the shared fakes at
+            # module scope, so a fakes-only edit must run it.
+            "tests/test_issue2224_origin_chunk_parity.py",
+        ),
+    ),
+    PathTestRule(
+        # #2224 Stage-1 identity mutants. Four non-gated suites import this
+        # helper at module scope; without an explicit support-module rule a
+        # helper-only edit collapses to the meta-guard and skips the inspect/
+        # tick/AST contracts that consume it.
+        "tests/cold_residency_identity_mutants.py",
+        (
+            "tests/test_compressed_chunk_cold_runtime.py",
+            "tests/test_issue2224_origin_chunk_parity.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
         ),
     ),
     PathTestRule(
@@ -2562,7 +2625,10 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/compressed_chunk_cold_residency.py",
-        ("tests/test_node27_write_roles.py",),
+        (
+            "tests/test_node27_write_roles.py",
+            *ORIGIN_CHUNK_PARITY_TESTS,
+        ),
     ),
     PathTestRule(
         "infra/compose.compute.yml",
@@ -3068,6 +3134,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "docs/runbooks/tier-node27-timeseries-storage.md",
         (
+            *ORIGIN_CHUNK_PARITY_TESTS,
             "tests/test_node27_timeseries_compression.py",
             "tests/test_node27_cold_residency.py",
             "tests/test_node27_cold_residency_runtime_identity.py",
@@ -3415,7 +3482,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/node27_issue1895_post_target.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        ORIGIN_CHUNK_PARITY_TESTS,
     ),
     PathTestRule(
         "packages/common/node27_issue1895_watermark.py",
@@ -3522,7 +3589,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # calls, and the runbook contract that binds the artifact schema it
         # publishes.
         "scripts/node27_cold_residency_census.py",
-        NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
+        (
+            *NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
+            "tests/test_issue1895_readiness_storage.py",
+            *ORIGIN_CHUNK_PARITY_TESTS,
+        ),
     ),
     PathTestRule(
         # #1895 task 4.0 structural split: the shared canonical-decimal capacity
@@ -3645,6 +3716,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             # #1774: this lane runs as a non-superuser; a superuser-gated
             # READ added here would fail SILENTLY.
             "tests/test_node27_write_roles.py",
+            *ORIGIN_CHUNK_PARITY_TESTS,
         ),
     ),
     PathTestRule(
@@ -3669,15 +3741,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_phase2.py",
             "tests/test_node27_cold_residency_runtime_identity.py",
             "tests/test_node27_cold_residency_publication.py",
+            # #2224: focused origin-chunk parity imports the movement owner,
+            # which re-exports this target-preflight surface; one-hop derivation
+            # therefore requires this suite on a target-only PR.
+            "tests/test_issue2224_origin_chunk_parity.py",
         ),
     ),
     PathTestRule(
         "packages/common/compressed_chunk_cold_runtime_catalog.py",
-        (
-            "tests/test_compressed_chunk_cold_runtime.py",
-            "tests/test_node27_cold_residency.py",
-            "tests/test_node27_cold_residency_phase2.py",
-        ),
+        ORIGIN_CHUNK_PARITY_TESTS,
     ),
     PathTestRule(
         "packages/common/compressed_chunk_cold_receipt.py",
@@ -3688,6 +3760,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_residency_runtime_identity.py",
             "tests/test_node27_cold_residency_schema_compat.py",
             "tests/test_timeseries_storage_schemas.py",
+            *ORIGIN_CHUNK_PARITY_TESTS,
         ),
     ),
     PathTestRule(

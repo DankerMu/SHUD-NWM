@@ -27,7 +27,7 @@ from packages.common.compressed_chunk_cold_runtime import (
     inspect_residency_group,
     migrate_residency_group,
 )
-from packages.common.compressed_chunk_cold_runtime_catalog import derive_bound_inventories, load_eligible_chunks
+from packages.common.compressed_chunk_cold_runtime_catalog import derive_bound_inventories
 from packages.common.compressed_chunk_cold_tick import run_tick
 from scripts.node27_cold_residency import RunnerConfig
 from tests.cold_residency_fakes import expected_exec_identity, target_observation
@@ -47,6 +47,7 @@ def test_integration_refuses_live_cluster_identity() -> None:
 
 @pytest.mark.integration
 @pytest.mark.timescaledb_210
+@pytest.mark.node27_docker
 def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
     pytest.importorskip("psycopg2")
     if not Path("/.dockerenv").exists() and not Path("/var/run/docker.sock").exists():
@@ -90,6 +91,21 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
             bootstrap_extension(connection)
             _bootstrap_production_shaped_schema(connection)
             inventories = derive_bound_inventories(lambda sql, params=None: _execute(connection, sql, params))
+            from tests.test_issue2224_origin_parity_integration import (
+                _assert_origin_parity_discriminator,
+                _assert_shipping_role_origin_parity,
+            )
+
+            _assert_origin_parity_discriminator(
+                inventories,
+                lambda sql, params=None: _execute(connection, sql, params),
+            )
+            _assert_shipping_role_origin_parity(
+                inventories,
+                lambda sql, params=None: _execute(connection, sql, params),
+            )
+            from packages.common.compressed_chunk_cold_runtime_catalog import load_eligible_chunks
+
             river_chunks = load_eligible_chunks(
                 lambda sql, params=None: _execute(connection, sql, params),
                 schema="hydro",
@@ -463,6 +479,8 @@ def _bootstrap_production_shaped_schema(connection: object) -> None:
         )
         execute(connection, f"ALTER TABLE {schema}.{table} SET ({options})")
     start = datetime(2026, 6, 27, tzinfo=UTC)
+    sibling_start = start + timedelta(days=7)
+    variant_start = sibling_start + timedelta(days=7)
     execute(
         connection,
         """
@@ -470,10 +488,34 @@ def _bootstrap_production_shaped_schema(connection: object) -> None:
             run_id, basin_version_id, river_network_version_id, river_segment_id,
             valid_time, variable, value, unit
         )
-        SELECT 'run', 'b', 'n', 's', %s + (g * interval '1 hour'), 'q_down', 1.0, 'm3/s'
+        SELECT 'selected', 'b', 'n', 's', %s + (g * interval '1 hour'), 'q_down', 1.0, 'm3/s'
         FROM generate_series(0, 23) g
         """,
         (start,),
+    )
+    execute(
+        connection,
+        """
+        INSERT INTO hydro.river_timeseries (
+            run_id, basin_version_id, river_network_version_id, river_segment_id,
+            valid_time, variable, value, unit
+        )
+        SELECT 'sibling', 'b', 'n', 's', %s + (g * interval '1 minute'), 'q_down', 2.0, 'm3/s'
+        FROM generate_series(0, 7199) g
+        """,
+        (sibling_start,),
+    )
+    execute(
+        connection,
+        """
+        INSERT INTO hydro.river_timeseries (
+            run_id, basin_version_id, river_network_version_id, river_segment_id,
+            valid_time, variable, value, unit
+        )
+        SELECT 'variant', 'b', 'n', 's', %s + (g * interval '1 hour'), 'q_down', 3.0, 'm3/s'
+        FROM generate_series(0, 23) g
+        """,
+        (variant_start,),
     )
     execute(
         connection,
@@ -486,7 +528,7 @@ def _bootstrap_production_shaped_schema(connection: object) -> None:
         """,
         (start,),
     )
-    older = start + timedelta(days=7)
+    older = variant_start + timedelta(days=7)
     execute(
         connection,
         "SELECT compress_chunk(show_chunks('hydro.river_timeseries', older_than => %s))",

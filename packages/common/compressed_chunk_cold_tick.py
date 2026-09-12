@@ -27,6 +27,7 @@ from packages.common.compressed_chunk_cold_receipt import (
 )
 from packages.common.compressed_chunk_cold_residency import (
     CatalogChunk,
+    ResidencyGroup,
     compute_cutoff,
     evaluate_capacity_preflight,
     json_ready,
@@ -119,7 +120,7 @@ def capacity_inputs(config: Any) -> tuple[int, int]:
     return int(cold_free), int(hot_free)
 
 
-def durable_from_chunk(chunk: CatalogChunk) -> dict[str, Any]:
+def durable_from_chunk(chunk: CatalogChunk | ResidencyGroup) -> dict[str, Any]:
     return json_ready(
         {
             "hypertable_schema": chunk.hypertable_schema,
@@ -336,9 +337,9 @@ def planned_observation(
     return payload
 
 
-def _group_observation_from_inspect(observation: Any, chunk: CatalogChunk, *, rank: int) -> dict[str, Any]:
+def _group_observation_from_inspect(observation: Any, *, rank: int) -> dict[str, Any]:
     payload = observation_payload(observation)
-    payload["durable"] = durable_from_chunk(chunk)
+    payload["durable"] = durable_from_chunk(observation.before)
     payload["rank"] = rank
     return payload
 
@@ -505,26 +506,37 @@ def run_tick(
     migrate_plan: list[tuple[int, CatalogChunk, Any]] = []
     already_cold: list[dict[str, Any]] = []
     for rank, _range_end, _schema, _name, _oid, chunk in ranked:
-        observation = inspect_residency_group(
-            connect=connect,
-            chunk=chunk,
-            inventories=inventories,
-            config=runtime_config(config),
-        )
+        try:
+            observation = inspect_residency_group(
+                connect=connect,
+                chunk=chunk,
+                inventories=inventories,
+                config=runtime_config(config),
+            )
+        except ColdRuntimeError as error:
+            if error.error_class != "selection_race":
+                raise
+            blocking_error = stable_error(
+                error_class=error.error_class,
+                stage=error.stage or "inspect",
+                reason=str(error),
+            )
+            blocking_state = "unknown"
+            break
         if observation.outcome == "already_cold":
-            payload = _group_observation_from_inspect(observation, chunk, rank=rank)
+            payload = _group_observation_from_inspect(observation, rank=rank)
             already_cold.append(payload)
             inspect_selected.append(payload)
             continue
         if observation.plan_kind != "migrate":
             if observation.reconciliation in {"mixed", "unknown"}:
                 blocking_error = stable_error(
-                    error_class=observation.reconciliation,
+                    error_class=observation.error_class or observation.reconciliation,
                     stage=observation.stage or "plan",
                     reason=observation.reason or observation.reconciliation,
                 )
                 blocking_state = observation.reconciliation
-                inspect_selected.append(_group_observation_from_inspect(observation, chunk, rank=rank))
+                inspect_selected.append(_group_observation_from_inspect(observation, rank=rank))
                 break
             deferred.append(
                 {

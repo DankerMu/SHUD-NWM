@@ -8,7 +8,10 @@ from typing import Any
 
 import pytest
 
-from packages.common.compressed_chunk_cold_residency import ACCEPTED_SEQUENCE_NAME, evaluate_capacity_preflight
+from packages.common.compressed_chunk_cold_residency import (
+    ACCEPTED_SEQUENCE_NAME,
+    evaluate_capacity_preflight,
+)
 from packages.common.compressed_chunk_cold_runtime import (
     CommitAckLost,
     RuntimeConfig,
@@ -43,6 +46,7 @@ from tests.cold_residency_fakes import (
     river_columns,
     target_observation,
 )
+from tests.cold_residency_identity_mutants import apply_first_reload_replacement, first_reload_mutation_sql
 
 
 def _connect(connection: FakeConnection):
@@ -161,10 +165,14 @@ def test_inventory_drift_reordered_column_fails_closed() -> None:
         )
 
 
-def test_window_parity_sql_covers_every_derived_column_and_half_open_window() -> None:
+def test_window_parity_sql_covers_exact_durable_origin_every_column_and_half_open_window() -> None:
     inventory = bound_inventories().river
-    sql = window_parity_sql(inventory)
+    target = chunk()
+    sql = window_parity_sql(inventory, target)
     assert "valid_time >= %s AND valid_time < %s" in sql
+    assert 'FROM "_timescaledb_internal"."_hyper_1_1_chunk"' in sql
+    assert 'FROM "hydro"."river_timeseries"' not in sql
+    assert 'compress_hyper_2_2_chunk' not in sql
     for column in inventory.columns:
         assert f'"{column.name}"' in sql
 
@@ -177,32 +185,33 @@ def test_window_parity_is_a_bounded_multiset_not_whole_table() -> None:
             "row_count": 2,
             "checksum_xor": 7,
             "checksum_sum": 11,
+            "origin_oid_matches": True,
             **{f"nn_{index}": 2 for index in range(len(inventory.columns))},
         }
     ]
+    target = chunk()
     first = compute_window_parity(
         lambda sql, params=None: connection.dispatch(sql, params)[0],
         inventory,
-        range_start=RANGE_START,
-        range_end=CUTOFF,
+        target,
     )
     connection.parity_rows = [
         {
             "row_count": 2,
             "checksum_xor": 7,
             "checksum_sum": 11,
+            "origin_oid_matches": True,
             **{f"nn_{index}": 2 for index in range(len(inventory.columns))},
         }
     ]
     second = compute_window_parity(
         lambda sql, params=None: connection.dispatch(sql, params)[0],
         inventory,
-        range_start=RANGE_START,
-        range_end=CUTOFF,
+        target,
     )
     assert first.checksum == second.checksum
     assert first.row_count == 2
-    sql = window_parity_sql(inventory)
+    sql = window_parity_sql(inventory, target)
     assert "string_agg" not in sql.lower()
     assert " AS token" not in sql
     assert "hashtextextended" in sql
@@ -217,7 +226,7 @@ def test_window_parity_rejects_row_shaped_payloads() -> None:
         return [{"token": "row", "valid_time": RANGE_START}]
 
     with pytest.raises(ColdRuntimeError, match="row-shaped"):
-        compute_window_parity(execute, inventory, range_start=RANGE_START, range_end=CUTOFF)
+        compute_window_parity(execute, inventory, chunk())
 
 
 def test_window_parity_rejects_more_than_one_aggregate_row() -> None:
@@ -229,7 +238,7 @@ def test_window_parity_rejects_more_than_one_aggregate_row() -> None:
         return [row, dict(row)]
 
     with pytest.raises(ColdRuntimeError, match="expected one aggregate row"):
-        compute_window_parity(execute, inventory, range_start=RANGE_START, range_end=CUTOFF)
+        compute_window_parity(execute, inventory, chunk())
 
 
 def test_capacity_equality_passes_and_one_byte_short_refuses() -> None:
@@ -314,6 +323,25 @@ def test_mixed_group_is_blocked_not_migrated() -> None:
     observation = inspect_residency_group(connect=_connect(connection), chunk=item, inventories=bound_inventories())
     assert observation.outcome == "blocked"
     assert observation.reconciliation == "mixed"
+
+
+def test_inspect_fresh_decompression_is_unknown_with_current_members() -> None:
+    connection, selected = _loaded(FakeConnection())
+    apply_first_reload_replacement(connection, selected, "is_compressed")
+    observation = inspect_residency_group(
+        connect=_connect(connection),
+        chunk=selected,
+        inventories=bound_inventories(),
+    )
+    assert observation.outcome == "blocked"
+    assert observation.reconciliation == "unknown"
+    assert observation.error_class == "unknown"
+    assert observation.shell_sql_executed is False
+    assert observation.before.members
+    assert observation.before.origin_oid == selected.origin_oid
+    assert observation.before.is_compressed is False
+    assert observation.before.compressed_oid is None
+    assert first_reload_mutation_sql(connection) == []
 
 
 def test_normal_migrate_uses_shell_first_and_fresh_observer() -> None:
@@ -589,18 +617,19 @@ def test_max_members_is_enforced() -> None:
 
 def test_reconcile_named_group_unknown_when_origin_disappears() -> None:
     connection = FakeConnection()
-    observation = reconcile_named_group(
-        connect=_connect(connection),
-        inventories=bound_inventories(),
-        hypertable_schema="hydro",
-        hypertable_name="river_timeseries",
-        origin_schema="_timescaledb_internal",
-        origin_name="_hyper_1_1_chunk",
-        range_start=RANGE_START,
-        range_end=CUTOFF,
-        origin_oid=10,
-    )
-    assert observation.reconciliation == "unknown"
+    with pytest.raises(ColdRuntimeError) as raised:
+        reconcile_named_group(
+            connect=_connect(connection),
+            inventories=bound_inventories(),
+            hypertable_schema="hydro",
+            hypertable_name="river_timeseries",
+            origin_schema="_timescaledb_internal",
+            origin_name="_hyper_1_1_chunk",
+            range_start=RANGE_START,
+            range_end=CUTOFF,
+            origin_oid=10,
+        )
+    assert raised.value.error_class == "relation_disappeared"
 
 
 def test_locked_inventory_drift_refuses_before_set_tablespace() -> None:
@@ -676,6 +705,7 @@ def test_locked_parity_drift_refuses_before_set_tablespace() -> None:
             "row_count": 2,
             "checksum_xor": 1,
             "checksum_sum": 3,
+            "origin_oid_matches": True,
             **{f"nn_{index}": 2 for index in range(len(inventory.columns))},
         }
     ]
@@ -691,6 +721,7 @@ def test_locked_parity_drift_refuses_before_set_tablespace() -> None:
                         "row_count": 3,
                         "checksum_xor": 9,
                         "checksum_sum": 12,
+                        "origin_oid_matches": True,
                         **{f"nn_{index}": 3 for index in range(len(inventory.columns))},
                     }
                 ]

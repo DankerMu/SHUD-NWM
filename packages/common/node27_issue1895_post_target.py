@@ -21,6 +21,7 @@ from packages.common.compressed_chunk_cold_runtime_catalog import (
     load_catalog_chunk,
     ranked_candidates_from_execute,
     snapshot_group,
+    window_parity_from_dict,
 )
 from packages.common.display_watermark import fetch_display_watermark
 from packages.common.node27_issue1895_private_receipt import read_held_private_json
@@ -70,6 +71,80 @@ def _binder(connection: Any) -> Execute:
     return execute
 
 
+_PARITY_FIELDS = (
+    "row_count",
+    "non_null_counts",
+    "checksum",
+    "inventory_digest",
+    "range_start",
+    "range_end",
+)
+
+
+def _raise_parity_invalid(message: str) -> None:
+    raise Issue1895ReadinessError(message, code="POST_TARGET_PARITY_INVALID", stage="post-target")
+
+
+def require_baseline_window_parity(value: object) -> dict[str, Any]:
+    if value is None:
+        raise Issue1895ReadinessError(
+            "baseline parity is missing",
+            code="POST_TARGET_PARITY_MISSING",
+            stage="post-target",
+        )
+    if not isinstance(value, Mapping):
+        _raise_parity_invalid("baseline parity is not an object")
+    missing = [field for field in _PARITY_FIELDS if field not in value]
+    if missing:
+        _raise_parity_invalid("baseline parity is missing required fields")
+    extra = [field for field in value if field not in _PARITY_FIELDS]
+    if extra:
+        _raise_parity_invalid("baseline parity has extra fields")
+    row_count = value["row_count"]
+    if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+        _raise_parity_invalid("baseline parity row_count is invalid")
+    counts = value["non_null_counts"]
+    if not isinstance(counts, Mapping):
+        _raise_parity_invalid("baseline parity non_null_counts is invalid")
+    for name, count in counts.items():
+        if not isinstance(name, str) or not name:
+            _raise_parity_invalid("baseline parity non_null_counts keys are invalid")
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            _raise_parity_invalid("baseline parity non_null_counts values are invalid")
+        if count > row_count:
+            _raise_parity_invalid("baseline parity non_null_counts exceed row_count")
+    checksum = value["checksum"]
+    digest = value["inventory_digest"]
+    if not isinstance(checksum, str) or not checksum:
+        _raise_parity_invalid("baseline parity checksum is invalid")
+    if not isinstance(digest, str) or not digest:
+        _raise_parity_invalid("baseline parity inventory_digest is invalid")
+    range_start = value["range_start"]
+    range_end = value["range_end"]
+    if not isinstance(range_start, str) or not isinstance(range_end, str):
+        _raise_parity_invalid("baseline parity window is invalid")
+    try:
+        parsed = window_parity_from_dict(
+            {
+                "row_count": row_count,
+                "non_null_counts": dict(counts),
+                "checksum": checksum,
+                "inventory_digest": digest,
+                "range_start": range_start,
+                "range_end": range_end,
+            }
+        )
+    except Exception as error:
+        raise Issue1895ReadinessError(
+            "baseline parity is invalid",
+            code="POST_TARGET_PARITY_INVALID",
+            stage="post-target",
+        ) from error
+    if parsed.range_start >= parsed.range_end:
+        _raise_parity_invalid("baseline parity window is invalid")
+    return parsed.as_dict()
+
+
 def observe_named_group(
     execute: Execute,
     *,
@@ -112,18 +187,15 @@ def observe_named_group(
             stage="post-target",
         )
     inventory = inventories.for_hypertable(chunk.hypertable_schema, chunk.hypertable_name)
-    parity = compute_window_parity(
-        execute,
-        inventory,
-        range_start=chunk.range_start,
-        range_end=chunk.range_end,
-    ).as_dict()
-    if expected_parity is not None and json_ready(parity) != json_ready(dict(expected_parity)):
-        raise Issue1895ReadinessError(
-            "business-window parity changed",
-            code="POST_TARGET_PARITY_DRIFT",
-            stage="post-target",
-        )
+    parity = compute_window_parity(execute, inventory, chunk).as_dict()
+    if expected_parity is not None:
+        required = require_baseline_window_parity(expected_parity)
+        if json_ready(parity) != json_ready(required):
+            raise Issue1895ReadinessError(
+                "business-window parity changed",
+                code="POST_TARGET_PARITY_DRIFT",
+                stage="post-target",
+            )
     return {
         "key": durable_key(identity),
         "durable": identity,
@@ -186,8 +258,7 @@ def observe_post_target(
             code="POST_TARGET_BASELINE_COUNT",
             stage="post-target",
         )
-    inventories = derive_bound_inventories(execute)
-    observed: list[dict[str, Any]] = []
+    validated: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
     for group in baseline_groups:
         if not isinstance(group, Mapping):
             raise Issue1895ReadinessError(
@@ -202,12 +273,22 @@ def observe_post_target(
                 code="POST_TARGET_DURABLE_INVALID",
                 stage="post-target",
             )
+        if "parity" not in group:
+            raise Issue1895ReadinessError(
+                "baseline parity is missing",
+                code="POST_TARGET_PARITY_MISSING",
+                stage="post-target",
+            )
+        validated.append((durable, require_baseline_window_parity(group.get("parity"))))
+    inventories = derive_bound_inventories(execute)
+    observed: list[dict[str, Any]] = []
+    for durable, expected_parity in validated:
         observed.append(
             observe_named_group(
                 execute,
                 durable=durable,
                 inventories=inventories,
-                expected_parity=group.get("parity") if isinstance(group.get("parity"), Mapping) else None,
+                expected_parity=expected_parity,
             )
         )
     complete_source, complete_target = classify_current_candidates(

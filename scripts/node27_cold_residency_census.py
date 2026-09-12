@@ -366,8 +366,7 @@ class CensusObserver:
         return compute_window_parity(
             self.binder(),
             inventories.for_hypertable(chunk.hypertable_schema, chunk.hypertable_name),
-            range_start=chunk.range_start,
-            range_end=chunk.range_end,
+            chunk,
         )
 
     def before_bytes(self, chunk: CatalogChunk) -> int:

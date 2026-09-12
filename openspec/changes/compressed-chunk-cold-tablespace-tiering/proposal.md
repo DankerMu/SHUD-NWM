@@ -53,11 +53,20 @@ not merely the near-empty origin chunk shell.
   reviewed executable runbook and Python readiness owners land first through
   dedicated child #2137, before node-27 access; six is a historical preflight
   count rather than reusable identity, and rollback acceptance uses the exact-SHA
-  disposable move-back branch plus live read-only compatibility. The independent
-  C4 producer/validator/publisher/binder has already merged through #2123, and its
+  disposable move-back branch plus live read-only compatibility. The first G1
+  observation at merged SHA `a8db554d6402bec642e9a05627eae64b2b79aec3`
+  ended as NO-GO when production parity read the parent hypertable and reached its
+  finite 3600-second statement timeout before publishing a census. Child #2224
+  must bind mandatory, no-default parity input to each current durable physical
+  origin relation, retain the half-open window as an identity fence, route every
+  production caller through that owner, and merge before G1 is retried at a new
+  reviewed SHA; this is an interpretation correction to the older D4 wording that
+  allowed a parent-plus-window implementation, and raising or removing the timeout
+  is not acceptance. The independent C4
+  producer/validator/publisher/binder has already merged through #2123, and its
   input-classification precedence was clarified by #2130; #1895 consumes that
-  promoted capability for live evidence rather than reimplementing it.
-  The installer may reconcile/roll back only an in-progress install whose private
+  promoted capability for live evidence rather than reimplementing it. The
+  installer may reconcile/roll back only an in-progress install whose private
   authority still exists; terminal `installed` closes that authority, so every
   later trigger preserves the installed topology. After movement, reversal also
   waits for a reviewed live move-back entrypoint from its owning implementation

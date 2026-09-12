@@ -1,4 +1,4 @@
-Fixture level: expanded
+Fixture level: high
 Repair intensity: high
 Project profile: NHMS
 Upstream suggested level: absent
@@ -18,6 +18,12 @@ Seams under test:
 - Local G0 readiness chain: production census owners + C1/C2/C3/G8 CLIs,
   schemas and binders + shared private-file primitives + canonical readonly
   facade + CI selector -> fail-closed current-run evidence without remote access.
+- Origin-scoped production parity (#2224): parent-derived validated column
+  inventory + mandatory current `CatalogChunk` durable origin schema/name/OID/
+  window -> one bounded business-row aggregate over only that physical origin,
+  with no default, parent or compressed-sibling fallback. Census, runtime
+  preflight/locked/post-commit/reconciliation and post-target observations all
+  use this same owner.
 - Node-27 rollout (tasks 4.1-4.8 only): merged reviewed SHA + approved
   maintenance inputs -> live parity/performance/timer receipt.
 
@@ -202,7 +208,43 @@ Seams under test:
   This child performs no SSH, census, probe, install, movement, live C1-C4 or
   timer work; it does not close #1895/#1891, archive this change, or check any of
   4.1-4.8.
-- [ ] 4.1 At the reviewed SHA, execute the merged live runbook for the first
+- [ ] 4.0A Merge child #2224 before retrying G1. The first node-27 G1 invocation
+  at reviewed SHA `a8db554d6402bec642e9a05627eae64b2b79aec3` ended NO-GO after
+  the parent-hypertable parity aggregate reached the finite 3600-second statement
+  timeout; it published no census, policy or valid-times baseline, and G2-G8 did
+  not run. Repair production parity so the exact quoted durable origin relation,
+  not the parent hypertable or compressed internal sibling, is the `FROM` target;
+  retain parent-derived physical-order user-column inventory, one aggregate row,
+  deterministic count/non-null/checksum fields and the half-open range as a
+  second identity fence. Origin schema/name is a mandatory, no-default input to
+  the production parity builder/owner and comes from the currently resolved
+  `CatalogChunk` durable identity. Missing/empty identity, the allowlisted parent,
+  the current compressed sibling, or any OID/schema/name/window mismatch fails
+  closed. Census; runtime preflight, locked revalidation, recompression,
+  post-commit readback and reconciliation; and post-target named-group observation
+  must all pass that identity to the same owner. Keep the census `3600000` ms and
+  runtime `3600s` finite statement ceilings unchanged.
+
+  Add a TimescaleDB 2.10.2 isolated discriminator with large sibling data that
+  proves both executed result and execution plan: target parity is sibling-
+  independent, target-sensitive and planned without sibling chunks. Compare
+  direct and `ONLY` origin forms and accept only the form that preserves
+  transparent business-row decompression. SQL-text unit assertions cannot satisfy
+  that database oracle; unit tests instead prove mandatory identity, quoted
+  identifiers, no parent/sibling `FROM`, OID/name/window drift and relation disappearance refusal. Map the catalog SQL owner, runtime owner, census owner,
+  post-target owner and runbook directly to their assertion-bearing census,
+  runtime and integration partitions, with non-vacuous removal mutants; a local
+  or GitHub skip/collect-only result cannot substitute for the node-27 isolated
+  PG 15.2 / TimescaleDB 2.10.2 result.
+
+  Update the executable runbook G0/G1 STOP fence: #2224 must merge first, the
+  `a8db554d6402bec642e9a05627eae64b2b79aec3` failed census/bracket and absent
+  policy/baseline cannot be reused, and a fresh maintenance window starts from G0
+  at the new exact merged SHA. Pass fixture review, strict OpenSpec, focused/full
+  tests, Ruff, independent review/verifier/Gap Sweep and exact-head CI, merge the
+  child, then restart #1895 from G0. Local or isolated PASS does not satisfy the
+  fresh production G1 retry.
+- [ ] 4.1 At the reviewed SHA, after 4.0A merges, execute the merged live runbook for the first
   node-27 observation. Before access, its exact deployed SHA must have passed
   the #2137 issue-specific fixture review, strict OpenSpec validation, contract
   tests and normal CI. The runbook must provide: a pre-target census using the
@@ -340,13 +382,16 @@ Seams under test:
   permission_probes,merge,route_smoke,validation}.py`, preserving public exports
   and `run_display_route_smoke`/`importlib`/`psycopg2` patch seams. It consumes
   the promoted #2123/#2130 C4 contract and never reimplements that producer.
-- TimescaleDB/time-series domain: tasks 1.3-1.6, 2.1-2.5, 4.0 and 4.4-4.7.
+- TimescaleDB/time-series domain: tasks 1.3-1.6, 2.1-2.5, 4.0, 4.0A and 4.4-4.7.
   The 4.0 census uses production catalog/inventory/parity owners without target
-  preflight; six remains a fresh count gate rather than reusable identity.
+  preflight; 4.0A closes the live-discovered parent-hypertable scan by proving
+  transparent business-row parity from the exact durable origin relation while
+  keeping the finite timeout; six remains a fresh count gate rather than reusable
+  identity.
 - Published NHMS identity: tasks 4.0 and 4.6-4.8. C1-C3/G8 identity and digest
   binders, source-scoped current publication and raw C4 bytes prove the local
   acceptance chain first and exact-SHA live display identity only after merge.
-- Documentation/migration/backup: tasks 1.8, 3.6, 4.0 and 4.1-4.8. The 4.0
+- Documentation/migration/backup: tasks 1.8, 3.6, 4.0, 4.0A and 4.1-4.8. The 4.0
   evidence covers the executable G0 text and `scripts/select_ci_tests.py` exact
   acceptance partitions/removal mutants; C4 uses `test:e2e:live-c4-display`, not
   legacy `e2e/monitoring.spec.ts`, and no production access precedes all gates.

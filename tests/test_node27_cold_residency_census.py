@@ -223,6 +223,10 @@ def test_observer_owner_return_structures() -> None:
     parity = observer.parity(inventories, candidate)
     assert isinstance(parity.as_dict(), dict)
     assert {"row_count", "checksum", "inventory_digest", "range_start", "range_end"} <= set(parity.as_dict())
+    executed_sql, params = connection.executed[-1]
+    assert 'FROM "_timescaledb_internal"."_hyper_10_0_chunk"' in executed_sql
+    assert 'FROM "hydro"."river_timeseries"' not in executed_sql
+    assert params == (candidate.range_start, candidate.range_end)
     assert isinstance(observer.before_bytes(candidate), int)
     assert observer.session_read_only() is True
 
@@ -367,17 +371,24 @@ def test_uncompressed_candidate_is_no_go(tmp_path: Path) -> None:
     _assert_no_go_with_blocker(tmp_path / "census.json", connection, "is not compressed")
 
 
-def test_missing_compressed_sibling_is_no_go(tmp_path: Path) -> None:
+def test_compressed_candidate_with_missing_sibling_is_no_go(tmp_path: Path) -> None:
     connection = CensusConnection()
-    item = _chunk_item(0, compressed_oid=None, compressed_name=None)
-    connection.load_group(
-        item,
-        (
-            rel(item.origin_oid, item.origin_schema, item.origin_name, "r", "pg_default", 8192),
-        ),
-    )
+    item = _chunk_item(0)
+    original = connection.dispatch
+
+    def dispatch(sql: str, params: object):
+        if "_timescaledb_catalog.chunk AS origin" in sql and params == (item.origin_schema, item.origin_name):
+            return [], ["schema_name", "table_name"]
+        return original(sql, params)
+
+    connection.dispatch = dispatch  # type: ignore[method-assign]
     connection.compression_bytes[item.origin_name] = 1000
-    _assert_no_go_with_blocker(tmp_path / "census.json", connection, "no current compressed sibling")
+    code, target = _main(census, tmp_path, connection, require_count="1")
+    assert code == 1
+    artifact = json.loads(target.read_text(encoding="utf-8"))
+    assert artifact["verdict"] == "NO-GO"
+    assert artifact["resolved_group_count"] == 0
+    assert any("exactly 1 are required" in blocker for blocker in artifact["blockers"])
 
 
 def test_hot_group_origin_not_pg_default_is_no_go(tmp_path: Path) -> None:
