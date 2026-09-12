@@ -26,7 +26,13 @@ _MUTATION_TOKENS = (
 )
 
 
-def apply_first_reload_replacement(connection: FakeConnection, selected: CatalogChunk, kind: str) -> CatalogChunk:
+def apply_first_reload_replacement(
+    connection: FakeConnection,
+    selected: CatalogChunk,
+    kind: str,
+    *,
+    origin_space: str = "pg_default",
+) -> CatalogChunk:
     """Replace the selected origin in place with a same schema/name drift."""
 
     if kind == "origin_oid":
@@ -48,6 +54,7 @@ def apply_first_reload_replacement(connection: FakeConnection, selected: Catalog
             compressed_oid=21,
             origin_name=selected.origin_name,
             compressed_name=selected.compressed_name or "compress_hyper_2_2_chunk",
+            origin_space=origin_space,
         )
     elif kind == "range_start":
         replacement = CatalogChunk(
@@ -63,7 +70,7 @@ def apply_first_reload_replacement(connection: FakeConnection, selected: Catalog
             selected.range_end,
             selected.is_compressed,
         )
-        relations = complete_relations()
+        relations = complete_relations(origin_space=origin_space)
     elif kind == "range_end":
         replacement = CatalogChunk(
             selected.hypertable_schema,
@@ -78,7 +85,22 @@ def apply_first_reload_replacement(connection: FakeConnection, selected: Catalog
             selected.range_end - timedelta(hours=1),
             selected.is_compressed,
         )
-        relations = complete_relations()
+        relations = complete_relations(origin_space=origin_space)
+    elif kind == "is_compressed":
+        replacement = CatalogChunk(
+            selected.hypertable_schema,
+            selected.hypertable_name,
+            selected.origin_oid,
+            selected.origin_schema,
+            selected.origin_name,
+            None,
+            None,
+            None,
+            selected.range_start,
+            selected.range_end,
+            False,
+        )
+        relations = complete_relations(origin_space=origin_space)
     elif kind == "compressed_sibling":
         replacement = CatalogChunk(
             selected.hypertable_schema,
@@ -98,6 +120,7 @@ def apply_first_reload_replacement(connection: FakeConnection, selected: Catalog
             compressed_oid=21,
             origin_name=selected.origin_name,
             compressed_name="compress_hyper_replaced_chunk",
+            origin_space=origin_space,
         )
     else:
         raise ValueError(f"unknown first-reload replacement {kind}")

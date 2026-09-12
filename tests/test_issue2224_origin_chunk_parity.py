@@ -493,6 +493,87 @@ def test_migrate_refuses_first_reload_identity_replacement_before_movement(kind:
     _assert_selection_race_before_mutation(observation, connection)
 
 
+def _migrate(connection: FakeConnection, selected: CatalogChunk, **overrides: Any):
+    return migrate_residency_group(
+        connect=_connect(connection),
+        chunk=selected,
+        inventories=bound_inventories(),
+        watermark=WATERMARK,
+        lag_seconds=LAG,
+        cold_free_bytes=10_000,
+        hot_free_bytes=10_000,
+        cold_reserve_bytes=100,
+        wal_reserve_bytes=1,
+        config=_runtime(inspect_target=_inspect_target, expected_device_identity="8:1"),
+        **overrides,
+    )
+
+
+def test_same_durable_new_sibling_complete_target_is_already_cold_noop() -> None:
+    connection, selected = _loaded(FakeConnection())
+    apply_first_reload_replacement(connection, selected, "compressed_sibling", origin_space="nhms_cold")
+    inspect = inspect_residency_group(
+        connect=_connect(connection),
+        chunk=selected,
+        inventories=bound_inventories(),
+    )
+    assert inspect.outcome == "already_cold"
+    assert inspect.shell_sql_executed is False
+    assert inspect.before.compressed_oid == 21
+    assert inspect.before.compressed_name == "compress_hyper_replaced_chunk"
+    assert first_reload_mutation_sql(connection) == []
+
+    connection, selected = _loaded(FakeConnection())
+    apply_first_reload_replacement(connection, selected, "compressed_sibling", origin_space="nhms_cold")
+    observation = _migrate(connection, selected)
+    assert observation.outcome == "already_cold"
+    assert observation.shell_sql_executed is False
+    assert observation.before.compressed_oid == 21
+    assert first_reload_mutation_sql(connection) == []
+
+
+def test_same_durable_new_sibling_all_source_is_selection_race() -> None:
+    connection, selected = _loaded(FakeConnection())
+    apply_first_reload_replacement(connection, selected, "compressed_sibling")
+    inspect = inspect_residency_group(
+        connect=_connect(connection),
+        chunk=selected,
+        inventories=bound_inventories(),
+    )
+    _assert_selection_race_before_mutation(inspect, connection)
+    observation = _migrate(connection, selected)
+    _assert_selection_race_before_mutation(observation, connection)
+
+
+def test_same_durable_new_sibling_complete_target_with_expected_before_is_selection_race() -> None:
+    connection, selected = _loaded(FakeConnection())
+    connection.load_group(selected, complete_relations(origin_space="nhms_cold"))
+    inspect = inspect_residency_group(
+        connect=_connect(connection),
+        chunk=selected,
+        inventories=bound_inventories(),
+    )
+    assert inspect.outcome == "already_cold"
+    apply_first_reload_replacement(connection, selected, "compressed_sibling", origin_space="nhms_cold")
+    observation = _migrate(connection, selected, expected_before=inspect.before)
+    _assert_selection_race_before_mutation(observation, connection)
+
+
+@pytest.mark.parametrize("kind", ("origin_oid", "range_start", "range_end", "is_compressed"))
+def test_durable_identity_drift_on_complete_target_never_uses_sibling_exception(kind: str) -> None:
+    connection, selected = _loaded(FakeConnection())
+    connection.load_group(selected, complete_relations(origin_space="nhms_cold"))
+    apply_first_reload_replacement(connection, selected, kind, origin_space="nhms_cold")
+    inspect = inspect_residency_group(
+        connect=_connect(connection),
+        chunk=selected,
+        inventories=bound_inventories(),
+    )
+    _assert_selection_race_before_mutation(inspect, connection)
+    observation = _migrate(connection, selected)
+    _assert_selection_race_before_mutation(observation, connection)
+
+
 def test_receipt_validation_refuses_outer_durable_oid_mismatch_with_before_snapshot() -> None:
     example_path = (
         Path(__file__).resolve().parents[1]

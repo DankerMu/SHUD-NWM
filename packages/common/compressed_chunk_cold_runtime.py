@@ -169,7 +169,7 @@ def load_inventories(connection: Any) -> BoundInventories:
     return derive_bound_inventories(_binder(connection))
 
 
-_SELECTED_IDENTITY_FIELDS = (
+_DURABLE_IDENTITY_FIELDS = (
     "hypertable_schema",
     "hypertable_name",
     "origin_oid",
@@ -178,6 +178,8 @@ _SELECTED_IDENTITY_FIELDS = (
     "range_start",
     "range_end",
     "is_compressed",
+)
+_SIBLING_IDENTITY_FIELDS = (
     "compressed_oid",
     "compressed_schema",
     "compressed_name",
@@ -194,14 +196,50 @@ def _reload_chunk(execute: Callable[..., list[Mapping[str, Any]]], chunk: Catalo
     )
 
 
-def _require_selected_identity(selected: CatalogChunk, current: CatalogChunk, *, stage: str) -> None:
-    drifted = [field for field in _SELECTED_IDENTITY_FIELDS if getattr(current, field) != getattr(selected, field)]
+def _require_durable_identity(selected: CatalogChunk, current: CatalogChunk, *, stage: str) -> None:
+    drifted = [field for field in _DURABLE_IDENTITY_FIELDS if getattr(current, field) != getattr(selected, field)]
     if drifted:
         raise ColdRuntimeError(
             "selected durable origin identity drifted on reload",
             error_class="selection_race",
             stage=stage,
         )
+
+
+def _sibling_identity_drifted(selected: CatalogChunk, current: CatalogChunk) -> bool:
+    return any(getattr(current, field) != getattr(selected, field) for field in _SIBLING_IDENTITY_FIELDS)
+
+
+def _require_selected_identity(selected: CatalogChunk, current: CatalogChunk, *, stage: str) -> None:
+    _require_durable_identity(selected, current, stage=stage)
+    if _sibling_identity_drifted(selected, current):
+        raise ColdRuntimeError(
+            "selected compressed sibling identity drifted on reload",
+            error_class="selection_race",
+            stage=stage,
+        )
+
+
+def _reject_unsafe_sibling_drift(
+    selected: CatalogChunk,
+    current: CatalogChunk,
+    group: ResidencyGroup,
+    *,
+    stage: str,
+    lock_timeout: str,
+    statement_timeout: str,
+    allow_complete_target_replay: bool,
+) -> ShellFirstPlan | None:
+    if not _sibling_identity_drifted(selected, current):
+        return None
+    plan = build_shell_first_plan(group, lock_timeout=lock_timeout, statement_timeout=statement_timeout)
+    if allow_complete_target_replay and plan.kind == "already_cold":
+        return plan
+    raise ColdRuntimeError(
+        "selected compressed sibling identity drifted on reload",
+        error_class="selection_race",
+        stage=stage,
+    )
 
 
 def _placeholder_group(chunk: CatalogChunk, *, reason: str) -> ResidencyGroup:
@@ -424,15 +462,24 @@ def inspect_residency_group(
         execute = _binder(observer)
         current = _reload_chunk(execute, chunk)
         try:
-            _require_selected_identity(chunk, current, stage="inspect")
+            _require_durable_identity(chunk, current, stage="inspect")
+            before = collect_residency_group(execute, current)
+            _require_complete_group(before, max_members=runtime.max_members)
+            sibling_plan = _reject_unsafe_sibling_drift(
+                chunk,
+                current,
+                before,
+                stage="inspect",
+                lock_timeout=runtime.lock_timeout,
+                statement_timeout=runtime.statement_timeout,
+                allow_complete_target_replay=True,
+            )
         except ColdRuntimeError as error:
             if error.error_class != "selection_race":
                 raise
             return _selection_race_observation(chunk, error, started=started, clock=runtime.clock)
-        before = collect_residency_group(execute, current)
-        _require_complete_group(before, max_members=runtime.max_members)
         before_parity = _parity_for(execute, inventories, current)
-        plan = build_shell_first_plan(
+        plan = sibling_plan or build_shell_first_plan(
             before,
             lock_timeout=runtime.lock_timeout,
             statement_timeout=runtime.statement_timeout,
@@ -517,9 +564,18 @@ def migrate_residency_group(
         server, timescale = engine_versions(execute)
         assert_engine_versions(server, timescale)
         current = _reload_chunk(execute, chunk)
-        _require_selected_identity(chunk, current, stage="preflight")
+        _require_durable_identity(chunk, current, stage="preflight")
         before = collect_residency_group(execute, current)
         _require_complete_group(before, max_members=runtime.max_members)
+        sibling_plan = _reject_unsafe_sibling_drift(
+            chunk,
+            current,
+            before,
+            stage="preflight",
+            lock_timeout=runtime.lock_timeout,
+            statement_timeout=runtime.statement_timeout,
+            allow_complete_target_replay=expected_before is None,
+        )
         before_parity = _parity_for(execute, inventories, current)
         if expected_before is not None:
             _require_same_group(expected_before, before)
@@ -529,7 +585,7 @@ def migrate_residency_group(
                 error_class="selection_race",
                 stage="preflight",
             )
-        plan = build_shell_first_plan(
+        plan = sibling_plan or build_shell_first_plan(
             before,
             lock_timeout=runtime.lock_timeout,
             statement_timeout=runtime.statement_timeout,
@@ -596,7 +652,7 @@ def migrate_residency_group(
                 timing=inspect_timing,
             )
     except ColdRuntimeError as error:
-        if error.error_class == "selection_race" and before is None:
+        if error.error_class == "selection_race" and expected_before is None:
             return _selection_race_observation(chunk, error, started=started, clock=runtime.clock)
         if expected_before is None:
             raise
