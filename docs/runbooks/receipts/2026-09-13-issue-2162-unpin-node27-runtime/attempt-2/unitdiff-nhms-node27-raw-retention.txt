@@ -1,0 +1,6 @@
+2c2
+< Description=NHMS node-27 retention: raw source data, canonical precipitation mirror and its PNG cache
+---
+> Description=NHMS node-27 raw source-data retention
+7d6
+< ExecStartPre=/usr/bin/mkdir -p /home/nwm/node27-raw-retention-logs

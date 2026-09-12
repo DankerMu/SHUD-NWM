@@ -57,7 +57,7 @@ ETag 即 body sha256（`W/"m16-<sha256>"`），三对 HTTP 码与 ETag 逐一相
 - 生产 display API（:8080）与活动树 checkout（`5a86841c`，落后 master）全程未重启、未 pull；merge 后部署（tasks 5.3）另记。
 
 
-## 6. merge 后部署（tasks 5.3）——deferred，未执行
+## 6. merge 后部署（tasks 5.3）——2026-09-08 deferred 记录（已由 §7 结清）
 
 - 时间：2026-09-08T14:15Z 前后，PR #2151 已合并（merge commit `e0cfe40b`），远端分支已删。
 - 活动树实测：`/home/nwm/NWM` 在分支 `hotfix/node27-rollback-pre-2073`（`5a86841c`，无 upstream，`git pull --ff-only` 按字面不可执行），落后 `origin/master` 165 个提交。
@@ -72,3 +72,19 @@ ETag 即 body sha256（`W/"m16-<sha256>"`），三对 HTTP 码与 ETag 逐一相
 - `loginctl show-user nwm` 为 `Linger=yes`，user timer 前提已满足。
 - 处置：5.3 整项 deferred 到 issue #2162（依赖 #2145 的迁移部署，同一维护窗口内先恢复活动树、再按 5.3 原文执行并在本 receipt 追加 §7）。
 - 生产 display API（:8080，`--workers 2`）全程未重启、未 pull。
+
+## 7. 5.3 部署（2026-09-12，issue #2162 目标 1 窗口）
+
+完整读数见 `docs/runbooks/receipts/2026-09-13-issue-2162-unpin-node27-runtime.md` §7；本节只记 5.3 各项的落地状态。
+
+- 活动树：`/home/nwm/NWM` = `a8db554d`（未 `git pull`，见该 receipt §1 的决策留痕；`scripts/node27_mvt_cache_retention_once.sh` 在该树存在）。
+  8 个 `60-reslice-pin-original-5a86841c.conf` 全部移除，unit 指向 `/home/nwm/NWM`。
+- env（0600）+ unit + timer：`install -m 0600 infra/env/node27-mvt-cache-retention.example → infra/env/node27-mvt-cache-retention.env`，
+  `install -m 0644` service/timer 到 `~/.config/systemd/user/`，`daemon-reload`。
+- plan-only 首跑：`execution_mode=plan_only planned=0 retention_days=14 cutoff=2026-08-29T16:52:07Z`，`planned[]` 无 `precip/`。
+- display 重启：**未跑 `scripts/ops/start-display-api.sh`**（其进程匹配会误杀同机 `yd` `:8081` 实例，#2282），手工复现其 systemd 分支
+  `systemctl --user restart nhms-display-api.service`，`/health` 3 s 内 200，MainPID 2186965 在 `/home/nwm/NWM`。
+- prewarm 后 `.locks/**` 不增：手工 prewarm 前 8520 → 后 8520；首个自然 autopipe tick 后仍 8520。
+- timer：`list-timers` 可见 `nhms-node27-mvt-cache-retention.timer NEXT Sun 2026-09-13 12:05:00 CST`（04:05 UTC）。
+- operator 触发的首个生产 tick：`execution_mode=production_execute counts={planned:0,deleted:0,skipped:0,failed:0}`，健康判据 rc=0。
+- 现网代价更新：`.locks/**` 8520、`.pbf` 8690（窗口末）；`df -h`：`/` 76%、`/home` 30%（1.1 T 可用，#2240 迁库后）。

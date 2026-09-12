@@ -1,0 +1,53 @@
+## nhms-display-api
+DropInPaths=
+Environment=
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash -lc set -a; . /home/nwm/NWM/infra/env/display.env; set +a; export NHMS_MVT_FILE_CACHE_DIR="${NHMS_MVT_FILE_CACHE_DIR:-/home/nwm/.cache/nhms/mvt}"; exec /home/nwm/NWM/.venv/bin/python -m uvicorn apps.api.main:app --host "${NHMS_DISPLAY_HOST:-127.0.0.1}" --port "${NHMS_DISPLAY_API_PORT:-8080}" --workers "${NHMS_DISPLAY_WORKERS:-2}"
+FragmentPath=/home/nwm/.config/systemd/user/nhms-display-api.service
+WorkingDirectory=/home/nwm/NWM
+## nhms-node27-autopipe
+DropInPaths=
+Environment=NODE27_AUTOPIPE_BOOTSTRAP_LOG=/home/nwm/autopipe-logs/bootstrap.log
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM/scripts/node27_autopipe_cron.sh
+ExecStartPre={ path=/usr/bin/mkdir ; argv[]=/usr/bin/mkdir -p /home/nwm/autopipe-logs
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-autopipe.service
+WorkingDirectory=/home/nwm/NWM
+## nhms-node27-download
+DropInPaths=
+Environment=
+ExecStart={ path=/bin/bash ; argv[]=/bin/bash /home/nwm/NWM/scripts/node27_download_once.sh
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-download.service
+WorkingDirectory=/home/nwm/NWM
+## nhms-node27-raw-retention
+DropInPaths=
+Environment=
+ExecStart={ path=/home/nwm/NWM/scripts/node27_raw_retention_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_raw_retention_once.sh
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-raw-retention.service
+WorkingDirectory=/home/nwm/NWM
+## nhms-node27-timeseries-retention
+DropInPaths=
+Environment=
+ExecStart={ path=/home/nwm/NWM/scripts/node27_timeseries_retention_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_timeseries_retention_once.sh
+ExecStartPre={ path=/usr/bin/mkdir ; argv[]=/usr/bin/mkdir -p /home/nwm/node27-timeseries-retention-logs
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-timeseries-retention.service
+WorkingDirectory=/home/nwm/NWM
+## nhms-node27-timeseries-compression
+DropInPaths=
+Environment=
+ExecStart={ path=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_timeseries_compression_once.sh --enforce
+ExecStartPre={ path=/usr/bin/mkdir ; argv[]=/usr/bin/mkdir -p /home/nwm/node27-timeseries-compression-logs
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-timeseries-compression.service
+WorkingDirectory=/home/nwm/NWM
+## nhms-node27-resource-governance
+DropInPaths=
+Environment=
+ExecStart={ path=/home/nwm/NWM/scripts/node27_resource_governance_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_resource_governance_once.sh
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-resource-governance.service
+WorkingDirectory=/home/nwm/NWM
+## nhms-node27-frontier-alert
+DropInPaths=
+Environment=NODE27_FRONTIER_ALERT_ENV_INJECTED=1
+EnvironmentFiles=/home/nwm/NWM/infra/env/node27-frontier-alert.env (ignore_errors=no)
+ExecStart={ path=/home/nwm/NWM/scripts/node27_frontier_stall_alert_once.sh ; argv[]=/home/nwm/NWM/scripts/node27_frontier_stall_alert_once.sh
+ExecStartPre={ path=/usr/bin/mkdir ; argv[]=/usr/bin/mkdir -p /home/nwm/node27-frontier-alert-logs
+FragmentPath=/home/nwm/.config/systemd/user/nhms-node27-frontier-alert.service
+WorkingDirectory=/home/nwm/NWM
