@@ -1,6 +1,6 @@
 # Current Production Operations Runbook
 
-最后更新：2026-08-07
+最后更新：2026-09-12
 
 适用范围：node-27 active DB + ingest + display，node-22 Slurm/SHUD compute，
 以及两者共享的 NFS object-store/published 数据面。
@@ -1054,11 +1054,22 @@ systemctl --user status nhms-scheduler-file-provider-refresh.timer \
 - service **不是** `activating` 或 `active`——oneshot service 可能在 timer 停掉后
   仍在执行本次 tick，只看 timer 会漏判。
 
-标准做法：先 `systemctl --user stop nhms-scheduler-file-provider-refresh.timer`，
-再重跑上面的成对 status 确认 service 也已退出，然后运行 CLI；跑完
-`systemctl --user start nhms-scheduler-file-provider-refresh.timer` 恢复 timer，并用
-`systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --no-pager`
-核对下次 tick 已排上。若 status 显示 service 正在跑，等它自然结束，不要 kill——
+标准做法是一对**必须成对完成**的动作，缺后半条就是事故：
+
+1. `systemctl --user stop nhms-scheduler-file-provider-refresh.timer`；
+2. 重跑上面的成对 status，确认 service 也已退出；
+3. 运行 manual publisher CLI；
+4. **`systemctl --user start nhms-scheduler-file-provider-refresh.timer`**——这一步
+   不是收尾礼节，是本窗口的第二半；
+5. `systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --no-pager`
+   核对下次 tick 已排上（`NEXT` 必须是具体时刻，不是 `-`）。
+
+**漏掉第 4 步的终态有名字**：timer 停在 `UnitFileState=enabled` +
+`ActiveState=inactive`、`list-timers` 的 `NEXT` 为 `-`、`status` 显示
+`Trigger: n/a`。`enabled` 依旧绿着，但没有任何 tick 会发生——这就是 2026-08-28 到
+09-08 那 11 天的形状，见本节后面的"`enabled` + `inactive` 是失败态（#2041 / #2146）"。
+
+若 status 显示 service 正在跑，等它自然结束，不要 kill——
 中途打断会留下未完成的 canonical replace 状态。
 
 **`cutover_gate` audit（R2-A1，v2 summary）**：CLI 每次退出（成功 summary 到 stdout、
@@ -1202,6 +1213,119 @@ proof 任一步失败，执行：
 scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
 # 脚本按 install 前记录恢复 refresh 初态，并断言 scheduler units 完全未变。
 ```
+
+##### `enabled` + `inactive` 是失败态（#2041 / #2146）
+
+**`is-enabled` 不是活性证据。** 稳态核对必须把下面四列当作**互相独立**的信号分别读，
+任何一列不合格都是失败，不能用另一列的绿色替代：
+
+| 列 | 命令 | 合格 | 不合格的样子 |
+| --- | --- | --- | --- |
+| `is-enabled` | `systemctl --user is-enabled nhms-scheduler-file-provider-refresh.timer` | `enabled` | `disabled` / `masked` / `static` / `not-found`——重启或 reload 后不会自己回来 |
+| `is-active` | `systemctl --user is-active nhms-scheduler-file-provider-refresh.timer` | `active`（`SubState=waiting`） | `inactive` / `failed`——**不管 `is-enabled` 是什么**，都没有 tick 会发生 |
+| `list-timers` 的 `NEXT` | `systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --no-pager` | 具体时刻，且在 36 小时以内 | `-`（等价 `status` 里的 `Trigger: n/a`），或远得离谱 |
+| manifest 年龄 | 见下方 `jq` 命令（含 `|`，无法放进表格单元格） | 距今 < 120 小时 | ≥ 120 小时是预警，≥ 168 小时 consumer 已经 fail closed |
+
+第四列的取值命令（表格单元格里的 `\|` 转义会被 `jq` 当成语法错误，所以单独成块）：
+
+```bash
+jq -r '.providers[] | select(.name == "registry") | .after_generated_at' \
+  /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
+```
+
+`enabled` + `inactive` + `NEXT=-` 是一个**看起来全绿、实际永不触发**的组合：
+`UnitFileState=enabled` 只说明 unit 在 `default.target` 的 wants 里，不说明 timer
+此刻装载着。`Persistent=false` 让这个洞更深——timer 停着的那段时间里错过的
+calendar event **不会**在重新 `start` 时补跑，所以既没有失败日志，也没有追赶。
+
+**2026-08-28 -> 2026-09-08 实例（反面教材）**：timer 在 `2026-08-28 00:11:18 CST`
+进入 inactive（`InactiveEnterTimestamp`），`UnitFileState` 全程 `enabled`。
+没有任何组件报警。11 天后 manifest 越过 168 小时 consumer 上限，compute 先
+`file_manifest_stale`、随即 `db_free_registry_blocked`，journal retention 报
+`frontier_block_missing`。运维在 `2026-09-08 13:47:49 CST` 手工恢复
+（`ActiveEnterTimestamp`）。**该一次性恢复已经完成**，timer 现为 `enabled` +
+`active`，不要再跑一遍 `--enable`：对健康 timer 重跑是无谓的生产 mutation。
+
+##### refresh timer 健康探针（read-only，不自愈）
+
+`scripts/node22_refresh_timer_health.py` 把上表四列读成四个独立字段、按固定优先级
+定级、写一份 receipt、非 `ok` 一律非零退出。它**只**调用
+`systemctl --user show` 与 `systemctl --user list-timers` 两个只读子命令，源码里
+不存在任何 `enable`/`disable`/`start`/`stop`/`restart`/`daemon-reload`（有测试扫描源码
+守着这一点），也不写 provider store 下的任何文件。**检测，不自愈**：修复动作永远是人做的。
+
+判决**首个命中者胜出**，`ok` 是纯 `else`：
+
+| 序 | verdict | 含义 |
+| --- | --- | --- |
+| 1 | `probe_failed` | systemd 查不动/报错，或 refresh receipt 缺失/读不出/schema 不符，或 `ActiveState != active` 但 `InactiveEnterTimestamp` 为空/不可解析（dwell 算术无定义）。证据缺失绝不落到健康 |
+| 2 | `manifest_expired` | manifest 年龄 ≥ 168 小时——consumer 已经 fail closed，比任何 timer 事实都严重 |
+| 3 | `timer_stopped` | `ActiveState != active` 且已停超过 stopped-dwell。不带 `enabled` 谓词：`disabled` 且停着同样报这条 |
+| 4 | `timer_not_enabled` | `UnitFileState` 不是 `enabled`。此刻恰好 active 也算——它熬不过一次 reload 或重启 |
+| 5 | `timer_not_scheduled` | timer `active`，但 `NextElapseUSecRealtime` 为空，或比 next-dwell 还远 |
+| 6 | `manifest_stale` | manifest 年龄 ≥ manifest-age 阈值（且 < 168）。两个 manifest 比较都是"等于即命中" |
+| 7 | `ok` | 以上都不命中 |
+
+三个阈值均可用 env 覆盖，两个 freshness 阈值在 config 阶段硬断言严格小于 168：
+
+- `NHMS_REFRESH_HEALTH_MAX_NEXT_DWELL_HOURS`（默认 36）
+- `NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS`（默认 120）
+- `NHMS_REFRESH_HEALTH_STOPPED_DWELL_HOURS`（默认 6）
+
+service unit **故意不带 `EnvironmentFile=`**：默认值就是 node-22 的生产值，多一个
+未入库的 env 文件就多一条能悄悄放松告警阈值的路径。真要改阈值，用 drop-in 并把
+drop-in 记回本节：
+
+```bash
+mkdir -p ~/.config/systemd/user/nhms-node22-refresh-timer-health.service.d
+printf '[Service]\nEnvironment=NHMS_REFRESH_HEALTH_MAX_MANIFEST_AGE_HOURS=96\n' \
+  > ~/.config/systemd/user/nhms-node22-refresh-timer-health.service.d/10-thresholds.conf
+systemctl --user daemon-reload
+```
+
+stopped-dwell 存在的原因就是上面 #1104 那个 stop/start 窗口：窗口期间 timer 的形状
+正好是探针要抓的 `enabled` + `inactive`，而 refresh oneshot 自己的
+`TimeoutStartSec=7200` 意味着合法窗口可以跑满两小时。6 小时是它的三倍，所以一次
+最长的合法手工发布也不会吵；而 08-28 那种停了六天的，过 dwell 后第一个 tick 就报。
+dwell 之内不是"静默放行"——其余信号照常定级，manifest 同时 stale 一样非零。
+
+Receipt 落在 `/scratch/frd_muziyao/nhms-prod/workspace/refresh-timer-health/receipts/latest.json`，
+目录 0700、文件 0600，字段是封闭集合（`schema_version`、`generated_at`、`verdict`、
+四个原始信号加 `sub_state`/`last_trigger`、`manifest_age_hours`、三个阈值、被检查的 unit 名）——
+**不回显任何路径或其它 env 值**。
+
+**本条告警只在 node-22 本机**：不合格判决让
+`nhms-node22-refresh-timer-health.service` 进入 `failed`
+（`systemctl --user list-units --failed` 可见）并留下上面那份 receipt。没有邮件、
+没有 paging，今天也没有任何东西在轮询 node-22 的 failed unit。这是**已知限制**，
+不是遗漏：它把"168 小时悬崖前完全不可见"换成了"任何上机的人几小时内可发现"，
+off-host 路由是另一条有自己认证与投递面的告警链路，另案处理。
+
+一个必须知道的后果：refresh 的 `latest.json` 若是 `failed`/refusal receipt，
+其 `providers` 为空数组，探针读不到 manifest 年龄，会每小时报一次 `probe_failed`。
+这是 fail-closed 的正确行为——处置是让 refresh 重新跑出一份成功 receipt，
+不是调探针。
+
+安装与回滚（只动探针自己的两个 unit；脚本在每个动作前后断言
+`nhms-compute-scheduler.{timer,service}` 与两个 refresh unit 的 enabled/active 完全未变）：
+
+```bash
+scripts/install_node22_refresh_timer_health.sh --install    # 落 unit 文件，保持停用
+scripts/install_node22_refresh_timer_health.sh --enable     # 装载 hourly timer
+systemctl --user list-timers nhms-node22-refresh-timer-health.timer --no-pager
+scripts/install_node22_refresh_timer_health.sh --rollback   # 撤回 unit 文件
+```
+
+预合并的只读验证不要在 `/scratch/frd_muziyao/NWM` 里 checkout 本分支——那棵树是
+scheduler 与 refresh oneshot 的活执行根。把探针单文件 stage 到 checkout 之外，
+用精确解释器跑，并显式指定 receipt 根，避免写进生产 workspace：
+
+```bash
+/scratch/frd_muziyao/NWM/.venv/bin/python /scratch/frd_muziyao/tmp/<staged>/node22_refresh_timer_health.py \
+  --health-receipt-root /scratch/frd_muziyao/tmp/<staged>/receipts --json
+```
+
+探针只用标准库，不 import 本仓任何包，正是为了能这样跑。
 
 Live acceptance 还必须把 receipt -> 三 provider digest -> scheduler pass/candidate/run ->
 实际 Slurm stage job/terminal -> 同一 run 的全新 forcing/runs/states leaf 串起来，并从
