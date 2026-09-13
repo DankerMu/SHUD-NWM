@@ -16,6 +16,11 @@ and writes the receipt the operator check reads).
   `test_an_unreadable_object_store_ancestor_skips_only_its_two_lanes`.
 - `infra/env/node27-raw-retention.example`: the documented operator check and
   the prose this change would otherwise falsify (see "Operator check").
+- `scripts/select_ci_tests.py` + `tests/test_select_ci_tests.py` (added in
+  review round 1): a path-exact selector row for the example, because the
+  retention test now executes the `jq` program it contains and the glob
+  rows select zero readers of it; pinned by an exact-set test and a
+  mutation red leg.
 
 ## Must preserve
 

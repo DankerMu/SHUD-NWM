@@ -99,12 +99,16 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #         ESTALE on `<object-store>` itself is a preflight blocker instead.
 #       * A stale receipt. If the run raises before writing its summary no new
 #         file appears, so `ls -t ... | head -1` returns the PREVIOUS tick's
-#         healthy file. #2104 closed the one crash path this unit is known to
-#         have had -- an unwrapped probe on a lane root or a source root, which
-#         used to retire all three lanes and skip `_write_summary` entirely;
-#         what is left is a tick that dies before `_write_summary` for some
-#         reason outside those probes, and the freshness clause below is the
-#         only thing that catches it.
+#         healthy file. #2104 closed the crash path on the lane/source probes --
+#         an unwrapped probe on a lane root or a source root, which used to
+#         retire all three lanes and skip `_write_summary` entirely; what is
+#         left is a tick that dies before `_write_summary` for a reason outside
+#         those probes. The one known today is `_dir_size`'s `rglob` walk over a
+#         deletion target (#2309): its generator is advanced OUTSIDE the `try`
+#         and `pathlib` swallows only `PermissionError` while iterating, so a
+#         non-EACCES `OSError` there -- ESTALE, EIO -- still escapes
+#         `collect_targets`. The freshness clause below is the only thing that
+#         catches any of them.
 #     Check freshness, execution mode and the failure kind together:
 #       jq -e '
 #         (.execution_mode == "production_execute")

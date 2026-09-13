@@ -63,4 +63,6 @@ change lands.
   key added or changed); an appended supersession pointer in
   `openspec/changes/display-v2-national-timeline-precip-overlay/tasks.md`
   where it describes the shipped clause.
+- `scripts/select_ci_tests.py` / `tests/test_select_ci_tests.py`: one additive
+  path-exact row so a template-only PR runs the suites that read the example.
 - No unit, wrapper, exit-code, schema-version, or deletion-path change.
