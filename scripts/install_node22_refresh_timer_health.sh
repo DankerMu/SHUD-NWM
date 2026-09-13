@@ -20,7 +20,8 @@
 # `-E` is load-bearing, not decoration: without it an ERR trap set here is NOT
 # inherited by function bodies, so `assert_protected_unchanged` failing inside a
 # function exits 1 without ever running the trap that is supposed to back the
-# install out.  Verified empirically; do not drop it.
+# install out.  `test_r15_without_errtrace_the_install_trap_never_runs` runs a
+# copy of this file with `-E` dropped and shows the units left behind.
 set -Eeuo pipefail
 
 repo=${NHMS_REFRESH_HEALTH_REPO:-/scratch/frd_muziyao/NWM}
@@ -126,10 +127,11 @@ remove_probe_units() {
 }
 
 # `remove_probe_units` swallows every systemctl failure on purpose -- it is also
-# the `--install` ERR trap body, which must not be cut short -- so on
+# the `--install` ERR trap body, which must not be cut short -- and `--install`
+# swallows its own `disable --now` failure too, so on both `--install` and
 # `--rollback` success is decided by READING THE UNITS BACK, never by how the
 # calls went.  A refused `disable --now` leaves the timer loaded, enabled and
-# active; without this check `--rollback` would still print `rolled_back`.
+# active; without this check either action would still print its status line.
 #
 # "Gone" means neither probe unit can fire again, for both the timer and the
 # service:
@@ -151,8 +153,8 @@ remove_probe_units() {
 #     refusing it would make rollback impossible after any real alert.
 # Anything else -- `enabled`, `enabled-runtime`, `linked`, `masked`, `active`,
 # `activating`, `reloading`, an empty `is-active` -- is refused: the run exits
-# non-zero without printing a status line.  A probe tick still running at the
-# moment of rollback is therefore refused too; re-run once it finishes.
+# non-zero without printing a status line.  A probe tick still running at that
+# moment is therefore refused too; re-run once it finishes.
 assert_probe_units_gone() {
   local unit enabled active
   for unit in "$timer" "$service"; do
@@ -161,14 +163,14 @@ assert_probe_units_gone() {
     case "$enabled" in
       disabled | static | not-found | '') ;;
       *)
-        printf 'rollback: %s is still %s\n' "$unit" "$enabled" >&2
+        printf 'probe read-back: %s is still %s\n' "$unit" "$enabled" >&2
         return 1
         ;;
     esac
     case "$active" in
       inactive | failed) ;;
       *)
-        printf 'rollback: %s is-active=%s, not stopped\n' "$unit" "${active:-<no answer>}" >&2
+        printf 'probe read-back: %s is-active=%s, not stopped\n' "$unit" "${active:-<no answer>}" >&2
         return 1
         ;;
     esac
@@ -194,6 +196,10 @@ if [[ "$action" == --install ]]; then
   $systemctl_bin --user daemon-reload
   # Installed but inert: arming is the separate, explicit `--enable`.
   $systemctl_bin --user disable --now "$timer" >/dev/null 2>&1 || true
+  # Still inside the ERR trap: a refused read-back runs `remove_probe_units`
+  # (the same swallowed `disable --now`, then the pre-install unit files back)
+  # and the protected assertion, and exits non-zero with no status line.
+  assert_probe_units_gone
   assert_protected_unchanged
   trap - ERR
   printf '{"status":"installed_stopped","protected_unchanged":true}\n'

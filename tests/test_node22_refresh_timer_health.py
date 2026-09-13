@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from scripts import node22_refresh_timer_health as probe
+from scripts import scheduler_file_provider_refresh as runner_module
 
 UNIT = "nhms-scheduler-file-provider-refresh.timer"
 NOW = datetime(2026, 9, 12, 15, 34, tzinfo=UTC)
@@ -1115,7 +1116,10 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
     * ``NHMS_FAKE_PROBE_IS_ENABLED`` / ``NHMS_FAKE_PROBE_IS_ACTIVE``, when SET
       (the empty string included), are the literal answer to that query for
       both probe units -- the states a real user manager reports that the
-      stateful fake never produces (`static`, `not-found`, `failed`, no answer).
+      stateful fake never produces (`static`, `not-found`, `failed`, no answer);
+    * ``NHMS_FAKE_PROBE_TIMER_IS_*`` / ``NHMS_FAKE_PROBE_SERVICE_IS_*`` do the
+      same for ONE probe unit and win over the shared knob, so the timer and
+      the service can answer differently.
     """
     log = tmp_path / "installer-systemctl.log"
     state = tmp_path / "fake-state"
@@ -1154,10 +1158,13 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
         "esac\n"
         'case "$unit" in\n'
         "  nhms-node22-refresh-timer-health.*)\n"
-        '    if [ "$verb" = is-enabled ] && [ -n "${NHMS_FAKE_PROBE_IS_ENABLED+set}" ]; then '
-        'printf "%s\\n" "$NHMS_FAKE_PROBE_IS_ENABLED"; exit 0; fi\n'
-        '    if [ "$verb" = is-active ] && [ -n "${NHMS_FAKE_PROBE_IS_ACTIVE+set}" ]; then '
-        'printf "%s\\n" "$NHMS_FAKE_PROBE_IS_ACTIVE"; exit 0; fi\n'
+        r"""    kind=SERVICE; case "$unit" in *.timer) kind=TIMER ;; esac
+    query=IS_ENABLED; [ "$verb" = is-active ] && query=IS_ACTIVE
+    for name in "NHMS_FAKE_PROBE_${kind}_${query}" "NHMS_FAKE_PROBE_${query}"; do
+      eval "isset=\${$name+set}"
+      if [ -n "$isset" ]; then eval "printf '%s\n' \"\$$name\""; exit 0; fi
+    done
+"""
         '    if [ "$verb" = is-enabled ]; then printf "%s\\n" "$enabled"; '
         'else printf "%s\\n" "$active"; fi\n'
         "    exit 0 ;;\n"
@@ -1186,6 +1193,9 @@ def _run_installer(
     diverge_value: str = "",
     fail_verb: str = "",
     probe_answers: dict[str, str] | None = None,
+    timer_answers: dict[str, str] | None = None,
+    service_answers: dict[str, str] | None = None,
+    installer: Path = INSTALLER,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     script, log = _installer_fake_systemctl(tmp_path)
     # Divergence is scoped to ONE installer invocation: the per-(unit, query)
@@ -1207,12 +1217,18 @@ def _run_installer(
             "NHMS_FAKE_FAIL_VERB": fail_verb,
         }
     )
-    for name in ("NHMS_FAKE_PROBE_IS_ENABLED", "NHMS_FAKE_PROBE_IS_ACTIVE"):
-        environment.pop(name, None)
-    for query, answer in (probe_answers or {}).items():
-        environment[f"NHMS_FAKE_PROBE_{query.upper().replace('-', '_')}"] = answer
+    for scope in ("", "TIMER_", "SERVICE_"):
+        for query in ("IS_ENABLED", "IS_ACTIVE"):
+            environment.pop(f"NHMS_FAKE_PROBE_{scope}{query}", None)
+    for scope, answers in (
+        ("", probe_answers),
+        ("TIMER_", timer_answers),
+        ("SERVICE_", service_answers),
+    ):
+        for query, answer in (answers or {}).items():
+            environment[f"NHMS_FAKE_PROBE_{scope}{query.upper().replace('-', '_')}"] = answer
     completed = subprocess.run(
-        ["bash", str(INSTALLER), action],
+        ["bash", str(installer), action],
         capture_output=True,
         text=True,
         env=environment,
@@ -1365,6 +1381,54 @@ def test_r11c_the_probe_timer_claims_no_self_catch_up() -> None:
     # next reader re-derives the wrong one.
     assert "boot" in comments
     assert "`enabled` + `inactive`" in comments
+
+
+def test_r11c_the_runbook_verdict_rows_5_and_7_name_what_grade_does() -> None:
+    """Row 5 must name the unparseable-`NEXT` case `grade` routes there, and
+    row 7 must name every timer verdict that an unresolvable manifest leaves
+    unmasked -- each is what `grade` still returns with no manifest age."""
+    section = _probe_runbook_section()
+
+    def row(number: int) -> str:
+        (line,) = [line for line in section.splitlines() if line.startswith(f"| {number} | ")]
+        return line
+
+    thresholds = probe.load_thresholds({})
+
+    def graded(properties: dict[str, str], age: float | None) -> str:
+        return probe.grade(
+            now=NOW,
+            properties=properties,
+            manifest_age_hours=age,
+            thresholds=thresholds,
+            systemd_error=None,
+        )
+
+    unparseable = _properties(active_state="active", next_elapse="not-a-timestamp")
+    assert graded(unparseable, 5.0) == probe.VERDICT_TIMER_NOT_SCHEDULED
+    assert f"`{probe.VERDICT_TIMER_NOT_SCHEDULED}`" in row(5)
+    assert "不可解析" in row(5)
+
+    unmasked = {
+        graded(properties, None)
+        for properties in (
+            _properties(
+                active_state="inactive",
+                sub_state="dead",
+                inactive_enter=_systemd_timestamp(NOW - timedelta(days=6)),
+                next_elapse="",
+            ),
+            _properties(unit_file_state="disabled"),
+            unparseable,
+        )
+    }
+    timer_verdicts = {
+        value for name, value in vars(probe).items() if name.startswith("VERDICT_TIMER_")
+    }
+    assert unmasked == timer_verdicts
+    assert f"`{probe.VERDICT_MANIFEST_UNAVAILABLE}`" in row(7)
+    for verdict in timer_verdicts:
+        assert f"`{verdict}`" in row(7), f"row 7 does not name {verdict}"
 
 
 def test_r11c_the_runbook_carries_the_probe_timers_own_steady_state_row() -> None:
@@ -1983,11 +2047,11 @@ def test_r9_history_answers_when_latest_cannot(
 def test_r9_a_dry_run_history_receipt_is_an_ordinary_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The fallback does NOT gate on the receipt's `outcome`.
+    """A `dry_run` history receipt answers with its `after_generated_at`.
 
-    A receipt carrying `registry.after_generated_at` reports a manifest that
-    really was published at that instant, whatever the run's terminal outcome
-    was; one predicate, applied uniformly (design D3b).
+    `dry_run` is one of the three outcomes whose `after_generated_at` the
+    probe trusts (design D3b).  The fixture carries no `before_generated_at`,
+    so an answer at all proves `after_generated_at` was the field read.
     """
     latest = _unresolvable_latest(tmp_path, "empty_providers")
     history = _history_root(tmp_path)
@@ -2000,6 +2064,142 @@ def test_r9_a_dry_run_history_receipt_is_an_ordinary_candidate(
     assert status == 0, payload
     assert payload["manifest_source"] == f"history:{name}"
     assert payload["manifest_age_hours"] == pytest.approx(11.0)
+
+
+# Design D3b, restated here rather than read from the probe: the outcomes whose
+# registry `after_generated_at` the probe trusts.
+DESIGN_TRUSTED_AFTER_OUTCOMES = frozenset({"published", "published_receipt_failed", "dry_run"})
+
+
+def _registry_evidence(
+    *, after_hours: float | None, before_hours: float | None
+) -> list[dict[str, object]]:
+    registry: dict[str, object] = {"name": "registry", "entry_count": 18}
+    for field, hours in (("after_generated_at", after_hours), ("before_generated_at", before_hours)):
+        if hours is not None:
+            registry[field] = (NOW - timedelta(hours=hours)).isoformat().replace("+00:00", "Z")
+    return [registry]
+
+
+@pytest.mark.parametrize("where", ["latest", "history"])
+def test_r9e_a_replace_uncertain_receipt_never_grades_ok_from_its_after_generated_at(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """A `replace_uncertain` receipt can carry a fresh registry
+    `after_generated_at` for bytes that were rolled back
+    (`test_replace_uncertain_receipt_carries_after_evidence_for_restored_registry_bytes`
+    in the runner suite).  Fresh after (1 h), stale before (150 h): the probe
+    answers with before, from `latest.json` and from a history candidate alike.
+    """
+    providers = _registry_evidence(after_hours=1.0, before_hours=150.0)
+    if where == "latest":
+        latest = _receipt_root(tmp_path) / "latest.json"
+        latest.write_text(
+            json.dumps(_refresh_receipt_payload(providers=providers, outcome="replace_uncertain"))
+        )
+        expected_source = "latest"
+    else:
+        latest = _unresolvable_latest(tmp_path, "empty_providers")
+        name = _history_name(10, 1)
+        _write_history_receipt(
+            _history_root(tmp_path), name, providers=providers, outcome="replace_uncertain"
+        )
+        expected_source = f"history:{name}"
+
+    status, root, _log = _run(tmp_path, monkeypatch, receipt=latest)
+    payload = json.loads((root / "latest.json").read_text())
+
+    assert status != 0
+    assert payload["verdict"] == "manifest_stale"
+    assert payload["manifest_source"] == expected_source
+    assert payload["manifest_age_hours"] == pytest.approx(150.0)
+
+
+def test_r9e_a_replace_uncertain_latest_without_before_generated_at_is_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No `before_generated_at` on an untrusted outcome: the candidate is
+    unresolvable, its fresh `after_generated_at` is ignored, and history answers."""
+    latest = _receipt_root(tmp_path) / "latest.json"
+    latest.write_text(
+        json.dumps(
+            _refresh_receipt_payload(
+                providers=_registry_evidence(after_hours=1.0, before_hours=None),
+                outcome="replace_uncertain",
+            )
+        )
+    )
+    name = _history_name(10, 1)
+    _write_history_receipt(_history_root(tmp_path), name, manifest_age_hours=20.0)
+
+    status, root, _log = _run(tmp_path, monkeypatch, receipt=latest)
+    payload = json.loads((root / "latest.json").read_text())
+
+    assert status == 0, payload
+    assert payload["verdict"] == "ok"
+    assert payload["manifest_source"] == f"history:{name}"
+    assert payload["manifest_age_hours"] == pytest.approx(20.0)
+
+
+@pytest.mark.parametrize("outcome", sorted(runner_module.OUTCOMES))
+def test_r9e_every_runner_outcome_lands_in_exactly_one_bucket(tmp_path: Path, outcome: str) -> None:
+    """Every outcome the runner can write answers with exactly one of the two
+    fields: `after_generated_at` for the design's trusted three, otherwise
+    `before_generated_at`."""
+    path = tmp_path / "receipt.json"
+    path.write_text(
+        json.dumps(
+            _refresh_receipt_payload(
+                providers=_registry_evidence(after_hours=1.0, before_hours=50.0),
+                outcome=outcome,
+            )
+        )
+    )
+
+    answered = probe.read_manifest_generated_at(path)
+
+    after, before = NOW - timedelta(hours=1.0), NOW - timedelta(hours=50.0)
+    assert answered == (after if outcome in DESIGN_TRUSTED_AFTER_OUTCOMES else before)
+
+
+def test_r9e_the_trusted_outcomes_are_the_designs_and_a_subset_of_the_runners() -> None:
+    """A renamed or dropped runner outcome reds here instead of silently
+    falling into the untrusted bucket."""
+    assert probe.TRUSTED_AFTER_GENERATED_AT_OUTCOMES == DESIGN_TRUSTED_AFTER_OUTCOMES
+    assert probe.TRUSTED_AFTER_GENERATED_AT_OUTCOMES <= runner_module.OUTCOMES
+    # The probe comment on the constant cites this test, and the reader's
+    # docstring cites this family.
+    assert "``test_r9e_*``" in PROBE_SOURCE.read_text()
+    assert (
+        "test_r9e_the_trusted_outcomes_are_the_designs_and_a_subset_of_the_runners"
+        in PROBE_SOURCE.read_text()
+    )
+
+
+def test_r9e_the_runbook_states_the_probes_outcome_rule() -> None:
+    """Prose<->code: the runbook's manual `jq` recipe and its fallback bullet
+    both name exactly the probe's trusted set, and the bullet names every other
+    runner outcome as the `before_generated_at` bucket."""
+    trusted = probe.TRUSTED_AFTER_GENERATED_AT_OUTCOMES
+    recipes = [
+        block
+        for block in re.findall(r"```bash\n(.*?)```", RUNBOOK.read_text(), re.S)
+        if 'select(.name == "registry")' in block
+        and "provider-refresh/receipts/latest.json" in block
+    ]
+    assert len(recipes) == 1, recipes
+    assert set(re.findall(r'\$o == "([^"]+)"', recipes[0])) == trusted
+    assert "then .after_generated_at else .before_generated_at end" in recipes[0]
+
+    section = _probe_runbook_section()
+    start = section.index("按 receipt 的 `outcome` 取字段")
+    bullet = section[start : section.index("\n\n", start)]
+    trusted_part, rest = bullet.split("时取 `registry.after_generated_at`", 1)
+    assert set(re.findall(r"`([a-z_]+)`", trusted_part)) - {"outcome"} == trusted
+    others = re.search(r"其余 outcome（([^）]*)）", rest)
+    assert others is not None, bullet
+    assert set(re.findall(r"`([a-z_]+)`", others.group(1))) == runner_module.OUTCOMES - trusted
+    assert "取 `registry.before_generated_at`" in rest
 
 
 def test_r9b_an_unresolvable_latest_never_masks_a_stopped_timer(
@@ -2275,8 +2475,6 @@ def test_the_history_filename_shape_matches_the_runner_that_writes_it() -> None:
     packages; it says nothing about this test, so the comparison is against the
     runner's live constant rather than a restated literal.
     """
-    from scripts import scheduler_file_provider_refresh as runner_module
-
     runner = (
         Path(__file__).resolve().parents[1] / "scripts" / "scheduler_file_provider_refresh.py"
     ).read_text()
@@ -2311,6 +2509,73 @@ def test_the_consumer_bound_is_the_consumers_own_constant() -> None:
         == scheduler_file_providers.DEFAULT_MAX_MANIFEST_AGE_HOURS
         - probe.REFRESH_CADENCE_HOURS
     )
+
+
+def test_the_history_listing_cap_is_above_the_runners_history_cap() -> None:
+    """The probe comment and the runbook both say the 200-entry listing cap is
+    above the runner's `MAX_HISTORY`; read the runner's constant for both."""
+    assert probe.MAX_HISTORY_ENTRIES_LISTED > runner_module.MAX_HISTORY
+    assert "test_the_history_listing_cap_is_above_the_runners_history_cap" in PROBE_SOURCE.read_text()
+    assert f"`MAX_HISTORY = {runner_module.MAX_HISTORY}`" in PROBE_SOURCE.read_text()
+    assert (
+        f"目录列举封顶 {probe.MAX_HISTORY_ENTRIES_LISTED} 条"
+        f"（高于 runner 自己的 `MAX_HISTORY = {runner_module.MAX_HISTORY}`），"
+        f"最多打开最新的 {probe.MAX_HISTORY_CANDIDATES_OPENED} 份"
+    ) in _probe_runbook_section()
+
+
+def test_the_stopped_dwell_is_three_times_the_refresh_oneshots_start_timeout() -> None:
+    """The runbook justifies the 6 h stopped-dwell as three times the refresh
+    oneshot's `TimeoutStartSec=`; read that value from the refresh unit."""
+    refresh_service = (
+        Path(__file__).resolve().parents[1]
+        / "infra"
+        / "systemd"
+        / "nhms-scheduler-file-provider-refresh.service"
+    )
+    timeouts = re.findall(r"^TimeoutStartSec=(\d+)$", refresh_service.read_text(), re.M)
+    assert len(timeouts) == 1, timeouts
+    seconds = int(timeouts[0])
+
+    assert probe.DEFAULT_STOPPED_DWELL_HOURS * 3600 == 3 * seconds
+    assert seconds == 2 * 3600
+    section = _probe_runbook_section()
+    assert f"`TimeoutStartSec={seconds}` 意味着合法窗口可以跑满两小时" in section
+    assert f"{probe.DEFAULT_STOPPED_DWELL_HOURS} 小时是它的三倍" in section
+
+
+def test_the_probe_units_start_timeout_comment_counts_every_receipt_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe unit's `TimeoutStartSec=` comment counts one receipt read plus
+    up to `MAX_HISTORY_CANDIDATES_OPENED` on the fallback; count the reads a
+    fully unresolvable run actually makes."""
+    unit = Path(__file__).resolve().parents[1] / "infra" / "systemd" / PROBE_UNITS[0]
+    comments = " ".join(
+        line.lstrip("#").strip() for line in unit.read_text().splitlines() if line.startswith("#")
+    )
+    assert (
+        "one bounded receipt read, and up to "
+        f"{probe.MAX_HISTORY_CANDIDATES_OPENED} more on the history fallback"
+    ) in comments
+
+    latest = _unresolvable_latest(tmp_path, "malformed")
+    history = _history_root(tmp_path)
+    for index in range(probe.MAX_HISTORY_CANDIDATES_OPENED + 5):
+        _write_history_receipt(history, _history_name(index, index), raw="{nope")
+    opened: list[Path] = []
+    real_read = probe.read_manifest_generated_at
+
+    def counting_read(path: Path) -> object:
+        opened.append(path)
+        return real_read(path)
+
+    monkeypatch.setattr(probe, "read_manifest_generated_at", counting_read)
+
+    generated_at, source, _errors = probe.resolve_manifest_generated_at(latest)
+
+    assert generated_at is None and source == probe.MANIFEST_SOURCE_UNAVAILABLE
+    assert len(opened) == 1 + probe.MAX_HISTORY_CANDIDATES_OPENED
 
 
 def test_the_production_path_defaults_match_every_file_that_states_them() -> None:
@@ -2686,11 +2951,12 @@ def test_rollback_of_an_armed_probe_succeeds_when_systemctl_complies(
         assert not (tmp_path / "units" / probe_unit).exists()
 
 
-# The `--rollback` read-back's closed accept sets.  The two tests below prove
-# them against the installer's `case` arms by behaviour, and
-# `test_the_runbook_states_exactly_the_rollback_accept_sets` reads the same
-# tuples against the runbook table -- so the code and the operator's copy can
-# only move together.  `""` is "no stdout answer".
+# The read-back's closed accept sets (`--install` and `--rollback`).
+# `test_the_read_back_accept_sets_are_the_installers_own_case_arms` reads them
+# against the installer's `case` arms, and
+# `test_the_runbook_states_exactly_the_rollback_accept_sets` against the
+# runbook table; the parametrized tests below exercise them by behaviour.
+# `""` is "no stdout answer".
 ROLLBACK_ACCEPTED_IS_ENABLED = ("disabled", "static", "not-found", "")
 ROLLBACK_ACCEPTED_IS_ACTIVE = ("inactive", "failed")
 ROLLBACK_REFUSED_IS_ENABLED = ("enabled", "enabled-runtime", "linked", "masked", "alias")
@@ -2753,6 +3019,189 @@ def test_the_runbook_states_exactly_the_rollback_accept_sets() -> None:
     assert accepted_in_row("is-enabled") == set(ROLLBACK_ACCEPTED_IS_ENABLED)
     assert accepted_in_row("is-active") == set(ROLLBACK_ACCEPTED_IS_ACTIVE)
     assert "--rollback" in section and "rolled_back" in section
+
+    # Both actions that print a "disarmed" status read back first, in the
+    # installer, and the runbook names the read-back on both.
+    source = INSTALLER.read_text()
+    branches = {
+        "--install": source[source.index('if [[ "$action" == --install ]]') : source.index("elif")],
+        "--rollback": source[source.rindex("\nelse\n") : source.rindex("\nfi\n")],
+    }
+    for action, status in READ_BACK_ACTIONS:
+        branch = branches[action]
+        printed = branch.index(f'{{"status":"{status}"')
+        assert "assert_probe_units_gone" in branch[:printed], action
+        assert f'`{{"status":"{status}",...}}`' in section
+        (command,) = [
+            line
+            for line in section.splitlines()
+            if line.startswith(f"scripts/install_node22_refresh_timer_health.sh {action} ")
+        ]
+        assert "读回" in command, command
+
+
+def test_the_read_back_accept_sets_are_the_installers_own_case_arms() -> None:
+    """Code<->test: the accept tuples are the literal first `case` arm of each
+    read in `assert_probe_units_gone`, and every other state falls to `*)`."""
+    body = re.search(
+        r"^assert_probe_units_gone\(\) \{\n(.*?)^\}\n", INSTALLER.read_text(), re.S | re.M
+    )
+    assert body is not None
+
+    def accepted_arm(variable: str) -> set[str]:
+        arms = re.findall(rf'case "\${variable}" in\n\s*([^\n]*?)\) ;;\n', body.group(1))
+        assert len(arms) == 1, arms
+        return {"" if state.strip() == "''" else state.strip() for state in arms[0].split("|")}
+
+    assert accepted_arm("enabled") == set(ROLLBACK_ACCEPTED_IS_ENABLED)
+    assert accepted_arm("active") == set(ROLLBACK_ACCEPTED_IS_ACTIVE)
+    assert body.group(1).count("    *)\n") == 2
+    assert not set(ROLLBACK_REFUSED_IS_ENABLED) & accepted_arm("enabled")
+    assert not set(ROLLBACK_REFUSED_IS_ACTIVE) & accepted_arm("active")
+
+
+READ_BACK_ACTIONS = [("--install", "installed_stopped"), ("--rollback", "rolled_back")]
+DISARMED_TIMER = {"is-enabled": "disabled", "is-active": "inactive"}
+
+
+@pytest.mark.parametrize(("action", "status"), READ_BACK_ACTIONS)
+@pytest.mark.parametrize(
+    ("timer_answers", "service_answers"),
+    [
+        pytest.param(
+            DISARMED_TIMER, {"is-enabled": "static", "is-active": "activating"}, id="service-activating"
+        ),
+        pytest.param(
+            DISARMED_TIMER, {"is-enabled": "static", "is-active": "active"}, id="service-active"
+        ),
+        pytest.param(
+            {"is-enabled": "enabled", "is-active": "active"},
+            {"is-enabled": "static", "is-active": "inactive"},
+            id="timer-still-armed",
+        ),
+    ],
+)
+def test_the_read_back_judges_each_probe_unit_on_its_own(
+    tmp_path: Path,
+    action: str,
+    status: str,
+    timer_answers: dict[str, str],
+    service_answers: dict[str, str],
+) -> None:
+    """R15c: a disarmed timer does not vouch for a service that is still
+    running, and a stopped service does not vouch for an armed timer."""
+    if action == "--rollback":
+        assert _run_installer(tmp_path, "--install")[0].returncode == 0
+
+    completed, _log = _run_installer(
+        tmp_path, action, timer_answers=timer_answers, service_answers=service_answers
+    )
+
+    assert status not in completed.stdout, completed.stdout
+    assert completed.stdout == ""
+    assert completed.returncode != 0
+
+
+@pytest.mark.parametrize(("action", "status"), READ_BACK_ACTIONS)
+@pytest.mark.parametrize("service_active", ["inactive", "failed"])
+def test_the_read_back_accepts_a_disarmed_timer_beside_a_stopped_service(
+    tmp_path: Path, action: str, status: str, service_active: str
+) -> None:
+    """The paired positive case for the per-unit read-back."""
+    if action == "--rollback":
+        assert _run_installer(tmp_path, "--install")[0].returncode == 0
+
+    completed, _log = _run_installer(
+        tmp_path,
+        action,
+        timer_answers=DISARMED_TIMER,
+        service_answers={"is-enabled": "static", "is-active": service_active},
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"status": status, "protected_unchanged": True}
+
+
+def test_install_refuses_installed_stopped_when_systemctl_refused_to_disarm_the_probe(
+    tmp_path: Path,
+) -> None:
+    """R15c on the `--install` main path, whose `disable --now` is `|| true`.
+
+    A re-install over an armed probe whose disarm systemctl refuses used to
+    print `installed_stopped` with the timer still armed.  Now the read-back
+    refuses inside the ERR trap window, so the trap backs the install out: no
+    status line, non-zero, the timer's arm state is what it was before this
+    invocation, and the unit files are byte-equal to what preceded it (an
+    operator-local edit included, so "restored" is not "reinstalled").
+    """
+    assert _run_installer(tmp_path, "--install")[0].returncode == 0
+    assert _run_installer(tmp_path, "--enable")[0].returncode == 0
+    assert _probe_timer_state(tmp_path) == ("enabled", "active")
+    timer_file = tmp_path / "units" / PROBE_TIMER
+    timer_file.write_text(timer_file.read_text() + "# operator-local edit\n")
+    before = {unit: (tmp_path / "units" / unit).read_bytes() for unit in PROBE_UNITS}
+
+    completed, _log = _run_installer(tmp_path, "--install", fail_verb="disable")
+
+    assert completed.stdout == "", completed.stdout
+    assert completed.returncode != 0
+    assert "still enabled" in completed.stderr
+    assert _probe_timer_state(tmp_path) == ("enabled", "active")
+    assert {unit: (tmp_path / "units" / unit).read_bytes() for unit in PROBE_UNITS} == before
+
+
+def test_rollback_after_two_installs_keeps_the_first_installs_disarmed_files(
+    tmp_path: Path,
+) -> None:
+    """Disarmed means inert, not file-absent (R15c): `--rollback` restores the
+    unit files that preceded the LAST `--install`, so after two installs the
+    probe's own files remain -- disarmed, and never re-armed by the rollback."""
+    for _ in range(2):
+        assert _run_installer(tmp_path, "--install")[0].returncode == 0
+    enabled, enable_log = _run_installer(tmp_path, "--enable")
+    assert enabled.returncode == 0, enabled.stderr
+    enable_log.write_text("")  # the fake appends; read only the rollback
+
+    completed, log = _run_installer(tmp_path, "--rollback")
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["status"] == "rolled_back"
+    repo_units = Path(__file__).resolve().parents[1] / "infra" / "systemd"
+    for unit in PROBE_UNITS:
+        assert (tmp_path / "units" / unit).read_bytes() == (repo_units / unit).read_bytes()
+    assert _probe_timer_state(tmp_path) == ("disabled", "inactive")
+    rearming = [
+        line
+        for line in log.read_text().splitlines()
+        if line.startswith(("--user enable", "--user start"))
+    ]
+    assert rearming == []
+
+
+def test_r15_without_errtrace_the_install_trap_never_runs(tmp_path: Path) -> None:
+    """`-E` is behavioural, not decoration.  The same divergent protected read
+    through the real installer and through a copy with `-E` dropped: the real
+    ERR trap removes the probe units, the copy's never runs and leaves them."""
+    source = INSTALLER.read_text()
+    assert source.count("set -Eeuo pipefail\n") == 1
+    # The installer header and the runbook both cite this test.
+    assert "test_r15_without_errtrace_the_install_trap_never_runs" in source
+    assert "去掉 `-E` 的副本实跑" in _probe_runbook_section()
+    without_errtrace = tmp_path / "installer-without-errtrace.sh"
+    without_errtrace.write_text(source.replace("set -Eeuo pipefail\n", "set -euo pipefail\n"))
+    real_root, copy_root = tmp_path / "real", tmp_path / "copy"
+    real_root.mkdir()
+    copy_root.mkdir()
+    divergence = {"diverge": "nhms-compute-scheduler.timer.is-enabled", "diverge_value": "disabled"}
+
+    real, _log = _run_installer(real_root, "--install", **divergence)
+    copy, _log = _run_installer(copy_root, "--install", installer=without_errtrace, **divergence)
+
+    assert real.returncode != 0 and copy.returncode != 0
+    assert real.stdout == copy.stdout == ""
+    for unit in PROBE_UNITS:
+        assert not (real_root / "units" / unit).exists(), f"the real trap left {unit}"
+        assert (copy_root / "units" / unit).exists(), f"without -E the trap still removed {unit}"
 
 
 # A baseline in a shape this installer never writes: every protected unit on

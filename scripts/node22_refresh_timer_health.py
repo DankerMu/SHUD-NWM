@@ -119,12 +119,21 @@ SYSTEMCTL_TIMEOUT_SECONDS = 30
 # prefix makes a lexical DESCENDING sort chronological -- no timestamp is
 # parsed and no `mtime` is trusted.  The runner caps that directory at
 # `MAX_HISTORY = 32`; the 200-entry listing cap is the probe's own
-# independent bound, comfortably above it, so an hourly watchdog can never
-# be made to walk an unbounded directory.
+# independent bound, above it (pinned by
+# `test_the_history_listing_cap_is_above_the_runners_history_cap`), so an
+# hourly watchdog can never be made to walk an unbounded directory.
 HISTORY_DIRECTORY_NAME = "history"
 HISTORY_RECEIPT_NAME = re.compile(r"\Arefresh_\d{8}T\d{6}Z_[0-9a-f]{12}\.json\Z")
 MAX_HISTORY_ENTRIES_LISTED = 200
 MAX_HISTORY_CANDIDATES_OPENED = 10
+
+# Refresh-runner outcomes whose registry `after_generated_at` the probe trusts
+# (design D3b).  Every other outcome answers with `before_generated_at`.
+# `test_r9e_the_trusted_outcomes_are_the_designs_and_a_subset_of_the_runners`
+# imports the runner's `OUTCOMES` and pins this set as a subset of it.
+TRUSTED_AFTER_GENERATED_AT_OUTCOMES = frozenset(
+    {"published", "published_receipt_failed", "dry_run"}
+)
 
 # systemd prints these for a timestamp it does not have.
 EMPTY_TIMESTAMPS = frozenset({"", "-", "n/a", "0"})
@@ -356,21 +365,20 @@ def read_bounded_no_follow(path: Path, *, max_bytes: int) -> bytes:
 
 
 def read_manifest_generated_at(path: Path) -> datetime:
-    """Return the published manifest's ``generated_at`` from a refresh receipt.
+    """Return the registry generation time a refresh receipt vouches for.
 
-    The value of record is the canonical registry provider's
-    ``after_generated_at`` --- the provider is located by name, never by index,
-    so a receipt whose provider list is shaped differently fails closed instead
-    of reading the wrong row.
+    Never newer than the on-disk manifest's ``generated_at``.
 
-    Applied uniformly to ``latest.json`` and to every history candidate: one
-    predicate, so there is no second vocabulary to keep in sync with the
-    runner's.  In particular the receipt's ``outcome`` is deliberately NOT
-    consulted --- a receipt carrying a parseable ``after_generated_at`` reports
-    a manifest that really was published at that instant, whatever the run's
-    terminal outcome was, and a ``dry_run`` receipt is an ordinary candidate
-    because a dry run leaves the field equal to the current manifest's real
-    generation time.
+    The canonical registry provider is located by name, never by index, so a
+    receipt whose provider list is shaped differently fails closed instead of
+    reading the wrong row.  Which of its fields answers depends on the
+    receipt's ``outcome`` (design D3b): ``after_generated_at`` when the outcome
+    is in ``TRUSTED_AFTER_GENERATED_AT_OUTCOMES``, otherwise
+    ``before_generated_at``, because a ``replace_uncertain`` receipt can carry
+    a fresh ``after_generated_at`` for registry bytes that were rolled back.
+    A missing or unparseable field makes the candidate unresolvable.  The same
+    rule applies to ``latest.json`` and to every history candidate.  Pinned by
+    the ``test_r9e_*`` tests.
     """
     try:
         content = read_bounded_no_follow(path, max_bytes=MAX_REFRESH_RECEIPT_BYTES)
@@ -393,14 +401,22 @@ def read_manifest_generated_at(path: Path) -> datetime:
         raise ProbeEvidenceError("refresh receipt has no providers list")
     for provider in providers:
         if isinstance(provider, dict) and provider.get("name") == "registry":
-            generated_at = provider.get("after_generated_at")
+            outcome = payload.get("outcome")
+            field = (
+                "after_generated_at"
+                if isinstance(outcome, str) and outcome in TRUSTED_AFTER_GENERATED_AT_OUTCOMES
+                else "before_generated_at"
+            )
+            generated_at = provider.get(field)
             if not isinstance(generated_at, str):
-                raise ProbeEvidenceError("registry provider has no after_generated_at")
+                raise ProbeEvidenceError(
+                    f"registry provider has no {field} (outcome {outcome!r})"
+                )
             try:
                 return parse_iso8601(generated_at)
             except ValueError as error:
                 raise ProbeEvidenceError(
-                    f"registry after_generated_at is unparseable: {error}"
+                    f"registry {field} is unparseable: {error}"
                 ) from error
     raise ProbeEvidenceError("refresh receipt carries no registry provider")
 

@@ -248,17 +248,33 @@ Resolution order, first success wins:
    Candidates are filtered to that filename shape, the directory listing is
    capped at 200 entries, and at most the 10 newest are opened. Each read is
    bounded and `O_NOFOLLOW` exactly as `latest.json` is.
-3. If neither yields a parseable `registry.after_generated_at`, the age is
+3. If no candidate yields a trusted generation time under the rule below, the age is
    unresolved and the verdict is `manifest_unavailable` (row 7).
 
-The fallback deliberately does **not** gate on the receipt's `outcome`. A
-receipt that carries a parseable `registry.after_generated_at` is reporting a
-manifest that really was published at that instant, whatever the run's terminal
-outcome was; a receipt that does not carry one is skipped whatever its outcome
-says. One predicate, applied uniformly, rather than a second vocabulary to keep
-in sync with the runner's. `dry_run` receipts are ordinary candidates for the
-same reason: a dry run leaves `after_generated_at` equal to the pre-image, which
-is the current manifest's real generation time.
+Which generation time a candidate answers with depends on the receipt's
+`outcome`, because a receipt describes a run, not the manifest the consumer reads
+(`services/orchestrator/scheduler_file_providers.py` reads `generated_at` from the
+on-disk manifest itself). The rule is closed over the runner's `OUTCOMES`:
+
+- **`published`, `published_receipt_failed`, `dry_run`** — the registry's
+  `after_generated_at` is what is on disk. `published_receipt_failed` is only ever
+  stamped onto an already-`published` receipt whose primary write failed
+  (`scripts/scheduler_file_provider_refresh.py`, the `_publish_primary_receipt`
+  failure branch), so its registry bytes are committed; a dry run copies the
+  pre-image into every `after_*` field.
+- **Every other outcome** (`replace_uncertain`, `restored_previous`, `failed`,
+  `already_running`) — `after_generated_at` is **not** trusted. A
+  `replace_uncertain` receipt carries the registry's pre-rollback evidence even
+  when `_rollback_provider_transaction` has verifiably restored the older bytes,
+  because transaction uncertainty from a later provider forces that branch. Such a
+  candidate answers with the registry's `before_generated_at` — the manifest that
+  was on disk before the run, never newer than what is on disk now — and when
+  that field is absent the candidate is unresolvable and resolution moves on.
+
+Grading from `before_generated_at` can only overstate the age, so the failure
+direction is a spurious `manifest_stale`, never a false `ok`. The probe's trusted
+set is pinned as a subset of the runner's `OUTCOMES` by a test that imports both,
+so a renamed or added outcome reds instead of silently falling into either bucket.
 
 The receipt records which source answered, as a closed three-shape field
 `manifest_source`: `latest`, `history:<filename>`, or `unavailable`. That is the
@@ -359,7 +375,8 @@ rather than incidental.
 
 ### D5: Dry-run mirror count comes from the prospective set, never a constant
 
-In `refresh_scheduler_file_providers`, `worker_registry_result` is initialized to
+Line numbers in this section cite `master` before the fix. In
+`refresh_scheduler_file_providers`, `worker_registry_result` is initialized to
 `None` (`scripts/scheduler_file_provider_refresh.py:721`) and only assigned
 inside the `not dry_run` publisher branch (`:859-860`). Under dry-run the mirror
 evidence is built from that `None` (`:985-987`), so `_provider_evidence`'s
@@ -476,6 +493,7 @@ Regression rows:
 | R9b | probe, `latest.json` unresolvable, crossed with **each** of the three timer verdicts | the timer verdict wins every time — `timer_stopped`, `timer_not_enabled`, and `timer_not_scheduled` (active with empty or unparseable `NextElapseUSecRealtime`) — never masked by a manifest-evidence verdict. All three arms are asserted: the spec says "SHALL NOT mask **any** timer verdict", and pinning two of three let the precedence-7 arm be hoisted above `timer_not_scheduled` with the suite still green |
 | R9c | probe, `latest.json` unresolvable **and** no history candidate resolves an age | `manifest_unavailable`, exit non-zero, never `ok`; `manifest_source` is `unavailable` |
 | R9d | probe, history fallback bounds | directory listing capped at 200 entries and at most 10 candidates opened; each read bounded and `O_NOFOLLOW`; only `refresh_<UTC>_<uuid>.json` names considered; candidates ordered by lexical descending filename, never by `mtime` |
+| R9e | probe, a candidate receipt whose `outcome` is not `published` / `published_receipt_failed` / `dry_run` but which carries a registry provider | the candidate answers with `before_generated_at` (never newer than the on-disk manifest) or, lacking it, is skipped; a `replace_uncertain` receipt with fresh `after_generated_at` and stale `before_generated_at` never grades `ok`; the trusted-outcome set is a subset of the runner's `OUTCOMES`, asserted by one test importing both |
 | R10 | config thresholds outside their enforced range | rejected at config time, non-zero, before any evidence is collected. Enforced range is `1..144` for all three (>= 24 h of margin below the consumer's 168 h bound), with `STOPPED_DWELL_HOURS` additionally capped at 24 h. Asserted at the boundaries: 144 accepted, 145 refused; stopped-dwell 24 accepted, 25 refused; and the previously-accepted 167 refused |
 | R10b | no in-range threshold combination grades a dead lane `ok` past one cadence | property test over the accepted threshold ranges: for the 2026-08-28 geometry (`enabled` + `inactive`, manifest stale), no accepted combination yields `ok` once idle exceeds 24 h. This is the executable form of the margin claim — the prose version held for the defaults only |
 | R11 | probe source scanned for `start\|stop\|enable\|disable\|restart\|daemon-reload` | zero hits |
@@ -485,9 +503,9 @@ Regression rows:
 | R13 | probe source scanned for non-stdlib imports | zero hits (self-contained, D4) |
 | R14 | probe receipt written | parent dir private, file mode 0600, bounded size, required fields present, no env values other than the integer thresholds and unit name. The field set is closed and includes `manifest_source`, whose value is exactly one of `latest`, `history:<filename>`, `unavailable` |
 | R14b | probe receipt write fails (short write, or an error mid-write) | fails closed with a non-zero exit **and** the previous good receipt is left intact — never truncated, never destroyed; the verdict and any evidence errors are printed to the journal before the process exits, since D2 makes the journal the alert channel |
-| R15 | the **probe** installer `--install` / `--enable` / `--rollback` | the protected units are unchanged across the run, compared per unit **type**: for the two **timers** both `UnitFileState` and `is-active` byte-equal before and after; for the two timer-driven **oneshot services** only `UnitFileState`, since a oneshot's `is-active` legitimately flips on its own cadence (the compute scheduler every 5 minutes, the refresh service inside its 02:15-04:15Z window) and comparing it would abort on a unit nobody touched. Proven behaviourally at **every** call site: on the main paths by a divergent second read that must abort the run and back it out, and on the two ERR-trap restore paths — where the abort comes from a failing verb — by the trap's own assertion re-reading all four protected units. A source grep is not evidence, and neither is covering `--install` alone: five of six call sites were once dark while `--install` stayed green |
+| R15 | the **probe** installer `--install` / `--enable` / `--rollback` | the protected units are unchanged across the run, compared per unit **type**: for the two **timers** both `UnitFileState` and `is-active` byte-equal before and after; for the two timer-driven **oneshot services** only `UnitFileState`, since a oneshot's `is-active` legitimately flips on its own cadence (the compute scheduler every 5 minutes, the refresh service inside its 02:15-04:15Z window) and comparing it would abort on a unit nobody touched. Proven behaviourally at **every** call site: on the main paths by a divergent second read that must abort the run and back it out, and on the two ERR-trap restore paths — where the abort comes from a failing verb — by the trap's own assertion re-reading all four protected units. A source grep is not evidence, and neither is covering `--install` alone: every call site other than `--install` was once dark while `--install` stayed green |
 | R15b | the probe installer's protected-state baseline is captured per invocation | `protected.before` is written at the start of **every** action, so the assertion means "this invocation changed nothing" and no on-disk format is ever a contract between two versions of the installer. Evidence: a test seeding a stale, differently-shaped baseline must leave each action behaving correctly. Nothing restores *from* this file |
-| R15c | the probe installer `--rollback` reports success only on a read-back | after removing the probe units, `--rollback` re-reads the probe timer and service and prints `rolled_back` only when each reports `is-enabled` in {`disabled`, `static`, `not-found`, empty} and `is-active` in {`inactive`, `failed`} (`failed` is the state every non-healthy verdict leaves the probe service in, so refusing it would make rollback impossible after a real alert; empty `is-active` means the user manager is unreachable and is refused). A `disable --now` that systemctl refuses leaves the timer armed, and the run exits non-zero with no status line — the `|| true` on the removal verbs stays, because the same helper runs inside the `--install` ERR trap, and the outcome is judged by what systemd reports afterwards, not by whether the call appeared to succeed. Evidence: a refused-disable test, a complying-disable test, parametrized accept and refuse sets, and a runbook pin that reads the same accept sets |
+| R15c | the probe installer reports a disarmed probe only on a read-back — `--rollback` and the `--install` main path | before printing `rolled_back` or `installed_stopped`, the installer re-reads the probe timer **and** the probe service **independently** and succeeds only when each reports `is-enabled` in {`disabled`, `static`, `not-found`, empty} and `is-active` in {`inactive`, `failed`} (`failed` is the state every non-healthy verdict leaves the probe service in, so refusing it would make rollback impossible after a real alert; empty `is-active` means the user manager is unreachable and is refused). "Disarmed" means inert, not file-absent: `--rollback` restores the unit files that existed before the last `--install` (so after two installs the probe's own disabled files remain), and it never re-arms, because `disable --now` runs before any file is restored. A `disable --now` that systemctl refuses leaves the timer armed, and the run exits non-zero with no status line — the `|| true` on the removal verbs stays, because the same helper runs inside the `--install` ERR trap, and the outcome is judged by what systemd reports afterwards. Evidence: refused-disable tests for both actions, a complying-disable test, per-unit divergence (timer disarmed while the service is still `activating`/`active` is refused), parametrized accept and refuse sets, one test parsing the installer's own `case` arms against the accept sets, and a runbook pin reading those same sets |
 | R16 | dry-run, direct-grid + worker mirror, N models | `outcome=dry_run`, `reason=dry_run_complete`, `phase=complete`; registry and mirror `entry_count` both N |
 | R17 | dry-run boundaries: single model and N models | counts agree at 1 and at N; no literal 76 anywhere in the assertion |
 | R17b | dry-run over an **empty** model set, both paths | fails closed with `provider_invalid` — direct-grid at `:896-898`, non-direct-grid at `:961-962` (empty readiness). The runner catches the `RefreshError` and persists a terminal `outcome=failed` / `reason=provider_invalid` receipt with an empty `providers` list, which is correct: what is unreachable is a **successful zero-count `dry_run` receipt**, and neither guard may be relaxed to make one reachable |
@@ -543,7 +561,7 @@ same documented steady-state row the refresh timer has (R11c).
   host", and off-host routing is a separate alerting lane with its own auth and
   delivery surface. Recorded as a known limit and filed as a follow-up at merge.
 - The probe cadence adds ticks on a production compute node. Bounded: hourly,
-  stdlib-only, two read-only `systemctl` calls and one small JSON read, with a
+  stdlib-only, two read-only `systemctl` calls, one bounded receipt read and at most 10 more on the history fallback, with a
   short `TimeoutStartSec` so a wedged probe becomes visible instead of hanging.
 - Thresholds are judgement calls. All three are env-overridable and all three
   are range-checked to `1..144`, with the stopped-dwell additionally capped at

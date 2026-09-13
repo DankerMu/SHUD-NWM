@@ -100,6 +100,11 @@ write any file under the provider store.
   earlier receipt in the runner's bounded history directory can
 - **THEN** the probe resolves the manifest age from the most recent such
   receipt, ordered by the fixed-width UTC timestamp their filenames carry
+- **AND** a candidate receipt reports the registry generation time the consumer
+  would read: the post-publish time only when its outcome guarantees those bytes
+  are on disk (published, published with a failed primary receipt, or dry-run),
+  and otherwise the pre-run time, so a run that rolled the registry back can never
+  make the manifest look fresher than it is
 - **AND** the receipt records which source answered, distinguishing the latest
   receipt, a named history receipt, and no available source
 - **AND** the scan is bounded in both the number of directory entries considered
@@ -130,14 +135,18 @@ write any file under the provider store.
   every invocation, so the comparison always describes that one invocation and
   no on-disk baseline is ever interpreted across versions of the installer
 
-#### Scenario: The probe installer's rollback reports success only when the probe is really disarmed
+#### Scenario: The probe installer reports a disarmed probe only when it really is
 
-- **WHEN** the probe installer's rollback runs and systemd refuses to disable or
-  stop the probe timer or service
-- **THEN** the rollback exits non-zero and does not report a rolled-back status
-- **AND** success is reported only after re-reading both probe units shows
-  neither is enabled nor active, where a failed probe service left behind by a
-  non-healthy verdict counts as disarmed and an unreachable user manager does not
+- **WHEN** the probe installer's install or rollback runs and systemd refuses to
+  disable or stop the probe timer or service
+- **THEN** the run exits non-zero and does not report an installed-stopped or
+  rolled-back status
+- **AND** success is reported only after re-reading each probe unit on its own
+  shows neither is enabled nor active, where a failed probe service left behind
+  by a non-healthy verdict counts as disarmed and an unreachable user manager
+  does not
+- **AND** disarmed means inert rather than removed: rollback restores whatever
+  unit files preceded the last install and never re-arms them
 
 ### Requirement: The tracked DB-free scheduler env template carries every key the documentation declares mandatory
 

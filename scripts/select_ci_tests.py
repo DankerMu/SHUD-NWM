@@ -2585,15 +2585,16 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # runbook by path (`test_the_runbook_states_the_same_pinned_terminal_stage`
     # asserts the pinned `NHMS_ORCHESTRATOR_TERMINAL_STAGE=forecast_state_save_qc`
     # and `NHMS_REQUIRE_FORECAST_WARM_START=true` appear in it), so the
-    # README/runbook/template mutual-consistency guard must run on a
-    # runbook-only PR -- otherwise the drift that produced #2075 can re-enter
-    # through the document that is supposed to pin the value.
+    # README/runbook/template mutual-consistency guard is selected whenever
+    # this runbook is in the diff. `docs/**` does not open the ci.yml backend
+    # lane, so the selection takes effect only when the lane opens for another
+    # reason; a runbook-only PR relies on the master full run.
     # #2146 round 2 widened this row by one again: the probe suite `read_text`s
     # this runbook and asserts its probe section states every `VERDICT_*` name,
     # each threshold's default AND ceiling, the receipt field set taken from a
     # real `build_receipt` call, the receipt root, and the probe timer's own
-    # steady-state row. Without this entry that guard never runs on the PR that
-    # edits the document it guards.
+    # steady-state row. Same lane caveat: selected when the backend lane runs
+    # and this runbook is in the diff.
     PathTestRule(
         "docs/runbooks/current-production-ops.md",
         (
@@ -2759,7 +2760,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # fallback filters on, and imports it to pin `SCHEMA_VERSION` against the
     # probe's `REFRESH_RECEIPT_SCHEMA_VERSION`: the probe rejects any receipt
     # whose `schema_version` differs, so an unpinned runner schema bump would
-    # kill the whole manifest arm silently.
+    # kill the whole manifest arm silently. Round 4 adds two more imports: the
+    # probe's trusted-outcome set is pinned as a subset of `OUTCOMES`, and its
+    # history listing cap as above `MAX_HISTORY`.
     PathTestRule(
         "scripts/scheduler_file_provider_refresh.py",
         (
@@ -2790,6 +2793,8 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # permanently DB-free and the probe must clear the same libpq selector set.
     # Editing this service's selector list without editing the probe's would
     # red that assertion, so the probe suite is a literal reader of this path.
+    # It also reads this unit's `TimeoutStartSec=` and pins the probe's default
+    # stopped-dwell at three times it.
     PathTestRule(
         "infra/systemd/nhms-scheduler-file-provider-refresh.service",
         (

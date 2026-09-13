@@ -2752,8 +2752,10 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
         assert select_tests([path], repo_root=Path(".")) == [], f"{path} must stay selector-empty"
     # #2075 widened this EXACT set by one: `tests/test_env_templates.py` is a
     # literal reader of this runbook (it asserts the pinned terminal stage
-    # appears there), so a runbook-only PR must run the README/runbook/template
-    # consistency guard as well as the deployment contract.
+    # appears there), so the README/runbook/template consistency guard is
+    # selected alongside the deployment contract. `docs/**` does not open the
+    # backend lane, so this takes effect only when the lane opens for another
+    # reason; a runbook-only PR relies on the master full run.
     # #2146 round 2 widened it by one more: the probe suite reads this runbook's
     # probe section and pins every verdict name, each threshold's default AND
     # ceiling, the receipt field set and the probe timer's steady-state row.

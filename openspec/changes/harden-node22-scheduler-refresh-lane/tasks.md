@@ -120,10 +120,12 @@ Evidence floor:
       makes a lexical **descending** sort chronological, so no timestamp is parsed and no
       `mtime` is trusted. Filter to that filename shape, cap the directory listing at 200
       entries, open at most the 10 newest, and bound each read `O_NOFOLLOW` exactly as
-      `latest.json` is read. First candidate yielding a parseable
-      `registry.after_generated_at` wins; do **not** gate on the receipt's `outcome`
-      (a `dry_run` receipt is an ordinary candidate — its `after_generated_at` is the
-      current manifest's real generation time). Record the answering source in
+      `latest.json` is read. First candidate yielding a trusted registry
+      generation time wins, under design D3b's outcome rule: `after_generated_at` for
+      `published` / `published_receipt_failed` / `dry_run`; `before_generated_at` for
+      every other outcome (a `replace_uncertain` receipt can carry pre-rollback
+      evidence for bytes no longer on disk); no usable field -> the candidate is
+      skipped. The trusted set is pinned as a subset of the runner's `OUTCOMES` (R9e). Record the answering source in
       `manifest_source`. Exhausting both sources means the age is unresolved.
 - [x] 1.6 Add `infra/systemd/nhms-node22-refresh-timer-health.{service,timer}`:
       user-scope oneshot, hourly, `Persistent=true`, bounded `TimeoutStartSec`,
@@ -213,6 +215,7 @@ Evidence floor:
 | R9b history fallback does not mask any timer verdict | three unit tests, one per timer verdict, each with an unresolvable `latest.json` and no usable history: `enabled`+`inactive` past the dwell -> `timer_stopped`; `UnitFileState` not `enabled` -> `timer_not_enabled`; `active` with empty (and separately, unparseable) `NextElapseUSecRealtime` -> `timer_not_scheduled`. Verified that with only the first two present, hoisting the precedence-7 arm above `timer_not_scheduled` leaves the suite green — so the third is load-bearing, not symmetry |
 | R9c `manifest_unavailable` | unit tests: no history directory; history present but every candidate unresolvable -> `manifest_unavailable`, non-zero, `manifest_source=unavailable`, never `ok` |
 | R9d fallback bounds | unit tests: a history directory of >200 entries is not fully listed; at most 10 candidates are opened (spy on the read); off-shape filenames are skipped; a symlinked candidate is refused; ordering is by descending filename with `mtime` deliberately set to contradict it |
+| R9e the receipt's outcome decides which generation time is trusted | unit tests: a `replace_uncertain` `latest.json` whose registry `after_generated_at` is fresh and `before_generated_at` is stale grades from the stale value (not `ok` on an otherwise healthy lane); the same receipt with no `before_generated_at` is skipped and history answers; `published_receipt_failed` and `dry_run` use `after_generated_at`; `failed`/`restored_previous`/`already_running` carrying a registry provider use `before_generated_at`; parametrized over every member of the runner's `OUTCOMES` so each lands in exactly one bucket, with an import-level assertion that the probe's trusted set is a subset of `OUTCOMES`. Reds when the outcome check is removed |
 | R10 threshold range | unit tests at the boundaries: for each **freshness** threshold 144 accepted / 145 refused; for the stopped-dwell 24 accepted / 25 refused (its cap is one cadence, so it never reaches 144); 145 refused for all three; 167 refused as a literal, since it was accepted before this fix; a refused value writes no receipt |
 | R10b no in-range combination greens a dead lane | property test sweeping the accepted ranges against the 2026-08-28 geometry, asserting no accepted threshold combination yields `ok` once idle exceeds one cadence |
 | R11 no mutation verbs | source-scan test over the probe file, zero hits |
@@ -222,9 +225,9 @@ Evidence floor:
 | R13 stdlib only | source-scan test of the probe's import statements against `sys.stdlib_module_names` |
 | R14 receipt shape and mode | unit test: parent dir mode, file mode 0600, required fields present (incl. `manifest_source` from its closed set), size bounded, no env values beyond thresholds and unit name |
 | R14b durable receipt write | unit tests: `os.write` monkeypatched to a short write -> fails closed, non-zero; a write failure leaves the previous receipt byte-identical; the verdict is on stdout/journal before the failure exit |
-| R15 probe installer leaves units untouched | the probe installer's before/after assertion, per unit type, proven behaviourally at **every** call site — the `--install` and `--enable` main assertions, both ERR-trap restore paths, and `--rollback` — each by a test that reds when that one assertion is blanked. On the main paths a divergent second read of a protected unit must abort the run and back it out; on the two ERR-trap paths the abort is triggered by a failing verb, and the evidence is that the trap's own assertion re-reads all four protected units. A paired negative case flips only a oneshot's `is-active` and asserts it does **not** fire. A source grep is not evidence for this row, and neither is `--install` alone: five of six call sites were once dark while `--install` stayed green |
+| R15 probe installer leaves units untouched | the probe installer's before/after assertion, per unit type, proven behaviourally at **every** call site — the `--install` and `--enable` main assertions, both ERR-trap restore paths, and `--rollback` — each by a test that reds when that one assertion is blanked. On the main paths a divergent second read of a protected unit must abort the run and back it out; on the two ERR-trap paths the abort is triggered by a failing verb, and the evidence is that the trap's own assertion re-reads all four protected units. A paired negative case flips only a oneshot's `is-active` and asserts it does **not** fire. A source grep is not evidence for this row, and neither is `--install` alone: every call site other than `--install` was once dark while `--install` stayed green |
 | R15b probe baseline captured per invocation | parametrized over all three actions: seed a stale, differently-shaped `protected.before`, then assert the action behaves correctly — exit 0 with its status line — proving the file is rewritten before it is read rather than inherited from a previous invocation. Nothing restores from this file |
-| R15c probe rollback reports success only on a read-back | installer test with fake `disable` refused after `--install` + `--enable`: timer still enabled/active, no `rolled_back` on stdout, non-zero exit; paired test where systemctl complies exits 0; parametrized accept set (8) and refuse set (10, incl. `masked`, `active`, empty `is-active`); a runbook test comparing the documented accept table as a set against the same tuples the behaviour tests use. Reds when the read-back call is blanked |
+| R15c probe installer reports a disarmed probe only on a read-back | for both `--rollback` and `--install`: fake `disable` refused -> no status line, non-zero exit, timer still enabled/active; paired complying test exits 0. Per-unit fake knobs: timer disarmed + service `activating` (and `active`) refused; timer disarmed + service `static`/`failed` accepted; the mirror case (timer bad, service good) refused. Parametrized accept set and refuse set. A test extracting the two `case` arm patterns from `scripts/install_node22_refresh_timer_health.sh` asserts set equality with the accept tuples (reds when `indirect` is added to an arm), and the runbook accept table is compared to the same tuples. Reds when the read-back call is blanked on either action, or when `"$service"` is dropped from the read-back loop |
 | R16 dry-run counts agree, N models | pytest over a multi-model fixture; assertion derives N from the fixture, no literal 76 |
 | R17 dry-run boundaries | pytest: 1 model and N models, counts derived from the fixture |
 | R17b empty set stays fail-closed | pytest: empty model set fails closed with `provider_invalid` on both the direct-grid (`:896-898`) and non-direct-grid (`:961-962`) paths, yielding a terminal `outcome=failed` receipt with no providers — never a successful zero-count `dry_run` receipt |
@@ -234,7 +237,8 @@ Evidence floor:
 | R21 post-gate failure keeps reason | existing pytest for that path plus an explicit assertion the reason is not `primary_receipt_failed` |
 | R22 non-dry-run unchanged | full `tests/test_scheduler_file_provider_refresh.py` green |
 | R23 env template complete | `tests/test_env_templates.py` against the README required-key block, values included |
-| 3.11 / 3.12 compatibility | R13 (stdlib-only) plus a probe run under node-22's 3.12.7 interpreter in the live receipt; repo suite runs under the 3.11 pin |
+
+Not an invariant row (no matrix twin): 3.11 / 3.12 compatibility is covered by R13 (stdlib-only) plus a probe run under node-22's 3.12.7 interpreter in the live receipt; the repo suite runs under the 3.11 pin.
 
 ## Verification
 

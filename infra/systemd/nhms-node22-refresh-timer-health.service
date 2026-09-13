@@ -24,5 +24,6 @@ StandardError=journal
 # receipt root the probe creates for itself.
 UMask=0077
 # A wedged watchdog must become visible rather than hang: the probe does two
-# bounded read-only systemctl queries and one small JSON read.
+# bounded read-only systemctl queries, one bounded receipt read, and up to 10
+# more on the history fallback.
 TimeoutStartSec=120

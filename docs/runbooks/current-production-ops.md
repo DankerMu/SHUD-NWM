@@ -1226,10 +1226,13 @@ scripts/install_node22_scheduler_file_provider_refresh.sh --rollback
 | `list-timers` 的 `NEXT` | `systemctl --user list-timers nhms-scheduler-file-provider-refresh.timer --no-pager` | 具体时刻，且在 36 小时以内 | `-`（等价 `status` 里的 `Trigger: n/a`），或远得离谱 |
 | manifest 年龄 | 见下方 `jq` 命令（含管道符，无法放进表格单元格） | 距今 < 120 小时 | ≥ 120 小时是预警，≥ 168 小时 consumer 已经 fail closed；`jq` 压根解不出（receipt 缺失/坏掉/`providers` 为空）**同样是不合格**——探针会先回退到 `history/`，两路都解不出才报 `manifest_unavailable`，看探针 receipt 的 `manifest_source` 字段定位 |
 
-第四列的取值命令（表格单元格里的转义反斜杠会被 `jq` 当成语法错误，所以单独成块）：
+第四列的取值命令（表格单元格里的转义反斜杠会被 `jq` 当成语法错误，所以单独成块）。
+取哪个字段看 receipt 的 `outcome`，与探针同一规则（见下文"manifest 年龄的取数顺序"）：
 
 ```bash
-jq -r '.providers[] | select(.name == "registry") | .after_generated_at' \
+jq -r '.outcome as $o | .providers[] | select(.name == "registry")
+  | if ($o == "published" or $o == "published_receipt_failed" or $o == "dry_run")
+    then .after_generated_at else .before_generated_at end' \
   /scratch/frd_muziyao/nhms-prod/workspace/provider-refresh/receipts/latest.json
 ```
 
@@ -1262,9 +1265,9 @@ calendar event **不会**在重新 `start` 时补跑，所以既没有失败日�
 | 2 | `manifest_expired` | manifest 年龄 ≥ 168 小时——consumer 已经 fail closed，比任何 timer 事实都严重 |
 | 3 | `timer_stopped` | `ActiveState != active` 且已停超过 stopped-dwell。不带 `enabled` 谓词：`disabled` 且停着同样报这条 |
 | 4 | `timer_not_enabled` | `UnitFileState` 不是 `enabled`。此刻恰好 active 也算——它熬不过一次 reload 或重启 |
-| 5 | `timer_not_scheduled` | timer `active`，但 `NextElapseUSecRealtime` 为空，或比 next-dwell 还远 |
+| 5 | `timer_not_scheduled` | timer `active`，但 `NextElapseUSecRealtime` 为空、不可解析，或比 next-dwell 还远 |
 | 6 | `manifest_stale` | manifest 年龄 ≥ manifest-age 阈值（且 < 168）。两个 manifest 比较都是"等于即命中" |
-| 7 | `manifest_unavailable` | `latest.json` 与 history 回退都解不出 manifest 年龄。**排在 `ok` 之前、所有 timer 判决之后**：解不出的 manifest 不能说明 timer 的任何事，所以不许遮住 `timer_stopped`/`timer_not_enabled`；但它仍是缺失的证据，所以也到不了 `ok` |
+| 7 | `manifest_unavailable` | `latest.json` 与 history 回退都解不出 manifest 年龄。**排在 `ok` 之前、所有 timer 判决之后**：解不出的 manifest 不能说明 timer 的任何事，所以不许遮住 `timer_stopped`/`timer_not_enabled`/`timer_not_scheduled`；但它仍是缺失的证据，所以也到不了 `ok` |
 | 8 | `ok` | 以上都不命中 |
 
 两路证据**独立定级**：systemd 读不动是第 1 条，manifest 解不出是第 7 条，互不遮蔽。
@@ -1319,7 +1322,7 @@ Receipt 落在 `/scratch/frd_muziyao/nhms-prod/workspace/refresh-timer-health/re
 
 | 值 | 含义 |
 | --- | --- |
-| `latest` | 配置的 `latest.json` 直接解出了 `registry.after_generated_at` |
+| `latest` | 配置的 `latest.json` 直接解出了 registry 的生成时间（取哪个字段按下文的 `outcome` 规则） |
 | `history:<文件名>` | `latest.json` 解不出，由 `history/` 里这份 receipt 回答（只是文件名，不是路径） |
 | `unavailable` | 两路都解不出，对应 `manifest_unavailable` 判决 |
 
@@ -1343,10 +1346,14 @@ off-host 路由是另一条有自己认证与投递面的告警链路，另案�
 - 只考虑 runner 自己的文件名形状 `refresh_<YYYYmmddTHHMMSSZ>_<uuid12>.json`；
 - 因为前缀是定宽 UTC 时间戳，**按文件名倒序**就是时间倒序——不解析时间戳，
   也**不信 `mtime`**（`mtime` 是文件系统的属性，不是运行的属性，rsync/恢复都会改它）；
-- 目录列举封顶 200 条（runner 自己的 `MAX_HISTORY = 32` 远在其下），最多打开最新的 10 份，
+- 目录列举封顶 200 条（高于 runner 自己的 `MAX_HISTORY = 32`），最多打开最新的 10 份，
   每份照样 `O_NOFOLLOW` + 尺寸封顶；
-- **不看 receipt 的 `outcome`**：带得出 `registry.after_generated_at` 就是候选，
-  `dry_run` receipt 也是普通候选（dry run 里该字段就等于当前 manifest 的真实生成时间）。
+- **按 receipt 的 `outcome` 取字段**，`latest.json` 与每份 history 同一规则：`outcome` 是
+  `published`、`published_receipt_failed`、`dry_run` 时取 `registry.after_generated_at`；
+  其余 outcome（`replace_uncertain`、`restored_previous`、`failed`、`already_running`）
+  取 `registry.before_generated_at`，该字段缺失或不可解析时这份 receipt 解不出，继续往下找。
+  原因：`replace_uncertain` 的 receipt 可能带着一个已被回滚掉的、更新的 `after_generated_at`，
+  而它的 `before_generated_at` 不会比磁盘上的 manifest 更新。
 
 效果：一次失败的演练不再产生告警，上一份成功 receipt 还能回答；
 而两路都解不出时才报 `manifest_unavailable`（`manifest_source=unavailable`）。
@@ -1364,20 +1371,27 @@ off-host 路由是另一条有自己认证与投递面的告警链路，另案�
 
 探针 installer 用 `set -Eeuo pipefail`：
 没有 `-E`，顶层的 ERR trap 不会被函数体继承，断言在函数里挂掉时脚本只会
-退 1 而 trap 根本不跑，回退等于不存在。
+退 1 而 trap 根本不跑，回退等于不存在（有测试拿去掉 `-E` 的副本实跑，探针 unit 被留在原地）。
 
 
 ```bash
-scripts/install_node22_refresh_timer_health.sh --install    # 落 unit 文件，保持停用
+scripts/install_node22_refresh_timer_health.sh --install    # 落 unit 文件，保持停用，读回确认
 scripts/install_node22_refresh_timer_health.sh --enable     # 装载 hourly timer
 systemctl --user list-timers nhms-node22-refresh-timer-health.timer --no-pager
-scripts/install_node22_refresh_timer_health.sh --rollback   # 停用并撤回探针 unit，读回确认
+scripts/install_node22_refresh_timer_health.sh --rollback   # 停用并复位到调用前状态，读回确认
 ```
 
-`--rollback` 的成功**以读回为准，不以 systemctl 调用是否报错为准**：撤回 unit 文件并
-`daemon-reload` 之后，脚本对探针 timer 和 service 各读一次 `is-enabled` / `is-active`，
-只有两者都落在下表里才打印 `{"status":"rolled_back",...}` 并退出 0；否则非零退出、
-stderr 说明哪个 unit 处于什么状态、**不打印** `rolled_back`。
+"停用"指不会再触发，不是文件不在。`--rollback` 先 `disable --now` 探针 timer，再把两个
+unit 文件复位成上一次 `--install` 之前的样子（那时没有就删掉），然后 `daemon-reload`；
+停用在复位文件之前，所以回滚**从不重新 arm**。连装两次再回滚，留下的是第一次安装落下的、
+已停用的探针文件。
+
+`--install` 与 `--rollback` 的成功都**以读回为准，不以 systemctl 调用是否报错为准**：
+`--install` 在 `disable --now` 之后、`--rollback` 在 `daemon-reload` 之后，脚本对探针
+timer 和 service **各自独立**读一次 `is-enabled` / `is-active`，只有两者都落在下表里才打印
+`{"status":"installed_stopped",...}` / `{"status":"rolled_back",...}` 并退出 0；否则非零
+退出、stderr 说明哪个 unit 处于什么状态、**不打印**状态行。`--install` 读回不过时 ERR trap
+照常回退：unit 文件复位成本次调用之前的内容，探针 timer 不会因此被 arm。
 
 | 读数 | 接受 | 为什么 |
 | --- | --- | --- |
