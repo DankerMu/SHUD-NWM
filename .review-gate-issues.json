@@ -3355,6 +3355,11 @@
           "pr": 2311,
           "outcome": "merged",
           "rounds": 2
+        },
+        {
+          "pr": 2318,
+          "outcome": "merged",
+          "rounds": 1
         }
       ]
     },
