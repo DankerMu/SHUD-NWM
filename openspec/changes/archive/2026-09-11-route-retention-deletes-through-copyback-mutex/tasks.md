@@ -309,6 +309,9 @@ at `4fe059f7` and the covering mutants are recorded there.
   `packages/common` is outside `DIRECTORY_RULE_AUDIT_PATHS`, so the gate does
   not demand a rule. Pre-existing from #2035, found while wiring T9, out of
   scope here. Routed at Phase 8.
+  **Closed by #2260** (change `close-selector-gate-fixture-gaps`): a path-exact
+  `packages/common/copyback_guard.py` rule now adds the mutex suite, and the
+  exact ten-path selection is pinned in `tests/test_select_ci_tests.py`.
 - A persistently contended copyback root reclaims **nothing**, quietly. Every
   entry lands in `result.failed` with the lock error, the pass reports
   `completed`, and nothing downstream distinguishes "failed to acquire on every
@@ -358,6 +361,11 @@ at `4fe059f7` and the covering mutants are recorded there.
   `runs_only_roots=` wiring it guards, which makes this the retention corpus's
   existing shape rather than a regression this change introduces. The
   full-suite master run catches it post-merge. Routed at Phase 8.
+  **Closed by #2260 for the mutex suite** (change
+  `close-selector-gate-fixture-gaps`): the `scheduler_runtime.py` stop rule is
+  extended at its site with this suite, and the exact 23-path selection is
+  pinned. The `tests/test_retention_extra_roots.py` sibling gap stays **open**
+  (outside #2260's boundary).
 - Issue #2238's sixth acceptance criterion (correct #2035's "Unchanged
   downstream consumers" wording for `retention.py`) is **already satisfied at
   base `6fdb2015`** by that change's own post-ceiling sweep. This change neither

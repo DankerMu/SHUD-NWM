@@ -528,6 +528,10 @@ class PathTestRule:
     pattern: str
     tests: tuple[str, ...]
     stop_on_match: bool = False
+    # #2198: honoured ONLY on CHANGED_TEST_FILE_RULES (via `_rule_activated`).
+    # The PATH_TEST_RULES and SUPPORT_MODULE_TEST_RULES loops never read it, so
+    # a gate set there would be silently inert; tests/test_select_ci_tests.py
+    # rejects it on both tables by table-level guard.
     only_when_any_changed: tuple[str, ...] = ()
 
 
@@ -1631,8 +1635,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        # Extended AT THE RULE SITE (#2260), not by editing the shared constant:
+        # FILE_JOURNAL_READ_STATE_TESTS also serves every other journal pattern,
+        # whose selection must not move. scheduler_runtime.py is stop-rule owned,
+        # so the broad `services/orchestrator/**` list that carries the
+        # copyback-mutex partition is unreachable here. It is the scheduler call
+        # site that names the shared copyback root the retention deleter locks,
+        # one of the mutex's two load-bearing modules (the other is
+        # packages/common/copyback_guard.py, routed below), so this stop rule is
+        # where its gap closes. The sibling tests/test_retention_extra_roots.py
+        # gap stays open (issue boundary, recorded known limit).
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[11],
-        FILE_JOURNAL_READ_STATE_TESTS,
+        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_retention_copyback_mutex.py"),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -2251,8 +2265,17 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # PRECIP_SURFACE_TESTS so the shared tuple (and with it the
         # apps/api/routes/precip.py rule below) does not inherit the prewarm
         # suite: a route-only diff must not pay for it.
+        # #2191: scripts/node27_raw_retention.py imports
+        # services.precip.constants.FILE_CACHE_DIR_ENV at module level and
+        # tests/test_node27_raw_retention.py imports that script at module level,
+        # so the raw-retention suite is a second one-hop importer suite of this
+        # tree. It is not redundant with tests/test_precip_overlay.py: that suite
+        # catches a first-order rename of the env name, but a CONSISTENT rename
+        # that also updates its pin leaves the raw-retention suite's bare literal
+        # stale — green in the PR lane, red only on master. Spelled in place for
+        # the same shared-tuple reason as the prewarm suite.
         "services/precip/**",
-        (*PRECIP_SURFACE_TESTS, "tests/test_node27_mvt_prewarm.py"),
+        (*PRECIP_SURFACE_TESTS, "tests/test_node27_mvt_prewarm.py", "tests/test_node27_raw_retention.py"),
     ),
     PathTestRule(
         # #2010: the two public routes. `apps/api/**` below buys the three broad
@@ -2310,6 +2333,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ),
     ),
     PathTestRule(
+        # #2260: the retention copyback mutex's lock semantics live here, yet no
+        # rule named this module, so a guard-only diff reached only its same-name
+        # suite plus the packages/common/** supplemental routes and never the
+        # mutex suite. Path-exact with neither flag: no stop rule matches this
+        # path, so the existing selections accumulate unchanged beside it.
+        "packages/common/copyback_guard.py",
+        ("tests/test_retention_copyback_mutex.py",),
+    ),
+    PathTestRule(
         # I1 #1980 river_ts_render: the shared per-store renderer. It owns the
         # text-identity vocabulary and the table-scoped attribution every oracle
         # in the group now imports, so a diff to it can blunt all of them at once
@@ -2348,6 +2380,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     PathTestRule(
         "tests/fixtures/hydro_national_mvt_pre_store_c21bacf9.sql",
         ("tests/test_hydro_display_mvt_scaling.py",),
+    ),
+    PathTestRule(
+        # #2183: the #1913 registry-partition additions ledger is a hand-edited
+        # guard input read only by the meta-suite; as data it reaches no other
+        # rule, so a ledger-only PR would select nothing and fail on master.
+        "tests/fixtures/basins_registry_partition_additions.json",
+        ("tests/test_select_ci_tests.py",),
     ),
     PathTestRule(
         "packages/common/forecast_store.py",
@@ -4904,6 +4943,12 @@ def _rule_activated(rule: PathTestRule, path: str, changed: Sequence[str]) -> bo
     live-tree ordinary-domain classification in
     tests/test_select_ci_tests.py (which must skip only an ACTUALLY active
     redirect) cannot drift from the loop that applies the redirects.
+
+    Scope (#2198): ``only_when_any_changed`` is honoured only on
+    ``CHANGED_TEST_FILE_RULES``; the ``PATH_TEST_RULES`` and
+    ``SUPPORT_MODULE_TEST_RULES`` loops never call this predicate, and a
+    table-level guard in tests/test_select_ci_tests.py rejects the field on
+    both of those tables rather than letting it sit there inert.
     """
     if rule.only_when_any_changed and not _any_path_matches(changed, rule.only_when_any_changed):
         return False
