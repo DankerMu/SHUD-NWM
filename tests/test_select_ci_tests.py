@@ -980,11 +980,16 @@ def test_select_tests_maps_file_journal_read_state_without_whole_legacy_suites()
     # out when the surface is an orchestrator module (see the orchestrator
     # manifest tests); for a shared-library module the baseline legitimately
     # includes them.
+    # `tests/test_retention_copyback_mutex.py` is #2260's at-site addition to the
+    # scheduler_runtime.py stop rule (that stop shadows the orchestrator tree
+    # rule which carries the mutex partition). Additive to the redirect, exactly
+    # like the safe_fs.py and journal importer targets.
     assert selected == sorted(
         {
             *FILE_JOURNAL_READ_STATE_TESTS,
             *FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS,
             *CORE_SMOKE_TESTS,
+            "tests/test_retention_copyback_mutex.py",
             "tests/test_safe_fs.py",
             "tests/test_select_ci_tests.py",
             INVARIANT_SUITE_PATH,
@@ -1634,6 +1639,12 @@ def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> Non
     which this rule already selected: the gap this leg closes is the missing oracle, not a
     lane that was green.
 
+    #2191 — the second one-hop importer suite: `scripts/node27_raw_retention.py` imports
+    `services.precip.constants.FILE_CACHE_DIR_ENV` at module level and
+    `tests/test_node27_raw_retention.py` imports that script at module level while holding the
+    env name as a bare literal. A consistent rename that also updates the in-lane
+    `tests/test_precip_overlay.py` pin would otherwise be green here and red only on master.
+
     The expected list is spelled out literally rather than built from
     `PRECIP_SURFACE_TESTS` (#1827): an expectation derived from the shared tuple would
     self-certify any edit to that tuple.
@@ -1643,6 +1654,7 @@ def test_precip_tree_module_selects_the_prewarm_reader_suite(module: str) -> Non
     assert select_tests([module], repo_root=Path(".")) == [
         "tests/test_api_contract.py",
         "tests/test_node27_mvt_prewarm.py",
+        "tests/test_node27_raw_retention.py",
         "tests/test_openapi_31_contract.py",
         "tests/test_openapi_drift.py",
         "tests/test_precip_overlay.py",
@@ -1844,7 +1856,8 @@ def test_precip_composition_owner_rules_carry_neither_selection_flag() -> None:
     API suites have already accumulated by the time either owner is reached and
     `stop_on_match=True` there shadows nothing. `only_when_any_changed` is consulted only by
     `_rule_activated`, which production calls solely from the `CHANGED_TEST_FILE_RULES`
-    loop — it is a dead field on any `PATH_TEST_RULES` entry (follow-up #2198).
+    loop — it is a dead field on any `PATH_TEST_RULES` entry, now rejected table-wide by
+    `test_path_test_rules_carry_no_activation_gate` (#2198).
 
     The pin is therefore STRUCTURAL, not behavioural: it keeps a future `stop_on_match`
     from shadowing a rule appended after these two whose pattern also matches these paths,
@@ -10038,6 +10051,12 @@ STOP_RULE_AT_SITE_EXTENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("services/orchestrator/file_orchestration_journal.py", FILE_ORCHESTRATION_JOURNAL_IMPORTER_TESTS),
     ("workers/forcing_producer/direct_grid_contract.py", DIRECT_GRID_CONTRACT_IMPORTER_TESTS),
+    # #2260: the scheduler_runtime.py stop rule's at-site addition. Its shared
+    # constant FILE_JOURNAL_READ_STATE_TESTS was never pinned here (it is the
+    # redirect, pinned by the file-journal selection test), so only the at-site
+    # target is named — the same "pin what the extension added" shape as the
+    # other rows. The exact 23-element selection is pinned below.
+    ("services/orchestrator/scheduler_runtime.py", ("tests/test_retention_copyback_mutex.py",)),
 )
 
 
@@ -10070,6 +10089,86 @@ def test_at_site_extensions_did_not_widen_the_stop_rules() -> None:
         assert broad_only_target not in selected, (
             f"{module_path} now reaches the broad services/orchestrator/** rule: a stop rule stopped stopping"
         )
+
+
+# #2260: the retention copyback mutex's two load-bearing modules. Both pins are
+# exact equality against LITERAL lists (#1827): an expectation read back from
+# FILE_JOURNAL_READ_STATE_TESTS or any rule would move with production and could
+# never red. Each list is the module's prior selection plus exactly the mutex
+# suite, so a stop flag dropped (orchestrator tree targets arrive), an at-site
+# target lost, or the guard rule's existing riders shadowed all red here.
+def test_scheduler_runtime_selects_the_copyback_mutex_suite() -> None:
+    # 22 -> 23: the stop rule for scheduler_runtime.py shadows the orchestrator
+    # tree rule, so the mutex suite arrives only through the at-site extension.
+    assert Path("services/orchestrator/scheduler_runtime.py").is_file()
+
+    assert select_tests(["services/orchestrator/scheduler_runtime.py"], repo_root=Path(".")) == [
+        "tests/test_file_orchestration_journal.py",
+        "tests/test_file_orchestration_migration.py",
+        "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_cycle_run_array_job_for_filtered_model",
+        "tests/test_orchestration_chain.py::test_psycopg_active_slurm_jobs_includes_queued_pipeline_rows",
+        "tests/test_orchestration_chain.py::test_psycopg_candidate_state_latest_truth_timestamp_selects_terminal_success",
+        "tests/test_orchestration_chain.py::test_psycopg_candidate_state_limits_jobs_and_reads_events_for_candidate_scope",
+        "tests/test_orchestration_chain.py::test_psycopg_find_forcing_context_populates_package_manifest_metadata",
+        "tests/test_orchestration_chain.py::test_psycopg_has_active_pipeline_includes_queued_pipeline_rows",
+        "tests/test_production_scheduler.py::test_db_free_from_env_raw_invalid_blocks_without_submission",
+        "tests/test_production_scheduler.py::test_db_free_from_env_raw_missing_blocks_canonical_zero_without_submission",
+        "tests/test_production_scheduler.py::test_db_free_from_env_raw_ready_canonical_zero_submits_convert_without_download_source_cycle",
+        "tests/test_production_scheduler.py::test_db_free_injected_collaborators_plan_without_unimplemented_provider_blocker",
+        "tests/test_production_scheduler.py::test_db_free_injected_factory_active_slurm_status_sync_blocks_without_factory_call",
+        "tests/test_production_scheduler.py::test_db_free_injected_factory_cancel_active_slurm_blocks_without_factory_call",
+        "tests/test_production_scheduler.py::test_db_free_injected_factory_ready_candidate_submit_blocks_without_factory_call",
+        "tests/test_production_scheduler.py::test_db_free_journal_write_block_forces_retention_dry_run_before_deletion",
+        "tests/test_production_scheduler.py::test_db_free_scheduler_fake_slurm_submission_writes_file_journal_without_database_url",
+        "tests/test_production_scheduler.py::test_fresh_cycle_with_active_slurm_job_does_not_double_submit",
+        "tests/test_retention_copyback_mutex.py",
+        # #2185: services/** is a river-segment write-surface root.
+        WRITE_SURFACE_SCAN_PATH,
+        "tests/test_scheduler_journal_retention_archive.py",
+        "tests/test_scheduler_journal_retention_planning.py",
+        "tests/test_source_cycle_raw_manifest.py",
+    ]
+
+
+def test_copyback_guard_selects_the_copyback_mutex_suite_without_losing_its_owners() -> None:
+    # 9 -> 10: a path-exact rule with neither flag, so the same-name suite, the
+    # selector meta-guard rider, the #1744 core-smoke baseline and both
+    # supplemental invariant routes all still accumulate beside the mutex suite.
+    assert Path("packages/common/copyback_guard.py").is_file()
+
+    assert select_tests(["packages/common/copyback_guard.py"], repo_root=Path(".")) == [
+        "tests/test_api.py",
+        "tests/test_copyback_guard.py",
+        "tests/test_gateway.py",
+        "tests/test_migrations.py",
+        "tests/test_orchestration_chain.py",
+        "tests/test_production_scheduler.py",
+        "tests/test_retention_copyback_mutex.py",
+        "tests/test_river_segment_write_surface_scan.py",
+        "tests/test_select_ci_tests.py",
+        "tests/test_timescale_write_guard_wire_site_invariant.py",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("module_path", "expected_count"),
+    (
+        ("services/orchestrator/retention.py", 49),
+        ("services/orchestrator/cli.py", 30),
+        ("services/orchestrator/__init__.py", 48),
+        ("tests/retention_test_helpers.py", 6),
+    ),
+)
+def test_copyback_mutex_routing_leaves_the_other_retention_legs_unmoved(module_path: str, expected_count: int) -> None:
+    # #2260 must-preserve: the two new mutex edges touch neither the broad
+    # orchestrator rule, the cli.py stop rule nor the helper's support-module
+    # route, so the #2238 legs keep their selection size (measured at base
+    # 55a14398d). Every leg already selects the mutex suite; asserted too, so a
+    # count kept by swapping it out still reds.
+    selected = select_tests([module_path], repo_root=Path("."))
+
+    assert len(selected) == expected_count, f"{module_path}: selection moved to {len(selected)}: {selected}"
+    assert "tests/test_retention_copyback_mutex.py" in selected, module_path
 
 
 # --------------------------------------------------------------------------
@@ -10782,7 +10881,9 @@ def test_invariant_suite_literal_anchors_to_the_selector_constant() -> None:
 
 # The invariant suite's scan roots, read from its OWN `_scan_roots` function
 # (the authority) rather than frozen a second time. Derivation shape: find the
-# `_scan_roots` FunctionDef, take its body's final `return`, and read the
+# `_scan_roots` FunctionDef, require its body to hold EXACTLY ONE top-level
+# `return` (#2230: a second one — even with an identical tuple — fails by name
+# rather than letting a first-match read pick one silently), and read the
 # `ast.Constant` string parts joined by `/` from the `REPO_ROOT / <part>`
 # BinOp chain. The suite's roots are absolute (REPO_ROOT-based); we reduce them
 # to the repo-relative prefix (the last path part, e.g. `workers`) and glob
@@ -10796,8 +10897,13 @@ def _invariant_scan_roots() -> list[str]:
         None,
     )
     assert fn is not None, "invariant suite no longer defines _scan_roots"
-    ret = next((node for node in fn.body if isinstance(node, ast.Return)), None)
-    assert ret is not None, "_scan_roots has no return statement"
+    returns = [node for node in fn.body if isinstance(node, ast.Return)]
+    assert len(returns) == 1, (
+        f"_scan_roots must have exactly one top-level return, found {len(returns)} "
+        f"at lines {[node.lineno for node in returns]}"
+    )
+    ret = returns[0]
+    assert ret.value is not None, "_scan_roots returns no value"
     assert isinstance(ret.value, ast.Tuple), f"_scan_roots must return a tuple, got {ast.dump(ret.value)!r}"
 
     roots: list[str] = []
@@ -10909,6 +11015,21 @@ def test_supplemental_invariant_routing_reds_when_a_root_is_dropped(
 
     violations = _supplemental_roots_violations(reduced, probe="scripts/brand_new_thing.py")
     assert any("scripts/**" in v for v in violations), f"expected a named scripts/** violation, got {violations}"
+
+    # #2230: the violations helper above takes `reduced` as an argument and
+    # never reads the patched module attribute, so on its own it stays green
+    # with the monkeypatch deleted. `select_tests` reads the module global at
+    # call time, which is what makes the patch load-bearing here: without it
+    # the dropped root still routes and the first assertion reds.
+    dropped = set(select_tests(["scripts/brand_new_thing.py"], repo_root=Path(".")))
+    assert INVARIANT_SUITE_PATH not in dropped, (
+        f"dropping scripts/** from TIMESCALE_WRITE_GUARD_INVARIANT_ROOTS left {INVARIANT_SUITE_PATH} "
+        "selected: the routing loop does not read the patched constant"
+    )
+    retained = set(select_tests(["workers/brand_new_thing.py"], repo_root=Path(".")))
+    assert INVARIANT_SUITE_PATH in retained, (
+        f"dropping scripts/** also stopped a RETAINED root from selecting {INVARIANT_SUITE_PATH}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -12715,6 +12836,32 @@ def test_supplemental_invariant_derivation_fails_loudly_on_an_unknown_shape(
         _invariant_scan_roots()
 
 
+def test_supplemental_invariant_derivation_rejects_a_second_top_level_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #2230: a `_scan_roots` copy carrying two top-level returns with IDENTICAL
+    # tuples must fail by the named exactly-one-return assertion. Identical on
+    # purpose: a first-match read and a last-match read would agree on it, so
+    # only a count check can red; an empty `return ()` is no discriminator
+    # because the existing `assert roots` already reds it. Same repo-shaped
+    # tmp_path + chdir idiom as the unknown-shape test above.
+    probe_dir = tmp_path / "tests"
+    probe_dir.mkdir(parents=True)
+    (probe_dir / "test_timescale_write_guard_wire_site_invariant.py").write_text(
+        "from pathlib import Path\n"
+        "REPO_ROOT = Path('.')\n"
+        "def _scan_roots():\n"
+        "    return (REPO_ROOT / 'workers', REPO_ROOT / 'scripts')\n"
+        "    return (REPO_ROOT / 'workers', REPO_ROOT / 'scripts')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(AssertionError, match="_scan_roots must have exactly one top-level return, found 2"):
+        _invariant_scan_roots()
+
+
 def test_support_module_rule_patterns_are_distinct_exact_paths() -> None:
     # The routing table carries no `stop_on_match`, which is only safe while its
     # patterns cannot both match one path. Exact paths (no glob metacharacters)
@@ -12724,6 +12871,47 @@ def test_support_module_rule_patterns_are_distinct_exact_paths() -> None:
     assert sorted(patterns) == sorted(set(patterns))
     assert not [pattern for pattern in patterns if set(pattern) & set("*?[")]
     assert all(not rule.stop_on_match and not rule.only_when_any_changed for rule in SUPPORT_MODULE_TEST_RULES)
+
+
+def _path_rules_carrying_activation_gate(rules: Sequence[PathTestRule]) -> list[str]:
+    """Patterns of ``rules`` rows that set ``only_when_any_changed``, in table order.
+
+    #2198: the field is honoured only by the CHANGED_TEST_FILE_RULES loop; the
+    PATH_TEST_RULES loop never consults it, so on that table a gate is silently
+    inert. Pure over the passed table so the live guard and the mutant proof
+    run the SAME checker.
+    """
+    return [rule.pattern for rule in rules if rule.only_when_any_changed]
+
+
+def test_path_test_rules_carry_no_activation_gate() -> None:
+    # #2198 option (b): reject, don't honour. The SUPPORT_MODULE_TEST_RULES
+    # sibling guard above already rejects the field on that table; this is the
+    # PATH_TEST_RULES half, table-wide rather than per-owner.
+    offending = _path_rules_carrying_activation_gate(_prod_module.PATH_TEST_RULES)
+
+    assert not offending, (
+        "PATH_TEST_RULES rows set only_when_any_changed, which that loop never reads "
+        f"(the gate would be silently inert): {offending}"
+    )
+
+
+def test_path_test_rules_activation_gate_guard_names_a_gated_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #2198 constructive proof: give ONE live row a gate and the same checker
+    # the guard uses must name exactly that row's pattern.
+    gated_pattern = "services/precip/**"
+    mutant = tuple(
+        PathTestRule(rule.pattern, rule.tests, rule.stop_on_match, ("scripts/select_ci_tests.py",))
+        if rule.pattern == gated_pattern
+        else rule
+        for rule in PATH_TEST_RULES
+    )
+    assert sum(rule.pattern == gated_pattern for rule in mutant) == 1, f"{gated_pattern}: owner rule not found"
+    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", mutant)
+
+    assert _path_rules_carrying_activation_gate(_prod_module.PATH_TEST_RULES) == [gated_pattern]
+    with pytest.raises(AssertionError, match=re.escape(gated_pattern)):
+        test_path_test_rules_carry_no_activation_gate()
 
 
 @pytest.mark.parametrize(
