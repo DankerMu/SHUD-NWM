@@ -670,7 +670,7 @@ def write_budget(args):
     dsn, identity = guard(args)
     config = json.loads(w.safe_path(args.fixture_config, True).read_text())
     w.require(
-        config["parse_run_id"] == "runfcst_gfs_2026081912_dg_945b6f0bbf63c5314d47df9481892229",
+        config["parse_run_id"] == "fcst_gfs_2026081912_dg_945b6f0bbf63c5314d47df9481892229",
         "ACTUAL_SMALL_RUN_REQUIRED",
     )
     with contextlib.closing(psycopg2.connect(dsn)) as conn:
