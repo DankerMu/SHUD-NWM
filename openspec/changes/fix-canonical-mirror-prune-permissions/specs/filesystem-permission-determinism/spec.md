@@ -45,9 +45,13 @@ descriptor-bound `fchmod` before the temp tree is created and whether or not
 the call created that level. `0o2775` is written explicitly on every one of
 those directories; nothing relies on a setgid bit surviving a chmod. The setgid
 bit on `<cycle>/` is what makes the temp tree inherit the shared group at
-`mkdir`, so a cycle tree created under a `2775`, shared-group
-`canonical/<storage_source>/` is deletable by the node-27 retention account
-(#2100). Files in every lane stay `0o644`.
+`mkdir`; the lane SHALL then re-assert `0o2775` on the temp tree root before
+the first file is written, because the traversal helper that prepares it
+writes `0o755` and a file takes the shared group only from a setgid parent.
+So a cycle tree created under a `2775`, shared-group
+`canonical/<storage_source>/` — directories and files alike — carries that
+group and is deletable by the node-27 retention account (#2100). Files in
+every lane stay `0o644`.
 
 `packages/common/safe_fs.py` itself remains unchanged: it still passes an
 explicit `0o755` base mode to `os.mkdir` and still never `chmod`s a directory

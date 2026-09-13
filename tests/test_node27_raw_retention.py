@@ -727,8 +727,10 @@ def test_an_undeletable_canonical_target_fails_without_stopping_the_other_lanes(
     assertion pins the difference: with only `canonical/IFS` at `0o555` the
     `.nc` is still unlinked and `prcp_rate_or_amount/` still `rmdir`'ed, and
     only the parent-owned `rmdir <cycle>/` fails, so the cycle directory
-    survives with bytes gone. An unswept production source denies at the FIRST
-    `unlink` instead, because `prcp_rate_or_amount/` is not writable either.
+    survives with bytes gone. That is a different on-disk sequence, kept here as
+    is; the unswept-source shape the delta spec promises -- denied at the FIRST
+    `unlink` with zero bytes removed -- is
+    `test_an_unswept_canonical_source_denies_the_first_unlink_and_removes_nothing`.
     Both reach the receipt as one `PermissionError` entry in `failed[]`.
     """
     if os.geteuid() == 0:
@@ -770,6 +772,79 @@ def test_an_undeletable_canonical_target_fails_without_stopping_the_other_lanes(
     assert not aged_cache.exists()
     # rmtree removes the children it can before the parent-owned rmdir fails.
     assert canonical_cycle.exists()
+
+
+def test_an_unswept_canonical_source_denies_the_first_unlink_and_removes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The production unswept-source shape: denied at the FIRST `unlink`, zero bytes gone.
+
+    #2100 promises that a storage source added to `NODE27_RAW_RETENTION_SOURCES`
+    before its `canonical/<S>` sweep fails closed rather than half-deleting. The
+    sibling test above denies one step later (only `canonical/<S>/` is
+    unwritable, so the `.nc` is already gone when the `rmdir` fails); here
+    `prcp_rate_or_amount/` itself is not writable, which is what an unswept tree
+    looks like, and `shutil.rmtree` with no `onerror` re-raises on that first
+    `unlink`. The file, its bytes, and both directories must all survive, and
+    the cycle's size must not appear in the top-level `freed_bytes`
+    (`counts` carries planned/deleted/skipped/failed only -- no byte total).
+
+    Mode half only. The production denial is mode AND gid (`0644`/`0755` under
+    gid 1078 vs the runner's 1107); an unprivileged test cannot chgrp, so the
+    gid half is not reproducible here and is not asserted.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root ignores directory modes, so the failure cannot be simulated")
+    cache = tmp_path / "cache"
+    raw_cycle = _write_raw_cycle(tmp_path, "gfs", "2026060100")
+    canonical_cycle = _write_canonical_cycle(tmp_path, "IFS", "2026060100")
+    aged_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    unswept_products = canonical_cycle / "prcp_rate_or_amount"
+    product = unswept_products / "ifs_2026060100_f003.nc"
+    assert product.is_file()
+    for name in (
+        "NODE27_RAW_RETENTION_ENABLED",
+        "NODE27_RAW_RETENTION_PLAN_ONLY",
+        "NODE27_RAW_RETENTION_SUMMARY_PATH",
+        "NODE27_RAW_RETENTION_DAYS",
+        "NODE27_RAW_RETENTION_SOURCES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(cache))
+    monkeypatch.setenv("NODE27_RAW_RETENTION_OBJECT_STORE_ROOT", str(tmp_path))
+    # Traversable and writable down to `<cycle>/`, exactly as an unswept tree is:
+    # only the directory holding the products denies the unlink.
+    unswept_products.chmod(0o555)
+    try:
+        exit_code = node27_raw_retention.main(
+            ["--sources", "gfs,ifs", "--reference-time", "2026-06-27T12:00:00Z"]
+        )
+        payload = json.loads(capsys.readouterr().out)
+    finally:
+        unswept_products.chmod(0o755)
+
+    assert exit_code == 1
+    assert payload["counts"]["failed"] == 1
+    assert len(payload["failed"]) == 1
+    failure = payload["failed"][0]
+    assert failure["key"] == "canonical/IFS/2026060100"
+    assert failure["error_type"] == "PermissionError"
+    assert failure["error"]
+    assert failure["reason"] == "canonical_cycle_aged_out"
+    assert failure["size_bytes"] > 0
+    # Nothing was removed: the first `unlink` is the one that was denied.
+    assert product.is_file()
+    assert product.read_text(encoding="utf-8") == "slice"
+    assert unswept_products.is_dir()
+    assert canonical_cycle.is_dir()
+    # The other two lanes still ran to completion.
+    assert _keys(payload["deleted"]) == ["raw/gfs/2026060100", "precip-cache/IFS/2026060100"]
+    assert not raw_cycle.exists()
+    assert not aged_cache.exists()
+    # Top-level `freed_bytes` counts only what was actually deleted, so the
+    # denied cycle's bytes are excluded from it.
+    assert payload["freed_bytes"] == sum(int(entry["size_bytes"]) for entry in payload["deleted"])
+    assert payload["freed_bytes"] < sum(int(entry["size_bytes"]) for entry in payload["planned"])
 
 
 def test_an_unreadable_object_store_ancestor_skips_only_its_two_lanes(
@@ -1293,8 +1368,9 @@ def test_documented_operator_check_goes_red_on_an_unsafe_skip(
     # The cycle directory is listed and aged, but its parent denies the `rmdir`.
     # That reproduces the summary SHAPE an unswept storage source (or a producer
     # mode regression) leaves behind -- one canonical `PermissionError` in
-    # `failed[]` -- not its on-disk sequence, which denies one step earlier; see
-    # `test_an_undeletable_canonical_target_fails_without_stopping_the_other_lanes`.
+    # `failed[]` -- not its on-disk sequence, which denies one step earlier; the
+    # production sequence is pinned by
+    # `test_an_unswept_canonical_source_denies_the_first_unlink_and_removes_nothing`.
     unwritable_parent = denied_store / "canonical" / "IFS"
     unwritable_parent.chmod(0o555)
     try:

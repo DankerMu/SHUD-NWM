@@ -2600,10 +2600,19 @@ ssh -p 32099 nwm@210.77.77.27 \
 - 每一级的 `2775` 都是**显式写上去的**：`os.chmod` 会清 setgid，所以代码里没有任何地方依赖
   "这个位能活过一次 chmod"。产出侧两个常量同值——`services/tile_publisher/publisher.py`
   的 `CANONICAL_MIRROR_DIRECTORY_MODE` 与 `scripts/canonical_precip_copyback_backfill.py`
-  的 `DIR_MODE`，都是 `0o2775`，只作用于它们自己创建的镜像目录（`canonical/`、
-  `canonical/<S>/`、`canonical/<S>/grid/` 这些穿越层仍是 `0755`）。
+  的 `DIR_MODE`，都是 `0o2775`，且都只作用于**自己创建**的目录。两个产出侧的分工不同，
+  按真实口径写：
+  - publisher 用 copyback 通用 helper 建穿越层（`canonical/`、`canonical/<S>/`、
+    `canonical/<S>/grid/`），落 `0755`；`2775` 落在它自己拥有的层——`<cycle>/`、本次
+    copyback 的临时树根、以及复制进来的树内各级（`prcp_rate_or_amount/`、
+    `grid/<grid_id>/`）。`canonical/<S>/` 与 `grid/` 这两个穿越层的 `2775` 由下面那段
+    **存量扫描**收敛——那就是它们的稳态。
+  - backfill 脚本建 `canonical/` 时落 `0755`（`MIRROR_ROOT_MODE`），`canonical/` 以下它
+    创建的每一级（`<S>/`、`grid/`、`<cycle>/`、`prcp_rate_or_amount/`、`grid/<grid_id>/`）
+    落 `2775`。
 - **`canonical/` 自己不扫**，保持 `755` gid 1078（该 gid 在 node-27 上叫 `nfsdata`、空组，
-  在 node-22 上叫 `huser`）。于是将来新增的 storage source 是 **fail closed**：第一个
+  在 node-22 上叫 `huser`）——它是唯一一级 producer 与扫描**都不放权**的目录（backfill 新建
+  它时也是 `0755`）。于是将来新增的 storage source 是 **fail closed**：第一个
   unlink 就被拒、零字节、`failed[]` 里一条 `PermissionError`，而不是删一半的形状。
 
 **存量树扫描（node-22，账号 `frd_muziyao`；每个 source 一次，幂等）：**
@@ -2651,6 +2660,12 @@ ssh -p 32099 frd_muziyao@210.77.77.22 \
 `00755` 的**五位数字是必须的**：`chmod(1)` 对目录用数字模式时默认保留 setgid，`chmod 0755`
 会留下 `2755`（这是 `chmod(1)` 的行为，不是 `chmod(2)` 的——`os.chmod(dir, 0o755)` 直接清位）。
 producer 侧回滚就是对该 commit 做 `git revert`。
+
+**回滚的中间态同样安全**，理由和正向扫描对称但方向相反：`chgrp -R` 是**后序**（先子后父，
+GNU coreutils 与 BSD 的实现都只在 `FTS_DP` 上动手），所以收权过程中任一瞬间只会出现
+"子目录已被拒、父目录仍可写"，永远不会出现被禁的反形状（`prcp_rate_or_amount/` 可写而
+`<cycle>/` 不可写）。`chgrp` 跑完整棵树已经全拒，后面那条 `find ... chmod`（先根后叶）
+无论顺序都不再改变可删性。因此回滚中断后原样重跑即可，同样幂等。
 
 **影响面**：gid 1107 `nwmuser` 的所有成员都获得了对这两棵镜像树的写/删权——node-27 上是
 `nwm` 与 `frd_muziyao`，node-22 上是包括 `frd_muziyao` 在内的七个人类账号。授权范围仅限

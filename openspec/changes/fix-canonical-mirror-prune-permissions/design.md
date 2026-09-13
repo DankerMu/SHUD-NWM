@@ -116,6 +116,17 @@ this change's mode change lands; a hard precondition recorded in the issue.
      `_rollback_qdown_copyback_batch` is at the lane mode too.
      `_replace_directory_tree_for_qdown_batch` needs no parameter (it only
      renames). All other callers keep the default.
+  2b. The temp tree root is asserted too. `_copyback_collected_object_tree`
+     prepares `temp_dir` with `ensure_traversable_copyback_directory`, whose
+     `chmod 0o755` strips the setgid bit `mkdir` inherited from `<cycle>/`;
+     files are created inside `temp_dir` before the tree chmod runs, and a
+     file takes the shared group only from a setgid parent at create time.
+     So the helper re-asserts `directory_mode` on `temp_dir` through the
+     same fd-bound `fchmod` right after preparing it and before the first
+     write. It runs for every lane: for `runs/` and `forcing/` it rewrites
+     the `0o755` the same call just wrote (ACL mask unchanged). This assert
+     is load-bearing on Linux — without it mirrored `.nc` files carry the
+     writer's egid, which the gid test pins.
   3. Result on node-22 under a swept `canonical/<S>/`: `<cycle>/` `2775`
      gid 1107, `prcp_rate_or_amount/` `2775` gid 1107, files `0644` gid
      1107. `grid/<grid_id>/` `2775`; `grid/` itself is a traversal level
@@ -133,10 +144,17 @@ this change's mode change lands; a hard precondition recorded in the issue.
   node-22 both carry `Groups: 118 1078 1106 1107`. The post-merge
   persistence receipt (`stat … nwmuser` on both levels) is the live oracle
   that the bit stuck.
-- D4 **Backfill: same mode.** `DIR_MODE = 0o2775`; `_ensure_target_directory`
-  unchanged otherwise (it already chmods every level it creates, `<cycle>/`
-  included, so the bit is on `<cycle>/` before `prcp_rate_or_amount/` is
-  created). `FILE_MODE` unchanged. The docstring's `0o755` sentence updated.
+- D4 **Backfill: same mode below `canonical/`.** `DIR_MODE = 0o2775`;
+  `_ensure_target_directory` unchanged otherwise (it chmods every level it
+  creates, `<cycle>/` included, so the bit is on `<cycle>/` before
+  `prcp_rate_or_amount/` is created). `canonical/` itself is the one level
+  neither producer nor the sweep widens (D2): the backfill prepares it at
+  `0o755` under the copyback batch mutex, before the first tree is
+  mirrored — only when this run created it — so the
+  per-level helper never creates the mirror root and a fresh copyback root
+  (the 2026-09-06 bring-up shape) lands `canonical/` `755`, everything below
+  `2775`. `FILE_MODE` unchanged. The docstring's `0o755` sentence updated.
+  (Review round 1: the first cut let the helper widen `canonical/` too.)
 - D5 **`PermissionError` becomes an incident.** The rmtree handler comment
   in `scripts/node27_raw_retention.py` points at the runbook section; the
   env example's "UNTIL #2100 LANDS" block is rewritten to the post-#2100
@@ -227,7 +245,8 @@ this change's mode change lands; a hard precondition recorded in the issue.
   `_copyback_object_tree` / `_copyback_object_tree_with_rollback`
   (temp-tree chain) and `_commit_qdown_copyback_batch` /
   `_clone_copyback_backup_tree_no_follow` (commit-clone chain) thread the
-  keyword; `_replace_directory_tree_for_qdown_batch` and
+  keyword; `_copyback_collected_object_tree` additionally re-asserts the
+  mode on the temp tree root (D3 2b); `_replace_directory_tree_for_qdown_batch` and
   `ensure_traversable_copyback_directory` are **not** change surfaces.
 - Public entrypoints: `TilePublisher.copyback_canonical_precip`;
   `canonical_precip_copyback_backfill.main`; the retention unit.
@@ -242,7 +261,8 @@ this change's mode change lands; a hard precondition recorded in the issue.
 
 - `services/tile_publisher/publisher.py`: `CANONICAL_MIRROR_DIRECTORY_MODE`,
   `_chmod_tree_readable` (keyword), the helper chain above,
-  `_copyback_canonical_precip` (assert `<cycle>/`, pass the mode).
+  `_copyback_canonical_precip` (assert `<cycle>/`, pass the mode);
+  `_copyback_collected_object_tree` (re-assert the temp tree root, D3 2b).
 - `scripts/canonical_precip_copyback_backfill.py`: `DIR_MODE`, docstring.
 - `scripts/node27_raw_retention.py`: rmtree handler comment;
   `infra/env/node27-raw-retention.example`: operator block.
@@ -306,6 +326,15 @@ this change's mode change lands; a hard precondition recorded in the issue.
   harmless and the re-sweep covers a cycle promoted mid-sweep; the retention
   tick (03:35Z daily) worst case during the sweep is the clean first-`unlink`
   denial.
+  Copyback vs. tick (review round 1, verified PLAUSIBLE, deferred): the
+  retention runner holds no copyback batch mutex, so a force re-mirror of a
+  cycle already past the cutoff can interleave with the tick while the
+  gap-cycle `.copyback-backup.<uuid>` (still `0755` gid 1078) sits beside
+  the promoted `2775` tree — the promoted tree is removed, the backup
+  denies, the next tick finishes the job. That is the unlocked-deleter
+  shape `openspec/specs/object-store-copyback-mutual-exclusion` already
+  records for this runner under #2252; the mandated post-deploy re-sweep
+  removes the only shape this change makes newly reachable.
 - Legacy compatibility / examples: sibling lanes pinned at `0o755`; the
   spec's ACL-mask-neutrality scenario still holds for them; env example and
   runbook updated with the change.
@@ -362,9 +391,11 @@ Domain packs (NHMS profile, all eight considered):
   on `canonical/gfs` before the copyback (skip if `chown` raises `PermissionError`)
   → `<cycle>/` and `<cycle>/prcp_rate_or_amount/` have that gid and mode
   `0o2775`; the `.nc` file has that gid and mode `0o644`. Deterministic on
-  Linux and macOS: the gid is inherited at `mkdir` on both once `<cycle>/`
-  carries setgid (macOS inherits the gid unconditionally), and every
-  asserted bit is set explicitly by the lane.
+  Linux and macOS: the directories inherit the gid at `mkdir` on both once
+  `<cycle>/` carries setgid (macOS inherits the gid unconditionally); the
+  file inherits it on Linux only because the temp tree root is re-asserted
+  `0o2775` before the first write (D3 2b), and every asserted bit is set
+  explicitly by the lane.
 - `tests/test_tile_publisher.py::test_canonical_copyback_converges_a_pre_existing_cycle_directory`
   (new): `<cycle>/` pre-created at `0o755` with different bytes at the
   destination → after the mirror `<cycle>/` is `0o2775` and the promoted tree

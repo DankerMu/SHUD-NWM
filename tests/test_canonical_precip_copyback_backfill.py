@@ -29,7 +29,9 @@ Contract (canonical-precip-copyback spec, Requirement 2):
   readable, and every file it promotes there ``0o644``, regardless of the
   process umask (node-22 writes as one account, node-27 reads the same NFS as
   another) -- while leaving directories it did not create and files it did not
-  write at the mode they already had.
+  write at the mode they already had. Two modes, not one (#2100): the mirror
+  root ``canonical/`` is ``0o755`` when this script creates it, everything it
+  creates below that level is ``0o2775``.
 """
 
 from __future__ import annotations
@@ -432,12 +434,20 @@ def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
 ) -> None:
     """node-22 writes as one account; node-27 reads -- and since #2100 prunes -- as another.
 
-    `DIR_MODE` is `0o2775`, not `0o755`: node-27's retention account has to be
-    able to remove a mirrored cycle, which needs group write on the directory,
-    and the setgid bit is what makes each level created underneath take its
-    parent's shared group instead of this process's egid. Every directory under
-    the copyback root here was created by this run -- the fixture creates the
-    root and nothing else -- so the assertion is exact rather than a floor.
+    Two buckets, not one. Below the mirror root `DIR_MODE` is `0o2775`, not
+    `0o755`: node-27's retention account has to be able to remove a mirrored
+    cycle, which needs group write on the directory, and the setgid bit is what
+    makes each level created underneath take its parent's shared group instead
+    of this process's egid. The mirror root `canonical/` itself is `0o755`
+    (#2100 D2): neither producer nor owner-side sweep widens that level, so an
+    unswept storage source under it is denied at its first `unlink` with zero
+    bytes removed rather than half-deleted, and gid 1078 never gains write on
+    the shared NFS mirror root. Every directory under the copyback root here was
+    created by this run -- the fixture creates the root and nothing else -- so
+    the assertion is exact rather than a floor.
+
+    `--dry-run` creates neither bucket; that half is pinned by
+    `test_backfill_dry_run_writes_nothing_and_reports_planned_copies`.
     """
 
     source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
@@ -450,12 +460,16 @@ def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
     capsys.readouterr()
 
     assert exit_code == 0
+    mirror_root = copyback_root / "canonical"
     created_dirs = [path for path in copyback_root.rglob("*") if path.is_dir()]
     # Intermediates (canonical/, canonical/<S>/, canonical/<S>/<cycle>/) too, not
     # just the leaves: mkdir(parents=True) creates them all at the umask.
     assert len(created_dirs) >= 10
+    assert mirror_root in created_dirs
     landed = {str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in created_dirs}
-    assert landed == {str(path): "0o2775" for path in created_dirs}
+    assert landed == {
+        str(path): ("0o755" if path == mirror_root else "0o2775") for path in created_dirs
+    }
 
 
 def test_backfill_created_cycle_directory_takes_the_source_roots_group(

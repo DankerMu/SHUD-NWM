@@ -102,7 +102,7 @@ first.
   tests/test_node27_raw_retention.py` green locally.
 - [x] 4.3 `openspec validate fix-canonical-mirror-prune-permissions --strict
   --no-interactive` valid.
-- [ ] 4.4 node-27 disposable worktree: the same three pytest files green
+- [x] 4.4 node-27 disposable worktree: the same three pytest files green
   (`TMPDIR=/home/nwm/tmp`; active tree untouched).
 - [x] 4.5 node-22 sweep receipt: before `stat` sample; commands; after
   `find canonical/gfs canonical/IFS -type d ! -perm -2775 | wc -l` = 0,
@@ -114,7 +114,7 @@ first.
   documented `jq` exits `0`. Covers D2 and the retention path only — not
   D3/D4 (every existing cycle is `2775` after the sweep regardless of the
   producer change).
-- [ ] 4.7 PR body: ordering gate (#2104 merged first), blast-radius
+- [x] 4.7 PR body: ordering gate (#2104 merged first), blast-radius
   disclosure, deviation record, and the post-merge persistence receipt plan
   (node-22 `git pull --ff-only`, first mirrored cycle `stat` at both levels,
   gap re-sweep) as the single declared post-merge evidence item and the only

@@ -1973,8 +1973,21 @@ def _assert_copyback_directory_mode(directory: Path, mode: int) -> None:
     symlink or a non-directory planted at ``directory`` is refused by the
     ``os.open`` itself rather than chmod'ed through. Unlike
     ``ensure_traversable_copyback_directory`` this asserts the mode whether or
-    not the caller created the level -- only the canonical precipitation lane
-    uses it, and only on the one level it owns (#2100 D3).
+    not the caller created the level (#2100 D3).
+
+    Two call sites, not one:
+
+    * the canonical precipitation lane's ``<cycle>/``, with
+      ``CANONICAL_MIRROR_DIRECTORY_MODE`` -- the one mirror level that lane owns,
+      converged whether or not this call created it;
+    * the copyback temp tree root in ``_copyback_collected_object_tree``, for
+      **every** lane, with that call's ``directory_mode``. It is not
+      canonical-only because ``ensure_traversable_copyback_directory`` chmods
+      that freshly created level to ``0o755`` and so strips the setgid bit its
+      ``mkdir`` inherited, and on Linux a file takes its parent directory's group
+      at creation only while the parent still carries setgid. For ``runs/`` and
+      ``forcing/`` the assertion therefore rewrites the ``0o755`` just written
+      and changes nothing.
     """
 
     fd = os.open(directory, _COPYBACK_DIR_FLAGS)

@@ -393,7 +393,12 @@ def ensure_traversable_copyback_directory(
     ``mkdir`` mode already clamped ``mask::rwx`` to ``mask::r-x`` before this
     runs. Do not generalize that to other modes --
     ``state_manager._ensure_copyback_state_parent``'s ``0o775`` genuinely
-    restores ``mask::rwx`` and must not be narrowed to this one.
+    restores ``mask::rwx`` and must not be narrowed to this one. The one
+    controlled exception is the canonical precipitation lane (#2100), which
+    re-asserts its own ``0o2775`` on the two levels it owns -- ``<cycle>/`` and
+    the copyback temp tree root -- through a descriptor-bound ``fchmod`` in
+    ``services/tile_publisher/publisher.py``; this helper still writes ``0o755``
+    on every level it creates, there as everywhere else.
 
     Accepted limit: ``ensure_directory_no_follow`` absorbs ``FileExistsError``,
     so "created by this call" is decided by the pre-probe and a level lost to a

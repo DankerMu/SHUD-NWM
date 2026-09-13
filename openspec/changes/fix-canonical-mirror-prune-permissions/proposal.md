@@ -15,12 +15,14 @@ The mirror grows monotonically on the 1.7 TB volume shared with `pg_default`.
 
 ## What Changes
 
-- **Producer modes.** The canonical-precip copyback lane leaves its copied
-  directory trees (`<cycle>/`, `<cycle>/prcp_rate_or_amount/`,
-  `grid/<grid_id>/`) at `0o775`, preserving an inherited setgid bit; files
-  stay `0o644`. The `runs/` and `forcing/` copyback lanes and the backup
-  clone path keep `0o755` (the forcing tree carries a default ACL where a
-  wider group mode would move the mask). `ensure_traversable_copyback_directory`
+- **Producer modes.** The canonical-precip copyback lane writes an explicit
+  `0o2775` (shared group + setgid) on every directory it owns — `<cycle>/`,
+  `<cycle>/prcp_rate_or_amount/`, `grid/<grid_id>/`, the temp tree it
+  promotes and the commit clone it keeps for rollback; nothing relies on a
+  setgid bit surviving a chmod. Files stay `0o644`. The `runs/` and
+  `forcing/` copyback lanes keep `0o755` on their trees and clones (the
+  forcing tree carries a default ACL where a wider group mode would move
+  the mask). `ensure_traversable_copyback_directory`
   is untouched. The one-shot backfill script applies the same directory mode.
 - **Existing tree (ops, not code).** A documented, idempotent sweep run on
   node-22 as the owner: `chgrp -R 1107` (shared group `nwmuser`, present on
@@ -59,8 +61,8 @@ The mirror grows monotonically on the 1.7 TB volume shared with `pg_default`.
 ## Impact
 
 - `services/tile_publisher/publisher.py` (`_chmod_tree_readable` gains a
-  directory-mode parameter; only `_copyback_canonical_precip`'s trees use
-  `0o775`).
+  directory-mode parameter; only `_copyback_canonical_precip`'s trees and
+  commit clones use `0o2775`).
 - `scripts/canonical_precip_copyback_backfill.py` (`DIR_MODE`,
   `_ensure_target_directory`).
 - `scripts/node27_raw_retention.py` (comment only),
