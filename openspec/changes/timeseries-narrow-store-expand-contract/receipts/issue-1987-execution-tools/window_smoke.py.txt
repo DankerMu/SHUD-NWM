@@ -11,6 +11,8 @@ Run once per case, with a DIFFERENT fresh database and --state each time:
     --old-repo OLD --new-repo NEW --container nwm-i8-1987-UNIQUE \
     --state PRIVATE_ABSOLUTE_NEW_DIR --case happy
 Cases: happy, stop, session, fence, do-before-ledger, rename, source, restart.
+Happy also drives the real main/CLI admission refusals and admitted emergency paths,
+including window's nested recovery protection; only external boundaries are simulated.
 The harness owns no container lifecycle and never deletes a database/volume.
 All SQL, catalog OIDs, ledger, parser rows and reader values are real. Only
 systemd, process inspection, git selection and HTTP transport are simulated.
@@ -32,6 +34,7 @@ import argparse
 import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -96,14 +99,16 @@ def worker(args):
 class BoundaryExecutor(w.Executor):
     """Real executor state/recovery/SQL with disposable external boundaries."""
 
-    def __init__(self, args, dsn):
-        super().__init__(SimpleNamespace(state=args.state, command="recover", go="Danker"))
+    def __init__(self, args, dsn, *, cli_args=None):
+        super().__init__(cli_args or SimpleNamespace(state=args.state, command="recover", go="Danker"))
         self.fixture = args
         self.dsn = dsn
         self.selected = w.OLD
-        self.units = {name: dict(self.s["units"][name]) for name in w.TIMERS + w.SERVICES}
+        self.units = {name: dict(unit) for name, unit in self.s.get("units", {}).items()}
         self.inject = None
         self.starts = 0
+        self.system_actions = []
+        self.stop_failures = 0
 
     def sql(self, query):
         import psycopg2
@@ -131,7 +136,11 @@ class BoundaryExecutor(w.Executor):
         return dict(self.units[name])
 
     def system(self, action, names):
+        self.system_actions.append({"action": action, "units": list(names)})
         w.require(action in {"start", "stop"} and set(names) <= set(self.units), "UNKNOWN_SYSTEM_COMMAND")
+        if action == "stop" and self.stop_failures:
+            self.stop_failures -= 1
+            raise w.Refusal("INJECTED_STOP_FAILURE")
         if self.inject == "stop" and action == "stop":
             raise w.Refusal("INJECTED_STOP_FAILURE")
         for name in names:
@@ -430,6 +439,8 @@ def scenario(args):
         target = artifacts / "runs/i8_narrow_run/output/demo.rivqdown"
         target.parent.mkdir(parents=True)
         target.write_bytes(source.read_bytes())
+        if args.case == "happy":
+            entrypoint_admission(e)
         started = time.monotonic()
         result = e.worker("parse")
         e.save(parse_write_wall_seconds=time.monotonic() - started, parse=result)
@@ -541,6 +552,110 @@ def scenario(args):
             default=str,
         )
     )
+
+
+def entrypoint_admission(e):
+    """Drive the real CLI parser/main with the existing external boundaries."""
+    original_executor, original_argv = w.Executor, sys.argv
+    config_bytes = (e.root / "config.json").read_bytes()
+    admitted = json.loads(json.dumps(e.s))
+    admitted.update(
+        phase="PREPARED",
+        config_sha256=w.digest(config_bytes),
+        driver_sha256=w.digest(Path(w.__file__).read_bytes()),
+        boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+        ledger_before=e.ledger(),
+    )
+    before_catalog, before_ledger = e.catalog(), e.ledger()
+    reports = []
+
+    def invoke(name, state, *, command="recover", go=True, stop_failures=0, owner_refusal=False):
+        root = Path("/") if owner_refusal else e.root / ("entrypoint-" + name)
+        if owner_refusal:
+            w.require(root.stat().st_uid != os.getuid(), "ROOT_OWNERSHIP_FIXTURE_REQUIRED")
+        elif command != "prepare":
+            root.mkdir(mode=0o700)
+            w.private_write(root / "config.json", config_bytes)
+            if state is not None:
+                w.private_write(root / "state.json", json.dumps(state).encode())
+        instances = []
+        external_units = json.loads(json.dumps(e.s["units"]))
+
+        def factory(cli_args):
+            fixture = SimpleNamespace(**{**vars(e.fixture), "state": str(root)})
+            instance = BoundaryExecutor(fixture, e.dsn, cli_args=cli_args)
+            instance.units = json.loads(json.dumps(external_units))
+            instance.stop_failures = stop_failures
+            instances.append(instance)
+            return instance
+
+        w.Executor = factory
+        sys.argv = [str(Path(w.__file__).resolve()), command, "--state", str(root)]
+        if go:
+            sys.argv += ["--go", "Danker"]
+        if command == "prepare":
+            sys.argv += ["--config", str(e.root / "config.json")]
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                rc = w.main()
+        finally:
+            w.Executor, sys.argv = original_executor, original_argv
+            for instance in instances:
+                os.close(instance.lock)
+        raw = output.getvalue()
+        e.save_file("entrypoint-" + name + ".stdout", raw.encode())
+        receipt = json.loads(raw)
+        actions = instances[0].system_actions if instances else []
+        final_units = instances[0].units if instances else external_units
+        if stop_failures:
+            w.require(
+                rc == 1
+                and receipt["check"] == "INJECTED_STOP_FAILURE"
+                and receipt["phase"] == "BLOCKED_FENCED"
+                and any(row["action"] == "stop" and w.DISPLAY in row["units"] for row in actions)
+                and final_units[w.DISPLAY]["ActiveState"] == "inactive",
+                "ADMITTED_ENTRYPOINT_FAILURE_NOT_FENCED",
+            )
+        else:
+            w.require(not actions and final_units == external_units, "INELIGIBLE_ENTRYPOINT_STOPPED_SERVICES")
+            w.require(not receipt.get("phase", "").startswith("BLOCKED_FENCE"), "REFUSAL_CLAIMED_FENCING")
+            w.require("recovery_command" not in receipt and receipt.get("inspection_only"), "UNSAFE_RECOVERY_GUIDANCE")
+        w.require(e.catalog() == before_catalog and e.ledger() == before_ledger, "ENTRYPOINT_CHANGED_DATABASE")
+        reports.append({"case": name, "returncode": rc, "receipt": receipt, "system_actions": actions})
+        return rc, receipt
+
+    partial = {"phase": "PREPARATION_FAILED", "fence_epochs": []}
+    for name, state in (("config-only", None), ("failed-prepare", partial)):
+        for go in (False, True):
+            rc, receipt = invoke(name + ("-go" if go else "-no-go"), state, go=go)
+            expected = "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY" if go else "RECOVERY_GO_REQUIRED"
+            w.require(rc == 1 and receipt["check"] == expected, "WRONG_INELIGIBLE_RECOVERY_REFUSAL")
+        rc, _ = invoke(name + "-status", state, command="status", go=False)
+        w.require(rc == 0, "INCOMPLETE_STATUS_FAILED")
+    rc, receipt = invoke("phase-only-admission", {**partial, "phase": "FENCED_DRAINED", "_recovery_active": True})
+    w.require(
+        rc == 1 and receipt["check"] == "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY",
+        "PERSISTED_LABEL_ADMITTED_RECOVERY",
+    )
+    rc, receipt = invoke("complete-no-go", admitted, go=False)
+    w.require(rc == 1 and receipt["check"] == "RECOVERY_GO_REQUIRED", "COMPLETE_NO_GO_ACCEPTED")
+    rc, receipt = invoke("owned-child-running", {**admitted, "child_pid": os.getpid()})
+    w.require(
+        rc == 1 and receipt["check"] == "OWNED_COMMAND_STILL_RUNNING_INSPECT_SUPERVISOR",
+        "OWNED_CHILD_RECOVERY_ACCEPTED",
+    )
+    rc, receipt = invoke("ownership-refusal", None, owner_refusal=True)
+    w.require(rc == 1 and receipt["check"] == "PRIVATE_STATE_REQUIRED", "WRONG_CONSTRUCTOR_REFUSAL")
+    rc, receipt = invoke("actual-failed-prepare", None, command="prepare")
+    w.require(rc == 1 and receipt["check"] == "FROZEN_IDENTITY_REQUIRED", "WRONG_PREPARE_REFUSAL")
+    rc, receipt = invoke("window-no-go", admitted, command="window", go=False)
+    w.require(rc == 1 and receipt["check"] == "PREPARED_SIGNED_GO_REQUIRED", "WINDOW_NO_GO_ACCEPTED")
+    invoke("admitted-recovery-failure", admitted, stop_failures=1)
+    # Actual window preparse reads the real unparsed fixture. Its first timer
+    # stop fails; nested admitted recover's stop fails too; emergency must fence.
+    invoke("nested-window-recovery-failure", admitted, command="window", stop_failures=2)
+    e.save_file("entrypoint-admission.json", json.dumps(reports, sort_keys=True).encode())
 
 
 def reopen(e):

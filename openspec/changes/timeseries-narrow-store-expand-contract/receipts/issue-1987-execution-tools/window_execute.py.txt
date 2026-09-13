@@ -8,7 +8,8 @@ Operator interface (run via retained Python 3.11, durable supervisor, never SSH 
   window_execute.py recover --state ... --go Danker
 Status is inspection, never resume. After transport loss inspect supervisor AND status;
 never repeat window. recover re-fences and examines physical OIDs, not the last label.
-A failed recovery leaves BLOCKED_FENCED; no automatic ledger deletion or data DROP.
+Pre-admission recovery refusals are inspection-only: no service or timer stop.
+Admitted recovery failures attempt emergency fencing; no ledger deletion or data DROP.
 
 Required private config (JSON, owner uid1005, mode0600):
   old_sha, new_sha: exact frozen SHAs below
@@ -203,6 +204,7 @@ class Executor:
         self.s = json.loads(safe_path(self.state_file, True).read_text()) if self.state_file.exists() else {}
         self.seq = self.s.get("seq", 0)
         self.recovering = args.command == "recover"
+        self._recovery_active = False
         if args.command == "prepare":
             self.c = json.loads(safe_path(args.config, True).read_text())
             self.save_file("config.json", json.dumps(self.c).encode())
@@ -1139,11 +1141,18 @@ class Executor:
         except BaseException:
             self.save("BLOCKED_FENCE_UNPROVEN", fenced=False)
 
-    def recover(self):
-        require(self.args.go == "Danker", "RECOVERY_GO_REQUIRED")
+    def check_recovery_eligibility(self):
         child = self.s.get("child_pid")
         require(not child or not Path(f"/proc/{child}").exists(), "OWNED_COMMAND_STILL_RUNNING_INSPECT_SUPERVISOR")
         require("old_oid" in self.s and "units" in self.s, "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY")
+
+    def recover(self):
+        self._recovery_active = False
+        require(self.args.go == "Danker", "RECOVERY_GO_REQUIRED")
+        self.check_recovery_eligibility()
+        # Invocation-local authority: a persisted phase cannot admit recovery.
+        # Leave this set on failure so main can fence only this protected segment.
+        self._recovery_active = True
         self.recovering = True
         self.freeze()
         self.immutable()
@@ -1228,6 +1237,25 @@ class Executor:
         self.restore_timers()
         self.yd()
         self.phase("RECOVERED_OLD_RETAINED", ledger_preserved=True)
+        self._recovery_active = False
+
+    def recovery_guidance(self):
+        inspection = {
+            "inspection_only": True,
+            "action": "Inspect saved state and supervisor; preparation is incomplete or recovery is not eligible.",
+        }
+        if self.running or not all(
+            key in self.s
+            for key in ("old_oid", "units", "files", "ledger_before", "old_branch", "legacy_read", "fence_epochs")
+        ):
+            return inspection
+        try:
+            self.check_recovery_eligibility()
+        except Refusal:
+            return inspection
+        return {
+            "recovery_command": (f"{sys.executable} {Path(__file__).resolve()} recover --state {self.root} --go Danker")
+        }
 
     def status(self):
         # Deliberately no mutation/recovery and no credential-bearing live output.
@@ -1268,9 +1296,9 @@ class Executor:
         receipt.update(
             executor_lock_held=self.running,
             state=str(self.root),
-            recovery_command=f"{sys.executable} {Path(__file__).resolve()} recover --state {self.root} --go Danker",
             status_is_not_live_health=True,
         )
+        receipt.update(self.recovery_guidance())
         encoded = json.dumps(receipt, sort_keys=True)
         require(len(encoded) < 32768, "PUBLIC_RECEIPT_LIMIT")
         print(encoded, flush=True)
@@ -1493,27 +1521,32 @@ def main():
         executor.status()
         return 0
     except BaseException as error:
+        failure = {
+            "error_type": type(error).__name__,
+            "check": (
+                str(error) if isinstance(error, Refusal) and re.fullmatch(r"[A-Z][A-Z0-9_]+", str(error)) else None
+            ),
+            "inspection_only": True,
+            "action": "Inspect private failure, saved state and supervisor before any new operator action.",
+        }
         if executor is not None:
             import traceback
 
-            executor.save_file("failure-private.txt", traceback.format_exc().encode())
-            if args.command == "recover":
+            if args.command == "recover" and executor._recovery_active:
                 executor.emergency_fence()
+            executor.save_file("failure-private.txt", traceback.format_exc().encode())
             print(
                 json.dumps(
                     {
+                        **failure,
                         "phase": executor.s.get("phase", "PREPARATION_FAILED"),
-                        "error_type": type(error).__name__,
                         "state": str(executor.root),
-                        "action": (
-                            "Inspect private failure and status; recover --go Danker only after inspecting supervisor"
-                        ),
                     }
                 ),
                 flush=True,
             )
         else:
-            print(json.dumps({"error_type": type(error).__name__, "phase": "INITIALIZATION_REFUSED"}), flush=True)
+            print(json.dumps({**failure, "phase": "INITIALIZATION_REFUSED"}), flush=True)
         return 1
 
 
