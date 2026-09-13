@@ -9,10 +9,8 @@ reimplement them.
 from __future__ import annotations
 
 import os
-import select
 import subprocess
 import sys
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -385,23 +383,17 @@ def test_cli_closed_stdout_after_success_keeps_published_artifact(
         "--output",
         str(paths["freeze"]),
     ]
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
     process = subprocess.Popen(
         argv,
-        stdout=subprocess.PIPE,
+        stdout=write_fd,
         stderr=subprocess.PIPE,
         text=True,
+        pass_fds=(write_fd,),
     )
-    assert process.stdout is not None
+    os.close(write_fd)
     assert process.stderr is not None
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not paths["freeze"].exists():
-        if process.poll() is not None:
-            break
-        time.sleep(0.05)
-    ready, _, _ = select.select([process.stdout], [], [], max(0.0, deadline - time.monotonic()))
-    if ready:
-        process.stdout.read(1)
-    process.stdout.close()
     stderr = process.stderr.read()
     rc = process.wait(timeout=10)
     assert rc == 1
