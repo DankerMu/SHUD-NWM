@@ -1,89 +1,88 @@
 ## Why
 
-The initial cold-tier proposal addressed active rows and terminal compressed
-TimescaleDB chunks sharing hot placement. Current devices and capacity require
-fresh deployment evidence; historical placement or chunk counts are not admission
-authority. A DB-only tier must prove that the actual compressed relations and
-every index move together, not merely the near-empty origin chunk shell.
+Selective-cold rollout is withdrawn. #1891/#1895 now require removal of the
+obsolete merged selective-cold implementation, not indefinite dormant retention
+and not a new general storage acceptance project. Shared functionality was
+placed in cold modules but is still used by PGDATA relocation, ordinary resource
+governance and manual verification; those consumers must survive the removal.
+
+This is a proposed target revision only. Cold code remains present; no removal,
+production operation, issue closure or archive is performed by this revision.
+The completed delivery ledger and immutable evidence retain their historical
+meaning and cannot authorize the new retirement implementation.
 
 ## What Changes
 
-- Introduce a cold-residency contract for compressed chunk groups: eligibility
-  derives only from the display business watermark and compression lag, and a
-  group includes the origin chunk, its compressed relation, and all physical
-  index/TOAST storage reachable from both.
-- Require an isolated PostgreSQL 15.2 / TimescaleDB 2.10.2 cluster experiment
-  before freezing the supported move, rollback, lock, decompression,
-  recompression, and retention sequence. A throwaway database inside the live
-  cluster is insufficient because tablespaces are cluster-scoped.
-- Add a dry-run-default, bounded, idempotent, receipted convergence runner and
-  a fail-closed fresh-tablespace installation/governance contract.
-- Re-admit `/dev/md0` only for terminal compressed DB storage after root-level
-  RAID and two-member SMART evidence; this does not revive product archive,
-  salvage, or rebuild lanes retired by #1309/#1370.
-- Forbid attaching the cold tablespace to either business hypertable, moving
-  active/uncompressed chunks, or moving PGDATA, WAL, or object-store data.
-- Bind cold eligibility to physical parent identities and the narrow river schema
-  through child #2290; exclude legacy stores and invalidate stale name-reuse
-  evidence without changing receipt wire schemas. Child #2291 then carries an
-  explicitly reviewed bounded count through all cold rollout gates. Both children
-  and separate external readiness must precede any new production G0.
+The sole executable contract is [tasks.md](tasks.md), in five mandatory groups:
+
+- **R1 — Transfer minimal surviving consumers to their actual owners:** PGDATA
+  command/container/evidence helpers, governance sampling and genuine manual
+  workload/evidence consumers migrate to existing domain owners. Independent C4,
+  generic readonly validation and actual PGDATA capacity binding survive.
+- **R2 — Detach normal compression while preserving safety:** eliminate cold env,
+  paired budgets and the second launcher leg; preserve inert descriptor-bound
+  config parsing, origin validation, bounded argv execution, lifecycle exclusion,
+  ordinary compression/retention and discovery behavior.
+- **R3 — Delete cold-only runtime and old G0-G8 delivery surfaces:** after R1/R2,
+  remove runtime/CLIs/config/schemas/examples/tests/CI references and the cold SQL
+  grant/audit. Tests/docs migrate with each source slice, never as a broken tail.
+- **R4 — Correct active authority and preserve history:** withdraw pending rollout,
+  update actual surviving contracts with implementation, obtain fresh retirement
+  fixture/review gates and preserve immutable completed evidence.
+- **R5 — Verify survivors, authorize deployment handoff, then close:** prove actual
+  deletion and survivor regression, separately authorize effective-unit/config
+  handoff and only then close the epic with evidence.
+
+R1 and R2 are independent; R3 follows both or is an atomic cutover with them.
+Cold samples/I9/I8/#2162/#2017 are not blanket retirement dependencies. Effective
+handoff still coordinates owners and foreign holds. Existing unrelated upgrade,
+recovery, capacity and autovacuum duties are neither cancelled nor new gates.
+No new RPO/RTO or storage-construction acceptance project is introduced.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `compressed-chunk-cold-residency`: eligibility, complete physical residency
-  groups, atomic migration/recovery, lifecycle convergence, runner receipts,
-  tablespace installation/governance, and live rollout evidence.
+- `compressed-chunk-cold-residency`: repurposed here solely as a proposed
+  retirement/closeout contract, NOT an enabled cold storage capability. The old
+  never-promoted cold-enabling ADDED delta is withdrawn, not a canonical
+  requirement removal. No installation, movement or cold convergence is required.
 
 ### Modified Capabilities
 
-- None. Existing compression eligibility, write guards, lag defaults,
-  retention windows, and display contracts remain unchanged.
+- `node27-pgdata-relocation`: preserve placement-aware observation and relocation
+  safety without requiring a retired installer or cold module ownership.
+- `hypertable-compression`: retain owner-role maintenance, remove cold grant/move
+  obligations and add a compression-only safe launch contract.
+- `runtime-service-role-boundary`: remove cold runtime/grant acceptance while
+  preserving every unrelated provisioning/security boundary.
+- `ci-contract-baseline`: retain surviving owner/dependent closure without
+  selecting removed cold suites.
+
+Canonical `openspec/specs/**` remains the implemented authority until the matching
+implementation cutover. These deltas do not claim retirement has shipped.
 
 ## Impact
 
-- #1892: this OpenSpec fixture, a pinned isolated-cluster integration probe,
-  ADR 0002 amendment, and the operator residency/decompression contract.
-- #1893: a node-27 cold-residency runner, receipt schema/example, configuration,
-  tests, and serialized systemd integration.
-- #1894: fresh tablespace/container installation and rollback tooling,
-  dual-device governance, backup-readiness checks, receipts, and tests.
-- #1929: bind the #1893 target writability probe to an explicitly configured,
-  observed numeric container runtime UID/GID and carry that principal in receipt
-  evidence; no image-user-name or root fallback is allowed.
-- #1895: controlled node-27 deployment and live receipts for migration,
-  automatic convergence, hot/cold reads, timers, and display performance. Its
-  reviewed executable runbook and Python readiness owners land first through
-  dedicated child #2137, before node-27 access; six is a historical preflight
-  count rather than reusable identity, and rollback acceptance uses the exact-SHA
-  disposable move-back branch plus live read-only compatibility. The first G1
-  observation at merged SHA `a8db554d6402bec642e9a05627eae64b2b79aec3`
-  ended as NO-GO when production parity read the parent hypertable and reached its
-  finite 3600-second statement timeout before publishing a census. Child #2224
-  must bind mandatory, no-default parity input to each current durable physical
-  origin relation, retain the half-open window as an identity fence, route every
-  production caller through that owner, and merge before G1 is retried at a new
-  reviewed SHA; this is an interpretation correction to the older D4 wording that
-  allowed a parent-plus-window implementation, and raising or removing the timeout
-  is not acceptance. The independent C4
-  producer/validator/publisher/binder has already merged through #2123, and its
-  input-classification precedence was clarified by #2130; #1895 consumes that
-  promoted capability for live evidence rather than reimplementing it. The
-  installer may reconcile/roll back only an in-progress install whose private
-  authority still exists; terminal `installed` closes that authority, so every
-  later trigger preserves the installed topology. After movement, reversal also
-  waits for a reviewed live move-back entrypoint from its owning implementation
-  issue.
-- #2290: physical-parent admission, all catalog/runtime/census/post-target callers,
-  distinct wide/narrow fixtures, identity-bound inventory digests and isolated
-  rename/replacement proof; detailed fixture in `fixtures/issue-2290.md`.
-- #2291: dependent reviewed-count/baseline cutover and G3 population alignment;
-  explicit N in 1..63 is frozen with the original private census's held-byte SHA,
-  validated once and passed through every readiness consumer. Preserve semantic
-  digest/wire meanings and separate natural newly-terminal sets. Detailed risk
-  and evidence contract: `fixtures/issue-2291.md`; no per-tick/time-budget
-  expansion or production execution.
-- No row-schema migration, public API change, TimescaleDB/PostgreSQL upgrade,
-  node-22 scheduling change, or archive-lane restoration.
+Concrete source families, consumer edges, schemas, CI and verification evidence
+are enumerated once in tasks.md R1-R5. No whole-PR revert, row-schema migration,
+changes to migrations 000058/000059, current data, ordinary retention windows,
+PostgreSQL/TimescaleDB upgrade or archive-lane restoration is authorized.
+
+Issues #2293/#2298/#1938 can be disposed as capability retired only after their affected
+paths and effective deployed references are gone. Extracted defects follow their
+new owner. Unexpected deployed cold state requires STOP and dedicated safe
+disposition; source deletion authorizes no live DROP, revoke or data deletion.
+
+## Historical authority and final disposition
+
+Completed #1892/#1893/#1894/#1929/#2137/#2224/#2290/#2291 delivery remains in
+tasks.md and existing evidence/fixtures. Original outstanding tasks 4.1-4.8 are
+withdrawn, not executed. Their reviews are not retirement fixture approval.
+
+Final archive requires a reviewed disposition that preserves surviving-spec
+updates and excludes withdrawn cold additions. Ordinary archive promotes deltas;
+`--skip-specs` is appropriate only after surviving updates have been explicitly
+applied and validated. Never use `--no-validate`, never silently drop survivor
+deltas, and never archive this revision into a newly enabled cold capability.
+No archive is executed here.

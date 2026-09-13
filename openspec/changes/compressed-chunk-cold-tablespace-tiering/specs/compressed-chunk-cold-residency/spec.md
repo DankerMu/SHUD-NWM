@@ -1,922 +1,112 @@
+# Proposed selective-cold retirement and closeout delta
+
+This replaces the withdrawn, never-promoted cold-enabling ADDED delta. Code is
+still present; these are proposed target requirements, not current implemented
+state. No canonical cold capability exists to remove. Final disposition must
+preserve surviving-capability updates without publishing enabled cold storage;
+see tasks.md R4.4. No archive is authorized by this revision.
+
 ## ADDED Requirements
 
-### Requirement: Cold-residency eligibility MUST derive from terminal compressed business-time state
+### Requirement: Selective-cold retirement SHALL transfer genuine surviving consumers before deletion
 
-The system SHALL consider a chunk for cold residency only when it belongs to an
-admitted physical parent for `hydro.river_timeseries` or
-`met.forcing_station_timeseries`, is currently compressed, and its half-open range
-satisfies `range_end <= business_watermark
-- compression_lag`. The business watermark SHALL be the existing display
-catalog forecast watermark; missing or unreadable truth SHALL block selection
-without a wall-clock fallback. The same facts SHALL be revalidated after
-relation locks are acquired and before any movement.
+R1 SHALL transfer only the command/container/evidence closure required by PGDATA
+host/migrate and generic filesystem/Postgres/working-set sampling required by
+resource governance to their existing domain owners. The image identity SHALL
+come from the existing container contract/snapshot owner. Retained manual
+workload/evidence producers, validators, schemas and tests SHALL migrate with
+their consumers before old issue1895 exits disappear. No compatibility re-export
+or wholesale renamed cold subsystem SHALL substitute for extraction.
 
-#### Scenario: Exact-cutoff compressed chunk is eligible
+#### Scenario: PGDATA relocation survives removal of cold modules
 
-- **WHEN** an allowlisted compressed chunk has `range_end` exactly equal to the display business watermark minus the configured compression lag
-- **THEN** it is eligible, subject to the remaining residency and environment preflights
+- **WHEN** retirement removes the former cold command/container/evidence owners
+- **THEN** PGDATA preserves bounded process cleanup, descriptor/RAID/SMART refusal, clean-stop/copy verification, exact container preservation, pre-write rollback and no stale post-write rollback without importing retired families
+- **AND** protective rejection of incompatible legacy cold binds/services remains a negative guard, not an enabled legacy path
 
-#### Scenario: Hot or uncompressed state is ineligible
+#### Scenario: Ordinary governance and manual readers remain usable
 
-- **WHEN** a chunk is newer than the cutoff, is uncompressed, belongs to another hypertable, or the business watermark is unavailable
-- **THEN** no member of that chunk is moved and the observation records an ineligible or fail-closed result without consulting host wall time
+- **WHEN** cold inventory/history/receipt branches and old C1-C3/G8 exits are removed
+- **THEN** ordinary governance still observes `/data/GHDC` and attributes current PGDATA to its actual device with unknown/conflict refusal
+- **AND** PGDATA manual instructions resolve to retained workload/evidence owners without a dangling cold rollout reference; independent C4 and canonical readonly validation remain available
 
-#### Scenario: Selection state changes before locking
+### Requirement: Ordinary compression SHALL have no cold launch dependency
 
-- **WHEN** an initially selected chunk is decompressed, dropped, renamed, or otherwise changes compression identity before the migration transaction locks and revalidates it
-- **THEN** the transaction performs no stale move and reports a deferred or recovery-classified result
+R2 SHALL remove paired cold env/budget assembly and the cold launcher leg while
+preserving safe configuration, execution and ordinary maintenance behavior.
 
-### Requirement: Cold admission MUST bind physical parents rather than reused canonical names
+#### Scenario: Compression launches with only its own safe configuration
 
-The river cold parent SHALL satisfy the post-expand narrow key/enum contract and
-SHALL NOT contain the legacy text-key projection, even if surrogate keys coexist.
-The canonical forcing parent SHALL retain its current supported shape. Each
-admitted inventory SHALL bind a positive PostgreSQL parent relation OID and
-Timescale hypertable ID, in addition to schema/name and all physical-order user
-columns. These IDs SHALL be mandatory internal inputs to candidate/origin
-membership checks and SHALL participate in the existing inventory digest; closed
-receipt/inventory wire keys and parity checksum semantics SHALL remain unchanged.
+- **WHEN** ordinary compression is launched without a cold env file
+- **THEN** its real wrapper/CLI can run with one consistent statement/cleanup/wrapper/systemd budget and no cold entrypoint
+- **AND** descriptor-bound mode-0600/no-symlink inert parsing, import-origin validation, bounded argv execution, secret-safe failure and lifecycle mutex remain enforced
 
-Every selection, origin reload, locked revalidation, fresh readback, persisted
-reconciliation, census and post-target/intersecting observation SHALL preserve the
-expected binding. Missing, ambiguous, invalid or replaced parent identity SHALL
-fail closed before mutation or prevent a false success on uncertain readback.
-The system SHALL NOT adopt a new parent through a name-only overload or a default
-identity. Legacy parents SHALL NOT be candidates or fallbacks; a valid narrow
-parent SHALL remain admissible after legacy is absent. Eligibility and parity
-SHALL use each origin's actual catalog bounds, never a default chunk interval.
+#### Scenario: Invalid compression input cannot bypass safety
 
-#### Scenario: Wide parent cannot be mistaken for the post-expand river
+- **WHEN** compression config is malformed, unsafe, or its lifecycle lock is held
+- **THEN** launch refuses safely without needing cold configuration and without changing ordinary retention windows or discovery/lag behavior
 
-- **WHEN** the canonical river name denotes the old wide table, including a wide table with surrogate-key additions, or parent metadata is missing or ambiguous
-- **THEN** admission refuses before parity, intent or movement; a migration filename or ledger entry cannot override the observed schema
+### Requirement: Cold-only implementations and rollout surfaces SHALL be removed rather than retained dormant
 
-#### Scenario: Narrow and legacy coexist after the rename
+R3 SHALL follow R1/R2 consumer cutovers or ship atomically with them. It SHALL
+remove the package/CLI/config/schema/example/test/CI and SQL grant-audit families
+listed in tasks.md, including old G0-G8 and manual callers after migration.
+Tests/docs SHALL accompany source changes. Migrations 000058/000059, current data,
+regular maintenance, independent C4 and generic readonly SHALL remain intact.
 
-- **WHEN** the old wide parent is renamed to legacy and a distinct canonical narrow parent is populated alongside canonical forcing
-- **THEN** only origins belonging to the bound narrow and forcing physical parents enter cold selection; compressed legacy origins remain excluded and untouched
+#### Scenario: A disabled installer remains in the tree
 
-#### Scenario: Legacy absence does not disable valid narrow admission
+- **WHEN** deployable cold install/move/rollout code or a compatibility alias remains despite disabled deployment
+- **THEN** retirement is incomplete and #1895/#1891 cannot close
 
-- **WHEN** the canonical narrow parent is valid and no legacy parent remains
-- **THEN** admission succeeds subject to the unchanged eligibility and environment gates, without requiring a legacy relation as a marker
+#### Scenario: Cold provisioning is removed without weakening other roles
 
-#### Scenario: Same-name same-column parent replacement invalidates evidence
+- **WHEN** the cold CREATE grant and positive grant audit are removed from provisioning source
+- **THEN** unrelated role/ownership/membership/trigger/default/security audits remain and no live REVOKE, DROP or data deletion is authorized
 
-- **WHEN** a parent relation OID or Timescale hypertable ID changes while its canonical name and column descriptors remain the same
-- **THEN** the inventory digest changes and prior selection/baseline/parity authority cannot be reused; reload or locked validation rejects the mismatch before movement and uncertain fresh reconciliation cannot publish success
+### Requirement: Retirement SHALL replace active authority without rewriting completed history
 
-#### Scenario: Distinct real chunk ranges are preserved
+R4 SHALL preserve completed ledger/evidence and withdraw outstanding old G0-G8
+rollout rather than mark it executed. Fresh retirement-specific high-risk fixture
+review SHALL precede implementation; independent review, finding verification,
+Gap Sweep, survivor regression and exact-head CI SHALL precede merge. Historical
+cold reviews SHALL NOT authorize retirement. Canonical survivor specs SHALL be
+updated only with their matching implementation cutover.
 
-- **WHEN** admitted origins and excluded legacy history have different one-, three- or seven-day catalog ranges
-- **THEN** every admitted origin retains its actual half-open bounds, forcing remains supported, and no global interval calculation selects legacy or manufactures a window
+#### Scenario: Historical fixture approval is offered for new deletion work
 
-#### Scenario: Catalog rename cannot mix identity and column observations
+- **WHEN** a retirement implementation cites only old cold fixture approvals
+- **THEN** it lacks retirement approval and must obtain fresh risk/invariant/consumer review
 
-- **WHEN** a canonical name changes owners while parent inventory is being derived
-- **THEN** the inventory contains one consistently observed physical parent's IDs and descriptors or fails closed; it cannot combine a wide parent's identity with a different narrow parent's columns
+#### Scenario: Final archive would promote withdrawn cold additions
 
-#### Scenario: Preparation does not authorize production execution
+- **WHEN** closeout prepares archive or another final disposition
+- **THEN** review preserves and validates surviving-spec updates while excluding withdrawn cold-enabling additions and any newly enabled cold capability
+- **AND** `--skip-specs`, if used, follows explicit preservation of survivor updates; `--no-validate` is forbidden and this document revision executes no archive
 
-- **WHEN** only the origin-parity or physical-parent preparation child has merged
-- **THEN** production G0 remains blocked until both #2290 and #2291 are merged and separate external readiness is supplied; isolated tests are not live rollout evidence
+### Requirement: Closure SHALL require deletion proof and separately authorized effective-deployment handoff
 
-### Requirement: A residency group MUST include all physical storage owned by both chunk relations
+R5 SHALL prove survivor behavior and zero active retired imports/entrypoints/
+options/CI targets, with only justified protective guards and immutable history
+exceptions. Required runtime oracles SHALL run on isolated node27 resources,
+not inside production, alongside affected local checks and required backend
+regression. Effective unit/dropins/env/ExecStartPre/reference disposition SHALL
+have separate authorization and coordinate owners/foreign holds. No cold sample,
+I9/I8/#2162/#2017 blanket dependency or new storage/RPO/RTO gate SHALL be added;
+existing independent upgrade/recovery duties remain with their owners.
 
-For one compressed chunk, the system SHALL resolve one residency group
-containing the origin chunk heap, its compressed relation heap, every index on
-both relations, and every owned TOAST heap and TOAST index reachable from those
-relations. The durable group identity SHALL bind hypertable identity, origin
-OID/name and half-open range. Each observation SHALL additionally bind the
-current compressed relation OID/name and every current member; before and after
-compressed identities SHALL be distinct fields because transactional
-recompression replaces the sibling. Missing, duplicated, cross-group, or
-unexpectedly changing mappings SHALL be rejected. A group SHALL be terminally
-cold only when every currently reachable member resolves to the configured cold
-tablespace.
+#### Scenario: Source retirement is complete but deployed references are unknown
 
-#### Scenario: Origin shell alone cannot prove cold residency
+- **WHEN** repository deletion passes but effective deployment has not been observed and disposition authorized
+- **THEN** closure remains incomplete; source templates do not prove production state and normal maintenance must not be disabled
 
-- **WHEN** the origin chunk shell is in the cold tablespace but its compressed relation, an index, or owned TOAST storage remains in `pg_default`
-- **THEN** the group is classified mixed/partial and cannot produce `migrated` or `already_cold`
+#### Scenario: Unexpected deployed cold state is found
 
-#### Scenario: Empty and index-shape variants remain complete
+- **WHEN** handoff discovers an unexpected cold relation, tablespace or other deployed cold state
+- **THEN** work stops for dedicated safe disposition without silent DROP, ignored state, or deletion of data, old PGDATA or private evidence
 
-- **WHEN** the group has an empty origin shell, no user-created index, multiple indexes including a quoted numeric-leading name, or owned TOAST storage
-- **THEN** discovery deterministically enumerates exactly the members that physically exist and verifies every member's tablespace
+#### Scenario: A tracked defect remains in extracted code
 
-#### Scenario: Same-window chunks retain separate identities
-
-- **WHEN** both allowlisted hypertables contain chunks covering the same time window
-- **THEN** each chunk resolves to a separate residency group and neither group can contribute members or evidence to the other
-
-### Requirement: Supported TimescaleDB 2.10.2 movement semantics MUST be proven on an isolated cluster
-
-Before production runner implementation, the change SHALL execute an automated
-probe against PostgreSQL 15.2 and TimescaleDB 2.10.2 in a separately named,
-disposable cluster using the exact pinned node-27 database image identity. The
-probe SHALL evaluate `timescaledb_experimental.move_chunk`, direct compressed
-relation/index movement, decompress-first movement, and the shell-first
-transactional sequence. It SHALL freeze only this measured shell-first
-sequence after proving complete movement, rollback, locking, query and
-lifecycle behavior: lock and revalidate the compressed group; move the origin
-shell and every origin index to `nhms_cold`; decompress; prove the expanded
-origin/TOAST/index group is cold; recompress; prove the newly-created complete
-compressed group is cold; prove data parity; then commit and perform a fresh
-readback. It SHALL never directly ALTER the compressed heap or TOAST. Rejected
-sequences and their exact errors SHALL remain in the committed probe evidence.
-
-The probe SHALL NOT create/drop a tablespace or inject filesystem faults inside
-the live `nhms-db` cluster. It SHALL refuse the live container name, live
-PGDATA/tablespace paths, and live PostgreSQL port, and SHALL clean up its own
-container, PGDATA and tablespace paths at the end.
-
-#### Scenario: Live-cluster database fixture is rejected
-
-- **WHEN** a test configuration points tablespace DDL or fault injection at the live container/port/path even if it requests a newly created database
-- **THEN** the probe refuses before connection because PostgreSQL tablespaces and their files are cluster-scoped
-
-#### Scenario: Probe freezes one complete sequence
-
-- **WHEN** all positive, lifecycle, lock, timeout, interruption and rollback rows pass on the pinned 2.10.2 cluster
-- **THEN** the probe log records server/extension/image identity, before/after member residency and bytes, query parity, the accepted SQL/lock order, and rejected alternatives
-
-#### Scenario: Engine behavior cannot satisfy complete residency
-
-- **WHEN** every tested sequence leaves a member hot, cannot roll back partial work, or cannot preserve cold residency through decompression and recompression
-- **THEN** the probe fails and blocks runner implementation rather than weakening the group invariant
-
-### Requirement: One residency-group move MUST be transactional and reconcilable
-
-The system SHALL acquire the supported heap locks in stable OID order,
-revalidate the candidate and source group, and run the shell-first sequence
-inside one transaction with finite local lock and statement timeouts. Moving
-the shell MAY create a transient mixed group inside that transaction; no
-terminal boundary may expose or accept it. After decompress, the expanded
-origin group SHALL be fully target-resident; after recompress, the newly-created
-complete group SHALL be fully target-resident. Any SQL or proof failure SHALL
-roll back the transaction. A successful commit SHALL be followed by a fresh
-catalog readback proving all current members at the target. If the client loses
-the commit result, a fresh reconciliation keyed by durable origin identity and
-range SHALL classify the group as complete source, complete target, mixed, or
-unknown while permitting a committed recompression to have a new compressed
-OID/name; mixed/unknown SHALL block further mutation and SHALL never be
-reported as success.
-
-#### Scenario: Mid-group statement fails
-
-- **WHEN** a missing target, capacity fault, permission error, statement timeout, or injected failure occurs after at least one member movement statement
-- **THEN** transaction rollback leaves every member at its before tablespace and no partial-success receipt is emitted
-
-#### Scenario: Rewrite capacity is budgeted on both devices
-
-- **WHEN** preflight sizes a shell-first migration
-- **THEN** `required_cold = before_compression_total_bytes + cold_reserve_bytes`
-  and `required_hot = wal_reserve_bytes`; exact equality is admitted, either
-  device being one byte short blocks before movement SQL, and
-  `retained_source_bytes` is recorded because the original compressed group
-  remains hot until commit but neither credits cold free space nor adds a second
-  hot-free requirement
-
-#### Scenario: Each group uses a fresh free-space observation
-
-- **WHEN** one enforce tick plans more than one residency-group rewrite
-- **THEN** it samples cold and hot free bytes immediately before each group's
-  capacity decision, so a prior rewrite's consumption can block a later group;
-  no run-start or previous-group free-space snapshot is reused
-
-#### Scenario: Production reserve configuration is explicit
-
-- **WHEN** either production cold-reserve or WAL-reserve byte input is absent, empty, non-integral, zero, or negative
-- **THEN** the runner refuses before connecting for mutation, and no Python, wrapper, environment example, or disposable-probe observation supplies an implicit production default
-
-#### Scenario: Expanded bytes never land on the hot tablespace
-
-- **WHEN** the shell-first transaction has moved the origin shell and then executes `decompress_chunk`
-- **THEN** the expanded origin heap, indexes and owned TOAST resolve entirely to `nhms_cold`, while any transient hot compressed index disappears before terminal recompression proof
-
-#### Scenario: Concurrent reader holds a conflicting lock
-
-- **WHEN** a reader or lifecycle operation prevents the stable group lock from being acquired within `lock_timeout`
-- **THEN** the group is deferred/refused with zero member movement while unrelated groups remain eligible for later bounded ticks
-
-#### Scenario: Process loses the commit acknowledgement
-
-- **WHEN** the moving process is interrupted or loses its connection around commit
-- **THEN** a new connection reconciles every group member and target-window parity without blindly replaying the move; complete source requires the original compressed sibling identity, while only a complete committed target may carry the probe-proven replacement sibling
-
-Production parity SHALL require the current durable origin schema and name as
-explicit, non-optional input derived from the resolved origin OID/schema/name and
-window. It SHALL reject a missing or empty identifier, the allowlisted parent,
-the current compressed sibling, or any mismatch with that resolved durable
-identity; no overload, default or inventory parent name may recover by reading the
-parent hypertable. G1 census, runtime preflight/locked/recompression/post-commit/
-reconciliation paths and post-target named-group observation SHALL all use this
-same origin-qualified owner. The probe-private fixture parity helper is unchanged.
-
-#### Scenario: Target-chunk parity cannot be hidden by sibling rows
-
-- **WHEN** migration parity is checked before, inside and after the transaction
-- **THEN** count, per-column non-null counts and deterministic multiset checksum
-  are computed by selecting from the exact quoted physical relation in the
-  durable origin chunk identity, over that origin's half-open `[range_start,
-  range_end)` window and every non-dropped user column in validated physical
-  order, so an unrelated same-table chunk cannot be scanned, offset, or hide
-  target data loss; the parent hypertable and the compressed sibling's encoded
-  columns are forbidden substitutes, a missing or invalid origin identity has no
-  parent fallback, PostgreSQL returns one bounded aggregate row, and the
-  production client never fetches or materializes all business rows
-
-#### Scenario: Compressed origin reads remain business-row scoped
-
-- **WHEN** TimescaleDB 2.10.2 stores a selected origin as a compressed chunk while
-  the same hypertable contains larger compressed or uncompressed sibling chunks
-- **THEN** an isolated PostgreSQL 15.2 / TimescaleDB 2.10.2 execution proves both
-  result and plan: the origin-qualified parity query returns the selected chunk's
-  transparent business rows, changing sibling rows cannot change its parity,
-  changing a target row does change it, and the execution plan names no sibling
-  chunk; SQL-string inspection alone cannot satisfy this oracle, and direct
-  compressed-storage columns, an `ONLY` form that suppresses transparent
-  decompression, mutation by `decompress_chunk`, or changing the census
-  `3600000`-millisecond or runtime `3600s` finite ceilings cannot satisfy it
-
-#### Scenario: Invalid origin identity has no fallback
-
-- **WHEN** unit or integration input omits the origin, supplies quoted identifiers,
-  names the allowlisted parent or compressed sibling, drifts the durable OID/name/
-  window, or the selected origin disappears before execution
-- **THEN** valid quoted origins remain exactly quoted, while every missing,
-  substituted, drifted or disappeared identity fails before a parent/sibling read
-  or parity success; unit SQL-shape assertions support this refusal contract but
-  do not replace the executed TimescaleDB result-and-plan oracle
-
-#### Scenario: Locked parity and inventory are freshly revalidated
-
-- **WHEN** stable group heap locks have been acquired and the preflight inventory
-  or target-window data changed after selection
-- **THEN** the moving transaction re-derives both allowlisted inventories and the
-  exact target-window parity, compares them with preflight descriptors/digests/
-  parity, and aborts before the first movement SQL on any drift; its parity read
-  lock remains held through commit
-
-#### Scenario: Production parity inventory is schema-derived and bound
-
-- **WHEN** the runner starts a dry-run or enforce observation
-- **THEN** it derives both allowlisted hypertables' complete non-dropped user-column
-  inventories from the live PostgreSQL catalogs, validates from the Timescale catalog that `valid_time` is the sole open time
-  dimension and has PostgreSQL type `timestamptz`, records name/type/nullability/generation descriptors
-  and their digest, and generates parity from that exact inventory before any
-  mutation; a missing, extra, reordered, unsupported, or drifted column fails
-  closed, and production code never imports the #1892 four-column fixture helper
-  or accepts an unvalidated caller list
-
-#### Scenario: Catalog and filesystem identity disagree
-
-- **WHEN** catalog location, current container bind source, host mount/device,
-  directory writability, or configured expected target identity disagree
-- **THEN** movement fails closed before the first relation statement; bind/host/
-  device observations must come from a required real inspector and cannot be
-  synthesized by echoing expected config values, while the isolated oracle
-  injects at least one safe mismatch and proves zero movement SQL
-
-#### Scenario: Writability is measured as the numeric server principal
-
-- **WHEN** the target inspector validates production or disposable residency
-- **THEN** both dry-run and enforce require numeric UID and GID config before
-  database connection, with each decimal component in `1..4294967294` (`2^32-2`,
-  excluding root and the `(uid_t)-1` sentinel). At the env/Python seam, missing,
-  empty, whitespace-padded, named/non-integral, boolean at the Python seam,
-  negative, above-bound, zero, or one-component-only input refuses. One bounded
-  inert
-  Docker inspection uses a small projection within the existing 5-second/64-KiB
-  ceilings to observe both the unique cold bind and strict numeric `Config.User`,
-  proves exact equality, and only then runs `test -w` with
-  `--user <uid>:<gid>` using that same pair. At the inspect seam, missing/empty,
-  named, UID-only, malformed, either-component-root, or mismatched identity
-  refuses before writable or movement. Image user names such as `postgres`, root
-  execution, and implicit defaults are forbidden, and tests prove image
-  `postgres=1000:1000` does not override an expected/observed runtime principal
-  of `1005:1005` on a mode-0700 owner-matched path. The public env example exposes
-  both UID/GID keys unassigned; #1895 fills them only after fresh measurement.
-
-#### Scenario: Pinned engine identity drifts
-
-- **WHEN** the live read-only image identity, disposable image ID, PostgreSQL version, or TimescaleDB version differs from the pinned contract
-- **THEN** the probe fails before selecting or executing a movement sequence and cannot emit PASS
-
-### Requirement: Cold residency MUST converge across decompression, replay, recompression and retention
-
-The legal state progression SHALL be `hot-uncompressed -> hot-compressed ->
-cold-compressed -> cold-uncompressed-replay -> cold-compressed`. A manual
-cold-chunk decompression SHALL recreate writable storage in the cold
-tablespace. Replay writes SHALL remain cold. Recompression SHALL end with a
-complete cold group through the probe-proven engine behavior or immediate
-serialized convergence. Dropping the chunk SHALL remove both chunk relations
-and all group-owned storage without orphaned catalog or filesystem members.
-
-#### Scenario: Cold decompression and replay stay cold
-
-- **WHEN** an eligible cold-compressed group is decompressed and historical rows are deleted/inserted through the existing guarded replay path
-- **THEN** the uncompressed origin relation and every newly created index/TOAST member remain in the cold tablespace and values/count/checksum match the requested replay
-
-#### Scenario: Recompression returns to complete cold state
-
-- **WHEN** the replayed chunk becomes terminal and the existing compression lane recompresses it
-- **THEN** the resulting origin/compressed relation group is fully cold before the serialized lifecycle tick can report success
-
-#### Scenario: Drop removes the entire group
-
-- **WHEN** existing retention drops a cold chunk through `drop_chunks`
-- **THEN** no origin, compressed, index, TOAST, catalog, or tablespace-file member for that group remains
-
-### Requirement: Cold-residency convergence MUST be dry-run by default, bounded, fair and serialized
-
-The production runner SHALL default to dry-run and SHALL require explicit
-enforce authorization. One enforce tick SHALL have a positive group bound,
-finite per-statement and whole-run budgets, deterministic fair progress across
-both hypertables, and the same mutex/ordering domain as compression,
-decompression and retention operations that can touch the selected group. It
-SHALL scan all eligible compressed groups, not only groups compressed in the
-current tick. An already-cold group SHALL be a no-write no-op; a partial group
-SHALL enter recovery handling rather than ordinary movement.
-
-#### Scenario: Catch-up includes previously compressed chunks
-
-- **WHEN** eligible hot-compressed groups predate the current compression tick
-- **THEN** they appear in dry-run selection and converge under later bounded enforce ticks
-
-#### Scenario: Bound and fairness hold
-
-- **WHEN** more eligible hot-compressed groups exist than the configured per-tick bound across both hypertables
-- **THEN** bounded catalog reads assign oldest-first rank within each hypertable
-  and merge by `(per_hypertable_rank, range_end, hypertable_schema,
-  hypertable_name, origin_oid)`, so every nonempty hypertable contributes one
-  candidate before either contributes its next rank; no more than the bound are
-  mutated, every remainder is recorded as deferred, and no table is starved
-
-#### Scenario: No-op observations do not consume the mutation bound
-
-- **WHEN** already-cold groups appear before hot-compressed groups in stable order
-- **THEN** the runner records every observed no-op without issuing rewrite SQL or decrementing the per-tick mutation budget, so the same tick may still migrate up to its configured bound
-
-#### Scenario: One lifecycle mutex and one recurring trigger serialize mutation
-
-- **WHEN** compression, cold residency, retention, or manual decompression/replay starts
-- **THEN** it acquires `/tmp/nhms-node27-timeseries-lifecycle.lock` before any
-  lane-local or database relation lock, after verifying a no-follow regular file
-  owned by the effective user with mode 0600, and contention produces a
-  no-mutation refused/deferred result; the existing 04:25 compression timer invokes cold
-  residency only as its second sequential `ExecStart`, with no cold-residency
-  timer or asynchronous mutation lane
-
-#### Scenario: Sequential wall budgets are mechanically ordered
-
-- **WHEN** runner config, wrappers and the shared systemd oneshot are validated
-- **THEN** each wrapper wall exceeds its maximum statement wall plus cleanup
-  margin, the service wall exceeds the compression-wrapper wall plus
-  cold-residency-wrapper wall plus systemd margin, and the existing retention
-  timer begins after that worst-case service window; invalid or drifted literals
-  refuse before mutation and fail the static contract tests without changing the
-  retention window
-
-#### Scenario: Autopipe selection race is revalidated transactionally
-
-- **WHEN** autopipe or another writer changes a candidate after catalog selection without holding the lifecycle flock
-- **THEN** the runner's stable heap locks and in-transaction compression/window/group revalidation prevent stale movement and record only the freshly proven state
-
-#### Scenario: Already-cold rerun is idempotent
-
-- **WHEN** a complete group is already at the cold target
-- **THEN** the runner records `already_cold` without issuing a large-file rewrite
-
-#### Scenario: Lifecycle race cannot produce stale success
-
-- **WHEN** decompression, retention, an ingest writer, or compression races selection
-- **THEN** shared serialization or locked revalidation prevents concurrent unsafe mutation and the runner reports only the state proven after the race
-
-### Requirement: Every runner outcome MUST carry a schema-valid identity-bound receipt
-
-The runner receipt SHALL bind its schema version, mode, exact reviewed head
-SHA, cluster/server/extension identity, business watermark, compression lag and
-cutoff, target tablespace/catalog/path/device identity, independently observed
-numeric container runtime UID/GID, bounds and timeout budgets, and every
-selected/deferred/skipped group. Each group observation SHALL record origin/
-compressed identities, every physical member's relation kind, OID/name, before/
-after tablespace and bytes, duration/wait, outcome, and any error/recovery
-status. Credentials and secret environment values SHALL never appear.
-
-New writers and all shipping examples SHALL emit schema version `1.1`. The
-shipping schema and readers SHALL accept a union of historical `1.0` and current
-`1.1`; a schema that accepts only `1.1` is invalid because it would strand
-existing recovery authority. Historical `1.0` target objects omit
-`container_exec_uid` and `container_exec_gid`. An observed `1.1` target SHALL
-require both non-root integers. An unobserved `1.1` target SHALL require both
-fields present as null rather than echoing expected config. New runs SHALL NOT
-emit `1.0`.
-
-Receipt publication SHALL be bounded, mode 0600 and atomic. Before an enforce
-run issues its first movement SQL, it SHALL atomically write a same-directory
-intent sidecar and replace any prior public receipt with the same schema-valid
-`in_progress` payload bound to each selected group's complete preflight source
-snapshot: original compressed sibling/member identities, source residency,
-inventory digest, target-window parity, and actual capacity decision. The
-sidecar SHALL be authoritative while it exists. After fresh reconciliation,
-terminal publication SHALL atomically replace the public receipt before durably
-removing the sidecar by unlink plus parent-directory fsync and identity
-verification. A publication failure SHALL make the run non-success even
-when reconciliation proves a DB commit; the runner SHALL not repeat mutation to
-recreate evidence. Failure or indeterminate durability at either terminal step
-leaves the public intent or a truthful terminal plus the authoritative sidecar,
-never an older success presented as current.
-
-#### Scenario: Normal and no-op receipts prove parity
-
-- **WHEN** one group migrates and one group is already cold
-- **THEN** both receipts validate, the migrated group proves every member at the
-  target, the no-op proves zero movement, and each schema `1.1` target records the
-  independently observed numeric principal used for writability
-
-#### Scenario: Historical receipt remains readable across the evidence upgrade
-
-- **WHEN** startup encounters a schema `1.0` terminal receipt or authoritative
-  sidecar written before the numeric-principal evidence field existed
-- **THEN** validation and recovery remain available without inventing UID/GID,
-  while every newly generated terminal, intent, tombstone, and example uses
-  schema `1.1`; a `1.1` observed target missing either numeric field is invalid
-
-#### Scenario: Partial/error receipt is honest
-
-- **WHEN** a group is mixed, disappears, times out, loses commit acknowledgement, or cannot publish its terminal receipt
-- **THEN** the available evidence records a non-success/recovery state and no stale prior success is presented as current
-
-#### Scenario: Terminal publication fails after database commit
-
-- **WHEN** pre-mutation intent artifacts exist, the database commit is freshly
-  reconciled as complete target, and terminal receipt replacement or sidecar
-  removal fails or has indeterminate durability
-- **THEN** the process exits non-success and does not replay movement; either the
-  public receipt is still `in_progress`, or it is the truthful terminal while
-  the authoritative sidecar still requires startup reconciliation, so no older
-  success is current
-
-#### Scenario: Source-side intent recovery requires original evidence
-
-- **WHEN** startup observes a group resident at the source tablespace
-- **THEN** it may classify `complete_source` only when every current member,
-  original compressed sibling OID/name, inventory digest and target-window parity
-  match the pre-mutation snapshot stored in intent; absent before evidence or a
-  replacement sibling at source is `unknown`, never successful rollback
-
-#### Scenario: A later tick encounters unresolved intent
-
-- **WHEN** startup finds an authoritative intent sidecar from an earlier enforce
-  run, regardless of the public receipt contents
-- **THEN** it fresh-reconciles every named durable group and durably publishes a
-  recovery terminal before selecting new mutation; complete source or target may
-  close the intent, while any mixed/unknown result blocks the tick and the
-  unresolved sidecar is never overwritten by a new run
-
-#### Scenario: Early terminal errors invalidate stale success
-
-- **WHEN** config is valid enough to identify a safe receipt path and a later
-  head-freeze, lock-open, watermark, catalog, target-inspector, capacity,
-  transaction, or terminal-publication step fails
-- **THEN** the runner atomically publishes a schema-valid truthful non-success
-  tombstone or preserves authoritative intent before exit; it never leaves an
-  older success looking current and never fabricates unobserved engine,
-  inventory, target or capacity identity to satisfy the schema
-
-#### Scenario: Movement event identity is honest
-
-- **WHEN** failure occurs before the first origin shell/index `SET TABLESPACE`
-  statement, including timeout while acquiring heap locks or revalidation drift
-- **THEN** `shell_sql_executed` is false; it becomes true only after a movement
-  statement actually reaches the database, not merely because a plan contains
-  movement SQL
-
-#### Scenario: Receipt cannot leak credentials
-
-- **WHEN** a database or filesystem error includes a DSN, password-like value, signed URL, or secret environment value
-- **THEN** the published receipt and stderr carry only redacted stable diagnostics
-
-### Requirement: Cold tablespace installation MUST bind catalog, container path and host device fail-closed
-
-Installation SHALL use fixed tablespace name `nhms_cold`, host path
-`/data/GHDC/nhms-cold-tablespace`, and container path
-`/home/postgres/pgdata/tablespaces/nhms_cold`. Its default mode SHALL be
-read-only dry-run. Before enforce, the host directory SHALL be empty,
-non-symlink, on the expected mounted RAID, and have the exact PostgreSQL
-container UID/GID and mode; the raw container configuration SHALL be snapshotted
-and recreated with every environment, port, mount, resource limit and restart
-policy preserved except for the one new bind. Catalog readback, bind source,
-host device and in-container writability SHALL agree.
-
-The installer SHALL NOT attach `nhms_cold` to either business hypertable. New
-chunks SHALL continue to default to `pg_default`.
-
-#### Scenario: Unsafe fresh directory or drifted catalog blocks installation
-
-- **WHEN** the directory is nonempty, symlinked, missing its mount, wrong owner/mode/device, or `nhms_cold` already exists at another location
-- **THEN** dry-run/enforce refuses before container replacement or DDL
-
-#### Scenario: Container identity diff is narrow
-
-- **WHEN** the fresh bind is installed
-- **THEN** a normalized before/after container-config diff shows only the expected bind while image identity, environment, ports, limits, restart policy and existing mounts remain equal
-
-#### Scenario: New chunk remains hot by default
-
-- **WHEN** a new time range creates a chunk after installation
-- **THEN** the chunk and its indexes use `pg_default`, and catalog inspection proves neither business hypertable has `nhms_cold` attached
-
-#### Scenario: Existing complete topology is an idempotent no-op
-
-- **WHEN** catalog location, live bind source, host device/identity, writability,
-  no-attach state and new-chunk placement already match the fixed contract
-- **THEN** dry-run and enforce report `already_ready` without recreating the
-  container, issuing DDL, replacing recovery authority, or changing the host
-  directory
-
-#### Scenario: Partial topology is not implicitly repaired
-
-- **WHEN** any subset of catalog, bind, host directory or container state exists
-  but the complete topology is absent or inconsistent
-- **THEN** the installer returns NO-GO with the observed identities and performs
-  no create, replace, delete or best-effort repair action
-
-#### Scenario: Private container recovery bundle never becomes public evidence
-
-- **WHEN** the current raw container config is captured before recreation
-- **THEN** exact secret-bearing environment and reconstructible fields are
-  atomically stored only in a mode-0600 private recovery bundle, while the public
-  receipt contains non-secret normalized fields and exact digests; command
-  substitution, shell evaluation, raw credentials and signed URLs are never
-  executed or serialized publicly
-
-#### Scenario: Rollback never shadows or deletes referenced data
-
-- **WHEN** recreation or tablespace readback fails after the prior container was
-  stopped and renamed
-- **THEN** rollback removes only installer-created catalog/container state,
-  restores the exact prior container, and refuses to bind an empty directory or
-  delete any host path until catalog dependencies, `pg_tblspc`, every current or
-  stopped-container bind, identity and emptiness checks prove it unreferenced
-
-### Requirement: Installer outcomes MUST carry schema-valid identity-bound receipts
-
-The installer MUST atomically publish a mode-0600 schema-valid receipt for
-every dry-run, enforce, already-ready, progress, rollback, NO-GO and error
-outcome. The receipt SHALL bind schema version, exact reviewed head SHA, fixed
-tablespace and host/container paths, observed image/config/mount digests, host
-path/device identity, root evidence file identities and freshness, parsed RAID/
-member SMART state, backup coverage, capacity and rollback headroom, catalog/
-bind/writability readback, mutation ownership, rollback status and stable
-redacted errors. It SHALL never include credentials or the private raw recovery
-bundle.
-
-#### Scenario: Precondition refusal replaces stale success truthfully
-
-- **WHEN** a safe receipt path is known and a path, health, backup, capacity,
-  container, catalog or readiness precondition fails
-- **THEN** the installer publishes a schema-valid NO-GO receipt containing only
-  observed evidence and performs zero live mutation; it never leaves an older
-  success looking current or fabricates missing observations
-
-#### Scenario: Interrupted mutation remains reconstructible
-
-- **WHEN** the installer exits after stopping/renaming the prior container or
-  creating installer-owned state but before terminal readback
-- **THEN** the private recovery bundle and public progress receipt identify every
-  owned mutation and the prior container reconstruction, so a later invocation
-  must finish rollback or prove complete target before admitting a new install
-
-### Requirement: Production authorization MUST require root RAID, member health and complete backup coverage
-
-A production install or migration SHALL require fresh root-generated
-`mdadm --detail` evidence and SMART PASS evidence for exactly the two member
-devices parsed from that array evidence, with no degraded, rebuilding,
-recovering, reshaping, missing, substituted or unknown state. Each evidence
-file SHALL be a bounded descriptor-pinned regular file with mode/owner,
-capture-time, hostname, command and subject-device identity; freshness SHALL be
-checked against an explicit positive configured maximum age and the run's fixed
-UTC observation time. A self-reported root flag, `/proc/mdstat [UU]`, a
-successful mount, or unprivileged evidence alone SHALL be insufficient. It
-SHALL also require a descriptor-bound backup inventory that covers PGDATA and
-every external `pg_tblspc` target; a PGDATA-only backup SHALL block rollout.
-
-#### Scenario: Health evidence is incomplete or unhealthy
-
-- **WHEN** root evidence is absent/stale, either member SMART result is unknown/non-passing, or the array is degraded/rebuilding/recovering
-- **THEN** installation and migration return NO-GO without changing the live container or catalog
-
-#### Scenario: Backup omits the tablespace target
-
-- **WHEN** the recovery inventory protects PGDATA but cannot identify and restore the `nhms_cold` target referenced through `pg_tblspc`
-- **THEN** live rollout is blocked even if RAID and capacity checks pass
-
-### Requirement: Governance MUST report hot and cold storage from one observation without category collapse
-
-Governance SHALL sample `/home` and `/data/GHDC` inside one recorded audit
-interval, record each observation time, and separately report filesystem total/
-free bytes, PGDATA bytes, cold-tablespace relation bytes, object-store bytes,
-and residual shared/third-party usage. Residual usage SHALL be derived from
-filesystem-used bytes minus non-overlapping known categories rather than by a
-recursive walk of the shared device root. It SHALL surface catalog/filesystem/
-bind divergence, dangling catalog or bind paths, stopped-container stale mounts,
-negative or unreconcilable residuals, capacity/rollback-budget shortfall, stale
-health evidence, and backup coverage gaps as explicit blockers. Thresholds
-SHALL derive from current measurements rather than historical constants.
-
-Every governance outcome SHALL atomically publish a mode-0600 schema-valid
-receipt binding the schema version, exact head SHA, audit interval, both
-filesystem observation identities and times, separated categories, relation-by-
-tablespace catalog rows, current and stopped-container mount inventories, root
-evidence identities and parsed health, backup coverage, thresholds and all
-blockers. Credentials, raw secret-bearing environment values and signed URLs
-SHALL be redacted or rejected before serialization.
-
-#### Scenario: Same-time healthy sample is internally reconcilable
-
-- **WHEN** catalog, current container, mounts and filesystems agree
-- **THEN** governance reports both devices and the separated storage categories with timestamps and accounting residuals that can be independently checked using catalog and filesystem commands
-
-#### Scenario: Dangling or stale topology is visible
-
-- **WHEN** a catalog target lacks its live bind, a bind points at an unreferenced directory, a stopped container carries a stale mount, or measured category bytes cannot reconcile
-- **THEN** the receipt names the divergent identities and rollout remains blocked
-
-#### Scenario: Residual accounting cannot hide category overlap
-
-- **WHEN** known-category bytes exceed filesystem-used bytes, categories overlap,
-  or one filesystem sample falls outside the recorded audit interval
-- **THEN** governance records an unreconcilable blocker and never clamps a
-  negative residual to zero or presents the sample as healthy
-
-#### Scenario: Governance refusal is schema-valid and non-secret
-
-- **WHEN** catalog, bind, health, backup or capacity evidence is missing,
-  malformed, stale or divergent
-- **THEN** governance still publishes a schema-valid blocking receipt with
-  observed identities and stable redacted diagnostics, without including the
-  database URL, container environment credentials, signed URLs or raw secret
-  evidence
-
-### Requirement: The complete local G0 acceptance chain MUST merge before remote access
-
-The rollout SHALL have one atomic merge-before-access child that delivers the
-executable G0 runbook contract; production pre-target census; C1-C3/G8 owners
-and CLIs; C1-C3 schemas, examples and binders; bounded private evidence/file
-publication; canonical readonly-validation compatibility; and complete CI test
-selection. Before that child merges, no issue-owned node-27/node-22 access,
-census, probe, install, movement, live C1-C4 or timer operation SHALL occur, and
-no local, mock, historical or CI evidence SHALL be described as live PASS.
-
-The census SHALL use production catalog, inventory and parity owners without
-requiring the not-yet-created cold target. Historical six SHALL NOT supply the
-reviewed count, reusable key set or selector. Every C1-C3/G8
-acceptance owner SHALL fail closed on missing or mismatched required input,
-reviewed SHA, invocation bracket, identity or digest and on stale, partial,
-secret-bearing or unapproved private-path evidence. Private receipt publication
-SHALL preserve default umask behavior when no explicit mode is supplied and
-SHALL enforce exact `0600`, no-follow, no-clobber, single-link descriptor/path
-identity, durable write/readback and bounded content when private acceptance
-receipts require it.
-
-C3 SHALL consume and bind the exact raw C4 PASS bytes produced by the promoted
-`c4-live-display-evidence` capability after that lane completes. It SHALL NOT
-embed another frontend C4 producer or treat the C4 command's PASS as a substitute
-for the outer G0/C3 reviewed-SHA and digest gates. The C4 live command SHALL be
-`test:e2e:live-c4-display`, subject to the promoted #2130 input-classification
-precedence; the legacy `e2e/monitoring.spec.ts` lane SHALL NOT satisfy C4.
-
-The readonly validation split SHALL preserve its canonical public imports and
-observable patch seams, including `run_display_route_smoke`, `importlib` and
-`psycopg2`. CI selection SHALL map every changed G0 owner, CLI, schema and shared
-helper to all corresponding assertion-bearing partitions; a collect-only
-fallback SHALL NOT satisfy this acceptance chain.
-
-#### Scenario: Local child blocks the maintenance window until merge
-
-- **WHEN** the local G0 child is under review or any required fixture, schema, binder, compatibility or selector gate is incomplete
-- **THEN** tasks 4.1-4.8 remain unexecuted, no node is accessed, and the result cannot claim a production receipt
-
-#### Scenario: C1-C3 evidence is current and identity-bound
-
-- **WHEN** a C1, C2 or C3 binder receives a missing or mismatched SHA, digest, bracket, identity, stale/partial receipt, unsafe private path or trailing content
-- **THEN** it refuses PASS without publishing a replacement that could make prior evidence look current
-
-#### Scenario: C4 has one promoted producer
-
-- **WHEN** live C4 evidence is requested after the local child has merged
-- **THEN** the rollout executes `test:e2e:live-c4-display`, C3 binds those exact completed PASS bytes, and neither an embedded producer nor `e2e/monitoring.spec.ts` can satisfy C4
-
-#### Scenario: Readonly and CI seams remain compatible
-
-- **WHEN** canonical readonly validation is imported or patched and when a changed G0 surface is selected for CI
-- **THEN** existing public/patch seams remain observable and all relevant assertion-bearing test partitions execute rather than degrading to collect-only
-
-### Requirement: Reviewed cardinality MUST remain bound to the frozen original census
-
-The explicit reviewed count N SHALL be canonical decimal 1..63 at CLI boundaries
-and a strict integer, excluding bool, in original census count fields. No default,
-historical-six fallback, observation-derived expectation or oldest-N truncation
-SHALL exist. G1 SHALL validate its successful private same-run original against N,
-reviewed SHA and its command bracket and freeze N plus the existing held-reader
-whole-file SHA-256 in the existing exclusive private policy. Existing semantic
-census digest and receipt wire meanings SHALL remain unchanged.
-
-Later original loaders SHALL verify the independently frozen file hash and
-reviewed SHA before consuming original required count; resolved/config counts,
-raw unique ordered keys/groups, durable identities and canonical string capacity
-count SHALL agree. Map construction SHALL NOT hide duplicates. Current evidence
-SHALL NOT supply expected original hash or N. G5/G6/G8 helpers SHALL receive the
-validated N explicitly and retain digest/parity/private-file/bracket checks,
-one-group sequential suffix semantics and distinct natural newly-terminal sets.
-
-G3 SHALL observe current eligible physical parents through the shared catalog
-owners, exclude legacy/third tables at admission and refuse invalid admitted
-groups rather than filtering them to match N. It SHALL preserve extra visibility,
-actual ranges and all resource limits without rerunning full parity or returning
-baseline N as an observation. Every approved measured byte value SHALL contribute
-to unchanged E/S/reserve/rollback arithmetic. Count-only success or unavailable
-narrow river proof SHALL NOT constitute parent live acceptance.
-
-#### Scenario: Non-six original authority traverses every gate
-
-- **WHEN** a complete successful original contains reviewed N distinct groups
-- **THEN** G5, every G6 call from 1 through N and G8 consume the same frozen N and
-  identities, with per-tick bound one and independent newly-terminal semantics
-
-#### Scenario: Changed or malformed original authority refuses
-
-- **WHEN** count fields disagree, a group is duplicated/missing/extra/replaced,
-  ordering or parity drifts, or the original is self-consistently rewritten
-- **THEN** the affected gate refuses against the original frozen hash/count/set
-  before observation or mutation, without recomputing its expected authority
-
-#### Scenario: Supported boundary counts do not waive resource limits
-
-- **WHEN** reviewed input is 1 or 63 and complete serialized artifacts fit limits
-- **THEN** public consumers accept the count unchanged; malformed or over-bound
-  counts and oversized artifacts refuse without truncation or budget expansion
-
-#### Scenario: Independent count excludes unrelated populations and detects extras
-
-- **WHEN** admitted narrow/forcing origins have differing actual ranges alongside
-  compressed legacy/third-table origins, and an extra admitted origin appears
-- **THEN** the pinned-engine census and independent count use only admitted
-  origins, and the extra is detected rather than truncated into agreement
-
-### Requirement: Live rollout MUST preserve data, hot placement, display behavior and performance
-
-Before node-27 access, the rollout SHALL commit and review an executable live
-runbook at the exact head to be deployed. It SHALL include a pre-target read-only
-census using the production catalog/inventory/parity owners without target
-preflight; production root-evidence capture; full installer argv;
-canonical-decimal env assembly; one-group invoke/readback/halt commands;
-exhaustive trigger table; current-run receipt checks; and evidence-merge/closure/
-archive ordering. It SHALL name the historical manual container-recreation recipe
-as forbidden for the cold bind.
-
-Root evidence SHALL use schema `1.0`, exact `/bin/hostname` output, UTC RFC3339
-capture time, root:root mode `0600`, 900-second freshness, exact mdadm/SMART/
-backup leaf argv and subject identities, nonempty output, and PGDATA plus every
-sorted external target including `nhms_cold`; the synthetic helper or missing
-producer SHALL be NO-GO. The installer mount identity
-`major:minor:mount-id:source` SHALL come from the pre-install host observer. The
-runner descriptor identity `st_dev:st_ino` SHALL be observed only after path
-creation; the two fields SHALL never be interchanged. Installer mode SHALL be
-`0700`, and UID/GID SHALL be freshly parsed from canonical numeric
-`.Config.User` rather than copied from historical evidence.
-
-The rollout SHALL freeze the exact reviewed head and pre-mutation container,
-cluster/catalog, group identity, row-count/checksum, dual-filesystem and public
-API baselines. The six compressed groups observed on 2026-08-29 SHALL be treated
-as a historical count, not as reusable group identity. Before mutation, a census
-that does not require the absent cold target SHALL resolve exactly the externally reviewed N complete
-eligible source groups and bind every durable origin/window key, current
-compressed sibling, member digest, production inventory/parity,
-`before_compression_total_bytes`, and retained-source bytes. Missing, extra or
-unexplained count/identity drift SHALL terminate the window as NO-GO rather than
-selecting an arbitrary subset.
-
-Let `E` be the checked positive maximum of all N expansion values and `S` the
-checked positive sum of their retained-source bytes. With checked non-overflowing
-canonical decimals, the rollout SHALL configure `cold_reserve=E`,
-`wal_reserve=E`, `install_required=S`, and `rollback_headroom=2*E`.
-`wal_reserve=E` SHALL be described as a conservative same-order proxy derived
-from fresh live expansion, not as measured/per-group-attributed WAL and never as
-the disposable LSN delta. The installer SHALL therefore require cold free space
-of at least `S + 2E`; each group SHALL still use fresh runtime observations and
-require cold free space of at least its expansion plus `E` and hot free space of
-at least `E`. Historical free-space values and disposable WAL observations SHALL
-NOT supply these inputs.
-
-Before any live mutation, the exact reviewed SHA SHALL run the isolated #1892
-oracle and prove a complete `nhms_cold` move, inverse `pg_default` move-back,
-parity and owned-resource cleanup, followed by live read-only compatibility
-checks. The rollout SHALL then quiesce writers and conflicting lifecycle
-operations, install the fresh target only through the reviewed #1894 installer,
-and re-census the same N keys and complete-source preimages with no unexplained
-extra eligible group before the first movement SQL.
-
-Enforce SHALL use `PER_TICK_BOUND=1` and SHALL issue only one invocation at a
-time. The next group SHALL NOT start until the preceding invocation's uniquely
-named receipt matches its reviewed head, generated-at bracket, mode/outcome and
-exit status and proves complete target, parity and filesystem reconciliation.
-Existing baseline groups SHALL become completely cold; active/uncompressed
-groups SHALL remain in `pg_default`. Recurring timers SHALL remain stopped while
-a bounded controlled ingest smoke is run and re-quiesced and while catalog,
-data, display, C1-C4, real-DB pytest, hot/cold plan and performance gates run.
-Timers SHALL be restored only after a written preliminary GO.
-
-The accepted primitive supports an inverse target, but the shipping runner has
-no live move-back entrypoint. During an interrupted or failed installation, a
-live private authority SHALL be consumed only by the same installer's
-reconciliation/rollback state machine. A terminal `installed` receipt SHALL
-prove that authority closed and was removed; it SHALL NOT be treated as a latent
-operator rollback handle. Every subsequent rollback/NO-GO trigger, including a
-post-install pre-movement failure with zero groups moved, SHALL stop later work,
-preserve referenced bind/catalog/path objects, forbid ad hoc SQL, and keep the
-quiesced state until a reviewed owning-implementation response exists. Triggers
-SHALL include head/worktree or engine
-drift; missing/extra census keys; inventory/parity/member/source drift; target,
-bind, device or runtime-principal drift; active writers/locks; RAID/SMART/backup/
-capacity failure; installer/authority or command failure; missing/stale/wrong-run
-receipt; mixed/unknown residency; filesystem reconciliation failure; Seq Scan or
-all-chunk decompression regression; #1342/API/MVT/click/publication failure; and
-natural-tick/unit failure.
-
-The rollout SHALL observe at least one natural serialized tick and either a new
-terminal group's automatic cold convergence or a provable clean no-op. Hot and
-cold SQL plans SHALL contain neither a Seq Scan nor all-chunk decompression
-regression. Public API/MVT/curve paths SHALL meet the #1342 gates: buffers no
-more than 5000, SQL P95 no more than 300 ms, local API P95 no more than 500 ms,
-and frontend river-click P95 under 2 seconds.
-
-Every accepted 4.x receipt SHALL be from the current invocation and exact
-reviewed head; a pre-existing clean file cannot satisfy GO. Issue #1938 SHALL
-remain a non-blocking parser follow-up, so all manually supplied values SHALL be
-short canonical decimals. The evidence PR SHALL merge while this change remains
-strict-valid; only then SHALL #1895 and #1891 close, followed by immediate
-post-merge archival after final strict validation.
-
-#### Scenario: Executable runbook precedes remote access
-
-- **WHEN** Issue #1895 reaches its first node-27 observation or retries G1 after
-  the `a8db554d6402bec642e9a05627eae64b2b79aec3` parent-scan timeout
-- **THEN** the exact reviewed head already contains all census, evidence, install,
-  one-group, halt, receipt and closure commands, explicitly forbids the historical
-  manual container recipe for the cold bind, requires #2224 merged before retry,
-  rejects the failed census/bracket and absent policy/baseline as reusable
-  evidence, and starts a new maintenance window from G0 at the new merged SHA
-
-#### Scenario: Historical baseline is rebound before mutation
-
-- **WHEN** the fresh preflight census runs before the first live mutation
-- **THEN** it resolves exactly the externally reviewed N complete eligible source groups and records every durable key, member/inventory/parity and capacity input, or ends the window as NO-GO without choosing an arbitrary N or deriving N from the observation
-
-#### Scenario: Capacity inputs derive from the same reviewed-N group preimage
-
-- **WHEN** the rollout freezes the installer and runner capacity values
-- **THEN** it checks positive non-overflowing `E` and `S`, records `cold_reserve=E`, `wal_reserve=E` as a live-expansion proxy rather than a WAL measurement, `install_required=S`, `rollback_headroom=2*E`, and rejects historical or disposable values as substitutes
-
-#### Scenario: Disposable rollback proof closes the pre-mutation gate
-
-- **WHEN** the issue-approved disposable branch runs before live mutation
-- **THEN** the exact reviewed SHA proves one complete group can move cold and return wholly to `pg_default` with data parity and owned-resource cleanup, and live read-only checks prove compatible engine/catalog/group inputs
-
-#### Scenario: Terminal install closes its recovery authority
-
-- **WHEN** the installer publishes a terminal `installed` receipt
-- **THEN** the private recovery authority is closed and absent, a later complete-topology invocation is observation-only, and any subsequent trigger preserves the installed topology rather than claiming an operator rollback path
-
-#### Scenario: Post-install census is unchanged before movement
-
-- **WHEN** the fresh target is installed and the first movement is about to start
-- **THEN** the same N keys remain complete source with matching inventory/parity and no unexplained extra eligible key, or movement remains zero, rollout is NO-GO, and the terminally installed topology remains preserved
-
-#### Scenario: Existing eligible groups migrate with data parity
-
-- **WHEN** the controlled rollout processes the N census-bound baseline compressed groups with one invocation per group
-- **THEN** every invocation is current-run-bound, every complete group is cold with no mixed member, row count/identity/aggregate checksum and representative query results match before/after, and filesystem deltas reconcile against relation bytes before the next invocation
-
-#### Scenario: Hot window remains writable and hot
-
-- **WHEN** migration completes and the bounded ingest smoke runs before timer restoration
-- **THEN** every active/uncompressed group remains in `pg_default`, current writers succeed and are re-quiesced, valid-times remain nonempty/non-regressing, and current GFS/IFS publication counts remain complete
-
-#### Scenario: Post-movement trigger fails closed
-
-- **WHEN** any enumerated trigger fires after a live group has moved and no reviewed live move-back entrypoint exists
-- **THEN** later groups and timer restoration stop, every referenced topology object remains intact, the rollout reports NO-GO, and no ad hoc SQL or production-only patch is executed
-
-#### Scenario: Natural lifecycle tick is healthy
-
-- **WHEN** preliminary GO permits timer restoration and the next natural compression/residency lifecycle tick completes
-- **THEN** its current-run schema-valid receipt is clean or a truthful no-op, all required timers are active, and `systemctl --user --failed` contains no issue-owned failure
-
-#### Scenario: Evidence merges before closure and archive
-
-- **WHEN** all live acceptance gates pass
-- **THEN** the strict-valid evidence PR merges first, #1895 then #1891 close, and the shared change archives only in the immediate validated post-merge follow-up
+- **WHEN** R1 transfers an affected path of #2293, #2298 or #1938 to a surviving owner
+- **THEN** that defect follows the new owner rather than being declared retired
+- **AND** capability-retired disposition and #1895/#1891 closure occur only after affected source and deployed references are gone and deletion/regression/deployment evidence is linked

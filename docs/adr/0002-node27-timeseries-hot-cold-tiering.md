@@ -23,7 +23,54 @@ stands; isolated 2.10.2 probe freezes shell-first movement — see
 
 ## Status
 
-Accepted
+Accepted, as amended below. **Current selective-cold direction: mandatory code
+retirement accepted; implementation and deployment handoff pending (2026-09-13).**
+
+## Amendment (2026-09-13): selective-cold code retirement, not dormant retention
+
+The current #1891/#1895 contract is
+[`compressed-chunk-cold-tablespace-tiering/tasks.md`](../../openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md).
+Production selective-cold rollout is withdrawn: no fresh G1 retry, cold sample,
+installation/movement or G0–G8 window is planned. Obsolete code **must be removed**
+before retirement closure; keeping it disabled or as future-use stubs is insufficient.
+This accepts a direction, not a claim that code or production references are gone.
+
+The authoritative groups are **R1** minimal PGDATA/governance/shared and manual
+consumer transfer to actual owners; **R2** independent normal-compression
+decoupling from cold env/paired budgets/launcher with safety intact; **R3** deletion
+of cold-only runtime, old G0–G8 wrappers, schemas/examples/tests/CI and cold SQL
+grant-audit after R1/R2; **R4** active-authority correction without rewriting
+completed history or promoting withdrawn ADDED cold specs; **R5** survivor proof,
+separately authorized effective-deployment handoff and honest closure. Tests/docs
+accompany each source slice. These are summaries, not a parallel implementation plan.
+
+PGDATA command/container/evidence guards, ordinary device-bound capacity sampling,
+compression/retention/lifecycle locking, generic readonly validation and independent
+C4/river-click producers survive. Actual runbook/CLI consumers must migrate and be
+repointed before their old exits disappear. #1895 is not a new comprehensive
+storage/display acceptance epic. Cold samples, I9, I8, #2162 and #2017 are not
+blanket retirement prerequisites; deployment must still coordinate their actual
+owners and foreign holds. Existing upgrade, capacity and recovery obligations
+remain outside this epic; no new RPO/RTO/storage-construction gates are introduced.
+
+Repository templates are not evidence of the effective unit/dropins/env/ExecStartPre
+or deployed state. No production inspection/cleanup is claimed by this amendment.
+R5 handoff must identify the actual approved release references without disabling
+ordinary maintenance. Do not delete tablespaces/data, old PGDATA or private recovery
+evidence merely because code retires. Unexpected deployed cold state requires
+stop/preserve and separately approved safe disposition. #2293/#2298/#1938 can be
+disposed as capability retired only after their affected paths and deployed
+references actually exit; any transferred defect follows its surviving owner.
+
+The #1370 archive retirement remains completed history. The 2026-08-29 successor
+and its 2026-08-31 refinement below are superseded historical technical evidence,
+not installation authority. The 2026-09-10 PGDATA amendment remains a separate
+capability/rollback contract: the later user-confirmed host PGDATA is
+`/data/GHDC/nhms-primary/pgdata`, as recorded by the
+[current runbook](../runbooks/tier-node27-timeseries-storage.md), not the historical
+source location stated in that dated amendment. This correction authorizes no
+repeat relocation, deployment or cleanup. Fresh hardware/backup admission,
+pre-write rollback and the prohibition on stale post-write rollback remain intact.
 
 ## Context
 
@@ -553,6 +600,14 @@ designs, is
 
 ## Amendment (2026-08-29): DB-only `nhms_cold` successor; archive retirement stands
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R1–R5)
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section, including all successor subsections through Lifecycle contract
+- retained_for: historical accepted cold design and isolated engine evidence; rollout withdrawn, code retirement pending
+
 The 2026-08-11 revision retired the **product archive / salvage / rebuild**
 lanes after the `/dev/md0` double-disk failure (#1309/#1370). That retirement
 still stands. This amendment does **not** restore those lanes, does **not**
@@ -568,6 +623,14 @@ is authorized here.
 
 ### What is live vs historical
 
+Archive status:
+- status: superseded
+- current_authority: docs/runbooks/tier-node27-timeseries-storage.md (current retirement authority)
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: dated placement and successor identities, not current live-state evidence
+
 - `pg_default` on `/home/nwm/nhms-pgdata` remains the live hot tablespace.
 - The historical `ghdc` tablespace path
   (`/data/GHDC/nwm-archive/nhms-tablespace`, container
@@ -581,6 +644,14 @@ is authorized here.
   must not create them on the live cluster.
 
 ### Frozen 2.10.2 movement sequence
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: immutable technical conclusions from isolated cold movement; no execution authority
 
 Pinned image identity is the live `nhms-db` image
 `sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e`
@@ -663,6 +734,14 @@ New chunks stay in `pg_default`.
 
 ### RAID, SMART, and backup gates (production, not this probe)
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section's selective-cold admission only
+- retained_for: historical cold gates; existing PGDATA/recovery hardware and backup guards remain in force
+
 Re-admitting `/dev/md0` for terminal compressed DB storage requires
 root-generated `mdadm --detail` plus SMART PASS evidence for **both** member
 devices, with no degraded/rebuild/recovering/unknown state. `/proc/mdstat
@@ -672,6 +751,14 @@ must cover PGDATA and every tablespace location. #1894 owns the installer
 and those gates; this amendment only freezes the policy.
 
 ### #1894 installation/rollback/governance refinement (2026-08-31)
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: historical installer state-machine limits, not new install/rollback authorization
 
 Issue #1894 fixes the host/container admission boundary before any #1895 live action.
 The installer is dry-run by default; enforce is valid only after fresh descriptor-bound
@@ -698,6 +785,14 @@ live execution and performance/archive closure.
 
 ### Lifecycle contract measured by the isolated probe
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: isolated cold lifecycle evidence, not a surviving runtime requirement
+
 Legal state flow is `hot-uncompressed -> hot-compressed -> cold-compressed
 -> cold-uncompressed-replay -> cold-compressed`. Cold decompression writes
 into the origin's tablespace. Replay stays there. Recompression placement
@@ -706,6 +801,12 @@ serialized tick converges the group or reports mixed/recovery. `drop_chunks`
 must leave no origin/compressed/index/TOAST catalog or files.
 
 ## Amendment (2026-09-10): whole-PGDATA relocation capability, not live placement
+
+**Current boundary:** this dated PGDATA capability and its real rollback guards
+survive. Its source placement and statement that cold merely “stays inactive”
+are historical: the 2026-09-13 amendment above records current placement and
+mandatory selective-cold code retirement, implementation pending. It neither
+reopens the migration nor changes its separately authorized release/recovery duties.
 
 Issue #2240 adds a separately authorized alternative to selective compressed-chunk
 residency: cleanly stop the existing PostgreSQL cluster, copy its complete physical

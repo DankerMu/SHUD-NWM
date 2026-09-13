@@ -6,6 +6,38 @@ delivered under `openspec/changes/tier-node27-timeseries-storage`, plus the
 **write-path least-privilege roles (§9)** these lanes run as
 (`openspec/changes/node27-write-path-roles`, #1774).
 
+## Current authority: selective-cold code retirement (implementation pending)
+
+The **accepted direction, not implemented state**, for #1891/#1895 is mandatory
+selective-cold **code retirement**. Production cold rollout is withdrawn: no new
+G1 retry, cold sample, install/movement window or G0–G8 acceptance run is planned.
+The sole retirement contract is the active change
+[`tasks.md`](../../openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md):
+
+- **R1:** transfer minimal PGDATA command/container/evidence, ordinary governance
+  capacity sampling and genuinely retained manual/shared consumers to their actual owners.
+- **R2:** independently detach normal compression from cold env, paired budgets
+  and launcher, retaining safe inert parsing, bounded execution and lifecycle locking.
+- **R3:** after R1 and R2, delete cold-only runtime, old G0–G8 wrappers,
+  schemas/examples/tests, CI targets and cold SQL grant/audit. Tests/docs accompany
+  each source slice; leaving code dormant is not closure.
+- **R4:** correct active authority while preserving completed delivery and immutable
+  evidence; withdraw old pending rollout, never mark it executed or promote its
+  withdrawn cold ADDED specs into base authority.
+- **R5:** prove surviving behavior, obtain separately authorized effective-deployment
+  handoff, then close honestly. #2293/#2298/#1938 retire only after affected paths
+  and deployed references are gone; a transferred defect stays with its real owner.
+
+This document revision removes no scripts and observes no effective unit,
+dropins, env or production cleanup. Deployment handoff must inspect the approved
+release's actual references and coordinate owners/foreign holds; it must not delete
+tablespaces, data, old PGDATA or private recovery evidence. Unexpected deployed cold
+state requires a separately approved safe disposition. Cold samples, I9, I8,
+issues #2162 and #2017 are not blanket retirement dependencies. Existing PGDATA, compression,
+retention, readonly/display, capacity, upgrade and recovery duties remain with their
+owners; no new comprehensive storage/display acceptance project or RPO/RTO gate
+is created. The completed #1370 archive retirement below is a different history.
+
 ## Retirement record: the cold archive lane is gone (2026-08-11)
 
 This runbook was originally written for a hot/cold tiering design whose cold
@@ -89,8 +121,9 @@ removed; git history preserves them. Do not recreate `ghdc`.
 
 **Current live fact:** hot storage is `pg_default` on
 `/data/GHDC/nhms-primary/pgdata` (host; container bind `/home/postgres/pgdata/data`).
-Issues #1894/#1895 own any later `nhms_cold` install/migration. A PGDATA-only
-backup is incomplete once any `pg_tblspc` target exists.
+Issues #1891/#1895 now own mandatory selective-cold code retirement, not a later
+`nhms_cold` install/migration. A PGDATA-only backup is incomplete once any
+`pg_tblspc` target exists.
 
 **Past-tense facts (2026-08-06 overflow, now retired):** a tablespace named
 `ghdc` was created at host `/data/GHDC/nwm-archive/nhms-tablespace`,
@@ -102,9 +135,10 @@ placement was a decompression-overflow exception, not the #1891 successor.
 
 **Current policy:** leftover `ghdc` catalog/bind residue is not a live
 cold-residency target and is not authorization to recreate it. Operators
-must not attach `ghdc` or `nhms_cold` to a business hypertable. Re-admitting
-`/dev/md0` for terminal compressed DB bytes requires root `mdadm --detail`
-plus both-member SMART PASS; `[UU]` is insufficient. #1894 owns those gates.
+must not attach `ghdc` or `nhms_cold` to a business hypertable, and must not
+use `[UU]` alone as hardware admission evidence. Any separately approved
+storage/recovery operation retains fresh root mdadm and both-member SMART guards;
+these guards are not authorization to install selective cold.
 
 ## Install (node-27, `nwm` user)
 
@@ -122,6 +156,14 @@ node-27 cleanup of any leftover installed units is the one-off step recorded
 in #1370's live evidence, not a recurring procedure.
 
 ## #1894 cold-tablespace installation and governance contract (no live rollout)
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R1–R5)
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section, including installation/rollback/governance details and oracle subsection
+- retained_for: historical installation contract; no install or rollout authorization
 
 Issue #1894 introduces only the tested installation/preflight and audit contract for
 `nhms_cold`; it does not authorize a node-27 mutation, chunk movement, archive-lane
@@ -172,6 +214,14 @@ identities for RAID/SMART/backup, discovers all external `pg_tblspc` targets for
 and binds optional prior receipt trend by no-follow mode-0600 identity.
 
 ### Disposable installer oracle prerequisite
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R1–R5)
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: historical cold installer oracle; not a current prerequisite or execution instruction
 
 Issue #1894 的 Docker oracle 只可在 node-27 的 disposable root 执行，绝不允许 live
 `nhms-db`、`nhms-db-before`、55432、`/data/GHDC`、`/home/nwm/NWM` 或
@@ -233,10 +283,10 @@ This is environment-location identity, not an installed-package integrity claim;
 package contents remain outside the fingerprint as for an ignored `.venv/`
 directory. Do not install or rebuild the shared environment during the window.
 
-Issues #1891/#1895 explicitly exclude **entire PGDATA**. Their cold rollout below
-does not authorize this procedure. Do not execute its G0–G8 installation/move
-sequence for #2240, add a cold bind, enable cold residency, or revive the
-retired archive. Re-admitting the historically failed RAID requires fresh
+Issues #1891/#1895 exclude **entire PGDATA** relocation and now require selective-cold
+code retirement. The withdrawn cold rollout below does not authorize this procedure.
+Do not execute its G0–G8 installation/move sequence for #2240, add a cold bind,
+enable cold residency, or revive the retired archive. Re-admitting the historically failed RAID requires fresh
 hardware evidence even though it is currently mounted.
 
 ### A. Review and isolated proof, before a production window
@@ -255,7 +305,7 @@ export PATH="$HOME/.local/bin:$PATH"
 export UV_PROJECT_ENVIRONMENT=/home/nwm/NWM/.venv
 export PYTHONPATH="$(pwd -P)"
 uv run --no-sync python scripts/node27_pgdata_migrate.py --help
-uv run --no-sync pytest -q tests/test_node27_resource_governance.py tests/test_node27_cold_governance.py tests/test_node27_cold_tablespace_container.py tests/test_node27_pgdata_*.py
+uv run --no-sync pytest -q tests/test_node27_resource_governance.py tests/test_node27_pgdata_*.py
 NHMS_RUN_NODE27_DOCKER=1 uv run --no-sync pytest -q \
   -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_pgdata_*.py
 ```
@@ -271,6 +321,14 @@ business-credential rejection despite explicit read-write intent; and refusal
 of stale rollback after durable release, including partial release. An image
 primitive experiment alone is not CLI/state/oracle proof. No isolated result
 proves live C1–C4, HDD latency, ingest, or backup/disposal readiness.
+
+R1 must migrate the PGDATA command/container/evidence and ordinary capacity
+consumer tests to their surviving owners before R3 deletes cold-named tests.
+The former extra `test_node27_cold_governance.py` and
+`test_node27_cold_tablespace_container.py` invocations are historical coverage
+dependencies, not permanent PGDATA prerequisites. The commands above do not
+claim this transfer is complete; R1 must update them with the actual surviving
+coverage before deletion, without inventing replacement test names.
 
 ### B. Later approved window: fresh admission and baseline
 
@@ -404,9 +462,10 @@ invented 100 GiB budget substitutes for a measured, approved value. No recursive
 Capture baseline business content and identical representative SQL/API/browser
 requests before stopping anything: latest-product identity/coverage, GFS and IFS
 forcing, river click/valid-times, compression/catalog/roles/migration metadata.
-Use the existing read-only C1–C4 workload definitions below, but preserve the
-OLD runtime and actual deployed endpoints; do not run their cold movement or
-runtime installation steps. Record one warm-up plus 20 measurements per same
+Use [Retained PGDATA and display workloads](#retained-pgdata-and-display-workloads)
+and the independent bringup C1–C4 owners, preserving the OLD runtime and actual
+deployed endpoints; never run withdrawn G7 installation/wrappers. Record one
+warm-up plus 20 measurements per same
 query/request/click, plans/buffers, timestamps and content digests. SQL P95
 must be <=300 ms and buffers <=5000; local API P95 <=500 ms; browser click
 P95 <2 s. Missing real-browser capability is a pending gate, not an API proxy.
@@ -610,13 +669,51 @@ reference/ownership check proving the directory is no longer any running or
 stopped container's required data. PR completion cannot authorize disposal,
 remove the foreign capacity hold, or claim production placement changed.
 
+## Retained PGDATA and display workloads
+
+This is the retained workload entrypoint for #2240, not a new #1895 acceptance
+project. [Bringup C1–C4](node-27-bringup-checklist.md) owns general runtime,
+readonly DB, cross-plane identity and browser evidence. Its independent
+`scripts/validate_readonly_db_boundary.py`, `services/production_closure/readonly_db_validation`,
+frontend `test:e2e:live-c4-display` and §4.9 river-click producer/binder remain.
+Do not start/redeploy display merely to observe an existing pinned runtime.
+
+For a separately authorized PGDATA window, bind before/after observations to the
+same real endpoints, reviewed tooling SHA, source/cycle/run/model/basin/segment
+identities and unchanged business content. Cover GFS and IFS latest-product,
+forcing and river series/valid-times, `/` river click and `/ops` readonly behavior.
+Use representative uncompressed and compressed windows already present; do not
+manufacture a selective-cold sample. Preserve SQL/API/browser one-warm-up plus
+20-sample requirements and thresholds in PGDATA §B. SQL uses the shipping M11
+`forecast_series()` explicit-cycle path: no relevant fact Seq Scan or all-chunk
+decompression; normal `DecompressChunk` of its own candidate is allowed. Buffer
+accounting is root Plan Shared Hit+Read, not summed parent/child counters.
+Missing DB/browser evidence remains pending, never mocked PASS.
+
+The old G7 C1/C2/C3/performance CLIs below are real manual consumers, not an
+exemption from retirement. R1 must transfer any still-required observation,
+identity/content binding and performance producer/validator with schema/tests
+to its actual PGDATA/display/readonly owner and repoint this guidance **before**
+R3 deletes its old exit. No replacement CLI is asserted to exist yet. Independent
+C4 does not depend on the old C3/G8 acceptors; retain its real producer/binder.
+Existing controlled-ingest/natural-tick and pre/post-write rollback obligations
+stay in PGDATA §D, subject to the actual hold owner's separate authorization.
+
 ## #1895 controlled live rollout (node-27 cold residency)
 
-This section is the **only** authorized procedure for creating the `nhms_cold`
-bind/tablespace and moving the first production compressed chunk group. It is
-written to be executed in order at one reviewed SHA, with no invented values and
-no placeholders. Nothing here is a template to adapt: every gate has a command,
-an observable field, and a stop condition.
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R1–R5)
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section, through G8 and its stop/rollback tables
+- retained_for: historical cold rollout and failed-window evidence; all commands and retry/closure demands withdrawn
+
+The following is the **withdrawn historical procedure**, not authorization to create
+`nhms_cold`, move chunks, retry G1 or run a fresh G0–G8 window. Its former gate
+order and safety evidence are preserved for audit; mandatory retirement remains
+unfinished. Use the current retirement authority and retained workload entrypoint
+above, not these commands, for current work.
 
 > **STOP — the gate order is load-bearing.** G0…G8 run inside one maintenance
 > window and each gate's artifact is consumed by the next. No node-27 command
@@ -676,6 +773,14 @@ an observable field, and a stop condition.
 
 ### Rollout conventions
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: withdrawn rollout conventions; commands are historical, not authorized
+
 - `$CHECKOUT` is `/home/nwm/NWM` on node-27 and every command runs from it.
 - Every repository Python entrypoint runs through
   `uv run --no-sync python scripts/<entry>.py`; every inline observation helper
@@ -722,6 +827,14 @@ an observable field, and a stop condition.
   `ORIGINAL_CENSUS_SHA256` once; every later gate consumes that same authority.
 
 ### G0 — Readiness at the reviewed SHA (no remote access)
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: withdrawn G0 readiness; no new cold-window gate
 
 The reviewed SHA must already contain, as merged content and not a local
 overlay: issue #1892 (`scripts/probe_compressed_chunk_cold_tablespace.py`),
@@ -798,6 +911,14 @@ the window before it opens**: no census, probe, or install until the reviewed SH
 is reachable, clean, and running the merged runbook.
 
 ### G1 — Pre-target read-only census (no `nhms_cold` preflight)
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: withdrawn G1 census; no retry or cold-sample demand
 
 The #1893 runner cannot serve as the census: its tick binds every observation to
 the production target preflight (#1929), which refuses while `nhms_cold` is
@@ -1029,6 +1150,14 @@ failure here is a trigger row, not a G7 problem to paper over.
 
 #### Capacity policy — what each number is, and what it is not
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: historical cold capacity policy, not PGDATA/governance admission
+
 | Symbol | Value | Consumed by |
 |--------|-------|-------------|
 | `E` | checked positive `max(before_compression_total_bytes)` over the census groups | cold reserve, WAL reserve, rollback headroom |
@@ -1054,6 +1183,14 @@ observation recorded by the #1892 probe. Quoting it as a WAL measurement is a
 documentation defect; shrinking it because "the WAL was smaller" is a trigger row.
 
 ### G2 — Production root evidence (never the synthetic helper)
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: withdrawn G2 cold evidence setup; no root or deployment authorization
 
 The installer consumes descriptor-bound, root-owned JSON envelopes. **This is the
 production contract, not the #1894 disposable oracle:
@@ -1280,6 +1417,14 @@ check, and `covered_paths` is never unioned with or replaced by a runbook list.
 
 ### G3 — Exact-SHA isolated oracle before any live mutation
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: historical G3 cold oracle; not a retirement prerequisite
+
 ```bash
 set -euo pipefail
 cd /home/nwm/NWM
@@ -1404,6 +1549,14 @@ window, never a patch bump). `_timescaledb_catalog.tablespace` carries
 point, that is partial topology: stop, do not install over it.
 
 ### G4 — Drain writers, then assemble the cold env
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: withdrawn G4 drain/env assembly; do not stop writers or provision cold env
 
 Stop the six writer service/timer units plus the governance and replay lanes that
 would otherwise fire during the container outage or write an eligible compressed
@@ -1595,6 +1748,14 @@ window requires the matching drop-in installed **first** — the preflight
 validates declarations and cannot introspect `TimeoutStartSec`.
 
 ### G5 — Install through the #1894 installer (the sole mutation entrypoint)
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: withdrawn G5 installer; no mutation authorized, preserve unexpected existing state
 
 > **FORBIDDEN PATH.** The historical §4.3.3 "Recreating the `nhms-db` container
 > (mount-critical)" recipe, the bare `docker run` block inside it, and the
@@ -2064,6 +2225,14 @@ applies, with no live move-back either.
 
 ### G6 — One group at a time
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: withdrawn G6 movement commands; do not execute
+
 Preview first. The runner is dry-run by default, and the preview must show
 **exactly one** selected group — the first remaining census key in ranked order —
 with zero mutations. `selected_keys <=` is too weak: with `PER_TICK_BOUND=1` the
@@ -2256,6 +2425,14 @@ catalog/bind/path/device topology, and route the response to the owning
 implementation issue for a reviewed live move-back entrypoint.
 
 ### G7 — Verification while the timers stay stopped
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section, including old C1/C2/C3/performance wrappers
+- retained_for: withdrawn G7 acceptance; use Retained PGDATA and display workloads above for surviving consumers
 
 Recurring timers remain stopped throughout G7. First prove nothing active was
 swept into cold storage — both counts machine-asserted as `0`:
@@ -2629,6 +2806,14 @@ satisfied by the legacy monitoring lane.
 
 ### G8 — Preliminary GO, natural tick, evidence, closure
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: withdrawn G8 timer/closure/archive procedure; no activation, closing or archive execution authorized
+
 Restoring timer enablement requires a **written** preliminary GO recorded in this
 issue's thread by the issuing authority — a chat ack, a green local run, or the
 operator's own judgement is not it. Then restore exactly what G4 recorded, in the
@@ -2882,6 +3067,14 @@ Closure order, in this exact sequence:
 
 #### #1895 stop / NO-GO trigger table
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: historical rollout stop table; unexpected deployed state still requires stop/preserve and dedicated owner disposition
+
 Every row has the same default action — **stop, keep all writers, timers and
 lanes quiesced, preserve the topology, issue no later group and no timer
 restoration, capture the current-run evidence, route a reviewed
@@ -2907,6 +3100,14 @@ owning-implementation response.** Only the two rows marked otherwise differ.
 
 #### Rollback points
 
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: historical installer rollback limits, not authorization to rerun installer or delete live state
+
 | Point | Legal rollback |
 |-------|----------------|
 | Before any mutation (G0–G4) | no-op: `$UNITS_ENABLE_STATE` does not exist yet and must not be referenced; close the window as NO-GO |
@@ -2917,6 +3118,21 @@ owning-implementation response.** Only the two rows marked otherwise differ.
 | After any group moved (G6 onward) | stop and preserve: no installer rollback, no move-back entrypoint, no deletion of any referenced path/catalog/bind, writers stay quiesced |
 
 ## Timer cadence order (UTC)
+
+**Current boundary:** governance, ordinary compression, retention and the lifecycle
+mutex survive. R2 must remove the cold leg and paired service budget while preserving
+safe timeout/cadence ordering; R5 separately checks effective deployment. This table
+records the old source assembly, not an observed effective timer/unit or an instruction
+to activate cold residency. Do not apply its cold-dependent schedule/budget as a new
+deployment; preserve actual maintenance until its approved handoff.
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R2/R5)
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section's cold leg, paired wall/cadence and cold env setup only
+- retained_for: historical source coupling; normal maintenance and lifecycle mutex remain required
 
 | Order | Timer                                        | OnCalendar         | Rationale |
 |-------|----------------------------------------------|--------------------|-----------|
@@ -2940,6 +3156,14 @@ subsection (#1929). Check what is actually enabled on the box with
 `systemctl --user list-timers` before relying on the table.
 
 ### Cold-residency target writability probe (#1929)
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section
+- retained_for: historical cold principal/preflight contract; no rollout dry-run or env provisioning
 
 The runner proves the cold path is writable **as the PostgreSQL server's own
 container principal**, never as an image user name. `docker exec --user postgres`
@@ -4222,7 +4446,8 @@ Since 2026-08-06 the container has been mount-critical for the **historical
 `ghdc` residue**: if that catalog name still exists, all three bind mounts
 below must be present or PostgreSQL cannot open those leftover relations.
 That is a residue constraint, not authorization to recreate `ghdc`.
-The #1891 successor bind (`nhms_cold`) is added only by #1894.
+The former #1891 successor bind (`nhms_cold`) is withdrawn; neither #1894's
+historical installer nor this recreation recipe authorizes adding it.
 
 | Host | Container |
 |---|---|
@@ -4525,6 +4750,23 @@ recurring unit's state) is dump-recorded and NEVER compared, so a scheduled
 check cannot flake on autovacuum or parallel-worker noise.
 
 ### 4.5 大 chunk 追赶（timeout 墙 override，`#1156`）
+
+**Retirement transition (R2, implementation pending):** normal compression and
+bounded catch-up survive, but the paired cold-env assembly described below is
+withdrawn as a deployment recipe. R2 must replace it with a compression-owned
+budget/launcher and update this procedure atomically, preserving safe parsing,
+timeouts, cleanup margin, secret safety and lifecycle locking. Do not provision
+cold env or run the cold leg to make compression work; do not remove an effective
+env dependency before the separately approved source/deployment handoff. Existing
+timeout/lock/refusal safety limits are not waived.
+
+Archive status:
+- status: superseded
+- current_authority: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md (R2)
+- superseded_by: openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md
+- status_since: 2026-09-13
+- archive_scope: section's paired cold-env budget and override commands only
+- retained_for: historical coupling and measured compression/catch-up safety evidence
 
 A terminal chunk that outgrows the per-chunk statement timeout cannot pass the
 automated lane, and because selection is oldest-first (`ORDER BY range_end
@@ -5384,8 +5626,8 @@ The frontend river-click `P95 < 2 s` gate (also §4.0 stop-table G7) has a
 shipping browser oracle after #1970: the public `/` map route, a gated
 read-only hook, and a no-mock serial sampler that publishes a schema-1.0
 mode-0600 no-clobber receipt. **This section documents the exact merged
-command; it does not claim a live PASS — #1895 owns the node-27 execution and
-acceptance.**
+independent display command; it does not claim live PASS. The display owner
+retains execution/acceptance; #1895 retirement creates no new display project.**
 
 - **Only five env keys are read.** `PLAYWRIGHT_LIVE_BASE_URL`,
   `PLAYWRIGHT_LIVE_API_BASE_URL` (both bare HTTP(S) origins, root pathname, no
@@ -5438,7 +5680,7 @@ acceptance.**
   test "$CMD_EXIT" = "0"
   ```
 
-- **Schema/readback acceptance.** `#1895` accepts only a receipt that is
+- **Schema/readback acceptance.** The independent display lane accepts only a receipt that is
   valid against `schemas/frontend_river_click_live_evidence.schema.json`
   (the semantic validator in `playwright.river-click-evidence.ts` enforces the
   same closed bounds before write), schema-`1.0` artifacts
@@ -5985,7 +6227,9 @@ commented placeholder; run it only after the two manual receipts in §8.4
    `~/.config/systemd/user/` from the checked-in
    `infra/systemd/nhms-node27-timeseries-retention.{service,timer}`. The
    cadence stays `OnCalendar=*-*-* 06:36:00 UTC` — do not retune it here;
-   that is after the worst-case sequential compression+cold service window.
+   that rationale came from the historical paired compression+cold budget.
+   R2 must preserve safe ordinary-maintenance ordering when removing cold;
+   R5 separately authorizes effective deployment. This is not cold activation.
 
    **The timer lane obeys ONLY the env file's
    `NODE27_TIMESERIES_RETENTION_ENFORCE` value**: every tick starts a fresh
@@ -7241,7 +7485,7 @@ scan and fails if a lane grows a requirement this table does not cover.
 | `nhms-node27-autopipe.service` | `scripts/node27_autopipeline.py` | DML across `core`/`met`/`hydro`/`ops`/`map`; **`ANALYZE` on frontier chunks and on authority tables** → ownership. No `compress_chunk`/`drop_chunks`/policy calls, no runtime `CREATE TABLE`/`CREATE INDEX`/`TRUNCATE`/`REFRESH MATERIALIZED VIEW` | `nhms_ingest_rw` |
 | `nhms-node27-download.service` | `scripts/node27_download_once.sh` → `node27_download_cycles.py` → `nhms-gfs`/`nhms-ifs download` | **no database connection at all** (no `execute(`, no `psycopg2`/`DATABASE_URL` under `workers/data_adapters/`); the `met.*` forcing DML is applied from the ingest lane | `nhms_download_rw` (DML on `met` only — provisioned so the template's promise holds and a future adapter write does not land on the superuser) |
 | `nhms-node27-timeseries-compression.service` (compression leg) | `scripts/node27_timeseries_compression.py:595` | `compress_chunk(regclass)` → ownership; read-only watermark query | `nhms_ingest_rw` |
-| `nhms-node27-timeseries-compression.service` (cold-residency leg) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py:421,422` | `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` on compressed chunks → chunk ownership **plus `CREATE` on tablespace `nhms_cold`** | `nhms_ingest_rw` |
+| Withdrawn cold-residency leg (source retirement pending R2/R3; not a deployment instruction) | `scripts/node27_cold_residency.py` → `packages/common/compressed_chunk_cold_residency.py` | Historical `ALTER TABLE/INDEX … SET TABLESPACE nhms_cold` and tablespace `CREATE`; R3 must remove cold grant/positive audit after consumer migration, not revoke/drop live state by this doc | historical `nhms_ingest_rw` requirement only |
 | `nhms-node27-timeseries-retention.service` | `scripts/node27_timeseries_retention.py:851` | `drop_chunks(...)` → ownership | `nhms_ingest_rw` |
 | `nhms-node27-timeseries-compression-replay.service` (`Type=oneshot`, no timer — operator-triggered, not a recurring lane) | `scripts/node27_timeseries_compression_supervisor.py:101-128,143,331-380` | `pg_dump`, two `migration_apply` steps (`psql --file <migration>`), `docker exec nhms-db pg_restore` — **migration-class DDL** — plus a `decompress` leg (`scripts/node27_timeseries_decompression_replay.py:194`, `decompress_chunk` → hypertable ownership) and, in the same `EXPECTED_COMMAND_SEQUENCE` (`:117-128`), `compression_dry_run` and `compression_enforce`. The exception is scoped by **"one-shot migration-class unit"**, not by which calls it makes: the compression legs are the same ones the recurring lane runs as `nhms_ingest_rw`; the `migration_apply` steps are what that role structurally cannot carry | **`nhms` (documented exception)** |
 | archive-rebuild drill (retired lane, #1370; no unit, no template in `infra/env/`) | — | `POSTGRES_ADMIN_URL` against the `postgres` database, `CREATEDB` for `nhms_archive_drill` | **`nhms` (documented exception)** |

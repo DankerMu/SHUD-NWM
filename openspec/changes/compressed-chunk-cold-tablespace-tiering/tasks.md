@@ -1,35 +1,180 @@
-Fixture level: high
-Repair intensity: high
-Project profile: NHMS
-Upstream suggested level: absent
+# Mandatory selective-cold retirement — active implementation contract
 
-Seams under test:
+Status: proposed target only. This revision changes documentation/specification;
+the merged cold code remains present and retirement implementation is pending.
+The sole executable retirement plan is this file. Old cold deployment approval
+does not authorize retirement, and disabling a lane is not code retirement.
 
-- Isolated-cluster probe CLI/test boundary: pinned image + isolated paths ->
-  measured PG 15.2 / TimescaleDB 2.10.2 movement and lifecycle verdicts.
-- Shared residency-group module: catalog snapshot -> complete group or stable
-  blocker; group + target -> transactional move/reconciliation result.
-- Runner CLI/wrapper: dry-run/enforce config, including required numeric runtime
-  UID/GID -> schema-valid receipt and bounded DB effects.
-- Target inspector: one bounded Mounts + strict numeric `Config.User` observation
-  -> exact `uid:gid` writable probe -> observed schema-1.1 target evidence.
-- Installer/governance CLI: host/container/catalog evidence -> NO-GO or exact
-  topology receipt.
-- Local G0 readiness chain: production census owners + C1/C2/C3/G8 CLIs,
-  schemas and binders + shared private-file primitives + canonical readonly
-  facade + CI selector -> fail-closed current-run evidence without remote access.
-- Origin-scoped production parity (#2224): parent-derived validated column
-  inventory + mandatory current `CatalogChunk` durable origin schema/name/OID/
-  window -> one bounded business-row aggregate over only that physical origin,
-  with no default, parent or compressed-sibling fallback. Census, runtime
-  preflight/locked/post-commit/reconciliation and post-target observations all
-  use this same owner.
-- Physical parent admission (#2290): canonical narrow river/current forcing
-  catalog OID + Timescale hypertable ID + actual columns -> mandatory bound
-  inventories and constrained origin membership, with no legacy/name-only
-  fallback. Detailed matrix/evidence: `fixtures/issue-2290.md`.
-- Node-27 rollout (tasks 4.1-4.8 only): merged reviewed SHA + approved
-  maintenance inputs -> live parity/performance/timer receipt.
+## R1 — Transfer minimal surviving consumers to their actual owners
+
+- [ ] R1.1 Migrate `packages/common/node27_pgdata_host.py` and
+  `node27_pgdata_migrate.py` off cold imports. Transfer `run_bounded_command` and
+  required process-kill/pipe/output-bound closure into PGDATA-owned command/host
+  code; translate `ColdRuntimeError` at the PGDATA error boundary. Transfer only
+  consumed `ContainerSnapshot` normalization/serialization from
+  `node27_cold_tablespace_container.py` into PGDATA-owned container code.
+  Exclude `with_cold_bind`, `build_recreate_argv` and cold rollback planning.
+- [ ] R1.2 Transfer consumed `EvidencePolicy`, descriptor/mdadm/both-member SMART
+  verification and dataclasses from `node27_cold_tablespace_evidence.py` into
+  PGDATA-owned evidence code. Do not carry installer path/capacity/backup-inventory
+  machinery without a real retained consumer. Use existing
+  `node27_external_contract_snapshot.json` / `node27_container_contract.py` for
+  the image pin, not a copied literal or `compressed_chunk_cold_residency.py`.
+  Respect existing module-size boundaries.
+- [ ] R1.3 Move generic `collect_filesystem`, `collect_postgres`,
+  `collect_working_set`, `bytes_pretty`, `run_command` and required sampling
+  helpers from `node27_cold_governance*` to resource-governance-owned code used by
+  `scripts/node27_resource_governance.py`. Preserve actual PGDATA device and
+  available-space binding, unknown/conflict refusal, bounded observations and
+  `/data/GHDC` observation. Remove cold inventory/topology/history/receipt
+  branches, `--cold-governance-*` inputs and `cold_tablespace_governance` output.
+- [ ] R1.4 Migrate/repoint manual consumers as real dependency edges: the PGDATA
+  procedure in `docs/runbooks/tier-node27-timeseries-storage.md` must own its
+  generic SQL/API/browser/ingest workload and evidence instructions rather than
+  refer to old C1-C4/G0-G8 sections or `node27_issue1895_*` exits. Retain genuinely
+  needed producers/validators with their schema/tests under existing
+  display/read-only/PGDATA owners before deleting old exits; do not rename the
+  entire cold acceptance stack. Preserve
+  `services/production_closure/readonly_db_validation.py` and
+  `scripts/validate_readonly_db_boundary.py`.
+- [ ] R1.5 Transfer behavioral tests and selector ownership with each extraction.
+  Prove PGDATA clean-stop/copy verification, exact container preservation,
+  pre-write restoration, no stale post-write rollback, bounded commands and
+  descriptor/RAID/SMART refusals; prove governance placement/unknown/conflict
+  behavior and #2273 capacity plus #1985 discovery/lag contracts. Keep protective
+  rejection of incompatible legacy cold binds/services, not executable aliases.
+  Independent C4 (`apps/frontend/package.json` `test:e2e:live-c4-display`,
+  `e2e/live-c4-display.spec.ts`, producer/binder/schema and
+  `openspec/specs/c4-live-display-evidence`) survives: old publication-current
+  consumes C4, not the reverse. Generic readonly survives old C2's removal.
+
+## R2 — Detach normal compression while preserving safety
+
+- [ ] R2.1 Change `infra/systemd/nhms-node27-timeseries-compression.service`,
+  `scripts/node27_timeseries_compression_once.sh`,
+  `scripts/node27_timeseries_budget_preflight.py`,
+  `scripts/node27_timeseries_compression.py`,
+  `packages/common/node27_timeseries_sequential_budget.py` and
+  `infra/env/node27-timeseries-compression.example` to one compression-owned
+  budget/launcher. Remove paired-env loading, cold arguments/defaults/mirrors/
+  assembly fields and the cold `ExecStart`; migrate every
+  `timeseries_compression_receipt` schema/example/consumer affected by paired
+  fields. No compatibility aliases or mechanical restoration of old literals.
+- [ ] R2.2 Derive a consistent single-compression budget: statement plus cleanup
+  must fit the wrapper, and systemd must retain the required outer safety margin.
+  Preserve descriptor-bound mode-0600/no-symlink inert env parsing, import-origin
+  validation, argv execution, bounded timeout, secret-safe refusal and fixed
+  lifecycle mutex before local/DB locks. Preserve ordinary compression,
+  retention windows, discovery/lag and maintenance scheduling safety.
+- [ ] R2.3 Migrate launcher/compression/retention tests, CI selectors and docs
+  atomically. Real wrapper/CLI smoke must launch normal compression without any
+  cold env and refuse malformed/unsafe compression configuration. Prove finite
+  timeout/cleanup and lifecycle-lock contention behavior on surviving paths;
+  do not infer effective production units from repository templates.
+
+## R3 — Delete cold-only runtime and old G0-G8 delivery surfaces
+
+R1 and R2 are independent preparation groups. R3 depends on both consumer
+cutovers, or ships atomically with them. Tests/docs accompany every source slice.
+The source census found 95 candidate Python files (38 cold package, 6 cold CLI,
+31 issue1895 package, 20 issue1895 CLI); these are families to classify after
+extraction, not wildcard deletion authority or proof of dynamic completeness.
+
+- [ ] R3.1 Delete `packages/common/compressed_chunk_cold_{residency,target,tick,
+  receipt,runtime,runtime_catalog,runtime_target,runtime_timing}.py` and
+  `compressed_chunk_cold_probe/`; `node27_cold_tablespace_{authority,container,
+  engine,evidence,host,identity,install,integration,observation,pending,receipt,
+  recovery,root_capability,topology,types}.py`; `node27_cold_governance{,_cli,
+  _collection,_history,_runtime}.py`; `node27_cold_residency_census_policy.py`;
+  and cold-only `packages/common/node27_issue1895_*.py` after R1 extraction.
+  Delete issue1895 first or together with cold because it imports cold owners.
+- [ ] R3.2 Delete `scripts/node27_cold_residency.py`,
+  `node27_cold_residency_census.py`, `node27_cold_identity_observe.py`,
+  `node27_cold_tablespace_install.py`, `node27_cold_tablespace_root_evidence_setup.py`,
+  `probe_compressed_chunk_cold_tablespace.py`, `node27_cold_residency_once.sh`,
+  cold-only `scripts/node27_issue1895_*.py` and
+  `infra/env/node27-cold-residency.example`. Remove all deployable old G0-G8 exits,
+  including manual/runbook callers after R1.4; no dormant stubs or re-exports.
+- [ ] R3.3 Remove the `nhms_cold` CREATE grant and positive cold-grant audit from
+  `db/roles/node27_write_roles.sql` and update
+  `scripts/node27_provision_write_roles.sh` description. Preserve all unrelated
+  ownership, role flags, membership, trigger/default and security audits.
+  Source retirement does not authorize live privilege revocation or DROP.
+- [ ] R3.4 Delete `timeseries_cold_residency_receipt`,
+  `node27_cold_tablespace_install_receipt`, `node27_cold_governance_receipt`,
+  `node27_issue1895_c1/c2/c3` receipt schemas and matching synthetic examples.
+  Delete cold-only tests/fakes/mutants, including issue1895/2224/2290/2291 tests
+  whose sole contract is retired. Move surviving command/container/evidence/
+  capacity/launcher tests to actual owners; remove incidental source-text or
+  constant-count pins rather than repinning obsolete wording.
+- [ ] R3.5 Update `scripts/select_ci_tests.py` PathTestRule/owner tuples/closure
+  sets and `tests/test_select_ci_tests.py`; close shared conftest/fixture/import/
+  generated and non-Python references. Every retained path must select existing
+  assertion-bearing surviving suites with no stale collection imports.
+  Preserve independent C4 and generic readonly suites. Leave migrations
+  `000058`/`000059`, ordinary compression/retention and current data unchanged.
+
+## R4 — Correct active authority and preserve history
+
+- [ ] R4.1 Implement the proposed surviving-capability deltas beside this file
+  with their matching source changes: PGDATA placement, compression launch/roles,
+  runtime role provisioning and CI selection. Canonical `openspec/specs/**`
+  remains the current implemented contract until that cutover; do not claim
+  this document-only revision has already removed code.
+- [ ] R4.2 Reconcile #1891/#1895, ADR 0002, storage runbook and bringup checklist
+  with mandatory retirement and actual surviving owners. The former pending
+  rollout is withdrawn, not executed. Keep completed ledger below and immutable
+  `evidence/**`, `fixtures/**` and `probe-1892-throwaway.md` as historical records,
+  never active deployment authority. Runtime synthetic examples are not
+  historical evidence merely because they predate retirement.
+- [ ] R4.3 Before implementation, obtain fresh retirement-specific high-risk
+  fixture/invariant review covering R1 ownership, R2 config/process/locking,
+  R3 deletion/security/CI closure and manual consumers, R4 spec disposition and
+  R5 deployment boundaries. Historical cold fixture approvals do not authorize
+  these edits. Require fresh independent review, finding verification, Gap
+  Sweep, regression evidence and exact-head CI before merge.
+- [ ] R4.4 At final closeout obtain reviewed archive/disposition that preserves
+  surviving-spec updates but never promotes withdrawn cold-enabling ADDED
+  requirements. There is no canonical `compressed-chunk-cold-residency`
+  capability to remove. If using `openspec archive --skip-specs`, first apply
+  and validate the surviving deltas explicitly; skipping promotion must not
+  discard those updates. Never use `--no-validate`. Do not archive during this
+  specification revision or while implementation remains pending.
+
+## R5 — Verify survivors, authorize deployment handoff, then close
+
+- [ ] R5.1 Audit zero active imports/entrypoints/options/CI targets for removed
+  families using Python and non-Python/manual consumers. Document only justified
+  protective negative guards and immutable history exceptions. Prove R1-R3
+  retained behavior via real isolated runtime oracles on node27 with owned
+  TMPDIR/resources, not a database inside production. Run affected local
+  Ruff/OpenSpec/frontend checks plus node27 targeted, required full/backend and
+  isolated PostgreSQL 15.2 / TimescaleDB 2.10.2 regression. No test/PASS or fresh
+  review is claimed by this planning revision.
+- [ ] R5.2 Separately authorize effective-deployment handoff at the final release:
+  identify actual unit/dropins/env/ExecStartPre and referenced paths, coordinate
+  owners and foreign holds, remove retired cold activation/configuration without
+  disabling normal maintenance, and record observed disposition. Repository
+  templates are not deployment proof. Do not delete real tablespaces/data, old
+  PGDATA or private evidence. Unexpected deployed cold relations/state require
+  STOP and a dedicated safe disposition, never silent DROP or ignore.
+- [ ] R5.3 Only after affected source paths and deployed references are gone,
+  dispose #2293/#2298/#1938 as capability retired, not fixed; a defect carried by
+  extraction follows the surviving owner. Link deletion, regression, reviewed
+  authority and deployment evidence before closing #1895/#1891. No optional
+  dormant-retention backlog substitutes for code removal.
+
+Cold samples, I9, I8, #2162 and #2017 are not blanket retirement dependencies.
+No new RPO/RTO, capacity-construction or general storage-acceptance epic is
+created. Existing unrelated upgrade, recovery, capacity and autovacuum duties
+remain with their owners; deployment cannot bypass their actual foreign holds.
+
+## Historical completed delivery ledger — non-normative
+
+The entries below preserve completed delivery and original acceptance wording,
+not current install/move instructions. Original fixture level and repair
+intensity were high (NHMS profile; upstream level absent). Those approvals and
+seams are historical only; R4.3 requires fresh retirement approval.
 
 ## 1. #1892 — Freeze the TimescaleDB 2.10.2 contract
 
@@ -277,160 +422,14 @@ Seams under test:
   real mixed-range population counts and every changed selector removal edge.
   Require node27 boundary/consumer/isolated-population evidence plus the normal
   fixture, selector-removal, review/verifier/final/CI gates; no production access.
-- [ ] 4.1 At the reviewed SHA, after 4.0A-4.0C merge and external readiness is supplied, execute the merged live runbook for the first
-  node-27 observation. Before access, its exact deployed SHA must have passed
-  the #2137 issue-specific fixture review, strict OpenSpec validation, contract
-  tests and normal CI. The runbook must provide: a pre-target census using the
-  production catalog/inventory/parity owners (`ranked_candidates_from_execute`,
-  `derive_bound_inventories`, `collect_residency_group`,
-  `compute_window_parity`, `compression_before_bytes`,
-  `retained_source_bytes`) without calling target preflight; the complete #1894
-  installer argv; canonical-decimal env assembly; one-group-at-a-time
-  invoke/readback/halt commands; the exhaustive D9 trigger table; current-run
-  receipt checks; and evidence-PR/close/archive order. It must bind rollback
-  wording to the shipping installer state machine: only a failed or interrupted
-  install with a still-live private authority may reconcile/roll back, while
-  terminal `installed` closes that authority and every later trigger stops and
-  preserves the installed topology. It must name the historical §4.3.3/manual
-  `docker run` recipe as forbidden for this cold bind.
 
-  Production root evidence is one fixed contract, never the synthetic #1894
-  helper: JSON envelope schema `1.0`; hostname equal to the exact `/bin/hostname`
-  output passed to the installer; `captured_at` UTC RFC3339; root:root owner;
-  mode `0600`; maximum age `900` seconds; exact leaf argv
-  `/usr/sbin/mdadm --detail /dev/md0`, `/usr/sbin/smartctl -H <each of the two
-  parsed active-sync members>`, and `/usr/local/sbin/nhms-backup-inventory
-  --json`; exact subject identities; nonempty output; and backup `covered_paths`
-  matching PGDATA plus the sorted catalog-derived external targets including
-  `/home/postgres/pgdata/tablespaces/nhms_cold`. A missing producer or mismatched
-  owner/mode/argv/subject/hostname/freshness/coverage is NO-GO.
+### Withdrawn outstanding rollout — not executed
 
-  The two device identities are deliberately different fields and must never be
-  copied between configs. `INSTALLER_DEVICE_IDENTITY` is the exact
-  `device_identity` returned before install by
-  `node27_cold_tablespace_host.inspect_host_path()` for the absent production
-  child (mount identity `major:minor:mount-id:source`) and feeds installer
-  `--expected-device-identity`. After install,
-  `RUNNER_DEVICE_IDENTITY` is freshly returned by
-  `compressed_chunk_cold_target.inspect_host_path()` for the created directory
-  (descriptor identity `st_dev:st_ino`) and alone feeds
-  `NODE27_COLD_RESIDENCY_DEVICE_IDENTITY`. Installer `--expected-mode` is `0700`;
-  `--expected-uid/gid` and runner UID/GID are the freshly observed canonical
-  numeric `.Config.User` pair, never the historical `1005:1005` text.
-  At the reviewed SHA, capture the read-only live preflight: clean worktree,
-  container config/image/runtime UID:GID, cluster/catalog, every
-  candidate/hot group identity/member residency/rows/checksum, both filesystems,
-  timer/writer/lock state, backup readiness, fresh root RAID/SMART evidence, API
-  valid-times/publication and #1342 baselines. The six compressed groups observed
-  on 2026-08-29 are a historical count, not reusable identities: the fresh
-  census must resolve exactly the externally reviewed N complete eligible source groups and freeze
-  each durable key, current sibling/member digest, production inventory/parity,
-  `before_compression_total_bytes` and `retained_source_bytes`; missing, extra or
-  unexplained drift ends this window as NO-GO, never an arbitrary oldest-N
-  subset. Let `E` be the checked positive maximum expansion and `S` the checked
-  positive sum of all N retained-source byte values; freeze canonical decimal values
-  `COLD_RESERVE=E`, `WAL_RESERVE=E`, `INSTALL_REQUIRED=S`, and
-  `ROLLBACK_HEADROOM=2*E`, rejecting overflow or any stale/probe-derived value.
-  `WAL_RESERVE=E` is an intentionally conservative same-order proxy derived from
-  fresh live expansion, not a measured or per-group-attributed WAL value; no LSN
-  probe or the disposable 165736-byte observation participates.
-- [ ] 4.2 Before any live service, container, catalog or relation mutation, rerun
-  `scripts/probe_compressed_chunk_cold_tablespace.py --mode isolated-cluster` at
-  the exact reviewed SHA with pinned image and isolated names/port/paths. Require
-  a current-run PASS proving complete `nhms_cold` movement, inverse `pg_default`
-  move-back, parity, and owned container/path cleanup; historical #1892 evidence
-  cannot satisfy this gate. Then live-read-only recheck the engine and group
-  contract inputs used by that primitive.
-- [ ] 4.3 Stop and drain autopipe/compression/residency/retention writers under
-  the documented mutex/lock order. Any active writer, conflicting lock, unknown
-  health, insufficient worst-case rollback space or identity mismatch is NO-GO;
-  units remain at this quiesced state until a written GO, a proven pre-install
-  no-mutation abort, or a completed installer-owned rollback receipt authorizes
-  restoration.
-- [ ] 4.4 Establish the fresh `nhms_cold` bind/tablespace only through the #1894
-  installer using the 4.1 values, and deploy #1893/#1929 at the exact reviewed
-  SHA. Re-observe numeric runtime identity and prove catalog/bind/device identity,
-  no hypertable attach and new-chunk `pg_default` placement. An installer failure
-  or interruption with a live private authority is reconciled only by the same
-  installer contract. A terminal `installed` receipt closes and removes that
-  authority; every later trigger, including a post-install pre-movement failure
-  with zero groups moved, stops and preserves the installed topology rather than
-  invoking a fictional operator rollback. The historical manual container recipe
-  is never an alternate install or rollback path.
-- [ ] 4.5 Run a dry-run preview and, before the first movement SQL, re-census the
-  same N 4.1 keys as complete source with the same inventory/parity inputs and
-  no unexplained extra eligible group. Set `PER_TICK_BOUND=1`; issue exactly one
-  enforce invocation per group and do not issue the next until the unique
-  current-run receipt passes head/time/config/outcome, complete residency,
-  parity, duration/wait/bytes and hot/cold filesystem reconciliation. Any D9
-  trigger stops all later groups, forbids ad hoc SQL and path/catalog deletion,
-  leaves every writer/timer quiesced and routes a reviewed owning-implementation
-  response. The shipping runner has no live move-back entrypoint.
-- [ ] 4.6 With recurring timers still stopped, prove all active/uncompressed
-  groups remain wholly `pg_default`, perform one bounded controlled ingest smoke
-  and re-quiesce its writer, then pass node-27 real-DB pytest, C1-C4, hot/cold
-  curve/MVT/click flows and #1342 plans/latencies. Both hot and cold plans must
-  have no Seq Scan or all-chunk decompression regression; require buffers <=
-  5000, SQL P95 <= 300 ms, local API P95 <= 500 ms, frontend click P95 < 2 s,
-  non-regressing valid-times and complete current GFS/IFS publication counts.
-- [ ] 4.7 Only after 4.6 has a written preliminary GO, restore the original
-  autopipe/compression/retention timer enablement and observe at least one natural
-  serialized tick plus one newly terminal group's automatic convergence or a
-  catalog-proven truthful no-op. Require current-run schema-valid receipt, active
-  timers and no issue-owned failed unit; any trigger returns to the 4.3 quiesced
-  state rather than continuing or patching production.
-- [ ] 4.8 Post schema-valid current-run live receipts and final GO/NO-GO with exact
-  deviations/triggers. Historical #1894/#1929 receipts may anchor contracts but
-  cannot satisfy a 4.x observation, and #1938 is a non-blocking parser follow-up:
-  every manual value is short canonical decimal and every GO receipt must match
-  this invocation's reviewed SHA, bracketed `generated_at`, mode/outcome and exit
-  status rather than a pre-existing clean file. Merge the evidence PR while the
-  shared change is still strict-valid; then close #1895, update/close #1891, and
-  archive this shared OpenSpec change in the immediate post-merge follow-up only
-  after its final strict validation gate.
-
-## Risk-pack evidence mapping
-
-- Public API / CLI / config: tasks 2.2, 2.4, 2A.1-2A.2, 3.1-3.3 and
-  4.0. The 4.0 evidence covers `node27_cold_residency_census_policy.py`,
-  `packages/common/node27_issue1895_*.py` and every corresponding census/C1-C3/G8
-  CLI; missing inputs, invalid canonical values or a wrong SHA fail before remote
-  access, publication or mutation.
-- File IO / path / permissions / secrets: tasks 1.2, 2.3, 2A.1-2A.4, 3.1-3.2
-  and 4.0. The 4.0 evidence covers `packages/common/evidence_io.py`,
-  `packages/common/safe_fs_publication.py`, private receipt owners and readonly
-  DSN binding; symlink, alias, mode, nlink, replacement, stale/private-path and
-  secret-bearing cases fail without unsafe overwrite or disclosure.
-- Schema / evidence identity: tasks 1.7, 2.3, 2A.2-2A.5, 3.1-3.7, 4.0 and
-  4.8. The 4.0 evidence covers all C1-C3 schemas/examples/binders and requires
-  exact identity, digest and invocation bracket. Historical 1.0/current 1.1
-  residency evidence, installer private authority and live receipts retain
-  schema validation, redaction, durable publication and semantic readback.
-- Concurrency / resources / rollback: tasks 1.6, 2.1-2.5, 3.5-3.6, 4.0 and
-  4.2-4.6. The 4.0 current-run owners prove ordered publication and allow C3
-  binding only after raw C4 PASS bytes exist; lock, timeout, full, interruption,
-  race, stale or partial output yields explicit non-PASS state.
-- Legacy/display compatibility: tasks 2.4, 2A.3, 3.3, 4.0 and 4.5-4.7. The
-  4.0 evidence covers `services/production_closure/readonly_db_{types,probe_adapter,
-  permission_probes,merge,route_smoke,validation}.py`, preserving public exports
-  and `run_display_route_smoke`/`importlib`/`psycopg2` patch seams. It consumes
-  the promoted #2123/#2130 C4 contract and never reimplements that producer.
-- TimescaleDB/time-series domain: tasks 1.3-1.6, 2.1-2.5, 4.0, 4.0A and 4.4-4.7.
-  The 4.0 census uses production catalog/inventory/parity owners without target
-  preflight; 4.0A closes the live-discovered parent-hypertable scan by proving
-  transparent business-row parity from the exact durable origin relation while
-  keeping the finite timeout; externally reviewed N remains a fresh count gate
-  rather than reusable identity.
-- Published NHMS identity: tasks 4.0 and 4.6-4.8. C1-C3/G8 identity and digest
-  binders, source-scoped current publication and raw C4 bytes prove the local
-  acceptance chain first and exact-SHA live display identity only after merge.
-- Documentation/migration/backup: tasks 1.8, 3.6, 4.0, 4.0A and 4.1-4.8. The 4.0
-  evidence covers the executable G0 text and `scripts/select_ci_tests.py` exact
-  acceptance partitions/removal mutants; C4 uses `test:e2e:live-c4-display`, not
-  legacy `e2e/monitoring.spec.ts`, and no production access precedes all gates.
-
-Non-goals:
-
-- No TimescaleDB/PostgreSQL upgrade, row-schema change, archive-lane restoration,
-  active chunk/PGDATA/WAL/object-store move, node-22/Slurm change, automatic
-  decompression, or compression-lag/retention/display-contract change.
+Original unchecked tasks 4.1–4.8 (fresh G0/G1 census and approval, isolated cold
+move/move-back probe, live writer quiescence, fresh cold tablespace/bind install,
+bounded group enforcement, live hot/cold C1-C4/performance acceptance, automatic
+cold convergence and rollout close/archive) are WITHDRAWN. They are not completed
+tasks or active prerequisites. The first historical G1 NO-GO remains a NO-GO;
+there is no claim that later G2-G8 ran. Their old risk-pack/rollout mapping no
+longer supplies active authority; R1-R5 above replaces it. Completed preparation
+entries 4.0–4.0C and their evidence remain intact above.
