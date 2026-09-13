@@ -1,0 +1,35 @@
+{
+  "purpose": "Preserved verbatim proof bodies and terminal reports; historical workplan paths remain historical citations, not runtime dependencies. Scripts use labeled synthetic receipts only.",
+  "artifacts": [
+    {
+      "historical_path": ".workplans/cold-topology-grill/c4-acceptance-smoke.py",
+      "preserved_file": "retirement-c4-initial-smoke.py.txt",
+      "sha256": "03d2427cbfb8f8ca2cb65a2c12c4a6080bc2612bf47065753d9a855ff63caab0"
+    },
+    {
+      "historical_path": ".workplans/cold-topology-grill/c4-acceptance-mutant.py",
+      "preserved_file": "retirement-c4-initial-mutant.py.txt",
+      "sha256": "b7bb15ec2e3fc4ad2cfd2cf9076856a4f890e333883660e8691d44f5dfe24c0b"
+    },
+    {
+      "historical_path": ".workplans/pr-2321/c4-r1-real-cli-smoke.py",
+      "preserved_file": "retirement-c4-fix-smoke.py.txt",
+      "sha256": "e0f7d1d7b7f50714944a4bfce7801c18cdb68245453e5b700cb3ba90dc5bb58a"
+    },
+    {
+      "historical_path": ".workplans/pr-2321/c4-r1-mutant.py",
+      "preserved_file": "retirement-c4-fix-mutant.py.txt",
+      "sha256": "b04343c6c0ab18052ecaee3dfe9fe0da8160a13e8bb3c89e0457415602288ff6"
+    },
+    {
+      "historical_path": ".workplans/pr-2321/review/final-review.json",
+      "preserved_file": "retirement-c4-final-review.json",
+      "sha256": "3b8bdf70cc5e316aca69d86ed80c3e01da82d536041557a96300a0312983ab0f"
+    },
+    {
+      "historical_path": ".workplans/pr-2321/review/ci-monitor.json",
+      "preserved_file": "retirement-c4-final-ci.json",
+      "sha256": "523b072ef0608889258e91e161b9444d284daabbc7fd55502f48e11511c8e804"
+    }
+  ]
+}

@@ -4642,3 +4642,14 @@ phase=60、skipped=15。#2318 high 单轮四席 clean，唯一 Note 是证据来
 独立确认后仅补说明；#2312 none 零轮。均不增加轮换样本。
 记录 deferral：keep/cut 仍待维护者决策；epic merge 预授权不含审核策略调整。
 现行 keep、座位上限不变，后续 R1.4/R1.6/R2–R5 仍按原退役契约执行。
+
+### Revisit 2026-09-13（post PR #2321 / issue #1895）
+
+追加 #2321 与前一 bookkeeping PR #2320 后实测 659 行、649 merged、
+10 terminal；219 个多轮样本，later-round catches core=282、rotated=270、
+phase=60、skipped=15。#2321 high 两轮：首轮四席，五项独立确认后修复；
+第二轮三席 clean，最终 Gap Sweep 无新候选。test-evidence 席贡献三项，
+spec-compliance 与 integration 各一项；主要收益是遗漏的必需证据和公开 CLI
+错误边界，不据单例调整座位策略。#2320 none 零轮。
+记录 deferral：keep/cut 仍待维护者决策；merge 预授权不含审核策略调整。
+现行 keep、座位上限不变；R1.6 已交付，R1.4 与后续退役任务仍按原契约执行。

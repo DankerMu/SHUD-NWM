@@ -1,0 +1,231 @@
+"""Disposable mutant proof for C4E-F2/F3 and C4SP-1. Restores exact bytes.
+
+Parent runs this on isolated node27. Never mutate test expectations. Each
+selected guard-family removal must kill the corresponding new row; sha-only
+identity must kill inode/mtime; dropped closed-object/cross-freeze/input
+checks must kill the matching F3 row; closed-stdout reds against original CLI.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path.cwd()
+OWNER = REPO / "services/production_closure/c4_production_acceptance.py"
+IO = REPO / "services/production_closure/c4_production_acceptance_io.py"
+CLI = REPO / "scripts/node27_c4_production_acceptance.py"
+BOUNDARIES = "tests/test_node27_c4_production_acceptance_boundaries.py"
+PYTEST = [sys.executable, "-m", "pytest", "-q"]
+
+
+def _run(tests: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([*PYTEST, *tests], cwd=REPO, text=True, timeout=180, capture_output=True)
+
+
+def _assert_red(result: subprocess.CompletedProcess[str], label: str) -> None:
+    if result.returncode != 1 or "FAILED " not in result.stdout or "ERROR collecting" in result.stdout or "ERROR at setup" in result.stdout:
+        raise SystemExit(f"{label} did not produce assertion-red:\n{result.stdout}\n{result.stderr}")
+    print(result.stdout)
+
+
+def _replace_once(path: Path, old: str, new: str) -> None:
+    text = path.read_text()
+    if old not in text:
+        raise SystemExit(f"anchor missing in {path}: {old!r}")
+    if text.count(old) != 1:
+        raise SystemExit(f"anchor not unique in {path}: {old!r} count={text.count(old)}")
+    path.write_text(text.replace(old, new, 1))
+
+
+def mutate(path: Path, old: str, new: str, tests: list[str], label: str) -> None:
+    original = path.read_bytes()
+    try:
+        _replace_once(path, old, new)
+        red = _run(tests)
+        _assert_red(red, label)
+    finally:
+        path.write_bytes(original)
+        if path.read_bytes() != original:
+            raise SystemExit(f"{path} was not restored exactly")
+    print(f"RED {label}")
+
+
+def main() -> int:
+    f2 = [f"{BOUNDARIES}::test_public_boundary_parameter_batch_refuses_without_publication"]
+    inode = [f"{BOUNDARIES}::test_verify_refuses_same_byte_inode_replacement_after_bind"]
+    utime = [f"{BOUNDARIES}::test_verify_refuses_utime_only_receipt_drift_after_bind"]
+    missing = [f"{BOUNDARIES}::test_bind_refuses_absent_freeze_without_binding"]
+    cross = [f"{BOUNDARIES}::test_verify_refuses_valid_cross_freeze_binding"]
+    edited = [f"{BOUNDARIES}::test_verify_refuses_edited_valid_binding_input"]
+    extra = [f"{BOUNDARIES}::test_verify_refuses_extra_key_freeze"]
+    closed = [f"{BOUNDARIES}::test_cli_closed_stdout_after_success_keeps_published_artifact"]
+
+    mutate(
+        IO,
+        'SHA_RE = r"^[0-9a-f]{40}$"',
+        'SHA_RE = r"^[0-9a-fA-F]{40}$"',
+        f2,
+        "F2 sha-family",
+    )
+    origin_text = IO.read_text()
+    origin_start = origin_text.index("def require_origin(")
+    origin_end = origin_text.index("def require_id(", origin_start)
+    mutate(
+        IO,
+        origin_text[origin_start:origin_end],
+        "def require_origin(value: object) -> str:\n    return value\n\n\n",
+        f2,
+        "F2 origin-family",
+    )
+    mutate(
+        IO,
+        """def require_id(value: object, *, code: str) -> str:
+    if not isinstance(value, str) or _ID_COMPILED.fullmatch(value) is None:
+        refuse("identifier is empty or not a bounded token", code)
+    return value
+""",
+        """def require_id(value: object, *, code: str) -> str:
+    if not isinstance(value, str):
+        refuse("identifier is empty or not a bounded token", code)
+    return value
+""",
+        f2,
+        "F2 id-family",
+    )
+    mutate(
+        IO,
+        """    if start > end:
+        refuse("command bracket is not a finite ordered integer pair", "C4_BRACKET_INVALID")
+    return start, end
+""",
+        """    return start, end
+""",
+        f2,
+        "F2 bracket-family",
+    )
+    mutate(
+        IO,
+        """def require_absolute_path(value: object, *, code: str) -> Path:
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, os.PathLike):
+        text = os.fspath(value)
+    else:
+        text = ""
+    if not isinstance(text, str) or not text.startswith("/") or "\\x00" in text:
+        refuse("path must be an absolute lexical path", code)
+    path = Path(text)
+    parts = path.parts
+    if path.anchor != "/" or any(part in {"", ".", ".."} for part in parts[1:]):
+        refuse("path must be lexically normalized", code)
+    if path != normalized_absolute_path(path):
+        refuse("path must be lexically normalized", code)
+    return path
+""",
+        """def require_absolute_path(value: object, *, code: str) -> Path:
+    del code
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, os.PathLike):
+        text = os.fspath(value)
+    else:
+        text = str(value)
+    return Path(text)
+""",
+        f2,
+        "F2 path-family",
+    )
+    mutate(
+        IO,
+        """        if opened.st_size > max_bytes or opened.st_size < 1:
+            refuse("file size is outside the bounded ceiling", "C4_TOO_LARGE")
+""",
+        """        if opened.st_size < 1:
+            refuse("file size is outside the bounded ceiling", "C4_TOO_LARGE")
+""",
+        f2,
+        "F2 size-family",
+    )
+
+    mutate(
+        OWNER,
+        """    if observed != expected:
+        refuse("original file identity drifted", code)
+""",
+        """    if observed.sha256 != expected.sha256:
+        refuse("original file identity drifted", code)
+""",
+        inode + utime,
+        "F3 sha-only identity",
+    )
+    mutate(
+        IO,
+        """        except FileNotFoundError:
+            refuse("path is unavailable", "C4_MISSING")
+""",
+        """        except FileNotFoundError:
+            refuse("path cannot be opened without following", "C4_OPEN")
+""",
+        missing,
+        "F3 missing-freeze coded guard",
+    )
+    mutate(
+        OWNER,
+        """    if bound_freeze_path != freeze_path:
+        refuse("binding does not name the original freeze", "C4_FREEZE_MISMATCH")
+    _assert_identity_match(freeze_identity, bound_freeze_identity, code="C4_FREEZE_MISMATCH")
+    _assert_parent_match(freeze_parent, bound_freeze_parent, code="C4_FREEZE_MISMATCH")
+""",
+        """    if bound_freeze_path != freeze_path:
+        pass
+""",
+        cross,
+        "F3 dropped cross-freeze check",
+    )
+    mutate(
+        OWNER,
+        """    if inputs != bound_inputs:
+        refuse("binding inputs drifted from the original freeze", "C4_INPUT_MISMATCH")
+""",
+        """    if False and inputs != bound_inputs:
+        refuse("binding inputs drifted from the original freeze", "C4_INPUT_MISMATCH")
+""",
+        edited,
+        "F3 dropped input-mismatch check",
+    )
+    mutate(
+        OWNER,
+        """    mapping = _require_closed_object(document, _FREEZE_KEYS, code="C4_FREEZE_SCHEMA")
+""",
+        """    mapping = document if isinstance(document, dict) else _require_closed_object(document, _FREEZE_KEYS, code="C4_FREEZE_SCHEMA")
+""",
+        extra,
+        "F3 dropped closed-object freeze check",
+    )
+
+    original_cli = CLI.read_bytes()
+    try:
+        text = original_cli.decode()
+        start = text.index("def _announce_pass")
+        end = text.index("def main(")
+        stub = (
+            "def _announce_pass(message: str) -> int:\n"
+            "    print(message)\n"
+            "    return 0\n\n\n"
+        )
+        CLI.write_text(text[:start] + stub + text[end:])
+        red = _run(closed)
+        _assert_red(red, "SP1 original CLI closed-stdout")
+    finally:
+        CLI.write_bytes(original_cli)
+        if CLI.read_bytes() != original_cli:
+            raise SystemExit("CLI was not restored exactly")
+    print("RED SP1 original CLI closed-stdout")
+    print("C4_R1_MUTANTS_KILLED_AND_RESTORED")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

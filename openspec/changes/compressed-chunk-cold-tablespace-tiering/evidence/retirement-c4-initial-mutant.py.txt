@@ -1,0 +1,24 @@
+"""Delete only verify's post-binder original-record checks, then restore bytes."""
+from pathlib import Path
+import subprocess
+import sys
+
+path = Path('services/production_closure/c4_production_acceptance.py')
+original = path.read_bytes()
+text = original.decode()
+start = text.index('    _assert_source_unchanged(approved_path, approved_identity, approved_parent)', text.index('    _assert_identity_match(observed_c4', text.index('def verify(')))
+end = text.index('    record = {', start)
+assert '_raw, after_binding' in text[start:end]
+tests = ['tests/test_node27_c4_production_acceptance.py::' + name for name in [
+    'test_verify_refuses_when_approved_record_mutates_across_binder',
+    'test_verify_refuses_when_freeze_mutates_across_binder',
+    'test_verify_refuses_when_binding_mutates_across_binder']]
+try:
+    path.write_text(text[:start] + text[end:])
+    red = subprocess.run([sys.executable, '-m', 'pytest', '-q', *tests], timeout=120)
+    assert red.returncode == 1, red.returncode
+finally:
+    path.write_bytes(original)
+assert path.read_bytes() == original
+subprocess.run([sys.executable, '-m', 'pytest', '-q', *tests], check=True, timeout=120)
+print('C4_POST_BINDER_MUTANT_KILLED_AND_RESTORED')
