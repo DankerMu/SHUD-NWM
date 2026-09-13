@@ -1,0 +1,953 @@
+{
+  "mode": "openspec-review",
+  "risk": "high",
+  "original_head": "7a51d560f42ef3954294720a198b158d57a8b07c",
+  "repaired_head": "44615a622d8187376da0e9c45be2912211282190",
+  "scope": "Contract review only; runtime retirement, production operations and merge not performed or authorized.",
+  "first_round": {
+    "completeness": {
+      "seat": "spec-completeness",
+      "lens": "spec-completeness",
+      "mode": "openspec-review",
+      "risk": "high",
+      "verdict": "request-changes",
+      "summary": "MODIFIED survivor blocks preserve unrelated security/state scenarios and the closeout delta forbids skip-specs from dropping them or promoting a cold capability. One blocking completeness gap remains: production-wide C4 SHA/digest acceptance is still owned by the #1895 G0/C3 chain that this contract deletes, with no C4 delta and no surviving owner.",
+      "findings": [
+        {
+          "id": "SC-C4-SHA-DIGEST-OWNERSHIP",
+          "severity": "P1",
+          "failure_class": "spec-completeness",
+          "violated_invariant": "Independent C4 survives retirement, but production-wide acceptance of a C4 PASS still requires a #1895 G0/C3 SHA/digest gate; that outer obligation must be explicitly transferred to a surviving owner or retired with a named replacement, not left on deleted issue1895 surfaces.",
+          "evidence": "Canonical openspec/specs/c4-live-display-evidence/spec.md Requirement '私有闭集证据接受链' and Scenario '完整 receipt 可接受': end-to-end acceptance MUST freeze reviewed SHA via the delivery/G0 gate, and #1895 C3 publisher/binder MUST re-verify C4 file bytes sha256 plus reviewed-SHA; production-wide acceptance still requires the #1895 G0/C3 SHA/digest gate; C4 CLI PASS MUST NOT substitute. Retirement tasks.md R1.5: independent C4 producer/binder/schema and c4-live-display-evidence survive, 'old publication-current consumes C4, not the reverse'. R3.1/R3.2/R3.4 delete packages/common/node27_issue1895_*.py, scripts/node27_issue1895_*.py, and node27_issue1895_c1/c2/c3 schemas. R4.1 survivor-delta list is only PGDATA placement, compression launch/roles, runtime role provisioning, and CI selection; proposal.md Modified Capabilities has no c4-live-display-evidence. Changed bringup C3: '原 #1895 direct-current C3 对 C4 bytes、DB/API identity、registry/valid-times 的 rollout 接受器已撤回；确有保留消费者的能力按 R1 迁移，不保留整个旧链.' Changed bringup C4: retain current-run identity/exact bytes/digest/time-bracket/reviewed SHA binding; 'C4 CLI PASS 不替代 C1–C3 的各自证据。旧 G0/G8 不再是 C4 的外层 gate.' Closeout spec 'Ordinary governance and manual readers remain usable' only says independent C4 remains available.",
+          "scenario": "Implementers execute the listed R1-R5 deltas as written. Independent C4 producer/binder/schema stay. R3 then deletes the issue1895 C3 publisher/binder and G0 reviewed-SHA gate. Canonical c4-live-display-evidence is never modified, so production-wide acceptance of a C4 PASS still requires the deleted #1895 G0/C3 SHA/digest chain. The bringup checklist simultaneously says old G0/G8 is no longer C4's outer gate while still requiring exact bytes/digest and reviewed SHA without naming a replacement owner or scenario.",
+          "consequence": "After the planned deletion, either production C4 acceptance remains blocked on a removed gate, or operators treat a C4 CLI PASS as production-wide acceptance and lose the reviewed-SHA plus C4-byte-digest re-verification that the canonical C4 spec currently forbids substituting. Independent C4 receipt protections (five inputs, second-granularity bracket, POSIX facts, no-clobber) are not the missing piece; the missing piece is the outer production-acceptance owner.",
+          "fix_direction": "Add an explicit c4-live-display-evidence MODIFIED/ADDED disposition, or an equivalent closeout requirement with WHEN/THEN, that (1) keeps the independent C4 producer/binder closed-set contract, (2) states whether production-wide SHA/digest re-verification is retained, (3) if retained, names the surviving owner/consumer after issue1895 C3/G0 deletion, and (4) if retired, names what remaining identity/digest binding still must hold and that a C4 CLI PASS still cannot stand in for C1-C3. Do not resurrect G0-G8 cold rollout or invent SHA/digest fields inside the C4 closed schema.",
+          "required_verification": "A C4 or closeout scenario that fails if R3 deletes issue1895 C3/G0 while production-wide SHA/digest acceptance still names those owners, and passes only after the surviving owner or explicit retirement is written. Complementary proof: bringup C3/C4 and R1.4/R1.5/R3.4 agree on the same owner; no remaining SHALL requires #1895 G0/C3 after the chosen disposition.",
+          "sibling_surfaces": [
+            "openspec/changes/compressed-chunk-cold-tablespace-tiering/proposal.md Capabilities",
+            "openspec/changes/compressed-chunk-cold-tablespace-tiering/specs/compressed-chunk-cold-residency/spec.md R1 C4 scenario",
+            "docs/runbooks/node-27-bringup-checklist.md C3 and C4",
+            "packages/common/node27_issue1895_publication_current.py (implementation-pending consumer, not in this PR)"
+          ],
+          "blocking": true,
+          "lens": "spec-completeness"
+        }
+      ],
+      "removed_behavior_audit": {
+        "deleted_bringup_wording_test": "tests/test_issue1895_runbook_contract.py lost _assert_bringup_checklist_g0_c4_contract and test_bringup_checklist_requires_2137_merge_before_1895_and_c4_promoted_lane. That pin required #2137-first/#1895 cold rollout as current guidance. Independent surviving C4 lane identity remains in the changed checklist (test:e2e:live-c4-display; e2e/monitoring.spec.ts is not a C4 substitute) and in apps/frontend/src/__tests__/c4LiveDisplayContract.test.ts. Deleting the obsolete prose pin is not itself a completeness defect. The remaining defect is the unresolved outer SHA/digest production-acceptance owner, not the missing wording test.",
+        "withdrawn_cold_added_delta": "BASE compressed-chunk-cold-residency ADDED requirements (eligibility, physical-parent admission, group completeness, isolated 2.10.2 movement, transactional group move, lifecycle convergence, receipts, installer, RAID/backup, G0-G8 live rollout) were never-promoted. HEAD replacement is retirement/closeout ADDED only; inventing REMOVED canonical cold requirements would be incorrect.",
+        "modifed_blocks_preserved": [
+          "runtime-service-role-boundary write-path: idempotence, default-privilege pre-reprovision, display SELECT survival, membership/grant-to-other-role refusal, owner-planted rule/trigger audit including TEMP revoke, COPY FROM PROGRAM refusal, no-superuser env files, and live-run-under-role remain; only cold CREATE grant/positive audit and cold-residency as a required runtime lane are retired, with no live REVOKE/DROP authorization.",
+          "hypertable-compression owner-role: remaining compress/drop/ANALYZE owner-role, non-owner refusal, and migration-owner drift scenarios remain; cold SET TABLESPACE/CREATE and cold-residency as a recurring unit are removed as intended. decompress_chunk remains a documented migration-class exception on the replay supervisor/archive drill, not a dropped recurring obligation.",
+          "ci-contract-baseline: sibling systemd.err glob pin, future-unit coverage, and exact autopipe.timer/retention.service sets remain. Cold-only targets (test_node27_cold_governance.py, test_node27_cold_residency.py) are removed after retained readers migrate; remaining owner-suite mapping is a derivation rule, not a frozen future filename list.",
+          "node27-pgdata-relocation: unmodified canonical closed action table, pre-write rollback, durable first-write, and 'copied cluster activates without a cold bind' remain authoritative. The MODIFIED placement block drops only 'cold-installer behavior MUST remain compatible' and adds unknown/conflict refusal plus PGDATA-owned command/container/evidence ADDED scenarios. Negative refusal of incompatible legacy cold binds/services is an intended surviving guard."
+        ],
+        "maintenance_freshness": "Merge commit f615fd2d6 brought database-maintenance-output-freshness into master. tasks.md R1.3 explicitly preserves the merged #2277/#1769 maintenance-output collection, effective thresholds, freshness/unavailable recommendations, and behavioral tests as ordinary governance, not cold inventory. Canonical openspec/specs/database-maintenance-output-freshness/spec.md is untouched. No missing-delta finding.",
+        "archive_disposition": "proposal/design/tasks/closeout spec require applying and validating surviving MODIFIED/ADDED updates before any openspec archive --skip-specs; --no-validate is forbidden; this revision executes no archive and must not promote the withdrawn cold-enabling ADDED delta or create an enabled cold capability. That is an executable closeout rule, not a missing recipe."
+      },
+      "ownership_audit": {
+        "R1_extraction": "PGDATA host/migrate command/container/evidence, governance collect_postgres/filesystem/working-set (including maintenance_output), and genuine manual/runbook consumers have named surviving owners. Independent C4 producer/binder and generic readonly validation are named survivors.",
+        "R2_compression": "ADDED 'Normal compression SHALL launch safely without cold configuration' plus R2.1-R2.3 cover single-lane launcher, statement/cleanup/wrapper/systemd budget, descriptor-bound parsing, origin validation, argv execution, secret-safe refusal, lifecycle mutex, and real wrapper/CLI success/refusal seams.",
+        "R3_deletion": "Cold-only runtime/CLI/schema/test/CI/SQL grant-audit families are listed for deletion after R1/R2. Unrelated role/security audits, migrations 000058/000059, current data, ordinary retention, and independent C4/readonly tests remain.",
+        "unresolved_owner": "Production-wide C4 reviewed-SHA + C4-byte-digest re-verification is still canonically owned by #1895 G0/C3. Retirement text says publication-current consumes C4, not the reverse, and that old C3 C4-bytes acceptor is withdrawn, but never names the surviving owner of that outer verification after issue1895 deletion."
+      },
+      "inspected_surfaces": [
+        "openspec/changes/compressed-chunk-cold-tablespace-tiering/{proposal,design,README,tasks}.md",
+        "openspec/changes/compressed-chunk-cold-tablespace-tiering/specs/{compressed-chunk-cold-residency,node27-pgdata-relocation,hypertable-compression,runtime-service-role-boundary,ci-contract-baseline}/spec.md",
+        "canonical openspec/specs/{node27-pgdata-relocation,hypertable-compression,runtime-service-role-boundary,ci-contract-baseline,c4-live-display-evidence,database-maintenance-output-freshness}/spec.md",
+        "BASE cold-residency ADDED requirement/scenario census (git show b860da262:.../compressed-chunk-cold-residency/spec.md)",
+        "docs/runbooks/node-27-bringup-checklist.md C3/C4 and BASE..HEAD diff",
+        "docs/adr/0002-node27-timeseries-hot-cold-tiering.md 2026-09-13 amendment",
+        "tests/test_issue1895_runbook_contract.py BASE deletion of bringup wording helper/test vs remaining G7 C4 tokens",
+        "apps/frontend/src/__tests__/c4LiveDisplayContract.test.ts independent C4 lane pin",
+        "packages/common/node27_cold_governance_collection.py collect_postgres/maintenance_output and scripts/node27_resource_governance.py recommendations",
+        ".workplans/cold-topology-grill/{contract-review-scope.txt,issue-1891-after.json,issue-1895-after.json}",
+        "frozen BASE..HEAD 17-file name-status"
+      ],
+      "limitations": [
+        "Read-only leaf: no tests, validation, formatters, git mutation, or nested agents.",
+        "This is contract review of the proposed retirement delta, not proof that R1-R5 runtime deletion already shipped.",
+        "Exact-head CI 34749821635 (targeted 2103 passed / 4 skipped) is observed at frozen HEAD and does not prove retirement implemented.",
+        "Historical evidence/, fixtures/, and completed ledger were treated as immutable history, not current install/move authority.",
+        "Unmodified canonical PGDATA/role/compression/CI requirements outside the listed MODIFIED titles remain the implemented authority until matching cutover."
+      ],
+      "non_blocking_notes": [
+        "None that meet the P2/Note reporting threshold."
+      ],
+      "out_of_scope_escalations": [
+        "None."
+      ]
+    },
+    "design": {
+      "mode": "openspec-review",
+      "risk": "high",
+      "seat": "Design Consistency",
+      "lens": "design-consistency",
+      "verdict": "request-changes",
+      "summary": "Proposed retirement contract correctly marks R1-R5 unimplemented, preserves completed ledger as non-normative history, and keeps independent C4 producer/readonly/PGDATA ownership from being inverted. The blocking consistency defect is that current-authority artifacts withdraw #1895 G0/C3 as C4's outer production-acceptance gate without a surviving-capability delta that re-homes the canonical SHA/digest re-verification obligation. Other current-heading cold commands sit inside declared archive-status scopes and are not treated as operative. Runtime code remaining present is intended pending state, not a dormant-retention escape. Targeted CI at HEAD is not production or retirement-implementation proof.",
+      "findings": [
+        {
+          "id": "DC-C4-SHA-DIGEST-OWNERSHIP",
+          "severity": "P1",
+          "failure_class": "design-consistency",
+          "lens": "design-consistency",
+          "blocking": true,
+          "violated_invariant": "Independent C4 production acceptance must keep a non-CLI reviewed-SHA freeze plus exact-byte sha256 re-verification owner after #1895 G0/C3 is withdrawn. Code-dependency direction (publication-current consumes C4) does not discharge that normative outer-gate requirement. Proposed survivor deltas must name the surviving owner; they must not silently drop the guarantee or leave it on a family R3 will delete.",
+          "evidence": [
+            "openspec/specs/c4-live-display-evidence/spec.md:38-42: end-to-end acceptance MUST freeze reviewed SHA via a delivery/G0 gate and have #1895 C3 publisher/binder re-verify C4 file-byte sha256 and reviewed-SHA; C4 CLI success MUST NOT replace the outer check; production-wide acceptance still requires the #1895 G0/C3 SHA/digest gate.",
+            "packages/common/node27_issue1895_publication_current.py:631-637: bind_c3_receipt currently owns that outer SHA/digest/tamper check.",
+            "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md:53-55 (R1.5): only asserts independent C4 survives and that old publication-current consumes C4, not the reverse.",
+            "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md:127-129 (R4.1): surviving-capability deltas listed are only PGDATA placement, compression launch/roles, runtime role provisioning and CI selection. No c4-live-display-evidence delta.",
+            "openspec/changes/compressed-chunk-cold-tablespace-tiering/specs/: proposed deltas exist for node27-pgdata-relocation, hypertable-compression, runtime-service-role-boundary, ci-contract-baseline and withdrawn cold-residency closeout; none for c4-live-display-evidence.",
+            "docs/runbooks/node-27-bringup-checklist.md:201-206,227-229: C3 withdraws the old #1895 direct-current C3 acceptor of C4 bytes; C4 checkbox still requires exact bytes/digest/time-bracket/reviewed-SHA binding, then states old G0/G8 is no longer C4's outer gate, without naming a replacement owner.",
+            "docs/runbooks/tier-node27-timeseries-storage.md:698-703: retained-workload section keeps independent C4 producer/binder and says no replacement CLI is asserted yet; it treats C4 independence from C3/G8 as sufficient.",
+            "issue-1891-after.json / issue-1895-after.json: both keep independent frontend C4 but never re-home the SHA/digest outer gate.",
+            "proposal.md Capabilities/Modified Capabilities and design.md R4: same four survivor surfaces; C4 listed only as independent surviving producer, not as a MODIFIED capability."
+          ],
+          "scenario": "An implementer follows R1.5/R3/R4.1 as written: migrates/deletes node27_issue1895_publication_current.py because C4 does not import it, then treats remaining test:e2e:live-c4-display + schema/binder as the complete surviving C4 contract. Canonical c4-live-display-evidence still requires production-wide acceptance through #1895 G0/C3 SHA/digest. After R3 the named owner is gone and no proposed delta transferred the obligation to display/PGDATA.",
+          "consequence": "Either production C4 acceptance remains bound to a deleted cold-rollout gate, or the outer reviewed-SHA/exact-byte guarantee is silently dropped. Independent C4 producer/validator/binder is not the missing piece; it is forbidden from inventing SHA/digest fields and from substituting CLI PASS for the outer check.",
+          "fix_direction": "Add a proposed MODIFIED delta for openspec/specs/c4-live-display-evidence that keeps the outer reviewed-SHA freeze and exact-byte sha256 re-verification, assigns it to the actual surviving display/PGDATA/readonly owner, and stops naming #1895 G0/C3. Update R1.5, R4.1, bringup C3/C4, retained-workload text, and #1891/#1895 so they name that owner and required public seam. Do not keep the withdrawn cold acceptor, and do not weaken the SHA/digest guarantee to make R3 executable.",
+          "required_verification": "Proposed c4-live-display-evidence delta exists and names a surviving owner/module/CLI; R1.5/R4.1 and bringup C4 no longer say old G0/G8/C3 is gone without a replacement; grep of proposed specs and issue bodies shows no remaining production-acceptance pointer to #1895 G0/C3; independent C4 producer/binder/schema remain. Do not treat existing targeted CI or C4 CLI PASS as proof.",
+          "sibling_surfaces": [
+            "openspec/specs/c4-live-display-evidence/spec.md",
+            "packages/common/node27_issue1895_publication_current.py",
+            "scripts/node27_issue1895_* C3/G8 binders",
+            "docs/runbooks/node-27-bringup-checklist.md C3/C4",
+            "docs/runbooks/tier-node27-timeseries-storage.md Retained PGDATA and display workloads and §4.9",
+            "openspec/changes/compressed-chunk-cold-tablespace-tiering/{proposal,design,tasks}.md",
+            "issue-1891-after.json",
+            "issue-1895-after.json"
+          ]
+        }
+      ],
+      "non_blocking_notes": [
+        "Timer cadence and §4.5 keep live-looking cold-env/preflight commands, but both have an explicit current-boundary plus archive-status: superseded. Those preserved commands are historical coupling, not operative current instructions.",
+        "Glossary physical-tiering / selective-cold-residency definitions are present-tense concept definitions, not deployment authorization. They do not create a new storage project.",
+        "Remaining tests/test_issue1895_runbook_contract.py still pins withdrawn G0-G8 as 'the only authorized node-27 procedure'. That is a later R3/R4 implementation surface, not a claim this contract PR already retired runtime.",
+        "Bringup '冷层仍未启用' under 主机容量纪律 is compatible with user-confirmed whole-PGDATA-on-large-disk plus pending code retirement; it is not a dormant-retention escape.",
+        "Deleted bringup wording test only pinned #2137-first/#1895 cold-rollout prose. Independent C4 producer path (test:e2e:live-c4-display, not monitoring.spec.ts) remains in current bringup C4. No C4/security producer obligation was lost by that deletion. The SHA/digest gap above is a missing proposed-delta/ownership transfer, not a lost producer test.",
+        "631ffcce6 / ADR0003 revisit / review-gate 2291 / loop-log row record historical #2291/PR#2296 merge accountability and still say 4.1-4.8 were not executed. They do not authorize this retirement."
+      ],
+      "removed_behavior_audit": {
+        "deleted_or_rewritten": [
+          "Proposed cold-enabling ADDED delta replaced by retirement/closeout-only requirements; never-promoted, so no REMOVED canonical cold capability is invented.",
+          "Outstanding tasks 4.1-4.8 marked WITHDRAWN, not checked executed; 4.0-4.0C remain historical completed.",
+          "Bringup C heading no longer requires #2137 merge before #1895 live C1-C4; generic C1-C4 stay with existing display/readonly owners.",
+          "Bringup C2b no longer requires a cold-residency live run for write-role proof.",
+          "One obsolete bringup wording test and private helper deleted."
+        ],
+        "re_established": [
+          "Independent C4 producer/validator/binder/schema and test:e2e:live-c4-display remain current bringup/runbook owners.",
+          "Canonical readonly validator and validate_readonly_db_boundary.py remain owned outside issue1895.",
+          "PGDATA relocation, ordinary compression/retention, governance sampling, and unrelated role audits remain surviving owners in R1-R3.",
+          "Completed ledger/evidence/fixtures preserved as non-normative history."
+        ],
+        "not_re_established": [
+          "Canonical C4 production-acceptance SHA/digest outer gate still names #1895 G0/C3; no surviving-capability delta or replacement owner is proposed. This is finding DC-C4-SHA-DIGEST-OWNERSHIP."
+        ]
+      },
+      "ownership_audit": {
+        "rightful_owners_preserved": [
+          "Independent frontend C4 live lane and river-click producer: display owner, not #1895 retirement.",
+          "Generic readonly DB validation: production_closure + validate_readonly_db_boundary.py.",
+          "Whole-PGDATA placement/rollback: #2240 / node27-pgdata-relocation; user-confirmed live host path /data/GHDC/nhms-primary/pgdata is a fact in production, distinct from repository unit/env templates.",
+          "Ordinary compression/retention/lifecycle lock: hypertable-compression owners; repository compression.service still has a second ExecStart cold leg and preflight still calls read_lane_env_pair_data — that is pending R2 source state, not effective-deployment proof.",
+          "Write-role security audits other than nhms_cold CREATE/positive-audit: runtime-service-role-boundary.",
+          "I8/#2162/#2017/I9 and upgrade/recovery/capacity holds remain with their owners; not blanket retirement gates."
+        ],
+        "wrong_layer_or_missing_owner": [
+          "C4 outer SHA/digest re-verification remains assigned to the retiring #1895 C3 publication-current binder with no proposed display/PGDATA owner."
+        ],
+        "no_new_storage_project": true,
+        "no_dormant_retention_escape": true,
+        "no_claim_that_runtime_already_retired": true
+      },
+      "inspected_surfaces": [
+        "Full base..HEAD 17-file diff at 7a51d560 vs b860da26: proposal/design/tasks/README, five proposed spec deltas, ADR0002, ADR0003 2291 revisit, glossary two definitions, bringup checklist, storage runbook current/archive-status headings, deleted bringup wording test, review-gate 2291, review-loop-log 2291 row.",
+        "Published snapshots .workplans/cold-topology-grill/issue-1891-after.json and issue-1895-after.json (and before bodies for contrast).",
+        "Canonical openspec/specs/{c4-live-display-evidence,hypertable-compression,runtime-service-role-boundary,ci-contract-baseline,node27-pgdata-relocation}.",
+        "Retained source edges: node27_pgdata_host.py:21-23, node27_pgdata_migrate.py:24-25, node27_resource_governance.py:22-45, nhms-node27-timeseries-compression.service:9-10, node27_timeseries_budget_preflight.py:32,288, node27_issue1895_publication_current.py:631-637.",
+        "Orientation-only: retirement-tasks.txt (not used as proof)."
+      ],
+      "limitations": [
+        "Read-only leaf; no tests, builds, linters, git mutation, SSH, issue edits, or nested agents.",
+        "Did not treat repository systemd/env templates as effective production units. User-confirmed whole PGDATA on /data/GHDC/nhms-primary/pgdata is a production fact; templates remain non-proof of deployed dropins/ExecStartPre.",
+        "Supplied exact-head CI run 34749821635 (targeted 2103 passed / 4 skipped; full/realDB/frontend skipped) proves neither retirement implementation nor production handoff.",
+        "R1-R5 remain implementation-pending by contract; this review does not demand they already be implemented.",
+        "Sibling Completeness seat independently classified the same C4 SHA/digest gap as P1; this seat reports it under design-consistency from names/IDs/authority mismatch across artifacts."
+      ],
+      "out_of_scope_escalations": []
+    },
+    "tasks": {
+      "seat": "ContractTasksReview",
+      "mode": "OpenSpec Review / Tasks Executability",
+      "head": "7a51d560f42ef3954294720a198b158d57a8b07c",
+      "base": "b860da262cea9e9fcd1ba8c3292c2802d70390d1",
+      "verdict": "request-changes",
+      "blocking": true,
+      "inspected_surfaces": [
+        "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md",
+        "openspec/changes/compressed-chunk-cold-tablespace-tiering/design.md",
+        "openspec/changes/compressed-chunk-cold-tablespace-tiering/proposal.md",
+        "openspec/changes/compressed-chunk-cold-tablespace-tiering/specs/{compressed-chunk-cold-residency,hypertable-compression,ci-contract-baseline,node27-pgdata-relocation,runtime-service-role-boundary}/spec.md",
+        ".workplans/cold-topology-grill/{contract-review-scope.txt,retirement-tasks.txt,issue-1891-retirement-body.md,issue-1895-retirement-body.md,issue-1891-after.json,issue-1895-after.json}",
+        "packages/common/{node27_pgdata_host.py,node27_pgdata_migrate.py,node27_container_contract.py,compressed_chunk_cold_residency.py,node27_cold_tablespace_container.py,node27_cold_governance_collection.py,node27_timeseries_sequential_budget.py,node27_timeseries_lifecycle_lock.py,node27_issue1895_query.py}",
+        "scripts/{node27_resource_governance.py,node27_timeseries_budget_preflight.py,node27_cold_residency_once.sh,node27_timeseries_compression_once.sh,select_ci_tests.py}",
+        "infra/systemd/nhms-node27-timeseries-compression.service",
+        "infra/env/node27-resource-governance.example",
+        "docs/runbooks/{tier-node27-timeseries-storage.md,node-27-bringup-checklist.md,current-production-ops.md}",
+        "tests/{test_issue1895_runbook_contract.py,test_node27_cold_tablespace_marker_contract.py,test_issue2227_explicit_cycle_named_binding.py,test_node27_pgdata_migrate_oracle.py,test_compressed_chunk_cold_runtime_integration.py,test_node27_cold_tablespace_integration.py}",
+        "schemas/timeseries_compression_receipt.schema.json"
+      ],
+      "limitations": [
+        "Read-only; no tests/CI/formatters by assignment.",
+        "select_ci_tests.py PATH_TEST_RULES tuple bodies were not fully expanded; cold/issue1895 owner constants and comments were.",
+        "node27_container_contract.py image-pin absence is from symbol grep (image_id/nhms_db_image_id/PINNED_IMAGE_ID), not a full AST of every helper name.",
+        "Did not re-derive the sibling C4 outer-acceptance finding; noted only as a deletion-closure adjacency.",
+        "Did not open every node27_issue1895_*.py body; production import of record_explicit_cycle_curve is evidenced from the #2227 test and query module."
+      ],
+      "removed_behavior_and_ownership_audit": {
+        "retired_cli_entrypoints": [
+          "scripts/node27_cold_residency.py + node27_cold_residency_once.sh",
+          "scripts/node27_cold_residency_census.py",
+          "scripts/node27_cold_identity_observe.py",
+          "scripts/node27_cold_tablespace_install.py",
+          "scripts/node27_cold_tablespace_root_evidence_setup.py",
+          "scripts/probe_compressed_chunk_cold_tablespace.py",
+          "scripts/node27_issue1895_*.py G0-G8 exits",
+          "systemd ExecStart #2 nhms-node27-timeseries-compression.service -> cold wrapper",
+          "ExecStartPre dual --cold-env",
+          "infra/env/node27-cold-residency.example",
+          "db/roles nhms_cold CREATE grant (source only; live DROP forbidden)",
+          "resource-governance --cold-governance-* and cold_tablespace_governance output"
+        ],
+        "surviving_owners_named_in_tasks": [
+          "PGDATA host/migrate (run_bounded_command, container snapshot normalize/serialize, evidence policy)",
+          "resource-governance collect_filesystem/postgres/working_set + /data/GHDC",
+          "compression-only launcher/budget/lifecycle mutex",
+          "C4 live-c4-display producer/binder/schema",
+          "services/production_closure/readonly_db_validation.py + scripts/validate_readonly_db_boundary.py"
+        ],
+        "unowned_or_ambiguous_after_R3": [
+          "packages.common.node27_issue1895_query.record_explicit_cycle_curve consumed by tests/test_issue2227_explicit_cycle_named_binding.py and openspec/specs/explicit-cycle-query-binding",
+          "packages/common/node27_timeseries_lifecycle_lock.py cold peer + tests/test_node27_timeseries_lifecycle_lock.py",
+          "infra/env/node27-resource-governance.example cold keys",
+          "docs/runbooks/current-production-ops.md live nhms_cold / node27-cold-residency.env row",
+          "apps/frontend display-cold-waterfall npm script",
+          "tests/test_node27_cold_tablespace_marker_contract.py remaining docker collection-gate",
+          "PINNED_IMAGE_ID currently sourced from compressed_chunk_cold_residency.py; node27_container_contract.py has no image_id/PINNED_IMAGE_ID symbol"
+        ],
+        "spec_safety_invariant_compatibility": "R2 correctly requires statement+cleanup < wrapper and systemd outer margin, descriptor-bound mode-0600/no-symlink parse, import-origin, secret-safe refusal, and lifecycle mutex before local/DB locks. Those invariants are not executable as a merge-safe slice because the same preflight/budget module is still the cold wrapper's launch gate. R3.3 correctly forbids live privilege revocation/DROP. R5.2 correctly STOP+safe-disposition on unexpected deployed cold state. Compatibility risk is broken-intermediate merge of R2 (cold wrapper still calls --launch cold / --cold-env) or R3 deleting issue1895_query.py while #2227 remains."
+      },
+      "findings": [
+        {
+          "id": "T-01",
+          "severity": "P1",
+          "failure_class": "task-boundary",
+          "violated_invariant": "R1 and R2 are independent preparation groups; each source slice must be mergeable without a broken intermediate.",
+          "evidence": "tasks.md R3 header: 'R1 and R2 are independent preparation groups.' design.md R3: 'R1 and R2 can proceed independently.' Contra: scripts/node27_timeseries_compression_once.sh:43-45 and scripts/node27_cold_residency_once.sh:43-45 both exec the same scripts/node27_timeseries_budget_preflight.py with both --compression-env and --cold-env; infra/systemd/nhms-node27-timeseries-compression.service:8-10 ExecStartPre requires both env files and ExecStart #2 is the cold wrapper. packages/common/node27_timeseries_sequential_budget.py exposes read_lane_env_pair, COLD_* walls, ASSEMBLY_COLD_* keys, and resolve_runner_budget(..., lane: Literal['compression','cold']). R2.1 orders removal of paired-env loading, cold arguments, and the cold ExecStart in those exact files. R2.3 and R3.5 both mutate scripts/select_ci_tests.py (NODE27_COLD_RESIDENCY_* and ISSUE1895_* closures live beside compression rules). tasks.md has no Suggested fixture level and no Minimal mergeable slice.",
+          "scenario": "Implementer ships R2 as an independent PR while cold families still exist (the independence claim). Cold wrapper and unit ExecStartPre still pass --cold-env / --launch cold into the rewritten single-lane preflight, so compression-unit CI goes red or the live oneshot cannot start. Opposite order (R3 first) deletes node27_cold_residency_once.sh while the unit still has ExecStart #2.",
+          "consequence": "No merge-safe small-PR DAG. 'Independent' R1/R2 PRs produce a broken master compression unit or a stuck cold wrapper. The only currently safe delivery is one atomic R1+R2+R3 change, which the contract simultaneously rejects as the default by advertising independence.",
+          "fix_direction": "Retract R1/R2 independence. Publish an explicit merge DAG: either (A) one atomic final PR for preflight/budget/unit/wrappers/selectors, or (B) sequenced slices that keep a dual-lane preflight API until the cold wrapper/unit leg is deleted in the same merge as R2.1, and that serialize all select_ci_tests.py edits onto one owner. Add Suggested fixture level + Minimal mergeable slice per slice.",
+          "required_verification": "A written PR/slice table naming shared files (budget_preflight.py, sequential_budget.py, compression.service, both once.sh, select_ci_tests.py) and the post-merge command that still launches compression without --cold-env while master never has ExecStart pointing at a deleted script.",
+          "sibling_surfaces": [
+            "R2.1 service/wrapper/preflight/budget",
+            "R3.2 cold wrapper deletion",
+            "R3.5 selector",
+            "R5.2 effective unit/ExecStartPre"
+          ],
+          "blocking": true
+        },
+        {
+          "id": "T-02",
+          "severity": "P1",
+          "failure_class": "task-executability",
+          "violated_invariant": "Every deletion's surviving consumer must be extracted to a named owner or explicitly retired; 'cold-only' / 'preserve shared' must not leave dead modules.",
+          "evidence": "tests/test_issue2227_explicit_cycle_named_binding.py:11-17 imports record_explicit_cycle_curve, _validate_captured_explicit_cycle_query, query_digest from packages.common.node27_issue1895_query (definition at node27_issue1895_query.py:453). scripts/select_ci_tests.py still names ISSUE2227_EXPLICIT_CYCLE_NAMED_BINDING_TEST. openspec/specs/explicit-cycle-query-binding remains a live capability. R1 extraction list is only PGDATA host/migrate, governance collection, and C1-C4 manual consumers. R3.1 deletes 'cold-only packages/common/node27_issue1895_*.py' after R1; R3.4 deletes issue1895/2224/2290/2291 tests 'whose sole contract is retired'. #2227 is in neither extract nor delete-with-owner. The 'cold-only' qualifier plus census note ('families to classify after extraction, not wildcard deletion authority') is the preserve-shared escape.",
+          "scenario": "R3 implementer deletes node27_issue1895_query.py as part of the issue1895_* family. #2227 suite and named-binding capability import-break. Alternative: implementer keeps the whole issue1895_query module because a test still imports it, leaving G0-G8 helpers in the active tree.",
+          "consequence": "Either a silently lost shipping named-capture contract, or a dead issue1895 module retained under 'shared' in violation of the no-dormant-code rule.",
+          "fix_direction": "Add an R1 task: extract record_explicit_cycle_curve and the exact helper/error surface #2227 needs into an explicit-cycle-query-binding owner; then R3 may delete the rest of node27_issue1895_*.py. If the capability is also retired, say so and delete the spec/test/selector row in the same slice. Forbid keeping node27_issue1895_query.py as a shared leftover.",
+          "required_verification": "Post-R3 grep with zero packages.common.node27_issue1895_* imports except documented negative guards; #2227 suite either runs against the new owner or is explicitly deleted with the spec.",
+          "sibling_surfaces": [
+            "openspec/specs/explicit-cycle-query-binding",
+            "tests/test_issue2227_explicit_cycle_named_binding.py",
+            "scripts/select_ci_tests.py ISSUE2227_*",
+            "R3.1 issue1895 family"
+          ],
+          "blocking": true
+        },
+        {
+          "id": "T-03",
+          "severity": "P1",
+          "failure_class": "task-executability",
+          "violated_invariant": "R3 family lists plus mixed-file cuts must close every live CLI/env/SQL/docs/lock/frontend consumer so deletion cannot be silently partial.",
+          "evidence": "Named in R3.1-R3.4: cold packages, listed cold scripts, node27-cold-residency.example, nhms_cold SQL grant, listed receipt schemas, issue1895/2224/2290/2291 tests, select_ci_tests.py. Not named but live: infra/env/node27-resource-governance.example (cold keys; R1.3 only mentions the .py CLI), docs/runbooks/current-production-ops.md:2311 still lists node27-cold-residency.env and CREATE ON TABLESPACE nhms_cold as current nhms_ingest_rw bind, packages/common/node27_timeseries_lifecycle_lock.py + tests/test_node27_timeseries_lifecycle_lock.py (cold as sequential lock peer; R2.2 only says preserve the mutex), apps/frontend display-cold-waterfall (grep hits under apps/frontend and docs), tests/test_node27_cold_tablespace_marker_contract.py remaining docker collection-gate. R1.4 names only tier-node27-timeseries-storage.md C1-C4. R5.1 is a post-hoc 'audit zero references' net, not a deletion worklist.",
+          "scenario": "Implementer executes R3.1-R3.4 as written. Governance example still documents cold flags; current-production-ops still presents nhms_cold as a live role; lifecycle lock still names cold residency as a peer; frontend still exposes display-cold-waterfall; marker-contract suite still imports deleted cold modules.",
+          "consequence": "Green R3 checklist with orphan entrypoints. Operators follow current-production-ops as live authority and re-enable a retired grant/env. 'Preserve shared' leftover on the lifecycle lock keeps a dead cold participant.",
+          "fix_direction": "Extend R3 (and R1 mixed-file cuts) with an exhaustive non-Python/manual/mixed-file worklist: governance example, current-production-ops, bringup checklist, lifecycle lock + tests, frontend waterfall script, marker-contract suite (keep generic docker gate under a non-cold name or delete if cold-only). R5.1 then proves that list is closed rather than discovering it.",
+          "required_verification": "A consumer matrix (path -> extract/delete/repoint) covering Python imports, CLI flags, env examples, systemd, SQL, npm scripts, runbooks, selector tuples. R5.1 grep oracles named per row.",
+          "sibling_surfaces": [
+            "R1.3 governance",
+            "R1.4 runbook",
+            "R2.2 lifecycle mutex",
+            "R3.3 roles",
+            "R4.2 authority docs",
+            "frontend display-cold-waterfall"
+          ],
+          "blocking": true
+        },
+        {
+          "id": "T-04",
+          "severity": "P1",
+          "failure_class": "task-executability",
+          "violated_invariant": "R1.2 must name an existing image-pin owner that actually exports the consumed symbol; extraction cannot copy a literal or depend on a module R3 deletes.",
+          "evidence": "node27_pgdata_migrate.py:24-25 imports PINNED_IMAGE_ID from packages.common.compressed_chunk_cold_residency. tests/test_node27_pgdata_migrate_oracle.py uses that pin (IMAGE = PINNED_IMAGE_ID) under pytest.mark.node27_docker. R1.2: 'Use existing node27_external_contract_snapshot.json / node27_container_contract.py for the image pin, not a copied literal or compressed_chunk_cold_residency.py.' Grep of packages/common/node27_container_contract.py for PINNED_IMAGE_ID|nhms_db_image_id|image_id returned no matches. R3.1 then deletes compressed_chunk_cold_residency.py.",
+          "scenario": "R1 implementer looks for a container_contract image-pin API, finds none, and either copies the digest literal (forbidden) or keeps importing compressed_chunk_cold_residency.py so R3 cannot delete it.",
+          "consequence": "PGDATA isolated-oracle identity silently detaches from the external-contract snapshot, or the cold residency module survives as a pin facade.",
+          "fix_direction": "Name the exact surviving reader (e.g. load digest from node27_external_contract_snapshot.json via a specified helper). If container_contract.py must grow that helper, make it an R1.2 substep with tests/test_node27_external_contract_snapshot.py as the oracle. Do not point at a non-existent symbol.",
+          "required_verification": "After R1, pgdata migrate/oracle import graph has zero compressed_chunk_cold_* edges; pin bytes equal the snapshot JSON; R3 can delete compressed_chunk_cold_residency.py without touching the pin.",
+          "sibling_surfaces": [
+            "R1.1/R1.2 PGDATA",
+            "R3.1 compressed_chunk_cold_residency.py",
+            "tests/test_node27_pgdata_migrate_oracle.py",
+            "tests/test_node27_external_contract_snapshot.py"
+          ],
+          "blocking": true
+        },
+        {
+          "id": "T-05",
+          "severity": "P2",
+          "failure_class": "task-executability",
+          "violated_invariant": "tasks.md is the sole executable retirement plan; validation commands/oracles must be specific enough that R5 cannot run a missing or already-deleted suite.",
+          "evidence": "tasks.md R5.1 names no exact pytest/CLI/docker invocation. issue-1895-retirement-body.md Evidence Floor names tests/test_node27_pgdata_migrate.py as a retained node-27 entry and isolated command `NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_pgdata_*.py`. The docker-marked PGDATA oracle observed is tests/test_node27_pgdata_migrate_oracle.py:21. Other current node27_docker tests are tests/test_compressed_chunk_cold_runtime_integration.py:49-50 and tests/test_node27_cold_tablespace_integration.py:731+ — both R3-deleted. R4.2 requires bringup-checklist reconciliation, but this PR already deleted tests/test_issue1895_runbook_contract.py::_assert_bringup_checklist_g0_c4_contract and test_bringup_checklist_requires_2137_merge_before_1895_and_c4_promoted_lane, so R4.2 has no remaining named oracle.",
+          "scenario": "Implementer follows tasks.md R5.1 as the sole plan and either skips isolated engine proof or copies the 1895 line pointing at test_node27_pgdata_migrate.py. After R3, a marker-only glob also goes empty except the oracle file. R4.2 restyles bringup prose with no test that can fail.",
+          "consequence": "R5 can be checked done without an isolated cluster oracle, or against a non-existent suite name. Bringup/C4 manual authority can drift after the only wording pin was removed in this spec PR.",
+          "fix_direction": "Put exact retained suite paths and the isolated command into tasks.md R5.1 (migrate_oracle.py, not a guessed migrate.py). Name a replacement R4.2 oracle for bringup/C4 surviving commands, or state that checklist reconciliation is proven by a listed grep/fixture. After R3, the timescaledb_210+node27_docker set must be enumerated, not globbed over deleted cold integration files.",
+          "required_verification": "R5.1 command list that exists at HEAD and still exists after the R3 file-deletion list; one named assertion-bearing check for the post-R4.2 bringup/C4 commands.",
+          "sibling_surfaces": [
+            "issue 1895 Evidence Floor",
+            "R3.4 deleted integration tests",
+            "R4.2 bringup checklist",
+            "C4 live-c4-display"
+          ],
+          "blocking": false
+        }
+      ],
+      "notes": [
+        "Not re-filed: C4 outer-acceptance ownership gap already identified by Design/Completeness seats and under independent verification. This seat only records the adjacent deletion-closure holes (display-cold-waterfall, bringup oracle removal, R1.4 docs-only C1-C4 rewrite).",
+        "R2.1 'migrate timeseries_compression_receipt paired fields' appears vacuous: schemas/timeseries_compression_receipt.schema.json has no cold_/assembly/sequential fields; pairing lives in sequential_budget env/assembly keys. Not blocking; do not invent a receipt rewrite.",
+        "R3.3 live-DROP forbid, R5.2 STOP on unexpected deployed cold state, and 'I8/#2162/#2017 are not blanket deps' are sound and not circular.",
+        "Historical [x] G0-G8 ledger in tasks.md is clearly marked non-normative; leftover checkbox confusion is not a P1 if R4.2 keeps it historical.",
+        "Current PR runtime is spec-only plus one bringup-test deletion; findings are about the proposed R1-R5 contract, not a demand that retirement already be implemented."
+      ],
+      "verification_gaps": [
+        "Forbidden to run pytest/CI; isolated-oracle file identity is from source markers, not an executed run.",
+        "Full select_ci_tests PATH_TEST_RULES rows not expanded; cold/issue1895 constants are enough to prove shared-file contention.",
+        "container_contract image API judged by symbol grep; a differently named helper could exist, which is why T-04's fix is 'name the real reader' rather than 'add a new pin service'."
+      ]
+    }
+  },
+  "verification": {
+    "c4": {
+      "report": "Verifier verdicts for batch: spec-completeness (1 candidate)\nReviewed head SHA: 7a51d560f42ef3954294720a198b158d57a8b07c\n\nCandidate: SC-C4-SHA-DIGEST-OWNERSHIP\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nEvidence: The canonical C4 contract expressly separates local C4 receipt acceptance from production acceptance: it requires the delivery/G0 gate to freeze the reviewed SHA and #1895 C3 publisher/binder to bind and re-verify the C4 file-byte SHA-256 plus reviewed SHA; it forbids substituting C4 CLI success and says the production acceptance still goes through #1895 G0/C3 (`openspec/specs/c4-live-display-evidence/spec.md:36-42`). The current C3 binder is the concrete owner of those outer checks: it rejects a C3 receipt whose head/reviewed SHA differs from the supplied reviewed SHA, rereads the C4 receipt, and rejects a changed SHA-256 or file facts (`packages/common/node27_issue1895_publication_current.py:613-637`). In contrast, the retained C4 binder accepts only receipt/origins/pins/command-bracket inputs and validates its private descriptor/document boundary; it has no reviewed-SHA or expected-C4-digest input (`apps/frontend/scripts/c4-receipt-binder.mjs:7-13`; `apps/frontend/scripts/c4-receipt-binder-core.mjs:358-444`).\n\nThe proposed contract preserves independent C4 but does not transfer that named outer owner. R1.4/R1.5 require generic manual-consumer migration and retain C4 because publication-current consumes it, not vice versa (`tasks.md:37-55`); that is a real protection against indiscriminate deletion, but it neither assigns the reviewed-SHA/C4-byte recheck nor supplies its reject condition. R3 removes the old issue1895 package/CLI family and C3 schema while preserving only independent C4 suites (`tasks.md:89-120`), and the changed bringup text calls the direct-current C3 acceptor withdrawn while C4 merely says to preserve identity/exact bytes/digest/bracket/reviewed-SHA binding and that old G0/G8 is no longer its outer gate (`docs/runbooks/node-27-bringup-checklist.md:200-209,221-229`). The proposed capability deltas likewise retain independent C4 as available but do not modify `c4-live-display-evidence` or name a successor acceptance owner (`openspec/changes/compressed-chunk-cold-tablespace-tiering/specs/compressed-chunk-cold-residency/spec.md:11-31`; `proposal.md:20-31,50-64`).\n\nTrigger / reachability (T1): At the specified R1–R3 cutover, the old C3/G0 acceptance exits are retired while the unchanged canonical C4 requirement still names them. An implementer following the written cutover therefore has no explicit surviving actor that can satisfy the retained outer acceptance obligation. Impact (T2): this leaves the production display-evidence/hand-off boundary unable to make a contractually valid C4 acceptance, rather than merely weakening an internal implementation detail. Oracle anchor (T3): the canonical MUST/production-acceptance scenario above is direct project authority. Because the gap is introduced by this proposed retirement contract, T1–T3 pass and require FIX_NOW.\n\nPreserved invariant and narrow repair/proof direction: transfer—not retire—the existing reviewed-SHA and exact-C4-byte-digest recheck to the existing display owner’s Bringup-C4 evidence-acceptance/handoff seam already named in the changed C4 checklist. Add a matching C4/closeout scenario and R1/R4 ownership wording that, after R3 removes old C3/G0, rejects absent or mismatched reviewed-SHA/C4-byte bindings and still rejects treating C4 CLI PASS as production-wide acceptance. Keep C4’s producer/binder/schema closed and retain its local file/identity guards; do not restore the cold rollout, reintroduce C3’s broader retired checks, add C4 schema/CLI SHA fields, or introduce a stronger signature model. The proof should show the same named owner and rejection condition across canonical disposition, R1/R3/R4, and bringup C3/C4.\n\nUnsupported: This evidence does not show that deletion has already occurred, that a current C4 CLI PASS has actually bypassed production acceptance, or that no possible surviving owner could be chosen. It shows only that the present proposed deltas do not explicitly transfer the canonically retained outer obligation. \nNote: The existing display/C4 lane is an appropriate transfer surface, but it is not evidenced as already performing the C3 reviewed-SHA/exact-byte acceptance role."
+    },
+    "boundary": {
+      "report": "Verifier verdicts for batch: task-boundary (1 candidate)\nReviewed head SHA: 7a51d560f42ef3954294720a198b158d57a8b07c\n\nCandidate: T-01\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nEvidence: The defective combination is `tasks.md:59–68`, which requires R2.1 to make the budget/launcher compression-only and remove paired-env loading, cold arguments/defaults/mirrors/assembly fields and the cold `ExecStart`, with `tasks.md:83–84`, which says only that “R1 and R2 are independent preparation groups” and that R3 follows both cutovers or ships atomically with them. The mirrored design wording at `design.md:81–83` likewise permits cold-family removal only after the cutovers (or in one final atomic change). It therefore distinguishes neither concurrent preparation from publication nor an atomic boundary for R2’s destructive interface cutover and its direct R3 consumers.\n\nAt frozen HEAD, the remaining executable cold wrapper invokes the to-be-removed paired interface: `scripts/node27_cold_residency_once.sh:42–45` supplies both `--cold-env` and `--launch cold`. The current preflight exposes exactly those cold interfaces (`scripts/node27_timeseries_budget_preflight.py:62–100`) and reads the two-file pair before launch (`:275–307`); the cold runner consumes the paired budget through `resolve_runner_budget(..., lane=\"cold\")` and cold fields (`scripts/node27_cold_residency.py:314–321`; `packages/common/node27_timeseries_sequential_budget.py:485–598`). R3.2 defers deletion of both the cold runner and wrapper to `tasks.md:97–103`, while R3.4/R3.5 defer cold-only test and selector closure (`:109–119`). Thus a permitted R2-only publication can leave a retained executable consumer of an interface R2 is required to remove; keeping that interface or making the wrapper a compatibility/no-op path would violate R2.1 and R3.2’s explicit no-alias/no-dormant-stub rules.\n\nThe frozen tests demonstrate the coupled closure rather than a name-only overlap: `tests/test_node27_timeseries_sequential_wrappers.py:300–360` executes both lanes, including `cold`, and asserts assembled cold values and the cold entrypoint; `tests/test_node27_timeseries_sequential_budget.py:479–494` asserts the two-ExecStart/two-env service contract; `scripts/select_ci_tests.py:2965–3003,3821–3837` routes the runner, wrapper, service, preflight, and budget module to those mixed/cold suites. These consumers must be deleted or migrated in the same publication slice, not preserved to keep an obsolete contract alive.\n\nGuard analysis and precise limit: R2.1 itself includes the compression wrapper and unit and explicitly removes the cold `ExecStart`; R2.3 (`tasks.md:75–79`) already requires launcher/compression/retention tests, selectors, and docs to move atomically. Therefore the candidate’s claims that a completed R2 necessarily leaves the unit’s old second `ExecStart`/old `ExecStartPre`, that R3-first is an allowed sequence, or that all R1+R2+R3 (or all selector edits) must merge together are unsupported. No direct R1 dependency is established here merely from shared files; R1 may be prepared and published subject to its own real consumer transfer. The necessary repair is narrower: state that R1/R2 preparation may proceed concurrently, but the R2 single-lane interface cutover MUST publish atomically with the directly coupled R3 deletion of `node27_cold_residency_once.sh` and `node27_cold_residency.py`, plus affected mixed-lane test/selector/docs cleanup. Broader R3 package deletion remains gated by its genuine R1 extraction prerequisites.\n\nPost-merge invariant: every retained executable/configuration consumer uses the supported compression-only budget contract; no remaining executable or applicable test/selector depends on removed `--cold-env`, `--launch cold`, paired-budget, or cold-runner interfaces; no unit references a deleted entrypoint; and R2.2’s retained compression safety properties remain intact. T1 passes because the current wording lacks this direct publication constraint; T2 passes because the surviving executable wrapper and assertion/CI closure have observable launch/selection behavior; T3 passes because R2.1, R3.2–R3.5, and the no-dormant-code requirement explicitly own the invariant. This is a defect in the proposed implementation plan, so FIX_NOW is required.\nNote: Frozen-head CI only covers the present two-lane tree, not this hypothetical intermediate; no tests were run for this read-only adjudication."
+    },
+    "task-closure": {
+      "report": "Verifier verdicts for batch: task-executability (4 candidates)\nReviewed head SHA: 7a51d560f42ef3954294720a198b158d57a8b07c\n\nCandidate: T-02\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nEvidence: The live canonical `openspec/specs/explicit-cycle-query-binding/spec.md:4,8,33-38` defines a #1895/G7 recorder and G7 evidence contract. Its direct callers are the `node27_issue1895_*` performance/lanes stack (for example `node27_issue1895_performance_live.py:55-58,637-645`) and its CLI is `scripts/node27_issue1895_performance_oracle.py:17-45`; this is not evidence of a post-cutover production consumer of the recorder. Conversely, `tests/test_issue2227_explicit_cycle_named_binding.py:11-18` and frozen `scripts/select_ci_tests.py:3378-3386` still depend on it. Frozen tasks R3.1 permits deletion of cold-only `node27_issue1895_*.py` (`tasks.md:89-96`), while R4.1 keeps canonical specs authoritative until cutover (`:125-129`), but no R3/R4 row names this canonical spec, its test, or its selector disposition. T1: a correct retired-only classification can delete the module while the un-dispositioned canonical requirement/test remains. T2: that leaves an OpenSpec/CI contract boundary requiring deleted code, or pressures retention of dead code. T3: the user mandate and R3/R4 require both dead-code removal and preservation of real consumers.\nNote: Add an explicit joint retirement/disposition of `explicit-cycle-query-binding`, #2227 test, and selector edges (or name a real survivor owner if one is demonstrated). Do not extract or preserve the recorder merely because its retired #1895 test imports it.\n\nCandidate: T-03\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nEvidence: Two real non-Python authority/config cuts are not assigned by the frozen task rows: `infra/env/node27-resource-governance.example:29-55` still documents the cold-governance configuration that feeds the current cold imports/fields in `scripts/node27_resource_governance.py:22-45,96-110`; and the explicitly current DB table in `docs/runbooks/current-production-ops.md:2304-2313` still advertises both `CREATE ON TABLESPACE nhms_cold` and `node27-cold-residency.env`. R1.3 removes the semantic `--cold-governance-*` inputs (`tasks.md:25-36`), R3.3 removes the grant (`:104-108`), but R4.2 names ADR/storage-runbook/bringup work and not `current-production-ops.md` (`:130-135`). There are also concrete mixed-test cuts: `tests/test_node27_timeseries_lifecycle_lock.py:131-159` imports the retiring cold CLI, although the lock implementation is a genuinely shared fixed mutex (and `node27_pgdata_migrate.py:38` consumes it); `tests/test_node27_cold_tablespace_marker_contract.py:10-16,323-359` reads deleted cold-oracle sources but contains a separable generic node27-Docker collection-gate assertion. T1: deleting the CLI/grant while these paths remain is directly reachable under the listed R3 work. T2: the current-operations table is an operator authority boundary and the mixed tests are collection boundaries. T3: R3.3-R3.5 require grant/test/non-Python closure and the user mandate requires active authority correction.\nNote: Add only per-path dispositions for the governance template, `current-production-ops.md`, the cold branch of the lifecycle-lock test, and the marker test's cold AST checks/generic gate. The lifecycle runtime has no cold-participant state beyond a stale docstring and must survive; `apps/frontend/package.json` has no such npm script, while `scripts/diagnostic/display-cold-waterfall.sh:3,17-22` is display-cache latency work, not a storage consumer.\n\nCandidate: T-04\nVerdict: REFUTED\nEvidence: Frozen R1.2 expressly directs the future extraction to use the existing `node27_external_contract_snapshot.json` / `node27_container_contract.py` source rather than either a copied literal or `compressed_chunk_cold_residency.py` (`tasks.md:18-24`); the proposed PGDATA capability likewise says image pinning uses the existing container-contract/snapshot owner. The authoritative JSON actually contains `host_context.nhms_db_image_id.value` (`node27_external_contract_snapshot.json:45-51`), and the retiring module demonstrates the non-literal read precisely (`compressed_chunk_cold_residency.py:18-24`). The present absence of a `PINNED_IMAGE_ID` export from `node27_container_contract.py` does not force either outcome in the candidate scenario: implementing a reader during R1 is authorized by the task.\nNote: No repair is required for the claimed missing existing export; a PGDATA-owned or contract-owned non-literal snapshot reader is an implementation choice, not a nonexistent prerequisite.\n\nCandidate: T-05\nVerdict: PLAUSIBLE\nDisposition: FIX_NOW\nEvidence: The claimed missing/invalid isolated command is false. Both `tests/test_node27_pgdata_migrate.py` and `tests/test_node27_pgdata_migrate_oracle.py` exist at the reviewed head, and frozen selector rows retain both together for PGDATA owners (`scripts/select_ci_tests.py:4203-4235`). The oracle has all three module-level marks (`test_node27_pgdata_migrate_oracle.py:21-24`). Statically, the Evidence Floor command's unquoted `tests/test_node27_pgdata_*.py` glob includes both files; its marker expression selects the triple-marked oracle, and `NHMS_RUN_NODE27_DOCKER=1` bypasses the ordinary integration gate for exactly that triple (`tests/conftest.py:92-113,232-247`). Frozen R5.1 nevertheless supplies only category-level proof requirements—real isolated node27 oracle plus PG15.2/TimescaleDB 2.10.2 regression—without a self-contained post-cutover PGDATA owner/path/selection mapping (`tasks.md:152-159`). T1: extraction or test relocation can make the current Evidence Floor selection stale without a task-owned replacement. T2: the release-evidence boundary cannot demonstrate that the retained PGDATA safety oracle, rather than an unrelated isolated test, was exercised. T3: R1.5's named PGDATA behaviors and R5.1's isolated-proof requirement anchor the need.\nNote: Narrow repair only: make R5 self-contained by naming the retained/migrated PGDATA oracle and its post-R3 selection command (the existing glob is valid if those paths remain) plus selector ownership. Do not require `migrate_oracle.py` in place of the valid glob, and do not add a replacement bringup/C4 prose-pin test.\n\nStatic read-only adjudication only; no tests, validation, linters, formatters, or runtime commands were run."
+    }
+  },
+  "fixes": {
+    "C4": "Transfer existing outer reviewed SHA and original C4 raw-byte/file identity binding to Bringup-C4 production acceptance; preserve local closed protocol.",
+    "T-01": "Atomic publication follows actual dependency closure: R2 plus dependent cold runner/wrapper and affected consumers, not whole-group serialization.",
+    "T-02": "Remove G7 canonical recorder capability and #2227 tests/selectors after minimum retained PGDATA manual SQL capture/binding/digest behavior transfers to its owner with normative survivor requirement.",
+    "T-03": "Explicit mixed env/current-ops/lifecycle/Docker test matrix; preserve generic mutex/gate and independent display-cache waterfall diagnostic.",
+    "T-04": "REFUTED: existing snapshot provides image pin; no added API demanded.",
+    "T-05": "PLAUSIBLE narrow clarification: exact existing isolated PGDATA oracle command and explicit future generic gate-test owner; no test execution claimed."
+  },
+  "validation": {
+    "openspec": "strict PASS",
+    "markdown": "14 revised contract/docs files PASS; additional glossary/README/history batch: 3 passed, unchanged historical issue-2291-implementation.md line 35 reports baseline MD018 (#1895/#1891 at line start). No historical evidence edited.",
+    "publication_drafts": "3 Markdown drafts PASS after formatting; final issue links require evidence-only successor repin and contract equality proof."
+  },
+  "rereview_status": "Complete: all first-round actionable findings closed; sole deduplicated R2 publication-pin finding independently confirmed and draft repair closed; final Gap Sweep no new findings.",
+  "rereview": {
+    "spec_completeness": {
+      "seat": "spec-completeness",
+      "lens": "spec-completeness",
+      "mode": "openspec-review",
+      "risk": "high",
+      "head": "44615a622d8187376da0e9c45be2912211282190",
+      "original_base": "b860da262cea9e9fcd1ba8c3292c2802d70390d1",
+      "prior_reviewed_head": "7a51d560f42ef3954294720a198b158d57a8b07c",
+      "verdict": "approve",
+      "blocking": false,
+      "summary": "Repaired contract completeness holds. C4 outer SHA/digest identity is transferred to Bringup-C4 production acceptance before G0/C3 deletion. G7 recorder is REMOVED only after PGDATA SQL capture/binding/query-identity transfer. Archive applies retained survivor deltas plus the G7 REMOVED delta and forbids promoting withdrawn cold ADDED requirements. No new missing-guarantee finding. This is contract completeness only: not implementation readiness, deployed correctness, runtime retirement, or merge authorization.",
+      "findings": [],
+      "repaired_invariants": [
+        {
+          "id": "C4",
+          "r1_status": "CONFIRMED at 7a51d560; closed at 44615a622",
+          "invariant": "Independent C4 producer/binder/closed schema survive; production-wide reviewed-SHA freeze plus original C4-byte SHA-256/file-identity recheck transfer to a surviving owner before G0/C3 deletion; C4 CLI PASS cannot substitute; no SHA/digest fields in the C4 closed protocol.",
+          "evidence": [
+            "openspec/changes/.../specs/c4-live-display-evidence/spec.md:19-34,36-61 (MODIFIED 私有闭集证据接受链; scenarios 完整 receipt 可接受, 外层绑定缺失或已变化, 冷接受链删除前必须先完成存活入口交接)",
+            "tasks.md R1.6:85-97 and R4.1:196-201",
+            "docs/runbooks/node-27-bringup-checklist.md:232-239",
+            "canonical openspec/specs/c4-live-display-evidence/spec.md:36-42 remains implemented authority until matching cutover; independent 独立真实 C4 入口 and 完整有界只读浏览器证明 are unmodified"
+          ]
+        },
+        {
+          "id": "T02-G7-PGDATA-SQL",
+          "r1_status": "CONFIRMED at 7a51d560; closed at 44615a622",
+          "invariant": "Retire the G7-only explicit-cycle-query-binding recorder with source/test/selector cutover, but first transfer retained PGDATA manual SQL capture, canonical-parameter validation, native named EXPLAIN binding, and deterministic query identity. Do not keep the four-lane G7 protocol, synthetic positional compatibility, or a dormant issue1895 recorder. Shipping forecast SQL alone is not the evidence producer.",
+          "evidence": [
+            "openspec/changes/.../specs/explicit-cycle-query-binding/spec.md REMOVED all three requirements with Migration after R1.4",
+            "openspec/changes/.../specs/node27-pgdata-relocation/spec.md ADDED Retained SQL performance evidence SHALL keep query identity:70-86",
+            "tasks.md R1.4:59-74, R3.6:169-176, R4.1:200-202",
+            "docs/runbooks/tier-node27-timeseries-storage.md:687-696 (retained GFS/IFS, uncompressed/compressed windows, 1+20 samples/thresholds remain runbook authority, not four-lane G7)",
+            "canonical openspec/specs/explicit-cycle-query-binding/spec.md:4,8,33-38 still names #1895/G7 until R3.6 cutover"
+          ]
+        },
+        {
+          "id": "ARCHIVE",
+          "r1_status": "already stated at 7a51d560; strengthened at 44615a622",
+          "invariant": "Final archive must apply and validate surviving MODIFIED/ADDED updates and the G7-only REMOVED delta, including removal of the empty G7 capability; must not promote withdrawn never-canonical cold ADDED requirements or create an enabled cold capability; --skip-specs only after those updates/removals; --no-validate forbidden; this revision executes no archive.",
+          "evidence": [
+            "proposal.md:92-99 Historical authority and final disposition",
+            "tasks.md R4.4:216-223",
+            "specs/compressed-chunk-cold-residency/spec.md:1-7,109-116 Scenario Final archive would promote withdrawn cold additions",
+            "BASE b860da262 cold-residency ADDED titles (eligibility through G0-G8 live rollout) are withdrawn, not REMOVED canonical requirements"
+          ]
+        }
+      ],
+      "removed_behavior_audit": {
+        "c4_outer_gate": "Canonical production-acceptance SHA/digest owner is still #1895 G0/C3 until cutover. Proposed delta re-homes freeze/recheck to Bringup-C4 production acceptance and forbids R3 deletion until real entrypoint, record provenance, and refusal proof exist. Local five-input/bracket/POSIX/no-clobber binder and independent C4 producer requirements are copied, not dropped.",
+        "g7_recorder": "Canonical G7 recorder (primary named capture, named mapping through EXPLAIN, mapping-order-stable digest, semantic-change identity change, selected_cycles refusal) transfers into PGDATA ADDED requirement before deletion. Synthetic positional compatibility and four-lane G7 live-PASS protocol are explicitly not survivors. #2227 test/selector retire with the recorder rather than promoting dead code.",
+        "pgdata_sql_execution_safety": "G7 requirement Existing G7 evidence and safety controls remain intact (warmup+20, readonly role proof, statement timeout, G7-SHA live PASS) is REMOVED as G7-rollout protocol. Surviving PGDATA §B/retained-workload text keeps 1+20 samples, P95/buffer thresholds, GFS/IFS identity/content binding, and independent readonly validator. Live STATEMENT_TIMEOUT_MS/assert_readonly_identity live in the retiring performance adapter; they are G7-lane execution controls, not a separate retained PGDATA SQL identity guarantee. Not filed as a missing spec requirement.",
+        "withdrawn_cold_added": "HEAD closeout ADDED is retirement/transfer/deletion/archive-safety only. Inventing REMOVED canonical cold-residency requirements would be incorrect.",
+        "deleted_bringup_wording_test": "tests/test_issue1895_runbook_contract.py lost the #2137-first/#1895 cold-rollout prose pin. Independent C4 lane identity remains in bringup C4 (test:e2e:live-c4-display; monitoring.spec.ts is not a substitute). No independent C4/security producer obligation was lost.",
+        "modified_blocks_preserved": [
+          "runtime-service-role-boundary write-path: unrelated idempotence/default-privilege/display SELECT/membership/trigger/TEMP/COPY FROM PROGRAM/no-superuser/live-run scenarios remain; cold CREATE grant/positive audit and cold-residency as a required runtime lane retire; no live REVOKE/DROP.",
+          "hypertable-compression owner-role: compress/drop/ANALYZE, non-owner refusal, migration-owner drift remain; cold SET TABLESPACE/CREATE and cold-residency as a recurring unit are removed; decompress_chunk stays a documented migration-class exception.",
+          "ci-contract-baseline sibling systemd.err glob pin, future-unit coverage, and exact autopipe.timer/retention.service sets remain; cold-only suites are removed after retained readers migrate.",
+          "node27-pgdata-relocation closed action table, pre-write rollback, durable first-write, and copied cluster activates without a cold bind remain canonical; MODIFIED placement drops only cold-installer compatibility and adds unknown/conflict refusal plus PGDATA-owned command/container/evidence and SQL-identity ADDED requirements."
+        ]
+      },
+      "ownership_audit": {
+        "C4": "Surviving outer owner is the existing display deployment Bringup-C4 production acceptance seam. R1.6 must ship real public entrypoint, code owner, original binding-record provenance, and assertion-bearing tests before R3 deletes G0/C3. Independent C4 producer/binder remain display-owned. Old publication-current consumes C4, not the reverse.",
+        "PGDATA_SQL": "PGDATA workload owner retains capture/canonical validation/native named EXPLAIN/query identity with a real entrypoint and tests before R3.6. Shipping forecast owner and named psycopg API stay unchanged.",
+        "archive": "R4.1 applies survivor deltas (PGDATA, compression, roles, CI, C4) plus G7 REMOVED with empty-capability removal at matching source cutover. R4.4 is the archive gate.",
+        "no_new_storage_project": true,
+        "runtime_unchanged_by_this_pr": true
+      },
+      "gap_sweep": {
+        "candidates_considered": [
+          "Bringup-C4 is a named seam rather than a current module/CLI — rejected: R1.6/C4 delta explicitly require real entrypoint delivery before deletion; pending implementation is in-scope for this contract PR.",
+          "PGDATA ADDED requirement omits warmup+20/P95/readonly/timeout — rejected as a stronger-than-oracle invention: four-lane G7 protocol is withdrawn; retained runbook already holds GFS/IFS, windows, 1+20, thresholds, identity/content binding.",
+          "Timeout/readonly live adapter not copied into PGDATA spec — rejected: those are G7-lane execution controls in node27_issue1895_performance_live.py; surviving SQL identity is capture/binding/EXPLAIN/digest; independent readonly validator remains.",
+          "Canonical C4/G7 still name G0/C3 and #1895 recorder — expected: canonical remains implemented authority until matching cutover; proposed deltas are the target.",
+          "Issue drafts vs published *after.json SHA 7a51d560 — publication lag, not a missing requirement in the repaired spec."
+        ],
+        "new_findings": []
+      },
+      "non_blocking_notes": [
+        "Prior observed CI/OpenSpec/Markdown/Ruff PASS is for 7a51d560f42ef3954294720a198b158d57a8b07c (run 34749821635 targeted 2103 passed / 4 skipped; full/realDB/frontend skipped). No equivalent exact-head evidence was supplied for repaired 44615a622d8187376da0e9c45be2912211282190.",
+        "Proposed issue-1891/1895 retirement bodies are synchronized publication drafts; issue-*-after.json remains the old published baseline at 7a51d560 and is not current-head proof.",
+        "Bringup-C4 production acceptance is a required successor seam, not a claim that the replacement entrypoint already exists."
+      ],
+      "out_of_scope_escalations": [],
+      "inspected_surfaces": [
+        "Frozen HEAD 44615a622 vs original BASE b860da262; repair commit 44615a622 vs prior reviewed 7a51d560",
+        "Proposed deltas: c4-live-display-evidence, explicit-cycle-query-binding REMOVED, node27-pgdata-relocation, compressed-chunk-cold-residency closeout, hypertable-compression, runtime-service-role-boundary, ci-contract-baseline",
+        "proposal.md, design.md, tasks.md R1.4/R1.6/R3.6/R4.1/R4.4, README.md",
+        "Canonical openspec/specs/{c4-live-display-evidence,explicit-cycle-query-binding,node27-pgdata-relocation,hypertable-compression,runtime-service-role-boundary,ci-contract-baseline}",
+        "BASE cold-residency ADDED requirement census via git show b860da262",
+        "docs/runbooks/{node-27-bringup-checklist.md C3/C4, tier-node27-timeseries-storage.md retained PGDATA SQL workload}",
+        "packages/common/{node27_issue1895_query.py capture/validator/digest, node27_issue1895_performance_live.py execute_explain/timeout/readonly, node27_issue1895_publication_current.py bind_c3_receipt}",
+        ".workplans/cold-topology-grill/{contract-review-scope.txt, review-r1-completeness.json, verify-r1-c4.json, issue-1891-retirement-body.md, issue-1895-retirement-body.md}"
+      ],
+      "limitations": [
+        "Read-only leaf: no tests, validation, formatters, nested agents, git mutation, or GitHub edits.",
+        "Contract review of proposed retirement deltas, not proof that R1-R5 runtime deletion already shipped.",
+        "User-supplied CI evidence is for 7a51d560, not repaired HEAD 44615a622.",
+        "Historical evidence/, fixtures/, and completed ledger treated as immutable history, not current install/move authority.",
+        "Approve means contract completeness only. Runtime retirement, production actions, and merge are not authorized."
+      ]
+    },
+    "design_consistency": {
+      "mode": "openspec-review",
+      "risk": "high",
+      "seat": "Design Consistency",
+      "lens": "design-consistency",
+      "head": "44615a622d8187376da0e9c45be2912211282190",
+      "base": "b860da262cea9e9fcd1ba8c3292c2802d70390d1",
+      "r1_head": "7a51d560f42ef3954294720a198b158d57a8b07c",
+      "verdict": "request-changes",
+      "summary": "Repaired HEAD closes first-wave C4 ownership: outer reviewed-SHA freeze plus original C4-byte SHA-256/file-identity recheck transfers to the existing display owner's proposed Bringup-C4 production-acceptance seam, without inventing C4 schema/CLI digest fields or restoring broader retired C3 checks. Executable DAG is dependency-closed (R2 atomic with dependent R3 only; unrelated R1/R3 not serialized). Remaining blocking inconsistency is publication-scope only: both proposed issue drafts still permalink the unrepaired 7a51d560 tasks.md as current contract.",
+      "c4_first_wave_closure": {
+        "id": "DC-C4-SHA-DIGEST-OWNERSHIP",
+        "r1_status": "CONFIRMED",
+        "repaired_status": "CLOSED",
+        "old_owner": "packages/common/node27_issue1895_publication_current.py bind_c3_receipt",
+        "new_owner": "existing display deployment owner's Bringup-C4 production acceptance (proposed R1.6 transfer; not claimed already implemented)",
+        "retained_guarantees": [
+          "independently frozen reviewed SHA from approved delivery/C1, not from the C4 file under acceptance",
+          "original C4 raw-byte sha256 plus POSIX file-identity recheck against the initial outer record",
+          "refuse missing/mismatched SHA or changed bytes/identity; never recompute the expected digest from the final read",
+          "C4 CLI PASS cannot substitute for outer production acceptance or independent C1-C3 proof",
+          "closed C4 producer/binder/schema/CLI unchanged; no invented SHA/digest fields; no stronger signature model",
+          "R3 MUST NOT delete G0/C3 SHA/digest capability until the real entrypoint, code owner, record provenance and refusal proof exist"
+        ],
+        "not_transferred_by_design": [
+          "C3 registry/valid-times/frontier checks",
+          "C3 GFS/IFS identity matching and ops job/log binding",
+          "cold census/baseline/G0-G8 rollout"
+        ]
+      },
+      "findings": [
+        {
+          "id": "DC-ISSUE-DRAFT-STALE-TASKS-PIN",
+          "severity": "P2",
+          "failure_class": "design-consistency",
+          "lens": "design-consistency",
+          "blocking": true,
+          "blocking_scope": "synchronized #1891/#1895 publication only; not runtime retirement and not a claim that the repaired OpenSpec contract itself still lacks R1.6/DAG",
+          "violated_invariant": "Proposed synchronized publication must name one current contract identity. Issue drafts that label a GitHub blob as the current tasks.md must resolve to the repaired HEAD, not the unrepaired first-wave SHA.",
+          "evidence": [
+            ".workplans/cold-topology-grill/issue-1891-retirement-body.md:11 labels PR #2304 current tasks.md but permalinks https://github.com/DankerMu/SHUD-NWM/blob/7a51d560f42ef3954294720a198b158d57a8b07c/openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md",
+            ".workplans/cold-topology-grill/issue-1895-retirement-body.md:13 uses the same 7a51d560 permalink as current Evidence Floor",
+            "7a51d560 tasks.md had no R1.6, no c4-live-display-evidence delta, and advertised R1/R2 independence; repaired 44615a622 adds R1.6, the C4 MODIFIED delta, and the dependency-closed publication DAG",
+            "Draft bodies themselves already contain the repaired R1.6/Bringup-C4/G7/R3.7 text, so the pin disagrees with the surrounding draft",
+            ".workplans/cold-topology-grill/issue-1891-after.json and issue-1895-after.json remain the old published baseline by assignment and are not the proposed current bodies"
+          ],
+          "scenario": "Synchronized publication posts these drafts as #1891/#1895. A reader follows '当前修订的 tasks.md' and lands on 7a51d560: independent C4 'survives because publication-current consumes it', no Bringup-C4 owner, and R1/R2 independence. That contradicts both the repaired Git contract at 44615a622 and the draft text on the same page.",
+          "consequence": "Issue publication re-introduces the withdrawn first-wave C4/DAG contract as the live issue pointer. Implementers can treat the unrepaired blob as current even though the PR HEAD transferred C4 ownership and retracted whole-group independence.",
+          "fix_direction": "Retarget both draft permalinks to the final reviewed publication SHA (currently 44615a622d8187376da0e9c45be2912211282190, or later exact reviewed SHA if another repair lands). Keep issue-*-after.json as historical published baseline. Do not rewrite after.json as if it were current, and do not revert the repaired OpenSpec contract.",
+          "required_verification": "Both draft bodies link tasks.md at the same SHA as git rev-parse HEAD of the publication candidate; grep of the drafts shows no 7a51d560 current-contract pin; after.json still differs as old published baseline.",
+          "sibling_surfaces": [
+            ".workplans/cold-topology-grill/issue-1891-after.json",
+            ".workplans/cold-topology-grill/issue-1895-after.json",
+            ".workplans/cold-topology-grill/retirement-publication.json",
+            ".workplans/cold-topology-grill/retirement-pr-body.md"
+          ]
+        }
+      ],
+      "first_wave_disposition": {
+        "C4": "CLOSED at repaired HEAD: proposed c4-live-display-evidence MODIFIED requirement plus R1.6/R4.1, bringup C4 checkbox, ADR 0002, storage retained-workload, closeout C4 scenario, and issue-draft body text all name Bringup-C4 production acceptance. Canonical openspec/specs/c4-live-display-evidence still names #1895 G0/C3 as implemented authority until matching cutover; that is declared pending, not silent drop.",
+        "T-01": "CLOSED in executable DAG: concurrent R1/R2 preparation; R2 publishes with dependent cold runner/wrapper/test/config/schema/selector removal; unrelated R1/R3 and G7/SQL/governance deletions need not wait for compression. No whole-group R1+R2+R3 serialization.",
+        "T-02": "CLOSED as design: retire G7-only explicit-cycle-query-binding with #2227/selector in R3.6 after R1.4 transfers retained PGDATA capture/parameter validation/native EXPLAIN/query identity; PGDATA ADDED requirement owns that survivor. Shipping forecast owner unchanged. A test import is not a surviving production owner.",
+        "T-03": "CLOSED as design: R3.7 matrix covers governance env, current-ops role table, lifecycle-lock cold test branch, Docker collection-gate owner tests/test_node27_docker_collection_gate.py; display-cold-waterfall retained as cache diagnostic. current-production-ops:2315-2318 already withdraws cold env/grant as current guidance and distinguishes pending source deletion from live REVOKE.",
+        "T-04": "Remains REFUTED: R1.2 still uses existing node27_external_contract_snapshot.json / node27_container_contract.py; no invented pin API.",
+        "T-05": "Narrow command clarification applied in tasks.md R5.1 (existing migrate.py + migrate_oracle.py isolated command; proposed docker-gate owner; no new wording-pin test)."
+      },
+      "ownership_audit": {
+        "c4_outer_acceptance": "Old owner bind_c3_receipt: require_sha(reviewed_sha); reject head_sha/reviewed_sha mismatch (C3_BIND_SHA); reread C4 bytes and reject sha256 or POSIX facts drift (C3_BIND_C4_TAMPER). Proposed owner: freeze reviewed SHA from approved delivery/C1 before execution; bind original accepted C4 bytes/identity/inputs/bracket; final acceptance rechecks that record. Broader C3 registry/identity/ops/valid-times checks are explicitly not migrated.",
+        "pgdata": "command/container/evidence plus retained SQL identity under PGDATA owner",
+        "compression": "single-lane launcher; no cold env",
+        "governance": "collect_filesystem/postgres/working_set including #2277/#1769 maintenance freshness",
+        "g7_recorder": "retired after minimum PGDATA workload transfer",
+        "deployment_hold": "R5.2 separate authorization; templates are not effective units; unexpected deployed cold state STOP+safe disposition; I8/#2162/#2017/I9 remain foreign-hold owners",
+        "no_new_storage_project": true,
+        "no_dormant_retention_escape": true,
+        "no_claim_runtime_already_retired": true,
+        "no_invented_c4_schema_or_platform": true
+      },
+      "removed_behavior_audit": {
+        "re_established": [
+          "Outer reviewed-SHA freeze",
+          "original C4-byte digest",
+          "file-identity recheck",
+          "CLI PASS cannot substitute",
+          "R3 blocked until real Bringup-C4 entrypoint/proof",
+          "PGDATA query-identity survivor before G7 deletion",
+          "dependency-closed R2 publication"
+        ],
+        "not_re_established_and_not_required": [
+          "C3 registry/valid-times/frontier",
+          "C3 source-identity and ops job/log binding",
+          "G0-G8 cold rollout",
+          "four-lane synthetic positional G7 protocol"
+        ],
+        "stale_summary_not_operative": "docs/runbooks/node-27-bringup-checklist.md:12-13 still says 'R2 独立解除' and 'R3 在二者之后', but the same paragraph names tasks.md as the sole contract. Not treated as a T-01 recurrence."
+      },
+      "non_blocking_notes": [
+        "Bringup current-boundary summary at node-27-bringup-checklist.md:12-13 is stale relative to the repaired DAG. The paragraph also defers to tasks.md as the sole contract, so it does not authorize an R2-only merge. Cleanup only; not a P1.",
+        "Canonical C4 spec still names #1895 G0/C3. That is current implemented authority until R1.6 cutover, matching R4.1. Not a remaining transfer gap.",
+        "issue-*-after.json is the old published baseline by assignment; do not treat it as the proposed current body.",
+        "Prior-head CI 34749821635 at 7a51d560 is historical. It does not prove repaired-head validation, retirement implementation, or production handoff.",
+        "Runtime code, production actions, merge, and archive remain unauthorized."
+      ],
+      "inspected_surfaces": [
+        "Frozen repaired HEAD 44615a622 vs original BASE b860da26 and R1 HEAD 7a51d560",
+        "proposal.md / design.md / tasks.md publication DAG, R1.6, R3.6, R3.7, R4.1, R5.1-R5.2",
+        "proposed specs: c4-live-display-evidence, explicit-cycle-query-binding, node27-pgdata-relocation, compressed-chunk-cold-residency closeout",
+        "canonical openspec/specs/c4-live-display-evidence and explicit-cycle-query-binding",
+        "old C3 owner packages/common/node27_issue1895_publication_current.py bind_c3_receipt:613-657, _read_c4_receipt:249-283, _validate_c4_facts:534-546",
+        "docs/runbooks/node-27-bringup-checklist.md C3/C4 and current-boundary summary",
+        "docs/runbooks/tier-node27-timeseries-storage.md current authority and retained PGDATA/display workloads:672-710",
+        "docs/runbooks/current-production-ops.md:2306-2318 role table",
+        "docs/adr/0002-node27-timeseries-hot-cold-tiering.md 2026-09-13 amendment",
+        "issue-1891-retirement-body.md and issue-1895-retirement-body.md; after.json treated as old published baseline",
+        "first-wave review-r1-design/completeness/tasks and verify-r1-c4/boundary/task-closure"
+      ],
+      "limitations": [
+        "Read-only leaf. No tests, builds, linters, git mutation, SSH, issue edits, or nested agents.",
+        "Did not treat repository systemd/env templates as effective production units.",
+        "Did not re-run or claim repaired-head CI.",
+        "R1.6 names a proposed acceptance seam on the existing display owner; it does not claim that entrypoint already exists in code.",
+        "Sibling Completeness/Tasks seats own requirement completeness and slice executability; this seat judged names/IDs/owners/DAG/authority consistency only."
+      ],
+      "out_of_scope_escalations": []
+    },
+    "tasks_executability": {
+      "mode": "openspec-review",
+      "risk": "high",
+      "seat": "tasks-executability",
+      "lens": "task-executability",
+      "head": "44615a622d8187376da0e9c45be2912211282190",
+      "base": "b860da262cea9e9fcd1ba8c3292c2802d70390d1",
+      "verdict": "request-changes",
+      "blocking": true,
+      "r1_disposition": {
+        "T-01": "CLOSED",
+        "T-02": "CLOSED",
+        "T-03": "CLOSED",
+        "T-04": "NOT_RESURRECTED",
+        "T-05": "CLOSED"
+      },
+      "findings": [
+        {
+          "id": "T-R2-01",
+          "severity": "P1",
+          "failure_class": "task-executability",
+          "lens": "task-executability",
+          "blocking": true,
+          "violated_invariant": "Proposed synchronized issue publication must point implementers at the repaired sole executable plan (tasks.md at frozen HEAD), not the unrepaired R1 blob.",
+          "evidence": "Both proposed drafts still pin unrepaired `7a51d560f42ef3954294720a198b158d57a8b07c` as 当前修订的 tasks.md: `.workplans/cold-topology-grill/issue-1891-retirement-body.md:11` and `issue-1895-retirement-body.md:13` (`blob/7a51d560f42ef3954294720a198b158d57a8b07c/openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md`). Frozen HEAD is `44615a622d8187376da0e9c45be2912211282190`, whose tasks.md is the repaired DAG/R3.7/R5.1 contract. `issue-*-after.json` remain the old published baseline and are not this finding.",
+          "scenario": "Publication uses these drafts as the GitHub bodies. An implementer follows 任务与 Evidence Floor 见当前修订的 tasks.md and opens the linked blob. That file is the R1 plan: independent R1/R2 publication, no R3.7 matrix, no named migrate_oracle/R5.1 commands. The issue prose is repaired, but tasks.md is the declared sole executable contract.",
+          "consequence": "R1-R5 implementation can be executed against the unrepaired DAG, reintroducing broken-intermediate R2 publication and the T-02/T-03/T-05 closure holes this round already fixed.",
+          "fix_direction": "Retarget both draft blob links (and any matching 当前修订 SHA) to `44615a622d8187376da0e9c45be2912211282190`, or to the final publication SHA if Main rewrites it at publish time. Do not leave 7a51d560f as current-plan authority. Do not rewrite issue-*-after.json.",
+          "required_verification": "The two draft URLs resolve to tasks.md containing the Publication DAG table, R3.7 mixed-surface matrix, and the R5.1 `tests/test_node27_pgdata_migrate_oracle.py` command.",
+          "sibling_surfaces": [
+            "issue-1891-retirement-body.md",
+            "issue-1895-retirement-body.md",
+            "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md"
+          ]
+        }
+      ],
+      "closed_r1": [
+        {
+          "id": "T-01",
+          "severity": "P1",
+          "failure_class": "task-boundary",
+          "status": "closed",
+          "proof": "tasks.md:9-31 Publication DAG: R1/R2 may prepare concurrently; R2 single-lane preflight/budget/unit/wrapper MUST merge with cold runner/wrapper plus affected direct/transitive tests/config/schema/selector edges. R3:83-90 names `node27_cold_residency.py` and `node27_cold_residency_once.sh` in that same merge. Other R3 may publish separately; no whole-group serialization. design.md:81-90 and issue drafts match. Live coupling still exists at compression.service:8-10 and both once.sh:43-45; the plan now forbids publishing that intermediate."
+        },
+        {
+          "id": "T-02",
+          "severity": "P1",
+          "failure_class": "task-executability",
+          "status": "closed",
+          "proof": "R3.6 (tasks.md:169-177) retires G7-only `explicit-cycle-query-binding` with `node27_issue1895_query` recorder, deletes `tests/test_issue2227_explicit_cycle_named_binding.py` and `ISSUE2227_*` selectors, applies REMOVED delta. R1.4 (tasks.md:59-76) first transfers capture, canonical parameter validation, native EXPLAIN binding, and deterministic query identity to the PGDATA workload owner with behavioral proof; shipping `forecast_series()` alone is not the recorder. PGDATA ADDED requirement `node27-pgdata-relocation/spec.md` `Retained SQL performance evidence SHALL keep query identity`. Canonical G7 purpose is not preserved. Shipping `PsycopgForecastStore.forecast_series` unchanged."
+        },
+        {
+          "id": "T-03",
+          "severity": "P1",
+          "failure_class": "task-executability",
+          "status": "closed",
+          "proof": "R3.7 matrix (tasks.md:178-207) dispositions governance.example cold keys, current-ops cold env/CREATE guidance, lifecycle-lock test cold CLI branch, and marker-contract Docker gate → `tests/test_node27_docker_collection_gate.py`. Explicit exclusion: `scripts/diagnostic/display-cold-waterfall.sh` retained (display cache, not tablespace); `apps/frontend/package.json` has no such npm script (only `test:e2e:live-c4-display`). Runtime mutex has no cold-participant state (`node27_timeseries_lifecycle_lock.py` is a fixed flock; only docstring/test import are stale). Verified current-ops.md:2315-2318 already withdraws cold as current guidance."
+        },
+        {
+          "id": "T-04",
+          "severity": "P1",
+          "failure_class": "task-executability",
+          "status": "not_resurrected",
+          "proof": "R1.2 still authorizes a non-literal reader from existing `node27_external_contract_snapshot.json` / `node27_container_contract.py`. Snapshot key `host_context.nhms_db_image_id.value` exists; `compressed_chunk_cold_residency.py:19-21` already demonstrates that read. Missing `PINNED_IMAGE_ID` export on container_contract.py is an R1 implementation choice, not a missing prerequisite."
+        },
+        {
+          "id": "T-05",
+          "severity": "P2",
+          "failure_class": "task-executability",
+          "status": "closed",
+          "proof": "R5.1 (tasks.md:241-270) names existing `tests/test_node27_pgdata_migrate.py` and isolated `NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_pgdata_migrate_oracle.py` (oracle file is triple-marked at :21). Collection-gate path is the R3.7 future owner, not claimed to exist now. No replacement bringup/C4 wording pin. `pnpm test` (apps/frontend `vitest run`) does cover surviving C4 binder/producer suites (`src/__tests__/c4ReceiptBinderCore.test.ts`, `c4LiveDisplayContract.test.ts`). Issue 1895 Evidence Floor matches the oracle command."
+        }
+      ],
+      "notes": [
+        "R2.1 still says migrate `timeseries_compression_receipt` paired fields; `schemas/timeseries_compression_receipt.schema.json` has none. Pairing lives in sequential_budget env/assembly keys and mixed tests (`test_node27_timeseries_sequential_{budget,wrappers,runner_config}.py`, compression.py ExecStart/#launch-cold pins). Those are DAG slice-2 transitive tests, not a new receipt rewrite. Non-blocking.",
+        "R3.7's phrase \"the atomic cutover\" is slightly broader than DAG slice 2, but slice 2 already requires all affected direct/transitive tests of the deleted cold CLI (including the lifecycle-lock cold import). Over-including governance/current-ops into R2 would be extra serialization, not a broken intermediate.",
+        "issue-*-after.json / retirement-publication.json still at 7a51d560f are the old published baseline per oracle; not defects."
+      ],
+      "inspected_surfaces": [
+        "openspec/changes/compressed-chunk-cold-tablespace-tiering/{tasks,design,proposal}.md",
+        "openspec/changes/compressed-chunk-cold-tablespace-tiering/specs/{explicit-cycle-query-binding,node27-pgdata-relocation,c4-live-display-evidence,hypertable-compression,ci-contract-baseline,runtime-service-role-boundary,compressed-chunk-cold-residency}/spec.md",
+        ".workplans/cold-topology-grill/{contract-review-scope.txt,review-r1-tasks.json,verify-r1-*.json,issue-1891-retirement-body.md,issue-1895-retirement-body.md}",
+        "scripts/{node27_timeseries_budget_preflight.py,node27_timeseries_compression_once.sh,node27_cold_residency_once.sh,select_ci_tests.py,node27_resource_governance.py}",
+        "infra/systemd/nhms-node27-timeseries-compression.service",
+        "infra/env/{node27-resource-governance.example,node27-timeseries-compression.example}",
+        "packages/common/{compressed_chunk_cold_residency.py,node27_container_contract.py,node27_pgdata_migrate.py,node27_timeseries_lifecycle_lock.py,node27_issue1895_query.py}",
+        "tests/{test_node27_pgdata_migrate.py,test_node27_pgdata_migrate_oracle.py,test_node27_timeseries_lifecycle_lock.py,test_node27_cold_tablespace_marker_contract.py,test_node27_timeseries_sequential_budget.py,test_node27_timeseries_sequential_wrappers.py,test_node27_timeseries_compression.py,conftest.py}",
+        "apps/frontend/package.json",
+        "scripts/diagnostic/display-cold-waterfall.sh",
+        "docs/runbooks/{current-production-ops.md,tier-node27-timeseries-storage.md,node-27-bringup-checklist.md}"
+      ],
+      "limitations": [
+        "Read-only; no tests/build/lint/CI/nested agents.",
+        "Selector PATH_TEST_RULES not fully expanded; mixed compression/cold/issue1895/2227/conftest rows were read where they close T-01/T-02/T-03/T-05.",
+        "Did not execute the R5.1 pytest/pnpm commands; file existence, markers, and package.json scripts were inspected statically."
+      ],
+      "verification_gaps": [
+        "R5.1 commands are implementation-stage; this contract revision does not claim they ran.",
+        "Future `tests/test_node27_docker_collection_gate.py` is correctly named as a post-R3.7 owner, not a current file."
+      ]
+    }
+  },
+  "publication_pin_verification": {
+    "batch": "publication-identity (1 deduplicated candidate)",
+    "reviewed_head": "44615a622d8187376da0e9c45be2912211282190",
+    "candidate": {
+      "ids": [
+        "DC-ISSUE-DRAFT-STALE-TASKS-PIN",
+        "T-R2-01"
+      ],
+      "verdict": "CONFIRMED",
+      "disposition": "FIX_NOW",
+      "evidence": [
+        "The two R2 reports describe the same historical defect: `review-r2-design.json:33-50` records the design-consistency finding, and `review-r2-tasks.json:19-29` records the task-executability duplicate. Both identify proposed issue bodies whose text called the linked `tasks.md` the current/sole executable contract while pinning `7a51d560f42ef3954294720a198b158d57a8b07c`.",
+        "Independent tracked-content comparison confirms the conflict was substantive, not a cosmetic SHA drift. `git diff 7a51d560f42ef3954294720a198b158d57a8b07c..44615a622d8187376da0e9c45be2912211282190 -- openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md` shows the old plan's `R1 and R2 are independent preparation groups` text replaced by the repaired Publication DAG, including the prohibition on an R2-only destructive interface change and atomic R2 + dependent-R3 closure. The same diff adds R3.6/R3.7 and the explicit R5.1 `tests/test_node27_pgdata_migrate_oracle.py` command absent from the old tracked task contract.",
+        "The repaired target at `44615a622d8187376da0e9c45be2912211282190` contains the Publication DAG (`tasks.md:9-27`), the R3.7 mixed-surface matrix (`tasks.md:178-207`), and the named R5.1 isolated-oracle command (`tasks.md:241-270`). Its `tasks.md` blob is `0f3ac22a63d666436b4bc7c6e5a98949706ed41f`.",
+        "The current proposed drafts are repaired: `issue-1891-retirement-body.md:15` and `issue-1895-retirement-body.md:19` both link exactly to `blob/44615a622d8187376da0e9c45be2912211282190/.../tasks.md`; the scoped stale-SHA search found no `7a51d560f42ef3954294720a198b158d57a8b07c` in either current draft.",
+        "The historical `issue-1891-after.json` and `issue-1895-after.json` bodies still contain the old `7a51…` marker and not `44615…`; they remain historical publication snapshots, as required, and were not altered."
+      ],
+      "disposition_tests": {
+        "T1_reachability": "PASS — under the reported pre-repair state, an implementer following the issue bodies' declared current `tasks.md` hyperlink reached the old tracked plan at `7a51…`.",
+        "T2_observable_impact": "PASS — the affected boundary is the implementer-facing synchronized GitHub issue publication. It pointed readers at a materially different sole executable contract, allowing use of the old independent-R1/R2 plan rather than the repaired dependency-closed plan.",
+        "T3_oracle_anchor": "PASS — the scope oracle calls `tasks.md` the sole executable retirement plan, and both assigned reports explicitly require synchronized issue publication to identify the repaired current contract."
+      },
+      "closure": {
+        "historical_finding": "CONFIRMED",
+        "current_draft_repair": "CLOSED at the inspected repaired head: both current draft links target `44615a622d8187376da0e9c45be2912211282190`.",
+        "final_publication": "OPEN / conditional. If publication uses an evidence-only successor SHA F rather than `44615…`, both issue-body links must be freshly repinned to F, and evidence must show every reviewed contract file is byte-identical to the reviewed `44615…` contract surface. Explicitly authorized evidence-only artifact changes may differ; comparison must not use the whole active-change directory tree as its oracle. The exact `tasks.md` blob above is supporting identity evidence, not a substitute for the full reviewed-contract comparison.",
+        "historical_after_json": "CLOSED as preservation requirement — retain both `issue-*-after.json` snapshots unchanged as history; do not repin them."
+      },
+      "note": "This adjudication covers only the one deduplicated publication-identity candidate. No new-defect search and no tests, builds, lint, formatter, runtime, production, merge, or publication action were performed."
+    }
+  },
+  "gap_sweep": {
+    "seat": "ContractFinalGapSweep",
+    "lens": "final-gap-sweep",
+    "mode": "openspec-review",
+    "risk": "high",
+    "head": "44615a622d8187376da0e9c45be2912211282190",
+    "base": "b860da262cea9e9fcd1ba8c3292c2802d70390d1",
+    "prior_reviewed_head": "7a51d560f42ef3954294720a198b158d57a8b07c",
+    "verdict": "no-new-findings",
+    "blocking": false,
+    "summary": "Independent final gap sweep of the repaired retirement contract at HEAD 44615a622 finds no new actionable defect. First-wave C4 outer SHA/digest transfer, PGDATA SQL capture/binding/digest survivor, dependency-closed R2 publication, mixed-surface R3.7 closure, archive skip-promotion rules, and separately authorized R5 deployment/closure are written into proposal/design/tasks, all proposed deltas, and active docs. Corrected issue drafts now pin tasks.md at 44615a622; that retarget is observed, not re-filed. This is contract completeness only: not implementation proof, runtime retirement, production handoff, merge, or final-SHA publication.",
+    "findings": [],
+    "closed_r1_and_r2": {
+      "C4": "CLOSED as proposed transfer: outer reviewed-SHA freeze plus original C4-byte SHA-256/file-identity recheck move to existing display owner's Bringup-C4 production acceptance; local closed C4 protocol unchanged; C4 CLI PASS cannot substitute; R3 must not delete G0/C3 until real entrypoint, owner, original binding-record provenance and refusal proof exist.",
+      "T-01": "CLOSED as dependency-closed publication: concurrent R1/R2 preparation; R2 single-lane cutover publishes atomically with cold runner/wrapper and affected caller/test/config/schema/selector removal; unrelated R1/R3 not serialized.",
+      "T-02": "CLOSED: G7-only explicit-cycle-query-binding REMOVED after R1.4 transfers minimum PGDATA capture/canonical-parameter validation/native EXPLAIN binding/deterministic query identity; synthetic positional/four-lane protocol explicitly not a survivor; shipping forecast owner unchanged.",
+      "T-03": "CLOSED: R3.7 matrix dispositions governance env, current-ops role guidance, lifecycle-lock cold test branch, and Docker collection-gate owner; generic mutex and display-cache waterfall retained.",
+      "T-04": "Remains REFUTED: existing snapshot/container-contract owner supplies the image pin.",
+      "T-05": "CLOSED as command clarification: R5.1 names existing migrate.py + migrate_oracle.py isolated command and proposed docker-gate owner; no replacement wording-pin test.",
+      "T-R2-01": "NOT REFILED: both issue drafts now permalink tasks.md at 44615a622d8187376da0e9c45be2912211282190; issue-*-after.json remain the old published baseline by assignment."
+    },
+    "survivor_guarantees": {
+      "c4_outer_binding": {
+        "old_owner": "packages/common/node27_issue1895_publication_current.py bind_c3_receipt (C3_BIND_SHA + C3_BIND_C4_TAMPER)",
+        "proposed_owner": "existing display deployment owner's Bringup-C4 production acceptance",
+        "evidence": [
+          "openspec/changes/compressed-chunk-cold-tablespace-tiering/specs/c4-live-display-evidence/spec.md:19-61",
+          "tasks.md R1.6:85-97 and R4.1",
+          "docs/runbooks/node-27-bringup-checklist.md:22-23,207-239",
+          "docs/adr/0002-node27-timeseries-hot-cold-tiering.md:49-53",
+          "docs/runbooks/tier-node27-timeseries-storage.md:698-709",
+          "proposal.md Capabilities c4-live-display-evidence",
+          "closeout spec Scenario C4's production acceptance outlives the retired caller"
+        ],
+        "retained": [
+          "independently frozen reviewed SHA from approved delivery/C1, not from the C4 file under acceptance",
+          "original C4 raw-byte sha256 plus POSIX file-identity recheck against the initial outer record",
+          "refuse missing/mismatched SHA or changed bytes/identity; never recompute expected digest from the final read",
+          "C4 CLI PASS cannot substitute for outer production acceptance or independent C1-C3 proof",
+          "closed C4 producer/binder/schema/CLI unchanged; no invented SHA/digest fields"
+        ],
+        "not_transferred_and_not_required": [
+          "C3 registry/valid-times/frontier checks",
+          "C3 GFS/IFS identity matching and ops job/log binding",
+          "cold census/baseline/G0-G8 rollout"
+        ],
+        "pending_implementation": "Bringup-C4 is a required successor seam; R1.6 forbids G0/C3 deletion until the real public entrypoint, code owner, original binding-record provenance and assertion-bearing refusal tests exist. Not claimed already implemented."
+      },
+      "pgdata_sql_capture_digest": {
+        "evidence": [
+          "tasks.md R1.4:59-74",
+          "specs/node27-pgdata-relocation/spec.md ADDED Retained SQL performance evidence SHALL keep query identity:70-86",
+          "specs/explicit-cycle-query-binding/spec.md REMOVED all three requirements with Migration after R1.4",
+          "docs/runbooks/tier-node27-timeseries-storage.md:687-696"
+        ],
+        "transferred": [
+          "capture",
+          "canonical parameter validation",
+          "native named EXPLAIN binding",
+          "deterministic query identity with mapping-order-stable / semantic-change proof"
+        ],
+        "explicitly_not_survivors": [
+          "synthetic positional compatibility",
+          "four-lane G7 live-PASS protocol"
+        ],
+        "shipping_forecast_owner": "unchanged; shipping forecast_series() alone is not the evidence producer"
+      },
+      "other_survivors": [
+        "PGDATA command/container/evidence and negative legacy-cold-bind refusal",
+        "governance collect_filesystem/postgres/working_set including #2277/#1769 maintenance freshness and /data/GHDC device attribution",
+        "independent C4 producer/binder/schema and test:e2e:live-c4-display",
+        "generic readonly validator and validate_readonly_db_boundary.py",
+        "compression/retention/lifecycle mutex safety",
+        "unrelated role/security audits; no live REVOKE/DROP"
+      ]
+    },
+    "publication_dag": {
+      "rule": "Atomic publication follows actual dependency closure, not whole-group serialization.",
+      "evidence": [
+        "tasks.md Publication DAG:9-31",
+        "tasks.md R3 header:125-131",
+        "design.md:81-90",
+        "closeout spec Scenario A paired-budget consumer remains after the interface cutover",
+        "issue-1891-retirement-body.md Dependency / PR boundary",
+        "issue-1895-retirement-body.md Dependency / PR boundary"
+      ],
+      "allowed": [
+        "concurrent R1/R2 preparation",
+        "R2 + dependent cold runner/wrapper/test/config/schema/selector in one merge",
+        "other R3 after each deleted owner's actual R1 transfers",
+        "G0/C3 deletion only after R1.6"
+      ],
+      "forbidden": [
+        "R2-only destructive interface cutover leaving a paired-budget caller",
+        "compatibility aliases or dormant stubs",
+        "unrelated whole-group R1+R2+R3 serialization"
+      ]
+    },
+    "archive_and_authority": {
+      "evidence": [
+        "proposal.md:92-99",
+        "tasks.md R4.4:216-223",
+        "specs/compressed-chunk-cold-residency/spec.md:1-7 and Scenario Final archive would promote withdrawn cold additions:109-116",
+        "README.md:13-16"
+      ],
+      "rules": [
+        "apply and validate surviving MODIFIED/ADDED updates plus the G7-only REMOVED delta, including removal of the empty G7 capability",
+        "do not promote withdrawn never-canonical cold ADDED requirements or create an enabled cold capability",
+        "--skip-specs only after those updates/removals are applied and validated",
+        "--no-validate forbidden",
+        "this revision executes no archive",
+        "canonical openspec/specs/** remains implemented authority until matching cutover"
+      ]
+    },
+    "deployment_and_closure": {
+      "evidence": [
+        "tasks.md R5.1-R5.3:226-285",
+        "closeout Requirement Closure SHALL require deletion proof and separately authorized effective-deployment handoff",
+        "ADR 0002 Amendment 2026-09-13:61-68",
+        "current-production-ops.md:2315-2318"
+      ],
+      "rules": [
+        "source deletion is not production DROP/REVOKE/data deletion",
+        "repository templates are not effective units",
+        "unexpected deployed cold state requires STOP and dedicated safe disposition",
+        "I8/#2162/#2017/I9 remain foreign-hold owners, not blanket retirement gates",
+        "no new storage/RPO/RTO project",
+        "#2293/#2298/#1938 capability-retired only after affected source and deployed references are gone",
+        "#1895/#1891 close only after R1-R5 deletion, regression, reviewed authority and authorized deployment evidence"
+      ],
+      "r5_1_commands_named_not_run": [
+        "uv run pytest -q tests/test_node27_pgdata_migrate.py tests/test_node27_resource_governance.py tests/test_node27_timeseries_compression.py tests/test_node27_timeseries_retention.py tests/test_node27_timeseries_lifecycle_lock.py tests/test_node27_write_roles.py tests/test_node27_external_contract_snapshot.py tests/test_select_ci_tests.py",
+        "NHMS_RUN_NODE27_DOCKER=1 uv run pytest -q -m 'integration and timescaledb_210 and node27_docker' tests/test_node27_pgdata_migrate_oracle.py",
+        "uv run pytest -q tests/test_node27_docker_collection_gate.py (R3.7 future owner, not claimed to exist now)"
+      ]
+    },
+    "corrected_issue_drafts": {
+      "status": "permalink retarget observed; not a duplicate finding",
+      "paths": [
+        ".workplans/cold-topology-grill/issue-1891-retirement-body.md:15",
+        ".workplans/cold-topology-grill/issue-1895-retirement-body.md:19"
+      ],
+      "current_pin": "https://github.com/DankerMu/SHUD-NWM/blob/44615a622d8187376da0e9c45be2912211282190/openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md",
+      "grep_7a51d560_in_drafts": "none",
+      "after_json": "issue-1891-after.json and issue-1895-after.json remain the old published baseline at 7a51d560 by assignment; not current-head proof",
+      "final_publication_note": "Final evidence-only commit may later repin both links to a later SHA; this sweep does not claim final-publication byte equality."
+    },
+    "candidates_considered_and_dropped": [
+      {
+        "id": "bringup-summary-R2-independence",
+        "reason": "docs/runbooks/node-27-bringup-checklist.md:12-13 still says 'R2 独立解除' and 'R3 在二者之后', but the same paragraph names tasks.md as the sole contract. Already classified by R2 design as stale-summary-not-operative / cleanup-only. Does not authorize an R2-only merge."
+      },
+      {
+        "id": "R3.7-atomic-cutover-breadth",
+        "reason": "Already noted by R2 tasks: phrase is slightly broader than DAG slice 2; DAG already requires all affected direct/transitive tests of the deleted cold CLI. Over-including governance/current-ops into R2 would be extra serialization, not a broken intermediate."
+      },
+      {
+        "id": "G0-G8-four-lane-commands-still-in-runbook",
+        "reason": "Fall inside explicitly superseded archive_scope sections whose current_authority is tasks.md. Retained PGDATA/display workload section transfers capture/identity and withdraws four-lane protocol. Remaining runbook-contract test pins the historical #1895 section as later R3/R4 implementation surface, not a claim this contract PR already retired runtime."
+      },
+      {
+        "id": "runtime-and-test-cold-imports-still-present",
+        "reason": "Expected pending implementation. Contract forbids treating remaining runtime as already retired and forbids dormant stubs after cutover. Presence now is not a retirement-contract defect."
+      },
+      {
+        "id": "Bringup-C4-entrypoint-not-yet-a-module",
+        "reason": "R1.6/C4 delta explicitly require real entrypoint delivery before deletion; pending implementation is in-scope for this contract PR and is not a missing-owner gap."
+      },
+      {
+        "id": "PGDATA-omits-warmup-timeout-readonly-live-adapter",
+        "reason": "Four-lane G7 protocol is withdrawn. Surviving runbook already holds GFS/IFS, windows, 1+20, thresholds, identity/content binding. Live STATEMENT_TIMEOUT_MS/assert_readonly_identity are G7-lane execution controls, not a separate retained PGDATA SQL identity guarantee."
+      },
+      {
+        "id": "canonical-C4-G7-still-name-old-owners",
+        "reason": "Expected: canonical remains implemented authority until matching cutover; proposed deltas are the target. R4.1 states this."
+      },
+      {
+        "id": "README-shorter-archive-summary",
+        "reason": "Does not override tasks.md R4.4 / closeout archive scenario. No new failure scenario."
+      }
+    ],
+    "non_blocking_notes": [
+      "Bringup current-boundary summary at node-27-bringup-checklist.md:12-13 is stale relative to the repaired DAG; it defers to tasks.md as the sole contract. Cleanup only; already noted by R2 design.",
+      "Prior observed CI/OpenSpec/Markdown/Ruff PASS is for 7a51d560 (run 34749821635 targeted 2103 passed / 4 skipped). No equivalent exact-head evidence is claimed here for 44615a622.",
+      "R2.1 still mentions timeseries_compression_receipt paired fields; pairing actually lives in sequential_budget env/assembly keys and mixed tests. Already a non-blocking R2 note; DAG slice-2 transitive tests, not a new receipt rewrite."
+    ],
+    "out_of_scope_escalations": [],
+    "inspected_surfaces": [
+      "HEAD 44615a622 vs BASE b860da262 and prior reviewed 7a51d560",
+      "openspec/changes/compressed-chunk-cold-tablespace-tiering/{proposal,design,tasks,README}.md",
+      "proposed specs: c4-live-display-evidence, explicit-cycle-query-binding REMOVED, node27-pgdata-relocation, compressed-chunk-cold-residency closeout, hypertable-compression, runtime-service-role-boundary, ci-contract-baseline",
+      "canonical openspec/specs/{c4-live-display-evidence,explicit-cycle-query-binding}",
+      "docs/runbooks/{node-27-bringup-checklist.md C3/C4 current-boundary, tier-node27-timeseries-storage.md retained workload and superseded G0-G8 archive_scope, current-production-ops.md:2315-2318}",
+      "docs/adr/0002-node27-timeseries-hot-cold-tiering.md 2026-09-13 amendment",
+      ".workplans/cold-topology-grill/{contract-review-scope.txt, issue-1891-retirement-body.md, issue-1895-retirement-body.md, review-r2-*.json, retirement-pr-body.md}",
+      "evidence/retirement-contract-review.json first-round findings, verification, fixes, rereview",
+      "old C3 owner packages/common/node27_issue1895_publication_current.py bind_c3_receipt:613-637",
+      "infra/env/node27-resource-governance.example cold option block (R3.7 pending deletion)",
+      "infra/systemd/nhms-node27-timeseries-compression.service remaining dual ExecStart (pending R2, not claimed retired)"
+    ],
+    "limitations": [
+      "Read-only leaf. No tests, builds, linters, formatters, git mutation, nested AI, issue edits, or CI were run.",
+      "Contract completeness of the proposed retirement deltas only. Distinguishes written guarantees from future implementation proof.",
+      "Does not prove R1-R5 runtime deletion, Bringup-C4 entrypoint existence, isolated PGDATA oracle execution, effective-unit handoff, archive, issue closure, or merge.",
+      "Does not authorize runtime retirement, production operations, or merge.",
+      "Final evidence-only publication may later repin draft permalinks to a later SHA and byte-check contract equality; that is the publication verifier's job, not claimed here.",
+      "issue-*-after.json remain the old published baseline at 7a51d560 by assignment."
+    ],
+    "authorization": {
+      "runtime_retirement": false,
+      "production_operations": false,
+      "merge": false,
+      "archive": false,
+      "issue_closure": false
+    }
+  },
+  "verdict": "Approve repaired contract scope at 44615a622; final publication must preserve reviewed contract bytes and repin issue links. Not runtime implementation readiness or merge authorization."
+}
