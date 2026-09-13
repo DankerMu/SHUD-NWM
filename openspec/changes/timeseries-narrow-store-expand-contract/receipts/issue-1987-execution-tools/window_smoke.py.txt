@@ -372,8 +372,23 @@ def scenario(args):
         data=b"SET lock_timeout='5s'; SET statement_timeout='120s';\n" + roles,
     )
     e.audit_roles()
+    # Compare the real catalog JSON producer with an independent native OID
+    # read, just as prepare compares its result with measured integer 24541.
+    # A JSON string OID must fail here, not merely agree with other strings.
+    with contextlib.closing(psycopg2.connect(dsn)) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 'hydro.river_timeseries'::regclass::oid")
+            admitted_oid = cur.fetchone()[0]
+    admission_catalog = e.catalog()
+    w.require(
+        type(admitted_oid) is int
+        and len(admission_catalog) == 1
+        and admission_catalog[0]["relname"] == "river_timeseries"
+        and admission_catalog[0]["oid"] == admitted_oid,
+        "CATALOG_NUMERIC_ADMISSION_MISMATCH",
+    )
     e.save(
-        old_oid=e.catalog()[0]["oid"],
+        old_oid=admission_catalog[0]["oid"],
         ledger_before=e.ledger(),
         legacy_read=e.worker("legacy", sha=w.OLD),
         legacy_catalog=e.table_metadata("hydro", "river_timeseries"),
@@ -472,9 +487,15 @@ def scenario(args):
         e.immutable()
         w.require(e.ledger() == ledger, "LEDGER_CHANGED")
         catalog = {r["relname"]: r["oid"] for r in e.catalog()}
-        w.require(catalog["river_timeseries"] == e.s["old_oid"], "OLD_OID_LOST")
+        w.require(
+            type(e.s["old_oid"]) is int and catalog["river_timeseries"] == e.s["old_oid"] == admitted_oid,
+            "OLD_OID_LOST",
+        )
         if narrow_oid:
-            w.require(catalog["river_timeseries_narrow_rollback"] == narrow_oid, "RETAINED_OID_LOST")
+            w.require(
+                type(e.s["narrow_oid"]) is int and catalog["river_timeseries_narrow_rollback"] == narrow_oid,
+                "RETAINED_OID_LOST",
+            )
             w.require(
                 e.rows("SELECT * FROM hydro.river_timeseries_narrow_rollback ORDER BY valid_time,river_segment_key")
                 == retained,

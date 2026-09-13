@@ -311,7 +311,7 @@ class Executor:
 
     def catalog(self):
         return self.rows(
-            "SELECT c.oid,c.relname,pg_get_userbyid(c.relowner) AS owner FROM pg_class c "
+            "SELECT c.oid::bigint AS oid,c.relname,pg_get_userbyid(c.relowner) AS owner FROM pg_class c "
             "JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='hydro' AND c.relname IN "
             "('river_timeseries','river_timeseries_legacy','river_timeseries_narrow_rollback') ORDER BY c.relname"
         )
