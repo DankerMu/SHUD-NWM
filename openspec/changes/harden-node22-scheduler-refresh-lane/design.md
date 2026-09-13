@@ -40,6 +40,24 @@ Goals:
 Non-Goals: listed in `proposal.md`. The load-bearing one is **no self-heal** —
 see the decision below.
 
+One further Non-Goal was added mid-flight, by a recorded user decision after the
+third review round: **this change does not modify
+`scripts/install_node22_scheduler_file_provider_refresh.sh`**, the live refresh
+installer. It was never required by any of #2041, #2146, #1926 or #2075 — the
+original implementation did not touch it, and it entered only through two
+review-fix scope extensions. It then produced a P1 in each of the two rounds it
+was present, both times as a direct consequence of the previous round's fix:
+first a reshaped `scheduler.before` that, combined with a newly-live ERR trap,
+disarmed the production timer; then a `|| true` that turned `--rollback` into a
+silent success while the timer stayed unrestored. The file manages the currently
+running production lane and cannot be rehearsed on node-22 until the #1831
+maintenance window, so every change to it is verifiable only by fake-systemctl
+harness. High blast radius, no live oracle, and no issue asking for it: it is
+reverted to master here and its hardening — the dead ERR traps, the per-unit-type
+comparison, the per-invocation baseline, an `assert_refresh_state_restored`, and
+the deferred second-`--install` baseline poisoning — is tracked separately for a
+PR that can be rehearsed.
+
 ## Decisions
 
 ### D1: Detection only, no automated self-heal
@@ -443,7 +461,7 @@ Regression rows:
 |---|---|---|
 | R1 | probe, timer enabled/active, `NEXT` present and within next-dwell, manifest fresh | `ok`, exit 0 |
 | R2 | probe, `UnitFileState=enabled` + `ActiveState=inactive`, inactive longer than stopped-dwell (08-28 geometry) | `timer_stopped`, exit non-zero |
-| R2b | probe, `UnitFileState=disabled` (installer `--install` / `--rollback` terminal state), any `ActiveState` within dwell | `timer_not_enabled`, exit non-zero — never `ok` |
+| R2b | probe, `UnitFileState=disabled` (the state the existing, unmodified refresh installer leaves after `--install` / `--rollback`), any `ActiveState` within dwell | `timer_not_enabled`, exit non-zero — never `ok` |
 | R3 | probe, enabled + inactive but inactive **less** than stopped-dwell (live #1104 window) | not `timer_stopped`; graded on remaining signals; `ok` only if manifest is also fresh |
 | R4 | probe, timer active, `NextElapseUSecRealtime` empty | `timer_not_scheduled`, exit non-zero |
 | R4b | probe, timer active, `NextElapseUSecRealtime` **present but unparseable** | `timer_not_scheduled`, exit non-zero — a distinct branch from R4's empty value, asserted separately |
@@ -467,8 +485,9 @@ Regression rows:
 | R13 | probe source scanned for non-stdlib imports | zero hits (self-contained, D4) |
 | R14 | probe receipt written | parent dir private, file mode 0600, bounded size, required fields present, no env values other than the integer thresholds and unit name. The field set is closed and includes `manifest_source`, whose value is exactly one of `latest`, `history:<filename>`, `unavailable` |
 | R14b | probe receipt write fails (short write, or an error mid-write) | fails closed with a non-zero exit **and** the previous good receipt is left intact — never truncated, never destroyed; the verdict and any evidence errors are printed to the journal before the process exits, since D2 makes the journal the alert channel |
-| R15 | installer `--install` / `--enable` / `--rollback` | the protected units are unchanged across the run, compared per unit **type**: for the two **timers** both `UnitFileState` and `is-active` byte-equal before and after; for the two timer-driven **oneshot services** only `UnitFileState`, since a oneshot's `is-active` legitimately flips on its own cadence (the compute scheduler every 5 minutes, the refresh service inside its 02:15-04:15Z window) and comparing it would abort on a unit nobody touched. Proven behaviourally on **both** installers by a divergent second read that must abort the run and back it out — a source grep is not evidence, because reverting the call sites while leaving the helper functions in place as dead code keeps every grep matching |
-| R15b | the protected-state baseline is captured per invocation, never read across invocations | `scheduler.before` / `protected.before` are written at the start of **every** action (`--install`, `--enable`, `--rollback`), so the assertion means "this invocation changed nothing" — exactly what R15 claims — and no on-disk format is ever a contract between two versions of the installer. Evidence: a test seeding a stale, differently-shaped baseline must leave `--enable` exiting 0 with the timer still armed, and `--rollback` exiting 0 with its status line printed. Nothing restores *from* this file; `refresh.before` is the restore data and keeps its existence precondition |
+| R15 | the **probe** installer `--install` / `--enable` / `--rollback` | the protected units are unchanged across the run, compared per unit **type**: for the two **timers** both `UnitFileState` and `is-active` byte-equal before and after; for the two timer-driven **oneshot services** only `UnitFileState`, since a oneshot's `is-active` legitimately flips on its own cadence (the compute scheduler every 5 minutes, the refresh service inside its 02:15-04:15Z window) and comparing it would abort on a unit nobody touched. Proven behaviourally at **every** call site: on the main paths by a divergent second read that must abort the run and back it out, and on the two ERR-trap restore paths — where the abort comes from a failing verb — by the trap's own assertion re-reading all four protected units. A source grep is not evidence, and neither is covering `--install` alone: five of six call sites were once dark while `--install` stayed green |
+| R15b | the probe installer's protected-state baseline is captured per invocation | `protected.before` is written at the start of **every** action, so the assertion means "this invocation changed nothing" and no on-disk format is ever a contract between two versions of the installer. Evidence: a test seeding a stale, differently-shaped baseline must leave each action behaving correctly. Nothing restores *from* this file |
+| R15c | the probe installer `--rollback` reports success only on a read-back | after removing the probe units, `--rollback` re-reads the probe timer and service and prints `rolled_back` only when each reports `is-enabled` in {`disabled`, `static`, `not-found`, empty} and `is-active` in {`inactive`, `failed`} (`failed` is the state every non-healthy verdict leaves the probe service in, so refusing it would make rollback impossible after a real alert; empty `is-active` means the user manager is unreachable and is refused). A `disable --now` that systemctl refuses leaves the timer armed, and the run exits non-zero with no status line — the `|| true` on the removal verbs stays, because the same helper runs inside the `--install` ERR trap, and the outcome is judged by what systemd reports afterwards, not by whether the call appeared to succeed. Evidence: a refused-disable test, a complying-disable test, parametrized accept and refuse sets, and a runbook pin that reads the same accept sets |
 | R16 | dry-run, direct-grid + worker mirror, N models | `outcome=dry_run`, `reason=dry_run_complete`, `phase=complete`; registry and mirror `entry_count` both N |
 | R17 | dry-run boundaries: single model and N models | counts agree at 1 and at N; no literal 76 anywhere in the assertion |
 | R17b | dry-run over an **empty** model set, both paths | fails closed with `provider_invalid` — direct-grid at `:896-898`, non-direct-grid at `:961-962` (empty readiness). The runner catches the `RefreshError` and persists a terminal `outcome=failed` / `reason=provider_invalid` receipt with an empty `providers` list, which is correct: what is unreachable is a **successful zero-count `dry_run` receipt**, and neither guard may be relaxed to make one reachable |

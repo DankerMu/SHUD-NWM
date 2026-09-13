@@ -2640,9 +2640,18 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # template (its `_env_templates()` globs `infra/env/*.example`) and stays
     # unselected here, because its rule glob is `infra/env/node27-*.example`
     # and widening it is out of scope for #2195.
+    # #2146 widened this row by one: `tests/test_node22_refresh_timer_health.py`
+    # `read_text`s this template too, and pins its
+    # `NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT=` line to the parent of the
+    # probe's `DEFAULT_REFRESH_RECEIPT` -- the receipt the probe grades. A
+    # template-only PR that moves the receipt root must run that pin, or the
+    # probe watches a path nothing writes and reports `manifest_unavailable`.
     PathTestRule(
         "infra/env/compute.scheduler-provider-refresh.env.example",
-        ("tests/test_scheduler_file_provider_refresh.py",),
+        (
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_node22_refresh_timer_health.py",
+        ),
     ),
     PathTestRule(
         "scripts/validate_two_node_docker_runtime.py",
@@ -2740,19 +2749,9 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         "scripts/scheduler_file_provider_refresh_once.sh",
         ("tests/test_scheduler_file_provider_refresh.py",),
     ),
-    # #2146 round 2 widened this row by one, and added the runner row below it.
-    # `tests/test_node22_refresh_timer_health.py` `read_text`s this installer
-    # (it asserts the per-unit-type comparison and `set -Eeuo pipefail`) AND
-    # runs it as a subprocess against a fake systemctl, driving a divergent
-    # second read of `nhms-compute-scheduler.timer`/`.service` and asserting
-    # the run aborts and is backed out. Before this entry, dropping `-E` on an
-    # installer-only PR selected only the refresh suite and merged green.
     PathTestRule(
         "scripts/install_node22_scheduler_file_provider_refresh.sh",
-        (
-            "tests/test_scheduler_file_provider_refresh.py",
-            "tests/test_node22_refresh_timer_health.py",
-        ),
+        ("tests/test_scheduler_file_provider_refresh.py",),
     ),
     # #2146 round 2: the refresh RUNNER had no explicit row -- only the
     # same-name derivation, which cannot know about a second reader. The probe

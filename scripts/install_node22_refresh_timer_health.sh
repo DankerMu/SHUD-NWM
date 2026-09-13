@@ -125,6 +125,56 @@ remove_probe_units() {
   $systemctl_bin --user daemon-reload || true
 }
 
+# `remove_probe_units` swallows every systemctl failure on purpose -- it is also
+# the `--install` ERR trap body, which must not be cut short -- so on
+# `--rollback` success is decided by READING THE UNITS BACK, never by how the
+# calls went.  A refused `disable --now` leaves the timer loaded, enabled and
+# active; without this check `--rollback` would still print `rolled_back`.
+#
+# "Gone" means neither probe unit can fire again, for both the timer and the
+# service:
+#   is-enabled  disabled | static | not-found | (empty)
+#     `disabled`: the file is still present (restored from `$unit.before`, or
+#     the removal raced) but nothing pulls it in.  `static`: a unit with no
+#     [Install] section -- the probe SERVICE, whenever it is loaded -- cannot
+#     be enabled at all.  Empty: the unit file is gone -- depending on the
+#     systemd release, `is-enabled` on a missing unit may put nothing on
+#     stdout, only a stderr message.  `not-found` is the placeholder this
+#     installer itself records for that case (`protected_state`), accepted for
+#     symmetry.  Empty is accepted only because the `is-active` read below
+#     refuses an empty answer, which is what an unreachable user manager
+#     produces.
+#   is-active   inactive | failed
+#     Not running.  `failed` is accepted because the probe service exits
+#     non-zero on every unhealthy verdict by design (D2), and a failed unit
+#     stays `failed` until `reset-failed` even after its file is removed;
+#     refusing it would make rollback impossible after any real alert.
+# Anything else -- `enabled`, `enabled-runtime`, `linked`, `masked`, `active`,
+# `activating`, `reloading`, an empty `is-active` -- is refused: the run exits
+# non-zero without printing a status line.  A probe tick still running at the
+# moment of rollback is therefore refused too; re-run once it finishes.
+assert_probe_units_gone() {
+  local unit enabled active
+  for unit in "$timer" "$service"; do
+    enabled=$($systemctl_bin --user is-enabled "$unit" 2>/dev/null || true)
+    active=$($systemctl_bin --user is-active "$unit" 2>/dev/null || true)
+    case "$enabled" in
+      disabled | static | not-found | '') ;;
+      *)
+        printf 'rollback: %s is still %s\n' "$unit" "$enabled" >&2
+        return 1
+        ;;
+    esac
+    case "$active" in
+      inactive | failed) ;;
+      *)
+        printf 'rollback: %s is-active=%s, not stopped\n' "$unit" "${active:-<no answer>}" >&2
+        return 1
+        ;;
+    esac
+  done
+}
+
 protected_state > "$state_root/protected.before"
 
 if [[ "$action" == --install ]]; then
@@ -163,6 +213,7 @@ elif [[ "$action" == --enable ]]; then
   printf '{"status":"enabled_active","protected_unchanged":true}\n'
 else
   remove_probe_units
+  assert_probe_units_gone
   assert_protected_unchanged
   printf '{"status":"rolled_back","protected_unchanged":true}\n'
 fi

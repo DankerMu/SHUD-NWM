@@ -546,21 +546,13 @@ NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
 }
 
 
-# #2146 round 2 — the two UNROUTED reader edges, both on paths inside that
-# PR's own diff. `tests/test_node22_refresh_timer_health.py` `read_text`s the
-# refresh installer (per-unit-type comparison, `set -Eeuo pipefail`) and runs
-# it as a subprocess against a fake systemctl, and it both `read_text`s and
-# imports the refresh runner (the `run_id` filename shape its history fallback
-# filters on, and `SCHEMA_VERSION` against the probe's copy). Neither path
-# routed to it, so dropping `-E` — or bumping the runner's receipt schema —
-# merged green on a PR that touched only that file.
+# #2146 round 2 — UNROUTED reader edges of the node-22 probe suite.
+# `tests/test_node22_refresh_timer_health.py` both `read_text`s and imports the
+# refresh runner (the `run_id` filename shape its history fallback filters on,
+# and `SCHEMA_VERSION` against the probe's copy). That path did not route to
+# it, so bumping the runner's receipt schema merged green on a PR that touched
+# only that file.
 NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
-    "scripts/install_node22_scheduler_file_provider_refresh.sh": frozenset(
-        {
-            "tests/test_scheduler_file_provider_refresh.py",
-            "tests/test_node22_refresh_timer_health.py",
-        }
-    ),
     "scripts/scheduler_file_provider_refresh.py": frozenset(
         {
             "tests/test_scheduler_file_provider_refresh.py",
@@ -594,8 +586,8 @@ def test_node22_refresh_reader_edge_rules_red_when_removed(
     """The complement leg: without the rules, the probe suite is not selected.
 
     A pin that only asserts presence cannot tell a real rule from a rider that
-    happens to pull the suite in for another reason, so this drops exactly the
-    three rows and asserts the edge goes away with them.
+    happens to pull the suite in for another reason, so this drops exactly
+    those rows and asserts the edge goes away with them.
     """
     from scripts import select_ci_tests
 
@@ -2448,12 +2440,16 @@ def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> 
     selection with ZERO readers, so the #1182 zero-assertion warning stayed silent too.
 
     Pinned as an EXACT set, not membership: `infra/env/**` is untouched and rule matches
-    accumulate (`selected.update(rule.tests)`), so the correct result is a 2-set, not the
-    owner suite alone. `tests/test_node27_write_roles.py` also reads this template (its
-    `_env_templates()` globs `infra/env/*.example`) and stays unselected by design — that leg
-    is out of scope for #2195.
+    accumulate (`selected.update(rule.tests)`), so the correct result is not the owner
+    suite alone. #2146 widened it from a 2-set to a 3-set:
+    `tests/test_node22_refresh_timer_health.py::test_the_production_path_defaults_match_every_file_that_states_them`
+    `read_text`s this template and pins its `NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT=`
+    line to the probe's `DEFAULT_REFRESH_RECEIPT` parent, so it is a literal reader too.
+    `tests/test_node27_write_roles.py` also reads this template (its `_env_templates()` globs
+    `infra/env/*.example`) and stays unselected by design — that leg is out of scope for #2195.
     """
     assert set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))) == {
+        "tests/test_node22_refresh_timer_health.py",
         "tests/test_scheduler_file_provider_refresh.py",
         "tests/test_two_node_docker_runtime.py",
     }

@@ -1362,7 +1362,7 @@ off-host 路由是另一条有自己认证与投递面的告警链路，另案�
 | `nhms-compute-scheduler.timer`、`nhms-scheduler-file-provider-refresh.timer` | `UnitFileState` **和** `is-active` | timer 的两个字段在安装期间都该是静止的 |
 | `nhms-compute-scheduler.service`、`nhms-scheduler-file-provider-refresh.service` | 只比 `UnitFileState` | 这两个是 timer 驱动的 oneshot，`is-active` 本就会自己翻（compute scheduler 每 5 分钟一次，refresh 在 02:15-04:15Z 窗口内）。比它会在没人动过的 unit 上误报，而误报会触发 abort + 回退，把 arming 变成重试循环 |
 
-两个 installer（探针的和 refresh 自己的）都照这个口径。脚本都用 `set -Eeuo pipefail`：
+探针 installer 用 `set -Eeuo pipefail`：
 没有 `-E`，顶层的 ERR trap 不会被函数体继承，断言在函数里挂掉时脚本只会
 退 1 而 trap 根本不跑，回退等于不存在。
 
@@ -1371,8 +1371,21 @@ off-host 路由是另一条有自己认证与投递面的告警链路，另案�
 scripts/install_node22_refresh_timer_health.sh --install    # 落 unit 文件，保持停用
 scripts/install_node22_refresh_timer_health.sh --enable     # 装载 hourly timer
 systemctl --user list-timers nhms-node22-refresh-timer-health.timer --no-pager
-scripts/install_node22_refresh_timer_health.sh --rollback   # 撤回 unit 文件
+scripts/install_node22_refresh_timer_health.sh --rollback   # 停用并撤回探针 unit，读回确认
 ```
+
+`--rollback` 的成功**以读回为准，不以 systemctl 调用是否报错为准**：撤回 unit 文件并
+`daemon-reload` 之后，脚本对探针 timer 和 service 各读一次 `is-enabled` / `is-active`，
+只有两者都落在下表里才打印 `{"status":"rolled_back",...}` 并退出 0；否则非零退出、
+stderr 说明哪个 unit 处于什么状态、**不打印** `rolled_back`。
+
+| 读数 | 接受 | 为什么 |
+| --- | --- | --- |
+| `is-enabled` | `disabled`、`static`、`not-found`、空 | 没有东西会拉起它：`static` 是无 `[Install]` 的探针 service；unit 文件删掉后，视 systemd 版本 `is-enabled` 可能在 stdout 上什么都不输出（只在 stderr 报错），即"空"；`not-found` 是本 installer 自己给这种情况记的占位值，一并接受 |
+| `is-active` | `inactive`、`failed` | 没在跑。`failed` 必须接受：探针在每个不合格判决上都会让 service 进入 `failed`，删掉文件后也要 `reset-failed` 才会清掉 |
+
+其余一律拒绝，包括 `enabled`、`masked`、`active`、`activating`，以及 `is-active` 没有输出
+（user manager 不可达）。所以正好撞上探针正在跑的那一刻会被拒——等这次 tick 跑完再执行一遍。
 
 ##### 探针自己的稳态核对（watchdog 不看自己）
 

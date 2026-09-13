@@ -14,7 +14,6 @@ import ast
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -1108,7 +1107,15 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
     * ``NHMS_FAKE_DIVERGE`` / ``NHMS_FAKE_DIVERGE_VALUE`` make ONE
       ``<unit>.<query>`` pair answer differently from its SECOND call onwards,
       which is exactly the "the protected units moved under us" shape
-      `assert_protected_unchanged` exists to catch.
+      `assert_protected_unchanged` exists to catch;
+    * ``NHMS_FAKE_FAIL_VERB`` makes every call of one mutating verb exit 1
+      without changing state, which reaches an action's ERR trap BEFORE its
+      main protected-unit assertion -- so the trap's own assertion is the only
+      protected re-read the invocation makes;
+    * ``NHMS_FAKE_PROBE_IS_ENABLED`` / ``NHMS_FAKE_PROBE_IS_ACTIVE``, when SET
+      (the empty string included), are the literal answer to that query for
+      both probe units -- the states a real user manager reports that the
+      stateful fake never produces (`static`, `not-found`, `failed`, no answer).
     """
     log = tmp_path / "installer-systemctl.log"
     state = tmp_path / "fake-state"
@@ -1121,6 +1128,7 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
         "shift\n"  # drop --user
         "verb=$1\n"
         "shift\n"
+        '[ "$verb" = "${NHMS_FAKE_FAIL_VERB:-}" ] && exit 1\n'
         "now=no\n"
         "unit=\n"
         "for arg in \"$@\"; do\n"
@@ -1146,6 +1154,10 @@ def _installer_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
         "esac\n"
         'case "$unit" in\n'
         "  nhms-node22-refresh-timer-health.*)\n"
+        '    if [ "$verb" = is-enabled ] && [ -n "${NHMS_FAKE_PROBE_IS_ENABLED+set}" ]; then '
+        'printf "%s\\n" "$NHMS_FAKE_PROBE_IS_ENABLED"; exit 0; fi\n'
+        '    if [ "$verb" = is-active ] && [ -n "${NHMS_FAKE_PROBE_IS_ACTIVE+set}" ]; then '
+        'printf "%s\\n" "$NHMS_FAKE_PROBE_IS_ACTIVE"; exit 0; fi\n'
         '    if [ "$verb" = is-enabled ]; then printf "%s\\n" "$enabled"; '
         'else printf "%s\\n" "$active"; fi\n'
         "    exit 0 ;;\n"
@@ -1172,6 +1184,8 @@ def _run_installer(
     *,
     diverge: str = "",
     diverge_value: str = "",
+    fail_verb: str = "",
+    probe_answers: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], Path]:
     script, log = _installer_fake_systemctl(tmp_path)
     # Divergence is scoped to ONE installer invocation: the per-(unit, query)
@@ -1190,8 +1204,13 @@ def _run_installer(
             "NHMS_REFRESH_HEALTH_SYSTEMCTL": str(script),
             "NHMS_FAKE_DIVERGE": diverge,
             "NHMS_FAKE_DIVERGE_VALUE": diverge_value,
+            "NHMS_FAKE_FAIL_VERB": fail_verb,
         }
     )
+    for name in ("NHMS_FAKE_PROBE_IS_ENABLED", "NHMS_FAKE_PROBE_IS_ACTIVE"):
+        environment.pop(name, None)
+    for query, answer in (probe_answers or {}).items():
+        environment[f"NHMS_FAKE_PROBE_{query.upper().replace('-', '_')}"] = answer
     completed = subprocess.run(
         ["bash", str(INSTALLER), action],
         capture_output=True,
@@ -1470,21 +1489,43 @@ def _environment_keys_read_by(source: str) -> set[str]:
     env`, so a walk that only knows the literal `os.environ` spelling finds
     five of eight and would call an unlisted threshold seam clean.
 
+    The `os` module and its `environ`/`getenv` members are resolved through
+    every import spelling -- `import os as _o`, `from os import environ as _e`,
+    `from os import getenv` -- because a walk that only knows the literal
+    `os.environ` spelling calls a ninth seam behind `from os import environ as
+    _env` clean.  `test_r11b_the_probe_binds_os_only_through_a_bare_import`
+    additionally forbids those spellings outright, so a form this walk still
+    does not model has to get past both.
+
     Keys are `ast.Name` nodes, not string literals, so each is resolved back
     through the module's own constant -- which is the point: the source and the
     declared surface have to agree.
     """
     tree = ast.parse(source)
 
+    os_names: set[str] = set()
+    aliases: set[str] = set()
+    getenv_names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name == "os":
+                    os_names.add(imported.asname or "os")
+        elif isinstance(node, ast.ImportFrom) and node.module == "os":
+            for imported in node.names:
+                if imported.name == "environ":
+                    aliases.add(imported.asname or imported.name)
+                elif imported.name == "getenv":
+                    getenv_names.add(imported.asname or imported.name)
+
     def _is_os_environ(node: ast.AST) -> bool:
         return (
             isinstance(node, ast.Attribute)
             and node.attr == "environ"
             and isinstance(node.value, ast.Name)
-            and node.value.id == "os"
+            and node.value.id in os_names
         )
 
-    aliases: set[str] = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
             continue
@@ -1514,8 +1555,10 @@ def _environment_keys_read_by(source: str) -> set[str]:
                 isinstance(function, ast.Attribute)
                 and function.attr == "getenv"
                 and isinstance(function.value, ast.Name)
-                and function.value.id == "os"
+                and function.value.id in os_names
                 and node.args
+            ) or (
+                isinstance(function, ast.Name) and function.id in getenv_names and node.args
             ):
                 key_nodes.append(node.args[0])
 
@@ -1536,6 +1579,26 @@ def _environment_keys_read_by(source: str) -> set[str]:
                 f"{ast.dump(key)}"
             )
     return keys
+
+
+def test_r11b_the_probe_binds_os_only_through_a_bare_import() -> None:
+    """The enumeration above can only see names it knows are bound to the
+    environment.  Pin the binding itself: exactly one `import os`, no alias, and
+    no `from os import ...` anywhere in the file (function scope included), so
+    an environment read cannot hide behind an import spelling."""
+    tree = ast.parse(PROBE_SOURCE.read_text())
+    os_imports: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for imported in node.names:
+                if imported.name == "os" or imported.name.startswith("os."):
+                    os_imports.append(ast.unparse(node))
+        elif isinstance(node, ast.ImportFrom) and (
+            node.module == "os" or (node.module or "").startswith("os.")
+        ):
+            os_imports.append(ast.unparse(node))
+
+    assert os_imports == ["import os"], os_imports
 
 
 def test_r11b_the_probe_reads_exactly_the_enumerated_environment_surface() -> None:
@@ -2251,20 +2314,18 @@ def test_the_consumer_bound_is_the_consumers_own_constant() -> None:
 
 
 def test_the_production_path_defaults_match_every_file_that_states_them() -> None:
-    """Audit P2: the probe's two production paths are restated in four other
+    """Audit P2: the probe's two production paths are restated in three other
     places, and nothing read both sides.
 
     `DEFAULT_HEALTH_RECEIPT_ROOT` is where the probe writes and where its
     installer creates a 0700 directory; `DEFAULT_REFRESH_RECEIPT` is the file
-    the probe reads and the file the refresh installer validates.  A drift on
-    either makes the probe watch a path nothing writes -- `manifest_unavailable`
-    forever, or a receipt root the installer never made private.
+    the probe reads, inside the receipt root the refresh runner's env template
+    names.  A drift on either makes the probe watch a path nothing writes --
+    `manifest_unavailable` forever, or a receipt root the installer never made
+    private.
     """
     repo = Path(__file__).resolve().parents[1]
     probe_installer = (repo / "scripts" / "install_node22_refresh_timer_health.sh").read_text()
-    refresh_installer = (
-        repo / "scripts" / "install_node22_scheduler_file_provider_refresh.sh"
-    ).read_text()
     runbook = (repo / "docs" / "runbooks" / "current-production-ops.md").read_text()
     env_example = (
         repo / "infra" / "env" / "compute.scheduler-provider-refresh.env.example"
@@ -2275,10 +2336,6 @@ def test_the_production_path_defaults_match_every_file_that_states_them() -> Non
         in probe_installer
     )
     assert probe.DEFAULT_HEALTH_RECEIPT_ROOT in runbook
-    assert (
-        f"receipt=${{NHMS_SCHEDULER_REFRESH_RECEIPT:-{probe.DEFAULT_REFRESH_RECEIPT}}}"
-        in refresh_installer
-    )
     # The runner's env template names the RECEIPT ROOT; the probe reads
     # `latest.json` inside it, so the pin is the parent, not the file.
     assert (
@@ -2532,232 +2589,295 @@ def test_r15_enable_leaves_the_probe_timer_armed_on_the_happy_path(
     assert _probe_timer_state(tmp_path) == ("enabled", "active")
 
 
-def test_r15_both_installers_compare_the_protected_units_per_unit_type() -> None:
-    """C1(d) applies to BOTH installers: the sibling's own scheduler assertion
-    compares the compute scheduler's `.service` on `UnitFileState` only, for the
-    same reason -- a oneshot re-activating every 5 minutes is not a change."""
-    sibling = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "install_node22_scheduler_file_provider_refresh.sh"
-    ).read_text()
-
-    assert "unit_file_state nhms-compute-scheduler.service" in sibling
-    assert "unit_state nhms-compute-scheduler.timer" in sibling
-    for installer_source in (INSTALLER.read_text(), sibling):
-        assert "set -Eeuo pipefail" in installer_source
+def test_r15_the_probe_installer_runs_with_errtrace() -> None:
+    """`-E` is what lets the top-level ERR traps see an assertion failing inside
+    a function body; without it the trap never runs."""
+    assert "set -Eeuo pipefail" in INSTALLER.read_text()
 
 
-# ---------------------------------------------------------------------------
-# R15 -- the SIBLING installer's half, behaviourally
-# ---------------------------------------------------------------------------
-
-# The test above is a source grep, and a source grep is not evidence for this
-# row: reverting the two call sites to the old inline form while leaving
-# `scheduler_state`/`unit_file_state` in place as dead code keeps every one of
-# those assertions matching and the whole suite green (verified end to end).
-# What follows drives the refresh installer itself, the same way the probe
-# installer's R15 regression drives that one, and asserts the run's SIDE
-# EFFECTS -- `set -e` exits non-zero whether or not the trap ever ran.
-
-SIBLING_INSTALLER = (
-    Path(__file__).resolve().parents[1]
-    / "scripts"
-    / "install_node22_scheduler_file_provider_refresh.sh"
+PROTECTED_QUERIES = (
+    "--user is-enabled nhms-compute-scheduler.timer",
+    "--user is-active nhms-compute-scheduler.timer",
+    "--user is-enabled nhms-scheduler-file-provider-refresh.timer",
+    "--user is-active nhms-scheduler-file-provider-refresh.timer",
+    "--user is-enabled nhms-compute-scheduler.service",
+    "--user is-enabled nhms-scheduler-file-provider-refresh.service",
 )
-REFRESH_UNITS = (
-    "nhms-scheduler-file-provider-refresh.service",
-    "nhms-scheduler-file-provider-refresh.timer",
-)
-SCHEDULER_TIMER = "nhms-compute-scheduler.timer"
-SCHEDULER_SERVICE = "nhms-compute-scheduler.service"
-
-
-def _sibling_fake_systemctl(tmp_path: Path) -> tuple[Path, Path]:
-    """The refresh installer's counterpart of `_installer_fake_systemctl`.
-
-    The refresh units carry real state (so `assert_refresh_service_inactive`
-    and the arming sequence are observable), while the two compute-scheduler
-    units answer from a per-``<unit>.<query>`` counter -- which is what lets
-    ``NHMS_FAKE_DIVERGE`` make the SECOND read of one of them disagree with the
-    first.  That is precisely the "the protected units moved under us" shape
-    `assert_scheduler_unchanged` exists to catch.
-    """
-    log = tmp_path / "sibling-systemctl.log"
-    state = tmp_path / "sibling-state"
-    state.mkdir(exist_ok=True)
-    script = tmp_path / "sibling-fake-systemctl"
-    script.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> {log}\n'
-        f"state={state}\n"
-        "shift\n"  # drop --user
-        "verb=$1\n"
-        "shift\n"
-        "now=no\n"
-        "unit=\n"
-        'for arg in "$@"; do\n'
-        '  case "$arg" in\n'
-        "    --now) now=yes ;;\n"
-        "    -*) ;;\n"
-        "    *) unit=$arg ;;\n"
-        "  esac\n"
-        "done\n"
-        'key=$(printf "%s" "$unit" | tr -c "a-zA-Z0-9._-" "_")\n'
-        'case "$unit" in\n'
-        "  nhms-scheduler-file-provider-refresh.*)\n"
-        '    enabled=$(cat "$state/$key.own-enabled" 2>/dev/null || printf disabled)\n'
-        '    active=$(cat "$state/$key.own-active" 2>/dev/null || printf inactive)\n'
-        '    case "$verb" in\n'
-        '      enable) enabled=enabled; [ "$now" = yes ] && active=active ;;\n'
-        '      disable) enabled=disabled; [ "$now" = yes ] && active=inactive ;;\n'
-        "      start) active=active ;;\n"
-        "      stop) active=inactive ;;\n"
-        "    esac\n"
-        '    printf "%s" "$enabled" > "$state/$key.own-enabled"\n'
-        '    printf "%s" "$active" > "$state/$key.own-active"\n'
-        '    case "$verb" in\n'
-        '      is-enabled) printf "%s\\n" "$enabled" ;;\n'
-        '      is-active) printf "%s\\n" "$active" ;;\n'
-        "    esac\n"
-        "    exit 0 ;;\n"
-        "esac\n"
-        'case "$verb" in\n'
-        "  is-enabled|is-active) ;;\n"
-        "  *) exit 0 ;;\n"
-        "esac\n"
-        "value=enabled\n"
-        'if [ "$verb" = is-active ]; then value=active; fi\n'
-        'counter=$(printf "%s" "$unit.$verb" | tr -c "a-zA-Z0-9._-" "_")\n'
-        'count=$(cat "$state/$counter.count" 2>/dev/null || printf 0)\n'
-        "count=$((count + 1))\n"
-        'printf "%s" "$count" > "$state/$counter.count"\n'
-        'if [ "$unit.$verb" = "${NHMS_FAKE_DIVERGE:-}" ] && [ "$count" -ge 2 ]; then\n'
-        "  value=${NHMS_FAKE_DIVERGE_VALUE:-}\n"
-        "fi\n"
-        'printf "%s\\n" "$value"\n'
-        "exit 0\n"
-    )
-    script.chmod(0o755)
-    return script, log
-
-
-def _run_sibling_installer(
-    tmp_path: Path,
-    action: str,
-    *,
-    diverge: str = "",
-    diverge_value: str = "",
-) -> tuple[subprocess.CompletedProcess[str], Path]:
-    repo = tmp_path / "sibling-repo"
-    if not repo.exists():
-        source = Path(__file__).resolve().parents[1] / "infra" / "systemd"
-        (repo / "infra" / "systemd").mkdir(parents=True)
-        (repo / "infra" / "env").mkdir(parents=True)
-        for name in REFRESH_UNITS:
-            shutil.copy2(source / name, repo / "infra" / "systemd" / name)
-        env_file = repo / "infra" / "env" / "compute.scheduler-provider-refresh.env"
-        env_file.write_text("NHMS_SCHEDULER_REQUIRE_DIRECT_GRID=true\n")
-        env_file.chmod(0o600)
-    script, log = _sibling_fake_systemctl(tmp_path)
-    # Divergence is scoped to ONE invocation, as in the probe harness: the
-    # counters reset so the baseline read is call 1 and the assertion's re-read
-    # is call 2, which is the real mid-run flip being modelled.
-    for counter in (tmp_path / "sibling-state").iterdir():
-        if counter.name.endswith(".count"):
-            counter.unlink()
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "NHMS_SCHEDULER_REFRESH_REPO": str(repo),
-            "NHMS_SCHEDULER_REFRESH_UNIT_DIR": str(tmp_path / "sibling-units"),
-            "NHMS_SCHEDULER_REFRESH_INSTALL_STATE_ROOT": str(tmp_path / "sibling-install-state"),
-            "NHMS_SCHEDULER_REFRESH_SYSTEMCTL": str(script),
-            "NHMS_FAKE_DIVERGE": diverge,
-            "NHMS_FAKE_DIVERGE_VALUE": diverge_value,
-        }
-    )
-    completed = subprocess.run(
-        ["bash", str(SIBLING_INSTALLER), action],
-        capture_output=True,
-        text=True,
-        env=environment,
-        check=False,
-    )
-    return completed, log
 
 
 @pytest.mark.parametrize(
-    ("query", "divergent"),
-    [("is-enabled", "disabled"), ("is-active", "inactive")],
+    ("diverge", "divergent"),
+    [
+        ("nhms-scheduler-file-provider-refresh.timer.is-active", "inactive"),
+        ("nhms-compute-scheduler.service.is-enabled", "disabled"),
+    ],
 )
-def test_r15_a_divergent_scheduler_timer_read_aborts_the_sibling_install(
-    tmp_path: Path, query: str, divergent: str
+def test_r15_rollback_does_not_report_success_when_a_protected_unit_moved(
+    tmp_path: Path, diverge: str, divergent: str
 ) -> None:
-    """For the compute scheduler's TIMER both fields are compared, and the
-    refresh installer's own assertion must bite exactly like the probe's.
+    """`--rollback` has no trap: its protected-unit assertion is the only thing
+    between "a protected unit moved under the rollback" and a printed
+    `{"status":"rolled_back","protected_unchanged":true}`.
 
-    The side effect is the evidence: the ERR trap has to remove the refresh
-    units it just laid down.  A dropped `-E` reds here and nowhere else --
-    `assert_scheduler_unchanged` fails inside a FUNCTION body, which is the
-    path an uninherited top-level trap never covers.
+    The probe units are removed either way (`remove_probe_units` runs first),
+    so that is not evidence.  The evidence is the success document: it must not
+    be emitted, and the divergent unit must have been re-read AFTER the removal.
     """
-    completed, _log = _run_sibling_installer(
-        tmp_path,
-        "--install",
-        diverge=f"{SCHEDULER_TIMER}.{query}",
-        diverge_value=divergent,
+    installed, install_log = _run_installer(tmp_path, "--install")
+    assert installed.returncode == 0, installed.stderr
+    install_log.write_text("")  # the fake appends; read only this invocation
+
+    completed, log = _run_installer(
+        tmp_path, "--rollback", diverge=diverge, diverge_value=divergent
     )
+    lines = log.read_text().splitlines()
+    unit, query = diverge.rsplit(".", 1)
+    reads = [index for index, line in enumerate(lines) if line == f"--user {query} {unit}"]
+    reloads = [index for index, line in enumerate(lines) if line == "--user daemon-reload"]
 
+    assert completed.stdout == "", (
+        f"--rollback reported success over a moved protected unit: {completed.stdout}"
+    )
     assert completed.returncode != 0
-    for unit in REFRESH_UNITS:
-        assert not (tmp_path / "sibling-units" / unit).exists(), (
-            f"the ERR trap never ran: {unit} was left installed"
-        )
+    assert len(reads) == 2, lines
+    assert reloads and reads[1] > reloads[-1], (
+        f"the protected units were not re-read after the rollback acted: {lines}"
+    )
+    for probe_unit in PROBE_UNITS:
+        assert not (tmp_path / "units" / probe_unit).exists()
 
 
-def test_r15_a_divergent_scheduler_service_unit_file_state_aborts_the_sibling_install(
+def test_rollback_refuses_success_when_systemctl_refused_to_disarm_the_probe(
     tmp_path: Path,
 ) -> None:
-    """`UnitFileState` IS compared for the compute scheduler's oneshot service
-    -- it is what "unchanged" means for a unit whose activity its timer drives.
+    """`remove_probe_units` guards `disable --now` with `|| true` -- it is also the
+    `--install` ERR trap body -- so a refused disarm used to fall straight
+    through to `rolled_back`, exit 0, with the probe timer still armed.
+
+    The outcome is what is asserted: the timer really is still enabled and
+    active afterwards, and `--rollback` does not claim otherwise.
     """
-    completed, _log = _run_sibling_installer(
-        tmp_path,
-        "--install",
-        diverge=f"{SCHEDULER_SERVICE}.is-enabled",
-        diverge_value="disabled",
-    )
+    assert _run_installer(tmp_path, "--install")[0].returncode == 0
+    enabled, _log = _run_installer(tmp_path, "--enable")
+    assert enabled.returncode == 0, enabled.stderr
+    assert _probe_timer_state(tmp_path) == ("enabled", "active")
 
+    completed, _log = _run_installer(tmp_path, "--rollback", fail_verb="disable")
+
+    assert _probe_timer_state(tmp_path) == ("enabled", "active")
+    assert "rolled_back" not in completed.stdout, completed.stdout
     assert completed.returncode != 0
-    for unit in REFRESH_UNITS:
-        assert not (tmp_path / "sibling-units" / unit).exists()
+    assert "still enabled" in completed.stderr
 
 
-def test_r15_the_scheduler_oneshot_flipping_active_does_not_fire_the_sibling_assertion(
+def test_rollback_of_an_armed_probe_succeeds_when_systemctl_complies(
     tmp_path: Path,
 ) -> None:
-    """The paired negative case.
+    """The paired positive case: the read-back must not refuse a real disarm."""
+    assert _run_installer(tmp_path, "--install")[0].returncode == 0
+    assert _run_installer(tmp_path, "--enable")[0].returncode == 0
 
-    `nhms-compute-scheduler.service` activates every five minutes on its own
-    cadence, so its `is-active` is not a property any installer can hold still.
-    The installer must therefore never read it -- and this test is what makes
-    that load-bearing: comparing the oneshot on `is-active` would take a second
-    read, the divergence would fire, and an installer that aborts and rolls
-    back on a unit nobody touched turns arming into a retry loop.
-    """
-    completed, log = _run_sibling_installer(
+    completed, _log = _run_installer(tmp_path, "--rollback")
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {"status": "rolled_back", "protected_unchanged": True}
+    assert _probe_timer_state(tmp_path) == ("disabled", "inactive")
+    for probe_unit in PROBE_UNITS:
+        assert not (tmp_path / "units" / probe_unit).exists()
+
+
+# The `--rollback` read-back's closed accept sets.  The two tests below prove
+# them against the installer's `case` arms by behaviour, and
+# `test_the_runbook_states_exactly_the_rollback_accept_sets` reads the same
+# tuples against the runbook table -- so the code and the operator's copy can
+# only move together.  `""` is "no stdout answer".
+ROLLBACK_ACCEPTED_IS_ENABLED = ("disabled", "static", "not-found", "")
+ROLLBACK_ACCEPTED_IS_ACTIVE = ("inactive", "failed")
+ROLLBACK_REFUSED_IS_ENABLED = ("enabled", "enabled-runtime", "linked", "masked", "alias")
+ROLLBACK_REFUSED_IS_ACTIVE = ("active", "activating", "reloading", "deactivating", "")
+
+
+@pytest.mark.parametrize("is_enabled", ROLLBACK_ACCEPTED_IS_ENABLED)
+@pytest.mark.parametrize("is_active", ROLLBACK_ACCEPTED_IS_ACTIVE)
+def test_rollback_accepts_every_stopped_probe_state(
+    tmp_path: Path, is_enabled: str, is_active: str
+) -> None:
+    assert _run_installer(tmp_path, "--install")[0].returncode == 0
+
+    completed, _log = _run_installer(
         tmp_path,
-        "--install",
-        diverge=f"{SCHEDULER_SERVICE}.is-active",
-        diverge_value="inactive",
+        "--rollback",
+        probe_answers={"is-enabled": is_enabled, "is-active": is_active},
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert json.loads(completed.stdout)["scheduler_unchanged"] is True
-    for unit in REFRESH_UNITS:
-        assert (tmp_path / "sibling-units" / unit).exists()
-    assert f"--user is-active {SCHEDULER_SERVICE}" not in log.read_text()
+    assert json.loads(completed.stdout)["status"] == "rolled_back"
+
+
+@pytest.mark.parametrize(
+    ("is_enabled", "is_active"),
+    [(value, "inactive") for value in ROLLBACK_REFUSED_IS_ENABLED]
+    + [("disabled", value) for value in ROLLBACK_REFUSED_IS_ACTIVE],
+)
+def test_rollback_refuses_every_state_that_can_still_fire(
+    tmp_path: Path, is_enabled: str, is_active: str
+) -> None:
+    assert _run_installer(tmp_path, "--install")[0].returncode == 0
+
+    completed, _log = _run_installer(
+        tmp_path,
+        "--rollback",
+        probe_answers={"is-enabled": is_enabled, "is-active": is_active},
+    )
+
+    assert "rolled_back" not in completed.stdout, completed.stdout
+    assert completed.returncode != 0
+
+
+def test_the_runbook_states_exactly_the_rollback_accept_sets() -> None:
+    """Prose<->code: the runbook's `--rollback` table must list exactly the
+    states the installer accepts -- set equality, so a state added to or
+    dropped from either side reds here.  `空` is the runbook's word for `""`."""
+    section = _probe_runbook_section()
+
+    def accepted_in_row(query: str) -> set[str]:
+        prefix = f"| `{query}` |"
+        rows = [line for line in section.splitlines() if line.startswith(prefix)]
+        assert len(rows) == 1, f"expected one `{query}` row in the rollback table: {rows}"
+        cell = rows[0][len(prefix) :].split("|", 1)[0]
+        states = set(re.findall(r"`([^`]+)`", cell))
+        if "空" in cell:
+            states.add("")
+        return states
+
+    assert accepted_in_row("is-enabled") == set(ROLLBACK_ACCEPTED_IS_ENABLED)
+    assert accepted_in_row("is-active") == set(ROLLBACK_ACCEPTED_IS_ACTIVE)
+    assert "--rollback" in section and "rolled_back" in section
+
+
+# A baseline in a shape this installer never writes: every protected unit on
+# `unit<TAB>enabled<TAB>active`, i.e. the oneshots compared on `is-active` too.
+# Timers match the fake's live answer; the oneshot rows differ only in SHAPE.
+STALE_PROTECTED_BASELINE = "".join(
+    f"{unit}\tenabled\tactive\n" for unit in PROTECTED_UNITS
+)
+
+
+@pytest.mark.parametrize(
+    ("action", "status"),
+    [
+        ("--install", "installed_stopped"),
+        ("--enable", "enabled_active"),
+        ("--rollback", "rolled_back"),
+    ],
+)
+def test_r15b_a_stale_differently_shaped_baseline_does_not_break_any_action(
+    tmp_path: Path, action: str, status: str
+) -> None:
+    """`protected.before` is captured at the start of EVERY invocation, so the
+    protected-unit assertion always means "this invocation changed nothing" and
+    no on-disk file is ever a contract between two runs or two installer
+    versions.  A file left by an earlier run must be overwritten, not read.
+    """
+    if action != "--install":
+        assert _run_installer(tmp_path, "--install")[0].returncode == 0
+    state_root = tmp_path / "install-state"
+    state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    baseline = state_root / "protected.before"
+    baseline.write_text(STALE_PROTECTED_BASELINE)
+
+    completed, _log = _run_installer(tmp_path, action)
+
+    assert completed.returncode == 0, (
+        f"{action} failed on a stale baseline alone: {completed.stderr}"
+    )
+    assert json.loads(completed.stdout) == {"status": status, "protected_unchanged": True}
+    assert baseline.read_text() != STALE_PROTECTED_BASELINE
+
+
+def test_r15_the_install_trap_rechecks_the_protected_units_after_removing_the_probe(
+    tmp_path: Path,
+) -> None:
+    """The `--install` ERR trap is `remove_probe_units; assert_protected_unchanged`:
+    backing the install out mutates units too, so it needs its own check.
+
+    Triggered by a failing `daemon-reload`, before the main protected-unit
+    assertion, so the trap's assertion is the ONLY protected re-read.  The probe
+    units are removed and the exit is non-zero whether or not that assertion
+    runs, so the evidence is the trace: every protected query is re-issued after
+    the trap's own `daemon-reload`.
+    """
+    completed, log = _run_installer(
+        tmp_path,
+        "--install",
+        diverge="nhms-compute-scheduler.service.is-enabled",
+        diverge_value="disabled",
+        fail_verb="daemon-reload",
+    )
+    lines = log.read_text().splitlines()
+    reloads = [index for index, line in enumerate(lines) if line == "--user daemon-reload"]
+
+    assert completed.stdout == ""
+    assert len(reloads) == 2, f"expected the failing reload and the trap's reload: {lines}"
+    after_trap_reload = lines[reloads[-1] + 1 :]
+    for query in PROTECTED_QUERIES:
+        assert query in after_trap_reload, (
+            f"the ERR trap removed the probe units but never re-checked `{query}`: "
+            f"{after_trap_reload}"
+        )
+        assert lines[: reloads[0]].count(query) == 1, lines
+    for probe_unit in PROBE_UNITS:
+        assert not (tmp_path / "units" / probe_unit).exists(), f"{probe_unit} was left installed"
+
+
+def test_r15_the_enable_trap_rechecks_the_protected_units_after_restoring_the_probe(
+    tmp_path: Path,
+) -> None:
+    """`enable_failure_restore` restores the probe timer and THEN asserts the
+    protected units -- the restore mutates units too, so it needs its own check.
+
+    Triggered by a failing `enable --now`, not by the main protected-unit
+    assertion: on this path the trap's assertion is the ONLY protected-unit
+    re-read the invocation makes, and the divergence it must see is the second
+    read of a protected unit.  Exit status and stdout are identical
+    whether or not the trap's assertion runs (the shell exits non-zero on the
+    original failure either way), so the evidence is the systemctl trace: every
+    protected query is re-issued after the restoring `stop`.
+    """
+    installed, install_log = _run_installer(tmp_path, "--install")
+    assert installed.returncode == 0, installed.stderr
+    install_log.write_text("")  # the fake appends; read only this invocation
+
+    completed, log = _run_installer(
+        tmp_path,
+        "--enable",
+        diverge="nhms-compute-scheduler.timer.is-enabled",
+        diverge_value="disabled",
+        fail_verb="enable",
+    )
+    lines = log.read_text().splitlines()
+    armed = [index for index, line in enumerate(lines) if line.startswith("--user enable --now")]
+    restored = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("--user stop") and PROBE_TIMER in line
+    ]
+
+    assert completed.stdout == ""
+    assert armed, f"the installer never attempted `enable --now`: {lines}"
+    assert restored and restored[-1] > armed[0], (
+        f"the ERR trap never restored the probe timer: {lines}"
+    )
+    after_restore = lines[restored[-1] + 1 :]
+    for query in PROTECTED_QUERIES:
+        assert query in after_restore, (
+            f"the ERR trap restored the probe timer but never re-checked `{query}`: "
+            f"{after_restore}"
+        )
+        # Exactly one read before the trap (the invocation baseline): the main
+        # assertion never ran, so the trap's check is the only re-read.
+        assert lines[: armed[0]].count(query) == 1, lines
+    assert _probe_timer_state(tmp_path) == ("disabled", "inactive")
 
 
 # ---------------------------------------------------------------------------

@@ -68,7 +68,11 @@ write any file under the provider store.
   bound, and the stopped-dwell is additionally capped at one cadence; a
   configuration outside those ranges is rejected before any evidence is
   collected, and no accepted combination of thresholds grades a lane healthy
-  once it has been idle for longer than one cadence
+  once its timer has been enabled-but-inactive for longer than one cadence.
+  This is deliberately scoped to the stopped-timer geometry: a timer that is
+  active and due to tick shortly, whose manifest is merely older than one
+  cadence, is healthy by design — the manifest-age threshold exists precisely to
+  tolerate a slow-but-alive lane, and capping it at one cadence would defeat it
 
 #### Scenario: The probe fails closed
 
@@ -125,6 +129,15 @@ write any file under the provider store.
 - **AND** the installer's protected-state baseline is captured at the start of
   every invocation, so the comparison always describes that one invocation and
   no on-disk baseline is ever interpreted across versions of the installer
+
+#### Scenario: The probe installer's rollback reports success only when the probe is really disarmed
+
+- **WHEN** the probe installer's rollback runs and systemd refuses to disable or
+  stop the probe timer or service
+- **THEN** the rollback exits non-zero and does not report a rolled-back status
+- **AND** success is reported only after re-reading both probe units shows
+  neither is enabled nor active, where a failed probe service left behind by a
+  non-healthy verdict counts as disarmed and an unreachable user manager does not
 
 ### Requirement: The tracked DB-free scheduler env template carries every key the documentation declares mandatory
 

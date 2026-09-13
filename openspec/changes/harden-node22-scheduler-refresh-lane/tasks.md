@@ -133,7 +133,8 @@ Evidence floor:
       modeled on the existing refresh installer's state-capture/rollback shape but
       minimal. It must capture and assert that **both** `nhms-compute-scheduler.timer`
       and `nhms-compute-scheduler.service`, and both refresh units, have identical
-      enabled/active states before and after its own run.
+      enabled/active states before and after its own run, and `--rollback` must
+      read back the probe units before reporting success (R15c).
 
 ### 2. Dry-run worker-mirror entry_count (#1926)
 
@@ -221,8 +222,9 @@ Evidence floor:
 | R13 stdlib only | source-scan test of the probe's import statements against `sys.stdlib_module_names` |
 | R14 receipt shape and mode | unit test: parent dir mode, file mode 0600, required fields present (incl. `manifest_source` from its closed set), size bounded, no env values beyond thresholds and unit name |
 | R14b durable receipt write | unit tests: `os.write` monkeypatched to a short write -> fails closed, non-zero; a write failure leaves the previous receipt byte-identical; the verdict is on stdout/journal before the failure exit |
-| R15 installer leaves units untouched | each installer's own before/after assertion, per unit type; for **both** installers a regression test drives the fake to a divergent second read of a protected unit and asserts the run aborts and is backed out (side effects, not exit code); a paired negative case flips only a oneshot's `is-active` and asserts it does **not** fire. A source grep does not count as evidence for this row — reverting the call sites while leaving the helpers as dead code keeps every grep green |
-| R15b baseline captured per invocation | unit tests: seed a stale, differently-shaped `scheduler.before`, then assert `--enable` exits 0 with the timer still armed and `--rollback` exits 0 printing its status line; assert every action rewrites the baseline before acting; assert `--rollback` still requires `refresh.before`, which is the actual restore data |
+| R15 probe installer leaves units untouched | the probe installer's before/after assertion, per unit type, proven behaviourally at **every** call site — the `--install` and `--enable` main assertions, both ERR-trap restore paths, and `--rollback` — each by a test that reds when that one assertion is blanked. On the main paths a divergent second read of a protected unit must abort the run and back it out; on the two ERR-trap paths the abort is triggered by a failing verb, and the evidence is that the trap's own assertion re-reads all four protected units. A paired negative case flips only a oneshot's `is-active` and asserts it does **not** fire. A source grep is not evidence for this row, and neither is `--install` alone: five of six call sites were once dark while `--install` stayed green |
+| R15b probe baseline captured per invocation | parametrized over all three actions: seed a stale, differently-shaped `protected.before`, then assert the action behaves correctly — exit 0 with its status line — proving the file is rewritten before it is read rather than inherited from a previous invocation. Nothing restores from this file |
+| R15c probe rollback reports success only on a read-back | installer test with fake `disable` refused after `--install` + `--enable`: timer still enabled/active, no `rolled_back` on stdout, non-zero exit; paired test where systemctl complies exits 0; parametrized accept set (8) and refuse set (10, incl. `masked`, `active`, empty `is-active`); a runbook test comparing the documented accept table as a set against the same tuples the behaviour tests use. Reds when the read-back call is blanked |
 | R16 dry-run counts agree, N models | pytest over a multi-model fixture; assertion derives N from the fixture, no literal 76 |
 | R17 dry-run boundaries | pytest: 1 model and N models, counts derived from the fixture |
 | R17b empty set stays fail-closed | pytest: empty model set fails closed with `provider_invalid` on both the direct-grid (`:896-898`) and non-direct-grid (`:961-962`) paths, yielding a terminal `outcome=failed` receipt with no providers — never a successful zero-count `dry_run` receipt |
