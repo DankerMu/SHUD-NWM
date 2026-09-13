@@ -19,8 +19,10 @@ from packages.common.compressed_chunk_cold_residency import (
     recompressed_group_is_complete,
 )
 from packages.common.compressed_chunk_cold_runtime_catalog import (
+    BoundInventories,
     collect_residency_group,
     load_catalog_chunk,
+    require_inventory,
 )
 from packages.common.node27_issue1895_sql import normalize_candidate_chunk_name
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
@@ -34,9 +36,14 @@ HOT_STATE = "hot_uncompressed_source"
 COLD_STATE = "cold_compressed_target"
 INTERSECTING_CHUNKS_SQL = """
 SELECT chunk_schema, chunk_name, range_start, range_end, is_compressed
-FROM timescaledb_information.chunks
+FROM timescaledb_information.chunks v
+JOIN _timescaledb_catalog.chunk ch ON ch.schema_name = v.chunk_schema AND ch.table_name = v.chunk_name
+JOIN _timescaledb_catalog.hypertable ht ON ht.id = ch.hypertable_id
+JOIN pg_namespace pn ON pn.nspname = ht.schema_name
+JOIN pg_class p ON p.relnamespace = pn.oid AND p.relname = ht.table_name
 WHERE hypertable_schema = 'hydro'
   AND hypertable_name = 'river_timeseries'
+  AND p.oid = %s AND ht.id = %s AND NOT ch.dropped
   AND range_end > %s::timestamptz
   AND range_start < %s::timestamptz
 ORDER BY range_start, chunk_name
@@ -140,6 +147,7 @@ def classify_complete_groups(
 def observe_intersecting_groups(
     execute: Execute,
     *,
+    inventories: BoundInventories,
     window_start: str,
     window_end: str,
     kind: str,
@@ -150,7 +158,14 @@ def observe_intersecting_groups(
     """Resolve every window chunk through shipping catalog/group owners."""
 
     try:
-        rows = list(execute(INTERSECTING_CHUNKS_SQL, (window_start, window_end)))
+        inventory = inventories.for_hypertable("hydro", "river_timeseries")
+        require_inventory(execute, inventory, "hydro", "river_timeseries")
+        rows = list(
+            execute(
+                INTERSECTING_CHUNKS_SQL,
+                (inventory.parent_oid, inventory.hypertable_id, window_start, window_end),
+            )
+        )
     except Issue1895ReadinessError:
         raise
     except Exception:
@@ -184,6 +199,7 @@ def observe_intersecting_groups(
         try:
             chunk = load_chunk(
                 execute,
+                inventory=inventory,
                 hypertable_schema="hydro",
                 hypertable_name="river_timeseries",
                 origin_schema=origin_schema,

@@ -1,16 +1,16 @@
 ## Context
 
-Node-27 runs PostgreSQL 15.2 / TimescaleDB 2.10.2. Its two business
-hypertables use seven-day chunks; terminal chunks are compressed, but both the
-active rows and compressed bytes currently live in `pg_default` on `/home`.
+The pinned cold-tier oracle is PostgreSQL 15.2 / TimescaleDB 2.10.2. The initial
+deployment baseline had seven-day business chunks and shared hot placement;
+those observations are historical, not current capacity or chunk-count inputs.
 The prior `ghdc` tablespace and product-archive lane were retired after the
-`/dev/md0` incident. The recovered RAID may be re-admitted only through a new,
-narrow DB-only contract.
+`/dev/md0` incident. Fresh physical placement/capacity evidence remains a separate
+live gate; code-side parent admission cannot establish storage headroom.
 
 A compressed TimescaleDB chunk has two identities: the origin chunk shell and
 an internal compressed relation. Each can own indexes and TOAST storage.
 Moving only the origin shell changes where decompression writes but does not
-prove that the compressed bytes left `/home`. Tablespaces are PostgreSQL
+prove that compressed bytes changed devices. Tablespaces are PostgreSQL
 cluster-scoped, so a throwaway database inside the live `nhms-db` cluster is
 not an isolated oracle for tablespace creation, filesystem faults, or catalog
 drift. The 2.10.2 experiment therefore runs in a separate disposable cluster
@@ -36,7 +36,7 @@ caller and requires a real TimescaleDB result-and-plan oracle before live retry.
   RAID/SMART evidence, mount/catalog/path identity, capacity, backup coverage,
   or relation mapping is unavailable or inconsistent.
 - Preserve ingest/display availability and current compression/retention
-  policy while relieving `/home` only by the bytes actually moved.
+  policy; claim device-space relief only from fresh physical placement evidence.
 
 **Non-Goals:**
 
@@ -57,6 +57,19 @@ compression_lag`. The watermark is the existing display-catalog forecast
 watermark; there is no wall-clock fallback. Selection revalidates all facts
 under the migration transaction. Hot/uncompressed and cold/uncompressed replay
 states are ineligible.
+
+For #2290, an allowlisted name is a lookup key, not authority. The river parent
+must satisfy the post-expand narrow key/enum shape and exclude legacy text-key
+columns; wide tables with surrogate-key additions still refuse. The parent
+`pg_class` OID and Timescale hypertable ID are mandatory internal inventory
+identity, constrain candidate/origin membership, and join the column descriptors
+in the existing opaque inventory digest. Published inventory/receipt keys remain
+unchanged. Every reload/locked/fresh consumer uses the expected binding rather
+than adopting whichever table now owns a name. Canonical forcing keeps its
+current shape but receives the same physical identity binding. Legacy never
+enters the cold set; valid narrow admission does not require legacy to exist.
+Actual chunk ranges, not default intervals, determine eligibility and parity.
+The detailed invariant/risk/evidence fixture is `fixtures/issue-2290.md`.
 
 ### D2 — One complete residency group is the mutation unit
 
@@ -530,9 +543,10 @@ Domain packs considered:
 
 - Governing invariants: a group is reported cold only when an eligible compressed
   chunk's complete physical residency group is atomically and readably resident
-  in `nhms_cold`; before live mutation, the entire #2137 G0 readiness chain must
-  be merged, and after the failed first G1, #2224 must also merge before any retry;
-  every uncertain evidence state must block remote access or PASS.
+  in `nhms_cold`; before live mutation, the #2137 G0 readiness chain, #2224 origin
+  parity, #2290 physical-parent admission and #2291 reviewed-count contract must
+  be merged; separate external readiness is still required. Every uncertain
+  evidence state blocks production access or PASS.
 - Source of truth: display business watermark + configured compression lag;
   TimescaleDB chunk/compression catalogs joined to PostgreSQL OIDs, with the
   mandatory current durable origin OID/schema/name/window selecting the physical
@@ -666,12 +680,16 @@ Boundary-surface checklist:
    parent-hypertable parity reached its finite statement timeout. Child #2224
    closes that interpretation gap, updates the executable G0/G1 STOP, and merges
    mandatory origin-qualified production parity plus its isolated 2.10.2 oracle.
-7. Only after #2224 merges, #1895 starts a fresh window from G0 at the new exact
-   reviewed SHA, performs the controlled live install/migration, consumes the
-   pre-mutation disposable inverse proof, and validates installer recovery
-   boundaries, automatic convergence, C1-C4 and display/performance.
-8. Archive this shared OpenSpec change only after #1895; the readiness child leaves
-   tasks 4.1-4.8 unchecked so unexecuted live behavior is never published as done.
+7. #2290 binds physical parents and refuses pre-expand/legacy authority; #2291
+   then carries the independently reviewed count through the original baseline
+   and all consumers. These are separate complete preparation slices with a
+   single dependency; neither executes production G0-G8.
+8. Only after all preparation children merge and external readiness is supplied,
+   #1895 starts a fresh window from G0 at the new exact reviewed SHA, performs the
+   controlled live install/migration, consumes the pre-mutation disposable inverse
+   proof, and validates recovery, convergence, C1-C4 and performance.
+9. Archive this shared change only after #1895; preparation children leave tasks
+   4.1-4.8 unchecked so unexecuted live behavior is never published as done.
 
 ## Open Questions
 

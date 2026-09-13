@@ -107,9 +107,7 @@ MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
 
 _CANONICAL_DECIMAL = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _HEAD_RE = re.compile(r"^[0-9a-f]{40}$")
-_HYPERTABLE_VALUE_LIST = ", ".join(
-    f"('{schema}', '{name}')" for schema, name in sorted(ALLOWED_HYPERTABLES)
-)
+_HYPERTABLE_VALUE_LIST = ", ".join(f"('{schema}', '{name}')" for schema, name in sorted(ALLOWED_HYPERTABLES))
 
 # The census only reports external pg_tblspc targets; #1894's backup-coverage
 # gate is what consumes them as a precondition.
@@ -161,8 +159,7 @@ def execute_on(connection: Any, sql: str, params: Any = None) -> list[dict[str, 
             return []
         names = [item[0] for item in cursor.description]
         return [
-            dict(row) if isinstance(row, Mapping) else dict(zip(names, row, strict=False))
-            for row in cursor.fetchall()
+            dict(row) if isinstance(row, Mapping) else dict(zip(names, row, strict=False)) for row in cursor.fetchall()
         ]
 
 
@@ -354,9 +351,10 @@ class CensusObserver:
     def inventories(self) -> BoundInventories:
         return derive_bound_inventories(self.binder())
 
-    def candidates(self, *, cutoff: datetime, per_table_limit: int) -> list[Any]:
+    def candidates(self, *, inventories: BoundInventories, cutoff: datetime, per_table_limit: int) -> list[Any]:
         return ranked_candidates_from_execute(
             self.binder(),
+            inventories=inventories,
             cutoff=cutoff,
             per_table_limit=per_table_limit,
             max_catalog_bytes=CATALOG_BYTE_CEILING,
@@ -639,7 +637,7 @@ def observe_census(
         )
 
     try:
-        ranked = observer.candidates(cutoff=cutoff, per_table_limit=limit)
+        ranked = observer.candidates(inventories=inventories, cutoff=cutoff, per_table_limit=limit)
     except ColdRuntimeError as error:
         return _artifact(
             **common,
@@ -820,13 +818,7 @@ def publish_artifact(path: Path, payload: Mapping[str, Any]) -> None:
     temp = path.with_name(f".{path.name}.tmp")
     if os.path.lexists(temp):
         raise CensusError("artifact temporary sibling already exists", error_class="artifact", stage="publish")
-    flags = (
-        os.O_WRONLY
-        | os.O_CREAT
-        | os.O_EXCL
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         fd = os.open(temp, flags, 0o600)
     except OSError as error:

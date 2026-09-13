@@ -24,6 +24,10 @@ Seams under test:
   with no default, parent or compressed-sibling fallback. Census, runtime
   preflight/locked/post-commit/reconciliation and post-target observations all
   use this same owner.
+- Physical parent admission (#2290): canonical narrow river/current forcing
+  catalog OID + Timescale hypertable ID + actual columns -> mandatory bound
+  inventories and constrained origin membership, with no legacy/name-only
+  fallback. Detailed matrix/evidence: `fixtures/issue-2290.md`.
 - Node-27 rollout (tasks 4.1-4.8 only): merged reviewed SHA + approved
   maintenance inputs -> live parity/performance/timer receipt.
 
@@ -208,7 +212,7 @@ Seams under test:
   This child performs no SSH, census, probe, install, movement, live C1-C4 or
   timer work; it does not close #1895/#1891, archive this change, or check any of
   4.1-4.8.
-- [ ] 4.0A Merge child #2224 before retrying G1. The first node-27 G1 invocation
+- [x] 4.0A Merge child #2224 before retrying G1. The first node-27 G1 invocation
   at reviewed SHA `a8db554d6402bec642e9a05627eae64b2b79aec3` ended NO-GO after
   the parent-hypertable parity aggregate reached the finite 3600-second statement
   timeout; it published no census, policy or valid-times baseline, and G2-G8 did
@@ -244,7 +248,28 @@ Seams under test:
   tests, Ruff, independent review/verifier/Gap Sweep and exact-head CI, merge the
   child, then restart #1895 from G0. Local or isolated PASS does not satisfy the
   fresh production G1 retry.
-- [ ] 4.1 At the reviewed SHA, after 4.0A merges, execute the merged live runbook for the first
+- [ ] 4.0B Merge child #2290 physical-parent admission before fresh production G0.
+  Complete the `fixtures/issue-2290.md` invariant matrix: narrow signature and
+  mandatory parent OID/Timescale ID; digest-bound inventory with unchanged wire
+  keys; all selection/reload/locked/fresh/census/post-target/intersecting-group
+  callers migrated; pre-expand/wide-with-keys/legacy/missing/ambiguous/substituted
+  identity refusal; actual ranges and current forcing preserved; stale artifacts
+  unable to authorize mutation/PASS. Require fixture review/strict validation,
+  tests-first node27 red/green, existing #2224 role/result/plan/lifecycle proof on
+  a narrow fixture, actual isolated rename/replacement/legacy-exclusion proof,
+  every-owner selector/removal closure, independent review/verifier/Gap Sweep,
+  exact-head CI and merged cold-only STOP/runbook. No production execution.
+- [ ] 4.0C After #2290, merge child #2291 reviewed-count/baseline cutover before
+  fresh production G0. Preserve explicit bounded `--require-count` input with no
+  default or observation-derived expectation; validate/freeze the original
+  count/keys/groups/capacity set and pass its count through all four readiness
+  owners and CLIs. Replace historical-six active assumptions and align G3's
+  independent current count to the admitted physical-parent population, with
+  extra/missing/duplicate/stale/set/digest drift refusal and no truncation.
+  Preserve per-tick1, E/S/2E arithmetic, actual ranges, timeouts and wire schemas.
+  Require node27 boundary/consumer/isolated-population evidence plus the normal
+  fixture, selector-removal, review/verifier/final/CI gates; no production access.
+- [ ] 4.1 At the reviewed SHA, after 4.0A-4.0C merge and external readiness is supplied, execute the merged live runbook for the first
   node-27 observation. Before access, its exact deployed SHA must have passed
   the #2137 issue-specific fixture review, strict OpenSpec validation, contract
   tests and normal CI. The runbook must provide: a pre-target census using the

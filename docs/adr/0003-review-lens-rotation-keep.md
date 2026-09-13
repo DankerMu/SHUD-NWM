@@ -4541,3 +4541,12 @@ Phase 0.5 fixture review 三轮只读（spec-compliance+test-evidence）属 fixt
 本单不增加后轮 catch，不能据此推断轮换收益。
 记录 deferral：keep/cut 仍待维护者决策；本次目标 1 合并授权不含审核策略调整。
 现行 keep 与座位上限不变。
+
+### Revisit 2026-09-12（post PR #2248 / issue #2224）
+
+追加后实测 644 行、634 merged、10 terminal；210 个多轮样本，
+later-round catches core=270、rotated=270、phase=57、skipped=15。
+本单 high 三轮；第二轮的一项 receipt selector 覆盖缺口由 pinned test-evidence
+发现并独立确认，第三轮与最终 gap sweep 无新候选；不构成新增轮换收益证据。
+记录 deferral：keep/cut 仍待维护者决策；本次 #1891–#1895 范围内的合并预授权
+不含审核策略调整。现行 keep、座位上限与共享 OpenSpec active 状态不变。

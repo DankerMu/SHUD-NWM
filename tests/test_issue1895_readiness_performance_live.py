@@ -91,6 +91,7 @@ IDENTITIES = {
     },
 }
 
+
 def _plan(*, decompress: list[str] | None = None, buffers: int = 12, child_buffers: int = 0) -> list[dict]:
     root = {
         "Node Type": "Index Scan",
@@ -261,6 +262,12 @@ class FakeCursor:
         text = str(sql)
         self.owner.executed.append((text, params))
         self.description = None
+        if "FROM pg_attribute" in text or "timescaledb_information.dimensions" in text:
+            from tests.cold_residency_fakes import FakeConnection as CatalogConnection
+
+            self._rows, names = CatalogConnection().dispatch(text, params)
+            self.description = [(name,) for name in names]
+            return
         if str(text).lstrip().startswith("EXPLAIN"):
             if isinstance(params, dict):
                 values = params.values()
@@ -296,7 +303,7 @@ class FakeCursor:
             source = str(params[1]).upper() if isinstance(params, tuple) else "GFS"
             self._rows = [dict(IDENTITIES[source]["cold"])]
         elif "timescaledb_information.chunks" in text:
-            window = str(params[0]) if isinstance(params, tuple) else "2026-08-01T00:00:00Z"
+            window = str(params[2]) if isinstance(params, tuple) else "2026-08-01T00:00:00Z"
             compressed = window.startswith("2026-06")
             chunk_name = "_hyper_1_1_chunk_cold" if compressed else "_hyper_1_1_chunk"
             self.owner.last_chunk_name = chunk_name
@@ -531,12 +538,14 @@ def test_default_opener_disables_proxies_and_refuses_redirects(
     )
     env_opener = build_opener()
     opener = default_opener()
+
     def proxy_maps(candidate: object) -> list[dict[str, str]]:
         return [
             dict(handler.proxies)
             for handler in getattr(candidate, "handlers", ())
             if isinstance(handler, ProxyHandler) and handler.proxies
         ]
+
     assert proxy_maps(env_opener)
     assert proxy_maps(opener) == []
     handlers = getattr(opener, "handlers", ())
