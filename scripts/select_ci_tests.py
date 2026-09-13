@@ -2382,6 +2382,13 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_hydro_display_mvt_scaling.py",),
     ),
     PathTestRule(
+        # #2183: the #1913 registry-partition additions ledger is a hand-edited
+        # guard input read only by the meta-suite; as data it reaches no other
+        # rule, so a ledger-only PR would select nothing and fail on master.
+        "tests/fixtures/basins_registry_partition_additions.json",
+        ("tests/test_select_ci_tests.py",),
+    ),
+    PathTestRule(
         "packages/common/forecast_store.py",
         (
             "tests/test_forecast_api.py",
