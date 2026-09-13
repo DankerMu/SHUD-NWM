@@ -1,0 +1,416 @@
+{
+  "pr": 2318,
+  "issue": 1895,
+  "head": "838f1ff69d53b909534b2fb5f95c49d82dfcb8e5",
+  "round1": {
+    "correctness": {
+      "verdict": "no-findings",
+      "summary": "Correctness lens over the full BASE..HEAD diff (19 files): the ordinary collector move is byte-identical except the three intended cold SQL inventory blocks; the CLI cold surface removal is complete with no dangling references; every removed guard/test has either a surviving moved equivalent or is an intended, fixture-approved cold removal with changed-behavior tests that demonstrably discriminate pre-change source. No P0/P1/P2 candidate findings.",
+      "findings": [],
+      "removed_behavior_audit": [
+        {
+          "removed": "4 local --cold-governance-* argparse options + add_cold_governance_arguments (12 more args)",
+          "disposition": "intended cold removal; unknown options now refuse via argparse SystemExit(2) before any audit work",
+          "surviving_equivalent": "tests/test_node27_resource_governance.py:175-181 (test_removed_cold_receipt_argument_refuses_before_audit) asserts SystemExit code 2 and no receipt file",
+          "evidence": "scripts/node27_resource_governance.py diff hunk @@ -724,29 +653,6 @@; main() parses outside the try so argparse refusal precedes audit (:741-743)"
+        },
+        {
+          "removed": "validate_cold_governance_arguments call in config_from_args (uid>=0, duplicate SMART device guards)",
+          "disposition": "intended removal — guards validated only the removed cold args; no surviving input accepts those values",
+          "evidence": "scripts/node27_resource_governance.py diff hunk @@ -789,7 +695,6 @@; retained module packages/common/node27_cold_governance_cli.py:132-136 keeps the guard for R3.1 deletion scope"
+        },
+        {
+          "removed": "cold_governance_receipt_path absolute-path ValueError",
+          "disposition": "intended removal — moot with the removed arg",
+          "evidence": "scripts/node27_resource_governance.py diff hunk @@ -801,11 +706,6 @@"
+        },
+        {
+          "removed": "16 AuditConfig cold_* fields",
+          "disposition": "intended removal; sole construction site updated; no surviving cold_governance_* reference in the CLI (grep: only pre-existing 'display cold-read path' recommendation text at :295)",
+          "evidence": "scripts/node27_resource_governance.py diff hunk @@ -93,23 +80,6; HEAD grep -i cold"
+        },
+        {
+          "removed": "_cold_runtime_config builder + ColdGovernanceRuntimeConfig/cold_governance_evidence imports",
+          "disposition": "intended removal with the receipt/evidence branch",
+          "evidence": "scripts/node27_resource_governance.py diff hunk @@ -186,23 +156,6 @@"
+        },
+        {
+          "removed": "build_receipt cold branch: evidence build, cold receipt write, cold_tablespace_governance receipt key",
+          "disposition": "intended removal; started_at/working_set/postgres/filesystem remain used by the ordinary receipt; redact_payload tail unchanged",
+          "evidence": "scripts/node27_resource_governance.py:558-606 (HEAD build_receipt); absence asserted by tests/test_node27_working_set.py:313"
+        },
+        {
+          "removed": "3 cold-only SQL inventory blocks in collect_postgres (external_pg_tblspc_targets, cold_tablespace, cold_relation_by_tablespace)",
+          "disposition": "intended removal — mechanical diff of BASE old module lines 1-609 vs new module proves these 29 lines + docstring are the ONLY source deltas; all consumers cold-owned (packages/common/node27_cold_governance_runtime.py:43-47,:120-125; _cold_relation_bytes :14-29)",
+          "surviving_equivalent": "disjointness asserted at tests/test_node27_resource_governance.py:938 and tests/test_node27_working_set.py:314-316",
+          "evidence": "diff of git-show BASE:...cold_governance_collection.py[1..609] vs HEAD new module: only docstring, 3 SQL blocks, trailing _cold_relation_bytes differ"
+        },
+        {
+          "removed": "NODE27_COLD_GOVERNANCE_* env defaults",
+          "disposition": "intended removal with args; leftover env is inert",
+          "surviving_equivalent": "tests/test_node27_working_set.py:300-316 (test_cli_ordinary_receipt_ignores_retired_cold_environment) sets NODE27_COLD_GOVERNANCE_RECEIPT_PATH and asserts ordinary receipt shape, absent cold keys, no cold file",
+          "evidence": "remaining NODE27_COLD_GOVERNANCE reads confined to caller-less packages/common/node27_cold_governance_cli.py (R3.1 deletion queue)"
+        },
+        {
+          "removed": "infra/env/node27-resource-governance.example 28-line cold block",
+          "disposition": "intended R3.7 row-1 removal with the Python CLI/config branch; PGDATA root, log root, DATABASE_URL lines preserved",
+          "evidence": "env diff: exactly lines 27-54 removed (all commented NODE27_COLD_GOVERNANCE_* declarations); no other current docs/infra cold-governance declarations (grep)"
+        },
+        {
+          "removed": "6 cold_governance_sample tests + _ok_cold_filesystem helper + test_pgdata_is_accounted_once_on_observed_filesystem + test_unknown_pgdata_placement_refuses_both_samples + test_unavailable_home_sample_publishes_null_bytes_not_fabricated_zero",
+          "disposition": "moved verbatim to the cold test owner (not deleted); jsonschema import present in destination",
+          "evidence": "tests/test_node27_cold_governance.py:18,24-258 vs removed block in tests/test_node27_resource_governance.py diff; content identical except governance._cold_governance_sample alias replaced by direct cold_governance_sample import (the CLI alias no longer exists)"
+        },
+        {
+          "removed": "test_optional_cold_governance_receipt_is_refusal_until_descriptor_evidence_is_configured + test_governance_cli_accepts_descriptor_evidence_and_prior_trend_configuration",
+          "disposition": "intended removal — exclusively demanded the removed CLI cold integration per fixture mixed-tests bullet",
+          "evidence": "tests/test_node27_resource_governance.py diff @@ -287,208 +172,12"
+        },
+        {
+          "removed": "test_cli_optional_cold_receipt_uses_destination_shape",
+          "disposition": "replaced by stronger ordinary-behavior test asserting schema version, working-set projection (750/900 GIB), filesystems.cold /data/GHDC observation, maintenance section, cold-key absence and no cold file",
+          "evidence": "tests/test_node27_working_set.py:300-316"
+        },
+        {
+          "removed": "dual-sink redaction assertion (summary + cold receipt + stderr)",
+          "disposition": "cold sink removed with the feature; redaction still asserted at summary and stderr with [redacted] binding path",
+          "evidence": "tests/test_node27_working_set.py:407-428 (test_secret_bearing_target_evidence_is_redacted_in_summary_and_diagnostics)"
+        },
+        {
+          "removed": "_MaintenanceFakeCursor cold_tablespace branch + cold key presence assertions",
+          "disposition": "fake aligned to new SQL set; replaced with hypertables/largest_chunks empty + removed-key disjointness assertions",
+          "evidence": "tests/test_node27_resource_governance.py:877-938"
+        },
+        {
+          "removed": "jsonschema imports in test_node27_resource_governance.py and test_node27_working_set.py",
+          "disposition": "only used by the moved/removed tests; zero leftover uses at HEAD (grep)",
+          "evidence": "HEAD greps of both files"
+        }
+      ],
+      "preservation_checks": [
+        {
+          "invariant": "Ordinary SQL byte-identical (database_sizes, settings, connections_by_state, stat_database, largest_relations, largest_indexes, dead_tuple_hotspots, hypertables, hypertable_size_breakdown, largest_chunks)",
+          "result": "PASS — mechanical diff BASE-lines-1..609 vs new module shows zero SQL changes",
+          "evidence": "packages/common/node27_resource_governance_collection.py:399-565"
+        },
+        {
+          "invariant": "#2277/#1769 maintenance semantics (effective reloption/setting thresholds, 50-row bound, summary ages, never-raise collector)",
+          "result": "PASS — MAINTENANCE_RELATIONS_CTE/ROWS_SQL/SUMMARY_SQL and collect_maintenance_output verbatim; evaluator _maintenance_output_recommendations untouched (no diff hunk; BASE :459 → HEAD :412 shift = 47 removed lines above it)",
+          "evidence": "new module :36-119; CLI hunk list"
+        },
+        {
+          "invariant": "#2273 actual PGDATA path/device/free binding, unknown/conflict refusal, never home fallback",
+          "result": "PASS — collect_working_set binding blockers/ambiguous conflict/null-free verbatim; _recommendations capacity gates untouched",
+          "evidence": "new module :131-199; CLI :159 _recommendations (no hunk)"
+        },
+        {
+          "invariant": "#1985 lag/discovery/watermark",
+          "result": "PASS — compression_lag_seconds (env default 172800), WORKING_SET_SQL over RUNTIME_HYPERTABLES_SQL, fetch_display_watermark verbatim",
+          "evidence": "new module :18-31,:122-129,:193-198"
+        },
+        {
+          "invariant": "filesystems.cold as /data/GHDC observation label; ordinary schema version unchanged",
+          "result": "PASS — collect_filesystem keeps 'cold': disk_usage(Path('/data/GHDC')); SCHEMA_VERSION stays nhms.node27_resource_governance.audit.v1",
+          "evidence": "new module :350-356; scripts/node27_resource_governance.py:35"
+        },
+        {
+          "invariant": "No facade/copy/compat export of moved helpers; cold callers use the real owner directly",
+          "result": "PASS — cold module reduced to _cold_relation_bytes + cold_governance_sample with qualified resource_collection.observation_int calls; no re-exports; packages/common/__init__.py empty; no stale import of removed symbols anywhere (git grep '*.py')",
+          "evidence": "packages/common/node27_cold_governance_collection.py:1-100"
+        },
+        {
+          "invariant": "Active service pin issue1987 untouched; no unit/wrapper cold references",
+          "result": "PASS — infra/systemd/nhms-node27-resource-governance.service and scripts/node27_resource_governance_once.sh contain no cold references at BASE or HEAD; neither file in diff",
+          "evidence": "git show HEAD greps (exit 1 both)"
+        }
+      ],
+      "coverage_matrix": [
+        {
+          "row": "Producers",
+          "status": "covered",
+          "citations": "collect_filesystem/collect_postgres/collect_working_set byte-identical move (mechanical diff); only 3 intended cold SQL blocks omitted; filesystems.cold label retained (new module :350-356); du/statvfs/subprocess bounds verbatim (:300-396)"
+        },
+        {
+          "row": "Validators/binding",
+          "status": "covered",
+          "citations": "collect_working_set binding/blockers/ambiguous-conflict verbatim (new module :131-173); CLI _recommendations and _maintenance_output_recommendations zero diff hunks; working-set oracle tests unchanged (not in diff); new spec scenario 'Device attribution cannot be established' matches implementation (openspec/specs/node27-pgdata-relocation/spec.md:137-144)"
+        },
+        {
+          "row": "Storage/query",
+          "status": "covered",
+          "citations": "ordinary SQL identical; maintenance CTE/50-row limit/summary verbatim (new module :36-119); integration suite repoint import-only (tests/test_node27_maintenance_output_integration.py:20); 3 cold inventory removals asserted disjoint (tests/test_node27_resource_governance.py:936-938)"
+        },
+        {
+          "row": "Entry",
+          "status": "covered",
+          "citations": "parser cold args removed (CLI hunk @@ -724,29 +653,6); argparse SystemExit(2) precedes config/audit (main :741-743); refusal test tests/test_node27_resource_governance.py:175-181; critical exit/diagnostic path CRITICAL_DIAGNOSTIC_PREFIX/_critical_codes untouched (:727-789)"
+        },
+        {
+          "row": "Consumers",
+          "status": "covered",
+          "citations": "CLI imports repointed (:22-32); test imports repointed (3 files); cold sample tests moved to cold owner (tests/test_node27_cold_governance.py:18-258); new selector rule scripts/select_ci_tests.py:4484-4492 selects all 4 direct-importer suites; CLI rule gains maintenance integration (:4512-4520); expected maps updated atomically (tests/test_select_ci_tests.py:200-205,:230); cold module qualified back-import only"
+        },
+        {
+          "row": "Failure",
+          "status": "covered",
+          "citations": "collect_maintenance_output never-raise verbatim (new module :111-119); probe-error/probe-ok parametrization retained with aligned fake (tests/test_node27_resource_governance.py:877-938); blocked/skipped collect_postgres paths verbatim; null-not-zero fabrication tests moved intact (tests/test_node27_cold_governance.py:132-258); redaction at summary+stderr asserted (:407-428)"
+        },
+        {
+          "row": "Evidence/deployment",
+          "status": "covered",
+          "citations": "schema version unchanged; _write_summary untouched; runbook §9.2 repoint by symbol not line (docs/runbooks/tier-node27-timeseries-storage.md:7561); env-template cold block removed per R3.7 row 1; verification JSON live_smoke exit0/PGDATA /data/GHDC/nhms-primary/pgdata/device 9:0:7539273700150526131/removed_arg_exit 2; device identity consistent with prechange-red.log stdout observation; canonical spec edit == active-change delta text (specs/node27-pgdata-relocation/spec.md:7-38)"
+        }
+      ],
+      "verification_gaps": [
+        "Read-only seat: no tests executed. Fake-cursor expectation correctness and the two new changed-behavior tests rest on supplied evidence (targeted 1035 passed at source 54365311; full backend 20136 passed; maintenance oracle 1 passed on independent exact-image cluster).",
+        "Red proof used a temporary test-only owner-name bridge (new test bodies with imports rewritten to the old module against pre-change source). The log shows the correct discrimination (old CLI emitted cold_tablespace_governance; argparse accepted the removed flag), but the shipped tests themselves were not run in-place at BASE — mechanism is disclosed in retirement-governance-verification.json red_proof and matches the PR body.",
+        "Live readonly smoke binding cannot be independently re-run from this seat; consistency rests on two evidence artifacts agreeing (device identity 9:0:7539273700150526131 appears both in verification JSON live_smoke and in the prechange-red.log captured stdout for /data/GHDC)."
+      ],
+      "residual_risks": [
+        "Retained cold modules node27_cold_governance{,_cli,_runtime,_history}.py plus the cold receipt schema are now production-uncalled (their sole production caller was the removed CLI branch); they persist test-only until the scheduled R3.1 family deletion. This is the fixture-approved intermediate state, but any accidental re-dependency before R3.1 has no automated guard.",
+        "Stale cold selector rules (cold collection/cli/history/runtime) still over-select the ordinary suites that no longer import them — extra test runs only; cleanup explicitly assigned to R3.5 in the fixture.",
+        "Sibling active change timeseries-narrow-store-expand-contract records (proposal/tasks/fixtures/receipts) still cite packages/common/node27_cold_governance_collection.py as the #1985/#2273 delivery path; adjudicated in fixture review r2 as delivery history with R4.2 disposition — no repoint required in this slice."
+      ],
+      "non_blocking_notes": [
+        "None — all candidate P2/Note items were either fixture-approved intermediate states (caller-less cold modules pending R3.1, stale selector over-selection pending R3.5) or lacked demonstrable user-facing impact; dropped per reporting threshold."
+      ],
+      "out_of_scope_escalations": [
+        "None — no pre-existing P0/P1-severity issues observed in the touched surface."
+      ],
+      "sibling_defect_classes": [
+        {
+          "class": "moved-symbol stale import",
+          "audit": "git grep '*.py' at HEAD for both module names: only tests/test_node27_cold_governance.py:18 imports the old module, and only the surviving cold_governance_sample; zero stale imports of moved symbols",
+          "siblings": "None"
+        },
+        {
+          "class": "removed-flag/env leakage",
+          "audit": "all NODE27_COLD_GOVERNANCE_* reads confined to caller-less node27_cold_governance_cli.py; inert-env asserted by test_node27_working_set.py:300-316",
+          "siblings": "None"
+        },
+        {
+          "class": "receipt-key consumer stranded by key removal",
+          "audit": "cold_tablespace_governance + 3 SQL keys: consumers limited to cold-owned runtime/collection modules and tests; disjointness asserted in two suites",
+          "siblings": "None"
+        },
+        {
+          "class": "selector strand on module move",
+          "audit": "new PathTestRule added with complete 4-suite importer closure; CLI rule repaired for previously missing maintenance-integration consumer; expected maps updated atomically",
+          "siblings": "None"
+        }
+      ]
+    },
+    "invariant-state": {
+      "review_scope": "PR2318 Phase4 round1 (HEAD 838f1ff69d53b909534b2fb5f95c49d82dfcb8e5 vs BASE 2846a581ea2d985b00ebe9b88ca8367776fc366c): R1.3 governance owner-transfer + governance R1.5 + R3.7 env row. Lens: invariant-state (device/capacity/projection/maintenance truthfulness and old cold consumers).",
+      "summary": "The ordinary collectors transfer is a byte-exact move minus the three intentionally retired cold SQL inventory sections and the cold-sample functions; the retained cold module re-imports the moved helper only via qualified module reference. All load-bearing invariants (PGDATA device binding with unknown/conflict refusal and no home fallback, maintenance effective thresholds/freshness/critical exit, filesystems.cold=/data/GHDC label, schema version, readonly/failure boundaries) are preserved in unchanged code regions, and the intentionally changed behavior is pinned by two discriminating tests with a byte-preserved pre-change red log. No invariant failures found from this lens.",
+      "findings": [],
+      "invariant_matrix": [
+        {
+          "row": "Producers",
+          "status": "covered",
+          "evidence": "diff of base packages/common/node27_cold_governance_collection.py (702 lines) vs new packages/common/node27_resource_governance_collection.py (572 lines) yields exactly 3 hunks: module docstring (old:1-6), removal of external_pg_tblspc_targets/cold_tablespace/cold_relation_by_tablespace SQL (old:511-539), removal of _cold_relation_bytes/cold_governance_sample (old:607-702). collect_filesystem (incl. filesystems.cold=disk_usage(Path('/data/GHDC')) at new module collect_filesystem), collect_postgres ordinary sections, WORKING_SET_SQL, MAINTENANCE CTE/rows/summary SQL, observation_int are byte-identical. Ordinary key preservation + removed-key absence asserted by tests/test_node27_working_set.py::test_cli_ordinary_receipt_ignores_retired_cold_environment and tests/test_node27_resource_governance.py::test_collect_postgres_isolates_maintenance_output_failure (isdisjoint assertions). Verification: targeted 1035 passed (raw log '1035 passed in 223.10s'), full backend 20136 passed/335 skipped (raw log tail)."
+        },
+        {
+          "row": "Validators/binding",
+          "status": "covered",
+          "evidence": "collect_working_set binding logic byte-identical: blockers PGDATA_FILESYSTEM_UNAVAILABLE/PGDATA_DEVICE_IDENTITY_UNAVAILABLE/PGDATA_AVAILABLE_BYTES_UNAVAILABLE, PGDATA_DEVICE_IDENTITY_CONFLICT -> status ambiguous, working_set_free_bytes=free only when binding ok else None (new resource collection collect_working_set body). No fallback to /home anywhere in the moved code; test_current_comparator_never_falls_back_to_historical_home retained unchanged in tests/test_node27_working_set.py. Live smoke (raw log inline capture READONLY_LIVE_CLI_SMOKE_PASS) binds actual PGDATA /data/GHDC/nhms-primary/pgdata device 9:0:7539273700150526131 with blockers [] and working_set_free_bytes 13011823702016 -- distinct from /home free 1191668690944 in the same session's red capture, proving device-truthful binding, not home substitution. Canonical spec openspec/specs/node27-pgdata-relocation/spec.md MODIFIED requirement adds the unknown/conflict refusal scenario."
+        },
+        {
+          "row": "Storage/query",
+          "status": "covered",
+          "evidence": "Maintenance effective-threshold CTE (_reloption_or_setting reloptions-override-else-cluster-setting, negative reltuples as 0, autovacuum_enabled=false exclusion), MAINTENANCE_OUTPUT_ROW_LIMIT=50, summary freshness ages byte-identical in new module; collect_maintenance_output records {status:error, error:type-name} and never raises. tests/test_node27_maintenance_output_integration.py change is a single import repoint (line 20); harness/markers untouched. Evidence: independent exact-image disposable cluster oracle '1 passed in 0.61s' + OWNED_DISPOSABLE_CLUSTER_REMOVED in raw log. collect_postgres connection behavior unchanged (autocommit=True, statement_timeout 20s, close in finally); query order unchanged apart from the retired sections (maintenance_output still immediately precedes the timescale try block); collect_working_set readonly session (set_session(readonly=True), SET LOCAL statement_timeout) unchanged."
+        },
+        {
+          "row": "Entry",
+          "status": "covered",
+          "evidence": "scripts/node27_resource_governance.py diff hunks are confined to imports (19-48), AuditConfig cold fields (93-110), _cold_runtime_config (186-201), build_receipt cold branch (650-676), parser cold args (724-749), validate call (795), config_from_args cold assembly (801-831); main(), CRITICAL_DIAGNOSTIC_PREFIX, _critical_codes, exit 0/1/2 contract, _recommendations, _maintenance_output_recommendations, AuditThresholds (maintenance_stale_multiplier=10.0, stale_age=86400.0) are byte-identical. Removed --cold-governance-* options refuse via normal argparse (SystemExit 2, no aliases/no-ops): new test_removed_cold_receipt_argument_refuses_before_audit. Pre-change red (evidence/retirement-governance-prechange-red.log, byte-identical to the pre-separation inline copy, 23024 bytes, verified sha match) shows DID NOT RAISE + old CLI emitting cold_tablespace_governance -- genuine discrimination. Retired env NODE27_COLD_GOVERNANCE_RECEIPT_PATH is inert (new working-set test asserts no cold receipt file, no cold keys, exit 0)."
+        },
+        {
+          "row": "Consumers",
+          "status": "covered",
+          "evidence": "Repo-wide census at HEAD: the only remaining import from the old collector is tests/test_node27_cold_governance.py:18 importing retained cold_governance_sample; zero generic-helper imports from node27_cold_governance_collection remain in packages/scripts/tests/infra. Retained cold module (103 lines) is byte-identical to old lines 605-702 except header and 6 qualified resource_collection.observation_int call sites -- real-owner back-import, no re-export, no copy; import direction is one-way (resource collection imports only display_watermark/node27_timeseries_discovery/redaction), no cycle. Selector: new PathTestRule for the new collection selects exactly the four suites (scripts/select_ci_tests.py:4486-4494); scripts/node27_resource_governance.py rule adds test_node27_maintenance_output_integration.py (:4514-4520), fixing the old rule's omission; tests/test_select_ci_tests.py expected maps updated atomically in the same diff. tests/test_node27_pgdata_migrate.py (untouched) was in the green targeted run per evidence."
+        },
+        {
+          "row": "Failure",
+          "status": "covered",
+          "evidence": "Maintenance failure isolation retained: test_collect_postgres_isolates_maintenance_output_failure keeps error/ok maintenance assertions and now asserts {external_pg_tblspc_targets, cold_tablespace, cold_relation_by_tablespace}.isdisjoint(result); _MaintenanceFakeCursor cold branch removed consistently. Stale/freshness evaluator untouched (AUTOVACUUM_OUTPUT_STALLED path, multiplier/age thresholds unchanged). No fabricated healthy zero: working_set_free_bytes null when binding not ok; unavailable cold sample publishes null bytes (moved tests test_unknown_pgdata_placement_refuses_both_samples, test_cold_governance_sample_refuses_unobserved_postgres_inventory/malformed_relation_rows, test_unavailable_home_sample_publishes_null_bytes_not_fabricated_zero now in the cold owner suite). Secret safety: run_command stderr/stdout still flows only into the receipt which passes redact_payload at build_receipt return and at _write_summary; both-sinks redaction test narrowed only by removing the retired cold sink (test_secret_bearing_target_evidence_is_redacted_in_summary_and_diagnostics). collect_postgres errors record type(error).__name__ only -- no DSN/stderr leakage, unchanged."
+        },
+        {
+          "row": "Evidence/deployment",
+          "status": "covered",
+          "evidence": "SCHEMA_VERSION 'nhms.node27_resource_governance.audit.v1' unchanged; build_receipt receipt shape unchanged except intentional cold_tablespace_governance removal. Env example infra/env/node27-resource-governance.example cold block (28 commented NODE27_COLD_GOVERNANCE_* lines) removed; PGDATA root/log root/DATABASE_URL retained; remaining NODE27_COLD_GOVERNANCE_* readers exist only inside retained cold-family node27_cold_governance_cli.py (sanctioned interim until R3). Runbook §9.2 attribution repointed by symbol (node27_resource_governance_collection.collect_postgres), no line pin. tasks.md checks only R1.3 with slice-evidence note; status does not overclaim R1.4+/epic. Post-tested commits 74c049279/838f1ff69 touch only tasks.md + evidence; red log separation verified byte-identical (23024 bytes) with added evidence_hygiene note. Live smoke + removed-arg refusal captured inline in the continuous raw session log (VERIFY_HEAD 54365311e -> capacity -> 1035 -> oracle -> READONLY_LIVE_CLI_SMOKE_PASS -> REMOVED_COLD_ARGUMENT_REFUSAL_PASS -> 20136). issue1987 pin/services untouched per evidence; readonly-only claim matches no unit/env file changes in diff."
+        }
+      ],
+      "non_blocking_notes": [
+        "Retained cold-family modules node27_cold_governance_cli.py / node27_cold_governance_runtime.py / node27_cold_governance.py now have no production caller (their sole consumer was the removed script branch), and node27_cold_governance_cli.py has no direct test at HEAD (its only exercising tests were the removed script-integration tests). This is the fixture-sanctioned interim state pending R3 owner-family deletion ('retain cold-only modules ... for the later R3 deletion'); selector rules still route these files to the cold/resource/working-set suites. No reachable behavior change -- noted only so the verifier and R3 planner share the same inventory.",
+        "The live-smoke free_bytes (13011823702016) is byte-identical to the pre-change red session's /data/GHDC capture. Both captures come from the same host's idle 15TB array and the smoke is embedded in the continuous green session raw log, so this is consistent rather than suspicious; the already-gated independent verifier exact-head re-smoke will re-bind evidence to HEAD cheaply."
+      ],
+      "out_of_scope_escalations": [],
+      "verification_gaps": [
+        "Reviewer boundary: no tests, lint, selector runs, or smoke re-executed by this seat; all pass/fail claims rest on the supplied evidence (retirement-governance-verification.json, embedded raw session log, byte-verified prechange-red.log, fixture reviews r1/r2, implementation record). I independently re-derived the diff-level facts (3-hunk collection move, script hunk confinement, import census, selector rule contents, red-log byte identity) directly from git objects at HEAD and BASE.",
+        "Evidence freshness: live-smoke structured fields carry no timestamp; the raw session log ordering (smoke between disposable-oracle cleanup and the 56-minute full backend in the same VERIFY_HEAD session) is the only time binding. Final exact-head verifier should re-run the readonly smoke + removed-arg refusal as the workflow already prescribes."
+      ],
+      "residual_risks": [
+        "Cold-only inventory removal changes one pre-existing failure mode: a pg_tablespace permission error previously flipped the whole ordinary collect_postgres result to blocked; that failure class no longer exists because the queries are gone. All remaining ordinary queries retain identical error semantics, no ordinary consumer ever read those keys (verified by base-repo grep: only node27_cold_governance_runtime.py and _cold_relation_bytes consumed them), and retained cold_governance_sample still refuses with null bytes when inventory is absent -- the safe direction. No action required; recorded so the verifier adjudicates the intended behavior change explicitly.",
+        "Sibling active/archived change records (timeseries-narrow-store-expand-contract, archive/*) still cite node27_cold_governance_collection.py as delivery history; intentionally untouched per implementation record. R4.2/archive disposition must not treat them as authority (carried forward from fixture review r2 residual)."
+      ],
+      "overall_assessment": "No blocking or non-blocking invariant findings from the invariant-state lens. The transfer preserves every required invariant in byte-identical code, the intentional removals are complete (no dangling caller, alias, or mixed identity), old cold consumers work through the real owner via qualified back-import, and the evidence chain (red log byte-preserved, smoke inline in session raw log, selector closure atomic) supports every matrix row."
+    },
+    "test-evidence": {
+      "reviewer": "GovernanceEvidenceR1",
+      "lens": "test-evidence + spec-compliance (fixture, test migrations, raw evidence)",
+      "head": "838f1ff69d53b909534b2fb5f95c49d82dfcb8e5",
+      "base": "2846a581ea2d985b00ebe9b88ca8367776fc366c",
+      "verdict": "PASS — no blocking findings from this lens; one non-blocking Note on evidence-record precision",
+      "findings": [
+        {
+          "id": "E1",
+          "severity": "Note",
+          "lens": "test-evidence",
+          "failureclass": "evidence-overclaim (record precision, not compliance miss)",
+          "invariant": "Evidence/deployment — the preserved verification record must be self-proving for the properties it asserts",
+          "scenario": "A future auditor re-checks from the preserved record alone whether the maintenance oracle ran on the contract engine image (PostgreSQL 15.2 / TimescaleDB 2.10.2) versus any local disposable postgres",
+          "path": "openspec/changes/compressed-chunk-cold-tablespace-tiering/evidence/retirement-governance-verification.json (maintenance_oracle.cluster, raw_log.text)",
+          "evidence": "Manifest and PR body characterize the oracle cluster as 'independent exact-image disposable'; the preserved raw log section for the oracle contains only '1 passed in 0.61s', MAINTENANCE_DISPOSABLE_ORACLE_PASS and OWNED_DISPOSABLE_CLUSTER_REMOVED — no image digest, version() output, or engine identity. The pre-existing harness (tests/conftest.py:175-214) enforces opt-in (NHMS_RUN_INTEGRATION=1 + NHMS_INTEGRATION_DATABASE_URL) and per-test throwaway create/drop but does not pin engine version. The fixture floor (fixtures/retirement-governance-owner-transfer.md Verification/Evidence Floor, real-engine bullet) required only 'independently created disposable PostgreSQL/Timescale cluster with appropriate integration opt-in' — all of those required properties ARE evidenced (pass marker, cleanup marker, opt-in harness).",
+          "consequence": "The 'exact-image' characterization is stronger than the record supports; the version-sensitive oracle assertions (reloptions override, autovacuum exclusion, zero-statistics class) cannot be tied to the contract engine from the preserved bytes alone. No impact on this slice's required floor.",
+          "fix": "For this record, either annotate the manifest that engine identity rests on the parent-run environment description, or (better, future slices incl. R5.1's isolated regression) capture the disposable cluster image digest / SELECT version() output into the raw verification log at oracle time.",
+          "proof": "None available under read-only review boundary; cannot re-run the node27 oracle. Evidence gap named exactly as above.",
+          "siblings": "R5.1's required isolated PostgreSQL 15.2/TimescaleDB 2.10.2 regression evidence should carry the same engine-identity recording; prior PGDATA slice evidence (retirement-pgdata-verification.json) not re-audited here.",
+          "blocking": false
+        }
+      ],
+      "matrix": [
+        {
+          "row": "Producers",
+          "status": "covered",
+          "citations": "collect_filesystem/collect_postgres/collect_working_set/bytes_pretty/run_command/disk_usage/du_bytes/observation_int/safe_resolve/filesystem_identity/compression_lag_seconds/collect_maintenance_output all present in packages/common/node27_resource_governance_collection.py (structural read); ordinary wire preserved and retired keys absent asserted by test_cli_ordinary_receipt_ignores_retired_cold_environment (tests/test_node27_working_set.py:300-317: schema_version nhms.node27_resource_governance.audit.v1, execution_mode read_only_audit, status completed, projected_peak/working_set_free 750/900 GiB, filesystems.cold path /data/GHDC, maintenance_output {ok,{},[]}, cold_tablespace_governance absent, postgres inventory disjoint, retired env receipt not created) and test_collect_postgres_isolates_maintenance_output_failure (tests/test_node27_resource_governance.py:917-939: dead_tuple_hotspots/hypertables/largest_chunks preserved as keys, three retired keys disjoint); both suites in targeted 1035 passed (raw log '1035 passed in 223.10s' + GOVERNANCE_TARGETED_PASS)."
+        },
+        {
+          "row": "Validators/binding",
+          "status": "covered",
+          "citations": "Retained working-set oracles unchanged by the diff except imports (test_current_comparator_never_falls_back_to_historical_home, test_cli_configured_paths_and_duplicate_device_labels etc. in tests/test_node27_working_set.py); moved cold accounting refusals retained byte-equivalent in tests/test_node27_cold_governance.py:22-260 (unhealthy-home, unknown-placement, unobserved/malformed inventory parametrizations); canonical MODIFIED delta scenario 'Device attribution cannot be established' applied verbatim (openspec/specs/node27-pgdata-relocation/spec.md:137-144 matches change delta specs/node27-pgdata-relocation/spec.md); live smoke bound actual PGDATA: raw log smoke JSON pgdata_binding {blockers: [], device_identity 9:0:7539273700150526131 (= /dev/md0 per the df capacity header), path /data/GHDC/nhms-primary/pgdata, status ok}, working_set_free_bytes 13011823702016 consistent with df 12T avail and with the red-log pre-change stdout free_bytes — cross-evidence consistent, no home fallback."
+        },
+        {
+          "row": "Storage/query",
+          "status": "covered (see E1 note)",
+          "citations": "MAINTENANCE_RELATIONS_CTE/ROWS_SQL/SUMMARY_SQL + 50-row MAINTENANCE_OUTPUT_ROW_LIMIT moved into new module (structural read); failure-isolation test retains probe-error/probe-ok parametrization; real-engine oracle: raw log '1 passed in 0.61s' + MAINTENANCE_DISPOSABLE_ORACLE_PASS + OWNED_DISPOSABLE_CLUSTER_REMOVED; integration suite keeps pre-existing harness and opt-in (tests/test_node27_maintenance_output_integration.py:23 pytestmark integration; tests/conftest.py:186-214 per-test throwaway_database_url); import repointed to new owner (:20). Engine-image identity not in the preserved record (finding E1)."
+        },
+        {
+          "row": "Entry",
+          "status": "covered",
+          "citations": "test_removed_cold_receipt_argument_refuses_before_audit (tests/test_node27_resource_governance.py:175-179) asserts SystemExit code 2 and no receipt file; red log shows it failing pre-change with DID NOT RAISE plus captured old cold receipt emission and RESOURCE_GOVERNANCE_CRITICAL diagnostics — discriminates the old accepted-flag path; live evidence REMOVED_COLD_ARGUMENT_REFUSAL_PASS + manifest removed_arg_exit 2; normal main path green via smoke exit 0 and retained CLI tests; scripts/node27_resource_governance.py contains zero cold_governance/cold-governance references at HEAD (grep)."
+        },
+        {
+          "row": "Consumers",
+          "status": "covered",
+          "citations": "New PathTestRule for packages/common/node27_resource_governance_collection.py selects all four direct-consumer suites including tests/test_node27_maintenance_output_integration.py and tests/test_node27_cold_governance.py (scripts/select_ci_tests.py:4485-4493); CLI rule adds maintenance integration (:4512-4519); expected maps updated atomically (tests/test_select_ci_tests.py:200-205,:230); repo-wide grep census confirms no remaining generic imports of node27_cold_governance_collection outside the retained cold suite (:18 cold_governance_sample) and historical/archive/receipt records (intentionally untouched per fixture); cold module back-import is a qualified module reference (packages/common/node27_cold_governance_collection.py:7 resource_collection.observation_int), no re-export; retained over-selection on old cold rules explicitly deferred to R3.5 by fixture G1 ('Narrowing the retained cold module/schema/example rules and dropping the cold suite from the CLI rule remain R3.5's end-state job')."
+        },
+        {
+          "row": "Failure",
+          "status": "covered",
+          "citations": "Redaction test retained with summary+stderr legs and [redacted] binding assertion, only the retired cold sink removed (tests/test_node27_working_set.py:407-428 diff); maintenance failure-isolation probe-error leg asserts {status error, error QueryCanceled} without masking healthy sections; unavailable-home null-bytes test moved to cold owner byte-equivalent (tests/test_node27_cold_governance.py:208-255); moved cold refusal parametrizations retain fabricated-zero/malformed-row refusals."
+        },
+        {
+          "row": "Evidence/deployment",
+          "status": "covered",
+          "citations": "Source frozen at 54365311 verified: git diff 54365311..838f1ff6 touches only tasks.md, verification.json, prechange-red.log; raw red log bytes preserved byte-identical through the HEAD separation commit (extracted 74c049279 embedded red_proof.log vs evidence/retirement-governance-prechange-red.log: 23024 bytes, cmp identical); manifest fields internally consistent with raw log (1035/223.10s, 1/0.61s, 20136 passed 335 skipped 1 warning/3371.49s, VERIFY_HEAD matches source_sha); readonly smoke used nhms_display_ro + readonly transaction with no unit/env change and manifest limits state 'not effective deployment handoff; issue1987 source pin untouched'; tasks.md partial checkboxes truthful (R1.3 [x] with slice evidence note; R1.5/R3.7/R4.1 remain [ ] with accurate partial wording; header claims only governance portions); canonical delta scope is MODIFIED-only for this slice (placement requirement applied verbatim; 'Retained SQL performance evidence' ADDED correctly absent from canonical, deferred to R1.4; no REMOVED); env example removed only the 28-line cold block with PGDATA/log-root/DATABASE_URL lines surviving (R3.7 row-1 disposition); runbook repoint asserts the owner symbol node27_resource_governance_collection.collect_postgres with no line pin (docs/runbooks/tier-node27-timeseries-storage.md:7561) and leaves the measured-privilege conclusion text unchanged; single fixture revise→pass (r1 verdict revise with G1/G2, r2 verdict pass)."
+        }
+      ],
+      "verification_gaps": [
+        "Red batch demonstrated discrimination for the argparse-refusal assertion (DID NOT RAISE) and the cold_tablespace_governance receipt-key assertion (failed exactly at tests line 313 per red log); the two postgres-inventory-key disjointness assertions (tests/test_node27_working_set.py:314-316 and the adapted isolation test :938-939) were not individually exercised in the red batch — statically discriminating (base collect_postgres unconditionally emitted those keys; red-log captured stdout shows the old emission) and green at HEAD via targeted 1035, but not separately red-proven. Implementer record itself flagged them as candidates for the batched red proof.",
+        "Local gate claims (full Ruff, active/canonical strict OpenSpec, scoped Markdown PASS) rest on the manifest 'local' field without preserved raw output; consistent with Main's report but not independently inspectable from bytes.",
+        "Exact-image engine identity for the disposable oracle not in preserved record (finding E1)."
+      ],
+      "residual_risks": [
+        "The ordinary audit receipt has no JSON schema file; wire stability (ordinary keys preserved, cold keys absent) is pinned only by the two changed-behavior tests — acceptable per the r1 residual-risk discharge since both discriminated red and pass green, but any future receipt-shape change must extend these tests rather than rely on a schema.",
+        "Sibling active change timeseries-narrow-store-expand-contract and archived records still cite node27_cold_governance_collection.py as delivery history; intentionally untouched here — R4.2/archive disposition must not treat them as authority (carried from fixture review residual)."
+      ],
+      "assignment_checks": {
+        "two_red_tests_distinguish_old_cold_behavior": "confirmed — both fail at pre-change source on the intended removed behavior (flag acceptance; cold output emission) with distinct failure modes, both exist at HEAD and pass in targeted",
+        "targeted_includes_migrated_cold_and_ordinary": "confirmed — targeted command covers resource_governance/working_set (ordinary), cold_governance (migrated cold), pgdata_migrate (env-binding edge), select_ci_tests (selector maps); maintenance integration ran separately on disposable engine per fixture floor",
+        "disposable_engine_and_readonly_main_differ_from_deployment": "confirmed within evidence limits — independently created/removed disposable cluster (never production), readonly nhms_display_ro + default_transaction_read_only=on smoke, no unit/env/pin mutation, deployment handoff explicitly not claimed",
+        "producer_selectors_include_direct_integration_consumers": "confirmed — both the new collection rule and the stable CLI rule explicitly name tests/test_node27_maintenance_output_integration.py; collection rule also names the retained cold consumer",
+        "testowner_relocation_retains_behavior": "confirmed — 8 moved items byte-equivalent modulo call-site adaptation; base governance._cold_governance_sample was the identical function re-exported (base scripts/node27_resource_governance.py:35), so direct cold_governance_sample import preserves semantics; retired 3 tests demanded exactly the removed CLI integration",
+        "canonical_modified_only": "confirmed — placement requirement MODIFIED applied verbatim with its new scenario; no unrelated ADDED/REMOVED; SQL-performance ADDED correctly deferred",
+        "partial_checkboxes_truthful": "confirmed — R1.3 checked with evidence pointer; R1.5/R3.7/R4.1 unchecked with accurate partial-completion notes",
+        "no_unrelated_contract_removal": "confirmed — env example cold block only; selector additions only (narrowing deferred to R3.5 per fixture); single-line runbook attribution; no schema/wire/key removal beyond the intended cold surface",
+        "altitude_owner_assertions_not_pins": "confirmed — runbook cites collect_postgres symbol without line number; fixture forbade brittle replacement pin",
+        "single_fixture_revise_then_pass": "confirmed — one fixture file, r1 revise (G1/G2), r2 pass, no further rounds",
+        "raw_evidence_integrity": "confirmed — red log bytes identical pre/post separation commit; manifest numbers match raw log markers; successor commits touch only docs/evidence/tasks"
+      }
+    },
+    "security-perf": {
+      "review_scope": "PR2318 Phase4 round1 — R1.3 governance owner-transfer + governance R1.5 + R3.7 env row. Full diff BASE 2846a581..HEAD 838f1ff6 across collector, CLI, config, selector, tests, docs. Lens: security-perf + integration.",
+      "summary": "Byte-level diff proves the moved collection owner is identical to the old generic code except the three intended cold SQL inventory removals; the retained cold module is identical except six qualified observation_int references; the CLI cold surface removal matches the fixture census 1:1 and every actual caller/test/selector edge migrated. No candidate findings from this lens; all seven matrix rows covered with citations.",
+      "findings": [],
+      "non_blocking_notes": [
+        "None. Higher-bar Note candidates were evaluated and dropped per reporting threshold: (a) legacy cold PathTestRules (node27_cold_governance_collection.py exact rule at scripts/select_ci_tests.py:4493 and node27_cold_governance*.py wildcard) still select the ordinary resource/working-set suites that no longer import them — harmless over-selection explicitly deferred to R3.5 by fixtures/retirement-governance-owner-transfer.md and tasks.md; (b) docs/runbooks/current-production-ops.md:2315-2318 already states the cold lane is withdrawn and is a separate later R3.7 row, so no stale-break; (c) env example NODE27_RESOURCE_GOVERNANCE_REPO_ROOT naming predates this diff (template-only, untouched context line) — pre-existing, no demonstrable harm."
+      ],
+      "out_of_scope_escalations": [
+        "None."
+      ],
+      "invariant_matrix": [
+        {
+          "row": "Producers",
+          "status": "covered",
+          "evidence": "packages/common/node27_resource_governance_collection.py verified byte-identical to BASE node27_cold_governance_collection.py via direct git-show diff: only docstring, 3 cold SQL inventory blocks (external_pg_tblspc_targets/cold_tablespace/cold_relation_by_tablespace) and the 2 cold functions removed. collect_filesystem retains filesystems.cold = /data/GHDC observation label (new module :348-360); ordinary wire keys, SCHEMA_VERSION nhms.node27_resource_governance.audit.v1 and schema version unchanged (scripts/node27_resource_governance.py:34). tests/test_node27_working_set.py:300-317 asserts ordinary keys plus cold-key absence."
+        },
+        {
+          "row": "Validators/binding",
+          "status": "covered",
+          "evidence": "#2273 binding moved intact: collect_working_set PGDATA path/device/free blockers, ambiguous-identity conflict and null working_set_free_bytes on non-ok binding (new module :129-173, byte-identical to base); capacity gates WORKING_SET_FILESYSTEM_UNAVAILABLE / PGDATA_USAGE_UNAVAILABLE / PROJECTED_PEAK_EXCEEDS_WORKING_SET_FREE in scripts/node27_resource_governance.py:213-282 untouched by diff; never-/home fallback preserved. Working-set suite oracles retained (tests/test_node27_working_set.py)."
+        },
+        {
+          "row": "Storage/query",
+          "status": "covered",
+          "evidence": "All retained SQL byte-identical: WORKING_SET_SQL with RUNTIME_HYPERTABLES_SQL binding, MAINTENANCE_OUTPUT_ROW_LIMIT=50, effective-threshold CTE with reloptions override/autovacuum_enabled exclusion, readonly set_session(readonly=True) + SET LOCAL 20s in working set, autocommit + SET statement_timeout 20s + finally connection.close() in collect_postgres (new module :107-572). Removal of the 3 cold queries also removes their failure mode from the ordinary blocked path — the intended change; tests/test_node27_resource_governance.py:933-938 asserts their absence plus ordinary sections present. Real-engine oracle tests/test_node27_maintenance_output_integration.py:20 repointed and reported 1 pass on an independent disposable cluster (evidence/retirement-governance-verification.json maintenance_oracle)."
+        },
+        {
+          "row": "Entry",
+          "status": "covered",
+          "evidence": "Removed --cold-governance-* args now refuse via argparse SystemExit(2) before any audit work (parse_args is first in main(), scripts/node27_resource_governance.py:730-732); tests/test_node27_resource_governance.py:175-180 asserts code 2 and no receipt file. NODE27_COLD_GOVERNANCE_* env fully inert (no reader remains in scripts/infra; grep clean), tested by tests/test_node27_working_set.py:300-317. Critical exit/diagnostic contract (CRITICAL_DIAGNOSTIC_PREFIX, exit 1 on critical, receipt-first ordering) untouched at scripts/node27_resource_governance.py:740-793."
+        },
+        {
+          "row": "Consumers",
+          "status": "covered",
+          "evidence": "Caller census clean: scripts/node27_resource_governance.py:22-32 imports new owner; retained cold module packages/common/node27_cold_governance_collection.py:7 uses qualified resource_collection.observation_int (6 sites, no compatibility re-export — single definition per symbol verified repo-wide); tests migrated (resource suite :124/:153/:921, working-set :14, maintenance integration :20, cold suite imports cold_governance_sample direct at :18). Selector closure matches fixture exactly: new producer rule scripts/select_ci_tests.py:4484-4492 selects all four suites incl. cold; CLI rule gains maintenance integration (:4514) fixing the old rule's missing consumer; expected maps mirrored in tests/test_select_ci_tests.py:200-205,227-233. Cold runtime/receipt builders (node27_cold_governance.py, node27_cold_governance_runtime.py, node27_cold_governance_cli.py) retain zero production callers — intended R3-retained dead family, exercised only by the cold suite."
+        },
+        {
+          "row": "Failure",
+          "status": "covered",
+          "evidence": "Failure semantics byte-preserved with the moved code: collect_postgres blocked results carry type(error).__name__ only (no DSN/stderr); collect_working_set swallows DB errors into projection_status=catalog_unavailable with null bytes (never fabricated zero); collect_maintenance_output records error, never raises; malformed-probe → MAINTENANCE_OUTPUT_UNAVAILABLE warning not green (tests/test_node27_resource_governance.py:826-846 retained); run_command/du/statvfs bounded (20s subprocess timeout, unavailable/missing statuses). Redaction preserved at both remaining sinks (redact_payload on receipt + _write_summary; tests/test_node27_working_set.py:407-428 summary+diagnostics). Old cold inventory failure can no longer leak into ordinary output because the ordinary cold branch is removed, not reinterpreted."
+        },
+        {
+          "row": "Evidence/deployment",
+          "status": "covered",
+          "evidence": "evidence/retirement-governance-verification.json: targeted 1035 pass, maintenance oracle 1 pass on independent exact-image disposable cluster (removed), live readonly smoke PASS exit0 with actual PGDATA /data/GHDC/nhms-primary/pgdata device 9:0 bound, maintenance ok, critical none, cold outputs absent, removed-arg exit2; full backend 20136 pass/335 skip. evidence/retirement-governance-prechange-red.log shows the 2 new changed-behavior tests failing at pre-change source (DID NOT RAISE SystemExit; cold_tablespace_governance present) — both refusal and key-absence discriminated. Successor commits 54365311..838f1ff verified via git to add only the two evidence files and tasks.md status. Runbook §9.2 repointed to symbol reference docs/runbooks/tier-node27-timeseries-storage.md:7561; env template cold block removed (infra/env/node27-resource-governance.example) with PGDATA/DATABASE_URL/compression-lag surviving; canonical spec MODIFIED delta identical to change delta; infra/systemd units and wrapper scripts/node27_resource_governance_once.sh contain no cold references and are untouched — issue1987 effective pin not mutated."
+        }
+      ],
+      "removed_behavior_audit": {
+        "intended_removals_verified": [
+          "--cold-governance-* CLI args + add_cold_governance_arguments/validate_cold_governance_arguments wiring (scripts/node27_resource_governance.py diff; remaining callers only in .workplans historical snapshots)",
+          "16 cold AuditConfig fields + _cold_runtime_config + build_receipt cold branch + cold_tablespace_governance output key",
+          "3 cold-only SQL inventory queries from ordinary collect_postgres (consumed only by cold-owned runtime/_cold_relation_bytes, now production-unreachable)",
+          "env-template cold block (R3.7 row; no other infra/ declarations remain)"
+        ],
+        "no_ordinary_loss": "Every ordinary behavior in the fixture must-preserve list traced byte-identical or test-pinned: filesystems.cold label, PGDATA binding/refusal, #1985 lag/discovery/watermark, #2277/#1769 maintenance thresholds/freshness/critical diagnostics, redaction, bounds, readonly transactions, close safety, ordinary wire keys/schema version.",
+        "wrapper_faithfulness": "No wrapper semantics changed: no recursion (cold module calls resource_collection.observation_int directly, self-contained leaf), no error swallow added, no timeout change (run_command default 20s, statement_timeout 20s, connect_timeout 5s all identical), no new side effects (moved module diff shows zero body changes)."
+      },
+      "verification_gaps": [
+        "Test/smoke counts (1035 targeted, 1 maintenance oracle, 20136 full backend, live readonly exit0/exit2 smoke) are evidence-reported; per leaf-reviewer contract nothing was re-executed. Consistency was checked instead: evidence files exist, red log content matches the two new tests' pre-change failure modes, live-smoke device identity 9:0 matches /dev/md0 major/minor, and git confirms post-tested-SHA commits are evidence/tasks-only.",
+        "test_node27_pgdata_migrate.py governance env-binding pins (NODE27_GOVERNANCE_PGDATA_ROOT) were not in the diff and remain satisfied by the preserved CLI env default (scripts/node27_resource_governance.py:649-652); their pass is part of the reported targeted 1035, not independently re-run."
+      ],
+      "residual_risks": [
+        "Retained cold family (node27_cold_governance{,_cli,_runtime,_collection}.py + cold schema) is now reachable only from its own test suite; R3 must delete it as a family — tracked in tasks.md R3, not this slice.",
+        "Legacy cold selector rules over-select ordinary suites until R3.5 cleanup; cost is extra CI test runs only, never missed selection (the new producer rule independently selects all four consumer suites)."
+      ],
+      "blocking": false
+    }
+  },
+  "verification": {
+    "result": "Verifier verdicts for batch: evidence-overclaim (record precision, not compliance miss) (1 candidates)\nReviewed head SHA: 838f1ff69d53b909534b2fb5f95c49d82dfcb8e5\n\nCandidate: E1\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nEvidence: The newly added manifest calls the maintenance cluster \"independent exact-image disposable\" at `openspec/changes/compressed-chunk-cold-tablespace-tiering/evidence/retirement-governance-verification.json:11-14`, while its complete embedded `raw_log.text` (`:43-48`) records the oracle segment only as `1 passed in 0.61s`, `MAINTENANCE_DISPOSABLE_ORACLE_PASS`, and `OWNED_DISPOSABLE_CLUSTER_REMOVED`; it emits neither an image ID/digest nor server/extension version. That is a record-provenance gap, not a false-engine-execution assertion: `governance-node27-verify.sh:13` invokes the parent engine proof; `governance-engine-proof.py:10-19` imports `PINNED_IMAGE_ID` and supplies it directly to `docker run`, then waits for readiness (`:20-27`), runs the existing integration oracle (`:33-36`), and verifies label/name ownership before removal (`:39-43`). `packages/common/node27_pgdata_container.py:11-15` derives that ID from `node27_external_contract_snapshot.json`, whose `host_context.nhms_db_image_id`, `pg_server_version`, and `timescaledb_version` entries (`:45-84`) fix the digest, PostgreSQL 15.2, and TimescaleDB 2.10.2; a direct diff from tested source SHA `54365311ee013da3e8710d3bac8571c90a4e2a9b` to reviewed HEAD shows neither owner nor snapshot changed. T1 passes because this newly added persisted evidence record is the stated future-audit surface. T2 passes because its `maintenance_oracle.cluster` field is the operator/auditor-facing provenance boundary and raw bytes alone cannot substantiate its stronger adjective. T3 passes at the applicable scope: the fixture requires the existing integration test on an independently created disposable PostgreSQL/Timescale cluster with integration opt-in (`fixtures/retirement-governance-owner-transfer.md:117-120`); it does not require a new platform, a rerun, or raw image stdout.\nNote: Make only a manifest annotation that exact-image identity is parent-run `governance-engine-proof.py`/pinned-snapshot provenance rather than an observation emitted in `raw_log.text` (ideally cite `source_sha` and those paths); retain the actual disposable oracle result and fixture unchanged—no runtime rerun or semantic change is warranted."
+  },
+  "round_status": "CLEAN: no P0/P1 or selected-row coverage gaps; one Note-level evidence-provenance precision candidate confirmed.",
+  "note_closure": "Manifest now attributes exact-image to parent-run script/pinned snapshot, not stdout; executed script preserved verbatim in evidence. No runtime/tests/fixture change and no rerun warranted.",
+  "post_clean_classification": "evidence-only local-repair, followed by exact-head independent final Gap Sweep; no extra comprehensive round for a Note."
+}
