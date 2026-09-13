@@ -1141,10 +1141,130 @@ class Executor:
         except BaseException:
             self.save("BLOCKED_FENCE_UNPROVEN", fenced=False)
 
+    def recovery_ready(self):
+        """Complete recovery inputs, not a phase label or a persisted admission bit."""
+
+        def text(value):
+            return isinstance(value, str) and bool(value.strip())
+
+        def oid(value):
+            return type(value) is int and 0 < value <= 4294967295
+
+        def checksum(value):
+            return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+        state = self.s
+        units, files = state.get("units"), state.get("files")
+        ledger, baseline, epochs = state.get("ledger_before"), state.get("legacy_read"), state.get("fence_epochs")
+        if not (
+            oid(state.get("old_oid"))
+            and (
+                state.get("narrow_oid") is None
+                or (oid(state["narrow_oid"]) and state["narrow_oid"] != state["old_oid"])
+            )
+            and type(self.seq) is int
+            and self.seq >= 0
+            and (state.get("child_pid") is None or oid(state["child_pid"]))
+            and text(state.get("old_branch"))
+            and isinstance(units, dict)
+            and set(units) == set(TIMERS + SERVICES)
+            and all(
+                isinstance(unit, dict)
+                and text(unit.get("ActiveState"))
+                and all(isinstance(unit.get(key, ""), str) for key in (*CONFIG_PROPS, "ControlGroup"))
+                for unit in units.values()
+            )
+            and isinstance(files, dict)
+            and bool(files)
+            and all(
+                text(path) and Path(path).is_absolute() and isinstance(record, dict) and checksum(record.get("sha256"))
+                for path, record in files.items()
+            )
+            and isinstance(ledger, list)
+            and bool(ledger)
+            and all(text(version) for version in ledger)
+            and isinstance(baseline, dict)
+            and checksum(baseline.get("response_sha256"))
+            and isinstance(epochs, list)
+        ):
+            return False
+        for index, epoch in enumerate(epochs):
+            if not (
+                isinstance(epoch, dict)
+                and type(epoch.get("number")) is int
+                and epoch["number"] == index + 1
+                and text(epoch.get("start"))
+                and isinstance(epoch.get("drains"), list)
+                and isinstance(epoch.get("restart_attempts"), list)
+                and all(text(t) for t in epoch["restart_attempts"])
+                and all(
+                    isinstance(drain, dict)
+                    and text(drain.get("at"))
+                    and isinstance(drain.get("public_refusal"), dict)
+                    and drain["public_refusal"].get("status") in (502, 503, 504)
+                    for drain in epoch["drains"]
+                )
+            ):
+                return False
+            restart = epoch.get("validated_restart")
+            if restart is not None:
+                if not (
+                    isinstance(restart, dict)
+                    and text(restart.get("at"))
+                    and restart.get("source") in (OLD, NEW)
+                    and isinstance(restart.get("display"), dict)
+                    and bool(restart["display"])
+                    and isinstance(restart.get("public"), dict)
+                    and restart["public"].get("status") == 200
+                ):
+                    return False
+            elif index != len(epochs) - 1:
+                return False
+        # These are the config inputs consumed by freeze, immutable ingress,
+        # legacy worker and restart. Readiness must not defer a missing input
+        # until after services have stopped.
+        config = self.c
+        reads = config.get("reads")
+        legacy = reads.get("legacy") if isinstance(reads, dict) else None
+        request = legacy.get("request") if isinstance(legacy, dict) else None
+        proxy = config.get("proxy")
+        return bool(
+            isinstance(request, dict)
+            and all(
+                text(request.get(key))
+                for key in (
+                    "run_id",
+                    "model_id",
+                    "basin_version_id",
+                    "river_network_version_id",
+                    "segment_id",
+                    "issue_time",
+                )
+            )
+            and request.get("variables") == ["q_down"]
+            and isinstance(request.get("scenarios"), list)
+            and all(text(v) for v in request["scenarios"])
+            and isinstance(config.get("lock_files"), list)
+            and all(text(path) and Path(path).is_absolute() for path in config["lock_files"])
+            and isinstance(config.get("authorized_timers"), list)
+            and all(timer in TIMERS for timer in config["authorized_timers"])
+            and isinstance(config.get("yd_pids"), list)
+            and all(oid(pid) for pid in config["yd_pids"])
+            and all(text(config.get(key)) for key in ("api_health_path", "yd_health_path", "public_base_url"))
+            and all(config[key].startswith("/") for key in ("api_health_path", "yd_health_path"))
+            and isinstance(proxy, dict)
+            and oid(proxy.get("master_pid"))
+            and isinstance(proxy.get("files"), dict)
+            and bool(proxy["files"])
+            and all(
+                text(path) and Path(path).is_absolute() and checksum(value) for path, value in proxy["files"].items()
+            )
+        )
+
     def check_recovery_eligibility(self):
         child = self.s.get("child_pid")
         require(not child or not Path(f"/proc/{child}").exists(), "OWNED_COMMAND_STILL_RUNNING_INSPECT_SUPERVISOR")
-        require("old_oid" in self.s and "units" in self.s, "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY")
+        require(self.recovery_ready(), "PREPARATION_INCOMPLETE_NO_AUTOMATIC_RECOVERY")
 
     def recover(self):
         self._recovery_active = False
@@ -1244,10 +1364,7 @@ class Executor:
             "inspection_only": True,
             "action": "Inspect saved state and supervisor; preparation is incomplete or recovery is not eligible.",
         }
-        if self.running or not all(
-            key in self.s
-            for key in ("old_oid", "units", "files", "ledger_before", "old_branch", "legacy_read", "fence_epochs")
-        ):
+        if self.running:
             return inspection
         try:
             self.check_recovery_eligibility()
