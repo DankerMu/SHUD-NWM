@@ -2,7 +2,9 @@
 
 Status: implementation in progress. R1.1/R1.2 merged via PR #2311.
 R1.3 and the corresponding PGDATA/governance portions of R1.5 have executable
-verification; remaining retirement and effective-deployment tasks are pending.
+verification. R1.6 and the C4 portion of R1.5 now have node-27 synthetic
+acceptance-owner proof; this is not live browser or production deployment PASS.
+Remaining retirement and effective-deployment tasks are pending.
 The sole executable retirement plan is this file. Old cold deployment approval
 does not authorize retirement, and disabling a lane is not code retirement.
 
@@ -89,7 +91,10 @@ budget fields. Real launcher and collection/survivor proofs are required.
   `e2e/live-c4-display.spec.ts`, producer/binder/schema and
   `openspec/specs/c4-live-display-evidence`) survives: old publication-current
   consumes C4, not the reverse. Generic readonly survives old C2's removal.
-- [ ] R1.6 Transfer the necessary outer C4 reviewed-SHA freeze and exact-byte
+  C4 extraction evidence: `evidence/retirement-c4-verification.json`; targeted
+  owner/selector, real Node binder, CLI refusal and post-binder mutation proof.
+  Remaining workload/compression/deletion test transfers are still pending.
+- [x] R1.6 Transfer the necessary outer C4 reviewed-SHA freeze and exact-byte
   SHA-256/file-identity recheck from G0/C3 to the existing display deployment
   owner's **Bringup-C4 production acceptance** seam. R1 must ship and record its
   real public entrypoint, code owner, original binding-record provenance and
@@ -102,6 +107,10 @@ budget fields. Real launcher and collection/survivor proofs are required.
   retired C3 checks, and never substitute local C4 CLI PASS for this outer gate
   or independent C1-C3 proof. Apply the matching `c4-live-display-evidence`
   MODIFIED delta with this transfer; generic “C4 survives” wording is not proof.
+  Slice evidence: `evidence/retirement-c4-verification.json`; fixture
+  `fixtures/retirement-c4-acceptance-owner.md`. Original-record drift refuses
+  after binder execution; real Node CLI proof uses synthetic C4 receipts and
+  does not activate production or complete R1.4.
 
 ## R2 — Detach normal compression while preserving safety
 

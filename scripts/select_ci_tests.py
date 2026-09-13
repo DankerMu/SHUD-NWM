@@ -822,6 +822,15 @@ NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS: tuple[str, ...] = (
     "tests/test_issue1895_runbook_contract.py",
 )
 
+# #1895 R1.6 C4 production-acceptance corpus. The public freeze/bind/verify
+# suite and the boundary-parameter/identity/closed-stdout partition are ONE
+# contract: the boundary module imports helpers from the core suite at module
+# scope. Explicit sorted tuple, never derived at import time.
+C4_PRODUCTION_ACCEPTANCE_TESTS: tuple[str, ...] = (
+    "tests/test_node27_c4_production_acceptance.py",
+    "tests/test_node27_c4_production_acceptance_boundaries.py",
+)
+
 # #2224: production parity is one closure across the catalog SQL owner, the
 # movement owner, the read-only G1 census, post-target observer and G0/G1
 # runbook fence. The integration suite is intentionally present even where its
@@ -1019,6 +1028,16 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
         # contract redirect does.
         "tests/test_node27_cold_residency_census_publication.py",
         NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_c4_production_acceptance.py",
+        C4_PRODUCTION_ACCEPTANCE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "tests/test_node27_c4_production_acceptance_boundaries.py",
+        C4_PRODUCTION_ACCEPTANCE_TESTS,
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1550,7 +1569,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # retain the file-journal closure. A separate stop_on_match rule would
         # shift selection because first match wins.
         FILE_JOURNAL_READ_STATE_PATH_PATTERNS[0],
-        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py"),
+        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py", *C4_PRODUCTION_ACCEPTANCE_TESTS),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -1558,7 +1577,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # publication and restore. It needs both its filesystem contract and
         # the two journal-retention behavioral partitions.
         "packages/common/safe_fs_publication.py",
-        (*FILE_JOURNAL_READ_STATE_TESTS, "tests/test_safe_fs.py"),
+        (
+            *FILE_JOURNAL_READ_STATE_TESTS,
+            "tests/test_safe_fs.py",
+            *C4_PRODUCTION_ACCEPTANCE_TESTS,
+        ),
         stop_on_match=True,
     ),
     PathTestRule(
@@ -2291,6 +2314,25 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             *READONLY_DB_VALIDATION_TESTS,
             *ISSUE1895_READINESS_C1_C2_C3_TESTS,
         ),
+    ),
+    PathTestRule(
+        "services/production_closure/__init__.py",
+        C4_PRODUCTION_ACCEPTANCE_TESTS,
+    ),
+    PathTestRule(
+        "services/production_closure/c4_production_acceptance.py",
+        C4_PRODUCTION_ACCEPTANCE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "services/production_closure/c4_production_acceptance_io.py",
+        C4_PRODUCTION_ACCEPTANCE_TESTS,
+        stop_on_match=True,
+    ),
+    PathTestRule(
+        "scripts/node27_c4_production_acceptance.py",
+        C4_PRODUCTION_ACCEPTANCE_TESTS,
+        stop_on_match=True,
     ),
     PathTestRule(
         # #1455: the directory's 25 importer gaps collapse onto four suites, all
@@ -3520,7 +3562,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     # PATH_TEST_RULES.
     PathTestRule(
         "packages/common/evidence_io.py",
-        ISSUE1895_READINESS_C1_C2_C3_TESTS,
+        (*ISSUE1895_READINESS_C1_C2_C3_TESTS, *C4_PRODUCTION_ACCEPTANCE_TESTS),
     ),
     # C3 verifies the scheduler manifest's shipping schema/checksum primitives.
     # After the readiness suite split that consumer contract lives in
@@ -4279,6 +4321,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_tablespace_integration.py",
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
+            *C4_PRODUCTION_ACCEPTANCE_TESTS,
         ),
         stop_on_match=True,
     ),

@@ -1,0 +1,96 @@
+{
+  "changedFiles": [
+    "apps/frontend/src/__tests__/runbookContract.test.ts",
+    "scripts/node27_c4_production_acceptance.py",
+    "scripts/select_ci_tests.py",
+    "tests/test_select_ci_tests.py",
+    "tests/test_node27_c4_production_acceptance_boundaries.py",
+    ".workplans/pr-2321/c4-r1-real-cli-smoke.py",
+    ".workplans/pr-2321/c4-r1-mutant.py"
+  ],
+  "findings": {
+    "C4E-F1": "Deleted the entire prose-only it-block 'checklist keeps the older C4 #389 path honest about delivered vs open work' (four raw Markdown assertions). Neighboring binder behavioral test left intact. Runbook not edited.",
+    "C4E-F2": "Added one public-boundary parameter batch: uppercase 40-hex SHA, query origin, empty basin, empty segment, inverted cmd-start>cmd-end, relative receipt, approved record >262144 bytes. Each asserts owner code and no publication.",
+    "C4E-F3": "Six cases: same-byte inode replacement after bind (replacement created before unlink), utime-only drift, absent freeze at bind, valid cross-freeze binding, edited valid binding input, extra-key freeze.",
+    "C4E-F4": "Disposable actual-CLI/real-Node proof expands existing positive+SHA smoke with status-not-PASS, same-byte inode replacement, and semantic-preserving reserialization. Fresh private subdir per case, synthetic label, stdout records codes. Not run here.",
+    "C4SP-1": "Narrow BrokenPipe handling: flush inside main, catch BrokenPipeError only, redirect stdout to /dev/null, static C4_STDOUT_CLOSED stderr, exit 1. Subprocess test with closed stdout reader asserts published freeze remains."
+  },
+  "testNames": [
+    "test_public_boundary_parameter_batch_refuses_without_publication",
+    "test_verify_refuses_same_byte_inode_replacement_after_bind",
+    "test_verify_refuses_utime_only_receipt_drift_after_bind",
+    "test_bind_refuses_absent_freeze_without_binding",
+    "test_verify_refuses_valid_cross_freeze_binding",
+    "test_verify_refuses_edited_valid_binding_input",
+    "test_verify_refuses_extra_key_freeze",
+    "test_cli_closed_stdout_after_success_keeps_published_artifact",
+    "test_c4_production_acceptance_owners_select_their_suite",
+    "test_c4_production_acceptance_suite_split_selects_both_halves",
+    "test_c4_production_acceptance_shared_producers_keep_prior_consumers",
+    "test_c4_production_acceptance_owner_rules_red_when_removed"
+  ],
+  "selector": {
+    "tuple": "C4_PRODUCTION_ACCEPTANCE_TESTS = (tests/test_node27_c4_production_acceptance.py, tests/test_node27_c4_production_acceptance_boundaries.py)",
+    "wiredInto": [
+      "services/production_closure/__init__.py",
+      "services/production_closure/c4_production_acceptance.py",
+      "services/production_closure/c4_production_acceptance_io.py",
+      "scripts/node27_c4_production_acceptance.py",
+      "packages/common/node27_pgdata_command.py",
+      "packages/common/safe_fs.py",
+      "packages/common/safe_fs_publication.py",
+      "packages/common/evidence_io.py",
+      "CHANGED_TEST_FILE_RULES for both suite halves"
+    ],
+    "priorConsumersPreserved": true
+  },
+  "parentCommands": [
+    "cd apps/frontend && npx vitest run src/__tests__/runbookContract.test.ts",
+    "uv run pytest -q tests/test_node27_c4_production_acceptance.py tests/test_node27_c4_production_acceptance_boundaries.py tests/test_select_ci_tests.py::test_c4_production_acceptance_owners_select_their_suite tests/test_select_ci_tests.py::test_c4_production_acceptance_suite_split_selects_both_halves tests/test_select_ci_tests.py::test_c4_production_acceptance_shared_producers_keep_prior_consumers tests/test_select_ci_tests.py::test_c4_production_acceptance_owner_rules_red_when_removed",
+    "python3 .workplans/pr-2321/c4-r1-real-cli-smoke.py",
+    "python3 .workplans/pr-2321/c4-r1-mutant.py"
+  ],
+  "mutationMechanics": {
+    "script": ".workplans/pr-2321/c4-r1-mutant.py",
+    "restoresExactBytes": true,
+    "neverMutatesExpectations": true,
+    "families": {
+      "F2 sha-family": "SHA_RE accepts uppercase hex; kills uppercase-SHA row",
+      "F2 origin-family": "drops '?' from host check; kills query-origin row",
+      "F2 id-family": "require_id skips regex; kills empty basin/segment rows",
+      "F2 bracket-family": "drops start>end refuse; kills inverted bracket row",
+      "F2 path-family": "require_absolute_path becomes Path(text); kills relative receipt row",
+      "F2 size-family": "drops st_size>max_bytes; kills >262144 approved row",
+      "F3 sha-only identity": "_assert_identity_match compares sha256 only; reds inode+utime",
+      "F3 missing-freeze": "FileNotFoundError maps to C4_OPEN not C4_MISSING",
+      "F3 dropped cross-freeze": "skips freeze path/identity/parent match",
+      "F3 dropped input-mismatch": "inputs!=bound_inputs disabled",
+      "F3 dropped closed-object": "_load_freeze skips _FREEZE_KEYS closed object",
+      "SP1 original CLI": "replaces _announce_pass with print-only; closed-stdout test reds"
+    },
+    "notRun": true
+  },
+  "lineCounts": {
+    "scripts/node27_c4_production_acceptance.py": 116,
+    "tests/test_node27_c4_production_acceptance.py": 856,
+    "tests/test_node27_c4_production_acceptance_boundaries.py": 414
+  },
+  "untouched": [
+    "fixtures/canonical/runbooks/old C4 binder",
+    "R1.4/R2-R5",
+    "environment candidate",
+    "log provenance candidate",
+    "existing frontend C4 protocol"
+  ],
+  "validation": "Not run. Parent owns all validation and canonical docs/evidence.",
+  "deviations": [
+    "F2 inverted-bracket row isolated after freeze-parameter rows so a successful freeze from that row cannot skip later no-publication asserts.",
+    "Closed-stdout test waits for freeze.json then closes the pipe so the published artifact is asserted after success, not before freeze returns.",
+    "Path-family mutant no-ops require_absolute_path rather than only SHA_RE-adjacent startswith, because later lexical-anchor/normpath still refuse a relative receipt."
+  ],
+  "parent_harness_corrections": [
+    "Smoke _invoke default success code supplied; previously missing required keyword.",
+    "Origin mutant removes the complete origin guard family (regex and structural checks), not redundant host check alone.",
+    "Mutation proof requires pytest exit1, excludes collection errors, preserves raw assertion failures."
+  ]
+}
