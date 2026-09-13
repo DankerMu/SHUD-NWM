@@ -15,13 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from packages.common.node27_cold_governance import COLD_HOST_PATH
-from packages.common.node27_cold_tablespace_evidence import EvidencePolicy
 from packages.common.node27_cold_tablespace_host import (
     DockerBoundary,
     EvidencePaths,
     inspect_host_path,
     inspect_storage_evidence,
 )
+from packages.common.node27_pgdata_evidence import EvidencePolicy
 
 
 @dataclass(frozen=True)
@@ -45,9 +45,7 @@ def external_pg_tblspc_targets(postgres: Mapping[str, Any]) -> tuple[str, ...]:
     if not isinstance(rows, list):
         return ()
     targets = [
-        str(row.get("target"))
-        for row in rows
-        if isinstance(row, Mapping) and isinstance(row.get("target"), str)
+        str(row.get("target")) for row in rows if isinstance(row, Mapping) and isinstance(row.get("target"), str)
     ]
     return tuple(sorted(set(targets)))
 

@@ -21,8 +21,7 @@ from typing import Any
 
 import psycopg2
 
-from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
-from packages.common.node27_cold_tablespace_container import normalize_raw_inspect, serialize_container_argv
+from packages.common.node27_pgdata_container import PINNED_IMAGE_ID, normalize_raw_inspect, serialize_container_argv
 from packages.common.node27_pgdata_host import (
     DOCKER,
     ROLE,

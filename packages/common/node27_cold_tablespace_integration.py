@@ -28,11 +28,7 @@ from packages.common.compressed_chunk_cold_residency import (
     PINNED_PG_VERSION_PREFIX,
     PINNED_TIMESCALEDB_VERSION,
 )
-from packages.common.node27_cold_tablespace_evidence import (
-    EvidencePolicy,
-    parse_backup_inventory,
-    verify_root_storage_evidence,
-)
+from packages.common.node27_cold_tablespace_evidence import parse_backup_inventory
 from packages.common.node27_cold_tablespace_identity import (
     INTEGRATION_PREFIX,
     ColdTablespaceIdentity,
@@ -50,6 +46,7 @@ from packages.common.node27_cold_tablespace_root_capability import (
     probe_root_evidence_capability,
 )
 from packages.common.node27_cold_tablespace_types import InstallDependencies
+from packages.common.node27_pgdata_evidence import EvidencePolicy, verify_root_storage_evidence
 
 DEFAULT_HOST_PORT = 55494
 _CONTAINER_PGDATA = "/home/postgres/pgdata/data"
@@ -649,9 +646,7 @@ def _target(
 ) -> dict[str, Any]:
     observed = _host_path(config)
     if observed["uid"] != capability.runtime_uid or observed["gid"] != capability.runtime_gid:
-        raise ColdTablespaceIntegrationError(
-            "cold tablespace host owner differs from the proven runtime identity"
-        )
+        raise ColdTablespaceIntegrationError("cold tablespace host owner differs from the proven runtime identity")
     _checked(
         runner,
         (
@@ -731,9 +726,7 @@ def dependencies(
         docker=_docker_action(resources, runner=runner),
         connect=connection_factory,
         connect_readonly=connection_factory,
-        inspect_target=lambda: _target(
-            config, capability=resources.require_capability(), runner=runner
-        ),
+        inspect_target=lambda: _target(config, capability=resources.require_capability(), runner=runner),
         current_bind_references=lambda: _cold_bind_refs(config, runner=runner)[0],
         stopped_bind_references=lambda: _cold_bind_refs(config, runner=runner)[1],
         pg_tblspc_references=pg_refs,

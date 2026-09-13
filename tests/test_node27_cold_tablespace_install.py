@@ -10,7 +10,7 @@ from typing import Any
 import jsonschema
 import pytest
 
-from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
+from packages.common.node27_cold_tablespace_container import with_cold_bind
 from packages.common.node27_cold_tablespace_install import (
     COLD_CONTAINER_PATH,
     COLD_HOST_PATH,
@@ -18,6 +18,7 @@ from packages.common.node27_cold_tablespace_install import (
     InstallDependencies,
     run_install,
 )
+from packages.common.node27_pgdata_container import normalize_raw_inspect
 from scripts import node27_cold_tablespace_install as installer_cli
 
 NOW = datetime(2026, 8, 31, 12, 0, tzinfo=UTC)
@@ -787,10 +788,10 @@ def test_enforce_rejects_nonquiescent_writer_or_timer_before_authority_or_mutati
 
 def _recovery_authority(*, phase: str, **ownership: bool) -> dict:
     from packages.common.node27_cold_tablespace_authority import private_snapshot_digest
-    from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
+    from packages.common.node27_pgdata_container import normalize_raw_inspect
 
     before = normalize_raw_inspect(_inspect())
-    replacement = before.with_cold_bind()
+    replacement = with_cold_bind(before)
     from packages.common.node27_cold_tablespace_identity import PRODUCTION_IDENTITY
 
     return {

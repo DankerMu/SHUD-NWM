@@ -1,0 +1,13 @@
+{
+  "status": "Corrected the two previously uncaught cold error boundaries.",
+  "changed_paths": [
+    "packages/common/node27_cold_tablespace_host.py"
+  ],
+  "correction": {
+    "SystemdBoundary.inspect_quiescence": "CommandError now translates to ColdRuntimeError with the original command error message, error_class='target_identity', and stage='target_identity'.",
+    "DockerBoundary._container_names": "Same ColdRuntimeError translation, preserving the pre-transfer observable boundary through inspect_optional and current_and_stopped_cold_binds.",
+    "unchanged": "Existing action/_json CommandError-to-ColdHostError translations and nonzero-result ColdHostError gates remain unchanged."
+  },
+  "deviation_report": "The prior quiescence/inventory change to ColdHostError was an unintended behavioral deviation and has been removed. This supersedes the corresponding census/deviation entries in my previous report. No other files were changed.",
+  "tests": "No tests added or modified for this direct boundary correction. No validation, formatting, commits, SSH, or nested agents were run."
+}

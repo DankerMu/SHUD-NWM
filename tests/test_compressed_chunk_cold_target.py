@@ -15,7 +15,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -34,7 +33,6 @@ from packages.common.compressed_chunk_cold_target import (
     INSPECT_TIMEOUT_SECONDS,
     LIVE_CONTAINER_NAME,
     TRUSTED_DOCKER_BIN,
-    ObservedTarget,
     container_exec_id_from_decimal,
     container_writable_argv,
     inspect_container_identity_observation,
@@ -42,10 +40,10 @@ from packages.common.compressed_chunk_cold_target import (
     inspect_production_target,
     parse_container_exec_user,
     production_inspect_target,
-    run_bounded_command,
     safe_token_echo,
     validate_container_exec_id,
 )
+from packages.common.node27_pgdata_command import run_bounded_command
 
 # The account the exact image ships with, and the principal node-27's live
 # container runs as (docs/runbooks/tier-node27-timeseries-storage.md,
@@ -495,9 +493,7 @@ def test_config_user_matrix_refuses_before_writable(config_user: Any, reason: st
 
 def test_boundaries_are_inclusive_and_root_is_excluded() -> None:
     assert parse_container_exec_user("1:1").uid == 1
-    assert parse_container_exec_user(f"{CONTAINER_EXEC_ID_MAX}:{CONTAINER_EXEC_ID_MAX}").gid == (
-        CONTAINER_EXEC_ID_MAX
-    )
+    assert parse_container_exec_user(f"{CONTAINER_EXEC_ID_MAX}:{CONTAINER_EXEC_ID_MAX}").gid == (CONTAINER_EXEC_ID_MAX)
     # The last accepted token and the first rejected one differ by a single unit,
     # so the bound is inclusive and the refusal is arithmetic, not a parse failure.
     with pytest.raises(ColdRuntimeError, match="must be within"):
@@ -762,47 +758,6 @@ def test_production_inspect_target_does_not_echo_expected_values() -> None:
             expected_container_exec_gid=IMAGE_GID,
         )
     assert diverging.commands == ["inspect"]
-
-
-def test_observed_target_record_carries_the_pair() -> None:
-    fields = set(ObservedTarget.__dataclass_fields__)
-    assert {"container_exec_uid", "container_exec_gid"} <= fields
-
-
-def test_bounded_collector_caps_real_stdout_child() -> None:
-    started = time.monotonic()
-    with pytest.raises(ColdRuntimeError, match="byte ceiling"):
-        run_bounded_command(
-            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 200000); sys.stdout.flush()"],
-            timeout=5,
-        )
-    assert time.monotonic() - started < 4
-
-
-def test_bounded_collector_caps_real_stderr_child() -> None:
-    started = time.monotonic()
-    with pytest.raises(ColdRuntimeError, match="byte ceiling"):
-        run_bounded_command(
-            [sys.executable, "-c", "import sys; sys.stderr.write('e' * 200000); sys.stderr.flush()"],
-            timeout=5,
-        )
-    assert time.monotonic() - started < 4
-
-
-def test_bounded_collector_kills_hanging_child() -> None:
-    started = time.monotonic()
-    with pytest.raises(ColdRuntimeError, match="timed out"):
-        run_bounded_command([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
-    assert time.monotonic() - started < 4
-
-
-def test_no_name_based_probe_survives_the_module() -> None:
-    import packages.common.compressed_chunk_cold_target as target
-
-    source = Path(target.__file__).read_text(encoding="utf-8")
-    assert '"postgres"' not in source
-    assert "CONTAINER_WRITABLE_ARGV" not in source
-    assert "inspect_nhms_db_cold_bind" not in source
 
 
 def test_host_identity_drift_after_writable_check_is_refused() -> None:

@@ -1,0 +1,59 @@
+{
+  "verdict": "revise",
+  "summary": "The slice fixture retirement-pgdata-owner-transfer.md is substantively strong: census line-pins, negative-guard characterization, image-pin resolution path, history pins, selector rows, risk-pack selection and the node-27 verification floor all check out against the live tree. It is not yet safe to govern the implementer on one axis: the error-type cutover for the moved bounded command is unrecorded, and four smaller concrete additions are needed. All findings below are slice-scoped; no whole-epic renegotiation.",
+  "required_additions": [
+    {
+      "id": "A1",
+      "severity": "P1",
+      "axis": "Error-type cutover contract for the moved bounded command (missing invariant axis)",
+      "evidence": "run_bounded_command raises ColdRuntimeError on every refusal path today (packages/common/compressed_chunk_cold_target.py:284-294, 306-312, 321-327, 334-340). design.md forbids PGDATA-owned code raising/aliasing ColdRuntimeError, so the moved function must raise a PGDATA-owned error and every still-live cold catch/propagation site must be adapted in the same merge: packages/common/node27_cold_tablespace_host.py:161-162 and :192-193 (except ColdRuntimeError -> ColdHostError 'Docker action/inspection timed out'), packages/common/compressed_chunk_cold_target.py:395,516 (internal callers whose public contract is ColdRuntimeError propagation), and the direct error assertions tests/test_compressed_chunk_cold_target.py:774-795 (byte-ceiling/timeout raise ColdRuntimeError). PGDATA's own boundary is packages/common/node27_pgdata_host.py:249 (except (ColdRuntimeError, OSError) -> MigrationError). The fixture's 'MigrationError boundary' and 'cold callers call its real owner directly' bullets cover imports only, not error semantics.",
+      "addition": "Add one Must-preserve bullet plus an invariant-matrix clause naming: (a) the PGDATA-owned command error type the moved bounded command raises (no cold import, no ColdRuntimeError subclass/alias); (b) its translation to MigrationError at node27_pgdata_host.py:249; (c) the cold-side adaptation mapping — node27_cold_tablespace_host keeps raising ColdHostError on timeout, compressed_chunk_cold_target keeps surfacing ColdRuntimeError — with the four cited sites enumerated. Without this, the intermediate silently changes cold DockerBoundary timeout/byte-ceiling behavior (a hidden broken intermediate on a still-live cold seam)."
+    },
+    {
+      "id": "A2",
+      "severity": "P2",
+      "axis": "Selector closure contents for the new PGDATA-owned modules",
+      "evidence": "The #1561 importer closure applies only when the CHANGED path is a test suite (scripts/select_ci_tests.py:4629-4639); for producer modules the explicit PathTestRule tuple is the entire selection. The current node27_cold_tablespace_evidence rule tuple (select_ci_tests.py:4266-4276) already omits the pgdata migrate/oracle suites even though node27_pgdata_host.py:23 imports EvidencePolicy/verify_root_storage_evidence from it — the container rule carries them (:4256-4265, specifically :4262-4263). tests/test_select_ci_tests.py:331-349 pins the expected producer->consumer map.",
+      "addition": "State the required rule contents: each new PGDATA-owned command/container/evidence module's PathTestRule must select the pgdata migrate + oracle suites AND the still-live cold consumer suites that exercise moved behavior through cold callers (tests/test_compressed_chunk_cold_target.py, tests/test_node27_cold_tablespace_host.py, and the cold container/evidence/install/governance rows as applicable); the tests/test_select_ci_tests.py expected-map update lands in the same merge; the current evidence rule's under-selection must not be replicated onto the new owner."
+    },
+    {
+      "id": "A3",
+      "severity": "P2",
+      "axis": "1,000-line module-size guard not restated",
+      "evidence": "Commit-time large-file ratchet (.large-file-guard.json) with zero pgdata exemptions (verified: no pgdata entries). packages/common/node27_pgdata_migrate.py is 991 lines (9 lines of headroom), node27_pgdata_host.py 781. tasks.md R1.2 'Respect existing module-size boundaries' and design.md 'Do not inflate the existing host/migrate modules' are omitted from the fixture, which is the slice-governing document; the transferred closure (bounded command ~110 lines of compressed_chunk_cold_target.py:260-360, evidence ~200 lines, container normalize/serialize ~300 lines) cannot fit into either existing module.",
+      "addition": "One line: transferred closures land in PGDATA-owned command/container/evidence modules (not by inflating node27_pgdata_host.py/node27_pgdata_migrate.py); every touched file stays <=1000 lines with no new .large-file-guard.json exemption."
+    },
+    {
+      "id": "A4",
+      "severity": "P2",
+      "axis": "Withdrawn-rollout runbook import disposition",
+      "evidence": "docs/runbooks/tier-node27-timeseries-storage.md:1376 and :2015 import EvidencePolicy, parse_mdadm_evidence, parse_smart_evidence from packages.common.node27_cold_tablespace_evidence — after this slice that module no longer exports the moved names, leaving the withdrawn-rollout G2/G3 code blocks referencing a broken import path (docs are not CI-executed; tests/test_issue1895_runbook_contract.py:296-298 pins only symbol names and stays green either way).",
+      "addition": "One line of explicit disposition: either update those import lines now or deliberately leave them stale for the R1.4/R3.2 deletion slice — so the fixture's 'update all callers' mandate has an unambiguous docs boundary and reviewers do not disagree."
+    },
+    {
+      "id": "A5",
+      "severity": "P2",
+      "axis": "Seam-name precision in Must-preserve and matrix",
+      "evidence": "Fixture names 'Migration public prepare/copy/rebind/abort/release/status' and matrix row 'Migration copy/rebind/abort/release', but the real public actions are plan/prepare/copy/activate/rollback/release (scripts/node27_pgdata_migrate.py:42; methods at packages/common/node27_pgdata_migrate.py:497 prepare, :642 copy, :786 activate, :852 rollback, :937 release). 'rebind' is a behavior inside activate; 'abort' is the rollback path; neither is a public seam.",
+      "addition": "Rename to the real seams (plan/prepare/copy/activate/rollback/release, with activate owning the exact-rebind behavior and rollback owning pre-write restoration/stale-post-write refusal) so the fixture does not imply methods that do not exist."
+    }
+  ],
+  "verified_pass": [
+    "Census exact: node27_pgdata_host.py:20-23 is precisely the four cold-family imports (ColdRuntimeError, run_bounded_command, normalize_raw_inspect, EvidencePolicy/verify_root_storage_evidence); node27_pgdata_migrate.py:24-25 is exactly PINNED_IMAGE_ID + normalize/serialize.",
+    "Negative guards real and correctly characterized: cold-residency unit active/enabled refusal at node27_pgdata_host.py:541-547; nhms_cold/nhms-cold-tablespace bind refusal at node27_pgdata_migrate.py:162-165; behavioral pin tests/test_node27_pgdata_migrate.py:324 test_cold_bind_is_refused_as_relocation_identity.",
+    "Image-pin path satisfiable without a copied literal: host_context.nhms_db_image_id.value exists in node27_external_contract_snapshot.json; the snapshot-read pattern is demonstrated at compressed_chunk_cold_residency.py:19-22; both pin-consuming test files (tests/test_node27_pgdata_migrate.py:13, tests/test_node27_pgdata_migrate_oracle.py:18,24) are inside the fixture's census/verification floor, consistent with the prior contract review's T-02 fix direction.",
+    "All four history commits exist with exactly the claimed subjects: cb607d62e governance placement admission, e6ed6c2ee primary wrapper env freeze, bd31bb093 ExecStart comparison without process metadata, bad464651 deployed-venv pin.",
+    "Selector ownership rows for all three pgdata producers exist with stop_on_match (scripts/select_ci_tests.py:4202-4235); the CLI scripts/node27_pgdata_migrate.py has no cold imports; tests/test_select_ci_tests.py:331-349 covers the pgdata/container closure.",
+    "Cold sibling callers fully mapped and consistent with the fixture's 'call the real owner directly' rule: run_bounded_command (node27_cold_tablespace_host.py:20,78,133,160,191; compressed_chunk_cold_target.py:395,516), normalize/serialize (node27_cold_tablespace_{observation,topology}.py; cold tests), EvidencePolicy/verify_root_storage_evidence (node27_cold_governance_runtime.py:18,83; node27_cold_tablespace_host.py:23-25,400-408; node27_cold_tablespace_integration.py:31-34,333-348; scripts/node27_cold_tablespace_install.py:21,130-139). No caller requires a legacy re-export.",
+    "R1.1 exclusion boundary is implementable as stated: pgdata consumes ContainerSnapshot only via fields/config_digest/replace (node27_pgdata_migrate.py:135-194, 592-597, 686-713) and never with_cold_bind/diff_container_config/build_recreate_argv; with_cold_bind (node27_cold_tablespace_container.py:136-141) and its sole production caller (:539-540) can stay cold-owned over the moved dataclass without a facade.",
+    "Error boundary for evidence refusals is already generic and stable: the CLI catches ValueError alongside MigrationError (scripts/node27_pgdata_migrate.py:79-84), so the moved evidence parsers' ValueError contract needs no new translation; the fixture's 'no outcome change' invariant covers it.",
+    "Risk-pack selection matches project-profile.md (PostGIS/TimescaleDB exact-image oracle and published-artifact identity selected; geospatial/SHUD/Slurm/provider/manifest correctly unselected); verification floor matches the profile's 'Physical PGDATA tooling -> exact-image disposable node-27 copy/rebind/rollback oracle' row, including the triple-marked oracle (tests/test_node27_pgdata_migrate_oracle.py:21) with no-empty/no-all-skipped clause.",
+    "R4.1 scoping is correct: this slice applies only the 'PGDATA relocation SHALL own its retained command, container and evidence behavior' ADDED requirement; the governance-placement MODIFIED scenarios and the SQL-performance ADDED requirement correctly wait for their own slices; non-goals correctly exclude R1.3/R1.4/R1.6/R2/R3 work and forbid closing R1.5/#1895/#1891."
+  ],
+  "verification_gaps": "Read-only review per subagent boundary: no tests, builds, linters or selector executions were run; all caller/selector/guard claims are from direct source inspection of the cited lines. Whether the fixture's prescribed suites actually pass pre-change is the implementer's node-27 red-proof duty, not settled here.",
+  "residual_risks": [
+    "Exact names of the new PGDATA-owned modules/error type remain implementer freedom (acceptable once A1/A3 land); cross-review must reject any ColdRuntimeError subclass or re-export.",
+    "Cold's build_recreate_argv/diff_container_config/rollback_plan will operate on the PGDATA-owned ContainerSnapshot with with_cold_bind re-homed as a cold-owned helper — derivable from the fixture's exclusion bullets, but it is a real edit to still-live cold code that the slice's full-regression evidence must cover.",
+    "The moved snapshot/evidence wire shapes (config_digest, public_payload, receipt-embedded snapshot fields consumed by cold install receipts) must remain byte-stable; the fixture's schema pack selection covers this but review should diff payload shape explicitly."
+  ]
+}
