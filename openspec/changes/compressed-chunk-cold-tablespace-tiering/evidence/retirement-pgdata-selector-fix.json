@@ -1,0 +1,13 @@
+{
+  "status": "Updated the overlooked snapshot selector regression expectation.",
+  "changed_paths": [
+    "tests/test_select_ci_tests.py"
+  ],
+  "changes": [
+    "Renamed the regression to describe snapshot and PGDATA consumers.",
+    "Updated exact selected-list equality to external-contract snapshot, PGDATA container, PGDATA migrate, and PGDATA migrate oracle suites.",
+    "Preserved the assertion excluding unrelated core smoke tests; production selector unchanged."
+  ],
+  "evidence": "Acted directly on the parent-reported node27 failure (1 failed, 1323 passed, 6 skipped); did not rerun it.",
+  "validation": "No tests, validation, formatting, SSH, or commit operations run."
+}

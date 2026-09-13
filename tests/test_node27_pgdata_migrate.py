@@ -10,8 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID
-from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
+from packages.common.node27_pgdata_container import PINNED_IMAGE_ID, normalize_raw_inspect
 from packages.common.node27_pgdata_host import DISPLAY, FENCE, UNITS, Host, MigrationError, covered_tree, path_identity
 from packages.common.node27_pgdata_migrate import DEFAULTS, Migration
 from packages.common.safe_fs import SafeFilesystemError

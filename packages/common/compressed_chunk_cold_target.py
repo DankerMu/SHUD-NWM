@@ -13,15 +13,14 @@ from __future__ import annotations
 import json
 import os
 import re
-import select
 import stat
 import subprocess
-import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
+from packages.common import node27_pgdata_command as command
 from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
 from packages.common.safe_fs import SafeFilesystemError, open_directory_no_follow
 
@@ -248,136 +247,6 @@ def _require_trusted_docker(docker_bin: str) -> None:
         )
 
 
-def _kill(process: subprocess.Popen[bytes]) -> None:
-    try:
-        process.kill()
-    except OSError:
-        pass
-    try:
-        process.wait(timeout=1)
-    except Exception:
-        pass
-
-
-def _close_pipes(process: subprocess.Popen[bytes]) -> None:
-    for pipe in (process.stdout, process.stderr):
-        if pipe is None:
-            continue
-        try:
-            pipe.close()
-        except OSError:
-            pass
-
-
-def run_bounded_command(
-    argv: Sequence[str],
-    *,
-    timeout: int = INSPECT_TIMEOUT_SECONDS,
-    max_bytes: int = INSPECT_OUTPUT_MAX_BYTES,
-    runner: DockerRunner | None = None,
-) -> subprocess.CompletedProcess[str]:
-    if runner is not None:
-        try:
-            result = runner(list(argv), check=False, capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired as error:
-            raise ColdRuntimeError(
-                "target inspector timed out",
-                error_class="target_identity",
-                stage="target_identity",
-            ) from error
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-        if len(stdout.encode("utf-8")) > max_bytes or len(stderr.encode("utf-8")) > max_bytes:
-            raise ColdRuntimeError(
-                "target inspector output exceeds the byte ceiling",
-                error_class="target_identity",
-                stage="target_identity",
-            )
-        return result
-    try:
-        process = subprocess.Popen(
-            list(argv),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            close_fds=True,
-        )
-    except OSError as error:
-        raise ColdRuntimeError(
-            "target inspector unavailable",
-            error_class="target_identity",
-            stage="target_identity",
-        ) from error
-    stdout_buf = bytearray()
-    stderr_buf = bytearray()
-    stdout_open = process.stdout is not None
-    stderr_open = process.stderr is not None
-    started = time.monotonic()
-    try:
-        while stdout_open or stderr_open:
-            remaining = timeout - (time.monotonic() - started)
-            if remaining <= 0:
-                _kill(process)
-                raise ColdRuntimeError(
-                    "target inspector timed out",
-                    error_class="target_identity",
-                    stage="target_identity",
-                )
-            watch: list[Any] = []
-            if stdout_open and process.stdout is not None:
-                watch.append(process.stdout)
-            if stderr_open and process.stderr is not None:
-                watch.append(process.stderr)
-            ready, _writers, _errors = select.select(watch, [], [], min(0.1, remaining))
-            if not ready:
-                if process.poll() is not None and not watch:
-                    break
-                continue
-            for pipe in ready:
-                chunk = os.read(pipe.fileno(), 4096)
-                target = stdout_buf if pipe is process.stdout else stderr_buf
-                if not chunk:
-                    if pipe is process.stdout:
-                        stdout_open = False
-                    else:
-                        stderr_open = False
-                    continue
-                if len(target) + len(chunk) > max_bytes:
-                    _kill(process)
-                    raise ColdRuntimeError(
-                        "target inspector output exceeds the byte ceiling",
-                        error_class="target_identity",
-                        stage="target_identity",
-                    )
-                target.extend(chunk)
-        returncode = process.wait(timeout=1)
-    except ColdRuntimeError:
-        raise
-    except subprocess.TimeoutExpired as error:
-        _kill(process)
-        raise ColdRuntimeError(
-            "target inspector timed out",
-            error_class="target_identity",
-            stage="target_identity",
-        ) from error
-    except OSError as error:
-        _kill(process)
-        raise ColdRuntimeError(
-            "target inspector unavailable",
-            error_class="target_identity",
-            stage="target_identity",
-        ) from error
-    finally:
-        if process.poll() is None:
-            _kill(process)
-        _close_pipes(process)
-    return subprocess.CompletedProcess(
-        list(argv),
-        returncode if returncode is not None else 1,
-        stdout_buf.decode("utf-8", errors="replace"),
-        stderr_buf.decode("utf-8", errors="replace"),
-    )
-
-
 def inspect_container_identity_observation(
     *,
     container_name: str = LIVE_CONTAINER_NAME,
@@ -392,12 +261,15 @@ def inspect_container_identity_observation(
     """
 
     _require_trusted_docker(docker_bin)
-    result = run_bounded_command(
-        [docker_bin, "inspect", "--format", INSPECT_FORMAT, container_name],
-        timeout=INSPECT_TIMEOUT_SECONDS,
-        max_bytes=INSPECT_OUTPUT_MAX_BYTES,
-        runner=runner,
-    )
+    try:
+        result = command.run_bounded_command(
+            [docker_bin, "inspect", "--format", INSPECT_FORMAT, container_name],
+            timeout=INSPECT_TIMEOUT_SECONDS,
+            max_bytes=INSPECT_OUTPUT_MAX_BYTES,
+            runner=runner,
+        )
+    except command.CommandError as error:
+        raise ColdRuntimeError(str(error), error_class="target_identity", stage="target_identity") from error
     if result.returncode != 0:
         stderr = (result.stderr or "").strip().split("\n")[0]
         raise ColdRuntimeError(
@@ -513,12 +385,15 @@ def inspect_container_writable(
         container_path=container_path,
         docker_bin=docker_bin,
     )
-    result = run_bounded_command(
-        argv,
-        timeout=INSPECT_TIMEOUT_SECONDS,
-        max_bytes=INSPECT_OUTPUT_MAX_BYTES,
-        runner=runner,
-    )
+    try:
+        result = command.run_bounded_command(
+            argv,
+            timeout=INSPECT_TIMEOUT_SECONDS,
+            max_bytes=INSPECT_OUTPUT_MAX_BYTES,
+            runner=runner,
+        )
+    except command.CommandError as error:
+        raise ColdRuntimeError(str(error), error_class="target_identity", stage="target_identity") from error
     if result.returncode != 0:
         raise ColdRuntimeError(
             "container-side cold tablespace path is not writable",

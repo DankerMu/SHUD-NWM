@@ -3347,6 +3347,17 @@
         }
       ]
     },
+    "1895": {
+      "ceilingPrs": [],
+      "gateEntries": 0,
+      "closed": [
+        {
+          "pr": 2311,
+          "outcome": "merged",
+          "rounds": 2
+        }
+      ]
+    },
     "2104": {
       "ceilingPrs": [],
       "gateEntries": 0,

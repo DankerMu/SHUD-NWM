@@ -18,7 +18,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from packages.common.node27_cold_tablespace_evidence import EvidencePolicy
 from packages.common.node27_cold_tablespace_host import (
     ColdHostError,
     DockerBoundary,
@@ -39,6 +38,7 @@ from packages.common.node27_cold_tablespace_install import (
     run_install,
 )
 from packages.common.node27_cold_tablespace_receipt import no_go, receipt_template
+from packages.common.node27_pgdata_evidence import EvidencePolicy
 from packages.common.redaction import redact_database_dsn, redact_text
 
 _CONNECT_TIMEOUT_SECONDS = 5

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from packages.common.compressed_chunk_cold_residency import PINNED_IMAGE_ID, PINNED_IMAGE_REF
-from packages.common.node27_cold_tablespace_container import diff_container_config, normalize_raw_inspect
+from packages.common.node27_cold_tablespace_container import diff_container_config
 from packages.common.node27_cold_tablespace_install import InstallConfig, InstallInterrupted, run_install
 from packages.common.node27_cold_tablespace_integration import (
     DEFAULT_HOST_PORT,
@@ -44,6 +44,7 @@ from packages.common.node27_cold_tablespace_integration import (
     validate_isolated_config,
 )
 from packages.common.node27_cold_tablespace_types import InstallDependencies
+from packages.common.node27_pgdata_container import normalize_raw_inspect
 
 
 def test_disposable_oracle_defaults_to_1892_pin_and_separate_identity(tmp_path: Path) -> None:
@@ -329,7 +330,8 @@ def test_fallback_cleanup_rejects_a_stranded_root_helper_after_work_root_removal
     (
         ({"image_id": "sha256:" + "0" * 64}, "image authority"),
         ({"default_user": "root"}, "default postgres"),
-        ({"postgres_identity": "0:0"}, "postgres identity"),        ({"root_identity": "1000:1000"}, "root identity"),
+        ({"postgres_identity": "0:0"}, "postgres identity"),
+        ({"root_identity": "1000:1000"}, "root identity"),
         ({"helper_exists": True}, "helper name"),
         ({"post_helper_exists": True}, "helper name"),
         ({"helper_returncode": 1}, "identity helper"),
@@ -772,9 +774,10 @@ def test_real_disposable_cluster_installs_through_run_install(tmp_path: Path) ->
         after_snapshot = normalize_raw_inspect(inspect_container(config, config.container_name))
         assert diff_container_config(before_snapshot, after_snapshot, identity=config.identity).approved
         assert result.receipt["container_snapshot"]["config_digest"] == after_snapshot.config_digest
-        assert sorted(
-            item.split("=", 1)[0] for item in after_snapshot.environment
-        ) == result.receipt["container_snapshot"]["environment_names"]
+        assert (
+            sorted(item.split("=", 1)[0] for item in after_snapshot.environment)
+            == result.receipt["container_snapshot"]["environment_names"]
+        )
         assert config.password not in receipt_path.read_text(encoding="utf-8")
         assert any(action[1] == "run" for action in resources.actions)
         assert_new_chunk_pg_default(config)

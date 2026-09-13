@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from packages.common.node27_cold_tablespace_evidence import EvidencePolicy
+from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
 from packages.common.node27_cold_tablespace_host import (
     ColdHostError,
     DockerBoundary,
@@ -20,6 +20,8 @@ from packages.common.node27_cold_tablespace_host import (
     inspect_running_target,
     inspect_storage_evidence,
 )
+from packages.common.node27_pgdata_command import CommandError
+from packages.common.node27_pgdata_evidence import EvidencePolicy
 
 
 def test_host_path_inspection_refuses_any_path_other_than_fixed_production_contract(tmp_path: Path) -> None:
@@ -58,6 +60,32 @@ def test_docker_boundary_refuses_malformed_or_failed_inspect(monkeypatch: pytest
     )
     with pytest.raises(ColdHostError, match="failed"):
         DockerBoundary().inspect("nhms-db")
+
+
+def test_systemd_quiescence_preserves_cold_runtime_command_error() -> None:
+    def unavailable(*_args, **_kwargs):
+        raise CommandError("target inspector unavailable")
+
+    with pytest.raises(ColdRuntimeError) as raised:
+        SystemdBoundary(runner=unavailable).inspect_quiescence(("nhms-display-api.service",))
+
+    assert str(raised.value) == "target inspector unavailable"
+    assert raised.value.error_class == "target_identity"
+    assert raised.value.stage == "target_identity"
+
+
+def test_cold_bind_inventory_preserves_cold_runtime_command_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def timed_out(*_args, **_kwargs):
+        raise CommandError("target inspector timed out")
+
+    monkeypatch.setattr("packages.common.node27_cold_tablespace_host.run_bounded_command", timed_out)
+
+    with pytest.raises(ColdRuntimeError) as raised:
+        DockerBoundary().current_and_stopped_cold_binds()
+
+    assert str(raised.value) == "target inspector timed out"
+    assert raised.value.error_class == "target_identity"
+    assert raised.value.stage == "target_identity"
 
 
 def test_descriptor_bound_storage_boundary_carries_parsed_health_and_catalog_bound_backup_scope(tmp_path: Path) -> None:
@@ -224,7 +252,7 @@ def test_docker_stop_uses_observed_stop_timeout_plus_margin(monkeypatch: pytest.
 def test_docker_action_timeout_after_possible_mutation_retains_pending_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
+    from packages.common.node27_pgdata_command import CommandError
 
     def fake(argv, **kwargs):
         if argv[1] == "inspect":
@@ -243,7 +271,7 @@ def test_docker_action_timeout_after_possible_mutation_retains_pending_authority
                 ),
                 stderr="",
             )
-        raise ColdRuntimeError("target inspector timed out", error_class="target_identity", stage="target_identity")
+        raise CommandError("target inspector timed out")
 
     monkeypatch.setattr("packages.common.node27_cold_tablespace_host.run_bounded_command", fake)
     with pytest.raises(ColdHostError, match="timed out"):
@@ -333,7 +361,7 @@ def _running_target_docker(
                     "Source": str(identity.host_path),
                     "Destination": identity.container_path,
                 }
-            ]
+            ],
         },
     )
     if seen is not None:
@@ -361,9 +389,7 @@ def test_inspect_running_target_refuses_host_owner_mismatch_before_docker_exec(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seen: list[list[str]] = []
-    docker = _running_target_docker(
-        monkeypatch, host_uid=999, host_gid=999, config_user="1005:1005", seen=seen
-    )
+    docker = _running_target_docker(monkeypatch, host_uid=999, host_gid=999, config_user="1005:1005", seen=seen)
 
     with pytest.raises(ColdHostError, match="owner"):
         inspect_running_target(docker, expected_uid=1005, expected_gid=1005)

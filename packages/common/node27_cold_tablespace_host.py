@@ -17,18 +17,15 @@ from pathlib import Path
 from typing import Any
 
 from packages.common.compressed_chunk_cold_runtime_catalog import ColdRuntimeError
-from packages.common.compressed_chunk_cold_target import run_bounded_command
-from packages.common.node27_cold_tablespace_container import MAX_INSPECT_BYTES
-from packages.common.node27_cold_tablespace_evidence import (
-    EvidencePolicy,
-    parse_backup_inventory,
-    verify_root_storage_evidence,
-)
+from packages.common.node27_cold_tablespace_evidence import parse_backup_inventory
 from packages.common.node27_cold_tablespace_identity import (
     PRODUCTION_IDENTITY,
     ColdTablespaceIdentity,
     validate_identity_for_action,
 )
+from packages.common.node27_pgdata_command import CommandError, run_bounded_command
+from packages.common.node27_pgdata_container import MAX_INSPECT_BYTES
+from packages.common.node27_pgdata_evidence import EvidencePolicy, verify_root_storage_evidence
 from packages.common.safe_fs import (
     SafeFilesystemError,
     list_directory_no_follow_limited,
@@ -74,11 +71,14 @@ class SystemdBoundary:
                 "-p",
                 "Result",
             )
-            result = (
-                run_bounded_command(argv, max_bytes=MAX_INSPECT_BYTES)
-                if self._runner is None
-                else self._runner(argv, max_bytes=MAX_INSPECT_BYTES)
-            )
+            try:
+                result = (
+                    run_bounded_command(argv, max_bytes=MAX_INSPECT_BYTES)
+                    if self._runner is None
+                    else self._runner(argv, max_bytes=MAX_INSPECT_BYTES)
+                )
+            except CommandError as error:
+                raise ColdRuntimeError(str(error), error_class="target_identity", stage="target_identity") from error
             if result.returncode != 0:
                 raise ColdHostError("writer/timer state inspection failed")
             fields: dict[str, str] = {}
@@ -130,9 +130,12 @@ class DockerBoundary:
         return self.inspect(container)
 
     def _container_names(self) -> tuple[str, ...]:
-        result = run_bounded_command(
-            (self._docker_bin, "ps", "-a", "--format", "{{.Names}}"), max_bytes=MAX_INSPECT_BYTES, timeout=5
-        )
+        try:
+            result = run_bounded_command(
+                (self._docker_bin, "ps", "-a", "--format", "{{.Names}}"), max_bytes=MAX_INSPECT_BYTES, timeout=5
+            )
+        except CommandError as error:
+            raise ColdRuntimeError(str(error), error_class="target_identity", stage="target_identity") from error
         if result.returncode != 0:
             raise ColdHostError("Docker container inventory is unavailable")
         return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
@@ -158,7 +161,7 @@ class DockerBoundary:
         timeout = self._action_timeout(argv)
         try:
             result = run_bounded_command(argv, max_bytes=MAX_INSPECT_BYTES, timeout=timeout)
-        except ColdRuntimeError as error:
+        except CommandError as error:
             raise ColdHostError("Docker action timed out") from error
         if result.returncode != 0:
             raise ColdHostError("Docker action failed")
@@ -189,7 +192,7 @@ class DockerBoundary:
     def _json(self, argv: Sequence[str], *, timeout: int = 5) -> Any:
         try:
             result = run_bounded_command(tuple(argv), max_bytes=MAX_INSPECT_BYTES, timeout=timeout)
-        except ColdRuntimeError as error:
+        except CommandError as error:
             raise ColdHostError("Docker inspection timed out") from error
         if result.returncode != 0:
             raise ColdHostError("Docker inspection failed")
@@ -466,9 +469,7 @@ def inspect_storage_evidence(
     )
 
 
-def inspect_running_target(
-    docker: DockerBoundary, *, expected_uid: int, expected_gid: int
-) -> dict[str, Any]:
+def inspect_running_target(docker: DockerBoundary, *, expected_uid: int, expected_gid: int) -> dict[str, Any]:
     """Read one contract's current bind plus in-container writability.
 
     Writability must be proven as the exact numeric uid:gid that owns the host
@@ -498,9 +499,7 @@ def inspect_running_target(
         raise ColdHostError("current container does not have exactly one cold bind")
     host = inspect_host_path(identity=identity)
     if host["uid"] != expected_uid or host["gid"] != expected_gid:
-        raise ColdHostError(
-            "cold tablespace host owner differs from the expected runtime identity"
-        )
+        raise ColdHostError("cold tablespace host owner differs from the expected runtime identity")
     config = inspect.get("Config") if isinstance(inspect.get("Config"), Mapping) else {}
     observed_user = config.get("User") if isinstance(config, Mapping) else None
     expected_user = f"{expected_uid}:{expected_gid}"

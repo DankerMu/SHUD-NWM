@@ -10,18 +10,15 @@ from pathlib import Path
 
 import pytest
 
-from packages.common import node27_cold_tablespace_evidence as evidence
-from packages.common.node27_cold_tablespace_evidence import (
-    EvidencePolicy,
-    parse_backup_inventory,
-    verify_root_storage_evidence,
-)
+from packages.common import node27_pgdata_evidence as evidence
+from packages.common.node27_cold_tablespace_evidence import parse_backup_inventory
 from packages.common.node27_cold_tablespace_integration import (
     IntegrationResources,
     RootEvidenceCapability,
     default_config,
     root_evidence_setup_argv,
 )
+from packages.common.node27_pgdata_evidence import EvidencePolicy, verify_root_storage_evidence
 
 _ROOT = Path(__file__).resolve().parents[1]
 _HELPER = _ROOT / "scripts/node27_cold_tablespace_root_evidence_setup.py"

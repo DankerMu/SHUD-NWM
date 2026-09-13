@@ -9,17 +9,18 @@ import jsonschema
 import pytest
 
 from packages.common.node27_cold_tablespace_authority import private_snapshot_digest
-from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
+from packages.common.node27_cold_tablespace_container import with_cold_bind
 from packages.common.node27_cold_tablespace_identity import PRODUCTION_IDENTITY
 from packages.common.node27_cold_tablespace_install import InstallConfig, run_install
+from packages.common.node27_pgdata_container import normalize_raw_inspect
 from tests.test_node27_cold_tablespace_install import NOW, SHA, FakeConnection, _config, _dependencies, _inspect
 
 
 def _authority(*, phase: str, **ownership: bool) -> dict:
-    from packages.common.node27_cold_tablespace_container import normalize_raw_inspect
+    from packages.common.node27_pgdata_container import normalize_raw_inspect
 
     before = normalize_raw_inspect(_inspect())
-    replacement = before.with_cold_bind()
+    replacement = with_cold_bind(before)
     return {
         "schema_version": "1.0",
         "phase": phase,
@@ -450,9 +451,12 @@ def test_rollback_persists_remaining_ownership_before_terminal_unlink_retry(tmp_
         "device_identity": "8:11:1",
         "writable": False,
     }
-    deps.remove_host_path = lambda: observed_path.update(
-        {"exists": False, "is_directory": False, "entry_count": None, "uid": None, "gid": None, "mode": None}
-    ) is None
+    deps.remove_host_path = lambda: (
+        observed_path.update(
+            {"exists": False, "is_directory": False, "entry_count": None, "uid": None, "gid": None, "mode": None}
+        )
+        is None
+    )
     config = _config(tmp_path, enforce=True)
     _write_authority(
         config,

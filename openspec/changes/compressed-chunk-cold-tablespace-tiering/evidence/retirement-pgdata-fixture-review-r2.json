@@ -1,0 +1,38 @@
+{
+  "verdict": "pass",
+  "iteration": "1",
+  "summary": "Revised fixtures/retirement-pgdata-owner-transfer.md resolves all five required additions from the round-0 review with accurate citations and no new contradictions. The fixture can safely govern the first owner-transfer slice (tasks.md R1.1, R1.2, PGDATA portion of R1.5) under R4.3.",
+  "additions_verified": [
+    {
+      "id": "A1",
+      "status": "resolved",
+      "note": "Must-preserve bullet pins PGDATA-owned CommandError (no cold subclass/alias), MigrationError translation at Host.command, cold ColdHostError preservation at node27_cold_tablespace_host action/inspect boundaries, and ColdRuntimeError preservation via explicit local translation in compressed_chunk_cold_target internal callers; cites original lines 395/516, catches 161/192, direct tests 774-795 with the correct test-expectation split (moved direct tests -> new owner error; cold public-boundary tests -> existing errors). New 'Error cutover' invariant row requires stable public errors and no cold imports in the moved owner. Matches packages/common/compressed_chunk_cold_target.py:395,516 and node27_cold_tablespace_host.py:161-162,192-193 as verified in round 0."
+    },
+    {
+      "id": "A2",
+      "status": "resolved",
+      "note": "New bullet mandates explicit PathTestRule contents for each new producer (pgdata migrate + oracle suites plus still-live cold consumers: compressed target, cold host/container/evidence/install/governance as applicable), same-merge test_select_ci_tests.py expected-map update, and the correct mechanism note that test-import closure does not cover producer edits (select_ci_tests.py:4629-4639), with an explicit warning not to copy the old evidence rule's under-selection (select_ci_tests.py:4266-4276 vs 4256-4265)."
+    },
+    {
+      "id": "A3",
+      "status": "resolved",
+      "note": "Moved closures go to PGDATA-owned command/container/evidence modules, not inflated host/migrate files (migrate.py verified at 991/1000 lines); touched files stay within the existing limit, new modules below 1000 lines, no new .large-file-guard.json exemptions."
+    },
+    {
+      "id": "A4",
+      "status": "resolved",
+      "note": "Unambiguous decision: update withdrawn-rollout runbook imports of moved EvidencePolicy/parsers now (storage runbook original lines 1376/2015), withdrawn status kept, no dangling executable import left for R1.4/R3.2. No conflict with the name-only pins at tests/test_issue1895_runbook_contract.py:296-298; parse_backup_inventory correctly remains a cold import."
+    },
+    {
+      "id": "A5",
+      "status": "resolved",
+      "note": "Real public seams plan/prepare/copy/activate/rollback/release now used in both the Must-preserve bullet and the Storage/state matrix row; activate owns exact rebind, rollback owns pre-write restoration and post-release refusal; 'no invented rebind/abort/status CLI actions' guards against phantom seams. Matches scripts/node27_pgdata_migrate.py:42."
+    }
+  ],
+  "regression_check": "Edits are purely additive/precise: census pins (node27_pgdata_host.py:20-23, node27_pgdata_migrate.py:24-25), negative-guard bullets, image-pin bullet, history pins (cb607d62e, e6ed6c2ee, bd31bb093, bad464651), risk packs, remaining matrix rows, verification floor, R4.1 scoping and non-goals are unchanged from the round-0-verified text. No internal contradictions between the new error-cutover bullet and the 'existing generic tests migrate with ownership' bullet (moved tests expect the new owner error; cold boundary tests keep theirs).",
+  "verification_gaps": "Read-only re-review per boundary: no tests/builds/selector runs executed; verdict rests on direct inspection of the revised fixture text against the round-0-verified source citations. Implementer-side node-27 red proof and evidence remain the slice's own gates.",
+  "residual_risks": [
+    "Module/error naming (CommandError, new module filenames) is now fixture-pinned in kind but not in filename; cross-review should confirm the chosen filenames keep every touched file <=1000 lines and carry the mandated selector rows.",
+    "Cold's with_cold_bind re-homing and build_recreate_argv/diff_container_config adaptation over the moved ContainerSnapshot remains derivable implementer work; the slice's full-regression and cold-suite evidence must cover it."
+  ]
+}
