@@ -1,0 +1,456 @@
+{
+  "head": "92657af3605273d0280b7107720788852786708e",
+  "round": 1,
+  "status": "not-clean",
+  "reviews": {
+    "C4CorrectnessR1": {
+      "seat": "correctness",
+      "lens": "correctness",
+      "pr": "2321",
+      "head": "92657af3605273d0280b7107720788852786708e",
+      "base": "f765ca0d0a20792ae77281fcefc399a4d0339676",
+      "verdict": "NO_ACTIONABLE_CORRECTNESS_CANDIDATE",
+      "blocking_findings": 0,
+      "findings": [],
+      "scope_reviewed": [
+        "services/production_closure/c4_production_acceptance.py (582ln, full)",
+        "services/production_closure/c4_production_acceptance_io.py (784ln, full)",
+        "scripts/node27_c4_production_acceptance.py (103ln, full)",
+        "scripts/select_ci_tests.py diff (+30, all hunks + surrounding rule context)",
+        "tests/test_node27_c4_production_acceptance.py (857ln, full)",
+        "tests/test_select_ci_tests.py diff (+52, all hunks)",
+        "openspec/specs/c4-live-display-evidence/spec.md diff (full)",
+        "docs/runbooks/node-27-bringup-checklist.md diff (C4 owner registration, full added section)",
+        "docs/runbooks/tier-node27-timeseries-storage.md diff (retained-workload registration, full)",
+        "openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md diff",
+        "surrounding contracts: packages/common/node27_pgdata_command.py (full), packages/common/safe_fs_publication.py (write/move bodies), packages/common/safe_fs.py (open walk, error kinds, _verify_fd_matches_path), packages/common/evidence_io.py (assert_paths_disjoint, normalized_absolute_path, validate_json_complexity, reject_secret_material + secret regexes), apps/frontend/scripts/c4-receipt-binder.mjs (full), services/production_closure/__init__.py"
+      ],
+      "checks_performed": {
+        "logic_and_signatures": "CLI↔owner keyword contracts match (freeze/bind/verify arg names/types verified pairwise); CommandRunner injection signature matches run_bounded_command's runner call (argv, check=False, capture_output=True, text=True, timeout); PrivateFileIdentity/ParentIdentity as_mapping↔identity_from_mapping/parent_from_mapping round-trip over closed 9/4-key sets with bool-excluded non-negative int validation; _require_closed_object enforces exact key sets for all three outer records plus nested approved_record/file_ref/inputs/bracket objects.",
+        "boundary_null_empty_stale_mismatched": "empty file refused (size<1), >256KiB refused; non-str/None JSON fields refused by require_* layer; malformed SHA (non 40-hex lowercase), origin (scheme/host/@/?/#/trailing-path rules + consistent trailing-slash normalization at every parse site), ID (bounded token), bracket (string decimal ≤10 digits vs JSON int ≤9_999_999_999, bool/negative/float excluded, start>end refused) all refused with stable codes; stale freeze/binding/approved/c4 caught by 9-field identity (dev/ino/uid/mode/nlink/size/mtime_ns/ctime_ns/sha256-from-same-held-fd) + parent identity rechecks before AND after binder; mismatched reviewed_sha refused at freeze load and approval extraction; duplicate JSON keys via object_pairs_hook; nonfinite numbers via parse_constant AND post-pass (1e999 float-inf path confirmed covered); depth 16/node 256/array 32/object 64 ceilings; RecursionError on deep nesting mapped to C4_JSON_INVALID.",
+        "error_branches_and_return_codes": "every refuse() call site in both modules uses a static literal message+code (no interpolation); CLI maps C4AcceptanceError→exit 1 '{code}: {message}' (no path/URL leakage), argparse errors→static 'C4_USAGE' exit 2 via parser_class override; CommandError translation verified verbatim against node27_pgdata_command.py messages ('target inspector timed out'→C4_BINDER_TIMEOUT, 'target inspector output exceeds the byte ceiling'→C4_BINDER_OUTPUT, else C4_BINDER_UNAVAILABLE); nonzero exit→C4_BINDER_FAILED precedes exact stdout=='BINDER: PASS\\n' check which matches c4-receipt-binder.mjs's only success terminal; native-exception scan found no reachable unwrap (all OSError/ValueError/TypeError/OverflowError wrapped or unreachable).",
+        "loop_bounds": "_read_fd_exact bounded by fstat size + trailing-byte probe; short/grown reads refused; json complexity/nonfinite traversals iterative with node ceilings; no unbounded loops in new code.",
+        "concurrency_ordering": "held receipt fd+parent fd across binder with recapture drift check; approved/freeze re-verified before and after binder in bind; approved/freeze/binding re-verified after binder in verify; publish is the only irreversible step and occurs after all rechecks; parent-swap detected via multiple independent parent opens + _named_inode cross-checks + safe_fs open-time _verify_fd_matches_path; no-follow per-component walk confirmed in safe_fs (_DIR_FLAGS O_NOFOLLOW, ELOOP/NotADirectory handling).",
+        "publication": "temp-sibling pattern composed from existing write_bytes_no_follow_exclusive(mode=0o600, require_durable_create=True) + move_regular_file_no_follow_exclusive (link+unlink); FileExistsError→C4_EXISTS with created-inode-only cleanup; SafeFilesystemError kind 'indeterminate'→refuse WITHOUT delete (winner/unproved-object preservation per fixture); readback bytes + published inode==temp inode + parent durability + temp-residue absence verified before returning; cleanup helper re-proves dev/ino through a fresh parent open before unlinking.",
+        "removed_behavior_audit": "no Python code deleted; two existing select_ci_tests.py rule lines extended additively (FILE_JOURNAL_READ_STATE_TESTS+test_safe_fs and ISSUE1895_READINESS_C1_C2_C3_TESTS tuples retain every prior suite, plus a new regression test asserting prior consumers kept); spec/runbook prose transferring the outer reviewed-SHA/exact-byte guarantee from old G0/C3 survives as freeze/bind/verify in the new owner; old node27_issue1895_* graph untouched and not imported (import census verified: only packages.common + services.production_closure imports in new modules; no node27_issue1895_* anywhere); binder CLI/core/schema/producer/river-click untouched.",
+        "wrapper_faithfulness": "run_bounded_command wrapped with fixed trusted argv (/usr/bin/node + repo-fixed binder script, lstat non-symlink regular checks), finite 10s timeout, 64KiB ceiling, runner injectable only at the documented boundary (tests); binder success requires exit 0 AND exact PASS terminal — no substring/exit-only acceptance; safe_fs/evidence_io primitives used with their documented contracts (no weakened common helper, no extended evidence_io.FileIdentity).",
+        "oracle_strength": "verify publishes the ORIGINAL binding's expected c4 identity (not the final observation) and never refreshes expectations; ordering invariant enforced without flooring the freeze instant (runbooks consistently instruct sleep 1 across the second boundary); post-binder guards proven load-bearing by the shipped mutant tests (3 guard-removal red tests present in suite).",
+        "selector_rules": "new owner/IO/CLI/package-__init__ rules select the new suite (stop_on_match on the three new modules, additive on __init__ per deviation record); all four shared deps (node27_pgdata_command, safe_fs, safe_fs_publication, evidence_io) select the new suite; redaction.py legitimately absent (not imported); owner-rule removal mutant test present (scripts/ red assertion deliberately skipped — flagged to evidence seat)."
+      },
+      "invariant_matrix_coverage": {
+        "approval_producer": "COVERED — freeze binds source path/identity/parent + status/head_sha/reviewed_sha equality with supplied 40-hex SHA; refusal publishes nothing; no self-approval path exists (approved record only read, never written).",
+        "validators_process": "COVERED — real binder required by default; PASS requires exit 0 + exact terminal; FAIL/nonzero/timeout/byte-ceiling/malformed all map to static refusals; CommandError messages verified verbatim.",
+        "storage_identity": "COVERED — same-held-fd sha256 + full 9-field facts, before/after fstat, named-path/pinned-parent cross-checks, nlink==1/mode 0600/euid enforced at capture and at mapping parse; drift across binder refused.",
+        "entry_order": "COVERED — freeze→producer→bind→verify enforced via artifact/stage closed schemas, reviewed_sha rebinding at each load, receipt-absent-at-freeze/exists-at-bind, freeze-not-later-than-cmd-start (unfloored) at bind and verify; missing records refuse C4_MISSING.",
+        "consumers": "COVERED — binder argv interface + PASS terminal unchanged (verified against binder source); old C3 owner/tests untouched; no old-graph import.",
+        "failure_publication": "COVERED — no clobber at three layers (lexists, pinned-parent _named_inode, exclusive link), winner never deleted, cleanup only for proven-created inode, readback+inode+parent durability proof, closed bounded JSON.",
+        "evidence_docs": "COVERED within lens — registrations in both runbooks match the CLI contract flag-for-flag and retain no-C1-C3-substitution language; runtime proof adjudication belongs to evidence seat."
+      },
+      "verification_gaps": [
+        "This seat ran no tests/builds per constraints; runtime claims (934 targeted, 2 real-node, CLI synthetic PASS/refusal, 3-red/3-green mutant, 20218 full) accepted as supplied in retirement-c4-verification.json and cross-checked only for internal consistency with the shipped tests (the three mutant-red tests exist and assert the post-binder guards).",
+        "C4_BINDER_OUTPUT translation branch (byte-ceiling CommandError→refusal) has no row in the new test suite; translation correctness settled by source inspection (exact message match at node27_pgdata_command.py:55,98 vs c4_production_acceptance.py translation), not by executed proof.",
+        "Owner-rule removal mutant test skips the red assertion for scripts/node27_c4_production_acceptance.py (scripts/ continue branch) — CLI rule's discriminating red power unproven by that test; routed to evidence seat."
+      ],
+      "residual_risks": [
+        "_translate_command_error couples to CommandError message text; a future message edit in node27_pgdata_command.py degrades timeout/ceiling codes to C4_BINDER_UNAVAILABLE — still a fail-closed refusal, and the new selector rule runs the C4 suite (incl. the timeout test) on any such edit.",
+        "Refusal paths can leave a random-named 0600 temp sibling as residue when creation provenance is unprovable — deliberate per fixture ('never delete an object not proved created by this invocation'); harmless clutter in a private 0700 dir.",
+        "freeze-not-later-than check is intentionally unfloored: a freeze inside the cmd-start second refuses even if it genuinely preceded the command; documented in both runbooks (sleep 1), fail-safe direction."
+      ]
+    },
+    "C4InvariantR1": {
+      "seat": "invariant-state",
+      "verdict": "NO_BLOCKING_FINDINGS",
+      "summary": "Traced the full freeze -> producer -> bind -> verify lifecycle across failure and stale-state boundaries in services/production_closure/c4_production_acceptance{,_io}.py, the public CLI, the unchanged Node binder/core, shared safe_fs/safe_fs_publication/evidence_io/node27_pgdata_command primitives, selector rules, canonical spec, both runbooks, and all evidence files. Every lifecycle invariant in the fixture's governing invariant (original SHA, original inputs/bracket, exact previously accepted bytes/identity; later observations refuse but never redefine expectations) holds in code with direct behavioral tests and a discriminating mutant proof. Zero P0/P1/P2 candidates from this lens; one non-blocking evidence-provenance note.",
+      "findings": [],
+      "non_blocking_notes": [
+        {
+          "id": "C4-INV-N1",
+          "severity": "Note",
+          "lens": "invariant-state",
+          "failure_class": "evidence-provenance",
+          "scenario": "retirement-c4-node27.log opens with header 'VERIFY_HEAD 767efb4b52a408926a60ce33f0c99c5f8d70c593' yet the same log body ends with '20218 passed, 335 skipped' and 'C4_FULL_BACKEND_PASS'. At 767efb4b the five selector disposition-guard tests red (retirement-c4-selector-red.log: 5 failed/929 passed), and test_select_ci_tests.py is part of the backend suite, so a full-backend run at that exact head could not be green; the green full run necessarily happened after the 4-line selector rule landed at 317ca7d4. An auditor reading the log alone could misbind the full-backend PASS to the pre-fix head.",
+          "evidence": "openspec/changes/compressed-chunk-cold-tablespace-tiering/evidence/retirement-c4-node27.log (head and tail); retirement-c4-selector-red.log tail '5 failed, 929 passed'; verification.json source_sha=317ca7d48ddd2cfaceea74d07ff0ef6addc1093e; git chain f765ca0d0 -> 767efb4b5 (implementation) -> 317ca7d48 (selector __init__ rule only, diff confirmed 4 lines + implementation.json) -> 92657af36 (evidence/tasks/spec-format only, diff confirmed)",
+          "consequence": "No product-code impact: HEAD product code is byte-identical to the 317ca7d4 verified source except the 4-line additive selector rule; the PR body already discloses 'successor changes only evidence/task status and canonical formatting'. Impact is limited to evidence-chain readability.",
+          "fix_direction": "Optional: annotate the log or verification.json that VERIFY_HEAD marks session start and the final targeted/full runs executed at source_sha 317ca7d4 after the in-session selector fix.",
+          "required_proof": "Evidence seat confirmation; no code change needed.",
+          "sibling_surfaces": "Evidence seat (C4EvidenceR1) owns adjudication of log-vs-json provenance.",
+          "blocking": false
+        }
+      ],
+      "out_of_scope_escalations": [],
+      "invariant_matrix": [
+        {
+          "id": "INV-1",
+          "invariant": "Approved source binds the supplied reviewed SHA; the CLI never self-approves",
+          "status": "HELD",
+          "evidence": "c4_production_acceptance.py:206-215 (_extract_approval requires status=='PASS' and head_sha==reviewed_sha==supplied 40-hex; require_sha io:151-154); freeze embeds source path/full identity/parent/status/head/reviewed (owner:320-342). Tests test_freeze_refuses_mismatched_sha_without_output (C4_SHA_MISMATCH, no output), test_freeze_refuses_non_pass_status_without_self_approval (C4_APPROVAL_STATUS, no output); CLI smoke wrong-SHA refusal without publishing or freeze rewrite (verification.json cli_smoke; test_real_node_binder_refuses_sha_mismatch_without_rewriting_freeze:838).",
+          "boundary": "private-record proof (operator-supplied approval record in euid-0700 dir), not approval authorization"
+        },
+        {
+          "id": "INV-2",
+          "invariant": "Temporal order: freeze strictly recorded before C4 execution; freeze instant never floored to the cmd-start second",
+          "status": "HELD",
+          "evidence": "frozen_at full-precision UTC (format_utc io:203-210; test_freeze_preserves_subsecond_timestamp_without_flooring:239 asserts .123456 preserved); freeze_is_not_later_than_cmd_start compares exact instants without flooring (io:247-250, docstring explicit) enforced at bind (owner:439-441) and re-enforced at verify from the recorded bracket (owner:507-509); receipt must be absent at freeze (assert_receipt_parent_ready io:585-600) so freeze-after-producer refuses C4_EXISTS (test:292), and bind before producer refuses C4_MISSING via capture_held_private_file; test_bind_refuses_freeze_after_command_start_without_flooring:403. Runbook operational mitigation (sleep 1 before recording C4_CMD_START) matches the no-flooring comparison (tier-node27-timeseries-storage.md diff; node-27-bringup-checklist.md:311-313).",
+          "boundary": "operator clock honesty is the trust boundary; bracket truthfulness is operator-supplied per fixture"
+        },
+        {
+          "id": "INV-3",
+          "invariant": "Binder receives only original frozen inputs and original recorded bracket; never re-derived at later stages",
+          "status": "HELD",
+          "evidence": "bind takes all five inputs solely from the freeze record (owner:425-426), bracket once from CLI validated canonical decimal ordered (require_ordered_bracket io:193-198) and records it; verify re-reads inputs from freeze, cross-checks binding inputs equality (owner:500-504 C4_INPUT_MISMATCH), takes bracket from the binding record (owner:506), and checks binding c4 path equals freeze receipt path (owner:523-524); both binder invocations use exactly these values (_run_binder_with_held_receipt owner:391-408; binder argv contract matches c4-receipt-binder.mjs:44-49 and core requireCmdBracket/normalizedOrigin/validatePassDocument which enforce bracket containment and origin/pin semantics).",
+          "boundary": "semantic origin/pin/bracket validation deliberately delegated to the unchanged binder"
+        },
+        {
+          "id": "INV-4",
+          "invariant": "Exact C4 bytes and full file/parent identity pinned and rechecked across the binder process boundary",
+          "status": "HELD",
+          "evidence": "PrivateFileIdentity = dev/ino/uid/mode/nlink/size/mtime_ns/ctime_ns + sha256 read from the SAME held fd (io:82-110, capture_held_private_file:340-393 with post-read fstat recheck and named-inode check through pinned parent); fd held open across binder; recapture_held_private_file re-hashes held fd, rechecks named inode and pinned parent (io:397-431); before/after equality enforced (owner:404-406 C4_IDENTITY_DRIFT). Tests test_bind_refuses_c4_byte_change_across_binder:431, test_verify_refuses_to_refresh_binding_when_c4_bytes_change:455 (binding bytes unchanged, no acceptance). Inode replacement, same-size content change, mode/nlink/mtime/ctime drift all covered by the 9-field signature; hardlink vector closed by nlink==1 assertion (io:288-291).",
+          "boundary": "local POSIX filesystem; coarse-ctime network filesystems out of domain"
+        },
+        {
+          "id": "INV-5",
+          "invariant": "No refreshed expectation: final acceptance validates against originally frozen/bound facts; a later observation can only refuse",
+          "status": "HELD",
+          "evidence": "verify compares observed post-binder identity against binding-recorded expectation (owner:545-546), then rechecks approved/freeze/binding original records AFTER the binder and before publication (owner:548-561); acceptance record built solely from record-sourced facts (owner:564-582; c4 ref uses expected identity). Mutant proof: removing the post-binder original-record rechecks turns exactly the 3 cross-binder mutation tests red, restoration green (verification.json mutant block; tests test_verify_refuses_when_{approved_record,freeze,binding}_mutates_across_binder:485/521/553 assert refusal, no acceptance, prior records not rewritten).",
+          "boundary": "mutant script verified byte-exact block removal; discriminating red/green pair recorded"
+        },
+        {
+          "id": "INV-6",
+          "invariant": "Publication never clobbers, never deletes unproven objects, leaves no accepted partial result or fd leak",
+          "status": "HELD",
+          "evidence": "publish_private_json (io:629-730): random secrets.token_hex(16) temp sibling, write_bytes_no_follow_exclusive(mode=0600, require_durable_create=True), temp identity/parent/inode proof, move_regular_file_no_follow_exclusive link-then-unlink no-clobber (safe_fs_publication.py:29-86 unchanged shared primitive), published inode==temp inode + byte readback + parent identity, _unlink_created_temp only after dev/ino proof, indeterminate paths refuse without unlinking (io:700-709, 722-730). Tests: parent swap during temp creation refused C4_PARENT_DRIFT without touching displaced tree (:586), existing output C4_EXISTS no-clobber (:629), unrelated stale sibling preserved (:648), symlink output parent refused (:768). Inputs immutable after refusal asserted in mutation tests (:485-583).",
+          "boundary": "single-operator private directory; no cross-user threat model per fixture"
+        },
+        {
+          "id": "INV-7",
+          "invariant": "Closed bounded schemas and static owner-coded refusals; no raw input/URL/credential leakage, no argparse leakage",
+          "status": "HELD",
+          "evidence": "Closed key sets + artifact/schema_version/stage checks (owner:137-197, 354-397); duplicate keys, nonfinite numbers (both 1e999 float and NaN literal paths), depth/node/array/object bounds, secret material refused (io:509-560 reusing evidence_io.validate_json_complexity/reject_secret_material); identity mappings re-validated against euid/0600/nlink==1 and parent 0700 (io:439-501); all refuse() messages static literals (io:66-77), CLI argparse error override emits static C4_USAGE exit 2 (scripts/node27_c4_production_acceptance.py:18-21), refusal exit 1. Tests :658/:730/:739/:789; smoke-script exit-1 semantic refusal documented in deviations.",
+          "boundary": "redaction.py deliberately not imported (static-first design); r2 residual risk about its psycopg2 import does not materialize"
+        },
+        {
+          "id": "INV-8",
+          "invariant": "Real unchanged Node binder required; no exit-only, substring, or fake PASS; bounded invocation with fixed trusted paths",
+          "status": "HELD",
+          "evidence": "Fixed /usr/bin/node lstat-checked non-symlink regular executable; repo binder script lstat-checked (owner:217-244); run_bounded_command with 10s timeout and 64KiB ceiling (owner:52-53; packages/common/node27_pgdata_command.py unchanged); acceptance requires returncode 0 AND stdout exactly 'BINDER: PASS\\n' (owner:290-294) matching c4-receipt-binder.mjs final line; CommandError text mapping exact ('target inspector timed out'/'output exceeds the byte ceiling' -> C4_BINDER_TIMEOUT/OUTPUT). Tests :348 (nonzero, inputs kept), :367 (exit-0 without PASS terminal), :386 (timeout static code, no URL leak); real /usr/bin/node v22.22.2 runs 2 passed/0 skipped (verification.json real_node; tests :814/:838). Binder/core/schema/producer byte-untouched (absent from diff; implementation.json unchanged list).",
+          "boundary": "synthetic fixture receipts labeled fixture proof; no live browser claim"
+        },
+        {
+          "id": "INV-9",
+          "invariant": "Sibling transitions preserve unchanged consumers and independent C1-C3 obligations; ownership transfer is additive",
+          "status": "HELD",
+          "evidence": "Import independence: zero node27_issue1895_* imports in new modules (grep, docstring-only mentions); old C1/C2/C3/performance callers absent from diff; selector rules additive-only — existing consumer tuples extended, none removed, 4 new PathTestRules for the 4 new paths including the services/production_closure/__init__.py gap that produced the 5-red/929-pass selector proof then 934-pass targeted (select_ci_tests.py:2296-2317; deviations record); canonical spec retains old C4 closed-protocol requirements and adds R3 deletion guard ('R3 MUST NOT delete old G0/C3 capability until R1 delivers') with new owner scenarios (spec.md diff); runbooks keep withdrawn G0-G8 status and C1/C2/C3 independence (checklist new lines 16/20/79/306-354; tier storage diff) and register the actual freeze/bind/verify commands with correct sleep-1 temporal guidance and honest R1.6-only scoping; tasks.md marks R1.6 with evidence links and keeps R1.4/R2-R5 open.",
+          "boundary": "R1.4 query workload and R2-R5 explicitly pending; no production activation claimed"
+        },
+        {
+          "id": "INV-10",
+          "invariant": "Private-record proof is never labeled live browser PASS or production deployment",
+          "status": "HELD",
+          "evidence": "write_closed_c4_fixture docstring 'Fixture proof, not live PASS' (tests:139-148); verification.json limits block; tasks.md 'this is not live browser or production deployment PASS'; PR body fixture/verification section; spec scenario retains 'local CLI PASS alone insufficient' and the new outer-binding scenario; runbook registration 'does not claim C1-C3, remaining R1.4, R1.5, or the epic is done' (tier storage diff; checklist:353-354).",
+          "boundary": "R5 final handoff remains the enforcement point for deployment completion"
+        }
+      ],
+      "verification_gaps": [
+        "Reviewer boundary: no tests, selector runs, OpenSpec strict, lint, or builds executed by this seat; all held-status judgments rest on direct full-file inspection of the diff at HEAD 92657af3 plus the supplied node-27 evidence (targeted 934, real-node 2, CLI smoke, mutant 3-red/3-green, full 20218/335).",
+        "C4-INV-N1 log-header provenance nuance needs evidence-seat adjudication.",
+        "Cross-seat overlap intentionally not duplicated here: oracle strength of individual assertions (test-evidence seat), security boundaries of shared primitives (security-perf seat), line-level logic beyond lifecycle invariants (correctness seat)."
+      ],
+      "residual_risks": [
+        "The acceptance record is terminal private evidence with no downstream consumer in this slice; R5 remains the production-handoff enforcement point (matches fixture-review-r2 residual risk).",
+        "Freeze-to-bind window: receipt parent identity is first pinned at bind (receipt is absent at freeze by design); a parent-directory swap in that window is undetectable and harmless because the binding pins whatever actually passed the binder fresh — consistent with the fixture's freeze contract, stated here so the verifier can confirm the reading.",
+        "Operator-supplied bracket honesty and clock are trust inputs; the chain enforces immutability and order of what was recorded, not the truth of the wall-clock bracket (fixture-defined boundary)."
+      ]
+    },
+    "C4EvidenceR1": {
+      "review_scope": "PR #2321 R1.6 C4 acceptance-owner slice (BASE f765ca0d..HEAD 92657af, 17 files): full diff, fixture retirement-c4-acceptance-owner.md, canonical c4-live-display-evidence delta, verification JSON + node27/selector-red logs + implementation/fixture-review manifests, runbook registrations, selector rules. Lens: test-evidence + spec-compliance (one lens per finding). Read-only; no tests/builds/lint executed per leaf constraints.",
+      "summary": "Evidence chain is internally consistent and unusually well provenanced: node27 log carries VERIFY_HEAD 767efb4b (5 failed/929 passed, missing __init__ rule) then VERIFY_HEAD 317ca7d (934 passed, 221.33s — matches JSON), 2 real-Node tests named and passed, smoke proof JSON with source_sha 317ca7d and live_browser_or_deployment_pass:false, mutant 3-red/3-green with byte-restore, full backend 20218p/335s. Source-SHA claims verified against git: 767efb4b→317ca7d is exactly the 4-line additive __init__ rule + one evidence note; 317ca7d→92657af touches only 2 logs, verification JSON, tasks.md status and canonical-spec reflow — the PR body's 'successor changes only evidence/task status and canonical formatting' is TRUE. Canonical spec matches the change's proposed survivor delta semantically. Scope discipline holds: R1.4/R1.5/R2–R5 all [ ], R1.6 [x] with entrypoint/owner/provenance registered in both runbooks, no archive, truthful synthetic-not-live labeling everywhere. One concrete P1: the Markdown reflow split a Chinese phrase pinned character-exact by the frontend runbookContract vitest suite, which is red at HEAD — and the fixture-mandated frontend-suite evidence that would have caught it was never recorded. Three P2 coverage/evidence-floor gaps against the fixture's own enumerated proof plan.",
+      "findings": [
+        {
+          "id": "C4E-F1",
+          "severity": "P1",
+          "lens": "test-evidence",
+          "failure_class": "downstream-compatibility regression (broken in-repo consumer) + omitted mandated evidence",
+          "violated_invariant": "An in-repo contract suite must stay green at the merge head; fixture Evidence Floor: 'existing frontend C4 binder/producer/private-publisher suites/typecheck as applicable' under Local checks — applicable here because the PR edits precisely the two runbooks that suite pins",
+          "scenario": "Run `corepack pnpm --dir apps/frontend test` (vitest include `src/**/*.test.{ts,tsx}`, vitest.config.ts:11) at HEAD: `runbookContract.test.ts` test 'checklist keeps the older C4 #389 path honest about delivered vs open work' executes `expect(text).toContain('门控的只读测试钩子 + 无 mock 的 live P95 采集 lane')` where text is the RAW `readFileSync` bytes of docs/runbooks/node-27-bringup-checklist.md (no whitespace normalization). The PR's Markdown reflow split that exact phrase across lines: HEAD bytes read '门控的只读测试钩子 + 无 mock 的 live\\n> P95 采集 lane'. Substring containment is deterministic — the assertion cannot pass. Verified bytewise: phrase present contiguous at base f765ca0d, absent at HEAD; runbook content identical between 317ca7d (node27-verified source) and HEAD, so the verified source carries the break too.",
+          "evidence": "apps/frontend/src/__tests__/runbookContract.test.ts:510-514 (raw readRunbook + toContain); docs/runbooks/node-27-bringup-checklist.md (HEAD, reflowed blockquote; diff hunk '-> #1970 交付了**门控的只读测试钩子 + 无 mock 的 live P95 采集 lane**' → '+> #1970 交付了**门控的只读测试钩子 + 无 mock 的 live'); evidence/retirement-c4-verification.json `local` field records only 'Ruff PASS; active and canonical OpenSpec strict PASS; scoped Markdown PASS' — no frontend vitest/typecheck run anywhere in the evidence manifest or node27 log; the 20218-pass full-backend run cannot see it (pytest does not collect vitest files)",
+          "consequence": "Frontend unit suite is red at the merge head; the failure surfaces on the next frontend-triggering CI run (or immediately if CI runs the frontend suite on this PR — trigger conditions for docs-only paths unverified by this seat). The recorded evidence structurally cannot detect it: every recorded gate (Ruff, OpenSpec strict, scoped Markdown, backend pytest) is blind to a vitest pin on edited Markdown. This is exactly the class the fixture's Local-checks line was written to catch.",
+          "fix_direction": "Restore the pinned phrase as one contiguous line (or reword keeping the exact substring), then run the frontend vitest suite — at minimum src/__tests__/runbookContract.test.ts — at the final head and record the result in retirement-c4-verification.json before merge.",
+          "required_proof": "Green `vitest run src/__tests__/runbookContract.test.ts` (or full `corepack pnpm --dir apps/frontend test`) output at the post-fix head, appended to the evidence manifest; byte-level presence of the pinned phrase confirmed.",
+          "sibling_surfaces": "All other exact pins in runbookContract.test.ts against both edited docs were batch-verified intact at HEAD: 5 required env keys + 6 forbidden override keys (river-click section), \"stat -c '%a'\", '600', river-click-receipt-binder.mjs, nearest-rank, check-jsonschema, CMD_START, 'cd \"$REPO_ROOT\" ||', '${PLAYWRIGHT_LIVE_BASE_URL-}', '${PLAYWRIGHT_LIVE_RIVER_BASIN_ID-}' (checklist + tier), tier '### 4.9 Frontend'/'## 8.' anchors, both negative not.toMatch patterns still negative. No backend test pins the phrase (grep tests/scripts/services: no match), consistent with 20218 passing.",
+          "blocking": "yes (candidate — verifier adjudicates)"
+        },
+        {
+          "id": "C4E-F2",
+          "severity": "P2",
+          "lens": "test-evidence",
+          "failure_class": "coverage-gap against fixture-enumerated contract",
+          "violated_invariant": "Fixture schema paragraph: 'Reject malformed/empty SHA/IDs/brackets, duplicate JSON keys and nonfinite numbers. Errors are stable owner-coded refusals' — the malformed-input half has zero assertion-bearing tests",
+          "scenario": "A regression in require_sha (accepts uppercase/non-40-hex), require_id (accepts empty basin/segment), require_origin (accepts credentials/query/fragment), require_ordered_bracket (accepts start>end or non-decimal), or require_absolute_path (accepts relative paths) merges green: no test asserts C4_SHA_INVALID, C4_ORIGIN_INVALID, C4_BASIN_INVALID, C4_SEGMENT_INVALID, C4_BRACKET_INVALID, C4_PATH_INVALID, or C4_TOO_LARGE (>256 KiB record). Only valid-input positives and one valid-but-mismatched SHA are exercised; the JSON duplicate/nonfinite/complex half IS tested (test_publish_refuses_duplicate_json_and_nonfinite_numbers, test_complex_json_is_refused).",
+          "evidence": "tests/test_node27_c4_production_acceptance.py (full 857-line read: 27 tests enumerated; none sends malformed SHA/ID/origin/bracket/path or oversized payload); services/production_closure/c4_production_acceptance_io.py:132-198 defines the refusal codes; fixture retirement-c4-acceptance-owner.md 'Reject malformed/empty SHA/IDs/brackets' sentence",
+          "consequence": "The stable owner-coded refusal surface — itself a fixture-level public contract consumed by operators/scripts matching exit codes/messages — can silently rot; a malformed input would then travel further into the acceptance chain before failing (or, for bracket parsing, crash-path instead of coded refusal). Defense in depth downstream (SHA field comparison, the real binder's own pin validation) mitigates but does not preserve the coded-refusal contract.",
+          "fix_direction": "Add a compact parametrized refusal batch (one test per code family, asserting code + no output published), covering malformed/empty SHA, bad origin forms (userinfo/query/fragment/non-root path), empty/illegal basin/segment, inverted/non-decimal bracket, relative path, and an over-ceiling record.",
+          "required_proof": "New tests red when the corresponding require_* guard is mutated (e.g., accept start>end), green at head; counts appended to verification evidence.",
+          "sibling_surfaces": "parse_utc calendar-validation refusals (C4_TIMESTAMP_INVALID) and identity/parent mapping refusals (C4_IDENTITY_SCHEMA/C4_PARENT_SCHEMA) are also unasserted; CLI-level usage refusals ARE covered (test_cli_usage_errors_are_static, test_cli_refuses_without_leaking_urls).",
+          "blocking": "no"
+        },
+        {
+          "id": "C4E-F3",
+          "severity": "P2",
+          "lens": "test-evidence",
+          "failure_class": "coverage-gap against fixture invariant matrix",
+          "violated_invariant": "Fixture invariant matrix: Storage/identity row 'C4 bytes change, inode replacement, same-size content change, mode/nlink/mtime/ctime drift → refuse every drift'; Entry/order row 'absent/late/stale/mismatched records refuse'",
+          "scenario": "(a) Same-bytes inode replacement: an operator restores the receipt from backup (new inode, identical bytes) between bind and verify — implementation refuses via full-identity dataclass equality, but no test proves it; a future refactor narrowing comparison to sha256-only merges green and silently reopens the banned swap. (b) Metadata-only drift (chmod/utime without byte change) — untested despite st_mode/st_mtime_ns/st_ctime_ns being identity fields. (c) Absent records: bind with missing freeze or verify with missing binding (C4_MISSING) — untested despite matrix 'absent…refuse'. (d) Mismatched-but-valid records: a binding naming a different freeze or different inputs (C4_FREEZE_MISMATCH/C4_INPUT_MISMATCH) — untested. (e) Record-schema violations: freeze/binding with extra/missing keys (C4_FREEZE_SCHEMA/C4_BINDING_SCHEMA via _require_closed_object) — untested.",
+          "evidence": "tests/test_node27_c4_production_acceptance.py covers byte drift same-size (test_bind_refuses_c4_byte_change_across_binder changes 200→201; test_verify_refuses_to_refresh_binding_when_c4_bytes_change), late freeze (test_bind_refuses_freeze_after_command_start_without_flooring), SHA mismatch (two tests) — no inode-swap-same-bytes, no metadata-only mutation, no absent-record, no cross-record mismatch, no schema-key violation test; implementation enforces all five (c4_production_acceptance_io.py PrivateFileIdentity frozen dataclass equality; c4_production_acceptance.py:486-491 freeze-path/identity comparison, :496-498 inputs comparison, :350/:380 _require_closed_object)",
+          "consequence": "Proof gap, not behavior gap at this head — but the matrix rows the fixture designated as the transfer's governing invariant ('refuse every drift', 'absent/late/stale/mismatched records refuse') have no regression net for their non-byte axes; the mutant proof only covers the post-binder recheck block wholesale, not the granularity of what those rechecks compare.",
+          "fix_direction": "Add: (1) same-bytes delete+recreate of receipt between bind and verify expecting C4_IDENTITY_DRIFT; (2) utime/chmod-only mutation expecting drift refusal; (3) bind/verify with absent freeze/binding expecting C4_MISSING with no output; (4) verify with a valid binding minted for a different freeze (or one edited input) expecting C4_FREEZE_MISMATCH/C4_INPUT_MISMATCH; (5) one extra-key and one missing-key record refusal.",
+          "required_proof": "Each new test red against the corresponding weakened comparison (sha-only identity, dropped closed-object check), green at head.",
+          "sibling_surfaces": "The 3 mutant-proof tests (approved/freeze/binding rewrite across binder) DO pin the post-binder recheck's existence; F3 is about what those rechecks compare, not whether they run.",
+          "blocking": "no"
+        },
+        {
+          "id": "C4E-F4",
+          "severity": "P2",
+          "lens": "spec-compliance",
+          "failure_class": "evidence-floor under-execution (fixture proof plan vs delivered evidence)",
+          "violated_invariant": "Fixture Evidence Floor: 'Run ACTUAL new CLI freeze/bind/verify around the REAL Node binder with a valid closed C4 receipt and negative byte/SHA/identity/binder cases, not only mocks or --help'",
+          "scenario": "The delivered actual-CLI/real-binder evidence (smoke_script in verification JSON + log line: SYNTHETIC_REAL_NODE_CLI_PASS) covers exactly one positive freeze→bind→verify and one negative: wrong reviewed SHA at bind, which refuses BEFORE the binder is invoked (C4_SHA_MISMATCH in _load_freeze). The floor's byte, identity, and binder-failure negatives were never run through the actual CLI around the real Node binder: the real binder's FAIL translation (nonzero exit → C4_BINDER_FAILED; exit-0-without-PASS-terminal → C4_BINDER_NOT_PASS; real timeout → C4_BINDER_TIMEOUT via run_bounded_command) is exercised only with injected runners in unit tests. If the real binder's refusal surface differed from the mock's shape (e.g., PASS-like stdout on failure, or hang), no recorded gate would show it.",
+          "evidence": "verification JSON cli_smoke field + full smoke_script (positive chain + wrong-SHA bind only); node27.log line ~194 proof JSON ('negative': 'SHA mismatch refuses without rewrite'); the two real-Node tests (test_real_node_binder_accepts_labeled_synthetic_fixture, test_real_node_binder_refuses_sha_mismatch_without_rewriting_freeze) mirror the same positive+SHA shape; binder-FAIL/NOT_PASS/TIMEOUT coverage is tests with _fail_runner/_timeout_runner/fake injected runners only",
+          "consequence": "The 'not only mocks' axis of the floor is half-met: the real process boundary is proven for the happy path and for a pre-binder refusal, but never for a real binder refusal — the one integration point where the unchanged Node component's actual exit/stdout contract meets the new owner's error translation. Residual risk is low (translation treats any nonzero as FAILED and any non-exact-PASS stdout as NOT_PASS, both fail-closed), hence P2 not P1. No overclaim: PR body and tasks.md assert only the PASS+SHA evidence actually delivered.",
+          "fix_direction": "Extend the node-27 smoke (or a real-Node test) with one real-binder negative: a syntactically valid closed C4 receipt whose content the real binder rejects (e.g., status!=PASS or pin/bracket inconsistency) driven through the actual CLI bind, asserting exit 1, C4_BINDER_FAILED/NOT_PASS, and no binding/freeze rewrite; optionally a byte-drift-across-real-binder case using a wrapper that mutates the receipt.",
+          "required_proof": "Node-27 log addition showing the real-binder negative case(s) exit-1 with the expected code and no publication, recorded in verification JSON.",
+          "sibling_surfaces": "None — the mock-side negatives are already comprehensive (C4_BINDER_FAILED/NOT_PASS/TIMEOUT asserted with static codes and no URL leak).",
+          "blocking": "no"
+        }
+      ],
+      "non_blocking_notes": [
+        "N1 (spec-compliance): evidence/retirement-c4-selector-red.log is a Python dict repr (`{'text': ...}`, single quotes — fails json.load) while its sibling retirement-c4-node27.log is valid JSON; both are cited as formal R1.6 evidence in tasks.md and the verification JSON 'logs' array. Content is intact and readable (extractable via ast.literal_eval; shows the 5 named disposition-guard failures at 767efb4b), but a machine consumer of the evidence manifest cannot parse the two logs uniformly.",
+        "N2 (spec-compliance): test_freeze_refuses_parent_replaced_during_temp_creation injects at the safe_fs_publication primitive boundary (monkeypatched write_bytes_no_follow_exclusive to enact the parent swap), beyond the fixture's literal 'with process boundary injection only'. The oracle is not weakened — the swap is real and the assertion is the refusal — and the parent-swap matrix row is otherwise untestable deterministically; flagged so the verifier consciously accepts the deviation rather than discovers it.",
+        "N3 (test-evidence): the registered runbook bash blocks restore `set -e` after the lane but never establish it; pasted into a non-errexit shell, a failed freeze or `test ! -e` guard would not abort the block. Failure remains closed downstream (missing freeze → C4_MISSING at bind; failed-lane receipt → real binder refusal), so impact is wasted lane execution only, never a false PASS.",
+        "N4 (informational, no action): test_c4_production_acceptance_owner_rules_red_when_removed skips the scripts/ producer by design — scripts/node27_c4_production_acceptance.py → tests/test_node27_c4_production_acceptance.py is exactly the selector's same-name fallback, so the suite is selected even with the explicit rule removed; the skip is principled, and the explicit rule (stop_on_match) is redundancy for clarity, not a coverage hole."
+      ],
+      "done_missing_matrix": {
+        "fixture_public_contract": {
+          "freeze binds approved source/facts, no self-approval, no output on refusal": "DONE (test_freeze_binds_original_source_and_five_inputs, _mismatched_sha_without_output, _non_pass_status_without_self_approval)",
+          "receipt absent + private parent ready at freeze": "DONE (test_freeze_refuses_existing_receipt_and_missing_parent: C4_EXISTS, C4_PARENT_OPEN)",
+          "bind: SHA/frozen-source recheck, freeze ≤ cmd-start (no flooring), real binder, before/after C4 identity": "DONE (test_bind_and_verify_succeed_with_injected_pass_binder, _freeze_after_command_start_without_flooring, _c4_byte_change_across_binder; impl freeze_is_not_later_than_cmd_start)",
+          "verify: original approved/freeze/binding revalidated AFTER binder, no refresh from final observation": "DONE (3 mutation tests + node27 mutant 3-red/3-green + test_verify_refuses_to_refresh_binding_when_c4_bytes_change)",
+          "default CLI always real binder; no exit-only/fake-PASS; bounded timeout/output": "DONE (test_bind_refuses_exit_zero_without_pass_terminal, _nonzero, _timeout; 2 real-Node tests; TRUSTED_NODE fixed, no user runner options in CLI parser)",
+          "static owner-coded errors, no raw input/URL/credential leakage, argparse errors static": "DONE (test_cli_usage_errors_are_static exact 'C4_USAGE: invalid arguments\\n' exit 2; test_cli_refuses_without_leaking_urls; test_bind_refuses_timeout_with_static_code asserts no 'http')",
+          "reject malformed/empty SHA/IDs/brackets/origins/paths + oversized records": "MISSING → C4E-F2",
+          "closed record schemas (exact key sets, artifact/version/stage)": "MISSING (negative schema-key cases) → C4E-F3(e)"
+        },
+        "filesystem_boundary": {
+          "euid 0700 parent / 0600 single-link regular, no-follow parent+leaf": "DONE (positive mode/nlink asserts; test_symlink_output_parent_is_refused)",
+          "existing output no-clobber; winner/unrelated sibling preserved": "DONE (test_publish_refuses_existing_output_and_does_not_clobber; test_publish_succeeds_without_clobbering_unrelated_sibling)",
+          "parent swap mid-publication refuses, no partial result": "DONE (test_freeze_refuses_parent_replaced_during_temp_creation; see N2)",
+          "unique random temp sibling, durable create, exclusive move, inode proof, readback": "DONE in impl (secrets.token_hex(16), write_bytes_no_follow_exclusive(require_durable_create=True, mode=0o600) + move_regular_file_no_follow_exclusive composed exactly per fixture); behavioral coverage via parent-swap/sibling tests; fsync-failure injection and fd-leak proof NOT exercised (primitive-owned; accepted)",
+          "path aliasing refusal": "DONE (test_alias_between_output_and_approved_is_refused: C4_ALIAS)",
+          "input records immutable after refusal": "DONE (assertions in binder-FAIL, verify-drift, mutation tests compare original bytes)"
+        },
+        "invariant_matrix_rows": {
+          "Approval producer": "DONE",
+          "Validators/process": "DONE (PASS/FAIL/nonzero/timeout/exit0-non-PASS + real binder)",
+          "Storage/identity (bytes/inode/same-size/metadata drift)": "PARTIAL — byte drift DONE; inode-replacement-same-bytes and metadata-only drift MISSING → C4E-F3(a,b)",
+          "Entry/order (sequence/absent/late/stale/mismatched)": "PARTIAL — sequence/late/SHA-mismatch DONE; absent records and binding↔freeze mismatch MISSING → C4E-F3(c,d)",
+          "Consumers (binder/core/schema/producer/river-click unchanged; old C3 green)": "DONE (diff touches zero apps/frontend or node27_issue1895_* files; real-Node tests drive the unchanged binder; full backend 20218p includes old C3 suites; no node27_issue1895 imports in new modules — grep-verified)",
+          "Failure/publication": "DONE (see filesystem_boundary; fsync/fd-leak noted)",
+          "Evidence/docs": "PARTIAL — registrations, truthful labels, entrypoint/owner/provenance DONE; frontend runbookContract pin BROKEN → C4E-F1"
+        },
+        "evidence_floor": {
+          "test owners with boundary injection, no Node dep in ordinary CI, no source/prose pins": "DONE (single suite, 27 tests; 2 real-Node tests skip without /usr/bin/node; CLI assertions target stable-code contract not prose; N2 deviation noted)",
+          "PathTestRules for owner/IO/CLI/__init__ + expected maps same PR; shared deps (pgdata_command/safe_fs/safe_fs_publication/evidence_io) select new suite; redaction.py conditional N/A (not imported — grep-verified); no consumer shrink": "DONE (rules at select_ci_tests.py:1550/1558/2296-2315/3543/4302 all additive; 3 new selector tests incl. monkeypatch red; pre-existing consumers asserted kept; directory-gap guards red without __init__ rule on node27 round 1)",
+          "node27 targeted + full backend": "DONE (934p @317ca7d 221.33s; 20218p/335s/1w 3598.84s; log/JSON counts match)",
+          "batched discriminating red proof/mutation, no import-error-as-red": "DONE (selector red: 5 named disposition-guard failures @767efb4b → green @317ca7d; verify post-binder mutant: 3 red → byte-restored → 3 green, marker C4_POST_BINDER_MUTANT_KILLED_AND_RESTORED)",
+          "actual CLI around real binder: positive + negative byte/SHA/identity/binder cases, not only mocks": "PARTIAL — PASS + pre-binder SHA refusal DONE; byte/identity/binder-fail negatives mock-only → C4E-F4",
+          "synthetic receipts labeled, never live PASS": "DONE (write_closed_c4_fixture docstring label; smoke proof JSON live_browser_or_deployment_pass:false; tasks.md/PR-body 'not live browser or production deployment PASS')",
+          "local Ruff / active+canonical OpenSpec strict / scoped Markdown": "DONE (claimed; consistent with spec delta and successor formatting-only commit)",
+          "existing frontend suites/typecheck as applicable": "MISSING — applicable (suite pins edited docs) and one pin now fails → C4E-F1",
+          "R1.6 done-criteria: real entrypoint, code owner, provenance recorded; R1.4/R1.5/R2–R5/epic NOT marked done": "DONE (tasks.md [x] R1.6 with evidence+fixture paths; runbooks register scripts/node27_c4_production_acceptance.py + services/production_closure/c4_production_acceptance.py(+_io); R1.4/R1.5/R2.x/R3.x/R4.x/R5.x all [ ]; change not archived)"
+        },
+        "source_sha_and_scope_claims": {
+          "source_sha 317ca7d is the verified node27 source": "VERIFIED (log VERIFY_HEAD 317ca7d → 934 passed; smoke JSON source_sha 317ca7d; 767efb4b→317ca7d diff = 4-line __init__ rule + 1 evidence note only)",
+          "frozen head 92657af = review HEAD; successor changes only evidence/tasks/canonical formatting": "VERIFIED (317ca7d→92657af: 2 logs + verification.json + tasks.md + spec.md reflow that restores SHALL to requirement first line, semantics unchanged)",
+          "canonical spec applies only the C4 MODIFIED delta, matching the change's proposed survivor delta": "VERIFIED (openspec/specs/c4-live-display-evidence/spec.md delta mirrors change-dir specs/c4-live-display-evidence/spec.md proposed MODIFIED requirement + 2 new scenarios; truthful no-C1-C3-substitution wording)",
+          "runbook command execution correctness": "DONE (CLI flags/subcommands match parser exactly; PLAYWRIGHT_LIVE_* env names match playwright.live-c4-display.config.ts requiredEnv; freeze→sleep 1→C4_CMD_START→lane→C4_CMD_END→bind/verify matches no-flooring instant semantics; same shell vars feed freeze and lane pins; N3 errexit caveat)"
+        }
+      },
+      "out_of_scope_escalations": [
+        "None — no pre-existing P0/P1-severity issues untouched by the diff were observed within this lens."
+      ],
+      "verification_gaps": [
+        "F1's failing assertion is established by deterministic byte-level analysis (raw readFileSync + exact toContain; phrase contiguous at base, split by '\\n> ' at HEAD; vitest include covers the file) — not by executing the suite, per leaf constraints; one `vitest run src/__tests__/runbookContract.test.ts` settles it definitively.",
+        "Node-27 artifacts (logs, verification JSON) are self-reported; this seat cross-checked internal consistency (VERIFY_HEAD lines, pass counts, test names, smoke/mutant markers, checkout/venv paths, 929+5=934 arithmetic) but cannot attest the runs physically occurred on node27.",
+        "Whether frontend CI triggers on a PR whose apps/frontend tree is untouched (docs-only frontend-facing change) is unknown to this seat; F1's blast radius (this merge vs the next frontend PR) depends on it.",
+        "Seat boundary: TOCTOU windows, origin-normalization edge cases, held-fd protocol soundness, and binder-output exactness beyond evidence mapping are the correctness/invariant/security seats' territory; nothing in this lens's read contradicts their domain but no independent verdict is offered."
+      ],
+      "residual_risks": [
+        "If F1 is adjudicated blocking, the fix (phrase re-join) must re-pass scoped Markdown without re-splitting the line — the same formatter tension already recorded in the deviation log for the canonical spec; worth pinning the phrase in a form the formatter leaves alone (e.g., inside the existing bold span on one line).",
+        "The acceptance record is terminal private evidence with no downstream consumer in this slice (fixture-review r2 residual risk); R5 remains the enforcement point — no action here.",
+        "Real-binder timeout value (10s) and 64KiB output ceiling are implementer freedom per fixture-review r2; the recorded evidence does not include a loaded-node timing margin — acceptable for synthetic proof, to be revisited when the live lane runs under R1.4/R5."
+      ]
+    },
+    "C4SecurityR1": {
+      "seat": "security-perf + integration",
+      "pr": 2321,
+      "head": "92657af3605273d0280b7107720788852786708e",
+      "base": "f765ca0d0a20792ae77281fcefc399a4d0339676",
+      "verdict": "APPROVE — no blocking findings from this seat; 1 P2 + 1 Note candidate for parent adjudication",
+      "read_first": [
+        ".workplans/cold-topology-grill/c4-pr-body.md (incl. 偏离记录)",
+        "fixtures/retirement-c4-acceptance-owner.md",
+        "evidence/retirement-c4-verification.json + node27/selector-red logs",
+        "evidence/retirement-c4-implementation.json",
+        "evidence/retirement-c4-fixture-review-r2.json"
+      ],
+      "surfaces_reviewed": [
+        "services/production_closure/c4_production_acceptance.py (full)",
+        "services/production_closure/c4_production_acceptance_io.py (full)",
+        "scripts/node27_c4_production_acceptance.py (full)",
+        "scripts/select_ci_tests.py (diff + rule context 4260-4310)",
+        "tests/test_node27_c4_production_acceptance.py (full)",
+        "tests/test_select_ci_tests.py (diff)",
+        "packages/common/node27_pgdata_command.py (full)",
+        "packages/common/safe_fs.py (full helpers)",
+        "packages/common/safe_fs_publication.py (full)",
+        "packages/common/evidence_io.py (assert_paths_disjoint/normalized_absolute_path/reject_secret_material/validate_json_complexity/FileIdentity)",
+        "apps/frontend/scripts/c4-receipt-binder.mjs + c4-receipt-binder-core.mjs (full contract)",
+        "packages/common/node27_issue1895_publication_current.py bind_c3_receipt (old guarantee comparison)",
+        "docs/runbooks/node-27-bringup-checklist.md + tier-node27-timeseries-storage.md (diffs)",
+        "openspec/specs/c4-live-display-evidence/spec.md (diff)",
+        "tasks.md (diff)"
+      ],
+      "findings": [
+        {
+          "id": "C4SP-1",
+          "lens": "integration",
+          "severity": "P2",
+          "failure_class": "error-contract-gap / native-exception-leak",
+          "violated_invariant": "Fixture error contract: 'Prefer static refusal codes/messages, never interpolated raw inputs or native exceptions (including argparse errors)'; Validators/process invariant row 'bounded static errors'",
+          "scenario": "main() catches only C4AcceptanceError. argparse errors are static (verified: _ArgumentParser.error → 'C4_USAGE: invalid arguments\\n', exit 2, no input echo) and all 128 refuse() sites are static literals (grep-verified), but any other exception escapes as a raw traceback. Concrete reachable trigger: stdout is a closed pipe when print('C4 production acceptance freeze PASS') runs after a successful publish → BrokenPipeError, raw traceback with repo paths, and a non-owner-coded exit status (~120) colliding with the documented 0/1/2 contract that scripted operators key on.",
+          "evidence": "scripts/node27_c4_production_acceptance.py:91-114 (try/except C4AcceptanceError only; PASS print at :97/:108/:116 outside any guard)",
+          "consequence": "Native-exception text and ambiguous exit semantics on the success-path I/O edge; cosmetic for interactive use, misleading for automation that treats exit 1 as the only refusal channel.",
+          "fix_direction": "Add a terminal `except Exception` in main() mapping to one static owner-coded refusal (e.g. C4_INTERNAL) with exit 1, preserving SystemExit/KeyboardInterrupt; keep C4AcceptanceError precedence.",
+          "required_proof": "CLI test piping stdout to a closed reader (or fault-injecting print) asserting static stderr text and owner-coded exit; no traceback text.",
+          "sibling_surfaces": [
+            "tests/test_node27_c4_production_acceptance.py (new CLI edge test)"
+          ],
+          "blocking": false
+        },
+        {
+          "id": "C4SP-2",
+          "lens": "security-perf",
+          "severity": "Note",
+          "failure_class": "pre-existing-helper-gap-newly-load-bearing / env-injection-into-pinned-process",
+          "violated_invariant": "Validators/process invariant row 'Real binder required; no exit-only/fake PASS' and fixture 'Fixed trusted binder path ... no user-supplied executable/runner'",
+          "scenario": "run_bounded_command's real branch does Popen(argv, stdout=PIPE, stderr=PIPE, close_fds=True) with inherited os.environ and inherited stdin. The new owner pins /usr/bin/node (lstat non-symlink regular + X_OK) and the binder script, but Node honors NODE_OPTIONS, and --require is a permitted NODE_OPTIONS option: an operator environment carrying NODE_OPTIONS='--require /path/preload.cjs' (compromised profile/toolchain wrapper) preloads code into the pinned binder that can patch node:fs/stdout and emit 'BINDER: PASS' for evidence the core never validated. Stdin inheritance is bounded by the 10s timeout (binder never reads stdin).",
+          "evidence": "packages/common/node27_pgdata_command.py:55-61 (no env=/stdin=); services/production_closure/c4_production_acceptance.py:205-215 (_assert_trusted_node) + run_real_c4_binder:238-260; apps/frontend/scripts/c4-receipt-binder.mjs writes BINDER: PASS only on core ok",
+          "consequence": "The acceptance verdict's process-integrity anchor is the fixed path, yet env-controlled preload executes inside that anchor; requires operator-env compromise, so hardening-level, not a verdict bypass under the stated trust model.",
+          "fix_direction": "Follow-up on the shared primitive (its own consumer selector suite exists): pass a scrubbed env allowlist (or env={} plus explicit PATH) and stdin=DEVNULL for this consumer class; do not special-case inside the C4 owner, which is mandated to reuse the primitive.",
+          "required_proof": "node27 demonstration: NODE_OPTIONS=--require preload toggles binder output pre-fix; post-fix the same env is inert and the real-binder suites stay green.",
+          "sibling_surfaces": [
+            "packages/common/node27_pgdata_command.py",
+            "all PGDATA run_bounded_command consumers (migrate/target/host/install/recovery/cli/integration/governance)",
+            "tests/test_node27_pgdata_command.py"
+          ],
+          "blocking": false,
+          "pre_existing": "Defect lives in the diff-untouched shared primitive; filed as the single consolidated Note per pre-existing-issue rule. The diff makes it newly load-bearing for production-acceptance verdicts."
+        }
+      ],
+      "non_findings_checked": [
+        {
+          "item": "path traversal / symlink / no-clobber",
+          "result": "clean — require_absolute_path rejects non-absolute/NUL/unnormalized (incl. '//' via anchor check); every open walks all components with O_NOFOLLOW (safe_fs._open_child_dir/_open_verified_dir) and re-verifies fd-vs-path identity; publication = exclusive O_EXCL temp + inode-proved link+unlink move (move_regular_file_no_follow_exclusive) with lexists + pinned-parent _named_inode absence checks; concurrent dest swap after link → C4_INODE_SWAP refusal; hardlink of dest during window → nlink!=1 refusal"
+        },
+        {
+          "item": "ownership / descriptor boundaries",
+          "result": "clean — euid-owned 0700 parent + 0600 single-link regular enforced on every input and output; 9-field identity (dev/ino/uid/mode/nlink/size/mtime_ns/ctime_ns + same-held-fd SHA-256); fds held across binder, recaptured with lseek+rehash+named-inode+pinned-parent recheck; all fds closed on every path (finally chains traced, no double-close, capture self-cleans on failure)"
+        },
+        {
+          "item": "actual concurrent mutation scenarios",
+          "result": "clean — receipt byte change across binder → C4_IDENTITY_DRIFT (tested); approved/freeze/binding mutation across binder → C4_SOURCE_DRIFT (3 tests, matching the 3-red/3-green mutant evidence); parent replaced during temp creation → C4_PARENT_DRIFT (tested); existing output → C4_EXISTS without clobber (tested); rename-exchange swap-swap-back analyzed: verify re-runs binder on bound bytes so no false PASS is constructible"
+        },
+        {
+          "item": "bounded IO/JSON/process",
+          "result": "clean — 256KiB record ceiling with exact-size + trailing-byte proof; depth 16/nodes 256/array 32/object 64; duplicate keys, nonfinite numbers, non-UTF8 all refused; 10s timeout + 64KiB/stream ceiling with kill+wait; exact 'BINDER: PASS\\n' + exit 0 (not substring/exit-only); CommandError texts match _translate_command_error exactly"
+        },
+        {
+          "item": "secrets/error leakage",
+          "result": "clean — 128/128 refuse() calls static literals; CLI prints code+static message only; argparse static; reject_secret_material applied to every parsed record; redaction.py correctly NOT imported (static-first per fixture r2); records contain operator's own absolute paths inside 0600 private evidence by design"
+        },
+        {
+          "item": "unnecessary costs (perf)",
+          "result": "clean — triple read+hash in publish and per-stage re-reads are ≤256KiB one-time correctness proofs; no avoidable copies beyond bounded joins; 0.1s select poll bounded"
+        },
+        {
+          "item": "source-of-truth identity through CLI/records/validators/docs",
+          "result": "consistent — CLI flag set matches fixture stage signatures; freeze records approved path/identity/parent + selected fields + 5 inputs + full-precision UTC; binding records freeze ref + c4 ref + inputs + bracket; verify binds original freeze/binding refs and re-runs binder with ORIGINAL inputs/bracket; strict freeze_at<=cmd_start instant comparison (no flooring) matches runbook 'do not floor; sleep 1' guidance in both docs"
+        },
+        {
+          "item": "helper/old binder contracts + wrapper faithfulness",
+          "result": "faithful — write_bytes_no_follow_exclusive(require_durable_create=True, mode=0o600) + move_regular_file_no_follow_exclusive signatures match; SafeFilesystemError kind mapping (indeterminate vs io/unsafe) correct; evidence_io FileIdentity correctly NOT extended (stricter local signature kept); old bind_c3_receipt guarantee (reviewed-SHA bind + exact C4 sha256/facts recheck) re-established without the old graph's registry/frontier/job-log scope; zero node27_issue1895_* imports (grep-verified); binder mjs/core untouched; old C3/river-click/private_receipt untouched"
+        },
+        {
+          "item": "preservation for unchanged consumers",
+          "result": "clean — selector additions additive-only; existing producer-rule consumers preserved and pinned by test_c4_production_acceptance_shared_producers_keep_prior_consumers; __init__.py additive rule without stop_on_match correct for docstring-only package init; three owner rules stop_on_match correct and minimal; red-when-removed mutant test present"
+        },
+        {
+          "item": "indeterminate/residue policy",
+          "result": "spec-compliant — on indeterminate create/move the code never unlinks (may-be-winner); cleanup only via _unlink_created_temp with dev+ino proof of this invocation's inode, and only when dest is absent; leftover temp residue on tamper/refusal is the conservative choice the fixture mandates"
+        },
+        {
+          "item": "fixture-review-r2 residual risks",
+          "result": "all four closed — strict instant comparison kept (no truncation); no redaction import; fixed argv + 10s/64KiB ceilings with no user options, real-node proof on node27; terminal-evidence scoping truthful in tasks.md/runbooks"
+        }
+      ],
+      "invariant_matrix_coverage": {
+        "approval_producer": "covered — freeze pins original source identity+parent+fields pre-execution; mismatch/status/swap refuse pre-publish with no output; no self-approval (selected fields only, no C1 validator import)",
+        "validators_process": "covered with Note C4SP-2 on env inheritance into the pinned binder process",
+        "storage_identity": "covered — same-held-fd hash + full facts, before/after/path-parent checks refuse byte change, inode replacement, same-size content change, mode/nlink/mtime/ctime drift",
+        "entry_order": "covered — freeze→producer→bind→verify enforced; missing/late/stale/mismatched refuse; freeze-after-start strict (tested without flooring); no mutable refresh (verify-refuses-to-refresh test)",
+        "consumers": "covered — C4 CLI/schema/binder/producer/river-click byte-untouched; old C3 tests/consumers preserved; selector consumers unshrink",
+        "failure_publication": "covered — no clobber, no winner/unowned cleanup, no accepted partial result, no fd leak; indeterminate residue per spec",
+        "evidence_docs": "covered — both runbooks register real entrypoint/owner/provenance with truthful synthetic-vs-live and not-done scoping; canonical spec delta faithful (owner transfer, no SHA fields in C4 closed protocol, refusal scenarios)"
+      },
+      "verification_gaps": [
+        "Read-only per constraints: no tests/build/lint/CI/SSH executed by this seat; 934-targeted/2-real-node/20218-full/mutant-3-red-3-green evidence taken as supplied and cross-checked for internal consistency (test names, mutant script span, log FFFF red round match the deviation record)",
+        "C4SP-2's NODE_OPTIONS=--require mechanism is stated from documented Node behavior, not demonstrated in this review",
+        "Synthetic CLI smoke evidence is not a live browser/deployment PASS (as labeled)"
+      ],
+      "residual_risks": [
+        "binder-script lstat→exec window on the operator-owned repo path (same-euid adversary; outside stated trust model)",
+        "acceptance record is terminal private evidence; R5 remains the production-handoff enforcement point",
+        "strict freeze/cmd-start comparison depends on the documented sleep-1 operator discipline (both runbooks carry it)",
+        "verify pins mtime/ctime: any later metadata touch of approved/freeze/binding/receipt refuses re-verification — deliberate per fixture, operators must treat records as immutable"
+      ]
+    }
+  },
+  "verifiers": {
+    "C4VerifyCoverageR1": {
+      "verdicts": "Verifier verdicts for batch: test-evidence (4 candidates)\nReviewed head SHA: 92657af3605273d0280b7107720788852786708e\n\nCandidate: C4E-F1\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nEvidence: At HEAD, `runbookContract.test.ts:11-13` reads raw runbook bytes with `readFileSync`, while :510-515 requires the contiguous literal `门控的只读测试钩子 + 无 mock 的 live P95 采集 lane`; the edited runbook splits it across `:402-403` as `live\\n> P95`, so the assertion is deterministically false. The base document contains the phrase contiguously, `apps/frontend/vitest.config.ts:5-9` includes this test file, and `package.json` maps `test` to `vitest run`; meanwhile the verification manifest's `local` evidence lists only Ruff/OpenSpec/Markdown, not a frontend run. T1: normal frontend test execution reaches the raw-byte assertion; T2: its nonzero test/CI exit is an operator boundary; T3: the fixture requires applicable frontend evidence and prohibits source/prose pins, while the assignment's test policy requires wording-only tests be deleted.\nNote: Minimum acceptance: delete this entire prose-only `it` block (all four raw-document assertions), never restore or re-pin the Markdown phrase; leave neighboring behavioral tests untouched, then record a green scoped `vitest run src/__tests__/runbookContract.test.ts` at the final head.\n\nCandidate: C4E-F2\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nEvidence: The fixture requires rejection of malformed/empty SHA/IDs/brackets with stable owner-coded refusals (`fixtures/retirement-c4-acceptance-owner.md:60-63`). Guards exist at `c4_production_acceptance_io.py:131-197` for path/SHA/origin/ID/bracket and at :361-362 for the 262,144-byte ceiling, but the delivered C4 suite has no assertion for `C4_SHA_INVALID`, `C4_ORIGIN_INVALID`, `C4_BASIN_INVALID`, `C4_SEGMENT_INVALID`, `C4_BRACKET_INVALID`, `C4_PATH_INVALID`, or `C4_TOO_LARGE`; its only direct JSON-boundary tests are duplicate/nonfinite/complex JSON (`tests/test_node27_c4_production_acceptance.py:658-664,789-795`). T1: these are public CLI/operator inputs; T2: the code and no-publication result are observable to scripts/operators; T3: the fixture owns the refusal contract for this newly added owner.\nNote: Minimum acceptance: one compact public-boundary parameter batch with an uppercase 40-hex SHA, query-bearing origin, empty basin and empty segment, inverted `cmd-start > cmd-end`, relative receipt path, and an approved record over 262,144 bytes—each asserts its owner code and no publication; prove discrimination by weakening one guard family at a time and making its row red, not by a per-regex-branch matrix.\n\nCandidate: C4E-F3\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nEvidence: The fixture matrix expressly requires refusal of inode/same-size/metadata drift and absent/stale/mismatched records (`fixtures/retirement-c4-acceptance-owner.md:145-146`). The implementation has the full identity dataclass (`c4_production_acceptance_io.py:76-99`), compares the observed receipt to the binding at `c4_production_acceptance.py:535`, refuses missing files at `c4_production_acceptance_io.py:351-353`, checks binding/freeze/input mismatches at `c4_production_acceptance.py:492-499`, and closes freeze/binding objects at :337/:364. The delivered tests cover byte mutation (`tests/test_node27_c4_production_acceptance.py:431-482`) but contain no assertions for `C4_MISSING`, `C4_FREEZE_MISMATCH`, `C4_INPUT_MISMATCH`, `C4_FREEZE_SCHEMA`, or `C4_BINDING_SCHEMA`, and no same-byte inode or metadata-only receipt mutation. T1: private records can realistically be missing, restored, or changed between stages; T2: weakened comparisons can publish an acceptance for a non-original artifact; T3: the fixture's governing invariant is direct and this is new code.\nNote: Minimum acceptance: six behavior cases—same-byte delete/recreate between bind and verify and an `utime`-only receipt drift (both `C4_IDENTITY_DRIFT`); bind with absent freeze (`C4_MISSING`, no binding); verify with a valid cross-freeze binding (`C4_FREEZE_MISMATCH`); verify with one edited valid input (`C4_INPUT_MISMATCH`); and an extra-key freeze (`C4_FREEZE_SCHEMA`). A sha256-only identity mutant must red the first two, with one dropped-check mutant per remaining mechanism; do not make a row for every stat field, key, or callsite.\n\nCandidate: C4E-F4\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nEvidence: The exact fixture floor requires actual CLI freeze/bind/verify around the real Node binder with negative byte/SHA/identity/binder cases, not mocks (`fixtures/retirement-c4-acceptance-owner.md:173-175`). The recorded smoke has only the positive chain and wrong-SHA bind (`retirement-c4-verification.json:15,38`; decoded script lines 43-50); that SHA fails in `_load_freeze` at `c4_production_acceptance.py:342-343`, before `_run_binder_with_held_receipt` at :379. The two recorded real-Node tests are direct Python `bind`/`verify` calls (`tests/test_node27_c4_production_acceptance.py:814-856`), while nonzero/not-PASS/timeout tests inject runners (:348-401); no delivered real-CLI proof invokes a real binder that refuses. T1: the public CLI is the real operator entrypoint; T2: exit status, static error code, and absence of publication are operator-visible; T3: the fixture explicitly owns this integration evidence floor.\nNote: Minimum acceptance: retain the SHA refusal and add one disposable actual-CLI/real-Node proof for each missing named class: a closed receipt with `status != PASS` must yield exit 1, `C4_BINDER_FAILED`, no binding, and unchanged freeze (`c4-receipt-binder-core.mjs:298`, outer translation `c4_production_acceptance.py:279-280`); a same-byte inode replacement after bind must make real-CLI verify return `C4_IDENTITY_DRIFT` with no acceptance; and a semantic-preserving byte-only reserialization after bind must do the same. Record stderr codes and non-publication in the Node-27 log and verification manifest under the existing synthetic-not-live label."
+    },
+    "C4VerifyBoundaryR1": {
+      "result": "Verifier verdicts for batch: SP1 (1 candidate)\nReviewed head SHA: 92657af3605273d0280b7107720788852786708e\n\nCandidate: C4SP-1\nVerdict: CONFIRMED\nDisposition: FIX_NOW\nSeverity: P2 (retained: a public CLI error/exit-signal defect after a successful stage, not a record-integrity or trust-boundary failure).\nEvidence: The review’s cited lines are stale: the current 103-line CLI prints the three success messages at `scripts/node27_c4_production_acceptance.py:78`, `:88`, and `:96`, returns 0 at `:79`, `:89`, and `:97`, catches only `C4AcceptanceError` at `:98-99`, and invokes `raise SystemExit(main())` at `:103`. There is no `flush`, `BrokenPipeError`, `SIGPIPE`, or stdout-redirection guard in the reviewed CLI/test surface. The fixture is an explicit rung-1 oracle: `fixtures/retirement-c4-acceptance-owner.md:64-65` requires static refusal codes/messages and says never to expose native exceptions; its validators/process row at `:144` requires bounded static errors. The normal code/test evidence establishes success=0 (`:79/:89/:97`), known owner refusal=1 (`_report`, `:59-61`; PR-body `:32`), and static usage=2 (`tests/test_node27_c4_production_acceptance.py:730-736`), although neither fixture nor runbook formally enumerates a universal “0/1/2” contract.\nReachability / guard analysis: T1 passes: the runbook exposes this as a public shell CLI (`docs/runbooks/node-27-bringup-checklist.md:307-309`), and neither code nor fixture excludes a pipe whose reader closes. T2 passes: stdout/stderr and the process status are the operator-facing boundary; the stage has returned successfully before its PASS write, yet the caller can receive a non-owner-coded termination instead of the normal stage signal. T3 passes via the fixture’s native-exception/static-error rule. [INFERENCE, not executed under this read-only assignment]: for ordinary buffered CPython pipe stdout, the short PASS write is buffered, then the closed-pipe failure occurs during interpreter shutdown flushing after `main()` has returned; CPython emits an `Exception ignored ... BrokenPipeError` diagnostic and exits 120. Thus the reviewer’s “raw traceback with repository paths” subclaim is inaccurate, but the native-exception/ambiguous-exit defect is real.\nResolution: Do not add the proposed terminal `except Exception`: it cannot catch the normal shutdown-flush failure after `main()` returns, and it is broader than the fixture requires. Scope handling to the success-message write: force that write/flush while still in `main()`, catch only `BrokenPipeError`, redirect stdout to `/dev/null` before return so finalization cannot reflush the failed stream, emit one static owner-coded stderr outcome, and return 1. Required proof is a subprocess-level successful CLI invocation with stdout connected to a reader that closes, asserting exit 1, the static stderr outcome, and absence of `BrokenPipeError`/shutdown diagnostic; the existing in-process `cli_main()` tests and a fault-injected `print` alone do not exercise interpreter shutdown.\nNote: The closed-pipe path is actionable, but its mechanism is shutdown flushing—not an ordinary caught `print()` traceback—so only the narrowed BrokenPipe handling is justified."
+    },
+    "C4VerifyEnvironmentR1": {
+      "result": "Verifier verdicts for batch: SP2 injection (1 candidate)\nReviewed head SHA: 92657af3605273d0280b7107720788852786708e\n\nCandidate: C4SP-2\nVerdict: PLAUSIBLE\nDisposition: DISCARD\nEvidence: `packages/common/node27_pgdata_command.py:58-63` calls `subprocess.Popen(list(argv), stdout=..., stderr=..., close_fds=True)` without an `env=` or `stdin=` override. The new owner hard-pins `TRUSTED_NODE = Path(\"/usr/bin/node\")` and direct argv (`services/production_closure/c4_production_acceptance.py:49-53,218-220`), but its only result guards are nonzero exit and exact `stdout != BINDER_PASS` (`:270-282`; `BINDER_PASS = \"BINDER: PASS\\n\"`). Thus the alleged same-euid `NODE_OPTIONS` preload route is not code-proven impossible, while no supplied runtime proof constructs its exact fake-PASS outcome; PLAUSIBLE is warranted rather than REFUTED. Decisive T1 fails: the fixture calls the approval a “trust input,” specifies the “operator's approved C4 configuration” and operator-supplied receipt (`fixtures/retirement-c4-acceptance-owner.md:47-55`), and confines records to an “euid-owned 0700 parent, 0600 regular single-link” boundary (`:83-85`). A hostile process environment controlled by that trusted operator/euid is therefore outside the artifact's stated real input domain. The owned binder requirement is only “Fixed trusted binder path ... no user-supplied executable/runner CLI options” plus real Node/actual PASS (`:73-78`), not environment isolation; the canonical C4 spec says `也不引入更强的签名/信任模型` (`specs/c4-live-display-evidence/spec.md:27-30`), and the fixture makes a new trust model or production environment change a non-goal (`:187-190`).\nNote: The fixture excludes a malicious operator process environment, so newly relying on the existing helper creates no in-scope bypass; shared environment scrubbing would be unanchored generic hardening, not a justified fix."
+    },
+    "C4VerifyProvenanceR1": {
+      "report": "Verifier verdicts for batch: test-evidence (1 candidate)\nReviewed head SHA: 92657af3605273d0280b7107720788852786708e\n\nCandidate: C4-INV-N1\nVerdict: REFUTED\nEvidence: The complete decoded `retirement-c4-node27.log` payload has two exact session boundaries: line 1, `VERIFY_HEAD 767efb4b52a408926a60ce33f0c99c5f8d70c593 PROOF_ROOT /home/nwm/tmp/issue1895-c4-proof.B9zXqR`, precedes the red selector result at line 163 (`5 failed, 929 passed`); line 164, `VERIFY_HEAD 317ca7d48ddd2cfaceea74d07ff0ef6addc1093e PROOF_ROOT /home/nwm/tmp/issue1895-c4-proof.QyIzKw`, precedes the green sequence: `934 passed` (line 179), the real-node proof record with `\"source_sha\": \"317ca7d48ddd2cfaceea74d07ff0ef6addc1093e\"` (line 194), then `20218 passed, 335 skipped, 1 warning` and `C4_FULL_BACKEND_PASS` (lines 581-582). `retirement-c4-verification.json:2` independently records the same source SHA and its full-backend tuple (20218 passed/335 skipped).\nNote: The claimed absent second boundary and resulting SHA misbinding are factually false; repeating the already-present second SHA adjacent to the tail would be only an optional readability preference, not a provenance defect requiring a rerun or source change."
+    }
+  },
+  "synthesis": {
+    "confirmed": [
+      "C4E-F1",
+      "C4E-F2",
+      "C4E-F3",
+      "C4E-F4",
+      "C4SP-1"
+    ],
+    "discarded_out_of_domain": [
+      "C4SP-2"
+    ],
+    "refuted": [
+      "C4-INV-N1"
+    ]
+  }
+}

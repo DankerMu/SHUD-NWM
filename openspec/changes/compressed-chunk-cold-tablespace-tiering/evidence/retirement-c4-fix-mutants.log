@@ -1,0 +1,951 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______ test_public_boundary_parameter_batch_refuses_without_publication _______
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-172/test_public_boundary_parameter0')
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-172/test_public_boundary_parameter0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-172/test_public_boundary_parameter0/private/freeze.json'), ...}
+
+    def test_public_boundary_parameter_batch_refuses_without_publication(tmp_path: Path, paths: dict[str, Path]) -> None:
+        cases = (
+            (
+                "C4_SHA_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=UPPERCASE_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_ORIGIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=QUERY_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BASIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id="",
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_SEGMENT_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id="",
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BRACKET_INVALID",
+                lambda: (
+                    _freeze_ok(paths),
+                    _write_receipt(paths),
+                    bind(
+                        freeze_path=paths["freeze"],
+                        reviewed_sha=REVIEWED_SHA,
+                        cmd_start=CMD_END,
+                        cmd_end=CMD_START,
+                        output=paths["binding"],
+                        command_runner=_pass_runner,
+                    ),
+                )[-1],
+            ),
+            (
+                "C4_PATH_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt="c4-receipt.json",
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_TOO_LARGE",
+                lambda: freeze(
+                    approved_record=_write_oversize_approved(tmp_path),
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=_private_dir(tmp_path / "oversize-out") / "freeze.json",
+                ),
+            ),
+        )
+        freeze_rows = cases[:4] + cases[5:]
+        for code, action in freeze_rows:
+            with pytest.raises(C4AcceptanceError) as error:
+                action()
+>           assert error.value.code == code
+E           AssertionError: assert 'C4_SHA_MISMATCH' == 'C4_SHA_INVALID'
+E             
+E             - C4_SHA_INVALID
+E             + C4_SHA_MISMATCH
+
+tests/test_node27_c4_production_acceptance_boundaries.py:184: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_public_boundary_parameter_batch_refuses_without_publication
+1 failed in 0.18s
+
+RED F2 sha-family
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______ test_public_boundary_parameter_batch_refuses_without_publication _______
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-173/test_public_boundary_parameter0')
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-173/test_public_boundary_parameter0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-173/test_public_boundary_parameter0/private/freeze.json'), ...}
+
+    def test_public_boundary_parameter_batch_refuses_without_publication(tmp_path: Path, paths: dict[str, Path]) -> None:
+        cases = (
+            (
+                "C4_SHA_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=UPPERCASE_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_ORIGIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=QUERY_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BASIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id="",
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_SEGMENT_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id="",
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BRACKET_INVALID",
+                lambda: (
+                    _freeze_ok(paths),
+                    _write_receipt(paths),
+                    bind(
+                        freeze_path=paths["freeze"],
+                        reviewed_sha=REVIEWED_SHA,
+                        cmd_start=CMD_END,
+                        cmd_end=CMD_START,
+                        output=paths["binding"],
+                        command_runner=_pass_runner,
+                    ),
+                )[-1],
+            ),
+            (
+                "C4_PATH_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt="c4-receipt.json",
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_TOO_LARGE",
+                lambda: freeze(
+                    approved_record=_write_oversize_approved(tmp_path),
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=_private_dir(tmp_path / "oversize-out") / "freeze.json",
+                ),
+            ),
+        )
+        freeze_rows = cases[:4] + cases[5:]
+        for code, action in freeze_rows:
+>           with pytest.raises(C4AcceptanceError) as error:
+E           Failed: DID NOT RAISE <class 'services.production_closure.c4_production_acceptance_io.C4AcceptanceError'>
+
+tests/test_node27_c4_production_acceptance_boundaries.py:182: Failed
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_public_boundary_parameter_batch_refuses_without_publication
+1 failed in 0.19s
+
+RED F2 origin-family
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______ test_public_boundary_parameter_batch_refuses_without_publication _______
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-174/test_public_boundary_parameter0')
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-174/test_public_boundary_parameter0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-174/test_public_boundary_parameter0/private/freeze.json'), ...}
+
+    def test_public_boundary_parameter_batch_refuses_without_publication(tmp_path: Path, paths: dict[str, Path]) -> None:
+        cases = (
+            (
+                "C4_SHA_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=UPPERCASE_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_ORIGIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=QUERY_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BASIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id="",
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_SEGMENT_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id="",
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BRACKET_INVALID",
+                lambda: (
+                    _freeze_ok(paths),
+                    _write_receipt(paths),
+                    bind(
+                        freeze_path=paths["freeze"],
+                        reviewed_sha=REVIEWED_SHA,
+                        cmd_start=CMD_END,
+                        cmd_end=CMD_START,
+                        output=paths["binding"],
+                        command_runner=_pass_runner,
+                    ),
+                )[-1],
+            ),
+            (
+                "C4_PATH_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt="c4-receipt.json",
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_TOO_LARGE",
+                lambda: freeze(
+                    approved_record=_write_oversize_approved(tmp_path),
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=_private_dir(tmp_path / "oversize-out") / "freeze.json",
+                ),
+            ),
+        )
+        freeze_rows = cases[:4] + cases[5:]
+        for code, action in freeze_rows:
+>           with pytest.raises(C4AcceptanceError) as error:
+E           Failed: DID NOT RAISE <class 'services.production_closure.c4_production_acceptance_io.C4AcceptanceError'>
+
+tests/test_node27_c4_production_acceptance_boundaries.py:182: Failed
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_public_boundary_parameter_batch_refuses_without_publication
+1 failed in 0.19s
+
+RED F2 id-family
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______ test_public_boundary_parameter_batch_refuses_without_publication _______
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-175/test_public_boundary_parameter0')
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-175/test_public_boundary_parameter0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-175/test_public_boundary_parameter0/private/freeze.json'), ...}
+
+    def test_public_boundary_parameter_batch_refuses_without_publication(tmp_path: Path, paths: dict[str, Path]) -> None:
+        cases = (
+            (
+                "C4_SHA_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=UPPERCASE_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_ORIGIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=QUERY_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BASIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id="",
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_SEGMENT_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id="",
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BRACKET_INVALID",
+                lambda: (
+                    _freeze_ok(paths),
+                    _write_receipt(paths),
+                    bind(
+                        freeze_path=paths["freeze"],
+                        reviewed_sha=REVIEWED_SHA,
+                        cmd_start=CMD_END,
+                        cmd_end=CMD_START,
+                        output=paths["binding"],
+                        command_runner=_pass_runner,
+                    ),
+                )[-1],
+            ),
+            (
+                "C4_PATH_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt="c4-receipt.json",
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_TOO_LARGE",
+                lambda: freeze(
+                    approved_record=_write_oversize_approved(tmp_path),
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=_private_dir(tmp_path / "oversize-out") / "freeze.json",
+                ),
+            ),
+        )
+        freeze_rows = cases[:4] + cases[5:]
+        for code, action in freeze_rows:
+            with pytest.raises(C4AcceptanceError) as error:
+                action()
+            assert error.value.code == code
+            assert not paths["freeze"].exists()
+            assert not paths["binding"].exists()
+            assert not paths["acceptance"].exists()
+        bracket_code, bracket_action = cases[4]
+>       with pytest.raises(C4AcceptanceError) as error:
+E       Failed: DID NOT RAISE <class 'services.production_closure.c4_production_acceptance_io.C4AcceptanceError'>
+
+tests/test_node27_c4_production_acceptance_boundaries.py:189: Failed
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_public_boundary_parameter_batch_refuses_without_publication
+1 failed in 0.19s
+
+RED F2 bracket-family
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______ test_public_boundary_parameter_batch_refuses_without_publication _______
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-176/test_public_boundary_parameter0')
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-176/test_public_boundary_parameter0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-176/test_public_boundary_parameter0/private/freeze.json'), ...}
+
+    def test_public_boundary_parameter_batch_refuses_without_publication(tmp_path: Path, paths: dict[str, Path]) -> None:
+        cases = (
+            (
+                "C4_SHA_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=UPPERCASE_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_ORIGIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=QUERY_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BASIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id="",
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_SEGMENT_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id="",
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BRACKET_INVALID",
+                lambda: (
+                    _freeze_ok(paths),
+                    _write_receipt(paths),
+                    bind(
+                        freeze_path=paths["freeze"],
+                        reviewed_sha=REVIEWED_SHA,
+                        cmd_start=CMD_END,
+                        cmd_end=CMD_START,
+                        output=paths["binding"],
+                        command_runner=_pass_runner,
+                    ),
+                )[-1],
+            ),
+            (
+                "C4_PATH_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt="c4-receipt.json",
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_TOO_LARGE",
+                lambda: freeze(
+                    approved_record=_write_oversize_approved(tmp_path),
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=_private_dir(tmp_path / "oversize-out") / "freeze.json",
+                ),
+            ),
+        )
+        freeze_rows = cases[:4] + cases[5:]
+        for code, action in freeze_rows:
+            with pytest.raises(C4AcceptanceError) as error:
+                action()
+>           assert error.value.code == code
+E           AssertionError: assert 'C4_PARENT_MODE' == 'C4_PATH_INVALID'
+E             
+E             - C4_PATH_INVALID
+E             + C4_PARENT_MODE
+
+tests/test_node27_c4_production_acceptance_boundaries.py:184: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_public_boundary_parameter_batch_refuses_without_publication
+1 failed in 0.19s
+
+RED F2 path-family
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______ test_public_boundary_parameter_batch_refuses_without_publication _______
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-177/test_public_boundary_parameter0')
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-177/test_public_boundary_parameter0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-177/test_public_boundary_parameter0/private/freeze.json'), ...}
+
+    def test_public_boundary_parameter_batch_refuses_without_publication(tmp_path: Path, paths: dict[str, Path]) -> None:
+        cases = (
+            (
+                "C4_SHA_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=UPPERCASE_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_ORIGIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=QUERY_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BASIN_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id="",
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_SEGMENT_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id="",
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_BRACKET_INVALID",
+                lambda: (
+                    _freeze_ok(paths),
+                    _write_receipt(paths),
+                    bind(
+                        freeze_path=paths["freeze"],
+                        reviewed_sha=REVIEWED_SHA,
+                        cmd_start=CMD_END,
+                        cmd_end=CMD_START,
+                        output=paths["binding"],
+                        command_runner=_pass_runner,
+                    ),
+                )[-1],
+            ),
+            (
+                "C4_PATH_INVALID",
+                lambda: freeze(
+                    approved_record=paths["approved"],
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt="c4-receipt.json",
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=paths["freeze"],
+                ),
+            ),
+            (
+                "C4_TOO_LARGE",
+                lambda: freeze(
+                    approved_record=_write_oversize_approved(tmp_path),
+                    reviewed_sha=REVIEWED_SHA,
+                    receipt=paths["receipt"],
+                    frontend_origin=FRONTEND_ORIGIN,
+                    api_origin=API_ORIGIN,
+                    basin_id=BASIN_ID,
+                    segment_id=SEGMENT_ID,
+                    output=_private_dir(tmp_path / "oversize-out") / "freeze.json",
+                ),
+            ),
+        )
+        freeze_rows = cases[:4] + cases[5:]
+        for code, action in freeze_rows:
+>           with pytest.raises(C4AcceptanceError) as error:
+E           Failed: DID NOT RAISE <class 'services.production_closure.c4_production_acceptance_io.C4AcceptanceError'>
+
+tests/test_node27_c4_production_acceptance_boundaries.py:182: Failed
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_public_boundary_parameter_batch_refuses_without_publication
+1 failed in 0.24s
+
+RED F2 size-family
+FF                                                                       [100%]
+=================================== FAILURES ===================================
+__________ test_verify_refuses_same_byte_inode_replacement_after_bind __________
+
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-178/test_verify_refuses_same_byte_0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-178/test_verify_refuses_same_byte_0/private/freeze.json'), ...}
+
+    def test_verify_refuses_same_byte_inode_replacement_after_bind(paths: dict[str, Path]) -> None:
+        _freeze_ok(paths)
+        _write_receipt(paths)
+        _bind_ok(paths)
+        original_binding = paths["binding"].read_bytes()
+        original_freeze = paths["freeze"].read_bytes()
+        original_ino = paths["receipt"].stat().st_ino
+        _replace_same_bytes_new_inode(paths["receipt"])
+        assert paths["receipt"].stat().st_ino != original_ino
+>       with pytest.raises(C4AcceptanceError) as error:
+E       Failed: DID NOT RAISE <class 'services.production_closure.c4_production_acceptance_io.C4AcceptanceError'>
+
+tests/test_node27_c4_production_acceptance_boundaries.py:220: Failed
+___________ test_verify_refuses_utime_only_receipt_drift_after_bind ____________
+
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-178/test_verify_refuses_utime_only0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-178/test_verify_refuses_utime_only0/private/freeze.json'), ...}
+
+    def test_verify_refuses_utime_only_receipt_drift_after_bind(paths: dict[str, Path]) -> None:
+        _freeze_ok(paths)
+        _write_receipt(paths)
+        _bind_ok(paths)
+        original_binding = paths["binding"].read_bytes()
+        original_bytes = paths["receipt"].read_bytes()
+        later = int(datetime(2025, 9, 4, 2, 0, 0, tzinfo=UTC).timestamp())
+        os.utime(paths["receipt"], (later, later), follow_symlinks=False)
+        assert paths["receipt"].read_bytes() == original_bytes
+>       with pytest.raises(C4AcceptanceError) as error:
+E       Failed: DID NOT RAISE <class 'services.production_closure.c4_production_acceptance_io.C4AcceptanceError'>
+
+tests/test_node27_c4_production_acceptance_boundaries.py:243: Failed
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_verify_refuses_same_byte_inode_replacement_after_bind
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_verify_refuses_utime_only_receipt_drift_after_bind
+2 failed in 0.23s
+
+RED F3 sha-only identity
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_______________ test_bind_refuses_absent_freeze_without_binding ________________
+
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-179/test_bind_refuses_absent_freez0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-179/test_bind_refuses_absent_freez0/private/freeze.json'), ...}
+
+    def test_bind_refuses_absent_freeze_without_binding(paths: dict[str, Path]) -> None:
+        _write_receipt(paths)
+        assert not paths["freeze"].exists()
+        with pytest.raises(C4AcceptanceError) as error:
+            bind(
+                freeze_path=paths["freeze"],
+                reviewed_sha=REVIEWED_SHA,
+                cmd_start=CMD_START,
+                cmd_end=CMD_END,
+                output=paths["binding"],
+                command_runner=_pass_runner,
+            )
+>       assert error.value.code == "C4_MISSING"
+E       AssertionError: assert 'C4_OPEN' == 'C4_MISSING'
+E         
+E         - C4_MISSING
+E         + C4_OPEN
+
+tests/test_node27_c4_production_acceptance_boundaries.py:268: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_bind_refuses_absent_freeze_without_binding
+1 failed in 0.18s
+
+RED F3 missing-freeze coded guard
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_verify_refuses_valid_cross_freeze_binding ________________
+
+tmp_path = PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-180/test_verify_refuses_valid_cros0')
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-180/test_verify_refuses_valid_cros0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-180/test_verify_refuses_valid_cros0/private/freeze.json'), ...}
+
+    def test_verify_refuses_valid_cross_freeze_binding(tmp_path: Path, paths: dict[str, Path]) -> None:
+        _freeze_ok(paths)
+        _write_receipt(paths)
+        _bind_ok(paths)
+        other_root = _private_dir(tmp_path / "other")
+        other = {
+            "root": other_root,
+            "approved": other_root / "approved.json",
+            "receipt": other_root / "c4-receipt.json",
+            "freeze": other_root / "freeze.json",
+            "binding": other_root / "binding.json",
+            "acceptance": other_root / "acceptance.json",
+        }
+        _write_private_json(
+            other["approved"],
+            {
+                "status": "PASS",
+                "head_sha": REVIEWED_SHA,
+                "reviewed_sha": REVIEWED_SHA,
+                "note": "second operator-supplied delivery record",
+            },
+        )
+        freeze(
+            approved_record=other["approved"],
+            reviewed_sha=REVIEWED_SHA,
+            receipt=other["receipt"],
+            frontend_origin=FRONTEND_ORIGIN,
+            api_origin=API_ORIGIN,
+            basin_id=BASIN_ID,
+            segment_id=SEGMENT_ID,
+            output=other["freeze"],
+            now=lambda: datetime(2025, 9, 4, 0, 59, 58, tzinfo=UTC),
+        )
+        original_binding = paths["binding"].read_bytes()
+        with pytest.raises(C4AcceptanceError) as error:
+            verify(
+                freeze_path=other["freeze"],
+                binding_path=paths["binding"],
+                reviewed_sha=REVIEWED_SHA,
+                output=paths["acceptance"],
+                command_runner=_pass_runner,
+            )
+>       assert error.value.code == "C4_FREEZE_MISMATCH"
+E       AssertionError: assert 'C4_INPUT_MISMATCH' == 'C4_FREEZE_MISMATCH'
+E         
+E         - C4_FREEZE_MISMATCH
+E         + C4_INPUT_MISMATCH
+
+tests/test_node27_c4_production_acceptance_boundaries.py:314: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_verify_refuses_valid_cross_freeze_binding
+1 failed in 0.20s
+
+RED F3 dropped cross-freeze check
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_verify_refuses_edited_valid_binding_input ________________
+
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-181/test_verify_refuses_edited_val0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-181/test_verify_refuses_edited_val0/private/freeze.json'), ...}
+
+    def test_verify_refuses_edited_valid_binding_input(paths: dict[str, Path]) -> None:
+        _freeze_ok(paths)
+        _write_receipt(paths)
+        _bind_ok(paths)
+        _raw, binding, _identity, _parent = read_private_json(paths["binding"])
+        mutated: dict[str, Any] = dict(binding)
+        mutated["c4_inputs"] = dict(binding["c4_inputs"])
+        mutated["c4_inputs"]["basin_id"] = "basins_other"
+        _rewrite_private_json(paths["binding"], mutated)
+>       with pytest.raises(C4AcceptanceError) as error:
+E       Failed: DID NOT RAISE <class 'services.production_closure.c4_production_acceptance_io.C4AcceptanceError'>
+
+tests/test_node27_c4_production_acceptance_boundaries.py:328: Failed
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_verify_refuses_edited_valid_binding_input
+1 failed in 0.19s
+
+RED F3 dropped input-mismatch check
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_____________________ test_verify_refuses_extra_key_freeze _____________________
+
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-182/test_verify_refuses_extra_key_0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-182/test_verify_refuses_extra_key_0/private/freeze.json'), ...}
+
+    def test_verify_refuses_extra_key_freeze(paths: dict[str, Path]) -> None:
+        _freeze_ok(paths)
+        _write_receipt(paths)
+        _bind_ok(paths)
+        _raw, freeze_document, _identity, _parent = read_private_json(paths["freeze"])
+        mutated = dict(freeze_document)
+        mutated["extra"] = "not-in-schema"
+        _rewrite_private_json(paths["freeze"], mutated)
+        with pytest.raises(C4AcceptanceError) as error:
+            verify(
+                freeze_path=paths["freeze"],
+                binding_path=paths["binding"],
+                reviewed_sha=REVIEWED_SHA,
+                output=paths["acceptance"],
+                command_runner=_pass_runner,
+            )
+>       assert error.value.code == "C4_FREEZE_SCHEMA"
+E       AssertionError: assert 'C4_FREEZE_MISMATCH' == 'C4_FREEZE_SCHEMA'
+E         
+E         - C4_FREEZE_SCHEMA
+E         ?              ---
+E         + C4_FREEZE_MISMATCH
+E         ?           ++ +++
+
+tests/test_node27_c4_production_acceptance_boundaries.py:356: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_verify_refuses_extra_key_freeze
+1 failed in 0.19s
+
+RED F3 dropped closed-object freeze check
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________ test_cli_closed_stdout_after_success_keeps_published_artifact _________
+
+paths = {'acceptance': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-183/test_cli_closed_stdout_after_s0/private/acceptance.js...'freeze': PosixPath('/home/nwm/tmp/pytest-of-nwm/pytest-183/test_cli_closed_stdout_after_s0/private/freeze.json'), ...}
+
+    def test_cli_closed_stdout_after_success_keeps_published_artifact(
+        paths: dict[str, Path],
+    ) -> None:
+        """Successful freeze with a closed stdout reader is owner-coded, not rolled back."""
+    
+        argv = [
+            sys.executable,
+            str(Path("scripts/node27_c4_production_acceptance.py").resolve()),
+            "freeze",
+            "--approved-record",
+            str(paths["approved"]),
+            "--reviewed-sha",
+            REVIEWED_SHA,
+            "--receipt",
+            str(paths["receipt"]),
+            "--frontend-origin",
+            FRONTEND_ORIGIN,
+            "--api-origin",
+            API_ORIGIN,
+            "--basin-id",
+            BASIN_ID,
+            "--segment-id",
+            SEGMENT_ID,
+            "--output",
+            str(paths["freeze"]),
+        ]
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        process = subprocess.Popen(
+            argv,
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+            text=True,
+            pass_fds=(write_fd,),
+        )
+        os.close(write_fd)
+        assert process.stderr is not None
+        stderr = process.stderr.read()
+        rc = process.wait(timeout=10)
+>       assert rc == 1
+E       assert 120 == 1
+
+tests/test_node27_c4_production_acceptance_boundaries.py:399: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_node27_c4_production_acceptance_boundaries.py::test_cli_closed_stdout_after_success_keeps_published_artifact
+1 failed in 0.27s
+
+RED SP1 original CLI closed-stdout
+C4_R1_MUTANTS_KILLED_AND_RESTORED
+...................................                                      [100%]
+35 passed in 0.73s
