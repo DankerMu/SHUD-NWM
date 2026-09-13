@@ -4521,6 +4521,15 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         ("tests/test_node27_cold_tablespace_install.py",),
     ),
     PathTestRule(
+        "packages/common/node27_resource_governance_collection.py",
+        (
+            "tests/test_node27_resource_governance.py",
+            "tests/test_node27_working_set.py",
+            "tests/test_node27_maintenance_output_integration.py",
+            "tests/test_node27_cold_governance.py",
+        ),
+    ),
+    PathTestRule(
         "packages/common/node27_cold_governance_collection.py",
         (
             "tests/test_node27_cold_governance.py",
@@ -4544,6 +4553,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_node27_cold_governance.py",
             "tests/test_node27_resource_governance.py",
             "tests/test_node27_working_set.py",
+            "tests/test_node27_maintenance_output_integration.py",
         ),
     ),
     PathTestRule(

@@ -1,0 +1,103 @@
+{
+  "status": "implemented; validation intentionally delegated to Main",
+  "changed_files": [
+    "packages/common/node27_resource_governance_collection.py",
+    "packages/common/node27_cold_governance_collection.py",
+    "scripts/node27_resource_governance.py",
+    "tests/test_node27_resource_governance.py",
+    "tests/test_node27_working_set.py",
+    "tests/test_node27_maintenance_output_integration.py",
+    "tests/test_node27_cold_governance.py",
+    "scripts/select_ci_tests.py",
+    "tests/test_select_ci_tests.py",
+    "infra/env/node27-resource-governance.example",
+    "docs/runbooks/tier-node27-timeseries-storage.md"
+  ],
+  "behavior": {
+    "changed": [
+      "Moved ordinary statvfs/du, subprocess/formatting, PostgreSQL, working-set, maintenance SQL collectors and required helpers into the actual resource-governance collection owner.",
+      "Removed all cold CLI arguments, AuditConfig/environment assembly, cold runtime/evidence imports, runtime-config builder, cold receipt/history branch and cold_tablespace_governance output from ordinary governance.",
+      "Removed only external_pg_tblspc_targets, cold_tablespace and cold_relation_by_tablespace SQL inventory from ordinary PostgreSQL collection.",
+      "Reduced the retained cold collection module to _cold_relation_bytes and cold_governance_sample, using qualified resource_collection.observation_int references; no compatibility exports of moved generic helpers.",
+      "Removed the cold env-template block and changed current runbook §9.2 attribution to node27_resource_governance_collection.collect_postgres without a line pin."
+    ],
+    "unchanged": [
+      "Ordinary schema version, filesystem/path sample keys and filesystems.cold as /data/GHDC observation.",
+      "Configured PGDATA path/device/free-byte binding and unknown/conflict refusal; no fallback to home.",
+      "Discovery-derived working-set SQL, shared compression lag, watermark and projected-peak semantics.",
+      "Existing PostgreSQL connection/autocommit behavior, query ordering apart from retired SQL removal, bounds, error classes and close behavior; working-set readonly transaction behavior.",
+      "Maintenance effective thresholds, 50-row bound, exclusions, summaries, freshness/unavailable recommendations and critical CLI diagnostics.",
+      "Still-live cold-family receipt/runtime/history/schema behavior; no full family deletion.",
+      "Production service/env/source pins, compression, C4, SQL role transfer, OpenSpec and parent-owned metadata."
+    ]
+  },
+  "caller_census": {
+    "method": "Explicit repository/import census via grep; no reference-provider tool available. No validation commands executed.",
+    "direct_new_owner_consumers": [
+      "scripts/node27_resource_governance.py: bytes_pretty, collect_filesystem, collect_postgres, collect_working_set, run_command",
+      "packages/common/node27_cold_governance_collection.py: qualified observation_int calls",
+      "tests/test_node27_resource_governance.py: disk_usage, du_bytes, collect_postgres and OS-boundary monkeypatches",
+      "tests/test_node27_working_set.py: collection module and OS-boundary monkeypatches",
+      "tests/test_node27_maintenance_output_integration.py: collect_postgres"
+    ],
+    "remaining_old_owner_consumer": "tests/test_node27_cold_governance.py imports cold_governance_sample directly. No remaining generic imports from the old collector in packages/scripts/tests/services/workers/apps/infra census.",
+    "historical_references": "Archived changes and sibling active-change delivery records still cite the historical cold collector; intentionally untouched. The current runbook attribution was migrated.",
+    "pgdata": "PGDATA host/migrate already use their transferred owners; this slice found no cold-governance-collector import to migrate there."
+  },
+  "test_census": {
+    "moved_to_existing_cold_suite": [
+      "test_cold_governance_sample_refuses_independently_unhealthy_home",
+      "_ok_cold_filesystem fixture helper",
+      "test_pgdata_is_accounted_once_on_observed_filesystem",
+      "test_unknown_pgdata_placement_refuses_both_samples",
+      "test_cold_governance_sample_refuses_unobserved_postgres_inventory",
+      "test_cold_governance_sample_refuses_malformed_relation_rows",
+      "test_cold_governance_sample_accounts_observed_ok_relation_inventory",
+      "test_unavailable_home_sample_publishes_null_bytes_not_fabricated_zero"
+    ],
+    "retired": [
+      "test_optional_cold_governance_receipt_is_refusal_until_descriptor_evidence_is_configured",
+      "test_governance_cli_accepts_descriptor_evidence_and_prior_trend_configuration",
+      "test_cli_optional_cold_receipt_uses_destination_shape"
+    ],
+    "new_changed_behavior": [
+      "test_removed_cold_receipt_argument_refuses_before_audit: main rejects removed option with argparse exit 2 and creates no receipt.",
+      "test_cli_ordinary_receipt_ignores_retired_cold_environment: normal main output preserves ordinary schema/mode/status/projection/capacity/maintenance and /data/GHDC observation, omits cold outputs and does not publish the retired env-configured receipt."
+    ],
+    "adapted": [
+      "Secret-bearing-target test retains summary and diagnostic redaction assertions, removing only the retired second sink.",
+      "Maintenance collector failure-isolation test retains error/healthy maintenance assertions and ordinary post-probe sections; now rejects the three removed catalog keys.",
+      "Ordinary filesystem/du, projection, PGDATA binding, failure, recommendation and maintenance integration tests retain their existing behavior assertions and import the real owner."
+    ]
+  },
+  "selector_census": {
+    "new_producer": "packages/common/node27_resource_governance_collection.py explicitly selects resource-governance, working-set, maintenance-output integration and cold-governance suites.",
+    "stable_cli": "scripts/node27_resource_governance.py retains existing selected suites and adds maintenance-output integration.",
+    "expected_maps": "Both changes mirrored in tests/test_select_ci_tests.py.",
+    "unchanged": "Cold-family wildcard/schema/example rules remain for later R3.5 cleanup as specified."
+  },
+  "matrix_coverage": {
+    "producers": "Ordinary collectors transferred whole except three retired SQL inventory sections; existing collection/CLI tests repointed, ordinary-output regression added.",
+    "validators_binding": "Existing PGDATA unknown/conflict/device/capacity and no-home-fallback tests retained; cold accounting tests moved without weakening.",
+    "storage_query": "Maintenance SQL and connection/close semantics retained; existing real-engine integration suite repointed and routed by both producer/CLI selector rules.",
+    "entry": "Existing normal/critical main behavior tests retained; removed-argument main regression added.",
+    "consumers": "All direct collector consumers migrated; retained cold observation helper uses qualified back-import; selector maps updated.",
+    "failure": "Existing DB/sampling/secrets and maintenance freshness/unavailable tests retained; mixed sink redaction narrowed only to surviving summary and diagnostics.",
+    "evidence_deployment": "Summary/schema behavior regression added, current source attribution corrected, cold env block removed; no deployment operation."
+  },
+  "parent_verification": {
+    "not_run": "No tests, smoke commands, linters, formatters, builds, SSH, DB operations or git operations were run, per assignment.",
+    "red_proof": "Parent's removed-flag red baseline is acknowledged. New ordinary-output/env regression and updated removed-SQL assertions also discriminate pre-change source and should join any parent batched red proof.",
+    "targeted_command": "uv run pytest -q tests/test_node27_resource_governance.py tests/test_node27_working_set.py tests/test_node27_cold_governance.py tests/test_node27_pgdata_migrate.py tests/test_select_ci_tests.py",
+    "real_engine_command": "NHMS_RUN_INTEGRATION=1 NHMS_INTEGRATION_DATABASE_URL=\"$DISPOSABLE_DATABASE_URL\" uv run pytest -q tests/test_node27_maintenance_output_integration.py",
+    "full_backend_command": "uv run pytest -q",
+    "local_lint_command": "uv run ruff check .",
+    "removed_argument_smoke": "uv run python -m scripts.node27_resource_governance --cold-governance-receipt-path \"$OWNED_TMP/cold.json\" (expect argparse exit 2, no audit/receipt).",
+    "readonly_main_smoke": "With parent-established readonly DATABASE_URL, no cold env, and owned temporary output: uv run python -m scripts.node27_resource_governance --repo-root \"$ISOLATED_REPO\" --object-store-root \"$OBJECT_STORE_ROOT\" --pgdata-root \"$ACTUAL_PGDATA\" --summary-path \"$OWNED_TMP/governance.json\" --quiet. Parent must inspect actual PGDATA device/free binding, maintenance status, absent cold output and critical diagnostic/exit correspondence.",
+    "environment": "Backend and real-engine checks belong on isolated node27 checkout/venv after capacity check of /, /home and /data/GHDC; use owned TMPDIR/basetemp below /home/nwm/tmp. Integration URL must identify independently created disposable PostgreSQL/Timescale, never production.",
+    "canonical_specs": "Parent retains strict OpenSpec/Markdown and placement-governance MODIFIED delta ownership."
+  },
+  "deviations": [],
+  "limits": "Implementation handoff is not a verification or deployment PASS. Parent must run validation and independent gates before any commit/PR/merge claim.",
+  "execution_summary": "agents=0; skills=0 (leaf boundary); tools=read,glob,grep,write,edit; verification=not run per assignment; limits=parent-owned node27 smoke/tests, Ruff, OpenSpec, review and release gates"
+}

@@ -1,8 +1,8 @@
 # Mandatory selective-cold retirement — active implementation contract
 
-Status: implementation in progress. R1.1/R1.2 and the PGDATA portion of R1.5
-have source and isolated node-27 verification; their PR review/merge is separate.
-Other retirement tasks remain pending and the cold runtime is still present.
+Status: implementation in progress. R1.1/R1.2 merged via PR #2311.
+R1.3 and the corresponding PGDATA/governance portions of R1.5 have executable
+verification; remaining retirement and effective-deployment tasks are pending.
 The sole executable retirement plan is this file. Old cold deployment approval
 does not authorize retirement, and disabling a lane is not code retirement.
 
@@ -48,7 +48,7 @@ budget fields. Real launcher and collection/survivor proofs are required.
   Slice evidence: `evidence/retirement-pgdata-verification.json`; fixture:
   `fixtures/retirement-pgdata-owner-transfer.md`. No production relocation or
   global R1/R3 completion is claimed.
-- [ ] R1.3 Move generic `collect_filesystem`, `collect_postgres`,
+- [x] R1.3 Move generic `collect_filesystem`, `collect_postgres`,
   `collect_working_set`, `bytes_pretty`, `run_command` and required sampling
   helpers from `node27_cold_governance*` to resource-governance-owned code used by
   `scripts/node27_resource_governance.py`. Preserve actual PGDATA device and
@@ -60,6 +60,10 @@ budget fields. Real launcher and collection/survivor proofs are required.
   tests when extracting this sampler; these are ordinary governance, not
   cold-only inventory. This does not assert production deployment or close
   any remaining maintenance/recovery duty.
+  Slice evidence: `evidence/retirement-governance-verification.json`; fixture:
+  `fixtures/retirement-governance-owner-transfer.md`. The R3.7 cold governance
+  env-template block also retires here; ordinary readonly live audit is not
+  effective service-source handoff.
 - [ ] R1.4 Migrate/repoint manual consumers as real dependency edges: the PGDATA
   procedure in `docs/runbooks/tier-node27-timeseries-storage.md` must own its
   generic SQL/API/browser/ingest workload and evidence instructions rather than

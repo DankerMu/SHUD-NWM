@@ -115,8 +115,14 @@ crash makes actual write completion uncertain. Post-release recovery MUST use cu
 
 ### Requirement: Placement-aware observation and truthful evidence
 
-Current PGDATA bytes MUST be attributed to their configured observed storage root without also charging `/home`; existing `/home` placement and cold-installer behavior MUST remain compatible. Disposable validation MUST use isolated
-identities and MUST NOT be represented as production HDD performance or rollout acceptance. Secrets MUST NOT appear in public receipts or errors.
+Current PGDATA bytes MUST be attributed to their configured observed storage
+root without also charging `/home`; existing `/home` placement MUST remain
+compatible. Ordinary governance MUST preserve actual PGDATA
+device/available-space binding and refuse unknown or conflicting placement
+without requiring cold-installer behavior or importing retired cold modules.
+Disposable validation MUST use isolated identities and MUST NOT be represented
+as production HDD performance or rollout acceptance. Secrets MUST NOT appear in
+public receipts or errors.
 
 #### Scenario: PGDATA is relocated to the large volume
 
@@ -127,6 +133,14 @@ identities and MUST NOT be represented as production HDD performance or rollout 
 
 - **WHEN** an isolated rehearsal succeeds without the later live SQL/API/browser/ingest gates
 - **THEN** its result proves migration mechanics only and cannot authorize production cutover or deletion of the old copy
+
+#### Scenario: Device attribution cannot be established
+
+- **WHEN** the configured PGDATA root and observed filesystem/device evidence
+  are unknown or conflicting
+- **THEN** governance refuses to invent available space or charge another root
+  as the live PGDATA device, while preserving ordinary `/home` and `/data/GHDC`
+  observations
 
 ### Requirement: PGDATA relocation SHALL own its retained command, container and evidence behavior
 
