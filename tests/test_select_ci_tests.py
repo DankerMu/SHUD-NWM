@@ -3652,16 +3652,20 @@ def test_container_contract_change_selects_its_derived_dependent_closure() -> No
     assert INVARIANT_SUITE_PATH in selected
 
 
-def test_contract_snapshot_fixture_change_selects_its_snapshot_suite() -> None:
-    # The committed fixture is the hermetic suite's ground truth, so a
-    # fixture-only PR (the runbook's patch-version drift disposition) must still
-    # select a suite that asserts; otherwise CI degrades to the collect-only
-    # smoke and re-baselines drift with zero assertions.
+def test_contract_snapshot_fixture_change_selects_its_snapshot_and_pgdata_consumers() -> None:
+    # The committed fixture is the snapshot suite's ground truth and the PGDATA
+    # container owner's image pin. Fixture-only changes must exercise both the
+    # drift contract and actual relocation consumers, not collect-only smoke.
     assert Path(CONTRACT_SNAPSHOT_FIXTURE_PATH).is_file()
 
     selected = select_tests([CONTRACT_SNAPSHOT_FIXTURE_PATH], repo_root=Path("."))
 
-    assert selected == ["tests/test_node27_external_contract_snapshot.py"]
+    assert selected == [
+        "tests/test_node27_external_contract_snapshot.py",
+        "tests/test_node27_pgdata_container.py",
+        "tests/test_node27_pgdata_migrate.py",
+        "tests/test_node27_pgdata_migrate_oracle.py",
+    ]
     assert not set(CORE_SMOKE_TESTS) & set(selected)
 
 
