@@ -4624,3 +4624,12 @@ later-round catches core=271、rotated=270、phase=57、skipped=15。
 第二轮使用首轮透镜子集、无新候选；没有轮换实验，不推断轮换收益。
 记录 deferral：keep/cut 仍待维护者决策；epic merge 预授权不含策略调整。
 现行 keep 与座位上限不变；R1.1/R1.2 完成不意味着全部退役或生产交接完成。
+
+### Revisit 2026-09-13（post PR #2313 / issues #2260 #2191 #2198 #2230 #2183）
+
+追加后实测 655 行、645 merged、10 terminal；218 个多轮样本，
+later-round catches core=282、rotated=270、phase=60、skipped=15。
+本单 expanded 三轮；第二轮 test-evidence 类重复后第三轮轮换 integration 入座，
+该席 0 候选（第三轮整体 clean），轮换未带来额外 catch，单例不足以推断收益或成本。
+记录 deferral：keep/cut 仍待维护者决策；本批合并预授权不含审核策略调整。
+现行 keep 与座位上限不变。
