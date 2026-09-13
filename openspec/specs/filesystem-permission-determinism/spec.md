@@ -198,6 +198,28 @@ applied unconditionally to those levels: an inherited POSIX default ACL does not
 change the outcome, because the explicit mode `safe_fs` passes to `os.mkdir`
 already fixed the new level's ACL mask before the caller runs.
 
+The trees a copyback lane *copies* (the temp tree it promotes with one
+`os.replace`, and the clone the commit phase keeps for rollback) are a separate
+surface from the traversal-widened levels above them: their directories are set
+by the lane's tree chmod, whose directory mode is lane-scoped. The `runs/` and
+`forcing/` lanes keep `0o755`, so the ACL-mask neutrality described below still
+holds for them. The canonical precipitation mirror lane SHALL set its copied
+trees (`canonical/<storage_source>/<cycle>/prcp_rate_or_amount/` and
+`canonical/<storage_source>/grid/<grid_id>/`) and their commit clones to an
+explicit `0o2775`, and SHALL additionally assert `0o2775` on
+`canonical/<storage_source>/<cycle>/` — a traversal-widened level — through a
+descriptor-bound `fchmod` before the temp tree is created and whether or not
+the call created that level. `0o2775` is written explicitly on every one of
+those directories; nothing relies on a setgid bit surviving a chmod. The setgid
+bit on `<cycle>/` is what makes the temp tree inherit the shared group at
+`mkdir`; the lane SHALL then re-assert `0o2775` on the temp tree root before
+the first file is written, because the traversal helper that prepares it
+writes `0o755` and a file takes the shared group only from a setgid parent.
+So a cycle tree created under a `2775`, shared-group
+`canonical/<storage_source>/` — directories and files alike — carries that
+group and is deletable by the node-27 retention account (#2100). Files in
+every lane stay `0o644`.
+
 `packages/common/safe_fs.py` itself remains unchanged: it still passes an
 explicit `0o755` base mode to `os.mkdir` and still never `chmod`s a directory
 after creating it.
@@ -207,25 +229,65 @@ after creating it.
 - **WHEN** a publisher-side copyback runs with the process umask set to `0o027`
   and creates the copyback root, `canonical/`, `canonical/<source>/`,
   `canonical/<source>/<cycle>/` and `canonical/<source>/grid/`
-- **THEN** each of those levels, the root included, lands with mode `0o755`
+- **THEN** the root, `canonical/`, `canonical/<source>/` and
+  `canonical/<source>/grid/` — the traversal-widened levels the lane does not
+  own — land with mode `0o755`
+- **AND** `canonical/<source>/<cycle>/` (asserted by the lane),
+  `canonical/<source>/<cycle>/prcp_rate_or_amount/` and
+  `canonical/<source>/grid/<grid_id>/` (the copied trees) land with mode
+  `0o2775`, and no level carries an other-write bit
 - **AND** the consuming account can traverse the whole chain and read the bytes
   of a mirrored file.
 
 #### Scenario: the ordinary umasks are unchanged
 
 - **WHEN** the same copyback runs under umask `0o022` or `0o002`
-- **THEN** each created level lands with mode `0o755`
-- **AND** no created level carries a group- or other-write bit.
+- **THEN** each traversal-widened level the lane does not own lands with mode
+  `0o755` and carries no group- or other-write bit
+- **AND** `<cycle>/` and the canonical precipitation copied trees land with
+  mode `0o2775` exactly as under `0o027`, because both modes are explicit and
+  not derived from the umask.
+
+#### Scenario: the canonical precipitation trees take the shared group of their source root
+
+- **WHEN** `canonical/<source>/` is `0o2775` with a shared group before the
+  copyback runs
+- **THEN** the promoted `canonical/<source>/<cycle>/` and its
+  `prcp_rate_or_amount/` carry that group and mode `0o2775`
+- **AND** the mirrored files carry that group and mode `0o644`.
+
+#### Scenario: a pre-existing cycle directory is converged when its tree is copied
+
+- **WHEN** `canonical/<source>/<cycle>/` already exists at `0o755` and the
+  destination bytes differ from the source
+- **THEN** after the mirror `<cycle>/` is `0o2775` and the promoted tree is
+  `0o2775`
+- **AND** when the destination is identical (the tree is `skipped`) the
+  `0o755` `<cycle>/` is left untouched.
+
+#### Scenario: a rolled-back canonical tree is restored at the lane mode
+
+- **WHEN** the commit phase of a canonical precipitation batch fails after
+  taking its rollback clone and the lane rolls the batch back
+- **THEN** the restored `prcp_rate_or_amount/` is `0o2775`.
+
+#### Scenario: sibling lanes keep the narrower mode
+
+- **WHEN** the `runs/` or `forcing/` copyback lane promotes a tree
+- **THEN** its directories land with mode `0o755` and its files `0o644`,
+  unchanged by the canonical precipitation lane's mode.
 
 #### Scenario: an already-existing intermediate directory keeps its mode
 
 - **WHEN** an intermediate directory beneath the copyback root already exists with
   a restrictive mode when the copyback caller probes for it
-- **THEN** the copyback caller MUST leave its mode unchanged
-- **AND** the sole exception is the accepted race in the requirement above — a
-  level created by someone else between this call's probe and its `mkdir` — which
-  MUST stay documented as an accepted limit rather than being presented as
-  compliance.
+- **THEN** the copyback caller MUST leave its mode unchanged, the one
+  exception being `canonical/<storage_source>/<cycle>/`, which the canonical
+  precipitation lane owns and asserts as described above
+- **AND** the sole further exception is the accepted race in the requirement
+  above — a level created by someone else between this call's probe and its
+  `mkdir` — which MUST stay documented as an accepted limit rather than being
+  presented as compliance.
 
 #### Scenario: the run-tree interior stays ACL-mask-preserving
 
