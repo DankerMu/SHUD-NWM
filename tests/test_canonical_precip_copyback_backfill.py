@@ -29,7 +29,9 @@ Contract (canonical-precip-copyback spec, Requirement 2):
   readable, and every file it promotes there ``0o644``, regardless of the
   process umask (node-22 writes as one account, node-27 reads the same NFS as
   another) -- while leaving directories it did not create and files it did not
-  write at the mode they already had.
+  write at the mode they already had. Two modes, not one (#2100): the mirror
+  root ``canonical/`` is ``0o755`` when this script creates it, everything it
+  creates below that level is ``0o2775``.
 """
 
 from __future__ import annotations
@@ -430,7 +432,23 @@ def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """node-22 writes as one account; node-27 reads the same NFS as another."""
+    """node-22 writes as one account; node-27 reads -- and since #2100 prunes -- as another.
+
+    Two buckets, not one. Below the mirror root `DIR_MODE` is `0o2775`, not
+    `0o755`: node-27's retention account has to be able to remove a mirrored
+    cycle, which needs group write on the directory, and the setgid bit is what
+    makes each level created underneath take its parent's shared group instead
+    of this process's egid. The mirror root `canonical/` itself is `0o755`
+    (#2100 D2): neither producer nor owner-side sweep widens that level, so an
+    unswept storage source under it is denied at its first `unlink` with zero
+    bytes removed rather than half-deleted, and gid 1078 never gains write on
+    the shared NFS mirror root. Every directory under the copyback root here was
+    created by this run -- the fixture creates the root and nothing else -- so
+    the assertion is exact rather than a floor.
+
+    `--dry-run` creates neither bucket; that half is pinned by
+    `test_backfill_dry_run_writes_nothing_and_reports_planned_copies`.
+    """
 
     source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
 
@@ -442,14 +460,109 @@ def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
     capsys.readouterr()
 
     assert exit_code == 0
+    mirror_root = copyback_root / "canonical"
     created_dirs = [path for path in copyback_root.rglob("*") if path.is_dir()]
     # Intermediates (canonical/, canonical/<S>/, canonical/<S>/<cycle>/) too, not
     # just the leaves: mkdir(parents=True) creates them all at the umask.
     assert len(created_dirs) >= 10
-    unreadable = [
-        str(path) for path in created_dirs if stat.S_IMODE(path.stat().st_mode) & 0o055 != 0o055
-    ]
-    assert unreadable == []
+    assert mirror_root in created_dirs
+    landed = {str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in created_dirs}
+    assert landed == {
+        str(path): ("0o755" if path == mirror_root else "0o2775") for path in created_dirs
+    }
+
+
+def test_backfill_leaves_a_pre_existing_mirror_root_mode_alone(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`_ensure_mirror_root`'s EEXIST branch: a `canonical/` this run did not create.
+
+    The mirror root is prepared at `MIRROR_ROOT_MODE` only when this run's own
+    bare `mkdir` creates it. A `canonical/` that was already there -- whatever
+    mode the operator, the publisher or an older run left on it -- is not
+    widened, not narrowed, not touched, exactly like every other pre-existing
+    level. The distinctive `0o750` is neither of the two modes this script
+    writes, so a stray chmod from either side is visible.
+    """
+
+    if os.geteuid() == 0:
+        pytest.skip("root may chmod through anything, so 'left alone' would prove nothing")
+    source_root, copyback_root, payloads = _seed_two_source_store(tmp_path)
+    mirror_root = copyback_root / "canonical"
+    mirror_root.mkdir()
+    os.chmod(mirror_root, 0o750)
+
+    try:
+        exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+        summary = json.loads(capsys.readouterr().out)
+        # Read before the `finally` restores it, or the restore would be what the
+        # assertion below observes.
+        landed_mirror_root_mode = stat.S_IMODE(mirror_root.stat().st_mode)
+        created_below = sorted(path for path in mirror_root.rglob("*") if path.is_dir())
+        landed_below = {str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in created_below}
+    finally:
+        os.chmod(mirror_root, 0o755)
+
+    assert exit_code == 0
+    assert summary["totals"] == {"copied": 14, "skipped": 0, "failed": 0}
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
+    assert oct(landed_mirror_root_mode) == "0o750"
+    # The levels this run *did* create are still `DIR_MODE`, so the skip is
+    # scoped to the pre-existing mirror root rather than disabling the rule.
+    assert len(created_below) >= 8
+    assert landed_below == {str(path): "0o2775" for path in created_below}
+
+
+def test_backfill_created_cycle_directory_takes_the_source_roots_group(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#2100: the backfill inherits `canonical/<S>/`'s group, it never names one.
+
+    Production needs the created `<cycle>/` and `prcp_rate_or_amount/` in gid
+    1107 (`nwmuser`) so node-27 can prune them. `DIR_MODE`'s setgid bit is what
+    carries the group down: a new directory takes its parent's gid
+    unconditionally on macOS and under a setgid parent on Linux, and this
+    script chmods each level as soon as that level exists, so every parent
+    carries the bit before its child is created.
+    """
+
+    if os.geteuid() == 0:
+        pytest.skip("root may chown to any group, so an inherited gid would prove nothing")
+    source_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    source_root.mkdir()
+    copyback_root.mkdir()
+    payloads = _seed_cycle(source_root, "gfs", "2026090212", leads=(3,))
+    destination_source_root = copyback_root / "canonical" / "gfs"
+    destination_source_root.mkdir(parents=True)
+    current_gid = destination_source_root.stat().st_gid
+    shared_gid = next((gid for gid in os.getgroups() if gid != current_gid), None)
+    if shared_gid is None:
+        pytest.skip("this process belongs to a single group, so no foreign gid can be propagated")
+    try:
+        os.chown(destination_source_root, -1, shared_gid)
+    except PermissionError:
+        pytest.skip("this environment refuses os.chown to a supplementary group")
+    # The swept production shape of `canonical/<S>/`, reproduced exactly.
+    os.chmod(destination_source_root, 0o2775)
+    if stat.S_IMODE(destination_source_root.stat().st_mode) != 0o2775:
+        pytest.skip("the kernel dropped the setgid bit on the seeded source root")
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    capsys.readouterr()
+
+    assert exit_code == 0
+    cycle_dir = destination_source_root / "2026090212"
+    prcp_dir = cycle_dir / "prcp_rate_or_amount"
+    assert {
+        str(path): (oct(stat.S_IMODE(path.stat().st_mode)), path.stat().st_gid)
+        for path in (cycle_dir, prcp_dir)
+    } == {str(path): ("0o2775", shared_gid) for path in (cycle_dir, prcp_dir)}
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
 
 
 def test_backfill_partially_created_directory_chain_stays_readable(

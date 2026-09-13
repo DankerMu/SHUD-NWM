@@ -2574,6 +2574,9 @@ ssh -p 32099 nwm@210.77.77.27 \
    （`umask 027` 下落成 `0o750`），而 `safe_fs` 按 #1513 的决定绝不事后 `chmod`。
    **本调用没有创建的层级一律不动**。手工 bring-up shell 里跑 copyback 时不再需要
    先 `umask 022`，但这条规则只覆盖 copyback 创建的层级，不修既有目录的历史模式。
+   **唯一例外**：canonical 降水镜像 lane 自己拥有的三级目录（`<cycle>/`、
+   `<cycle>/prcp_rate_or_amount/`、`grid/<grid_id>/`）是 `2775` 而不是 `0755`，
+   且 `<cycle>/` 无论是否由本次调用创建都会被断言成该模式——见下一小节（#2100）。
 
 快速核查（node-27 读侧，用 display 账号真正读到字节才算数）：
 
@@ -2582,6 +2585,92 @@ ssh -p 32099 nwm@210.77.77.27 \
   'stat -c "%a %n" /home/ghdc/nwm/object-store /home/ghdc/nwm/object-store/canonical &&
    f=$(find /home/ghdc/nwm/object-store/canonical -type f | head -1); cat "$f" | wc -c'
 ```
+
+#### canonical 降水镜像的跨账号删除权限（#2100）
+
+写侧是 node-22 的 `frd_muziyao`，删侧是 node-27 retention unit 里的 `nwm`——同一份 NFS、
+两个 uid。两端都存在、且两个账号都在里面的组只有 `nwmuser`（gid **1107**），所以镜像目录的
+口径是 **`2775` + gid 1107**：
+
+- 组写位给的是**删除权**。`rmtree` 先 unlink 文件（要 `prcp_rate_or_amount/` 的 `w+x`），
+  再 `rmdir` 它（要 `<cycle>/` 的 `w+x`），最后 `rmdir <cycle>/`（要 `canonical/<S>/` 的
+  `w+x`）。unlink 看的是**目录**的位，不是文件的位，所以文件一律留 `0644`。
+- setgid 位让新建的下一级继承父目录的组（Linux 语义；macOS 无条件继承），这样 node-22 新
+  镜像出来的 cycle 自动落在 1107，而不是写者的 egid 1078。
+- 每一级的 `2775` 都是**显式写上去的**：`os.chmod` 会清 setgid，所以代码里没有任何地方依赖
+  "这个位能活过一次 chmod"。产出侧两个常量同值——`services/tile_publisher/publisher.py`
+  的 `CANONICAL_MIRROR_DIRECTORY_MODE` 与 `scripts/canonical_precip_copyback_backfill.py`
+  的 `DIR_MODE`，都是 `0o2775`，且都只作用于**自己创建**的目录。两个产出侧的分工不同，
+  按真实口径写：
+  - publisher 用 copyback 通用 helper 建穿越层（`canonical/`、`canonical/<S>/`、
+    `canonical/<S>/grid/`），落 `0755`；`2775` 落在它自己拥有的层——`<cycle>/`、本次
+    copyback 的临时树根、以及复制进来的树内各级（`prcp_rate_or_amount/`、
+    `grid/<grid_id>/`）。`canonical/<S>/` 与 `grid/` 这两个穿越层的 `2775` 由下面那段
+    **存量扫描**收敛——那就是它们的稳态。
+  - backfill 脚本建 `canonical/` 时落 `0755`（`MIRROR_ROOT_MODE`），`canonical/` 以下它
+    创建的每一级（`<S>/`、`grid/`、`<cycle>/`、`prcp_rate_or_amount/`、`grid/<grid_id>/`）
+    落 `2775`。
+- **`canonical/` 自己不扫**，保持 `755` gid 1078（该 gid 在 node-27 上叫 `nfsdata`、空组，
+  在 node-22 上叫 `huser`）——它是唯一一级 producer 与扫描**都不放权**的目录（backfill 新建
+  它时也是 `0755`）。于是将来新增的 storage source 是 **fail closed**：第一个
+  unlink 就被拒、零字节、`failed[]` 里一条 `PermissionError`，而不是删一半的形状。
+
+**存量树扫描（node-22，账号 `frd_muziyao`；每个 source 一次，幂等）：**
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'cd /ghdc/data/nwm/object-store &&
+   for S in gfs IFS; do
+     chgrp -R 1107 "canonical/$S" &&
+     find "canonical/$S" -type d -exec chmod 2775 {} + ;
+   done'
+```
+
+`find` 是先根后叶（pre-order），父目录一定先于子目录被放权，所以任何一个瞬间都不会出现
+"`prcp_rate_or_amount/` 可写而 `<cycle>/` 不可写"的半删形状；扫到一半中断也只是让剩下的
+cycle 继续干净地被拒，重跑即可。**用数字 gid**：1078/1107 在两台机上映射到不同的组名。
+
+核查（同样在 node-22，`cd` 到 object-store 根）：
+
+```bash
+find canonical/gfs canonical/IFS -type d ! -perm -2775 | wc -l   # 期望 0
+find canonical/gfs canonical/IFS ! -group 1107 | wc -l           # 期望 0（含文件）
+stat -c '%a %U %g' canonical                                     # 期望 755 frd_muziyao 1078
+```
+
+**新增 storage source 的前置条件**：把 `<S>` 写进 `NODE27_RAW_RETENTION_SOURCES` 之前，
+先扫 `canonical/<S>`。顺序反了不会丢数据，但那条 lane 每个 tick 都会报一条
+`PermissionError`（零字节），直到补扫。
+
+**部署后必须补扫一遍**（不是可选项）：producer 只在"这棵树确实需要复制"时才纠正
+`<cycle>/` 的模式；目标字节完全相同的 cycle 在 plan 阶段就被整体 `skipped`，**不会被治愈**。
+扫描完成到 node-22 拉起新 producer 之间镜像出来的 cycle 正是这一类（`<cycle>/` `0755` gid
+1107、`prcp_rate_or_amount/` `0755` gid 1078，删除时干净被拒）。把上面那段扫描原样再跑一次
+即可，幂等。
+
+**回滚**（两条，和上面对称）：
+
+```bash
+ssh -p 32099 frd_muziyao@210.77.77.22 \
+  'cd /ghdc/data/nwm/object-store &&
+   chgrp -R 1078 canonical/gfs canonical/IFS &&
+   find canonical/gfs canonical/IFS -type d -exec chmod 00755 {} +'
+```
+
+`00755` 的**五位数字是必须的**：`chmod(1)` 对目录用数字模式时默认保留 setgid，`chmod 0755`
+会留下 `2755`（这是 `chmod(1)` 的行为，不是 `chmod(2)` 的——`os.chmod(dir, 0o755)` 直接清位）。
+producer 侧回滚就是对该 commit 做 `git revert`。
+
+**回滚的中间态同样安全**，理由和正向扫描对称但方向相反：`chgrp -R` 是**后序**（先子后父，
+GNU coreutils 与 BSD 的实现都只在 `FTS_DP` 上动手），所以收权过程中任一瞬间只会出现
+"子目录已被拒、父目录仍可写"，永远不会出现被禁的反形状（`prcp_rate_or_amount/` 可写而
+`<cycle>/` 不可写）。`chgrp` 跑完整棵树已经全拒，后面那条 `find ... chmod`（先根后叶）
+无论顺序都不再改变可删性。因此回滚中断后原样重跑即可，同样幂等。
+
+**影响面**：gid 1107 `nwmuser` 的所有成员都获得了对这两棵镜像树的写/删权——node-27 上是
+`nwm` 与 `frd_muziyao`，node-22 上是包括 `frd_muziyao` 在内的七个人类账号。授权范围仅限
+`canonical/gfs`、`canonical/IFS` 两棵树的目录位；`canonical/` 本身、`runs/`、`forcing/`
+以及所有文件位都不动。
 
 ### 5.4 Published artifacts
 

@@ -66,13 +66,28 @@ Path safety, stated as exactly what is enforced and nothing more:
   and recorded as a failure rather than followed out of the root, and so is a
   regular file already at this run's own temp name.
 
-Every directory the script creates under ``--copyback-root`` is chmod'ed 0o755
+Every directory the script creates *below* the mirror root is chmod'ed 0o2775
 explicitly, and every file it promotes there is chmod'ed 0o644 on the temp name
 before the ``os.replace``, because node-22 writes as one account and node-27
 reads the same NFS as another and the process umask must not decide that
 (``O_CREAT``'s mode argument is masked by the umask exactly as ``mkdir``'s is).
-Directories the script did not create and files it did not write -- an
-identical-size destination is skipped -- keep the mode they already had.
+0o2775 rather than 0o755 since #2100: node-27's retention account must be able
+to *delete* a mirrored cycle, which needs write on the directory, and the setgid
+bit makes each level created underneath take its parent's shared group (gid 1107
+``nwmuser`` in production) instead of this writer's egid. It is the same value
+the publisher's ``CANONICAL_MIRROR_DIRECTORY_MODE`` and the documented
+owner-side sweep write; ``docs/runbooks/current-production-ops.md`` 5.3 carries
+the sweep and the reversal. Directories the script did not create and files it
+did not write -- an identical-size destination is skipped -- keep the mode they
+already had.
+
+The mirror root ``canonical/`` itself is the one exception, and it is the whole
+point of the rule rather than a gap in it (#2100 D2): when this script creates
+that level it chmods it 0o755, not ``DIR_MODE``. Neither producer nor the
+owner-side sweep ever widens ``canonical/``, so a storage source nobody has
+swept yet is denied at its first ``unlink`` with zero bytes removed instead of
+half-deleted, and group write on the shared NFS root is not handed to every
+member of the writer's gid.
 """
 
 from __future__ import annotations
@@ -98,7 +113,8 @@ PRCP_DIR = "prcp_rate_or_amount"
 CYCLE_TOKEN_LENGTH = 10
 
 
-DIR_MODE = 0o755
+DIR_MODE = 0o2775
+MIRROR_ROOT_MODE = 0o755
 FILE_MODE = 0o644
 
 
@@ -195,14 +211,67 @@ def _reject_symlinked_directory(path: Path) -> None:
         raise SymlinkedDirectoryError(f"refusing to mirror a symlinked directory: {path}")
 
 
+def _ensure_mirror_root(mirror_root: Path) -> None:
+    """Create the mirror root ``canonical/`` at ``MIRROR_ROOT_MODE``, never ``DIR_MODE``.
+
+    Design D2 keeps ``canonical/`` at 0o755: neither the publisher nor the
+    owner-side sweep widens that level, so an unswept storage source under it
+    fails closed at the first ``unlink`` instead of being half-deleted, and gid
+    1078 does not gain write on the shared NFS mirror root. Preparing it here is
+    what keeps ``_ensure_target_directory`` -- which chmods every level it
+    creates to ``DIR_MODE`` -- from ever being the creator of this one.
+
+    Only a level *this call* creates is chmod'ed: the bare ``mkdir`` (no
+    ``exist_ok``) is a stricter test than ``_ensure_target_directory``'s
+    probe-then-create, having no window between the two. The copyback root above
+    it is guaranteed to exist by ``resolve_roots``' ``is_dir`` check.
+
+    Every error from the ``mkdir`` is deliberately swallowed rather than raised:
+    whatever blocks it blocks ``_ensure_target_directory`` too, one level deeper and
+    inside ``_mirror_file``'s ``except OSError``, so it reaches the summary as a
+    recorded per-file failure instead of aborting the run with a traceback and
+    no JSON at all. A regular file planted at ``canonical/`` is the worked
+    example: ``EEXIST`` here, then ``ENOTDIR`` on ``mkdir canonical/<S>`` there.
+    An ``EEXIST`` from the publisher's own
+    ``ensure_traversable_copyback_directory`` is the benign case and needs no
+    repair: that writer wants 0o755 on this level too.
+
+    The ``chmod`` is outside that ``try`` on purpose, and the asymmetry is the
+    point: it runs only on a directory this call has just created, so a failure
+    there has no deeper level to re-surface at. Swallowing it would leave
+    ``canonical/`` at the process umask -- 0o750 under ``umask 027`` -- and
+    silently hide the whole mirror from node-27's reader account. A traceback is
+    the better outcome.
+    """
+
+    try:
+        mirror_root.mkdir()
+    except OSError:
+        return
+    os.chmod(mirror_root, MIRROR_ROOT_MODE)
+
+
 def _ensure_target_directory(directory: Path) -> None:
-    """``mkdir -p`` the destination and chmod 0o755 every directory created here.
+    """``mkdir -p`` the destination and chmod ``DIR_MODE`` every directory created here.
 
     ``mkdir(mode=...)`` is masked by the process umask, so the mode has to be
     applied afterwards with an explicit ``chmod``; under ``umask 027`` the plain
     ``mkdir`` leaves 0o750 and node-27's reader account loses the tree.
     Pre-existing directories are left alone -- this script only owns what it
     creates.
+
+    ``_mirror_tree_under_batch_lock`` has already prepared the mirror root
+    ``canonical/`` at 0o755 via ``_ensure_mirror_root``, so the topmost level
+    this function can ever
+    create is ``canonical/<S>/`` and ``DIR_MODE`` is the right mode for every
+    level it reaches. That split is the #2100 D2 rule: ``canonical/<S>/`` and
+    ``canonical/<S>/grid/`` at 0o2775 are the sweep's own end state, while
+    ``canonical/`` must stay 0o755 for an unswept source to fail closed.
+
+    Outermost level first, which is also what puts the setgid bit of ``DIR_MODE``
+    on ``<cycle>/`` before ``prcp_rate_or_amount/`` is created under it, so on
+    Linux that child takes the parent's group rather than this process's egid
+    (#2100).
 
     The chain is created one level at a time, outermost first, and each level is
     chmod'ed as soon as *that* level exists. A single ``mkdir(parents=True)``
@@ -452,9 +521,19 @@ def _mirror_tree_under_batch_lock(
     this script counts as ``copied`` is removable by a concurrent publisher
     rollback.
 
+    The mirror root ``canonical/`` is prepared here, inside the ``with``, rather
+    than once in ``backfill()``: every directory this script creates under the
+    copyback root must be created while the mutex is held, or a run that cannot
+    take the lock -- and therefore mirrors nothing -- would still leave a
+    directory behind. ``_ensure_mirror_root`` is idempotent (``EEXIST`` on every
+    tree after the first), and calling it here is also what keeps
+    ``_ensure_target_directory`` from ever creating that level at ``DIR_MODE``
+    (#2100 D2).
+
     ``--dry-run`` takes no lock: it provably writes nothing (``_mirror_file``
-    returns before ``_ensure_target_directory``), and acquiring would create the
-    lock file under the copyback root, which is itself a write.
+    returns before ``_ensure_target_directory``, and the mirror root is created
+    under the lock this branch never takes), and acquiring would create the lock
+    file under the copyback root, which is itself a write.
 
     ``resolve_roots`` has already refused a ``--copyback-root`` that is absent,
     is the source root, or overlaps it, so the lock's parent directory exists and
@@ -465,6 +544,7 @@ def _mirror_tree_under_batch_lock(
         return mirror_tree(source_dir, target_dir, dry_run=dry_run)
     try:
         with copyback_batch_lock(copyback_root):
+            _ensure_mirror_root(copyback_root / CANONICAL_DIR)
             return mirror_tree(source_dir, target_dir, dry_run=dry_run)
     except CopybackLockError as error:
         result = _TreeResult()

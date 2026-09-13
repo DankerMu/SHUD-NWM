@@ -52,6 +52,18 @@ _CANONICAL_PRCP_LEAF = "prcp_rate_or_amount"
 _CANONICAL_GRID_DIR = "grid"
 _CANONICAL_GRID_FILE = "grid.json"
 _COPYBACK_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+# #2100 D3. Every directory the canonical precipitation mirror lane owns --
+# `canonical/<S>/<cycle>/`, the trees it copies under it, and their commit
+# clones -- carries this mode, the same value the documented owner-side sweep
+# writes on the existing tree (`docs/runbooks/current-production-ops.md` 5.3).
+# Group write is what lets node-27's `nwm` prune a cycle it did not create, and
+# the setgid bit is what makes a directory created underneath take the shared
+# group (gid 1107 `nwmuser` in production) instead of the writer's egid. It is
+# written explicitly on every one of those directories: `os.chmod` clears
+# setgid, so nothing here may rely on the bit surviving a later chmod. Lane
+# scoped on purpose -- `runs/` and `forcing/` keep the `0o755` default of the
+# `directory_mode` keyword threaded through the copy helpers.
+CANONICAL_MIRROR_DIRECTORY_MODE = 0o2775
 _COPYBACK_MAX_FILES = 100_000
 _COPYBACK_MAX_DIRECTORIES = 20_000
 _COPYBACK_MAX_TOTAL_BYTES = 100 * 1024 * 1024 * 1024
@@ -1297,9 +1309,10 @@ class TilePublisher:
 
             # Phase 1 is read-only: every "missing source" verdict is reached
             # before a single byte is written under the copyback root.
+            prcp_key = f"canonical/{storage_source}/{cycle_dir}/{_CANONICAL_PRCP_LEAF}"
             plans = [
                 self._plan_canonical_precip_tree(
-                    f"canonical/{storage_source}/{cycle_dir}/{_CANONICAL_PRCP_LEAF}",
+                    prcp_key,
                     copyback_store,
                 )
             ]
@@ -1339,12 +1352,31 @@ class TilePublisher:
 
             # Phase 2 writes, on a rollback batch of its own: a precip failure
             # must never roll back the q_down products copied earlier.
+            #
+            # #2100 D3, once per call and before the first tree is copied: this
+            # lane owns `<cycle>/` and asserts `CANONICAL_MIRROR_DIRECTORY_MODE`
+            # on it whether or not this call created it, which is what converges
+            # a `<cycle>/` an older producer left at `0o755`. It happens here
+            # rather than inside the copy helper for two reasons: the setgid bit
+            # must already be on `<cycle>/` when the temp tree's `mkdir` runs,
+            # or on Linux the temp tree takes the writer's egid instead of the
+            # mirror's shared group; and phase 2 is the first point at which a
+            # tree is known to need copying, so a cycle whose destination is
+            # identical (`trees_already_mirrored` above) is left untouched. The
+            # trees themselves and the commit clone take the same mode below.
+            # Scoped to this lane on purpose: `runs/` keeps `0o755`, and
+            # `forcing/` must, because node-27 carries a POSIX default ACL there
+            # whose mask a wider group mode would move.
+            cycle_directory = _object_tree_root_path(copyback_store, prcp_key).parent
+            ensure_traversable_copyback_directory(cycle_directory, containment_root=copyback_root)
+            _assert_copyback_directory_mode(cycle_directory, CANONICAL_MIRROR_DIRECTORY_MODE)
             for tree in pending:
                 counts = self._copyback_object_tree_with_rollback(
                     str(tree["object_key"]),
                     copyback_store,
                     validate_source_tree=_accept_canonical_precip_tree,
                     rollback_log=rollback_log,
+                    directory_mode=CANONICAL_MIRROR_DIRECTORY_MODE,
                 )
                 # Only now has this tree been promoted; before this line it is
                 # still `pending` and the destination holds nothing new. Both
@@ -1355,7 +1387,11 @@ class TilePublisher:
                 tree["status"] = "copied"
                 tree["file_count"] = counts["file_count"]
                 tree["byte_count"] = counts["byte_count"]
-            _commit_qdown_copyback_batch(rollback_log, containment_root=copyback_root)
+            _commit_qdown_copyback_batch(
+                rollback_log,
+                containment_root=copyback_root,
+                directory_mode=CANONICAL_MIRROR_DIRECTORY_MODE,
+            )
             return {**summary, "status": "ok", "file_count": _summed_tree_file_count(trees)}
         except Exception as error:
             if copyback_root is not None and rollback_log:
@@ -1650,11 +1686,18 @@ class TilePublisher:
         target_store: LocalObjectStore,
         *,
         validate_source_tree: Callable[[_CopybackSourceTree], None],
+        directory_mode: int = 0o755,
     ) -> dict[str, int]:
         key = self.object_store.normalize_key(key)
         source_tree = _collect_copyback_source_tree(self.object_store, key)
         validate_source_tree(source_tree)
-        return self._copyback_collected_object_tree(key, target_store, source_tree, rollback_log=None)
+        return self._copyback_collected_object_tree(
+            key,
+            target_store,
+            source_tree,
+            rollback_log=None,
+            directory_mode=directory_mode,
+        )
 
     def _copyback_object_tree_with_rollback(
         self,
@@ -1664,6 +1707,7 @@ class TilePublisher:
         validate_source_tree: Callable[[_CopybackSourceTree], None],
         validate_target_tree: Callable[[_CopybackSourceTree], None] | None = None,
         rollback_log: list[_CopybackRollbackEntry],
+        directory_mode: int = 0o755,
     ) -> dict[str, int]:
         key = self.object_store.normalize_key(key)
         source_tree = _collect_copyback_source_tree(self.object_store, key)
@@ -1674,6 +1718,7 @@ class TilePublisher:
             source_tree,
             rollback_log=rollback_log,
             validate_target_tree=validate_target_tree,
+            directory_mode=directory_mode,
         )
 
     def _copyback_collected_object_tree(
@@ -1684,19 +1729,31 @@ class TilePublisher:
         *,
         rollback_log: list[_CopybackRollbackEntry] | None,
         validate_target_tree: Callable[[_CopybackSourceTree], None] | None = None,
+        directory_mode: int = 0o755,
     ) -> dict[str, int]:
         target_dir = _object_tree_root_path(target_store, key)
         temp_key = _copyback_temp_tree_key(key)
         temp_dir = _object_tree_root_path(target_store, temp_key)
-        # #2035 Weakness B: `canonical/`, `canonical/<S>/`, `canonical/<S>/<cycle>/`
-        # and `canonical/<S>/grid/` are all created here, and `_chmod_tree_readable`
-        # below only reaches inside the copied tree.
+        # #2035 Weakness B: `canonical/`, `canonical/<S>/` and `canonical/<S>/grid/`
+        # are all created here, and `_chmod_tree_readable` below only reaches
+        # inside the copied tree. `canonical/<S>/<cycle>/` is created by this
+        # same helper one caller up since #2100 -- the canonical lane has to own
+        # that level's mode -- so here it is an existing level and untouched.
         ensure_traversable_copyback_directory(target_dir.parent, containment_root=target_store.root)
 
         byte_count = 0
         file_count = len(source_tree.files)
         try:
             ensure_traversable_copyback_directory(temp_dir, containment_root=target_store.root)
+            # #2100: the temp tree root is this call's own, freshly created
+            # directory, and `directory_mode` is asserted on it HERE rather than
+            # only in the `_chmod_tree_readable` below, because on Linux a file
+            # takes its parent directory's group at creation only while that
+            # parent carries setgid -- and the helper above clears the bit the
+            # `mkdir` inherited by chmod'ing the level to `0o755`. For every
+            # lane but the canonical mirror this re-asserts the `0o755` that
+            # call just wrote.
+            _assert_copyback_directory_mode(temp_dir, directory_mode)
             for directory_key in source_tree.directories:
                 temp_directory_key = _copyback_temp_key(directory_key, source_key=key, temp_key=temp_key)
                 ensure_traversable_copyback_directory(
@@ -1709,7 +1766,7 @@ class TilePublisher:
                 _enforce_copyback_tree_count("total bytes", byte_count, _COPYBACK_MAX_TOTAL_BYTES, tree_key=key)
                 temp_file_key = _copyback_temp_key(file_key, source_key=key, temp_key=temp_key)
                 target_store.write_bytes_atomic(temp_file_key, content)
-            _chmod_tree_readable(temp_dir, containment_root=target_store.root)
+            _chmod_tree_readable(temp_dir, containment_root=target_store.root, directory_mode=directory_mode)
             if rollback_log is None:
                 _replace_directory_tree_no_follow(temp_dir, target_dir, containment_root=target_store.root)
                 if validate_target_tree is not None:
@@ -1907,6 +1964,37 @@ def _compact_cycle_time_for_forcing_identity(value: Any) -> str:
         return format_cycle_time(value)
     except (TypeError, ValueError):
         return str(value).strip()
+
+
+def _assert_copyback_directory_mode(directory: Path, mode: int) -> None:
+    """``chmod`` an existing copyback directory through a descriptor, never a path.
+
+    ``_COPYBACK_DIR_FLAGS`` carries ``O_NOFOLLOW`` and ``O_DIRECTORY``, so a
+    symlink or a non-directory planted at ``directory`` is refused by the
+    ``os.open`` itself rather than chmod'ed through. Unlike
+    ``ensure_traversable_copyback_directory`` this asserts the mode whether or
+    not the caller created the level (#2100 D3).
+
+    Two call sites, not one:
+
+    * the canonical precipitation lane's ``<cycle>/``, with
+      ``CANONICAL_MIRROR_DIRECTORY_MODE`` -- the one mirror level that lane owns,
+      converged whether or not this call created it;
+    * the copyback temp tree root in ``_copyback_collected_object_tree``, for
+      **every** lane, with that call's ``directory_mode``. It is not
+      canonical-only because ``ensure_traversable_copyback_directory`` chmods
+      that freshly created level to ``0o755`` and so strips the setgid bit its
+      ``mkdir`` inherited, and on Linux a file takes its parent directory's group
+      at creation only while the parent still carries setgid. For ``runs/`` and
+      ``forcing/`` the assertion therefore rewrites the ``0o755`` just written
+      and changes nothing.
+    """
+
+    fd = os.open(directory, _COPYBACK_DIR_FLAGS)
+    try:
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
 
 
 def _object_tree_root_path(store: LocalObjectStore, key: str) -> Path:
@@ -2528,7 +2616,16 @@ def _commit_qdown_copyback_batch(
     rollback_log: list[_CopybackRollbackEntry],
     *,
     containment_root: Path,
+    directory_mode: int = 0o755,
 ) -> None:
+    """Clone each entry's backup, drop the original, and keep the clone for rollback.
+
+    ``directory_mode`` is the calling lane's copied-tree mode and reaches the
+    clone, because a clone this phase keeps is exactly what
+    ``_rollback_qdown_copyback_batch`` renames back into place: restoring a
+    canonical mirror tree at `0o755` would silently undo #2100's grant.
+    """
+
     for entry in rollback_log:
         if entry.backup_dir is not None:
             _verify_copyback_target_tree_clean(entry.backup_dir, containment_root=containment_root)
@@ -2545,6 +2642,7 @@ def _commit_qdown_copyback_batch(
                 entry.backup_dir,
                 rollback_backup,
                 containment_root=containment_root,
+                directory_mode=directory_mode,
             )
         except (OSError, SafeFilesystemError) as error:
             errors.append(str(error))
@@ -2600,7 +2698,13 @@ def _copyback_rollback_backup_dir(entry: _CopybackRollbackEntry) -> Path:
     return entry.target_dir.parent / f".{entry.target_dir.name}.copyback-rollback.{uuid.uuid4().hex}"
 
 
-def _clone_copyback_backup_tree_no_follow(source_dir: Path, clone_dir: Path, *, containment_root: Path) -> None:
+def _clone_copyback_backup_tree_no_follow(
+    source_dir: Path,
+    clone_dir: Path,
+    *,
+    containment_root: Path,
+    directory_mode: int = 0o755,
+) -> None:
     containment_root = containment_root.expanduser().resolve()
     source_dir = source_dir.expanduser()
     clone_dir = clone_dir.expanduser()
@@ -2621,7 +2725,7 @@ def _clone_copyback_backup_tree_no_follow(source_dir: Path, clone_dir: Path, *, 
             counters=counters,
             depth=0,
         )
-        _chmod_tree_readable(clone_dir, containment_root=containment_root)
+        _chmod_tree_readable(clone_dir, containment_root=containment_root, directory_mode=directory_mode)
     except Exception:
         rmtree_no_follow(clone_dir, containment_root=containment_root, missing_ok=True)
         raise
@@ -2771,7 +2875,16 @@ def _restore_copyback_backup(
         ) from error
 
 
-def _chmod_tree_readable(root: Path, *, containment_root: Path) -> None:
+def _chmod_tree_readable(root: Path, *, containment_root: Path, directory_mode: int = 0o755) -> None:
+    """Give every directory of a copied tree ``directory_mode`` and every file ``0o644``.
+
+    ``directory_mode`` is the copying lane's, not this helper's: the canonical
+    precipitation mirror passes ``CANONICAL_MIRROR_DIRECTORY_MODE`` (#2100 D3)
+    and every other lane keeps the ``0o755`` default, which is also what
+    ``ensure_traversable_copyback_directory`` gives the traversal levels above
+    the tree. Applied verbatim, setgid bit included where the caller set one.
+    """
+
     root = root.resolve()
     containment_root = containment_root.resolve()
     root.relative_to(containment_root)
@@ -2782,7 +2895,7 @@ def _chmod_tree_readable(root: Path, *, containment_root: Path) -> None:
         if stat.S_ISLNK(entry_stat.st_mode):
             raise SafeFilesystemError(f"Copied object-store entry must not be a symlink: {entry}")
         if stat.S_ISDIR(entry_stat.st_mode):
-            entry.chmod(0o755)
+            entry.chmod(directory_mode)
         elif stat.S_ISREG(entry_stat.st_mode):
             entry.chmod(0o644)
         else:

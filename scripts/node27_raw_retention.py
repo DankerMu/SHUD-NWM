@@ -638,14 +638,19 @@ def run_retention(
             try:
                 shutil.rmtree(target.path)
             except OSError as error:
-                # Known limit (measured on node-27, 2026-09-06): the canonical
-                # tree is `755 frd_muziyao nfsdata` while this runner is `nwm`,
-                # so every canonical target fails here with PermissionError on
-                # each tick. `error_type` keeps that distinguishable from other
-                # IO failures in the receipt. The remedy is a directory-mode or
-                # group change on the mirror producers, or an ops group
-                # membership change -- both outside this script, and both
-                # tracked by #2100.
+                # `error_type` keeps a permission denial distinguishable from
+                # other IO failures in the receipt, and since #2100 that
+                # distinction is an incident signal rather than a known limit:
+                # the canonical mirror is `2775` with the shared group this
+                # runner belongs to (gid 1107 `nwmuser`), set by the mirror
+                # producers on every directory they own and by the owner-side
+                # sweep on the rest. A `PermissionError` on a canonical target
+                # therefore means either the producer mode regressed or that
+                # source was never swept -- a storage source added to
+                # `NODE27_RAW_RETENTION_SOURCES` without its sweep fails closed
+                # here by design, with zero bytes removed. Remedy and the exact
+                # sweep commands: `docs/runbooks/current-production-ops.md` 5.3
+                # (#2100). Nothing in this script is the fix; it reports.
                 failed.append({**payload, "error": str(error), "error_type": type(error).__name__})
                 continue
             deleted.append(payload)
