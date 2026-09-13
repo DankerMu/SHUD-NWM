@@ -1,4 +1,5 @@
 """Reviewed original authority across census, G5, G6 and G8 public seams."""
+
 from __future__ import annotations
 
 import ast
@@ -46,19 +47,28 @@ def add_group(connection: CensusConnection, index: int, *, cold: bool = False) -
         range_start=CUTOFF - timedelta(days=100 - index),
         range_end=CUTOFF - timedelta(days=99 - index),
     )
-    connection.load_group(item, complete_relations(
-        origin_oid=item.origin_oid, compressed_oid=item.compressed_oid,
-        origin_name=item.origin_name, compressed_name=item.compressed_name,
-        origin_space="nhms_cold" if cold else "pg_default",
-    ))
+    connection.load_group(
+        item,
+        complete_relations(
+            origin_oid=item.origin_oid,
+            compressed_oid=item.compressed_oid,
+            origin_name=item.origin_name,
+            compressed_name=item.compressed_name,
+            origin_space="nhms_cold" if cold else "pg_default",
+        ),
+    )
     connection.compression_bytes[item.origin_name] = 1000 + index * 137
 
 
 def document(count: int, connection: CensusConnection | None = None) -> dict:
     return census.observe_census(
         census.CensusObserver(connection if connection is not None else population(count)),
-        require_count=count, lag_seconds=LAG, watermark=WATERMARK, now_utc=WATERMARK,
-        head_sha=SHA, database_url="postgresql://readonly:secret@localhost/isolated",
+        require_count=count,
+        lag_seconds=LAG,
+        watermark=WATERMARK,
+        now_utc=WATERMARK,
+        head_sha=SHA,
+        database_url="postgresql://readonly:secret@localhost/isolated",
     )
 
 
@@ -82,12 +92,17 @@ def frozen_files(root: Path, value: dict) -> tuple[Path, Path, Path, str]:
 
 def receipt(groups: list[dict], call: int, *, outcome: str = "migrated") -> dict:
     return {
-        "schema_version": "1.1", "per_tick_bound": 1, "outcome": "clean",
-        "selected": [
-            {"outcome": "already_cold", "durable": group["durable"]}
-            for group in groups[:call - 1]
-        ] + [{"outcome": outcome, "durable": groups[call - 1]["durable"],
-              "after": {"members": groups[call - 1]["members"]}}],
+        "schema_version": "1.1",
+        "per_tick_bound": 1,
+        "outcome": "clean",
+        "selected": [{"outcome": "already_cold", "durable": group["durable"]} for group in groups[: call - 1]]
+        + [
+            {
+                "outcome": outcome,
+                "durable": groups[call - 1]["durable"],
+                "after": {"members": groups[call - 1]["members"]},
+            }
+        ],
         "deferred": [{"reason": "per_tick_bound", "durable": group["durable"]} for group in groups[call:]],
     }
 
@@ -101,32 +116,76 @@ def test_same_complete_frozen_file_crosses_all_gates(tmp_path: Path, count: int)
     original, current, bracket, frozen = frozen_files(tmp_path / "private", value)
     assert original.stat().st_size < 1024**2
     loaded, approved = binding.load_original_census(
-        original, expected_original_sha256=frozen, reviewed_sha=SHA,
+        original,
+        expected_original_sha256=frozen,
+        reviewed_sha=SHA,
     )
     assert approved == count and loaded == value
-    assert binding.bind_pre_movement_census(
-        original_path=original, current_path=current, bracket_path=bracket,
-        expected_digest=value["census_digest"], reviewed_sha=SHA, expected_original_sha256=frozen,
-    ) == value
-    assert importlib.import_module("scripts.node27_issue1895_census_bind").main([
-        "--original", str(original), "--current", str(current), "--bracket", str(bracket),
-        "--digest", value["census_digest"], "--reviewed-sha", SHA, "--original-sha256", frozen,
-    ]) == 0
+    assert (
+        binding.bind_pre_movement_census(
+            original_path=original,
+            current_path=current,
+            bracket_path=bracket,
+            expected_digest=value["census_digest"],
+            reviewed_sha=SHA,
+            expected_original_sha256=frozen,
+        )
+        == value
+    )
+    assert (
+        importlib.import_module("scripts.node27_issue1895_census_bind").main(
+            [
+                "--original",
+                str(original),
+                "--current",
+                str(current),
+                "--bracket",
+                str(bracket),
+                "--digest",
+                value["census_digest"],
+                "--reviewed-sha",
+                SHA,
+                "--original-sha256",
+                frozen,
+            ]
+        )
+        == 0
+    )
     for call in range(1, count + 1):
         shipping = receipt(loaded["groups"], call)
         migrated = assert_sequential_tick_receipt(
-            shipping, ordered_keys=loaded["group_keys"], call_index=call, expected_count=approved,
+            shipping,
+            ordered_keys=loaded["group_keys"],
+            call_index=call,
+            expected_count=approved,
         )
         assert durable_key(migrated["durable"]) == loaded["group_keys"][call - 1]
         path, _ = private_json(original.parent / "receipt.json", shipping)
-        assert sequential_cli.main([
-            "--census", str(original), "--receipt", str(path), "--call-index", str(call),
-            "--original-sha256", frozen, "--reviewed-sha", SHA,
-        ]) == 0
+        assert (
+            sequential_cli.main(
+                [
+                    "--census",
+                    str(original),
+                    "--receipt",
+                    str(path),
+                    "--call-index",
+                    str(call),
+                    "--original-sha256",
+                    frozen,
+                    "--reviewed-sha",
+                    SHA,
+                ]
+            )
+            == 0
+        )
     connection = population(count, cold=True)
     observed = post_target.run_post_target_observation(
-        baseline_path=original, output_path=original.parent / "post.json", reviewed_sha=SHA,
-        expected_original_sha256=frozen, lag_seconds=LAG, watermark=WATERMARK,
+        baseline_path=original,
+        output_path=original.parent / "post.json",
+        reviewed_sha=SHA,
+        expected_original_sha256=frozen,
+        lag_seconds=LAG,
+        watermark=WATERMARK,
         execute=census.CensusObserver(connection).binder(),
     )
     baseline = persist_baseline_groups(loaded["groups"], expected_count=approved)
@@ -137,20 +196,46 @@ def test_same_complete_frozen_file_crosses_all_gates(tmp_path: Path, count: int)
     assert observed["complete_source_keys"] == []
     assert_natural_tick_selection(
         {"outcome": "no_op", "selected": [], "deferred": []},
-        baseline_keys=loaded["group_keys"], expected_count=approved,
-        remaining_complete_source_keys=[], newly_terminal_keys=[],
+        baseline_keys=loaded["group_keys"],
+        expected_count=approved,
+        remaining_complete_source_keys=[],
+        newly_terminal_keys=[],
     )
     reconcile_cli = importlib.import_module("scripts.node27_issue1895_group_reconcile")
-    natural_path, _ = private_json(original.parent / "natural.json", {
-        "schema_version": "1.1", "per_tick_bound": 1, "outcome": "no_op",
-        "head_sha": SHA, "watermark": value["watermark"], "cutoff": value["cutoff"],
-        "selected": [], "deferred": [],
-    })
-    assert reconcile_cli.main([
-        "--baseline", str(original), "--original-sha256", frozen, "--reviewed-sha", SHA,
-        "--observed", str(original.parent / "post.json"), "--receipt", str(natural_path),
-        "--expected-cutoff", value["cutoff"], "--expected-watermark", value["watermark"],
-    ]) == 0
+    natural_path, _ = private_json(
+        original.parent / "natural.json",
+        {
+            "schema_version": "1.1",
+            "per_tick_bound": 1,
+            "outcome": "no_op",
+            "head_sha": SHA,
+            "watermark": value["watermark"],
+            "cutoff": value["cutoff"],
+            "selected": [],
+            "deferred": [],
+        },
+    )
+    assert (
+        reconcile_cli.main(
+            [
+                "--baseline",
+                str(original),
+                "--original-sha256",
+                frozen,
+                "--reviewed-sha",
+                SHA,
+                "--observed",
+                str(original.parent / "post.json"),
+                "--receipt",
+                str(natural_path),
+                "--expected-cutoff",
+                value["cutoff"],
+                "--expected-watermark",
+                value["watermark"],
+            ]
+        )
+        == 0
+    )
 
 
 @pytest.mark.parametrize("raw", ["0", "64", "01", "+1", "-1", "1.0", "1e0", " 1", "1 ", "", "١"])
@@ -175,10 +260,26 @@ def test_original_counts_are_strict_integers(bad: object) -> None:
         binding.validate_original_census(value, expected_count=3, reviewed_sha=SHA)
 
 
-@pytest.mark.parametrize("mutation", [
-    "resolved", "config", "capacity_count", "capacity_type", "duplicate", "missing", "extra",
-    "key_order", "group_order", "identity", "head", "verdict", "residency", "parity", "capacity_bytes",
-])
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "resolved",
+        "config",
+        "capacity_count",
+        "capacity_type",
+        "duplicate",
+        "missing",
+        "extra",
+        "key_order",
+        "group_order",
+        "identity",
+        "head",
+        "verdict",
+        "residency",
+        "parity",
+        "capacity_bytes",
+    ],
+)
 def test_original_rejects_raw_count_identity_and_preimage_drift(mutation: str) -> None:
     value = document(3)
     if mutation == "resolved":
@@ -204,7 +305,7 @@ def test_original_rejects_raw_count_identity_and_preimage_drift(mutation: str) -
     elif mutation == "head":
         value["head_sha"] = "b" * 40
     elif mutation == "verdict":
-        value["verdict"] = "NO_GO"
+        value["verdict"] = "NO-GO"
     elif mutation == "residency":
         value["groups"][0]["residency"] = "mixed"
     elif mutation == "parity":
@@ -224,15 +325,24 @@ def test_self_consistent_replacement_cannot_reauthorize_original(tmp_path: Path)
         binding.load_original_census(original, expected_original_sha256=frozen, reviewed_sha=SHA)
     with pytest.raises(Issue1895ReadinessError):
         binding.bind_pre_movement_census(
-            original_path=original, current_path=current, bracket_path=bracket,
-            expected_digest=replacement["census_digest"], reviewed_sha=SHA, expected_original_sha256=frozen,
+            original_path=original,
+            current_path=current,
+            bracket_path=bracket,
+            expected_digest=replacement["census_digest"],
+            reviewed_sha=SHA,
+            expected_original_sha256=frozen,
         )
     opened = []
     with pytest.raises(Issue1895ReadinessError):
         post_target.run_post_target_observation(
-            baseline_path=original, output_path=original.parent / "post.json", reviewed_sha=SHA,
-            expected_original_sha256=frozen, lag_seconds=LAG, watermark=WATERMARK,
-            connect=lambda dsn: opened.append(dsn), dsn="postgresql://secret@localhost/isolated",
+            baseline_path=original,
+            output_path=original.parent / "post.json",
+            reviewed_sha=SHA,
+            expected_original_sha256=frozen,
+            lag_seconds=LAG,
+            watermark=WATERMARK,
+            connect=lambda dsn: opened.append(dsn),
+            dsn="postgresql://secret@localhost/isolated",
         )
     assert opened == [] and not (original.parent / "post.json").exists()
 
@@ -245,7 +355,9 @@ def test_oversized_original_refuses_under_unchanged_held_limit(tmp_path: Path) -
         binding.load_original_census(original, expected_original_sha256=frozen, reviewed_sha=SHA)
 
 
-@pytest.mark.parametrize("mutation", ["suffix", "index_zero", "index_extra", "extra_migration", "prior", "bound", "duplicate_keys"])
+@pytest.mark.parametrize(
+    "mutation", ["suffix", "index_zero", "index_extra", "extra_migration", "prior", "bound", "duplicate_keys"]
+)
 def test_sequential_ticks_refuse_wrong_transition(mutation: str) -> None:
     value = document(3)
     shipping = receipt(value["groups"], 1)
@@ -271,8 +383,11 @@ def test_sequential_ticks_refuse_wrong_transition(mutation: str) -> None:
 def test_planned_preview_preserves_one_group_bound() -> None:
     value = document(3)
     result = assert_sequential_tick_receipt(
-        receipt(value["groups"], 1, outcome="planned"), ordered_keys=value["group_keys"],
-        call_index=1, expected_count=3, migrate_outcome="planned",
+        receipt(value["groups"], 1, outcome="planned"),
+        ordered_keys=value["group_keys"],
+        call_index=1,
+        expected_count=3,
+        migrate_outcome="planned",
     )
     assert durable_key(result["durable"]) == value["group_keys"][0]
 
@@ -283,27 +398,41 @@ def test_newly_terminal_identity_remains_outside_original_population() -> None:
     add_group(connection, 3, cold=True)
     add_group(connection, 4)
     observed = post_target.observe_post_target(
-        baseline_groups=value["groups"], expected_count=3,
-        execute=census.CensusObserver(connection).binder(), cutoff=CUTOFF,
-        watermark=WATERMARK, lag_seconds=LAG, reviewed_sha=SHA,
+        baseline_groups=value["groups"],
+        expected_count=3,
+        execute=census.CensusObserver(connection).binder(),
+        cutoff=CUTOFF,
+        watermark=WATERMARK,
+        lag_seconds=LAG,
+        reviewed_sha=SHA,
     )
     assert observed["baseline_keys"] == value["group_keys"]
     extra = document(5)["groups"]
     newly = post_target.newly_terminal_keys(
-        pre_target_keys=value["group_keys"], post_target_keys=observed["complete_target_keys"],
+        pre_target_keys=value["group_keys"],
+        post_target_keys=observed["complete_target_keys"],
     )
     assert newly == (extra[3]["key"],)
     assert observed["complete_source_keys"] == [extra[4]["key"]]
-    shipping = {"outcome": "clean", "selected": [{"outcome": "migrated", "durable": extra[3]["durable"]}],
-                "deferred": [{"reason": "per_tick_bound", "durable": extra[4]["durable"]}]}
+    shipping = {
+        "outcome": "clean",
+        "selected": [{"outcome": "migrated", "durable": extra[3]["durable"]}],
+        "deferred": [{"reason": "per_tick_bound", "durable": extra[4]["durable"]}],
+    }
     assert_natural_tick_selection(
-        shipping, baseline_keys=value["group_keys"], expected_count=3,
-        remaining_complete_source_keys=observed["complete_source_keys"], newly_terminal_keys=newly,
+        shipping,
+        baseline_keys=value["group_keys"],
+        expected_count=3,
+        remaining_complete_source_keys=observed["complete_source_keys"],
+        newly_terminal_keys=newly,
     )
     with pytest.raises(Issue1895ReadinessError):
         assert_natural_tick_selection(
-            shipping, baseline_keys=value["group_keys"], expected_count=3,
-            remaining_complete_source_keys=[], newly_terminal_keys=newly,
+            shipping,
+            baseline_keys=value["group_keys"],
+            expected_count=3,
+            remaining_complete_source_keys=[],
+            newly_terminal_keys=newly,
         )
     with pytest.raises(Issue1895ReadinessError):
         assert_exact_cold_groups(observed["groups"] + [extra[3]], baseline=value["groups"], expected_count=3)
@@ -311,20 +440,46 @@ def test_newly_terminal_identity_remains_outside_original_population() -> None:
 
 def test_measured_capacity_uses_every_group_not_sample_times_count() -> None:
     policy = capacity_policy(expansions=[101, 307, 211], retained=[11, 23, 47], group_count=3)
-    assert {key: policy[key] for key in (
-        "status", "group_count", "E", "S", "cold_reserve_bytes", "wal_reserve_bytes",
-        "install_required_bytes", "rollback_headroom_bytes", "installer_required_cold_free_bytes",
-    )} == {"status": "resolved", "group_count": "3", "E": "307", "S": "81",
-           "cold_reserve_bytes": "307", "wal_reserve_bytes": "307", "install_required_bytes": "81",
-           "rollback_headroom_bytes": "614", "installer_required_cold_free_bytes": "695"}
+    assert {
+        key: policy[key]
+        for key in (
+            "status",
+            "group_count",
+            "E",
+            "S",
+            "cold_reserve_bytes",
+            "wal_reserve_bytes",
+            "install_required_bytes",
+            "rollback_headroom_bytes",
+            "installer_required_cold_free_bytes",
+        )
+    } == {
+        "status": "resolved",
+        "group_count": "3",
+        "E": "307",
+        "S": "81",
+        "cold_reserve_bytes": "307",
+        "wal_reserve_bytes": "307",
+        "install_required_bytes": "81",
+        "rollback_headroom_bytes": "614",
+        "installer_required_cold_free_bytes": "695",
+    }
     assert policy["expansion_values"] == ["101", "307", "211"]
     assert policy["retained_values"] == ["11", "23", "47"]
 
 
-@pytest.mark.parametrize("expansions,retained", [
-    ([0], [1]), ([1], [-1]), ([2**62], [1]), ([1, 1], [2**62, 2**62]),
-    ([2**62 - 1], [2]), ([True], [1]), ([1], [False]),
-])
+@pytest.mark.parametrize(
+    "expansions,retained",
+    [
+        ([0], [1]),
+        ([1], [-1]),
+        ([2**62], [1]),
+        ([1, 1], [2**62, 2**62]),
+        ([2**62 - 1], [2]),
+        ([True], [1]),
+        ([1], [False]),
+    ],
+)
 def test_capacity_positive_and_overflow_guards(expansions: list, retained: list) -> None:
     with pytest.raises(CensusPolicyError):
         capacity_policy(expansions=expansions, retained=retained, group_count=len(expansions))
@@ -337,41 +492,74 @@ def test_capacity_exact_signed_bigint_boundary() -> None:
 
 def test_census_reports_surplus_without_truncating() -> None:
     value = document(3, population(4))
-    assert value["verdict"] == "NO_GO"
+    assert value["verdict"] == "NO-GO"
     assert value["required_group_count"] == 3 and value["resolved_group_count"] == 4
     assert len(value["groups"]) == len(value["group_keys"]) == 4
 
 
-@pytest.mark.parametrize("module", [
-    "node27_issue1895_census_bind", "node27_issue1895_sequential_receipt",
-    "node27_issue1895_post_target_observe", "node27_issue1895_group_reconcile", "node27_issue1895_cutoff_count",
-])
+@pytest.mark.parametrize(
+    "module",
+    [
+        "node27_issue1895_census_bind",
+        "node27_issue1895_sequential_receipt",
+        "node27_issue1895_post_target_observe",
+        "node27_issue1895_group_reconcile",
+        "node27_issue1895_cutoff_count",
+    ],
+)
 @pytest.mark.parametrize("flag", ["--original-sha256", "--reviewed-sha"])
 def test_every_original_cli_requires_both_external_anchors(module: str, flag: str) -> None:
     parser = importlib.import_module(f"scripts.{module}").build_parser()
     inputs = {
-        "node27_issue1895_census_bind": ["--current", "current", "--original", "original", "--digest", "digest",
-                                      "--bracket", "bracket"],
+        "node27_issue1895_census_bind": [
+            "--current",
+            "current",
+            "--original",
+            "original",
+            "--digest",
+            "digest",
+            "--bracket",
+            "bracket",
+        ],
         "node27_issue1895_sequential_receipt": ["--receipt", "receipt", "--census", "original", "--call-index", "1"],
         "node27_issue1895_post_target_observe": ["--baseline", "original", "--output", "output", "--lag-seconds", "1"],
-        "node27_issue1895_group_reconcile": ["--baseline", "original", "--observed", "observed", "--receipt", "receipt",
-                                          "--expected-cutoff", "cutoff", "--expected-watermark", "watermark"],
+        "node27_issue1895_group_reconcile": [
+            "--baseline",
+            "original",
+            "--observed",
+            "observed",
+            "--receipt",
+            "receipt",
+            "--expected-cutoff",
+            "cutoff",
+            "--expected-watermark",
+            "watermark",
+        ],
         "node27_issue1895_cutoff_count": ["--original", "original"],
     }
     argv = inputs[module] + ["--original-sha256", "b" * 64, "--reviewed-sha", SHA]
     parser.parse_args(argv)
     index = argv.index(flag)
     with pytest.raises(SystemExit) as refused:
-        parser.parse_args(argv[:index] + argv[index + 2:])
+        parser.parse_args(argv[:index] + argv[index + 2 :])
     assert refused.value.code == 2
 
 
 def test_pinned_runtime_invokes_count_discriminator() -> None:
     tree = ast.parse(Path("tests/test_compressed_chunk_cold_runtime_integration.py").read_text())
-    harness = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
-                   and node.name == "test_isolated_cluster_production_runtime_not_probe_executor")
-    calls = [node for node in ast.walk(harness) if isinstance(node, ast.Call)
-             and isinstance(node.func, ast.Name) and node.func.id == "_assert_reviewed_count_discriminator"]
+    harness = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "test_isolated_cluster_production_runtime_not_probe_executor"
+    )
+    calls = [
+        node
+        for node in ast.walk(harness)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_assert_reviewed_count_discriminator"
+    ]
     assert len(calls) == 1
 
 
@@ -381,8 +569,13 @@ def test_named_observation_rejects_duplicate_before_query() -> None:
     queried = []
     with pytest.raises(Issue1895ReadinessError):
         post_target.observe_post_target(
-            baseline_groups=groups, expected_count=3, execute=lambda *args: queried.append(args),
-            cutoff=CUTOFF, watermark=WATERMARK, lag_seconds=LAG, reviewed_sha=SHA,
+            baseline_groups=groups,
+            expected_count=3,
+            execute=lambda *args: queried.append(args),
+            cutoff=CUTOFF,
+            watermark=WATERMARK,
+            lag_seconds=LAG,
+            reviewed_sha=SHA,
         )
     assert queried == []
 
@@ -396,14 +589,20 @@ def test_current_order_and_duplicates_cannot_hide_in_maps(tmp_path: Path) -> Non
         private_json(current, drift)
         with pytest.raises(Issue1895ReadinessError):
             binding.bind_pre_movement_census(
-                original_path=original, current_path=current, bracket_path=bracket,
-                expected_digest=value["census_digest"], reviewed_sha=SHA, expected_original_sha256=frozen,
+                original_path=original,
+                current_path=current,
+                bracket_path=bracket,
+                expected_digest=value["census_digest"],
+                reviewed_sha=SHA,
+                expected_original_sha256=frozen,
             )
 
 
 @pytest.mark.parametrize("observed_count", [0, 3, 4])
 def test_cutoff_count_observes_catalog_not_original_n(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], observed_count: int,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    observed_count: int,
 ) -> None:
     cutoff_cli = importlib.import_module("scripts.node27_issue1895_cutoff_count")
     original, frozen = private_json(tmp_path / "private" / "original.json", document(3))
@@ -422,7 +621,9 @@ def test_cutoff_count_observes_catalog_not_original_n(
 
 @pytest.mark.parametrize("state", ["mixed", "incomplete", "inventory", "overscan", "hash"])
 def test_cutoff_count_refuses_without_integer_output(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], state: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
 ) -> None:
     cutoff_cli = importlib.import_module("scripts.node27_issue1895_cutoff_count")
     original, frozen = private_json(tmp_path / "private" / "original.json", document(3))
@@ -445,7 +646,8 @@ def test_cutoff_count_refuses_without_integer_output(
     result = cutoff_cli.main(
         ["--original", str(original), "--original-sha256", frozen, "--reviewed-sha", SHA],
         env={"DATABASE_URL": "postgresql://readonly:secret@localhost/isolated"},
-        connect=connect, watermark_fetcher=lambda dsn, connect=None: WATERMARK,
+        connect=connect,
+        watermark_fetcher=lambda dsn, connect=None: WATERMARK,
     )
     captured = capsys.readouterr()
     assert result != 0 and captured.out == ""
@@ -461,8 +663,12 @@ def test_g1_executable_policy_freezes_external_count_and_held_hash(tmp_path: Pat
     original, _current, bracket, frozen = frozen_files(tmp_path / "private", value)
     policy = original.parent / "policy.env"
     for key, setting in {
-        "CENSUS_ARTIFACT": str(original), "POLICY_FILE": str(policy), "REQUIRE_COUNT": "3",
-        "REVIEWED_SHA": SHA, "CENSUS_BRACKET": str(bracket), "BRACKET_FILE": str(bracket),
+        "CENSUS_ARTIFACT": str(original),
+        "POLICY_FILE": str(policy),
+        "REQUIRE_COUNT": "3",
+        "REVIEWED_SHA": SHA,
+        "CENSUS_BRACKET": str(bracket),
+        "BRACKET_FILE": str(bracket),
     }.items():
         monkeypatch.setenv(key, setting)
     blocks = [body for _opening, body in _gate_bash("G1") if "O_EXCL" in body and "POLICY_FILE" in body]
@@ -481,7 +687,9 @@ def test_g1_executable_policy_freezes_external_count_and_held_hash(tmp_path: Pat
     assert policy.read_bytes() == saved
 
 
-@pytest.mark.parametrize("mutation", ["duplicate_keys", "missing_keys", "extra_keys", "same_length_duplicate", "measured"])
+@pytest.mark.parametrize(
+    "mutation", ["duplicate_keys", "missing_keys", "extra_keys", "same_length_duplicate", "measured"]
+)
 def test_original_raw_identity_set_and_measured_capacity_are_authoritative(mutation: str) -> None:
     value = document(3)
     if mutation == "duplicate_keys":
@@ -515,3 +723,25 @@ def test_original_loader_retains_private_held_identity_rules(tmp_path: Path, kin
         original.parent.chmod(0o755)
     with pytest.raises(Issue1895ReadinessError):
         binding.load_original_census(original, expected_original_sha256=frozen, reviewed_sha=SHA)
+
+
+def test_g6_executable_key_extraction_cannot_authorize_replacement(tmp_path: Path, monkeypatch, capsys) -> None:
+    import re
+    import sys
+
+    from tests.test_issue1895_runbook_contract import _gate_bash
+
+    value = document(3)
+    original, frozen = private_json(tmp_path / "private" / "original.json", value)
+    loop = next(body for _opening, body in _gate_bash("G6") if "while IFS= read -r GROUP" in body)
+    line = next(line for line in loop.splitlines() if line.startswith("done < <("))
+    match = re.search(r"python -c '([^']+)'", line)
+    assert match is not None
+    monkeypatch.setattr(sys, "argv", ["-c", str(original), frozen, SHA])
+    program = compile(match.group(1), "<runbook-G6-keys>", "exec")
+    exec(program, {})
+    assert capsys.readouterr().out.splitlines() == value["group_keys"]
+    private_json(original, document(4))
+    with pytest.raises(Issue1895ReadinessError):
+        exec(program, {})
+    assert capsys.readouterr().out == ""

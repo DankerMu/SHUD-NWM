@@ -13057,7 +13057,10 @@ def test_runtime_integration_test_only_change_selects_marker_contract_exactly() 
     marker = "tests/test_node27_cold_tablespace_marker_contract.py"
     selected = set(select_tests([owner], repo_root=Path(".")))
     assert selected == {
-        owner, marker, SELECTOR_META_GUARD_TEST, "tests/test_issue2290_cold_parent_admission.py",
+        owner,
+        marker,
+        SELECTOR_META_GUARD_TEST,
+        "tests/test_issue2290_cold_parent_admission.py",
         "tests/test_issue2291_reviewed_census_count.py",
     }
 
@@ -13073,7 +13076,10 @@ def test_runtime_integration_marker_contract_redirect_reds_when_rule_removed(
     assert len(matching) == 1, f"expected exactly one CHANGED_TEST_FILE_RULES entry for {owner}"
     assert matching[0].stop_on_match is True
     assert matching[0].tests == (
-        owner, marker, "tests/test_issue2290_cold_parent_admission.py", "tests/test_issue2291_reviewed_census_count.py",
+        owner,
+        marker,
+        "tests/test_issue2290_cold_parent_admission.py",
+        "tests/test_issue2291_reviewed_census_count.py",
     )
     mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
     assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
@@ -17743,23 +17749,37 @@ def _issue2291_retained_targets(owner: str) -> set[str]:
     if owner == "packages/common/node27_cold_residency_census_policy.py":
         return set(_prod_module.NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS)
     if owner == "scripts/node27_cold_residency_census.py":
-        return {*_prod_module.NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS, *ORIGIN_CHUNK_PARITY_TESTS,
-                "tests/test_issue1895_readiness_storage.py", "tests/test_issue2290_cold_parent_admission.py"}
+        return {
+            *_prod_module.NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
+            *ORIGIN_CHUNK_PARITY_TESTS,
+            "tests/test_issue1895_readiness_storage.py",
+            "tests/test_issue2290_cold_parent_admission.py",
+        }
     if owner == "scripts/node27_issue1895_cutoff_count.py":
         return {"tests/test_compressed_chunk_cold_runtime_integration.py"}
     if owner == "packages/common/node27_issue1895_post_target.py":
         return {*ORIGIN_CHUNK_PARITY_TESTS, "tests/test_issue2290_cold_parent_admission.py"}
     if owner == "docs/runbooks/tier-node27-timeseries-storage.md":
-        return {*ORIGIN_CHUNK_PARITY_TESTS, *_prod_module.ISSUE1895_READINESS_TESTS,
-                "tests/test_node27_timeseries_compression.py", "tests/test_node27_cold_residency.py",
-                "tests/test_node27_cold_residency_runtime_identity.py",
-                "tests/test_node27_timeseries_sequential_budget.py",
-                "tests/test_node27_timeseries_sequential_runner_config.py",
-                "tests/test_node27_timeseries_sequential_wrappers.py", "tests/test_node27_lifecycle_contract.py",
-                "tests/test_issue1895_runbook_contract.py", "tests/test_issue2290_cold_parent_admission.py"}
+        return {
+            *ORIGIN_CHUNK_PARITY_TESTS,
+            *_prod_module.ISSUE1895_READINESS_TESTS,
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_lifecycle_contract.py",
+            "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2290_cold_parent_admission.py",
+        }
     if owner in {"packages/common/node27_issue1895_timer.py", "scripts/node27_issue1895_group_reconcile.py"}:
-        return {*storage, *ISSUE1895_READINESS_STORAGE_TESTS,
-                "tests/test_issue1895_readiness_gates.py", "tests/test_issue1895_readiness_c14.py"}
+        return {
+            *storage,
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_readiness_gates.py",
+            "tests/test_issue1895_readiness_c14.py",
+        }
     if owner.startswith("scripts/"):
         return {*storage, *ISSUE1895_READINESS_STORAGE_TESTS}
     return storage
@@ -17781,10 +17801,16 @@ def test_reviewed_count_each_owner_leg_removal_preserves_prior_selection(monkeyp
     assert ISSUE2291_COUNT_SUITE in matching[0].tests
     before = set(select_tests([owner], repo_root=Path(".")))
     assert _issue2291_retained_targets(owner) <= before
-    monkeypatch.setattr(_prod_module, "PATH_TEST_RULES", tuple(
-        replace(rule, tests=tuple(target for target in rule.tests if target != ISSUE2291_COUNT_SUITE))
-        if rule.pattern == owner else rule for rule in _prod_module.PATH_TEST_RULES
-    ))
+    monkeypatch.setattr(
+        _prod_module,
+        "PATH_TEST_RULES",
+        tuple(
+            replace(rule, tests=tuple(target for target in rule.tests if target != ISSUE2291_COUNT_SUITE))
+            if rule.pattern == owner
+            else rule
+            for rule in _prod_module.PATH_TEST_RULES
+        ),
+    )
     assert set(select_tests([owner], repo_root=Path("."))) == before - {ISSUE2291_COUNT_SUITE}
 
 
@@ -17793,11 +17819,56 @@ def test_reviewed_count_harness_route_and_independent_removal(monkeypatch) -> No
     rules = _prod_module.CHANGED_TEST_FILE_RULES
     matching = [rule for rule in rules if rule.pattern == owner]
     assert len(matching) == 1 and matching[0].stop_on_match
-    required = {owner, ISSUE2291_COUNT_SUITE, "tests/test_node27_cold_tablespace_marker_contract.py",
-                "tests/test_issue2290_cold_parent_admission.py", SELECTOR_META_GUARD_TEST}
+    required = {
+        owner,
+        ISSUE2291_COUNT_SUITE,
+        "tests/test_node27_cold_tablespace_marker_contract.py",
+        "tests/test_issue2290_cold_parent_admission.py",
+        SELECTOR_META_GUARD_TEST,
+    }
     assert set(select_tests([owner], repo_root=Path("."))) == required
-    monkeypatch.setattr(_prod_module, "CHANGED_TEST_FILE_RULES", tuple(
-        replace(rule, tests=tuple(target for target in rule.tests if target != ISSUE2291_COUNT_SUITE))
-        if rule.pattern == owner else rule for rule in rules
-    ))
+    monkeypatch.setattr(
+        _prod_module,
+        "CHANGED_TEST_FILE_RULES",
+        tuple(
+            replace(rule, tests=tuple(target for target in rule.tests if target != ISSUE2291_COUNT_SUITE))
+            if rule.pattern == owner
+            else rule
+            for rule in rules
+        ),
+    )
     assert set(select_tests([owner], repo_root=Path("."))) == required - {ISSUE2291_COUNT_SUITE}
+
+
+@pytest.mark.parametrize(
+    "suite",
+    [
+        "tests/test_issue1895_readiness_storage.py",
+        "tests/test_issue1895_readiness_storage_publication.py",
+        "tests/test_compressed_chunk_cold_runtime_integration.py",
+        "tests/test_node27_cold_tablespace_marker_contract.py",
+    ],
+)
+def test_reviewed_count_fixture_owner_selects_consumers_and_each_removal(monkeypatch, suite: str) -> None:
+    rules = _prod_module.CHANGED_TEST_FILE_RULES
+    matching = [rule for rule in rules if rule.pattern == ISSUE2291_COUNT_SUITE]
+    assert len(matching) == 1 and matching[0].stop_on_match
+    before = set(select_tests([ISSUE2291_COUNT_SUITE], repo_root=Path(".")))
+    assert {
+        *_prod_module.ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        ISSUE2291_COUNT_SUITE,
+        "tests/test_compressed_chunk_cold_runtime_integration.py",
+        "tests/test_node27_cold_tablespace_marker_contract.py",
+    } <= before
+    assert suite in matching[0].tests
+    monkeypatch.setattr(
+        _prod_module,
+        "CHANGED_TEST_FILE_RULES",
+        tuple(
+            replace(rule, tests=tuple(target for target in rule.tests if target != suite))
+            if rule.pattern == ISSUE2291_COUNT_SUITE
+            else rule
+            for rule in rules
+        ),
+    )
+    assert set(select_tests([ISSUE2291_COUNT_SUITE], repo_root=Path("."))) == before - {suite}

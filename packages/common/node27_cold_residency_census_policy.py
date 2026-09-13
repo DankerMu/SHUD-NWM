@@ -18,6 +18,7 @@ from typing import Any
 # argv or the runner env must stay inside it, so an overflow refuses rather than
 # emitting a value a second parser could read differently.
 MAX_BYTE_VALUE = 2**63 - 1
+MAX_REVIEWED_COUNT = 63
 
 
 class CensusPolicyError(Exception):
@@ -27,6 +28,21 @@ class CensusPolicyError(Exception):
         super().__init__(message)
         self.error_class = error_class
         self.stage = stage
+
+
+def validate_reviewed_count(value: object, *, error_type: type[Exception] = CensusPolicyError) -> int:
+    """Accept only a reviewed integer with room for an independently seen extra."""
+    if type(value) is not int or not 1 <= value <= MAX_REVIEWED_COUNT:
+        raise error_type("reviewed count must be an integer in 1..63", error_class="config", stage="config")
+    return value
+
+
+def parse_reviewed_count(raw: str, *, error_type: type[Exception] = CensusPolicyError) -> int:
+    if not isinstance(raw, str) or not raw or not raw.isascii() or not raw.isdecimal() or raw.startswith("0"):
+        raise error_type("reviewed count must be canonical decimal 1..63", error_class="config", stage="config")
+    if len(raw) > 2:
+        raise error_type("reviewed count exceeds 63", error_class="config", stage="config")
+    return validate_reviewed_count(int(raw), error_type=error_type)
 
 
 def _canonical_decimal(value: int, *, label: str, error_type: type[Exception]) -> str:
@@ -81,6 +97,7 @@ def capacity_policy(
     observation.
     """
 
+    validate_reviewed_count(group_count, error_type=error_type)
     if group_count < 1 or len(expansions) != group_count or len(retained) != group_count:
         raise error_type(
             "capacity policy needs one positive expansion and retained-source value per census group",
@@ -98,9 +115,7 @@ def capacity_policy(
         total = _checked_add(total, value, label="S", error_type=error_type)
     s_value = _positive_decimal(total, label="S", error_type=error_type)
     rollback = _checked_add(expansion_max, expansion_max, label="ROLLBACK_HEADROOM", error_type=error_type)
-    installer_required = _checked_add(
-        total, rollback, label="installer cold requirement", error_type=error_type
-    )
+    installer_required = _checked_add(total, rollback, label="installer cold requirement", error_type=error_type)
     return {
         "status": "resolved",
         "group_count": _canonical_decimal(group_count, label="group_count", error_type=error_type),
@@ -109,9 +124,7 @@ def capacity_policy(
         "expansion_values": [
             _positive_decimal(value, label="expansion", error_type=error_type) for value in expansions
         ],
-        "retained_values": [
-            _positive_decimal(value, label="retained", error_type=error_type) for value in retained
-        ],
+        "retained_values": [_positive_decimal(value, label="retained", error_type=error_type) for value in retained],
         "cold_reserve_bytes": e_value,
         "wal_reserve_bytes": e_value,
         "install_required_bytes": s_value,

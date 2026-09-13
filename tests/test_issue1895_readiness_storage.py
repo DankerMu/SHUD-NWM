@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import os
 from datetime import UTC, datetime
@@ -39,12 +41,20 @@ from scripts import node27_issue1895_fs_reconcile as fs_reconcile_cli
 from scripts import node27_issue1895_post_target_observe as post_target_observe_cli
 from scripts import node27_issue1895_sequential_receipt as sequential_receipt_cli
 from scripts import node27_issue1895_watermark as watermark_cli
+from scripts.node27_cold_residency_census import CensusObserver
+from tests.cold_residency_fakes import CUTOFF, LAG, WATERMARK
 from tests.test_issue1895_readiness_c14 import _group
-from tests.test_issue1895_runbook_contract import _gate_bash, _gate_lines
+from tests.test_issue1895_runbook_contract import _gate_lines
+from tests.test_issue2291_reviewed_census_count import document as reviewed_document
+from tests.test_issue2291_reviewed_census_count import population as reviewed_population
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE = REPO_ROOT / "infra" / "env" / "node27-cold-residency.example"
 SHA = "a" * 40
+_ORIGINAL = reviewed_document(6)
+_ORIGINAL["generated_at"] = "2026-09-04T04:00:30Z"
+_ORIGINAL_HASH = hashlib.sha256(json.dumps(_ORIGINAL).encode()).hexdigest()
+_DURABLE_GROUPS = reviewed_document(8)["groups"]
 
 
 def _private_dir(path: Path) -> Path:
@@ -77,7 +87,7 @@ def _substitute_identity(path: Path, kind: str) -> None:
 
 
 def _durable(index: int) -> dict:
-    return _group(f"k{index}", index)["durable"]
+    return copy.deepcopy(_DURABLE_GROUPS[index - 1]["durable"])
 
 
 KEYS = tuple(durable_key(_durable(index)) for index in range(1, 7))
@@ -106,24 +116,8 @@ def _shipping_receipt(*, call_index: int, outcome: str = "migrated") -> dict:
     }
 
 
-def _census_artifact(*, digest: str = "abc") -> dict:
-    groups = [_group(key, index, residency="all_source") for index, key in enumerate(KEYS, start=1)]
-    for group in groups:
-        group["group_digest"] = f"g-{group['key']}"
-        group["inventory_digest"] = "inv"
-        group["parity"] = {"row_count": 1}
-        group["before_compression_total_bytes"] = 100
-        group["retained_source_bytes"] = 50
-    return {
-        "verdict": "GO",
-        "head_sha": SHA,
-        "generated_at": "2026-09-04T04:00:30Z",
-        "census_digest": digest,
-        "group_keys": list(KEYS),
-        "residency_counts": {"all_source": 6},
-        "groups": groups,
-        "capacity_policy": {"S": 1, "E": 2},
-    }
+def _census_artifact() -> dict:
+    return copy.deepcopy(_ORIGINAL)
 
 
 def test_g3_engine_gate_accepts_ubuntu_suffix_and_rejects_wrong_major() -> None:
@@ -149,9 +143,10 @@ def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
     bound = bind_pre_movement_census(
         current_path=current_path,
         original_path=original_path,
-        expected_digest="abc",
+        expected_digest=_ORIGINAL["census_digest"],
         bracket_path=bracket,
         reviewed_sha=SHA,
+        expected_original_sha256=_ORIGINAL_HASH,
     )
     assert bound["verdict"] == "GO"
     bracket.write_text("not-a-bracket\n2026-09-04T04:01:00+00:00\n0\n", encoding="utf-8")
@@ -164,11 +159,13 @@ def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
                 "--original",
                 str(original_path),
                 "--digest",
-                "abc",
+                _ORIGINAL["census_digest"],
                 "--bracket",
                 str(bracket),
                 "--reviewed-sha",
                 SHA,
+                "--original-sha256",
+                _ORIGINAL_HASH,
             ]
         )
         == 1
@@ -182,11 +179,13 @@ def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
             "--original",
             str(original_path),
             "--digest",
-            "abc",
+            _ORIGINAL["census_digest"],
             "--bracket",
             str(bracket),
             "--reviewed-sha",
             SHA,
+            "--original-sha256",
+            _ORIGINAL_HASH,
         ]
     )
     assert rc == 0
@@ -198,9 +197,10 @@ def test_g5_census_binder_loads_both_json_paths(tmp_path: Path) -> None:
         bind_pre_movement_census(
             current_path=current_path,
             original_path=original_path,
-            expected_digest="abc",
+            expected_digest=_ORIGINAL["census_digest"],
             bracket_path=bracket,
             reviewed_sha=SHA,
+            expected_original_sha256=_ORIGINAL_HASH,
         )
     assert digest.value.code == "CENSUS_DIGEST_DRIFT"
     g5 = " ".join(_gate_lines("G5"))
@@ -223,9 +223,10 @@ def test_g5_census_binder_refuses_unsafe_current_original_or_bracket_identity(
         bind_pre_movement_census(
             current_path=current_path,
             original_path=original_path,
-            expected_digest="abc",
+            expected_digest=_ORIGINAL["census_digest"],
             bracket_path=bracket,
             reviewed_sha=SHA,
+            expected_original_sha256=_ORIGINAL_HASH,
         )
     assert refused.value.code in {
         "CENSUS_JSON_INVALID",
@@ -356,7 +357,7 @@ def test_live_compression_lag_rejects_noncanonical_and_missing_values(tmp_path: 
 def test_g6_sequential_receipts_bind_one_migrated_key_and_suffix() -> None:
     for call in range(1, 7):
         receipt = _shipping_receipt(call_index=call)
-        migrated = assert_sequential_tick_receipt(receipt, ordered_keys=KEYS, call_index=call)
+        migrated = assert_sequential_tick_receipt(receipt, ordered_keys=KEYS, call_index=call, expected_count=6)
         assert unique_migrated_observation(receipt) is migrated
         if call < 6:
             assert receipt["deferred"]
@@ -365,20 +366,20 @@ def test_g6_sequential_receipts_bind_one_migrated_key_and_suffix() -> None:
     wrong = _shipping_receipt(call_index=2)
     wrong["selected"][1]["durable"] = _durable(3)
     with pytest.raises(Issue1895ReadinessError) as mismatch:
-        assert_sequential_tick_receipt(wrong, ordered_keys=KEYS, call_index=2)
+        assert_sequential_tick_receipt(wrong, ordered_keys=KEYS, call_index=2, expected_count=6)
     assert mismatch.value.code == "RECEIPT_MIGRATED_KEY_MISMATCH"
     missing_prior = _shipping_receipt(call_index=3)
     missing_prior["selected"] = [item for item in missing_prior["selected"] if item.get("outcome") != "already_cold"]
-    assert_sequential_tick_receipt(missing_prior, ordered_keys=KEYS, call_index=3)
+    assert_sequential_tick_receipt(missing_prior, ordered_keys=KEYS, call_index=3, expected_count=6)
     suffix = _shipping_receipt(call_index=2)
     suffix["deferred"][0]["reason"] = "other"
     with pytest.raises(Issue1895ReadinessError) as reason:
-        assert_sequential_tick_receipt(suffix, ordered_keys=KEYS, call_index=2)
+        assert_sequential_tick_receipt(suffix, ordered_keys=KEYS, call_index=2, expected_count=6)
     assert reason.value.code == "RECEIPT_DEFERRED_REASON"
     extra = _shipping_receipt(call_index=1)
     extra["selected"].append({"outcome": "already_cold", "durable": _group("k9", 9)["durable"]})
     with pytest.raises(Issue1895ReadinessError):
-        assert_sequential_tick_receipt(extra, ordered_keys=KEYS, call_index=1)
+        assert_sequential_tick_receipt(extra, ordered_keys=KEYS, call_index=1, expected_count=6)
     g6 = " ".join(_gate_lines("G6"))
     assert "scripts/node27_issue1895_sequential_receipt.py" in g6
     assert 'len(receipt["selected"]) == 1 and not receipt["deferred"]' not in g6
@@ -395,7 +396,18 @@ def test_g6_sequential_receipt_cli_refuses_unsafe_census_or_receipt_identity(
     target = census_path if which == "census" else receipt_path
     _substitute_identity(target, kind)
     rc = sequential_receipt_cli.main(
-        ["--receipt", str(receipt_path), "--census", str(census_path), "--call-index", "1"]
+        [
+            "--receipt",
+            str(receipt_path),
+            "--census",
+            str(census_path),
+            "--call-index",
+            "1",
+            "--original-sha256",
+            _ORIGINAL_HASH,
+            "--reviewed-sha",
+            SHA,
+        ]
     )
     assert rc == 1
 
@@ -405,7 +417,20 @@ def test_g6_sequential_receipt_cli_accepts_valid_private_files(tmp_path: Path) -
     census_path = _write_private_json(private / "census.json", _census_artifact())
     receipt_path = _write_private_json(private / "receipt.json", _shipping_receipt(call_index=1))
     assert (
-        sequential_receipt_cli.main(["--receipt", str(receipt_path), "--census", str(census_path), "--call-index", "1"])
+        sequential_receipt_cli.main(
+            [
+                "--receipt",
+                str(receipt_path),
+                "--census",
+                str(census_path),
+                "--call-index",
+                "1",
+                "--original-sha256",
+                _ORIGINAL_HASH,
+                "--reviewed-sha",
+                SHA,
+            ]
+        )
         == 0
     )
 
@@ -420,9 +445,10 @@ def test_g5_and_g6_owners_refuse_parent_mode_0755(tmp_path: Path) -> None:
         bind_pre_movement_census(
             current_path=current_path,
             original_path=original_path,
-            expected_digest="abc",
+            expected_digest=_ORIGINAL["census_digest"],
             bracket_path=bracket,
             reviewed_sha=SHA,
+            expected_original_sha256=_ORIGINAL_HASH,
         )
     assert census.value.code in {
         "CENSUS_JSON_INVALID",
@@ -435,40 +461,29 @@ def test_g5_and_g6_owners_refuse_parent_mode_0755(tmp_path: Path) -> None:
     receipt_path = _write_private_json(private / "receipt.json", _shipping_receipt(call_index=1))
     os.chmod(private, 0o755)
     assert (
-        sequential_receipt_cli.main(["--receipt", str(receipt_path), "--census", str(census_path), "--call-index", "1"])
+        sequential_receipt_cli.main(
+            [
+                "--receipt",
+                str(receipt_path),
+                "--census",
+                str(census_path),
+                "--call-index",
+                "1",
+                "--original-sha256",
+                _ORIGINAL_HASH,
+                "--reviewed-sha",
+                SHA,
+            ]
+        )
         == 1
     )
-
-
-def test_g6_preview_and_group_enumeration_use_held_reader_before_mutation() -> None:
-    fences = [body for _opening, body in _gate_bash("G6")]
-    preview = next(body for body in fences if "PREVIEW_RECEIPT" in body and "ORIGINAL_CENSUS" in body)
-    assert "json.load(open" not in preview
-    assert "open(bracket)" not in preview
-    assert "read_held_private_json" in preview
-    assert "read_held_private_text" in preview
-    helper_at = min(preview.index("read_held_private_json"), preview.index("read_held_private_text"))
-    assert helper_at < preview.index("assert_sequential_tick_receipt")
-
-    loop = next(body for body in fences if "while IFS= read -r GROUP" in body and "--enforce" in body)
-    assert "json.load(open" not in loop
-    assert "< <(" in loop
-    substitution = loop[loop.index("< <(") :]
-    assert "read_held_private_json" in substitution
-    assert "group_keys" in substitution
-    assert "json.load(open" not in substitution
-    assert loop.index("while IFS= read -r GROUP") < loop.index("--enforce")
-    assert loop.index("< <(") > loop.index("--enforce")
-    assert substitution.index("read_held_private_json") < substitution.index("group_keys")
-    assert "IFS= read -r GROUP" in loop
-    assert "for GROUP in" not in loop
 
 
 def test_post_target_observation_refuses_unsafe_baseline_identity(tmp_path: Path) -> None:
     private = _private_dir(tmp_path / "private")
     baseline = _write_private_json(
         private / "baseline.json",
-        {"groups": [_group(key, index) for index, key in enumerate(KEYS, start=1)]},
+        _census_artifact(),
     )
     output = private / "observed.json"
     linked = tmp_path / "baseline-link.json"
@@ -478,6 +493,7 @@ def test_post_target_observation_refuses_unsafe_baseline_identity(tmp_path: Path
             baseline_path=linked,
             output_path=output,
             reviewed_sha=SHA,
+            expected_original_sha256=_ORIGINAL_HASH,
             lag_seconds=172800,
             execute=lambda *_args, **_kwargs: [],
             watermark=datetime(2026, 9, 6, tzinfo=UTC),
@@ -501,7 +517,7 @@ def test_post_target_observation_refuses_parent_mode_0755(tmp_path: Path) -> Non
     private = _private_dir(tmp_path / "private")
     baseline = _write_private_json(
         private / "baseline.json",
-        {"groups": [_group(key, index) for index, key in enumerate(KEYS, start=1)]},
+        _census_artifact(),
     )
     output = private / "observed.json"
     os.chmod(private, 0o755)
@@ -510,6 +526,7 @@ def test_post_target_observation_refuses_parent_mode_0755(tmp_path: Path) -> Non
             baseline_path=baseline,
             output_path=output,
             reviewed_sha=SHA,
+            expected_original_sha256=_ORIGINAL_HASH,
             lag_seconds=172800,
             execute=lambda *_args, **_kwargs: [],
             watermark=datetime(2026, 9, 6, tzinfo=UTC),
@@ -575,12 +592,12 @@ def test_filesystem_10mib_zero_reversed_and_tolerance_bounds() -> None:
 
 
 def test_g8_natural_tick_uses_independent_pre_post_sets() -> None:
-    baseline = [_group(key, index) for index, key in enumerate(KEYS, start=1)]
-    assert_exact_cold_groups(baseline, baseline=baseline)
-    replaced = [_group(key, index) for index, key in enumerate(KEYS, start=1)]
+    baseline = [dict(group, residency="already_target") for group in _census_artifact()["groups"]]
+    assert_exact_cold_groups(baseline, baseline=baseline, expected_count=6)
+    replaced = copy.deepcopy(baseline)
     replaced[0]["compressed"] = {"oid": 9999, "schema": "_timescaledb_internal", "name": "new_comp"}
     replaced[0]["members"][0]["oid"] = 4242
-    assert_exact_cold_groups(replaced, baseline=baseline)
+    assert_exact_cold_groups(replaced, baseline=baseline, expected_count=6)
     k7 = durable_key(_group("k7", 7)["durable"])
     k8 = durable_key(_group("k8", 8)["durable"])
     no_op = {
@@ -590,6 +607,7 @@ def test_g8_natural_tick_uses_independent_pre_post_sets() -> None:
     }
     assert_natural_tick_selection(
         no_op,
+        expected_count=6,
         remaining_complete_source_keys=(),
         newly_terminal_keys=(),
         baseline_keys=KEYS,
@@ -604,6 +622,7 @@ def test_g8_natural_tick_uses_independent_pre_post_sets() -> None:
     }
     assert_natural_tick_selection(
         migrated,
+        expected_count=6,
         remaining_complete_source_keys=(k8,),
         newly_terminal_keys=(k7,),
         baseline_keys=KEYS,
@@ -612,6 +631,7 @@ def test_g8_natural_tick_uses_independent_pre_post_sets() -> None:
     with pytest.raises(Issue1895ReadinessError):
         assert_natural_tick_selection(
             migrated,
+            expected_count=6,
             remaining_complete_source_keys=("k9",),
             newly_terminal_keys=(k7,),
             baseline_keys=KEYS,
@@ -741,26 +761,12 @@ def _valid_window_parity() -> dict:
 
 
 def _baseline_groups_with_parity(parity: object) -> list[dict]:
-    groups = [_group(key, index) for index, key in enumerate(KEYS, start=1)]
-    for group in groups:
-        if parity is _MISSING:
-            group.pop("parity", None)
-        else:
-            group["parity"] = parity
+    groups = _census_artifact()["groups"]
+    if parity is _MISSING:
+        groups[0].pop("parity", None)
+    else:
+        groups[0]["parity"] = parity
     return groups
-
-
-def _named_group_result(durable: dict, parity: dict) -> dict:
-    return {
-        "key": durable_key(durable),
-        "durable": durable,
-        "residency": "already_target",
-        "compressed": {"oid": durable["origin_oid"] + 1000},
-        "members": [],
-        "parity": parity,
-        "inventory_digest": "inv",
-        "complete_target": True,
-    }
 
 
 @pytest.mark.parametrize(
@@ -775,7 +781,7 @@ def _named_group_result(durable: dict, parity: dict) -> dict:
         ({**_valid_window_parity(), "non_null_counts": ["run_id"]}, "POST_TARGET_PARITY_INVALID"),
         ({**_valid_window_parity(), "extra": "not-a-window-field"}, "POST_TARGET_PARITY_INVALID"),
         ({**_valid_window_parity(), "non_null_counts": {"run_id": 2}}, "POST_TARGET_PARITY_INVALID"),
-        ({**_valid_window_parity(), "checksum": "changed"}, "POST_TARGET_PARITY_DRIFT"),
+        ({**_ORIGINAL["groups"][0]["parity"], "checksum": "changed"}, "POST_TARGET_PARITY_DRIFT"),
     ),
     ids=(
         "missing",
@@ -796,110 +802,56 @@ def test_post_target_malformed_or_mismatched_baseline_parity_fails_closed(
     parity: object,
     code: str,
 ) -> None:
-    private = _private_dir(tmp_path / "private")
+    connection = reviewed_population(6, cold=True)
     baseline_groups = _baseline_groups_with_parity(parity)
-    baseline = _write_private_json(private / "baseline.json", {"groups": baseline_groups})
-    output = private / "observed.json"
-    current = _valid_window_parity() | {"checksum": "current"}
-    named_calls: list[object] = []
-
-    def fake_named(_execute: object, *, durable: dict, inventories: object, expected_parity: object = None) -> dict:
-        named_calls.append(expected_parity)
-        if expected_parity is not None and expected_parity != current:
-            raise Issue1895ReadinessError(
-                "business-window parity changed",
-                code="POST_TARGET_PARITY_DRIFT",
-                stage="post-target",
-            )
-        return _named_group_result(dict(durable), current)
-
-    monkeypatch.setattr("packages.common.node27_issue1895_post_target.observe_named_group", fake_named)
-    monkeypatch.setattr(
-        "packages.common.node27_issue1895_post_target.derive_bound_inventories",
-        lambda _execute: BoundInventories(
-            river=HypertableInventory("hydro", "river_timeseries", (), "inv", 2001, 17),
-            forcing=HypertableInventory("met", "forcing_station_timeseries", (), "inv", 1001, 29),
-            digest="inv",
-        ),
-    )
-    monkeypatch.setattr(
-        "packages.common.node27_issue1895_post_target.classify_current_candidates",
-        lambda *_args, **_kwargs: ((), tuple(KEYS)),
-    )
     with pytest.raises(Issue1895ReadinessError) as refused:
         observe_post_target(
             baseline_groups=baseline_groups,
-            execute=lambda *_args, **_kwargs: [],
-            cutoff=datetime(2026, 1, 8, tzinfo=UTC),
-            watermark=datetime(2026, 1, 15, tzinfo=UTC),
-            lag_seconds=604800,
+            expected_count=6,
+            execute=CensusObserver(connection).binder(),
+            cutoff=CUTOFF,
+            watermark=WATERMARK,
+            lag_seconds=LAG,
             reviewed_sha=SHA,
         )
     assert refused.value.code == code
-    assert refused.value.code in _POST_TARGET_PARITY_CODES
     if code in {"POST_TARGET_PARITY_MISSING", "POST_TARGET_PARITY_INVALID"}:
-        assert named_calls == []
+        assert connection.executed == []
+    original = _census_artifact()
+    original["groups"] = baseline_groups
+    frozen = hashlib.sha256(json.dumps(original).encode()).hexdigest()
+    baseline = _write_private_json(_private_dir(tmp_path / "private") / "baseline.json", original)
+    output = baseline.with_name("observed.json")
     with pytest.raises(Issue1895ReadinessError) as published:
         run_post_target_observation(
             baseline_path=baseline,
+            expected_original_sha256=frozen,
             output_path=output,
             reviewed_sha=SHA,
-            lag_seconds=604800,
-            execute=lambda *_args, **_kwargs: [],
-            watermark=datetime(2026, 1, 15, tzinfo=UTC),
-            dsn="postgresql://nhms_display_ro@127.0.0.1/nhms",
+            lag_seconds=LAG,
+            execute=CensusObserver(connection).binder(),
+            watermark=WATERMARK,
         )
     assert published.value.code == code
     assert not output.exists()
 
 
-def test_post_target_exact_equality_parity_is_accepted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    private = _private_dir(tmp_path / "private")
-    parity = _valid_window_parity()
-    baseline_groups = _baseline_groups_with_parity(parity)
-    baseline = _write_private_json(private / "baseline.json", {"groups": baseline_groups})
-    output = private / "observed.json"
-    forwarded: list[object] = []
-
-    def fake_named(_execute: object, *, durable: dict, inventories: object, expected_parity: object = None) -> dict:
-        forwarded.append(expected_parity)
-        assert expected_parity == parity
-        return _named_group_result(dict(durable), parity)
-
-    monkeypatch.setattr("packages.common.node27_issue1895_post_target.observe_named_group", fake_named)
-    monkeypatch.setattr(
-        "packages.common.node27_issue1895_post_target.derive_bound_inventories",
-        lambda _execute: BoundInventories(
-            river=HypertableInventory("hydro", "river_timeseries", (), "inv", 2001, 17),
-            forcing=HypertableInventory("met", "forcing_station_timeseries", (), "inv", 1001, 29),
-            digest="inv",
-        ),
-    )
-    monkeypatch.setattr(
-        "packages.common.node27_issue1895_post_target.classify_current_candidates",
-        lambda *_args, **_kwargs: ((), tuple(KEYS)),
-    )
-    observed = observe_post_target(
-        baseline_groups=baseline_groups,
-        execute=lambda *_args, **_kwargs: [],
-        cutoff=datetime(2026, 1, 8, tzinfo=UTC),
-        watermark=datetime(2026, 1, 15, tzinfo=UTC),
-        lag_seconds=604800,
-        reviewed_sha=SHA,
-    )
-    assert all(item["complete_target"] is True for item in observed["groups"])
-    assert None not in forwarded
+def test_post_target_exact_equality_parity_is_accepted(tmp_path: Path) -> None:
+    connection = reviewed_population(6, cold=True)
+    baseline = _write_private_json(_private_dir(tmp_path / "private") / "baseline.json", _census_artifact())
+    output = baseline.with_name("observed.json")
     published = run_post_target_observation(
         baseline_path=baseline,
+        expected_original_sha256=_ORIGINAL_HASH,
         output_path=output,
         reviewed_sha=SHA,
-        lag_seconds=604800,
-        execute=lambda *_args, **_kwargs: [],
-        watermark=datetime(2026, 1, 15, tzinfo=UTC),
-        dsn="postgresql://nhms_display_ro@127.0.0.1/nhms",
+        lag_seconds=LAG,
+        execute=CensusObserver(connection).binder(),
+        watermark=WATERMARK,
     )
     assert output.exists()
-    assert published["groups"][0]["parity"] == parity
+    assert [group["parity"] for group in published["groups"]] == [group["parity"] for group in _ORIGINAL["groups"]]
+    assert all(group["complete_target"] for group in published["groups"])
 
 
 def test_post_target_caller_mutants_red_when_chunk_is_omitted_or_not_loaded_current(
@@ -1079,6 +1031,8 @@ def test_post_target_observer_closes_display_watermark_failures_without_secret_o
                 str(tmp_path / "post.json"),
                 "--reviewed-sha",
                 SHA,
+                "--original-sha256",
+                _ORIGINAL_HASH,
                 "--lag-seconds",
                 "172800",
             ]
@@ -1101,7 +1055,7 @@ def test_post_target_observer_propagates_programming_errors(
     connection = FakeConnection()
     baseline = _write_private_json(
         _private_dir(tmp_path / "input") / "baseline.json",
-        {"groups": _baseline_groups_with_parity(_valid_window_parity())},
+        _census_artifact(),
     )
     output = _private_dir(tmp_path / "output") / "post.json"
     monkeypatch.setattr(post_target_observe_cli, "resolve_readonly_dsn", lambda **_kwargs: "readonly-dsn")
@@ -1121,6 +1075,8 @@ def test_post_target_observer_propagates_programming_errors(
                 str(output),
                 "--reviewed-sha",
                 SHA,
+                "--original-sha256",
+                _ORIGINAL_HASH,
                 "--lag-seconds",
                 "172800",
             ]
@@ -1218,7 +1174,7 @@ def test_w8_and_post_target_accept_valid_display_env_under_parent_0755(
         return {}
 
     monkeypatch.setattr(post_target_observe_cli, "run_post_target_observation", capture)
-    baseline = _write_private_json(_private_dir(tmp_path / "census") / "baseline.json", {"groups": []})
+    baseline = _write_private_json(_private_dir(tmp_path / "census") / "baseline.json", _census_artifact())
     argv = [
         "--baseline",
         str(baseline),
@@ -1226,6 +1182,8 @@ def test_w8_and_post_target_accept_valid_display_env_under_parent_0755(
         str(baseline.with_name("observed.json")),
         "--reviewed-sha",
         SHA,
+        "--original-sha256",
+        _ORIGINAL_HASH,
         "--lag-seconds",
         "172800",
         "--display-env",
@@ -1319,7 +1277,7 @@ def test_post_target_cli_refuses_actual_cold_admission_without_publication(
     connection.dispatch = dispatch
     baseline = _write_private_json(
         _private_dir(tmp_path / "input") / "baseline.json",
-        {"groups": _baseline_groups_with_parity(_valid_window_parity())},
+        _census_artifact(),
     )
     output = _private_dir(tmp_path / "output") / "observed.json"
     monkeypatch.setattr(post_target_observe_cli, "resolve_readonly_dsn", lambda **_kwargs: "readonly-dsn")
@@ -1333,6 +1291,8 @@ def test_post_target_cli_refuses_actual_cold_admission_without_publication(
             str(output),
             "--reviewed-sha",
             SHA,
+            "--original-sha256",
+            _ORIGINAL_HASH,
             "--lag-seconds",
             "604800",
         ]

@@ -19,8 +19,14 @@ from packages.common.node27_issue1895_watermark import (
 )
 from scripts import node27_issue1895_group_reconcile as group_reconcile_cli
 from scripts import node27_issue1895_systemd_facts as systemd_facts_cli
-from tests.test_issue1895_readiness_c14 import _group
-from tests.test_issue1895_readiness_storage import KEYS, SHA, _durable, _substitute_identity, _write_private_json
+from tests.test_issue1895_readiness_storage import (
+    _ORIGINAL_HASH,
+    SHA,
+    _census_artifact,
+    _durable,
+    _substitute_identity,
+    _write_private_json,
+)
 from tests.test_issue1895_runbook_contract import _gate, _gate_bash, _gate_lines
 
 
@@ -150,9 +156,12 @@ def test_systemd_facts_closes_unreadable_inputs_without_path_or_traceback(
     secret_path = tmp_path / "synthetic-secret-timer-show.txt"
     rc = systemd_facts_cli.main(
         [
-            "--timer-show", str(secret_path),
-            "--service-show", str(tmp_path / "missing-service-show.txt"),
-            "--output", str(tmp_path / "systemd-facts.json"),
+            "--timer-show",
+            str(secret_path),
+            "--service-show",
+            str(tmp_path / "missing-service-show.txt"),
+            "--output",
+            str(tmp_path / "systemd-facts.json"),
         ]
     )
     assert rc == 1
@@ -228,9 +237,12 @@ def test_systemd_facts_refuses_symlink_and_parent_0755_before_publication(
     assert not output.exists()
     os.chmod(private, 0o700)
     monkeypatch.setattr(systemd_facts_cli, "assert_systemd_invocation_facts", assert_systemd_invocation_facts)
-    assert systemd_facts_cli.main(
-        ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
-    ) == 0
+    assert (
+        systemd_facts_cli.main(
+            ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
+        )
+        == 0
+    )
     assert output.exists()
 
 
@@ -327,13 +339,14 @@ def test_independent_w8_and_systemd_facts_refuse_self_bind() -> None:
     assert "scripts/node27_issue1895_watermark.py" in g8
     assert "scripts/node27_issue1895_systemd_facts.py" in g8
     assert "post-tick external independent horizon" in _gate("G8")
-    assert "expected_cutoff=receipt[\"cutoff\"]" not in g8
-    assert "expected_watermark=receipt[\"watermark\"]" not in g8
+    assert 'expected_cutoff=receipt["cutoff"]' not in g8
+    assert 'expected_watermark=receipt["watermark"]' not in g8
 
 
 def _group_reconcile_documents(*, receipt: dict) -> tuple[dict, dict, dict]:
-    groups = [_group(KEYS[index - 1], index) for index in range(1, 7)]
-    return {"groups": groups}, {"groups": groups}, receipt
+    baseline = _census_artifact()
+    groups = [dict(group, residency="already_target") for group in baseline["groups"]]
+    return baseline, {"groups": groups}, receipt
 
 
 def _write_group_reconcile_documents(tmp_path: Path, *, receipt: dict) -> tuple[Path, Path, Path]:
@@ -364,6 +377,8 @@ def _group_reconcile_argv(
         str(receipt_path),
         "--reviewed-sha",
         SHA,
+        "--original-sha256",
+        _ORIGINAL_HASH,
         "--expected-cutoff",
         "2026-09-04T00:00:00Z",
         "--expected-watermark",
@@ -438,11 +453,11 @@ def test_g8_natural_receipt_under_parent_0755_succeeds_with_private_current_run_
     os.chmod(artifacts, 0o755)
     baseline_path = _write_private_json(
         census_parent / "baseline.json",
-        {"groups": [_group(KEYS[index - 1], index) for index in range(1, 7)]},
+        _census_artifact(),
     )
     observed_path = _write_private_json(
         census_parent / "observed.json",
-        {"groups": [_group(KEYS[index - 1], index) for index in range(1, 7)]},
+        {"groups": [dict(group, residency="already_target") for group in _census_artifact()["groups"]]},
     )
     receipt_path = _write_private_json(artifacts / "node27_timeseries_cold_residency.json", receipt_document)
     os.chmod(artifacts, 0o755)
@@ -518,15 +533,18 @@ def test_group_reconcile_cli_accepts_migrated_newline_sets_and_deferred_suffix(t
         ),
     )
 
-    assert group_reconcile_cli.main(
-        _group_reconcile_argv(
-            baseline_path,
-            observed_path,
-            receipt_path,
-            remaining=f"\n{deferred_key}\n",
-            newly=f"\n{migrated_key}\n",
+    assert (
+        group_reconcile_cli.main(
+            _group_reconcile_argv(
+                baseline_path,
+                observed_path,
+                receipt_path,
+                remaining=f"\n{deferred_key}\n",
+                newly=f"\n{migrated_key}\n",
+            )
         )
-    ) == 0
+        == 0
+    )
 
 
 def test_group_reconcile_cli_redacts_domain_failures_without_traceback_or_raw_path(

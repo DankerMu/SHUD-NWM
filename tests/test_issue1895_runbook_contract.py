@@ -93,7 +93,7 @@ def _bash_fences(text: str) -> list[tuple[int, str]]:
         stripped = line.lstrip(" ")
         leading = len(line) - len(stripped)
         if leading <= indentation and stripped.startswith(character * width) and set(stripped) == {character}:
-            body_lines = lines[body_start: line_number - 1]
+            body_lines = lines[body_start : line_number - 1]
             fences.append((line_start, "\n".join(body_lines)))
             active = None
     if active is not None:
@@ -350,16 +350,6 @@ def test_census_uses_verdict_binder_and_capacity_policy_arithmetic() -> None:
     assert 'policy["installer_required_cold_free_bytes"]' in g1
     assert 'policy["wal_reserve_bytes"]' in g1
     assert "$(( 2 * E ))" not in g1 and "$((2*E))" not in g1
-
-
-def test_census_never_accepts_already_cold_or_oldest_six() -> None:
-    g1 = _gate("G1")
-    assert "all_source" in g1
-    # The prohibition on "oldest six of a larger set" is a rollout convention in
-    # force for G1: exactly six complete eligible all-source groups, never a
-    # truncation.
-    assert "taking the oldest six" in _section()
-    assert re.search(r"(?i)never.{0,30}oldest", _section())
 
 
 def test_census_gate_uses_readonly_set_session_contract() -> None:
@@ -716,9 +706,9 @@ def test_g7_publication_counts_bind_canonical_sources_and_current_cycle() -> Non
     g7 = _gate("G7")
     assert "scripts/node27_issue1895_publication_current.py" in g7
     assert "--registry" not in g7
-    publication_owner = (
-        REPO_ROOT / "packages" / "common" / "node27_issue1895_publication_current.py"
-    ).read_text(encoding="utf-8")
+    publication_owner = (REPO_ROOT / "packages" / "common" / "node27_issue1895_publication_current.py").read_text(
+        encoding="utf-8"
+    )
     assert "CANONICAL_SCHEDULER_REGISTRY_MANIFEST" in publication_owner
     assert 'Path("/home/ghdc/nwm/object-store/scheduler/registry/manifest-last.json")' in publication_owner
     assert "CANONICAL_SCHEDULER_REGISTRY_MANIFEST_ALIASES" not in publication_owner
@@ -833,8 +823,8 @@ def test_g8_binds_a_post_tick_external_horizon_before_receipt_or_group_validatio
     g8 = _gate("G8")
     restore = g8.index('/usr/bin/systemctl --user start "$UNIT"')
     service_success = g8.index('test "$RESULT" = "success"')
-    service_exit = g8.index('SERVICE_EXIT=')
-    w8_owner = g8.index('scripts/node27_issue1895_watermark.py')
+    service_exit = g8.index("SERVICE_EXIT=")
+    w8_owner = g8.index("scripts/node27_issue1895_watermark.py")
     receipt_identity = g8.index("assert_natural_receipt_identity")
     receipt_horizon = g8.index("assert_independent_receipt_horizon")
     group_reconcile = g8.index("scripts/node27_issue1895_group_reconcile.py")
@@ -847,7 +837,7 @@ def test_g8_binds_a_post_tick_external_horizon_before_receipt_or_group_validatio
     assert "post-tick external independent horizon" in g8
     assert "not G1" in g8
     assert "never receipt self-report" in g8
-    assert g8.index('output "$PRE_NATURAL"') < g8.index('scripts/node27_issue1895_watermark.py')
+    assert g8.index('output "$PRE_NATURAL"') < g8.index("scripts/node27_issue1895_watermark.py")
     assert "expected_watermark=receipt" not in g8
     assert "expected_cutoff=receipt" not in g8
     assert '--expected-cutoff "$(/home/nwm/NWM/.venv/bin/python -c' in g8
@@ -862,8 +852,8 @@ def test_g8_systemd_facts_output_is_exclusive_private_and_checked() -> None:
     absent = g8.index('test ! -e "$RUN_ROOT/receipts/systemd-facts-$RUN_STAMP.json"')
     owner = g8.index("scripts/node27_issue1895_systemd_facts.py")
     regular = g8.index('test -f "$SYSTEMD_FACTS" && test ! -L "$SYSTEMD_FACTS"')
-    mode = g8.index("stat -c '%a' \"$SYSTEMD_FACTS\")\" = \"600\"")
-    nlink = g8.index("stat -c '%h' \"$SYSTEMD_FACTS\")\" = \"1\"")
+    mode = g8.index('stat -c \'%a\' "$SYSTEMD_FACTS")" = "600"')
+    nlink = g8.index('stat -c \'%h\' "$SYSTEMD_FACTS")" = "1"')
 
     assert timer_show < service_show < output < absent < owner < regular < mode < nlink
     assert 'test ! -e "$TIMER_SHOW"' in g8

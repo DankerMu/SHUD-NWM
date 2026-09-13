@@ -899,6 +899,16 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
         stop_on_match=True,
     ),
     PathTestRule(
+        "tests/test_issue2291_reviewed_census_count.py",
+        (
+            *ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+            "tests/test_issue2291_reviewed_census_count.py",
+            "tests/test_compressed_chunk_cold_runtime_integration.py",
+            "tests/test_node27_cold_tablespace_marker_contract.py",
+        ),
+        stop_on_match=True,
+    ),
+    PathTestRule(
         "tests/test_issue2224_origin_parity_runbook_contract.py",
         ISSUE1895_RUNBOOK_CONTRACT_TESTS + ORIGIN_CHUNK_PARITY_TESTS,
         stop_on_match=True,
@@ -923,6 +933,7 @@ CHANGED_TEST_FILE_RULES: tuple[PathTestRule, ...] = (
             "tests/test_compressed_chunk_cold_runtime_integration.py",
             "tests/test_node27_cold_tablespace_marker_contract.py",
             "tests/test_issue2290_cold_parent_admission.py",
+            "tests/test_issue2291_reviewed_census_count.py",
         ),
         stop_on_match=True,
     ),
@@ -3154,6 +3165,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_issue1895_runbook_contract.py",
             *ISSUE1895_READINESS_TESTS,
             "tests/test_issue2290_cold_parent_admission.py",
+            "tests/test_issue2291_reviewed_census_count.py",
         ),
     ),
     PathTestRule(
@@ -3255,6 +3267,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_issue1895_readiness_gates.py",
             *ISSUE1895_READINESS_STORAGE_TESTS,
             "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2291_reviewed_census_count.py",
         ),
     ),
     PathTestRule(
@@ -3449,6 +3462,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_issue1895_readiness_c14.py",
             *ISSUE1895_READINESS_STORAGE_TESTS,
             "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2291_reviewed_census_count.py",
         ),
     ),
     PathTestRule(
@@ -3482,15 +3496,27 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "packages/common/node27_issue1895_census_bind.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        (
+            "tests/test_issue1895_readiness_storage.py",
+            "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2291_reviewed_census_count.py",
+        ),
     ),
     PathTestRule(
         "packages/common/node27_issue1895_receipt.py",
-        ("tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"),
+        (
+            "tests/test_issue1895_readiness_storage.py",
+            "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2291_reviewed_census_count.py",
+        ),
     ),
     PathTestRule(
         "packages/common/node27_issue1895_post_target.py",
-        (*ORIGIN_CHUNK_PARITY_TESTS, "tests/test_issue2290_cold_parent_admission.py"),
+        (
+            *ORIGIN_CHUNK_PARITY_TESTS,
+            "tests/test_issue2290_cold_parent_admission.py",
+            "tests/test_issue2291_reviewed_census_count.py",
+        ),
     ),
     PathTestRule(
         "packages/common/node27_issue1895_watermark.py",
@@ -3502,15 +3528,27 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
     ),
     PathTestRule(
         "scripts/node27_issue1895_census_bind.py",
-        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
+        (
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2291_reviewed_census_count.py",
+        ),
     ),
     PathTestRule(
         "scripts/node27_issue1895_sequential_receipt.py",
-        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
+        (
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2291_reviewed_census_count.py",
+        ),
     ),
     PathTestRule(
         "scripts/node27_issue1895_post_target_observe.py",
-        (*ISSUE1895_READINESS_STORAGE_TESTS, "tests/test_issue1895_runbook_contract.py"),
+        (
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2291_reviewed_census_count.py",
+        ),
     ),
     PathTestRule(
         "scripts/node27_issue1895_publication_prove.py",
@@ -3602,6 +3640,7 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
             "tests/test_issue1895_readiness_storage.py",
             *ORIGIN_CHUNK_PARITY_TESTS,
             "tests/test_issue2290_cold_parent_admission.py",
+            "tests/test_issue2291_reviewed_census_count.py",
         ),
     ),
     PathTestRule(
@@ -3611,7 +3650,11 @@ PATH_TEST_RULES: tuple[PathTestRule, ...] = (
         # runtime owner and runbook contract, instead of falling to the #1744
         # shared-baseline smoke which asserts none of it.
         "packages/common/node27_cold_residency_census_policy.py",
-        NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
+        (*NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS, "tests/test_issue2291_reviewed_census_count.py"),
+    ),
+    PathTestRule(
+        "scripts/node27_issue1895_cutoff_count.py",
+        ("tests/test_issue2291_reviewed_census_count.py", "tests/test_compressed_chunk_cold_runtime_integration.py"),
     ),
     PathTestRule(
         # #1895 task 4.0: the read-only identity observer supplies the two

@@ -676,7 +676,9 @@ def _assert_reviewed_count_discriminator(connection: Any, config: Any) -> None:
     before_names = {(row["chunk_schema"], row["chunk_name"]) for row in before}
     execute("""CREATE TABLE met.issue2291_third (LIKE met.forcing_station_timeseries INCLUDING ALL)""")
     try:
-        execute("SELECT create_hypertable('met.issue2291_third', 'valid_time', chunk_time_interval => interval '2 days')")
+        execute(
+            "SELECT create_hypertable('met.issue2291_third', 'valid_time', chunk_time_interval => interval '2 days')"
+        )
         execute("""ALTER TABLE met.issue2291_third SET (
             timescaledb.compress=true, timescaledb.compress_segmentby='forcing_version_id, station_id',
             timescaledb.compress_orderby='variable, valid_time')""")
@@ -689,15 +691,22 @@ def _assert_reviewed_count_discriminator(connection: Any, config: Any) -> None:
         assert all(row["is_compressed"] for row in excluded)
         with contextlib.closing(readonly("")) as read_connection:
             original = census.observe_census(
-                census.CensusObserver(read_connection), require_count=4, lag_seconds=_LAG,
-                watermark=watermark, now_utc=watermark, head_sha=_HEAD,
+                census.CensusObserver(read_connection),
+                require_count=4,
+                lag_seconds=_LAG,
+                watermark=watermark,
+                now_utc=watermark,
+                head_sha=_HEAD,
                 database_url="postgresql://localhost/isolated",
             )
         assert original["verdict"] == "GO", original["blockers"]
         assert original["required_group_count"] == original["resolved_group_count"] == 4
         groups = original["groups"]
         assert sorted(group["durable"]["hypertable_name"] for group in groups) == [
-            "forcing_station_timeseries", "river_timeseries", "river_timeseries", "river_timeseries",
+            "forcing_station_timeseries",
+            "river_timeseries",
+            "river_timeseries",
+            "river_timeseries",
         ]
         excluded_names = {(row["chunk_schema"], row["chunk_name"]) for row in excluded}
         assert not excluded_names & {
@@ -707,7 +716,8 @@ def _assert_reviewed_count_discriminator(connection: Any, config: Any) -> None:
             group["durable"]["hypertable_name"]: (
                 datetime.fromisoformat(group["durable"]["range_end"].replace("Z", "+00:00"))
                 - datetime.fromisoformat(group["durable"]["range_start"].replace("Z", "+00:00"))
-            ) for group in groups
+            )
+            for group in groups
         }
         assert widths == {"river_timeseries": timedelta(days=1), "forcing_station_timeseries": timedelta(days=7)}
         with tempfile.TemporaryDirectory(prefix="issue2291-count-") as temporary:
@@ -719,16 +729,20 @@ def _assert_reviewed_count_discriminator(connection: Any, config: Any) -> None:
                     code = cutoff_count.main(
                         ["--original", str(path), "--original-sha256", frozen, "--reviewed-sha", _HEAD],
                         env={"DATABASE_URL": "postgresql://localhost/isolated"},
-                        connect=readonly, watermark_fetcher=lambda dsn, connect=None: watermark,
+                        connect=readonly,
+                        watermark_fetcher=lambda dsn, connect=None: watermark,
                     )
                 assert code == 0
                 return output.getvalue().strip()
 
             assert observe_count() == "4"
-            execute("""INSERT INTO hydro.river_timeseries (
+            execute(
+                """INSERT INTO hydro.river_timeseries (
                 run_key, basin_version_key, river_network_version_key, river_segment_key,
                 valid_time, variable_e, value, unit_e, quality_flag_e)
-                VALUES (91, 1, 1, 91, %s, 'q_down', 9.0, 'm3/s', 'ok')""", (extra_start,))
+                VALUES (91, 1, 1, 91, %s, 'q_down', 9.0, 'm3/s', 'ok')""",
+                (extra_start,),
+            )
             extra = execute("""SELECT chunk_schema, chunk_name FROM timescaledb_information.chunks
                 WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries'""")
             extra_names = {(row["chunk_schema"], row["chunk_name"]) for row in extra} - before_names
@@ -737,11 +751,15 @@ def _assert_reviewed_count_discriminator(connection: Any, config: Any) -> None:
             assert observe_count() == "5"
             with contextlib.closing(readonly("")) as read_connection:
                 surplus = census.observe_census(
-                    census.CensusObserver(read_connection), require_count=4, lag_seconds=_LAG,
-                    watermark=watermark, now_utc=watermark, head_sha=_HEAD,
+                    census.CensusObserver(read_connection),
+                    require_count=4,
+                    lag_seconds=_LAG,
+                    watermark=watermark,
+                    now_utc=watermark,
+                    head_sha=_HEAD,
                     database_url="postgresql://localhost/isolated",
                 )
-            assert surplus["verdict"] == "NO_GO" and surplus["resolved_group_count"] == 5
+            assert surplus["verdict"] == "NO-GO" and surplus["resolved_group_count"] == 5
             assert len(surplus["groups"]) == 5
     finally:
         execute("DROP TABLE met.issue2291_third")
