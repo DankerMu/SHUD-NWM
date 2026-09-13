@@ -1,0 +1,247 @@
+{
+  "head": "1edc3d68a8e4311854666b651ff71132076770c1",
+  "round": 2,
+  "status": "clean",
+  "reviews": {
+    "C4InvariantR2": {
+      "seat": "invariant-state",
+      "pr": 2321,
+      "round": 2,
+      "head": "1edc3d68a8e4311854666b651ff71132076770c1",
+      "base": "f765ca0d0a20792ae77281fcefc399a4d0339676",
+      "verdict": "NO_BLOCKING_FINDINGS — full-PR invariants hold at HEAD; all five round-1 findings verifiably closed against current source; zero new/regression candidates from this seat",
+      "summary": "Independently re-traced the complete freeze→producer→bind→verify lifecycle at HEAD (owner 583ln, io 785ln, CLI 116ln, both suites, selector rules, canonical spec, both runbooks, fixture, smoke/mutant scripts and all fix logs). The governing invariant — acceptance validates only the original approved SHA, original five inputs/bracket, and exact previously accepted bytes/identity; later observations refuse but never redefine expectations — holds in source with direct behavioral tests, 12 discriminating mutant families, and real-CLI/real-Node refusal proof. The fix delta (92657af36..HEAD) touches no owner/io/docs/spec lines; product code at HEAD is byte-identical to every evidence SHA. Removed-behavior census: zero file deletions PR-wide; only a policy-sanctioned prose-pin test block removed; old C3/binder/river-click graph untouched; selector consumers only grow.",
+      "scope_reviewed": [
+        "services/production_closure/c4_production_acceptance.py (full, 583ln, re-traced at HEAD)",
+        "services/production_closure/c4_production_acceptance_io.py (full, 785ln, re-traced at HEAD)",
+        "scripts/node27_c4_production_acceptance.py (full at HEAD incl. _announce_pass)",
+        "scripts/select_ci_tests.py (tuple def, both CHANGED_TEST_FILE_RULES, all 8 splice/rule sites + rule-ordering context)",
+        "tests/test_node27_c4_production_acceptance_boundaries.py (full, 407ln)",
+        "tests/test_node27_c4_production_acceptance.py (fixture/helpers/cross-check targets)",
+        "tests/test_select_ci_tests.py (all 5 splice sites + 3 C4 selector tests at HEAD)",
+        "apps/frontend/src/__tests__/runbookContract.test.ts (deletion boundary at HEAD)",
+        "docs/runbooks/node-27-bringup-checklist.md + tier-node27-timeseries-storage.md (C4 registrations)",
+        "openspec/specs/c4-live-display-evidence/spec.md (full delta)",
+        "openspec/changes/.../fixtures/retirement-c4-acceptance-owner.md, tasks.md, all retirement-c4-* evidence incl. full node27.log, mutants log, smoke log, fix-verification.json, fix-r1.json, review-r1.json, fixture-review-r2.json",
+        ".workplans/pr-2321/c4-r1-mutant.py (full) and c4-r1-real-cli-smoke.py (full)",
+        "packages/common/node27_pgdata_command.py (CommandError message contract)",
+        "git archaeology: base..HEAD, r1head..HEAD, f862a51b2..HEAD diffs; 0af8eff66/cacd38641 repair-commit diffs"
+      ],
+      "invariant_matrix": [
+        {
+          "id": "INV-1",
+          "invariant": "Approved source binds supplied reviewed SHA; CLI never self-approves",
+          "status": "HELD",
+          "evidence": "owner:_extract_approval (status==PASS, head==reviewed==supplied 40-hex); freeze embeds path/9-field identity/parent/status/head/reviewed and all checks precede publish_private_json; approved record only read, never written. Boundary batch C4_SHA_INVALID row + smoke wrong-SHA case refuse without publication or freeze rewrite."
+        },
+        {
+          "id": "INV-2",
+          "invariant": "Temporal order freeze→producer→bind→verify; freeze instant never floored",
+          "status": "HELD",
+          "evidence": "io:assert_receipt_parent_ready refuses existing receipt (C4_EXISTS) at freeze; freeze_is_not_later_than_cmd_start compares exact instants (io:241-245) enforced at bind (owner:439-441) and re-enforced at verify from binding bracket (owner:507-509); absent freeze at bind→C4_MISSING (io capture FileNotFoundError branch), proven by new test_bind_refuses_absent_freeze_without_binding; runbooks register sleep 1 before C4_CMD_START matching no-flooring semantics."
+        },
+        {
+          "id": "INV-3",
+          "invariant": "Binder receives only original frozen inputs and original recorded bracket; never re-derived",
+          "status": "HELD",
+          "evidence": "bind takes five inputs solely from freeze record (owner:424-425), bracket once from CLI; verify re-reads inputs from freeze, refuses C4_INPUT_MISMATCH on binding-input drift (owner:500-504, new edited-input test), takes bracket from binding record, refuses C4_FREEZE_MISMATCH when binding names another freeze (owner:486-491, new cross-freeze test), checks binding c4 path == freeze receipt (owner:523-524)."
+        },
+        {
+          "id": "INV-4",
+          "invariant": "Exact C4 bytes and full file/parent identity pinned and rechecked across the binder boundary",
+          "status": "HELD",
+          "evidence": "Held fd + 9-field identity + same-held-fd sha256 captured before/after (io capture/recapture), drift refuses C4_IDENTITY_DRIFT. Non-byte axes now behaviorally proven: same-byte inode replacement (new test + real-CLI smoke case) and utime-only drift (new test) both refuse; sha-only-identity mutant reds both tests."
+        },
+        {
+          "id": "INV-5",
+          "invariant": "No refreshed expectation: acceptance validates against originally frozen/bound facts; later observation can only refuse",
+          "status": "HELD",
+          "evidence": "verify compares observed identity to binding-recorded expectation (owner:545-546), rechecks approved/freeze/binding original bytes+identity AFTER binder before publish (owner:548-561), acceptance embeds EXPECTED c4 identity (owner:573). 3 cross-binder mutation tests + 3-red/3-green mutant at 317ca7d4; fix delta adds no expectation-refresh path anywhere (all new tests are refusal-only)."
+        },
+        {
+          "id": "INV-6",
+          "invariant": "Publication never clobbers, never deletes unproven objects, no accepted partial result or fd leak",
+          "status": "HELD",
+          "evidence": "io:publish_private_json random 16-byte temp sibling, write_bytes_no_follow_exclusive(require_durable_create, mode 0600), exclusive link+unlink move, published-inode==temp-inode + byte readback + parent durability + temp-residue proofs; _unlink_created_temp only after dev/ino re-proof through fresh parent open; indeterminate create/move refuses WITHOUT unlink; C4AcceptanceError path cleans temp only when dest absent and creation proven."
+        },
+        {
+          "id": "INV-7",
+          "invariant": "Closed bounded schemas and static owner-coded refusals; no raw input/URL/credential/native-exception leakage",
+          "status": "HELD",
+          "evidence": "_require_closed_object exact key sets on all three outer records + nested file_ref/inputs/bracket (new extra-key freeze test → C4_FREEZE_SCHEMA, dropped-closed-object mutant red); duplicate keys/nonfinite/depth/node/byte bounds/secret material refused; identity mappings re-validate euid/0600/nlink==1 and parent 0700; argparse override static C4_USAGE exit 2; _announce_pass BrokenPipeError branch emits static C4_STDOUT_CLOSED, exit 1, no native text (subprocess-proven)."
+        },
+        {
+          "id": "INV-8",
+          "invariant": "Removed-behavior and ownership: no old-graph imports, no consumer shrink, euid/0700/0600 ownership enforced, binder/core/schema/producer unchanged",
+          "status": "HELD",
+          "evidence": "git: zero deletions PR-wide; apps/frontend touched only in the test file; base select_ci_tests.py had zero C4 references (all wiring new); owner/io/docstring-only node27_issue1895 mentions, no imports (grep); no redaction import; selector splices additive — prior consumers retained at every site and pinned by shared-producers test; CommandError translation strings verbatim-match node27_pgdata_command.py:51,55,76,98."
+        }
+      ],
+      "prior_finding_closure": {
+        "C4E-F1": "CLOSED — prose-only pin it-block deleted (runbookContract.test.ts -8); runbook NOT edited to cater (split phrase 'live\\n> P95 采集 lane' still present at checklist:402-403, #389/#1970 honesty text intact); neighboring binder-behavioral tests intact; frontend 969p/75f/tsc PASS at f862a51b2 whose product/docs tree equals HEAD. Deletion per test policy (fixture Evidence Floor: no source/prose pins) — required closure, not oracle weakening.",
+        "C4E-F2": "CLOSED — 7-row public-boundary batch (uppercase SHA, query origin, empty basin, empty segment, inverted bracket, relative receipt, >256KiB approved) each asserting exact owner code + zero publication; 6 guard-family mutants independently assertion-red (code-mismatch/DID-NOT-RAISE, no collection errors), exact bytes restored, green at head.",
+        "C4E-F3": "CLOSED — 6 cases (same-byte inode replacement with st_ino anti-vacuity assert, utime-only drift, absent freeze→C4_MISSING, valid cross-freeze binding→C4_FREEZE_MISMATCH, edited valid binding input→C4_INPUT_MISMATCH, extra-key freeze→C4_FREEZE_SCHEMA); 5 mutant families red incl. sha-only-identity killing both drift tests; every refusal asserts no publication and prior-record byte preservation.",
+        "C4E-F4": "CLOSED — disposable actual-CLI/real-Node (/usr/bin/node v22.22.2) smoke at 0af8eff66: positive freeze→bind→verify + wrong-SHA, status-not-PASS receipt refused by the REAL binder → C4_BINDER_FAILED (no binding, freeze unchanged), same-byte inode replacement → C4_IDENTITY_DRIFT, semantic-preserving reserialization → C4_IDENTITY_DRIFT, both without acceptance; synthetic labels and live_browser_or_deployment_pass:false throughout; script mechanics verified against smoke log case roots/codes.",
+        "C4SP-1": "CLOSED — narrow _announce_pass (print+flush inside main, BrokenPipeError-only catch, /dev/null redirect, static C4_STDOUT_CLOSED stderr, exit 1); subprocess test with reader closed before Popen asserts rc==1, static code, no 'BrokenPipeError'/'Exception ignored' text, published freeze retained with correct stage/sha; SP1 mutant (print-only CLI) reds with rc==120 shutdown-exception shape, proving the pipe was genuinely broken in the green runs.",
+        "discarded_and_refuted_not_reopened": "C4SP-2 (NODE_OPTIONS env injection) remains discarded — trusted-operator boundary out of domain, no new evidence. C4-INV-N1 (log provenance) remains refuted — node27.log itself contains the second VERIFY_HEAD 317ca7d4 line immediately preceding 934-passed/C4_TARGETED_PASS and the 20218-passed/C4_FULL_BACKEND_PASS run, so the full-backend green binds to the post-selector-fix SHA; no new evidence."
+      },
+      "findings": [],
+      "non_blocking_notes": [],
+      "out_of_scope_escalations": [],
+      "cross_checks": [
+        "Evidence-SHA chain: HEAD product code byte-identical to f862a51b2 (git diff empty across scripts/services/apps/tests/packages except boundary test file, which changed only via the two documented test-only repairs); targeted 943 at cacd38641, smoke at 0af8eff66, frontend at f862a51b2 all therefore cover HEAD product code.",
+        "Arithmetic: 943 = round-1 targeted 934 + 8 boundary tests + 1 new selector split test; restored 35 = 27 owner + 8 boundary; boundary suite enumerated at exactly 8 tests; mutants log 12 RED markers = 11×1-failed + 1×2-failed (sha-only identity) followed by 35 passed; frontend 969 = 970 − 1 deleted it-block.",
+        "Node27 interpreter: Python 3.11.15, pytest 9.0.3 (from node27.log header); the closed-stdout test passed twice there with genuinely broken pipe.",
+        "Harness repairs (0af8eff66 fixture registration, cacd38641 reader-before-Popen) verified as test-only diffs that strengthen determinism; they mask no product failure (SP1 mutant still reds against original CLI after the repairs).",
+        "Selector state archaeology: base had zero C4 references; r1-head had 8 single-suite references; HEAD consolidates into one shared 2-tuple constant consumed by both selector and tests (drift-proof single source of truth), 2 new stop_on_match CHANGED_TEST_FILE_RULES correctly ordered among exact-path neighbors, __init__ rule deliberately without stop_on_match ahead of the directory glob.",
+        "Repo-wide sweep: no CI configs, expected maps, or other files reference the C4 suites outside select_ci_tests.py, test_select_ci_tests.py, the boundary module, and evidence."
+      ],
+      "verification_gaps": [
+        "This seat executed no tests/builds per leaf constraints; all runtime claims accepted as supplied and cross-checked for internal consistency (log markers, counts, test names, mutant anchors, SHA chain) — every consistency check closed exactly.",
+        "Full-backend 20218p/335s baseline is at 317ca7d4 (pre-fix); not rerun on the fix SHA — disclosed in fix-verification.json with no false final-full claim; affected suites (943 targeted, 35 restored, 969 frontend, real-Node smoke) all rerun post-fix. First post-merge full CI is the first repo-wide execution of the boundary suite and selector changes.",
+        "Closed-stdout shutdown cleanliness is empirically proven on node27 Python 3.11.15 only; on other interpreters the worst case is cosmetic stderr noise at teardown (rc stays 1 because the shutdown flush hits the /dev/null wrapper), and the shipped test asserts the no-native-noise contract, so any regression fails closed.",
+        "Node-27 artifacts are self-reported; internal consistency verified, physical occurrence not attestable from this seat."
+      ],
+      "residual_risks": [
+        "_translate_command_error couples to CommandError message text; a future message edit degrades timeout/ceiling codes to C4_BINDER_UNAVAILABLE — still fail-closed, and the selector rule runs the C4 suite (incl. timeout test) on any edit of node27_pgdata_command.py.",
+        "Strict unfloored freeze/cmd-start comparison can refuse a genuinely-earlier freeze recorded inside the cmd-start second; documented sleep-1 discipline in both runbooks; fail-safe direction.",
+        "Round-1 non-blocking evidence notes (selector-red.log dict-repr format N1, runbook set-e restoration N3) are unchanged by the fix delta and remain with the evidence seat; not reopened absent new evidence.",
+        "Acceptance record remains terminal private evidence; R5 stays the production-handoff enforcement point — scoping truthful in tasks.md, PR body, and both runbooks."
+      ]
+    },
+    "C4EvidenceR2": {
+      "seat": "test-evidence+spec-compliance",
+      "lens": "test-evidence",
+      "pr": "2321",
+      "head": "1edc3d68a8e4311854666b651ff71132076770c1",
+      "base": "f765ca0d0a20792ae77281fcefc399a4d0339676",
+      "fix_delta_since": "92657af3605273d0280b7107720788852786708e",
+      "verdict": "NO_ACTIONABLE_TEST_EVIDENCE_SPEC_CANDIDATE",
+      "blocking_findings": 0,
+      "findings": [],
+      "summary": "All five confirmed R1 findings are closed against each verifier's stated minimum acceptance, with raw logs and manifests bound to byte-identical source at the reviewed HEAD. Baseline/skipped claims are truthful and the selector/test split is owned as one contract. No new actionable coverage or evidence candidates; no test padding detected.",
+      "per_finding_verdicts": {
+        "C4E-F1": {
+          "verdict": "CLOSED",
+          "minimum_check": "Entire prose-only it-block deleted (apps/frontend/src/__tests__/runbookContract.test.ts:506-513, -8 lines, all four raw-document assertions); neighboring behavioral cmd-start/cmd-end test untouched; grep confirms no re-pin of the phrase/#389/#1970 anywhere in the file; runbook Markdown not edited (policy-compliant deletion, not oracle catering). Frontend proof: 75 files/969 tests + tsc PASS at f862a51b2, whose apps/frontend bytes are byte-identical to final HEAD (git diff f862a51b2..1edc3d68a -- apps/frontend = empty); a full green run including this file exceeds the scoped-run minimum.",
+          "evidence": "git diff hunk; retirement-c4-fix-verification.json frontend block with honest subsequent_changes note"
+        },
+        "C4E-F2": {
+          "verdict": "CLOSED",
+          "minimum_check": "One compact batch (tests/test_node27_c4_production_acceptance_boundaries.py:83-176) covers all seven named classes: uppercase 40-hex SHA/C4_SHA_INVALID, query origin/C4_ORIGIN_INVALID, empty basin/C4_BASIN_INVALID, empty segment/C4_SEGMENT_INVALID, inverted cmd-start>cmd-end/C4_BRACKET_INVALID (CMD_START 01:00:00 < CMD_END 01:02:03, genuinely inverted), relative receipt/C4_PATH_INVALID, approved record 262,145 bytes/C4_TOO_LARGE (MAX_RECORD_BYTES=262_144 at c4_production_acceptance_io.py:42). Each row asserts exact owner code plus non-publication; bracket row correctly isolated after freeze rows so its _freeze_ok publish cannot pollute loop assertions. Discrimination: six guard-family mutants (sha/origin/id/bracket/path/size) each assertion-red in retirement-c4-fix-mutants.log:119,233,347,468,587,701 — no per-regex-branch matrix, per verifier instruction.",
+          "evidence": "boundaries file; mutants log RED F2 lines; IO constants grep"
+        },
+        "C4E-F3": {
+          "verdict": "CLOSED",
+          "minimum_check": "All six behavior cases present with exact codes: same-byte delete/recreate (replacement created before unlink, ino asserted changed) and utime-only drift both C4_IDENTITY_DRIFT with binding/freeze bytes asserted unrefreshed; absent freeze at bind C4_MISSING with no binding; valid cross-freeze binding C4_FREEZE_MISMATCH; one edited valid input C4_INPUT_MISMATCH; extra-key freeze C4_FREEZE_SCHEMA. Sha256-only identity mutant reds exactly the first two (2 failed, mutants log:743); one dropped-check mutant per remaining mechanism (missing/cross/input/closed-object, log:773,834,858,894). No per-stat-field or per-key rows.",
+          "evidence": "boundaries file:179-356; mutants log F3 lines"
+        },
+        "C4E-F4": {
+          "verdict": "CLOSED",
+          "minimum_check": "Actual public CLI around real /usr/bin/node v22.22.2 with labeled synthetic receipts: positive freeze->bind->verify plus retained wrong-SHA bind (C4_SHA_MISMATCH, no output, freeze bytes unchanged); status!=PASS receipt refused by the real binder -> exit 1, C4_BINDER_FAILED, binding_published=false, freeze_unchanged=true; same-byte inode replacement and semantic-preserving reserialization after bind -> real-CLI verify C4_IDENTITY_DRIFT, acceptance_published=false. All four cases recorded with stderr codes and non-publication in retirement-c4-fix-smoke.log and fix-verification.json under SYNTHETIC_FIXTURE_NOT_LIVE_PASS with live_browser_or_deployment_pass=false. Proof source 0af8eff66; scripts/services/packages bytes verified byte-identical to HEAD (git diff = empty), so the proof binds exactly.",
+          "evidence": "fix-smoke.log JSON; fix-verification.json real_cli block; proof script in manifest"
+        },
+        "C4SP-1": {
+          "verdict": "CLOSED",
+          "minimum_check": "Implementation matches the verifier's prescribed mechanism exactly (scripts/node27_c4_production_acceptance.py:64-76): print+flush inside main, catch BrokenPipeError only, redirect stdout to /dev/null, static C4_STDOUT_CLOSED stderr, return 1; all three stage success paths route through it. Subprocess proof closes the pipe reader BEFORE Popen and asserts exit 1, static code, absence of BrokenPipeError/Exception-ignored diagnostics, and the published freeze intact/valid (no rollback). Mutant stub (print-only) reds with exactly the predicted shutdown mechanism (rc 120 != 1, mutants log:945-948). Harness repair (reader-before-Popen) is transparently recorded in verification_harness_repairs and strengthens discrimination rather than masking product failure.",
+          "evidence": "CLI diff; boundaries file:359-407; mutants log SP1 block"
+        }
+      },
+      "r1_discarded_refuted_unchanged": {
+        "C4SP-2": "No new evidence; NODE_OPTIONS via trusted-operator euid environment remains outside the fixture's stated input domain. Stays discarded.",
+        "C4-INV-N1": "No new evidence; second VERIFY_HEAD boundary and 20218/335 tuple at 317ca7d48 remain independently confirmed. Stays refuted."
+      },
+      "evidence_validation": {
+        "raw_logs": "Targeted log headers FINAL_TARGETED_HEAD cacd38641 with 943 passed in 221.33s (matches manifest seconds). Mutants log shows 12 RED families (6 F2 + 5 F3 + 1 SP1), each a genuine assertion failure (FAILED + assert, no collection/setup errors per the script's _assert_red gate), then C4_R1_MUTANTS_KILLED_AND_RESTORED and 35 passed post-restore; exact-byte restoration enforced inline by the script. Smoke log is the single JSON payload whose printing is itself conditioned on every in-script assertion passing.",
+        "exact_source_binding": "git diff proves apps/frontend+scripts+services+packages byte-identical f862a51b2..1edc3d68a and 0af8eff66..1edc3d68a; 1edc3d68a touches only the five evidence files; cacd38641 (targeted-run head) changed only the boundaries test, which 1edc3d68a leaves untouched. The mutant log's SP1 traceback displays the repaired closed-stdout test, self-pinning it to cacd38641-era test bytes. Every proof therefore binds to HEAD bytes.",
+        "baseline_and_skipped_claims": "Full backend 20218 passed/335 skipped/1 ecCodes warning is explicitly bound to 317ca7d48 with a not_rerun_for_fix disclaimer in both manifest and PR body — no false final-full claim. 943/969/35/8/real-CLI-2 claims each have a log or manifest anchor; synthetic-not-live labels consistent throughout; no live browser/deployment PASS implied anywhere.",
+        "selector_test_split_ownership": "C4_PRODUCTION_ACCEPTANCE_TESTS tuple (both suites) declared once with a one-contract comment (module-scope helper import); CHANGED_TEST_FILE_RULES route each half to both with stop_on_match; all seven shared producers (owner, IO, CLI, __init__, node27_pgdata_command, safe_fs via file-journal rules, safe_fs_publication, evidence_io) select both; redaction.py correctly excluded because the C4 owner/IO do not import it (grep-verified, fixture's when-imported clause). New split test pins both-halves selection; removal-red test extended to the boundaries half; prior-consumers assertions preserved (additive literal->tuple substitutions only).",
+        "no_padding_check": "Every added test maps to a fixture-named behavior/refusal code with a discriminating mutant; boundary tests inject command_runner so ordinary CI keeps zero Node dependency; the only real-subprocess test (closed stdout) exercises freeze, which never invokes the binder. No per-branch/per-field matrices, no duplicate-path rows, no plumbing assertions found.",
+        "fixture_intact": "git diff 92657af36..1edc3d68a under fixtures/ is empty; working tree equals HEAD for all tracked files (3 untracked unrelated paths only)."
+      },
+      "non_blocking_notes": [
+        "C4E-F2 oversize row: the batch loop asserts non-publication at the shared paths['freeze'/'binding'/'acceptance'], but the C4_TOO_LARGE row's own output target (oversize-out/freeze.json) is never asserted absent — a literal deviation from the verifier's 'each asserts its owner code and no publication' wording. Structurally unreachable by a plausible bug: read_private_json refuses oversize before any publish call (corroborated independently by C4SecurityR2), sibling rows pin the publish-on-refusal regression class, and the size-family mutant proves the row's owner-code assertion discriminates. Zero unique detection value; reported for adjudication only, below the P2 bar.",
+        "Evidence hygiene: retirement-c4-fix-mutants.log carries no embedded VERIFY_HEAD/source line (unlike the round1 node27 log convention and the targeted log's FINAL_TARGETED_HEAD header); content still pins it (SP1 traceback shows the cacd38641 test bytes, and product bytes are 0-diff to HEAD), but an explicit header would make the 12-family claim self-contained. Related staleness: intermediate fix-r1.json cites boundaries=414 lines vs 407 at HEAD (predates the 0af8eff66/cacd38641 test repairs; its CLI=116 and core=856 counts remain exact). fix-r1.json is explicitly non-canonical ('Parent owns all validation'); the canonical fix-verification.json cites no line counts."
+      ],
+      "out_of_scope_escalations": [
+        "Pre-existing sibling-CLI closed-stdout class (e2e/ops/scale/slurm/readiness/object_store/readonly_db/two_node success prints share the shutdown-flush mechanism, untouched by this diff): triage-only, carried and emitted by C4SecurityR2's seat; referenced here only to avoid double-reporting."
+      ],
+      "verification_gaps": [
+        "Read-only seat: no re-execution of any suite, smoke, or mutant; verdicts rest on the supplied logs/manifests plus source/diff inspection.",
+        "The 943 log does not itemize suite composition (owner+boundary+selector split is taken from the PR body); per-suite counts other than boundary=8/restored=35 are not separately logged.",
+        "Frontend evidence is the full 969-test run at f862a51b2 rather than the verifier's literal scoped vitest run at the final head; closed in substance via verified byte-identity of apps/frontend to HEAD.",
+        "Local Ruff/OpenSpec-strict/Markdown PASS claims are recorded in the PR body without attached logs in the evidence pack; fix delta touches no spec or runbook files, so spec-drift risk from this delta is nil."
+      ],
+      "residual_risks": [
+        "_announce_pass falls back silently if open('/dev/null') itself fails (OSError pass), which would re-expose the shutdown-flush diagnostic; unreachable on the target node27 Linux runtime and the exact pattern the verifier prescribed.",
+        "The boundaries suite's module-scope import of core-suite helpers means a helper rename breaks collection of both halves — intentionally mitigated by the one-contract selector coupling, which is now pinned by the split test."
+      ],
+      "invariant_matrix_closure": {
+        "governing_invariant": "Fix delta does not alter acceptance logic (services/ untouched): no new path can redefine approved SHA, original inputs/bracket, or accepted bytes/identity; the new tests affirmatively prove later observations only refuse (inode/utime/reserialization rows assert binding/freeze bytes unrefreshed).",
+        "cli_entry": "SP1 fix preserves success=0 and owner-refusal=1 contracts; closed-stdout now yields static-coded exit 1 with the published artifact retained; proven by subprocess test + mutant.",
+        "storage_identity": "F3 rows + sha-only mutant close inode/mtime drift; CLI-level inode/reserialization proofs close the real-binder loop.",
+        "validators_process": "F2 batch + six guard mutants close input refusal; F4 status-not-PASS proves real-binder FAIL translation with no publication and unchanged freeze.",
+        "evidence_docs": "All runtime proofs carry synthetic labels and exact SHA binding; baseline claim truthful; second-round review (this round) is the remaining fixture gate, not an evidence defect.",
+        "sibling_regressions": "Selector tuple substitutions are additive supersets with prior-consumers tests intact; frontend deletion is isolated to the prose block; core suite untouched (856 lines, unchanged in delta); no caller migration needed anywhere."
+      }
+    },
+    "C4SecurityR2": {
+      "seat": "security-perf+integration",
+      "lens": "security-perf+integration",
+      "pr": "2321",
+      "head": "1edc3d68a8e4311854666b651ff71132076770c1",
+      "base": "f765ca0d0a20792ae77281fcefc399a4d0339676",
+      "fix_delta": "92657af3605273d0280b7107720788852786708e..1edc3d68a8e4311854666b651ff71132076770c1",
+      "verdict": "NO_ACTIONABLE_SECURITY_INTEGRATION_CANDIDATE",
+      "blocking_findings": 0,
+      "findings": [],
+      "sp1_audit": {
+        "mechanism_match": "CONFIRMED. Pre-fix failure class was interpreter-shutdown flushing (CPython block-buffers pipe stdout; flush_std_files() in finalization raises unraisable BrokenPipeError -> 'Exception ignored' diagnostic + exit 120). _announce_pass (scripts/node27_c4_production_acceptance.py:66-79) forces print+sys.stdout.flush() inside main(), converting EPIPE into a catchable error at a controlled point. Catch is narrowed to BrokenPipeError only; the verifier's warned-against terminal broad except is absent.",
+        "redirect_soundness": "CONFIRMED. sys.stdout rebound to open('/dev/null','w') before return: shutdown flush_std_files() flushes the new empty stream; the original stream stays referenced by sys.__stdout__ and CPython's IOBase finalizer silences close() errors, so no shutdown diagnostic can reappear. Fallback except OSError only degrades to pre-fix behavior on non-POSIX (no /dev/null) — out of domain for this Linux-only tool (/usr/bin/node, 0700/0600 POSIX modes).",
+        "semantics_preserved": "CONFIRMED. Stage publishes before _announce_pass is called; artifact-then-announce order unchanged for all three stages. Static owner-coded stderr outcome 'C4_STDOUT_CLOSED: ...' and return 1 exactly match the approved R1 resolution. Refusal path (_report, stderr-only) and usage path (argparse override -> stderr, exit 2) leave stdout buffer empty, so no sibling broken-pipe exposure exists on non-success paths. Exit lattice 0/1/2 unchanged for all pre-fix paths; only the former 120+diagnostic case becomes static-1.",
+        "subprocess_test": "SOUND. tests/test_node27_c4_production_acceptance_boundaries.py:367-408 closes the pipe read end BEFORE Popen (deterministic EPIPE on the child's first flush; cacd38641 replaced the racy select/read-then-close intermediate that could flush successfully before closing). pass_fds + parent-side close correct; stderr read before wait cannot deadlock (bounded output). Assertions cover rc==1, static code present, 'BrokenPipeError' and 'Exception ignored' absent, published freeze re-parsed through the real read_private_json (0600/single-link/euid reader) with correct stage/reviewed_sha, and no stray binding.",
+        "resource_cleanup": "No leak relevant to a short-lived CLI: pipe fds closed in parent; devnull stream flush-clean at shutdown; child fds reaped at exit."
+      },
+      "fixture_mutation_audit": {
+        "mutants_genuine": "12/12 families are source-level, anchor-unique (SystemExit unless exactly one match), assertion-red-verified (rc==1 + FAILED, collection/setup errors excluded), byte-exact restored with post-restore comparison. Log evidence: 12 RED lines, each preceded by '1 failed' ('2 failed' for sha-only identity killing inode+utime), terminal C4_R1_MUTANTS_KILLED_AND_RESTORED then 35 passed (retirement-c4-fix-mutants.log:117-951).",
+        "guards_intact_at_head": "All 12 mutant anchors verified verbatim in shipping HEAD: SHA_RE lowercase-only (c4_production_acceptance_io.py:47), size ceiling (:361,:411), FileNotFoundError->C4_MISSING (:352-353), require_absolute_path (:131), require_origin (:155), require_id (:169), full-identity compare (c4_production_acceptance.py:152,157), closed-object freeze (:337), cross-freeze checks (:492-495), input-mismatch (:498). services/ is untouched by the fix delta; path/ownership/time/byte caps unweakened.",
+        "no_fake_proof": "Boundary tests invoke real freeze/bind/verify with real invalid inputs and assert exact owner codes plus genuine non-publication; inode test self-checks st_ino changed, utime test self-checks bytes unchanged (no vacuous mutation). _pass_runner stubs only the binder subprocess (returns real owner.BINDER_PASS) while every guard under test executes in Python. freeze() reads the approved record (byte ceiling) strictly before publish_private_json (:285-329), so refusal-before-publication is structural. One row-level nit (oversize row asserts non-publication at the fixture path rather than its own oversize-out output) is unreachable by a plausible bug given that ordering; dropped below P2 bar and handed to C4EvidenceR2 via hub.",
+        "real_binder": "Actual-CLI/real-Node smoke (/usr/bin/node v22.22.2, synthetic-labeled) covers positive freeze->bind->verify, wrong-SHA refusal pre-binder, binder status!=PASS -> exit 1/C4_BINDER_FAILED/no binding/freeze-bytes-unchanged, same-byte inode replacement and semantic-preserving reserialization -> C4_IDENTITY_DRIFT/no acceptance — exactly the R1 verifier minimum acceptance. CLI file last modified in f862a51b2, so smoke SHA 0af8eff66 ran the identical CLI code as HEAD."
+      },
+      "selector_audit": {
+        "prior_consumers_retained": "CONFIRMED. All 7 PATH_TEST_RULES sites (select_ci_tests.py:1572,1583,2320,2324,2329,2334,3565,4324) are pure splat-for-literal substitutions (superset); zero stray single-element literals remain (grep). Prior-consumer retention explicitly proven by test_c4_production_acceptance_shared_producers_keep_prior_consumers (pgdata_command, evidence_io, safe_fs_publication keep original consumers) and strengthened expectations (set(C4_PRODUCTION_ACCEPTANCE_TESTS) <= selected at 4 sites).",
+        "new_rules_sound": "Tuple defined once, explicit and sorted (:829-832). Two new CHANGED_TEST_FILE_RULES (:1033-1042) are exact-path with stop_on_match, mirroring the established census-publication split convention (:1021-1032); no earlier rule can shadow them (exact paths; core pattern is not a prefix of the boundaries path). Only the boundaries module imports the core suite (grep over tests/), so stop_on_match orphans no other importer. red_when_removed asserts both halves drop out with the three owner rules removed."
+      },
+      "f1_closure": "Prose-only it-block fully deleted (apps/frontend/src/__tests__/runbookContract.test.ts, -8 lines, all four raw-document assertions); neighboring behavioral cmd-start/cmd-end test intact; runbook Markdown untouched. Deletion is the required fix per test policy, not oracle weakening.",
+      "closed_candidates_stay_closed": [
+        "C4SP-2 NODE_OPTIONS: fix adds no env surface; trusted-operator domain boundary unchanged — stays DISCARDED, no new evidence.",
+        "C4-INV-N1 log SHA: fix touches no logs/provenance; second VERIFY_HEAD refutation stands — stays REFUTED."
+      ],
+      "non_blocking_notes": [
+        {
+          "note": "Pre-existing sibling production CLIs print results to stdout with no broken-pipe guard and share SP1's shutdown-flush exposure class (exit 120 + diagnostic if an operator pipes to a closing reader): e2e_validation.py:2073, object_store_validation.py:848, ops_validation.py:2850, readiness_validation.py:1136, readonly_db_validation.py:548, scale_validation.py:2001, slurm_validation.py:2435, two_node_e2e_evidence.py:4517. Untouched by this diff; same P2-class impact SP1 had here. Recorded for triage only — fixing them in this PR would be out-of-scope generic hardening."
+        }
+      ],
+      "out_of_scope_escalations": "None.",
+      "verification_gaps": [
+        "Read-only seat: node27 execution evidence (mutants log, smoke JSON, targeted 943-pass log, verification manifest at source_sha cacd38641) was inspected for internal consistency, not re-executed. All cross-checks passed: smoke CLI SHA == HEAD CLI code; 12 RED + restore marker + 35 green; targeted log FINAL_TARGETED_HEAD matches manifest.",
+        "fix-r1.json cites boundaries=414 lines vs 408 at HEAD — implementer manifest predates the cacd38641 test-timing commit; authoritative node27 fix-verification.json matches HEAD. Cosmetic staleness only; routed to evidence seat."
+      ],
+      "residual_risks": [
+        "On non-POSIX hosts without /dev/null the SP1 handler degrades to pre-fix exit-120 behavior (OSError fallback); the tool's real input domain is Linux-only, so no in-domain exposure.",
+        "Closed-stdout exit 1 after a successful, published stage is an intentional semantic (artifact kept, static owner code) per the approved R1 resolution and is documented by the test name; operators scripting on exit codes should treat C4_STDOUT_CLOSED as delivery failure, not refusal — the stderr code disambiguates."
+      ],
+      "matrix_closure": {
+        "SP1_closed_stdout": "CLOSED — mechanism, narrowing, redirect, static code, exit semantics, artifact preservation, subprocess test all verified",
+        "F1_prose_pin": "CLOSED — required deletion, neighbors intact",
+        "F2_boundary_batch": "CLOSED — 7 real-input rows, owner codes + non-publication, 6 guard-family mutants killed",
+        "F3_identity_records": "CLOSED — 6 behavior cases incl. inode/utime self-checks, 5 mutants killed",
+        "F4_real_cli_binder": "CLOSED — synthetic-labeled actual-CLI/real-Node positive + 3 negative classes with non-publication and freeze-integrity assertions",
+        "selector_consumers": "CLOSED — superset substitution at all sites, split rules sound, prior consumers proven retained",
+        "sibling_regressions": "NONE — services/ guards byte-identical to R1-reviewed state; refusal/usage paths unaffected by _announce_pass; no other importers of core suite",
+        "security_invariants": "Holding — trusted binder path, private-path/ownership/time/byte caps, static errors, no-publication-on-refusal, published-artifact integrity all intact at HEAD"
+      }
+    }
+  },
+  "source_binding_note": "Exact matrix governs: original full-backend source317ca7d has pre-fix CLI; final fix owner/boundary/selector proof is cacd3864. No claim every product byte equals every earlier evidence SHA."
+}
