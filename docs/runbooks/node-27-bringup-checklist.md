@@ -4,6 +4,28 @@
 > 本清单 = 待办的全部工作，分三批：A 已完成（回填）、B 测试尾巴（本地可做）、C live 证据（需 node-27 实机 / 真实只读 DB / 浏览器）。
 > 对账明细见 `openspec/changes/m22-two-node-docker-readonly-display/tasks.md`；角色边界设计见 `docs/runbooks/two-node-deployment-overview.md`。
 
+## 当前边界：selective-cold 必须退役代码，尚未实施
+
+原 #1891/#1895 的生产冷层 rollout 已撤回，不再要求新 G1 retry、冷样本或 G0–G8
+窗口。唯一退役合同是
+[`compressed-chunk-cold-tablespace-tiering/tasks.md`](../../openspec/changes/compressed-chunk-cold-tablespace-tiering/tasks.md)：
+R1 最小共享/PGDATA/governance/manual consumers 迁到真实 owner；R2 独立解除普通
+compression 的 cold env/paired budget/launcher 耦合并保留安全边界；R3 在二者之后
+删除 cold-only runtime、旧 G0–G8 wrappers、schemas/examples/tests/CI/SQL grant-audit；
+R4 更正权威并保留历史，不晋升 withdrawn ADDED cold specs；R5 验证存活能力、
+另行批准 effective-deployment handoff 后才闭合。测试/文档随各源码切片同行。
+代码仍待删除，不能以 dormant retention 关闭；#2293/#2298/#1938 仅在受影响路径和
+部署引用真正退出后处置，迁出的缺陷随真实 owner 保留。
+
+本清单 C1–C4、river-click 和既有只读/展示 producer 继续由各自 owner 承担；
+**不把 #1895 改造成新的全面 display/storage acceptance 项目**。旧 issue1895
+C1/C2/C3/performance 包装不是本地 C4 producer/binder 的前置，但其中必要的
+外层 SHA/digest 保证必须按 R1.6 迁交 **Bringup-C4 production acceptance**。
+R1 必须迁移/repoint 真正保留的手工/PGDATA consumers 后 R3 才能删除旧出口。
+此修订不声称源码已移除、effective unit
+已观测或生产已清理。冷样本/I9/I8/#2162/#2017 不是一揽子退役依赖，部署仍须协调
+真实 owner 和 foreign holds；既有容量、升级、恢复职责不取消，也不新增 RPO/RTO gate。
+
 ## 开发流程衔接（2026-06-07）
 
 - **验证 oracle 路由**：本地跑 lint/unit/OpenSpec/前端构建；真实 DB、ingest、display API、前端生产化和只读边界（本清单 C1–C4）在 **node-27** 产 live receipt；只有 sbatch、Slurm gateway、SHUD runtime 或调度行为变更才走 **node-22** Slurm scheduling oracle。node-22 检查和本地检查都不闭合 C1–C4。
@@ -36,7 +58,7 @@
   **不替代** C1（生产 docker 部署）/ C2（只读 DB denied-write 矩阵）/ C3（cross-plane identity GFS+IFS 双源）——
   这三项仍须独立产 live receipt。④⑤ popup live 点击证据缺口按 2026-09 状态拆分：**river popup** 的
   framing/命中已由 #1970 门控 hook 交付（详情 geom bbox + 真实渲染要素 + 既有 onOverlayClick 路径），
-  live receipt 由 C4-river-click 节（#1895）执行；**station popup**（station-MVT 端点/bbox 属 #342 协同）
+  live receipt 由独立 C4-river-click 展示 lane 执行（原 #1895 rollout 归属已撤回）；**station popup**（station-MVT 端点/bbox 属 #342 协同）
   仍由 #389 承接，绘制不变量已由本地单测全覆盖、数据 live 就绪。这不再是整体「#389 唯一承接」的表述。
 - **live MVT closure（#351 → #343）**：#351 已用 2026-06-08 node-27 live receipt 闭合 #343；`NHMS_ENABLE_LIVE_POSTGIS_MVT=true`
   后 `/api/v1/layers` 返回 live layers，`hydro-national/q_down` tile 200。原 river-network 424 / hydro 409 根因是
@@ -87,9 +109,9 @@ display/frontend oracle 都在 node-27。
 
 ## C. live 证据（必须在 node-27 实机产出，是「上线」的实质）
 
-C4 producer 已由 #2123 合并；C1-C3/G8 owner 与可执行 G0 合同由 #2137
-先行合并。#2137 不访问 node-27，也不产 live receipt。只有该前置合并后，#1895
-才能在 27 实机执行 C1-C4 并产出真实环境 receipt。
+C4 producer 已由 #2123 合并并独立保留。#2137 已交付的旧 C1-C3/G8/G0
+rollout 合同是历史记录，不访问 node-27、也不产 live receipt；其冷层 rollout
+授权已撤回。以下通用 C1–C4 仍是既有上线/展示 owner 的证据要求，不是 #1895 新任务。
 
 ### C1. 部署 receipt（开发期本地起服务，非 docker compose up）
 
@@ -116,9 +138,10 @@ C4 producer 已由 #2123 合并；C1-C3/G8 owner 与可执行 G0 合同由 #2137
 >   geometry 已完整的网络上它是休眠的（`only_missing=True` 的路径在 bump 之前就返回 0）。
 
 - [ ] **开发期：27 本地起 display API**（不 `docker compose up`）：只读派生端口，
-  再启动 wrapper。#1895 的 C1 receipt owner 只解析 `NHMS_DISPLAY_API_PORT`（缺省
-  `8080`）而不 source 该 env，随后必须通过 systemd MainPID/cgroup、`/health`、
-  runtime 五键精确值和 `/api/v1/slurm/health` 的 404；start log 不是 receipt。
+  再启动 wrapper。验证须绑定实际端口、真实运行进程、`/health`、
+  readonly runtime 配置和 `/api/v1/slurm/health` 的 404；start log 不是 receipt。
+  旧 #1895 C1 wrapper 待退役；保留的自动观察/身份绑定能力须经 R1 迁到实际 owner，
+  不因撤回冷 rollout 而把日志或静态检查当作运行态 PASS。
 
   ```bash
   DISPLAY_API_PORT="$(
@@ -141,10 +164,11 @@ C4 producer 已由 #2123 合并；C1-C3/G8 owner 与可执行 G0 合同由 #2137
 
 - [ ] 用 27 真实只读账号设 `NHMS_DISPLAY_READONLY_DATABASE_URL`（或
   `NHMS_READONLY_DB_VALIDATION_DATABASE_URL`），跑 canonical readonly DB validation
-  入口，产出脱敏 evidence。#1895 从显式私有 `display.env` 绑定唯一短生命周期
-  DSN，环境中的旧 DSN 不可覆盖；canonical evidence 必须在已批准 `artifacts/`
-  根的唯一子树，以本次 run-id 运行，成功后由 C2 acceptance receipt 绑定四个
-  authoritative 文件 digest 与 exact reviewed SHA：
+  入口 `scripts/validate_readonly_db_boundary.py`，产出脱敏 evidence；底层
+  `services/production_closure/readonly_db_validation` 独立保留。凭证和 evidence
+  必须绑定本次实际运行，私有保存且不得泄露 DSN。旧 #1895 C2 acceptance
+  wrapper/digest 绑定链已撤回，不是 canonical validator 的永久前置；
+  R1 迁移真正保留的绑定消费者后 R3 才删除旧出口：
   - display API（health/models/stations/latest-product/pipeline status·stages·jobs·logs/runtime config）在只读凭证下 PASS，identity-bound 路由用一个 strict `source/cycle_time/run_id/model_id`、logs 绑 `job_id`。
   - permission-denied 矩阵：`hydro/met/ops` 关键表的 INSERT/UPDATE/DELETE/DDL/TRUNCATE/sequence/schema CREATE 全被拒，记录 `current_user` + DB role 类型。
   - 缺真实 DB 时入口必须报 `BLOCKED`，不得 mock 冒充 PASS。
@@ -152,8 +176,8 @@ C4 producer 已由 #2123 合并；C1-C3/G8 owner 与可执行 G0 合同由 #2137
 ### C2b. 写侧最小权限 receipt（#1774）
 
 C2 证的是**读**边界（`nhms_display_ro` 无写权）。写边界是另一半，2026-09 之前完全缺失：
-ingest / download / compression / cold-residency / retention 五条 lane 全部以 superuser
-`nhms` 连库，也就是一份凭据 == 数据库容器内命令执行，而这台机器同时对外提供
+ingest / download / compression / retention 及当时计划的 cold-residency 五条 lane
+在历史调查中以 superuser `nhms` 连库，也就是一份凭据 == 数据库容器内命令执行，而这台机器同时对外提供
 `https://test.nwm.ac.cn`。
 
 - [ ] **pre-merge（additive，可在 unit 全部照常运行时做）**：从 detached worktree 跑
@@ -165,7 +189,9 @@ ingest / download / compression / cold-residency / retention 五条 lane 全部�
 - [ ] **post-merge（timer 停机窗口）**：跑完整 `scripts/node27_provision_write_roles.sh`，
       入证 owner-drift 清单为空、`nhms_display_ro` 有效 SELECT 集合 before/after 一致、
       `relacl` diff（预期只有 grantor 从 `…/nhms` 改写为 `…/nhms_ingest_rw`）。
-- [ ] 五条 lane 各在新角色下跑一轮真实 run 并留 receipt；autopipe dry tick 的统计守卫
+- [ ] 存活 lane 各在新角色下跑一轮真实 run 并留 receipt；**不为冷层退役启动 cold lane**。
+      R3 删除 cold-only grant/positive audit，不据本文直接撤销生产权限。
+      autopipe dry tick 的统计守卫
       **两条 ANALYZE 腿都必须是 `ok`**（`warning` = 非 owner 被静默跳过，tick 绿而腿死）。
 - [ ] env 切换后脱敏 `grep`：`/home/nwm/NWM/infra/env/*.env` 中不再出现 `nhms:` DSN 用户名或
       `PGUSER=nhms`，例外只有 `node27-timeseries-compression-replay.env` 与
@@ -177,11 +203,13 @@ ingest / download / compression / cold-residency / retention 五条 lane 全部�
 
 - [ ] 同一个 `run_id/source/cycle_time/model_id/basin_id` 串起：22 生产 → DB
   状态 → published logs → `/api/v1/mvp/qhh/latest-product` → 27 `/` 单页地图 +
-  `/ops`，**拒 historical latest 冒充**。#1895 的 direct current C3 receipt 在 C4
-  PASS 后绑定其 exact bytes、readonly DB exact API identity、source-scoped
-  registry complete-cycle 集合和 valid-times baseline；它不冒充通用
-  producer-complete full-scope/twelve-lane aggregator，后者仍只接受完整
-  producer bundle。
+  `/ops`，**拒 historical latest 冒充**。通用 cross-plane 身份和双源要求保留。
+  原 #1895 direct-current C3 的冷 rollout 已撤回，但独立 C4 生产接受所需的
+  reviewed-SHA/exact-byte digest 校验不能一起撤销：R1.6 必须将该最小职责迁交
+  本清单 C4 的既有 display owner（**Bringup-C4 production acceptance**）。
+  不迁移 C3 其他已撤销的冷 baseline/完整周期检查，不保留整个旧链。
+  通用 producer-complete full-scope/twelve-lane aggregator 仍只接受完整
+  producer bundle，不能用空目录或旧 C3 receipt 冒充。
 - [ ] GFS + IFS 双源都过 strict latest/series/ops/logs/browser 才算 cross-plane `PASS`；单源为 `PARTIAL`。
 
 ### C4. 浏览器 e2e（tasks 6.8 + §10.4）
@@ -189,20 +217,27 @@ ingest / download / compression / cold-residency / retention 五条 lane 全部�
 > M26（EPIC #336）已对**新单页全屏地图**形态产 live browser receipt（重定向
 > 矩阵 / 全屏无导航 / QHH↔Heihe 同页 zoom / overlay 诚实未注册态 = live-PASS，
 > 见上「M26」节）。C4 producer/validator/private publisher/binder 已由 #2123
-> 合并，其输入分类优先级由 #2130 晋升为权威规格。#1895 的 C4 判定只执行
+> 合并，其输入分类优先级由 #2130 晋升为权威规格。独立 C4 判定执行
 > `test:e2e:live-c4-display`：以 `/` strict 单页地图 + `/ops` 为准，
 > `/hydro-met -> /` 仅作旧别名 redirect smoke。`e2e/monitoring.spec.ts` 不是 C4
-> 替代品，也不在 #2137/#1895 本窗口补。
+> 替代品；撤回 #1895 rollout 不删除或重新分配这些独立展示职责。
 
-- [ ] #1895 在 task 4.6/G7 以真实 node-27 backend 执行
+- [ ] 既有 display owner 在其批准窗口以真实 node-27 backend 执行
   `test:e2e:live-c4-display`，完成 GFS/IFS 双源 `/` strict bootstrap 与 `/ops`
   readonly lane，且 receipt 通过已合并的 C4 schema、semantic validator、
   private publisher 和 binder。
 - [ ] 由该 C4 lane 实测 display 模式控件隐藏/禁用、无 retry·cancel·Slurm
   POST、queue-depth unavailable、诊断复制、人工 22 恢复指引，并证明 27 只展示
   22 的结果而不创建控制面 receipt。
-- [ ] C3 在 C4 PASS 后绑定其 exact raw bytes、digest、current-run bracket 与
-  reviewed SHA；C4 CLI PASS 不替代外层 G0/C3 gate。
+- [ ] **Bringup-C4 production acceptance** 由既有 display 上线 owner 承担：
+  执行前从获批准的交付/C1 记录冻结 reviewed SHA，将当次 C4 原始字节
+  sha256、文件身份、五输入和执行 bracket 绑定到原外层接受记录；最终接受
+  重新读取并比对，不从待接受文件或最终观察反推/覆盖预期。
+  缺记录、SHA 不符、字节或文件身份变化均拒绝；C4 CLI PASS 不替代此外层
+  gate 或 C1–C3 的独立证据，也不向 C4 闭集 schema/既有 CLI 增加 SHA/digest 字段。
+  R1.6 必须先交付并登记真实入口、代码 owner、记录来源及拒绝证明，R3 才能
+  删除原 G0/C3 中的相应能力。新归属是待实现的交接目标，不声称新入口已经存在；
+  旧冷 G0–G8 不恢复为上线流程。
 
 Issue #389 的 station popup/bbox/framing 与 #342 station-MVT 是独立缺口，不挂在
 本 C4 checkbox 下。#1970 已交付的河段 click oracle 仍由上述 C4 lane live 执行。
@@ -223,7 +258,7 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
   `window.__nhmsRiverClickEvidence.selectRenderedRiver` 钩子以真实渲染要素沿既有 `onOverlayClick`
   点击路径完成 fit/命中/弹窗打开；配合 `basin-versions/{id}/river-segments/{segment_id}` 详情响应的
   *geom bbox*（M11 段详情本就带 geom），河段 river popup 的确定性 framing/命中已可自动化（见下方
-  C4-river-click 节，由 #1895 产出 live receipt）。**station popup 仍无等价路径**（station-MVT
+  C4-river-click 节，由独立 display owner 产出 live receipt）。**station popup 仍无等价路径**（station-MVT
   端点/bbox 属 #342/#389 协同侧，未闭合）。
 - [x] **node-27 浏览器可启动**（**#431 已解，2026-06-10**）：曾缺 `libgbm.so.1`/`libxcb-randr.so.0`
   导致 chromium `exitCode=127`。已用 `sudo apt-get install -y libgbm1 libxcb-randr0`（apt 自动带
@@ -233,13 +268,14 @@ popup live click 只能人工截图、无法纳入 C4 自动 receipt：
   临时 `~/pwdeps` userspace hack 已清除。live browser lane（含本节 popup live click、
   `e2e/live-display.spec.ts`）的浏览器前提已就绪。
 - [ ] 上述就绪后：station popup（forcing 序列）的 live 点击截图 + 断言仍在 **#389** 未闭（river popup
-  的流量/起报时间 live 点击已由 C4-river-click 节承接，#1970 交付、#1895 执行）。
+  的流量/起报时间 live 点击已由 C4-river-click 节承接，#1970 交付、display owner 执行）。
 
 #### C4-river-click：`/` 河段点击 GFS+IFS P95 证据（#1970 → #1895）
 
 > #1970 交付了**门控的只读测试钩子 + 无 mock 的 live P95 采集 lane**（代码与本地单测已就绪），
-> 本 PR **没有**在 node-27 实机执行、**没有**产 live PASS。真正的 live PASS 由 **#1895** 用
-> 下面的 exact merged command 在当前运行里产出。
+> 本 PR **没有**在 node-27 实机执行、**没有**产 live PASS。原 **#1895** rollout
+> 执行归属已撤回；下面的独立命令仍由既有 display owner 在批准的当前运行中产证。
+> 标题中的 #1895 仅保留历史锚点，不是退役的新 live acceptance gate。
 >
 > C4 #389 历史文本（station popup / basin-bbox 的 live receipt）保持诚实：river 河段点击的
 > WebGL 钩子与 segment-detail 几何 framing 已由 #1970 交付；station popup 与 basin-bbox 的
