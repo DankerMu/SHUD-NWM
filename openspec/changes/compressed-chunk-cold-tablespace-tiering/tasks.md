@@ -248,7 +248,7 @@ Seams under test:
   tests, Ruff, independent review/verifier/Gap Sweep and exact-head CI, merge the
   child, then restart #1895 from G0. Local or isolated PASS does not satisfy the
   fresh production G1 retry.
-- [ ] 4.0B Merge child #2290 physical-parent admission before fresh production G0.
+- [x] 4.0B Merge child #2290 physical-parent admission before fresh production G0.
   Complete the `fixtures/issue-2290.md` invariant matrix: narrow signature and
   mandatory parent OID/Timescale ID; digest-bound inventory with unchanged wire
   keys; all selection/reload/locked/fresh/census/post-target/intersecting-group
