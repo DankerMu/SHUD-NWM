@@ -12,9 +12,11 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import grp
 import hashlib
 import json
 import os
+import pwd
 import re
 import signal
 import stat
@@ -32,12 +34,14 @@ PIN = "70-issue1987-governance-reviewed-source.conf"
 
 
 class Refusal(Exception):
-    pass
+    def __init__(self, code, path=None):
+        super().__init__(code)
+        self.path = re.sub(r"[^A-Za-z0-9/_.-]", "?", str(path))[:240] if path is not None else None
 
 
-def require(ok, code):
+def require(ok, code, path=None):
     if not ok:
-        raise Refusal(code)
+        raise Refusal(code, path)
 
 
 def digest(data):
@@ -46,17 +50,47 @@ def digest(data):
 
 def safe(path, *, directory=False, private=False):
     path = Path(path)
-    require(path.is_absolute() and ".." not in path.parts, "UNSAFE_PATH")
+    require(path.is_absolute() and ".." not in path.parts, "UNSAFE_PATH", path)
     for parent in reversed((path, *path.parents)):
-        info = parent.lstat()
-        require(not stat.S_ISLNK(info.st_mode), "SYMLINK_PATH")
-        require(info.st_uid in (0, os.getuid()), "FOREIGN_PATH_OWNER")
-        require(not info.st_mode & 0o022, "WRITABLE_PATH")
+        try:
+            info = parent.lstat()
+        except OSError:
+            raise Refusal("PATH_STAT_FAILED", parent) from None
+        require(not stat.S_ISLNK(info.st_mode), "SYMLINK_PATH", parent)
+        require(info.st_uid in (0, os.getuid()), "FOREIGN_PATH_OWNER", parent)
+        require(not info.st_mode & 0o002, "WORLD_WRITABLE_PATH", parent)
+        if info.st_mode & 0o020:
+            # Only the current user's demonstrably single-user primary group
+            # may write existing parents. Never trust a caller-supplied group.
+            require(
+                info.st_uid == os.getuid() and info.st_gid == os.getgid(),
+                "FOREIGN_GROUP_WRITABLE_PATH",
+                parent,
+            )
+            try:
+                group = grp.getgrgid(info.st_gid)
+                explicit = [pwd.getpwnam(name).pw_uid for name in group.gr_mem]
+                primary = [entry.pw_uid for entry in pwd.getpwall() if entry.pw_gid == info.st_gid]
+                attributes = os.listxattr(parent, follow_symlinks=False)
+            except (OSError, KeyError):
+                raise Refusal("GROUP_WRITE_AUTHORITY_UNAVAILABLE", parent) from None
+            require(
+                bool(primary) and all(uid == os.getuid() for uid in (*explicit, *primary)),
+                "MULTIUSER_GROUP_WRITABLE_PATH",
+                parent,
+            )
+            require(
+                not {"system.posix_acl_access", "system.posix_acl_default", "security.NTACL"}.intersection(attributes),
+                "GROUP_WRITABLE_PATH_ACL",
+                parent,
+            )
     info = path.stat()
-    require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode), "PATH_TYPE")
+    require(stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode), "PATH_TYPE", path)
     if private:
         require(
-            info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == (0o700 if directory else 0o600), "PRIVATE_MODE"
+            info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == (0o700 if directory else 0o600),
+            "PRIVATE_MODE",
+            path,
         )
     return path
 
@@ -659,12 +693,14 @@ def main():
     executor = None
     code = 0
     error = None
+    error_path = None
     try:
         executor = Executor(args)
         executor.execute()
     except BaseException as exc:
         code = 1
         error = str(exc) if isinstance(exc, Refusal) else "OPERATION_FAILED"
+        error_path = exc.path if isinstance(exc, Refusal) else None
         if executor is not None:
             executor.log.write(("\nPRIVATE_FAILURE " + repr(exc) + "\n").encode())
             os.fsync(executor.log.fileno())
@@ -681,6 +717,7 @@ def main():
                 else ("PREFLIGHT_OK" if args.operation == "preflight" else state.get("outcome", "NO_STATE")),
                 "phase": state.get("phase", "not_started"),
                 "error": error,
+                "error_path": error_path,
                 "runtime_retained": True,
             },
             sort_keys=True,
