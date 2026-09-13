@@ -41,6 +41,9 @@ from tests.test_node27_c4_production_acceptance import (
     _write_private_json,
     _write_receipt,
 )
+from tests.test_node27_c4_production_acceptance import (
+    paths as paths,
+)
 
 UPPERCASE_SHA = "0123456789ABCDEF0123456789ABCDEF01234567"
 QUERY_ORIGIN = "https://display.example.test/?lane=c4"
