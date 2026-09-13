@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
+import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -779,7 +782,9 @@ def test_an_unreadable_object_store_ancestor_skips_only_its_two_lanes(
     `uv run --python 3.14 pytest` for that version reason, not for a defect
     (measured on 3.14.2). The assertions stay exact on purpose: widening them
     to accept either receipt would merge two different meanings and delete the
-    invariant. The label fix is tracked by #2104.
+    invariant. The 3.14 label is a documented limit that #2104 deliberately did
+    NOT fix (it is on that change's non-goal list, as it was on #2099's), so no
+    open issue promises a different spelling there.
     """
     if os.geteuid() == 0:
         pytest.skip("root traverses any directory mode, so the failure cannot be simulated")
@@ -818,8 +823,384 @@ def test_an_unreadable_object_store_ancestor_skips_only_its_two_lanes(
     }
     assert ("raw_root_unsafe", "path_unavailable") in skipped
     assert ("canonical_root_unsafe", "path_unavailable") in skipped
+    # #2104 item 3: the errno the probe saw is additive on those same entries.
+    unavailable = [
+        entry for entry in payload["skipped"] if entry.get("detail") == "path_unavailable"
+    ]
+    assert sorted(_keys(unavailable)) == ["canonical", "raw"]
+    for entry in unavailable:
+        assert entry["error"]
+        assert entry["error_type"] == "PermissionError"
     assert _keys(payload["deleted"]) == ["precip-cache/IFS/2026060100"]
     assert payload["counts"]["failed"] == 0
     assert not aged_cache.exists()
     assert (store / "raw" / "gfs" / "2026060100").is_dir()
     assert (store / "canonical" / "IFS" / "2026060100").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Issue #2104 - lane / source locality past the lane-root gate.
+#
+# Every probe in `_resolve_lane_root` and `_safe_resolved_dir` stats the lane
+# root FROM ITS PARENT, so the gate only ever needs `x` on `<object-store>`.
+# The first syscalls that need `x` on the lane root itself live one step later
+# (`_collect_mapped_lane`'s source probe and the `is_dir()` comprehension in
+# `_iter_dirs`); before #2104 an `EACCES` there escaped `collect_targets`,
+# which completes BEFORE the first `rmtree`, so all three lanes ended with zero
+# deletions and `main()` never reached `_write_summary`.
+#
+# These tests are pinned to the repo's 3.11 interpreter exactly like
+# `test_an_unreadable_object_store_ancestor_skips_only_its_two_lanes`: from
+# CPython 3.14 `pathlib` swallows every `OSError` on those predicates, so the
+# same on-disk state surfaces as an empty listing there, not as a skip.
+# ---------------------------------------------------------------------------
+_RETENTION_ENV_EXAMPLE = (
+    Path(__file__).resolve().parents[1] / "infra" / "env" / "node27-raw-retention.example"
+)
+
+
+def _production_env(
+    monkeypatch: pytest.MonkeyPatch, *, store: Path, cache: Path, summary_path: Path
+) -> None:
+    """The env of a node-27 production tick: both rollout gates unset, receipt on."""
+    for name in (
+        "NODE27_RAW_RETENTION_ENABLED",
+        "NODE27_RAW_RETENTION_PLAN_ONLY",
+        "NODE27_RAW_RETENTION_DAYS",
+        "NODE27_RAW_RETENTION_SOURCES",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NHMS_MVT_FILE_CACHE_DIR", str(cache))
+    monkeypatch.setenv("NODE27_RAW_RETENTION_OBJECT_STORE_ROOT", str(store))
+    monkeypatch.setenv("NODE27_RAW_RETENTION_SUMMARY_PATH", str(summary_path))
+
+
+def _production_tick(capsys: pytest.CaptureFixture[str]) -> tuple[int, dict[str, Any]]:
+    exit_code = node27_raw_retention.main(
+        ["--sources", "gfs,ifs", "--reference-time", "2026-06-27T12:00:00Z"]
+    )
+    return exit_code, json.loads(capsys.readouterr().out)
+
+
+def _entries(payload: dict[str, Any], reason: str) -> list[dict[str, Any]]:
+    return [entry for entry in payload["skipped"] if str(entry["reason"]) == reason]
+
+
+def test_an_untraversable_canonical_root_retires_only_that_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`canonical/` itself at 0o000: the lane-root gate passes, the source probe raises.
+
+    This is the #2100 shape -- a mode change on the mirror tree that removes
+    this uid's traversal of `canonical/` while `<object-store>` stays 775. The
+    obligation is that raw and precip-cache still prune on the SAME tick and the
+    receipt is written, i.e. that the failure retires one lane, not the run.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root traverses any directory mode, so the failure cannot be simulated")
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    raw_cycle = _write_raw_cycle(store, "gfs", "2026060100")
+    canonical_cycle = _write_canonical_cycle(store, "IFS", "2026060100")
+    aged_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+
+    canonical_root = store / "canonical"
+    canonical_root.chmod(0o000)
+    try:
+        exit_code, payload = _production_tick(capsys)
+    finally:
+        canonical_root.chmod(0o755)
+
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == payload
+    assert _keys(payload["deleted"]) == ["raw/gfs/2026060100", "precip-cache/IFS/2026060100"]
+    unsafe = _entries(payload, "canonical_source_unsafe")
+    # Both configured sources are reported: the probe raises before existence
+    # is known, so the runner cannot tell which of them has a directory here.
+    assert sorted(_keys(unsafe)) == ["canonical/IFS", "canonical/gfs"]
+    for entry in unsafe:
+        assert entry["detail"] == "path_unavailable"
+        assert entry["path"].startswith(str(canonical_root) + "/")
+        assert entry["error"]
+        assert entry["error_type"] == "PermissionError"
+    assert payload["counts"]["failed"] == 0
+    assert not raw_cycle.exists()
+    assert not aged_cache.exists()
+    assert canonical_cycle.exists()
+
+
+def test_a_readable_but_untraversable_raw_root_retires_only_the_raw_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`raw/` at 0o444: `iterdir()` succeeds and the first `is_dir()` raises EACCES."""
+    if os.geteuid() == 0:
+        pytest.skip("root traverses any directory mode, so the failure cannot be simulated")
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    raw_cycle = _write_raw_cycle(store, "gfs", "2026060100")
+    canonical_cycle = _write_canonical_cycle(store, "IFS", "2026060100")
+    aged_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+
+    raw_root = store / "raw"
+    raw_root.chmod(0o444)
+    try:
+        exit_code, payload = _production_tick(capsys)
+    finally:
+        raw_root.chmod(0o755)
+
+    assert exit_code == 0
+    assert json.loads(summary_path.read_text(encoding="utf-8")) == payload
+    unsafe = _entries(payload, "raw_root_unsafe")
+    assert _keys(unsafe) == ["raw"]
+    assert unsafe[0]["detail"] == "path_unavailable"
+    assert unsafe[0]["path"] == str(raw_root)
+    assert unsafe[0]["error"]
+    assert unsafe[0]["error_type"] == "PermissionError"
+    # A listing that raised is never reported as an empty raw lane.
+    assert _keys(payload["deleted"]) == [
+        "canonical/IFS/2026060100",
+        "precip-cache/IFS/2026060100",
+    ]
+    assert payload["counts"]["failed"] == 0
+    assert not canonical_cycle.exists()
+    assert not aged_cache.exists()
+    assert raw_cycle.exists()
+
+
+def test_an_untraversable_canonical_source_root_retires_only_that_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One source root inside a live lane: `canonical/gfs` still prunes."""
+    if os.geteuid() == 0:
+        pytest.skip("root traverses any directory mode, so the failure cannot be simulated")
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    raw_cycle = _write_raw_cycle(store, "gfs", "2026060100")
+    gfs_cycle = _write_canonical_cycle(store, "gfs", "2026060100")
+    ifs_cycle = _write_canonical_cycle(store, "IFS", "2026060100")
+    aged_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+
+    ifs_root = store / "canonical" / "IFS"
+    ifs_root.chmod(0o444)
+    try:
+        exit_code, payload = _production_tick(capsys)
+    finally:
+        ifs_root.chmod(0o755)
+
+    assert exit_code == 0
+    unsafe = _entries(payload, "canonical_source_unsafe")
+    assert _keys(unsafe) == ["canonical/IFS"]
+    assert unsafe[0]["detail"] == "path_unavailable"
+    assert unsafe[0]["path"] == str(ifs_root)
+    assert unsafe[0]["error"]
+    assert unsafe[0]["error_type"] == "PermissionError"
+    assert _keys(payload["deleted"]) == [
+        "raw/gfs/2026060100",
+        "canonical/gfs/2026060100",
+        "precip-cache/IFS/2026060100",
+    ]
+    assert payload["counts"]["failed"] == 0
+    assert not raw_cycle.exists()
+    assert not gfs_cycle.exists()
+    assert not aged_cache.exists()
+    assert ifs_cycle.exists()
+
+
+def test_an_untraversable_raw_source_root_retires_only_that_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The raw lane's per-source caller keys off the ON-DISK name, unlike the mapped lanes."""
+    if os.geteuid() == 0:
+        pytest.skip("root traverses any directory mode, so the failure cannot be simulated")
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    raw_cycle = _write_raw_cycle(store, "gfs", "2026060100")
+    canonical_cycle = _write_canonical_cycle(store, "IFS", "2026060100")
+    aged_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+
+    gfs_root = store / "raw" / "gfs"
+    gfs_root.chmod(0o444)
+    try:
+        exit_code, payload = _production_tick(capsys)
+    finally:
+        gfs_root.chmod(0o755)
+
+    assert exit_code == 0
+    unsafe = _entries(payload, "raw_source_unsafe")
+    assert _keys(unsafe) == ["raw/gfs"]
+    assert unsafe[0]["detail"] == "path_unavailable"
+    assert unsafe[0]["path"] == str(gfs_root)
+    assert unsafe[0]["error"]
+    assert unsafe[0]["error_type"] == "PermissionError"
+    assert _keys(payload["deleted"]) == [
+        "canonical/IFS/2026060100",
+        "precip-cache/IFS/2026060100",
+    ]
+    assert payload["counts"]["failed"] == 0
+    assert raw_cycle.exists()
+    assert not canonical_cycle.exists()
+    assert not aged_cache.exists()
+
+
+def test_iter_dirs_reports_the_listing_error_instead_of_raising(tmp_path: Path) -> None:
+    """`([], error)` and `([], None)` are different answers: unavailable vs empty."""
+    if os.geteuid() == 0:
+        pytest.skip("root traverses any directory mode, so the failure cannot be simulated")
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    child.mkdir(parents=True)
+    (parent / "manifest.json").write_text("payload", encoding="utf-8")
+    link = parent / "link"
+    try:
+        link.symlink_to(child, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink unavailable: {error}")
+
+    readable, no_error = node27_raw_retention._iter_dirs(parent)
+
+    assert readable == [child]
+    assert no_error is None
+
+    parent.chmod(0o444)
+    try:
+        entries, error = node27_raw_retention._iter_dirs(parent)
+    finally:
+        parent.chmod(0o755)
+
+    assert entries == []
+    assert isinstance(error, PermissionError)
+    assert error.errno == errno.EACCES
+
+
+def test_a_stale_lane_root_handle_is_reported_with_its_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ESTALE on an NFS lane root: same local skip, and the errno reaches the receipt.
+
+    `<object-store>` itself going stale is a preflight blocker (rc=2); only a
+    LANE root lands in `_resolve_lane_root`'s `except OSError`, which is the
+    path pinned here. ESTALE maps to no `OSError` subclass, so `error_type` is
+    the base class name -- the field is the exception class, never a reason.
+    """
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    summary_path = tmp_path / "summaries" / "raw-retention.json"
+    raw_cycle = _write_raw_cycle(store, "gfs", "2026060100")
+    canonical_cycle = _write_canonical_cycle(store, "IFS", "2026060100")
+    aged_cache = _write_cache_cycle(cache, "IFS", "2026060100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=summary_path)
+
+    real_resolve = Path.resolve
+    stale = {str(store / "raw"), str(store.resolve() / "raw")}
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if str(self) in stale:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    exit_code, payload = _production_tick(capsys)
+
+    assert exit_code == 0
+    assert payload["status"] == "completed"
+    unsafe = _entries(payload, "raw_root_unsafe")
+    assert _keys(unsafe) == ["raw"]
+    assert unsafe[0]["detail"] == "path_unavailable"
+    assert "Stale file handle" in unsafe[0]["error"]
+    assert unsafe[0]["error_type"] == "OSError"
+    assert _keys(payload["deleted"]) == [
+        "canonical/IFS/2026060100",
+        "precip-cache/IFS/2026060100",
+    ]
+    assert payload["counts"]["failed"] == 0
+    assert raw_cycle.exists()
+    assert not canonical_cycle.exists()
+    assert not aged_cache.exists()
+
+
+def _documented_operator_jq_program() -> str:
+    """The `jq -e '...'` program as the env example teaches it, not a copy of it."""
+    lines = _RETENTION_ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+    start = next(index for index, line in enumerate(lines) if "jq -e '" in line)
+    end = next(
+        index
+        for index, line in enumerate(lines)
+        if index > start and "' \"$(ls -t" in line
+    )
+    body = [lines[index].lstrip().lstrip("#").strip() for index in range(start + 1, end)]
+    return "\n".join(body)
+
+
+def test_documented_operator_check_goes_red_on_an_unsafe_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A per-source skip leaves the receipt fresh and `failed[]` empty.
+
+    Before #2104 widened clause 4 from `endswith("_root_unsafe")` to
+    `endswith("_unsafe")` that state would have turned "found after 26h" (the
+    crashed tick tripped the freshness clause) into "never found": fresh file,
+    `production_execute`, no failure, and a reason clause 4 did not match.
+    """
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed; it is present on node-27")
+    if os.geteuid() == 0:
+        pytest.skip("root traverses any directory mode, so the failure cannot be simulated")
+    program = _documented_operator_jq_program()
+    assert 'endswith("_unsafe")' in program
+    assert "_root_unsafe" not in program
+    assert "production_execute" in program
+
+    store = tmp_path / "store"
+    cache = tmp_path / "cache"
+    unsafe_summary = tmp_path / "summaries" / "unsafe.json"
+    _write_raw_cycle(store, "gfs", "2026060100")
+    _write_canonical_cycle(store, "IFS", "2026060100")
+    _write_cache_cycle(cache, "IFS", "2026060100")
+    _production_env(monkeypatch, store=store, cache=cache, summary_path=unsafe_summary)
+    canonical_root = store / "canonical"
+    canonical_root.chmod(0o000)
+    try:
+        exit_code, payload = _production_tick(capsys)
+    finally:
+        canonical_root.chmod(0o755)
+
+    assert exit_code == 0
+    assert payload["failed"] == []
+    assert "canonical_source_unsafe" in _reasons(payload["skipped"])
+    unsafe_check = subprocess.run(
+        ["jq", "-e", program, str(unsafe_summary)], capture_output=True, text=True
+    )
+    assert unsafe_check.returncode == 1, unsafe_check.stderr
+
+    healthy_store = tmp_path / "healthy-store"
+    healthy_cache = tmp_path / "healthy-cache"
+    healthy_summary = tmp_path / "summaries" / "healthy.json"
+    _write_raw_cycle(healthy_store, "gfs", "2026060100")
+    _write_canonical_cycle(healthy_store, "IFS", "2026060100")
+    _write_cache_cycle(healthy_cache, "IFS", "2026060100")
+    _production_env(
+        monkeypatch, store=healthy_store, cache=healthy_cache, summary_path=healthy_summary
+    )
+
+    healthy_exit, healthy_payload = _production_tick(capsys)
+
+    assert healthy_exit == 0
+    assert healthy_payload["execution_mode"] == "production_execute"
+    assert healthy_payload["failed"] == []
+    assert [
+        entry for entry in healthy_payload["skipped"] if str(entry["reason"]).endswith("_unsafe")
+    ] == []
+    healthy_check = subprocess.run(
+        ["jq", "-e", program, str(healthy_summary)], capture_output=True, text=True
+    )
+    assert healthy_check.returncode == 0, healthy_check.stderr
