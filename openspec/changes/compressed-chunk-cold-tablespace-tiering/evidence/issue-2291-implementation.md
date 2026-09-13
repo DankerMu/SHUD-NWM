@@ -54,4 +54,30 @@ affected original-loading entrypoints. Added subprocess coverage extracts those
 actual launches and reaches original refusal without PYTHONPATH, database
 observation or publication. This documented invocation change is a recorded
 plan deviation; no sys.path shim, package change or fallback was introduced.
-Corrected-head green remains to be executed; earlier results are not its proof.
+Those initial results apply only to their stated SHA; corrected results follow.
+
+## Corrected implementation verification
+
+At `e36f65e5d5229c19f3c789cdc6a8e4308c829f7c` on the same owned node27
+checkout/environment, run serially:
+
+- Focused public count, storage/publication/C14, census, executable runbook and
+  selector suites:1147 passed (223.98s).
+- Pinned runtime engine:1 passed,1 deselected (10.03s).
+- Diff-selected regression:4665 passed,5 skipped (757.64s).
+
+SHA-bound driver: `.workplans/issue-2291/run-selected-node27.sh`; terminal
+statuses: `.workplans/issue-2291/selected-driver-node27.log`. The focused set
+includes the same full N=1/3/63 frozen-file consumer chains, all five documented
+CLI launches with both G8 occurrences, and actual extracted G8 derivation
+commands refusing symlinked observed-file inputs. Obsolete script-spelling
+assertions were replaced with execution, not re-pinned to new wording.
+
+Actual module CLI smoke at `6e944e4b13b40d66755a57b38671d9a35ce18908` also
+reached `CENSUS_JSON_INVALID` for a missing original: exit1, no stdout, no DSN.
+No import traceback remained. The temporary tests-first driver is removed from
+the final tree after this proof; its source remains at the tests-only commit.
+
+Default full regression, independent code cross-review/final review and CI are
+still separate premerge requirements. No preparation result authorizes
+production G0-G8 or closes #1895/#1891. #2291 merge requires a new human decision.
