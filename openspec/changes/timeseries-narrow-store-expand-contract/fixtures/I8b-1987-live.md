@@ -70,9 +70,14 @@ active NWM or change the other seven units before 000059. Retain that checkout w
 
 Use the existing wrapper without modifying it. Its executable checkout key is
 `NODE27_RESOURCE_GOVERNANCE_REPO` (not `_REPO_ROOT`); set its existing
-`NODE27_RESOURCE_GOVERNANCE_ENV_FILE` to the unchanged active env file. `_REPO_ROOT` in that env
-continues to describe the audited production repository. Verify imported modules resolve to NEW.
-Keep original journal/OnFailure/tee/PIPESTATUS behavior and private DB credentials.
+`NODE27_RESOURCE_GOVERNANCE_ENV_FILE` to the same active env path. Live preflight found its
+`NODE27_GOVERNANCE_PGDATA_ROOT` still points to `/home/nwm/nhms-pgdata`; correct only that assignment
+to `/data/GHDC/nhms-primary/pgdata` after an on-node private backup and whole-file checksum comparison.
+Preserve all other bytes and mode/owner; do not synchronize the real env across hosts. This required
+configuration repair corrects the earlier unchanged-env assumption under the authorized governance
+repair; it does not relax PGDATA binding or fresh-audit admission. `_REPO_ROOT` still describes the
+audited production repository. Verify imported modules resolve to NEW. Keep original
+journal/OnFailure/tee/PIPESTATUS behavior and private DB credentials.
 
 The sole owned drop-in is `70-issue1987-governance-reviewed-source.conf`; refuse a pre-existing file,
 symlink/unsafe parent or unexpected concurrent unit/config change. Save original unit/environment

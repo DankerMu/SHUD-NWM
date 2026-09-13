@@ -32,9 +32,9 @@ Required private config (JSON, owner uid1005, mode0600):
     Human reviews the contents; private GO records the approved inputs, retained SHUD facts,
     original OLD, NEW, 30min window, ten-minute restore threshold, ingress mechanism.
   public_base_url: actual public display proxy origin (https, no credentials/query)
-  access_log: readable dedicated display nginx combined access log, unbuffered
-    Installed API stop is the primary fence. Direct listener absence, public failed
-    data probe and actual access-log interval prove no serving; no external adapters.
+  proxy: {master_pid, files: {absolute installed config path: reviewed sha256}}
+    Include the master -c configuration and its complete active include closure.
+    Installed unit/cgroup drain, absent direct listener and public refusal fence ingress.
   read_guards: [{path: actual API relative path, status: expected 4xx}]
     Must include at least one real guarded selector request; no fabricated production run.
 
@@ -74,6 +74,10 @@ from pathlib import Path
 
 OLD = "a8db554d6402bec642e9a05627eae64b2b79aec3"
 NEW = "1a32ebb7b536873e6403f3faeb6eb8d83ef24d32"
+_WORKER_DATABASE = "nhms"
+_WORKER_PORT = "55432"
+_WORKER_USERS = {"parse": "nhms_ingest_rw", "read": "nhms_display_ro", "admin": "nhms"}
+_PROCESS_INVENTORY_ROOT = Path("/proc")
 EXPAND = "000059_river_timeseries_narrow_expand.sql"
 DISPLAY = "nhms-display-api.service"
 AUTO = "nhms-node27-autopipe.service"
@@ -347,33 +351,61 @@ class Executor:
         self.save_file("public-probe.body", body)
         self.save(public_probe={"status": status, "sha256": digest(body), "at": now()})
 
-    def ingress_audit(self):
-        path = safe_path(self.c["access_log"])
-        original = self.s["access_log"]
-        st = path.stat()
+    def proxy_binding(self):
+        proxy = self.c["proxy"]
+        require("access_log" not in self.c, "OBSOLETE_ACCESS_LOG_CONFIG")
+        pid = proxy["master_pid"]
+        require(isinstance(pid, int) and pid > 1, "PROXY_MASTER_PID_REQUIRED")
+        root = Path(f"/proc/{pid}")
+        command = (root / "cmdline").read_bytes()
         require(
-            st.st_ino == original["inode"] and st.st_dev == original["device"] and st.st_size >= original["offset"],
-            "ACCESS_LOG_ROTATED_OR_TRUNCATED",
+            b"nginx: master process" in command and b"-c /etc/nginx/nginx.conf" in command,
+            "INSTALLED_PROXY_MASTER_REQUIRED",
         )
-        with path.open("rb") as stream:
-            stream.seek(original["offset"])
-            data = stream.read(32 * 1024 * 1024 + 1)
-        require(len(data) <= 32 * 1024 * 1024 and data.endswith(b"\n"), "ACCESS_LOG_INCOMPLETE")
-        self.save_file("ingress-interval.log", data)
-        start = datetime.fromisoformat(self.s["outage_start"])
-        end = datetime.fromisoformat(self.s["restart_at"])
-        checked = 0
-        for line in data.decode().splitlines():
-            match = re.search(r'\[([^\]]+)\] "([^"]*)" (\d{3}) ', line)
-            require(match, "NGINX_COMBINED_LOG_REQUIRED")
-            instant = datetime.strptime(match[1], "%d/%b/%Y:%H:%M:%S %z")
-            # Combined log timestamps have second precision: conservatively inspect
-            # every second strictly inside the verified stopped interval.
-            if start.timestamp() < instant.timestamp() < int(end.timestamp()):
-                checked += 1
-                require(not (200 <= int(match[3]) < 400 and "/api/" in match[2]), "DATA_SERVED_DURING_FENCE")
-        require(checked > 0, "NO_PUBLIC_FENCE_ACCESS_LOG_EVIDENCE")
-        self.save(ingress_audit={"checked_requests": checked, "sha256": digest(data), "timestamp_precision_seconds": 1})
+        files = proxy["files"]
+        require("/etc/nginx/nginx.conf" in files and len(files) > 1, "PROXY_INCLUDE_CLOSURE_REQUIRED")
+        for path, expected in files.items():
+            require(digest(safe_path(path).read_bytes()) == expected, "PROXY_CONFIG_CHANGED")
+        binding = {
+            "pid": pid,
+            "start": (root / "stat").read_text().rsplit(")", 1)[1].split()[19],
+            "command_sha256": digest(command),
+            "files": files,
+        }
+        if "proxy_binding" in self.s:
+            require(binding == self.s["proxy_binding"], "PROXY_PROCESS_CHANGED")
+        return binding
+
+    def fence_epoch(self):
+        epochs = self.s.get("fence_epochs")
+        require(isinstance(epochs, list), "UNKNOWN_FENCE_HISTORY")
+        for index, epoch in enumerate(epochs):
+            require(
+                isinstance(epoch, dict)
+                and epoch.get("number") == index + 1
+                and epoch.get("start")
+                and isinstance(epoch.get("drains"), list)
+                and isinstance(epoch.get("restart_attempts"), list),
+                "UNKNOWN_FENCE_EPOCH",
+            )
+            require(index == len(epochs) - 1 or epoch.get("validated_restart"), "UNCLOSED_FENCE_HISTORY")
+        if not epochs or epochs[-1].get("validated_restart"):
+            epochs.append({"number": len(epochs) + 1, "start": now(), "drains": [], "restart_attempts": []})
+        self.save(fence_epochs=epochs)
+        return epochs[-1]
+
+    def ingress_audit(self):
+        self.proxy_binding()
+        epochs = self.s["fence_epochs"]
+        require(epochs and epochs[-1].get("drains"), "FENCE_DRAIN_EVIDENCE_REQUIRED")
+        require(epochs[-1].get("validated_restart"), "RESTART_NOT_VALIDATED")
+        self.save(
+            ingress_audit={
+                "epoch": epochs[-1]["number"],
+                "mechanism": "physical-unit-cgroup-listener-public-refusal",
+                "continuous_access_log_claim": False,
+            }
+        )
 
     def http(self, path, port=8080):
         require(
@@ -471,7 +503,7 @@ class Executor:
         patterns = re.compile(
             r"workers\.output_parser|node27[_-](?:autopipe|download|raw.retention|frontier.alert|mvt.cache.retention|timeseries|resource.governance)|autopipe\.sh"
         )
-        for p in Path("/proc").iterdir():
+        for p in _PROCESS_INVENTORY_ROOT.iterdir():
             if not p.name.isdigit() or int(p.name) in {os.getpid(), os.getppid(), *self.c["yd_pids"]}:
                 continue
             try:
@@ -488,14 +520,15 @@ class Executor:
     def freeze(self):
         self.phase("FREEZING_TIMERS")
         self.system("stop", TIMERS)
-        log = safe_path(self.c["access_log"]).stat()
-        self.save(access_log={"inode": log.st_ino, "device": log.st_dev, "offset": log.st_size})
-        self.save(stop_mono=time.monotonic(), basic_ready=False)
+        epoch = self.fence_epoch()
+        self.save(stop_mono=self.s.get("stop_mono", time.monotonic()), basic_ready=False)
         self.phase("STOPPING_SERVICES")
         self.system("stop", SERVICES)
-        self.save(outage_start=now(), fenced=True)
+        self.save(fenced=False)
+        self.proxy_binding()
         self.drain()
-        self.phase("FENCED_DRAINED")
+        epoch["drains"].append({"at": now(), "public_refusal": self.s["public_probe"]})
+        self.phase("FENCED_DRAINED", fenced=True, fence_epochs=self.s["fence_epochs"])
 
     def runtime_env(self, repo, credential):
         env = {
@@ -585,22 +618,44 @@ class Executor:
         )
         times = json.loads(body)["data"]["valid_times"]
         require(times, "NO_ACTUAL_VALID_TIME")
-        vt = times[0]
-        cycle_path, vt_path = urllib.parse.quote(cycle, safe=""), urllib.parse.quote(vt, safe="")
-        paths = [
-            "/api/v1/layers",
-            "/api/v1/tiles/river-network-national/5/25/12.pbf",
-            f"/api/v1/tiles/hydro-national/q_down/{vt_path}/4/12/6.pbf",
-            f"/api/v1/tiles/hydro-national/gfs/{cycle_path}/q_down/{vt_path}/4/12/6.pbf",
+        cycle_path = urllib.parse.quote(cycle, safe="")
+        records = [
+            self.http(path)[0] for path in ("/api/v1/layers", "/api/v1/tiles/river-network-national/5/25/12.pbf")
         ]
-        records = [self.http(path)[0] for path in paths]
+        generated_times = []
+        # A hit from either map.tile_cache or the file tier is not SQL evidence.
+        # Try real discovered pins only; leave both caches and unrelated keys intact.
+        # The response header is emitted after readCached checks BOTH tiers.
+        for template in (
+            "/api/v1/tiles/hydro-national/q_down/{vt}/4/12/6.pbf",
+            "/api/v1/tiles/hydro-national/gfs/" + cycle_path + "/q_down/{vt}/4/12/6.pbf",
+        ):
+            accepted = None
+            for vt in times[:32]:
+                record = self.http(template.format(vt=urllib.parse.quote(vt, safe="")))[0]
+                headers = {k.lower(): v for k, v in record["headers"].items()}
+                if baseline or (
+                    record["status"] == 200
+                    and record["bytes"] > 0
+                    and headers.get("x-tile-cache") in {"miss", "bypass"}
+                    and headers.get("x-tile-cache-key")
+                ):
+                    accepted = record
+                    generated_times.append(vt)
+                    break
+                require(
+                    record["status"] == 200 and headers.get("x-tile-cache") == "hit",
+                    "NATIONAL_GENERATION_RESPONSE_INVALID",
+                )
+            require(accepted is not None, "NO_UNCACHED_REAL_PIN_GENERATION_PROOF")
+            records.append(accepted)
         if not baseline:
             require(all(r["status"] == 200 and r["bytes"] > 0 for r in records), "NATIONAL_ROUTE_VALIDATION_FAILED")
             require(self.c["read_guards"], "READ_GUARD_PRECONDITION_REQUIRED")
             for guard in self.c["read_guards"]:
                 require(400 <= guard["status"] < 500, "READ_GUARD_EXPECTATION_REQUIRED")
                 require(self.http(guard["path"])[0]["status"] == guard["status"], "READ_GUARD_FAILED")
-        return {"cycle": cycle, "valid_time": vt, "routes": records}
+        return {"cycle": cycle, "valid_times": generated_times, "routes": records}
 
     def prepare(self):
         require(os.getuid() == 1005, "NODE27_USER_REQUIRED")
@@ -665,8 +720,7 @@ class Executor:
             and not public.fragment,
             "PUBLIC_PROXY_URL_REQUIRED",
         )
-        log = safe_path(self.c["access_log"]).stat()
-        self.save(access_log={"inode": log.st_ino, "device": log.st_dev, "offset": log.st_size})
+        self.save(proxy_binding=self.proxy_binding(), fence_epochs=[])
         self.public_probe()
         self.run(["systemctl", "--user", "list-unit-files", "--no-pager", "--no-legend"], timeout=30)
         self.run(["systemctl", "--user", "list-units", "--all", "--no-pager", "--no-legend"], timeout=30)
@@ -952,11 +1006,23 @@ class Executor:
 
     def start_runtime(self):
         self.immutable()
-        self.phase("STARTING_DISPLAY", restart_at=now())
+        epoch = self.fence_epoch()
+        require(epoch["drains"], "START_WITHOUT_DRAIN")
+        self.proxy_binding()
+        self.no_listener()
+        epoch["restart_attempts"].append(now())
+        self.phase("STARTING_DISPLAY", fence_epochs=self.s["fence_epochs"])
         self.system("start", [DISPLAY])
         require(self.http(self.c["api_health_path"])[0]["status"] == 200, "DISPLAY_HEALTH_FAILED")
         display = self.source_process(DISPLAY)
-        self.save(basic_ready=True)
+        self.public_probe()
+        epoch["validated_restart"] = {
+            "at": now(),
+            "source": OLD if self.recovering else NEW,
+            "display": display,
+            "public": self.s["public_probe"],
+        }
+        self.save(basic_ready=True, fenced=False, fence_epochs=self.s["fence_epochs"])
         before = self.unit(AUTO)["ExecMainStartTimestampMonotonic"]
         self.run(["systemctl", "--user", "start", "--no-block", AUTO], timeout=15)
         deadline = time.monotonic() + 30
@@ -1034,15 +1100,7 @@ class Executor:
             routes = self.api_proof()
             self.ingress_audit()
             self.public_probe()
-            self.save(
-                fenced=False,
-                no_serving_interval={
-                    "start": self.s["outage_start"],
-                    "end": self.s["restart_at"],
-                    "ingress_audit_passed": True,
-                },
-                route_proof=routes,
-            )
+            self.save(route_proof=routes)
             self.restore_timers()
             self.yd()
             self.phase(
@@ -1076,7 +1134,7 @@ class Executor:
         try:
             self.system("stop", TIMERS)
             self.system("stop", SERVICES)
-            self.no_listener()
+            self.freeze()
             self.save("BLOCKED_FENCED", fenced=True)
         except BaseException:
             self.save("BLOCKED_FENCE_UNPROVEN", fenced=False)
@@ -1090,6 +1148,10 @@ class Executor:
         self.freeze()
         self.immutable()
         recovery_ledger = self.ledger()
+        require(
+            recovery_ledger in (self.s["ledger_before"], sorted(self.s["ledger_before"] + [EXPAND])),
+            "UNKNOWN_RECOVERY_LEDGER",
+        )
         cat = {x["relname"]: x for x in self.catalog()}
         canonical, legacy, rollback = (
             cat.get(n) for n in ("river_timeseries", "river_timeseries_legacy", "river_timeseries_narrow_rollback")
@@ -1120,6 +1182,8 @@ class Executor:
             require(canonical["oid"] == self.s["old_oid"], "UNKNOWN_CANONICAL_PERMUTATION")
             if rollback:
                 require(rollback["oid"] == self.s.get("narrow_oid"), "UNKNOWN_ROLLBACK_OID")
+            else:
+                require(not self.s.get("narrow_oid") and EXPAND not in recovery_ledger, "RETAINED_NARROW_MISSING")
         self.clean()
         require(self.git("rev-parse", "refs/heads/" + self.s["old_branch"] + "^{commit}") == OLD, "OLD_BRANCH_CHANGED")
         self.phase("RESTORING_OLD")
@@ -1181,7 +1245,7 @@ class Executor:
                 "runtime",
                 "readability",
                 "route_proof",
-                "no_serving_interval",
+                "fence_epochs",
                 "remaining",
                 "governance_handoff",
                 "fenced",
@@ -1233,15 +1297,15 @@ def worker(args):
     dsn = os.environ["DATABASE_URL"]
     identity = parse_dsn(dsn)
     require(
-        identity.get("dbname") == "nhms"
+        identity.get("dbname") == _WORKER_DATABASE
         and identity.get("host") in {"127.0.0.1", "localhost"}
-        and identity.get("port") == "55432",
+        and identity.get("port") == _WORKER_PORT,
         "DSN_DESTINATION_MISMATCH",
     )
     require(not any(k in identity for k in ("options", "service", "passfile")), "DSN_OPTIONS_REFUSED")
-    expected_user = "nhms_ingest_rw" if args.action == "parse" else "nhms_display_ro"
+    expected_user = _WORKER_USERS["parse" if args.action == "parse" else "read"]
     if args.action in {"imports", "migrate"}:
-        expected_user = "nhms"
+        expected_user = _WORKER_USERS["admin"]
     require(identity.get("user") == expected_user, "CREDENTIAL_ROLE_MISMATCH")
     conn = psycopg2.connect(dsn)
     conn.autocommit = True
@@ -1249,7 +1313,8 @@ def worker(args):
         cur.execute("SELECT current_database(),current_user,inet_server_port(),current_setting('server_version')")
         db, user, port, version = cur.fetchone()
         require(
-            db == "nhms" and user == expected_user and port == 5432 and version.startswith("15.2"), "LIVE_DB_IDENTITY"
+            db == _WORKER_DATABASE and user == expected_user and port == 5432 and version.startswith("15.2"),
+            "LIVE_DB_IDENTITY",
         )
     result = {"action": args.action, "sha": head, "python": "3.11.15", "module_origin_verified": True}
     if args.action in {"parse", "preparse"}:
@@ -1287,13 +1352,53 @@ def worker(args):
             expanded = cur.fetchone()[0] is not None
             table = "river_timeseries_legacy" if args.action == "legacy" and expanded else "river_timeseries"
             segment = request["segment_id"].replace("_reach_", "_shud_riv_", 1)
+            require(
+                not request.get("include_analysis") and not request.get("run_types"),
+                "FORECAST_ONLY_COMPARATOR_REQUIRED",
+            )
+            cur.execute(
+                "SELECT h.run_key,h.basin_version_key,s.river_network_version_key,s.river_segment_key,h.cycle_time "
+                "FROM hydro.hydro_run h JOIN core.river_segment s ON s.river_segment_id=%s "
+                "AND s.river_network_version_id=%s WHERE h.run_id=%s AND h.basin_version_id=%s "
+                "AND h.model_id=%s AND h.scenario_id=ANY(%s) AND h.run_type='forecast'",
+                (
+                    segment,
+                    request["river_network_version_id"],
+                    request["run_id"],
+                    request["basin_version_id"],
+                    request["model_id"],
+                    request["scenarios"],
+                ),
+            )
+            identities = cur.fetchall()
+            require(len(identities) == 1, "COMPARATOR_IDENTITY_NOT_UNIQUE")
+            run_key, basin_key, network_key, segment_key, cycle = identities[0]
+            require(
+                request["issue_time"] == "latest"
+                or datetime.fromisoformat(request["issue_time"].replace("Z", "+00:00")) == cycle,
+                "COMPARATOR_CYCLE_MISMATCH",
+            )
+            legacy_aid = (
+                (
+                    " AND t.run_id=%s AND t.basin_version_id=%s AND t.river_network_version_id=%s "
+                    "AND t.river_segment_id=%s"
+                )
+                if args.action == "legacy"
+                else ""
+            )
+            legacy_params = (
+                (request["run_id"], request["basin_version_id"], request["river_network_version_id"], segment)
+                if legacy_aid
+                else ()
+            )
             cur.execute(
                 f"SELECT (extract(epoch FROM t.valid_time)*1000)::bigint,t.value FROM hydro.{table} t "
-                "JOIN hydro.hydro_run h ON h.run_key=t.run_key "
-                "JOIN core.river_segment s ON s.river_segment_key=t.river_segment_key "
-                "WHERE h.run_id=%s AND s.river_segment_id=%s AND s.river_network_version_id=%s "
-                "AND t.variable_e='q_down'::hydro.river_variable ORDER BY t.valid_time",
-                (request["run_id"], segment, request["river_network_version_id"]),
+                "WHERE t.run_key=%s AND t.basin_version_key=%s AND t.river_network_version_key=%s "
+                "AND t.river_segment_key=%s AND t.variable_e='q_down'::hydro.river_variable "
+                "AND t.valid_time >= %s AND t.valid_time <= %s + INTERVAL '7 days' "
+                + legacy_aid
+                + " ORDER BY t.valid_time",
+                (run_key, basin_key, network_key, segment_key, cycle, cycle, *legacy_params),
             )
             facts = [list(row) for row in cur.fetchall()]
         require(points == facts, "READER_FACT_VALUES_MISMATCH")

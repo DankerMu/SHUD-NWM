@@ -1,0 +1,750 @@
+#!/usr/bin/env python3
+"""Focused disposable executor scenario. No production execution or provisioning.
+
+Parent setup: provision a fresh container from IMAGE below, label
+nhms.i8.disposable=true, anonymous volumes ONLY, publish 5432 on a unique
+127.0.0.1 port other than 5432/55432. Create an empty i8_1987_<suffix>
+database there. Set I8_REHEARSAL_DSN privately (never argv). Retain exact OLD
+and NEW clean checkouts and Python 3.11.15 with their installed dependencies.
+Run once per case, with a DIFFERENT fresh database and --state each time:
+  python window_smoke.py --oracle PARENT/receipts/2026-09-12-i8-rollback/rehearse_river_rollback.py.txt \
+    --old-repo OLD --new-repo NEW --container nwm-i8-1987-UNIQUE \
+    --state PRIVATE_ABSOLUTE_NEW_DIR --case happy
+Cases: happy, stop, session, fence, do-before-ledger, rename, source, restart.
+The harness owns no container lifecycle and never deletes a database/volume.
+All SQL, catalog OIDs, ledger, parser rows and reader values are real. Only
+systemd, process inspection, git selection and HTTP transport are simulated.
+Keep private state + stdout as evidence. No PASS until the entire case ends.
+
+Small real write-budget entrypoint, AFTER copying the actual LH-YLJ artifact
+and its complete authoritative run/model/segment metadata into the isolated
+expanded DB, with succeeded/parsed_at NULL/narrow routing:
+  python window_smoke.py --case write-budget --container nwm-i8-1987-UNIQUE \
+    --new-repo NEW --state PRIVATE_ABSOLUTE_NEW_DIR --fixture-config PRIVATE.json
+PRIVATE.json uses executor parse_run_id/artifacts_root/object_store_prefix keys.
+The receipt measures actual parser DB-write end-to-end wall (not read/QC alone).
+Do not use the synthetic 12-row measurement as the 512232-row budget.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import importlib.machinery
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+IMAGE = "sha256:ad39c4fbc5c44557db1e16af10ec11e3ab12d0a472374f39aaba06ad9ca2640e"
+
+
+def load(path, name):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    loader.exec_module(module)
+    return module
+
+
+w = load(Path(__file__).with_name("window_execute.py"), "window_executor")
+
+
+def guard(args):
+    from psycopg2.extensions import parse_dsn
+
+    dsn = os.environ["I8_REHEARSAL_DSN"]
+    identity = parse_dsn(dsn)
+    w.require(set(identity) <= {"host", "port", "dbname", "user", "password", "sslmode"}, "DSN_OPTIONS")
+    w.require(
+        identity.get("host") == "127.0.0.1" and identity.get("port") not in {None, "5432", "55432"}, "ISOLATED_PORT"
+    )
+    w.require(w.re.fullmatch(r"i8_1987_[a-z0-9_]+", identity.get("dbname", "")), "ISOLATED_DATABASE")
+    w.require(w.re.fullmatch(r"nwm-i8-1987-[a-z0-9-]+", args.container), "ISOLATED_CONTAINER")
+    raw = subprocess.check_output(["docker", "inspect", args.container])
+    container = json.loads(raw)[0]
+    w.require(container["Image"] == IMAGE and container["State"]["Running"], "EXACT_RUNNING_IMAGE")
+    w.require(container["Config"].get("Labels", {}).get("nhms.i8.disposable") == "true", "OWNED_DISPOSABLE")
+    w.require(container["Mounts"] and all(m["Type"] == "volume" for m in container["Mounts"]), "NO_BIND_MOUNTS")
+    w.require(container["HostConfig"]["NetworkMode"] != "host", "NO_HOST_NETWORK")
+    w.require(
+        container["NetworkSettings"]["Ports"].get("5432/tcp")
+        == [{"HostIp": "127.0.0.1", "HostPort": identity["port"]}],
+        "PORT_BINDING",
+    )
+    for key in list(os.environ):
+        if key.startswith("PG"):
+            del os.environ[key]
+    os.environ.update(DATABASE_URL=dsn, PGOPTIONS="-c lock_timeout=5s -c statement_timeout=120s")
+    return dsn, identity
+
+
+def worker(args):
+    _, identity = guard(args)
+    # Private in-memory binding only, never exposed by the production executor.
+    w._WORKER_DATABASE = identity["dbname"]
+    w._WORKER_PORT = identity["port"]
+    w._WORKER_USERS = dict.fromkeys(("parse", "read", "admin"), identity["user"])
+    w.worker(SimpleNamespace(repo=args.repo, sha=args.sha, state=args.state, action=args.action))
+
+
+class BoundaryExecutor(w.Executor):
+    """Real executor state/recovery/SQL with disposable external boundaries."""
+
+    def __init__(self, args, dsn):
+        super().__init__(SimpleNamespace(state=args.state, command="recover", go="Danker"))
+        self.fixture = args
+        self.dsn = dsn
+        self.selected = w.OLD
+        self.units = {name: dict(self.s["units"][name]) for name in w.TIMERS + w.SERVICES}
+        self.inject = None
+        self.starts = 0
+
+    def sql(self, query):
+        import psycopg2
+
+        with contextlib.closing(psycopg2.connect(self.dsn)) as conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("SET lock_timeout='5s'; SET statement_timeout='120s';")
+                cur.execute(query)
+                if self.inject == "rename" and query.startswith(
+                    "BEGIN; ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_narrow_rollback; "
+                ):
+                    self.crash_boundary()
+                return (
+                    "\n".join(
+                        json.dumps(row[0], default=str) if isinstance(row[0], (list, dict)) else str(row[0])
+                        for row in cur.fetchall()
+                    )
+                    if cur.description
+                    else ""
+                )
+
+    def unit(self, name):
+        w.require(name in self.units, "UNKNOWN_UNIT")
+        return dict(self.units[name])
+
+    def system(self, action, names):
+        w.require(action in {"start", "stop"} and set(names) <= set(self.units), "UNKNOWN_SYSTEM_COMMAND")
+        if self.inject == "stop" and action == "stop":
+            raise w.Refusal("INJECTED_STOP_FAILURE")
+        for name in names:
+            self.units[name].update(
+                ActiveState="active" if action == "start" else "inactive",
+                SubState="running" if action == "start" else "dead",
+                MainPID="1" if action == "start" else "0",
+            )
+            if action == "start":
+                self.starts += 1
+                self.units[name]["ExecMainStartTimestampMonotonic"] = str(self.starts)
+        if self.inject == "restart" and action == "start" and w.DISPLAY in names:
+            self.inject = None
+            self.crash_boundary()
+
+    def run(self, argv, **kwargs):
+        if argv[:6] == ["docker", "exec", "-i", "nhms-db", "psql", "-X"]:
+            from psycopg2.extensions import parse_dsn
+
+            identity = parse_dsn(self.dsn)
+            w.require(argv[6:12] == ["-U", "nhms", "-d", "nhms", "-v", "ON_ERROR_STOP=1"], "UNKNOWN_PSQL_BOUNDARY")
+            command = list(argv)
+            command[3], command[7], command[9] = self.fixture.container, identity["user"], identity["dbname"]
+            proc = subprocess.run(command, input=kwargs["data"], capture_output=True, timeout=150)
+            self.seq += 1
+            self.save()
+            self.save_file(f"role-audit-{self.seq}.stderr", proc.stderr)
+            w.require(proc.returncode == 0, "REAL_ROLE_AUDIT_FAILED")
+            return proc.stdout
+        if argv == ["ss", "-Hlnpt", "sport = :8080"]:
+            return b"" if self.units[w.DISPLAY]["ActiveState"] == "inactive" else b"listener"
+        if argv == ["systemctl", "--user", "start", "--no-block", w.AUTO]:
+            self.system("start", [w.AUTO])
+            return b""
+        raise w.Refusal("UNKNOWN_BOUNDARY_COMMAND")
+
+    def git(self, *args, repo=None):
+        if args == ("status", "--porcelain=v1", "--untracked-files=all"):
+            return ""
+        if args == ("rev-parse", "HEAD"):
+            return self.selected
+        if args == ("rev-parse", "refs/heads/old^{commit}"):
+            return w.OLD
+        if args == ("switch", "old"):
+            self.selected = w.OLD
+            if self.inject == "source":
+                self.inject = None
+                self.crash_boundary()
+            return ""
+        raise w.Refusal("UNKNOWN_GIT_BOUNDARY")
+
+    def crash_boundary(self):
+        self.save_file(
+            "system-boundary.json",
+            json.dumps({"units": self.units, "selected": self.selected, "starts": self.starts}).encode(),
+        )
+        os.kill(os.getpid(), w.signal.SIGKILL)
+
+    def proxy_binding(self):
+        return {"boundary": "isolated-no-proxy"}
+
+    def public_probe(self, stopped=False):
+        active = self.units[w.DISPLAY]["ActiveState"] == "active"
+        w.require(active != stopped, "PUBLIC_PROXY_FENCE_OR_RESTORE_FAILED")
+        self.save(public_probe={"status": 200 if active else 502, "at": w.now()})
+
+    def no_listener(self):
+        w.require(self.inject != "fence", "INJECTED_FENCE_FAILURE")
+        w.require(self.units[w.DISPLAY]["ActiveState"] == "inactive", "8080_LISTENER_PRESENT")
+        self.public_probe(stopped=True)
+
+    def yd(self):
+        return {"boundary": "unchanged-yd"}
+
+    def http(self, path, port=8080):
+        w.require(path == self.c["api_health_path"] and port == 8080, "UNKNOWN_HTTP_BOUNDARY")
+        w.require(self.units[w.DISPLAY]["ActiveState"] == "active", "DISPLAY_NOT_RUNNING")
+        return {"status": 200}, b"{}"
+
+    def source_process(self, unit):
+        w.require(unit in {w.DISPLAY, w.AUTO} and self.units[unit]["ActiveState"] == "active", "NO_PROCESS")
+        w.require(self.selected == (w.OLD if self.recovering else w.NEW), "RUNTIME_SHA_MISMATCH")
+        return {"unit": unit, "source": self.selected, "execution": self.units[unit]["ExecMainStartTimestampMonotonic"]}
+
+    def worker(self, action, *, repo=None, sha=None, timeout=150):
+        sha = sha or w.NEW
+        repo = self.fixture.old_repo if sha == w.OLD else self.fixture.new_repo
+        argv = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--worker",
+            "--container",
+            self.fixture.container,
+            "--state",
+            str(self.root),
+            "--repo",
+            repo,
+            "--sha",
+            sha,
+            "--action",
+            action,
+        ]
+        proc = subprocess.run(argv, cwd=repo, env=os.environ.copy(), capture_output=True, timeout=timeout)
+        self.seq += 1
+        self.save()
+        self.save_file(f"worker-{self.seq}.stderr", proc.stderr)
+        w.require(proc.returncode == 0, "REAL_WORKER_FAILED")
+        return json.loads(proc.stdout)
+
+
+def scenario(args):
+    import psycopg2
+
+    dsn, identity = guard(args)
+    root = Path(args.state).resolve()
+    root.mkdir(mode=0o700, parents=False, exist_ok=False)
+    w._PROCESS_INVENTORY_ROOT = root / "proc-boundary"
+    w._PROCESS_INVENTORY_ROOT.mkdir()
+    for repo, sha in ((args.old_repo, w.OLD), (args.new_repo, w.NEW)):
+        w.require(
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip() == sha, "SOURCE_SHA"
+        )
+    sys.path.insert(0, args.new_repo)
+    from packages.common import migrate
+    from tests.integration_helpers import apply_migrations_from_zero
+    from tests.test_river_ts_dual_write_integration import _seed_authority, _write_rivqdown
+
+    with contextlib.closing(psycopg2.connect(dsn)) as conn:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT to_regnamespace('hydro'),to_regclass('public.schema_migrations'),"
+                "current_setting('server_version')"
+            )
+            row = cur.fetchone()
+            w.require(row[:2] == (None, None) and row[2].startswith("15.2"), "FRESH_PG152_REQUIRED")
+    apply_migrations_from_zero(dsn, through="000058")
+    artifacts = root / "artifacts"
+    artifacts.mkdir()
+    with contextlib.closing(psycopg2.connect(dsn)) as conn:
+        conn.autocommit = True
+        _seed_authority(conn, output_uri="s3://nhms/runs/run_dual_write/output/")
+    _write_rivqdown(artifacts)
+    # Fresh current OLD parser/reader, not the historical oracle's OLD constant.
+    command = [
+        sys.executable,
+        args.oracle,
+        "--worker",
+        "--repo",
+        args.old_repo,
+        "--sha",
+        w.OLD,
+        "--action",
+        "parse",
+        "--run",
+        "run_dual_write",
+        "--artifacts",
+        str(artifacts),
+    ]
+    parsed = subprocess.run(command, cwd=args.old_repo, capture_output=True, timeout=180)
+    w.private_write(root / "old-parse.stderr", parsed.stderr)
+    w.require(parsed.returncode == 0, "ACTUAL_OLD_PARSE")
+    request = dict(
+        basin_version_id="bv1",
+        segment_id="seg-1",
+        river_network_version_id="rnv1",
+        issue_time="2026-06-01T00:00:00Z",
+        variables=["q_down"],
+        scenarios=["sc"],
+        model_id="m1",
+    )
+    config = dict(
+        repo=args.old_repo,
+        old_sha=w.OLD,
+        new_sha=w.NEW,
+        staged_new_repo=args.new_repo,
+        parse_run_id="i8_narrow_run",
+        artifacts_root=str(artifacts),
+        object_store_prefix="s3://nhms",
+        reads={
+            kind: {"request": dict(request, run_id=run)}
+            for kind, run in (("legacy", "run_dual_write"), ("narrow", "i8_narrow_run"))
+        },
+        lock_files=[],
+        yd_pids=[],
+        authorized_timers=[w.TIMERS[0], w.TIMERS[1]],
+        api_health_path="/health",
+    )
+    w.private_write(root / "config.json", json.dumps(config).encode())
+    files = {}
+    for name in ("HOLD-state.json", "resume-approved", "foreign.conf"):
+        path = root / name
+        w.private_write(path, b"immutable admitted fixture\n")
+        files[str(path)] = {"sha256": w.digest(path.read_bytes())}
+    units = {
+        name: dict(
+            LoadState="loaded",
+            ActiveState="active",
+            SubState="running",
+            Result="success",
+            MainPID="1",
+            ControlGroup="",
+            ExecMainStartTimestampMonotonic="0",
+        )
+        for name in w.TIMERS + w.SERVICES
+    }
+    # One authorized timer was inactive at admission and must never be started.
+    units[w.TIMERS[1]]["ActiveState"] = "inactive"
+    w.private_write(
+        root / "state.json", json.dumps(dict(units=units, files=files, old_branch="old", fence_epochs=[])).encode()
+    )
+    e = BoundaryExecutor(args, dsn)
+    roles = (Path(args.new_repo) / "db/roles/node27_write_roles.sql").read_bytes()
+    e.run(
+        [
+            "docker",
+            "exec",
+            "-i",
+            "nhms-db",
+            "psql",
+            "-X",
+            "-U",
+            "nhms",
+            "-d",
+            "nhms",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-v",
+            "do_roles=on",
+            "-v",
+            "do_ownership=on",
+            "-v",
+            "do_audit=on",
+            "-v",
+            "strict_audit=on",
+        ],
+        data=b"SET lock_timeout='5s'; SET statement_timeout='120s';\n" + roles,
+    )
+    e.audit_roles()
+    e.save(
+        old_oid=e.catalog()[0]["oid"],
+        ledger_before=e.ledger(),
+        legacy_read=e.worker("legacy", sha=w.OLD),
+        legacy_catalog=e.table_metadata("hydro", "river_timeseries"),
+        forcing_catalog=e.table_metadata("met", "forcing_station_timeseries"),
+    )
+    before = e.catalog(), e.ledger()
+    session = psycopg2.connect(dsn) if args.case == "session" else None
+    e.inject = args.case if args.case in {"stop", "fence"} else None
+    try:
+        try:
+            e.freeze()
+        except w.Refusal:
+            w.require(args.case in {"stop", "session", "fence"}, "UNEXPECTED_FREEZE_REFUSAL")
+            w.require((e.catalog(), e.ledger()) == before, "DDL_BEFORE_DRAIN")
+        else:
+            w.require(args.case not in {"stop", "session", "fence"}, "UNSAFE_DRAIN_ACCEPTED")
+    finally:
+        if session:
+            session.close()
+    e.inject = None
+    e.freeze()
+    if args.case not in {"stop", "session", "fence"}:
+        migration = Path(args.new_repo) / "db/migrations" / w.EXPAND
+        if args.case == "do-before-ledger":
+            statements = migrate.split_sql_statements(migration.read_text())
+            w.require(len(statements) == 1, "SINGLE_DO_REQUIRED")
+            e.sql(statements[0])
+            w.require(e.ledger() == before[1], "DO_INSERTED_LEDGER")
+        else:
+            e.worker("migrate")
+        e.validate_expand()
+        e.sql(
+            "INSERT INTO hydro.hydro_run (run_id,run_type,scenario_id,model_id,basin_version_id,"
+            "cycle_time,start_time,end_time,status,run_manifest_uri,output_uri) VALUES "
+            "('i8_narrow_run','forecast','sc','m1','bv1','2026-06-01','2026-06-01',"
+            "'2026-06-01 03:00+00','succeeded','s3://m','s3://nhms/runs/i8_narrow_run/output/')"
+        )
+        source = artifacts / "runs/run_dual_write/output/demo.rivqdown"
+        target = artifacts / "runs/i8_narrow_run/output/demo.rivqdown"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(source.read_bytes())
+        started = time.monotonic()
+        result = e.worker("parse")
+        e.save(parse_write_wall_seconds=time.monotonic() - started, parse=result)
+        w.require(result["rows_written"] == 12, "REAL_FORMAT_ROWS")
+        facts = e.rows(
+            "SELECT run_key,basin_version_key,river_network_version_key,river_segment_key,"
+            "lead_time_hours,value FROM hydro.river_timeseries ORDER BY valid_time,river_segment_key"
+        )
+        expected = [
+            dict(
+                run_key=4002,
+                basin_version_key=5001,
+                river_network_version_key=6001,
+                river_segment_key=7000 + segment,
+                lead_time_hours=hour,
+                value=float((hour + 1) * segment),
+            )
+            for hour in range(3)
+            for segment in range(1, 5)
+        ]
+        w.require(facts == expected, "D12_INDEPENDENT_REAL_FORMAT_VALUES")
+        e.worker("narrow")
+        w.require(e.worker("legacy")["response_sha256"] == e.s["legacy_read"]["response_sha256"], "LEGACY_CHANGED")
+        if args.case == "happy":
+            e.recovering = False
+            e.selected = w.NEW
+            e.start_runtime()
+            e.ingress_audit()
+            cache_boundary(e)
+    ledger = e.ledger()
+    narrow_oid = e.s.get("narrow_oid")
+    retained = (
+        e.rows("SELECT * FROM hydro.river_timeseries ORDER BY valid_time,river_segment_key") if narrow_oid else None
+    )
+    e = reopen(e)
+    e.inject = args.case if args.case in {"rename", "source", "restart"} else None
+    if args.case in {"rename", "source", "restart"}:
+        child = os.fork()
+        if child == 0:
+            try:
+                e.recover()
+            finally:
+                os._exit(70)
+        _, status = os.waitpid(child, 0)
+        w.require(os.WIFSIGNALED(status) and os.WTERMSIG(status) == w.signal.SIGKILL, "HARD_INTERRUPTION_NOT_EXERCISED")
+        external = json.loads((root / "system-boundary.json").read_text())
+        e.units, e.selected, e.starts = external["units"], external["selected"], external["starts"]
+        e = reopen(e)
+    else:
+        e.recover()
+    for _ in range(2):
+        prior_epochs = json.loads(json.dumps(e.s["fence_epochs"]))
+        e = reopen(e)
+        e.recover()
+        e.immutable()
+        w.require(e.ledger() == ledger, "LEDGER_CHANGED")
+        catalog = {r["relname"]: r["oid"] for r in e.catalog()}
+        w.require(catalog["river_timeseries"] == e.s["old_oid"], "OLD_OID_LOST")
+        if narrow_oid:
+            w.require(catalog["river_timeseries_narrow_rollback"] == narrow_oid, "RETAINED_OID_LOST")
+            w.require(
+                e.rows("SELECT * FROM hydro.river_timeseries_narrow_rollback ORDER BY valid_time,river_segment_key")
+                == retained,
+                "RETAINED_ROWS_CHANGED",
+            )
+        for index, epoch in enumerate(prior_epochs):
+            w.require(e.s["fence_epochs"][index]["start"] == epoch["start"], "FENCE_START_OVERWRITTEN")
+            if epoch.get("validated_restart"):
+                w.require(e.s["fence_epochs"][index] == epoch, "CLOSED_EPOCH_CHANGED")
+        w.require(e.s["restored_timers"] == [w.TIMERS[0]], "TIMER_AUTHORIZATION")
+    if args.case == "happy":
+        e.sql("ALTER TABLE hydro.river_timeseries RENAME TO river_timeseries_unknown_smoke;")
+        unknown = e.rows("SELECT oid,relname FROM pg_class WHERE relnamespace='hydro'::regnamespace ORDER BY oid")
+        starts = e.starts
+        try:
+            e.recover()
+        except w.Refusal as error:
+            w.require(str(error) == "CANONICAL_ABSENT_UNKNOWN_RECOVERY", "WRONG_UNKNOWN_RECOVERY_REFUSAL")
+        else:
+            raise w.Refusal("UNKNOWN_RECOVERY_ACCEPTED")
+        w.require(
+            e.starts == starts
+            and e.ledger() == ledger
+            and e.rows("SELECT oid,relname FROM pg_class WHERE relnamespace='hydro'::regnamespace ORDER BY oid")
+            == unknown,
+            "UNKNOWN_RECOVERY_MUTATED_DATA_OR_STARTED",
+        )
+        # Undo only this fixture-owned rename, never an inferred recovery repair.
+        e.sql("ALTER TABLE hydro.river_timeseries_unknown_smoke RENAME TO river_timeseries;")
+        e.recover()
+        e.immutable()
+    e.save(smoke_case=args.case, smoke_result="PASS", scope="disposable executor recovery, not production")
+    print(
+        json.dumps(
+            {
+                "case": args.case,
+                "result": "PASS",
+                "state": str(root),
+                "old_oid": e.s["old_oid"],
+                "narrow_oid": narrow_oid,
+                "fence_epochs": e.s["fence_epochs"],
+            },
+            default=str,
+        )
+    )
+
+
+def reopen(e):
+    """Discard executor memory; retain only the external simulated system."""
+    units, selected, starts = e.units, e.selected, e.starts
+    args, dsn = e.fixture, e.dsn
+    os.close(e.lock)
+    restored = BoundaryExecutor(args, dsn)
+    restored.units, restored.selected, restored.starts = units, selected, starts
+    return restored
+
+
+def cache_boundary(e):
+    """Actual two-tier owner + API header adapter, fake HTTP transport only."""
+    import psycopg2
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.orm import Session
+
+    from apps.api.routes.hydro_display import _mvt_response
+    from services.tiles import mvt
+
+    engine = create_engine("postgresql+psycopg2://", creator=lambda: psycopg2.connect(e.dsn))
+    os.environ["NHMS_MVT_FILE_CACHE_DIR"] = str(e.root / "tile-files")
+    generated = []
+    mode = "db"
+    target_pinned = False
+    cycle = "2026-06-01T00:00:00Z"
+    original_http = e.http
+    e.c["read_guards"] = [{"path": "/api/guard", "status": 422}]
+
+    def transport(path, port=8080):
+        w.require(port == 8080, "CACHE_TRANSPORT_PORT")
+        body = b"{}"
+        headers = {}
+        status = 200
+        if path == "/api/v1/layers/discharge/cycles?source=gfs":
+            body = json.dumps({"data": {"default_cycle": cycle, "cycles": [{"cycle_time": cycle}]}}).encode()
+        elif path.startswith("/api/v1/layers/discharge/valid-times?"):
+            body = json.dumps({"data": {"valid_times": [cycle]}}).encode()
+        elif path == "/api/guard":
+            status = 422
+        elif path.startswith("/api/v1/tiles/hydro-national/"):
+            tile = mvt.TileInput(
+                layer_id="hydro:q_down",
+                source_id="i8_narrow_run",
+                source_version=mode + str(target_pinned) + ("-pinned" if "/gfs/" in path else "-default"),
+                valid_time=cycle,
+                z=4,
+                x=12,
+                y=6,
+            )
+            key = mvt.cache_key(tile)
+            with Session(engine) as session:
+                targeted = ("/gfs/" in path) == target_pinned
+                if mode == "db" and targeted:
+                    seeded = mvt.build_raw_tile_response(session, tile, b"retained-cache")
+                    w.require(seeded.cache_status in {"miss", "hit"}, "DB_CACHE_SEED")
+                    w.require(mvt._read_cache(session, tile, key) is not None, "REAL_DB_CACHE_REQUIRED")
+                elif mode == "file" and targeted:
+                    w.require(mvt._write_file_cache(key, b"retained-file-cache"), "FILE_CACHE_SEED")
+                    w.require(mvt._read_cache(session, tile, key) is None, "FILE_CASE_DB_NOT_EMPTY")
+                cached = mvt.read_cached_tile_response(session, tile)
+                if cached is None:
+                    # Real PostGIS encoding of the actual NEW narrow facts.
+                    raw = session.execute(
+                        text(
+                            "SELECT ST_AsMVT(q,'hydro',4096,'geom') FROM ("
+                            "SELECT value, ST_SetSRID(ST_MakePoint(river_segment_key % 4,"
+                            "lead_time_hours),3857) AS geom "
+                            "FROM hydro.river_timeseries WHERE run_key=(SELECT run_key FROM hydro.hydro_run "
+                            "WHERE run_id='i8_narrow_run')) q"
+                        )
+                    ).scalar_one()
+                    w.require(raw, "REAL_SQL_GENERATION_EMPTY")
+                    generated.append(path)
+                    cached = mvt.build_raw_tile_response(session, tile, bytes(raw))
+                response = _mvt_response(cached)
+                body, headers = response.body, dict(response.headers)
+        else:
+            w.require(
+                path in {"/api/v1/layers", "/api/v1/tiles/river-network-national/5/25/12.pbf"},
+                "UNKNOWN_CACHE_TRANSPORT",
+            )
+        record = dict(
+            path=path,
+            port=port,
+            status=status,
+            headers=headers,
+            bytes=len(body),
+            sha256=w.digest(body),
+            seconds=0,
+            at=w.now(),
+        )
+        e.seq += 1
+        e.save_file(f"cache-response-{e.seq}.json", json.dumps(record).encode())
+        return record, body
+
+    e.http = transport
+    try:
+        for mode in ("db", "file"):
+            for target_pinned in (False, True):
+                before = len(generated)
+                try:
+                    e.api_proof()
+                except w.Refusal as error:
+                    w.require(str(error) == "NO_UNCACHED_REAL_PIN_GENERATION_PROOF", "WRONG_CACHE_REFUSAL")
+                else:
+                    raise w.Refusal("CACHED_HIT_ACCEPTED_AS_GENERATION")
+                w.require(len(generated) - before == int(target_pinned), "CACHED_REQUEST_GENERATED_SQL")
+        generated.clear()
+        mode = "generation"
+        proof = e.api_proof()
+        w.require(
+            len(generated) == 2 and "/gfs/" not in generated[0] and "/gfs/" in generated[1],
+            "BOTH_GENERATION_PATHS_REQUIRED",
+        )
+        e.save(cache_boundary_proof=proof, cache_boundary_sql_paths=generated)
+    finally:
+        e.http = original_http
+        engine.dispose()
+
+
+def write_budget(args):
+    """Fixture provisioner supplies real metadata/artifacts in the isolated DB."""
+    import psycopg2
+
+    dsn, identity = guard(args)
+    config = json.loads(w.safe_path(args.fixture_config, True).read_text())
+    w.require(
+        config["parse_run_id"] == "runfcst_gfs_2026081912_dg_945b6f0bbf63c5314d47df9481892229",
+        "ACTUAL_SMALL_RUN_REQUIRED",
+    )
+    with contextlib.closing(psycopg2.connect(dsn)) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status,parsed_at,timeseries_store FROM hydro.hydro_run WHERE run_id=%s",
+                (config["parse_run_id"],),
+            )
+            w.require(cur.fetchone() == ("succeeded", None, "narrow"), "PROVISIONED_UNPARSED_REAL_FIXTURE_REQUIRED")
+    root = Path(args.state).resolve()
+    root.mkdir(mode=0o700, parents=False, exist_ok=False)
+    w.private_write(root / "config.json", json.dumps(config).encode())
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--worker",
+        "--container",
+        args.container,
+        "--state",
+        str(root),
+        "--repo",
+        args.new_repo,
+        "--sha",
+        w.NEW,
+        "--action",
+        "parse",
+    ]
+    started = time.monotonic()
+    result = subprocess.run(command, cwd=args.new_repo, capture_output=True, timeout=180)
+    elapsed = time.monotonic() - started
+    w.private_write(root / "parse.stderr", result.stderr)
+    w.require(result.returncode == 0, "ACTUAL_SMALL_DB_WRITE_FAILED")
+    parsed = json.loads(result.stdout)
+    w.require(parsed["rows_written"] == 512232, "SMALL_REAL_ROW_COUNT")
+    receipt = dict(
+        result="PASS",
+        scope="actual small parser DB-write wall, includes startup/read/QC",
+        seconds=elapsed,
+        rows_written=512232,
+        database=identity["dbname"],
+    )
+    w.private_write(root / "write-budget.json", json.dumps(receipt).encode())
+    print(json.dumps(receipt))
+
+
+def arguments():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--worker", action="store_true")
+    for name in ("oracle", "old-repo", "new-repo", "container", "state", "repo", "sha", "action", "fixture-config"):
+        p.add_argument("--" + name)
+    p.add_argument(
+        "--case",
+        choices=(
+            "happy",
+            "stop",
+            "session",
+            "fence",
+            "do-before-ledger",
+            "rename",
+            "source",
+            "restart",
+            "write-budget",
+        ),
+    )
+    args = p.parse_args()
+    required = (
+        ("container", "state", "repo", "sha", "action")
+        if args.worker
+        else ("oracle", "old_repo", "new_repo", "container", "state", "case")
+    )
+    if args.case == "write-budget":
+        required = ("container", "state", "new_repo", "fixture_config")
+    for name in required:
+        if not getattr(args, name):
+            p.error("missing --" + name.replace("_", "-"))
+    return args
+
+
+if __name__ == "__main__":
+    os.umask(0o077)
+    args = arguments()
+    try:
+        if args.worker:
+            worker(args)
+        elif args.case == "write-budget":
+            write_budget(args)
+        else:
+            scenario(args)
+    except BaseException as error:
+        print(
+            json.dumps(
+                {
+                    "result": "FAIL",
+                    "error_type": type(error).__name__,
+                    "check": str(error) if isinstance(error, w.Refusal) else None,
+                }
+            )
+        )
+        raise SystemExit(1)

@@ -31,6 +31,8 @@ OLD = "a8db554d6402bec642e9a05627eae64b2b79aec3"
 SERVICE = "nhms-node27-resource-governance.service"
 TIMER = "nhms-node27-resource-governance.timer"
 PIN = "70-issue1987-governance-reviewed-source.conf"
+# Frozen observed host/container PGDATA identity; not a caller-controlled bypass.
+_PGDATA_IDENTITY = (2304, 126746626, 1005, 1005, 0o700)
 
 
 class Refusal(Exception):
@@ -372,6 +374,19 @@ print(json.dumps({key: os.environ.get(key) for key in keys}))
             os.close(fd)
 
     def source(self):
+        # PGDATA is observed, never written by this executor. Shared mount
+        # ancestors (notably /data) do not inherit our owned-write policy.
+        pg = Path(self.a.pgdata_root)
+        require(pg.is_absolute() and ".." not in pg.parts, "UNSAFE_PATH", pg)
+        for parent in reversed((pg, *pg.parents)):
+            try:
+                info = parent.lstat()
+            except OSError:
+                raise Refusal("PATH_STAT_FAILED", parent) from None
+            require(not stat.S_ISLNK(info.st_mode), "SYMLINK_PATH", parent)
+            require(stat.S_ISDIR(info.st_mode), "PATH_TYPE", parent)
+        identity = (info.st_dev, info.st_ino, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
+        require(identity == _PGDATA_IDENTITY, "PRIMARY_PGDATA_IDENTITY_MISMATCH", pg)
         fields = "{{json .Id}} {{json .Image}} {{json .State.Running}}"
         observed = self.run(["docker", "inspect", "--type=container", "--format", fields, self.a.source_name]).split()
         require(
@@ -389,6 +404,11 @@ print(json.dumps({key: os.environ.get(key) for key in keys}))
             and matched[0].get("RW") is True,
             "PRIMARY_MOUNT_MISMATCH",
         )
+        container = self.run(
+            ["docker", "exec", self.a.source_id, "stat", "-Lc", "%d:%i:%u:%g:%a", "--", self.a.container_pgdata]
+        )
+        expected = ":".join(str(value) for value in identity[:4]) + ":" + format(identity[4], "o")
+        require(container == expected, "PRIMARY_PGDATA_CONTAINER_MISMATCH")
 
     def dropins(self, owned=False):
         p = self.show(SERVICE, ["DropInPaths", "FragmentPath"])
@@ -421,7 +441,6 @@ print(json.dumps({key: os.environ.get(key) for key in keys}))
         self.timer()
         self.health()
         self.hold()
-        safe(self.a.pgdata_root, directory=True)
         self.source()
 
     def invariants(self):

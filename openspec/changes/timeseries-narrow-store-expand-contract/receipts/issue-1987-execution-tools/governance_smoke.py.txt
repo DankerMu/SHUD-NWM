@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+"""Disposable Linux smoke: real private files, fake process/HTTP boundaries only.
+
+Run with python3 -B governance_smoke.py --private-parent /home/nwm.
+Never executes a subprocess, systemctl, Docker, or a network request. The only
+production seam replaced is the private frozen PGDATA identity, with the actual
+identity of this smoke's owned directory. No executor CLI/env bypass is added.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import importlib.util
+import json
+import os
+import stat
+import subprocess
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+
+def load(path):
+    spec = importlib.util.spec_from_file_location("governance_under_smoke", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def refuse(gov, operation, code):
+    try:
+        operation()
+    except gov.Refusal as exc:
+        assert str(exc) == code, (str(exc), code)
+    else:
+        raise AssertionError("expected refusal: " + code)
+
+
+class Response:
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, limit):
+        return b'{"status":"ok"}'
+
+
+class Boundary:
+    def __init__(self, gov, args, active, enabled, failure):
+        self.g = gov
+        self.a = args
+        self.active = active
+        self.enabled = enabled
+        self.failure = failure
+        self.cutover = False
+        self.container_drift = False
+        self.invocation = 0
+        self.commands = []
+        self.loaded_pin = False
+        self.phases = []
+        self.replace = os.replace
+        self.pin = Path(args.unit_root) / (gov.SERVICE + ".d") / gov.PIN
+        self.units = (gov.SERVICE, gov.TIMER, "nhms-display-api.service")
+
+    def observe_replace(self, source, destination):
+        self.replace(source, destination)
+        if Path(destination) == Path(self.a.state_dir) / "state.json":
+            self.phases.append(json.loads(Path(destination).read_text())["phase"])
+
+    def open(self, request, timeout):
+        assert request.full_url in ("http://127.0.0.1:8080/health", "http://127.0.0.1:8081/health")
+        assert timeout == 10
+        return Response()
+
+    def receipt(self):
+        pg = Path(self.a.pgdata_root)
+        info, fs = pg.stat(), os.statvfs(pg)
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        data = {
+            "schema_version": "nhms.node27_resource_governance.audit.v1",
+            "status": "completed",
+            "execution_mode": "read_only_audit",
+            "recommendations": [],
+            "started_at": now,
+            "finished_at": now,
+            "paths": {"repo_root": self.a.active_root, "pgdata_root": str(pg)},
+            "working_set": {
+                "working_set_filesystem": {
+                    "status": "ok",
+                    "path": str(pg),
+                    "blockers": [],
+                    "device_identity": f"{os.major(info.st_dev)}:{os.minor(info.st_dev)}:{fs.f_fsid}",
+                }
+            },
+            "safety": {"destructive_actions_enabled": False},
+        }
+        if self.failure == "binding":
+            data["working_set"]["working_set_filesystem"]["device_identity"] = "wrong-device"
+        Path(self.a.log_root, f"resource-governance-{self.invocation}.json").write_text(json.dumps(data))
+
+    def systemctl(self, argv):
+        g, a = self.g, self.a
+        if argv == ["list-unit-files", "nhms-*", "--no-legend", "--no-pager"]:
+            return "\n".join(unit + " enabled" for unit in self.units)
+        if argv == ["daemon-reload"]:
+            self.loaded_pin = self.pin.exists()
+            return ""
+        if len(argv) == 2 and argv[0] in ("start", "stop"):
+            action, unit = argv
+            if unit == g.TIMER:
+                self.active = "active" if action == "start" else "inactive"
+                return ""
+            assert unit == g.SERVICE and action == "start", argv
+            self.invocation += 1
+            if self.failure == "foreign":
+                self.pin.write_bytes(b"foreign replacement\n")
+            self.receipt()
+            return ""
+        if len(argv) >= 3 and argv[0] == "show" and argv[1] in self.units:
+            unit = argv[1]
+            values = {
+                "Transient": "no",
+                "FragmentPath": str(Path(a.unit_root, unit)),
+                "DropInPaths": str(self.pin) if unit == g.SERVICE and self.loaded_pin else "",
+                "EnvironmentFiles": "",
+                "LoadState": "loaded",
+                "UnitFileState": self.enabled,
+                "ActiveState": self.active if unit == g.TIMER else "inactive",
+                "MainPID": "0",
+                "ControlPID": "0",
+                "Result": "success",
+                "ExecMainStatus": "0",
+                "InvocationID": str(self.invocation),
+                "ExecMainStartTimestampMonotonic": str(self.invocation * 100),
+                "ExecMainExitTimestampMonotonic": str(self.invocation * 100 + 1),
+            }
+            if self.failure in ("service", "foreign") and self.invocation:
+                values.update(Result="exit-code", ExecMainStatus="1")
+            properties = [p.removeprefix("--property=") for p in argv[2:]]
+            assert all(p.startswith("--property=") for p in argv[2:]), argv
+            return "\n".join(p + "=" + values[p] for p in properties)
+        raise AssertionError("unknown systemctl command: " + repr(argv))
+
+    def run(self, argv, **kwargs):
+        self.commands.append(argv)
+        g, a = self.g, self.a
+        if argv[:2] == ["systemctl", "--user"]:
+            text = self.systemctl(argv[2:])
+        elif argv == ["journalctl", "--user", "-u", g.SERVICE, "-n", "100", "--no-pager"]:
+            text = "old failed audit (fake system boundary)"
+        elif argv[:2] == ["git", "-C"] and argv[2] in (a.active_root, a.runtime_root):
+            root = argv[2]
+            if argv[3:] == ["rev-parse", "HEAD"]:
+                text = g.NEW if root == a.runtime_root or self.cutover else g.OLD
+            elif argv[3:] == ["status", "--porcelain", "--untracked-files=no"]:
+                text = ""
+            elif len(argv) == 5 and argv[3] == "show":
+                revision, relative = argv[4].split(":", 1)
+                assert revision == g.NEW
+                assert relative in (
+                    "scripts/node27_resource_governance_once.sh",
+                    "scripts/node27_resource_governance.py",
+                )
+                text = Path(root, relative).read_text()
+            else:
+                raise AssertionError(argv)
+        elif argv[0] in [str(Path(root, ".venv/bin/python")) for root in (a.active_root, a.runtime_root)]:
+            assert len(argv) == 3 and argv[1] == "-c" and "IMPORT_ORIGIN_OK" in argv[2]
+            assert kwargs["cwd"] in (a.active_root, a.runtime_root)
+            text = "IMPORT_ORIGIN_OK"
+        elif argv[:2] == ["/bin/bash", "-c"]:
+            assert len(argv) == 5 and argv[3:] == ["governance-env", a.env_file]
+            keys = (
+                "NODE27_GOVERNANCE_REPO_ROOT",
+                "NODE27_RESOURCE_GOVERNANCE_REPO_ROOT",
+                "NODE27_GOVERNANCE_PGDATA_ROOT",
+                "NODE27_RESOURCE_GOVERNANCE_LOG_ROOT",
+                "NODE27_RESOURCE_GOVERNANCE_LOCK_PATH",
+                "NODE27_RESOURCE_GOVERNANCE_SUMMARY_PATH",
+                "NODE27_RESOURCE_GOVERNANCE_REPO",
+                "REPO",
+                "ENV_FILE",
+                "PYTHONPATH",
+            )
+            values = dict.fromkeys(keys)
+            values.update(
+                NODE27_GOVERNANCE_REPO_ROOT=a.active_root,
+                NODE27_GOVERNANCE_PGDATA_ROOT=a.pgdata_root,
+                NODE27_RESOURCE_GOVERNANCE_LOG_ROOT=a.log_root,
+                NODE27_RESOURCE_GOVERNANCE_LOCK_PATH=a.runner_lock,
+            )
+            text = json.dumps(values)
+        elif argv[:5] == ["docker", "inspect", "--type=container", "--format", "{{json .Mounts}}"]:
+            assert argv[5:] == [a.source_id]
+            text = json.dumps(
+                [{"Destination": a.container_pgdata, "Type": "bind", "Source": a.pgdata_root, "RW": True}]
+            )
+        elif argv == [
+            "docker",
+            "inspect",
+            "--type=container",
+            "--format",
+            "{{json .Id}} {{json .Image}} {{json .State.Running}}",
+            a.source_name,
+        ]:
+            text = json.dumps(a.source_id) + " " + json.dumps(a.source_image) + " true"
+        elif argv == ["docker", "exec", a.source_id, "stat", "-Lc", "%d:%i:%u:%g:%a", "--", a.container_pgdata]:
+            info = Path(a.pgdata_root).stat()
+            text = f"{info.st_dev}:{info.st_ino}:{info.st_uid}:{info.st_gid}:{stat.S_IMODE(info.st_mode):o}"
+            if self.container_drift:
+                text = "0:0:0:0:700"
+        elif argv in (["ss", "-H", "-ltnp", "sport = :8080"], ["ss", "-H", "-ltnp", "sport = :8081"]):
+            text = f'LISTEN users:(("smoke",pid={os.getpid()},fd=1))'
+        else:
+            raise AssertionError("unknown command/target: " + repr(argv))
+        return subprocess.CompletedProcess(argv, 0, text.encode(), b"")
+
+
+def scenario(g, root, active, enabled, failure):
+    for relative in (
+        "runtime/.venv/bin",
+        "runtime/scripts",
+        "runtime/infra/systemd",
+        "active/.venv/bin",
+        "active/scripts",
+        "active/infra/systemd",
+        "units",
+        "logs",
+        "shared/pgdata",
+    ):
+        (root / relative).mkdir(parents=True, mode=0o700, exist_ok=True)
+    for checkout in ("runtime", "active"):
+        for relative in (
+            ".venv/bin/python",
+            "scripts/node27_resource_governance_once.sh",
+            "scripts/node27_resource_governance.py",
+        ):
+            target = root / checkout / relative
+            target.write_text("smoke system-boundary fixture\n")
+            target.chmod(0o700)
+        (root / checkout / "infra/systemd" / g.SERVICE).write_text("[Service]\nType=oneshot\n")
+    for unit in (g.SERVICE, g.TIMER, "nhms-display-api.service"):
+        (root / "units" / unit).write_text("[Service]\nType=oneshot\n")
+    for name in ("env", "hold"):
+        (root / name).write_text("private unchanged fixture\n")
+        (root / name).chmod(0o600)
+    (root / "shared").chmod(0o777)
+    a = g.parser().parse_args(["stage", "--state-dir", str(root / "state"), "--runtime-root", str(root / "runtime")])
+    for key, relative in {
+        "active_root": "active",
+        "unit_root": "units",
+        "env_file": "env",
+        "hold_state": "hold",
+        "pgdata_root": "shared/pgdata",
+        "log_root": "logs",
+        "runner_lock": "logs/runner.lock",
+    }.items():
+        setattr(a, key, str(root / relative))
+    a.uid, a.gid = os.getuid(), os.getgid()
+    info = Path(a.pgdata_root).stat()
+    identity = (info.st_dev, info.st_ino, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode))
+    boundary = Boundary(g, a, active, enabled, failure)
+    before = {p: p.read_bytes() for p in (root / "env", root / "hold", *list((root / "units").iterdir()))}
+    with (
+        patch.object(g, "_PGDATA_IDENTITY", identity),
+        patch.object(g.subprocess, "run", boundary.run),
+        patch.object(g.urllib.request, "build_opener", return_value=boundary),
+        patch.object(g.os, "replace", boundary.observe_replace),
+    ):
+        e = g.Executor(a)
+        try:
+            refuse(g, lambda: g.safe(root / "shared", directory=True), "WORLD_WRITABLE_PATH")
+            e.source()  # Same real shared ancestor is legal only for observation.
+            boundary.container_drift = True
+            refuse(g, e.source, "PRIMARY_PGDATA_CONTAINER_MISMATCH")
+            boundary.container_drift = False
+            link = root / "pg-link"
+            link.symlink_to(a.pgdata_root, target_is_directory=True)
+            original = a.pgdata_root
+            a.pgdata_root = str(link)
+            refuse(g, e.source, "SYMLINK_PATH")
+            a.pgdata_root = original
+            with patch.object(g, "_PGDATA_IDENTITY", (0, 0, 0, 0, 0)):
+                refuse(g, e.source, "PRIMARY_PGDATA_IDENTITY_MISMATCH")
+            if failure:
+                code = "AUDIT_DEVICE_BINDING_FAILED" if failure == "binding" else "REAL_SERVICE_FAILED"
+                refuse(g, e.execute, code)
+                expected = "rollback_required" if failure == "foreign" else "rolled_back"
+                assert e.state["phase"] == expected and e.state["outcome"] == "FAIL", e.state
+                if failure == "foreign":
+                    assert e.pin.read_bytes() == b"foreign replacement\n"
+                    assert boundary.active == "inactive"  # Fail closed, not a false timer-restored claim.
+                    a.operation = "recover"
+                    refuse(g, e.execute, "PIN_NOT_OWNED")
+                    assert e.pin.read_bytes() == b"foreign replacement\n"
+                else:
+                    assert not e.pin.exists()
+                    assert boundary.active == active
+                assert "rollback_pending" in boundary.phases
+            else:
+                e.execute()
+                assert e.state["phase"] == "staged" and e.state["outcome"] == "PASS"
+                assert e.pin.read_bytes() == e.content and boundary.active == active
+                boundary.cutover = True
+                # Reopen durable state across the authorized active-checkout cutover.
+                e.log.close()
+                e.lock.close()
+                a.operation = "unstage"
+                e = g.Executor(a)
+                e.execute()
+                assert e.state["phase"] == "unstaged" and e.state["outcome"] == "PASS"
+                assert not e.pin.exists() and boundary.active == active
+                assert boundary.phases == [
+                    "prepared",
+                    "timer_stopped",
+                    "install_pending",
+                    "stage_starting",
+                    "stage_verified",
+                    "staged",
+                    "unstage_admitted",
+                    "unstage_prepared",
+                    "unstage_remove_pending",
+                    "unstage_starting",
+                    "unstage_verified",
+                    "unstaged",
+                ]
+            assert boundary.enabled == enabled
+            assert all(p.read_bytes() == data for p, data in before.items())
+            assert not any(
+                cmd[:3] == ["systemctl", "--user", action]
+                for cmd in boundary.commands
+                for action in ("enable", "disable", "mask", "reset-failed")
+            )
+            return {"timer": [active, enabled], "failure": failure, "phases": boundary.phases}
+        finally:
+            e.log.close()
+            e.lock.close()
+            (root / "shared").chmod(0o700)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--executor", type=Path, default=Path(__file__).with_name("governance_stage.py"))
+    parser.add_argument("--private-parent", type=Path, required=True)
+    args = parser.parse_args()
+    assert Path("/proc/self/stat").exists(), "Linux /proc required; no services are contacted"
+    os.umask(0o077)
+    g = load(args.executor)
+    g.safe(args.private_parent, directory=True)
+    results = []
+    for active, enabled, failure in (
+        ("active", "enabled", None),
+        ("inactive", "disabled", None),
+        ("active", "enabled-runtime", "service"),
+        ("inactive", "static", "binding"),
+        ("active", "enabled", "foreign"),
+    ):
+        with tempfile.TemporaryDirectory(prefix="issue1987-governance-smoke-", dir=args.private_parent) as directory:
+            results.append(scenario(g, Path(directory), active, enabled, failure))
+    print(
+        json.dumps(
+            {
+                "surface": "governance_system_boundary_fakes_real_private_files",
+                "checks": results,
+                "real_services_exercised": False,
+                "database_exercised": False,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()
