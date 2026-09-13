@@ -48,7 +48,7 @@ GET jobs), `request_auth.auth_context_from_request`, `public_evidence` renderer 
 
 - [x] 3.1 `packages/common/model_registry.py::_model_public_projection` pops `mesh_properties_json`.
 - [x] 3.2 Remove the field (and asymmetry docstring) from `apps/api/openapi_restored_schemas.py`;
-  regenerate `openapi/nhms.v1.yaml` via the repo's generator; `cd apps/frontend && pnpm generate:api`;
+  hand-edit `openapi/nhms.v1.yaml` (no generator exists; pinned by `tests/test_openapi_drift.py`); `cd apps/frontend && pnpm generate:api`;
   remove stub injection + mutation in `tests/test_openapi_response_conformance.py`.
 - [x] 3.3 Regression (R6/R7): a projection-level test feeding a row whose `mesh_properties_json` carries
   `source_path`, `resolved_source_path`, `package_checksum`, `source_inventory_checksum`, `manifest_uri`
@@ -57,13 +57,17 @@ GET jobs), `request_auth.auth_context_from_request`, `public_evidence` renderer 
   `PUT /models/{id}/active`; assert no raw token appears in the serialized JSON (token scan, as in
   `tests/test_model_registration.py` detail test) and no `mesh_properties_json` key in `model`/`previous_model`.
 - [x] 3.4 R8 unchanged: preflight lineage redaction assertion and GET detail/list tests stay green.
-- [ ] 3.5 node-27 live receipt (non-mutating, recorded deviation from the issue's "run a lifecycle operation":
+- [x] 3.5 node-27 live receipt (non-mutating, recorded deviation from the issue's "run a lifecycle operation":
   production has no user credential path and a real lifecycle POST would mutate production model state):
   `psql` confirms a Basins-imported model's `core.mesh_version.properties_json` is non-empty (not `{}`);
   a read-only script fetches that model's row via `_fetch_model_lifecycle_row`'s SQL in a read-only
   transaction, passes it through `_model_public_projection`, `json.dumps` the result, and asserts no
   `mesh_properties_json` key and none of the row's raw `source_path`/`resolved_source_path`/`package_checksum`
   values appear. Output captured to the PR evidence. No POST, no writes.
+  Evidence: node-27 @ `54922f6b`, model `basins_dth_ls_shud`, `properties_json` 7 keys; receipt
+  `RECEIPT PASS` (`/home/nwm/tmp/2305/receipt-54922f6b.log`). v1 of the receipt also required the
+  `manifest_uri` value to be absent and failed on pre-existing `resource_profile.manifest_uri` (same on
+  GET detail); spec delta narrowed accordingly (design.md Risks).
 
 ## 4. #1975 route-level error_message path rendering
 
@@ -110,5 +114,8 @@ GET jobs), `request_auth.auth_context_from_request`, `public_evidence` renderer 
   tests/test_slurm_gateway_openapi_security.py tests/test_api.py tests/test_auth_policy_matrix.py
   tests/test_openapi_drift.py tests/test_openapi_response_conformance.py tests/test_model_registration.py
   tests/test_retry.py tests/test_file_orchestration_journal.py`.
-- [ ] 6.3 node-27 exact-head rerun of 6.2 with real DB env (`TMPDIR=/home/nwm/tmp`) + task 3.5 receipt.
+- [x] 6.3 node-27 exact-head rerun of 6.2 with real DB env (`TMPDIR=/home/nwm/tmp`) + task 3.5 receipt.
+  Evidence: node-27 @ `54922f6b`, Python 3.11.15, scratch PG via `NHMS_INTEGRATION_DATABASE_URL`,
+  ruff pass, 15 files → `1443 passed`, rc 0 (`/home/nwm/tmp/2305/run-54922f6b*.log`).
+- [x] 6.5 Frontend: `cd apps/frontend && pnpm typecheck` exit 0 (types.ts regenerated).
 - [x] 6.4 red-proof: new-behavior tests fail against pre-change source (batched, reported by implementer).

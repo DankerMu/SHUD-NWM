@@ -3,7 +3,7 @@
 ### Requirement: Public job error messages SHALL render local paths and URIs
 
 The system SHALL render public job error messages through the shared renderer. The manual-retry `submission_failed` 503 body (`error.message`, `details.error_message`) and job/basin
-result payloads returned by pipeline read routes SHALL render `error_message` through the shared public
+result payloads returned by pipeline routes (job listings, stage summaries, and the cancel response) SHALL render `error_message` through the shared public
 evidence renderer: secrets become `[redacted]`, absolute local paths `[local-path]`, URIs
 `[uri]`/`[object-uri]`, while surrounding words are kept. Persisted job rows and pipeline events keep raw text.
 The database and file-journal lanes SHALL produce the same public rendering for the same text.

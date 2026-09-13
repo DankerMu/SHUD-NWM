@@ -30,7 +30,9 @@ text change, no `scheduler_file_providers` change).
 ## Decisions
 
 - **D1 #2081 delete the gate** (user decision). Rationale: hindcast data is same-shape as public
-  forecast series; no spec requires hindcast restriction; production has no user credential path, so
+  forecast series; no `openspec/specs` requirement restricts hindcast (two narrative docs,
+  `docs/spec/00_overall_design.md` and `docs/governance/ROLE_BOUNDARY.md`, described a role gate and
+  are updated in this change); production has no user credential path, so
   wiring into `require_action` would close hindcast to everyone. `PROTECTED_OPERATION_OVERRIDES` and
   `test_exactly_fifteen_protected_operations_override_root_security` stay unchanged.
 - **D2 #2169** mirror `service_bearer_matches` (ascii encode, `UnicodeEncodeError` → False, then
@@ -115,3 +117,11 @@ Regression rows:
 - Hindcast becomes explicitly anonymous (it was effectively anonymous via header already). Accepted by user.
 - `error_message` on GET job listings loses absolute path detail for operators; raw text remains in DB/logs.
 - Removing `mesh_properties_json` is a response-narrowing change; zero frontend consumers verified by grep.
+- Residual (not a regression): an absolute local root containing whitespace inside `error_message` prose
+  still renders token-wise as `[local-path] <tail>`. Reason: prose rendering is token-wise by design and
+  was already so before this change; #1976 only makes scheme-anchored whole values classify whole.
+- Residual (existing policy): `resource_profile.manifest_uri` object-store URIs stay on lifecycle/active
+  responses exactly as on GET detail (node-27 receipt v1 asserted all mesh-property values absent and
+  failed on this pre-existing field; the spec delta was narrowed to what this change guarantees).
+- Out of scope, tracked: file-lane runtime-root `[object-uri]`/`[uri]` values nulled by
+  `_strip_redaction_placeholders` → #2306.

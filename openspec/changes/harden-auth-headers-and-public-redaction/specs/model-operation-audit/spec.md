@@ -4,8 +4,10 @@
 
 The system SHALL omit `mesh_properties_json` from lifecycle and active-model responses: `POST /api/v1/models/{model_id}/lifecycle` and `PUT /api/v1/models/{model_id}/active` `data.model` and `data.previous_model` SHALL NOT contain `mesh_properties_json`, for every outcome
 (`already_current`, `blocked`, `allowed`, `refused`) and for the audit-persistence failure 503 body.
-No raw `source_path`, `resolved_source_path`, `package_checksum`, `source_inventory_checksum`, or
-`manifest_uri` value from mesh properties SHALL appear in the serialized response.
+No raw `source_path`, `resolved_source_path`, `package_checksum`, or `source_inventory_checksum` value
+from mesh properties SHALL appear in the serialized response. Other `manifest_uri` fields on the model
+projection (for example `resource_profile.manifest_uri`) keep the existing public URI sanitizer policy
+(object-store URIs kept, local paths nulled), identical to `GET /api/v1/models/{model_id}`.
 `preflight.lineage.mesh_properties` keeps its existing audit redaction.
 
 #### Scenario: Allowed lifecycle operation response carries no raw mesh properties
