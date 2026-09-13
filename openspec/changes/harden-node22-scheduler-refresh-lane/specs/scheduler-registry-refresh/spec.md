@@ -113,7 +113,7 @@ write any file under the provider store.
 #### Scenario: No resolvable manifest age is its own verdict
 
 - **WHEN** neither the latest refresh receipt nor any receipt in the bounded
-  history scan yields a published manifest's generation time, and no
+  history scan yields a registry generation time it can trust, and no
   higher-precedence condition matches
 - **THEN** the probe returns a distinct unresolvable-manifest verdict and a
   non-zero exit status

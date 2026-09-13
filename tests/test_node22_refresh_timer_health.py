@@ -2485,6 +2485,14 @@ def test_the_history_filename_shape_matches_the_runner_that_writes_it() -> None:
     )
     assert probe.REFRESH_RECEIPT_SCHEMA_VERSION == runner_module.SCHEMA_VERSION
 
+    # The directory the runner writes history receipts into, next to
+    # `latest.json`, is the one the probe falls back to.  The runner exposes no
+    # constant for it, so its one literal is read from source.
+    history_dirs = re.findall(r'^\s*history = root / "([^"]+)"$', runner, re.M)
+    assert history_dirs == [probe.HISTORY_DIRECTORY_NAME]
+    assert 'history / f"{run_id}.json"' in runner
+    assert 'latest_path = root / "latest.json"' in runner
+
 
 def test_the_consumer_bound_is_the_consumers_own_constant() -> None:
     """Audit F5: `CONSUMER_MAX_MANIFEST_AGE_HOURS` is a COPY, and until now the
@@ -3041,21 +3049,31 @@ def test_the_runbook_states_exactly_the_rollback_accept_sets() -> None:
 
 
 def test_the_read_back_accept_sets_are_the_installers_own_case_arms() -> None:
-    """Code<->test: the accept tuples are the literal first `case` arm of each
-    read in `assert_probe_units_gone`, and every other state falls to `*)`."""
+    """Code<->test: across EVERY arm of each `case` in `assert_probe_units_gone`,
+    the non-`*)` patterns are exactly the accept tuple, and each `case` has
+    exactly one `*)` arm, which is where every other state goes."""
     body = re.search(
         r"^assert_probe_units_gone\(\) \{\n(.*?)^\}\n", INSTALLER.read_text(), re.S | re.M
     )
     assert body is not None
 
     def accepted_arm(variable: str) -> set[str]:
-        arms = re.findall(rf'case "\${variable}" in\n\s*([^\n]*?)\) ;;\n', body.group(1))
-        assert len(arms) == 1, arms
-        return {"" if state.strip() == "''" else state.strip() for state in arms[0].split("|")}
+        blocks = re.findall(rf'case "\${variable}" in\n(.*?)\n\s*esac\n', body.group(1), re.S)
+        assert len(blocks) == 1, blocks
+        # An arm starts on a line whose pattern list is closed by `)`; the
+        # body lines (`printf`, `return 1`, `;;`) never match this shape.
+        patterns = re.findall(r"^\s*([^\s()][^()\n]*)\)", blocks[0], re.M)
+        defaults = [pattern for pattern in patterns if pattern.strip() == "*"]
+        assert len(defaults) == 1, patterns
+        return {
+            "" if state.strip() == "''" else state.strip()
+            for pattern in patterns
+            if pattern.strip() != "*"
+            for state in pattern.split("|")
+        }
 
     assert accepted_arm("enabled") == set(ROLLBACK_ACCEPTED_IS_ENABLED)
     assert accepted_arm("active") == set(ROLLBACK_ACCEPTED_IS_ACTIVE)
-    assert body.group(1).count("    *)\n") == 2
     assert not set(ROLLBACK_REFUSED_IS_ENABLED) & accepted_arm("enabled")
     assert not set(ROLLBACK_REFUSED_IS_ACTIVE) & accepted_arm("active")
 

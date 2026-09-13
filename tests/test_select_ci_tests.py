@@ -564,6 +564,19 @@ NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
     "services/orchestrator/scheduler_file_providers.py": frozenset(
         {"tests/test_node22_refresh_timer_health.py"}
     ),
+    # The probe's own installer and units were routed from the start but had no
+    # pin: the suite runs the installer as a subprocess and `read_text`s both
+    # units, and without these three rules none of them selects it (the
+    # installer falls back to the generic shell baseline, the units to nothing).
+    "scripts/install_node22_refresh_timer_health.sh": frozenset(
+        {"tests/test_node22_refresh_timer_health.py"}
+    ),
+    "infra/systemd/nhms-node22-refresh-timer-health.service": frozenset(
+        {"tests/test_node22_refresh_timer_health.py"}
+    ),
+    "infra/systemd/nhms-node22-refresh-timer-health.timer": frozenset(
+        {"tests/test_node22_refresh_timer_health.py"}
+    ),
 }
 
 

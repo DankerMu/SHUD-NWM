@@ -135,8 +135,9 @@ Evidence floor:
       modeled on the existing refresh installer's state-capture/rollback shape but
       minimal. It must capture and assert that **both** `nhms-compute-scheduler.timer`
       and `nhms-compute-scheduler.service`, and both refresh units, have identical
-      enabled/active states before and after its own run, and `--rollback` must
-      read back the probe units before reporting success (R15c).
+      enabled/active states before and after its own run, and both `--install` and
+      `--rollback` must read back each probe unit independently before reporting
+      success (R15c).
 
 ### 2. Dry-run worker-mirror entry_count (#1926)
 

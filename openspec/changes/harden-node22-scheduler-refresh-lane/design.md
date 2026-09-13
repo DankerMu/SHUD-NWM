@@ -205,7 +205,7 @@ can mask the other's signal. No evidence failure of either kind reaches `ok`.
 ### D3a: `timer_stopped` needs a dwell, or routine operations become the alarm
 
 The documented #1104 manual-publisher procedure is: `stop` the refresh timer, run
-the CLI, `start` it again (`docs/runbooks/current-production-ops.md:1056-1060`).
+the CLI, `start` it again (`docs/runbooks/current-production-ops.md:1059-1062`).
 For the whole of that window the timer's geometry is precisely `enabled` +
 `inactive` — the state the probe exists to catch. The refresh oneshot's own
 `TimeoutStartSec=7200` means such a window can legitimately run for two hours,
@@ -272,9 +272,13 @@ on-disk manifest itself). The rule is closed over the runner's `OUTCOMES`:
   that field is absent the candidate is unresolvable and resolution moves on.
 
 Grading from `before_generated_at` can only overstate the age, so the failure
-direction is a spurious `manifest_stale`, never a false `ok`. The probe's trusted
-set is pinned as a subset of the runner's `OUTCOMES` by a test that imports both,
-so a renamed or added outcome reds instead of silently falling into either bucket.
+direction is a spurious `manifest_stale` (or, while a lane recovers from an
+already-expired manifest, a spurious `manifest_expired`), never a false `ok`. Two
+tests keep the rule closed over the runner's vocabulary: one pins the probe's
+trusted set as a subset of the runner's `OUTCOMES`, so a renamed or dropped trusted
+outcome reds; the other asserts the runbook's list of remaining outcomes equals
+`OUTCOMES` minus that set, so an added outcome reds instead of silently falling
+into either bucket.
 
 The receipt records which source answered, as a closed three-shape field
 `manifest_source`: `latest`, `history:<filename>`, or `unavailable`. That is the
@@ -441,8 +445,9 @@ D3 verdict table and its thresholds, and is proven row by row below rather than
 asserted as an invariant.
 
 Source-of-truth identity/contract: the published provider manifest's
-`generated_at` (as recorded in the refresh receipt's
-`providers[].after_generated_at`), the refresh timer's systemd
+`generated_at` (as vouched for by the refresh receipt's registry provider under
+D3b's outcome rule — `after_generated_at` for trusted outcomes, otherwise
+`before_generated_at`), the refresh timer's systemd
 `(UnitFileState, ActiveState, InactiveEnterTimestamp, NextElapseUSecRealtime)`
 tuple, and the receipt invariant
 registry`.entry_count` == `registry_worker_mirror.entry_count`.
