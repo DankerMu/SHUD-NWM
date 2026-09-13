@@ -530,13 +530,90 @@ def test_node27_unit_files_select_their_owner_suites(unit: str, owners: frozense
 # outside the `#2173` glob `infra/systemd/nhms-node27-*.service`, so neither
 # owes the sibling lane pin.
 NODE22_UNIT_OWNER_SUITES: dict[str, frozenset[str]] = {
+    # #2146: the `.service` gained a SECOND literal reader --
+    # `tests/test_node22_refresh_timer_health.py` asserts the probe unit's
+    # `UnsetEnvironment=` line is byte-equal to this one's.
     "infra/systemd/nhms-scheduler-file-provider-refresh.service": frozenset(
-        {"tests/test_scheduler_file_provider_refresh.py"}
+        {
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_node22_refresh_timer_health.py",
+        }
     ),
     "infra/systemd/nhms-scheduler-file-provider-refresh.timer": frozenset(
         {"tests/test_scheduler_file_provider_refresh.py"}
     ),
 }
+
+
+# #2146 round 2 — UNROUTED reader edges of the node-22 probe suite.
+# `tests/test_node22_refresh_timer_health.py` both `read_text`s and imports the
+# refresh runner (the `run_id` filename shape its history fallback filters on,
+# and `SCHEMA_VERSION` against the probe's copy). That path did not route to
+# it, so bumping the runner's receipt schema merged green on a PR that touched
+# only that file.
+NODE22_REFRESH_READER_EDGES: dict[str, frozenset[str]] = {
+    "scripts/scheduler_file_provider_refresh.py": frozenset(
+        {
+            "tests/test_scheduler_file_provider_refresh.py",
+            "tests/test_node22_refresh_timer_health.py",
+        }
+    ),
+    # The probe copies this module's `DEFAULT_MAX_MANIFEST_AGE_HOURS` (D4 keeps
+    # the probe stdlib-only) and derives both threshold ceilings from it.
+    "services/orchestrator/scheduler_file_providers.py": frozenset(
+        {"tests/test_node22_refresh_timer_health.py"}
+    ),
+    # The probe's own installer and units were routed from the start but had no
+    # pin: the suite runs the installer as a subprocess and `read_text`s both
+    # units, and without these three rules none of them selects it (the
+    # installer falls back to the generic shell baseline, the units to nothing).
+    "scripts/install_node22_refresh_timer_health.sh": frozenset(
+        {"tests/test_node22_refresh_timer_health.py"}
+    ),
+    "infra/systemd/nhms-node22-refresh-timer-health.service": frozenset(
+        {"tests/test_node22_refresh_timer_health.py"}
+    ),
+    "infra/systemd/nhms-node22-refresh-timer-health.timer": frozenset(
+        {"tests/test_node22_refresh_timer_health.py"}
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("source", "readers"),
+    sorted(NODE22_REFRESH_READER_EDGES.items()),
+    ids=[PurePosixPath(source).name for source in sorted(NODE22_REFRESH_READER_EDGES)],
+)
+def test_node22_refresh_reader_edges_select_every_suite_that_reads_them(
+    source: str, readers: frozenset[str]
+) -> None:
+    selected = set(select_tests([source], repo_root=Path(".")))
+
+    assert readers <= selected, f"{source} lost a reader: {sorted(readers - selected)}"
+
+
+def test_node22_refresh_reader_edge_rules_red_when_removed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The complement leg: without the rules, the probe suite is not selected.
+
+    A pin that only asserts presence cannot tell a real rule from a rider that
+    happens to pull the suite in for another reason, so this drops exactly
+    those rows and asserts the edge goes away with them.
+    """
+    from scripts import select_ci_tests
+
+    mutant = tuple(
+        rule for rule in PATH_TEST_RULES if rule.pattern not in NODE22_REFRESH_READER_EDGES
+    )
+    assert len(mutant) == len(PATH_TEST_RULES) - len(NODE22_REFRESH_READER_EDGES)
+    monkeypatch.setattr(select_ci_tests, "PATH_TEST_RULES", mutant)
+
+    for source in NODE22_REFRESH_READER_EDGES:
+        selected = select_tests([source], repo_root=Path("."))
+        assert "tests/test_node22_refresh_timer_health.py" not in selected, (
+            f"{source} still reaches the probe suite without its rule"
+        )
 
 
 @pytest.mark.parametrize(
@@ -2376,12 +2453,16 @@ def test_refresh_env_template_selects_exactly_its_owner_and_runtime_suites() -> 
     selection with ZERO readers, so the #1182 zero-assertion warning stayed silent too.
 
     Pinned as an EXACT set, not membership: `infra/env/**` is untouched and rule matches
-    accumulate (`selected.update(rule.tests)`), so the correct result is a 2-set, not the
-    owner suite alone. `tests/test_node27_write_roles.py` also reads this template (its
-    `_env_templates()` globs `infra/env/*.example`) and stays unselected by design — that leg
-    is out of scope for #2195.
+    accumulate (`selected.update(rule.tests)`), so the correct result is not the owner
+    suite alone. #2146 widened it from a 2-set to a 3-set:
+    `tests/test_node22_refresh_timer_health.py::test_the_production_path_defaults_match_every_file_that_states_them`
+    `read_text`s this template and pins its `NHMS_SCHEDULER_PROVIDER_REFRESH_RECEIPT_ROOT=`
+    line to the probe's `DEFAULT_REFRESH_RECEIPT` parent, so it is a literal reader too.
+    `tests/test_node27_write_roles.py` also reads this template (its `_env_templates()` globs
+    `infra/env/*.example`) and stays unselected by design — that leg is out of scope for #2195.
     """
     assert set(select_tests([REFRESH_ENV_TEMPLATE], repo_root=Path("."))) == {
+        "tests/test_node22_refresh_timer_health.py",
         "tests/test_scheduler_file_provider_refresh.py",
         "tests/test_two_node_docker_runtime.py",
     }
@@ -2433,7 +2514,19 @@ def test_scheduler_provider_refresh_template_rule_carries_no_selection_flags() -
         ),
         pytest.param(
             "infra/env/compute.scheduler-dbfree.env.example",
-            [SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST, "tests/test_two_node_docker_runtime.py"],
+            # #2075 widened this row by one, on the same reader-completeness
+            # ground #2195 established: `tests/test_env_templates.py` parses the
+            # `nhms-required-keys` block out of `infra/env/README.md` and
+            # asserts THIS template satisfies every entry, key and pinned value.
+            # It is a literal reader of the changed path, so a template-only PR
+            # must run it -- the previous 2-set was non-empty yet held no reader
+            # of this file, which is how the missing
+            # `NHMS_ORCHESTRATOR_TERMINAL_STAGE` reached a rebuilt node.
+            [
+                "tests/test_env_templates.py",
+                SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
+                "tests/test_two_node_docker_runtime.py",
+            ],
             id="compute-scheduler-dbfree",
         ),
         pytest.param(
@@ -2670,8 +2763,19 @@ def test_generated_roots_and_unrelated_docs_stay_selector_empty() -> None:
         "docs/runbooks/failed-basin-retry.md",
     ):
         assert select_tests([path], repo_root=Path(".")) == [], f"{path} must stay selector-empty"
+    # #2075 widened this EXACT set by one: `tests/test_env_templates.py` is a
+    # literal reader of this runbook (it asserts the pinned terminal stage
+    # appears there), so the README/runbook/template consistency guard is
+    # selected alongside the deployment contract. `docs/**` does not open the
+    # backend lane, so this takes effect only when the lane opens for another
+    # reason; a runbook-only PR relies on the master full run.
+    # #2146 round 2 widened it by one more: the probe suite reads this runbook's
+    # probe section and pins every verdict name, each threshold's default AND
+    # ceiling, the receipt field set and the probe timer's steady-state row.
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
-        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST
+        "tests/test_env_templates.py",
+        "tests/test_node22_refresh_timer_health.py",
+        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
 
     workflow = Path(CI_WORKFLOW_PATH).read_text(encoding="utf-8")
@@ -5452,7 +5556,10 @@ def test_select_tests_ignores_docs_only_changes() -> None:
     # so a runbook-only change now selects that focused suite; other `docs/**`
     # changes still select nothing.
     assert select_tests(["docs/runbooks/current-production-ops.md"], repo_root=Path(".")) == [
-        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST
+        "tests/test_env_templates.py",
+        # #2146 round 2: third literal reader -- the node-22 probe suite.
+        "tests/test_node22_refresh_timer_health.py",
+        SLURM_GATEWAY_DEPLOYMENT_CONTRACT_TEST,
     ]
     assert select_tests(["docs/runbooks/other-runbook.md"], repo_root=Path(".")) == []
 
@@ -5900,8 +6007,12 @@ def test_github_output_flags_selector_source_diff_is_not_a_collapse(tmp_path: Pa
         # module-scope importers plus the accumulated meta-guard.
         ("tests/test_orchestration_chain.py", "4"),
         # #1684 EVID-05/F: the gateway rollout runbook is an exact rollout
-        # owner selecting exactly one focused suite — still non-collapsed.
-        ("docs/runbooks/current-production-ops.md", "1"),
+        # owner selecting focused suites — still non-collapsed. #2075 added a
+        # second reader (`tests/test_env_templates.py` asserts the pinned
+        # terminal stage appears in this runbook) and #2146 round 2 a third
+        # (`tests/test_node22_refresh_timer_health.py` pins the probe section's
+        # verdicts, thresholds and receipt fields), so the count is 3.
+        ("docs/runbooks/current-production-ops.md", "3"),
         # The discrimination boundary. A single-target selection that is NOT the
         # meta-guard suite must stay false — 15 rules in today's table select
         # exactly one file, so a flag that merely counted targets would arm the
