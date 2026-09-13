@@ -4552,3 +4552,12 @@ TE-1 为未来模板一致性的 PLAUSIBLE P2 note，非 blocking，不计 net c
 本单不增加后轮样本，不能据此调整轮换；keep/cut 决策仍待维护者，
 记录 deferral：本次修复与合并授权不含审查策略调整。现行 keep、座位上限不变。
 共享 timeseries OpenSpec 保持 active，#1987 实机窗口与后续 epic tasks 未借此完成。
+
+### Revisit 2026-09-12（post PR #2248 / issue #2224）
+
+追加后实测 644 行、634 merged、10 terminal；210 个多轮样本，
+later-round catches core=270、rotated=270、phase=57、skipped=15。
+本单 high 三轮；第二轮的一项 receipt selector 覆盖缺口由 pinned test-evidence
+发现并独立确认，第三轮与最终 gap sweep 无新候选；不构成新增轮换收益证据。
+记录 deferral：keep/cut 仍待维护者决策；本次 #1891–#1895 范围内的合并预授权
+不含审核策略调整。现行 keep、座位上限与共享 OpenSpec active 状态不变。

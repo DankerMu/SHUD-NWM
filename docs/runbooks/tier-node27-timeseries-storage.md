@@ -643,6 +643,24 @@ an observable field, and a stop condition.
 > work and **preserves** the installed topology; there is no `groups_moved`
 > field in the installer receipt, no rolled-back-at-zero operation, and no
 > live move-back entrypoint.
+>
+> **STOP — #2224 origin-chunk parity must merge before a G1 retry.** The failed
+> `a8db554d6402bec642e9a05627eae64b2b79aec3` G1 census/bracket reached its
+> finite parity timeout and produced no census, capacity policy, or valid-times
+> baseline. None of those absent artifacts, and none of that failed window, is
+> reusable evidence. Start a fresh maintenance window from G0 at a new exact
+> merged SHA. Production parity reads the mandatory current durable origin
+> relation; it never reads the parent hypertable or current compressed sibling,
+> and its finite timeout remains unchanged.
+>
+> **STOP — #2290 and #2291 must both be merged before a fresh G0.** Cold
+> admission requires the canonical post-expand narrow river parent; wide river,
+> including wide tables carrying surrogate keys, and every legacy parent are
+> excluded. Canonical forcing retains its current shape. A narrow river remains
+> valid when legacy is absent. Capture fresh census, parity, intent and readiness
+> artifacts at the same reviewed revision and physical parent identity; never
+> reuse pre-expand or cross-revision artifacts. With #2291 pending, the existing
+> count contract below is unchanged and production rollout remains HOLD.
 
 | Gate | Name | Blocks the next gate until proven |
 |------|------|-----------------------------------|
@@ -711,10 +729,13 @@ identity in `packages/common/compressed_chunk_cold_target.py`), issue #1894
 (`scripts/node27_cold_tablespace_install.py`,
 `packages/common/node27_cold_tablespace_*`), issue #1970 (river-click oracle),
 issue #2123 (the promoted C4 producer/validator/private publisher/binder),
-issue #2130 (C4 input-classification precedence), and issue #2137 (this executable G0
-runbook plus census/C1-C3/G8 owners, schemas, binders and acceptance routing).
-Issue #2137 merges this content without remote access; it consumes rather than
-reimplements C4.
+issue #2130 (C4 input-classification precedence), issue #2137 (this executable G0
+runbook plus census/C1-C3/G8 owners, schemas, binders and acceptance routing),
+and issue #2224 (mandatory durable-origin production parity). Issue #2137
+merges this content without remote access; it consumes rather than reimplements
+C4. #2224 must also be merged before any retry of G1.
+Both #2290 (physical-parent admission) and #2291 (reviewed-count preparation)
+must also be merged before starting a fresh G0; neither authorizes a live window.
 
 **Step 1 — local readiness only (nothing on node-27 runs yet).** This runs on
 the machine that owns the PR; it must not be confused with the node-27 session
@@ -782,7 +803,11 @@ absent. `scripts/node27_cold_residency_census.py` is the pre-target branch of th
 same contract: it calls the shipped production owners
 `ranked_candidates_from_execute`, `derive_bound_inventories`,
 `collect_residency_group`, `compute_window_parity`,
-`compression_before_bytes`, `retained_source_bytes` directly, uses the real
+`compression_before_bytes`, `retained_source_bytes` directly. `compute_window_parity`
+receives the currently resolved `CatalogChunk` durable origin as mandatory input:
+its one aggregate reads the exact quoted origin relation, never the parent
+hypertable or current compressed sibling, while retaining the origin's half-open
+window as a second identity fence. It uses the real
 display watermark (`packages/common/display_watermark.py`) and the configured
 compression lag, and is read-only by construction — one connection goes through
 the driver's native `set_session(readonly=True, autocommit=False)` **before any

@@ -303,13 +303,16 @@ def test_cli_refuses_invalid_private_display_env_port_before_connect(
         connection_attempted = True
         raise AssertionError("invalid port must refuse before a DSN connection")
 
-    assert oracle.main(
-        _argv(target) + ["--display-env", str(env_file)],
-        connect=unexpected_connect,
-        opener=FakeOpener(),
-        load_chunk=_fake_load_chunk,
-        collect_group=_fake_collect_group,
-    ) == 1
+    assert (
+        oracle.main(
+            _argv(target) + ["--display-env", str(env_file)],
+            connect=unexpected_connect,
+            opener=FakeOpener(),
+            load_chunk=_fake_load_chunk,
+            collect_group=_fake_collect_group,
+        )
+        == 1
+    )
     assert connection_attempted is False
     assert not target.exists()
     assert not (parent / "performance.json.commit").exists()
@@ -320,9 +323,9 @@ def test_cli_refuses_display_origin_conflicting_with_display_env(tmp_path: Path)
     parent.mkdir()
     os.chmod(parent, 0o700)
     env_file = _private_display_env(tmp_path / "display.env", port=18080)
-    assert oracle.main(
-        _argv(parent / "performance.json", display_origin=ORIGIN) + ["--display-env", str(env_file)]
-    ) == 1
+    assert (
+        oracle.main(_argv(parent / "performance.json", display_origin=ORIGIN) + ["--display-env", str(env_file)]) == 1
+    )
 
 
 def test_cli_failure_still_closes_and_redacts_connect_errors(
@@ -456,3 +459,86 @@ def test_g7_runbook_invokes_live_cli_and_binds_current_pass_receipt() -> None:
         assert "Shared Read Buffers:" not in body
         assert "pgrep -f" not in body
     assert INTERSECTING_CHUNKS_SQL
+
+
+@pytest.mark.parametrize("state", ["wide", "parent_drift"])
+def test_performance_cli_refuses_actual_cold_admission_without_publication(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+) -> None:
+    class AdmissionConnection(FakeConnection):
+        def cursor(self):
+            cursor = super().cursor()
+            original = cursor.execute
+
+            def execute(sql, params=None):
+                original(sql, params)
+                if "FROM pg_attribute" in str(sql) and params == ("hydro", "river_timeseries"):
+                    if state == "wide":
+                        cursor._rows.append(
+                            dict(
+                                cursor._rows[0],
+                                attnum=99,
+                                attname="run_id",
+                                type_name="text",
+                                typtype="b",
+                            )
+                        )
+                    else:
+                        cursor._rows[-1] = dict(
+                            cursor._rows[-1],
+                            parent_oid=cursor._rows[-1]["parent_oid"] + 1,
+                        )
+
+            cursor.execute = execute
+            return cursor
+
+    parent = tmp_path / "run"
+    parent.mkdir(mode=0o700)
+    target = parent / "performance.json"
+    env_file = _private_display_env(tmp_path / "display.env")
+    connection = AdmissionConnection()
+    rc = oracle.main(
+        _argv(target, display_origin=ORIGIN) + ["--display-env", str(env_file)],
+        connect=lambda _dsn: connection,
+        opener=FakeOpener(),
+        load_chunk=_fake_load_chunk,
+        collect_group=_fake_collect_group,
+        environ={"NHMS_DISPLAY_API_PORT": "8080"},
+    )
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("LANE_CATALOG_FAILED:")
+    assert "Traceback" not in captured.err
+    assert list(parent.iterdir()) == []
+    assert connection.closed
+
+
+def test_performance_cli_propagates_admission_programming_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from packages.common import node27_issue1895_performance_live as owner
+
+    parent = tmp_path / "run"
+    parent.mkdir(mode=0o700)
+    target = parent / "performance.json"
+    env_file = _private_display_env(tmp_path / "display.env")
+    connection = FakeConnection()
+
+    def programming_error(_execute):
+        raise RuntimeError("admission programming sentinel")
+
+    monkeypatch.setattr(owner, "derive_bound_inventories", programming_error)
+    with pytest.raises(RuntimeError, match="admission programming sentinel"):
+        oracle.main(
+            _argv(target, display_origin=ORIGIN) + ["--display-env", str(env_file)],
+            connect=lambda _dsn: connection,
+            opener=FakeOpener(),
+            load_chunk=_fake_load_chunk,
+            collect_group=_fake_collect_group,
+            environ={"NHMS_DISPLAY_API_PORT": "8080"},
+        )
+    assert connection.closed
+    assert list(parent.iterdir()) == []

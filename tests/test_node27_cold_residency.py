@@ -20,6 +20,7 @@ from tests.cold_residency_fakes import (
     required_exec_env,
     target_observation,
 )
+from tests.cold_residency_identity_mutants import apply_first_reload_replacement, first_reload_mutation_sql
 
 _ROOT = Path(__file__).resolve().parents[1]
 _NOW = datetime(2026, 7, 11, 12, tzinfo=UTC)
@@ -241,8 +242,8 @@ def test_dry_run_records_already_cold_without_consuming_bound(tmp_path: Path, mo
         origin_name="_hyper_1_2_chunk",
         compressed_oid=21,
         compressed_name="compress_21",
-        range_start=CUTOFF,
-        range_end=CUTOFF + timedelta(days=0),
+        range_start=CUTOFF - timedelta(days=7),
+        range_end=CUTOFF,
     )
     connection.load_group(cold, complete_relations(origin_space="nhms_cold"))
     connection.load_group(
@@ -651,3 +652,59 @@ def test_four_hot_groups_bound_two_dry_run_observes_all(tmp_path: Path) -> None:
     assert {item["rank"] for item in deferred} == {1}
     assert all(item["reason"] == "per_tick_bound" for item in deferred)
     assert not any("SET TABLESPACE" in sql for sql, _params in connection.executed)
+
+
+def test_run_tick_refuses_first_reload_oid_replacement_before_any_success_or_movement(
+    tmp_path: Path,
+) -> None:
+    env = _base_env(tmp_path)
+    config = _ready(runner.config_from_args(_args(), env))
+    connection = FakeConnection()
+    selected = chunk()
+    connection.load_group(selected, complete_relations())
+    apply_first_reload_replacement(connection, selected, "origin_oid")
+    receipt = runner.run_tick(
+        config,
+        now_utc=_NOW,
+        head_sha="a" * 40,
+        connect=_connect_factory(connection),
+        fetch_watermark=lambda: _NOW,
+    )
+    validated = validate_receipt(receipt)
+    assert validated["mode"] == "dry-run"
+    assert validated["outcome"] == "failed"
+    assert validated["state"] == "unknown"
+    assert validated["error"]["class"] == "selection_race"
+    assert validated["selected"] == []
+    assert first_reload_mutation_sql(connection) == []
+    assert not any("pg_relation_size" in sql for sql, _params in connection.executed)
+    assert not config.receipt_path.exists()
+    assert not intent_path_for(config.receipt_path).exists()
+
+
+def test_run_tick_enforce_publishes_first_reload_oid_replacement_failure(tmp_path: Path) -> None:
+    env = _base_env(tmp_path)
+    config = _ready(runner.config_from_args(_args(enforce=True), env))
+    connection = FakeConnection()
+    selected = chunk()
+    connection.load_group(selected, complete_relations())
+    apply_first_reload_replacement(connection, selected, "origin_oid")
+    receipt = runner.run_tick(
+        config,
+        now_utc=_NOW,
+        head_sha="a" * 40,
+        connect=_connect_factory(connection),
+        fetch_watermark=lambda: _NOW,
+    )
+    published = json.loads(config.receipt_path.read_text(encoding="utf-8"))
+    validated = validate_receipt(published)
+    assert receipt == published == validated
+    assert validated["mode"] == "enforce"
+    assert validated["outcome"] == "failed"
+    assert validated["state"] == "unknown"
+    assert validated["error"]["class"] == "selection_race"
+    assert validated["selected"] == []
+    assert validated.get("recovery") is None
+    assert not intent_path_for(config.receipt_path).exists()
+    assert first_reload_mutation_sql(connection) == []
+    assert not any("pg_relation_size" in sql for sql, _params in connection.executed)

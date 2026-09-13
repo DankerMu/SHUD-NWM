@@ -253,8 +253,8 @@ def test_transient_mixed_compressed_index_is_not_a_terminal_success() -> None:
     assert all("compress_hyper_2_2_chunk" not in sql or "ALTER TABLE" not in sql for sql in plan.shell_move_sql)
 
 
-def test_missing_compressed_relation_blocks_the_group() -> None:
-    chunk = _chunk(compressed_oid=None, compressed_schema=None, compressed_name=None)
+def test_missing_compressed_physical_relation_blocks_the_group() -> None:
+    chunk = _chunk()
     relations = (
         _rel(10, "_timescaledb_internal", "_hyper_1_1_chunk", "r", "pg_default", 8192),
         _rel(15, "_timescaledb_internal", "10_23_river_timeseries_pkey", "i", "pg_default", 8192, heap_oid=10),
