@@ -22,7 +22,6 @@ _APPLICATION_NAME = "nhms-api-forecast"
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
-_HINDCAST_ACCESS_ROLES = {"analyst", "operator", "model_admin", "sys_admin"}
 
 
 def get_forecast_store() -> PsycopgForecastStore:
@@ -63,8 +62,6 @@ def get_forecast_series(
     store: PsycopgForecastStore = Depends(get_forecast_store),
 ) -> dict[str, Any]:
     run_type_tokens = _split_query_list(run_types) if run_types is not None else None
-    if run_type_tokens is not None and "hindcast" in {token.lower() for token in run_type_tokens}:
-        _require_hindcast_access_role(request)
     try:
         return store.forecast_series(
             basin_version_id=basin_version_id,
@@ -350,14 +347,3 @@ def _bounded_qhh_latest_reflected_value(value: Any) -> str:
     if len(text) <= QHH_LATEST_REFLECTED_VALUE_LIMIT:
         return text
     return f"{text[: QHH_LATEST_REFLECTED_VALUE_LIMIT - 3]}..."
-
-
-def _require_hindcast_access_role(request: Request) -> None:
-    role = request.headers.get("X-User-Role")
-    if role is not None and role.strip().lower() in _HINDCAST_ACCESS_ROLES:
-        return
-    raise ApiError(
-        status_code=403,
-        code="PERMISSION_DENIED",
-        message="Analyst, operator, or admin role required for hindcast series.",
-    )

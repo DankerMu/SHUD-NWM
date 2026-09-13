@@ -164,8 +164,8 @@ Forbidden capabilities:
 Current residual / follow-up boundary:
 
 - `display_readonly` currently still registers some non-Slurm mutation-shaped
-  routes, including model registry and hindcast endpoints, that are protected by
-  auth checks and the readonly DB/deployment posture rather than by the #360
+  routes, including model registry endpoints, that are protected by auth checks
+  and the readonly DB/deployment posture rather than by the #360
   runtime role guard. Governance-1/Governance-4 follow-up work must decide
   whether to gate or split display mutation routes, or add display-wide
   fail-closed mutation tests. #360 only claims the display Slurm-route,

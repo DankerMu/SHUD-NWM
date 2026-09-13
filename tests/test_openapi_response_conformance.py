@@ -131,20 +131,19 @@ class _LifecycleModelRegistryStore(_ModelRegistryStore):
     `_update_model_lifecycle_state` (`:3143-3190`) -- alias
     `bv.checksum AS basin_checksum`, `rnv.checksum AS river_network_checksum`
     and `mv.properties_json AS mesh_properties_json`.
-    `_model_public_projection` (`:3601`) forces the two checksums to null but
-    keeps the keys, and (unlike `_model_asset_detail`, which pops it at `:3545`)
-    never removes `mesh_properties_json`; the route hands that dict straight to
-    `_ok` with no sanitizer (`apps/api/routes/models.py:629-640`). Validating
-    the thin stub row would let the schema drop these three keys unnoticed.
+    `_model_public_projection` forces the two checksums to null but keeps the
+    keys; the route hands that dict straight to `_ok` with no sanitizer
+    (`apps/api/routes/models.py:629-640`). Validating the thin stub row would
+    let the schema drop these two keys unnoticed. `mesh_properties_json` is
+    popped by the projection since #2038 (tightening: raw mesh properties no
+    longer reach the wire), so the stub no longer injects it and the schema no
+    longer declares it.
     """
 
     def model_lifecycle_operation(self, model_id: str, *, operation: str, **kwargs: Any) -> dict[str, Any]:
         result = super().model_lifecycle_operation(model_id, operation=operation, **kwargs)
         result["model"] = {
             **result["model"],
-            # `core.mesh_version.properties_json` is `JSONB NOT NULL DEFAULT '{}'`
-            # (db/migrations/000004_core.sql:52), so the join always yields an object.
-            "mesh_properties_json": {"shud_input_name": "alias-a"},
             # `_model_public_projection` nulls every lineage checksum it finds.
             "basin_checksum": None,
             "river_network_checksum": None,
@@ -603,8 +602,9 @@ ROUTE_CASES: tuple[RouteCase, ...] = (
             validator="required",
             apply=lambda body: _pop(body, ("data", "preflight")),
         ),
-        # `data.model` is the widest `ModelInstance` any route emits: the three
-        # join-projected keys below reach the client only here, and
+        # `data.model` is the widest `ModelInstance` any route emits: the two
+        # join-projected checksum keys below reach the client only here
+        # (#2038 tightening: `mesh_properties_json` is popped, its mutation removed), and
         # `lifecycle_state` is a `NOT NULL DEFAULT 'inactive'` column
         # (db/migrations/000022_model_asset_lifecycle.sql:2) that both
         # projections write unconditionally. `ModelInstance` has no
@@ -612,13 +612,6 @@ ROUTE_CASES: tuple[RouteCase, ...] = (
         # silently -- these value mutations are what make the declarations
         # load-bearing.
         extra_mutations=(
-            Mutation(
-                component="ModelInstance",
-                field="mesh_properties_json",
-                kind="value",
-                validator="type",
-                apply=lambda body: _put(body, ("data", "model", "mesh_properties_json"), "not-an-object"),
-            ),
             Mutation(
                 component="ModelInstance",
                 field="basin_checksum",

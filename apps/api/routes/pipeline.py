@@ -27,6 +27,7 @@ from services.artifacts import (
     safe_public_log_uri,
 )
 from services.orchestrator.persistence import PipelineJob, PipelineStore
+from services.orchestrator.public_evidence import _public_message
 from services.orchestrator.retry import (
     ManualRetryService,
     RetryConfig,
@@ -547,7 +548,10 @@ def retry_run(
         raise _api_error(error) from error
 
     if job.status == "submission_failed":
-        error_message = _safe_redacted_text(job.error_message or "Retry submission failed.")
+        # #1975: gateway stderr carries absolute sbatch paths; render them the
+        # way the sibling ``runtime_root_resolution`` does.  The persisted
+        # job row and pipeline event keep the raw text.
+        error_message = _public_error_message(job.error_message or "Retry submission failed.")
         details = {
             "run_id": job.run_id,
             "job_id": job.job_id,
@@ -949,6 +953,18 @@ def _safe_redacted_payload(value: Any) -> Any:
 def _safe_redacted_text(value: str) -> str:
     redacted = redact_payload(value)
     return redacted if isinstance(redacted, str) else str(redacted)
+
+
+def _public_error_message(value: str) -> str:
+    """Public rendering of a persisted job ``error_message``.
+
+    Secrets redaction plus path/URI token rendering (``[local-path]``,
+    ``[uri]``, ``[object-uri]``) through the shared public evidence renderer, so
+    route bodies match both retry lanes' ``runtime_root_resolution`` shape.
+    """
+
+    rendered = _public_message(value)
+    return rendered if isinstance(rendered, str) else str(rendered)
 
 
 def _safe_public_log_uri(value: str | None) -> str | None:
@@ -2268,7 +2284,7 @@ def _basin_result(job: PipelineJob) -> dict[str, Any]:
         "duration_seconds": _duration_seconds(job.started_at, job.finished_at),
         "retry_count": job.retry_count,
         "error_code": job.error_code,
-        "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
+        "error_message": _public_error_message(job.error_message) if job.error_message is not None else None,
         "log_uri": _safe_public_log_uri(job.log_uri),
     }
 
@@ -2292,7 +2308,7 @@ def _job_payload(job: PipelineJob, run_metadata: dict[str, str | None] | None = 
         "exit_code": job.exit_code,
         "retry_count": job.retry_count,
         "error_code": job.error_code,
-        "error_message": _safe_redacted_text(job.error_message) if job.error_message is not None else None,
+        "error_message": _public_error_message(job.error_message) if job.error_message is not None else None,
         "log_uri": _safe_public_log_uri(job.log_uri),
         "duration_seconds": _duration_seconds(job.started_at, job.finished_at),
     }

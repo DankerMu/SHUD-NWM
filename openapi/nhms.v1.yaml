@@ -4919,12 +4919,6 @@ components:
           anyOf:
           - type: string
           - type: 'null'
-        mesh_properties_json:
-          type: object
-          additionalProperties: true
-          description: mv.properties_json (core.mesh_version.properties_json, JSONB
-            NOT NULL DEFAULT '{}'). Emitted only by the lifecycle route, whose projection
-            -- unlike _model_asset_detail -- does not pop this key.
         shud_code_version:
           type: string
         rshud_code_version:

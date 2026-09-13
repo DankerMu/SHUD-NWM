@@ -168,7 +168,7 @@ def test_security_scheme_shapes_and_no_credentials() -> None:
 
 
 def test_dev_scheme_descriptions_gate_all_three_production_modes_and_live_backend() -> None:
-    # _production_mode() in apps/api/auth.py includes production, live, and
+    # _production_mode() in packages/common/request_auth.py includes production, live, and
     # live_idp, and auth_context_from_request() routes AUTH_BACKEND in
     # live/live_idp/oidc/saml straight to the live/release-blocked branch — so
     # the dev role header and dev bearer token are unavailable in all three
