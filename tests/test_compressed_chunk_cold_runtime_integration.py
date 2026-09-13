@@ -91,6 +91,7 @@ def test_isolated_cluster_production_runtime_not_probe_executor() -> None:
             bootstrap_extension(connection)
             _bootstrap_production_shaped_schema(connection)
             _assert_physical_parent_admission(connection)
+            _assert_reviewed_count_discriminator(connection, config)
             inventories = derive_bound_inventories(lambda sql, params=None: _execute(connection, sql, params))
             from tests.test_issue2224_origin_parity_integration import (
                 _assert_origin_parity_discriminator,
@@ -647,3 +648,104 @@ def _assert_physical_parent_admission(connection: Any) -> None:
     execute("DROP TABLE hydro.river_timeseries")
     execute("ALTER TABLE hydro.river_timeseries_saved RENAME TO river_timeseries")
     assert derive_bound_inventories(execute) == inventories
+
+
+def _assert_reviewed_count_discriminator(connection: Any, config: Any) -> None:
+    """The same physical mixed population feeds real census and independent G3."""
+    import contextlib
+    import io
+    import tempfile
+
+    from packages.common.compressed_chunk_cold_probe.cluster import connect
+    from scripts import node27_cold_residency_census as census
+    from scripts import node27_issue1895_cutoff_count as cutoff_count
+    from tests.test_issue2291_reviewed_census_count import private_json
+
+    def execute(sql, params=None):
+        return _execute(connection, sql, params)
+
+    def readonly(_dsn):
+        owned = connect(config)
+        owned.set_session(readonly=True, autocommit=True)
+        return owned
+
+    watermark = _WATERMARK + timedelta(days=21)
+    extra_start = datetime(2026, 6, 25, tzinfo=UTC)
+    before = execute("""SELECT chunk_schema, chunk_name FROM timescaledb_information.chunks
+        WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries'""")
+    before_names = {(row["chunk_schema"], row["chunk_name"]) for row in before}
+    execute("""CREATE TABLE met.issue2291_third (LIKE met.forcing_station_timeseries INCLUDING ALL)""")
+    try:
+        execute("SELECT create_hypertable('met.issue2291_third', 'valid_time', chunk_time_interval => interval '2 days')")
+        execute("""ALTER TABLE met.issue2291_third SET (
+            timescaledb.compress=true, timescaledb.compress_segmentby='forcing_version_id, station_id',
+            timescaledb.compress_orderby='variable, valid_time')""")
+        execute("INSERT INTO met.issue2291_third SELECT * FROM met.forcing_station_timeseries")
+        execute("SELECT compress_chunk(show_chunks('met.issue2291_third'))")
+        excluded = execute("""SELECT hypertable_name, chunk_schema, chunk_name, is_compressed
+            FROM timescaledb_information.chunks
+            WHERE hypertable_name IN ('river_timeseries_legacy', 'issue2291_third')""")
+        assert {row["hypertable_name"] for row in excluded} == {"river_timeseries_legacy", "issue2291_third"}
+        assert all(row["is_compressed"] for row in excluded)
+        with contextlib.closing(readonly("")) as read_connection:
+            original = census.observe_census(
+                census.CensusObserver(read_connection), require_count=4, lag_seconds=_LAG,
+                watermark=watermark, now_utc=watermark, head_sha=_HEAD,
+                database_url="postgresql://localhost/isolated",
+            )
+        assert original["verdict"] == "GO", original["blockers"]
+        assert original["required_group_count"] == original["resolved_group_count"] == 4
+        groups = original["groups"]
+        assert sorted(group["durable"]["hypertable_name"] for group in groups) == [
+            "forcing_station_timeseries", "river_timeseries", "river_timeseries", "river_timeseries",
+        ]
+        excluded_names = {(row["chunk_schema"], row["chunk_name"]) for row in excluded}
+        assert not excluded_names & {
+            (group["durable"]["origin_schema"], group["durable"]["origin_name"]) for group in groups
+        }
+        widths = {
+            group["durable"]["hypertable_name"]: (
+                datetime.fromisoformat(group["durable"]["range_end"].replace("Z", "+00:00"))
+                - datetime.fromisoformat(group["durable"]["range_start"].replace("Z", "+00:00"))
+            ) for group in groups
+        }
+        assert widths == {"river_timeseries": timedelta(days=1), "forcing_station_timeseries": timedelta(days=7)}
+        with tempfile.TemporaryDirectory(prefix="issue2291-count-") as temporary:
+            path, frozen = private_json(Path(temporary) / "private" / "original.json", original)
+
+            def observe_count():
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = cutoff_count.main(
+                        ["--original", str(path), "--original-sha256", frozen, "--reviewed-sha", _HEAD],
+                        env={"DATABASE_URL": "postgresql://localhost/isolated"},
+                        connect=readonly, watermark_fetcher=lambda dsn, connect=None: watermark,
+                    )
+                assert code == 0
+                return output.getvalue().strip()
+
+            assert observe_count() == "4"
+            execute("""INSERT INTO hydro.river_timeseries (
+                run_key, basin_version_key, river_network_version_key, river_segment_key,
+                valid_time, variable_e, value, unit_e, quality_flag_e)
+                VALUES (91, 1, 1, 91, %s, 'q_down', 9.0, 'm3/s', 'ok')""", (extra_start,))
+            extra = execute("""SELECT chunk_schema, chunk_name FROM timescaledb_information.chunks
+                WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries'""")
+            extra_names = {(row["chunk_schema"], row["chunk_name"]) for row in extra} - before_names
+            assert len(extra_names) == 1
+            execute("SELECT compress_chunk(show_chunks('hydro.river_timeseries'), if_not_compressed => true)")
+            assert observe_count() == "5"
+            with contextlib.closing(readonly("")) as read_connection:
+                surplus = census.observe_census(
+                    census.CensusObserver(read_connection), require_count=4, lag_seconds=_LAG,
+                    watermark=watermark, now_utc=watermark, head_sha=_HEAD,
+                    database_url="postgresql://localhost/isolated",
+                )
+            assert surplus["verdict"] == "NO_GO" and surplus["resolved_group_count"] == 5
+            assert len(surplus["groups"]) == 5
+    finally:
+        execute("DROP TABLE met.issue2291_third")
+        execute("SELECT drop_chunks('hydro.river_timeseries', older_than => %s)", (extra_start + timedelta(days=1),))
+    restored = execute("""SELECT chunk_schema, chunk_name FROM timescaledb_information.chunks
+        WHERE hypertable_schema='hydro' AND hypertable_name='river_timeseries'""")
+    assert {(row["chunk_schema"], row["chunk_name"]) for row in restored} == before_names
