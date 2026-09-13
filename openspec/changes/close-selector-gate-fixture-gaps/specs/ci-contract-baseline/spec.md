@@ -83,12 +83,17 @@ The #1656 root-drop mutant test SHALL, after replacing `TIMESCALE_WRITE_GUARD_IN
 
 ### Requirement: registry partition additions MUST be registered, never backfilled
 
-The #1913 registry-partition guards SHALL compare the partitioned tree against the frozen oracle united with a tracked additions ledger (`tests/fixtures/basins_registry_partition_additions.json`). The frozen oracle SHALL stay byte-identical and every frozen definition SHALL remain byte- and AST-identical. A ledger record SHALL name its issue, a resolvable base commit that is an ancestor of `HEAD` and at whose blob the owner partition exists and does not define the name, one of the six partitions other than the retained core `tests/test_basins_registry_import.py` as owner, a name absent from the frozen rows, the pinned definition row, and its collected and integration node suffixes. Collection, integration, per-owner count, definition identity and execution-count guards SHALL expect exactly the frozen values plus the registered additions. A diff to the ledger file SHALL select `tests/test_select_ci_tests.py`.
+The #1913 registry-partition guards SHALL compare the partitioned tree against the frozen oracle united with a tracked additions ledger (`tests/fixtures/basins_registry_partition_additions.json`). The frozen oracle SHALL stay byte-identical and every frozen definition SHALL remain byte- and AST-identical. A ledger record SHALL name its issue, a resolvable base commit that is an ancestor of `HEAD` and at whose blob the owner partition exists and does not define the name, one of the six partitions other than the retained core `tests/test_basins_registry_import.py` as owner, a name absent from the frozen rows, the pinned definition row (a list of seven strings whose first field equals the record's owner), and its collected and integration node suffixes; a record with integration node suffixes SHALL be owned by a partition in the registry `database:` authority. Collection, integration, per-owner count, definition identity and execution-count guards SHALL expect exactly the frozen values plus the registered additions. A diff to the ledger file SHALL select `tests/test_select_ci_tests.py`.
 
 #### Scenario: an unregistered test addition fails by name
 
 - **WHEN** a test function is added to a partition without a ledger record
 - **THEN** the definition guard fails naming `<partition>::<name>` and prints the observed row
+
+#### Scenario: a deleted definition fails by name
+
+- **WHEN** a frozen definition, or a registered addition, is removed from its partition
+- **THEN** the definition, collection and integration guards fail naming `<partition>::<name>`
 
 #### Scenario: a registered addition passes
 

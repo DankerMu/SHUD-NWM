@@ -17228,6 +17228,19 @@ def _registry_ledger_violations(
         names.add(name)
         if name in frozen_rows:
             violations.append(f"ledger.name_frozen: {label} is a frozen baseline definition, not an addition")
+        row = record["row"]
+        if not (isinstance(row, list) and len(row) == 7 and all(isinstance(field, str) for field in row)):
+            violations.append(f"ledger.row_shape: {label} row must be a list of 7 strings, got {row!r}")
+        elif row[0] != owner:
+            # The definitions guard checks `row` at row[0]'s file while the owner allow-list,
+            # provenance blob and owner counts use `owner`: the two must be one partition.
+            violations.append(f"ledger.row_owner_mismatch: {label} row[0] {row[0]!r} != owner {owner!r}")
+        if integration_nodes and owner not in REGISTRY_PARTITION_DATABASE_AUTHORITY:
+            # An integration node only runs where its owner opens the real-db lane.
+            violations.append(
+                f"ledger.integration_owner_not_database_authority: {label} owner {owner!r} has integration "
+                f"nodes but is not one of {sorted(REGISTRY_PARTITION_DATABASE_AUTHORITY)}"
+            )
         if owner not in allowed_owners:
             violations.append(
                 f"ledger.owner_not_allowed: {label} owner {owner!r} is not one of {sorted(allowed_owners)}"
@@ -17488,6 +17501,18 @@ def _registry_addition_integration_nodes(additions: Sequence[dict[str, Any]]) ->
     return [node for record in additions for node in record["integration_nodes"]]
 
 
+def _registry_owner_of(oracle: dict[str, Any], additions: Sequence[dict[str, Any]]) -> dict[str, str]:
+    """Definition name -> owning partition over ``frozen rows ∪ additions``."""
+    owner_of = {name: row[0] for name, row in oracle["rows"].items()}
+    owner_of.update({record["name"]: record["owner"] for record in additions})
+    return owner_of
+
+
+def _registry_owned_nodes(owner_of: dict[str, str], nodes: Iterable[str]) -> list[str]:
+    """``<owner>::<node>`` for each node (``?`` when the definition is unknown)."""
+    return sorted(f"{owner_of.get(node.split('[', 1)[0], '?')}::{node}" for node in nodes)
+
+
 def _registry_assert_collected_suffixes(
     oracle: dict[str, Any],
     additions: Sequence[dict[str, Any]],
@@ -17498,7 +17523,8 @@ def _registry_assert_collected_suffixes(
     expected = sorted([*oracle["node_suffixes"], *added])
     assert sorted(observed) == expected, (
         f"collected suffixes != frozen ∪ registered additions: "
-        f"unregistered nodes={sorted(set(observed) - set(expected))} missing={sorted(set(expected) - set(observed))}"
+        f"unregistered nodes={sorted(set(observed) - set(expected))} "
+        f"missing={_registry_owned_nodes(_registry_owner_of(oracle, additions), set(expected) - set(observed))}"
     )
     assert len(observed) == len(set(observed)) == 96 + len(added), "a suffix vanished or landed in two partitions"
     assert _registry_digest_lines(sorted(set(observed) - set(added))) == oracle["digests"]["suffix"]
@@ -17514,11 +17540,11 @@ def _registry_assert_integration_suffixes(
     expected = sorted([*oracle["integration_suffixes"], *added])
     assert sorted(observed) == expected, (
         f"integration suffixes != frozen ∪ registered additions: "
-        f"unregistered nodes={sorted(set(observed) - set(expected))} missing={sorted(set(expected) - set(observed))}"
+        f"unregistered nodes={sorted(set(observed) - set(expected))} "
+        f"missing={_registry_owned_nodes(_registry_owner_of(oracle, additions), set(expected) - set(observed))}"
     )
     assert _registry_digest_lines(sorted(set(observed) - set(added))) == oracle["digests"]["integration_suffix"]
-    owner_of = {name: row[0] for name, row in oracle["rows"].items()}
-    owner_of.update({record["name"]: record["owner"] for record in additions})
+    owner_of = _registry_owner_of(oracle, additions)
     owner_counts = Counter(owner_of[suffix.split("[", 1)[0]] for suffix in observed)
     expected_counts = Counter(
         {
@@ -17583,9 +17609,10 @@ def _registry_definition_violations(
                 )
             elif observed != tuple(expected):
                 violations.append(f"{owner}::{node.name} drifted: observed={observed} expected={tuple(expected)}")
-    missing = sorted((set(rows) | set(added_rows)) - set(observed_by_name))
+    missing = (set(rows) | set(added_rows)) - set(observed_by_name)
     if missing:
-        violations.append(f"missing definitions: {missing}")
+        owned = _registry_owned_nodes(_registry_owner_of(oracle, additions), missing)
+        violations.append(f"missing definitions: {owned}")
     frozen_observed = {name: owner for name, owner in observed_by_name.items() if name in rows}
     if len(frozen_observed) != 94:
         violations.append(f"frozen definition count {len(frozen_observed)} != 94")
@@ -17712,6 +17739,38 @@ REGISTRY_PARTITION_DEMO_NAME = "test_registry_import_viewer_role_writes_no_model
 # #1903 transition merge-base), so the live git reader's happy path is exercised too.
 REGISTRY_PARTITION_DEMO_BASE_COMMIT = "27dc6aab5a0772c5489b04049eb483a660cf60d8"
 REGISTRY_PARTITION_DEMO_FROZEN_NAME = "test_registry_import_checksum_conflict_rolls_back"
+REGISTRY_PARTITION_DEMO_AUTH_OWNER = "tests/test_basins_registry_import_auth.py"
+REGISTRY_PARTITION_DEMO_PARSER_OWNER = "tests/test_basins_registry_import_parser.py"
+REGISTRY_PARTITION_DEMO_AUTH_NAME = "test_argparse_import_basins_registry_rejects_unknown_auth_role_before_preparation"
+_REGISTRY_PARTITION_DEMO_AUTH_ADDITION = '''
+
+def test_argparse_import_basins_registry_rejects_unknown_auth_role_before_preparation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _, _, inventory_path, manifest_path, _ = _write_registry_fixture(tmp_path)
+    report_path = tmp_path / "import-report.json"
+
+    exit_code = _argparse_main(
+        [
+            "import-basins-registry",
+            "--inventory",
+            str(inventory_path),
+            "--package-manifest",
+            str(manifest_path),
+            "--output",
+            str(report_path),
+            "--auth-actor-id",
+            "cli-model-admin",
+            "--auth-role",
+            "not-a-role",
+        ]
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().err)["status"] == "blocked"
+    assert not report_path.exists()
+'''
 _REGISTRY_PARTITION_DEMO_ADDITION = '''
 
 @pytest.mark.integration
@@ -17763,10 +17822,24 @@ def _registry_demo_reader(owner_text: str) -> Callable[[str], str]:
     return read
 
 
+def _registry_additions_with(*records: dict[str, Any]) -> list[dict[str, Any]]:
+    """The REAL ledger's additions plus in-memory proof records (never the bare records)."""
+    return [*_registry_partition_additions(), *records]
+
+
+def _registry_without_definition(text: str, name: str) -> str:
+    """``text`` minus the top-level function ``name`` (decorators included)."""
+    lines = text.splitlines(keepends=True)
+    node = next(n for n in ast.parse(text).body if isinstance(n, ast.FunctionDef) and n.name == name)
+    start = min([node.lineno, *(decorator.lineno for decorator in node.decorator_list)])
+    assert isinstance(node.end_lineno, int)
+    return "".join(lines[: start - 1] + lines[node.end_lineno :])
+
+
 def _registry_demo_record() -> dict[str, Any]:
     """Build the demo record by the written procedure: copy the checker's printed row."""
     violations = _registry_definition_violations(
-        _registry_partition_oracle(), [], _registry_demo_reader(_registry_demo_text())
+        _registry_partition_oracle(), _registry_additions_with(), _registry_demo_reader(_registry_demo_text())
     )
     assert len(violations) == 1, violations
     return {
@@ -17890,6 +17963,25 @@ def _registry_first_record(ledger: dict[str, Any]) -> dict[str, Any]:
             lambda ledger: _registry_first_record(ledger).update(owner=REGISTRY_PARTITION_HELPER),
             "ledger.owner_not_allowed",
         ),
+        (
+            lambda ledger: _registry_first_record(ledger)["row"].__setitem__(0, REGISTRY_PARTITION_RETAINED_CORE),
+            "ledger.row_owner_mismatch",
+        ),
+        (
+            lambda ledger: _registry_first_record(ledger)["row"].__setitem__(0, REGISTRY_PARTITION_DEMO_AUTH_OWNER),
+            "ledger.row_owner_mismatch",
+        ),
+        (
+            lambda ledger: _registry_first_record(ledger).update(row=[REGISTRY_PARTITION_DEMO_OWNER, "1" * 64]),
+            "ledger.row_shape",
+        ),
+        (
+            lambda ledger: _registry_first_record(ledger).update(
+                owner=REGISTRY_PARTITION_DEMO_PARSER_OWNER,
+                row=[REGISTRY_PARTITION_DEMO_PARSER_OWNER, *_registry_first_record(ledger)["row"][1:]],
+            ),
+            "ledger.integration_owner_not_database_authority",
+        ),
     ),
     ids=[
         "wrong-schema",
@@ -17905,6 +17997,10 @@ def _registry_first_record(ledger: dict[str, Any]) -> dict[str, Any]:
         "name-in-frozen-rows",
         "owner-retained-core",
         "owner-helper",
+        "row-owner-retained-core-under-allowed-owner",
+        "row-owner-auth-under-db-owner",
+        "row-malformed",
+        "integration-owner-outside-database-authority",
     ],
 )
 def test_registry_partition_ledger_checker_names_each_record_rule(
@@ -17969,7 +18065,11 @@ def test_registry_partition_ledger_checker_names_an_unknown_base_commit_against_
 
 
 def test_registry_partition_ledger_checker_accepts_a_valid_record() -> None:
+    # GREEN arm of the row-owner and database-authority rules: a DB-owned integration record.
     calls: list[tuple[str, ...]] = []
+    record = _registry_first_record(_registry_valid_ledger())
+    assert record["integration_nodes"] and record["owner"] in REGISTRY_PARTITION_DATABASE_AUTHORITY
+    assert record["row"][0] == record["owner"]
 
     violations = _registry_ledger_violations(
         _registry_partition_oracle(), _registry_valid_ledger(), _registry_valid_git(calls)
@@ -17982,7 +18082,7 @@ def test_registry_partition_ledger_checker_accepts_a_valid_record() -> None:
 def test_registry_partition_unregistered_addition_reds_the_definitions_checker_by_name() -> None:
     # 5.4(a): no record -> red naming `<partition>::<name>` and printing the observed row.
     violations = _registry_definition_violations(
-        _registry_partition_oracle(), [], _registry_demo_reader(_registry_demo_text())
+        _registry_partition_oracle(), _registry_additions_with(), _registry_demo_reader(_registry_demo_text())
     )
 
     assert len(violations) == 1, violations
@@ -18000,12 +18100,16 @@ def test_registry_partition_registered_addition_passes_every_rebased_guard() -> 
     oracle = _registry_partition_oracle()
     record = _registry_demo_record()
 
-    assert _registry_definition_violations(oracle, [record], _registry_demo_reader(_registry_demo_text())) == []
-    _registry_assert_collected_suffixes(oracle, [record], [*oracle["node_suffixes"], REGISTRY_PARTITION_DEMO_NAME])
-    _registry_assert_integration_suffixes(
-        oracle, [record], [*oracle["integration_suffixes"], REGISTRY_PARTITION_DEMO_NAME]
+    additions = _registry_additions_with(record)
+
+    assert _registry_definition_violations(oracle, additions, _registry_demo_reader(_registry_demo_text())) == []
+    _registry_assert_collected_suffixes(
+        oracle, additions, [*oracle["node_suffixes"], *_registry_addition_nodes(additions)]
     )
-    ledger = {"schema": REGISTRY_PARTITION_ADDITIONS_SCHEMA, "additions": [record]}
+    _registry_assert_integration_suffixes(
+        oracle, additions, [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)]
+    )
+    ledger = {"schema": REGISTRY_PARTITION_ADDITIONS_SCHEMA, "additions": additions}
     assert _registry_ledger_violations(oracle, ledger, _registry_run_git) == []
 
 
@@ -18015,7 +18119,9 @@ def test_registry_partition_registered_addition_reds_when_its_body_drifts() -> N
     edited = _registry_demo_text().replace('basin_slug="basin-a-viewer-role"', 'basin_slug="basin-a-viewer-role-2"')
     assert edited != _registry_demo_text()
 
-    violations = _registry_definition_violations(_registry_partition_oracle(), [record], _registry_demo_reader(edited))
+    violations = _registry_definition_violations(
+        _registry_partition_oracle(), _registry_additions_with(record), _registry_demo_reader(edited)
+    )
 
     assert len(violations) == 1, violations
     assert violations[0].startswith(f"{REGISTRY_PARTITION_DEMO_OWNER}::{REGISTRY_PARTITION_DEMO_NAME} drifted:")
@@ -18027,7 +18133,9 @@ def test_registry_partition_registered_addition_cannot_cover_a_frozen_definition
     edited = _registry_demo_text().replace('"package-sha-mutated"', '"package-sha-mutated-again"')
     assert edited.count("package-sha-mutated-again") == 1
 
-    violations = _registry_definition_violations(_registry_partition_oracle(), [record], _registry_demo_reader(edited))
+    violations = _registry_definition_violations(
+        _registry_partition_oracle(), _registry_additions_with(record), _registry_demo_reader(edited)
+    )
 
     assert len(violations) == 1, violations
     assert violations[0].startswith(f"{REGISTRY_PARTITION_DEMO_OWNER}::{REGISTRY_PARTITION_DEMO_FROZEN_NAME} drifted:")
@@ -18044,12 +18152,13 @@ def test_registry_partition_record_naming_a_frozen_definition_reds_the_ledger() 
         "nodes": [f"{REGISTRY_PARTITION_DEMO_FROZEN_NAME}[registered]"],
         "integration_nodes": [],
     }
-    ledger = {"schema": REGISTRY_PARTITION_ADDITIONS_SCHEMA, "additions": [record]}
+    ledger = {"schema": REGISTRY_PARTITION_ADDITIONS_SCHEMA, "additions": _registry_additions_with(record)}
 
     violations = _registry_ledger_violations(oracle, ledger, _registry_run_git)
 
     assert any(violation.startswith("ledger.name_frozen:") for violation in violations), violations
-    assert _registry_definition_violations(oracle, [record], _registry_read_partition_text) == []
+    inert = _registry_definition_violations(oracle, _registry_additions_with(record), _registry_read_partition_text)
+    assert inert == []
 
 
 def test_registry_partition_expected_execution_counts_are_frozen_literals_plus_additions() -> None:
@@ -18092,6 +18201,88 @@ def test_registry_partition_unchanged_ledger_cannot_absorb_a_tree_addition() -> 
             additions,
             [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions), node],
         )
+
+
+def test_registry_partition_deleted_frozen_definition_is_named_with_its_partition() -> None:
+    # AC3 deletion arm: a frozen definition removed from the DB partition is named as
+    # `<partition>::<name>` by the definitions, collection and integration checks.
+    oracle = _registry_partition_oracle()
+    additions = _registry_additions_with()
+    owned = f"{REGISTRY_PARTITION_DEMO_OWNER}::{REGISTRY_PARTITION_DEMO_FROZEN_NAME}"
+    text = _registry_without_definition(
+        _registry_read_partition_text(REGISTRY_PARTITION_DEMO_OWNER), REGISTRY_PARTITION_DEMO_FROZEN_NAME
+    )
+
+    violations = _registry_definition_violations(oracle, additions, _registry_demo_reader(text))
+    assert any(v.startswith("missing definitions:") and repr(owned) in v for v in violations), violations
+    node = REGISTRY_PARTITION_DEMO_FROZEN_NAME
+    with pytest.raises(AssertionError, match=re.escape(repr(owned))):
+        nodes = [*oracle["node_suffixes"], *_registry_addition_nodes(additions)]
+        _registry_assert_collected_suffixes(oracle, additions, [s for s in nodes if s != node])
+    integration = [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)]
+    assert node in integration
+    with pytest.raises(AssertionError, match=re.escape(repr(owned))):
+        _registry_assert_integration_suffixes(oracle, additions, [s for s in integration if s != node])
+
+
+def test_registry_partition_registered_addition_absent_from_the_tree_is_named_with_its_partition() -> None:
+    # AC3 deletion arm for an addition: a registered record whose definition is gone.
+    oracle = _registry_partition_oracle()
+    record = _registry_demo_record()
+    additions = _registry_additions_with(record)
+    owned = f"{REGISTRY_PARTITION_DEMO_OWNER}::{REGISTRY_PARTITION_DEMO_NAME}"
+
+    violations = _registry_definition_violations(oracle, additions, _registry_read_partition_text)
+    assert violations == [f"missing definitions: {[owned]}"], violations
+    with pytest.raises(AssertionError, match=re.escape(repr(owned))):
+        _registry_assert_collected_suffixes(
+            oracle, additions, [*oracle["node_suffixes"], *_registry_addition_nodes(additions)[:-1]]
+        )
+    with pytest.raises(AssertionError, match=re.escape(repr(owned))):
+        _registry_assert_integration_suffixes(
+            oracle, additions, [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)[:-1]]
+        )
+
+
+def test_registry_partition_proofs_hold_with_a_non_empty_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The proofs above read the REAL ledger: simulate a first genuine registered addition in
+    # another allowed partition (auth, in memory) and re-run their core GREEN/RED arms.
+    module = sys.modules[__name__]
+    oracle = _registry_partition_oracle()
+    real_read = _registry_read_partition_text
+    auth_text = real_read(REGISTRY_PARTITION_DEMO_AUTH_OWNER) + _REGISTRY_PARTITION_DEMO_AUTH_ADDITION
+
+    def read(path: str) -> str:
+        return auth_text if path == REGISTRY_PARTITION_DEMO_AUTH_OWNER else real_read(path)
+
+    printed = _registry_definition_violations(oracle, [], read)
+    assert len(printed) == 1 and printed[0].startswith(f"{REGISTRY_PARTITION_DEMO_AUTH_OWNER}::"), printed
+    auth_record = {
+        "issue": 2183,
+        "base_commit": REGISTRY_PARTITION_DEMO_BASE_COMMIT,
+        "owner": REGISTRY_PARTITION_DEMO_AUTH_OWNER,
+        "name": REGISTRY_PARTITION_DEMO_AUTH_NAME,
+        "row": json.loads(printed[0].split("observed row=", 1)[1]),
+        "nodes": [REGISTRY_PARTITION_DEMO_AUTH_NAME],
+        "integration_nodes": [],
+    }
+    ledger = {"schema": REGISTRY_PARTITION_ADDITIONS_SCHEMA, "additions": [auth_record]}
+    assert _registry_ledger_violations(oracle, ledger, _registry_run_git) == []
+    monkeypatch.setattr(module, "_registry_read_partition_text", read)
+    monkeypatch.setattr(module, "_registry_partition_additions", lambda: [dict(auth_record)])
+    assert _registry_definition_violations(oracle, [auth_record], read) == []
+
+    for proof in (
+        test_registry_partition_unregistered_addition_reds_the_definitions_checker_by_name,
+        test_registry_partition_registered_addition_passes_every_rebased_guard,
+        test_registry_partition_registered_addition_reds_when_its_body_drifts,
+        test_registry_partition_registered_addition_cannot_cover_a_frozen_definition_edit,
+        test_registry_partition_record_naming_a_frozen_definition_reds_the_ledger,
+        test_registry_partition_unchanged_ledger_cannot_absorb_a_tree_addition,
+        test_registry_partition_deleted_frozen_definition_is_named_with_its_partition,
+        test_registry_partition_registered_addition_absent_from_the_tree_is_named_with_its_partition,
+    ):
+        proof()
 
 
 def test_registry_partition_ledger_checker_reads_before_state_only_through_git(
@@ -18409,9 +18600,11 @@ def test_registry_partition_database_authority_is_the_exact_eight_path_union() -
     assert sorted(oracle["database_authority"]["exact_paths"]) == sorted(REGISTRY_PARTITION_DATABASE_AUTHORITY)
     assert sorted(oracle["database_authority"]["absent_paths"]) == sorted(REGISTRY_PARTITION_DATABASE_ABSENT)
     _registry_database_contract(observed, oracle["database_authority"]["baseline_patterns"])
-    # The 17 frozen integration suffixes bind suffix -> frozen owner -> an exact literal.
-    owner_of = {name: row[0] for name, row in oracle["rows"].items()}
-    for suffix in oracle["integration_suffixes"]:
+    # The 17 frozen integration suffixes (plus registered integration additions, #2183)
+    # bind suffix -> owner -> an exact literal.
+    additions = _registry_partition_additions()
+    owner_of = _registry_owner_of(oracle, additions)
+    for suffix in [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)]:
         owner = owner_of[suffix.split("[", 1)[0]]
         assert any(fnmatch.fnmatch(owner, pattern) for pattern in observed), (
             f"integration owner {owner} for {suffix} matches no database pattern"
@@ -18458,8 +18651,10 @@ def test_registry_partition_database_edge_deletion_is_independent_and_unrescued(
     catch_alls = [pattern for pattern in remaining if fnmatch.fnmatch(sentinel, pattern)]
     assert not catch_alls, f"catch-all `database:` patterns would rescue {target}: {catch_alls}"
     oracle = _registry_partition_oracle()
-    owner_of = {name: row[0] for name, row in oracle["rows"].items()}
-    other_owners = {owner_of[suffix.split("[", 1)[0]] for suffix in oracle["integration_suffixes"]} - {target}
+    additions = _registry_partition_additions()
+    owner_of = _registry_owner_of(oracle, additions)
+    integration_suffixes = [*oracle["integration_suffixes"], *_registry_addition_integration_nodes(additions)]
+    other_owners = {owner_of[suffix.split("[", 1)[0]] for suffix in integration_suffixes} - {target}
     for owner in other_owners:
         assert any(fnmatch.fnmatch(owner, pattern) for pattern in remaining), (
             f"deleting {target} unroutes integration owner {owner}"
