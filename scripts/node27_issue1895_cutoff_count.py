@@ -92,6 +92,9 @@ def main(
     except (Issue1895ReadinessError, CensusError, ColdRuntimeError, DisplayWatermarkError) as error:
         print(getattr(error, "code", "CUTOFF_COUNT_REFUSED"), file=sys.stderr)
         return 1
+    except Exception:  # Residual driver/OS errors must never echo connection details.
+        print("CUTOFF_COUNT_REFUSED", file=sys.stderr)
+        return 1
     finally:
         if owned is not None:
             close_observer_connection(owned)

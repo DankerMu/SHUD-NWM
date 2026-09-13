@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind the G5 pre-movement census against the original six-group preimage."""
+"""Bind the G5 pre-movement census against the reviewed original census preimage."""
 
 from __future__ import annotations
 

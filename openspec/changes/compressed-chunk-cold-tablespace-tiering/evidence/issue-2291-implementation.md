@@ -81,3 +81,35 @@ the final tree after this proof; its source remains at the tests-only commit.
 Default full regression, independent code cross-review/final review and CI are
 still separate premerge requirements. No preparation result authorizes
 production G0-G8 or closes #1895/#1891. #2291 merge requires a new human decision.
+
+## Round1 wrapper finding and tests-first repair
+
+Four independent seats reviewed integrated
+`2f96addbac5f95ec0bb4a9b73bc3b82d4aa47c26`. Correctness's initial attempt exited
+without a verdict and was recovered as the same seat/round; no counter reset.
+Only CAND-SP-01 remained: wrapper/P1, independently CONFIRMED/FIX_NOW by
+CountVerifyWrapper. G3's second observation opener/session could emit a raw
+driver/OS traceback after successful watermark. Real credential leakage was
+not proven; the deterministic regression injects a distinctive fake DSN marker.
+
+At tests-only `9491cad36ffa38cbf621fa10df2b4f9e098c15b8`, node27 executed:
+
+```sh
+uv run --no-sync pytest -q tests/test_issue2291_reviewed_census_count.py \
+  -k cutoff_count_closes_post_watermark_driver_failures
+```
+
+All4 OS/driver × open/session cases failed semantically (96 deselected,0.52s),
+after the first watermark connection succeeded and closed. Raw exceptions escaped
+instead of stable refusal; no missing import/signature failure was counted.
+`wrapper-red-node27.log` and `run-wrapper-red-node27.sh` bind the evidence.
+
+The repair adds the existing census-style residual public exception boundary
+only to new G3 main; typed refusal codes and finally cleanup remain. G8 and shared
+connection owners are untouched. Stale six-group G5 help is removed as a cleanup
+rider. Corrected-head green and round2/final/full/CI evidence remain separate.
+
+The pre-integration full baseline at
+`a18def5da632068370f1af2303182ba758330829` completed19837 passed,330 skipped,
+1 optional missing-ecCodes warning (3591.90s). It is not evidence for the
+integrated repaired head; that head requires its own full regression.
