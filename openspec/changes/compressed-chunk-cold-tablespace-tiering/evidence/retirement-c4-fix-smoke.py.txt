@@ -1,0 +1,422 @@
+"""Disposable actual-CLI/real-Node C4 proof. Synthetic fixture, never live PASS.
+
+Parent runs this on isolated node27. Fresh private subdir per case. Uses the
+shipping CLI through /usr/bin/node indirectly; freeze is full-precision then
+sleep 1 before the second bracket.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path.cwd()))
+from tests.test_node27_c4_production_acceptance import write_closed_c4_fixture
+
+REPO = Path.cwd()
+CLI = [sys.executable, str(REPO / "scripts/node27_c4_production_acceptance.py")]
+FRONTEND_ORIGIN = "https://display.example.test"
+API_ORIGIN = "https://api.example.test"
+BASIN_ID = "basins_qhh"
+SEGMENT_ID = "basins_qhh_shud_reach_000001"
+PARENT_MODE = 0o700
+FILE_MODE = 0o600
+
+
+def _private_root(prefix: str) -> Path:
+    root = Path(tempfile.mkdtemp(prefix=prefix, dir=os.environ.get("TMPDIR") or None))
+    os.chmod(root, PARENT_MODE)
+    return root
+
+
+def _write_approved(path: Path, sha: str) -> None:
+    document = {"status": "PASS", "head_sha": sha, "reviewed_sha": sha}
+    path.write_text(json.dumps(document, separators=(",", ":")))
+    os.chmod(path, FILE_MODE)
+
+
+def _invoke(args: list[str], *, expected: int = 0, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(CLI + args, capture_output=True, text=True, timeout=30, cwd=cwd or REPO)
+    assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
+    return result
+
+
+def _replace_same_bytes_new_inode(path: Path) -> None:
+    original = path.read_bytes()
+    sibling = path.with_name(f".{path.name}.replacement")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(sibling, flags, FILE_MODE)
+    try:
+        os.write(fd, original)
+        os.fsync(fd)
+        os.fchmod(fd, FILE_MODE)
+    finally:
+        os.close(fd)
+    os.unlink(path)
+    os.rename(sibling, path)
+    os.chmod(path, FILE_MODE)
+
+
+def _reserialize_same_semantics(path: Path) -> None:
+    document = json.loads(path.read_text())
+    rewritten = json.dumps(document, indent=2, sort_keys=True).encode("utf-8")
+    assert rewritten != path.read_bytes()
+    os.chmod(path, 0o600)
+    path.write_bytes(rewritten)
+    os.chmod(path, FILE_MODE)
+
+
+def case_positive_and_sha() -> dict[str, object]:
+    root = _private_root("c4-cli-positive-")
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    approved = root / "approved.json"
+    receipt = root / "receipt.json"
+    freeze = root / "freeze.json"
+    binding = root / "binding.json"
+    acceptance = root / "acceptance.json"
+    _write_approved(approved, sha)
+    freeze_result = _invoke(
+        [
+            "freeze",
+            "--approved-record",
+            str(approved),
+            "--reviewed-sha",
+            sha,
+            "--receipt",
+            str(receipt),
+            "--frontend-origin",
+            FRONTEND_ORIGIN,
+            "--api-origin",
+            API_ORIGIN,
+            "--basin-id",
+            BASIN_ID,
+            "--segment-id",
+            SEGMENT_ID,
+            "--output",
+            str(freeze),
+        ]
+    )
+    time.sleep(1)
+    start = int(time.time())
+    end = start
+    write_closed_c4_fixture(receipt, cmd_start=start, cmd_end=end)
+    freeze_bytes = freeze.read_bytes()
+    bind_result = _invoke(
+        [
+            "bind",
+            "--freeze",
+            str(freeze),
+            "--reviewed-sha",
+            sha,
+            "--cmd-start",
+            str(start),
+            "--cmd-end",
+            str(end),
+            "--output",
+            str(binding),
+        ]
+    )
+    verify_result = _invoke(
+        [
+            "verify",
+            "--freeze",
+            str(freeze),
+            "--binding",
+            str(binding),
+            "--reviewed-sha",
+            sha,
+            "--output",
+            str(acceptance),
+        ]
+    )
+    assert json.loads(acceptance.read_text())["status"] == "PASS"
+    assert freeze.read_bytes() == freeze_bytes
+    refused = root / "refused.json"
+    wrong_sha = "a" * 40 if sha != "a" * 40 else "b" * 40
+    sha_result = _invoke(
+        [
+            "bind",
+            "--freeze",
+            str(freeze),
+            "--reviewed-sha",
+            wrong_sha,
+            "--cmd-start",
+            str(start),
+            "--cmd-end",
+            str(end),
+            "--output",
+            str(refused),
+        ],
+        expected=1,
+    )
+    assert not refused.exists()
+    assert freeze.read_bytes() == freeze_bytes
+    return {
+        "label": "SYNTHETIC_FIXTURE_NOT_LIVE_PASS",
+        "case": "positive-and-sha",
+        "stdout": [freeze_result.stdout, bind_result.stdout, verify_result.stdout],
+        "stderr_sha": sha_result.stderr,
+        "codes": ["C4_SHA_MISMATCH"] if "C4_SHA_MISMATCH" in sha_result.stderr else [sha_result.stderr],
+        "root": str(root),
+    }
+
+
+def case_status_not_pass() -> dict[str, object]:
+    root = _private_root("c4-cli-status-")
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    approved = root / "approved.json"
+    receipt = root / "receipt.json"
+    freeze = root / "freeze.json"
+    binding = root / "binding.json"
+    _write_approved(approved, sha)
+    freeze_result = _invoke(
+        [
+            "freeze",
+            "--approved-record",
+            str(approved),
+            "--reviewed-sha",
+            sha,
+            "--receipt",
+            str(receipt),
+            "--frontend-origin",
+            FRONTEND_ORIGIN,
+            "--api-origin",
+            API_ORIGIN,
+            "--basin-id",
+            BASIN_ID,
+            "--segment-id",
+            SEGMENT_ID,
+            "--output",
+            str(freeze),
+        ]
+    )
+    time.sleep(1)
+    start = int(time.time())
+    end = start
+    write_closed_c4_fixture(receipt, cmd_start=start, cmd_end=end)
+    document = json.loads(receipt.read_text())
+    document["status"] = "FAIL"
+    os.chmod(receipt, 0o600)
+    receipt.write_text(json.dumps(document, separators=(",", ":")))
+    os.chmod(receipt, FILE_MODE)
+    freeze_bytes = freeze.read_bytes()
+    result = _invoke(
+        [
+            "bind",
+            "--freeze",
+            str(freeze),
+            "--reviewed-sha",
+            sha,
+            "--cmd-start",
+            str(start),
+            "--cmd-end",
+            str(end),
+            "--output",
+            str(binding),
+        ],
+        expected=1,
+    )
+    assert "C4_BINDER_FAILED:" in result.stderr
+    assert not binding.exists()
+    assert freeze.read_bytes() == freeze_bytes
+    return {
+        "label": "SYNTHETIC_FIXTURE_NOT_LIVE_PASS",
+        "case": "status-not-pass",
+        "stdout_freeze": freeze_result.stdout,
+        "stderr": result.stderr,
+        "codes": ["C4_BINDER_FAILED"],
+        "binding_published": False,
+        "freeze_unchanged": True,
+        "root": str(root),
+    }
+
+
+def case_inode_replacement() -> dict[str, object]:
+    root = _private_root("c4-cli-inode-")
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    approved = root / "approved.json"
+    receipt = root / "receipt.json"
+    freeze = root / "freeze.json"
+    binding = root / "binding.json"
+    acceptance = root / "acceptance.json"
+    _write_approved(approved, sha)
+    _invoke(
+        [
+            "freeze",
+            "--approved-record",
+            str(approved),
+            "--reviewed-sha",
+            sha,
+            "--receipt",
+            str(receipt),
+            "--frontend-origin",
+            FRONTEND_ORIGIN,
+            "--api-origin",
+            API_ORIGIN,
+            "--basin-id",
+            BASIN_ID,
+            "--segment-id",
+            SEGMENT_ID,
+            "--output",
+            str(freeze),
+        ]
+    )
+    time.sleep(1)
+    start = int(time.time())
+    end = start
+    write_closed_c4_fixture(receipt, cmd_start=start, cmd_end=end)
+    _invoke(
+        [
+            "bind",
+            "--freeze",
+            str(freeze),
+            "--reviewed-sha",
+            sha,
+            "--cmd-start",
+            str(start),
+            "--cmd-end",
+            str(end),
+            "--output",
+            str(binding),
+        ]
+    )
+    original_ino = receipt.stat().st_ino
+    _replace_same_bytes_new_inode(receipt)
+    assert receipt.stat().st_ino != original_ino
+    result = _invoke(
+        [
+            "verify",
+            "--freeze",
+            str(freeze),
+            "--binding",
+            str(binding),
+            "--reviewed-sha",
+            sha,
+            "--output",
+            str(acceptance),
+        ],
+        expected=1,
+    )
+    assert "C4_IDENTITY_DRIFT:" in result.stderr
+    assert not acceptance.exists()
+    return {
+        "label": "SYNTHETIC_FIXTURE_NOT_LIVE_PASS",
+        "case": "same-byte-inode-replacement",
+        "stderr": result.stderr,
+        "codes": ["C4_IDENTITY_DRIFT"],
+        "acceptance_published": False,
+        "root": str(root),
+    }
+
+
+def case_semantic_reserialization() -> dict[str, object]:
+    root = _private_root("c4-cli-reserial-")
+    sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    approved = root / "approved.json"
+    receipt = root / "receipt.json"
+    freeze = root / "freeze.json"
+    binding = root / "binding.json"
+    acceptance = root / "acceptance.json"
+    _write_approved(approved, sha)
+    _invoke(
+        [
+            "freeze",
+            "--approved-record",
+            str(approved),
+            "--reviewed-sha",
+            sha,
+            "--receipt",
+            str(receipt),
+            "--frontend-origin",
+            FRONTEND_ORIGIN,
+            "--api-origin",
+            API_ORIGIN,
+            "--basin-id",
+            BASIN_ID,
+            "--segment-id",
+            SEGMENT_ID,
+            "--output",
+            str(freeze),
+        ]
+    )
+    time.sleep(1)
+    start = int(time.time())
+    end = start
+    write_closed_c4_fixture(receipt, cmd_start=start, cmd_end=end)
+    _invoke(
+        [
+            "bind",
+            "--freeze",
+            str(freeze),
+            "--reviewed-sha",
+            sha,
+            "--cmd-start",
+            str(start),
+            "--cmd-end",
+            str(end),
+            "--output",
+            str(binding),
+        ]
+    )
+    _reserialize_same_semantics(receipt)
+    result = _invoke(
+        [
+            "verify",
+            "--freeze",
+            str(freeze),
+            "--binding",
+            str(binding),
+            "--reviewed-sha",
+            sha,
+            "--output",
+            str(acceptance),
+        ],
+        expected=1,
+    )
+    assert "C4_IDENTITY_DRIFT:" in result.stderr
+    assert not acceptance.exists()
+    return {
+        "label": "SYNTHETIC_FIXTURE_NOT_LIVE_PASS",
+        "case": "semantic-preserving-reserialization",
+        "stderr": result.stderr,
+        "codes": ["C4_IDENTITY_DRIFT"],
+        "acceptance_published": False,
+        "root": str(root),
+    }
+
+
+def main() -> int:
+    if not Path("/usr/bin/node").is_file():
+        print(json.dumps({"error": "trusted Node runtime is absent"}))
+        return 1
+    proofs = [
+        case_positive_and_sha(),
+        case_status_not_pass(),
+        case_inode_replacement(),
+        case_semantic_reserialization(),
+    ]
+    print(
+        json.dumps(
+            {
+                "proof": "SYNTHETIC_REAL_NODE_CLI_PASS",
+                "source_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+                "node": subprocess.check_output(["/usr/bin/node", "--version"], text=True).strip(),
+                "live_browser_or_deployment_pass": False,
+                "label": "SYNTHETIC_FIXTURE_NOT_LIVE_PASS",
+                "cases": proofs,
+            }
+        )
+    )
+    for proof in proofs:
+        shutil.rmtree(proof["root"], ignore_errors=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

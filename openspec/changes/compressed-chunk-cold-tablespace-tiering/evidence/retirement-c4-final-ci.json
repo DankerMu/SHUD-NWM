@@ -1,0 +1,67 @@
+{
+  "state": "SUCCEEDED",
+  "runId": 34786829249,
+  "runUrl": "https://github.com/DankerMu/SHUD-NWM/actions/runs/34786829249",
+  "headSha": "4e6d761d177b800118cf3bbcc9fb701b8f2b1d14",
+  "requiredHeadSha": "4e6d761d177b800118cf3bbcc9fb701b8f2b1d14",
+  "headMatches": true,
+  "runStatus": "completed",
+  "runConclusion": "success",
+  "jobs": [
+    {
+      "id": 103803719360,
+      "name": "Detect changed areas",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 103803748333,
+      "name": "Markdown Lint",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 103803748351,
+      "name": "Unit Tests",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 103803748463,
+      "name": "Frontend Build",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 103803748818,
+      "name": "Unit Tests (full)",
+      "status": "completed",
+      "conclusion": "skipped"
+    },
+    {
+      "id": 103803748820,
+      "name": "SQL Migration Dry Run",
+      "status": "completed",
+      "conclusion": "skipped"
+    },
+    {
+      "id": 103803749392,
+      "name": "OpenAPI Validate",
+      "status": "completed",
+      "conclusion": "skipped"
+    },
+    {
+      "id": 103803749426,
+      "name": "JSON Schema Validate",
+      "status": "completed",
+      "conclusion": "skipped"
+    }
+  ],
+  "failingJobIds": [],
+  "wallClock": {
+    "started": "2026-09-13T22:28:04Z",
+    "ended": "2026-09-13T22:33:15Z",
+    "elapsed": "5m11s"
+  },
+  "evidence": "Authoritative gh run view reported completed/success and the exact required head SHA. Four jobs succeeded; four conditional jobs were skipped; no job had a failure, cancellation, or timeout conclusion."
+}

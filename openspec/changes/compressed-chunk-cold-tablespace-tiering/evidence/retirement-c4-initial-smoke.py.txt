@@ -1,0 +1,51 @@
+"""Disposable synthetic C4 CLI proof; never a live browser/deployment PASS."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.path.insert(0, str(Path.cwd()))
+from tests.test_node27_c4_production_acceptance import write_closed_c4_fixture
+
+root = Path(tempfile.mkdtemp(prefix="c4-cli-", dir=os.environ["TMPDIR"]))
+sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+approved = root / "approved.json"
+approved.write_text(json.dumps({"status": "PASS", "head_sha": sha, "reviewed_sha": sha}))
+approved.chmod(0o600)
+cli = [sys.executable, "scripts/node27_c4_production_acceptance.py"]
+receipt = root / "receipt.json"
+freeze = root / "freeze.json"
+binding = root / "binding.json"
+acceptance = root / "acceptance.json"
+def invoke(args, expected=0):
+    result = subprocess.run(cli + args, capture_output=True, text=True, timeout=30)
+    assert result.returncode == expected, (result.returncode, result.stdout, result.stderr)
+    return result
+
+invoke(["freeze", "--approved-record", str(approved), "--reviewed-sha", sha,
+        "--receipt", str(receipt), "--frontend-origin", "https://display.example.test",
+        "--api-origin", "https://api.example.test", "--basin-id", "basins_qhh",
+        "--segment-id", "basins_qhh_shud_reach_000001", "--output", str(freeze)])
+time.sleep(1)
+start = int(time.time())
+end = start
+write_closed_c4_fixture(receipt, cmd_start=start, cmd_end=end)
+freeze_bytes = freeze.read_bytes()
+invoke(["bind", "--freeze", str(freeze), "--reviewed-sha", sha,
+        "--cmd-start", str(start), "--cmd-end", str(end), "--output", str(binding)])
+invoke(["verify", "--freeze", str(freeze), "--binding", str(binding),
+        "--reviewed-sha", sha, "--output", str(acceptance)])
+assert json.loads(acceptance.read_text())["status"] == "PASS"
+assert freeze.read_bytes() == freeze_bytes
+refused = root / "refused.json"
+wrong_sha = "a" * 40 if sha != "a" * 40 else "b" * 40
+invoke(["bind", "--freeze", str(freeze), "--reviewed-sha", wrong_sha,
+        "--cmd-start", str(start), "--cmd-end", str(end), "--output", str(refused)], 1)
+assert not refused.exists() and freeze.read_bytes() == freeze_bytes
+print(json.dumps({"proof": "SYNTHETIC_REAL_NODE_CLI_PASS", "source_sha": sha,
+                  "positive": "freeze-bind-verify", "negative": "SHA mismatch refuses without rewrite",
+                  "node": subprocess.check_output(["/usr/bin/node", "--version"], text=True).strip(),
+                  "live_browser_or_deployment_pass": False}))

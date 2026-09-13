@@ -1,0 +1,86 @@
+{
+  "seat": "final-gap-sweep",
+  "pr": 2321,
+  "round": "phase7-final",
+  "head": "4e6d761d177b800118cf3bbcc9fb701b8f2b1d14",
+  "base": "f765ca0d0a20792ae77281fcefc399a4d0339676",
+  "verdict": "APPROVE — zero new actionable candidates; full-PR fresh gap sweep at frozen HEAD finds no real defect not already adjudicated and verifiably closed",
+  "blocking_findings": 0,
+  "findings": [],
+  "non_blocking_notes": [],
+  "out_of_scope_escalations": [],
+  "head_and_baseline_relationship": {
+    "frozen_head": "4e6d761d1 == worktree HEAD; merge-base with BASE verified == f765ca0d0 (three-dot diff base correct)",
+    "r2_clean_successor": "git show confirms 1edc3d68a adds exactly 5 evidence files and 4e6d761d1 adds exactly retirement-c4-review-r2.json; product/test/docs bytes at HEAD are byte-identical to cacd38641",
+    "proof_sha_chain_independently_reverified": "cacd38641..HEAD = 6 evidence files only (own git diff); f862a51b2..cacd38641 = boundaries test only (frontend969 binds to HEAD apps/frontend bytes); 92657af36 = tasks/evidence + 4-line spec SHALL-reflow only; 317ca7d48..92657af36 contains no product change; full-backend 20218p/335s is explicitly bound to 317ca7d48 with not-rerun disclaimer in manifest and PR body — older-baseline relationship is truthful, not an overclaim",
+    "arithmetic": "943 log tail at FINAL_TARGETED_HEAD cacd38641 matches manifest seconds (221.33s); 943 = 934 + 8 boundary + 1 selector split test; 35 = 27 owner + 8 boundary; 12 mutant RED families then restore marker then 35 passed; 969 = 970 − 1 deleted prose block"
+  },
+  "per_lens_results": {
+    "lost_behavior": "NONE. Zero file deletions PR-wide; sole removal is the verifier-mandated prose-pin it-block (-8 lines, all four raw-byte assertions, neighbors intact, 969 green post-deletion); selector consumers only grow (additive splat substitutions at all 7 sites, prior-consumers test present); old C3/binder/river-click graph absent from diff; no caller migration outstanding.",
+    "caller_callee_drift": "NONE. CLI↔owner kwargs pairwise matched; CommandError message strings verified verbatim against node27_pgdata_command.py (timeout/ceiling exact, else UNAVAILABLE); binder argv flags (--receipt/--frontend-origin/--api-origin/--basin-id/--segment-id/--cmd-start/--cmd-end) and exact 'BINDER: PASS\\n' terminal verified against c4-receipt-binder.mjs:7-13,40; safe_fs_publication/evidence_io signatures matched; both runbooks' registered commands match the CLI parser flag-for-flag; PLAYWRIGHT_LIVE_C4_RECEIPT_PATH confirmed as the live lane's required receipt env (playwright.live-c4-display.config.ts:31).",
+    "boundary_values": "NONE new. Own re-trace of require_* layer: bracket string ≤10 digits ↔ JSON int ≤9,999,999,999 consistent caps; 262,144-byte ceiling enforced at read AND encode; size≥1; origin normalization idempotent across freeze/bind/verify parse sites; 7-row boundary batch + 6 guard-family mutants discriminate each family (log lines confirmed).",
+    "failure_cleanup": "NONE new. fd finally-chains traced (capture self-cleans on refusal; held receipt closed after binder); publish cleanup unlinks only dev/ino-proven-created temp and only when dest absent; indeterminate create/move refuses without delete (fixture-mandated); refusal leaves inputs immutable (asserted in tests).",
+    "sequencing": "NONE. Receipt absent at freeze / present at bind; unfloored freeze≤cmd-start enforced at bind and re-enforced at verify from the binding bracket; artifact/stage closed schemas + reviewed_sha rebinding per stage; post-binder rechecks of approved/freeze/binding precede the only irreversible step (publish) in both bind and verify; verify re-runs binder with original freeze inputs + binding bracket.",
+    "private_file_source_identity": "NONE. 9-field identity + same-held-fd sha256, before/after fstat, named-inode through pinned parent; identity mappings re-validate euid/0600/nlink==1 and parent 0700 on load; acceptance record embeds the ORIGINAL binding expectation, never the final observation; same-byte inode replacement, utime-only drift and semantic reserialization all refuse (unit + real-CLI proof); sha-only-identity mutant reds both drift tests.",
+    "evidence_overclaims": "NONE. Every PR-body numeric claim anchored: 943 (targeted log tail), 35 (mutants log), 2 real-node (initial manifest, tests unchanged at HEAD), 969/75/typecheck (f862a51b2, apps/frontend bytes verified identical to HEAD), 20218/335/1w (317ca7d48, honest not-rerun disclosure), 12 families (mutants log 12 RED + C4_R1_MUTANTS_KILLED_AND_RESTORED), 4 real-CLI cases (fix-smoke log JSON == manifest real_cli block); synthetic-not-live labels consistent everywhere; tasks.md marks R1.6 [x] with R1.4/R2–R5 open; fixture review r2 PASS read; OpenSpec-strict/Ruff/Markdown claims carry no attached logs (recorded gap, fix delta touches no spec/runbook).",
+    "selector_consumers": "NONE. C4_PRODUCTION_ACCEPTANCE_TESTS single-sourced sorted 2-tuple; CHANGED_TEST_FILE_RULES exact-path stop_on_match entries correctly ordered among exact neighbors; three owner stop rules placed ahead of the services/production_closure/** glob (new files — nothing shadowed that existed before); __init__ additive rule without stop falls through to the glob (prior consumers retained — the exact R1 miss, now ruled and green); shared deps (node27_pgdata_command, safe_fs via FILE_JOURNAL pattern, safe_fs_publication, evidence_io) all select both halves; redaction.py correctly excluded (not imported — fixture's when-imported clause); 4 selector tests (owners/split/prior-consumers/red-when-removed) inside the green 943."
+  },
+  "prior_adjudication_respected": {
+    "not_reopened": "C4-INV-N1 (log SHA mismatch) stays REFUTED — second VERIFY_HEAD 317ca7d4 boundary verified present in node27.log per verifier decode; no new evidence. C4SP-2 (trusted-operator NODE_OPTIONS env injection) stays DISCARDED — out of the fixture's stated input domain; no new evidence.",
+    "r1_five_confirmed_all_verified_closed_at_head": "C4E-F1 (prose pin deleted, runbook not catered, 969 green), C4E-F2 (7-row batch + 6 guard mutants), C4E-F3 (6 identity/record cases + 5 mutants incl. sha-only), C4E-F4 (4-case actual-CLI/real-Node smoke at 0af8eff66 with CLI bytes identical to HEAD), C4SP-1 (_announce_pass exactly per verifier prescription; SP1 mutant reds with rc==120 against stubbed CLI, proving discrimination)."
+  },
+  "candidates_considered_and_dropped": [
+    "Temp-residue leak window between write_bytes_no_follow_exclusive success and created_dev/ino assignment (capture/readback/parent-check refusals leak the random 0600 temp): already adjudicated — correctness-R1 residual #2, security-R1 'indeterminate/residue policy' non-finding, INV-6; harmless clutter in the operator's own 0700 dir, never blocks retry, never confused with an acceptance record; below P2 bar.",
+    "Closed-stderr on the refusal path (_report print raises): the R1 verifier consciously narrowed SP1 to the success-message write and rejected a terminal broad except; a closed error channel makes any report undeliverable and exit stays nonzero (fail-closed); below P2 bar, listed as residual.",
+    "_translate_command_error string coupling to CommandError messages; C4_BINDER_OUTPUT branch without a test row; unfloored freeze comparison false-refusal inside the cmd-start second; fix-r1.json 414-line staleness; selector-red.log dict-repr format; runbook set-e caveat; sibling-CLI closed-stdout class: all previously adjudicated residuals/notes/escalations, unchanged by the fix delta, not duplicated as findings."
+  ],
+  "invariant_matrix": [
+    {
+      "row": "Approval producer",
+      "status": "HELD",
+      "proof": "freeze binds source path/9-field identity/parent + status/head/reviewed == supplied 40-hex before publish; refusal publishes nothing; no self-approval path"
+    },
+    {
+      "row": "Validators/process",
+      "status": "HELD",
+      "proof": "fixed trusted argv + lstat checks; exit 0 AND exact PASS terminal; FAIL/nonzero/timeout/ceiling map to static codes; real-binder FAIL proven through actual CLI"
+    },
+    {
+      "row": "Storage/identity",
+      "status": "HELD",
+      "proof": "same-held-fd hash + full facts across binder; inode replacement/utime/reserialization refuse at unit and real-CLI level"
+    },
+    {
+      "row": "Entry/order",
+      "status": "HELD",
+      "proof": "receipt absent-at-freeze/exists-at-bind; unfloored freeze≤cmd-start at bind+verify; missing/mismatched/stale records refuse with stable codes"
+    },
+    {
+      "row": "Consumers",
+      "status": "HELD",
+      "proof": "binder CLI/core/schema/producer/river-click byte-untouched; old C3 tests in the 20218 baseline; selector consumers strictly grow"
+    },
+    {
+      "row": "Failure/publication",
+      "status": "HELD",
+      "proof": "three-layer no-clobber; winner never deleted; proven-created-only cleanup; readback+inode+parent-durability+temp-residue proofs before return"
+    },
+    {
+      "row": "Evidence/docs",
+      "status": "HELD",
+      "proof": "both runbooks register real entrypoint/owner/provenance with sleep-1 discipline matching no-flooring semantics; canonical spec MODIFIED delta faithful; truthful synthetic/R1.6-only scoping in tasks.md/PR body"
+    }
+  ],
+  "verification_gaps": [
+    "Read-only leaf: no test/CI/lint/build/selector execution; runtime claims accepted as supplied and independently cross-checked for internal consistency (log tails, markers, counts, SHA chain via own git diffs) — every check closed exactly.",
+    "943-pass log does not itemize per-suite composition (owner/boundary/selector split taken from PR body); carried from R2, not an evidence defect.",
+    "Exact-head CI run 34786829249 is C4FinalCiMonitor's surface; this sweep does not pre-empt its terminal result — it is the first repo-wide execution of the boundary suite and selector changes (R2-recorded gap).",
+    "Node-27 artifacts are self-reported; physical occurrence not attestable from this seat."
+  ],
+  "residual_risks": [
+    "_report's stderr write is unguarded against a closed error channel (fail-closed, nonzero exit regardless); the verifier's SP1 scope deliberately excluded it.",
+    "On non-POSIX hosts without /dev/null the SP1 handler degrades to pre-fix exit-120 shape; tool domain is Linux-only.",
+    "Operator clock/bracket honesty and trusted-operator environment remain fixture-defined trust inputs; the chain enforces immutability and order of what was recorded, not the truth of the wall clock.",
+    "Acceptance record is terminal private evidence with no downstream consumer in this slice; R5 remains the production-handoff enforcement point — scoping truthful everywhere."
+  ]
+}
