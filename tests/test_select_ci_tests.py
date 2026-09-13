@@ -13172,7 +13172,10 @@ def test_issue1895_contract_change_redirects_to_the_owners(owner: str) -> None:
     from scripts.select_ci_tests import ISSUE1895_RUNBOOK_CONTRACT_TESTS
 
     selected = set(select_tests([owner], repo_root=Path(".")))
-    assert selected == set(ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
+    expected = set(ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
+    if owner == "tests/test_issue1895_runbook_contract.py":
+        expected.add("tests/test_issue2291_reviewed_census_count.py")
+    assert selected == expected
 
 
 def test_issue1895_gates_redirect_reds_when_rule_removed(

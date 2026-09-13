@@ -492,31 +492,49 @@ def test_g8_inline_natural_receipt_fence_opts_file_only_parent_policy() -> None:
     assert "require_private_parent=False" not in horizon_line
 
 
-def test_g8_owner_inputs_use_held_reader_before_parameter_derivation() -> None:
-    fences = [body for _opening, body in _gate_bash("G8")]
-    natural = next(
-        body
-        for body in fences
-        if "NATURAL_RECEIPT" in body and "assert_natural_receipt_identity" in body and "W8_PATH" in body
-    )
-    assert "json.load(open" not in natural
-    assert "read_held_private_json" in natural
-    assert natural.index("read_held_private_json") < natural.index("assert_natural_receipt_identity")
+@pytest.mark.parametrize(
+    ("selector", "input_index"),
+    [("NEWLY=", 0), ("NEWLY=", 1), ("REMAINING=", 0), ("--expected-cutoff", 0), ("--expected-watermark", 0)],
+)
+def test_g8_inline_derivation_refuses_unsafe_observation_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    selector: str,
+    input_index: int,
+) -> None:
+    import sys
 
-    derive = next(body for body in fences if "newly_terminal_keys" in body and "group_reconcile.py" in body)
-    assert "json.load(open" not in derive
-    assert "read_held_private_json" in derive
-    newly_cmd = derive[derive.index("NEWLY=") : derive.index("REMAINING=")]
-    remaining_cmd = derive[derive.index("REMAINING=") : derive.index("group_reconcile.py")]
-    assert "read_held_private_json" in newly_cmd
-    assert "read_held_private_json" in remaining_cmd
-    cutoff_cmd = derive[derive.index("--expected-cutoff") : derive.index("--expected-watermark")]
-    watermark_cmd = derive[derive.index("--expected-watermark") : derive.index("--invoked-unit")]
-    assert "read_held_private_json" in cutoff_cmd
-    assert "read_held_private_json" in watermark_cmd
-    assert derive.index("NEWLY=") < derive.index("group_reconcile.py")
-    assert derive.index("REMAINING=") < derive.index("group_reconcile.py")
-    assert "while IFS= read -r GROUP" not in derive
+    original_key = durable_key(_durable(1))
+    newly_key = durable_key(_durable(7))
+    remaining_key = durable_key(_durable(8))
+    private = tmp_path / "private"
+    pre = _write_private_json(private / "pre.json", {"complete_target_keys": [original_key]})
+    post = _write_private_json(
+        private / "post.json",
+        {"complete_target_keys": [original_key, newly_key], "complete_source_keys": [remaining_key]},
+    )
+    horizon = _write_private_json(
+        private / "horizon.json",
+        {"cutoff": "2026-09-04T00:00:00Z", "watermark": "2026-09-06T00:00:00Z"},
+    )
+    arguments, expected = {
+        "NEWLY=": ([pre, post], newly_key),
+        "REMAINING=": ([post], remaining_key),
+        "--expected-cutoff": ([horizon], "2026-09-04T00:00:00Z"),
+        "--expected-watermark": ([horizon], "2026-09-06T00:00:00Z"),
+    }[selector]
+    derive = next(body for _opening, body in _gate_bash("G8") if "NEWLY=" in body and "REMAINING=" in body)
+    line = next(line for line in derive.splitlines() if line.lstrip().startswith(selector))
+    program = line.split("python -c '", 1)[1].split("'", 1)[0]
+    monkeypatch.setattr(sys, "argv", ["-c", *(str(path) for path in arguments)])
+    compiled = compile(program, "<G8-inline-derivation>", "exec")
+    exec(compiled, {})
+    assert capsys.readouterr().out == expected + "\n"
+    _substitute_identity(arguments[input_index], "symlink")
+    with pytest.raises(Issue1895ReadinessError):
+        exec(compiled, {})
+    assert capsys.readouterr().out == ""
 
 
 def test_group_reconcile_cli_accepts_migrated_newline_sets_and_deferred_suffix(tmp_path: Path) -> None:
