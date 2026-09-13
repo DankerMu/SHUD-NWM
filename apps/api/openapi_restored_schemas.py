@@ -288,9 +288,9 @@ def _model_instance_schema() -> dict:
       ``core.model_instance`` column) and normalizes ``model_name``;
     * only the lifecycle rows carry ``basin_checksum``/``river_network_checksum``
       (``bv.checksum``/``rnv.checksum`` aliases, nulled by the projection but
-      still present as keys) and ``mesh_properties_json`` -- the SQL alias for
-      ``mv.properties_json``, which ``_model_asset_detail`` pops at :3545 and
-      ``_model_public_projection`` never does.
+      still present as keys).  Their ``mesh_properties_json`` SQL alias for
+      ``mv.properties_json`` is popped by both ``_model_asset_detail`` and
+      ``_model_public_projection`` (#2038), so it is not part of this schema.
     """
     return {
         "type": "object",
@@ -333,14 +333,6 @@ def _model_instance_schema() -> dict:
             "segment_count": _null_union({"type": "integer", "minimum": 0}),
             "mesh_uri": _null_union({"type": "string"}),
             "mesh_checksum": _null_union({"type": "string"}),
-            "mesh_properties_json": {
-                **_JSON_OBJECT,
-                "description": (
-                    "mv.properties_json (core.mesh_version.properties_json, JSONB NOT NULL "
-                    "DEFAULT '{}'). Emitted only by the lifecycle route, whose projection -- "
-                    "unlike _model_asset_detail -- does not pop this key."
-                ),
-            },
             "shud_code_version": {"type": "string"},
             "rshud_code_version": _null_union({"type": "string"}),
             "autoshud_code_version": _null_union({"type": "string"}),

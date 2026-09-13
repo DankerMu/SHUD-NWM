@@ -776,6 +776,39 @@ async def test_forecast_series_forwards_strict_run_and_model_identity(fake_store
     assert fake_store.forecast_calls[-1]["model_id"] == "model-direct-grid"
 
 
+_HINDCAST_SERIES_PATH = (
+    "/api/v1/basin-versions/basin_v1/river-segments/seg_001/forecast-series"
+    "?river_network_version_id=rnv_v1&issue_time=latest&variables=q_down&scenarios=GFS&run_types=hindcast"
+)
+
+
+@pytest.mark.asyncio
+async def test_forecast_series_hindcast_without_identity_headers_is_served(fake_store: FakeForecastStore) -> None:
+    """R1 (#2081): the route is anonymous in OpenAPI (root ``security: []``); hindcast is no exception."""
+
+    response = await _get(_HINDCAST_SERIES_PATH)
+
+    assert response.status_code == 200
+    assert response.json() == fake_store.response
+    assert fake_store.forecast_calls[-1]["run_types"] == ["hindcast"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asserted_role", ["viewer", "garbage", "analyst"])
+async def test_forecast_series_hindcast_ignores_client_asserted_role_header(
+    fake_store: FakeForecastStore, asserted_role: str
+) -> None:
+    """R2 (#2081): a client-asserted ``X-User-Role`` has no effect on hindcast series."""
+
+    baseline = await _get(_HINDCAST_SERIES_PATH)
+    response = await _get(_HINDCAST_SERIES_PATH, headers={"X-User-Role": asserted_role})
+
+    assert baseline.status_code == 200
+    assert response.status_code == 200
+    assert response.json() == baseline.json()
+    assert [call["run_types"] for call in fake_store.forecast_calls] == [["hindcast"], ["hindcast"]]
+
+
 @pytest.mark.asyncio
 async def test_forecast_series_include_analysis_true_returns_spliced_segments(fake_store: FakeForecastStore) -> None:
     response = await _get(
@@ -3314,10 +3347,10 @@ async def test_met_station_series_invalid_limit_returns_documented_validation_de
     assert fake_store.station_series_calls == []
 
 
-async def _get(path: str) -> Any:
+async def _get(path: str, *, headers: dict[str, str] | None = None) -> Any:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.get(path)
+        return await client.get(path, headers=headers)
 
 
 def _dt(value: str) -> datetime:

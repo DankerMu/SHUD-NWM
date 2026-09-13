@@ -26,6 +26,7 @@ test: ``_safe_error_message`` (``retry.py``) and ``_public_path_or_uri_placehold
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
@@ -33,6 +34,10 @@ from urllib.parse import urlparse
 
 from packages.common.redaction import is_sensitive_key, redact_payload
 from services.orchestrator.scheduler_state_common import _format_utc
+
+# Same pattern as ``services.orchestrator.retry._URI_STYLE_RE`` (which accepts
+# such a value as a runtime root without local-path safety checks).
+_SCHEME_ANCHORED_URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 
 def _public_evidence(value: Any) -> Any:
@@ -103,14 +108,20 @@ def _sanitize_public_path_or_uri_scalar(value: str) -> str:
         # ``/``-leading prose value like ``/srv/x is not a directory`` collapses
         # to ``[local-path]`` whole.  ``message``/``*_message`` go through
         # ``_public_message`` and stay tokenised; no producer in the repo writes
-        # leading-slash prose under a generic key.  Deliberate residual: a spaced
-        # URI stays BEHIND the bail-out and still renders token-wise -- tracked
-        # as follow-up issue #1976.
+        # leading-slash prose under a generic key.
+        return _public_path_or_uri_placeholder(value)
+    if _SCHEME_ANCHORED_URI_RE.match(text):
+        # #1976: a value that BEGINS with ``scheme://`` is one URI and is
+        # classified whole, ahead of the whitespace bail-out, for the same
+        # reason as the path branch above: ``s3://nhms prod/objects`` otherwise
+        # rendered ``"[object-uri] prod/objects"`` and disclosed the post-space
+        # tail.  Only the anchored form moves: ``://`` in the middle of prose
+        # and the bare ``s3:``/``published:`` prefixes stay behind the bail-out.
         return _public_path_or_uri_placeholder(value)
     if any(char.isspace() for char in text):
-        # The URI branches stay BEHIND the bail-out: a whitespace-bearing string
-        # is not a single URI, and classifying it whole would rewrite prose that
-        # merely mentions a scheme.
+        # The remaining URI branches stay BEHIND the bail-out: prose that merely
+        # mentions a scheme mid-text (``see s3://x for details``) or starts with
+        # a bare ``s3:`` prefix is not a single URI and keeps token-wise rendering.
         return value
     if "://" in text or text.startswith("s3:") or text.startswith("published:"):
         return _public_path_or_uri_placeholder(value)

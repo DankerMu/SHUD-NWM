@@ -281,4 +281,16 @@ def _internal_live_proof_token_matches(request: Any, env: Mapping[str, str] | No
     if not _trusted_live_auth_proof_available(env):
         return False
     configured_token = _env_value(env, "NHMS_INTERNAL_LIVE_PROOF_TOKEN").strip()
-    return request.headers.get("X-NHMS-Internal-Live-Proof", "") == configured_token
+    provided = request.headers.get("X-NHMS-Internal-Live-Proof", "")
+    if not isinstance(provided, str):
+        return False
+    # #2169: constant-time comparison, mirroring ``service_bearer_matches``.
+    # Starlette decodes raw header bytes as latin-1, so a non-ASCII ``str`` is
+    # the wire value; a non-ASCII header or configured token is an ordinary
+    # mismatch (release-blocked), never a ``TypeError`` surfaced as a 500.
+    try:
+        provided_bytes = provided.encode("ascii")
+        configured_bytes = configured_token.encode("ascii")
+    except UnicodeEncodeError:
+        return False
+    return hmac.compare_digest(provided_bytes, configured_bytes)

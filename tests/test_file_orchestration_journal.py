@@ -19771,11 +19771,28 @@ def test_public_evidence_renders_whitespace_bearing_local_roots_whole() -> None:
     assert "data/objects" not in json.dumps(rendered)
     assert public_evidence_module._sanitize_public_path_or_uri_scalar("/srv/my dir") == "[local-path]"
     assert public_evidence_module._sanitize_public_path_or_uri_scalar("~/my dir") == "[local-path]"
-    # The URI branches stay BEHIND the whitespace bail-out: a whitespace-bearing
-    # string is not one URI, so it keeps falling through to the token path.  This
-    # states today's behaviour; it is not a widening.
-    assert public_evidence_module._sanitize_public_path_or_uri_scalar("s3://bucket/my key") == "s3://bucket/my key"
-    assert public_evidence_module._public_evidence({"note": "s3://bucket/my key"}) == {"note": "[object-uri] key"}
+    # #1976 TIGHTENING, not a widening: these two asserts used to pin the
+    # post-space tail leak (``"s3://bucket/my key"`` passed the scalar classifier
+    # unchanged and rendered ``"[object-uri] key"``).  A value that BEGINS with
+    # ``scheme://`` is one URI and is now classified whole, ahead of the
+    # whitespace bail-out, like the ``/``-anchored path above (R13).
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("s3://bucket/my key") == "[object-uri]"
+    assert public_evidence_module._public_evidence({"note": "s3://bucket/my key"}) == {"note": "[object-uri]"}
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("file:///srv/nhms data/ws") == "[uri]"
+    assert public_evidence_module._public_evidence({"note": "file:///srv/nhms data/ws"}) == {"note": "[uri]"}
+    # R14: only the ANCHORED form moved.  Prose that mentions a scheme mid-text,
+    # or starts with a word and a colon, stays behind the bail-out and keeps
+    # token-wise rendering; so does a bare ``s3:`` prefix.
+    assert public_evidence_module._public_evidence({"note": "see s3://x for details"}) == {
+        "note": "see [object-uri] for details"
+    }
+    assert public_evidence_module._public_evidence({"note": "error: see s3://x for details"}) == {
+        "note": "error: see [object-uri] for details"
+    }
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("see s3://x for details") == (
+        "see s3://x for details"
+    )
+    assert public_evidence_module._sanitize_public_path_or_uri_scalar("s3: upload failed") == "s3: upload failed"
 
 
 def test_public_evidence_is_idempotent_on_both_lane_shapes() -> None:
@@ -19840,5 +19857,27 @@ def test_public_evidence_scalar_classifier_matches_file_provider_classifier() ->
     ]
     for value in corpus:
         assert public_evidence_module._public_path_or_uri_placeholder(
+            value
+        ) == scheduler_file_providers_module._sanitize_file_provider_scalar(value), value
+
+    # R16 (#1976): the classifier alone never saw the whitespace gate, so the two
+    # copies could diverge on gate ORDER.  Compare the full scalar sanitizer
+    # outcome over strings, including spaced scheme-anchored URIs (which the
+    # providers copy has always classified whole) and prose that mentions a URI
+    # mid-text (which both leave unchanged at scalar level).  Bare ``s3: prose``
+    # is deliberately absent: providers' ``urlparse`` sees scheme ``s3`` there,
+    # while the leaf keeps that shape behind the bail-out (documented divergence).
+    scalar_corpus = [
+        *(value for value in corpus if isinstance(value, str)),
+        "s3://bucket/my key",
+        "s3://nhms prod/objects",
+        "s3://nhms-prod/pre fix",
+        "published://p q",
+        "file:///srv/nhms data/ws",
+        "https://h/a b",
+        "see s3://x for details",
+    ]
+    for value in scalar_corpus:
+        assert public_evidence_module._sanitize_public_path_or_uri_scalar(
             value
         ) == scheduler_file_providers_module._sanitize_file_provider_scalar(value), value
