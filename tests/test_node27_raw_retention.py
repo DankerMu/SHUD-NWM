@@ -714,11 +714,22 @@ def test_the_env_gates_stop_all_three_lanes(
 def test_an_undeletable_canonical_target_fails_without_stopping_the_other_lanes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Production shape (node-27, 2026-09-06): `canonical/<S>/` is not writable by `nwm`.
+    """A `canonical/<S>/` this account cannot write: one failed target, two live lanes.
 
-    Every canonical target then fails with ``PermissionError``; the obligation is
-    a stable, distinguishable failure, not a fix (the remedy lives in the mirror
-    producers or an ops group change).
+    Since #2100 this is an incident shape, not the production steady state --
+    the mirror is `2775` with a group this account is in, so the canonical lane
+    deletes. It survives as the fail-closed case the rollout deliberately keeps
+    reachable (an unswept storage source, or a producer mode regression): the
+    obligation is a stable, distinguishable failure that stops neither the raw
+    nor the precip-cache lane.
+
+    Which step denies is not the same here as in production, and the trailing
+    assertion pins the difference: with only `canonical/IFS` at `0o555` the
+    `.nc` is still unlinked and `prcp_rate_or_amount/` still `rmdir`'ed, and
+    only the parent-owned `rmdir <cycle>/` fails, so the cycle directory
+    survives with bytes gone. An unswept production source denies at the FIRST
+    `unlink` instead, because `prcp_rate_or_amount/` is not writable either.
+    Both reach the receipt as one `PermissionError` entry in `failed[]`.
     """
     if os.geteuid() == 0:
         pytest.skip("root ignores directory modes, so the failure cannot be simulated")
@@ -1219,6 +1230,8 @@ def test_documented_operator_check_goes_red_on_an_unsafe_skip(
     assert 'endswith("_unsafe")' in program
     assert "_root_unsafe" not in program
     assert "production_execute" in program
+    # #2100: the whitelist that let a canonical `PermissionError` pass is gone.
+    assert "PermissionError" not in program
 
     store = tmp_path / "store"
     cache = tmp_path / "cache"
@@ -1264,3 +1277,38 @@ def test_documented_operator_check_goes_red_on_an_unsafe_skip(
         ["jq", "-e", program, str(healthy_summary)], capture_output=True, text=True
     )
     assert healthy_check.returncode == 0, healthy_check.stderr
+
+    # (iii) #2100: a fresh `production_execute` tick whose only defect is one
+    # canonical `PermissionError` is RED. Before #2100 clause 3 selected those
+    # entries out and this same summary exited 0.
+    denied_store = tmp_path / "denied-store"
+    denied_cache = tmp_path / "denied-cache"
+    denied_summary = tmp_path / "summaries" / "denied.json"
+    _write_raw_cycle(denied_store, "gfs", "2026060100")
+    _write_canonical_cycle(denied_store, "IFS", "2026060100")
+    _write_cache_cycle(denied_cache, "IFS", "2026060100")
+    _production_env(
+        monkeypatch, store=denied_store, cache=denied_cache, summary_path=denied_summary
+    )
+    # The cycle directory is listed and aged, but its parent denies the `rmdir`.
+    # That reproduces the summary SHAPE an unswept storage source (or a producer
+    # mode regression) leaves behind -- one canonical `PermissionError` in
+    # `failed[]` -- not its on-disk sequence, which denies one step earlier; see
+    # `test_an_undeletable_canonical_target_fails_without_stopping_the_other_lanes`.
+    unwritable_parent = denied_store / "canonical" / "IFS"
+    unwritable_parent.chmod(0o555)
+    try:
+        denied_exit, denied_payload = _production_tick(capsys)
+    finally:
+        unwritable_parent.chmod(0o755)
+
+    assert denied_exit == 1
+    assert denied_payload["execution_mode"] == "production_execute"
+    assert [entry["error_type"] for entry in denied_payload["failed"]] == ["PermissionError"]
+    assert [
+        entry for entry in denied_payload["skipped"] if str(entry["reason"]).endswith("_unsafe")
+    ] == []
+    denied_check = subprocess.run(
+        ["jq", "-e", program, str(denied_summary)], capture_output=True, text=True
+    )
+    assert denied_check.returncode == 1, denied_check.stderr

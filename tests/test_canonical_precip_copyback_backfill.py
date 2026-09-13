@@ -430,7 +430,15 @@ def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """node-22 writes as one account; node-27 reads the same NFS as another."""
+    """node-22 writes as one account; node-27 reads -- and since #2100 prunes -- as another.
+
+    `DIR_MODE` is `0o2775`, not `0o755`: node-27's retention account has to be
+    able to remove a mirrored cycle, which needs group write on the directory,
+    and the setgid bit is what makes each level created underneath take its
+    parent's shared group instead of this process's egid. Every directory under
+    the copyback root here was created by this run -- the fixture creates the
+    root and nothing else -- so the assertion is exact rather than a floor.
+    """
 
     source_root, copyback_root, _payloads = _seed_two_source_store(tmp_path)
 
@@ -446,10 +454,58 @@ def test_backfill_created_directories_stay_readable_under_a_restrictive_umask(
     # Intermediates (canonical/, canonical/<S>/, canonical/<S>/<cycle>/) too, not
     # just the leaves: mkdir(parents=True) creates them all at the umask.
     assert len(created_dirs) >= 10
-    unreadable = [
-        str(path) for path in created_dirs if stat.S_IMODE(path.stat().st_mode) & 0o055 != 0o055
-    ]
-    assert unreadable == []
+    landed = {str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in created_dirs}
+    assert landed == {str(path): "0o2775" for path in created_dirs}
+
+
+def test_backfill_created_cycle_directory_takes_the_source_roots_group(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#2100: the backfill inherits `canonical/<S>/`'s group, it never names one.
+
+    Production needs the created `<cycle>/` and `prcp_rate_or_amount/` in gid
+    1107 (`nwmuser`) so node-27 can prune them. `DIR_MODE`'s setgid bit is what
+    carries the group down: a new directory takes its parent's gid
+    unconditionally on macOS and under a setgid parent on Linux, and this
+    script chmods each level as soon as that level exists, so every parent
+    carries the bit before its child is created.
+    """
+
+    if os.geteuid() == 0:
+        pytest.skip("root may chown to any group, so an inherited gid would prove nothing")
+    source_root = tmp_path / "object-store"
+    copyback_root = tmp_path / "shared-object-store"
+    source_root.mkdir()
+    copyback_root.mkdir()
+    payloads = _seed_cycle(source_root, "gfs", "2026090212", leads=(3,))
+    destination_source_root = copyback_root / "canonical" / "gfs"
+    destination_source_root.mkdir(parents=True)
+    current_gid = destination_source_root.stat().st_gid
+    shared_gid = next((gid for gid in os.getgroups() if gid != current_gid), None)
+    if shared_gid is None:
+        pytest.skip("this process belongs to a single group, so no foreign gid can be propagated")
+    try:
+        os.chown(destination_source_root, -1, shared_gid)
+    except PermissionError:
+        pytest.skip("this environment refuses os.chown to a supplementary group")
+    # The swept production shape of `canonical/<S>/`, reproduced exactly.
+    os.chmod(destination_source_root, 0o2775)
+    if stat.S_IMODE(destination_source_root.stat().st_mode) != 0o2775:
+        pytest.skip("the kernel dropped the setgid bit on the seeded source root")
+
+    exit_code = backfill.main(["--source-root", str(source_root), "--copyback-root", str(copyback_root)])
+    capsys.readouterr()
+
+    assert exit_code == 0
+    cycle_dir = destination_source_root / "2026090212"
+    prcp_dir = cycle_dir / "prcp_rate_or_amount"
+    assert {
+        str(path): (oct(stat.S_IMODE(path.stat().st_mode)), path.stat().st_gid)
+        for path in (cycle_dir, prcp_dir)
+    } == {str(path): ("0o2775", shared_gid) for path in (cycle_dir, prcp_dir)}
+    for key, payload in payloads.items():
+        assert (copyback_root / key).read_bytes() == payload
 
 
 def test_backfill_partially_created_directory_chain_stays_readable(

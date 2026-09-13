@@ -7,7 +7,7 @@ first.
 
 ## 1. Producers (code)
 
-- [ ] 1.1 `services/tile_publisher/publisher.py`: add
+- [x] 1.1 `services/tile_publisher/publisher.py`: add
   `CANONICAL_MIRROR_DIRECTORY_MODE = 0o2775`; `_chmod_tree_readable(root, *,
   containment_root, directory_mode=0o755)` applies `directory_mode` to
   directories and `0o644` to files; thread `directory_mode` through the
@@ -16,7 +16,7 @@ first.
   (`_commit_qdown_copyback_batch`, `_clone_copyback_backup_tree_no_follow`),
   default `0o755` everywhere; `_replace_directory_tree_for_qdown_batch` only
   renames and gets no parameter.
-- [ ] 1.2 `_copyback_canonical_precip`: at the top of phase 2 — after the
+- [x] 1.2 `_copyback_canonical_precip`: at the top of phase 2 — after the
   `trees_already_mirrored` early return, once per call, before the first
   tree is copied — ensure
   `<cycle>/` exists via `ensure_traversable_copyback_directory(..., containment_root=copyback_root)`
@@ -26,14 +26,14 @@ first.
   and grid) and to `_commit_qdown_copyback_batch`. Comment states the lane scoping, why
   `<cycle>/` is asserted before the temp tree exists (gid inheritance), and
   why `forcing/` keeps `0o755` (default ACL mask).
-- [ ] 1.3 `scripts/canonical_precip_copyback_backfill.py`: `DIR_MODE =
+- [x] 1.3 `scripts/canonical_precip_copyback_backfill.py`: `DIR_MODE =
   0o2775`; module docstring sentence "chmod'ed 0o755" updated.
-- [ ] 1.4 `scripts/node27_raw_retention.py`: rewrite the rmtree-handler
+- [x] 1.4 `scripts/node27_raw_retention.py`: rewrite the rmtree-handler
   comment ("Known limit (measured on node-27, 2026-09-06) …") — a
   `PermissionError` on the canonical lane now means the producer mode or the
   ops sweep regressed; point at `docs/runbooks/current-production-ops.md`
   §5.3 (#2100).
-- [ ] 1.5 `infra/env/node27-raw-retention.example`: rewrite the "HOW TO READ
+- [x] 1.5 `infra/env/node27-raw-retention.example`: rewrite the "HOW TO READ
   THIS UNIT UNTIL #2100 LANDS" block to the post-#2100 steady state
   (`failed[]` empty, rc 0, unit not in `--failed`); clause 3 of the `jq`
   becomes `([.failed[]] | length == 0)`; the exit-code table's "expected
@@ -42,73 +42,73 @@ first.
 
 ## 2. Tests
 
-- [ ] 2.1 `tests/test_tile_publisher.py`: update
+- [x] 2.1 `tests/test_tile_publisher.py`: update
   `test_canonical_copyback_leaves_every_level_it_created_traversable` per
   design Required evidence (traversal levels `0o755`, `<cycle>/` and copied
   trees `0o2775`, no other-write, files `0o644`).
-- [ ] 2.2 `tests/test_tile_publisher.py`: new
+- [x] 2.2 `tests/test_tile_publisher.py`: new
   `test_canonical_copyback_trees_take_the_source_roots_group` (second gid
   from `os.getgroups()`; skip when unavailable or `chown` is refused;
   `<cycle>/` and `prcp_rate_or_amount/` `0o2775` + gid; `.nc` gid + `0o644`).
-- [ ] 2.3 `tests/test_tile_publisher.py`: new
+- [x] 2.3 `tests/test_tile_publisher.py`: new
   `test_canonical_copyback_converges_a_pre_existing_cycle_directory` (a
   `0o755` `<cycle>/` becomes `0o2775` on a copy; stays `0o755` on a skip).
-- [ ] 2.4 `tests/test_tile_publisher.py`: new
+- [x] 2.4 `tests/test_tile_publisher.py`: new
   `test_copyback_canonical_precip_rollback_restores_the_commit_clone_at_the_lane_mode`
   — fail `_commit_qdown_copyback_batch` after its clone (monkeypatch the
   `rmtree_no_follow` it calls to raise for `entry.backup_dir`) so the
   `.copyback-rollback.<uuid>` clone is what `_rollback_qdown_copyback_batch`
   restores; assert `rolled_back`, primed bytes, restored
   `prcp_rate_or_amount/` `0o2775`, `<cycle>/` `0o2775`.
-- [ ] 2.5 `tests/test_tile_publisher.py`: confirm the sibling-lane tests
+- [x] 2.5 `tests/test_tile_publisher.py`: confirm the sibling-lane tests
   (`…qdown…under_umask_027`, `…run_products…under_umask_027`,
   `test_publish_qdown_copybacks_complete_run_products_to_shared_object_store`,
   `test_a_pre_existing_copyback_level_keeps_its_restrictive_mode`) pass
   unchanged and say so.
-- [ ] 2.6 `tests/test_canonical_precip_copyback_backfill.py`: extend
+- [x] 2.6 `tests/test_canonical_precip_copyback_backfill.py`: extend
   `test_backfill_created_directories_stay_readable_under_a_restrictive_umask`
   (every created directory `0o2775`); new
   `test_backfill_created_cycle_directory_takes_the_source_roots_group`.
-- [ ] 2.7 `tests/test_node27_raw_retention.py`: the documented-`jq` test gains
+- [x] 2.7 `tests/test_node27_raw_retention.py`: the documented-`jq` test gains
   case (iii) — a `production_execute` summary with one canonical
   `PermissionError` failure exits `1`; the docstring of
   `test_an_undeletable_canonical_target_fails_without_stopping_the_other_lanes`
   no longer calls that the production shape.
-- [ ] 2.8 Red proof: 2.1 (mode assertions), 2.2 (gid/mode on `<cycle>/`) and
+- [x] 2.8 Red proof: 2.1 (mode assertions), 2.2 (gid/mode on `<cycle>/`) and
   2.6 fail on pre-change source (batched red run, output kept in the PR
   evidence).
 
 ## 3. Docs
 
-- [ ] 3.1 `docs/runbooks/current-production-ops.md` §5.3: new subsection
+- [x] 3.1 `docs/runbooks/current-production-ops.md` §5.3: new subsection
   "canonical 降水镜像的跨账号删除权限（#2100）" covering design D1–D7:
   model (gid 1107, `2775`, why `canonical/` is left alone), exact sweep
   commands + account + host, verification one-liners, new-source
   precondition ("sweep `canonical/<S>` before adding `<S>` to
   `NODE27_RAW_RETENTION_SOURCES`"), post-deploy re-sweep (load-bearing for
   gap cycles), reversal with `chmod 00755`, blast radius.
-- [ ] 3.2 Supersession pointer (原文保留、追加指针) in
+- [x] 3.2 Supersession pointer (原文保留、追加指针) in
   `openspec/changes/display-v2-national-timeline-precip-overlay/specs/canonical-precip-copyback/spec.md`
   after the sentence stating created directories are `0o755`.
-- [ ] 3.3 `docs/runbooks/receipts/2026-09-13-issue-2100-canonical-mirror-prune-node27.md`
+- [x] 3.3 `docs/runbooks/receipts/2026-09-13-issue-2100-canonical-mirror-prune-node27.md`
   (orchestrator-authored from live output; §sweep, §live tick, §post-merge
   persistence placeholder replaced by the follow-up).
 
 ## 4. Evidence Floor
 
-- [ ] 4.1 `uv run ruff check .` clean.
-- [ ] 4.2 `uv run pytest -q tests/test_tile_publisher.py
+- [x] 4.1 `uv run ruff check .` clean.
+- [x] 4.2 `uv run pytest -q tests/test_tile_publisher.py
   tests/test_canonical_precip_copyback_backfill.py
   tests/test_node27_raw_retention.py` green locally.
-- [ ] 4.3 `openspec validate fix-canonical-mirror-prune-permissions --strict
+- [x] 4.3 `openspec validate fix-canonical-mirror-prune-permissions --strict
   --no-interactive` valid.
 - [ ] 4.4 node-27 disposable worktree: the same three pytest files green
   (`TMPDIR=/home/nwm/tmp`; active tree untouched).
-- [ ] 4.5 node-22 sweep receipt: before `stat` sample; commands; after
+- [x] 4.5 node-22 sweep receipt: before `stat` sample; commands; after
   `find canonical/gfs canonical/IFS -type d ! -perm -2775 | wc -l` = 0,
   `find canonical/gfs canonical/IFS ! -group 1107 | wc -l` = 0,
   `canonical/` still `755` gid 1078.
-- [ ] 4.6 node-27 live tick receipt via the unit: canonical `deleted` > 0,
+- [x] 4.6 node-27 live tick receipt via the unit: canonical `deleted` > 0,
   `freed_bytes` > 0, `failed == []`, raw/cache lanes no new `failed`,
   `Result=success` / `ExecMainStatus=0`, `du`/`df` before and after, the
   documented `jq` exits `0`. Covers D2 and the retention path only — not

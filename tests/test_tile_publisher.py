@@ -2834,6 +2834,63 @@ def test_copyback_canonical_precip_rollback_restores_a_stale_tree(
     _assert_no_copyback_residue(copyback_root)
 
 
+def test_copyback_canonical_precip_rollback_restores_the_commit_clone_at_the_lane_mode(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2100 D3: the tree a rollback puts back is `0o2775`, not `0o755`.
+
+    Two branches restore a canonical tree and only this one can discriminate the
+    `directory_mode` threaded into `_commit_qdown_copyback_batch`. The sibling
+    `…_restores_a_stale_tree` exercises the rename-back of the backup, whose
+    mode is whatever the lane already gave it, so it stays green either way.
+    Here the commit is driven past its clone -- the `rmtree_no_follow` of the
+    original `.copyback-backup.<uuid>` is made to raise -- which puts the
+    `.copyback-rollback.<uuid>` clone into `remaining_for_rollback`; that clone
+    is a *fresh* tree, chmod'ed by `_clone_copyback_backup_tree_no_follow`, and
+    it is what `_rollback_qdown_copyback_batch` renames into place.
+    """
+
+    copyback_root = tmp_path / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    primed = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+    assert primed is not None and primed["status"] == "ok"
+    prcp_key = _prcp_tree_key("gfs", COMPACT_TIME)
+    cycle_dir = (copyback_root / prcp_key).parent
+    primed_bytes = _tree_bytes(copyback_root / prcp_key)
+    # Only the precipitation tree plans a copy; the grid tree stays identical,
+    # so the batch holds exactly the one entry whose backup is cloned.
+    publisher.object_store.write_bytes_atomic(
+        f"{prcp_key}/gfs_{COMPACT_TIME}_prcp_rate_or_amount_f003.nc", b"fresh"
+    )
+    original_rmtree = publisher_module.rmtree_no_follow
+
+    def fail_backup_cleanup_after_the_clone(
+        path: Path,
+        *,
+        containment_root: Path | None = None,
+        missing_ok: bool = False,
+    ) -> None:
+        if ".copyback-backup." in Path(path).name:
+            raise OSError("backup cleanup blocked after the rollback clone was taken")
+        original_rmtree(path, containment_root=containment_root, missing_ok=missing_ok)
+
+    monkeypatch.setattr(publisher_module, "rmtree_no_follow", fail_backup_cleanup_after_the_clone)
+
+    mirror = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert mirror is not None
+    assert mirror["status"] == "failed"
+    assert [tree["status"] for tree in mirror["trees"]] == ["rolled_back", "skipped"]
+    assert "rollback_error" not in mirror
+    # The clone really is what landed: byte-for-byte the tree as it stood before
+    # this run, not the `fresh` bytes the run promoted.
+    assert _tree_bytes(copyback_root / prcp_key) == primed_bytes
+    assert stat.S_IMODE((copyback_root / prcp_key).stat().st_mode) == 0o2775
+    assert stat.S_IMODE(cycle_dir.stat().st_mode) == 0o2775
+
+
 def test_copyback_canonical_precip_failed_rollback_is_recorded_not_raised(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -3633,6 +3690,12 @@ def test_canonical_copyback_leaves_every_level_it_created_traversable(
     which it deliberately never `chmod`s afterwards (#1513); under `umask 027`
     every one of these levels used to land `0o750` and node-27's reader account
     lost traversal of the whole chain.
+
+    Two modes since #2100, and which level gets which is the point: the
+    traversal levels the lane does not own stay `0o755`, while the three
+    directories it does own -- `<cycle>/` and the two trees it copies -- are
+    `0o2775`, so node-27's retention account can *delete* a mirrored cycle and
+    not merely traverse it. Both are explicit, so neither moves with the umask.
     """
 
     copyback_root = Path(tmp_path) / "shared-object-store"
@@ -3647,19 +3710,144 @@ def test_canonical_copyback_leaves_every_level_it_created_traversable(
         os.umask(previous_umask)
 
     assert summary is not None and summary["status"] == "ok"
-    levels = [
+    traversal_levels = [
         copyback_root,
         copyback_root / "canonical",
         copyback_root / "canonical" / "gfs",
+        copyback_root / "canonical" / "gfs" / "grid",
+    ]
+    mirror_levels = [
         copyback_root / "canonical" / "gfs" / COMPACT_TIME,
         copyback_root / "canonical" / "gfs" / COMPACT_TIME / "prcp_rate_or_amount",
-        copyback_root / "canonical" / "gfs" / "grid",
         copyback_root / "canonical" / "gfs" / "grid" / "gfs_0p25",
     ]
-    landed = {str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in levels}
-    assert landed == {str(path): "0o755" for path in levels}
-    # No created level carries a group- or other-write bit at any of the umasks.
-    assert all(stat.S_IMODE(path.stat().st_mode) & 0o022 == 0 for path in levels)
+    landed = {
+        str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in traversal_levels + mirror_levels
+    }
+    assert landed == {
+        **{str(path): "0o755" for path in traversal_levels},
+        **{str(path): "0o2775" for path in mirror_levels},
+    }
+    # No created level carries an other-write bit at any of the umasks, and the
+    # group-write bit reaches the lane's own levels and nothing else.
+    assert all(stat.S_IMODE(path.stat().st_mode) & 0o002 == 0 for path in traversal_levels + mirror_levels)
+    assert all(stat.S_IMODE(path.stat().st_mode) & 0o022 == 0 for path in traversal_levels)
+    mirrored_files = sorted(
+        path for path in (copyback_root / "canonical").rglob("*") if path.is_file()
+    )
+    assert mirrored_files, "the mirror must have landed files for the file mode to mean anything"
+    assert {str(path): oct(stat.S_IMODE(path.stat().st_mode)) for path in mirrored_files} == {
+        str(path): "0o644" for path in mirrored_files
+    }
+
+
+def _a_second_group_of_this_process(path: Path) -> int | None:
+    """A gid this process belongs to that is NOT `path`'s current group, or None.
+
+    `os.chown(path, -1, gid)` is permitted for an unprivileged caller only for a
+    group it is a member of, and the kernel drops the setgid bit of a `chmod`
+    for the same reason -- so the gid the mirror is asked to propagate has to
+    come from `os.getgroups()`.
+    """
+
+    current = path.stat().st_gid
+    return next((gid for gid in os.getgroups() if gid != current), None)
+
+
+def test_canonical_copyback_trees_take_the_source_roots_group(tmp_path: Any) -> None:
+    """#2100 D3: the mirror inherits `canonical/<S>/`'s group, it never imposes one.
+
+    Production needs `<cycle>/` and `prcp_rate_or_amount/` to end up in gid 1107
+    (`nwmuser`, shared by node-22's writer and node-27's retention account)
+    without the publisher naming any gid: the lane sets `0o2775` and the *group*
+    comes from the swept `canonical/<S>/` above it.
+
+    Deterministic on both platforms, by two different mechanisms. A new
+    directory takes its parent's gid unconditionally on macOS and only under a
+    setgid parent on Linux -- and every parent here carries the bit by the time
+    its child is created, `<cycle>/` because the lane asserts the mode before
+    the temp tree is made. The `.nc` files follow the same rule one level down,
+    where the setgid parent is the *temp tree root*, not `<cycle>/`: the lane
+    asserts the mode on it right after the traversal helper created (and, at
+    `0o755`, de-setgid'ed) it, before the first byte is written.
+    """
+
+    if os.geteuid() == 0:
+        pytest.skip("root may chown to any group, so an inherited gid would prove nothing")
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    source_root = copyback_root / "canonical" / "gfs"
+    source_root.mkdir(parents=True)
+    shared_gid = _a_second_group_of_this_process(source_root)
+    if shared_gid is None:
+        pytest.skip("this process belongs to a single group, so no foreign gid can be propagated")
+    try:
+        os.chown(source_root, -1, shared_gid)
+    except PermissionError:
+        pytest.skip("this environment refuses os.chown to a supplementary group")
+    # The swept production shape of `canonical/<S>/`, reproduced exactly.
+    os.chmod(source_root, 0o2775)
+    if stat.S_IMODE(source_root.stat().st_mode) != 0o2775:
+        pytest.skip("the kernel dropped the setgid bit on the seeded source root")
+
+    summary = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert summary is not None and summary["status"] == "ok"
+    cycle_dir = source_root / COMPACT_TIME
+    prcp_dir = cycle_dir / "prcp_rate_or_amount"
+    owned = {
+        str(path): (oct(stat.S_IMODE(path.stat().st_mode)), path.stat().st_gid)
+        for path in (cycle_dir, prcp_dir)
+    }
+    assert owned == {str(path): ("0o2775", shared_gid) for path in (cycle_dir, prcp_dir)}
+    mirrored_files = sorted(prcp_dir.glob("*.nc"))
+    assert len(mirrored_files) == 2
+    assert {
+        str(path): (oct(stat.S_IMODE(path.stat().st_mode)), path.stat().st_gid)
+        for path in mirrored_files
+    } == {str(path): ("0o644", shared_gid) for path in mirrored_files}
+
+
+def test_canonical_copyback_converges_a_pre_existing_cycle_directory(tmp_path: Any) -> None:
+    """#2100 D3/D6: a copy converges `<cycle>/`, a skip deliberately does not.
+
+    The cycles mirrored by the pre-#2100 producer sit at `0o755`. The lane
+    asserts the mode on `<cycle>/` whether or not this call created it, so
+    re-mirroring one heals it -- but only when a tree actually needs copying.
+    A cycle whose destination is already identical is `skipped` whole before
+    phase 2 runs and keeps its `0o755`, which is exactly why the runbook's
+    post-deploy re-sweep is load-bearing rather than decorative.
+    """
+
+    copyback_root = Path(tmp_path) / "shared-object-store"
+    publisher = _publisher(tmp_path, object_store_copyback_root=copyback_root)
+    _seed_canonical_precip(publisher, leads=(3, 6))
+    primed = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+    assert primed is not None and primed["status"] == "ok"
+    cycle_dir = copyback_root / "canonical" / "gfs" / COMPACT_TIME
+    prcp_dir = cycle_dir / "prcp_rate_or_amount"
+    # The pre-#2100 shape of an already mirrored cycle.
+    os.chmod(prcp_dir, 0o755)
+    os.chmod(cycle_dir, 0o755)
+
+    identical = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert identical is not None and identical["status"] == "skipped"
+    assert identical["reason"] == "trees_already_mirrored"
+    assert stat.S_IMODE(cycle_dir.stat().st_mode) == 0o755
+    assert stat.S_IMODE(prcp_dir.stat().st_mode) == 0o755
+
+    # Now make the destination differ, so the tree is copied and the lane runs.
+    stale = prcp_dir / f"gfs_{COMPACT_TIME}_prcp_rate_or_amount_f003.nc"
+    stale.write_bytes(b"stale")
+
+    remirrored = publisher.copyback_canonical_precip("gfs", COMPACT_TIME)
+
+    assert remirrored is not None and remirrored["status"] == "ok"
+    assert stat.S_IMODE(cycle_dir.stat().st_mode) == 0o2775
+    assert stat.S_IMODE(prcp_dir.stat().st_mode) == 0o2775
+    assert stale.read_bytes() == f"prcp:gfs:{COMPACT_TIME}:003".encode("utf-8")
 
 
 def test_qdown_copyback_leaves_every_level_it_created_traversable_under_umask_027(
@@ -3877,10 +4065,14 @@ def test_canonical_copyback_holds_the_batch_mutex_through_its_commit(
     held_during: dict[str, bool] = {}
     real_commit = publisher_module._commit_qdown_copyback_batch
 
-    def probing_commit(rollback_log: Any, *, containment_root: Path) -> None:
+    def probing_commit(
+        rollback_log: Any, *, containment_root: Path, directory_mode: int = 0o755
+    ) -> None:
         assert rollback_log, "the commit must run with real promoted entries"
         held_during["commit"] = _batch_lock_is_held(copyback_root)
-        return real_commit(rollback_log, containment_root=containment_root)
+        # Forwarded, not dropped: this lane passes its own mode (#2100) and a
+        # probe that swallowed it would leave the clone at the default.
+        return real_commit(rollback_log, containment_root=containment_root, directory_mode=directory_mode)
 
     monkeypatch.setattr(publisher_module, "_commit_qdown_copyback_batch", probing_commit)
 

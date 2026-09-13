@@ -66,13 +66,20 @@ Path safety, stated as exactly what is enforced and nothing more:
   and recorded as a failure rather than followed out of the root, and so is a
   regular file already at this run's own temp name.
 
-Every directory the script creates under ``--copyback-root`` is chmod'ed 0o755
+Every directory the script creates under ``--copyback-root`` is chmod'ed 0o2775
 explicitly, and every file it promotes there is chmod'ed 0o644 on the temp name
 before the ``os.replace``, because node-22 writes as one account and node-27
 reads the same NFS as another and the process umask must not decide that
 (``O_CREAT``'s mode argument is masked by the umask exactly as ``mkdir``'s is).
-Directories the script did not create and files it did not write -- an
-identical-size destination is skipped -- keep the mode they already had.
+0o2775 rather than 0o755 since #2100: node-27's retention account must be able
+to *delete* a mirrored cycle, which needs write on the directory, and the setgid
+bit makes each level created underneath take its parent's shared group (gid 1107
+``nwmuser`` in production) instead of this writer's egid. It is the same value
+the publisher's ``CANONICAL_MIRROR_DIRECTORY_MODE`` and the documented
+owner-side sweep write; ``docs/runbooks/current-production-ops.md`` 5.3 carries
+the sweep and the reversal. Directories the script did not create and files it
+did not write -- an identical-size destination is skipped -- keep the mode they
+already had.
 """
 
 from __future__ import annotations
@@ -98,7 +105,7 @@ PRCP_DIR = "prcp_rate_or_amount"
 CYCLE_TOKEN_LENGTH = 10
 
 
-DIR_MODE = 0o755
+DIR_MODE = 0o2775
 FILE_MODE = 0o644
 
 
@@ -196,13 +203,18 @@ def _reject_symlinked_directory(path: Path) -> None:
 
 
 def _ensure_target_directory(directory: Path) -> None:
-    """``mkdir -p`` the destination and chmod 0o755 every directory created here.
+    """``mkdir -p`` the destination and chmod ``DIR_MODE`` every directory created here.
 
     ``mkdir(mode=...)`` is masked by the process umask, so the mode has to be
     applied afterwards with an explicit ``chmod``; under ``umask 027`` the plain
     ``mkdir`` leaves 0o750 and node-27's reader account loses the tree.
     Pre-existing directories are left alone -- this script only owns what it
     creates.
+
+    Outermost level first, which is also what puts the setgid bit of ``DIR_MODE``
+    on ``<cycle>/`` before ``prcp_rate_or_amount/`` is created under it, so on
+    Linux that child takes the parent's group rather than this process's egid
+    (#2100).
 
     The chain is created one level at a time, outermost first, and each level is
     chmod'ed as soon as *that* level exists. A single ``mkdir(parents=True)``

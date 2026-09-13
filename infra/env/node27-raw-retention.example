@@ -62,24 +62,35 @@ NODE27_RAW_RETENTION_DAYS=14
 # `precip_cache_root_unconfigured` and raw + canonical are still pruned.
 NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 
-# HOW TO READ THIS UNIT UNTIL #2100 LANDS (issue #2011; node-27 observations
-# 2026-09-06, local reproductions marked as such). The canonical tree is `755
-# frd_muziyao nfsdata` and this runner is `nwm`, so every canonical target
-# fails with `PermissionError`. That is the EXPECTED STEADY STATE, not an
-# incident:
-#   - `failed[]` is permanently non-empty on the canonical lane, so the runner
-#     returns rc=1 on every tick (`return 1 if payload["counts"]["failed"] else
-#     0`), the wrapper propagates that rc unchanged (`RC=$?` ... `exit "$RC"`),
-#     and this `Type=oneshot` unit sets no `SuccessExitStatus=`, so it sits
-#     permanently in `systemctl --user --failed`. The unit carries no
-#     `OnFailure=` (unlike nhms-node27-timeseries-retention and
-#     nhms-node27-resource-governance), so nothing pages -- but the exit code
-#     stops being usable as a raw-lane signal.
+# HOW TO READ THIS UNIT (issue #2011; node-27 observations 2026-09-06, local
+# reproductions marked as such; the canonical lane's permission model is #2100).
+# Steady state since #2100: every canonical mirror directory this runner has to
+# remove -- `canonical/<S>/`, `<cycle>/` and its `prcp_rate_or_amount/` -- is
+# `2775` with group `nwmuser` (gid 1107), which `nwm` is a member of. The mirror
+# producers write that mode on every directory they own and the owner-side sweep
+# in docs/runbooks/current-production-ops.md 5.3 covers the rest, so aged
+# canonical cycles are actually deleted, `failed[]` is EMPTY, the runner returns
+# rc=0 (`return 1 if payload["counts"]["failed"] else 0`), the wrapper propagates
+# that rc unchanged (`RC=$?` ... `exit "$RC"`), and this `Type=oneshot` unit does
+# NOT sit in `systemctl --user --failed`.
+#   - A `PermissionError` in `failed[]` is an INCIDENT, not the expected shape.
+#     On the canonical lane it means one of two things: the producer mode
+#     regressed, or that storage source was added to
+#     NODE27_RAW_RETENTION_SOURCES without the per-source sweep that 5.3
+#     requires (`canonical/` itself is deliberately left `755` with a group
+#     `nwm` is not in, so an unswept source fails closed). Fail-closed is the
+#     whole point: the first `unlink` is denied and ZERO bytes are removed, so
+#     the remedy is the sweep -- or a producer fix -- and never a manual delete.
 #   - The historical ops criterion `counts.failed == 0`
-#     (docs/runbooks/receipts/2026-06-27-node27-raw-retention-live-proof.md)
-#     CANNOT hold again until #2100 is resolved. Do not re-adopt it.
-#   - `failed[]` alone is NOT the signal. It stays empty in two states where
-#     retention has silently stopped:
+#     (docs/runbooks/receipts/2026-06-27-node27-raw-retention-live-proof.md) is
+#     back in force; #2100 is what restored it. It was suspended only while the
+#     canonical tree was `755 frd_muziyao nfsdata` and every canonical target
+#     failed on every tick.
+#   - This unit carries no `OnFailure=` (unlike nhms-node27-timeseries-retention
+#     and nhms-node27-resource-governance), so a red tick pages nobody. It is
+#     read from `systemctl --user --failed` or from the check below.
+#   - `failed[]` alone is still NOT the whole signal. It stays empty in two
+#     states where retention has silently stopped:
 #       * Lanes retired silently. If `<object-store>` itself loses `x`,
 #         `config_from_env`'s `resolve(strict=True)` still succeeds (it stats
 #         that root from its PARENT), so the loud `preflight_blocked` rc=2 path
@@ -109,29 +120,34 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #         non-EACCES `OSError` there -- ESTALE, EIO -- still escapes
 #         `collect_targets`. The freshness clause below is the only thing that
 #         catches any of them.
-#     Check freshness, execution mode and the failure kind together:
+#     Check freshness, execution mode and every failure together:
 #       jq -e '
 #         (.execution_mode == "production_execute")
 #         and ((.finished_at | fromdateiso8601) > (now - 26*3600))
-#         and ([.failed[]  | select(.error_type != "PermissionError")]        | length == 0)
-#         and ([.skipped[] | select(.reason | endswith("_unsafe"))]           | length == 0)
+#         and ([.failed[]]                                          | length == 0)
+#         and ([.skipped[] | select(.reason | endswith("_unsafe"))] | length == 0)
 #       ' "$(ls -t /home/nwm/node27-raw-retention-logs/raw-retention-*.json | head -1)"
 #     26h is not a magic constant: it is the 24h tick of
 #     nhms-node27-raw-retention.timer (`OnCalendar=*-*-* 03:35:00 UTC`, daily)
-#     plus slack. Exit codes over eight summary shapes -- seven produced by
-#     driving the shipped script (the newest of them, a per-source
-#     `*_source_unsafe` skip, is driven by
+#     plus slack. Exit codes over the summary shapes below -- all of them
+#     produced by driving the shipped script, except the stale one, which is a
+#     real summary with only `finished_at` aged past the window. Three of them --
+#     the healthy tick, the `*_source_unsafe` skip and the canonical
+#     `PermissionError` -- are driven by
 #     `tests/test_node27_raw_retention.py::test_documented_operator_check_goes_red_on_an_unsafe_skip`,
-#     which extracts and runs THIS `jq` program rather than a copy of it), the
-#     stale one a real summary with only `finished_at` aged past the window:
-#       0  expected steady state -- fresh file, `production_execute`,
-#          `PermissionError` entries only, no `*_unsafe` skip at either depth.
+#     which extracts and runs THIS `jq` program rather than a copy of it:
+#       0  expected steady state -- fresh file, `production_execute`, `failed[]`
+#          empty, no `*_unsafe` skip at either depth.
+#       1  ANY entry in `failed[]`, `PermissionError` included -- clause 3 stopped
+#          whitelisting that error type with #2100. Read the entry's `key`,
+#          `error_type` and `error`: `PermissionError` under `canonical/` means
+#          the mirror's mode/group regressed or that source was never swept
+#          (5.3); a genuine IO failure reads e.g. `error_type: "OSError"` /
+#          `[Errno 30] Read-only file system`.
 #       1  a lane silently retired via `*_root_unsafe`, or one source inside a
 #          live lane via `*_source_unsafe` -- clause 4 matches every reason
 #          ending in `_unsafe`, at both depths.
 #       1  a stale receipt, i.e. no new summary since the last tick.
-#       1  a genuine IO failure in `failed[]` (driven as `error_type: "OSError"`
-#          / `[Errno 30] Read-only file system`) -- read its `key`/`error`.
 #       1  `NODE27_RAW_RETENTION_ENABLED=false`, i.e. `execution_mode:
 #          "disabled"`.
 #       1  `NODE27_RAW_RETENTION_PLAN_ONLY=true`, i.e. `execution_mode:
@@ -143,10 +159,10 @@ NHMS_MVT_FILE_CACHE_DIR=/home/nwm/.cache/nhms/mvt
 #       1  `preflight_blocked` -- nothing ran; the runner already exits rc=2
 #          there.
 #     Exit 0 means those four clauses and nothing more: fresh summary,
-#     `production_execute`, every `failed[]` entry a `PermissionError` (on ANY
-#     lane -- the clause does not single out canonical), and no `*_unsafe` skip
-#     of either depth (no `*_root_unsafe` lane root, no `*_source_unsafe`
-#     source root). It does NOT mean all three lanes ran: a lane that retired
+#     `production_execute`, an EMPTY `failed[]` (on ANY lane -- the clause does
+#     not single out canonical), and no `*_unsafe` skip of either depth (no
+#     `*_root_unsafe` lane root, no `*_source_unsafe` source root). It does NOT
+#     mean all three lanes ran: a lane that retired
 #     itself with `<lane>_root_missing` or `precip_cache_root_unconfigured`
 #     passes clause 4 deliberately, because `_resolve_lane_root` treats absence
 #     as a benign per-lane skip and matching it would hold a fresh install at
