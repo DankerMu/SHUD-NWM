@@ -25,13 +25,13 @@ from packages.common.compressed_chunk_cold_runtime_catalog import (
     window_parity_from_dict,
 )
 from packages.common.display_watermark import fetch_display_watermark
-from packages.common.node27_issue1895_private_receipt import read_held_private_json
+from packages.common.node27_issue1895_census_bind import load_original_census
 from packages.common.node27_issue1895_receipt import DURABLE_FIELDS, durable_key
+from packages.common.node27_issue1895_timer import persist_baseline_groups
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 from scripts.node27_cold_residency_census import close_observer_connection, open_readonly_connection
 
 Execute = Callable[..., Sequence[Mapping[str, Any]]]
-REQUIRE_COUNT = 6
 ARTIFACT = "nhms-issue1895-post-target-observe"
 MAX_BYTES = 262144
 
@@ -251,13 +251,15 @@ def observe_post_target(
     watermark: datetime,
     lag_seconds: int,
     reviewed_sha: str,
+    expected_count: int,
 ) -> dict[str, Any]:
-    if len(baseline_groups) != REQUIRE_COUNT:
-        raise Issue1895ReadinessError(
-            "baseline is not exactly six durable groups",
-            code="POST_TARGET_BASELINE_COUNT",
-            stage="post-target",
+    try:
+        persist_baseline_groups(baseline_groups, expected_count=expected_count)
+    except Issue1895ReadinessError as error:
+        code = (
+            "POST_TARGET_BASELINE_COUNT" if error.code == "BASELINE_COUNT_INVALID" else "POST_TARGET_BASELINE_INVALID"
         )
+        raise Issue1895ReadinessError("original identity set is invalid", code=code, stage="post-target") from error
     validated: list[tuple[Mapping[str, Any], dict[str, Any]]] = []
     for group in baseline_groups:
         if not isinstance(group, Mapping):
@@ -322,23 +324,20 @@ def run_post_target_observation(
     output_path: Path,
     reviewed_sha: str,
     lag_seconds: int,
+    expected_original_sha256: str,
     connect: Callable[[str], Any] | None = None,
     execute: Execute | None = None,
     watermark: datetime | None = None,
     dsn: str | None = None,
 ) -> dict[str, Any]:
     try:
-        _raw, baseline, _facts = read_held_private_json(
-            Path(baseline_path),
-            label="post-target baseline",
-            stage="post-target",
-            unreadable_code="POST_TARGET_BASELINE_INVALID",
-            identity_code="POST_TARGET_BASELINE_INVALID",
-            toctou_code="POST_TARGET_BASELINE_INVALID",
-            json_code="POST_TARGET_BASELINE_INVALID",
+        baseline, count = load_original_census(
+            baseline_path,
+            expected_original_sha256=expected_original_sha256,
+            reviewed_sha=reviewed_sha,
         )
     except Issue1895ReadinessError as error:
-        if error.code.startswith("READINESS_INPUT_"):
+        if error.code.startswith("READINESS_INPUT_") or error.code == "CENSUS_JSON_INVALID":
             raise Issue1895ReadinessError(
                 "baseline artifact is invalid",
                 code="POST_TARGET_BASELINE_INVALID",
@@ -370,6 +369,7 @@ def run_post_target_observation(
         cutoff = compute_cutoff(live_watermark, lag_seconds)
         document = observe_post_target(
             baseline_groups=baseline["groups"],
+            expected_count=count,
             execute=live_execute,
             cutoff=cutoff,
             watermark=live_watermark,

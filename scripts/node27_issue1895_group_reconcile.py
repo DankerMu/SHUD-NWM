@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""G8 exact six-group reconciliation plus natural-tick receipt identity.
+"""G8 original-group reconciliation plus natural-tick receipt identity.
 
 Binds subsequent-tick selected/moved/deferred semantics to the shipping
 receipt, never a catalog row count.
@@ -11,6 +11,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from packages.common.node27_issue1895_census_bind import load_original_census
 from packages.common.node27_issue1895_private_receipt import read_held_private_json
 from packages.common.node27_issue1895_timer import (
     COMPRESSION_SERVICE,
@@ -28,6 +29,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--observed", required=True, type=Path)
     parser.add_argument("--receipt", required=True, type=Path)
     parser.add_argument("--reviewed-sha", required=True)
+    parser.add_argument("--original-sha256", required=True)
     parser.add_argument("--expected-cutoff", required=True)
     parser.add_argument("--expected-watermark", required=True)
     parser.add_argument("--invoked-unit", default=COMPRESSION_SERVICE)
@@ -79,11 +81,15 @@ def _groups(document: dict) -> list:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        baseline_doc = _load(args.baseline)
+        baseline_doc, count = load_original_census(
+            args.baseline,
+            expected_original_sha256=args.original_sha256,
+            reviewed_sha=args.reviewed_sha,
+        )
         observed_doc = _load(args.observed)
         receipt = _load(args.receipt, require_private_parent=False)
-        persist_baseline_groups(_groups(baseline_doc))
-        assert_exact_cold_groups(_groups(observed_doc), baseline=_groups(baseline_doc))
+        persist_baseline_groups(_groups(baseline_doc), expected_count=count)
+        assert_exact_cold_groups(_groups(observed_doc), baseline=_groups(baseline_doc), expected_count=count)
         assert_natural_receipt_identity(
             receipt,
             reviewed_sha=args.reviewed_sha,
@@ -99,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
             remaining_complete_source_keys=remaining,
             newly_terminal_keys=newly,
             baseline_keys=baseline_keys,
+            expected_count=count,
         )
     except Issue1895ReadinessError as error:
         print(error.code, file=sys.stderr)

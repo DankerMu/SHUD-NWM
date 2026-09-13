@@ -713,11 +713,13 @@ an observable field, and a stop condition.
   artifact `0600`. Root-owned storage evidence lives in a private **root-owned**
   directory and is handed to the installer by pathname, read by descriptor.
   Evidence is never `source`d by a shell and never embedded in a shell variable.
-- **The historical six is not identity.** Six compressed groups were observed
-  on 2026-08-29; that is a preflight expectation only. G1 must resolve exactly
-  six **complete eligible all-source groups from the live catalog**. "Six" is
-  never satisfied by taking the oldest six of a larger set, by dropping a
-  drifted group, or by reusing the 2026-08-29 keys.
+- **The historical six is not authority.** Six compressed groups were observed
+  on 2026-08-29; this and historical byte figures are not current acceptance.
+  Supply an externally reviewed canonical `REQUIRE_COUNT` in 1..63. G1 must
+  resolve exactly N complete eligible all-source groups from the live catalog.
+  Never take an oldest-N subset, drop drifted groups, substitute legacy chunks,
+  reuse historical keys, or retry with the observed count. G1 freezes N and
+  `ORIGINAL_CENSUS_SHA256` once; every later gate consumes that same authority.
 
 ### G0 — Readiness at the reviewed SHA (no remote access)
 
@@ -832,8 +834,8 @@ chmod 700 "$RUN_ROOT" "$RUN_ROOT/census" "$RUN_ROOT/evidence" "$RUN_ROOT/receipt
 test "$(git rev-parse HEAD)" = "$REVIEWED_SHA"
 CENSUS_ARTIFACT="$RUN_ROOT/census/pre-target-$RUN_STAMP.json"
 CENSUS_BRACKET="$RUN_ROOT/census/pre-target-$RUN_STAMP.bracket"
-REQUIRE_COUNT=6
-export CENSUS_ARTIFACT
+: "${REQUIRE_COUNT:?externally reviewed canonical count 1..63 is required}"
+export CENSUS_ARTIFACT REQUIRE_COUNT REVIEWED_SHA
 set -a
 . /home/nwm/NWM/infra/env/node27-timeseries-compression.env   # DATABASE_URL + configured lag
 set +a
@@ -867,8 +869,12 @@ import re, sys
 from datetime import UTC, datetime
 from pathlib import Path
 from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
+from packages.common.node27_cold_residency_census_policy import parse_reviewed_count
+from packages.common.node27_issue1895_census_bind import validate_original_census
 path, head, required, bracket = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+required = parse_reviewed_count(sys.argv[3])
 _raw, artifact, _facts = read_held_private_json(Path(path), label="G1 census", stage="census")
+validate_original_census(artifact, expected_count=required, reviewed_sha=head)
 bracket_text = read_held_private_text(Path(bracket), label="G1 census bracket", stage="census")
 start, end, _rc = [line.strip() for line in bracket_text.splitlines() if line.strip()]
 def _utc(value):
@@ -911,8 +917,8 @@ print("census OK:", artifact["census_digest"])
 PY
 ```
 
-Freeze the policy and the digest into a mode-0600 file that G4/G5 read (the
-assignment form also makes them available to the current shell). The write is an
+Freeze the reviewed count, whole held-file SHA256, capacity policy and semantic
+digest into the mode-0600 file that G3/G4/G5 and later gates read. The write is an
 **exclusive no-clobber private write**: `O_CREAT|O_EXCL` with mode `0600` from
 the first byte, so a stale or racing file can never be replaced but only
 refused, and the file never exists in a wider mode at any instant:
@@ -925,8 +931,21 @@ export CENSUS_ARTIFACT POLICY_FILE
 import os, re
 from pathlib import Path
 from packages.common.node27_issue1895_private_receipt import read_held_private_json
+from packages.common.node27_cold_residency_census_policy import parse_reviewed_count
+from packages.common.node27_issue1895_census_bind import validate_original_census
+from packages.common.node27_issue1895_private_receipt import read_held_private_text
+from packages.common.node27_issue1895_probe import assert_report_within_command_bracket, parse_bracket_instant
+from datetime import datetime
 census_path = Path(os.environ["CENSUS_ARTIFACT"])
 _raw, artifact, _facts = read_held_private_json(census_path, label="G1 census", stage="census")
+count = parse_reviewed_count(os.environ["REQUIRE_COUNT"])
+validate_original_census(artifact, expected_count=count, reviewed_sha=os.environ["REVIEWED_SHA"])
+bracket = read_held_private_text(Path(os.environ["CENSUS_BRACKET"]), label="G1 bracket", stage="census")
+lines = bracket.splitlines()
+assert len(lines) == 3 and lines[2] == "0"
+assert_report_within_command_bracket(
+    report_mtime=datetime.fromisoformat(artifact["generated_at"].replace("Z", "+00:00")).timestamp(),
+    start=parse_bracket_instant(lines[0]), end=parse_bracket_instant(lines[1]))
 policy = artifact["capacity_policy"]
 assert artifact["verdict"] == "GO"
 decimal = re.compile(r"^(?:0|[1-9][0-9]*)$")
@@ -944,6 +963,7 @@ for name, value in values.items():
 digest = artifact["census_digest"]
 assert digest_re.fullmatch(digest), "CENSUS_DIGEST"
 payload = "".join(f"{name}={value}\n" for name, value in values.items()) + f"CENSUS_DIGEST={digest}\n"
+payload += f"REQUIRE_COUNT={count}\nORIGINAL_CENSUS_SHA256={_facts['sha256']}\n"
 target = os.environ["POLICY_FILE"]
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 fd = os.open(target, flags, 0o600)
@@ -961,6 +981,7 @@ test "$(stat -c '%a' "$POLICY_FILE")" = "600"
 set -a
 . "$POLICY_FILE"
 set +a
+export ORIGINAL_CENSUS="$CENSUS_ARTIFACT"
 test "$COLD_RESERVE" = "$E" && test "$WAL_RESERVE" = "$E"
 test "$INSTALL_REQUIRED" = "$S"
 test "${#E}" -le 20 && test "${#S}" -le 20
@@ -1361,8 +1382,8 @@ set -a
 . /home/nwm/NWM/infra/env/node27-timeseries-compression.env
 set +a
 : "${NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS:?configured compression lag is required}"
-CUTOFF_COUNT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
-  "SELECT count(*) FROM timescaledb_information.chunks WHERE is_compressed AND range_end <= (SELECT max(cycle_time) FROM hydro.hydro_run WHERE run_type='forecast' AND status IN ('succeeded','parsed','published')) - interval '1 second' * ${NODE27_TIMESERIES_COMPRESSION_LAG_SECONDS}")"
+CUTOFF_COUNT="$(uv run --no-sync python -m scripts.node27_issue1895_cutoff_count \
+  --original "$ORIGINAL_CENSUS" --original-sha256 "$ORIGINAL_CENSUS_SHA256" --reviewed-sha "$REVIEWED_SHA")"
 test "$CUTOFF_COUNT" = "$REQUIRE_COUNT" || { echo "NO-GO: cutoff count $CUTOFF_COUNT != $REQUIRE_COUNT" >&2; exit 1; }
 TARGET_ABSENT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -c \
   "SELECT spcname FROM pg_tablespace WHERE spcname='nhms_cold'")"
@@ -1372,8 +1393,10 @@ ATTACHED="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager=off -
 test -z "$ATTACHED" || { echo "NO-GO: a tablespace is already attached" >&2; exit 1; }
 ```
 
-The count statement must equal `REQUIRE_COUNT` and its interval must be the same
-configured lag the census used — the cutoff is shared, not recomputed from wall
+The fresh admitted physical count must equal `REQUIRE_COUNT`; zero and bounded
+surplus are mismatches, not GO receipts. Mixed/incomplete or drifted groups refuse.
+The configured lag and cutoff must match the original; neither legacy nor third
+tables may fill a missing narrow river population. The cutoff is not wall-clock
 time. `node27_external_contract_snapshot.py --check` must exit `0` (exit `3` is
 drift, `4` fixture misalignment, `5` probe-execution failure — all NO-GO for this
 window, never a patch bump). `_timescaledb_catalog.tablespace` carries
@@ -2014,15 +2037,16 @@ COLD_REL_COUNT="$(/usr/bin/docker exec nhms-db psql -U nhms -d nhms -tA -P pager
   "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_tablespace t ON t.oid=c.reltablespace WHERE t.spcname='nhms_cold'")"
 test "$COLD_REL_COUNT" = "0" || { echo "NO-GO: $COLD_REL_COUNT cold-resident relations before movement" >&2; exit 1; }
 export ORIGINAL_CENSUS="$RUN_ROOT/census/pre-target-$RUN_STAMP.json"
-uv run --no-sync python scripts/node27_issue1895_census_bind.py \
+uv run --no-sync python -m scripts.node27_issue1895_census_bind \
   --current "$PRE_MOVEMENT_CENSUS" \
   --original "$ORIGINAL_CENSUS" \
+  --original-sha256 "$ORIGINAL_CENSUS_SHA256" \
   --digest "$CENSUS_DIGEST" \
   --bracket "$PRE_MOVEMENT_BRACKET" \
   --reviewed-sha "$REVIEWED_SHA"
 ```
 
-Same six durable keys, same complete-source preimages, same inventory/parity and
+Same original N ordered durable keys, same complete-source preimages, same inventory/parity and
 capacity inputs, no unexplained extra eligible group, and zero cold-resident
 relations — or movement stays at zero and the window is NO-GO.
 
@@ -2065,14 +2089,15 @@ uv run --no-sync python scripts/node27_cold_residency.py --receipt-path "$PREVIE
 _end="$(/usr/bin/date -u +%FT%T.%N%:z)"
 printf '%s\n%s\n%s\n' "$_start" "$_end" "$rc" > "$PREVIEW_BRACKET"
 test "$rc" -eq 0 || { echo "NO-GO: cold preview exit $rc" >&2; exit 1; }
-/home/nwm/NWM/.venv/bin/python - "$PREVIEW_RECEIPT" "$ORIGINAL_CENSUS" "$PREVIEW_BRACKET" "$REVIEWED_SHA" <<'PY'
+/home/nwm/NWM/.venv/bin/python - "$PREVIEW_RECEIPT" "$ORIGINAL_CENSUS" "$PREVIEW_BRACKET" "$REVIEWED_SHA" "$ORIGINAL_CENSUS_SHA256" <<'PY'
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from packages.common.node27_issue1895_private_receipt import read_held_private_json, read_held_private_text
 receipt_path, census_path, bracket, head = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 _raw, receipt, _facts = read_held_private_json(Path(receipt_path), label="G6 preview receipt", stage="receipt")
-_craw, census, _cfacts = read_held_private_json(Path(census_path), label="G6 preview census", stage="receipt")
+from packages.common.node27_issue1895_census_bind import load_original_census
+census, count = load_original_census(Path(census_path), expected_original_sha256=sys.argv[5], reviewed_sha=head)
 bracket_text = read_held_private_text(Path(bracket), label="G6 preview bracket", stage="receipt")
 lines = [line.strip() for line in bracket_text.splitlines() if line.strip()]
 assert len(lines) == 3 and lines[2] == "0", lines
@@ -2091,7 +2116,7 @@ assert receipt["target"]["observed"] is True
 assert receipt["target"]["device_identity"] and receipt["target"]["container_exec_uid"]
 assert receipt["inventory"]["observed"] is True
 from packages.common.node27_issue1895_receipt import assert_sequential_tick_receipt, unique_migrated_observation, durable_key
-planned = assert_sequential_tick_receipt(receipt, ordered_keys=census["group_keys"], call_index=1, migrate_outcome="planned")
+planned = assert_sequential_tick_receipt(receipt, ordered_keys=census["group_keys"], expected_count=count, call_index=1, migrate_outcome="planned")
 key = durable_key(planned["durable"])
 assert key == census["group_keys"][0], (key, census["group_keys"][0])
 assert planned["shell_sql_executed"] is False
@@ -2149,9 +2174,10 @@ while IFS= read -r GROUP; do
     > "$RUN_ROOT/receipts/filespace-$GROUP_INDEX.json"
   chmod 600 "$RUN_ROOT/receipts/filespace-$GROUP_INDEX.json"
   printf 'group=%s before=%s after=%s\n' "$GROUP" "$START_FREE" "$END_FREE" >> "$FILESYSTEM_LOG"
-  uv run --no-sync python scripts/node27_issue1895_sequential_receipt.py \
-    --receipt "$RECEIPT" --census "$ORIGINAL_CENSUS" --call-index "$GROUP_INDEX" --migrate-outcome migrated
-  /home/nwm/NWM/.venv/bin/python - "$RECEIPT" "$BRACKET" "$REVIEWED_SHA" "$ORIGINAL_CENSUS" "$GROUP" "$E" <<'PY'
+  uv run --no-sync python -m scripts.node27_issue1895_sequential_receipt \
+    --receipt "$RECEIPT" --census "$ORIGINAL_CENSUS" --call-index "$GROUP_INDEX" --migrate-outcome migrated \
+    --original-sha256 "$ORIGINAL_CENSUS_SHA256" --reviewed-sha "$REVIEWED_SHA"
+  /home/nwm/NWM/.venv/bin/python - "$RECEIPT" "$BRACKET" "$REVIEWED_SHA" "$ORIGINAL_CENSUS" "$GROUP" "$E" "$ORIGINAL_CENSUS_SHA256" <<'PY'
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2165,7 +2191,8 @@ def _utc(value):
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 _raw, receipt, _facts = read_held_private_json(Path(path), label="G6 receipt", stage="receipt")
-_craw, census, _cfacts = read_held_private_json(Path(census_path), label="G6 census", stage="receipt")
+from packages.common.node27_issue1895_census_bind import load_original_census
+census, count = load_original_census(Path(census_path), expected_original_sha256=sys.argv[7], reviewed_sha=head)
 generated = _utc(receipt["generated_at"])
 assert receipt["schema_version"] == "1.1"
 assert receipt["mode"] == "enforce" and receipt["outcome"] == "clean"
@@ -2197,7 +2224,7 @@ assert capacity["retained_source_bytes"] == bound["retained_source_bytes"]
 assert receipt["target"]["device_identity"] and receipt["target"]["container_exec_uid"]
 print("group OK:", key)
 PY
-done < <(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, census, _facts = read_held_private_json(Path(sys.argv[1]), label="G6 census keys", stage="receipt"); print("\n".join(census["group_keys"]))' "$ORIGINAL_CENSUS")
+done < <(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_census_bind import load_original_census; census, count = load_original_census(Path(sys.argv[1]), expected_original_sha256=sys.argv[2], reviewed_sha=sys.argv[3]); print("\n".join(census["group_keys"]))' "$ORIGINAL_CENSUS" "$ORIGINAL_CENSUS_SHA256" "$REVIEWED_SHA")
 test "$GROUP_INDEX" -eq "$REQUIRE_COUNT"
 ```
 
@@ -2621,8 +2648,9 @@ W8_PATH="$RUN_ROOT/census/w8-$RUN_STAMP.json"
 test ! -e "$PRE_NATURAL"
 # PRE_NATURAL proves durable catalog sets before timer restoration. It is not a
 # receipt horizon and never supplies the receipt's expected watermark/cutoff.
-uv run --no-sync python scripts/node27_issue1895_post_target_observe.py \
+uv run --no-sync python -m scripts.node27_issue1895_post_target_observe \
   --baseline "$ORIGINAL_CENSUS" --output "$PRE_NATURAL" --reviewed-sha "$REVIEWED_SHA" \
+  --original-sha256 "$ORIGINAL_CENSUS_SHA256" \
   --lag-seconds "$NODE27_COLD_RESIDENCY_LAG_SECONDS" --display-env /home/nwm/NWM/infra/env/display.env
 chmod 600 "$PRE_NATURAL"
 TIMER_BEFORE="$(/usr/bin/systemctl --user show nhms-node27-timeseries-compression.timer -p LastTriggerUSec --value)"
@@ -2789,7 +2817,7 @@ independent horizon**: it is captured after the G7 natural service has proven
 `ExecMainExitTimestamp`, from the real display watermark plus the exact cold-env
 lag. It is not G1, is not captured before restore, and is never derived from a
 receipt's self-report. The post-target observer independently reads the baseline
-six durable keys and current complete-source/complete-target sets. Compressed
+original N durable keys and current complete-source/complete-target sets. Compressed
 sibling OIDs are mutable and are not compared to G1.
 
 ```bash
@@ -2801,14 +2829,16 @@ set +a
 : "${NODE27_COLD_RESIDENCY_LAG_SECONDS:?cold lag is required}"
 POST_NATURAL="$RUN_ROOT/census/post-natural-$RUN_STAMP.json"
 test ! -e "$POST_NATURAL"
-uv run --no-sync python scripts/node27_issue1895_post_target_observe.py \
+uv run --no-sync python -m scripts.node27_issue1895_post_target_observe \
   --baseline "$ORIGINAL_CENSUS" --output "$POST_NATURAL" --reviewed-sha "$REVIEWED_SHA" \
+  --original-sha256 "$ORIGINAL_CENSUS_SHA256" \
   --lag-seconds "$NODE27_COLD_RESIDENCY_LAG_SECONDS" --display-env /home/nwm/NWM/infra/env/display.env
 chmod 600 "$POST_NATURAL"
 NEWLY="$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; from packages.common.node27_issue1895_post_target import newly_terminal_keys; _pr, pre, _pf = read_held_private_json(Path(sys.argv[1]), label="G8 pre-natural", stage="post-target"); _po, post, _of = read_held_private_json(Path(sys.argv[2]), label="G8 post-natural", stage="post-target"); print("\n".join(newly_terminal_keys(pre_target_keys=pre["complete_target_keys"], post_target_keys=post["complete_target_keys"])))' "$PRE_NATURAL" "$POST_NATURAL")"
 REMAINING="$(/home/nwm/NWM/.venv/bin/python -c 'import sys; from pathlib import Path; from packages.common.node27_issue1895_private_receipt import read_held_private_json; _raw, post, _facts = read_held_private_json(Path(sys.argv[1]), label="G8 post-natural remaining", stage="post-target"); print("\n".join(post["complete_source_keys"]))' "$POST_NATURAL")"
-uv run --no-sync python scripts/node27_issue1895_group_reconcile.py \
+uv run --no-sync python -m scripts.node27_issue1895_group_reconcile \
   --baseline "$ORIGINAL_CENSUS" \
+  --original-sha256 "$ORIGINAL_CENSUS_SHA256" \
   --observed "$POST_NATURAL" \
   --receipt "$NATURAL_RECEIPT" \
   --reviewed-sha "$REVIEWED_SHA" \

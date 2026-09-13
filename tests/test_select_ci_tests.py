@@ -12741,6 +12741,59 @@ def test_cold_residency_fakes_rule_importer_edge_is_load_bearing(
     ], f"the closure guard did not bite on the deleted edge: {offenders}"
 
 
+def test_cold_residency_fakes_reviewed_count_edge_preserves_all_prior_legs(monkeypatch: pytest.MonkeyPatch) -> None:
+    consumer = "tests/test_issue2291_reviewed_census_count.py"
+    rule = _support_rule_for(COLD_RESIDENCY_FAKES_PRODUCER)
+    before = set(select_tests([COLD_RESIDENCY_FAKES_PRODUCER], repo_root=Path(".")))
+    assert consumer in rule.tests and consumer in before
+    assert set(rule.tests) <= before
+    mutant = replace(rule, tests=tuple(target for target in rule.tests if target != consumer))
+    monkeypatch.setattr(
+        _prod_module,
+        "SUPPORT_MODULE_TEST_RULES",
+        tuple(
+            mutant if existing.pattern == COLD_RESIDENCY_FAKES_PRODUCER else existing
+            for existing in _prod_module.SUPPORT_MODULE_TEST_RULES
+        ),
+    )
+    selected = set(select_tests([COLD_RESIDENCY_FAKES_PRODUCER], repo_root=Path(".")))
+    assert selected == before - {consumer}
+    derived = _derived_support_module_importers([COLD_RESIDENCY_FAKES_PRODUCER])
+    assert _support_module_closure_offenders(
+        modules=[COLD_RESIDENCY_FAKES_PRODUCER],
+        derived=derived,
+        select=lambda _module: selected,
+    ) == [f"{COLD_RESIDENCY_FAKES_PRODUCER} -> {consumer}: derived non-gated importer suite is not selected"]
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [
+        "tests/test_node27_cold_residency_census.py",
+        "tests/test_issue1895_runbook_contract.py",
+    ],
+)
+def test_reviewed_count_shared_suite_helpers_retain_independent_importer_edge(monkeypatch, owner: str) -> None:
+    consumer = "tests/test_issue2291_reviewed_census_count.py"
+    rules = _prod_module.CHANGED_TEST_FILE_RULES
+    matching = [rule for rule in rules if rule.pattern == owner]
+    assert len(matching) == 1 and matching[0].stop_on_match
+    before = set(select_tests([owner], repo_root=Path(".")))
+    assert consumer in matching[0].tests and consumer in before
+    assert set(matching[0].tests) <= before
+    monkeypatch.setattr(
+        _prod_module,
+        "CHANGED_TEST_FILE_RULES",
+        tuple(
+            replace(rule, tests=tuple(target for target in rule.tests if target != consumer))
+            if rule.pattern == owner
+            else rule
+            for rule in rules
+        ),
+    )
+    assert set(select_tests([owner], repo_root=Path("."))) == before - {consumer}
+
+
 # Issue #1929 producer -> consumer closure. The contract spans four surfaces
 # (target inspector, runtime identity, CLI/env config, receipt schema) and a
 # change on ONE of them invalidates assertions on another — e.g. deleting the
@@ -13167,7 +13220,13 @@ def test_runtime_integration_test_only_change_selects_marker_contract_exactly() 
     owner = "tests/test_compressed_chunk_cold_runtime_integration.py"
     marker = "tests/test_node27_cold_tablespace_marker_contract.py"
     selected = set(select_tests([owner], repo_root=Path(".")))
-    assert selected == {owner, marker, SELECTOR_META_GUARD_TEST, "tests/test_issue2290_cold_parent_admission.py"}
+    assert selected == {
+        owner,
+        marker,
+        SELECTOR_META_GUARD_TEST,
+        "tests/test_issue2290_cold_parent_admission.py",
+        "tests/test_issue2291_reviewed_census_count.py",
+    }
 
 
 def test_runtime_integration_marker_contract_redirect_reds_when_rule_removed(
@@ -13180,7 +13239,12 @@ def test_runtime_integration_marker_contract_redirect_reds_when_rule_removed(
     matching = [rule for rule in CHANGED_TEST_FILE_RULES if rule.pattern == owner]
     assert len(matching) == 1, f"expected exactly one CHANGED_TEST_FILE_RULES entry for {owner}"
     assert matching[0].stop_on_match is True
-    assert matching[0].tests == (owner, marker, "tests/test_issue2290_cold_parent_admission.py")
+    assert matching[0].tests == (
+        owner,
+        marker,
+        "tests/test_issue2290_cold_parent_admission.py",
+        "tests/test_issue2291_reviewed_census_count.py",
+    )
     mutant = tuple(rule for rule in select_ci_tests.CHANGED_TEST_FILE_RULES if rule.pattern != owner)
     assert len(mutant) == len(select_ci_tests.CHANGED_TEST_FILE_RULES) - 1
     monkeypatch.setattr(select_ci_tests, "CHANGED_TEST_FILE_RULES", mutant)
@@ -13188,6 +13252,7 @@ def test_runtime_integration_marker_contract_redirect_reds_when_rule_removed(
     selected = set(select_tests([owner], repo_root=Path(".")))
     assert marker not in selected
     assert "tests/test_issue2290_cold_parent_admission.py" not in selected
+    assert "tests/test_issue2291_reviewed_census_count.py" not in selected
     assert owner in selected
     assert SELECTOR_META_GUARD_TEST in selected
 
@@ -13218,7 +13283,10 @@ def test_issue1895_contract_change_redirects_to_the_owners(owner: str) -> None:
     from scripts.select_ci_tests import ISSUE1895_RUNBOOK_CONTRACT_TESTS
 
     selected = set(select_tests([owner], repo_root=Path(".")))
-    assert selected == set(ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
+    expected = set(ISSUE1895_RUNBOOK_CONTRACT_TESTS) | {SELECTOR_META_GUARD_TEST}
+    if owner == "tests/test_issue1895_runbook_contract.py":
+        expected.add("tests/test_issue2291_reviewed_census_count.py")
+    assert selected == expected
 
 
 def test_issue1895_gates_redirect_reds_when_rule_removed(
@@ -17824,3 +17892,150 @@ def test_admission_readiness_owner_asserting_suite_removal_preserves_other_legs(
     )
     monkeypatch.setattr(select_ci_tests, rules_name, mutant)
     assert set(select_tests([owner], repo_root=Path("."))) == before - {suite}
+
+
+ISSUE2291_COUNT_SUITE = "tests/test_issue2291_reviewed_census_count.py"
+ISSUE2291_COUNT_OWNERS = (
+    "packages/common/node27_cold_residency_census_policy.py",
+    "scripts/node27_cold_residency_census.py",
+    "scripts/node27_issue1895_cutoff_count.py",
+    "packages/common/node27_issue1895_census_bind.py",
+    "scripts/node27_issue1895_census_bind.py",
+    "packages/common/node27_issue1895_receipt.py",
+    "scripts/node27_issue1895_sequential_receipt.py",
+    "packages/common/node27_issue1895_post_target.py",
+    "scripts/node27_issue1895_post_target_observe.py",
+    "packages/common/node27_issue1895_timer.py",
+    "scripts/node27_issue1895_group_reconcile.py",
+    "docs/runbooks/tier-node27-timeseries-storage.md",
+)
+
+
+def _issue2291_retained_targets(owner: str) -> set[str]:
+    storage = {"tests/test_issue1895_readiness_storage.py", "tests/test_issue1895_runbook_contract.py"}
+    if owner == "packages/common/node27_cold_residency_census_policy.py":
+        return set(_prod_module.NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS)
+    if owner == "scripts/node27_cold_residency_census.py":
+        return {
+            *_prod_module.NODE27_COLD_RESIDENCY_CENSUS_CLOSURE_TESTS,
+            *ORIGIN_CHUNK_PARITY_TESTS,
+            "tests/test_issue1895_readiness_storage.py",
+            "tests/test_issue2290_cold_parent_admission.py",
+        }
+    if owner == "scripts/node27_issue1895_cutoff_count.py":
+        return {"tests/test_compressed_chunk_cold_runtime_integration.py"}
+    if owner == "packages/common/node27_issue1895_post_target.py":
+        return {*ORIGIN_CHUNK_PARITY_TESTS, "tests/test_issue2290_cold_parent_admission.py"}
+    if owner == "docs/runbooks/tier-node27-timeseries-storage.md":
+        return {
+            *ORIGIN_CHUNK_PARITY_TESTS,
+            *_prod_module.ISSUE1895_READINESS_TESTS,
+            "tests/test_node27_timeseries_compression.py",
+            "tests/test_node27_cold_residency.py",
+            "tests/test_node27_cold_residency_runtime_identity.py",
+            "tests/test_node27_timeseries_sequential_budget.py",
+            "tests/test_node27_timeseries_sequential_runner_config.py",
+            "tests/test_node27_timeseries_sequential_wrappers.py",
+            "tests/test_node27_lifecycle_contract.py",
+            "tests/test_issue1895_runbook_contract.py",
+            "tests/test_issue2290_cold_parent_admission.py",
+        }
+    if owner in {"packages/common/node27_issue1895_timer.py", "scripts/node27_issue1895_group_reconcile.py"}:
+        return {
+            *storage,
+            *ISSUE1895_READINESS_STORAGE_TESTS,
+            "tests/test_issue1895_readiness_gates.py",
+            "tests/test_issue1895_readiness_c14.py",
+        }
+    if owner.startswith("scripts/"):
+        return {*storage, *ISSUE1895_READINESS_STORAGE_TESTS}
+    return storage
+
+
+@pytest.mark.parametrize("owner", ISSUE2291_COUNT_OWNERS)
+def test_reviewed_count_unique_owner_route_retains_all_prior_legs(owner: str) -> None:
+    matching = [rule for rule in _prod_module.PATH_TEST_RULES if rule.pattern == owner]
+    assert len(matching) == 1
+    required = _issue2291_retained_targets(owner) | {ISSUE2291_COUNT_SUITE}
+    assert required <= set(matching[0].tests)
+    assert required <= set(select_tests([owner], repo_root=Path(".")))
+
+
+@pytest.mark.parametrize("owner", ISSUE2291_COUNT_OWNERS)
+def test_reviewed_count_each_owner_leg_removal_preserves_prior_selection(monkeypatch, owner: str) -> None:
+    matching = [rule for rule in _prod_module.PATH_TEST_RULES if rule.pattern == owner]
+    assert len(matching) == 1
+    assert ISSUE2291_COUNT_SUITE in matching[0].tests
+    before = set(select_tests([owner], repo_root=Path(".")))
+    assert _issue2291_retained_targets(owner) <= before
+    monkeypatch.setattr(
+        _prod_module,
+        "PATH_TEST_RULES",
+        tuple(
+            replace(rule, tests=tuple(target for target in rule.tests if target != ISSUE2291_COUNT_SUITE))
+            if rule.pattern == owner
+            else rule
+            for rule in _prod_module.PATH_TEST_RULES
+        ),
+    )
+    assert set(select_tests([owner], repo_root=Path("."))) == before - {ISSUE2291_COUNT_SUITE}
+
+
+def test_reviewed_count_harness_route_and_independent_removal(monkeypatch) -> None:
+    owner = "tests/test_compressed_chunk_cold_runtime_integration.py"
+    rules = _prod_module.CHANGED_TEST_FILE_RULES
+    matching = [rule for rule in rules if rule.pattern == owner]
+    assert len(matching) == 1 and matching[0].stop_on_match
+    required = {
+        owner,
+        ISSUE2291_COUNT_SUITE,
+        "tests/test_node27_cold_tablespace_marker_contract.py",
+        "tests/test_issue2290_cold_parent_admission.py",
+        SELECTOR_META_GUARD_TEST,
+    }
+    assert set(select_tests([owner], repo_root=Path("."))) == required
+    monkeypatch.setattr(
+        _prod_module,
+        "CHANGED_TEST_FILE_RULES",
+        tuple(
+            replace(rule, tests=tuple(target for target in rule.tests if target != ISSUE2291_COUNT_SUITE))
+            if rule.pattern == owner
+            else rule
+            for rule in rules
+        ),
+    )
+    assert set(select_tests([owner], repo_root=Path("."))) == required - {ISSUE2291_COUNT_SUITE}
+
+
+@pytest.mark.parametrize(
+    "suite",
+    [
+        "tests/test_issue1895_readiness_storage.py",
+        "tests/test_issue1895_readiness_storage_publication.py",
+        "tests/test_compressed_chunk_cold_runtime_integration.py",
+        "tests/test_node27_cold_tablespace_marker_contract.py",
+    ],
+)
+def test_reviewed_count_fixture_owner_selects_consumers_and_each_removal(monkeypatch, suite: str) -> None:
+    rules = _prod_module.CHANGED_TEST_FILE_RULES
+    matching = [rule for rule in rules if rule.pattern == ISSUE2291_COUNT_SUITE]
+    assert len(matching) == 1 and matching[0].stop_on_match
+    before = set(select_tests([ISSUE2291_COUNT_SUITE], repo_root=Path(".")))
+    assert {
+        *_prod_module.ISSUE1895_RUNBOOK_CONTRACT_TESTS,
+        ISSUE2291_COUNT_SUITE,
+        "tests/test_compressed_chunk_cold_runtime_integration.py",
+        "tests/test_node27_cold_tablespace_marker_contract.py",
+    } <= before
+    assert suite in matching[0].tests
+    monkeypatch.setattr(
+        _prod_module,
+        "CHANGED_TEST_FILE_RULES",
+        tuple(
+            replace(rule, tests=tuple(target for target in rule.tests if target != suite))
+            if rule.pattern == ISSUE2291_COUNT_SUITE
+            else rule
+            for rule in rules
+        ),
+    )
+    assert set(select_tests([ISSUE2291_COUNT_SUITE], repo_root=Path("."))) == before - {suite}

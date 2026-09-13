@@ -7,6 +7,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from packages.common.node27_issue1895_census_bind import load_original_census
 from packages.common.node27_issue1895_private_receipt import read_held_private_json
 from packages.common.node27_issue1895_receipt import assert_sequential_tick_receipt
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
@@ -47,13 +48,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--census", required=True, type=Path)
     parser.add_argument("--call-index", required=True, type=int)
     parser.add_argument("--migrate-outcome", default="migrated")
+    parser.add_argument("--original-sha256", required=True)
+    parser.add_argument("--reviewed-sha", required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        census = _load_object(args.census, label="census")
+        census, count = load_original_census(
+            args.census,
+            expected_original_sha256=args.original_sha256,
+            reviewed_sha=args.reviewed_sha,
+        )
         receipt = _load_object(args.receipt, label="receipt")
         keys = census.get("group_keys")
         if not isinstance(keys, list):
@@ -66,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
             receipt,
             ordered_keys=[str(key) for key in keys],
             call_index=args.call_index,
+            expected_count=count,
             migrate_outcome=args.migrate_outcome,
         )
     except Issue1895ReadinessError as error:

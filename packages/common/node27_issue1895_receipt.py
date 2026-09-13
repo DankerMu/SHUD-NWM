@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from packages.common.node27_cold_residency_census_policy import CensusPolicyError, validate_reviewed_count
 from packages.common.node27_issue1895_types import Issue1895ReadinessError
 
-REQUIRE_COUNT = 6
 PER_TICK_BOUND = 1
 DURABLE_FIELDS: tuple[str, ...] = (
     "hypertable_schema",
@@ -75,25 +75,29 @@ def assert_sequential_tick_receipt(
     *,
     ordered_keys: Sequence[str],
     call_index: int,
+    expected_count: int,
     per_tick_bound: int = PER_TICK_BOUND,
     migrate_outcome: str = "migrated",
 ) -> Mapping[str, Any]:
-    """Bind call i of six sequential ticks to shipping selected/deferred shape.
+    """Bind call i to the reviewed ordered keys, one migration and the exact suffix.
 
-    With ordered keys K1..K6 and per_tick_bound=1, call i contains exactly one
-    migrate observation for Ki. Prior K1..K(i-1) may appear as already_cold.
-    Deferred equals suffix K(i+1)..K6 with reason per_tick_bound. The sixth
-    suffix is empty; earlier calls must not require empty deferred.
+    Prior keys may be already cold; no current receipt can redefine the baseline.
     """
 
-    keys = tuple(ordered_keys)
-    if len(keys) != REQUIRE_COUNT or len(set(keys)) != REQUIRE_COUNT:
+    try:
+        count = validate_reviewed_count(expected_count)
+    except CensusPolicyError:
         raise Issue1895ReadinessError(
-            "baseline ordered keys are not exactly six unique identities",
+            "reviewed count is invalid", code="RECEIPT_KEYS_INVALID", stage="receipt"
+        ) from None
+    keys = tuple(ordered_keys)
+    if len(keys) != count or any(not isinstance(key, str) or not key for key in keys) or len(set(keys)) != count:
+        raise Issue1895ReadinessError(
+            "baseline ordered keys disagree with the reviewed unique identity set",
             code="RECEIPT_KEYS_INVALID",
             stage="receipt",
         )
-    if call_index < 1 or call_index > REQUIRE_COUNT:
+    if type(call_index) is not int or call_index < 1 or call_index > count:
         raise Issue1895ReadinessError(
             "sequential call index is out of range",
             code="RECEIPT_CALL_INVALID",
@@ -186,7 +190,7 @@ def assert_sequential_tick_receipt(
     extra = (set(selected_keys) | set(deferred_keys)) - set(keys)
     if extra:
         raise Issue1895ReadinessError(
-            "receipt contains a key outside the baseline six",
+            "receipt contains a key outside the original baseline",
             code="RECEIPT_EXTRA_KEY",
             stage="receipt",
         )

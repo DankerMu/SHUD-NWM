@@ -77,6 +77,7 @@ from packages.common.compressed_chunk_cold_runtime_catalog import (
 )
 from packages.common.display_watermark import DisplayWatermarkError, fetch_display_watermark
 from packages.common.node27_cold_residency_census_policy import capacity_policy as _policy_capacity_policy
+from packages.common.node27_cold_residency_census_policy import parse_reviewed_count, validate_reviewed_count
 
 ARTIFACT_NAME = "nhms-node27-cold-residency-census"
 ARTIFACT_VERSION = "1.0"
@@ -97,9 +98,9 @@ COMPRESSION_LAG_KEYS = (
 # claim a wider (or narrower) discovery window than the lane it freezes.
 CATALOG_BYTE_CEILING = 16 * 1024**2
 MAX_MEMBERS_PER_GROUP = 64
-MAX_REQUIRE_COUNT = 64
-# One extra candidate slot per allowlisted hypertable: the scanner must be able
-# to *see* a seventh group and call it drift, not truncate it into agreement.
+MAX_CATALOG_PER_TABLE = 64
+# One extra candidate slot per allowlisted hypertable surfaces a surplus,
+# rather than truncating the catalog into agreement with reviewed N.
 EXTRA_CANDIDATE_SLOTS_PER_TABLE = 1
 MAX_WINDOW_ROWS = 2_000
 MAX_REPORTED_HOT_GROUPS = 200
@@ -211,10 +212,7 @@ def _parse_canonical_int(raw: str | None, *, name: str, minimum: int) -> int:
 
 
 def require_count_from_arg(raw: str) -> int:
-    count = _parse_canonical_int(raw, name="--require-count", minimum=1)
-    if count > MAX_REQUIRE_COUNT:
-        raise CensusError("--require-count is above the census ceiling", error_class="config", stage="config")
-    return count
+    return parse_reviewed_count(raw, error_type=CensusError)
 
 
 def lag_source_key(env: Mapping[str, str]) -> str:
@@ -256,7 +254,8 @@ def per_table_catalog_limit(require_count: int) -> int:
     as drift — detection, never truncation.
     """
 
-    if require_count + EXTRA_CANDIDATE_SLOTS_PER_TABLE > MAX_REQUIRE_COUNT:
+    validate_reviewed_count(require_count, error_type=CensusError)
+    if require_count + EXTRA_CANDIDATE_SLOTS_PER_TABLE > MAX_CATALOG_PER_TABLE:
         raise CensusError(
             "census candidate ceiling is too close to the scan bound",
             error_class="bound",
@@ -598,6 +597,7 @@ def observe_census(
     lag_source: str = "configured-compression-contract-default",
 ) -> dict[str, Any]:
     """Build the census artifact from the shipped production owners only."""
+    validate_reviewed_count(require_count, error_type=CensusError)
 
     server_version, timescaledb_version = observer.versions()
     try:
@@ -884,7 +884,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-count",
         required=True,
-        help="Exact eligible complete all-source group count required.",
+        help="Exact reviewed eligible complete all-source group count, canonical decimal 1..63.",
     )
     parser.add_argument("--output", required=True, help="Absolute mode-0600 census artifact path.")
     return parser

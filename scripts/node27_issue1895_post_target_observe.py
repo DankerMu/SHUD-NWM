@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baseline", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--reviewed-sha", required=True)
+    parser.add_argument("--original-sha256", required=True)
     parser.add_argument("--lag-seconds", required=True)
     parser.add_argument("--display-env", type=Path, default=None)
     return parser
@@ -38,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
             baseline_path=args.baseline,
             output_path=args.output,
             reviewed_sha=args.reviewed_sha,
+            expected_original_sha256=args.original_sha256,
             lag_seconds=lag,
             dsn=dsn,
         )

@@ -19,8 +19,14 @@ from packages.common.node27_issue1895_watermark import (
 )
 from scripts import node27_issue1895_group_reconcile as group_reconcile_cli
 from scripts import node27_issue1895_systemd_facts as systemd_facts_cli
-from tests.test_issue1895_readiness_c14 import _group
-from tests.test_issue1895_readiness_storage import KEYS, SHA, _durable, _substitute_identity, _write_private_json
+from tests.test_issue1895_readiness_storage import (
+    _ORIGINAL_HASH,
+    SHA,
+    _census_artifact,
+    _durable,
+    _substitute_identity,
+    _write_private_json,
+)
 from tests.test_issue1895_runbook_contract import _gate, _gate_bash, _gate_lines
 
 
@@ -150,9 +156,12 @@ def test_systemd_facts_closes_unreadable_inputs_without_path_or_traceback(
     secret_path = tmp_path / "synthetic-secret-timer-show.txt"
     rc = systemd_facts_cli.main(
         [
-            "--timer-show", str(secret_path),
-            "--service-show", str(tmp_path / "missing-service-show.txt"),
-            "--output", str(tmp_path / "systemd-facts.json"),
+            "--timer-show",
+            str(secret_path),
+            "--service-show",
+            str(tmp_path / "missing-service-show.txt"),
+            "--output",
+            str(tmp_path / "systemd-facts.json"),
         ]
     )
     assert rc == 1
@@ -228,9 +237,12 @@ def test_systemd_facts_refuses_symlink_and_parent_0755_before_publication(
     assert not output.exists()
     os.chmod(private, 0o700)
     monkeypatch.setattr(systemd_facts_cli, "assert_systemd_invocation_facts", assert_systemd_invocation_facts)
-    assert systemd_facts_cli.main(
-        ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
-    ) == 0
+    assert (
+        systemd_facts_cli.main(
+            ["--timer-show", str(timer_show), "--service-show", str(service_show), "--output", str(output)]
+        )
+        == 0
+    )
     assert output.exists()
 
 
@@ -327,13 +339,14 @@ def test_independent_w8_and_systemd_facts_refuse_self_bind() -> None:
     assert "scripts/node27_issue1895_watermark.py" in g8
     assert "scripts/node27_issue1895_systemd_facts.py" in g8
     assert "post-tick external independent horizon" in _gate("G8")
-    assert "expected_cutoff=receipt[\"cutoff\"]" not in g8
-    assert "expected_watermark=receipt[\"watermark\"]" not in g8
+    assert 'expected_cutoff=receipt["cutoff"]' not in g8
+    assert 'expected_watermark=receipt["watermark"]' not in g8
 
 
 def _group_reconcile_documents(*, receipt: dict) -> tuple[dict, dict, dict]:
-    groups = [_group(KEYS[index - 1], index) for index in range(1, 7)]
-    return {"groups": groups}, {"groups": groups}, receipt
+    baseline = _census_artifact()
+    groups = [dict(group, residency="already_target") for group in baseline["groups"]]
+    return baseline, {"groups": groups}, receipt
 
 
 def _write_group_reconcile_documents(tmp_path: Path, *, receipt: dict) -> tuple[Path, Path, Path]:
@@ -364,6 +377,8 @@ def _group_reconcile_argv(
         str(receipt_path),
         "--reviewed-sha",
         SHA,
+        "--original-sha256",
+        _ORIGINAL_HASH,
         "--expected-cutoff",
         "2026-09-04T00:00:00Z",
         "--expected-watermark",
@@ -438,11 +453,11 @@ def test_g8_natural_receipt_under_parent_0755_succeeds_with_private_current_run_
     os.chmod(artifacts, 0o755)
     baseline_path = _write_private_json(
         census_parent / "baseline.json",
-        {"groups": [_group(KEYS[index - 1], index) for index in range(1, 7)]},
+        _census_artifact(),
     )
     observed_path = _write_private_json(
         census_parent / "observed.json",
-        {"groups": [_group(KEYS[index - 1], index) for index in range(1, 7)]},
+        {"groups": [dict(group, residency="already_target") for group in _census_artifact()["groups"]]},
     )
     receipt_path = _write_private_json(artifacts / "node27_timeseries_cold_residency.json", receipt_document)
     os.chmod(artifacts, 0o755)
@@ -477,31 +492,49 @@ def test_g8_inline_natural_receipt_fence_opts_file_only_parent_policy() -> None:
     assert "require_private_parent=False" not in horizon_line
 
 
-def test_g8_owner_inputs_use_held_reader_before_parameter_derivation() -> None:
-    fences = [body for _opening, body in _gate_bash("G8")]
-    natural = next(
-        body
-        for body in fences
-        if "NATURAL_RECEIPT" in body and "assert_natural_receipt_identity" in body and "W8_PATH" in body
-    )
-    assert "json.load(open" not in natural
-    assert "read_held_private_json" in natural
-    assert natural.index("read_held_private_json") < natural.index("assert_natural_receipt_identity")
+@pytest.mark.parametrize(
+    ("selector", "input_index"),
+    [("NEWLY=", 0), ("NEWLY=", 1), ("REMAINING=", 0), ("--expected-cutoff", 0), ("--expected-watermark", 0)],
+)
+def test_g8_inline_derivation_refuses_unsafe_observation_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    selector: str,
+    input_index: int,
+) -> None:
+    import sys
 
-    derive = next(body for body in fences if "newly_terminal_keys" in body and "group_reconcile.py" in body)
-    assert "json.load(open" not in derive
-    assert "read_held_private_json" in derive
-    newly_cmd = derive[derive.index("NEWLY=") : derive.index("REMAINING=")]
-    remaining_cmd = derive[derive.index("REMAINING=") : derive.index("group_reconcile.py")]
-    assert "read_held_private_json" in newly_cmd
-    assert "read_held_private_json" in remaining_cmd
-    cutoff_cmd = derive[derive.index("--expected-cutoff") : derive.index("--expected-watermark")]
-    watermark_cmd = derive[derive.index("--expected-watermark") : derive.index("--invoked-unit")]
-    assert "read_held_private_json" in cutoff_cmd
-    assert "read_held_private_json" in watermark_cmd
-    assert derive.index("NEWLY=") < derive.index("group_reconcile.py")
-    assert derive.index("REMAINING=") < derive.index("group_reconcile.py")
-    assert "while IFS= read -r GROUP" not in derive
+    original_key = durable_key(_durable(1))
+    newly_key = durable_key(_durable(7))
+    remaining_key = durable_key(_durable(8))
+    private = tmp_path / "private"
+    pre = _write_private_json(private / "pre.json", {"complete_target_keys": [original_key]})
+    post = _write_private_json(
+        private / "post.json",
+        {"complete_target_keys": [original_key, newly_key], "complete_source_keys": [remaining_key]},
+    )
+    horizon = _write_private_json(
+        private / "horizon.json",
+        {"cutoff": "2026-09-04T00:00:00Z", "watermark": "2026-09-06T00:00:00Z"},
+    )
+    arguments, expected = {
+        "NEWLY=": ([pre, post], newly_key),
+        "REMAINING=": ([post], remaining_key),
+        "--expected-cutoff": ([horizon], "2026-09-04T00:00:00Z"),
+        "--expected-watermark": ([horizon], "2026-09-06T00:00:00Z"),
+    }[selector]
+    derive = next(body for _opening, body in _gate_bash("G8") if "NEWLY=" in body and "REMAINING=" in body)
+    line = next(line for line in derive.splitlines() if line.lstrip().startswith(selector))
+    program = line.split("python -c '", 1)[1].split("'", 1)[0]
+    monkeypatch.setattr(sys, "argv", ["-c", *(str(path) for path in arguments)])
+    compiled = compile(program, "<G8-inline-derivation>", "exec")
+    exec(compiled, {})
+    assert capsys.readouterr().out == expected + "\n"
+    _substitute_identity(arguments[input_index], "symlink")
+    with pytest.raises(Issue1895ReadinessError):
+        exec(compiled, {})
+    assert capsys.readouterr().out == ""
 
 
 def test_group_reconcile_cli_accepts_migrated_newline_sets_and_deferred_suffix(tmp_path: Path) -> None:
@@ -518,15 +551,18 @@ def test_group_reconcile_cli_accepts_migrated_newline_sets_and_deferred_suffix(t
         ),
     )
 
-    assert group_reconcile_cli.main(
-        _group_reconcile_argv(
-            baseline_path,
-            observed_path,
-            receipt_path,
-            remaining=f"\n{deferred_key}\n",
-            newly=f"\n{migrated_key}\n",
+    assert (
+        group_reconcile_cli.main(
+            _group_reconcile_argv(
+                baseline_path,
+                observed_path,
+                receipt_path,
+                remaining=f"\n{deferred_key}\n",
+                newly=f"\n{migrated_key}\n",
+            )
         )
-    ) == 0
+        == 0
+    )
 
 
 def test_group_reconcile_cli_redacts_domain_failures_without_traceback_or_raw_path(
