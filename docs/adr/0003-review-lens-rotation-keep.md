@@ -4598,3 +4598,12 @@ later-round catches core=270、rotated=270、phase=57、skipped=15。
 本单 high 单轮（四席 clean、0 候选），Phase 7 gap sweep clean；单轮 PR 不进入轮换归因样本，
 不能据此判断轮换收益。记录 deferral：keep/cut 仍待维护者决策；本次合并预授权
 不含审核策略调整。现行 keep、座位上限不变。
+
+### Revisit 2026-09-13（post PR #2304 / issue #1895）
+
+追加后实测 650 行、640 merged、10 terminal；214 个多轮样本，
+later-round catches core=271、rotated=270、phase=57、skipped=15。
+本单为 OpenSpec 契约审核，两轮均为 completeness/design/tasks 三席；
+账本仅为规范词表映射，不表示运行时四席审核或新增轮换实验。
+记录 deferral：keep/cut 仍待维护者决策；epic 实现与 merge 预授权不含审核策略调整。
+现行 keep、座位上限不变；active 退役契约待 R1–R5 完成后另行安全归档。
